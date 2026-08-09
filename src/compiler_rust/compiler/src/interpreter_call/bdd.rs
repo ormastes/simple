@@ -50,6 +50,25 @@ thread_local! {
     // end a hollow-call provisional failure is suppressed iff a matcher ran.
     pub(crate) static BDD_MATCHER_RAN: RefCell<bool> = const { RefCell::new(false) };
 
+    // Vacuity gate for `expect(<non-bool subject>)`.
+    //
+    // A matcher-less `expect(<subject>)` only asserts truthiness. For a BOOL
+    // subject that is a real assertion. For any other subject (text, number,
+    // list, object) truthiness is almost always trivially true, so the example
+    // asserts NOTHING — and a tail method that exists on the subject's own type
+    // (`expect(s).len()`, `expect(v).contains(x)`) reads like a matcher while
+    // being none, so it stays silently green forever.
+    //
+    // BDD_EXPECT_NEEDS_MATCHER counts non-bool expects raised in the current
+    // example; BDD_MATCHER_COUNT counts `.to_*()` matchers that actually ran.
+    // Counters, not a single flag, so `expect(a).to_equal(b)` followed by a
+    // vacuous `expect(c).len()` is still caught. At example end
+    // needs > matchers => the example is vacuous and fails.
+    pub(crate) static BDD_EXPECT_NEEDS_MATCHER: RefCell<usize> = const { RefCell::new(0) };
+    pub(crate) static BDD_MATCHER_COUNT: RefCell<usize> = const { RefCell::new(0) };
+    // Display text for the first unmatched non-bool subject in this example.
+    pub(crate) static BDD_VACUOUS_SUBJECT: RefCell<Option<String>> = const { RefCell::new(None) };
+
     // TEST-010: Shared examples registry - maps name to block
     pub(crate) static BDD_SHARED_EXAMPLES: RefCell<HashMap<String, Value>> = RefCell::new(HashMap::new());
 
@@ -680,6 +699,9 @@ pub(super) fn eval_bdd_builtin(
             BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = false);
             BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow_mut() = false);
             BDD_MATCHER_RAN.with(|cell| *cell.borrow_mut() = false);
+            BDD_EXPECT_NEEDS_MATCHER.with(|cell| *cell.borrow_mut() = 0);
+            BDD_MATCHER_COUNT.with(|cell| *cell.borrow_mut() = 0);
+            BDD_VACUOUS_SUBJECT.with(|cell| *cell.borrow_mut() = None);
             BDD_FAILURE_MSG.with(|cell| *cell.borrow_mut() = None);
             BDD_INSIDE_IT.with(|cell| *cell.borrow_mut() = true);
 
@@ -750,8 +772,24 @@ pub(super) fn eval_bdd_builtin(
                     // actually checked (and may legitimately be falsy, e.g.
                     // `expect(returns_zero()).to_equal(0)`).
                     let matcher_ran = BDD_MATCHER_RAN.with(|cell| *cell.borrow());
-                    let failed = hard_failed || (provisional && !matcher_ran);
-                    let failure_msg = BDD_FAILURE_MSG.with(|cell| cell.borrow().clone());
+                    // Vacuity: more non-bool `expect(...)` subjects were raised
+                    // than matchers ran, so at least one expect asserted nothing.
+                    let needs = BDD_EXPECT_NEEDS_MATCHER.with(|cell| *cell.borrow());
+                    let matchers = BDD_MATCHER_COUNT.with(|cell| *cell.borrow());
+                    let vacuous = needs > matchers;
+                    let failed = hard_failed || (provisional && !matcher_ran) || vacuous;
+                    let mut failure_msg = BDD_FAILURE_MSG.with(|cell| cell.borrow().clone());
+                    if vacuous && !hard_failed {
+                        let subject = BDD_VACUOUS_SUBJECT
+                            .with(|cell| cell.borrow().clone())
+                            .unwrap_or_else(|| "<subject>".to_string());
+                        failure_msg = Some(format!(
+                            "vacuous expect: expect({subject}) was never consumed by a matcher \
+                             ({needs} non-bool expect(s), {matchers} matcher(s) ran). A tail method \
+                             that is not a `to_*` matcher asserts nothing — chain a matcher such as \
+                             .to_equal(...) / .to_contain(...), or use assert_true(...)."
+                        ));
+                    }
 
                     if failed {
                         println!("{}\x1b[31m✗ {}\x1b[0m", indent_str, name_str);
@@ -954,6 +992,17 @@ pub(super) fn eval_bdd_builtin(
                 enums,
                 impl_methods,
             )?;
+            // Vacuity gate: a non-bool subject MUST be consumed by a matcher.
+            // Truthiness on a text/number/list/object subject asserts nothing.
+            if !matches!(value, Value::Bool(_)) {
+                BDD_EXPECT_NEEDS_MATCHER.with(|cell| *cell.borrow_mut() += 1);
+                BDD_VACUOUS_SUBJECT.with(|cell| {
+                    let mut slot = cell.borrow_mut();
+                    if slot.is_none() {
+                        *slot = Some(value.to_display_string());
+                    }
+                });
+            }
             if !value.truthy() {
                 // Provisional only: if a `.to_*()` matcher follows, it clears this
                 // (the subject IS being checked, and a falsy value like 0/false/""
@@ -1797,6 +1846,9 @@ pub fn clear_bdd_state() {
     BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = false);
     BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow_mut() = false);
     BDD_MATCHER_RAN.with(|cell| *cell.borrow_mut() = false);
+    BDD_EXPECT_NEEDS_MATCHER.with(|cell| *cell.borrow_mut() = 0);
+    BDD_MATCHER_COUNT.with(|cell| *cell.borrow_mut() = 0);
+    BDD_VACUOUS_SUBJECT.with(|cell| *cell.borrow_mut() = None);
     BDD_INSIDE_IT.with(|cell| *cell.borrow_mut() = false);
     BDD_FAILURE_MSG.with(|cell| *cell.borrow_mut() = None);
     BDD_SHARED_EXAMPLES.with(|cell| cell.borrow_mut().clear());

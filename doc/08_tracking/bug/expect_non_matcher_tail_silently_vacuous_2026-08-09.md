@@ -1,7 +1,7 @@
 # `expect(X).<non-matcher>()` and `expect(X) <arith>` are SILENTLY VACUOUS
 
 **ID:** expect_non_matcher_tail_silently_vacuous_2026-08-09
-**Status:** OPEN
+**Status:** FIXED 2026-08-09 (see RESOLUTION at end)
 **Severity:** Medium (bounded — 41 sites, enumerated below)
 **Found by:** stream F6, by EXECUTION (6 probe specs, verdict lines quoted verbatim)
 **Supersedes the diagnosis in:** stream F2's `expect (result - 5.0).abs() < 0.001` report
@@ -254,3 +254,107 @@ This is small enough to be worth doing and is recommended.
 - `test/feature/**`, `test/unit/**`, `test/system/**`, `test/shared/**` appear
   to be a duplicate/legacy mirror of the numbered trees; ~13 of the 41 are that
   mirror, so the distinct-source count is closer to **28**.
+
+---
+
+# RESOLUTION 2026-08-09 (stream G1) — FIXED at the DSL level
+
+**Status: FIXED.** Fixed in the DSL, not by sweeping the 41 call sites. The
+sites above are now RED and are real defects; they must be fixed on their
+merits, not by weakening the gate.
+
+## Premise correction: `spec.spl` is DEAD CODE on the shipping test path
+
+The "Why (source)" section above cites `src/lib/nogc_sync_mut/spec.spl:643-651`.
+That file is **never reached** by `bin/simple test`. Proven by sabotage:
+inserting an unconditional `fail_assertion` into the generic
+`pub fn expect(value)` overload left a 4-example probe at
+`SPEC FILE VERDICT ... executed=4 passed=4 failed=0`.
+
+The live implementation is the Rust seed BDD interpreter:
+`src/compiler_rust/compiler/src/interpreter_call/bdd.rs` (the `"expect"` arm)
+plus the matcher arm in `src/compiler_rust/compiler/src/interpreter_method/mod.rs`.
+Any future fix aimed only at `spec.spl` is a no-op.
+
+## The fix
+
+A counter-based vacuity gate reusing the existing provisional/matcher plumbing:
+
+- `BDD_EXPECT_NEEDS_MATCHER` — incremented for every `expect(<non-bool subject>)`.
+- `BDD_MATCHER_COUNT` — incremented wherever `BDD_MATCHER_RAN` is already set.
+- At example end, `needs > matchers` fails the example with a `vacuous expect:`
+  message naming the unconsumed subject.
+
+Counters rather than a single flag, so a vacuous `expect(c).len()` is still
+caught when a sibling `expect(a).to_equal(b)` in the same example did chain a
+matcher.
+
+Bool subjects are deliberately exempt: bare `expect(<bool>)` remains a real
+truthiness assertion (row 1 of the table above, and the 2026-08-02
+bare-assert-vacuity fix). `expect(a == b)` / `expect(a < b)` return through the
+earlier comparison arms and are unaffected (rows 5).
+
+Rows 3 and 6 — the two **YES** rows — are both non-bool subjects and are both
+now caught. Note this did **not** require stopping the `ExpectHelper`
+auto-unwrap: `expect(...)` still returns the subject value, so chaining
+semantics are untouched; the gate catches the vacuity independently. That is
+strictly less invasive than removing the unwrap.
+
+`src/lib/nogc_sync_mut/spec.spl` was mirrored for the future pure-Simple path
+(generic `expect` now records a provisional failure that the first matcher pops
+via `_begin_matcher()`, exactly like the bool overload).
+
+## Spec
+
+`test/03_system/check/expect_vacuity_gate_spec.spl` — 5 examples covering both
+directions. The negative half generates fixtures and runs them through a child
+compiler, asserting they go red; the positive half asserts every correct usage
+still passes (chained matchers, matchers on falsy non-bool subjects, bare
+`expect(<bool>)`).
+
+```
+SPEC FILE VERDICT: test/03_system/check/expect_vacuity_gate_spec.spl declared>=5 executed=5 passed=5 failed=0 dropped=0
+```
+
+## Newly RED — real defects, left RED
+
+```
+BEFORE: SPEC FILE VERDICT: test/03_system/gui/editor_gui_sdl_spec.spl declared>=19 executed=19 passed=19 failed=0 dropped=0
+AFTER : SPEC FILE VERDICT: test/03_system/gui/editor_gui_sdl_spec.spl declared>=19 executed=19 passed=0  failed=19 dropped=0
+```
+
+`test/03_system/gui/editor_gui_sdl_spec.spl` was 19/19 green on a needle that
+cannot occur: `src/app/editor/main.spl` no longer has the `--gui-sdl`
+entrypoint. **Unblock condition:** restore the `--gui-sdl` entrypoint in
+`src/app/editor/main.spl`, or retarget the spec at whatever replaced it. Do NOT
+soften the assertions. Its duplicate-tree twin `test/system/editor_gui_sdl_spec.spl`
+has the same two sites and is expected to go red identically.
+
+The other 39 enumerated sites above are expected to go red on the same
+mechanism; each needs a real matcher chained (`.to_be_close_to(...)`,
+`.to_contain(...)`, `.to_equal(...)`) rather than a dropped expression tail.
+
+## Measured non-regression
+
+`test/01_unit/spec` (9 files, 141 examples): `Results: 141 total, 136 passed,
+5 failed` — **zero** new reds. The failures there (`dsl_spec.spl` 11/3,
+`matchers_spec.spl` 0/1) are pre-existing and unrelated: an `import` vs `use`
+error, an array out-of-bounds, and an arity mismatch. No `vacuous expect`
+message appears in that run.
+
+## Verification binary
+
+`bin/simple` is a stale deployed seed (2026-08-09 04:50) predating this gate and
+was **not** relinked. All evidence above was produced with a freshly built
+`src/compiler_rust/target/bootstrap/simple`. The gate spec honours
+`$SIMPLE_SPEC_BIN` for that reason and passes on the `bin/simple` default once a
+redeploy happens.
+
+## Incidental unblocks (NOT part of this fix, left uncommitted by G1)
+
+The seed did not build at all in this working tree. Three pre-existing breaks
+from other sessions' in-flight work had to be worked around locally:
+`runtime/src/value/sffi/env_process.rs:1223` (`String` vs `&str`), and two
+"source-list-absent" link failures (`rt_packed_span_v1_*`, `rt_counterpart_*`)
+whose C files exist but were never registered in
+`src/compiler_rust/runtime/build.rs`.

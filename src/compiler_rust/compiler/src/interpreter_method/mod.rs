@@ -364,11 +364,17 @@ pub(crate) fn evaluate_method_call(
             | "not_to"
             | "to_not"
     ) {
-        use crate::interpreter::interpreter_call::{BDD_EXPECT_PROVISIONAL, BDD_MATCHER_RAN};
+        use crate::interpreter::interpreter_call::{
+            BDD_EXPECT_PROVISIONAL, BDD_MATCHER_COUNT, BDD_MATCHER_RAN,
+        };
         BDD_EXPECT_PROVISIONAL.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = false);
         // Monotonic within an example: records that a matcher checked the expect
         // receiver, so a re-set provisional flag can't false-fail the example.
         BDD_MATCHER_RAN.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
+        // Counted form, paired with BDD_EXPECT_NEEDS_MATCHER, so a vacuous
+        // `expect(<non-bool>)` is caught even when a sibling expect in the same
+        // example did chain a matcher. See bdd.rs for the contract.
+        BDD_MATCHER_COUNT.with(|cell: &std::cell::RefCell<usize>| *cell.borrow_mut() += 1);
     }
     match method {
         "to_equal" | "to_be" => {
