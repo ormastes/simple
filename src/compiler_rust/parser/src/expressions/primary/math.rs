@@ -27,6 +27,33 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// True only when the `grid` token at `current` actually begins a grid
+    /// literal, i.e. the DISAMBIGUATING syntax is present:
+    ///
+    /// ```text
+    /// grid [device="cuda"] :
+    ///     | a | b |
+    /// ```
+    ///
+    /// A trailing `:` alone is NOT enough. `for r in grid:` puts a `Colon`
+    /// right after `grid` too — that colon belongs to the `for` statement — so
+    /// the old `peek_next() == Colon` test hijacked every ordinary variable
+    /// spelled `grid` in iterable position and then failed deep inside row
+    /// parsing with "Grid literal must have at least one row", pointing at the
+    /// wrong line (bug: identifier_named_grid_hijacked_by_grid_literal_parser_
+    /// 2026-08-09.md). The body's leading `|` is the real trigger, so require
+    /// `: NEWLINE INDENT |` (or the explicit `device=` form) before committing.
+    pub(crate) fn at_grid_literal(&mut self) -> bool {
+        // `grid device=...` is unambiguous: no other construct spells that.
+        if matches!(&self.peek_nth(1).kind, TokenKind::Identifier { name, .. } if name == "device") {
+            return true;
+        }
+        self.peek_nth(1).kind == TokenKind::Colon
+            && self.peek_nth(2).kind == TokenKind::Newline
+            && self.peek_nth(3).kind == TokenKind::Indent
+            && self.peek_nth(4).kind == TokenKind::Pipe
+    }
+
     pub(super) fn parse_primary_math(&mut self) -> Result<Expr, ParseError> {
         match &self.current.kind {
             TokenKind::Grid => self.parse_grid_literal(),

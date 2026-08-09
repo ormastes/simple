@@ -1,6 +1,6 @@
 # A local variable named `grid` is hijacked by the grid-literal parser
 
-Status: OPEN — found 2026-08-09 while building
+Status: FIXED 2026-08-09 (see "Root cause and fix" below) — found 2026-08-09 while building
 `scripts/check/check_engine_differential.spl`. Parser-level, so it affects
 every engine equally (this is NOT an engine divergence).
 
@@ -74,6 +74,58 @@ If `grid` is genuinely reserved, it belongs in the reserved-keyword list in
 `actor`, `assert`, `join`, `pass_todo`, `pass_do_nothing`, `pass_dn` — `grid`
 is absent). If it is not meant to be reserved, the grid-literal rule needs to
 stop firing on a bare identifier in iterable position.
+
+## Root cause and fix (2026-08-09)
+
+`grid` is lexed as `TokenKind::Grid` (`parser/src/lexer/identifiers.rs:298`), and
+`parse_primary` already tried to keep it *contextual* — but its test was one
+token deep:
+
+```rust
+let starts_literal = next.kind == TokenKind::Colon
+    || matches!(&next.kind, Identifier { name, .. } if name == "device");
+```
+
+In `for r in grid:` the token right after `grid` **is** a `Colon` — the `for`
+statement's own colon. So the guard fired, `parse_grid_literal` consumed
+`: NEWLINE INDENT`, found the nested `for` instead of a `|` row, and reported
+"Grid literal must have at least one row" at the inner `for`'s span. Exactly the
+same misfire happens for `if grid:` and `while grid:`.
+
+Fix: require the real disambiguating syntax — the row body's leading `|`:
+
+- `src/compiler_rust/parser/src/expressions/primary/math.rs` — new
+  `at_grid_literal()`: `grid device=...` (unambiguous) **or**
+  `grid : NEWLINE INDENT |`.
+- `src/compiler_rust/parser/src/expressions/primary/mod.rs` — the `TokenKind::Grid`
+  arm calls `at_grid_literal()` instead of the one-token test.
+- `src/compiler_rust/parser/src/parser_helpers.rs` — new `peek_nth(n)`
+  (buffered, EOF-clamped) since only `peek_next()` existed.
+
+The pure-Simple parser (`src/compiler/10.frontend`) has no grid-literal rule at
+all, so this was contained to the Rust seed. `grid` is **not** reserved and does
+not belong in `.claude/rules/language.md`.
+
+### Evidence
+
+Regression tests in `src/compiler_rust/parser/tests/expression_tests.rs`:
+`identifier_named_grid_is_not_hijacked_in_iterable_position` (exact bug shape
+plus `if grid:` / `while grid:` / assignment / bare use) and
+`genuine_grid_literal_still_parses_after_tightened_trigger`.
+
+- RED: with the old one-token trigger restored, the identifier test FAILS
+  (34 passed, 1 failed) while the grid-literal test still passes.
+- GREEN: with the fix, `cargo test --release -p simple-parser` is fully green
+  (276+ across all test binaries, 0 failed).
+- End-to-end, the report's exact program: old seed → `Syntax error at 4:9: Grid
+  literal must have at least one row`; rebuilt binary → prints `c=1` / `c=2`.
+
+## Second symptom: NOT reproducible, tracked separately
+
+`var xs: [[i64]] = []` parses and runs cleanly on **both** the pre-fix seed and
+the fixed binary (rc=0), so the `[[i64]]` annotation failure is not this bug and
+was not reproduced in the shape given here. If it resurfaces, capture the exact
+surrounding context — it is a type-parser issue, unrelated to `TokenKind::Grid`.
 
 ## Workaround in the corpus
 

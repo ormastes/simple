@@ -268,10 +268,7 @@ impl<'a> Parser<'a> {
             | TokenKind::Match
             | TokenKind::Dollar => self.parse_primary_control(),
             TokenKind::Grid => {
-                let next = self.peek_next();
-                let starts_literal = next.kind == TokenKind::Colon
-                    || matches!(&next.kind, TokenKind::Identifier { name, .. } if name == "device");
-                if starts_literal {
+                if self.at_grid_literal() {
                     self.parse_primary_math()
                 } else {
                     self.advance();

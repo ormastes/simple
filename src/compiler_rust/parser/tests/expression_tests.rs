@@ -121,6 +121,41 @@ fn grid_literal_remains_contextual() {
     }
 }
 
+/// Regression: an ordinary local named `grid` in ITERABLE position is followed
+/// by the `for` statement's own `:`, which the old lookahead mistook for the
+/// grid-literal header colon. It then failed inside row parsing with
+/// "Grid literal must have at least one row" pointing at the INNER `for` line.
+/// bug: doc/08_tracking/bug/
+/// identifier_named_grid_hijacked_by_grid_literal_parser_2026-08-09.md
+#[test]
+fn identifier_named_grid_is_not_hijacked_in_iterable_position() {
+    // Exact shape from the bug report: nested `for` over a var named `grid`.
+    parse("fn main() -> i64:\n    var grid = [[1, 2]]\n    for r in grid:\n        for c in r:\n            print(\"c={c}\")\n    0\n")
+        .expect("nested for over a variable named `grid` should parse");
+
+    for source in [
+        "fn main() -> i64:\n    var grid = [[1, 2]]\n    for r in grid:\n        print(\"r\")\n    0\n",
+        "fn main() -> i64:\n    val grid = 1\n    grid\n",
+        "fn main() -> i64:\n    var grid = 1\n    grid = 2\n    grid\n",
+        "fn main() -> i64:\n    val grid = [1]\n    if grid:\n        print(\"y\")\n    0\n",
+        "fn main() -> i64:\n    val grid = [1]\n    while grid:\n        break\n    0\n",
+    ] {
+        parse(source).unwrap_or_else(|e| panic!("`grid` as a plain identifier should parse: {source:?} -> {e:?}"));
+    }
+}
+
+/// The genuine feature must survive the tightened trigger.
+#[test]
+fn genuine_grid_literal_still_parses_after_tightened_trigger() {
+    for source in [
+        "grid:\n    | 1 | 2 |\n",
+        "grid device=\"cuda\":\n    | 1 | 2 |\n    | 3 | 4 |\n",
+    ] {
+        let module = parse(source).unwrap_or_else(|e| panic!("grid literal should parse: {source:?} -> {e:?}"));
+        assert!(matches!(module.items[0], Node::Expression(Expr::GridLiteral { .. })));
+    }
+}
+
 #[test]
 fn test_constant_method_call_is_not_parsed_as_static_type_path() {
     let module = parse("FRAME_HEADER_WORDS.to_u32()").unwrap();

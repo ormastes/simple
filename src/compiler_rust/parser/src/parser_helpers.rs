@@ -106,6 +106,26 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// Peek at the token `n` positions after `current` (`n == 1` is `peek_next`)
+    /// without consuming anything. Fills `pending_tokens` on demand; the buffer
+    /// is drained in order by `advance`, so speculative lookahead is
+    /// semantics-neutral.
+    pub(crate) fn peek_nth(&mut self, n: usize) -> Token {
+        debug_assert!(n >= 1, "peek_nth is 1-based; use self.current for n == 0");
+        while self.pending_tokens.len() < n {
+            let tok = self.lexer.next_token();
+            let at_eof = tok.kind == TokenKind::Eof;
+            self.pending_tokens.push_back(tok);
+            if at_eof {
+                break;
+            }
+        }
+        self.pending_tokens
+            .get(n - 1)
+            .cloned()
+            .unwrap_or_else(|| self.pending_tokens.back().cloned().unwrap_or_else(|| self.current.clone()))
+    }
+
     /// True when `detect_common_mistake` reported the TypeScript arrow-function
     /// mistake for a `=>` that is really a MATCH-ARM SEPARATOR.
     ///
