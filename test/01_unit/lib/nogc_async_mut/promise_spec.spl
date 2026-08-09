@@ -42,6 +42,12 @@ impl PromiseState:
 # Mirrors the pattern in test/01_unit/lib/std/concurrency/promise_spec.spl.
 var _promise_new_state: [PromiseState] = []
 
+# Module-level flags for the "executor receives both callbacks" test below --
+# must be module-level (not `it`-block locals) for the same nested-closure-
+# cannot-modify-a-captured-local reason as _promise_new_state above.
+var _executor_resolve_called = false
+var _executor_reject_called = false
+
 # The push-and-reassign must live in its own free function, not inline in
 # `static fn new` alongside the nested `resolve`/`reject` closures that also
 # reference `_promise_new_state` -- doing so in the same function body
@@ -229,18 +235,26 @@ describe "Promise<T> - Integration":
         expect matched
 
     it "executor receives both callbacks":
-        var resolve_called = false
-        var reject_called = false
+        # NOTE: resolve_called/reject_called must be MODULE-level vars, not
+        # locals of this `it` block -- a nested closure (the executor lambda
+        # below) can read an outer local but cannot modify it; only a
+        # module-level `var` can be mutated from a nested closure. See the
+        # identical constraint documented above `_promise_new_state` (top of
+        # this file) and doc/08_tracking/bug/promise_new_push_reassign_same_scope_as_nested_closure_2026-07-29.md.
+        _executor_resolve_called = false
+        _executor_reject_called = false
 
         val p1 = Promise.new(\resolve, reject:
-            resolve_called = true
+            _executor_resolve_called = true
             resolve(1)
         )
 
         val p2 = Promise.new(\resolve, reject:
-            reject_called = true
+            _executor_reject_called = true
             reject("err")
         )
 
-        expect resolve_called
-        expect reject_called
+        expect _executor_resolve_called
+        expect _executor_reject_called
+        expect p1.is_resolved()
+        expect p2.is_rejected()
