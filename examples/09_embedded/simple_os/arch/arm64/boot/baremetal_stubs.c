@@ -3549,6 +3549,18 @@ int32_t rt_arm64_virtio_input_semantic_y_raw(void) { return g_arm64_virtio_input
 int32_t rt_arm64_virtio_input_semantic_kind_raw(void) { return g_arm64_virtio_input_semantic_kind; }
 int32_t rt_arm64_virtio_input_semantic_button_raw(void) { return g_arm64_virtio_input_semantic_button; }
 
+void rt_gui_draw_input_cursor(int32_t x, int32_t y, int32_t kind)
+{
+    if (!g_fb_addr || !g_fb_w || x < 0 || y < 0) return;
+    uint32_t color = kind == 1 ? 0xffffcc00u :
+        (kind == 2 ? 0xffffffffu : 0xff00ccffu);
+    volatile uint32_t *fb = (volatile uint32_t *)(uintptr_t)g_fb_addr;
+    for (int32_t row = 0; row < 8 && y + row < 768; row++) {
+        for (int32_t col = 0; col <= row && col < 8 && x + col < (int32_t)g_fb_w; col++)
+            fb[(uint64_t)(y + row) * g_fb_w + (uint64_t)(x + col)] = color;
+    }
+}
+
 int64_t rt_arm64_virtio_input_sign_extend_i32(uint64_t raw)
 {
     return (int64_t)(int32_t)(uint32_t)raw;

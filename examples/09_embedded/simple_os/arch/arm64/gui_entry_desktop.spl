@@ -65,6 +65,7 @@ extern fn rt_arm64_virtio_input_semantic_x_raw() -> i32
 extern fn rt_arm64_virtio_input_semantic_y_raw() -> i32
 extern fn rt_arm64_virtio_input_semantic_kind_raw() -> i32
 extern fn rt_arm64_virtio_input_semantic_button_raw() -> i32
+extern fn rt_gui_draw_input_cursor(x: i32, y: i32, kind: i32)
 
 @export("C", name: "rt_file_exists")
 fn rt_file_exists(path: text) -> bool:
@@ -375,6 +376,15 @@ pub fn gui_entry_desktop_start(file_backed_ram_tail_base: u64):
                 pointer_kind_code = rt_arm64_virtio_input_semantic_kind_raw()
                 input_compositor.handle_pointer_step_scalars(
                     pointer_x, pointer_y, pointer_button_code, pointer_kind_code)
+                if pointer_kind_code == 3 and backend2d_event_step == 2:
+                    uart_writeln("[backend2d-event] backend=simpleos-qemu-arm64 event_backend=virtio-mmio seq=2 name=pointer_move delivered=true")
+                    backend2d_event_step = 3
+                elif pointer_kind_code == 1 and backend2d_event_step == 3:
+                    uart_writeln("[backend2d-event] backend=simpleos-qemu-arm64 event_backend=virtio-mmio seq=3 name=pointer_down delivered=true")
+                    backend2d_event_step = 4
+                elif pointer_kind_code == 2 and backend2d_event_step == 4:
+                    uart_writeln("[backend2d-event] backend=simpleos-qemu-arm64 event_backend=virtio-mmio seq=4 name=pointer_up delivered=true")
+                    backend2d_event_step = 5
             if input_backend.delivered_key_sequence > observed_key_sequence:
                 observed_key_sequence = input_backend.delivered_key_sequence
                 key_event_pending = true
@@ -489,11 +499,15 @@ pub fn gui_entry_desktop_start(file_backed_ram_tail_base: u64):
             if pointer_event_pending and key_event_pending:
                 uart_writeln("[desktop-gui-arm64] fatal reason=multi-input-frame-attribution")
                 running = false
-            elif pointer_event_pending:
+            elif pointer_event_pending or key_event_pending:
                 rendered_revision = wm_frame_executor.replay_prepared_input_frame()
             else:
                 rendered_revision = shell.render_baremetal_frame(wm_frame_executor)
             if rendered_revision > 0:
+                rt_gui_draw_input_cursor(
+                    rt_arm64_virtio_input_semantic_x_raw(),
+                    rt_arm64_virtio_input_semantic_y_raw(),
+                    if pointer_event_pending: pointer_kind_code else: 3)
                 ramfb_frame_id = ramfb_frame_id + 1
                 val frame_input_sequence = if key_event_pending:
                     key_sequence
