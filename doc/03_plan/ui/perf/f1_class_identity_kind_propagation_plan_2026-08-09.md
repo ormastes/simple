@@ -377,3 +377,103 @@ existing sites require.
 **Order still matters.** Fixing one seed engine and not the other converts the
 defect into its sibling, so the `draw_ir_v3_native_writer` workaround
 (§4) stays load-bearing until S4 AND S5 both land.
+
+### 7f. S4 scoping pass, measured 2026-08-09 — not attempted, here is why and what's next
+
+This pass tried to determine whether S4 is bounded. It is not, but the "~210
+sites" estimate from §7e was a grep count of `Value::Object` matches, not a
+measured blast radius. Here is the measured version.
+
+**What COW means here, precisely.** There is no existing copy-on-write
+*mechanism* separate from the problem — `Arc::make_mut` on
+`fields: Arc<HashMap<String, Value>>` IS the COW, and it is *correct by
+accident* for structs and *wrong by the same accident* for classes:
+`Arc::make_mut` mutates in place only when the `Arc`'s strong count is 1; if a
+struct value was aliased by a `let b = a`, the alias holds a second strong
+reference, so the first mutation through either name clones the `HashMap`
+first — exactly value semantics, confirmed correct and pinned by a regression
+test at `interpreter/node_exec.rs:1973` (`field_assignment_cow_protects_struct_local_alias`,
+added for bug #187). For a class the same clone-on-shared-mutate is the
+defect: two aliases of the same object are supposed to see each other's
+writes, and COW severs that the instant either alias mutates.
+
+**The runtime already knows which kind a value is, per-value.**
+`Value::Object` carries `class: String` directly, and
+`interpreter_call/core/function_exec.rs:953`
+(`fn is_value_type_struct(v, classes) -> bool`) already resolves it against
+`ClassDef::is_value_type` — used today at one call site (`:1065`, parameter
+binding). So the *classification* is not the blocker; S3 (§7b) already solved
+that at the HIR/MIR layer and it is trivially available to the interpreter at
+runtime too. The blocker is that classification cannot fix mutation-through-
+alias at the *call site*, because `Arc<HashMap>` provides no legal way to get a
+`&mut HashMap` out of a shared (`strong_count > 1`) `Arc` without either
+cloning (the current, wrong-for-classes behavior) or `unsafe` (not on the
+table). Fixing it requires interior mutability in the storage itself
+(`Arc<RefCell<HashMap>>` or `Arc<Mutex<HashMap>>`), which is a representation
+change, not a call-site change.
+
+**Measured blast radius of that representation change** (ripgrep over
+`compiler/src`, 2026-08-09, `Value::Object` is defined once,
+`compiler/src/value.rs:1190`):
+
+| category | count | why it matters |
+|---|---|---|
+| `Value::Object` pattern matches (destructuring) | 190 (41 files) | every one is a candidate exhaustiveness point if a new variant is added |
+| direct `fields.get(` / `.iter(` / `.contains_key(` / `.keys(` / `.values(` calls | 168 | these rely on `Arc<HashMap>`'s **transparent `Deref`**; `RefCell`/`Mutex` do not implement it, so each becomes `fields.borrow().get(...)` (or `.lock()`) — a mechanical but real per-site edit |
+| genuine **write-through** sites (`Arc::make_mut(fields)` / `Arc::make_mut(&mut fields)` and the two `inner_fields`/`root_fields` variants) | **23** (7 files: `interpreter/place.rs`, `interpreter/node_exec.rs`, `interpreter/expr/calls.rs`, `interpreter_call/core/lambda.rs`, `interpreter_call/core/function_exec.rs`, `interpreter_call/bdd.rs`, `interpreter_helpers/patterns.rs`) | this subset is small and already correct for structs — it is not the wall |
+
+The wall is the 168+190 (overlapping, not summed) **read** sites, not the 23
+write sites. And critically: **the struct/class split does not shrink this
+set.** `Value::Object` is one representation for both kinds — the same
+`to_text`, equality, pattern-match-binding, JSON/BDD helper, and generic
+field-lookup code paths execute for a struct instance and a class instance
+identically, because nothing before this pass ever needed them to differ. So
+"how many of the 210 are struct-only vs class-only" has a real answer: **zero
+are staticaly scoped to one kind** — every read site is reachable from both,
+and the per-value `class: String` + `is_value_type_struct` check only tells
+you which kind you're holding at runtime, it does not let you skip touching
+the site when converting the storage type.
+
+**Why this pass did not attempt it anyway.** A `RefCell`/`Mutex` swap is not
+just mechanical churn — it introduces a genuinely new runtime hazard the
+current code cannot have: reentrant `borrow_mut()` panics (e.g. a class
+method that reads `self.field` while a caller already holds a `borrow_mut()`
+on the same object further up the call stack — routine in OOP code with
+nested method calls). Landing that across ~200 sites in one pass, sight
+unseen per site, is exactly the "broad, risky change" this task was told not
+to attempt in one pass.
+
+**Smallest safe next step (not this pass).** Do not convert
+`Value::Object`'s existing `fields` field type in place — that forces the
+struct path (200 already-correct read sites) to eat 100% of the risk for a
+fix that only classes need. Instead, add a **new, additive** variant used only
+for newly-constructed class instances, so struct code paths are untouched:
+
+1. `Value::ClassInstance { class: String, fields: Arc<RefCell<HashMap<String, Value>>>, id: u64 }`
+   in `value.rs`, next to `Object` — `id` is a monotonic counter for identity
+   comparison/debug, not load-bearing for the COW fix itself.
+2. Route construction through `is_value_type_struct`'s existing classification
+   at every `Value::Object` *construction* site (literal eval, constructor
+   call) — the S3-landed `type_value_kinds`/`ClassDef::is_value_type` gate
+   already exists for exactly this branch; grep-count the construction sites
+   first (expected: a handful, in `node_exec.rs` and `interpreter_call/`, not
+   200 — construction is far rarer than read).
+3. Add `Value::ClassInstance` arms only where the corpus (A–E, `test/fixtures/repro/compiler/class_identity/cases/*.spl`)
+   actually exercises them: `place.rs` (`step_mut`/`store_last`, 2 sites, using
+   `.borrow_mut()` instead of `Arc::make_mut`), the `FieldAccess` read path,
+   method-call receiver resolution, and `to_text`/equality/debug formatting.
+   Every OTHER site either doesn't need a new arm (generic array/dict/pattern
+   machinery that never inspects `Value::Object`'s internals) or the Rust
+   compiler's non-exhaustive-match error names it for you — that error list
+   IS the real, code-verified blast radius, superior to any grep estimate,
+   and should be captured as the artifact of step 1-2 before doing step 3 for
+   real.
+4. Run `scripts/check/check-class-identity-seed-matrix.shs` after step 3;
+   expect A, C, D, E to flip `COPY(n)` → `REF` on seedINTERP while F–K and the
+   seedJIT column stay byte-identical to §7d's table (no struct regression, no
+   change on the JIT engine at all — S4 only touches the interpreter).
+
+This additive-variant approach was not implemented in this pass (only
+investigated) because step 3's exact site list is only known after step 2 is
+built and the compiler's own exhaustiveness errors enumerate it — that is
+follow-on work, not a same-pass extension of this scoping.
