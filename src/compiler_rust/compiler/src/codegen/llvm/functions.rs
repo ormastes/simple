@@ -2212,23 +2212,30 @@ impl LlvmBackend {
                     func_name.rsplit('.').next().unwrap_or(func_name)
                 };
 
-                // For qualified user-defined methods like `Boxed.get`, prefer
-                // the exact resolved function symbol before consulting builtin
-                // method shims such as `get -> rt_index_get`. Otherwise a
-                // struct method can be misrouted through a collection helper
-                // purely because it shares a common short name.
                 let resolved_direct = self
                     .use_map
                     .get(func_name)
                     .or_else(|| self.import_map.get(func_name))
                     .map(|s| s.as_str());
+                let resolved_text_runtime = resolved_direct.and_then(super::resolved_text_runtime_method);
+
+                // For qualified user-defined methods like `Boxed.get`, prefer
+                // the exact resolved function symbol before consulting builtin
+                // method shims such as `get -> rt_index_get`. Otherwise a
+                // struct method can be misrouted through a collection helper
+                // purely because it shares a common short name. Canonical text
+                // declarations are the exception: their Simple bodies are the
+                // semantic owners, but LLVM must call the matching runtime ABI.
                 let dotted_direct = func_name.replace("_dot_", ".");
                 let direct_func = resolved_direct
                     .and_then(|n| module.get_function(n))
                     .or_else(|| resolved_direct.and_then(|n| module.get_function(&n.replace("_dot_", "."))))
                     .or_else(|| module.get_function(func_name))
                     .or_else(|| module.get_function(&dotted_direct));
-                if direct_func.is_some() && (func_name.contains('.') || func_name.contains("_dot_")) {
+                if resolved_text_runtime.is_none()
+                    && direct_func.is_some()
+                    && (func_name.contains('.') || func_name.contains("_dot_"))
+                {
                     let mut all_args = vec![*receiver];
                     all_args.extend_from_slice(args);
                     let func = direct_func.unwrap();
@@ -2264,7 +2271,7 @@ impl LlvmBackend {
                 }
 
                 // Special case: substring(start) → rt_slice(receiver, start, rt_len(receiver), 1)
-                if method == "substring" && args.len() == 1 {
+                if (method == "substring" || resolved_text_runtime == Some("rt_slice")) && args.len() == 1 {
                     let recv_val = self.get_vreg(receiver, vreg_map)?;
                     let recv_casted = self.coerce_value_to_type(recv_val, Some(i64_type.into()), builder)?;
                     let start_val = self.get_vreg(&args[0], vreg_map)?;
@@ -2535,7 +2542,8 @@ impl LlvmBackend {
                     }
                 } else {
                     None
-                };
+                }
+                .or(resolved_text_runtime);
 
                 if let Some(rt_name) = runtime_func {
                     if rt_name == "rt_len" {
@@ -3488,6 +3496,75 @@ mod tests {
         assert!(ir.contains("lib__database__DbValue.to_text"), "{ir}");
         assert!(ir.contains("@DbValue.to_text"), "{ir}");
         assert!(!ir.contains("@rt_to_string"), "{ir}");
+        backend.verify().unwrap();
+    }
+
+    #[test]
+    fn resolved_text_methods_precede_direct_declarations_but_user_text_stays_direct() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let mut backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("resolved_text_method_runtime_redirects").unwrap();
+        backend.set_use_map(HashMap::from([
+            (
+                "Path.replace".to_string(),
+                "lib__common__string_core__str_dot_replace".to_string(),
+            ),
+            (
+                "Path.substring".to_string(),
+                "lib__common__string_core__str_dot_substring".to_string(),
+            ),
+            ("UserText.replace".to_string(), "UserText_dot_replace".to_string()),
+        ]));
+
+        for name in [
+            "lib__common__string_core__str_dot_replace",
+            "lib__common__string_core__str_dot_substring",
+            "UserText_dot_replace",
+        ] {
+            let mut declaration = MirFunction::new(
+                name.to_string(),
+                crate::hir::TypeId::I64,
+                simple_parser::ast::Visibility::Public,
+            );
+            declaration.blocks[0].terminator = Terminator::Return(None);
+            backend.compile_function(&declaration).unwrap();
+        }
+
+        let mut caller = MirFunction::new(
+            "probe".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        for (dest, value) in [(VReg(0), 3), (VReg(1), 1)] {
+            caller.blocks[0].instructions.push(MirInst::ConstInt { dest, value });
+        }
+        for (dest, name) in [
+            (VReg(2), "Path.replace"),
+            (VReg(3), "Path.substring"),
+            (VReg(4), "UserText.replace"),
+        ] {
+            caller.blocks[0].instructions.push(MirInst::MethodCallStatic {
+                dest: Some(dest),
+                receiver: VReg(0),
+                func_name: name.to_string(),
+                args: vec![VReg(1)],
+            });
+        }
+        caller.blocks[0].terminator = Terminator::Return(Some(VReg(4)));
+        backend.compile_function(&caller).unwrap();
+
+        let ir = backend.get_ir().unwrap();
+        assert!(ir.contains("call i64 @rt_string_replace"), "{ir}");
+        assert!(ir.contains("call i64 @rt_slice"), "{ir}");
+        assert!(ir.contains("call i64 @UserText_dot_replace"), "{ir}");
+        assert!(
+            !ir.contains("call i64 @lib__common__string_core__str_dot_replace"),
+            "{ir}"
+        );
+        assert!(
+            !ir.contains("call i64 @lib__common__string_core__str_dot_substring"),
+            "{ir}"
+        );
         backend.verify().unwrap();
     }
 
