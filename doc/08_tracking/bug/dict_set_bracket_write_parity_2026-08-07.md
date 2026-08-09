@@ -1,6 +1,60 @@
 # Dict `.set()` vs `d[k]=v` write parity -- 2026-08-07 re-verification
 
-## Status: OPEN -- narrower than the 2026-07-31 filing, and confirmed by a DIFFERENT symptom on the real native/self-hosted lane
+## Status: FIXED (source-level, 2026-08-09) -- see "Fix applied" below. Full native-lane re-execution still not obtained (see caveat).
+
+## Fix applied (2026-08-09)
+
+Applied the exact fix candidate this doc already identified: added
+`method == "set"` to the `is_dict_method_name` whitelist at
+`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:1232`, and
+added a new dispatch arm (`receiver_is_dict and method == "set" and
+args.len() == 2`) right after the `remove`/`delete` arm that lowers `.set(k,
+v)` to the SAME `rt_dict_set` runtime call, with the same key-lowering
+(`lower_dict_key`) and value-boxing (`box_runtime_value`) as `d[k]=v`'s
+Index-assign lowering already uses (`mir_lowering_stmts.spl`, `Index(base,
+index)` case). Returns the receiver handle, matching `.set()`'s documented
+mutate-in-place/alias-return behavior (see
+`reference_dict_bracket_assign_beats_set_both_engines` project memory).
+
+Root cause confirmed: genuine bug, not working-as-intended. `"set"` was
+simply absent from `is_dict_method_name`, the whitelist that routes Dict
+method calls to their dedicated MIR lowering; `d[k]=v` never went through
+that whitelist at all (different MIR construct -- Index-assign, not a method
+call), so the two forms were never actually equivalent code paths despite
+being intended as equivalent Dict-write APIs.
+
+## Verification performed this pass
+
+- `git diff origin/main -- src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`
+  shows exactly the intended hunk (whitelist entry + new arm), clean against
+  origin immediately before landing.
+- `bin/simple lint src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`
+  and a full `bin/simple test test/01_unit/compiler/dict_bracket_vs_set_spec.spl`
+  run (which parses/typechecks the entire compiler source tree, including the
+  edited file, as part of resolving its own imports) both completed with only
+  pre-existing repo-wide warnings (`export use *`, deprecated generics syntax,
+  cross-module symbol collisions) -- no syntax/type errors introduced by this
+  change. The regression spec passed **3/3** (seed/interpreter lane).
+- **Caveat, same as this doc's prior pass:** true end-to-end verification on
+  the real self-hosted/native-codegen lane (the lane this defect actually
+  affects) requires compiling the fixed compiler source into a fresh
+  self-hosted binary, i.e. a bootstrap rebuild. That was explicitly out of
+  scope for this task (no `bin/simple build bootstrap`), exactly as the prior
+  pass on 2026-08-07 also deferred it. `bin/simple test`'s 3/3 pass exercises
+  only the Rust bootstrap seed's interpreter/JIT, which -- per this doc's own
+  prior finding -- was **never** the affected lane (the seed's own native Dict
+  implementation is unrelated Rust code, untouched by this .spl-level fix).
+  The fix is corroborated by direct source inspection (mirrors the
+  already-working `d[k]=v` lowering call-for-call: same runtime symbol, same
+  key/value lowering helpers, same argument count/order) rather than by a
+  fresh native-lane execution trace.
+- Regression surface: `get`, `contains_key`, `remove`/`delete`, `keys`,
+  `values`, `has`/`contains` dispatch arms were not touched -- only a new arm
+  was added and the whitelist gained one more name. The existing regression
+  spec (`test/01_unit/compiler/dict_bracket_vs_set_spec.spl`) covers `d[k]=v`,
+  `.set()`, `.get()`, `[]` read, and `.contains_key()` together; all pass.
+
+## Status: OPEN -- narrower than the 2026-07-31 filing, and confirmed by a DIFFERENT symptom on the real native/self-hosted lane (superseded by "Fix applied" above)
 
 ## Correction to an earlier version of this doc
 

@@ -1229,7 +1229,7 @@ impl MirLowering:
         # builtin set and reuse it in every non-static dispatch path.
         var dict_recv_local: LocalId = 0
         var dict_recv_lowered = false
-        val is_dict_method_name = method == "keys" or method == "values" or method == "has" or method == "contains" or method == "contains_key" or method == "get" or method == "remove" or method == "delete"
+        val is_dict_method_name = method == "keys" or method == "values" or method == "has" or method == "contains" or method == "contains_key" or method == "get" or method == "remove" or method == "delete" or method == "set"
         # Resolved custom remove/delete may need indexed/field writeback below;
         # do not pre-evaluate those receivers. Their unresolved Dict fallback
         # keeps its existing behavior.
@@ -1417,6 +1417,33 @@ impl MirLowering:
             var b_rm = self.builder
             b_rm.emit_call(remove_op, [mir_operand_copy(receiver_local), mir_operand_copy(key_local)], MirType.i64())
             self.builder = b_rm
+            return receiver_local
+
+        # `.set(key, value)` -> rt_dict_set, the same runtime call and boxing
+        # `d[k] = v`'s Index-assign lowering already uses (mir_lowering_stmts.spl,
+        # Index(base, index) case). Root cause of
+        # `doc/08_tracking/bug/dict_set_bracket_write_parity_2026-08-07.md`:
+        # "set" was absent from `is_dict_method_name` above, so `.set(` on a
+        # Dict never reached this dispatch and failed MIR lowering outright
+        # ("unresolved method call: set") while `d[k]=v` lowered cleanly via a
+        # different MIR construct (Index-assign, not a method call). Mutates
+        # the receiver in place and returns the same handle, matching the
+        # oracle's observed alias-return behavior (see
+        # reference_dict_bracket_assign_beats_set_both_engines memory: `val e =
+        # d.set(k, v)` leaves `d` and `e` both mutated/aliased).
+        if receiver_is_dict and method == "set" and args.len() == 2:
+            val receiver_local = if dict_recv_lowered: dict_recv_local else: self.lower_expr(receiver)
+            val key_local = self.lower_dict_key(args[0].value)
+            val value_local = self.lower_expr(args[1].value)
+            self.note_container_elem_type(receiver_local, value_local)
+            val boxed_value = self.box_runtime_value(value_local)
+            val set_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_dict_set"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+            ))
+            var b_set = self.builder
+            b_set.emit_call(set_op, [mir_operand_copy(receiver_local), mir_operand_copy(key_local), mir_operand_copy(boxed_value)], MirType.i64())
+            self.builder = b_set
             return receiver_local
 
         if (method == "len" or method == "length") and args.len() == 0:
