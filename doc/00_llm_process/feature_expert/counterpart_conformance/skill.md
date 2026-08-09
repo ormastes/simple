@@ -80,11 +80,43 @@ acceptance criterion — see the acceptance-gate table in the design doc.
 
 ## Current state (2026-08-09)
 
-- Wave 0 complete: ADR + frozen contracts landed.
-- Wave 1 in progress: F1 ABI/mock, F5/F6 converter graph + relation engine, F7/F8 artifact
-  store + SSpec projection.
-- Not started: F2 package/build resolver (lockfile records are declarations, not yet enforced),
-  F3 isolated worker, F4 provider registry, F9 foundation red-team, and all of Waves 2–7.
+**Wave 0 and Wave 1 complete.** 138/138 examples green across nine specs, all measured with
+`bin/simple run` (the daemon path trips the 800-module cap):
+
+| spec | result |
+|---|---|
+| contract_model | 18/18 |
+| converter_graph | 19/19 |
+| relation_matrix | 19/19 |
+| evidence_projection | 6/6 |
+| counterpart_abi | 8/8 |
+| provider_registry | 19/19 |
+| package_registry | 19/19 |
+| foundation_redteam | 21/21 |
+| worker_isolation | 9/9 |
+
+Landed lanes: F1 ABI + mock adapter, F2 package resolver + `counterpart` CLI, F3 isolated
+worker with proven crash containment, F4 provider registry/runner, F5/F6 converter graph +
+N-way relation engine, F7/F8 artifact store + evidence/manual projection, F9 adversarial
+red-team.
+
+Not started: all of Waves 2–7 — no real upstream provider exists yet. Wave 2 (mock, zlib,
+HarfBuzz, OpenSSL pilots) is the production-readiness gate; Chrome and Venus must not start
+until it passes.
+
+### Carry these forward
+
+- **The native-build wiring is UNVERIFIED.** The ABI works on the interpreter path only.
+  Proving the native path needs a native build of an `rt_counterpart_*` caller, which the
+  Stage-3 self-host blocker prevents.
+- **`bin/simple` is a Rust seed**, so every number above is seed-attributed, and
+  `bin/simple counterpart …` is unreachable — use `bin/simple run src/app/counterpart/main.spl`.
+- **SBOM emission is not implemented**; `sbom_sha256` is parsed and placeholder-checked only.
+- **The mock lock record is all `pending`**, so `verify`/`run` correctly exit 1 as UNVERIFIED.
+- Three fail-open defects were found and fixed during Wave 1 — artifact hashing that made
+  every binary verify against every other, a missing derived-expected-value gate, and a
+  hardcoded `ConversionLoss.identity` that made the exactness gate dead code on the
+  production path. Expect more of this shape; sabotage every guard you add.
 
 ## Update Rule
 
