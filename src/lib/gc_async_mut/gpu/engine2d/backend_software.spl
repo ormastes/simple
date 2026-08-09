@@ -171,7 +171,7 @@ impl RenderBackend for SoftwareBackend:
         val row_end = y + h
         val clip_y_end = self.clip_y + self.clip_h
         val clip_x_end = self.clip_x + self.clip_w
-        val mask_active = self.mask_buf.len() > 0
+        val mask_active = _sw_mask_active(self)
         if has_alpha:
             var alpha_row = y
             while alpha_row < row_end:
@@ -360,7 +360,10 @@ impl RenderBackend for SoftwareBackend:
         val scale = metrics.scale
         val advance = metrics.advance
         val text_len = text_val.len()
-        val fast_direct = not self.clip_enabled and self.mask_buf.len() == 0
+        var fast_direct = not self.clip_enabled
+        if fast_direct:
+            if _sw_mask_active(self):
+                fast_direct = false
         var i: i64 = 0
         var cursor_x = x
         while i < text_len:
@@ -412,7 +415,9 @@ impl RenderBackend for SoftwareBackend:
         val pixels_len = pixels.len()
         if w <= 0 or h <= 0:
             return
-        val slow_checked = self.clip_enabled or self.mask_buf.len() > 0
+        var slow_checked = self.clip_enabled
+        if not slow_checked:
+            slow_checked = _sw_mask_active(self)
         var row = 0
         while row < h:
             val py = y + row
@@ -464,7 +469,10 @@ impl RenderBackend for SoftwareBackend:
         self.mask_h = h
 
     me clear_mask():
-        self.mask_buf = []
+        # Clearing a mask changes its active dimensions; retaining the owned
+        # buffer avoids an empty-array allocation/store on every Draw IR frame
+        # reset. No mask consumer may inspect the retained buffer while either
+        # dimension is zero.
         self.mask_w = 0
         self.mask_h = 0
 
@@ -601,7 +609,9 @@ impl RenderBackend for SoftwareBackend:
         if w <= 0 or h <= 0:
             return
         val pixels_len = pixels.len()
-        val slow_checked = self.clip_enabled or self.mask_buf.len() > 0
+        var slow_checked = self.clip_enabled
+        if not slow_checked:
+            slow_checked = _sw_mask_active(self)
         var row = 0
         while row < h:
             val py = y + row
@@ -844,7 +854,7 @@ impl SoftwareBackend:
         val count = clipped.2
         if count <= 0:
             return
-        val mask_active = self.mask_buf.len() > 0
+        val mask_active = _sw_mask_active(self)
         if mask_active:
             var xoff = 0
             while xoff < count:
@@ -860,7 +870,7 @@ impl SoftwareBackend:
         val count = clipped.2
         if count <= 0:
             return
-        val mask_active = self.mask_buf.len() > 0
+        val mask_active = _sw_mask_active(self)
         if mask_active:
             var xoff = 0
             while xoff < count:
@@ -973,12 +983,21 @@ fn _clip_span(backend: SoftwareBackend, x: i32, y: i32, length: i32) -> (i32, i3
     (start, end, end - start)
 
 fn _sw_mask_blocks(backend: SoftwareBackend, x: i32, y: i32) -> bool:
-    if backend.mask_buf.len() == 0:
+    if not _sw_mask_active(backend):
         return false
     val mi = y * backend.mask_w + x
     if mi < 0 or mi >= backend.mask_buf.len():
         return false
     backend.mask_buf[mi] == 0u8
+
+fn _sw_mask_active(backend: SoftwareBackend) -> bool:
+    # Keep the dimension checks sequential: they must return before touching a
+    # retained or target-ABI-invalid empty-array handle.
+    if backend.mask_w <= 0:
+        return false
+    if backend.mask_h <= 0:
+        return false
+    backend.mask_buf.len() > 0
 
 # ============================================================================
 # Triangle Edge Interpolation

@@ -448,9 +448,10 @@ fn attr_key_index(inner: text, key: text, key_len: i32) -> i32:
     val inner_len = inner.len() as i32
     if inner_len < key_len:
         return -1
-    val ib = inner.bytes()
-    val kb = key.bytes()
-    val first = kb[0]
+    # Read bytes directly from their text owners. Materializing `[u8]` views
+    # here crosses the freestanding array ABI and produced valid lengths with
+    # unusable elements, so present attributes were reported as empty.
+    val first = key.byte_at(0)
     val limit = inner_len - key_len
     var i = 0
     # Quote-aware scan: a key substring that lands INSIDE a quoted attribute
@@ -461,7 +462,7 @@ fn attr_key_index(inner: text, key: text, key_len: i32) -> i32:
     # (34 = '"', 39 = '\''). Byte comparisons keep this freestanding-safe.
     var quote = 0
     while i <= limit:
-        val ci = ib[i]
+        val ci = inner.byte_at(i)
         if quote != 0:
             if ci == quote:
                 quote = 0
@@ -480,13 +481,15 @@ fn attr_key_index(inner: text, key: text, key_len: i32) -> i32:
             var at_token_start = i == 0
             if not at_token_start:
                 # 32 = space, 9 = tab, 10 = LF, 13 = CR
-                val prev = ib[i - 1]
+                val prev = inner.byte_at(i - 1)
                 at_token_start = prev == 32 or prev == 9 or prev == 10 or prev == 13
             if at_token_start:
                 var j = 1
                 var matched = true
                 while j < key_len:
-                    if not html_attr_name_byte_equal(ib[i + j], kb[j]):
+                    if not html_attr_name_byte_equal(
+                        inner.byte_at(i + j), key.byte_at(j)
+                    ):
                         matched = false
                         break
                     j = j + 1
