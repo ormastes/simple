@@ -636,6 +636,10 @@ fn _simple_web_content_frame_cached_impl(cache: WebRenderPixelArtifactCache, win
     val clamped_scroll = _clamp_scroll_px(scroll_y)
     val full_h = height + clamped_scroll
     val req = simple_web_content_render_request_with_theme(theme, title, body_html, width, full_h).with_pixel_output()
+    # Serialize while the request is still pristine. The native freestanding
+    # large-artifact decorator ABI can overwrite fields on a request reused
+    # after that return; a held immutable text handle survives that boundary.
+    val rendered_full_html = web_render_full_html(req)
     var wm_receipt: [text] = ["", "", "", "", "", "", "", "", "", "", "", ""]
     val artifact = if animation_clock_ms >= 0:
         cache.request_to_pixel_artifact_at_time(
@@ -646,8 +650,9 @@ fn _simple_web_content_frame_cached_impl(cache: WebRenderPixelArtifactCache, win
     # All metadata aggregation is complete. Create the live array now so no
     # later large artifact return can overwrite its RuntimeArray items field.
     var delivered_pixels: [u32] = [0u32; width * full_h]
-    val delivered_status = cache.render_pixels_after_metadata_at_time_into(
-        req, content_revision, animation_clock_ms, delivered_pixels, wm_receipt
+    val delivered_status = cache.render_pixels_after_metadata_html_at_time_into(
+        rendered_full_html, width, full_h, content_revision,
+        animation_clock_ms, delivered_pixels, wm_receipt
     )
     if delivered_status != 1:
         if delivered_status == -1:
