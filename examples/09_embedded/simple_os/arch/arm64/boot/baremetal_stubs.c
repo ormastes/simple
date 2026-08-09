@@ -1803,6 +1803,24 @@ static RuntimeArray *arm64_pixel_array(RuntimeValue value) {
     return array;
 }
 
+/*
+ * Cross-module [u32] fields retained by the WM content-frame owner can arrive
+ * with a noncanonical header tag on the current self-hosted AArch64 aggregate
+ * ABI even though their RuntimeArray payload is intact and was already
+ * length/index validated in Pure Simple.  Keep strict tag checks everywhere
+ * else; the packed blit boundary additionally admits only a structurally
+ * bounded array payload.
+ */
+static RuntimeArray *arm64_blit_pixel_array(RuntimeValue value) {
+    RuntimeArray *array = arm64_pixel_array(value);
+    if (array) return array;
+    if (!IS_HEAP(value)) return NULL;
+    array = (RuntimeArray *)DECODE_PTR(value);
+    if (!array || !array->items || array->len > array->cap ||
+        array->cap > 16777216u) return NULL;
+    return array;
+}
+
 static RuntimeValue arm64_box_pixel(uint32_t pixel) {
     return ENCODE_INT((int64_t)(uint64_t)pixel);
 }
@@ -2836,7 +2854,7 @@ RuntimeValue rt_gui_fill4(RuntimeValue xy, RuntimeValue wh, RuntimeValue color, 
 RuntimeValue rt_gui_blit_row4(RuntimeValue pixels_value, RuntimeValue src_offset_value,
                               RuntimeValue xy, RuntimeValue count_value)
 {
-    RuntimeArray *pixels = arm64_pixel_array(pixels_value);
+    RuntimeArray *pixels = arm64_blit_pixel_array(pixels_value);
     if (!pixels || !g_fb_addr || !g_fb_w) return 0;
     int64_t src_offset = (int64_t)src_offset_value;
     uint32_t requested = (uint32_t)((uint64_t)count_value >> 32);
