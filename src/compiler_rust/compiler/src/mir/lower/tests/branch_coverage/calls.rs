@@ -422,6 +422,87 @@ fn chained_text_replace_rfind_keeps_string_receiver() {
 }
 
 #[test]
+fn bootstrap_stem_and_chained_text_aliases_use_canonical_runtime_calls() {
+    let mir = compile_to_mir(
+        r#"fn _bootstrap_default_stem(path_text: text) -> text:
+    val slash = path_text.rfind("/")
+    val base = if slash >= 0: path_text.substring(slash + 1) else: path_text
+    val dot = base.rfind(".")
+    if dot > 0:
+        base.substring(0, dot)
+    else:
+        base
+
+fn normalize(value: text) -> bool:
+    value.trim().lower().upper().starts_with("A")
+
+fn rewrite(value: text) -> text:
+    value.lower().replace("a", "b")
+
+fn code_and_split(value: text) -> i64:
+    val code = value.char_code_at(0)
+    val parts = value.split("/")
+    code + parts.len()
+"#,
+    )
+    .unwrap();
+
+    for (target_name, arity) in [
+        ("rt_string_trim", 1),
+        ("rt_string_to_lower", 1),
+        ("rt_string_to_upper", 1),
+        ("rt_string_starts_with", 2),
+        ("rt_slice", 4),
+        ("rt_string_rfind", 2),
+        ("rt_string_replace", 3),
+        ("rt_string_split", 2),
+        ("rt_string_char_code_at", 2),
+    ] {
+        assert!(
+            has_inst(&mir, |i| matches!(
+                i,
+                MirInst::Call { target, args, .. }
+                    if target == &CallTarget::from_name(target_name) && args.len() == arity
+            )),
+            "missing canonical {target_name}/{arity}"
+        );
+    }
+    assert!(!has_inst(&mir, |i| matches!(
+        i,
+        MirInst::MethodCallStatic { func_name, .. }
+            if matches!(func_name.as_str(), "substring" | "str.substring" | "trim" | "str.trim" | "lower" | "str.lower")
+    )));
+}
+
+#[test]
+fn custom_user_text_transform_methods_stay_direct() {
+    let mir = compile_to_mir(
+        r#"struct UserText:
+    marker: i64
+
+impl UserText:
+    fn lower() -> UserText:
+        self
+    fn substring(start: i64) -> UserText:
+        self
+
+fn preserve(value: UserText) -> UserText:
+    value.lower().substring(1)
+"#,
+    )
+    .unwrap();
+    for expected in ["UserText.lower", "UserText.substring"] {
+        assert!(
+            has_inst(&mir, |i| matches!(
+                i,
+                MirInst::MethodCallStatic { func_name, .. } if func_name == expected
+            )),
+            "custom method {expected} was redirected"
+        );
+    }
+}
+
+#[test]
 fn inferred_text_predicate_does_not_reuse_unrelated_custom_owner() {
     let mir = compile_to_mir(
         r#"struct CustomPrefixOwner:

@@ -329,6 +329,48 @@ fn empty(value: String) -> bool:
 }
 
 #[test]
+fn bootstrap_stem_and_text_transform_aliases_keep_string_results() {
+    let module = parse_and_lower(
+        r#"fn _bootstrap_default_stem(path_text: text) -> text:
+    val slash = path_text.rfind("/")
+    val base = if slash >= 0: path_text.substring(slash + 1) else: path_text
+    val dot = base.rfind(".")
+    if dot > 0:
+        base.substring(0, dot)
+    else:
+        base
+
+fn normalize(value: text) -> bool:
+    val lowered = value.trim().lower()
+    val lowered_alias = lowered.to_lower()
+    val uppered = lowered_alias.upper()
+    val uppered_alias = uppered.to_upper()
+    uppered_alias.starts_with("A")
+"#,
+    )
+    .unwrap();
+
+    let stem = module
+        .functions
+        .iter()
+        .find(|f| f.name == "_bootstrap_default_stem")
+        .expect("bootstrap stem");
+    for stmt in &stem.body {
+        if let HirStmt::Let { value: Some(value), .. } = stmt {
+            assert_ne!(value.ty, TypeId::ANY, "bootstrap stem intermediate lost its type: {value:?}");
+        }
+    }
+    assert_eq!(stem.return_type, TypeId::STRING);
+
+    let normalize = module.functions.iter().find(|f| f.name == "normalize").expect("normalize");
+    for stmt in &normalize.body {
+        if let HirStmt::Let { value: Some(value), .. } = stmt {
+            assert_eq!(value.ty, TypeId::STRING, "text transform result must remain String: {value:?}");
+        }
+    }
+}
+
+#[test]
 fn test_lower_danger_block_retains_boundary_and_tail_type() {
     let module = parse_and_lower("fn test() -> i64:\n    danger:\n        val x = 40\n        x + 2\n").unwrap();
     let func = &module.functions[0];

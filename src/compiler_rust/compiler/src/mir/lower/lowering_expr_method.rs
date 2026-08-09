@@ -1247,6 +1247,58 @@ impl<'a> MirLowerer<'a> {
         // rt_array_push returns bool, not a new pointer — no store-back needed.
         let _receiver_local_index: Option<usize> = None;
 
+        let receiver_is_string = receiver.ty == TypeId::STRING || receiver_local_ty == Some(TypeId::STRING);
+        if receiver_is_string {
+            let unary_runtime = match (method, args.len()) {
+                ("trim", 0) => Some("rt_string_trim"),
+                ("lower" | "to_lower", 0) => Some("rt_string_to_lower"),
+                ("upper" | "to_upper", 0) => Some("rt_string_to_upper"),
+                _ => None,
+            };
+            if let Some(runtime_name) = unary_runtime {
+                return self.lower_builtin_call_expr(runtime_name, std::slice::from_ref(receiver), TypeId::STRING);
+            }
+
+            // Preserve the canonical substring ABI: rt_slice(text, start, end, 1).
+            // The one-bound form obtains `end` from rt_len; the two-bound form
+            // forwards its explicit end. This is STRING-gated so a user type
+            // declaring `substring` remains a direct user-method call.
+            if method == "substring" && matches!(args.len(), 1 | 2) {
+                let receiver_reg = self.lower_expr(receiver)?;
+                let start_reg = self.lower_expr(&args[0])?;
+                let end_reg = if args.len() == 2 {
+                    self.lower_expr(&args[1])?
+                } else {
+                    self.with_func(|func, current_block| {
+                        let dest = func.new_vreg();
+                        func.block_mut(current_block).unwrap().instructions.push(MirInst::Call {
+                            dest: Some(dest),
+                            target: crate::mir::effects::CallTarget::from_name("rt_len"),
+                            args: vec![receiver_reg],
+                        });
+                        dest
+                    })?
+                };
+                let step_reg = self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    func.block_mut(current_block)
+                        .unwrap()
+                        .instructions
+                        .push(MirInst::ConstInt { dest, value: 1 });
+                    dest
+                })?;
+                return self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    func.block_mut(current_block).unwrap().instructions.push(MirInst::Call {
+                        dest: Some(dest),
+                        target: crate::mir::effects::CallTarget::from_name("rt_slice"),
+                        args: vec![receiver_reg, start_reg, end_reg, step_reg],
+                    });
+                    dest
+                });
+            }
+        }
+
         let mut receiver_reg = self.lower_expr(receiver)?;
         let mut arg_regs = Vec::new();
         for arg in args {

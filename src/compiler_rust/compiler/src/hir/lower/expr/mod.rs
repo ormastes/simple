@@ -1133,9 +1133,8 @@ impl Lowerer {
                 // bool-boxing step is skipped.
                 "starts_with" | "ends_with" | "contains" | "is_empty" | "is_digit" | "is_numeric" | "is_alpha"
                 | "is_alphabetic" | "is_alphanumeric" | "is_alnum" | "is_whitespace" => Some(TypeId::BOOL),
-                "concat" | "slice" | "replace" | "trim" | "trim_start" | "trim_end" => {
-                    Some(TypeId::STRING)
-                }
+                "concat" | "slice" | "substring" | "replace" | "trim" | "trim_start" | "trim_end" | "lower"
+                | "to_lower" | "upper" | "to_upper" => Some(TypeId::STRING),
                 // `appended`/`prepended` (= `concat` with swapped operand
                 // order) return a fresh String — same shape as the
                 // `concat`/`slice` entry just above. See the MIR expansion
