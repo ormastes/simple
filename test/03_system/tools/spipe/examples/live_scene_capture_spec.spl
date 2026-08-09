@@ -1,0 +1,92 @@
+# @cover src/lib/common/spec/evidence/format/scene_profile.spl 10%
+# @req REQ-SSPEC-SCENE-LIVE-001
+"""
+T2e: Live 2D scene capture via the real widget-tree -> layout -> draw-command
+facade (src/lib/common/ui/widget_draw_cmds.spl), NOT a hand-built DrawScene
+literal. A real WidgetNode tree is built through the real `builder.label`
+constructor, run through the real `compute_layout` layout engine at a fixed
+viewport, and projected into real `DrawCmd` records by
+`widget_tree_to_draw_cmds`. Those real draw commands are converted into the
+`scene_profile` adapter's `DrawScene`/`DrawNode` input types and checked with
+`compare_evidence` against a closed oracle whose expected literals are
+computed by hand from the layout/draw-cmd rules (see file:line evidence
+below), independent of the evidence under test.
+
+Why this is a legitimate headless "live" capture: `widget_tree_to_draw_cmds`
+requires no GPU, no window, and no display server — it is pure layout
+arithmetic (`compute_layout`, src/lib/common/ui/layout.spl:25) plus a pure
+widget-kind -> DrawCmd projection (`_emit_for_rect`,
+src/lib/common/ui/widget_draw_cmds.spl:90). This is the same facade boundary
+`doc/07_guide/ui/rendering/backend_isolation_guide.md` requires: no `rt_*` or
+backend call is made anywhere in this spec.
+
+Hand-reasoned oracle derivation (verified against source, not against a run):
+  - Root node is `builder.label("root", "Hi")` (builder.spl:74), a non-panel
+    leaf, so `compute_layout(root, 0, 0, 200, 100)` returns exactly one rect
+    `WidgetRect(id: "root", x: 0, y: 0, w: 200, h: 100)` — leaf nodes take the
+    full parent rect unmodified (layout.spl:40, panel-only inset at
+    layout.spl:51-60 does not apply to "label" kind).
+  - `_emit_for_rect` for `kind == "label"` (widget_draw_cmds.spl:107-111)
+    emits exactly one `_text_cmd(rect.id, rect.x, rect.y + rect.h / 2,
+    TEXT_FG, lbl, 7)` = `_text_cmd("root", 0, 0 + 100/2, TEXT_FG, "Hi", 7)`
+    = x=0, y=50, color=TEXT_FG=0xFFE0E0E0=4292927712u32, label="Hi", size=7.
+  - `widget_tree_to_draw_cmds` unconditionally appends one more probe cmd
+    (widget_draw_cmds.spl:181-184): the root has no "nav_pattern" prop, so
+    `probe_label = "none"`, giving `_text_cmd("nav_pattern_probe", 0, 0,
+    TEXT_FG, "none", 7)`.
+  - So the real, live-computed cmd list is exactly 2 entries, both kind
+    "text", with the x/y/color/label/size values above — computed here from
+    the source rules, not read back from the evidence under test.
+"""
+
+use std.spec.*
+use std.common.spec.evidence.model.{check_exact, oracle_spec, EvidenceStatus}
+use std.common.spec.evidence.evidence_comparator.{compare_evidence}
+use std.common.spec.evidence.format.scene_profile.{
+    DrawNode, DrawScene, draw_node_default, draw_scene_to_evidence
+}
+use common.ui.widget_draw_cmds.{DrawCmd, widget_tree_to_draw_cmds}
+use common.ui.builder.{label}
+
+fn draw_cmd_to_draw_node(cmd: DrawCmd) -> DrawNode:
+    var node = draw_node_default(cmd.widget_id)
+    node.kind = cmd.kind
+    node.x = cmd.x as i64
+    node.y = cmd.y as i64
+    node.width = cmd.w as i64
+    node.height = cmd.h as i64
+    node.style = "label={cmd.label} size={cmd.size} color={cmd.color}"
+    node
+
+describe "Live 2D scene capture through the real widget/layout facade":
+    it "projects a real widget-tree/layout draw-cmd list into scene evidence and verifies it against a hand-reasoned closed oracle":
+        step("Build a real WidgetNode tree via the real builder.label constructor")
+        val root = label("root", "Hi")
+
+        step("Run the real widget-tree -> layout -> draw-cmd facade at a fixed 200x100 viewport (no GPU, no window)")
+        val cmds = widget_tree_to_draw_cmds(root, 200, 100)
+        expect(cmds.len()).to_equal(2)
+
+        step("Convert the real draw commands into the scene_profile adapter's DrawScene input")
+        var nodes: [DrawNode] = []
+        for cmd in cmds:
+            nodes.push(draw_cmd_to_draw_node(cmd))
+        val scene = DrawScene(scene_id: "live-widget-scene", nodes: nodes)
+
+        step("Project the live scene to canonical evidence")
+        val evidence = draw_scene_to_evidence(scene, "live/widget_scene/1")
+        expect(evidence.parse_ok).to_equal(true)
+
+        step("Compare against a closed oracle whose values were hand-derived from the layout/draw-cmd source rules")
+        val spec = oracle_spec("live/widget_scene/1", [
+            check_exact(
+                "draw.root",
+                "kind=text parent= z=0 x=0 y=50 w=0 h=0 clip=[0,0,0,0] style=label=Hi size=7 color=4292927712 hit_testable=false"
+            ),
+            check_exact(
+                "draw.nav_pattern_probe",
+                "kind=text parent= z=0 x=0 y=0 w=0 h=0 clip=[0,0,0,0] style=label=none size=7 color=4292927712 hit_testable=false"
+            )
+        ])
+        val result = compare_evidence(evidence, spec)
+        expect(result.status).to_equal(EvidenceStatus.passed)
