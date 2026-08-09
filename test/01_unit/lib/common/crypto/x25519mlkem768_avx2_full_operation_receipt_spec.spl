@@ -9,7 +9,9 @@ use lib.common.crypto.x25519_mlkem768.contract.{
     X25519_MLKEM768_IMPLEMENTATION_VERSION,
     X25519_MLKEM768_PROFILE_VERSION}
 use lib.common.crypto.x25519_mlkem768.evidence_contract.{
-    X25519MlKem768EvidenceBackend, X25519MlKem768EvidenceStatus}
+    X25519MlKem768EvidenceBackend, X25519MlKem768EvidenceStatus,
+    X25519MlKem768EvidenceMode, X25519MlKem768EvidenceScope,
+    X25519MlKem768RunReceipt}
 use lib.common.crypto.x25519_mlkem768.performance_attestation.{
     X25519MlKem768PerformanceAttestation,
     X25519_MLKEM768_PERFORMANCE_ATTESTATION_SCHEMA,
@@ -19,7 +21,17 @@ use lib.common.crypto.x25519_mlkem768.avx2_full_operation_receipt.{
     x25519_mlkem768_compose_avx2_full_operation_receipt}
 use lib.common.crypto.x25519_mlkem768.simd_full_operation_receipt.{
     X25519MlKem768SimdReceiptBinding,
-    x25519_mlkem768_compose_simd_full_operation_receipt}
+    X25519MlKem768SimdPublicObservation,
+    x25519_mlkem768_compose_simd_full_operation_receipt,
+    x25519_mlkem768_compose_simd_observed_full_operation_receipt}
+use lib.common.crypto.x25519_mlkem768.pinned_public_receipt.{
+    X25519MlKem768PinnedSet, X25519MlKem768PinnedSetReceipt,
+    X25519_MLKEM768_PINNED_MLKEM_EK_SHA256,
+    X25519_MLKEM768_PINNED_MLKEM_CT_SHA256,
+    X25519_MLKEM768_PINNED_CLIENT_X25519_SHA256,
+    X25519_MLKEM768_PINNED_SERVER_X25519_SHA256,
+    X25519_MLKEM768_PINNED_CLIENT_SHARE_SHA256,
+    X25519_MLKEM768_PINNED_SERVER_SHARE_SHA256}
 
 val _AVX2_SOURCE = "a" * 64
 val _AVX2_BINARY = "b" * 64
@@ -232,6 +244,61 @@ fn _generic_performance(backend: X25519MlKem768EvidenceBackend) -> X25519MlKem76
     performance.session_id = "generic-simd-test"
     performance
 
+fn _observed_set_a() -> X25519MlKem768PinnedSetReceipt:
+    X25519MlKem768PinnedSetReceipt(set_id: X25519MlKem768PinnedSet.MlKem,
+        first_output_label: "mlkem768-encapsulation-key", second_output_label: "mlkem768-ciphertext",
+        first_output_bytes: 1184, second_output_bytes: 1088, shared_secret_bytes: 32,
+        recovered_secret_bytes: 32, first_output_sha256: X25519_MLKEM768_PINNED_MLKEM_EK_SHA256,
+        second_output_sha256: X25519_MLKEM768_PINNED_MLKEM_CT_SHA256)
+
+fn _observed_set_b() -> X25519MlKem768PinnedSetReceipt:
+    X25519MlKem768PinnedSetReceipt(set_id: X25519MlKem768PinnedSet.X25519,
+        first_output_label: "x25519-client-public", second_output_label: "x25519-server-public",
+        first_output_bytes: 32, second_output_bytes: 32, shared_secret_bytes: 32,
+        recovered_secret_bytes: 32, first_output_sha256: X25519_MLKEM768_PINNED_CLIENT_X25519_SHA256,
+        second_output_sha256: X25519_MLKEM768_PINNED_SERVER_X25519_SHA256)
+
+fn _observed_set_c() -> X25519MlKem768PinnedSetReceipt:
+    X25519MlKem768PinnedSetReceipt(set_id: X25519MlKem768PinnedSet.Hybrid,
+        first_output_label: "x25519mlkem768-client-share", second_output_label: "x25519mlkem768-server-share",
+        first_output_bytes: 1216, second_output_bytes: 1120, shared_secret_bytes: 64,
+        recovered_secret_bytes: 64, first_output_sha256: X25519_MLKEM768_PINNED_CLIENT_SHARE_SHA256,
+        second_output_sha256: X25519_MLKEM768_PINNED_SERVER_SHARE_SHA256)
+
+fn _observation(backend: X25519MlKem768EvidenceBackend,
+        keygen: text, encapsulate: text, decapsulate: text,
+        rvv_vlen_bits: i64) -> X25519MlKem768SimdPublicObservation:
+    val binding = _simd_binding(backend, keygen, encapsulate, decapsulate)
+    var name = "rvv"
+    if backend == X25519MlKem768EvidenceBackend.Avx2:
+        name = "avx2"
+    elif backend == X25519MlKem768EvidenceBackend.Neon:
+        name = "neon"
+    X25519MlKem768SimdPublicObservation(
+        raw_receipt: X25519MlKem768RunReceipt(schema: "x25519mlkem768-evidence-v1",
+            status: X25519MlKem768EvidenceStatus.Pass, reason: "raw-native-" + name,
+            scope: X25519MlKem768EvidenceScope.FullOperation, requested_backend: backend,
+            selected_backend: Some(backend), mode: X25519MlKem768EvidenceMode.Native,
+            emulated: false, promotion_eligible: false,
+            implementation_version: X25519_MLKEM768_IMPLEMENTATION_VERSION,
+            profile_version: X25519_MLKEM768_PROFILE_VERSION, fixture_id: binding.fixture_id,
+            fixture_manifest_sha256: binding.fixture_manifest_sha256,
+            fixture_source_sha256: binding.fixture_source_sha256,
+            pinned_workload_sha256: binding.pinned_workload_sha256,
+            runner_source_sha256: binding.runner_source_sha256, batch_size: 1,
+            client_share_bytes: 1216, server_share_bytes: 1120, shared_secret_bytes: 64,
+            keygen_output_digest: keygen, encapsulate_output_digest: encapsulate,
+            decapsulate_output_digest: decapsulate, scalar_roundtrip_match: true,
+            fallback_used: false, absolute_oracle_match: true, simd_chunk_hits: 6,
+            observed_rvv_vlen_bits: rvv_vlen_bits, kernel_invocations: 0,
+            compiled: false, submitted: false, fence_completed: false, device_readback: false,
+            artifact_sha256: binding.stage4_binary_sha256,
+            device_identity: "cpu:avx2-native-device"),
+        backend_configuration_sha256: _AVX2_CONFIGURATION,
+        set_a: _observed_set_a(), set_b: _observed_set_b(), set_c: _observed_set_c(),
+        client_share_sha256: X25519_MLKEM768_PINNED_CLIENT_SHARE_SHA256,
+        server_share_sha256: X25519_MLKEM768_PINNED_SERVER_SHARE_SHA256)
+
 describe "X25519MLKEM768 native AVX2 full-operation receipt":
     it "emits a promotable receipt only with a matching typed performance attestation":
         val (key_pair, encapsulation, decapsulation) = _roundtrip()
@@ -354,3 +421,40 @@ describe "X25519MLKEM768 native AVX2 full-operation receipt":
         expect(x25519_mlkem768_compose_simd_full_operation_receipt(
             wrong_arch, key_pair, encapsulation, decapsulation,
             Some(_generic_performance(X25519MlKem768EvidenceBackend.Neon))).is_err()).to_be(true)
+
+    it "promotes only a public native SIMD observation with admitted performance":
+        val keygen = "4" * 64
+        val encapsulate = "5" * 64
+        val observation = _observation(X25519MlKem768EvidenceBackend.Avx2,
+            keygen, encapsulate, encapsulate, 0)
+        val result = x25519_mlkem768_compose_simd_observed_full_operation_receipt(
+            _simd_binding(X25519MlKem768EvidenceBackend.Avx2,
+                keygen, encapsulate, encapsulate), observation,
+            Some(_generic_performance(X25519MlKem768EvidenceBackend.Avx2)))
+        expect(result.is_ok()).to_be(true)
+        val receipt = result.unwrap()
+        expect(receipt.promotion_eligible).to_be(true)
+        expect(receipt.keygen_output_digest).to_equal(sha256_text(keygen))
+        expect(receipt.encapsulate_output_digest).to_equal(sha256_text(encapsulate))
+
+    it "rejects a raw SIMD observation that falsely claims promotion":
+        val keygen = "4" * 64
+        val encapsulate = "5" * 64
+        var observation = _observation(X25519MlKem768EvidenceBackend.Avx2,
+            keygen, encapsulate, encapsulate, 0)
+        observation.raw_receipt.promotion_eligible = true
+        expect(x25519_mlkem768_compose_simd_observed_full_operation_receipt(
+            _simd_binding(X25519MlKem768EvidenceBackend.Avx2,
+                keygen, encapsulate, encapsulate), observation,
+            Some(_generic_performance(X25519MlKem768EvidenceBackend.Avx2))).is_err()).to_be(true)
+
+    it "rejects tampered public operation outputs before promotion":
+        val keygen = "4" * 64
+        val encapsulate = "5" * 64
+        var observation = _observation(X25519MlKem768EvidenceBackend.Avx2,
+            keygen, encapsulate, encapsulate, 0)
+        observation.raw_receipt.decapsulate_output_digest = "6" * 64
+        expect(x25519_mlkem768_compose_simd_observed_full_operation_receipt(
+            _simd_binding(X25519MlKem768EvidenceBackend.Avx2,
+                keygen, encapsulate, encapsulate), observation,
+            Some(_generic_performance(X25519MlKem768EvidenceBackend.Avx2))).is_err()).to_be(true)
