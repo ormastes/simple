@@ -12,6 +12,14 @@ use crate::mir::VReg;
 use super::helpers::adapted_call;
 use super::{InstrContext, InstrResult};
 
+fn runtime_integer_cast_requires_decode(from_ty: TypeId, to_ty: TypeId) -> bool {
+    matches!(from_ty, TypeId::ANY | TypeId::STRING)
+        && matches!(
+            to_ty,
+            TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
+        )
+}
+
 /// Compile Copy instruction: copies a value from one register to another
 pub fn compile_copy<M: Module>(
     ctx: &mut InstrContext<'_, M>,
@@ -45,7 +53,7 @@ pub fn compile_cast<M: Module>(
         eprintln!("[cast-ty] from={:?} to={:?}", from_ty, to_ty);
     }
 
-    if from_ty == TypeId::ANY {
+    if runtime_integer_cast_requires_decode(from_ty, to_ty) {
         match to_ty {
             TypeId::I8
             | TypeId::I16
@@ -104,62 +112,7 @@ pub fn compile_cast<M: Module>(
     let to_signed = matches!(to_ty, TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64);
     let from_signed = matches!(from_ty, TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64);
 
-    let val = if from_ty == TypeId::STRING && to_int_width.is_some() {
-        // `int(text_expr)` (and any other integer-cast of a `text` value) used
-        // to load the first byte of the string data and use its char code as
-        // the result (e.g. int("42") == 52, the ASCII code of '4') instead of
-        // parsing the decimal digits. Task #100 — Rust-side sibling of task
-        // #94's `cranelift_codegen_adapter.spl` fix (`cl_translate_cast`):
-        // route through a runtime parser instead.
-        //
-        // Task #118 correction: this used to call `rt_string_to_int`, which
-        // was believed (per stale comments here and in
-        // `cranelift_codegen_adapter.spl`) to be strtoll-based/leading-prefix
-        // lenient like its C (`runtime_native.c`) and self-hosted
-        // (`simple_core/core_string.spl`) namesakes. It is NOT: the Rust-native
-        // `simple-runtime` crate's `rt_string_to_int` (runtime/src/value/collections.rs)
-        // does a *strict whole-string* `str::parse::<i64>()` and returns 0 on
-        // any partial match, so `int("4.2")` silently produced 0 instead of 4.
-        // `rt_string_to_int` is left strict on purpose — it also backs
-        // `.to_int()`/`.parse_int()`/`to_i64()` method calls (see
-        // closures_structs.rs / calls.rs), which reject partial matches.
-        // `int(text_expr)` now routes through the sibling
-        // `rt_string_to_int_lenient` (added for task #118), which does the
-        // canonical leading-digit-run parse ("4.2" -> 4, "abc"/"" -> 0),
-        // matching eval_builtins.spl's `eval_int_parse_lenient` (flat-AST
-        // interpreter) and interpreter_call/builtins.rs's `parse_int_lenient`
-        // (seed tree-walk interpreter). `src_val` here is already the boxed
-        // string RuntimeValue, so no rt_string_new re-boxing is needed.
-        // Not every JIT compilation pre-populates `rt_string_to_int_lenient` in
-        // `ctx.runtime_funcs` (unlike `rt_string_len`/`rt_string_data` used
-        // below) — fall back to declaring it fresh, mirroring the existing
-        // `.to_int()` method-call lowering in closures_structs.rs.
-        let string_to_int_id = if let Some(&fid) = ctx.runtime_funcs.get("rt_string_to_int_lenient") {
-            fid
-        } else if let Some(&fid) = ctx.func_ids.get("rt_string_to_int_lenient") {
-            fid
-        } else {
-            let mut sig = cranelift_codegen::ir::Signature::new(crate::codegen::shared::platform_call_conv());
-            sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-            sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-            let fid = ctx
-                .module
-                .declare_function("rt_string_to_int_lenient", cranelift_module::Linkage::Import, &sig)
-                .map_err(|e| e.to_string())?;
-            ctx.func_ids.insert("rt_string_to_int_lenient".to_string(), fid);
-            fid
-        };
-        let string_to_int_ref = ctx.module.declare_func_in_func(string_to_int_id, builder.func);
-        let parse_call = adapted_call(builder, string_to_int_ref, &[src_val]);
-        let parsed_i64 = builder.inst_results(parse_call)[0];
-
-        match to_int_width {
-            Some(types::I8) => builder.ins().ireduce(types::I8, parsed_i64),
-            Some(types::I16) => builder.ins().ireduce(types::I16, parsed_i64),
-            Some(types::I32) => builder.ins().ireduce(types::I32, parsed_i64),
-            _ => parsed_i64,
-        }
-    } else if from_ty == TypeId::STRING && is_to_float {
+    let val = if from_ty == TypeId::STRING && is_to_float {
         let string_len_id = ctx.runtime_funcs["rt_string_len"];
         let string_len_ref = ctx.module.declare_func_in_func(string_len_id, builder.func);
         let len_call = adapted_call(builder, string_len_ref, &[src_val]);
@@ -340,10 +293,9 @@ pub fn compile_unary_op<M: Module>(
                     .ins()
                     .fcmp(cranelift_codegen::ir::condcodes::FloatCC::Equal, val, zero_f)
             } else {
-                let is_zero =
-                    builder
-                        .ins()
-                        .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, val, 0);
+                let is_zero = builder
+                    .ins()
+                    .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, val, 0);
                 // A tagged operand can also be nil, which is falsy. Nil is the
                 // tagged sentinel 3 (TAG_SPECIAL=0b011 | SPECIAL_NIL=0), the same
                 // constant `MirLiteral::Nil` lowers to in instr/pattern.rs.
@@ -357,11 +309,9 @@ pub fn compile_unary_op<M: Module>(
                 // indistinguishable from the nil sentinel at this level, so
                 // widening it unconditionally would break `not 3` the other way.
                 if operand_may_be_nil(ctx.vreg_types.get(&operand).copied()) {
-                    let is_nil = builder.ins().icmp_imm(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        val,
-                        3,
-                    );
+                    let is_nil = builder
+                        .ins()
+                        .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, val, 3);
                     builder.ins().bor(is_zero, is_nil)
                 } else {
                     is_zero
@@ -395,10 +345,20 @@ pub fn compile_spread<M: Module>(
 
 #[cfg(test)]
 mod tests {
+    use super::runtime_integer_cast_requires_decode;
     use crate::codegen::Codegen;
     use crate::hir::TypeId;
     use crate::mir::{BlockId, MirFunction, MirInst, MirModule, Terminator};
     use simple_parser::ast::Visibility;
+
+    #[test]
+    fn tagged_any_and_text_integer_casts_require_runtime_decode() {
+        assert!(runtime_integer_cast_requires_decode(TypeId::ANY, TypeId::I64));
+        assert!(runtime_integer_cast_requires_decode(TypeId::STRING, TypeId::I64));
+        assert!(runtime_integer_cast_requires_decode(TypeId::STRING, TypeId::U8));
+        assert!(!runtime_integer_cast_requires_decode(TypeId::I64, TypeId::I64));
+        assert!(!runtime_integer_cast_requires_decode(TypeId::STRING, TypeId::F64));
+    }
 
     /// Helper: build a single-function MIR module and AOT-compile it.
     /// The `build` closure pushes instructions into block 0 and returns the

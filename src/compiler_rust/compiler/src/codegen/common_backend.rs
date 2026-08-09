@@ -169,7 +169,7 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                         names.insert("rt_value_as_int".to_string());
                     }
                     MirInst::Cast { from_ty, to_ty, .. } => {
-                        if *from_ty == TypeId::ANY
+                        if matches!(*from_ty, TypeId::ANY | TypeId::STRING)
                             && matches!(
                                 *to_ty,
                                 TypeId::I8
@@ -478,10 +478,7 @@ pub(crate) fn module_init_symbol(module_prefix: Option<&str>) -> String {
 }
 
 fn make_module_init_dynamic_name(module_name: &str) -> String {
-    let normalized = module_name
-        .replace('.', "_")
-        .replace('/', "_")
-        .replace('-', "_");
+    let normalized = module_name.replace('.', "_").replace('/', "_").replace('-', "_");
     if normalized.is_empty() {
         "__module_init_dynamic".to_string()
     } else {
@@ -493,9 +490,7 @@ fn find_dynamic_init_func_id(
     func_ids: &BTreeMap<String, cranelift_module::FuncId>,
     module_name: &Option<String>,
 ) -> Option<cranelift_module::FuncId> {
-    let names = module_name
-        .as_ref()
-        .map(|name| make_module_init_dynamic_name(name));
+    let names = module_name.as_ref().map(|name| make_module_init_dynamic_name(name));
     names.and_then(|name| func_ids.get(&name).copied()).or_else(|| {
         // Compatibility with older plain-name emission.
         if let Some(id) = func_ids.get("__module_init_dynamic").copied() {
@@ -504,15 +499,13 @@ fn find_dynamic_init_func_id(
 
         // Fallback search: when module naming is unavailable, pick the first
         // matching dynamic init function for this build step.
-        func_ids
-            .iter()
-            .find_map(|(name, id)| {
-                if name.starts_with("__module_init_") && name.ends_with("_dynamic") {
-                    Some(*id)
-                } else {
-                    None
-                }
-            })
+        func_ids.iter().find_map(|(name, id)| {
+            if name.starts_with("__module_init_") && name.ends_with("_dynamic") {
+                Some(*id)
+            } else {
+                None
+            }
+        })
     })
 }
 
@@ -2768,10 +2761,7 @@ pub fn module_prefix_from_path(file_path: &std::path::Path, source_root: &std::p
 
 /// Compute the dotted module name used by Pure Simple for runtime type identity.
 /// Unlike symbol mangling, numbered layer prefixes are significant here.
-pub fn enum_runtime_module_name_from_path(
-    file_path: &std::path::Path,
-    source_root: &std::path::Path,
-) -> String {
+pub fn enum_runtime_module_name_from_path(file_path: &std::path::Path, source_root: &std::path::Path) -> String {
     let stripped = file_path.strip_prefix(source_root);
     let root_matched = stripped.is_ok();
     let relative = stripped.unwrap_or(file_path);
@@ -3087,7 +3077,7 @@ mod tests {
         backend.compile_all_functions(&first).expect("first compile");
         assert!(!backend.runtime_funcs.contains_key("rt_value_as_int"));
 
-        let mut second_main = MirFunction::new("later_any_cast".to_string(), TypeId::I64, Visibility::Public);
+        let mut second_main = MirFunction::new("later_text_cast".to_string(), TypeId::I64, Visibility::Public);
         let source = second_main.new_vreg();
         let casted = second_main.new_vreg();
         let block = second_main.block_mut(BlockId(0)).unwrap();
@@ -3095,7 +3085,7 @@ mod tests {
         block.instructions.push(MirInst::Cast {
             dest: casted,
             source,
-            from_ty: TypeId::ANY,
+            from_ty: TypeId::STRING,
             to_ty: TypeId::I64,
         });
         block.terminator = Terminator::Return(Some(casted));
