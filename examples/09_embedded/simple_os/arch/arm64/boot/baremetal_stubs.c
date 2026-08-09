@@ -671,6 +671,23 @@ RuntimeValue arm64_debug_style_word(RuntimeValue style, int64_t index)
     serial_putchar('\n');
     return style;
 }
+RuntimeValue arm64_debug_layout_words(RuntimeValue layout, int64_t stage)
+{
+    serial_puts("[layout-words] stage=");
+    serial_put_dec(stage);
+    serial_puts(" layout=");
+    serial_put_hex((uint64_t)layout);
+    serial_puts(" bx=");
+    if (IS_HEAP(layout) && DECODE_PTR(layout)) {
+        uint64_t bx = *(uint64_t *)DECODE_PTR(layout);
+        serial_put_hex(bx);
+    } else {
+        serial_puts("invalid");
+    }
+    serial_putchar('\r');
+    serial_putchar('\n');
+    return layout;
+}
 void rt_print_bool(RuntimeValue val) { if (DECODE_INT(val)) serial_puts("true"); else serial_puts("false"); }
 void rt_println_bool(RuntimeValue val) { rt_print_bool(val); serial_putchar('\r'); serial_putchar('\n'); }
 
