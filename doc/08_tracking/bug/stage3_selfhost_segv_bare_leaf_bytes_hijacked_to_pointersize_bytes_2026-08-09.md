@@ -177,6 +177,83 @@ receiver here. The receiver is a valid `text` that the callee never reads.
   **still UNVERIFIED.** Its fault site has still never executed; this bug is
   blocker 15 in front of it.
 
+## Appendix — the two follow-ups this doc left uninvestigated (2026-08-09)
+
+Both were surfaced by the same `SIMPLE_NO_STUB_FALLBACK=1` Stage-3 run.
+**First, what that flag actually does** (`pipeline/native_project/stubs.rs:110-133`):
+with `SIMPLE_STRICT_FREESTANDING_PRECHECK` unset it selects
+`FreestandingUnresolvedMode::DeferToLinker` — which is **also the default mode**
+when the flag is absent. Its only other effect is suppressing the
+"N internal Simple symbol(s) will be stubbed" warning (`stubs.rs:994-1004`) and
+never entering `EmitStubs`. So the flag is a **reporting/no-fabrication** switch,
+not a different link contract. It is not required for Stage 3 and is not what
+Stage 3 normally runs under.
+
+### 1. `max` — same defect class, different (louder) failure mode
+
+`max` is a bare leaf with no owner, exactly like `bytes`. It differs in *where*
+it lands:
+
+- `functions.rs:2424` handles `min`/`max` **as an inline i64 select intrinsic,
+  before the suffix scan — but only when `args.len() == 1`.** So `a.max(b)` is
+  safe and never reaches owner-blind resolution.
+- **Zero-arg** `.max()` receivers exist in-tree (`src/lib/nogc_sync_mut/src/table.spl:100`
+  `fn max() -> Any`, `src/app/llm_caret/claude_full/utils/fileStateCache.spl:68`
+  `fn max() -> i64`) and fall through. There they hit two owner-blind paths:
+  1. `module.get_function(func_name)` at `functions.rs:2712` — a **plain
+     leaf-name lookup**, tried *before* `suffix_match()`. A free function `max`
+     does exist (`src/lib/nogc_sync_mut/runtime_wrappers.spl:50`
+     `fn max(a: i64, b: i64) -> i64`), so a bare `max` leaf can bind to a
+     2-parameter free function called with 1 argument. This is a **third**
+     owner-blind mechanism, distinct from both the builtin-owner gate and the
+     suffix scan, and it runs earliest of the three.
+  2. If that misses, the `functions.rs:2675` suffix scan finds **≥20** `*.max`
+     candidates (`Vec4f.max`, `Score.max`, tensor/SIMD `max`, …), so the
+     ambiguity guard at `:2703` **does** fire and the build reports
+     `ambiguous LLVM method resolution` instead of silently binding.
+
+**Verdict: same root class (leaf name carries no owner type), no new mechanism
+needing its own repair — but it does prove the class has a third entry point
+(`get_function(func_name)`) that a fix confined to the suffix scan would miss.**
+Because the `max` outcome is either the correct intrinsic (1-arg), a loud
+ambiguity error, or a loud arity mismatch — never a silent wrong-callee — its
+severity is well below `bytes`. The upstream typed HIR/MIR repair that supplies
+the receiver's owner type covers it; **no separate fix filed.** The one thing to
+carry into that repair: it must also cover the bare `get_function(func_name)`
+lookup, not only the suffix scan.
+
+### 2. The 84 `rt_cranelift_*` "gaps" — expected, NOT a registration gap
+
+Measured, not a registration omission — every layer already knows the family:
+
+| layer | state |
+|---|---|
+| `.spl` externs (`src/lib/nogc_sync_mut/{ffi,sffi}/codegen.spl`) | 75 unique `rt_cranelift_*` referenced |
+| Rust definitions (`codegen/cranelift_sffi.rs`) | 80 unique defined — **superset; 0 declared-but-undefined** |
+| `common/src/runtime_symbols.rs:229` | already classifies `name.starts_with("rt_cranelift_")` as a runtime symbol |
+| `pipeline/native_project/tools.rs:1797` | `build_compiler_backfill_archive` treats the `rt_cranelift_*` set as its **export contract**, enforced exactly-once |
+
+The gaps are a **bundle-lane consequence, by design**:
+`src/compiler/70.backend/backend/llvm_native_link.spl:1042`
+`native_all_allowed_for_runtime_bundle` returns **false** for `core-c-bootstrap`
+(and `simple-core`, `runtime`, `core`, `core-c`), so the Rust `native_all`
+archive — the thing that carries `rt_cranelift_*` — is deliberately not linked
+into those narrow lanes. The refs are dead code there and `DeferToLinker` +
+section GC discards them. That is the documented intent of that function
+("narrow core runtime lanes must never acquire the Rust hosted archive").
+
+**Verdict: not a defect, nothing to register, no bug filed.** This is *not* the
+same shape as the `RUNTIME_SYMBOL_NAMES`-missing-`native_tcp_*` or
+`counterpart_abi_runtime.c` omissions: there the provider existed and the list
+forgot it; here the provider is intentionally absent from the bundle.
+
+### Severity for the normal (non-strict) path
+
+Neither finding blocks it. `SIMPLE_NO_STUB_FALLBACK=1` selects the same
+`DeferToLinker` mode as the default, so both were visible only as *reporting*,
+not as a changed link contract. The Stage-3 blocker remains the silent
+`bytes` → `PointerSize.bytes` wrong-callee bind documented above.
+
 ## Artifacts
 
 - Pinned tree: `/home/ormastes/dev/s3crash_8ddd09f` (HEAD `8ddd09f6d92`, clean)
