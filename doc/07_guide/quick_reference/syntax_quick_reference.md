@@ -1370,11 +1370,12 @@ class Logger with Printable, Clickable:
 See [No-Inheritance Ergonomics](../research/no_inheritance_ergonomics_2026-02-16.md) for full
 forwarding syntax and design rationale.
 
-### Trait-header `with` groups — **PARSES BUT IS INERT, DO NOT USE**
+### Trait-header `with` groups — **works; the `.from()` acquisition does not**
 
-> **This sugar cannot be used today. It is documented here only so you
-> recognise it in `src/lib/common/debug/` comments and do not mistake it for an
-> available feature.**
+> **CORRECTED 2026-08-09.** An earlier revision of this section said the sugar
+> "parses but is inert, do not use". **That was wrong** and is retracted. The
+> group trait itself works natively. Only the generated `G__from()` acquisition
+> helper is unreachable. See "What actually works" below.
 
 The `with` clause already used on `struct X with Mixin:` is also accepted in a
 **trait** header, expressing a *capability group* — one trait that is the
@@ -1385,20 +1386,32 @@ trait DebugProfiler with DebugTarget, ProfileTarget:
     pass                     # pure group: zero new methods
 ```
 
-**Why it does nothing:**
+**What actually works.** The parser records `with` members in the **same
+`TraitDef.super_traits` field** as `trait G: A + B`, so `with A, B` is exactly
+sugar for that — and the trait solver resolves it **natively, with no desugar
+pass involved at all**. Verified by execution: a class implementing both members
+used where the group is expected computed correctly, and a class missing one
+member failed to compile with `method 'b_id' not found`. **The desugar tool is
+irrelevant to the group trait** — it is a *separate* trait model
+(traits → struct-of-fn-fields), not a missing compiler pass, which is why
+importing it would both invert layering and conflict with the compiler's own
+trait handling.
 
-1. `desugar_traits` (`src/app/desugar/trait_desugar.spl`) is a text-level,
-   pre-parse transform whose only caller is `src/app/desugar/mod.spl:210`,
-   inside the standalone `app.desugar` tool. **No compile path runs it** — the
-   compiler deliberately does not import `app.desugar` (layering note at
-   `src/compiler/20.hir/hir_forward_lowering.spl:33-35`).
-2. The **deployed seed predates the parser change**, so the binary you run today
-   would not accept the syntax even if the desugar were wired.
+**The one real limitation — `G__from()`.** The generated acquisition helper is
+not reachable from a compile path. Acquire capabilities explicitly instead (a
+single accessor returning the group — never by pairing two accessors; see the
+value-type rules below).
 
-Until both are fixed, write the group **longhand**: declare a trait listing
-every method of both members. That is exactly what the sugar would produce, so
-nothing breaks when it becomes reachable. Landed example:
-`src/lib/common/debug/debug_profiler.spl`.
+**You must be running a binary built after 2026-08-09 11:43 UTC.** The seed
+deployed at `bin/simple` predates the parser change and rejects the syntax with
+`Unexpected token: expected Colon, found With`. That error means *your binary is
+stale*, not that the grammar is missing — an A/B against a freshly built seed
+confirmed it. Rebuild through the normal bootstrap lane; do not hand-copy a
+cargo artifact over `bin/release/**`.
+
+Writing the group longhand — a trait listing every method of both members —
+remains valid and is what the landed
+`src/lib/common/debug/debug_profiler.spl` does.
 
 Two rules that go with groups and are *not* optional — classes are value types,
 so a mis-shaped group silently does nothing:
