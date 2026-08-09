@@ -25,6 +25,17 @@
  * so the gate here is widened to "any non-Windows target" rather than
  * reproducing the Linux-only gate of the epoll file it was extracted from --
  * this is strictly more capable, never less, than the code it replaces.
+ *
+ * Windows has no fcntl at all; PROVED blocking a full Windows Rust-seed link
+ * 2026-08-09 ("unresolved external symbol rt_socket_set_nonblocking") -- the
+ * Rust side (interpreter_extern/socket_nonblock.rs) declares and registers
+ * this `extern "C"` symbol unconditionally, with no matching
+ * `#[cfg(not(windows))]` guard, so a Windows build needs a real definition,
+ * not just a "this platform doesn't have it" no-op. Winsock's equivalent is
+ * `ioctlsocket(fd, FIONBIO, &mode)` -- `mode` nonzero enables non-blocking
+ * mode, matching this function's `enabled` polarity exactly, so no inversion
+ * is needed on this branch the way there sometimes is between POSIX/Windows
+ * socket APIs.
  */
 
 #if !defined(_WIN32)
@@ -42,6 +53,17 @@ bool rt_socket_set_nonblocking(int64_t fd, bool enabled) {
         flags &= ~O_NONBLOCK;
     }
     return (fcntl((int)fd, F_SETFL, flags) == 0);
+}
+
+#else /* defined(_WIN32) */
+
+#include <stdbool.h>
+#include <stdint.h>
+#include <winsock2.h>
+
+bool rt_socket_set_nonblocking(int64_t fd, bool enabled) {
+    u_long mode = enabled ? 1 : 0;
+    return ioctlsocket((SOCKET)fd, FIONBIO, &mode) == 0;
 }
 
 #endif /* !defined(_WIN32) */
