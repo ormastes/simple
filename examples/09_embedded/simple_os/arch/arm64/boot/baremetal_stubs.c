@@ -2839,12 +2839,14 @@ RuntimeValue rt_gui_blit_row4(RuntimeValue pixels_value, RuntimeValue src_offset
     RuntimeArray *pixels = arm64_pixel_array(pixels_value);
     if (!pixels || !g_fb_addr || !g_fb_w) return 0;
     int64_t src_offset = (int64_t)src_offset_value;
-    int64_t requested = (int64_t)count_value;
-    if (src_offset < 0 || requested <= 0 || (uint64_t)src_offset >= pixels->len) return 0;
+    uint32_t requested = (uint32_t)((uint64_t)count_value >> 32);
+    uint32_t opacity_milli = (uint32_t)((uint64_t)count_value & 0xffffffffu);
+    if (src_offset < 0 || requested == 0 || opacity_milli == 0 || opacity_milli > 1000u ||
+        (uint64_t)src_offset >= pixels->len) return 0;
     uint32_t x = (uint32_t)((uint64_t)xy >> 32);
     uint32_t y = (uint32_t)((uint64_t)xy & 0xffffffffu);
     if (x >= g_fb_w || y >= 768u) return 0;
-    uint64_t count = (uint64_t)requested;
+    uint64_t count = requested;
     if (count > pixels->len - (uint64_t)src_offset)
         count = pixels->len - (uint64_t)src_offset;
     if (count > g_fb_w - x) count = g_fb_w - x;
@@ -2859,6 +2861,9 @@ RuntimeValue rt_gui_blit_row4(RuntimeValue pixels_value, RuntimeValue src_offset
         int opaque = 1;
         for (uint32_t lane = 0; lane < 4u; lane++) {
             packed[lane] = arm64_unbox_pixel(pixels->items[(uint64_t)src_offset + i + lane]);
+            uint32_t source_alpha = packed[lane] >> 24;
+            uint32_t scaled_alpha = source_alpha * opacity_milli / 1000u;
+            packed[lane] = (packed[lane] & 0x00ffffffu) | (scaled_alpha << 24);
             if ((packed[lane] >> 24) != 255u) opaque = 0;
         }
         if (opaque) {
@@ -2876,6 +2881,9 @@ RuntimeValue rt_gui_blit_row4(RuntimeValue pixels_value, RuntimeValue src_offset
     }
     while (i < count) {
         uint32_t src = arm64_unbox_pixel(pixels->items[(uint64_t)src_offset + i]);
+        uint32_t source_alpha = src >> 24;
+        uint32_t scaled_alpha = source_alpha * opacity_milli / 1000u;
+        src = (src & 0x00ffffffu) | (scaled_alpha << 24);
         uint32_t alpha = src >> 24;
         if (alpha == 255u) dst[i] = src;
         else if (alpha != 0u) dst[i] = arm64_blend_pixel(src, dst[i]);
