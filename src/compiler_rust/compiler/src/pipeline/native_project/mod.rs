@@ -223,6 +223,33 @@ pub(crate) fn effective_target() -> simple_common::target::Target {
         .unwrap_or_else(simple_common::target::Target::host)
 }
 
+fn effective_cfg_target() -> crate::pipeline::cfg_strip::CfgTarget {
+    use simple_common::target::TargetOS;
+
+    let target = effective_target();
+    let os = std::env::var("SIMPLE_TARGET_OS")
+        .ok()
+        .and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
+            "linux" => Some(TargetOS::Linux),
+            "windows" | "win" => Some(TargetOS::Windows),
+            "macos" | "darwin" => Some(TargetOS::MacOS),
+            "freebsd" => Some(TargetOS::FreeBSD),
+            "simpleos" | "simple-os" | "simple_os" => Some(TargetOS::SimpleOS),
+            "none" | "bare" => Some(TargetOS::None),
+            _ => None,
+        })
+        .unwrap_or(target.os);
+    crate::pipeline::cfg_strip::CfgTarget { arch: target.arch, os }
+}
+
+pub(crate) fn preprocess_source_for_effective_target(source: &str) -> String {
+    crate::pipeline::cfg_strip::preprocess_for_target(source, effective_cfg_target())
+}
+
+pub(crate) fn strip_ast_for_effective_target(module: &mut simple_parser::ast::Module) {
+    crate::pipeline::cfg_strip::strip_inactive_cfg_target_fns(module, effective_cfg_target());
+}
+
 /// Grouped duplicate struct definitions: bare type name → list of field-lists.
 type DuplicateStructDefs = std::sync::Arc<std::collections::HashMap<String, Vec<Vec<(String, simple_parser::Type)>>>>;
 /// Enum definitions: enum name → list of (variant name, optional payload types).
@@ -1198,13 +1225,12 @@ fn security_registry_sdn_from_sources(
         if !source_may_declare_security(source) {
             continue;
         }
-        let filtered_source =
-            crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(source, effective_target().arch);
+        let filtered_source = preprocess_source_for_effective_target(source);
         let mut parser = Parser::new(&filtered_source);
         let mut ast = parser
             .parse()
             .map_err(|err| format!("parse security registry source {}: {}", path.display(), err))?;
-        crate::pipeline::cfg_strip::strip_inactive_cfg_arch_fns(&mut ast, effective_target().arch);
+        strip_ast_for_effective_target(&mut ast);
         let module = crate::hir::lower_with_context_lenient_and_project_hint(&ast, path, project_hint)
             .map_err(|err| format!("lower security registry source {}: {}", path.display(), err))?;
         let inventory = build_security_inventory(&module);

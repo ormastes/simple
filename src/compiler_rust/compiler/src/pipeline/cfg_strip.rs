@@ -32,8 +32,86 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
-use simple_common::target::TargetArch;
+use simple_common::target::{TargetArch, TargetOS};
 use simple_parser::ast::{Attribute, Node};
+
+/// Semantic target used by native-project conditional compilation.  The OS
+/// is deliberately separate from the LLVM emission triple: SimpleOS lowers to
+/// an `unknown-none-elf` triple, but its source-level cfg value is `simpleos`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CfgTarget {
+    pub arch: TargetArch,
+    pub os: TargetOS,
+}
+
+fn cfg_os_name_matches(name: &str, os: TargetOS) -> bool {
+    name.trim().to_ascii_lowercase().replace(['-', '_'], "") == os.name().replace(['-', '_'], "")
+}
+
+fn when_os_verdict(condition: &str, target: CfgTarget) -> Option<bool> {
+    let condition = condition.trim();
+    let (condition, negate) = condition
+        .strip_prefix("not(")
+        .and_then(|inner| inner.strip_suffix(')'))
+        .map_or((condition, false), |inner| (inner.trim(), true));
+    let (key, value) = condition.split_once('=')?;
+    if key.trim() != "os" {
+        return None;
+    }
+    let value = value.trim().trim_matches(|ch| ch == '\'' || ch == '"');
+    Some(cfg_os_name_matches(value, target.os) != negate)
+}
+
+/// Select source-level `@when(...):` / `@else:` / `@end` blocks before the
+/// Rust parser desugars them by concatenating both branches.  Blank lines keep
+/// diagnostics aligned with the original source.
+pub(crate) fn strip_inactive_when_blocks(source: &str, target: CfgTarget) -> String {
+    #[derive(Clone, Copy)]
+    struct Frame {
+        parent_active: bool,
+        condition_active: bool,
+    }
+
+    let mut frames: Vec<Frame> = Vec::new();
+    let mut active = true;
+    let mut output = Vec::with_capacity(source.lines().count());
+    for line in source.split('\n') {
+        let trimmed = line.trim();
+        if let Some(condition) = trimmed.strip_prefix("@when(").and_then(|rest| rest.strip_suffix("):")) {
+            let condition_active = when_os_verdict(condition, target).unwrap_or(true);
+            frames.push(Frame {
+                parent_active: active,
+                condition_active,
+            });
+            active = active && condition_active;
+            output.push("");
+            continue;
+        }
+        if trimmed == "@else:" {
+            if let Some(frame) = frames.last_mut() {
+                active = frame.parent_active && !frame.condition_active;
+            }
+            output.push("");
+            continue;
+        }
+        if trimmed == "@end" {
+            if let Some(frame) = frames.pop() {
+                active = frame.parent_active;
+            }
+            output.push("");
+            continue;
+        }
+        output.push(if active { line } else { "" });
+    }
+    output.join("\n")
+}
+
+/// Target-aware source preprocessing shared by native-project discovery,
+/// import indexing, and code generation.
+pub(crate) fn preprocess_for_target(source: &str, target: CfgTarget) -> String {
+    let selected = strip_inactive_when_blocks(source, target);
+    strip_inactive_cfg_globals_impl(&selected, target.arch, Some(target.os))
+}
 
 /// Resolve a `@cfg(...)` condition name to an architecture, if it names one.
 ///
@@ -64,6 +142,29 @@ fn cfg_line_arch_verdict(line: &str, target_arch: TargetArch) -> Option<bool> {
         .and_then(|inner| inner.strip_suffix(')'))
         .map_or((condition, false), |name| (name.trim(), true));
     cfg_name_to_arch(name).map(|arch| (arch == target_arch) != negate)
+}
+
+fn cfg_line_os_verdict(line: &str, target_os: TargetOS) -> Option<bool> {
+    let condition = line.trim().strip_prefix("@cfg(")?.strip_suffix(')')?.trim();
+    let (condition, negate) = condition
+        .strip_prefix("not(")
+        .and_then(|inner| inner.strip_suffix(')'))
+        .map_or((condition, false), |inner| (inner.trim(), true));
+    let pair = if let Some((key, value)) = condition.split_once('=') {
+        Some((key.trim(), value.trim()))
+    } else {
+        let mut parts = condition.split(',').map(str::trim);
+        match (parts.next(), parts.next(), parts.next()) {
+            (Some(key), Some(value), None) => Some((key, value)),
+            _ => None,
+        }
+    }?;
+    let key = pair.0.trim_matches(|ch| ch == '\'' || ch == '"');
+    if key != "os" {
+        return None;
+    }
+    let value = pair.1.trim_matches(|ch| ch == '\'' || ch == '"');
+    Some(cfg_os_name_matches(value, target_os) != negate)
 }
 
 fn is_top_level_global_decl(line: &str) -> bool {
@@ -195,6 +296,10 @@ fn doc_comment_end(lines: &[&str], start: usize) -> Option<usize> {
 /// so globals must be selected while the source still carries its `@cfg`.
 /// Blank replacement preserves source line numbers for diagnostics.
 pub fn strip_inactive_cfg_arch_globals(source: &str, target_arch: TargetArch) -> String {
+    strip_inactive_cfg_globals_impl(source, target_arch, None)
+}
+
+fn strip_inactive_cfg_globals_impl(source: &str, target_arch: TargetArch, target_os: Option<TargetOS>) -> String {
     let lines: Vec<&str> = source.split('\n').collect();
     let mut filtered = Vec::with_capacity(lines.len());
     let mut index = 0;
@@ -203,11 +308,17 @@ pub fn strip_inactive_cfg_arch_globals(source: &str, target_arch: TargetArch) ->
             let group_start = index;
             let mut declaration = index;
             let mut cfg_lines = Vec::new();
+            let mut has_os_cfg = false;
             while declaration < lines.len() {
                 let line = lines[declaration];
                 let trimmed = line.trim();
                 if line.trim_start() == line && trimmed.starts_with('@') {
-                    if let Some(active) = cfg_line_arch_verdict(line, target_arch) {
+                    let arch_verdict = cfg_line_arch_verdict(line, target_arch);
+                    let os_verdict = target_os.and_then(|os| cfg_line_os_verdict(line, os));
+                    if os_verdict.is_some() {
+                        has_os_cfg = true;
+                    }
+                    if let Some(active) = arch_verdict.or(os_verdict) {
                         cfg_lines.push((declaration, active));
                     }
                     declaration += 1;
@@ -219,7 +330,10 @@ pub fn strip_inactive_cfg_arch_globals(source: &str, target_arch: TargetArch) ->
                     break;
                 }
             }
-            if !cfg_lines.is_empty() && declaration < lines.len() && is_top_level_global_decl(lines[declaration]) {
+            if !cfg_lines.is_empty()
+                && declaration < lines.len()
+                && (is_top_level_global_decl(lines[declaration]) || has_os_cfg)
+            {
                 if cfg_lines.iter().any(|(_, active)| !active) {
                     let end = global_decl_end(&lines, declaration);
                     filtered.extend((group_start..=end).map(|_| ""));
@@ -290,6 +404,54 @@ pub(crate) fn cfg_attr_arch_verdict(attr: &Attribute, target_arch: TargetArch) -
         Expr::Identifier(name) => cfg_name_to_arch(name).map(|arch| arch == target_arch),
         _ => None,
     }
+}
+
+fn cfg_attr_os_verdict(attr: &Attribute, target_os: TargetOS) -> Option<bool> {
+    use simple_parser::ast::Expr;
+
+    if let Some(named) = &attr.named_args {
+        for (key, value) in named {
+            if key == "os" {
+                if let Expr::String(name) = value {
+                    return Some(cfg_os_name_matches(name, target_os));
+                }
+            }
+        }
+    }
+    let args = attr.args.as_ref()?;
+    if args.len() == 2 {
+        let key = match &args[0] {
+            Expr::String(key) | Expr::Identifier(key) => key,
+            _ => return None,
+        };
+        if let Expr::String(value) = &args[1] {
+            return (key == "os").then(|| cfg_os_name_matches(value, target_os));
+        }
+    }
+    None
+}
+
+fn item_inactive_cfg_target(attrs: &[Attribute], target: CfgTarget) -> bool {
+    attrs.iter().any(|attr| {
+        attr.name == "cfg"
+            && (cfg_attr_arch_verdict(attr, target.arch) == Some(false)
+                || cfg_attr_os_verdict(attr, target.os) == Some(false))
+    })
+}
+
+/// Drop inactive architecture and OS function variants for native-project
+/// compilation.  Hosted execution retains the established arch-only API.
+pub(crate) fn strip_inactive_cfg_target_fns(module: &mut simple_parser::ast::Module, target: CfgTarget) {
+    module.items.retain(|item| {
+        if let Node::Function(function) = item {
+            if item_inactive_cfg_target(&function.attributes, target) {
+                note_stripped_fn(&function.name);
+                return false;
+            }
+        }
+        true
+    });
+    warn_duplicate_active_variants(&module.items, target.arch);
 }
 
 /// True if any `@cfg` attribute names an arch that does NOT match `arch`
@@ -411,6 +573,65 @@ pub fn strip_inactive_cfg_arch_fns_for_host(module: &mut simple_parser::ast::Mod
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_target_preprocessor_selects_simpleos_package_branch() {
+        let source =
+            "@when(os = \"simpleos\"):\nval TARGET_ROOT = true\n@else:\nuse hosted.metal\nuse hosted.tls\n@end\n";
+        let simpleos = preprocess_for_target(
+            source,
+            CfgTarget {
+                arch: TargetArch::Aarch64,
+                os: TargetOS::SimpleOS,
+            },
+        );
+        assert_eq!(simpleos.lines().count(), source.lines().count());
+        assert!(simpleos.contains("TARGET_ROOT"));
+        assert!(!simpleos.contains("hosted.metal"));
+        assert!(!simpleos.contains("hosted.tls"));
+
+        let macos = preprocess_for_target(
+            source,
+            CfgTarget {
+                arch: TargetArch::Aarch64,
+                os: TargetOS::MacOS,
+            },
+        );
+        assert!(!macos.contains("TARGET_ROOT"));
+        assert!(macos.contains("hosted.metal"));
+        assert!(macos.contains("hosted.tls"));
+    }
+
+    #[test]
+    fn native_target_preprocessor_filters_both_os_cfg_spellings() {
+        let source = "@cfg(\"os\", \"simpleos\")\nval SIMPLE_VALUE = 1\n@cfg(os = \"macos\")\nval HOST_VALUE = 2\n@cfg(\"os\", \"simpleos\")\nfn simple_fn(): pass\n@cfg(os = \"macos\")\nfn host_fn(): pass\n";
+        let target = CfgTarget {
+            arch: TargetArch::Aarch64,
+            os: TargetOS::SimpleOS,
+        };
+        let filtered = preprocess_for_target(source, target);
+        assert_eq!(filtered.lines().count(), source.lines().count());
+        assert!(filtered.contains("SIMPLE_VALUE"));
+        assert!(!filtered.contains("HOST_VALUE"));
+
+        let mut module = simple_parser::Parser::new(&filtered)
+            .parse()
+            .expect("parse target cfg source");
+        strip_inactive_cfg_target_fns(&mut module, target);
+        let names: Vec<_> = module
+            .items
+            .iter()
+            .filter_map(|item| {
+                if let Node::Function(function) = item {
+                    Some(function.name.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(names.contains(&"simple_fn"));
+        assert!(!names.contains(&"host_fn"));
+    }
 
     #[test]
     fn cfg_globals_select_aarch64_and_riscv64_before_hir_lowering() {

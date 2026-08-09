@@ -268,15 +268,14 @@ pub(crate) fn build_import_map(
         let per_file_root = source_root_for_file(path, source_dirs, fallback_root);
         let prefix = module_prefix_from_path(path, &per_file_root);
         let runtime_module_name = enum_runtime_module_name_from_path(path, fallback_root);
-        let filtered_source =
-            crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(source, super::effective_target().arch);
+        let filtered_source = super::preprocess_source_for_effective_target(source);
         let mut parser = simple_parser::Parser::new(&filtered_source);
         if let Ok(mut ast) = parser.parse() {
             // Keep the arity/return-type map consistent with the codegen unit:
             // drop wrong-arch `@cfg` function variants so a non-target variant
             // does not seed these maps (bug
             // x64_freestanding_cfg_multivariant_misdispatch).
-            super::discovery::strip_inactive_cfg_arch_fns(&mut ast, super::effective_target().arch);
+            super::strip_ast_for_effective_target(&mut ast);
             for item in &ast.items {
                 match item {
                     simple_parser::ast::Node::Function(f) => {
@@ -585,11 +584,10 @@ pub(crate) fn build_import_map(
         }
         let per_file_root = source_root_for_file(path, source_dirs, fallback_root);
         let prefix = module_prefix_from_path(path, &per_file_root);
-        let filtered_source =
-            crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(source, super::effective_target().arch);
+        let filtered_source = super::preprocess_source_for_effective_target(source);
         let mut parser = simple_parser::Parser::new(&filtered_source);
         if let Ok(mut ast) = parser.parse() {
-            super::discovery::strip_inactive_cfg_arch_fns(&mut ast, super::effective_target().arch);
+            super::strip_ast_for_effective_target(&mut ast);
             let mut item_metadata = ExportMetadata {
                 path: canonical_path,
                 root: per_file_root,

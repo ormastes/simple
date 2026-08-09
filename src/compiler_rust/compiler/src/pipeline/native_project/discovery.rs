@@ -891,8 +891,7 @@ impl NativeProjectBuilder {
             if source.contains('\r') {
                 source = source.replace('\r', "");
             }
-            let target_arch = super::effective_target().arch;
-            source = crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(&source, target_arch);
+            source = super::preprocess_source_for_effective_target(&source);
 
             let mut parser = simple_parser::Parser::new(&source);
             let mut module = parser.parse().map_err(|e| {
@@ -907,7 +906,7 @@ impl NativeProjectBuilder {
                     e
                 )
             })?;
-            strip_inactive_cfg_arch_fns(&mut module, target_arch);
+            super::strip_ast_for_effective_target(&mut module);
             let mut found_deps: HashSet<PathBuf> = HashSet::new();
 
             // A package facade may export names implemented by sibling files.
@@ -957,14 +956,13 @@ impl NativeProjectBuilder {
                         if sibling_source.contains('\r') {
                             sibling_source = sibling_source.replace('\r', "");
                         }
-                        sibling_source =
-                            crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(&sibling_source, target_arch);
+                        sibling_source = super::preprocess_source_for_effective_target(&sibling_source);
                         let mut sibling_parser = simple_parser::Parser::new(&sibling_source);
                         let mut sibling_module = match sibling_parser.parse() {
                             Ok(module) => module,
                             Err(_) => continue,
                         };
-                        strip_inactive_cfg_arch_fns(&mut sibling_module, target_arch);
+                        super::strip_ast_for_effective_target(&mut sibling_module);
                         let (explicit, definitions, facades, extern_weak, forwards_glob) =
                             provided_export_names(&sibling_module.items, &requested);
                         if forwards_glob {

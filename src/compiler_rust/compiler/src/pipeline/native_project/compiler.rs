@@ -419,7 +419,7 @@ pub(crate) fn compile_file_to_object(
         // Non-bootstrap: just normalize text? -> text for basic compat
         source.replace("text?", "text")
     };
-    source = crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(&source, effective_target().arch);
+    source = super::preprocess_source_for_effective_target(&source);
 
     // Parse
     let mut parser = simple_parser::Parser::new(&source);
@@ -430,7 +430,7 @@ pub(crate) fn compile_file_to_object(
     // build target, before same-named variants collapse to a source-order
     // first-wins pick in codegen (bug
     // x64_freestanding_cfg_multivariant_misdispatch).
-    super::discovery::strip_inactive_cfg_arch_fns(&mut ast, effective_target().arch);
+    super::strip_ast_for_effective_target(&mut ast);
     let is_freestanding = matches!(
         target.os,
         simple_common::target::TargetOS::None | simple_common::target::TargetOS::SimpleOS
@@ -1235,13 +1235,22 @@ mod bootstrap_rewrite_try_operator_tests {
     #[test]
     fn parseable_source_keeps_all_try_operator_forms() {
         let call = "fn f() -> Result<i64, text>:\n    val v = call(1)?\n    Ok(v)\n";
-        assert!(bootstrap_rewrite_if_unparseable(call, false).contains(")?"), "call form eaten");
+        assert!(
+            bootstrap_rewrite_if_unparseable(call, false).contains(")?"),
+            "call form eaten"
+        );
 
         let var = "fn f() -> Result<i64, text>:\n    val r = mk()\n    val h = r?\n    Ok(h)\n";
-        assert!(bootstrap_rewrite_if_unparseable(var, false).contains("r?"), "var form eaten");
+        assert!(
+            bootstrap_rewrite_if_unparseable(var, false).contains("r?"),
+            "var form eaten"
+        );
 
         let index = "fn f() -> Result<i64, text>:\n    val v = xs[0]?\n    Ok(v)\n";
-        assert!(bootstrap_rewrite_if_unparseable(index, false).contains("]?"), "index form eaten");
+        assert!(
+            bootstrap_rewrite_if_unparseable(index, false).contains("]?"),
+            "index form eaten"
+        );
     }
 
     /// Vacuity anchor: the RAW textual rewrite really does eat the var and
@@ -1274,7 +1283,10 @@ mod bootstrap_rewrite_try_operator_tests {
             simple_parser::Parser::new(legacy).parse().is_err(),
             "fixture must be unparseable for this test to exercise the fallback"
         );
-        assert!(!out.contains("[u8]?"), "optional type suffix not stripped in fallback: {out}");
+        assert!(
+            !out.contains("[u8]?"),
+            "optional type suffix not stripped in fallback: {out}"
+        );
     }
 }
 
