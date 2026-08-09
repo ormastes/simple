@@ -62,6 +62,16 @@ disk_space_verdict() {
     fi
 }
 
+# Extracted so --selftest can drive it directly. Two real path shapes have
+# been observed for `git rev-parse --show-toplevel` output across tooling in
+# this repo: Windows-drive-letter (`C:/Users/...`, what this host's git
+# actually emits — PROVED 2026-08-09, the original `^/[A-Za-z]/` -only regex
+# silently matched nothing against it and fell through to the "could not
+# determine" skip branch on every run) and MSYS-style (`/c/Users/...`).
+extract_drive_letter() {
+    printf '%s' "$1" | sed -E -e 's#^([A-Za-z]):/.*#\1#' -e 's#^/([A-Za-z])/.*#\1#'
+}
+
 run_selftest() {
     fails=0
     total=0
@@ -79,6 +89,19 @@ run_selftest() {
     check_case "just below threshold" 19999999999 20000000000 "low"
     check_case "far below threshold (the real 2026-08-09 case: ~6.9GB free)" 7000000000 20000000000 "low"
     check_case "zero free" 0 20000000000 "low"
+
+    check_drive_case() {
+        label=$1; input=$2; expected=$3
+        total=$((total + 1))
+        actual=$(extract_drive_letter "$input")
+        if [ "$actual" != "$expected" ]; then
+            echo "$SELF: SELFTEST FAIL — $label: expected '$expected', got '$actual'" >&2
+            fails=$((fails + 1))
+        fi
+    }
+    check_drive_case "Windows drive-letter form (this host's real output)" "C:/Users/ormas/dev/simple" "C"
+    check_drive_case "MSYS form" "/c/Users/ormas/dev/simple" "c"
+    check_drive_case "Windows drive-letter form, D drive" "D:/repos/other" "D"
 
     if [ "$fails" -ne 0 ]; then
         echo "$SELF: selftest FAILED ($fails/$total cases wrong)" >&2
@@ -115,10 +138,14 @@ fail_count=0
 # at 6.9 GB free, an order of magnitude below it.
 THRESHOLD_GB=20
 THRESHOLD_BYTES=$((THRESHOLD_GB * 1000 * 1000 * 1000))
-repo_drive_root=$(printf '%s' "$toplevel" | sed -E 's#^(/[A-Za-z])/.*#\1#')
+# `git rev-parse --show-toplevel` on this host prints a Windows-drive-letter
+# path (`C:/Users/...`), NOT the MSYS `/c/Users/...` form some other tooling
+# in this repo assumes — extract the letter accordingly. Accept BOTH forms
+# defensively since which one a given git build emits is not guaranteed
+# across environments.
+drive_letter=$(extract_drive_letter "$toplevel")
 free_bytes=""
-if command -v powershell.exe >/dev/null 2>&1; then
-    drive_letter=$(printf '%s' "$repo_drive_root" | sed -E 's#^/([A-Za-z])$#\1#')
+if [ ${#drive_letter} -eq 1 ] && command -v powershell.exe >/dev/null 2>&1; then
     free_bytes=$(powershell.exe -NoProfile -Command \
         "(Get-PSDrive -Name '$drive_letter' -ErrorAction SilentlyContinue).Free" 2>/dev/null | tr -d '\r\n ')
 fi
