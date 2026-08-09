@@ -21,6 +21,7 @@ fn group_fixture() -> text:
     src = src + "trait SessionCore:" + "\n"
     src = src + "    fn debug() -> Option<DebugTarget>" + "\n"
     src = src + "    fn profile() -> Option<ProfileTarget>" + "\n"
+    src = src + "    fn debug_profiler() -> Option<DebugProfiler>" + "\n"
     src = src + "\n"
     src = src + "trait DebugProfiler with DebugTarget, ProfileTarget:" + "\n"
     src = src + "    pass_dn" + "\n"
@@ -74,9 +75,10 @@ describe "return type capture":
         it "records ret_type on scanned trait methods":
             val traits = scan_traits(group_fixture())
             val core = find_trait("SessionCore", traits)
-            expect(core.methods.len()).to_equal(2)
+            expect(core.methods.len()).to_equal(3)
             expect(core.methods[0].ret_type).to_equal("Option<DebugTarget>")
             expect(core.methods[1].ret_type).to_equal("Option<ProfileTarget>")
+            expect(core.methods[2].ret_type).to_equal("Option<DebugProfiler>")
 
 describe "group desugar":
 
@@ -103,10 +105,12 @@ describe "group desugar":
             val out = desugar_traits(group_fixture())
             expect(out.contains("fn DebugProfiler__from(src: SessionCore) -> Option<DebugProfiler>:")).to_equal(true)
 
-        it "acquires through the accessor matched by Option<Member> return type":
+        it "capability-checks through the accessor matched by Option<Member> return type":
             val out = desugar_traits(group_fixture())
-            expect(out.contains("src.debug()")).to_equal(true)
-            expect(out.contains("src.profile()")).to_equal(true)
+            # `_fn` suffix is load-bearing: after desugaring the accessor is a
+            # fn-FIELD, so `src.debug()` fails with "method not found".
+            expect(out.contains("src.debug_fn()")).to_equal(true)
+            expect(out.contains("src.profile_fn()")).to_equal(true)
 
         it "returns None when any member fails to acquire":
             # The generated body falls through to a bare `nil` after the nested
@@ -114,12 +118,36 @@ describe "group desugar":
             val out = desugar_traits(group_fixture())
             expect(out.contains("    nil")).to_equal(true)
 
-        it "bundles every member field into the constructed group":
+        it "acquires the group from a SINGLE Option<Group> accessor":
+            # Classes are VALUE types, so the group must come off ONE value.
             val out = desugar_traits(group_fixture())
-            expect(out.contains("set_breakpoint_fn: __m0.set_breakpoint_fn")).to_equal(true)
-            expect(out.contains("profile_begin_fn: __m1.profile_begin_fn")).to_equal(true)
+            expect(out.contains("return src.debug_profiler_fn()")).to_equal(true)
+
+        it "never pairs per-member copies into a constructed group":
+            # The unsound shape: building `G(field: __m0.field, ...)` from two
+            # independently acquired copies. Its absence is the fix.
+            val out = desugar_traits(group_fixture())
+            expect(out.contains("__m0.")).to_equal(false)
+            expect(out.contains("__m1.")).to_equal(false)
+            expect(out.contains("set_breakpoint_fn: __m0.set_breakpoint_fn")).to_equal(false)
 
     context "AC6 -- a missing accessor blocks generation":
+        it "does not generate .from() when no Option<Group> accessor exists":
+            var src = "trait DebugTarget:" + "\n"
+            src = src + "    fn resume() -> bool" + "\n"
+            src = src + "\n"
+            src = src + "trait ProfileTarget:" + "\n"
+            src = src + "    fn profile_begin() -> bool" + "\n"
+            src = src + "\n"
+            src = src + "trait SessionCore:" + "\n"
+            src = src + "    fn debug() -> Option<DebugTarget>" + "\n"
+            src = src + "    fn profile() -> Option<ProfileTarget>" + "\n"
+            src = src + "\n"
+            src = src + "trait DebugProfiler with DebugTarget, ProfileTarget:" + "\n"
+            src = src + "    pass_dn" + "\n"
+            val out = desugar_traits(src)
+            expect(out.contains("fn DebugProfiler__from")).to_equal(false)
+
         it "does not generate .from() when no Option<Member> accessor exists":
             var src = "trait DebugTarget:" + "\n"
             src = src + "    fn resume() -> bool" + "\n"

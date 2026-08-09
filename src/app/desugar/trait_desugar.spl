@@ -114,19 +114,25 @@ fn _collect_trait_field_lines(source: text, trait_name: text) -> [text]:
         i = i + 1
     return out
 
-fn _field_name_of(field_line: text) -> text:
-    """`foo_fn: fn() -> i64` -> `foo_fn`."""
-    val idx = field_line.index_of(":")
-    if val ci = idx:
-        return field_line.substring(0, ci).trim()
-    return field_line.trim()
-
 fn _gen_group_froms(source: text) -> text:
     """Generate `G__from(src) -> Option<G>` for every group trait in source.
 
-    Accessor-matching rule (design §3): for each member trait `M` the source
-    type must declare an accessor returning `Option<M>`. A member with no such
-    accessor is a COMPILE ERROR naming it, and `.from()` is NOT generated.
+    Shape (design §3 CORRECTION 2026-08-09): a group is ONE trait over ONE
+    value. Classes are VALUE types (`val b = a` copies), so a group built by
+    PAIRING per-member accessors (`src.debug()` + `src.profile()`) would hold
+    two DIVERGING copies of the same target -- stepping the debug half leaves
+    the profile half at zero. See
+    `doc/08_tracking/bug/capability_group_from_unsound_under_value_semantics_2026-08-09.md`.
+
+    So `.from()` is generated as:
+
+        capability check   -- every member's `Option<M>` accessor must acquire
+        single acquisition -- the group comes from ONE `Option<G>` accessor
+
+    Accessor-matching rule: the source type must declare an accessor returning
+    `Option<M>` for every member `M`, AND one returning `Option<G>` for the
+    group itself. A missing accessor is a COMPILE ERROR naming it, and
+    `.from()` is NOT generated.
     """
     var out = ""
     val scanned = scan_traits(source)
@@ -151,34 +157,35 @@ fn _gen_group_froms(source: text) -> text:
             continue
 
         val st = _find_scanned(scanned, src_trait)
+
+        # The group must ALSO be reachable as one value: a single accessor
+        # returning `Option<G>`. Without it there is no sound acquisition --
+        # pairing the member accessors is the defect this rejects.
+        val gacc = _accessor_name(st, g.name)
+        if gacc == "":
+            print "error: trait group {g.name}: no accessor returning Option<{g.name}> is declared on {src_trait}; a group must be acquired from a SINGLE value (classes are value types), so {g.name}.from() cannot be generated"
+            gi = gi + 1
+            continue
+
+        # Capability check: every member must acquire, all-or-nothing. The
+        # acquired member values are checks ONLY -- they are deliberately not
+        # used to build the group, because each is an independent COPY.
         var body = ""
         var indent = "    "
-        var close_args = ""
         var k = 0
         while k < g.group_members.len():
             val m = g.group_members[k]
             val acc = _accessor_name(st, m)
-            body = body + indent + "val __o{k} = src.{acc}()\n"
-            body = body + indent + "if val __m{k} = __o{k}:\n"
+            # `_fn` suffix: the accessor is a fn-FIELD after desugaring, not a
+            # method. `src.{acc}()` does not compile ("method not found").
+            body = body + indent + "val __o{k} = src.{acc}_fn()\n"
+            body = body + indent + "if val __cap{k} = __o{k}:\n"
             indent = indent + "    "
             k = k + 1
 
-        # Build the group constructor arguments: every member's fn-fields,
-        # copied from that member's acquired value, in member order.
-        var args = ""
-        var mi2 = 0
-        while mi2 < g.group_members.len():
-            val mf = _collect_trait_field_lines(source, g.group_members[mi2])
-            var fi = 0
-            while fi < mf.len():
-                val fname = _field_name_of(mf[fi])
-                if args != "":
-                    args = args + ", "
-                args = args + "{fname}: __m{mi2}.{fname}"
-                fi = fi + 1
-            mi2 = mi2 + 1
-
-        body = body + indent + "return {g.name}({args})\n"
+        # Single-value acquisition: the group comes from ONE accessor, so both
+        # capabilities live on the SAME value and cannot diverge.
+        body = body + indent + "return src.{gacc}_fn()\n"
         out = out + "\nfn {g.name}__from(src: {src_trait}) -> Option<{g.name}>:\n"
         out = out + body
         out = out + "    nil\n"
