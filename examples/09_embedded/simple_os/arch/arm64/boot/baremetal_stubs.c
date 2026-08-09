@@ -654,6 +654,23 @@ void rt_print_int(RuntimeValue val) { serial_put_dec(DECODE_INT(val)); }
 void rt_println_int(RuntimeValue val) { serial_put_dec(DECODE_INT(val)); serial_putchar('\r'); serial_putchar('\n'); }
 void rt_print_char(RuntimeValue val) { serial_putchar((char)DECODE_INT(val)); }
 void rt_print_hex(RuntimeValue val) { serial_put_hex((uint64_t)DECODE_INT(val)); }
+RuntimeValue arm64_debug_style_word(RuntimeValue style, int64_t index)
+{
+    serial_puts("[style-word] index=");
+    serial_put_dec(index);
+    serial_puts(" object=");
+    serial_put_hex((uint64_t)style);
+    serial_puts(" display=");
+    if (IS_HEAP(style) && DECODE_PTR(style)) {
+        uint64_t word = *(uint64_t *)((uint8_t *)DECODE_PTR(style) + 0x298);
+        serial_put_hex(word);
+    } else {
+        serial_puts("invalid");
+    }
+    serial_putchar('\r');
+    serial_putchar('\n');
+    return style;
+}
 void rt_print_bool(RuntimeValue val) { if (DECODE_INT(val)) serial_puts("true"); else serial_puts("false"); }
 void rt_println_bool(RuntimeValue val) { rt_print_bool(val); serial_putchar('\r'); serial_putchar('\n'); }
 
