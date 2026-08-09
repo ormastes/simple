@@ -559,3 +559,85 @@ diagnostics land in the discarded middle, so `grep -c` over native-build output
 is **fail-open** — 0 can mean "truncated", not "absent". The counts in this
 doc's recipe table were taken through that truncation and should be re-measured
 with the limit raised before being trusted.
+
+## Edit 1 + registration-gap fix LANDED, 2026-08-09 — unverifiable by execution, verified by trace
+
+Re-verified fresh at `origin/main` `c97ae6cf426c` (2026-08-09). `native-build`
+is still unusable: both the native-min repro and a trivial hello-world time out
+(>90s, no output) rather than the fast nil-deref this doc previously recorded —
+same practical outcome (no oracle), worse symptom. Not re-filed separately;
+consistent with `native_build_nil_deref_total_outage_2026-08-08.md`.
+
+**Root cause refinement.** Edit 1 alone (the `try_trait_method` fall-through)
+is confirmed correct but was previously assumed sufficient once combined with
+edit 2 (already landed, `af3ad25e761e`). It is not: `build_trait_impls`
+(`resolve.spl:235-259`), which populates the **legacy** `trait_impls: Dict<i64,
+[SymbolId]>` map that `try_trait_method` checks first, silently drops every
+`impl Trait for <primitive>` via its `case nil: pass` arm — the same
+"primitives have no SymbolId" hole as `get_type_symbol`, one level up. This is
+why the struct control passes today (structs get a real symbol and reach the
+legacy map) while primitives previously had **no reachable registration at
+all**, independent of the TraitSolver being empty (confirmed still empty/inert
+per the 2026-08-08 CORRECTION above — not touched by this fix, out of scope).
+
+**Fix landed** (both in `resolve.spl`, same class):
+1. `TypeChecker.primitive_type_key(kind: HirTypeKind) -> i64?` — a stable
+   synthetic key per `(Int bits/signed, Float bits, Bool, Char, Str, Unit)`,
+   disjoint from real `SymbolId`s (all `< -1000`, never collides with `i32`
+   vs `i64` etc).
+2. `build_trait_impls`: on `get_type_symbol(impl_.type_) == nil`, register
+   under `primitive_type_key` instead of dropping the impl.
+3. `try_trait_method` (`resolve_strategies.spl:148-163`): on
+   `not type_id.is_valid()`, look up `primitive_type_key(receiver_type.kind)`
+   in `self.trait_impls` before falling through to
+   `try_trait_method_with_solver` (recipe edit 1), instead of the previous
+   unconditional `return nil`.
+
+Both changes are strictly additive — they only fire on the branch that
+previously always returned `nil`/dropped the impl, so no previously-working
+(struct/symbol-bearing) resolution path changes.
+
+**Verification.** `bin/simple lint` on both edited files: clean (no errors,
+only pre-existing unrelated warnings). Liveness-marker proof (unconditional
+`eprint` as the first statement of `try_trait_method`, per this doc's own
+methodology above): **0 hits** across `bin/simple test
+test/01_unit/language/primitive_receiver_trait_impl_dispatch_spec.spl`
+(`Results: 7 total, 6 passed, 1 failed` — byte-identical to the documented
+baseline, marker reverted after the probe). This is expected, not vacuous: the
+marker being 0 shows `MethodResolver.try_trait_method`
+(`src/compiler/35.semantics/`) is **not on the interpret execution path** —
+`bin/simple test`'s default interpret mode dispatches methods entirely inside
+`src/compiler_rust/` (Defect A's engine: `TRAIT_IMPLS` HashMap +
+`interpreter_method/mod.rs`), never loading this self-hosted resolver at all.
+This resolver is wired only into `resolve_methods`
+(`80.driver/driver_hir_pipeline_lowering.spl:282`,
+`driver_hir_pipeline_passes.spl:30`), which is reached by the self-hosted
+compiler pipeline (native-build / AOT), not by the seed interpreter. Since
+native-build hangs/is unusable and no self-hosted binary exists (stage 3
+blocked), this fix has **no execution oracle** in this environment right now —
+same conclusion the 2026-08-08 update reached for edits 1/3/4, now confirmed to
+also apply to the registration-gap half. The fix is correct by code trace
+(traced the exact same way the doc traced Defect A into `compiler_rust`) but
+not confirmed by a passing/failing test.
+
+**Regression check.** The unaffected `primitive_receiver_trait_impl_dispatch_spec.spl`
+baseline (6/7, interpret-mode) is unchanged, as expected since interpret
+doesn't touch this code. No other trait-dispatch spec exists under
+`test/01_unit/language/` to cross-check against (searched
+`^trait |impl.*for.*:` — only this one file matches). Did not extend the spec
+file further: any new assertion would hit the same unreachable-under-interpret
+wall and add no real coverage without a working native-build/self-hosted
+oracle.
+
+**Status:** Defect A — confirmed still present, confirmed still out of scope
+(`src/compiler_rust/`, editing forbidden). Defect B — the two gaps (resolver
+fall-through + legacy-map registration) are now fixed in `.spl` source but
+unverified by execution; MIR-lowering recipe edits 3/4 remain unapplied and
+blocked on the same broken/hanging `native-build`. Not "one unified fix": the
+seed (Defect A) and the pure-Simple resolver (Defect B) are two independent
+code bases with two independent root causes (Rust ordered-fallback dispatch on
+runtime `Value` variant vs. `.spl` symbol-keyed registration dropping
+primitives) that happen to share the same *shape* of bug ("primitives have no
+symbol, so anything keyed on symbol silently treats them as impl-less") but
+require separate fixes in separate languages; only the pure-Simple side was
+touched here, per scope.

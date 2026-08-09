@@ -92,6 +92,27 @@ struct TypeChecker:
             case Named(sym, _): sym
             case _: nil
 
+    static fn primitive_type_key(kind: HirTypeKind) -> i64?:
+        """Stable synthetic key for primitive Self types (i64, f32, bool, ...),
+        which carry no SymbolId. `impl Trait for <primitive>` needs SOME key to
+        register/look up under in `MethodResolver.trait_impls`; primitives are
+        keyed here instead of being silently dropped (see
+        doc/08_tracking/bug/primitive_receiver_trait_impl_dispatch_2026-08-07.md,
+        Defect B). Distinct per (kind, bits, signedness) so e.g. `impl X for i32`
+        and `impl X for i64` never collide."""
+        match kind:
+            case Int(bits, signed):
+                if signed:
+                    -1000 - bits
+                else:
+                    -2000 - bits
+            case Float(bits): -3000 - bits
+            case Bool: -4001
+            case Char: -4002
+            case Str: -4003
+            case Unit: -4004
+            case _: nil
+
 # ============================================================================
 # Method Resolver
 # ============================================================================
@@ -254,7 +275,19 @@ impl MethodResolver:
                                     case nil:
                                         pass
                         case nil:
-                            pass
+                            # Self type carries no SymbolId — a primitive
+                            # (i64, f32, bool, ...). Register under the
+                            # synthetic primitive key instead of dropping the
+                            # impl (Defect B).
+                            if val prim_key = TypeChecker.primitive_type_key(impl_.type_.kind):
+                                match TypeChecker.get_type_symbol(trait_type):
+                                    case Some(trait_symbol):
+                                        if trait_symbol != nil:
+                                            if not self.trait_impls[prim_key].?:
+                                                self.trait_impls[prim_key] = []
+                                            self.trait_impls[prim_key] = self.trait_impls[prim_key].push(trait_symbol)
+                                    case nil:
+                                        pass
                 case nil:
                     pass
 

@@ -149,7 +149,20 @@ impl MethodResolver:
         if val found_type_id = TypeChecker.get_type_symbol(receiver_type):
             type_id = found_type_id
         if not type_id.is_valid():
-            return nil
+            # Receiver carries no SymbolId — a primitive Self type (i64, f32,
+            # bool, ...). Look it up under the synthetic primitive key
+            # (`build_trait_impls` in resolve.spl registers impls there)
+            # instead of bailing before the solver is ever consulted
+            # (doc/08_tracking/bug/primitive_receiver_trait_impl_dispatch_2026-08-07.md,
+            # Defect B fix recipe edit 1).
+            if val prim_key = TypeChecker.primitive_type_key(receiver_type.kind):
+                if self.trait_impls.contains_key(prim_key):
+                    val prim_traits = self.trait_impls[prim_key]
+                    for trait_id in prim_traits:
+                        val prim_method_sym = self.symbols.lookup_trait_method_raw(trait_id.id, method)
+                        if val symbol = prim_method_sym:
+                            return MethodResolution.TraitMethod(trait_id, symbol)
+            return self.try_trait_method_with_solver(receiver_type, method)
         val resolved_type_id = type_id.id
 
         # LEGACY PATH: Use simple trait_impls map as fallback
