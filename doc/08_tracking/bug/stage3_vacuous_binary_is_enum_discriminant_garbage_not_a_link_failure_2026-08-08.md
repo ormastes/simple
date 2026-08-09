@@ -1,9 +1,105 @@
 # Stage 3 "vacuous binary" is enum-discriminant garbage in stage2, NOT a link failure
 
 Date: 2026-08-08
-Status: OPEN, still untestable — the pipeline no longer reaches codegen at
-  all before hitting an earlier blocker (see "2026-08-09 follow-up" below)
+Status: OPEN — root question **RESOLVED as a confirmed scale artifact** (see
+  "2026-08-09 bisection resolved" below); the underlying MIR-lowering
+  wildcard-arm defect that triggers at project scale is still unfixed and is
+  the next concrete blocker.
 Severity: BLOCKER (critical path to self-host)
+
+## 2026-08-09 bisection resolved: CONFIRMED SCALE ARTIFACT
+
+Once the type-mapper `unresolved name: error` blocker cleared (fix on
+`origin/main` at `ccef50cd443383a64024de060210cc82deab868b`, verified
+ancestor of `origin/main` and confirmed `src/lib/common/error/error.spl` is
+gone), retried the bisection this doc recommended. Used the *same, byte-stable*
+`build/cyc/S3FIX1/stage2-simple` binary (128,111,944 B,
+md5 `bcb9446301cdf2eafd2db2044d03d8e0`) in the `/home/ormastes/dev/simple-s3bisect`
+worktree (reset to `origin/main` first — it had drifted, see below), and the
+exact 7-line `p2_add.spl` reproducer from the "Root cause" section:
+
+```
+fn addup(a: i64, b: i64) -> i64:
+    return a + b
+
+fn main() -> i64:
+    val x = addup(20, 22)
+    print "RESULT={x}"
+    return 0
+```
+
+**Key discovery: `--entry FILE` / positional `FILE` with no `--source` silently
+scans the DEFAULT source roots (the whole ~728-module project), not just the
+given file.** The driver even says so once you look: `note: --entry without
+--source scans the DEFAULT source roots (whole project) and stays silent while
+loading that import graph; pass --source <dir> to bound it`. This means every
+prior "small reproducer" run in this doc's own history that used `--entry` or
+positional form *without* `--source` was never actually small — it pulled in
+the entire project's module graph regardless of how trivial the entry file was.
+
+With that understood, the same file + same binary gives a clean scale-vs-scope
+A/B, all four runs today from `/home/ormastes/dev/simple-s3bisect`:
+
+| run | command | closure scope | result |
+|---|---|---|---|
+| scoped | `native-build --backend llvm --mode dynload --entry p2_add.spl --source build/cyc/RETRY0809 --output scoped_out` | 1-file dir | **exit 0**, `Build complete: 1 compiled, 0 cached, 0 failed`, binary runs, prints `RESULT=42` |
+| default×3 | `native-build --backend llvm --mode dynload p2_add.spl --output <out>` (no `--source`) | whole project | **exit 1**, every one of 3 repeats: `[TEMP-PROBE-mir-wildcard] d=-1 …` then `error: … unsupported MIR type kind [wildcard-arm] disc=-1: <value:0x1800000007>`, no binary produced |
+| `--entry` no `--source` | same, `--entry` form | whole project | exit 124 (timeout at 60s budget), confirmed same "scans whole project" note in log |
+| `--entry-closure` positional | same, `--entry-closure` form | whole project | exit 1, same wildcard-arm error (3 occurrences in log) |
+
+Logs preserved at `/home/ormastes/dev/simple-s3bisect/build/cyc/RETRY0809/{scoped,small_1,small_2,small_3,formB,formD,full}.log`.
+
+**This is decisive: the identical 7-line construct, compiled by the identical
+binary, succeeds when the resolved source-root closure is scoped to ~1 file and
+fails (deterministically, 4/4 non-timeout runs) when the closure defaults to
+the whole project.** Nothing about the construct changed between the two
+columns — only the size of the module graph the compiler resolves before
+codegen. That directly answers this doc's central open question in favor of
+**(a) scale artifact**, not (b) a construct-level defect reproducible in
+isolation. It also refutes this doc's earlier "2026-08-08 CORRECTION" framing
+that the small-reproducer non-reproduction (§2 of the Control-runs section)
+meant nothing was wrong with the reproducer — the earlier non-reproduction was
+itself an artifact of the same undocumented "no `--source` ⇒ whole project"
+default, which happened to resolve a smaller/luckier closure at the time.
+
+**Why this still explains `STAGE3_EXIT=0` at full project scale (not exit 1):**
+per "Why Stage 3 still reported `STAGE3_EXIT=0`" above, the real Stage-3 entry
+point goes through `driver_bootstrap.spl`'s bootstrap lane, which drops
+`MirLowering.errors` and only fails on the "0 MIR instructions" guard. The
+`native-build` CLI path used in today's runs is the *ordinary* (non-bootstrap)
+lane, which does surface `self.error(...)` from `50.mir` and therefore fails
+closed (exit 1) on the same underlying wildcard-arm condition that, on the
+bootstrap lane, gets silently swallowed into a vacuous stub binary. Same root
+trigger (an MIR type kind falling to a wildcard match arm once the project-scale
+module graph is loaded), two different fail postures depending on which driver
+lane is entered.
+
+**Not yet established:** which specific `HirTypeKind` variant reaches the
+wildcard arm, or why closure size (as opposed to some specific file/module
+first pulled in past a threshold) is the operative variable — a bisection by
+`--source` subset size (e.g. add one compiler layer at a time) would narrow
+this further but was out of scope for today's session. No `.spl` source was
+changed in this session: the failure is real but its exact trigger inside
+`50.mir` was not isolated to a single construct, and this doc's own
+constraints route edits to `src/compiler/70.backend/**` to another concurrent
+agent — the wildcard-arm site in `50.mir` (`function_lowering.spl:798`,
+`bootstrap_globals.spl:408`/`:776`) is in scope for a future session but was
+not touched here since the "which variant" question remains open and a blind
+edit there risks papering over the defect rather than fixing it.
+
+**Housekeeping note:** the `/home/ormastes/dev/simple-s3bisect` worktree's
+`HEAD` had drifted behind `origin/main` (missing the type-mapper fix commit,
+`src/lib/common/error/error.spl` still present) despite a recent-looking
+commit date; it was reset to `origin/main` (`git fetch && git checkout -B
+bisect-work origin/main`) before this session's runs. Prior stale local
+changes there were stashed, not discarded.
+
+**Recommended next step:** bisect `--source` by compiler layer (00. through
+90., one directory at a time) against the scoped-vs-default A/B established
+today, to find the specific module/file whose inclusion flips the 7-line
+reproducer from exit-0 to the wildcard-arm failure. That will convert "scale"
+into a concrete construct or module, which is what actually needs fixing in
+`50.mir`.
 
 ## 2026-08-09 follow-up — still inconclusive, pipeline now fails even earlier
 
