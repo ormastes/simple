@@ -26,6 +26,17 @@ The preferred installed command remains:
 simple office calc [FILE] --tui
 ```
 
+For semantic LLM/debug access, launch the opt-in loopback service on an
+available port and point the normal `simple ui` client at that endpoint:
+
+```text
+simple office calc [FILE] --tui --ui-access-port PORT
+```
+
+Do not call a controller in-process or reuse prior artifacts as an operator
+test. The service process, UI-client commands, and rendered terminal must all
+belong to the same fresh run ID.
+
 ## LLM Inspection Flow
 
 1. Launch Calc in a PTY of at least 124x37.

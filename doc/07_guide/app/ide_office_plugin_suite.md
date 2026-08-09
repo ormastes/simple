@@ -110,8 +110,17 @@ simple office calc [FILE] --tui
 `FILE` is optional for a new workbook. Existing `sheets` and
 `edit-sheet FILE --tui` commands remain compatibility aliases.
 
-Calc exposes its real sheet model through the shared `simple.access/v1`
-operator protocol:
+Semantic access is an explicit loopback service attachment. Start Calc with an
+available local port and then use the shared `simple.access/v1` operator
+protocol against that service:
+
+```bash
+simple office calc [FILE] --tui --ui-access-port PORT
+```
+
+The normal `--tui` command remains the human terminal route. It must render the
+same 20×30 model; do not treat an old receipt or a source-level controller as
+proof that it is attached to a live UI service.
 
 ```text
 simple ui windows

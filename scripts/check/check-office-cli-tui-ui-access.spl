@@ -1,30 +1,32 @@
-# Focused fail-closed gate for deployed Office/IDE CLI and Calc semantic TUI.
+# Fail-closed deployed Office/Calc evidence gate.
+#
+# This gate deliberately has no controller-level fallback.  It starts the
+# configured deployed runtime, drives its public `simple ui` commands, and
+# stores proof only below the caller-provided unique run directory.
 
 use std.nogc_sync_mut.io_runtime.{
+    dir_create_all,
+    dir_exists,
+    env_get,
+    file_exists,
     file_read,
     file_write,
-    file_exists,
-    dir_create_all,
     get_args,
+    getpid,
     process_run,
+    process_spawn_async,
+    thread_sleep,
     time_now_unix_micros
 }
-use app.io.env_ops.{env_get}
-use common.ui.access.{ui_access_find_node, ui_access_snapshot_to_json, ui_access_events_to_json}
-use nogc_sync_mut.ui.session.{UISession}
-use common.ui.widget.{UIEvent}
-use app.ui.test_api.handler.{handle_test_request}
-use app.office.sheets.access_controller.{
-    CalcAccessController,
-    calc_access_controller_new,
-    calc_access_cell_id,
-    calc_access_formula_input_id,
-    calc_access_confirm_edit_id
-}
-use app.office.mod.{run_office}
-use app.ide.main.{run_ide_cli}
+use nogc_sync_mut.process_monitor.{sample_process}
 
-val EVIDENCE_ROOT: text = "build/test-artifacts/03_system/app/office/feature/office_cli_tui_ui_access"
+val EVIDENCE_BASE: text = "build/test-artifacts/03_system/app/office/feature/office_cli_tui_ui_access"
+val WARM_SAMPLE_COUNT: i32 = 20
+val SNAPSHOT_P95_MAX_US: i64 = 100000
+val FIND_P95_MAX_US: i64 = 25000
+val ACTION_POST_P95_MAX_US: i64 = 250000
+val ACCESS_RSS_DELTA_MAX_KIB: i64 = 20480
+val STARTUP_MAX_US: i64 = 2000000
 
 fn _arg(args: [text], name: text) -> text:
     var i = 0
@@ -34,520 +36,354 @@ fn _arg(args: [text], name: text) -> text:
         i = i + 1
     ""
 
-fn _runtime() -> text:
-    val value = env_get("SIMPLE_BINARY")
-    if value == nil:
-        return ""
-    value
-
-fn _ensure_evidence_dirs() -> bool:
-    dir_create_all(EVIDENCE_ROOT + "/tui") and
-        dir_create_all(EVIDENCE_ROOT + "/protocol") and
-        dir_create_all(EVIDENCE_ROOT + "/exec") and
-        dir_create_all(EVIDENCE_ROOT + "/log") and
-        dir_create_all(EVIDENCE_ROOT + "/perf")
-
-fn _fail(scenario: text, message: text) -> i32:
-    print "scenario=" + scenario
-    print "status=fail"
+fn _fail(message: text) -> i32:
+    print "suite=office-cli-tui-ui-access"
+    print "suite_status=fail"
     print "failure=" + message
     1
 
-fn _pass(scenario: text, markers: [text]) -> i32:
-    print "scenario=" + scenario
-    print "status=pass"
-    for marker in markers:
-        print marker
-    0
+fn _runtime() -> text:
+    val configured = env_get("SIMPLE_BINARY")
+    if configured == nil: return ""
+    configured
 
-fn _sort_i64(values: [i64]) -> [i64]:
-    var out = values
-    var i = 0
-    while i < out.len():
-        var j = i + 1
-        while j < out.len():
-            if out[j] < out[i]:
-                val swap = out[i]
-                out[i] = out[j]
-                out[j] = swap
-            j = j + 1
-        i = i + 1
-    out
+fn _run_root(run_id: text) -> text:
+    EVIDENCE_BASE + "/runs/" + run_id
 
-fn _controller_session() -> (CalcAccessController, UISession):
-    val controller = calc_access_controller_new()
-    val session = UISession.new(controller.ui_tree())
-    (controller, session)
+fn _run(runtime: text, args: [text]) -> (text, text, i64):
+    process_run(runtime, args)
 
-fn _act(mut controller: CalcAccessController, mut session: UISession, canonical_id: text, action: text, value: text, request_id: text) -> bool:
-    val revision = session.access_snapshot().snapshot_revision
-    val body = "{\"surface_id\":\"main\",\"canonical_id\":\"" + canonical_id +
-        "\",\"action\":\"" + action + "\",\"value\":\"" + value +
-        "\",\"request_id\":\"" + request_id + "\",\"expected_revision\":" +
-        revision.to_text() + "}"
-    val inject = \event:
-        controller.apply_ui_event(event)
-        session.dispatch(event)
-        session.update_tree(controller.ui_tree())
-    val response = handle_test_request(
-        "/api/test/ui/act",
-        "POST",
-        body,
-        session.current_state(),
-        inject,
-        session
-    )
-    response.0 == 200
+fn _revision(json: text) -> i64:
+    val marker = "\"snapshot_revision\":"
+    val at = json.index_of(marker)
+    if at < 0: return -1
+    val rest = json.slice(at + marker.len(), json.len()).trim()
+    val comma = rest.index_of(",")
+    val token = if comma < 0: rest else: rest.slice(0, comma)
+    token.trim().to_i64()
 
-fn _set_cell(mut controller: CalcAccessController, mut session: UISession, ref: text, value: text) -> bool:
-    _act(controller, session, calc_access_cell_id(ref), "select", "", "select-" + ref) and
-        _act(controller, session, calc_access_formula_input_id(), "type_text", value, "type-" + ref) and
-        _act(controller, session, calc_access_confirm_edit_id(), "invoke", "", "commit-" + ref)
+fn _ui(runtime: text, port: i32, args: [text]) -> (text, text, i64):
+    _run(runtime, ["ui"] + args + ["--port", port.to_text(), "--json"])
 
-fn _viewport_124x37(content: text) -> text:
-    val source_lines = content.split("\n")
-    var rows: [text] = []
-    var row = 0
-    while row < 37:
-        var line = if row < source_lines.len(): source_lines[row] else: ""
-        if line.len() > 124:
-            line = line.slice(0, 124)
-        while line.len() < 124:
-            line = line + " "
-        rows = rows.push(line)
-        row = row + 1
-    rows.join("\n")
+fn _act(runtime: text, port: i32, canonical: text, action: text, value: text, revision: i64) -> (text, text, i64):
+    _ui(runtime, port, [
+        "act", "--surface", "main", "--canonical", canonical,
+        "--action", action, "--value", value,
+        "--revision", revision.to_text()
+    ])
 
-fn _transport_act(mut controller: CalcAccessController, mut session: UISession, canonical_id: text, action: text, value: text, request_id: text, revision: i64) -> (i32, text):
-    val body = "{\"surface_id\":\"main\",\"canonical_id\":\"" + canonical_id +
-        "\",\"action\":\"" + action + "\",\"value\":\"" + value +
-        "\",\"request_id\":\"" + request_id + "\",\"expected_revision\":" +
-        revision.to_text() + "}"
-    val inject = \event:
-        controller.apply_ui_event(event)
-        session.dispatch(event)
-        session.update_tree(controller.ui_tree())
-    val response = handle_test_request(
-        "/api/test/ui/act",
-        "POST",
-        body,
-        session.current_state(),
-        inject,
-        session
-    )
-    (response.0, response.2)
+fn _await_snapshot(runtime: text, port: i32) -> (text, bool):
+    var attempt = 0
+    while attempt < 20:
+        val (out, _err, code) = _ui(runtime, port, ["snapshot"])
+        if code == 0 and out.contains("main#cell_A1") and _revision(out) >= 0:
+            return (out, true)
+        thread_sleep(100)
+        attempt = attempt + 1
+    ("", false)
 
-fn _populate_formula_fixture(mut controller: CalcAccessController, mut session: UISession) -> bool:
-    _set_cell(controller, session, "A1", "6") and
-        _set_cell(controller, session, "A2", "8") and
-        _set_cell(controller, session, "B1", "=A1*A2") and
-        _set_cell(controller, session, "C1", "=AVG(A1:A2)")
+fn _await_child_pid(root: text) -> i64:
+    var attempt = 0
+    while attempt < 20:
+        val path = root + "/tui/calc-pid.txt"
+        if file_exists(path):
+            val pid = file_read(path).trim().to_i64()
+            if pid > 1: return pid
+        thread_sleep(100)
+        attempt = attempt + 1
+    -1
 
-fn _formula_fixture_session() -> (CalcAccessController, UISession, bool):
-    var controller = calc_access_controller_new()
-    var session = UISession.new(controller.ui_tree())
-    val ids = [
-        calc_access_cell_id("A1"), calc_access_formula_input_id(), calc_access_confirm_edit_id(),
-        calc_access_cell_id("A2"), calc_access_formula_input_id(), calc_access_confirm_edit_id(),
-        calc_access_cell_id("B1"), calc_access_formula_input_id(), calc_access_confirm_edit_id(),
-        calc_access_cell_id("C1"), calc_access_formula_input_id(), calc_access_confirm_edit_id()
-    ]
-    val actions = [
-        "select", "type_text", "invoke",
-        "select", "type_text", "invoke",
-        "select", "type_text", "invoke",
-        "select", "type_text", "invoke"
-    ]
-    val values = [
-        "", "6", "",
-        "", "8", "",
-        "", "=A1*A2", "",
-        "", "=AVG(A1:A2)", ""
-    ]
-    var i = 0
-    while i < ids.len():
-        val revision = session.access_snapshot().snapshot_revision
-        val body = "{\"surface_id\":\"main\",\"canonical_id\":\"" + ids[i] +
-            "\",\"action\":\"" + actions[i] + "\",\"value\":\"" + values[i] +
-            "\",\"request_id\":\"fixture-" + i.to_text() +
-            "\",\"expected_revision\":" + revision.to_text() + "}"
-        val inject = \event:
-            session.dispatch(event)
-        val response = handle_test_request(
-            "/api/test/ui/act", "POST", body, session.current_state(), inject, session
-        )
-        if response.0 != 200:
-            return (controller, session, false)
-        val result = controller.act(ids[i], actions[i], values[i], "fixture-" + i.to_text())
-        if not result.ok:
-            return (controller, session, false)
-        session.update_tree(controller.ui_tree())
-        i = i + 1
-    (controller, session, true)
+fn _rss_kib(pid: i64) -> i64:
+    # process_monitor is the canonical platform seam: /proc on Linux and ps
+    # on macOS.  A zero result means the host has no valid measurement, which
+    # is a gate failure rather than an optimistic "not measured" result.
+    val metric = sample_process(pid, time_now_unix_micros() / 1000)
+    metric.memory_mb * 1024
 
-fn _write_ui_evidence(controller: CalcAccessController, session: UISession) -> bool:
-    if not _ensure_evidence_dirs():
+fn _p95_us(samples: [i64]) -> i64:
+    if samples.len() == 0: return -1
+    val sorted = samples.sort()
+    val index = ((sorted.len() * 95 + 99) / 100) - 1
+    sorted[index]
+
+fn _json_text(body: text, key: text) -> text:
+    val marker = "\"" + key + "\":\""
+    val at = body.index_of(marker)
+    if at < 0: return ""
+    val rest = body.slice(at + marker.len(), body.len())
+    val end = rest.index_of("\"")
+    if end < 0: return ""
+    rest.slice(0, end)
+
+fn _count_text(body: text, needle: text) -> i32:
+    if needle == "": return 0
+    var count = 0
+    var from = 0
+    while from < body.len():
+        val relative = body.slice(from, body.len()).index_of(needle)
+        if relative < 0: return count
+        count = count + 1
+        from = from + relative + needle.len()
+    count
+
+fn _start_real_tui(runtime: text, root: text, port: i32) -> i64:
+    """Start the *one* deployed Calc process under a real 124x37 PTY.
+
+    The Python parent is capture plumbing only.  Its child is the configured
+    deployed runtime, launched once with both `--tui` and `--ui-access-port`.
+    The child must accept public UI actions while continuing to render its
+    terminal surface, and must exit cleanly after the stop sentinel is made.
+    """
+    val fixture = root + "/exec/calc-fixture.csv"
+    if not file_write(fixture, ""):
+        return -1
+    val code = "import fcntl,os,pty,re,select,signal,struct,sys,termios,time;" +
+        "raw_path,text_path,status_path,stop_path,pid_path,exe,fixture,port=sys.argv[1:9];" +
+        "pid,fd=pty.fork();" +
+        "(fcntl.ioctl(0,termios.TIOCSWINSZ,struct.pack('HHHH',37,124,0,0)) or os.execvp(exe,[exe,'office','calc',fixture,'--tui','--ui-access-port',port])) if pid==0 else None;" +
+        "open(pid_path,'w').write(str(pid)+'\\n');" +
+        "fcntl.ioctl(fd,termios.TIOCSWINSZ,struct.pack('HHHH',37,124,0,0));" +
+        "raw=b'';sent=False;exit_code=-999;deadline=time.time()+20;" +
+        "\nwhile time.time()<deadline:\n r,_,_=select.select([fd],[],[],0.1);\n if r:\n  try: chunk=os.read(fd,65536)\n  except OSError: chunk=b''\n  raw+=chunk\n if os.path.exists(stop_path) and not sent: os.write(fd,b'q');sent=True\n if sent:\n  done,status=os.waitpid(pid,os.WNOHANG)\n  if done: exit_code=os.waitstatus_to_exitcode(status);break\n" +
+        "\nif exit_code == -999:\n os.kill(pid,signal.SIGTERM);_,status=os.waitpid(pid,0);exit_code=os.waitstatus_to_exitcode(status)\nopen(raw_path,'wb').write(raw);open(status_path,'w').write('exit='+str(exit_code)+'\\n');" +
+        "plain=re.sub(rb'\\x1b\\[[0-?]*[ -/]*[@-~]',b'',raw).replace(b'\\r',b'');" +
+        "lines=[x.decode('utf-8','replace') for x in plain.split(b'\\n') if x!=b''];frame=lines[-37:];" +
+        "ok=exit_code==0 and b'\\x1b[' in raw and len(frame)==37 and all(len(x)==124 for x in frame) and any('Simple Calc' in x for x in frame);" +
+        "open(text_path,'w').write('\\n'.join(frame)+'\\n') if ok else None;" +
+        "sys.exit(0 if ok else 4)"
+    process_spawn_async("python3", [
+        "-c", code,
+        root + "/tui/calc-after.ansi", root + "/tui/calc-after.txt",
+        root + "/tui/calc-exit.txt", root + "/tui/stop", root + "/tui/calc-pid.txt", runtime, fixture,
+        port.to_text()
+    ])
+
+fn _finish_real_tui(root: text) -> bool:
+    if not file_write(root + "/tui/stop", "stop\n"):
         return false
-    val snapshot = session.access_snapshot()
-    val snapshot_json = ui_access_snapshot_to_json(snapshot)
-    val tui = _viewport_124x37(controller.tui_text())
-    file_write(EVIDENCE_ROOT + "/protocol/snapshot-after.json", snapshot_json) and
-        file_write(EVIDENCE_ROOT + "/protocol/history.json", ui_access_events_to_json(session.access_recent_events(64))) and
-        file_write(EVIDENCE_ROOT + "/tui/calc-after.txt", tui + "\n") and
-        file_write(EVIDENCE_ROOT + "/tui/calc-after.ansi", tui + "\n")
+    var attempt = 0
+    while attempt < 80:
+        if file_exists(root + "/tui/calc-exit.txt"):
+            return file_exists(root + "/tui/calc-after.ansi") and
+                file_exists(root + "/tui/calc-after.txt")
+        thread_sleep(100)
+        attempt = attempt + 1
+    false
 
-fn _formula_fixture_ok(controller: CalcAccessController) -> bool:
-    val snapshot = controller.snapshot()
-    ui_access_find_node(snapshot, "main#cell_B1").text_value == "48" and
-        ui_access_find_node(snapshot, "main#cell_C1").text_value == "7" and
-        controller.tui_text().contains("48") and
-        controller.tui_text().contains("7")
+fn _measure_warm_protocol(runtime: text, port: i32, root: text, revision0: i64, pid: i64, rss_baseline_kib: i64) -> (bool, i64, text):
+    """Measure public deployed CLI operations after the ready surface is warm.
 
-fn _setup() -> i32:
-    val runtime = _runtime()
-    if runtime == "":
-        return _fail("setup", "SIMPLE_BINARY is missing")
-    if runtime.contains("src/compiler_rust"):
-        return _fail("setup", "Rust seed runtime is forbidden")
-    if not file_exists("src/app/office/sheets/access_server.spl"):
-        return _fail("setup", "Calc access server is missing")
-    if not _ensure_evidence_dirs():
-        return _fail("setup", "evidence directories could not be created")
-    _pass("setup", ["runtime=pure-simple-self-hosted"])
-
-fn _cli_help() -> i32:
-    val cli_source = file_read("src/app/cli/_CliMain/main_and_help.spl")
-    val help_source = file_read("src/app/cli/cli_helpers.spl")
-    val office_source = file_read("src/app/office/mod.spl")
-    if not cli_source.contains("run_office(_cli_args_from(raw_args, 1))") or
-       not help_source.contains("simple office calc [file] --tui") or
-       not office_source.contains("simple office calc [file.csv|.ods|.xlsx] --tui"):
-        return _fail("cli-help", "Office app command ownership/help is missing")
-    val start = time_now_unix_micros()
-    val controller = calc_access_controller_new()
-    val calc_out = controller.tui_text()
-    val elapsed_ms = (time_now_unix_micros() - start) / 1000
-    if not calc_out.contains("Simple Calc") or
-       not calc_out.contains("T") or
-       calc_out.split("\n").len() != 37 or
-       elapsed_ms > 2000:
-        return _fail("cli-help", "full-size no-file Calc TUI failed")
-    file_write(EVIDENCE_ROOT + "/tui/calc-before.txt", calc_out)
-    file_write(EVIDENCE_ROOT + "/exec/commands.txt", "simple office calc --tui\n")
-    _pass("cli-help", [
-        "command=simple office calc [FILE] --tui",
-        "office_help=pass",
-        "calc_no_file=pass",
-        "calc_file=pass",
-        "raw_source_fallback=false",
-        "app_dev_no_bootstrap=true"
-    ])
-
-fn _cli_ide() -> i32:
-    val tui_code = run_ide_cli(["--feature-check", "--tui"])
-    val gui_code = run_ide_cli(["--feature-check", "--gui"])
-    if tui_code != 0 or gui_code != 0:
-        return _fail("cli-ide", "IDE app feature checks failed")
-    _pass("cli-ide", [
-        "ide_tui=pass",
-        "ide_gui=pass",
-        "mode_tui=visible",
-        "mode_gui=visible",
-        "legacy_edit_sheet=pass"
-    ])
-
-fn _cli_invalid() -> i32:
-    val office_code = run_office(["calc", "--not-a-calc-option"])
-    val ide_code = run_ide_cli(["--not-an-ide-option"])
-    if office_code == 0 or ide_code == 0:
-        return _fail("cli-invalid", "invalid deployed arguments returned success")
-    _pass("cli-invalid", [
-        "office_invalid=invalid_argument",
-        "ide_invalid=invalid_argument",
-        "nonzero_exit=pass",
-        "child_started=false"
-    ])
-
-fn _ui_discovery() -> i32:
-    val (controller, session) = _controller_session()
-    val snapshot = session.access_snapshot()
-    if ui_access_find_node(snapshot, "main#cell_A1") == nil or
-       ui_access_find_node(snapshot, "main#formula_input") == nil or
-       ui_access_find_node(snapshot, "main#confirm_edit") == nil:
-        return _fail("ui-discovery", "stable Calc semantic nodes are missing")
-    if not _ensure_evidence_dirs():
-        return _fail("ui-discovery", "evidence directory unavailable")
-    file_write(EVIDENCE_ROOT + "/protocol/windows.json", ui_access_snapshot_to_json(snapshot))
-    file_write(EVIDENCE_ROOT + "/protocol/snapshot-before.json", ui_access_snapshot_to_json(snapshot))
-    file_write(EVIDENCE_ROOT + "/protocol/surface-main.json", ui_access_snapshot_to_json(snapshot))
-    file_write(EVIDENCE_ROOT + "/protocol/find.json", ui_access_snapshot_to_json(snapshot))
-    _pass("ui-discovery", [
-        "operation_order=windows,snapshot,surface,find",
-        "surface=main",
-        "canonical_id=main#cell_A1",
-        "canonical_id=main#formula_input",
-        "canonical_id=main#confirm_edit",
-        "capture_size=124x37"
-    ])
-
-fn _ui_action_history() -> i32:
-    val (controller, session) = _controller_session()
-    if not _set_cell(controller, session, "A1", "6"):
-        return _fail("ui-action-history", "value action failed")
-    val events = session.access_recent_events(16)
-    var request_seen = false
-    var result_seen = false
-    for event in events:
-        if event.event_kind == "access_request":
-            request_seen = true
-        if event.event_kind == "access_result":
-            result_seen = true
-    if not request_seen or not result_seen:
-        return _fail("ui-action-history", "correlated history is incomplete")
-    _pass("ui-action-history", [
-        "value_action=type_text",
-        "confirm_action=invoke",
-        "post_snapshot=independent",
-        "history_request=pass",
-        "history_action=pass",
-        "history_result=pass",
-        "history_correlation=pass"
-    ])
-
-fn _ui_rejection() -> i32:
-    val (controller, session) = _controller_session()
-    if not _act(controller, session, calc_access_cell_id("A1"), "select", "", "baseline"):
-        return _fail("ui-rejection", "rejection baseline action failed")
-    val before = controller.snapshot().snapshot_revision
-    val live_revision = session.access_snapshot().snapshot_revision
-    val (stale_status, stale_body) = _transport_act(
-        controller, session, calc_access_cell_id("A1"), "select", "", "stale", live_revision - 1
-    )
-    val (missing_status, missing_body) = _transport_act(
-        controller, session, "main#cell_Z999", "select", "", "missing", session.access_snapshot().snapshot_revision
-    )
-    val (unsupported_status, unsupported_body) = _transport_act(
-        controller, session, calc_access_cell_id("A1"), "delete_everything", "", "unsupported", session.access_snapshot().snapshot_revision
-    )
-    val after = controller.snapshot().snapshot_revision
-    if stale_status < 400 or not stale_body.contains("stale_target"):
-        return _fail("ui-rejection", "stale revision was not rejected by the transport")
-    if missing_status < 400 or not missing_body.contains("target_not_found"):
-        return _fail("ui-rejection", "missing target was not rejected by the transport")
-    if unsupported_status < 400 or not unsupported_body.contains("unsupported_action"):
-        return _fail("ui-rejection", "unsupported action was not rejected by the transport")
-    if after != before:
-        return _fail("ui-rejection", "rejected actions mutated Calc state")
-    _pass("ui-rejection", [
-        "stale_revision=stale_target",
-        "missing_target=target_not_found",
-        "unsupported_action=unsupported_action",
-        "state_unchanged=pass",
-        "revision_unchanged=pass"
-    ])
-
-fn _formula_multiply() -> i32:
-    val (controller, session, populated) = _formula_fixture_session()
-    if not populated or not _formula_fixture_ok(controller):
-        val post = controller.snapshot()
-        val b1 = ui_access_find_node(post, "main#cell_B1")
-        val c1 = ui_access_find_node(post, "main#cell_C1")
-        val b1_value = if b1 == nil: "<missing>" else: b1.text_value
-        val c1_value = if c1 == nil: "<missing>" else: c1.text_value
-        return _fail("formula-multiply", "real Calc multiplication/AVG fixture failed; B1=" + b1_value + ";C1=" + c1_value)
-    _write_ui_evidence(controller, session)
-    _pass("formula-multiply", [
-        "A1=6",
-        "A2=8",
-        "B1_formula==A1*A2",
-        "B1_display=48",
-        "B1_snapshot=48",
-        "B1_tui=48"
-    ])
-
-fn _formula_avg() -> i32:
-    val (controller, session, populated) = _formula_fixture_session()
-    if not populated or not _formula_fixture_ok(controller):
-        return _fail("formula-avg", "real Calc AVG fixture failed")
-    if not _write_ui_evidence(controller, session):
-        return _fail("formula-avg", "formula evidence could not be written")
-    _pass("formula-avg", [
-        "C1_formula==AVG(A1:A2)",
-        "C1_display=7",
-        "C1_snapshot=7",
-        "C1_tui=7"
-    ])
-
-fn _formula_invalid() -> i32:
-    val (controller, session) = _controller_session()
-    val selected = controller.act(calc_access_cell_id("A1"), "select", "", "invalid-select")
-    val typed = controller.act(calc_access_formula_input_id(), "type_text", "=NOT_A_REAL_CALC_FUNCTION(1)", "invalid-type")
-    val committed = controller.act(calc_access_confirm_edit_id(), "invoke", "", "invalid-commit")
-    if not selected.ok or not typed.ok or not committed.ok:
-        return _fail("formula-invalid", "invalid formula action failed")
-    val display = ui_access_find_node(controller.snapshot(), "main#cell_A1").text_value
-    if not display.contains("#ERR"):
-        return _fail("formula-invalid", "invalid formula did not expose an error")
-    _pass("formula-invalid", [
-        "formula_error=#ERR",
-        "numeric_result_fabricated=false",
-        "neighbor_cells_unchanged=pass",
-        "error_visible=pass"
-    ])
-
-fn _evidence() -> i32:
-    val (controller, session, populated) = _formula_fixture_session()
-    if not populated or not _write_ui_evidence(controller, session):
-        return _fail("evidence", "current evidence bundle could not be created")
-    _pass("evidence", [
-        "capture_size=124x37",
-        "tui_before=present",
-        "tui_after=present",
-        "ansi_after=present",
-        "protocol_files=complete",
-        "run_id_consistent=pass",
-        "stale_artifacts=0"
-    ])
-
-fn _performance() -> i32:
-    val ready_start = time_now_unix_micros()
-    val (controller, session) = _controller_session()
-    val ready_ms = (time_now_unix_micros() - ready_start) / 1000
-    var snapshot_samples: [i64] = []
-    var find_samples: [i64] = []
-    var action_samples: [i64] = []
+    Each action sample includes a second, separately invoked snapshot after
+    `simple ui act` has completed its own protocol observation.  Thus the
+    receipt records the end-to-end operator action and an independent
+    post-state read, not a controller call or a cached response.
+    """
+    var snapshot_us: [i64] = []
+    var find_us: [i64] = []
+    var action_post_us: [i64] = []
+    var revision = revision0
+    var max_rss_kib = rss_baseline_kib
+    var last_request_id = ""
     var i = 0
-    while i < 20:
+    while i < WARM_SAMPLE_COUNT:
         val snapshot_start = time_now_unix_micros()
-        val snapshot = session.access_snapshot()
-        val snapshot_us = time_now_unix_micros() - snapshot_start
-        snapshot_samples = snapshot_samples.push(snapshot_us)
+        val (snapshot, _snapshot_err, snapshot_code) = _ui(runtime, port, ["snapshot"])
+        snapshot_us = snapshot_us.push(time_now_unix_micros() - snapshot_start)
+        if snapshot_code != 0 or not snapshot.contains("main#cell_A1"):
+            return (false, revision, "snapshot sample failed")
+
         val find_start = time_now_unix_micros()
-        val node = ui_access_find_node(snapshot, calc_access_cell_id("A1"))
-        val find_us = time_now_unix_micros() - find_start
-        if node == nil:
-            return _fail("performance", "warm find lost the A1 target")
-        find_samples = find_samples.push(find_us)
+        val (found, _find_err, find_code) = _ui(runtime, port, ["find", "--canonical", "main#cell_B1"])
+        find_us = find_us.push(time_now_unix_micros() - find_start)
+        if find_code != 0 or not found.contains("main#cell_B1"):
+            return (false, revision, "find sample failed")
+
         val action_start = time_now_unix_micros()
-        if not _act(controller, session, calc_access_cell_id("A1"), "select", "", "perf-" + i.to_text()):
-            return _fail("performance", "warm action failed")
-        val observed = ui_access_find_node(session.access_snapshot(), calc_access_cell_id("A1"))
-        val action_us = time_now_unix_micros() - action_start
-        if observed == nil:
-            return _fail("performance", "post-action observation lost A1")
-        action_samples = action_samples.push(action_us)
+        val (acted, _act_err, action_code) = _act(runtime, port, "main#cell_A1", "select", "", revision)
+        revision = _revision(acted)
+        val (observed, _observe_err, observe_code) = _ui(runtime, port, ["snapshot"])
+        action_post_us = action_post_us.push(time_now_unix_micros() - action_start)
+        if action_code != 0 or observe_code != 0 or revision < 0 or not observed.contains("main#cell_A1"):
+            return (false, revision, "action/post-state sample failed")
+        last_request_id = _json_text(acted, "request_id")
+        val current_rss_kib = _rss_kib(pid)
+        if current_rss_kib <= 0:
+            file_write(root + "/perf/rss-measurement.txt", "rss_status=missing\nreason=rss_measurement_unavailable_after_warm_request\npid=" + pid.to_text() + "\n")
+            return (false, revision, "rss_measurement_unavailable_after_warm_request")
+        if current_rss_kib > max_rss_kib: max_rss_kib = current_rss_kib
         i = i + 1
-    val snapshot_p95_ms = (_sort_i64(snapshot_samples)[18] + 999) / 1000
-    val find_p95_ms = (_sort_i64(find_samples)[18] + 999) / 1000
-    val action_p95_ms = (_sort_i64(action_samples)[18] + 999) / 1000
-    if ready_ms > 2000 or snapshot_p95_ms > 100 or find_p95_ms > 25 or action_p95_ms > 250:
-        return _fail(
-            "performance",
-            "balanced local tooling budget exceeded; ready=" + ready_ms.to_text() +
-            ";snapshot_p95=" + snapshot_p95_ms.to_text() +
-            ";find_p95=" + find_p95_ms.to_text() +
-            ";action_p95=" + action_p95_ms.to_text()
-        )
-    file_write(
-        EVIDENCE_ROOT + "/perf/metrics.txt",
-        "ready_ms=" + ready_ms.to_text() +
-        "\nsnapshot_p95_ms=" + snapshot_p95_ms.to_text() +
-        "\nfind_p95_ms=" + find_p95_ms.to_text() +
-        "\naction_observed_p95_ms=" + action_p95_ms.to_text() +
-        "\nrss_delta_mib=not_measured_app_dev" +
-        "\nhistory_limit=64\n"
-    )
-    _pass("performance", [
-        "warm_calc_ready_ms<=2000",
-        "windows_snapshot_p95_ms<=100",
-        "find_p95_ms<=25",
-        "action_observed_p95_ms<=250",
-        "access_rss_delta_mib=not_measured_app_dev",
-        "history_limit=64"
-    ])
 
-fn _isolation() -> i32:
+    val snapshot_p95 = _p95_us(snapshot_us)
+    val find_p95 = _p95_us(find_us)
+    val action_post_p95 = _p95_us(action_post_us)
+    val rss_delta_kib = max_rss_kib - rss_baseline_kib
+    val receipt = "sample_count=" + WARM_SAMPLE_COUNT.to_text() +
+        "\nsnapshot_p95_us=" + snapshot_p95.to_text() +
+        "\nfind_p95_us=" + find_p95.to_text() +
+        "\naction_post_p95_us=" + action_post_p95.to_text() +
+        "\nrss_baseline_kib=" + rss_baseline_kib.to_text() +
+        "\nrss_max_kib=" + max_rss_kib.to_text() +
+        "\nrss_delta_kib=" + rss_delta_kib.to_text() +
+        "\nrss_status=measured\n"
+    if not file_write(root + "/perf/warm-protocol.txt", receipt):
+        return (false, revision, "could not write warm protocol receipt")
+    if snapshot_p95 > SNAPSHOT_P95_MAX_US:
+        return (false, revision, "snapshot_p95_exceeds_100ms")
+    if find_p95 > FIND_P95_MAX_US:
+        return (false, revision, "find_p95_exceeds_25ms")
+    if action_post_p95 > ACTION_POST_P95_MAX_US:
+        return (false, revision, "action_post_p95_exceeds_250ms")
+    if rss_delta_kib > ACCESS_RSS_DELTA_MAX_KIB:
+        return (false, revision, "rss_delta_exceeds_20MiB")
+    (true, revision, last_request_id)
+
+fn _deployed_cli_checks(runtime: text, root: text) -> bool:
+    val (ide_tui, ide_tui_err, ide_tui_code) = _run(runtime, ["ide", "--feature-check", "--tui"])
+    val (ide_gui, ide_gui_err, ide_gui_code) = _run(runtime, ["ide", "--feature-check", "--gui"])
+    val (_bad_office, bad_office_err, bad_office_code) = _run(runtime, ["office", "calc", "--not-a-calc-option"])
+    val (_bad_ide, bad_ide_err, bad_ide_code) = _run(runtime, ["ide", "--not-an-ide-option"])
+    val log = "ide_tui:\n" + ide_tui + ide_tui_err + "\nide_gui:\n" + ide_gui + ide_gui_err +
+        "\ninvalid_office:\n" + bad_office_err + "\ninvalid_ide:\n" + bad_ide_err + "\n"
+    if not file_write(root + "/exec/commands.txt", log): return false
+    ide_tui_code == 0 and ide_gui_code == 0 and bad_office_code != 0 and bad_ide_code != 0
+
+fn _runtime_provenance(runtime: text, root: text) -> bool:
+    """Reject seed binaries by observed behavior, not their misleading path.
+
+    A release-looking pathname and `--version` are insufficient: stale macOS
+    launchers have identified themselves as a Rust bootstrap seed only after
+    receiving an actual Office command.  Preserve that transcript with the
+    fresh evidence and fail before any product assertion could look green.
+    """
+    val (out, err, code) = _run(runtime, ["office", "calc", "--not-a-calc-option"])
+    val transcript = out + err
+    val lowered = transcript.lower()
+    if not file_write(root + "/exec/runtime-provenance.txt", transcript): return false
+    code != 0 and transcript.contains("Usage: simple office calc") and
+        not lowered.contains("rust-built simple binary") and
+        not lowered.contains("bootstrap seed only") and
+        not lowered.contains("seed sibling") and
+        not lowered.contains("debug build")
+
+fn _live_workflow(runtime: text, root: text) -> (bool, text):
+    val port = 38000 + (getpid() % 2000).to_i32()
+    val startup_started_us = time_now_unix_micros()
+    val capture_pid = _start_real_tui(runtime, root, port)
+    if capture_pid <= 1: return (false, "could_not_start_deployed_calc_pty")
+    val (before, ready) = _await_snapshot(runtime, port)
+    if not ready:
+        # Ask the PTY owner to close its child before returning failure.  Do
+        # not kill only the capture parent: that would orphan the deployed
+        # Calc process and make a later run's port/evidence ambiguous.
+        _finish_real_tui(root)
+        return (false, "deployed_calc_surface_not_ready")
+    val startup_us = time_now_unix_micros() - startup_started_us
+    if not file_write(root + "/perf/startup.txt", "startup_us=" + startup_us.to_text() + "\nstartup_limit_us=" + STARTUP_MAX_US.to_text() + "\n"):
+        _finish_real_tui(root)
+        return (false, "could_not_write_startup_receipt")
+    if startup_us > STARTUP_MAX_US:
+        _finish_real_tui(root)
+        return (false, "startup_exceeds_2s")
+    val child_pid = _await_child_pid(root)
+    val rss_baseline_kib = if child_pid > 1: _rss_kib(child_pid) else: 0
+    if rss_baseline_kib <= 0:
+        file_write(root + "/perf/rss-measurement.txt", "rss_status=missing\nreason=rss_measurement_unavailable_at_ready\npid=" + child_pid.to_text() + "\n")
+        _finish_real_tui(root)
+        return (false, "rss_measurement_unavailable_at_ready")
+    val (windows, windows_err, windows_code) = _ui(runtime, port, ["windows"])
+    val (surface, surface_err, surface_code) = _ui(runtime, port, ["surface", "main"])
+    val revision0 = _revision(before)
+    val (select_a1, select_a1_err, select_a1_code) = _act(runtime, port, "main#cell_A1", "select", "", revision0)
+    val revision1 = _revision(select_a1)
+    val (type_a1, type_a1_err, type_a1_code) = _act(runtime, port, "main#formula_input", "type_text", "6", revision1)
+    val revision2 = _revision(type_a1)
+    val (commit_a1, commit_a1_err, commit_a1_code) = _act(runtime, port, "main#confirm_edit", "invoke", "", revision2)
+    val revision3 = _revision(commit_a1)
+    val (select_a2, select_a2_err, select_a2_code) = _act(runtime, port, "main#cell_A2", "select", "", revision3)
+    val revision4 = _revision(select_a2)
+    val (type_a2, type_a2_err, type_a2_code) = _act(runtime, port, "main#formula_input", "type_text", "8", revision4)
+    val revision5 = _revision(type_a2)
+    val (commit_a2, commit_a2_err, commit_a2_code) = _act(runtime, port, "main#confirm_edit", "invoke", "", revision5)
+    val revision6 = _revision(commit_a2)
+    val (select_b1, select_b1_err, select_b1_code) = _act(runtime, port, "main#cell_B1", "select", "", revision6)
+    val revision7 = _revision(select_b1)
+    val (type_b1, type_b1_err, type_b1_code) = _act(runtime, port, "main#formula_input", "type_text", "=A1*A2", revision7)
+    val revision8 = _revision(type_b1)
+    val (commit_b1, commit_b1_err, commit_b1_code) = _act(runtime, port, "main#confirm_edit", "invoke", "", revision8)
+    val revision9 = _revision(commit_b1)
+    val (select_c1, select_c1_err, select_c1_code) = _act(runtime, port, "main#cell_C1", "select", "", revision9)
+    val revision10 = _revision(select_c1)
+    val (type_c1, type_c1_err, type_c1_code) = _act(runtime, port, "main#formula_input", "type_text", "=AVG(A1:A2)", revision10)
+    val revision11 = _revision(type_c1)
+    val (commit_c1, commit_c1_err, commit_c1_code) = _act(runtime, port, "main#confirm_edit", "invoke", "", revision11)
+    val revision12 = _revision(commit_c1)
+    val (nfr_ok, warm_revision, nfr_detail) = _measure_warm_protocol(runtime, port, root, revision12, child_pid, rss_baseline_kib)
+    if not nfr_ok:
+        file_write(root + "/perf/nfr-failure.txt", "nfr_status=fail\nreason=" + nfr_detail + "\n")
+        _finish_real_tui(root)
+        return (false, nfr_detail)
+    # The initial action's request/result pair must be evicted once the public
+    # protocol has recorded more than the 64-event session ceiling.
+    val early_request_id = _json_text(select_a1, "request_id")
+    val (evict_action, evict_err, evict_code) = _act(runtime, port, "main#cell_A1", "select", "", warm_revision)
+    val revision13 = _revision(evict_action)
+    val (after, after_err, after_code) = _ui(runtime, port, ["snapshot"])
+    val (b1, b1_err, b1_code) = _ui(runtime, port, ["find", "--canonical", "main#cell_B1"])
+    val (c1, c1_err, c1_code) = _ui(runtime, port, ["find", "--canonical", "main#cell_C1"])
+    val (history, history_err, history_code) = _ui(runtime, port, ["history", "--surface", "main", "--count", "64"])
+    val (_stale, stale_err, stale_code) = _act(runtime, port, "main#cell_A1", "select", "", revision0)
+    val (_missing, missing_err, missing_code) = _act(runtime, port, "main#cell_Z999", "select", "", _revision(after))
+    val (_unsupported, unsupported_err, unsupported_code) = _act(runtime, port, "main#cell_A1", "delete_everything", "", _revision(after))
+    val evidence_ok = file_write(root + "/protocol/snapshot-before.json", before) and
+        file_write(root + "/protocol/snapshot-after.json", after) and
+        file_write(root + "/protocol/find-b1.json", b1) and
+        file_write(root + "/protocol/find-c1.json", c1) and
+        file_write(root + "/protocol/history.json", history) and
+        file_write(root + "/protocol/windows.json", windows) and
+        file_write(root + "/protocol/surface-main.json", surface) and
+        file_write(root + "/protocol/rejections.txt", stale_err + "\n" + missing_err + "\n" + unsupported_err)
+    val tui_ok = _finish_real_tui(root)
+    val screen = if tui_ok: file_read(root + "/tui/calc-after.txt") else: ""
+    val live_ok = evidence_ok and select_a1_code == 0 and type_a1_code == 0 and commit_a1_code == 0 and
+        select_a2_code == 0 and type_a2_code == 0 and commit_a2_code == 0 and
+        select_b1_code == 0 and type_b1_code == 0 and commit_b1_code == 0 and
+        select_c1_code == 0 and type_c1_code == 0 and commit_c1_code == 0 and
+        windows_code == 0 and surface_code == 0 and evict_code == 0 and revision13 >= 0 and
+        after_code == 0 and b1_code == 0 and c1_code == 0 and history_code == 0 and
+        windows.contains("simple.access/v1") and windows.contains("main") and
+        surface.contains("main#cell_A1") and surface.contains("main#formula_input") and
+        b1.contains("main#cell_B1") and b1.contains("48") and
+        c1.contains("main#cell_C1") and c1.contains("7") and
+        history.contains("access_request") and history.contains("access_result") and
+        _count_text(history, "\"event_kind\"") == 64 and early_request_id != "" and not history.contains(early_request_id) and
+        stale_code != 0 and stale_err.contains("stale_target") and
+        missing_code != 0 and missing_err.contains("target_not_found") and
+        unsupported_code != 0 and unsupported_err.contains("unsupported_action") and tui_ok
+        and screen.contains("48") and screen.contains("7") and
+        screen.contains("T") and screen.contains("30")
+    (live_ok, if live_ok: "" else: "deployed_ui_protocol_or_cleanup_assertion_failed")
+
+fn _all(run_id: text) -> i32:
     val runtime = _runtime()
-    val sources = file_read("src/app/office/sheets/access_controller.spl") +
-        file_read("src/app/office/sheets/access_server.spl") +
-        file_read("src/app/office/mod.spl")
-    val (version_out, version_err, version_code) = process_run(runtime, ["--version"])
-    val lowered = sources.to_lower()
-    val sgtti_import = lowered.contains("use app.sgtti") or
-        lowered.contains("use std.sgtti") or
-        lowered.contains("use common.sgtti")
-    if version_code != 0 or runtime.contains("src/compiler_rust") or sgtti_import:
-        return _fail("isolation", "runtime provenance or SGTTI isolation failed")
-    _pass("isolation", [
-        "runtime=pure-simple-self-hosted",
-        "rust_seed_used=false",
-        "raw_source_fallback=false",
-        "terminal_restored=pass",
-        "service_stopped=pass",
-        "production_sgtti_imports=0",
-        "normal_access_artifacts=0"
-    ])
-
-fn _all() -> i32:
-    var code = _setup()
-    if code != 0: return code
-    code = _cli_help()
-    if code != 0: return code
-    # Measure the warm Calc fixture before the broad IDE feature report
-    # intentionally allocates every Office capability graph.
-    code = _performance()
-    if code != 0: return code
-    code = _cli_ide()
-    if code != 0: return code
-    code = _cli_invalid()
-    if code != 0: return code
-    code = _ui_discovery()
-    if code != 0: return code
-    code = _ui_action_history()
-    if code != 0: return code
-    code = _ui_rejection()
-    if code != 0: return code
-    code = _formula_multiply()
-    if code != 0: return code
-    code = _formula_avg()
-    if code != 0: return code
-    code = _formula_invalid()
-    if code != 0: return code
-    code = _evidence()
-    if code != 0: return code
-    code = _isolation()
-    if code != 0: return code
-    file_write(
-        EVIDENCE_ROOT + "/suite.txt",
-        "suite=office-cli-tui-ui-access\n" +
-        "suite_status=pass\n" +
-        "capture_size=124x37\n" +
-        "B1_display=48\n" +
-        "C1_display=7\n" +
-        "runtime=pure-simple-self-hosted\n"
-    )
+    if runtime == "" or not file_exists(runtime): return _fail("SIMPLE_BINARY must name an executable deployed runtime")
+    if runtime.contains("compiler_rust"): return _fail("Rust seed runtime is forbidden")
+    val root = _run_root(run_id)
+    if run_id == "" or run_id.contains("/") or dir_exists(root): return _fail("--run-id must be unique and path-safe")
+    if not (dir_create_all(root + "/tui") and dir_create_all(root + "/protocol") and dir_create_all(root + "/exec") and dir_create_all(root + "/perf")):
+        return _fail("could not create unique evidence directory")
+    if not _runtime_provenance(runtime, root): return _fail("runtime provenance failed; a self-hosted Office command is required")
+    if not _deployed_cli_checks(runtime, root): return _fail("deployed IDE/Office CLI checks failed")
+    val (live_ok, live_detail) = _live_workflow(runtime, root)
+    if not live_ok: return _fail(live_detail)
+    if not file_write(root + "/suite.txt", "suite=office-cli-tui-ui-access\nsuite_status=pass\nrun_id=" + run_id + "\nruntime=pure-simple-self-hosted\ncapture_size=124x37\nB1_display=48\nC1_display=7\n"):
+        return _fail("could not retain suite receipt")
     print "suite=office-cli-tui-ui-access"
     print "suite_status=pass"
+    print "run_id=" + run_id
     0
 
 fn main() -> i64:
-    val scenario = _arg(get_args(), "--scenario")
-    match scenario:
-        "setup": _setup().to_i64()
-        "cli-help": _cli_help().to_i64()
-        "cli-ide": _cli_ide().to_i64()
-        "cli-invalid": _cli_invalid().to_i64()
-        "ui-discovery": _ui_discovery().to_i64()
-        "ui-action-history": _ui_action_history().to_i64()
-        "ui-rejection": _ui_rejection().to_i64()
-        "formula-multiply": _formula_multiply().to_i64()
-        "formula-avg": _formula_avg().to_i64()
-        "formula-invalid": _formula_invalid().to_i64()
-        "evidence": _evidence().to_i64()
-        "performance": _performance().to_i64()
-        "isolation": _isolation().to_i64()
-        "all": _all().to_i64()
-        "screen":
-            print calc_access_controller_new().tui_text()
-            0
-        _: _fail("unknown", "unknown --scenario value").to_i64()
+    val args = get_args()
+    val scenario = _arg(args, "--scenario")
+    if scenario != "all": return _fail("only --scenario all is supported by the deployed gate").to_i64()
+    _all(_arg(args, "--run-id")).to_i64()

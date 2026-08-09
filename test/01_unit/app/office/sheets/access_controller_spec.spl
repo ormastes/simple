@@ -7,6 +7,7 @@ use app.office.sheets.access_controller.{
 }
 use common.ui.access.{ui_access_find_node, ui_access_find_nodes}
 use common.ui.widget.{UIEvent}
+use nogc_sync_mut.ui.session.{UISession}
 
 describe "Calc semantic UI access controller":
     it "exposes stable Calc cells and controls through simple.access/v1":
@@ -78,6 +79,15 @@ describe "Calc semantic UI access controller":
         val cell = ui_access_find_node(controller.snapshot(), "main#cell_A1")
         expect(cell.text_value).to_equal("")
 
+    it "rejects malformed formulas without replacing the current cell":
+        val controller = calc_access_controller_new()
+        expect(controller.act(calc_access_formula_input_id(), "type_text", "=AVG(", "bad-formula-input").ok).to_equal(true)
+        val result = controller.act(calc_access_confirm_edit_id(), "invoke", "", "bad-formula-commit")
+
+        expect(result.ok).to_equal(false)
+        expect(result.code).to_equal("malformed_formula")
+        expect(ui_access_find_node(controller.snapshot(), "main#cell_A1").text_value).to_equal("")
+
     it "applies shared UISession events to the authoritative sheet":
         val controller = calc_access_controller_new()
         controller.apply_ui_event(UIEvent.FocusEvent(target_id: "cell_A1", kind: "focus"))
@@ -85,3 +95,52 @@ describe "Calc semantic UI access controller":
         controller.apply_ui_event(UIEvent.Action(name: "invoke"))
 
         expect(ui_access_find_node(controller.snapshot(), "main#cell_A1").text_value).to_equal("6")
+
+    it "publishes every advertised viewport cell to the live session":
+        val controller = calc_access_controller_new()
+        val session = UISession.new(controller.ui_tree())
+        val live = session.access_snapshot()
+
+        # T30 proves the live protocol tree, not merely the controller's
+        # private snapshot, exposes the far end of the full 20 by 30 grid.
+        expect(ui_access_find_node(live, "main#cell_A1").canonical_id).to_equal("main#cell_A1")
+        expect(ui_access_find_node(live, "main#cell_T30").canonical_id).to_equal("main#cell_T30")
+
+    it "incrementally refreshes the stable live tree after select type and commit":
+        val controller = calc_access_controller_new()
+        val session = UISession.new(controller.ui_tree())
+
+        controller.apply_ui_event_to_session(session, UIEvent.FocusEvent(target_id: "cell_B2", kind: "focus"))
+        controller.apply_ui_event_to_session(session, UIEvent.InputChange(target_id: "formula_input", value: "42"))
+        controller.apply_ui_event_to_session(session, UIEvent.Action(name: "invoke"))
+
+        val live = session.access_snapshot()
+        expect(ui_access_find_node(live, "main#cell_B2").selected).to_equal(true)
+        expect(ui_access_find_node(live, "main#cell_B2").text_value).to_equal("42")
+        expect(ui_access_find_node(live, "main#formula_input").text_value).to_equal("42")
+        # Far cells remain in this same long-lived UISession tree; this proves
+        # the refresh did not replace it with a compact/action-only projection.
+        expect(ui_access_find_node(live, "main#cell_T30").canonical_id).to_equal("main#cell_T30")
+
+    it "uses the same authoritative session for terminal bytes and UI access":
+        val controller = calc_access_controller_new()
+        val session = UISession.new(controller.ui_tree())
+
+        # TUI typing selects A1's formula field, then commits into the live
+        # semantic tree; no parallel workbook/session is involved.
+        expect(controller.apply_terminal_byte(session, 54, 0)).to_equal(0)
+        expect(controller.apply_terminal_byte(session, 13, 0)).to_equal(0)
+
+        val live = session.access_snapshot()
+        expect(ui_access_find_node(live, "main#cell_A1").text_value).to_equal("6")
+
+    it "rebuilds the shared viewport tree when terminal navigation scrolls":
+        val controller = calc_access_controller_new()
+        val session = UISession.new(controller.ui_tree())
+        controller.apply_ui_event_to_session(session, UIEvent.FocusEvent(target_id: "cell_A30", kind: "focus"))
+        expect(controller.apply_terminal_byte(session, 27, 0)).to_equal(1)
+        expect(controller.apply_terminal_byte(session, 91, 1)).to_equal(2)
+        expect(controller.apply_terminal_byte(session, 66, 2)).to_equal(0)
+
+        val live = session.access_snapshot()
+        expect(ui_access_find_node(live, "main#cell_A31").canonical_id).to_equal("main#cell_A31")

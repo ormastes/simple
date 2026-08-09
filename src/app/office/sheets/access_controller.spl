@@ -19,11 +19,15 @@ use common.ui.access.{
 }
 use app.office.sheets.sheets_app.{SheetsApp}
 use app.office.sheets.spreadsheet.{Sheet}
-use app.office.sheets.cell.{CellRef, cell_ref_to_string, cell_display_text, col_to_letter, parse_cell_ref}
+use app.office.sheets.cell.{CellRef, CellValue, cell_ref_to_string, cell_display_text, parse_cell_ref}
 use app.office.file_formats.{recalculate_formula_cells}
+use app.office.sheets.formula.{evaluate_formula}
 use common.ui.builder.{column, button, text_field, build_tree_with_title}
+use common.ui.spreadsheet_grid.{spreadsheet_grid_default_metrics, spreadsheet_grid_width, spreadsheet_grid_column_label, spreadsheet_grid_widget}
 use common.ui.widget.{UITree, UIEvent, WidgetNode, WidgetKind}
+use nogc_sync_mut.ui.session.{UISession}
 use std.common.encoding.utf8.{text_truncate_bytes}
+use std.common.string_core.{char_from_code}
 
 pub val CALC_ACCESS_SURFACE_ID: text = "main"
 pub val CALC_ACCESS_APP_ID: text = "office.calc"
@@ -47,6 +51,19 @@ impl CalcAccessController:
     static fn new() -> CalcAccessController:
         val app = SheetsApp.new()
         CalcAccessController(app: app, sheet: app.workbook.active(), events: [], sequence: 0)
+
+    static fn with_sheet(sheet: Sheet) -> CalcAccessController:
+        """Create the shared Calc interaction model around a loaded sheet.
+
+        SheetsApp navigation and edit-mode helpers read `workbook.active()`.
+        Install the loaded sheet there as well as in the controller so a cell
+        selected from a file never reads formula text from an unrelated empty
+        workbook.
+        """
+        var app = SheetsApp.new()
+        app.workbook.sheets = [sheet]
+        app.workbook.active_sheet = 0
+        CalcAccessController(app: app, sheet: sheet, events: [], sequence: 0)
 
     fn snapshot() -> UiAccessSnapshot:
         val active_ref = cell_ref_to_string(self.app.active_cell)
@@ -140,8 +157,21 @@ impl CalcAccessController:
             if not self.app.editing:
                 return self._finish_action(false, "interaction_required", rid, canonical_id)
             val ref = cell_ref_to_string(self.app.active_cell)
+            # A malformed expression must not replace the real cell value.
+            # Formula evaluation is performed before mutation and any error is
+            # returned through the normal correlated action result.
+            if self.app.formula_text.starts_with("="):
+                match evaluate_formula(self.app.formula_text, self.sheet):
+                    CellValue.ErrorVal(_):
+                        return self._finish_action(false, "malformed_formula", rid, canonical_id)
+                    _:
+                        pass_dn
             self.sheet.set_value(ref, self.app.formula_text)
             self.sheet = recalculate_formula_cells(self.sheet)
+            # SheetsApp navigation always reads workbook.active(); keep that
+            # authoritative sheet identical to the recalculated controller
+            # value so later selections cannot resurrect stale formulas.
+            self.app.workbook.sheets = [self.sheet]
             self.app.editing = false
             self.app.modified = true
             return self._finish_action(true, "ok", rid, canonical_id)
@@ -154,29 +184,29 @@ impl CalcAccessController:
     fn tui_text() -> text:
         val active_ref = cell_ref_to_string(self.app.active_cell)
         var out = "Simple Calc\nCell: " + active_ref + "  Formula: " + self.app.formula_text + "\n\n    "
-        # Preserve SheetsApp's established full viewport: 20 columns x 30
-        # rows. Four row-header columns plus twenty 6-column cells produce a
-        # 124-column frame; seven title/formula/status rows make it 37 rows.
+        # Shared web/TUI grid contract: terminal paint is local, but viewport
+        # dimensions and row-major labels are not.
+        val metrics = spreadsheet_grid_default_metrics()
         val cols = self.app.visible_cols
         val rows = self.app.visible_rows
         var col = 0
         while col < cols:
-            out = out + _calc_access_pad(col_to_letter(self.app.scroll_col + col), 6)
+            out = out + _calc_access_pad(spreadsheet_grid_column_label(self.app.scroll_col + col), metrics.cell_width)
             col = col + 1
         var row = 0
         while row < rows:
-            out = out + "\n" + _calc_access_pad((self.app.scroll_row + row + 1).to_text(), 4)
+            out = out + "\n" + _calc_access_pad((self.app.scroll_row + row + 1).to_text(), metrics.row_header_width)
             col = 0
             while col < cols:
                 val ref = cell_ref_to_string(CellRef(col: self.app.scroll_col + col, row: self.app.scroll_row + row))
                 var display = cell_display_text(self.sheet.get_cell(ref))
                 if display.len() > 5:
                     display = display.substring(0, 5)
-                out = out + _calc_access_pad(display, 6)
+                out = out + _calc_access_pad(display, metrics.cell_width)
                 col = col + 1
             row = row + 1
         val content = out + "\n\n" + (if self.app.editing: "Editing" else: "Ready")
-        _calc_access_frame_124x37(content)
+        _calc_access_frame(content, spreadsheet_grid_width(metrics), 37)
 
     fn ui_tree() -> UITree:
         """Project the authoritative Calc model into the shared UISession tree."""
@@ -194,18 +224,28 @@ impl CalcAccessController:
         confirm = confirm.set_prop("text", "Confirm edit")
         children.push(confirm)
 
-        # UISession is the action transport, not the authoritative full-grid
-        # snapshot. Keep its mutable widget tree compact so one cell edit does
-        # not rebuild 600 buttons; snapshot() still exposes all 20x30 cells.
-        for ref in ["A1", "A2", "B1", "C1", "T30"]:
-            val display = cell_display_text(self.sheet.get_cell(ref))
-            var cell = button("cell_" + ref, display, "select")
-            cell = cell.set_prop("text", display)
-            cell = cell.set_prop("value", display)
-            cell = cell.set_prop("ref", ref)
-            if ref == cell_ref_to_string(self.app.active_cell):
-                cell = cell.set_prop("selected", "true")
-            children.push(cell)
+        # The live UISession is the discovery and action authority.  Publish
+        # every visible cell through the same common grid semantic tree used
+        # by the web producer and common.ui.layout.
+        val metrics = spreadsheet_grid_default_metrics()
+        var cells: [WidgetNode] = []
+        var row = 0
+        while row < self.app.visible_rows:
+            var col = 0
+            while col < self.app.visible_cols:
+                val ref = cell_ref_to_string(CellRef(col: self.app.scroll_col + col, row: self.app.scroll_row + row))
+                val display = cell_display_text(self.sheet.get_cell(ref))
+                var cell = button("cell_" + ref, display, "select")
+                cell = cell.set_prop("text", display)
+                cell = cell.set_prop("value", display)
+                cell = cell.set_prop("ref", ref)
+                cell = cell.set_prop("raw_formula", self.sheet.get_cell(ref).value)
+                if ref == cell_ref_to_string(self.app.active_cell):
+                    cell = cell.set_prop("selected", "true")
+                cells.push(cell)
+                col = col + 1
+            row = row + 1
+        children.push(spreadsheet_grid_widget("sheet_grid", cells, metrics))
         build_tree_with_title(column("root", children), "Simple Calc", "glass_dark")
 
     me apply_ui_event(event: UIEvent):
@@ -227,6 +267,118 @@ impl CalcAccessController:
                     self.act(calc_access_confirm_edit_id(), "invoke", "", "")
             _:
                 pass_dn
+
+    me apply_ui_event_to_session(mut session: UISession, event: UIEvent):
+        """Apply an access event and patch only its affected live widgets.
+
+        The Calc tree is deliberately constructed once at server startup: it
+        contains all 600 viewport cells so every discovered target remains
+        actionable.  Replacing that tree after every keystroke used to rebuild
+        and diff the entire grid.  Keep the model authoritative, then mutate
+        only the stable widgets whose observable properties changed.
+        """
+        val previous_active = cell_ref_to_string(self.app.active_cell)
+        val previous_scroll_row = self.app.scroll_row
+        val previous_scroll_col = self.app.scroll_col
+        self.apply_ui_event(event)
+        session.dispatch(event)
+        val active_ref = cell_ref_to_string(self.app.active_cell)
+
+        # A viewport move changes stable identities (for example A1:T30 to
+        # A2:T31), so it is the one case that must replace the semantic grid.
+        # Ordinary edits remain incremental.
+        if previous_scroll_row != self.app.scroll_row or previous_scroll_col != self.app.scroll_col:
+            session.update_tree(self.ui_tree())
+            return
+
+        # A changed selection has exactly two affected cell widgets.
+        if previous_active != active_ref:
+            session.set_surface_widget_prop(
+                CALC_ACCESS_SURFACE_ID, "cell_" + previous_active, "selected", "false"
+            )
+            session.set_surface_widget_prop(
+                CALC_ACCESS_SURFACE_ID, "cell_" + active_ref, "selected", "true"
+            )
+            session.set_surface_widget_value(
+                CALC_ACCESS_SURFACE_ID, CALC_ACCESS_FORMULA_INPUT_ID, self.app.formula_text
+            )
+            session.set_surface_widget_prop(
+                CALC_ACCESS_SURFACE_ID, CALC_ACCESS_FORMULA_INPUT_ID, "text", self.app.formula_text
+            )
+
+        match event:
+            UIEvent.InputChange(target_id, _):
+                if target_id == CALC_ACCESS_FORMULA_INPUT_ID:
+                    session.set_surface_widget_value(
+                        CALC_ACCESS_SURFACE_ID, CALC_ACCESS_FORMULA_INPUT_ID, self.app.formula_text
+                    )
+                    session.set_surface_widget_prop(
+                        CALC_ACCESS_SURFACE_ID, CALC_ACCESS_FORMULA_INPUT_ID, "text", self.app.formula_text
+                    )
+            UIEvent.Action(name):
+                if name == "invoke":
+                    val display = cell_display_text(self.sheet.get_cell(active_ref))
+                    session.set_surface_widget_value(
+                        CALC_ACCESS_SURFACE_ID, "cell_" + active_ref, display
+                    )
+                    session.set_surface_widget_prop(
+                        CALC_ACCESS_SURFACE_ID, "cell_" + active_ref, "text", display
+                    )
+                    session.set_surface_widget_prop(
+                        CALC_ACCESS_SURFACE_ID, "cell_" + active_ref, "raw_formula", self.sheet.get_cell(active_ref).value
+                    )
+            _:
+                pass_dn
+
+    me apply_terminal_byte(mut session: UISession, byte: i64, pending_escape: i32) -> i32:
+        """Apply one terminal byte through the same model as UI access.
+
+        The session host owns this method's controller and UISession.  The
+        input reader never touches either object; it only places bytes on its
+        channel.  Return -1 for quit, otherwise the ESC decoder state.
+        """
+        if byte < 0 or byte == 113: # EOF or q
+            return -1
+        if pending_escape == 1:
+            if byte == 91:
+                return 2
+            return 0
+        if pending_escape == 2:
+            var col = self.app.active_cell.col
+            var row = self.app.active_cell.row
+            if byte == 65 and row > 0:
+                row = row - 1
+            elif byte == 66:
+                row = row + 1
+            elif byte == 67:
+                col = col + 1
+            elif byte == 68 and col > 0:
+                col = col - 1
+            val ref = cell_ref_to_string(CellRef(col: col, row: row))
+            self.apply_ui_event_to_session(session, UIEvent.FocusEvent("cell_" + ref, "focus"))
+            return 0
+        if byte == 27:
+            return 1
+        if byte == 10 or byte == 13:
+            if self.app.editing:
+                self.apply_ui_event_to_session(session, UIEvent.Action(name: "invoke"))
+            else:
+                self.app.enter_edit_mode()
+                session.set_surface_widget_value(
+                    CALC_ACCESS_SURFACE_ID, CALC_ACCESS_FORMULA_INPUT_ID, self.app.formula_text
+                )
+            return 0
+        if byte == 127 or byte == 8:
+            if self.app.editing and self.app.formula_text.len() > 0:
+                val next = self.app.formula_text.substring(0, self.app.formula_text.len() - 1)
+                self.apply_ui_event_to_session(session, UIEvent.InputChange(CALC_ACCESS_FORMULA_INPUT_ID, next))
+            return 0
+        if byte >= 32 and byte <= 126:
+            if not self.app.editing:
+                self.app.enter_edit_mode()
+            val next = self.app.formula_text + char_from_code(byte)
+            self.apply_ui_event_to_session(session, UIEvent.InputChange(CALC_ACCESS_FORMULA_INPUT_ID, next))
+        0
 
     me _record(widget_id: text, kind: text, payload: text):
         self.sequence = self.sequence + 1
@@ -253,6 +405,9 @@ impl CalcAccessController:
 
 fn calc_access_controller_new() -> CalcAccessController:
     CalcAccessController.new()
+
+fn calc_access_controller_with_sheet(sheet: Sheet) -> CalcAccessController:
+    CalcAccessController.with_sheet(sheet)
 
 fn calc_access_cell_id(ref: text) -> text:
     ui_access_canonical_id(CALC_ACCESS_SURFACE_ID, "cell_" + ref.upper())
@@ -300,15 +455,15 @@ fn _calc_access_pad(value: text, width: i32) -> text:
         out = out + " "
     out
 
-fn _calc_access_frame_124x37(content: text) -> text:
+fn _calc_access_frame(content: text, width: i32, height: i32) -> text:
     val source_lines = content.split("\n")
     var lines: [text] = []
     var row = 0
-    while row < 37:
+    while row < height:
         var line = if row < source_lines.len(): source_lines[row] else: ""
-        if line.len() > 124:
-            line = text_truncate_bytes(line, 124)
-        lines = lines.push(_calc_access_pad(line, 124))
+        if line.len() > width:
+            line = text_truncate_bytes(line, width)
+        lines = lines.push(_calc_access_pad(line, width))
         row = row + 1
     lines.join("\n")
 

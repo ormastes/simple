@@ -1,11 +1,12 @@
 <!-- codex-design -->
 # Office CLI/TUI UI Access Agent Tasks
 
-## Selected Lane
+## Corrective Lane (2026-08-08)
 
-Feature F1 and NFR N1. Research and final requirement documents are owned by
-their concurrent lane and are not edited here. This plan preserves unrelated
-dirty work and assigns ownership by file/module lane.
+Feature F1 and NFR N1 are not complete. An independent audit found a split
+small/full Calc TUI, a five-cell live UI tree, and an SSpec that read stale
+evidence instead of executing its gate. This plan preserves unrelated dirty
+work and assigns the corrective ownership needed for genuine acceptance.
 
 ## Frozen Shared Interfaces
 
@@ -50,9 +51,9 @@ Manual step names are frozen in
 | F1/N1 design+SSpec | this Codex lane | architecture, TUI/detail design, plans, executable spec | none |
 | Unified CLI | production implementation owner | startup-light IDE/Office dispatch and help/errors | design |
 | Formula | production implementation owner | pure `AVG -> AVERAGE` alias plus unit regression | design |
-| Calc controller/UI | production implementation owner | sheet/session/controller, stable nodes, real TUI reuse | CLI + design |
+| Calc controller/UI | production implementation owner | loaded-sheet/session/controller, one normal TUI model, full 20x30 live tree | CLI + design |
 | Access action | production implementation owner | value-bearing safe act input and correlated history | controller |
-| System gate | production/test implementation owner | deployed process/PTy/protocol/perf evidence gate | all production lanes |
+| System gate | production/test implementation owner | deployed self-hosted process/PTy/protocol/perf gate with unique run ID | all production lanes |
 | Manual/evidence audit | merge owner after runnable PASS | generated manual, diagram update, evidence audit registration | executable spec PASS |
 | Verification | final reviewer | focused tests, audits, N1 evidence, no SGTTI/source fallback | merged implementation |
 
@@ -83,14 +84,14 @@ real failed expectation. Silent no-op helpers, `pass_todo`, and
 
 ## Handoff Checklist
 
-- [ ] CLI owns `--tui|--gui` before global filtering.
-- [ ] Preferred and compatibility Office routes work.
-- [ ] Stable Calc nodes and value-bearing actions exist.
-- [ ] Formula multiplication and AVG witness pass.
-- [ ] Independent post-state and correlated history pass.
-- [ ] PTY/text/ANSI/XLSX/protocol evidence is current.
-- [ ] N1 timings/RSS/history bounds pass.
-- [ ] Production closure excludes SGTTI and raw source fallback.
-- [ ] Focused SSpec runs before docgen.
-- [ ] Generated manual reports `0 stubs`.
-- [ ] UI evidence audit recognizes canonical non-`test/` manual path.
+- [ ] CLI owns `--tui|--gui` without raw-source dispatch.
+- [ ] Preferred and compatibility routes use one Calc model.
+- [ ] All 20x30 cells are live semantic targets.
+- [ ] Formula multiplication and AVG pass through deployed UI actions.
+- [ ] Independent post-state and correlated history pass live.
+- [ ] Current actual PTY ANSI/text/protocol evidence is retained.
+- [ ] N1 startup/query/action/RSS/history bounds pass on a deployed runtime.
+- [ ] Production closure excludes SGTTI and raw-source fallback.
+- [ ] Focused SSpec invokes the gate before docgen.
+- [ ] Generated manual reports `0 stubs` and requirement-specific evidence.
+- [ ] UI evidence uses the canonical manual path.

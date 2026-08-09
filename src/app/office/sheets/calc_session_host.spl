@@ -1,0 +1,132 @@
+# Calc's one-process terminal and semantic-UI host.
+#
+# The host is the sole owner of CalcAccessController and UISession.  A small
+# stdin reader thread transfers bytes only; all workbook/UI mutations and all
+# HTTP test-api dispatch happen in this main accept_timeout loop.
+
+use app.office.sheets.access_controller.{CalcAccessController, calc_access_controller_with_sheet}
+use app.office.interactive.{editor_load_sheet}
+use app.ui.standalone.bootstrap.{StandaloneOptions, standalone_handle_stream}
+use nogc_sync_mut.ui.session.{UISession}
+use common.ui.widget.{UIEvent}
+use std.nogc_sync_mut.io.tcp.{TcpListener}
+use std.nogc_sync_mut.concurrent.channel.{Channel, channel_new, channel_from_id}
+use std.nogc_sync_mut.concurrent.thread.{thread_spawn_with_args}
+use std.common.string_core.{char_from_code}
+use std.nogc_sync_mut.io_runtime.{thread_sleep}
+
+extern fn rt_stdin_read_byte() -> i64
+extern fn rt_terminal_enable_raw_mode() -> bool
+extern fn rt_terminal_disable_raw_mode() -> bool
+
+class CalcSessionHost:
+    controller: CalcAccessController
+    session: UISession
+    input_bytes: Channel
+    running: bool
+    pending_escape: i32
+
+    static fn open(in_path: text) -> CalcSessionHost:
+        var controller = calc_access_controller_with_sheet(editor_load_sheet(in_path))
+        val session = UISession.new(controller.ui_tree())
+        CalcSessionHost(
+            controller: controller,
+            session: session,
+            input_bytes: channel_new(),
+            running: true,
+            pending_escape: 0
+        )
+
+    me run(port: i32) -> i32:
+        if port < 0 or port > 65535:
+            print "Error: Calc UI access port must be between 1 and 65535"
+            return 1
+        if port == 0:
+            return self._run_terminal_only()
+        val address = "127.0.0.1:" + port.to_text()
+        match TcpListener.bind(address):
+            Err(e):
+                print "Error: Calc UI access bind failed: {e}"
+                return 1
+            Ok(listener):
+                print "[calc] UI access ready on http://{address}/api/test/ready"
+                if not rt_terminal_enable_raw_mode():
+                    print "Error: Calc TUI requires a terminal with raw-mode support"
+                    return 1
+                self._spawn_input_reader()
+                self._redraw()
+                val opts = StandaloneOptions.new_with_title(address, "Simple Calc TUI")
+                val inject = \event:
+                    self.controller.apply_ui_event_to_session(self.session, event)
+                    self._redraw()
+                while self.running:
+                    match listener.accept_timeout(25):
+                        Ok(stream):
+                            # A partial HTTP client must not monopolize the
+                            # host loop and starve terminal edits. The shared
+                            # standalone parser performs bounded reads using
+                            # these per-connection deadlines.
+                            stream.set_read_timeout(1000)
+                            stream.set_write_timeout(1000)
+                            standalone_handle_stream(stream, self.session, inject, opts)
+                        Err(_):
+                            pass_dn
+                    self._drain_terminal_bytes()
+                self.input_bytes.close()
+                rt_terminal_disable_raw_mode()
+                print "bye"
+                return 0
+
+    me _run_terminal_only() -> i32:
+        """Run the normal Calc TUI through the same controller/session host.
+
+        No listener is bound for the normal command, but there is still no
+        second workbook or legacy terminal state machine.
+        """
+        if not rt_terminal_enable_raw_mode():
+            print "Error: Calc TUI requires a terminal with raw-mode support"
+            return 1
+        self._spawn_input_reader()
+        self._redraw()
+        while self.running:
+            self._drain_terminal_bytes()
+            # The keyboard reader blocks; yield while its channel is empty
+            # instead of busy-spinning the normal no-server TUI.
+            thread_sleep(10)
+        self.input_bytes.close()
+        rt_terminal_disable_raw_mode()
+        print "bye"
+        0
+
+    me _spawn_input_reader():
+        val input_channel_id = self.input_bytes.id()
+        val reader = thread_spawn_with_args(input_channel_id, 0, \channel_id, _:
+            val channel = channel_from_id(channel_id)
+            loop:
+                channel.send(rt_stdin_read_byte())
+        )
+        reader.free()
+
+    me _drain_terminal_bytes():
+        var queued = self.input_bytes.try_recv()
+        while queued != nil and self.running:
+            val byte: i64 = queued
+            self.pending_escape = self.controller.apply_terminal_byte(self.session, byte, self.pending_escape)
+            if self.pending_escape < 0:
+                self.running = false
+            else:
+                self._redraw()
+            queued = self.input_bytes.try_recv()
+
+    me _redraw():
+        # The controller returns normalized 124x37 text for protocol and
+        # evidence comparison. Terminal ownership adds actual ANSI redraw
+        # control, so the PTY transcript proves a rendered surface.
+        val esc = char_from_code(27)
+        print "{esc}[2J{esc}[H" + self.controller.tui_text()
+
+fn run_calc_session_host(port: i32, in_path: text) -> i32:
+    var host = CalcSessionHost.open(in_path)
+    host.run(port)
+
+export CalcSessionHost, run_calc_session_host

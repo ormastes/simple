@@ -45,7 +45,7 @@ Provide first-class Simple CLI launch and semantic UI-access support for the IDE
 
 ## Phase
 
-design-and-implementation
+corrective-implementation-and-evidence
 
 ## Log
 
@@ -60,3 +60,56 @@ design-and-implementation
 - requirements: User selected F1 and N1 and explicitly requested parallel
   subagents. Final feature/NFR documents now contain the selected contract;
   unchosen option documents were deleted as required.
+- audit (2026-08-08): Prior completion evidence was rejected. The normal Calc
+  route rendered a separate used-range TUI, the live server published only five
+  cells, the supplied workbook was dropped by the access-service route, and
+  the SSpec only read stale receipts. Corrective implementation must retain
+  AC-1 through AC-8 and prove them through a deployed self-hosted binary.
+- implementation (2026-08-08): Corrective source work routes Office/IDE
+  directly to owners, preserves Calc input paths for UI access, publishes the
+  complete visible 20x30 UI tree, fixes the normal TUI frame, and normalizes
+  AVG before common formula lookup. Live-process verification remains active.
+- docs (2026-08-08): Architecture, detail design, agent plan, and system-test
+  plan were corrected to remove false completion claims and to retain the
+  deployed PTY/run-ID/self-hosted acceptance criteria.
+- runtime audit (2026-08-08): No valid current self-hosted Office runtime is
+  available. `bin/simple` resolves to a seed despite its release path; the only
+  self-hosted candidate is stale and fails Office launch. Final AC-1/2/4/8
+  evidence must record the deployed artifact path, digest, mtime, real-command
+  stderr, and rejection of all seed markers.
+- wiki (2026-08-08): Updated the IDE/Office and LLM operation guides to state
+  the opt-in loopback service command and prohibit stale/in-process evidence.
+- system-test corrective implementation (2026-08-08): Replaced the
+  controller/receipt gate with a unique-run deployed-process gate. It launches
+  IDE, Calc PTY, loopback Calc access, and public `simple ui` operations;
+  provenance is observed from an Office command rather than inferred from a
+  pathname. The SSpec invokes that gate and reads only its fresh run directory.
+  The prior generated manual is explicitly marked stale pending self-hosted
+  docgen.
+- N1 audit (2026-08-08): The corrected gate is not yet N1-complete. Pending
+  work is one shared terminal/access session, production (non-test) service
+  ownership, observed artifact provenance, warm p95 and RSS-delta receipts,
+  >64 history eviction, protocol/viewport assertions, malformed-formula and
+  terminal-restoration evidence, focused audit/docgen execution, and manual
+  regeneration. These remain blockers for AC-2/4/5/6/8 and goal completion.
+- deployment (2026-08-08): A smallest-path redeploy is essential for final
+  acceptance, but is deferred while unrelated agents have uncommitted changes
+  throughout `src/compiler` and `src/lib`; building now would produce a mixed
+  artifact and violate shared-worktree preservation. Resume only after those
+  owners publish/clean their work, using the documented incremental deploy and
+  its native-cache reuse receipt.
+- host integration (2026-08-08): Added a single-owner `CalcSessionHost` for
+  `office calc FILE --tui --ui-access-port P`. It owns controller/session,
+  services timed loopback requests, and receives terminal bytes through a
+  channel. The system gate captures and drives that same PTY child. Source
+  checks are diagnostic only because every available runtime is a seed.
+- shared layout (2026-08-08): Added `common.ui.spreadsheet_grid` as the single
+  Calc viewport contract. The TUI, UI-access tree, and Office web producer now
+  share row-major labels and metrics; the access tree is a common semantic
+  grid consumed by `common.ui.layout`. ANSI/CSS painting remains local.
+- host hardening (2026-08-08): Normal `office calc --tui` and the opt-in
+  access command now use the same `CalcSessionHost`. The host emits real ANSI
+  redraws, has bounded per-connection I/O, rejects unavailable raw mode, keeps
+  the recalculated workbook/session synchronized, and replaces the semantic
+  grid only when scrolling changes its visible identities. Malformed formula
+  commits fail before mutating the cell.

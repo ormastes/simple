@@ -12,12 +12,14 @@
 
 use app.office.sheets.spreadsheet.{Sheet}
 use app.office.sheets.cell.{cell_display_text, CellRef, cell_ref_to_string, parse_cell_ref, col_to_letter}
+use common.ui.spreadsheet_grid.{spreadsheet_grid_default_metrics, spreadsheet_grid_width, spreadsheet_grid_column_label}
 use app.office.file_formats.{parse_csv_sheet, sheet_to_csv, recalculate_formula_cells}
 use app.office.odf_ooxml.{ods_bytes_to_sheet, xlsx_bytes_to_sheet, sheet_to_ods_bytes, sheet_to_xlsx_bytes}
 use app.office.odf_export.{sheet_to_fods}
 use std.io_runtime.{write_file, read_file, file_exists}
 use std.nogc_sync_mut.sffi.io.{file_read_bytes, file_write_bytes}
 use std.common.string_core.{char_from_code}
+use std.common.encoding.utf8.{text_truncate_bytes}
 use app.office.gui.{SheetGuiSession, SheetGuiView, session_new, sheet_gui_view_with_selection, office_gui_sheet_session_pixels, office_gui_non_background_pixel_count, office_gui_frame_width, office_gui_frame_height, run_gui_live_step, SlideGuiSession, SlideGuiView, slide_session_new, slide_session_view, slide_gui_step, office_gui_slide_pixels}
 use app.office.slides.slide.{Slide}
 
@@ -318,7 +320,51 @@ fn tui_frame(state: TuiState, file_label: text) -> text:
     val title = "{esc}[7m Simple Calc — {file_label} {esc}[0m"
     val formula_bar = "[{ref_str}] {shown}"
     val bar = "{esc}[7m {state.status} {esc}[0m"
-    "{esc}[2J{esc}[H{title}\n{formula_bar}\n\n{sheet_grid_text(state.sheet)}\n\n{bar}"
+    # Calc TUI has a stable spreadsheet viewport, including for a new or
+    # sparse workbook.  Rendering only the used range made an empty file look
+    # like a tiny, broken program even though the editor supports 20x30.
+    "{esc}[2J{esc}[H" + _tui_fixed_frame("{title}\n{formula_bar}\n\n{_tui_viewport_grid(state.sheet)}\n\n{bar}")
+
+fn _tui_viewport_grid(sheet: Sheet) -> text:
+    val metrics = spreadsheet_grid_default_metrics()
+    var out = "    "
+    var col = 0
+    while col < metrics.visible_columns:
+        out = out + _tui_pad(spreadsheet_grid_column_label(col), metrics.cell_width)
+        col = col + 1
+    var row = 0
+    while row < metrics.visible_rows:
+        out = out + "\n" + _tui_pad((row + 1).to_text(), metrics.row_header_width)
+        col = 0
+        while col < metrics.visible_columns:
+            val ref = cell_ref_to_string(CellRef(col: col, row: row))
+            var value = cell_display_text(sheet.get_cell(ref))
+            if value.len() > 5:
+                value = value.substring(0, 5)
+            out = out + _tui_pad(value, metrics.cell_width)
+            col = col + 1
+        row = row + 1
+    out
+
+fn _tui_pad(value: text, width: i32) -> text:
+    var out = value
+    while out.len() < width:
+        out = out + " "
+    out
+
+fn _tui_fixed_frame(content: text) -> text:
+    val source = content.split("\n")
+    var lines: [text] = []
+    var row = 0
+    val metrics = spreadsheet_grid_default_metrics()
+    val width = spreadsheet_grid_width(metrics)
+    while row < 37:
+        var line = if row < source.len(): source[row] else: ""
+        if line.len() > width:
+            line = text_truncate_bytes(line, width)
+        lines = lines.push(_tui_pad(line, width))
+        row = row + 1
+    lines.join("\n")
 
 # Raw-mode keystroke loop. rt_stdin_read_byte DOES resolve when called from
 # an imported module (proven via a probe entry+module pair piping bytes

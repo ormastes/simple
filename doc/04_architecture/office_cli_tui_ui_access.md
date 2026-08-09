@@ -3,10 +3,11 @@
 
 ## Status
 
-Proposed for the explicitly selected F1 feature option and N1 quality profile.
-This document defines architecture and verification contracts only. The final
-requirements are owned by the concurrent requirements lane; this design does
-not authorize a parallel Office automation protocol.
+Corrective design, 2026-08-08: implementation and prior evidence are not
+acceptance-complete. Audit found a split small normal TUI/full access model,
+an incomplete live UI tree, and a receipt-reading SSpec. The requirements and
+this ownership contract remain authoritative; no parallel Office automation
+protocol is authorized.
 
 ## Decision
 
@@ -52,11 +53,12 @@ evaluator. Neither behavior is reimplemented in the controller or UI adapter.
 @direction LR
 SimpleCLI -> IdeCliEntry
 SimpleCLI -> OfficeCliEntry
-OfficeCliEntry -> CalcController
+OfficeCliEntry -> CalcSessionHost
+CalcSessionHost -> CalcController
 CalcController -> SheetModel
 SheetModel -> FormulaEvaluator
-CalcController -> CalcTuiRenderer
-CalcController -> UISession
+CalcSessionHost -> CalcTuiRenderer
+CalcSessionHost -> UISession
 UISession -> UiAccessService
 SimpleUiCLI -> UiAccessService
 UiAccessService -> AccessStore
@@ -94,17 +96,29 @@ system spec -> deployed commands + TUI/protocol/artifact evidence
 | Semantic model | common UI tree/session and access contract | No Office-only snapshot/action schema |
 | Live transport | existing UI test/access service | Loopback service, revision validation, correlated requests |
 | History | existing access store/session | Maximum 64 events per active surface/session |
-| ANSI rendering | existing Calc TUI renderer | Render controller-owned state at deterministic 124x37 capture size |
+| Spreadsheet layout | `common.ui.spreadsheet_grid` + `common.ui.layout` | One row-major viewport contract and semantic grid for web and TUI; backend paint remains local |
+| ANSI rendering | Calc access controller | Render the established 20x30 sheet viewport in a deterministic 124x37 frame |
 | Test-only queries | SGTTI in executable tests only | Production Calc closure must not import or construct SGTTI |
 
 ## Adapter Choice
 
 F1 is a runtime adapter composition, not a compiler feature transform:
 
+- `CalcSessionHost` is the one mutable owner of terminal input, controller,
+  and `UISession`; its reader thread carries bytes only;
 - the Calc controller adapts app-local sheet transitions to `UISession`;
 - the access service adapts the session to the existing
   `simple.access/v1` CLI protocol;
 - the real TUI adapts the same controller state to ANSI output.
+
+### Shared Spreadsheet Layout
+
+`common.ui.spreadsheet_grid` owns Calc's visible row/column counts, header and
+cell metrics, column labels, and row-major `grid` widget construction. The
+Calc access tree uses that semantic grid, which `common.ui.layout` lays out for
+TUI/web consumers. `office/gui.spl` consumes the same metrics and labels for
+its web tree. ANSI padding and CSS/pixel styling remain backend-local; neither
+backend may become the source of grid geometry.
 
 No MDSOC weave is needed. UI access is explicitly launched and does not impose
 snapshot construction, polling, or capture allocation on ordinary non-debug
@@ -162,8 +176,9 @@ the existing formula serialization owner already canonicalizes names.
   owner-specific options.
 - Production wrappers execute cached compiled artifacts; raw `.spl` entrypoint
   fallback and Rust-seed delegation are forbidden.
-- Initial tree construction is proportional to the visible 124x37 viewport,
-  not the entire worksheet.
+- The rendered snapshot, normal TUI, and live `UISession` action tree expose
+  the same visible 20x30 grid. A cell returned by discovery is always an
+  addressable action target.
 - `find` queries inspect the current bounded snapshot; they do not rebuild or
   rescan the filesystem.
 - Actions rebuild at most one visible semantic tree and one TUI frame.
@@ -206,10 +221,10 @@ On the checked-in realistic fixture:
 
 ## Verification Boundary
 
-The system spec invokes the verified self-hosted runtime named by
-`SIMPLE_BINARY`, while its gate launches the deployed Office/IDE commands and
-the canonical `simple ui` CLI. Direct module calls and screenshot-only checks
-cannot satisfy acceptance.
+The system gate launches a self-hosted deployed command/service, records a
+unique run ID, and writes actual PTY plus protocol evidence. The SSpec invokes
+that gate and rejects stale or mismatched receipts. A receipt-reading-only
+SSpec is not valid acceptance evidence.
 
 Test-only orchestration and SGTTI may exist in the executable spec/check gate.
 The normal Office entry, Calc controller, real TUI, IDE entry, and unified CLI
