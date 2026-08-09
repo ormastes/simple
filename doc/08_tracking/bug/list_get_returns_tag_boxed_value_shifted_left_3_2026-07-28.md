@@ -3,11 +3,18 @@
 - **Filed:** 2026-07-28
 - **Severity:** P0 — silent wrong values, no error, on the DEFAULT engine
 - **Status:** FIXED on the JIT (cranelift) + tree-walk interpreter lanes,
-  re-verified 2026-08-07 — see *Re-verification* below. **AOT/native-codegen
-  lane (`native-build --backend cranelift/llvm`) NOT re-verified** (a
-  `native-build` attempt this session failed for an unrelated pipeline reason
-  before reaching the probe; no bootstrap rebuild was in scope). Do **not**
-  read this doc as blanket-closed for the native lane.
+  re-verified 2026-08-07 and again 2026-08-09 — see *Re-verification* entries
+  below. Root cause confirmed 2026-08-09: a missing tag-box **decode/unbox**
+  step on `.get()`'s call site (the "value-vs-address" hypothesis was checked
+  and refuted — `rt_array_get` takes an index and returns a tagged *value*,
+  there is no byte-offset/pointer arithmetic involved). **AOT/native-codegen
+  lane (`native-build --backend cranelift/llvm`) still NOT directly
+  re-verified end-to-end** — three attempts 2026-08-09 were all blocked
+  before reaching `.get()` codegen by a separate, already-tracked pipeline
+  gap (Task #145, see 2026-08-09 entry). Structural evidence (no
+  backend-conditional branching around the decode step) strongly implies the
+  fix already covers AOT too, but that is inference, not a direct run. Do
+  **not** read this doc as blanket-closed for the native lane.
 - **Affects:** every `list.get(i)` call site returning an integer. Index read `a[i]` is CORRECT.
 - **`src/os/crypto/**` `mut`-annotation prohibition (see *Blast radius* below):
   STILL STANDS.** It was written against the JIT lane specifically
@@ -15,6 +22,78 @@
   since the native/AOT lane is unverified and the crypto code is
   correctness-critical, do not lift the prohibition without re-checking that
   lane too.
+
+## Re-verification 2026-08-09 — root cause confirmed (tag-box, not addr/deref); AOT lane still unreachable, but blocker is now identified
+
+Re-ran the JIT-lane repro again (`bin/simple run` on the exact 2026-07-28
+fixture plus a fresh `[10,20,30]`/bracket-assign/`.push()`/`.first()`/
+`.last()`/OOB-miss probe) — all correct, matching the 2026-08-07 table
+below (`xs[1]=99 xs.get(1)=99`, `ys.get(2)=3` after 3 pushes, `ys.get(50) ??
+-1 = -1`). `Array` has no `.set()` method at all (`Runtime error: Function
+'Array.set' not found`) — an unrelated, pre-existing API gap, not a
+regression of this bug; bracket-assign (`xs[1]=99`) is the only mutate path
+and it is correct.
+
+**Root-cause hypothesis check (address/pointer-vs-deref conflation): REFUTED.**
+Read `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl` in
+full around the `.get()`/`.map()`/element-decode lowering (~lines 3230-3900).
+The lowering is: emit a runtime call (`rt_array_get` et al.) that returns a
+**tagged word** (`elem_tagged`), then call `self.decode_runtime_value(elem_tagged,
+elem_type)` to untag/unbox it into the real scalar (`elem_raw`/`elem_decoded`).
+This is a **tag-box decode step**, not a pointer computation — there is no
+`base + i*8` address arithmetic anywhere in this path; `rt_array_get` already
+takes the element *index*, not a byte offset, and returns a *value* (tagged),
+not an address. The historical `<<3` factor is the tag-box's own encoding
+shift (consistent with `128 << 3 = 1024` and `5 << 3 = 40` in the original
+filing), not a missing dereference of an 8-byte-stride element address. The
+bug was: `.get()`'s call site was missing the `decode_runtime_value` step that
+`a[i]` (index-read) already applied — a missing *unbox*, not a missing
+*deref*.
+
+**AOT/native-codegen lane: still not directly executed end-to-end, but the
+blocker is now pinned down and is provably unrelated to this bug.** Three
+`bin/simple native-build --backend cranelift` attempts today (isolated
+`/tmp` fixture + `--source src/lib`, both `--mode one-binary` and default
+`dynload`) all failed identically, before reaching codegen, with:
+
+```
+[mir-lower] WARNING: unresolved method call 'get' lowered to const-0 placeholder (silent-null risk, Task #145)
+[ERROR] MIR error: MIR lowering error: unresolved method call: get
+error: native-build worker exited with code 1.
+```
+
+This is the **generic fail-closed "unresolved method call" guard**
+(`method_calls_literals.spl` ~line 2935, `self.error("unresolved method
+call: {method}", nil)` + `rt_panic` placeholder), already tracked as Task
+#145 / `doc/08_tracking/bug/native_mir_lowering_unresolved_to_u8_and_join_2026-08-08.md`.
+It fires whenever the receiver's runtime-array-ness can't be statically
+resolved from an isolated/minimal `--source` set outside the full compiler+
+app+lib source graph — it is not specific to `.get()` (the same guard also
+covers `.join()`, `.char_at()`, `.slice()`, `.merge()`) and it is not the
+`<<3` shift bug this doc tracks. This matches the 2026-08-07 entry's own
+note that "a `native-build` attempt this session failed for an unrelated
+pipeline reason before reaching the probe."
+
+**Structural argument that the fix is backend-agnostic (why AOT is very
+likely already fixed too, pending an unblocked native-build run):** grepped
+every call site of `decode_runtime_value`/`box_runtime_value` around list
+`.get`/`.set`-equivalent/`[i]`/`.push`/`.map`/`.first`/`.last` lowering in
+`method_calls_literals.spl` and `expr_dispatch.spl`, and the LLVM backend
+(`src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl`) for any
+backend-conditional branching (`self.backend ==`, `is_jit`, etc.) around
+this decode step — **none exists**. The untag/unbox call happens once, at
+MIR-construction time, before any backend (cranelift-JIT, cranelift
+native-object, or LLVM) ever sees the instruction stream; there is no
+separate un-decoded code path reserved for AOT codegen. Given that, a
+backend-specific regression limited to just the native/AOT lane would
+require a *second*, independent bug in a currently-unidentified
+backend-specific lowering step — nothing found supports that. This doc
+should be read as: interpreter + JIT lane **directly verified fixed**
+(2026-08-07 and again 2026-08-09); AOT/native lane **structurally implied
+fixed** by the shared-MIR argument above, but still **not directly executed
+end-to-end** because of the separate Task #145 gap. Do not close this doc's
+AOT caveat until a native-build run actually reaches and exercises
+`.get()` codegen.
 
 ## Re-verification 2026-08-07 — the `<< 3` shift defect is FIXED (JIT + interpreter lanes)
 
