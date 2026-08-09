@@ -120,42 +120,54 @@ struct ModuleSurface:
     constants: Dict<text, ModuleSurfaceConst>
     export_origins: Dict<text, ModuleSurfaceExportOrigin>
 
-struct ModuleSurfaceReexportSource:
-    """Lower-layer representation of one completed re-export lookup.
-
-    This deliberately lives with the module-surface snapshot rather than HIR
-    lowering.  HIR can adapt it to its own result type without making the
-    lower-layer surface model depend on HIR types.
-    """
-    found: bool
-    module_name: text
-    item_name: text
-
 class ModuleSurfaceReexportCache:
-    """Completed root re-export lookups owned by one surface snapshot."""
+    """Completed root re-export lookups owned by one surface snapshot.
+
+    Keep every payload member in an independent scalar dictionary.  A
+    Dict<text, three-field-struct> crosses an unstable native aggregate ABI
+    boundary during self-hosted Stage4 cache reads, corrupting `found` and the
+    source names.  The snapshot still owns one cache object; only its stored
+    representation is deliberately scalar.
+    """
     snapshot_generation: i64
-    entries: Dict<text, ModuleSurfaceReexportSource>
+    found_by_key: Dict<text, i64>
+    module_by_key: Dict<text, text>
+    item_by_key: Dict<text, text>
 
     static fn new(snapshot_generation: i64) -> ModuleSurfaceReexportCache:
         ModuleSurfaceReexportCache(snapshot_generation: snapshot_generation,
-                                   entries: {})
+                                   found_by_key: {},
+                                   module_by_key: {},
+                                   item_by_key: {})
 
 impl ModuleSurfaceReexportCache:
     me has(key: text) -> bool:
-        self.entries.contains_key(key)
+        self.found_by_key.contains_key(key)
 
-    me get(key: text) -> ModuleSurfaceReexportSource:
-        self.entries[key]
+    me found_value(key: text) -> i64:
+        self.found_by_key[key]
 
-    me put(key: text, value: ModuleSurfaceReexportSource):
+    me module_name(key: text) -> text:
+        self.module_by_key[key]
+
+    me item_name(key: text) -> text:
+        self.item_by_key[key]
+
+    me put(key: text, found: i64, module_name: text, item_name: text):
         # Seed interpreter collections use Arc/COW mutation.  Persist the
         # updated Dict back into the cache receiver explicitly.
-        var entries = self.entries
-        entries[key] = value
-        self.entries = entries
+        var found_by_key = self.found_by_key
+        found_by_key[key] = found
+        self.found_by_key = found_by_key
+        var module_by_key = self.module_by_key
+        module_by_key[key] = module_name
+        self.module_by_key = module_by_key
+        var item_by_key = self.item_by_key
+        item_by_key[key] = item_name
+        self.item_by_key = item_by_key
 
     me count() -> i64:
-        self.entries.keys().len()
+        self.found_by_key.keys().len()
 
 struct ModuleSurfacesByName:
     surfaces: [ModuleSurface]
@@ -186,13 +198,21 @@ impl ModuleSurfacesByName:
         var cache = self.reexport_cache
         cache.has(key)
 
-    me reexport_get(key: text) -> ModuleSurfaceReexportSource:
+    me reexport_found_value(key: text) -> i64:
         var cache = self.reexport_cache
-        cache.get(key)
+        cache.found_value(key)
 
-    me reexport_put(key: text, value: ModuleSurfaceReexportSource):
+    me reexport_module_name(key: text) -> text:
         var cache = self.reexport_cache
-        cache.put(key, value)
+        cache.module_name(key)
+
+    me reexport_item_name(key: text) -> text:
+        var cache = self.reexport_cache
+        cache.item_name(key)
+
+    me reexport_put(key: text, found: i64, module_name: text, item_name: text):
+        var cache = self.reexport_cache
+        cache.put(key, found, module_name, item_name)
         # Persist the seed interpreter's COW cache receiver at this owner
         # boundary.  Native class references keep the same identity.
         self.reexport_cache = cache

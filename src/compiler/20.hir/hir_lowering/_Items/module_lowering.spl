@@ -837,18 +837,23 @@ impl HirLowering:
         val memo_key = facade_name + "\t" + wanted
         var module_surfaces = self.module_surfaces
         if depth == 0 and module_surfaces.reexport_has(memo_key):
-            val cached = module_surfaces.reexport_get(memo_key)
-            return HirReexportSource(found: cached.found, module_name: cached.module_name, item_name: cached.item_name)
+            # Read scalar cache fields independently.  Native Stage4 cannot
+            # safely round-trip the former aggregate cache value here.
+            return HirReexportSource(
+                found: module_surfaces.reexport_found_value(memo_key) == 1,
+                module_name: module_surfaces.reexport_module_name(memo_key),
+                item_name: module_surfaces.reexport_item_name(memo_key))
         if self.reexport_active.contains_key(memo_key):
             return HirReexportSource(found: false, module_name: "", item_name: "")
         self.reexport_active[memo_key] = true
         val resolved = self.find_reexport_source_inner(facade_mod, facade_name, wanted, depth)
         self.reexport_active = self.reexport_active.remove(memo_key)
         if depth == 0:
-            module_surfaces.reexport_put(memo_key, ModuleSurfaceReexportSource(
-                found: resolved.found,
-                module_name: resolved.module_name,
-                item_name: resolved.item_name))
+            module_surfaces.reexport_put(
+                memo_key,
+                if resolved.found: 1 else: 0,
+                resolved.module_name,
+                resolved.item_name)
             # Seed interpreter receivers are Arc/COW; write the updated
             # snapshot struct back through the HIR owner.  Native keeps the
             # snapshot-owned cache class shared across lowerings.

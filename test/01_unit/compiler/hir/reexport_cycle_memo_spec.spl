@@ -67,3 +67,58 @@ describe "HIR re-export cycle memo":
         expect(resolved.found).to_equal(true)
         expect(resolved.module_name).to_equal("cycle.owner")
         expect(resolved.item_name).to_equal("Stable")
+        var persisted_snapshot = lowering.module_surfaces
+        expect(persisted_snapshot.reexport_count()).to_equal(1)
+
+        # Exercise the completed positive cache entry through a second
+        # lowering.  Stage4 previously corrupted the aggregate cache payload
+        # at exactly this native ABI boundary.
+        var cached_lowering = hirlowering_for_module("cycle.cached_consumer", persisted_snapshot)
+        val cached = cached_lowering.find_reexport_source(facade, "cycle.a", "Stable", 0)
+        expect(cached.found).to_equal(true)
+        expect(cached.module_name).to_equal("cycle.owner")
+        expect(cached.item_name).to_equal("Stable")
+        persisted_snapshot = cached_lowering.module_surfaces
+        expect(persisted_snapshot.reexport_count()).to_equal(1)
+
+    it "does not carry a completed lookup into a fresh surface snapshot":
+        val log = cycle_memo_logger()
+        val owner_source = "pub fn Stable() -> i64:\n    1"
+        val changed_owner_source = "pub fn Replaced() -> i64:\n    2"
+        val a_source = "use cycle.b.*"
+        val b_source = "use cycle.a.*\nuse cycle.owner.*"
+        val owner = parse_full_frontend(owner_source, "cycle.owner", "cycle.owner", log)
+        val a = parse_full_frontend(a_source, "cycle.a", "cycle.a", log)
+        val b = parse_full_frontend(b_source, "cycle.b", "cycle.b", log)
+        var modules: Dict<text, Module> = {}
+        modules["cycle.owner"] = owner
+        modules["cycle.a"] = a
+        modules["cycle.b"] = b
+        val sources = [
+            SourceFile(path: "cycle/owner.spl", content: owner_source, module_name: "cycle.owner"),
+            SourceFile(path: "cycle/a.spl", content: a_source, module_name: "cycle.a"),
+            SourceFile(path: "cycle/b.spl", content: b_source, module_name: "cycle.b")
+        ]
+        val first_surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+        val first_facade = first_surfaces.surfaces[first_surfaces.index_by_name["cycle.a"]]
+        var first_lowering = hirlowering_for_module("cycle.first_consumer", first_surfaces)
+        val first = first_lowering.find_reexport_source(first_facade, "cycle.a", "Stable", 0)
+        expect(first.found).to_equal(true)
+        expect(first_lowering.module_surfaces.reexport_count()).to_equal(1)
+
+        val changed_owner = parse_full_frontend(changed_owner_source, "cycle.owner", "cycle.owner", log)
+        var changed_modules: Dict<text, Module> = {}
+        changed_modules["cycle.owner"] = changed_owner
+        changed_modules["cycle.a"] = a
+        changed_modules["cycle.b"] = b
+        val changed_sources = [
+            SourceFile(path: "cycle/owner.spl", content: changed_owner_source, module_name: "cycle.owner"),
+            SourceFile(path: "cycle/a.spl", content: a_source, module_name: "cycle.a"),
+            SourceFile(path: "cycle/b.spl", content: b_source, module_name: "cycle.b")
+        ]
+        val fresh_surfaces = module_surfaces_from_modules(changed_modules, changed_sources).unwrap()
+        val fresh_facade = fresh_surfaces.surfaces[fresh_surfaces.index_by_name["cycle.a"]]
+        var fresh_lowering = hirlowering_for_module("cycle.fresh_consumer", fresh_surfaces)
+        val fresh = fresh_lowering.find_reexport_source(fresh_facade, "cycle.a", "Stable", 0)
+        expect(fresh.found).to_equal(false)
+        expect(fresh_lowering.module_surfaces.reexport_count()).to_equal(1)
