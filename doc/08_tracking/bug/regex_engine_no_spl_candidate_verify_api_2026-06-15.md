@@ -5,6 +5,18 @@
 - severity: P3 (lib friction / blocked integration)
 - area: lib/common/regex_engine, lib/common/regex, lib/common/search
 - status: open
+- triage (2026-08-09): FEATURE-REQUEST-NOT-BUG, not a defect. Re-read in
+  full: the doc's own title and "Requested fix / feature" section describe a
+  missing importable `.spl` surface (`compile`/`matches_at`/`is_match`) that
+  was never built, not existing behavior that is broken. The regex engines
+  under `src/lib/common/regex_engine/` and `src/lib/common/regex/` ship as
+  compiled `.smf` only — there is no `.spl` source to regress, and
+  `prefilter.spl`'s existing literal/trigram verify path
+  (`Haystack.matches_at(cand, Pattern)`) is confirmed correct for the
+  patterns it screens today (exact byte match at a candidate offset), so
+  nothing is silently wrong in shipped behavior. Left OPEN as a feature
+  request (new API surface, not a fix), scoped out of this bug-fix pass per
+  mandate: a missing feature is not the same as a bug. No code change.
 
 ## Summary
 The Phase-1 search prefilter (`src/lib/common/search/prefilter.spl`, AC-4) is
