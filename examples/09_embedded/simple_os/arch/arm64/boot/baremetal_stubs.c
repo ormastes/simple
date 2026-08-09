@@ -2035,13 +2035,17 @@ RuntimeValue rt_map_merge(RuntimeValue map_a, RuntimeValue map_b) {
 
 RuntimeValue rt_map_for_each(RuntimeValue map, RuntimeValue callback) { (void)map; (void)callback; return NIL_VALUE; }
 
-RuntimeValue rt_dict_new(void) { return NIL_VALUE; }
-RuntimeValue rt_dict_get(RuntimeValue d, RuntimeValue k) { (void)d; (void)k; return NIL_VALUE; }
-RuntimeValue rt_dict_set(RuntimeValue d, RuntimeValue k, RuntimeValue v) { (void)d; (void)k; (void)v; return NIL_VALUE; }
-RuntimeValue rt_dict_len(RuntimeValue d) { (void)d; return ENCODE_INT(0); }
-RuntimeValue rt_dict_keys(RuntimeValue d) { (void)d; return NIL_VALUE; }
-RuntimeValue rt_dict_values(RuntimeValue d) { (void)d; return NIL_VALUE; }
-RuntimeValue rt_dict_clear(RuntimeValue d) { (void)d; return NIL_VALUE; }
+/* Dict and map share the same RuntimeMap representation on freestanding
+ * SimpleOS. Keep the compatibility ABI truthful: projection and serializer
+ * code commonly writes through rt_index_set/rt_map_set and enumerates through
+ * rt_dict_keys, so stubbed dict reads silently discarded real owned data. */
+RuntimeValue rt_dict_new(void) { return rt_map_new(); }
+RuntimeValue rt_dict_get(RuntimeValue d, RuntimeValue k) { return rt_map_get(d, k); }
+RuntimeValue rt_dict_set(RuntimeValue d, RuntimeValue k, RuntimeValue v) { return rt_map_set(d, k, v); }
+RuntimeValue rt_dict_len(RuntimeValue d) { return rt_map_len(d); }
+RuntimeValue rt_dict_keys(RuntimeValue d) { return rt_map_keys(d); }
+RuntimeValue rt_dict_values(RuntimeValue d) { return rt_map_values(d); }
+RuntimeValue rt_dict_clear(RuntimeValue d) { return rt_map_clear(d); }
 RuntimeValue rt_array_first(RuntimeValue a) { (void)a; return NIL_VALUE; }
 RuntimeValue rt_array_last(RuntimeValue a) { (void)a; return NIL_VALUE; }
 RuntimeValue rt_array_repeat(RuntimeValue v, RuntimeValue n) {
