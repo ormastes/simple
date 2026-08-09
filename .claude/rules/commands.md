@@ -50,7 +50,21 @@ Why there is no partial build: there is **no target/dependency model**. No
 ONE-HOP predicate that never recurses, and is **never called** — its four
 importers take only fingerprint helpers. `action_key.spl` / `cas_store.spl` have
 zero external callers and are not exported from `cache/__init__.spl`.
-Detail: `doc/01_research/compiler/build/lib_only_build_feasibility_2026-08-09.md`.
+Detail: `doc/01_research/compiler/incremental_build/lib_only_build_feasibility_2026-08-09.md`.
+(NOT under `.../compiler/build/` — `.gitignore:106 build/` silently swallows any
+path containing a `build/` component, and `git add` on it is a silent no-op.)
+
+**The mechanism to fix this is designed and written, but wired to nothing:**
+- `src/lib/simple.sdn` already declares `name/version/type: library/dependencies:`
+  — real target edges. Read only by `src/app/info/main.spl:116` (display) and a
+  lint-profile reader. **No build path traverses `dependencies:`.**
+- `action_key.spl:197-204` implements `interface_digest_of` canonically
+  (`simple/interface/v1`), with `ActionDep.iface_digest` and dep sort on
+  `(module_id, iface_digest)`. **`grep -rn interface_digest_of src` returns one
+  line: its own definition. Zero callers — never computed, not merely ignored.**
+- The caches that DO run are content-keyed: `object_cache_key` hashes only the
+  module's own source; `SmfManifestEntry` carries `source_hash` and has no
+  interface-digest field. `SmfManifest` is written but never verified on load.
 
 ## Fast Path (measured 2026-08-09)
 
