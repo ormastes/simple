@@ -249,6 +249,7 @@ class HNode:
     has_focused_class: bool
     id_attr: text
     attrs_raw: text    # raw tag inner text for attribute selectors
+    attrs: {text: text} # canonical typed attributes from the DOM owner
     parent: i64        # index of parent in the arena (-1 for root)
     is_details_summary: bool # first direct summary owned by details
 
@@ -274,7 +275,7 @@ class ClassFlags:
     has_focused_class: bool
 
 fn mk_node(tag: text, parent: i64) -> HNode:
-    HNode(tag: tag, text_data: "", text_trimmed: "", style_attr: "", class_attr: "", class_words: [], has_widget_class: false, has_icon_image_class: false, has_widget_panel_class: false, has_widget_button_class: false, has_widget_image_class: false, has_focused_class: false, id_attr: "", attrs_raw: "", parent: parent, is_details_summary: false)
+    HNode(tag: tag, text_data: "", text_trimmed: "", style_attr: "", class_attr: "", class_words: [], has_widget_class: false, has_icon_image_class: false, has_widget_panel_class: false, has_widget_button_class: false, has_widget_image_class: false, has_focused_class: false, id_attr: "", attrs_raw: "", attrs: {}, parent: parent, is_details_summary: false)
 
 fn build_child_index(nodes: [HNode]) -> HtmlChildIndex:
     val node_count = nodes.len()
@@ -644,13 +645,21 @@ fn class_flags_from_attr(class_attr: text) -> ClassFlags:
         i = i + 1
     flags
 
-fn mk_element_node(tag: text, parent: i64, inner: text) -> HNode:
+fn mk_element_node(
+    tag: text, parent: i64, inner: text,
+    attr_names: [text], attr_values: [text]
+) -> HNode:
     # Construct array-bearing node fields in one typed value. Mutating an
     # initially-empty [text] field and then copying the class into [HNode]
     # loses earlier siblings' array handles in native code.
     val class_attr: text = attr_value_by_key(inner, "class=")
     val class_words: [text] = if class_attr.len() > 0: split_class_words_trimmed(class_attr) else: []
     val flags: ClassFlags = class_flags_from_attr(class_attr)
+    var attrs: {text: text} = {}
+    var attr_i = 0
+    while attr_i < attr_names.len() and attr_i < attr_values.len():
+        attrs[attr_names[attr_i]] = attr_values[attr_i]
+        attr_i = attr_i + 1
     HNode(
         tag: tag,
         text_data: "",
@@ -666,6 +675,7 @@ fn mk_element_node(tag: text, parent: i64, inner: text) -> HNode:
         has_focused_class: flags.has_focused_class,
         id_attr: attr_value_by_key(inner, "id="),
         attrs_raw: inner,
+        attrs: attrs,
         parent: parent,
         is_details_summary: false
     )
@@ -857,7 +867,8 @@ fn _parse_html_with_limits(
             val tag = if flat.tag == "#document": "#root" else: flat.tag
             flat_to_hnode[i] = nodes.len() as i32
             var element = mk_element_node(
-                tag, parent, tag + flat.normalized_attrs
+                tag, parent, tag + flat.normalized_attrs,
+                flat.attr_names, flat.attr_values
             )
             if (
                 tag == "summary" and parent >= 0 and
