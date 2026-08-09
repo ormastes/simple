@@ -117,6 +117,15 @@ spl_u64 rt_riscv64_read_gp(void)
     return value;
 }
 
+void rt_riscv64_fence_i(void) { __asm__ volatile("fence.i" ::: "memory"); }
+void rt_riscv64_cbo_clean(spl_u64 addr) { __asm__ volatile(".option push\n.option arch,+zicbom\ncbo.clean 0(%0)\n.option pop" :: "r"(addr) : "memory"); }
+void rt_riscv64_cbo_inval(spl_u64 addr) { __asm__ volatile(".option push\n.option arch,+zicbom\ncbo.inval 0(%0)\n.option pop" :: "r"(addr) : "memory"); }
+void rt_riscv64_cbo_flush(spl_u64 addr) { __asm__ volatile(".option push\n.option arch,+zicbom\ncbo.flush 0(%0)\n.option pop" :: "r"(addr) : "memory"); }
+void rt_riscv64_cbo_zero(spl_u64 addr) { __asm__ volatile(".option push\n.option arch,+zicboz\ncbo.zero 0(%0)\n.option pop" :: "r"(addr) : "memory"); }
+void rt_riscv64_prefetch_r(spl_u64 addr) { __asm__ volatile(".option push\n.option arch,+zicbop\nprefetch.r 0(%0)\n.option pop" :: "r"(addr)); }
+void rt_riscv64_prefetch_w(spl_u64 addr) { __asm__ volatile(".option push\n.option arch,+zicbop\nprefetch.w 0(%0)\n.option pop" :: "r"(addr)); }
+void rt_riscv64_prefetch_i(spl_u64 addr) { __asm__ volatile(".option push\n.option arch,+zicbop\nprefetch.i 0(%0)\n.option pop" :: "r"(addr)); }
+
 typedef struct RtRiscv64SbiRet {
     spl_i64 error;
     spl_i64 value;

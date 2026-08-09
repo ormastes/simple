@@ -40,3 +40,25 @@ describe "RISC-V64 raw syscall ABI contract":
 
         val linker = file_read("src/compiler/70.backend/backend/llvm_native_link.spl")
         expect(linker).to_contain("RtRiscv64SbiRet rt_riscv64_sbi_call")
+
+    it "keeps startup outside the RISC-V package closure and routes CMO operands through runtime":
+        val hal_smp = file_read("src/os/kernel/arch/riscv64/hal_smp.spl")
+        val hal_cache = file_read("src/os/kernel/arch/riscv64/hal_cache.spl")
+        val user_entry = file_read("src/os/kernel/arch/riscv64/user_entry.spl")
+        expect(hal_smp).to_contain("baremetal.riscv.{sbi_probe_then_send_ipi}")
+        expect(hal_cache).to_contain("baremetal.riscv.{fence_i, cbo_flush, cbo_clean, cbo_inval}")
+        expect(user_entry).to_contain("baremetal.riscv.{fence_i}")
+
+        val package = file_read("src/lib/nogc_async_mut_noalloc/baremetal/riscv/__init__.spl")
+        expect(package.contains("export plic, startup")).to_equal(false)
+        expect(package.contains("export _start, trap_handler")).to_equal(false)
+
+        val cmo = file_read("src/lib/nogc_async_mut_noalloc/baremetal/riscv/cmo.spl")
+        expect(cmo).to_contain("extern fn rt_riscv64_cbo_clean")
+        expect(cmo).to_contain("rt_riscv64_cbo_flush(addr)")
+        expect(cmo.contains("in(reg)")).to_equal(false)
+        expect(cmo.contains("Identifier(")).to_equal(false)
+
+        val runtime = file_read("src/os/kernel/arch/riscv64/boot/freestanding_runtime.c")
+        expect(runtime).to_contain("void rt_riscv64_cbo_clean")
+        expect(runtime).to_contain(".option arch,+zicbom")
