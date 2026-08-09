@@ -2755,6 +2755,8 @@ static uint32_t g_gui_prepared_packed_pixels
 static uint32_t g_gui_prepared_packed_misses = 0;
 static uint32_t g_gui_prepared_packed_full = 0;
 static uint32_t g_gui_prepared_scanout_ready = 0;
+static uint32_t g_gui_prepared_capture_traced = 0;
+static uint32_t g_gui_prepared_replay_traced = 0;
 
 RuntimeValue rt_gui_set_fb(RuntimeValue addr, RuntimeValue w)
 {
@@ -2854,6 +2856,16 @@ RuntimeValue rt_gui_replay_prepared_packed_scanout(RuntimeValue wh)
     uint32_t width = (uint32_t)((uint64_t)wh >> 32);
     uint32_t height = (uint32_t)((uint64_t)wh & 0xffffffffu);
     uint64_t count = (uint64_t)width * height;
+    if (!g_gui_prepared_replay_traced) {
+        g_gui_prepared_replay_traced = 1;
+        serial_puts("[prepared-scanout-runtime] op=replay width=");
+        serial_put_dec(width);
+        serial_puts(" height="); serial_put_dec(height);
+        serial_puts(" fb_width="); serial_put_dec(g_fb_w);
+        serial_puts(" ready="); serial_put_dec(g_gui_prepared_scanout_ready);
+        serial_puts(" cached_len="); serial_put_dec(g_gui_prepared_packed_lens[0]);
+        serial_puts("\r\n");
+    }
     if (!g_fb_addr || !g_fb_w || width != g_fb_w || height != 768u ||
         !g_gui_prepared_scanout_ready ||
         g_gui_prepared_packed_lens[0] != count) return 0;
@@ -2885,6 +2897,15 @@ RuntimeValue rt_gui_capture_prepared_packed_scanout(RuntimeValue wh)
     uint32_t width = (uint32_t)((uint64_t)wh >> 32);
     uint32_t height = (uint32_t)((uint64_t)wh & 0xffffffffu);
     uint64_t count = (uint64_t)width * height;
+    if (!g_gui_prepared_capture_traced) {
+        g_gui_prepared_capture_traced = 1;
+        serial_puts("[prepared-scanout-runtime] op=capture width=");
+        serial_put_dec(width);
+        serial_puts(" height="); serial_put_dec(height);
+        serial_puts(" fb_width="); serial_put_dec(g_fb_w);
+        serial_puts(" count="); serial_put_dec(count);
+        serial_puts("\r\n");
+    }
     if (!g_fb_addr || !g_fb_w || width != g_fb_w || height != 768u ||
         count == 0 || count > GUI_PREPARED_PACKED_CACHE_PIXELS) return 0;
     volatile uint32_t *src = (volatile uint32_t *)(uintptr_t)g_fb_addr;
