@@ -2895,6 +2895,8 @@ RuntimeValue rt_gui_blit_row4(RuntimeValue pixels_value, RuntimeValue src_offset
     int64_t src_offset = (int64_t)src_offset_value;
     uint32_t requested = (uint32_t)((uint64_t)count_value >> 32);
     uint32_t opacity_milli = (uint32_t)((uint64_t)count_value & 0xffffffffu);
+    int trusted_opaque = opacity_milli == 1001u;
+    if (trusted_opaque) opacity_milli = 1000u;
     if (src_offset < 0 || requested == 0 || opacity_milli == 0 || opacity_milli > 1000u ||
         (uint64_t)src_offset >= pixels->len) return 0;
     uint32_t x = (uint32_t)((uint64_t)xy >> 32);
@@ -2922,13 +2924,16 @@ RuntimeValue rt_gui_blit_row4(RuntimeValue pixels_value, RuntimeValue src_offset
 #if defined(__aarch64__)
     if (opacity_milli == 1000u) {
         while (i + 16u <= count) {
-            int sixteen_opaque = 1;
-            for (uint32_t lane = 0; lane < 16u; lane++) {
-                uint32_t pixel = arm64_blit_raw_pixel(
-                    pixels->items[(uint64_t)src_offset + i + lane]);
-                if ((pixel >> 24) != 255u) {
-                    sixteen_opaque = 0;
-                    break;
+            int sixteen_opaque = trusted_opaque;
+            if (!sixteen_opaque) {
+                sixteen_opaque = 1;
+                for (uint32_t lane = 0; lane < 16u; lane++) {
+                    uint32_t pixel = arm64_blit_raw_pixel(
+                        pixels->items[(uint64_t)src_offset + i + lane]);
+                    if ((pixel >> 24) != 255u) {
+                        sixteen_opaque = 0;
+                        break;
+                    }
                 }
             }
             if (!sixteen_opaque) break;
@@ -3002,7 +3007,7 @@ RuntimeValue rt_gui_blit_rect4(RuntimeValue pixels_value, RuntimeValue source_va
     uint32_t width = (uint32_t)((uint64_t)wh >> 32);
     uint32_t height = (uint32_t)((uint64_t)wh & 0xffffffffu);
     if (src_stride == 0u || width == 0u || height == 0u ||
-        opacity_milli == 0u || opacity_milli > 1000u) return 0;
+        opacity_milli == 0u || opacity_milli > 1001u) return 0;
     for (uint32_t row = 0; row < height; row++) {
         uint64_t row_offset = src_offset + (uint64_t)row * src_stride;
         uint64_t row_xy = ((uint64_t)x << 32) | (uint64_t)(y + row);
