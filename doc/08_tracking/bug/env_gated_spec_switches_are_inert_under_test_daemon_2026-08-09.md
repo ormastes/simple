@@ -117,3 +117,96 @@ be inert under the daemon (NOT verified by this stream):
 SIMPLE_REQUIRE_GPU=1 bin/simple test test/03_system/gpu_lane/cuda_debug_session_conformance_spec.spl
 # before the fix: spec body observes nil/false while the caller has it set to "1"
 ```
+
+---
+
+## P14 addendum (2026-08-09): `test_env_gate` family audited by measurement
+
+P13 recommended auditing `src/lib/common/test_env_gate.spl`. Done. P13's guess
+("likely inert too") is **half right, and the correction matters**: the gates are
+not unconditionally inert. Env reaches a spec body **exactly once — at the
+invocation that STARTS the light daemon**. Every later request reads that frozen
+snapshot, in *either* direction.
+
+### Measurement
+
+Probe: `test/01_unit/lib/common/test_env_gate/p14_env_propagation_probe_spec.spl`
+(7 its; each asserts the observed value in the ASSERT MESSAGE, since `step()`
+output is not surfaced). Binary: `bin/release/x86_64-unknown-linux-gnu/simple`.
+
+| # | daemon state | caller env | verbatim result |
+|---|---|---|---|
+| A | cold (`rm -rf .build/test_daemon_light`) | vars exported | `Results: 7 total, 7 passed, 0 failed` |
+| B | warm from A | vars **un**exported | `Results: 7 total, 7 passed, 0 failed` ← **stale AVAILABLE** |
+| C | cold | vars unexported | `Results: 7 total, 0 passed, 7 failed` (`expected observed=nil to equal observed=1`) |
+| D | warm from C | vars exported | `Results: 7 total, 0 passed, 7 failed` ← **stale UNAVAILABLE** |
+
+B and D are the defect; A and C prove the oracle is not a tautology (same file,
+same assertions, opposite verdicts). `bin/simple run` on a direct probe printed
+`HW=true` with `SIMPLE_HW_TEST=1` and `HW=false` without — the **run path is
+correct**.
+
+### Per-gate verdict
+
+All eight gates share one code path (`test_env_available` → `rt_env_get`), so
+the verdict is uniform and is a property of the *daemon*, not of any gate:
+
+| gate | `bin/simple run` | `bin/simple test` | verdict |
+|---|---|---|---|
+| `SIMPLE_HW_TEST` | correct | frozen at daemon start | 2 in practice, 3 if daemon started with it set |
+| `SIMPLE_QEMU_TEST` | correct | frozen | same |
+| `SIMPLE_NET_TEST` | correct | frozen | same |
+| `SIMPLE_GPU_TEST` | correct | frozen | same |
+| `SIMPLE_CUDA_TEST` | correct | frozen | same |
+| `SIMPLE_LLVM_TEST` | correct | frozen | same |
+| `SIMPLE_VHDL_TEST` | correct | frozen | same |
+| `SIMPLE_WASM_TEST` | correct | frozen | same |
+
+**Steady state is outcome 2** (always-skip, vacuous green): the first
+`bin/simple test` of a session starts the daemon with no gate vars, so every
+later `SIMPLE_GPU_TEST=1 bin/simple test ...` still sees the gate CLOSED.
+Outcome 3 (always-run) needs a daemon that was *started* with the var set.
+
+### Blast radius
+
+47 spec files reference `test_env_gate`; discounting the `test/unit/**` and
+`test/feature/**` legacy mirrors, the gate's own unit spec, and the P14 probe,
+**27 canonical specs are affected**:
+
+- `SIMPLE_HW_TEST` (1): `test/01_unit/app/serial_mcp/serial_mcp_spec.spl`
+- `SIMPLE_QEMU_TEST` (0), `SIMPLE_NET_TEST` (0): declared, no canonical consumer yet
+- `SIMPLE_GPU_TEST` (14): `test/01_unit/lib/gpu/engine2d/{backend_qualcomm,device_detect,engine_platform,ffi_cuda,ffi_intel,ffi_rocm,ffi_vulkan}_spec.spl`, `test/01_unit/lib/gc_async_mut/processing/fault_injection_spec.spl`, `test/03_system/app/simpleos_gpu_host/{gpu_backend_failure_injection,macos_metal_processing_ir_failure_injection,processing_ir_fault_source_contract,processing_vulkan_fault_native_contract}_spec.spl`, `test/03_system/feature/usage/{tensor_interface,vulkan}_spec.spl`
+- `SIMPLE_CUDA_TEST` (3): `test/03_system/feature/usage/{cuda,gpu_ptx_gen}_spec.spl`, `test/03_system/io_audio/simple_audio_cuda_q15_env_spec.spl`
+- `SIMPLE_LLVM_TEST` (6): `test/03_system/feature/usage/llvm_backend{,_aarch64,_arm32,_i686,_riscv32,_riscv64}_spec.spl`
+- `SIMPLE_VHDL_TEST` (2): `test/03_system/feature/usage/{vhdl,vhdl_golden}_spec.spl`
+- `SIMPLE_WASM_TEST` (1): `test/03_system/feature/usage/wasm_compile_spec.spl`
+
+Their hardware-path branches have effectively **never executed under
+`bin/simple test`**; the green they contribute is the skip branch's green.
+
+### Fix
+
+`src/app/test_runner_new/test_runner_client.spl`: `_test_env_gate_vars()` /
+`_test_env_gate_names()` + `env_gate_bypass`, folded into the existing
+`daemon_ok` divert alongside `cov_bypass` / `require_gpu_bypass`. Verified
+against the exact scenario D above: same warm gate-less daemon, vars exported →
+`test-env-gate: SIMPLE_HW_TEST, SIMPLE_QEMU_TEST, SIMPLE_NET_TEST,
+SIMPLE_GPU_TEST, SIMPLE_LLVM_TEST set; bypassing test daemon so the gate reaches
+the spec` and `Results: 7 total, 7 passed, 0 failed` (was 0/7 before the edit).
+
+The v2-request fix from the list above is still the right one and is **not** done
+here: it needs a protocol change on both client and daemon, which is larger than
+an audit stream should land blind.
+
+### Residual gaps, stated plainly
+
+- **Scenario B is not fixed.** A daemon started *with* a gate var set keeps
+  reporting it available to later runs that do not set it. The bypass only
+  triggers when the caller sets a var, and the request carries no environment,
+  so there is nothing to compare against. Only the v2 request closes this.
+- The bypass costs the daemon's warm-start saving on any gated run. Accepted:
+  a correct slow answer beats a fast vacuous one.
+- Not measured: whether the gated hardware branches actually *pass* on this host
+  once they really run. This box has CUDA + Vulkan, no Metal, Linux — the Metal
+  and Qualcomm specs would need their own host-awareness audit. Out of scope
+  here, and deliberately not enabled.

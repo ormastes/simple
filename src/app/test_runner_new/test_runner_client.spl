@@ -390,6 +390,30 @@ fn _binary_override_names() -> text:
             names.push(name)
     names.join(", ")
 
+# P14 2026-08-09: the std.common.test_env_gate family. Measured on the daemon
+# lane: env reaches a spec body ONLY at the invocation that STARTED the daemon;
+# every later request reads that frozen snapshot. Proven with a probe spec
+# (test/01_unit/lib/common/test_env_gate/p14_env_propagation_probe_spec.spl):
+# cold daemon + vars exported -> 7/7 pass; SAME warm daemon with the vars
+# unexported -> still 7/7 pass (stale "available"); fresh daemon with vars
+# unexported -> 7/7 fail; then that warm daemon WITH the vars exported -> still
+# 7/7 fail (stale "unavailable"). `bin/simple run` reads them correctly.
+# Steady state in practice is the last case: the first `bin/simple test` of a
+# session starts the daemon with no gate vars, so every subsequent
+# `SIMPLE_GPU_TEST=1 bin/simple test ...` still sees the gate CLOSED and the
+# guarded work silently skips while reporting green.
+fn _test_env_gate_vars() -> [text]:
+    ["SIMPLE_HW_TEST", "SIMPLE_QEMU_TEST", "SIMPLE_NET_TEST", "SIMPLE_GPU_TEST",
+     "SIMPLE_CUDA_TEST", "SIMPLE_LLVM_TEST", "SIMPLE_VHDL_TEST", "SIMPLE_WASM_TEST"]
+
+fn _test_env_gate_names() -> text:
+    var names: [text] = []
+    for name in _test_env_gate_vars():
+        val v = env_get(name) ?? ""
+        if v != "" and v != "0":
+            names.push(name)
+    names.join(", ")
+
 fn main() -> i64:
     val cleaned = clean_args()
     if has_spl_doctest_flag(cleaned):
@@ -459,6 +483,16 @@ fn main() -> i64:
     # pass for the wrong reason. Fail-safe: any request that names one of these
     # overrides takes the direct lane, where the child really does inherit it.
     val binary_override_bypass = _has_binary_override()
+    # test_env_gate family: see _test_env_gate_vars above. Bypass the daemon
+    # whenever the caller sets one, so the value actually reaches the spec.
+    # Residual gap stated plainly: this cannot repair the OPPOSITE direction --
+    # a daemon started WITH a gate var set keeps reporting it available to
+    # later runs that do not set it, and there is nothing here to detect that
+    # because the v1 request carries no environment. The real fix is to put the
+    # caller's environment in the request; this is the same fail-safe divert the
+    # four bypasses above use.
+    val env_gate_names = _test_env_gate_names()
+    val env_gate_bypass = env_gate_names != ""
     # Same defect class again, and the reason the 2026-07-27 fix did not hold.
     # The light daemon is pinned for its ENTIRE LIFETIME to whichever binary
     # spawned it, and the v1 request carries only a path + expiry — no binary.
@@ -475,13 +509,15 @@ fn main() -> i64:
     # A --timeout beyond the daemon protocol cap cannot ride the daemon lane
     # (the request would be clamped and the spec killed at ~600s); run
     # directly so the full requested timeout is honored.
-    val daemon_ok = if cov_bypass or binary_override_bypass or long_timeout_bypass or invoker_bypass or require_gpu_bypass: false else: ensure_daemon()
+    val daemon_ok = if cov_bypass or binary_override_bypass or long_timeout_bypass or invoker_bypass or require_gpu_bypass or env_gate_bypass: false else: ensure_daemon()
     var binary = ""
     if not daemon_ok:
         if cov_bypass:
             print "coverage: SIMPLE_COVERAGE set; bypassing test daemon"
         elif require_gpu_bypass:
             print "require-gpu: SIMPLE_REQUIRE_GPU set; bypassing test daemon so the requirement reaches the spec"
+        elif env_gate_bypass:
+            print "test-env-gate: {env_gate_names} set; bypassing test daemon so the gate reaches the spec"
         elif invoker_bypass:
             print "invoking-binary: live test daemon runs {daemon_binary} but this process is {invoker}; bypassing daemon so the invoking binary executes the spec"
         elif binary_override_bypass:
