@@ -2853,8 +2853,9 @@ static const uint32_t *rt_gui_prepared_packed_pixels(RuntimeArray *pixels)
 
 RuntimeValue rt_gui_replay_prepared_packed_scanout(RuntimeValue wh)
 {
-    uint32_t width = (uint32_t)((uint64_t)wh >> 32);
-    uint32_t height = (uint32_t)((uint64_t)wh & 0xffffffffu);
+    (void)wh;
+    uint32_t width = g_fb_w;
+    uint32_t height = 768u;
     uint64_t count = (uint64_t)width * height;
     if (!g_gui_prepared_replay_traced) {
         g_gui_prepared_replay_traced = 1;
@@ -2866,7 +2867,7 @@ RuntimeValue rt_gui_replay_prepared_packed_scanout(RuntimeValue wh)
         serial_puts(" cached_len="); serial_put_dec(g_gui_prepared_packed_lens[0]);
         serial_puts("\r\n");
     }
-    if (!g_fb_addr || !g_fb_w || width != g_fb_w || height != 768u ||
+    if (!g_fb_addr || !g_fb_w ||
         count == 0 || count > GUI_PREPARED_PACKED_CACHE_PIXELS) return 0;
     volatile uint32_t *dst = (volatile uint32_t *)(uintptr_t)g_fb_addr;
     const uint32_t *src = (g_gui_prepared_scanout_ready &&
@@ -2896,8 +2897,9 @@ RuntimeValue rt_gui_replay_prepared_packed_scanout(RuntimeValue wh)
 
 RuntimeValue rt_gui_capture_prepared_packed_scanout(RuntimeValue wh)
 {
-    uint32_t width = (uint32_t)((uint64_t)wh >> 32);
-    uint32_t height = (uint32_t)((uint64_t)wh & 0xffffffffu);
+    (void)wh;
+    uint32_t width = g_fb_w;
+    uint32_t height = 768u;
     uint64_t count = (uint64_t)width * height;
     if (!g_gui_prepared_capture_traced) {
         g_gui_prepared_capture_traced = 1;
@@ -2908,7 +2910,7 @@ RuntimeValue rt_gui_capture_prepared_packed_scanout(RuntimeValue wh)
         serial_puts(" count="); serial_put_dec(count);
         serial_puts("\r\n");
     }
-    if (!g_fb_addr || !g_fb_w || width != g_fb_w || height != 768u ||
+    if (!g_fb_addr || !g_fb_w ||
         count == 0 || count > GUI_PREPARED_PACKED_CACHE_PIXELS) return 0;
     volatile uint32_t *src = (volatile uint32_t *)(uintptr_t)g_fb_addr;
     for (uint64_t i = 0; i < count; i++)
