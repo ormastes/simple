@@ -12,17 +12,46 @@ ENGINES) and
 
 ## Why the demotion happens
 
-Three layers stack. Only the third is inherent.
+**Four** layers stack (line numbers re-verified 2026-08-09). Only layers 1 and 2
+are policy; 3 and 4 together close the loop.
 
 | # | Layer | Where |
 |---|-------|-------|
-| 1 | The runner pins the child's engine to `interpret` before spawning it | `src/app/test_runner_new/test_runner_single.spl:330-331`, `src/lib/nogc_sync_mut/test_runner/test_runner_execute.spl:86` |
-| 2 | The seed honours the pin | `src/compiler_rust/driver/src/exec_core.rs:37-38` maps `"interpret" \| "interpreter"` to `ExecutionMode::Interpret`; `:638` branches on `is_jit()` |
-| 3 | A module with no `fn main` de-JITs regardless | `src/compiler_rust/driver/src/exec_core.rs:774-781` falls back to `evaluate_module` |
+| 1 | The runner pins the child's engine to `interpret` before spawning it | `src/app/test_runner_new/test_runner_single.spl:811`, `src/lib/nogc_sync_mut/test_runner/test_runner_execute.spl:86`, `src/lib/nogc_sync_mut/test_runner/test_runner_single.spl:170` |
+| 2 | The driver honours the pin | `src/compiler_rust/driver/src/exec_core.rs:120` maps `"interpret" \| "interpreter"` to `ExecutionMode::Interpret`; `:933`/`:936` gate the JIT arm on `is_jit()` |
+| 3 | A module with no `fn main` de-JITs regardless | `exec_core.rs:696-703` and `:1074-1079` fall back to `evaluate_module` |
+| 4 | **A module WITH `fn main` but module-level examples ALSO de-JITs** | `exec_core.rs:1085-1100` bails out deliberately |
 
 Layers 1 and 2 are policy and could be lifted. **Layer 3 cannot be**, and it
 alone is sufficient: a spec file is top-level `describe`/`it` with no `main`,
 so even `SIMPLE_EXECUTION_MODE=jit` routes it to the tree-walker.
+
+### Layer 4 — why "just give the spec a `fn main`" is a dead end
+
+The obvious workaround for layer 3 is to add a `fn main` so the de-JIT stops
+firing. **That door is already nailed shut, and for a good reason.** On the JIT
+entry path the compiled program calls `main` and *nothing else*, so every
+module-level `describe`/`it` statement is simply dropped — the file prints
+whatever `main` prints, reports **zero examples**, and exits **0**. A
+deliberately-failing example becomes invisible. Measured on
+`test/01_unit/compiler/native/baremetal_syntax_spec.spl` (22 blocks, 0 executed)
+and reproduced on a two-example fixture, which runs both examples and exits 1
+the moment its `fn main` is removed. See
+`doc/08_tracking/bug/bare_assert_statement_vacuity_2026-08-02.md` OPEN 3.
+
+So `exec_core.rs:1085-1100` now bails out to the interpreter for any file with
+module-level examples. The consequence for spec authors is absolute:
+
+- spec **without** `main` → layer 3 de-JITs it;
+- spec **with** `main` + module-level examples → layer 4 de-JITs it;
+- spec **with** `main` and examples nested *inside* `main` → this is the only
+  shape that reaches the JIT, and it is the **vacuous** one:
+  `extract_file_test_meta` does not descend into function bodies, so the file
+  reports 0 tests.
+
+There is no fourth shape. Restructuring specs to reach a compiled lane is not a
+matter of effort — it is closed by construction, and the guard against it is
+load-bearing. Out-of-process probing is the only mechanism.
 
 The reason is that `describe` / `it` / `expect` are Rust **interpreter
 intrinsics** with thread-local state
