@@ -34,6 +34,7 @@ hardware - they only verify the text output of the code generator.
 
 use compiler.backend.cuda_backend.{CudaBackend, CudaCompiledModule}
 use compiler.backend.cuda.ptx_builder.PtxBuilder
+use compiler.backend.cuda.cuda_launcher.{LaunchConfig}
 use compiler.backend.cuda_type_mapper.CudaTypeMapper
 use compiler.backend.common.type_mapper.PrimitiveType
 use compiler.hir.hir_types.MemorySpace
@@ -369,7 +370,7 @@ describe "PTX Builder - Atomic Operations":
         builder.emit_atomic_add("%r0", PrimitiveType.I64, "%addr", "%val", MemorySpace.Global)
         val ptx = builder.build()
 
-        expect(ptx).to_contain("atom.global.add.s64 %r0, [%addr], %val;")
+        expect(ptx).to_contain("atom.global.add.u64 %r0, [%addr], %val;")
 
     it "generates atomic min":
         var builder = PtxBuilder__create((8, 6))
@@ -390,7 +391,7 @@ describe "PTX Builder - Atomic Operations":
         builder.emit_atomic_cas("%r0", PrimitiveType.I64, "%addr", "%cmp", "%val", MemorySpace.Global)
         val ptx = builder.build()
 
-        expect(ptx).to_contain("atom.global.cas.s64 %r0, [%addr], %cmp, %val;")
+        expect(ptx).to_contain("atom.global.cas.b64 %r0, [%addr], %cmp, %val;")
 
     it "generates shared memory atomic add":
         var builder = PtxBuilder__create((8, 6))
@@ -598,17 +599,17 @@ describe "PTX Builder - Function Calls":
 
     it "generates function call with return value":
         var builder = PtxBuilder__create((8, 6))
-        builder.emit_call("%r0", PrimitiveType.I64, "device_func", ["%r1", "%r2"])
+        builder.emit_call("%r0", PrimitiveType.I64, "device_func", ["%r1", "%r2"], [PrimitiveType.I64, PrimitiveType.I64])
         val ptx = builder.build()
 
-        expect(ptx).to_contain("call (%r0), device_func, (%r1, %r2);")
+        expect(ptx).to_contain("call (__call_0_retval), device_func, (__call_0_arg_0, __call_0_arg_1);")
 
     it "generates void function call":
         var builder = PtxBuilder__create((8, 6))
-        builder.emit_call_void("void_func", ["%r0"])
+        builder.emit_call_void("void_func", ["%r0"], [PrimitiveType.I64])
         val ptx = builder.build()
 
-        expect(ptx).to_contain("call void_func, (%r0);")
+        expect(ptx).to_contain("call void_func, (__call_0_arg_0);")
 
 # ============================================================================
 # CUDA Type Mapper
@@ -762,10 +763,10 @@ describe "Launch Configuration":
 
     it "rejects zero block size":
         val config = LaunchConfig.for_1d(1024, 0)
+        expect(config.block_x).to_equal(0)
         val err = config.validate()
-        expect(err).to_be_nil()  # for_1d with 0 produces invalid config
-        # The grid would be computed with division by zero;
-        # real validation catches block dims
+        expect(err).to_not_be_nil()
+        expect(err ?? "").to_equal("Block dimensions must be positive")
 
     it "adds shared memory to config":
         val config = LaunchConfig.for_1d(1024, 256).with_shared_mem(4096)
