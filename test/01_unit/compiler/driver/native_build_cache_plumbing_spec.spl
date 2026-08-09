@@ -1,7 +1,7 @@
 use std.spec
 use std.io_runtime.{file_read}
 use std.common.validation.{is_hex_string}
-use compiler.driver.driver_build.incremental.{native_build_cache_scope_key, native_build_compiler_identity}
+use compiler.driver.driver_build.incremental.{native_build_cache_scope_key, native_build_cfg_scope_identity_for, native_build_compiler_identity}
 use compiler.driver.driver_aot_output.{driver_native_module_is_export_facade, driver_native_sources_fingerprint}
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.frontend.parser_types.{Module, Export, DomainBlock}
@@ -192,6 +192,8 @@ describe "native-build cache plumbing policy":
         expect(base).to_contain("backend=smf")
         expect(base).to_contain("cpu=native")
         expect(base).to_contain("opt=0")
+        expect(base).to_contain(";cfg=os=")
+        expect(base).to_contain(";arch=")
         expect(backend).to_contain("backend=llvm")
         expect(target).to_contain("cpu=x86-64-v3")
         expect(target).to_contain("features=+avx2")
@@ -210,6 +212,18 @@ describe "native-build cache plumbing policy":
         expect(incremental_src).to_contain("rt_file_hash_sha256(args[0])")
         expect(incremental_src).to_contain("uncacheable-{rt_getpid()}-{rt_time_now_unix_micros()}")
         expect(driver_src).to_contain("native_build_compiler_identity()")
+
+    it "isolates native objects by normalized cfg target identity":
+        val simpleos_arm64 = native_build_cfg_scope_identity_for("SimpleOS", "arm64", "arm64")
+        val linux_arm64 = native_build_cfg_scope_identity_for("linux", "arm64", "arm64")
+        val normalized_alias = native_build_cfg_scope_identity_for("simpleos", "aarch64", "aarch64")
+        expect(simpleos_arm64).to_equal("os=simpleos;arch=aarch64;cpu=aarch64")
+        assert_not_equal(simpleos_arm64, linux_arm64)
+        expect(simpleos_arm64).to_equal(normalized_alias)
+
+    it "keeps unknown explicit cfg targets out of the default cache scope":
+        val identity = native_build_cfg_scope_identity_for("future-os", "", "")
+        expect(identity).to_contain("os=unknown-future-os")
 
     it "keeps the running compiler identity stable and content-derived":
         val first = native_build_compiler_identity()
