@@ -192,10 +192,45 @@ that the other 16 files already demonstrate.
   re-measure the 375 after each; a file that does not lower the count did not do
   what you thought.
 
-**Phase 2 — `src/compiler/80.driver` facade (clears 22, cheapest win).**
-Make `driver_public_compile_backends.spl` re-export the `aot_*` symbols from
-`driver_api_*.spl` instead of redefining them. **~3 files, risk LOW** — same
-module, same tree, no cross-tier semantics.
+**Phase 2 — `src/compiler/80.driver` facade — ~~clears 22, cheapest win~~
+DO NOT SHIM. This rating was WRONG.**
+
+> **CORRECTION 2026-08-09, after inspection.** The original text below said "make
+> `driver_public_compile_backends.spl` re-export the `aot_*` symbols from
+> `driver_api_*.spl` instead of redefining them, ~3 files, risk LOW — same
+> module, same tree, no cross-tier semantics." **Every clause of that is wrong.**
+>
+> The two sides are not duplicates; they are two deliberate execution strategies
+> that collide on 9 `aot_*` names by accident:
+>
+> - `driver_api_codegen_backends.spl` compiles **in-process**
+>   (`compiler_driver_create` / `compiler_driver_run_compile`).
+> - `driver_public_compile_backends.spl` spawns a **subprocess**
+>   (`rt_process_run(simple_bin, ["compile", ...])`), guarded by
+>   `check_compile_delegation_guard` / `mark_compile_delegated` in
+>   `driver_public_shared.spl` — anti-recursion machinery whose comment records
+>   that a naive `/proc/self/exe` shell-out **caused a fork bomb on 2026-07-25**.
+> - `driver_public_compile_vhdl.spl::aot_vhdl_file` deliberately imports
+>   `run_compile_to_path` FROM the public facade to reach the subprocess path.
+> - A prior session already treated this collision as intentional:
+>   `src/app/cli/bootstrap_main.spl:304-307` documents working AROUND the
+>   ambiguous import rather than merging the two.
+>
+> Collapsing the facade into `export use` would silently convert every
+> subprocess-isolated caller to in-process compilation and defeat the recursion
+> guard. "Diff both directions and port the divergence" does not apply: the
+> divergence is not a bug-fix gap, it is two load-bearing behaviours sharing a
+> name.
+>
+> **Correct fix is RENAME, not merge** — e.g. `aot_*_delegated` on the public
+> side or `_inprocess` on the API side, so both survive under distinct names.
+> That touches the facade re-export lists (`driver_public_compile.spl`,
+> `driver.spl`, `driver_api.spl`, `__init__.spl`) and is NOT a low-risk slice.
+> Return it to triage.
+>
+> General lesson, consistent with the `file_read_bytes` failure: **a name
+> collision is not evidence of duplication.** Before shimming, establish that
+> the two bodies are the same *thing*, not merely the same *signature*.
 
 **Phase 3 — `90.tools` × `lib/tooling/easy_fix` (clears 50).** Same shim
 technique. **~10-15 files, risk LOW-MEDIUM.**
