@@ -21,8 +21,15 @@ use compiler.core.parser.{
 }
 use compiler.frontend.core.lexer.{lex_init_with_path}
 use compiler.frontend.core.parser_expr.{parse_expr}
+use compiler.core.ast_expr.{
+    EXPR_CALL,
+    EXPR_METHOD_CALL
+}
+use compiler.core.ast.{expr_get_args}
 use compiler.frontend.desugar.placeholder_lambda.{
-    set_placeholder_transform_suppressed
+    expr_has_placeholder,
+    set_placeholder_transform_suppressed,
+    transform_interpolated_placeholder_args
 }
 
 fn parse_interpolation_fragment(inner: text) -> i64:
@@ -97,6 +104,53 @@ fn parse_string_interpolation_parts(value: text) -> [i64]:
     if depth != 0:
         return []
     parts
+
+fn expand_interpolated_placeholder_call_args(start_expr: i64):
+    """Driver/native-build counterpart of expand_string_interpolations() +
+    transform_interpolated_placeholder_args().
+
+    The driver path (parse_full_frontend -> parse_and_build_module_scoped) never
+    calls expand_string_interpolations(); it leaves every string literal opaque
+    and sub-parses interpolation regions much later in the flat->rich bridge
+    (flat_bridge_build_string_interps). That means a call argument like
+    `params.map("({_.0} : {_.1})")` never becomes an EXPR_INTERPOLATED_STRING
+    while the placeholder transform can still see it, so the `_` identifiers
+    minted for its regions survive into HIR as `unresolved name: _`.
+    See doc/08_tracking/bug/placeholder_lambda_fix_missed_driver_native_build_parse_path_2026-08-09.md
+
+    Promote ONLY those string literals that are (a) direct call arguments and
+    (b) contain a placeholder in an interpolation region, then run the existing
+    transform over them. Every other string literal is left untouched so the
+    broad StringLit-with-Interpolation-parts representation the bridge relies on
+    is not disturbed.
+    """
+    var promoted = false
+    var idx = start_expr
+    while idx < expr_count():
+        val tag = expr_get_tag(idx)
+        if (tag == EXPR_CALL or tag == EXPR_METHOD_CALL):
+            val args = expr_get_args(idx)
+            var i = 0
+            while i < args.len():
+                val a = args[i]
+                if (a >= 0 and expr_get_tag(a) == EXPR_STRING_LIT and
+                        expr_get_int(a) == 0):
+                    val value = expr_get_str(a)
+                    val parts = parse_string_interpolation_parts(value)
+                    if parts.len() > 0:
+                        var has_ph = false
+                        var p = 0
+                        while p < parts.len():
+                            if expr_has_placeholder(parts[p]):
+                                has_ph = true
+                            p = p + 1
+                        if has_ph:
+                            expr_promote_interpolated_string(a, value, parts)
+                            promoted = true
+                i = i + 1
+        idx = idx + 1
+    if promoted:
+        transform_interpolated_placeholder_args(start_expr)
 
 fn expand_string_interpolations(start_expr: i64):
     var idx = start_expr

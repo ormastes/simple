@@ -14,6 +14,7 @@ use compiler.core.ast_expr.{
     expr_count, expr_tag, expr_s_val, expr_args, expr_left, expr_right, expr_extra
 }
 use compiler.frontend.core.frontend.{core_frontend_parse_reset}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module_scoped}
 
 fn subtree_has_placeholder_ident(eid: i64) -> bool:
     """Whether `_` or `_1` still appears as a bare identifier under `eid`."""
@@ -79,6 +80,52 @@ fn lambda_args_in_method_calls(src: text) -> i64:
         idx = idx + 1
     lambdas
 
+fn driver_leaked_placeholder_args(src: text) -> i64:
+    """Same probe as leaked_placeholder_args(), but over the DRIVER parse path.
+
+    Stage 3 / native-build never calls core_frontend_parse(); it enters through
+    parse_full_frontend -> parse_and_build_module_scoped, which is why the
+    original fix (wired into core_frontend_parse only) left the blocker live.
+    See doc/08_tracking/bug/placeholder_lambda_fix_missed_driver_native_build_parse_path_2026-08-09.md
+    `streaming_scope: false` leaves the flat arena intact after the build, so
+    the same flat-array assertions apply.
+    """
+    ast_reset()
+    val _module = parse_and_build_module_scoped(src, "placeholder_probe.spl", false)
+    var leaked = 0
+    var idx = 0
+    while idx < expr_count():
+        if expr_tag[idx] == EXPR_METHOD_CALL:
+            val args = expr_args[idx]
+            var i = 0
+            while i < args.len():
+                val a = args[i]
+                if (a >= 0 and a < expr_tag.len() and
+                        expr_tag[a] == EXPR_INTERPOLATED_STRING and
+                        subtree_has_placeholder_ident(a)):
+                    leaked = leaked + 1
+                i = i + 1
+        idx = idx + 1
+    leaked
+
+fn driver_lambda_args_in_method_calls(src: text) -> i64:
+    """Driver-path counterpart of lambda_args_in_method_calls()."""
+    ast_reset()
+    val _module = parse_and_build_module_scoped(src, "placeholder_probe.spl", false)
+    var lambdas = 0
+    var idx = 0
+    while idx < expr_count():
+        if expr_tag[idx] == EXPR_METHOD_CALL:
+            val args = expr_args[idx]
+            var i = 0
+            while i < args.len():
+                val a = args[i]
+                if (a >= 0 and a < expr_tag.len() and expr_tag[a] == EXPR_LAMBDA):
+                    lambdas = lambdas + 1
+                i = i + 1
+        idx = idx + 1
+    lambdas
+
 # The probe sources must contain literal `{`/`}` interpolation braces. Writing
 # them inline would make THIS spec's own string literal an interpolated string
 # (and, since the fix, a placeholder lambda), so they are assembled from
@@ -122,3 +169,20 @@ describe "placeholder lambdas in interpolated-string call arguments":
         val src = "fn shout(names: [text]) -> text:\n    names.map(\"hi\").join(\" \")\n"
         expect(lambda_args_in_method_calls(src)).to_equal(0)
         expect(leaked_placeholder_args(src)).to_equal(0)
+
+describe "placeholder lambdas on the driver / native-build parse path":
+    it "leaves no bare `_` in an interpolated-string map argument":
+        expect(driver_leaked_placeholder_args(unnumbered_probe_src())).to_equal(0)
+
+    it "wraps the interpolated-string argument in a lambda":
+        expect(driver_lambda_args_in_method_calls(unnumbered_probe_src())).to_be_greater_than(0)
+
+    it "leaves no bare `_1` in a numbered interpolated-string argument":
+        expect(driver_leaked_placeholder_args(numbered_probe_src())).to_equal(0)
+
+    it "does not turn an interpolated string without placeholders into a lambda":
+        # Guards the narrowness of the driver-path pass: only placeholder-bearing
+        # string literals may be promoted, everything else must stay an opaque
+        # literal for flat_bridge_build_string_interps to handle.
+        val src = "fn shout(names: [text]) -> text:\n    names.map(\"hi\").join(\" \")\n"
+        expect(driver_lambda_args_in_method_calls(src)).to_equal(0)
