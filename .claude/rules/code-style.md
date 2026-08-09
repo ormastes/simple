@@ -28,14 +28,16 @@ alwaysApply: true
 - Gemini extension: `gemini-extension.json`
 - MCP registry: `tools/mcp-registry/`
 
-## Native-Codegen Dict Pitfalls (2026-07-27)
+## Native-Codegen Dict Pitfalls (2026-07-27, RESOLVED 2026-08-09)
 
-Under **native** codegen (not the interpreter, not the seed): `Dict.len()`
-always returns `-1`, and `.get(k)` on a hit is corrupt (undecoded `i64`, or a
-segfaulting struct/class/enum payload). Details, truth table, and safe
-replacements: `doc/07_guide/language/dict_native_pitfalls.md`.
-
-- **Never call `Dict.len()` / `.length()`.** Use `keys().len()` (cold path) or
-  a maintained counter (hot path).
-- **Never call `.get()` on a dict whose value type is a struct/class/enum.**
-  Use `contains_key(k)` + index read `d[k]` instead.
+Under **native** codegen (not the interpreter, not the seed), `Dict.len()`
+used to always return `-1`, and `.get(k)` on a hit used to be corrupt
+(undecoded `i64`, or a segfaulting struct/class/enum payload). **Both are
+fixed** (`.len()` routing fix 2026-08-01; `.get()` hit-decode fix
+`7e83e92ce31`) and re-verified via real JIT execution on 2026-08-09 — see the
+RESOLVED note at the top of `doc/07_guide/language/dict_native_pitfalls.md`
+for evidence and commit references. `Dict.len()` and `.get()` on
+struct/class/enum-valued dicts are now safe to call directly. Other
+native-only Dict gaps (`f64`-value `.get()` miss, class-field `d[k]`
+bracket-read on array values) remain open — see that doc's truth table
+before relying on those specific operations.

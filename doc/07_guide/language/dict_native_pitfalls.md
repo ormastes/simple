@@ -1,11 +1,37 @@
 # Dict Pitfalls Under Native Codegen
 
-Two native-codegen defects make common `Dict` operations silently wrong or
-crash-prone. They are **native-only** — the interpreter and the Rust seed
-both behave correctly, so a seed build or an interpreter-mode test run
-**cannot** catch either bug. Only a native build/run exercises the broken
-paths. Treat "seed-build verified" or "interpreter test green" as no signal
-at all for dict correctness.
+> **RESOLVED 2026-08-09 (re-verified).** The two headline defects this doc was
+> originally written for — `Dict.len()` always returning `-1`, and `.get(k)`
+> on a hit being corrupt for struct/class/enum value types — are **fixed** and
+> were re-confirmed fresh today via real JIT execution (`SIMPLE_LOG=cranelift_jit=debug
+> bin/simple run`, confirmed by `cranelift_jit::backend` log lines and
+> `PROT_EXEC` code-page mmaps in `strace`, not a silent interpreter fallback).
+> Two independent probes (`d.len()` on a 2-entry then a 3-entry `{text: i64}`
+> dict; `.get()` on a `{text: Payload}` struct-valued dict with two distinct
+> keys) both returned correct, key-differentiated results — `LEN_MARKER=2` /
+> `LEN3_MARKER=3`, and a sabotage/negative-control probe fetching the
+> *second* inserted struct returned that struct's own fields (`999`/`zzz`),
+> not the first's or a stale/corrupt value. Fix commits: `.len()` routing fix
+> landed 2026-08-01 (native ELF `8fdc21c67b5`); `.get()` hit-decode fix is
+> `7e83e92ce31` ("fix(mir): decode Dict.get() exactly like the d\[k] index
+> read"). Both live in the pure-Simple MIR lowering
+> (`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl` for
+> `.len()`, `expr_dispatch.spl` for `.get()`), not the C runtime — the
+> underlying `rt_dict_len`/`rt_dict_get` runtime entry points were already
+> correct; the bug was in the MIR lowering's receiver-type routing that fed
+> them. **The `f64`-value `.get()` miss gap and the class-field `d[k]`
+> bracket-read array-value segfault (see Truth table below) remain open** —
+> only the two headline defects named in this doc's title are resolved.
+
+Two native-codegen defects **used to** make common `Dict` operations silently
+wrong or crash-prone (see the RESOLVED note above — both are now fixed).
+Historically they were **native-only** — the interpreter and the Rust seed
+both behaved correctly, so a seed build or an interpreter-mode test run
+**could not** catch either bug; only a native build/run exercised the broken
+paths. The truth table below still lists the OTHER, still-open native-only
+gaps (`f64`-miss, class-field array bracket-read) for which that caveat still
+applies — treat "seed-build verified" or "interpreter test green" as no
+signal for those remaining rows.
 
 Both syntaxes are affected: `Dict<K, V>` **and** the brace shorthand
 `name: {K: V}`. A grep for `Dict<` alone misses roughly a third of the real
