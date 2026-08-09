@@ -1,0 +1,153 @@
+# Vulkan-only Screen2D showcase host.
+#
+# This adapter deliberately accepts the original DrawIrComposition instead of
+# attempting to reconstruct one from DrawIrV3Scene.  It owns one persistent
+# Engine2D Vulkan surface and accepts a frame only after the strict primitive
+# executor returns real device readback, complete command coverage, and (when
+# text is present) the shared FontRenderer Vulkan receipt.
+
+use common.ui.draw_ir.{
+    DRAW_IR_BACKEND_GPU, DRAW_IR_COMMAND_TEXT, DrawIrComposition
+}
+use common.ui.draw_ir_v3.{DrawIrV3Scene}
+use common.ui.host_input_event.{HostInputEvent}
+use common.ui.screen_host.{ScreenHost}
+use common.ui.widget.{UIState}
+use common.ui.widget_draw_ir.{widget_tree_to_draw_ir}
+use gpu.engine2d.engine.{Engine2D}
+use gpu.engine2d.draw_ir_adv.{
+    Engine2dDrawIrAdvResult, Engine2dResolvedDrawIrImage,
+    engine2d_draw_ir_adv_strict_vulkan_primitives_with_images
+}
+use app.ui_showcase.hosts.host_2d.{screen_2d_parse_script}
+use app.ui_showcase.showcase_core.{
+    ShowcaseRunReport, showcase_apply, showcase_build, showcase_report
+}
+
+fn _lower_hex_sha256_valid(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    for ch in value.chars():
+        val code = ch.char_code_at(0)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)):
+            return false
+    true
+
+fn _composition_has_text(composition: DrawIrComposition) -> bool:
+    for batch in composition.batches:
+        for command in batch.commands:
+            if command.? != false and command.kind == DRAW_IR_COMMAND_TEXT:
+                return true
+    false
+
+class Screen2dVulkanHost:
+    var w: i32
+    var h: i32
+    var engine: Engine2D
+    var queue: [HostInputEvent]
+    var cursor: i64
+    var last_pixels: [u32]
+    var last_receipt: text
+    var last_rejection: text
+
+    static fn open(w: i32, h: i32, script: text) -> Screen2dVulkanHost?:
+        if w <= 0 or h <= 0:
+            return nil
+        val engine = Engine2D.create_with_backend_fast(w, h, "vulkan")
+        if engine.backend_name() != "vulkan":
+            engine.shutdown()
+            return nil
+        Screen2dVulkanHost(
+            w: w, h: h, engine: engine,
+            queue: screen_2d_parse_script(script), cursor: 0,
+            last_pixels: [], last_receipt: "", last_rejection: "not-rendered"
+        )
+
+    me _reject(reason: text) -> bool:
+        self.last_pixels = []
+        self.last_receipt = ""
+        self.last_rejection = reason
+        false
+
+    me _accept_fresh_device_result(composition: DrawIrComposition) -> bool:
+        if composition.backend_target != DRAW_IR_BACKEND_GPU:
+            return self._reject("vulkan-host-requires-gpu-composition")
+        var images: [Engine2dResolvedDrawIrImage] = []
+        val result: Engine2dDrawIrAdvResult =
+            engine2d_draw_ir_adv_strict_vulkan_primitives_with_images(
+                self.engine, composition, images)
+        val expected_pixels = self.w.to_i64() * self.h.to_i64()
+        if (result.selected_backend != "gpu" or result.fallback_required or
+            result.fallback_reason != "" or result.skipped_command_count != 0 or
+            result.rendered_command_count <= 0 or
+            result.readback_source != "device_readback" or
+            result.backend_handle <= 0 or result.device_identity <= 0 or
+            result.readback_checksum <= 0 or
+            result.pixels.len() != expected_pixels):
+            return self._reject("fresh-device-drawir-receipt-rejected")
+        if _composition_has_text(composition) and (
+            result.font_execution_target != "vulkan" or
+            result.font_identity == "" or result.font_batch_identity == "" or
+            result.font_readback_source != "device_readback" or
+            result.font_device_checksum != result.font_oracle_checksum or
+            result.font_readback_nonblank_pixels <= 0 or not result.font_parity or
+            not result.font_device_executed or not result.font_promotion_ready or
+            result.font_atlas_upload_count <= 0 or
+            result.font_atlas_upload_bytes <= 0 or
+            not _lower_hex_sha256_valid(result.font_atlas_payload_sha256)):
+            return self._reject("fresh-device-font-receipt-rejected")
+        self.last_pixels = result.pixels
+        self.last_receipt = (
+            "renderer=vulkan source={result.readback_source} " +
+            "backend_handle={result.backend_handle} device_identity={result.device_identity} " +
+            "checksum={result.readback_checksum} rendered={result.rendered_command_count} " +
+            "font_target={result.font_execution_target} font_identity={result.font_identity} " +
+            "font_batch={result.font_batch_identity} font_source={result.font_readback_source}"
+        )
+        self.last_rejection = ""
+        true
+
+    me present_composition(composition: DrawIrComposition) -> bool:
+        self._accept_fresh_device_result(composition)
+
+    me pixels() -> [u32]: self.last_pixels
+    fn device_receipt() -> text: self.last_receipt
+    fn rejection_reason() -> text: self.last_rejection
+
+impl ScreenHost for Screen2dVulkanHost:
+    me host_name() -> text: "2d-vulkan"
+    me size() -> (i32, i32): (self.w, self.h)
+
+    me present_scene(_scene: DrawIrV3Scene) -> bool:
+        self._reject("vulkan-host-requires-original-composition")
+
+    me poll_input() -> HostInputEvent?:
+        if self.cursor >= self.queue.len().to_i64():
+            return nil
+        val event = self.queue[self.cursor]
+        self.cursor = self.cursor + 1
+        event
+
+    me shutdown():
+        self.cursor = self.queue.len().to_i64()
+        self.engine.shutdown()
+
+fn showcase_run_with_backend(host: Screen2dVulkanHost, prefix: text,
+                             max_frames: i64, backend: text) -> ShowcaseRunReport:
+    """Run the shared showcase reducer while preserving DrawIrComposition."""
+    var state: UIState = showcase_build(prefix)
+    var frames: i64 = 0
+    while frames < max_frames:
+        val (w, h) = host.size()
+        val composition = widget_tree_to_draw_ir(
+            state.tree.root_node(), w, h, backend)
+        if not host.present_composition(composition):
+            break
+        frames = frames + 1
+        var event = host.poll_input()
+        while event != nil:
+            state = showcase_apply(state, event!, w, h)
+            event = host.poll_input()
+    showcase_report(state, host.host_name(), frames)
+
+export Screen2dVulkanHost, showcase_run_with_backend
