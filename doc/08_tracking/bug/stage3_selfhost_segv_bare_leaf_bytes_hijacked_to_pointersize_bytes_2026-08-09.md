@@ -260,3 +260,96 @@ not as a changed link contract. The Stage-3 blocker remains the silent
 - Output: `/home/ormastes/dev/s3crash_out`
 - Crashing binary (has `.symtab`):
   `/home/ormastes/dev/s3crash_out/stage3/x86_64-unknown-linux-gnu/stage2-admitted/simple`
+
+## 2026-08-09 — RE-MEASURED against current `origin/main` `94b861249c5`: REPRODUCES, BIT-IDENTICAL
+
+The "re-measure against current `origin/main` before closing" note at the top is
+now discharged. **It reproduces, unchanged.** The upstream revert of
+`8ddd09f6d92`'s untyped last-resort routing (replaced by a typed HIR/MIR repair)
+did **not** close this bug — exactly as this doc predicted, because the hijack
+happens in the **suffix scan**, which runs *before* any last-resort routing.
+
+### Method
+
+Pinned clean checkout of `origin/main` `94b861249c5718dd3a58881f924ccb4b94036661`
+(`git archive` + alternates recipe) at `/home/ormastes/dev/s3camp6`; tree clean
+apart from the 15 known CRLF-noise `.cmd`/`.bat` entries.
+
+```
+SIMPLE_MIR_STMT_CALLER_DEBUG=1 SIMPLE_MIR_GARBAGE_EXPR_DEBUG=1 \
+  sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy \
+  --output=/home/ormastes/dev/s3camp6-out --progress
+```
+
+Host at launch: load 8.7, 1.1 T free on `/`, 92 G RAM available. A PID-scoped
+watchdog sampled output size, free disk and >2 GB RSS every 15 s; no safety trip
+fired (peak `simple` RSS ~20 G during Stage 2 codegen, output tree 3.3 G, log
+growth normal — no lexer-class log explosion).
+
+| stage | result |
+|---|---|
+| Rust seed / runtime / backfill | clean, no local patching |
+| **Stage 2** | **809 compiled, 0 cached, 0 failed**, 126,022 KB, 193.0 s compile + 75.1 s link |
+| Stage-2 sanity + capability gate | "passed" (gate verdict NOT relied on — see below) |
+| **Stage 3** | **`Segmentation fault (core dumped)` — exit 139**, `stage3-native-build.log` **0 bytes** |
+
+The admitted Stage-2 binary is byte-identical to the built one
+(`md5 ff6cf832d4d03d50b73362724fc2dedf` for both), so the crash is the real
+Stage-2 product, not an admission-copy artifact.
+
+### Verified backtrace (gdb, `.symtab` present, faulting instruction disassembled)
+
+Reproduced standalone outside the wrapper from the recorded
+`stage3-command.transcript` — crashes in **under a second**, exit 139, 43 bytes
+of output. Under gdb:
+
+```
+Program received signal SIGSEGV
+0x00000000004d9617 in compiler.frontend.core.interpreter.hashmap.hm_hash_text ()
+#0  hm_hash_text ()
+#1  compiler__driver__driver_source_loading___driver_text_bucket_set_has ()
+#2  compiler__driver__driver_source_pipeline_loading__CompilerDriver.load_sources_impl ()
+#3  compiler__driver__driver_orchestration__CompilerDriver.compile ()
+#4  app.cli.bootstrap_main.run_native_build_bootstrap ()
+#5  main ()
+
+rax 0x8   rbx 0x8   si_addr 0x10
+
+0x4d9609 <hm_hash_text+9>:   call   0x800d80 <lib__common__target__PointerSize.bytes>
+0x4d960e <hm_hash_text+14>:  mov    %rax,%rbx
+0x4d9611 <hm_hash_text+17>:  and    $0xfffffffffffffff8,%rax
+0x4d9615 <hm_hash_text+21>:  je     ...
+=> 0x4d9617 <hm_hash_text+23>: mov    0x8(%rax),%r15        <- SEGV
+```
+
+Same instruction sequence, same registers, same `si_addr 0x10` as the
+`8ddd09f6d92` measurement; only the `PointerSize.bytes` address moved
+(`0x8007b0` → `0x800d80`), as expected from a different build. The fault address
+and the disassembly agree with the story — this is not nearest-symbol
+misattribution.
+
+- `objdump -d | grep -c 'call.*<lib__common__target__PointerSize.bytes>'` → **14**
+  (identical to the prior measurement).
+- `scripts/check/check-no-call-zero.shs` → `PASS — 1 binary checked, 0
+  call-to-zero sites`. Still not a call-to-zero.
+- `.symtab` present (`readelf -S | grep -c symtab` → 1).
+
+### Consequence
+
+This is now confirmed as a **pre-existing, independent** defect of the seed's
+bare-leaf call-target resolution, **not** a side effect of the routing commit
+that was reverted. The fix direction recorded above (make the well-known-method
+table at `codegen/llvm/functions.rs:2497` reachable for dotless leaves, and/or
+add an owner-type/arity compatibility check to the suffix scan at
+`functions.rs:2675-2746` so a single *incompatible* candidate is rejected rather
+than silently accepted) is unchanged and still unlanded.
+
+### Note on the sanity gate (again)
+
+`Stage 2: running bootstrap compiler sanity` and `Stage 2 native-build capability
+passed` were both emitted for a binary that segfaults on the very next step. The
+gate is fail-open here for the third campaign running; Stage 3's own behaviour
+was observed directly and the crash independently reproduced outside the wrapper.
+
+**Status: ROOT-CAUSED, STILL NOT FIXED, and now RE-CONFIRMED on current
+`origin/main`.**

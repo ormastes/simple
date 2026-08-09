@@ -1,7 +1,23 @@
 # Stage-3 self-host blocked by nil-receiver SIGILL in the caller of `lower_expr`
 
 Date: 2026-08-05
-Status: **STILL UNVERIFIED (2026-08-09, FIFTH campaign)** — but the chain moved
+Status: **STILL UNVERIFIED (2026-08-09, SIXTH campaign)** — a full bootstrap at
+`origin/main` `94b861249c5` reproduces **blocker 15 bit-identically** (Stage 2
+809/809 green, Stage 3 SIGSEGV exit 139, 0-byte log, `s.bytes()` bound to
+`PointerSize.bytes`, si_addr `0x10`). The upstream typed HIR/MIR repair did NOT
+close it — the hijack is in the suffix scan, ahead of any last-resort routing.
+Probes again read `[mir-stmt-caller]` = 0, `[mir-garbage-expr]` = 0, nil-receiver
+= 0, SIGILL/exit 132 = 0. See the "SIXTH campaign" section at the BOTTOM.
+Prior status (FIFTH campaign): blockers 13 and 14
+are now BOTH CLOSED. Stage 2 links clean from a pinned `origin/main`
+`8ddd09f6d92` (809/809, 0 undefined refs, 0 call-to-zero sites) and Stage 3
+reached execution for the first time. It dies of **blocker 15**: a wrong-callee
+miscompile in the DRIVER'S SOURCE-LOADING phase (`bytes` suffix-matched to
+`PointerSize.bytes`), root-caused in
+`stage3_selfhost_segv_bare_leaf_bytes_hijacked_to_pointersize_bytes_2026-08-09.md`.
+That is still BEFORE MIR: instrumented with both probes, `[mir-stmt-caller]` = 0,
+`[mir-garbage-expr]` = 0, no SIGILL, no exit 132. **This fault site has still
+never executed.** Prior status: **STILL UNVERIFIED (2026-08-09, FIFTH campaign)** — but the chain moved
 substantially. Blocker 12 (the dead Stage-2 lexer) is now **fixed and verified
 end-to-end**; Stage 3 lexes and parses its own entry file and reaches phase-1
 module assembly, where it dies of a **SIGSEGV (exit 139)** in
@@ -1014,3 +1030,80 @@ next step. The documented `--entry` fail-open weakness was therefore treated as
 real and the gate's verdict was **not** relied on; Stage 3's own behaviour was
 observed directly, and the crash was independently reproduced outside the
 wrapper. That decision is what produced the backtrace.
+
+## 2026-08-09 (SIXTH campaign) — blocker 15 RECURS unchanged on current `origin/main`; fault site still never executed
+
+One genuine complete `--full-bootstrap --deploy` was run from a pinned clean
+`git archive` + alternates checkout of `origin/main`
+`94b861249c5718dd3a58881f924ccb4b94036661` (`/home/ormastes/dev/s3camp6`,
+output `/home/ormastes/dev/s3camp6-out`), both MIR probes enabled, with a
+15-second watchdog on output size, free disk and >2 GB RSS. Host at launch:
+load 8.7, 1.1 T free, 92 G RAM available. No safety trip; no log explosion.
+
+**Outcome: (4) — blocker 15 recurs, bit-identically.**
+
+| stage | result |
+|---|---|
+| Rust seed / runtime / backfill | clean, no local patching needed |
+| **Stage 2** | **809 compiled, 0 cached, 0 failed**, 126,022 KB, 268.1 s |
+| Stage-2 sanity + capability gate | "passed" — fail-open again, verdict not relied on |
+| **Stage 3** | **SIGSEGV, exit 139**, `stage3-native-build.log` = **0 bytes** |
+
+The admitted Stage-2 binary is md5-identical to the built one
+(`ff6cf832d4d03d50b73362724fc2dedf`).
+
+### Verdict for THIS bug — unchanged, and measured not inferred
+
+| probe / signal | count across the whole run |
+|---|---|
+| `[mir-stmt-caller]` | **0** |
+| `[mir-garbage-expr]` | **0** |
+| `field access on nil receiver` | **0** |
+| SIGILL / exit 132 | **0** |
+
+Both probes were enabled and both produced nothing: Stage 3 dies in the
+driver's **source-loading** phase, upstream of the frontend, of HIR, and far
+upstream of the `50.mir` lowering where this SIGILL lives. **Fifteen blockers
+have now been logged in front of this bug and the fault site has still never
+executed.** Rank 1-5 remain neither confirmed nor refuted; the `0x1800000007`
+decode still has not been re-measured against a live fault.
+
+### The blocker, with a verified backtrace
+
+Reproduced standalone from the recorded `stage3-command.transcript` in under a
+second, and symbolized under gdb (binary retains `.symtab`, faulting
+instruction disassembled and consistent with the fault address — no
+nearest-symbol misattribution):
+
+```
+0x4d9617 in compiler.frontend.core.interpreter.hashmap.hm_hash_text ()
+ #1 ..._driver_text_bucket_set_has  #2 CompilerDriver.load_sources_impl
+ #3 CompilerDriver.compile          #4 run_native_build_bootstrap  #5 main
+rax 0x8  rbx 0x8  si_addr 0x10
+0x4d9609: call 0x800d80 <lib__common__target__PointerSize.bytes>
+=> 0x4d9617: mov 0x8(%rax),%r15
+```
+
+`s.bytes()` on a `text` receiver is bound to `PointerSize.bytes`, which returns
+the constant 8; `8 & ~7 = 8`, and the `.len()` field load reads `0x10`. 14 such
+hijacked call sites in the binary; `check-no-call-zero.shs` PASSes (0 sites), so
+this is a wrong-callee miscompile, not a call-to-zero.
+
+**Important new fact:** this run's tree does **not** contain `8ddd09f6d92`'s
+untyped last-resort routing — `origin/main` reverted it in favour of a typed
+HIR/MIR repair. The hijack reproduces anyway, confirming this doc's prediction
+that the defect lives in the **suffix scan**
+(`src/compiler_rust/compiler/src/codegen/llvm/functions.rs:2675-2746`), which
+runs *before* any last-resort routing and is untouched by either the original
+fix or its revert. Full re-measurement appended to
+`stage3_selfhost_segv_bare_leaf_bytes_hijacked_to_pointersize_bytes_2026-08-09.md`.
+
+No fix was attempted here: the defect is in the **Rust seed's LLVM backend**,
+not in `.spl`, and any `.spl`-side avoidance of `text.bytes()` would be a
+cover-up of a miscompile rather than a fix.
+
+**Status: STILL UNVERIFIED.** Not resolved, not disproven. Next lane: land the
+bare-leaf resolution fix in `functions.rs` (make the well-known-method table at
+`:2497` reachable for dotless leaves, and/or make the suffix scan reject a
+single *incompatible* candidate instead of accepting it), then re-run this exact
+recipe.
