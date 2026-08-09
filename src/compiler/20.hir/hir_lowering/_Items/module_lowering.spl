@@ -1240,10 +1240,15 @@ impl HirLowering:
         # contains several dictionaries, and the first field access below can
         # otherwise dispatch through a nil Any receiver in bootstrap builds.
         var lowered_module: HirModule = self.lower_module(module)
-        val focused_future_diag = bootstrap_mode and module.name == "src/lib/nogc_async_mut/async/future.spl"
+        # The self-hosted return-side frame sync can clobber scalar locals held
+        # across the deep lower_module call. Re-read these process invariants
+        # after the call instead of trusting the pre-call admission snapshot.
+        val finalize_bootstrap_mode = (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+        val finalize_flat_mode = finalize_bootstrap_mode and (hir_module_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1"
+        val focused_future_diag = finalize_bootstrap_mode and module.name == "src/lib/nogc_async_mut/async/future.spl"
         if focused_future_diag:
             eprint("[hir-finalize] returned future")
-        if bootstrap_mode and parser_constants.len() > 0:
+        if finalize_bootstrap_mode and parser_constants.len() > 0:
             var recovered_constants: Dict<SymbolId, HirConst> = {}
             var const_idx = 0
             while const_idx < parser_constants.len():
@@ -1261,11 +1266,11 @@ impl HirLowering:
             lowered_module.constants = recovered_constants
         if focused_future_diag:
             eprint("[hir-finalize] constants done")
-            if bootstrap_flat_mode:
+            if finalize_flat_mode:
                 eprint("[hir-finalize] flat true")
             else:
                 eprint("[hir-finalize] flat false")
-        if bootstrap_flat_mode:
+        if finalize_flat_mode:
             if focused_future_diag:
                 eprint("[hir-finalize] flat start")
             var flat_functions: [HirFunction] = []
