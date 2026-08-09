@@ -1694,6 +1694,24 @@ class Engine2D with DrawIrRenderTarget:
             x, y, text_val, advance_widths, color, engine2d_default_font_config_for(font_size, self.baremetal_backend != nil)
         )
 
+    me draw_text_with_advances_vulkan_only(x: i32, y: i32, text_val: text, advance_widths: [i32], color: u32, font_size: i32) -> bool:
+        """Draw resolved text through the canonical Vulkan font batch only.
+
+        This is the strict DrawIR device primitive boundary: unlike the normal
+        routing policy it never tries CUDA, Metal, or CPU after Vulkan.
+        """
+        if self.selected_backend_name != "vulkan" or self.vulkan_font_state_unknown:
+            return false
+        val config = engine2d_default_font_config_for(font_size, false)
+        if not font_render_config_selection_supported(config):
+            return false
+        self.ensure_font_renderer()
+        var fonts: FontRenderer = self.font_owner.active[0]
+        fonts.stage_text_with_advances_configured(text_val, advance_widths, color, config)
+        self.font_owner.active[0] = fonts
+        self._font_batch_receipt("text-advances-vulkan-only", text_val.len())
+        self._draw_font_batch_staged(x, y, ["vulkan"])
+
     me draw_text_with_advances_configured(x: i32, y: i32, text_val: text, advance_widths: [i32], color: u32, config: FontRenderConfig) -> bool:
         # Mut-param plan (font_execution_plan_into): the [text] array RETURN of
         # font_execution_plan arrived empty at THIS call site on the
@@ -1727,6 +1745,20 @@ class Engine2D with DrawIrRenderTarget:
         self.draw_shaped_text_configured(
             x, y, glyph_run, color, engine2d_default_font_config_for(font_size, self.baremetal_backend != nil)
         )
+
+    me draw_shaped_text_vulkan_only(x: i32, y: i32, glyph_run: DrawIrGlyphRunPayload, color: u32, font_size: i32) -> bool:
+        """Draw a shaped run through the canonical Vulkan font batch only."""
+        if self.selected_backend_name != "vulkan" or self.vulkan_font_state_unknown:
+            return false
+        val config = engine2d_default_font_config_for(font_size, false)
+        if not font_render_config_selection_supported(config):
+            return false
+        self.ensure_font_renderer()
+        var fonts: FontRenderer = self.font_owner.active[0]
+        fonts.stage_selected_glyph_run_configured(glyph_run, color, config)
+        self.font_owner.active[0] = fonts
+        self._font_batch_receipt("shaped-vulkan-only", glyph_run.glyph_ids.len())
+        self._draw_font_batch_staged(x, y, ["vulkan"])
 
     me draw_shaped_text_configured(x: i32, y: i32, glyph_run: DrawIrGlyphRunPayload, color: u32, config: FontRenderConfig) -> bool:
         val plan = font_execution_plan(config, ["cuda", "metal", "opencl", "vulkan", "rocm", "cpu"])

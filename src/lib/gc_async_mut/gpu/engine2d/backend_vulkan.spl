@@ -532,13 +532,29 @@ impl RenderBackend for VulkanBackend:
 
     me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
         if self.completion_unknown: return
-        # Composed from real GPU draw_rect_filled dispatches using the same
-        # Bresenham walk as SoftwareBackend, so the pixels are genuinely written
-        # on the device framebuffer AND bit-exact with the CPU reference. The
-        # dedicated line SPIR-V kernel (spirv_line) is a truncating DDA that
-        # diverges from the engine's Bresenham contract, so it stays unwired.
-        # See bug vulkan_raster_kernels_noop_and_divergent_2026-06-17.
-        emu_draw_line(self, x1, y1, x2, y2, color, thickness)
+        if thickness <= 0:
+            self.mark_cpu_fallback("line-thickness-invalid")
+            return
+        val dx = _i64(x2) - _i64(x1)
+        val dy = _i64(y2) - _i64(y1)
+        val abs_dx = if dx < 0: -dx else: dx
+        val abs_dy = if dy < 0: -dy else: dy
+        # The line kernel owns every pixel write. Keep its workgroup count
+        # bounded; degenerate lines still require one device invocation.
+        var steps = if abs_dx > abs_dy: abs_dx else: abs_dy
+        if steps == 0:
+            steps = 1
+        if steps <= 0 or steps > 2147483647:
+            self.mark_cpu_fallback("line-dispatch-size-invalid")
+            return
+        val pc = _pack_line_pc(
+            x1, y1, x2, y2, color, thickness, self.w, self.h,
+            self.clip_x, self.clip_y, self.clip_w, self.clip_h,
+            self.clip_enabled)
+        val dispatched = self._dispatch_framebuffer_checked(
+            self.pipe_line, pc, (steps + 255) / 256, 1, 1)
+        if dispatched < 0:
+            self.completion_unknown = true
 
     me draw_circle(cx: i32, cy: i32, r: i32, color: u32):
         if self.completion_unknown: return

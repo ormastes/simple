@@ -1175,6 +1175,76 @@ fn _engine2d_draw_ir_prepare_fresh_device_text(engine: Engine2D, composition: Dr
                         return (eng, "fresh-device-font-quad-invalid")
     (eng, "")
 
+# Strict Vulkan primitive lane.  This is deliberately narrower than the
+# general advanced executor: it has one persistent Vulkan Engine2D surface,
+# admits only an opaque target clear, opaque rectangles, straight EDGE/linear
+# PATH, and resolved vector text.  In particular it never asks the generic
+# executor to turn images, effects, clipped child surfaces, or a CPU result
+# into a device receipt.
+fn _engine2d_draw_ir_strict_vulkan_primitive_reason(engine: Engine2D, composition: DrawIrComposition, images: [Engine2dResolvedDrawIrImage]) -> text:
+    if engine.selected_backend_name != "vulkan" or engine.vulkan_font_poisoned():
+        return "strict-vulkan-engine-required"
+    var first = true
+    var count = 0
+    for batch in composition.batches:
+        val embedding = batch.embedding
+        if (batch.backend_target != DRAW_IR_BACKEND_GPU or embedding.x != 0 or
+            embedding.y != 0 or embedding.width != engine.width() or
+            embedding.height != engine.height() or embedding.opacity_milli != 1000 or
+            embedding.clip):
+            return "strict-vulkan-single-surface-required"
+        for command in batch.commands:
+            if command.? == false or command.clip_rect.present:
+                return "strict-vulkan-command-preflight-required"
+            val right = command.x.to_i64() + command.width.to_i64()
+            val bottom = command.y.to_i64() + command.height.to_i64()
+            if (command.width <= 0 or command.height <= 0 or command.x < 0 or
+                command.y < 0 or right > engine.width().to_i64() or
+                bottom > engine.height().to_i64()):
+                return "strict-vulkan-command-bounds-required"
+            if first and command.kind != DRAW_IR_COMMAND_RECT:
+                return "strict-vulkan-clear-first-required"
+            if command.kind == DRAW_IR_COMMAND_RECT:
+                if (command.computed_style.len() != 0 or
+                    ((command.color >> 24) & 0xFFu32) != 0xFFu32):
+                    return "strict-vulkan-opaque-rect-required"
+                if first and (command.x != 0 or command.y != 0 or
+                    command.width != engine.width() or
+                    command.height != engine.height()):
+                    return "strict-vulkan-clear-first-required"
+            elif command.kind == DRAW_IR_COMMAND_TEXT:
+                if not _engine2d_draw_ir_fresh_device_command_supported(
+                    command, images, engine.width(), engine.height(), false, false):
+                    return "strict-vulkan-font-preflight-required"
+            elif command.kind == DRAW_IR_COMMAND_EDGE or command.kind == DRAW_IR_COMMAND_PATH:
+                val stroke = _engine2d_draw_ir_linear_stroke(command, 0, 0)
+                if not stroke.valid:
+                    return "strict-vulkan-linear-stroke-required"
+                for point in stroke.points:
+                    if (point.x < 0 or point.y < 0 or point.x >= engine.width() or
+                        point.y >= engine.height()):
+                        return "strict-vulkan-line-bounds-required"
+            else:
+                return "strict-vulkan-primitive-kind-required"
+            first = false
+            count = count + 1
+    if first or count == 0:
+        return "strict-vulkan-nonempty-composition-required"
+    ""
+
+fn _engine2d_draw_ir_strict_vulkan_rejected(composition: DrawIrComposition, reason: text) -> Engine2dDrawIrAdvResult:
+    val plan = simple_2d_draw_ir_adv_composition_plan(composition, true)
+    _engine2d_draw_ir_result_from_composition_plan_with_unsupported(
+        plan, 0, 1, reason, engine2d_readback([], "preflight_rejected"))
+
+fn _engine2d_draw_ir_strict_vulkan_command_count(composition: DrawIrComposition) -> i32:
+    var count = 0
+    for batch in composition.batches:
+        for command in batch.commands:
+            if command.? != false:
+                count = count + 1
+    count
+
 # Append one diagnostic kind without unbounded duplicate string growth.
 fn _engine2d_draw_ir_note_unsupported_kind(kinds: text, kind: text) -> text:
     if kinds == "":
@@ -2027,6 +2097,130 @@ fn engine2d_draw_ir_adv_fresh_device_composition_with_images(engine: Engine2D, c
         return _engine2d_draw_ir_result_from_composition_plan_with_unsupported(plan, 0, 1, prepared.1, engine2d_readback([], "preflight_rejected"))
     _engine2d_draw_ir_adv_composition_with_images(prepared.0, composition, true, images, true, false, true)
 
+fn _engine2d_draw_ir_strict_vulkan_result_with_font_evidence(composition: DrawIrComposition, rendered: i32, skipped: i32, readback: Engine2DReadback, engine: Engine2D) -> Engine2dDrawIrAdvResult:
+    val plan = simple_2d_draw_ir_adv_composition_plan(composition, true)
+    var result = _engine2d_draw_ir_result_from_composition_plan_with_unsupported(
+        plan, rendered, skipped, if skipped == 0: "none" else: "strict-vulkan-execution", readback)
+    result.font_identity = engine.selected_font_identity()
+    result.font_execution_target = engine.font_execution_target()
+    val target_font = engine.draw_ir_font_evidence()
+    if target_font != nil:
+        val evidence: DrawIrTargetFontEvidence = target_font
+        result.font_batch_identity = evidence.batch_identity
+        result.font_readback_source = evidence.readback_source
+        result.font_device_checksum = evidence.device_checksum
+        result.font_oracle_checksum = evidence.oracle_checksum
+        result.font_readback_nonblank_pixels = evidence.readback_nonblank_pixels
+        result.font_parity = evidence.parity
+        result.font_device_executed = evidence.device_executed
+        result.font_promotion_ready = evidence.promotion_ready
+        result.font_atlas_upload_count = evidence.atlas_upload_count
+        result.font_atlas_upload_bytes = evidence.atlas_upload_bytes
+        result.font_atlas_payload_sha256 = evidence.atlas_payload_sha256
+    result
+
+fn _engine2d_draw_ir_execute_strict_vulkan_primitives(engine: Engine2D, composition: DrawIrComposition) -> Engine2dDrawIrAdvResult:
+    var eng = engine
+    var rendered = 0
+    var skipped = 0
+    var first = true
+    for batch in composition.batches:
+        for command in batch.commands:
+            if command.kind == DRAW_IR_COMMAND_RECT:
+                if first:
+                    eng.clear(command.color)
+                else:
+                    eng.draw_rect_filled(
+                        command.x, command.y, command.width, command.height,
+                        command.color)
+                rendered = rendered + 1
+            elif command.kind == DRAW_IR_COMMAND_TEXT:
+                val identity = _engine2d_draw_ir_style_value(
+                    command.computed_style, "font-identity")
+                val advances = _engine2d_draw_ir_text_advances(command)
+                val shaped = _engine2d_draw_ir_shaping_requested(command)
+                var drawn = eng.select_font_identity(identity)
+                if drawn:
+                    if shaped:
+                        drawn = eng.draw_shaped_text_vulkan_only(
+                            command.x, command.y, command.glyph_run,
+                            command.color,
+                            _engine2d_draw_ir_text_font_size(command.computed_style))
+                    else:
+                        drawn = eng.draw_text_with_advances_vulkan_only(
+                            command.x, command.y, command.text_value, advances,
+                            command.color,
+                            _engine2d_draw_ir_text_font_size(command.computed_style))
+                if drawn:
+                    rendered = rendered + 1
+                else:
+                    skipped = skipped + 1
+            else:
+                val stroke = _engine2d_draw_ir_linear_stroke(command, 0, 0)
+                var segment = 0
+                while segment < stroke.points.len() - 1:
+                    val from = stroke.points[segment]
+                    val to = stroke.points[segment + 1]
+                    eng.draw_line(from.x, from.y, to.x, to.y, stroke.color, 1)
+                    segment = segment + 1
+                rendered = rendered + 1
+            first = false
+    val submitted = eng.submit_batch()
+    val readback = eng.read_pixels_with_source()
+    if not submitted:
+        skipped = skipped + 1
+    _engine2d_draw_ir_strict_vulkan_result_with_font_evidence(
+        composition, rendered, skipped, readback, eng)
+
+fn engine2d_draw_ir_adv_strict_vulkan_primitives_with_images(engine: Engine2D, composition: DrawIrComposition, images: [Engine2dResolvedDrawIrImage]) -> Engine2dDrawIrAdvResult:
+    """Execute only device-attested Vulkan DrawIR primitives.
+
+    A caller receives pixels only after the persistent Vulkan surface has
+    flushed its batch fence and returned a device-origin readback with both
+    stable handles.  Any missing execution evidence is a rejection, never a
+    CPU/mirror result labelled as a device receipt.
+    """
+    val reason = _engine2d_draw_ir_strict_vulkan_primitive_reason(
+        engine, composition, images)
+    if reason != "":
+        return _engine2d_draw_ir_strict_vulkan_rejected(composition, reason)
+    val prepared = _engine2d_draw_ir_prepare_fresh_device_text(
+        engine, composition, engine.width(), engine.height())
+    if prepared.1 != "":
+        return _engine2d_draw_ir_strict_vulkan_rejected(composition, prepared.1)
+    var result = _engine2d_draw_ir_execute_strict_vulkan_primitives(
+        prepared.0, composition)
+    val expected = _engine2d_draw_ir_strict_vulkan_command_count(composition)
+    val font_required = _engine2d_draw_ir_composition_has_text(composition)
+    val readback_valid = (result.readback_source == "device_readback" and
+        result.backend_handle > 0 and result.device_identity > 0 and
+        result.pixels.len() == engine.width().to_i64() * engine.height().to_i64())
+    val commands_valid = (result.rendered_command_count == expected and
+        result.skipped_command_count == 0 and not result.fallback_required)
+    val font_valid = (not font_required or
+        (result.font_execution_target == "vulkan" and
+            result.font_device_executed and result.font_promotion_ready and
+            result.font_readback_source == "device_readback"))
+    if readback_valid and commands_valid and font_valid:
+        return result
+    result.fallback_required = true
+    result.fallback_reason = "strict-vulkan-device-evidence-required"
+    result.rendered_command_count = 0
+    result.skipped_command_count = expected
+    result.pixels = []
+    result.readback_source = "device_evidence_rejected"
+    result.backend_handle = 0
+    result.device_identity = 0
+    result.readback_checksum = 0
+    result
+
+fn _engine2d_draw_ir_composition_has_text(composition: DrawIrComposition) -> bool:
+    for batch in composition.batches:
+        for command in batch.commands:
+            if command.? != false and command.kind == DRAW_IR_COMMAND_TEXT:
+                return true
+    false
+
 fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: DrawIrComposition, gpu_available: bool, images: [Engine2dResolvedDrawIrImage], allow_parent_image: bool, present_frame: bool, readback_frame: bool) -> Engine2dDrawIrAdvResult:
     val plan = simple_2d_draw_ir_adv_composition_plan(composition, gpu_available)
     # Preserve the public fallback invariant from the original inputs. The
@@ -2272,6 +2466,7 @@ export engine2d_draw_ir_adv_composition
 export engine2d_draw_ir_adv_composition_with_images
 export engine2d_draw_ir_adv_composition_present_with_images
 export engine2d_draw_ir_adv_fresh_device_composition_with_images
+export engine2d_draw_ir_adv_strict_vulkan_primitives_with_images
 export engine2d_draw_ir_command_samples_parent
 export engine2d_draw_ir_render_tiled
 export engine2d_resolved_draw_ir_image
