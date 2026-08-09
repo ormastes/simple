@@ -8,8 +8,8 @@ Run `scripts/check/check-unoq-qrb2210-native-2d.shs --transcript FILE
 --capture FILE` to preflight a receipt. The checker verifies the capture hash
 and delegates all semantic decisions to the Pure-Simple admission owner. Once
 the canonical port exists it may report at most `ready` with
-`offline-untrusted`: caller-supplied files cannot prove a physical board. A
-The live runner is
+`offline-untrusted`: caller-supplied files cannot prove a physical board. The
+live runner is
 `scripts/check/run-unoq-qrb2210-native-2d-live.shs`. It accepts only device,
 output-directory, and timeout selection; transcript, receipt, capture, replay,
 and offline inputs are rejected. It selects an authorized ADB device, verifies
@@ -21,22 +21,22 @@ offline preflight can never be promoted to PASS. The admission contract requires
 Adreno Vulkan submission, fence and device readback, exact checksum, no CPU
 fallback, left/right Ctrl and Alt, pointer move/down/drag/up/wheel, and completed
 non-silent audio. The live runner strengthens this to exactly 20 animation and
-20 warm performance frames, a nonzero warm p95 no
-greater than the host-owned 16,700 us budget, a nonzero peak RSS no greater
-than the host-owned 256 MiB budget,
-DrawIR work, font glyph work, exact raw-capture byte count/hash, and matching
+20 warm performance frames, a nonzero warm p95 no greater than the host-owned
+16,700 us budget, a nonzero peak RSS no greater than the host-owned 256 MiB
+budget, DrawIR work, font glyph work, exact raw-capture byte count/hash, and matching
 run/ADB/boot/frame identities. The boot ID is read independently before and
 after provider execution, the readback byte count must equal the acquired
 capture, and admission runs only through a canonical Stage4 provenance-verified
 pure-Simple CLI. The exact invoked board-provider artifact is also acquired,
 hashed, retained, and matched to the receipt's `provider_sha256`; the receipt
 itself is retained with its hash. Pre/post provider hashes must also match, so
-an artifact replacement during the run fails. A Debian/Android board run is readiness
-only.
+an artifact replacement during the run fails. A Debian/Android board run is
+readiness only.
 
 Today the canonical `uno_q_desktop_contract` reports the QRB2210 SimpleOS
-display/input/audio/GPU-submit/fence/device-readback ports unavailable, so even a semantically complete offline
-receipt is blocked before readiness promotion. Do not change the admission to
+display/input/audio/GPU-submit/fence/device-readback ports unavailable, so even
+a semantically complete offline receipt is blocked before readiness promotion.
+Do not change the admission to
 bypass that owner; the port implementation must update the canonical contract.
 
 The next real source boundary is split between
@@ -59,6 +59,7 @@ to manufacture an `UnoQNative2dEvidence` record; PASS evidence must originate
 from the eventual physical composition root and live-board runner.
 
 This host had no authorized ADB device on 2026-08-09, so no live board claim is
-made and the live runner was not executed against hardware. Remaining external work is the QRB2210 SimpleOS boot/display/Adreno
-firmware, MMU/cache, queue and fence bring-up, followed by a real transcript and
-capture from the physical board.
+made and the live runner was not executed against hardware. Remaining external
+work is the QRB2210 SimpleOS boot/display/Adreno firmware, MMU/cache, queue and
+fence bring-up, followed by a real transcript and capture from the physical
+board.
