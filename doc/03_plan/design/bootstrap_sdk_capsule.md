@@ -302,3 +302,7 @@ The x86 Stage4 closure now passes the previously failing glass-token and daemon 
 ## 2026-08-09 QEMU runner and cache-facade recovery
 
 The preserved-cache Stage4 closure now passes prior MCP T32 frontiers and exposed three later phase-4 ownership issues: QEMU scenario platform-lane imports, obsolete bare `float` conversion, and raw test-cache `rt_file_stat` consumption. Each frontier was corrected through explicit owners/concrete primitives, covered by focused native fixtures, reviewed with sidecars, committed, and pushed. The third frontier is fixed but not yet exercised by a fourth canonical Stage4 attempt because the mandatory retry cap is reached. A Stage3 native `f64` ABI/value anomaly was also observed; behavior assertions remain interpreter-gated until a self-hosted Stage4 CLI is produced. QEMU primitive WM remains unverified and cannot be claimed from Stage3 artifacts.
+
+## 2026-08-09 Loader typing recovery
+
+The canonical Stage4 closure now passes the prior file-stat frontier and exposed three later phase-4 boundaries: daemon process liveness ownership, project-build function-local imports, and compatibility-loader optional return typing plus `SmfSymbol` ownership. Each was corrected without weakening bootstrap or QEMU gates and covered by focused native evidence. The loader fix is pushed but not yet exercised by a fourth canonical Stage4 attempt because the mandatory three-attempt cap is reached. No Stage4 candidate or QEMU primitive-WM verification may be claimed yet.

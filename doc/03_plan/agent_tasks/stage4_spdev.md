@@ -100,3 +100,12 @@
 - The retry-3 frontier is fixed and pushed. The three-attempt cap is reached; use the preserved Stage4 cache in the next fresh cycle.
 - Separate defect observed: Stage3 native `f64` values/default arguments are zero or corrupted. Do not treat Stage3 native numeric output as interpreter evidence; investigate after obtaining the Stage4 candidate.
 - No Stage4 candidate exists. Candidate smoke/install, ARM64 attestation, QMP primitive-WM receipts, macOS, ARM, and Uno-Q verification remain pending.
+
+## 2026-08-09 Stage4 cache/driver/loader cycle
+
+- Pushed `43ba00eb7bc`: replace function-local daemon PID probing and raw shared-cache file I/O with process/file facades. Child-process liveness and cache save/load native fixtures pass.
+- Pushed `901efe323df`: move project-build `HeaderGenerator` and `get_shared_lib_flags` imports to module scope. Focused HIR passes; minimal-bundle linking stops later on expected missing Cranelift runtime externs.
+- Pushed `212ba4b9fca`: import `SmfSymbol` and add concrete optional return types to loader lookups. Focused native build and runtime lookup pass.
+- Retry 1 advanced to daemon `rt_process_exists`; retry 2 advanced to project-build local imports; retry 3 advanced to loader return typing and `SmfSymbol`.
+- The retry-3 loader frontier is fixed and pushed. The three-attempt cap is reached; use the preserved cache in the next fresh cycle.
+- No Stage4 candidate exists. Candidate smoke/install, ARM64 attestation, QMP primitive-WM receipts, macOS, ARM, and Uno-Q remain pending.
