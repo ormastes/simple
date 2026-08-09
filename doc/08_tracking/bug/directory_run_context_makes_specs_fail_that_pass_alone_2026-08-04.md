@@ -1,6 +1,9 @@
 # A spec that passes 28/28 alone reports 3 failures inside a directory run
 
-**Status:** OPEN
+**Status:** RETRACTED (see below) — original "directory-run" diagnosis was
+wrong; the real cause was the `T?`-to-`bool` coercion defect plus an unpinned,
+concurrently-mutated working copy. Kept for the durable measurement-methodology
+finding at the bottom (pin a worktree before measuring).
 **Found:** 2026-08-04, while verifying the `T?`-to-`bool` coercion fix.
 **Class:** measurement defect — inflates every directory-scoped failure count by
 an unknown amount. Same binary, same flags, different answer.
