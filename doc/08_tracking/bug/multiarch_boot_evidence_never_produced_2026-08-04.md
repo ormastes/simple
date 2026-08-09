@@ -80,3 +80,16 @@ under QEMU. Fabricating the JSON files would be exactly the false-green this
 gate exists to prevent.
 
 Not fixable by editing spec or product source from a hosted test lane.
+
+## Re-confirmed 2026-08-09
+
+Re-checked fresh: `/usr/bin/grep -n -- '--arch' scripts/bootstrap/bootstrap-from-scratch.sh`
+still returns no output (the per-arch dispatch flag still does not exist),
+and `build/multiarch/` on disk still contains only the single riscv64
+`bootstrap_result.json` (`smoke_status: "fail"`), no `smoke_result.json` for
+any arch. Root cause and scope are unchanged from the original analysis.
+Status remains **ARCHITECTURAL-OPEN**: closing this requires implementing
+`--arch=<triple>` dispatch plus six real QEMU boots (and, per
+`.claude/rules/board-runnable.md`, board-runnable evidence, not QEMU-only),
+which is out of scope for a hosted, non-QEMU verification pass. No code
+changed this pass.

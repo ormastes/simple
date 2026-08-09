@@ -170,3 +170,13 @@ Alternate the two binaries within the loop, or load drift becomes the result.
 Scope is unchanged and remains the binary's own string:
 `mlkem_ntt_benchmark_scope=focused-primitive-mean-not-full-mlkem-promotion` — an
 NTT-primitive speedup, **not** a full ML-KEM speedup and **not** a promotion.
+
+## Re-confirmed 2026-08-09
+
+Fresh re-run of `sh scripts/check/build-mlkem-simd-c-lane.shs` from a clean
+invocation: builds with 0 implicit-declaration warnings and exits with
+`MLKEM_SIMD_C_LANE: PASS backend=1 iters=20000
+bin=build/check/mlkem-simd-c-lane/mlkem_ntt_simd_c_test`. Status remains
+**FIXED**; the build script and the header declarations from the 2026-08-05
+resolution are both present and working on the current tree. No code changed
+this pass.

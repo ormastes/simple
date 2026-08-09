@@ -1,7 +1,7 @@
 # native-build is blocked from inside the repo by 91 hyphen/underscore module-name collisions
 
 **Date:** 2026-07-28
-**Status:** OPEN — blocks the native smoke matrix on the pure-Simple compiler
+**Status:** FIXED (re-confirmed 2026-08-09 — see bottom of doc) — was blocking the native smoke matrix on the pure-Simple compiler
 **Severity:** high (it makes the mandatory pre-deploy gate unrunnable)
 **Found by:** the MIR fail-open migration lane, while trying to run
 `scripts/check/native-smoke-matrix.shs` against a pure-Simple binary.
@@ -90,3 +90,25 @@ rename. Deliberately not fixed here.
 
 - `doc/03_plan/compiler/reliable_mode/mir_error_fail_open_class_migration_plan.md`
   — the lane that hit this.
+
+## Re-confirmed 2026-08-09 — ALREADY-FIXED, verified fresh
+
+Re-ran the exact counting command from this doc against current `HEAD`:
+
+```
+git ls-tree -r --name-only HEAD src/ | /usr/bin/grep '\.spl$' | sed 's/-/_/g' | sort | uniq -d | wc -l
+=> 0
+```
+
+Zero collisions today, versus the 91 recorded on `origin/main` at the time
+this doc was filed. `src/app/llm_caret/claude_full/commands/` now carries
+only the underscored spelling of each command directory (`ant_trace/`,
+`autofix_pr/`, `backfill_sessions/`, ...) — the hyphenated duplicates named in
+"Scale" above are gone from the tree; `git log` shows subsequent commits
+touching that directory (`cfe0506e336`, `78dbaff5d7c`, `aff29a24dfe`). No
+stage3 pure-Simple binary was available in this session to re-run
+`native-build` end-to-end (building one is out of budget for this pass), but
+the underlying condition this doc names — the hyphen/underscore duplicate
+tree causing path-sanitization collisions — is verifiably gone at the source
+level, which is sufficient to close this. Status: **FIXED**. No code changed
+this pass (the dedup predates this session).

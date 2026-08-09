@@ -290,3 +290,21 @@ alone — the next step to actually close this is (a) rebuild+redeploy
 missing probe fixture and run it 5-10 times against the redeployed binary,
 exactly as the original (untrusted) "PASS" claim should have been checked in
 the first place.
+
+## Re-confirmed 2026-08-09
+
+Re-read in full. `src/compiler_rust/runtime/src/value/simd_int_ops.rs` was
+inspected fresh: all eight `rt_simd_{add,sub,mul,xor,and,or,shl,shr}_i32x8`
+wrappers already use `.read_unaligned()`/`.write_unaligned()` (e.g. line 645
+onward), confirming the 2026-08-06 source-level fix is landed and present on
+the current tree. The named probe files
+(`mlkem_ntt_simd_public_interface_probe.spl`,
+`mlkem_ntt_forced_scalar_control_probe.spl`) still do not exist anywhere in
+this working copy, so the literal end-to-end repro remains not independently
+re-runnable, matching the 2026-08-06 finding exactly. Per the mandate here,
+`src/compiler_rust/**` may not be edited from this pass and a full bootstrap
+rebuild+redeploy is out of budget for a single item, so this stays
+**ARCHITECTURAL-OPEN**: the source fix is real and present, but the
+end-to-end claim cannot be independently closed without (a) a Stage
+rebuild/redeploy of `bin/simple` and (b) recreating the missing `.spl`
+fixture. No code touched.

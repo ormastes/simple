@@ -307,6 +307,22 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 
 ---
 
+## Re-confirmed 2026-08-09
+
+Re-read in full; status re-confirmed as ARCHITECTURAL-OPEN, not fixable in a
+scoped pass. `struct_value_syms` and `module_lowering.spl` (two of the files
+this document names as part of the fix surface) currently carry uncommitted
+edits from a concurrent session in this shared working copy and were
+explicitly out of scope to touch here regardless. Blocker A (no oracle for a
+`src/compiler` source change short of a full Stage 3 rebuild) and Blocker B
+(the transitive closure is ~340 references across 10+ interlocking bare-keyed
+maps, a design-sized unit of work) both still hold on inspection of the
+current tree; nothing in `50.mir` or `20.hir` has changed the namespace
+derivation since this doc's last update. Left OPEN, no code changed for this
+finding.
+
+---
+
 ## DYNAMIC CONFIRMATION (2026-08-08) — the first actual measurement
 
 The review above stated its central claim was static-only and named the probe
