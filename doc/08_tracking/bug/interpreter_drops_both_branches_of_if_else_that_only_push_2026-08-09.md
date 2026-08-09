@@ -1,7 +1,33 @@
 # Tree-walk interpreter silently drops BOTH branches of an if/else whose bodies only `push`
 
 **Date:** 2026-08-09
-**Status:** OPEN
+**Status:** NOT REPRODUCIBLE (2026-08-09 follow-up; regression spec landed)
+
+## 2026-08-09 follow-up: cannot reproduce on any engine
+
+Investigated on the shared WC (binary: Rust seed at
+`bin/release/x86_64-unknown-linux-gnu/simple`). ~20 shapes probed, including a
+faithful reconstruction of the original `cache_explain` site (struct-field
+condition `lookup.hit`, push of concatenated field accesses, one and two
+pushes per arm, long surrounding push sequence):
+
+| Shape | interpreter (`SIMPLE_EXECUTION_MODE=interpreter`) | spec harness (`bin/simple test`) | JIT (`bin/simple run`) | native (`native-build`) |
+|---|---|---|---|---|
+| if/else single push, literal cond | OK (len=1) | OK | OK | OK |
+| if/else single push, comparison / struct-field cond | OK | OK | OK | — |
+| elif chain, single push per arm | OK | OK | OK | — |
+| while / match arms / nested if, push-only | OK | — | OK | — |
+| `.set` / `.insert` / nested `ll[0].push` only bodies | OK | — | `.set` fails with known dict-set dispatch gap (separate bug) | — |
+| two pushes per arm (original t10 shape) | OK | — | OK | — |
+
+No shape drops a branch. Either the defect was specific to the (since
+replaced) binary/state C8 ran under, or C8's probe mismeasured (the missing
+tier line had another cause). Regression spec guarding the shape:
+`test/01_unit/bugs/if_else_push_only_branch_spec.spl` (4/4 green;
+sabotage-verified — neutralizing the pushes turns it RED).
+
+Blast radius if it ever recurs: 187 if/push/else/push sites across 160
+`*_spec.spl` files (`/usr/bin/grep`-based sweep, 2026-08-09).
 **Severity:** silent wrong output under the interpreter; JIT is correct — so this is engine divergence, not a uniform bug
 **Found by:** agent C8 while building `cache_explain.spl`
 

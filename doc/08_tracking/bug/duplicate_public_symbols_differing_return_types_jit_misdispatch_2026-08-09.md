@@ -88,6 +88,37 @@ SIMPLE_DIAG_SAME_SIGNATURE_COLLISION=1 bin/simple test <any spec> 2>&1 \
 `SIMPLE_DIAG_SAME_SIGNATURE_COLLISION=1` prints the OWNER PATH of each colliding
 definition, which is what makes the two-parallel-trees structure visible.
 
+## CRITICAL: converging signatures makes things WORSE, not better
+
+Measured 2026-08-09, second attempt. An agent converged every `file_read_bytes`
+definition onto `[u8]` — the obviously "correct" canonical type. Result:
+
+```
+BEFORE: file_read_bytes, 2 defs, DIFFERING signatures ((text)->[i64] vs (text)->[u8])   [Class A]
+AFTER:  file_read_bytes, 3 defs, IDENTICAL signature   ((text)->[u8])                    [Class B]
+        Defined in: .../io/file_ops.spl, .../io_runtime.spl, .../sffi/io.spl
+```
+
+**It converted a Class A collision into a Class B collision — the worse class.**
+
+With differing signatures, exact-arg-type match can still pick correctly in many
+call sites, and a type error can fire. With identical signatures, one definition
+silently wins, **no diagnostic can ever fire**, and importing specs may exercise
+a different module's body.
+
+So the intuitive fix — "make the signatures agree" — is actively harmful on its
+own. Signature convergence is only safe when combined with **deleting the
+duplicate definitions**, leaving exactly one. Renaming is likewise only safe if
+the result is one definition per name.
+
+The change was reverted. Total collisions during that attempt read 431 vs the
+375 baseline, though other sessions' concurrent edits were also present in the
+working copy, so that delta is not solely attributable.
+
+**Rule for anyone continuing this work:** the metric is the count of
+DEFINITIONS per symbol, driven to one. Signature agreement is not the goal and
+optimising for it makes the codebase less diagnosable.
+
 ## Recommended approach
 
 1. Decide whether `src/app/io/**` and `src/lib/nogc_sync_mut/io/**` should both
