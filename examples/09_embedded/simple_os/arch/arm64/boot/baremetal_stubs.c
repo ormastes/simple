@@ -1867,6 +1867,16 @@ static uint32_t arm64_blend_pixel(uint32_t src, uint32_t dst) {
     if (sa == 255u) return src;
     if (sa == 0u) return dst;
     uint32_t da = (dst >> 24) & 0xffu;
+    if (da == 255u) {
+        uint32_t inverse = 255u - sa;
+        uint32_t r = ((((src >> 16) & 0xffu) * sa) +
+                      (((dst >> 16) & 0xffu) * inverse)) / 255u;
+        uint32_t g = ((((src >> 8) & 0xffu) * sa) +
+                      (((dst >> 8) & 0xffu) * inverse)) / 255u;
+        uint32_t b = (((src & 0xffu) * sa) +
+                      ((dst & 0xffu) * inverse)) / 255u;
+        return 0xff000000u | (r << 16) | (g << 8) | b;
+    }
     uint32_t dst_weight = (da * (255u - sa)) / 255u;
     uint32_t out_a = sa + dst_weight;
     uint32_t r = ((((src >> 16) & 0xffu) * sa) + (((dst >> 16) & 0xffu) * dst_weight)) / out_a;
@@ -2810,6 +2820,25 @@ RuntimeValue rt_gui_fill4(RuntimeValue xy, RuntimeValue wh, RuntimeValue color, 
         volatile uint32_t *dst = fb + (uint64_t)row * g_fb_w + px;
         uint32_t remaining = x_limit - px;
 #if defined(__aarch64__)
+        while (remaining >= 16u) {
+            __asm__ volatile(
+                "dup v0.4s, %w1\n\t"
+                "stp q0, q0, [%0]\n\t"
+                "stp q0, q0, [%0, #32]"
+                :
+                : "r" (dst), "r" (c)
+                : "v0", "memory");
+            if (g_gui_simd_fill_scalar_parity_checks < 64u) {
+                for (uint32_t i = 0; i < 16u; i++) {
+                    if (dst[i] != c)
+                        g_gui_simd_fill_scalar_parity_failures++;
+                }
+                g_gui_simd_fill_scalar_parity_checks++;
+            }
+            dst += 16;
+            remaining -= 16u;
+            call_chunks += 4u;
+        }
         while (remaining >= 4u) {
             uint32_t scalar_reference[4];
             rt_gui_scalar_fill4(scalar_reference, c);
