@@ -27,8 +27,12 @@ it is that live capture exists for only a sliver of the system:
 | `live_json_capture_spec.spl` | real subprocess stdout → `json_document` (closed JSON-pointer oracle) | LIVE (T2c, landed 2026-08-09) |
 | `live_text_protocol_capture_spec.spl` | real subprocess stdout → `text_protocol` frame parse | LIVE (T2c, landed 2026-08-09) |
 | `live_binary_capture_spec.spl` | real file round-trip bytes → `binary_layout` PTE decode | LIVE (T2d, landed 2026-08-09) |
-| 30 migrated legacy specs | real captures via `untyped_capture.spl` | LIVE |
-| `terminal_grid` (interactive), `action_trace`, `scene_profile`, `simulation_profile`, `audio_profile`, `ml_profile`, `json_document`, `text_protocol`, `binary_layout` | constructed fixtures only | FIXTURE |
+| `live_interactive_surface_spec.spl` | real in-process widget mutations → `WinTextSnapshot` rows + `ActionTrace` | LIVE (T2a/T2b, 2026-08-09) |
+| `live_scene_capture_spec.spl` | real `builder.label`→`compute_layout`→`widget_tree_to_draw_cmds` → `DrawScene` | LIVE (T2e, 2026-08-09) |
+| `live_simulation_capture_spec.spl` | real `ChaosScheduler.pick_next` decisions → `TimelineEvent` | LIVE (T2f, 2026-08-09) |
+| `live_audio_capture_spec.spl` | real PCM16 WAV bytes → real `decode_wav` → `audio_profile` | LIVE (T2g, 2026-08-09) |
+| 37 migrated legacy specs | real captures via `untyped_capture.spl` | LIVE |
+| `ml_profile` | constructed fixtures only — real torch facade unreachable under the interpreter runtime (blocked, documented) | FIXTURE |
 | 3 E8 reference manuals | hand-built fixtures (labeled) | FIXTURE |
 
 **Gaps found by the audit:**
@@ -53,7 +57,14 @@ it is that live capture exists for only a sliver of the system:
 
 ## Task plan
 
-### T1 — Self-hosted re-verification gate (G4) — do FIRST, blocks trust in everything else
+### T1 — Self-hosted re-verification gate (G4) — **BLOCKED 2026-08-09, still owed**
+Attempted 2026-08-09; stopped at its own safety gate and recorded in
+`doc/08_tracking/todo/sspec_self_hosted_reverification_2026-08-09.md`: four competing
+bootstrap/native-build jobs were already running (one directly in this repo tree) on a
+99%-full disk (62G free), and no self-hosted binary is deployed. Starting a fifth build
+would have risked the machine for every session. This remains the single caveat on ALL
+green results in this feature. Original procedure retained below.
+
 1. Rebuild + deploy: `scripts/setup/setup.shs && bin/simple build bootstrap`,
    then redeploy per `.claude/rules/bootstrap.md` (copy to
    `bin/release/<triple>/` via `.new` + `mv`).
@@ -76,18 +87,19 @@ plus a sabotage/revert proof.
 
 | Order | Domain | Real source (facade) | Target struct | Notes |
 |---|---|---|---|---|
-| 2a | TUI interactive | in-process `Compositor`/`UIState` via `SgttiTestDriver.from_tui_state` | `TerminalSnapshot` | SGTTI is NOT a process launcher (verified); use it for the in-process interactive case: drive a real UIState, snapshot per step. Keystroke dispatch + settle per `action_trace.spl`'s `SettleCondition`. |
-| 2b | GUI action trace | same SGTTI in-process dispatch | `ActionTrace` | Record real dispatched steps instead of hand-built `UiActionStep`s; 2a and 2b share one lane. |
+| 2a | TUI interactive | in-process widget store via `SgttiTestDriver.from_tui_state` | `TerminalSnapshot` | **LANDED 2026-08-09** — `live_interactive_surface_spec.spl` (2 ex): real `set_prop` mutations on the widget store, rows read back from the post-mutation `WinTextSnapshot`. |
+| 2b | GUI action trace | same SGTTI in-process dispatch | `ActionTrace` | **LANDED 2026-08-09** — same spec records the real dispatched steps. |
 | 2c | JSON/text protocol | real process stdout via `capture_exec` | `json_document`/`text_protocol` input | **LANDED 2026-08-09** — `live_json_capture_spec.spl` + `live_text_protocol_capture_spec.spl`, both green/red/green sabotage-proven. |
 | 2d | Binary layout | real bytes from a real file via `file_capture.spl` | `binary_layout` input | **LANDED 2026-08-09** — `live_binary_capture_spec.spl`: real file round-trip, PTE value derived only from read-back bytes, sabotage-proven. |
-| 2e | 2D/3D scene | Engine2D/Draw IR readback through `doc/07_guide/ui/rendering/backend_isolation_guide.md` facade | `DrawScene` | Needs its own research pass — headless backend availability decides feasibility. |
-| 2f | Simulation | a real run of an existing sim harness emitting `TimelineEvent`s | `simulation_profile` input | Research pass first (which harness exists). |
-| 2g | Audio / ML | file-based: real decoded samples / real model-run metrics | `audio_profile` / `ml_profile` input | Blocked on decoder / ML-runtime facade existence; research first, may defer with explicit blocker docs. |
+| 2e | 2D/3D scene | real `builder.label` → `compute_layout` → `widget_tree_to_draw_cmds` | `DrawScene` | **LANDED 2026-08-09** — `live_scene_capture_spec.spl`; pure-arithmetic headless path, no GPU/window/backend call. 3D scene readback still open. |
+| 2f | Simulation | real `ChaosScheduler.pick_next` (RoundRobin, seeded) | `simulation_profile` input | **LANDED 2026-08-09** — `live_simulation_capture_spec.spl`; 5 real scheduling decisions, oracle hand-derived from the RoundRobin formula. |
+| 2g | Audio / ML | audio: real `decode_wav`; ML: none reachable | `audio_profile` / `ml_profile` | **AUDIO LANDED 2026-08-09** (`live_audio_capture_spec.spl`, real RIFF/WAVE bytes through the real parser, rms/peak hand-computed). **ML BLOCKED** — `rt_torch_*` externs do not resolve under the interpreter runtime `bin/simple test` uses; documented in `doc/08_tracking/todo/live_ml_capture_blocked_2026-08-09.md` rather than faked. |
 
-Sequencing: 2c and 2d landed 2026-08-09 (written by three small guided agents, independently re-verified).
-2a/2b is one focused lane. 2e–2g each start with a bounded research report
-before any design/impl (per the TODO's "do not skip straight to
-implementation" rule).
+**Status 2026-08-09: T2 substantially complete.** 2a/2b/2c/2d/2e/2f and the audio half of
+2g all landed, written by parallel guided agents and independently re-verified (blob
+re-hash + re-run + tautology review; one agent's evidence-derived oracle was rewritten to
+hand-reasoned literals before landing). Remaining: ML (blocked, documented) and 3D scene
+readback (2e covered 2D only).
 
 ### T3 — Migration backlog continuation (G3)
 Continue exactly the batch protocol that landed batches 1–9 (triage rule,
@@ -97,11 +109,13 @@ rows); treat as background work, batches of ~25, any number of sessions.
 Explicitly NOT a completion gate for the feature — the design doc scopes it
 as incremental.
 
-### T4 — Slow-lane NVMe cluster (G5)
-One dedicated pass for `nvme_vfat_baseline_script_spec.spl` with a 10-minute
-budget: establish HEAD baseline first, then triage its 17 rows. If the spec
-cannot complete even at that budget, mark the rows
-`reject: unverifiable-within-runner-budget` with the measured evidence.
+### T4 — Slow-lane NVMe cluster (G5) — **DONE 2026-08-09**
+Baseline measured GREEN 16/16 within the 600s budget, so the earlier "90s timeout" was
+budget, not breakage. All 16 rows triaged and rejected with evidence-backed reasons: row 9
+emits structured `key: value` stdout but its values embed run-specific interpolated
+mount/image paths, so an exact typed check would be built from the same variables
+(tautological); rows 29-257 each assert a single substring on a fixed stderr diagnostic,
+where an exact check on full stderr adds brittleness without precision.
 
 ## Non-goals
 - Driving the backlog (T3) to 0 in any single session.

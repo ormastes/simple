@@ -81,16 +81,30 @@ violating this file's own Update Rule. Corrected, verified status:
   `untyped_capture.spl`), E9 docs/skills refresh. Core proof specs re-run
   green 2026-08-09: `typed_evidence_oracle_spec` 28/28,
   `terminal_grid_spec` 21/21, `exec_capture_spec` 6/6 (real processes).
-- **Live vs fixture (the honest "mocking" ledger):** genuinely LIVE input
-  paths are `exec_capture.spl` (real process), `file_capture.spl` (real file
-  I/O), and `test/03_system/tools/spipe/examples/live_terminal_capture_spec.spl`
-  (real subprocess stdout -> `TerminalSnapshot`, landed 2026-08-09). Every
-  OTHER format adapter is proven only against CONSTRUCTED fixture input, and
-  the three E8 reference manuals are hand-built fixtures carrying explicit
-  honesty notes. None of this is hidden mocking — every fixture is labeled —
-  but live capture exists for only 1 of the ~6 evidence domains.
-- **Open work:** (a) untyped-evidence migration backlog — 37 migrated + 143
-  rejected of 1119 rows as of batch 9
+- **Live vs fixture (the honest "mocking" ledger, updated 2026-08-09):** live
+  capture now covers nearly every evidence domain. Provider modules:
+  `exec_capture.spl` (real process), `file_capture.spl` (real file I/O).
+  Live specs under `test/03_system/tools/spipe/examples/`:
+  `live_terminal_capture_spec` (real subprocess stdout -> `TerminalSnapshot`),
+  `live_json_capture_spec`, `live_text_protocol_capture_spec`,
+  `live_binary_capture_spec` (real file round-trip -> PTE decode),
+  `live_interactive_surface_spec` (real in-process widget-store mutations via
+  `SgttiTestDriver.from_tui_state` -> real `WinTextSnapshot` rows + `ActionTrace`),
+  `live_scene_capture_spec` (real `builder.label` -> `compute_layout` ->
+  `widget_tree_to_draw_cmds` -> `DrawScene`, headless, no GPU),
+  `live_simulation_capture_spec` (real `ChaosScheduler.pick_next` -> `TimelineEvent`),
+  `live_audio_capture_spec` (real RIFF/WAVE bytes through the real `decode_wav`).
+  Each carries a green/red/green sabotage proof and a hand-reasoned oracle —
+  expected values are NEVER read from the evidence under test; that tautology was
+  caught in review and rewritten twice, so check for it when reviewing a new lane.
+  STILL FIXTURE-ONLY: `ml_profile` (blocked — `rt_torch_*` externs do not resolve
+  under the interpreter runtime `bin/simple test` uses; see
+  `doc/08_tracking/todo/live_ml_capture_blocked_2026-08-09.md`), 3D scene readback,
+  and the three E8 reference manuals (which carry explicit honesty notes).
+- **Open work:** (a) untyped-evidence migration backlog — 37 migrated + 159
+  rejected of 1119 rows as of batch 10 plus the T4 NVMe cluster; sequential
+  scanning is now yield-exhausted (batch 10 found 0 hits in 15+ sampled rows),
+  see the backlog TODO's recommended change of approach
   (`doc/08_tracking/todo/untyped_evidence_migration_backlog_2026-08-08.md`);
   (b) live-capture infrastructure for the remaining domains
   (`doc/08_tracking/todo/sspec_live_capture_infrastructure_2026-08-08.md`);
