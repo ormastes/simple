@@ -10,6 +10,10 @@
 #
 # Enforced here, all fail-closed:
 #
+#   * the converter route between each pair is RESOLVED against the real
+#     converter graph and its measured loss is carried into the cell — the
+#     Exactness gate is therefore live on this path, not only in the graph's
+#     own unit tests
 #   * plan rejections (counterpart_plan_rejections) are inherited verbatim
 #   * a comparison naming a source with no result is a rejection, not a skip
 #   * every source in `require_gpu_receipt_source_ids` must clear the GPU gate
@@ -41,6 +45,14 @@ use std.common.spec.evidence.counterpart.model.{
     counterpart_plan_rejections,
     counterpart_run_vacuity_failures,
     execution_receipt_gpu_gate_failures
+}
+use std.nogc_sync_mut.spec.evidence.counterpart.converter_registry.{
+    ConverterRegistry,
+    converter_registry
+}
+use std.nogc_sync_mut.spec.evidence.counterpart.converter_graph.{
+    resolve_route,
+    route_request
 }
 use std.nogc_sync_mut.spec.evidence.counterpart.relation_engine.{
     RelationInput,
@@ -148,10 +160,25 @@ fn unavailable_cell(comparison: PlanComparison, detail: text) -> ComparisonCell:
         detail: detail
     )
 
+# The schema a source's artifact actually carries, as a routable schema id.
+pub fn source_schema_id(result: SourceResult) -> text:
+    result.artifact.schema_id + "@" + result.artifact.schema_version.to_text()
+
 # Builds the full matrix. A comparison whose source did not execute produces a
 # FAILING cell, never an absent one — a missing provider must never shrink the
 # matrix into vacuous agreement.
-pub fn matrix_build(plan: CounterpartPlan, results: [SourceResult]) -> [ComparisonCell]:
+#
+# `registry` is the converter graph the comparison must actually traverse. The
+# route from the left source's schema to the right source's schema is RESOLVED,
+# not assumed, and the resolved route's loss is carried into the cell. That is
+# what makes the Exactness gate live on the production path: an exact relation
+# whose sources are only reachable through a lossy converter is refused here,
+# not merely in the graph's own unit tests.
+pub fn matrix_build_with_registry(
+    plan: CounterpartPlan,
+    results: [SourceResult],
+    registry: ConverterRegistry
+) -> [ComparisonCell]:
     var cells: [ComparisonCell] = []
     for comparison in plan.comparisons:
         val left_index = matrix_result_index(results, comparison.left_source_id)
@@ -174,10 +201,32 @@ pub fn matrix_build(plan: CounterpartPlan, results: [SourceResult]) -> [Comparis
                         cells.push(unavailable_cell(comparison, "source "
                             + right.source_id + " status=" + provider_status_name(right.status)))
                     else:
-                        val input = matrix_relation_input(comparison, left, right,
-                            ConversionLoss.identity)
-                        cells.push(evaluate_relation(input))
+                        # Measure the route rather than assume it.
+                        val resolution = resolve_route(registry, route_request(
+                            source_schema_id(left),
+                            source_schema_id(right),
+                            comparison.relation,
+                            left.artifact.item_count,
+                            left.artifact.canonical_hash
+                        ))
+                        if not resolution.resolved:
+                            cells.push(unavailable_cell(comparison,
+                                "no admissible converter route from "
+                                    + source_schema_id(left) + " to "
+                                    + source_schema_id(right) + ": "
+                                    + resolution.rejection_code + " ("
+                                    + resolution.rejection_detail + ")"))
+                        else:
+                            val input = matrix_relation_input(comparison, left, right,
+                                resolution.route.loss)
+                            cells.push(evaluate_relation(input))
     cells
+
+# Back-compatible entry point: an empty converter graph. Sources already sharing
+# a canonical schema resolve to a MEASURED identity route; sources at differing
+# schemas resolve to `no_route` and fail, because no converter was declared.
+pub fn matrix_build(plan: CounterpartPlan, results: [SourceResult]) -> [ComparisonCell]:
+    matrix_build_with_registry(plan, results, converter_registry())
 
 # ---------------------------------------------------------------------------
 # Gates
@@ -254,7 +303,11 @@ pub fn matrix_comparison_failures(cells: [ComparisonCell]) -> [text]:
 # The engine
 # ---------------------------------------------------------------------------
 
-pub fn evaluate_matrix(plan: CounterpartPlan, results: [SourceResult]) -> CounterpartRun:
+pub fn evaluate_matrix_with_registry(
+    plan: CounterpartPlan,
+    results: [SourceResult],
+    registry: ConverterRegistry
+) -> CounterpartRun:
     var rejections: [text] = []
     for reason in counterpart_plan_rejections(plan):
         rejections.push("plan: " + reason)
@@ -265,7 +318,7 @@ pub fn evaluate_matrix(plan: CounterpartPlan, results: [SourceResult]) -> Counte
         if not matrix_has_result(results, comparison.right_source_id):
             rejections.push("no result for planned source " + comparison.right_source_id)
 
-    val cells = matrix_build(plan, results)
+    val cells = matrix_build_with_registry(plan, results, registry)
     if cells.len() == 0:
         rejections.push("zero comparisons were performed")
 
@@ -297,6 +350,12 @@ pub fn evaluate_matrix(plan: CounterpartPlan, results: [SourceResult]) -> Counte
         matrix: cells,
         rejections: rejections
     )
+
+# Back-compatible entry point: an empty converter graph. See
+# `matrix_build_with_registry` — the identity route this yields for same-schema
+# sources is MEASURED, not assumed.
+pub fn evaluate_matrix(plan: CounterpartPlan, results: [SourceResult]) -> CounterpartRun:
+    evaluate_matrix_with_registry(plan, results, converter_registry())
 
 pub fn matrix_run_accepted(run: CounterpartRun) -> bool:
     run.rejections.len() == 0

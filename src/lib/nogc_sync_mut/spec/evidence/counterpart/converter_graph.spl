@@ -24,6 +24,9 @@
 #                                       the caller never declared
 #   zero_items                          the conversion resolved zero items
 #   provider_schema_mismatch            provider output schema != its manifest
+#   derived_expected_value              an edge derives its expected value from
+#                                       the candidate's own output (defense in
+#                                       depth; the registry refuses it first)
 #   registry_rejected                   the registry itself refused an edge
 #   no_route                            no path exists at all
 #
@@ -53,7 +56,8 @@ use std.common.spec.evidence.counterpart.model.{
 use std.nogc_sync_mut.spec.evidence.counterpart.converter_registry.{
     ConverterRegistry,
     schema_id_is_valid,
-    converter_edge_label
+    converter_edge_label,
+    manifest_derives_expected_from_candidate
 }
 
 pub val COUNTERPART_ROUTE_MAX_DEPTH: i64 = 8
@@ -380,6 +384,15 @@ pub fn resolve_route(registry: ConverterRegistry, request: RouteRequest) -> Rout
     val dimension_violations = dropped_required_dimensions(chosen, request.required_dimensions)
     if dimension_violations.len() != 0:
         return route_rejected(request, "required_dimension_dropped", dimension_violations[0])
+
+    # Defense in depth. The registry already refuses such an edge at
+    # registration, so reaching this branch means an edge entered the graph by
+    # some other path. It is still a refusal here, never a warning.
+    for edge in chosen:
+        if manifest_derives_expected_from_candidate(edge):
+            return route_rejected(request, "derived_expected_value",
+                "converter " + edge.converter_id
+                    + " derives an expected value from the candidate under test")
 
     val undeclared = undeclared_defaults_of(chosen, request.declared_defaults)
     if undeclared.len() != 0:

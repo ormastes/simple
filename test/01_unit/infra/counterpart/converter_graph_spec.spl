@@ -72,6 +72,9 @@ use std.common.spec.evidence.counterpart.model.{
     CounterpartRelation
 }
 use std.nogc_sync_mut.spec.evidence.counterpart.converter_registry.{
+    ConverterRegistry,
+    converter_manifest_rejections,
+    manifest_derives_expected_from_candidate,
     converter_registry,
     converter_manifest,
     converter_manifest_full,
@@ -151,6 +154,48 @@ describe "Counterpart converter registry":
         assert_false(registry_is_clean(registry))
         assert_equal(registry_edge_count(registry), 1)
         assert_true(registry.rejections[0].contains("duplicate converter registration"))
+
+    # NEGATIVE GUARD: design §6.3, final clause. A converter that reads the
+    # candidate's own output makes every downstream relation trivially true
+    # while passing every other gate — the route is short, deterministic,
+    # loss-free and unambiguous, so nothing else catches it.
+    it "refuses a converter that derives its expected value from the candidate":
+        step("Declare a converter that states it reads the candidate's own output")
+        val manifest = converter_manifest_full(
+            "peek_candidate", "1.0.0", CHROME, CANON,
+            ConversionLoss.canonicalizing, true, [], [],
+            ["derives_expected_from:candidate_output"])
+        step("Confirm the manifest is refused, and that the reason echoes the source")
+        val reasons = converter_manifest_rejections(manifest)
+        assert_equal(reasons.len(), 1)
+        assert_true(reasons[0].contains("candidate_output"))
+        step("Confirm it never enters the graph")
+        var registry = converter_registry()
+        registry = registry_register(registry, manifest)
+        assert_equal(registry_edge_count(registry), 0)
+        step("Confirm a rename cannot walk around the gate")
+        assert_true(manifest_derives_expected_from_candidate(converter_manifest_full(
+            "renamed", "1.0.0", CHROME, CANON, ConversionLoss.identity, true, [], [],
+            ["derives_expected_from:candidate_under_test.stdout"])))
+        step("Confirm an honest upstream source is still permitted")
+        assert_false(manifest_derives_expected_from_candidate(converter_manifest_full(
+            "honest", "1.0.0", CHROME, CANON, ConversionLoss.identity, true, [], [],
+            ["derives_expected_from:normative_vector_file"])))
+
+    it "refuses to route across an edge that derives from the candidate":
+        step("Force such an edge past the registry into a graph directly")
+        val poisoned = ConverterRegistry(
+            converters: [converter_manifest_full(
+                "peek_candidate", "1.0.0", CHROME, CANON,
+                ConversionLoss.canonicalizing, true, [], [],
+                ["derives_expected_from:candidate_output"])],
+            rejections: []
+        )
+        step("Confirm the graph refuses the route in its own right")
+        val resolution = resolve_route(poisoned, route_request(
+            CHROME, CANON, CounterpartRelation.semantic_equal, 12, "in-hash"))
+        assert_false(resolution.resolved)
+        assert_equal(resolution.rejection_code, "derived_expected_value")
 
     it "refuses an edge whose schema carries no version":
         step("Register an edge with an unpinned target schema")

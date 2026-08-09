@@ -82,7 +82,13 @@ use std.common.spec.evidence.counterpart.model.{
     logical_artifact,
     plan_source,
     plan_comparison,
+    conversion_loss_name,
     execution_receipt_cpu
+}
+use std.nogc_sync_mut.spec.evidence.counterpart.converter_registry.{
+    converter_registry,
+    converter_manifest,
+    registry_register
 }
 use std.nogc_sync_mut.spec.evidence.counterpart.relation_engine.{
     relation_input,
@@ -95,6 +101,7 @@ use std.nogc_sync_mut.spec.evidence.counterpart.relation_engine.{
 }
 use std.nogc_sync_mut.spec.evidence.counterpart.matrix_compare.{
     evaluate_matrix,
+    evaluate_matrix_with_registry,
     matrix_run_accepted,
     matrix_run_has_rejection_containing,
     matrix_independent_group_count,
@@ -148,6 +155,19 @@ fn a_source(
         status: ProviderStatus.executed,
         artifact: an_artifact(hash, 16),
         execution: execution,
+        provenance: a_provenance(),
+        conversions: [],
+        diagnostics: []
+    )
+
+fn a_source_at(source_id: text, group: text, hash: text, schema_id: text) -> SourceResult:
+    SourceResult(
+        source_id: source_id,
+        provider_id: "provider_" + source_id,
+        independence_group: group,
+        status: ProviderStatus.executed,
+        artifact: logical_artifact(BOUNDARY, schema_id, 1, 16, hash, "ref://" + hash),
+        execution: execution_receipt_cpu("provider_" + source_id),
         provenance: a_provenance(),
         conversions: [],
         diagnostics: []
@@ -308,6 +328,61 @@ describe "Counterpart N-way matrix":
 # Fail-closed refusals
 # ============================================================================
 # @manual_section: Refusals
+
+describe "Counterpart matrix measures the converter route it traversed":
+    # NEGATIVE GUARD: route_loss on a cell must be RESOLVED against the real
+    # converter graph, never assumed to be identity.
+    it "carries the measured route loss into the comparison cell":
+        step("Register a semantic_projection converter between two schemas")
+        val registry = registry_register(converter_registry(), converter_manifest(
+            "project", "1.0.0", "chrome.dom@1", "canonical.node_arena@1",
+            ConversionLoss.semantic_projection))
+        step("Compare a chrome-schema source against a canonical-schema source")
+        val plan = a_plan([plan_comparison("simple_cpu", "chrome", CounterpartRelation.semantic_equal)])
+        val run = evaluate_matrix_with_registry(plan, [
+            a_source_at("simple_cpu", "simple", "h1", "chrome.dom"),
+            a_source_at("chrome", "chromium", "h1", "canonical.node_arena")
+        ], registry)
+        step("Confirm the cell reports the loss it actually traversed")
+        assert_equal(conversion_loss_name(run.matrix[0].route_loss), "semantic_projection")
+
+    it "reports a measured identity route when both sources share a schema":
+        step("Compare two sources already at the canonical schema")
+        val plan = a_plan([plan_comparison("simple_cpu", "chrome", CounterpartRelation.byte_exact)])
+        val run = evaluate_matrix(plan, [
+            a_source("simple_cpu", "simple", "h1", execution_receipt_cpu("p_simple")),
+            a_source("chrome", "chromium", "h1", execution_receipt_cpu("p_chrome"))
+        ])
+        assert_equal(conversion_loss_name(run.matrix[0].route_loss), "identity")
+        assert_true(matrix_run_accepted(run))
+
+    # NEGATIVE GUARD: the Exactness gate must be live on the production path.
+    it "refuses an exact relation whose sources are only reachable lossily":
+        step("Register the same semantic_projection converter")
+        val registry = registry_register(converter_registry(), converter_manifest(
+            "project", "1.0.0", "chrome.dom@1", "canonical.node_arena@1",
+            ConversionLoss.semantic_projection))
+        step("Ask for byte_exact across it")
+        val plan = a_plan([plan_comparison("simple_cpu", "chrome", CounterpartRelation.byte_exact)])
+        val run = evaluate_matrix_with_registry(plan, [
+            a_source_at("simple_cpu", "simple", "h1", "chrome.dom"),
+            a_source_at("chrome", "chromium", "h1", "canonical.node_arena")
+        ], registry)
+        step("Confirm the matrix itself names the exactness refusal")
+        assert_false(matrix_run_accepted(run))
+        assert_true(run.matrix[0].detail.contains("exact_relation_through_lossy_route"))
+
+    it "refuses a comparison across schemas with no declared converter at all":
+        step("Compare two differing schemas with an empty converter graph")
+        val plan = a_plan([plan_comparison("simple_cpu", "chrome", CounterpartRelation.semantic_equal)])
+        val run = evaluate_matrix(plan, [
+            a_source_at("simple_cpu", "simple", "h1", "chrome.dom"),
+            a_source_at("chrome", "chromium", "h1", "canonical.node_arena")
+        ])
+        step("Confirm an undeclared conversion is a refusal, not an implicit identity")
+        assert_false(matrix_run_accepted(run))
+        assert_true(run.matrix[0].detail.contains("no_route"))
+
 
 describe "Counterpart matrix refuses vacuous and unsound runs":
     # NEGATIVE GUARD: a matrix that compared nothing must not be a pass.
