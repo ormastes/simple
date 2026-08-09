@@ -82,6 +82,48 @@ fn _split_once(s: text, sep: text) -> [text]:
         i = i + 1
     []
 
+fn _rsplit_once(s: text, sep: text) -> [text]:
+    """[before, after] on the LAST occurrence of `sep`; [] when absent.
+
+    The authoritative generator splits a forwarding target on the last dot
+    (src/app/desugar/forwarding.spl:381, `find_last_char(right, ".")`), so this
+    scan must split there too. Splitting on the FIRST dot instead reports an
+    intermediate field as the method and drops the real call target: for
+    `inner.items.push` the generator emits `self.inner.items.push()`, so the
+    receiver projection is `inner.items` and the method is `push`."""
+    var i = s.len() - sep.len()
+    while i >= 0:
+        if s[i:i + sep.len()] == sep:
+            return [s[0:i], s[i + sep.len():s.len()]]
+        i = i - 1
+    []
+
+fn _dotted_ident_prefix(s: text) -> text:
+    """Leading dotted identifier path of `s` (`a`, `a.b`, `a.b.c`); "" when `s`
+    does not start with an identifier.
+
+    A forwarding target is a receiver PROJECTION followed by a method, and the
+    projection is legitimately dotted (forwarding.spl:325 — "FIELD.METHOD can
+    be a dotted path like inner.items.push"). Running the single-identifier
+    `_ident_prefix` over the receiver half would truncate it at the next dot."""
+    var out = ""
+    var rest = s
+    var more = true
+    while more:
+        more = false
+        val seg = _ident_prefix(rest)
+        if seg == "":
+            return ""
+        if out == "":
+            out = seg
+        else:
+            out = out + "." + seg
+        rest = rest[seg.len():rest.len()]
+        if rest.starts_with("."):
+            rest = rest[1:rest.len()]
+            more = true
+    out
+
 fn parse_forward_decl(line: text) -> [ForwardDeclLine]:
     """Parse `alias fn NAME[(args)] = FIELD.METHOD` / `alias me ...`.
 
@@ -104,12 +146,17 @@ fn parse_forward_decl(line: text) -> [ForwardDeclLine]:
     val logical = _ident_prefix(halves[0].trim())
     if logical == "":
         return []
-    val target = halves[1].trim()
-    val dotted = _split_once(target, ".")
+    # Receiver projection + method, split on the LAST dot exactly as the
+    # generator does. `receiver_field` is therefore a dotted PATH, not a single
+    # identifier — `inner.items` for `alias fn push = inner.items.push`.
+    # A target with no dot is not a forwarding declaration (the generator
+    # returns its `empty_result` for that case), so it is not matched here.
+    val target = _dotted_ident_prefix(halves[1].trim())
+    val dotted = _rsplit_once(target, ".")
     if dotted.len() != 2:
         return []
-    val field = _ident_prefix(dotted[0].trim())
-    val method = _ident_prefix(dotted[1].trim())
+    val field = dotted[0]
+    val method = dotted[1]
     if field == "" or method == "":
         return []
     [ForwardDeclLine(logical_name: logical, receiver_field: field,
