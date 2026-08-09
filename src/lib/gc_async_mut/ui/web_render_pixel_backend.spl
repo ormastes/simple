@@ -144,8 +144,22 @@ impl WebRenderPixelArtifactCache:
             animation_next_frame_ms: -1
         )
 
+    me _record_wm_receipt(
+        receipt: [text], status: text, backend: text, reason: text,
+        material_kind: text, material_reason: text, material_sha256: text
+    ):
+        if receipt.len() < 6:
+            return
+        receipt[0] = status
+        receipt[1] = backend
+        receipt[2] = reason
+        receipt[3] = material_kind
+        receipt[4] = material_reason
+        receipt[5] = material_sha256
+
     me _html_request_to_pixel_artifact_with_revision(
-        req: WebRenderRequest, full_html: text, content_revision: i64
+        req: WebRenderRequest, full_html: text, content_revision: i64,
+        wm_receipt: [text]
     ) -> WebRenderArtifact:
         if req.viewport_w != self.width or req.viewport_h != self.height:
             return web_render_html_request_to_pixel_artifact_with_backend(req, full_html, self.backend_name)
@@ -156,6 +170,12 @@ impl WebRenderPixelArtifactCache:
             content_revision
         )
         val rendered_pixels = result.readback.pixels
+        self._record_wm_receipt(
+            wm_receipt, "engine2d_rendered", self.resolved_backend_name,
+            "rendered through Engine2D", result.material_fallback.kind,
+            result.material_fallback.reason,
+            result.material_fallback.material_sha256
+        )
         val artifact = web_render_artifact_with_backend_readback_source_evidence(web_render_engine2d_rendered_artifact(web_render_pixel_artifact(req.with_pixel_output(), _web_render_cache_artifact_pixels(rendered_pixels)), self.resolved_backend_name), self.resolved_backend_name, result.readback.source)
         val queued = web_render_artifact_with_runtime_queue_evidence(artifact, self.resolved_backend_name)
         web_render_artifact_with_material_fallback(queued, result.material_fallback)
@@ -164,7 +184,14 @@ impl WebRenderPixelArtifactCache:
         req: WebRenderRequest, full_html: text
     ) -> WebRenderArtifact:
         self._html_request_to_pixel_artifact_with_revision(
-            req, full_html, -1
+            req, full_html, -1, []
+        )
+
+    me request_to_pixel_artifact_with_wm_receipt(
+        req: WebRenderRequest, wm_receipt: [text]
+    ) -> WebRenderArtifact:
+        self._html_request_to_pixel_artifact_with_revision(
+            req, web_render_full_html(req), -1, wm_receipt
         )
 
     me request_to_pixel_artifact(req: WebRenderRequest) -> WebRenderArtifact:
@@ -173,7 +200,8 @@ impl WebRenderPixelArtifactCache:
         )
 
     me request_to_pixel_artifact_at_time(
-        req: WebRenderRequest, content_revision: i64, now_ms: i64
+        req: WebRenderRequest, content_revision: i64, now_ms: i64,
+        wm_receipt: [text]
     ) -> WebRenderArtifact:
         val full_html = web_render_full_html(req)
         if self.animation_revision != content_revision:
@@ -187,7 +215,7 @@ impl WebRenderPixelArtifactCache:
         if self.animation_end_ms == -1:
             self.animation_next_frame_ms = -1
             return self._html_request_to_pixel_artifact_with_revision(
-                req, full_html, content_revision
+                req, full_html, content_revision, wm_receipt
             )
         val elapsed = if now_ms > self.animation_epoch_ms:
             now_ms - self.animation_epoch_ms
@@ -208,6 +236,13 @@ impl WebRenderPixelArtifactCache:
                 content_revision
             ):
                 self.animation_next_frame_ms = -1
+                self._record_wm_receipt(
+                    wm_receipt, "engine2d_rendered",
+                    self.resolved_backend_name, "rendered through Engine2D",
+                    cached.material_fallback.kind,
+                    cached.material_fallback.reason,
+                    cached.material_fallback.material_sha256
+                )
                 val artifact = web_render_artifact_with_backend_readback_source_evidence(
                     web_render_engine2d_rendered_artifact(
                         web_render_pixel_artifact(
@@ -230,6 +265,12 @@ impl WebRenderPixelArtifactCache:
                 full_html, req.viewport_w, req.viewport_h,
                 self.backend_name, elapsed
             )
+        )
+        self._record_wm_receipt(
+            wm_receipt, "engine2d_rendered", self.resolved_backend_name,
+            "rendered through Engine2D", result.material_fallback.kind,
+            result.material_fallback.reason,
+            result.material_fallback.material_sha256
         )
         # Preserve the direct array handle before any large WebRenderArtifact
         # reconstruction. Nonterminal animation frames are not normal cache
