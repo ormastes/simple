@@ -76,6 +76,31 @@ pub struct UiEnvironmentAdmission:
     reason: text
     promotion_eligible: bool
 
+pub struct UiArm64QemuPrimitiveConfig:
+    profile_id: text
+    machine: text
+    pci_transport: text
+    mmio_transport: text
+    ivshmem_device: text
+    keyboard_device: text
+    pointer_device: text
+    sound_device: text
+
+pub struct UiArm64QemuPrimitiveEvidence:
+    profile_id: text
+    evidence_class: UiEnvironmentEvidenceClass
+    guest_booted: bool
+    guest_driver_ready: bool
+    draw_ir_executed: bool
+    vulkan_physical_device: text
+    vulkan_device_executed: bool
+    device_readback: bool
+    fallback_used: bool
+    keyboard_queue_ready: bool
+    pointer_queue_ready: bool
+    audio_queue_ready: bool
+    audio_completed: bool
+
 pub fn ui_environment_evidence_class_name(kind: UiEnvironmentEvidenceClass) -> text:
     match kind:
         case UiEnvironmentEvidenceClass.HostReadiness: "host-readiness"
@@ -189,6 +214,189 @@ pub fn ui_environment_profile_by_id(id: text) -> UiEnvironmentProfile?:
             return Some(profile)
     nil
 
+pub fn arm64_simpleos_qemu_primitive_config(
+    profile_id: text = "simpleos-qemu-aarch64-vulkan-virtio",
+    machine: text = "virt",
+    pci_transport: text = "pcie",
+    mmio_transport: text = "virtio-mmio",
+    ivshmem_device: text = "ivshmem-plain,memdev=hostgpu",
+    keyboard_device: text = "virtio-keyboard-device",
+    pointer_device: text = "virtio-mouse-device",
+    sound_device: text = "virtio-sound-device"
+) -> UiArm64QemuPrimitiveConfig:
+    UiArm64QemuPrimitiveConfig(
+        profile_id: profile_id,
+        machine: machine,
+        pci_transport: pci_transport,
+        mmio_transport: mmio_transport,
+        ivshmem_device: ivshmem_device,
+        keyboard_device: keyboard_device,
+        pointer_device: pointer_device,
+        sound_device: sound_device
+    )
+
+pub fn arm64_simpleos_qemu_primitive_evidence(
+    profile_id: text,
+    evidence_class: UiEnvironmentEvidenceClass,
+    guest_booted: bool = false,
+    guest_driver_ready: bool = false,
+    draw_ir_executed: bool = false,
+    vulkan_physical_device: text = "",
+    vulkan_device_executed: bool = false,
+    device_readback: bool = false,
+    fallback_used: bool = false,
+    keyboard_queue_ready: bool = false,
+    pointer_queue_ready: bool = false,
+    audio_queue_ready: bool = false,
+    audio_completed: bool = false
+) -> UiArm64QemuPrimitiveEvidence:
+    UiArm64QemuPrimitiveEvidence(
+        profile_id: profile_id,
+        evidence_class: evidence_class,
+        guest_booted: guest_booted,
+        guest_driver_ready: guest_driver_ready,
+        draw_ir_executed: draw_ir_executed,
+        vulkan_physical_device: vulkan_physical_device,
+        vulkan_device_executed: vulkan_device_executed,
+        device_readback: device_readback,
+        fallback_used: fallback_used,
+        keyboard_queue_ready: keyboard_queue_ready,
+        pointer_queue_ready: pointer_queue_ready,
+        audio_queue_ready: audio_queue_ready,
+        audio_completed: audio_completed
+    )
+
+fn _arm64_simpleos_qemu_profile(profile: UiEnvironmentProfile) -> bool:
+    ui_environment_profile_valid(profile) and
+        profile.target_os == UiEnvironmentTargetOs.SimpleOs and
+        profile.arch == UiEnvironmentArch.Aarch64 and
+        profile.execution == UiEnvironmentExecution.QemuTcg and
+        profile.input == UiEnvironmentInput.VirtioInput and
+        profile.audio == UiEnvironmentAudio.VirtioSnd and
+        profile.required_evidence == UiEnvironmentEvidenceClass.LiveGuest
+
+fn _arm64_simpleos_qemu_config_reason(config: UiArm64QemuPrimitiveConfig) -> text:
+    if config.machine != "virt":
+        return "arm64-qemu-machine-unbound"
+    if config.pci_transport != "pcie":
+        return "arm64-qemu-pci-unbound"
+    if config.mmio_transport != "virtio-mmio":
+        return "arm64-qemu-mmio-unbound"
+    if config.ivshmem_device != "ivshmem-plain,memdev=hostgpu":
+        return "arm64-qemu-ivshmem-unbound"
+    if config.keyboard_device != "virtio-keyboard-device":
+        return "arm64-qemu-keyboard-unbound"
+    if config.pointer_device != "virtio-mouse-device":
+        return "arm64-qemu-pointer-unbound"
+    if config.sound_device != "virtio-sound-device":
+        return "arm64-qemu-sound-unbound"
+    "ready"
+
+pub fn arm64_simpleos_qemu_primitive_config_valid(
+    config: UiArm64QemuPrimitiveConfig
+) -> bool:
+    config.profile_id == "simpleos-qemu-aarch64-vulkan-virtio" and
+        _arm64_simpleos_qemu_config_reason(config) == "ready"
+
+fn _ui_environment_admission(
+    status: UiEnvironmentAdmissionStatus,
+    reason: text,
+    promotion_eligible: bool = false
+) -> UiEnvironmentAdmission:
+    UiEnvironmentAdmission(
+        status: status,
+        reason: reason,
+        promotion_eligible: promotion_eligible
+    )
+
+pub fn validate_arm64_simpleos_qemu_primitives(
+    profile: UiEnvironmentProfile,
+    config: UiArm64QemuPrimitiveConfig,
+    evidence: UiArm64QemuPrimitiveEvidence
+) -> UiEnvironmentAdmission:
+    if not _arm64_simpleos_qemu_profile(profile):
+        return _ui_environment_admission(
+            UiEnvironmentAdmissionStatus.Fail,
+            "arm64-simpleos-qemu-profile-required"
+        )
+    if config.profile_id != profile.id or evidence.profile_id != profile.id:
+        return _ui_environment_admission(
+            UiEnvironmentAdmissionStatus.Fail,
+            "profile-identity-mismatch"
+        )
+    val config_reason = _arm64_simpleos_qemu_config_reason(config)
+    if config_reason != "ready":
+        return _ui_environment_admission(
+            UiEnvironmentAdmissionStatus.Blocked,
+            config_reason
+        )
+    if evidence.evidence_class == UiEnvironmentEvidenceClass.HostReadiness:
+        return _ui_environment_admission(
+            UiEnvironmentAdmissionStatus.Ready,
+            "arm64-qemu-primitives-ready-live-guest-proof-required"
+        )
+    if evidence.evidence_class != UiEnvironmentEvidenceClass.LiveGuest:
+        return _ui_environment_admission(
+            UiEnvironmentAdmissionStatus.Fail,
+            "wrong-evidence-class"
+        )
+    if not evidence.guest_booted:
+        return _ui_environment_admission(
+            UiEnvironmentAdmissionStatus.Fail,
+            "guest-boot-proof-missing"
+        )
+    if not evidence.guest_driver_ready:
+        return _ui_environment_admission(
+            UiEnvironmentAdmissionStatus.Fail,
+            "guest-driver-ready-proof-missing"
+        )
+    if not evidence.draw_ir_executed:
+        return _ui_environment_admission(
+            UiEnvironmentAdmissionStatus.Fail,
+            "draw-ir-execution-proof-missing"
+        )
+    if evidence.vulkan_physical_device == "":
+        return _ui_environment_admission(
+            UiEnvironmentAdmissionStatus.Fail,
+            "vulkan-physical-device-proof-missing"
+        )
+    if not evidence.vulkan_device_executed:
+        return _ui_environment_admission(
+            UiEnvironmentAdmissionStatus.Fail,
+            "vulkan-device-execution-proof-missing"
+        )
+    if not evidence.device_readback:
+        return _ui_environment_admission(
+            UiEnvironmentAdmissionStatus.Fail,
+            "device-readback-proof-missing"
+        )
+    if evidence.fallback_used:
+        return _ui_environment_admission(
+            UiEnvironmentAdmissionStatus.Fail,
+            "fallback-used"
+        )
+    if not evidence.keyboard_queue_ready:
+        return _ui_environment_admission(
+            UiEnvironmentAdmissionStatus.Fail,
+            "keyboard-queue-proof-missing"
+        )
+    if not evidence.pointer_queue_ready:
+        return _ui_environment_admission(
+            UiEnvironmentAdmissionStatus.Fail,
+            "pointer-queue-proof-missing"
+        )
+    if not evidence.audio_queue_ready:
+        return _ui_environment_admission(
+            UiEnvironmentAdmissionStatus.Fail,
+            "audio-queue-proof-missing"
+        )
+    if not evidence.audio_completed:
+        return _ui_environment_admission(
+            UiEnvironmentAdmissionStatus.Fail,
+            "audio-completion-proof-missing"
+        )
+    _ui_environment_admission(UiEnvironmentAdmissionStatus.Pass, "pass", true)
+
 pub fn ui_environment_evidence(
     profile_id: text,
     evidence_class: UiEnvironmentEvidenceClass,
@@ -220,17 +428,6 @@ pub fn ui_environment_evidence(
         fallback_used: fallback_used,
         device_identity: device_identity,
         frame_identity: frame_identity
-    )
-
-fn _ui_environment_admission(
-    status: UiEnvironmentAdmissionStatus,
-    reason: text,
-    promotion_eligible: bool = false
-) -> UiEnvironmentAdmission:
-    UiEnvironmentAdmission(
-        status: status,
-        reason: reason,
-        promotion_eligible: promotion_eligible
     )
 
 pub fn validate_ui_environment_evidence(
@@ -279,8 +476,13 @@ export UiEnvironmentHostOs, UiEnvironmentTargetOs, UiEnvironmentArch
 export UiEnvironmentExecution, UiEnvironmentRenderer, UiEnvironmentInput
 export UiEnvironmentAudio, UiEnvironmentEvidenceClass, UiEnvironmentAdmissionStatus
 export UiEnvironmentProfile, UiEnvironmentEvidence, UiEnvironmentAdmission
+export UiArm64QemuPrimitiveConfig, UiArm64QemuPrimitiveEvidence
 export ui_environment_evidence_class_name, ui_environment_admission_status_name
 export ui_environment_profile_valid, linux_host_2d_environment_profile
 export macos_emulated_2d_environment_profile, simpleos_qemu_2d_environment_profiles
 export ui_2d_environment_profiles, ui_environment_profile_by_id
+export arm64_simpleos_qemu_primitive_config
+export arm64_simpleos_qemu_primitive_evidence
+export arm64_simpleos_qemu_primitive_config_valid
+export validate_arm64_simpleos_qemu_primitives
 export ui_environment_evidence, validate_ui_environment_evidence
