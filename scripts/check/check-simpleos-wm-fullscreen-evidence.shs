@@ -272,6 +272,10 @@ KERNEL_INPUT_STATUS_FILE="$BUILD_DIR/kernel-input-status"
 KERNEL_INPUT_COUNT=0
 KERNEL_INPUT_SET_STATUS=unresolved
 KERNEL_INPUT_MIN_FILES="${SIMPLEOS_WM_KERNEL_INPUT_MIN_FILES:-200}"
+# A build that loses the mid-build source race against a concurrent session is
+# retried, not failed. Admission itself is unchanged (see the retry loop).
+KERNEL_BUILD_MAX_ATTEMPTS="${SIMPLEOS_WM_KERNEL_BUILD_MAX_ATTEMPTS:-3}"
+KERNEL_BUILD_ATTEMPTS=0
 # Each invocation resolves the input set from scratch; a stale list from a
 # previous run must never be reused.
 rm -f "$KERNEL_INPUT_LIST" "$KERNEL_INPUT_STATUS_FILE"
@@ -731,6 +735,7 @@ emit_failure() {
         echo "simpleos_wm_fullscreen_kernel_source_input_set=$KERNEL_INPUT_SET_STATUS"
         echo "simpleos_wm_fullscreen_kernel_source_revision_sha256=$KERNEL_SOURCE_REVISION"
         echo "simpleos_wm_fullscreen_kernel_build_status=$KERNEL_BUILD_STATUS"
+        echo "simpleos_wm_fullscreen_kernel_build_attempts=$KERNEL_BUILD_ATTEMPTS"
         echo "simpleos_wm_fullscreen_native_build_timeout_seconds=$NATIVE_BUILD_TIMEOUT_SECONDS"
         echo "simpleos_wm_fullscreen_disk_image=$DISK_IMAGE"
         echo "simpleos_wm_fullscreen_disk_image_status=$disk_image_status"
@@ -957,6 +962,16 @@ SPL
             break
         fi
     done
+    # This tree is shared with concurrent sessions (and, at times, an in-flight
+    # `git am`) that rewrite thousands of files under the hashed source roots.
+    # Losing that race mid-build is expected and benign; it is not evidence of
+    # anything about the kernel. Retry the whole build against the re-sampled
+    # tree state instead of aborting the lane. The admission invariant is
+    # NOT relaxed: the attempt that actually admits must still observe
+    # before == after over the same input set, so a kernel is never admitted
+    # against source it was not compiled from.
+    while :; do
+    KERNEL_BUILD_ATTEMPTS=$((KERNEL_BUILD_ATTEMPTS + 1))
     rm -f "$KERNEL_CANDIDATE"
     set +e
     SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$ROOT_DIR/src" SIMPLE_OS_LOG_MODE=off \
@@ -998,8 +1013,11 @@ SPL
         emit_failure "artifact-sha256-invalid"
         exit 1
     fi
-    # Re-hash the SAME input file list (computed once, before the build) so a
-    # mid-build edit to any linked input still refuses.
+    # Re-resolve and re-hash the input set so a mid-build edit to any linked
+    # input still refuses admission of this candidate. The set must resolve to
+    # the same file count as the pre-build sampling (checked below); a revision
+    # mismatch means a concurrent session edited a linked input during the
+    # build, which is retried above rather than admitted.
     revision_pair_after="$(kernel_source_revision)"
     input_count_after="${revision_pair_after%% *}"
     source_revision_after="${revision_pair_after#* }"
@@ -1012,11 +1030,20 @@ SPL
     fi
     if [ "$source_revision_after" != "$KERNEL_SOURCE_REVISION" ]; then
         rm -f "$KERNEL_CANDIDATE"
+        if [ "$KERNEL_BUILD_ATTEMPTS" -lt "$KERNEL_BUILD_MAX_ATTEMPTS" ]; then
+            # Re-sample to the tree state observed at the end of the lost race
+            # and rebuild against exactly that.
+            KERNEL_SOURCE_REVISION="$source_revision_after"
+            KERNEL_INPUT_COUNT="$input_count_after"
+            continue
+        fi
         KERNEL_BUILD_STATUS=source-changed-cache-preserved
         kernel_input_verdict changed
         emit_failure "wm-simple-web-build-source-changed"
         exit 1
     fi
+    break
+    done
     kernel_input_verdict pass
     mv "$KERNEL_CANDIDATE" "$KERNEL_OUTPUT"
     KERNEL_SHA256="$candidate_sha256"
@@ -1820,6 +1847,7 @@ fi
     echo "simpleos_wm_fullscreen_kernel_source_input_set=$KERNEL_INPUT_SET_STATUS"
     echo "simpleos_wm_fullscreen_kernel_source_revision_sha256=$KERNEL_SOURCE_REVISION"
     echo "simpleos_wm_fullscreen_kernel_build_status=$KERNEL_BUILD_STATUS"
+    echo "simpleos_wm_fullscreen_kernel_build_attempts=$KERNEL_BUILD_ATTEMPTS"
     echo "simpleos_wm_fullscreen_native_build_timeout_seconds=$NATIVE_BUILD_TIMEOUT_SECONDS"
     echo "simpleos_wm_fullscreen_disk_image=$DISK_IMAGE"
     echo "simpleos_wm_fullscreen_disk_image_status=$disk_image_status"
