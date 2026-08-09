@@ -8,16 +8,14 @@
 # EOF token, kind 190) re-reported the identical parser error forever: 444 MB
 # of log / 6,299,344 lines / 32 GB RSS before the run was killed.
 #
-# Root cause: core/lexer.spl's lex_next() threw away the kind RETURNED by
-# CoreLexer.next_token() and instead read `loaded.cur_kind` back off the struct.
-# CoreLexer is a value-type struct held in a module-level array slot; in the
-# native binary that read-back yielded the constructor default (0) rather than
-# the scanned kind, so EOF (190) was never observable.
+# Root cause: the seed MIR copied the mutable CoreLexer receiver, while
+# core/lexer.spl's lex_next() also failed to rebind the updated value-type
+# lexer. The scan mutated only temporaries and the owner kept its constructor
+# defaults, so EOF (190) was never observable.
 #
 # Fixes under test:
-#   (a) lex_next() uses next_token()'s return value (no struct read-back), and
-#       fails closed on the impossible kind 0 by terminating the stream at EOF
-#       with one bounded diagnostic.
+#   (a) lex_next() receives and rebinds the updated CoreLexer plus token kind,
+#       and fails closed on impossible kind 0 with one bounded diagnostic.
 #   (b) parse_module_body() asserts forward progress: if the (kind, line, col)
 #       triple repeats across iterations it emits one error and breaks, instead
 #       of looping unboundedly.
@@ -25,9 +23,21 @@
 # See doc/08_tracking/bug/stage2_binary_lexer_reads_every_source_as_empty_infinite_parser_loop_2026-08-09.md
 
 use core.ast.{ast_reset, module_get_decls, decl_get_tag, decl_get_name, DECL_FN}
+use core.lexer.{lex_init, lex_next, lex_token_text}
 use core.parser.{parse_module, parse_module_silent_checked, parser_has_errors}
+use core.tokens.{TOK_KW_FN, TOK_IDENT, TOK_LPAREN, TOK_RPAREN, TOK_COLON}
 
 describe "lexer produces a live token stream and the parser always advances":
+
+    it "rebinds lexer state across consecutive tokens":
+        lex_init("fn main():\n    1\n")
+        expect(lex_next()).to_equal(TOK_KW_FN)
+        expect(lex_token_text()).to_equal("fn")
+        expect(lex_next()).to_equal(TOK_IDENT)
+        expect(lex_token_text()).to_equal("main")
+        expect(lex_next()).to_equal(TOK_LPAREN)
+        expect(lex_next()).to_equal(TOK_RPAREN)
+        expect(lex_next()).to_equal(TOK_COLON)
 
     it "lexes and parses the exact two-line program the dead Stage-2 binary choked on":
         # This is byte-for-byte the probe from the bug report. Under the defect

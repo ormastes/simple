@@ -1708,14 +1708,21 @@ impl<'a> MirLowerer<'a> {
         // Explicit state transition: Idle -> Lowering
         self.begin_function(mir_func, &func.name, func.is_public())?;
 
-        // F1/S6 — site J: copy declared-value-type (struct) parameters into a
-        // private local before the body runs, closing the last alias gap in
-        // the class-identity kind-propagation corpus (case J). Must run after
-        // begin_function (needs an active block) and before the body is
-        // lowered (every read of the parameter inside the body must see the
-        // copy, not the caller's original).
+        // F1/S6 — site J: copy ordinary declared-value-type struct parameters
+        // into a private local before the body runs. Mutable parameters are
+        // aliases by contract: in particular, the implicit self parameter of
+        // a me method is mutable and every field update must reach the caller.
+        // Copying that receiver here made every nested CoreLexer mutation
+        // disappear during bootstrap. This mirrors the pure-Simple MIR
+        // lowerer's is_me_receiver || is_mut_param exclusion.
+        //
+        // Must run after begin_function (needs an active block) and before the
+        // body is lowered (every read of an ordinary by-value parameter inside
+        // the body must see the copy, not the caller's original).
         for (i, param) in func.params.iter().enumerate() {
-            self.copy_param_if_value_type(i, param.ty)?;
+            if !param.is_mutable() {
+                self.copy_param_if_value_type(i, param.ty)?;
+            }
         }
 
         // Reset last expression value for this function

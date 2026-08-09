@@ -163,7 +163,11 @@ fn bind_class() -> i64:
 fn aggregate_copies_in(mir: &simple_compiler::mir::MirModule, func_name: &str) -> Vec<Option<String>> {
     mir.functions
         .iter()
-        .filter(|f| f.name == func_name || f.name.ends_with(&format!("__{}", func_name)))
+        .filter(|f| {
+            f.name == func_name
+                || f.name.ends_with(&format!("__{}", func_name))
+                || f.name.ends_with(&format!(".{}", func_name))
+        })
         .flat_map(|f| f.blocks.iter())
         .flat_map(|b| b.instructions.iter())
         .filter_map(|i| match i {
@@ -270,6 +274,10 @@ fn take_struct(a: SCell) -> i64:
 
 fn take_class(a: BCell) -> i64:
     return a.n
+
+impl SCell:
+    me bump():
+        self.n = self.n + 1
 "#;
 
 #[test]
@@ -298,6 +306,37 @@ fn class_parameter_binding_never_emits_aggregate_copy() {
         "binding a declared `class` PARAMETER must NOT be copied — copying an \
          identity type converts the class defect into its struct sibling. \
          Emitted copies: {:?}",
+        copies
+    );
+}
+
+#[test]
+fn mutable_struct_receiver_never_emits_aggregate_copy() {
+    let hir = parse_and_lower(PARAM_SITE_SOURCE);
+    let bump = hir
+        .functions
+        .iter()
+        .find(|f| f.name == "bump" || f.name.ends_with("__bump") || f.name.ends_with(".bump"))
+        .expect("fixture must lower SCell.bump into HIR");
+    assert!(
+        bump.params.first().is_some_and(|param| param.name == "self" && param.is_mutable()),
+        "a me-method self parameter must remain mutable through HIR lowering: {:?}",
+        bump.params
+    );
+    let mir = lower_to_mir(&hir, None).expect("MIR lowering failed");
+
+    assert!(
+        mir.functions
+            .iter()
+            .any(|f| f.name == "bump" || f.name.ends_with("__bump") || f.name.ends_with(".bump")),
+        "fixture must lower SCell.bump into MIR"
+    );
+
+    let copies = aggregate_copies_in(&mir, "bump");
+    assert!(
+        copies.is_empty(),
+        "a mutable me receiver must alias its caller; copying it discards \
+         every field update at method return. Emitted copies: {:?}",
         copies
     );
 }

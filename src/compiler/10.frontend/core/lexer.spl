@@ -555,24 +555,22 @@ fn lex_next() -> i64:
     if lexer_array_len(current_core_lexer_slot) == 0:
         current_core_lexer_slot = [current_core_lexer_load()]
     var loaded = current_core_lexer_slot[0]
-    var _scan_kind: i64 = 0
     if lex_generic_close_pending[0]:
         lex_generic_close_pending[0] = false
-        _scan_kind = loaded.next_token_after_generic_close()
-    else:
-        _scan_kind = loaded.next_token()
-    # Use the value RETURNED by next_token(), not a read-back of
-    # `loaded.cur_kind`. CoreLexer is a value-type struct held in a module-level
-    # array slot; in the Stage-2 native binary the `me`-method mutation of
-    # `self.cur_kind` was NOT visible to this caller, so the read-back yielded
-    # the constructor default 0 for EVERY token. Kind 0 is not a real token
-    # kind, so the parser never saw EOF (190) and parse_module_body's
-    # `while true` loop re-reported "unexpected token: Unknown(0) ''" at 1:1
-    # forever -- 444 MB of log / 32 GB RSS before the run was killed. See
-    # doc/08_tracking/bug/stage2_binary_lexer_reads_every_source_as_empty_infinite_parser_loop_2026-08-09.md
-    # `next_token()` computes the kind while `self` is still live and returns it
-    # by value, which is reliable across the struct/method boundary.
-    var kind = _scan_kind
+        # next_token_after_generic_close() only clears the prior token before
+        # scanning. Clear it on the value that crosses the explicit state
+        # handoff below so a receiver temporary cannot lose the update.
+        loaded.cur_kind = 0
+    # CoreLexer is a value-type struct. Carry BOTH the updated lexer and token
+    # kind across the function boundary, then rebind the owner slot.
+    val scan_result = core_lexer_next_token(loaded)
+    loaded = scan_result[0]
+    # The Stage-2 seed used to copy mutable struct receivers on every method
+    # entry. Returning only a token kind therefore could not preserve the
+    # updated position/text state. The explicit tuple handoff above returns the
+    # updated CoreLexer value and the kind, and this owner rebinds both.
+    # See doc/08_tracking/bug/stage2_binary_lexer_reads_every_source_as_empty_infinite_parser_loop_2026-08-09.md.
+    var kind: i64 = scan_result[1]
     # Fail-closed invariant: scan_token()/next_token() ALWAYS route through
     # make_token(), which never emits kind 0 (0 is only the CoreLexer
     # constructor default). Observing 0 here means the lexer state was lost or

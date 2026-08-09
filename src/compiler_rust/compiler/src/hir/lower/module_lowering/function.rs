@@ -591,11 +591,20 @@ impl Lowerer {
                     function: f.name.clone(),
                 });
             };
+            // The parser injects `self` before HIR lowering and records that
+            // synthetic parameter as immutable, even for `me` methods.  Once
+            // `has_self` is true the mutable implicit-self branch above is not
+            // used, so preserve the method contract explicitly here.
+            let param_mutability = if param_idx == 0 && param.name == "self" && f.is_me_method {
+                ast::Mutability::Mutable
+            } else {
+                param.mutability
+            };
             ctx.add_local_with_inject_and_type_hint(
                 param.name.clone(),
                 ty,
                 param.ty.as_ref().and_then(type_name_hint),
-                param.mutability,
+                param_mutability,
                 param.inject,
             );
         }
