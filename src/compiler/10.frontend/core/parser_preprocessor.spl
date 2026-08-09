@@ -255,6 +255,16 @@ fn _pp_extract_cfg_condition(line: text) -> text:
             return "{key}={value}"
     raw
 
+fn _pp_concat_nonempty_text_parts(parts: [text]) -> text:
+    if parts.len() == 0:
+        return ""
+    var result = parts[0]
+    var part_index: i64 = 1
+    while part_index < parts.len():
+        result = result + parts[part_index]
+        part_index = part_index + 1
+    result
+
 fn _pp_split_lines(source: text) -> [text]:
     var lines: [text] = []
     var line_chars: [text] = []
@@ -271,17 +281,17 @@ fn _pp_split_lines(source: text) -> [text]:
             # so the later line join cannot synthesize identifiers such as
             # `nilnil` at module boundaries.
             if line_chars.len() == 0:
-                lines.push("")
+                lines.push(" ")
             else:
-                lines.push(line_chars.join(""))
+                lines.push(_pp_concat_nonempty_text_parts(line_chars))
             line_chars = []
         else:
             line_chars.push(ch)
         i = i + 1
     if line_chars.len() == 0:
-        lines.push("")
+        lines.push(" ")
     else:
-        lines.push(line_chars.join(""))
+        lines.push(_pp_concat_nonempty_text_parts(line_chars))
     lines
 
 fn _pp_join_lines_without_empty_elements(lines: [text]) -> text:
@@ -295,7 +305,7 @@ fn _pp_join_lines_without_empty_elements(lines: [text]) -> text:
         if i > 0:
             parts.push("\n")
         val line = lines[i]
-        if line.len() > 0:
+        if line.trim().len() > 0:
             parts.push(line)
         i = i + 1
     if parts.len() == 0:
@@ -303,12 +313,7 @@ fn _pp_join_lines_without_empty_elements(lines: [text]) -> text:
     # Do not use an empty join separator here. In staged AOT that separator
     # can be nil-backed and is then rendered as `nil` between parts. Seed the
     # result from real text so no empty-text value participates in assembly.
-    var result = parts[0]
-    i = 1
-    while i < parts.len():
-        result = result + parts[i]
-        i = i + 1
-    result
+    _pp_concat_nonempty_text_parts(parts)
 
 fn _pp_may_have_conditionals(source: text) -> bool:
     (source.contains("@when(") or source.contains("@elif(") or
@@ -350,7 +355,7 @@ fn _pp_preprocess_conditionals(source: text) -> text:
                 stack_branch_active[depth] = current
             depth = depth + 1
             active = current
-            out_lines.push("")
+            out_lines.push(" ")
             continue
 
         val is_elif = trimmed.starts_with("@elif(")
@@ -368,7 +373,7 @@ fn _pp_preprocess_conditionals(source: text) -> text:
                 stack_branch_taken[idx] = taken
                 stack_branch_active[idx] = current
                 active = current
-            out_lines.push("")
+            out_lines.push(" ")
             continue
 
         val is_else = trimmed == "@else" or trimmed == "@else:"
@@ -381,7 +386,7 @@ fn _pp_preprocess_conditionals(source: text) -> text:
                 stack_branch_taken[idx] = taken or current
                 stack_branch_active[idx] = current
                 active = current
-            out_lines.push("")
+            out_lines.push(" ")
             continue
 
         val is_end = trimmed == "@end"
@@ -392,14 +397,14 @@ fn _pp_preprocess_conditionals(source: text) -> text:
                 active = true
             else:
                 active = stack_branch_active[depth - 1]
-            out_lines.push("")
+            out_lines.push(" ")
             continue
 
         if active:
             out_lines.push(line)
         else:
             # Keep line count stable for diagnostics.
-            out_lines.push("")
+            out_lines.push(" ")
 
     # Second pass: @cfg(condition) per-declaration conditionals
     var final_lines: [text] = []
@@ -430,7 +435,7 @@ fn _pp_preprocess_conditionals(source: text) -> text:
                     closes = closes + 1
                 bi = bi + 1
             brace_depth = brace_depth + opens - closes
-            final_lines.push("")
+            final_lines.push(" ")
             i = i + 1
             if brace_depth <= 0:
                 skip_until_close_brace = false
@@ -442,7 +447,7 @@ fn _pp_preprocess_conditionals(source: text) -> text:
                 # Blank and comment-only lines do not dedent a declaration.
                 # A column-zero comment inside a false-gated body must not
                 # make the next indented body line visible.
-                final_lines.push("")
+                final_lines.push(" ")
                 i = i + 1
                 continue
             var cur_indent: i64 = 0
@@ -458,7 +463,7 @@ fn _pp_preprocess_conditionals(source: text) -> text:
                     break
                 ci = ci + 1
             if cur_indent > skip_indent:
-                final_lines.push("")
+                final_lines.push(" ")
                 i = i + 1
                 continue
             else:
@@ -470,13 +475,13 @@ fn _pp_preprocess_conditionals(source: text) -> text:
             val cfg_ok = _pp_eval_condition(cfg_cond)
             if cfg_ok:
                 # Condition true: blank @cfg line, keep declaration
-                final_lines.push("")
+                final_lines.push(" ")
             else:
                 # Condition false: blank @cfg line, any same-indent decorator
                 # stack, and the following declaration.  Looking at only the
                 # immediate next line leaks declarations such as
                 # `@cfg(false)\n@export(...)\nfn ...` back into the parser.
-                final_lines.push("")
+                final_lines.push(" ")
                 var cfg_indent: i64 = 0
                 var cfg_i: i64 = 0
                 for _ in ol:
@@ -512,14 +517,14 @@ fn _pp_preprocess_conditionals(source: text) -> text:
                     val is_preamble = next_trimmed == "" or next_trimmed.starts_with("#")
                     val is_decorator = next_indent == cfg_indent and next_trimmed.starts_with("@")
                     if is_preamble or is_decorator:
-                        final_lines.push("")
+                        final_lines.push(" ")
                         i = next_index
                         next_index = next_index + 1
                         continue
                     if next_indent != cfg_indent:
                         found_declaration = true
                         continue
-                    final_lines.push("")
+                    final_lines.push(" ")
                     i = next_index
                     found_declaration = true
                     # If declaration ends with ':', blank its body too

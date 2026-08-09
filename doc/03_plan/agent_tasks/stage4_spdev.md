@@ -8,3 +8,12 @@
 - Fix prepared: conditional-source assembly no longer uses a staged nil-backed empty separator; a production-facade parser regression was added.
 - Verification state: ownership fix has Stage4 boundary evidence; the final nilnil fix is unverified because this session reached the mandatory three-cycle cap. Next session starts with one incremental Stage3 refresh and focused Stage4 resume.
 - Sidecars: ownership review completed by highest-capability reviewer; merge owner remains Codex; final done mark remains pending fresh-session verification.
+
+## 2026-08-09 nilnil resolution
+
+- Parallel source-loader, runtime-representation, and HIR provenance lanes localized corruption to preprocessor nonblank-line reconstruction.
+- Root cause: `_pp_split_lines` used `line_chars.join("")`; the native generic join path can reject the raw empty separator and return a nil sentinel. Adjacent reconstructed slots surfaced as terminal `nilnil`.
+- Fix: all empty-separator joins in conditional reconstruction now use first-element-seeded text concatenation; semantic blank placeholders are excluded while newline separators preserve line counts.
+- Review: highest-capability review reported no blocking findings and marked the change safe to accept.
+- Evidence: pure-Simple Stage2/Stage3 recovery and capability gates passed (Stage3 SHA-256 `adf5a93256c20bffbc0c5e26bee46cb3717da8154c52c614e784a77ef0ef43b2`). Stage4 produced no `nilnil` diagnostics and advanced to unresolved `to_int` in `src/lib/nogc_sync_mut/test_runner/test_runner_args.spl`.
+- Next blocker: resolve the independent `to_int` HIR surface/import issue, then resume cached Stage4.

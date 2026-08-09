@@ -58,3 +58,7 @@ handoff remain unproven until the full CLI Stage4 artifact exists.
 ## 2026-08-09 resolution evidence
 
 The parser-to-HIR crash was caused by incomplete transient ownership promotion. `ModuleSurfaceBuilder.add_parsed` mutates `surfaces`, `index_by_name`, and `index_by_path` inside the transient parser scope; promoting only the newest `ModuleSurface` left those owning containers reclaimable. Promoting all three containers before scope teardown moved the profiled Stage4 build through complete HIR typecheck into phase 4. The remaining synthetic `nilnil` monomorphization diagnostic is a separate preprocessor assembly defect and is tracked by the Stage4 plan checkpoint.
+
+## Synthetic nilnil follow-up resolved
+
+The subsequent terminal `nilnil` was independent of surface ownership. `_pp_split_lines` reconstructed nonblank lines with `line_chars.join("")`; under staged native lowering the raw empty separator could produce a nil sentinel. Seeded concatenation now removes all empty-separator joins from this path. A profiled Stage4 run emitted no `nilnil` HIR diagnostics and advanced to the unrelated `to_int` resolution failure.
