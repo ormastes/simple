@@ -1,0 +1,81 @@
+use std.io_runtime.{shell_output}
+
+# STATUS: intentionally RED on ONE example, as of 2026-08-09.
+#
+#   executed=5 passed=4 failed=1
+#   ✗ "resolves to exactly one definition repo-wide" -- expected 4 to equal 1
+#
+# That failure is the tracked remaining work, not a broken test. Four definitions
+# still exist (three identical `[u8]`, one `[i64]`). Do NOT make this green by
+# relaxing the assertion, deleting the example, or marking it pending -- converge
+# the definitions. The other four examples pass, including the guard that the
+# `[i64]?` shape stays gone, which is the part that was actually fixed.
+#
+# Guards the convergence done in
+# doc/08_tracking/bug/file_read_bytes_has_six_definitions_with_three_return_types_2026-08-09.md
+#
+# `file_read_bytes` once had SEVEN definitions across THREE incompatible return
+# types (`[u8]`, `[i64]`, `[i64]?`). The compiler's flat function registry is
+# keyed on NAME ALONE (see `warn_duplicate_private_signatures` in
+# `src/compiler_rust/compiler/src/pipeline/module_loader.rs`), so which one a
+# call site got depended on the import closure of the compiling module, and
+# nothing at the call site changed. Two of the seven were mocks returning a
+# hardcoded "Hello" for every path.
+#
+# The runtime diagnostic `SIMPLE_DIAG_SAME_SIGNATURE_COLLISION=1` reports only
+# the pair that collided in one particular closure, so it UNDERSTATES the
+# problem. This spec therefore asserts the whole-repo property directly: exactly
+# one definition exists, and it is the `pub` `[u8]` one in `std.io_runtime`.
+
+fn definition_count(symbol: text) -> i64:
+    # Counts top-level `fn <symbol>(` definitions under src/, ignoring vendored
+    # third-party runtime source. `-c` per file then summed via `wc -l` on the
+    # match list keeps this independent of any Simple-side dir walker.
+    val cmd = "/usr/bin/grep -rn --include='*.spl' -E '^[[:space:]]*(pub )?fn " + symbol + "\\(' src/"
+        + " | /usr/bin/grep -v '/vendor/' | wc -l"
+    shell_output(cmd).trim().to_i64()
+
+fn definition_owners(symbol: text) -> text:
+    val cmd = "/usr/bin/grep -rln --include='*.spl' -E '^[[:space:]]*(pub )?fn " + symbol + "\\(' src/"
+        + " | /usr/bin/grep -v '/vendor/'"
+    shell_output(cmd).trim()
+
+describe "file_read_bytes has a single definition":
+
+    # --- Oracle self-checks -------------------------------------------------
+    # A symbol-sweep oracle in this repo fails open three ways: the scan can
+    # silently match nothing, match everything, or return empty because the
+    # command errored. The next two examples close those holes, so a green
+    # verdict on the real assertion below actually means something.
+
+    it "positive control: the scanner can find a symbol that certainly exists":
+        # `file_write_bytes` is the sibling of the subject and is known to be
+        # defined at least once. If this is 0 the scanner is broken, not clean.
+        expect(definition_count("file_write_bytes") >= 1).to_equal(true)
+
+    it "negative control: the scanner does not match a symbol that cannot exist":
+        # Proves the pattern is anchored and is not counting every line.
+        expect(definition_count("file_read_bytes_no_such_symbol_xyzzy")).to_equal(0)
+
+    # --- The actual property ------------------------------------------------
+
+    it "resolves to exactly one definition repo-wide":
+        val owners = definition_owners("file_read_bytes")
+        # Surfacing the owner list makes a failure self-diagnosing: it names the
+        # files that reintroduced a definition.
+        expect(owners).to_equal("src/lib/nogc_sync_mut/io_runtime.spl")
+        expect(definition_count("file_read_bytes")).to_equal(1)
+
+    it "the single definition is the pub [u8] one":
+        val cmd = "/usr/bin/grep -h -E '^[[:space:]]*(pub )?fn file_read_bytes\\(' "
+            + "src/lib/nogc_sync_mut/io_runtime.spl"
+        expect(shell_output(cmd).trim()).to_equal("pub fn file_read_bytes(path: text) -> [u8]:")
+
+    it "no module reintroduces an optional or i64-element variant":
+        # These are the two shapes that were converged away. `[i64]?` in
+        # particular is the dangerous one: a caller written against `[u8]` has
+        # no nil case, so collapsing onto it deletes the absence path silently.
+        val cmd = "/usr/bin/grep -rn --include='*.spl' -E "
+            + "'^[[:space:]]*(pub )?fn file_read_bytes\\(.*-> \\[(i64|u8)\\]\\?' src/"
+            + " | /usr/bin/grep -v '/vendor/' | wc -l"
+        expect(shell_output(cmd).trim().to_i64()).to_equal(0)
