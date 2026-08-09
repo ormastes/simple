@@ -21,3 +21,11 @@
 - Latest canonical Stage4 attempt reaches phase 4 and stops at `src/lib/nogc_sync_mut/test_runner/test_runner_async.spl: unresolved name: file_size`.
 - Retained cache: `build/bootstrap-recovery/stage4-native-cache`; latest log: `build/bootstrap-recovery/stage4-sdoctest-retry.log`. Resume with the canonical Stage4 command recorded in `stage4_spdev.md`, reusing this cache and Stage3 authority.
 - Stage4 candidate, attested ARM64 SimpleOS build, and QMP primitive-WM evidence remain OPEN. Stage3 artifacts are diagnostic/bootstrap authority only and cannot satisfy attested QEMU admission.
+
+## Stage 4 recovery status (2026-08-09, second bounded cycle)
+
+- Cleared `std.io.file_size` facade resolution and driver cache-hash module-scope binding with executable entry-closure regressions.
+- Narrowed `driver_source_loading.spl` from the full type-inference facade to the exact `TypeInferError` contract; focused fixture compiles and executes.
+- The third canonical retry still stops in phase 4 with eight transitive `unresolved type: Symbol` diagnostics attributed to `driver_source_loading.spl`.
+- Retained latest log: `build/bootstrap-recovery/stage4-source-loading-retry.log`; retained cache remains `build/bootstrap-recovery/stage4-native-cache`.
+- Next cycle must trace the reachable `TypeInferError` type graph and cache invalidation/closure identity before choosing a trait `Symbol`/`SymbolId` model migration. Do not repeat the unchanged Stage4 command first.

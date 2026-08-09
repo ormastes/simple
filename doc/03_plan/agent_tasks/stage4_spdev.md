@@ -36,3 +36,11 @@
 - `type_infer/traits.spl` currently moves HIR `SymbolId` values into trait-model fields typed as `Symbol` (`HirSymbol`). Do not paper over this with a `Symbol` import or annotation-only migration.
 - A separate designed change must cover HIR-to-trait conversion, built-in traits, solver keys, associated types, method resolution, supertraits, generic parameters, and compatibility before selecting a canonical identity representation.
 - This audit is not required in the driver source-loading closure: that owner now imports only `TypeInferError` rather than the entire type-inference facade.
+
+## Active handoff update (2026-08-09, second bounded cycle)
+
+- New accepted commits: `8afe114ac59` (`std.io.file_size`), `dc1f6ef5c0d` (driver cache hash binding), `18fdb0ceed6` (source-loading dependency narrowing and audit record).
+- Focused evidence: file-size fixture `36 compiled, 0 failed` and reports size `5`; options-hash fixture `291 compiled, 0 failed` and reports stable/changed `true:true`; source-loading formatter fixture `155 compiled, 0 failed` and reports formatter resolution `true`.
+- Canonical Stage4 now clears `file_size` and `CompileOptionsHash`, but still reports eight `Symbol` errors after the narrowed import. This disproves the hypothesis that wildcard expansion alone was the complete cause.
+- Fresh-session next action: inspect the exact reachable fields of `TypeInferError` and the Stage4 cache/closure manifest for `driver_source_loading`; add a failing focused fixture that reproduces the canonical transitive graph before any `SymbolId` migration.
+- Stage4 executable and all downstream essential-tools, attested ARM64, QMP primitive-WM, native ARM/macOS, and Uno-Q gates remain OPEN.
