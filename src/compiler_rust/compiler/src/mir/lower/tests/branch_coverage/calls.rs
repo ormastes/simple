@@ -475,6 +475,68 @@ fn code_and_split(value: text) -> i64:
 }
 
 #[test]
+fn chars_index_char_code_uses_text_runtime_without_stealing_custom_owner() {
+    let mir = compile_to_mir(
+        r#"struct Rune:
+    code: i64
+
+impl Rune:
+    fn char_code_at(index: i64) -> i64:
+        self.code + index
+
+fn builtin_code(s: text) -> i64:
+    s.chars()[0].char_code_at(0)
+
+fn common_contains_shape(s: text, sub: text) -> bool:
+    val cs = s.chars()
+    val subs = sub.chars()
+    cs[0].char_code_at(0) == subs[0].char_code_at(0)
+
+fn custom_code(runes: [Rune]) -> i64:
+    runes[0].char_code_at(0)
+"#,
+    )
+    .unwrap();
+
+    let builtin = mir.functions.iter().find(|f| f.name == "builtin_code").unwrap();
+    assert!(builtin.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(
+        i,
+        MirInst::Call { target, args, .. }
+            if target == &CallTarget::from_name("rt_string_char_code_at") && args.len() == 2
+    )));
+
+    let contains = mir
+        .functions
+        .iter()
+        .find(|f| f.name == "common_contains_shape")
+        .unwrap();
+    assert_eq!(
+        contains
+            .blocks
+            .iter()
+            .flat_map(|b| &b.instructions)
+            .filter(|i| matches!(
+                i,
+                MirInst::Call { target, args, .. }
+                    if target == &CallTarget::from_name("rt_string_char_code_at") && args.len() == 2
+            ))
+            .count(),
+        2,
+        "both common/text indexed chars must use the text runtime"
+    );
+
+    let custom = mir.functions.iter().find(|f| f.name == "custom_code").unwrap();
+    assert!(custom.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(
+        i,
+        MirInst::MethodCallStatic { func_name, .. } if func_name == "Rune.char_code_at"
+    )));
+    assert!(!custom.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(
+        i,
+        MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_string_char_code_at")
+    )));
+}
+
+#[test]
 fn custom_user_text_transform_methods_stay_direct() {
     let mir = compile_to_mir(
         r#"struct UserText:
@@ -581,9 +643,7 @@ fn read_then_write(mut owner: OwnedFields) -> i64:
         .collect();
     assert!(!owners.is_empty(), "expected direct field get/set instructions");
     assert!(
-        owners
-            .iter()
-            .all(|owner| *owner == (Some("OwnedFields"), None)),
+        owners.iter().all(|owner| *owner == (Some("OwnedFields"), None)),
         "field owner identity was lost: {owners:?}"
     );
 }

@@ -252,11 +252,119 @@ fn bytes_method_infers_i64_array_seed_bytes_u8_boxtag_2026_07_17() {
     assert_eq!(index_ty, TypeId::I64, "byte_arr[0] must infer i64, not ANY");
 }
 
+fn assert_string_array(module: &HirModule, ty: TypeId, context: &str) {
+    match module.types.get(ty) {
+        Some(HirType::Array { element, size }) => {
+            assert_eq!(*element, TypeId::STRING, "{context} element type must be String");
+            assert_eq!(*size, None, "{context} must remain dynamically sized");
+        }
+        other => panic!("{context} must infer Array(String, None), got {other:?}"),
+    }
+}
+
+#[test]
+fn chars_method_infers_dynamic_string_array_and_indexed_string() {
+    let module = parse_and_lower(
+        r#"fn first_code(s: text) -> i64:
+    val chars = s.chars()
+    return chars[0].char_code_at(0)
+"#,
+    )
+    .unwrap();
+    let function = module.functions.iter().find(|f| f.name == "first_code").unwrap();
+    let chars_call = function
+        .body
+        .iter()
+        .find_map(|stmt| match stmt {
+            HirStmt::Let { value: Some(value), .. }
+                if matches!(&value.kind, HirExprKind::MethodCall { method, .. } if method == "chars") =>
+            {
+                Some(value)
+            }
+            _ => None,
+        })
+        .expect("chars initializer");
+    assert_string_array(&module, chars_call.ty, "text.chars()");
+
+    let returned = function
+        .body
+        .iter()
+        .find_map(|stmt| match stmt {
+            HirStmt::Return(Some(value)) => Some(value),
+            _ => None,
+        })
+        .expect("char_code_at return");
+    let HirExprKind::MethodCall { receiver, method, .. } = &returned.kind else {
+        panic!("expected char_code_at call, got {:?}", returned.kind);
+    };
+    assert_eq!(method, "char_code_at");
+    assert_eq!(receiver.ty, TypeId::STRING, "chars()[0] must be a String receiver");
+    assert_eq!(returned.ty, TypeId::I64);
+}
+
+#[test]
+fn chars_common_text_contains_shape_types_both_calls_as_string_arrays() {
+    let module = parse_and_lower(
+        r#"fn contains_shape(s: text, sub: text) -> bool:
+    val cs = s.chars()
+    val subs = sub.chars()
+    return cs[0].char_code_at(0) == subs[0].char_code_at(0)
+"#,
+    )
+    .unwrap();
+    let function = module.functions.iter().find(|f| f.name == "contains_shape").unwrap();
+    let chars_types: Vec<TypeId> = function
+        .body
+        .iter()
+        .filter_map(|stmt| match stmt {
+            HirStmt::Let { value: Some(value), .. }
+                if matches!(&value.kind, HirExprKind::MethodCall { method, .. } if method == "chars") =>
+            {
+                Some(value.ty)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        chars_types.len(),
+        2,
+        "common/text contains shape must retain both chars calls"
+    );
+    for ty in chars_types {
+        assert_string_array(&module, ty, "contains chars call");
+    }
+}
+
+#[test]
+fn impl_text_self_chars_index_remains_a_string_receiver() {
+    let module = parse_and_lower(
+        r#"impl text:
+    fn first_code() -> i64:
+        return self.chars()[0].char_code_at(0)
+"#,
+    )
+    .unwrap();
+    let function = module.functions.iter().find(|f| f.name == "first_code").unwrap();
+    let returned = function
+        .body
+        .iter()
+        .find_map(|stmt| match stmt {
+            HirStmt::Return(Some(value)) => Some(value),
+            _ => None,
+        })
+        .expect("impl text return");
+    let HirExprKind::MethodCall { receiver, method, .. } = &returned.kind else {
+        panic!("expected char_code_at call, got {:?}", returned.kind);
+    };
+    assert_eq!(method, "char_code_at");
+    assert_eq!(receiver.ty, TypeId::STRING, "impl text self.chars()[0] must be String");
+    assert_eq!(returned.ty, TypeId::I64);
+}
+
 #[test]
 fn array_join_stays_a_static_string_builtin() {
     let module =
-        parse_and_lower("fn joined() -> text:\n    val parts = [\"a\", \"b\"]\n    return parts.join(\"\")\n")
-            .unwrap();
+        parse_and_lower("fn joined() -> text:\n    val parts = [\"a\", \"b\"]\n    return parts.join(\"\")\n").unwrap();
     let returned = module.functions[0]
         .body
         .iter()
@@ -357,15 +465,27 @@ fn normalize(value: text) -> bool:
         .expect("bootstrap stem");
     for stmt in &stem.body {
         if let HirStmt::Let { value: Some(value), .. } = stmt {
-            assert_ne!(value.ty, TypeId::ANY, "bootstrap stem intermediate lost its type: {value:?}");
+            assert_ne!(
+                value.ty,
+                TypeId::ANY,
+                "bootstrap stem intermediate lost its type: {value:?}"
+            );
         }
     }
     assert_eq!(stem.return_type, TypeId::STRING);
 
-    let normalize = module.functions.iter().find(|f| f.name == "normalize").expect("normalize");
+    let normalize = module
+        .functions
+        .iter()
+        .find(|f| f.name == "normalize")
+        .expect("normalize");
     for stmt in &normalize.body {
         if let HirStmt::Let { value: Some(value), .. } = stmt {
-            assert_eq!(value.ty, TypeId::STRING, "text transform result must remain String: {value:?}");
+            assert_eq!(
+                value.ty,
+                TypeId::STRING,
+                "text transform result must remain String: {value:?}"
+            );
         }
     }
 }

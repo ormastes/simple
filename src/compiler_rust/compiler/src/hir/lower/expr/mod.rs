@@ -1179,6 +1179,17 @@ impl Lowerer {
                         .types
                         .register(HirType::Array { element: TypeId::STRING, size: None }),
                 ),
+                // One `chars()` element is a one-codepoint String in both the
+                // interpreter and `rt_string_chars`.  Keep that element type
+                // precise so indexing the result remains a String receiver;
+                // otherwise a following text builtin (for example
+                // `s.chars()[0].char_code_at(0)`) is lowered from ANY and can
+                // be stolen by an unrelated custom method owner.
+                "chars" => Some(
+                    self.module
+                        .types
+                        .register(HirType::Array { element: TypeId::STRING, size: None }),
+                ),
                 // `.lines()` / `.split_lines()` had NO codegen mapping at all
                 // until `rt_string_lines` was added alongside the sibling
                 // `rt_string_bytes`/`rt_string_chars` unary string->array
