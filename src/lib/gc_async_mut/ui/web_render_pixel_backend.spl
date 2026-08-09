@@ -44,18 +44,14 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
 }
 use std.gc_async_mut.gpu.engine2d.engine_target.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_composition}
-use std.gc_async_mut.gpu.engine2d.backend_lane.{
-    ENGINE2D_HOST_GPU_LANE_GPU,
-    ENGINE2D_HOST_GPU_LANE_HOST,
-    engine2d_host_gpu_lane_schedule
-}
-use std.gc_async_mut.gpu.engine2d.host_gpu_event_queue.{
-    engine2d_host_gpu_event,
-    engine2d_host_gpu_event_handler_decision,
-    engine2d_host_gpu_event_submit_to_runtime,
-    engine2d_host_gpu_runtime_drain,
-    engine2d_host_gpu_runtime_queue_with_backend_handle
-}
+@cfg("os", "simpleos")
+use std.gc_async_mut.ui.web_render_runtime_queue_simpleos.{web_render_artifact_with_runtime_queue_evidence}
+@cfg("os", "macos")
+use std.gc_async_mut.ui.web_render_runtime_queue_hosted.{web_render_artifact_with_runtime_queue_evidence}
+@cfg("os", "linux")
+use std.gc_async_mut.ui.web_render_runtime_queue_hosted.{web_render_artifact_with_runtime_queue_evidence}
+@cfg("os", "windows")
+use std.gc_async_mut.ui.web_render_runtime_queue_hosted.{web_render_artifact_with_runtime_queue_evidence}
 
 fn web_render_runtime_queue_available(backend_name: text) -> bool:
     if backend_name == "metal":
@@ -76,11 +72,6 @@ fn web_render_backend_readback_checksum(pixels: [u32]) -> i64:
         i = i + 1
     checksum
 
-fn web_render_backend_handle_evidence(backend_name: text) -> i64:
-    if web_render_runtime_queue_available(backend_name):
-        return 7
-    0
-
 fn web_render_artifact_with_backend_readback_evidence(artifact: WebRenderArtifact, backend_name: text) -> WebRenderArtifact:
     if not web_render_runtime_queue_available(backend_name):
         return artifact
@@ -91,31 +82,6 @@ fn web_render_artifact_with_backend_readback_source_evidence(artifact: WebRender
         return artifact
     val receipt_source = if source == "": "engine2d_pixel_readback" else: source
     web_render_artifact_with_backend_readback_source(artifact, "readback", backend_name, artifact.pixels.len().to_i64(), web_render_backend_readback_checksum(artifact.pixels), "same-frame Engine2D read_pixels", receipt_source)
-
-fn web_render_artifact_with_runtime_queue_evidence(artifact: WebRenderArtifact, backend_name: text) -> WebRenderArtifact:
-    if not web_render_runtime_queue_available(backend_name):
-        return artifact
-    val packet_bytes = artifact.viewport_w.to_i64() * artifact.viewport_h.to_i64() * 4
-    val backend_handle = web_render_backend_handle_evidence(backend_name)
-    val queue = engine2d_host_gpu_runtime_queue_with_backend_handle(backend_name, 1, backend_handle, true, packet_bytes + 4096)
-    val lane_result = engine2d_host_gpu_lane_schedule(
-        ENGINE2D_HOST_GPU_LANE_HOST,
-        ENGINE2D_HOST_GPU_LANE_GPU,
-        "frame_batch",
-        packet_bytes,
-        queue.max_packet_bytes,
-        false,
-        false,
-        true,
-        1
-    )
-    val event = engine2d_host_gpu_event("web-render-frame", ENGINE2D_HOST_GPU_LANE_GPU, "frame_batch", packet_bytes, queue.max_packet_bytes, false, false, false, true)
-    val decision = engine2d_host_gpu_event_handler_decision(event, lane_result)
-    val submit = engine2d_host_gpu_event_submit_to_runtime(queue, decision, lane_result)
-    val drain = if submit.submitted: engine2d_host_gpu_runtime_drain(queue, 1) else: engine2d_host_gpu_runtime_drain(queue, 0)
-    val submit_status = if submit.submitted: WEB_RENDER_QUEUE_STATUS_SUBMITTED else: WEB_RENDER_QUEUE_STATUS_UNAVAILABLE
-    val drain_status = if drain.drained > 0: WEB_RENDER_QUEUE_STATUS_DRAINED else: WEB_RENDER_QUEUE_STATUS_UNAVAILABLE
-    web_render_artifact_with_runtime_queue_handle(artifact, submit_status, drain_status, submit.packet_id, drain.drained, drain.last_backend_handle, drain.diagnostic)
 
 pub fn web_render_draw_ir_request_to_pixel_artifact(req: WebRenderRequest, composition: DrawIrComposition, backend_name: text) -> WebRenderArtifact:
     val backend = simple_web_resolved_engine2d_backend_name(req.viewport_w, req.viewport_h, backend_name)

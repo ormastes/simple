@@ -1363,6 +1363,79 @@ pub fn rt_string_to_lower(value: i64) -> i64:
         i = i + 1
     return out
 
+fn utf8_continuation_byte(ch: i64) -> bool:
+    ch >= 128 and ch <= 191
+
+fn utf8_valid_sequence_at(data: i64, len: i64, offset: i64) -> i64:
+    val b0 = spl_load_u8(data, offset)
+    if b0 < 128:
+        return 1
+    if b0 >= 194 and b0 <= 223:
+        if offset + 1 < len and utf8_continuation_byte(spl_load_u8(data, offset + 1)):
+            return 2
+        return 0
+    if b0 >= 224 and b0 <= 239:
+        if offset + 2 >= len:
+            return 0
+        val b1 = spl_load_u8(data, offset + 1)
+        val b2 = spl_load_u8(data, offset + 2)
+        if not utf8_continuation_byte(b1) or not utf8_continuation_byte(b2):
+            return 0
+        if b0 == 224 and b1 < 160:
+            return 0
+        if b0 == 237 and b1 >= 160:
+            return 0
+        return 3
+    if b0 >= 240 and b0 <= 244:
+        if offset + 3 >= len:
+            return 0
+        val b1 = spl_load_u8(data, offset + 1)
+        val b2 = spl_load_u8(data, offset + 2)
+        val b3 = spl_load_u8(data, offset + 3)
+        if (
+            not utf8_continuation_byte(b1) or
+            not utf8_continuation_byte(b2) or
+            not utf8_continuation_byte(b3)
+        ):
+            return 0
+        if b0 == 240 and b1 < 144:
+            return 0
+        if b0 == 244 and b1 >= 144:
+            return 0
+        return 4
+    0
+
+pub fn rt_text_count_codepoints_cached(value: i64) -> i64:
+    val ptr = string_ptr(value)
+    if ptr < 1:
+        return 0
+    val len = string_len_ptr(ptr)
+    val data = string_data_ptr_value(ptr)
+    var offset = 0
+    var count = 0
+    while offset < len:
+        val width = utf8_valid_sequence_at(data, len, offset)
+        if width < 1:
+            offset = offset + 1
+        else:
+            offset = offset + width
+        count = count + 1
+    count
+
+pub fn rt_text_validate_utf8(value: i64) -> i64:
+    val ptr = string_ptr(value)
+    if ptr < 1:
+        return 0
+    val len = string_len_ptr(ptr)
+    val data = string_data_ptr_value(ptr)
+    var offset = 0
+    while offset < len:
+        val width = utf8_valid_sequence_at(data, len, offset)
+        if width < 1:
+            return 0
+        offset = offset + width
+    1
+
 # rt_string_to_float — parse a decimal float string and return a tagged float
 # value (tag 2).  Returns nil (3) on failure.
 pub fn rt_string_to_float(value: i64) -> i64:
