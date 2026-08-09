@@ -29,6 +29,7 @@ use lib.common.crypto.x25519_mlkem768.evidence_contract.{
     X25519_MLKEM768_EVIDENCE_MAX_BATCH,
     x25519_mlkem768_evidence_backend_name}
 use app.test.x25519mlkem768_pinned_workload.{
+    X25519MlKem768PinnedPublicOutputs,
     X25519_MLKEM768_PINNED_FIXTURE_ID,
     X25519_MLKEM768_PINNED_WORKLOAD_SHA256,
     x25519_mlkem768_pinned_workload_binding_reason,
@@ -69,12 +70,21 @@ struct X25519MlKem768GpuDispatchRequest:
 struct X25519MlKem768GpuDispatchResult:
     receipt: X25519MlKem768RunReceipt
     exit_code: i64
+    # Present only for a same-run, batch-one CUDA/Vulkan completion.  This is
+    # typed retained public A/B/C material, never a serialized receipt.
+    public_outputs: X25519MlKem768PinnedPublicOutputs?
+    runner_artifact_sha256: text
+
+struct _X25519MlKem768GpuRoundtripObservation:
+    receipt: X25519MlKem768RunReceipt
+    public_outputs: X25519MlKem768PinnedPublicOutputs
 
 struct X25519MlKem768GpuRunnerAdmission:
     binary_sha256: text
     binary_aux_sha256: text
     device_capability: text
     device_name: text
+    runner_artifact_sha256: text
 
 fn _gpu_empty_receipt(request: X25519MlKem768GpuDispatchRequest,
         status: X25519MlKem768EvidenceStatus,
@@ -109,7 +119,7 @@ fn _gpu_result(request: X25519MlKem768GpuDispatchRequest,
         exit_code: i64) -> X25519MlKem768GpuDispatchResult:
     X25519MlKem768GpuDispatchResult(
         receipt: _gpu_empty_receipt(request, status, reason),
-        exit_code: exit_code)
+        exit_code: exit_code, public_outputs: nil, runner_artifact_sha256: "")
 
 fn _binding_field(encoded: text, key: text) -> Result<text, text>:
     val prefix = key + "="
@@ -275,12 +285,13 @@ fn _gpu_admission(request: X25519MlKem768GpuDispatchRequest
     if tuple_reason != "": return Err(tuple_reason)
     Ok(X25519MlKem768GpuRunnerAdmission(
         binary_sha256: binary_sha256, binary_aux_sha256: binary_aux_sha256,
-        device_capability: device_capability, device_name: device_name))
+        device_capability: device_capability, device_name: device_name,
+        runner_artifact_sha256: runner_sha256))
 
 fn _cuda_roundtrip(request: X25519MlKem768GpuDispatchRequest,
         admission: X25519MlKem768GpuRunnerAdmission,
         executor: X25519MlKem768CudaNttExecutor
-) -> Result<X25519MlKem768RunReceipt, text>:
+) -> Result<_X25519MlKem768GpuRoundtripObservation, text>:
     if request.evidence.mode != X25519MlKem768EvidenceMode.Native:
         return Err("cuda-native-execution-required")
     if request.evidence.batch_size < 1:
@@ -297,6 +308,7 @@ fn _cuda_roundtrip(request: X25519MlKem768GpuDispatchRequest,
     var submitted = true
     var fence_completed = true
     var device_readback = true
+    var retained_outputs: X25519MlKem768PinnedPublicOutputs? = nil
     var batch_index: i64 = 0
     while batch_index < request.evidence.batch_size:
         var config = x25519_mlkem768_default_config()
@@ -310,6 +322,10 @@ fn _cuda_roundtrip(request: X25519MlKem768GpuDispatchRequest,
                 config, executor):
             case Ok(value): value
             case Err(reason): return Err("cuda-pinned-workload-" + reason)
+        # Retain the last typed public observation for callers that need it.
+        # Final-row composition independently requires batch one, while normal
+        # multi-batch dispatch retains its existing receipt behaviour.
+        retained_outputs = Some(outputs)
         # Ok contains three independently oracle-validated typed set receipts.
         if not outputs.candidate_oracle_match or outputs.fallback_used:
             return Err("cuda-pinned-workload-proof-incomplete")
@@ -366,7 +382,10 @@ fn _cuda_roundtrip(request: X25519MlKem768GpuDispatchRequest,
     receipt.device_readback = device_readback
     receipt.artifact_sha256 = observed_artifact_sha256
     receipt.device_identity = executor_identity
-    Ok(receipt)
+    match retained_outputs:
+        case Some(outputs): Ok(_X25519MlKem768GpuRoundtripObservation(
+            receipt: receipt, public_outputs: outputs))
+        case nil: return Err("cuda-pinned-public-outputs-not-retained")
 
 fn _cuda_runtime_capability_reason(
         admission: X25519MlKem768GpuRunnerAdmission) -> text:
@@ -414,7 +433,7 @@ fn _vulkan_runtime_identity_reason(
 fn _vulkan_roundtrip(request: X25519MlKem768GpuDispatchRequest,
         admission: X25519MlKem768GpuRunnerAdmission,
         executor: X25519MlKem768VulkanNttExecutor
-) -> Result<X25519MlKem768RunReceipt, text>:
+) -> Result<_X25519MlKem768GpuRoundtripObservation, text>:
     if request.evidence.mode != X25519MlKem768EvidenceMode.Native:
         return Err("vulkan-native-execution-required")
     if request.evidence.batch_size < 1:
@@ -434,6 +453,7 @@ fn _vulkan_roundtrip(request: X25519MlKem768GpuDispatchRequest,
     var submitted = true
     var fence_completed = true
     var device_readback = true
+    var retained_outputs: X25519MlKem768PinnedPublicOutputs? = nil
     var batch_index: i64 = 0
     while batch_index < request.evidence.batch_size:
         var config = x25519_mlkem768_default_config()
@@ -447,6 +467,9 @@ fn _vulkan_roundtrip(request: X25519MlKem768GpuDispatchRequest,
                 config, executor):
             case Ok(value): value
             case Err(reason): return Err("vulkan-pinned-workload-" + reason)
+        # See CUDA: this is typed same-run public material; only the final-row
+        # adapter may require the stronger batch-one condition.
+        retained_outputs = Some(outputs)
         if (executor.session.device_identity != session_identity_tag or
                 executor.session.device_name != session_device_name or
                 executor.session.driver_identity != session_driver_identity):
@@ -509,7 +532,10 @@ fn _vulkan_roundtrip(request: X25519MlKem768GpuDispatchRequest,
     receipt.device_readback = device_readback
     receipt.artifact_sha256 = artifact_set_digest
     receipt.device_identity = executor_identity
-    Ok(receipt)
+    match retained_outputs:
+        case Some(outputs): Ok(_X25519MlKem768GpuRoundtripObservation(
+            receipt: receipt, public_outputs: outputs))
+        case nil: return Err("vulkan-pinned-public-outputs-not-retained")
 
 fn x25519_mlkem768_dispatch_gpu(
         request: X25519MlKem768GpuDispatchRequest
@@ -557,8 +583,10 @@ fn x25519_mlkem768_dispatch_gpu(
         val vulkan_result = _vulkan_roundtrip(request, admission, executor)
         executor.shutdown()
         return match vulkan_result:
-            case Ok(receipt): X25519MlKem768GpuDispatchResult(
-                receipt: receipt, exit_code: 0)
+            case Ok(observation): X25519MlKem768GpuDispatchResult(
+                receipt: observation.receipt, exit_code: 0,
+                public_outputs: Some(observation.public_outputs),
+                runner_artifact_sha256: admission.runner_artifact_sha256)
             case Err(reason): _gpu_result(
                 request, X25519MlKem768EvidenceStatus.Fail, reason, 1)
     if request.evidence.backend == X25519MlKem768EvidenceBackend.Cuda:
@@ -581,8 +609,10 @@ fn x25519_mlkem768_dispatch_gpu(
         val cuda_result = _cuda_roundtrip(request, admission, executor)
         executor.shutdown()
         return match cuda_result:
-            case Ok(receipt): X25519MlKem768GpuDispatchResult(
-                receipt: receipt, exit_code: 0)
+            case Ok(observation): X25519MlKem768GpuDispatchResult(
+                receipt: observation.receipt, exit_code: 0,
+                public_outputs: Some(observation.public_outputs),
+                runner_artifact_sha256: admission.runner_artifact_sha256)
             case Err(reason): _gpu_result(
                 request, X25519MlKem768EvidenceStatus.Fail, reason, 1)
     _gpu_result(request, X25519MlKem768EvidenceStatus.Blocked,
