@@ -55,6 +55,7 @@ use os.kernel.ipc.host_gpu_ivshmem_map.{
 use os.kernel.boot.monotonic_hardware.{boot_monotonic_now_us, boot_monotonic_prepare}
 use common.gpu.simpleos_host_gpu_protocol.{
     SIMPLEOS_HOST_GPU_BACKEND_METAL,
+    SIMPLEOS_HOST_GPU_BACKEND_VULKAN,
     SIMPLEOS_HOST_GPU_ISA_AARCH64
 }
 
@@ -262,6 +263,8 @@ pub fn gui_entry_desktop_start(file_backed_ram_tail_base: u64, preferred_backend
     var event_count = 0
     var observed_key_sequence: i64 = 0
     var observed_pointer_sequence: i64 = 0
+    var showcase_animation_tick: i64 = 0
+    var showcase_animation_next_us = boot_monotonic_now_us() + 16667
     while running:
         var input_compositor = shell.compositor
         var action = WmAction.None
@@ -276,6 +279,7 @@ pub fn gui_entry_desktop_start(file_backed_ram_tail_base: u64, preferred_backend
         var key_sequence: i64 = 0
         var key_code: u16 = 0u16
         var key_value: u32 = 0u32
+        var animation_event_pending = false
 
         if virtio_input_enabled:
             input_compositor.handle_input()
@@ -393,8 +397,21 @@ pub fn gui_entry_desktop_start(file_backed_ram_tail_base: u64, preferred_backend
             case WmAction.None:
                 pass
 
+        # The showcase animation is guest-owned scene state. It advances a
+        # real compositor surface on the boot monotonic clock and therefore
+        # traverses the canonical Shell -> DrawIR -> required Vulkan path.
+        # Input always wins an iteration so attribution remains one-to-one.
+        val animation_now_us = boot_monotonic_now_us()
+        if backend_required and preferred_backend_code == SIMPLEOS_HOST_GPU_BACKEND_VULKAN and showcase_animation_tick < 20 and not pointer_event_pending and not key_event_pending and animation_now_us >= showcase_animation_next_us:
+            showcase_animation_tick = showcase_animation_tick + 1
+            showcase_animation_next_us = animation_now_us + 16667
+            input_compositor.move_window(editor_id.to_i32(), (300 + showcase_animation_tick).to_i32(), 160)
+            changed = true
+            animation_event_pending = true
+
         if changed or pointer_event_pending or key_event_pending:
-            event_count = event_count + 1
+            if pointer_event_pending or key_event_pending:
+                event_count = event_count + 1
             shell.compositor = input_compositor
             if pointer_event_pending:
                 uart_writeln("[wm-pointer-poll] source=poll input_seq={pointer_sequence} x={pointer_x} y={pointer_y} button_code={pointer_button_code} kind_code={pointer_kind_code}")
@@ -437,6 +454,8 @@ pub fn gui_entry_desktop_start(file_backed_ram_tail_base: u64, preferred_backend
                 uart_writeln("[wm-pointer-frame] input_seq={pointer_sequence} rendered_revision={rendered_revision} frame_id={ramfb_frame_id}")
             if rendered_revision > 0 and key_event_pending:
                 uart_writeln("[wm-key-frame] input_seq={key_sequence} rendered_revision={rendered_revision} frame_id={ramfb_frame_id}")
+            if rendered_revision > 0 and animation_event_pending:
+                uart_writeln("[showcase-animation-frame] source=guest-monotonic tick={showcase_animation_tick} scene_revision={rendered_revision} frame_id={ramfb_frame_id} editor_x={300 + showcase_animation_tick}")
             if rendered_revision <= 0:
                 uart_writeln("[desktop-gui-arm64] fatal reason=changed-frame")
                 running = false

@@ -78,24 +78,6 @@ def main():
             {"type": "key", "data": {"down": False, "key": {"type": "qcode", "data": "alt"}}},
             {"type": "key", "data": {"down": True, "key": {"type": "qcode", "data": "alt_r"}}},
             {"type": "key", "data": {"down": False, "key": {"type": "qcode", "data": "alt_r"}}},
-            # Seven real focus transitions (press + release) provide enough
-            # interaction-driven device frames for a 20-sample distribution.
-            # They are deliberately sent only after the frozen primitive
-            # sequence above, so they cannot manufacture its admission.
-            {"type": "key", "data": {"down": True, "key": {"type": "qcode", "data": "tab"}}},
-            {"type": "key", "data": {"down": False, "key": {"type": "qcode", "data": "tab"}}},
-            {"type": "key", "data": {"down": True, "key": {"type": "qcode", "data": "tab"}}},
-            {"type": "key", "data": {"down": False, "key": {"type": "qcode", "data": "tab"}}},
-            {"type": "key", "data": {"down": True, "key": {"type": "qcode", "data": "tab"}}},
-            {"type": "key", "data": {"down": False, "key": {"type": "qcode", "data": "tab"}}},
-            {"type": "key", "data": {"down": True, "key": {"type": "qcode", "data": "tab"}}},
-            {"type": "key", "data": {"down": False, "key": {"type": "qcode", "data": "tab"}}},
-            {"type": "key", "data": {"down": True, "key": {"type": "qcode", "data": "tab"}}},
-            {"type": "key", "data": {"down": False, "key": {"type": "qcode", "data": "tab"}}},
-            {"type": "key", "data": {"down": True, "key": {"type": "qcode", "data": "tab"}}},
-            {"type": "key", "data": {"down": False, "key": {"type": "qcode", "data": "tab"}}},
-            {"type": "key", "data": {"down": True, "key": {"type": "qcode", "data": "tab"}}},
-            {"type": "key", "data": {"down": False, "key": {"type": "qcode", "data": "tab"}}},
         ]})
 
 

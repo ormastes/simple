@@ -22,7 +22,8 @@ case "${1:-}" in
         grep -Fq 'showcase-device-frame.ppm' "$0"
         grep -Fq 'showcase-device-sample-count' "$0"
         grep -Fq 'transient-vulkan-font-receipt-missing' "$0"
-        grep -Fq 'showcase-interaction-static' "$0"
+        grep -Fq 'showcase-animation-static' "$0"
+        grep -Fq 'source=guest-monotonic tick=20' "$0"
         grep -Fq 'showcase_max_rss_kib' "$0"
         grep -Fq 'validate-simpleos-arm64-unified-live-receipt.spl' "$0"
         echo simpleos_arm64_unified_live_self_test=pass
@@ -148,6 +149,7 @@ while test "$attempt" -lt 300; do
     if grep -Eq '^\[wm-key-poll\].*input_seq=[1-9][0-9]*' "$serial" 2>/dev/null &&
        grep -Eq '^\[wm-pointer-poll\].*input_seq=[1-9][0-9]*' "$serial" 2>/dev/null &&
        grep -Fq 'sequence=pointer_move,pointer_down,pointer_drag,pointer_up,pointer_wheel,left_ctrl_down,left_ctrl_up,right_ctrl_down,right_ctrl_up,left_alt_down,left_alt_up,right_alt_down,right_alt_up delivered=true' "$serial" 2>/dev/null &&
+       grep -Eq '^\[showcase-animation-frame\] source=guest-monotonic tick=20 scene_revision=[1-9][0-9]* frame_id=[1-9][0-9]* editor_x=320$' "$serial" 2>/dev/null &&
        test "$(grep -Ec '^\[wm-frame\] host-gpu-device-evidence backend=vulkan ' "$serial" 2>/dev/null || true)" -ge 20; then
         break
     fi
@@ -196,7 +198,18 @@ printf '%s\n' "$frame_id" | grep -Eq '^[1-9][0-9]*$' || fail frame-identity-miss
 # 19th sorted sample for N=20 (nearest-rank), never a single best-case frame.
 sample_receipts=$out_dir/showcase-device-receipts.txt
 samples=$out_dir/showcase-device-elapsed-us.txt
-grep -E '^\[wm-frame\] host-gpu-device-evidence backend=vulkan ' "$serial" | tail -n 20 >"$sample_receipts"
+animation_receipts=$out_dir/showcase-animation-receipts.txt
+grep -E '^\[showcase-animation-frame\] source=guest-monotonic tick=[1-9][0-9]* scene_revision=[1-9][0-9]* frame_id=[1-9][0-9]* editor_x=[1-9][0-9]*$' "$serial" >"$animation_receipts"
+test "$(wc -l <"$animation_receipts" | tr -d ' ')" -eq 20 || fail showcase-animation-frame-count
+animation_ticks=$(tr ' ' '\n' <"$animation_receipts" | sed -n 's/^tick=//p')
+printf '%s\n' "$animation_ticks" | awk 'BEGIN { ok=1 } { if ($1 != NR) ok=0 } END { if (NR != 20 || !ok) exit 1 }' || fail showcase-animation-tick-sequence
+animation_revisions=$(tr ' ' '\n' <"$animation_receipts" | sed -n 's/^scene_revision=//p')
+test "$(printf '%s\n' "$animation_revisions" | sort -n -u | wc -l | tr -d ' ')" -eq 20 || fail showcase-animation-revisions-not-distinct
+: >"$sample_receipts"
+printf '%s\n' "$animation_revisions" | while IFS= read -r animation_revision; do
+    grep -E "^\[wm-frame\] host-gpu-device-evidence backend=vulkan .* scene_revision=$animation_revision .* readback=device .* elapsed_us=[1-9][0-9]*$" "$serial" | tail -n 1 >>"$sample_receipts"
+done
+test "$(wc -l <"$sample_receipts" | tr -d ' ')" -eq 20 || fail showcase-animation-device-correlation
 tr ' ' '\n' <"$sample_receipts" | sed -n 's/^elapsed_us=//p' >"$samples"
 sample_count=$(wc -l <"$samples" | tr -d ' ')
 test "$sample_count" -eq 20 || fail showcase-device-sample-count
@@ -210,7 +223,7 @@ test "$(printf '%s\n' "$sample_frames" | wc -l | tr -d ' ')" -eq 20 || fail show
 test "$(printf '%s\n' "$sample_frames" | sort -n -u | wc -l | tr -d ' ')" -eq 20 || fail showcase-frame-identities-not-distinct
 printf '%s\n' "$sample_frames" | grep -Fxq "$font_frame" || fail transient-font-frame-not-sampled
 distinct_checksums=$(tr ' ' '\n' <"$sample_receipts" | sed -n 's/^checksum=//p' | sort -u | wc -l | tr -d ' ')
-test "$distinct_checksums" -ge 2 || fail showcase-interaction-static
+test "$distinct_checksums" -ge 2 || fail showcase-animation-static
 
 qemu_rss_kib=$(sed -n 's/^VmHWM:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*kB$/\1/p' "/proc/$qemu_pid/status" | head -n 1)
 daemon_rss_kib=$(sed -n 's/^VmHWM:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*kB$/\1/p' "/proc/$daemon_pid/status" | head -n 1)
@@ -242,9 +255,11 @@ printf '%s\n' "$admission" | grep -Fq 'simpleos_arm64_unified_environment_admiss
     echo virtio_pointer_delivery=pass
     echo virtio_snd_completion=pass
     echo fallback_used=false
-    echo showcase_interaction_device_frames=20
-    echo showcase_interaction_distinct_checksums="$distinct_checksums"
-    echo showcase_animation_status=not_proven
+    echo showcase_animation_device_frames=20
+    echo showcase_animation_distinct_scene_revisions=20
+    echo showcase_animation_distinct_checksums="$distinct_checksums"
+    echo showcase_animation_clock=guest-monotonic
+    echo showcase_animation_status=pass
     echo showcase_transient_font=pass
     echo showcase_capture_path="$capture"
     echo showcase_capture_sha256="$capture_sha"
