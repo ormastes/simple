@@ -6,6 +6,15 @@
 
 # use compiler.di.{DiContainer, di_is_system_test_locked}
 
+# Prevention-mock adoption (U5, sspec_prevention_mock_plan_2026-08-07.md):
+# a locked DI mutation must be REJECTED, not silently recorded. `prevent()`
+# checks immediately against the mock's current call state — it must be
+# called AFTER bind_instance_guarded() runs, not before. See
+# doc/07_guide/infra/testing/prevention_mocks.md and the ordering-contract
+# comment at src/lib/nogc_sync_mut/spec.spl:527.
+use std.nogc_sync_mut.src.testing.mock.builder.{MockFunction}
+use std.nogc_sync_mut.spec.{prevent}
+
 extern fn rt_env_get(key: text) -> text
 extern fn rt_env_set(key: text, value: text)
 
@@ -28,6 +37,22 @@ class DiContainer:
 
     me bind_instance(key: text, value):
         if self.locked:
+            return nil
+        var new_bindings = []
+        for entry in self.all_bindings:
+            if entry[0] != key:
+                new_bindings = new_bindings + [entry]
+        new_bindings = new_bindings + [[key, value]]
+        self.all_bindings = new_bindings
+
+    # Prevention-mock variant of bind_instance: routes the "call while
+    # locked" seam through `guard` so a spec can assert it is NEVER called
+    # (a locked mutation must be rejected, not recorded). Only used by the
+    # prevention-mock adoption example below; existing bind_instance/bind
+    # call sites are untouched.
+    me bind_instance_guarded(key: text, value, guard):
+        if self.locked:
+            guard.record_call([key])
             return nil
         var new_bindings = []
         for entry in self.all_bindings:
@@ -113,6 +138,24 @@ describe "DI Container Lock":
             di.bind_instance("Svc", "hello")
             di.lock()
             expect(di.resolve("Svc")).to_equal("hello")
+
+        it "well-behaved caller never reaches the guarded bind path while locked":
+            # A caller that respects the lock (checks is_locked() first) must
+            # never invoke bind_instance_guarded while locked — the prevention
+            # mock stays green, proving no code path silently records a
+            # locked-mutation attempt. See the sabotage recipe (deleted after
+            # use) for proof this guard actually fires when that invariant is
+            # violated: bind_instance_guarded called unconditionally while
+            # locked reports `forbidden call: di_bind_while_locked called 1x
+            # (allowed 0) — DI mutation while locked must be rejected, not
+            # recorded` and fails the example.
+            val di = DiContainer(bindings: [], singletons: [], profile: "dev", all_bindings: [], locked: false)
+            val guard_mock = MockFunction.new("di_bind_while_locked")
+            di.lock()
+            if not di.is_locked():
+                di.bind_instance_guarded("Bar", 99, guard_mock)
+            expect(di.has_binding("Bar")).to_equal(false)
+            prevent(guard_mock, "DI mutation while locked must be rejected, not recorded")
 
     describe "env-var based lock":
         it "env lock active when SIMPLE_SYSTEM_TEST=1":
