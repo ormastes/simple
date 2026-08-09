@@ -171,6 +171,82 @@ high: a single `bin/simple test` full-suite run on Windows can, unattended,
 degrade the host machine to the point of other tools failing with OS resource
 errors, with no warning printed by the test runner itself.
 
+## Follow-up 2026-08-08 — the deployed April binary's `test` NEVER evaluates assertions (PROVED, severe)
+
+While writing a regression spec for a separate Windows fix (see
+`doc/08_tracking/bug/windows_build_subcommand_silent_noop_stale_binary_2026-08-05.md`'s
+sibling doc on symlink checkouts and
+`sspec_module_docstring_plus_subprocess_it_false_green_2026-08-08.md`), a
+routine sanity check — deliberately break a new spec's assertion to confirm
+`bin/simple test` actually catches it before trusting a green result —
+revealed something far more basic and severe than a docstring-interaction
+edge case:
+
+**`bin/simple test <spec> --clean` on the deployed April self-hosted binary
+(`bin/release/x86_64-pc-windows-msvc/simple.exe`) reports PASS for
+`expect(1).to_equal(2)`.** Not a subtle interaction — the single simplest
+possible wrong assertion, in a brand-new file, with no docstring, no
+subprocess calls, no describe nesting:
+
+```simple
+describe "trivial":
+    it "fails on purpose":
+        expect(1).to_equal(2)
+```
+
+`bin/simple test` on that file: `Passed: 1, Failed: 0`. Confirmed the same
+false-PASS for `to_be_truthy(false)`, `assert_equal(1, 2)`, and
+`to_contain` on a definitely-absent substring — all four matcher forms
+tested, all four silently green.
+
+**Contrast, same source file, different binary:** the June-2026-built Rust
+seed (`SIMPLE_BOOTSTRAP=1 src/compiler_rust/target/bootstrap/simple.exe test
+<same file> --clean`) correctly reports `Failed: 1` for the identical
+`expect(1).to_equal(2)`, and correctly fails all four matcher forms in the
+breadth check.
+
+### Why this matters more than it first appears
+
+This means **every `bin/simple test` result reported in this repo's history
+while using the deployed April Windows binary is unverified for anything
+that PARSES successfully.** The 135-failure count from the full-suite run
+recorded earlier in
+`windows_build_subcommand_silent_noop_stale_binary_2026-08-05.md`'s main body
+is now known to be a **parse-error-only** undercount — every one of those 135
+failures was a `parse error:` message (the loader's own hard-fail path,
+which this defect does not touch), and every other spec in that 19,197-file,
+292,830-assertion run that PARSED but contained a wrong assertion would have
+silently passed. The true failure count on that binary is unknown and likely
+far higher than 135; the 292,830 "passed" figure has no evidentiary value at
+all for this binary.
+
+### Relationship to existing tracked false-green defects
+
+This is the same general family as `sspec_test_path_false_green_undercount_2026-07-20.md`
+(FIXED for a specific text-ordering/cranelift-codegen root cause) and
+`bare_assert_statement_vacuity_2026-08-02.md` (bare `assert`, fixed for the
+interpreter, open for the pure-Simple compiler path). Given the deployed
+binary is from April — predating both of those July/August fixes — the
+simplest explanation is that this binary simply lacks those fixes, i.e. this
+is NOT a new defect, it's the ALREADY-KNOWN-AND-PARTIALLY-FIXED defect class
+surviving in a binary old enough to predate the fix. Not proved (would
+require bisecting exactly which commit fixed `expect().to_equal()`
+specifically, as opposed to the bare-`assert`/`==`-chained-matcher cases
+those docs cover), but consistent with all available evidence: the root
+blocker throughout this whole investigation has been that `bin/simple build`
+cannot redeploy on Windows (the symptom this doc's main body records), so
+nothing has been able to update this binary since April regardless of how
+many fixes landed upstream.
+
+### Practical consequence for this session
+
+Every actual verification performed in this session (the Windows symlink
+checkout fix, the new push guard, the new materializer script) was instead
+confirmed against the June Rust seed binary specifically BECAUSE this defect
+was discovered before trusting the deployed binary's `test` output. Anyone
+using the deployed `bin/simple test` on Windows for anything beyond "does
+this file parse" should be aware the result is not evidence of correctness.
+
 ## Suggested follow-up
 
 1. Confirm staleness directly: run the identity/behavioural probes from
