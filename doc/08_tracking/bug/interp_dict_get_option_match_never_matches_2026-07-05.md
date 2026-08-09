@@ -1,6 +1,6 @@
 ---
 id: interp_dict_get_option_match_never_matches_2026-07-05
-status: OPEN
+status: RESOLVED (2026-08-09, not reproducible — see Re-verification below)
 severity: medium
 discovered: 2026-07-05
 discovered_by: std.diag (easy-debug-infra P0) implementation + spec work
@@ -55,3 +55,26 @@ using `Dict<K,V>` with `if val Some(x) = ...:` on a `.get()` result.
 
 Interpreter semantics of `Dict.get()` return type vs the `if val Some(x) = `
 pattern-match sugar; not specific to `std.diag`.
+
+## Re-verification 2026-08-09 — NOT REPRODUCIBLE, marking RESOLVED
+
+Reproduced the documented repro shape on the currently deployed seed binary
+(`bin/release/x86_64-unknown-linux-gnu/simple`, seed-warning banner
+confirmed) under `SIMPLE_EXECUTION_MODE=interpret` (the engine `bin/simple
+test` itself uses per `.claude/rules/testing.md`):
+
+```
+var d: Dict<text, i32> = Dict.new()
+d.set("k", 42)
+if val Some(x) = d.get("k"):   # matched, x == 42
+if val Some(x) = d.get("missing"):   # NOT matched (else branch taken)
+```
+
+Both cases behave correctly — the reported "never matches" symptom does not
+reproduce; `d.get(k)` on a present key correctly binds through `Some(x)` and
+a missing key correctly falls through. No source change was needed.
+Regression gate landed:
+`test/01_unit/language/dict_get_option_match_spec.spl` (`2 examples, 0
+failures`).
+
+**Status: RESOLVED** (verified fixed upstream, no code change required).
