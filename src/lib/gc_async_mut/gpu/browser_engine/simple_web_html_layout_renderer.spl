@@ -1425,7 +1425,8 @@ fn _simple_web_layout_compose_retained(
     scroll_y: i32,
     overlay: BrowserTextInputOverlay,
     images: [SimpleOsHostGpuImageResource],
-    depth: i32
+    depth: i32,
+    witness_i64: [i64], witness_text: [text]
 ) -> SimpleWebLayoutDrawIrResult:
     val scrolled = _simple_web_scrolled_layout(
         nodes, styles, raw_boxes, width, height, scroll_y
@@ -1579,7 +1580,7 @@ fn _simple_web_layout_compose_retained(
                         child_html, content.width, content.height,
                         vector_fonts, animation_time_ms, 0,
                         browser_text_input_overlay_empty(), [], [], child_rules,
-                        depth + 1, child_deadline
+                        depth + 1, child_deadline, [], []
                     )
                     _web_render_deadline_us = save_deadline
                     if _simple_web_draw_ir_has_material_request(child.composition):
@@ -1623,6 +1624,12 @@ fn _simple_web_layout_compose_retained(
     val material_witness = _simple_web_layout_merge_material_witness(
         [parent_material_witness] + child_witnesses
     )
+    if witness_i64.len() >= 2:
+        witness_i64[0] = material_witness.cpu_composited_count.to_i64()
+        witness_i64[1] = material_witness.solid_material_count.to_i64()
+    if witness_text.len() >= 2:
+        witness_text[0] = material_witness.cpu_composited_sha256
+        witness_text[1] = material_witness.solid_material_sha256
     SimpleWebLayoutDrawIrResult(
         composition: composition,
         material_fallback: simple_web_layout_material_provenance_after_execution(
@@ -1662,7 +1669,8 @@ fn _simple_web_layout_compose_document(
     overlay: BrowserTextInputOverlay,
     animation_instances: [BrowserCssAnimationInstance],
     images: [SimpleOsHostGpuImageResource],
-    extra_rules: Rules, depth: i32, deadline_us: i64
+    extra_rules: Rules, depth: i32, deadline_us: i64,
+    witness_i64: [i64], witness_text: [text]
 ) -> SimpleWebLayoutDrawIrResult:
     val render_start_us = rt_time_now_micros()
     val _phase_on = _web_phase_trace_enabled()
@@ -1817,7 +1825,7 @@ fn _simple_web_layout_compose_document(
         animation_registry, animation_schedule, animation_property_work_count,
         material_entries, material_counts, cpu_material_nodes,
         solid_material_nodes, width, height, vector_fonts, animation_time_ms, scroll_y,
-        overlay, images, depth
+        overlay, images, depth, witness_i64, witness_text
     )
     if _phase_on:
         # "compose_shaping" -- _simple_web_layout_compose_retained builds the
@@ -1930,15 +1938,17 @@ pub fn simple_web_layout_compose_prepared(
         prepared.material_entries, prepared.material_counts,
         prepared.cpu_material_nodes, prepared.solid_material_nodes,
         prepared.width, prepared.height, prepared.vector_fonts,
-        prepared.animation_time_ms, prepared.scroll_y, prepared.overlay, prepared.images, 0
+        prepared.animation_time_ms, prepared.scroll_y, prepared.overlay, prepared.images, 0,
+        [], []
     )
 
-fn _simple_web_layout_render_html_draw_ir_result_at_time(
+fn _simple_web_layout_render_html_draw_ir_result_at_time_with_witness_receipt(
     html: text, width: i32, height: i32, vector_fonts: bool,
     animation_time_ms: i64, scroll_y: i32,
     overlay: BrowserTextInputOverlay,
     animation_instances: [BrowserCssAnimationInstance],
-    images: [SimpleOsHostGpuImageResource]
+    images: [SimpleOsHostGpuImageResource],
+    witness_i64: [i64], witness_text: [text]
 ) -> SimpleWebLayoutDrawIrResult:
     val env_override = _web_render_budget_ms_env_override()
     val area_floor_ms = (width as i64) * (height as i64) / 16
@@ -1948,7 +1958,19 @@ fn _simple_web_layout_render_html_draw_ir_result_at_time(
     _simple_web_layout_compose_document(
         html, width, height, vector_fonts, animation_time_ms, scroll_y,
         overlay, animation_instances, images, _web_empty_rules(), 0,
-        _web_render_deadline_us
+        _web_render_deadline_us, witness_i64, witness_text
+    )
+
+fn _simple_web_layout_render_html_draw_ir_result_at_time(
+    html: text, width: i32, height: i32, vector_fonts: bool,
+    animation_time_ms: i64, scroll_y: i32,
+    overlay: BrowserTextInputOverlay,
+    animation_instances: [BrowserCssAnimationInstance],
+    images: [SimpleOsHostGpuImageResource]
+) -> SimpleWebLayoutDrawIrResult:
+    _simple_web_layout_render_html_draw_ir_result_at_time_with_witness_receipt(
+        html, width, height, vector_fonts, animation_time_ms, scroll_y,
+        overlay, animation_instances, images, [], []
     )
 
 fn _simple_web_layout_render_html_draw_ir_result(html: text, width: i32, height: i32, vector_fonts: bool) -> SimpleWebLayoutDrawIrResult:
@@ -2072,7 +2094,8 @@ pub fn simple_web_layout_rerender_retained(
         raw_boxes, prior.animation_registry, animation_schedule,
         animation_property_work_count,
         material_entries, material_counts, cpu_material_nodes,
-        solid_material_nodes, width, height, true, animation_time_ms, scroll_y, overlay, images, 0
+        solid_material_nodes, width, height, true, animation_time_ms, scroll_y,
+        overlay, images, 0, [], []
     )
 
 pub fn simple_web_layout_render_html_draw_ir(html: text, width: i32, height: i32) -> DrawIrComposition:
@@ -2102,6 +2125,18 @@ pub fn simple_web_layout_render_html_draw_ir_result_at_time(html: text, width: i
     _simple_web_layout_render_html_draw_ir_result_at_time(
         html, width, height, true, animation_time_ms, 0,
         browser_text_input_overlay_empty(), [], []
+    )
+
+# Native/freestanding-safe witness transport. The Draw IR result remains the
+# canonical layout product; these caller-owned buffers preserve the four
+# provenance scalars before its nested aggregate crosses the return ABI.
+pub fn simple_web_layout_render_html_draw_ir_result_at_time_with_witness_receipt(
+    html: text, width: i32, height: i32, animation_time_ms: i64,
+    witness_i64: [i64], witness_text: [text]
+) -> SimpleWebLayoutDrawIrResult:
+    _simple_web_layout_render_html_draw_ir_result_at_time_with_witness_receipt(
+        html, width, height, true, animation_time_ms, 0,
+        browser_text_input_overlay_empty(), [], [], witness_i64, witness_text
     )
 
 pub fn simple_web_layout_render_html_draw_ir_result_at_time_with_images(
