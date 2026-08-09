@@ -2739,6 +2739,7 @@ static volatile uint64_t g_gui_simd_fill_scalar_parity_failures = 0;
 static volatile uint64_t g_gui_blit_row_calls = 0;
 static volatile uint64_t g_gui_blit_row_pixels = 0;
 static volatile uint64_t g_gui_blit_row_neon_chunks = 0;
+static int g_gui_blit_row_alpha_profiled = 0;
 
 RuntimeValue rt_gui_set_fb(RuntimeValue addr, RuntimeValue w)
 {
@@ -2901,6 +2902,15 @@ RuntimeValue rt_gui_blit_row4(RuntimeValue pixels_value, RuntimeValue src_offset
     g_gui_blit_row_pixels += count;
     volatile uint32_t *dst = (volatile uint32_t *)(uintptr_t)g_fb_addr
         + (uint64_t)y * g_fb_w + x;
+    if (!g_gui_blit_row_alpha_profiled && x == 64u && y == 92u && count >= 4u) {
+        g_gui_blit_row_alpha_profiled = 1;
+        serial_puts("[engine2d-blit-alpha] raw=");
+        serial_put_hex((uint64_t)pixels->items[(uint64_t)src_offset]);
+        serial_puts(" decoded=");
+        serial_put_hex((uint64_t)arm64_unbox_pixel(
+            pixels->items[(uint64_t)src_offset]));
+        serial_puts("\r\n");
+    }
     uint64_t i = 0;
     uint64_t chunks = 0;
     while (i + 4u <= count) {
