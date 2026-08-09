@@ -175,6 +175,26 @@ static void *_heap_alloc(size_t sz)
     return p;
 }
 
+/*
+ * Explicit lifetime boundary for synchronous, allocation-heavy frame work.
+ * The ARM64 desktop is single-core/cooperative and completes Draw IR + present
+ * before restoring this checkpoint. Persistent scene/content/backend owners
+ * are prepared before the scope; only per-frame temporaries are reclaimed.
+ */
+uint64_t rt_simpleos_frame_heap_checkpoint(void)
+{
+    return (uint64_t)_heap_off;
+}
+
+int8_t rt_simpleos_frame_heap_restore(uint64_t checkpoint)
+{
+    if (checkpoint > (uint64_t)_heap_off || checkpoint > (uint64_t)sizeof(_heap)) {
+        return 0;
+    }
+    _heap_off = (size_t)checkpoint;
+    return 1;
+}
+
 static int arm64_heap_contains(const void *p, size_t min_size)
 {
     uintptr_t addr = (uintptr_t)p;
