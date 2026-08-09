@@ -2919,6 +2919,35 @@ RuntimeValue rt_gui_blit_row4(RuntimeValue pixels_value, RuntimeValue src_offset
     }
     uint64_t i = 0;
     uint64_t chunks = 0;
+#if defined(__aarch64__)
+    if (opacity_milli == 1000u) {
+        while (i + 16u <= count) {
+            int sixteen_opaque = 1;
+            for (uint32_t lane = 0; lane < 16u; lane++) {
+                uint32_t pixel = arm64_blit_raw_pixel(
+                    pixels->items[(uint64_t)src_offset + i + lane]);
+                if ((pixel >> 24) != 255u) {
+                    sixteen_opaque = 0;
+                    break;
+                }
+            }
+            if (!sixteen_opaque) break;
+            RuntimeValue *src_slots = pixels->items +
+                (uint64_t)src_offset + i;
+            for (uint32_t block = 0; block < 4u; block++) {
+                __asm__ volatile(
+                    "ld2 {v0.4s, v1.4s}, [%1]\n\t"
+                    "st1 {v0.4s}, [%0]"
+                    :
+                    : "r" (dst + i + (uint64_t)block * 4u),
+                      "r" (src_slots + (uint64_t)block * 4u)
+                    : "v0", "v1", "memory");
+            }
+            i += 16u;
+            chunks += 4u;
+        }
+    }
+#endif
     while (i + 4u <= count) {
         uint32_t packed[4];
         int opaque = 1;
