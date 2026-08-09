@@ -1,6 +1,6 @@
 # Native codegen: an omitted trailing default parameter reads an UNINITIALIZED slot
 
-Status: **FIXED** — the MIR call-lowering pad has landed
+Status: **FIXED** — the MIR call-lowering pad has landed; regression fence now in the `check-aot-lane-fences.shs` roster
 Date: 2026-08-09
 
 ## Symptom
@@ -134,11 +134,12 @@ that pass is not on this lane.
   `InstanceMethod`, `TraitMethod`, `FreeFunction` (UFCS), and the
   `Unresolved`-arm name-derived custom-owner dispatch all call `b.emit_call`
   **directly**, bypassing `emit_resolved_direct_call` entirely, so each needed
-  its own `pad_trailing_default_args` call. For all of these, `arg_operands[0]`
-  is the receiver and the registered `HirFunction.params[0]` is the synthetic
-  `self` parameter (`20.hir/hir_lowering/_Items/declaration_lowering.spl:317`)
-  — the two already align 1:1, so the **full** array (receiver included) is
-  passed to the pad. An earlier draft of this fix stripped the receiver before
+  its own `pad_trailing_default_args` call (`method_calls_literals.spl:2371`,
+  `:2403`, `:2445`, `:2615`). For all of these, `arg_operands[0]` is the
+  receiver and the registered `HirFunction.params[0]` is the synthetic `self`
+  parameter (`20.hir/hir_lowering/_Items/declaration_lowering.spl:317`) — the
+  two already align 1:1, so the **full** array (receiver included) is passed
+  to the pad. An earlier draft of this fix stripped the receiver before
   padding and re-prepended it after; that shifted every index by one, which
   both broke the arity check (a real explicit arg misread as "needs a
   default") and, once padding did trigger, duplicated an already-supplied
@@ -158,8 +159,8 @@ Verified via `scripts/check/check-native-trailing-default-param.shs` against
 | default is a **const expression** (`= 3 * 5 + 1`) | yes |
 | instance method | yes |
 | static method | yes |
-| trait method | yes (code path patched; not exercised by the fixture) |
-| UFCS free-function-as-method call | yes (code path patched; not exercised by the fixture) |
+| trait method (typed local variable receiver) | yes — fixture-exercised as of 2026-08-09 (see below) |
+| UFCS free-function-as-method call | code path patched; not fixture-exercised |
 
 Not covered: a default parameter that is itself another parameter reference
 (`fn f(a: i64, b: i64 = a)`) — not attempted; `lower_expr` would need the
@@ -170,10 +171,58 @@ silently mis-lower it (whatever `lower_expr` resolves the bare name to at the
 not blocking: the blast-radius section below lists only trailing-literal/
 const/call defaults, none of which hit this case.
 
-Sabotage-tested: with `pad_trailing_default_args` short-circuited to
-`return args_in` (no padding), the fence fails closed — every omitted slot in
-the fixture reads back a different garbage value than the correct run,
-confirming the fence is not vacuously green.
+Sabotage-tested (twice, both closing red): with `pad_trailing_default_args`
+short-circuited to `return args_in` (no padding), the fence fails closed —
+every omitted slot in the fixture reads back a different garbage value than
+the correct run. Re-confirmed 2026-08-09 with the trait-method scenario added:
+`local a=1 s=false t=0` / `t=22` (vs `t=12`), `cross tag=95365951392960` (vs
+`tag=41`), `bump ... loud=true extra=138235345180544` (vs `loud=false
+extra=99`), `stat ... b=95365951393936` (vs `b=55`), `greet ... loud=true
+times=138235345180544` (vs `loud=false times=1`) — garbage, consistent with
+the uninitialized-memory symptom, not a stable misbinding.
+
+## Trait-method coverage closed (2026-08-09 follow-up)
+
+The fixture originally shipped without exercising the `TraitMethod` MIR arm at
+all (see coverage table above, pre-2026-08-09: "code path patched; not
+exercised by the fixture"). Closing that gap surfaced two more things worth
+recording:
+
+1. **The check script had a harness bug independent of this fix's
+   correctness**: an earlier draft of the trailing-default-param check deleted
+   its own `$WORK_DIR` (and the build/run log inside it) in the `EXIT` trap
+   even on failure, so a real compile or run failure printed a bare `FAIL`
+   with the diagnostic evidence already gone — not a real PASS/FAIL verdict.
+   Fixed by checking each stage's exit code explicitly and `cp`-ing the log to
+   `/tmp/check-native-trailing-default-param.last.log` before the trap fires,
+   on every failure path (build failure, run failure, or output mismatch).
+2. **A trait-typed *field* receiver does not compile at all under
+   `native-build`, for a separate, unrelated reason.** `host.g.greet(...)` (for
+   `g: Greeter?` on a class) and `if val g = host.g: g.greet(...)` both hit
+   `error: MIR lowering error: unresolved method call: greet` — as does a
+   trait-typed value threaded through a function **return type**
+   (`fn make_greeter() -> Greeter`). Only a trait-typed **local variable**
+   initialized by direct construction (`var g: Greeter =
+   FriendlyGreeter(...)`) resolves correctly through the `TraitMethod` arm.
+   The fixture's trait scenario uses that working shape
+   (`test/fixtures/native_trailing_default_param/main.spl`) specifically to
+   isolate the trailing-default-arg regression from this separate
+   field/return-value trait-dispatch gap. **Not filed as its own bug** — out
+   of scope here; flag it if it recurs elsewhere, since it blocks any
+   `Trait?`-typed struct field or `-> Trait` return value from being used as a
+   native-build method-call receiver at all, regardless of default-arg
+   omission.
+
+With the trait scenario added and the harness bug fixed, the check produces a
+real PASS/FAIL verdict, currently PASSes against the landed fix, and correctly
+goes red under the sabotage above. Confirmed by directly diffing the
+compiler's `50.mir` sources against `origin/main` before landing this
+follow-up: an earlier read of a partially-synced local working copy (missing
+`method_calls_literals.spl`'s four `pad_trailing_default_args` call sites)
+made the check appear to fail even with the real fix present — a stale-file
+artifact of a shared working copy, not a real regression. Always verify
+against the actual fetched remote tip, not an assumption that local files are
+current.
 
 ## Blast radius
 
@@ -195,8 +244,9 @@ arm64 entry, silently broke x86_64 without changing its call site.
 ## Regression fence
 
 `scripts/check/check-native-trailing-default-param.shs`, landed alongside the
-fix. Not yet added to `scripts/check/check-aot-lane-fences.shs`'s `FENCES`
-roster — that aggregator wiring is a follow-up, tracked separately; run the
-script directly in the meantime. `bin/simple test` hard-defaults to the
-tree-walk interpreter, which binds defaults correctly, so **no spec can ever
-observe this defect** — only a script driving `native-build` directly can.
+fix, now in `scripts/check/check-aot-lane-fences.shs`'s `FENCES` roster (added
+2026-08-09 once the trait-method scenario was fixture-exercised and the check
+was confirmed to pass clean AND sabotage-fail closed). `bin/simple test`
+hard-defaults to the tree-walk interpreter, which binds defaults correctly, so
+**no spec can ever observe this defect** — only a script driving
+`native-build` directly can.

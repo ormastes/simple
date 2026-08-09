@@ -28,6 +28,10 @@
 #     (`expr: i64 = 3 * 5 + 1`), not just a literal
 #   - instance METHOD (receiver + synthetic `self` param alignment)
 #   - static METHOD
+#   - TRAIT method (receiver's STATIC type is the trait, e.g. a trait-typed
+#     local variable, not the concrete class -- resolves through the
+#     `TraitMethod` MIR arm, not `InstanceMethod`; this closes the "code path
+#     patched, not fixture-exercised" gap noted when the fix landed)
 #
 # Only the DECLARED DEFAULT is asserted, never a specific wrong value --
 # uninitialized memory is garbage, not a consistent misbinding, so asserting
@@ -44,24 +48,47 @@ EXPECTED="local a=1 s=false t=12
 local a=1 s=true t=12
 cross tag=41 flag=false computed=7 expr=16
 bump step=1 loud=false extra=99
-stat a=2 b=55 c=false"
+stat a=2 b=55 c=false
+greet name=Bob loud=false times=1"
 
 test -x "$SIMPLE_BINARY"
 mkdir -p "$WORK_DIR"
+KEPT_LOG="/tmp/check-native-trailing-default-param.last.log"
 trap 'rm -rf "$WORK_DIR"' EXIT HUP INT TERM
 
 binary="$WORK_DIR/trailing-default-param"
 log="$WORK_DIR/trailing-default-param.log"
 
+set +e
 env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 \
     "$SIMPLE_BINARY" native-build \
     --source test/fixtures --entry-closure --entry "$FIXTURE" \
     --cache-dir "$WORK_DIR/cache" --output "$binary" >"$log" 2>&1
+build_rc=$?
+set -e
 
+if [ "$build_rc" -ne 0 ]; then
+    cp "$log" "$KEPT_LOG" 2>/dev/null || true
+    echo "FAIL — native-build failed to compile the fixture (exit $build_rc, log saved to $KEPT_LOG)"
+    tail -n 60 "$log" | sed 's/^/    /'
+    exit 1
+fi
+
+set +e
 out="$(timeout 60 "$binary" 2>>"$log")"
+run_rc=$?
+set -e
+
+if [ "$run_rc" -ne 0 ]; then
+    cp "$log" "$KEPT_LOG" 2>/dev/null || true
+    echo "FAIL — compiled binary exited $run_rc (log saved to $KEPT_LOG)"
+    tail -n 60 "$log" | sed 's/^/    /'
+    exit 1
+fi
 
 if [ "$out" != "$EXPECTED" ]; then
-    echo "FAIL — native-build omitted-trailing-default-parameter regression (see $log)"
+    cp "$log" "$KEPT_LOG" 2>/dev/null || true
+    echo "FAIL — native-build omitted-trailing-default-parameter regression (log saved to $KEPT_LOG)"
     echo "  expected:"
     echo "$EXPECTED" | sed 's/^/    /'
     echo "  actual:"
@@ -69,4 +96,4 @@ if [ "$out" != "$EXPECTED" ]; then
     exit 1
 fi
 
-echo "PASS — native-build omitted trailing default parameters: free/cross-module/instance-method/static-method all bind the declared default"
+echo "PASS — native-build omitted trailing default parameters: free/cross-module/instance-method/static-method/trait-method all bind the declared default"
