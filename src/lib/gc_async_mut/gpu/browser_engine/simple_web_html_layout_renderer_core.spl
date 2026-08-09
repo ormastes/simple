@@ -54,12 +54,30 @@ class CssVarResolutionState:
         var prop_count = 0
         var pos: i64 = 0
         var guard = 0
+        # First-iteration discriminator for the `prop_count=0` stage-3 defect.
+        # `guard=45` with `prop_count=0` proves `colon > 0` never fired, but NOT
+        # which primitive broke: `substring` (raw_len=0), `trim` (raw_len>0 but
+        # line_len=0), or `index_of` itself (line_len>0 but io<0 while the
+        # native `find_from` on the SAME text returns a real index). Capturing
+        # both searches on the same receiver is what separates the third case
+        # from the first two -- an `index_of` that disagrees with `find_from`
+        # on identical input is a compiler/runtime defect and nothing else.
+        var probe_raw_len: i64 = -1
+        var probe_line_len: i64 = -1
+        var probe_colon_io: i64 = -1
+        var probe_colon_ff: i64 = -1
         while pos < props.len() and guard < names.len():  # cpu-lane-loop-ok: walks the collected :root custom-property lines (one per newline), bounded by the 200-entry prop_names table; runs once per style invalidation inside extract_css, not per paint frame
             guard = guard + 1
             val nl = find_from(props, "\n", pos)
             val line_end = if nl < 0: props.len() else: nl
-            val line = props.substring(pos, line_end).trim()
+            val line_raw = props.substring(pos, line_end)
+            val line = line_raw.trim()
             val colon = line.index_of(":")
+            if guard == 1:
+                probe_raw_len = line_raw.len()
+                probe_line_len = line.len()
+                probe_colon_io = colon
+                probe_colon_ff = find_from(line, ":", 0)
             if colon > 0:
                 names[prop_count] = line.substring(0, colon).trim()
                 values[prop_count] = line.substring(
@@ -67,6 +85,24 @@ class CssVarResolutionState:
                 ).trim()
                 prop_count = prop_count + 1
             pos = if nl < 0: props.len() else: nl + 1
+        # STAGE 3 of the `props=0` chain, and the only stage that had never been
+        # instrumented. `prop_count` is set solely inside `if colon > 0` above,
+        # and the walk is bounded by `guard < names.len()` -- the `200` literal
+        # table cap. A non-empty `props` that yields `prop_count=0` is therefore
+        # either "the loop never ran" (`guard=0`), "the loop ran but no line had
+        # a colon" (`guard>0`), or "the table cap truncated it"
+        # (`guard>=names_cap`), and those three have different causes. Silent
+        # whenever the re-parse recovers at least one property.
+        #
+        # PROVEN 2026-08-09 in the SimpleOS WM lane: stage 1 and stage 2 were
+        # both silent and this fired with
+        #   props_len=1365 names_cap=200 guard=45 prop_count=0
+        # i.e. the collected sheet arrives intact (1365 chars, the host's exact
+        # value), the loop walks all 45 property lines, and `colon > 0` still
+        # never fires. The `raw_len`/`line_len`/`colon_index_of`/`colon_find_from`
+        # fields exist to name which primitive is responsible.
+        if props.len() > 0 and (prop_count == 0 or guard >= names.len()):
+            print "[web-style-producer] css-props-stage3 props_len={props.len()} names_cap={names.len()} guard={guard} prop_count={prop_count} raw_len={probe_raw_len} line_len={probe_line_len} colon_index_of={probe_colon_io} colon_find_from={probe_colon_ff}"
         CssVarResolutionState(
             remaining: CSS_VAR_SUBSTITUTION_BUDGET,
             active_names: [""; 33],
@@ -789,11 +825,29 @@ fn _extract_css_vw_with_rule_limit(
             break
         val pre_css = html.substring(pre_open + 1, pre_close)
         val collected_props = _css_collect_custom_props(pre_css, root_attrs)
+        # STAGE 1 of the `props=0` chain. `props={state.prop_count}` on the
+        # `css-var-unresolved` receipt is NOT this function's return value --
+        # it is the end of collect -> join -> re-parse, and a zero there is
+        # consistent with a failure at any of the three. This receipt pins the
+        # collector itself: `pre_css_len>0` with `collected_len=0` means the
+        # collector found no `:root` custom properties in a non-empty <style>
+        # block. Silent when the block yields properties.
+        # PROVEN SILENT 2026-08-09 in the WM lane -- the collector is healthy in
+        # the guest; do not re-suspect it without new evidence.
+        if collected_props.len() == 0:
+            print "[web-style-producer] css-props-stage1 block={pre_guard} pre_css_len={pre_css.len()} collected_len=0"
         if collected_props.len() > 0 and custom_prop_count < custom_prop_parts.len():
             custom_prop_parts[custom_prop_count] = collected_props
             custom_prop_count = custom_prop_count + 1
         pre_pos = pre_close + 1
     val custom_props = if custom_prop_count == 0: "" else: custom_prop_parts.join("")
+    # STAGE 2 of the `props=0` chain: the gate at `collected_props.len() > 0`
+    # plus the `join("")`. A zero here with a non-zero stage-1 collection means
+    # the accumulate/join lost the data rather than the collector.
+    # PROVEN SILENT 2026-08-09 in the WM lane -- the join delivers 1365 chars,
+    # the host's exact value. The defect is downstream, in the re-parse.
+    if custom_props.len() == 0:
+        print "[web-style-producer] css-props-stage2 parts={custom_prop_count} custom_props_len=0"
     var group_parts: [[[text]]] = []
     var group_specificities: [[i32]] = []
     var decls: [text] = []
