@@ -1675,6 +1675,52 @@ fn codegen_string_bytes_method_calls_rt_string_bytes() {
 }
 
 #[test]
+fn codegen_typed_string_bytes_ignores_same_leaf_user_owner() {
+    let mut user_bytes = MirFunction::new(
+        "PointerSize.bytes".to_string(),
+        TypeId::I64,
+        simple_parser::ast::Visibility::Public,
+    );
+    let user_receiver = user_bytes.new_vreg();
+    user_bytes.params.push(MirLocal {
+        name: "self".to_string(),
+        ty: TypeId::I64,
+        kind: LocalKind::Parameter,
+        is_ghost: false,
+    });
+    user_bytes.block_mut(BlockId(0)).unwrap().terminator = Terminator::Return(Some(user_receiver));
+
+    let mut caller = MirFunction::new(
+        "typed_string_bytes_collision".to_string(),
+        TypeId::I64,
+        simple_parser::ast::Visibility::Public,
+    );
+    let receiver = caller.new_vreg();
+    let dest = caller.new_vreg();
+    let block = caller.block_mut(BlockId(0)).unwrap();
+    block.instructions.push(MirInst::ConstString {
+        dest: receiver,
+        value: "abc".to_string(),
+    });
+    block.instructions.push(MirInst::Call {
+        dest: Some(dest),
+        target: crate::mir::CallTarget::from_name("bytes"),
+        args: vec![receiver],
+    });
+    block.terminator = Terminator::Return(Some(dest));
+
+    let mut module = MirModule::new();
+    module.functions.push(user_bytes);
+    module.functions.push(caller);
+    let codegen = crate::codegen::Codegen::new().expect("failed to create codegen");
+    let object = codegen.compile_module(&module).expect("AOT compilation failed");
+    assert!(
+        object_relocates_to_symbol(&object, "rt_string_bytes"),
+        "typed string bytes must relocate to rt_string_bytes even when PointerSize.bytes is present"
+    );
+}
+
+#[test]
 fn codegen_string_chars_method_calls_rt_string_chars() {
     let object = aot_object("string_chars_method", |f| {
         let receiver = f.new_vreg();

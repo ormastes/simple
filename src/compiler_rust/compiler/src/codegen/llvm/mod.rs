@@ -81,13 +81,13 @@ pub(crate) fn resolved_text_runtime_method(func_name: &str) -> Option<&'static s
     let dotted = func_name.replace("_dot_", ".");
     let (owner, method) = dotted.rsplit_once('.')?;
     let canonical_string_core = owner == "lib__common__string_core__str";
-    let unqualified_builtin = !owner.contains("__")
-        && !owner.contains('.')
-        && matches!(owner, "str" | "text" | "String" | "string");
+    let unqualified_builtin =
+        !owner.contains("__") && !owner.contains('.') && matches!(owner, "str" | "text" | "String" | "string");
     if !canonical_string_core && !unqualified_builtin {
         return None;
     }
     match method {
+        "bytes" => Some("rt_string_bytes"),
         "replace" => Some("rt_string_replace"),
         "split" => Some("rt_string_split"),
         "starts_with" => Some("rt_string_starts_with"),
@@ -96,6 +96,14 @@ pub(crate) fn resolved_text_runtime_method(func_name: &str) -> Option<&'static s
         "char_code_at" => Some("rt_string_char_code_at"),
         _ => None,
     }
+}
+
+/// A suffix-only match has no owner proof.  When MIR still carries an exact
+/// STRING receiver, accept only a canonical built-in text owner; never let a
+/// same-leaf user method become the callee.
+pub(crate) fn string_receiver_suffix_candidate_is_builtin(candidate: &str) -> bool {
+    candidate.starts_with("rt_")
+        || (qualified_runtime_method_owner_is_builtin(candidate) && resolved_text_runtime_method(candidate).is_some())
 }
 
 #[cfg(feature = "llvm-gpu")]
@@ -111,7 +119,10 @@ mod wasm_tests;
 
 #[cfg(test)]
 mod qualified_runtime_method_tests {
-    use super::{qualified_runtime_method_owner_is_builtin, resolved_text_runtime_method};
+    use super::{
+        qualified_runtime_method_owner_is_builtin, resolved_text_runtime_method,
+        string_receiver_suffix_candidate_is_builtin,
+    };
 
     #[test]
     fn runtime_method_shortcuts_require_builtin_owners() {
@@ -135,19 +146,16 @@ mod qualified_runtime_method_tests {
             ("lib__common__string_core__str_dot_starts_with", "rt_string_starts_with"),
             ("lib__common__string_core__str_dot_rfind", "rt_string_rfind"),
             ("lib__common__string_core__str_dot_substring", "rt_slice"),
-            ("lib__common__string_core__str_dot_char_code_at", "rt_string_char_code_at"),
+            (
+                "lib__common__string_core__str_dot_char_code_at",
+                "rt_string_char_code_at",
+            ),
+            ("lib__common__string_core__str_dot_bytes", "rt_string_bytes"),
         ];
         for (resolved, intrinsic) in cases {
             assert_eq!(resolved_text_runtime_method(resolved), Some(intrinsic));
         }
-        for leaf in [
-            "replace",
-            "split",
-            "starts_with",
-            "rfind",
-            "substring",
-            "char_code_at",
-        ] {
+        for leaf in ["replace", "split", "starts_with", "rfind", "substring", "char_code_at"] {
             assert_eq!(
                 resolved_text_runtime_method(&format!("UserText_dot_{leaf}")),
                 None,
@@ -160,5 +168,15 @@ mod qualified_runtime_method_tests {
             );
         }
         assert_eq!(resolved_text_runtime_method("user__model__str_dot_replace"), None);
+    }
+
+    #[test]
+    fn typed_string_suffix_match_rejects_unrelated_bytes_owner() {
+        assert!(string_receiver_suffix_candidate_is_builtin(
+            "lib__common__string_core__str_dot_bytes"
+        ));
+        assert!(string_receiver_suffix_candidate_is_builtin("rt_string_bytes"));
+        assert!(!string_receiver_suffix_candidate_is_builtin("PointerSize.bytes"));
+        assert!(!string_receiver_suffix_candidate_is_builtin("UserType.bytes"));
     }
 }

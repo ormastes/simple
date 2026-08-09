@@ -1171,6 +1171,45 @@ impl MirLowering:
                 receiver_type = self.lower_type(found_receiver_type)
         eprint("[mir-method-call] receiver-type method={method}\n")
 
+        # A statically-text `.bytes()` is a closed language builtin.  Route it
+        # before unresolved/custom method recovery: suffix-only native
+        # resolution can otherwise bind the call to an unrelated user owner
+        # (PointerSize.bytes was observed while compiling hm_hash_text).
+        # Keep the gate exact so `UserType.bytes()` retains normal dispatch.
+        if method == "bytes" and args.len() == 0:
+            var bytes_receiver_is_text = false
+            val declared_bytes_receiver_type = self.receiver_declared_type(receiver)
+            if declared_bytes_receiver_type != nil:
+                val found_bytes_receiver_type = declared_bytes_receiver_type ?? HirType(kind: HirTypeKind.Error, span: receiver.span)
+                match found_bytes_receiver_type.kind:
+                    case HirTypeKind.Str: bytes_receiver_is_text = true
+                    case _: ()
+            if not bytes_receiver_is_text and maybe_receiver_type_for_call != nil:
+                val found_bytes_receiver_type = maybe_receiver_type_for_call ?? HirType(kind: HirTypeKind.Error, span: receiver.span)
+                match found_bytes_receiver_type.kind:
+                    case HirTypeKind.Str: bytes_receiver_is_text = true
+                    case _: ()
+            if bytes_receiver_is_text:
+                val bytes_receiver_local = self.lower_expr(receiver)
+                val bytes_func = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_string_bytes"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                        params: [MirType.i64()],
+                        return_type: MirType.i64(),
+                        is_variadic: false
+                    )))
+                ))
+                var bytes_builder = self.builder
+                val bytes_result = bytes_builder.emit_call(
+                    bytes_func,
+                    [mir_operand_copy(bytes_receiver_local)],
+                    MirType.i64()
+                )
+                self.builder = bytes_builder
+                if val bytes_result_local = bytes_result:
+                    return bytes_result_local
+                return bytes_receiver_local
+
         # Bug #138: `resolution == Unresolved` (no method-resolution info for
         # this receiver -- HIR type inference never populated receiver.type_)
         # is the actual condition the untyped string-method fallbacks below
@@ -1536,31 +1575,6 @@ impl MirLowering:
                 var b_len = self.builder
                 val result = b_len.emit_call(func_operand, [mir_operand_copy(receiver_local)], MirType.i64())
                 self.builder = b_len
-                if val result_local = result:
-                    return result_local
-                return receiver_local
-
-        if method == "bytes" and args.len() == 0:
-            var is_text_receiver = false
-            if maybe_receiver_type_for_call != nil:
-                val found_receiver_type = maybe_receiver_type_for_call
-                if found_receiver_type != nil:
-                    match found_receiver_type.kind:
-                        case HirTypeKind.Str: is_text_receiver = true
-                        case _: ()
-            if is_text_receiver:
-                val receiver_local = self.lower_expr(receiver)
-                val func_operand = MirOperand(kind: MirOperandKind.Const(
-                    MirConstValue.Str("rt_string_bytes"),
-                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(
-                        params: [MirType.i64()],
-                        return_type: MirType.i64(),
-                        is_variadic: false
-                    )))
-                ))
-                var b_bytes = self.builder
-                val result = b_bytes.emit_call(func_operand, [mir_operand_copy(receiver_local)], MirType.i64())
-                self.builder = b_bytes
                 if val result_local = result:
                     return result_local
                 return receiver_local

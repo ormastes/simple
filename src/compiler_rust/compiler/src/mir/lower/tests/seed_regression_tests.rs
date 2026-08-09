@@ -28,6 +28,39 @@ fn has_call(func: &MirFunction, name: &str) -> bool {
     block_index_with_call(func, name).is_some()
 }
 
+#[test]
+fn typed_text_bytes_does_not_bind_same_leaf_user_owner() {
+    let source = include_str!("../../../../../../../test/fixtures/compiler/text_bytes_owner_collision.spl");
+    let mir = compile_to_mir(source).expect("collision fixture must lower to MIR");
+    let hash = mir
+        .functions
+        .iter()
+        .find(|f| f.name == "hm_hash_text")
+        .expect("hm_hash_text");
+    assert!(
+        has_call(hash, "rt_string_bytes"),
+        "typed text.bytes must become rt_string_bytes"
+    );
+    assert!(
+        !hash.blocks.iter().flat_map(|b| b.instructions.iter()).any(|inst| {
+            matches!(inst, MirInst::Call { target, .. } if target.name().contains("PointerSize") || target.name().contains("UserType"))
+        }),
+        "text.bytes must have zero user-owner MIR callees"
+    );
+
+    for function_name in ["user_bytes", "pointer_bytes"] {
+        let function = mir
+            .functions
+            .iter()
+            .find(|f| f.name == function_name)
+            .expect(function_name);
+        assert!(
+            !has_call(function, "rt_string_bytes"),
+            "{function_name} must retain custom bytes dispatch"
+        );
+    }
+}
+
 // =============================================================================
 // #1: Result.Ok end-to-end MIR canonicalization (86e56ca7867)
 // =============================================================================
@@ -41,7 +74,10 @@ fn result_ok_canonicalizes_to_mir_result_ok_instruction() {
         .flat_map(|f| f.blocks.iter())
         .flat_map(|b| b.instructions.iter())
         .any(|i| matches!(i, MirInst::ResultOk { .. }));
-    assert!(has_result_ok, "Result.Ok(1) must canonicalize to MirInst::ResultOk in MIR");
+    assert!(
+        has_result_ok,
+        "Result.Ok(1) must canonicalize to MirInst::ResultOk in MIR"
+    );
 }
 
 // =============================================================================
@@ -50,10 +86,9 @@ fn result_ok_canonicalizes_to_mir_result_ok_instruction() {
 
 #[test]
 fn short_circuit_and_evaluates_rhs_call_only_in_conditional_block() {
-    let mir = compile_to_mir(
-        "fn call() -> bool:\n    return true\n\nfn test(x: bool) -> bool:\n    return x and call()\n",
-    )
-    .unwrap();
+    let mir =
+        compile_to_mir("fn call() -> bool:\n    return true\n\nfn test(x: bool) -> bool:\n    return x and call()\n")
+            .unwrap();
     let func = mir.functions.iter().find(|f| f.name == "test").expect("test fn");
 
     // Entry block must branch (not eagerly fall through to the call).
@@ -76,7 +111,11 @@ fn short_circuit_and_evaluates_rhs_call_only_in_conditional_block() {
         .iter()
         .find(|l| l.name.starts_with("__logical_"))
         .expect("expected a __logical_* merge temp local");
-    assert_eq!(logical_local.ty, TypeId::I64, "short-circuit merge temp must be I64, not BOOL");
+    assert_eq!(
+        logical_local.ty,
+        TypeId::I64,
+        "short-circuit merge temp must be I64, not BOOL"
+    );
 }
 
 #[test]
@@ -100,7 +139,11 @@ fn short_circuit_or_evaluates_rhs_call_only_in_conditional_block() {
         .iter()
         .find(|l| l.name.starts_with("__logical_"))
         .expect("expected a __logical_* merge temp local");
-    assert_eq!(logical_local.ty, TypeId::I64, "short-circuit merge temp must be I64, not BOOL");
+    assert_eq!(
+        logical_local.ty,
+        TypeId::I64,
+        "short-circuit merge temp must be I64, not BOOL"
+    );
 }
 
 /// Sibling: nested `a and (b or c())` -- the innermost call must still be
@@ -120,11 +163,18 @@ fn nested_and_or_short_circuit_keeps_innermost_call_conditional() {
         entry.terminator
     );
     let call_block = block_index_with_call(func, "c").expect("c() must appear somewhere in the function");
-    assert_ne!(call_block, 0, "c() must never be reachable unconditionally from the entry block");
+    assert_ne!(
+        call_block, 0,
+        "c() must never be reachable unconditionally from the entry block"
+    );
 
     // Both the outer (a and ...) and inner (b or c()) merges allocate their
     // own __logical_* temp, all I64.
-    let logical_locals: Vec<_> = func.locals.iter().filter(|l| l.name.starts_with("__logical_")).collect();
+    let logical_locals: Vec<_> = func
+        .locals
+        .iter()
+        .filter(|l| l.name.starts_with("__logical_"))
+        .collect();
     assert!(
         logical_locals.len() >= 2,
         "nested and/or must allocate a merge temp per short-circuit level, got {}",
@@ -141,10 +191,9 @@ fn nested_and_or_short_circuit_keeps_innermost_call_conditional() {
 /// block.
 #[test]
 fn and_suspend_keeps_eager_unconditional_evaluation() {
-    let mir = compile_to_mir(
-        "fn call() -> bool:\n    return true\n\nfn test(x: bool) -> bool:\n    return x and~ call()\n",
-    )
-    .unwrap();
+    let mir =
+        compile_to_mir("fn call() -> bool:\n    return true\n\nfn test(x: bool) -> bool:\n    return x and~ call()\n")
+            .unwrap();
     let func = mir.functions.iter().find(|f| f.name == "test").expect("test fn");
 
     let call_block = block_index_with_call(func, "call").expect("call() must appear somewhere in the function");

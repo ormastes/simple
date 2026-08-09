@@ -1778,6 +1778,27 @@ impl LlvmBackend {
             .map(|s| s.as_str())
             .unwrap_or(func_name_raw);
         let resolved_text_runtime = super::super::resolved_text_runtime_method(resolved_name);
+        let receiver_is_exact_string = args
+            .first()
+            .and_then(|receiver| vreg_types.get(receiver))
+            .is_some_and(|ty| *ty == crate::hir::TypeId::STRING);
+        let direct_leaf_is_bytes = |name: &str| {
+            name.rsplit("_dot_")
+                .next()
+                .unwrap_or(name)
+                .rsplit('.')
+                .next()
+                .is_some_and(|leaf| leaf == "bytes")
+        };
+        // A STRING receiver is authoritative even when an earlier lowering
+        // stage supplied only the method leaf (or, due to the historical
+        // collision, an unrelated owner). Resolve before *all* module-name and
+        // suffix lookups so the safety net cannot merely turn the bad callee
+        // into a newly-declared unresolved symbol.
+        let exact_string_bytes_runtime = (receiver_is_exact_string
+            && args.len() == 1
+            && (direct_leaf_is_bytes(func_name_raw) || direct_leaf_is_bytes(resolved_name)))
+            .then_some("rt_string_bytes");
 
         if sffi_name == "rt_typed_bytes_u8_at"
             && self.compile_inline_bytes_u8_at(dest, args, vreg_map, builder, true)?
@@ -1911,9 +1932,7 @@ impl LlvmBackend {
 
         // Special case: substring(text, start[, end]) → rt_slice(text, start, end, 1)
         // rt_string_substring doesn't exist in the runtime, so we expand to rt_slice + rt_len.
-        if (func_name_raw == "substring" || resolved_text_runtime == Some("rt_slice"))
-            && matches!(args.len(), 2 | 3)
-        {
+        if (func_name_raw == "substring" || resolved_text_runtime == Some("rt_slice")) && matches!(args.len(), 2 | 3) {
             let text_val = self.get_vreg(&args[0], vreg_map)?;
             let text_casted = self.coerce_value_to_type(text_val, Some(i64_type.into()), builder)?;
             let start_val = self.get_vreg(&args[1], vreg_map)?;
@@ -2004,6 +2023,7 @@ impl LlvmBackend {
             "unwrap" | "unwrap_or" | "unwrap_err" => Some("rt_enum_payload"),
             _ => None,
         }
+        .or(exact_string_bytes_runtime)
         .or(resolved_text_runtime);
 
         if let Some(rt_fn_name) = bare_rt_redirect {
@@ -2356,6 +2376,11 @@ impl LlvmBackend {
                 while let Some(f) = func_opt {
                     let name = f.get_name().to_string_lossy();
                     if name.ends_with(&suffix) {
+                        if receiver_is_exact_string && !super::super::string_receiver_suffix_candidate_is_builtin(&name)
+                        {
+                            func_opt = f.get_next_function();
+                            continue;
+                        }
                         if best
                             .as_ref()
                             .map_or(true, |b| name.len() < b.get_name().to_bytes().len())
@@ -2385,6 +2410,12 @@ impl LlvmBackend {
                     while let Some(f) = func_opt {
                         let name = f.get_name().to_string_lossy();
                         if name.ends_with(&suffix) {
+                            if receiver_is_exact_string
+                                && !super::super::string_receiver_suffix_candidate_is_builtin(&name)
+                            {
+                                func_opt = f.get_next_function();
+                                continue;
+                            }
                             let has_prefix = prefix_part.is_empty() || name.to_lowercase().contains(&prefix_part);
                             if !has_prefix {
                                 func_opt = f.get_next_function();
@@ -2547,20 +2578,35 @@ impl LlvmBackend {
                     module.add_function("rt_string_len", i64_type.fn_type(&[i64_type.into()], false), None)
                 });
                 let rt_string_new = module.get_function("rt_string_new").unwrap_or_else(|| {
-                    module.add_function("rt_string_new", i64_type.fn_type(&[i64_type.into(), i64_type.into()], false), None)
+                    module.add_function(
+                        "rt_string_new",
+                        i64_type.fn_type(&[i64_type.into(), i64_type.into()], false),
+                        None,
+                    )
                 });
                 let mut boxed = Vec::with_capacity(raw_arg_vals.len());
                 for (i, val) in raw_arg_vals.iter().enumerate() {
                     if text_indices.contains(&i) {
-                        let ptr = builder.build_call(rt_string_data, &[(*val).into()], "boxed_text_ptr")
+                        let ptr = builder
+                            .build_call(rt_string_data, &[(*val).into()], "boxed_text_ptr")
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_data", &e))?
-                            .try_as_basic_value().left().unwrap().into_int_value();
-                        let len = builder.build_call(rt_string_len, &[(*val).into()], "boxed_text_len")
+                            .try_as_basic_value()
+                            .left()
+                            .unwrap()
+                            .into_int_value();
+                        let len = builder
+                            .build_call(rt_string_len, &[(*val).into()], "boxed_text_len")
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_len", &e))?
-                            .try_as_basic_value().left().unwrap().into_int_value();
-                        let value = builder.build_call(rt_string_new, &[ptr.into(), len.into()], "boxed_text_value")
+                            .try_as_basic_value()
+                            .left()
+                            .unwrap()
+                            .into_int_value();
+                        let value = builder
+                            .build_call(rt_string_new, &[ptr.into(), len.into()], "boxed_text_value")
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_new", &e))?
-                            .try_as_basic_value().left().unwrap();
+                            .try_as_basic_value()
+                            .left()
+                            .unwrap();
                         boxed.push(value.into());
                     } else {
                         boxed.push((*val).into());
