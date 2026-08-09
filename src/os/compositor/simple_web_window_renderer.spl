@@ -630,6 +630,12 @@ fn _window_scrolled_pixels(pixels: [u32], cw: i32, full_h: i32, ch: i32, scroll_
 # provenance marking (engine2d_status=compatibility_renderer,
 # engine2d_backend="native-safe-fallback") for how evidence capture can
 # reject a fallback frame that leaked through.
+@cfg("os", "simpleos")
+fn _simple_web_direct_retained_delivery() -> bool: true
+
+@cfg(macos or linux or windows or freebsd or openbsd or netbsd or android)
+fn _simple_web_direct_retained_delivery() -> bool: false
+
 fn _simple_web_content_frame_cached_impl(cache: WebRenderPixelArtifactCache, window_id: text, scene_revision: i64, content_revision: i64, theme: text, title: text, body_html: text, width: i32, height: i32, scroll_y: i32, parent_window_id: text, offset_x: i32, offset_y: i32, animation_clock_ms: i64) -> WmContentFrame:
     if window_id.len() == 0 or scene_revision <= 0 or content_revision <= 0 or width <= 0 or height <= 0:
         return WmContentFrame(window_id: window_id, scene_revision: scene_revision, content_revision: content_revision, origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: width, height: height, pixels: [], checksum: 0u64, parent_window_id: parent_window_id, offset_x: offset_x, offset_y: offset_y)
@@ -654,39 +660,30 @@ fn _simple_web_content_frame_cached_impl(cache: WebRenderPixelArtifactCache, win
         request_contract_mask = request_contract_mask + 4
     print "[web-request-evidence] window_id={window_id} html_len={rendered_full_html.len()} contract_mask={request_contract_mask}"
     var wm_receipt: [text] = ["", "", "", "", "", "", "", "", "", "", "", ""]
-    val artifact = if animation_clock_ms >= 0:
-        cache.request_to_pixel_artifact_at_time(
-            req, content_revision, animation_clock_ms, wm_receipt
-        )
-    else:
-        cache.request_to_pixel_artifact_with_wm_receipt(req, wm_receipt)
-    # Normal frames already own a cache-retained pixel array from the first
-    # render. Retrieve that scalar handle only after all large artifact
-    # decorators have returned. Re-render only when the cache owner cannot
-    # prove a complete viewport-sized retained frame.
     var delivered_pixels: [u32] = []
     var delivered_status = -4
-    delivered_pixels = cache.retained_pixels_after_metadata(width * full_h)
-    if delivered_pixels.len() == width * full_h:
-        delivered_status = 1
-        var no_material_execution = false
-        if wm_receipt[3] == "none":
-            no_material_execution = true
-        if wm_receipt[3] == "":
-            no_material_execution = true
-        if no_material_execution:
-            wm_receipt[6] = "0"
-            wm_receipt[7] = "0"
-            wm_receipt[8] = "0:0"
-            wm_receipt[9] = "0"
-            wm_receipt[10] = "0"
-            wm_receipt[11] = "0"
-    else:
+    if _simple_web_direct_retained_delivery():
         delivered_pixels = [0u32; width * full_h]
         delivered_status = cache.render_pixels_after_metadata_html_at_time_into(
             rendered_full_html, width, full_h, content_revision,
             animation_clock_ms, delivered_pixels, wm_receipt
         )
+    else:
+        val artifact = if animation_clock_ms >= 0:
+            cache.request_to_pixel_artifact_at_time(
+                req, content_revision, animation_clock_ms, wm_receipt
+            )
+        else:
+            cache.request_to_pixel_artifact_with_wm_receipt(req, wm_receipt)
+        delivered_pixels = cache.retained_pixels_after_metadata(width * full_h)
+        if delivered_pixels.len() == width * full_h:
+            delivered_status = 1
+        else:
+            delivered_pixels = [0u32; width * full_h]
+            delivered_status = cache.render_pixels_after_metadata_html_at_time_into(
+                rendered_full_html, width, full_h, content_revision,
+                animation_clock_ms, delivered_pixels, wm_receipt
+            )
     if delivered_status != 1:
         if delivered_status == -1:
             print "[web-pixel-fill] rejected invalid-size"
