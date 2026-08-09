@@ -80,6 +80,43 @@ status spec below for the assertions).
   provisioned in this repo's Actions fleet — same honest-placeholder pattern
   `notebook-lanes-tests.yml`'s `gpu-notebook-fixtures` job already uses).
 
+## Debug / profile capability per lane
+
+Added by the unified debug/profile work (2026-08-09,
+`doc/03_plan/agent_tasks/unified_debug_profile_capability_parallel_plan_2026-08-09.md`).
+These are **capability** notes, not lane semantics — the routing rows above are
+unchanged. Each backend exposes a single group accessor
+`<backend>_debug_profiler(session)` returning the `DebugProfiler` union of
+`DebugTarget` + `ProfileTarget` (`src/lib/common/debug/`).
+
+| Lane / target | Wrapper | Debug | Profile | Device evidence |
+|---|---|---|---|---|
+| host | `src/lib/common/debug/host_profile_target.spl` | yes | yes (`HostProfileTarget`, wall time) | n/a — host |
+| `ref` VM | `src/lib/common/debug/ref_debug_session.spl` | yes (conformance oracle) | emulated (step counts) | n/a — reference |
+| cuda | `src/lib/gc_async_mut/gpu_lane/cuda_debug_session.spl` | DBG-1 | PROF-1 | **Real device** — 20 launches, field diffs clean |
+| vulkan | `src/lib/gc_async_mut/gpu_lane/vulkan_debug_session.spl` | DBG-1 | PROF-1 | **Real device** — 20 launches, field diffs clean; launch-count-floor oracle proven by sabotage (`expected 20 to be greater than 100000`) |
+| metal | `src/lib/gc_async_mut/gpu_lane/metal_debug_session.spl` | DBG-1 (code landed) | PROF-1 (code landed) | **NONE — entirely unverified.** `svmg_metal_kernel.metal` has never been compiled by any Metal compiler; there is no `xcrun`/`metal` on this Linux host. Green specs here prove the wrapper, not the device. Highest-risk unknown in the feature. |
+| native (AOT) timing | P7 | — | wall/device timing | seed only |
+
+Notes that apply to every row:
+
+- **Profiling is armed at attach** (`AttachOpts.profile`). GPU PROF-1 cannot be
+  enabled after upload, so there is no mid-run start.
+- **`PROFILE_ABSENT = -1` is the only honest "not measured".** A row reporting
+  `0` is a contract violation, not a fast kernel.
+- **DAP GPU attach is ROUTING-ONLY.** `TargetDapSession`
+  (`src/app/dap/target_session.spl`) resolves and probes a GPU lane, but there
+  is no `.spl` → SVM-G path — `lower_svmg_program` is scoped to HIR test bodies
+  with no caller outside `70.backend`. Filed:
+  `doc/08_tracking/bug/no_general_spl_to_svmg_path_blocks_dap_gpu_attach_2026-08-09.md`.
+- **All evidence is from the Rust seed**; none of these rows has self-hosted
+  evidence.
+- Specs in this area must **emit which branch ran** (`DEVICE-RAN:` /
+  `SKIPPED: … the DEVICE-RAN branch did NOT run`) and honour
+  `SIMPLE_REQUIRE_GPU=1`; a "skip cleanly OR match ref_vm" disjunction proves
+  nothing. See
+  `doc/07_guide/language/capability_library_authoring.md` § Testing practice.
+
 ## Status spec
 
 `test/03_system/gpu_lane/gpu_lane_matrix_status_spec.spl` — extends the

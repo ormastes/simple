@@ -5,7 +5,34 @@
 (`gpu_debugger_common_interface_parallel_plan_2026-08-09.md` — its D1/D3
 protocol content is inherited by P5/P6 here; do not execute that plan
 separately).
-**Status:** PLAN ONLY — agents not yet launched.
+**Status:** COMPLETE (2026-08-09) — all streams landed; P12 docs sweep closed.
+Landed: P0 `50f06dcdd56` · P0b `8477ff5bdd0` · P1 `5ad3f64f928` ·
+P2 `0b8ec4395b2` · P3 `79f3b662376` · P4 `a800bb04066` · P5 `abacef5d7f4` ·
+P6 `7d53bf0a83b` · P6b `7f4004e1ff1` · P7 `40f72d2ceb1` · P8 `f94d2c2b02a` ·
+P9 `6e108de66b2` · P10 `a4156a456d2` · P11 `2562958c4b0` · P13 `5fb82db579b` ·
+P14 `c3307d1404d` · P15 `1bc53420716` · N3 `c2fc4ebaef5`.
+
+**Carried gaps — the plan is done, the feature is not:**
+- Trait-header `with` sugar (P0) is landed but **INERT**: `desugar_traits` has
+  no compile-path caller (only the standalone `app.desugar` tool) and the
+  deployed seed predates the parser change. Requirement/remaining work:
+  `doc/02_requirements/language/grammar/trait_with_capability_groups.md`.
+- **DAP GPU attach is routing-only** — no `.spl` → SVM-G path exists
+  (`no_general_spl_to_svmg_path_blocks_dap_gpu_attach_2026-08-09.md`).
+- **Metal's device path is entirely unverified** — `svmg_metal_kernel.metal`
+  has never been compiled by any Metal compiler (no `xcrun`/`metal` on this
+  Linux host). Highest-risk unknown in the feature.
+- Every result is from the **Rust seed**; nothing is self-hosted evidence.
+- `if val` is AOT-broken, so a generated capability check would fail **OPEN**
+  under `native-build` once wired.
+
+Docs (§10) landed at: `doc/07_guide/language/capability_library_authoring.md`,
+`doc/07_guide/app/lsp_dap/debug_profile_dap.md`,
+`doc/07_guide/quick_reference/syntax_quick_reference.md` (§ Trait-header `with`
+groups), `doc/02_requirements/language/grammar/trait_with_capability_groups.md`,
+`doc/00_llm_process/feature_expert/debug_profile/skill.md`,
+`.claude/skills/capability_interfaces.md` (+ `.codex`/`.gemini` mirrors),
+`doc/08_tracking/lane_matrix.md` § Debug / profile capability per lane.
 
 **Ground rules (every agent, verbatim from prior plans — they work):**
 - Never work in the shared `/home/ormastes/dev/pub/simple` checkout.

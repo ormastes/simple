@@ -1370,6 +1370,49 @@ class Logger with Printable, Clickable:
 See [No-Inheritance Ergonomics](../research/no_inheritance_ergonomics_2026-02-16.md) for full
 forwarding syntax and design rationale.
 
+### Trait-header `with` groups — **PARSES BUT IS INERT, DO NOT USE**
+
+> **This sugar cannot be used today. It is documented here only so you
+> recognise it in `src/lib/common/debug/` comments and do not mistake it for an
+> available feature.**
+
+The `with` clause already used on `struct X with Mixin:` is also accepted in a
+**trait** header, expressing a *capability group* — one trait that is the
+literal union of its members' method sets, with no new keyword and no new token:
+
+```simple
+trait DebugProfiler with DebugTarget, ProfileTarget:
+    pass                     # pure group: zero new methods
+```
+
+**Why it does nothing:**
+
+1. `desugar_traits` (`src/app/desugar/trait_desugar.spl`) is a text-level,
+   pre-parse transform whose only caller is `src/app/desugar/mod.spl:210`,
+   inside the standalone `app.desugar` tool. **No compile path runs it** — the
+   compiler deliberately does not import `app.desugar` (layering note at
+   `src/compiler/20.hir/hir_forward_lowering.spl:33-35`).
+2. The **deployed seed predates the parser change**, so the binary you run today
+   would not accept the syntax even if the desugar were wired.
+
+Until both are fixed, write the group **longhand**: declare a trait listing
+every method of both members. That is exactly what the sugar would produce, so
+nothing breaks when it becomes reachable. Landed example:
+`src/lib/common/debug/debug_profiler.spl`.
+
+Two rules that go with groups and are *not* optional — classes are value types,
+so a mis-shaped group silently does nothing:
+
+- A group is **one trait over one value**, acquired through a **single**
+  accessor. Never a struct pairing two accessors (that holds two diverging
+  copies).
+- Every mutating trait method must be `me`, not `fn`. A `fn` method receives a
+  **copy** and discards mutation with no diagnostic.
+
+Full treatment, including the acquisition-position aliasing trap:
+[Authoring a capability library](../language/capability_library_authoring.md).
+Requirement: `doc/02_requirements/language/grammar/trait_with_capability_groups.md`.
+
 ### Existing Trait Example (Resource)
 
 The built-in `Resource` trait uses the same syntax:

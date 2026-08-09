@@ -1,5 +1,15 @@
 # GPU Debugger Common Interface — Parallel Implementation Plan
 
+**Status: SUPERSEDED (2026-08-09)** by
+`doc/05_design/app/tools/unified_debug_profile_capability_architecture_2026-08-09.md`
+and its plan
+`doc/03_plan/agent_tasks/unified_debug_profile_capability_parallel_plan_2026-08-09.md`,
+which landed the debug capability as one half of a unified debug+profile
+capability. The D1/D3 protocol content here was inherited by streams P5/P6 and
+is still accurate as background; the acquisition/`.from()` shape is NOT — it was
+measured unsound under value semantics. Do not implement from this document.
+Read the unified design's §3 CORRECTION block instead.
+
 **Design:** `doc/05_design/app/tools/gpu_debugger_common_interface_architecture_2026-08-09.md`
 (read in FULL before starting any stream — §ref numbers below point there)
 **Status:** PLAN ONLY — approved for planning 2026-08-09; agents not yet launched.
