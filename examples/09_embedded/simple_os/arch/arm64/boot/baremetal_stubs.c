@@ -2867,10 +2867,12 @@ RuntimeValue rt_gui_replay_prepared_packed_scanout(RuntimeValue wh)
         serial_puts("\r\n");
     }
     if (!g_fb_addr || !g_fb_w || width != g_fb_w || height != 768u ||
-        !g_gui_prepared_scanout_ready ||
-        g_gui_prepared_packed_lens[0] != count) return 0;
+        count == 0 || count > GUI_PREPARED_PACKED_CACHE_PIXELS) return 0;
     volatile uint32_t *dst = (volatile uint32_t *)(uintptr_t)g_fb_addr;
-    const uint32_t *src = g_gui_prepared_packed_pixels[0];
+    const uint32_t *src = (g_gui_prepared_scanout_ready &&
+        g_gui_prepared_packed_lens[0] == count)
+        ? g_gui_prepared_packed_pixels[0]
+        : (const uint32_t *)(uintptr_t)g_fb_addr;
     uint64_t i = 0;
 #if defined(__aarch64__)
     while (i + 16u <= count) {
