@@ -92,3 +92,77 @@ Requires a macOS host with a Metal-capable GPU. On that host:
 
 Until all five steps are done, any statement that the Metal lane "works" is
 unsupported.
+
+## P8 addendum — the Metal debug/profile wrapper (2026-08-09)
+
+Stream P8 added `src/lib/gc_async_mut/gpu_lane/metal_debug_session.spl`
+(`MetalDebugSession`, the DBG-1/PROF-1 wrapper) on top of N3's executor. It
+inherits this bug's status wholesale, and adds items to it. Artifacts:
+
+- `src/lib/gc_async_mut/gpu_lane/metal_debug_session.spl`
+- `test/01_unit/lib/gpu_lane/metal_debug_session_spec.spl` — 8/8, runs on
+  **every** host including Linux
+- `test/03_system/gpu_lane/metal_debug_session_conformance_spec.spl` — 2/2,
+  device branch skip-clean here
+
+### What P8's unit spec DOES verify on a Linux host
+
+This is real coverage of real, reachable code, and it is the reason the Metal
+lane is not test-free on a non-Mac: capability tier (`kind`/`debug_level`/
+`profile_level`, answerable before attach); fail-closed-before-attach on
+`launch`/`step`/`resume`/`state`; breakpoint bookkeeping including the DBG-1
+**arena table** (`dbg_read_break_count`/`dbg_read_breakpoint`), not merely the
+host-side list; `read_mem` bounds and truncation; and the PROF-1 absent-value
+contract. Four sabotages were run and each produced a failure:
+zeroing `profile_end`'s absent quantities; dropping the arena write in
+`set_breakpoint` while keeping the list update; `kind()` -> `"vulkan"`; and
+changing the conformance spec's expected skip reason.
+
+### What P8 SPECIFICALLY does NOT claim
+
+- **Not claimed:** that `MetalDebugSession.launch` ever produced a device
+  result. The `DEVICE-RAN` branch of both new specs has never executed.
+- **Not claimed:** that the DBG-1 block survives a Metal `MTLBuffer`
+  round-trip. The whole break/inspect/resume mechanism depends on
+  `build_svmg_arena_persisting_data` carrying 0x1F000..0x20000 forward through
+  an upload/dispatch/readback cycle; on this host that cycle never happens.
+- **Not claimed:** that the MSL kernel implements DBG-1 correctly. Metal's
+  two green pre-P8 gates run with `DBG_FLAGS == 0` and prove **inertness
+  only** — the same gap that motivated the Vulkan twin.
+- **Not claimed:** that `SENTINEL_DEBUG_BREAK` is written by the MSL kernel at
+  all. The host detects a break from the `debug_break`/sentinel field and
+  never from `exit_code` (0xCAFE00DB aliases exit code 0xDB), but whether the
+  kernel writes the sentinel is a device question.
+- **Not claimed:** that the budget-expiry lane conflation behaves as asserted.
+  The conformance spec asserts, rather than skips, the known limitation that
+  `MetalLaneSession` decodes `SENTINEL_TIMEOUT` as a device timeout. That
+  assertion is a **prediction** by analogy with CUDA/Vulkan until a Mac runs
+  it; if a Mac disagrees, that is a new Metal finding to file, not something
+  to quietly relax.
+- **Not claimed:** any `device_ns`. `profile_end` reports `PROFILE_ABSENT`
+  (-1) for both `wall_ns` and `device_ns` — never 0 — because this class reads
+  no host clock and creates no `MTLCounterSampleBuffer`. A Native Metal
+  profile target (the `MTLCounterSampleBuffer` analogue of P7's
+  `CudaNativeProfileTarget`) does **not exist**; it is future work, not a gap
+  in this wrapper.
+
+### Additional steps to close this bug (extend the list above)
+
+6. `bin/simple test test/03_system/gpu_lane/metal_debug_session_conformance_spec.spl`
+   on the Mac, and confirm the output reads
+   `[metal_debug_session_conformance] DEVICE-RAN:` — a green run alone is not
+   evidence. Record the per-launch diff count; it must exceed the floor of 20.
+7. `bin/simple test test/01_unit/lib/gpu_lane/metal_debug_session_spec.spl` on
+   the Mac and confirm both branching `it`s print `DEVICE-RAN:`.
+8. Run both with `SIMPLE_REQUIRE_GPU=1`, which turns a skip into a FAILURE.
+   Verified on Linux 2026-08-09: it correctly fails 2 of 8 (unit) there. On the
+   Mac it must PASS, which is the only configuration in which a green is
+   unambiguous device evidence. Note the runner bypasses the light test daemon
+   when this variable is set — without that bypass the spec body reads the
+   daemon's frozen environment and the switch fails OPEN.
+9. Record `DEVICE-RAN` lines, device name, and the verbatim `Results:` lines
+   for all three Metal specs in this document, naming the machine.
+
+Until steps 6-9 are also done, the Metal debug/profile wrapper is
+structurally complete and device-unverified, exactly like the executor
+beneath it.
