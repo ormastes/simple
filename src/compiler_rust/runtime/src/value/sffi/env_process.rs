@@ -1220,7 +1220,7 @@ pub unsafe extern "C" fn rt_process_run_bounded(
         return make_tuple(b"", b"", -1);
     };
 
-    let mut command = Command::new(resolve_command_path(cmd_str));
+    let mut command = Command::new(resolve_command_path(&cmd_str));
     clear_simple_child_stack_env(&mut command);
     configure_timeout_child_process_group(&mut command);
     for index in 0..rt_array_len(args) {

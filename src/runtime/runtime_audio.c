@@ -20,7 +20,12 @@
 #include "runtime.h"
 
 #include <stdint.h>
+#if defined(_WIN32) || defined(_WIN64)
+#define RT_AUDIO_WINDOWS_LOCK
+#include <windows.h>
+#else
 #include <pthread.h>
+#endif
 #include <stdlib.h>
 #include <string.h>
 
@@ -51,7 +56,37 @@ typedef struct {
 static rt_audio_engine_slot g_engine_slots[RT_AUDIO_SLOT_COUNT];
 static rt_audio_slot g_source_slots[RT_AUDIO_SLOT_COUNT];
 static rt_audio_slot g_playback_slots[RT_AUDIO_SLOT_COUNT];
+
+/* Cross-platform lock: MSVC has no <pthread.h> (no POSIX threads on Windows),
+ * so this file — unlike most of the runtime, which already carries the same
+ * split for runtime_pool.c — used pthread_mutex_t unconditionally and could
+ * not build under MSVC at all ("fatal error C1083: Cannot open include file:
+ * 'pthread.h'"). CRITICAL_SECTION needs InitializeCriticalSection() before
+ * first use (no static initializer exists), so lazy-init it once via
+ * InitOnceExecuteOnce, same idiom as runtime_pool.c's g_pool_lock. */
+#ifdef RT_AUDIO_WINDOWS_LOCK
+static CRITICAL_SECTION g_audio_lock;
+static INIT_ONCE g_audio_lock_once = INIT_ONCE_STATIC_INIT;
+
+static BOOL CALLBACK rt_audio_lock_init_once(PINIT_ONCE once, PVOID param, PVOID* context) {
+    (void)once;
+    (void)param;
+    (void)context;
+    InitializeCriticalSection(&g_audio_lock);
+    return TRUE;
+}
+
+static void rt_audio_lock_ensure_init(void) {
+    InitOnceExecuteOnce(&g_audio_lock_once, rt_audio_lock_init_once, NULL, NULL);
+}
+
+#define RT_AUDIO_LOCK() do { rt_audio_lock_ensure_init(); EnterCriticalSection(&g_audio_lock); } while (0)
+#define RT_AUDIO_UNLOCK() LeaveCriticalSection(&g_audio_lock)
+#else
 static pthread_mutex_t g_audio_lock = PTHREAD_MUTEX_INITIALIZER;
+#define RT_AUDIO_LOCK() pthread_mutex_lock(&g_audio_lock)
+#define RT_AUDIO_UNLOCK() pthread_mutex_unlock(&g_audio_lock)
+#endif
 
 static int64_t audio_handle(size_t index, uint32_t generation) {
     return (int64_t)((uint64_t)generation * RT_AUDIO_HANDLE_BASE + index + 1);
@@ -167,14 +202,14 @@ static void audio_reap_finished(void) {
  * ================================================================ */
 
 int64_t rt_audio_init(void) {
-    pthread_mutex_lock(&g_audio_lock);
+    RT_AUDIO_LOCK();
     int initialized_here = 0;
     if (!g_audio_initialized) {
         ma_engine_config config = ma_engine_config_init();
         config.sampleRate = 48000;
         ma_result result = ma_engine_init(&config, &g_audio_engine);
         if (result != MA_SUCCESS) {
-            pthread_mutex_unlock(&g_audio_lock);
+            RT_AUDIO_UNLOCK();
             return 0;
         }
         g_audio_initialized = 1;
@@ -186,12 +221,12 @@ int64_t rt_audio_init(void) {
         ma_engine_uninit(&g_audio_engine);
         g_audio_initialized = 0;
     }
-    pthread_mutex_unlock(&g_audio_lock);
+    RT_AUDIO_UNLOCK();
     return handle;
 }
 
 const char* rt_audio_backend_name(void) {
-    pthread_mutex_lock(&g_audio_lock);
+    RT_AUDIO_LOCK();
     const char* name = "uninitialized";
     if (g_audio_initialized) {
         ma_device* device = ma_engine_get_device(&g_audio_engine);
@@ -199,27 +234,27 @@ const char* rt_audio_backend_name(void) {
             name = ma_get_backend_name(device->pContext->backend);
         }
     }
-    pthread_mutex_unlock(&g_audio_lock);
+    RT_AUDIO_UNLOCK();
     return name;
 }
 
 int64_t rt_audio_backend_is_real(void) {
-    pthread_mutex_lock(&g_audio_lock);
+    RT_AUDIO_LOCK();
     int64_t real = 0;
     if (g_audio_initialized) {
         ma_device* device = ma_engine_get_device(&g_audio_engine);
         real = device && device->pContext &&
             device->pContext->backend != ma_backend_null;
     }
-    pthread_mutex_unlock(&g_audio_lock);
+    RT_AUDIO_UNLOCK();
     return real;
 }
 
 int64_t rt_audio_shutdown(int64_t engine_handle) {
-    pthread_mutex_lock(&g_audio_lock);
+    RT_AUDIO_LOCK();
     rt_audio_engine_slot* engine_slot = audio_engine_slot(engine_handle);
     if (!engine_slot) {
-        pthread_mutex_unlock(&g_audio_lock);
+        RT_AUDIO_UNLOCK();
         return 0;
     }
     engine_slot->live = 0;
@@ -229,7 +264,7 @@ int64_t rt_audio_shutdown(int64_t engine_handle) {
         engine_slot->generation = 1;
     }
     if (audio_engine_live_count_unlocked() > 0) {
-        pthread_mutex_unlock(&g_audio_lock);
+        RT_AUDIO_UNLOCK();
         return 1;
     }
 
@@ -240,7 +275,7 @@ int64_t rt_audio_shutdown(int64_t engine_handle) {
     }
     ma_engine_uninit(&g_audio_engine);
     g_audio_initialized = 0;
-    pthread_mutex_unlock(&g_audio_lock);
+    RT_AUDIO_UNLOCK();
     return 1;
 }
 
@@ -250,15 +285,15 @@ int64_t rt_audio_shutdown(int64_t engine_handle) {
 
 int64_t rt_audio_load_sound(const char* path) {
     if (!path) return 0;
-    pthread_mutex_lock(&g_audio_lock);
+    RT_AUDIO_LOCK();
     if (!g_audio_initialized) {
-        pthread_mutex_unlock(&g_audio_lock);
+        RT_AUDIO_UNLOCK();
         return 0;
     }
 
     ma_sound* sound = (ma_sound*)malloc(sizeof(ma_sound));
     if (!sound) {
-        pthread_mutex_unlock(&g_audio_lock);
+        RT_AUDIO_UNLOCK();
         return 0;
     }
 
@@ -266,7 +301,7 @@ int64_t rt_audio_load_sound(const char* path) {
         &g_audio_engine, path, 0, NULL, NULL, sound);
     if (result != MA_SUCCESS) {
         free(sound);
-        pthread_mutex_unlock(&g_audio_lock);
+        RT_AUDIO_UNLOCK();
         return 0;
     }
     int64_t handle = audio_store(g_source_slots, sound, NULL, NULL);
@@ -274,14 +309,14 @@ int64_t rt_audio_load_sound(const char* path) {
         ma_sound_uninit(sound);
         free(sound);
     }
-    pthread_mutex_unlock(&g_audio_lock);
+    RT_AUDIO_UNLOCK();
     return handle;
 }
 
 void rt_audio_unload_sound(int64_t handle) {
-    pthread_mutex_lock(&g_audio_lock);
+    RT_AUDIO_LOCK();
     audio_release_slot(audio_slot(g_source_slots, handle, NULL));
-    pthread_mutex_unlock(&g_audio_lock);
+    RT_AUDIO_UNLOCK();
 }
 
 /* ================================================================
@@ -295,22 +330,22 @@ void rt_audio_unload_sound(int64_t handle) {
  * On older miniaudio versions without _copy, we just start() the original.
  */
 static int64_t play_sound_internal(int64_t sound_handle, int looped) {
-    pthread_mutex_lock(&g_audio_lock);
+    RT_AUDIO_LOCK();
     if (!g_audio_initialized) {
-        pthread_mutex_unlock(&g_audio_lock);
+        RT_AUDIO_UNLOCK();
         return 0;
     }
     audio_reap_finished();
     rt_audio_slot* source = audio_slot(g_source_slots, sound_handle, NULL);
     if (!source) {
-        pthread_mutex_unlock(&g_audio_lock);
+        RT_AUDIO_UNLOCK();
         return 0;
     }
 
     /* Create an independent copy so multiple plays don't collide */
     ma_sound* playback = (ma_sound*)malloc(sizeof(ma_sound));
     if (!playback) {
-        pthread_mutex_unlock(&g_audio_lock);
+        RT_AUDIO_UNLOCK();
         return 0;
     }
 
@@ -318,7 +353,7 @@ static int64_t play_sound_internal(int64_t sound_handle, int looped) {
         &g_audio_engine, source->sound, 0, NULL, playback);
     if (result != MA_SUCCESS) {
         free(playback);
-        pthread_mutex_unlock(&g_audio_lock);
+        RT_AUDIO_UNLOCK();
         return 0;
     }
 
@@ -326,7 +361,7 @@ static int64_t play_sound_internal(int64_t sound_handle, int looped) {
     if (ma_sound_start(playback) != MA_SUCCESS) {
         ma_sound_uninit(playback);
         free(playback);
-        pthread_mutex_unlock(&g_audio_lock);
+        RT_AUDIO_UNLOCK();
         return 0;
     }
     int64_t handle = audio_store(g_playback_slots, playback, NULL, NULL);
@@ -335,7 +370,7 @@ static int64_t play_sound_internal(int64_t sound_handle, int looped) {
         ma_sound_uninit(playback);
         free(playback);
     }
-    pthread_mutex_unlock(&g_audio_lock);
+    RT_AUDIO_UNLOCK();
     return handle;
 }
 
@@ -442,9 +477,9 @@ int64_t rt_audio_play_pcm_f32(
         samples->len > INT64_C(48000) * 2 * 600) {
         return 0;
     }
-    pthread_mutex_lock(&g_audio_lock);
+    RT_AUDIO_LOCK();
     if (!g_audio_initialized) {
-        pthread_mutex_unlock(&g_audio_lock);
+        RT_AUDIO_UNLOCK();
         return 0;
     }
     audio_reap_finished();
@@ -452,7 +487,7 @@ int64_t rt_audio_play_pcm_f32(
     size_t sample_count = (size_t)samples->len;
     float* pcm = (float*)malloc(sample_count * sizeof(float));
     if (!pcm) {
-        pthread_mutex_unlock(&g_audio_lock);
+        RT_AUDIO_UNLOCK();
         return 0;
     }
     size_t i;
@@ -465,7 +500,7 @@ int64_t rt_audio_play_pcm_f32(
     int64_t handle = audio_play_pcm_owned_locked(
         pcm, sample_count, channels
     );
-    pthread_mutex_unlock(&g_audio_lock);
+    RT_AUDIO_UNLOCK();
     return handle;
 }
 #endif /* SIMPLE_RUNTIME_AUDIO_STUB_SPLARRAY */
@@ -481,9 +516,9 @@ int64_t rt_audio_play_pcm_f64_raw(
         sample_count_i64 > INT64_C(48000) * 2 * 600) {
         return 0;
     }
-    pthread_mutex_lock(&g_audio_lock);
+    RT_AUDIO_LOCK();
     if (!g_audio_initialized) {
-        pthread_mutex_unlock(&g_audio_lock);
+        RT_AUDIO_UNLOCK();
         return 0;
     }
     audio_reap_finished();
@@ -493,7 +528,7 @@ int64_t rt_audio_play_pcm_f64_raw(
         (const double*)(uintptr_t)samples_addr;
     float* pcm = (float*)malloc(sample_count * sizeof(float));
     if (!pcm) {
-        pthread_mutex_unlock(&g_audio_lock);
+        RT_AUDIO_UNLOCK();
         return 0;
     }
     size_t i;
@@ -506,31 +541,31 @@ int64_t rt_audio_play_pcm_f64_raw(
     int64_t handle = audio_play_pcm_owned_locked(
         pcm, sample_count, channels
     );
-    pthread_mutex_unlock(&g_audio_lock);
+    RT_AUDIO_UNLOCK();
     return handle;
 }
 
 void rt_audio_stop(int64_t playback_handle) {
-    pthread_mutex_lock(&g_audio_lock);
+    RT_AUDIO_LOCK();
     audio_release_slot(audio_slot(g_playback_slots, playback_handle, NULL));
-    pthread_mutex_unlock(&g_audio_lock);
+    RT_AUDIO_UNLOCK();
 }
 
 void rt_audio_pause(int64_t playback_handle) {
-    pthread_mutex_lock(&g_audio_lock);
+    RT_AUDIO_LOCK();
     rt_audio_slot* slot = audio_slot(g_playback_slots, playback_handle, NULL);
     if (slot) {
         ma_sound_stop(slot->sound);
         slot->paused = 1;
     }
-    pthread_mutex_unlock(&g_audio_lock);
+    RT_AUDIO_UNLOCK();
 }
 
 void rt_audio_resume(int64_t playback_handle) {
-    pthread_mutex_lock(&g_audio_lock);
+    RT_AUDIO_LOCK();
     rt_audio_slot* slot = audio_slot(g_playback_slots, playback_handle, NULL);
     if (slot && ma_sound_start(slot->sound) == MA_SUCCESS) slot->paused = 0;
-    pthread_mutex_unlock(&g_audio_lock);
+    RT_AUDIO_UNLOCK();
 }
 
 /* ================================================================
@@ -538,25 +573,25 @@ void rt_audio_resume(int64_t playback_handle) {
  * ================================================================ */
 
 void rt_audio_set_volume(int64_t playback_handle, double volume) {
-    pthread_mutex_lock(&g_audio_lock);
+    RT_AUDIO_LOCK();
     rt_audio_slot* slot = audio_slot(g_playback_slots, playback_handle, NULL);
     if (slot) ma_sound_set_volume(slot->sound, (float)volume);
-    pthread_mutex_unlock(&g_audio_lock);
+    RT_AUDIO_UNLOCK();
 }
 
 void rt_audio_set_master_volume(double volume) {
-    pthread_mutex_lock(&g_audio_lock);
+    RT_AUDIO_LOCK();
     if (g_audio_initialized) {
         ma_engine_set_volume(&g_audio_engine, (float)volume);
     }
-    pthread_mutex_unlock(&g_audio_lock);
+    RT_AUDIO_UNLOCK();
 }
 
 double rt_audio_get_master_volume(void) {
-    pthread_mutex_lock(&g_audio_lock);
+    RT_AUDIO_LOCK();
     double volume = g_audio_initialized
         ? (double)ma_engine_get_volume(&g_audio_engine) : 0.0;
-    pthread_mutex_unlock(&g_audio_lock);
+    RT_AUDIO_UNLOCK();
     return volume;
 }
 
@@ -565,14 +600,14 @@ double rt_audio_get_master_volume(void) {
  * ================================================================ */
 
 int64_t rt_audio_is_playing(int64_t playback_handle) {
-    pthread_mutex_lock(&g_audio_lock);
+    RT_AUDIO_LOCK();
     rt_audio_slot* slot = audio_slot(g_playback_slots, playback_handle, NULL);
     int64_t playing = slot && ma_sound_is_playing(slot->sound) ? 1 : 0;
     if (slot && !slot->paused && ma_sound_at_end(slot->sound)) {
         audio_release_slot(slot);
         playing = 0;
     }
-    pthread_mutex_unlock(&g_audio_lock);
+    RT_AUDIO_UNLOCK();
     return playing;
 }
 
@@ -581,92 +616,92 @@ int64_t rt_audio_is_playing(int64_t playback_handle) {
  * ================================================================ */
 
 void rt_audio_set_sound_position(int64_t playback_handle, double x, double y, double z) {
-    pthread_mutex_lock(&g_audio_lock);
+    RT_AUDIO_LOCK();
     rt_audio_slot* slot = audio_slot(g_playback_slots, playback_handle, NULL);
     if (slot) ma_sound_set_position(slot->sound, (float)x, (float)y, (float)z);
-    pthread_mutex_unlock(&g_audio_lock);
+    RT_AUDIO_UNLOCK();
 }
 
 void rt_audio_set_spatialization_enabled(int64_t playback_handle, int64_t enabled) {
-    pthread_mutex_lock(&g_audio_lock);
+    RT_AUDIO_LOCK();
     rt_audio_slot* slot = audio_slot(g_playback_slots, playback_handle, NULL);
     if (slot) ma_sound_set_spatialization_enabled(
         slot->sound, enabled ? MA_TRUE : MA_FALSE
     );
-    pthread_mutex_unlock(&g_audio_lock);
+    RT_AUDIO_UNLOCK();
 }
 
 void rt_audio_set_listener_position(double x, double y, double z) {
-    pthread_mutex_lock(&g_audio_lock);
+    RT_AUDIO_LOCK();
     if (g_audio_initialized) {
         ma_engine_listener_set_position(
             &g_audio_engine, 0, (float)x, (float)y, (float)z
         );
     }
-    pthread_mutex_unlock(&g_audio_lock);
+    RT_AUDIO_UNLOCK();
 }
 
 void rt_audio_set_listener_direction(double x, double y, double z) {
-    pthread_mutex_lock(&g_audio_lock);
+    RT_AUDIO_LOCK();
     if (g_audio_initialized) {
         ma_engine_listener_set_direction(
             &g_audio_engine, 0, (float)x, (float)y, (float)z
         );
     }
-    pthread_mutex_unlock(&g_audio_lock);
+    RT_AUDIO_UNLOCK();
 }
 
 void rt_audio_set_listener_world_up(double x, double y, double z) {
-    pthread_mutex_lock(&g_audio_lock);
+    RT_AUDIO_LOCK();
     if (g_audio_initialized) {
         ma_engine_listener_set_world_up(
             &g_audio_engine, 0, (float)x, (float)y, (float)z
         );
     }
-    pthread_mutex_unlock(&g_audio_lock);
+    RT_AUDIO_UNLOCK();
 }
 
 void rt_audio_set_sound_min_distance(int64_t playback_handle, double distance) {
-    pthread_mutex_lock(&g_audio_lock);
+    RT_AUDIO_LOCK();
     rt_audio_slot* slot = audio_slot(g_playback_slots, playback_handle, NULL);
     if (slot) ma_sound_set_min_distance(slot->sound, (float)distance);
-    pthread_mutex_unlock(&g_audio_lock);
+    RT_AUDIO_UNLOCK();
 }
 
 void rt_audio_set_sound_max_distance(int64_t playback_handle, double distance) {
-    pthread_mutex_lock(&g_audio_lock);
+    RT_AUDIO_LOCK();
     rt_audio_slot* slot = audio_slot(g_playback_slots, playback_handle, NULL);
     if (slot) ma_sound_set_max_distance(slot->sound, (float)distance);
-    pthread_mutex_unlock(&g_audio_lock);
+    RT_AUDIO_UNLOCK();
 }
 
 int64_t rt_audio_live_source_count(void) {
-    pthread_mutex_lock(&g_audio_lock);
+    RT_AUDIO_LOCK();
     int64_t count = 0;
     size_t i;
     for (i = 0; i < RT_AUDIO_SLOT_COUNT; ++i) {
         if (g_source_slots[i].live) count += 1;
     }
-    pthread_mutex_unlock(&g_audio_lock);
+    RT_AUDIO_UNLOCK();
     return count;
 }
 
 int64_t rt_audio_live_device_count(void) {
-    pthread_mutex_lock(&g_audio_lock);
+    RT_AUDIO_LOCK();
     int64_t count = audio_engine_live_count_unlocked();
-    pthread_mutex_unlock(&g_audio_lock);
+    RT_AUDIO_UNLOCK();
     return count;
 }
 
 int64_t rt_audio_live_playback_count(void) {
-    pthread_mutex_lock(&g_audio_lock);
+    RT_AUDIO_LOCK();
     audio_reap_finished();
     int64_t count = 0;
     size_t i;
     for (i = 0; i < RT_AUDIO_SLOT_COUNT; ++i) {
         if (g_playback_slots[i].live) count += 1;
     }
-    pthread_mutex_unlock(&g_audio_lock);
+    RT_AUDIO_UNLOCK();
     return count;
 }
 
