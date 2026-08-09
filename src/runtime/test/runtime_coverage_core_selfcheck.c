@@ -16,17 +16,22 @@ int main(void) {
     assert(setenv("SIMPLE_COVERAGE", "1", 1) == 0);
     rt_coverage_clear();
     rt_coverage_decision_probe(9, true, "z.spl", 3, 4);
+    rt_coverage_decision_probe(9, false, "z.spl", 3, 4);
     rt_coverage_decision_probe(2, false, "a,spl", 1, 2);
     rt_coverage_decision_probe(2, true, "a%2Cspl", 1, 2);
     rt_coverage_condition_probe(9, 7, true, "z.spl", 3, 5);
+    rt_coverage_condition_probe(9, 7, false, "z.spl", 3, 5);
     char *first = rt_coverage_dump_sdn();
     char *second = rt_coverage_dump_sdn();
     assert(first && second && strcmp(first, second) == 0);
     assert(strstr(first, "coverage_extension: decision-condition-v1\n"));
     assert(strstr(first, "    2, a%2Cspl, 1, 2, 0, 1\n"));
     assert(strstr(first, "    2, a%252Cspl, 1, 2, 1, 0\n"));
-    assert(strstr(first, "    9, z.spl, 3, 4, 1, 0\n"));
-    assert(strstr(first, "    9, 7, z.spl, 3, 5, 1, 0\n"));
+    /* One exact source identity must retain both outcomes for decisions and
+       conditions.  Separate-path hits could otherwise make coverage appear
+       complete while no owner/span row is actually branch-complete. */
+    assert(strstr(first, "    9, z.spl, 3, 4, 1, 1\n"));
+    assert(strstr(first, "    9, 7, z.spl, 3, 5, 1, 1\n"));
     assert(strstr(first, "    2,") < strstr(first, "    9,"));
     rt_coverage_free_sdn(first);
     rt_coverage_free_sdn(second);
