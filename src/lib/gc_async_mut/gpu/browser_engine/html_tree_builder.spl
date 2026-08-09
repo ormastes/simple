@@ -208,6 +208,26 @@ fn _apply_attrs(node: BeDomNode, attrs: [HtmlAttr]) -> BeDomNode:
     n.attributes = attributes
     n
 
+fn _apply_flat_attrs(
+    node: BeDomNode, names: [text], values: [text], start: i32, end: i32
+) -> BeDomNode:
+    """Apply tokenizer-owned flat attributes without an aggregate transit."""
+    var n = node
+    var attributes = n.attributes
+    var i = start
+    while i < end and i < names.len() and i < values.len():
+        val name = names[i]
+        if name == "src":
+            attributes.remove("\u0000simple-render-image-src")
+        elif name == "poster":
+            attributes.remove("\u0000simple-render-image-poster")
+        elif name == "style":
+            attributes.remove("\u0000simple-render-image-style")
+        attributes[name] = values[i]
+        i = i + 1
+    n.attributes = attributes
+    n
+
 fn _token_would_create_node(
     kind_id: i32, tag: text, data: text,
     in_body: bool, in_script: bool,
@@ -424,40 +444,49 @@ fn _html_tree_builder_build_with_parse_limits_and_projection(
             if t == "html":
                 val html_idx = stack.find_tag("html")
                 if html_idx >= 0:
-                    stack.replace_at(html_idx, _apply_attrs(
-                        stack.nodes[html_idx], reconstructed_attrs
+                    stack.replace_at(html_idx, _apply_flat_attrs(
+                        stack.nodes[html_idx], token_attr_names,
+                        token_attr_values, token_attr_offsets[ti - 1], attr_end
                     ))
 
             elif t == "head":
                 val head_idx = stack.find_tag("head")
                 if head_idx >= 0:
-                    stack.replace_at(head_idx, _apply_attrs(
-                        stack.nodes[head_idx], reconstructed_attrs
+                    stack.replace_at(head_idx, _apply_flat_attrs(
+                        stack.nodes[head_idx], token_attr_names,
+                        token_attr_values, token_attr_offsets[ti - 1], attr_end
                     ))
 
             elif t == "body":
                 if not in_body:
                     # Pop head, push body
                     stack.close_top()
-                    stack.push_open(_apply_attrs(body_el, reconstructed_attrs))
+                    stack.push_open(_apply_flat_attrs(
+                        body_el, token_attr_names, token_attr_values,
+                        token_attr_offsets[ti - 1], attr_end))
                     in_body = true
                 else:
                     val body_idx = stack.find_tag("body")
                     if body_idx >= 0:
-                        stack.replace_at(body_idx, _apply_attrs(
-                            stack.nodes[body_idx], reconstructed_attrs
+                        stack.replace_at(body_idx, _apply_flat_attrs(
+                            stack.nodes[body_idx], token_attr_names,
+                            token_attr_values, token_attr_offsets[ti - 1], attr_end
                         ))
 
             elif t == "title":
                 val title_raw = BeDomNode.element_with_id(next_node_id, t)
                 next_node_id = next_node_id + 1
-                stack.push_open(_apply_attrs(title_raw, reconstructed_attrs))
+                stack.push_open(_apply_flat_attrs(
+                    title_raw, token_attr_names, token_attr_values,
+                    token_attr_offsets[ti - 1], attr_end))
 
             elif t == "meta" or t == "link" or t == "base":
                 # head elements — add to top of stack as void children
                 val he_raw = BeDomNode.element_with_id(next_node_id, t)
                 next_node_id = next_node_id + 1
-                val he = _apply_attrs(he_raw, reconstructed_attrs)
+                val he = _apply_flat_attrs(
+                    he_raw, token_attr_names, token_attr_values,
+                    token_attr_offsets[ti - 1], attr_end)
                 stack.append_child(he)
 
             elif t == "script":
@@ -480,7 +509,9 @@ fn _html_tree_builder_build_with_parse_limits_and_projection(
                 # Push script element onto stack
                 val script_el = BeDomNode.element_with_id(next_node_id, "script")
                 next_node_id = next_node_id + 1
-                val script_node = _apply_attrs(script_el, reconstructed_attrs)
+                val script_node = _apply_flat_attrs(
+                    script_el, token_attr_names, token_attr_values,
+                    token_attr_offsets[ti - 1], attr_end)
                 stack.push_open(script_node)
 
             elif t == "style" or t == "noscript":
@@ -518,7 +549,9 @@ fn _html_tree_builder_build_with_parse_limits_and_projection(
                 if _is_void(t):
                     val vn_raw = BeDomNode.element_with_id(next_node_id, t)
                     next_node_id = next_node_id + 1
-                    val vnode = _apply_attrs(vn_raw, reconstructed_attrs)
+                    val vnode = _apply_flat_attrs(
+                        vn_raw, token_attr_names, token_attr_values,
+                        token_attr_offsets[ti - 1], attr_end)
                     if in_table_ctx and not is_table_content:
                         stack.foster_append(vnode)
                     else:
@@ -527,12 +560,16 @@ fn _html_tree_builder_build_with_parse_limits_and_projection(
                     # Foster-parent non-table elements that appear inside table context
                     val fp_raw = BeDomNode.element_with_id(next_node_id, t)
                     next_node_id = next_node_id + 1
-                    val fp_el = _apply_attrs(fp_raw, reconstructed_attrs)
+                    val fp_el = _apply_flat_attrs(
+                        fp_raw, token_attr_names, token_attr_values,
+                        token_attr_offsets[ti - 1], attr_end)
                     stack.foster_push_open(fp_el)
                 else:
                     val el_raw = BeDomNode.element_with_id(next_node_id, t)
                     next_node_id = next_node_id + 1
-                    val new_el = _apply_attrs(el_raw, reconstructed_attrs)
+                    val new_el = _apply_flat_attrs(
+                        el_raw, token_attr_names, token_attr_values,
+                        token_attr_offsets[ti - 1], attr_end)
                     stack.push_open(new_el)
 
         elif flat_kind == 2:
