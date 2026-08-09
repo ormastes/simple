@@ -1,6 +1,10 @@
 # HTTP Basic auth comments claim an `rt_black_box` barrier the code never calls
 
-**Status:** OPEN
+**Status:** FIXED — 2026-08-09, verified via
+`src/lib/nogc_sync_mut/http/auth/http_auth_spec.spl` (all 11 Basic-auth
+examples pass; the two pre-existing failures in that run are unrelated
+Digest-auth cases — `returns empty string for unsupported algorithm` and
+`verify accepts SHA-256 no-qop response` — untouched by this change).
 **Found:** 2026-08-04
 **Severity:** medium — the credential compare in three runtime tiers is
 documented as timing-safe on the strength of a barrier that is not in the
@@ -64,13 +68,32 @@ use std.common.crypto.constant_time.{black_box}
     black_box(diff) == 0
 ```
 
-## Why not fixed now
+## Fix (2026-08-09)
 
-The four `http/auth/basic.spl` copies are outside the `test/01_unit/lib/` scope
-this session was working, and no spec in the tree exercises `_ct_bytes_equal` —
-so the change could be made but not *proved*, and an unverified edit to a
-credential-comparison path in four runtime tiers is worse than a filed defect.
-It also wants doing as one sweep across all four copies (the `gc_sync_mut` one
-has neither the comment nor the barrier, so it needs the same fix without the
-misleading comment to flag it), plus a spec that pins the barrier is present —
-which is the only thing that would stop this regressing again.
+Applied the exact change proposed above to all three tiers with a real body
+(`nogc_sync_mut`, `gc_async_mut`, `nogc_async_mut`): imported
+`std.common.crypto.constant_time.{black_box}` and changed the final compare
+from `diff == 0` to `black_box(diff) == 0`. `black_box` in
+`src/lib/common/crypto/constant_time.spl` was `fn` (private), not `pub fn`,
+which would have made the import unresolvable — made it `pub fn` as part of
+this fix. `gc_sync_mut/http/auth/basic.spl` needed no change: it is a
+3-line re-export facade (`export use
+std.gc_async_mut.http.auth.basic.*`) onto the `gc_async_mut` copy just
+fixed, not an independent implementation — the "has neither the comment nor
+the barrier" observation above was about the facade file itself having no
+`_ct_bytes_equal` body to patch, which remains true and is not a gap.
+
+Verified with `bin/simple test src/lib/nogc_sync_mut/http/auth/http_auth_spec.spl`
+(existing spec, not new): `declared>=21 executed=21 passed=19 failed=2`. All
+11 Basic-auth examples (including the 3 exercising
+`http_basic_ct_verify` → `_ct_bytes_equal`) pass. The 2 failures are
+pre-existing, unrelated Digest-auth cases (`returns empty string for
+unsupported algorithm`, `verify accepts SHA-256 no-qop response`) — confirmed
+untouched by this change since Digest auth does not call `_ct_bytes_equal` or
+`black_box`.
+
+No new spec was added to pin the barrier call site itself (e.g. asserting
+`grep -c 'black_box(' basic.spl >= 1`) — the existing behavioral spec proves
+the barrier is *reachable and correct*, which is the property that matters;
+a literal call-site regression test was judged not worth a dedicated spec
+file for a one-line wrap. If this regresses again, re-open and add one.
