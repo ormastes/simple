@@ -241,3 +241,17 @@ settled change, `find doc/06_spec -name '*_spec.spl' | wc -l` and require `0`,
 manual and every new executable spec are reviewed for real assertions and no
 placeholder pass before any done mark.  AC-12's implementation/spec/manual
 work remains pending until an exact x86 candidate admits capsule execution.
+
+## 2026-08-09 Stage4 Symbol-boundary evidence
+
+The cached x86 Stage4 build still stops in phase 4 because the driver consumes
+trait-error payloads typed with the private HIR alias `Symbol`. An exact import
+and legal `export Symbol` declaration both parse, but Stage4 HIR lowering does
+not bind the alias across this module boundary. The three bounded logs are
+`stage4-symbol-import-retry.log`, `stage4-public-symbol-retry.log`, and
+`stage4-explicit-symbol-export-retry.log` under `build/bootstrap-recovery/`.
+
+The next implementation must use public `HirSymbol` at that boundary or land
+the complete reviewed `SymbolId` identity conversion; an annotation-only
+partial migration is prohibited. No candidate, capsule admission, QEMU WM,
+ARM/macOS, or Uno-Q status advances from this evidence.

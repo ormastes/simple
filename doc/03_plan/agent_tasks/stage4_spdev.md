@@ -44,3 +44,11 @@
 - Canonical Stage4 now clears `file_size` and `CompileOptionsHash`, but still reports eight `Symbol` errors after the narrowed import. This disproves the hypothesis that wildcard expansion alone was the complete cause.
 - Fresh-session next action: inspect the exact reachable fields of `TypeInferError` and the Stage4 cache/closure manifest for `driver_source_loading`; add a failing focused fixture that reproduces the canonical transitive graph before any `SymbolId` migration.
 - Stage4 executable and all downstream essential-tools, attested ARM64, QMP primitive-WM, native ARM/macOS, and Uno-Q gates remain OPEN.
+
+## Active handoff update (2026-08-09, Symbol export cycle)
+
+- Pushed `a8c0bf7a1b1` (exact driver `Symbol` import), `e9642a2c904` (public-alias experiment), and `45094a400f4` (legal explicit alias export) to `codex/stage4-x86-phase4-llvm23-integrated`.
+- Highest-capability review rejected the parallel broad `SymbolId` migration before commit: it contained invalid `SymbolId` field accesses, nonexistent `SymbolId.to_text()`, inconsistent coherence payloads, unconverted HIR bounds, malformed-impl/inherent conflation, and ambiguous associated-type identity. The seven agent edits were removed; the unrelated Android `.bat` CRLF artifact remains untouched.
+- Cycle 1 (`stage4-symbol-import-retry.log`) reached phase 4 after about ten minutes and reproduced seven unresolved `Symbol` payloads. Cycle 2 (`stage4-public-symbol-retry.log`) reused the cache and proved `pub type` is invalid grammar. Cycle 3 (`stage4-explicit-symbol-export-retry.log`) parsed and reached phase 4, but explicit `export Symbol` still did not bind the alias during HIR lowering. No Stage4 candidate exists.
+- Do not rerun the unchanged command in this session. Fresh-session next action: replace cross-module trait-error `Symbol` payload annotations with the public concrete `HirSymbol` type and update the focused formatter fixture, or implement the reviewed `SymbolId` model atomically with all caller conversions. Then resume the same Stage4 cache once.
+- x86 Stage4, essential-tools smoke, ARM64 attestation/QMP primitive WM, native ARM/macOS, and Uno-Q remain OPEN.
