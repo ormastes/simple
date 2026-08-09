@@ -4,7 +4,9 @@
 - **Filed:** 2026-08-09
 - **Status:** PARTIALLY FIXED — the registration defect is fixed and both specs
   are GREEN for real reasons; the natively-linked-backend coverage gap is
-  SCOPED OUT and recorded below.
+  SCOPED OUT and recorded below. The interpreter-mode `_native` residual
+  reported on 2026-08-09 was re-measured the same day and is **NOT A DEFECT** —
+  a stale-binary artifact, no second resolver exists; see that section.
 - **Files:**
   - `test/01_unit/lib/mem_infra/harden_backend_parity_spec.spl` (was 4/5 RED, now 5/5 GREEN)
   - `test/01_unit/lib/mem_infra/guard_backend_parity_spec.spl` (was 3/4 RED, now 4/4 GREEN)
@@ -94,25 +96,61 @@ does not link `runtime_memory.o` at all.
   the native rows rest on a hand transcript, and a regression in the native
   allocator lane would not turn any spec red.
 
-## Residual defect (open, unrelated to both specs)
+## Residual defect — NOT A DEFECT (closed 2026-08-09, measurement artifact)
 
-With the alias registered, `rt_mem_harden_check_native` resolves under
-`SIMPLE_EXECUTION_MODE=jit` but still fails under
-`SIMPLE_EXECUTION_MODE=interpreter`:
+The residual was reported as: with the alias registered,
+`rt_mem_harden_check_native` resolves under `SIMPLE_EXECUTION_MODE=jit` but
+still fails under `SIMPLE_EXECUTION_MODE=interpreter` with
+`error: semantic: unknown extern function: rt_mem_harden_check_native`,
+implying the tree-walk interpreter used a *different* resolver than
+`rt_interp_call`.
+
+**There is no second resolver.** Both lanes enter the single function
+`interpreter_extern::call_extern_function_with_values`
+(`src/compiler_rust/compiler/src/interpreter_extern/mod.rs:2616`), whose first
+action is the `EXTERN_DISPATCH.get(name)` lookup at line 2637. The tree-walk
+interpreter reaches it via `call_extern_function` (same file, line ~2595, which
+only evaluates args and delegates); the JIT reaches it via the `rt_interp_call`
+trampoline. `unknown extern function` is emitted from exactly four sites, all at
+the tail of that same function (lines 2751/2774/2782/2789) — there is nowhere
+else in the tree that can produce that message, and there is no `_native`
+suffix-stripping or name normalisation anywhere on the path.
+
+**Actual cause: the two arms were measured with two different binaries.** The
+jit arm used the freshly rebuilt seed
+(`src/compiler_rust/target/release/simple`, which contains the alias); the
+interpreter arm used the deployed `bin/simple`
+(`bin/release/x86_64-unknown-linux-gnu/simple`, 29,577,536 bytes, mtime
+2026-08-09 04:50 — built *before* the alias landed).
+
+Re-measured 2026-08-09 with a two-extern probe declaring both spellings:
 
 ```
-a=0                                                   # rt_mem_harden_check     - resolves
+### FRESH binary (src/compiler_rust/target/release/simple), interpreter:
+a=0
+b=0                                   # _native resolves — no error
+
+### DEPLOYED bin/simple (04:50 pre-alias seed), interpreter:
+a=0
 error: semantic: unknown extern function: rt_mem_harden_check_native
 ```
 
-Both spellings are in the one `EXTERN_DISPATCH` map and the map is consulted
-first in `interpreter_extern/mod.rs:2637`, so the tree-walk interpreter must be
-resolving externs through a *different* path than `rt_interp_call`. That path
-was not located. It does not affect either parity spec (the interpreter arms use
-`harden_poison_workload.spl`, which uses the registered `rt_mem_harden_check`
-spelling), so it is filed here rather than fixed. Next step: instrument the
-interpreter's extern call site and find which resolver rejects a name the shared
-map contains.
+And the real fixture, fresh binary, `SIMPLE_MEM_HARDEN=1`, both modes:
+
+```
+=== interpreter          === jit
+t0=0 t1=1 t2=2 t3=3      t0=0 t1=1 t2=2 t3=3
+```
+
+Interpreter and jit are now bit-identical on the `_native` spelling. **No code
+change was required or made.** The only outstanding action is the pre-existing
+one already noted above: `bin/release/**` is a shared deployed seed and was
+deliberately not clobbered, so it stays pre-alias until the next normal
+redeploy. Anyone re-testing this must pass the rebuilt binary explicitly
+(`SIMPLE_TEST_BINARY`) rather than using `bin/simple`.
+
+Filed as an instance of the standing measurement trap "the `bin/simple` symlink
+can point at a stale build — record binary identity with every measurement".
 
 ## Evidence
 
