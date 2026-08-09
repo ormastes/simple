@@ -101,3 +101,22 @@ risks silently mismatching the two keying paths.
 A masking workaround in the ndarray library (e.g. reordering `DType` so `Bool`
 is not 4th) is deliberately NOT applied: it would hide the defect for one enum
 while leaving every other 4-variant enum in the repo broken.
+
+## Re-verification (2026-08-09)
+
+Re-ran the exact reproducer from this doc under
+`SIMPLE_EXECUTION_MODE=interpreter bin/simple run` and got the identical
+result:
+```
+F32(disc 0) == F32 : true
+F64(disc 1) == F64 : true
+I64(disc 2) == I64 : true
+Bool(disc 3)== Bool: false
+```
+Confirms the defect is unchanged. Root cause remains the Rust bootstrap
+seed's cross-module enum-registry/discriminant encoding (sentinel-3
+collision family), which per repo rules
+(`feedback_fix_spl_not_rust`/`feedback_no_bootstrap_unless_essential`) is out
+of scope for a `.spl`-only fix and would require a cross-crate ABI change to
+the seed's enum registry — not attempted this pass. Status confirmed
+unchanged: **OPEN / ARCHITECTURAL**.

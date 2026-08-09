@@ -73,3 +73,22 @@ core parser/interpreter code, out of scope for this lane's shortest-diff
 budget. Filing this so the pattern is not silently reintroduced elsewhere and
 so `jit.spl`'s use of the same shape gets re-audited once it has real test
 coverage.
+
+## Re-verification (2026-08-09)
+
+Reproduced fresh against the currently deployed binary
+(`bin/simple run`, tree-walk interpreter path — this binary identifies
+itself as the Rust bootstrap seed). The minimal repro from this doc still
+fails identically:
+```
+error: semantic: undefined field 'width': cannot access field on value of
+type 'symbol'
+```
+The root cause lives in the semantic-analysis/interpreter binding logic for
+the expression-form `if val Some(x) = opt: EXPR else: EXPR2`, which per repo
+provenance is the Rust seed (`src/compiler_rust/**`), not `.spl` product
+source — out of scope for this lane per repo rules (`feedback_fix_spl_not_rust`,
+no seed edits, no bootstrap rebuild). Status confirmed unchanged:
+**OPEN / ARCHITECTURAL** — genuinely reproducible, root cause outside
+pure-Simple scope, workaround already in place at the one call site that
+needed it.

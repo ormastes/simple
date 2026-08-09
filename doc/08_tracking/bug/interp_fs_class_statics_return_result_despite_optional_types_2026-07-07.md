@@ -4,7 +4,35 @@
 **Severity:** medium — silently defeats truthiness checks on file-existence/IO
 guard code; found while wiring the image-background-provider PPM loader
 (`src/os/compositor/background_image_provider.spl`) onto `fs.File`.
-**Status:** OPEN — workaround applied at the call site, root cause not fixed.
+**Status:** ALREADY-FIXED (superseded) — re-verified 2026-08-09.
+
+## Re-verification (2026-08-09)
+
+The buggy statics this doc describes lived in
+`src/lib/nogc_sync_mut/fs.spl` (a bare file). That file is now **unreachable
+dead code**: Simple's module resolver prefers a directory over a same-named
+sibling file, so `use std.nogc_sync_mut.fs` / `use
+std.nogc_sync_mut.fs.{File}` resolves to
+`src/lib/nogc_sync_mut/fs/__init__.spl` + `src/lib/nogc_sync_mut/fs/path.spl`
+instead — confirmed by reproducing the exact `use` statement from this doc:
+```
+error: semantic: unknown static method read_bytes on class File
+```
+`File` in the reachable module (`fs/path.spl`) has no `read_bytes`/
+`write_bytes` statics at all (only `read`/`write`/`copy_to`/`delete`, all
+instance methods on an already-constructed `File`), and its `delete()`
+returns a real `bool` from a shell exit-code check — no `Result` unwrap, no
+`.path`-on-`String` crash path. A repo-wide grep
+(`/usr/bin/grep -rln "nogc_sync_mut.fs\b\|nogc_sync_mut\.fs\.File"`) found no
+callers of the shadowed `fs.spl` file outside itself, and the one call site
+named in this doc (`background_image_provider.spl`) does not import it.
+
+Conclusion: the described symptom cannot be reproduced through any reachable
+import path today. The bug is moot — not because the Result-unwrap logic was
+fixed, but because the module carrying it was superseded by
+`fs/__init__.spl` + `fs/path.spl` and is no longer on the resolution path.
+No code change was needed; `fs.spl`'s dead declarations were left in place
+(deleting unreachable files is out of scope for this doc).
 
 ## Symptom
 
