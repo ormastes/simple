@@ -2848,6 +2848,37 @@ static const uint32_t *rt_gui_prepared_packed_pixels(RuntimeArray *pixels)
     return NULL;
 }
 
+RuntimeValue rt_gui_replay_prepared_packed_scanout(RuntimeValue wh)
+{
+    uint32_t width = (uint32_t)((uint64_t)wh >> 32);
+    uint32_t height = (uint32_t)((uint64_t)wh & 0xffffffffu);
+    uint64_t count = (uint64_t)width * height;
+    if (!g_fb_addr || !g_fb_w || width != g_fb_w || height != 768u ||
+        g_gui_prepared_packed_keys[0] == NULL ||
+        g_gui_prepared_packed_lens[0] != count) return 0;
+    volatile uint32_t *dst = (volatile uint32_t *)(uintptr_t)g_fb_addr;
+    const uint32_t *src = g_gui_prepared_packed_pixels[0];
+    uint64_t i = 0;
+#if defined(__aarch64__)
+    while (i + 16u <= count) {
+        for (uint32_t block = 0; block < 4u; block++) {
+            __asm__ volatile(
+                "ld1 {v0.4s}, [%1]\n\t"
+                "st1 {v0.4s}, [%0]"
+                :
+                : "r" (dst + i + (uint64_t)block * 4u),
+                  "r" (src + i + (uint64_t)block * 4u)
+                : "v0", "memory");
+        }
+        i += 16u;
+    }
+#endif
+    while (i < count) { dst[i] = src[i]; i++; }
+    g_gui_simd_fill_hits++;
+    g_gui_simd_fill_chunks += count / 4u;
+    return 1;
+}
+
 RuntimeValue rt_gui_fill4(RuntimeValue xy, RuntimeValue wh, RuntimeValue color, RuntimeValue u)
 {
     if (!g_fb_addr || !g_fb_w) { (void)xy;(void)wh;(void)color;(void)u; return 0; }
