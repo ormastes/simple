@@ -17,3 +17,16 @@
 - Review: highest-capability review reported no blocking findings and marked the change safe to accept.
 - Evidence: pure-Simple Stage2/Stage3 recovery and capability gates passed (Stage3 SHA-256 `adf5a93256c20bffbc0c5e26bee46cb3717da8154c52c614e784a77ef0ef43b2`). Stage4 produced no `nilnil` diagnostics and advanced to unresolved `to_int` in `src/lib/nogc_sync_mut/test_runner/test_runner_args.spl`.
 - Next blocker: resolve the independent `to_int` HIR surface/import issue, then resume cached Stage4.
+
+## Active handoff (2026-08-09)
+
+- Merge owner: Codex Stage4 isolated lane; final reviewer: highest-capability model.
+- Accepted commits: `0b12654a11a`, `b6fb63df642`, `5d7466c2952`, `154a6094ec4`, `30c7bd7a711`.
+- Focused executable evidence:
+  - `native_std_io_bounded_exports`: `36 compiled, 0 failed`, executable output confirms public `std.io` resolution.
+  - `native_test_runner_helpers_phase4`: `247 compiled, 0 failed`, executable output confirms helper closure resolution and stale warning dependencies are absent.
+  - `native_sdoctest_config_ends_with`: `54 compiled, 0 failed`, executable output `sdoctest config resolved: 2:2`.
+- Third bounded Stage4 cycle stopped at new phase-4 blocker `file_size` in `test_runner_async.spl`; do not repeat the unchanged command in this session.
+- Fresh-session resume: diagnose and regression-test the `file_size` owner, then rerun the existing canonical Stage4 command once with `build/bootstrap-recovery/stage4-native-cache`, Stage3 runtime authority `build/bootstrap-recovery/stage3/x86_64-unknown-linux-gnu/stage2-runtime-authority`, and `SIMPLE_NO_STUB_FALLBACK=1`.
+- After an executable exists: smoke the exact candidate, install it as a non-symlink canonical release binary, run `scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs`, then `scripts/check/check-simpleos-arm64-qmp-input-evidence.shs`.
+- x86 Stage4, ARM64 QEMU primitive WM, native ARM/macOS, and Uno-Q rows remain OPEN until their authoritative gates emit PASS.
