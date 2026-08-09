@@ -1419,7 +1419,7 @@ RuntimeValue rt_string_split(RuntimeValue str, RuntimeValue delim) {
     if (!s || s->len == 0) return arr;
     if (!d || d->len == 0) {
         for (uint32_t i = 0; i < s->len; i++) {
-            RuntimeValue ch = rt_string_new((RuntimeValue)(uintptr_t)&s->data[i], 1);
+            RuntimeValue ch = arm64_single_byte_text((uint8_t)s->data[i]);
             arr = rt_array_push_handle(arr, ch);
         } return arr;
     }
@@ -1550,7 +1550,10 @@ RuntimeValue rt_string_chars(RuntimeValue str) {
         if (lead >= 0xC2 && lead <= 0xDF && i + 2 <= s->len) width = 2;
         else if (lead >= 0xE0 && lead <= 0xEF && i + 3 <= s->len) width = 3;
         else if (lead >= 0xF0 && lead <= 0xF4 && i + 4 <= s->len) width = 4;
-        arr = rt_array_push_handle(arr, rt_string_new((RuntimeValue)(uintptr_t)&s->data[i], (RuntimeValue)width));
+        RuntimeValue ch = width == 1
+            ? arm64_single_byte_text(lead)
+            : rt_string_new((RuntimeValue)(uintptr_t)&s->data[i], (RuntimeValue)width);
+        arr = rt_array_push_handle(arr, ch);
         i += width;
     }
     return arr;
@@ -4775,7 +4778,7 @@ RuntimeValue rt_char_from_code(RuntimeValue code)
     char buf[5] = { 0, 0, 0, 0, 0 };
     RuntimeValue len = 1;
     if (c < 0x80) {
-        buf[0] = (char)c;
+        return arm64_single_byte_text((uint8_t)c);
     } else if (c < 0x800) {
         len = 2;
         buf[0] = (char)(0xC0 | (c >> 6));
@@ -4881,12 +4884,38 @@ int64_t rt_pool_safepoint(void)
 #define CRYPTO_ARRAY_HDR_TYPE(arr) ((arr)->type)
 #include "../../shared/crypto_common.h"
 
-/* Interned string-literal ctor: codegen emits rt_string_new_literal for every
- * multi-byte literal (hosted interns by data ptr for perf). The freestanding
- * kernel has no intern table, so forward to rt_string_new — functionally
- * identical (a fresh heap string per call). Matches the riscv32 stub. */
+/* Codegen literal storage has a stable address for the lifetime of the image.
+ * Cache immutable literal values by that address and length so parser/render
+ * loops do not allocate the same property names millions of times. The table
+ * is bounded and open-addressed; saturation only loses the optimization. */
+#define ARM64_LITERAL_CACHE_CAPACITY 2048U
+typedef struct {
+    uintptr_t data;
+    uint32_t len;
+    RuntimeValue value;
+} Arm64LiteralCacheEntry;
+static Arm64LiteralCacheEntry _arm64_literal_cache[ARM64_LITERAL_CACHE_CAPACITY];
+
 RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val);
 RuntimeValue rt_string_new_literal(RuntimeValue data, RuntimeValue len_val)
 {
+    uintptr_t ptr = (uintptr_t)data;
+    uint32_t len = len_val > (RuntimeValue)UINT32_MAX ? UINT32_MAX : (uint32_t)len_val;
+    uintptr_t mixed = (ptr >> 3) ^ (ptr >> 17) ^ ((uintptr_t)len * 2654435761U);
+    uint32_t slot = (uint32_t)mixed & (ARM64_LITERAL_CACHE_CAPACITY - 1U);
+    for (uint32_t probe = 0; probe < ARM64_LITERAL_CACHE_CAPACITY; probe++) {
+        Arm64LiteralCacheEntry *entry = &_arm64_literal_cache[slot];
+        if (entry->value != 0 && entry->value != NIL_VALUE) {
+            if (entry->data == ptr && entry->len == len) return entry->value;
+        } else {
+            RuntimeValue value = rt_string_new(data, len_val);
+            if (value == NIL_VALUE) return value;
+            entry->data = ptr;
+            entry->len = len;
+            entry->value = value;
+            return value;
+        }
+        slot = (slot + 1U) & (ARM64_LITERAL_CACHE_CAPACITY - 1U);
+    }
     return rt_string_new(data, len_val);
 }
