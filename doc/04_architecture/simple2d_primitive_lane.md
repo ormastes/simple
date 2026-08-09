@@ -90,10 +90,20 @@ other than `qualcomm` and any GPU provider not identifying Qualcomm Vulkan
 vendor `0x5143`. The port definitions do not implement hardware or generate
 receipts.
 
-Every one of those capabilities still returns canonical `port-unavailable`.
-Consequently the QRB2210 entry fails before binding the composition root, and
-no source contract, Debian run, QEMU adapter, or caller-supplied object can
-promote the physical-board row.
+The first physical provider slice now adapts kernel-owned QRB2210 Vulkan
+resources to the GPU submit, fence, and device-readback ports. The adapter
+requires a physical identity receipt for board `qrb2210-uno-q`, Qualcomm vendor
+`0x5143`, an Adreno device name, a non-empty driver identity, and matching
+nonzero physical-device, logical-device, queue, fence, and readback handles.
+Submission is accepted only when the kernel returns a positive submission ID
+and the bound fence; readback is accepted only after exact dimensions, pixel
+count, submission correlation, and source `qrb2210-vulkan-device-memory`.
+
+The kernel transport itself and the display, input, and audio providers remain
+unavailable, so canonical capability status stays `port-unavailable` and the
+composition root cannot yet bind. No source contract, Debian run, QEMU adapter,
+hosted Vulkan loader, or caller-supplied identity string can promote the
+physical-board row.
 
 ## Migration sequence
 
