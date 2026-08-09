@@ -3,24 +3,34 @@
 # already discards docstrings, so seed the recovered arena shape directly.
 # @cover src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl
 
-use compiler.core.ast.{ast_reset, expr_int_lit, expr_raw_string_lit, decl_val_binding, module_add_decl}
+use compiler.core.ast.{ast_reset, expr_ident, expr_int_lit, decl_val_binding, module_add_decl}
 use compiler.frontend.flat_ast_bridge.{flat_ast_to_module}
 use std.spec
 
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text)
+
 describe "module docstring synthetic-main guard":
-    it "drops a recovered docstring expression before synthetic-main lowering":
+    it "drops the native-replayed docstring identifier before conversion":
+        val saved_source = rt_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE") ?? ""
         ast_reset()
-        val doc = expr_raw_string_lit("I/O documentation with source: nil", 0)
-        module_add_decl(decl_val_binding("_expr_0", -1, doc, 0))
+        rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", "\"\"\"I/O documentation with source: nil\"\"\"")
+        # Native Stage4 loses the raw StringLit tag before bridge conversion.
+        val replayed = expr_ident("nilnil", 0)
+        module_add_decl(decl_val_binding("_expr_0", -1, replayed, 0))
         val module = flat_ast_to_module("module_docstring_guard.spl")
         expect(module.functions.contains("main")).to_equal(false)
         expect(module.constants.len()).to_equal(0)
+        rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", saved_source)
 
     it "keeps a recovered non-string expression as a script main":
+        val saved_source = rt_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE") ?? ""
         ast_reset()
+        rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", "print(42)\n")
         val value = expr_int_lit(42, 0)
         module_add_decl(decl_val_binding("_expr_0", -1, value, 0))
         val module = flat_ast_to_module("module_expr_guard.spl")
         expect(module.functions.contains("main")).to_equal(true)
         val main = module.functions["main"] ?? panic("missing synthetic main")
         expect(main.body.stmts.len()).to_equal(1)
+        rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", saved_source)

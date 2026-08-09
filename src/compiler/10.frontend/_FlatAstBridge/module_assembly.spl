@@ -54,6 +54,17 @@ fn flat_bootstrap_enabled() -> bool:
 fn flat_bridge_trace_enabled() -> bool:
     (flat_module_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
 
+fn flat_leading_module_docstring_artifact(decl_index: i64, name: text) -> bool:
+    # In the native Stage4 streaming parser, a leading triple-quoted module
+    # docstring can be replayed as `_expr_0` after its StringLit payload has
+    # already degraded to an identifier (for example `nil` -> `nilnil`).
+    # Classify it before `convert_flat_expr`; checking the converted ExprKind
+    # is too late because the original StringLit tag has been lost.
+    if decl_index != 0 or not name.starts_with("_expr_"):
+        return false
+    val source = flat_module_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE")
+    source.starts_with("\"\"\"") or source.starts_with("'''")
+
 fn flat_module_trace_function(stage: text, fn_: ParserFunction):
     if flat_module_env_get("SIMPLEOS_FOCUSED_HIR_DIAG") == "1":
         val return_name = parser_type_kind_named_name(fn_.return_type.kind)
@@ -527,6 +538,9 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                 span: span
             )
             if c_name.starts_with("_expr_"):
+                if flat_leading_module_docstring_artifact(di, c_name):
+                    di = di + 1
+                    continue
                 # A module docstring is semantically inert. The normal parser
                 # consumes its StringLit token before it reaches the arena, but
                 # a self-hosted/native token replay can retain it as a bare
