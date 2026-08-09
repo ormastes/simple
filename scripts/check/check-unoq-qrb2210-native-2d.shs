@@ -1,0 +1,72 @@
+#!/bin/sh
+# Offline UNO Q QRB2210 receipt preflight. Files supplied by a caller are not
+# physical-board proof, so this checker can report READY but never PASS. A
+# future live runner must acquire the serial stream and capture itself before it
+# may promote the canonical Pure-Simple admission result to physical evidence.
+set -eu
+
+TRANSCRIPT=""
+CAPTURE=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --transcript) shift; TRANSCRIPT=${1:-} ;;
+        --capture) shift; CAPTURE=${1:-} ;;
+        --help|-h) echo "usage: $0 --transcript FILE --capture FILE"; exit 0 ;;
+        *) echo "unoq_native_2d_status=fail reason=unknown-argument:$1"; exit 2 ;;
+    esac
+    shift
+done
+
+blocked() { echo "unoq_native_2d_status=blocked reason=$1"; exit 2; }
+failed() { echo "unoq_native_2d_status=fail reason=$1"; exit 1; }
+[ -n "$TRANSCRIPT" ] || blocked "physical-board-transcript-required"
+[ -f "$TRANSCRIPT" ] || blocked "physical-board-transcript-missing"
+[ -n "$CAPTURE" ] || blocked "physical-frame-capture-required"
+[ -s "$CAPTURE" ] || blocked "physical-frame-capture-missing"
+command -v sha256sum >/dev/null 2>&1 || blocked "sha256sum-missing"
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+simple=${SIMPLE_BIN:-$root/bin/release/x86_64-unknown-linux-gnu/simple}
+validator=$root/scripts/check/validate-unoq-qrb2210-native-2d-receipt.spl
+[ -x "$simple" ] || blocked "pure-simple-runtime-missing"
+version=$($simple --version 2>&1 || true)
+case "$version" in
+    *'Rust-built'*|*'bootstrap seed only'*) blocked "runtime-is-rust-seed" ;;
+esac
+
+value() {
+    count=$(sed -n "s/^$1=//p" "$TRANSCRIPT" | wc -l | tr -d ' ')
+    [ "$count" = 1 ] || failed "$1-missing-or-duplicate"
+    sed -n "s/^$1=//p" "$TRANSCRIPT"
+}
+
+capture_sha=$(sha256sum "$CAPTURE" | awk '{print $1}')
+[ "$(value capture_sha256)" = "$capture_sha" ] || failed "capture-sha256-mismatch"
+
+set +e
+admission=$(SIMPLE_LIB="$root/src" "$simple" run "$validator" \
+    "$(value board_id)" "$(value platform)" "$(value arch)" \
+    "$(value gpu_vendor_id)" "$(value gpu_name)" "$(value backend)" \
+    "$(value draw_ir)" "$(value draw_ir_op_count)" "$(value animation_frame_count)" \
+    "$(value font_glyph_count)" "$(value device_executed)" "$(value physical_device)" \
+    "$(value fallback_used)" "$(value submit_count)" "$(value fence_count)" \
+    "$(value readback_bytes)" "$(value expected_checksum)" "$(value actual_checksum)" \
+    "$(value boot_id)" "$(value frame_id)" "$(value capture_frame_id)" \
+    "$(value ctrl_left)" "$(value ctrl_right)" "$(value alt_left)" "$(value alt_right)" \
+    "$(value key_down)" "$(value key_up)" \
+    "$(value pointer_move)" "$(value pointer_down)" "$(value pointer_drag)" \
+    "$(value pointer_up)" "$(value pointer_wheel)" \
+    "$(value audio_submitted)" "$(value audio_completed)" \
+    "$(value audio_non_silent)" 2>&1)
+admission_rc=$?
+set -e
+printf '%s\n' "$admission"
+if [ "$admission_rc" -eq 2 ]; then
+    blocked "canonical-simpleos-qrb2210-port-unavailable"
+fi
+[ "$admission_rc" -eq 0 ] || failed "pure-simple-admission-rejected"
+
+echo "unoq_native_2d_status=ready"
+echo "unoq_native_2d_evidence_class=offline-untrusted"
+echo "unoq_native_2d_reason=live-board-runner-required"
+echo "unoq_native_2d_capture_sha256=$capture_sha"
