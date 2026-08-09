@@ -1610,6 +1610,17 @@ RuntimeValue rt_string_bytes(RuntimeValue str) {
     return arr;
 }
 
+/* Raw byte accessor for the ARM boot runtime's concrete RuntimeString layout.
+ * The weak pure-Simple core owner targets its own pointer layout and reads 0
+ * from boot-owned strings, breaking every byte-indexed scanner. Indices and
+ * return values are intentionally raw i64 for the text.byte_at intrinsic. */
+RuntimeValue rt_string_byte_at(RuntimeValue str, RuntimeValue index) {
+    RuntimeString *s = IS_HEAP(str) ? (RuntimeString *)DECODE_PTR(str) : NULL;
+    int64_t i = (int64_t)index;
+    if (!s || i < 0 || (uint64_t)i >= (uint64_t)s->len) return 0;
+    return (RuntimeValue)(uint8_t)s->data[(uint32_t)i];
+}
+
 RuntimeValue rt_string_is_empty(RuntimeValue str) { RuntimeString *s = decode_string(str); if (!s) return 1; return s->len == 0 ? 1 : 0; }
 
 RuntimeValue rt_string_compare(RuntimeValue a, RuntimeValue b) {
