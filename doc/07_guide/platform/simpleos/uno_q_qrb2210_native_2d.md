@@ -9,12 +9,20 @@ Run `scripts/check/check-unoq-qrb2210-native-2d.shs --transcript FILE
 and delegates all semantic decisions to the Pure-Simple admission owner. Once
 the canonical port exists it may report at most `ready` with
 `offline-untrusted`: caller-supplied files cannot prove a physical board. A
-future live runner must itself acquire the serial stream
-and frame before it may claim PASS. The admission contract requires correlated
+The live runner is
+`scripts/check/run-unoq-qrb2210-native-2d-live.shs`. It accepts only device,
+output-directory, and timeout selection; transcript, receipt, capture, replay,
+and offline inputs are rejected. It selects an authorized ADB device, verifies
+QRB2210/UNO Q identity, invokes `/usr/bin/simpleos-unoq-2d-evidence` on the
+board, and acquires both the serial receipt and raw RGBA capture itself. Missing
+hardware or a missing/failing production provider remains `blocked`; an
+offline preflight can never be promoted to PASS. The admission contract requires correlated
 Adreno Vulkan submission, fence and device readback, exact checksum, no CPU
 fallback, left/right Ctrl and Alt, pointer move/down/drag/up/wheel, and completed
-non-silent audio. It also requires ordinary key down/up, at least two animation
-frames, DrawIR work, and font glyph work. A Debian/Android board run is readiness
+non-silent audio. The live runner strengthens this to at least 20 animation and
+warm performance frames, a bounded nonzero warm p95, bounded nonzero peak RSS,
+DrawIR work, font glyph work, exact raw-capture byte count/hash, and matching
+run/ADB/boot/frame identities. A Debian/Android board run is readiness
 only.
 
 Today the canonical `uno_q_desktop_contract` reports the QRB2210 SimpleOS
@@ -32,6 +40,6 @@ to manufacture an `UnoQNative2dEvidence` record; PASS evidence must originate
 from the eventual physical composition root and live-board runner.
 
 This host had no authorized ADB device on 2026-08-09, so no live board claim is
-made. Remaining external work is the QRB2210 SimpleOS boot/display/Adreno
+made and the live runner was not executed against hardware. Remaining external work is the QRB2210 SimpleOS boot/display/Adreno
 firmware, MMU/cache, queue and fence bring-up, followed by a real transcript and
 capture from the physical board.
