@@ -1,6 +1,6 @@
 # `parse_trait_group_members` splits on `,` naively — multi-arg generic members break
 
-**Status:** OPEN
+**Status:** FIXED (2026-08-09) — see commit 40d36dceba0289b112cb166a90da64786a953dc2, which added split_top_level_commas() and a regression spec in test/01_unit/app/desugar/trait_group_spec.spl.
 **Found:** 2026-08-09, during P0 (trait `with` groups + `.from()` sugar, landed as `50f06dcdd56`)
 **Severity:** low today, latent — no current caller hits it
 **Component:** `src/app/desugar/trait_scanner.spl` (`parse_trait_group_members`)
