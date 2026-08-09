@@ -216,61 +216,308 @@ is_sha256() {
     esac
 }
 
-kernel_source_revision() {
-    for source_root in src/os src/lib build/os/generated examples/09_embedded/simple_os/arch/x86_64; do
+# ---- kernel input set (the files the built kernel actually depends on) -----
+#
+# WHY THIS IS NOT A WHOLE-TREE HASH ANY MORE.
+#
+# The previous implementation content-hashed EVERY .spl/.c/.h/.s/.S/.ld file
+# under src/os + src/lib + build/os/generated + the x86_64 example dir --
+# 9,608 files -- once before the ~151s kernel build and once after, and aborted
+# the whole run with `wm-simple-web-build-source-changed` on any difference.
+# The refusal window was therefore `2 x full-tree scan + build`, over a set
+# roughly 7x larger than what the kernel links. On this shared machine a
+# neighbouring session writing ANY file under src/lib -- e.g. the
+# src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_* files another lane rewrites
+# continuously -- aborted a run its edit could not possibly affect. Six lane
+# attempts across two agents died this way; see
+# doc/08_tracking/bug/wm_lane_source_hash_gate_trips_on_foreign_session_bulk_write_2026-08-09.md
+#
+# WHAT IS HASHED NOW: the kernel's real input set, defined two independent ways
+# and UNIONED (a union can only ever be a superset, so it cannot fail open):
+#
+#   (1) IMPORT CLOSURE -- the transitive `use` closure of the actual compiler
+#       inputs: the `--entry` file plus every file under the `--source`
+#       directory build/os/generated. This is the compiler's own definition of
+#       what it compiles. Cross-check: the build reports "5 compiled, 750
+#       cached" = 755 modules; the closure resolves 1,313 files, a superset.
+#       Module resolution mirrors the compiler's rules (`std.` -> src/lib,
+#       tier-relative and tier-fallback lookups, dir/mod.spl, sibling-relative).
+#       Where a module path cannot be resolved exactly, EVERY file whose
+#       basename matches is admitted -- ambiguity always widens the set.
+#
+#   (2) LINKED-SYMBOL REPAIR -- `nm` on the kernel ELF yields the symbols the
+#       artifact genuinely links. Any file OUTSIDE the closure that defines a
+#       linked symbol which NO closure file defines is added. This is the
+#       backstop for a resolver gap: it repairs the closure using the built
+#       artifact itself rather than trusting the resolver. Before this repair
+#       existed the measured gap was 7 symbols; the repair closes it.
+#
+#   (3) All non-.spl inputs (.c/.h/.s/.S/.ld, 193 files) under the same roots,
+#       minus foreign-architecture sources, are hashed unconditionally. They are
+#       few, they are link inputs, and they do not churn.
+#
+# FAIL-CLOSED PROPERTIES (do not weaken any of these):
+#   * An empty or too-small input set is an ERROR, never a pass
+#     (KERNEL_INPUT_MIN_FILES floor + the entry file must be present).
+#   * Any file that hashes to something that is not a sha256 is an ERROR.
+#   * A missing source root is an ERROR.
+#   * The FILE LIST is computed once per run and reused for the before/after
+#     hashes, so a mid-build edit to a listed file always changes the revision.
+#     An edit that adds a new import to a listed file also changes that listed
+#     file's own content, so it is caught too.
+#   * The set is only ever widened by ambiguity, never narrowed.
+KERNEL_SOURCE_ROOTS="src/os src/lib build/os/generated examples/09_embedded/simple_os/arch/x86_64"
+KERNEL_INPUT_LIST="$BUILD_DIR/kernel-input-files.txt"
+KERNEL_INPUT_STATUS_FILE="$BUILD_DIR/kernel-input-status"
+KERNEL_INPUT_COUNT=0
+KERNEL_INPUT_SET_STATUS=unresolved
+KERNEL_INPUT_MIN_FILES="${SIMPLEOS_WM_KERNEL_INPUT_MIN_FILES:-200}"
+# Each invocation resolves the input set from scratch; a stale list from a
+# previous run must never be reused.
+rm -f "$KERNEL_INPUT_LIST" "$KERNEL_INPUT_STATUS_FILE"
+
+set_kernel_input_status() {
+    KERNEL_INPUT_SET_STATUS="$1"
+    printf '%s\n' "$1" >"$KERNEL_INPUT_STATUS_FILE"
+}
+
+kernel_input_closure_awk='
+function addf(p) {
+    if ((p in idx) && !(p in seen)) { seen[p] = 1; q[++qn] = p }
+}
+function try_path(cand,    c) {
+    c = cand
+    sub(/^src\/std\//, "src/lib/", c)
+    if (c in idx) { addf(c); return 1 }
+    return 0
+}
+function resolve(m, dir,    mm, rest, tail, k, nn, parts2, base, cnt, arr, i, t, found) {
+    found = 0
+    if (index(m, ".") == 0) {
+        k = dir "\t" m
+        if (k in sib) { addf(sib[k]); found = 1 }
+    }
+    mm = m; gsub(/\./, "/", mm)
+    if (try_path("src/" mm ".spl")) found = 1
+    if (try_path("src/lib/" mm ".spl")) found = 1
+    if (try_path("src/" mm "/mod.spl")) found = 1
+    if (try_path("src/lib/" mm "/mod.spl")) found = 1
+    rest = mm
+    if (sub(/^std\//, "", rest)) {
+        if (try_path("src/lib/" rest ".spl")) found = 1
+        if (try_path("src/lib/" rest "/mod.spl")) found = 1
+    }
+    tail = rest
+    sub(/^[^\/]+\//, "", tail)
+    for (t in tiers) {
+        if (try_path("src/lib/" t "/" rest ".spl")) found = 1
+        if (try_path("src/lib/" t "/" rest "/mod.spl")) found = 1
+        if (tail != rest) {
+            if (try_path("src/lib/" t "/" tail ".spl")) found = 1
+            if (try_path("src/lib/" t "/" tail "/mod.spl")) found = 1
+        }
+    }
+    if (found) return
+    nn = split(m, parts2, ".")
+    base = parts2[nn]
+    if (base == "mod" && nn > 1) base = parts2[nn - 1]
+    if (base in byBase) {
+        cnt = split(byBase[base], arr, "\t")
+        for (i = 1; i <= cnt; i++) addf(arr[i])
+        return
+    }
+}
+{
+    path = $0
+    idx[path] = 1
+    n = split(path, parts, "/")
+    base = parts[n]
+    sub(/\.spl$/, "", base)
+    dir = substr(path, 1, length(path) - length(parts[n]) - 1)
+    sib[dir "\t" base] = path
+    if (base in byBase) byBase[base] = byBase[base] "\t" path
+    else byBase[base] = path
+    if (path ~ /^build\/os\/generated\//) seeds[path] = 1
+    if (path ~ /^src\/lib\/[^\/]+\//) tiers[parts[3]] = 1
+}
+END {
+    seeds[entry] = 1
+    qn = 0
+    for (p in seeds) addf(p)
+    head = 1
+    while (head <= qn) {
+        f = q[head++]
+        n = split(f, parts, "/")
+        dir = substr(f, 1, length(f) - length(parts[n]) - 1)
+        while ((getline line < f) > 0) {
+            if (line !~ /^[ \t]*use[ \t]/) continue
+            sub(/^[ \t]*use[ \t]+/, "", line)
+            if (match(line, /^[A-Za-z_][A-Za-z0-9_.]*/) == 0) continue
+            m = substr(line, 1, RLENGTH)
+            sub(/\.$/, "", m)
+            resolve(m, dir)
+        }
+        close(f)
+    }
+    for (p in seen) print p
+}
+'
+
+# Files outside the closure that define a linked symbol no closure file defines.
+kernel_input_repair_awk='
+function scan(f,    line, s) {
+    while ((getline line < f) > 0) {
+        if (match(line, /^[ \t]*(pub[ \t]+)?fn[ \t]+[A-Za-z_][A-Za-z0-9_]*/) == 0) continue
+        s = substr(line, RSTART, RLENGTH)
+        sub(/^.*[ \t]/, "", s)
+        if (mode == "inc") incsym[s] = 1
+        else if ((s in linked) && !(s in incsym)) { print f; close(f); return }
+    }
+    close(f)
+}
+BEGIN {
+    while ((getline line < symfile) > 0) linked[line] = 1
+    close(symfile)
+    mode = "inc"
+    while ((getline line < incfile) > 0) scan(line)
+    close(incfile)
+    mode = "out"
+    while ((getline line < outfile) > 0) scan(line)
+    close(outfile)
+}
+'
+
+kernel_input_set_resolve() {
+    # Computes $KERNEL_INPUT_LIST exactly once per run. Echoes the file count
+    # (0 means the input set could not be determined -> caller must ERROR).
+    if [ -s "$KERNEL_INPUT_LIST" ]; then
+        wc -l <"$KERNEL_INPUT_LIST" | tr -d ' '
+        return
+    fi
+    for source_root in $KERNEL_SOURCE_ROOTS; do
         if [ ! -d "$source_root" ]; then
-            echo ""
+            set_kernel_input_status "missing-root:$source_root"
+            echo 0
             return
         fi
     done
-    manifest="$(mktemp "$BUILD_DIR/kernel-source-manifest.XXXXXX")" || {
-        echo ""
+    work="$(mktemp -d "$BUILD_DIR/kernel-input.XXXXXX")" || { echo 0; return; }
+    find $KERNEL_SOURCE_ROOTS -type f -name '*.spl' -print \
+        | LC_ALL=C sort -u >"$work/index"
+    awk -v entry="$ENTRY" "$kernel_input_closure_awk" "$work/index" \
+        | LC_ALL=C sort -u >"$work/closure"
+    if [ ! -s "$work/closure" ]; then
+        set_kernel_input_status closure-empty
+        rm -rf "$work"
+        echo 0
         return
-    }
-    # Scope: the kernel's real input set. Everything the x86_64 artifact can
-    # link stays IN (all of src/os, all of src/lib, the generated source root,
-    # and the x86_64 example dir). The ONLY prune is source belonging to a
-    # FOREIGN target architecture, which a `--target x86_64-unknown-none` build
-    # cannot link.
-    #
-    # Why the prune is required: this is a shared working tree. A concurrent
-    # aarch64 lane rewrites src/os/kernel/boot/limine_boot_aarch64.spl every
-    # ~90s; because the pre-build and post-build revisions bracket a ~150s
-    # build plus two full-tree scans, an unrelated arch edit tripped
-    # `wm-simple-web-build-source-changed` on essentially every run, so the
-    # gate could never admit a kernel regardless of WM correctness.
-    #
-    # Why the prune is SAFE (measured, not assumed): `nm` over an admitted
-    # build/simpleos_wm_production_desktop.elf shows 0 of the 96 pruned files
-    # contribute a single symbol. Every arch-flavoured symbol in the kernel
-    # (EM_AARCH64, SIMPLEOS_HOST_GPU_ISA_RISCV64, rt_arm64_user_as_*, ...) comes
-    # from an arch-NEUTRAL module that is still hashed here.
-    #
-    # This prune is deliberately narrow and structural. Anything else that
-    # churns mid-build -- including any src/lib edit -- still refuses, because
-    # such a file genuinely can change the artifact. Do not widen this.
-    find src/os src/lib build/os/generated examples/09_embedded/simple_os/arch/x86_64 \
-        -type f \( -name '*.spl' -o -name '*.c' -o -name '*.h' -o -name '*.s' -o -name '*.S' -o -name '*.ld' \) \
+    fi
+    LC_ALL=C comm -23 "$work/index" "$work/closure" >"$work/outside"
+    : >"$work/repair"
+    repair_elf=""
+    for elf_candidate in "$KERNEL_OUTPUT" "$KERNEL_CANDIDATE"; do
+        [ -n "$elf_candidate" ] && [ -s "$elf_candidate" ] && { repair_elf="$elf_candidate"; break; }
+    done
+    if [ -n "$repair_elf" ] && command -v nm >/dev/null 2>&1 && \
+       nm --defined-only "$repair_elf" 2>/dev/null | awk '{print $NF}' \
+           | LC_ALL=C sort -u >"$work/syms" && [ -s "$work/syms" ]; then
+        awk -v symfile="$work/syms" -v incfile="$work/closure" \
+            -v outfile="$work/outside" "$kernel_input_repair_awk" \
+            </dev/null >"$work/repair" 2>/dev/null || : >"$work/repair"
+        set_kernel_input_status "closure+linked-symbol-repair"
+    else
+        set_kernel_input_status "closure-only-no-kernel-elf"
+    fi
+    find $KERNEL_SOURCE_ROOTS -type f \
+        \( -name '*.c' -o -name '*.h' -o -name '*.s' -o -name '*.S' -o -name '*.ld' \) \
         ! -path '*/arch/aarch64/*' ! -path '*/arch/arm64/*' ! -path '*/arch/arm/*' \
         ! -path '*/arch/riscv/*' ! -path '*/arch/riscv32/*' ! -path '*/arch/riscv64/*' \
         ! -path '*/arch/wasm/*' ! -path '*/arch/wasm32/*' ! -path '*/arch/wasm64/*' \
         ! -name '*_aarch64.*' ! -name '*_arm64.*' ! -name '*_riscv.*' \
         ! -name '*_riscv32.*' ! -name '*_riscv64.*' ! -name '*_wasm.*' \
-        -print | LC_ALL=C sort | while IFS= read -r source_path; do
-            source_sha256="$(file_sha256 "$source_path")"
-            if is_sha256 "$source_sha256"; then
-                printf '%s  %s\n' "$source_sha256" "$source_path"
-            else
-                printf 'invalid  %s\n' "$source_path"
-            fi
-        done >"$manifest"
-    if grep -q '^invalid  ' "$manifest"; then
+        -print >"$work/nonspl"
+    {
+        cat "$work/closure" "$work/repair" "$work/nonspl"
+        printf '%s\n' "$ENTRY" "$LINKER_SCRIPT"
+    } | LC_ALL=C sort -u >"$work/list"
+    # Fail closed: the entry must be in its own input set, and a plausible
+    # input set is never a handful of files.
+    if ! grep -Fxq "$ENTRY" "$work/list"; then
+        set_kernel_input_status entry-not-in-input-set
+        rm -rf "$work"
+        echo 0
+        return
+    fi
+    resolved_count="$(wc -l <"$work/list" | tr -d ' ')"
+    if [ "$resolved_count" -lt "$KERNEL_INPUT_MIN_FILES" ]; then
+        set_kernel_input_status "below-min-files:$resolved_count"
+        rm -rf "$work"
+        echo 0
+        return
+    fi
+    mv "$work/list" "$KERNEL_INPUT_LIST"
+    rm -rf "$work"
+    echo "$resolved_count"
+}
+
+kernel_source_revision() {
+    # Echoes "<file-count> <sha256>". An empty sha256 (or a zero count) means
+    # the input set could not be determined -> the caller must ERROR/BLOCK.
+    input_count="$(kernel_input_set_resolve)"
+    if [ -z "$input_count" ] || [ "$input_count" -le 0 ] || [ ! -s "$KERNEL_INPUT_LIST" ]; then
+        printf '0 \n'
+        return
+    fi
+    manifest="$(mktemp "$BUILD_DIR/kernel-source-manifest.XXXXXX")" || {
+        printf '0 \n'
+        return
+    }
+    while IFS= read -r source_path; do
+        source_sha256="$(file_sha256 "$source_path")"
+        if is_sha256 "$source_sha256"; then
+            printf '%s  %s\n' "$source_sha256" "$source_path"
+        else
+            printf 'invalid  %s\n' "$source_path"
+        fi
+    done <"$KERNEL_INPUT_LIST" >"$manifest"
+    manifest_lines="$(wc -l <"$manifest" | tr -d ' ')"
+    if grep -q '^invalid  ' "$manifest" || [ "$manifest_lines" -ne "$input_count" ]; then
         revision=""
+        input_count=0
     else
         revision="$(file_sha256 "$manifest")"
     fi
     rm -f "$manifest"
-    echo "$revision"
+    printf '%s %s\n' "$input_count" "$revision"
+}
+
+sample_kernel_source_revision() {
+    # Sets KERNEL_SOURCE_REVISION + KERNEL_INPUT_COUNT from one sampling.
+    revision_pair="$(kernel_source_revision)"
+    KERNEL_INPUT_COUNT="${revision_pair%% *}"
+    KERNEL_SOURCE_REVISION="${revision_pair#* }"
+    case "$KERNEL_INPUT_COUNT" in
+        ''|*[!0-9]*) KERNEL_INPUT_COUNT=0 ;;
+    esac
+    if [ -s "$KERNEL_INPUT_STATUS_FILE" ]; then
+        KERNEL_INPUT_SET_STATUS="$(head -n 1 "$KERNEL_INPUT_STATUS_FILE")"
+    fi
+}
+
+kernel_input_verdict() {
+    # The pre-push-guard convention: a passing verdict always states how many
+    # files it actually hashed, so a vacuous run cannot look like a real one.
+    case "$1" in
+        pass)
+            echo "simpleos_wm_kernel_input_verdict=PASS — $KERNEL_INPUT_COUNT file(s) hashed (set=$KERNEL_INPUT_SET_STATUS, revision=$KERNEL_SOURCE_REVISION)"
+            ;;
+        changed)
+            echo "simpleos_wm_kernel_input_verdict=FAIL — kernel input source changed during build ($KERNEL_INPUT_COUNT file(s) hashed, set=$KERNEL_INPUT_SET_STATUS)"
+            ;;
+        *)
+            echo "simpleos_wm_kernel_input_verdict=ERROR — nothing was checked (kernel input set unresolved: $KERNEL_INPUT_SET_STATUS)"
+            ;;
+    esac
 }
 
 regular_file_status() {
@@ -480,6 +727,8 @@ emit_failure() {
         echo "simpleos_wm_fullscreen_kernel_sha256=$KERNEL_SHA256"
         echo "simpleos_wm_fullscreen_kernel_admission=$KERNEL_ADMISSION"
         echo "simpleos_wm_fullscreen_kernel_admission_sha256=$(file_sha256 "$KERNEL_ADMISSION")"
+        echo "simpleos_wm_fullscreen_kernel_source_input_files=$KERNEL_INPUT_COUNT"
+        echo "simpleos_wm_fullscreen_kernel_source_input_set=$KERNEL_INPUT_SET_STATUS"
         echo "simpleos_wm_fullscreen_kernel_source_revision_sha256=$KERNEL_SOURCE_REVISION"
         echo "simpleos_wm_fullscreen_kernel_build_status=$KERNEL_BUILD_STATUS"
         echo "simpleos_wm_fullscreen_native_build_timeout_seconds=$NATIVE_BUILD_TIMEOUT_SECONDS"
@@ -635,7 +884,7 @@ KERNEL_OUTPUT="${SIMPLEOS_WM_KERNEL_ARTIFACT:-$BUILD_DIR/simpleos_wm_production_
 KERNEL_CANDIDATE="$KERNEL_OUTPUT.candidate"
 KERNEL_ADMISSION="$KERNEL_OUTPUT.admission"
 if [ -z "${SIMPLEOS_WM_KERNEL_ARTIFACT:-}" ] && [ -f "$KERNEL_OUTPUT" ]; then
-    KERNEL_SOURCE_REVISION="$(kernel_source_revision)"
+    sample_kernel_source_revision
 fi
 
 if [ ! -f "$ENTRY" ]; then
@@ -662,6 +911,8 @@ elif ! is_sha256 "$KERNEL_SOURCE_REVISION" || \
      ! grep -Fxq "wrapper_sha256=$WRAPPER_SHA256" "$KERNEL_ADMISSION" || \
      ! grep -Fxq "simple_bin_sha256=$SIMPLE_BIN_SHA256" "$KERNEL_ADMISSION" || \
      ! grep -Fxq "profile=cranelift|x86-64-v1|none|dynload" "$KERNEL_ADMISSION" || \
+     ! grep -Fxq "schema=simpleos-wm-kernel-admission-v2" "$KERNEL_ADMISSION" || \
+     ! grep -Fxq "source_input_files=$KERNEL_INPUT_COUNT" "$KERNEL_ADMISSION" || \
      ! grep -Fxq "source_revision_sha256=$KERNEL_SOURCE_REVISION" "$KERNEL_ADMISSION" || \
      ! grep -Fxq "kernel_sha256=$(file_sha256 "$KERNEL_OUTPUT")" "$KERNEL_ADMISSION"; then
     kernel_stale=true
@@ -688,9 +939,10 @@ fn simpleos_log_compile_mode_name() -> text:
         return "on"
     "off"
 SPL
-    KERNEL_SOURCE_REVISION="$(kernel_source_revision)"
-    if ! is_sha256 "$KERNEL_SOURCE_REVISION"; then
+    sample_kernel_source_revision
+    if ! is_sha256 "$KERNEL_SOURCE_REVISION" || [ "$KERNEL_INPUT_COUNT" -lt "$KERNEL_INPUT_MIN_FILES" ]; then
         KERNEL_BUILD_STATUS=source-revision-unavailable
+        kernel_input_verdict error
         emit_failure "wm-simple-web-source-revision-unavailable"
         exit 1
     fi
@@ -746,20 +998,34 @@ SPL
         emit_failure "artifact-sha256-invalid"
         exit 1
     fi
-    source_revision_after="$(kernel_source_revision)"
+    # Re-hash the SAME input file list (computed once, before the build) so a
+    # mid-build edit to any linked input still refuses.
+    revision_pair_after="$(kernel_source_revision)"
+    input_count_after="${revision_pair_after%% *}"
+    source_revision_after="${revision_pair_after#* }"
+    if ! is_sha256 "$source_revision_after" || [ "$input_count_after" != "$KERNEL_INPUT_COUNT" ]; then
+        rm -f "$KERNEL_CANDIDATE"
+        KERNEL_BUILD_STATUS=source-input-set-unresolved-cache-preserved
+        kernel_input_verdict error
+        emit_failure "wm-simple-web-source-revision-unavailable"
+        exit 1
+    fi
     if [ "$source_revision_after" != "$KERNEL_SOURCE_REVISION" ]; then
         rm -f "$KERNEL_CANDIDATE"
         KERNEL_BUILD_STATUS=source-changed-cache-preserved
+        kernel_input_verdict changed
         emit_failure "wm-simple-web-build-source-changed"
         exit 1
     fi
+    kernel_input_verdict pass
     mv "$KERNEL_CANDIDATE" "$KERNEL_OUTPUT"
     KERNEL_SHA256="$candidate_sha256"
     {
-        echo "schema=simpleos-wm-kernel-admission-v1"
+        echo "schema=simpleos-wm-kernel-admission-v2"
         echo "wrapper_sha256=$WRAPPER_SHA256"
         echo "simple_bin_sha256=$SIMPLE_BIN_SHA256"
         echo "profile=cranelift|x86-64-v1|none|dynload"
+        echo "source_input_files=$KERNEL_INPUT_COUNT"
         echo "source_revision_sha256=$KERNEL_SOURCE_REVISION"
         echo "kernel_sha256=$KERNEL_SHA256"
     } >"$KERNEL_ADMISSION.candidate"
@@ -767,6 +1033,7 @@ SPL
     KERNEL_BUILD_STATUS=current-source-built
 elif [ -z "${SIMPLEOS_WM_KERNEL_ARTIFACT:-}" ]; then
     KERNEL_BUILD_STATUS=current-source-cache
+    kernel_input_verdict pass
 fi
 
 KERNEL_SHA256="$(file_sha256 "$KERNEL_OUTPUT")"
@@ -1549,6 +1816,8 @@ fi
     echo "simpleos_wm_fullscreen_kernel_sha256=$KERNEL_SHA256"
     echo "simpleos_wm_fullscreen_kernel_admission=$KERNEL_ADMISSION"
     echo "simpleos_wm_fullscreen_kernel_admission_sha256=$(file_sha256 "$KERNEL_ADMISSION")"
+    echo "simpleos_wm_fullscreen_kernel_source_input_files=$KERNEL_INPUT_COUNT"
+    echo "simpleos_wm_fullscreen_kernel_source_input_set=$KERNEL_INPUT_SET_STATUS"
     echo "simpleos_wm_fullscreen_kernel_source_revision_sha256=$KERNEL_SOURCE_REVISION"
     echo "simpleos_wm_fullscreen_kernel_build_status=$KERNEL_BUILD_STATUS"
     echo "simpleos_wm_fullscreen_native_build_timeout_seconds=$NATIVE_BUILD_TIMEOUT_SECONDS"
