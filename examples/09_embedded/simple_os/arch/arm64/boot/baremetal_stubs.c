@@ -1136,6 +1136,7 @@ static void _pl011_init(void)
 }
 
 extern void spl_start(void) __attribute__((weak));
+extern void __simple_call_module_inits(void) __attribute__((weak));
 
 void _c_start(void)
 {
@@ -1171,6 +1172,12 @@ void _c_start(void)
         serial_puts(" class="); serial_puthex(_pci_cache[i].cls);
         serial_puts("."); serial_puthex(_pci_cache[i].sub);
         serial_puts("\r\n");
+    }
+
+    if (__simple_call_module_inits) {
+        serial_puts("[BOOT] Calling Simple module initializers...\r\n");
+        __simple_call_module_inits();
+        serial_puts("[BOOT] Simple module initializers complete\r\n");
     }
 
     if (spl_start) {
