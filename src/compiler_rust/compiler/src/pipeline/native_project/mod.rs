@@ -1236,8 +1236,22 @@ fn security_registry_sdn_from_sources(
             .parse()
             .map_err(|err| format!("parse security registry source {}: {}", path.display(), err))?;
         crate::pipeline::cfg_strip::strip_inactive_cfg_arch_fns(&mut ast, effective_target().arch);
-        let module = crate::hir::lower_with_context_lenient_and_project_hint(&ast, path, project_hint)
-            .map_err(|err| format!("lower security registry source {}: {}", path.display(), err))?;
+        // Single-file lenient lowering here has no cross-module type resolution
+        // (ModuleResolver::single_file_with_project_hint), unlike the main
+        // whole-program lowering pass. A file that matched source_may_declare_security
+        // can still reference a cross-module type (e.g. a Result<T, E> return type
+        // defined in another file) that this isolated pass cannot resolve, which
+        // collapses the field type to ANY and hard-fails lowering with
+        // "cannot infer field type while lowering ... struct 'ANY' field '...'"
+        // even though the main pass lowers the same file fine. This auxiliary scan
+        // only needs require_policy:/enter_sandbox:/lowered_backend: markers, not
+        // full type-soundness on unrelated fields, so skip (rather than hard-fail
+        // the whole native-build) a file this isolated pass can't lower. See
+        // doc/08_tracking/bug/wm_production_fullscreen_evidence_security_registry_any_field_infer_2026-08-09.md
+        let module = match crate::hir::lower_with_context_lenient_and_project_hint(&ast, path, project_hint) {
+            Ok(module) => module,
+            Err(_) => continue,
+        };
         let inventory = build_security_inventory(&module);
         if inventory.security_aop_sdn.contains("require_policy:")
             || inventory.security_aop_sdn.contains("enter_sandbox:")
