@@ -1,6 +1,6 @@
 # InterpreterBackendImpl.process_module fails on ANY module with a user-to-user function call
 
-Status: OPEN (RED, blocking)
+Status: FIXED 2026-08-09 (see "RESOLVED" section at the end)
 Found: 2026-08-09, while verifying `test/01_unit/compiler/semantics/aspect_weave_spec.spl`
 (C3 static-weave codegen, `src/compiler/35.semantics/aspect_weave.spl`).
 
@@ -82,3 +82,67 @@ RED") they were left failing rather than weakened or routed around.
 - Re-run `aspect_weave_spec.spl`; examples 2-4 should go green once this
   underlying defect is fixed, with no changes needed to
   `aspect_weave.spl` itself.
+
+---
+
+## RESOLVED 2026-08-09 — root cause was `70.backend/backend/env.spl`, two defects
+
+Fixed in `src/compiler/70.backend/backend/env.spl` (pure Simple; the Rust seed
+was NOT touched). Two independent defects, both in `Environment`, both only
+reachable once a second scope exists — i.e. inside a function call frame,
+which is exactly why a single-function module passed and any user-to-user
+call failed:
+
+1. **Doubly-indexed assignment target.** `Environment.define` wrote
+   `self.scopes[last_idx][name] = value`, and `Environment.assign` wrote
+   `self.scopes[i][name] = value`. An index assignment whose CONTAINER is
+   itself an `Index` expression is not a supported assignment target — the
+   interpreter accepts only an identifier or a field access there — so
+   evaluating `define` aborted with the reported
+   `invalid assignment: index assignment requires identifier or field access
+   as container` on the very first parameter bind of the callee. Rewritten as
+   read-modify-write through a typed local (`var scope = self.scopes[i]` /
+   `scope[name] = value` / `self.scopes[i] = scope`); the write-back is
+   required because dicts/arrays are value types here.
+
+2. **Descending inclusive range iterated zero times.** `Environment.lookup`
+   and `Environment.assign` both searched inner scopes with
+   `for i in (self.scopes.len() - 1)..=0:`. A descending `a..=b` (a > b) is
+   an EMPTY range, so both loops ran zero iterations as soon as
+   `scopes.len() > 1` — every lookup of a function parameter missed and fell
+   through to globals, surfacing as `invalid operands for +` once defect 1
+   was fixed. Rewritten as an explicit counted-down `while i >= 0` loop.
+   These were the only two `..=0` ranges in `src/`.
+
+### Verification (binary: Rust bootstrap seed `bin/simple`, which prints the
+seed warning banner; compiler `.spl` edits are live on this interpreter path)
+
+* Minimal repro (`fn f(n)` + `fn main(): f(41)`), plus a 3-function chain and
+  a chain with an uncalled sibling function: 1/4 passed before, 4/4 after.
+* `test/01_unit/compiler/semantics/aspect_weave_spec.spl`:
+  `passed=2 failed=3` -> `passed=3 failed=2`. The example this bug directly
+  blocked — *"the woven advice call actually EXECUTES: the tripwire fires"* —
+  now passes.
+* Sabotage: reverting `env.spl` to its pre-fix content reproduced exactly
+  `passed=2 failed=3` on the weave spec and `passed=1 failed=3` on the repro;
+  restoring it returned both to the numbers above.
+* Regressions, all unchanged or green:
+  `backend/interpreter_mode_spec` 4/4, `backend/interpreter_strict_mem_spec`
+  9/9, `backend/jit_interpreter_spec` 8/8,
+  `semantics/aspect_join_point_spec` 10/10, `semantics/const_eval_spec` 2/2,
+  `semantics/call_graph_spec` 1/1. `backend/interpreter_backend_spec` is
+  `passed=9 failed=2` both WITH and WITHOUT the fix — those 2 are
+  pre-existing and unrelated.
+
+### Still open (separate defects, NOT this bug)
+
+* The remaining 2 `aspect_weave_spec` failures ("does NOT weave ... wrong
+  join-point kind" / "... unmatched selector") are a DIFFERENT defect.
+  Probing `process_module` directly on the byte-identical `SRC_WRONG_KIND`
+  source returns Ok, so the failure is introduced somewhere in the spec's
+  `weave_forward_advice(modules)` / `Dict<text, HirModule>` round-trip, not
+  in the interpreter backend. Needs its own bug.
+* `Environment.pop_scope` (`env.spl:119-121`) calls `self.scopes.pop()` and
+  DISCARDS the result. Arrays are value types, so the pop is a no-op and
+  call-frame scopes are never actually torn down. Left unchanged here to keep
+  this fix scoped; worth its own bug + fix.
