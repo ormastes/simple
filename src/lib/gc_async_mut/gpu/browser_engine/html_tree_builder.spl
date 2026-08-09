@@ -193,20 +193,20 @@ fn _apply_attrs(node: BeDomNode, attrs: [HtmlAttr]) -> BeDomNode:
     n
 
 fn _token_would_create_node(
-    tok: HtmlToken, in_body: bool, in_script: bool,
+    kind_id: i32, tag: text, data: text,
+    in_body: bool, in_script: bool,
     skipped_raw_text_tag: text
 ) -> bool:
-    if tok.token_kind == HtmlTokenKind.StartTag:
-        val tag = tok.tag_name
+    if kind_id == 1:
         if tag == "html" or tag == "head" or tag == "body":
             return false
         return tag != "style" and tag != "noscript"
-    if tok.token_kind == HtmlTokenKind.EndTag:
-        return tok.tag_name == "script" and in_script
-    if tok.token_kind == HtmlTokenKind.Character:
+    if kind_id == 2:
+        return tag == "script" and in_script
+    if kind_id == 3:
         if in_script or skipped_raw_text_tag != "":
             return false
-        return in_body or tok.data.trim().len() > 0
+        return in_body or data.trim().len() > 0
     false
 
 pub class TreeBuilderResult:
@@ -373,18 +373,8 @@ fn _html_tree_builder_build_with_parse_limits_and_projection(
     var ti = 0
     while ti < ntok:
         val flat_kind = token_kind_ids[ti]
-        val token_kind = if flat_kind == 0:
-            HtmlTokenKind.Doctype
-        elif flat_kind == 1:
-            HtmlTokenKind.StartTag
-        elif flat_kind == 2:
-            HtmlTokenKind.EndTag
-        elif flat_kind == 3:
-            HtmlTokenKind.Character
-        elif flat_kind == 4:
-            HtmlTokenKind.Comment
-        else:
-            HtmlTokenKind.Eof
+        val token_tag = token_tags[ti]
+        val token_text = token_data[ti]
         var reconstructed_attrs: [HtmlAttr] = []
         var attr_i = token_attr_offsets[ti]
         val attr_end = token_attr_offsets[ti + 1]
@@ -394,70 +384,64 @@ fn _html_tree_builder_build_with_parse_limits_and_projection(
                 value: token_attr_values[attr_i]
             ))
             attr_i = attr_i + 1
-        val tok = HtmlToken(
-            token_kind: token_kind,
-            tag_name: token_tags[ti],
-            attrs: reconstructed_attrs,
-            self_closing: token_self_closing_ids[ti] == 1,
-            data: token_data[ti]
-        )
         if (next_node_id > node_limit and _token_would_create_node(
-            tok, in_body, in_script, skipped_raw_text_tag
+            flat_kind, token_tag, token_text,
+            in_body, in_script, skipped_raw_text_tag
         )):
             truncated = true
             ti = ntok
             continue
         ti = ti + 1
 
-        if tok.token_kind == HtmlTokenKind.Eof:
+        if flat_kind == 5:
             ti = ntok
 
-        elif tok.token_kind == HtmlTokenKind.Doctype:
+        elif flat_kind == 0:
             pass_dn
 
-        elif tok.token_kind == HtmlTokenKind.Comment:
+        elif flat_kind == 4:
             pass_dn
 
-        elif tok.token_kind == HtmlTokenKind.StartTag:
-            val t = tok.tag_name
+        elif flat_kind == 1:
+            val t = token_tag
 
             if t == "html":
                 val html_idx = stack.find_tag("html")
                 if html_idx >= 0:
                     stack.nodes[html_idx] = _apply_attrs(
-                        stack.nodes[html_idx], tok.attrs
+                        stack.nodes[html_idx], reconstructed_attrs
                     )
 
             elif t == "head":
                 val head_idx = stack.find_tag("head")
                 if head_idx >= 0:
                     stack.nodes[head_idx] = _apply_attrs(
-                        stack.nodes[head_idx], tok.attrs
+                        stack.nodes[head_idx], reconstructed_attrs
                     )
 
             elif t == "body":
                 if not in_body:
                     # Pop head, push body
                     stack.close_top()
-                    stack.push_open(_apply_attrs(body_el, tok.attrs))
+                    stack.push_open(_apply_attrs(body_el, reconstructed_attrs))
                     in_body = true
                 else:
                     val body_idx = stack.find_tag("body")
                     if body_idx >= 0:
                         stack.nodes[body_idx] = _apply_attrs(
-                            stack.nodes[body_idx], tok.attrs
+                            stack.nodes[body_idx], reconstructed_attrs
                         )
 
             elif t == "title":
                 val title_raw = BeDomNode.element_with_id(next_node_id, t)
                 next_node_id = next_node_id + 1
-                stack.push_open(_apply_attrs(title_raw, tok.attrs))
+                stack.push_open(_apply_attrs(title_raw, reconstructed_attrs))
 
             elif t == "meta" or t == "link" or t == "base":
                 # head elements — add to top of stack as void children
                 val he_raw = BeDomNode.element_with_id(next_node_id, t)
                 next_node_id = next_node_id + 1
-                val he = _apply_attrs(he_raw, tok.attrs)
+                val he = _apply_attrs(he_raw, reconstructed_attrs)
                 stack.append_child(he)
 
             elif t == "script":
@@ -472,15 +456,15 @@ fn _html_tree_builder_build_with_parse_limits_and_projection(
                 # Check for src attribute
                 script_src = ""
                 var sa = 0
-                while sa < tok.attrs.len():
-                    val attr = tok.attrs[sa]
+                while sa < reconstructed_attrs.len():
+                    val attr = reconstructed_attrs[sa]
                     if attr.name == "src":
                         script_src = attr.value
                     sa = sa + 1
                 # Push script element onto stack
                 val script_el = BeDomNode.element_with_id(next_node_id, "script")
                 next_node_id = next_node_id + 1
-                val script_node = _apply_attrs(script_el, tok.attrs)
+                val script_node = _apply_attrs(script_el, reconstructed_attrs)
                 stack.push_open(script_node)
 
             elif t == "style" or t == "noscript":
@@ -518,7 +502,7 @@ fn _html_tree_builder_build_with_parse_limits_and_projection(
                 if _is_void(t):
                     val vn_raw = BeDomNode.element_with_id(next_node_id, t)
                     next_node_id = next_node_id + 1
-                    val vnode = _apply_attrs(vn_raw, tok.attrs)
+                    val vnode = _apply_attrs(vn_raw, reconstructed_attrs)
                     if in_table_ctx and not is_table_content:
                         stack.foster_append(vnode)
                     else:
@@ -527,16 +511,16 @@ fn _html_tree_builder_build_with_parse_limits_and_projection(
                     # Foster-parent non-table elements that appear inside table context
                     val fp_raw = BeDomNode.element_with_id(next_node_id, t)
                     next_node_id = next_node_id + 1
-                    val fp_el = _apply_attrs(fp_raw, tok.attrs)
+                    val fp_el = _apply_attrs(fp_raw, reconstructed_attrs)
                     stack.foster_push_open(fp_el)
                 else:
                     val el_raw = BeDomNode.element_with_id(next_node_id, t)
                     next_node_id = next_node_id + 1
-                    val new_el = _apply_attrs(el_raw, tok.attrs)
+                    val new_el = _apply_attrs(el_raw, reconstructed_attrs)
                     stack.push_open(new_el)
 
-        elif tok.token_kind == HtmlTokenKind.EndTag:
-            val et = tok.tag_name
+        elif flat_kind == 2:
+            val et = token_tag
             if et == "script" and in_script:
                 # M15: Close script tag — collect content
                 in_script = false
@@ -563,8 +547,8 @@ fn _html_tree_builder_build_with_parse_limits_and_projection(
             elif stack.find_tag(et) >= 0:
                 stack.close_through(et)
 
-        elif tok.token_kind == HtmlTokenKind.Character:
-            val data = tok.data
+        elif flat_kind == 3:
+            val data = token_text
             # M15: Accumulate text inside <script> tags
             if in_script:
                 script_content = "{script_content}{data}"
