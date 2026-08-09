@@ -20,6 +20,11 @@ int64_t rt_arm64_syscall(uint64_t id, uint64_t arg0, uint64_t arg1,
     return (int64_t)x0;
 }
 
+uint8_t rt_copy_user_byte(uint64_t ptr_addr)
+{
+    return *(const volatile uint8_t *)(uintptr_t)ptr_addr;
+}
+
 #define PL011_BASE   0x09000000ULL
 #define BAREMETAL_PL011_ENABLE_DIRECT_PUTS 1
 #include "../../common/baremetal_pl011_serial.h"
@@ -854,6 +859,11 @@ RuntimeValue rt_bytes_to_text(RuntimeValue arr_rv)
     }
     s->data[a->len] = '\0';
     return ENCODE_PTR(s);
+}
+
+RuntimeValue rt_string_from_byte_array(RuntimeValue arr_rv)
+{
+    return rt_bytes_to_text(arr_rv);
 }
 
 /* bytes_to_string is the same conversion as rt_bytes_to_text */
