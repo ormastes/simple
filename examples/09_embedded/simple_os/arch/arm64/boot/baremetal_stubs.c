@@ -2752,6 +2752,8 @@ static RuntimeArray *g_gui_prepared_packed_keys[GUI_PREPARED_PACKED_CACHE_SLOTS]
 static uint64_t g_gui_prepared_packed_lens[GUI_PREPARED_PACKED_CACHE_SLOTS];
 static uint32_t g_gui_prepared_packed_pixels
     [GUI_PREPARED_PACKED_CACHE_SLOTS][GUI_PREPARED_PACKED_CACHE_PIXELS];
+static uint32_t g_gui_prepared_packed_misses = 0;
+static uint32_t g_gui_prepared_packed_full = 0;
 
 RuntimeValue rt_gui_set_fb(RuntimeValue addr, RuntimeValue w)
 {
@@ -2828,9 +2830,21 @@ static const uint32_t *rt_gui_prepared_packed_pixels(RuntimeArray *pixels)
                     arm64_blit_raw_pixel(pixels->items[i]);
             g_gui_prepared_packed_lens[slot] = pixels->len;
             g_gui_prepared_packed_keys[slot] = pixels;
+            g_gui_prepared_packed_misses++;
+            serial_puts("[engine2d-packed-cache] result=miss slot=");
+            serial_put_dec((int64_t)slot);
+            serial_puts(" len=");
+            serial_put_dec((int64_t)pixels->len);
+            serial_puts("\r\n");
             return g_gui_prepared_packed_pixels[slot];
         }
     }
+    if (g_gui_prepared_packed_full == 0) {
+        serial_puts("[engine2d-packed-cache] result=full misses=");
+        serial_put_dec((int64_t)g_gui_prepared_packed_misses);
+        serial_puts("\r\n");
+    }
+    g_gui_prepared_packed_full++;
     return NULL;
 }
 
