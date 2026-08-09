@@ -1,4 +1,4 @@
-# `native-build` MIR lowering: cross-module `Result<T, E>` payload struct-name recovery collides/misses across modules — 4th/5th layer RESOLVED, 6th/7th layer surfaced (still open, root cause narrowed to a SymbolTable id-divergence between HIR- and MIR-lowering-time views)
+# `native-build` MIR lowering: cross-module `Result<T, E>` payload struct-name recovery collides/misses across modules — 4th/5th/7th layer RESOLVED (6th layer's leads were dead ends; see 7th layer for the real root cause and fix)
 
 ## Summary
 
@@ -495,3 +495,88 @@ bisection needed; what remains is the id-divergence root cause, not scale)
 3. Once the true duplicate-invocation source is fixed at its root, re-run
    the fast repro above, then the full 18-minute `rt_io_file_roundtrip`
    closure, to finally get the `rt_io_file_*` AOT stub/no-stub verdict.
+
+## 7th layer (2026-08-09b): FIXED — the actual site was MIR, not HIR
+
+Picked up exactly where the 6th layer left off. Root-caused via tightly
+module-filtered (`self.module_filename.ends_with("main.spl")`), env-gated
+(`SIMPLE_L6_DIAG=1`) instrumentation on the fast 2-file repro only (never run
+against the full closure or bootstrap; peak log volume observed was single
+digits of lines, nowhere near the prior session's ENOSPC-causing runaway) —
+and this time the trail led to **MIR lowering**
+(`50.mir/_MirLoweringExpr/switch_operators_calls.spl`'s
+`scrutinee_payload_struct` computation), not HIR's `lower_named_kind`/
+`imported_surface_type*` (the 6th layer's leads there were dead ends: direct
+instrumentation showed `lookup_qualified_type_raw` never resolves "FileHandle"
+by name at all for this repro's shape — `Result<FileHandle, text>`'s
+declared-type projection only ever looks up the OUTER `"Result"` name, which
+isn't a qualified type, so it falls through to plain `lower_type`, and
+`lower_named_kind` is reached zero times while lowering `main.spl`, exactly
+matching the prior session's own observation).
+
+**Confirmed root cause, empirically, via direct instrumentation of the actual
+resolution chain** (`enum_match_expr_type` -> `resolved_call_hir_return_type`
+-> the `scrutinee_payload_struct` computation in
+`switch_operators_calls.spl`):
+
+- `resolved_call_hir_return_type`'s name-keyed registry
+  (`bootstrap_fn_ret_hir_type_register`/`_lookup`, the existing 5th-layer
+  fix) correctly answers `FileHandle.open`'s OUTER return type as
+  `HirTypeKind.Result(ok_type, err_type)` cross-module -- this part already
+  worked, matching the 6th layer's step 2 finding.
+- But `ok_type` is still `HirTypeKind.Named(SymbolId)`, and that `SymbolId`
+  is the one captured when `fh_mod.spl` lowered `open`'s declaration --
+  **valid only in `fh_mod.spl`'s own per-module `SymbolTable`**, because
+  entry-closure lowering replaces the active `SymbolTable` for every module
+  (a fact `_MirLowering/module_lowering.spl` already documents in a comment
+  near `lower_module`'s `struct_method_syms` reset: *"Entry-closure lowering
+  reuses one MirLowering while replacing its active SymbolTable for every
+  module. Method SymbolIds are therefore module-local state and must not
+  survive that boundary."* -- true for `struct_method_syms`, but the SAME
+  hazard was NOT closed for a `Result` return type's embedded `ok_type`
+  `SymbolId`).
+- Direct measurement on the repro: `rpt_sym.id = 1`. Read against
+  `main.spl`'s own captured `self.symbols` (correct for THAT module, since
+  `main.spl` independently registers "FileHandle" at id `0` and "close" at
+  id `1` while importing/registering the type's methods), id `1` resolves
+  to `SymbolKind::Method` named `"...fh_mod.FileHandle::close"` -- NOT the
+  `FileHandle` class. `recv_type_sym.id = 0` (the correctly-resolved
+  `FileHandle` class symbol used by the static-call fallback) confirms `0`
+  is the real class id in `main.spl`'s table, so `1` (whatever `fh_mod.spl`'s
+  own table happened to number the class as) collided with an unrelated
+  method in `main.spl`'s independent numbering.
+
+**Fix landed** (commit `26ab53a1aa42cc3dee51d347ddc7617ffd03bb33`): register
+the Ok payload's struct/class **NAME** (not `SymbolId`) in a new name-keyed
+`bootstrap_fn_ret_ok_shape_register`/`_lookup` registry
+(`50.mir/mir_data.spl`), populated at MIR prescan time in
+`_MirLowering/module_lowering.spl` while `module.symbols` is still the
+DEFINING module's own self-consistent table (mirrors the pattern already
+used for `bootstrap_fn_ret_shape_register`, which solves the identical
+problem for a callee's TOP-LEVEL `Named` return type but never covered the
+INNER `ok_type` of a `Result`-kind return). Consumed via two new methods --
+`resolved_call_result_ok_shape` (`expr_dispatch.spl`) and
+`result_variant_payload_struct_name` (`switch_operators_calls.spl`, which
+mirrors `enum_match_expr_type`'s existing `MethodCall` resolution chain but
+ends at a safe NAME instead of a possibly-foreign-id-bearing `HirType`) --
+and wired in as the PRIMARY source for `scrutinee_payload_struct`, ahead of
+the old (still-correct-for-same-module) `SymbolId`-based fallback.
+
+**Verified**: both the fast 2-file cross-module repro and the single-module
+(mechanism #1) repro earlier in this doc now emit a real `.o` object file
+under `native-build`/`native_build_worker.spl --entry-closure` (previously:
+`unresolved method call: write_text`/`close`, exit 1, for the cross-module
+repro).
+
+**Incidental cleanup**: this session found and stripped unrelated,
+unfiltered `[L6DBG]` debug `eprint` residue that had landed on `main` in
+`switch_operators_calls.spl` from a separate, concurrent investigation
+session sharing this host (confirmed via `git show origin/main:...` at the
+time, not something this session added) -- restored to plain no-op match
+arms with no behavior change and no debug output, landed in the same commit.
+
+**`rt_io_file_*` AOT stub verdict**: the real 18-minute
+`rt_io_file_roundtrip` closure build was launched after landing and
+verifying the fast repros. See
+`scripts/check/check-rt-io-file-native-jit-stub.shs` for the current
+tracked outcome of that run.
