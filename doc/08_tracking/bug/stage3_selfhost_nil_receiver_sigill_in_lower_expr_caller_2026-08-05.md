@@ -1,7 +1,22 @@
 # Stage-3 self-host blocked by nil-receiver SIGILL in the caller of `lower_expr`
 
 Date: 2026-08-05
-Status: **STILL UNVERIFIED (2026-08-09)** — not resolved, and not disproven
+Status: **STILL UNVERIFIED (2026-08-09, THIRD campaign)** — blockers 9/10/11 are
+all confirmed genuinely fixed on `origin/main` and the run got further than ever
+before (Rust seed clean in 4m23s, **Stage 2 806/806 green**, Stage 3 launched),
+but a **new blocker 12** stopped it before lexing even finished: the Stage-2
+binary reads EVERY source file as empty and the parser loops forever. See the
+"2026-08-09 (third campaign)" section at the BOTTOM. Prior status line follows.
+
+Prior status (2026-08-09, second campaign): see the
+"2026-08-09 (second campaign)" section at the BOTTOM of this file for the most
+recent run. Short version: three more blockers (10, 11, and a **recurrence of
+blocker 9**) were found and root-caused; Stage 2 went GREEN and Stage 3 ran to a
+verdict, but again failed **closed** in phase 3 (HIR lowering) with **no SIGILL,
+no nil-receiver fault, no exit 132 anywhere in the run**. The fault site has
+STILL never executed.
+
+Prior status line (2026-08-09, first campaign): not resolved, and not disproven
 either. Rank 2 fix + Rank 4 probe remain landed-but-unexercised. A dedicated
 instrumented full-bootstrap campaign on 2026-08-09 (three runs) got **closer
 than any previous attempt** — Stage 2 now builds cleanly, 803/803 files, and
@@ -706,3 +721,180 @@ before Stage 3's MIR-lowering region: ByteOrder (fixed), the
 undefined-reference to `run_fn`. Next lane must resolve (or file separately
 and hand off) the `run_fn` link failure before this bug's actual claim can be
 tested at all.
+
+## 2026-08-09 (second campaign) — blockers 10, 11 and a RECURRENCE of blocker 9; SIGILL still unexercised
+
+Assigned action: `git fetch origin main`, then ONE clean instrumented full
+bootstrap, and determine the outcome. Four runs were needed. **Outcome: (3) — a
+different, NEW blocker**, three of them in fact.
+
+### Setup (per this file's own standing recommendation)
+
+Run from a **clean pinned checkout**, never the shared working copy:
+`/home/ormastes/dev/simple-s3bisect`, hard-reset to `origin/main`
+`63ee79be7eee49f4fe59975b8d1e72426f7bcb59`, `git clean -xfd` (only CRLF noise in
+2 `.bat` files remained). `git merge-base --is-ancestor 144fecf4280 origin/main`
+-> YES, so the blocker-9 fix WAS present. `df -h /` 293G free before, 256G after;
+no `git gc`/`prune` was run.
+
+Command (all four runs), output outside any repo tree:
+
+```
+SIMPLE_MIR_STMT_CALLER_DEBUG=1 SIMPLE_MIR_GARBAGE_EXPR_DEBUG=1 \
+  sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy \
+  --output=/home/ormastes/dev/simple-build-out/stage3-nilrecv-20260809<N> --progress
+```
+
+### Runs
+
+| run | result | exit |
+|---|---|---|
+| a | Rust seed E0308, `env_process.rs:1223` | 101 |
+| b | seed link: 18 undefined `rt_counterpart_*` / `rt_packed_span_v1_*` | 101 |
+| c | added `counterpart_worker_runtime.c` -> missing header; reverted that one file | 101 |
+| d | seed OK, **Stage 2 GREEN**, Stage 3 started, then SIGTERM'd externally (exit 143, empty stage3 log) — harness interruption, not a product fault | 2 |
+| e | relaunched fully detached (`setsid`), seed cached, **Stage 2 GREEN**, **Stage 3 ran to a verdict** | 2 |
+
+Run e: START 07:53:22Z, END 08:15:52Z. Stage 3 process (pid 2617599) ran ~14 min
+at ~98% CPU, RSS peaked around **53 GB**.
+
+### Blockers 10 & 11 — the Rust seed does not build at `origin/main`
+
+Both reproduce from a pristine `origin/main` checkout, so they block every full
+bootstrap on `main`. Filed separately with full detail and fixes:
+`rust_seed_build_broken_on_origin_main_2026-08-09.md`. Fixed locally in the
+pinned checkout only (one `&`, and two C files added to the seed's
+`build.rs` list) — deliberately NOT pushed, since they belong to two other
+lanes.
+
+### Blocker 9 RECURS — the fix was wired into only one of two parse paths
+
+Stage 3 ran to a verdict and failed **closed**, with the byte-identical
+diagnosis blocker 9 was supposed to have fixed:
+
+```
+[collect-all] 0.0 module(s) poisoned, 8 error(s) collected across 565 source(s) in phase 3 (HIR lowering).
+[collect-all]   poisoned: src/compiler/70.backend/backend/lean_backend.spl
+[collect-all]   poisoned: src/compiler/70.backend/backend/cuda_type_mapper.spl
+[ERROR] phase 3 FAILED
+error: ... HIR lowering error in .../lean_backend.spl: unresolved name: _        (x2)
+error: ... HIR lowering error in .../cuda_type_mapper.spl: unresolved name: _1   (x6)
+```
+
+Root-caused this session: `transform_interpolated_placeholder_args()` is real,
+present, and correctly wired — but only into `core_frontend_parse()`
+(interpreter / core-compiler path). The driver/native-build path that Stage 3
+actually uses goes `parse_full_frontend()` ->
+`parse_and_build_module_scoped()`, which never calls
+`expand_string_interpolations()` at all (that function has exactly ONE non-doc
+call site in the tree). Full analysis, a 6-line seconds-to-run reproducer, the
+suggested fix and its module-cycle constraint:
+`placeholder_lambda_fix_missed_driver_native_build_parse_path_2026-08-09.md`.
+
+### Consequence for THIS bug — unchanged, and be precise about it
+
+Stage 3 aborts at **phase 3 (HIR lowering)**. This bug lives in **phase 4+ MIR
+lowering**. Measured over run e's Stage 3 log:
+
+- `field access on nil receiver` — **0 occurrences**
+- `SIGILL` / `Illegal instruction` / exit 132 — **0**
+- `[mir-stmt-caller]` probe lines — **0**
+- `garbage-expr` probe lines — **0**
+
+Both probes were enabled and both produced nothing, because MIR lowering of the
+stage-3 sources was never reached. Eleven blockers have now been logged in front
+of this SIGILL and **the fault site has still never executed**. The Rank-1..5
+shortlist remains neither confirmed nor refuted, and the `0x1800000007` decode
+still has not been re-measured with `SIMPLE_MIR_GARBAGE_EXPR_DEBUG=1` against a
+live fault.
+
+**Status: STILL UNVERIFIED.** Not resolved, not disproven. Next lane: land the
+driver-path placeholder fix (blocker 9's real fix), then re-run this exact
+recipe. Note that blockers 10 and 11 must also be resolved upstream or
+re-applied locally, or the seed will not build at all.
+
+## 2026-08-09 (third campaign) — blockers 9/10/11 all CLEARED; new blocker 12 stops it at LEXING
+
+Assigned action: re-run the instrumented full bootstrap now that host contention
+had cleared, and reach a real verdict. **Outcome: (3) — a different, NEW
+blocker.** The SIGILL fault site again never executed.
+
+### Setup and host conditions (verified before committing to the run)
+
+`git fetch origin main` → `f026cfcf510d12758048c1bad585ccd59d9764fa`.
+Host at launch: **load 8.2** (down from 61.2 in the prior attempt), **1.4 T free**
+on `/`, **108 G RAM available** (Stage 3's known ~53 G peak fits). Host stayed
+healthy throughout — this run was **not** defeated by contention or disk.
+
+Checkout used the lightweight recipe the previous lane staged but never ran:
+`git archive <sha> | tar -x` into a fresh dir, then `git init` +
+`.git/objects/info/alternates` → main repo's object store + `git update-ref HEAD
+<sha>` + `git read-tree HEAD`. **It works and it is fast**: 112,095 files
+extracted and a clean-status tree with real git metadata **in seconds**, versus
+the stalls/1.5-files-per-second degradation that `git clone --shared` and
+`git worktree add` hit under load. `git status` showed only the 10 pre-existing
+CRLF-noise `.cmd`/`.bat` entries. Recommended for future bootstrap lanes.
+
+### Blockers 9, 10, 11 — all confirmed genuinely fixed on origin/main
+
+- **Blocker 10/11 (Rust seed):** seed + runtime built clean,
+  `Finished \`bootstrap\` profile [optimized] target(s) in 4m 23s`. No E0308, no
+  undefined `rt_counterpart_*`. No local patching was needed this time.
+- **Blocker 9 (placeholder lambdas on the driver path):** the real fix is landed
+  AND correctly wired. `expand_interpolated_placeholder_call_args()` exists at
+  `src/compiler/10.frontend/core/string_interpolation_expand.spl:108` and is
+  called from the flat-AST bridge at
+  `src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl:942` — i.e. on
+  `parse_full_frontend()` → `parse_and_build_module_scoped()`, the path Stage 3
+  actually uses. `b9ed8aa45f2` and `144fecf4280` both verified ancestors of
+  `origin/main`. **Stage 2 went 806/806 green**, and no `unresolved name: _` /
+  `_1` diagnosis appeared anywhere in this run.
+
+### Blocker 12 — Stage-2 binary lexes every file as empty; parser loops forever
+
+Stage 2 reported `Build complete: 806 compiled, 0 cached, 0 failed`, linked a
+126 MB binary, and **passed the `Stage 2: running bootstrap compiler sanity`
+gate**. The binary it produced cannot lex anything:
+
+```
+$ printf 'fn main():\n    print("hi")\n' > probe_tiny.spl
+$ .../stage2-admitted/simple native-build ... probe_tiny.spl
+[parser_error] line 1:1: unexpected token in expression: Unknown(0) ''
+[parser_error_ctx] path probe_tiny.spl kind 0 text ''
+... forever
+```
+
+Stage 3's log after 11 minutes: **444,103,752 bytes / 6,299,344 lines**, and
+`sort -u` over the whole file yields **2 distinct lines** — the pair above.
+Process at 100% CPU with **32.4 GB RSS**, still climbing; killed deliberately
+rather than allowed to ENOSPC/OOM the host.
+
+Ruled out as a checkout artifact: entry file is 21,918 bytes with real content
+and `git diff HEAD` on it is empty; the failing process's `/proc/<pid>/cwd` is
+the checkout root and the file is readable at exactly the relative path passed;
+and the Rust seed read those same 806 files fine while building Stage 2.
+
+Filed with full evidence, the two stacked defects (dead lexer + parser error
+recovery with no forward-progress guarantee), and the fail-open sanity gate:
+`stage2_binary_lexer_reads_every_source_as_empty_infinite_parser_loop_2026-08-09.md`.
+
+### Consequence for THIS bug — measured, not inferred
+
+Stage 3 died during **lexing of its entry file**, which is upstream of phase 3
+(HIR) and far upstream of phase 4+ (MIR) where this crash lives. Measured over
+the full 444 MB Stage-3 log:
+
+- `field access on nil receiver` — **0**
+- `SIGILL` / `Illegal instruction` / exit 132 — **0**
+- `[mir-stmt-caller]` probe lines — **0**
+- `garbage-expr` probe lines — **0**
+
+Both probes were enabled; both produced nothing, because MIR lowering was never
+reached. **Twelve blockers have now been logged in front of this SIGILL and the
+fault site has still never executed.** The Rank-1..5 shortlist remains neither
+confirmed nor refuted, and the `0x1800000007` decode still has not been
+re-measured against a live fault.
+
+**Status: STILL UNVERIFIED.** Not resolved, not disproven. Next lane: fix
+blocker 12 (the lexer, and independently the unbounded parser loop), then re-run
+this exact recipe using the `git archive` + alternates checkout above.
