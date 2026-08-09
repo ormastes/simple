@@ -40,6 +40,7 @@ use app.test.x25519mlkem768_gpu_dispatch.{
     X25519MlKem768GpuDispatchRequest,
     x25519_mlkem768_dispatch_gpu}
 use app.test.x25519mlkem768_pinned_workload.{
+    X25519MlKem768PinnedSet, X25519MlKem768PinnedSetReceipt,
     X25519MlKem768PinnedPublicOutputs,
     x25519_mlkem768_pinned_scalar_config,
     x25519_mlkem768_run_pinned_workload,
@@ -67,6 +68,20 @@ struct X25519MlKem768EvidenceRunnerCli:
 struct X25519MlKem768SpecializedRunnerAdmission:
     simd: X25519MlKem768SimdAdmission
     runner_artifact_sha256: text
+
+# Public, non-promotable hand-off from a native SIMD runner to later evidence
+# composition.  It contains neither fixture secrets nor secret-derived
+# material: only the runner's raw receipt and the pinned A/B/C public outputs.
+# A later composer must still provide an independent performance attestation
+# before it can create a promotion-eligible receipt.
+struct X25519MlKem768PinnedSimdObservation:
+    raw_receipt: X25519MlKem768RunReceipt
+    public_outputs: X25519MlKem768PinnedPublicOutputs
+    set_a: X25519MlKem768PinnedSetReceipt
+    set_b: X25519MlKem768PinnedSetReceipt
+    set_c: X25519MlKem768PinnedSetReceipt
+    client_share_sha256: text
+    server_share_sha256: text
 
 fn _parse_runner_cli(args: [text]) -> Result<X25519MlKem768EvidenceRunnerCli, text>:
     var evidence_args: [text] = []
@@ -441,15 +456,10 @@ fn _simd_roundtrip(cli: X25519MlKem768EvidenceRunnerCli,
         return Err("simd-qemu-execution-requires-wrapper-observation")
     val backend = _simd_backend(cli.evidence.backend)?
     if cli.evidence.scope == X25519MlKem768EvidenceScope.FullOperation:
-        if cli.evidence.batch_size != 1:
-            return Err("simd-pinned-full-operation-requires-batch-one")
-        var config = x25519_mlkem768_pinned_scalar_config()
-        config.requested_backend = backend
-        val outputs = x25519_mlkem768_run_pinned_simd_workload(
-            config, admission.simd)?
-        return Ok(x25519_mlkem768_pinned_full_operation_receipt(
-            cli.evidence, manifest_sha256, fixture_sha256, runner_sha256,
-            "native-simd-pinned-full-operation-admitted", outputs))
+        val observation = x25519_mlkem768_observe_pinned_simd_full_operation(
+            cli.evidence, admission.simd, manifest_sha256, fixture_sha256,
+            runner_sha256)?
+        return Ok(observation.raw_receipt)
     var keygen_digest_chain = ""
     var encapsulate_digest_chain = ""
     var decapsulate_digest_chain = ""
@@ -566,6 +576,58 @@ fn x25519_mlkem768_pinned_full_operation_receipt(
     receipt.device_identity = outputs.executor_identity
     receipt
 
+fn _pinned_simd_outputs_reason(
+        cli: X25519MlKem768EvidenceCli,
+        outputs: X25519MlKem768PinnedPublicOutputs) -> Result<text, text>:
+    val backend = _simd_backend(cli.backend)?
+    if outputs.requested_backend != backend or outputs.selected_backend != backend:
+        return Ok("pinned-simd-output-backend-mismatch")
+    if outputs.fallback_used or not outputs.candidate_oracle_match or
+            outputs.accelerated_operation_count != 3 or
+            outputs.simd_chunk_hits < 3:
+        return Ok("pinned-simd-output-proof-incomplete")
+    if outputs.set_a.set_id != X25519MlKem768PinnedSet.MlKem or
+            outputs.set_b.set_id != X25519MlKem768PinnedSet.X25519 or
+            outputs.set_c.set_id != X25519MlKem768PinnedSet.Hybrid:
+        return Ok("pinned-simd-output-set-identity-mismatch")
+    Ok("")
+
+fn x25519_mlkem768_pinned_simd_observation_from_outputs(
+        cli: X25519MlKem768EvidenceCli,
+        manifest_sha256: text, fixture_sha256: text, runner_sha256: text,
+        outputs: X25519MlKem768PinnedPublicOutputs
+        ) -> Result<X25519MlKem768PinnedSimdObservation, text>:
+    if cli.mode != X25519MlKem768EvidenceMode.Native:
+        return Err("simd-qemu-execution-requires-wrapper-observation")
+    if cli.scope != X25519MlKem768EvidenceScope.FullOperation:
+        return Err("pinned-simd-observation-requires-full-operation")
+    if cli.batch_size != 1:
+        return Err("simd-pinned-full-operation-requires-batch-one")
+    val output_reason = _pinned_simd_outputs_reason(cli, outputs)?
+    if output_reason != "": return Err(output_reason)
+    var raw_receipt = x25519_mlkem768_pinned_full_operation_receipt(
+        cli, manifest_sha256, fixture_sha256, runner_sha256,
+        "native-simd-pinned-full-operation-observed", outputs)
+    # Observation is intentionally not a performance or promotion decision.
+    raw_receipt.promotion_eligible = false
+    Ok(X25519MlKem768PinnedSimdObservation(
+        raw_receipt: raw_receipt, public_outputs: outputs,
+        set_a: outputs.set_a, set_b: outputs.set_b, set_c: outputs.set_c,
+        client_share_sha256: outputs.client_share_sha256,
+        server_share_sha256: outputs.server_share_sha256))
+
+fn x25519_mlkem768_observe_pinned_simd_full_operation(
+        cli: X25519MlKem768EvidenceCli,
+        admission: X25519MlKem768SimdAdmission,
+        manifest_sha256: text, fixture_sha256: text, runner_sha256: text
+        ) -> Result<X25519MlKem768PinnedSimdObservation, text>:
+    val backend = _simd_backend(cli.backend)?
+    var config = x25519_mlkem768_pinned_scalar_config()
+    config.requested_backend = backend
+    val outputs = x25519_mlkem768_run_pinned_simd_workload(config, admission)?
+    x25519_mlkem768_pinned_simd_observation_from_outputs(
+        cli, manifest_sha256, fixture_sha256, runner_sha256, outputs)
+
 fn _is_simd_backend(backend: X25519MlKem768EvidenceBackend) -> bool:
     backend == X25519MlKem768EvidenceBackend.Avx2 or
     backend == X25519MlKem768EvidenceBackend.Neon or
@@ -645,3 +707,6 @@ fn main() -> i64:
 
 export x25519_mlkem768_scalar_observation_reason
 export x25519_mlkem768_pinned_full_operation_receipt
+export X25519MlKem768PinnedSimdObservation
+export x25519_mlkem768_pinned_simd_observation_from_outputs
+export x25519_mlkem768_observe_pinned_simd_full_operation
