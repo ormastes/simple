@@ -59,7 +59,7 @@
 - qemu-side perf harness sample origin: qemu-guest
 - qemu-side perf harness required sample origin: qemu-guest
 - qemu-side perf harness pending marker: [desktop-e2e] qemu-perf sample_origin=qemu-guest simple_frame_cycles=<positive> iterations=<positive> timing_unit=tsc
-- qemu-side perf harness marker line: [desktop-e2e] qemu-perf sample_origin=qemu-guest simple_frame_cycles=251664583 iterations=16 timing_unit=tsc scope=simple-vga-paint
+- qemu-side perf harness marker line: [desktop-e2e] qemu-perf sample_origin=qemu-guest simple_frame_cycles=251664583 iterations=16 timing_unit=tsc scope=simple-vga-paint
 - host perf baseline status: pass
 - host perf baseline reason: pass
 - host perf baseline simple frame us: 1
@@ -161,7 +161,7 @@
 - qemu_gtk_wm_capture_qemu_perf_harness_sample_origin=qemu-guest
 - qemu_gtk_wm_capture_qemu_perf_harness_required_sample_origin=qemu-guest
 - qemu_gtk_wm_capture_qemu_perf_harness_pending_marker=[desktop-e2e] qemu-perf sample_origin=qemu-guest simple_frame_cycles=<positive> iterations=<positive> timing_unit=tsc
-- qemu_gtk_wm_capture_qemu_perf_harness_marker_line=[desktop-e2e] qemu-perf sample_origin=qemu-guest simple_frame_cycles=251664583 iterations=16 timing_unit=tsc scope=simple-vga-paint
+- qemu_gtk_wm_capture_qemu_perf_harness_marker_line=[desktop-e2e] qemu-perf sample_origin=qemu-guest simple_frame_cycles=251664583 iterations=16 timing_unit=tsc scope=simple-vga-paint
 - qemu_gtk_wm_capture_host_perf_status=pass
 - qemu_gtk_wm_capture_host_perf_reason=pass
 - qemu_gtk_wm_capture_host_perf_simple_frame_us=1
@@ -232,7 +232,7 @@
 - simpleos_desktop_qmp_guest_perf_simple_frame_cycles=251664583
 - simpleos_desktop_qmp_guest_perf_iterations=16
 - simpleos_desktop_qmp_guest_perf_timing_unit=tsc
-- simpleos_desktop_qmp_guest_perf_marker_line=[desktop-e2e] qemu-perf sample_origin=qemu-guest simple_frame_cycles=251664583 iterations=16 timing_unit=tsc scope=simple-vga-paint
+- simpleos_desktop_qmp_guest_perf_marker_line=[desktop-e2e] qemu-perf sample_origin=qemu-guest simple_frame_cycles=251664583 iterations=16 timing_unit=tsc scope=simple-vga-paint
 
 ## WM Capture Output
 - check=wm_launch_capture_evidence

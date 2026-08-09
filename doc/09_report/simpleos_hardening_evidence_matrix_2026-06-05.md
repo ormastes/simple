@@ -22,7 +22,7 @@
 - qemu_guest_perf_harness_sample_origin: qemu-guest
 - qemu_guest_perf_harness_required_sample_origin: qemu-guest
 - qemu_guest_perf_harness_pending_marker: [desktop-e2e] qemu-perf sample_origin=qemu-guest simple_frame_cycles=<positive> iterations=<positive> timing_unit=tsc
-- qemu_guest_perf_harness_marker_line: [desktop-e2e] qemu-perf sample_origin=qemu-guest simple_frame_cycles=251664583 iterations=16 timing_unit=tsc scope=simple-vga-paint
+- qemu_guest_perf_harness_marker_line: [desktop-e2e] qemu-perf sample_origin=qemu-guest simple_frame_cycles=251664583 iterations=16 timing_unit=tsc scope=simple-vga-paint
 - qemu_host_perf_promotes_qemu_perf: false
 - qemu_wm_simple_gui_mdi: pass
 - qemu_wm_simple_gui_mdi_ppm_anchors: pass

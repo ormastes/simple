@@ -310,6 +310,16 @@ MCP server available via npm: `@simple-lang/mcp-server`
 
 ---
 
+## Line Endings
+
+- Repository text files use LF only on Linux, macOS, and Windows.
+- Windows agents must configure Git and editors not to rewrite files to CRLF.
+  Use `git config core.autocrlf false`; `.gitattributes` is authoritative.
+- Never add `eol=crlf` exceptions for `.cmd`, `.bat`, PowerShell, or generated
+  text. Keep binary and checksum-sensitive vendored paths marked `-text`.
+- Before committing Windows-authored changes, remove CRLF pairs from touched
+  text files and confirm Git does not report line-ending-only modifications.
+
 ## Critical Rules
 
 - Web producers lower through web semantic/layout; GUI producers lower through
