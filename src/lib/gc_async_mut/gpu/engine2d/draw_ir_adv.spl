@@ -68,6 +68,7 @@ var _e2d_text_probe_count: i32 = 0
 val _E2D_MATERIAL_TRACE: bool = false
 var _e2d_material_bounds_rejection_logged: bool = false
 var _e2d_wm_batch_profile_emitted: bool = false
+var _e2d_wm_command_profile_active: bool = false
 val _E2D_DRAW_IR_MAX_TEXT_ITEMS: i64 = 4096
 val _E2D_DRAW_IR_MAX_STYLE_VALUE_BYTES: i64 = 65536
 val _E2D_DRAW_IR_MAX_FONT_SIZE: i32 = 512
@@ -1210,6 +1211,7 @@ fn _engine2d_draw_ir_note_unsupported_kind(kinds: text, kind: text) -> text:
 fn _engine2d_draw_ir_unsupported_command_kinds(commands: [DrawIrCommand]) -> text:
     var kinds = ""
     for command in commands:
+        val profile_command_started_us = rt_time_now_micros()
         if command.? == false:
             continue
         if not _engine2d_draw_ir_supported_command(command.kind):
@@ -1641,6 +1643,9 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
                 )
             else:
                 eng.clear_clip()
+        if _e2d_wm_command_profile_active:
+            val profile_command_finished_us = rt_time_now_micros()
+            print "[engine2d-command-profile] kind={command_kind} id={command.component_id} elapsed_us={profile_command_finished_us - profile_command_started_us}"
     if material_execution_counts.len() >= 6:
         material_execution_counts[0] = cpu_composited_material_count.to_i64()
         material_execution_counts[1] = metal_device_glass_material_count.to_i64()
@@ -2285,9 +2290,13 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: 
     for batch in composition.batches:
         var batch_execution_counts: [i64] = [0, 0, 0, 0, 0, 0]
         val profile_batch_started_us = rt_time_now_micros()
+        if profile_wm_batches:
+            if profile_batch_index == 6:
+                _e2d_wm_command_profile_active = true
         val outcome = _engine2d_draw_ir_render_batch_embedded(
             eng, batch, images, 0, allow_parent_image,
             css_background_pixel_work_remaining, batch_execution_counts)
+        _e2d_wm_command_profile_active = false
         if profile_wm_batches:
             val profile_batch_finished_us = rt_time_now_micros()
             print "[engine2d-batch-profile] index={profile_batch_index} commands={batch.commands.len()} surface={batch.embedding.surface_id} elapsed_us={profile_batch_finished_us - profile_batch_started_us} cpu_material={batch_execution_counts[0]} rendered={batch_execution_counts[4]} skipped={batch_execution_counts[5]}"
