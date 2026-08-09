@@ -53,6 +53,15 @@
 - Do not rerun the unchanged command in this session. Fresh-session next action: replace cross-module trait-error `Symbol` payload annotations with the public concrete `HirSymbol` type and update the focused formatter fixture, or implement the reviewed `SymbolId` model atomically with all caller conversions. Then resume the same Stage4 cache once.
 - x86 Stage4, essential-tools smoke, ARM64 attestation/QMP primitive WM, native ARM/macOS, and Uno-Q remain OPEN.
 
+## Active handoff update (2026-08-09, lint sweep complete)
+
+- Pushed `42c01f9a2f4` (traceability concrete owners/primitives), `181b57b6cf2` (high-reviewed complete `_LintMain` primitive and facade sweep), and `5a0db0cb2d2` (module-scope `ShbReader` binding).
+- Focused native evidence passes for traceability (`lint traceability resolved: true`) and the reviewed remaining lint modules (`lint remaining modules resolved: true`, exit 0). The SHB-validator focused closure crossed HIR lowering and reached link; its runtime fixture was not committed because `core-c-bootstrap` intentionally lacks the independent `bytes_to_u32_le` extern.
+- Stage4 cycle 1 cleared traceability and exposed `entry_and_fixes`; cycle 2 cleared the entire remaining lint subtree and exposed only `ShbReader`; cycle 3 cleared `ShbReader` and advanced to native generic rejection in `frontend/core/lexer.spl`: `lexer_array_len` declares type parameters, but native monomorphization is not implemented (`#158 Phase B`).
+- Logs: `stage4-lint-traceability-retry.log`, `stage4-lint-remaining-retry.log`, and `stage4-shb-reader-retry.log`. No candidate exists; do not run a fourth unchanged build this session.
+- Fresh-session next action: inspect all call sites and concrete array element types for `lexer_array_len`; prefer non-generic concrete overloads or a native-supported length owner rather than weakening the native generic gate. Add focused compile/runtime prevention coverage, then resume the preserved Stage4 cache once.
+- x86 Stage4, essential-tools smoke, ARM64 attestation/QMP primitive WM, native ARM/macOS, and Uno-Q remain OPEN.
+
 ## Active handoff update (2026-08-09, lint primitive sweep)
 
 - Pushed `bda3617b78c` (replace exported trait-error `Symbol` aliases with public `HirSymbol`), `c278a9aea4d` (concrete lint config primitives and facade-cycle removal), and `ae0e1b09d72` (concrete lint-check primitives, EasyFix owner imports, and facade-cycle removal).

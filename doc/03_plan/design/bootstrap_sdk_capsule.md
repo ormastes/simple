@@ -267,3 +267,16 @@ runs advanced monotonically from `driver_source_loading` to
 
 This progression is compiler-frontier evidence only. It does not admit an x86
 candidate or advance the capsule, QEMU WM, ARM/macOS, or Uno-Q matrix rows.
+
+## 2026-08-09 Native generic frontier
+
+The complete `_LintMain` alias/facade sweep and cache-validator `ShbReader`
+binding are now past Stage4 HIR lowering. The next blocker is native rejection
+of generic `lexer_array_len` in `frontend/core/lexer.spl`; the native path does
+not yet monomorphize generic functions (`#158 Phase B`). The follow-up must
+either use concrete non-generic overloads for every observed lexer array type
+or implement the required native monomorphization support. It must not disable
+or weaken the generic-function rejection gate.
+
+No x86 candidate exists, so capsule admission and every QEMU/native platform
+row remain open.
