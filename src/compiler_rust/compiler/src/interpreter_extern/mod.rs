@@ -902,6 +902,14 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_cuda_ctx_set_current", gpu::rt_cuda_ctx_set_current_fn);
     insert_simple!("rt_cuda_ctx_destroy", gpu::rt_cuda_ctx_destroy_fn);
     insert_simple!("rt_cuda_ctx_synchronize", gpu::rt_cuda_ctx_synchronize_fn);
+    insert_simple!("rt_cuda_event_create", gpu::rt_cuda_event_create_fn);
+    insert_simple!("rt_cuda_event_record", gpu::rt_cuda_event_record_fn);
+    insert_simple!("rt_cuda_event_synchronize", gpu::rt_cuda_event_synchronize_fn);
+    insert_simple!("rt_cuda_event_elapsed_ns", gpu::rt_cuda_event_elapsed_ns_fn);
+    insert_simple!("rt_cuda_event_destroy", gpu::rt_cuda_event_destroy_fn);
+    insert_simple!("rt_vulkan_timestamp_supported", gpu::rt_vulkan_timestamp_supported_fn);
+    insert_simple!("rt_vulkan_timestamp_period_fnum", gpu::rt_vulkan_timestamp_period_fnum_fn);
+    insert_simple!("rt_vulkan_query_elapsed_ns", gpu::rt_vulkan_query_elapsed_ns_fn);
     insert_simple!(
         "rt_cuda_device_compute_capability",
         gpu::rt_cuda_device_compute_capability_fn

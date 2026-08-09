@@ -280,6 +280,11 @@ mod cuda_dlopen {
     type CuCtxSetCurrent = unsafe extern "C" fn(*mut c_void) -> i32;
     type CuCtxDestroy = unsafe extern "C" fn(*mut c_void) -> i32;
     type CuCtxSynchronize = unsafe extern "C" fn() -> i32;
+    type CuEventCreate = unsafe extern "C" fn(*mut *mut c_void, u32) -> i32;
+    type CuEventRecord = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32;
+    type CuEventSynchronize = unsafe extern "C" fn(*mut c_void) -> i32;
+    type CuEventElapsedTime = unsafe extern "C" fn(*mut f32, *mut c_void, *mut c_void) -> i32;
+    type CuEventDestroy = unsafe extern "C" fn(*mut c_void) -> i32;
     type CuMemAlloc = unsafe extern "C" fn(*mut u64, usize) -> i32;
     type CuMemFree = unsafe extern "C" fn(u64) -> i32;
     type CuMemsetD32 = unsafe extern "C" fn(u64, u32, usize) -> i32;
@@ -314,6 +319,13 @@ mod cuda_dlopen {
         pub ctx_set_current: CuCtxSetCurrent,
         pub ctx_destroy: CuCtxDestroy,
         pub ctx_synchronize: CuCtxSynchronize,
+        // Device-timing events. Optional: a driver that lacks them must not
+        // invalidate the whole symbol table (callers surface -1 instead).
+        pub event_create: Option<CuEventCreate>,
+        pub event_record: Option<CuEventRecord>,
+        pub event_synchronize: Option<CuEventSynchronize>,
+        pub event_elapsed_time: Option<CuEventElapsedTime>,
+        pub event_destroy: Option<CuEventDestroy>,
         pub mem_alloc: CuMemAlloc,
         pub mem_free: CuMemFree,
         pub memset_d32: CuMemsetD32,
@@ -412,8 +424,39 @@ mod cuda_dlopen {
                 std::mem::transmute(p)
             }};
         }
+        // Like `sym!`, but yields None instead of aborting the whole table
+        // when the driver does not export the symbol.
+        macro_rules! sym_opt {
+            ($name:expr) => {{
+                match CString::new($name) {
+                    Ok(n) => {
+                        #[cfg(unix)]
+                        let p = libc::dlsym(handle, n.as_ptr());
+                        #[cfg(windows)]
+                        let p = {
+                            use windows_sys::Win32::System::LibraryLoader::GetProcAddress;
+                            match GetProcAddress(handle as _, n.as_ptr() as *const u8) {
+                                Some(f) => f as *mut c_void,
+                                None => std::ptr::null_mut(),
+                            }
+                        };
+                        if p.is_null() {
+                            None
+                        } else {
+                            Some(std::mem::transmute(p))
+                        }
+                    }
+                    Err(_) => None,
+                }
+            }};
+        }
         Some(CudaFns {
             init: sym!("cuInit"),
+            event_create: sym_opt!("cuEventCreate"),
+            event_record: sym_opt!("cuEventRecord"),
+            event_synchronize: sym_opt!("cuEventSynchronize"),
+            event_elapsed_time: sym_opt!("cuEventElapsedTime"),
+            event_destroy: sym_opt!("cuEventDestroy"),
             device_get: sym!("cuDeviceGet"),
             device_get_uuid: sym_alt!("cuDeviceGetUuid_v2", "cuDeviceGetUuid"),
             device_get_name: sym!("cuDeviceGetName"),
@@ -1202,6 +1245,141 @@ pub fn rt_cuda_ctx_synchronize_fn(_args: &[Value]) -> Result<Value, CompileError
         }
         Ok(Value::Int(-3))
     }
+}
+
+// ---------------------------------------------------------------------------
+// CUDA device timing (events). Honesty rule: every failure path returns -1.
+// 0 is never used to mean "unknown" because 0 ns is a legitimate measurement.
+// ---------------------------------------------------------------------------
+
+pub fn rt_cuda_event_create_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    #[cfg(not(feature = "cuda"))]
+    {
+        if let Some(fns) = get_cuda_dl() {
+            if let Some(f) = fns.event_create {
+                let mut ev: *mut std::ffi::c_void = std::ptr::null_mut();
+                // CU_EVENT_DEFAULT = 0 (blocking-free, timing enabled)
+                let rc = unsafe { f(&mut ev as *mut _, 0) };
+                if rc != 0 || ev.is_null() {
+                    return Ok(Value::Int(-1));
+                }
+                return Ok(Value::Int(ev as i64));
+            }
+        }
+    }
+    Ok(Value::Int(-1))
+}
+
+pub fn rt_cuda_event_record_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let event = arg_i64(args, 0, "rt_cuda_event_record", 2)?;
+    let stream = arg_i64(args, 1, "rt_cuda_event_record", 2)?;
+    #[cfg(not(feature = "cuda"))]
+    {
+        if event > 0 {
+            if let Some(fns) = get_cuda_dl() {
+                if let Some(f) = fns.event_record {
+                    let rc = unsafe {
+                        f(
+                            event as *mut std::ffi::c_void,
+                            stream as *mut std::ffi::c_void,
+                        )
+                    };
+                    return Ok(Value::Int(if rc == 0 { 0 } else { -1 }));
+                }
+            }
+        }
+    }
+    #[cfg(feature = "cuda")]
+    let _ = (event, stream);
+    Ok(Value::Int(-1))
+}
+
+pub fn rt_cuda_event_synchronize_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let event = arg_i64(args, 0, "rt_cuda_event_synchronize", 1)?;
+    #[cfg(not(feature = "cuda"))]
+    {
+        if event > 0 {
+            if let Some(fns) = get_cuda_dl() {
+                if let Some(f) = fns.event_synchronize {
+                    let rc = unsafe { f(event as *mut std::ffi::c_void) };
+                    return Ok(Value::Int(if rc == 0 { 0 } else { -1 }));
+                }
+            }
+        }
+    }
+    #[cfg(feature = "cuda")]
+    let _ = event;
+    Ok(Value::Int(-1))
+}
+
+pub fn rt_cuda_event_elapsed_ns_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let start = arg_i64(args, 0, "rt_cuda_event_elapsed_ns", 2)?;
+    let end = arg_i64(args, 1, "rt_cuda_event_elapsed_ns", 2)?;
+    #[cfg(not(feature = "cuda"))]
+    {
+        if start > 0 && end > 0 {
+            if let Some(fns) = get_cuda_dl() {
+                if let Some(f) = fns.event_elapsed_time {
+                    let mut ms: f32 = 0.0;
+                    let rc = unsafe {
+                        f(
+                            &mut ms as *mut f32,
+                            start as *mut std::ffi::c_void,
+                            end as *mut std::ffi::c_void,
+                        )
+                    };
+                    if rc != 0 || !ms.is_finite() || ms < 0.0 {
+                        return Ok(Value::Int(-1));
+                    }
+                    // cuEventElapsedTime reports MILLISECONDS as f32.
+                    return Ok(Value::Int((f64::from(ms) * 1_000_000.0) as i64));
+                }
+            }
+        }
+    }
+    #[cfg(feature = "cuda")]
+    let _ = (start, end);
+    Ok(Value::Int(-1))
+}
+
+pub fn rt_cuda_event_destroy_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let event = arg_i64(args, 0, "rt_cuda_event_destroy", 1)?;
+    #[cfg(not(feature = "cuda"))]
+    {
+        if event > 0 {
+            if let Some(fns) = get_cuda_dl() {
+                if let Some(f) = fns.event_destroy {
+                    let rc = unsafe { f(event as *mut std::ffi::c_void) };
+                    return Ok(Value::Int(if rc == 0 { 0 } else { -1 }));
+                }
+            }
+        }
+    }
+    #[cfg(feature = "cuda")]
+    let _ = event;
+    Ok(Value::Int(-1))
+}
+
+// ---------------------------------------------------------------------------
+// Vulkan device timing. The `vulkan` cargo feature (and hence `ash`) is OFF in
+// the default/deployed build, so there is no VkDevice, no command buffer and no
+// query pool to read a timestamp from. Rather than fabricate a number, these
+// report "unavailable" (-1 / 0) unconditionally.
+// ---------------------------------------------------------------------------
+
+pub fn rt_vulkan_timestamp_supported_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let _device = arg_i64(args, 0, "rt_vulkan_timestamp_supported", 1)?;
+    Ok(Value::Int(0))
+}
+
+pub fn rt_vulkan_timestamp_period_fnum_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let _device = arg_i64(args, 0, "rt_vulkan_timestamp_period_fnum", 1)?;
+    Ok(Value::Int(-1))
+}
+
+pub fn rt_vulkan_query_elapsed_ns_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let _device = arg_i64(args, 0, "rt_vulkan_query_elapsed_ns", 1)?;
+    Ok(Value::Int(-1))
 }
 
 pub fn rt_cuda_mem_alloc_fn(args: &[Value]) -> Result<Value, CompileError> {

@@ -36,7 +36,7 @@ use std.common.debug.debug_target.{
     DebugState, debug_state_new, PC_KIND_SVMG,
     STOP_BREAKPOINT, STOP_STEP, STOP_HALT, STOP_TRAP, STOP_TIMEOUT,
 }
-use std.common.debug.profile_target.{ProfileReport, profile_report_new}
+use std.common.debug.profile_target.{ProfileReport, PROFILE_ABSENT, profile_report_new}
 use std.common.debug.session_core.{AttachOpts}
 use std.common.svmg.assembler.{svmg_asm}
 use std.common.svmg.mailbox_const.{
@@ -266,7 +266,9 @@ class CudaDebugSession:
     fn profile_level() -> CapLevel:
         # Emulated: DBG_STEP_COUNT is an exact instruction count maintained
         # by our kernel, NOT a cuEvent device-time measurement. `steps` is
-        # trustworthy; `device_ns` is deliberately 0 rather than invented.
+        # trustworthy; `wall_ns` and `device_ns` are NOT measured here and are
+        # therefore PROFILE_ABSENT. For real device time on this lane use
+        # `CudaNativeProfileTarget` (cuda_native_profile.spl, stream P7).
         CapLevel.Emulated
 
     me profile_begin():
@@ -276,7 +278,21 @@ class CudaDebugSession:
     me profile_end() -> ProfileReport:
         val steps = self.last.step_count - self.profile_base_steps
         self.profiling = false
-        profile_report_new(CapLevel.Emulated, 0, 0, steps, "svmg-dbg1-step-count")
+        # P7 CORRECTION: this previously reported wall_ns=0 and device_ns=0.
+        # Zero is a LEGITIMATE measurement, so reporting it for a quantity that
+        # was never measured reads as "instantaneous" instead of "not measured"
+        # -- exactly the failure profile_target.spl's contract forbids ("it is
+        # exactly -1 -- never 0"). Neither a host clock nor a cuEvent is read
+        # anywhere in this class, so both are PROFILE_ABSENT.
+        profile_report_new(
+            CapLevel.Emulated,
+            PROFILE_ABSENT,
+            PROFILE_ABSENT,
+            steps,
+            "target=cuda-svmg; steps=measured(DBG_STEP_COUNT, exact); " +
+            "wall_ns=absent(no host clock read on this path); " +
+            "device_ns=absent(no cuEvent on this path; see CudaNativeProfileTarget)",
+        )
 
 fn _empty_outcome() -> CudaDebugOutcome:
     CudaDebugOutcome(

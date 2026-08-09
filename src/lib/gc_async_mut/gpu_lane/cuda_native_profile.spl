@@ -1,0 +1,298 @@
+# CUDA **Native** `ProfileTarget` -- REAL device timing via cuEvent.
+#
+# Design: doc/05_design/app/tools/unified_debug_profile_capability_architecture_2026-08-09.md §7
+# Plan stream: P7.
+#
+# ===========================================================================
+# WHAT "NATIVE" MEANS HERE, AND WHY IT IS NOT A RELABELED HOST CLOCK
+# ===========================================================================
+# `device_ns` on this target is produced by the CUDA driver's own event
+# timers, NOT by subtracting two host clock readings:
+#
+#   cuEventCreate      -> two event objects
+#   cuEventRecord(a)   -> a timestamp is enqueued IN THE STREAM, so it is
+#                         taken by the GPU when the stream reaches it, not
+#                         when the host issues it
+#   ... device work ...
+#   cuEventRecord(b)
+#   cuEventSynchronize(b)
+#   cuEventElapsedTime(a, b) -> float MILLISECONDS between the two device
+#                         timestamps, converted to ns by the extern
+#
+# Because both timestamps are taken on the device, the difference excludes
+# host-side launch overhead and cannot be a disguised wall-clock delta. That
+# is exactly the property the honesty bar for this stream demands.
+#
+# `wall_ns` is measured independently, on the host, around the SAME window,
+# and is ALWAYS reported. It exists so that `device_ns` is falsifiable: see
+# the plausibility rule below.
+#
+# ===========================================================================
+# PLAUSIBILITY RULE (the cross-check that makes a fabricated number visible)
+# ===========================================================================
+# The host window strictly encloses the device window: the host clock is read
+# BEFORE cuEventRecord(start) and AFTER cuEventSynchronize(end). Therefore a
+# sound measurement must satisfy
+#
+#       device_ns <= wall_ns + CUDA_NATIVE_TOLERANCE_NS
+#
+# The tolerance absorbs clock granularity and the fact that the two clocks
+# are unrelated oscillators; it does NOT absorb a real violation, which would
+# mean device_ns is measuring something other than the enclosed window (the
+# classic symptom of a fabricated or mis-scaled number -- e.g. forgetting
+# that cuEventElapsedTime returns MILLISECONDS would inflate device_ns by
+# 1e6 and trip this immediately).
+#
+# When the rule is violated the report is DOWNGRADED to Unavailable with the
+# violation spelled out in `detail`. It is never silently kept, and it is
+# never clamped -- clamping would hide the bug this check exists to find.
+#
+# ===========================================================================
+# HONEST FAILURE MODES -- every one of these reports Unavailable, never 0
+# ===========================================================================
+#   * profiling not armed at attach (AttachOpts.profile = false)
+#   * no CUDA driver / no device / cuEvent symbols missing from libcuda
+#   * cuEventCreate, cuEventRecord, cuEventSynchronize or cuEventElapsedTime
+#     returning an error
+#   * profile_end() with no matching profile_begin()
+#   * host clock running backwards
+#   * the plausibility rule above being violated
+# `PROFILE_ABSENT` (-1) is the absent value in every one of those cases,
+# because 0 is a legitimate measurement and would read as "instantaneous".
+#
+# ===========================================================================
+# LIFECYCLE
+# ===========================================================================
+# Armed at attach (`AttachOpts.profile`), matching the shared interface --
+# there is deliberately no post-attach enable. Events are created lazily on
+# the first `profile_begin` of an armed target, so an unarmed target performs
+# NO extern call at all (see the disabled-path note in profile_begin).
+#
+# Value-type note: classes are VALUE TYPES here (`val b = a` copies). Keep and
+# mutate ONE handle across a begin/end pair. `profile_begin`/`profile_end`/
+# `release` are `me`, not `fn`: a `fn` trait method receives a COPY and
+# silently discards the mutation, which would leave the event handles at 0
+# with no diagnostic.
+#
+# Acquisition note (P10 hazard): a capability handle stops aliasing its target
+# unless the acquisition is a function's TAIL expression. This class is used
+# DIRECTLY, never handed out through a group accessor, so that defect cannot
+# reach it.
+
+use std.common.debug.capability.{CapLevel}
+use std.common.debug.profile_target.{ProfileReport, PROFILE_ABSENT, profile_report_new, profile_report_unavailable}
+use std.common.debug.session_core.{AttachOpts}
+
+extern fn rt_time_now_nanos() -> i64
+extern fn rt_cuda_available() -> i64
+extern fn rt_cuda_init() -> i64
+extern fn rt_cuda_device_get(device_id: i64) -> i64
+extern fn rt_cuda_ctx_create(device: i64) -> i64
+extern fn rt_cuda_ctx_set_current(ctx: i64) -> i64
+extern fn rt_cuda_event_create() -> i64
+extern fn rt_cuda_event_record(event: i64, stream: i64) -> i64
+extern fn rt_cuda_event_synchronize(event: i64) -> i64
+extern fn rt_cuda_event_elapsed_ns(start_event: i64, end_event: i64) -> i64
+extern fn rt_cuda_event_destroy(event: i64) -> i64
+
+# The default (null) CUDA stream. The SVM-G lane launches on it.
+pub val CUDA_NATIVE_DEFAULT_STREAM: i64 = 0
+
+# Slack allowed when comparing the device window against the enclosing host
+# window. 250us is far above the granularity of either clock and far below
+# any real mis-scaling (a ms/ns confusion is a factor of 1e6).
+pub val CUDA_NATIVE_TOLERANCE_NS: i64 = 250000
+
+pub fn cuda_native_detail_measured() -> text:
+    """`ProfileReport.detail` for a real measurement: names the mechanism
+    behind every field, per design §5."""
+    "target=cuda; device_ns=measured(cuEventElapsedTime between two " +
+    "in-stream cuEventRecord timestamps, ms->ns); " +
+    "wall_ns=measured(rt_time_now_nanos monotonic delta enclosing the " +
+    "device window); steps=absent(cuEvent times the launch, it does not " +
+    "count instructions -- use CudaDebugSession DBG_STEP_COUNT for steps)"
+
+pub fn cuda_native_detail_disabled() -> text:
+    "target=cuda; profiling not armed at attach (AttachOpts.profile=false); no event was created and no clock was read"
+
+pub fn cuda_native_detail_no_begin() -> text:
+    "target=cuda; profile_end() with no matching profile_begin()"
+
+pub fn cuda_native_detail_backwards() -> text:
+    "target=cuda; host clock went backwards between begin and end; duration refused"
+
+pub fn cuda_native_detail_no_events() -> text:
+    "target=cuda; cuEvent unavailable (no CUDA driver, no device, or cuEventCreate failed); device timing refused rather than substituted with a host clock"
+
+pub fn cuda_native_detail_event_error(stage: text) -> text:
+    "target=cuda; CUDA event API failed at {stage}; device timing refused"
+
+pub fn cuda_native_detail_implausible(device_ns: i64, wall_ns: i64) -> text:
+    """Reported when the device window exceeds the enclosing host window by
+    more than the tolerance. Both numbers are included so the violation is
+    diagnosable rather than merely announced."""
+    "target=cuda; IMPLAUSIBLE: device_ns={device_ns} exceeds enclosing " +
+    "wall_ns={wall_ns} by more than {CUDA_NATIVE_TOLERANCE_NS}ns tolerance. " +
+    "The host window strictly encloses the device window, so this means " +
+    "device_ns is not measuring the enclosed window (mis-scaled or " +
+    "fabricated). Measurement refused rather than reported or clamped."
+
+pub fn cuda_native_plausible(device_ns: i64, wall_ns: i64) -> bool:
+    """The falsifiability check: a device window can never outlast the host
+    window that encloses it, beyond clock slack."""
+    device_ns <= wall_ns + CUDA_NATIVE_TOLERANCE_NS
+
+pub fn cuda_native_ensure_context() -> bool:
+    """cuEventCreate requires a CURRENT CUDA context; without one it fails with
+    CUDA_ERROR_INVALID_CONTEXT and every event call returns -1. A lane that has
+    already created a context leaves it current and this is a cheap no-op
+    re-assert; a bare probe (e.g. a unit spec with no lane) needs the context
+    made here, otherwise a machine with live GPUs would truthfully-but-
+    uselessly report Unavailable. Returns false when there is genuinely no
+    usable CUDA device."""
+    if rt_cuda_available() != 1:
+        return false
+    if rt_cuda_init() != 0:
+        return false
+    val device = rt_cuda_device_get(0)
+    if device < 0:
+        return false
+    val ctx = rt_cuda_ctx_create(device)
+    if ctx <= 0:
+        return false
+    rt_cuda_ctx_set_current(ctx)
+    true
+
+pub fn cuda_native_events_available() -> bool:
+    """Probe whether real cuEvent timing can be obtained on this host. Creates
+    and immediately destroys one event -- the only honest way to answer, since
+    a driver may load but expose no usable device, and a device may be present
+    with no current context."""
+    if not cuda_native_ensure_context():
+        return false
+    val probe = rt_cuda_event_create()
+    if probe < 0:
+        return false
+    rt_cuda_event_destroy(probe)
+    true
+
+# ===========================================================================
+# The target
+# ===========================================================================
+pub class CudaNativeProfileTarget:
+    armed: bool
+    running: bool
+    start_event: i64
+    end_event: i64
+    events_ok: bool
+    begin_wall_ns: i64
+
+    fn new(opts: AttachOpts) -> CudaNativeProfileTarget:
+        """Construct from attach options -- profiling is armed here or not at
+        all, matching the shared attach-time lifecycle."""
+        CudaNativeProfileTarget(
+            armed: opts.profile, running: false,
+            start_event: 0, end_event: 0, events_ok: false, begin_wall_ns: 0,
+        )
+
+    fn armed_target() -> CudaNativeProfileTarget:
+        """Convenience for callers that already decided to profile."""
+        CudaNativeProfileTarget(
+            armed: true, running: false,
+            start_event: 0, end_event: 0, events_ok: false, begin_wall_ns: 0,
+        )
+
+    fn disarmed_target() -> CudaNativeProfileTarget:
+        """A target that will create no event and read no clock at all."""
+        CudaNativeProfileTarget(
+            armed: false, running: false,
+            start_event: 0, end_event: 0, events_ok: false, begin_wall_ns: 0,
+        )
+
+    fn profile_level() -> CapLevel:
+        """`Native` ONLY when this target is armed AND real cuEvent timing is
+        obtainable on this host. Anything else is `Unavailable` -- there is no
+        fallback to a host clock dressed up as device time. Note this probes
+        the driver, so it answers truthfully on a machine with no GPU."""
+        if not self.armed:
+            return CapLevel.Unavailable
+        if cuda_native_events_available():
+            CapLevel.Native
+        else:
+            CapLevel.Unavailable
+
+    me profile_begin():
+        """Arms measurement: creates the event pair on first use, records the
+        start timestamp in the stream, and reads the enclosing host clock.
+        Last-begin-wins per the trait contract."""
+        if not self.armed:
+            # Disabled path: no extern call, no event, no clock read.
+            return
+        if not self.events_ok:
+            if not cuda_native_ensure_context():
+                return
+            val a = rt_cuda_event_create()
+            if a < 0:
+                return
+            val b = rt_cuda_event_create()
+            if b < 0:
+                rt_cuda_event_destroy(a)
+                return
+            self.start_event = a
+            self.end_event = b
+            self.events_ok = true
+        # Host clock is read BEFORE the device timestamp is enqueued, so the
+        # host window strictly encloses the device window. The plausibility
+        # rule depends on this ordering.
+        self.begin_wall_ns = rt_time_now_nanos()
+        if rt_cuda_event_record(self.start_event, CUDA_NATIVE_DEFAULT_STREAM) != 0:
+            return
+        self.running = true
+
+    me profile_end() -> ProfileReport:
+        """Report for the window since the last `profile_begin`. Every failure
+        path yields a distinct Unavailable report; none fabricates a zero."""
+        if not self.armed:
+            # Disabled path: no extern call, no clock read.
+            return profile_report_unavailable(cuda_native_detail_disabled())
+        if not self.events_ok:
+            return profile_report_unavailable(cuda_native_detail_no_events())
+        if not self.running:
+            return profile_report_unavailable(cuda_native_detail_no_begin())
+        self.running = false
+        if rt_cuda_event_record(self.end_event, CUDA_NATIVE_DEFAULT_STREAM) != 0:
+            return profile_report_unavailable(cuda_native_detail_event_error("cuEventRecord(end)"))
+        if rt_cuda_event_synchronize(self.end_event) != 0:
+            return profile_report_unavailable(cuda_native_detail_event_error("cuEventSynchronize"))
+        # Host clock read AFTER the device window has been synchronised, so
+        # wall_ns encloses device_ns.
+        val end_wall_ns = rt_time_now_nanos()
+        val wall = end_wall_ns - self.begin_wall_ns
+        if wall < 0:
+            return profile_report_unavailable(cuda_native_detail_backwards())
+        val device = rt_cuda_event_elapsed_ns(self.start_event, self.end_event)
+        if device < 0:
+            return profile_report_unavailable(cuda_native_detail_event_error("cuEventElapsedTime"))
+        if not cuda_native_plausible(device, wall):
+            return profile_report_unavailable(cuda_native_detail_implausible(device, wall))
+        profile_report_new(
+            CapLevel.Native,
+            wall,
+            device,
+            PROFILE_ABSENT,
+            cuda_native_detail_measured(),
+        )
+
+    me release():
+        """Destroys the event pair. Safe to call on a target that never
+        created one."""
+        if not self.events_ok:
+            return
+        rt_cuda_event_destroy(self.start_event)
+        rt_cuda_event_destroy(self.end_event)
+        self.start_event = 0
+        self.end_event = 0
+        self.events_ok = false
+        self.running = false
+
+export CudaNativeProfileTarget, CUDA_NATIVE_TOLERANCE_NS, CUDA_NATIVE_DEFAULT_STREAM, cuda_native_plausible, cuda_native_events_available, cuda_native_ensure_context, cuda_native_detail_measured, cuda_native_detail_disabled, cuda_native_detail_no_begin, cuda_native_detail_backwards, cuda_native_detail_no_events, cuda_native_detail_event_error, cuda_native_detail_implausible
