@@ -2,11 +2,11 @@
 
 > Source-synchronized unit manual. The current self-hosted SSpec runner is
 > blocked before trustworthy scenario execution, so this document records
-> 83 active scenarios and 0 executed scenarios.
+> 84 active scenarios and 0 executed scenarios.
 
 | Tests | Active | Skipped | Pending | Executed |
 |------:|-------:|--------:|--------:|---------:|
-| 83 | 83 | 0 | 0 | 0 |
+| 84 | 84 | 0 | 0 | 0 |
 
 **Executable source:** `test/01_unit/app/llm_caret/claude_cli_spec.spl`
 
@@ -1401,6 +1401,16 @@ expect(duplicate[0].content).to_contain("after a terminal")
 
 </details>
 
+## should reject an assistant event after message stop
+
+**Group:** claude_cli_stream - local fixture
+
+**Step:** Receive a `message_stop` marker followed by an assistant envelope.
+
+**Expected:** The stream wrapper rejects the out-of-order event as a single
+invalid terminal error that identifies data after `message_stop`; the later
+assistant content is not admitted.
+
 ## should distinguish incomplete, empty, and valid stop-result streams
 
 **Group:** claude_cli_stream - local fixture
@@ -1439,8 +1449,8 @@ expect(completed[1].content).to_equal("complete")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 83 |
-| Active scenarios | 83 |
+| Total scenarios | 84 |
+| Active scenarios | 84 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 | Executed scenarios | 0 |
