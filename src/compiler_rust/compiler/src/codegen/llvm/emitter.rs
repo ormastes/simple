@@ -238,6 +238,23 @@ impl LlvmEmitter<'_> {
             .into()
     }
 
+    // The core-C coverage ABI owns the source name as a C string.  Keep that
+    // name in an immutable module global and pass its address through the
+    // runtime's i64 pointer slot.
+    fn coverage_file_value(&self, file: &str) -> Result<BasicValueEnum<'static>, String> {
+        let mut bytes = file.as_bytes().to_vec();
+        bytes.push(0);
+        let text = self.backend.context_ref().const_string(&bytes, false);
+        let global = self.module.add_global(text.get_type(), None, "coverage_file");
+        global.set_initializer(&text);
+        global.set_constant(true);
+        let pointer = global.as_pointer_value();
+        let value = self.builder
+            .build_ptr_to_int(pointer, self.backend.runtime_int_type(), "coverage_file_ptr")
+            .map_err(|e| format!("LLVM coverage file pointer conversion failed: {e}"))?;
+        Ok(value.into())
+    }
+
     fn method_leaf_name(func_name: &str) -> &str {
         func_name.rsplit('.').next().unwrap_or(func_name)
     }
@@ -1887,37 +1904,28 @@ impl CodegenEmitter for LlvmEmitter<'_> {
     // =========================================================================
     // Coverage — delegate to runtime
     // =========================================================================
-    // The three probe callees below are `rt_decision_probe`,
-    // `rt_condition_probe` and `rt_path_probe`. These are the names the runtime
-    // actually exports, the names the Cranelift backend emits
-    // (`codegen/instr/coverage.rs`), and the names already declared as codegen
-    // roots for these MIR instructions in `codegen/common_backend.rs`.
-    //
-    // They previously read `rt_coverage_decision` / `rt_coverage_condition` /
-    // `rt_coverage_path`, which are defined in NEITHER runtime — confirmed with
-    // `nm --defined-only` against both built archives — so any module reaching
-    // these paths failed at LINK time (`undefined reference to
-    // 'rt_coverage_path'`). Codegen itself never complains about an undefined
-    // callee, which is why this survived: only linking discriminates.
-    //
-    // The argument ORDER was wrong as well, independently of the names. The
-    // runtime signatures are `rt_decision_probe(decision_id: u64, result: bool)`
-    // and `rt_condition_probe(decision_id: u64, condition_id: u32,
-    // result: bool)` — id(s) first, result last — and Cranelift passes them in
-    // that order. This emitter passed `result` FIRST. Renaming alone would have
-    // turned an undefined-symbol link error into a silently transposed call, so
-    // the operands are reordered here to match.
+    // The admitted core-C coverage ABI records the source location with each
+    // outcome.  The legacy `rt_decision_probe` and `rt_condition_probe` helpers
+    // cannot produce a receipt-qualified row because they accept no file or
+    // span.  Do not route native coverage through them: use the SFFI-stable
+    // `rt_coverage_*` functions declared in `runtime_sffi.rs`.
     fn emit_decision_probe(
         &mut self,
         result: VReg,
         decision_id: u32,
-        _file: &str,
-        _line: u32,
-        _column: u32,
+        file: &str,
+        line: u32,
+        column: u32,
     ) -> Result<(), String> {
         let res = self.get(result)?;
         let id = self.i64_const(decision_id as i64);
-        self.call_runtime_void("rt_decision_probe", &[id, res])
+        let file_value = self.coverage_file_value(file)?;
+        let line_value = self.i64_const(line as i64);
+        let column_value = self.i64_const(column as i64);
+        self.call_runtime_void(
+            "rt_coverage_decision_probe",
+            &[id, res, file_value, line_value, column_value],
+        )
     }
 
     fn emit_condition_probe(
@@ -1925,14 +1933,20 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         decision_id: u32,
         condition_id: u32,
         result: VReg,
-        _file: &str,
-        _line: u32,
-        _column: u32,
+        file: &str,
+        line: u32,
+        column: u32,
     ) -> Result<(), String> {
         let res = self.get(result)?;
         let did = self.i64_const(decision_id as i64);
         let cid = self.i64_const(condition_id as i64);
-        self.call_runtime_void("rt_condition_probe", &[did, cid, res])
+        let file_value = self.coverage_file_value(file)?;
+        let line_value = self.i64_const(line as i64);
+        let column_value = self.i64_const(column as i64);
+        self.call_runtime_void(
+            "rt_coverage_condition_probe",
+            &[did, cid, res, file_value, line_value, column_value],
+        )
     }
 
     fn emit_path_probe(&mut self, path_id: u32, block_id: u32) -> Result<(), String> {
@@ -2410,26 +2424,15 @@ mod tests {
         assert_eq!(LlvmEmitter::method_leaf_name("to_u32"), "to_u32");
     }
 
-    /// Regression guard for the coverage-probe callee names.
+    /// Regression guard for native receipt-qualified coverage lowering.
     ///
-    /// `rt_coverage_path` / `rt_coverage_decision` / `rt_coverage_condition` are
-    /// defined in NEITHER runtime. That was established at the BINARY level, not
-    /// by reading source: `nm --defined-only` over both built archives
-    /// (`target/release/libsimple_runtime.a`, 1679 exported `rt_*`, and
-    /// `build/simple-core/libsimple_runtime.a`, 790) lists none of them, while
-    /// the three replacements below are present. It was then confirmed at the
-    /// LINK level, which is the only layer that discriminates: an object
-    /// referencing `rt_coverage_path` fails with `undefined reference to
-    /// 'rt_coverage_path'` (rc=1), whereas one referencing `rt_path_probe` links
-    /// to a real ELF executable with the symbol resolved at a real address.
-    /// Codegen alone never complains, so no codegen-only check can see this.
-    ///
-    /// The positive half of this test is the TRUE-POSITIVE CONTROL: without it,
-    /// "the dead names are gone" could be satisfied by deleting the probe
-    /// emission entirely rather than by pointing it at the real helper. Both
-    /// halves must hold.
+    /// The core-C runtime is the only admitted ML-KEM coverage bundle.  Its
+    /// probe ABI includes a source pointer and span; the old two/three-argument
+    /// helpers cannot be used because they lose the owner identity needed by
+    /// the receipt composer.  Check both native calls and the retained file
+    /// conversion so deleting instrumentation cannot satisfy the test.
     #[test]
-    fn llvm_emitter_probes_call_symbols_that_exist_in_the_runtime() {
+    fn llvm_emitter_probes_call_core_c_coverage_abi_with_source_identity() {
         // Search the EMITTER code only, never this test module — otherwise the
         // assertions below would match their own text and be vacuous in both
         // directions.
@@ -2437,46 +2440,49 @@ mod tests {
         let split = src.find("#[cfg(all(test, feature = \"llvm\"))]").expect("test module marker");
         let code = &src[..split];
 
-        // Negative: these three are defined in neither runtime. Names are
-        // assembled at runtime so they never appear as quoted literals here.
-        for suffix in ["path", "decision", "condition"] {
-            let dead = format!("\"rt_coverage_{}\"", suffix);
+        // Negative: legacy helpers omit file/line/column and cannot yield an
+        // owner-qualified core-C row.  Names are assembled to exclude this test
+        // body itself from the source scan.
+        for suffix in ["decision", "condition"] {
+            let legacy = format!("\"rt_{}_probe\"", suffix);
             assert!(
-                !code.contains(&dead),
-                "rt_coverage_{} is not defined in either runtime; emitting it \
-                 produces an undefined-symbol link failure that codegen cannot see",
+                !code.contains(&legacy),
+                "legacy rt_{}_probe drops the source location required by core-C coverage",
                 suffix
             );
         }
 
-        // Positive control: the probe emissions must still exist, naming the
-        // helpers the runtime actually exports and that Cranelift already emits.
-        // Without this half, deleting the probes would satisfy the negative half.
-        for kind in ["path", "decision", "condition"] {
-            let live = format!("\"rt_{}_probe\"", kind);
+        // Positive control: decision and condition calls must retain every ABI
+        // field, including an immutable source name converted to the runtime
+        // pointer slot.
+        for kind in ["decision", "condition"] {
+            let live = format!("\"rt_coverage_{}_probe\"", kind);
             assert!(
                 code.contains(&live),
-                "rt_{}_probe must still be emitted; a silent probe path would \
+                "rt_coverage_{}_probe must still be emitted; a silent probe path would \
                  satisfy the negative assertions above without fixing anything",
                 kind
             );
         }
-
-        // Argument order matters independently of the name: the runtime
-        // signatures are (decision_id, result) and (decision_id, condition_id,
-        // result) — ids first, result last — matching Cranelift's emission in
-        // codegen/instr/coverage.rs. Renaming without reordering would have
-        // traded a loud link error for a silently transposed call.
         assert!(
-            code.contains(&format!("{}\"rt_decision_probe\", &[id, res])", "call_runtime_void(")),
-            "rt_decision_probe takes (decision_id, result), not (result, decision_id)"
+            code.contains("fn coverage_file_value") &&
+                code.contains("build_ptr_to_int(pointer") &&
+                code.contains("bytes.push(0)"),
+            "coverage lowering must retain a NUL-terminated immutable file name"
         );
         assert!(
             code.contains(&format!(
-                "{}\"rt_condition_probe\", &[did, cid, res])",
+                "{}\"rt_coverage_decision_probe\", &[id, res, file_value, line_value, column_value]",
                 "call_runtime_void("
             )),
-            "rt_condition_probe takes (decision_id, condition_id, result)"
+            "decision coverage must pass id, result, file, line, and column"
+        );
+        assert!(
+            code.contains(&format!(
+                "{}\"rt_coverage_condition_probe\", &[did, cid, res, file_value, line_value, column_value]",
+                "call_runtime_void("
+            )),
+            "condition coverage must pass id, condition id, result, file, line, and column"
         );
     }
 }
