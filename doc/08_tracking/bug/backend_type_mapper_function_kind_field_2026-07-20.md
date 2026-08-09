@@ -1,7 +1,9 @@
 # Bug: backend type_mapper composite-type strategy dispatch accesses
 `.kind` on a value of type `function`
 
-**Status:** OPEN — filed, not fixed (source not read in depth)
+**Status:** FIXED 2026-08-09 — `InterpreterTypeMapper.map_struct` rewritten to
+avoid the buggy pattern; `test/01_unit/compiler/backend/type_mapper_spec.spl`
+is 4/4 green.
 
 **Date:** 2026-07-20
 **Campaign:** whole-suite 01_unit triage (fix_guide.md)
@@ -37,9 +39,38 @@ where a type value was expected, and `.kind` is then accessed on it.
 `test/01_unit/compiler/backend/type_mapper_spec.spl`, example "handles
 composite types using each backend strategy".
 
-## Suggested follow-up
+## Root cause (confirmed)
 
-Read the example body and the `type_mapper` composite-type dispatch it
-exercises (likely `src/compiler/70.backend/backend/type_mapper.spl` or
-similar) to find where a function value flows into a `.kind` access instead
-of the intended type value.
+`src/compiler/70.backend/backend/interpreter_type_mapper.spl`, method
+`map_struct`, used:
+
+```
+val field_types = fields.map("{_.0}: {self.map_type(_.1)}")
+```
+
+The `_` placeholder-lambda promotion for `.map(...)` mis-binds the *nested*
+`self.map_type(_.1)` call embedded inside the string interpolation: instead
+of evaluating `_.1` against the outer `.map` element and passing the
+resulting `MirType` to `map_type`, it wraps `_.1` as its own closure and
+passes that function value into `map_type`, which then panics accessing
+`.kind` on a `function`. This interpolated-placeholder pattern
+(`"{_.field}"` referencing the map element inside a nested call inside a
+string literal) had exactly one call site in the whole `70.backend/` tree;
+every sibling mapper (e.g. `llvm_type_mapper.map_struct`) instead uses the
+working bare-closure form `fields.map(self.map_type(_.1))`.
+
+## Fix
+
+Rewrote `map_struct` to use an explicit `for` loop building `"{name}:
+{ty_str}"` per field instead of the interpolated-placeholder `.map(...)`
+call, matching the pattern used by the other backends' `map_struct`
+implementations. Isolated regression check (temporary per-assertion spec,
+removed after use) confirmed the interp `map_struct`/`map_union`/tuple
+compositions all pass individually and together; the full spec file is now
+4/4 green.
+
+Note: the underlying general defect — `_` placeholder-lambda promotion
+inside a nested call embedded in a string interpolation can bind to the
+wrong scope — is not otherwise characterized or fixed here; only this one
+call site is confirmed to hit it, and it has been rewritten to avoid the
+pattern rather than to exercise it.

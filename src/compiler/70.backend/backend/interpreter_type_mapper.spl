@@ -145,8 +145,21 @@ impl InterpreterTypeMapper:
         if fields.len() == 0:
             "Struct<>"
         else:
-            val field_types = fields.map("{_.0}: {self.map_type(_.1)}")
-            "Struct<{field_types.join(', ')}>"
+            # Root cause: `_` placeholder-lambda promotion inside a string
+            # interpolation embed (`"{_.0}: {self.map_type(_.1)}"`) mis-binds
+            # the nested `self.map_type(_.1)` call as its own closure instead
+            # of evaluating `_.1` against the outer `.map` element, so
+            # `map_type` receives a function value and `ty.kind` panics. Use
+            # an explicit loop (matches the working pattern in
+            # llvm_type_mapper.map_struct: `fields.map(self.map_type(_.1))`)
+            # instead of the buggy interpolated-placeholder form.
+            # See doc/08_tracking/bug/backend_type_mapper_function_kind_field_2026-07-20.md
+            var parts: [text] = []
+            for f in fields:
+                val name = f.0
+                val ty_str = self.map_type(f.1)
+                parts = parts.push("{name}: {ty_str}")
+            "Struct<{parts.join(', ')}>"
 
     fn map_array(element: MirType, size: i64) -> text:
         """
