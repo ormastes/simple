@@ -1,6 +1,20 @@
 #!/bin/sh
 set -eu
 
+# User-authorized diagnostic mode: permit a fresh Stage2→Stage3 check while
+# mechanically preventing it from being mistaken for a deploy/release admission.
+if [ "${SIMPLE_ADHOC_BOOTSTRAP:-0}" = 1 ]; then
+  for adhoc_arg in "$@"; do
+    case "$adhoc_arg" in
+      --full-cli|--deploy|--release)
+        echo "error: SIMPLE_ADHOC_BOOTSTRAP=1 is Stage2/Stage3 diagnostic-only" >&2
+        exit 2
+        ;;
+    esac
+  done
+  export SIMPLE_BOOTSTRAP_STAGE4=0
+fi
+
 # Bootstrap wrapper for Linux, macOS, Windows/MSYS2, and FreeBSD.
 #
 # Output layout uses <arch>-<vendor>-<os>-<abi> target triple:

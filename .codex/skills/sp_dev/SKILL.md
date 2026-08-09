@@ -99,6 +99,12 @@ recorded and its native smoke passes with stub fallback disabled. It is not
 Stage 4 unless the bounded essential-tools smoke above also passes against that
 exact artifact.
 
+When the user explicitly authorizes `SIMPLE_ADHOC_BOOTSTRAP=1`, run a fresh
+Stage2→Stage3 bootstrap in an isolated output directory and retain its
+`adhoc-stage3-evidence.env` receipt. The hook rejects `--full-cli`, `--deploy`,
+and `--release` in this mode. Treat the receipt as diagnostic evidence only;
+it never authorizes a release, remote `main`, or a Stage4 PASS claim.
+
 After the backend and SimpleOS port admit the same provider, build the browser
 guest with `scripts/os/build_browser_demo_client.shs`, retain
 `build/os/apps/browser_demo/clang-23.1-evidence.txt`, and run the canonical

@@ -320,6 +320,7 @@ MCP server available via npm: `@simple-lang/mcp-server`
   paths. Engine3D HUD/world is a separate lane, never a GUI/web/2D shortcut.
 
 - **Default tooling = pure-Simple self-hosted binary, not the Rust seed.** `test`/`lint`/`fmt`/`build`/`run`/MCP/LSP all run on `bin/release/<triple>/simple` (built via bootstrap). The seed (`src/compiler_rust/target/bootstrap/simple`) is bootstrap-only. If the self-hosted binary is slow/unstable, fix it in pure-Simple (`src/compiler`/`src/lib`/`src/app`) and re-deploy or file a bug — don't fall back to the seed. See `.claude/rules/bootstrap.md`
+- **User-authorized ad-hoc bootstrap:** `SIMPLE_ADHOC_BOOTSTRAP=1` may run a fresh Stage2→Stage3 diagnostic bootstrap when the user explicitly requests it. Record its output path, Stage3 version, hash, provenance, command, and focused smoke result. It is diagnostic evidence only: it cannot deploy, release, push to `main`, satisfy Stage4/essential-tools admission, or substitute for the normal pure-Simple toolchain.
 - **Self-sufficient**: never fail because another LLM didn't do its step — do it yourself
 - When a short, safe grammar or compact expression form fails, compiles too slowly, or forces a workaround, fix it or record a concrete bug/feature request instead of silently normalizing the workaround
 - When you hit a meaningful perf regression during implementation or verification, either fix it in the same change or record it as a concrete bug/todo before moving on
