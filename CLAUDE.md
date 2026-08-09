@@ -5,7 +5,10 @@ Impl in Simple unless it has big performance differences.
 
 ## Essential Commands
 ```bash
-bin/simple build                  # Debug build (lint/fmt/check/bootstrap subcommands also available)
+bin/simple build                  # Prints bootstrap HELP and exits (~0.02s) — does NOT build
+                                  # A src/lib/** edit needs NO build: stdlib is read as SOURCE
+                                  # every run (82 .spl opens, 0 .smf). Bootstrap only DEPLOYS a
+                                  # compiler. See .claude/rules/commands.md
 bin/simple test                   # Run all tests (or: test path/to/spec.spl)
 scripts/setup/setup.shs && bin/simple build bootstrap  # Full bootstrap
 ```

@@ -5,7 +5,7 @@ alwaysApply: false
 
 ```bash
 # Build
-bin/simple build                    # Debug build (runs bootstrap by default)
+bin/simple build                    # Prints bootstrap HELP and exits (~0.02s). Does NOT build.
 bin/simple build bootstrap          # 3-stage self-compilation verification
 
 # Quality
@@ -24,6 +24,33 @@ bin/simple todo-scan                # Update TODO tracking
 bin/simple bug-add --id=X           # Add bug
 bin/simple bug-gen                  # Generate bug report
 ```
+
+## A `src/lib/**` change needs NO build (measured 2026-08-09)
+
+Editing the stdlib requires **no build step at all** for `run` / `test` / lint /
+LSP. The stdlib is read as SOURCE on every process start — measured by strace:
+**82 opens of `src/lib/**.spl`, zero `.smf`**. Nothing is baked into the binary
+(no `include_str!` of `src/lib`; only 3 `src/lib` strings, all path literals),
+so no relink is needed either.
+
+```bash
+# edit src/lib/... then just run it. No build.
+bin/simple test test/01_unit/.../foo_spec.spl
+```
+
+**Bootstrap is only for DEPLOYING A COMPILER**, not for picking up a lib change.
+When you do need it, the genuine dependency set is 239 of 1567 compiler files
+that import std, across 75 prefixes (`nogc_sync_mut/io/**`, `log`, `io_runtime`,
+`string_core`, `text`, `platform`, `path`, `array`, `binary_io`,
+`common/{crypto/sha256,target,sdn}`, `tooling/easy_fix`, `sffi/llvm`).
+
+Why there is no partial build: there is **no target/dependency model**. No
+`BuildTarget` exists in `80.driver` — only files.
+`DependencyEntry.needs_recompile` (`driver_build/incremental.spl:203-226`) is a
+ONE-HOP predicate that never recurses, and is **never called** — its four
+importers take only fingerprint helpers. `action_key.spl` / `cas_store.spl` have
+zero external callers and are not exported from `cache/__init__.spl`.
+Detail: `doc/01_research/compiler/build/lib_only_build_feasibility_2026-08-09.md`.
 
 ## Fast Path (measured 2026-08-09)
 
