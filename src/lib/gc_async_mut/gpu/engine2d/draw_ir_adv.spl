@@ -1323,21 +1323,11 @@ var _engine2d_parent_material_css_b: i64 = 0
 var _engine2d_parent_material_css_c: i64 = 0
 var _engine2d_parent_material_next: i32 = 0
 
-fn _engine2d_parent_material_pixels_checksum(pixels: [u32]) -> u64:
-    var checksum = 0x9E3779B97F4A7C15u64
-    var i = 0
-    while i < pixels.len():
-        checksum = checksum ^ (
-            pixels[i].to_u64() + (i + 1).to_u64() * 0x100000001B3u64)
-        i = i + 1
-    checksum & 0x7FFFFFFFFFFFFFFFu64
-
 fn _engine2d_parent_material_cache_key(
-    batch: DrawIrBatch, seed: [u32], padding: i32
+    batch: DrawIrBatch, visual_key: text, padding: i32
 ) -> text:
     val e: DrawIrEmbeddingConfig = batch.embedding
-    val parent_checksum = _engine2d_parent_material_pixels_checksum(seed)
-    "{batch.backend_target}|{batch.source.style_revision}|{e.surface_id}|{e.x},{e.y},{e.width},{e.height},{e.opacity_milli}|{padding}|{batch.commands.len()}|{parent_checksum}"
+    "{visual_key}|{batch.backend_target}|{batch.source.style_revision}|{e.surface_id}|{e.x},{e.y},{e.width},{e.height},{e.opacity_milli}|{padding}|{batch.commands.len()}"
 
 fn _engine2d_parent_material_cache_slot(key: text) -> i32:
     if key != "" and key == _engine2d_parent_material_key_a:
@@ -1840,7 +1830,7 @@ fn _engine2d_draw_ir_parent_material_padding(batch: DrawIrBatch) -> i32:
 # today's exact direct translate+clip behavior — this is the load-bearing
 # backward-compatibility path: no regression for callers that never opted
 # into a real embedded surface.
-fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch, images: [Engine2dResolvedDrawIrImage], depth: i32, allow_parent_image: bool, css_background_pixel_work_budget: i64, batch_execution_counts: [i64]) -> Engine2dDrawIrRenderOutcome:
+fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch, images: [Engine2dResolvedDrawIrImage], depth: i32, allow_parent_image: bool, css_background_pixel_work_budget: i64, batch_execution_counts: [i64], visual_key: text) -> Engine2dDrawIrRenderOutcome:
     var eng = engine
     # Preserve the nested Draw IR struct layout across the native
     # free-function boundary. Native inference has historically treated an
@@ -1928,23 +1918,15 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
         val parent_padding = _engine2d_draw_ir_parent_material_padding(batch)
         val delta_width = embedding.width + parent_padding * 2
         val delta_height = embedding.height + parent_padding * 2
-        # D9: was a full-frame eng.read_pixels_with_source() every call, even
-        # though only this one glass rect is needed. Route through the
-        # region-limited seam instead -- see
-        # engine2d_read_pixels_region_equivalence_spec.spl for the proof that
-        # this returns pixels identical to the old full-read-then-crop path.
-        val seed = _engine2d_read_pixels_region_pixels(
-            eng, embedding.x - parent_padding, embedding.y - parent_padding,
-            delta_width, delta_height)
-        if seed.len() != delta_width.to_i64() * delta_height.to_i64():
-            return _engine2d_draw_ir_render_outcome(
-                eng, 0, batch.commands.len().to_i32(),
-                "parent-material-seed-unavailable", 0)
+        # A composition scene key is the canonical immutable visual identity
+        # for prepared replay.  Admit a retained material before copying or
+        # checksumming its parent region; a changed scene/style/geometry/backend
+        # key misses and executes the canonical seeded path below.
         val material_cache_key = _engine2d_parent_material_cache_key(
-            batch, seed, parent_padding)
+            batch, visual_key, parent_padding)
         val material_cache_slot = _engine2d_parent_material_cache_slot(
             material_cache_key)
-        if material_cache_slot >= 0:
+        if visual_key != "" and material_cache_slot >= 0:
             val cached_pixels = _engine2d_parent_material_cache_pixels(
                 material_cache_slot)
             if cached_pixels.len() == embedding.width.to_i64() * embedding.height.to_i64():
@@ -1971,6 +1953,18 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
                         eng, cached_rendered, 0, "", cached_cpu,
                         0, 0, 0, [], "cpu-composited-material",
                         0, 0, cached_css)
+        # D9: was a full-frame eng.read_pixels_with_source() every call, even
+        # though only this one glass rect is needed. Route through the
+        # region-limited seam instead -- see
+        # engine2d_read_pixels_region_equivalence_spec.spl for the proof that
+        # this returns pixels identical to the old full-read-then-crop path.
+        val seed = _engine2d_read_pixels_region_pixels(
+            eng, embedding.x - parent_padding, embedding.y - parent_padding,
+            delta_width, delta_height)
+        if seed.len() != delta_width.to_i64() * delta_height.to_i64():
+            return _engine2d_draw_ir_render_outcome(
+                eng, 0, batch.commands.len().to_i32(),
+                "parent-material-seed-unavailable", 0)
         val seeded_surface = eng.draw_ir_create_offscreen_engine(
             delta_width, delta_height)
         match seeded_surface:
@@ -2176,7 +2170,7 @@ fn engine2d_draw_ir_adv_batch_with_images(engine: Engine2D, batch: DrawIrBatch, 
     var batch_execution_counts: [i64] = [0, 0, 0, 0, 0, 0]
     val outcome = _engine2d_draw_ir_render_batch_embedded(
         engine, batch, images, 0, false,
-        engine.width().to_i64() * engine.height().to_i64(), batch_execution_counts)
+        engine.width().to_i64() * engine.height().to_i64(), batch_execution_counts, "")
     val eng = engine
     var unsupported_kinds = outcome.unsupported_kinds
     if unsupported_kinds == "":
@@ -2210,7 +2204,7 @@ fn engine2d_draw_ir_adv_composition(engine: Engine2D, composition: DrawIrComposi
 
 fn engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: DrawIrComposition, gpu_available: bool, images: [Engine2dResolvedDrawIrImage]) -> Engine2dDrawIrAdvResult:
     val transport = Engine2dDrawIrTransport(destination: [], status: [], evidence_i64: [], evidence_text: [])
-    val result = _engine2d_draw_ir_adv_composition_with_images(engine, composition, gpu_available, images, false, true, true, transport)
+    val result = _engine2d_draw_ir_adv_composition_with_images(engine, composition, gpu_available, images, false, true, true, transport, "")
     result
 
 fn engine2d_draw_ir_adv_composition_with_images_into(engine: Engine2D, composition: DrawIrComposition, gpu_available: bool, images: [Engine2dResolvedDrawIrImage], destination: [u32]) -> i32:
@@ -2218,7 +2212,7 @@ fn engine2d_draw_ir_adv_composition_with_images_into(engine: Engine2D, compositi
     val transport = Engine2dDrawIrTransport(destination: destination, status: transport_status, evidence_i64: [], evidence_text: [])
     _engine2d_draw_ir_adv_composition_with_images(
         engine, composition, gpu_available, images, false, true, true,
-        transport
+        transport, ""
     )
     transport_status[0]
 
@@ -2231,18 +2225,25 @@ fn engine2d_draw_ir_adv_composition_with_images_into_evidence(engine: Engine2D, 
     val transport = Engine2dDrawIrTransport(destination: destination, status: transport_status, evidence_i64: evidence_i64, evidence_text: evidence_text)
     _engine2d_draw_ir_adv_composition_with_images(
         engine, composition, gpu_available, images, false, true, true,
-        transport
+        transport, ""
     )
     transport_status[0]
 
 fn engine2d_draw_ir_adv_composition_present_with_images(engine: Engine2D, composition: DrawIrComposition, gpu_available: bool, images: [Engine2dResolvedDrawIrImage]) -> Engine2dDrawIrAdvResult:
     """Render and present a composition without requesting a result readback."""
     val transport = Engine2dDrawIrTransport(destination: [], status: [], evidence_i64: [], evidence_text: [])
-    _engine2d_draw_ir_adv_composition_with_images(engine, composition, gpu_available, images, false, true, false, transport)
+    _engine2d_draw_ir_adv_composition_with_images(engine, composition, gpu_available, images, false, true, false, transport, "")
 
 fn engine2d_draw_ir_adv_composition_present_with_images_evidence(engine: Engine2D, composition: DrawIrComposition, gpu_available: bool, images: [Engine2dResolvedDrawIrImage], evidence_i64: [i64], evidence_text: [text]) -> Engine2dDrawIrAdvResult:
     val transport = Engine2dDrawIrTransport(destination: [], status: [], evidence_i64: evidence_i64, evidence_text: evidence_text)
-    _engine2d_draw_ir_adv_composition_with_images(engine, composition, gpu_available, images, false, true, false, transport)
+    _engine2d_draw_ir_adv_composition_with_images(engine, composition, gpu_available, images, false, true, false, transport, "")
+
+fn engine2d_draw_ir_adv_composition_present_prepared_with_images_evidence(engine: Engine2D, composition: DrawIrComposition, gpu_available: bool, images: [Engine2dResolvedDrawIrImage], evidence_i64: [i64], evidence_text: [text]) -> Engine2dDrawIrAdvResult:
+    """Replay an immutable prepared composition through fresh Draw IR execution."""
+    val transport = Engine2dDrawIrTransport(destination: [], status: [], evidence_i64: evidence_i64, evidence_text: evidence_text)
+    _engine2d_draw_ir_adv_composition_with_images(
+        engine, composition, gpu_available, images, false, true, false,
+        transport, composition.scene_key)
 
 fn engine2d_draw_ir_adv_fresh_device_composition_with_images(engine: Engine2D, composition: DrawIrComposition, images: [Engine2dResolvedDrawIrImage]) -> Engine2dDrawIrAdvResult:
     """Render/read back an exhaustively preflighted fresh device composition."""
@@ -2255,9 +2256,9 @@ fn engine2d_draw_ir_adv_fresh_device_composition_with_images(engine: Engine2D, c
         val plan = simple_2d_draw_ir_adv_composition_plan(composition, true)
         return _engine2d_draw_ir_result_from_composition_plan_with_unsupported(plan, 0, 1, prepared.1, engine2d_readback([], "preflight_rejected"))
     val transport = Engine2dDrawIrTransport(destination: [], status: [], evidence_i64: [], evidence_text: [])
-    _engine2d_draw_ir_adv_composition_with_images(prepared.0, composition, true, images, true, false, true, transport)
+    _engine2d_draw_ir_adv_composition_with_images(prepared.0, composition, true, images, true, false, true, transport, "")
 
-fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: DrawIrComposition, gpu_available: bool, images: [Engine2dResolvedDrawIrImage], allow_parent_image: bool, present_frame: bool, readback_frame: bool, transport: Engine2dDrawIrTransport) -> Engine2dDrawIrAdvResult:
+fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: DrawIrComposition, gpu_available: bool, images: [Engine2dResolvedDrawIrImage], allow_parent_image: bool, present_frame: bool, readback_frame: bool, transport: Engine2dDrawIrTransport, prepared_visual_key: text) -> Engine2dDrawIrAdvResult:
     val plan = simple_2d_draw_ir_adv_composition_plan(composition, gpu_available)
     # Preserve the public fallback invariant from the original inputs. The
     # native cross-module aggregate path can lose this bool from `plan`.
@@ -2310,7 +2311,8 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: 
                 _e2d_wm_command_profile_active = true
         val outcome = _engine2d_draw_ir_render_batch_embedded(
             eng, batch, images, 0, allow_parent_image,
-            css_background_pixel_work_remaining, batch_execution_counts)
+            css_background_pixel_work_remaining, batch_execution_counts,
+            prepared_visual_key)
         _e2d_wm_command_profile_active = false
         if profile_wm_batches:
             val profile_batch_finished_us = rt_time_now_micros()
@@ -2453,5 +2455,6 @@ export engine2d_draw_ir_adv_composition_with_images_into
 export engine2d_draw_ir_adv_composition_with_images_into_evidence
 export engine2d_draw_ir_adv_composition_present_with_images
 export engine2d_draw_ir_adv_composition_present_with_images_evidence
+export engine2d_draw_ir_adv_composition_present_prepared_with_images_evidence
 export engine2d_draw_ir_adv_fresh_device_composition_with_images
 export engine2d_resolved_draw_ir_image
