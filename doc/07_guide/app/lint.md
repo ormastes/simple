@@ -655,6 +655,82 @@ justified until the classifier root cause is fixed.
 
 ---
 
+## Dynamic Capability Acquisition Lint (DCA001-DCA002)
+
+Source: `src/compiler/35.semantics/lint/dynamic_capability_acquire.spl`.
+Spec: `test/01_unit/compiler/lint/dynamic_capability_acquire_spec.spl`.
+
+In a mission-critical build the set of capabilities a process holds is decided
+once, at boot, from a pinned manifest. Acquiring a capability in the middle of a
+control loop means a failed acquisition surfaces where there is no safe way to
+handle it. These rules push acquisition back into the composition root.
+
+### DCA001: Capability acquired outside `@init_phase` (severity from config)
+
+Fires on a single-value capability-group acquisition in a function that is not
+marked `@init_phase`:
+
+```simple
+# WARNED — acquisition inside a control-loop function
+fn render_frame(src: Host):
+    val g = GpuCaps.from(src)          # the static P0's `with` sugar generates
+    val d = ref_debug_profiler(src)    # per-backend interim helper (P2)
+
+# CLEAN — acquired once at boot and passed down
+@init_phase
+fn boot(src: Host):
+    val g = GpuCaps.from(src)
+```
+
+Recognised spellings: `G.from(...)`, `G__from(...)` (the same generated static),
+and `<backend>_debug_profiler(...)`.
+
+**Not flagged: accessor pairing.** Building a group by pairing
+`session.debug()` with `session.profile()` is a *correctness* defect, not a
+policy question — classes are value types here, so the two halves are
+independent copies that diverge. That belongs to
+`doc/08_tracking/bug/capability_group_from_unsound_under_value_semantics_2026-08-09.md`;
+reporting it as a DCA001 warning would imply it is merely discouraged.
+
+**Severity is configuration, not a constant.** It comes from
+`critical.dynamic_acquire` in `config/critical_mode.sdn`:
+
+| value   | effect                                | when                             |
+|---------|---------------------------------------|----------------------------------|
+| `allow` | no diagnostics                        | default outside critical mode    |
+| `warn`  | diagnostic, build still succeeds      | critical mode's default **today**|
+| `error` | build fails                           | critical mode's **target** state |
+
+The requirement is "a warning now, promotable to an error later", so promoting
+the rule is that one config line and needs no code change. An unrecognised mode
+is treated as `warn`, never `allow` — a config typo must not silently disable
+the lint. The shipped config has `critical.enabled: false`, so the rule
+contributes nothing to a non-critical build.
+
+### DCA002: `gpu.backend` must be manifest-pinned in critical mode (ERROR)
+
+Under critical mode `gpu.backend` must name a concrete backend; `auto` and an
+unset value are rejected because they defer the choice to a boot probe.
+
+```
+critical:
+  enabled: true
+  gpu:
+    backend: cuda(sm80)      # OK
+  # backend: auto            # DCA002
+```
+
+### DCA003: boot-time probe-vs-manifest refusal (runtime, not lint)
+
+`std.critical.capability_manifest.verify_gpu_manifest_pin(manifest, probed,
+critical)` is the boot gate. In critical mode, if the probe disagrees with the
+pinned backend the process **refuses to start** with a report naming both
+sides. It is a promoted fault path, not a fallback: it never downgrades to
+whatever the probe found, because running unvalidated code paths is the exact
+failure the pin exists to prevent.
+
+---
+
 ## Related Commands
 
 - `simple build check` — Rust workspace clippy/rustfmt/test aggregate

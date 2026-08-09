@@ -27,6 +27,8 @@ use compiler.semantics.lint.riscv_rtl_debuggability_lint.{lint_riscv_rtl_debugga
 use compiler.semantics.lint.param_tag.{check_param_tag}
 use compiler.semantics.lint.module_init_literal.{check_module_init_literal}
 use compiler.semantics.lint.raw_rt_access.{check_raw_rt_access}
+use compiler.semantics.lint.dynamic_capability_acquire.{check_dynamic_capability_acquire}
+use std.critical.capability_manifest.{load_critical_mode_config}
 use compiler.semantics.lint.leading_operator.{check_leading_operator}
 use compiler.semantics.lint.const_ref_default.{check_const_ref_default}
 use compiler.semantics.lint.bare_primitive_internal.{check_bare_primitive_internal}
@@ -230,6 +232,7 @@ impl Linter:
         self.check_os_freestanding_patterns(path, content)
         self.check_module_init_literal_spl(path, content)
         self.check_raw_rt_access_spl(path, content)
+        self.check_dynamic_capability_acquire_spl(path, content)
         self.check_leading_operator_spl(path, content)
         self.check_const_ref_default_spl(path, content)
         self.check_bare_primitive_internal_spl(path, content)
@@ -342,6 +345,24 @@ impl Linter:
             val lint = Lint.new(warning.code, LintLevel.Warn, LintCategory.Correctness, warning.message)
                 .with_fix(warning.hint)
             self.results.push(LintResult.new(path, warning.line_num, 0, lint))
+
+    # DCA001: capability-group acquisition outside an `@init_phase` function.
+    # Severity comes from `critical.dynamic_acquire` in config/critical_mode.sdn,
+    # which ships as `enabled: false` -> mode `allow`, so this contributes zero
+    # findings to a non-critical build and cannot regress the existing corpus.
+    # Critical builds set `enabled: true` (mode `warn` today, promotable to
+    # `error`). Reported at LintLevel.Warn for the same reason LEADOP001 is:
+    # a rule must not be escalated to Deny before its population is converted.
+    me check_dynamic_capability_acquire_spl(path: String, content: String):
+        val cfg = load_critical_mode_config("config/critical_mode.sdn")
+        val mode = if cfg.enabled: cfg.dynamic_acquire else: "allow"
+        if mode == "allow":
+            return
+        val findings = check_dynamic_capability_acquire(content, path, [], mode)
+        for finding in findings:
+            val lint = Lint.new(finding.code, LintLevel.Warn, LintCategory.Correctness, finding.message)
+                .with_fix(finding.note)
+            self.results.push(LintResult.new(path, finding.line_num, 0, lint))
 
     me check_raw_rt_access_spl(path: String, content: String):
         val findings = check_raw_rt_access(content, path)

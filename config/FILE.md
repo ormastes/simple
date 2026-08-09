@@ -8,6 +8,7 @@ Configuration files for build, test, packaging, and tooling.
 |---|---|
 | `bootstrap.sdn` | Bootstrap configuration |
 | `critical_files.sdn` | Critical file guard configuration |
+| `critical_mode.sdn` | Mission-critical mode: dynamic-acquire lint severity + gpu.backend manifest pin |
 | `di.sdn` | Dependency injection configuration |
 | `dl.config.sdn` | Deep learning configuration |
 | `doc_coverage.sdn` | Documentation coverage configuration |
