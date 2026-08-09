@@ -10,4 +10,17 @@ if [ ! -x "$go_bin" ]; then
   echo 'ERROR: cached Go 1.24 toolchain unavailable; CIRCL oracle cannot be skipped' >&2
   exit 2
 fi
-exec env GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local "$go_bin" test ./...
+go_version=$("$go_bin" version)
+case "$go_version" in
+  'go version go1.24.0 '*) ;;
+  *)
+    echo "ERROR: CIRCL oracle requires cached Go 1.24.0; found: $go_version" >&2
+    exit 2
+    ;;
+esac
+
+# This is deliberately a single independent external implementation check.
+# Keep module resolution read-only and offline so a missing cache is a failure,
+# never an implicit network download or a changed dependency graph.
+exec env GOENV=off GOWORK=off GOPROXY=off GOSUMDB=off GONOSUMDB='*' \
+  GOTOOLCHAIN=local GOFLAGS=-mod=readonly "$go_bin" test -count=1 ./...
