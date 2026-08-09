@@ -1829,6 +1829,12 @@ static uint32_t arm64_unbox_pixel(RuntimeValue value) {
     return (uint32_t)(uint64_t)DECODE_INT(value);
 }
 
+/* Framebuffer/WM [u32] pixel arrays carry raw u32 words in 8-byte slots.
+ * They are distinct from the tagged generic Engine2D SIMD-array ABI above. */
+static uint32_t arm64_blit_raw_pixel(RuntimeValue value) {
+    return (uint32_t)(uint64_t)value;
+}
+
 RuntimeValue rt_engine2d_simd_fill_span_u32(RuntimeValue dst, int64_t offset,
                                              int64_t count, int64_t color) {
     RuntimeArray *array = arm64_pixel_array(dst);
@@ -2907,7 +2913,7 @@ RuntimeValue rt_gui_blit_row4(RuntimeValue pixels_value, RuntimeValue src_offset
         serial_puts("[engine2d-blit-alpha] raw=");
         serial_put_hex((uint64_t)pixels->items[(uint64_t)src_offset]);
         serial_puts(" decoded=");
-        serial_put_hex((uint64_t)arm64_unbox_pixel(
+        serial_put_hex((uint64_t)arm64_blit_raw_pixel(
             pixels->items[(uint64_t)src_offset]));
         serial_puts("\r\n");
     }
@@ -2917,7 +2923,7 @@ RuntimeValue rt_gui_blit_row4(RuntimeValue pixels_value, RuntimeValue src_offset
         uint32_t packed[4];
         int opaque = 1;
         for (uint32_t lane = 0; lane < 4u; lane++) {
-            packed[lane] = arm64_unbox_pixel(pixels->items[(uint64_t)src_offset + i + lane]);
+            packed[lane] = arm64_blit_raw_pixel(pixels->items[(uint64_t)src_offset + i + lane]);
             uint32_t source_alpha = packed[lane] >> 24;
             uint32_t scaled_alpha = source_alpha * opacity_milli / 1000u;
             packed[lane] = (packed[lane] & 0x00ffffffu) | (scaled_alpha << 24);
@@ -2937,7 +2943,7 @@ RuntimeValue rt_gui_blit_row4(RuntimeValue pixels_value, RuntimeValue src_offset
         i += 4u;
     }
     while (i < count) {
-        uint32_t src = arm64_unbox_pixel(pixels->items[(uint64_t)src_offset + i]);
+        uint32_t src = arm64_blit_raw_pixel(pixels->items[(uint64_t)src_offset + i]);
         uint32_t source_alpha = src >> 24;
         uint32_t scaled_alpha = source_alpha * opacity_milli / 1000u;
         src = (src & 0x00ffffffu) | (scaled_alpha << 24);
