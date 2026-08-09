@@ -2746,8 +2746,8 @@ static volatile uint64_t g_gui_blit_row_calls = 0;
 static volatile uint64_t g_gui_blit_row_pixels = 0;
 static volatile uint64_t g_gui_blit_row_neon_chunks = 0;
 static int g_gui_blit_row_alpha_profiled = 0;
-#define GUI_PREPARED_PACKED_CACHE_SLOTS 3u
-#define GUI_PREPARED_PACKED_CACHE_PIXELS 131072u
+#define GUI_PREPARED_PACKED_CACHE_SLOTS 1u
+#define GUI_PREPARED_PACKED_CACHE_PIXELS 786432u
 static RuntimeArray *g_gui_prepared_packed_keys[GUI_PREPARED_PACKED_CACHE_SLOTS];
 static uint64_t g_gui_prepared_packed_lens[GUI_PREPARED_PACKED_CACHE_SLOTS];
 static uint32_t g_gui_prepared_packed_pixels

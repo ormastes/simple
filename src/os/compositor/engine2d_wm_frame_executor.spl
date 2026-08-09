@@ -18,7 +18,11 @@ use common.gpu.simpleos_host_gpu_protocol.{
     simpleos_host_gpu_guest_isa_name,
     simpleos_host_gpu_max_readback_bytes
 }
-use common.ui.draw_ir.{DRAW_IR_BACKEND_CPU, DrawIrComposition}
+use common.ui.draw_ir.{
+    DRAW_IR_BACKEND_CPU, DrawIrComposition,
+    draw_ir_batch_with_source, draw_ir_embedding_config_geometry,
+    draw_ir_image_command, draw_ir_source_manual
+}
 use common.ui.taskbar_model.{TaskbarModel}
 use common.ui.window_scene.{SharedWmScene, SharedWmWindow, WmContentFrame, wm_content_frame_checksum, wm_content_frame_web_provenance_valid}
 use common.ui.window_scene_draw_ir.{
@@ -477,8 +481,36 @@ class Engine2dWmFrameExecutor:
                 if not captured:
                     replay_images.push(replay_image)
                 replay_image_index = replay_image_index + 1
-            self.prepared_composition = local_composition
-            self.prepared_images = replay_images
+            val scanout_w = self.fb_w.to_i32()
+            val scanout_h = self.fb_h.to_i32()
+            val scanout_count = self.fb_w * self.fb_h
+            var scanout_pixels: [u32] = [0u32; scanout_count]
+            val scanout_status = self.engine.copy_pixels_region_into(
+                0, 0, scanout_w, scanout_h, scanout_pixels)
+            if scanout_status == scanout_count.to_i32():
+                val scanout_uri = "wm-prepared-scanout://{scene_revision}/{taskbar_revision}"
+                val scanout_batch = draw_ir_batch_with_source(
+                    "wm-prepared-scanout", self.local_draw_ir_backend_target,
+                    draw_ir_embedding_config_geometry(
+                        "", "wm-prepared-scanout",
+                        [0, 0, scanout_w, scanout_h, 0, 1000], false),
+                    [draw_ir_image_command(
+                        "wm-prepared-scanout", 0, 0, scanout_w, scanout_h,
+                        scanout_uri, [])],
+                    draw_ir_source_manual())
+                self.prepared_composition = DrawIrComposition(
+                    schema: local_composition.schema,
+                    composition_id: "{local_composition.composition_id}:prepared-scanout",
+                    scene_key: local_composition.scene_key,
+                    backend_target: local_composition.backend_target,
+                    batches: [scanout_batch])
+                self.prepared_images = [engine2d_resolved_draw_ir_image(
+                    scanout_uri, scanout_w, scanout_h, scanout_pixels)]
+                self.prepared_image_x0 = 0
+                self.prepared_image_y0 = 0
+            else:
+                self.prepared_composition = local_composition
+                self.prepared_images = replay_images
             self.prepared_image_xy = image_xy
             self.prepared_scene_revision = scene_revision
             self.prepared_taskbar_revision = taskbar_revision
