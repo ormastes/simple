@@ -169,27 +169,75 @@ describe "Network Error Handling":
 
 
 # ============================================================================
-# Test Group 5: JIT Compilation Mode
+# Test Group 5: engine reach (out of process) -- rewritten 2026-08-09
 # ============================================================================
+#
+# This group used to be titled "JIT Compilation Mode" with two examples named
+# "tcp bind compiles in JIT mode" / "udp bind compiles in JIT mode". Their
+# entire body was:
+#
+#     @net
+#     fn test_tcp_jit() -> bool:
+#         true
+#     expect test_tcp_jit()
+#
+# Doubly empty: it bound no socket, so it asserted nothing about networking;
+# and an sspec body physically cannot execute under the Cranelift JIT anyway
+# (`describe` / `it` / `expect` are Rust interpreter intrinsics with no codegen
+# lowering, and a spec file has no `fn main`, so the driver routes it to
+# `evaluate_module` regardless of SIMPLE_EXECUTION_MODE -- see
+# scripts/check/check-engine-claiming-specs-use-probe.shs). It would have
+# stayed green with the entire network stack removed.
+#
+# It is replaced by an out-of-process probe that binds REAL TCP and UDP
+# sockets on a kernel-assigned port, closes them, rebinds, and rejects an
+# invalid handle -- run under each NAMED engine, scored on its verdict LINE.
+#
+# Mechanism: src/lib/nogc_sync_mut/spec/engine_probe.spl
+# Pattern:   doc/07_guide/infra/testing/spec_engine_reach.md
 
-describe "JIT Compilation Mode":
-    # ## Native Code Networking
-    #
-    # Tests that networking works in JIT/compiler mode.
+use std.spec.engine_probe.{engine_stdout, run_under_engine}
 
-    it "tcp bind compiles in JIT mode":
-        @net
-        fn test_tcp_jit() -> bool:
-            # Extern declarations should compile in JIT mode
-            true
+val _NET_PROBE = "test/03_system/feature/usage/networking_jit_probe.spl"
+val _NET_PASS = "PROBE VERDICT: PASS"
 
-        expect test_tcp_jit()
+describe "networking holds under each named engine (out of process)":
+    """
+    As a runtime maintainer, I need TCP/UDP bind, close and rebind pinned to a
+    NAMED engine by a probe that opens real sockets, so that neither a socket
+    regression nor an engine regression can pass review behind an example
+    whose body was the literal `true`.
+    """
 
-    it "udp bind compiles in JIT mode":
-        @net
-        fn test_udp_jit() -> bool:
-            # Extern declarations should compile in JIT mode
-            true
+    it "binds, closes and rebinds real sockets under the interpreter":
+        expect(engine_stdout(_NET_PROBE, "interpret")).to_contain(_NET_PASS)
 
-        expect test_udp_jit()
+    it "binds, closes and rebinds real sockets under SIMPLE_EXECUTION_MODE=jit":
+        expect(engine_stdout(_NET_PROBE, "jit")).to_contain(_NET_PASS)
 
+    it "records that tcp bind does NOT actually compile in JIT mode":
+        """
+        The old title claimed "tcp bind compiles in JIT mode". It does not.
+        `native_tcp_bind` is not registered with the Cranelift JIT module, so
+        JIT compilation fails on an unresolved external symbol and the WHOLE
+        module is dropped back to the tree-walking interpreter. Measured
+        2026-08-09; `SIMPLE_JIT_STRICT=1` turns the same fallback into a hard
+        error, which proves it is a real resolution failure and not a
+        heuristic demotion.
+
+        Filed:
+        doc/08_tracking/bug/jit_cannot_resolve_native_socket_externs_2026-08-09.md
+
+        This assertion is a PIN ON MEASURED REALITY, NOT APPROVAL. It is also
+        this group's engine-reach canary: the notice appears only on the "jit"
+        arm, so if that arm ever stopped selecting the JIT the example goes RED
+        rather than quietly vacuous. When the externs are registered with the
+        JIT this must be replaced by an assertion of a genuinely compiled run.
+        """
+        val (_out, err, _code) = run_under_engine(_NET_PROBE, "jit")
+        expect(err).to_contain("unresolved external symbol 'native_tcp_bind'")
+
+        # The interpreter arm must NOT carry that notice -- that asymmetry is
+        # what makes the line above evidence of engine reach.
+        val (_out2, err2, _code2) = run_under_engine(_NET_PROBE, "interpret")
+        expect(err2).to_not_contain("unresolved external symbol")

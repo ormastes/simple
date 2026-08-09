@@ -309,3 +309,72 @@ describe "Feature #96 - Generator State Machine Concepts":
             expect(dispatch(1)).to_equal("process")
             expect(dispatch(2)).to_equal("finalize")
             expect(dispatch(3)).to_equal("done")
+
+# ============================================================================
+# Compiled-lane assertion (out of process) -- added 2026-08-09
+# ============================================================================
+#
+# Everything ABOVE this line is titled "Feature #100 - Cranelift Backend" and
+# names its examples "compiles integer arithmetic", "compiles string
+# interpolation", "compiles array creation and access" -- but none of it ever
+# reached a compiler. `describe` / `it` / `expect` are Rust INTERPRETER
+# intrinsics with no codegen lowering, and a spec file has no `fn main`, so the
+# driver routes it to `evaluate_module` no matter what SIMPLE_EXECUTION_MODE
+# says. The examples above therefore assert that the TREE-WALKING INTERPRETER
+# can add two integers, under a heading claiming they validate Cranelift. They
+# would stay green through a total loss of the codegen backend.
+#
+# The block below asserts the SAME contracts against a NAMED engine, by
+# spawning a runnable probe program out of process and scoring its verdict
+# LINE (not its exit code -- a codegen panic and a clean failure both exit
+# non-zero, and some failure shapes still exit 0).
+#
+# Mechanism: src/lib/nogc_sync_mut/spec/engine_probe.spl
+# Pattern:   doc/07_guide/infra/testing/spec_engine_reach.md
+# Guard:     scripts/check/check-engine-claiming-specs-use-probe.shs
+
+use std.spec.engine_probe.{engine_stdout, is_known_engine}
+
+val _CODEGEN_PROBE = "test/01_unit/lib/common/feature_validation/codegen_feature_validation_probe.spl"
+val _CODEGEN_PASS = "PROBE VERDICT: PASS"
+
+describe "Feature #100 - Cranelift Backend holds under the JIT lane (out of process)":
+    """
+    As a compiler maintainer, I need the language-level contracts this file is
+    named for -- integer and comparison ops, direct/recursive/nested calls,
+    if-else / while / for control flow, text creation / interpolation /
+    concatenation, and array creation / indexing / length -- pinned to a NAMED
+    engine, so that a compiled-lane regression cannot pass review behind a
+    suite that only ever ran on the interpreter.
+    """
+
+    it "passes the probe under the interpreter":
+        # Control column. The interpreter is the engine the examples above
+        # already exercise, so this arm failing means the probe or the harness
+        # broke, not codegen.
+        expect(engine_stdout(_CODEGEN_PROBE, "interpret")).to_contain(_CODEGEN_PASS)
+
+    it "passes the probe under the cranelift JIT":
+        # The arm that carries the weight: the same 50 checks, compiled.
+        expect(engine_stdout(_CODEGEN_PROBE, "jit")).to_contain(_CODEGEN_PASS)
+
+    it "proves each arm reached the engine it names":
+        # A probe printing the same verdict on both engines cannot by itself
+        # prove the "jit" arm reached the JIT: one unsupported operation
+        # silently demotes a whole program back to the interpreter, and an
+        # unrecognised SIMPLE_EXECUTION_MODE value silently selects the JIT.
+        # The probe therefore also reports a live, still-OPEN divergence --
+        # `Dict<text, f64>.get()` on a miss, which the F64 decode arm
+        # deliberately does not guard (expr_dispatch.spl:991).
+        #
+        # Measured 2026-08-09, same probe, same binary, both engines:
+        #   interpret -> PROBE ENGINE CANARY: true    (correct)
+        #   jit       -> PROBE ENGINE CANARY: false   (the open gap)
+        expect(engine_stdout(_CODEGEN_PROBE, "interpret")).to_contain("PROBE ENGINE CANARY: true")
+        expect(engine_stdout(_CODEGEN_PROBE, "jit")).to_contain("PROBE ENGINE CANARY: false")
+
+    it "rejects an unrecognised engine name instead of silently using the JIT":
+        assert_false(is_known_engine("interp"))
+        assert_false(is_known_engine("native"))
+        assert_true(is_known_engine("jit"))
+        assert_true(is_known_engine("interpret"))
