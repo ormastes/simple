@@ -1,13 +1,26 @@
 # Stage4 regression: a recovered top-level docstring must never become the
-# synthetic script main that HIR lowers as executable source.
+# synthetic script main that HIR lowers as executable source. Normal parsing
+# already discards docstrings, so seed the recovered arena shape directly.
 # @cover src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl
 
-use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.core.ast.{ast_reset, expr_int_lit, expr_raw_string_lit, decl_val_binding, module_add_decl}
+use compiler.frontend.flat_ast_bridge.{flat_ast_to_module}
 use std.spec
 
 describe "module docstring synthetic-main guard":
-    it "keeps a top-level triple docstring out of script lowering":
-        val source = "\"\"\"I/O documentation with source: nil\"\"\"\n"
-        val module = parse_and_build_module(source, "module_docstring_guard.spl")
+    it "drops a recovered docstring expression before synthetic-main lowering":
+        ast_reset()
+        val doc = expr_raw_string_lit("I/O documentation with source: nil", 0)
+        module_add_decl(decl_val_binding("_expr_0", -1, doc, 0))
+        val module = flat_ast_to_module("module_docstring_guard.spl")
         expect(module.functions.contains("main")).to_equal(false)
         expect(module.constants.len()).to_equal(0)
+
+    it "keeps a recovered non-string expression as a script main":
+        ast_reset()
+        val value = expr_int_lit(42, 0)
+        module_add_decl(decl_val_binding("_expr_0", -1, value, 0))
+        val module = flat_ast_to_module("module_expr_guard.spl")
+        expect(module.functions.contains("main")).to_equal(true)
+        val main = module.functions["main"] ?? panic("missing synthetic main")
+        expect(main.body.stmts.len()).to_equal(1)
