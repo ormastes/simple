@@ -31,7 +31,7 @@ use common.ui.window_scene_draw_ir.{
 use std.gc_async_mut.gpu.engine2d.engine_target.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
     Engine2dResolvedDrawIrImage,
-    engine2d_draw_ir_adv_composition_present_with_images,
+    engine2d_draw_ir_adv_composition_present_with_images_evidence,
     engine2d_resolved_draw_ir_image
 }
 use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
@@ -305,8 +305,16 @@ class Engine2dWmFrameExecutor:
         if engine2d_wm_draw_ir_local_recompose_required(self.draw_ir_backend_target, self.local_draw_ir_backend_target):
             local_composition = shared_wm_scene_draw_ir_composition_with_content(filtered_scene, taskbar, good_content_frames, self.local_draw_ir_backend_target, 1000, clock_label, 0)
         if _WM_TRACE: serial_println("[wm-exec] at=present-begin")
-        val result = engine2d_draw_ir_adv_composition_present_with_images(self.engine, local_composition, false, images)
-        if _WM_TRACE: serial_println("[wm-exec] at=present-end rendered={result.rendered_command_count} skipped={result.skipped_command_count}")
+        var render_evidence_i64: [i64] = [0, 0, 0, 0, 0, 0, 0]
+        var render_evidence_text: [text] = ["", "", ""]
+        val result = engine2d_draw_ir_adv_composition_present_with_images_evidence(
+            self.engine, local_composition, false, images,
+            render_evidence_i64, render_evidence_text)
+        val rendered_count = render_evidence_i64[5].to_i32()
+        val skipped_count = render_evidence_i64[0].to_i32()
+        val fallback_required = render_evidence_i64[6] != 0
+        val fallback_reason = render_evidence_text[2]
+        if _WM_TRACE: serial_println("[wm-exec] at=present-end rendered={rendered_count} skipped={skipped_count}")
         # A partially-unsupported composition (e.g. one taskbar icon whose
         # image never resolved because the backing disk lease is degraded)
         # must still show the commands that DID render -- rejecting the
@@ -314,11 +322,11 @@ class Engine2dWmFrameExecutor:
         # screen even though 9 of 14 commands were perfectly renderable
         # (SimpleOS baremetal desktop, 2026-07-16). Only bail when the
         # composition produced literally nothing.
-        if result.rendered_command_count <= 0:
-            serial_println("[wm-frame] engine2d-draw-ir-rejected resolved_images={images.len()} expected_images={expected_images} degraded={degraded_window_count} skipped={result.skipped_command_count} rendered={result.rendered_command_count} fallback_required={result.fallback_required} reason={result.fallback_reason}")
+        if rendered_count <= 0:
+            serial_println("[wm-frame] engine2d-draw-ir-rejected resolved_images={images.len()} expected_images={expected_images} degraded={degraded_window_count} skipped={skipped_count} rendered={rendered_count} fallback_required={fallback_required} reason={fallback_reason}")
             return 0
-        if degraded_window_count > 0 or result.skipped_command_count != 0:
-            serial_println("[wm-frame] frame-degraded degraded_window_count={degraded_window_count} skipped={result.skipped_command_count} rendered={result.rendered_command_count} scene_revision={scene_revision} reason={result.fallback_reason}")
+        if degraded_window_count > 0 or skipped_count != 0:
+            serial_println("[wm-frame] frame-degraded degraded_window_count={degraded_window_count} skipped={skipped_count} rendered={rendered_count} scene_revision={scene_revision} reason={fallback_reason}")
         for frame in good_content_frames:
             serial_println("[wm-frame] content-presented scene_revision={scene_revision} path=software window_id={frame.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}")
         scene_revision
