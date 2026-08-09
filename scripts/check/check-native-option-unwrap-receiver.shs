@@ -1,0 +1,122 @@
+#!/bin/sh
+# check-native-option-unwrap-receiver.shs
+#
+# AOT-lane fence for: a method call whose receiver came out of
+# `Option<T>.unwrap()` fails MIR lowering on the native lane with
+#     error: MIR lowering error: unresolved method call: <method>
+#
+# This is the minimal form of the shape that keeps the SimpleOS hosted FAT32
+# mount disabled (`g_root_fat32.unwrap().stat(...)`,
+# src/os/services/vfs/vfs_init.spl). Full analysis:
+#   doc/08_tracking/bug/native_option_unwrap_receiver_unresolved_2026-08-09.md
+#
+# WHY A SCRIPT AND NOT A SPEC
+# `bin/simple test` hard-defaults to the tree-walk interpreter, which resolves
+# these receivers fine, so NO `*_spec.spl` can observe this lane. Only a script
+# that drives the real `native-build` binary can. Same reasoning as
+# scripts/check/check-native-trailing-default-param.shs.
+#
+# WHAT IS ASSERTED (the defect is OPEN, so this is not a simple red/green)
+#   1. CONTROL must build, run, and print `CONTROL=9`. The control is the same
+#      code with the Option hop removed. If the control ever breaks, static
+#      devirtualization has regressed far beyond this bug — hard FAIL.
+#   2. REPRO must never FAIL OPEN. Two outcomes are acceptable:
+#        - builds and prints exactly `OPTUNWRAP=9`  -> the bug is FIXED
+#        - fails to build with `unresolved method call` -> KNOWN-OPEN, the
+#          current state; loud and safe.
+#      Anything else — most importantly "builds and prints a WRONG value" —
+#      is a silent-miscompile regression and is a hard FAIL. That fail-open
+#      direction is strictly more dangerous than today's loud failure and is
+#      the thing this fence exists to catch.
+#
+# EXIT CODES (repo pre-push guard convention)
+#   0  PASS   — both checks measured and acceptable. Verdict states which.
+#   1  FAIL   — a real regression.
+#   2  ERROR  — nothing was actually measured. NOT a pass.
+#
+# Usage: sh scripts/check/check-native-option-unwrap-receiver.shs
+set -u
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+REPO_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)"
+cd "$REPO_ROOT" || { echo "ERROR — nothing was checked (cannot cd to repo root)"; exit 2; }
+
+# RELATIVE on purpose: `native-build` reports "native entry source not found"
+# for an absolute entry path even when the file plainly exists. We cd to the
+# repo root above, so this resolves.
+FIXTURE_DIR="test/fixtures/native_option_unwrap_receiver"
+SIMPLE_BIN="$REPO_ROOT/bin/simple"
+# Generous: a cold native-build far exceeds the 2-minute default, and the
+# host kill_monitor SIGTERMs long high-CPU runs unless this is set.
+export SIMPLE_TIMEOUT_SECONDS="${SIMPLE_TIMEOUT_SECONDS:-3600}"
+
+[ -x "$SIMPLE_BIN" ] || { echo "ERROR — nothing was checked (bin/simple missing or not executable)"; exit 2; }
+[ -f "$FIXTURE_DIR/main.spl" ] || { echo "ERROR — nothing was checked (fixture main.spl missing)"; exit 2; }
+[ -f "$FIXTURE_DIR/control.spl" ] || { echo "ERROR — nothing was checked (fixture control.spl missing)"; exit 2; }
+
+WORK="$(mktemp -d)" || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+# Deliberately NOT an unconditional EXIT trap that removes the logs: the
+# reference fence's own trap once ate its diagnostics on failure. Logs are
+# removed only on the success paths, explicitly.
+keep_logs() {
+    echo "logs preserved: $WORK"
+}
+
+# build_and_run <fixture.spl> <outname> -> sets BUILD_RC, RUN_RC, RUN_OUT, LOG
+build_and_run() {
+    _src="$1"; _name="$2"
+    LOG="$WORK/$_name.build.log"
+    "$SIMPLE_BIN" native-build "$_src" -o "$WORK/$_name.bin" >"$LOG" 2>&1
+    BUILD_RC=$?
+    RUN_RC=-1
+    RUN_OUT=""
+    if [ "$BUILD_RC" -eq 0 ] && [ -x "$WORK/$_name.bin" ]; then
+        RUN_OUT="$("$WORK/$_name.bin" 2>>"$LOG")"
+        RUN_RC=$?
+    fi
+}
+
+# ---------------------------------------------------------------- 1. CONTROL
+build_and_run "$FIXTURE_DIR/control.spl" control
+if [ "$BUILD_RC" -ne 0 ]; then
+    echo "control build rc=$BUILD_RC (expected 0)"
+    keep_logs
+    echo "FAIL — control fixture (no Option hop) failed to BUILD on the native lane; static devirtualization has regressed"
+    exit 1
+fi
+if [ "$RUN_OUT" != "CONTROL=9" ]; then
+    echo "control run rc=$RUN_RC output='$RUN_OUT' (expected 'CONTROL=9')"
+    keep_logs
+    echo "FAIL — control fixture built but produced the wrong value; static devirtualization has regressed"
+    exit 1
+fi
+
+# ------------------------------------------------------------------ 2. REPRO
+build_and_run "$FIXTURE_DIR/main.spl" repro
+REPRO_BUILD_RC="$BUILD_RC"
+REPRO_RUN_OUT="$RUN_OUT"
+
+if [ "$REPRO_BUILD_RC" -eq 0 ]; then
+    if [ "$REPRO_RUN_OUT" = "OPTUNWRAP=9" ]; then
+        rm -rf "$WORK"
+        echo "PASS — 2 fixtures checked: control=CONTROL=9, repro=OPTUNWRAP=9 (Option-unwrap receiver defect is now FIXED; update the bug doc and tighten this fence to require it)"
+        exit 0
+    fi
+    echo "repro built (rc=0) but printed '$REPRO_BUILD_RC/$REPRO_RUN_OUT' instead of 'OPTUNWRAP=9'"
+    keep_logs
+    echo "FAIL — Option-unwrap receiver now FAILS OPEN: it compiles and yields a WRONG value instead of erroring. Silent miscompile, strictly worse than the known-open loud failure."
+    exit 1
+fi
+
+# Build failed — require it to be THIS defect's loud, recognisable failure,
+# not some unrelated breakage that would make the fence vacuous.
+if grep -q "unresolved method call" "$WORK/repro.build.log" 2>/dev/null; then
+    rm -rf "$WORK"
+    echo "PASS — 2 fixtures checked: control=CONTROL=9 (green), repro=KNOWN-OPEN 'unresolved method call' (loud failure, not fail-open). See doc/08_tracking/bug/native_option_unwrap_receiver_unresolved_2026-08-09.md"
+    exit 0
+fi
+
+echo "repro build rc=$REPRO_BUILD_RC but the log does not contain 'unresolved method call'"
+keep_logs
+echo "ERROR — nothing was checked (repro failed for an unrecognised reason; this fence can no longer discriminate the defect)"
+exit 2
