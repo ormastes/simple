@@ -591,3 +591,63 @@ the Stage-2-recipe form (`--entry-closure` + explicit `--source src/compiler
 scaffolding it needs) so the closure stays small enough to finish inside a
 single session's time budget, and compare vacuity there against the known-good
 1–3 module probes in §1 and the known-vacuous whole-compiler run.
+
+## 2026-08-09: assigned bisection task's premise does not reproduce; layer-by-layer bisection not performed
+
+This session was assigned to bisect the `--source` allowlist by compiler layer
+(`00.common` .. `90.tools`) to find the specific module/construct that flips
+the `p2_add.spl` reproducer from exit-0 to
+`error: ... unsupported MIR type kind [wildcard-arm] disc=-1: <value:0x...>`,
+using `build/cyc/S3FIX1/stage2-simple`.
+
+**That premise was already refuted by this document's own §2 ("The
+reproducer claim in this document is not reproducible"), written earlier on
+2026-08-08.** This session re-confirmed the refutation independently before
+attempting the requested layer bisection:
+
+1. `S3FIX1/stage2-simple` (128,111,944 B, still present, unchanged) run against
+   `p2_add.spl` with **no `--source`** (whole default project, matching the
+   original bug report's setup) does **not** produce the `[wildcard-arm]`
+   error. It times out at 90s still resolving imports/warnings — no MIR
+   lowering error of any kind is reached. Log:
+   `/tmp/.../scratchpad/bisect/run0.log`.
+2. Scoped to a single small layer, `--source src/compiler/00.common`, the same
+   binary reaches codegen and fails with a **different, unrelated** defect —
+   not enum/wildcard-arm at all:
+   ```
+   FAILED FILES (1):
+     - src/compiler/00.common/predicate_parser.spl: llvm codegen: semantic:
+       llvm global load referenced undeclared symbol `has_paren_idx`
+   ```
+   Log: `/tmp/.../scratchpad/bisect/run1.log`. `has_paren_idx` looks like a
+   local/loop variable in `predicate_parser.spl` that LLVM codegen is trying to
+   read as a global — plausibly the same "unqualified name falls through to
+   the wrong symbol class" family as the enum-variant-as-binding-pattern
+   defects fixed elsewhere today, but this was **not investigated further**:
+   it is a different failure signature (`undeclared symbol` in codegen, not a
+   `HirTypeKind` match wildcard arm in MIR lowering) and was out of this
+   session's assigned scope.
+
+**Conclusion: no layer bisection of the `[wildcard-arm] disc=-1` symptom was
+performed, because that symptom itself could not be reproduced against the
+named binary in either the unscoped or the `00.common`-scoped configuration.**
+Continuing the requested binary-search bisection would have bisected a
+mis-recorded observation. Per this document's own 2026-08-08 correction, the
+open, live thread is item 6.1/6 in the "Control runs" section above (scale-vs-
+construct in the pure-Simple `native-build` pipeline on the whole compiler),
+not the wildcard-arm/enum-discriminant story.
+
+**No `.spl` source was changed by this session.** No fix, no regression test
+was added, because there is nothing to fix: the defect this session was
+assigned to isolate does not currently reproduce, and the `has_paren_idx`
+codegen error found incidentally is a distinct, unscoped defect that would
+need its own bisection to confirm scope and cause.
+
+**Recommended next step:** either (a) whoever files a fresh wildcard-arm
+report attaches the exact command line, exact binary path+mtime/md5, and
+captured log for a run that actually produces `[wildcard-arm] disc=-1`, so it
+can be bisected on a reproducing baseline instead of a described-but-untested
+one; or (b) pick up the still-open scale-vs-construct thread from the
+"Control runs" §6 recommended next step (Stage-2-recipe form with a reduced
+explicit `--source` set), which is the actual unresolved lead in this
+document.
