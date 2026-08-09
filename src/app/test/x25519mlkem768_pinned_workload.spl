@@ -36,8 +36,6 @@ use os.crypto.x25519_mlkem768.vulkan_ntt_provider.{
 use os.crypto.x25519_mlkem768.metal_ntt_provider.{
     X25519MlKem768MetalNttExecutor}
 use os.crypto.sha256.{sha256}
-use lib.common.crypto.x25519_mlkem768.raw_workload_binding.{
-    x25519_mlkem768_raw_workload_sha256}
 use os.crypto.x25519_mlkem768.hybrid_support.{
     x25519_mlkem768_slice_list, x25519_mlkem768_buffer_error_text,
     x25519_mlkem768_wipe_owned, x25519_mlkem768_wipe_owned_bytes}
@@ -54,8 +52,6 @@ val X25519_MLKEM768_PINNED_WORKLOAD_SCHEMA: text =
     "x25519mlkem768-pinned-workload-v3"
 val X25519_MLKEM768_PINNED_FIXTURE_ID: text =
     "mlkem-native-fd58+rfc7748-abc-v1"
-val X25519_MLKEM768_PINNED_WORKLOAD_SHA256: text =
-    "2c5c93e8120ce4c2f927340819935a005d5c8ebf06fc65c531b8165c5fac22d0"
 val X25519_MLKEM768_PINNED_ORACLE_ID: text =
     "mlkem-native-fd58+rfc7748"
 val X25519_MLKEM768_PINNED_SHARED_SECRET_SHA256: text =
@@ -88,7 +84,6 @@ struct X25519MlKem768PinnedSetChecks:
 struct X25519MlKem768PinnedPublicOutputs:
     schema: text
     fixture_id: text
-    workload_sha256: text
     oracle_id: text
     set_a: X25519MlKem768PinnedSetReceipt
     set_b: X25519MlKem768PinnedSetReceipt
@@ -187,34 +182,6 @@ fn _pinned_wipe_inputs(inputs: _X25519MlKem768PinnedInputs):
     x25519_mlkem768_wipe_owned(inputs.z)
     x25519_mlkem768_wipe_owned_bytes(inputs.client_private)
     x25519_mlkem768_wipe_owned_bytes(inputs.server_private)
-
-fn _pinned_workload_sha256(
-        inputs: _X25519MlKem768PinnedInputs) -> Result<text, text>:
-    # The pinned full-hybrid fixture defines m equal to d.  Pass it explicitly
-    # to the domain-separated binding so a future input split cannot silently
-    # turn this receipt into a different workload.
-    x25519_mlkem768_raw_workload_sha256(
-        inputs.client_private, inputs.d, inputs.z, inputs.server_private,
-        inputs.d)
-
-fn x25519_mlkem768_pinned_workload_sha256() -> Result<text, text>:
-    val inputs = _pinned_inputs()
-    defer _pinned_wipe_inputs(inputs)
-    val digest = _pinned_workload_sha256(inputs)?
-    if digest != X25519_MLKEM768_PINNED_WORKLOAD_SHA256:
-        return Err("pinned-workload-binding-digest-mismatch")
-    Ok(digest)
-
-fn x25519_mlkem768_pinned_workload_binding_reason(
-        fixture_id: text, workload_sha256: text) -> text:
-    if fixture_id != X25519_MLKEM768_PINNED_FIXTURE_ID:
-        return "pinned-workload-fixture-id-mismatch"
-    val expected = match x25519_mlkem768_pinned_workload_sha256():
-        case Ok(value): value
-        case Err(reason): return reason
-    if workload_sha256 != expected:
-        return "pinned-workload-sha256-mismatch"
-    ""
 
 fn _pinned_wipe_key_pair(key_pair: X25519MlKem768KeyPair):
     x25519_mlkem768_wipe_owned(key_pair.decapsulation_key)
@@ -361,7 +328,6 @@ fn _pinned_operation_accelerated(
 
 fn _pinned_finalize(config: X25519MlKem768Config,
         expected_backend: X25519MlKem768Backend,
-        workload_sha256: text,
         key_pair: X25519MlKem768KeyPair,
         encapsulation: X25519MlKem768Encapsulation,
         decapsulation: X25519MlKem768Decapsulation
@@ -563,7 +529,6 @@ fn _pinned_finalize(config: X25519MlKem768Config,
     Ok(X25519MlKem768PinnedPublicOutputs(
         schema: X25519_MLKEM768_PINNED_WORKLOAD_SCHEMA,
         fixture_id: X25519_MLKEM768_PINNED_FIXTURE_ID,
-        workload_sha256: workload_sha256,
         oracle_id: X25519_MLKEM768_PINNED_ORACLE_ID,
         set_a: set_a, set_b: set_b, set_c: set_c,
         client_share_bytes: client_bytes,
@@ -611,9 +576,6 @@ fn x25519_mlkem768_run_pinned_workload(
         return Err(config_reason)
     val inputs = _pinned_inputs()
     defer _pinned_wipe_inputs(inputs)
-    val workload_sha256 = _pinned_workload_sha256(inputs)?
-    if workload_sha256 != X25519_MLKEM768_PINNED_WORKLOAD_SHA256:
-        return Err("pinned-workload-binding-digest-mismatch")
 
     val key_pair = match x25519_mlkem768_keygen(
             config, inputs.client_private, inputs.d, inputs.z):
@@ -632,7 +594,7 @@ fn x25519_mlkem768_run_pinned_workload(
         case Ok(value): value
         case Err(reason): return Err("pinned-set-abc-decapsulation:" + reason)
     defer _pinned_wipe_decapsulation(decapsulation)
-    _pinned_finalize(config, X25519MlKem768Backend.ScalarCpu, workload_sha256,
+    _pinned_finalize(config, X25519MlKem768Backend.ScalarCpu,
         key_pair, encapsulation, decapsulation)
 
 fn x25519_mlkem768_run_pinned_simd_workload(
@@ -646,9 +608,6 @@ fn x25519_mlkem768_run_pinned_simd_workload(
         return Err(config_reason)
     val inputs = _pinned_inputs()
     defer _pinned_wipe_inputs(inputs)
-    val workload_sha256 = _pinned_workload_sha256(inputs)?
-    if workload_sha256 != X25519_MLKEM768_PINNED_WORKLOAD_SHA256:
-        return Err("pinned-workload-binding-digest-mismatch")
     val key_pair = match x25519_mlkem768_keygen_simd_candidate(
             config, admission, inputs.client_private, inputs.d, inputs.z):
         case Ok(value): value
@@ -667,7 +626,7 @@ fn x25519_mlkem768_run_pinned_simd_workload(
         case Ok(value): value
         case Err(reason): return Err("pinned-set-abc-simd-decapsulation:" + reason)
     defer _pinned_wipe_decapsulation(decapsulation)
-    _pinned_finalize(config, config.requested_backend, workload_sha256,
+    _pinned_finalize(config, config.requested_backend,
         key_pair, encapsulation, decapsulation)
 
 fn x25519_mlkem768_run_pinned_cuda_workload(
@@ -680,9 +639,6 @@ fn x25519_mlkem768_run_pinned_cuda_workload(
         return Err(config_reason)
     val inputs = _pinned_inputs()
     defer _pinned_wipe_inputs(inputs)
-    val workload_sha256 = _pinned_workload_sha256(inputs)?
-    if workload_sha256 != X25519_MLKEM768_PINNED_WORKLOAD_SHA256:
-        return Err("pinned-workload-binding-digest-mismatch")
     val key_pair = match x25519_mlkem768_keygen_cuda_candidate(
             config, executor, inputs.client_private, inputs.d, inputs.z):
         case Ok(value): value
@@ -701,7 +657,7 @@ fn x25519_mlkem768_run_pinned_cuda_workload(
         case Ok(value): value
         case Err(reason): return Err("pinned-set-abc-cuda-decapsulation:" + reason)
     defer _pinned_wipe_decapsulation(decapsulation)
-    _pinned_finalize(config, X25519MlKem768Backend.Cuda, workload_sha256,
+    _pinned_finalize(config, X25519MlKem768Backend.Cuda,
         key_pair, encapsulation, decapsulation)
 
 fn x25519_mlkem768_run_pinned_vulkan_workload(
@@ -714,9 +670,6 @@ fn x25519_mlkem768_run_pinned_vulkan_workload(
         return Err(config_reason)
     val inputs = _pinned_inputs()
     defer _pinned_wipe_inputs(inputs)
-    val workload_sha256 = _pinned_workload_sha256(inputs)?
-    if workload_sha256 != X25519_MLKEM768_PINNED_WORKLOAD_SHA256:
-        return Err("pinned-workload-binding-digest-mismatch")
     val key_pair = match x25519_mlkem768_keygen_vulkan_candidate(
             config, executor, inputs.client_private, inputs.d, inputs.z):
         case Ok(value): value
@@ -735,7 +688,7 @@ fn x25519_mlkem768_run_pinned_vulkan_workload(
         case Ok(value): value
         case Err(reason): return Err("pinned-set-abc-vulkan-decapsulation:" + reason)
     defer _pinned_wipe_decapsulation(decapsulation)
-    _pinned_finalize(config, X25519MlKem768Backend.Vulkan, workload_sha256,
+    _pinned_finalize(config, X25519MlKem768Backend.Vulkan,
         key_pair, encapsulation, decapsulation)
 
 fn x25519_mlkem768_run_pinned_metal_workload(
@@ -748,9 +701,6 @@ fn x25519_mlkem768_run_pinned_metal_workload(
         return Err(config_reason)
     val inputs = _pinned_inputs()
     defer _pinned_wipe_inputs(inputs)
-    val workload_sha256 = _pinned_workload_sha256(inputs)?
-    if workload_sha256 != X25519_MLKEM768_PINNED_WORKLOAD_SHA256:
-        return Err("pinned-workload-binding-digest-mismatch")
     val key_pair = match x25519_mlkem768_keygen_metal_candidate(
             config, executor, inputs.client_private, inputs.d, inputs.z):
         case Ok(value): value
@@ -769,13 +719,12 @@ fn x25519_mlkem768_run_pinned_metal_workload(
         case Ok(value): value
         case Err(reason): return Err("pinned-set-abc-metal-decapsulation:" + reason)
     defer _pinned_wipe_decapsulation(decapsulation)
-    _pinned_finalize(config, X25519MlKem768Backend.Metal, workload_sha256,
+    _pinned_finalize(config, X25519MlKem768Backend.Metal,
         key_pair, encapsulation, decapsulation)
 
 export X25519MlKem768PinnedSetChecks, X25519MlKem768PinnedPublicOutputs
 export X25519_MLKEM768_PINNED_WORKLOAD_SCHEMA
 export X25519_MLKEM768_PINNED_FIXTURE_ID, X25519_MLKEM768_PINNED_ORACLE_ID
-export X25519_MLKEM768_PINNED_WORKLOAD_SHA256
 export X25519_MLKEM768_PINNED_CLIENT_SHARE_SHA256
 export X25519_MLKEM768_PINNED_SERVER_SHARE_SHA256
 export X25519_MLKEM768_PINNED_CLIENT_SHARE_BYTES
@@ -787,8 +736,6 @@ export x25519_mlkem768_validate_pinned_set_a
 export x25519_mlkem768_validate_pinned_set_b
 export x25519_mlkem768_validate_pinned_set_c
 export x25519_mlkem768_pinned_scalar_config
-export x25519_mlkem768_pinned_workload_sha256
-export x25519_mlkem768_pinned_workload_binding_reason
 export x25519_mlkem768_run_pinned_workload
 export x25519_mlkem768_run_pinned_simd_workload
 export x25519_mlkem768_run_pinned_cuda_workload

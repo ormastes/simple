@@ -1234,7 +1234,30 @@ impl MirLowering:
         # do not pre-evaluate those receivers. Their unresolved Dict fallback
         # keeps its existing behavior.
         val resolved_dict_probe_is_safe = method != "remove" and method != "delete"
-        if not receiver_is_dict and not resolution_is_static_method and is_dict_method_name and (resolution_is_unresolved or resolved_dict_probe_is_safe):
+        # BUG FIX (native_build_mir_lowering_undefined_file_symbol_2026-08-08):
+        # `static_receiver_name` (computed above) is non-empty exactly when
+        # `receiver` is a bare reference to a Class/Struct/Enum/Import name
+        # (a STATIC method call, e.g. `File.delete(path)`), never a runtime
+        # value. Several builtin Dict method names ("delete", "get", "has",
+        # "keys", "values", "contains", "contains_key") collide with
+        # ordinary user static-method names, and without this guard the
+        # dict-receiver probe unconditionally called `self.lower_expr
+        # (receiver)` to test whether the receiver is a runtime Dict --
+        # lowering a bare class-name expression the same way it would a
+        # local/param. `Var`/`NamedVar` has no "this names a class" case
+        # (only locals, module globals, and two hardcoded constants), so
+        # the class-name receiver fell straight through to the generic
+        # "undefined variable" error before the Unresolved-resolution arm
+        # ever got a chance to dispatch it as a real static call. Root
+        # cause of `File.delete(path)` -> "undefined variable: File" in the
+        # rt_io_file_roundtrip native-build repro: NOT a cross-module
+        # lowering-order issue (module order idx=0 main / idx=1 file.spl
+        # was a red herring -- `exists`, a non-colliding static method on
+        # the same class in the same call chain, resolved fine at the same
+        # ordering), but this Dict-name collision firing specifically for
+        # `delete`. Skip the dict probe entirely for a known static/class
+        # receiver; it can never be a Dict instance.
+        if not receiver_is_dict and not resolution_is_static_method and is_dict_method_name and static_receiver_name == "" and (resolution_is_unresolved or resolved_dict_probe_is_safe):
             if has_prelowered_method_receiver:
                 dict_recv_local = prelowered_method_receiver
             else:

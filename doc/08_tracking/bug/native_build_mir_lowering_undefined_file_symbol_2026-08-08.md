@@ -139,3 +139,67 @@ Full trace log (24,369 lines,
 above are direct quotes of its `[BOOTSTRAP-PHASE]` markers. Not attached to
 this doc (too large) — reproducible via the exact command above in ~18
 minutes.
+
+## RESOLVED 2026-08-09 — root cause was a Dict-method-name collision, not a
+## cross-module lowering-order bug
+
+The "module lowering order idx=0 (`main`) before idx=1 (`file`)" framing
+above is **falsified**. Discriminating evidence: `File.exists(path)` (same
+call chain, same module-lowering order, a genuinely non-resolved-ahead-of-
+time static method) resolved fine; only `File.delete(path)` failed. If this
+were an ordering bug, both calls would fail identically.
+
+Actual root cause: `lower_method_call`
+(`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`, dict-probe
+block around line 1230) treats any Unresolved-resolution method call named
+`delete`/`get`/`has`/`keys`/`values`/`contains`/`contains_key`/`remove` as a
+candidate Dict method and unconditionally calls `self.lower_expr(receiver)`
+to probe whether the receiver is a runtime `Dict` — **before** the
+static/class-receiver dispatch logic further down gets a chance to run.
+`File` is a bare class-name reference (`NamedVar`), never a runtime value;
+`Var`/`NamedVar` lowering (`expr_dispatch.spl`) has no "this names a
+class" case (only locals, module globals, and two hardcoded named
+constants), so probing it as an ordinary expression fell straight through
+to the generic "undefined variable" error. `File.exists` didn't collide
+with any Dict method name, so it skipped this probe entirely and reached
+the correct static-dispatch path further down (`Unresolved` arm,
+`static_receiver_name`-keyed lookup) — which is exactly why one call in the
+same chain succeeded and the other failed identically-ordered.
+
+Fix: gate the dict-probe block on `static_receiver_name == ""` (computed
+earlier in the same function from the receiver's HIR symbol kind —
+non-empty iff the receiver is a bare Class/Struct/Enum/Import name). A
+class-name receiver can never be a Dict instance, so the probe is safely
+skipped and control reaches the existing static-method dispatch logic,
+which already resolves the call correctly via `struct_method_syms` or the
+`self.symbols.lookup_method_in_type` fallback — neither of which is
+ordering-sensitive.
+
+Verified:
+- Minimal 2-module fixture (`FileThing` class with static `delete`/`exists`,
+  entry module importing and calling both) — before the fix: `undefined
+  variable: FileThing`; after: `rc=0`, object file emitted.
+- Real Dict operations (`d["a"]=1`, `d.delete("a")`, `d.has("b")`) combined
+  with a colliding-named static method (`Thing.delete(...)`) in the same
+  module — `rc=0`, both dispatch correctly (no regression to genuine Dict
+  method resolution).
+- Full original repro (`rt_io_file_roundtrip/main.spl` through the real
+  `src/compiler`+`src/app`+`src/lib` closure, ~18 minutes to a definitive
+  result twice, same recipe as above): `undefined variable: File` is GONE.
+  The build now progresses past the `File`-class calls (`File.delete`,
+  `File.exists`) and reaches a **different, later** failure: `undefined
+  variable: h` (the `FileHandle` local bound via `case Ok(h): h`) plus a
+  cluster of `unresolved method call:` errors for `FileHandle` INSTANCE
+  methods (`write_text`, `close`, `read_text`, `size`, `read_all`,
+  `write_all`, `merge`). That is the pre-existing "native-build can't
+  resolve a struct instance method without HIR type inference" gap
+  documented inline at `method_calls_literals.spl`'s `Unresolved` arm
+  (bug #138/#156) — a distinct, separable defect from this one. The
+  original `rt_io_file_*` AOT-stub question (whether `rt_io_file_*` is
+  stubbed under true LLVM codegen) is therefore **still undetermined**, now
+  blocked on the FileHandle instance-method-resolution gap instead of this
+  one. Not fixed here — out of scope for this fix, filed as a distinct
+  follow-up.
+
+Fix landed in `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`
+(one-line gate + doc comment on the existing dict-probe condition).

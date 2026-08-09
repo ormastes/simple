@@ -251,16 +251,20 @@ fi
 
 # --- AOT (native-build, true LLVM codegen): fails-closed by default --------
 # Full status and evidence:
-#   doc/08_tracking/bug/native_build_mir_lowering_undefined_file_symbol_2026-08-08.md
-# The fixture does not compile under native-build today: parsing genuinely
-# finishes (~1048s, slow but not stalled) but MIR lowering then fails with a
-# reproducible `undefined variable: File` error before codegen is ever
-# reached -- a symbol-resolution ordering bug unrelated to rt_io_file_*
-# itself, filed separately. This makes a default-on ~18-minute build attempt
-# on every invocation of this check disproportionate for what is, until that
-# bug is fixed, a guaranteed-fail with a known cause. Default: fail closed,
-# fast, pointing at the bug. Set RUN_AOT_LEG=1 to actually re-run the repro
-# (takes ~18 minutes) and get a live status line instead of the canned one.
+#   doc/08_tracking/bug/native_build_mir_lowering_undefined_file_symbol_2026-08-08.md (RESOLVED 2026-08-09)
+#   doc/08_tracking/bug/native_build_filehandle_instance_method_unresolved_2026-08-09.md (current blocker)
+# 2026-08-09 update: the `undefined variable: File` MIR-lowering failure is
+# FIXED (was a Dict-method-name collision in lower_method_call's dict-probe,
+# not a cross-module lowering-order bug -- see the RESOLVED doc above). The
+# fixture now compiles PAST every `File`-class call and fails one layer
+# later, on `FileHandle` INSTANCE methods (`undefined variable: h` plus
+# unresolved-method-call errors for write_text/close/read_text/size/etc --
+# see the current-blocker doc above). Still a guaranteed-fail with a known
+# cause, so this leg stays fail-closed-by-default for the same reason as
+# before: an ~18-minute build attempt on every invocation is disproportionate
+# while the outcome is already known. Set RUN_AOT_LEG=1 to actually re-run
+# the repro (takes ~18 minutes) and get a live status line instead of the
+# canned one.
 if [ "${RUN_AOT_LEG:-0}" = "1" ]; then
     rm -f "$FIXED_PATH"
     aot_log="$WORK_DIR/aot.log"
@@ -276,40 +280,50 @@ if [ "${RUN_AOT_LEG:-0}" = "1" ]; then
     aot_rc=$?
     set -e
     if [ "$aot_rc" -eq 124 ]; then
-        echo "ERROR — AOT native-build timed out after ${aot_timeout}s without the known"
-        echo "        MIR-lowering failure appearing. That is a DIFFERENT symptom than the"
-        echo "        one this session characterized (which fails at ~1080s, well under"
-        echo "        any reasonable timeout) -- investigate before assuming it's the same bug."
-        echo "        See doc/08_tracking/bug/native_build_mir_lowering_undefined_file_symbol_2026-08-08.md"
+        echo "ERROR — AOT native-build timed out after ${aot_timeout}s without any known"
+        echo "        failure signature appearing. That is a DIFFERENT symptom than either"
+        echo "        characterized bug (both fail at well under any reasonable timeout) --"
+        echo "        investigate before assuming it's a known issue."
         exit 2
     elif grep -q 'undefined variable: File' "$aot_log"; then
-        echo "KNOWN-OPEN — AOT native-build reproduced the known MIR-lowering failure"
-        echo "             ('undefined variable: File') before reaching codegen. Consistent"
-        echo "             with doc/08_tracking/bug/native_build_mir_lowering_undefined_file_symbol_2026-08-08.md."
+        echo "ERROR — AOT native-build reproduced the OLD 'undefined variable: File'"
+        echo "        MIR-lowering failure. That bug was fixed 2026-08-09 (Dict-method-name"
+        echo "        collision in lower_method_call's dict-probe) -- a REGRESSION if seen"
+        echo "        again. See doc/08_tracking/bug/native_build_mir_lowering_undefined_file_symbol_2026-08-08.md"
+        exit 2
+    elif grep -q 'undefined variable: h' "$aot_log" || grep -q 'unresolved method call: write_text' "$aot_log"; then
+        echo "KNOWN-OPEN — AOT native-build reproduced the known FileHandle instance-method"
+        echo "             resolution failure ('undefined variable: h' / unresolved"
+        echo "             write_text/close/read_text/size/etc). Consistent with"
+        echo "             doc/08_tracking/bug/native_build_filehandle_instance_method_unresolved_2026-08-09.md."
         echo "             The rt_io_file_* stub question remains UNDETERMINED under AOT --"
         echo "             the build cannot reach codegen until that bug is fixed."
     elif [ -f "$WORK_DIR/aot_out.o" ] || [ "$aot_rc" -eq 0 ]; then
-        echo "NOTE — AOT native-build did NOT reproduce the known MIR-lowering failure this"
-        echo "       time (rc=$aot_rc). The MIR-lowering bug in"
-        echo "       doc/08_tracking/bug/native_build_mir_lowering_undefined_file_symbol_2026-08-08.md"
+        echo "NOTE — AOT native-build did NOT reproduce either known MIR-lowering failure this"
+        echo "       time (rc=$aot_rc). The FileHandle instance-method bug in"
+        echo "       doc/08_tracking/bug/native_build_filehandle_instance_method_unresolved_2026-08-09.md"
         echo "       may have been fixed -- if so, promote this branch to actually link+run"
         echo "       the binary and strace it for openat/open against \$FIXED_PATH, exactly"
         echo "       like the JIT leg above, to finally answer the stub question."
         sed -n '1,20p' "$aot_log"
     else
-        echo "ERROR — AOT native-build failed (rc=$aot_rc) with neither the known"
-        echo "        MIR-lowering signature nor a clean success. Unexpected shape --"
-        echo "        investigate rather than assuming it matches the filed bug."
+        echo "ERROR — AOT native-build failed (rc=$aot_rc) with neither known MIR-lowering"
+        echo "        signature nor a clean success. Unexpected shape -- investigate rather"
+        echo "        than assuming it matches a filed bug."
         sed -n '1,40p' "$aot_log"
         exit 2
     fi
 else
     echo "KNOWN-OPEN — AOT (native-build) leg skipped by default (RUN_AOT_LEG=1 to run the"
-    echo "             ~18-minute repro). Known status: the fixture fails to compile under"
-    echo "             native-build with a reproducible MIR-lowering error ('undefined"
-    echo "             variable: File') before reaching codegen -- not a stub verdict, a"
-    echo "             prerequisite compile failure. See"
+    echo "             ~18-minute repro). Known status: the fixture compiles PAST all"
+    echo "             \`File\`-class calls (fixed 2026-08-09) but still fails to compile"
+    echo "             under native-build, now on FileHandle INSTANCE methods"
+    echo "             ('undefined variable: h' etc) -- not a stub verdict, a prerequisite"
+    echo "             compile failure. See"
     echo "             doc/08_tracking/bug/native_build_mir_lowering_undefined_file_symbol_2026-08-08.md"
+    echo "             (resolved) and"
+    echo "             doc/08_tracking/bug/native_build_filehandle_instance_method_unresolved_2026-08-09.md"
+    echo "             (current blocker)."
 fi
 
 if [ "$fail" -ne 0 ]; then
