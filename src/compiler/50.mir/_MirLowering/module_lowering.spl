@@ -807,6 +807,28 @@ impl MirLowering:
             bootstrap_fn_ret_shape_register(prescan_call_name, prescan_return_shape)
             if not prescan_fn.is_method:
                 bootstrap_fn_ret_hir_type_register(prescan_fn.name, prescan_fn.return_type)
+            # Cross-module METHOD return types (native_build_cross_module_
+            # result_payload_struct_name_collision_2026-08-09 mechanism #2):
+            # a method's SYMBOL name is already owner-qualified
+            # ("{module}.{Type}::{method}") and therefore globally unique, so
+            # registering the declared return HirType under it is
+            # collision-free. resolved_call_hir_return_type's name-keyed
+            # lookup (found_sym.name) then recovers e.g. `FileHandle.open`'s
+            # `Result<FileHandle, text>` while lowering the ENTRY module,
+            # before the defining dependency module has been lowered --
+            # module.impls/struct_method_syms never carry inline class
+            # methods, so this registry is the only pre-lowering source.
+            if prescan_call_name != prescan_fn.name:
+                bootstrap_fn_ret_hir_type_register(prescan_call_name, prescan_fn.return_type)
+                # The IMPORTING module's symbol table spells the same method
+                # with `_hir_symbol_owner_module`-sanitized module segments
+                # (dashes -> underscores), while the defining module's own
+                # symbol keeps the raw directory-derived name. Register the
+                # sanitized spelling too so the importing-side name-keyed
+                # lookup hits.
+                val prescan_sanitized_name = prescan_call_name.replace("-", "_")
+                if prescan_sanitized_name != prescan_call_name:
+                    bootstrap_fn_ret_hir_type_register(prescan_sanitized_name, prescan_fn.return_type)
                 var prescan_param_tys: [HirType] = []
                 for prescan_param in prescan_fn.params:
                     prescan_param_tys.push(prescan_param.type_)

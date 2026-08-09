@@ -1,4 +1,4 @@
-# `native-build` MIR lowering: cross-module `Result<T, E>` payload struct-name recovery collides/misses across modules — 4th layer, still open
+# `native-build` MIR lowering: cross-module `Result<T, E>` payload struct-name recovery collides/misses across modules — 4th layer, RESOLVED 2026-08-09 (5th layer surfaced)
 
 ## Summary
 
@@ -188,3 +188,53 @@ blocker rather than a residual of the 3rd-layer bug.
 - Full 18-minute closure re-run of `test/fixtures/rt_io_file_roundtrip/main.spl`
   after landing the 3rd-layer fix: 17 `unresolved method call` errors, byte-
   identical error tally to the pre-fix run documented in the parent doc.
+
+## Resolution (2026-08-09, layer-4 session)
+
+Both mechanisms fixed; both fast repros above now compile clean (EXIT=0, zero
+`unresolved method call`, marker-liveness-verified end to end).
+
+1. **Mechanism #1 (global-map collision)** — fixed by making the
+   scrutinee-instantiation-derived payload type the PRIMARY source (option 1
+   of "Next steps"): at the enum-match single-field bind site
+   (`switch_operators_calls.spl`), when `result_variant_payload_type` names a
+   Class/Struct, that name is written to `struct_value_syms` for the bound
+   payload; the unqualified `enum_payload_struct_names` map is now only the
+   last-ditch fallback. No key change needed — the scrutinee type is
+   per-instantiation by construction. Single-module repro: `o.bump()` AND
+   `h.write_text()` both resolve regardless of lowering order.
+
+2. **Mechanism #2 (inline class methods absent from struct_method_syms)** —
+   REAL and REQUIRED for the cross-module repro, but fixed by routing AROUND
+   `module.impls`/`struct_method_syms` rather than populating them:
+   - `enum_match_expr_type` (MethodCall arm) gained a static-receiver
+     fallback through `SymbolTable.lookup_method_in_type` — the symbol table
+     DOES carry owner-qualified symbols ("{module}.{Type}::{method}") for
+     inline class methods, including imported ones.
+   - `method_calls_literals.spl`'s Unresolved INSTANCE arm gained the
+     matching fallback: resolve the owner type symbol by the
+     `struct_value_syms` NAME via `lookup_or_invalid`, then
+     `lookup_method_in_type`.
+   - `prescan_module_struct_names` (`module_lowering.spl`) now registers
+     every method's declared return HirType in the global name-keyed
+     `bootstrap_fn_ret_hir_type` registry under its owner-qualified symbol
+     name AND the underscore-sanitized spelling (the importing module's
+     symbol table spells module segments with `-` -> `_`; the defining
+     module's own symbol keeps the raw directory-derived name — found
+     empirically, both spellings must be registered or the importing-side
+     name-keyed lookup misses).
+
+## 5th layer surfaced (still open)
+
+The real `rt_io_file_roundtrip` fixture now fails EARLIER, in phase 3 (HIR
+lowering): `unresolved type: SeekFrom`, entry module poisoned. NOT caused by
+this fix — a control run with the three fixed files reverted to their
+pre-fix blobs fails byte-identically — and not present at the layer-3
+session's full run, so it arrived via upstream churn between sessions.
+Discriminators: `use std.common.io.types.{FileMode, SeekFrom}` alone
+compiles; `use std.io.types.{FileMode, SeekFrom}` (file.spl's alias path)
+with real SeekFrom pattern-matches compiles; the io.file closure fails even
+when the ENTRY drops its own SeekFrom import (the error is attributed to the
+entry module regardless). The AOT `rt_io_file_*` stub question therefore
+remains UNDETERMINED — never reaches codegen, now for a fifth, pre-existing
+reason.

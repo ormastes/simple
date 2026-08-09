@@ -1630,6 +1630,27 @@ impl MirLowering:
                         val method_key = "{struct_name}::{method}"
                         if self.struct_method_syms != nil and self.struct_method_syms.has(method_key):
                             return self.resolved_call_hir_return_type(self.struct_method_syms[method_key])
+                # Static-receiver symbol-table fallback (cross-module inline
+                # class methods -- native_build_cross_module_result_payload_
+                # struct_name_collision_2026-08-09 mechanism #2):
+                # struct_method_syms is module.impls-derived AND reset per
+                # lower_module, so `class FileHandle: static fn open(...)`
+                # (inline class method, the shape all real stdlib code uses)
+                # defined in a not-yet-lowered dependency module has NO entry
+                # there -- module.impls never carries a class's own inline
+                # methods at all. The active SymbolTable, however, already
+                # holds the owner-qualified method symbol
+                # ("{module}.{Type}::{method}", registered at HIR-lowering
+                # time) for imported types too -- resolve through it directly.
+                # For an instance receiver the Var symbol is a local, not a
+                # type, so lookup_method_in_type misses harmlessly.
+                val static_recv_sym: SymbolId? = match receiver.kind:
+                    case Var(recv_sym): Some(recv_sym)
+                    case NamedVar(recv_sym, _): Some(recv_sym)
+                    case _: nil
+                if val recv_type_sym = static_recv_sym:
+                    if val fallback_method_id = self.symbols.lookup_method_in_type(recv_type_sym, method):
+                        return self.resolved_call_hir_return_type(fallback_method_id)
             case _: ()
         nil
 
@@ -2293,6 +2314,28 @@ impl MirLowering:
                     val payload_key = "{enum_name}::{enum_variants[ci]}"
                     val payload_struct = self.enum_payload_struct_names.get(payload_key)
                     val result_payload_type = self.result_variant_payload_type(scrutinee, enum_variants[ci])
+                    # Mechanism #1 fix (native_build_cross_module_result_
+                    # payload_struct_name_collision_2026-08-09):
+                    # enum_payload_struct_names is keyed by the UNQUALIFIED
+                    # "{enum}::{variant}" -- every `Result<T, E>` instantiation
+                    # in the whole compiled closure shares one "Result::Ok"
+                    # slot, so with N different T's only the LAST-lowered
+                    # construction site wins and every earlier-lowered match
+                    # binds the WRONG struct name. The scrutinee's own
+                    # instantiated payload type (result_variant_payload_type)
+                    # is collision-free by construction; when it names a
+                    # struct/class, that name is authoritative and takes
+                    # precedence over the global map below.
+                    var scrutinee_payload_struct = ""
+                    if val known_rpt = result_payload_type:
+                        match known_rpt.kind:
+                            case HirTypeKind.Named(rpt_sym, _):
+                                if val rpt_symbol = self.symbols.get_symbol_raw(rpt_sym.id):
+                                    match rpt_symbol.kind:
+                                        case Class | Struct:
+                                            scrutinee_payload_struct = rpt_symbol.name
+                                        case _: ()
+                            case _: ()
                     val payload_hir_type: HirType? = match result_payload_type:
                         case Some(known_payload_type): known_payload_type
                         case _:
@@ -2354,6 +2397,10 @@ impl MirLowering:
                         if val text_local = text_res:
                             self.local_map[bind_syms[0].id] = text_local
                             self.bind_local(bind_syms[0].id, text_local)
+                    elif scrutinee_payload_struct != "":
+                        # Scrutinee-instantiation-derived name: immune to the
+                        # global-map collision above.
+                        self.struct_value_syms[bound_payload.id] = scrutinee_payload_struct
                     elif payload_struct != nil and payload_struct != "":
                         self.struct_value_syms[bound_payload.id] = payload_struct ?? ""
             elif bind_syms.len() >= 1:
