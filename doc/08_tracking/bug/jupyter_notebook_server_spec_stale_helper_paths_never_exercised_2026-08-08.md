@@ -56,3 +56,57 @@ pre-restructure duplicate cruft — it isn't referenced by anything except itsel
 `doc/06_spec/03_system/tools/jupyter/...` generates from. Left untouched pending a decision on
 whether to delete it; flagging here so it isn't mistaken for a second, independently-maintained
 suite.
+
+## Resolution (2026-08-09)
+
+Re-read the current spec (`test/03_system/tools/jupyter/jupyter_notebook_server_system_spec.spl`,
+171 lines). Three `it` blocks reference the stale helper path, not two (`should start server and
+execute cell via HTTP + ZMQ locally`, `should execute hello.ipynb via nbconvert and verify output`,
+`should execute state_persistence.ipynb and verify cross-cell state`). All three are **not**
+placeholder scaffolding: each contains real `expect(code).to_equal(0)` /
+`expect(stdout).to_contain("ALL CHECKS PASSED")` assertions that run whenever the helper file is
+present — the `SKIP` early-`return` only fires because the helper doesn't exist at any path yet.
+This matches decision path (b) in the "Ask" above, not (a): the assertions have real value once the
+helper scripts exist, so the `it` blocks were **kept, not deleted**.
+
+What was done:
+1. **Fixed the stale path** in all three `it` blocks and in both `--notebook` fixture args
+   (`test/system/jupyter/helpers/...` → `test/03_system/tools/jupyter/helpers/...`,
+   `test/system/jupyter/fixtures/...` → `test/03_system/tools/jupyter/fixtures/...`) — the canonical,
+   actively-developed directory. This does not make the checks pass (the helper scripts still don't
+   exist anywhere), but it removes the double bug (wrong directory *and* missing file) down to a
+   single, already-tracked gap.
+2. **The actual helper-script implementation was intentionally left out of scope** — building
+   `run_server_check.py` / `run_notebook_server_test.py` is real feature work (a Python
+   `jupyter_client`/`nbconvert` driver, same shape as the existing
+   `test/03_system/tools/jupyter/helpers/wrapper_transport_roundtrip.py`), and is already tracked
+   separately at `doc/08_tracking/todo/jupyter_e2e_helper_scripts_missing_2026-08-08.md` (P2). No new
+   TODO needed. Note: that todo doc's own text still says "fix the stale path" as an action item —
+   that action is now DONE by this change.
+3. **`test/system/jupyter/` duplicate directory removed.** Diffed the spec file byte-for-byte
+   against its `test/03_system/tools/jupyter/` counterpart — identical. Repo-wide grep for the
+   literal path `test/system/jupyter` (no extension filter, excluding the directory's own files)
+   found only descriptive mentions in this bug doc, the sibling todo doc, one generated
+   `doc/06_spec/...md` (mirrors the identical stale string that lived in the duplicate spec file —
+   now stale in a different way after step 1, harmless, doc regenerates from source), and two
+   research/LLM-wiki docs that merely note the duplicate's existence. `git log` on the two
+   directories showed the duplicate's last per-file touch was the same repo-wide bulk `chore: sync`
+   commits as the canonical directory, i.e. it was never independently maintained. No build script,
+   CI config, or `.spl`/`.shs` file loads from `test/system/jupyter/` at runtime. Confidence was
+   high enough to delete it (`git rm -r test/system/jupyter/`, 12 tracked files removed). Left the
+   two descriptive doc mentions (`doc/01_research/app/tools/notebook_lanes_research.md`,
+   `doc/00_llm_process/feature_expert/notebook_lanes/skill.md`) untouched — updating stale prose in
+   unrelated research/wiki docs is out of scope for this bug fix.
+
+**Verification:** `SIMPLE_MODULE_LIMIT=4000 bin/simple test
+test/03_system/tools/jupyter/jupyter_notebook_server_system_spec.spl` →
+`Results: 6 total, 6 passed, 0 failed`. All three affected `it` blocks still print `SKIP: ... not
+found` (expected — the helper scripts genuinely don't exist yet) and still report green via the
+early-return path; that residual "green via SKIP" behavior is intentional per decision (b) and is
+the exact condition the linked P2 todo now fully covers (path is no longer part of the gap, only the
+missing scripts are).
+
+**Status: RESOLVED** — the ambiguity this doc opened (fix vs. delete, and whether the duplicate
+directory is dead) is closed. The one remaining open item (write the two Python helper scripts) is
+intentionally *not* closed here and continues to live at
+`doc/08_tracking/todo/jupyter_e2e_helper_scripts_missing_2026-08-08.md`.

@@ -1,8 +1,11 @@
 # `lab_http_api_spec.spl` never completes under `bin/simple test` (test-daemon client times out)
 
-**Status:** FIXED — root cause pinned and corrected; spec now completes in ~40s.
-A separate, previously-masked assertion failure in the spec's own second `it`
-block is now exposed and tracked as a follow-up (see "Follow-up" below).
+**Status:** FIXED (non-completion) — root cause pinned and corrected; spec
+now completes in ~40s. A separate, previously-masked assertion failure in
+the spec's own second `it` block is now exposed; it has been root-caused
+to a genuine compiler/interpreter defect (state mutated by one accepted
+TCP connection's request handler not surviving to the next) and is left
+RED, tracked in "Follow-up" below (2026-08-09).
 **File:** `test/03_system/tools/simple_lab/lab_http_api_spec.spl`
 **Date filed:** 2026-08-08
 **Date fixed:** 2026-08-08
@@ -156,14 +159,120 @@ every time; it is no longer non-terminating.
 
 ## Follow-up (separate, newly-exposed defect — not this bug)
 
+**Status: root-caused, left RED — genuine compiler/interpreter defect, out of
+reasonable scope to fix inside `lab_server.spl`/the spec.**
+
 With the hang fixed, one previously-unreachable assertion now fails for real:
 `it "drives the full create -> execute -> stream -> save flow over one real
 server"` (test/03_system/tools/simple_lab/lab_http_api_spec.spl:303) crashes
-with `semantic: array index out of bounds: index is 0 but length is 0`
-somewhere in that flow (session create → execute → WS event drain → notebook
-save/load). This was previously invisible because the spec never reached
-that `it` block's execution report — the whole file just hung. This is a
-distinct issue from the non-completion bug fixed here and needs its own
-triage/bug filing; not investigated further as part of this task (out of
-scope: this bug was specifically about non-termination, which is now
-resolved and verified).
+with `semantic: array index out of bounds: index is 0 but length is 0` at
+`frames[0]` (line 335), because `ws_connect_and_drain` (line 226) returns
+zero WS frames instead of the two the preceding `execute` call buffered.
+`expect(frames.len()).to_equal(2)` (line 334) records the mismatch but does
+**not** halt execution (`fail_assertion` in `src/lib/nogc_sync_mut/spec.spl:845`
+just appends to an error list), so the very next line indexes the empty
+array and crashes — that crash, not a clean assertion failure, is what
+`Results:` reports. This was previously invisible because the spec never
+reached that `it` block's execution report — the whole file just hung.
+
+### Root cause: not the spec, not `lab_server.spl` application logic
+
+Debug instrumentation (added temporarily, then removed — no permanent debug
+code landed) traced the byte-level WS read and the server's own event
+buffer and found: `POST .../cells/c1/execute` runs correctly (200, `"ok":
+true`, `"lab-http-api-ok"` in `stdout_delta`) and its handler
+(`lab_route_execute`, `src/app/simple_lab/lab_server.spl:383`) does push
+both `stream`/`status` frames into `LAB_STATE.sessions[idx].events` — a
+same-connection read-back immediately after the push confirms
+`events_len=2`. But the **next** TCP connection (the WS `.../events`
+GET, handled by `lab_handle_ws_events`, line 584) sees
+`LAB_STATE.sessions[idx].events.len() == 0` the moment it starts running,
+before `drain_events` is even called. The session itself is still there
+(`sessions.len()==1`, correct `id`) — only the nested `events` mutation
+from the *prior* connection is gone.
+
+This is **not** a race (the accept loop is single-connection-at-a-time, per
+this file's own design comment at line 34) and **not** an application logic
+bug in the read-modify-writeback pattern
+(`var session = self.sessions[idx]; session.events.push(...); 
+self.sessions[idx] = session`) in isolation — a minimal, sockets-free repro
+of that exact pattern, called through the exact same first-class-function
+`Router.dispatch` indirection this server uses for every route, persists
+correctly. Escalating fixes were tried and each disproved by a fresh repro
+closer to the real server, in order:
+
+1. **Batch the two `push_event` calls into one `push_events([f1, f2])`
+   call** (avoids two separate mutating `me` calls on the same array
+   element within one dispatched invocation — confirmed as a real, narrower
+   defect via an in-process repro, filed separately: see below). Verified
+   in isolation this does fix that narrower symptom, but the *real* server
+   also chains `record_cell` before `push_events`, i.e. still two different
+   mutating calls per request — merging those into one
+   `record_cell_and_push_events` call did not fix the end-to-end failure.
+2. **Merge `record_cell` + `push_events` into one method call.** Still
+   `events_len=0` on the next connection, even though a same-connection
+   read right after the merged call shows `events_len=2` correctly.
+3. **Restructure away from nesting `cells`/`events` arrays inside each
+   `LabApiSession` array element entirely** — replaced with flat top-level
+   `LabApiState.cell_records: [LabCellRecord]` /
+   `event_records: [LabEventRecord]` fields (keyed by `session_id`,
+   mutated only via `.push()` or whole-field reassignment, the same shape
+   already proven to persist reliably for `LAB_STATE.sessions` itself).
+   Still lost across the connection boundary: `cell_records`/`event_records`
+   both read back as length 0 on the next connection, while the sibling
+   `sessions` field (mutated identically, `.push()` inside a
+   router-dispatched handler) reads back correctly every time.
+
+That last result rules out both "nested array inside a struct-in-array
+element" and "index-based read-modify-write" as sufficient explanations —
+a flat, top-level, `.push()`-only array field on the *same class instance*,
+mutated from a request handler reached the *same way* `sessions` is, still
+does not survive to the next accepted connection, while `sessions` does.
+Minimal in-process repros (no real `TcpListener`, including ones that spawn
+a real subprocess between the two mutations, mirroring
+`KernelSessionManager.execute_cell`'s subprocess-per-cell design) never
+reproduced the loss — only the actual server, run as a real spawned OS
+subprocess serving real accepted TCP connections through its own
+`serve_bounded` loop, exhibits it. This points at something specific to
+crossing a real `TcpListener.accept()` boundary in this interpreter/runtime
+combination (`SIMPLE_EXECUTION_MODE=interpreter`, the mode this server is
+deliberately pinned to — see the `start_lab_server` comment at
+`test/03_system/tools/simple_lab/lab_http_api_spec.spl:107-110` — so this is
+not the already-documented JIT named-fn-as-value defect either), not at the
+`lab_server.spl` application code, which was tried in three materially
+different, individually-plausible shapes and stayed broken in the same way
+each time.
+
+Given this is a compiler/runtime defect reproducible only through a real
+accept-loop-driven subprocess, not something addressable by further
+`lab_server.spl` restructuring without evidence it would help, the spec is
+left **RED** (`Results: 4 total, 3 passed, 1 failed`) rather than force a
+pass by weakening the assertion. No source changes landed from this
+follow-up investigation; `src/app/simple_lab/lab_server.spl` is unchanged
+from before.
+
+### Narrower, independently-confirmed sub-defect
+
+Separately, and confirmed with a pure in-process repro (no sockets): calling
+**two different mutating `me` methods** that each do their own
+read-modify-writeback of the same array element (`self.sessions[idx]`),
+back to back, from *inside a single invocation of a function that was
+itself reached through a stored first-class function value* (exactly what
+`Router.dispatch` does for a registered route handler), silently drops the
+first call's write. This is real and reproducible under
+`SIMPLE_EXECUTION_MODE=interpreter` (not only the JIT), but per the
+escalation above it is not sufficient on its own to explain the full
+end-to-end loss this spec hits — the accept-loop-crossing loss persists
+even after collapsing to a single combined mutating call. Filed as its own
+narrower compiler defect: doc/08_tracking/bug/
+interpreter_first_class_fn_dispatch_drops_nested_array_writeback_2026-08-09.md.
+
+### Unblock condition
+
+This spec's second `it` block can go green once the underlying
+interpreter/runtime defect (state mutated by one accepted connection's
+request handler not being visible to the next accepted connection, for at
+least some array-typed class fields) is fixed and verified with the same
+repro shape used here (flat `.push()`-only array field on a class instance,
+mutated inside a router-dispatched handler across two real, sequential
+`TcpListener.accept()`-served connections in one process).
