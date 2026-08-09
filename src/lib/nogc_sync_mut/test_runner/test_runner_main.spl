@@ -217,7 +217,7 @@ fn run_tests(options: TestOptions) -> TestRunResult:
             val daemon_results = run_tests_via_daemon(files, updated_options, daemon_config)
             for dr in daemon_results:
                 print_result(dr, updated_options.format)
-            return summarize_test_results(daemon_results)
+            return reconcile_discovered_vs_executed(files, summarize_test_results(daemon_results), false)
         else:
             # Daemon could not start/respond (e.g. stale pidfile, light_daemon
             # IPC mismatch). Fall back to direct execution instead of failing the
@@ -233,13 +233,14 @@ fn run_tests(options: TestOptions) -> TestRunResult:
     if updated_options.parallel:
         if not is_linux():
             print "WARNING: --parallel is experimental on non-Linux platforms. Attempting with graceful fallback."
-        return run_tests_parallel_mode(
+        val parallel_result = run_tests_parallel_mode(
             files,
             updated_options,
             ckpt_passed: ckpt_passed,
             ckpt_failed: ckpt_failed,
             ckpt_skipped: ckpt_skipped
         )
+        return reconcile_discovered_vs_executed(files, parallel_result, false)
 
     report_free_mem("BEFORE_TEST_LOOP")
     val mode_name = mode_to_str(updated_options.mode)
@@ -288,6 +289,7 @@ fn run_tests(options: TestOptions) -> TestRunResult:
     var total_cached = 0
     var completed_files: [text] = []
     var tests_run = 0
+    var stopped_early = false
 
     for file_path in files:
         # Only check system thresholds every 20 tests (avoids 100ms CPU sleep per check)
@@ -357,6 +359,7 @@ fn run_tests(options: TestOptions) -> TestRunResult:
         if updated_options.fail_fast and (result.failed > 0 or result.timed_out):
             print ""
             print "Stopping early (--fail-fast)"
+            stopped_early = true
             break
 
     # Save cache
@@ -370,7 +373,7 @@ fn run_tests(options: TestOptions) -> TestRunResult:
     # if options.resume and checkpoint_exists():
     #     checkpoint_delete()
 
-    TestRunResult(
+    val sequential_result = TestRunResult(
         files: results,
         total_passed: total_passed,
         total_failed: total_failed,
@@ -381,6 +384,7 @@ fn run_tests(options: TestOptions) -> TestRunResult:
         total_setup_ms: total_setup_ms,
         total_cached: total_cached
     )
+    reconcile_discovered_vs_executed(files, sequential_result, stopped_early)
 
 fn run_tests_parallel_mode(
     files: [text],
@@ -739,6 +743,83 @@ fn run_tests_via_daemon(
                 break
 
     results
+
+fn reconcile_discovered_vs_executed(
+    discovered: [text],
+    result: TestRunResult,
+    stopped_early: bool
+) -> TestRunResult:
+    """Fail-closed accounting: every discovered spec file must produce a result.
+
+    A directory run that returns fewer file results than files discovered has
+    silently truncated coverage — the historical failure mode where an abort
+    part-way through a directory still printed a clean `Results:` line for the
+    subset that happened to run. Print the discovered/executed pair on EVERY
+    run so the gap is visible, and turn each unaccounted-for file into a
+    counted failure so a truncated run can never read green.
+
+    `stopped_early` marks a deliberate stop (--fail-fast). It is still
+    reported, but it is not re-counted as extra failures.
+    """
+    var executed_paths: {text: bool} = {}
+    for r in result.files:
+        executed_paths[r.path] = true
+
+    var missing: [text] = []
+    for f in discovered:
+        if not executed_paths.contains_key(f):
+            missing.push(f)
+
+    val discovered_n = discovered.len()
+    val executed_n = discovered_n - missing.len()
+    print ""
+    print "Files:   {discovered_n} discovered, {executed_n} executed"
+
+    if missing.len() == 0:
+        return result
+
+    if stopped_early:
+        print "         {missing.len()} not executed (stopped early by --fail-fast)"
+        return result
+
+    print ""
+    print "ERROR: {missing.len()} discovered test file(s) produced NO result."
+    print "       A directory run must never silently skip files; each is counted as failed."
+    var shown = 0
+    for m in missing:
+        if shown < 25:
+            print "  NOT EXECUTED  {m}"
+        shown = shown + 1
+    if missing.len() > 25:
+        print "  ... and {missing.len() - 25} more"
+    print ""
+
+    var augmented = result.files
+    for m in missing:
+        augmented.push(TestFileResult(
+            path: m,
+            passed: 0,
+            failed: 1,
+            skipped: 0,
+            pending: 0,
+            duration_ms: 0,
+            setup_ms: 0,
+            error: "NOT EXECUTED: discovered but never run (truncated test run)",
+            timed_out: false,
+            cached: false
+        ))
+
+    TestRunResult(
+        files: augmented,
+        total_passed: result.total_passed,
+        total_failed: result.total_failed + missing.len(),
+        total_skipped: result.total_skipped,
+        total_pending: result.total_pending,
+        total_timed_out: result.total_timed_out,
+        total_duration_ms: result.total_duration_ms,
+        total_setup_ms: result.total_setup_ms,
+        total_cached: result.total_cached
+    )
 
 fn summarize_test_results(results: [TestFileResult]) -> TestRunResult:
     var total_passed = 0

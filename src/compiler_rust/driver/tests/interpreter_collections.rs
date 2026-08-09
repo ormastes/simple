@@ -698,3 +698,21 @@ main = increment(10)
     // increment(10) = 11 (undecorated)
     assert_eq!(result.exit_code, 11);
 }
+
+#[test]
+fn interpreter_indexes_mid_codepoint_byte_fragment() {
+    // Regression: slicing a non-ASCII string at a non-codepoint boundary yields
+    // a `Value::StrBytes` fragment. Indexing that fragment used to fall through
+    // to the catch-all arm and abort the whole process with the nonsensical
+    // "invalid operation: cannot index value of type str" — which is what
+    // silently truncated directory-target test runs. Indexing must succeed and
+    // stay byte-transparent.
+    let code = r#"
+s = "aé b"
+frag = s[1:2]
+ch = frag[0]
+main = 7
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 7);
+}

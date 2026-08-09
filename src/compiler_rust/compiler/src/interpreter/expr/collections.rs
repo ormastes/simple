@@ -633,6 +633,28 @@ pub(super) fn eval_collection_expr(
                     let raw_idx = require_integer_index_value(&idx_val, "string")?;
                     indexed_string_char(&s, raw_idx)
                 }
+                // A `StrBytes` is a text value whose bytes are not valid UTF-8 —
+                // it is produced by `Value::text_from_bytes` whenever a byte
+                // slice lands mid-codepoint (see value_impl.rs). It is still a
+                // string as far as the language is concerned (`type_name()`
+                // reports "str"), so indexing it MUST work; falling through to
+                // the catch-all below produced the nonsensical
+                // "cannot index value of type str" abort. Index it by BYTE, to
+                // match the byte-transparent slice path that created it.
+                Value::StrBytes(bytes) => {
+                    let raw_idx = require_integer_index_value(&idx_val, "string")?;
+                    let len = bytes.len() as i64;
+                    let idx = if raw_idx < 0 { len + raw_idx } else { raw_idx };
+                    if (0..len).contains(&idx) {
+                        Ok(Value::text_from_bytes(vec![bytes[idx as usize]]))
+                    } else {
+                        Err(string_index_out_of_bounds(
+                            &String::from_utf8_lossy(&bytes),
+                            raw_idx,
+                            len,
+                        ))
+                    }
+                }
                 Value::Object {
                     ref class, ref fields, ..
                 } => {
