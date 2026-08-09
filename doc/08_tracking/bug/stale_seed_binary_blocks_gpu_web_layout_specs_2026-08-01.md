@@ -1,8 +1,17 @@
 # Stale deployed `bin/simple_seed` blocks every spec importing `browser_renderer_protocol.spl`
 
 **Date:** 2026-08-01
-**Status:** OPEN — the grammar is already FIXED in source; the DEPLOYED binary
-is stale. Remediation is a redeploy, not a source change.
+**Status:** ALREADY-FIXED (re-verified 2026-08-09) — the grammar fix
+(`023a60a05aa`) is in source, and the deployed binary has since been
+redeployed. Re-verified fresh: `bin/release/x86_64-unknown-linux-gnu/simple`
+is now dated Aug 9 04:50 (was Jul 25 04:18 at filing), and
+`bin/simple run src/lib/common/web/browser_renderer_protocol.spl` no longer
+reproduces the `Unexpected token: expected expression, found Newline` parse
+error at lines 575/583 — it proceeds past parsing into normal lint/use-warning
+output. The regression-coverage context added at filing time
+("implicit trailing-operator continuation (no backslash)",
+`test/03_system/feature/usage/line_continuation_spec.spl`) already guards
+against this recurring. Original text below is left intact for history.
 **Severity:** HIGH — both `test/01_unit/lib/gpu_web/layout/*_spec.spl` specs and
 every other spec that transitively imports
 `src/lib/common/web/browser_renderer_protocol.spl` fail to COMPILE, so they have
