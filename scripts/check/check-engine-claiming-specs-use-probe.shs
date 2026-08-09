@@ -124,9 +124,22 @@ NATIVE_ACK_RE='@engine-reach:[[:space:]]*native-by-compile'
 NATIVE_COMPILE_RE='compile[^"]*--native|--native[^"]*-o|native-build|--mode=native'
 NATIVE_EXEC_RE='rt_process_run|process_run|process_run_timeout|run_command|shell_exec|shell\('
 
+# English words that merely CONTAIN a claim substring but claim nothing. `jit` is
+# matched as a bare substring on purpose — the genuine claims are compound
+# identifiers (`vulkan_jit`, `cuda_jit`, `jit_run`, `on_jit_compile`,
+# `JitBackend`, ...), so a `\<jit\>` word-boundary tightening would over-exempt
+# ~30 real claims. The only observed collision across the whole tree is the
+# jitter family (7 titles: retry_resilience_spec x2, cron_jitter_config_spec,
+# netcode_prediction_spec, simpleos_crypto_random_gate_spec x3). POSIX ERE has no
+# lookaround, so instead of complicating CLAIM_RE we DELETE the decoy words from
+# the text before matching. Verified 2026-08-09 that no other claim token
+# (AOT / cranelift / natively / native codegen / native lane) has any such
+# collision in spec titles.
+DECOY_SED='s/[Jj][Ii][Tt][Tt][Ee][Rr]//g'
+
 # is_engine_claiming FILE -> 0 when the file needs a probe or an ack
 is_engine_claiming() {
-    $GREP -qE "$CLAIM_RE" "$1" 2>/dev/null
+    sed "$DECOY_SED" "$1" 2>/dev/null | $GREP -qE "$CLAIM_RE"
 }
 
 is_exempt() {
@@ -229,6 +242,26 @@ selftest() {
     : > "$tmp/repo/scripts/check/engine_claiming_specs_baseline.txt"
     ENGINE_PROBE_GUARD_NESTED=1 sh "$0" --root "$tmp/repo" >"$tmp/out5" 2>&1 || fail "backed native-by-compile spec failed an end-to-end scan"
 
+    # 16. "jitter" is NOT a JIT claim (the decoy-word false positive)
+    printf 'describe "retry":\n    it "applies jitter to the backoff window":\n        expect(1).to_equal(1)\n' > "$tmp/k_spec.spl"
+    is_engine_claiming "$tmp/k_spec.spl" && fail "flagged the English word 'jitter' as a JIT claim"
+    printf 'describe "crypto":\n    it "seeds from CPU Jitter entropy":\n        expect(1).to_equal(1)\n' > "$tmp/l_spec.spl"
+    is_engine_claiming "$tmp/l_spec.spl" && fail "flagged capitalised 'Jitter' as a JIT claim"
+
+    # 17. the jitter exclusion must NOT over-exempt compound jit identifiers
+    # (mixed-case `Jit...` — e.g. `JitBackend` — is a PRE-EXISTING blind spot of
+    # CLAIM_RE, which lists only `jit|JIT`; it is unrelated to this exclusion and
+    # widening it would add unbaselined offenders, so it is left recorded here
+    # rather than silently changed.)
+    for t in vulkan_jit cuda_jit jit_run on_jit_compile __jit__; do
+        printf 'describe "g":\n    it "keeps %s stable":\n        expect(1).to_equal(1)\n' "$t" > "$tmp/m_spec.spl"
+        is_engine_claiming "$tmp/m_spec.spl" || fail "lost a genuine claim for compound identifier $t"
+    done
+
+    # 18. a title carrying BOTH a decoy and a real claim is still a claim
+    printf 'describe "g":\n    it "measures jitter under the JIT":\n        expect(1).to_equal(1)\n' > "$tmp/n_spec.spl"
+    is_engine_claiming "$tmp/n_spec.spl" || fail "decoy stripping swallowed a real JIT claim on the same line"
+
     # 10. fail-closed: an empty tree is an ERROR, not a PASS
     mkdir -p "$tmp/empty/scripts/check"
     : > "$tmp/empty/scripts/check/engine_claiming_specs_baseline.txt"
@@ -241,7 +274,7 @@ selftest() {
 
 if [ "$MODE" = selftest ]; then
     if selftest; then
-        echo "PASS — 15 selftest fixtures checked"
+        echo "PASS — 18 selftest fixtures checked"
         exit 0
     fi
     echo "FAIL — selftest fixtures failed"

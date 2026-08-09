@@ -1,11 +1,9 @@
 # JIT cannot resolve the native socket externs — every "JIT mode" networking run is silently an interpreter run
 
 - **Filed:** 2026-08-09
-- **Status:** OPEN — root-caused 2026-08-09, scoped OUT of `.spl` work
-  (Rust-seed-only fix, see "Root cause" below)
+- **Status:** OPEN
 - **Severity:** Medium (correctness of engine claims; performance cliff)
-- **Component:** `RUNTIME_SYMBOL_NAMES` manifest (`src/compiler_rust/common/src/runtime_symbols.rs`)
-  → Cranelift JIT external-symbol registration
+- **Component:** Cranelift JIT external-symbol registration / `src/runtime` socket FFI
 - **Binary measured:** `bin/release/x86_64-unknown-linux-gnu/simple`
   (`readlink -f bin/simple`)
 
@@ -83,86 +81,8 @@ assertion is a pin on measured reality, **not approval**: when the externs are
 registered with the JIT it will go RED and must then be replaced by an
 assertion of a genuinely compiled run.
 
-## Root cause (2026-08-09, confirmed)
-
-**One missing list, and it is a Rust-seed list — there is no `.spl`-side
-registration list at all.** The chain:
-
-1. `src/compiler_rust/compiler/src/codegen/jit.rs:387`
-   `register_runtime_symbols_from_provider()` iterates **only**
-   `RUNTIME_SYMBOL_NAMES` and calls `JITBuilder::symbol(name, ptr)` for each.
-   A symbol not in that list is never handed to Cranelift.
-2. `jit_import_resolves()` (`jit.rs:405`) then falls back to
-   `elf_utils::resolve_runtime_symbol` and `dlsym(RTLD_DEFAULT, ..)`. Neither
-   finds `native_tcp_bind`: the runtime is statically linked into the driver
-   and the symbol is not in the dynamic symbol table, so `dlsym` misses.
-   Result: unresolved import → whole-module demotion.
-3. `RUNTIME_SYMBOL_NAMES` is `src/compiler_rust/common/src/runtime_symbols.rs:381`.
-   **It contains zero `native_tcp_*` / `native_udp_*` / `native_http_*`
-   entries** (the only `native` hits in the whole 1,800-line list are
-   `rt_native_eq`, `rt_native_cmp`, `rt_compile_to_native_with_opt`,
-   `rt_native_profile_*` — unrelated).
-4. The omission is clearly an oversight, not a policy: the *tier classifier*
-   in the same file (`symbol_tier_of`, lines 303-305) already has explicit
-   `native_tcp_` / `native_udp_` / `native_http_` prefix arms assigning them
-   Tier-`Sys`. Something classifies these symbols that the name list never
-   emits.
-5. The implementations **do exist and are correctly exported**:
-   `src/compiler_rust/runtime/src/value/net_tcp.rs:118`
-   `#[no_mangle] pub unsafe extern "C" fn native_tcp_bind(...) -> (i64, i64)`,
-   plus `native_tcp_accept/flush/shutdown/close/set_backlog/set_nodelay`, and
-   the UDP peers in `net.rs`. `nm -g --defined-only libsimple_runtime.a`
-   confirms `native_tcp_bind` is a defined global. So this is purely a
-   registration gap, not a missing implementation.
-6. The static provider table is **generated** from that same list:
-   `src/compiler_rust/runtime/build.rs:40-75` textually parses
-   `../common/src/runtime_symbols.rs` for `pub const RUNTIME_SYMBOL_NAMES`,
-   intersects it with `collect_defined_runtime_symbols()`, and emits
-   `OUT_DIR/runtime_symbol_entries.rs` (`RUNTIME_SYMBOL_ENTRIES`), which
-   `StaticSymbolProvider::get_symbol` serves. So adding the names to the one
-   const propagates to both the static provider and the JIT builder.
-
-### Scope ruling: Rust-seed only — deliberately NOT fixed here
-
-Per CLAUDE.md "fix `.spl` not Rust": every artifact on this path is Rust seed
-(`src/compiler_rust/**`). Searched `src/compiler/**` for an analogous
-`.spl`-side "externs available to JIT" list — **none exists**; the pure-Simple
-JIT files (`70.backend/backend/jit_interpreter.spl`,
-`10.frontend/core/interpreter/jit.spl`, `95.interp/execution/tiered_jit_manager.spl`)
-carry no runtime-symbol manifest. There is nothing to fix in `.spl` scope.
-
-### Exact work a seed lane needs
-
-- **File:** `src/compiler_rust/common/src/runtime_symbols.rs`, inside the
-  `pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[` literal (starts line 381).
-- **Change:** add one `"name",` entry per socket extern actually defined in
-  `src/compiler_rust/runtime/src/value/net_tcp.rs` and `net.rs` — at minimum
-  `native_tcp_bind`, `native_tcp_accept`, `native_tcp_close`,
-  `native_tcp_flush`, `native_tcp_shutdown`, `native_tcp_set_backlog`,
-  `native_tcp_set_nodelay`, and the `native_udp_*` peers. Enumerate the family
-  with `nm -g --defined-only` rather than adding only the two symbols this bug
-  names — a partial add leaves siblings broken.
-- **No other call site needs editing.** `build.rs` regenerates
-  `RUNTIME_SYMBOL_ENTRIES`, `StaticSymbolProvider` picks them up, and
-  `register_runtime_symbols_from_provider` registers them with `JITBuilder`
-  automatically. `symbol_tier_of` already handles the tiering.
-- **Watch:** `native_tcp_bind`/`native_tcp_accept` return Rust tuples
-  (`-> (i64, i64)`), which is not a stable C ABI. Registration only takes the
-  address so the list add is safe, but the seed lane should confirm the
-  Cranelift-side signature the JIT synthesises for these matches what the
-  interpreter/AOT lanes already assume before declaring the lane green.
-- **Gate:** requires a `--full-bootstrap` (cargo seed + runtime rebuild), so
-  this cannot ride an incremental pure-Simple bootstrap.
-
 ## Unblock condition
 
-Land the `RUNTIME_SYMBOL_NAMES` additions above in a seed lane, then flip the
-`networking_spec.spl` fallback assertion to a real compiled-lane assertion
-(and add a regression check that `SIMPLE_JIT_STRICT=1
-SIMPLE_EXECUTION_MODE=jit` on a `native_tcp_bind` program exits 0 — strict mode
-is the sharpest available oracle for "the extern is genuinely resolvable") and
-re-run both engines.
-
-The current spec pin stays RED-on-fix by design and is **unchanged** by this
-investigation: measured behaviour has not moved, so flipping the assertion now
-would assert a fiction.
+Register the socket externs in the JIT's symbol table alongside the other
+`rt_*` / `native_*` runtime entry points, then flip the spec's fallback
+assertion to a real compiled-lane assertion and re-run both engines.
