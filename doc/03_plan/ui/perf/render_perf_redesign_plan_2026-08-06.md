@@ -10,6 +10,110 @@ Relationship to existing plans:
   basis. This plan is **additive V2 repair**, not a new scene architecture.
   No GuiIR/WebIR (standing rejected decision).
 
+## 0-A. STATUS OVERLAY (added 2026-08-09) — read this first
+
+This overlay was added because the plan below carried almost no status markers
+while a large part of its surface had already been built, **some of it out of
+the plan's own stated order**. The prose below §0-A is the ORIGINAL plan and is
+deliberately unedited; where it disagrees with this overlay, the overlay is
+newer. Every SHA here was verified present in `origin/main` on 2026-08-09.
+
+### Standing caveat — no perf number is admissible yet
+
+`bin/simple` is still the **Rust seed**. Per §11, no perf claim produced by the
+seed or the tree-walk interpreter is admissible. Everything landed so far gates
+the **mechanism** (measured-bits, counted refusals, ABI width, engine identity),
+**not any performance number**. Do not read a green gate as a met milestone.
+
+### Ordering inversions — the reason this overlay exists
+
+1. **F3 and the F2 Simple-side primitive landed BEFORE F1, together, on
+   2026-08-06** — commit `deea048b59f` added `packed_span.spl`,
+   `ui_scene_column_arena_v2.spl`, `draw_ir_v3_direct_writer_v2.spl` and two
+   specs in **one commit**, two days before any F0/F1 work existed. §2's stated
+   critical path is `F1→F2→F3`; the tree was built `F3+F2ʹ → F2ʺ → F0 → F1`.
+   Consequence: **UiSceneColumnArenaV2's zero-copy property is engine-dependent
+   and unproven until F1 lands.** It rests on a class/reference contract the
+   compiler does not yet have.
+2. **C1 and C4 are fixture-fed, not source-fed, in part.** C1's obligations 1–4
+   are proven against real layout; **5–8 run at neutral defaults** because
+   `TypeLayout`/HIR carry no per-field facts for them — a neutral default is not
+   a proof. C4's verifier is complete but still fed by fixtures; source wiring
+   is in flight. Treat both as PARTIAL, never as green.
+3. **C5 emits `ZFP_UNMEASURED` for three of four axes.** Only the hop axis is
+   measured. The other three are BLOCKED-by-design rather than assumed zero —
+   which is correct, but means §0's five-zero milestone is one-fifth measured.
+
+### Lane status
+
+| Lane | Status | Evidence |
+|---|---|---|
+| **F0** receipts + engine-identity gates (not a numbered §; serves §0/§11) | **LANDED `64dbe3b01c8`** | `src/lib/common/perf/render_perf_receipt_v2.spl` (per-counter `measured` bit, `perf_milestone_gate`, `RenderPerfGateLedger`, never-merged verdict families `refuse:*` / `blocked:unmeasured:<n>` / `fail:nonzero:<n>=<v>`), `scripts/check/check-render-perf-milestone-gate.shs` (fatal selftest). Closed a real fabricated-zero hole: counters initialised to 0 with no record of whether anyone wrote them read as five perfect zeros. Gates mechanism only — see caveat above. |
+| **F1** class/reference semantics | **BLOCKED** | Plan `a4eb22fa77d` → `doc/03_plan/ui/perf/f1_class_identity_kind_propagation_plan_2026-08-09.md` (**not** under `doc/03_plan/compiler/`). Corpus + JIT struct-alias defect `47a162e079a`. The seed has **zero** `ClassKind` / `StructKind` / `TypeKind::Class`; `is_value_type` is set at the parser then **hardcoded at 13 literal sites** across `context_pack.rs`, `hir/lower/module_lowering/module_pass.rs:548` (`false`), `interpreter/node_exec.rs:438` (`true`), `interpreter_call/block_execution.rs`, `interpreter_eval.rs`. Engines fail in OPPOSITE directions (interpreter copies classes; JIT aliases structs), so no single-backend patch works. Staged S1–S5; **S2 (a driver reaching the pure-Simple engine) must precede S1**. |
+| **F2** packed span ABI | **PARTIAL (both halves present)** | Simple primitive landed `deea048b59f` (08-06, with F3); counted refusal gate `cf36e6d6200`; C half `dc201577385` → `src/runtime/runtime_packed_span.{c,h}`, magic-first struct, `sizeof == 40`, alignment 8. One-check-per-batch measured: 1 resolve call admitting 16384 elements. `packed_span_backend_name()` is a **live per-engine probe, not hardcoded** (reports `scalar-oracle` where the engine cannot deliver). **Criterion 7 remains PARTIAL — blocked by a stdlib MIR `HirTypeKind::Infer` gap.** |
+| **F3** UiSceneColumnArenaV2 | **PARTIAL — built on absent foundations** | `deea048b59f` (08-06): `src/lib/nogc_sync_mut/ui/ui_scene_column_arena_v2.spl`, `draw_ir_v3_direct_writer_v2.spl` + specs. Landed **before** F1 and alongside F2ʹ. Zero-copy unproven until F1. |
+| **C0** layer declarations | **LANDED** | Soft keyword, `@layer(NAME)`, DAG errors implemented. |
+| **C1** layer-equivalent types | **PARTIAL** | `c0b284e6a5f` — `@layer_eq`/`@layer_field` parse and reach the checker on **real source** (`10.frontend/layer_eq_registry.spl`, `35.semantics/layer_eq_validation.spl`, parser + HIR pipeline wiring). Obligations 1–4 proven against real layout; **5–8 at neutral defaults** (missing `TypeLayout`/HIR per-field facts). |
+| **C2** typed forwarding | **IN FLIGHT** | — |
+| **C3** logical AOP join points | **NOT STARTED** | — |
+| **C4** effect verifier | **PARTIAL** | Verifier complete but **fixture-fed**; source wiring in flight. |
+| **C5** `@zero_forward_path` gates | **PARTIAL — hop axis LANDED `3fc73b79b11`** | `src/compiler/35.semantics/zero_forward_path_gate.spl`. Hop axis bites; the other three axes emit `ZFP_UNMEASURED` → BLOCKED rather than assumed zeros. |
+| **U0–U3** WM/GUI/Web/events adoption | **PARTIAL** | Events `945f7bde756`: `src/os/drivers/input/input_batch.spl` — `drain_into`, coalescing policy that **never merges key/text/focus/close**, allocation gate asserting F0 returns `blocked:unmeasured:allocations`. Hit-test boundary agreement `1b8c772792f`: `src/lib/common/engine/interaction/hit_test.spl` + `event_route_stack_boundary_agreement_spec.spl` — the two stacks agree on well-formed input but **provably diverge on `z_index`, `enabled=false`, and `pointer_policy=None`**, because `DrawIrV3Command` has no such columns; **a disabled overlay eats clicks on the packed path**. Still open: SPSC atomics, POD `InputPacket` (`ch: text` is a heap ref), `RouteToken`, allocating flat hit-test path. |
+| **O0–O4**, **P0–P5**, **G0–G4** | **NOT STARTED** | Correctly gated behind §0's milestone. |
+
+### SimpleOS runnable status (per `.claude/rules/board-runnable.md`)
+
+Bug doc: `doc/08_tracking/bug/simpleos_wm_lane_not_board_runnable_2026-08-08.md`
+(`f7421f2625e`). **That doc is STALE as of 22:16 on 08-08 and was never updated**
+— three later commits supersede its rung (b) and (c) verdicts. Current rungs:
+
+- **(a) source present — YES.**
+- **(b) cross-built / staged into an image — YES on x86_64**, `e83b3df9596`
+  (the bug doc still says NO; it predates this).
+- **(c) booted under real firmware — YES on BOTH arches.** aarch64 under AAVMF
+  with an 800x600 framebuffer, `bf37f58c41d`. Note: the framebuffer was **never
+  a kernel bug** — QEMU `-M virt` has no default display adapter; `ramfb` fixes
+  it. x86_64 under OVMF with 27,487 bytes of serial.
+- **(d) WM actually running and rendering in-guest — NO on either arch.**
+  - *x86_64 blocker, precisely isolated* (`b4184d4aac6`, doc
+    `...rs_reject_cpu_composited_material_2026-08-08.md`): rendering **completes**
+    (`engine2d_rendered backend=software`) but the `aetheric_dark` theme's
+    two-layer `.wm-window` background yields `layers_len=73` while the
+    `engine2d-cpu-composited-material-v1` predicate requires `mat_layers == ""`.
+    Every other term passes; all 3 windows are `content-provenance-rejected`.
+  - *aarch64 blocker*: `memory_init` is still the Layer 1 milestone stub.
+- **Physical board: ZERO evidence on either arch.** Per the board-runnable rule
+  this is a filed gap, not a completion.
+
+### Resume here — highest-leverage next steps
+
+1. **F1 / S2 — build a driver that reaches the pure-Simple engine.** *Unblocks:*
+   everything downstream, because F3's zero-copy and F2's arena guarantees are
+   engine-dependent until the class/reference contract is real. S2 must precede
+   S1. *Blocked by:* nothing — this is the front of the queue.
+2. **SimpleOS rung (d), x86_64 — reconcile the material predicate with the
+   theme.** *Unblock condition:* either `engine2d-cpu-composited-material-v1`
+   accepts a layered `.wm-window` background, or the theme stops emitting two
+   layers. Everything else in that gate already passes; this is a one-term
+   contract mismatch, not a rendering defect.
+3. **U-lane: add `z_index` / `enabled` / `pointer_policy` columns to
+   `DrawIrV3Command`.** *Unblock condition:* none — the divergence is proven and
+   the fix is additive. Until then the packed hit-test path is **unsafe to
+   adopt**: a disabled overlay eats clicks.
+4. **C4 source wiring, then C1 obligations 5–8.** *Unblock condition for 5–8:*
+   `TypeLayout`/HIR must carry the per-field facts; until then they are neutral
+   defaults and must not be reported as proven.
+5. **F2 criterion 7.** *Unblock condition:* close the stdlib MIR
+   `HirTypeKind::Infer` gap.
+6. **Do not start O/P/G lanes.** §0's five zeros are one-fifth measured and no
+   perf number is admissible while the deployed binary is the seed.
+
+### Working-tree note
+
+On 2026-08-09 the local working copy was missing
+`scripts/check/check-render-perf-milestone-gate.shs` even though it is present
+in `origin/main`. Verify lane files against `origin/main`, not the WC.
+
 ## 0. Decisive first milestone
 
 Not Vulkan, not AVX-512. A warm frame where:
