@@ -64,6 +64,19 @@ fn web_render_runtime_queue_available(backend_name: text) -> bool:
         return true
     false
 
+# SimpleOS WM pixels travel through the narrow cache-owned delivery lane below.
+# Never place the live array handle in the large WebRenderArtifact aggregate:
+# native freestanding decorator returns can overwrite the pointed RuntimeArray
+# header/items field while reconstructing that aggregate. Hosted targets retain
+# the existing artifact pixel contract.
+@cfg("os", "simpleos")
+fn _web_render_cache_artifact_pixels(pixels: [u32]) -> [u32]:
+    []
+
+@cfg(macos or linux or windows or freebsd or openbsd or netbsd or android)
+fn _web_render_cache_artifact_pixels(pixels: [u32]) -> [u32]:
+    pixels
+
 fn web_render_backend_readback_checksum(pixels: [u32]) -> i64:
     var checksum: i64 = 0
     var i = 0
@@ -142,7 +155,7 @@ impl WebRenderPixelArtifactCache:
             content_revision
         )
         val rendered_pixels = result.readback.pixels
-        val artifact = web_render_artifact_with_backend_readback_source_evidence(web_render_engine2d_rendered_artifact(web_render_pixel_artifact(req.with_pixel_output(), rendered_pixels), self.resolved_backend_name), self.resolved_backend_name, result.readback.source)
+        val artifact = web_render_artifact_with_backend_readback_source_evidence(web_render_engine2d_rendered_artifact(web_render_pixel_artifact(req.with_pixel_output(), _web_render_cache_artifact_pixels(rendered_pixels)), self.resolved_backend_name), self.resolved_backend_name, result.readback.source)
         val queued = web_render_artifact_with_runtime_queue_evidence(artifact, self.resolved_backend_name)
         web_render_artifact_with_material_fallback(queued, result.material_fallback)
 
@@ -197,7 +210,8 @@ impl WebRenderPixelArtifactCache:
                 val artifact = web_render_artifact_with_backend_readback_source_evidence(
                     web_render_engine2d_rendered_artifact(
                         web_render_pixel_artifact(
-                            req.with_pixel_output(), cached.readback.pixels
+                            req.with_pixel_output(),
+                            _web_render_cache_artifact_pixels(cached.readback.pixels)
                         ),
                         self.resolved_backend_name
                     ),
@@ -216,6 +230,10 @@ impl WebRenderPixelArtifactCache:
                 self.backend_name, elapsed
             )
         )
+        # Preserve the direct array handle before any large WebRenderArtifact
+        # reconstruction. Nonterminal animation frames are not normal cache
+        # entries, but the compositor still needs this exact rendered frame.
+        self.pixel_cache.retain_delivered_pixels(result.readback.pixels)
         if self.animation_end_ms == -2:
             self.animation_next_frame_ms = now_ms + 16
         elif elapsed >= self.animation_end_ms:
@@ -235,7 +253,8 @@ impl WebRenderPixelArtifactCache:
         val artifact = web_render_artifact_with_backend_readback_source_evidence(
             web_render_engine2d_rendered_artifact(
                 web_render_pixel_artifact(
-                    req.with_pixel_output(), result.readback.pixels
+                    req.with_pixel_output(),
+                    _web_render_cache_artifact_pixels(result.readback.pixels)
                 ),
                 self.resolved_backend_name
             ),
@@ -255,12 +274,12 @@ impl WebRenderPixelArtifactCache:
     fn hits() -> i32:
         self.pixel_cache.hits
 
-    # Return the pixel buffer directly from its canonical producer/cache.  A
+    # Return the pixel buffer directly from its canonical producer/cache. A
     # WebRenderArtifact remains the metadata/evidence carrier, but its repeated
     # large aggregate decorators are not an array-handle transport on native
-    # freestanding targets. Static content is an immediate cache hit. Animated
-    # content is recomputed at the identical elapsed timestamp so correctness
-    # is preserved even when it is not terminal-cacheable.
+    # freestanding targets. Do not call result_for_html here: an immediate cache
+    # hit would reconstruct and unwrap a nested Option/readback aggregate, which
+    # is the exact ABI boundary this accessor exists to avoid.
     fn pixels_for_request_at_time(
         req: WebRenderRequest, content_revision: i64, now_ms: i64
     ) -> [u32]:
@@ -268,22 +287,10 @@ impl WebRenderPixelArtifactCache:
             return []
         if web_render_dynamic_region_count(req) > 0:
             return []
-        val full_html = web_render_full_html(req)
-        if now_ms < 0 or self.animation_end_ms == -1:
-            val cached = self.pixel_cache.result_for_html(
-                full_html, SIMPLE_WEB_PIXEL_CACHE_MODE_UNTIMED_STATIC,
-                content_revision
-            )
-            return cached.readback.pixels
-        val elapsed = if now_ms > self.animation_epoch_ms:
-            now_ms - self.animation_epoch_ms
-        else:
-            0
-        val rendered = simple_web_render_html_to_readback_result_with_engine2d_backend_at_time(
-            full_html, req.viewport_w, req.viewport_h,
-            self.backend_name, elapsed
-        )
-        rendered.readback.pixels
+        val retained = self.pixel_cache.retained_pixels()
+        if retained.len() != req.viewport_w * req.viewport_h:
+            return []
+        retained
 
     fn stores() -> i32:
         self.pixel_cache.stores
