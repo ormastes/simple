@@ -95,10 +95,17 @@ class Engine2dWmFrameExecutor:
     image_resource_revisions: [SimpleOsHostGpuImageResourceRevision]
     emit_repeated_evidence: bool
     profile_emitted: bool
+    prepared_composition: DrawIrComposition
+    prepared_images: [Engine2dResolvedDrawIrImage]
+    prepared_scene_revision: i64
+    prepared_taskbar_revision: i64
+    prepared_clock_label: text
+    prepared_backend_target: text
+    prepared_valid: bool
 
     static fn create(engine: Engine2D, framebuffer: FramebufferDriver, fb_w: i64 = 0, fb_h: i64 = 0, cpu_simd_enabled: bool = false) -> Engine2dWmFrameExecutor:
         val local_target = engine2d_wm_draw_ir_backend_target(false, "", cpu_simd_enabled)
-        Engine2dWmFrameExecutor(engine: engine, framebuffer: framebuffer, host_gpu_base: 0u64, host_gpu_run_id_hash: 0, host_gpu_backend: "", host_gpu_backend_code: 0, draw_ir_backend_target: local_target, local_draw_ir_backend_target: local_target, fb_w: fb_w, fb_h: fb_h, image_resource_revisions: [], emit_repeated_evidence: true, profile_emitted: false)
+        Engine2dWmFrameExecutor(engine: engine, framebuffer: framebuffer, host_gpu_base: 0u64, host_gpu_run_id_hash: 0, host_gpu_backend: "", host_gpu_backend_code: 0, draw_ir_backend_target: local_target, local_draw_ir_backend_target: local_target, fb_w: fb_w, fb_h: fb_h, image_resource_revisions: [], emit_repeated_evidence: true, profile_emitted: false, prepared_composition: DrawIrComposition(schema: "", composition_id: "", scene_key: "", backend_target: "", batches: []), prepared_images: [], prepared_scene_revision: 0, prepared_taskbar_revision: 0, prepared_clock_label: "", prepared_backend_target: "", prepared_valid: false)
 
     static fn create_host_gpu(engine: Engine2D, framebuffer: FramebufferDriver, base: u64, guest_isa_code: i64, backend_code: i64, fb_width: i64, fb_height: i64, negotiation_started_us: i64, cpu_simd_enabled: bool = false) -> Engine2dWmFrameExecutor:
         var executor = Engine2dWmFrameExecutor.create(engine, framebuffer, fb_width, fb_height, cpu_simd_enabled)
@@ -220,6 +227,40 @@ class Engine2dWmFrameExecutor:
         val profile_started_us = boot_monotonic_now_us()
         if scene_revision <= 0 or taskbar_revision <= 0:
             return 0
+        # The shell invokes this lane only with the exact immutable inputs
+        # retained after an authoritative successful frame. Reuse the already
+        # validated composition/resources, but execute every Draw IR command,
+        # Engine2D operation, SIMD fill/blit and present again.
+        var prepared_replay_eligible = false
+        if not self.emit_repeated_evidence:
+            if self.prepared_valid:
+                if scene_revision == self.prepared_scene_revision:
+                    if taskbar_revision == self.prepared_taskbar_revision:
+                        if clock_label == self.prepared_clock_label:
+                            if self.local_draw_ir_backend_target == self.prepared_backend_target:
+                                prepared_replay_eligible = true
+        if prepared_replay_eligible:
+            var prepared_evidence_i64: [i64] = [0, 0, 0, 0, 0, 0, 0]
+            var prepared_evidence_text: [text] = ["", "", ""]
+            val prepared_execute_started_us = boot_monotonic_now_us()
+            val prepared_result = engine2d_draw_ir_adv_composition_present_prepared_with_images_evidence(
+                self.engine, self.prepared_composition, false,
+                self.prepared_images, prepared_evidence_i64,
+                prepared_evidence_text)
+            val prepared_rendered = prepared_evidence_i64[5].to_i32()
+            val prepared_skipped = prepared_evidence_i64[0].to_i32()
+            if not self.profile_emitted:
+                self.profile_emitted = true
+                val prepared_finished_us = boot_monotonic_now_us()
+                val prepared_execute_us = boot_monotonic_elapsed_us(
+                    prepared_execute_started_us, prepared_finished_us)
+                val prepared_total_us = boot_monotonic_elapsed_us(
+                    profile_started_us, prepared_finished_us)
+                serial_println("[wm-exec-profile] prepare_us={prepared_total_us - prepared_execute_us} execute_us={prepared_execute_us} images={self.prepared_images.len()} batches={self.prepared_composition.batches.len()} rendered={prepared_rendered} skipped={prepared_skipped}")
+            if prepared_rendered <= 0:
+                self.prepared_valid = false
+                return 0
+            return scene_revision
 
         # Per-window fail-closed degrade: a window whose content frame is
         # missing, has an empty URI, or duplicates another window's URI is
@@ -344,6 +385,14 @@ class Engine2dWmFrameExecutor:
         if rendered_count <= 0:
             serial_println("[wm-frame] engine2d-draw-ir-rejected resolved_images={images.len()} expected_images={expected_images} degraded={degraded_window_count} skipped={skipped_count} rendered={rendered_count} fallback_required={fallback_required} reason={fallback_reason}")
             return 0
+        if self.emit_repeated_evidence:
+            self.prepared_composition = local_composition
+            self.prepared_images = images
+            self.prepared_scene_revision = scene_revision
+            self.prepared_taskbar_revision = taskbar_revision
+            self.prepared_clock_label = clock_label
+            self.prepared_backend_target = self.local_draw_ir_backend_target
+            self.prepared_valid = true
         if degraded_window_count > 0 or skipped_count != 0:
             serial_println("[wm-frame] frame-degraded degraded_window_count={degraded_window_count} skipped={skipped_count} rendered={rendered_count} scene_revision={scene_revision} reason={fallback_reason}")
         if self.emit_repeated_evidence:
