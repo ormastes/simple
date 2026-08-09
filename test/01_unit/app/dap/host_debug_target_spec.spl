@@ -1,0 +1,247 @@
+# @cover src/app/dap/host_debug_target.spl 90%
+#
+# Host `DebugTarget` adapter over the existing `SimpleDapSession`.
+#
+# Drives the adapter against a real fixture `.spl` program
+# (`test/fixtures/dap/host_debug_target_program.spl`, 3 comment lines then
+# `val alpha`..`val delta` on lines 4-7) so every assertion is a claim about
+# the real session machinery, not about a mock.
+#
+# The contract asserted here is the one documented on `trait DebugTarget`
+# (`src/lib/common/debug/debug_target.spl`) -- the same contract P2's ref
+# spec pins -- so host and ref are diffable target-for-target.
+#
+# Design: doc/05_design/app/tools/unified_debug_profile_capability_architecture_2026-08-09.md §2, §5
+
+use app.dap.host_debug_target.{HostDebugTarget, host_mem_len}
+use std.common.debug.capability.{CapLevel, cap_level_name}
+use std.common.debug.debug_target.{debug_state_is_stopped_alive, debug_state_is_terminal}
+
+val FIXTURE = "test/fixtures/dap/host_debug_target_program.spl"
+
+describe "HostDebugTarget identity":
+    it "reports the host kind":
+        var t = HostDebugTarget.launch(FIXTURE)
+        assert_equal(t.kind(), "host")
+
+    it "reports Native debug capability":
+        var t = HostDebugTarget.launch(FIXTURE)
+        assert_equal(cap_level_name(t.debug_level()), "native")
+
+describe "HostDebugTarget state":
+    it "starts on the first executable line with line pc units":
+        var t = HostDebugTarget.launch(FIXTURE)
+        val s = t.state()
+        assert_equal(s.pc, 4)
+        assert_equal(s.pc_kind, "line")
+        assert_equal(s.stop_reason, "running")
+
+    it "reports a single-frame call stack at the current line":
+        var t = HostDebugTarget.launch(FIXTURE)
+        val s = t.state()
+        assert_equal(s.call_stack.len(), 1)
+        assert_equal(s.call_stack[0], 4)
+
+    it "is a pure read that does not advance execution":
+        var t = HostDebugTarget.launch(FIXTURE)
+        val a = t.state()
+        val b = t.state()
+        val c = t.state()
+        assert_equal(a.pc, b.pc)
+        assert_equal(b.pc, c.pc)
+        assert_equal(c.pc, 4)
+
+    it "reports sp as the count of visible bindings":
+        var t = HostDebugTarget.launch(FIXTURE)
+        val before = t.state().sp
+        t.step()
+        t.step()
+        assert_true(t.state().sp > before)
+
+describe "HostDebugTarget breakpoints":
+    it "reports true when a breakpoint is newly added":
+        var t = HostDebugTarget.launch(FIXTURE)
+        assert_true(t.set_breakpoint(6))
+        assert_equal(t.breakpoints().len(), 1)
+        assert_equal(t.breakpoints()[0], 6)
+
+    it "reports false for a line that already has a breakpoint":
+        var t = HostDebugTarget.launch(FIXTURE)
+        assert_true(t.set_breakpoint(6))
+        assert_false(t.set_breakpoint(6))
+        assert_equal(t.breakpoints().len(), 1)
+
+    it "refuses a breakpoint past the end of the program":
+        var t = HostDebugTarget.launch(FIXTURE)
+        assert_false(t.set_breakpoint(9999))
+        assert_equal(t.breakpoints().len(), 0)
+
+    it "lists breakpoints in ascending order regardless of insertion order":
+        var t = HostDebugTarget.launch(FIXTURE)
+        assert_true(t.set_breakpoint(7))
+        assert_true(t.set_breakpoint(5))
+        assert_true(t.set_breakpoint(6))
+        assert_equal(t.breakpoints().len(), 3)
+        assert_equal(t.breakpoints()[0], 5)
+        assert_equal(t.breakpoints()[1], 6)
+        assert_equal(t.breakpoints()[2], 7)
+
+    it "clears a breakpoint that was set":
+        var t = HostDebugTarget.launch(FIXTURE)
+        assert_true(t.set_breakpoint(6))
+        assert_true(t.clear_breakpoint(6))
+        assert_equal(t.breakpoints().len(), 0)
+
+    it "reports false when clearing a line that has no breakpoint":
+        var t = HostDebugTarget.launch(FIXTURE)
+        assert_false(t.clear_breakpoint(5))
+
+    it "clears only the requested line":
+        var t = HostDebugTarget.launch(FIXTURE)
+        assert_true(t.set_breakpoint(5))
+        assert_true(t.set_breakpoint(6))
+        assert_true(t.clear_breakpoint(5))
+        assert_equal(t.breakpoints().len(), 1)
+        assert_equal(t.breakpoints()[0], 6)
+
+describe "HostDebugTarget step":
+    it "advances one executable line and reports the step reason":
+        var t = HostDebugTarget.launch(FIXTURE)
+        val s = t.step()
+        assert_equal(s.pc, 5)
+        assert_equal(s.stop_reason, "step")
+        assert_true(debug_state_is_stopped_alive(s))
+
+    it "advances again on a second step":
+        var t = HostDebugTarget.launch(FIXTURE)
+        t.step()
+        val s = t.step()
+        assert_equal(s.pc, 6)
+        assert_equal(s.stop_reason, "step")
+
+    it "is not wedged by a breakpoint on the destination line":
+        var t = HostDebugTarget.launch(FIXTURE)
+        assert_true(t.set_breakpoint(5))
+        val s = t.step()
+        assert_equal(s.pc, 5)
+        assert_equal(s.stop_reason, "step")
+
+    it "halts instead of advancing past the last line":
+        var t = HostDebugTarget.launch(FIXTURE)
+        t.step()
+        t.step()
+        t.step()
+        val s = t.step()
+        assert_equal(s.pc, 7)
+        assert_equal(s.stop_reason, "halt")
+        assert_true(debug_state_is_terminal(s))
+
+describe "HostDebugTarget resume":
+    # These also guard the handle-aliasing family (`me` vs `fn` receiver
+    # copies; a capability handle that stops aliasing its target unless
+    # acquired as a tail expression -- see
+    # doc/08_tracking/bug/ref_debug_profiler_handle_stops_aliasing_unless_tail_expression_2026-08-09.md).
+    # If `set_breakpoint` were silently discarded against the stored
+    # session, `resume()` would run to "halt" instead of stopping here.
+    it "stops at the next breakpoint":
+        var t = HostDebugTarget.launch(FIXTURE)
+        assert_true(t.set_breakpoint(6))
+        val s = t.resume()
+        assert_equal(s.pc, 6)
+        assert_equal(s.stop_reason, "breakpoint")
+
+    it "picks the nearest breakpoint ahead of the current line":
+        var t = HostDebugTarget.launch(FIXTURE)
+        assert_true(t.set_breakpoint(7))
+        assert_true(t.set_breakpoint(5))
+        val s = t.resume()
+        assert_equal(s.pc, 5)
+        assert_equal(s.stop_reason, "breakpoint")
+
+    it "makes progress when resuming from a breakpointed location":
+        var t = HostDebugTarget.launch(FIXTURE)
+        assert_true(t.set_breakpoint(5))
+        assert_true(t.set_breakpoint(7))
+        val first = t.resume()
+        assert_equal(first.pc, 5)
+        val second = t.resume()
+        assert_equal(second.pc, 7)
+        assert_equal(second.stop_reason, "breakpoint")
+
+    it "halts when there is no breakpoint ahead":
+        var t = HostDebugTarget.launch(FIXTURE)
+        val s = t.resume()
+        assert_equal(s.stop_reason, "halt")
+        assert_true(debug_state_is_terminal(s))
+
+describe "HostDebugTarget read_mem":
+    it "reads the head of the variable slab":
+        var t = HostDebugTarget.launch(FIXTURE)
+        val bytes = t.read_mem(0, 1)
+        assert_equal(bytes.len(), 1)
+        # The slab is the session's variables body: {"variables":[...]}
+        assert_equal(bytes[0] as i64, 123)     # '{'
+
+    it "reads an in-range window of the requested length":
+        var t = HostDebugTarget.launch(FIXTURE)
+        val bytes = t.read_mem(1, 4)
+        assert_equal(bytes.len(), 4)
+        assert_equal(bytes[0] as i64, 34)      # '"'
+
+    it "returns nothing for a non-positive length":
+        var t = HostDebugTarget.launch(FIXTURE)
+        assert_equal(t.read_mem(0, 0).len(), 0)
+
+    it "returns nothing for a negative offset":
+        var t = HostDebugTarget.launch(FIXTURE)
+        assert_equal(t.read_mem(-1, 4).len(), 0)
+
+    it "returns empty rather than a short buffer when the read overruns":
+        var t = HostDebugTarget.launch(FIXTURE)
+        val n = host_mem_len(t)
+        assert_true(n > 0)
+        assert_equal(t.read_mem(0, n).len(), n)
+        assert_equal(t.read_mem(0, n + 1).len(), 0)
+        assert_equal(t.read_mem(n - 1, 2).len(), 0)
+
+    it "grows the slab as execution reveals more variables":
+        var t = HostDebugTarget.launch(FIXTURE)
+        val before = host_mem_len(t)
+        t.step()
+        t.step()
+        assert_true(host_mem_len(t) > before)
+
+describe "HostDebugTarget detach":
+    it "reports no error and drops breakpoints":
+        var t = HostDebugTarget.launch(FIXTURE)
+        assert_true(t.set_breakpoint(6))
+        assert_equal(t.detach(), "")
+        assert_equal(t.breakpoints().len(), 0)
+
+    it "is safe to call twice":
+        var t = HostDebugTarget.launch(FIXTURE)
+        assert_equal(t.detach(), "")
+        assert_equal(t.detach(), "")
+
+    it "stops stepping once detached":
+        var t = HostDebugTarget.launch(FIXTURE)
+        t.detach()
+        val s = t.step()
+        assert_equal(s.pc, 4)
+        assert_equal(s.stop_reason, "halt")
+
+    it "stops resuming once detached":
+        var t = HostDebugTarget.launch(FIXTURE)
+        t.detach()
+        val s = t.resume()
+        assert_equal(s.stop_reason, "halt")
+
+    it "refuses new breakpoints once detached":
+        var t = HostDebugTarget.launch(FIXTURE)
+        t.detach()
+        assert_false(t.set_breakpoint(6))
+
+    it "reads no memory once detached":
+        var t = HostDebugTarget.launch(FIXTURE)
+        t.detach()
+        assert_equal(t.read_mem(0, 4).len(), 0)
