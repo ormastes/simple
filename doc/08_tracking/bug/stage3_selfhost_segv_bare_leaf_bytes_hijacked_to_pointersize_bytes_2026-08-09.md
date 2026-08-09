@@ -353,3 +353,86 @@ was observed directly and the crash independently reproduced outside the wrapper
 
 **Status: ROOT-CAUSED, STILL NOT FIXED, and now RE-CONFIRMED on current
 `origin/main`.**
+
+## 2026-08-09 — HARDENED: suffix-match resolution is now verified (arity + owner)
+
+Two things changed since the re-measurement above.
+
+1. **`origin/main` `d5ddc4371dd` already carries a targeted repair** for the
+   exact `bytes` instance: `functions/calls.rs` now computes
+   `receiver_is_exact_string` from `vreg_types` and (a) routes a STRING-receiver
+   `bytes` leaf straight to `rt_string_bytes` *before* every module-name and
+   suffix lookup, and (b) rejects any suffix candidate that is not a builtin
+   (`string_receiver_suffix_candidate_is_builtin`) when the receiver is exactly
+   STRING. The doc's line numbers (`functions.rs:2675`) refer to a revision
+   before the `functions/calls.rs` split; the live hijack site is the
+   `MirInst::Call` scan in `functions/calls.rs`, not the `MethodCallStatic`
+   scan in `functions.rs`.
+
+2. **The class fix landed on top of it.** The STRING guard is type-specific and
+   fires only when the receiver type survived lowering. The scan itself still
+   accepted a lone candidate with *no* verification, so the same hijack shape
+   remained open for every other receiver type and for erased receivers. The
+   scan now verifies before binding:
+
+   - **Arity** — a candidate's parameter count must equal the call's argument
+     count (receiver included). Note this check alone does **not** catch the
+     `bytes` instance: `PointerSize.bytes` takes exactly one parameter, the same
+     as `s.bytes()` passes. Owner verification is the one that catches it.
+   - **Owner** — when the receiver's type is a known primitive
+     (`primitive_type_symbol_name`), the candidate's owner must be that type
+     (`suffix_owner_matches`, with `string`/`text`/`str` as aliases). `rt_*`
+     symbols are exempt.
+   - **Fail closed** — if verification leaves no candidate, resolution returns
+     `None` instead of binding an unverifiable one. The call then falls through
+     to the declare path and surfaces as a loud undefined symbol rather than
+     silent garbage.
+   - **The third entry point named in the appendix is covered.** The bare-leaf
+     `module.get_function(func_name_raw)` lookup (and, it turns out, the
+     `sffi_name` / `resolved_name` / `raw_dotted` lookups, which all collapse to
+     the same string for a bare leaf) now go through one guarded helper that
+     rejects an arity-mismatched free function when the module also holds a real
+     `Owner.<leaf>` method — the `max` shape from appendix §1.
+
+### Regressions added (`codegen/llvm/functions.rs`, `#[cfg(all(test, feature = "llvm"))] mod tests`)
+
+- `bare_bytes_leaf_never_binds_to_unrelated_owner_bytes` — builds a module
+  containing `lib__common__target__PointerSize.bytes` (same leaf, same arity,
+  unrelated owner) plus a STRING-receiver `Call { target: "bytes" }`, and
+  asserts the emitted IR contains no call to it.
+- `bare_leaf_does_not_bind_free_function_with_wrong_arity` — the `max` shape.
+- `suffix_owner_matches_only_the_receiver_type` — unit coverage of the owner
+  predicate, including the `PointerSize` vs `string` and `Vec4f` vs `f64` cases.
+
+### Verification (fast, not a bootstrap)
+
+`cargo test -p simple-compiler --features llvm --lib codegen::` in a pinned
+clean checkout of `d5ddc4371dd`:
+
+| | passed | failed |
+|---|---|---|
+| baseline (`d5ddc4371dd`, unmodified) | 966 | 10 |
+| with this change | **969** | **10 — the same 10** |
+
+The 10 failures are pre-existing and identical in both runs (`vhdl_lowers_*`,
+`all_funcs_have_unique_names`, `referenced_empty_extern_is_declared`,
+`resolved_text_methods_precede_direct_declarations_but_user_text_stays_direct`,
+`rt_value_bool_calls_receive_raw_boolean_bits`, `static_dict_remove_uses_runtime_symbol`,
+`codegen_typed_string_bytes_ignores_same_leaf_user_owner`,
+`llvm_emitter_probes_call_core_c_coverage_abi_with_source_identity`). Zero
+regressions; the three new tests are the delta.
+
+### Blocker found while verifying — the lib test binary does not compile on `origin/main`
+
+`cargo test -p simple-compiler --lib` fails to build at `d5ddc4371dd` with **9 ×
+E0063**: `pipeline/native_project/imports.rs` gained
+`struct_module_owners` and `unique_struct_owners` on `ModuleImports` /
+`ImportMapResult`, and the nine struct literals in
+`pipeline/native_project/tests.rs` were never updated. Pre-existing, unrelated
+to this bug, and it blocks **every** Rust seed unit test, not just these. Worked
+around locally (not landed) by adding the two fields as `Default::default()`.
+Filed as a separate concern for whoever owns that in-flight change.
+
+**Status: the suffix-scan hijack class is FIXED and pinned by regressions.**
+Whether Stage 3 now progresses past this point is a separate bootstrap
+measurement.

@@ -4019,4 +4019,156 @@ mod tests {
             "rt_dict_contains returns bool and must remain in the returns_bool set"
         );
     }
+
+    /// Regression: a bare `bytes` leaf on a text receiver must NEVER be
+    /// suffix-matched onto an unrelated `*.bytes` accessor.
+    ///
+    /// doc/08_tracking/bug/stage3_selfhost_segv_bare_leaf_bytes_hijacked_to_pointersize_bytes_2026-08-09.md
+    #[test]
+    fn bare_bytes_leaf_never_binds_to_unrelated_owner_bytes() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("bare_leaf_bytes_hijack").unwrap();
+
+        // The decoy: same leaf, same arity (1 = receiver), unrelated owner.
+        let mut decoy = MirFunction::new(
+            "lib__common__target__PointerSize.bytes".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        decoy.params.push(MirLocal {
+            name: "self".to_string(),
+            ty: crate::hir::TypeId::I64,
+            kind: LocalKind::Parameter,
+            is_ghost: false,
+        });
+        decoy.blocks[0].instructions.push(MirInst::ConstInt {
+            dest: VReg(0),
+            value: 8,
+        });
+        decoy.blocks[0].terminator = Terminator::Return(Some(VReg(0)));
+
+        let mut caller = MirFunction::new(
+            "hm_hash_text".to_string(),
+            crate::hir::TypeId::STRING,
+            simple_parser::ast::Visibility::Public,
+        );
+        caller.params.push(MirLocal {
+            name: "s".to_string(),
+            ty: crate::hir::TypeId::STRING,
+            kind: LocalKind::Parameter,
+            is_ghost: false,
+        });
+        caller.blocks[0].instructions.push(MirInst::LocalAddr {
+            dest: VReg(0),
+            local_index: 0,
+        });
+        caller.blocks[0].instructions.push(MirInst::Load {
+            dest: VReg(1),
+            addr: VReg(0),
+            ty: crate::hir::TypeId::STRING,
+        });
+        caller.blocks[0].instructions.push(MirInst::Call {
+            dest: Some(VReg(2)),
+            target: CallTarget::from_name("bytes"),
+            args: vec![VReg(1)],
+        });
+        caller.blocks[0].terminator = Terminator::Return(Some(VReg(2)));
+
+        backend.compile_function(&decoy).unwrap();
+        backend.compile_function(&caller).unwrap();
+        let ir = backend.get_ir().unwrap();
+
+        assert!(
+            !ir.contains("call i64 @\"lib__common__target__PointerSize.bytes\""),
+            "bare `bytes` was hijacked onto an unrelated owner: {ir}"
+        );
+        backend.verify().unwrap();
+    }
+
+    /// Regression: a bare method leaf whose arity disagrees with a same-named
+    /// free function must not silently bind to it. `T.max()` (receiver only)
+    /// against the free `fn max(a, b)` is the measured shape.
+    #[test]
+    fn bare_leaf_does_not_bind_free_function_with_wrong_arity() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("bare_leaf_arity_guard").unwrap();
+
+        let mut free_max = MirFunction::new(
+            "max".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        for name in ["a", "b"] {
+            free_max.params.push(MirLocal {
+                name: name.to_string(),
+                ty: crate::hir::TypeId::I64,
+                kind: LocalKind::Parameter,
+                is_ghost: false,
+            });
+        }
+        free_max.blocks[0].instructions.push(MirInst::ConstInt {
+            dest: VReg(0),
+            value: 1,
+        });
+        free_max.blocks[0].terminator = Terminator::Return(Some(VReg(0)));
+
+        // A `Table.max` method exists, which is what makes the bare `max` leaf
+        // recognisably a method leaf rather than a free-function call.
+        let mut owner_max = MirFunction::new(
+            "Table.max".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        owner_max.params.push(MirLocal {
+            name: "self".to_string(),
+            ty: crate::hir::TypeId::I64,
+            kind: LocalKind::Parameter,
+            is_ghost: false,
+        });
+        owner_max.blocks[0].instructions.push(MirInst::ConstInt {
+            dest: VReg(0),
+            value: 2,
+        });
+        owner_max.blocks[0].terminator = Terminator::Return(Some(VReg(0)));
+
+        let mut caller = MirFunction::new(
+            "probe_max".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        caller.blocks[0].instructions.push(MirInst::ConstInt {
+            dest: VReg(0),
+            value: 0,
+        });
+        caller.blocks[0].instructions.push(MirInst::Call {
+            dest: Some(VReg(1)),
+            target: CallTarget::from_name("max"),
+            args: vec![VReg(0)],
+        });
+        caller.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+
+        backend.compile_function(&free_max).unwrap();
+        backend.compile_function(&owner_max).unwrap();
+        backend.compile_function(&caller).unwrap();
+        let ir = backend.get_ir().unwrap();
+
+        assert!(
+            !ir.contains("call i64 @max(i64 %"),
+            "1-arg bare `max` bound to the 2-param free function: {ir}"
+        );
+        backend.verify().unwrap();
+    }
+
+    #[test]
+    fn suffix_owner_matches_only_the_receiver_type() {
+        use super::calls::suffix_owner_matches;
+        assert!(suffix_owner_matches("text", "string"));
+        assert!(suffix_owner_matches("string", "string"));
+        assert!(suffix_owner_matches("lib__common__string_core__str", "string"));
+        assert!(!suffix_owner_matches("lib__common__target__PointerSize", "string"));
+        assert!(!suffix_owner_matches("Vec4f", "f64"));
+        assert!(suffix_owner_matches("f64", "f64"));
+    }
 }

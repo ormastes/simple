@@ -30,6 +30,45 @@ fn map_sffi_name(func_name: &str) -> &str {
     }
 }
 
+/// Does the owner part of an `Owner.leaf` symbol denote the primitive receiver
+/// type `recv`?
+///
+/// Owners are emitted either bare (`text.bytes`) or module-mangled
+/// (`lib__common__target__PointerSize.bytes`), so only the LAST path component
+/// is compared. `string`/`text` are two spellings of one type.
+///
+/// Generalises the STRING-receiver guard: an `f64` receiver must not bind
+/// `Vec4f.to_f32` just because it is the only `.to_f32` in the module.
+pub(crate) fn suffix_owner_matches(owner_head: &str, recv: &str) -> bool {
+    let last = owner_head
+        .rsplit("__")
+        .next()
+        .unwrap_or(owner_head)
+        .rsplit('.')
+        .next()
+        .unwrap_or(owner_head);
+    match recv {
+        "string" => last == "string" || last == "text" || last == "str",
+        _ => last == recv,
+    }
+}
+
+/// Is there any `Owner.<leaf>` method symbol in the module for this leaf name?
+/// Distinguishes a genuine free function from a bare method leaf whose owner
+/// was erased by an earlier lowering stage.
+#[cfg(feature = "llvm")]
+fn module_has_method_leaf(module: &Module<'static>, leaf: &str) -> bool {
+    let suffix = format!(".{}", leaf);
+    let mut func_opt = module.get_first_function();
+    while let Some(f) = func_opt {
+        if f.get_name().to_string_lossy().ends_with(&suffix) {
+            return true;
+        }
+        func_opt = f.get_next_function();
+    }
+    false
+}
+
 fn qualified_runtime_arity(method: &str, rt_name: &str) -> Option<usize> {
     match rt_name {
         "rt_len" | "rt_to_string" | "rt_string_to_int" | "rt_string_to_float" | "rt_string_to_upper"
@@ -2356,21 +2395,54 @@ impl LlvmBackend {
             }
         }
 
+        // A BARE leaf name carries no owner type. Accepting a same-named free
+        // function for it is only safe when the arity agrees; otherwise the
+        // callee reads arguments the call site never passed. `max` is the
+        // measured shape: a zero-arg `T.max()` leaf binding to the free
+        // `fn max(a: i64, b: i64)`. Only rejected when the module also holds a
+        // real `Owner.<leaf>` method, i.e. the name is recognisably a method
+        // leaf rather than an ordinary free-function call with defaults.
+        // doc/08_tracking/bug/stage3_selfhost_segv_bare_leaf_bytes_hijacked_to_pointersize_bytes_2026-08-09.md
+        let bare_leaf = !func_name_raw.contains('.') && !func_name_raw.contains("_dot_");
+        let bare_leaf_arity_ok = |f: &inkwell::values::FunctionValue<'static>, name: &str| {
+            !bare_leaf
+                || name != func_name_raw
+                || f.get_type().get_param_types().len() == args.len()
+                || !module_has_method_leaf(module, func_name_raw)
+        };
+        let lookup_guarded = |name: &str| module.get_function(name).filter(|f| bare_leaf_arity_ok(f, name));
         // Get or declare the called function (with suffix matching safety net)
-        let called_func = module
-            .get_function(sffi_name)
-            .or_else(|| module.get_function(resolved_name))
-            .or_else(|| module.get_function(&resolved_dotted))
-            .or_else(|| module.get_function(func_name_raw))
-            .or_else(|| module.get_function(&raw_dotted))
+        let called_func = lookup_guarded(sffi_name)
+            .or_else(|| lookup_guarded(resolved_name))
+            .or_else(|| lookup_guarded(&resolved_dotted))
+            .or_else(|| lookup_guarded(func_name_raw))
+            // `raw_dotted == func_name_raw` for a bare leaf, so an unguarded
+            // lookup here would simply re-find what `exact_bare` just rejected.
+            .or_else(|| lookup_guarded(&raw_dotted))
             .or_else(|| {
                 // Suffix matching: scan module for functions ending with ".{func_name}"
+                //
+                // VERIFIED. This scan keys on the LEAF NAME ONLY, so every symbol
+                // ending in `.<leaf>` collides regardless of receiver type, and
+                // taking the shortest hit unverified is a wrong-callee MISCOMPILE
+                // rather than a safety net (`text.bytes()` -> `PointerSize.bytes`,
+                // a constant-8 accessor whose result was then used as a pointer:
+                // Stage-3 SIGSEGV at si_addr 0x10). Beyond the STRING-receiver
+                // builtin guard below, a candidate must now also agree on ARITY,
+                // and on OWNER whenever the receiver's type is a known primitive.
+                // If verification leaves nothing, resolution FAILS CLOSED: the
+                // call falls through to the declare path and surfaces as a loud
+                // undefined symbol instead of silent garbage.
                 let suffix_name = if raw_dotted != func_name_raw {
                     raw_dotted.as_str()
                 } else {
                     func_name_raw
                 };
                 let suffix = format!(".{}", suffix_name);
+                let recv_primitive = args
+                    .first()
+                    .and_then(|r| vreg_types.get(r).copied())
+                    .and_then(super::primitive_type_symbol_name);
                 let mut func_opt = module.get_first_function();
                 let mut best: Option<inkwell::values::FunctionValue> = None;
                 while let Some(f) = func_opt {
@@ -2380,6 +2452,21 @@ impl LlvmBackend {
                         {
                             func_opt = f.get_next_function();
                             continue;
+                        }
+                        // Arity must agree exactly (receiver included).
+                        if f.get_type().get_param_types().len() != args.len() {
+                            func_opt = f.get_next_function();
+                            continue;
+                        }
+                        // Owner must be the receiver's type when that is known.
+                        if let Some(recv) = recv_primitive {
+                            let owner_ok = name
+                                .strip_suffix(&suffix)
+                                .is_some_and(|head| suffix_owner_matches(head, recv));
+                            if !owner_ok && !name.starts_with("rt_") {
+                                func_opt = f.get_next_function();
+                                continue;
+                            }
                         }
                         if best
                             .as_ref()
