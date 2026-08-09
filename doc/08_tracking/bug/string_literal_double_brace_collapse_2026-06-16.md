@@ -51,3 +51,34 @@ This is how the R3 emitter/parser fix should construct JSON until this is resolv
   its "interpreter substring off-by-one" note is superseded by THIS finding.
 - Prior art: brace handling in literals is a known sharp edge (LaTeX/JSON spec samples fail
   with "variable not found" when `{ident}` is read as interpolation).
+
+## Re-verification / triage (2026-08-09)
+
+Re-ran the exact minimal repro against current `bin/simple`
+(`bin/release/x86_64-unknown-linux-gnu/simple`, seed):
+
+```
+val a = "x}}y"; print a.len()   -> 3   (still collapsed, expected 4)
+val b = "p{{q"; print b.len()   -> 3   (still collapsed, expected 4)
+val c = "end}}"; print c        -> "end}" (still collapsed, expected "end}}")
+```
+
+Still reproduces exactly as originally reported. Not a stale defect.
+
+Root cause is in the Rust seed's string-literal lexer/interpolation scanner
+(`src/compiler_rust/parser/src/lexer/strings.rs`), not in the pure-Simple
+self-hosted lexer. Read the self-hosted brace-interpolation scanner at
+`src/compiler/10.frontend/core/lexer_struct.spl` (`fn scan_string`, `{`
+handling around line 884 and `fs_nested_string_may_open` at line 984): its
+lookahead logic pushes each un-matched `{` (or `}`) as a single literal
+character independently and does not perform an unconditional `{{`→`{` /
+`}}`→`}` collapse — so this specific defect does not appear to reproduce in
+the self-hosted lexer by code inspection (not independently confirmed by
+execution — `bootstrap/stage3/simple` in this tree has no `run`/file-exec
+subcommand available to test against, per this repo's current bootstrap
+build).
+
+Per this sweep's scope rules (no edits under `src/compiler_rust/**`), this
+defect is left **OPEN / out of scope for this sweep** — the fix, if the
+seed's behavior is confirmed as the sole reproduction site, belongs in
+`src/compiler_rust/parser/src/lexer/strings.rs`. No source changes made.
