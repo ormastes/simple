@@ -1771,6 +1771,13 @@ impl LlvmBackend {
         let func_name_raw = target.name();
         let sffi_name = map_sffi_name(func_name_raw);
         let i64_type = self.runtime_int_type();
+        let resolved_name = self
+            .use_map
+            .get(func_name_raw)
+            .or_else(|| self.import_map.get(func_name_raw))
+            .map(|s| s.as_str())
+            .unwrap_or(func_name_raw);
+        let resolved_text_runtime = super::super::resolved_text_runtime_method(resolved_name);
 
         if sffi_name == "rt_typed_bytes_u8_at"
             && self.compile_inline_bytes_u8_at(dest, args, vreg_map, builder, true)?
@@ -1904,7 +1911,9 @@ impl LlvmBackend {
 
         // Special case: substring(text, start[, end]) → rt_slice(text, start, end, 1)
         // rt_string_substring doesn't exist in the runtime, so we expand to rt_slice + rt_len.
-        if func_name_raw == "substring" && matches!(args.len(), 2 | 3) {
+        if (func_name_raw == "substring" || resolved_text_runtime == Some("rt_slice"))
+            && matches!(args.len(), 2 | 3)
+        {
             let text_val = self.get_vreg(&args[0], vreg_map)?;
             let text_casted = self.coerce_value_to_type(text_val, Some(i64_type.into()), builder)?;
             let start_val = self.get_vreg(&args[1], vreg_map)?;
@@ -1994,7 +2003,8 @@ impl LlvmBackend {
             "values" => Some("rt_dict_values"),
             "unwrap" | "unwrap_or" | "unwrap_err" => Some("rt_enum_payload"),
             _ => None,
-        };
+        }
+        .or(resolved_text_runtime);
 
         if let Some(rt_fn_name) = bare_rt_redirect {
             let needs_receiver = !matches!(rt_fn_name, "rt_enum_payload" | "rt_enum_check_discriminant");
@@ -2268,12 +2278,6 @@ impl LlvmBackend {
         }
 
         // Resolve through use_map/import_map before declaring (matches Cranelift behavior)
-        let resolved_name = self
-            .use_map
-            .get(func_name_raw)
-            .or_else(|| self.import_map.get(func_name_raw))
-            .map(|s| s.as_str())
-            .unwrap_or(func_name_raw);
         let resolved_dotted = resolved_name.replace("_dot_", ".");
         let raw_dotted = func_name_raw.replace("_dot_", ".");
         let direct_method_name = resolved_dotted
