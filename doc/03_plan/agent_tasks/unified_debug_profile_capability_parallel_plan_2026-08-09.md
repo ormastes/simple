@@ -20,6 +20,19 @@ separately).
 - Each stream's report must include: files, fresh `Results:` lines, push
   SHA verified via `ls-remote`, and any interface drift from the design doc
   (report it, don't silently diverge).
+- **Check free space and btrfs metadata BEFORE `worktree add`.** The first
+  launch attempt (2026-08-09) wedged the machine: seven concurrent worktree
+  checkouts of a 112k-file tree drove btrfs Metadata,DUP to 48.99/49.50 GiB
+  with Device unallocated at 1.00 MiB. Every write then blocked forever in
+  `handle_reserve_ticket` — 26 unkillable D-state processes, and no stream
+  produced a single file. `df` is MISLEADING here: it reported 237G free,
+  but that was data-blockgroup slack that cannot become metadata. Gate on
+  `btrfs filesystem usage /` showing **Device unallocated > 0** and
+  Metadata used < 90%. If metadata is near-full, `btrfs balance start
+  -dusage=20 /` — but note a balance RELOCATES by writing first, so it needs
+  reservations too and is not a rescue once you are already at the wall;
+  free space first (`truncate -s 0` on large files works when `rm` hangs).
+  Stagger worktree creation rather than issuing all of them at once.
 
 ## Dependency graph
 
@@ -53,8 +66,36 @@ small follow-up commit (explicitly listed in P0's tasks).
 
 ### P0 — Language: trait `with` groups + generated `.from()` (design §3)
 
-Files: parser (trait-header production — find where `struct X with M:` is
-parsed and extend the trait header to accept the same clause; zero new
+**Reconnaissance already done (2026-08-09, read-only — do not redo):** the
+parser change is far smaller than assumed. The `with` token ALREADY EXISTS
+(`src/compiler_rust/parser/src/lexer/identifiers.rs:242` maps `"with"` →
+`TokenKind::With`), and `parse_explicit_mixins()`
+(`src/compiler_rust/parser/src/types_def/mod.rs:161`) is already a standalone
+reusable `with IDENT {, IDENT}` clause parser handling generic args. The ONLY
+gap: `parse_trait()`
+(`src/compiler_rust/parser/src/types_def/trait_impl_parsing.rs:30`) never
+calls it — empirically `trait G with A, B:` → `Unexpected token: expected
+Colon, found With`. Insert `parse_explicit_mixins()` after
+`parse_generic_params_as_strings()` (line 33) and map members onto the
+EXISTING `TraitDef.super_traits` field: `with A, B` is exactly sugar for
+`trait G: A + B:`, so blanket satisfaction reuses the trait solver's existing
+supertrait rule. No new token, no new AST field.
+Pure-Simple side: `parse_struct_or_trait_decl(is_class, is_trait)`
+(`src/compiler/10.frontend/core/_ParserDecls/fn_struct_decls.spl:842`) is
+ALREADY shared by struct/class/trait (trait path enters via
+`enum_module_body.spl:471`), and its `with` arm at lines 860-867 already sits
+in that shared path treating `with` as a soft ident. Likely needs only member
+CAPTURE (names are currently parsed then discarded), not new parsing.
+Known desugar gaps to close: `parse_trait_header()`
+(`src/app/desugar/trait_scanner.spl:151`) would mis-read
+`"DebugProfiler with DebugTarget, ProfileTarget"` as one name, and
+`TraitMethod` (line 39) records no return type — which `.from()`'s
+"match accessor by `Option<M>` return type" rule requires. Plus
+`trait_desugar.spl:25` for member fn-field concatenation.
+A draft feature-request doc is already written at
+`<scratchpad>/p0_feature_req.md` — reuse it if still present, else rewrite.
+
+Files: parser (trait-header production — extend per the recon above; zero new
 tokens), `src/app/desugar/trait_scanner.spl` + `forwarding.spl` (group =
 concat member fn-fields; blanket satisfaction; generate `Group.from(expr)`
 per the accessor-matching rule in design §3 — missing accessor = compile
