@@ -34,7 +34,7 @@ use std.gc_async_mut.gpu.engine2d.engine_target.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
     Engine2dDrawIrAdvResult, Engine2dResolvedDrawIrImage,
     engine2d_draw_ir_adv_composition_with_images,
-    engine2d_draw_ir_adv_composition_with_images_into,
+    engine2d_draw_ir_adv_composition_with_images_into_evidence,
     engine2d_resolved_draw_ir_image
 }
 use std.gc_async_mut.gpu.engine2d.backend.{Engine2DReadback, engine2d_readback}
@@ -248,7 +248,8 @@ fn _simple_web_layout_render_draw_ir_composition(
 fn _simple_web_layout_render_draw_ir_composition_into(
     composition: DrawIrComposition, width: i32, height: i32,
     backend_name: text, image_resources: [SimpleOsHostGpuImageResource],
-    destination: [u32]
+    destination: [u32], material_witness: SimpleWebLayoutMaterialWitness,
+    material_receipt: [text]
 ) -> i32:
     var engine = Engine2D.create_with_backend_fast(width, height, backend_name)
     engine.clear(0u32)
@@ -257,9 +258,23 @@ fn _simple_web_layout_render_draw_ir_composition_into(
         images.push(engine2d_resolved_draw_ir_image(
             image.image_uri, image.width, image.height, image.pixels
         ))
-    val transport_status = engine2d_draw_ir_adv_composition_with_images_into(
-        engine, composition, true, images, destination
+    var evidence_i64: [i64] = [0, 0, 0, 0, 0]
+    var evidence_text: [text] = ["", ""]
+    val transport_status = engine2d_draw_ir_adv_composition_with_images_into_evidence(
+        engine, composition, true, images, destination,
+        evidence_i64, evidence_text
     )
+    val material = simple_web_layout_material_provenance_after_backend_execution(
+        material_witness, evidence_i64[0].to_i32(),
+        if transport_status == 1: destination.len() else: 0,
+        width * height, evidence_i64[1].to_i32(),
+        evidence_i64[2].to_i32(), evidence_text[0], evidence_text[1],
+        evidence_i64[3], evidence_i64[4]
+    )
+    if material_receipt.len() >= 3:
+        material_receipt[0] = material.kind
+        material_receipt[1] = material.reason
+        material_receipt[2] = material.material_sha256
     engine.shutdown()
     transport_status
 
@@ -603,6 +618,14 @@ pub fn simple_web_layout_render_html_pixels_engine2d_at_time_into(
     html: text, width: i32, height: i32, backend_name: text,
     animation_time_ms: i64, destination: [u32]
 ) -> i32:
+    simple_web_layout_render_html_pixels_engine2d_at_time_into_receipt(
+        html, width, height, backend_name, animation_time_ms, destination, []
+    )
+
+pub fn simple_web_layout_render_html_pixels_engine2d_at_time_into_receipt(
+    html: text, width: i32, height: i32, backend_name: text,
+    animation_time_ms: i64, destination: [u32], material_receipt: [text]
+) -> i32:
     if width <= 0 or height <= 0:
         return -1
     val expected = width * height
@@ -621,7 +644,7 @@ pub fn simple_web_layout_render_html_pixels_engine2d_at_time_into(
         )
     _simple_web_layout_render_draw_ir_composition_into(
         layout_result.composition, width, height, backend_name, [],
-        destination
+        destination, layout_result.material_witness, material_receipt
     )
 
 pub fn simple_web_layout_render_html_pixels_engine2d_at_time_with_images(
@@ -744,6 +767,7 @@ pub fn engine2d_fast_metal_available() -> bool:
 
 export simple_web_layout_render_html_pixels_engine2d
 export simple_web_layout_render_html_pixels_engine2d_at_time_into
+export simple_web_layout_render_html_pixels_engine2d_at_time_into_receipt
 export simple_web_layout_render_html_readback_engine2d
 export simple_web_layout_render_html_readback_engine2d_result
 export simple_web_layout_render_html_engine2d_result
