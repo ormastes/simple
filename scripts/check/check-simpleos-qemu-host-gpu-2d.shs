@@ -94,11 +94,14 @@ set_host_contract() {
             EXPECTED_PROCESSING_RECEIPT='(cuda|vulkan)'
             ;;
         macos)
-            BACKEND=metal
-            PROCESSING_BACKEND=metal
-            EXPECTED_RENDER_MASK=2
-            EXPECTED_PROCESSING_MASK=2
-            EXPECTED_PROCESSING_RECEIPT=metal
+            # This Simple2D goal has one shared Vulkan contract. macOS is a
+            # readiness/emulator lane here; native proof belongs to the
+            # dedicated MoltenVK evidence wrapper, never to Metal receipts.
+            BACKEND=vulkan
+            PROCESSING_BACKEND=vulkan
+            EXPECTED_RENDER_MASK=1
+            EXPECTED_PROCESSING_MASK=1
+            EXPECTED_PROCESSING_RECEIPT=vulkan
             ;;
         windows)
             BACKEND=directx
@@ -120,7 +123,7 @@ set_host_contract() {
 apply_processing_selector() {
     case "$1:$ACTIVE_HOST" in
         auto:*) ;;
-        vulkan:linux)
+        vulkan:linux|vulkan:macos)
             PROCESSING_BACKEND=vulkan
             EXPECTED_PROCESSING_MASK=1
             EXPECTED_PROCESSING_RECEIPT=vulkan
@@ -131,7 +134,7 @@ apply_processing_selector() {
 
 set_host_contract "$ACTIVE_HOST"
 if ! apply_processing_selector "$PROCESSING_SELECTOR"; then
-    echo "simpleos_qemu_host_gpu_2d: SIMPLEOS_HOST_GPU_PROCESSING_BACKEND must be auto, or vulkan on Linux" >&2
+    echo "simpleos_qemu_host_gpu_2d: SIMPLEOS_HOST_GPU_PROCESSING_BACKEND must be auto, or vulkan on Linux/macOS" >&2
     exit 2
 fi
 LINUX_RUNTIME_TARGET=build/simpleos_gpu_host/$HOST_ARCH-vulkan-cuda-runtime-target
@@ -1078,7 +1081,7 @@ emit_row() {
     row_processing_backend=${6:-}
     row_prefix="simpleos_qemu_host_gpu_2d_${row_host}_${row_isa}"
     case "$row_host" in
-        macos) row_render_backend=metal; row_processing_backend=${row_processing_backend:-metal} ;;
+        macos) row_render_backend=vulkan; row_processing_backend=${row_processing_backend:-vulkan} ;;
         windows) row_render_backend=directx; row_processing_backend=${row_processing_backend:-cuda} ;;
         linux)
             row_render_backend=vulkan
@@ -1367,9 +1370,16 @@ validate_report() (
     case "$report_active_host" in linux|macos|windows) ;; *) return 1 ;; esac
     case "$report_host_arch" in x86_64|aarch64|riscv64) ;; *) return 1 ;; esac
     HOST_ARCH=$report_host_arch
-    case "$report_processing_selector:$report_active_host" in auto:*|vulkan:linux) ;; *) return 1 ;; esac
+    case "$report_processing_selector:$report_active_host" in auto:*|vulkan:linux|vulkan:macos) ;; *) return 1 ;; esac
     [ -n "$reason" ] || return 1
     case "$status" in pass|blocked|fail|unsupported) ;; *) return 1 ;; esac
+    if [ "$report_active_host" = macos ]; then
+        [ "$status" = unsupported ] &&
+        [ "$reason" = macos-vulkan-live-evidence-required ] &&
+        [ "$(report_one "$report" simpleos_qemu_host_gpu_2d_execution)" = emulator-only ] &&
+        [ "$(report_one "$report" simpleos_qemu_host_gpu_2d_backend)" = vulkan ] &&
+        [ "$(report_one "$report" simpleos_qemu_host_gpu_2d_processing_backend)" = vulkan ] || return 1
+    fi
 
     for report_host in linux macos windows; do
         for report_isa in x86_64 aarch64 riscv64; do
@@ -1381,9 +1391,16 @@ validate_report() (
             row_log=$(report_one "$report" "${prefix}_serial_log") || return 1
             [ -n "$row_reason" ] && [ -n "$row_log" ] || return 1
             case "$row_status" in pass|blocked|fail|unsupported) ;; *) return 1 ;; esac
+            if [ "$report_host" = macos ]; then
+                [ "$row_status" = unsupported ] || return 1
+                case "$row_reason" in
+                    requires-macos-host|macos-vulkan-live-evidence-required) ;;
+                    *) return 1 ;;
+                esac
+            fi
             case "$report_host:$row_render_backend:$row_processing_backend" in
                 linux:vulkan:cuda-preferred-vulkan-fallback|linux:vulkan:cuda|linux:vulkan:vulkan) ;;
-                macos:metal:metal|windows:directx:cuda-preferred-vulkan-fallback|windows:directx:cuda|windows:directx:vulkan) ;;
+                macos:vulkan:vulkan|windows:directx:cuda-preferred-vulkan-fallback|windows:directx:cuda|windows:directx:vulkan) ;;
                 *) return 1 ;;
             esac
             if [ "$row_status" = pass ]; then
@@ -1615,7 +1632,8 @@ self_test() {
         exit 1
     fi
     set_host_contract macos
-    if apply_processing_selector vulkan; then
+    if ! apply_processing_selector vulkan ||
+       [ "$BACKEND:$PROCESSING_BACKEND:$EXPECTED_RENDER_MASK:$EXPECTED_PROCESSING_MASK:$EXPECTED_PROCESSING_RECEIPT" != vulkan:vulkan:1:1:vulkan ]; then
         echo "simpleos_qemu_host_gpu_2d_self_test=fail"
         exit 1
     fi
@@ -2310,16 +2328,8 @@ EOF
         echo "simpleos_qemu_host_gpu_2d_self_test=fail"
         exit 1
     fi
-    set_host_contract macos
-    serial_has_pass "$metal_log" aarch64
-    arm64_production_serial_has_correlated_frame "$metal_production_log" "$arm_production_qemu_args"
-    if serial_has_pass "$metal_wrong_mask_log" aarch64 ||
-       serial_has_pass "$metal_wrong_backend_log" aarch64 ||
-       serial_has_pass "$metal_wrong_generation_log" aarch64
-    then
-        echo "simpleos_qemu_host_gpu_2d_self_test=fail"
-        exit 1
-    fi
+    # A Metal fixture may still exercise the generic protocol implementation,
+    # but it is never admissible as macOS Simple2D completion evidence.
     {
         for report_host in linux windows; do
             for report_isa in x86_64 aarch64 riscv64; do
@@ -2350,7 +2360,10 @@ EOF
         echo simpleos_qemu_host_gpu_2d_blocked=0
         echo simpleos_qemu_host_gpu_2d_failed=0
     } >"$metal_pass_report"
-    validate_report "$metal_pass_report" >/dev/null
+    if validate_report "$metal_pass_report" >/dev/null 2>&1; then
+        echo "simpleos_qemu_host_gpu_2d_self_test=fail"
+        exit 1
+    fi
     set_host_contract windows
     serial_has_pass "$directx_log" aarch64
     serial_has_pass "$directx_vulkan_log" aarch64
@@ -2673,6 +2686,25 @@ if [ "$host" != linux ] && [ "$host" != macos ] && [ "$host" != windows ]; then
     echo "simpleos_qemu_host_gpu_2d_host=$host"
     echo "simpleos_qemu_host_gpu_2d_host_arch=$HOST_ARCH"
     echo "simpleos_qemu_host_gpu_2d_reason=host-daemon-backend-not-implemented"
+    exit 0
+fi
+
+# The generic host-GPU/QEMU matrix must not promote macOS from Linux-style
+# synthetic rows. macOS remains an emulator/readiness lane until the dedicated
+# Vulkan/MoltenVK wrapper records source-matched DrawIR -> Engine2D -> Vulkan
+# submit, fence and device-readback evidence on a prepared Mac.
+if [ "$host" = macos ]; then
+    for isa in $GUEST_ISAS; do
+        emit_row macos "$isa" unsupported macos-vulkan-live-evidence-required none vulkan
+    done
+    echo "simpleos_qemu_host_gpu_2d_host=macos"
+    echo "simpleos_qemu_host_gpu_2d_host_arch=$HOST_ARCH"
+    echo "simpleos_qemu_host_gpu_2d_status=unsupported"
+    echo "simpleos_qemu_host_gpu_2d_reason=macos-vulkan-live-evidence-required"
+    echo "simpleos_qemu_host_gpu_2d_backend=vulkan"
+    echo "simpleos_qemu_host_gpu_2d_processing_backend=vulkan"
+    echo "simpleos_qemu_host_gpu_2d_execution=emulator-only"
+    echo "simpleos_qemu_host_gpu_2d_readiness_wrapper=scripts/check/check-macos-vulkan-2d-live-evidence.shs"
     exit 0
 fi
 

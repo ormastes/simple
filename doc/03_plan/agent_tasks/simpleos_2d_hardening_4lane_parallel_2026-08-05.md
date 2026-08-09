@@ -28,7 +28,7 @@ Execution window target: **1d 3h 24m** (planning, parser coverage, and gate hard
   - Linux/Vulkan host rows: self-tests are complete, live PASS is blocked by compiler/runtime admission.
   - ARM64 QEMU Vulkan row: parser/self-test contracts are complete, live PASS is blocked by compiler/runtime admission.
   - RV64/board-adjacent transport closure: source and self-test contracts are complete, live PASS is blocked by compiler/runtime admission.
-  - macOS HVF Metal row is non-runnable in this environment and remains emulation-only until delegated to an approved macOS host.
+  - macOS HVF Simple2D row is non-runnable in this environment and remains emulator/readiness-only until the shared Vulkan contract runs on an approved macOS host. Metal remains available to unrelated platform features but is not admissible evidence for this lane.
   - UNO Q board remains blocker and emits `board-not-connected` when no hardware is attached.
 - Shared 1280x720 canonical DrawIR/parity artifact with deterministic event/audio/fame capture path is complete in source.
   - 4th-lane showcase currently validates the contract composition (DrawIR + input + audio + font) and writes a generated manual; a fresh live run is blocked by host/compiler readiness.
@@ -73,7 +73,7 @@ All four lanes must use the same evidence fields and helper names:
   - no synthetic pass records.
   - this host cannot run macOS-native acceleration and does not claim live PASS.
 - Commands:
-  - `SIMPLE_BIN=<admitted>` `SIMPLEOS_GPU_HOST_BIN=<metal-host-daemon>` `SIMPLEOS_HOST_GPU_GUEST_ISAS=aarch64 sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs`
+  - `sh scripts/check/check-macos-vulkan-2d-live-evidence.shs` on a prepared macOS host; the generic host-GPU/QEMU wrapper must keep macOS rows unsupported/emulator-only and cannot promote a synthetic or Metal row.
 
 ### Lane 4 — UNO Q native board + 2D capture showcase (Vulkan-backed if available)
 - Scope: board wrapper contract + capture showcase contract in a single lane.

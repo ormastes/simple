@@ -31,9 +31,10 @@ Harden and validate the cross-platform SimpleOS 2D flow with shared DrawIR rende
   explicit `unattached_status=blocked`/`board-not-connected` row; it never
   flashes, probes, or claims a physical board.
 - Host GPU checker validates pass row contract (Linux row pass + render backend matrix)
-  and emits inactive macOS rows as `unsupported`, reason
-  `requires-macos-host`, execution class `emulator-only`; no macOS row may be
-  reported as `pass` by this Linux self-test.
+  and emits macOS rows as `unsupported`: inactive rows use
+  `requires-macos-host`, while a Darwin invocation uses
+  `macos-vulkan-live-evidence-required` and execution class `emulator-only`.
+  No macOS row may be reported as `pass` by this generic matrix.
 - Audio checker validates keyboard/pointer/controller receipts and playback/capture non-silent traces.
 - Host GPU metrics contract validates render sample count + p95 + RSS evidence (no hardcoded synthetic values).
 - RV64 checker validates font route, marker parsing, and keyboard/pointer correlation.
@@ -54,7 +55,9 @@ Harden and validate the cross-platform SimpleOS 2D flow with shared DrawIR rende
 - ⏸️ Still blocked:
   - Fresh native PASS on this host for Linux/QEMU/ARM64 rows because pure-Simple compiler admission/runtime still needs to be installed end-to-end.
   - macOS/uno-q native row execution cannot be completed on this host; macOS remains emulator-only here, and UNO Q is not attached.
-    - On this host, macOS row must stay `unsupported` or `blocked` and must only be promoted after a prepared-macOS host run with native contracts.
+    - In this generic matrix, every macOS row stays `unsupported`; only the
+      dedicated prepared-macOS Vulkan/MoltenVK evidence wrapper can supply
+      native proof.
     - TODO 658 owns the eventual board-attached UNO Q identity, download,
       fence, device-readback, and DrawIR parity proof. TODO 660 owns the
       source-matched prepared-macOS DrawIR-to-Engine2D-to-Vulkan receipt; this
