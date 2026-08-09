@@ -767,7 +767,7 @@ impl HirLowering:
             self.struct_field_types_by_name[canonical_composite_name] = imported_field_types
             if not self.struct_field_types_by_name.has(imported_name):
                 self.struct_field_types_by_name[imported_name] = imported_field_types
-            self.register_imported_type_methods(imported_mod, imported_mod_name, imported_name, imported_type, import_span)
+            self.register_imported_type_methods(imported_mod, imported_mod_name, imported_name, imported_type, import_span, materialize_enum)
         elif imported_mod.enums.contains_key(imported_name):
             if materialize_enum:
                 val root_origin = HirMaterializedPayloadOrigin(
@@ -788,7 +788,7 @@ impl HirLowering:
             # idempotent surface and must be registered on both paths; keeping
             # this inside `not already_bound` silently routed calls such as
             # imported `DbValue.to_text()` to generic enum stringification.
-            self.register_imported_type_methods(imported_mod, imported_mod_name, imported_name, imported_type, import_span)
+            self.register_imported_type_methods(imported_mod, imported_mod_name, imported_name, imported_type, import_span, materialize_enum)
             # A directory-sibling declaration-only prebind may already own the
             # symbol. A later explicit import must still transition the enum
             # into materialized state and close over its payload dependencies.
@@ -1348,7 +1348,56 @@ impl HirLowering:
                 seen[name] = true
                 self.register_materialized_payload_named_dependency(imported_mod, imported_mod_name, name, skipped, import_span)
 
-    me register_imported_type_methods(imported_mod: ModuleSurface, imported_mod_name: text, imported_name: text, local_owner: SymbolId, import_span: Span):
+    me materialize_imported_callable_type_dependencies(imported_mod: ModuleSurface, imported_mod_name: text, callable: ModuleSurfaceCallable, import_span: Span, materialize_enum: bool):
+        """Pre-register every named type a cross-module method SIGNATURE
+        depends on, before that signature is eagerly lowered.
+
+        Mirrors the composite-FIELD materialization a few lines above
+        (`register_imported_symbol`'s `for field in composite.fields` loop):
+        a public field naming a sibling type from the same defining module is
+        recursively registered so field-type lowering never races module
+        load order. `register_imported_type_methods` (below) is the METHOD
+        twin of that same registration pass, but had no equivalent step --
+        a param/return type declared in the SAME defining module as the
+        method's owner (e.g. `fn seek(pos: SeekFrom)` on `FileHandle`, both
+        in `io/file.spl`) that was never independently named in the
+        IMPORTER's own `use` line stayed unbound. `declared_imported_surface_
+        callable_type` -> `imported_surface_type_projected` then took the
+        scalar `type_name` branch, missed the qualified lookup, and called
+        `lower_named_kind` directly (bypassing `imported_surface_type`'s own
+        fallback) -- landing on the hard, non-recovered "unresolved type:
+        {name}" error and poisoning the ENTRY module (attribution is
+        allocated to whichever module is currently being lowered, not the
+        type's actual defining module). Root-caused via a minimal 1-file
+        repro: a class with one field and one never-called method whose sole
+        param type is a struct declared in the SAME file reproduces this
+        with no cross-module import at all -- see
+        doc/08_tracking/bug/native_build_cross_module_result_payload_struct_name_collision_2026-08-09.md
+        (5th layer)."""
+        for param in callable.params:
+            if param.type_name != "":
+                if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, param.type_name) < 0:
+                    self.register_imported_symbol(imported_mod, imported_mod_name, param.type_name, param.type_name, import_span, materialize_enum)
+            elif param.array_element_name != "":
+                if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, param.array_element_name) < 0:
+                    self.register_imported_symbol(imported_mod, imported_mod_name, param.array_element_name, param.array_element_name, import_span, materialize_enum)
+            else:
+                for dependency in parser_type_named_dependencies(param.type_):
+                    if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, dependency) < 0:
+                        self.register_imported_symbol(imported_mod, imported_mod_name, dependency, dependency, import_span, materialize_enum)
+        if callable.has_return_type:
+            if callable.return_type_name != "":
+                if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, callable.return_type_name) < 0:
+                    self.register_imported_symbol(imported_mod, imported_mod_name, callable.return_type_name, callable.return_type_name, import_span, materialize_enum)
+            elif callable.return_array_element_name != "":
+                if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, callable.return_array_element_name) < 0:
+                    self.register_imported_symbol(imported_mod, imported_mod_name, callable.return_array_element_name, callable.return_array_element_name, import_span, materialize_enum)
+            else:
+                for dependency in parser_type_named_dependencies(callable.return_type):
+                    if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, dependency) < 0:
+                        self.register_imported_symbol(imported_mod, imported_mod_name, dependency, dependency, import_span, materialize_enum)
+
+    me register_imported_type_methods(imported_mod: ModuleSurface, imported_mod_name: text, imported_name: text, local_owner: SymbolId, import_span: Span, materialize_enum: bool):
         var local_owner_module: text = imported_mod_name
         var local_owner_defining_module: text? = nil
         if val owner_symbol = self.symbols.get_symbol(local_owner):
@@ -1364,6 +1413,7 @@ impl HirLowering:
                 val symbol_name = "{owner_module}.{imported_name}::{method_name}"
                 if not self.symbols.lookup_or_invalid(symbol_name).is_valid():
                     val kind = if method.is_static: SymbolKind.Function else: SymbolKind.Method
+                    self.materialize_imported_callable_type_dependencies(imported_mod, imported_mod_name, method, import_span, materialize_enum)
                     val method_type = self.declared_imported_surface_callable_type(
                         method, imported_mod, Some(local_owner))
                     self.symbols.define(symbol_name, kind, method_type, import_span, Visibility.Public, false, local_owner_defining_module)
@@ -1382,6 +1432,7 @@ impl HirLowering:
                             val symbol_name = "{owner_module}.{imported_name}::{trait_method.name}"
                             if not self.symbols.lookup_or_invalid(symbol_name).is_valid():
                                 val kind = if trait_method.is_static: SymbolKind.Function else: SymbolKind.Method
+                                self.materialize_imported_callable_type_dependencies(imported_mod, imported_mod_name, trait_method, import_span, materialize_enum)
                                 val method_type = self.declared_imported_surface_callable_type(
                                     trait_method, imported_mod, Some(local_owner))
                                 self.symbols.define(symbol_name, kind, method_type, import_span, Visibility.Public, false, local_owner_defining_module)

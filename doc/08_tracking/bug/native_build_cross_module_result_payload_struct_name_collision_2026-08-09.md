@@ -1,4 +1,4 @@
-# `native-build` MIR lowering: cross-module `Result<T, E>` payload struct-name recovery collides/misses across modules — 4th layer, RESOLVED 2026-08-09 (5th layer surfaced)
+# `native-build` MIR lowering: cross-module `Result<T, E>` payload struct-name recovery collides/misses across modules — 4th layer RESOLVED, 5th layer RESOLVED 2026-08-09, 6th layer surfaced (still open)
 
 ## Summary
 
@@ -238,3 +238,116 @@ when the ENTRY drops its own SeekFrom import (the error is attributed to the
 entry module regardless). The AOT `rt_io_file_*` stub question therefore
 remains UNDETERMINED — never reaches codegen, now for a fifth, pre-existing
 reason.
+
+## 5th layer root cause and fix (2026-08-09, layer-5 session)
+
+**Root cause**: `register_imported_type_methods`
+(`20.hir/hir_lowering/_Items/module_lowering.spl`) eagerly builds a HIR
+callable type for every cross-module method it registers (via
+`declared_imported_surface_callable_type` ->
+`imported_surface_type_projected`). That resolution requires the method's
+param/return type to already have a `bind_qualified_type` binding under the
+type's OWN defining module. The sibling code path for composite FIELDS
+(`register_imported_symbol`'s `for field in composite.fields` loop, a few
+lines above) already recursively pre-registers exactly this kind of
+same-module type dependency before lowering field types — but
+`register_imported_type_methods` had no equivalent step. A method parameter
+type declared in the SAME module as its owning class/impl (e.g. `fn
+seek(pos: SeekFrom)` on `FileHandle`, both living in
+`src/lib/nogc_sync_mut/io/file.spl`) that was never independently named in
+the IMPORTER's own `use` line therefore stayed unbound: the qualified lookup
+missed, `imported_surface_type_projected` fell through its scalar
+`type_name` branch straight into `lower_named_kind` (bypassing
+`imported_surface_type`'s own graceful fallback), and hit the hard,
+non-recovered `"unresolved type: {name}"` error path — fatal, and
+attributed to whichever module happens to be the CURRENT lowering context
+(the entry module), not the type's actual defining module. This explains
+every discriminator recorded above: the entry's own SeekFrom import/match
+compiles fine because `SeekFrom` gets bound directly; the failure needs a
+method whose param/return type is otherwise-unreferenced in the closure.
+
+**Minimal fast repro** (root-caused down from the 18-minute closure to a
+sub-second, single-file, ZERO-stdlib-import case — no trait mixin, no enum,
+no method call needed):
+```
+# file_mod.spl
+struct Pos:
+    off: i64
+
+class FileHandle:
+    fd: i64
+    fn seek(pos: Pos) -> Result<i64, text>:
+        Ok(0)
+
+# main.spl
+use file_mod.FileHandle
+
+fn main() -> i64:
+    val h = FileHandle(fd: 1)
+    print("ok")
+    return 0
+```
+Run via the same `native_build_worker.spl --entry-closure` recipe as above
+(`--source <dir-containing-both-files>`). Pre-fix: `unresolved type: Pos`.
+Post-fix: `RC=0`. A single-module variant (both declarations in `main.spl`,
+method never called) does NOT reproduce — confirms this is cross-module
+eager registration, not a general "unused type" gap.
+
+**Fix**: new helper `materialize_imported_callable_type_dependencies`
+mirrors the composite-field pattern — for every param and the return type of
+a cross-module method being registered, recursively `register_imported_symbol`
+any named-type dependency not yet qualified-bound in the type's OWN defining
+module, BEFORE calling `declared_imported_surface_callable_type`. Wired into
+both call sites in `register_imported_type_methods` (the `impl_.methods` loop
+and the `trait_.methods` loop), threading `materialize_enum` through (that
+function previously had no such parameter; both of its own call sites already
+had `materialize_enum` in scope). Verified with a marker-liveness eprint
+probe (`[SEEKFROM-PROBE] register_imported_type_methods ...`) tracing the
+exact call chain before writing the fix, then removed before landing.
+
+**Verification**:
+- Minimal fast repro above: `RC=0` (was `unresolved type: Pos`).
+- The doc's own SeekFrom-with-trait-mixin repro (real enum, `case
+  SeekFrom.Start/Current/End` match, `class FileHandle with Seek`): no more
+  `unresolved type: SeekFrom`; progresses to a separate, pre-existing,
+  unrelated `--emit-object` complaint (`MIR module has no functions`) for an
+  enum-only module with zero functions — an artifact of that specific
+  minimal fixture, not a regression.
+- Layer-1 single-module collision repro and layer-4 cross-module repro
+  (reproduced verbatim from this doc's own "Reproduction" section): both
+  still `RC=0` — no regression.
+- Full 18-minute closure re-run of `test/fixtures/rt_io_file_roundtrip/main.spl`:
+  no longer fails in phase 3. `unresolved type: SeekFrom` is GONE. See
+  "6th layer" below for where it lands instead.
+
+## 6th layer surfaced (still open, AOT stub question still UNDETERMINED)
+
+With the 5th layer fixed, the full closure build now reaches **phase 4 (MIR
+lowering)** — past HIR lowering entirely for the first time in this bug
+chain — and fails there with the SAME error signature layer 4 described as
+its own root cause: `unresolved method call` for `write_text`, `close`,
+`read_text`, `size`, `read_all`, `write_all`, `merge` (18 errors total,
+`FileHandle`/`File` instance methods reached through a `case Ok(x): x`
+match-bound local).
+
+This is very likely NOT a new, distinct mechanism — it is layer 4's own bug
+class (`enum_payload_struct_names` global-map collision / cross-module
+`struct_method_syms` gap for inline class methods) reappearing at REAL
+closure scale. The layer-4 "Resolution" section above was verified only
+against small hand-written fast repros (2-3 `Result<T, E>` instantiations);
+it was never run through the actual `rt_io_file_roundtrip` full closure
+because the 5th-layer SeekFrom block was hit first, before this session.
+The real stdlib closure has dozens of `Result<T, E>` instantiations across
+hundreds of modules — evidently enough to defeat the layer-4 fix's coverage
+even though this session's isolated regression repros (the exact 2-file
+cross-module case from layer 4's own "Reproduction" section) still pass
+clean. Filing this as a 6th layer rather than reopening layer 4's "Resolution"
+note verbatim, since the exact failure surface at full-closure scale has not
+yet been isolated to a minimal fast repro.
+
+**AOT `rt_io_file_*` stub verdict: still UNDETERMINED.** The closure now
+gets one phase further (4 instead of 3) but still never reaches codegen.
+Next step for a follow-up session: bisect the full closure's actual
+`Result<T, E>` instantiation graph (not another hand-written repro) to find
+what specifically defeats the layer-4 fix at scale — likely a global-map
+key collision or an ordering case the small repros do not exercise.

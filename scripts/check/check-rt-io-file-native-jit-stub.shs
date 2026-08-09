@@ -210,6 +210,33 @@
 #   upstream churn between sessions. AOT rt_io_file_* stub verdict: STILL
 #   UNDETERMINED -- the fixture never reaches codegen, now for a fifth,
 #   pre-existing reason.
+#
+# 2026-08-09e -- the 5th-layer `unresolved type: SeekFrom` blocker is
+#   RESOLVED. Root cause: `register_imported_type_methods`
+#   (20.hir/hir_lowering/_Items/module_lowering.spl) eagerly lowers a
+#   cross-module method's signature but, unlike the sibling composite-FIELD
+#   registration path a few lines above it, never pre-materialized the
+#   method's param/return named-type dependencies declared in the SAME
+#   defining module -- so a param type like `SeekFrom` on `FileHandle.seek`
+#   that the IMPORTER never separately named in its own `use` line hit the
+#   hard "unresolved type" error. Fixed by a new
+#   `materialize_imported_callable_type_dependencies` helper mirroring the
+#   field-dependency pattern, wired into both call sites (impl methods and
+#   trait methods). Minimal fast repro (root-caused down from the 18-minute
+#   closure to sub-second, zero-stdlib-import, single struct + single
+#   never-called method across 2 files): pre-fix `unresolved type: Pos`,
+#   post-fix EXIT=0. Regression-checked against the layer-1 and layer-4 fast
+#   repros above (both still EXIT=0). Full 18-minute closure re-run: zero
+#   `unresolved type` errors -- the closure now reaches phase 4 (MIR
+#   lowering) for the first time in this bug chain, past HIR lowering
+#   entirely. It then fails with the SAME error signature as the "4th layer"
+#   above (`unresolved method call` for write_text/close/read_text/size/
+#   read_all/write_all/merge) -- i.e. the layer-4 fix, verified only against
+#   small hand-written repros, does not fully cover the real closure's much
+#   larger `Result<T, E>` instantiation graph. Filed as the "6th layer" in
+#   doc/08_tracking/bug/native_build_cross_module_result_payload_struct_name_collision_2026-08-09.md.
+#   AOT rt_io_file_* stub verdict: STILL UNDETERMINED -- one phase further
+#   (4 instead of 3), still never reaches codegen.
 set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
