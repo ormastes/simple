@@ -14,6 +14,8 @@
   (static devirtualization cannot recover a concrete owner name), but a
   **distinct and strictly simpler trigger** — see "Relationship to the trait
   bug", which explains why that doc's language-policy blocker does NOT apply.
+  That policy call is laid out in
+  `doc/02_requirements/language/type_system/native_trait_object_dispatch_options.md`.
 
 ## Symptom
 

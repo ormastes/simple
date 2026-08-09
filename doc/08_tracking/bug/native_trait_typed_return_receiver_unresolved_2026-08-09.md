@@ -6,6 +6,7 @@
 - **Status:** OPEN. Root cause located; fix is a semantic policy decision
   (see "Why this was not fixed in place").
 - **Repro fixture:** `test/fixtures/native_trait_receiver_resolution/main.spl`
+- **Blocking decision doc:** `doc/02_requirements/language/type_system/native_trait_object_dispatch_options.md`
 
 ## Symptom
 
