@@ -4,7 +4,50 @@
 # These are ports, not emulators. No implementation is supplied until the
 # SimpleOS QRB2210 display, input, audio and Adreno Vulkan owners exist.
 
-use common.ui.host_input_event.{HostInputEvent}
+use common.ui.host_input_event.{
+    HostInputEvent,
+    HOST_BTN_NONE,
+    HOST_BTN_LEFT,
+    HOST_BTN_RIGHT,
+    HOST_BTN_MIDDLE,
+    HOST_MOD_CTRL,
+    HOST_MOD_ALT
+}
+use common.ui.key_code.{evdev_to_canon, CANON_UNKNOWN}
+
+val QRB2210_DEVICE_DISPLAY: text = "display"
+val QRB2210_DEVICE_INPUT: text = "input"
+val QRB2210_DEVICE_AUDIO: text = "audio"
+
+val QRB2210_INPUT_MOVE: text = "move"
+val QRB2210_INPUT_DOWN: text = "down"
+val QRB2210_INPUT_DRAG: text = "drag"
+val QRB2210_INPUT_UP: text = "up"
+val QRB2210_INPUT_WHEEL: text = "wheel"
+val QRB2210_INPUT_KEY: text = "key"
+
+class Qrb2210BoardDeviceHandle:
+    board_id: text
+    boot_id: text
+    owner: text
+    device_node: text
+    native_handle: u64
+    driver_generation: i64
+
+fn _qrb2210_owner_device_node_matches(owner: text, device_node: text) -> bool:
+    if owner == QRB2210_DEVICE_DISPLAY:
+        return device_node.starts_with("/dev/dri/")
+    if owner == QRB2210_DEVICE_INPUT:
+        return device_node.starts_with("/dev/input/event")
+    if owner == QRB2210_DEVICE_AUDIO:
+        return device_node.starts_with("/dev/snd/pcm")
+    false
+
+fn qrb2210_board_device_handle_ready(handle: Qrb2210BoardDeviceHandle, owner: text) -> bool:
+    """Accept only a live handle minted for this physical QRB2210 boot."""
+    (handle.board_id == "qrb2210-uno-q" and handle.boot_id != "" and
+        handle.owner == owner and _qrb2210_owner_device_node_matches(owner, handle.device_node) and
+        handle.native_handle > 0u64 and handle.driver_generation > 0)
 
 class Qrb2210DisplayMode:
     width: i32
@@ -13,27 +56,168 @@ class Qrb2210DisplayMode:
     format: text
 
 class Qrb2210DisplayPresentReceipt:
+    device: Qrb2210BoardDeviceHandle
     frame_id: i64
+    present_id: i64
     readback_checksum: i64
     presented: bool
 
+class Qrb2210DisplayCaptureReceipt:
+    device: Qrb2210BoardDeviceHandle
+    frame_id: i64
+    present_id: i64
+    capture_id: i64
+    width: i32
+    height: i32
+    byte_count: i64
+    readback_checksum: i64
+    completed: bool
+
+fn qrb2210_display_capture_correlated(
+    present: Qrb2210DisplayPresentReceipt,
+    capture: Qrb2210DisplayCaptureReceipt
+) -> bool:
+    """Prove that presentation and capture came from one board/boot/frame."""
+    (qrb2210_board_device_handle_ready(present.device, QRB2210_DEVICE_DISPLAY) and
+        qrb2210_board_device_handle_ready(capture.device, QRB2210_DEVICE_DISPLAY) and
+        present.device.boot_id == capture.device.boot_id and
+        present.device.native_handle == capture.device.native_handle and
+        present.device.driver_generation == capture.device.driver_generation and
+        present.presented and capture.completed and present.frame_id > 0 and
+        present.frame_id == capture.frame_id and present.present_id > 0 and
+        present.present_id == capture.present_id and capture.capture_id > 0 and
+        capture.width > 0 and capture.height > 0 and
+        capture.byte_count == capture.width.to_i64() * capture.height.to_i64() * 4 and
+        present.readback_checksum > 0 and
+        present.readback_checksum == capture.readback_checksum)
+
 trait Qrb2210DisplayPort:
     fn readiness_status() -> i64
+    fn device_handle() -> Qrb2210BoardDeviceHandle
     fn mode() -> Qrb2210DisplayMode
     me present_device_readback(readback: Qrb2210DeviceReadbackReceipt) -> Qrb2210DisplayPresentReceipt
+    me capture_present(present_id: i64, frame_id: i64) -> Qrb2210DisplayCaptureReceipt
+
+class Qrb2210InputDeviceReceipt:
+    device: Qrb2210BoardDeviceHandle
+    sequence: i64
+    kind: text
+    x: i32
+    y: i32
+    button: i64
+    wheel: i32
+    evdev_code: i64
+    ch: text
+    down: bool
+    left_ctrl: bool
+    right_ctrl: bool
+    left_alt: bool
+    right_alt: bool
+
+class Qrb2210NormalizedInputReceipt:
+    sequence: i64
+    event: HostInputEvent
+    left_ctrl: bool
+    right_ctrl: bool
+    left_alt: bool
+    right_alt: bool
+
+fn qrb2210_input_receipt_follows(
+    previous: Qrb2210InputDeviceReceipt,
+    current: Qrb2210InputDeviceReceipt
+) -> bool:
+    """Reject replay, reordering, and cross-device input receipt chains."""
+    (qrb2210_board_device_handle_ready(previous.device, QRB2210_DEVICE_INPUT) and
+        qrb2210_board_device_handle_ready(current.device, QRB2210_DEVICE_INPUT) and
+        previous.device.boot_id == current.device.boot_id and
+        previous.device.native_handle == current.device.native_handle and
+        previous.device.driver_generation == current.device.driver_generation and
+        previous.sequence > 0 and current.sequence == previous.sequence + 1)
+
+fn qrb2210_normalize_input_receipt(
+    receipt: Qrb2210InputDeviceReceipt
+) -> Result<Qrb2210NormalizedInputReceipt, text>:
+    """Normalize one QRB2210 evdev receipt through the canonical host ingress."""
+    if not qrb2210_board_device_handle_ready(receipt.device, QRB2210_DEVICE_INPUT):
+        return Err("qrb2210-input-device-handle-unavailable")
+    if receipt.sequence <= 0:
+        return Err("qrb2210-input-sequence-invalid")
+    var event = HostInputEvent.Pointer(x: 0, y: 0, button: HOST_BTN_NONE, pressed: true, wheel: 0)
+    if receipt.kind == QRB2210_INPUT_MOVE:
+        if receipt.button != HOST_BTN_NONE or receipt.wheel != 0:
+            return Err("qrb2210-pointer-move-payload-invalid")
+        event = HostInputEvent.Pointer(x: receipt.x, y: receipt.y, button: HOST_BTN_NONE, pressed: true, wheel: 0)
+    else if receipt.kind == QRB2210_INPUT_DOWN or receipt.kind == QRB2210_INPUT_DRAG:
+        if (receipt.button != HOST_BTN_LEFT and receipt.button != HOST_BTN_RIGHT and
+            receipt.button != HOST_BTN_MIDDLE) or receipt.wheel != 0:
+            return Err("qrb2210-pointer-press-payload-invalid")
+        event = HostInputEvent.Pointer(x: receipt.x, y: receipt.y, button: receipt.button, pressed: true, wheel: 0)
+    else if receipt.kind == QRB2210_INPUT_UP:
+        if (receipt.button != HOST_BTN_LEFT and receipt.button != HOST_BTN_RIGHT and
+            receipt.button != HOST_BTN_MIDDLE) or receipt.wheel != 0:
+            return Err("qrb2210-pointer-up-payload-invalid")
+        event = HostInputEvent.Pointer(x: receipt.x, y: receipt.y, button: receipt.button, pressed: false, wheel: 0)
+    else if receipt.kind == QRB2210_INPUT_WHEEL:
+        if receipt.button != HOST_BTN_NONE or receipt.wheel == 0:
+            return Err("qrb2210-pointer-wheel-payload-invalid")
+        event = HostInputEvent.Pointer(x: receipt.x, y: receipt.y, button: HOST_BTN_NONE, pressed: false, wheel: receipt.wheel)
+    else if receipt.kind == QRB2210_INPUT_KEY:
+        val code = evdev_to_canon(receipt.evdev_code)
+        if code == CANON_UNKNOWN:
+            return Err("qrb2210-evdev-key-unmapped")
+        var mods: i64 = 0
+        if receipt.left_ctrl or receipt.right_ctrl:
+            mods = mods | HOST_MOD_CTRL
+        if receipt.left_alt or receipt.right_alt:
+            mods = mods | HOST_MOD_ALT
+        event = HostInputEvent.Key(code: code, ch: receipt.ch, down: receipt.down, mods: mods)
+    else:
+        return Err("qrb2210-input-kind-unsupported")
+    Ok(Qrb2210NormalizedInputReceipt(
+        sequence: receipt.sequence, event: event,
+        left_ctrl: receipt.left_ctrl, right_ctrl: receipt.right_ctrl,
+        left_alt: receipt.left_alt, right_alt: receipt.right_alt))
 
 trait Qrb2210InputPort:
     fn readiness_status() -> i64
-    me poll_event() -> HostInputEvent?
+    fn device_handle() -> Qrb2210BoardDeviceHandle
+    me poll_device_receipt() -> Qrb2210InputDeviceReceipt?
 
 class Qrb2210AudioSubmitReceipt:
+    device: Qrb2210BoardDeviceHandle
     submission_id: i64
+    buffer_handle: u64
     sample_count: i64
+    accepted: bool
+
+class Qrb2210AudioCompletionReceipt:
+    device: Qrb2210BoardDeviceHandle
+    submission_id: i64
+    buffer_handle: u64
+    completed_sample_count: i64
+    completion_id: i64
     completed: bool
+
+fn qrb2210_audio_completion_correlated(
+    submit: Qrb2210AudioSubmitReceipt,
+    completion: Qrb2210AudioCompletionReceipt
+) -> bool:
+    """Require a hardware completion for the exact submitted PCM buffer."""
+    (qrb2210_board_device_handle_ready(submit.device, QRB2210_DEVICE_AUDIO) and
+        qrb2210_board_device_handle_ready(completion.device, QRB2210_DEVICE_AUDIO) and
+        submit.device.boot_id == completion.device.boot_id and
+        submit.device.native_handle == completion.device.native_handle and
+        submit.device.driver_generation == completion.device.driver_generation and
+        submit.accepted and completion.completed and submit.submission_id > 0 and
+        submit.submission_id == completion.submission_id and submit.buffer_handle > 0u64 and
+        submit.buffer_handle == completion.buffer_handle and submit.sample_count > 0 and
+        submit.sample_count == completion.completed_sample_count and completion.completion_id > 0)
 
 trait Qrb2210AudioPort:
     fn readiness_status() -> i64
+    fn device_handle() -> Qrb2210BoardDeviceHandle
     me submit_pcm_s16le(samples: [i64], channels: i32, sample_rate_hz: i32) -> Qrb2210AudioSubmitReceipt
+    me poll_completion(submission_id: i64) -> Qrb2210AudioCompletionReceipt?
 
 class Qrb2210GpuSubmitReceipt:
     submission_id: i64
@@ -84,9 +268,17 @@ class Qrb2210Native2dPlatformPorts:
     gpu_fence: Qrb2210GpuFencePort
     device_readback: Qrb2210DeviceReadbackPort
 
-export Qrb2210DisplayMode, Qrb2210DisplayPresentReceipt
+export QRB2210_DEVICE_DISPLAY, QRB2210_DEVICE_INPUT, QRB2210_DEVICE_AUDIO
+export QRB2210_INPUT_MOVE, QRB2210_INPUT_DOWN, QRB2210_INPUT_DRAG
+export QRB2210_INPUT_UP, QRB2210_INPUT_WHEEL, QRB2210_INPUT_KEY
+export Qrb2210BoardDeviceHandle, qrb2210_board_device_handle_ready
+export Qrb2210DisplayMode, Qrb2210DisplayPresentReceipt, Qrb2210DisplayCaptureReceipt
+export qrb2210_display_capture_correlated
 export Qrb2210DisplayPort, Qrb2210InputPort
-export Qrb2210AudioSubmitReceipt, Qrb2210AudioPort
+export Qrb2210InputDeviceReceipt, Qrb2210NormalizedInputReceipt
+export qrb2210_input_receipt_follows, qrb2210_normalize_input_receipt
+export Qrb2210AudioSubmitReceipt, Qrb2210AudioCompletionReceipt, Qrb2210AudioPort
+export qrb2210_audio_completion_correlated
 export Qrb2210Engine2dSubmitBatch, Qrb2210GpuSubmitReceipt, Qrb2210GpuSubmitPort
 export Qrb2210GpuFenceReceipt, Qrb2210GpuFencePort
 export Qrb2210DeviceReadbackReceipt, Qrb2210DeviceReadbackPort

@@ -1,0 +1,107 @@
+use std.spec.{describe, it, expect}
+use common.ui.host_input_event.{HostInputEvent, HOST_BTN_NONE, HOST_BTN_LEFT, HOST_MOD_CTRL, HOST_MOD_ALT}
+use common.ui.key_code.{CANON_A, CANON_CTRL, CANON_ALT}
+use os.port.qrb2210_native_2d_ports.{
+    QRB2210_DEVICE_DISPLAY, QRB2210_DEVICE_INPUT, QRB2210_DEVICE_AUDIO,
+    QRB2210_INPUT_MOVE, QRB2210_INPUT_DOWN, QRB2210_INPUT_DRAG,
+    QRB2210_INPUT_UP, QRB2210_INPUT_WHEEL, QRB2210_INPUT_KEY,
+    Qrb2210BoardDeviceHandle, Qrb2210DisplayPresentReceipt, Qrb2210DisplayCaptureReceipt,
+    Qrb2210InputDeviceReceipt, Qrb2210AudioSubmitReceipt, Qrb2210AudioCompletionReceipt,
+    qrb2210_board_device_handle_ready, qrb2210_input_receipt_follows,
+    qrb2210_normalize_input_receipt,
+    qrb2210_display_capture_correlated, qrb2210_audio_completion_correlated
+}
+
+fn device(owner: text, node: text, native_handle: u64) -> Qrb2210BoardDeviceHandle:
+    Qrb2210BoardDeviceHandle(
+        board_id: "qrb2210-uno-q", boot_id: "boot-17", owner: owner,
+        device_node: node, native_handle: native_handle, driver_generation: 3)
+
+fn input(kind: text, button: i64, wheel: i32, evdev_code: i64,
+         down: bool, lc: bool, rc: bool, la: bool, ra: bool) -> Qrb2210InputDeviceReceipt:
+    Qrb2210InputDeviceReceipt(
+        device: device(QRB2210_DEVICE_INPUT, "/dev/input/event2", 41u64), sequence: 9,
+        kind: kind, x: 12, y: 23, button: button, wheel: wheel,
+        evdev_code: evdev_code, ch: if evdev_code == 30: "a" else: "", down: down,
+        left_ctrl: lc, right_ctrl: rc, left_alt: la, right_alt: ra)
+
+fn pointer_shape(event: HostInputEvent) -> text:
+    match event:
+        HostInputEvent.Pointer(x, y, button, pressed, wheel):
+            "{x}:{y}:{button}:{pressed}:{wheel}"
+        _:
+            "not-pointer"
+
+fn key_shape(event: HostInputEvent) -> text:
+    match event:
+        HostInputEvent.Key(code, ch, down, mods):
+            "{code}:{ch}:{down}:{mods}"
+        _:
+            "not-key"
+
+describe "QRB2210 board-owned primitive receipts":
+    it "rejects identity-free and cross-owner handles":
+        expect(qrb2210_board_device_handle_ready(
+            device(QRB2210_DEVICE_INPUT, "/dev/input/event2", 41u64), QRB2210_DEVICE_INPUT)).to_be(true)
+        expect(qrb2210_board_device_handle_ready(
+            device(QRB2210_DEVICE_INPUT, "/dev/input/event2", 0u64), QRB2210_DEVICE_INPUT)).to_be(false)
+        expect(qrb2210_board_device_handle_ready(
+            device(QRB2210_DEVICE_AUDIO, "/dev/snd/pcmC0D0p", 42u64), QRB2210_DEVICE_INPUT)).to_be(false)
+        expect(qrb2210_board_device_handle_ready(
+            device(QRB2210_DEVICE_INPUT, "/dev/dri/card0", 42u64), QRB2210_DEVICE_INPUT)).to_be(false)
+
+    it "requires a contiguous receipt sequence from the same physical input handle":
+        val previous = input(QRB2210_INPUT_MOVE, 0, 0, 0, false, false, false, false, false)
+        var current = previous
+        current.sequence = 10
+        expect(qrb2210_input_receipt_follows(previous, current)).to_be(true)
+        current.sequence = 9
+        expect(qrb2210_input_receipt_follows(previous, current)).to_be(false)
+
+    it "normalizes move down drag up and wheel without a private event type":
+        expect(pointer_shape(qrb2210_normalize_input_receipt(input(QRB2210_INPUT_MOVE, 0, 0, 0, false, false, false, false, false)).unwrap().event)).to_equal("12:23:0:true:0")
+        expect(pointer_shape(qrb2210_normalize_input_receipt(input(QRB2210_INPUT_DOWN, HOST_BTN_LEFT, 0, 0, false, false, false, false, false)).unwrap().event)).to_equal("12:23:1:true:0")
+        expect(pointer_shape(qrb2210_normalize_input_receipt(input(QRB2210_INPUT_DRAG, HOST_BTN_LEFT, 0, 0, false, false, false, false, false)).unwrap().event)).to_equal("12:23:1:true:0")
+        expect(pointer_shape(qrb2210_normalize_input_receipt(input(QRB2210_INPUT_UP, HOST_BTN_LEFT, 0, 0, false, false, false, false, false)).unwrap().event)).to_equal("12:23:1:false:0")
+        expect(pointer_shape(qrb2210_normalize_input_receipt(input(QRB2210_INPUT_WHEEL, 0, -2, 0, false, false, false, false, false)).unwrap().event)).to_equal("12:23:0:false:-2")
+
+    it "maps evdev keys and preserves left/right Ctrl and Alt evidence":
+        val printable = qrb2210_normalize_input_receipt(input(
+            QRB2210_INPUT_KEY, 0, 0, 30, true, true, false, false, true)).unwrap()
+        expect(key_shape(printable.event)).to_equal("{CANON_A}:a:true:{HOST_MOD_CTRL | HOST_MOD_ALT}")
+        expect(printable.left_ctrl).to_be(true)
+        expect(printable.right_alt).to_be(true)
+        expect(key_shape(qrb2210_normalize_input_receipt(input(
+            QRB2210_INPUT_KEY, 0, 0, 97, false, false, true, false, false)).unwrap().event)).to_equal("{CANON_CTRL}::false:{HOST_MOD_CTRL}")
+        expect(key_shape(qrb2210_normalize_input_receipt(input(
+            QRB2210_INPUT_KEY, 0, 0, 100, true, false, false, true, false)).unwrap().event)).to_equal("{CANON_ALT}::true:{HOST_MOD_ALT}")
+
+    it "fails closed for malformed or unmapped input receipts":
+        expect(qrb2210_normalize_input_receipt(input(QRB2210_INPUT_WHEEL, 0, 0, 0, false, false, false, false, false)).is_err()).to_be(true)
+        expect(qrb2210_normalize_input_receipt(input(QRB2210_INPUT_KEY, 0, 0, 999, false, false, false, false, false)).is_err()).to_be(true)
+        expect(qrb2210_normalize_input_receipt(input("touch-guess", 0, 0, 0, false, false, false, false, false)).is_err()).to_be(true)
+
+    it "correlates display present and capture on physical identity and frame":
+        val display = device(QRB2210_DEVICE_DISPLAY, "/dev/dri/card0", 43u64)
+        val present = Qrb2210DisplayPresentReceipt(
+            device: display, frame_id: 71, present_id: 19, readback_checksum: 991, presented: true)
+        val capture = Qrb2210DisplayCaptureReceipt(
+            device: display, frame_id: 71, present_id: 19, capture_id: 20,
+            width: 2, height: 2, byte_count: 16, readback_checksum: 991, completed: true)
+        expect(qrb2210_display_capture_correlated(present, capture)).to_be(true)
+        var wrong_frame = capture
+        wrong_frame.frame_id = 72
+        expect(qrb2210_display_capture_correlated(present, wrong_frame)).to_be(false)
+
+    it "correlates audio completion with its physical PCM buffer":
+        val audio = device(QRB2210_DEVICE_AUDIO, "/dev/snd/pcmC0D0p", 44u64)
+        val submit = Qrb2210AudioSubmitReceipt(
+            device: audio, submission_id: 81, buffer_handle: 82u64,
+            sample_count: 960, accepted: true)
+        val completion = Qrb2210AudioCompletionReceipt(
+            device: audio, submission_id: 81, buffer_handle: 82u64,
+            completed_sample_count: 960, completion_id: 83, completed: true)
+        expect(qrb2210_audio_completion_correlated(submit, completion)).to_be(true)
+        var short = completion
+        short.completed_sample_count = 959
+        expect(qrb2210_audio_completion_correlated(submit, short)).to_be(false)

@@ -48,6 +48,25 @@ requires Adreno vendor `0x5143`. It checks canonical status before touching a
 provider, so a test object or offline transcript cannot bypass unavailable
 hardware.
 
+The primitive port now rejects boolean-only success claims. Display, input,
+and audio receipts carry a `Qrb2210BoardDeviceHandle` containing the physical
+board ID, current SimpleOS boot ID, `/dev` node, nonzero native handle, owner,
+and driver generation. Input receipts normalize evdev codes through the shared
+`common.ui.key_code.evdev_to_canon` owner and emit only the canonical
+`HostInputEvent`. Move/down/drag/up/wheel are validated as distinct receipt
+kinds; left/right Ctrl and Alt remain separate receipt evidence while their WM
+modifier bits use the shared canonical flags. Audio PASS requires a completion
+with the same boot, device, generation, submission and PCM-buffer handle and an
+exact completed sample count. Display capture requires the same boot, device,
+generation, frame and present IDs, exact RGBA byte count, and matching nonzero
+readback checksum. These pure validators do not manufacture handles and do not
+make the canonical capability status ready.
+
+The outstanding physical driver binding is tracked in
+`doc/08_tracking/todo/qrb2210_simpleos_physical_2d_device_bindings_2026-08-09.md`.
+Until those SimpleOS device nodes mint the typed handles and hardware receipts,
+all six canonical capabilities remain unavailable.
+
 The QRB2210 boot target is
 `examples/09_embedded/simple_os/arch/qrb2210/gui_entry_desktop.spl`. At present
 it intentionally terminates with `UNO_Q_QRB2210_DESKTOP_BLOCKED` after querying
