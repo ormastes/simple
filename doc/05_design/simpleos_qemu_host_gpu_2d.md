@@ -511,3 +511,21 @@ is constant; profile lookup scans five immutable entries only during test or
 session setup. Existing receipt validators continue to check exact pixels,
 device handles, event ordering, audio hashes, and latency/RSS counters before
 their observations may populate the typed evidence.
+
+## ARM64 unified live adapter
+
+The unified entry calls `simpleos_virtio_snd_probe` before
+`gui_entry_desktop_start`; a failed audio probe parks the guest and cannot
+reach desktop readiness. The launcher consumes the daemon built by the
+canonical host-GPU checker and starts one Vulkan-selected host daemon,
+creates one 8 MiB shared transport, and launches one ARM64 QEMU with RAMFB,
+ivshmem, keyboard, mouse, and sound devices. It injects input only after the
+desktop readiness receipt and admits success only after audio completion,
+keyboard and pointer polls, strict Vulkan DrawIR device evidence, correlated
+identity fields, and absence of fallback.
+
+The final Simple validator consumes extracted observations and calls both
+`validate_arm64_simpleos_qemu_primitives` and
+`validate_ui_environment_evidence`. Shell parsing cannot independently grant
+PASS. `--self-test` is static and never launches QEMU; the live command is
+reserved for an admitted pure-Simple compiler/runtime.

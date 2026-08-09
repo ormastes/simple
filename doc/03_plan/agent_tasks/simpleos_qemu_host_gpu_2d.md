@@ -165,3 +165,13 @@ This canonical QEMU plan continues to own the guest/host protocol, fixture,
 receipt, wrapper, and host/ISA rows. The extension plan owns only shared
 capability/artifact additions and native-board adapters. It may not fork the
 Simple 2D, Draw IR, Metal, Vulkan, font, event, or CPU oracle contracts.
+
+## Unified ARM64 primitive lane
+
+- Sidecar lanes: N/A; this focused adapter reuses already-reviewed canonical
+  GPU, input, audio, and environment owners.
+- Merge owner: `/root`.
+- Final reviewer: `/root`, after the pure-Simple runtime admission gate.
+- Live QEMU execution is intentionally deferred until that runtime is admitted;
+  static launcher, guest-entry ordering, receipt provenance, and typed admission
+  are the only checks in this package.

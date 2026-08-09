@@ -1,0 +1,195 @@
+#!/bin/sh
+set -eu
+
+# One-process ARM64 SimpleOS primitive lane. The same QEMU invocation owns the
+# Vulkan/ivshmem DrawIR receipt, virtio keyboard+mouse delivery, and virtio-snd
+# completion. Evidence from separate guest launches is never merged.
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$root"
+
+build=yes
+case "${1:-}" in
+    "") ;;
+    --no-build) build=no ;;
+    --self-test)
+        grep -Fq 'gui_entry_desktop_linux_qemu_unified.spl' "$0"
+        grep -Fq -- '-device ivshmem-plain,memdev=hostgpu' "$0"
+        grep -Fq -- '-device virtio-keyboard-device' "$0"
+        grep -Fq -- '-device virtio-mouse-device' "$0"
+        grep -Fq -- '-device virtio-sound-device,audiodev=audio0' "$0"
+        grep -Fq 'host-gpu-device-evidence' "$0"
+        grep -Fq 'validate-simpleos-arm64-unified-live-receipt.spl' "$0"
+        echo simpleos_arm64_unified_live_self_test=pass
+        exit 0
+        ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+esac
+
+out_dir=${SIMPLEOS_ARM64_UNIFIED_EVIDENCE_DIR:-build/verify/simpleos-arm64-unified-live}
+simple=${SIMPLE_BIN:-bin/release/x86_64-unknown-linux-gnu/simple}
+# The host-GPU checker remains the build/runtime owner for this daemon. This
+# adapter consumes that canonical artifact and never forks its runtime bundle.
+daemon=${SIMPLEOS_GPU_HOST_BIN:-build/simpleos_host_gpu_2d/simpleos_gpu_host}
+kernel=$out_dir/simpleos_arm64_unified_primitive.elf
+serial=$out_dir/serial.log
+daemon_log=$out_dir/daemon.log
+qemu_log=$out_dir/qemu.log
+qmp=$out_dir/qmp.sock
+shm=$out_dir/hostgpu.shm
+receipt=$out_dir/evidence.env
+validator=scripts/check/validate-simpleos-arm64-unified-live-receipt.spl
+entry=examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop_linux_qemu_unified.spl
+mkdir -p "$out_dir" build/os/generated/generated
+
+qemu_pid=
+daemon_pid=
+cleanup() {
+    test -z "$qemu_pid" || kill "$qemu_pid" 2>/dev/null || true
+    test -z "$daemon_pid" || kill "$daemon_pid" 2>/dev/null || true
+    test -z "$qemu_pid" || wait "$qemu_pid" 2>/dev/null || true
+    test -z "$daemon_pid" || wait "$daemon_pid" 2>/dev/null || true
+    rm -f "$qmp"
+}
+trap cleanup EXIT HUP INT TERM
+
+fail() {
+    reason=$1
+    {
+        echo schema=simpleos-arm64-unified-live-v1
+        echo status=fail
+        echo reason="$reason"
+        echo serial_log="$serial"
+        echo daemon_log="$daemon_log"
+        echo qemu_log="$qemu_log"
+    } >"$receipt"
+    cat "$receipt"
+    exit 1
+}
+
+command -v qemu-system-aarch64 >/dev/null 2>&1 || fail qemu-system-aarch64-missing
+command -v sha256sum >/dev/null 2>&1 || fail sha256sum-missing
+command -v truncate >/dev/null 2>&1 || fail truncate-missing
+command -v python3 >/dev/null 2>&1 || fail python3-missing
+test -x "$simple" || fail pure-simple-compiler-missing
+version=$($simple --version 2>&1 || true)
+case "$version" in
+    *'Rust-built'*|*'bootstrap seed only'*) fail compiler-is-bootstrap-seed ;;
+    *'simple-bootstrap'*)
+        compiler_manifest=${SIMPLE_COMPILER_PROVENANCE:-${simple}.provenance.env}
+        test -s "$compiler_manifest" || fail compiler-provenance-missing
+        compiler_sha=$(sha256sum "$simple" | awk '{print $1}')
+        grep -Fqx status=pass "$compiler_manifest" || fail compiler-provenance-status
+        grep -Fqx artifact_kind=pure-simple-bootstrap-compiler "$compiler_manifest" || fail compiler-provenance-kind
+        grep -Fqx output_sha256="$compiler_sha" "$compiler_manifest" || fail compiler-provenance-sha
+        ;;
+esac
+
+if test "$build" = yes; then
+    cp src/generated/simpleos_log_config.spl build/os/generated/generated/simpleos_log_config.spl
+    SIMPLE_BOOT_MINIMAL=1 SIMPLE_OS_LOG_MODE=on SIMPLE_NO_STUB_FALLBACK=1 \
+        "$simple" native-build \
+        --source build/os/generated --source src/os --source src/lib \
+        --source examples/09_embedded/simple_os --backend cranelift \
+        --opt-level=aggressive --log on --entry-closure --entry "$entry" \
+        --target aarch64-unknown-none --output "$kernel" \
+        --linker-script examples/09_embedded/simple_os/arch/arm64/linker.ld \
+        >"$out_dir/kernel-build.log" 2>&1 || fail guest-build-failed
+fi
+test -s "$kernel" || fail unified-kernel-missing
+test -x "$daemon" || fail canonical-gpu-host-daemon-missing
+
+rm -f "$serial" "$daemon_log" "$qemu_log" "$qmp" "$receipt" "$shm"
+truncate -s 8M "$shm"
+"$daemon" --shm="$shm" --processing-backend=vulkan --processing-verify-cpu \
+    >"$daemon_log" 2>&1 &
+daemon_pid=$!
+attempt=0
+while test "$attempt" -lt 200; do
+    grep -Fq 'HOST_GPU_DAEMON_SELECTOR processing_backend=vulkan' "$daemon_log" 2>/dev/null && break
+    kill -0 "$daemon_pid" 2>/dev/null || fail gpu-host-daemon-exited
+    sleep 0.05
+    attempt=$((attempt + 1))
+done
+grep -Fq 'HOST_GPU_DAEMON_SELECTOR processing_backend=vulkan' "$daemon_log" || fail gpu-host-daemon-not-ready
+grep -Fq 'HOST_GPU_DAEMON_FALLBACK processing_fallback=false' "$daemon_log" || fail gpu-host-fallback-enabled
+
+set -- -no-user-config -machine virt -accel tcg -cpu cortex-a72 -m 512M \
+    -serial "file:$serial" -display none -monitor none -net none -no-reboot \
+    -kernel "$kernel" -device ramfb \
+    -object "memory-backend-file,id=hostgpu,share=on,mem-path=$shm,size=8M" \
+    -device ivshmem-plain,memdev=hostgpu \
+    -global virtio-mmio.force-legacy=false \
+    -device virtio-keyboard-device -device virtio-mouse-device \
+    -audiodev driver=none,id=audio0 -device virtio-sound-device,audiodev=audio0 \
+    -qmp "unix:$qmp,server=on,wait=off"
+qemu_args=$(printf '%s\n' "$@" | sha256sum | awk '{print $1}')
+qemu-system-aarch64 "$@" >"$qemu_log" 2>&1 &
+qemu_pid=$!
+
+attempt=0
+while test "$attempt" -lt 1200; do
+    grep -Eq '^\[desktop-gui-arm64\] desktop-ready revision=[1-9][0-9]*' "$serial" 2>/dev/null && break
+    kill -0 "$qemu_pid" 2>/dev/null || fail qemu-exited-before-desktop
+    sleep 0.05
+    attempt=$((attempt + 1))
+done
+grep -Eq '^\[desktop-gui-arm64\] desktop-ready revision=[1-9][0-9]*' "$serial" || fail desktop-ready-missing
+python3 scripts/check/qmp-send-virtio-input.py "$qmp" || fail qmp-input-injection-failed
+
+attempt=0
+while test "$attempt" -lt 300; do
+    if grep -Eq '^\[wm-key-poll\].*input_seq=[1-9][0-9]*' "$serial" 2>/dev/null &&
+       grep -Eq '^\[wm-pointer-poll\].*input_seq=[1-9][0-9]*' "$serial" 2>/dev/null; then
+        break
+    fi
+    sleep 0.05
+    attempt=$((attempt + 1))
+done
+
+grep -Fq 'SIMPLEOS_VIRTIO_SND status=driver_ok arch=aarch64' "$serial" || fail audio-queue-proof-missing
+grep -Eq '^SIMPLEOS_AUDIO_PLAYBACK non_silent=1 frames=[1-9][0-9]* ' "$serial" || fail audio-playback-proof-missing
+grep -Eq '^SIMPLEOS_AUDIO_CAPTURE status=completed .* bounded=1$' "$serial" || fail audio-completion-proof-missing
+grep -Eq '^\[backend2d-event-blocker\].*keyboard=transport-ready pointer=transport-ready' "$serial" || fail input-queue-proof-missing
+grep -Eq '^\[wm-key-poll\].*input_seq=[1-9][0-9]*' "$serial" || fail keyboard-delivery-proof-missing
+grep -Eq '^\[wm-pointer-poll\].*input_seq=[1-9][0-9]*' "$serial" || fail pointer-delivery-proof-missing
+device_line=$(grep -E '^\[wm-frame\] host-gpu-device-evidence backend=vulkan ' "$serial" | tail -n 1 || true)
+test -n "$device_line" || fail vulkan-device-readback-proof-missing
+case "$device_line" in *' readback=device '*) ;; *) fail non-device-readback ;; esac
+if grep -Eq 'host-gpu-fallback|fallback=software|cpu_reference' "$serial" "$daemon_log"; then
+    fail fallback-used
+fi
+device_id=$(printf '%s\n' "$device_line" | tr ' ' '\n' | sed -n 's/^identity=//p')
+frame_id=$(printf '%s\n' "$device_line" | tr ' ' '\n' | sed -n 's/^frame=//p')
+printf '%s\n' "$device_id" | grep -Eq '^[1-9][0-9]*$' || fail device-identity-missing
+printf '%s\n' "$frame_id" | grep -Eq '^[1-9][0-9]*$' || fail frame-identity-missing
+
+set +e
+admission=$($simple run "$validator" 1 1 1 1 1 0 1 1 1 1 "$device_id" "$frame_id" 2>&1)
+admission_rc=$?
+set -e
+test "$admission_rc" -eq 0 || fail environment-profile-admission-failed
+printf '%s\n' "$admission" | grep -Fq 'simpleos_arm64_unified_primitive_admission=pass reason=pass' || fail primitive-admission-not-pass
+printf '%s\n' "$admission" | grep -Fq 'simpleos_arm64_unified_environment_admission=pass reason=pass' || fail environment-admission-not-pass
+
+{
+    echo schema=simpleos-arm64-unified-live-v1
+    echo status=pass
+    echo evidence_class=live-guest
+    echo profile_id=simpleos-qemu-aarch64-vulkan-virtio
+    echo guest_process_count=1
+    echo qemu_argv_sha256="$qemu_args"
+    echo kernel_sha256=$(sha256sum "$kernel" | awk '{print $1}')
+    echo daemon_sha256=$(sha256sum "$daemon" | awk '{print $1}')
+    echo vulkan_device_identity="$device_id"
+    echo frame_identity="$frame_id"
+    echo drawir_device_readback=pass
+    echo virtio_keyboard_delivery=pass
+    echo virtio_pointer_delivery=pass
+    echo virtio_snd_completion=pass
+    echo fallback_used=false
+    echo serial_log="$serial"
+    echo daemon_log="$daemon_log"
+    printf '%s\n' "$admission"
+} >"$receipt"
+cat "$receipt"

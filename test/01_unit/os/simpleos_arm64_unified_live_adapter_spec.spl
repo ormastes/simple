@@ -1,0 +1,50 @@
+"""Static contract for the one-guest ARM64 Vulkan/input/audio adapter."""
+
+use std.spec.*
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use std.io_runtime.{process_run}
+
+val WRAPPER = "scripts/check/check-simpleos-arm64-unified-live.shs"
+val ENTRY = "examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop_linux_qemu_unified.spl"
+val EXECUTOR = "src/os/compositor/engine2d_wm_frame_executor.spl"
+val VALIDATOR = "scripts/check/validate-simpleos-arm64-unified-live-receipt.spl"
+
+describe "ARM64 unified SimpleOS primitive adapter":
+    it "launches all primitive devices in one QEMU process":
+        val source = file_read(WRAPPER)
+        expect(source).to_contain("guest_process_count=1")
+        expect(source).to_contain("-device ivshmem-plain,memdev=hostgpu")
+        expect(source).to_contain("-device virtio-keyboard-device")
+        expect(source).to_contain("-device virtio-mouse-device")
+        expect(source).to_contain("-device virtio-sound-device,audiodev=audio0")
+        expect(source).to_contain("--processing-backend=vulkan")
+
+    it "uses the canonical audio probe before the canonical desktop":
+        val source = file_read(ENTRY)
+        val audio = source.index_of("simpleos_virtio_snd_probe(\"aarch64\"")
+        val desktop = source.index_of("gui_entry_desktop_start(0u64")
+        expect(audio >= 0).to_be(true)
+        expect(desktop > audio).to_be(true)
+        expect(source).to_contain("SIMPLEOS_UNIFIED_PRIMITIVE_FAIL reason=audio")
+
+    it "exposes device identity only after strict DrawIR receipt validation":
+        val source = file_read(EXECUTOR)
+        val validation = source.index_of("host_gpu_ivshmem_device_receipt_valid")
+        val evidence = source.index_of("host-gpu-device-evidence")
+        expect(validation >= 0).to_be(true)
+        expect(evidence > validation).to_be(true)
+        expect(source).to_contain("readback=device")
+        expect(source).to_contain("identity={" + "receipt.device_identity}")
+
+    it "delegates final promotion to both environment profile admissions":
+        val source = file_read(VALIDATOR)
+        expect(source).to_contain("validate_arm64_simpleos_qemu_primitives")
+        expect(source).to_contain("validate_ui_environment_evidence")
+        expect(source).to_contain("UiEnvironmentEvidenceClass.LiveGuest")
+        expect(source).to_contain("primitive.status == UiEnvironmentAdmissionStatus.Pass")
+        expect(source).to_contain("combined.status == UiEnvironmentAdmissionStatus.Pass")
+
+    it "passes its no-QEMU launcher self test":
+        val result = process_run("/bin/sh", [WRAPPER, "--self-test"])
+        expect(result.2).to_equal(0)
+        expect(result.0).to_contain("simpleos_arm64_unified_live_self_test=pass")

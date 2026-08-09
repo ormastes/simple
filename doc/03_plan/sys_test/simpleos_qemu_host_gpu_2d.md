@@ -315,3 +315,10 @@ same catalog, and `test/03_system/os/qemu/simpleos_io_audio_spec.spl` classifies
 preflight as `Ready` while retaining `LiveGuest` as its required evidence
 class. This covers REQ-003, REQ-008, REQ-011, REQ-019, REQ-020, NFR-009, and
 NFR-013 without treating configuration as live execution.
+
+The focused no-QEMU contract gate is
+`test/01_unit/os/simpleos_arm64_unified_live_adapter_spec.spl`. After runtime
+admission, run `scripts/check/check-simpleos-arm64-unified-live.shs` exactly
+once. Its single evidence file must report `guest_process_count=1`, both typed
+admissions as `pass`, Vulkan device identity and frame identity, input delivery,
+audio completion, and `fallback_used=false`.

@@ -492,3 +492,19 @@ process launches, device probes, caching, or backend dispatch. Catalog
 construction is bounded to five profiles and ID lookup is O(5), outside the
 render/event/audio hot paths. Production capability discovery remains cached
 once per boot/session and follows the invalidation rules above.
+
+### Unified ARM64 live primitive capsule
+
+`check-simpleos-arm64-unified-live.shs` is the sole promotion adapter for the
+ARM64 primitive row. One QEMU process binds the Vulkan host daemon through
+`ivshmem-plain`, RAMFB, virtio keyboard, virtio mouse, and virtio-snd. The
+guest entry runs the existing bounded audio probe and then transfers ownership
+to the canonical desktop, input backend, compositor, and DrawIR executor.
+
+The executor emits a separate device-evidence line only after
+`host_gpu_ivshmem_device_receipt_valid` and checked framebuffer presentation.
+This keeps the established presentation receipt stable while exposing the
+device/frame identity required by `environment_profile`. The adapter rejects
+fallback markers and delegates final promotion to both typed ARM64 primitive
+and general UI-environment admissions. Receipts from different guest PIDs are
+never merged.
