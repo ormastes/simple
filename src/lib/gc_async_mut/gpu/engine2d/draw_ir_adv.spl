@@ -182,6 +182,11 @@ struct Engine2dDrawIrGlassOutcome:
     composited: bool
     execution: Engine2dGlassExecutionResult
 
+class Engine2dDrawIrMaterialExecutionEvidence:
+    execution_target: text
+    backend_handle: i64
+    device_identity: i64
+
 fn _engine2d_draw_ir_render_outcome(
     engine: Engine2D,
     rendered: i32,
@@ -572,7 +577,11 @@ fn _engine2d_draw_ir_render_glass_material(engine: Engine2D, command: DrawIrComm
 # box that still has a border or shadow paints instead of vanishing. Engine2D is
 # value-copied across this free-function boundary, so the caller MUST reassign
 # from the returned engine.
-fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32, y: i32, w: i32, h: i32) -> Engine2dDrawIrBoxOutcome:
+fn _engine2d_draw_ir_render_box(
+    engine: Engine2D, command: DrawIrCommand,
+    x: i32, y: i32, w: i32, h: i32,
+    mut execution_evidence: Engine2dDrawIrMaterialExecutionEvidence
+) -> Engine2dDrawIrBoxOutcome:
     var eng = engine
     # This free-function boundary projects Engine2D once more. Reset the exact
     # receiver used by all box draws, then retain it instead of replacing it
@@ -635,6 +644,9 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
         _engine2d_draw_ir_render_glass_material(
             eng, command, x, y, w, h, radius)
     if glass.composited:
+        execution_evidence.execution_target = glass.execution.execution_target
+        execution_evidence.backend_handle = glass.execution.backend_handle
+        execution_evidence.device_identity = glass.execution.device_identity
         if shadow_admitted:
             val inset_shadow_engine_ignored = engine2d_draw_ir_render_typed_inset_shadows(
                 eng, typed_shadows.layers, x, y, w, h, effective_corners)
@@ -1298,6 +1310,8 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
     var glass_backend_handle: i64 = 0
     var glass_device_identity: i64 = 0
     var css_background_pixel_work_remaining = css_background_pixel_work_budget
+    val material_execution = Engine2dDrawIrMaterialExecutionEvidence(
+        execution_target: "", backend_handle: 0, device_identity: 0)
     for command in commands:
         # A nil display-list element must be skipped before any field access.
         # Keep the explicit comparison: freestanding codegen has miscompiled
@@ -1329,38 +1343,42 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
             if metal_requested:
                 metal_device_glass_requested_count = (
                     metal_device_glass_requested_count + 1)
-            val box = _engine2d_draw_ir_render_box(
-                eng, command, x, y, command.width, command.height)
-            if box.glass_execution.execution_target == "cpu-scalar-glass-v1":
+            material_execution.execution_target = ""
+            material_execution.backend_handle = 0
+            material_execution.device_identity = 0
+            val box_ignored = _engine2d_draw_ir_render_box(
+                eng, command, x, y, command.width, command.height,
+                material_execution)
+            if material_execution.execution_target == "cpu-scalar-glass-v1":
                 cpu_composited_material_count = cpu_composited_material_count + 1
-                glass_execution_target = box.glass_execution.execution_target
-            elif box.glass_execution.execution_target == "metal-device-glass-v1":
-                if (box.glass_execution.backend_handle > 0 and
-                    box.glass_execution.device_identity > 0):
+                glass_execution_target = material_execution.execution_target
+            elif material_execution.execution_target == "metal-device-glass-v1":
+                if (material_execution.backend_handle > 0 and
+                    material_execution.device_identity > 0):
                     metal_device_glass_material_count = (
                         metal_device_glass_material_count + 1)
-                    glass_execution_target = box.glass_execution.execution_target
-                    glass_backend_handle = box.glass_execution.backend_handle
-                    glass_device_identity = box.glass_execution.device_identity
+                    glass_execution_target = material_execution.execution_target
+                    glass_backend_handle = material_execution.backend_handle
+                    glass_device_identity = material_execution.device_identity
             if metal_requested and not (
-                box.glass_execution.execution_target ==
+                material_execution.execution_target ==
                     "metal-device-glass-v1" and
-                box.glass_execution.backend_handle > 0 and
-                box.glass_execution.device_identity > 0):
+                material_execution.backend_handle > 0 and
+                material_execution.device_identity > 0):
                 metal_device_glass_unfulfilled_count = (
                     metal_device_glass_unfulfilled_count + 1)
             if metal_requested:
-                val fulfilled = (box.glass_execution.execution_target ==
+                val fulfilled = (material_execution.execution_target ==
                     "metal-device-glass-v1" and
-                    box.glass_execution.backend_handle > 0 and
-                    box.glass_execution.device_identity > 0)
+                    material_execution.backend_handle > 0 and
+                    material_execution.device_identity > 0)
                 metal_device_glass_receipts.push(
                     Engine2dMetalGlassReceipt(
                         material_id: command.component_id,
                         fulfilled: fulfilled,
-                        execution_target: box.glass_execution.execution_target,
-                        backend_handle: box.glass_execution.backend_handle,
-                        device_identity: box.glass_execution.device_identity,
+                        execution_target: material_execution.execution_target,
+                        backend_handle: material_execution.backend_handle,
+                        device_identity: material_execution.device_identity,
                         readback_source: "",
                         readback_checksum: 0
                     )
