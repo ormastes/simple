@@ -1,25 +1,494 @@
-# SimpleOS Production Desktop Render Contract
+# Gui Entry Desktop Production Render Contract Specification
 
-**Status:** manually synchronized; executable docgen refresh pending
-**Executable:** `test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl`
+> Tests covering SimpleOS production desktop render entry.
 
-Five source-contract scenarios keep x86_64, AArch64, and RV64 desktops on the
-canonical WM/Draw IR/Engine2D route.
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 8 | 8 | 0 | 0 |
 
-## Operator flow
+<details>
+<summary>Full Scenario Manual</summary>
 
-1. Mount the architecture FAT32 media where required, then register the selected
-   VFS font bytes through the shared desktop bootstrap before Engine2D creation
-   on x86_64, AArch64, and RV64.
-2. Require the taskbar-clock `SharedWmScene -> DrawIrComposition -> Engine2D`
-   marker to bind the selected asset hash, rasterizer, size, text, and crop hash.
-3. Reject private post-frame `draw_text`, probe rectangle, or `present`
-   paths.
-4. Keep AArch64 and RV64 production entries on their canonical Engine2D owners
-   and optional host-GPU presentation facades.
-5. Submit one composed WM Draw IR frame to validated host presentation before
-   local fallback.
+# Gui Entry Desktop Production Render Contract Specification
 
-The AArch64 and RV64 canonical QEMU targets attach deterministic VirtIO-BLK
-font media and register the selected bytes through the shared bootstrap.
-These are wiring assertions, not retained QEMU pixel evidence.
+## Scenarios
+
+### SimpleOS production desktop render entry
+
+#### installs the exact generated WM snapshot once before every canonical desktop compositor and frame
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val x86 = file_read("examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl")
+val arm64 = file_read("examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl")
+val riscv64 = file_read("examples/09_embedded/simple_os/arch/riscv64/gui_entry_desktop.spl")
+
+for src in [x86, arm64, riscv64]:
+    val install = src.index_of("install_generated_simpleos_wm_theme(")
+    val compositor = src.index_of("Compositor.with_backends(")
+    val frame_executor = src.index_of("Engine2dWmFrameExecutor.")
+    val first_frame = src.index_of("shell.render_baremetal_first_frame(")
+    expect(src).to_contain("use os.compositor.simpleos_wm_theme_bootstrap.{install_generated_simpleos_wm_theme}")
+    expect(_desktop_theme_installer_occurrences(src)).to_equal(1)
+    expect(install).to_be_greater_than(0)
+    expect(install).to_be_less_than(compositor)
+    expect(install).to_be_less_than(frame_executor)
+    expect(install).to_be_less_than(first_frame)
+```
+
+</details>
+
+#### should keep registered-only shaping independent of the stubbed host font ABI
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 28 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val renderer = file_read("src/lib/nogc_sync_mut/text_layout/font_renderer.spl")
+val shaper = file_read("src/lib/skia/feature/shaper/shaper.spl")
+val bootstrap = file_read("src/os/desktop/font_bootstrap.spl")
+val vfs = file_read("src/os/services/vfs/vfs_init.spl")
+val registered_branch = renderer.index_of("val shaped = if registered_only:")
+val pure_binding = renderer.index_of("val shaper = shaper_with_ot_font")
+val hosted_binding = renderer.index_of("val loaded = load_font(font_path)")
+expect(registered_branch).to_be_greater_than(0)
+expect(pure_binding).to_be_greater_than(registered_branch)
+expect(hosted_binding).to_be_greater_than(pure_binding)
+expect(renderer).to_contain("(shaper_shape_with_language(shaper, codepoints, font, 0.0, 0.0, language), 0, 0)")
+expect(shaper).to_contain("validate_selected_font_asset(font.typeface.font_path, parsed.blob).valid")
+expect(shaper).to_contain("(handle_matches or selected_blob_matches)")
+expect(bootstrap).to_contain("font_renderer_use_registered_selected_bytes_only()")
+expect(bootstrap.contains("vfs_is_ready")).to_be(false)
+expect(bootstrap).to_contain("val candidates = selected_font_asset_candidates()")
+expect(bootstrap).to_contain("for candidate in candidates:")
+expect(bootstrap).to_contain("val canonical_blob = g_vfs_read_file_bytes(simpleos_font_asset_guest_path(candidate))")
+expect(bootstrap).to_contain("registered_candidate = canonical_blob.len() > 0 and font_renderer_register_selected_bytes(candidate.local_path, canonical_blob)")
+expect(bootstrap).to_contain("if not registered_candidate:\n            val short_blob = g_vfs_read_file_bytes(simpleos_font_asset_short_guest_path(candidate))")
+expect(bootstrap).to_contain("registered_candidate = short_blob.len() > 0 and font_renderer_register_selected_bytes(candidate.local_path, short_blob)")
+expect(bootstrap).to_contain("registered == candidates.len()")
+expect(bootstrap.contains("return true")).to_be(false)
+val read_fn = vfs.substring(vfs.index_of("pub fn g_vfs_read_file_bytes"), vfs.len())
+val direct_read = read_fn.index_of("val direct_scalar_bytes = vfs_boot_read_pure_nvme_fat32_path_bytes(name)")
+val mounted_gate = read_fn.index_of("if not g_vfs_initialized:")
+expect(direct_read).to_be_greater_than(0)
+expect(direct_read).to_be_less_than(mounted_gate)
+```
+
+</details>
+
+#### boots validated dynamic scanout into persistent Engine2D shared shell rendering
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 41 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val src = file_read("examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl")
+expect(src).to_contain("bga_init_scanout")
+expect(src).to_contain("mmio_disable_test_mode()")
+expect(src).to_contain("scanout_evidence_is_valid(scanout)")
+expect(src).to_contain("FramebufferDriver.from_scanout_raw(scanout.address, scanout.width, scanout.height, scanout.stride")
+expect(src).to_contain("var engine = create_fb_engine_sized(fb, screen_width, screen_height)")
+expect(src).to_contain("val font_loaded = simpleos_desktop_register_selected_fonts_from_vfs()")
+expect(src).to_contain("route=shared-wm-draw-ir component_id=taskbar-clock")
+expect(src).to_contain("fn taskbar_clock_region_rgb_sha256_pin() -> text:")
+expect(src).to_contain("addf76edf6d23ca9bea6d698ca1d30bc4bd8dd684bb50ff3158ef755bd2854fc")
+expect(src).to_contain("val pinned_region_sha256: text = taskbar_clock_region_rgb_sha256_pin()")
+expect(src).to_contain("region_sha256 == pinned_region_sha256")
+expect(src).to_contain("[font-evidence] guest_path={font_guest_path} asset_bytes={font_blob.len()} family=Noto Sans Mono asset_sha256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081 raster=pure-sfnt-glyf route=shared-wm-draw-ir component_id=taskbar-clock font_size=12 text=00:00 region=right56,bottom48 region_rgb_sha256={region_sha256}")
+val register_font = src.index_of("val font_loaded = simpleos_desktop_register_selected_fonts_from_vfs()")
+val create_engine = src.index_of("var engine = create_fb_engine_sized(fb, screen_width, screen_height)")
+val first_frame = src.index_of("shell.render_baremetal_first_frame(wm_frame_executor)")
+expect(register_font).to_be_greater_than(0)
+expect(register_font).to_be_less_than(create_engine)
+expect(register_font).to_be_less_than(first_frame)
+expect(src.contains("font_renderer_register_selected_bytes(")).to_be(false)
+expect(src.contains("engine.draw_text(64, 64")).to_be(false)
+expect(src.contains("engine.draw_rect_filled(64, 64")).to_be(false)
+expect(src.contains("engine.present()")).to_be(false)
+expect(src).to_contain("shell.materialize_process_launch_scalar")
+expect(src).to_contain("shell.process_owned_surface_count_scalar()")
+expect(src).to_contain("[production-readiness-failed]")
+expect(src).to_contain("port_outb(0xF4, 1)")
+expect(src).to_contain("shell.init_baremetal()")
+expect(src).to_contain("map_qemu_host_gpu_ivshmem_bar2_active_vmm()")
+expect(src).to_contain("boot_monotonic_prepare()")
+expect(src).to_contain("val negotiation_started_us = boot_monotonic_now_us()")
+expect(src).to_contain("Engine2dWmFrameExecutor.create_host_gpu(engine, fb, host_gpu_base")
+expect(src).to_contain("SIMPLEOS_HOST_GPU_BACKEND_VULKAN, screen_width.to_i64(), screen_height.to_i64(), negotiation_started_us)")
+expect(src).to_contain("shell.run_baremetal(wm_frame_executor)")
+expect(src).to_contain("[production-readiness]")
+expect(src.contains("val FB_W:")).to_be(false)
+expect(src.contains("val DIRECT_QEMU_TOTAL_MEMORY:")).to_be(false)
+expect(src.contains("shared_mdi")).to_be(false)
+expect(src.contains("create_window(")).to_be(false)
+expect(src.contains("update_window_content(")).to_be(false)
+expect(src.contains("shell.run()")).to_be(false)
+```
+
+</details>
+
+#### routes WM Simple Web evidence through the production desktop entry
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 28 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val targets = file_read("src/os/_QemuRunner/runner_targets.spl")
+val scenarios = file_read("src/os/_QemuRunner/scenario_catalog.spl")
+val builds = file_read("src/os/_QemuRunner/os_build_run.spl")
+val arm64_readiness = file_read("scripts/check/check-simpleos-arm64-wm-qemu-readiness.shs")
+val x64_readiness = file_read("scripts/check/check-simpleos-x86-64-wm-qemu-readiness.shs")
+val resolver = file_read("src/os/_QemuRunner/scenario_disks.spl")
+val execution = file_read("src/os/_QemuRunner/scenario_exec.spl")
+expect(targets).to_contain("entry: \"examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl\"")
+expect(targets).to_contain("entry: \"examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl\"")
+expect(targets).to_contain("entry: \"examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl\",\n        linker_script: \"examples/09_embedded/simple_os/arch/arm64/linker.ld\",\n        target_triple: \"aarch64-unknown-none\",\n        output: \"build/os/simpleos_arm64_wm.elf\"")
+expect(targets.contains("entry: \"examples/09_embedded/simple_os/arch/arm64/wm_entry.spl\"")).to_be(false)
+expect(targets).to_contain("output: \"build/os/simpleos_arm64_desktop_engine2d.elf\"")
+expect(scenarios).to_contain("_scenario_from_target(\"arm64-desktop-engine2d\", get_arm64_desktop_engine2d_target()")
+expect(builds).to_contain("if _is_arm64_wm_qemu_target(target) or _is_arm64_desktop_engine2d_target(target):\n        return [\"build/os/generated\", \"src/os\", \"src/lib\", \"examples/09_embedded/simple_os\"]")
+expect(builds).to_contain("target.entry == \"examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl\" and\n        target.output == \"build/os/simpleos_arm64_desktop_engine2d.elf\"")
+expect(builds.contains("target.entry == \"examples/09_embedded/simple_os/arch/arm64/wm_entry.spl\"")).to_be(false)
+expect(builds).to_contain("if _is_arm64_wm_qemu_target(target) or _is_arm64_desktop_engine2d_target(target):\n        envs.push(\"SIMPLE_BOOTSTRAP=1\")")
+expect(resolver).to_contain("if scenario.name == \"arm64-desktop-engine2d\":\n        return get_arm64_desktop_engine2d_target()")
+expect(execution).to_contain("fn arm64_desktop_engine2d_required_marker_fragments() -> [text]:")
+expect(execution).to_contain("if scenario.name == \"arm64-desktop-engine2d\":\n        return arm64_desktop_engine2d_required_marker_fragments()")
+expect(execution).to_contain("[WM] ramfb configured successfully via fw_cfg DMA")
+expect(execution).to_contain("[desktop-gui] first-frame-rendered scene_revision=")
+expect(execution).to_contain("[desktop-gui-arm64] desktop-ready revision=")
+expect(execution).to_contain("scenario.name == \"arm64-desktop-engine2d\" and _scenario_serial_accepts_completion(scenario, serial_output)")
+expect(arm64_readiness).to_contain("arch/arm64/gui_entry_desktop.spl")
+expect(arm64_readiness.contains("arch/arm64/wm_entry.spl")).to_be(false)
+expect(x64_readiness).to_contain("arch/x86_64/gui_entry_desktop.spl")
+expect(x64_readiness.contains("arch/x86_64/wm_entry.spl")).to_be(false)
+```
+
+</details>
+
+#### routes the AArch64 boot desktop through canonical Engine2D owners and optional host GPU
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 40 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val src = file_read("examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl")
+val mount_font_media = src.index_of("    vfs_boot_init_virtio_fat32()")
+val register_font = src.index_of("val font_loaded = simpleos_desktop_register_selected_fonts_from_vfs()")
+val create_engine = src.index_of("var engine = create_fb_engine_sized(framebuffer, screen_width, screen_height)")
+expect(src).to_contain("raw_alloc(FRAMEBUFFER_SIZE.to_i64())")
+expect(src).to_contain("FramebufferDriver.from_scanout_raw(")
+expect(src).to_contain("create_fb_engine_sized(")
+expect(mount_font_media).to_be_greater_than(0)
+expect(mount_font_media).to_be_less_than(register_font)
+expect(register_font).to_be_greater_than(0)
+expect(register_font).to_be_less_than(create_engine)
+expect(src).to_contain("if font_loaded:")
+expect(src).to_contain("font registered source=virtio-fat32")
+expect(src).to_contain("compositor.compositor_materialize_process_surface_scalar(")
+expect(src).to_contain("map_qemu_host_gpu_ivshmem_bar2()")
+expect(src).to_contain("qemu_host_gpu_ivshmem_window_base(")
+expect(src).to_contain("boot_monotonic_prepare()")
+expect(src).to_contain("val negotiation_started_us = boot_monotonic_now_us()")
+expect(src).to_contain("Engine2dWmFrameExecutor.create_host_gpu(")
+expect(src).to_contain("SIMPLEOS_HOST_GPU_ISA_AARCH64")
+expect(src).to_contain("SIMPLEOS_HOST_GPU_ISA_AARCH64,\n            SIMPLEOS_HOST_GPU_BACKEND_METAL")
+expect(src).to_contain("SIMPLEOS_HOST_GPU_BACKEND_METAL,\n            0, 0, negotiation_started_us")
+expect(src.contains("SIMPLEOS_HOST_GPU_ISA_X86_64")).to_be(false)
+expect(src.contains("SIMPLEOS_HOST_GPU_ISA_RISCV64")).to_be(false)
+expect(src).to_contain("shell.render_baremetal_first_frame(wm_frame_executor)")
+expect(src).to_contain("shell.render_baremetal_frame(wm_frame_executor)")
+expect(src).to_contain("uart_data_ready()")
+expect(src).to_contain("uart_read_char()")
+expect(src).to_contain("uart_char_to_action(")
+expect(src.contains("extern fn rt_")).to_be(false)
+expect(src.contains("rt_gui_")).to_be(false)
+expect(src.contains("shared_mdi")).to_be(false)
+expect(src.contains("[mdi-demo]")).to_be(false)
+expect(src.contains("wm_entry_glass")).to_be(false)
+expect(src.contains("draw_desktop")).to_be(false)
+expect(src.contains("draw_glass_")).to_be(false)
+expect(src.contains("0x3E000000")).to_be(false)
+expect(src.contains("0x3e000000")).to_be(false)
+expect(src.contains("shell.run_baremetal(")).to_be(false)
+expect(src.contains(".host_gpu_base")).to_be(false)
+```
+
+</details>
+
+#### projects ARM64 window geometry and bounded scroll through DrawIR and requires Vulkan on Linux
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 22 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val entry = file_read("examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl")
+val linux_entry = file_read("examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop_linux_qemu.spl")
+val compositor = file_read("src/os/compositor/compositor.spl")
+val lifecycle = file_read("src/os/compositor/wm_action_lifecycle.spl")
+val shell = file_read("src/os/desktop/shell.spl")
+val executor = file_read("src/os/compositor/engine2d_wm_frame_executor.spl")
+expect(lifecycle).to_contain("fn wm_lifecycle_resize_grip_hit(")
+expect(lifecycle).to_contain("fn wm_lifecycle_bounded_window_width(")
+expect(lifecycle).to_contain("fn wm_lifecycle_bounded_window_height(")
+expect(compositor).to_contain("scroll_y: i32 = 0")
+expect(compositor).to_contain("me scroll_window(id: u64, wheel_delta: i32):")
+expect(compositor).to_contain("wm_lifecycle_resize_grip_hit(")
+expect(shell).to_contain("surface.scroll_y.to_i64()")
+expect(shell).to_contain("content_h, surface.scroll_y")
+expect(shell).to_contain("executor.render(scene, taskbar, content_frames")
+expect(executor).to_contain("host_gpu_required: bool")
+expect(executor).to_contain("host-gpu-required-rejected reason=device-receipt-or-readback")
+expect(executor).to_contain("shared_wm_scene_draw_ir_composition_with_content(")
+expect(linux_entry).to_contain("gui_entry_desktop_start(0u64, SIMPLEOS_HOST_GPU_BACKEND_VULKAN, true)")
+expect(entry).to_contain("if host_gpu_base != 0u64 or backend_required:")
+expect(entry.contains("shared_mdi")).to_be(false)
+expect(entry.contains("engine.draw_")).to_be(false)
+expect(entry.contains("engine.present()")).to_be(false)
+```
+
+</details>
+
+#### routes the RV64 dynamic scanout through canonical Engine2D owners and one runtime facade
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 37 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val src = file_read("examples/09_embedded/simple_os/arch/riscv64/gui_entry_desktop.spl")
+val display = file_read("src/os/kernel/arch/riscv64/display.spl")
+val resolver = file_read("src/os/_QemuRunner/scenario_disks.spl")
+val builds = file_read("src/os/_QemuRunner/os_build_run.spl")
+val mount_font_media = src.index_of("vfs_boot_init_riscv64_virtio_fat32()")
+val register_font = src.index_of("simpleos_desktop_register_selected_fonts_from_vfs()")
+val create_engine = src.index_of("create_fb_engine_sized")
+val render = src.index_of("shell.render_baremetal_first_frame(executor)")
+val present = src.index_of("if not riscv64_display_present():")
+val ready = src.index_of("[desktop-gui-riscv64] desktop-ready revision=")
+expect(src).to_contain("riscv64_display_initialize")
+expect(src).to_contain("FramebufferDriver.from_scanout_raw")
+expect(src).to_contain("create_fb_engine_sized")
+expect(mount_font_media).to_be_greater_than(0)
+expect(mount_font_media).to_be_less_than(register_font)
+expect(register_font).to_be_less_than(create_engine)
+expect(src).to_contain("simpleos_desktop_register_selected_fonts_from_vfs()")
+expect(src).to_contain("vfs_boot_init_riscv64_virtio_fat32()")
+expect(src.contains("vfs_boot_init_virtio_fat32()")).to_be(false)
+expect(src).to_contain("compositor.compositor_materialize_process_surface_scalar")
+expect(src).to_contain("DesktopShell.new")
+expect(src).to_contain("Engine2dWmFrameExecutor.create_host_gpu")
+expect(src).to_contain("boot_monotonic_prepare()")
+expect(src).to_contain("val negotiation_started_us = boot_monotonic_now_us()")
+expect(src).to_contain("SIMPLEOS_HOST_GPU_ISA_RISCV64")
+expect(src).to_contain("SIMPLEOS_HOST_GPU_BACKEND_METAL,\n            0, 0, negotiation_started_us")
+expect(src).to_contain("val input_byte = serial_read_byte()")
+expect(render).to_be_greater_than(0)
+expect(render).to_be_less_than(present)
+expect(present).to_be_less_than(ready)
+expect(src.contains("extern fn rt_")).to_be(false)
+expect(src.contains("[mdi-demo]")).to_be(false)
+expect(src.contains("320x240")).to_be(false)
+expect(display).to_contain("extern fn rt_display_init() -> i64")
+expect(display).to_contain("extern fn rt_display_present() -> i64")
+expect(resolver).to_contain("examples/09_embedded/simple_os/arch/riscv64/gui_entry_desktop.spl")
+expect(builds).to_contain("[\"build/os/generated\", \"src/os\", \"src/lib\", \"examples/09_embedded/simple_os\"]")
+```
+
+</details>
+
+#### submits canonical WM Draw IR to validated host presentation before local fallback
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 73 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val src = file_read("src/os/compositor/engine2d_wm_frame_executor.spl")
+val mapper = file_read("src/os/kernel/arch/x86_64/host_gpu_ivshmem_vmm.spl")
+val bridge = file_read("src/os/lib/gpu_bridge/host_gpu_ivshmem.spl")
+val submit = src.index_of("val result = host_gpu_ivshmem_submit_draw_ir_retained(")
+val validate = src.index_of("if not host_gpu_ivshmem_device_receipt_valid(receipt")
+val present = src.index_of("if not self.framebuffer.present_argb32_from_mmio(receipt.output_addr")
+val composition_build = src.index_of("val composition = shared_wm_scene_draw_ir_composition_with_content")
+val nested_collect = src.index_of("val nested_content_frames = shared_wm_nested_content_frames")
+val nested_loop = src.index_of("for frame in nested_content_frames:")
+val nested_append = src.last_index_of("good_content_frames.push(frame)")
+val validated_composition = src.index_of("val composition = shared_wm_scene_draw_ir_composition_with_content(filtered_scene, taskbar, good_content_frames, self.draw_ir_backend_target")
+val local_recompose = src.index_of("if engine2d_wm_draw_ir_local_recompose_required(self.draw_ir_backend_target, self.local_draw_ir_backend_target):")
+val local_composition = src.index_of("local_composition = shared_wm_scene_draw_ir_composition_with_content(filtered_scene, taskbar, good_content_frames, self.local_draw_ir_backend_target")
+val unfiltered_composition = src.index_of("val composition = shared_wm_scene_draw_ir_composition_with_content(filtered_scene, taskbar, content_frames,")
+val host_attempt = src.index_of("if self._render_host_gpu(composition, host_images):")
+val local_present = src.index_of("engine2d_draw_ir_adv_composition_present_with_images(self.engine")
+val map_marker = src.index_of("HOST_GPU_MAP_OK scope=production isa={{guest_isa}} base={{base}}")
+val deadline = src.index_of("val deadline_us = boot_monotonic_deadline_us(")
+val backend_order = src.index_of("backend_codes = simpleos_host_gpu_render_backend_order(backend_code, backend_required)")
+val attempt_loop = src.index_of("for candidate_code in backend_codes:")
+val attempt_marker = src.index_of("HOST_GPU_NEGOTIATION_ATTEMPT scope=production")
+val negotiate = src.index_of("val hello = host_gpu_ivshmem_negotiate(")
+expect(submit).to_be_greater_than(0)
+expect(submit).to_be_less_than(validate)
+expect(validate).to_be_less_than(present)
+expect(src).to_contain("receipt.output_bytes, receipt.output_checksum")
+expect(src).to_contain("images.push(engine2d_resolved_draw_ir_image(image_uri, frame.width, frame.height, frame.pixels))")
+expect(src).to_contain("host_images.push(simpleos_host_gpu_image_resource(image_uri, frame.width, frame.height, frame.pixels))")
+# Per-window fail-closed degrade: an unresolved/duplicate window is
+# skipped and counted while the background + remaining windows still
+# compose, instead of the whole composite blacking out (return 0).
+expect(src).to_contain("var degraded_window_count = 0")
+expect(src).to_contain("degraded_window_count = degraded_window_count + 1")
+expect(src).to_contain("val renderable_images = expected_images - degraded_window_count")
+expect(src).to_contain("val filtered_scene = SharedWmScene(width: scene.width, height: scene.height, backend: scene.backend, windows: good_windows, background: scene.background)")
+expect(nested_collect).to_be_greater_than(0)
+expect(nested_loop).to_be_greater_than(nested_collect)
+expect(nested_append).to_be_greater_than(nested_loop)
+expect(validated_composition).to_be_greater_than(nested_append)
+expect(unfiltered_composition).to_equal(-1)
+expect(composition_build).to_equal(validated_composition)
+expect(composition_build).to_be_less_than(host_attempt)
+# A host success returns before this lazy local recompose. A host
+# failure only rebuilds when the negotiated target differs, preserving
+# CPU/CPU-SIMD material semantics rather than reusing Metal/Vulkan IR.
+expect(src).to_contain("local_draw_ir_backend_target: text")
+expect(src).to_contain("draw_ir_backend_target: local_target, local_draw_ir_backend_target: local_target")
+expect(local_recompose).to_be_greater_than(host_attempt)
+val host_success_branch = src.substring(host_attempt, local_recompose)
+expect(host_success_branch).to_contain("return scene_revision")
+expect(local_composition).to_be_greater_than(local_recompose)
+expect(local_composition).to_be_less_than(local_present)
+expect(src).to_contain("engine2d_draw_ir_adv_composition_present_with_images(self.engine, local_composition, false, images)")
+expect(src).to_contain("use os.kernel.boot.monotonic_hardware.{boot_monotonic_deadline_us, boot_monotonic_elapsed_us, boot_monotonic_now_us}")
+expect(src).to_contain("val deadline_us = boot_monotonic_deadline_us(negotiation_started_us, SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US)")
+expect(src).to_contain("backend_codes = simpleos_host_gpu_render_backend_order(backend_code, backend_required)")
+expect(src).to_contain("host_gpu_ivshmem_negotiate(base, generation, guest_isa, candidate, 0, HOST_GPU_IVSHMEM_DEFAULT_TIMEOUT_POLLS, deadline_us)")
+expect(map_marker).to_be_greater_than(0)
+expect(map_marker).to_be_less_than(attempt_loop)
+expect(map_marker).to_be_less_than(attempt_marker)
+expect(deadline).to_be_greater_than(0)
+expect(deadline).to_be_less_than(backend_order)
+expect(backend_order).to_be_less_than(attempt_loop)
+expect(attempt_loop).to_be_less_than(negotiate)
+expect(mapper).to_contain("fn map_qemu_host_gpu_ivshmem_bar2_active_vmm() -> u64:")
+expect(mapper).to_contain("while offset < SIMPLEOS_HOST_GPU_REGION_BYTES.to_u64():")
+expect(mapper).to_contain("vmm_map_page(VirtAddr(addr: base + offset), PhysAddr(addr: base + offset), VmFlags.mmio())")
+expect(mapper).to_contain("vmm_unmap_page(VirtAddr(addr: base + rollback))")
+expect(bridge).to_contain("not _host_gpu_slot_is_idle(base, completion)")
+# Forbid the retired readback-producing local call specifically. The
+# required production path above is the distinct
+# engine2d_draw_ir_adv_composition_present_with_images API.
+expect(src.contains("engine2d_draw_ir_adv_composition_with_images(self.engine")).to_be(false)
+```
+
+</details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Hardware & OS |
+| Status | Active |
+| Source | `test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl` |
+| Updated | 2026-08-09 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering SimpleOS production desktop render entry.
+- SimpleOS production desktop render entry
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 8 |
+| Active scenarios | 8 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `82dc5e48e4ad696aa9110329c9888917fd7a49e6951ca91067fb6225346cf0ea`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `82dc5e48e4ad696aa9110329c9888917fd7a49e6951ca91067fb6225346cf0ea`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `82dc5e48e4ad696aa9110329c9888917fd7a49e6951ca91067fb6225346cf0ea`
+Analyzer: `1`; rules: `ssdoc-rules/1`
+Raw score: **77/100**; effective score: **77/100**; blockers: **0**.
+
+SSpec documentization score: 77/100
+source: test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl
+mirror: doc/06_spec/01_unit/os/gui_entry_desktop_production_render_contract_spec.md (current)
+findings: 12 blockers: 0
+  narrative=80 structure=55 oracle=80
+  traceability=80 evidence=100 coverage=100 maintainability=45
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/os/gui_entry_desktop_production_render_contract_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/os/gui_entry_desktop_production_render_contract_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, traceability, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl:1:1: advice SSDOC-MNT-001 [maintainability] (-15): multiple scenarios form a flat, unfolded presentation
+  why: Long flat dumps obscure the primary workflow.
+  improve: Group secondary detail and keep the primary workflow visible.
+test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl:1:1: advice SSDOC-MNT-007 [maintainability] (-10): research, plan, architecture, or design metadata links are incomplete
+  why: Reviewers need selected lifecycle evidence, not inferred project state.
+  improve: Link the selected lifecycle artifacts or configure a reasoned scope suppression.
+test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl:1:1: warning SSDOC-NAR-001 [narrative] (-20): missing authored purpose and audience
+  why: Readers need scope, audience, and intent before executable detail.
+  improve: Add authored purpose, scope, and audience facts.
+test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl:1:1: warning SSDOC-TRC-001 [traceability] (-20): no implemented requirement identity
+  why: Stable requirement identity connects intent, implementation, and evidence.
+  improve: Bind scenarios to stable selected REQ identities.
+test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl:17:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'installs the exact generated WM snapshot once before every canonical desktop compositor and frame' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl:34:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'should keep registered-only shaping independent of the stubbed host font ABI' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl:34:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should keep registered-only shaping independent of the stubbed host font ABI' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl:64:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'boots validated dynamic scanout into persistent Engine2D shared shell rendering' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl:107:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'routes WM Simple Web evidence through the production desktop entry' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+<!-- sspec-maintain:scorecard:end -->

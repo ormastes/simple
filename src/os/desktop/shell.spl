@@ -39,7 +39,11 @@ use os.compositor.pixel_content_store.{
 }
 use common.ui.pixel_surface_content_frame.{pixel_surface_content_frame}
 use std.gc_async_mut.ui.gui_content_renderer.{gui_session_content_frame}
-use os.compositor.simple_web_window_renderer.{simple_web_content_frame_cached, simple_web_content_revision_with_theme}
+use os.compositor.simple_web_window_renderer.{
+    content_paint_full_height,
+    simple_web_content_frame_cached,
+    simple_web_content_revision_with_theme
+}
 use os.compositor.wm_action_applier.{apply_wm_action_to_compositor, wm_action_with_app_id, wm_lifecycle_owner_allows_source}
 use os.compositor.app_content.{app_state_new}
 use os.drivers.framebuffer.fb_driver.{Color}
@@ -115,6 +119,7 @@ fn simpleos_runtime_scene_revision(surfaces: [WindowSurface], focused_idx: i32) 
         revision = _simpleos_revision_mix_i64(revision, surface.y.to_i64())
         revision = _simpleos_revision_mix_i64(revision, surface.width.to_i64())
         revision = _simpleos_revision_mix_i64(revision, surface.height.to_i64())
+        revision = _simpleos_revision_mix_i64(revision, surface.scroll_y.to_i64())
         revision = _simpleos_revision_mix_i64(revision, surface.content_revision)
         revision = _simpleos_revision_mix_text(revision, surface.title)
         revision = _simpleos_revision_mix_text(revision, surface.app_id)
@@ -1318,7 +1323,10 @@ impl DesktopShell:
                             installed_theme_id
                         else:
                             default_theme_id()
-                        var cache = WebRenderPixelArtifactCache.create(content_w, content_h, "software")
+                        val render_h = content_paint_full_height(
+                            content_h, surface.scroll_y
+                        )
+                        var cache = WebRenderPixelArtifactCache.create(content_w, render_h, "software")
                         var cache_index = -1
                         var cache_scan = 0
                         while cache_scan < self.baremetal_web_cache_ids.len():
@@ -1327,10 +1335,17 @@ impl DesktopShell:
                             cache_scan = cache_scan + 1
                         if cache_index >= 0:
                             cache = self.baremetal_web_caches[cache_index]
-                        if cache.width != content_w or cache.height != content_h:
-                            cache = WebRenderPixelArtifactCache.create(content_w, content_h, "software")
-                        val content_revision = simple_web_content_revision_with_theme(content_theme_id, surface.title, surface.content_html, content_w, content_h, 0)
-                        frames.push(simple_web_content_frame_cached(cache, "{surface.id}", scene_revision, content_revision, content_theme_id, surface.title, surface.content_html, content_w, content_h, 0))
+                        if cache.width != content_w or cache.height != render_h:
+                            cache = WebRenderPixelArtifactCache.create(content_w, render_h, "software")
+                        val content_revision = simple_web_content_revision_with_theme(
+                            content_theme_id, surface.title, surface.content_html,
+                            content_w, content_h, surface.scroll_y
+                        )
+                        frames.push(simple_web_content_frame_cached(
+                            cache, "{surface.id}", scene_revision, content_revision,
+                            content_theme_id, surface.title, surface.content_html,
+                            content_w, content_h, surface.scroll_y
+                        ))
                         if cache_index >= 0:
                             self.baremetal_web_caches[cache_index] = cache
                         else:

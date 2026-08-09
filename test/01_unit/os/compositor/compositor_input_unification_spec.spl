@@ -20,6 +20,11 @@
 
 use std.spec
 use os.compositor.compositor.{Compositor}
+use os.compositor.wm_action_lifecycle.{
+    wm_lifecycle_bounded_window_width,
+    wm_lifecycle_bounded_window_height,
+    wm_lifecycle_resize_grip_hit
+}
 use os.compositor.host_compositor_entry.{HeadlessHostCompositorBackend}
 use os.compositor.display_backend.{CompositorBackend}
 use os.compositor.input_backend.{InputBackend, host_event_from_polled}
@@ -250,6 +255,57 @@ describe "compositor input path — recorded sequence equivalence":
         expect(moved.id).to_equal(w1)
         expect(moved.x).to_equal(40)
         expect(moved.y).to_equal(35)
+
+    it "resizes the topmost window from its canonical south-east grip":
+        var down = mouse_at(109, 89)
+        down.left_pressed = true
+        down.left_just_pressed = true
+        var resize = mouse_at(190, 140)
+        resize.left_pressed = true
+        var up = mouse_at(190, 140)
+        up.left_just_released = true
+        var c = compositor_with_mice([down, resize, up])
+        val window_id = c.create_window("resizable", 10, 10, 100, 80)
+        drive(c, 4)
+        val resized = c.surfaces[0]
+        expect(resized.id).to_equal(window_id)
+        expect(resized.width).to_equal(181)
+        expect(resized.height).to_equal(131)
+        expect(c.resizing).to_equal(false)
+        expect(c.resize_window_id).to_equal(0)
+
+    it "keeps interactive resize geometry inside canonical min and desktop bounds":
+        expect(wm_lifecycle_bounded_window_width(20, 800)).to_equal(160)
+        expect(wm_lifecycle_bounded_window_height(20, 600)).to_equal(120)
+        expect(wm_lifecycle_bounded_window_width(900, 800)).to_equal(800)
+        expect(wm_lifecycle_bounded_window_height(700, 600)).to_equal(600)
+        expect(wm_lifecycle_resize_grip_hit(10, 20, 300, 200, 309, 219)).to_equal(true)
+        expect(wm_lifecycle_resize_grip_hit(10, 20, 300, 200, 280, 180)).to_equal(false)
+
+    it "scrolls only the topmost web surface under the pointer":
+        var wheel = mouse_at(40, 50)
+        wheel.wheel = 1
+        var c = compositor_with_mice([wheel])
+        val lower = c.create_window("lower", 10, 10, 150, 120)
+        c.update_window_content(lower.to_u64(), "<p>lower</p>")
+        val upper = c.create_window("upper", 20, 20, 150, 120)
+        c.update_window_content(upper.to_u64(), "<p>upper</p>")
+        drive(c, 2)
+        expect(c.surfaces[0].id).to_equal(lower)
+        expect(c.surfaces[0].scroll_y).to_equal(0)
+        expect(c.surfaces[1].id).to_equal(upper)
+        expect(c.surfaces[1].scroll_y).to_equal(40)
+
+    it "bounds accumulated wheel scroll before it reaches layout rendering":
+        var wheel = mouse_at(40, 50)
+        wheel.wheel = 1000
+        var c = compositor_with_mice([
+            wheel, wheel, wheel, wheel, wheel, wheel, wheel
+        ])
+        val window_id = c.create_window("bounded", 10, 10, 150, 120)
+        c.update_window_content(window_id.to_u64(), "<p>bounded</p>")
+        drive(c, 8)
+        expect(c.surfaces[0].scroll_y).to_equal(4000)
 
     it "leaves focus alone for a left press on empty desktop":
         var miss = mouse_at(190, 5)

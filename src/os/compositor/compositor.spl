@@ -43,6 +43,11 @@ use common.ui.wm_window_state.{
     wm_window_state_begin_close,
     wm_window_state_finish_close
 }
+use os.compositor.wm_action_lifecycle.{
+    wm_lifecycle_bounded_window_width,
+    wm_lifecycle_bounded_window_height,
+    wm_lifecycle_resize_grip_hit
+}
 use nogc_sync_mut.ui.session.{UISession}
 use std.gc_async_mut.ui.gui_content_renderer.{gui_session_content_frame}
 use common.ui.wm_chrome_theme.{wm_chrome_theme}
@@ -53,7 +58,10 @@ use os.compositor.shared_mdi_framebuffer_scene.{
     draw_shared_mdi_window_chrome,
     draw_shared_mdi_taskbar
 }
-use os.compositor.simple_web_window_renderer.{render_simple_web_content}
+use os.compositor.simple_web_window_renderer.{
+    render_simple_web_content,
+    simple_web_bounded_scroll_y
+}
 use os.compositor.ps2_wm_key_decode.{
     ps2_wm_character,
     ps2_wm_key_name,
@@ -76,6 +84,8 @@ val WM_CONTENT_KIND_EMPTY: i32 = 0
 val WM_CONTENT_KIND_GUI_SESSION: i32 = 1
 val WM_CONTENT_KIND_WEB_DOCUMENT: i32 = 2
 val WM_CONTENT_KIND_PIXEL_SURFACE: i32 = 3
+val WM_CONTENT_SCROLL_STEP_PX: i32 = 40
+val WM_CONTENT_SCROLL_MAX_WHEEL_STEPS: i32 = 16
 
 fn _ps2_wm_pointer_button_code(left_btn: bool, right_btn: bool, middle_btn: bool) -> i32:
     """Map PS/2 mouse status-byte button bits (status byte bits 0/1/2) to
@@ -210,6 +220,7 @@ class WindowSurface:
     # native-safe tree/focus state lives in Compositor's GUI registry.
     content_html: text
     content_revision: i64
+    scroll_y: i32 = 0
     dirty: bool
     owner_port: i64
     process_id: i64
@@ -240,6 +251,12 @@ class Compositor:
     drag_window_id: i32
     drag_offset_x: i32
     drag_offset_y: i32
+    resizing: bool
+    resize_window_id: i32
+    resize_start_x: i32
+    resize_start_y: i32
+    resize_start_w: i32
+    resize_start_h: i32
     gui_pointer_capture_window_id: i32
     pending_meta_key: i32
     pending_shortcut: text
@@ -315,6 +332,12 @@ class Compositor:
             drag_window_id: 0,
             drag_offset_x: 0,
             drag_offset_y: 0,
+            resizing: false,
+            resize_window_id: 0,
+            resize_start_x: 0,
+            resize_start_y: 0,
+            resize_start_w: 0,
+            resize_start_h: 0,
             gui_pointer_capture_window_id: 0,
             pending_meta_key: 0,
             pending_shortcut: "",
@@ -367,6 +390,7 @@ class Compositor:
             content_handle: 0,
             content_html: "",
             content_revision: 1,
+            scroll_y: 0,
             dirty: true,
             state: WM_WINDOW_STATE_NORMAL,
             state_before_minimize: WM_WINDOW_STATE_NORMAL,
@@ -428,6 +452,13 @@ class Compositor:
         if self.dragging and self.drag_window_id == id:
             self.dragging = false
             self.drag_window_id = 0
+        if self.resizing and self.resize_window_id == id:
+            self.resizing = false
+            self.resize_window_id = 0
+            self.resize_start_x = 0
+            self.resize_start_y = 0
+            self.resize_start_w = 0
+            self.resize_start_h = 0
         if self.gui_pointer_capture_window_id == id:
             self.gui_pointer_capture_window_id = 0
 
@@ -519,6 +550,24 @@ class Compositor:
             var surface = self.surfaces[i]
             surface.width = width
             surface.height = height
+            surface.dirty = true
+            self.surfaces[i] = surface
+
+    me scroll_window(id: u64, wheel_delta: i32):
+        val i = self.surface_index(id)
+        if i < 0 or self.surfaces[i].content_kind != WM_CONTENT_KIND_WEB_DOCUMENT:
+            return
+        var bounded_steps = wheel_delta
+        if bounded_steps > WM_CONTENT_SCROLL_MAX_WHEEL_STEPS:
+            bounded_steps = WM_CONTENT_SCROLL_MAX_WHEEL_STEPS
+        if bounded_steps < 0 - WM_CONTENT_SCROLL_MAX_WHEEL_STEPS:
+            bounded_steps = 0 - WM_CONTENT_SCROLL_MAX_WHEEL_STEPS
+        var surface = self.surfaces[i]
+        val next_scroll_y = simple_web_bounded_scroll_y(
+            surface.scroll_y + bounded_steps * WM_CONTENT_SCROLL_STEP_PX
+        )
+        if next_scroll_y != surface.scroll_y:
+            surface.scroll_y = next_scroll_y
             surface.dirty = true
             self.surfaces[i] = surface
 
@@ -1184,6 +1233,20 @@ class Compositor:
                             new_x - self.drag_offset_x,
                             new_y - self.drag_offset_y
                         )
+                    elif self.resizing:
+                        val resized_width = wm_lifecycle_bounded_window_width(
+                            self.resize_start_w + (new_x - self.resize_start_x),
+                            self.screen_width
+                        )
+                        val resized_height = wm_lifecycle_bounded_window_height(
+                            self.resize_start_h + (new_y - self.resize_start_y),
+                            self.screen_height
+                        )
+                        self.resize_window(
+                            self.resize_window_id.to_u64(),
+                            resized_width,
+                            resized_height
+                        )
                     else:
                         pointer_kind_code = 1
                 elif button == HOST_BTN_RIGHT and pressed:
@@ -1201,25 +1264,61 @@ class Compositor:
                     pointer_kind_code
                 )
 
-                if left_press and not self.dragging:
+                if wheel != 0:
+                    var scroll_hit_idx = -1
+                    var scroll_scan = 0
+                    # cpu-lane-loop-ok: pointer scroll hit test over open window surfaces, once per backend input event; bound is the surface count
+                    while scroll_scan < self.surfaces.len():
+                        val surface = self.surfaces[scroll_scan]
+                        if (surface.visible and
+                            wm_window_state_accepts_input(surface.state) and
+                            new_x >= surface.x and new_x < surface.x + surface.width and
+                            new_y >= surface.y and new_y < surface.y + surface.height):
+                            scroll_hit_idx = scroll_scan
+                        scroll_scan = scroll_scan + 1
+                    if scroll_hit_idx >= 0:
+                        self.scroll_window(
+                            self.surfaces[scroll_hit_idx].id.to_u64(), wheel
+                        )
+
+                if left_press and not self.dragging and not self.resizing:
                     var hit_idx = -1
                     var wi = 0
                     # cpu-lane-loop-ok: pointer hit test over open window surfaces, once per backend input event; bound is the surface count
                     while wi < self.surfaces.len():
                         val surface = self.surfaces[wi]
-                        if (new_x >= surface.x and new_x < surface.x + surface.width and new_y >= surface.y and new_y < surface.y + surface.height):
+                        if (surface.visible and
+                            wm_window_state_accepts_input(surface.state) and
+                            new_x >= surface.x and new_x < surface.x + surface.width and
+                            new_y >= surface.y and new_y < surface.y + surface.height):
                             hit_idx = wi
                         wi = wi + 1
                     if hit_idx >= 0:
                         val hit = self.surfaces[hit_idx]
                         self.focus_window(hit.id)
-                        if new_y < hit.y + 24:
+                        if wm_lifecycle_resize_grip_hit(
+                            hit.x, hit.y, hit.width, hit.height, new_x, new_y
+                        ):
+                            self.resizing = true
+                            self.resize_window_id = hit.id
+                            self.resize_start_x = new_x
+                            self.resize_start_y = new_y
+                            self.resize_start_w = hit.width
+                            self.resize_start_h = hit.height
+                        elif new_y < hit.y + 24:
                             self.dragging = true
                             self.drag_window_id = hit.id
                             self.drag_offset_x = new_x - hit.x
                             self.drag_offset_y = new_y - hit.y
                 elif button == HOST_BTN_LEFT and not pressed:
                     self.dragging = false
+                    self.drag_window_id = 0
+                    self.resizing = false
+                    self.resize_window_id = 0
+                    self.resize_start_x = 0
+                    self.resize_start_y = 0
+                    self.resize_start_w = 0
+                    self.resize_start_h = 0
             HostInputEvent.Resize(w, h):
                 # No resize producer reaches this path yet (WS-C C4/C5 wire the
                 # host toolkits). Ignored rather than guessed at.

@@ -197,6 +197,23 @@ serial transcript before PASS. Its normalized fields are retained in
 `build/os/arm64_qmp_input_evidence/evidence.env`, `qmp-input.log`, and
 `report.md`.
 
+The canonical compositor applies titlebar drag and south-east border resize to
+the live `WindowSurface` geometry before the next frame. Resize uses the shared
+WM lifecycle grip and clamps to the 160x120 minimum and current desktop bounds.
+Wheel input changes only the topmost eligible web surface under the pointer;
+its per-surface offset is bounded to the Simple Web 4,000px render ceiling and
+is threaded through content revision, cache height, `WmContentFrame`, and the
+existing `DrawIrComposition` builder. No ARM-only scene or drawing path is
+introduced.
+
+The Linux production host-GPU entry is
+`examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop_linux_qemu.spl`.
+It requests Vulkan with `backend_required=true`. A missing map/negotiation,
+degraded content resource, rejected device receipt, or failed device readback
+returns a zero frame revision and terminates through the existing ARM desktop
+fatal path; the required row never recomposes or presents through the local
+software path. The generic RAMFB entry remains the local portability row.
+
 The host-GPU evidence owner remains
 `scripts/check/check-simpleos-qemu-host-gpu-2d.shs`. Its AArch64 row must first
 pass the existing 64x48 raw-render, Draw IR, and independent ProcessingIR probe.
