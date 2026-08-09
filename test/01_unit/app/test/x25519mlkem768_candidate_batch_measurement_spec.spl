@@ -104,6 +104,36 @@ describe "X25519MLKEM768 qualified SIMD batch measurement":
         expect(source).to_contain(
             "_collect_paired_samples(\n        final_qualification")
 
+    it "freezes the finalized session across oracle, receipts, and schedule":
+        # Regression for a provenance error where a post-run RSS refresh could
+        # mint a new session identity after the timed samples had completed.
+        val source = file_read_text(
+            "src/app/test/x25519mlkem768_candidate_batch_measurement.spl")
+        val final_reason_at = source.index_of(
+            "val final_qualification_reason =")
+        val oracle_at = source.index_of("val oracle = _qualify_oracle(")
+        val samples_at = source.index_of("val samples = _collect_paired_samples(")
+        val session_assignment_at = source.index_of(
+            "final_qualification.target.session_id =")
+        val after_session_assignment = source.substring(
+            session_assignment_at + 1, source.len())
+        val after_samples = source.substring(samples_at, source.len())
+        val second_session_assignment_at = after_session_assignment.index_of(
+            "final_qualification.target.session_id =")
+        val post_sample_refresh_at = after_samples.index_of(
+            "platform_measurement_refresh_process_rss(")
+        expect(final_reason_at).to_be_greater_than(session_assignment_at)
+        expect(oracle_at).to_be_greater_than(final_reason_at)
+        expect(samples_at).to_be_greater_than(oracle_at)
+        expect(second_session_assignment_at).to_equal(-1)
+        expect(post_sample_refresh_at).to_equal(-1)
+        expect(source).to_contain(
+            "session_id: warm.session_id, monotonic_clock_id: warm.monotonic_clock_id")
+        expect(source).to_contain(
+            "session_id: final_qualification.target.session_id,")
+        expect(source).to_contain(
+            "val max_rss_kb = refreshed_observation.peak_memory_kib")
+
     it "accepts only exact qualification config and SIMD artifact binding":
         val qualification = _measurement_qualification()
         val config = _measurement_config(qualification)
