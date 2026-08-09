@@ -183,6 +183,7 @@ struct Engine2dDrawIrGlassOutcome:
     execution: Engine2dGlassExecutionResult
 
 class Engine2dDrawIrMaterialExecutionEvidence:
+    composited: bool
     execution_target: text
     backend_handle: i64
     device_identity: i64
@@ -468,7 +469,11 @@ fn _engine2d_draw_ir_render_borders(engine: Engine2D, style: [DrawIrStyleProp], 
         eng.draw_rect_filled(x + w - right_w, y, right_w, h, right_c)
     eng
 
-fn _engine2d_draw_ir_render_glass_material(engine: Engine2D, command: DrawIrCommand, x: i32, y: i32, w: i32, h: i32, radius: i32) -> Engine2dDrawIrGlassOutcome:
+fn _engine2d_draw_ir_render_glass_material(
+    engine: Engine2D, command: DrawIrCommand,
+    x: i32, y: i32, w: i32, h: i32, radius: i32,
+    mut execution_evidence: Engine2dDrawIrMaterialExecutionEvidence
+) -> Engine2dDrawIrGlassOutcome:
     var eng = engine
     val unavailable = engine2d_glass_execution_unavailable(
         "glass-material-not-composited")
@@ -553,6 +558,10 @@ fn _engine2d_draw_ir_render_glass_material(engine: Engine2D, command: DrawIrComm
     )
     val device_execution = eng.draw_ir_apply_glass_material(config)
     if device_execution.applied:
+        execution_evidence.composited = true
+        execution_evidence.execution_target = device_execution.execution_target
+        execution_evidence.backend_handle = device_execution.backend_handle
+        execution_evidence.device_identity = device_execution.device_identity
         return Engine2dDrawIrGlassOutcome(
             engine: eng, composited: true, execution: device_execution)
     if device_execution.failure_reason == "device-glass-state-unknown":
@@ -564,6 +573,10 @@ fn _engine2d_draw_ir_render_glass_material(engine: Engine2D, command: DrawIrComm
         return Engine2dDrawIrGlassOutcome(
             engine: eng, composited: false, execution: unavailable)
     eng.draw_image(x, y, w, h, pixels)
+    execution_evidence.composited = true
+    execution_evidence.execution_target = "cpu-scalar-glass-v1"
+    execution_evidence.backend_handle = 0
+    execution_evidence.device_identity = 0
     Engine2dDrawIrGlassOutcome(
         engine: eng,
         composited: true,
@@ -642,18 +655,17 @@ fn _engine2d_draw_ir_render_box(
         )
     else:
         _engine2d_draw_ir_render_glass_material(
-            eng, command, x, y, w, h, radius)
-    if glass.composited:
-        execution_evidence.execution_target = glass.execution.execution_target
-        execution_evidence.backend_handle = glass.execution.backend_handle
-        execution_evidence.device_identity = glass.execution.device_identity
+            eng, command, x, y, w, h, radius, execution_evidence)
+    if execution_evidence.composited:
         if shadow_admitted:
             val inset_shadow_engine_ignored = engine2d_draw_ir_render_typed_inset_shadows(
                 eng, typed_shadows.layers, x, y, w, h, effective_corners)
         val border_engine_ignored = _engine2d_draw_ir_render_borders(
             eng, style, x, y, w, h, radius)
         return Engine2dDrawIrBoxOutcome(
-            engine: eng, glass_execution: glass.execution)
+            engine: eng,
+            glass_execution: engine2d_glass_execution_unavailable(
+                "execution-owned-by-sidecar"))
     val bg_image = _engine2d_draw_ir_style_value(style, "background-image")
     if typed_nonuniform:
         val background_engine_ignored = engine2d_draw_ir_render_typed_background(
@@ -1311,7 +1323,8 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
     var glass_device_identity: i64 = 0
     var css_background_pixel_work_remaining = css_background_pixel_work_budget
     val material_execution = Engine2dDrawIrMaterialExecutionEvidence(
-        execution_target: "", backend_handle: 0, device_identity: 0)
+        composited: false, execution_target: "",
+        backend_handle: 0, device_identity: 0)
     for command in commands:
         # A nil display-list element must be skipped before any field access.
         # Keep the explicit comparison: freestanding codegen has miscompiled
@@ -1343,6 +1356,7 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
             if metal_requested:
                 metal_device_glass_requested_count = (
                     metal_device_glass_requested_count + 1)
+            material_execution.composited = false
             material_execution.execution_target = ""
             material_execution.backend_handle = 0
             material_execution.device_identity = 0
