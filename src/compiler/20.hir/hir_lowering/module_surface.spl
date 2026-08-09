@@ -140,6 +140,23 @@ class ModuleSurfaceReexportCache:
         ModuleSurfaceReexportCache(snapshot_generation: snapshot_generation,
                                    entries: {})
 
+impl ModuleSurfaceReexportCache:
+    me has(key: text) -> bool:
+        self.entries.contains_key(key)
+
+    me get(key: text) -> ModuleSurfaceReexportSource:
+        self.entries[key]
+
+    me put(key: text, value: ModuleSurfaceReexportSource):
+        # Seed interpreter collections use Arc/COW mutation.  Persist the
+        # updated Dict back into the cache receiver explicitly.
+        var entries = self.entries
+        entries[key] = value
+        self.entries = entries
+
+    me count() -> i64:
+        self.entries.keys().len()
+
 struct ModuleSurfacesByName:
     surfaces: [ModuleSurface]
     index_by_name: Dict<text, i64>
@@ -161,6 +178,28 @@ impl ModuleSurfacesByName:
             index_by_name: {},
             snapshot_generation: snapshot_generation,
             reexport_cache: ModuleSurfaceReexportCache.new(snapshot_generation))
+
+    # Keep cache access at one field hop.  The seed interpreter can detach a
+    # class receiver reached through a deeper projection, so callers must not
+    # extract `snapshot.reexport_cache` themselves.
+    me reexport_has(key: text) -> bool:
+        var cache = self.reexport_cache
+        cache.has(key)
+
+    me reexport_get(key: text) -> ModuleSurfaceReexportSource:
+        var cache = self.reexport_cache
+        cache.get(key)
+
+    me reexport_put(key: text, value: ModuleSurfaceReexportSource):
+        var cache = self.reexport_cache
+        cache.put(key, value)
+        # Persist the seed interpreter's COW cache receiver at this owner
+        # boundary.  Native class references keep the same identity.
+        self.reexport_cache = cache
+
+    me reexport_count() -> i64:
+        var cache = self.reexport_cache
+        cache.count()
 
 impl ModuleSurfaceBuilder:
     static fn new() -> ModuleSurfaceBuilder:

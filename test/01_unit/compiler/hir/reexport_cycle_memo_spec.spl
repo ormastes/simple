@@ -29,9 +29,19 @@ describe "HIR re-export cycle memo":
         var lowering = hirlowering_for_module("cycle.consumer", surfaces)
         val first = lowering.find_reexport_source(facade, "cycle.a", "NeverThere", 0)
         expect(first.found).to_equal(false)
+        var first_snapshot = lowering.module_surfaces
+        expect(first_snapshot.reexport_count()).to_equal(1)
 
-        val second = lowering.find_reexport_source(facade, "cycle.a", "NeverThere", 0)
+        # Thread the persisted snapshot into a second lowering.  The seed
+        # interpreter is Arc/COW and cannot prove live cross-copy class alias
+        # mutation; the MIR class prescan covers that native ABI path.
+        var second_lowering = hirlowering_for_module("cycle.other_consumer", first_snapshot)
+        var second_snapshot = second_lowering.module_surfaces
+        expect(second_snapshot.reexport_count()).to_equal(1)
+        val second = second_lowering.find_reexport_source(facade, "cycle.a", "NeverThere", 0)
         expect(second.found).to_equal(false)
+        second_snapshot = second_lowering.module_surfaces
+        expect(second_snapshot.reexport_count()).to_equal(1)
 
     it "retains a positive result reached through a cyclic facade graph":
         val log = cycle_memo_logger()

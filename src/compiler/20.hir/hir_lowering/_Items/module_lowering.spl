@@ -151,19 +151,6 @@ fn hir_module_item_terminal_kind(m: ModuleSurface, name: text) -> text:
     if m.constants.contains_key(name): return "const"
     ""
 
-# Keep cache mutation behind methods because the native semantic checker
-# rejects assignment through a nested field (`snapshot.reexport_cache.entries`)
-# even though the cache itself is reference-owned.
-impl ModuleSurfaceReexportCache:
-    me has(key: text) -> bool:
-        self.entries.contains_key(key)
-
-    me get(key: text) -> ModuleSurfaceReexportSource:
-        self.entries[key]
-
-    me put(key: text, value: ModuleSurfaceReexportSource):
-        self.entries[key] = value
-
 fn hir_symbol_terminal_kind(kind: SymbolKind) -> text:
     match kind:
         case SymbolKind.Class: "class"
@@ -848,9 +835,9 @@ impl HirLowering:
         # the surface view, and keeping this map on HIR would pay the full
         # resolver walk again for every module.
         val memo_key = facade_name + "\t" + wanted
-        var snapshot_cache = self.module_surfaces.reexport_cache
-        if depth == 0 and snapshot_cache.has(memo_key):
-            val cached = snapshot_cache.get(memo_key)
+        var module_surfaces = self.module_surfaces
+        if depth == 0 and module_surfaces.reexport_has(memo_key):
+            val cached = module_surfaces.reexport_get(memo_key)
             return HirReexportSource(found: cached.found, module_name: cached.module_name, item_name: cached.item_name)
         if self.reexport_active.contains_key(memo_key):
             return HirReexportSource(found: false, module_name: "", item_name: "")
@@ -858,10 +845,14 @@ impl HirLowering:
         val resolved = self.find_reexport_source_inner(facade_mod, facade_name, wanted, depth)
         self.reexport_active = self.reexport_active.remove(memo_key)
         if depth == 0:
-            snapshot_cache.put(memo_key, ModuleSurfaceReexportSource(
+            module_surfaces.reexport_put(memo_key, ModuleSurfaceReexportSource(
                 found: resolved.found,
                 module_name: resolved.module_name,
                 item_name: resolved.item_name))
+            # Seed interpreter receivers are Arc/COW; write the updated
+            # snapshot struct back through the HIR owner.  Native keeps the
+            # snapshot-owned cache class shared across lowerings.
+            self.module_surfaces = module_surfaces
         resolved
 
     me find_reexport_source_inner(facade_mod: ModuleSurface, facade_name: text, wanted: text, depth: i64) -> HirReexportSource:
