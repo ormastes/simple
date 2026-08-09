@@ -90,3 +90,13 @@
 - Stage4 retry 1 advanced to `daemon_sdk/protocol.spl: rt_file_rename`; retry 2 advanced to `mcp_t32/gap_tools.spl: rt_file_read_text`; retry 3 advanced to `mcp_t32/json_helpers.spl: file_write_text`.
 - The retry-3 frontier is fixed and pushed, but the three-retry cap is reached. Start the next preserved-cache Stage4 attempt only in a fresh cycle.
 - No Stage4 candidate exists yet. Candidate smoke, ARM64 attestation, QMP evidence, macOS, and Uno-Q remain pending. Primitive QEMU WM is not verified.
+
+## 2026-08-09 Stage4 fresh-cycle continuation
+
+- Pushed `77a7950b243`: import QEMU platform lane helpers explicitly in `scenario_exec`; native facade fixture and source contract pass.
+- Pushed `7ce3d0e27c4`: replace obsolete config `float` conversion in sync/async parsers with concrete `parse_f64` handling; native lowering passes and interpreter behavior spec is present but cannot run until a self-hosted CLI exists.
+- Pushed `b1483f1f6f1`: export/consume canonical `app.io.mod.file_stat`; native cache fingerprint fixture passes.
+- Retry 1 advanced to missing QEMU platform helper imports; retry 2 advanced to config parser `float`; retry 3 advanced to test-cache `rt_file_stat`.
+- The retry-3 frontier is fixed and pushed. The three-attempt cap is reached; use the preserved Stage4 cache in the next fresh cycle.
+- Separate defect observed: Stage3 native `f64` values/default arguments are zero or corrupted. Do not treat Stage3 native numeric output as interpreter evidence; investigate after obtaining the Stage4 candidate.
+- No Stage4 candidate exists. Candidate smoke/install, ARM64 attestation, QMP primitive-WM receipts, macOS, ARM, and Uno-Q verification remain pending.
