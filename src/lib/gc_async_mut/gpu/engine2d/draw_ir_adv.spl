@@ -1949,12 +1949,20 @@ fn engine2d_draw_ir_adv_composition(engine: Engine2D, composition: DrawIrComposi
     result
 
 fn engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: DrawIrComposition, gpu_available: bool, images: [Engine2dResolvedDrawIrImage]) -> Engine2dDrawIrAdvResult:
-    val result = _engine2d_draw_ir_adv_composition_with_images(engine, composition, gpu_available, images, false, true, true)
+    val result = _engine2d_draw_ir_adv_composition_with_images(engine, composition, gpu_available, images, false, true, true, [], [])
     result
+
+fn engine2d_draw_ir_adv_composition_with_images_into(engine: Engine2D, composition: DrawIrComposition, gpu_available: bool, images: [Engine2dResolvedDrawIrImage], destination: [u32]) -> i32:
+    var transport_status: [i32] = [-4]
+    _engine2d_draw_ir_adv_composition_with_images(
+        engine, composition, gpu_available, images, false, true, true,
+        destination, transport_status
+    )
+    transport_status[0]
 
 fn engine2d_draw_ir_adv_composition_present_with_images(engine: Engine2D, composition: DrawIrComposition, gpu_available: bool, images: [Engine2dResolvedDrawIrImage]) -> Engine2dDrawIrAdvResult:
     """Render and present a composition without requesting a result readback."""
-    _engine2d_draw_ir_adv_composition_with_images(engine, composition, gpu_available, images, false, true, false)
+    _engine2d_draw_ir_adv_composition_with_images(engine, composition, gpu_available, images, false, true, false, [], [])
 
 fn engine2d_draw_ir_adv_fresh_device_composition_with_images(engine: Engine2D, composition: DrawIrComposition, images: [Engine2dResolvedDrawIrImage]) -> Engine2dDrawIrAdvResult:
     """Render/read back an exhaustively preflighted fresh device composition."""
@@ -1966,9 +1974,9 @@ fn engine2d_draw_ir_adv_fresh_device_composition_with_images(engine: Engine2D, c
     if prepared.1 != "":
         val plan = simple_2d_draw_ir_adv_composition_plan(composition, true)
         return _engine2d_draw_ir_result_from_composition_plan_with_unsupported(plan, 0, 1, prepared.1, engine2d_readback([], "preflight_rejected"))
-    _engine2d_draw_ir_adv_composition_with_images(prepared.0, composition, true, images, true, false, true)
+    _engine2d_draw_ir_adv_composition_with_images(prepared.0, composition, true, images, true, false, true, [], [])
 
-fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: DrawIrComposition, gpu_available: bool, images: [Engine2dResolvedDrawIrImage], allow_parent_image: bool, present_frame: bool, readback_frame: bool) -> Engine2dDrawIrAdvResult:
+fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: DrawIrComposition, gpu_available: bool, images: [Engine2dResolvedDrawIrImage], allow_parent_image: bool, present_frame: bool, readback_frame: bool, destination: [u32], transport_status: [i32]) -> Engine2dDrawIrAdvResult:
     val plan = simple_2d_draw_ir_adv_composition_plan(composition, gpu_available)
     # Preserve the public fallback invariant from the original inputs. The
     # native cross-module aggregate path can lose this bool from `plan`.
@@ -2058,6 +2066,15 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: 
     var readback = engine2d_readback([], "not_requested")
     if readback_frame:
         readback = eng.read_pixels_with_source()
+    if destination.len() > 0 and transport_status.len() > 0:
+        if readback.pixels.len() == destination.len():
+            var transport_index: i32 = 0
+            while transport_index < destination.len():
+                destination[transport_index] = readback.pixels[transport_index]
+                transport_index = transport_index + 1
+            transport_status[0] = 1
+        else:
+            transport_status[0] = -4
     var result = _engine2d_draw_ir_result_from_composition_plan_with_unsupported(
         plan, rendered, skipped, unsupported_kinds, readback)
     if gpu_fallback_required:
@@ -2123,6 +2140,7 @@ export engine2d_draw_ir_adv_batch
 export engine2d_draw_ir_adv_batch_with_images
 export engine2d_draw_ir_adv_composition
 export engine2d_draw_ir_adv_composition_with_images
+export engine2d_draw_ir_adv_composition_with_images_into
 export engine2d_draw_ir_adv_composition_present_with_images
 export engine2d_draw_ir_adv_fresh_device_composition_with_images
 export engine2d_resolved_draw_ir_image
