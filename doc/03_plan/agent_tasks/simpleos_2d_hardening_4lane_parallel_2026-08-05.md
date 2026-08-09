@@ -61,6 +61,13 @@ All four lanes must use the same evidence fields and helper names:
 ### Lane 3 — macOS HVF row (emulator-only, non-runnable here)
 - Scope: emulated macOS run path with current constraints.
 - Status policy: tests/specs can be implemented and run only on macOS host; no in this lane host run is claimed.
+- Emulator-readiness source contract now requires decoded and correlated
+  move/down/drag/up/wheel coordinates and deltas, ordinary key delivery,
+  distinct left/right Ctrl and Alt identities, one real audio
+  submit/completion, twenty explicit submit/fence/device-readback animation
+  frames, vector-font/capture integrity, 16.7 ms nearest-rank p95, 256 MiB
+  maximum RSS, stable identity, and no fallback. TODO660 remains open until a
+  source-matched prepared macOS host produces the live receipt.
 - Deliverable:
   - run plan + test artifacts captured as `blocked`/`unsupported` with exact reasons, plus TODO list for runnable operators.
   - no synthetic pass records.

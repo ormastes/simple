@@ -6,11 +6,10 @@
 # of inferring it from aggregate counters.
 
 use std.gpu.engine2d.engine.{Engine2D}
-use std.gc_async_mut.gpu.engine2d.backend_metal.{MetalBackend}
-use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
     Engine2dDrawIrAdvResult,
-    engine2d_draw_ir_adv_composition
+    engine2d_draw_ir_adv_composition,
+    engine2d_draw_ir_adv_strict_vulkan_primitives_with_images
 }
 use std.common.processing.processing_ir.{processing_ir_fill_u32}
 use std.gc_async_mut.processing.vulkan_fill_u32.{processing_ir_execute_vulkan}
@@ -19,29 +18,53 @@ use std.common.image.ppm_decode.{encode_ppm_p6}
 use std.io.window_winit.{winit_loop_new, winit_loop_free, winit_window_new, winit_window_free, winit_present_rgba}
 use std.nogc_sync_mut.concurrent.thread.{thread_sleep}
 use std.io_runtime.{env_get, file_write, file_write_bytes}
+use std.nogc_sync_mut.engine.audio.ui_click_pcm_raw.{
+    ui_click_pcm_create, ui_click_pcm_checksum, ui_click_pcm_play,
+    ui_click_pcm_release
+}
+use std.nogc_sync_mut.io.audio_sffi.{
+    rt_audio_init, rt_audio_shutdown, rt_audio_is_playing,
+    rt_audio_live_device_count, rt_audio_backend_name, rt_audio_backend_is_real
+}
 use macos_gpu_2d_draw_ir_event_fixture.{
     MACOS_GPU_2D_NATIVE_FOCUS_KIND,
     MacosGpu2dDrawIrEventFixture,
-    macos_gpu_2d_draw_ir_event_fixture
+    macos_gpu_2d_draw_ir_event_fixture,
+    macos_gpu_2d_animation_composition
 }
 
 extern fn rt_winit_event_loop_poll_events(el: i64, max: i64) -> i64
 extern fn rt_winit_event_get_type(ev: i64) -> i64
 extern fn rt_winit_event_key_pressed(ev: i64) -> i64
+extern fn rt_winit_event_key_keycode(ev: i64) -> i64
 extern fn rt_winit_event_mouse_pressed(ev: i64) -> i64
+extern fn rt_winit_event_mouse_button(ev: i64) -> i64
+extern fn rt_winit_event_mouse_x_milli(ev: i64) -> i64
+extern fn rt_winit_event_mouse_y_milli(ev: i64) -> i64
+extern fn rt_winit_event_wheel_x_milli(ev: i64) -> i64
+extern fn rt_winit_event_wheel_y_milli(ev: i64) -> i64
 extern fn rt_winit_event_free(ev: i64)
+extern fn rt_time_now_nanos() -> i64
 
 val LIVE_DPI: i32 = 300
 val LIVE_FONT_POINTS: i32 = 24
 val LIVE_BACKGROUND: u32 = 0xFF101522u32
 val PREVIEW_WIDTH: i32 = 960
 val PREVIEW_HEIGHT: i32 = 540
-val EVENT_SEQUENCE: text = "focus,pointer_move,pointer_down,pointer_up,key_down,key_up"
+val EVENT_SEQUENCE: text = "focus,pointer_move,pointer_down,pointer_drag,pointer_up,pointer_wheel,key_down,key_up,left_ctrl_down,left_ctrl_up,right_ctrl_down,right_ctrl_up,left_alt_down,left_alt_up,right_alt_down,right_alt_up"
 val EVT_CLOSE: i64 = 3
 val EVT_WINDOW_FOCUSED: i64 = 5
 val EVT_KEYBOARD_INPUT: i64 = 10
 val EVT_MOUSE_BUTTON: i64 = 20
 val EVT_MOUSE_MOVED: i64 = 21
+val EVT_MOUSE_WHEEL: i64 = 22
+val KEY_H: i64 = 72
+val KEY_LEFT_CTRL: i64 = 1001
+val KEY_RIGHT_CTRL: i64 = 1002
+val KEY_LEFT_ALT: i64 = 1003
+val KEY_RIGHT_ALT: i64 = 1004
+val LIVE_ANIMATION_FRAMES: i64 = 20
+val LIVE_FRAME_P95_BUDGET_NS: i64 = 16700000
 
 fn event_preview(interaction_complete: bool) -> [i64]:
     # The event window is deliberately smaller than the evidence framebuffer.
@@ -106,6 +129,21 @@ fn lower_hex_sha256_valid(value: text) -> bool:
         i = i + 1
     true
 
+fn frame_p95_ns(samples: [i64]) -> i64:
+    var ordered = samples
+    var i = 1
+    while i < ordered.len():
+        val current = ordered[i]
+        var j = i
+        while j > 0 and ordered[j - 1] > current:
+            ordered[j] = ordered[j - 1]
+            j = j - 1
+        ordered[j] = current
+        i = i + 1
+    # ceil(0.95 * 20) - 1 = 18; retain the formula for contract clarity.
+    val p95_index = (ordered.len() * 95 + 99) / 100 - 1
+    ordered[p95_index]
+
 fn vulkan_font_device_evidence_valid(result: Engine2dDrawIrAdvResult) -> bool:
     (result.font_execution_target == "vulkan" and
      result.font_batch_identity != "" and
@@ -163,6 +201,16 @@ fn write_runtime_receipt(path: text, backend: text, capture_path: text,
                          font_pixel_size: i32,
                          font_target: text, font_attempts: text,
                          event_sequence: text, event_count: i64,
+                         pointer_move_x_milli: i64, pointer_move_y_milli: i64,
+                         pointer_drag_x_milli: i64, pointer_drag_y_milli: i64,
+                         pointer_button: i64, wheel_x_milli: i64,
+                         wheel_y_milli: i64, ordinary_keycode: i64,
+                         animation_frame_count: i64, animation_frame_p95_ns: i64,
+                         animation_submit_count: i64, animation_fence_count: i64,
+                         animation_correlated_frame_count: i64,
+                         animation_final_checksum: i64,
+                         audio_backend: text, audio_pcm_checksum: u64,
+                         audio_playback_handle: i64, audio_completion_observed: bool,
                          fixture: MacosGpu2dDrawIrEventFixture,
                          draw_ir_result: Engine2dDrawIrAdvResult,
                          warm_draw_ir_result: Engine2dDrawIrAdvResult,
@@ -219,6 +267,34 @@ fn write_runtime_receipt(path: text, backend: text, capture_path: text,
         "gpu_2d_live_event_sequence={event_sequence}\n" +
         "gpu_2d_live_event_count={event_count}\n" +
         "gpu_2d_live_event_backend={backend}\n" +
+        "gpu_2d_live_pointer_move_x_milli={pointer_move_x_milli}\n" +
+        "gpu_2d_live_pointer_move_y_milli={pointer_move_y_milli}\n" +
+        "gpu_2d_live_pointer_drag_x_milli={pointer_drag_x_milli}\n" +
+        "gpu_2d_live_pointer_drag_y_milli={pointer_drag_y_milli}\n" +
+        "gpu_2d_live_pointer_button={pointer_button}\n" +
+        "gpu_2d_live_pointer_wheel_x_milli={wheel_x_milli}\n" +
+        "gpu_2d_live_pointer_wheel_y_milli={wheel_y_milli}\n" +
+        "gpu_2d_live_ordinary_keycode={ordinary_keycode}\n" +
+        "gpu_2d_live_left_ctrl_keycode={KEY_LEFT_CTRL}\n" +
+        "gpu_2d_live_right_ctrl_keycode={KEY_RIGHT_CTRL}\n" +
+        "gpu_2d_live_left_alt_keycode={KEY_LEFT_ALT}\n" +
+        "gpu_2d_live_right_alt_keycode={KEY_RIGHT_ALT}\n" +
+        "gpu_2d_live_animation_frame_count={animation_frame_count}\n" +
+        "gpu_2d_live_animation_frame_p95_ns={animation_frame_p95_ns}\n" +
+        "gpu_2d_live_animation_frame_p95_budget_ns={LIVE_FRAME_P95_BUDGET_NS}\n" +
+        "gpu_2d_live_animation_submit_count={animation_submit_count}\n" +
+        "gpu_2d_live_animation_fence_count={animation_fence_count}\n" +
+        "gpu_2d_live_animation_correlated_frame_count={animation_correlated_frame_count}\n" +
+        "gpu_2d_live_animation_readback_source=device_readback\n" +
+        "gpu_2d_live_animation_final_checksum={animation_final_checksum}\n" +
+        "gpu_2d_live_audio_backend={audio_backend}\n" +
+        "gpu_2d_live_audio_pcm_checksum={audio_pcm_checksum}\n" +
+        "gpu_2d_live_audio_playback_handle={audio_playback_handle}\n" +
+        "gpu_2d_live_audio_submit_count=1\n" +
+        "gpu_2d_live_audio_completion_count={if audio_completion_observed: 1 else: 0}\n" +
+        "gpu_2d_live_audio_completion_observed={audio_completion_observed}\n" +
+        "gpu_2d_live_audio_backend_real=true\n" +
+        "gpu_2d_live_audio_fallback=false\n" +
         "gpu_2d_live_draw_ir_composition_id={fixture.composition.composition_id}\n" +
         "gpu_2d_live_draw_ir_scene_key={fixture.composition.scene_key}\n" +
         "gpu_2d_live_draw_ir_rendered_commands={draw_ir_result.rendered_command_count}\n" +
@@ -237,8 +313,8 @@ fn write_runtime_receipt(path: text, backend: text, capture_path: text,
         "gpu_2d_live_semantic_native_focus_kind={mutation.native_focus_kind}\n" +
         "gpu_2d_live_semantic_native_focus_reduced={mutation.native_focus_reduced}\n" +
         "gpu_2d_live_semantic_raw_winit_reduced={mutation.native_focus_reduced}\n" +
-        "gpu_2d_live_semantic_pointer_key_delivery=observed\n" +
-        "gpu_2d_live_semantic_correlation=native-focus-reduced;pointer-key-delivery-observed\n")
+        "gpu_2d_live_semantic_pointer_key_delivery=decoded-and-correlated\n" +
+        "gpu_2d_live_semantic_correlation=native-focus-reduced;pointer-drag-wheel-correlated;ordinary-left-right-modifiers-correlated\n")
 
 fn write_failure_receipt_with_diagnostics(
         path: text, backend: text, reason: text, stage: i64, exit_code: i64,
@@ -287,21 +363,6 @@ fn run_macos_gpu_2d_live_harness(backend: text) -> i64:
     if engine.backend_name() != backend:
         val selected_backend = engine.backend_name()
         engine.shutdown()
-        var probe_reason = "backend-specific-probe-unavailable"
-        if backend == "vulkan":
-            var vulkan_probe = VulkanBackend.create()
-            if vulkan_probe.init(live_width, live_height):
-                probe_reason = "vulkan-direct-probe-unexpectedly-initialized"
-                vulkan_probe.shutdown()
-            else:
-                probe_reason = vulkan_probe.last_error
-        elif backend == "metal":
-            var metal_probe = MetalBackend.create()
-            if metal_probe.init(live_width, live_height):
-                probe_reason = "metal-direct-probe-unexpectedly-initialized"
-                metal_probe.shutdown()
-            else:
-                probe_reason = metal_probe.last_error
         file_write(
             receipt_path,
             "gpu_2d_live_status=fail\n" +
@@ -311,13 +372,9 @@ fn run_macos_gpu_2d_live_harness(backend: text) -> i64:
             "gpu_2d_live_exit_code=4\n" +
             "gpu_2d_live_requested_backend=" + backend + "\n" +
             "gpu_2d_live_selected_backend=" + selected_backend + "\n" +
-            "gpu_2d_live_probe=" + probe_reason + "\n")
+            "gpu_2d_live_probe=canonical-engine2d-backend-selection-failed\n")
         return 4
     engine.clear(LIVE_BACKGROUND)
-    engine.draw_gradient_rect(160, 140, 3520, 1880, 0xFF172554u32, 0xFF312E81u32)
-    engine.draw_rect_filled(260, 260, 1120, 520, 0xCC1F2937u32)
-    engine.draw_circle_filled(3100, 620, 330, 0xFF22D3EEu32)
-    engine.draw_triangle_filled(2460, 1560, 3100, 980, 3580, 1740, 0xFFF59E0Bu32)
 
     # Use the pinned static Bungee face for live evidence. The first catalog
     # entry is a 17.7 MB CJK variable font whose interpreted parse alone can
@@ -381,8 +438,16 @@ fn run_macos_gpu_2d_live_harness(backend: text) -> i64:
     var event_count: i64 = 0
     var native_focus_observed = false
     var native_focus_kind: i64 = 0
+    var pointer_move_x_milli: i64 = 0
+    var pointer_move_y_milli: i64 = 0
+    var pointer_drag_x_milli: i64 = 0
+    var pointer_drag_y_milli: i64 = 0
+    var pointer_button: i64 = -1
+    var wheel_x_milli: i64 = 0
+    var wheel_y_milli: i64 = 0
+    var ordinary_keycode: i64 = 0
     var wait_ticks = 0
-    while event_stage < 6 and wait_ticks < 18000:
+    while event_stage < 16 and wait_ticks < 18000:
         var event = rt_winit_event_loop_poll_events(lp.handle, 1)
         while event != 0:
             val kind = rt_winit_event_get_type(event)
@@ -393,35 +458,91 @@ fn run_macos_gpu_2d_live_harness(backend: text) -> i64:
                 event_stage = 1
                 event_count = event_count + 1
             elif kind == EVT_MOUSE_MOVED and event_stage == 1:
+                pointer_move_x_milli = rt_winit_event_mouse_x_milli(event)
+                pointer_move_y_milli = rt_winit_event_mouse_y_milli(event)
                 event_sequence = append_event(event_sequence, "pointer_move")
                 event_stage = 2
+                event_count = event_count + 1
+            elif kind == EVT_MOUSE_MOVED and event_stage == 3:
+                pointer_drag_x_milli = rt_winit_event_mouse_x_milli(event)
+                pointer_drag_y_milli = rt_winit_event_mouse_y_milli(event)
+                event_sequence = append_event(event_sequence, "pointer_drag")
+                event_stage = 4
                 event_count = event_count + 1
             elif kind == EVT_MOUSE_BUTTON:
                 val pressed = rt_winit_event_mouse_pressed(event) != 0
                 if event_stage == 2 and pressed:
+                    pointer_button = rt_winit_event_mouse_button(event)
                     event_sequence = append_event(event_sequence, "pointer_down")
                     event_stage = 3
                     event_count = event_count + 1
-                elif event_stage == 3 and not pressed:
+                elif event_stage == 4 and not pressed and rt_winit_event_mouse_button(event) == pointer_button:
                     event_sequence = append_event(event_sequence, "pointer_up")
-                    event_stage = 4
-                    event_count = event_count + 1
-            elif kind == EVT_KEYBOARD_INPUT:
-                val pressed = rt_winit_event_key_pressed(event) != 0
-                if event_stage == 4 and pressed:
-                    event_sequence = append_event(event_sequence, "key_down")
                     event_stage = 5
                     event_count = event_count + 1
-                elif event_stage == 5 and not pressed:
+            elif kind == EVT_MOUSE_WHEEL and event_stage == 5:
+                wheel_x_milli = rt_winit_event_wheel_x_milli(event)
+                wheel_y_milli = rt_winit_event_wheel_y_milli(event)
+                event_sequence = append_event(event_sequence, "pointer_wheel")
+                event_stage = 6
+                event_count = event_count + 1
+            elif kind == EVT_KEYBOARD_INPUT:
+                val pressed = rt_winit_event_key_pressed(event) != 0
+                val keycode = rt_winit_event_key_keycode(event)
+                if event_stage == 6 and pressed and keycode == KEY_H:
+                    ordinary_keycode = keycode
+                    event_sequence = append_event(event_sequence, "key_down")
+                    event_stage = 7
+                    event_count = event_count + 1
+                elif event_stage == 7 and not pressed and keycode == ordinary_keycode:
                     event_sequence = append_event(event_sequence, "key_up")
-                    event_stage = 6
+                    event_stage = 8
+                    event_count = event_count + 1
+                elif event_stage == 8 and pressed and keycode == KEY_LEFT_CTRL:
+                    event_sequence = append_event(event_sequence, "left_ctrl_down")
+                    event_stage = 9
+                    event_count = event_count + 1
+                elif event_stage == 9 and not pressed and keycode == KEY_LEFT_CTRL:
+                    event_sequence = append_event(event_sequence, "left_ctrl_up")
+                    event_stage = 10
+                    event_count = event_count + 1
+                elif event_stage == 10 and pressed and keycode == KEY_RIGHT_CTRL:
+                    event_sequence = append_event(event_sequence, "right_ctrl_down")
+                    event_stage = 11
+                    event_count = event_count + 1
+                elif event_stage == 11 and not pressed and keycode == KEY_RIGHT_CTRL:
+                    event_sequence = append_event(event_sequence, "right_ctrl_up")
+                    event_stage = 12
+                    event_count = event_count + 1
+                elif event_stage == 12 and pressed and keycode == KEY_LEFT_ALT:
+                    event_sequence = append_event(event_sequence, "left_alt_down")
+                    event_stage = 13
+                    event_count = event_count + 1
+                elif event_stage == 13 and not pressed and keycode == KEY_LEFT_ALT:
+                    event_sequence = append_event(event_sequence, "left_alt_up")
+                    event_stage = 14
+                    event_count = event_count + 1
+                elif event_stage == 14 and pressed and keycode == KEY_RIGHT_ALT:
+                    event_sequence = append_event(event_sequence, "right_alt_down")
+                    event_stage = 15
+                    event_count = event_count + 1
+                elif event_stage == 15 and not pressed and keycode == KEY_RIGHT_ALT:
+                    event_sequence = append_event(event_sequence, "right_alt_up")
+                    event_stage = 16
                     event_count = event_count + 1
             rt_winit_event_free(event)
             event = rt_winit_event_loop_poll_events(lp.handle, 1)
         wait_ticks = wait_ticks + 1
         thread_sleep(10)
 
-    if event_sequence != EVENT_SEQUENCE or event_count != 6:
+    if (event_sequence != EVENT_SEQUENCE or event_count != 16 or
+        pointer_move_x_milli <= 0 or pointer_move_y_milli <= 0 or
+        pointer_drag_x_milli <= 0 or pointer_drag_y_milli <= 0 or
+        (pointer_drag_x_milli == pointer_move_x_milli and
+         pointer_drag_y_milli == pointer_move_y_milli) or
+        pointer_button != 0 or
+        (wheel_x_milli == 0 and wheel_y_milli == 0) or
+        ordinary_keycode != KEY_H):
         winit_window_free(win)
         winit_loop_free(lp)
         engine.shutdown()
@@ -504,6 +625,72 @@ fn run_macos_gpu_2d_live_harness(backend: text) -> i64:
         return write_failure_receipt(
             receipt_path, backend, "vulkan-font-device-evidence-failed", 13, 13)
 
+    # Twenty animated DrawIR compositions use the same Engine2D backend.
+    # engine2d_draw_ir_adv_composition explicitly calls submit_batch (the
+    # Vulkan fence boundary) before its device-origin readback.
+    var animation_frame_times: [i64] = []
+    var animation_frame_count: i64 = 0
+    var animation_submit_count: i64 = 0
+    var animation_fence_count: i64 = 0
+    var animation_correlated_frame_count: i64 = 0
+    var animation_final_checksum: i64 = 0
+    while animation_frame_count < LIVE_ANIMATION_FRAMES:
+        val frame_started = rt_time_now_nanos()
+        val animation_composition = macos_gpu_2d_animation_composition(
+            mutation.after_accent, animation_frame_count)
+        var frame_result = engine2d_draw_ir_adv_composition(
+            engine, animation_composition, true)
+        if backend == "vulkan":
+            frame_result = engine2d_draw_ir_adv_strict_vulkan_primitives_with_images(
+                engine, animation_composition, [])
+        if (frame_result.readback_source != "device_readback" or
+            frame_result.backend_handle != backend_handle or
+            frame_result.device_identity != initial_readback.device_identity or
+            frame_result.readback_checksum <= 0 or
+            frame_result.skipped_command_count != 0 or
+            frame_result.fallback_required or frame_result.fallback_reason != ""):
+            winit_window_free(win)
+            winit_loop_free(lp)
+            engine.shutdown()
+            return write_failure_receipt(
+                receipt_path, backend, "animation-fence-readback-failed", 14, 14)
+        val marker_x = 300 + (animation_frame_count * 120).to_i32() + 48
+        val marker_y: i32 = 1880 + 48
+        val marker_index = marker_y.to_i64() * live_width.to_i64() + marker_x.to_i64()
+        if (marker_index < 0 or marker_index >= frame_result.pixels.len() or
+            frame_result.pixels[marker_index] != 0xFF38BDF8u32):
+            winit_window_free(win)
+            winit_loop_free(lp)
+            engine.shutdown()
+            return write_failure_receipt(
+                receipt_path, backend, "animation-frame-correlation-failed", 14, 14)
+        animation_correlated_frame_count = animation_correlated_frame_count + 1
+        animation_submit_count = animation_submit_count + 1
+        animation_fence_count = animation_fence_count + 1
+        animation_final_checksum = frame_result.readback_checksum
+        val elapsed_ns = rt_time_now_nanos() - frame_started
+        if elapsed_ns <= 0:
+            winit_window_free(win)
+            winit_loop_free(lp)
+            engine.shutdown()
+            return write_failure_receipt(
+                receipt_path, backend, "animation-clock-invalid", 14, 14)
+        animation_frame_times.push(elapsed_ns)
+        animation_frame_count = animation_frame_count + 1
+    val animation_frame_p95_ns = frame_p95_ns(animation_frame_times)
+    if (animation_frame_count != LIVE_ANIMATION_FRAMES or
+        animation_submit_count != LIVE_ANIMATION_FRAMES or
+        animation_fence_count != LIVE_ANIMATION_FRAMES or
+        animation_correlated_frame_count != LIVE_ANIMATION_FRAMES or
+        animation_final_checksum <= 0 or
+        animation_frame_p95_ns <= 0 or
+        animation_frame_p95_ns > LIVE_FRAME_P95_BUDGET_NS):
+        winit_window_free(win)
+        winit_loop_free(lp)
+        engine.shutdown()
+        return write_failure_receipt(
+            receipt_path, backend, "animation-performance-contract-failed", 14, 14)
+
     if not winit_present_rgba(
         win, PREVIEW_WIDTH.to_i64(), PREVIEW_HEIGHT.to_i64(), event_preview(true)):
         winit_window_free(win)
@@ -512,21 +699,35 @@ fn run_macos_gpu_2d_live_harness(backend: text) -> i64:
         return write_failure_receipt(
             receipt_path, backend, "interaction-window-present-failed", 14, 14)
 
-    engine.draw_rect_filled(3300, 1860, 300, 180, 0xFF22C55Eu32)
-    val interaction_readback = engine.read_pixels_with_source()
-    if (interaction_readback.source != "device_readback" or
-        interaction_readback.backend_handle != backend_handle or
-        interaction_readback.device_identity != initial_readback.device_identity or
-        interaction_readback.checksum <= 0 or
-        interaction_readback.checksum == initial_checksum or
-        interaction_readback.pixel_count != (live_width * live_height).to_i64()):
+    var interaction_draw_ir_result = engine2d_draw_ir_adv_composition(
+        engine,
+        macos_gpu_2d_animation_composition(
+            mutation.after_accent, LIVE_ANIMATION_FRAMES - 1),
+        true)
+    if backend == "vulkan":
+        interaction_draw_ir_result =
+            engine2d_draw_ir_adv_strict_vulkan_primitives_with_images(
+                engine,
+                macos_gpu_2d_animation_composition(
+                    mutation.after_accent, LIVE_ANIMATION_FRAMES - 1),
+                [])
+    if (interaction_draw_ir_result.readback_source != "device_readback" or
+        interaction_draw_ir_result.backend_handle != backend_handle or
+        interaction_draw_ir_result.device_identity != initial_readback.device_identity or
+        interaction_draw_ir_result.readback_checksum <= 0 or
+        interaction_draw_ir_result.readback_checksum == initial_checksum or
+        interaction_draw_ir_result.pixels.len() !=
+            (live_width * live_height).to_i64() or
+        interaction_draw_ir_result.skipped_command_count != 0 or
+        interaction_draw_ir_result.fallback_required or
+        interaction_draw_ir_result.fallback_reason != ""):
         winit_window_free(win)
         winit_loop_free(lp)
         engine.shutdown()
         return write_failure_receipt(
             receipt_path, backend, "interaction-device-readback-failed", 15, 15)
     engine.present()
-    val captured_pixels = interaction_readback.pixels
+    val captured_pixels = interaction_draw_ir_result.pixels
     if captured_pixels.len() != live_width * live_height:
         winit_window_free(win)
         winit_loop_free(lp)
@@ -547,21 +748,64 @@ fn run_macos_gpu_2d_live_harness(backend: text) -> i64:
         engine.shutdown()
         return write_failure_receipt(
             receipt_path, backend, "framebuffer-write-failed", 18, 18)
+
+    # Submit deterministic PCM through the real miniaudio device and observe
+    # the playback handle transition to completed.  A non-real backend or a
+    # missing output device is a hard failure, never a silent/null fallback.
+    val audio_engine = rt_audio_init()
+    val audio_backend = rt_audio_backend_name()
+    if (audio_engine <= 0 or rt_audio_backend_is_real() <= 0 or
+        rt_audio_live_device_count() <= 0 or audio_backend == ""):
+        engine.shutdown()
+        return write_failure_receipt(
+            receipt_path, backend, "audio-device-admission-failed", 19, 19)
+    val audio_pcm = ui_click_pcm_create()
+    val audio_pcm_checksum = ui_click_pcm_checksum(audio_pcm)
+    val audio_playback_handle = ui_click_pcm_play(audio_pcm)
+    if (audio_pcm == 0 or audio_pcm_checksum == 0u64 or
+        audio_playback_handle <= 0):
+        ui_click_pcm_release(audio_pcm)
+        rt_audio_shutdown(audio_engine)
+        engine.shutdown()
+        return write_failure_receipt(
+            receipt_path, backend, "audio-submit-failed", 19, 19)
+    var audio_wait_ticks = 0
+    while rt_audio_is_playing(audio_playback_handle) != 0 and audio_wait_ticks < 500:
+        thread_sleep(10)
+        audio_wait_ticks = audio_wait_ticks + 1
+    val audio_completion_observed = rt_audio_is_playing(audio_playback_handle) == 0
+    ui_click_pcm_release(audio_pcm)
+    if not audio_completion_observed:
+        rt_audio_shutdown(audio_engine)
+        engine.shutdown()
+        return write_failure_receipt(
+            receipt_path, backend, "audio-completion-timeout", 19, 19)
+    rt_audio_shutdown(audio_engine)
     if not write_runtime_receipt(
         receipt_path, backend, capture_path, repo_revision,
         shared_scene_fingerprint, source_revision, backend_handle,
         initial_readback.device_identity, initial_checksum,
-        interaction_readback.checksum, interaction_readback.device_identity,
+        interaction_draw_ir_result.readback_checksum,
+        interaction_draw_ir_result.device_identity,
         bounds, live_width, live_height,
         font_loaded, expected_font_identity, font_identity, cold_rasterizations,
         warm_rasterizations, warm_hits, font_pixel_size, font_target, font_attempts,
-        event_sequence, event_count, fixture, draw_ir_result, warm_draw_ir_result,
+        event_sequence, event_count,
+        pointer_move_x_milli, pointer_move_y_milli,
+        pointer_drag_x_milli, pointer_drag_y_milli, pointer_button,
+        wheel_x_milli, wheel_y_milli, ordinary_keycode,
+        animation_frame_count, animation_frame_p95_ns,
+        animation_submit_count, animation_fence_count,
+        animation_correlated_frame_count, animation_final_checksum,
+        audio_backend, audio_pcm_checksum, audio_playback_handle,
+        audio_completion_observed,
+        fixture, draw_ir_result, warm_draw_ir_result,
         processing_ir_receipt):
         winit_window_free(win)
         winit_loop_free(lp)
         engine.shutdown()
         return write_failure_receipt(
-            receipt_path, backend, "success-receipt-write-failed", 19, 19)
+            receipt_path, backend, "success-receipt-write-failed", 20, 20)
 
     if (env_get("GPU_2D_LIVE_HOLD") ?? "") == "1":
         var holding = true

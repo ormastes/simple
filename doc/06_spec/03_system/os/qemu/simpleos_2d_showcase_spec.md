@@ -40,7 +40,7 @@ Harden and validate the cross-platform SimpleOS 2D flow with shared DrawIR rende
 ## Lane status at handoff
 - Lane 1 (Linux/QEMU Vulkan): parser/self-test complete, live pass blocked by compiler/runtime admission.
 - Lane 2 (ARM64/QEMU event): parser/self-test complete, live pass blocked by compiler/runtime admission.
-- Lane 3 (macOS HVF): parser/test harness complete, emulator-only in this host context.
+- Lane 3 (macOS HVF): emulator-ready source contract decodes and correlates move/down/drag/up/wheel, ordinary keys, and distinct left/right Ctrl/Alt; requires one real audio submit/completion, twenty explicit submit/fence/device-readback animation frames, vector-font/capture integrity, p95 and maximum-RSS budgets, and no fallback. It remains emulator-only and cannot produce a live PASS on this Linux host.
 - Lane 4 (UNO Q + showcase): parser/matrix complete; board pass intentionally blocked unless hardware is attached.
 
 ## What is done vs. still blocked

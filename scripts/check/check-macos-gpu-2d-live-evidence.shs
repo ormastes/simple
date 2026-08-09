@@ -333,6 +333,7 @@ run_bounded_vulkaninfo() {
 command -v osascript >/dev/null 2>&1 || fail "osascript-missing"
 command -v screencapture >/dev/null 2>&1 || fail "screencapture-missing"
 command -v cliclick >/dev/null 2>&1 || fail "cliclick-missing"
+command -v xcrun >/dev/null 2>&1 || fail "xcrun-missing"
 command -v sips >/dev/null 2>&1 || fail "sips-missing"
 
 # The live scene's 24pt/300-DPI vector-text proof deliberately uses the
@@ -490,6 +491,24 @@ simple_runtime_c_provider_sha256="$(sha256_file "$SIMPLE_RUNTIME_C_DYLIB")"
 otool -l "$SELECTED_DRIVER_PATH" |
     grep -Fq "$(dirname -- "$SIMPLE_RUNTIME_DYLIB")" ||
     fail "runtime-provider-rpath-missing"
+for input_symbol in \
+    rt_winit_event_key_keycode rt_winit_event_mouse_button \
+    rt_winit_event_mouse_x_milli rt_winit_event_mouse_y_milli \
+    rt_winit_event_wheel_x_milli rt_winit_event_wheel_y_milli; do
+    nm -u "$SELECTED_DRIVER_PATH" | grep -Fq "_$input_symbol" ||
+        fail "native-driver-input-import-missing:$input_symbol"
+    nm -gU "$SPL_WINIT_LIB" | grep -Fq "_$input_symbol" ||
+        fail "winit-input-provider-symbol-missing:$input_symbol"
+done
+for audio_symbol in \
+    rt_audio_init rt_audio_shutdown rt_audio_play_pcm_f64_raw \
+    rt_audio_is_playing rt_audio_live_device_count rt_audio_backend_name \
+    rt_audio_backend_is_real; do
+    nm -u "$SELECTED_DRIVER_PATH" | grep -Fq "_$audio_symbol" ||
+        fail "native-driver-audio-import-missing:$audio_symbol"
+    nm -gU "$SIMPLE_RUNTIME_C_DYLIB" | grep -Fq "_$audio_symbol" ||
+        fail "audio-provider-symbol-missing:$audio_symbol"
+done
 if [ "$BACKEND" = vulkan ]; then
     nm -u "$SELECTED_DRIVER_PATH" |
         grep -Fq "_rt_vulkan_init" ||
@@ -655,27 +674,41 @@ OSA
 
 pointer_x=$((window_x + (window_w / 2)))
 pointer_y=$((window_y + (window_h / 2)))
-cliclick "m:${pointer_x},${pointer_y}" "dd:." "w:200" "du:." ||
+drag_x=$((pointer_x + 80))
+drag_y=$((pointer_y + 60))
+cliclick "m:${pointer_x},${pointer_y}" "dd:." "m:${drag_x},${drag_y}" "du:." ||
     fail "pointer-injection-failed"
-osascript - "$app_pid" >/dev/null <<'OSA' || fail "key-injection-failed"
-on run argv
-  set targetPid to (item 1 of argv) as integer
-  tell application "System Events"
-    repeat with proc in (processes whose unix id is targetPid)
-      tell proc
-        set frontmost to true
-        key code 5
-        return true
-      end tell
-    end repeat
-  end tell
-  error "GPU evidence process missing"
-end run
-OSA
+# CoreGraphics preserves side-specific modifier scan codes and emits a real
+# scroll-wheel record; AppleScript's `using control down` collapses left/right.
+xcrun swift - >/dev/null <<'SWIFT' || fail "wheel-key-injection-failed"
+import CoreGraphics
+import Foundation
 
+func postKey(_ code: CGKeyCode) {
+    CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true)!.post(tap: .cghidEventTap)
+    usleep(30000)
+    CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false)!.post(tap: .cghidEventTap)
+    usleep(30000)
+}
+
+CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 2,
+        wheel1: 3, wheel2: -1, wheel3: 0)!.post(tap: .cghidEventTap)
+usleep(30000)
+postKey(4)   // H
+postKey(59)  // left Control
+postKey(62)  // right Control
+postKey(58)  // left Option/Alt
+postKey(61)  // right Option/Alt
+SWIFT
+
+max_rss_kb=0
+max_rss_budget_kb=262144
 receipt_deadline=$(($(date +%s) + 180))
 while [ "$(date +%s)" -lt "$receipt_deadline" ] && [ ! -s "$RECEIPT" ]; do
     require_launched_process
+    sampled_rss_kb="$(ps -o rss= -p "$app_pid" | tr -d '[:space:]')"
+    case "$sampled_rss_kb" in ''|*[!0-9]*) sampled_rss_kb=0 ;; esac
+    [ "$sampled_rss_kb" -le "$max_rss_kb" ] || max_rss_kb="$sampled_rss_kb"
     sleep 1
 done
 [ -s "$RECEIPT" ] || fail "runtime-receipt-timeout"
@@ -711,12 +744,56 @@ after_window_cksum="$(file_cksum "$WINDOW_AFTER_PNG")"
 [ "$(value_of gpu_2d_live_source_revision "$RECEIPT")" = "$source_revision" ] ||
     fail "source-revision-mismatch"
 [ "$(value_of gpu_2d_live_event_sequence "$RECEIPT")" = \
-    "focus,pointer_move,pointer_down,pointer_up,key_down,key_up" ] ||
+    "focus,pointer_move,pointer_down,pointer_drag,pointer_up,pointer_wheel,key_down,key_up,left_ctrl_down,left_ctrl_up,right_ctrl_down,right_ctrl_up,left_alt_down,left_alt_up,right_alt_down,right_alt_up" ] ||
     fail "event-sequence-mismatch"
-[ "$(value_of gpu_2d_live_event_count "$RECEIPT")" = "6" ] ||
+[ "$(value_of gpu_2d_live_event_count "$RECEIPT")" = "16" ] ||
     fail "event-count-mismatch"
 [ "$(value_of gpu_2d_live_event_backend "$RECEIPT")" = "$BACKEND" ] ||
     fail "event-backend-mismatch"
+for coordinate_field in \
+    gpu_2d_live_pointer_move_x_milli gpu_2d_live_pointer_move_y_milli \
+    gpu_2d_live_pointer_drag_x_milli gpu_2d_live_pointer_drag_y_milli; do
+    positive_integer "$(value_of "$coordinate_field" "$RECEIPT")" ||
+        fail "decoded-pointer-coordinate-missing:$coordinate_field"
+done
+[ "$(value_of gpu_2d_live_pointer_button "$RECEIPT")" = 0 ] ||
+    fail "decoded-pointer-button-mismatch"
+wheel_x_milli="$(value_of gpu_2d_live_pointer_wheel_x_milli "$RECEIPT")"
+wheel_y_milli="$(value_of gpu_2d_live_pointer_wheel_y_milli "$RECEIPT")"
+case "$wheel_x_milli" in ''|*[!0-9-]*) fail "decoded-wheel-x-invalid" ;; esac
+case "$wheel_y_milli" in ''|*[!0-9-]*) fail "decoded-wheel-y-invalid" ;; esac
+[ "$wheel_x_milli:$wheel_y_milli" != 0:0 ] || fail "decoded-wheel-delta-missing"
+[ "$(value_of gpu_2d_live_ordinary_keycode "$RECEIPT")" = 72 ] ||
+    fail "decoded-ordinary-key-mismatch"
+[ "$(value_of gpu_2d_live_left_ctrl_keycode "$RECEIPT")" = 1001 ] &&
+    [ "$(value_of gpu_2d_live_right_ctrl_keycode "$RECEIPT")" = 1002 ] &&
+    [ "$(value_of gpu_2d_live_left_alt_keycode "$RECEIPT")" = 1003 ] &&
+    [ "$(value_of gpu_2d_live_right_alt_keycode "$RECEIPT")" = 1004 ] ||
+    fail "decoded-sided-modifier-mismatch"
+[ "$(value_of gpu_2d_live_animation_frame_count "$RECEIPT")" = 20 ] &&
+    [ "$(value_of gpu_2d_live_animation_submit_count "$RECEIPT")" = 20 ] &&
+    [ "$(value_of gpu_2d_live_animation_fence_count "$RECEIPT")" = 20 ] &&
+    [ "$(value_of gpu_2d_live_animation_correlated_frame_count "$RECEIPT")" = 20 ] ||
+    fail "animation-submit-fence-count-mismatch"
+animation_frame_p95_ns="$(value_of gpu_2d_live_animation_frame_p95_ns "$RECEIPT")"
+animation_frame_p95_budget_ns="$(value_of gpu_2d_live_animation_frame_p95_budget_ns "$RECEIPT")"
+positive_integer "$animation_frame_p95_ns" || fail "animation-p95-missing"
+[ "$animation_frame_p95_ns" -le "$animation_frame_p95_budget_ns" ] ||
+    fail "animation-p95-budget-exceeded"
+[ "$(value_of gpu_2d_live_animation_readback_source "$RECEIPT")" = device_readback ] ||
+    fail "animation-device-readback-missing"
+positive_integer "$(value_of gpu_2d_live_animation_final_checksum "$RECEIPT")" ||
+    fail "animation-final-checksum-missing"
+[ "$(value_of gpu_2d_live_audio_backend_real "$RECEIPT")" = true ] &&
+    [ "$(value_of gpu_2d_live_audio_fallback "$RECEIPT")" = false ] &&
+    [ "$(value_of gpu_2d_live_audio_submit_count "$RECEIPT")" = 1 ] &&
+    [ "$(value_of gpu_2d_live_audio_completion_count "$RECEIPT")" = 1 ] &&
+    [ "$(value_of gpu_2d_live_audio_completion_observed "$RECEIPT")" = true ] ||
+    fail "audio-submit-completion-contract-failed"
+positive_integer "$(value_of gpu_2d_live_audio_playback_handle "$RECEIPT")" ||
+    fail "audio-playback-handle-missing"
+positive_integer "$max_rss_kb" || fail "max-rss-sample-missing"
+[ "$max_rss_kb" -le "$max_rss_budget_kb" ] || fail "max-rss-budget-exceeded"
 [ "$(value_of gpu_2d_live_draw_ir_composition_id "$RECEIPT")" = \
     "macos-gpu-2d-frozen-composition-v1" ] ||
     fail "shared-draw-ir-composition-mismatch"
@@ -748,9 +825,9 @@ positive_integer "$draw_ir_checksum" || fail "shared-draw-ir-checksum-missing"
 [ "$(value_of gpu_2d_live_semantic_raw_winit_reduced "$RECEIPT")" = "true" ] ||
     fail "raw-winit-focus-not-reduced"
 [ "$(value_of gpu_2d_live_semantic_pointer_key_delivery "$RECEIPT")" = \
-    "observed" ] || fail "pointer-key-delivery-not-observed"
+    "decoded-and-correlated" ] || fail "pointer-key-delivery-not-correlated"
 [ "$(value_of gpu_2d_live_semantic_correlation "$RECEIPT")" = \
-    "native-focus-reduced;pointer-key-delivery-observed" ] ||
+    "native-focus-reduced;pointer-drag-wheel-correlated;ordinary-left-right-modifiers-correlated" ] ||
     fail "semantic-correlation-mismatch"
 semantic_before_accent="$(value_of gpu_2d_live_semantic_before_accent "$RECEIPT")"
 semantic_after_accent="$(value_of gpu_2d_live_semantic_after_accent "$RECEIPT")"
@@ -898,6 +975,8 @@ positive_integer "$initial_checksum" || fail "initial-checksum-missing"
 positive_integer "$interaction_checksum" || fail "interaction-checksum-missing"
 [ "$initial_checksum" != "$interaction_checksum" ] ||
     fail "interaction-checksum-unchanged"
+[ "$(value_of gpu_2d_live_animation_final_checksum "$RECEIPT")" = "$interaction_checksum" ] ||
+    fail "animation-capture-checksum-mismatch"
 
 ppm_bytes="$(wc -c <"$CAPTURE_PPM" | tr -d ' ')"
 [ "$ppm_bytes" -gt 24883200 ] || fail "capture-truncated"
@@ -976,9 +1055,14 @@ png_dpi_height="$(sips -g dpiHeight "$CAPTURE_PNG" |
     echo "${PREFIX}_png_dpi_height=$png_dpi_height"
     echo "${PREFIX}_pixel_sha256=$pixel_sha256"
     echo "${PREFIX}_non_background_bounds=$non_background_bounds"
-    echo "${PREFIX}_event_sequence=focus,pointer_move,pointer_down,pointer_up,key_down,key_up"
-    echo "${PREFIX}_event_count=6"
+    echo "${PREFIX}_event_sequence=$(value_of gpu_2d_live_event_sequence "$RECEIPT")"
+    echo "${PREFIX}_event_count=16"
     echo "${PREFIX}_event_backend=$BACKEND"
+    for evidence_field in pointer_move_x_milli pointer_move_y_milli pointer_drag_x_milli pointer_drag_y_milli pointer_button pointer_wheel_x_milli pointer_wheel_y_milli ordinary_keycode left_ctrl_keycode right_ctrl_keycode left_alt_keycode right_alt_keycode animation_frame_count animation_frame_p95_ns animation_frame_p95_budget_ns animation_submit_count animation_fence_count animation_readback_source animation_final_checksum audio_backend audio_pcm_checksum audio_playback_handle audio_submit_count audio_completion_count audio_completion_observed audio_backend_real audio_fallback; do
+        echo "${PREFIX}_${evidence_field}=$(value_of "gpu_2d_live_${evidence_field}" "$RECEIPT")"
+    done
+    echo "${PREFIX}_max_rss_kb=$max_rss_kb"
+    echo "${PREFIX}_max_rss_budget_kb=$max_rss_budget_kb"
     echo "${PREFIX}_draw_ir_composition_id=macos-gpu-2d-frozen-composition-v1"
     echo "${PREFIX}_draw_ir_scene_key=macos-gpu-2d-frozen-scene-v1"
     echo "${PREFIX}_draw_ir_rendered_commands=5"
@@ -992,7 +1076,8 @@ png_dpi_height="$(sips -g dpiHeight "$CAPTURE_PNG" |
     echo "${PREFIX}_semantic_changed=true"
     echo "${PREFIX}_semantic_native_focus_reduced=true"
     echo "${PREFIX}_semantic_raw_winit_reduced=true"
-    echo "${PREFIX}_semantic_pointer_key_delivery=observed"
+    echo "${PREFIX}_semantic_pointer_key_delivery=decoded-and-correlated"
+    echo "${PREFIX}_semantic_correlation=native-focus-reduced;pointer-drag-wheel-correlated;ordinary-left-right-modifiers-correlated"
     echo "${PREFIX}_font_loaded=true"
     echo "${PREFIX}_font_expected_identity=$font_expected_identity"
     echo "${PREFIX}_font_identity=$font_identity"
@@ -1060,9 +1145,14 @@ png_dpi_height="$(sips -g dpiHeight "$CAPTURE_PNG" |
     echo "trusted_build_manifest_sha256=$driver_manifest_sha256"
     echo "pixel_sha256=$pixel_sha256"
     echo "non_background_bounds=$non_background_bounds"
-    echo "event_sequence=focus,pointer_move,pointer_down,pointer_up,key_down,key_up"
-    echo "event_count=6"
+    echo "event_sequence=$(value_of gpu_2d_live_event_sequence "$RECEIPT")"
+    echo "event_count=16"
     echo "event_backend=$BACKEND"
+    for evidence_field in pointer_move_x_milli pointer_move_y_milli pointer_drag_x_milli pointer_drag_y_milli pointer_button pointer_wheel_x_milli pointer_wheel_y_milli ordinary_keycode left_ctrl_keycode right_ctrl_keycode left_alt_keycode right_alt_keycode animation_frame_count animation_frame_p95_ns animation_frame_p95_budget_ns animation_submit_count animation_fence_count animation_readback_source animation_final_checksum audio_backend audio_pcm_checksum audio_playback_handle audio_submit_count audio_completion_count audio_completion_observed audio_backend_real audio_fallback; do
+        echo "${evidence_field}=$(value_of "gpu_2d_live_${evidence_field}" "$RECEIPT")"
+    done
+    echo "max_rss_kb=$max_rss_kb"
+    echo "max_rss_budget_kb=$max_rss_budget_kb"
     echo "repo_revision=$repo_revision"
     echo "shared_scene_fingerprint=$shared_scene_fingerprint"
     echo "draw_ir_composition_id=macos-gpu-2d-frozen-composition-v1"
@@ -1078,13 +1168,13 @@ png_dpi_height="$(sips -g dpiHeight "$CAPTURE_PNG" |
     echo "semantic_changed=true"
     echo "semantic_native_focus_reduced=true"
     echo "semantic_raw_winit_reduced=true"
-    echo "semantic_pointer_key_delivery=observed"
-    echo "semantic_correlation=native-focus-reduced;pointer-key-delivery-observed"
+    echo "semantic_pointer_key_delivery=decoded-and-correlated"
+    echo "semantic_correlation=native-focus-reduced;pointer-drag-wheel-correlated;ordinary-left-right-modifiers-correlated"
     echo "capture_path=$CAPTURE_PPM"
     echo "source_revision=$source_revision"
 } >"$EVIDENCE"
 
-write_report pass "live-$BACKEND-device-readback-vector-font-ordered-events-exact-window"
+write_report pass "live-$BACKEND-device-readback-vector-font-decoded-events-audio-20-frame-animation"
 cleanup
 trap - EXIT HUP INT TERM
 echo "macOS $BACKEND_TITLE 2D live evidence: PASS"

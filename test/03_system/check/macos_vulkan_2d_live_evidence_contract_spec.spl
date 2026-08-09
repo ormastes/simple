@@ -254,10 +254,9 @@ describe "macOS Vulkan 2D live evidence":
         expect(harness).to_contain("font_pixel_size")
         expect(harness.contains("0xFFF3F6FCu32, 96")).to_equal(false)
         expect(harness).to_contain("Engine2D.create_with_backend_fast")
-        expect(harness).to_contain("VulkanBackend.create")
-        expect(harness).to_contain("MetalBackend.create")
-        expect(harness).to_contain("metal-direct-probe-unexpectedly-initialized")
-        expect(harness).to_contain("probe_reason = metal_probe.last_error")
+        expect(harness.contains("VulkanBackend.create")).to_equal(false)
+        expect(harness.contains("MetalBackend.create")).to_equal(false)
+        expect(harness).to_contain("canonical-engine2d-backend-selection-failed")
         expect(harness).to_contain("gpu_2d_live_probe=")
         expect(harness).to_contain("write_failure_receipt")
         expect(harness).to_contain("initial-device-readback-failed")
@@ -279,7 +278,7 @@ describe "macOS Vulkan 2D live evidence":
     it "deliver input events":
         val source = file_read(WRAPPER)
         val harness = file_read(HARNESS)
-        expect(source).to_contain("focus,pointer_move,pointer_down,pointer_up,key_down,key_up")
+        expect(source).to_contain("focus,pointer_move,pointer_down,pointer_drag,pointer_up,pointer_wheel,key_down,key_up,left_ctrl_down,left_ctrl_up,right_ctrl_down,right_ctrl_up,left_alt_down,left_alt_up,right_alt_down,right_alt_up")
         expect(source).to_contain("event-count-mismatch")
         expect(source).to_contain("event-backend-mismatch")
         expect(harness).to_contain("EVT_WINDOW_FOCUSED")
@@ -293,11 +292,59 @@ describe "macOS Vulkan 2D live evidence":
         expect(harness).to_contain(
             "gpu_2d_live_semantic_raw_winit_reduced={" + "mutation.native_focus_reduced}"
         )
-        expect(harness).to_contain("gpu_2d_live_semantic_pointer_key_delivery=observed")
+        expect(harness).to_contain("gpu_2d_live_semantic_pointer_key_delivery=decoded-and-correlated")
         expect(source).to_contain("semantic-correlation-mismatch")
         expect(source).to_contain("native-focus-not-reduced")
         expect(source).to_contain("raw-winit-focus-not-reduced")
-        expect(source).to_contain("pointer-key-delivery-not-observed")
+        expect(source).to_contain("pointer-key-delivery-not-correlated")
+
+    it "decode pointer wheel ordinary and sided modifier events without collapsing identity":
+        val source = file_read(WRAPPER)
+        val harness = file_read(HARNESS)
+        val provider = file_read("src/runtime/spl_winit/src/lib.rs")
+        for accessor in [
+            "rt_winit_event_mouse_x_milli", "rt_winit_event_mouse_y_milli",
+            "rt_winit_event_wheel_x_milli", "rt_winit_event_wheel_y_milli",
+            "rt_winit_event_mouse_button", "rt_winit_event_key_keycode"
+        ]:
+            expect(harness).to_contain(accessor)
+        for mapping in [
+            "KeyCode::ControlLeft => 1001", "KeyCode::ControlRight => 1002",
+            "KeyCode::AltLeft => 1003", "KeyCode::AltRight => 1004"
+        ]:
+            expect(provider).to_contain(mapping)
+        expect(source).to_contain("CGEvent(scrollWheelEvent2Source:")
+        expect(source).to_contain("postKey(59)")
+        expect(source).to_contain("postKey(62)")
+        expect(source).to_contain("postKey(58)")
+        expect(source).to_contain("postKey(61)")
+        expect(source).to_contain("decoded-sided-modifier-mismatch")
+
+    it "require real audio completion and twenty fenced device-readback animation frames":
+        val source = file_read(WRAPPER)
+        val harness = file_read(HARNESS)
+        val draw_ir_lowering = file_read(
+            "src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl")
+        expect(harness).to_contain("LIVE_ANIMATION_FRAMES: i64 = 20")
+        expect(harness).to_contain("macos_gpu_2d_animation_composition(")
+        expect(harness).to_contain("engine2d_draw_ir_adv_strict_vulkan_primitives_with_images(")
+        expect(harness).to_contain("frame_result.readback_source != \"device_readback\"")
+        expect(harness).to_contain("animation-frame-correlation-failed")
+        expect(draw_ir_lowering).to_contain("eng.submit_batch()")
+        expect(harness).to_contain("animation_frame_p95_ns")
+        expect(harness).to_contain("rt_audio_backend_is_real()")
+        expect(harness).to_contain("ui_click_pcm_play(audio_pcm)")
+        expect(harness).to_contain("rt_audio_is_playing(audio_playback_handle)")
+        expect(harness).to_contain("gpu_2d_live_audio_fallback=false")
+        expect(source).to_contain("animation-submit-fence-count-mismatch")
+        expect(source).to_contain("animation-capture-checksum-mismatch")
+        expect(source).to_contain("animation-p95-budget-exceeded")
+        expect(source).to_contain("audio-submit-completion-contract-failed")
+        expect(source).to_contain("max-rss-budget-exceeded")
+        expect(source).to_contain("native-driver-input-import-missing:")
+        expect(source).to_contain("winit-input-provider-symbol-missing:")
+        expect(source).to_contain("native-driver-audio-import-missing:")
+        expect(source).to_contain("audio-provider-symbol-missing:")
 
     it "require Vulkan font device evidence and warm atlas reuse":
         val source = file_read(WRAPPER)

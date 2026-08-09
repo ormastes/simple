@@ -402,6 +402,11 @@ fn keycode_to_simple(code: KeyCode) -> Option<i64> {
         KeyCode::Tab => 9, KeyCode::Backspace => 8, KeyCode::Delete => 127, KeyCode::Home => 36,
         KeyCode::End => 35, KeyCode::PageUp => 33, KeyCode::PageDown => 34, KeyCode::Space => 32,
         KeyCode::Escape => 27, KeyCode::Enter => 13,
+        // Preserve side identity for modifiers.  These values deliberately
+        // live outside the legacy ASCII/DOM-key range used above; consumers
+        // must not collapse left/right Ctrl or Alt into a boolean modifier.
+        KeyCode::ControlLeft => 1001, KeyCode::ControlRight => 1002,
+        KeyCode::AltLeft => 1003, KeyCode::AltRight => 1004,
         KeyCode::F1 => 112, KeyCode::F2 => 113, KeyCode::F3 => 114, KeyCode::F4 => 115,
         KeyCode::F5 => 116, KeyCode::F6 => 117, KeyCode::F7 => 118, KeyCode::F8 => 119,
         KeyCode::F9 => 120, KeyCode::F10 => 121, KeyCode::F11 => 122, KeyCode::F12 => 123,
@@ -421,6 +426,19 @@ fn mouse_button_to_simple(button: MouseButton) -> i64 {
         MouseButton::Back => 3,
         MouseButton::Forward => 4,
         MouseButton::Other(v) => v as i64 + 5,
+    }
+}
+
+#[cfg(test)]
+mod sided_modifier_tests {
+    use super::{keycode_to_simple, KeyCode};
+
+    #[test]
+    fn preserves_left_and_right_control_and_alt_identity() {
+        assert_eq!(keycode_to_simple(KeyCode::ControlLeft), Some(1001));
+        assert_eq!(keycode_to_simple(KeyCode::ControlRight), Some(1002));
+        assert_eq!(keycode_to_simple(KeyCode::AltLeft), Some(1003));
+        assert_eq!(keycode_to_simple(KeyCode::AltRight), Some(1004));
     }
 }
 
