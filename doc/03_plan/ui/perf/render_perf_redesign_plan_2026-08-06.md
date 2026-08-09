@@ -10,13 +10,14 @@ Relationship to existing plans:
   basis. This plan is **additive V2 repair**, not a new scene architecture.
   No GuiIR/WebIR (standing rejected decision).
 
-## 0-A. STATUS OVERLAY (added 2026-08-09) — read this first
+## 0-A. STATUS OVERLAY (added 2026-08-09, revised 2026-08-09) — read this first
 
 This overlay was added because the plan below carried almost no status markers
 while a large part of its surface had already been built, **some of it out of
 the plan's own stated order**. The prose below §0-A is the ORIGINAL plan and is
 deliberately unedited; where it disagrees with this overlay, the overlay is
-newer. Every SHA here was verified present in `origin/main` on 2026-08-09.
+newer. Every SHA here was verified present on `main` (fetched tip, not the local
+`origin/main` ref, which lags) on 2026-08-09.
 
 ### Standing caveat — no perf number is admissible yet
 
@@ -24,6 +25,9 @@ newer. Every SHA here was verified present in `origin/main` on 2026-08-09.
 seed or the tree-walk interpreter is admissible. Everything landed so far gates
 the **mechanism** (measured-bits, counted refusals, ABI width, engine identity),
 **not any performance number**. Do not read a green gate as a met milestone.
+Nothing landed on 2026-08-09 moves this: the day's evidence is seed- or
+stage2-attributed throughout, and **nothing proves the self-hosted or native-AOT
+lane**.
 
 ### Ordering inversions — the reason this overlay exists
 
@@ -44,50 +48,121 @@ the **mechanism** (measured-bits, counted refusals, ABI width, engine identity),
    measured. The other three are BLOCKED-by-design rather than assumed zero —
    which is correct, but means §0's five-zero milestone is one-fifth measured.
 
+Treat every marker in the table below as claim-verified only for the SHA cited.
+An earlier revision of this table said "O0–O4 NOT STARTED" while O0/O1/O2 were
+already partially built; markers here have been re-derived from git history, not
+carried forward.
+
 ### Lane status
 
 | Lane | Status | Evidence |
 |---|---|---|
 | **F0** receipts + engine-identity gates (not a numbered §; serves §0/§11) | **LANDED `64dbe3b01c8`** | `src/lib/common/perf/render_perf_receipt_v2.spl` (per-counter `measured` bit, `perf_milestone_gate`, `RenderPerfGateLedger`, never-merged verdict families `refuse:*` / `blocked:unmeasured:<n>` / `fail:nonzero:<n>=<v>`), `scripts/check/check-render-perf-milestone-gate.shs` (fatal selftest). Closed a real fabricated-zero hole: counters initialised to 0 with no record of whether anyone wrote them read as five perfect zeros. Gates mechanism only — see caveat above. |
-| **F1** class/reference semantics | **BLOCKED** | Plan `a4eb22fa77d` → `doc/03_plan/ui/perf/f1_class_identity_kind_propagation_plan_2026-08-09.md` (**not** under `doc/03_plan/compiler/`). Corpus + JIT struct-alias defect `47a162e079a`. The seed has **zero** `ClassKind` / `StructKind` / `TypeKind::Class`; `is_value_type` is set at the parser then **hardcoded at 13 literal sites** across `context_pack.rs`, `hir/lower/module_lowering/module_pass.rs:548` (`false`), `interpreter/node_exec.rs:438` (`true`), `interpreter_call/block_execution.rs`, `interpreter_eval.rs`. Engines fail in OPPOSITE directions (interpreter copies classes; JIT aliases structs), so no single-backend patch works. Staged S1–S5; **S2 (a driver reaching the pure-Simple engine) must precede S1**. |
+| **F1** class/reference semantics | **BLOCKED — unchanged 2026-08-09** | Plan `a4eb22fa77d` → `doc/03_plan/ui/perf/f1_class_identity_kind_propagation_plan_2026-08-09.md` (**not** under `doc/03_plan/compiler/`). Corpus + JIT struct-alias defect `47a162e079a`. The seed has **zero** `ClassKind` / `StructKind` / `TypeKind::Class`; `is_value_type` is set at the parser then **hardcoded at 13 literal sites** across `context_pack.rs`, `hir/lower/module_lowering/module_pass.rs:548` (`false`), `interpreter/node_exec.rs:438` (`true`), `interpreter_call/block_execution.rs`, `interpreter_eval.rs`. Engines fail in OPPOSITE directions (interpreter copies classes; JIT aliases structs), so no single-backend patch works. Staged S1–S5; **S2 (a driver reaching the pure-Simple engine) must precede S1.** Still the front of the queue. |
 | **F2** packed span ABI | **PARTIAL (both halves present)** | Simple primitive landed `deea048b59f` (08-06, with F3); counted refusal gate `cf36e6d6200`; C half `dc201577385` → `src/runtime/runtime_packed_span.{c,h}`, magic-first struct, `sizeof == 40`, alignment 8. One-check-per-batch measured: 1 resolve call admitting 16384 elements. `packed_span_backend_name()` is a **live per-engine probe, not hardcoded** (reports `scalar-oracle` where the engine cannot deliver). **Criterion 7 remains PARTIAL — blocked by a stdlib MIR `HirTypeKind::Infer` gap.** |
 | **F3** UiSceneColumnArenaV2 | **PARTIAL — built on absent foundations** | `deea048b59f` (08-06): `src/lib/nogc_sync_mut/ui/ui_scene_column_arena_v2.spl`, `draw_ir_v3_direct_writer_v2.spl` + specs. Landed **before** F1 and alongside F2ʹ. Zero-copy unproven until F1. |
 | **C0** layer declarations | **LANDED** | Soft keyword, `@layer(NAME)`, DAG errors implemented. |
 | **C1** layer-equivalent types | **PARTIAL** | `c0b284e6a5f` — `@layer_eq`/`@layer_field` parse and reach the checker on **real source** (`10.frontend/layer_eq_registry.spl`, `35.semantics/layer_eq_validation.spl`, parser + HIR pipeline wiring). Obligations 1–4 proven against real layout; **5–8 at neutral defaults** (missing `TypeLayout`/HIR per-field facts). |
 | **C2** typed forwarding | **IN FLIGHT** | — |
-| **C3** logical AOP join points | **NOT STARTED** | — |
+| **C3** logical AOP join points | **PARTIAL — static weave landed for ONE join-point kind (was "NOT STARTED")** | `5f13a5f3dc5`: `src/compiler/35.semantics/aspect_weave.spl` + `driver_hir_pipeline_lowering.spl` wiring + `test/01_unit/compiler/semantics/aspect_weave_spec.spl`. Weaves the **`forward`** join-point kind only — the other six kinds stay unwoven because `join_point_kind_is_measurable` cannot prove them. The commit also fixed a real write-back bug that silently lost **every** weave. `39a216bf843` corrected two spec oracles that asserted a post-weave statement count against un-woven bodies: `HirBlock` stores a single tail expression in `.value`, not `.stmts`, so the un-woven baseline is 0, not 1 — the spec is now 5/5. Seed/interpreter evidence only. |
 | **C4** effect verifier | **PARTIAL** | Verifier complete but **fixture-fed**; source wiring in flight. |
 | **C5** `@zero_forward_path` gates | **PARTIAL — hop axis LANDED `3fc73b79b11`** | `src/compiler/35.semantics/zero_forward_path_gate.spl`. Hop axis bites; the other three axes emit `ZFP_UNMEASURED` → BLOCKED rather than assumed zeros. |
-| **U0–U3** WM/GUI/Web/events adoption | **PARTIAL** | Events `945f7bde756`: `src/os/drivers/input/input_batch.spl` — `drain_into`, coalescing policy that **never merges key/text/focus/close**, allocation gate asserting F0 returns `blocked:unmeasured:allocations`. Hit-test boundary agreement `1b8c772792f`: `src/lib/common/engine/interaction/hit_test.spl` + `event_route_stack_boundary_agreement_spec.spl` — the two stacks agree on well-formed input but **provably diverge on `z_index`, `enabled=false`, and `pointer_policy=None`**, because `DrawIrV3Command` has no such columns; **a disabled overlay eats clicks on the packed path**. Still open: SPSC atomics, POD `InputPacket` (`ch: text` is a heap ref), `RouteToken`, allocating flat hit-test path. |
-| **O0** revisions/invalidation | **PARTIAL (mechanism only) — corrects this table's earlier "NOT STARTED"** | `src/lib/common/ui/render_opt/revisions.spl`: `RenderRevisions` with an explicit 8×8 propagation matrix (no bitmasks, no enums — engine-portable integer indexing), `mark`/`is_dirty`/`dirty_nodes`/`total_dirty`, in-band `mark_count`. The load-bearing TRANSFORM row marks one column. Gate: `test/01_unit/lib/common/ui/render_opt/render_opt_invalidation_spec.spl` describe (a), 8/8. **Mechanism only — no perf number, see the standing caveat.** |
+| **U0–U3** WM/GUI/Web/events adoption | **PARTIAL — hit-test divergence CLOSED `3166165f0e3`** | Events `945f7bde756`: `src/os/drivers/input/input_batch.spl` — `drain_into`, coalescing policy that **never merges key/text/focus/close**, allocation gate asserting F0 returns `blocked:unmeasured:allocations`. Hit-test boundary agreement `1b8c772792f` had proven the two stacks diverge on `z_index`, `enabled=false` and `pointer_policy=None` because `DrawIrV3Command` carried no such columns — **a disabled overlay ate clicks on the packed path**. `3166165f0e3` adds `z_indices` / `enableds` / `pointer_policies` columns to the DrawIrV3 hit-test table (`DRAW_IR_V3_SCHEMA_ID` 3→4) and threads them through `draw_ir_v3_emit_full`, `draw_ir_v3_group_resolve`, `ui_scene_arena` and all three packed producers (wm/gui/web); `event_route_stack_boundary_agreement_spec.spl` was rewritten accordingly. Still open: SPSC atomics, POD `InputPacket` (`ch: text` is a heap ref), `RouteToken`, allocating flat hit-test path. |
+| **O0** revisions/invalidation | **PARTIAL (mechanism only)** | `src/lib/common/ui/render_opt/revisions.spl`: `RenderRevisions` with an explicit 8×8 propagation matrix (no bitmasks, no enums — engine-portable integer indexing), `mark`/`is_dirty`/`dirty_nodes`/`total_dirty`, in-band `mark_count`. The load-bearing TRANSFORM row marks one column. Gate: `test/01_unit/lib/common/ui/render_opt/render_opt_invalidation_spec.spl` describe (a), 8/8. **Mechanism only — no perf number, see the standing caveat.** |
 | **O1** property trees / retained chunks | **PARTIAL (mechanism only)** | `src/lib/common/ui/render_opt/property_trees.spl`: `PropertyTrees` (transform/clip/effect/scroll + exact damage rects), `PaintChunks` with the §4-pass-3 cache key, `paint_chunks_sync`. `paint_chunks_property_rev` deliberately EXCLUDES `PT_TRANSFORM` — that exclusion is what makes a transform-only move cost zero chunk rebuilds. Gate: same spec, describe (b), 7/7, incl. live-key controls that fail if the key were inert. |
 | **O2** damage / raster skip | **PARTIAL (raster-skip half only)** | `paint_chunks_raster` → `RasterStats{rastered,skipped,bytes_painted}`; quiescent frame rasters 0. Gate: same spec, describe (c), 3/3, plus `paint_chunk_rasterizer_spec.spl` 9/9 and `draw_ir_delta_spec.spl` 6/6. **The occlusion/visibility half (§4 pass 5) and the multi-scale dirty-TILE sets (§4 pass 4: coarse grid / CPU tiles / GPU bins, profile-measured) are NOT in this module** — the only occlusion code is the compositor-level baseline under `src/os/**`. Do not read O2 as complete. |
 | **O0/O1/O2 sabotage controls** | **LANDED 2026-08-09** | Same spec, describe (d), 3/3. Each reconstructs the defeating edit inside the spec (TRANSFORM row also marking PAINT; `PT_TRANSFORM` folded into the chunk key; unconditional raster) and asserts the gate's expected value is violated. Meta-sabotage verified: neutralising all three injections turns the file **21/21 → 18/21 with exactly those 3 red**, so none of them is a check that cannot go red. Binary: `bin/release/x86_64-unknown-linux-gnu/simple` — **the Rust SEED** (`--version` prints the bootstrap-seed warning), tree-walk interpreter test path. Correctness evidence only; **not admissible as any perf claim.** |
 | **O3–O4**, **P0–P5**, **G0–G4** | **NOT STARTED** | Correctly gated behind §0's milestone. |
 
+### Adjacent defects fixed 2026-08-09 that this plan's surface depends on
+
+These are not lanes, but each was silently corrupting a path the render/perf
+work reads or is verified through:
+
+- `724b8d32eeb` — **radial gradients were painting ZERO pixels.** The N-stop
+  gradient branch in `draw_ir_adv.spl:683` was gated on flat props nothing ever
+  wrote; linear gradients only passed by accident, via a legacy path that
+  ignores middle stops and angle. Fix emits the GAP-2 stop props.
+- `e5bc26ced33` — interpreter `70.backend/backend/env.spl`: a doubly-indexed
+  assignment target plus a descending inclusive range `(n)..=0` that iterates
+  **zero** times. This broke any user-to-user function call, i.e. every spec run
+  through the interpreter lane.
+- `197b61f972f` — `levenshtein_distance` returned **0 for every input**: the DP
+  rows are value types, copied out and never written back. Landed with a
+  value-type write-back family audit. `48de6604045` closed that audit's `tbl`
+  finding as **wrong** — the excerpt was truncated; the write-backs exist at
+  `pure_db` :2822 and :2888 and both are sabotage-proven load-bearing.
+  Recorded RESOLVED-not-a-defect, with an UPDATE-then-read spec.
+- `70a641a4df3` / `d5ddc4371dd` / `b0e0092a5fd` — three native-AOT fences.
+  Trailing-default-param (and a repair to the check's own `EXIT` trap, which was
+  eating its diagnostics); Option-unwrap receiver lowering, which is the actual
+  root cause of the SimpleOS hosted-FAT32 blocker (new fence
+  `check-native-option-unwrap-receiver.shs`); and trait-typed **return**
+  receivers failing MIR lowering — where trait-typed **optional field**
+  receivers are worse still, **silently losing data** (fail-open, not a hard
+  error). Also: the `blockdevice-dispatch-codegen-bug` marker at
+  `src/os/services/vfs/vfs_boot_init.spl:383` is **STALE** — that defect was
+  fixed 2026-07-20; the skip was retained for the Option-unwrap defect.
+- `7fb77258f47` — `src/lib/cc/**` is **not** dead code: the audit claim was
+  refuted, `src/lib/viz/feature/aggregator_compose.spl:8` is a live consumer of
+  `cc/entity/property_tree.spl`. Only `layer.spl` / `layer_tree_host.spl` are
+  spec-only. Separately, `doc/04_architecture/ui/drawing_stack.md` lists
+  `cc/entity/{layer_base,tile}.spl`, which **do not exist**.
+
 ### SimpleOS runnable status (per `.claude/rules/board-runnable.md`)
 
-Bug doc: `doc/08_tracking/bug/simpleos_wm_lane_not_board_runnable_2026-08-08.md`
-(`f7421f2625e`). **That doc is STALE as of 22:16 on 08-08 and was never updated**
-— three later commits supersede its rung (b) and (c) verdicts. Current rungs:
+Rungs: (a) source present, (b) staged into an image, (c) booted under real
+firmware, (d) WM actually rendering in-guest.
+
+Bug doc `doc/08_tracking/bug/simpleos_wm_lane_not_board_runnable_2026-08-08.md`
+(`f7421f2625e`) is **STALE** — it predates the rung (b)/(c) evidence below.
 
 - **(a) source present — YES.**
-- **(b) cross-built / staged into an image — YES on x86_64**, `e83b3df9596`
-  (the bug doc still says NO; it predates this).
-- **(c) booted under real firmware — YES on BOTH arches.** aarch64 under AAVMF
-  with an 800x600 framebuffer, `bf37f58c41d`. Note: the framebuffer was **never
-  a kernel bug** — QEMU `-M virt` has no default display adapter; `ramfb` fixes
-  it. x86_64 under OVMF with 27,487 bytes of serial.
-- **(d) WM actually running and rendering in-guest — NO on either arch.**
-  - *x86_64 blocker, precisely isolated* (`b4184d4aac6`, doc
-    `...rs_reject_cpu_composited_material_2026-08-08.md`): rendering **completes**
-    (`engine2d_rendered backend=software`) but the `aetheric_dark` theme's
-    two-layer `.wm-window` background yields `layers_len=73` while the
-    `engine2d-cpu-composited-material-v1` predicate requires `mat_layers == ""`.
-    Every other term passes; all 3 windows are `content-provenance-rejected`.
-  - *aarch64 blocker*: `memory_init` is still the Layer 1 milestone stub.
+- **(b) staged into an image — YES on x86_64** (`e83b3df9596`).
+- **(c) booted under real firmware — YES.** x86_64 chain verified end to end:
+  OVMF pflash → GRUB `BOOTX64.EFI` multiboot → `[BOOT32]` / `[BOOT64]` → kernel
+  `_start` → PMM/VMM → NVMe + FAT32 → framebuffer 3840x2160 argb8888 →
+  `engine2d-ready` → `compositor ready`, 3 owned surfaces. **No `-kernel`, no
+  `isa-debug-exit`** — real-firmware proxy throughout. Best serial 16,578 bytes.
+  aarch64 booted under AAVMF with an 800x600 framebuffer (`bf37f58c41d`); the
+  missing framebuffer there was never a kernel bug — QEMU `-M virt` has no
+  default display adapter, `ramfb` fixes it. aarch64's own blocker is that
+  `memory_init` is still the Layer 1 milestone stub.
+- **(d) WM actually rendering — NO. This is an explicit non-claim.**
+  `scanout_capture_size=0` on **every** run and no PPM was ever captured, so
+  **no compositing evidence exists**. Reaching `compositor ready` is rung (c),
+  not rung (d). Do not read the boot chain as rendering.
 - **Physical board: ZERO evidence on either arch.** Per the board-runnable rule
   this is a filed gap, not a completion.
+
+**Why the lane was stuck, recorded because it was self-perpetuating:** the gate
+hashed a 1,512-file source closure before the build and re-hashed after,
+aborting on mismatch **upstream** of disk staging and QEMU — so `qemu.out` /
+`serial.log` never existed and `kernel_sha256` was always empty. Every run
+therefore rebuilt, and every rebuild lost the race against concurrent-session
+churn (17 `src/lib` files changed within one run; a foreign `git am` rewrote
+9,386 files mid-build), so no valid admission was ever written and the cache
+path could never engage. `92af22801ef` added a bounded build retry; one
+successful admission broke the loop, and later runs hit `current-source-cache`
+at `attempts=0`. That single fix took the lane from rung (a) to rung (c).
+
+### Measurement traps in this lane — check these before believing a RED
+
+1. **Readiness timeout produced FALSE REDs.**
+   `SIMPLEOS_WM_READINESS_TIMEOUT_MS` used to default to 60s, too tight for a
+   source-built run on a loaded host. Controlled experiment, identical kernel
+   and identical staging: 300s reached full scanout; the 60s run stopped at
+   7,068 serial bytes and read as a regression. **The default is now 300000 ms**
+   in `scripts/check/check-simpleos-wm-fullscreen-evidence.shs` — verified on
+   the current tip, so this trap is closed, but any older transcript showing a
+   60s-bounded RED is not evidence of a defect.
+2. **Canonical evidence paths are racy, and `serial_log_bytes` is noisy.**
+   `build/simpleos_wm_fullscreen_evidence/{serial.log,qemu.out,evidence.env}`
+   are overwritten by concurrent sessions mid-flight; run dirs have been
+   observed whose contents do not match their timestamps. **Only per-run
+   archived copies are trustworthy.** And `serial_log_bytes` is not a progress
+   signal: the identical kernel produced 16,578 and 14,207 bytes on consecutive
+   runs.
 
 ### Resume here — highest-leverage next steps
 
@@ -95,18 +170,15 @@ Bug doc: `doc/08_tracking/bug/simpleos_wm_lane_not_board_runnable_2026-08-08.md`
    everything downstream, because F3's zero-copy and F2's arena guarantees are
    engine-dependent until the class/reference contract is real. S2 must precede
    S1. *Blocked by:* nothing — this is the front of the queue.
-2. **SimpleOS rung (d), x86_64 — reconcile the material predicate with the
-   theme.** *Unblock condition:* either `engine2d-cpu-composited-material-v1`
-   accepts a layered `.wm-window` background, or the theme stops emitting two
-   layers. Everything else in that gate already passes; this is a one-term
-   contract mismatch, not a rendering defect.
-3. **U-lane: add `z_index` / `enabled` / `pointer_policy` columns to
-   `DrawIrV3Command`.** *Unblock condition:* none — the divergence is proven and
-   the fix is additive. Until then the packed hit-test path is **unsafe to
-   adopt**: a disabled overlay eats clicks.
-4. **C4 source wiring, then C1 obligations 5–8.** *Unblock condition for 5–8:*
+2. **SimpleOS rung (d) — get a scanout capture.** `scanout_capture_size` is 0 on
+   every run to date. *Unblock condition:* a captured PPM (or equivalent) that
+   shows composited output; until one exists there is no rendering claim to
+   make, only a boot claim.
+3. **C4 source wiring, then C1 obligations 5–8.** *Unblock condition for 5–8:*
    `TypeLayout`/HIR must carry the per-field facts; until then they are neutral
    defaults and must not be reported as proven.
+4. **C3 — extend the static weave past `forward`.** Six of seven join-point
+   kinds stay unwoven because `join_point_kind_is_measurable` cannot prove them.
 5. **F2 criterion 7.** *Unblock condition:* close the stdlib MIR
    `HirTypeKind::Infer` gap.
 6. **Do not start O/P/G lanes.** §0's five zeros are one-fifth measured and no
@@ -114,9 +186,11 @@ Bug doc: `doc/08_tracking/bug/simpleos_wm_lane_not_board_runnable_2026-08-08.md`
 
 ### Working-tree note
 
-On 2026-08-09 the local working copy was missing
-`scripts/check/check-render-perf-milestone-gate.shs` even though it is present
-in `origin/main`. Verify lane files against `origin/main`, not the WC.
+Do not verify lane files against the local working copy or the local
+`origin/main` ref — both lag, and concurrent sessions (including a live foreign
+`git am`) edit the tree mid-session. On 2026-08-09 the WC was missing
+`scripts/check/check-render-perf-milestone-gate.shs` while it was present
+upstream. Fetch the true tip and read blobs from it.
 
 ## 0. Decisive first milestone
 
