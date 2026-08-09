@@ -679,13 +679,13 @@ def inject_and_wait(events, poll_pattern, frame_label):
     input_watermarks[seq] = serial_watermark
     return seq, commit
 
-# Preserve the guest's declared six-event order. Each logical input action
-# completes its own
-# guest poll/frame/commit cycle before the next QMP command is admitted.
+# Every primitive completes a guest poll/frame/commit cycle before the next
+# QMP command is admitted. A missing producer receipt is therefore fatal;
+# this checker never promotes QMP acknowledgement alone to a pass.
 move_seq, move_commit = inject_and_wait(
     [
-        {"type": "rel", "data": {"axis": "x", "value": 24}},
-        {"type": "rel", "data": {"axis": "y", "value": 16}},
+        {"type": "rel", "data": {"axis": "x", "value": -40}},
+        {"type": "rel", "data": {"axis": "y", "value": -50}},
     ],
     r"^\[wm-pointer-poll\] source=poll input_seq=(\d+) "
     r"x=\d+ y=\d+ button_code=\d+ kind_code=3\r?$",
@@ -697,33 +697,54 @@ down_seq, down_commit = inject_and_wait(
     r"x=\d+ y=\d+ button_code=\d+ kind_code=1\r?$",
     "wm-pointer-frame",
 )
+drag_seq, drag_commit = inject_and_wait(
+    [
+        {"type": "rel", "data": {"axis": "x", "value": 32}},
+        {"type": "rel", "data": {"axis": "y", "value": 18}},
+    ],
+    r"^\[wm-pointer-poll\] source=poll input_seq=(\d+) "
+    r"x=\d+ y=\d+ button_code=\d+ kind_code=4\r?$",
+    "wm-pointer-frame",
+)
 up_seq, up_commit = inject_and_wait(
     [{"type": "btn", "data": {"down": False, "button": "left"}}],
     r"^\[wm-pointer-poll\] source=poll input_seq=(\d+) "
     r"x=\d+ y=\d+ button_code=\d+ kind_code=2\r?$",
     "wm-pointer-frame",
 )
-key_down_seq, key_down_commit = inject_and_wait(
-    [{"type": "key", "data": {
-        "down": True, "key": {"type": "qcode", "data": "tab"}
-    }}],
-    r"^\[wm-key-poll\] source=poll input_seq=(\d+) "
-    r"edge=press code=15\r?$",
-    "wm-key-frame",
+wheel_seq, wheel_commit = inject_and_wait(
+    [{"type": "rel", "data": {"axis": "z", "value": -2}}],
+    r"^\[wm-pointer-poll\] source=poll input_seq=(\d+) "
+    r"x=\d+ y=\d+ button_code=\d+ kind_code=3\r?$",
+    "wm-pointer-frame",
 )
-key_up_seq, key_up_commit = inject_and_wait(
-    [{"type": "key", "data": {
-        "down": False, "key": {"type": "qcode", "data": "tab"}
-    }}],
-    r"^\[wm-key-poll\] source=poll input_seq=(\d+) "
-    r"edge=release code=15\r?$",
-    "wm-key-frame",
-)
+
+def key_edge(qcode, down, evdev_code):
+    edge = "press" if down else "release"
+    return inject_and_wait(
+        [{"type": "key", "data": {
+            "down": down, "key": {"type": "qcode", "data": qcode}
+        }}],
+        r"^\[wm-key-poll\] source=poll input_seq=(\d+) "
+        r"edge=%s code=%d\r?$" % (edge, evdev_code),
+        "wm-key-frame",
+    )
+
+left_ctrl_down_seq, left_ctrl_down_commit = key_edge("ctrl", True, 29)
+left_ctrl_up_seq, left_ctrl_up_commit = key_edge("ctrl", False, 29)
+right_ctrl_down_seq, right_ctrl_down_commit = key_edge("ctrl_r", True, 97)
+right_ctrl_up_seq, right_ctrl_up_commit = key_edge("ctrl_r", False, 97)
+left_alt_down_seq, left_alt_down_commit = key_edge("alt", True, 56)
+left_alt_up_seq, left_alt_up_commit = key_edge("alt", False, 56)
+right_alt_down_seq, right_alt_down_commit = key_edge("alt_r", True, 100)
+right_alt_up_seq, right_alt_up_commit = key_edge("alt_r", False, 100)
 
 _, serial = wait_serial(
     r"^\[backend2d-event-receipt\] backend=simpleos-qemu-arm64 "
-    r"event_backend=virtio-mmio event_count=6 "
-    r"sequence=focus,pointer_move,pointer_down,pointer_up,key_down,key_up "
+    r"event_backend=virtio-mmio event_count=13 "
+    r"sequence=pointer_move,pointer_down,pointer_drag,pointer_up,pointer_wheel,"
+    r"left_ctrl_down,left_ctrl_up,right_ctrl_down,right_ctrl_up,"
+    r"left_alt_down,left_alt_up,right_alt_down,right_alt_up "
     r"delivered=true\r?$",
     10,
 )
@@ -742,25 +763,43 @@ raw_up_seq = sequence(
     r"^\[virtio-input-device\] input_seq=(\d+) device=pointer "
     r"type=1 code=272 value=0 frame=raw-edge\r?$"
 )
-raw_key_down_seq = sequence(
-    r"^\[virtio-input-device\] input_seq=(\d+) device=keyboard "
-    r"type=1 code=15 value=1\r?$"
-)
-raw_key_up_seq = sequence(
-    r"^\[virtio-input-device\] input_seq=(\d+) device=keyboard "
-    r"type=1 code=15 value=0\r?$"
-)
-if (
-    raw_down_seq != down_seq or raw_up_seq != up_seq or
-    raw_key_down_seq != key_down_seq or raw_key_up_seq != key_up_seq
-):
+if raw_down_seq != down_seq or raw_up_seq != up_seq:
     raise RuntimeError("raw device sequence does not match delivered WM sequence")
-if not (move_seq < down_seq < up_seq < key_down_seq < key_up_seq):
+key_edges = [
+    (left_ctrl_down_seq, 29, 1, True, False),
+    (left_ctrl_up_seq, 29, 0, False, False),
+    (right_ctrl_down_seq, 97, 1, True, False),
+    (right_ctrl_up_seq, 97, 0, False, False),
+    (left_alt_down_seq, 56, 1, False, True),
+    (left_alt_up_seq, 56, 0, False, False),
+    (right_alt_down_seq, 100, 1, False, True),
+    (right_alt_up_seq, 100, 0, False, False),
+]
+for seq, code, value, ctrl, alt in key_edges:
+    if not re.search(
+        r"^\[virtio-input-device\] input_seq=%d device=keyboard "
+        r"type=1 code=%d value=%d\r?$" % (seq, code, value), serial, re.M,
+    ):
+        raise RuntimeError("raw modifier edge does not match delivered WM sequence")
+    if not re.search(
+        r"^\[wm-key-modifiers\] input_seq=%d ctrl=%s alt=%s\r?$"
+        % (seq, str(ctrl).lower(), str(alt).lower()), serial, re.M,
+    ):
+        raise RuntimeError("WM modifier state does not match raw producer edge")
+if not (move_seq < down_seq < drag_seq < up_seq < wheel_seq < left_ctrl_down_seq < left_ctrl_up_seq < right_ctrl_down_seq < right_ctrl_up_seq < left_alt_down_seq < left_alt_up_seq < right_alt_down_seq < right_alt_up_seq):
     raise RuntimeError("guest input sequences are not strictly ordered")
 
-input_sequences = [move_seq, down_seq, up_seq, key_down_seq, key_up_seq]
+input_sequences = [
+    move_seq, down_seq, drag_seq, up_seq, wheel_seq,
+    left_ctrl_down_seq, left_ctrl_up_seq, right_ctrl_down_seq, right_ctrl_up_seq,
+    left_alt_down_seq, left_alt_up_seq, right_alt_down_seq, right_alt_up_seq,
+]
 input_commits = [
-    move_commit, down_commit, up_commit, key_down_commit, key_up_commit
+    move_commit, down_commit, drag_commit, up_commit, wheel_commit,
+    left_ctrl_down_commit, left_ctrl_up_commit,
+    right_ctrl_down_commit, right_ctrl_up_commit,
+    left_alt_down_commit, left_alt_up_commit,
+    right_alt_down_commit, right_alt_up_commit,
 ]
 previous_frame_id = baseline_commit["frame_id"]
 for commit in input_commits:
@@ -776,27 +815,27 @@ for commit in input_commits:
 
 if not re.search(
     r"^\[virtio-input-device\] input_seq=%d device=pointer "
-    r"type=2 code=0 value=24 frame=raw-summary\r?$" % move_seq,
+    r"type=2 code=0 value=-40 frame=raw-summary\r?$" % move_seq,
     serial, re.M,
 ) or not re.search(
     r"^\[virtio-input-device\] input_seq=%d device=pointer "
-    r"type=2 code=1 value=16 frame=raw-summary\r?$" % move_seq,
+    r"type=2 code=1 value=-50 frame=raw-summary\r?$" % move_seq,
     serial, re.M,
 ):
     raise RuntimeError("pointer relative-motion receipt mismatch")
 
-expected_pointer_x = baseline_commit["width"] // 2 + 24
-expected_pointer_y = baseline_commit["height"] // 2 + 16
 pointer_focus = {}
-for seq, kind, button in (
-    (move_seq, 3, 0),
-    (down_seq, 1, 1),
-    (up_seq, 2, 1),
+for seq, x, y, kind, button in (
+    (move_seq, baseline_commit["width"] // 2 - 40, baseline_commit["height"] // 2 - 50, 3, 0),
+    (down_seq, baseline_commit["width"] // 2 - 40, baseline_commit["height"] // 2 - 50, 1, 1),
+    (drag_seq, baseline_commit["width"] // 2 - 8, baseline_commit["height"] // 2 - 32, 4, 1),
+    (up_seq, baseline_commit["width"] // 2 - 8, baseline_commit["height"] // 2 - 32, 2, 1),
+    (wheel_seq, baseline_commit["width"] // 2 - 8, baseline_commit["height"] // 2 - 32, 3, 0),
 ):
     if not re.search(
         r"^\[wm-pointer-poll\] source=poll input_seq=%d "
         r"x=%d y=%d button_code=%d kind_code=%d\r?$"
-        % (seq, expected_pointer_x, expected_pointer_y, button, kind),
+        % (seq, x, y, button, kind),
         serial, re.M,
     ):
         raise RuntimeError("pointer poll correlation missing")
@@ -820,23 +859,19 @@ for seq, kind, button in (
     ):
         raise RuntimeError("pointer frame correlation missing")
 
-key_focus = {}
-for seq, edge, changed in (
-    (key_down_seq, "press", "true"),
-    (key_up_seq, "release", "false"),
-):
+for seq, code, value, ctrl, alt in key_edges:
+    edge = "press" if value else "release"
     if not re.search(
-        r"^\[wm-key-poll\] source=poll input_seq=%d edge=%s code=15\r?$"
-        % (seq, edge), serial, re.M,
+        r"^\[wm-key-poll\] source=poll input_seq=%d edge=%s code=%d\r?$"
+        % (seq, edge, code), serial, re.M,
     ):
         raise RuntimeError("key poll correlation missing")
     state = re.search(
-        r"^\[wm-key-state\] input_seq=%d edge=%s changed=%s "
-        r"focused_idx=(-?\d+)\r?$" % (seq, edge, changed), serial, re.M,
+        r"^\[wm-key-state\] input_seq=%d edge=%s changed=false "
+        r"focused_idx=(-?\d+)\r?$" % (seq, edge), serial, re.M,
     )
     if not state:
         raise RuntimeError("key state correlation missing")
-    key_focus[seq] = int(state.group(1))
     frame = re.search(
         r"^\[wm-key-frame\] input_seq=%d rendered_revision=(\d+) "
         r"frame_id=(\d+)\r?$" % seq,
@@ -849,11 +884,6 @@ for seq, edge, changed in (
         int(frame.group(2)) != commit["frame_id"]
     ):
         raise RuntimeError("key frame correlation missing")
-
-if key_focus[key_down_seq] == pointer_focus[up_seq]:
-    raise RuntimeError("Tab key-down did not change focused window")
-if key_focus[key_up_seq] != key_focus[key_down_seq]:
-    raise RuntimeError("Tab key-up unexpectedly changed focused window")
 
 screendump(after_path)
 before_w, before_h, before_pixels, before_sha = ppm(before_path)
@@ -934,8 +964,13 @@ print(
 print("simd_fallback=%s" % final_simd_receipt["fallback"])
 print("simd_scalar_parity=%s" % final_simd_receipt["scalar_parity"])
 print("baseline_revision=%d" % baseline_revision)
-print("pointer_sequences=%d,%d,%d" % (move_seq, down_seq, up_seq))
-print("key_sequences=%d,%d" % (key_down_seq, key_up_seq))
+print("pointer_sequences=%d,%d,%d,%d,%d" % (move_seq, down_seq, drag_seq, up_seq, wheel_seq))
+print("key_sequences=%d,%d,%d,%d,%d,%d,%d,%d" % (
+    left_ctrl_down_seq, left_ctrl_up_seq,
+    right_ctrl_down_seq, right_ctrl_up_seq,
+    left_alt_down_seq, left_alt_up_seq,
+    right_alt_down_seq, right_alt_up_seq,
+))
 print("input_serial_watermarks=%s" % ",".join(
     "%d:%d" % (seq, input_watermarks[seq]) for seq in input_sequences
 ))

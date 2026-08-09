@@ -254,7 +254,7 @@ class Compositor:
     # 2026-07-18 input-correlation lane).
     # button_code: 0=none, 1=left, 2=middle, 3=right (see
     # _ps2_wm_pointer_button_code). kind_code: 0=none, 1=down, 2=up,
-    # 3=move. Decoded back to text in shell.spl's
+    # 3=move, 4=drag. Decoded back to text in shell.spl's
     # wm_pointer_button_from_code / wm_pointer_kind_from_code (see
     # handle_pending_wm_pointer_step) — keep both ends in sync.
     pending_wm_pointer_button_code: i32
@@ -1177,7 +1177,15 @@ class Compositor:
                 var pointer_kind_code: i32 = 3
                 if left_press:
                     pointer_button_code = 1
-                    pointer_kind_code = 1
+                    if self.dragging:
+                        pointer_kind_code = 4
+                        self.move_window(
+                            self.drag_window_id,
+                            new_x - self.drag_offset_x,
+                            new_y - self.drag_offset_y
+                        )
+                    else:
+                        pointer_kind_code = 1
                 elif button == HOST_BTN_RIGHT and pressed:
                     pointer_button_code = 3
                     pointer_kind_code = 1
@@ -1193,7 +1201,7 @@ class Compositor:
                     pointer_kind_code
                 )
 
-                if left_press:
+                if left_press and not self.dragging:
                     var hit_idx = -1
                     var wi = 0
                     # cpu-lane-loop-ok: pointer hit test over open window surfaces, once per backend input event; bound is the surface count
@@ -1203,7 +1211,15 @@ class Compositor:
                             hit_idx = wi
                         wi = wi + 1
                     if hit_idx >= 0:
-                        self.focus_window(self.surfaces[hit_idx].id)
+                        val hit = self.surfaces[hit_idx]
+                        self.focus_window(hit.id)
+                        if new_y < hit.y + 24:
+                            self.dragging = true
+                            self.drag_window_id = hit.id
+                            self.drag_offset_x = new_x - hit.x
+                            self.drag_offset_y = new_y - hit.y
+                elif button == HOST_BTN_LEFT and not pressed:
+                    self.dragging = false
             HostInputEvent.Resize(w, h):
                 # No resize producer reaches this path yet (WS-C C4/C5 wire the
                 # host toolkits). Ignored rather than guessed at.
