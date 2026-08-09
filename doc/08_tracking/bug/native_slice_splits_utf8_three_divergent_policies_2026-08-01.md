@@ -609,3 +609,58 @@ policies (rows 1–4); LLVM-without-`--native` and the C runtime's
 they were before. No fix was attempted for the underlying divergence or for
 the `native-build` opaque-error defect — per the task's explicit scope, the
 891-site migration decision from "Stage 3 migration" above stands unchanged.
+
+## Re-verified 2026-08-09 — row 6's premise FALSIFIED; native-build now REACHES the raw-bytes policy (still open, not fixed)
+
+The fence's B2 branch (`native-build`) flagged its own `FAIL (promote-me)`
+convention: `nb_rc=0` where the pinned premise said it should stay nonzero.
+Re-ran the underlying repro directly (not just the fence) to characterize the
+drift before touching anything:
+
+```
+env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 bin/simple native-build \
+    --source <dir with fixture> --entry-closure --entry <fixture>/main.spl \
+    --cache-dir <cache> --output <bin>
+```
+
+Build now succeeds (rc=0, 32112-byte standalone binary, no interpreter present
+at runtime). Running the produced binary and inspecting stdout byte-for-byte
+(`od -c` / `xxd`):
+
+| tag | len | bytes |
+|---|---|---|
+| `bracket_ctl` (`s[0:3]`, control) | 3 | `61 c3 a9` — correct, both codepoint bytes |
+| `bracket_cut` (`s[0:2]`, splits é) | 2 | `61 c3` — **truncated mid-codepoint, invalid UTF-8** |
+| `slice_cut` (`.slice(0,2)`) | 2 | `61 c3` — same truncation |
+| `substring_cut` (`.substring(0,2)`) | 2 | `61 c3` — same truncation |
+
+This is byte-identical to the raw-bytes policy already pinned above for the
+Cranelift JIT (rows 1–3): a mid-codepoint slice silently produces 2 raw bytes
+with no UTF-8 validation and no error. **Verdict: NOT fixed.** What changed is
+reachability — the whole-program `native-build` AOT path used to fail closed
+(opaque `undefined field 'kind'` MIR-lowering error) on any function
+containing a slice; it now silently compiles the slice and materializes the
+invalid-UTF-8 value into a real standalone executable with no interpreter
+present. That is a narrowing of "this defect is unreachable through native
+tooling," not a repair — if anything it slightly *widens* the defect's
+observable blast radius (a shippable native artifact can now carry it),
+though it does not change which policy is applied.
+
+Root cause of the reachability change not investigated (out of scope for this
+pass — no fix was attempted, per this doc's standing scope statement above).
+
+Separately observed, not examined further: the native-build binary's `print()`
+emits **no newlines** between successive calls at all (all four `dump()` lines
+land back-to-back in one unbroken byte run) — a distinct divergence from
+`bin/simple run`'s output, unrelated to the UTF-8 slicing policy itself.
+
+`scripts/check/check-native-utf8-slice.shs` B2 was re-pinned accordingly: it
+no longer reports `FAIL (promote-me)` on `nb_rc=0`; it now runs the produced
+binary and hard-asserts the exact byte-level raw-bytes-truncation shape above,
+reporting `KNOWN-OPEN` when it matches (current state) and `FAIL`/`NOTE` if it
+ever drifts (aligned-control regression fails hard; any other shape change is
+flagged for human re-triage rather than silently re-accepted). Sabotage-verified
+2026-08-09: mutating the fixture's control line to `s[0:2]` reproduced the
+fence's `FAIL — aligned control s[0:3] regressed` on both the existing Part-A
+assertion and the new native-build byte-level assertion; restoring the line
+returned a clean `PASS` on all branches.
