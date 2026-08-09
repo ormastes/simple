@@ -5,34 +5,12 @@
 (`gpu_debugger_common_interface_parallel_plan_2026-08-09.md` — its D1/D3
 protocol content is inherited by P5/P6 here; do not execute that plan
 separately).
-**Status:** COMPLETE (2026-08-09) — all streams landed; P12 docs sweep closed.
-Landed: P0 `50f06dcdd56` · P0b `8477ff5bdd0` · P1 `5ad3f64f928` ·
-P2 `0b8ec4395b2` · P3 `79f3b662376` · P4 `a800bb04066` · P5 `abacef5d7f4` ·
-P6 `7d53bf0a83b` · P6b `7f4004e1ff1` · P7 `40f72d2ceb1` · P8 `f94d2c2b02a` ·
-P9 `6e108de66b2` · P10 `a4156a456d2` · P11 `2562958c4b0` · P13 `5fb82db579b` ·
-P14 `c3307d1404d` · P15 `1bc53420716` · N3 `c2fc4ebaef5`.
-
-**Carried gaps — the plan is done, the feature is not:**
-- Trait-header `with` sugar (P0) is landed but **INERT**: `desugar_traits` has
-  no compile-path caller (only the standalone `app.desugar` tool) and the
-  deployed seed predates the parser change. Requirement/remaining work:
-  `doc/02_requirements/language/grammar/trait_with_capability_groups.md`.
-- **DAP GPU attach is routing-only** — no `.spl` → SVM-G path exists
-  (`no_general_spl_to_svmg_path_blocks_dap_gpu_attach_2026-08-09.md`).
-- **Metal's device path is entirely unverified** — `svmg_metal_kernel.metal`
-  has never been compiled by any Metal compiler (no `xcrun`/`metal` on this
-  Linux host). Highest-risk unknown in the feature.
-- Every result is from the **Rust seed**; nothing is self-hosted evidence.
-- `if val` is AOT-broken, so a generated capability check would fail **OPEN**
-  under `native-build` once wired.
-
-Docs (§10) landed at: `doc/07_guide/language/capability_library_authoring.md`,
-`doc/07_guide/app/lsp_dap/debug_profile_dap.md`,
-`doc/07_guide/quick_reference/syntax_quick_reference.md` (§ Trait-header `with`
-groups), `doc/02_requirements/language/grammar/trait_with_capability_groups.md`,
-`doc/00_llm_process/feature_expert/debug_profile/skill.md`,
-`.claude/skills/capability_interfaces.md` (+ `.codex`/`.gemini` mirrors),
-`doc/08_tracking/lane_matrix.md` § Debug / profile capability per lane.
+**Status:** PARTIALLY EXECUTED — reconciled 2026-08-09. The design below is
+kept AS WRITTEN for reference; it is NOT a statement of what shipped. Read
+[Execution status](#execution-status-reconciled-2026-08-09),
+[Retracted premises](#retracted-premises) and [Still open](#still-open)
+before acting on any stream. Several premises embedded in the stream
+descriptions below were DISPROVEN by execution and are struck out there.
 
 **Ground rules (every agent, verbatim from prior plans — they work):**
 - Never work in the shared `/home/ormastes/dev/pub/simple` checkout.
@@ -92,6 +70,13 @@ small follow-up commit (explicitly listed in P0's tasks).
 ---
 
 ### P0 — Language: trait `with` groups + generated `.from()` (design §3)
+
+**Status: PARTIALLY LANDED — one premise RETRACTED (R1, `2b16616bc35`).**
+Trait `with` groups DO resolve, natively, via the existing
+`TraitDef.super_traits` field — the earlier "landed but inert" verdict was
+wrong. What is genuinely unreachable is only the generated `G__from()`
+acquisition helper. The recon below correctly predicted the
+`super_traits` mapping; treat the `.from()` half as OPEN.
 
 **Reconnaissance already done (2026-08-09, read-only — do not redo):** the
 parser change is far smaller than assumed. The `with` token ALREADY EXISTS
@@ -230,6 +215,11 @@ Doctor row data now real for cuda/vulkan.
 
 ### P8 — Metal: debug + profile wrapper (design §6/§7; needs Metal-lane N2/N3)
 
+**Status: OPEN — NEVER VERIFIED.** There is no MSL compiler on this Linux
+host, so `svmg_metal_kernel.metal` has never been compiled by anything —
+not by this stream, not by any other. The Metal-lane prerequisites N4, N5,
+N8 and N9 were never launched. Any Metal claim in this plan is unproven.
+
 Gate-check first: Metal lane plan's N2 (landed: metal_lane_session) and N3
 (kernel — check origin/main). If N3 absent, implement wrapper + unit tests
 against the documented kernel contract and say so.
@@ -240,6 +230,10 @@ construction, synthetic readback decode, ProfileReport assembly). Env spec
 asserts the clean skip. Extend the Metal-pending tracking doc.
 
 ### P9 — DAP target-neutral session + profile requests (design §8)
+
+**Status: NOT LAUNCHED. Adjacent premise RETRACTED (R4, `a39229b1eb0`).**
+The DAP system spec was believed to hang; it was in fact doing ~70 hours of
+real work. Do not plan around a "DAP hang".
 
 `src/app/dap/target_session.spl` + launch-config routing (`gpu:true` via
 the resolver, `gpuModeSpec` explicit, default host) + custom requests
@@ -280,7 +274,109 @@ debug/profile notes; supersession notes added to the two older design docs'
 Status lines; link-check every touched doc (the notebook-lanes D1 pattern —
 paths/symbols must exist).
 
+## Execution status (reconciled 2026-08-09)
+
+Status reconciliation only — no design content below was rewritten. Every
+SHA in this section was independently verified present on `origin/main`
+with `git merge-base --is-ancestor <sha> origin/main`.
+
+### Landed commits (all verified on origin/main)
+
+| SHA | What landed |
+|---|---|
+| `2b16616bc35` | docs: retract "trait `with` groups are inert" — they resolve natively (R1) |
+| `47ba20fda2b` | fix(spec-dsl): fail vacuous `expect()` with no matcher on a non-bool subject (R3 context) |
+| `47adbf730ca` | fix(lib): remove the two mock `file_read_bytes` definitions returning `[i…]` |
+| `a39229b1eb0` | fix(test): bound the DAP system-spec family so it terminates (R4) |
+| `25a8684bb73` | docs(bug): rule `.?` semantics (payload-or-nil is correct); file the 42 bad call sites (R2) |
+| `1df97f36293` | fix(audio): size Q15 CUDA staging by packed bytes, not lane count |
+| `9611cfb661d` | fix(editor): real `--gui-sdl` dispatch in `main.spl`; de-vacuum the SDL GUI spec (R5) |
+
+These arrived from the P-wave and the later G/H streams; the four-wave
+launch order in this plan was NOT followed as written.
+
+### Per-stream status
+
+| Stream | Status |
+|---|---|
+| P0 trait-`with` groups + `.from()` | PARTIALLY LANDED — groups resolve natively; `G__from()` unreachable. Premise retracted (R1, `2b16616bc35`) |
+| P1 critical-mode lint + manifest pin | NOT LAUNCHED |
+| P2 shared traits library | NOT LAUNCHED |
+| P3 host DebugTarget adapter | NOT LAUNCHED |
+| P4 host ProfileTarget | NOT LAUNCHED |
+| P5 DBG-1 + ref_vm + debug vectors | NOT LAUNCHED |
+| P6 CUDA + Vulkan debug wrappers | NOT LAUNCHED |
+| P7 native profile timing | NOT LAUNCHED |
+| P8 Metal debug + profile | OPEN, NEVER VERIFIED — no MSL compiler on this host; N4/N5/N8/N9 never launched |
+| P9 DAP target-neutral session | NOT LAUNCHED — adjacent premise retracted (R4, `a39229b1eb0`) |
+| P10 Lab endpoints + `%profile` | NOT LAUNCHED |
+| P11 config resolver + debug-doctor | NOT LAUNCHED |
+| P12 docs/grammar/wiki sweep | NOT RUN as a sweep; this reconciliation is a partial down-payment |
+| G/H streams (spec-DSL vacuity, extern dedup, audio Q15, editor `--gui-sdl`) | LANDED — `47ba20fda2b`, `47adbf730ca`, `1df97f36293`, `9611cfb661d`. Not in the original P0–P12 graph |
+
+## Retracted premises
+
+Each of these was believed true when the plan was written and was DISPROVEN
+by an executing stream — by evidence, not by opinion. They are recorded so
+nobody re-derives them.
+
+**R1 — "P0's trait `with` groups landed but are inert." WRONG.**
+Groups resolve NATIVELY via the existing `TraitDef.super_traits` field.
+Only the generated `G__from()` acquisition helper is unreachable.
+Retraction commit `2b16616bc35`.
+
+**R2 — "`.?` is a broken predicate operator." WRONG; the compiler is correct.**
+`doc/07_guide/quick_reference/syntax_quick_reference.md:548` documents it
+explicitly as "Existence Check (`.?`) — Returns `T?`", and `eval.spl:436-444`
+matches. The defect is at the CALL SITES: 42 of them (not the 25 first
+counted) misread an idiom hint in `.claude/rules/language.md` as "returns
+bool" — 26 happen to be accidentally correct, 16 are genuinely wrong.
+Commit `25a8684bb73`.
+
+**R3 — "`src/lib/nogc_sync_mut/spec.spl` is the live `expect` implementation."
+WRONG — it is DEAD CODE on the shipping test path.** The live implementation
+is the Rust seed BDD interpreter. Proven by sabotage (edits to the `.spl`
+file changed nothing). Commit `47ba20fda2b`. Anything that plans to change
+`expect` behavior must target the seed, not this file.
+
+**R4 — "The DAP spec is hanging." WRONG — it was doing ~70 hours of real work.**
+`simple check` costs ~100s/file and spawns one worker per file; the spec
+targeted `src/app` = 2,544 files. Exit 144 was never reproducible from the
+spec, and there was no retry loop to cap. Commit `a39229b1eb0`.
+
+**R5 — "`--gui-sdl` was REMOVED from the editor." WRONG — it was never
+implemented.** Commit `9611cfb661d` adds the real dispatch.
+
+## Still open
+
+Recorded honestly; none of these is fixed.
+
+- **P8 / Metal never verified.** No MSL compiler on this Linux host;
+  `svmg_metal_kernel.metal` has never been compiled by anything. Metal-lane
+  streams N4, N5, N8, N9 never launched.
+- **`-> bool` return types are NOT ENFORCED.**
+  `fn ret_text() -> bool: "not-a-bool"` runs to exit 0 yielding
+  `<special:129>`. Filed with warn → census → error sequencing.
+- **Interpreter and seed/JIT DISAGREE on `.?` in tail position** — the seed
+  returns `true` for an empty list.
+- **`rt_time_now_nanos` / `rt_time_now_micros` use two different epochs**,
+  roughly 50 years apart.
+- **Extern `rt_file_read_bytes` is re-declared 47 times across six different
+  return types** (`47adbf730ca` removed only the two mock definitions).
+- **`simple check` at ~100s/file makes directory-wide gating infeasible** —
+  any plan gating on a whole directory is unrunnable as written.
+- **The test daemon kills a spec at 600s with exit 255 and NO verdict line**,
+  so a killed run is indistinguishable from a silent one.
+- **Duplicate test trees:** `test/03_system/feature/` ≡ `test/feature/`, and
+  `test/01_unit/` ≡ `test/unit/`.
+- **Full-corpus vacuity sweep never run** — only a bounded 141-example subset
+  was swept.
+
 ## Definition of done
+
+NOT MET as of 2026-08-09 — see the status table above; most streams never
+launched and none of the four cross-cutting regression gates has a
+fresh-run report.
 
 Design doc §11 verbatim; every stream's verification actually run and
 reported. The four cross-cutting regression gates (existing DAP specs, four
