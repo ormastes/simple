@@ -307,6 +307,16 @@ class Engine2dWmFrameExecutor:
         for window in scene.windows:
             if _WM_TRACE: serial_println("[wm-exec] at=window-begin id={window.window_id}")
             val content = shared_wm_scene_window_content_rect_with_titlebar(window, 28)
+            # The native ARM64 aggregate return can corrupt SharedWmRect x/y
+            # while preserving width/height. Reconstruct the canonical inset
+            # from the owning window scalars and the proven content extent.
+            val content_inset_x = (window.width - content.width) / 2
+            val content_total_inset_y = window.height - content.height
+            val content_x = window.x + content_inset_x
+            val content_y = if content_total_inset_y > 0:
+                window.y + content_total_inset_y - 4
+            else:
+                window.y
             val needs_surface = not window.minimized and content.width > 0 and content.height > 0
             if not needs_surface:
                 # Minimized / zero-content windows carry no content surface; keep
@@ -325,7 +335,7 @@ class Engine2dWmFrameExecutor:
                     if not wm_content_frame_web_provenance_valid(frame):
                         serial_println("[wm-frame] content-provenance-rejected window_id={window.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}")
                     val image_uri = shared_wm_content_frame_positioned_image_uri(
-                        frame, expected_content.x, expected_content.y)
+                        frame, content_x, content_y)
                     if wm_content_frame_web_provenance_valid(frame) and image_uri != "":
                         var duplicate_uri = false
                         for image in images:
@@ -334,17 +344,17 @@ class Engine2dWmFrameExecutor:
                         if not duplicate_uri:
                             val top_image_index = images.len()
                             images.push(engine2d_resolved_draw_ir_image(image_uri, frame.width, frame.height, frame.pixels))
-                            image_xy.push(content.x.to_i64())
-                            image_xy.push(content.y.to_i64())
+                            image_xy.push(content_x.to_i64())
+                            image_xy.push(content_y.to_i64())
                             if top_image_index == 0:
-                                image_x0 = content.x.to_i64()
-                                image_y0 = content.y.to_i64()
+                                image_x0 = content_x.to_i64()
+                                image_y0 = content_y.to_i64()
                             elif top_image_index == 1:
-                                image_x1 = content.x.to_i64()
-                                image_y1 = content.y.to_i64()
+                                image_x1 = content_x.to_i64()
+                                image_y1 = content_y.to_i64()
                             elif top_image_index == 2:
-                                image_x2 = content.x.to_i64()
-                                image_y2 = content.y.to_i64()
+                                image_x2 = content_x.to_i64()
+                                image_y2 = content_y.to_i64()
                             if self.host_gpu_base != 0u64:
                                 host_images.push(simpleos_host_gpu_image_resource(image_uri, frame.width, frame.height, frame.pixels))
                             good_windows.push(window)
