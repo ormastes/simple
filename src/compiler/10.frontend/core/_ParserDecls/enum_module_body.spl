@@ -56,6 +56,12 @@ use compiler.core.parser_cli.{parse_cli_decl}
 use compiler.frontend.layer_eq_registry.{layer_field_pending_any, layer_field_pending_get}
 use compiler.frontend.effect_registry.{effect_pending_set_budget, effect_pending_set_bounded}
 use compiler.frontend.effect_registry.{effect_pending_budget, effect_pending_bounded_flag, effect_pending_reset}
+use compiler.frontend.aspect_registry.{aspect_pending_set_advice, aspect_pending_set_readonly}
+use compiler.frontend.aspect_registry.{aspect_pending_set_noalloc, aspect_pending_set_bounded_time}
+use compiler.frontend.aspect_registry.{aspect_pending_kind_get, aspect_pending_selector_get}
+use compiler.frontend.aspect_registry.{aspect_pending_mode_get, aspect_pending_readonly_get}
+use compiler.frontend.aspect_registry.{aspect_pending_noalloc_get, aspect_pending_bounded_time_get}
+use compiler.frontend.aspect_registry.{aspect_pending_saw_advice_get, aspect_pending_reset}
 extern fn rt_env_get(key: text) -> text
 
 # ===== Helper Functions =====
@@ -802,12 +808,15 @@ fn parse_module_body():
                     val dec_end2: bool = par_kind_get() == 190
                     if dec_end1 or dec_end2:
                         break
-                    if decorator_name == "layer" or decorator_name == "layer_eq":
-                        # Both take a single bare ident arg: `@layer(NAME)` (M1
-                        # module tag) and `@layer_eq(TargetType)` (C1 view-type
-                        # equivalence claim). Sharing this collection arm is
-                        # deliberate -- a second, divergent ident-arg parser is
-                        # exactly the drift the C0/C1 plan warns about.
+                    if decorator_name == "layer" or decorator_name == "layer_eq" or decorator_name == "advice":
+                        # All take bare ident args: `@layer(NAME)` (M1
+                        # module tag), `@layer_eq(TargetType)` (C1 view-type
+                        # equivalence claim) and `@advice(KIND, SELECTOR[,
+                        # MODE])` (C3 logical join point -- two or three idents;
+                        # the non-ident branch below consumes the separating
+                        # commas). Sharing this collection arm is deliberate --
+                        # a second, divergent ident-arg parser is exactly the
+                        # drift the C0/C1 plan warns about.
                         if par_kind_get() == 6:
                             layer_tag_names.push(par_text_get())
                             parser_advance()
@@ -1046,6 +1055,89 @@ fn parse_module_body():
                     # how C4 would go back to being "annotated but unchecked".
                     effect_pending_reset()
                     parser_error("`@copy_budget(N)` / `@bounded_loop` must decorate a function declaration")
+            elif decorator_name == "advice" or decorator_name == "readonly" or decorator_name == "noalloc" or decorator_name == "bounded_time":
+                # C3 `@advice(KIND, SELECTOR[, MODE])` + the three advice
+                # obligations `@readonly` / `@noalloc` / `@bounded_time`
+                # (doc/03_plan/ui/perf/
+                # render_perf_redesign_plan_2026-08-06.md §3, "C3 - logical AOP
+                # join points"; milestone M5 of the C0-C5 staged plan).
+                #
+                # Structurally identical to the `@copy_budget` / `@bounded_loop`
+                # arm directly above -- same stacking discipline, same inert
+                # `__..._decl(...)` marker, same "attributes add a proof
+                # obligation, never a behaviour change" rule. The advice fn is
+                # a completely ordinary function.
+                #
+                # No kind/mode validation here on purpose: 10.frontend records
+                # the raw spelling and `35.semantics/aspect_validation.spl`
+                # owns every verdict. Validating in two places is how a typo
+                # ends up accepted by one and rejected by the other.
+                if decorator_name == "advice":
+                    var adv_kind = ""
+                    var adv_selector = ""
+                    var adv_mode = ""
+                    if layer_tag_names.len() > 0:
+                        adv_kind = layer_tag_names[0]
+                    if layer_tag_names.len() > 1:
+                        adv_selector = layer_tag_names[1]
+                    if layer_tag_names.len() > 2:
+                        adv_mode = layer_tag_names[2]
+                    aspect_pending_set_advice(adv_kind, adv_selector, adv_mode)
+                elif decorator_name == "readonly":
+                    aspect_pending_set_readonly()
+                elif decorator_name == "noalloc":
+                    aspect_pending_set_noalloc()
+                else:
+                    aspect_pending_set_bounded_time()
+                val adv_is_fn: bool = par_kind_get() == 20 or par_kind_get() == 34
+                if adv_is_fn:
+                    val adv_d = parse_fn_decl(0)
+                    module_add_decl(adv_d)
+                    # A BARE `@readonly` with no `@advice` above it is not an
+                    # advice declaration at all -- recording one would invent a
+                    # pointcut the author never wrote, and the validator would
+                    # then reject a perfectly ordinary function.
+                    if aspect_pending_saw_advice_get():
+                        val adv_helper = expr_ident("__advice_decl", 0)
+                        var adv_args: [i64] = []
+                        adv_args.push(expr_string_lit(decl_get_name(adv_d), 0))
+                        adv_args.push(expr_string_lit(aspect_pending_kind_get(), 0))
+                        adv_args.push(expr_string_lit(aspect_pending_selector_get(), 0))
+                        adv_args.push(expr_string_lit(aspect_pending_mode_get(), 0))
+                        # Three obligation flags in the plan's own order,
+                        # packed as one "111"-style payload so the marker keeps
+                        # a fixed arity.
+                        var adv_flags = ""
+                        if aspect_pending_readonly_get():
+                            adv_flags = adv_flags + "1"
+                        else:
+                            adv_flags = adv_flags + "0"
+                        if aspect_pending_noalloc_get():
+                            adv_flags = adv_flags + "1"
+                        else:
+                            adv_flags = adv_flags + "0"
+                        if aspect_pending_bounded_time_get():
+                            adv_flags = adv_flags + "1"
+                        else:
+                            adv_flags = adv_flags + "0"
+                        adv_args.push(expr_string_lit(adv_flags, 0))
+                        val adv_marker = expr_call(adv_helper, adv_args, 0)
+                        val adv_decl = decl_val_binding("_expr_advice_" + int_to_str(i), -1, adv_marker, -1)
+                        module_add_decl(adv_decl)
+                    aspect_pending_reset()
+                    parser_reset_pending_vhdl_decorators()
+                elif par_kind_get() == 171:
+                    # Another decorator follows: keep the pending facts alive so
+                    # the stacked spelling records the pointcut AND all three
+                    # obligations on one function.
+                    pass_dn
+                else:
+                    # Rejecting is deliberate and is the anti-fail-open move:
+                    # silently dropping a misplaced advice declaration is
+                    # exactly how C3 would go back to being "annotated but
+                    # unchecked".
+                    aspect_pending_reset()
+                    parser_error("`@advice(KIND, SELECTOR)` / `@readonly` / `@noalloc` / `@bounded_time` must decorate a function declaration")
             elif decorator_name == "unsafe":
                 # Args already collected into PENDING_UNSAFE_* above; the next
                 # parsed decl records itself via parser_record_unsafe_annotation.
