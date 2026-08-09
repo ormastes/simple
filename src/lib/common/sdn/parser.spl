@@ -177,6 +177,10 @@ fn _sdn_split_lines(s: text) -> [text]:
 
 fn _sdn_parse_mapping(source: text) -> Result<SdnValue, text>:
     val lines = _sdn_split_lines(source)
+    if _sdn_next_is_seq(lines, 0, 0):
+        match _sdn_parse_seq(lines, 0, 0):
+            case Ok(sq): return Ok(SdnValue.Array(sq.0))
+            case Err(e): return Err(e)
     match _sdn_parse_block(lines, 0, 0):
         case Ok(result): Ok(result.0)
         case Err(e): Err(e)
@@ -218,13 +222,23 @@ fn _sdn_parse_block(lines: [text], start: i64, indent: i64) -> Result<(SdnValue,
                     val key = t.slice(0, ci).trim()
                     val valstr = t.slice(ci + 1, t.len()).trim()
                     if valstr == "":
-                        # Nested block: consume the deeper-indented following lines.
-                        match _sdn_parse_block(lines, i + 1, ind + 1):
-                            case Ok(child):
-                                m[key] = child.0
-                                i = child.1
-                            case Err(e):
-                                return Err(e)
+                        # Nested block. A deeper-indented run of `- ` lines is a
+                        # block SEQUENCE, not a mapping whose keys start with a
+                        # dash (which silently collapsed to last-wins before).
+                        if _sdn_next_is_seq(lines, i + 1, ind + 1):
+                            match _sdn_parse_seq(lines, i + 1, ind + 1):
+                                case Ok(sq):
+                                    m[key] = SdnValue.Array(sq.0)
+                                    i = sq.1
+                                case Err(e):
+                                    return Err(e)
+                        else:
+                            match _sdn_parse_block(lines, i + 1, ind + 1):
+                                case Ok(child):
+                                    m[key] = child.0
+                                    i = child.1
+                                case Err(e):
+                                    return Err(e)
                     else:
                         var value_source = valstr
                         if valstr.starts_with("[") or valstr.starts_with("{"):
@@ -250,6 +264,81 @@ fn _sdn_parse_block(lines: [text], start: i64, indent: i64) -> Result<(SdnValue,
                                 return Err(e)
                         i = i + 1
     Ok((SdnValue.Dict(m), i))
+
+# True when the first non-blank line at or beyond `start` is indented >= `indent`
+# and begins a block-sequence item (`- ...`).
+fn _sdn_next_is_seq(lines: [text], start: i64, indent: i64) -> bool:
+    var i = start
+    while i < lines.len():
+        val t = lines[i].trim()
+        if t == "":
+            i = i + 1
+        else:
+            if _sdn_indent(lines[i]) < indent:
+                return false
+            return t.starts_with("- ") or t == "-"
+    false
+
+fn _sdn_spaces(n: i64) -> text:
+    var s = ""
+    var i = 0
+    while i < n:
+        s = s + " "
+        i = i + 1
+    s
+
+# Parse a run of block-sequence items (`- ...`) at indentation >= `indent` into
+# a list of SdnValue. An item whose remainder holds a top-level `key: value`
+# pair becomes a mapping built from the rewritten dash line plus every line
+# indented deeper than the dash. Returns the items and the index of the first
+# line NOT consumed.
+fn _sdn_parse_seq(lines: [text], start: i64, indent: i64) -> Result<([SdnValue], i64), text>:
+    var items: [SdnValue] = []
+    var i = start
+    var running = true
+    while running and i < lines.len():
+        val line = lines[i]
+        if line.trim() == "":
+            i = i + 1
+        else:
+            val ind = _sdn_indent(line)
+            val t = line.trim()
+            if ind < indent or not (t.starts_with("- ") or t == "-"):
+                running = false
+            else:
+                var rest = ""
+                if t.len() > 1:
+                    rest = t.slice(2, t.len()).trim()
+                # Item body: the dash line rewritten as a plain line at the
+                # item's own column, followed by its deeper-indented children.
+                var body: [text] = []
+                body.push(_sdn_spaces(ind + 2) + rest)
+                var j = i + 1
+                var inner = true
+                while inner and j < lines.len():
+                    if lines[j].trim() == "":
+                        body.push(lines[j])
+                        j = j + 1
+                    else:
+                        if _sdn_indent(lines[j]) > ind:
+                            body.push(lines[j])
+                            j = j + 1
+                        else:
+                            inner = false
+                if _sdn_top_sep(rest) >= 0:
+                    match _sdn_parse_block(body, 0, ind + 2):
+                        case Ok(child):
+                            items.push(child.0)
+                        case Err(e):
+                            return Err(e)
+                else:
+                    match parse(rest):
+                        case Ok(v):
+                            items.push(v)
+                        case Err(e):
+                            return Err(e)
+                i = j
+    Ok((items, i))
 
 # Return the number of unclosed collection delimiters, rejecting mismatched
 # closers. Delimiters inside quoted strings, including after escaped quotes,

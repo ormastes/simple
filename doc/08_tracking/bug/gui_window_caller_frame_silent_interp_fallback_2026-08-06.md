@@ -1,15 +1,18 @@
 # Silent interpreter fallback poisons entire callee tree when engine is called from gui_window frame
 
-**Date:** 2026-08-06 (updated 2026-08-07)
-**Status:** OPEN — unverified. 2026-08-07 pass built a probe that confirms the
-general unresolved-extern-symbol whole-module fallback IS loud when it fires,
-but could NOT confirm that mechanism is what fires on this bug's actual
-`gui_window.spl`/`--open` path (a `SIMPLE_JIT_STRICT=1` text-mode check argues
-against it). Whether the real repro's fallback is silent remains untested —
-see "2026-08-07 update" below before trusting either the original Severity
-line or an earlier same-day draft of that update that overclaimed a refutal.
-**Severity:** High (perf cliff itself is real and reproduced via workaround
-diff; silence claim status: unresolved)
+**Date:** 2026-08-06 (updated 2026-08-07, 2026-08-09)
+**Status:** PARTIALLY RESOLVED — visibility CONFIRMED, perf-cliff root cause
+still OPEN. 2026-08-09 pass called the real `browser_engine_pixels_at` from a
+module importing `gui_renderer` (the exact `gui_window.spl` shape) and
+confirmed the `[jit-fallback]`/`[INFO] JIT compilation failed, falling back
+to interpreter` diagnostics fire loudly and immediately for this bug's actual
+trigger (`subsys_from_scope` unresolved symbol), in both strict and lenient
+mode. The "silent" framing is refuted for the confirmed trigger. The perf
+cliff itself (whole callee tree running interpreted, ~30x-unbounded) is
+unchanged and still needs the item-2 root-cause fix. See "2026-08-09 update"
+below.
+**Severity:** Medium (perf cliff itself is real and reproduced via workaround
+diff and a fresh 2026-08-09 repro; silence claim: refuted — diagnostic fires)
 
 ## Symptom
 
@@ -183,3 +186,69 @@ for `jit-fallback`/`falling back to interpreter`. This session's probes
 (`probe_callee.spl`, `probe_baseline.spl`, `probe_via_gui.spl`,
 `probe_gui_only.spl`, kept in scratch) are reusable as a template for that
 follow-up but are not themselves proof either way for this specific bug.
+
+## 2026-08-09 update — decisive test performed: visibility CONFIRMED for this bug's actual call shape
+
+Ran the one still-unperformed test from the note above, using the REAL
+`browser_engine_pixels_at` (not the synthetic `expensive_work` loop) called
+from a module that also imports `nogc_sync_mut.ui.gui_renderer` at module
+level, i.e. the exact shape `gui_window.spl` has:
+
+```
+use nogc_sync_mut.ui.gui_renderer.{GuiRenderer, GUI_EVT_NONE, GUI_EVT_CLOSE}
+use app.browser.render_adapter.{browser_engine_pixels_at}
+fn main():
+    val pixels = browser_engine_pixels_at("simple://home", 8, 8)
+    print("done pixels_len={pixels.len()}")
+```
+
+Two runs, same binary (`bin/simple`, the Rust seed — where the fallback
+decision lives, same as the 2026-08-07 pass):
+
+- `SIMPLE_JIT_STRICT=1`: hard error, immediately (`SIMPLE_JIT_STRICT:
+  unresolved external symbol 'subsys_from_scope' would NULL-jump in JIT;
+  refusing to fall back to the interpreter`), preceded by the loud
+  `[jit-fallback] unresolved external symbol 'subsys_from_scope': whole
+  module dropped to the interpreter ...` line.
+- Unset (leniant, matches production default): same `[jit-fallback]` line
+  plus `[INFO] JIT compilation failed, falling back to interpreter: ...`
+  fire on stderr immediately, then the run proceeds interpreted and did
+  **not finish an 8x8 render in 120s** (killed by `timeout`, exit 124) —
+  consistent in kind (not just direction) with the original bug's 64x36
+  render never finishing in 1800s. Even at this trivially small size, the
+  interpreted path through this exact frame shape does not complete in a
+  reasonable budget.
+
+**This settles items 1 and (partially) 3 from "What a real fix needs"
+above:**
+
+1. **Not silent for this bug's actual trigger.** The `subsys_from_scope`
+   unresolved-symbol mechanism identified by the 2026-08-07 probe is
+   confirmed, with the REAL callee (`browser_engine_pixels_at`, not a
+   synthetic stand-in), to be the same whole-module-fallback path already
+   instrumented at `exec_core.rs:959`/`:1329`, and it fires reliably. The
+   "no diagnostic emitted" framing in the original 2026-08-06 report is
+   refuted for this call shape: a diagnostic IS emitted, on both stderr,
+   unconditionally, every run. (The earlier `--open`/text-mode attempts
+   that saw no diagnostic before their watchdog fired most likely never
+   reached this exact frame under the shipped workaround, which now avoids
+   calling `browser_engine_pixels_at` from inside `gui_window.spl`'s frame
+   entirely — see "Workaround (shipped)" above — rather than hitting an
+   unrelated silent path.)
+2. **No code change made.** Per task scope, a silent-fallback bug is fixed
+   either by narrowing the trigger or by adding visibility — and visibility
+   already exists and fires correctly here, so there is nothing to patch on
+   that axis. Broadening JIT support for `gui_renderer`'s dlopen/extern
+   surface so it JITs instead of falling back (item 2, `_web_budget_clock`
+   / `subsys_from_scope` registration order) remains a genuine architectural
+   root-cause fix, out of scope for a visibility-only pass.
+3. **Regression probe (item 3):** the repro above (`probe_caller_frame_
+   repro.spl` in this update) is a ready-made, cheap (8x8, no Xvfb/Docker
+   needed) template — run it under `SIMPLE_JIT_STRICT=1` and assert the
+   process exits non-zero with `subsys_from_scope` in stderr within a few
+   seconds, instead of timing a full render.
+
+**Status revised:** the silence claim in the Severity line above is now
+REFUTED for the confirmed trigger (loud, both modes). Remaining open work is
+the perf-cliff root cause (item 2), which is unchanged from 2026-08-06 and
+is architectural, not a visibility gap.

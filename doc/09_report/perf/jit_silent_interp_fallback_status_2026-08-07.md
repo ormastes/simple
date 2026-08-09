@@ -117,7 +117,7 @@ incidents, not bytecode-VM comparisons):
 |---|---|---|---|
 | Whole-file JIT-compile-failure (unresolved symbol, skipped BDD examples, generators) | No — 2 log lines each | whole file | Fixed/visible (this session confirms, 3 of 3 bail-out sites checked) |
 | Single unresolved variable (lenient mode) | N/A — no longer de-JITs | n/a | Does not reproduce in single-module, bare-identifier form; cross-module import-order trigger untested this pass |
-| Caller-module-frame → whole callee tree | Unconfirmed (no top-level log observed in the original incident) | whole callee tree below the failing frame | OPEN, tracked, not reproduced fresh this pass |
+| Caller-module-frame → whole callee tree | **Confirmed loud (2026-08-09)** — see bug doc update | whole callee tree below the failing frame | Visibility resolved; perf-cliff root cause still OPEN |
 
 No code changes made. The log-line precedent already exists and already
 fires for the mechanism this pass could reproduce; the harder, still-open
@@ -127,3 +127,16 @@ at minimum instrument the per-call/lazy-JIT fallback site the same way
 `exec_core.rs` instruments the whole-file site) — that is compiler-internals
 work beyond a safe one-line addition and is left to the tracked bug rather
 than patched here.
+
+## 2026-08-09 addendum
+
+The row-2 "unconfirmed" caller-module-frame mechanism has since been
+confirmed loud: calling the real `browser_engine_pixels_at` from a module
+that also imports `gui_renderer` (the exact `gui_window.spl` shape) fires
+`[jit-fallback] unresolved external symbol 'subsys_from_scope'` and `[INFO]
+JIT compilation failed, falling back to interpreter` on every run, in both
+`SIMPLE_JIT_STRICT=1` and lenient mode. No code change made (visibility
+already existed and works); the perf-cliff root cause (item 2 in the bug
+doc) remains open. Full repro and analysis:
+`doc/08_tracking/bug/gui_window_caller_frame_silent_interp_fallback_2026-08-06.md`
+("2026-08-09 update").
