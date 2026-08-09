@@ -1,7 +1,10 @@
 # Blocker 9 recurs: placeholder-lambda fix was wired into only ONE of two parse paths
 
 Date: 2026-08-09
-Status: **FIXED — driver-path pass landed, regression asserts the driver path**
+Status: **FIXED at source level — driver-path pass landed with a sabotage-proven
+driver-path regression. NOT yet confirmed end-to-end at native-build level: that
+requires a full bootstrap-from-scratch (see the measurement-trap section), which
+is blocked on the Rust seed (blockers 10/11).**
 Area: 10.frontend / desugar / placeholder_lambda / driver native-build
 
 ## Summary
@@ -166,6 +169,35 @@ with no cycle. Fix shape 1/2 hybrid, three edits:
   scenarios are green either way by construction: pre-fix the argument is still an
   `EXPR_STRING_LIT`, so an `EXPR_INTERPOLATED_STRING` scan finds nothing. The lambda
   count is the real oracle.)
+
+### Measurement trap: `resume-stage3-from-admitted.sh` CANNOT validate a frontend fix
+
+A resumed Stage-3 run was attempted against a patched tree and returned the
+**identical 8 errors**. That result is *vacuous*, not a refutation:
+
+Stage 3 is *the **Stage-2** binary compiling the compiler source*. The compiler
+performing the parse is `stage3/<platform>/stage2-admitted/simple`, built at
+07:58 from **pre-fix** source; the patch landed in the source tree at 08:29. A
+frontend/desugar fix only changes behaviour once it is *inside* the compiler
+doing the compiling, i.e. from the **stage1/stage2 rebuild of a full
+bootstrap-from-scratch**. Resuming from an admitted Stage-2 snapshot pins the
+compiler to pre-fix behaviour by construction, so the 8 errors were guaranteed
+regardless of whether the fix is correct.
+
+Corollary, same trap: the fast reproducer `ph.spl` demonstrates the **defect**
+(it runs under the pre-fix Stage-2 binary) but can never demonstrate the **fix**.
+Any native-build-level proof of this fix requires a full bootstrap-from-scratch,
+which needs the Rust seed — blocked upstream by
+`rust_seed_build_broken_on_origin_main_2026-08-09.md` (blockers 10/11).
+
+Two smaller fail-open traps hit on the way, worth not repeating:
+- `pgrep -f resume-stage3` **matches the watching shell's own command text**, so a
+  liveness check written that way reports RUNNING forever and never fires. Key
+  monitors on a captured PID (`kill -0 $pid`), not a pattern.
+- `resume-stage3-from-admitted.sh` rejects an **absolute** OUTPUT_DIR at line 6
+  (`case "$source_output" in /*|*../*) exit 2`) and exits 2 **silently, with no
+  message**. A symlink does not help either (line 8 compares `pwd -P`). The dir
+  must be copied to a plain relative path inside the repo root.
 
 ## Consequence
 
