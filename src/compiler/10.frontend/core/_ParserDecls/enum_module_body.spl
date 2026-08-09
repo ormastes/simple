@@ -54,6 +54,8 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 # Import CLI parser
 use compiler.core.parser_cli.{parse_cli_decl}
 use compiler.frontend.layer_eq_registry.{layer_field_pending_any, layer_field_pending_get}
+use compiler.frontend.effect_registry.{effect_pending_set_budget, effect_pending_set_bounded}
+use compiler.frontend.effect_registry.{effect_pending_budget, effect_pending_bounded_flag, effect_pending_reset}
 extern fn rt_env_get(key: text) -> text
 
 # ===== Helper Functions =====
@@ -791,6 +793,8 @@ fn parse_module_body():
             # function reads via par_kind_get()/par_text_get()) -- a single
             # ident arg, same shape as @derive's trait-name collection above.
             var layer_tag_names: [text] = []
+            # C4 `@copy_budget(N)` payload, raw decimal text ("" = absent).
+            var effect_budget_arg = ""
             if par_kind_get() == 140:
                 parser_advance()
                 while true:
@@ -806,6 +810,19 @@ fn parse_module_body():
                         # exactly the drift the C0/C1 plan warns about.
                         if par_kind_get() == 6:
                             layer_tag_names.push(par_text_get())
+                            parser_advance()
+                        else:
+                            parser_advance()
+                    elif decorator_name == "copy_budget":
+                        # C4 `@copy_budget(N)`: a single integer-literal arg.
+                        # Token kinds 1/2 are the int-literal kinds the rest of
+                        # this parser already uses (see `@bits(N)` in
+                        # fn_struct_decls.spl). The RAW TEXT is captured here
+                        # and decoded by effect_registry.effect_parse_budget --
+                        # keeping one decoder means a malformed payload cannot
+                        # decode two different ways in two places.
+                        if par_kind_get() == 1 or par_kind_get() == 2:
+                            effect_budget_arg = par_text_get()
                             parser_advance()
                         else:
                             parser_advance()
@@ -979,6 +996,56 @@ fn parse_module_body():
                     parser_reset_pending_vhdl_decorators()
                 else:
                     parser_error("`@layer_eq(TYPE)` must decorate a struct or class declaration")
+            elif decorator_name == "copy_budget" or decorator_name == "bounded_loop":
+                # C4 `@copy_budget(N)` / `@bounded_loop` on a function
+                # (doc/03_plan/compiler/forwarding/
+                # zero_cost_layers_c0_c5_staged_implementation_plan_2026-08-07.md;
+                # closes §3 line 203 of the render-perf plan).
+                #
+                # Structurally identical to the `@layer_eq` arm directly above:
+                # parse the decorated fn normally and emit it, then lower the
+                # CONTRACT into the same inert `__..._decl(...)` marker
+                # `@layer(NAME)` / `@layer_eq(TYPE)` already use, so
+                # module_assembly can record it in effect_registry and DROP the
+                # marker (zero HIR/MIR/codegen output for the attribute
+                # itself). The fn is a completely ordinary decl -- these
+                # attributes add a proof obligation, never a behaviour change.
+                #
+                # The two attributes STACK, and `parse_module_body` consumes
+                # one `@` per iteration, so the first one parked its fact in
+                # effect_pending_* and this iteration merges into it.
+                if decorator_name == "copy_budget":
+                    effect_pending_set_budget(effect_budget_arg)
+                else:
+                    effect_pending_set_bounded()
+                val eff_is_fn: bool = par_kind_get() == 20 or par_kind_get() == 34
+                if eff_is_fn:
+                    val eff_d = parse_fn_decl(0)
+                    module_add_decl(eff_d)
+                    val eff_helper = expr_ident("__effect_decl", 0)
+                    var eff_args: [i64] = []
+                    eff_args.push(expr_string_lit(decl_get_name(eff_d), 0))
+                    eff_args.push(expr_string_lit(effect_pending_budget(), 0))
+                    var eff_bounded_text = "0"
+                    if effect_pending_bounded_flag():
+                        eff_bounded_text = "1"
+                    eff_args.push(expr_string_lit(eff_bounded_text, 0))
+                    val eff_marker = expr_call(eff_helper, eff_args, 0)
+                    val eff_decl = decl_val_binding("_expr_effect_" + int_to_str(i), -1, eff_marker, -1)
+                    module_add_decl(eff_decl)
+                    effect_pending_reset()
+                    parser_reset_pending_vhdl_decorators()
+                elif par_kind_get() == 171:
+                    # Another decorator follows: keep the pending fact alive so
+                    # the stacked spelling above records BOTH contracts on one
+                    # function.
+                    pass_dn
+                else:
+                    # Rejecting is deliberate and is the anti-fail-open move:
+                    # silently dropping a misplaced effect contract is exactly
+                    # how C4 would go back to being "annotated but unchecked".
+                    effect_pending_reset()
+                    parser_error("`@copy_budget(N)` / `@bounded_loop` must decorate a function declaration")
             elif decorator_name == "unsafe":
                 # Args already collected into PENDING_UNSAFE_* above; the next
                 # parsed decl records itself via parser_record_unsafe_annotation.

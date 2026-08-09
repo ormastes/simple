@@ -21,9 +21,18 @@
 #
 # SCOPE, stated plainly: this is a verdict engine over EXTRACTED FACTS, in the
 # same style as layer_eq_checker.spl. It decides correctly given copy sites and
-# loop descriptors; producing those from real code is driver/MIR work that
-# cannot be verified in this tree (no pure-Simple binary exists here). See the
-# "Deferred" note at the foot of this file.
+# loop descriptors.
+#
+# WIRED (C4, 2026-08-09). Those facts now come from REAL LOWERED BODIES:
+# `10.frontend/effect_registry.spl` records `@copy_budget(N)` / `@bounded_loop`
+# at parse time, and `35.semantics/effect_validation.spl` drains the registry
+# after HIR lowering, walking each annotated function's body for real loop and
+# copy sites and returning real compile diagnostics through the same driver
+# hook C1's `validate_layer_eq_types` uses. Before that, everything below ran
+# on hand-built fixtures only and could not fail a build. The residual gaps are
+# enumerated honestly in the "Still deferred" note at the foot of this file --
+# they are narrower than the original list, and none of them is silently
+# reported as proven.
 
 # ============================================================================
 # Kind codes
@@ -359,21 +368,29 @@ fn format_effect_violations(violations: [EffectViolation]) -> [text]:
     messages
 
 # ============================================================================
-# Deferred — MIR-level, not writable blind here
+# Still deferred (C4 wiring landed 2026-08-09; these four remain)
 # ============================================================================
-# 1. Driver wiring. Nothing populates an EffectManifest, exactly as nothing
-#    populates a NoallocCapabilityManifest (that checker has ZERO production
-#    call sites — it is exported and spec'd, never invoked). Until a driver
-#    pass collects annotations and walks bodies, both are libraries, not gates.
-# 2. Byte-exact copy sizes need real layout information from MIR. This file
-#    consumes DECLARED sizes, the same compromise layer_eq_checker.spl makes.
-# 3. Indirect calls — closures, function values, trait-object dispatch — have
-#    no callee name, so the closure cannot see through them. A conservative
-#    driver must treat an indirect call as saturating (EFFECT_COPY_CEILING).
-#    Not modelled here because the caller-side fact does not exist yet.
-# 4. Loop bound INFERENCE. This file classifies a bound it is handed; deriving
-#    LOOP_BOUND_CONST/_CAPACITY from a loop needs induction-variable analysis
-#    on MIR, and no pure-Simple binary exists in this tree to verify one.
+# 1. CLOSED. `35.semantics/effect_validation.spl` populates the facts from real
+#    lowered HIR bodies and is invoked from
+#    `80.driver/driver_hir_pipeline_lowering.spl`, the same hook C1 uses. The
+#    sibling gap it names — `noalloc_checker.spl` still has ZERO production
+#    call sites — is unchanged and is NOT covered by this work.
+# 2. CLOSED for struct copies. Copy sizes now come from the production layout
+#    engine (`compute_struct_layout`), the same source C1 proves layouts with,
+#    not from declared numbers. Non-struct copy sites (arrays, dicts, text) are
+#    still not measured — they are simply not reported, never reported as zero.
+# 3. OPEN. Indirect calls — closures, function values, trait-object dispatch —
+#    still have no callee name, so `effect_copy_closure` cannot see through
+#    them; `effect_validation` follows DIRECT calls only, which makes a
+#    caller's reported cost a LOWER bound. Saturating on every indirect call
+#    (the fail-closed alternative) would reject essentially every real function
+#    and is deferred until callee-set facts exist.
+# 4. NARROWED. Loop bounds are now derived from real HIR shapes: `while true`
+#    and bare `loop:` classify NONE, `while i < <literal>` and
+#    `for x in a..<literal>` classify CONST, and any other `for` classifies
+#    CAPACITY. Full induction-variable analysis for a non-literal bound is
+#    still absent, and such a bound classifies NONE — fail-closed, so the
+#    missing analysis can only over-report, never silently pass a loop.
 
 export CopySite, LoopSite, EffectViolation, EffectFnEntry, EffectManifest
 export EFFECT_COPY_OVER_BUDGET, EFFECT_IMPLICIT_COPY
