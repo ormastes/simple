@@ -1,7 +1,14 @@
 # Stage-2 binary lexes EVERY source file as empty → unbounded parser-error loop
 
 Date: 2026-08-09
-Status: **REOPENED — NOT FIXED.** The 2026-08-09 fix (bfd9284618a) was verified
+Status: **ROOT CAUSE FOUND AND FIXED — end-to-end bootstrap verification still
+outstanding.** See "2026-08-09 run 5" (the last section) FIRST: the run-4
+native-codegen hypothesis below is **disproven**, and the real defect is a
+no-token return path in `CoreLexer.handle_indentation()` that reproduces in the
+interpreter with no bootstrap at all. The rest of this document is preserved as
+the investigation record; read it knowing run 4's conclusion was wrong.
+
+Earlier status (run 4): **REOPENED — NOT FIXED.** The 2026-08-09 fix (bfd9284618a) was verified
 only through the interpreter path. A full bootstrap at that exact commit
 (2026-08-09, 12:34-12:58) rebuilt Stage 2 and the dead lexer **recurred
 immediately**: Stage 3 died on its own entry file with
@@ -419,3 +426,117 @@ enabled and both produced nothing, because the fault site never executed. The
   (`parse_module_silent_checked` returns false) while the Rust seed rejects it.
   Found incidentally while writing the regression spec; unrelated to this bug
   and not tracked elsewhere yet.
+
+## 2026-08-09 run 5 — ROOT CAUSE FOUND. The codegen hypothesis is REFUTED.
+
+Status change: the "native-codegen loses a value-type struct in a module-level
+array slot" hypothesis from run 4 is **disproven by direct measurement**, and the
+actual defect — which reproduces **in the interpreter, with no bootstrap at all**
+— has been found and fixed in `lexer_struct.spl`.
+
+### Part 1 — the codegen hypothesis, refuted by four repros
+
+All four were built with the **exact** compiler and flags that produce Stage 2
+(`stage2-runtime-authority` seed, `--backend llvm --runtime-bundle
+core-c-bootstrap --entry-closure --mode dynload`, `SIMPLE_NATIVE_BUILD_RUST=1
+SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_BOOTSTRAP=1`), and run natively. Every one
+printed identical, correct values under the interpreter and under native:
+
+| # | pattern | native result |
+|---|---------|---------------|
+| 1 | struct in module-level `[T]`, assigned in fn A, read in fn B, `me` method mutates, field read back, stored back, reloaded | **correct** (41→42 throughout) |
+| 2 | same, with `SIMPLE_BOOTSTRAP=1` + `--mode dynload` | **correct** |
+| 3 | same, struct + `impl` in a **separate module** from the slot | **correct** |
+| 4 | **nested** `me` mutation — `next_token()`→`scan_token()`→`make_token()` sets `self.cur_kind`, exactly the real shape | **correct** (42 at all three levels and on read-back) |
+| 5 | `source.chars()` stored in a `[text]` struct field; `at_end()`/`peek()` off `.len()` | **correct** (24 chars, `peek()=='f'`) |
+
+Conclusion: **(a) the array index read, (b) the method call's in-place mutation,
+and (c) local-variable aliasing are all fine.** The answer is (d), something
+else — and it is not in the backend at all.
+
+### Part 2 — the real defect: the ONE no-token return path in the scanner
+
+`CoreLexer.handle_indentation()` (`lexer_struct.spl:1210`) had a bare
+
+```
+        if is_end:
+            return
+```
+
+reached when EOF arrives while consuming a line's indentation. It emits **no
+token**, so `self.cur_kind` keeps whatever it already held — and on the **first**
+token of a file that is the `make_core_lexer()` constructor default **0**.
+`next_token()` then returns 0. This is the only path in the whole scanner that
+returns without routing through `make_token()`, and it produces **every**
+observed symptom at once: `kind 0`, `cur_text ""`, and `line 1 col 1` (the
+module-global mirrors `core_lexer_last_line_get()`/`_col_get()` are only written
+by `make_token`, so they too read back as untouched defaults) — while
+`current_core_source_get()` still reports the correct source length, exactly as
+the run-4 evidence showed.
+
+Reproduced with **`bin/simple run` in the interpreter**, no bootstrap, no
+Stage 2:
+
+```
+$ cat probe2.spl
+use core.lexer.{lex_init, lex_next}
+fn main():
+    lex_init("   ")
+    print("first_kind={lex_next()}")
+
+$ SIMPLE_EXECUTION_MODE=interpreter bin/simple run probe2.spl
+[lexer_fatal] dead lexer: next_token() produced kind 0 (never a valid token kind)
+for path '' at line 0 col 0; source length 3. Terminating token stream at EOF.
+first_kind=190
+```
+
+That is the run-4 diagnostic, verbatim, from three space characters. The
+fail-closed guard landed in the previous campaign is what turns it into `190`
+instead of a runaway — the guard works, and it is what made this findable.
+
+### The fix
+
+`handle_indentation()` now clears `at_line_start` and re-dispatches through
+`scan_token_rescan()`, whose `at_end()` branch emits the pending dedents and the
+real EOF token:
+
+```
+        if is_end:
+            self.at_line_start = false
+            self.scan_token_rescan()
+            return
+```
+
+Termination is guaranteed: `at_line_start` is false on re-entry, and
+`scan_token()` tests `at_end()` before any indentation handling.
+
+### Evidence
+
+- **New regression spec**
+  `test/01_unit/compiler/frontend/lexer_indentation_eof_emits_token_spec.spl` —
+  `SPEC FILE VERDICT ... declared>=6 executed=6 passed=6 failed=0 dropped=0`.
+  Covers whitespace-only, tab-only, mixed-whitespace and empty sources (all must
+  yield 190, never 0), plus two non-vacuity controls that a healthy program
+  still lexes to a full stream ending in EOF.
+- Before the fix, `first_kind_of("   ")` emitted `[lexer_fatal]`; after, it is
+  190 with no diagnostic. Direct A/B on the same interpreter.
+- No regressions: `lexer_dead_stream_forward_progress_spec` 5/5,
+  `lexer_position_unification_spec` 4/4.
+
+### What is still open
+
+- **Not yet proven end-to-end.** No full bootstrap has been run since this fix,
+  so it is not yet established that this single path is the *whole* cause of
+  Stage 2's failure on `bootstrap_main.spl` (that file does not begin with
+  whitespace, so the trigger must be reached mid-scan — plausible via
+  `advance()`/rescan, but unverified). It IS proven to be a real defect that
+  produces the exact signature. The next campaign should re-run the bootstrap
+  and, critically, land the run-4 gate fix first (drop `--entry` from
+  `candidate_frontend_admission.shs`, add a wall-clock timeout) so a recurrence
+  cannot be admitted to Stage 3 again.
+- The run-4 sibling-audit items (`lexer.spl:608-619` reading `loaded.cur_start`
+  / `pos` / `cur_no_interp` / `cur_text` back off the struct) are **not**
+  defects — repro 4 proves those read-backs are sound. The inconsistency with
+  the `core_lexer_last_*_get()` mirrors is cosmetic, not load-bearing.
+- The strengthened admission gate is **still fail-open** via `--entry`. Unchanged
+  from run 4 and still the highest-value remaining fix.
