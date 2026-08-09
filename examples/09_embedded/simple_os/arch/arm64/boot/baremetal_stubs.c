@@ -1673,6 +1673,177 @@ RuntimeValue rt_array_index_of(RuntimeValue arr, RuntimeValue val) {
     for (uint32_t i = 0; i < a->len; i++) { if (rt_native_eq(a->items[i], val)) return ENCODE_INT(i); } return ENCODE_INT(-1);
 }
 
+RuntimeValue rt_index_of(RuntimeValue haystack, RuntimeValue needle) {
+    if (!IS_HEAP(haystack)) return ENCODE_INT(-1);
+    HeapHeader *header = (HeapHeader *)DECODE_PTR(haystack);
+    if (!header) return ENCODE_INT(-1);
+    if (header->type == HEAP_ARRAY) return rt_array_index_of(haystack, needle);
+    if (header->type == HEAP_STRING) return rt_string_index_of(haystack, needle);
+    return ENCODE_INT(-1);
+}
+
+RuntimeValue rt_simd_has_sse(void) { return 0; }
+RuntimeValue rt_simd_has_avx2(void) { return 0; }
+RuntimeValue rt_simd_has_neon(void) { return 1; }
+RuntimeValue rt_simd_has_rvv(void) { return 0; }
+
+static RuntimeArray *arm64_pixel_array(RuntimeValue value) {
+    if (!IS_HEAP(value)) return NULL;
+    RuntimeArray *array = (RuntimeArray *)DECODE_PTR(value);
+    if (!array || array->hdr.type != HEAP_ARRAY) return NULL;
+    return array;
+}
+
+static RuntimeValue arm64_box_pixel(uint32_t pixel) {
+    return ENCODE_INT((int64_t)(uint64_t)pixel);
+}
+
+static uint32_t arm64_unbox_pixel(RuntimeValue value) {
+    return (uint32_t)(uint64_t)DECODE_INT(value);
+}
+
+RuntimeValue rt_engine2d_simd_fill_span_u32(RuntimeValue dst, int64_t offset,
+                                             int64_t count, int64_t color) {
+    RuntimeArray *array = arm64_pixel_array(dst);
+    if (!array || offset < 0 || count <= 0 || (uint64_t)offset >= array->len) return dst;
+    if ((uint64_t)count > array->len - (uint64_t)offset)
+        count = (int64_t)(array->len - (uint64_t)offset);
+    RuntimeValue word = arm64_box_pixel((uint32_t)(uint64_t)color);
+    for (int64_t i = 0; i < count; i++) array->items[offset + i] = word;
+    return dst;
+}
+
+RuntimeValue rt_engine2d_simd_copy_span_u32(RuntimeValue dst, int64_t dst_offset,
+                                             RuntimeValue src, int64_t src_offset,
+                                             int64_t count) {
+    RuntimeArray *d = arm64_pixel_array(dst);
+    RuntimeArray *s = arm64_pixel_array(src);
+    if (!d || !s || dst_offset < 0 || src_offset < 0 || count <= 0) return dst;
+    if ((uint64_t)dst_offset >= d->len || (uint64_t)src_offset >= s->len) return dst;
+    uint64_t available_d = d->len - (uint64_t)dst_offset;
+    uint64_t available_s = s->len - (uint64_t)src_offset;
+    uint64_t n = (uint64_t)count;
+    if (n > available_d) n = available_d;
+    if (n > available_s) n = available_s;
+    if (d == s && dst_offset > src_offset) {
+        for (uint64_t i = n; i > 0; i--)
+            d->items[(uint64_t)dst_offset + i - 1] = s->items[(uint64_t)src_offset + i - 1];
+    } else {
+        for (uint64_t i = 0; i < n; i++)
+            d->items[(uint64_t)dst_offset + i] = s->items[(uint64_t)src_offset + i];
+    }
+    return dst;
+}
+
+static uint32_t arm64_blend_pixel(uint32_t src, uint32_t dst) {
+    uint32_t sa = (src >> 24) & 0xffu;
+    if (sa == 255u) return src;
+    if (sa == 0u) return dst;
+    uint32_t da = (dst >> 24) & 0xffu;
+    uint32_t dst_weight = (da * (255u - sa)) / 255u;
+    uint32_t out_a = sa + dst_weight;
+    uint32_t r = ((((src >> 16) & 0xffu) * sa) + (((dst >> 16) & 0xffu) * dst_weight)) / out_a;
+    uint32_t g = ((((src >> 8) & 0xffu) * sa) + (((dst >> 8) & 0xffu) * dst_weight)) / out_a;
+    uint32_t b = (((src & 0xffu) * sa) + ((dst & 0xffu) * dst_weight)) / out_a;
+    return (out_a << 24) | (r << 16) | (g << 8) | b;
+}
+
+RuntimeValue rt_array_repeat(RuntimeValue v, RuntimeValue n);
+
+RuntimeValue rt_engine2d_box_blur_region(
+    RuntimeValue pixels_value, RuntimeValue fb_w_value, RuntimeValue fb_h_value,
+    RuntimeValue x_value, RuntimeValue y_value, RuntimeValue w_value,
+    RuntimeValue h_value, RuntimeValue radius_value)
+{
+    RuntimeArray *pixels = arm64_pixel_array(pixels_value);
+    int64_t fb_w = (int64_t)fb_w_value;
+    int64_t fb_h = (int64_t)fb_h_value;
+    int64_t x = (int64_t)x_value;
+    int64_t y = (int64_t)y_value;
+    int64_t w = (int64_t)w_value;
+    int64_t h = (int64_t)h_value;
+    int64_t radius = (int64_t)radius_value;
+    if (!pixels || fb_w <= 0 || fb_h <= 0 || w <= 0 || h <= 0 || radius <= 0)
+        return rt_array_repeat(arm64_box_pixel(0), 0);
+    if ((uint64_t)fb_w > UINT64_MAX / (uint64_t)fb_h ||
+        pixels->len != (uint64_t)fb_w * (uint64_t)fb_h ||
+        (uint64_t)w > 0x100000u / (uint64_t)h)
+        return rt_array_repeat(arm64_box_pixel(0), 0);
+    int64_t sample_left = x - radius > 0 ? x - radius : 0;
+    int64_t sample_top = y - radius > 0 ? y - radius : 0;
+    int64_t sample_right = x + w + radius < fb_w ? x + w + radius : fb_w;
+    int64_t sample_bottom = y + h + radius < fb_h ? y + h + radius : fb_h;
+    int64_t sample_w = sample_right - sample_left;
+    int64_t sample_h = sample_bottom - sample_top;
+    RuntimeValue output_value = rt_array_repeat(arm64_box_pixel(0), w * h);
+    RuntimeArray *output = arm64_pixel_array(output_value);
+    if (!output || sample_w <= 0 || sample_h <= 0) return output_value;
+    uint64_t stride = (uint64_t)sample_w + 1u;
+    uint64_t rows = (uint64_t)sample_h + 1u;
+    if (stride > UINT64_MAX / rows || stride * rows > SIZE_MAX / (4u * sizeof(uint64_t)))
+        return rt_array_repeat(arm64_box_pixel(0), 0);
+    uint64_t cells = stride * rows;
+    uint64_t *prefix = (uint64_t *)malloc((size_t)cells * 4u * sizeof(uint64_t));
+    if (!prefix) return rt_array_repeat(arm64_box_pixel(0), 0);
+    for (uint64_t i = 0; i < cells * 4u; i++) prefix[i] = 0;
+    uint64_t *pr = prefix;
+    uint64_t *pg = prefix + cells;
+    uint64_t *pb = prefix + cells * 2u;
+    uint64_t *pa = prefix + cells * 3u;
+    for (int64_t sy = 0; sy < sample_h; sy++) {
+        uint64_t rr = 0, rg = 0, rb = 0, ra = 0;
+        for (int64_t sx = 0; sx < sample_w; sx++) {
+            uint32_t p = arm64_unbox_pixel(pixels->items[
+                (uint64_t)(sample_top + sy) * (uint64_t)fb_w + (uint64_t)(sample_left + sx)]);
+            rr += (p >> 16) & 0xffu; rg += (p >> 8) & 0xffu;
+            rb += p & 0xffu; ra += (p >> 24) & 0xffu;
+            uint64_t pi = (uint64_t)(sy + 1) * stride + (uint64_t)(sx + 1);
+            uint64_t above = (uint64_t)sy * stride + (uint64_t)(sx + 1);
+            pr[pi] = pr[above] + rr; pg[pi] = pg[above] + rg;
+            pb[pi] = pb[above] + rb; pa[pi] = pa[above] + ra;
+        }
+    }
+    for (int64_t py = 0; py < h; py++) {
+        for (int64_t px = 0; px < w; px++) {
+            int64_t left_abs = x + px - radius > sample_left ? x + px - radius : sample_left;
+            int64_t top_abs = y + py - radius > sample_top ? y + py - radius : sample_top;
+            int64_t right_abs = x + px + radius + 1 < sample_right ? x + px + radius + 1 : sample_right;
+            int64_t bottom_abs = y + py + radius + 1 < sample_bottom ? y + py + radius + 1 : sample_bottom;
+            uint64_t left = (uint64_t)(left_abs - sample_left);
+            uint64_t top = (uint64_t)(top_abs - sample_top);
+            uint64_t right = (uint64_t)(right_abs - sample_left);
+            uint64_t bottom = (uint64_t)(bottom_abs - sample_top);
+            uint64_t i00 = top * stride + left, i10 = top * stride + right;
+            uint64_t i01 = bottom * stride + left, i11 = bottom * stride + right;
+            uint64_t count = (right - left) * (bottom - top);
+            if (count) {
+                uint32_t r = (uint32_t)((pr[i11] - pr[i10] - pr[i01] + pr[i00]) / count);
+                uint32_t g = (uint32_t)((pg[i11] - pg[i10] - pg[i01] + pg[i00]) / count);
+                uint32_t b = (uint32_t)((pb[i11] - pb[i10] - pb[i01] + pb[i00]) / count);
+                uint32_t a = (uint32_t)((pa[i11] - pa[i10] - pa[i01] + pa[i00]) / count);
+                output->items[(uint64_t)py * (uint64_t)w + (uint64_t)px] =
+                    arm64_box_pixel((a << 24) | (r << 16) | (g << 8) | b);
+            }
+        }
+    }
+    return output_value;
+}
+
+RuntimeValue rt_engine2d_simd_blend_row_u32(RuntimeValue dst, RuntimeValue src) {
+    RuntimeArray *d = arm64_pixel_array(dst);
+    RuntimeArray *s = arm64_pixel_array(src);
+    uint64_t n = (!d || !s) ? 0 : (d->len < s->len ? d->len : s->len);
+    RuntimeValue out = rt_array_new_with_cap(ENCODE_INT((int64_t)n));
+    RuntimeArray *o = arm64_pixel_array(out);
+    if (!o) return out;
+    for (uint64_t i = 0; i < n; i++) {
+        uint32_t pixel = arm64_blend_pixel(
+            arm64_unbox_pixel(s->items[i]), arm64_unbox_pixel(d->items[i]));
+        rt_array_push(out, arm64_box_pixel(pixel));
+    }
+    return out;
+}
+
 RuntimeValue rt_array_last_index_of(RuntimeValue arr, RuntimeValue val) {
     if (!IS_HEAP(arr)) return ENCODE_INT(-1); RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
     if (!a || a->hdr.type != HEAP_ARRAY) return ENCODE_INT(-1);
