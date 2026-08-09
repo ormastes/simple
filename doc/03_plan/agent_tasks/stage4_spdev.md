@@ -109,3 +109,13 @@
 - Retry 1 advanced to daemon `rt_process_exists`; retry 2 advanced to project-build local imports; retry 3 advanced to loader return typing and `SmfSymbol`.
 - The retry-3 loader frontier is fixed and pushed. The three-attempt cap is reached; use the preserved cache in the next fresh cycle.
 - No Stage4 candidate exists. Candidate smoke/install, ARM64 attestation, QMP primitive-WM receipts, macOS, ARM, and Uno-Q remain pending.
+
+## 2026-08-09 Stage4 EasyFix/AOT/parser cycle
+
+- Pushed `539d4c03ff4`: replace executable EasyFix `Int` offset/line annotations with `i64`; focused native offset/edit-distance fixture passes.
+- Pushed `eb8c9728178`: move AOT pipeline, watcher daemon, and SMF dependency helper imports to module scope; higher-model review ACCEPT and focused compiler HIR passes to the known minimal-bundle Cranelift link boundary.
+- Pushed `af1d67856ef`: import concrete `Lexer` owner in parser types; focused native parser-type fixture passes.
+- Retry 1 advanced to EasyFix legacy `Int`; retry 2 advanced to AOT cache/manifest local imports; retry 3 ran about 28 minutes and advanced to parser `Lexer` ownership.
+- The retry-3 parser frontier is fixed and pushed. The three-attempt cap is reached; reuse the preserved cache in the next fresh cycle.
+- Sidecar follow-up inventory: compatibility loader JIT types/imports and five optional/result return signatures remain candidates only; fix them when authoritative HIR reaches that frontier.
+- No Stage4 candidate exists. Candidate smoke/install, ARM64 attestation, QMP primitive-WM receipts, macOS, ARM, and Uno-Q remain pending.

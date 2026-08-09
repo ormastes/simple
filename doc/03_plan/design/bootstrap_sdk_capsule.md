@@ -306,3 +306,7 @@ The preserved-cache Stage4 closure now passes prior MCP T32 frontiers and expose
 ## 2026-08-09 Loader typing recovery
 
 The canonical Stage4 closure now passes the prior file-stat frontier and exposed three later phase-4 boundaries: daemon process liveness ownership, project-build function-local imports, and compatibility-loader optional return typing plus `SmfSymbol` ownership. Each was corrected without weakening bootstrap or QEMU gates and covered by focused native evidence. The loader fix is pushed but not yet exercised by a fourth canonical Stage4 attempt because the mandatory three-attempt cap is reached. No Stage4 candidate or QEMU primitive-WM verification may be claimed yet.
+
+## 2026-08-09 AOT import and parser ownership recovery
+
+The preserved-cache Stage4 closure now passes loader typing and exposed three later native-HIR boundaries: EasyFix legacy integer aliases, function-local AOT/cache/manifest imports, and missing parser `Lexer` ownership. All were corrected with concrete primitives or module-scope direct-owner imports, focused native evidence, and higher-model architecture review for the broad AOT import change. The final attempt progressed for roughly 28 minutes before the parser frontier, materially later than prior failures. Its fix is pushed but awaits a fresh-cycle canonical retry. No candidate or primitive-WM QEMU verification may be claimed yet.
