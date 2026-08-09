@@ -30,3 +30,9 @@
 - Fresh-session resume: diagnose and regression-test the `file_size` owner, then rerun the existing canonical Stage4 command once with `build/bootstrap-recovery/stage4-native-cache`, Stage3 runtime authority `build/bootstrap-recovery/stage3/x86_64-unknown-linux-gnu/stage2-runtime-authority`, and `SIMPLE_NO_STUB_FALLBACK=1`.
 - After an executable exists: smoke the exact candidate, install it as a non-symlink canonical release binary, run `scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs`, then `scripts/check/check-simpleos-arm64-qmp-input-evidence.shs`.
 - x86 Stage4, ARM64 QEMU primitive WM, native ARM/macOS, and Uno-Q rows remain OPEN until their authoritative gates emit PASS.
+
+### Deferred trait identity model audit
+
+- `type_infer/traits.spl` currently moves HIR `SymbolId` values into trait-model fields typed as `Symbol` (`HirSymbol`). Do not paper over this with a `Symbol` import or annotation-only migration.
+- A separate designed change must cover HIR-to-trait conversion, built-in traits, solver keys, associated types, method resolution, supertraits, generic parameters, and compatibility before selecting a canonical identity representation.
+- This audit is not required in the driver source-loading closure: that owner now imports only `TypeInferError` rather than the entire type-inference facade.
