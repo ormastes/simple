@@ -71,6 +71,14 @@ use std.nogc_sync_mut.notebook.snb_sdn.{snb_parse}
 use std.nogc_sync_mut.notebook.ipynb.{ipynb_parse}
 use std.nogc_sync_mut.notebook.local_exec.{LocalExecFactory}
 use app.ui.web.ws_handler.{compute_ws_accept, escape_json_string}
+use std.common.debug.capability.{cap_level_name}
+use std.common.debug.debug_target.{DebugState}
+use app.simple_lab.lab_debug.{
+    LabDebugRegistry, lab_debug_state_json, lab_profile_report_json,
+    lab_dbg_json_text, lab_dbg_json_i64, lab_dbg_json_bool,
+    lab_profile_cell, lab_profile_body_of, lab_profile_magic_matches,
+    LAB_DEBUG_DEFAULT_BUDGET
+}
 use std.common.json.parser.{json_parse}
 use std.common.json.object_ops.{json_object_get}
 use std.common.json.types.{json_to_string}
@@ -514,6 +522,167 @@ fn lab_route_notebook_put(req: HttpRequest) -> HttpResponse:
     _lab_json("{\"saved\":true,\"path\":\"{escape_json_string(path)}\"}")
 
 # ============================================================================
+# Routes: debug + profile (design §9, stream P10)
+#
+#   POST /api/lab/sessions/{id}/debug                 attach a lane
+#   POST /api/lab/sessions/{id}/debug/step            single step
+#   POST /api/lab/sessions/{id}/debug/resume          run to break/halt
+#   POST /api/lab/sessions/{id}/debug/break           set/clear a breakpoint
+#   GET  /api/lab/sessions/{id}/debug/state           pure read
+#   POST /api/lab/sessions/{id}/debug/profile/begin   open a measurement window
+#   POST /api/lab/sessions/{id}/debug/profile/end     close it -> ProfileReport
+#   POST /api/lab/sessions/{id}/profile               the `%profile` cell magic
+#
+# The default lane is `ref` — the host SVM-G reference VM, which needs no GPU
+# and no driver, so every one of these endpoints is exercisable on a bare
+# host. All state, encoders and the value-semantics discipline live in
+# `app.simple_lab.lab_debug`; this file only routes.
+#
+# Profiling is armed AT ATTACH (`{"profile":true}`, the default) because GPU
+# PROF-1 step counting cannot be switched on after upload. `profile/begin`
+# opens a WINDOW on an already-armed target; it never arms one. Attaching with
+# `{"profile":false}` therefore makes `profile/end` answer an `Unavailable`
+# report, which is forwarded verbatim rather than smoothed into zeros.
+# ============================================================================
+
+var LAB_DEBUG: LabDebugRegistry = LabDebugRegistry.create()
+
+fn _lab_debug_session_id(req: HttpRequest) -> text:
+    val segments = _lab_path_segments(req.path)
+    if segments.len() < 5:
+        return ""
+    segments[3]
+
+fn _lab_debug_guard(req: HttpRequest, need_attached: bool) -> text:
+    """Returns "" when the request may proceed, else a diagnostic. Split out
+    so every debug handler answers the same 404s in the same order."""
+    val session_id = _lab_debug_session_id(req)
+    if session_id == "":
+        return "malformed debug path"
+    if LAB_STATE.find_session_index(session_id) < 0:
+        return "unknown session: {session_id}"
+    if need_attached and LAB_DEBUG.index_of(session_id) < 0:
+        return "no debug lane attached for session: {session_id}"
+    ""
+
+fn _lab_debug_state_response(session_id: text, state: DebugState) -> HttpResponse:
+    val state_json = lab_debug_state_json(state)
+    val level = cap_level_name(LAB_DEBUG.profile_level(session_id))
+    val armed = if LAB_DEBUG.armed_at_attach(session_id): "true" else: "false"
+    val kind = LAB_DEBUG.kind_of(session_id)
+    # NOTE: the trailing `}` is a separate `val` rather than a literal brace
+    # immediately after an interpolation — `{x}}` is ambiguous to the string
+    # interpolator and must not be written.
+    val close = "}"
+    _lab_json("{\"kind\":\"{kind}\",\"profile_level\":\"{level}\",\"profile_armed_at_attach\":{armed},\"state\":{state_json}{close}")
+
+fn lab_route_debug_attach(req: HttpRequest) -> HttpResponse:
+    val guard = _lab_debug_guard(req, false)
+    if guard != "":
+        return _lab_error(HttpStatus.NotFound, guard)
+    if not lab_json_body_is_valid(req.body):
+        return _lab_error(HttpStatus.BadRequest, "malformed JSON body")
+    val session_id = _lab_debug_session_id(req)
+    val source = lab_dbg_json_text(req.body, "source", "")
+    val budget = lab_dbg_json_i64(req.body, "step_budget", LAB_DEBUG_DEFAULT_BUDGET)
+    # Profiling defaults ON: a silently-unprofiled session is a worse failure
+    # mode than a marginally slower one (session_core.attach_opts_default).
+    val profile = lab_dbg_json_bool(req.body, "profile", true)
+    val diag = LAB_DEBUG.attach_ref(session_id, source, budget, profile)
+    if diag != "":
+        # "skip:" is a truthful host-capability absence, not a client error —
+        # 503, so a caller can tell it apart from its own bad request.
+        if diag.starts_with("skip:"):
+            return _lab_error(HttpStatus.ServiceUnavailable, diag)
+        return _lab_error(HttpStatus.BadRequest, diag)
+    _lab_debug_state_response(session_id, LAB_DEBUG.state_of(session_id))
+
+fn lab_route_debug_step(req: HttpRequest) -> HttpResponse:
+    val guard = _lab_debug_guard(req, true)
+    if guard != "":
+        return _lab_error(HttpStatus.NotFound, guard)
+    val session_id = _lab_debug_session_id(req)
+    _lab_debug_state_response(session_id, LAB_DEBUG.step(session_id))
+
+fn lab_route_debug_resume(req: HttpRequest) -> HttpResponse:
+    val guard = _lab_debug_guard(req, true)
+    if guard != "":
+        return _lab_error(HttpStatus.NotFound, guard)
+    val session_id = _lab_debug_session_id(req)
+    _lab_debug_state_response(session_id, LAB_DEBUG.resume(session_id))
+
+fn lab_route_debug_state(req: HttpRequest) -> HttpResponse:
+    val guard = _lab_debug_guard(req, true)
+    if guard != "":
+        return _lab_error(HttpStatus.NotFound, guard)
+    val session_id = _lab_debug_session_id(req)
+    _lab_debug_state_response(session_id, LAB_DEBUG.state_of(session_id))
+
+fn lab_route_debug_break(req: HttpRequest) -> HttpResponse:
+    """`{"loc":N}` sets, `{"loc":N,"clear":true}` clears. The boolean result
+    is reported as `changed`: `set` is idempotent and returns false when the
+    breakpoint was already present, which a UI needs to distinguish from a
+    fresh add."""
+    val guard = _lab_debug_guard(req, true)
+    if guard != "":
+        return _lab_error(HttpStatus.NotFound, guard)
+    if not lab_json_body_is_valid(req.body):
+        return _lab_error(HttpStatus.BadRequest, "malformed JSON body")
+    val session_id = _lab_debug_session_id(req)
+    val loc = lab_dbg_json_i64(req.body, "loc", -1)
+    if loc < 0:
+        return _lab_error(HttpStatus.BadRequest, "breakpoint requires a non-negative integer 'loc'")
+    val clear = lab_dbg_json_bool(req.body, "clear", false)
+    val changed = if clear: LAB_DEBUG.clear_break(session_id, loc) else: LAB_DEBUG.set_break(session_id, loc)
+    var locs: [text] = []
+    for l in LAB_DEBUG.breakpoints(session_id):
+        locs.push("{l}")
+    val changed_text = if changed: "true" else: "false"
+    val joined = locs.join(",")
+    _lab_json("{\"changed\":{changed_text},\"breakpoints\":[{joined}]}")
+
+fn lab_route_debug_profile_begin(req: HttpRequest) -> HttpResponse:
+    val guard = _lab_debug_guard(req, true)
+    if guard != "":
+        return _lab_error(HttpStatus.NotFound, guard)
+    val session_id = _lab_debug_session_id(req)
+    LAB_DEBUG.profile_begin(session_id)
+    val level = cap_level_name(LAB_DEBUG.profile_level(session_id))
+    _lab_json("{\"begun\":true,\"profile_level\":\"{level}\"}")
+
+fn lab_route_debug_profile_end(req: HttpRequest) -> HttpResponse:
+    val guard = _lab_debug_guard(req, true)
+    if guard != "":
+        return _lab_error(HttpStatus.NotFound, guard)
+    val session_id = _lab_debug_session_id(req)
+    _lab_json(lab_profile_report_json(LAB_DEBUG.profile_end(session_id)))
+
+fn lab_route_profile_magic(req: HttpRequest) -> HttpResponse:
+    """`%profile` cell magic (design §9). A cell whose first non-empty line is
+    `%profile` is measured begin/execute/end; anything else is handed back
+    unchanged with `handled:false` so the ordinary execute path runs it.
+
+    A `%profile` cell WITH a body profiles that body on a fresh `ref` lane
+    (self-contained, no prior attach and no GPU needed). A BARE `%profile`
+    profiles a resume of the session's already-attached lane."""
+    val guard = _lab_debug_guard(req, false)
+    if guard != "":
+        return _lab_error(HttpStatus.NotFound, guard)
+    if not lab_json_body_is_valid(req.body):
+        return _lab_error(HttpStatus.BadRequest, "malformed JSON body")
+    val session_id = _lab_debug_session_id(req)
+    val source = lab_dbg_json_text(req.body, "source", "")
+    if not lab_profile_magic_matches(source):
+        _lab_json("{\"handled\":false,\"code\":\"{escape_json_string(source)}\"}")
+    else:
+        val body = lab_profile_body_of(source)
+        val budget = lab_dbg_json_i64(req.body, "step_budget", LAB_DEBUG_DEFAULT_BUDGET)
+        val outcome = if body != "": lab_profile_cell(body, budget) else: LAB_DEBUG.profile_attached(session_id)
+        val report_json = lab_profile_report_json(outcome.report)
+        val close = "}"
+        _lab_json("{\"handled\":true,\"error\":\"{escape_json_string(outcome.error)}\",\"report\":{report_json}{close}")
+
+# ============================================================================
 # Router wiring
 # ============================================================================
 
@@ -527,6 +696,15 @@ fn lab_build_router() -> Router:
     router.post("/api/lab/sessions/:id/reset", lab_route_reset)
     router.get("/api/lab/notebooks/:name", lab_route_notebook_get)
     router.put("/api/lab/notebooks/:name", lab_route_notebook_put)
+    # Debug + profile (P10, design §9).
+    router.post("/api/lab/sessions/:id/debug", lab_route_debug_attach)
+    router.post("/api/lab/sessions/:id/debug/step", lab_route_debug_step)
+    router.post("/api/lab/sessions/:id/debug/resume", lab_route_debug_resume)
+    router.post("/api/lab/sessions/:id/debug/break", lab_route_debug_break)
+    router.get("/api/lab/sessions/:id/debug/state", lab_route_debug_state)
+    router.post("/api/lab/sessions/:id/debug/profile/begin", lab_route_debug_profile_begin)
+    router.post("/api/lab/sessions/:id/debug/profile/end", lab_route_debug_profile_end)
+    router.post("/api/lab/sessions/:id/profile", lab_route_profile_magic)
     # Shared UI contract (task L4) — /api/test/... prefix mount. `Router`'s
     # prefix-route matching (router.spl:83-85) does not filter by HTTP
     # method, so this single mount serves both the GET and POST endpoints
@@ -717,5 +895,8 @@ export LabServer, LabApiState, lab_build_router, lab_server_main
 export lab_route_status, lab_route_lanes, lab_route_create_session, lab_route_execute
 export lab_route_interrupt, lab_route_reset, lab_route_notebook_get, lab_route_notebook_put
 export lab_route_test_api, lab_test_api_inject_event
+export lab_route_debug_attach, lab_route_debug_step, lab_route_debug_resume
+export lab_route_debug_break, lab_route_debug_state
+export lab_route_debug_profile_begin, lab_route_debug_profile_end, lab_route_profile_magic
 
 lab_server_main()

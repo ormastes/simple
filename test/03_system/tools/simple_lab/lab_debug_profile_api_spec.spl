@@ -1,0 +1,459 @@
+"""
+# Simple Lab debug/profile API — real loopback system spec (Stream P10)
+
+Drives the design §9 endpoints on `src/app/simple_lab/lab_server.spl` as a
+**separate OS process** over a **real TCP socket**, reusing the driver shape of
+`lab_http_api_spec.spl` (same directory) for the same reason: an in-process
+call proves nothing about the actual wire.
+
+Everything here runs on the **`ref` lane** — the host SVM-G reference VM from
+P2's `src/lib/common/debug/ref_debug_session.spl`. It needs no GPU, no driver
+and no device upload, so this spec is a real end-to-end exercise of the debug
+endpoints on a bare host rather than a hardware-gated skip.
+
+## Poll-loop constants are load-bearing — do not "tidy" them
+
+`start_lab_server` polls for the portfile with `while waited < 150000` and the
+success path sets `waited = 150000` to leave the loop. An earlier revision of
+the sibling spec set `15000` there instead: that never satisfies the guard, and
+because a non-empty `bound` also skips the only branch that advances `waited`,
+the loop spun forever — the spec hung past 700s on a one-digit typo. Both
+constants must stay 150000, and the `if bound == ""` branch must remain the
+sleep-and-advance path.
+
+Design: doc/05_design/app/tools/unified_debug_profile_capability_architecture_2026-08-09.md §9
+Plan:   doc/03_plan/agent_tasks/unified_debug_profile_capability_parallel_plan_2026-08-09.md (P10)
+"""
+
+# tag: slow, system
+
+use std.spec.*
+use std.nogc_sync_mut.io.tcp.{TcpStream}
+
+extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
+extern fn rt_process_kill(pid: i64) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_cwd() -> text
+extern fn rt_sleep_ms(ms: i64)
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_getpid() -> i64
+
+val SERVER_ENTRYPOINT = "src/app/simple_lab/lab_server.spl"
+val TEST_TOKEN = "p10-debug-profile-test-token"
+
+# ============================================================================
+# The program under debug.
+#
+# Identical to the vector P2's `debug_target_ref_spec.spl` pins, so a
+# divergence between this HTTP surface and the trait it wraps shows up as a
+# disagreement on numbers that are already independently asserted:
+#
+#   PUSHI 1 @0 | PUSHI 3 @5 | PUSHI 4 @10 | ADD @15 | SYS_RESULT @16 | HALT 0 @17
+#
+# PUSHI is 5 bytes, the rest 1 byte each -> 6 instructions total.
+# ============================================================================
+
+val ADD_PROGRAM = "PUSHI 1\\nPUSHI 3\\nPUSHI 4\\nADD\\nSYS_RESULT\\nHALT 0"
+val ADD_PROGRAM_STEPS = 6
+val PC_PUSHI2 = 5
+val PC_ADD = 15
+
+# ============================================================================
+# Subprocess driver — mirrors lab_http_api_spec.spl (same directory).
+# ============================================================================
+
+fn scratch_dir() -> text:
+    val t = rt_env_get("SIMPLE_TEST_SCRATCH_DIR")
+    if t != nil and t != "":
+        return t
+    val tmp = rt_env_get("TMPDIR")
+    if tmp != nil and tmp != "" and tmp.starts_with("/"):
+        return tmp
+    return "/tmp"
+
+fn repo_root() -> text:
+    val r = rt_env_get("SIMPLE_REPO_ROOT")
+    if r != nil and r != "":
+        return r
+    val c = rt_env_cwd()
+    if c == nil:
+        return "."
+    return c
+
+class LabServerProc:
+    pid: i64
+    addr: text
+    portfile: text
+    started: bool
+
+    me stop():
+        if self.pid > 0:
+            val _ = rt_process_kill(self.pid)
+            self.pid = -1
+        if self.portfile != "":
+            val _ = rt_file_delete(self.portfile)
+
+fn start_lab_server(max_requests: i64) -> LabServerProc:
+    val root = repo_root()
+    val stamp = rt_time_now_unix_micros()
+    val me_pid = rt_getpid()
+    val base = "{scratch_dir()}/simple_lab_dbg_{me_pid}_{stamp}"
+    val portfile = "{base}.port"
+
+    var server = LabServerProc(pid: -1, addr: "", portfile: portfile, started: false)
+
+    if rt_file_exists(portfile):
+        val _ = rt_file_delete(portfile)
+
+    # SIMPLE_EXECUTION_MODE=interpreter pins the server subprocess off the JIT
+    # for the same reason the sibling spec does: named-function-as-value route
+    # handlers (exactly what lab_build_router registers) are documented to
+    # return garbage under the JIT.
+    val args = [
+        "SIMPLE_EXECUTION_MODE=interpreter",
+        "SIMPLE_LAB_HTTP_PORT=0",
+        "SIMPLE_LAB_HTTP_MAX={max_requests}",
+        "SIMPLE_LAB_HTTP_PORTFILE={portfile}",
+        "SIMPLE_LAB_HTTP_ACCEPT_TIMEOUT_MS=20000",
+        "SIMPLE_LAB_NOTEBOOK_ROOT={base}_notebooks",
+        "SIMPLE_LAB_TOKEN={TEST_TOKEN}",
+        "{root}/bin/simple",
+        "run",
+        "{root}/{SERVER_ENTRYPOINT}"
+    ]
+    val pid = rt_process_spawn_async("env", args)
+    if pid <= 0:
+        return server
+    server.pid = pid
+
+    # See the module docstring: 150000 in BOTH places, and the sleep lives in
+    # the `bound == ""` branch. Changing either reintroduces a >700s hang.
+    var waited = 0
+    var bound = ""
+    while waited < 150000:
+        if rt_file_exists(portfile):
+            val t = rt_file_read_text(portfile)
+            if t != nil and t.trim() != "":
+                bound = t.trim()
+                waited = 150000
+        if bound == "":
+            rt_sleep_ms(50)
+            waited = waited + 50
+
+    if bound == "":
+        server.stop()
+        return server
+
+    server.addr = bound
+    server.started = true
+    return server
+
+# ============================================================================
+# Minimal real HTTP/1.1 client over TcpStream.
+# ============================================================================
+
+struct HttpProbe:
+    ok: bool
+    status: i64
+    headers: text
+    body: text
+
+fn http_request(addr: text, method: text, path: text, body: text) -> HttpProbe:
+    val stream_res = TcpStream.connect(addr)
+    if stream_res.is_err():
+        return HttpProbe(ok: false, status: -1, headers: "", body: "connect failed")
+    var stream = stream_res.unwrap()
+
+    val clen = body.len()
+    var req = "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Length: {clen}\r\nContent-Type: application/json\r\nAuthorization: Bearer {TEST_TOKEN}\r\nConnection: close\r\n\r\n{body}"
+    val w = stream.write_text(req)
+    if w.is_err():
+        val _ = stream.close()
+        return HttpProbe(ok: false, status: -1, headers: "", body: "write failed")
+    val _f = stream.flush()
+
+    val read_res = stream.read_text()
+    val _c = stream.close()
+    if read_res.is_err():
+        return HttpProbe(ok: false, status: -1, headers: "", body: "read failed")
+    val raw = read_res.unwrap()
+
+    val split = raw.index_of("\r\n\r\n")
+    if split < 0:
+        return HttpProbe(ok: false, status: -1, headers: raw, body: "")
+    val head = raw.slice(0, split)
+    val resp_body = raw.slice(split + 4, raw.len())
+
+    var status: i64 = -1
+    val first_nl = head.index_of("\r\n")
+    val status_line = if first_nl > 0: head.slice(0, first_nl) else: head
+    val sp1 = status_line.index_of(" ")
+    if sp1 > 0:
+        val rest = status_line.slice(sp1 + 1, status_line.len())
+        val sp2 = rest.index_of(" ")
+        val code_text = if sp2 > 0: rest.slice(0, sp2) else: rest
+        status = code_text.to_i64()
+
+    HttpProbe(ok: status > 0, status: status, headers: head, body: resp_body)
+
+fn json_text_field(body: text, key: text) -> text:
+    val needle = "\"{key}\":\""
+    val idx = body.index_of(needle)
+    if idx < 0:
+        return ""
+    val rest = body.slice(idx + needle.len(), body.len())
+    val endq = rest.index_of("\"")
+    if endq < 0:
+        return ""
+    rest.slice(0, endq)
+
+fn json_raw_field(body: text, key: text) -> text:
+    """Read a NON-string field (number, bool, null) verbatim, up to the next
+    `,` or `}`. Reading it raw rather than as an integer is deliberate: this
+    spec has to distinguish JSON `null` (absent measurement) from `0` and from
+    `-1`, and a `to_i64()` would collapse all three."""
+    val needle = "\"{key}\":"
+    val idx = body.index_of(needle)
+    if idx < 0:
+        return ""
+    val rest = body.slice(idx + needle.len(), body.len())
+    var i = 0
+    while i < rest.len():
+        val ch = rest.slice(i, i + 1)
+        if ch == "," or ch == "}":
+            return rest.slice(0, i).trim()
+        i = i + 1
+    rest.trim()
+
+fn create_session(addr: text) -> text:
+    val resp = http_request(addr, "POST", "/api/lab/sessions", "{\"default_mode\":\"interpreter\"}")
+    json_text_field(resp.body, "id")
+
+# A literal `}` immediately after an interpolation (`{x}}`) is ambiguous to the
+# string interpolator, so every JSON body below closes with this `val`.
+val JCLOSE = "}"
+
+fn attach_body(profile: bool) -> text:
+    val p = if profile: "true" else: "false"
+    "{\"source\":\"{ADD_PROGRAM}\",\"profile\":{p}{JCLOSE}"
+
+fn break_body(loc: i64, clear: bool) -> text:
+    val tail = if clear: ",\"clear\":true" else: ""
+    "{\"loc\":{loc}{tail}{JCLOSE}"
+
+fn profile_cell_body(source: text) -> text:
+    "{\"source\":\"{source}\"{JCLOSE}"
+
+# ============================================================================
+# Spec
+# ============================================================================
+
+describe "Simple Lab debug/profile API (real loopback, ref lane)":
+
+    it "attaches a ref lane and reports a live stop state over real HTTP":
+        val server = start_lab_server(30)
+        if not server.started:
+            fail("lab_server subprocess did not start listening")
+
+        val sid = create_session(server.addr)
+        expect(sid).to_start_with("sess_")
+
+        step("POST .../debug attaches the host SVM-G ref lane — no GPU involved")
+        val attach = http_request(server.addr, "POST", "/api/lab/sessions/{sid}/debug", attach_body(true))
+        expect(attach.ok).to_equal(true)
+        expect(attach.status).to_equal(200)
+        expect(attach.headers.to_lower()).to_contain("x-lab-protocol-version: 1")
+        expect(attach.body).to_contain("\"kind\":\"ref\"")
+
+        step("the lane reports the Emulated profile tier, and says profiling was armed AT ATTACH")
+        expect(attach.body).to_contain("\"profile_level\":\"emulated\"")
+        expect(attach.body).to_contain("\"profile_armed_at_attach\":true")
+
+        step("a freshly attached target is stopped at entry in SVM-G pc units")
+        expect(attach.body).to_contain("\"pc_kind\":\"svmg_pc\"")
+        expect(json_raw_field(attach.body, "pc")).to_equal("0")
+
+        step("GET .../debug/state is a PURE read — it does not advance execution")
+        val s1 = http_request(server.addr, "GET", "/api/lab/sessions/{sid}/debug/state", "")
+        val s2 = http_request(server.addr, "GET", "/api/lab/sessions/{sid}/debug/state", "")
+        expect(s1.status).to_equal(200)
+        expect(json_raw_field(s1.body, "pc")).to_equal("0")
+        expect(json_raw_field(s2.body, "pc")).to_equal("0")
+
+        server.stop()
+
+    it "steps one instruction at a time and stops on a real breakpoint via resume":
+        val server = start_lab_server(30)
+        if not server.started:
+            fail("lab_server subprocess did not start listening")
+        val sid = create_session(server.addr)
+        val _a = http_request(server.addr, "POST", "/api/lab/sessions/{sid}/debug", attach_body(true))
+
+        step("POST .../debug/step advances exactly one instruction (PUSHI is 5 bytes)")
+        val st1 = http_request(server.addr, "POST", "/api/lab/sessions/{sid}/debug/step", "")
+        expect(st1.status).to_equal(200)
+        expect(json_raw_field(st1.body, "pc")).to_equal("{PC_PUSHI2}")
+        expect(st1.body).to_contain("\"stop_reason\":\"step\"")
+
+        step("the step really mutated SERVER-SIDE state — the stack grew by one")
+        expect(st1.body).to_contain("\"stack\":[1]")
+        expect(json_raw_field(st1.body, "sp")).to_equal("1")
+
+        step("POST .../debug/break sets a breakpoint on ADD and reports it back")
+        val bp = http_request(server.addr, "POST", "/api/lab/sessions/{sid}/debug/break", break_body(PC_ADD, false))
+        expect(bp.status).to_equal(200)
+        expect(bp.body).to_contain("\"changed\":true")
+        expect(bp.body).to_contain("\"breakpoints\":[{PC_ADD}]")
+
+        step("setting the SAME breakpoint again is idempotent: changed=false, still one entry")
+        val bp2 = http_request(server.addr, "POST", "/api/lab/sessions/{sid}/debug/break", break_body(PC_ADD, false))
+        expect(bp2.body).to_contain("\"changed\":false")
+        expect(bp2.body).to_contain("\"breakpoints\":[{PC_ADD}]")
+
+        step("POST .../debug/resume runs until that breakpoint, not to completion")
+        val res = http_request(server.addr, "POST", "/api/lab/sessions/{sid}/debug/resume", "")
+        expect(res.status).to_equal(200)
+        expect(json_raw_field(res.body, "pc")).to_equal("{PC_ADD}")
+        expect(res.body).to_contain("\"stop_reason\":\"breakpoint\"")
+
+        step("the three PUSHIs ran and ADD did NOT — proven by the live stack, not by the pc alone")
+        expect(res.body).to_contain("\"stack\":[1,3,4]")
+
+        step("clearing the breakpoint and resuming again runs to a terminal halt")
+        val clr = http_request(server.addr, "POST", "/api/lab/sessions/{sid}/debug/break", break_body(PC_ADD, true))
+        expect(clr.body).to_contain("\"changed\":true")
+        expect(clr.body).to_contain("\"breakpoints\":[]")
+        val done = http_request(server.addr, "POST", "/api/lab/sessions/{sid}/debug/resume", "")
+        expect(done.body).to_contain("\"stop_reason\":\"halt\"")
+
+        server.stop()
+
+    it "profile begin/end over the wire reports the Emulated tier with EXACT steps and absent device time":
+        val server = start_lab_server(30)
+        if not server.started:
+            fail("lab_server subprocess did not start listening")
+        val sid = create_session(server.addr)
+        val _a = http_request(server.addr, "POST", "/api/lab/sessions/{sid}/debug", attach_body(true))
+
+        step("POST .../debug/profile/begin opens a window on the already-armed target")
+        val begin = http_request(server.addr, "POST", "/api/lab/sessions/{sid}/debug/profile/begin", "")
+        expect(begin.status).to_equal(200)
+        expect(begin.body).to_contain("\"begun\":true")
+        expect(begin.body).to_contain("\"profile_level\":\"emulated\"")
+
+        step("resume the whole program inside the window")
+        val res = http_request(server.addr, "POST", "/api/lab/sessions/{sid}/debug/resume", "")
+        expect(res.body).to_contain("\"stop_reason\":\"halt\"")
+
+        step("POST .../debug/profile/end returns a ProfileReport with an EXACT step count")
+        val end = http_request(server.addr, "POST", "/api/lab/sessions/{sid}/debug/profile/end", "")
+        expect(end.status).to_equal(200)
+        expect(end.body).to_contain("\"level\":\"emulated\"")
+        expect(json_raw_field(end.body, "steps")).to_equal("{ADD_PROGRAM_STEPS}")
+        expect(end.body).to_contain("\"steps_present\":true")
+
+        step("device time is ABSENT on a lane with no device — JSON null, never 0 and never -1")
+        expect(json_raw_field(end.body, "device_ns")).to_equal("null")
+        expect(end.body).to_contain("\"device_time_present\":false")
+
+        step("wall time IS measured at every tier, so it is a real non-null number")
+        val wall = json_raw_field(end.body, "wall_ns")
+        expect(wall == "null").to_equal(false)
+        expect(wall == "").to_equal(false)
+
+        step("`detail` names exactly which pieces were measured, per the tier contract")
+        expect(end.body).to_contain("steps=exact")
+        expect(end.body).to_contain("device=none")
+
+        server.stop()
+
+    it "a lane attached with profile:false stays Unavailable — begin/end never re-arms it":
+        val server = start_lab_server(30)
+        if not server.started:
+            fail("lab_server subprocess did not start listening")
+        val sid = create_session(server.addr)
+
+        step("attach with {\"profile\":false} — profiling is armed AT ATTACH and nowhere else")
+        val attach = http_request(server.addr, "POST", "/api/lab/sessions/{sid}/debug", attach_body(false))
+        expect(attach.status).to_equal(200)
+        expect(attach.body).to_contain("\"profile_level\":\"unavailable\"")
+        expect(attach.body).to_contain("\"profile_armed_at_attach\":false")
+
+        step("begin + resume + end still runs, but end refuses to invent numbers")
+        val _b = http_request(server.addr, "POST", "/api/lab/sessions/{sid}/debug/profile/begin", "")
+        val _r = http_request(server.addr, "POST", "/api/lab/sessions/{sid}/debug/resume", "")
+        val end = http_request(server.addr, "POST", "/api/lab/sessions/{sid}/debug/profile/end", "")
+        expect(end.status).to_equal(200)
+        expect(end.body).to_contain("\"level\":\"unavailable\"")
+
+        step("EVERY quantity is null — a zero here would chart as a real measurement")
+        expect(json_raw_field(end.body, "steps")).to_equal("null")
+        expect(json_raw_field(end.body, "wall_ns")).to_equal("null")
+        expect(json_raw_field(end.body, "device_ns")).to_equal("null")
+        expect(end.body).to_contain("\"steps_present\":false")
+
+        step("and it says WHY, naming the attach-time lifecycle")
+        expect(end.body).to_contain("profiling-disabled-at-attach")
+
+        server.stop()
+
+    it "%profile magic measures a cell body on a fresh ref lane, needing no prior attach":
+        val server = start_lab_server(30)
+        if not server.started:
+            fail("lab_server subprocess did not start listening")
+        val sid = create_session(server.addr)
+
+        step("POST .../profile with a %profile cell — note NO .../debug attach happened first")
+        val cell = profile_cell_body("%profile\\n{ADD_PROGRAM}")
+        val resp = http_request(server.addr, "POST", "/api/lab/sessions/{sid}/profile", cell)
+        expect(resp.status).to_equal(200)
+        expect(resp.body).to_contain("\"handled\":true")
+
+        step("the report is Emulated with the same EXACT step count the trait-level spec pins")
+        expect(resp.body).to_contain("\"level\":\"emulated\"")
+        expect(json_raw_field(resp.body, "steps")).to_equal("{ADD_PROGRAM_STEPS}")
+        expect(json_raw_field(resp.body, "device_ns")).to_equal("null")
+
+        step("a cell that is NOT a %profile cell is handed back unhandled, code intact")
+        val plain = http_request(server.addr, "POST", "/api/lab/sessions/{sid}/profile", profile_cell_body("print(1)"))
+        expect(plain.status).to_equal(200)
+        expect(plain.body).to_contain("\"handled\":false")
+        expect(plain.body).to_contain("print(1)")
+
+        step("a BARE %profile with no attached lane reports absence, never a zero window")
+        val bare = http_request(server.addr, "POST", "/api/lab/sessions/{sid}/profile", profile_cell_body("%profile"))
+        expect(bare.status).to_equal(200)
+        expect(bare.body).to_contain("\"level\":\"unavailable\"")
+        expect(bare.body).to_contain("no-debug-lane-attached")
+        expect(json_raw_field(bare.body, "steps")).to_equal("null")
+
+        server.stop()
+
+    it "debug endpoints 404 on an unknown session and on an unattached lane, and never wedge the server":
+        val server = start_lab_server(30)
+        if not server.started:
+            fail("lab_server subprocess did not start listening")
+        val sid = create_session(server.addr)
+
+        step("unknown session -> 404 with the version header")
+        val unknown = http_request(server.addr, "POST", "/api/lab/sessions/sess_nope/debug/step", "")
+        expect(unknown.status).to_equal(404)
+        expect(unknown.headers.to_lower()).to_contain("x-lab-protocol-version: 1")
+
+        step("known session but no attached lane -> 404 naming that specific cause")
+        val unattached = http_request(server.addr, "POST", "/api/lab/sessions/{sid}/debug/step", "")
+        expect(unattached.status).to_equal(404)
+        expect(unattached.body).to_contain("no debug lane attached")
+
+        step("an empty SVM-G source is a client ERROR (400), never a silent empty attach")
+        val bad = http_request(server.addr, "POST", "/api/lab/sessions/{sid}/debug", profile_cell_body(""))
+        expect(bad.status).to_equal(400)
+
+        step("the server is still alive and answers the next request")
+        val status_resp = http_request(server.addr, "GET", "/api/lab/status", "")
+        expect(status_resp.status).to_equal(200)
+
+        server.stop()
