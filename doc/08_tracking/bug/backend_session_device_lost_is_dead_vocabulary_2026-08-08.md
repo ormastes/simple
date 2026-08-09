@@ -1,7 +1,7 @@
 # `BackendSessionError.device_lost` is dead vocabulary (engine2d GPU lane)
 
 **Date:** 2026-08-08
-**Status:** OPEN — filed, not fixed (deliberately: there is nothing to hook)
+**Status:** FIXED 2026-08-09 — dead vocabulary deleted (option (b) below)
 **Severity:** low correctness / medium honesty
 **Area:** `src/lib/nogc_sync_mut/gpu/engine2d/`
 
@@ -81,3 +81,14 @@ Either of:
 
 Related: `doc/08_tracking/bug/chrome_vs_simple_gpu_offload_comparison_2026-08-08.md`
 (the sibling-backend-drift audit this was found in).
+
+## Resolution 2026-08-09
+
+Took option (b): deleted `BackendSessionError.device_lost(...)` from
+`src/lib/nogc_sync_mut/gpu/engine2d/backend_session.spl:233-234`. Re-swept
+`grep -rn 'device_lost' --include=*.spl src/lib/nogc_sync_mut/ test/` —
+every remaining hit belongs to unrelated subsystems (`simple_audio_device`,
+`webgpu_context`, `receipt_contract` fixtures, `canvas_api`,
+`webgpu_status_errors`), none of them route through `BackendSessionError`, so
+none needed updating. `is_recoverable()` untouched (its `else -> false`
+fallthrough already covers all remaining codes correctly).
