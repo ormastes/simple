@@ -66,6 +66,7 @@ struct ElfRelocation:
     r_offset: i64      # location to apply relocation
     r_info: i64        # symbol index + relocation type (packed)
     r_addend: i64      # addend for RELA
+    section_idx: i64   # index (in ElfObject.sections) of the RELA section this came from
 
 struct ElfStringTable:
     """Raw string table data and file offset."""
@@ -226,7 +227,7 @@ fn elf_parse_symbols(bytes: [u8], symtab_section: ElfSectionHeader, strtab: ElfS
 # Relocation Table Parser
 # ============================================================================
 
-fn elf_parse_relocations(bytes: [u8], rela_section: ElfSectionHeader) -> [ElfRelocation]:
+fn elf_parse_relocations(bytes: [u8], rela_section: ElfSectionHeader, section_idx: i64) -> [ElfRelocation]:
     """Parse all ELF64 RELA relocation entries from a SHT_RELA section.
 
     ELF64 Rela entry layout (24 bytes):
@@ -258,7 +259,8 @@ fn elf_parse_relocations(bytes: [u8], rela_section: ElfSectionHeader) -> [ElfRel
         relocs = relocs.push(ElfRelocation(
             r_offset: r_offset,
             r_info: r_info,
-            r_addend: r_addend
+            r_addend: r_addend,
+            section_idx: section_idx
         ))
         i = i + 1
 
@@ -372,15 +374,20 @@ fn elf_parse_object(bytes: [u8]) -> Result<ElfObject, text>:
         if sec.sh_type == SHT_SYMTAB:
             symbols = elf_parse_symbols(bytes, sec, strtab)
 
-    # Find and parse first RELA section
+    # Find and parse all RELA sections, tagging each relocation with the
+    # section index it came from (section_idx) so callers can attribute
+    # relocations back to their target section instead of losing that
+    # information by merging blindly.
     var relocations: [ElfRelocation] = []
-    for sec in sections:
-        if sec.sh_type == SHT_RELA:
-            val rela_relocs = elf_parse_relocations(bytes, sec)
+    var sec_i: i64 = 0
+    while sec_i < sections.len():
+        if sections[sec_i].sh_type == SHT_RELA:
+            val rela_relocs = elf_parse_relocations(bytes, sections[sec_i], sec_i)
             var k: i64 = 0
             while k < rela_relocs.len():
                 relocations = relocations.push(rela_relocs[k])
                 k = k + 1
+        sec_i = sec_i + 1
 
     Ok(ElfObject(
         header: header,
