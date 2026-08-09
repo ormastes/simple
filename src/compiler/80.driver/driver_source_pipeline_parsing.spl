@@ -10,7 +10,7 @@ use compiler.core.parser.{par_had_error_get}
 use compiler.frontend.parser_types.*
 use compiler.hir.hir_lowering.module_surface.{
     ModuleSurfaceBuilder,
-    module_surface_promote
+    module_surface_builder_promote
 }
 use compiler.driver.driver_source_loading.{
     _driver_is_bootstrap_entry_source,
@@ -61,12 +61,9 @@ impl CompilerDriver:
         if add_result.is_err():
             val _ended = driver_end_transient_parse_scope()
             return Err(add_result.unwrap_err())
-        val surface_index = builder.surfaces.len() - 1
-        if surface_index < 0 or not module_surface_promote(
-            builder.surfaces[surface_index]
-        ):
+        if not module_surface_builder_promote(builder):
             val _ended = driver_end_transient_parse_scope()
-            return Err("module surface promotion failed for {source.path}")
+            return Err("module surface builder promotion failed for {source.path}")
         if not driver_end_transient_parse_scope():
             return Err("transient parser scope end failed for {source.path}")
         Ok(builder)
@@ -77,6 +74,7 @@ impl CompilerDriver:
         self.ctx.parser_module_index = {}
         self.ctx.parser_module_source_indices = []
         self.ctx.module_surfaces = nil
+        self.ctx.streaming_module_surface_builder = ModuleSurfaceBuilder.new()
         var builder = ModuleSurfaceBuilder.new()
         var source_index = 0
         var release_seq: i64 = 0
@@ -100,12 +98,17 @@ impl CompilerDriver:
                 log_module_surface_released(source.path, release_seq)
             source_index = source_index + 1
 
+        dtrace("[BOOTSTRAP-PHASE] phase2:surface:loop:done unique={builder.surfaces.len()} aliases={builder.index_by_name.keys().len()}")
         var streaming_ctx = self.ctx
-        streaming_ctx.module_surfaces = Some(builder.finish())
+        dtrace("[BOOTSTRAP-PHASE] phase2:surface:context-copy:done")
+        streaming_ctx.module_surfaces = nil
+        streaming_ctx.streaming_module_surface_builder = builder
+        dtrace("[BOOTSTRAP-PHASE] phase2:surface:builder-handoff:done")
         streaming_ctx.modules = {}
         streaming_ctx.parser_modules = []
         streaming_ctx.parser_module_index = {}
         streaming_ctx.parser_module_source_indices = []
+        dtrace("[BOOTSTRAP-PHASE] phase2:surface:return")
         (streaming_ctx, streaming_ctx.errors.len() == 0)
 
     me parse_all_impl() -> (CompileContext, bool):

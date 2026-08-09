@@ -548,6 +548,9 @@ run_logged() {
 CANDIDATE_FRONTEND_ROOT=${repo_root}
 COMPILER_PROBE_TIMEOUT_SECONDS=5
 COMPILER_BUILD_TIMEOUT_SECONDS=60
+if [ "${execution_profile}" = "incremental-unlimited" ]; then
+  COMPILER_BUILD_TIMEOUT_SECONDS=600
+fi
 COMPILER_EXEC_TIMEOUT_SECONDS=5
 COMPILER_CHECK_KILL_GRACE_SECONDS=1
 . "${repo_root}/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs"

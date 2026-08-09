@@ -7,7 +7,7 @@ use compiler.driver.driver_types.{CompileContext}
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.hir.hir.*
 use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module, hirlowering_for_module_with_diagnostics, LoweringError, LoweringErrorKind}
-use compiler.hir.hir_lowering.module_surface.{ModuleSurface, ModuleSurfacesByName, module_surface_source_matches, module_surfaces_from_modules, module_surfaces_from_indexed_modules}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurface, ModuleSurfaceBuilder, ModuleSurfacesByName, module_surface_source_matches, module_surfaces_from_modules, module_surfaces_from_indexed_modules}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
 use compiler.core.ast.{ast_reset}
@@ -84,10 +84,14 @@ impl CompilerDriver:
         Ok(hir_module)
 
     me lower_and_check_streaming_surfaces_impl() -> (CompileContext, bool):
-        if not self.ctx.module_surfaces.?:
+        val surface_builder = self.ctx.streaming_module_surface_builder
+        if (surface_builder.surfaces.len() == 0 or
+            surface_builder.index_by_name.keys().len() == 0):
             self.ctx.add_error("Streaming module surfaces missing after phase 2")
             return (self.ctx, false)
-        val surfaces = self.ctx.module_surfaces.unwrap()
+        val surfaces = ModuleSurfacesByName(
+            surfaces: surface_builder.surfaces,
+            index_by_name: surface_builder.index_by_name)
         var lowering: HirLowering = hirlowering_for_module("", surfaces)
         var lowered_by_surface: Dict<i64, HirModule> = {}
         var phase_hir_modules: Dict<text, HirModule> = self.ctx.hir_modules
@@ -177,6 +181,7 @@ impl CompilerDriver:
         log_phase("phase3:streaming_source_reclaim:done reclaimed={reclaimed_sources}")
         phase_ctx.evict_sources()
         phase_ctx.module_surfaces = nil
+        phase_ctx.streaming_module_surface_builder = ModuleSurfaceBuilder.new()
         (phase_ctx, true)
 
     me lower_and_check_impl() -> (CompileContext, bool):

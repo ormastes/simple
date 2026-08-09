@@ -2,6 +2,8 @@ use std.io.{file_read}
 use std.spec.{describe, it, expect}
 
 val PARSER_PIPELINE = "src/compiler/80.driver/driver_source_pipeline_parsing.spl"
+val HIR_PIPELINE = "src/compiler/80.driver/driver_hir_pipeline_lowering.spl"
+val ORCHESTRATION = "src/compiler/80.driver/driver_orchestration.spl"
 
 describe "Stage4 entry-closure parser representation":
     it "stores parsed modules in an array with scalar logical-name indices":
@@ -15,3 +17,22 @@ describe "Stage4 entry-closure parser representation":
         val source = file_read(PARSER_PIPELINE)
         expect(source.contains("var entry_modules: Dict<text, ParserModule>")).to_equal(false)
         expect(source.contains("entry_modules[source.module_name] =")).to_equal(false)
+
+    it "transports streaming surfaces without Option aggregate unwrap":
+        val parser_source = file_read(PARSER_PIPELINE)
+        val hir_source = file_read(HIR_PIPELINE)
+        expect(parser_source).to_contain("streaming_ctx.streaming_module_surface_builder = builder")
+        expect(hir_source.contains("self.ctx.module_surfaces.unwrap()")).to_equal(false)
+
+    it "promotes streaming builder containers before transient teardown":
+        val source = file_read(PARSER_PIPELINE)
+        expect(source).to_contain("module_surface_builder_promote(builder)")
+        expect(source).to_contain(
+            "module surface builder promotion failed for {source.path}")
+
+    it "counts streaming surfaces without consulting emptied parser registries":
+        val source = file_read(ORCHESTRATION)
+        expect(source).to_contain(
+            "parsed_module_count = self.ctx.streaming_module_surface_builder.index_by_name.keys().len()")
+        expect(source.contains(
+            "phase2:parse:done n_modules={self.ctx.parser_module_names().len()}")).to_equal(false)
