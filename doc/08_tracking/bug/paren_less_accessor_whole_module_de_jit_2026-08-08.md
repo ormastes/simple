@@ -246,13 +246,66 @@ alone (`Dict.len()` returns -1 under native codegen).
 - `src/compiler/10.frontend/c_import/c_import_resolve.spl` — `struct 'String'
   field 'length'`. It was edited in this lane, but a parallel session clobbered
   the working-copy edit before it could be landed. **Still an open DROP site.**
-- `src/compiler/35.semantics/lint/primitive_api.spl` (`struct 'String' field
-  'ty'`) and `src/lib/*/package/list.spl` (`struct 'ANY' field 'prefix'`) are
-  drops from a RELATED but DIFFERENT cause — field access on an erased/ANY
-  receiver — not the paren-less accessor family. Same ~100-1000x consequence.
-- `src/lib/nogc_async_mut_noalloc/path/baremetal_path.spl` — `struct 'Array'
-  field 'last'`. Not rewritten: unlike `.length`, it was not confirmed that a
-  `.last()` method exists with matching semantics.
+
+### Fixed 2026-08-09: `primitive_api.spl` and `baremetal_path.spl`
+
+Both of the two remaining DROP sites named above are now clear (`check-no-jit-
+module-drop.shs --file` on both: 0 DROP, was 2). Root causes, confirmed
+independently for each:
+
+- **`src/lib/nogc_async_mut_noalloc/path/baremetal_path.spl`** (`struct
+  'Array' field 'last'`) — this genuinely is the paren-less accessor family:
+  `result_parts.last != Some("..")` should be `result_parts.last() !=
+  Some("..")`. Proof it's semantics-preserving: the identical
+  `bm_path_normalize`-equivalent function already exists with parens in three
+  sibling tiers — `src/lib/nogc_sync_mut/path.spl:104`,
+  `src/lib/gc_async_mut/path.spl:104`, `src/lib/nogc_async_mut/path.spl:104` —
+  all read `result_parts.last() != Some("..")`. Only the `noalloc` copy was
+  missing the parens. One-line fix.
+- **`src/compiler/35.semantics/lint/primitive_api.spl`** (`struct 'String'
+  field 'ty'`) — this is confirmed to be the RELATED-BUT-DIFFERENT cause
+  flagged above, not the accessor family (`ty` is not in the 8-member list).
+  Root cause: `compiler.frontend.ast.FunctionDef.params` /
+  `StructDef.fields` / `ClassDef.fields` are declared `[text]` — flat `'name:
+  Type'` strings (see the `# DESUGARED` markers in `ast.spl`) — not
+  `[Param]`/`[ParserField]` objects. `primitive_api.spl` iterated `func.params`
+  and field-accessed `.ty`/`.name` on each entry as if it held rich AST nodes;
+  since the entries are actually `text`, the receiver statically resolves to
+  the builtin `String` struct and HIR lowering has no `.ty` field on it. Sibling
+  `semantic_api/checker.spl` already parses this exact flat-text shape
+  correctly (`_param_name_of`/`_param_type_of`, using `'name: Type'` splitting)
+  — `primitive_api.spl` now does the same via local `_pf_name_of`/`_pf_type_of`
+  helpers, dropping the `Type`-enum-based matching entirely (also fixes the
+  matching `Option<Type>` misuse on `func.return_type`, itself flat `text` +
+  `has_return_type: bool`, not `text?`).
+  **Blast radius:** `primitive_api.spl`'s `check_function`/`check_struct`/
+  `check_class`/`check_module_items` are confirmed DEAD CODE — sibling
+  `primitive_api_arena.spl`'s docstring states outright that "the live lint
+  pipeline never builds" the typed-`Node` AST this file consumes, and a repo
+  grep found zero constructors of `Node.Function(FunctionDef(...))` anywhere
+  and zero external callers of these functions outside this file's own
+  `__init__.spl` re-export. No live behavior depends on this file, so the
+  rewrite is float-free correctness-repair, not a live-path risk.
+  **After the fix**, `bin/simple compile` on this file now fails for a
+  DIFFERENT, unrelated, pre-existing reason ("2 function(s) contain constructs
+  that require the interpreter: `[PatternMatch]`" in `check_module_items` and
+  `is_raw_primitive_expr`, both untouched by this change) — the field-type
+  DROP was simply the FIRST-reported error masking this one, exactly the
+  documented "compiler reports only the FIRST error per file" pattern above.
+  Not a regression: confirmed via `git stash` A/B that the two pre-existing
+  `primitive_api_lint_spec.spl` / `primitive_api_canary_spec.spl` test failures
+  (unrelated to this file — one is an extern-signature-mirroring canary, the
+  other is a `sffi_common`/`Handle` canary) are byte-identical in count and
+  content with and without this fix.
+- Similarly `src/lib/*/package/list.spl` (`struct 'ANY' field 'prefix'`) is
+  still open — same class as `primitive_api.spl` was, not yet investigated.
+
+**Verification:** `test/01_unit/lib/nogc_async_mut_noalloc/path/
+baremetal_path_spec.spl` (2/2 pass, unaffected by the accessor rewrite —
+covers `bm_path_normalize` including a `..` collapse case that exercises the
+fixed line). No live spec exercises `primitive_api.spl`'s dead functions
+directly; the fence itself (`compile`-lane) is the applicable oracle here and
+now reports 0 DROP for both files.
 
 ## Fence
 
