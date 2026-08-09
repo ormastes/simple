@@ -384,14 +384,23 @@ import time
 socket_path, serial_path, before_path, after_path = sys.argv[1:5]
 max_checksum_us = int(sys.argv[5])
 deadline = time.monotonic() + 15
-while time.monotonic() < deadline and not os.path.exists(socket_path):
+sock = None
+last_connect_error = None
+while time.monotonic() < deadline:
+    if os.path.exists(socket_path):
+        candidate = socket.socket(socket.AF_UNIX)
+        candidate.settimeout(5)
+        try:
+            candidate.connect(socket_path)
+            sock = candidate
+            break
+        except (ConnectionRefusedError, FileNotFoundError) as exc:
+            last_connect_error = exc
+            candidate.close()
     time.sleep(0.05)
-if not os.path.exists(socket_path):
-    raise RuntimeError("qmp socket timeout")
+if sock is None:
+    raise RuntimeError("qmp connect timeout: %r" % (last_connect_error,))
 
-sock = socket.socket(socket.AF_UNIX)
-sock.settimeout(5)
-sock.connect(socket_path)
 stream = sock.makefile("rwb", buffering=0)
 
 def read_message():
