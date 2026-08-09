@@ -1181,6 +1181,13 @@ fn _engine2d_draw_ir_prepare_fresh_device_text(engine: Engine2D, composition: Dr
 # PATH, and resolved vector text.  In particular it never asks the generic
 # executor to turn images, effects, clipped child surfaces, or a CPU result
 # into a device receipt.
+fn _engine2d_draw_ir_strict_vulkan_box_bounded(command: DrawIrCommand, width: i32, height: i32) -> bool:
+    val right = command.x.to_i64() + command.width.to_i64()
+    val bottom = command.y.to_i64() + command.height.to_i64()
+    command.width > 0 and command.height > 0 and
+        command.x >= 0 and command.y >= 0 and
+        right <= width.to_i64() and bottom <= height.to_i64()
+
 fn _engine2d_draw_ir_strict_vulkan_primitive_reason(engine: Engine2D, composition: DrawIrComposition, images: [Engine2dResolvedDrawIrImage]) -> text:
     if engine.selected_backend_name != "vulkan" or engine.vulkan_font_poisoned():
         return "strict-vulkan-engine-required"
@@ -1196,15 +1203,12 @@ fn _engine2d_draw_ir_strict_vulkan_primitive_reason(engine: Engine2D, compositio
         for command in batch.commands:
             if command.? == false or command.clip_rect.present:
                 return "strict-vulkan-command-preflight-required"
-            val right = command.x.to_i64() + command.width.to_i64()
-            val bottom = command.y.to_i64() + command.height.to_i64()
-            if (command.width <= 0 or command.height <= 0 or command.x < 0 or
-                command.y < 0 or right > engine.width().to_i64() or
-                bottom > engine.height().to_i64()):
-                return "strict-vulkan-command-bounds-required"
             if first and command.kind != DRAW_IR_COMMAND_RECT:
                 return "strict-vulkan-clear-first-required"
             if command.kind == DRAW_IR_COMMAND_RECT:
+                if not _engine2d_draw_ir_strict_vulkan_box_bounded(
+                    command, engine.width(), engine.height()):
+                    return "strict-vulkan-command-bounds-required"
                 if (command.computed_style.len() != 0 or
                     ((command.color >> 24) & 0xFFu32) != 0xFFu32):
                     return "strict-vulkan-opaque-rect-required"
@@ -1213,6 +1217,9 @@ fn _engine2d_draw_ir_strict_vulkan_primitive_reason(engine: Engine2D, compositio
                     command.height != engine.height()):
                     return "strict-vulkan-clear-first-required"
             elif command.kind == DRAW_IR_COMMAND_TEXT:
+                if not _engine2d_draw_ir_strict_vulkan_box_bounded(
+                    command, engine.width(), engine.height()):
+                    return "strict-vulkan-command-bounds-required"
                 if not _engine2d_draw_ir_fresh_device_command_supported(
                     command, images, engine.width(), engine.height(), false, false):
                     return "strict-vulkan-font-preflight-required"
