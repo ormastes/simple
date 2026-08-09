@@ -2746,6 +2746,12 @@ static volatile uint64_t g_gui_blit_row_calls = 0;
 static volatile uint64_t g_gui_blit_row_pixels = 0;
 static volatile uint64_t g_gui_blit_row_neon_chunks = 0;
 static int g_gui_blit_row_alpha_profiled = 0;
+#define GUI_PREPARED_PACKED_CACHE_SLOTS 3u
+#define GUI_PREPARED_PACKED_CACHE_PIXELS 131072u
+static RuntimeArray *g_gui_prepared_packed_keys[GUI_PREPARED_PACKED_CACHE_SLOTS];
+static uint64_t g_gui_prepared_packed_lens[GUI_PREPARED_PACKED_CACHE_SLOTS];
+static uint32_t g_gui_prepared_packed_pixels
+    [GUI_PREPARED_PACKED_CACHE_SLOTS][GUI_PREPARED_PACKED_CACHE_PIXELS];
 
 RuntimeValue rt_gui_set_fb(RuntimeValue addr, RuntimeValue w)
 {
@@ -2804,6 +2810,28 @@ static void rt_gui_store4(volatile uint32_t *dst, const uint32_t pixels[4])
 #else
     for (uint32_t i = 0; i < 4u; i++) dst[i] = pixels[i];
 #endif
+}
+
+static const uint32_t *rt_gui_prepared_packed_pixels(RuntimeArray *pixels)
+{
+    if (!pixels || pixels->len == 0 ||
+        pixels->len > GUI_PREPARED_PACKED_CACHE_PIXELS) return NULL;
+    for (uint32_t slot = 0; slot < GUI_PREPARED_PACKED_CACHE_SLOTS; slot++) {
+        if (g_gui_prepared_packed_keys[slot] == pixels &&
+            g_gui_prepared_packed_lens[slot] == pixels->len)
+            return g_gui_prepared_packed_pixels[slot];
+    }
+    for (uint32_t slot = 0; slot < GUI_PREPARED_PACKED_CACHE_SLOTS; slot++) {
+        if (g_gui_prepared_packed_keys[slot] == NULL) {
+            for (uint64_t i = 0; i < pixels->len; i++)
+                g_gui_prepared_packed_pixels[slot][i] =
+                    arm64_blit_raw_pixel(pixels->items[i]);
+            g_gui_prepared_packed_lens[slot] = pixels->len;
+            g_gui_prepared_packed_keys[slot] = pixels;
+            return g_gui_prepared_packed_pixels[slot];
+        }
+    }
+    return NULL;
 }
 
 RuntimeValue rt_gui_fill4(RuntimeValue xy, RuntimeValue wh, RuntimeValue color, RuntimeValue u)
@@ -2921,6 +2949,8 @@ RuntimeValue rt_gui_blit_row4(RuntimeValue pixels_value, RuntimeValue src_offset
     }
     uint64_t i = 0;
     uint64_t chunks = 0;
+    const uint32_t *prepared_packed = trusted_opaque
+        ? rt_gui_prepared_packed_pixels(pixels) : NULL;
 #if defined(__aarch64__)
     if (opacity_milli == 1000u) {
         while (i + 16u <= count) {
@@ -2937,16 +2967,30 @@ RuntimeValue rt_gui_blit_row4(RuntimeValue pixels_value, RuntimeValue src_offset
                 }
             }
             if (!sixteen_opaque) break;
-            RuntimeValue *src_slots = pixels->items +
-                (uint64_t)src_offset + i;
-            for (uint32_t block = 0; block < 4u; block++) {
-                __asm__ volatile(
-                    "ld2 {v0.4s, v1.4s}, [%1]\n\t"
-                    "st1 {v0.4s}, [%0]"
-                    :
-                    : "r" (dst + i + (uint64_t)block * 4u),
-                      "r" (src_slots + (uint64_t)block * 4u)
-                    : "v0", "v1", "memory");
+            if (prepared_packed) {
+                const uint32_t *src_words = prepared_packed +
+                    (uint64_t)src_offset + i;
+                for (uint32_t block = 0; block < 4u; block++) {
+                    __asm__ volatile(
+                        "ld1 {v0.4s}, [%1]\n\t"
+                        "st1 {v0.4s}, [%0]"
+                        :
+                        : "r" (dst + i + (uint64_t)block * 4u),
+                          "r" (src_words + (uint64_t)block * 4u)
+                        : "v0", "memory");
+                }
+            } else {
+                RuntimeValue *src_slots = pixels->items +
+                    (uint64_t)src_offset + i;
+                for (uint32_t block = 0; block < 4u; block++) {
+                    __asm__ volatile(
+                        "ld2 {v0.4s, v1.4s}, [%1]\n\t"
+                        "st1 {v0.4s}, [%0]"
+                        :
+                        : "r" (dst + i + (uint64_t)block * 4u),
+                          "r" (src_slots + (uint64_t)block * 4u)
+                        : "v0", "v1", "memory");
+                }
             }
             i += 16u;
             chunks += 4u;
