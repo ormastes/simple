@@ -14,6 +14,7 @@ use common.ui.render_opt.revisions.{
     REV_CLIP,
     REV_RESOURCE,
     REV_EVENT,
+    REV_KIND_COUNT,
     REV_OK,
     REV_BAD_NODE,
     REV_BAD_KIND
@@ -24,9 +25,11 @@ use common.ui.render_opt.property_trees.{
     RasterStats,
     paint_chunks_sync,
     paint_chunks_raster,
+    paint_chunks_property_rev,
     PT_TRANSFORM,
     PT_CLIP,
     PT_EFFECT,
+    PT_SCROLL,
     PT_OK,
     PT_WRONG_TREE
 }
@@ -276,3 +279,124 @@ describe "O2 paint_chunks_raster skips chunks whose cache key is unchanged":
         val stats: RasterStats = paint_chunks_raster(c, t, r, 1, 1, 1, 1, 1)
         assert_true(stats.rastered_count == 3)
         assert_true(stats.skipped_count == 0)
+
+# --- sabotage controls -------------------------------------------------------
+#
+# The three gates above assert exact counts, but an exact-count assertion is
+# only worth what it costs to violate. Each case below reconstructs, INSIDE
+# the spec, the one edit that would defeat its gate, and asserts that the
+# gate's own expected value is then WRONG. Nothing here mutates
+# `src/lib/common/ui/render_opt/**` — the sabotage is a local bypass of the
+# module, so the real path is re-asserted green in the same `it` body.
+#
+# Expected values are taken from the plan, not read back from the code:
+# `render_perf_redesign_plan_2026-08-06.md` §4 pass 1 (minimal marking),
+# pass 3 (chunk cache key) and §10 ("transform-only move => zero repaint",
+# "idle raster pixels = 0").
+
+describe "SABOTAGE: each O-lane gate goes red when its invariant is broken":
+    it "SABOTAGE (O0): a TRANSFORM row that also marks PAINT breaks the one-column invariant":
+        # Real matrix: TRANSFORM marks column TRANSFORM only.
+        val real = RenderRevisions.create(4)
+        assert_true(real.mark(1, REV_TRANSFORM) == REV_OK)
+        assert_true(real.total_dirty() == 1)
+        assert_true(real.dirty_nodes(REV_PAINT) == 0)
+
+        # Sabotage: identical in every way except the TRANSFORM row, which
+        # now also marks PAINT — the exact regression the module's comment
+        # calls out as defeating the whole lane.
+        var revs: [u32] = []
+        var k: i64 = 0
+        while k < REV_KIND_COUNT:
+            revs.push(0)
+            k = k + 1
+        var flags: [u32] = []
+        var i: i64 = 0
+        while i < 4 * REV_KIND_COUNT:
+            flags.push(0)
+            i = i + 1
+        val bad_matrix: [u32] = [
+            1, 1, 1, 1, 0, 0, 0, 0,
+            0, 1, 1, 1, 0, 0, 0, 0,
+            0, 0, 1, 1, 0, 0, 0, 0,
+            0, 0, 0, 1, 0, 0, 0, 0,
+            0, 0, 0, 1, 1, 0, 0, 0,
+            0, 0, 0, 1, 0, 1, 0, 0,
+            0, 0, 0, 1, 0, 0, 1, 0,
+            0, 0, 0, 0, 0, 0, 0, 1
+        ]
+        val sab = RenderRevisions(
+            kind_rev: revs, node_dirty: flags, node_count: 4,
+            prop: bad_matrix, mark_count: 0)
+        assert_true(sab.mark(1, REV_TRANSFORM) == REV_OK)
+        # The gate's expected values (1 and 0) are now both violated, so the
+        # gate above would fail. Assert the violation explicitly.
+        assert_true(sab.total_dirty() != 1)
+        assert_true(sab.total_dirty() == 2)
+        assert_true(sab.dirty_nodes(REV_PAINT) != 0)
+        assert_true(sab.dirty_nodes(REV_PAINT) == 1)
+
+    it "SABOTAGE (O1): folding PT_TRANSFORM into the chunk cache key rebuilds on every move":
+        val t = make_scene()
+        val c = make_chunks()
+        val r = RenderRevisions.create(4)
+        assert_true(prime(c, t, r) == 3)
+
+        val real_before = paint_chunks_property_rev(t)
+        val sab_before = real_before + t.revision(PT_TRANSFORM)
+        assert_true(t.set_translate(1, 200, 20) == PT_OK)
+        val real_after = paint_chunks_property_rev(t)
+        val sab_after = paint_chunks_property_rev(t) + t.revision(PT_TRANSFORM)
+
+        # Real key component: a transform-only move does not move it, so
+        # zero chunks go stale (§10 "transform-only move => zero repaint").
+        assert_true(real_after == real_before)
+        assert_true(paint_chunks_sync(c, t, r, 1, 1, 1, 1, 1) == 0)
+
+        # Sabotaged key component: it moved. Count how many chunks a key
+        # built on it would find stale — all of them.
+        assert_true(sab_after != sab_before)
+        var stale: i64 = 0
+        var i: i64 = 0
+        while i < c.chunk_count:
+            if c.key_property_rev[i] != sab_after:
+                stale = stale + 1
+            i = i + 1
+        assert_true(stale != 0)
+        assert_true(stale == 3)
+
+    it "SABOTAGE (O2): an unconditional raster breaks the quiescent-frame zero":
+        val t = make_scene()
+        val c = PaintChunks.create()
+        c.add_chunk_sized(1, 1, 2, 3, 0, 7, 0, 1000)
+        c.add_chunk_sized(2, 1, 2, 3, 0, 7, 1, 1000)
+        c.add_chunk_sized(3, 1, 2, 3, 0, 8, 2, 1000)
+        c.add_chunk_sized(4, 1, 2, 3, 0, 8, 3, 1000)
+        c.add_chunk_sized(5, 1, 2, 3, 0, 9, 4, 1000)
+        val r = RenderRevisions.create(4)
+        val primed: RasterStats = paint_chunks_raster(c, t, r, 1, 1, 1, 1, 1)
+        assert_true(primed.rastered_count == 5)
+
+        # Real path on a quiescent frame: nothing rastered, nothing painted.
+        val quiet: RasterStats = paint_chunks_raster(c, t, r, 1, 1, 1, 1, 1)
+        assert_true(quiet.rastered_count == 0)
+        assert_true(quiet.bytes_painted == 0)
+
+        # Sabotage: skip the staleness decision entirely, exactly what a
+        # rasterizer that ignores the cache key would do.
+        var sab_count: i64 = 0
+        var sab_bytes: i64 = 0
+        var i: i64 = 0
+        while i < c.chunk_count:
+            sab_count = sab_count + 1
+            sab_bytes = sab_bytes + c.chunk_area[i]
+            i = i + 1
+        assert_true(sab_count != 0)
+        assert_true(sab_count == 5)
+        assert_true(sab_bytes != 0)
+        assert_true(sab_bytes == 5000)
+
+        # The real path is unaffected by the bypass and still quiescent.
+        val after: RasterStats = paint_chunks_raster(c, t, r, 1, 1, 1, 1, 1)
+        assert_true(after.rastered_count == 0)
+        assert_true(after.skipped_count == 5)
