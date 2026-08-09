@@ -92,6 +92,38 @@ a truthful runtime absence, never an unimplemented hole.
 
 ## 3. Trait groups + sugar — zero new grammar tokens
 
+> **CORRECTION 2026-08-09 — read before implementing against this section.**
+> The `.from()` acquisition shape originally specified below is **UNSOUND** and
+> was measured RED by P2 (8/70 failing, `expected 6, got 0`) before being
+> corrected on main.
+>
+> Cause: classes in this language are **value types** — `val b = a` copies. A
+> group built by PAIRING two accessors (`session.debug()` + `session.profile()`)
+> therefore holds two *diverging copies* of the session. Stepping through the
+> debug half leaves the profile half reading 0 steps. Nothing in the type system
+> catches this.
+>
+> **Corrected shape (what is on main):** a group is **one trait over one value**
+> — the literal union of its members' methods, which is exactly what the `with`
+> sugar already desugars to — acquired through a **single** accessor, never by
+> pairing. Until P0's generator is updated, each backend supplies
+> `<backend>_debug_profiler(session)`.
+>
+> A second value-semantics trap in the same family: **`me` vs `fn` on trait
+> methods is load-bearing.** A `fn` method receives a COPY of the receiver and
+> silently discards mutation, with no compiler complaint. Every mutating method
+> (`step`, `resume`, `set_breakpoint`, `clear_breakpoint`, `detach`,
+> `profile_begin`, `profile_end`) MUST be declared `me`. The `me` markers in
+> this document are normative, not stylistic.
+>
+> Authoritative writeup:
+> `doc/08_tracking/bug/capability_group_from_unsound_under_value_semantics_2026-08-09.md`.
+> Landed interfaces to code against: `src/lib/common/debug/`.
+> Also note `AttachOpts` (referenced but never defined here) is now real in
+> `session_core.spl`: `step_budget`, `entry_pc`, `log_cap`, `profile: bool` —
+> and profiling must be **armed at attach**, since GPU PROF-1 cannot be enabled
+> after upload.
+
 **Group definition** reuses the existing `with` clause (already parsed on
 `struct X with Mixin:`; the trait-header production is extended to accept
 the same clause — no new keyword, no new token, no `+`):
