@@ -1,7 +1,41 @@
 # `set` method: dict returns nil on the JIT; array/tuple silently no-op when a dict `.set` shares the module
 
 Date: 2026-08-02
-Status: OPEN — measured end to end, codegen route NOT located; two hypotheses refuted
+Status: OPEN — re-verified 2026-08-09; still architectural/out-of-scope for a
+.spl/.shs-only lane. Superseded characterization (more precise root cause,
+self-hosted lane): `dict_set_bracket_write_parity_2026-08-07.md`.
+
+## Re-verification 2026-08-09
+
+Re-read fresh. The root cause found by the later 2026-08-07 investigation is
+sharper than this file's own "codegen route NOT located": on the **self-hosted
+lane**, `d.set(k, v)` fails MIR lowering outright with
+`unresolved method call: set` because `"set"`/`"insert"` are absent from the
+builtin-Dict method whitelist (`is_dict_method_name` at
+`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:1254`) —
+confirmed present at that line, `"set"`/`"insert"` genuinely not listed
+(`keys`/`values`/`has`/`contains`/`contains_key`/`get`/`remove`/`delete` are).
+That whitelist and the rest of the Dict `.set` dispatch chain are woven through
+MIR lowering machinery adjacent to (and, per the 2026-08-02 findings above, in
+the Rust seed's Cranelift codegen also inside) files this lane is expressly
+barred from touching (`_MirLoweringExpr/switch_operators_calls.spl`,
+`mir_data.spl`, `_MirLowering/module_lowering.spl`, and — per repo rules —
+`src/compiler_rust/**` entirely, which is where the seed-JIT `nil`-return and
+same-module array/tuid silent-noop defects actually live per the refuted
+hypotheses above). A same-module fixture also could not be re-run to confirm
+current behavior: the self-hosted lane segfaults on trivial Dict-free
+hello-world programs per the 2026-08-07 doc (a separate pre-existing defect),
+and this lane's `bin/simple` is the Rust seed only (`bootstrap/stage1-3` seed
+binaries present, no deployed pure-Simple binary in `bin/`).
+
+Left OPEN. Not a duplicate of `reference_dict_bracket_assign_beats_set_both_engines.md`
+(the memory note is about `d[k]=v` racing/beating `.set()` when both apply to
+the same key in sequence) — this file's defects are `.set()`'s return value
+and cross-receiver dispatch being wrong in the Rust seed's codegen, plus (per
+the 2026-08-07 follow-up) `.set()`/`.insert()` not being MIR-lowerable at all
+on the self-hosted compiler. Same *family* (Dict write-method routing), two
+distinct defects, neither fixable from this lane without touching
+off-limits/off-limits-adjacent MIR/codegen internals.
 Related: `0e711be648d` (the text-mutator lane that measured this), the
 `rev`/`reverse` split in `06eb4fe3f8f`
 

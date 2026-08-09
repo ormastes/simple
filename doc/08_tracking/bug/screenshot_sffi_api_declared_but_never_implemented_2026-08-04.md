@@ -1,7 +1,20 @@
 # `std.spec.screenshot` SFFI API is declared but implemented nowhere
 
-**Status:** OPEN
+**Status:** OPEN — re-verified 2026-08-09, unchanged
 **Found:** 2026-08-04
+
+## Re-verification 2026-08-09
+
+Fresh `grep -rn "rt_screenshot_disable" src/runtime src/compiler_rust/compiler/src`
+still returns zero matches; the extern is still declared only, in
+`src/compiler_rust/lib/std/src/spec/screenshot.spl:24`. Confirms the "API is
+dead" finding below is still current. No fix attempted: closing this requires
+new `rt_screenshot_*` runtime primitives (terminal-buffer capture to disk,
+output-dir/test-context state, path generation) implemented in
+`src/runtime/` or `src/compiler_rust/`, which is out of scope for a
+`.spl`/`.shs`-only lane (`src/compiler_rust/**` is explicitly off-limits to
+this lane, and the runtime work itself is a new feature, not a bug repair, per
+the existing "Why not fixed now" section below). Left OPEN.
 
 ## Symptom
 
