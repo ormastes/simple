@@ -1,0 +1,887 @@
+# Cache protocol schema — Semantic Incremental Build v2
+#
+# ONE declarative source of truth for cache identity, trust, AOP groups, block
+# reuse, GC, and promotion. Consumed by the SDN->Simple and SDN->Lean generator
+# (src/app/gen_cache_model/, agent C6) and read as a frozen contract by agents
+# C1-C7.
+#
+# Design:  doc/05_design/compiler/semantic_incremental_build_cache_aop_formal_2026-08-09.md
+# Plan:    doc/03_plan/compiler/cache/semantic_incremental_build_v2_plan_2026-08-09.md
+# Freeze:  doc/03_plan/compiler/cache/c0_schema_freeze_2026-08-09.md
+#
+# This schema DESCRIBES AND EXTENDS the identity that
+# src/compiler/80.driver/cache/action_key.spl already computes and that
+# src/verification/cache_identity/src/CacheIdentity/Model.lean already proves.
+# It does NOT define a second CAS or a second action-key scheme.
+#
+# Classification vocabulary (every semantic field carries exactly one):
+#   KEY          enters ActionDigest; changes it; must have a field-visibility theorem
+#   PROVENANCE   admission/trust evidence; NEVER enters ActionDigest
+#   LOCAL_STATE  workspace/session only; never globally shared, never in any digest
+#   GC_METADATA  storage accounting/eviction only; never affects identity or trust
+#
+# Backing status (`backing:` on a group / `spec_forward: true` on a field):
+#   BACKED        an implementation exists in-tree today
+#   SPEC_FORWARD  no implementation exists; `prerequisite:` names what must be
+#                 built first. Generators may emit the type; no agent may claim
+#                 it is wired.
+
+cache_protocol:
+  version: 2
+  supersedes_schema_version: 1
+  description: >
+    Tiered local/global cache identity, main-branch promotion, AOP-aware
+    invalidation groups, function-private block reuse, and storage GC.
+    Git identity controls ADMISSION only, never semantic action identity.
+
+  # --------------------------------------------------------------------------
+  # Canonical encoding — unchanged from v1 (action_key.spl / Model.lean Canon)
+  # --------------------------------------------------------------------------
+  encoding:
+    name: canon_v1
+    domain_separated: true
+    length_prefixed: true
+    constructors:
+      str: "S<len>:<bytes>"
+      nat: "N<decimal>;"
+      field: "F<len(tag)>:<tag><encoded_value>"
+      seq: "Q<count>:<concat(encoded_items)>"
+    outer_form: "field(domain, seq(inner_fields_in_canonical_order))"
+    digest: sha256
+    digest_text: hex_lowercase
+    rationale: >
+      Length prefixes make delimiter injection impossible; a value containing
+      "|" or ":" cannot forge another key.
+
+  # --------------------------------------------------------------------------
+  # Normalization rules for non-scalar KEY fields
+  # --------------------------------------------------------------------------
+  normalization:
+    text_order: bytewise_lexicographic     # mirrors Lean String `<`
+    sets:
+      rule: sort_then_encode_as_seq
+      duplicates: forbidden                # generator emits a dedup+assert
+      applies_to:
+        - cfg_features                     # sort by text
+        - ct_env_inputs                    # sort by text
+        - deps                             # sort by (module_id, iface_digest)
+        - aop_candidate_partition_roots    # sort by digest text
+        - block_manifest_roots             # sort by digest text
+    maps:
+      rule: sort_entries_by_key_then_encode_as_seq_of_pairs
+      duplicate_keys: forbidden
+    ordered_sequences:
+      rule: encode_in_given_order          # order is SEMANTIC, never sorted
+      applies_to:
+        - resolution_witness.probes        # resolver probe order is semantic
+        - aop_selection.ordered_advice     # advice application order is semantic
+        - block_key.same_anchor_ordinal    # positional disambiguator
+    paths:
+      rule: normalize_to_repository_or_package_relative_stable_id
+      note: absolute workspace paths are LOCAL_STATE and never hashed
+    optionals:
+      rule: encode_as_seq_of_zero_or_one   # nil = Q0:, present = Q1:<enc>
+    booleans:
+      rule: encode_as_nat_0_or_1
+
+  # --------------------------------------------------------------------------
+  # Domain tags
+  # --------------------------------------------------------------------------
+  domains:
+    action_interpreter_module: "simple/interpreter-module/v1"
+    interface: "simple/interface/v1"
+    resolution_witness: "simple/resolution-witness/v1"
+    result_manifest: "simple/result-manifest/v2"
+    promotion_receipt: "simple/promotion-receipt/v2"
+    cache_namespace: "simple/cache-namespace/v2"
+    aop_surface: "simple/aop-surface/v2"
+    aop_candidate_partition: "simple/aop-candidate-partition/v2"
+    aop_selection: "simple/aop-selection/v2"
+    aop_weave: "simple/aop-weave/v2"
+    aop_group_manifest: "simple/aop-group-manifest/v2"
+    advice_interface: "simple/advice-interface/v2"
+    advice_implementation: "simple/advice-implementation/v2"
+    aspect_pack: "simple/aspect-pack/v2"
+    block_key: "simple/block-key/v2"
+    block_input_fingerprint: "simple/block-input/v2"
+    block_result: "simple/block-result/v2"
+    function_block_manifest: "simple/function-block-manifest/v2"
+    dependency_manifest: "simple/dependency-manifest/v2"
+    schema_self: "simple/cache-protocol-schema/v2"
+  note_schema_digest: >
+    The sha256 of this file's canonical form is the schema digest and is bound
+    into ActionKey.schema_version's companion field `schema_digest`. Editing
+    this file changes every action key. That is intended.
+
+  # --------------------------------------------------------------------------
+  # Tree reality check — what exists today (recon 2026-08-09)
+  # --------------------------------------------------------------------------
+  tree_baseline:
+    action_key:
+      file: src/compiler/80.driver/cache/action_key.spl
+      status: BACKED
+      note: "Phase 1 compute-and-log; NO caller. 15 KEY fields, canonical order frozen."
+    cas_store:
+      file: src/compiler/80.driver/cache/cas_store.spl
+      status: BACKED
+      api: [cas_open, cas_put, cas_get, cas_has, cas_quarantine, action_put, action_get]
+      record: "ActionManifest{action_digest, artifact_digests, schema_version}"
+      note: "NO caller; no GC, no leases, no remote, no namespaces."
+    lean_identity:
+      dir: src/verification/cache_identity/
+      status: BACKED
+      note: "Model.lean ActionKey/Canon/canonKey/encode + Theorems already proven."
+    aop:
+      dir: src/compiler/85.mdsoc/weaving/
+      status: PARTIAL
+      exists:
+        join_point_kind: "enum JoinPointKind { Execution, Decision, Condition, Error, SecurityGate }"
+        join_point: "JoinPoint{kind, block_id: BlockId, instruction_index, context}"
+        join_point_context_fields: [function_name, module_path, signature, attributes, effects]
+        weaving_config: "before / after_success / after_error / around advice arrays"
+        matching: "WeavingRule.predicate_text — an UNTYPED STRING"
+        weaving: "src/compiler/50.mir/mir_aop_injection.spl mutates MirFunction IN PLACE"
+      missing:
+        - pointcuts_of_any_kind
+        - normalized_pointcut_query
+        - typed_matcher
+        - join_point_publicization_or_visibility   # CapsuleVisibility is for capsule exports
+        - candidate_partitioning                    # all join points are global today
+        - per_target_weave_artifact                 # in-place MIR mutation instead
+        - visible_aspect_catalog
+    mir:
+      block_id: "src/compiler/50.mir/mir_instruction_support.spl — struct BlockId{id: i64}, entry = BlockId(0)"
+      block_id_class: LOCAL_STATE
+      block_id_rule: >
+        BlockId is a TRANSIENT in-run integer handle. It is exactly the
+        anti-pattern block.block_key.forbidden_identity_sources forbids and MUST
+        NEVER be serialized into any cache key, manifest, or digest. A
+        BlockId -> BlockKey mapping table is a C5 prerequisite. JoinPoint
+        currently addresses its target by BlockId, so join-point identity is
+        likewise unstable today.
+      optimizer_path: src/compiler/60.mir_opt/     # NOT 60.optimizer as the plan says
+      dataflow_framework: absent
+      dataflow_note: >
+        No lattice, no worklist, no transfer-function abstraction exists in
+        50.mir or 60.mir_opt (one inline "backwards dataflow" comment in
+        dce.spl). Block-level reuse has no substrate to attach to yet.
+
+  # ==========================================================================
+  # ActionDigest — the ONE semantic action key
+  # ==========================================================================
+  # Fields 1..15 are byte-identical in name, order, and encoding to
+  # action_key.spl / Model.lean v1. Fields 16..20 are the v2 extension and are
+  # APPENDED after ctEnvInputs so the v1 prefix stays provable.
+  # `domain` is not an inner field: it is the outer field tag.
+  action_key:
+    domain_field: domain                   # KEY, outer tag, position 0
+    canonical_order:
+      - { pos: 1,  name: compiler_exe,                 tag: compilerExe,              type: digest,          class: KEY }
+      - { pos: 2,  name: live_compiler_src,            tag: liveCompilerSrc,          type: digest,          class: KEY }
+      - { pos: 3,  name: schema_version,               tag: schemaVersion,            type: u32,             class: KEY }
+      - { pos: 4,  name: target_triple,                tag: targetTriple,             type: text,            class: KEY }
+      - { pos: 5,  name: host_arch,                    tag: hostArch,                 type: text,            class: KEY }
+      - { pos: 6,  name: cfg_features,                 tag: cfgFeatures,              type: set<text>,       class: KEY }
+      - { pos: 7,  name: stdlib_variant,               tag: stdlibVariant,            type: text,            class: KEY }
+      - { pos: 8,  name: runtime_family,               tag: runtimeFamily,            type: text,            class: KEY }
+      - { pos: 9,  name: source_content,               tag: sourceContent,            type: digest,          class: KEY }
+      - { pos: 10, name: resolution_witness,           tag: resolutionWitness,        type: digest,          class: KEY }
+      - { pos: 11, name: deps,                         tag: deps,                     type: set<dep>,        class: KEY }
+      - { pos: 12, name: macro_root,                   tag: macroRoot,                type: digest,          class: KEY }
+      - { pos: 13, name: aop_selection,                tag: aopSelection,             type: digest,          class: KEY }
+      - { pos: 14, name: ct_env_inputs,                tag: ctEnvInputs,              type: set<text>,       class: KEY }
+      # ---- v2 extension, appended; v1 prefix above is frozen ----
+      - { pos: 15, name: schema_digest,                tag: schemaDigest,             type: digest,          class: KEY }
+      - { pos: 16, name: aop_surface_root,             tag: aopSurfaceRoot,           type: digest,          class: KEY }
+      - { pos: 17, name: aop_candidate_partition_roots, tag: aopCandidatePartitionRoots, type: set<digest>,  class: KEY }
+      - { pos: 18, name: aop_weave_root,               tag: aopWeaveRoot,             type: digest,          class: KEY }
+      - { pos: 19, name: block_manifest_roots,         tag: blockManifestRoots,       type: set<digest>,     class: KEY }
+      - { pos: 20, name: result_kind,                  tag: resultKind,               type: result_kind,     class: KEY }
+    v1_prefix_frozen: "pos 0..14 (domain + 14 inner fields) are byte-identical to v1"
+    v2_extension_backing:
+      schema_digest:                 { backing: BACKED }
+      aop_surface_root:              { backing: SPEC_FORWARD, prerequisite: "pub-pointcut / join-point publicization" }
+      aop_candidate_partition_roots: { backing: SPEC_FORWARD, prerequisite: "candidate Merkle partitioning; today all join points are global" }
+      aop_weave_root:                { backing: SPEC_FORWARD, prerequisite: "per-target weave artifacts (replace in-place MIR mutation)" }
+      block_manifest_roots:          { backing: SPEC_FORWARD, prerequisite: "stable BlockKey + BlockId->BlockKey map + a dataflow framework" }
+      result_kind:                   { backing: BACKED }
+    v2_encoding_until_backed: >
+      Every SPEC_FORWARD key field encodes as the fixed sentinel digest of the
+      empty canonical seq until its producer lands. The field is PRESENT in the
+      canonical order from day one, so the field count, the canonical order, and
+      the C6 coverage gate never change when a producer is wired — only the
+      value does. No agent may omit a field to "defer" it.
+
+    field_docs:
+      compiler_exe: "sha of the compiler executable actually running the action"
+      live_compiler_src: "sha of live interpreted compiler source (self-host lane)"
+      schema_version: "cache_protocol.version; bumping it invalidates everything"
+      cfg_features: "declared compile-time feature set"
+      source_content: "sha of module source BYTES after path normalization"
+      resolution_witness: "sha from resolution_witness_digest; probes stay ORDERED"
+      deps: "dependency module id + INTERFACE digest, not full content digest"
+      aop_selection: "v1 coarse root; retained for the v1 prefix. v2 refines with 16-18"
+      schema_digest: "sha256 of this schema file; binds proofs to implementation"
+      aop_surface_root: "root of AopSurfaceKey digests visible to this action"
+      aop_candidate_partition_roots: "only partitions the action's pointcuts may READ"
+      aop_weave_root: "AopWeaveKey root; nil-encoded when the action does not weave"
+      block_manifest_roots: "FunctionBlockManifest merkle roots the action CONSUMES"
+      result_kind: "prevents an artifact of one kind hitting a query of another"
+
+    # ------------------------------------------------------------------
+    # EXCLUDED — must never enter ActionDigest. This is the whole design.
+    # ------------------------------------------------------------------
+    excluded_from_key:
+      - { name: branch_name,           class: PROVENANCE, lives_in: [cache_namespace, promotion_receipt] }
+      - { name: source_commit,         class: PROVENANCE, lives_in: [promotion_receipt] }
+      - { name: source_tree,           class: PROVENANCE, lives_in: [promotion_receipt] }
+      - { name: trusted_ref,           class: PROVENANCE, lives_in: [promotion_receipt] }
+      - { name: trusted_ref_tip,       class: PROVENANCE, lives_in: [promotion_receipt] }
+      - { name: pull_request_number,   class: PROVENANCE, lives_in: [promotion_receipt] }
+      - { name: ci_run_id,             class: PROVENANCE, lives_in: [promotion_receipt] }
+      - { name: builder_id,            class: PROVENANCE, lives_in: [promotion_receipt] }
+      - { name: user_name,             class: PROVENANCE, lives_in: [namespace_policy] }
+      - { name: signature,             class: PROVENANCE, lives_in: [promotion_receipt] }
+      - { name: timestamp,             class: PROVENANCE, lives_in: [promotion_receipt, gc_metadata] }
+      - { name: workspace_absolute_path, class: LOCAL_STATE, lives_in: [workspace_state] }
+      - { name: workspace_id,          class: LOCAL_STATE, lives_in: [cache_namespace] }
+      - { name: worktree_dirty,        class: LOCAL_STATE, lives_in: [workspace_state] }
+      - { name: watcher_generation,    class: LOCAL_STATE, lives_in: [workspace_state] }
+      - { name: runtime_activation_generation, class: LOCAL_STATE, lives_in: [workspace_state] }
+      - { name: jit_address,           class: LOCAL_STATE, lives_in: [workspace_state] }
+      - { name: loader_generation,     class: LOCAL_STATE, lives_in: [workspace_state] }
+      - { name: negative_resolution_entry, class: LOCAL_STATE, lives_in: [workspace_state] }
+      - { name: last_access_time,      class: GC_METADATA, lives_in: [gc_metadata] }
+      - { name: access_count,          class: GC_METADATA, lives_in: [gc_metadata] }
+      - { name: unique_retained_bytes, class: GC_METADATA, lives_in: [gc_metadata] }
+      - { name: recomputation_cost_ms, class: GC_METADATA, lives_in: [gc_metadata] }
+      - { name: artifact_size_bytes,   class: GC_METADATA, lives_in: [gc_metadata] }
+      - { name: ttl_deadline,          class: GC_METADATA, lives_in: [gc_metadata] }
+      - { name: refcount_approx,       class: GC_METADATA, lives_in: [gc_metadata] }
+    invariant: >
+      Adding any excluded_from_key entry to canonical_order, or removing any
+      canonical_order entry, must fail the C6 field-count == theorem-count gate.
+
+  # ==========================================================================
+  # Enums
+  # ==========================================================================
+  enums:
+    cache_trust:
+      values: [workspace_local, machine_local, trusted_branch_ci, trusted_main_ci, release_pinned]
+      lookup_order: [workspace_local, machine_local, trusted_main_ci, trusted_branch_ci]
+      write_main_allowed: [trusted_main_ci, release_pinned]
+    result_kind:
+      values: [interpreter_module, mir_module, object_file, interface_summary,
+               diagnostics, aop_weave_artifact, advice_artifact, aspect_pack,
+               block_transfer_result, function_summary, link_product]
+    join_point_kind:
+      backing: PARTIAL
+      values_today: [execution, decision, condition, error, security_gate]
+      values_today_source: src/compiler/85.mdsoc/weaving/join_point_kind.spl
+      values_reserved: [call, field_get, field_set, construction, initialization,
+                        error_edge, cleanup, module_load]
+      rule: >
+        The encoder tags a join-point kind by NAME, never by ordinal, so
+        appending reserved values later does not perturb existing digests.
+        values_reserved are SPEC_FORWARD.
+    weave_mode:
+      values: [symbolic_call, static_inline, around_expansion, security_plan_embed, specialization]
+      embeds_advice_body: [static_inline, around_expansion, security_plan_embed, specialization]
+      note: >
+        For any mode in embeds_advice_body the advice_implementation_digest MUST
+        enter AopWeaveKey. For symbolic_call it MUST NOT (design 16.2 / inv 8).
+    block_role:
+      values: [entry, exit, if_condition, if_then, if_else, loop_header, loop_body,
+               match_arm, exception_handler, cleanup, short_circuit_left,
+               short_circuit_right, compiler_synthesized, aop_before,
+               aop_after_success, aop_after_error, aop_around_entry, aop_proceed]
+    assurance_level:
+      values: [normal, hardened, mission_critical]
+    visibility:
+      values: [private, scope, component, public]
+    cache_state:
+      values: [absent, temp, published, leased, pinned, trash, quarantine]
+      served_to_readers: [published, leased, pinned]
+      never_served: [absent, temp, trash, quarantine]
+
+  # ==========================================================================
+  # Namespace, manifests, receipts
+  # ==========================================================================
+  structs:
+    dep:
+      fields:
+        module_id: text
+        iface_digest: digest
+      class_all: KEY
+      order: [module_id, iface_digest]
+
+    cache_namespace:
+      fields:
+        repository_id: { type: digest, class: PROVENANCE }
+        trust: { type: cache_trust, class: PROVENANCE }
+        target_profile: { type: digest, class: PROVENANCE }
+        schema_version: { type: u32, class: PROVENANCE }
+        branch_identity: { type: digest?, class: PROVENANCE }
+        workspace_id: { type: digest?, class: LOCAL_STATE }
+      order: [repository_id, trust, target_profile, schema_version, branch_identity]
+      note: workspace_id is NOT encoded; it is a local path selector only.
+
+    result_manifest:
+      fields:
+        action_digest: { type: digest, class: KEY }
+        result_kind: { type: result_kind, class: KEY }
+        artifact_digests: { type: list<digest>, class: KEY }
+        output_fingerprint: { type: digest, class: KEY }
+        dependency_manifest: { type: digest, class: KEY }
+        aop_group_roots: { type: set<digest>, class: KEY }
+        block_manifest_root: { type: digest?, class: KEY }
+        diagnostics_digest: { type: digest?, class: KEY }
+        producer_schema: { type: u32, class: KEY }
+      order: [action_digest, result_kind, artifact_digests, output_fingerprint,
+              dependency_manifest, aop_group_roots, block_manifest_root,
+              diagnostics_digest, producer_schema]
+      note: >
+        artifact_digests is an ORDERED list (position is meaningful to the
+        consumer); aop_group_roots is a SET and is sorted.
+      extends: cas_store.spl ActionManifest {action_digest, artifact_digests, schema_version}
+
+    promotion_receipt:
+      class_all: PROVENANCE
+      fields:
+        repository_id: digest
+        source_commit: git_commit_id
+        source_tree: git_tree_id
+        trusted_ref: text
+        trusted_ref_tip: git_commit_id
+        clean_tree_digest: digest
+        action_digest: digest
+        result_manifest_digest: digest
+        builder_id: text
+        workflow_digest: digest
+        toolchain_digest: digest
+        external_parameters_digest: digest
+        timestamp: timestamp
+        signature: signature
+      order: [repository_id, source_commit, source_tree, trusted_ref, trusted_ref_tip,
+              clean_tree_digest, action_digest, result_manifest_digest, builder_id,
+              workflow_digest, toolchain_digest, external_parameters_digest,
+              timestamp, signature]
+      signed_over: "all fields except signature, in the order above"
+
+    dependency_manifest:
+      fields:
+        roots: { type: set<dep>, class: KEY }
+        interface_schema: { type: u32, class: KEY }
+      order: [roots, interface_schema]
+
+  # ==========================================================================
+  # AOP group identities
+  # ==========================================================================
+  aop:
+    backing: SPEC_FORWARD
+    refines_v1_field: aop_selection
+    refinement_note: >
+      v1 has exactly ONE opaque field, `aopSelection: Sha`. The group split below
+      is a REFINEMENT of that single field, not a new subsystem: until the
+      prerequisites land, aop_surface_root / aop_candidate_partition_roots /
+      aop_weave_root carry the empty sentinel and `aopSelection` alone continues
+      to carry all AOP identity, exactly as Model.lean's aop_change_visible
+      theorem already proves.
+    degraded_selector_read_set_today:
+      source: "src/compiler/85.mdsoc/weaving/join_point.spl JoinPointContext"
+      fields: [function_name, module_path, signature, attributes, effects]
+      note: >
+        These five are the ONLY descriptor fields a selector can read today.
+        The nine-value selector_read_set_fields list below is SPEC_FORWARD.
+    prerequisites_before_any_group_is_backed:
+      - "a normalized pointcut query type to replace WeavingRule.predicate_text: text"
+      - "a typed matcher with a schema digest (matcher_schema_digest has no producer)"
+      - "join-point publicization/visibility (CapsuleVisibility does not apply)"
+      - "candidate partitioning; today every join point is global and unpartitioned"
+      - "per-target weave artifacts; today mir_aop_injection.spl mutates MIR in place"
+      - "a visible-aspect catalog"
+      - "stable join-point identity; JoinPoint.block_id is a transient BlockId"
+    groups:
+      - { name: aop_surface_group,          cacheable: machine_and_remote, session_local: false }
+      - { name: aop_candidate_group,        cacheable: machine_and_remote, session_local: false }
+      - { name: aop_selection_group,        cacheable: machine_and_remote, session_local: false }
+      - { name: aop_weave_group,            cacheable: machine_and_remote, session_local: false }
+      - { name: advice_interface_group,     cacheable: machine_and_remote, session_local: false }
+      - { name: advice_implementation_group, cacheable: machine_and_remote, session_local: false }
+      - { name: aspect_pack_group,          cacheable: machine_and_remote, session_local: false }
+      - { name: runtime_activation_generation, cacheable: none, session_local: true }
+    packing_rule: >
+      Physical storage packs never couple logical cache validity (invariant 7).
+
+    keys:
+      aop_surface_key:
+        fields:
+          public_entity: { type: entity_key, class: KEY }
+          owner_scope: { type: scope_id, class: KEY }
+          visibility: { type: visibility, class: KEY }
+          exposed_context_schema: { type: digest, class: KEY }
+          assurance: { type: assurance_level, class: KEY }
+        order: [public_entity, owner_scope, visibility, exposed_context_schema, assurance]
+
+      aop_candidate_partition_key:
+        fields:
+          component: { type: component_id, class: KEY }
+          scope: { type: scope_id, class: KEY }
+          join_point_kind: { type: join_point_kind, class: KEY }
+          target_profile: { type: digest, class: KEY }
+          descriptor_schema: { type: u32, class: KEY }
+        order: [component, scope, join_point_kind, target_profile, descriptor_schema]
+        merkle_partition: [component, scope, join_point_kind, entity_id_prefix, join_point_descriptor_leaf]
+
+      aop_selection_key:
+        fields:
+          pointcut_surface_digest: { type: digest, class: KEY }
+          normalized_query_digest: { type: digest, class: KEY }
+          matcher_schema_digest: { type: digest, class: KEY }
+          visible_aspect_catalog_digest: { type: digest, class: KEY }
+          candidate_partition_roots: { type: set<digest>, class: KEY }
+          advice_interface_root: { type: digest, class: KEY }
+          ordering_policy_digest: { type: digest, class: KEY }
+        order: [pointcut_surface_digest, normalized_query_digest, matcher_schema_digest,
+                visible_aspect_catalog_digest, candidate_partition_roots,
+                advice_interface_root, ordering_policy_digest]
+        excludes: [advice_implementation_digest]
+
+      aop_weave_key:
+        fields:
+          target_preweave_mir: { type: digest, class: KEY }
+          target_join_point_descriptor: { type: digest, class: KEY }
+          selection_digest: { type: digest, class: KEY }
+          weave_mode: { type: weave_mode, class: KEY }
+          weaver_schema: { type: u32, class: KEY }
+          backend_policy: { type: digest, class: KEY }
+          embedded_advice_impl: { type: digest?, class: KEY }
+        order: [target_preweave_mir, target_join_point_descriptor, selection_digest,
+                weave_mode, weaver_schema, backend_policy, embedded_advice_impl]
+        conditional_field:
+          embedded_advice_impl:
+            present_when: "weave_mode in weave_mode.embeds_advice_body"
+            absent_when: "weave_mode == symbolic_call"
+            encoding_when_absent: "Q0: (optional-empty), NOT omitted"
+        note: >
+          `embedded_advice_impl` is the SDN-explicit form of design 16.2's prose
+          rule. Encoding it as an always-present optional keeps the field count
+          and the canonical order constant, so the C6 coverage gate stays exact.
+
+      advice_interface_key:
+        fields:
+          advice_form: { type: text, class: KEY }
+          signature_digest: { type: digest, class: KEY }
+          effects_digest: { type: digest, class: KEY }
+          capabilities_digest: { type: digest, class: KEY }
+          ordering_contract_digest: { type: digest, class: KEY }
+        order: [advice_form, signature_digest, effects_digest, capabilities_digest, ordering_contract_digest]
+
+      advice_implementation_key:
+        fields:
+          advice_interface_digest: { type: digest, class: KEY }
+          body_digest: { type: digest, class: KEY }
+          target_profile: { type: digest, class: KEY }
+        order: [advice_interface_digest, body_digest, target_profile]
+
+    aop_group_manifest:
+      fields:
+        group_id: { type: digest, class: KEY }
+        owner_scope: { type: scope_id, class: KEY }
+        generation: { type: digest, class: KEY }
+        pointcut_entries: { type: list<pointcut_entry>, class: KEY }
+        advice_interfaces: { type: list<advice_interface_entry>, class: KEY }
+        candidate_partition_roots: { type: set<digest>, class: KEY }
+        selection_shards: { type: set<digest>, class: KEY }
+        weave_artifacts: { type: set<digest>, class: KEY }
+        implementation_artifacts: { type: set<digest>, class: KEY }
+        aspect_pack_artifacts: { type: set<digest>, class: KEY }
+        schema_version: { type: u32, class: KEY }
+      order: [group_id, owner_scope, generation, pointcut_entries, advice_interfaces,
+              candidate_partition_roots, selection_shards, weave_artifacts,
+              implementation_artifacts, aspect_pack_artifacts, schema_version]
+
+    selector_read_set_fields:
+      backing: SPEC_FORWARD
+      values: [qualified_name, owning_scope, signature, attributes, effects,
+               capabilities, type_relations, call_execution_kind, source_annotations]
+      backed_subset_today: [qualified_name, owning_scope, signature, attributes, effects]
+      backed_subset_mapping:
+        qualified_name: JoinPointContext.function_name
+        owning_scope: JoinPointContext.module_path
+        signature: JoinPointContext.signature
+        attributes: JoinPointContext.attributes
+        effects: JoinPointContext.effects
+
+    reverse_indexes:
+      - { from: pointcut_group,         to: candidate_partitions_read }
+      - { from: candidate_descriptor_field, to: pointcut_groups_reading_field }
+      - { from: target_entity,          to: selection_group_and_advice_interfaces }
+      - { from: advice_interface,       to: targets_embedding_or_referencing }
+      - { from: advice_implementation,  to: link_load_activation_actions }
+      - { from: aspect_pack,            to: catalogs_and_deployment_roots }
+
+    trust_eligibility:
+      publicized_scoped_deterministic: [machine_local, trusted_main_ci, trusted_branch_ci]
+      same_scope_private_with_complete_scope_index: [workspace_local, machine_local]
+      legacy_unpublicized_cross_scope: [workspace_local]
+      legacy_unpublicized_cross_scope_mission_critical: error
+      runtime_created_pointcut: none
+
+  # ==========================================================================
+  # Block-level reuse
+  # ==========================================================================
+  block:
+    backing: SPEC_FORWARD
+    prerequisites:
+      - "a BlockId -> BlockKey mapping; BlockId{id: i64} is a transient handle"
+      - "a stable AST anchor (StableAstId) — none exists today"
+      - "a dataflow framework: lattice + monotone transfer + worklist (absent in 50.mir/60.mir_opt)"
+      - "per-target weave artifacts, for the post-weave identity derivation"
+    owning_paths: [src/compiler/50.mir/incremental/, src/compiler/60.mir_opt/incremental/]
+    scope:
+      persistent_public_graph: "module -> declaration -> function"
+      function_private_subgraph: "function -> region/SCC -> block"
+      rule: "no consumer outside a function may depend on a block digest"
+
+    block_key:
+      fields:
+        parent_function: { type: entity_key, class: KEY }
+        origin_anchor: { type: stable_ast_id, class: KEY }
+        role: { type: block_role, class: KEY }
+        structural_path: { type: digest, class: KEY }
+        same_anchor_ordinal: { type: u32, class: KEY }
+      order: [parent_function, origin_anchor, role, structural_path, same_anchor_ordinal]
+      forbidden_identity_sources:
+        - source_line
+        - parser_token_offset_alone
+        - transient_mir_block_number
+        - vector_index
+        - pointer_or_address
+        - traversal_order_alone
+        - mir_block_id                      # struct BlockId{id: i64} — LOCAL_STATE, never serialized
+      postweave_derivation: "preweave_block_key + weave_plan_digest + advice_slot + synthesized_role"
+      ambiguity_rule: "ambiguous old/new correspondence => invalidate the parent function"
+
+    block_input_fingerprint:
+      fields:
+        canonical_mir: { type: digest, class: KEY }
+        predecessor_contracts: { type: list<digest>, class: KEY }
+        successor_shape: { type: digest, class: KEY }
+        incoming_abstract_state: { type: digest, class: KEY }
+        semantic_read_set: { type: set<semantic_dependency>, class: KEY }
+        local_aop_plan: { type: digest?, class: KEY }
+        pass_schema: { type: u32, class: KEY }
+        pass_options: { type: digest, class: KEY }
+      order: [canonical_mir, predecessor_contracts, successor_shape,
+              incoming_abstract_state, semantic_read_set, local_aop_plan,
+              pass_schema, pass_options]
+      note: predecessor_contracts is ORDERED by CFG edge index (position is semantic).
+
+    block_result:
+      fields:
+        transformed_block: { type: digest, class: KEY }
+        outgoing_abstract_state: { type: digest, class: KEY }
+        diagnostics: { type: digest, class: KEY }
+        local_summary: { type: digest, class: KEY }
+      order: [transformed_block, outgoing_abstract_state, diagnostics, local_summary]
+
+    function_block_manifest:
+      fields:
+        function: { type: entity_key, class: KEY }
+        function_input_digest: { type: digest, class: KEY }
+        block_records: { type: list<block_record>, class: KEY }
+        region_records: { type: list<region_record>, class: KEY }
+        packed_chunk_digests: { type: set<digest>, class: KEY }
+        large_block_digests: { type: set<digest>, class: KEY }
+        merkle_root: { type: digest, class: KEY }
+      order: [function, function_input_digest, block_records, region_records,
+              packed_chunk_digests, large_block_digests, merkle_root]
+
+    reuse_preconditions:
+      all_of:
+        - equal_block_key
+        - equal_canonical_block_semantics
+        - equal_relevant_semantic_dependencies
+        - equal_incoming_abstract_state
+        - equal_pass_schema_and_options
+        - unambiguous_structural_correspondence
+      on_any_failure: recompute_or_fall_back_to_function
+
+    queries:
+      - canonicalize_block
+      - compute_transfer
+      - optimize_block
+      - analyze_region
+      - compute_function_summary
+
+    pass_eligibility:
+      block: [local_const_fold, peephole, liveness_transfer, null_range_definite_init_transfer]
+      block_worklist_in_function: [dataflow_fixed_point]
+      region_or_scc: [loop_optimization]
+      function: [dominator_construction, inlining, escape_alias, global_value_numbering,
+                 register_allocation, machine_block_layout, final_object_emission]
+      deferred: [independently_relocatable_machine_code_blocks]
+
+  # ==========================================================================
+  # GC: roots, leases, states, transitions
+  # ==========================================================================
+  gc:
+    roots:
+      - active_action_result_leases
+      - in_flight_uploads_and_publications
+      - explicit_user_or_admin_pins
+      - workspace_last_successful_manifests
+      - retained_main_action_generations
+      - current_and_retained_bootstrap_catalogs
+      - release_tag_manifests
+      - policy_retained_verification_evidence
+      - toolchain_and_schema_artifacts_of_retained_actions
+
+    lease:
+      class_all: LOCAL_STATE
+      fields:
+        lease_id: digest
+        process_identity: text
+        created_at: timestamp
+        heartbeat_generation: u64
+        referenced_manifests: set<digest>
+        referenced_artifacts: set<digest>
+      reclaim_rule: "only after proving the owning process/session is dead, or after
+                     a conservative timeout PLUS a generation check"
+
+    metadata:
+      class_all: GC_METADATA
+      fields: [last_access_time, access_count, artifact_size_bytes,
+               unique_retained_bytes, recomputation_cost_ms, ttl_deadline,
+               refcount_approx, namespace_protection_class]
+      refcount_authority: "approximate; mark-and-sweep is the source of truth"
+      access_time_write: journaled_or_batched   # never a synchronous hot-path write
+
+    eviction_ranking:
+      signals: [namespace_protection_class, expiration_ttl_status, last_access_time,
+                access_frequency, recomputation_cost, unique_retained_bytes,
+                artifact_size, toolchain_target_relevance]
+      protection_order_lowest_value_first:
+        - expired_temporary_or_quarantine
+        - orphaned_schema_generations
+        - expired_branch_namespace
+        - unreferenced_dirty_worktree_actions
+        - old_feature_branch_actions
+        - old_machine_local_actions
+        - old_unpinned_main_actions
+        - retained_main_generations
+        - bootstrap_roots
+        - release_pins
+        - active_leases
+
+    limits:
+      workspace: { enabled: true, max_bytes: auto }
+      machine:
+        root: "$SIMPLE_CACHE"
+        max_bytes: auto
+        high_watermark: 0.90
+        low_watermark: 0.75
+        min_free_bytes: auto
+        min_free_ratio: 0.05
+        hard_limit_ratio: 1.05
+      remote:
+        read_main: true
+        write_policy: trusted_main_ci
+        branch_cache: optional
+        branch_ttl_days: 7
+      retention:
+        main_generations: 8
+        bootstrap_generations: 3
+        release_tags: pinned
+        quarantine_days: 7
+        tmp_hours: 24
+      note: "starting points, not language semantics"
+
+    pinned_overflow_report:
+      fields: [protected_bytes, configured_max, largest_roots, suggested_action]
+      rule: "never delete a protected root to meet a size target"
+
+    # Names are the Lean transition constructors (design 19.3), frozen verbatim.
+    transitions:
+      - put_blob
+      - put_manifest
+      - publish_local_action
+      - publish_branch_action
+      - promote_main_action
+      - lookup_action
+      - acquire_lease
+      - release_lease
+      - pin
+      - unpin
+      - expire_branch
+      - gc_select_roots
+      - gc_mark
+      - gc_move_to_trash
+      - gc_delete_trash
+      - quarantine
+      - invalidate_aop_group
+      - reuse_block_result
+      - recompute_block_result
+
+    predicates:
+      - well_formed_cas
+      - manifest_closure
+      - well_formed_action_index
+      - trusted_main_entry
+      - aop_selection_consistent
+      - aop_weave_consistent
+      - block_reuse_preconditions
+      - gc_reachability_safe
+      - lease_safe
+      - deterministic_action
+
+    crash_safety:
+      write_order: [write_temp, hash_while_writing, verify, flush, atomic_rename,
+                    publish_blobs, publish_action_mapping]
+      rule: "an action mapping is published ONLY after its complete artifact closure exists"
+      gc_delete_order: [rename_to_trash, grace_period, delete]
+      lost_race_is_success_when: "existing bytes verify to the requested digest"
+
+  # ==========================================================================
+  # Promotion preconditions
+  # ==========================================================================
+  promotion:
+    main_eligibility_all_of:
+      - clean_source_tree
+      - exact_immutable_source_commit
+      - authenticated_repository_identity
+      - trusted_origin_main_snapshot
+      - source_commit_reachable_from_that_snapshot
+      - trusted_ci_builder_and_protected_workflow
+      - hermetic_declared_action_inputs
+      - strict_manifest_and_artifact_verification
+      - required_tests_and_proofs_passed
+      - signed_promotion_receipt
+    reachability_check: "git merge-base --is-ancestor <build_commit> refs/remotes/origin/main
+                         against a FRESHLY fetched, authenticated snapshot"
+    stale_local_ref_is_not_proof: true
+
+    modes:
+      mode_a_rebuild_on_main: { default: true, mission_critical: required }
+      mode_b_attested_relabel:
+        allowed_only_when_all_of:
+          - branch_build_by_accepted_trusted_builder
+          - branch_commit_now_ancestor_of_authenticated_origin_main
+          - source_tree_action_key_toolchain_workflow_artifacts_match_signed_receipt
+          - action_is_deterministic_and_globally_cacheable
+          - no_untrusted_dependency_or_runtime_state_entered_result
+        copies: action_mapping_reference_only
+
+    integration_style_matrix:
+      fast_forward_merge:   { reachable: true,  direct_promotion: allowed_with_valid_receipt }
+      normal_merge_commit:  { reachable: true,  direct_promotion: allowed_with_valid_receipt }
+      rebase_then_ff:       { reachable: rebased_commits_only, direct_promotion: old_receipts_rejected }
+      squash_merge:         { reachable: false, direct_promotion: rejected_main_must_rebuild }
+      cherry_pick:          { reachable: false, direct_promotion: rejected_main_must_rebuild }
+      force_push_removing:  { reachable: false, direct_promotion: rejected_existing_entry_retained }
+
+    write_policy:
+      dirty_developer_worktree: { read_main: true,  write_branch: false, write_main: false }
+      clean_developer_branch:   { read_main: true,  write_branch: false, write_main: false }
+      untrusted_pr_or_fork:     { read_main: policy, write_branch: false, write_main: false }
+      trusted_branch_ci:        { read_main: true,  write_branch: optional_ttl, write_main: false }
+      trusted_main_ci:          { read_main: true,  write_branch: false, write_main: true }
+      release_ci:               { read_main: strict, write_branch: false, write_main: true_and_pin }
+
+    conflict_rule:
+      trigger: same_action_digest_two_different_result_manifests
+      response: [do_not_overwrite, quarantine_both_mappings, emit_nondeterminism_diagnostic,
+                 force_strict_recomputation, fail_mission_critical_and_release]
+
+  # ==========================================================================
+  # Exported-name contract
+  # ==========================================================================
+  # Durable manual Lean proofs (src/verification/cache_protocol/Theorems/*) and
+  # C1-C7 Simple code may import ONLY the names below. The generator must emit
+  # exactly these, and regeneration may replace Generated/* but never Theorems/*.
+  exported_names:
+    stability: frozen_at_schema_version_2
+    rename_policy: "a rename is a schema_version bump, not a patch"
+
+    simple_module: "src/compiler/80.driver/cache/schema/generated/cache_protocol_types.spl"
+    lean_module_root: "src/verification/cache_protocol/Generated/"
+
+    types:
+      - ActionKey
+      - ActionDep
+      - ResolutionProbe
+      - CacheTrust
+      - CacheNamespace
+      - ResultKind
+      - ResultManifest
+      - DependencyManifest
+      - PromotionReceipt
+      - AopSurfaceKey
+      - AopCandidatePartitionKey
+      - AopSelectionKey
+      - AopWeaveKey
+      - AdviceInterfaceKey
+      - AdviceImplementationKey
+      - AopGroupManifest
+      - JoinPointKind
+      - WeaveMode
+      - BlockKey
+      - BlockRole
+      - BlockInputFingerprint
+      - BlockResult
+      - FunctionBlockManifest
+      - CacheLease
+      - CacheMetadata
+      - CacheState
+      - PinnedOverflowReport
+      - AssuranceLevel
+      - Visibility
+
+    encoders:
+      - action_key_encode
+      - action_key_digest
+      - interface_digest_of
+      - resolution_witness_digest
+      - result_manifest_encode
+      - result_manifest_digest
+      - promotion_receipt_encode
+      - promotion_receipt_digest
+      - cache_namespace_encode
+      - cache_namespace_digest
+      - aop_surface_key_digest
+      - aop_candidate_partition_key_digest
+      - aop_selection_key_digest
+      - aop_weave_key_digest
+      - advice_interface_key_digest
+      - advice_implementation_key_digest
+      - aop_group_manifest_digest
+      - block_key_digest
+      - block_input_fingerprint_digest
+      - block_result_digest
+      - function_block_manifest_digest
+      - schema_digest_of_protocol
+    encoder_primitives_reused_from_v1:
+      module: "src/compiler/80.driver/cache/action_key.spl"
+      names: [canon_str, canon_nat, canon_field, canon_seq, canon_dep,
+              action_key_text_lt, action_key_text_le, action_dep_le,
+              action_key_sort_texts, action_key_sort_deps]
+      rule: "the generator REUSES these; it must not emit a second copy"
+
+    lean_definitions:
+      - CacheState
+      - Namespace
+      - Policy
+      - Transition
+      - canonicalOrder
+      - fieldClass
+      - encode
+      - canonKey
+    lean_transition_constructors: "= gc.transitions, camelCased (put_blob -> PutBlob)"
+    lean_predicates: "= gc.predicates, camelCased (well_formed_cas -> WellFormedCas)"
+
+    coverage_gate:
+      rule: "count(action_key.canonical_order) + 1 (domain) == count(generated field-visibility theorems)"
+      also: "every entry in action_key.excluded_from_key needs a negative
+             (field-absent) theorem; adding a field without a theorem fails CI"
+      script: "scripts/check/check-cache-protocol-formal.shs"
