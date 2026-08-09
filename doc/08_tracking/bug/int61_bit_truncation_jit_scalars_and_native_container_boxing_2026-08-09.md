@@ -1,6 +1,9 @@
 # Integers needing 61+ bits are corrupted: JIT everywhere, native inside containers
 
-Status: OPEN — found 2026-08-09 by the multi-engine differential harness
+Status: **Defect B (container boxing) FIXED in source — T2+T3 landed 2026-08-09,
+awaiting a bootstrap redeploy for the native-lane re-measurement.
+Defect A (JIT scalars) OPEN — Rust-seed scope, see "Root cause" below.**
+Found 2026-08-09 by the multi-engine differential harness
 (`scripts/check/check_engine_differential.spl`) on its first run.
 Binary under test: `bin/release/x86_64-unknown-linux-gnu/simple`, sha256
 prefix `166c622b30c2257c`.
@@ -97,10 +100,87 @@ becoming `-1` inverts every `if x < best` comparison in a min-search.
     # narrowed (native lane needs a full native-build, several minutes):
     DIFF_FILTER=i64 bin/simple run scripts/check/check_engine_differential.spl
 
-## Not yet done
+## Root cause (read off the code 2026-08-09)
 
-- Not root-caused to a specific lowering site; the 61-bit field is inferred
-  from the value table, not yet read off the code.
-- No fix. A value that does not fit the tagged immediate should be heap-boxed
-  rather than truncated; failing closed with a diagnostic would still beat the
-  current silent wrong answer.
+The inferred 61-bit field is confirmed exactly: it is the ABI contract's own
+`v << 3` / `v >> 3` tag-box scheme
+(`doc/04_architecture/compiler/array_value_abi_contract.md` §1.1), applied with
+**no range check** anywhere in either tree.
+
+**Defect B — container boxing (in `.spl`/C scope, FIXED).** Two mirrored sites
+in the pure-Simple compiler, both of which the native lane uses:
+
+- encode: `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl`
+  `box_runtime_value` — the integer arm emitted an unconditional
+  `MirBinOp.Shl(v, 3)`.
+- decode: same file, `decode_runtime_value` — the `is_integer` arm emitted an
+  unconditional `MirBinOp.Shr(raw, 3)`.
+
+So it is a **missing range check, not a wrong shift width**: `<<3`/`>>3` are the
+specified widths, and the encoder simply had no fallback for a value that does
+not fit the 61-bit payload. §1.1 already names the required behavior ("the
+encoder traps or heap-boxes; silently truncating is a violation"), so the fix is
+the contract's own escape hatch, not a new policy.
+
+Fix, three trees:
+
+- **T3 `src/runtime/runtime_native.c`**: new `RT_VALUE_HEAP_INT` ("INT1") leaf
+  `RtCoreWideInt` — deliberately the same layout as `RtCoreFloat`, so it reuses
+  every existing lifecycle/registry/transient-scope path — plus
+  `rt_value_int_wide()` (in-range → the bit-identical `v << 3` immediate;
+  out-of-range → registered heap box) and `rt_value_as_int_wide()` (heap-aware
+  decode, bare `>> 3` otherwise). `rt_value_int`, `rt_value_as_int`,
+  `rt_core_numeric_arg` and the print path are now heap-int aware.
+- **T2 `expr_dispatch.spl`**: the `I64`/`U64` arms of `box_runtime_value` /
+  `decode_runtime_value` now call those two runtime functions. Integer kinds
+  **≤ 32 bits keep the inline shift** — their payload cannot overflow 61 bits, so
+  they pay no call and their codegen is byte-for-byte unchanged.
+- **T1 seed**: untouched (see Defect A).
+
+Note the perf shape deliberately chosen: only 64-bit-wide integer boxes/unboxes
+become an extern call; the in-range fast path inside that call is a compare plus
+the same shift. If this shows up in a self-build profile, the follow-up is to
+inline the range test in MIR (the builder has no `select`/branch helper today),
+not to revert the check.
+
+## Defect A — JIT scalars: RUST-SEED SCOPE, still OPEN
+
+Not fixed here, deliberately: `identity(v)` corrupts the value with **no
+container involved**, i.e. before any of the boxing sites above run, and the
+native (LLVM AOT) lane — which shares T2's MIR — is *correct* on the same
+scalars. That localizes it to the seed's Cranelift JIT lowering, which is
+`src/compiler_rust/**` and therefore off-limits under CLAUDE.md's "fix .spl, not
+Rust" rule. What a seed-lane effort must do:
+
+- Find where a scalar `i64` local/argument acquires the tagged representation in
+  the seed's Cranelift path — the `needs_int_unbox` decision in
+  `src/compiler_rust/.../mir/lower/lowering_expr_struct.rs::lower_index_expr`
+  and its `UnboxInt`/box counterparts (ABI contract §1.2 names these).
+- Apply the same rule as T2/T3: a value outside `[-2^60, 2^60)` must be
+  heap-boxed via `rt_value_int_wide` (the runtime entry point now exists and is
+  linked by the seed too), never shifted.
+- The seed must decode through `rt_value_as_int_wide` for symmetry, otherwise a
+  wide value boxed by native code and read by JIT code shreds a pointer.
+
+Until that lands, `jit` stays red for every `p*` and `boxed_*` row in the table
+above, and the ABI contract's "seed Cranelift JIT VIOLATES" line stays true.
+
+## Verification
+
+- `src/runtime/test/rt_value_int_wide_selfcheck.c` (new) — 17 checks: in-range
+  values keep the identical immediate (`1→8`, `-1→-8`, `42→336`), the four
+  measured boundary values round-trip, `2^59` / `2^60-1` cutoff pair, the legacy
+  `rt_value_int`/`rt_value_as_int` entry points agree, and a RAW untagged word
+  still takes the bare shift. **SELFCHECK PASS**, and **sabotage-verified**:
+  forcing `rt_core_int_fits_tagged()` to return 1 (the old always-truncate
+  behavior) turns it red with 5 failures, so the oracle is fail-closed.
+- Differential harness, unchanged fixture, before the fix: `interpret` correct
+  on every row; `jit` corrupt on every row (`p60=-1152921504606846976`,
+  `p62=0`, `imax=-1`, and the same for `boxed_*`) — reproduced directly, matching
+  the table above.
+- **Still owed**: the `native` lane re-measurement. The T2 half only takes effect
+  once the self-hosted binary is rebuilt and redeployed (`bin/simple build
+  bootstrap`), because `native-build` compiles the fixture with the *deployed*
+  binary's compiled-in lowering, not from `src/compiler/**`. The fixture stays
+  UNBASELINED — it was not touched, and the gate must stay red until both the
+  redeploy confirms Defect B and the seed lane closes Defect A.

@@ -700,7 +700,36 @@ impl MirLowering:
             return local
         var b = self.builder
         val boxed = match type_.kind:
-            case MirTypeKind.I8 | MirTypeKind.U8 | MirTypeKind.I16 | MirTypeKind.U16 | MirTypeKind.I32 | MirTypeKind.U32 | MirTypeKind.I64 | MirTypeKind.U64 | MirTypeKind.Char:
+            case MirTypeKind.I64 | MirTypeKind.U64:
+                # 64-bit-wide integers are the ONLY kinds that can overflow the
+                # tagged immediate's 61-bit payload, so they -- and only they --
+                # pay a call. `v << 3` silently sign-extended any |v| >= 2^60
+                # back to a different number (2^60 -> negative, i64::MAX -> -1,
+                # 2^62 -> 0), corrupting nanosecond timestamps, FNV/xxHash
+                # seeds and i64::MAX sentinels merely by entering a container
+                # (bug int61_bit_truncation_jit_scalars_and_native_container_
+                # boxing_2026-08-09). rt_value_int_wide keeps the identical
+                # `v << 3` immediate for in-range values and heap-boxes the
+                # rest, which is the escape hatch
+                # doc/04_architecture/compiler/array_value_abi_contract.md §1.1
+                # already names as normative ("the encoder traps or heap-boxes;
+                # silently truncating is a violation"). Mirror unbox is
+                # decode_runtime_value's I64/U64 arm (rt_value_as_int_wide).
+                val widened = b.emit_cast(mir_operand_copy(local), MirType.i64())
+                # Fallback first, mirroring the F64 arm's `boxed_opt ?? bits`
+                # shape: should the call fail to materialize, the historical
+                # inline form is still emitted rather than an unboxed word.
+                val shift_wide = b.emit_const_int(3)
+                val inline_shifted = b.emit_binop(MirBinOp.Shl, mir_operand_copy(widened), mir_operand_copy(shift_wide), MirType.i64())
+                val box_int_fn = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_value_int_wide"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                ))
+                val boxed_int = b.emit_call(box_int_fn, [mir_operand_copy(widened)], MirType.i64())
+                boxed_int ?? inline_shifted
+            case MirTypeKind.I8 | MirTypeKind.U8 | MirTypeKind.I16 | MirTypeKind.U16 | MirTypeKind.I32 | MirTypeKind.U32 | MirTypeKind.Char:
+                # <= 32 bits: the payload cannot overflow 61 bits, so the
+                # inline shift stays (no call, no perf change on these).
                 val widened = b.emit_cast(mir_operand_copy(local), MirType.i64())
                 val shift = b.emit_const_int(3)
                 b.emit_binop(MirBinOp.Shl, mir_operand_copy(widened), mir_operand_copy(shift), MirType.i64())
@@ -805,6 +834,20 @@ impl MirLowering:
         val disc = rt_enum_discriminant(result_type.kind)
         val is_integer = self.mir_type_is_integer(result_type)
         if is_integer:
+            if disc == rt_enum_discriminant(MirTypeKind.I64) or disc == rt_enum_discriminant(MirTypeKind.U64):
+                # Mirror of box_runtime_value's I64/U64 arm: a wide value that
+                # did not fit the 61-bit tagged immediate is heap-boxed, so a
+                # bare `>> 3` would read back a shredded pointer. Narrower
+                # integer kinds cannot be heap-boxed and keep the inline shift.
+                val unbox_int_fn = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_value_as_int_wide"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                ))
+                val unboxed = b.emit_call(unbox_int_fn, [mir_operand_copy(raw)], MirType.i64())
+                if val unboxed_local = unboxed:
+                    val decoded_wide = b.emit_cast(mir_operand_copy(unboxed_local), result_type)
+                    self.builder = b
+                    return decoded_wide
             val shift = b.emit_const_int(3)
             val value = b.emit_binop(MirBinOp.Shr, mir_operand_copy(raw), mir_operand_copy(shift), MirType.i64())
             val decoded = b.emit_cast(mir_operand_copy(value), result_type)

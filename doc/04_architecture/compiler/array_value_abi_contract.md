@@ -55,9 +55,24 @@ Struct, class, enum and heap pointers are stored **unshifted**; floats are
 heap-boxed with their own encode/decode arms. Applying `>>3` to an unshifted
 pointer is type confusion and shreds the value (SIGSEGV or garbage).
 
-**MUST** (unspecified gap to close): overflow of a value wider than 61 bits is
-currently undefined in every tree. The target rule is that the encoder traps or
-heap-boxes; silently truncating is a violation.
+**MUST**: a value wider than the 61-bit payload MUST be heap-boxed; silently
+truncating is a violation. Measured consequence of the old unchecked encoder:
+`2^60` came back negative, `i64::MAX` as `-1`, `2^62` as `0`
+(`doc/08_tracking/bug/int61_bit_truncation_jit_scalars_and_native_container_boxing_2026-08-09.md`).
+
+Conformance as of 2026-08-09:
+
+- **T3 C runtime — CONFORMS.** `rt_value_int_wide` / `rt_value_as_int_wide`
+  (`runtime_native.c`) keep the bit-identical `v << 3` immediate in range and
+  heap-box out-of-range values as an `RT_VALUE_HEAP_INT` (`RtCoreWideInt`, same
+  leaf layout as `RtCoreFloat`). Pinned by
+  `src/runtime/test/rt_value_int_wide_selfcheck.c` (sabotage-verified).
+- **T2 pure-Simple — CONFORMS in source.** `box_runtime_value` /
+  `decode_runtime_value` route `I64`/`U64` through those two calls; kinds
+  ≤ 32 bits keep the inline shift, since their payload cannot overflow.
+- **T1 seed Cranelift JIT — VIOLATES.** Still truncates, and does so for plain
+  scalars as well as container elements. The runtime entry points it needs
+  already exist and are linked; see the bug file's "Defect A" section.
 
 ### §1.2 When a value is tagged
 

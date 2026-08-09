@@ -275,6 +275,11 @@ void     __simple_runtime_init(void);
 void     __simple_runtime_shutdown(void);
 int64_t  rt_value_int(int64_t value);
 int64_t  rt_value_as_int(int64_t value);
+/* Range-checked int box/unbox: in-range values keep the classic `v << 3`
+ * immediate; values wider than the 61-bit payload are heap-boxed losslessly
+ * instead of being silently truncated (ABI contract §1.1). */
+int64_t  rt_value_int_wide(int64_t value);
+int64_t  rt_value_as_int_wide(int64_t value);
 int64_t  rt_value_float(int64_t raw_bits);
 double   rt_value_as_float(int64_t value);
 int8_t   rt_value_is_float(int64_t value);

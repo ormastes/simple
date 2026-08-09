@@ -112,6 +112,15 @@ bool rt_dir_create(const char* path, bool recursive) {
  * RT_VALUE_HEAP_STRING's "STR1") so a validated pointer's kind read is
  * unambiguous. */
 #define RT_VALUE_HEAP_FLOAT 0x464C5431U
+/* Heap-boxed WIDE integer (see rt_value_int_wide). The tagged-immediate form
+ * `v << 3` has only a 61-bit payload, so any |v| >= 2^60 silently sign-extended
+ * back to a different number (2^60 -> negative, i64::MAX -> -1, 2^62 -> 0; bug
+ * int61_bit_truncation_jit_scalars_and_native_container_boxing_2026-08-09). Per
+ * doc/04_architecture/compiler/array_value_abi_contract.md §1.1 the encoder MUST
+ * heap-box rather than truncate. Layout is deliberately identical to
+ * RtCoreFloat, so every lifecycle switch treats it as the same leaf shape.
+ * Magic "INT1". */
+#define RT_VALUE_HEAP_INT 0x494E5431U
 #define RT_CORE_ARRAY_FLAG_BYTES 0x08U
 #define RT_CORE_ARRAY_FLAG_U64_PACKED 0x10U
 /* Internal-only marker distinguishing a tuple from a plain array. Both share
@@ -873,6 +882,14 @@ typedef struct RtCoreFloat {
     double value;
 } RtCoreFloat;
 
+/* Heap-boxed wide integer (see RT_VALUE_HEAP_INT). Same layout as RtCoreFloat
+ * (kind, transient_scope_id, 8-byte payload) so it shares every lifecycle path. */
+typedef struct RtCoreWideInt {
+    uint32_t kind;      /* RT_VALUE_HEAP_INT */
+    uint32_t transient_scope_id;
+    int64_t value;
+} RtCoreWideInt;
+
 static RtCoreDict* rt_core_as_dict(int64_t value);
 static int64_t rt_core_dict_lookup(RtCoreDict* d, int64_t key);
 static int rt_core_dict_put(RtCoreDict* d, int64_t key, int64_t value);
@@ -920,7 +937,8 @@ static void rt_core_heap_lifecycle_release(void) {
 
 static uint32_t rt_core_registered_object_kind(void* ptr) {
     uint32_t wide_kind = *(uint32_t*)ptr;
-    if (wide_kind == RT_VALUE_HEAP_STRING || wide_kind == RT_VALUE_HEAP_FLOAT) {
+    if (wide_kind == RT_VALUE_HEAP_STRING || wide_kind == RT_VALUE_HEAP_FLOAT ||
+        wide_kind == RT_VALUE_HEAP_INT) {
         return wide_kind;
     }
     return *(uint8_t*)ptr;
@@ -1488,6 +1506,7 @@ static void rt_core_reclaim_transient_immortal(uint32_t scope_id) {
                 object_scope = &((RtCoreClosure*)ptr)->transient_scope_id;
                 break;
             case RT_VALUE_HEAP_FLOAT:
+            case RT_VALUE_HEAP_INT:   /* identical leaf layout */
                 object_scope = &((RtCoreFloat*)ptr)->transient_scope_id;
                 break;
             default:
@@ -1546,6 +1565,24 @@ static inline RtCoreFloat* rt_core_as_heap_float(int64_t value) {
     return f;
 }
 
+/* Return the boxed wide integer if `value` is a registered heap-int, else NULL.
+ * Registry membership is checked BEFORE any dereference (same tag-collision
+ * guard as rt_core_as_heap_float). */
+static inline RtCoreWideInt* rt_core_as_heap_int(int64_t value) {
+    if ((((uint64_t)value) & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) return NULL;
+    RtCoreWideInt* n = (RtCoreWideInt*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK);
+    if (!n) return NULL;
+    if (!rt_core_is_registered_immortal_ptr(n)) return NULL;
+    if (n->kind != RT_VALUE_HEAP_INT) return NULL;
+    return n;
+}
+
+/* True when `v` survives the 61-bit tagged-immediate payload intact, i.e.
+ * (v << 3) >> 3 == v. */
+static inline int rt_core_int_fits_tagged(int64_t v) {
+    return v >= -(int64_t)1152921504606846976LL && v < (int64_t)1152921504606846976LL;
+}
+
 static inline int64_t rt_core_from_special(uint64_t payload) {
     return (int64_t)((payload << 3) | RT_VALUE_TAG_SPECIAL);
 }
@@ -1597,6 +1634,10 @@ static inline int64_t rt_core_numeric_arg(int64_t value) {
         /* ARITHMETIC shift: boxed negatives are (v << 3); a logical >>3 turned
          * boxed -1 into 2305843009213693951 instead of -1. */
         return value >> 3;
+    }
+    {   /* Wide integers are heap-boxed, not tagged immediates. */
+        RtCoreWideInt* n = rt_core_as_heap_int(value);
+        if (n) return n->value;
     }
     return value;
 }
@@ -1767,6 +1808,7 @@ static int rt_core_transient_classify(int64_t value, RtCoreTransientNode* node) 
                 *node = (RtCoreTransientNode){ptr, RT_CORE_TRANSIENT_ENUM, 0};
                 return 1;
             case RT_VALUE_HEAP_FLOAT:
+            case RT_VALUE_HEAP_INT:   /* identical leaf layout */
                 *node = (RtCoreTransientNode){ptr, RT_CORE_TRANSIENT_FLOAT, 0};
                 return 1;
             case RT_VALUE_HEAP_CLOSURE:
@@ -1889,6 +1931,14 @@ static void rt_core_print_value_to(FILE* stream, int64_t value) {
     if (rt_core_is_int(value)) {
         fprintf(stream, "%lld", (long long)rt_core_as_int(value));
         return;
+    }
+
+    {   /* Heap-boxed wide integer (>= 2^60): print the real value, not a ptr. */
+        RtCoreWideInt* wide = rt_core_as_heap_int(value);
+        if (wide) {
+            fprintf(stream, "%lld", (long long)wide->value);
+            return;
+        }
     }
 
     if (rt_core_is_special(value)) {
@@ -2027,8 +2077,47 @@ void rt_stderr_flush(void) {
     fflush(stderr);
 }
 
+/* Forward declaration: rt_value_int_wide is defined just below, but is called
+ * from rt_value_int above it. Without this, C99 implicit-declaration rules make
+ * the call default to `int (*)()`, which clang rejects outright
+ * (-Wimplicit-function-declaration, then "conflicting types") and which fails
+ * the whole runtime_native.c compile -- blocking every native-build/AOT run. */
+int64_t rt_value_int_wide(int64_t value);
+
 int64_t rt_value_int(int64_t value) {
+    if (!rt_core_int_fits_tagged(value)) return rt_value_int_wide(value);
     return (int64_t)(((uint64_t)value << 3) | RT_VALUE_TAG_INT);
+}
+
+/* Range-checked integer box (ABI contract §1.1). Values inside the 61-bit
+ * payload keep the classic `v << 3` immediate -- bit-identical to before, so no
+ * existing consumer changes behavior. Values that do NOT fit are heap-boxed
+ * losslessly instead of being silently truncated. */
+int64_t rt_value_int_wide(int64_t value) {
+    if (rt_core_int_fits_tagged(value)) {
+        return (int64_t)(((uint64_t)value << 3) | RT_VALUE_TAG_INT);
+    }
+    RtCoreWideInt* n = (RtCoreWideInt*)malloc(sizeof(RtCoreWideInt));
+    if (!n) {
+        /* OOM: the truncating form is still wrong, but crashing here is worse. */
+        return (int64_t)(((uint64_t)value << 3) | RT_VALUE_TAG_INT);
+    }
+    n->kind = RT_VALUE_HEAP_INT;
+    n->transient_scope_id = 0;
+    n->value = value;
+    if (!rt_core_register_scoped_immortal(n, &n->transient_scope_id)) {
+        free(n);
+        return (int64_t)(((uint64_t)value << 3) | RT_VALUE_TAG_INT);
+    }
+    return (int64_t)(((uint64_t)(uintptr_t)n) | RT_VALUE_TAG_HEAP);
+}
+
+/* Mirror unbox for rt_value_int_wide: heap-boxed wide int, else the plain
+ * arithmetic `>> 3` the tagged immediate has always used. */
+int64_t rt_value_as_int_wide(int64_t value) {
+    RtCoreWideInt* n = rt_core_as_heap_int(value);
+    if (n) return n->value;
+    return value >> 3;
 }
 
 int64_t rt_value_as_int(int64_t value) {
@@ -2074,7 +2163,7 @@ int64_t rt_value_as_int(int64_t value) {
         }
         return rt_string_to_int_lenient(value);
     }
-    return value >> 3;
+    return rt_value_as_int_wide(value);
 }
 
 /* Box an f64 (passed as its raw i64 bit pattern) into the tagged RuntimeValue
