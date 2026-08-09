@@ -1,6 +1,6 @@
 # X25519mlkem768 Pinned Hybrid Oracle Specification
 
-> Tests covering X25519MLKEM768 pinned three-oracle composition.
+> Tests covering X25519MLKEM768 local + pinned-fixture + CIRCL composition (one independent external oracle).
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -13,7 +13,7 @@
 
 ## Scenarios
 
-### X25519MLKEM768 pinned three-oracle composition
+### X25519MLKEM768 local + pinned-fixture + CIRCL composition
 
 #### should compare full wire components and the 64-byte secret (REQ-003 REQ-013)
 
@@ -82,8 +82,8 @@ match x25519_mlkem768_combine(mlkem_secret, x_secret):
 
 ## Overview
 
-Tests covering X25519MLKEM768 pinned three-oracle composition.
-- X25519MLKEM768 pinned three-oracle composition
+Tests covering X25519MLKEM768 local + pinned-fixture + CIRCL composition (one independent external oracle).
+- X25519MLKEM768 local + pinned-fixture + CIRCL composition
 
 ## Scenario Summary
 
