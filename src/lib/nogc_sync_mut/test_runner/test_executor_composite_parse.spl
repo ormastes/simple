@@ -42,6 +42,8 @@ fn extract_arch_from_spec(spec: text) -> text:
         return "ptx64"
     if spec.contains("remote(vulkan("):
         return "spirv"
+    if spec.contains("remote(metal("):
+        return "msl"
     if spec.contains("riscv32"): return "riscv32"
     if spec.contains("stm32h7"): return "arm32"
     if spec.contains("stm32wb"): return "arm32"
@@ -70,6 +72,10 @@ fn extract_target_from_spec(spec: text) -> text:
         val token = _gpu_backend_token(spec, "vulkan")
         val spv = if token == "": "spv15" else: token
         return "vulkan_{spv}"
+    if spec.contains("remote(metal("):
+        val token = _gpu_backend_token(spec, "metal")
+        val msl = if token == "": "msl2" else: token
+        return "metal_{msl}"
     if spec.contains("stm32h7"): return "stm32h7"
     if spec.contains("stm32wb"): return "stm32wb"
     if spec.contains("riscv32"): return "riscv32"
@@ -92,19 +98,28 @@ fn extract_remote_backend(spec: text) -> text:
         return "vulkan"
     if spec.contains("remote(cudagdb("):
         return "cudagdb"
+    if spec.contains("remote(metal("):
+        return "metal"
     ""
 
 fn extract_gpu_submode(spec: text) -> text:
     """Extract the GPU lane submode ('launch'/'resident'/'dispatch') from a
-    composite spec, per design doc §2.2. Vulkan is always 'dispatch' and never
-    accepts 'resident' (per-dispatch execution has no forward-progress
-    guarantee); attempting it returns the rejection diagnostic text instead of
-    a submode string."""
+    composite spec, per design doc §2.2. Vulkan and Metal are always
+    'dispatch' and never accept 'resident' (per-dispatch execution has no
+    forward-progress guarantee); attempting it returns the rejection
+    diagnostic text instead of a submode string. Metal has no CUDA-style
+    persistent-kernel + doorbell-ring primitive (see
+    metal_gpu_lane_and_vulkan_jit_notebook_architecture_2026-08-09.md §1)."""
     val is_vulkan = spec.contains("remote(vulkan(")
+    val is_metal = spec.contains("remote(metal(")
     val is_cuda = spec.contains("remote(cuda(") or spec.contains("remote(cudagdb(")
     if is_vulkan:
         if spec.contains("(resident)"):
             return "resident submode requires forward-progress guarantees; vulkan lanes are per-dispatch (see gpu_remote_interpreter_architecture.md §6.3)"
+        return "dispatch"
+    if is_metal:
+        if spec.contains("(resident)"):
+            return "resident submode requires forward-progress guarantees; metal lanes are per-dispatch (see metal_gpu_lane_and_vulkan_jit_notebook_architecture_2026-08-09.md §1)"
         return "dispatch"
     if is_cuda:
         if spec.contains("(resident)"):
