@@ -4,6 +4,8 @@
 # The subprocess is a plain program, so it exercises the compiler's normal
 # run path rather than only SSpec's interpreted bodies. Both seed and
 # self-hosted compilers must bind one text value per Unicode codepoint.
+use std.spec.engine_probe.{engine_stdout, is_known_engine}
+
 extern fn rt_process_run(program: text, args: [text]) -> (text, text, i64)
 extern fn rt_file_exists(path: text) -> bool
 
@@ -44,19 +46,52 @@ fn _check_binary_runnable() -> bool:
 
 val _can_run = _check_binary_runnable()
 
-fn run_probe() -> (text, text, i64):
-    rt_process_run(
-        find_simple_binary(),
-        ["run", "test/03_system/interpreter/for_in_text_jit_probe.spl"]
-    )
+val _PROBE = "test/03_system/interpreter/for_in_text_jit_probe.spl"
 
 describe "for-loop-over-text JIT regression (subprocess)":
-    it "binds ch correctly under the default (JIT) run path":
+    """
+    ## Why this spec was retrofitted 2026-08-09
+
+    This file already spawned the probe as a subprocess, but it spawned it with
+    a BARE `rt_process_run(binary, ["run", probe])` and never named an engine.
+    A child process INHERITS the parent's environment, and the test runner pins
+    `SIMPLE_EXECUTION_MODE=interpret` before spawning this spec
+    (src/app/test_runner_new/test_runner_single.spl,
+    src/lib/nogc_sync_mut/test_runner/test_runner_execute.spl:86). The child
+    therefore inherited `interpret` too, so the example titled "under the
+    default (JIT) run path" was in fact asserting against the tree-walking
+    interpreter -- the one engine that was never broken. Getting the subprocess
+    boundary right is necessary but NOT sufficient; the engine has to be named.
+
+    `engine_probe.run_under_engine` sets `SIMPLE_EXECUTION_MODE` (and the older
+    `SIMPLE_RUNTIME_MODE` spelling, which would otherwise fight it) explicitly
+    for the child, and rejects an unrecognised engine name up front -- an
+    unknown value silently selects the JIT, which would make an A/B comparison
+    look like agreement.
+
+    Mechanism: src/lib/nogc_sync_mut/spec/engine_probe.spl
+    Pattern:   doc/07_guide/infra/testing/spec_engine_reach.md
+    """
+
+    it "binds ch correctly under the interpreter":
+        # Control column: the tree-walking interpreter was always correct here,
+        # so this arm failing means the probe or the harness broke, not codegen.
         if not _can_run:
             expect(_can_run).to_equal(false)
         else:
-            val (stdout, stderr, code) = run_probe()
-            val out = stdout.trim()
-            expect(code).to_equal(0)
-            expect(stderr.contains("#143")).to_equal(false)
-            expect(out).to_equal("ok")
+            expect(engine_stdout(_PROBE, "interpret").trim()).to_equal("ok")
+
+    it "binds ch correctly under the cranelift JIT":
+        # The arm that carries the weight, and the one this file is named for:
+        # doc/08_tracking/bug/for_loop_over_text_char_code_at_zero_len_crash_2026-07-19.md
+        # was a JIT-only corruption of the per-codepoint loop variable.
+        # Measured 2026-08-09: "ok" under both engines.
+        if not _can_run:
+            expect(_can_run).to_equal(false)
+        else:
+            expect(engine_stdout(_PROBE, "jit").trim()).to_equal("ok")
+
+    it "rejects an unrecognised engine name instead of silently using the JIT":
+        assert_false(is_known_engine("interp"))
+        assert_true(is_known_engine("jit"))
+        assert_true(is_known_engine("interpret"))

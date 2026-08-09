@@ -15,18 +15,26 @@
 `d.get(k)` must yield `nil` for a key that is not present, and must keep a
 stored zero / `false` distinguishable from that miss.
 
-## Lane coverage warning -- READ BEFORE TRUSTING A GREEN RUN
+## Lane coverage -- READ BEFORE TRUSTING A GREEN RUN
 
-The defect these examples describe is **native-codegen only**. `simple test`
+The defect these examples describe is **compiled-lane only**. `simple test`
 executes the tree-walking interpreter, which has always been CORRECT here, so
-**this spec is green on the interpreter both before and after the MIR fix and
-is NOT an active gate for the native lane.** It documents the contract and
-guards the interpreter against regressing to the native behaviour; the native
-lane is verified by building these same cases with `native-build` and running
-the resulting ELF (transcript in the bug doc above).
+every `describe` below is green both before and after the MIR fix.
+
+Until 2026-08-09 that was the WHOLE of this file, and this header said so in
+prose: the spec was not a gate for the lane it is named after. The final
+`describe` in this file closes that hole. It spawns
+`dict_get_miss_returns_nil_jit_probe.spl` -- a runnable program, so it is not
+subject to the four layers that force a spec body onto the interpreter -- under
+each NAMED engine and scores its verdict line.
+
+Mechanism: `src/lib/nogc_sync_mut/spec/engine_probe.spl`
+Pattern:   `doc/07_guide/infra/testing/spec_engine_reach.md`
+Guard:     `scripts/check/check-engine-claiming-specs-use-probe.shs`
 """
 
 use std.spec
+use std.spec.engine_probe.{engine_stdout, is_known_engine}
 
 
 struct Pt:
@@ -134,3 +142,73 @@ describe "Dict.len() on the native lane":
 
 fn dict_len_of(d: Dict<text, i64>) -> i64:
     d.len()
+
+
+# ============================================================================
+# Compiled-lane assertion (out of process) -- added 2026-08-09
+# ============================================================================
+#
+# Everything ABOVE this line runs on the tree-walking interpreter and always
+# did. `describe` / `it` / `expect` are Rust interpreter intrinsics with no
+# codegen lowering, and a spec file has no `fn main`, so the driver routes it
+# to `evaluate_module` no matter what SIMPLE_EXECUTION_MODE says. The defect
+# this file is named for is compiled-lane only, so the examples above could
+# not have caught it -- and did not.
+#
+# The block below asserts the SAME contracts against a NAMED engine by
+# spawning a runnable probe out of process and scoring its verdict LINE (not
+# its exit code -- a codegen panic and a clean failure both exit non-zero).
+
+val _PROBE = "test/01_unit/compiler/dict_get_miss_returns_nil_jit_probe.spl"
+val _PASS = "PROBE VERDICT: PASS"
+
+describe "Dict.get() miss decoding holds on the JIT lane (out of process)":
+    """
+    As a compiler maintainer, I need the dict miss/hit decode contract pinned
+    to a NAMED engine, so that a compiled-lane-only regression cannot pass
+    review behind a spec that only ever ran on the interpreter.
+
+    Mechanism: src/lib/nogc_sync_mut/spec/engine_probe.spl
+    Pattern:   doc/07_guide/infra/testing/spec_engine_reach.md
+    """
+
+    it "passes the probe under the interpreter":
+        # Control column. The interpreter was correct throughout, so this arm
+        # failing means the probe or the harness broke, not codegen.
+        expect(engine_stdout(_PROBE, "interpret")).to_contain(_PASS)
+
+    it "passes the probe under the cranelift JIT":
+        # The arm that carries the weight: stored-zero / stored-false /
+        # stored-empty-text must stay distinguishable from a miss, and
+        # keys().len() must not report -1, when the decode arms are actually
+        # compiled rather than interpreted.
+        expect(engine_stdout(_PROBE, "jit")).to_contain(_PASS)
+
+    it "still observes the documented OPEN f64-miss gap under the JIT only":
+        # This is the ENGINE-REACH CANARY, not a wish. `rt_value_as_float`
+        # cannot round-trip the flat-Option nil sentinel (RT_NIL == 3) through
+        # a float bit pattern, so dict_get_preserve_flat_nil
+        # (src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:991)
+        # deliberately does NOT guard the F64 decode arm.
+        #
+        # Measured 2026-08-09, same probe, same binary, both engines:
+        #   interpret -> PROBE F64MISS: true    (correct)
+        #   jit       -> PROBE F64MISS: false   (the open gap)
+        #
+        # Asserting BOTH answers is what proves each arm reached the engine it
+        # names. If the "jit" arm ever silently fell back to the interpreter,
+        # this example goes RED instead of quietly going vacuous.
+        #
+        # When the f64 gap is FIXED, this example must be updated to expect
+        # `true` on both arms -- it is a pin on current reality, not approval.
+        expect(engine_stdout(_PROBE, "interpret")).to_contain("PROBE F64MISS: true")
+        expect(engine_stdout(_PROBE, "jit")).to_contain("PROBE F64MISS: false")
+
+    it "rejects an unrecognised engine name instead of silently using the JIT":
+        # SIMPLE_EXECUTION_MODE falls back to the JIT on any unknown value, so
+        # a typo like "interp" would make an A/B comparison look like
+        # agreement between two identical JIT runs.
+        assert_false(is_known_engine("interp"))
+        assert_false(is_known_engine("native"))
+        assert_true(is_known_engine("jit"))
+        assert_true(is_known_engine("interpret"))
