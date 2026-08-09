@@ -225,6 +225,17 @@ fn _css_resolve_vars(
         return CssVarResolution.BudgetExceeded
     var chunks: [text] = [""; 801]
     var chunk_count = 0
+    # Unresolved-var accounting for the top-level pass. A `var()` that cannot
+    # be resolved used to be spliced out to the EMPTY string while the pass
+    # still reported `Resolved`, which is silent AND wrong (see the
+    # `replacement_text` match below). Count them and name the first one so a
+    # sheet rendered with dead variables says so in one line instead of
+    # surfacing downstream as a content mismatch.
+    var unresolved_var_count = 0
+    var first_unresolved_name = ""
+    var first_unresolved_sw_raw = false
+    var first_unresolved_sw_portable = false
+    var first_unresolved_prop_idx = -1
     var resolved_len = 0
     val css_len = css.len()
     var scan = 0
@@ -270,8 +281,20 @@ fn _css_resolve_vars(
                 break
             m = m + 1
         val prop_name = (if comma >= 0: inner.substring(0, comma) else: inner).trim()
+        # `text_starts_with_portable` (byte compare), NOT `.starts_with()`.
+        # The x86_64 freestanding kernel build mis-marshals boolean results
+        # from text builtins at call depth
+        # (doc/08_tracking/bug/x64_freestanding_text_char_at_starts_with.md,
+        # residual item 3) — the same defect that once collapsed
+        # `_html_scan_events` to zero events in the guest while the host
+        # produced a full DOM. This call site sits deep inside the style pass
+        # AND recurses, so a mis-marshalled `false` here would declare every
+        # custom-property name invalid and splice every `var()` away, which is
+        # precisely the SimpleOS WM rung-(d) signature.
+        val prop_name_sw_raw = prop_name.starts_with("--")
+        val prop_name_sw_portable = text_starts_with_portable(prop_name, "--")
         val valid_var_name = (
-            prop_name.len() > 2 and prop_name.starts_with("--")
+            prop_name.len() > 2 and prop_name_sw_portable
         )
         # CSS declarations are last-wins. Search backwards so a matching
         # :root variant (or a later base declaration) overrides an earlier
@@ -354,22 +377,63 @@ fn _css_resolve_vars(
                 fallback, state, resolution_depth + 1,
                 active_count, true
             )
+        # An unresolvable `var()` must NOT become the empty string. CSS makes
+        # such a declaration invalid at computed-value time (css-variables-1
+        # §3.2); splicing empty instead manufactures a syntactically parseable
+        # but semantically wrong value. Measured on the `aetheric_dark` sheet:
+        # `backdrop-filter: blur(var(--blur-surface)) saturate(170%)` became
+        # `blur() saturate(170%)` (21 chars, rejected by
+        # simple_web_backdrop_admission because the blur term no longer ends in
+        # `px)`), and `background: linear-gradient(...), var(--app-surface)`
+        # became `linear-gradient(...),` (73 chars, a bare trailing comma)
+        # whose colour was then read off the GRADIENT'S FIRST STOP
+        # (0x14FFFFFF) rather than the surface. Those are exactly the three
+        # numbers the SimpleOS WM x86_64 lane reported, and they read as a
+        # theme/content mismatch rather than as dead variables.
+        #
+        # This resolver is driven over a WHOLE `<style>` sheet, not one
+        # declaration, so "drop the declaration" cannot be expressed by
+        # returning `Invalid` (that would drop the entire stylesheet). The
+        # fail-closed equivalent at this granularity is to leave the `var(...)`
+        # SOURCE TEXT verbatim in place: downstream value parsers already treat
+        # a literal `var(` as unparseable, and
+        # `src/os/compositor/simple_web_window_renderer.spl` states the intent
+        # explicitly — it keeps "unresolved variables as rejection witnesses".
+        # The declaration therefore fails loudly instead of attesting a colour
+        # it never had.
         var replacement_text = ""
+        val unresolved_source = css.substring(open, close + 1)
+        var unresolved_here = false
         match replacement:
             CssVarResolution.Resolved(resolved_value):
                 replacement_text = resolved_value
             CssVarResolution.Invalid:
                 if nested:
                     return CssVarResolution.Invalid
+                replacement_text = unresolved_source
+                unresolved_here = true
             CssVarResolution.Cycle:
                 if nested:
                     return CssVarResolution.Cycle
+                replacement_text = unresolved_source
+                unresolved_here = true
             CssVarResolution.DepthExceeded:
                 if nested:
                     return CssVarResolution.DepthExceeded
+                replacement_text = unresolved_source
+                unresolved_here = true
             CssVarResolution.BudgetExceeded:
                 if nested:
                     return CssVarResolution.BudgetExceeded
+                replacement_text = unresolved_source
+                unresolved_here = true
+        if unresolved_here:
+            if unresolved_var_count == 0:
+                first_unresolved_name = prop_name
+                first_unresolved_sw_raw = prop_name_sw_raw
+                first_unresolved_sw_portable = prop_name_sw_portable
+                first_unresolved_prop_idx = prop_idx
+            unresolved_var_count = unresolved_var_count + 1
         if (
             resolved_len + prefix.len() + replacement_text.len() >
             SIMPLE_WEB_MAX_HTML_BYTES
@@ -389,6 +453,23 @@ fn _css_resolve_vars(
             return CssVarResolution.Invalid
         chunks[chunk_count] = suffix
         chunk_count = chunk_count + 1
+    # One line, only when something actually failed to resolve, only for the
+    # top-level pass. Silent on a healthy sheet.
+    #
+    # Do NOT replace this with a post-hoc `resolved.index_of("var(") >= 0`
+    # check on the caller side: that test was written, measured against a
+    # provably-unresolved sheet, and DID NOT FIRE, because under the old
+    # splice-to-empty behaviour the `var(` text was already gone by the time
+    # anyone could look. The receipt has to live at the substitution site.
+    #
+    # `props` separates "no custom properties collected" from "collected but
+    # the lookup missed" (`idx=-1` with `props>0`). `sw_raw`/`sw_portable`
+    # separate BOTH of those from the x86_64 freestanding boolean
+    # mis-marshalling of `text.starts_with` at depth: `sw_raw=false` with
+    # `sw_portable=true` on a name that plainly begins with `--` is that
+    # defect and nothing else.
+    if unresolved_var_count > 0 and not nested:
+        print "[web-style-producer] css-var-unresolved count={unresolved_var_count} first={first_unresolved_name} idx={first_unresolved_prop_idx} props={state.prop_count} sw_raw={first_unresolved_sw_raw} sw_portable={first_unresolved_sw_portable} css_len={css_len}"
     CssVarResolution.Resolved(
         value: text_list_prefix(chunks, chunk_count).join("")
     )
@@ -741,6 +822,17 @@ fn _extract_css_vw_with_rule_limit(
                 resolved_css
             _:
                 css_raw
+        # The OTHER silent path: the substitution pass bailed WHOLESALE
+        # (budget/depth/invalid) and the sheet is used RAW, so every `var()`
+        # in it stays literal. Distinct from the per-`var()` unresolved case
+        # reported by `css-var-unresolved` inside `_css_resolve_vars`, and the
+        # two must not be confused — the 2026-08-08 WM rung-(d) misdiagnosis
+        # came from mistaking one for the other. Silent on a healthy sheet.
+        match css_resolution:
+            CssVarResolution.Resolved(_):
+                pass
+            _:
+                print "[web-style-producer] css-var-pass-bailed block={guard} props_len={custom_props.len()} css_len={css_raw.len()}"
         # Rule-boundary scan: split the sheet ONCE on "{"/"}" natively rather
         # than walking it a character at a time in interpreted Simple (which
         # cost seconds-to-minutes on a realistic theme sheet). See

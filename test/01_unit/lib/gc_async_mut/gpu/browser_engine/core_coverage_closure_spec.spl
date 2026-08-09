@@ -186,12 +186,20 @@ describe "core.spl: _css_resolve_vars":
             _:
                 assert_true(false)
 
-    it "resolves to empty text for an undefined property with no fallback":
+    # BEHAVIOUR CHANGE 2026-08-09: this used to assert `""`. Splicing an
+    # unresolvable var() out to the empty string is a CSS violation
+    # (css-variables-1 3.2 makes the declaration invalid at computed-value
+    # time) and it manufactured the malformed values that blocked SimpleOS WM
+    # rung (d) — see
+    # doc/08_tracking/bug/wm_guest_css_var_unresolved_blocks_material_admission_2026-08-09.md
+    # The resolver now preserves the var() source text so the value stays
+    # unparseable downstream instead of silently becoming a wrong one.
+    it "preserves the var() source text for an undefined property with no fallback":
         val state = CssVarResolutionState.new("")
         val result = _css_resolve_vars("var(--missing)", state, 0, 0, false)
         match result:
             CssVarResolution.Resolved(value):
-                assert_equal(value, "")
+                assert_equal(value, "var(--missing)")
             _:
                 assert_true(false)
 
@@ -597,12 +605,15 @@ describe "core.spl: compute_styles_with_material":
 # running, per the existing spec's evidence bar.
 
 describe "core.spl: _css_resolve_vars — cycle detection":
-    it "a direct self-reference with no fallback resolves to empty text (cycle swallowed at top level)":
+    # BEHAVIOUR CHANGE 2026-08-09: was `""` (cycle swallowed at top level).
+    # Same rationale as the undefined-property case above — a cycle with no
+    # fallback now keeps its source text rather than silently vanishing.
+    it "a direct self-reference with no fallback keeps its var() source text":
         val state = CssVarResolutionState.new("--a:var(--a)")
         val result = _css_resolve_vars("var(--a)", state, 0, 0, false)
         match result:
             CssVarResolution.Resolved(value):
-                assert_equal(value, "")
+                assert_equal(value, "var(--a)")
             _:
                 assert_true(false)
 
