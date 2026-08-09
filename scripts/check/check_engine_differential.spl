@@ -41,12 +41,13 @@
 # distinction is load-bearing: prior findings that named `native` via the env
 # var were actually measuring the JIT.
 #
-# ## Comparison is whitespace-normalized, deliberately
+# ## Comparison strips whitespace, deliberately
 #
-# The native lane does not emit trailing newlines from `print`, so a raw
-# byte-compare would flag all 10 fixtures for one formatting quirk and bury
-# every real signal. Tokens are compared after whitespace collapsing; the
-# newline difference is reported ONCE as a lane-level note instead.
+# The native lane emits NO separator between `print` calls, so a raw
+# byte-compare would flag every fixture for one formatting quirk and bury
+# every real signal. All whitespace is stripped before comparing; the
+# formatting difference is reported ONCE as a lane-level note instead.
+# Consequence: a purely-whitespace divergence is out of scope here.
 #
 # ## Reading the result
 #
@@ -123,22 +124,29 @@ fn selected_lanes() -> [text]:
             out.push(cleaned)
     out
 
-# Collapse all runs of whitespace to a single space so the native lane's
-# missing newlines do not masquerade as a semantic difference. Everything
-# else -- digits, ordering, punctuation -- is preserved exactly.
+# Strip ALL whitespace before comparing.
+#
+# Collapsing runs of whitespace to a single space is NOT enough, and getting
+# this wrong produced a false DIVERGENCE on the first native run: the native
+# lane emits no separator between print() calls AT ALL, so the interpreter's
+#     "callee_saw=99 orig0=1 alias1=77"
+# and native's
+#     "callee_saw=99orig0=1alias1=77"
+# are the same answer but differ under any collapsing scheme. Removing every
+# whitespace character makes the two identical, which is the correct verdict.
+#
+# Tradeoff, accepted deliberately: a divergence that is PURELY a whitespace
+# difference becomes invisible to this harness. That is the right trade --
+# the defect family being hunted is wrong VALUES (shifted integers, truncated
+# codepoints, aliased buffers), and leaving the newline quirk in would flag
+# every fixture and bury all of them. Fixtures therefore print `key=value`
+# tokens, which stay unambiguous once whitespace is gone.
 fn normalize(raw: text) -> text:
     var out = ""
-    var pending_space = false
     for ch in raw.chars():
-        if ch == " " or ch == "\n" or ch == "\t" or ch == "\r":
-            if out.len() > 0:
-                pending_space = true
-        else:
-            if pending_space:
-                out = out + " "
-                pending_space = false
+        if ch != " " and ch != "\n" and ch != "\t" and ch != "\r":
             out = out + ch
-    out.trim()
+    out
 
 # Compiler warnings and gc-warnings are emitted on stderr and are not part of
 # the program's answer; only stdout is compared. A lane that printed nothing
@@ -287,7 +295,8 @@ fn main() -> i64:
     print("divergences:       {divergences} ({new_divergences} NEW, unbaselined)")
     print("lane errors:       {lane_errors} (failed closed -- not counted as divergence)")
     print("")
-    print("NOTE: the native lane does not emit trailing newlines from print();")
-    print("comparison is whitespace-normalized so that quirk alone cannot mask")
-    print("or manufacture a divergence.")
+    print("NOTE: the native lane emits NO separator between print() calls;")
+    print("comparison strips whitespace entirely so that quirk alone cannot")
+    print("manufacture a divergence. Purely-whitespace divergences are")
+    print("therefore out of scope for this harness by construction.")
     new_divergences
