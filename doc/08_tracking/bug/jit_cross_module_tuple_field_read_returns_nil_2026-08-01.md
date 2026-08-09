@@ -53,3 +53,28 @@ guessing at the boundary would be worse than stating the measured case.
 Use a predicate or accessor defined in the same module as the constructor
 (`is_yaml_scalar(v)` rather than `v.0 == ...`). The yaml fix takes this route
 and is immune to the defect as a side effect.
+
+## Re-verified 2026-08-09 — still reproduces, still architectural (Rust seed)
+
+Fresh minimal repro (2-file, no yaml involved), run against
+`bin/release/x86_64-unknown-linux-gnu/simple` (seed banner confirmed):
+
+```simple
+# tupmod_a.spl
+fn make_tup():
+    ("string", "hi")
+
+# tupmod_main.spl
+use tupmod_a.{make_tup}
+
+fn main():
+    val v = make_tup()
+    print("field0={v.0}")
+```
+
+`bin/simple run tupmod_main.spl` -> `field0=nil` (expected `"string"`).
+Confirms the defect is general to any cross-module tuple constructor, not
+specific to yaml's `yaml_string`. Root cause remains the Cranelift JIT
+codegen path (`src/compiler_rust/compiler/src/codegen/**`) — out of scope for
+a pure-Simple (`.spl`) fix; leaving OPEN. No regression risk introduced since
+no source under `src/` was changed for this bug.
