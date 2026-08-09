@@ -630,7 +630,6 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
     else:
         _engine2d_draw_ir_render_glass_material(
             eng, command, x, y, w, h, radius)
-    eng = glass.engine
     if glass.composited:
         if shadow_admitted:
             eng = engine2d_draw_ir_render_typed_inset_shadows(
@@ -1254,9 +1253,6 @@ fn _engine2d_embed_offscreen_acquire(
     if (_engine2d_embed_pool_w == w and _engine2d_embed_pool_h == h and
         _engine2d_embed_pool_backend == owner.backend_name()):
         if val Some(cached) = _engine2d_embed_pool:
-            cached.clear(0x00000000u32)
-            cached.clear_clip()
-            cached.clear_mask()
             return cached
     val created = owner.draw_ir_create_offscreen_engine(w, h)
     match created:
@@ -1277,8 +1273,14 @@ fn _engine2d_embed_offscreen_acquire(
 # offset_x/offset_y are 0 since the surface origin IS the batch origin).
 # Engine2D is value-copied across this free-function boundary (see
 # _engine2d_draw_ir_render_box), so callers reassign the typed outcome engine.
-fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand], offset_x: i32, offset_y: i32, images: [Engine2dResolvedDrawIrImage], blend_images: bool, metal_device_glass_required: bool, active_clip: DrawIrRect, css_background_pixel_work_budget: i64) -> Engine2dDrawIrRenderOutcome:
+fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand], offset_x: i32, offset_y: i32, images: [Engine2dResolvedDrawIrImage], blend_images: bool, metal_device_glass_required: bool, active_clip: DrawIrRect, css_background_pixel_work_budget: i64, reset_surface: bool = false) -> Engine2dDrawIrRenderOutcome:
     var eng = engine
+    if reset_surface:
+        # Reset after the function's own Engine2D projection so every reset and
+        # draw observes the exact same concrete backend payload.
+        eng.clear(0x00000000u32)
+        eng.clear_clip()
+        eng.clear_mask()
     var rendered = 0
     var skipped = 0
     var unsupported_kinds = ""
@@ -1324,7 +1326,6 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
                     metal_device_glass_requested_count + 1)
             val box = _engine2d_draw_ir_render_box(
                 eng, command, x, y, command.width, command.height)
-            eng = box.engine
             if box.glass_execution.execution_target == "cpu-scalar-glass-v1":
                 cpu_composited_material_count = cpu_composited_material_count + 1
                 glass_execution_target = box.glass_execution.execution_target
@@ -1757,8 +1758,7 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
                 val inner = _engine2d_draw_ir_render_commands(
                     delta, batch.commands, parent_padding, parent_padding, images, true,
                     batch.backend_target == "metal", draw_ir_no_rect(),
-                    css_background_pixel_work_budget)
-                delta = inner.engine
+                    css_background_pixel_work_budget, false)
                 val child_readback = delta.read_pixels_with_source()
                 val child_core = _engine2d_draw_ir_parent_region_pixels(
                     child_readback, delta_width, delta_height,
@@ -1804,8 +1804,7 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
                 )
             else:
                 draw_ir_no_rect(),
-            css_background_pixel_work_budget)
-        eng = direct.engine
+            css_background_pixel_work_budget, false)
         if apply_clip:
             eng.clear_clip()
         return _engine2d_draw_ir_render_outcome(
@@ -1846,6 +1845,10 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
             return _engine2d_draw_ir_render_outcome(
                 eng, 0, commands.len().to_i32(), pool_failure[0], 0)
         offscreen = pooled
+        # Reset the exact local identity that is passed to the renderer. A
+        # pooled class may cross Option/direct-return lowering on acquisition;
+        # resetting inside the acquire owner can therefore mutate a different
+        # projected payload than the caller subsequently draws through.
         offscreen_created = true
         offscreen_pooled = true
     else:
@@ -1869,8 +1872,7 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
     val inner = _engine2d_draw_ir_render_commands(
         offscreen, commands, 0, 0, images, true,
         batch.backend_target == "metal", draw_ir_no_rect(),
-        css_background_pixel_work_budget)
-    offscreen = inner.engine
+        css_background_pixel_work_budget, true)
     val child = offscreen.read_pixels_with_source()
     val composited = eng.draw_ir_composite_readback(
         embedding.x,
@@ -1920,7 +1922,7 @@ fn engine2d_draw_ir_adv_batch_with_images(engine: Engine2D, batch: DrawIrBatch, 
     val outcome = _engine2d_draw_ir_render_batch_embedded(
         engine, batch, images, 0, false,
         engine.width().to_i64() * engine.height().to_i64())
-    val eng = outcome.engine
+    val eng = engine
     var unsupported_kinds = outcome.unsupported_kinds
     if unsupported_kinds == "":
         unsupported_kinds = "none"
@@ -2038,7 +2040,6 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: 
         if outcome.css_background_pixel_work_remaining >= 0:
             css_background_pixel_work_remaining = (
                 outcome.css_background_pixel_work_remaining)
-        eng = outcome.engine
         rendered = rendered + outcome.rendered
         skipped = skipped + outcome.skipped
         cpu_composited_material_count = (
