@@ -2,7 +2,28 @@
 
 - **ID:** private_symbol_collision_sshd_four_names_2026-07-28
 - **Date:** 2026-07-28
-- **Status:** OPEN (analysis complete, no fix applied — compiler trees have live lanes)
+- **Status:** PARTIALLY FIXED 2026-08-09 (source-side renames landed; compiler-side
+  C1/C2 still OPEN — compiler trees have live lanes). Re-verified: `_u8_at`,
+  `_cswap_pair`, and `_ladder_step` are **no longer present** in
+  `curve25519_smalllimb.spl` at all (superseded by unrelated refactoring —
+  `_u8_at_i`, `fe_cswap`; no separate `_ladder_step` helper remains), so those
+  3 of 4 collision groups are already gone. The 4th (`_hex_digit`, 11
+  definitions) still had the encoder/decoder split from "Proposed remedy"
+  below applied in this pass: the three `(text)->i64` decoders
+  (`embedded_certs.spl`, `protocol.spl`, `wm_quality_contract.spl`) renamed to
+  `_hex_digit_from_char`, and the odd `(u8)->u8` variant
+  (`dual_backend.spl:89`, dead code — no in-file callers) renamed to
+  `_hex_digit_byte`. Verified via targeted `bin/simple compile --emit-mir` on
+  each touched file: no `_hex_digit`-related
+  `compiler_cross_module_private_symbol_collision` warning remains (other,
+  unrelated collision warnings like `_css_var`/`compress_block`/`shell` in
+  `wm_quality_contract.spl` are pre-existing and out of scope). The remaining
+  7 `_hex_digit(i64|i32)->text` encoder definitions still share a name and
+  will still warn if wildcard-imported together, but per the verdict below
+  they agree on every in-range input, so this residual collision is the
+  documented **benign** class, not the encoder/decoder cross-direction hazard
+  this pass closed. C1 (include return type in the dedup key) and C2 (make
+  `candidates.last()` a hard error) remain unapplied Rust-seed changes.
 - **Parent:** `compiler_cross_module_private_symbol_collision_2026-06-16`
 - **Severity:** HIGH for the general mechanism (silent wrong answer, exit 0, JIT only).
   LOW for these four specific names — see verdict.
