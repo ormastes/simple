@@ -438,6 +438,46 @@ pub fn call_runtime_3_void<M: Module>(
     adapted_call(builder, func_ref, &[arg1, arg2, arg3]);
 }
 
+/// Call a five-argument runtime function, discarding its return value.
+///
+/// Kept explicit rather than padding a smaller helper: the coverage ABI carries
+/// the source owner and exact span as real arguments, not optional metadata.
+#[inline]
+pub fn call_runtime_5_void<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    func_name: &str,
+    arg1: cranelift_codegen::ir::Value,
+    arg2: cranelift_codegen::ir::Value,
+    arg3: cranelift_codegen::ir::Value,
+    arg4: cranelift_codegen::ir::Value,
+    arg5: cranelift_codegen::ir::Value,
+) {
+    let func_ref = ctx
+        .module
+        .declare_func_in_func(resolve_runtime_func(ctx, func_name), builder.func);
+    adapted_call(builder, func_ref, &[arg1, arg2, arg3, arg4, arg5]);
+}
+
+/// Call a six-argument runtime function, discarding its return value.
+#[inline]
+pub fn call_runtime_6_void<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    func_name: &str,
+    arg1: cranelift_codegen::ir::Value,
+    arg2: cranelift_codegen::ir::Value,
+    arg3: cranelift_codegen::ir::Value,
+    arg4: cranelift_codegen::ir::Value,
+    arg5: cranelift_codegen::ir::Value,
+    arg6: cranelift_codegen::ir::Value,
+) {
+    let func_ref = ctx
+        .module
+        .declare_func_in_func(resolve_runtime_func(ctx, func_name), builder.func);
+    adapted_call(builder, func_ref, &[arg1, arg2, arg3, arg4, arg5, arg6]);
+}
+
 // ============================================================================
 // C2: declare_uniform_i64_import — cache-check + sig-build + declare + cache
 // ============================================================================

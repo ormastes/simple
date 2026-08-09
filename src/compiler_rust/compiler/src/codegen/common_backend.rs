@@ -424,10 +424,10 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                         }
                     }
                     MirInst::DecisionProbe { .. } => {
-                        names.insert("rt_decision_probe".to_string());
+                        names.insert("rt_coverage_decision_probe".to_string());
                     }
                     MirInst::ConditionProbe { .. } => {
-                        names.insert("rt_condition_probe".to_string());
+                        names.insert("rt_coverage_condition_probe".to_string());
                     }
                     MirInst::PathProbe { .. } => {
                         names.insert("rt_path_probe".to_string());
