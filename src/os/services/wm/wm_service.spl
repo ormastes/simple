@@ -73,6 +73,7 @@ class WmService:
     owner_count: i32
     max_windows: i32
     initialized: bool
+    local_only: bool
     running: bool
     request_count: u64
 
@@ -95,6 +96,7 @@ impl WmService:
             owner_count: 0,
             max_windows: WM_MAX_WINDOWS,
             initialized: false,
+            local_only: false,
             running: false,
             request_count: 0
         )
@@ -167,6 +169,19 @@ impl WmService:
         log_raw_println("[wm-service] Listening on IPC port {self.port_id} as '{WM_PORT_NAME}'")
         true
 
+    me init_local() -> bool:
+        """Enable compositor-owned WM state without claiming an IPC port.
+
+        Direct-boot SimpleOS currently has no SYS_IPC_CREATE_PORT provider;
+        local pointer/key actions and ownership tracking remain valid and must
+        not be reported as a failed remote service initialization.
+        """
+        self.port_id = 0
+        self.local_only = true
+        self.initialized = true
+        log_raw_println("[wm-service] local compositor mode (IPC unavailable)")
+        true
+
     me run_loop():
         """Main service loop (blocking). Prefer poll_once() in shell integration.
 
@@ -202,7 +217,7 @@ impl WmService:
         timeout_ms = 0 means non-blocking (return immediately if no message).
         flags bit 0 = 1 means non-blocking poll.
         """
-        if not self.initialized:
+        if not self.initialized or self.local_only:
             return nil
         # Non-blocking recv: timeout = 0, flags = 1 (poll mode)
         val msg_raw = syscall(SYS_IPC_RECV, self.port_id, 0, 1, 0, 0)
