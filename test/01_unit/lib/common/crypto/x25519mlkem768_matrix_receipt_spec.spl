@@ -20,6 +20,7 @@ use lib.common.crypto.x25519_mlkem768.matrix_receipt.{
     X25519MlKem768MatrixOutputComparison,
     X25519MlKem768MatrixRow,
     x25519_mlkem768_admit_full_backend_matrix,
+    x25519_mlkem768_admit_source_backend_matrix,
     x25519_mlkem768_render_matrix_receipt}
 
 fn _gpu(backend: X25519MlKem768EvidenceBackend) -> bool:
@@ -720,3 +721,53 @@ describe "X25519MLKEM768 backend matrix v2":
         duplicate[6] = _pass_row(X25519MlKem768EvidenceBackend.Vulkan)
         val repeated = x25519_mlkem768_admit_full_backend_matrix(duplicate)
         expect(repeated.reason).to_equal("duplicate-backend-vulkan")
+
+    it "admits non-promotable source rows while final promotion rejects them":
+        step("Bind all public outputs and lifecycle claims as source evidence")
+        var rows = _complete_matrix()
+        var index: i64 = 0
+        while index < rows.len():
+            rows[index].execution.promotion_eligible = false
+            index = index + 1
+        val source = x25519_mlkem768_admit_source_backend_matrix(rows)
+        expect(source.status).to_equal(X25519MlKem768EvidenceStatus.Pass)
+        expect(source.admitted_rows).to_equal(7)
+        expect(source.rejected_rows).to_equal(0)
+        expect(source.row_set_sha256.len()).to_equal(64)
+        val final_matrix = x25519_mlkem768_admit_full_backend_matrix(rows)
+        expect(final_matrix.status).to_equal(X25519MlKem768EvidenceStatus.Blocked)
+        expect(final_matrix.rows[0].admission_reason).to_equal(
+            "row-not-promotion-eligible")
+
+    it "rejects source integrity lifecycle and oracle violations":
+        step("Reject a promoted source row to preserve the lifecycle boundary")
+        var lifecycle = _complete_matrix()
+        var lifecycle_index: i64 = 0
+        while lifecycle_index < lifecycle.len():
+            lifecycle[lifecycle_index].execution.promotion_eligible = false
+            lifecycle_index = lifecycle_index + 1
+        lifecycle[1].admission_phase =
+            X25519MlKem768MatrixAdmissionPhase.ArtifactAdmitted
+        val bad_lifecycle = x25519_mlkem768_admit_source_backend_matrix(lifecycle)
+        expect(bad_lifecycle.rows[1].admission_reason).to_equal(
+            "source-row-not-executed")
+        step("Reject a source receipt whose pinned public oracle diverges")
+        var oracle = _complete_matrix()
+        var oracle_index: i64 = 0
+        while oracle_index < oracle.len():
+            oracle[oracle_index].execution.promotion_eligible = false
+            oracle_index = oracle_index + 1
+        oracle[2].client_share_sha256 = "8" * 64
+        val bad_oracle = x25519_mlkem768_admit_source_backend_matrix(oracle)
+        expect(bad_oracle.rows[2].admission_reason).to_equal(
+            "set-c-public-wire-sha256-mismatch")
+        step("Reject a tampered admitted artifact binding")
+        var integrity = _complete_matrix()
+        var integrity_index: i64 = 0
+        while integrity_index < integrity.len():
+            integrity[integrity_index].execution.promotion_eligible = false
+            integrity_index = integrity_index + 1
+        integrity[1].admitted_artifact_sha256 = "8" * 64
+        val bad_integrity = x25519_mlkem768_admit_source_backend_matrix(integrity)
+        expect(bad_integrity.rows[1].admission_reason).to_equal(
+            "executed-artifact-binding-mismatch")

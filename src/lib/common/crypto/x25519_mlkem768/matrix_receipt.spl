@@ -26,6 +26,11 @@ use lib.common.crypto.x25519_mlkem768.contract.{
     X25519_MLKEM768_PROFILE_VERSION}
 
 val X25519_MLKEM768_MATRIX_SCHEMA = "x25519mlkem768-backend-matrix-v2"
+# Source matrices are deliberately a separate, non-promotable evidence class.
+# They bind complete public outputs and lifecycle provenance for qualification
+# input, but can never be mistaken for the final promotion matrix.
+val X25519_MLKEM768_SOURCE_MATRIX_SCHEMA =
+    "x25519mlkem768-source-backend-matrix-v1"
 val _MATRIX_PINNED_SCHEMA = "x25519mlkem768-pinned-workload-v3"
 val _MATRIX_PINNED_ORACLE = "mlkem-native-fd58+rfc7748"
 val _MATRIX_PINNED_FIXTURE = "mlkem-native-fd58+rfc7748-abc-v1"
@@ -98,6 +103,15 @@ struct X25519MlKem768MatrixReceipt:
     executed_rows: i64
     native_rows: i64
     full_operation_rows: i64
+    rows: [X25519MlKem768MatrixRowReceipt]
+
+struct X25519MlKem768SourceMatrixReceipt:
+    schema: text
+    status: X25519MlKem768EvidenceStatus
+    reason: text
+    row_set_sha256: text
+    admitted_rows: i64
+    rejected_rows: i64
     rows: [X25519MlKem768MatrixRowReceipt]
 
 fn _matrix_hex64(value: text) -> bool:
@@ -622,6 +636,108 @@ fn _matrix_canonical_rows(rows: [X25519MlKem768MatrixRow]
         desired = desired + 1
     (ordered, "")
 
+# Qualification consumes this source-only admission product.  Its invariant is
+# intentionally the inverse of promotion eligibility: an executor may provide
+# complete, integrity-bound public evidence for a future promotion cycle, but
+# that evidence is not itself a promotion decision.
+fn _matrix_source_row_reason(row: X25519MlKem768MatrixRow,
+        reference: X25519MlKem768MatrixRow) -> text:
+    if row.admission_phase != X25519MlKem768MatrixAdmissionPhase.Executed:
+        return "source-row-not-executed"
+    if row.execution.status != X25519MlKem768EvidenceStatus.Pass:
+        return "source-row-pass-required"
+    if row.execution.promotion_eligible:
+        return "source-row-must-be-non-promotable"
+    val fixture_reason = _matrix_fixture_stage_reason(row, reference)
+    if fixture_reason != "": return fixture_reason
+    val artifact_reason = _matrix_artifact_stage_reason(row)
+    if artifact_reason != "": return artifact_reason
+    val execution_reason = _matrix_execution_started_reason(row)
+    if execution_reason != "": return execution_reason
+    if not row.execution.scalar_roundtrip_match or
+            not row.execution.absolute_oracle_match:
+        return "source-row-full-output-oracle-missing"
+    val pinned_reason = _matrix_pinned_reason(row)
+    if pinned_reason != "": return pinned_reason
+    # Unlike the final matrix's scalar-only external oracle check, source
+    # qualification binds every row to the fixed public workload oracle.
+    if row.client_share_sha256 !=
+            X25519_MLKEM768_PINNED_CLIENT_SHARE_SHA256 or
+            row.server_share_sha256 !=
+                X25519_MLKEM768_PINNED_SERVER_SHARE_SHA256:
+        return "source-row-public-output-oracle-mismatch"
+    ""
+
+fn _matrix_source_empty(reason: text) -> X25519MlKem768SourceMatrixReceipt:
+    X25519MlKem768SourceMatrixReceipt(
+        schema: X25519_MLKEM768_SOURCE_MATRIX_SCHEMA,
+        status: X25519MlKem768EvidenceStatus.Blocked,
+        reason: reason, row_set_sha256: sha256_text(""),
+        admitted_rows: 0, rejected_rows: 0, rows: [])
+
+fn x25519_mlkem768_admit_source_backend_matrix(
+        input_rows: [X25519MlKem768MatrixRow]
+        ) -> X25519MlKem768SourceMatrixReceipt:
+    if input_rows.len() == 0:
+        return _matrix_source_empty("missing-all-backend-rows")
+    val (rows, structural_reason) = _matrix_canonical_rows(input_rows)
+    if structural_reason != "": return _matrix_source_empty(structural_reason)
+    val reference = rows[0]
+    var receipts: [X25519MlKem768MatrixRowReceipt] = []
+    var material = _matrix_frame("schema", X25519_MLKEM768_SOURCE_MATRIX_SCHEMA)
+    var admitted: i64 = 0
+    var rejected: i64 = 0
+    var first_reason = ""
+    var ordinal: i64 = 0
+    while ordinal < rows.len():
+        val row = rows[ordinal]
+        val reason = _matrix_source_row_reason(row, reference)
+        val admitted_row = reason == "" and
+            _matrix_same_public_outputs(reference, row)
+        val admission_reason = if admitted_row: "" elif reason != "":
+            reason else: "source-row-public-output-mismatch"
+        val outcome = if admitted_row:
+            X25519MlKem768MatrixRowOutcome.Admitted
+        else:
+            X25519MlKem768MatrixRowOutcome.Rejected
+        val comparison = if admitted_row:
+            X25519MlKem768MatrixOutputComparison.Match
+        else:
+            X25519MlKem768MatrixOutputComparison.Mismatch
+        if admitted_row:
+            admitted = admitted + 1
+        else:
+            rejected = rejected + 1
+            if first_reason == "":
+                first_reason = admission_reason + "-" +
+                    x25519_mlkem768_evidence_backend_name(
+                        row.execution.requested_backend)
+        val source_sha256 = sha256_text(_matrix_receipt_material(row.execution))
+        receipts.push(X25519MlKem768MatrixRowReceipt(
+            ordinal: ordinal, backend: row.execution.requested_backend,
+            outcome: outcome, source_reason: row.execution.reason,
+            admission_reason: admission_reason,
+            input_contract_matches: _matrix_same_input(
+                reference.execution, row.execution),
+            output_comparison: comparison,
+            source_receipt_sha256: source_sha256, source: row))
+        material = material + _matrix_frame("row", _matrix_row_material(row) +
+            _matrix_frame("outcome", _matrix_outcome_name(outcome)) +
+            _matrix_frame("admission_reason", admission_reason) +
+            _matrix_frame("source_receipt_sha256", source_sha256))
+        ordinal = ordinal + 1
+    val status = if admitted == 7:
+        X25519MlKem768EvidenceStatus.Pass
+    else:
+        X25519MlKem768EvidenceStatus.Blocked
+    X25519MlKem768SourceMatrixReceipt(
+        schema: X25519_MLKEM768_SOURCE_MATRIX_SCHEMA, status: status,
+        reason: if status == X25519MlKem768EvidenceStatus.Pass:
+            "all-seven-non-promotable-source-rows-match"
+        else: first_reason,
+        row_set_sha256: sha256_text(material), admitted_rows: admitted,
+        rejected_rows: rejected, rows: receipts)
+
 fn _matrix_empty(reason: text) -> X25519MlKem768MatrixReceipt:
     X25519MlKem768MatrixReceipt(
         schema: X25519_MLKEM768_MATRIX_SCHEMA,
@@ -805,10 +921,12 @@ fn x25519_mlkem768_render_matrix_receipt(
                 row.source.server_share_sha256 + "\n"
     out
 
-export X25519_MLKEM768_MATRIX_SCHEMA
+export X25519_MLKEM768_MATRIX_SCHEMA, X25519_MLKEM768_SOURCE_MATRIX_SCHEMA
 export X25519MlKem768MatrixAdmissionPhase, X25519MlKem768MatrixRowOutcome
 export X25519MlKem768MatrixOutputComparison
 export X25519MlKem768MatrixRow, X25519MlKem768MatrixRowReceipt
 export X25519MlKem768MatrixReceipt
+export X25519MlKem768SourceMatrixReceipt
 export x25519_mlkem768_admit_full_backend_matrix
+export x25519_mlkem768_admit_source_backend_matrix
 export x25519_mlkem768_render_matrix_receipt
