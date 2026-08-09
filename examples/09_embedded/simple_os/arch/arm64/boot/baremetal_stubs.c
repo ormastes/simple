@@ -2007,7 +2007,21 @@ RuntimeValue rt_dict_values(RuntimeValue d) { (void)d; return NIL_VALUE; }
 RuntimeValue rt_dict_clear(RuntimeValue d) { (void)d; return NIL_VALUE; }
 RuntimeValue rt_array_first(RuntimeValue a) { (void)a; return NIL_VALUE; }
 RuntimeValue rt_array_last(RuntimeValue a) { (void)a; return NIL_VALUE; }
-RuntimeValue rt_array_repeat(RuntimeValue v, RuntimeValue n) { (void)v; (void)n; return NIL_VALUE; }
+RuntimeValue rt_array_repeat(RuntimeValue v, RuntimeValue n) {
+    /* MIR passes the repeat count as a raw i64. Array repeat is required by
+     * selector/layout indexes such as [-1; node_count]; returning NIL here
+     * turns NIL's tag into child index 3 and creates an infinite sibling loop. */
+    int64_t count = (int64_t)n;
+    if (count < 0) count = 0;
+    if (count > 0x100000) count = 0x100000;
+    RuntimeValue result = rt_array_new((RuntimeValue)count);
+    if (!IS_HEAP(result)) return result;
+    RuntimeArray *array = (RuntimeArray *)DECODE_PTR(result);
+    if (!array || array->hdr.type != HEAP_ARRAY) return NIL_VALUE;
+    array->len = (uint64_t)count;
+    for (int64_t i = 0; i < count; i++) array->items[i] = v;
+    return result;
+}
 RuntimeValue rt_string_find(RuntimeValue s, RuntimeValue sub) { (void)s; (void)sub; return ENCODE_INT(-1); }
 RuntimeValue rt_string_rfind(RuntimeValue s, RuntimeValue sub) { (void)s; (void)sub; return ENCODE_INT(-1); }
 RuntimeValue rt_string_join(RuntimeValue a, RuntimeValue sep) { (void)a; (void)sep; return NIL_VALUE; }
