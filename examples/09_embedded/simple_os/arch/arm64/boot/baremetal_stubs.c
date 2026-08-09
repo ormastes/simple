@@ -2627,6 +2627,9 @@ static volatile uint64_t g_gui_simd_fill_chunks = 0;
 static volatile uint64_t g_gui_simd_fill_tail_pixels = 0;
 static volatile uint64_t g_gui_simd_fill_scalar_parity_checks = 0;
 static volatile uint64_t g_gui_simd_fill_scalar_parity_failures = 0;
+static volatile uint64_t g_gui_blit_row_calls = 0;
+static volatile uint64_t g_gui_blit_row_pixels = 0;
+static volatile uint64_t g_gui_blit_row_neon_chunks = 0;
 
 RuntimeValue rt_gui_set_fb(RuntimeValue addr, RuntimeValue w)
 {
@@ -2663,6 +2666,9 @@ RuntimeValue rt_gui_simd_fill_enabled(void)
     return 0;
 #endif
 }
+RuntimeValue rt_gui_blit_row_calls(void) { return (RuntimeValue)g_gui_blit_row_calls; }
+RuntimeValue rt_gui_blit_row_pixels(void) { return (RuntimeValue)g_gui_blit_row_pixels; }
+RuntimeValue rt_gui_blit_row_neon_chunks(void) { return (RuntimeValue)g_gui_blit_row_neon_chunks; }
 
 static void rt_gui_scalar_fill4(uint32_t dst[4], uint32_t color)
 {
@@ -2761,6 +2767,8 @@ RuntimeValue rt_gui_blit_row4(RuntimeValue pixels_value, RuntimeValue src_offset
     if (count > pixels->len - (uint64_t)src_offset)
         count = pixels->len - (uint64_t)src_offset;
     if (count > g_fb_w - x) count = g_fb_w - x;
+    g_gui_blit_row_calls++;
+    g_gui_blit_row_pixels += count;
     volatile uint32_t *dst = (volatile uint32_t *)(uintptr_t)g_fb_addr
         + (uint64_t)y * g_fb_w + x;
     uint64_t i = 0;
@@ -2796,6 +2804,7 @@ RuntimeValue rt_gui_blit_row4(RuntimeValue pixels_value, RuntimeValue src_offset
         g_gui_simd_fill_hits++;
         g_gui_simd_fill_chunks += chunks;
     }
+    g_gui_blit_row_neon_chunks += chunks;
     g_gui_simd_fill_tail_pixels += count - chunks * 4u;
     return 1;
 }
