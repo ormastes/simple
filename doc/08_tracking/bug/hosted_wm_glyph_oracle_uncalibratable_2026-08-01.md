@@ -1,7 +1,17 @@
 # `GLYPH_RGB_SHA256=pending` is not the first blocker for showcase cells 4/5/6
 
-**Status:** OPEN — no legitimate calibration value exists yet, and none was
-invented.
+**Status:** OPEN — ARCHITECTURAL. no legitimate calibration value exists yet,
+and none was invented.
+
+**Re-checked 2026-08-09:** `GLYPH_RGB_SHA256=pending` is still line 18 of the
+gate script; still the last blocker in the chain described below. Calibrating
+it for real requires the full chain this doc lays out — a clean dedicated
+worktree, a quiet host, an `native-build` closure of the hosted-WM entry
+point, and a live X11 window capture to hash — none of which fits in an
+interpreter-only, no-native-build-closure verification pass. Deferred rather
+than attempted with a shortcut; a shortcut here (guessing/back-filling the
+hash) is explicitly the thing this doc already warns against. No code change
+made this pass; characterization confirmed accurate as written below.
 **Gate:** `scripts/check/check-linux-hosted-wm-live-window-evidence.shs:18`
 **Investigated:** 2026-08-01, host `linux-x86_64`, base
 `f7bfaf973de2a2c398fec7f11ea4235e19f557ab`, re-checked against
