@@ -239,3 +239,81 @@ fn bind_builtin() -> i64:
         "an UNKNOWN type must never be copied — absence is not value-semantics"
     );
 }
+
+// =============================================================================
+// F1/S6 — the FOURTH copy site: struct PARAMETER binding (corpus case J)
+// =============================================================================
+//
+// S5 closed struct-literal field init, local binding, field store, and return
+// (cases F/G/H/I/K), but explicitly left one alias path open: an incoming
+// struct-typed PARAMETER is caller-owned storage — a plain `fn f(a: SCell)`
+// receives the same tagged heap pointer the caller holds, so a mutation to
+// `a` inside `f` is visible to the caller. S6 closes that gap by copying a
+// declared-value-type parameter into a private local before the body runs,
+// gated by the identical `type_value_kinds` check `copy_if_value_type` already
+// uses (`copy_param_if_value_type`, mir/lower/lowering_core.rs).
+//
+// SABOTAGE CHECK: making `copy_param_if_value_type` return early
+// unconditionally (or gate on the wrong `type_value_kinds` entry) makes
+// `struct_parameter_binding_emits_aggregate_copy` fail. If it does not, this
+// test is not measuring anything.
+
+const PARAM_SITE_SOURCE: &str = r#"
+struct SCell:
+    n: i64
+
+class BCell:
+    n: i64
+
+fn take_struct(a: SCell) -> i64:
+    return a.n
+
+fn take_class(a: BCell) -> i64:
+    return a.n
+"#;
+
+#[test]
+fn struct_parameter_binding_emits_aggregate_copy() {
+    let hir = parse_and_lower(PARAM_SITE_SOURCE);
+    let mir = lower_to_mir(&hir, None).expect("MIR lowering failed");
+
+    let copies = aggregate_copies_in(&mir, "take_struct");
+    assert!(
+        copies.iter().any(|n| n.as_deref() == Some("SCell")),
+        "binding a declared `struct` PARAMETER must emit an AggregateCopy \
+         before the body runs — without one, the parameter aliases the \
+         caller's storage (corpus case J). Emitted copies: {:?}",
+        copies
+    );
+}
+
+#[test]
+fn class_parameter_binding_never_emits_aggregate_copy() {
+    let hir = parse_and_lower(PARAM_SITE_SOURCE);
+    let mir = lower_to_mir(&hir, None).expect("MIR lowering failed");
+
+    let copies = aggregate_copies_in(&mir, "take_class");
+    assert!(
+        copies.is_empty(),
+        "binding a declared `class` PARAMETER must NOT be copied — copying an \
+         identity type converts the class defect into its struct sibling. \
+         Emitted copies: {:?}",
+        copies
+    );
+}
+
+#[test]
+fn struct_and_class_parameter_binding_diverge_in_emitted_mir() {
+    let hir = parse_and_lower(PARAM_SITE_SOURCE);
+    let mir = lower_to_mir(&hir, None).expect("MIR lowering failed");
+
+    let struct_copies = aggregate_copies_in(&mir, "take_struct").len();
+    let class_copies = aggregate_copies_in(&mir, "take_class").len();
+    assert!(
+        struct_copies > class_copies,
+        "struct and class parameters must not lower identically: struct \
+         emitted {} AggregateCopy, class emitted {}",
+        struct_copies,
+        class_copies
+    );
+}

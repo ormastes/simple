@@ -949,6 +949,47 @@ impl<'a> MirLowerer<'a> {
         })
     }
 
+    /// F1/S6 — site J: an incoming struct-typed parameter is caller-owned
+    /// storage (the same tagged heap pointer the caller holds). Without this,
+    /// mutations to the parameter inside the callee body are visible to the
+    /// caller — exactly the alias case sites F/G/H/I/K already close for
+    /// struct-literal init, local binding, field store, and return.
+    ///
+    /// Reuses the `copy_if_value_type` gate verbatim: Some(true) (declared
+    /// `struct`) copies, Some(false)/None (class, actor, unknown) leaves the
+    /// parameter's local slot untouched. Checking the gate before emitting the
+    /// load avoids a wasted Load/AggregateCopy/Store triple on every
+    /// non-struct parameter (the overwhelming common case).
+    pub(super) fn copy_param_if_value_type(&mut self, local_idx: usize, ty: TypeId) -> MirLowerResult<()> {
+        let should_copy = self
+            .type_registry
+            .and_then(|registry| registry.get_type_name(ty))
+            .is_some_and(|name| self.type_value_kinds.get(name) == Some(&true));
+        if !should_copy {
+            return Ok(());
+        }
+        let vreg = self.lower_local_expr(local_idx, ty)?;
+        let copied = self.copy_if_value_type(vreg, ty)?;
+        if copied == vreg {
+            // Gate declined at the stricter checks inside copy_if_value_type
+            // (e.g. no concrete field list) — leave the slot untouched.
+            return Ok(());
+        }
+        self.with_func(|func, current_block| {
+            let addr = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::LocalAddr {
+                dest: addr,
+                local_index: local_idx,
+            });
+            block.instructions.push(MirInst::Store {
+                addr,
+                value: copied,
+                ty,
+            });
+        })
+    }
+
     /// Set type registry reference for looking up unit type constraints
     pub fn with_type_registry(mut self, registry: &'a crate::hir::TypeRegistry) -> Self {
         self.type_registry = Some(registry);
@@ -1666,6 +1707,16 @@ impl<'a> MirLowerer<'a> {
 
         // Explicit state transition: Idle -> Lowering
         self.begin_function(mir_func, &func.name, func.is_public())?;
+
+        // F1/S6 — site J: copy declared-value-type (struct) parameters into a
+        // private local before the body runs, closing the last alias gap in
+        // the class-identity kind-propagation corpus (case J). Must run after
+        // begin_function (needs an active block) and before the body is
+        // lowered (every read of the parameter inside the body must see the
+        // copy, not the caller's original).
+        for (i, param) in func.params.iter().enumerate() {
+            self.copy_param_if_value_type(i, param.ty)?;
+        }
 
         // Reset last expression value for this function
         self.last_expr_value = None;

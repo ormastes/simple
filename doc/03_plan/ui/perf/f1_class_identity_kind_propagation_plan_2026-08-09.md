@@ -477,3 +477,67 @@ This additive-variant approach was not implemented in this pass (only
 investigated) because step 3's exact site list is only known after step 2 is
 built and the compiler's own exhaustiveness errors enumerate it — that is
 follow-on work, not a same-pass extension of this scoping.
+
+## 8. S6 result — the fourth copy site (parameter binding, measured 2026-08-09)
+
+S5 landed three of the four sites the corpus needs (struct-literal field init,
+local binding, field store — plus return/method-return as a side effect of the
+local-binding gate) but left case J (`j_struct_param_binding`) unchanged: an
+incoming struct-typed parameter is caller-owned storage, and nothing copied it
+before the callee's body ran.
+
+**The fix.** `MirLowerer::copy_param_if_value_type` (new,
+`mir/lower/lowering_core.rs`), called once per parameter at the top of
+`lower_function` — after `begin_function` (needs an active block) and before
+the body is lowered (every in-body read of the parameter must see the copy).
+It gates on the exact same `type_value_kinds` check `copy_if_value_type` uses
+(`Some(true)` only), then reads the parameter's own local slot
+(`lower_local_expr`), copies it via the S5 `AggregateCopy` primitive, and
+stores the copy back into that same slot — so every subsequent `LocalAddr`
+read of the parameter inside the function body sees the private copy, not the
+caller's original. Reuses `copy_if_value_type` rather than duplicating its
+field-list / byte-size checks.
+
+**Oracle.** Three new tests in
+`compiler/tests/class_identity_kind_propagation.rs`
+(`struct_parameter_binding_emits_aggregate_copy`,
+`class_parameter_binding_never_emits_aggregate_copy`,
+`struct_and_class_parameter_binding_diverge_in_emitted_mir`), mirroring S5's
+pattern for the other three sites. Sabotage-verified: short-circuiting
+`copy_param_if_value_type` to an unconditional `return Ok(())` takes the suite
+from 11/11 to 9/11 — exactly the two gate-dependent parameter tests fail, with
+an explicit assertion message, not silence. Restoring the real gate returns
+11/11.
+
+**Seed-only A–K matrix** (`scripts/check/check-class-identity-seed-matrix.shs`),
+before → after, on a from-source-rebuilt seed (binary provenance printed by the
+script itself — this is NOT the deployed `bin/simple`):
+
+```
+case                          seedJIT (before → after)        seedINTERP (before → after)
+a_class_trait_field           REF → REF                       COPY(n=100) → COPY(n=100)
+b_class_optional_field        (nil-field runtime error, unchanged, both engines)
+c_class_array_element         REF → REF                       COPY(n=130) → COPY(n=130)
+d_class_param_to_field        REF → REF                       COPY(n=140) → COPY(n=140)
+e_class_returned               REF → REF                       COPY(n=90)  → COPY(n=90)
+f_struct_literal_field_init    VAL → VAL                       VAL → VAL
+g_struct_local_binding         VAL → VAL                       VAL → VAL
+h_struct_field_store           VAL → VAL                       VAL → VAL
+i_struct_returned              VAL → VAL                       VAL → VAL
+j_struct_param_binding         ALIAS(n=99) → VAL                VAL → VAL   (unchanged)
+k_struct_method_returned       VAL → VAL                       VAL → VAL
+```
+
+Only `j_struct_param_binding`'s seedJIT cell moved, and it moved the direction
+S6 targets (ALIAS→VAL). Every class case (A/C/D/E) and every seedINTERP
+reading is byte-for-byte identical before and after — the gate did not convert
+the class defect into its struct sibling, matching the invariant S3 and S5
+established.
+
+**Status after S6.** All six corpus sites S5's plan named for the JIT
+(literal field init, local binding, field store, free-function return,
+parameter binding, method return) are now closed on the seed JIT. S4 (the
+seed interpreter's class-identity gap, `Arc<HashMap>` COW) remains the
+deep blocker described in §7e and is untouched by this change — S6 is scoped
+to the JIT-side parameter-binding gap S5's commit message called out, nothing
+more.
