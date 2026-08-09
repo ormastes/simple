@@ -2294,7 +2294,31 @@ S1(rt_thread_create) S1(rt_thread_join)
 RuntimeValue rt_thread_yield(void) { return NIL_VALUE; }
 RuntimeValue rt_thread_current(void) { return ENCODE_INT(0); }
 RuntimeValue rt_thread_sleep(RuntimeValue a) { (void)a; return NIL_VALUE; }
-S0(rt_mutex_new) S1(rt_mutex_lock) S1(rt_mutex_unlock) S1(rt_mutex_try_lock)
+/* Single-core cooperative mutex.
+ *
+ * The ARM64 desktop currently runs one guest CPU and does not preempt its
+ * render/service path.  A mutex is therefore a value-owning cell: acquiring
+ * reads the protected value and releasing writes its replacement.  This is
+ * the same real freestanding contract used by the x86_64 SimpleOS target; it
+ * is intentionally not a success-returning synchronization stub. */
+RuntimeValue rt_mutex_new(RuntimeValue initial) {
+    RuntimeValue *box = (RuntimeValue *)malloc(sizeof(RuntimeValue));
+    if (box == NULL) return NIL_VALUE;
+    *box = initial;
+    return ENCODE_PTR(box);
+}
+RuntimeValue rt_mutex_lock(RuntimeValue mutex) {
+    if (!IS_HEAP(mutex)) return mutex;
+    return *(RuntimeValue *)DECODE_PTR(mutex);
+}
+RuntimeValue rt_mutex_unlock(RuntimeValue mutex, RuntimeValue new_value) {
+    if (IS_HEAP(mutex)) *(RuntimeValue *)DECODE_PTR(mutex) = new_value;
+    return new_value;
+}
+RuntimeValue rt_mutex_try_lock(RuntimeValue mutex) {
+    if (!IS_HEAP(mutex)) return mutex;
+    return *(RuntimeValue *)DECODE_PTR(mutex);
+}
 S0(rt_condvar_new) S1(rt_condvar_wait) S1(rt_condvar_notify) S1(rt_condvar_notify_all)
 
 S0(rt_channel_new) S2(rt_channel_send) S1(rt_channel_recv) S1(rt_channel_try_recv) S1(rt_channel_close)
