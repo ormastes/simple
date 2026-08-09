@@ -2,9 +2,6 @@
 
 use std.gc_async_mut.gpu.browser_engine.simple_web_env_target.{env_get}
 use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language}
-use std.common.web.browser_renderer_protocol.{
-    BROWSER_RENDERER_MAX_PAYLOAD_BYTES
-}
 use std.common.animation.timing.{parse_timing_function}
 use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{
     html_tree_builder_flat_projection_with_limits
@@ -79,9 +76,12 @@ fn simple_web_backdrop_admission(backdrop: text) -> SimpleWebBackdropAdmission:
 # from this render-budget mechanism; do not paper over it by raising this
 # default.
 val WEB_RENDER_BUDGET_MS: i64 = 10000
-val SIMPLE_WEB_MAX_HTML_NODES: i32 = 65536
-val SIMPLE_WEB_MAX_HTML_BYTES: i64 = BROWSER_RENDERER_MAX_PAYLOAD_BYTES
-val SIMPLE_WEB_MAX_HTML_PARTS: i32 = 262144
+# These security limits must be literal-return owners, not runtime globals.
+# Native freestanding module initialization can observe a cross-module `val`
+# dependency as zero, which previously rejected every non-empty WM document.
+fn _simple_web_max_html_nodes() -> i32: 65536
+fn _simple_web_max_html_bytes() -> i64: 1048576
+fn _simple_web_max_html_parts() -> i32: 262144
 
 fn _simple_web_html_source_admitted(html: text, byte_limit: i64) -> bool:
     if html.len() > byte_limit:
@@ -110,7 +110,7 @@ fn _simple_web_html_source_admitted(html: text, byte_limit: i64) -> bool:
     while i < n:
         if html.byte_at(i) == 60:
             part_count = part_count + 1
-            if part_count > SIMPLE_WEB_MAX_HTML_PARTS:
+            if part_count > _simple_web_max_html_parts():
                 return false
         i = i + 1
     true
@@ -764,12 +764,12 @@ fn decode_html_entities(s: text) -> text:
 
 fn parse_html(html: text) -> [HNode]:
     _parse_html_with_limits(
-        html, SIMPLE_WEB_MAX_HTML_NODES, SIMPLE_WEB_MAX_HTML_BYTES
+        html, _simple_web_max_html_nodes(), _simple_web_max_html_bytes()
     )
 
 fn _parse_html_with_node_limit(html: text, requested_node_limit: i32) -> [HNode]:
     _parse_html_with_limits(
-        html, requested_node_limit, SIMPLE_WEB_MAX_HTML_BYTES
+        html, requested_node_limit, _simple_web_max_html_bytes()
     )
 
 fn _parse_html_with_limits(
@@ -777,20 +777,20 @@ fn _parse_html_with_limits(
 ) -> [HNode]:
     val node_limit = if requested_node_limit < 1:
         1
-    elif requested_node_limit > SIMPLE_WEB_MAX_HTML_NODES:
-        SIMPLE_WEB_MAX_HTML_NODES
+    elif requested_node_limit > _simple_web_max_html_nodes():
+        _simple_web_max_html_nodes()
     else:
         requested_node_limit
     val byte_limit = if requested_byte_limit < 0:
         0
-    elif requested_byte_limit > SIMPLE_WEB_MAX_HTML_BYTES:
-        SIMPLE_WEB_MAX_HTML_BYTES
+    elif requested_byte_limit > _simple_web_max_html_bytes():
+        _simple_web_max_html_bytes()
     else:
         requested_byte_limit
     if not _simple_web_html_source_admitted(html, byte_limit):
         return [mk_node("#root", -1)]
     val projected = html_tree_builder_flat_projection_with_limits(
-        html, node_limit, SIMPLE_WEB_MAX_HTML_PARTS, 65536
+        html, node_limit, _simple_web_max_html_parts(), 65536
     )
     var flat_to_hnode: [i32] = [-1; projected.nodes.len()]
     var skip_subtree: [bool] = [false; projected.nodes.len()]
@@ -860,7 +860,7 @@ pub fn simple_web_layout_debug_capped_input_node_count(
     html: text, requested_byte_limit: i64
 ) -> i32:
     _parse_html_with_limits(
-        html, SIMPLE_WEB_MAX_HTML_NODES, requested_byte_limit
+        html, _simple_web_max_html_nodes(), requested_byte_limit
     ).len() as i32
 
 pub fn simple_web_layout_debug_dump_nodes(html: text) -> text:
