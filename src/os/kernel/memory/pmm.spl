@@ -241,6 +241,22 @@ fn pmm_init(boot_info: BootOutputPort):
         low_page = low_page + 1
 
     # Step 8: Seed refcounts from the final allocation bitmap.
+    #
+    # This used to grow `g_page_refcounts` via one `.push()` per physical page
+    # (up to `total_pages`, e.g. 393,216 for a 512MB aarch64 VM) on a
+    # dynamically-sized `[u16] = []`. Found 2026-08-09 wiring this PMM into
+    # the aarch64 Limine boot lane for the first time (previously dead code on
+    # every lane — see memory_init in limine_boot_aarch64.spl): that single
+    # eager loop made real EDK2/AAVMF firmware boot hang indefinitely (ruled
+    # out as a fault via `qemu -d int` showing no exceptions after kernel
+    # entry — genuinely busy, not stuck), because `.push()` clones the whole
+    # backing array per call under this codegen (a known defect — see
+    # doc-tracked `reference_seed_array_push_clones_no_fast_path`), turning N
+    # sequential pushes into O(N^2) work. `g_page_refcounts` is now a fixed
+    # `[u16; MAX_PHYS_PAGES]` array (see its declaration below) — direct
+    # indexed writes, O(n) total, no growth needed, so eager seeding is cheap
+    # again and restored here to match this module's own documented design
+    # ("Limits: MAX_PHYS_PAGES entries x 2 bytes = 2MB of BSS. Acceptable.").
     _pmm_initialize_refcounts()
 
     log_raw_println("[PMM] Refcount slab: {total_pages} entries ({total_pages * 2 / 1024}KB)")
@@ -341,7 +357,7 @@ fn pmm_alloc_page() -> PageFrame?:
 fn _pmm_free_page_index(index: u64):
     if index >= _pmm_total_pages:
         return
-    if (g_page_refcounts.len() as u64) > index:
+    if index < MAX_PHYS_PAGES:
         g_page_refcounts[index as i32] = 0
     if _bitmap_test_addr(_pmm_bitmap_addr, index):
         _bitmap_clear_addr(_pmm_bitmap_addr, index)
@@ -432,21 +448,37 @@ fn pmm_free_memory() -> u64:
 # Managed independently of the alloc bitmap: a page with refcount > 1 is
 # shared; the bitmap still tracks whether it is allocated at all.
 #
-# Limits: MAX_PHYS_PAGES entries × 2 bytes = 2MB of BSS. Acceptable.
-
-var g_page_refcounts: [u16] = []
+# Limits: MAX_PHYS_PAGES entries x 2 bytes = 2MB of BSS. Acceptable.
+#
+# Fixed-size BSS array, NOT a growable `.push()`-built one (2026-08-09, found
+# wiring this module into the aarch64 Limine boot lane for the first time —
+# see limine_boot_aarch64.spl's memory_init). This module previously declared
+# `var g_page_refcounts: [u16] = []` and grew it one element at a time via
+# `.push()` in a loop, exactly matching this file's own header comment's
+# stated 2MB/MAX_PHYS_PAGES design intent, but not actually implementing it:
+# `.push()` clones the whole backing array per call under this codegen (a
+# known array-growth defect — see doc-tracked
+# `reference_seed_array_push_clones_no_fast_path`), so a loop of N pushes is
+# O(N^2). At MAX_PHYS_PAGES that is intractable; even lazily growing to a
+# single high pfn (e.g. pfn ~262144, the first free page on the real aarch64
+# `virt` memory map this was proven against) hung real EDK2/AAVMF firmware
+# boot indefinitely on the very first `pmm_alloc_page()` call — confirmed via
+# `qemu -d int` showing no exceptions after kernel entry, i.e. genuinely busy,
+# not faulting. A fixed `[u16; MAX_PHYS_PAGES]` array needs no growth at all:
+# every index is O(1) from the start, matching the header comment's original
+# design.
+var g_page_refcounts: [u16; 1048576] = [0; 1048576]
 
 fn _pmm_set_refcount(index: u64, count: u16):
-    while (g_page_refcounts.len() as u64) <= index:
-        g_page_refcounts.push(0)
+    if index >= MAX_PHYS_PAGES:
+        return
     g_page_refcounts[index as i32] = count
 
 fn _pmm_initialize_refcounts():
-    g_page_refcounts = []
     var index: u64 = 0
-    while index < _pmm_total_pages:
+    while index < _pmm_total_pages and index < MAX_PHYS_PAGES:
         val count: u16 = if _bitmap_test_addr(_pmm_bitmap_addr, index): 1 else 0
-        g_page_refcounts.push(count)
+        g_page_refcounts[index as i32] = count
         index = index + 1
 
 fn _pmm_initialize_refcounts_prefix(reserved_pages: u64):
@@ -454,11 +486,10 @@ fn _pmm_initialize_refcounts_prefix(reserved_pages: u64):
     `reserved_pages` frames are allocated (refcount 1), everything after is
     free (refcount 0). Equivalent to _pmm_initialize_refcounts on that bitmap
     shape, without any per-page bitmap MMIO reads."""
-    g_page_refcounts = []
     var index: u64 = 0
-    while index < _pmm_total_pages:
+    while index < _pmm_total_pages and index < MAX_PHYS_PAGES:
         val count: u16 = if index < reserved_pages: 1 else 0
-        g_page_refcounts.push(count)
+        g_page_refcounts[index as i32] = count
         index = index + 1
 
 fn pmm_ref_page(pa: u64):
@@ -471,10 +502,8 @@ fn pmm_ref_page(pa: u64):
     val pfn = pa / PAGE_SIZE
     if pfn >= _pmm_total_pages:
         return
-    # Grow refcount array lazily to total_pages length if needed.
-    # In baremetal this is only called after pmm_init so total_pages is stable.
-    while (g_page_refcounts.len() as u64) <= pfn:
-        g_page_refcounts.push(0)
+    if pfn >= MAX_PHYS_PAGES:
+        return
     val cur = g_page_refcounts[pfn as i32]
     if cur < 65535:
         g_page_refcounts[pfn as i32] = cur + 1
@@ -489,7 +518,7 @@ fn pmm_unref_page(pa: u64) -> u16:
     val pfn = pa / PAGE_SIZE
     if pfn >= _pmm_total_pages:
         return 0
-    if (g_page_refcounts.len() as u64) <= pfn:
+    if pfn >= MAX_PHYS_PAGES:
         return 0
     val cur = g_page_refcounts[pfn as i32]
     if cur == 0:
@@ -511,7 +540,7 @@ fn pmm_get_refcount(pa: u64) -> u16:
     val pfn = pa / PAGE_SIZE
     if pfn >= _pmm_total_pages:
         return 0
-    if (g_page_refcounts.len() as u64) <= pfn:
+    if pfn >= MAX_PHYS_PAGES:
         return 0
     g_page_refcounts[pfn as i32]
 

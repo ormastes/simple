@@ -1524,6 +1524,21 @@ void rt_aarch64_wfe_spin(void) {
     }
 }
 
+/* rt_arm64_mrs_sctlr_el1: bare read of SCTLR_EL1 (System Control Register,
+ * EL1), used by limine_boot_aarch64.spl's memory_init to log whether the
+ * MMU (bit 0, "M") is on at kernel entry. No side effect, no write half —
+ * this lane never touches the page tables Limine already built. Matches the
+ * `mrs_sctlr_el1` accessor in src/os/kernel/arch/arm64/cpu.spl (the older
+ * non-Limine boot lane's `rt_arm64_mrs_sctlr_el1` extern), but that lane's
+ * own C implementation is not linked into this freestanding runtime, so the
+ * symbol is re-provided here rather than pulling that whole EL1-direct boot
+ * lane's object graph into the Limine link closure. */
+spl_u64 rt_arm64_mrs_sctlr_el1(void) {
+    spl_u64 value;
+    __asm__ volatile("mrs %0, sctlr_el1" : "=r"(value));
+    return value;
+}
+
 /* ============================================================================
  * Remaining generic rt_* primitives needed to link limine_boot_aarch64.spl +
  * klog_api.spl + os.kernel.boot.mmio against this file. Ported/adapted from

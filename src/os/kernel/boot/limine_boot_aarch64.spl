@@ -36,9 +36,21 @@
 
 use os.kernel.types.memory_types.{PhysAddr, VirtAddr}
 use os.kernel.boot.ports.{BootOutputPort, BootMemoryRegion, FramebufferInfo, MemoryRegionKind}
-use os.kernel.boot.mmio.{mmio_read64, mmio_read32, mmio_write8, mmio_read8}
+use os.kernel.boot.mmio.{mmio_read64, mmio_read32, mmio_write8, mmio_read8, mmio_disable_test_mode}
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.log.klog_api.{log_init_serial, log_raw, log_raw_println, LOG_INFO}
+use os.kernel.memory.pmm.{pmm_init, pmm_total_pages, pmm_free_pages, pmm_total_memory, pmm_free_memory, pmm_alloc_page, pmm_free_page}
+
+# SCTLR_EL1 read-only probe, used only to log the MMU/cache-enable state that
+# Limine's protocol handoff is supposed to have already established (Limine
+# guarantees the MMU is on with the kernel's higher-half mapping active by
+# the time kernel_main runs — that guarantee is what lets this file dereference
+# raw physical response pointers via mmio_read64 at all). This is a bare `mrs`
+# read with no side effect; the real implementation lives in
+# examples/09_embedded/simple_os/arch/aarch64/boot/freestanding_runtime.c
+# because system-register access is genuinely hardware-only (no Simple
+# intrinsic for it) — never a Rust dependency.
+extern fn rt_arm64_mrs_sctlr_el1() -> u64
 
 # `os.kernel.boot.cpu.halt_loop` is x86_64-only (rt_cli/rt_hlt are x86 `cli`/
 # `hlt` instructions with no aarch64 meaning) — importing that module here
@@ -389,7 +401,27 @@ fn _build_boot_output() -> BootOutputPort:
     val rsdp_addr = _parse_rsdp()
     val (kernel_phys, kernel_virt) = _parse_kernel_address()
 
-    val kernel_size = _get_kernel_end() - kernel_phys.addr
+    # BUG FIX (2026-08-09, found wiring pmm_init into this lane for the first
+    # time — see memory_init below): `_get_kernel_end()` is a linker-provided
+    # symbol read back as a raw address baked into this higher-half-linked
+    # ELF, so it is a VIRTUAL address (matches the `Entry point address:
+    # 0xffffffff8010...` this kernel actually links at). `kernel_phys.addr` is
+    # the PHYSICAL base Limine reports. Subtracting a ~0xffffffff8010_0000
+    # virtual address from a ~0x5FA0_0000 physical one used to underflow to a
+    # near-u64::MAX "kernel_size" — harmless as long as nothing read it, which
+    # is exactly why this went unnoticed: `boot_info.kernel_size` had no real
+    # consumer on any arch until memory_init's Step 6 (kernel-region
+    # reservation, pmm.spl) started deriving a page COUNT from it, at which
+    # point the loop bound became astronomical and boot hung indefinitely
+    # (confirmed under real EDK2/AAVMF firmware with `qemu -d int` showing no
+    # further exceptions after kernel entry — genuinely busy, not faulting).
+    # Fix: subtract from `kernel_virt.addr` (also virtual) instead, so both
+    # operands are in the same address space and the difference is the real,
+    # small kernel image size. `limine_boot.spl` (x86_64) has the identical
+    # `_get_kernel_end() - kernel_phys.addr` pattern and is presumed to share
+    # this defect, but memory_init is still unwired there (MILESTONE STUB) so
+    # nothing has exercised it yet — fixing that file is out of scope here.
+    val kernel_size = _get_kernel_end() - kernel_virt.addr
 
     BootOutputPort(
         memory_map: memory_map,
@@ -409,21 +441,60 @@ fn _build_boot_output() -> BootOutputPort:
 # Kernel Entry Point
 # ============================================================================
 
-# MILESTONE STUB (2026-08-07): the real cross-arch memory layer (Layer 1)
-# `memory_init` is unimplemented for the Limine boot-entry lane on BOTH
-# x86_64 (limine_boot.spl) and aarch64 as of this pass — the `extern fn`
-# declaration this replaces had no definition anywhere in the tree on
-# either arch, so kernel_main() could never have linked before now. This
-# stub exists only to let a REAL (non-probe) SimpleOS kernel reach a real
-# halt after real serial output, which is this pass's actual milestone
-# scope (a genuine klog_api line from the real kernel booted via Limine +
-# AAVMF pflash on QEMU aarch64 `virt` — see
-# doc/08_tracking/bug/aarch64_real_firmware_boot_gap_and_seed_defects_2026-07-14.md).
-# Porting the real memory layer to this boot lane is future work, tracked
-# in that same bug doc — do not mistake this stub for a completed memory
-# subsystem.
+# Layer 1 memory port (2026-08-09): wires the existing arch-agnostic bitmap
+# physical-frame allocator (src/os/kernel/memory/pmm.spl, already used by the
+# older non-Limine boot lanes) into this Limine boot-entry lane for aarch64.
+# This was a MILESTONE STUB through 2026-08-07 — the `extern fn` declaration
+# it replaced had no definition anywhere in the tree on either arch (x86_64's
+# limine_boot.spl is still unwired; that is out of scope here but shares this
+# fix once ported). pmm_init() takes the same BootOutputPort this file already
+# assembles from the real Limine memory-map response, so no new arch-specific
+# parsing is needed — only genuine work left before this was reachable was
+# `mmio_disable_test_mode()` in limine_aarch64_boot_main (see call site below):
+# without it, freestanding native builds skip the module-level
+# `_mmio_test_mode = false` initializer, .bss stays unzeroed/garbage, and every
+# mmio_read/write in this whole file — including pmm's bitmap I/O — silently
+# reads/writes the in-memory test journal instead of physical memory.
+#
+# Real MMU/page-table setup (Layer 1's other traditional job) is NOT done
+# here: Limine's protocol handoff already leaves the MMU on with the kernel's
+# own higher-half + low-physical mapping active (that guarantee is what lets
+# every function above this one dereference raw physical Limine response
+# pointers via mmio_read64 without a fault) — this port covers the piece that
+# was actually missing: a physical frame allocator over the real memory map.
+# Building a second, kernel-owned page-table layer (arch/arm64/paging.spl
+# already exists for the older non-Limine lane) remains future work.
 fn memory_init(boot_info: BootOutputPort):
-    log_raw_println("[BOOT] memory_init: MILESTONE STUB — Layer 1 not yet ported to the Limine boot lane (aarch64)")
+    log_raw_println("[BOOT] memory_init: wiring Layer 1 physical memory manager (aarch64, Limine lane)")
+
+    val sctlr = rt_arm64_mrs_sctlr_el1()
+    val mmu_on = (sctlr & 1) != 0
+    log_raw_println("[BOOT] SCTLR_EL1=0x{sctlr} MMU={mmu_on}")
+
+    pmm_init(boot_info)
+
+    val total_pages = pmm_total_pages()
+    val free_pages = pmm_free_pages()
+    val total_bytes = pmm_total_memory()
+    val free_bytes = pmm_free_memory()
+    log_raw_println("[BOOT] PMM: total_pages={total_pages} free_pages={free_pages} total_bytes={total_bytes} free_bytes={free_bytes}")
+
+    # Prove the allocator is live, not just initialized: allocate one frame,
+    # confirm free_pages dropped by exactly one, then return it.
+    val probe = pmm_alloc_page()
+    if probe:
+        val after_alloc = pmm_free_pages()
+        log_raw_println("[BOOT] PMM probe: allocated pfn={probe.pfn} free_pages_after={after_alloc}")
+        pmm_free_page(probe)
+        val after_free = pmm_free_pages()
+        log_raw_println("[BOOT] PMM probe: freed pfn={probe.pfn} free_pages_after={after_free}")
+        if after_alloc + 1 == free_pages and after_free == free_pages:
+            log_raw_println("[BOOT] SIMPLEOS-AARCH64-LIMINE-MEMORY-INIT-OK")
+        else:
+            log_raw_println("[BOOT] SIMPLEOS-AARCH64-LIMINE-MEMORY-INIT-FAIL: accounting mismatch")
+    else:
+        log_raw_println("[BOOT] SIMPLEOS-AARCH64-LIMINE-MEMORY-INIT-FAIL: no free page available")
+
     log_raw_println("[BOOT] SIMPLEOS-AARCH64-LIMINE-KERNEL-OK")
     halt_loop()
 
@@ -449,6 +520,15 @@ fn limine_aarch64_boot_main():
     memory layer. Structurally identical to limine_boot.spl's kernel_main —
     only the BootOutputPort serial/arch fields differ (see _build_boot_output).
     """
+    # Step 0: Pin the MMIO layer to the real-hardware path. Freestanding
+    # native builds skip module-level initializers, so `_mmio_test_mode`
+    # (mmio.spl) would otherwise read garbage/unzeroed .bss and route every
+    # mmio_read/write in this file — memory-map parsing, framebuffer parsing,
+    # and now pmm_init's bitmap I/O — through the fake in-memory test journal
+    # instead of physical memory. Must run before ANY mmio_* call, including
+    # the ones inside log_init_serial below.
+    mmio_disable_test_mode()
+
     # Step 1: Initialize early serial for debug output
     log_init_serial(LOG_INFO)
     log_raw_println("")
