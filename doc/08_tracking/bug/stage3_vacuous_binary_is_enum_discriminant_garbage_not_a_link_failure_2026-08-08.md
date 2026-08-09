@@ -1,8 +1,37 @@
 # Stage 3 "vacuous binary" is enum-discriminant garbage in stage2, NOT a link failure
 
 Date: 2026-08-08
-Status: OPEN — Stage 3 cannot produce a genuine self-hosted binary
+Status: OPEN, still untestable — the pipeline no longer reaches codegen at
+  all before hitting an earlier blocker (see "2026-08-09 follow-up" below)
 Severity: BLOCKER (critical path to self-host)
+
+## 2026-08-09 follow-up — still inconclusive, pipeline now fails even earlier
+
+Re-attempted the bisection this doc's prior update recommended (scoped
+`--source` allowlist form instead of `--entry-closure`, which doesn't
+actually scope the transitive import graph). Confirmed today's other Stage-2
+fixes (ByteOrder, unqualified enum-variant match arms, `run_fn` closure-call
+link failure) are on `origin/main` first.
+
+- **Attempt A** — repeated the `--entry-closure` + `--source` closure build:
+  still hits the 60s-per-file timeout, now on
+  `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl` instead of
+  the file it stalled on previously. Fails closed (exit 1, no binary), 240s.
+- **Attempt B** — ran the real single-unit Stage-3 recipe (positional entry,
+  no `--entry-closure`/`--source`) fresh against current `origin/main`.
+  Result: exit 1 in 268s (much faster than the earlier 1202s vacuous run),
+  failing at HIR lowering with `unresolved name: error` in
+  `src/compiler/70.backend/backend/llvm_type_mapper.spl` and 5 sibling files
+  — the separately-tracked
+  `stage3_selfhost_unresolved_name_error_type_mappers_2026-08-08.md` (fix
+  landed there as of today, full-bootstrap verification in progress).
+
+**Verdict: still inconclusive.** No scale-vs-construct answer reached — the
+pipeline no longer even reaches codegen, so the original vacuous-binary
+question is untestable until the type-mapper bug's fix is confirmed and
+Stage 3 gets further. No `.spl` source changed here. Next step: once the
+type-mapper fix is verified, retry this bisection with a reduced `--source`
+set and a self-contained small entry point.
 
 > **2026-08-08 CORRECTION — the "enum discriminant garbage" root cause below is
 > REFUTED by control runs.** Native enum dispatch is correct on both backends,
