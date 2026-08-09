@@ -1238,6 +1238,25 @@ impl HirLowering:
         val bootstrap_closure = bootstrap_mode and (hir_module_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
         if bootstrap_flat_mode and (not bootstrap_closure or hir_module_is_bootstrap_entry(module.name)):
             bootstrap_hir_modules_reset()
+        # Select the Stage4 path before the deep lowering call. Return-side
+        # frame synchronization can invalidate caller locals and module helper
+        # state, so this path must not inspect admission state afterward.
+        if bootstrap_mode and not bootstrap_flat_mode:
+            val stage4_parser_constants = module.constants.values()
+            var stage4_lowered_module: HirModule = self.lower_module(module)
+            if module.name == "src/lib/nogc_async_mut/async/future.spl":
+                eprint("[hir-finalize] stage4 returned future")
+            if stage4_parser_constants.len() > 0:
+                var stage4_constants: Dict<SymbolId, HirConst> = {}
+                var stage4_const_idx = 0
+                while stage4_const_idx < stage4_parser_constants.len():
+                    val stage4_const = self.lower_hir_const_decl(stage4_parser_constants[stage4_const_idx])
+                    stage4_constants[SymbolId(id: stage4_const_idx)] = stage4_const
+                    stage4_const_idx = stage4_const_idx + 1
+                stage4_lowered_module.constants = stage4_constants
+            if module.name == "src/lib/nogc_async_mut/async/future.spl":
+                eprint("[hir-finalize] stage4 return start")
+            return stage4_lowered_module
         val parser_constants = module.constants.values()
         # Keep the aggregate out of the stage4 Any-erasure path. HirModule
         # contains several dictionaries, and the first field access below can
