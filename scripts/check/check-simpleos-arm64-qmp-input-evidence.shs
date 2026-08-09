@@ -371,8 +371,15 @@ qemu-system-aarch64 \
 QEMU_PID=$!
 
 set +e
+READY_TIMEOUT_SECONDS=${SIMPLEOS_QMP_READY_TIMEOUT_SECONDS:-45}
+case "$READY_TIMEOUT_SECONDS" in
+    ''|*[!0-9]*) fail_evidence "invalid-ready-timeout-seconds" ;;
+esac
+if [ "$READY_TIMEOUT_SECONDS" -le 0 ]; then
+    fail_evidence "invalid-ready-timeout-seconds"
+fi
 python3 - "$QMP_SOCKET" "$SERIAL_LOG" "$BEFORE_PPM" "$AFTER_PPM" \
-    "$MAX_CHECKSUM_US" >"$QMP_LOG" 2>&1 <<'PY'
+    "$MAX_CHECKSUM_US" "$READY_TIMEOUT_SECONDS" >"$QMP_LOG" 2>&1 <<'PY'
 import hashlib
 import json
 import os
@@ -383,6 +390,7 @@ import time
 
 socket_path, serial_path, before_path, after_path = sys.argv[1:5]
 max_checksum_us = int(sys.argv[5])
+ready_timeout_seconds = int(sys.argv[6])
 deadline = time.monotonic() + 15
 sock = None
 last_connect_error = None
@@ -497,7 +505,8 @@ def ppm(path):
 
 qmp("qmp_capabilities")
 ready, _ = wait_serial(
-    r"^\[desktop-gui-arm64\] desktop-ready revision=(\d+)\r?$", 45
+    r"^\[desktop-gui-arm64\] desktop-ready revision=(\d+)\r?$",
+    ready_timeout_seconds
 )
 baseline_revision = int(ready.group(1))
 
