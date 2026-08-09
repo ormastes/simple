@@ -280,3 +280,17 @@ or weaken the generic-function rejection gate.
 
 No x86 candidate exists, so capsule admission and every QEMU/native platform
 row remain open.
+
+## 2026-08-09 Generic-wrapper policy evidence
+
+Two private zero-behavior generic `.len()` wrappers were replaced with direct
+array length operations after call-type inventory and higher-model review.
+The native Phase B rejection remains unchanged; no generic-support claim is
+made. Focused native fixtures prove lexer slot initialization and declaration
+arena count/reset behavior, including the neutral invalid-declaration result.
+
+Stage4 now reaches `src/lib/common/ui/glass/theme.spl` and stops on unresolved
+`theme_design_tokens`. This is a new concrete import/export frontier. It does
+not admit an x86 candidate or advance any capsule, QEMU WM, ARM/macOS, or Uno-Q
+row. A separate bounded lexer token-iteration fixture hung before EOF and must
+remain tracked independently from the slot-initialization fix.

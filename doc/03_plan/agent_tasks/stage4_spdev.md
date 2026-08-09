@@ -53,6 +53,16 @@
 - Do not rerun the unchanged command in this session. Fresh-session next action: replace cross-module trait-error `Symbol` payload annotations with the public concrete `HirSymbol` type and update the focused formatter fixture, or implement the reviewed `SymbolId` model atomically with all caller conversions. Then resume the same Stage4 cache once.
 - x86 Stage4, essential-tools smoke, ARM64 attestation/QMP primitive WM, native ARM/macOS, and Uno-Q remain OPEN.
 
+## Active handoff update (2026-08-09, native wrapper frontier cleared)
+
+- Pushed `455034a1259` (remove zero-behavior generic lexer length wrapper), `3e70ba471a0` (remove the only remaining compiler-local generic `.len()` wrapper in declaration slots), and `5cee9a1621c` (export/import `make_core_decl` at its concrete module boundary).
+- Higher-model policy review approved only private, behavior-free primitive wrappers for direct replacement and explicitly preserved the native `#158 Phase B` generic rejection. Legitimate generic filtering, traversal, rewriting, callback, storage, and equality helpers remain untouched.
+- Focused pure-Simple native evidence passes: repeated `Lexer.new` slot initialization prints `lexer slot init resolved: true`; declaration/module slot mutation/reset plus invalid `decl_get` fallback prints `decl node slots resolved: true`. A token-until-EOF version of the lexer fixture hung and was stopped; token progress remains a separate concrete bug and was excluded from the bounded initialization regression.
+- Stage4 cycle 1 cleared `lexer_array_len` and exposed `decl_nodes_array_len`; cycle 2 cleared all zero-behavior generic length wrappers and exposed `make_core_decl`; cycle 3 cleared the concrete export/import boundary and advanced to one new error: unresolved `theme_design_tokens` in `src/lib/common/ui/glass/theme.spl`.
+- Logs: `stage4-lexer-direct-len-retry.log`, `stage4-decl-direct-len-retry.log`, and `stage4-make-core-decl-retry.log`. No Stage4 candidate exists; do not run a fourth unchanged build this session.
+- Fresh-session next action: trace the concrete owner/export/import path for `theme_design_tokens`, add focused UI-theme resolution coverage, and resume the preserved Stage4 cache once. Separately retain the bounded native lexer token-progress hang for diagnosis; do not weaken the Stage4 gate.
+- x86 Stage4, essential-tools smoke, ARM64 attestation/QMP primitive WM, native ARM/macOS, and Uno-Q remain OPEN.
+
 ## Active handoff update (2026-08-09, lint sweep complete)
 
 - Pushed `42c01f9a2f4` (traceability concrete owners/primitives), `181b57b6cf2` (high-reviewed complete `_LintMain` primitive and facade sweep), and `5a0db0cb2d2` (module-scope `ShbReader` binding).
