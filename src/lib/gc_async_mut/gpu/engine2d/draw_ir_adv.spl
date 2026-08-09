@@ -123,6 +123,12 @@ struct Engine2dDrawIrAdvResult:
     glass_execution_target: text = ""
     glass_backend_handle: i64 = 0
     glass_device_identity: i64 = 0
+    # Device execution receipts, not caller-inferred frame counters. A submit
+    # is counted only when the backend accepts submit_batch(). A fence is
+    # counted only when that submission is followed by a device-origin
+    # readback bound to concrete backend and device identities.
+    device_submit_count: i64 = 0
+    device_fence_count: i64 = 0
 
 struct Engine2dResolvedDrawIrImage:
     image_uri: text
@@ -2104,10 +2110,15 @@ fn engine2d_draw_ir_adv_fresh_device_composition_with_images(engine: Engine2D, c
         return _engine2d_draw_ir_result_from_composition_plan_with_unsupported(plan, 0, 1, prepared.1, engine2d_readback([], "preflight_rejected"))
     _engine2d_draw_ir_adv_composition_with_images(prepared.0, composition, true, images, true, false, true)
 
-fn _engine2d_draw_ir_strict_vulkan_result_with_font_evidence(composition: DrawIrComposition, rendered: i32, skipped: i32, readback: Engine2DReadback, engine: Engine2D) -> Engine2dDrawIrAdvResult:
+fn _engine2d_draw_ir_strict_vulkan_result_with_font_evidence(composition: DrawIrComposition, rendered: i32, skipped: i32, readback: Engine2DReadback, engine: Engine2D, submitted: bool) -> Engine2dDrawIrAdvResult:
     val plan = simple_2d_draw_ir_adv_composition_plan(composition, true)
     var result = _engine2d_draw_ir_result_from_composition_plan_with_unsupported(
         plan, rendered, skipped, if skipped == 0: "none" else: "strict-vulkan-execution", readback)
+    val device_receipt_count: i64 = if (submitted and
+        readback.source == "device_readback" and readback.backend_handle > 0 and
+        readback.device_identity > 0): 1 else: 0
+    result.device_submit_count = device_receipt_count
+    result.device_fence_count = device_receipt_count
     result.font_identity = engine.selected_font_identity()
     result.font_execution_target = engine.font_execution_target()
     val target_font = engine.draw_ir_font_evidence()
@@ -2177,7 +2188,7 @@ fn _engine2d_draw_ir_execute_strict_vulkan_primitives(engine: Engine2D, composit
     if not submitted:
         skipped = skipped + 1
     _engine2d_draw_ir_strict_vulkan_result_with_font_evidence(
-        composition, rendered, skipped, readback, eng)
+        composition, rendered, skipped, readback, eng, submitted)
 
 fn engine2d_draw_ir_adv_strict_vulkan_primitives_with_images(engine: Engine2D, composition: DrawIrComposition, images: [Engine2dResolvedDrawIrImage]) -> Engine2dDrawIrAdvResult:
     """Execute only device-attested Vulkan DrawIR primitives.
@@ -2219,6 +2230,10 @@ fn engine2d_draw_ir_adv_strict_vulkan_primitives_with_images(engine: Engine2D, c
     result.backend_handle = 0
     result.device_identity = 0
     result.readback_checksum = 0
+    # A rejected strict result must not retain the provisional paired
+    # submit/readback receipt computed before font and command validation.
+    result.device_submit_count = 0
+    result.device_fence_count = 0
     result
 
 fn _engine2d_draw_ir_composition_has_text(composition: DrawIrComposition) -> bool:
@@ -2312,7 +2327,7 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: 
     # (one fence wait) before present/readback, instead of leaving frame
     # boundaries implicit in present()'s own flush. A no-op on backends that
     # already dispatch immediately per primitive (see RenderBackend.submit_batch).
-    eng.submit_batch()
+    val submitted = eng.submit_batch()
     if present_frame:
         eng.present()
     var readback = engine2d_readback([], "not_requested")
@@ -2374,6 +2389,17 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: 
         result.font_atlas_upload_count = evidence.atlas_upload_count
         result.font_atlas_upload_bytes = evidence.atlas_upload_bytes
         result.font_atlas_payload_sha256 = evidence.atlas_payload_sha256
+    # Publish only a complete, successful device receipt. submit_batch() is
+    # the backend acceptance result; device_readback plus both native
+    # identities is the completion/fence evidence. A planner, command, or
+    # material fallback is a failed device frame and therefore reports zero
+    # for both counters even if a partial surface happened to be readable.
+    val device_receipt_count: i64 = if (submitted and
+        not result.fallback_required and result.skipped_command_count == 0 and
+        readback.source == "device_readback" and readback.backend_handle > 0 and
+        readback.device_identity > 0): 1 else: 0
+    result.device_submit_count = device_receipt_count
+    result.device_fence_count = device_receipt_count
     result
 
 # ---------------------------------------------------------------------------

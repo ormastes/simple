@@ -626,8 +626,9 @@ fn run_macos_gpu_2d_live_harness(backend: text) -> i64:
             receipt_path, backend, "vulkan-font-device-evidence-failed", 13, 13)
 
     # Twenty animated DrawIR compositions use the same Engine2D backend.
-    # engine2d_draw_ir_adv_composition explicitly calls submit_batch (the
-    # Vulkan fence boundary) before its device-origin readback.
+    # Each result carries the Engine2D backend's submit acceptance and the
+    # completed device-readback fence receipt. Never infer either from a local
+    # loop iteration.
     var animation_frame_times: [i64] = []
     var animation_frame_count: i64 = 0
     var animation_submit_count: i64 = 0
@@ -647,6 +648,8 @@ fn run_macos_gpu_2d_live_harness(backend: text) -> i64:
             frame_result.backend_handle != backend_handle or
             frame_result.device_identity != initial_readback.device_identity or
             frame_result.readback_checksum <= 0 or
+            frame_result.device_submit_count != 1 or
+            frame_result.device_fence_count != 1 or
             frame_result.skipped_command_count != 0 or
             frame_result.fallback_required or frame_result.fallback_reason != ""):
             winit_window_free(win)
@@ -665,8 +668,10 @@ fn run_macos_gpu_2d_live_harness(backend: text) -> i64:
             return write_failure_receipt(
                 receipt_path, backend, "animation-frame-correlation-failed", 14, 14)
         animation_correlated_frame_count = animation_correlated_frame_count + 1
-        animation_submit_count = animation_submit_count + 1
-        animation_fence_count = animation_fence_count + 1
+        animation_submit_count = (
+            animation_submit_count + frame_result.device_submit_count)
+        animation_fence_count = (
+            animation_fence_count + frame_result.device_fence_count)
         animation_final_checksum = frame_result.readback_checksum
         val elapsed_ns = rt_time_now_nanos() - frame_started
         if elapsed_ns <= 0:
