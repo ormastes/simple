@@ -1,0 +1,180 @@
+# Host ProfileTarget — behavioral spec (plan stream P4).
+#
+# These are REAL calls against the real implementation, not source-text
+# assertions: every `it` constructs a HostProfileTarget and drives it.
+#
+# Honesty anchors this spec enforces, because they are the whole point of the
+# tiered ProfileReport contract:
+#   * `steps` is PROFILE_ABSENT and MUST NOT be a plausible-looking number.
+#     The host has no interpreter step counter (see the discovery block in
+#     src/lib/common/debug/host_profile_target.spl).
+#   * `device_ns` is PROFILE_ABSENT, never 0 -- the host has no device, and 0
+#     would read as "instantaneous device work".
+#   * an unarmed target reports Unavailable with everything absent, never a
+#     zero-length measurement.
+
+use std.spec.{describe, it, expect}
+use std.common.debug.capability.{CapLevel, cap_level_name}
+use std.common.debug.profile_target.{PROFILE_ABSENT, profile_has_steps, profile_has_device_time}
+use std.common.debug.session_core.{AttachOpts, attach_opts_default}
+use std.common.debug.host_profile_target.{HostProfileTarget, host_profile_now_nanos}
+
+# A deterministic unit of work with no I/O, used as the profiled window.
+# Returns the sum so the loop cannot be optimised away as dead.
+fn burn(rounds: i64) -> i64:
+    var acc = 0
+    var i = 0
+    while i < rounds:
+        acc = acc + (i % 7)
+        i = i + 1
+    acc
+
+describe "HostProfileTarget tiering":
+    it "reports Native when profiling was armed at attach":
+        val t = HostProfileTarget.armed_target()
+        expect(cap_level_name(t.profile_level())).to_equal("native")
+
+    it "reports Unavailable when profiling was not armed at attach":
+        val t = HostProfileTarget.disarmed_target()
+        expect(cap_level_name(t.profile_level())).to_equal("unavailable")
+
+    it "takes its arming from AttachOpts.profile, not from a later toggle":
+        val armed_t = HostProfileTarget.new(AttachOpts(step_budget: 10, entry_pc: 0, log_cap: 8, profile: true))
+        val unarmed_t = HostProfileTarget.new(AttachOpts(step_budget: 10, entry_pc: 0, log_cap: 8, profile: false))
+        expect(cap_level_name(armed_t.profile_level())).to_equal("native")
+        expect(cap_level_name(unarmed_t.profile_level())).to_equal("unavailable")
+
+    it "defaults to armed under attach_opts_default":
+        val t = HostProfileTarget.new(attach_opts_default())
+        expect(cap_level_name(t.profile_level())).to_equal("native")
+
+describe "HostProfileTarget measurement":
+    it "measures a positive wall_ns across real work":
+        var t = HostProfileTarget.armed_target()
+        t.profile_begin()
+        val sum = burn(200000)
+        val r = t.profile_end()
+        # Guard against the loop being elided: 200000 rounds of (i % 7) is a
+        # large positive sum.
+        expect(sum > 0).to_equal(true)
+        expect(r.wall_ns > 0).to_equal(true)
+        expect(cap_level_name(r.level)).to_equal("native")
+
+    it "reports steps as absent and NEVER as a number":
+        var t = HostProfileTarget.armed_target()
+        t.profile_begin()
+        burn(1000)
+        val r = t.profile_end()
+        expect(r.steps).to_equal(PROFILE_ABSENT)
+        expect(profile_has_steps(r)).to_equal(false)
+
+    it "reports device_ns as absent, not zero":
+        var t = HostProfileTarget.armed_target()
+        t.profile_begin()
+        burn(1000)
+        val r = t.profile_end()
+        expect(r.device_ns).to_equal(PROFILE_ABSENT)
+        expect(profile_has_device_time(r)).to_equal(false)
+
+    it "states in detail which fields were measured and which are absent":
+        var t = HostProfileTarget.armed_target()
+        t.profile_begin()
+        burn(1000)
+        val r = t.profile_end()
+        expect(r.detail).to_contain("wall_ns=measured")
+        expect(r.detail).to_contain("device_ns=absent")
+        expect(r.detail).to_contain("steps=absent")
+
+    it "measures a longer window as at least as long as a shorter one":
+        var short_t = HostProfileTarget.armed_target()
+        short_t.profile_begin()
+        burn(20000)
+        val short_r = short_t.profile_end()
+        var long_t = HostProfileTarget.armed_target()
+        long_t.profile_begin()
+        burn(400000)
+        val long_r = long_t.profile_end()
+        # 20x the work. Asserting only >= keeps this robust on a loaded
+        # machine while still failing outright if wall_ns is a constant.
+        expect(long_r.wall_ns >= short_r.wall_ns).to_equal(true)
+
+describe "HostProfileTarget refuses to fabricate":
+    it "returns Unavailable with everything absent when not armed":
+        var t = HostProfileTarget.disarmed_target()
+        t.profile_begin()
+        burn(50000)
+        val r = t.profile_end()
+        expect(cap_level_name(r.level)).to_equal("unavailable")
+        expect(r.wall_ns).to_equal(PROFILE_ABSENT)
+        expect(r.device_ns).to_equal(PROFILE_ABSENT)
+        expect(r.steps).to_equal(PROFILE_ABSENT)
+        expect(r.detail).to_contain("not armed at attach")
+
+    it "returns Unavailable when profile_end has no matching profile_begin":
+        var t = HostProfileTarget.armed_target()
+        val r = t.profile_end()
+        expect(cap_level_name(r.level)).to_equal("unavailable")
+        expect(r.wall_ns).to_equal(PROFILE_ABSENT)
+        expect(r.detail).to_contain("no matching profile_begin")
+
+    it "honours last-begin-wins per the trait contract":
+        var t = HostProfileTarget.armed_target()
+        t.profile_begin()
+        burn(300000)
+        t.profile_begin()          # re-arm: the first window is discarded
+        val r = t.profile_end()
+        expect(cap_level_name(r.level)).to_equal("native")
+        # The reported window starts at the SECOND begin, so it must be far
+        # shorter than the 300000-round burn that preceded it. Measured on
+        # this host that burn is >1ms; 300us is a wide margin that still
+        # fails if the first begin_ns were kept.
+        expect(r.wall_ns < 300000).to_equal(true)
+
+    it "closes the window so a second end without a begin is Unavailable":
+        var t = HostProfileTarget.armed_target()
+        t.profile_begin()
+        burn(1000)
+        val first = t.profile_end()
+        val second = t.profile_end()
+        expect(cap_level_name(first.level)).to_equal("native")
+        expect(cap_level_name(second.level)).to_equal("unavailable")
+
+describe "HostProfileTarget disabled-path cost":
+    # The zero-overhead-when-disabled claim needs a DETERMINISTIC oracle, not
+    # a timing comparison.
+    #
+    # A timing comparison was tried first and REJECTED: an armed begin/end
+    # pair also builds a ProfileReport with a long `detail` string, and that
+    # construction dominates the two clock reads. Deleting the guards and
+    # re-running left `disarmed_ns < armed_ns` still true, i.e. the timing
+    # assertion passed under sabotage -- a fail-open oracle. It is gone.
+    #
+    # What replaces it is the direct observable: `begin_ns` is the ONLY place
+    # a clock reading can be stored, so `begin_ns == 0` after a disarmed
+    # profile_begin() proves no reading was taken. Deleting the
+    # `if not self.armed: return` guard in profile_begin makes begin_ns a
+    # large clock value and fails this immediately and every time.
+    it "stores no clock reading when not armed":
+        var t = HostProfileTarget.disarmed_target()
+        t.profile_begin()
+        expect(t.begin_ns).to_equal(0)
+        expect(t.running).to_equal(false)
+
+    it "does store a clock reading when armed (control for the above)":
+        # Without this control the assertion above could pass because the
+        # clock is broken rather than because the guard works.
+        var t = HostProfileTarget.armed_target()
+        t.profile_begin()
+        expect(t.begin_ns > 0).to_equal(true)
+        expect(t.running).to_equal(true)
+
+    it "reads no clock at all when not armed, however long the window":
+        # Structural half of the zero-overhead claim: even across a large
+        # window the disarmed target produces no duration, proving no
+        # reading was taken rather than merely discarded.
+        var t = HostProfileTarget.disarmed_target()
+        t.profile_begin()
+        burn(200000)
+        val r = t.profile_end()
+        expect(r.wall_ns).to_equal(PROFILE_ABSENT)
+        expect(t.begin_ns).to_equal(0)
