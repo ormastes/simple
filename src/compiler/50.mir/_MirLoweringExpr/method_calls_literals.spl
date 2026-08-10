@@ -337,6 +337,28 @@ impl MirLowering:
             return true
         self.nil_locals.contains(local.id)
 
+    me local_hir_type_is_str(local: LocalId) -> bool:
+        match self.find_local_hir_type(local.id):
+            case Some(found_type):
+                if found_type == nil or found_type == 0:
+                    return false
+                match found_type.kind:
+                    case HirTypeKind.Str: true
+                    case _: false
+            case nil:
+                false
+
+    me local_hir_type_is_int(local: LocalId) -> bool:
+        match self.find_local_hir_type(local.id):
+            case Some(found_type):
+                if found_type == nil or found_type == 0:
+                    return false
+                match found_type.kind:
+                    case HirTypeKind.Int(_, _): true
+                    case _: false
+            case nil:
+                false
+
     me option_map_value_hir_type(local: LocalId, span: Span) -> HirType?:
         """Recover the primitive type needed to decode an Option.map result."""
         if val known = self.find_local_hir_type(local.id):
@@ -1066,11 +1088,8 @@ impl MirLowering:
                 # stale ByteSpan (or another same-named custom method) steal
                 # `text.starts_with`/`ends_with`/`contains`.
                 predicate_receiver_is_text = self.local_is_str(prelowered_method_receiver)
-                if not predicate_receiver_is_text and self.find_local_hir_type(prelowered_method_receiver.id) != nil:
-                    val predicate_hir_type = self.find_local_hir_type(prelowered_method_receiver.id) ?? HirType(kind: HirTypeKind.Error, span: receiver.span)
-                    match predicate_hir_type.kind:
-                        case HirTypeKind.Str: predicate_receiver_is_text = true
-                        case _: ()
+                if not predicate_receiver_is_text:
+                    predicate_receiver_is_text = self.local_hir_type_is_str(prelowered_method_receiver)
                 if not predicate_receiver_is_text and resolution_is_unresolved:
                     val predicate_owner = self.struct_value_syms.get(prelowered_method_receiver.id)
                     if predicate_owner != nil and predicate_owner != "":
@@ -1815,11 +1834,8 @@ impl MirLowering:
                 chr_receiver_is_runtime_int = true
             case _: ()
         var chr_receiver_is_local_int = false
-        if has_prelowered_method_receiver and self.find_local_hir_type(prelowered_method_receiver.id) != nil:
-            val chr_local_type = self.find_local_hir_type(prelowered_method_receiver.id) ?? HirType(kind: HirTypeKind.Error, span: receiver.span)
-            match chr_local_type.kind:
-                case HirTypeKind.Int(_, _): chr_receiver_is_local_int = true
-                case _: ()
+        if has_prelowered_method_receiver:
+            chr_receiver_is_local_int = self.local_hir_type_is_int(prelowered_method_receiver)
         val lower_builtin_chr = chr_method_shape and (
             chr_primitive_resolution_allowed and not chr_has_custom_owner and
             (chr_receiver_is_declared_int or chr_receiver_is_runtime_int or chr_receiver_is_local_int)
@@ -2695,14 +2711,7 @@ impl MirLowering:
                 if method == "char_code_at" and args.len() == 1:
                     var char_code_receiver_is_text = self.local_is_str(unresolved_receiver_local)
                     if not char_code_receiver_is_text:
-                        match self.find_local_hir_type(unresolved_receiver_local.id):
-                            case Some(char_code_receiver_hir_type):
-                                if char_code_receiver_hir_type != nil and char_code_receiver_hir_type != 0:
-                                    match char_code_receiver_hir_type.kind:
-                                        case HirTypeKind.Str: char_code_receiver_is_text = true
-                                        case _: ()
-                            case nil:
-                                ()
+                        char_code_receiver_is_text = self.local_hir_type_is_str(unresolved_receiver_local)
                     if not char_code_receiver_is_text:
                         self.error_fatal("char_code_at receiver is not text", Some(receiver.span))
                         return unresolved_receiver_local
@@ -2735,14 +2744,7 @@ impl MirLowering:
                 if method == "byte_at" and args.len() == 1:
                     var byte_at_receiver_is_text = self.local_is_str(unresolved_receiver_local)
                     if not byte_at_receiver_is_text:
-                        match self.find_local_hir_type(unresolved_receiver_local.id):
-                            case Some(byte_at_receiver_hir_type):
-                                if byte_at_receiver_hir_type != nil and byte_at_receiver_hir_type != 0:
-                                    match byte_at_receiver_hir_type.kind:
-                                        case HirTypeKind.Str: byte_at_receiver_is_text = true
-                                        case _: ()
-                            case nil:
-                                ()
+                        byte_at_receiver_is_text = self.local_hir_type_is_str(unresolved_receiver_local)
                     if not byte_at_receiver_is_text:
                         self.error_fatal("byte_at receiver is not text", Some(receiver.span))
                         return unresolved_receiver_local
