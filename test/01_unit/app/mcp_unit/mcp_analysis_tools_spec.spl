@@ -119,18 +119,23 @@ bin/simple spipe-docgen test/01_unit/app/mcp_unit/mcp_analysis_tools_spec.spl --
 ```
 """
 
+use app.mcp.main_lazy_query_tools
+
 extern fn rt_file_read_text(path: text) -> text
+
+# Small, stable product file used as the analysis target. It has exactly one
+# `use` line, so import extraction is checkable without being brittle.
+val PROBE_FILE = "src/lib/nogc_sync_mut/service/request_queue.spl"
 
 # ============================================================================
 # Test Group 1: simple_dependencies tool
 # ============================================================================
 
 describe "simple_dependencies tool":
-    it "builds import grep for specific file":
-        val file = "src/app/cli/main.spl"
-        var cmd = "grep -n '^use \\|^import ' " + file + " 2>/dev/null"
-        expect(cmd).to_contain("grep")
-        expect(cmd).to_contain(file)
+    it "reports the imports of a specific file":
+        val out = handle_simple_dependencies("d1", "{\"file\":\"" + PROBE_FILE + "\"}")
+        expect(out).to_contain("--- Imports ---")
+        expect(out).to_contain("use std.io_runtime")
 
     it "works without file for project summary":
         val source = rt_file_read_text("src/app/mcp/main_lazy_query_tools.spl") ?? ""
@@ -146,18 +151,17 @@ describe "simple_api_diff tool":
         expect(source).to_contain("Missing required parameter: file")
 
     it "defaults revision to HEAD":
-        val revision = ""
-        var rev = "HEAD"
-        if revision != "":
-            rev = revision
-        expect(rev).to_equal("HEAD")
+        val out = handle_simple_api_diff("a1", "{\"file\":\"" + PROBE_FILE + "\"}")
+        expect(out).to_contain("revision=HEAD")
+        expect(out).to_contain(PROBE_FILE)
 
     it "uses custom revision":
-        val revision = "main~5"
-        var rev = "HEAD"
-        if revision != "":
-            rev = revision
-        expect(rev).to_equal("main~5")
+        val out = handle_simple_api_diff("a2", "{\"file\":\"" + PROBE_FILE + "\",\"revision\":\"main~5\"}")
+        expect(out).to_contain("revision=main~5")
+
+    it "reports a missing file parameter as an error":
+        val out = handle_simple_api_diff("a3", "{}")
+        expect(out).to_contain("Missing required parameter: file")
 
     it "uses literal argv for previous API":
         val source = rt_file_read_text("src/app/mcp/main_lazy_query_tools.spl") ?? ""
@@ -177,9 +181,15 @@ describe "simple_context tool":
         expect(source).to_contain("val sourceless_sql_query = file == \"\" and sql_enabled and query != \"\"")
         expect(source).to_contain("if file == \"\" and not sourceless_sql_query")
 
-    it "includes source, imports, symbols, diagnostics":
-        val sections = ["Source", "Imports", "Symbols", "Diagnostics"]
-        expect(sections.len()).to_equal(4)
+    it "emits the file header, source summary and diagnostics sections":
+        val out = handle_simple_context("c1", "{\"file\":\"" + PROBE_FILE + "\"}")
+        expect(out).to_contain("-- simple_context file=" + PROBE_FILE)
+        expect(out).to_contain("--- Source Summary (")
+        expect(out).to_contain("--- Diagnostics ---")
+
+    it "reports a missing file parameter as an error":
+        val out = handle_simple_context("c2", "{}")
+        expect(out).to_contain("Missing required parameter: file")
 
     it "app MCP context generates the pack via the `context` subprocess":
         # The context pack must be produced by a `bin/simple context` subprocess,
@@ -192,7 +202,8 @@ describe "simple_context tool":
         val source = rt_file_read_text("src/app/mcp/main_lazy_query_tools.spl") ?? ""
         expect(source).to_contain("ctx_args")
         expect(source).to_contain("\"context\", file")
-        expect(source).to_contain("process_run_timeout(_mcp_find_simple_binary(), ctx_args")
+        expect(source).to_contain("mcp_run_argv(")
+        expect(source).to_contain("_mcp_find_simple_binary(), ctx_args")
         expect(source).to_contain("ctx_args.push(\"--json\")")
         expect(source).to_contain("ctx_args.push(\"--text\")")
 
@@ -379,74 +390,52 @@ describe "simple_search tool":
         val source = rt_file_read_text("src/app/mcp/main_lazy_query_tools.spl") ?? ""
         expect(source).to_contain("Missing required parameter: query")
 
-    it "builds general search command":
-        val query = "fn main"
-        val kind = ""
-        val scope = ""
-        var search_dir = "src/"
-        var cmd = "grep -rn '" + query + "' " + search_dir + " --include='*.spl' 2>/dev/null | head -50"
-        expect(cmd).to_contain(query)
-        expect(cmd).to_contain("src/")
+    it "runs a general source search and finds the symbol":
+        val out = handle_simple_search("s1", "{\"query\":\"request_queue_new\"}")
+        expect(out).to_contain("query=request_queue_new")
+        expect(out).to_contain("service/request_queue.spl")
 
-    it "builds function search":
-        val query = "main"
-        val kind = "fn"
-        var cmd = ""
-        if kind == "fn":
-            cmd = "grep -rn '^fn " + query + "' src/ --include='*.spl' 2>/dev/null | head -50"
-        expect(cmd).to_contain("^fn main")
+    it "scopes a function search to declarations":
+        val out = handle_simple_search("s2", "{\"query\":\"request_queue_new\",\"kind\":\"fn\"}")
+        expect(out).to_contain("kind=fn")
+        expect(out).to_contain("fn request_queue_new")
 
-    it "builds class search":
-        val query = "Point"
-        val kind = "class"
-        var cmd = ""
-        if kind == "class":
-            cmd = "grep -rn '^class " + query + "' src/ --include='*.spl' 2>/dev/null | head -50"
-        expect(cmd).to_contain("^class Point")
+    it "scopes a class search to declarations":
+        val out = handle_simple_search("s3", "{\"query\":\"JsonBuilder\",\"kind\":\"class\"}")
+        expect(out).to_contain("kind=class")
+        expect(out).to_contain("class JsonBuilder")
 
-    it "maps scope to correct directory":
-        val scope = "test"
-        var search_dir = "src/"
-        if scope == "test":
-            search_dir = "test/"
-        elif scope == "lib":
-            search_dir = "src/lib/"
-        elif scope == "compiler":
-            search_dir = "src/compiler/"
-        expect(search_dir).to_equal("test/")
+    it "scopes a struct search to declarations":
+        val out = handle_simple_search("s4", "{\"query\":\"RequestQueue\",\"kind\":\"struct\"}")
+        expect(out).to_contain("kind=struct")
+        expect(out).to_contain("struct RequestQueue")
 
-    it "maps lib scope":
-        val scope = "lib"
-        var search_dir = "src/"
-        if scope == "lib":
-            search_dir = "src/lib/"
-        expect(search_dir).to_equal("src/lib/")
+    it "maps the test scope to the test tree":
+        val out = handle_simple_search("s5", "{\"query\":\"request_queue_new\",\"scope\":\"test\"}")
+        expect(out).to_contain("scope=test")
+        expect(out).to_contain("test/")
 
-    it "maps compiler scope":
-        val scope = "compiler"
-        var search_dir = "src/"
-        if scope == "compiler":
-            search_dir = "src/compiler/"
-        expect(search_dir).to_equal("src/compiler/")
+    it "maps the lib scope to src/lib":
+        val out = handle_simple_search("s6", "{\"query\":\"request_queue_new\",\"scope\":\"lib\"}")
+        expect(out).to_contain("scope=lib")
+        expect(out).to_contain("src/lib/")
 
-    it "restricts to specific file":
-        val file = "src/app/cli/main.spl"
-        val query = "fn main"
-        var cmd = "grep -n '" + query + "' " + file + " 2>/dev/null | head -50"
-        expect(cmd).to_contain(file)
+    it "maps the compiler scope to src/compiler":
+        val out = handle_simple_search("s7", "{\"query\":\"lower_expr\",\"scope\":\"compiler\"}")
+        expect(out).to_contain("scope=compiler")
+        expect(out).to_contain("src/compiler/")
 
-    it "builds import search":
-        val query = "std.spec"
-        val kind = "import"
-        var cmd = ""
-        if kind == "import":
-            cmd = "grep -rn 'use.*" + query + "' src/ --include='*.spl' 2>/dev/null | head -50"
-        expect(cmd).to_contain("use.*std.spec")
+    it "restricts the search to a specific file":
+        val out = handle_simple_search("s8", "{\"query\":\"queue_drain\",\"file\":\"" + PROBE_FILE + "\"}")
+        expect(out).to_contain("query=queue_drain")
+        expect(out).to_contain("queue_drain")
 
-    it "builds type search":
-        val query = "Position"
-        val kind = "type"
-        var cmd = ""
-        if kind == "type":
-            cmd = "grep -rn '^type " + query + "' src/ --include='*.spl' 2>/dev/null | head -50"
-        expect(cmd).to_contain("^type Position")
+    it "scopes an import search to use statements":
+        val out = handle_simple_search("s9", "{\"query\":\"std.io_runtime\",\"kind\":\"import\"}")
+        expect(out).to_contain("kind=import")
+        expect(out).to_contain("use std.io_runtime")
+
+    it "scopes a type search to type-like declarations":
+        val out = handle_simple_search("s10", "{\"query\":\"QueueEntry\",\"kind\":\"type\"}")
+        expect(out).to_contain("kind=type")
+        expect(out).to_contain("QueueEntry")
