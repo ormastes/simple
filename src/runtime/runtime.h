@@ -206,8 +206,8 @@ bool     rt_file_unlock(int64_t handle);
 
 const char* rt_file_read_text_at(const char* path, int64_t offset, int64_t size);
 int64_t     rt_file_write_text_at(int64_t path_value, int64_t offset_value, int64_t data_value);
-int         rt_file_fsync(const char* path);
-int         rt_file_fsync_cached(const char* path);
+int         rt_file_fsync(const uint8_t* path_ptr, uint64_t path_len);
+int         rt_file_fsync_cached(const uint8_t* path_ptr, uint64_t path_len);
 
 /* ===== Memory-Mapped File I/O ===== */
 
@@ -765,9 +765,9 @@ int         rt_file_append_text(const uint8_t* path, uint64_t path_len, const ui
 int         rt_file_delete(const char* path);
 int         rt_file_copy(const char* src, const char* dst);
 int64_t     rt_file_size(const uint8_t* path_ptr, uint64_t path_len);
-int         rt_file_fsync(const char* path);
-int         rt_file_fsync_cached(const char* path);
-int         rt_file_sync(const char* path, int64_t path_len);
+int         rt_file_fsync(const uint8_t* path_ptr, uint64_t path_len);
+int         rt_file_fsync_cached(const uint8_t* path_ptr, uint64_t path_len);
+int         rt_file_sync(const uint8_t* path_ptr, uint64_t path_len);
 int64_t     rt_crc32_text(const char* text, int64_t text_len);
 int         rt_file_create_excl(const char* path, int64_t path_len,
                                 const char* content, int64_t content_len);

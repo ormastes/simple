@@ -1540,7 +1540,11 @@ int64_t     rt_file_size(const uint8_t* path_ptr, uint64_t path_len) {
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return -1;
     return spl_file_size(path);
 }
-int         rt_file_fsync(const char* path) {
+/* C-internal fsync worker: takes a genuine NUL-terminated C string. The rt_*
+ * entry points below convert the compiler's (ptr, len) `text` pair into one of
+ * these before calling it, so the conversion lives in exactly one place and
+ * C-internal callers do not have to fake a pair. */
+static int rt_fsync_path(const char* path) {
     if (!path) return 0;
     FILE* file = fopen(path, "rb");
     if (!file) return 0;
@@ -1552,12 +1556,24 @@ int         rt_file_fsync(const char* path) {
     fclose(file);
     return ok ? 1 : 0;
 }
-int         rt_file_fsync_cached(const char* path) {
-    return rt_file_fsync(path);
+int         rt_file_fsync(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
+    return rt_fsync_path(path);
 }
-int         rt_file_sync(const char* path, int64_t path_len) {
-    (void)path_len;
-    return rt_file_fsync(path);
+int         rt_file_fsync_cached(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
+    return rt_fsync_path(path);
+}
+/* rt_file_sync already had the right ARITY -- which is why the signature gate
+ * never flagged it -- but it DISCARDED path_len and passed the pointer on as a
+ * C string, so it carried the identical defect invisibly. Same family, found
+ * while converting its neighbours. */
+int         rt_file_sync(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
+    return rt_fsync_path(path);
 }
 int64_t     rt_crc32_text(const char* text, int64_t text_len) {
     if (!text || text_len <= 0) return 0;
