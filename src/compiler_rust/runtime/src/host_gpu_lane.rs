@@ -386,22 +386,7 @@ pub fn rt_host_gpu_queue_last_payload_text() -> String {
         .unwrap_or_default()
 }
 
-/// The extern the compiler actually emits a call to.
-///
-/// `src/lib/{gc,nogc}_async_mut/gpu/engine2d/host_gpu_event_queue.spl` both
-/// declare `extern fn rt_host_gpu_queue_last_payload_text() -> text`, and
-/// RuntimeFuncSpec (runtime_sffi.rs:1058) spells it `&[I64]` -- a RuntimeValue.
-/// Exporting the raw `*const c_char` form under this name handed the caller an
-/// UNTAGGED word; MEASURED 2026-08-10 as tag=0 through the compiler's emitted
-/// ABI in all three C link orders. Same defect class as rt_file_read_text.
 #[export_name = "rt_host_gpu_queue_last_payload_text"]
-pub extern "C" fn rt_host_gpu_queue_last_payload_text_rv() -> crate::value::RuntimeValue {
-    let text = rt_host_gpu_queue_last_payload_text();
-    crate::rt_string_new(text.as_ptr(), text.len() as u64)
-}
-
-/// Raw C-string form, kept for the in-crate test below. No longer exported
-/// under the bare `rt_host_gpu_queue_last_payload_text` name.
 pub extern "C" fn rt_host_gpu_queue_last_payload_text_c() -> *const c_char {
     let text = rt_host_gpu_queue_last_payload_text();
     let Ok(mut buffer) = LAST_PAYLOAD_TEXT_C.lock() else {

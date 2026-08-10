@@ -245,16 +245,12 @@ pub extern "C" fn rt_coverage_path_finalize(path_id: u32) {
     }
 }
 
-/// Get the coverage data as a raw SDN C string.
-///
-/// This is NOT the extern the compiler emits a call to -- see
-/// `rt_coverage_dump_sdn` below. It exists for in-process Rust callers
-/// (`compiler/src/coverage.rs`) that want the malloc'd buffer.
+/// Get the coverage data as an SDN string
 ///
 /// # Safety
 /// The returned pointer must be freed by the caller using `rt_coverage_free_sdn`.
 #[no_mangle]
-pub extern "C" fn rt_coverage_dump_sdn_cstr() -> *mut std::os::raw::c_char {
+pub extern "C" fn rt_coverage_dump_sdn() -> *mut std::os::raw::c_char {
     let sdn = if let Ok(data) = get_coverage_data().lock() {
         data.to_sdn()
     } else {
@@ -266,23 +262,6 @@ pub extern "C" fn rt_coverage_dump_sdn_cstr() -> *mut std::os::raw::c_char {
         Ok(cstr) => cstr.into_raw(),
         Err(_) => std::ptr::null_mut(),
     }
-}
-
-/// Get the coverage data as a Simple `text`.
-///
-/// Every Simple declaration spells this `extern fn rt_coverage_dump_sdn() ->
-/// text`, and RuntimeFuncSpec (runtime_sffi.rs:1350) spells it `&[I64]`, i.e. a
-/// RuntimeValue. Returning a raw `*mut c_char` handed the caller an UNTAGGED
-/// word -- MEASURED 2026-08-10 as tag=0 through the compiler's emitted ABI.
-/// Same defect class as rt_file_read_text.
-#[no_mangle]
-pub extern "C" fn rt_coverage_dump_sdn() -> crate::value::RuntimeValue {
-    let sdn = if let Ok(data) = get_coverage_data().lock() {
-        data.to_sdn()
-    } else {
-        String::new()
-    };
-    crate::rt_string_new(sdn.as_ptr(), sdn.len() as u64)
 }
 
 /// Free an SDN string returned by `rt_coverage_dump_sdn`

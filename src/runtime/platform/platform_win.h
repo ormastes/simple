@@ -107,17 +107,7 @@ bool rt_dir_create_cpath(const char* path, bool recursive) {
     return ok;
 }
 
-/* C-string worker. The public rt_dir_list entry point lives in runtime.c and
- * converts the compiler's (ptr, len) `text` pair before calling this.
- *
- * This used to BE `rt_dir_list`, which was catastrophic: runtime_sffi.rs:1888
- * declares rt_dir_list as `(path_ptr, path_len) -> RuntimeValue`, so the
- * compiler passed a LENGTH where this signature reads an `int64_t* out_count`
- * and wrote through it -- an immediate SIGSEGV, reproduced in all three C link
- * orders, for an existing directory AND a missing one. The arities happened to
- * match (2 and 2), which is why the extern ABI gate's arity check never saw it;
- * only the return-class check (const char** vs I64) flagged the row. */
-const char** rt_dir_list_cpath(const char* path, int64_t* out_count) {
+const char** rt_dir_list(const char* path, int64_t* out_count) {
     if (!path || !out_count) {
         if (out_count) *out_count = 0;
         return NULL;

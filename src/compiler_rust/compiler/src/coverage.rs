@@ -361,7 +361,7 @@ fn write_coverage_file(path: &Path, content: &str) -> Result<(), String> {
 
 pub(crate) fn dump_runtime_coverage_sdn() -> String {
     unsafe {
-        let ptr = simple_runtime::rt_coverage_dump_sdn_cstr();
+        let ptr = simple_runtime::rt_coverage_dump_sdn();
         if ptr.is_null() {
             return String::new();
         }

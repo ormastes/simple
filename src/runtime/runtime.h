@@ -196,10 +196,7 @@ bool     rt_dir_create(const uint8_t* path_ptr, uint64_t path_len, bool recursiv
 bool     rt_dir_create_cpath(const char* path, bool recursive);
 bool     rt_dir_remove_all(const uint8_t* path_ptr, uint64_t path_len);
 bool     rt_dir_remove_all_cpath(const char* path);
-/* -> RuntimeValue (I64) array of text, per runtime_sffi.rs:1888. */
-int64_t  rt_dir_list(const uint8_t* path_ptr, uint64_t path_len);
-/* C-string worker behind it; NOT the symbol the compiler calls. */
-const char** rt_dir_list_cpath(const char* path, int64_t* out_count);
+const char** rt_dir_list(const char* path, int64_t* out_count);
 void     rt_dir_list_free(const char** entries, int64_t count);
 
 /* ===== File Locking ===== */
@@ -405,7 +402,7 @@ int64_t  rt_array_len_safe(int64_t value);
 int64_t  rt_array_get(SplArray* array, int64_t idx);
 int64_t  rt_array_get_text(SplArray* array, int64_t idx);
 int64_t  rt_array_last(SplArray* array);
-int8_t   rt_array_set(SplArray* array, int64_t idx, int64_t value);
+void     rt_array_set(SplArray* array, int64_t idx, int64_t value);
 int8_t   rt_array_set_text(SplArray* array, int64_t idx, int64_t value);
 int8_t   rt_array_push(SplArray* array, int64_t value);
 int8_t   rt_array_clear(SplArray* array);

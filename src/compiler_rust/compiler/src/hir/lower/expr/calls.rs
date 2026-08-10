@@ -504,38 +504,8 @@ impl Lowerer {
                     ty: TypeId::ANY,
                 }))
             }
-            // Result type is DERIVED FROM THE ARGUMENTS, not hard-coded.
-            //
-            // These seven were pinned to `TypeId::I64` unconditionally. The MIR
-            // lowering and both backends are already float-correct for
-            // `min`/`max`/`abs` (they lower to a compare + a typed select, and
-            // codegen picks fcmp vs icmp off `vreg_types`) — the ONLY thing
-            // wrong for float arguments was this label. The observable symptom
-            // was `print min(1.5, 2.5)` printing `4609434218613702656`, the
-            // verbatim IEEE-754 bit pattern of the correct answer 1.5, because
-            // the i64 stamp made `print` render the bits as an integer. Bind
-            // the same call to a `val x: f64` and it always printed `1.5`, which
-            // is what isolated this to the type and not the computation.
-            //
-            // Integer callers are unaffected: with i64 arguments this still
-            // yields TypeId::I64, exactly as before.
-            //
-            // NOTE: `sqrt`/`floor`/`ceil`/`pow` have a SECOND, independent
-            // defect that this does not fix — they fall through
-            // `lower_min_max_abs` in mir/lower/lowering_expr_builtin.rs to a
-            // generic external `Call` using the integer ABI, so they read a
-            // return register libm never wrote. Tracked separately.
-            // doc/08_tracking/bug/numeric_builtins_hardcode_i64_result_type_2026-08-10.md
             "abs" | "min" | "max" | "sqrt" | "floor" | "ceil" | "pow" => {
-                let args_hir = self.lower_call_args(args, ctx)?;
-                let ret_ty = Self::numeric_builtin_result_ty(&args_hir);
-                Ok(Some(HirExpr {
-                    kind: HirExprKind::BuiltinCall {
-                        name: name.to_string(),
-                        args: args_hir,
-                    },
-                    ty: ret_ty,
-                }))
+                Ok(Some(self.lower_builtin_call(name, args, TypeId::I64, ctx)?))
             }
             "to_string" => Ok(Some(self.lower_builtin_call(name, args, TypeId::STRING, ctx)?)),
             "to_int" => Ok(Some(self.lower_builtin_call(name, args, TypeId::I64, ctx)?)),
@@ -562,30 +532,6 @@ impl Lowerer {
                 Ok(Some(self.lower_builtin_call(name, args, TypeId::ANY, ctx)?))
             }
             _ => Ok(None),
-        }
-    }
-
-    /// Result type for the numeric builtins `abs`/`min`/`max`/`sqrt`/`floor`/
-    /// `ceil`/`pow`, derived from the lowered argument types.
-    ///
-    /// Rule: the result is floating point if ANY argument is floating point,
-    /// widening to the widest float present (`f64` beats `f32`); otherwise it
-    /// keeps the previous `i64` behaviour. A mixed `pow(2.0, 3)` therefore
-    /// yields `f64`, matching how the arithmetic actually evaluates, and an
-    /// all-integer call is bit-for-bit unchanged from before this fix.
-    ///
-    /// `TypeId::ANY` arguments (erased/unknown) deliberately do NOT force a
-    /// float: nothing is known about them, and defaulting them to float would
-    /// regress every integer caller whose argument type inference is
-    /// incomplete. They fall through to the `i64` default, which is the
-    /// pre-existing behaviour for those callers.
-    fn numeric_builtin_result_ty(args: &[HirExpr]) -> TypeId {
-        if args.iter().any(|a| a.ty == TypeId::F64) {
-            TypeId::F64
-        } else if args.iter().any(|a| a.ty == TypeId::F32) {
-            TypeId::F32
-        } else {
-            TypeId::I64
         }
     }
 

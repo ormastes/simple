@@ -883,8 +883,8 @@ impl LlvmBackend {
                     vreg_map.insert(*dest, default_val.into());
                 }
             }
-            MirInst::AggregateCopy { dest, src, byte_size, deep_fields, .. } => {
-                self.compile_aggregate_copy(*dest, *src, *byte_size, deep_fields, vreg_map, builder)?;
+            MirInst::AggregateCopy { dest, src, byte_size, .. } => {
+                self.compile_aggregate_copy(*dest, *src, *byte_size, vreg_map, builder)?;
             }
             MirInst::BinOp { dest, op, left, right } => {
                 let left_val = self.get_vreg(left, vreg_map)?;
@@ -2063,16 +2063,7 @@ impl LlvmBackend {
                         }
                         FStringPart::Expr(vreg) => {
                             let val = self.get_vreg(vreg, vreg_map)?;
-                            // An untagged FloatValue (e.g. a typed f64 struct-field
-                            // load, which MIR does not BoxFloat) must be TAGGED here,
-                            // not bitcast: coerce_value_to_type bitcasts f64→i64 raw,
-                            // making rt_value_to_string print the IEEE-754 bit
-                            // pattern as an integer (1.0 → 4607182418800017408).
-                            let coerced = if val.is_float_value() {
-                                self.build_box_float_value(val, builder, module)?.into()
-                            } else {
-                                self.coerce_value_to_type(val, Some(i64_type.into()), builder)?
-                            };
+                            let coerced = self.coerce_value_to_type(val, Some(i64_type.into()), builder)?;
                             let call = builder
                                 .build_call(value_to_string, &[coerced.into()], "expr_str")
                                 .map_err(|e| crate::error::factory::llvm_build_failed("rt_value_to_string", &e))?;
@@ -2087,12 +2078,7 @@ impl LlvmBackend {
                                 module.add_function("rt_value_format_string", fn_type, None)
                             });
                             let val = self.get_vreg(vreg, vreg_map)?;
-                            // Same float-tagging requirement as FStringPart::Expr above.
-                            let coerced = if val.is_float_value() {
-                                self.build_box_float_value(val, builder, module)?.into()
-                            } else {
-                                self.coerce_value_to_type(val, Some(i64_type.into()), builder)?
-                            };
+                            let coerced = self.coerce_value_to_type(val, Some(i64_type.into()), builder)?;
                             // Create format spec string constant
                             let spec_val = self.context_ref().const_string(format_spec.as_bytes(), false);
                             let spec_global = module.add_global(spec_val.get_type(), None, "fmtspec");

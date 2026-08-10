@@ -62,73 +62,23 @@ struct NoSqlDocumentRecord:
     encoded_bytes: i64
     metadata: Dict<text, text>
 
-# `;` separates key=value pairs and `\` is the escape character used below,
-# so both must be escaped in keys/values before joining -- otherwise a value
-# containing ";" (e.g. "a;b") gets split into extra bogus pairs on decode,
-# silently corrupting or dropping metadata instead of round-tripping it.
-fn _nosql_metadata_escape(s: text) -> text:
-    var out = ""
-    for ch in s.chars():
-        if ch == "\\":
-            out = out + "\\\\"
-        elif ch == ";":
-            out = out + "\\;"
-        else:
-            out = out + ch
-    out
-
-fn _nosql_metadata_unescape(s: text) -> text:
-    var out = ""
-    var i = 0
-    val n = s.len()
-    while i < n:
-        val ch = s[i]
-        if ch == "\\" and i + 1 < n:
-            out = out + s[i + 1]
-            i = i + 2
-        else:
-            out = out + ch
-            i = i + 1
-    out
-
 fn nosql_document_encode_metadata(metadata: Dict<text, text>) -> text:
     var parts: [text] = []
     for (key, value) in metadata:
-        parts.push("{_nosql_metadata_escape(key)}={_nosql_metadata_escape(value)}")
+        parts.push("{key}={value}")
     parts.join(";")
-
-# Split on ";" that is not preceded by an escaping "\".
-fn _nosql_metadata_split_pairs(encoded: text) -> [text]:
-    var pairs: [text] = []
-    var current = ""
-    var i = 0
-    val n = encoded.len()
-    while i < n:
-        val ch = encoded[i]
-        if ch == "\\" and i + 1 < n:
-            current = current + ch + encoded[i + 1]
-            i = i + 2
-        elif ch == ";":
-            pairs.push(current)
-            current = ""
-            i = i + 1
-        else:
-            current = current + ch
-            i = i + 1
-    pairs.push(current)
-    pairs
 
 fn nosql_document_decode_metadata(encoded: text) -> Dict<text, text>:
     var metadata: Dict<text, text> = {}
     if encoded == "":
         return metadata
-    val pairs = _nosql_metadata_split_pairs(encoded)
+    val pairs = encoded.split(";")
     for pair in pairs:
         val split_at = pair.index_of("=")
         if split_at > 0:
             val key = pair.slice(0, split_at)
             val value = pair.slice(split_at + 1, pair.len())
-            metadata[_nosql_metadata_unescape(key)] = _nosql_metadata_unescape(value)
+            metadata[key] = value
     metadata
 
 fn nosql_document_record_to_line(record: NoSqlDocumentRecord) -> text:
