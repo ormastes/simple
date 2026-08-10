@@ -1467,7 +1467,19 @@ int         rt_file_rename(const uint8_t* src_ptr, uint64_t src_len,
 }
 int         rt_file_move(const uint8_t* src_ptr, uint64_t src_len,
                          const uint8_t* dst_ptr, uint64_t dst_len) {
-    return rt_file_rename(src_ptr, src_len, dst_ptr, dst_len);
+    char* src = rt_file_text_arg_to_cstr(src_ptr, src_len);
+    char* dst = rt_file_text_arg_to_cstr(dst_ptr, dst_len);
+    if (!src || !dst) {
+        free(src);
+        free(dst);
+        return 0;
+    }
+    int ok = rename(src, dst) == 0;
+    if (!ok && rt_file_copy(src, dst)) ok = rt_file_delete(src);
+    if (!ok) remove(dst);
+    free(src);
+    free(dst);
+    return ok ? 1 : 0;
 }
 int         rt_file_delete(const char* path)    { return spl_file_delete(path); }
 int64_t     rt_file_size(const char* path)      { return spl_file_size(path); }

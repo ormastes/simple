@@ -6789,7 +6789,35 @@ int rt_file_rename(const uint8_t* src_ptr, uint64_t src_len,
 
 int rt_file_move(const uint8_t* src_ptr, uint64_t src_len,
                  const uint8_t* dst_ptr, uint64_t dst_len) {
-    return rt_file_rename(src_ptr, src_len, dst_ptr, dst_len);
+    char* src = rt_core_text_arg_to_cstr(src_ptr, src_len);
+    char* dst = rt_core_text_arg_to_cstr(dst_ptr, dst_len);
+    if (!src || !dst) {
+        free(src);
+        free(dst);
+        return 0;
+    }
+    int ok = rename(src, dst) == 0;
+    if (!ok) {
+        FILE* in = fopen(src, "rb");
+        FILE* out = in ? fopen(dst, "wb") : NULL;
+        ok = in && out;
+        char buffer[8192];
+        while (ok) {
+            size_t n = fread(buffer, 1, sizeof(buffer), in);
+            if (n > 0 && fwrite(buffer, 1, n, out) != n) ok = 0;
+            if (n < sizeof(buffer)) {
+                if (ferror(in)) ok = 0;
+                break;
+            }
+        }
+        if (in && fclose(in) != 0) ok = 0;
+        if (out && fclose(out) != 0) ok = 0;
+        if (ok) ok = remove(src) == 0;
+        if (!ok) remove(dst);
+    }
+    free(src);
+    free(dst);
+    return ok ? 1 : 0;
 }
 
 char* rt_env_cwd(void) {
