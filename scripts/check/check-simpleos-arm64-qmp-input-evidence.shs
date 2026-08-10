@@ -891,6 +891,35 @@ if (
 ):
     raise RuntimeError("QMP capture dimensions do not match guest RAMFB receipt")
 
+# The canonical desktop fixture owns three visible content windows. A changed
+# cursor over an otherwise blank scanout used to satisfy this gate, so require
+# real palette/content evidence inside every authoritative window rectangle.
+window_rois = [
+    (64, 92, 412, 224),
+    (544, 332, 352, 204),
+    (304, 192, 472, 264),
+]
+titlebar_rois = [(x, y, w, min(32, h)) for x, y, w, h in window_rois]
+minimum_roi_palette = 3
+minimum_roi_nonblack_ratio_num = 1
+minimum_roi_nonblack_ratio_den = 2
+for roi_index, (rx, ry, rw, rh) in enumerate(window_rois):
+    if rx < 0 or ry < 0 or rx + rw > before_w or ry + rh > before_h:
+        raise RuntimeError("window ROI %d is outside RAMFB" % roi_index)
+    palette = set()
+    nonblack = 0
+    for y in range(ry, ry + rh):
+        for x in range(rx, rx + rw):
+            offset = (y * before_w + x) * 3
+            pixel = bytes(before_pixels[offset:offset + 3])
+            palette.add(pixel)
+            if pixel != b"\x00\x00\x00":
+                nonblack += 1
+    if len(palette) < minimum_roi_palette:
+        raise RuntimeError("window ROI %d lacks detailed palette" % roi_index)
+    if nonblack * minimum_roi_nonblack_ratio_den < rw * rh * minimum_roi_nonblack_ratio_num:
+        raise RuntimeError("window ROI %d is predominantly blank" % roi_index)
+
 damage_bounds = [
     commit["region"] for commit in input_commits
     if commit["region"][2] > 0 and commit["region"][3] > 0
@@ -899,18 +928,28 @@ if not damage_bounds:
     raise RuntimeError("guest reported no RAMFB damage bound")
 changed_pixels = 0
 outside_pixels = 0
+semantic_pixels = 0
 for y in range(before_h):
     for x in range(before_w):
         offset = (y * before_w + x) * 3
         if before_pixels[offset:offset + 3] == after_pixels[offset:offset + 3]:
             continue
         changed_pixels += 1
+        if any(
+            rx <= x < rx + rw and ry <= y < ry + rh
+            for rx, ry, rw, rh in titlebar_rois
+        ):
+            semantic_pixels += 1
         if not any(
             rx <= x < rx + rw and ry <= y < ry + rh
             for rx, ry, rw, rh in damage_bounds
         ):
             outside_pixels += 1
-if changed_pixels <= 0 or outside_pixels != 0:
+if changed_pixels <= 100:
+    raise RuntimeError("post-input delta is only cursor-sized")
+if semantic_pixels <= 0:
+    raise RuntimeError("input produced no focus/titlebar visual transition")
+if outside_pixels != 0:
     raise RuntimeError("QMP pixel delta is outside guest-declared damage bounds")
 
 final_commit = input_commits[-1]
