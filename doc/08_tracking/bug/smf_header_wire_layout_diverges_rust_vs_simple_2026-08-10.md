@@ -1,10 +1,17 @@
 # SMF header wire layout diverges between the Simple and Rust implementations
 
 **Date:** 2026-08-10
-**Status:** OPEN — confirmed by audit, NOT fixed. A fix requires the dual-write migration
-below; changing either layout unilaterally would invalidate every existing cached artifact.
+**Status:** OPEN — ARCHITECTURAL, confirmed genuinely out of scope for a unilateral fix.
+Re-verified fresh 2026-08-10: root cause, offset table, and parity-spec pass (7/7) all
+reproduced independently from source; the round-trip gap flagged in the original filing
+is now closed (see "Round trip executed and recorded" below) — the divergence is **live**,
+not latent: `object_provider.spl` parses real on-disk `.smf` files with the packed-offset
+reader and would misdecode any Rust-seed-written file with a non-empty section table.
+A fix requires the dual-write migration below; changing either layout unilaterally would
+invalidate every existing cached artifact, which is why no code fix is applied in this pass.
 **Severity:** blocks the `.simple_meta` metadata work (targeted-build plan §13.1 P0 gate).
-**Found by:** SMF format audit (agent A6), independently re-verified by the reviewing model.
+**Found by:** SMF format audit (agent A6), independently re-verified by the reviewing model,
+and re-verified again 2026-08-10 (round-trip evidence added, no findings changed).
 
 ---
 
@@ -69,19 +76,41 @@ also why the padding leaked into the file layout in the first place.
   (re-run by the reviewer in the main tree, not relayed). Sabotage probe: flipping the
   compile-options offset assertion 0x88→0x87 produced `passed=6 failed=1`; reverted to 7/7.
 
-### NOT verified — scope of live impact
+### Round trip executed and recorded (2026-08-10, re-investigation)
 
-A true cross-toolchain round trip (write with one toolchain, read with the other) was
-**not executed**. So this is proven as a layout divergence, but *how often it is actually
-exercised today* is unknown. If the two implementations never read each other's SMF files,
-the practical impact today is latent rather than active.
+Independently re-verified all of the above from source (`src/compiler_rust/common/src/smf/header.rs:9-35`
+struct field list, `src/compiler/70.backend/linker/smf_header.spl` offsets, and a fresh run of
+`smf_layout_parity_spec.spl` → `declared>=7 executed=7 passed=7 failed=0 dropped=0`, matching the
+prior claim exactly).
+
+The previously-open "NOT verified" item is now closed. Real `.smf` artifacts already on disk in
+this tree (`build/dynsmf/net_io.smf`, `build/enum_exposure/p_eq_native.smf`, both written by the
+only toolchain currently producing them, the Rust seed) were decoded byte-for-byte under both
+candidate offset schemes:
+
+```
+section_count @16 = 3 (net_io.smf) / 7 (p_eq_native.smf)  — sane either way
+section_table_offset read @20 (Simple packed offset):  412316860416   ← garbage
+section_table_offset read @24 (Rust padded offset):     96            ← correct (= header size)
+```
+
+This confirms the files on disk use the Rust `#[repr(C)]` padded layout, and that reading them
+at the Simple packed offset produces exactly the garbage the doc predicted. Header location was
+also confirmed empirically to be **at offset 0** in every sampled file (`SMF\0...` magic bytes at
+byte 0), not at the EOF trailer both header.rs and smf_header.spl also support — so the trailer-vs-
+header-front question is moot for files actually being produced today; only the packed-vs-padded
+field-offset divergence is live.
+
+Crucially, this is **not latent**: `src/compiler/70.backend/linker/object_provider.spl:160,201`
+calls `smf_header_from_bytes` (the packed-offset Simple parser) directly against real `.smf` files
+read from disk — this is the live pure-Simple SMF loader path, not dead/test-only code. Any
+pure-Simple toolchain component that loads a Rust-seed-written `.smf` today hits the misparse
+described below in normal operation, not just in a hypothetical cross-toolchain scenario.
 
 The failure mode when it IS exercised: a Simple reader parsing a Rust-written SMF decodes
 garbage from byte 20 onward. Because each side looks for its trailer at a different offset
 from EOF, the other side's magic check fails and it silently falls back to a v1.0
 offset-0 parse — a **misparse, not a clean error**.
-
-**Next step to close this gap:** run the round trip and record the result here.
 
 ## Constraint on any fix
 
