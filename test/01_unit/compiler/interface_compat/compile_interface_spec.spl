@@ -40,6 +40,14 @@ val source_a: text = "fn alpha(x: i64) -> i64:\n    x + 1\n\nfn beta(x: text) ->
 val source_a_body_changed: text = "fn alpha(x: i64) -> i64:\n    x + 2\n\nfn beta(x: text) -> bool:\n    x.len() > 0\n"
 # Same code, comments/blank-line formatting only.
 val source_a_commented: text = "# a comment\nfn alpha(x: i64) -> i64:\n    x + 1   \n\n\nfn beta(x: text) -> bool:  # trailing note\n    x.len() > 0\n"
+# Regression fixture (2026-08-10 bug fix): a `#` inside a text literal must
+# NOT be treated as a comment start. These two sources differ only in the
+# text AFTER the `#` inside a string literal ("tag#1" vs "tag#2"). A naive
+# line-based `#`-strip truncates both at the `#` and normalizes them to the
+# IDENTICAL text, wrongly collapsing two different bodies into one
+# implementation digest. A string-aware strip must keep them distinct.
+val source_a_hash_in_literal_1: text = "fn alpha(x: i64) -> i64:\n    x + 1\n\nfn beta(x: text) -> bool:\n    x.len() > 0 and x != \"tag#1\"\n"
+val source_a_hash_in_literal_2: text = "fn alpha(x: i64) -> i64:\n    x + 1\n\nfn beta(x: text) -> bool:\n    x.len() > 0 and x != \"tag#2\"\n"
 
 describe "compile_interface_digest acceptance properties":
     it "body-only change: same interface digest, different implementation digest":
@@ -78,6 +86,13 @@ describe "compile_interface_digest acceptance properties":
         reversed.add_function(fn_sig("beta", "text", "bool", nil))
         reversed.add_function(fn_sig("alpha", "i64", "i64", nil))
         expect compile_interface_digest(surface_a()) == compile_interface_digest(reversed)
+
+    it "hash inside a string literal is not treated as a comment start (no false collision)":
+        val id1 = compute_module_identity(surface_a(), source_a_hash_in_literal_1)
+        val id2 = compute_module_identity(surface_a(), source_a_hash_in_literal_2)
+        expect id1.compile_interface_digest == id2.compile_interface_digest
+        expect id1.implementation_digest != id2.implementation_digest
+        expect id1.source_digest != id2.source_digest
 
     it "placeholder abi/semantic digests are domain-separated from compile digest":
         val id = compute_module_identity(surface_a(), source_a)

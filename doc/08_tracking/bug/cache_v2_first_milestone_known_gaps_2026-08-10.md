@@ -43,18 +43,37 @@ compute-and-log and is wired into no build decision.
 rather than the ApiSurface summary. Blocks the plan's Wave 2 (`.sreq` per-consumer
 requirements) from being sound.
 
-## 3. `normalize_module_source` comment-stripping is not string-literal aware
+## 3. `normalize_module_source` comment-stripping is not string-literal aware — FIXED 2026-08-10
 
-**Where:** `src/compiler/35.semantics/interface/compile_interface.spl`
+**Where:** `src/compiler/35.semantics/interface/module_identity.spl` (not
+`compile_interface.spl` — that was a stale reference in the original filing;
+`normalize_module_source` and the new `strip_trailing_comment` helper live in
+`module_identity.spl`).
 
-A `#` inside a text literal is treated as a comment start when normalizing source for
-`implementation_digest`.
+**Was:** a `#` inside a text literal was treated as a comment start when
+normalizing source for `implementation_digest` (naive `index_of("#")` +
+`substring`), so two genuinely different modules could normalize to the same
+text if they differed only inside a literal containing `#` (e.g.
+`"tag#1"` vs `"tag#2"` both truncated to `"tag`, colliding on the same
+`implementation_digest` — an under-invalidation risk for reuse decisions built
+on that digest).
 
-**Consequence:** two genuinely different modules can normalize to the same text if they
-differ only inside a literal containing `#`. Affects `implementation_digest` only, not
-`compile_interface_digest`.
+**Fix:** `strip_trailing_comment` now scans each line char-by-char tracking
+`in_string` state (toggled on unescaped `"`, with `\` escape handling inside
+the literal) and only cuts at `#` when not inside a string literal. Still
+line-based (does not track multi-line/triple-quoted literals spanning lines —
+same scope limit as before; not addressed by this fix).
 
-**Unblock:** normalize via the lexer's token stream instead of textual stripping.
+**Evidence:** `test/01_unit/compiler/interface_compat/compile_interface_spec.spl`,
+new case `"hash inside a string literal is not treated as a comment start (no
+false collision)"` — two sources differing only after `#` inside a string
+literal now produce distinct `implementation_digest`s. Sabotage-verified: with
+the old naive `index_of("#")`+`substring` stripping restored, this case fails
+(`8 total, 7 passed, 1 failed`, `✗ hash inside a string literal...`); with the
+fix, `8 total, 8 passed, 0 failed`. Full spec file also reconfirmed green
+end-to-end after restoring the fix. Verified against `bin/simple` (currently
+the Rust seed per its `--version` banner — see gap 7; not separately verified
+against the self-hosted binary).
 
 ## 4. GC `min_free_ratio` is scoped to the cache budget, not host disk free space
 

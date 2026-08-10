@@ -30,17 +30,46 @@ struct ModuleIdentity:
     compile_semantic_digest: text
     link_export_digest: text
 
+# Strip a trailing `#` comment from a single source line, string-literal
+# aware: a `#` inside a `"..."` text literal is NOT treated as a comment
+# start. Handles `\` escapes inside the literal (e.g. `\"`) so an escaped
+# quote does not toggle string state. Does not track multi-line/triple-quoted
+# literals — normalization is line-based, so a `#` inside a line that is
+# itself part of a multi-line literal is out of scope here, same as before.
+fn strip_trailing_comment(line: text) -> text:
+    val cs = line.chars()
+    var in_string = false
+    var i = 0
+    var cut = cs.len()
+    while i < cs.len():
+        val ch = cs[i]
+        if in_string and ch == "\\":
+            i = i + 2
+        else:
+            if ch == "\"":
+                in_string = not in_string
+                i = i + 1
+            else:
+                if ch == "#" and not in_string:
+                    cut = i
+                    i = cs.len()
+                else:
+                    i = i + 1
+    var result = ""
+    var j = 0
+    while j < cut:
+        result = result + cs[j]
+        j = j + 1
+    result
+
 # Normalize the module for implementation identity: strip whole-line and
-# trailing `#` comments (naive: not string-aware inside `"..."` containing
-# `#` — acceptable for the identity digest first slice), trim trailing
-# whitespace, drop blank lines. Bodies remain, so body edits change it.
+# trailing `#` comments (string-literal aware — a `#` inside a `"..."` text
+# literal does not start a comment), trim trailing whitespace, drop blank
+# lines. Bodies remain, so body edits change it.
 fn normalize_module_source(source: text) -> text:
     var out: [text] = []
     for line in source.split("\n"):
-        var code = line
-        val hash_pos = code.index_of("#")
-        if hash_pos >= 0:
-            code = code.substring(0, hash_pos)
+        var code = strip_trailing_comment(line)
         code = code.trim_end()
         if code.len() > 0:
             out.push(code)
