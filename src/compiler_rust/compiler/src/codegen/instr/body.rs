@@ -370,6 +370,16 @@ pub(super) fn build_vreg_types(
                         // `our_version.len().to_i64()` returned garbage → empty
                         // server version → KEX "incorrect signature").
                         "rt_array_len" | "rt_len" => Some(TypeId::I64),
+                        // libm-backed math helpers. Declared `-> F64` in
+                        // runtime_sffi.rs::RUNTIME_FUNCS, so the Cranelift call
+                        // really does produce an F64 value; without the stamp
+                        // the result VReg is untyped and a directly-printed
+                        // `sqrt(16.0)` renders the float as an integer.
+                        // Emitted by mir/lower/lowering_expr_builtin.rs
+                        // (`lower_libm_math`, Defect B).
+                        "rt_math_sqrt" | "rt_math_floor" | "rt_math_ceil" | "rt_math_pow" | "rt_math_round" => {
+                            Some(TypeId::F64)
+                        }
                         "rt_array_get_text" => Some(TypeId::STRING),
                         "rt_typed_bytes_u8_at" | "rt_typed_bytes_u8_data_at" | "rt_bytes_u8_at" => Some(TypeId::U8),
                         "rt_typed_words_u32_at" | "rt_typed_words_u32_unchecked" | "rt_typed_words_u32_data_at" => {

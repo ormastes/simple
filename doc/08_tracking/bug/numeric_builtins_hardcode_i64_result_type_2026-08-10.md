@@ -1,7 +1,7 @@
 # Numeric builtins hard-code an `i64` result type, printing float answers as raw IEEE bits
 
 - **Date:** 2026-08-10
-- **Status:** DEFECT A **FIXED**; DEFECT B **OPEN** (independent, filed below)
+- **Status:** DEFECT A **FIXED**; DEFECT B **FIXED**; DEFECT C **FIXED**
 - **Lanes measured:** interpreter, JIT (`SIMPLE_JIT_STRICT=1`)
 - **Class:** silent wrong-value / type mislabel
 - **Fence:** `scripts/check/check-numeric-builtin-result-type.shs`
@@ -59,7 +59,7 @@ Positive-only testing would have been fail-open here: IEEE positive floats
 order-correspond to their bit patterns, so an integer compare would also have
 produced the right answer for positives. The negative rows are what proved it.
 
-## Defect B — `sqrt`/`floor`/`ceil`/`pow` compute genuine garbage (OPEN)
+## Defect B — `sqrt`/`floor`/`ceil`/`pow` compute genuine garbage (FIXED)
 
 Reported as "possible uninitialised read: `sqrt(16.0)` returned different
 garbage on consecutive runs". Confirmed real, **independent of Defect A**, and
@@ -99,11 +99,54 @@ The comment already in `lower_min_max_abs` asserts that these four "map to real
 libm symbols" — they do, but **not with a compatible ABI**, so that assumption
 is where the defect lives.
 
-**Fix shape (not done here):** extend `lower_min_max_abs` to cover
-`sqrt`/`floor`/`ceil`/`pow` with float-typed lowering — the same layer, upstream
-of every backend. The method forms (`x.sqrt()`, `x.floor()`) already lower
-correctly through `codegen/instr/methods.rs` (`builder.ins().sqrt` / `.floor`),
-so a working float path exists to route to.
+### Fix
+
+**A float-ABI external-call path already existed and did not have to be built.**
+`codegen/runtime_sffi.rs::RUNTIME_FUNCS` declares real `F64` signatures for
+`rt_math_sqrt` / `rt_math_floor` / `rt_math_ceil` / `rt_math_pow`;
+`codegen/instr/calls.rs::adapt_args_to_signature` converts arguments to the
+declared types at the call site; and the `f64 **` operator in
+`codegen/instr/core.rs` already calls `rt_math_pow` exactly this way. All four
+symbols are also registered in the interpreter (`interpreter_extern/mod.rs`) and
+exist as `extern "C"` `f64` functions in the Rust runtime
+(`runtime/src/value/sffi/math.rs`). So the fix routes these four builtins onto
+that existing path rather than teaching the generic integer call about floats.
+
+`mir/lower/lowering_expr_builtin.rs::lower_libm_math` (new, sibling of
+`lower_min_max_abs`) lowers each of the four to `Cast`-to-`f64` on every
+argument, a `MirInst::Call` to the matching `rt_math_*` symbol, and a `Cast`
+back to the `expr_ty` that Defect A's `numeric_builtin_result_ty` already
+derived from the arguments. Integer callers therefore keep integer results
+(`sqrt(16)` => `4`), matching the interpreter-fallback lane exactly.
+`codegen/instr/body.rs::build_vreg_types` gains the matching `-> F64` stamp for
+those four call targets, without which a directly-printed `sqrt(16.0)` has an
+untyped result VReg and renders the float as an integer.
+
+**Same Rust-seed rationale as Defect A:** this name-to-emitted-call mapping
+exists only in the seed's MIR lowering; no pure-Simple file expresses it, and
+MIR lowering is one layer upstream of every backend, so it is a single fix
+point rather than a per-backend one.
+
+Measured, same probe, same binary lineage (private `CARGO_TARGET_DIR`, debug
+`simple-driver`), both lanes, via typed locals:
+
+| expression | before | after |
+|---|---|---|
+| `sqrt(16.0)` | `6.39e-310`-class denormal (run-varying) | `4.0` |
+| `sqrt(16)` | `5470854845600` (interp) / `3872221041824` (jit) | `4` |
+| `floor(2.7)` | `2.7` | `2.0` |
+| `ceil(2.1)` | denormal garbage | `3.0` |
+| `pow(2.0, 3.0)` | denormal garbage | `8.0` |
+| `pow(2, 3)` | `255` | `8` |
+| `floor(17)` / `ceil(12)` | `6083089011872` / `4108981114016` | `17` / `12` |
+
+**Native lane, not fixed and not regressed:** `native-build` (the pure-Simple
+driver, with or without `--entry-closure`) rejects all four names outright —
+`HIR lowering error: unresolved name: ceil` — identically before and after this
+change (15 `unresolved name` diagnostics in both logs). That is a separate,
+pre-existing gap in the pure-Simple driver's builtin table, not part of this
+defect, and it is why the fence covers the interpreter, JIT, and
+interpreter-fallback lanes only.
 
 ## Defect C — the interpreter-fallback lane truncated floats (FIXED)
 
@@ -158,10 +201,13 @@ here for the record; it needs its own change.
 `scripts/check/check-numeric-builtin-result-type.shs` — asserts computed
 **values** (not existence) across the interpreter and JIT lanes, with negative
 arguments, integer-caller regression controls, a typed-local control, and a
-negative control that proves the harness can fail. The four Defect-B float cases
-are asserted as XFAIL rows: the script fails if one of them starts passing
-without the XFAIL list being updated, so the open defect cannot be silently
-fixed or silently forgotten.
+negative control that proves the harness can fail. The four Defect-B cases were
+XFAIL rows; they are now positive assertions, joined by negative-argument
+`floor`/`ceil` rows, the four integer-argument rows (the group that separated B
+from A), and typed-local forms. **48 assertions, PASS** on the fixed binary (was
+32 with 8 XFAILs). Revert-proof: the same script against the pre-fix binary
+reports `FAIL — 48 assertions checked, 24 wrong value(s)`, exit 1, with the
+specific wrong values tabulated above.
 
 ## Related
 

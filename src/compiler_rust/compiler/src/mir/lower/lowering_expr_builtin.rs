@@ -96,11 +96,13 @@ impl<'a> MirLowerer<'a> {
     /// Lower bare `min(a, b)` / `max(a, b)` / `abs(a)` directly as
     /// comparisons + a select, instead of a call to an external symbol
     /// literally named "min"/"max"/"abs" (gap 6: no runtime/libc symbol by
-    /// those names exists — unlike the sibling `sqrt`/`floor`/`ceil`/`pow`
-    /// builtins in this same dispatch, which map to real libm symbols, bare
-    /// `min`/`max`/`abs` fell through to a generic external `Call` that only
-    /// ever links by accident, and never for the JIT/cranelift backend,
-    /// which has no such symbol registered at all).
+    /// those names exists — bare `min`/`max`/`abs` fell through to a generic
+    /// external `Call` that only ever links by accident, and never for the
+    /// JIT/cranelift backend, which has no such symbol registered at all).
+    /// The sibling `sqrt`/`floor`/`ceil`/`pow` builtins in this same dispatch
+    /// DO map to real libm symbols, but linking to them was not enough: that
+    /// same generic `Call` used the integer ABI, which libm does not answer.
+    /// See `lower_libm_math` below (Defect B).
     ///
     /// Contract matched here is the interpreter's own (PROVED by reading
     /// `interpreter_extern/math.rs`): `min`/`max` take exactly 2 args,
@@ -168,6 +170,103 @@ impl<'a> MirLowerer<'a> {
         }
     }
 
+    /// Emit `Cast { source, from_ty, to_ty }` unless it would be a no-op.
+    fn cast_reg(&mut self, source: VReg, from_ty: TypeId, to_ty: TypeId) -> MirLowerResult<VReg> {
+        if from_ty == to_ty {
+            return Ok(source);
+        }
+        self.with_func(|func, current_block| {
+            let dest = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::Cast {
+                dest,
+                source,
+                from_ty,
+                to_ty,
+            });
+            dest
+        })
+    }
+
+    /// Lower bare `sqrt(x)` / `floor(x)` / `ceil(x)` / `pow(a, b)` as a call to
+    /// the **`rt_math_*` runtime symbols**, whose signatures are declared as
+    /// `f64 -> f64` (`f64, f64 -> f64` for `pow`) in
+    /// `codegen/runtime_sffi.rs::RUNTIME_FUNCS`, with explicit `Cast`s into and
+    /// out of `f64`.
+    ///
+    /// DEFECT B (doc/08_tracking/bug/numeric_builtins_hardcode_i64_result_type_2026-08-10.md).
+    /// Previously these four fell through to a generic external `MirInst::Call`
+    /// to symbols literally named `sqrt`/`floor`/`ceil`/`pow`. Those link to
+    /// **libm**, which takes and returns a `double` in `xmm0` — but the generic
+    /// call is emitted with the **integer ABI**, so the arguments went into
+    /// integer registers and the result was read from `rax`, which libm never
+    /// wrote. The tell was `sqrt(16)` returning `0`: libm had correctly put
+    /// `4.0` in `xmm0` and `rax` happened to be zero. Every other case read
+    /// stale register/stack contents, which is why the same expression printed
+    /// *different* garbage on consecutive runs and looked like uninitialised
+    /// memory. It was not — it was an ABI mismatch.
+    ///
+    /// A float-ABI external-call path already existed and did not have to be
+    /// built: `RUNTIME_FUNCS` carries real `F64` parameter/return signatures,
+    /// `codegen/instr/calls.rs::adapt_args_to_signature` converts arguments to
+    /// the declared types at the call site, and the `f64 **` operator in
+    /// `codegen/instr/core.rs` already calls `rt_math_pow` this way. The fix is
+    /// therefore to route these four onto that existing path rather than to
+    /// teach the generic integer call about floats.
+    ///
+    /// Why MIR lowering and not a `.spl` site: like Defect A, this mapping from
+    /// builtin name to emitted call exists **only** in the Rust seed's MIR
+    /// lowering. There is no pure-Simple file that expresses it, so the repo's
+    /// "fix `.spl` not Rust" default has nothing to apply to. Fixing it here —
+    /// one layer upstream of every backend (interpreter-over-MIR, cranelift/JIT,
+    /// LLVM/native) — is a single fix point rather than a per-backend one,
+    /// exactly as `lower_min_max_abs` above.
+    ///
+    /// Integer callers keep integer results: `expr_ty` is already derived from
+    /// the argument types by `numeric_builtin_result_ty` (Defect A), so
+    /// `sqrt(16)` computes in `f64` and casts back to `i64` => `4`, matching the
+    /// interpreter-fallback lane (`interpreter_extern/math.rs`) exactly.
+    fn lower_libm_math(&mut self, name: &str, args: &[HirExpr], expr_ty: TypeId) -> Option<MirLowerResult<VReg>> {
+        let rt_name = match (name, args.len()) {
+            ("sqrt", 1) => "rt_math_sqrt",
+            ("floor", 1) => "rt_math_floor",
+            ("ceil", 1) => "rt_math_ceil",
+            ("pow", 2) => "rt_math_pow",
+            _ => return None,
+        };
+        Some((|| {
+            let mut arg_regs = Vec::with_capacity(args.len());
+            for arg in args {
+                let reg = self.lower_expr(arg)?;
+                // Anything not already a float is treated as an integer, which
+                // is what the previous behaviour assumed too (TypeId::ANY
+                // included) — so incomplete inference keeps the integer path.
+                let from_ty = match arg.ty {
+                    TypeId::F64 => TypeId::F64,
+                    TypeId::F32 => TypeId::F32,
+                    _ => TypeId::I64,
+                };
+                arg_regs.push(self.cast_reg(reg, from_ty, TypeId::F64)?);
+            }
+            let call_dest = self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: CallTarget::from_name(rt_name),
+                    args: arg_regs,
+                });
+                dest
+            })?;
+            let result_ty = match expr_ty {
+                TypeId::F64 => TypeId::F64,
+                TypeId::F32 => TypeId::F32,
+                _ => TypeId::I64,
+            };
+            self.cast_reg(call_dest, TypeId::F64, result_ty)
+        })())
+    }
+
     pub(super) fn lower_builtin_call_expr(
         &mut self,
         name: &str,
@@ -175,6 +274,9 @@ impl<'a> MirLowerer<'a> {
         expr_ty: TypeId,
     ) -> MirLowerResult<VReg> {
         if let Some(result) = self.lower_min_max_abs(name, args, expr_ty) {
+            return result;
+        }
+        if let Some(result) = self.lower_libm_math(name, args, expr_ty) {
             return result;
         }
 

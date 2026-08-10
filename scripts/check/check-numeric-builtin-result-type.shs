@@ -28,12 +28,24 @@
 # order-correspond to their bit patterns) while negatives would invert. The
 # negative rows are the ones that prove a real float compare.
 #
-# SCOPE / KNOWN OPEN. sqrt/floor/ceil/pow on FLOAT arguments are a SECOND,
-# independent defect (they fall through to a generic external Call using the
-# integer ABI and read a return register libm never wrote). They are asserted
-# here as XFAIL rows: this script reports them, and fails if one of them starts
-# passing without the XFAIL list being updated, so the open defect cannot be
-# quietly forgotten OR quietly fixed without this fence noticing.
+# DEFECT B (FIXED 2026-08-10, previously the XFAIL rows below). sqrt/floor/ceil/
+# pow were a SECOND, independent defect: they fell through to a generic external
+# Call to the libm symbols literally named sqrt/floor/ceil/pow, emitted with the
+# INTEGER ABI. libm takes and returns a double in xmm0, so the arguments went to
+# integer registers and the result was read from rax, which libm never wrote.
+# The values were stale register/stack contents, which is why the same expression
+# printed DIFFERENT garbage on consecutive runs and looked like uninitialised
+# memory. The tell that separated it from Defect A was that INTEGER arguments
+# were broken too -- `sqrt(16)` returned 0, i.e. libm had put 4.0 in xmm0 and rax
+# happened to be zero -- which a mere type mislabel cannot explain.
+#
+# mir/lower/lowering_expr_builtin.rs `lower_libm_math` now lowers these four onto
+# the rt_math_sqrt/floor/ceil/pow runtime symbols, whose F64 signatures are
+# declared in codegen/runtime_sffi.rs, with explicit Casts into and out of f64.
+# The integer-argument rows below are load-bearing: they are what proves the
+# call really moved to the float ABI rather than the result merely being
+# relabelled, and they pin the i64-in/i64-out contract against the
+# interpreter-fallback lane.
 #
 # Verdict line is the last line of stdout:
 #   PASS  -- <n> assertions checked, n > 0    exit 0
@@ -54,7 +66,6 @@ trap 'rm -rf "$WORK"' EXIT INT TERM
 
 CHECKED=0
 FAILED=0
-XFAIL_UNEXPECTED_PASS=0
 
 # emit_case <file> <decl-type> <expr>
 # Prints the expression through a TYPED LOCAL. The typed local is load-bearing:
@@ -77,28 +88,6 @@ run_case() {
     echo "  FAIL [$_lane] $_label: expected '$_expect', got '$_got'"
     FAILED=$((FAILED + 1))
     return 1
-}
-
-# Same as run_case but for the KNOWN-OPEN sqrt/floor/ceil/pow float defect.
-# A pass here is reported as an unexpected pass and FAILS the script, so the
-# XFAIL list can never silently rot.
-run_xfail() {
-    _label="$1"; _lane="$2"; _src="$3"; _expect="$4"
-    printf '%s\n' "$_src" > "$WORK/case.spl"
-    case "$_lane" in
-        interp) _got=$(SIMPLE_RUST_SEED_WARNING=0 "$BIN" run "$WORK/case.spl" 2>/dev/null) ;;
-        jit)    _got=$(SIMPLE_JIT_STRICT=1 SIMPLE_RUST_SEED_WARNING=0 "$BIN" "$WORK/case.spl" 2>/dev/null) ;;
-    esac
-    CHECKED=$((CHECKED + 1))
-    if [ "$_got" = "$_expect" ]; then
-        echo "  XPASS[$_lane] $_label unexpectedly CORRECT ('$_got') — the float"
-        echo "        sqrt/floor/ceil/pow defect appears FIXED; update the XFAIL"
-        echo "        list in this script and in the bug doc."
-        XFAIL_UNEXPECTED_PASS=$((XFAIL_UNEXPECTED_PASS + 1))
-        return 1
-    fi
-    echo "  xfail[$_lane] $_label still broken as expected (got '$_got')"
-    return 0
 }
 
 echo "check-numeric-builtin-result-type — binary: $BIN"
@@ -146,15 +135,48 @@ for LANE in interp jit; do
     val x: f64 = min(1.5, 2.5)
     print x' '1.5'
 
-    # ---- KNOWN-OPEN: float sqrt/floor/ceil/pow (integer-ABI call defect). ----
-    run_xfail "print sqrt(16.0)"     "$LANE" 'fn main():
+    # ---- DEFECT B (was XFAIL): float sqrt/floor/ceil/pow. These read a return
+    # register libm never wrote and printed run-varying garbage; they now go
+    # through the rt_math_* float-ABI symbols. ----
+    run_case "print sqrt(16.0)"      "$LANE" 'fn main():
     print sqrt(16.0)' '4.0'
-    run_xfail "print floor(1.7)"     "$LANE" 'fn main():
+    run_case "print floor(1.7)"      "$LANE" 'fn main():
     print floor(1.7)' '1.0'
-    run_xfail "print ceil(1.2)"      "$LANE" 'fn main():
+    run_case "print ceil(1.2)"       "$LANE" 'fn main():
     print ceil(1.2)' '2.0'
-    run_xfail "print pow(2.0, 3.0)"  "$LANE" 'fn main():
+    run_case "print pow(2.0, 3.0)"   "$LANE" 'fn main():
     print pow(2.0, 3.0)' '8.0'
+
+    # Negative float arguments: floor/ceil must round toward -inf / +inf, which
+    # an integer-truncating or bit-reinterpreting path gets wrong in a way that
+    # positive-only rows cannot see.
+    run_case "print floor(-1.2)"     "$LANE" 'fn main():
+    print floor(-1.2)' '-2.0'
+    run_case "print ceil(-1.7)"      "$LANE" 'fn main():
+    print ceil(-1.7)' '-1.0'
+
+    # ---- DEFECT B, INTEGER ARGUMENTS. This is the group that separated
+    # Defect B from Defect A: a pure type mislabel cannot make sqrt(16) return
+    # 0. These assert the i64-in / i64-out contract, identical to the
+    # interpreter-fallback lane asserted further below. ----
+    run_case "print sqrt(16)"        "$LANE" 'fn main():
+    print sqrt(16)' '4'
+    run_case "print floor(17)"       "$LANE" 'fn main():
+    print floor(17)' '17'
+    run_case "print ceil(12)"        "$LANE" 'fn main():
+    print ceil(12)' '12'
+    run_case "print pow(2, 3)"       "$LANE" 'fn main():
+    print pow(2, 3)' '8'
+
+    # Typed-local form of the same four floats -- the direct-print form above
+    # and this one exercise different result-type plumbing, and Defect B broke
+    # BOTH (unlike Defect A, which the typed local always survived).
+    run_case "val f64 = sqrt(16.0)"  "$LANE" 'fn main():
+    val x: f64 = sqrt(16.0)
+    print x' '4.0'
+    run_case "val f64 = pow(2.0,3.0)" "$LANE" 'fn main():
+    val x: f64 = pow(2.0, 3.0)
+    print x' '8.0'
 
     echo
 done
@@ -198,11 +220,11 @@ else
     FAILED=$((FAILED + 1))
 fi
 
-# sqrt/floor/ceil/pow ARE correct in this lane -- the math.rs float path fixes
-# them here even though Defect B (the integer-ABI libm call) still breaks them
-# in the MIR/JIT lanes above. Asserting it pins the difference between the two
-# lanes, so a future "fix" that routes the fallback lane back through the
-# broken MIR path is caught rather than silently accepted.
+# sqrt/floor/ceil/pow in this lane are served by the math.rs float path (Defect
+# C). Since Defect B was fixed the MIR/JIT lanes above must agree with it
+# EXACTLY -- same values, same int-in/int-out contract -- so these rows are now
+# a cross-lane agreement check rather than a record of divergence. A future
+# change that moves either lane off that contract breaks this row.
 FALLBACK2_SRC='use std.nogc_sync_mut.runtime_wrappers.{hash}
 fn main():
     print sqrt(16.0)
@@ -243,9 +265,8 @@ if [ "$CHECKED" -eq 0 ]; then
     exit 2
 fi
 
-TOTAL_FAIL=$((FAILED + XFAIL_UNEXPECTED_PASS))
-if [ "$TOTAL_FAIL" -gt 0 ]; then
-    echo "FAIL — $CHECKED assertions checked, $FAILED wrong value(s), $XFAIL_UNEXPECTED_PASS unexpected pass(es)"
+if [ "$FAILED" -gt 0 ]; then
+    echo "FAIL — $CHECKED assertions checked, $FAILED wrong value(s)"
     exit 1
 fi
 

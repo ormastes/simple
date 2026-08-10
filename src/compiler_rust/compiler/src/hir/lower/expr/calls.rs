@@ -520,11 +520,14 @@ impl Lowerer {
             // Integer callers are unaffected: with i64 arguments this still
             // yields TypeId::I64, exactly as before.
             //
-            // NOTE: `sqrt`/`floor`/`ceil`/`pow` have a SECOND, independent
-            // defect that this does not fix — they fall through
-            // `lower_min_max_abs` in mir/lower/lowering_expr_builtin.rs to a
-            // generic external `Call` using the integer ABI, so they read a
-            // return register libm never wrote. Tracked separately.
+            // `sqrt`/`floor`/`ceil`/`pow` had a SECOND, independent defect that
+            // this type derivation did not fix (they fell through to a generic
+            // external `Call` to libm using the integer ABI, so they read a
+            // return register libm never wrote). That is fixed separately in
+            // `lower_libm_math` in mir/lower/lowering_expr_builtin.rs, which
+            // routes them to the `rt_math_*` symbols' real f64 ABI — and which
+            // depends on the result type derived HERE to decide whether to cast
+            // the f64 result back to i64 for integer callers.
             // doc/08_tracking/bug/numeric_builtins_hardcode_i64_result_type_2026-08-10.md
             "abs" | "min" | "max" | "sqrt" | "floor" | "ceil" | "pow" => {
                 let args_hir = self.lower_call_args(args, ctx)?;
