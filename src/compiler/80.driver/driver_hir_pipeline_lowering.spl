@@ -282,9 +282,6 @@ impl CompilerDriver:
         # registered handle for every module. In the no-GC bootstrap runtime,
         # creating a fresh array near the terminal module can fail registry
         # growth under peak AST+HIR pressure and leave `errors` invalid.
-        var shared_lowering_errors: [LoweringError] = []
-        var shared_lowering_diagnostic_messages: [text] = []
-        var shared_lowering_diagnostic_recovered: [bool] = []
         val retained_module_surfaces: ModuleSurfacesByName = if self.ctx.sources.len() > 0:
             match module_surfaces_from_modules(self.ctx.modules, self.ctx.sources):
                 case Ok(value): value
@@ -351,7 +348,13 @@ impl CompilerDriver:
             # lower_parser_module_unstub) mis-dispatch and the HIR lowering body
             # never runs (iteration 17; same family as the iteration 9 Dict-ANY
             # field hazard).
-            var lowering: HirLowering = hirlowering_for_module_with_diagnostics(src_path ?? "", retained_module_surfaces, shared_lowering_errors, shared_lowering_diagnostic_messages, shared_lowering_diagnostic_recovered)
+            # A fresh lowerer needs fresh diagnostic owners. Reusing these arrays
+            # across modules lets recovered diagnostics from an earlier source
+            # replay through staged value/COW semantics even after clear().
+            var module_lowering_errors: [LoweringError] = []
+            var module_lowering_diagnostic_messages: [text] = []
+            var module_lowering_diagnostic_recovered: [bool] = []
+            var lowering: HirLowering = hirlowering_for_module_with_diagnostics(src_path ?? "", retained_module_surfaces, module_lowering_errors, module_lowering_diagnostic_messages, module_lowering_diagnostic_recovered)
             if src_path != nil:
                 lowering.module_filename = src_path
             lowering.lowered_traits = shared_lowered_traits
@@ -441,9 +444,6 @@ impl CompilerDriver:
                 else:
                     self.ctx.add_error(module_error_message)
                 module_error_idx = module_error_idx + 1
-            shared_lowering_errors.clear()
-            shared_lowering_diagnostic_messages.clear()
-            shared_lowering_diagnostic_recovered.clear()
             if focused_future_driver_diag:
                 eprint("[driver-hir] errors done")
 
