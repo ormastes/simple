@@ -2,7 +2,15 @@
 
 **Date:** 2026-07-06
 **Area:** runtime, self-hosted interpreter extern marshalling, SimpleOS image build
-**Status:** OPEN
+**Status:** ARCHITECTURAL-OPEN — final terminal-status pass 2026-08-10
+re-confirms the 2026-08-09 finding: `rt_file_truncate` at
+`src/compiler_rust/compiler/src/interpreter_extern/file_io.rs:1047` still
+has no visible 4 MiB clamp (`file.set_len(size)` uses the full 64-bit value),
+but this cannot be confirmed end-to-end because the fix/diagnosis surface
+(`extract_path`'s `Value::Str`-only match plus the truncate path itself) is
+entirely inside `src/compiler_rust/**`, out of edit scope for this pass, and
+the unrelated `argument 0 must be a string path` marshalling failure still
+blocks any fresh repro in this environment. Left OPEN, unmodified.
 
 ## Symptom
 
