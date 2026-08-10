@@ -66,7 +66,8 @@ Options:
   --jobs=<n|full|half|min|auto>
                      Native build workers (default: half CPUs locally, 2 on GitHub Actions)
                      Stage 3 uses a three-sample portable memory admission;
-                     override added headroom with SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB
+                     measured headroom defaults to 12288 MiB; override with
+                     SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB
   --no-mcp           Skip MCP server builds (Stage 5)
   --keep-artifacts   Accepted for compatibility; artifacts are kept
   --no-verify        Accepted for compatibility; hash verification still runs

@@ -72,6 +72,7 @@ set -e
 [ ! -e "$launched" ] || fail "low-memory refusal launched Stage 3"
 assert_value blocked status "$low_evidence"
 assert_value linux-host-below-reserve-plus-headroom reason "$low_evidence"
+assert_value 12288 headroom_mib "$low_evidence"
 assert_value 3 concurrent_process_count "$low_evidence"
 assert_value informational-only process_scan_effect "$low_evidence"
 assert_value 101 process_1_pid "$low_evidence"
@@ -83,11 +84,23 @@ assert_value 1 concurrent_bootstrap_count "$low_evidence"
 assert_value 1 concurrent_native_build_count "$low_evidence"
 assert_value 1 runaway_replay_chain_count "$low_evidence"
 
+# The documented override is the provider's canonical configuration contract.
+override_evidence="$test_dir/linux-override.env"
+export SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB=1024
+set +e
+bootstrap_stage3_memory_admission_preflight "$override_evidence"
+override_status=$?
+set -e
+[ "$override_status" -eq 75 ] ||
+    fail "headroom override refusal returned $override_status"
+assert_value 1024 headroom_mib "$override_evidence"
+unset SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB
+
 # Sufficient Linux memory is ready, includes finite cgroup headroom, and can be
 # finalized only after the exact launched runner is attached.
 ready_fixture="$test_dir/linux-ready"
 write_three "$ready_fixture" \
-    'linux|134217728|20000000|1073741824|8589934592|10|fixture'
+    'linux|134217728|30000000|1073741824|17179869184|10|fixture'
 ready_evidence="$test_dir/linux-ready.env"
 export SIMPLE_BOOTSTRAP_STAGE3_MEMORY_SAMPLE_FIXTURE="$ready_fixture"
 bootstrap_stage3_memory_admission_preflight "$ready_evidence" ||
@@ -101,7 +114,8 @@ wait "$runner"
 bootstrap_stage3_memory_verify_evidence "$ready_evidence" ||
     fail "ready evidence did not verify"
 assert_value ready status "$ready_evidence"
-assert_value 7340032 sample_3_cgroup_available_kib "$ready_evidence"
+assert_value 12288 headroom_mib "$ready_evidence"
+assert_value 15728640 sample_3_cgroup_available_kib "$ready_evidence"
 assert_value "$runner" stage3_runner_pid "$ready_evidence"
 assert_value "$runner_executable" stage3_runner_executable "$ready_evidence"
 
@@ -164,7 +178,7 @@ export SIMPLE_BOOTSTRAP_STAGE3_MEMORY_SAMPLE_INTERVAL_SECONDS=0
 
 linux_unknown_fixture="$test_dir/linux-cgroup-unknown"
 write_three "$linux_unknown_fixture" \
-    'linux|134217728|20000000|unavailable|unavailable|10|fixture'
+    'linux|134217728|30000000|unavailable|unavailable|10|fixture'
 linux_unknown_evidence="$test_dir/linux-cgroup-unknown.env"
 export SIMPLE_BOOTSTRAP_STAGE3_MEMORY_SAMPLE_FIXTURE="$linux_unknown_fixture"
 bootstrap_stage3_memory_admission_preflight "$linux_unknown_evidence" ||
@@ -229,7 +243,7 @@ assert_value darwin-memory-pressure sample_3_provider "$darwin_pressure_evidence
 
 darwin_vmstat="$test_dir/darwin-vmstat"
 write_three "$darwin_vmstat" \
-    'darwin-vmstat|17179869184|4096|600000|100000|10000'
+    'darwin-vmstat|17179869184|4096|3000000|500000|100000'
 export SIMPLE_BOOTSTRAP_STAGE3_MEMORY_SAMPLE_FIXTURE="$darwin_vmstat"
 darwin_vmstat_evidence="$test_dir/darwin-vmstat.env"
 bootstrap_stage3_memory_admission_preflight "$darwin_vmstat_evidence" ||
@@ -240,7 +254,7 @@ assert_value darwin-vm-stat sample_3_provider "$darwin_vmstat_evidence"
 # FreeBSD figures are recorded as advisory UNKNOWN until calibrated live.
 freebsd_fixture="$test_dir/freebsd"
 write_three "$freebsd_fixture" \
-    'freebsd|17179869184|4096|600000|100000|10000'
+    'freebsd|17179869184|4096|3000000|500000|100000'
 export SIMPLE_BOOTSTRAP_STAGE3_MEMORY_PLATFORM=FreeBSD
 export SIMPLE_BOOTSTRAP_STAGE3_MEMORY_SAMPLE_FIXTURE="$freebsd_fixture"
 freebsd_evidence="$test_dir/freebsd.env"
