@@ -96,7 +96,18 @@ val TASKBAR_PIN_LAYOUT_PATH: text = "/SYS/TASKBAR.PIN"
 # never built when off. Does NOT cover [wm-pointer-irq]/[wm-pointer-state]/
 # [wm-pointer-frame]/[wm-input-irq] — those are the evidence receipts the
 # fullscreen wrapper correlates on and must always print.
-val _WM_TRACE: bool = false
+val _WM_TRACE: bool = true
+
+# Track W1 (2026-08-10, doc/03_plan/sys_test/simpleos_qemu_wm_real_screen.md
+# "rung-(d) minimum-path execution plan"): gate content-frame paint behind a
+# flag so the first frame can skip the still-open
+# rt_string_concat/memcpy page fault inside
+# _engine2d_draw_ir_render_glass_material (draw_ir_adv.spl:508) and still
+# reach a chrome-only, non-uniform baseline frame. Default OFF in production;
+# windows already degrade gracefully when content_frames is empty
+# (engine2d_wm_frame_executor.spl:277-287). Do NOT touch
+# runtime_content_frames itself or the executor.
+val _WM_CONTENT_FRAMES_ENABLED: bool = false
 
 fn _simpleos_revision_mix_i64(seed: i64, value: i64) -> i64:
     ((seed * 131 + value) % 2147483647) + 1
@@ -987,7 +998,10 @@ impl DesktopShell:
         if _WM_TRACE: serial_println("[wm-render-step] at=taskbar-revision")
         val taskbar_revision = self.runtime_taskbar_revision()
         if _WM_TRACE: serial_println("[wm-render-step] at=content-frames scene_revision={scene_revision}")
-        val content_frames = self.runtime_content_frames(scene_revision)
+        val content_frames = if _WM_CONTENT_FRAMES_ENABLED:
+            self.runtime_content_frames(scene_revision)
+        else:
+            []
         if _WM_TRACE: serial_println("[wm-render-step] at=executor-render")
         val rendered_revision = executor.render(scene, taskbar, content_frames, scene_revision, taskbar_revision, self.clock_text)
         if _WM_TRACE: serial_println("[wm-render-step] at=done rendered={rendered_revision}")

@@ -72,7 +72,45 @@ Run 20260810T083128Z (first run in which the composite actually executes):
 bounds corruption of layer 2 was masking this path entirely. This is a
 freestanding codegen memory-corruption defect inside
 `engine2d_draw_ir_glass_material_pixels` / its callers, not an evidence or
-provenance issue. Needs its own reduction.
+provenance issue. Needs its own reduction. **CONFIRMED STILL OPEN as of run
+`20260810T112327Z`** (identical `rip=`/`cr2=` signature) — an earlier same-night
+report that this was resolved was WRONG (that run had failed earlier, for a
+different reason, and looked clean only because it never reached this path).
+
+### Track W1 workaround attempted (2026-08-10, run `20260810T123139Z`) — FAILED, not a false lead but a wrong dependency assumption
+Per `doc/03_plan/sys_test/simpleos_qemu_wm_real_screen.md` § "2026-08-10
+rung-(d) minimum-path execution plan": added `_WM_CONTENT_FRAMES_ENABLED: bool
+= false` (`src/os/desktop/shell.spl:99`) and gated
+`self.runtime_content_frames(scene_revision)` in `render_baremetal_frame`
+(`shell.spl:990-993`) to return `[]` when the flag is off, intending a
+chrome-only first frame that skips the crashing paint entirely. Also flipped
+`_WM_TRACE` to `true` for step localisation. Origin-sync precondition verified
+first: fetched tip `a3b9ef4ec40`, confirmed `e99a5b76d11` (the
+`closures_structs.rs` deep-field-copy fix) is an ancestor before building.
+
+Gate run (`check-simpleos-wm-fullscreen-evidence.shs`) result:
+`simpleos_wm_fullscreen_status=fail reason=guest-render-fault`,
+`scanout_capture_size=0`, all four PPMs `missing` — did NOT reach rung (d).
+Archived serial log (`build/simpleos_wm_fullscreen_evidence/runs/20260810T123139Z-fail/serial.log`,
+297 lines, truncated with no fault frame and no `[wm-render-step]` trace lines
+at all despite `_WM_TRACE=true`) shows the SAME
+`web-style-producer`/`rfm`/`web-material-provenance witness-unconverted` →
+5x `0x1dc020`-byte heap-alloc sequence that precedes the fault in the prior
+`20260810T112327Z` run (compare lines 267-276 there), occurring during
+`[desktop-gui] process-owned-surfaces-ready` / window materialize — i.e.
+**before `render_baremetal_frame` is ever reached**. This falsifies the plan's
+dependency note ("this track needs NO paint output at all... every window
+takes the already-tolerated degraded branch"): the crash-triggering content
+paint is NOT confined to the `runtime_content_frames` call gated by the new
+flag — it also fires eagerly during window/surface materialization, on a path
+this change does not touch. The flag and guard are implemented correctly per
+the plan's steps 1-2 (lint-clean, default off, `runtime_content_frames` itself
+untouched) but do not achieve the intended chrome-only degradation because the
+paint call site assumed to be the only trigger is not the only trigger.
+No check was weakened; `wm_content_frame_web_provenance_valid` and the gate
+script are untouched. Root-causing the materialize-time paint trigger belongs
+to Track W2 (root-cause, out of scope here) — this remains a DIAGNOSTIC run,
+not a gate pass.
 
 ## Gap analysis — why nothing caught it
 - AOT/freestanding-lane defects are invisible to the host spec corpus (known
