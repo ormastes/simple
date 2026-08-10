@@ -31,6 +31,10 @@ extern fn rt_gui_hline(y: i64, x: i64, count: i64, color: i64)
 # writes) never hit. One `rt_gui_fill4` call replaces 2160.
 extern fn rt_gui_fill4(xy: i64, wh: i64, color: i64, unused: i64)
 
+# Direct-LFB boxed pixel row blit. The runtime owns the array ABI and performs
+# opaque four-pixel NEON stores while preserving transparent/source-over pixels.
+extern fn rt_gui_blit_row4(pixels: [u32], src_offset: i64, xy: i64, count: i64) -> i64
+
 # ============================================================================
 # Color
 # ============================================================================
@@ -683,6 +687,17 @@ impl FramebufferSurface for FramebufferDriver:
                     rt_gui_fill4(xy, wh, color.to_i64(), 0)
         else:
             self.fill_rect(x, y, w, h, framebuffer_argb_to_color(color))
+
+    me framebuffer_blit_row_argb(pixels: [u32], src_offset: i64, x: u32, y: u32, count: u32) -> bool:
+        if self.front_addr == 0u64:
+            return false
+        if x >= self.width or y >= self.height or count == 0u32:
+            return false
+        var clamped_count = count
+        if x + clamped_count > self.width:
+            clamped_count = self.width - x
+        val xy = (x.to_i64() << 32) | y.to_i64()
+        rt_gui_blit_row4(pixels, src_offset, xy, clamped_count.to_i64()) != 0
 
     me framebuffer_put_pixel_argb(x: u32, y: u32, color: u32):
         if x >= self.width or y >= self.height:

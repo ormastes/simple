@@ -29,3 +29,18 @@ Backend selection belongs to app entrypoints:
 - Host-WM launchers forward the env var unchanged to children and verify requested/actual backend match.
 
 Catalog IDs are stable across surfaces; installed paths are mappings, not new logical identities. This prevents launcher, WM scene, docs, and tests from drifting into separate app definitions.
+
+## ARM64 QEMU evidence adapter
+
+The ARM64 real-screen fixture consumes the same host-I/O-free 2D render owner
+as the standalone app. `graphics_2d_showcase_core` renders through `Engine2D`;
+the guest compositor owns the returned frame through
+`WM_CONTENT_KIND_PIXEL_SURFACE`. The ordinary WM scene builder embeds that
+content in its `DrawIrComposition`, so window chrome, focus, input repaint,
+SIMD execution, and RAMFB presentation remain on the production WM → Draw IR
+→ Engine2D path. The adapter owns transport and evidence, never a duplicate
+gallery implementation.
+
+This fixture is live QEMU acceptance evidence, not installed-launcher evidence.
+The catalog readiness flag remains false until the installed manifest is
+launched through the catalog action.

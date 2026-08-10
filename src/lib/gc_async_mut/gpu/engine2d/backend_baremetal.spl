@@ -30,6 +30,7 @@ use std.gpu.engine2d.backend_emu.{
     emu_draw_image_transform,
     emu_draw_rect_blend_mode
 }
+use std.gpu.engine2d.blur_pixels_target.{engine2d_blur_pixels_target}
 
 # ============================================================================
 # Framebuffer Surface
@@ -351,8 +352,48 @@ impl RenderBackend for BaremetalBackend:
         if w <= 0 or h <= 0 or w > BM_MAX_DRAW_DIM or h > BM_MAX_DRAW_DIM:
             return
         val pixel_count = pixels.len()
+        # Flat opaque web/UI regions are common and must use the same bounded
+        # SIMD fill owner as rectangles.  Masks still require per-pixel tests,
+        # and translucent pixels still require destination reads/blending.
+        val opaque_runs_enabled = self.mask_w <= 0 or self.mask_h <= 0
         var row = 0
         while row < h:
+            # The MMIO surface owns a packed row blit that crosses the runtime
+            # boundary once per visible row instead of once per pixel. Keep
+            # clipping in Pure Simple and masks in the canonical scalar path.
+            if opaque_runs_enabled:
+                val py = y + row
+                var dst_x0 = x
+                var dst_x1 = x + w
+                if self.clip_enabled:
+                    if dst_x0 < self.clip_x:
+                        dst_x0 = self.clip_x
+                    val clip_x1 = self.clip_x + self.clip_w
+                    if dst_x1 > clip_x1:
+                        dst_x1 = clip_x1
+                if dst_x0 < 0:
+                    dst_x0 = 0
+                if dst_x1 > self.w:
+                    dst_x1 = self.w
+                var row_visible = false
+                if py >= 0:
+                    if py < self.h:
+                        row_visible = true
+                if self.clip_enabled:
+                    if py < self.clip_y or py >= self.clip_y + self.clip_h:
+                        row_visible = false
+                if row_visible and dst_x1 > dst_x0:
+                    val src_offset = row * w + (dst_x0 - x)
+                    val available = pixel_count - src_offset
+                    var count = dst_x1 - dst_x0
+                    if count.to_i64() > available:
+                        count = available.to_i32()
+                    if count > 0:
+                        if self.fb.framebuffer_blit_row_argb(
+                            pixels, src_offset.to_i64(), dst_x0.to_u32(), py.to_u32(), count.to_u32()
+                        ):
+                            row = row + 1
+                            continue
             var col = 0
             while col < w:
                 val src_idx = row * w + col
@@ -370,7 +411,20 @@ impl RenderBackend for BaremetalBackend:
                             allowed = false
                         if allowed:
                             if color_a(c) == 255:
-                                self.fb.framebuffer_put_pixel_argb(px.to_u32(), py.to_u32(), c)
+                                var run_len = 1
+                                if opaque_runs_enabled:
+                                    while col + run_len < w:
+                                        val next_idx = src_idx + run_len
+                                        if next_idx >= pixel_count or pixels[next_idx] != c:
+                                            break
+                                        run_len = run_len + 1
+                                # Four pixels is the first NEON chunk and
+                                # amortizes the bounded fill call/parity proof.
+                                if run_len >= 4:
+                                    self.draw_rect_filled(px, py, run_len, 1, c)
+                                    col = col + run_len - 1
+                                else:
+                                    self.fb.framebuffer_put_pixel_argb(px.to_u32(), py.to_u32(), c)
                             else if color_a(c) > 0:
                                 val dst = self.fb.framebuffer_read_pixel_argb(px.to_u32(), py.to_u32())
                                 self.fb.framebuffer_put_pixel_argb(px.to_u32(), py.to_u32(), blend(c, dst))
@@ -481,7 +535,9 @@ impl RenderBackend for BaremetalBackend:
         emu_draw_triangle_outline(self, x1, y1, x2, y2, x3, y3, color, thickness)
 
     me draw_blur_rect(x: i32, y: i32, w: i32, h: i32, radius: i32):
-        emu_draw_blur_rect(self, x, y, w, h, radius)
+        val blurred = engine2d_blur_pixels_target(self.read_pixels(), self.width(), self.height(), x, y, w, h, radius)
+        if blurred.len() > 0:
+            self.draw_image(x, y, w, h, blurred)
 
     me draw_shadow_rect(x: i32, y: i32, w: i32, h: i32, offset_x: i32, offset_y: i32, blur_r: i32, color: u32):
         emu_draw_shadow_rect(self, x, y, w, h, offset_x, offset_y, blur_r, color)

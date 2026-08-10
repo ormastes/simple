@@ -29,10 +29,12 @@ use common.ui.window_scene_draw_ir.{
     shared_wm_scene_draw_ir_composition_with_content,
     shared_wm_scene_window_content_rect_with_titlebar
 }
-use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.engine_target.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
     Engine2dResolvedDrawIrImage,
     engine2d_draw_ir_adv_composition_present_with_images,
+    engine2d_draw_ir_adv_replay_prepared_scanout,
+    engine2d_draw_ir_adv_capture_prepared_scanout,
     engine2d_resolved_draw_ir_image
 }
 use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
@@ -94,10 +96,15 @@ class Engine2dWmFrameExecutor:
     # empty whenever retention isn't negotiated with the host, or after any
     # non-PASS receipt (fail closed — next frame re-sends full resources).
     image_resource_revisions: [SimpleOsHostGpuImageResourceRevision]
+    prepared_scene_revision: i64
+    prepared_taskbar_revision: i64
+    prepared_clock_label: text
+    prepared_backend_target: text
+    prepared_scanout_valid: bool
 
     static fn create(engine: Engine2D, framebuffer: FramebufferDriver, fb_w: i64 = 0, fb_h: i64 = 0, cpu_simd_enabled: bool = false) -> Engine2dWmFrameExecutor:
         val local_target = engine2d_wm_draw_ir_backend_target(false, "", cpu_simd_enabled)
-        Engine2dWmFrameExecutor(engine: engine, framebuffer: framebuffer, host_gpu_base: 0u64, host_gpu_run_id_hash: 0, host_gpu_backend: "", host_gpu_backend_code: 0, host_gpu_required: false, draw_ir_backend_target: local_target, local_draw_ir_backend_target: local_target, fb_w: fb_w, fb_h: fb_h, image_resource_revisions: [])
+        Engine2dWmFrameExecutor(engine: engine, framebuffer: framebuffer, host_gpu_base: 0u64, host_gpu_run_id_hash: 0, host_gpu_backend: "", host_gpu_backend_code: 0, host_gpu_required: false, draw_ir_backend_target: local_target, local_draw_ir_backend_target: local_target, fb_w: fb_w, fb_h: fb_h, image_resource_revisions: [], prepared_scene_revision: 0, prepared_taskbar_revision: 0, prepared_clock_label: "", prepared_backend_target: "", prepared_scanout_valid: false)
 
     static fn create_host_gpu(engine: Engine2D, framebuffer: FramebufferDriver, base: u64, guest_isa_code: i64, backend_code: i64, fb_width: i64, fb_height: i64, negotiation_started_us: i64, cpu_simd_enabled: bool = false, backend_required: bool = false) -> Engine2dWmFrameExecutor:
         var executor = Engine2dWmFrameExecutor.create(engine, framebuffer, fb_width, fb_height, cpu_simd_enabled)
@@ -227,6 +234,13 @@ class Engine2dWmFrameExecutor:
         if self.host_gpu_required and self.host_gpu_base == 0u64:
             serial_println("[wm-frame] host-gpu-required-rejected reason=negotiation-or-mapping")
             return 0
+        if self.host_gpu_base == 0u64 and self.prepared_scanout_valid:
+            if scene_revision == self.prepared_scene_revision and taskbar_revision == self.prepared_taskbar_revision and clock_label == self.prepared_clock_label and self.local_draw_ir_backend_target == self.prepared_backend_target:
+                val replay_w = if self.fb_w > 0: self.fb_w.to_i32() else: self.framebuffer.width.to_i32()
+                val replay_h = if self.fb_h > 0: self.fb_h.to_i32() else: self.framebuffer.height.to_i32()
+                if engine2d_draw_ir_adv_replay_prepared_scanout(self.engine, replay_w, replay_h) > 0:
+                    return scene_revision
+                self.prepared_scanout_valid = false
 
         # Per-window fail-closed degrade: a window whose content frame is
         # missing, has an empty URI, or duplicates another window's URI is
@@ -333,4 +347,13 @@ class Engine2dWmFrameExecutor:
             serial_println("[wm-frame] frame-degraded degraded_window_count={degraded_window_count} skipped={result.skipped_command_count} rendered={result.rendered_command_count} scene_revision={scene_revision} reason={result.fallback_reason}")
         for frame in good_content_frames:
             serial_println("[wm-frame] content-presented scene_revision={scene_revision} path=software window_id={frame.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}")
+        if degraded_window_count == 0 and result.skipped_command_count == 0:
+            val capture_w = if self.fb_w > 0: self.fb_w.to_i32() else: self.framebuffer.width.to_i32()
+            val capture_h = if self.fb_h > 0: self.fb_h.to_i32() else: self.framebuffer.height.to_i32()
+            engine2d_draw_ir_adv_capture_prepared_scanout(self.engine, capture_w, capture_h)
+            self.prepared_scene_revision = scene_revision
+            self.prepared_taskbar_revision = taskbar_revision
+            self.prepared_clock_label = clock_label
+            self.prepared_backend_target = self.local_draw_ir_backend_target
+            self.prepared_scanout_valid = true
         scene_revision

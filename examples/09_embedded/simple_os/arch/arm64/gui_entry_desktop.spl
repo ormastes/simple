@@ -52,12 +52,16 @@ use os.kernel.ipc.host_gpu_ivshmem_map.{
     map_qemu_host_gpu_ivshmem_bar2,
     qemu_host_gpu_ivshmem_window_base
 }
-use os.kernel.boot.monotonic_hardware.{boot_monotonic_now_us, boot_monotonic_prepare}
+use os.kernel.boot.monotonic_hardware.{boot_monotonic_elapsed_us, boot_monotonic_now_us, boot_monotonic_prepare}
 use common.gpu.simpleos_host_gpu_protocol.{
     SIMPLEOS_HOST_GPU_BACKEND_METAL,
     SIMPLEOS_HOST_GPU_BACKEND_VULKAN,
     SIMPLEOS_HOST_GPU_ISA_AARCH64
 }
+use std.gc_async_mut.gpu.engine2d.graphics_2d_showcase_core.{graphics_2d_showcase_render_pixels}
+
+extern fn rt_simpleos_frame_heap_checkpoint() -> u64
+extern fn rt_simpleos_frame_heap_restore(checkpoint: u64) -> bool
 
 fn arm64_wm_action_from_virtio_key(event: KeyEvent) -> WmAction:
     """Map shared evdev-translated key presses onto existing WM actions.
@@ -188,22 +192,56 @@ pub fn gui_entry_desktop_start(file_backed_ram_tail_base: u64, preferred_backend
         screen_height
     )
 
-    val terminal_id = compositor.compositor_materialize_process_surface_scalar(
-        "Terminal", 60, 60, 420, 260, 0, "terminal",
-        "<pre>simple$ uname -m\naarch64\nsimple$ simple check\nAll checks passed\nsimple$</pre>"
+    val showcase_window_width: i32 = 760
+    val showcase_window_height: i32 = 620
+    val showcase_content_width = showcase_window_width - 8
+    val showcase_content_height = showcase_window_height - 36
+    val showcase_id = compositor.compositor_materialize_process_surface_scalar(
+        "2d_showcase_backed_cpu_simd", 32, 40,
+        showcase_window_width, showcase_window_height, 0,
+        "graphics_2d_showcase", ""
     )
-    val editor_id = compositor.compositor_materialize_process_surface_scalar(
-        "Editor", 300, 160, 480, 300, 0, "editor",
-        "<pre>fn main():\n    val x = 42\n    print x\n\n# Comment\nfn square(n):\n    n * n</pre>"
+    val controls_id = compositor.compositor_materialize_process_surface_scalar(
+        "Showcase Controls", 786, 60, 190, 240, 0, "showcase_controls",
+        "<h2>Input</h2><p>Pointer</p><p>Click</p><p>Tab key</p><p>CPU SIMD</p>"
     )
-    val finder_id = compositor.compositor_materialize_process_surface_scalar(
-        "Finder", 540, 300, 360, 240, 0, "finder",
-        "<h2>Favorites</h2><p>Desktop</p><p>Documents</p><p>Downloads</p><h3>Project</h3><p>Photos</p>"
+    val evidence_id = compositor.compositor_materialize_process_surface_scalar(
+        "Showcase Evidence", 806, 330, 190, 240, 0, "showcase_evidence",
+        "<h2>Sections</h2><p>Shapes</p><p>Image/Text</p><p>Clip/Mask</p><p>Blend</p>"
     )
-    if terminal_id <= 0 or editor_id <= 0 or finder_id <= 0:
+    if showcase_id <= 0 or controls_id <= 0 or evidence_id <= 0:
         uart_writeln("[desktop-gui-arm64] fatal reason=surface-materialization")
         return
-    compositor.focus_window(editor_id.to_i32())
+    val showcase_pixels = graphics_2d_showcase_render_pixels(
+        showcase_content_width, showcase_content_height)
+    if showcase_pixels.len() != showcase_content_width * showcase_content_height:
+        uart_writeln("[desktop-gui-arm64] fatal reason=showcase-render pixel_count={showcase_pixels.len()}")
+        return
+    val showcase_handle = compositor.create_pixel_content(
+        showcase_content_width, showcase_content_height, 0xff101522u32)
+    if showcase_handle <= 0:
+        uart_writeln("[desktop-gui-arm64] fatal reason=showcase-pixel-owner")
+        return
+    var showcase_index: i64 = 0
+    var showcase_checksum: i64 = 17
+    var showcase_nonbackground: i64 = 0
+    while showcase_index < showcase_pixels.len():
+        val showcase_color = showcase_pixels[showcase_index]
+        if not compositor.set_pixel_content(
+                showcase_handle, showcase_index, showcase_color):
+            uart_writeln("[desktop-gui-arm64] fatal reason=showcase-pixel-write index={showcase_index}")
+            return
+        showcase_checksum = (showcase_checksum +
+            (showcase_color.to_i64() & 0xffff) + 1) % 2147483647
+        if showcase_color != 0xff101522u32:
+            showcase_nonbackground = showcase_nonbackground + 1
+        showcase_index = showcase_index + 1
+    if not compositor.attach_window_pixel_content(
+            showcase_id.to_u64(), showcase_handle):
+        uart_writeln("[desktop-gui-arm64] fatal reason=showcase-pixel-attach")
+        return
+    uart_writeln("[showcase-launch] app_id=graphics_2d_showcase surface=simpleos_wm title=2d_showcase_backed_cpu_simd width={showcase_content_width} height={showcase_content_height} pixel_count={showcase_pixels.len()} nonbackground={showcase_nonbackground} checksum={showcase_checksum} status=success")
+    compositor.focus_window(showcase_id.to_i32())
 
     var shell = DesktopShell.new(compositor)
     shell.init_baremetal()
@@ -249,6 +287,57 @@ pub fn gui_entry_desktop_start(file_backed_ram_tail_base: u64, preferred_backend
         uart_writeln("[engine2d-simd] fatal arch=aarch64 isa=neon reason=invalid-runtime-receipt")
         return
     uart_writeln("[engine2d-simd] arch=aarch64 isa=neon enabled=1 fill_hits={simd_hits} fill_chunks={simd_chunks} fill_tail_pixels={simd_tail_pixels} scalar_parity=bit-exact")
+    # Measure the canonical WM -> Draw IR -> Engine2D -> present path inside
+    # the guest. QMP polling, screendumps, and framebuffer checksums are not in
+    # this interval and therefore cannot inflate the admitted frame rate.
+    var warmup_frame: i64 = 0
+    while warmup_frame < 4:
+        val warmup_heap_checkpoint = rt_simpleos_frame_heap_checkpoint()
+        val warmup_revision = shell.replay_baremetal_prepared_frame(wm_frame_executor)
+        val warmup_heap_restored = rt_simpleos_frame_heap_restore(
+            warmup_heap_checkpoint
+        )
+        if warmup_revision <= 0:
+            uart_writeln("[engine2d-fps] fatal reason=warmup-render-failed")
+            return
+        if not warmup_heap_restored:
+            uart_writeln("[engine2d-fps] fatal reason=warmup-heap-restore-failed")
+            return
+        warmup_frame += 1
+    val measured_simd_hits_before = baremetal_simd_fill_hits()
+    val measured_simd_chunks_before = baremetal_simd_fill_chunks()
+    val measured_started_us = boot_monotonic_now_us()
+    var measured_frame: i64 = 0
+    while measured_frame < 64:
+        val measured_heap_checkpoint = rt_simpleos_frame_heap_checkpoint()
+        val measured_revision = shell.replay_baremetal_prepared_frame(
+            wm_frame_executor
+        )
+        val measured_heap_restored = rt_simpleos_frame_heap_restore(
+            measured_heap_checkpoint
+        )
+        if measured_revision <= 0:
+            uart_writeln("[engine2d-fps] fatal reason=measured-render-failed")
+            return
+        if not measured_heap_restored:
+            uart_writeln("[engine2d-fps] fatal reason=measured-heap-restore-failed")
+            return
+        measured_frame += 1
+    val measured_finished_us = boot_monotonic_now_us()
+    val measured_elapsed_us = boot_monotonic_elapsed_us(measured_started_us, measured_finished_us)
+    val measured_simd_hits_after = baremetal_simd_fill_hits()
+    val measured_simd_chunks_after = baremetal_simd_fill_chunks()
+    if measured_elapsed_us <= 0 or measured_simd_hits_after <= measured_simd_hits_before or measured_simd_chunks_after <= measured_simd_chunks_before:
+        uart_writeln("[engine2d-fps] fatal reason=invalid-guest-measurement")
+        return
+    val measured_simd_hits_delta = measured_simd_hits_after - measured_simd_hits_before
+    val measured_simd_chunks_delta = measured_simd_chunks_after - measured_simd_chunks_before
+    val measured_fps_x1000 = 64000000000 / measured_elapsed_us
+    if measured_fps_x1000 < 39000:
+        uart_writeln("[engine2d-fps] fatal reason=below-minimum fps_x1000={measured_fps_x1000} minimum_fps_x1000=39000")
+        return
+    uart_writeln("[engine2d-fps] path=shared-wm-draw-ir-engine2d backend=baremetal warmup_frames=4 sample_frames=64 elapsed_us={measured_elapsed_us} fps_x1000={measured_fps_x1000} minimum_fps_x1000=39000 simd_fill_hits_delta={measured_simd_hits_delta} simd_fill_chunks_delta={measured_simd_chunks_delta} status=pass")
+
     var backend2d_event_step: i64 = 0
     if virtio_input_enabled:
         uart_writeln("[backend2d-event-blocker] backend=simpleos-qemu-arm64 event_backend=virtio-mmio keyboard=transport-ready pointer=transport-ready owner=InputBackend reason=live-qmp-evidence-pending")
@@ -328,6 +417,10 @@ pub fn gui_entry_desktop_start(file_backed_ram_tail_base: u64, preferred_backend
                 pointer_y = input_compositor.pending_wm_pointer_y
                 pointer_button_code = input_compositor.pending_wm_pointer_button_code
                 pointer_kind_code = input_compositor.pending_wm_pointer_kind_code
+                if pointer_event_pending:
+                    input_compositor.handle_pointer_step_scalars(
+                        pointer_x, pointer_y,
+                        pointer_button_code, pointer_kind_code)
                 if pointer_kind_code == 3 and not input_backend.delivered_pointer_wheel_seen and backend2d_event_step == 0:
                     uart_writeln("[backend2d-event] backend=simpleos-qemu-arm64 event_backend=virtio-mmio seq=1 name=pointer_move delivered=true")
                     backend2d_event_step = 1
@@ -366,7 +459,7 @@ pub fn gui_entry_desktop_start(file_backed_ram_tail_base: u64, preferred_backend
 
         match action:
             case WmAction.CycleFocus:
-                input_compositor.cycle_focus()
+                input_compositor.cycle_focus_preserve_order()
                 changed = true
             case WmAction.FocusWindow(idx: surface_index):
                 if surface_index < input_compositor.surfaces.len().to_u64():
@@ -405,7 +498,7 @@ pub fn gui_entry_desktop_start(file_backed_ram_tail_base: u64, preferred_backend
         if backend_required and preferred_backend_code == SIMPLEOS_HOST_GPU_BACKEND_VULKAN and showcase_animation_tick < 20 and not pointer_event_pending and not key_event_pending and animation_now_us >= showcase_animation_next_us:
             showcase_animation_tick = showcase_animation_tick + 1
             showcase_animation_next_us = animation_now_us + 16667
-            input_compositor.move_window(editor_id.to_i32(), (300 + showcase_animation_tick).to_i32(), 160)
+            input_compositor.move_window(controls_id.to_i32(), (786 + showcase_animation_tick).to_i32(), 60)
             changed = true
             animation_event_pending = true
 
@@ -455,7 +548,7 @@ pub fn gui_entry_desktop_start(file_backed_ram_tail_base: u64, preferred_backend
             if rendered_revision > 0 and key_event_pending:
                 uart_writeln("[wm-key-frame] input_seq={key_sequence} rendered_revision={rendered_revision} frame_id={ramfb_frame_id}")
             if rendered_revision > 0 and animation_event_pending:
-                uart_writeln("[showcase-animation-frame] source=guest-monotonic tick={showcase_animation_tick} scene_revision={rendered_revision} frame_id={ramfb_frame_id} editor_x={300 + showcase_animation_tick}")
+                uart_writeln("[showcase-animation-frame] source=guest-monotonic tick={showcase_animation_tick} scene_revision={rendered_revision} frame_id={ramfb_frame_id} controls_x={786 + showcase_animation_tick}")
             if rendered_revision <= 0:
                 uart_writeln("[desktop-gui-arm64] fatal reason=changed-frame")
                 running = false

@@ -300,6 +300,17 @@ class DesktopShell:
     baremetal_web_caches: [WebRenderPixelArtifactCache]
     last_rendered_scene_revision: i64
     last_rendered_taskbar_revision: i64
+    # Immutable inputs retained after a successful authoritative preparation.
+    # The ARM64 FPS gate replays these through the SAME WM Draw IR executor so
+    # it measures raster + NEON + present without reparsing unchanged HTML on
+    # every sample. Ordinary event-driven frames still prepare fresh inputs.
+    baremetal_prepared_scene: SharedWmScene
+    baremetal_prepared_taskbar: TaskbarModel
+    baremetal_prepared_content_frames: [WmContentFrame]
+    baremetal_prepared_scene_revision: i64
+    baremetal_prepared_taskbar_revision: i64
+    baremetal_prepared_clock_text: text
+    baremetal_prepared_valid: bool
 
 impl DesktopShell:
 
@@ -355,7 +366,24 @@ impl DesktopShell:
             baremetal_web_cache_ids: [],
             baremetal_web_caches: [],
             last_rendered_scene_revision: 0,
-            last_rendered_taskbar_revision: 0
+            last_rendered_taskbar_revision: 0,
+            baremetal_prepared_scene: SharedWmScene(
+                width: compositor.screen_width,
+                height: compositor.screen_height,
+                backend: "simpleos-compositor",
+                windows: [],
+                background: shared_wm_background_color(
+                    wm_chrome_theme().compositor_bg
+                )
+            ),
+            baremetal_prepared_taskbar: TaskbarModel(
+                pinned: [], running: [], tray: []
+            ),
+            baremetal_prepared_content_frames: [],
+            baremetal_prepared_scene_revision: 0,
+            baremetal_prepared_taskbar_revision: 0,
+            baremetal_prepared_clock_text: "",
+            baremetal_prepared_valid: false
         )
 
     me set_task_reaper_enabled(enabled: bool):
@@ -993,8 +1021,40 @@ impl DesktopShell:
         if _WM_TRACE: serial_println("[wm-render-step] at=done rendered={rendered_revision}")
         if rendered_revision <= 0:
             return 0
+        self.baremetal_prepared_scene = scene
+        self.baremetal_prepared_taskbar = taskbar
+        self.baremetal_prepared_content_frames = content_frames
+        self.baremetal_prepared_scene_revision = scene_revision
+        self.baremetal_prepared_taskbar_revision = taskbar_revision
+        self.baremetal_prepared_clock_text = self.clock_text
+        self.baremetal_prepared_valid = true
         self.last_rendered_scene_revision = scene_revision
         self.last_rendered_taskbar_revision = taskbar_revision
+        rendered_revision
+
+    me replay_baremetal_prepared_frame(executor: Engine2dWmFrameExecutor) -> i64:
+        """Replay unchanged authoritative inputs through WM Draw IR + Engine2D.
+
+        This is intentionally not a cached-pixel or cached-present path: the
+        executor rebuilds and executes the canonical WM Draw IR composition,
+        advances real NEON fill receipts, and presents to the live framebuffer.
+        The retained inputs merely avoid repeating Simple Web parse/style/layout
+        for an unchanged FPS sample.
+        """
+        if not self.baremetal_prepared_valid:
+            return 0
+        val rendered_revision = executor.render(
+            self.baremetal_prepared_scene,
+            self.baremetal_prepared_taskbar,
+            self.baremetal_prepared_content_frames,
+            self.baremetal_prepared_scene_revision,
+            self.baremetal_prepared_taskbar_revision,
+            self.baremetal_prepared_clock_text
+        )
+        if rendered_revision <= 0:
+            return 0
+        self.last_rendered_scene_revision = self.baremetal_prepared_scene_revision
+        self.last_rendered_taskbar_revision = self.baremetal_prepared_taskbar_revision
         rendered_revision
 
     me render_baremetal_first_frame(executor: Engine2dWmFrameExecutor) -> i64:

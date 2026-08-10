@@ -1,0 +1,697 @@
+# Concrete Engine2D facade for freestanding SimpleOS builds.
+#
+# Keep this module deliberately small: the live target is BaremetalBackend and
+# embedded surfaces are SoftwareBackend.  In particular, do not import the
+# desktop Engine2D facade here; its eager accelerator imports make unreachable
+# host APIs part of a freestanding entry closure.
+
+use common.ui.draw_ir.{DrawIrGlyphRunPayload}
+use std.gc_async_mut.gpu.engine2d.backend.{Engine2DReadback}
+use std.gc_async_mut.gpu.engine2d.backend_baremetal.{BaremetalBackend}
+extern fn rt_gui_replay_prepared_packed_scanout(wh: i64) -> i64
+extern fn rt_gui_capture_prepared_packed_scanout(wh: i64) -> i64
+use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
+use std.gc_async_mut.gpu.engine2d.draw_ir_glass_material.{
+    Engine2dGlassExecutionResult,
+    Engine2dGlassMaterialConfig,
+    engine2d_glass_execution_unavailable
+}
+use std.nogc_sync_mut.text_layout.font_types.{FontRenderBatch}
+use std.gc_async_mut.gpu.engine2d.color.{color_a, color_b, color_g, color_r, rgba}
+use std.gc_async_mut.gpu.engine2d.backend_emu_math.{
+    _emu_cos_approx, _emu_isqrt, _emu_max, _emu_sin_approx
+}
+
+struct DrawIrTargetFontEvidence:
+    batch_identity: text = ""
+    readback_source: text = ""
+    device_checksum: i64 = 0
+    oracle_checksum: i64 = 0
+    readback_nonblank_pixels: i64 = 0
+    parity: bool = false
+    device_executed: bool = false
+    promotion_ready: bool = false
+    atlas_upload_count: i64 = 0
+    atlas_upload_bytes: i64 = 0
+    atlas_payload_sha256: text = ""
+
+# Minimal owner required by the shared fresh-device preflight. Baremetal never
+# claims that preflight: its invalid batches make that GPU-only lane fail
+# closed, while ordinary Draw IR text uses the bitmap backend below.
+class BaremetalFontRenderer:
+    fn current_font_identity() -> text:
+        "bitmap-5x7"
+
+    me prepare_selected_glyph_run(
+        glyph_run: DrawIrGlyphRunPayload, color: u32, font_size: i32
+    ) -> FontRenderBatch:
+        _baremetal_invalid_font_batch()
+    me prepare_text_with_advances(
+        text_val: text, advances: [i32], color: u32, font_size: i32
+    ) -> FontRenderBatch:
+        _baremetal_invalid_font_batch()
+
+fn _baremetal_invalid_font_batch() -> FontRenderBatch:
+    FontRenderBatch(
+        program_version: 0,
+        font_identity: "",
+        face_generation: 0,
+        valid: false,
+        atlas_width: 0,
+        atlas_height: 0,
+        atlas_pixels: [],
+        quads: [],
+        atlas_generation: 0,
+        dirty_rects: []
+    )
+
+fn _baremetal_gradient_color_at(
+    colors: [u32], positions: [i32], position: i32
+) -> u32:
+    val count = colors.len().to_i32()
+    if count <= 0:
+        return 0u32
+    if count == 1 or positions.len() < count.to_i64():
+        return colors[0]
+    if position <= positions[0]:
+        return colors[0]
+    var i: i32 = 1
+    while i < count:
+        if position <= positions[i]:
+            val p0 = positions[i - 1]
+            val span = _emu_max(positions[i] - p0, 1)
+            val amount = position - p0
+            val first = colors[i - 1]
+            val second = colors[i]
+            return rgba(
+                color_r(first) + (color_r(second) - color_r(first)) * amount / span,
+                color_g(first) + (color_g(second) - color_g(first)) * amount / span,
+                color_b(first) + (color_b(second) - color_b(first)) * amount / span,
+                color_a(first) + (color_a(second) - color_a(first)) * amount / span)
+        i = i + 1
+    colors[count - 1]
+
+class Engine2D:
+    baremetal: BaremetalBackend?
+    software: SoftwareBackend?
+    live_baremetal: bool
+    w: i32
+    h: i32
+    font_renderer: BaremetalFontRenderer
+    selected_identity: text
+    last_font_target: text
+
+    static fn create_with_baremetal_backend(backend: BaremetalBackend) -> Engine2D:
+        Engine2D.create_with_baremetal_backend_dims(
+            backend.w, backend.h, backend)
+
+    static fn create_with_baremetal_backend_dims(
+        width: i32, height: i32, backend: BaremetalBackend
+    ) -> Engine2D:
+        Engine2D(
+            baremetal: Some(backend),
+            software: nil,
+            live_baremetal: true,
+            w: width,
+            h: height,
+            font_renderer: BaremetalFontRenderer(),
+            selected_identity: "bitmap-5x7",
+            last_font_target: ""
+        )
+
+    static fn create_offscreen(width: i32, height: i32) -> Engine2D:
+        var backend = SoftwareBackend.create_cpu_simd()
+        backend.init(width, height)
+        Engine2D(
+            baremetal: nil,
+            software: Some(backend),
+            live_baremetal: false,
+            w: width,
+            h: height,
+            font_renderer: BaremetalFontRenderer(),
+            selected_identity: "bitmap-5x7",
+            last_font_target: ""
+        )
+
+    static fn create_with_backend_fast(
+        width: i32, height: i32, backend_name: text
+    ) -> Engine2D:
+        # A freestanding facade has no host accelerator selection.  This
+        # constructor exists for shared compositor code and is an honest
+        # software target when no framebuffer owner was supplied.
+        Engine2D.create_offscreen(width, height)
+
+    static fn create_requested_backend(
+        width: i32, height: i32, backend_name: text
+    ) -> Result<Engine2D, text>:
+        # Canonical presenter contract: requested backend creation must never
+        # silently claim a device that the freestanding target does not own.
+        # Offscreen SimpleOS rendering truthfully supports only its CPU SIMD
+        # software backend; host/device names fail closed.
+        if width <= 0 or height <= 0:
+            return Err("invalid-surface-size")
+        val requested = backend_name.trim().lower()
+        if (
+            requested == "software" or requested == "cpu" or
+            requested == "cpu_simd" or requested == "auto"
+        ):
+            return Ok(Engine2D.create_offscreen(width, height))
+        Err("backend-unavailable-on-simpleos")
+
+    static fn detect_best_backend() -> text:
+        # Shared offscreen web rendering has no framebuffer owner and must use
+        # the CPU SIMD software backend on freestanding SimpleOS.
+        "software"
+
+impl Engine2D:
+    me backend_name() -> text:
+        if self.baremetal.?:
+            return "baremetal"
+        "software"
+
+    me width() -> i32: self.w
+    me height() -> i32: self.h
+
+    me clear(color: u32):
+        if self.baremetal.?:
+            var backend = self.baremetal.unwrap()
+            backend.clear(color)
+        else:
+            var backend = self.software.unwrap()
+            backend.clear(color)
+    me present():
+        if self.baremetal.?:
+            var backend = self.baremetal.unwrap()
+            backend.present()
+        else:
+            var backend = self.software.unwrap()
+            backend.present()
+    me shutdown():
+        if self.baremetal.?:
+            var backend = self.baremetal.unwrap()
+            backend.shutdown()
+        else:
+            var backend = self.software.unwrap()
+            backend.shutdown()
+        self.last_font_target = ""
+    me submit_batch() -> bool:
+        if self.baremetal.?:
+            var backend = self.baremetal.unwrap()
+            val ok = backend.submit_batch()
+            return ok
+        if self.software.?:
+            var backend = self.software.unwrap()
+            val ok = backend.submit_batch()
+            return ok
+        false
+    me read_pixels() -> [u32]:
+        if self.baremetal.?:
+            var backend = self.baremetal.unwrap()
+            return backend.read_pixels()
+        if self.software.?:
+            var backend = self.software.unwrap()
+            return backend.read_pixels()
+        []
+    me copy_pixels_into(destination: [u32]) -> i32:
+        print "[parent-snapshot-engine] live_baremetal={self.live_baremetal} width={self.w} height={self.h} destination={destination.len()}"
+        if self.baremetal.?:
+            var backend = self.baremetal.unwrap()
+            return backend.copy_pixels_into(destination)
+        if self.software.?:
+            var backend = self.software.unwrap()
+            return backend.copy_pixels_into(destination)
+        0
+    me copy_pixels_region_into(x: i32, y: i32, width: i32, height: i32, destination: [u32]) -> i32:
+        if self.baremetal.?:
+            var backend = self.baremetal.unwrap()
+            return backend.copy_pixels_region_into(x, y, width, height, destination)
+        if self.software.?:
+            var backend = self.software.unwrap()
+            return backend.copy_pixels_region_into(x, y, width, height, destination)
+        0
+    me read_pixels_with_source() -> Engine2DReadback:
+        if self.baremetal.?:
+            var backend = self.baremetal.unwrap()
+            return backend.read_pixels_with_source()
+        if self.software.?:
+            var backend = self.software.unwrap()
+            return backend.read_pixels_with_source()
+        Engine2DReadback(pixels: [], source: "unavailable", backend_handle: 0,
+            device_identity: 0, pixel_count: 0, checksum: 0)
+    me take_pixels_with_source() -> Engine2DReadback:
+        if self.baremetal.?:
+            var backend = self.baremetal.unwrap()
+            return backend.read_pixels_with_source()
+        if self.software.?:
+            var backend = self.software.unwrap()
+            val readback = backend.take_pixels_with_source()
+            return readback
+        Engine2DReadback(pixels: [], source: "unavailable", backend_handle: 0,
+            device_identity: 0, pixel_count: 0, checksum: 0)
+
+    me set_clip(x: i32, y: i32, w: i32, h: i32):
+        if self.baremetal.?:
+            var backend = self.baremetal.unwrap()
+            backend.set_clip(x, y, w, h)
+        else:
+            var backend = self.software.unwrap()
+            backend.set_clip(x, y, w, h)
+    me clear_clip():
+        if self.baremetal.?:
+            var backend = self.baremetal.unwrap()
+            backend.clear_clip()
+        else:
+            var backend = self.software.unwrap()
+            backend.clear_clip()
+    me clear_mask():
+        if self.baremetal.?:
+            var backend = self.baremetal.unwrap()
+            backend.clear_mask()
+        else:
+            var backend = self.software.unwrap()
+            backend.clear_mask()
+
+    me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
+        if self.baremetal.?:
+            var backend = self.baremetal.unwrap()
+            backend.draw_rect_filled(x, y, w, h, color)
+        else:
+            var backend = self.software.unwrap()
+            backend.draw_rect_filled(x, y, w, h, color)
+    me draw_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        if self.baremetal.?:
+            var backend = self.baremetal.unwrap()
+            backend.draw_rect(x, y, w, h, color)
+        else:
+            var backend = self.software.unwrap()
+            backend.draw_rect(x, y, w, h, color)
+    me draw_rect_thick(x: i32, y: i32, w: i32, h: i32,
+                       color: u32, thickness: i32):
+        if self.baremetal.?:
+            var backend = self.baremetal.unwrap()
+            backend.draw_rect_thick(x, y, w, h, color, thickness)
+        else:
+            var backend = self.software.unwrap()
+            backend.draw_rect_thick(x, y, w, h, color, thickness)
+    me draw_line(x1: i32, y1: i32, x2: i32, y2: i32,
+                 color: u32, thickness: i32):
+        if self.baremetal.?:
+            var backend = self.baremetal.unwrap()
+            backend.draw_line(x1, y1, x2, y2, color, thickness)
+        else:
+            var backend = self.software.unwrap()
+            backend.draw_line(x1, y1, x2, y2, color, thickness)
+    me draw_circle(cx: i32, cy: i32, radius: i32, color: u32):
+        if self.baremetal.?:
+            var backend = self.baremetal.unwrap()
+            backend.draw_circle(cx, cy, radius, color)
+        else:
+            var backend = self.software.unwrap()
+            backend.draw_circle(cx, cy, radius, color)
+    me draw_circle_filled(cx: i32, cy: i32, radius: i32, color: u32):
+        if self.baremetal.?:
+            var backend = self.baremetal.unwrap()
+            backend.draw_circle_filled(cx, cy, radius, color)
+        else:
+            var backend = self.software.unwrap()
+            backend.draw_circle_filled(cx, cy, radius, color)
+    me draw_circle_thick(cx: i32, cy: i32, radius: i32,
+                         color: u32, thickness: i32):
+        if self.baremetal.?:
+            var backend = self.baremetal.unwrap()
+            backend.draw_circle_thick(cx, cy, radius, color, thickness)
+        else:
+            var backend = self.software.unwrap()
+            backend.draw_circle_thick(cx, cy, radius, color, thickness)
+    me draw_ellipse_filled(cx: i32, cy: i32, rx: i32, ry: i32, color: u32):
+        if self.baremetal.?:
+            var backend = self.baremetal.unwrap()
+            backend.draw_ellipse_filled(cx, cy, rx, ry, color)
+        else:
+            var backend = self.software.unwrap()
+            backend.draw_ellipse_filled(cx, cy, rx, ry, color)
+    me draw_triangle_filled(x1: i32, y1: i32, x2: i32, y2: i32,
+                            x3: i32, y3: i32, color: u32):
+        if self.baremetal.?:
+            var backend = self.baremetal.unwrap()
+            backend.draw_triangle_filled(x1, y1, x2, y2, x3, y3, color)
+        else:
+            var backend = self.software.unwrap()
+            backend.draw_triangle_filled(x1, y1, x2, y2, x3, y3, color)
+    me draw_bezier(x1: i32, y1: i32, cx1: i32, cy1: i32,
+                   cx2: i32, cy2: i32, x2: i32, y2: i32,
+                   color: u32, thickness: i32):
+        if self.baremetal.?:
+            var backend = self.baremetal.unwrap()
+            backend.draw_bezier(x1, y1, cx1, cy1, cx2, cy2, x2, y2,
+                color, thickness)
+        else:
+            var backend = self.software.unwrap()
+            backend.draw_bezier(x1, y1, cx1, cy1, cx2, cy2, x2, y2,
+                color, thickness)
+    me draw_radial_gradient(cx: i32, cy: i32, radius: i32,
+                            center_color: u32, edge_color: u32):
+        if self.baremetal.?:
+            var backend = self.baremetal.unwrap()
+            backend.draw_radial_gradient(cx, cy, radius,
+                center_color, edge_color)
+        else:
+            var backend = self.software.unwrap()
+            backend.draw_radial_gradient(cx, cy, radius,
+                center_color, edge_color)
+    me draw_rect_blend(x: i32, y: i32, w: i32, h: i32, color: u32):
+        if self.baremetal.?:
+            var backend = self.baremetal.unwrap()
+            backend.draw_rect_blend(x, y, w, h, color)
+        else:
+            var backend = self.software.unwrap()
+            backend.draw_rect_blend(x, y, w, h, color)
+    me draw_rect_blend_mode(x: i32, y: i32, w: i32, h: i32,
+                            color: u32, mode: i32):
+        if self.baremetal.?:
+            var backend = self.baremetal.unwrap()
+            backend.draw_rect_blend_mode(x, y, w, h, color, mode)
+        else:
+            var backend = self.software.unwrap()
+            backend.draw_rect_blend_mode(x, y, w, h, color, mode)
+    me draw_image_transform(dst_x: i32, dst_y: i32, src_w: i32, src_h: i32,
+                            a: i32, b: i32, c: i32, d: i32,
+                            tx: i32, ty: i32, pixels: [u32]):
+        if self.baremetal.?:
+            var backend = self.baremetal.unwrap()
+            backend.draw_image_transform(dst_x, dst_y, src_w, src_h,
+                a, b, c, d, tx, ty, pixels)
+        else:
+            var backend = self.software.unwrap()
+            backend.draw_image_transform(dst_x, dst_y, src_w, src_h,
+                a, b, c, d, tx, ty, pixels)
+    me set_mask(mask_pixels: [u8], w: i32, h: i32):
+        if self.baremetal.?:
+            var backend = self.baremetal.unwrap()
+            backend.set_mask(mask_pixels, w, h)
+        else:
+            var backend = self.software.unwrap()
+            backend.set_mask(mask_pixels, w, h)
+    me draw_rounded_rect(
+        x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32
+    ):
+        if self.baremetal.?:
+            var backend = self.baremetal.unwrap()
+            backend.draw_rounded_rect(x, y, w, h, radius, color)
+        else:
+            var backend = self.software.unwrap()
+            backend.draw_rounded_rect(x, y, w, h, radius, color)
+    me draw_rounded_rect_outline(
+        x: i32, y: i32, w: i32, h: i32, radius: i32,
+        color: u32, thickness: i32
+    ):
+        if self.baremetal.?:
+            var backend = self.baremetal.unwrap()
+            backend.draw_rounded_rect_outline(
+                x, y, w, h, radius, color, thickness)
+        else:
+            var backend = self.software.unwrap()
+            backend.draw_rounded_rect_outline(
+                x, y, w, h, radius, color, thickness)
+    me draw_gradient_rect(
+        x: i32, y: i32, w: i32, h: i32,
+        top_color: u32, bottom_color: u32
+    ):
+        if self.baremetal.?:
+            var backend = self.baremetal.unwrap()
+            backend.draw_gradient_rect(x, y, w, h, top_color, bottom_color)
+        else:
+            var backend = self.software.unwrap()
+            backend.draw_gradient_rect(x, y, w, h, top_color, bottom_color)
+    me draw_gradient_rect_h(
+        x: i32, y: i32, w: i32, h: i32,
+        left_color: u32, right_color: u32
+    ):
+        if self.baremetal.?:
+            var backend = self.baremetal.unwrap()
+            backend.draw_gradient_rect_h(
+                x, y, w, h, left_color, right_color)
+        else:
+            var backend = self.software.unwrap()
+            backend.draw_gradient_rect_h(
+                x, y, w, h, left_color, right_color)
+    me draw_gradient_rect_stops(
+        x: i32, y: i32, w: i32, h: i32,
+        stop_colors: [u32], stop_positions: [i32], angle_deg: i32
+    ):
+        if w <= 0 or h <= 0 or stop_colors.len() == 0:
+            return
+        val dx1000 = _emu_sin_approx(angle_deg)
+        val dy1000 = 0 - _emu_cos_approx(angle_deg)
+        val hw = w - 1
+        val hh = h - 1
+        val t00 = (0 - hw) * dx1000 + (0 - hh) * dy1000
+        val t10 = hw * dx1000 + (0 - hh) * dy1000
+        val t01 = (0 - hw) * dx1000 + hh * dy1000
+        val t11 = hw * dx1000 + hh * dy1000
+        var low = t00
+        if t10 < low: low = t10
+        if t01 < low: low = t01
+        if t11 < low: low = t11
+        var high = t00
+        if t10 > high: high = t10
+        if t01 > high: high = t01
+        if t11 > high: high = t11
+        val span = _emu_max(high - low, 1)
+        var py = 0
+        while py < h:
+            var px = 0
+            while px < w:
+                val projected = (2 * px - hw) * dx1000 + (2 * py - hh) * dy1000
+                var position = (projected - low) * 1000 / span
+                if position < 0: position = 0
+                if position > 1000: position = 1000
+                self.draw_rect_filled(x + px, y + py, 1, 1,
+                    _baremetal_gradient_color_at(
+                        stop_colors, stop_positions, position))
+                px = px + 1
+            py = py + 1
+    me draw_radial_gradient_rect_stops(
+        cx: i32, cy: i32, r: i32,
+        stop_colors: [u32], stop_positions: [i32]
+    ):
+        if stop_colors.len() == 0:
+            return
+        if r <= 0:
+            self.draw_rect_filled(cx, cy, 1, 1, stop_colors[0])
+            return
+        var py = 0 - r
+        while py <= r:
+            var px = 0 - r
+            while px <= r:
+                val distance_sq = px * px + py * py
+                if distance_sq <= r * r:
+                    val position = _emu_isqrt(distance_sq) * 1000 / r
+                    self.draw_rect_filled(cx + px, cy + py, 1, 1,
+                        _baremetal_gradient_color_at(
+                            stop_colors, stop_positions, position))
+                px = px + 1
+            py = py + 1
+    me draw_shadow_rect(
+        x: i32, y: i32, w: i32, h: i32,
+        offset_x: i32, offset_y: i32, blur_r: i32, color: u32
+    ):
+        if self.baremetal.?:
+            var backend = self.baremetal.unwrap()
+            backend.draw_shadow_rect(
+                x, y, w, h, offset_x, offset_y, blur_r, color)
+        else:
+            var backend = self.software.unwrap()
+            backend.draw_shadow_rect(
+                x, y, w, h, offset_x, offset_y, blur_r, color)
+
+    me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        if self.baremetal.?:
+            var backend = self.baremetal.unwrap()
+            backend.draw_image(x, y, w, h, pixels)
+        else:
+            var backend = self.software.unwrap()
+            backend.draw_image_scalar_owner(x, y, w, h, pixels)
+    me draw_image_blend(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        if self.baremetal.?:
+            var backend = self.baremetal.unwrap()
+            backend.draw_image_blend(x, y, w, h, pixels)
+        else:
+            var backend = self.software.unwrap()
+            backend.draw_image_blend(x, y, w, h, pixels)
+
+    me draw_pixel_raw_owner(x: i32, y: i32, color: u32):
+        if self.software.?:
+            var backend = self.software.unwrap()
+            backend.draw_pixel_raw_owner(x, y, color)
+        else:
+            var backend = self.baremetal.unwrap()
+            backend.draw_rect_filled(x, y, 1, 1, color)
+
+    me draw_span_raw_bounded_owner(x: i32, y: i32, count: i32, color: u32):
+        if self.software.?:
+            var backend = self.software.unwrap()
+            backend.draw_span_raw_bounded_owner(x, y, count, color)
+        else:
+            var backend = self.baremetal.unwrap()
+            backend.draw_rect_filled(x, y, count, 1, color)
+
+    me draw_ir_blit_image_exact_status(x: i32, y: i32, w: i32, h: i32, pixels: [u32]) -> i32:
+        """Blit one exact-size Draw IR image through the packed framebuffer owner."""
+        if w <= 0 or h <= 0 or pixels.len() != w.to_i64() * h.to_i64():
+            return 0
+        var backend = self.baremetal.unwrap()
+        backend.draw_ir_image_exact_status(x, y, w, h, pixels)
+    me draw_ir_blit_image_prepared_opaque_status(x: i32, y: i32, w: i32, h: i32, pixels: [u32]) -> i32:
+        """Blit a capture proven opaque by the prepared-frame owner."""
+        if w <= 0 or h <= 0 or pixels.len() != w.to_i64() * h.to_i64():
+            return 0
+        var backend = self.baremetal.unwrap()
+        backend.draw_ir_image_prepared_opaque_status(x, y, w, h, pixels)
+    me draw_image_scaled(
+        dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32,
+        src_w: i32, src_h: i32, pixels: [u32]
+    ):
+        if self.baremetal.?:
+            var backend = self.baremetal.unwrap()
+            backend.draw_image_scaled(
+                dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
+        else:
+            var backend = self.software.unwrap()
+            backend.draw_image_scaled(
+                dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
+    me draw_image_scaled_blend(
+        dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32,
+        src_w: i32, src_h: i32, pixels: [u32]
+    ):
+        if dst_w <= 0 or dst_h <= 0 or src_w <= 0 or src_h <= 0:
+            return
+        var scaled: [u32] = [0u32; dst_w * dst_h]
+        var y = 0
+        while y < dst_h:
+            var x = 0
+            while x < dst_w:
+                val source_x = x * src_w / dst_w
+                val source_y = y * src_h / dst_h
+                val source_index = source_y * src_w + source_x
+                if source_index >= 0 and source_index.to_i64() < pixels.len():
+                    scaled[y * dst_w + x] = pixels[source_index]
+                x = x + 1
+            y = y + 1
+        self.draw_image_blend(dst_x, dst_y, dst_w, dst_h, scaled)
+
+    me draw_text(
+        x: i32, y: i32, text_val: text, color: u32, font_size: i32
+    ):
+        self.last_font_target = "bitmap"
+        if self.baremetal.?:
+            var backend = self.baremetal.unwrap()
+            backend.draw_text(x, y, text_val, color, font_size)
+        else:
+            var backend = self.software.unwrap()
+            backend.draw_text(x, y, text_val, color, font_size)
+
+    me draw_text_bg(
+        x: i32, y: i32, text_val: text, fg: u32, bg: u32, font_size: i32
+    ):
+        if self.baremetal.?:
+            var backend = self.baremetal.unwrap()
+            backend.draw_text_bg(x, y, text_val, fg, bg, font_size)
+        else:
+            var backend = self.software.unwrap()
+            backend.draw_text_bg(x, y, text_val, fg, bg, font_size)
+
+    me draw_text_with_advances(
+        x: i32, y: i32, text_val: text, advance_widths: [i32],
+        color: u32, font_size: i32
+    ) -> bool:
+        if text_val.len() == 0 or advance_widths.len() != text_val.len():
+            return false
+        # The freestanding bitmap atlas has fixed advances. Rendering it is an
+        # honest CPU fallback; no vector/font-atlas receipt is emitted.
+        self.draw_text(x, y, text_val, color, font_size)
+        self.last_font_target = "bitmap"
+        true
+
+    me draw_shaped_text(
+        x: i32, y: i32, glyph_run: DrawIrGlyphRunPayload,
+        color: u32, font_size: i32
+    ) -> bool:
+        # Glyph ids require the selected vector face. Baremetal owns only the
+        # bitmap codepoint atlas, so shaped runs fail closed instead of drawing
+        # incorrect glyphs or claiming execution.
+        self.last_font_target = ""
+        false
+
+    me select_font_identity(identity: text) -> bool:
+        if identity == "":
+            return false
+        self.selected_identity = identity
+        true
+
+    me fonts() -> BaremetalFontRenderer: self.font_renderer
+    me install_font_renderer(renderer: BaremetalFontRenderer):
+        self.font_renderer = renderer
+        self.last_font_target = ""
+    me selected_font_identity() -> text:
+        self.selected_identity
+    fn font_execution_target() -> text: self.last_font_target
+    fn draw_ir_font_evidence() -> DrawIrTargetFontEvidence?: nil
+
+    me draw_ir_apply_glass_material(
+        config: Engine2dGlassMaterialConfig
+    ) -> Engine2dGlassExecutionResult:
+        # This facade owns no GPU device.  The shared executor may perform its
+        # bounded CPU material fallback from readback, but must never receive a
+        # fabricated device receipt from this target.
+        engine2d_glass_execution_unavailable(
+            "baremetal-device-glass-unavailable")
+
+    me draw_ir_create_offscreen_engine(
+        width: i32, height: i32
+    ) -> Result<Engine2D, text>:
+        val pixels = width.to_i64() * height.to_i64()
+        if width <= 0 or height <= 0 or pixels <= 0 or pixels > 2147483647:
+            return Err("invalid-baremetal-offscreen-size")
+        Ok(Engine2D.create_offscreen(width, height))
+
+    me draw_ir_composite_readback(
+        dst_x: i32, dst_y: i32, width: i32, height: i32,
+        readback: Engine2DReadback, opacity_milli: i32
+    ) -> bool:
+        if (width <= 0 or height <= 0 or opacity_milli <= 0 or
+            opacity_milli > 1000 or
+            readback.pixels.len() != width.to_i64() * height.to_i64()):
+            return false
+        if self.baremetal.?:
+            var backend = self.baremetal.unwrap()
+            return backend.draw_image_opacity_status(
+                dst_x, dst_y, width, height, readback.pixels, opacity_milli) != 0
+        var pixels: [u32] = []
+        var i: i64 = 0
+        while i < readback.pixels.len():
+            val pixel = readback.pixels[i]
+            val alpha = ((pixel >> 24u32) & 0xFFu32).to_i64()
+            val scaled = (alpha * opacity_milli.to_i64() / 1000) as u32
+            pixels.push((pixel & 0x00FFFFFFu32) | (scaled << 24u32))
+            i = i + 1
+        self.draw_image_blend(dst_x, dst_y, width, height, pixels)
+        true
+
+fn engine2d_target_draw_ir_blit_image_prepared_opaque_status(
+    engine: Engine2D, x: i32, y: i32, w: i32, h: i32, pixels: [u32]
+) -> i32:
+    """Return the prepared blit receipt within the concrete target owner."""
+    engine.draw_ir_blit_image_prepared_opaque_status(x, y, w, h, pixels)
+
+fn engine2d_target_replay_prepared_scanout_status(
+    engine: Engine2D, w: i32, h: i32
+) -> i32:
+    rt_gui_replay_prepared_packed_scanout(0).to_i32()
+
+fn engine2d_target_capture_prepared_scanout_status(
+    engine: Engine2D, w: i32, h: i32
+) -> i32:
+    rt_gui_capture_prepared_packed_scanout(0).to_i32()
+
+export Engine2D, engine2d_target_draw_ir_blit_image_prepared_opaque_status, engine2d_target_replay_prepared_scanout_status, engine2d_target_capture_prepared_scanout_status

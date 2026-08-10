@@ -29,14 +29,41 @@ fn _guide_path() -> text:
 fn _entry_path() -> text:
     "examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl"
 
+fn _desktop_shell_path() -> text:
+    "src/os/desktop/shell.spl"
+
 fn _ramfb_path() -> text:
     "src/os/kernel/arch/arm64/ramfb.spl"
 
 fn _console_path() -> text:
     "src/os/kernel/arch/arm64/console.spl"
 
+fn _arm64_boot_stubs_path() -> text:
+    "examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c"
+
+fn _freestanding_engine_path() -> text:
+    "src/lib/gc_async_mut/gpu/engine2d/engine_baremetal.spl"
+
+fn _freestanding_backend_path() -> text:
+    "src/lib/gc_async_mut/gpu/engine2d/backend_baremetal.spl"
+
+fn _font_registry_path() -> text:
+    "src/lib/common/encoding/font_registry.spl"
+
+fn _simple_web_env_target_path() -> text:
+    "src/lib/gc_async_mut/gpu/browser_engine/simple_web_env_target.spl"
+
+fn _draw_ir_executor_path() -> text:
+    "src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl"
+
 fn _readiness_script_path() -> text:
     "scripts/check/check-simpleos-arm64-wm-qemu-readiness.shs"
+
+fn _qmp_evidence_path() -> text:
+    "scripts/check/check-simpleos-arm64-qmp-input-evidence.shs"
+
+fn _graphics_2d_showcase_core_path() -> text:
+    "src/lib/gc_async_mut/gpu/engine2d/graphics_2d_showcase_core.spl"
 
 fn _cli_path() -> text:
     "src/app/cli/_CliMain/args_and_os_commands.spl"
@@ -100,6 +127,84 @@ describe "ARM64 SimpleOS WM QEMU contract":
         expect(ramfb).to_contain("etc/ramfb")
         expect(ramfb).to_contain("mmio_memory_barrier()")
         expect(console).to_contain("pl011_data_ready")
+
+    it "selects a concrete freestanding Engine2D without replacing Draw IR":
+        val target = file_read_text(_freestanding_engine_path())
+        val executor = file_read_text(_draw_ir_executor_path())
+        expect(target).to_contain("baremetal: BaremetalBackend?")
+        expect(target).to_contain("software: SoftwareBackend?")
+        expect(target.contains("backend: RenderBackend")).to_equal(false)
+        expect(target.contains("backend_metal")).to_equal(false)
+        expect(target.contains("backend_vulkan")).to_equal(false)
+        expect(target.contains("backend_cuda")).to_equal(false)
+        expect(executor).to_contain("@cfg(\"os\", \"simpleos\")")
+        expect(executor).to_contain("engine_baremetal.{Engine2D}")
+        expect(executor).to_contain("engine2d_draw_ir_adv_composition_present_with_images")
+
+    it "attests the selected compiler and Simple-core runtime without fabricated stubs":
+        val builder = file_read_text(_attested_builder_path())
+        val consumer = file_read_text(_qmp_evidence_path())
+        expect(builder).to_contain("SIMPLEOS_ATTESTED_COMPILER")
+        expect(builder).to_contain("SIMPLE_SIMPLE_CORE_PATH=$SIMPLE_CORE_DIR")
+        expect(builder).to_contain("SIMPLE_NATIVE_RUNTIME_BUNDLE=simple-core")
+        expect(builder).to_contain("--runtime-bundle simple-core")
+        expect(builder).to_contain("SIMPLE_NO_STUB_FALLBACK=1")
+        expect(builder).to_contain("SIMPLE_STRICT_FABRICATED_STUB_RATCHET=1")
+        expect(builder).to_contain("simple_core_sha256=$PRE_SIMPLE_CORE_SHA256")
+        expect(consumer).to_contain("MANIFEST_SIMPLE_CORE_SHA256")
+        expect(consumer).to_contain("canonical-simple-core-mutated-during-run")
+
+    it "admits at least 39 guest-timed canonical WM frames per second":
+        val entry = file_read_text(_entry_path())
+        val shell = file_read_text(_desktop_shell_path())
+        val consumer = file_read_text(_qmp_evidence_path())
+        expect(entry).to_contain("while warmup_frame < 4:")
+        expect(entry).to_contain("while measured_frame < 64:")
+        expect(entry).to_contain("shell.replay_baremetal_prepared_frame(wm_frame_executor)")
+        expect(shell).to_contain("me replay_baremetal_prepared_frame(executor: Engine2dWmFrameExecutor) -> i64:")
+        expect(shell).to_contain("val rendered_revision = executor.render(")
+        expect(shell).to_contain("self.baremetal_prepared_content_frames")
+        expect(entry).to_contain("rt_simpleos_frame_heap_checkpoint()")
+        expect(entry).to_contain("rt_simpleos_frame_heap_restore(")
+        expect(entry).to_contain("boot_monotonic_elapsed_us(measured_started_us, measured_finished_us)")
+        expect(entry).to_contain("measured_fps_x1000 < 39000")
+        expect(entry).to_contain("[engine2d-fps] path=shared-wm-draw-ir-engine2d backend=baremetal")
+        expect(entry).to_contain("simd_fill_hits_delta={measured_simd_hits_delta}")
+        expect(entry).to_contain("simd_fill_chunks_delta={measured_simd_chunks_delta}")
+        val compositor = file_read_text("src/os/compositor/compositor.spl")
+        expect(entry).to_contain("input_compositor.handle_pointer_step_scalars(")
+        expect(entry).to_contain("input_compositor.cycle_focus_preserve_order()")
+        expect(compositor).to_contain("me handle_pointer_step_scalars(")
+        expect(compositor).to_contain("me cycle_focus_preserve_order():")
+        expect(consumer).to_contain("def require_fps_receipt(text):")
+        expect(consumer).to_contain("minimum_fps_x1000 != 39000")
+        expect(consumer).to_contain("fps_x1000 < minimum_fps_x1000")
+        expect(consumer).to_contain("arm64_qmp_input_fps_x1000=$(field fps_x1000)")
+        expect(consumer).to_contain("input produced no semantic WM visual transition")
+
+    it "routes flat opaque image rows through the bounded SIMD fill owner":
+        val backend = file_read_text(_freestanding_backend_path())
+        val surface = file_read_text("src/lib/gc_async_mut/gpu/engine2d/framebuffer_surface.spl")
+        val driver = file_read_text("src/os/drivers/framebuffer/fb_driver.spl")
+        val runtime = file_read_text(_arm64_boot_stubs_path())
+        expect(surface).to_contain("fn framebuffer_blit_row_argb(pixels: [u32]")
+        expect(driver).to_contain("extern fn rt_gui_blit_row4")
+        expect(backend).to_contain("self.fb.framebuffer_blit_row_argb(")
+        expect(runtime).to_contain("RuntimeValue rt_gui_blit_row4(")
+        expect(runtime).to_contain("if (opaque) {")
+        expect(runtime).to_contain("rt_gui_store4(dst + i, packed)")
+        expect(runtime).to_contain("arm64_blend_pixel(src, dst[i + lane])")
+        expect(runtime).to_contain("g_gui_simd_fill_scalar_parity_checks < 64u")
+        val blur_target = file_read_text("src/lib/gc_async_mut/gpu/engine2d/blur_pixels_target.spl")
+        expect(blur_target).to_contain("rt_engine2d_box_blur_region")
+        expect(runtime).to_contain("RuntimeValue rt_engine2d_box_blur_region(")
+        expect(runtime).to_contain("uint64_t *prefix = (uint64_t *)malloc")
+        expect(backend).to_contain("val opaque_runs_enabled = self.mask_w <= 0 or self.mask_h <= 0")
+        expect(backend).to_contain("if next_idx >= pixel_count or pixels[next_idx] != c:")
+        expect(backend).to_contain("if run_len >= 4:")
+        expect(backend).to_contain("self.draw_rect_filled(px, py, run_len, 1, c)")
+        expect(backend).to_contain("else if color_a(c) > 0:")
+        expect(backend).to_contain("blend(c, dst)")
 
     it "has a host readiness probe for the live ARM64 QEMU ramfb lane":
         val guide = file_read_text(_guide_path())
@@ -202,3 +307,23 @@ describe "ARM64 SimpleOS WM QEMU contract":
         expect(cli).to_contain("val built = build_scenario(scenario)")
         expect(cli).to_contain("val ok = run_scenario(scenario)")
         expect(cli).to_contain("val ok = test_scenario(scenario, scenario_test_timeout_ms(scenario))")
+
+    it "requires the canonical detailed Simple2D scene in live RAMFB evidence":
+        val entry = file_read_text(_entry_path())
+        val showcase = file_read_text(_graphics_2d_showcase_core_path())
+        val consumer = file_read_text(_qmp_evidence_path())
+        expect(entry).to_contain("graphics_2d_showcase_render_pixels(")
+        expect(entry).to_contain("app_id=graphics_2d_showcase surface=simpleos_wm")
+        expect(entry).to_contain("compositor.attach_window_pixel_content(")
+        expect(showcase).to_contain("RECT / LINE")
+        expect(showcase).to_contain("CURVES / SHAPES")
+        expect(showcase).to_contain("GRADIENT / EFFECT")
+        expect(showcase).to_contain("IMAGE / TEXT")
+        expect(showcase).to_contain("CLIP")
+        expect(showcase).to_contain("MASK / BLEND")
+        expect(showcase).to_contain("ENGINE COMPOSITION / OPACITY")
+        expect(consumer).to_contain("canonical SimpleOS graphics showcase launch receipt missing")
+        expect(consumer).to_contain("showcase_anchors = [")
+        expect(consumer).to_contain("showcase anchor %s mismatch")
+        expect(consumer).to_contain("window ROI %d lacks detailed palette")
+        expect(consumer).to_contain("window ROI %d is predominantly blank")
