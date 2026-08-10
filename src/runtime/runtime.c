@@ -1782,7 +1782,7 @@ void rt_prefetch_wait(void) { spl_prefetch_wait(); }
  * ================================================================ */
 
 #ifdef _WIN32
-static void rt_dir_walk_impl(const char* path, SplArray* result) {
+static void rt_dir_walk_impl(const char* path, int64_t* result) {
     char pattern[4096];
     snprintf(pattern, sizeof(pattern), "%s\\*", path);
 
@@ -1800,14 +1800,15 @@ static void rt_dir_walk_impl(const char* path, SplArray* result) {
             !(find_data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
             rt_dir_walk_impl(full, result);
         } else {
-            spl_array_push(result, spl_str(full));
+            rt_array_push((SplArray*)(uintptr_t)*result,
+                          rt_string_new((const uint8_t*)full, (uint64_t)strlen(full)));
         }
     } while (FindNextFileA(hFind, &find_data));
 
     FindClose(hFind);
 }
 #else
-static void rt_dir_walk_impl(const char* path, SplArray* result) {
+static void rt_dir_walk_impl(const char* path, int64_t* result) {
     DIR* dir = opendir(path);
     if (!dir) return;
 
@@ -1824,18 +1825,31 @@ static void rt_dir_walk_impl(const char* path, SplArray* result) {
         if (S_ISDIR(st.st_mode)) {
             rt_dir_walk_impl(full, result);
         } else {
-            spl_array_push(result, spl_str(full));
+            rt_array_push((SplArray*)(uintptr_t)*result,
+                          rt_string_new((const uint8_t*)full, (uint64_t)strlen(full)));
         }
     }
     closedir(dir);
 }
 #endif
 
-SplArray* rt_dir_walk(const uint8_t* path_ptr, uint64_t path_len) {
-    SplArray* result = spl_array_new();
+/* (ptr, len) -> RuntimeValue (array of text), per runtime_sffi.rs:1896, and
+ * matching the canonical Rust definition (sffi/file_io/directory.rs:223 ->
+ * RuntimeValue).
+ *
+ * This used to build its result with spl_array_new()/spl_array_push()/spl_str()
+ * -- runtime.c's LEGACY array, a `SplValue* items` struct that is a completely
+ * different representation from the RtCoreArray the compiler decodes, and that
+ * is handed back as a bare malloc'd address with no tag.  The runtime's own
+ * handle validator rejected it ("probable compiler/FFI ABI mismatch") and the
+ * caller saw array_len=0 -- which is ALSO the legitimate answer for an empty or
+ * missing directory, which is why this stayed silent.  It now builds a real
+ * tagged RuntimeValue array of text.  rt_dir_walk_impl has no other caller. */
+int64_t rt_dir_walk(const uint8_t* path_ptr, uint64_t path_len) {
+    int64_t result = (int64_t)(uintptr_t)rt_array_new(0);
     char path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return result;
-    rt_dir_walk_impl(path, result);
+    rt_dir_walk_impl(path, &result);
     return result;
 }
 

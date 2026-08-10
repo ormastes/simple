@@ -791,7 +791,8 @@ SplValue    rt_cli_arg_at(int64_t index);
 #else
 int64_t     rt_cli_arg_at(int64_t index);
 #endif
-SplArray*   rt_dir_walk(const uint8_t* path_ptr, uint64_t path_len);
+/* -> RuntimeValue (I64) array of text, per runtime_sffi.rs:1896. */
+int64_t     rt_dir_walk(const uint8_t* path_ptr, uint64_t path_len);
 SplArray*   rt_dir_list_array(const char* path);
 int         rt_dir_create_all(const uint8_t* path_ptr, uint64_t path_len);
 int         rt_mkdir_p(const char* path);

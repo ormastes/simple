@@ -100,7 +100,7 @@ const char* spl_as_str(SplValue v) {
 }
 
 #if defined(_WIN32)
-static void core_dir_walk_impl(const char* path, SplArray* result) {
+static void core_dir_walk_impl(const char* path, int64_t* result) {
     char pattern[4096];
     snprintf(pattern, sizeof(pattern), "%s\\*", path);
     WIN32_FIND_DATAA entry;
@@ -114,13 +114,14 @@ static void core_dir_walk_impl(const char* path, SplArray* result) {
             !(entry.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
             core_dir_walk_impl(full, result);
         } else {
-            spl_array_push(result, spl_str(full));
+            rt_array_push((SplArray*)(uintptr_t)*result,
+                          rt_string_new((const uint8_t*)full, (uint64_t)strlen(full)));
         }
     } while (FindNextFileA(handle, &entry));
     FindClose(handle);
 }
 #else
-static void core_dir_walk_impl(const char* path, SplArray* result) {
+static void core_dir_walk_impl(const char* path, int64_t* result) {
     DIR* dir = opendir(path);
     if (!dir) return;
     struct dirent* entry;
@@ -133,7 +134,8 @@ static void core_dir_walk_impl(const char* path, SplArray* result) {
         if (S_ISDIR(metadata.st_mode)) {
             core_dir_walk_impl(full, result);
         } else {
-            spl_array_push(result, spl_str(full));
+            rt_array_push((SplArray*)(uintptr_t)*result,
+                          rt_string_new((const uint8_t*)full, (uint64_t)strlen(full)));
         }
     }
     closedir(dir);
@@ -142,14 +144,17 @@ static void core_dir_walk_impl(const char* path, SplArray* result) {
 
 /* (ptr, len): the compiler's `text` extern ABI (runtime_sffi.rs:1896 declares
  * &[I64, I64]). A Simple `text` is not NUL-terminated. */
-SplArray* rt_dir_walk(const uint8_t* path_ptr, uint64_t path_len) {
-    SplArray* result = spl_array_new();
+/* -> RuntimeValue (array of text), per runtime_sffi.rs:1896. Used to return
+ * the legacy spl_array_new() representation as a bare untagged address; see the
+ * sibling in runtime.c for the reproduction and the revert-proof. */
+int64_t rt_dir_walk(const uint8_t* path_ptr, uint64_t path_len) {
+    int64_t result = (int64_t)(uintptr_t)rt_array_new(0);
     char path[4096];
     if (!path_ptr && path_len != 0) return result;
     if (path_len >= sizeof(path)) return result;
     if (path_len != 0) memcpy(path, path_ptr, (size_t)path_len);
     path[(size_t)path_len] = '\0';
-    if (path[0]) core_dir_walk_impl(path, result);
+    if (path[0]) core_dir_walk_impl(path, &result);
     return result;
 }
 
