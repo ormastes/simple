@@ -13,14 +13,20 @@
 #     grown to fit children
 # Consumers: blink/paint/paint_tree_walker.spl, blink/input/hit_test.spl
 #
-# DUPLICATION FLAG — this is the THIRD `LayoutBox` in the tree, alongside
-# `std.common.layout.box_model` (recursive [LayoutBox] children, x/y/w/h,
-# BoxKind) and `browser_engine/layout_box.spl` (`BeLayoutBox`). It is NOT
-# reused here because the blink spec contract is arena/id-based
-# (`children_ids: [i64]`, `computed_rect: SkRect`) rather than a recursive
-# tree with scalar x/y/w/h, and `BoxModel` carries no width/height. Do not
-# add a fourth: consolidation is tracked in
-# doc/08_tracking/bug/three_layoutbox_variants_2026-08-10.md
+# NAMING — this type was called `LayoutBox` until 2026-08-10, which collided
+# with three unrelated box records: `common.layout.box_model.LayoutBox`
+# (recursive value tree, scalar x/y/w/h), `common.render_scene.box_types.
+# LayoutBox` (class, EdgeSizes-grouped BoxModel) and `browser_engine/
+# layout_box.spl.BeLayoutBox` (class, DOM-attached). They are genuinely
+# different structures — this one is arena/id-based (`children_ids: [i64]`,
+# `computed_rect: SkRect`) because the blink render-lane contract needs id
+# lookup and skia rects, which `common/` (a no-skia-dependency tier) must not
+# acquire. Renamed to `BlockFlowBox` so the four cannot be conflated.
+#
+# STILL DUPLICATED: `BoxGeometry`'s twelve spacing edges are field-for-field
+# identical to `common.layout.box_model.BoxModel`. Consolidation is tracked in
+# doc/08_tracking/bug/three_layoutbox_variants_2026-08-10.md — do not add a
+# fifth spacing record; nest `BoxModel` here instead.
 
 use std.skia.entity.geometry.{SkRect}
 
@@ -59,16 +65,16 @@ fn box_geometry_new(width: f64, height: f64, margin: f64, padding: f64, border: 
         border_top: border, border_right: border, border_bottom: border, border_left: border
     )
 
-class LayoutBox:
+class BlockFlowBox:
     """One participant in the block flow: its geometry, children, and laid-out rect."""
     id: i64
     geometry: BoxGeometry
     children_ids: [i64]
     computed_rect: SkRect
 
-fn layout_box_new(id: i64, geometry: BoxGeometry) -> LayoutBox:
+fn block_flow_box_new(id: i64, geometry: BoxGeometry) -> BlockFlowBox:
     """Create an unlaid-out box with no children and an empty computed rect."""
-    LayoutBox(
+    BlockFlowBox(
         id: id,
         geometry: geometry,
         children_ids: [],
@@ -79,7 +85,7 @@ class LayoutContext:
     """An arena of layout boxes plus the viewport they are laid out in."""
     viewport_width: f64
     viewport_height: f64
-    boxes: [LayoutBox]
+    boxes: [BlockFlowBox]
     root_id: i64
 
 fn layout_context_new(viewport_width: f64, viewport_height: f64) -> LayoutContext:
@@ -92,7 +98,7 @@ fn layout_context_new(viewport_width: f64, viewport_height: f64) -> LayoutContex
     )
 
 impl LayoutContext:
-    fn add_box(box: LayoutBox):
+    fn add_box(box: BlockFlowBox):
         """Add a box to the arena. Ids are not checked for uniqueness."""
         self.boxes.push(box)
 
@@ -109,7 +115,7 @@ impl LayoutContext:
             i = i + 1
         -1
 
-    fn get_box(id: i64) -> LayoutBox?:
+    fn get_box(id: i64) -> BlockFlowBox?:
         """Look up a box by id. Returns nil when no such box was added."""
         val idx = self.index_of(id)
         if idx < 0:
@@ -171,7 +177,7 @@ impl LayoutContext:
                     cursor = ctop + cg.height + cg.margin_bottom
 
         # Rebuild the arena with the computed rects (element write-back by value).
-        var updated: [LayoutBox] = []
+        var updated: [BlockFlowBox] = []
         var i = 0
         while i < self.boxes.len():
             val b = self.boxes[i as i32]
@@ -181,7 +187,7 @@ impl LayoutContext:
                 if laid_idx[k as i32] == i:
                     rect = laid_rect[k as i32]
                 k = k + 1
-            updated.push(LayoutBox(
+            updated.push(BlockFlowBox(
                 id: b.id,
                 geometry: b.geometry,
                 children_ids: b.children_ids,
