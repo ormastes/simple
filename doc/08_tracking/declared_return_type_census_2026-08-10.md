@@ -118,6 +118,78 @@ of which would otherwise inflate the count:
 | triple-quoted regions masked before the line walk | 10 of 11 RET004 |
 | `loop` matched as a whole keyword, not a prefix | 2 (`loopback`, `loop_ref`) |
 
+## CORRECTION 2026-08-10 (stream P3): RET001 and RET004 are 100% FALSE POSITIVES
+
+The repair pass below was commissioned against "60 deduped real type
+violations" (RET001 14 + RET002 28 + RET004 18). **32 of those 60 are not
+violations at all.** Every RET001 and every RET004 finding was re-checked
+against the real function body, located by NAME rather than by the reported
+line, and all 32 are correct code. The corpus-repair bill in item 2 below is
+wrong and must not be used to size the promotion work.
+
+### Why the census misreports
+
+The reported line is the declaration line **+1**, i.e. it points at the
+docstring, and the classifier reads its `actual=` from the wrong region:
+
+- **`actual=text` (8 of 14 RET001)** is the function's `"""docstring"""` being
+  read as the tail expression. The doc's own note that triple-quoted regions
+  are "masked before the line walk" holds for RET004 but **not** for the
+  RET001 tail classifier.
+- **`actual=bool` is the PRECEDING function's tail.** `_pow2_i64`
+  (`formula.spl`) is reported `actual=bool`; its real tail is `result` (i64).
+  The `bool` comes from `_is_nonneg_int` immediately above it, whose tail is
+  `v >= 0.0 and v == v.to_i64().to_f64()`.
+- **RET004 `<no value>` is a multi-line or call tail.** `emit_vssrl_vv`'s tail
+  is `_encode_rvv_fp(...)` — a call, which the doc states classifies UNKNOWN
+  and should never be reported. `breakpoint_probe_serial_evidence_contract_line`
+  ends in a `+`-continued string concatenation spanning 14 lines; the line
+  walk cannot see a tail expression that is not on one line, so it concludes
+  the tail yields nothing.
+
+Representative verified-correct sites (real tails in parentheses):
+`_pow2_i64` (`result`), `_pow2` (`result`), `extract_feature_ids` (`ids`),
+`make_two_stored_blocks` (`data`), `_aes_gcm_make_j0` (`j0`),
+`proc_slot_active` (`0` / `rt_atomic_int_load(...)`), `is_numeric_type` and
+`get_successor_blocks` (match arms), `recall` and `cosh_approx` (arithmetic),
+`cose_tag_mac0` (`17`), `cose_alg_eddsa` (`return -8`).
+
+The three `total_allocated -> usize` findings are trait-method declarations
+with a docstring and no body — that is RET005 (stub), not RET001.
+
+**Consequence:** the counts are not merely a floor (as the doc states), they
+are also inflated by false positives in two of the four codes. Fix the
+classifier before this census is used to gate anything.
+
+### RET002 re-verification
+
+The 28 remaining RET002 sites are the accidentally-correct residue left by
+`48537735be4`, which had already fixed the 16 genuinely-wrong ones. Re-checked
+by payload type: the struct/tuple-payload sites (`MirFunction?`,
+`PeCodeViewInfo?`, `(text, PossibleInstantiation)?`, symbol/table/db handles)
+are safe, and rewriting them would be churn. **One genuinely-wrong class was
+found and fixed:** `LazySeq.any` in `src/app/interpreter/lazy/lazy_seq.spl:415`
+and `lazy_seq_fixed.spl:413`, which was `self.find(predicate).?` over
+`find(...) -> T?` with a *generic* payload. Measured on both engines:
+
+```
+                 interpreter      jit
+any_old(has 0)   0   (raw i64!)   false   <- WRONG, element 0 does match
+any_old(no 0)    nil              false
+any_new(has 0)   true             true
+any_new(no 0)    false            false
+```
+
+`.?` in tail position of `-> bool` leaks the raw payload out of the function on
+the interpreter and is *unconditionally false* for a falsy payload on the JIT,
+so `any` answered false for any element equal to `0` / `""` / `false`. Rewritten
+as `self.find(predicate) != nil`, which is correct and engine-agreeing.
+
+The `text?`-payload sites (`has_subcommand`, `has_js_glue`,
+`optimization_rule_provider_missing_fact`) are the same hazard class in
+principle but carry values that are never empty in practice; left alone and
+recorded here rather than churned.
+
 ## Recommendation (for the owner, not acted on here)
 
 1. RET005 (50) is the largest bucket but is a **different defect** — declaration
