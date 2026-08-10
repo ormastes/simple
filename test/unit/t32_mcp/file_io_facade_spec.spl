@@ -7,22 +7,15 @@ existing `std.io_runtime` facade (via `t32_file_read`), not module-local raw
 intrinsics.
 """
 
-use std.io_runtime.{file_read, file_write, file_delete}
+use std.io_runtime.{file_read, file_write, file_delete, dir_walk, getpid, time_now_unix_micros}
 use app.mcp_t32.json_helpers.{t32_file_read}
 use app.mcp_t32.gap_tools.{handle_t32_cmm_validate}
-
-val T32_MCP_SOURCE_FILES = [
-    "examples/10_tooling/trace32_tools/t32_mcp/gap_tools.spl",
-    "examples/10_tooling/trace32_tools/t32_mcp/window_tools.spl",
-    "examples/10_tooling/trace32_tools/t32_mcp/dialog_tools.spl",
-    "examples/10_tooling/trace32_tools/t32_mcp/json_helpers.spl"
-]
 
 describe "T32 MCP file-I/O facade":
 
     context "exact gap_tools reproducer":
         it "loads a real CMM path through handle_t32_cmm_validate":
-            val path = "/tmp/t32_mcp_gap_tools_reproducer.cmm"
+            val path = "/tmp/t32_mcp_gap_tools_reproducer_{getpid()}_{time_now_unix_micros()}.cmm"
             val wrote = file_write(path, "DIALOG.OK \"Flash done\"\n")
             expect(wrote).to_equal(true)
             val body = "{\"source\":\"" + path + "\",\"mode\":\"check\"}"
@@ -41,9 +34,14 @@ describe "T32 MCP file-I/O facade":
 
     context "adjacent raw-intrinsic prevention":
         it "keeps every T32 MCP file-read callsite on the facade":
-            for path in T32_MCP_SOURCE_FILES:
-                val source = file_read(path)
-                expect(source.contains("rt_file_read_text(")).to_equal(false)
+            val files = dir_walk("examples/10_tooling/trace32_tools/t32_mcp")
+            var scanned = 0
+            for path in files:
+                if path.ends_with(".spl"):
+                    val source = file_read(path)
+                    expect(source.contains("rt_file_read_text(")).to_equal(false)
+                    scanned = scanned + 1
+            expect(scanned > 0).to_equal(true)
 
         it "keeps the shared helper implemented by file_read":
             val source = file_read("examples/10_tooling/trace32_tools/t32_mcp/json_helpers.spl")
