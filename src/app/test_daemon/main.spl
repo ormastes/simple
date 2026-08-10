@@ -2,6 +2,7 @@
 
 use std.sffi.cli.{cli_get_args}
 use app.io.process_ops.{process_run, process_run_timeout}
+use app.test_daemon.light_protocol.{timeout_verdict_line}
 
 extern fn rt_dir_create_all(path: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
@@ -125,13 +126,20 @@ fn daemon_pid() -> text:
     content.split("\n")[0].trim()
 
 fn daemon_lock_alive() -> bool:
+    """True only when the lock is held by a LIVE light-daemon process.
+
+    Mirrors test_runner_client.daemon_lock_alive: a reused PID passes kill -0,
+    so a crashed daemon's lock made every request wait out the full budget and
+    report a timeout with no verdict. A D-state daemon matches its own cmdline
+    and is left strictly alone; no process is ever signalled, only the lock
+    file is removed. Bug: stale_daemon_lock_fakes_total_red_2026-08-09."""
     val pid = daemon_pid()
     if pid == "":
         return false
     val (_stdout, _stderr, code) = process_run_timeout(
         "/bin/sh",
-        ["-c", "kill -0 {pid} 2>/dev/null"],
-        1000
+        ["-c", "kill -0 {pid} 2>/dev/null || exit 1; test -r /proc/{pid}/cmdline || exit 0; tr '\\0' ' ' < /proc/{pid}/cmdline | grep -q light_daemon"],
+        2000
     )
     code == 0
 
@@ -139,6 +147,10 @@ fn ensure_daemon() -> bool:
     ensure_dirs()
     if daemon_lock_alive():
         return true
+    val stale_pid = daemon_pid()
+    if stale_pid != "":
+        print "warning: test-daemon: stale lock {LIGHT_LOCK} (recorded pid {stale_pid} is not a live light_daemon); removing it and respawning."
+        print "warning: test-daemon: if this repeats, clear the lane by hand: rm -rf {LIGHT_DAEMON_DIR}"
     rt_file_delete(LIGHT_LOCK)
     rt_file_delete(LIGHT_STOP)
     val binary = simple_binary()
@@ -227,6 +239,9 @@ fn cli_test_daemon_run(args: [text], clean: bool) -> i64:
             return print_response(content)
         rt_sleep_ms(100)
     print "ERROR: test daemon timed out: {path}"
+    print "ERROR: no response from the light daemon within 600000ms."
+    print "ERROR: if EVERY spec reports this, the lock at {LIGHT_LOCK} is stale/wedged; fix: rm -rf {LIGHT_DAEMON_DIR}"
+    print timeout_verdict_line(path, "daemon-no-response", 600000)
     1
 
 fn main() -> i64:

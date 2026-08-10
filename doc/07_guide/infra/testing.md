@@ -797,7 +797,7 @@ contract is not test evidence.
 
 ### Runner Operational Caveats (2026-07-18)
 
-Four critical operational facts for reliable test execution:
+Six critical operational facts for reliable test execution:
 
 1. **Stale/corrupt manifest** (F1): `Test discovery found 0 test files ... but N exist on disk` + `Warning: Could not load test database` → remedy is `--refresh-manifest`. The runner correctly fail-closes this as a failed result. See `doc/08_tracking/bug/test_runner_fresh_seed_silent_noop_2026-07-17.md`.
 
@@ -805,7 +805,52 @@ Four critical operational facts for reliable test execution:
 
 3. **Verification discipline** (F3): Only the final `Results: N total, ...` line is authoritative. Compile diagnostics may quote runner source containing "passed"/"failed" tokens — grepping those greenwashes a failed run. Always consume the bottom-line result summary, not intermediate diagnostic output.
 
-4. **Single-file vs directory paths** (F4): Single-file targets (`simple test path/to/spec.spl`) run via the Rust-embedded runner (fail-closed, verified); directory targets (`simple test path/to/dir`) enter `src/app/test_runner_new` (daemon route, known hang under fresh seed). For automated test workflows, prefer single-spec targets or use the self-hosted binary (`bin/release/<triple>/simple`) after bootstrap.
+4. **Test-lane exit codes** (F5, 2026-08-09): these have been repeatedly
+   misattributed — `144` was chased as a spec defect for hours when no spec can
+   produce it. Read the code together with the `SPEC FILE VERDICT:` line; the
+   runner now prints a one-sentence gloss next to the number
+   (`light_protocol.exit_code_reason`).
+
+   | code | meaning |
+   |------|---------|
+   | `0` **with a verdict line** | ran, clean |
+   | `0` **with NO verdict line** | **ran nothing** — never read this as a pass |
+   | `1` | ordinary failure (or a client-side error such as a daemon timeout) |
+   | `124` | coreutils `timeout` wall-clock kill |
+   | `143` | 128+15 SIGTERM — usually the kill_monitor watchdog, which SIGTERMs any run ≥60 s at high CPU. Bootstrap / full-suite / cold-lint cannot finish without `SIMPLE_TIMEOUT_SECONDS=3600` |
+   | `144` | comes from the **reporting harness, not from any spec** — not reproducible from a spec, and a `pkill -f` that matches its own wrapper produces it. Never `pkill -f`; kill by PID |
+   | `255` | worker killed / light-daemon request timed out |
+   | `-1` (internal) | `process_run_bounded` killed the child at its budget |
+
+   **Timeout now always emits a verdict.** A spec killed at its per-file budget
+   used to print `Process timed out`, exit 255, and *no verdict line at all*, so
+   a sweep counting `^SPEC FILE VERDICT:` read the spec as **not yet run**
+   instead of **broken** — the single most dangerous shape in this corpus. Every
+   timeout path (inner single-runner, daemon worker, client outer bound, client
+   no-response wait) now emits:
+
+   ```
+   SPEC FILE VERDICT: <path> declared>=1 executed=1 passed=0 failed=1 dropped=0 timeout=1 reason=<why> budget_ms=<N>
+   ```
+
+   Field prefix is byte-compatible with the driver's real verdict line, so
+   existing parsers count it as a failure with no change; grep `timeout=1` to
+   separate a killed spec from an honestly-failing one, and `reason=` for which
+   layer killed it. A synthetic verdict is suppressed whenever the child already
+   emitted a real one.
+
+5. **Stale daemon lock fakes a total-RED baseline** (F6, 2026-08-09): if
+   `.build/test_daemon_light/daemon.lock` records a PID that has been **reused**
+   by an unrelated process, `kill -0` succeeds, the client believes a daemon is
+   alive, never respawns one, and *every* spec waits out its full budget and
+   exits 1 with `ERROR: test daemon timed out`. Liveness now additionally
+   requires `/proc/<pid>/cmdline` to name `light_daemon`; a stale lock is
+   announced by name and self-healed (lock file removed, daemon respawned). A
+   D-state daemon still matches its cmdline and is deliberately left alone — it
+   may be progressing. No process is ever signalled. Manual remedy if it
+   recurs: `rm -rf .build/test_daemon_light`.
+
+6. **Single-file vs directory paths** (F4): Single-file targets (`simple test path/to/spec.spl`) run via the Rust-embedded runner (fail-closed, verified); directory targets (`simple test path/to/dir`) enter `src/app/test_runner_new` (daemon route, known hang under fresh seed). For automated test workflows, prefer single-spec targets or use the self-hosted binary (`bin/release/<triple>/simple`) after bootstrap.
 
 ---
 

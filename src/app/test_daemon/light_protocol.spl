@@ -1,5 +1,12 @@
 val LIGHT_REQUEST_DEFAULT_TIMEOUT_MS: i64 = 600000
-val LIGHT_REQUEST_MAX_TIMEOUT_MS: i64 = 600000
+# Ceiling on an EXPLICITLY requested budget, not the default (which stays
+# 600s above). It used to equal the default, so a spec that asked for more —
+# via `--timeout` or the `# @timeout_secs <N>` header directive — was silently
+# clamped back to 600s on the light-daemon lane, killed mid-run, and reported
+# "Process timed out" with no verdict line: a spec that cannot print a verdict
+# can never print a failure either. Only specs that declare a larger budget
+# can reach this ceiling. See tile_paint_parity_spec (measured 1108s honest).
+val LIGHT_REQUEST_MAX_TIMEOUT_MS: i64 = 2400000
 val LIGHT_REQUEST_RESPONSE_GRACE_MS: i64 = 2000
 val LIGHT_REQUEST_V1_HEADER: text = "simple-test-daemon-request-v1"
 
@@ -38,6 +45,46 @@ fn light_request_parse(content: text) -> (text, i64):
         path_parts.push(lines[i])
         i = i + 1
     (path_parts.join("\n"), expiry_micros)
+
+# ---------------------------------------------------------------------------
+# Timeout verdict emission (bug: killed_spec_emits_no_verdict_line_2026-08-09)
+# ---------------------------------------------------------------------------
+# A spec killed at the per-file budget used to produce "Process timed out",
+# exit 255, and NO verdict line at all. In a sweep that reads as "not yet run"
+# rather than "broken" — the most dangerous shape in this corpus, because a
+# broken spec becomes invisible instead of red. Every timeout path in the test
+# lane now emits THIS line so existing tooling (which greps
+# `^SPEC FILE VERDICT:` and parses executed=/passed=/failed=/dropped=) counts
+# the kill as a real failure. The shape is byte-compatible with the driver's
+# own verdict line (report_spec_file_verdict); the extra `timeout=1` and
+# `reason=` fields are appended AFTER dropped= so no existing parser is
+# disturbed, and give a grep-able marker that distinguishes a killed spec from
+# an honestly-failing one.
+fn timeout_verdict_line(path: text, reason: text, budget_ms: i64) -> text:
+    "SPEC FILE VERDICT: {path} declared>=1 executed=1 passed=0 failed=1 dropped=0 timeout=1 reason={reason} budget_ms={budget_ms}"
+
+fn has_verdict_line(output: text) -> bool:
+    output.contains("SPEC FILE VERDICT:")
+
+# Human-readable gloss for a process exit status seen on the test lane. Exit
+# codes here have repeatedly been misread (144 was chased as a spec defect when
+# it comes from the reporting harness), so every timeout/abort report prints
+# the number WITH this sentence. See doc/07_guide/infra/testing.md
+# "Test-lane exit codes".
+fn exit_code_reason(code: i64) -> text:
+    if code == 0:
+        return "exit 0 (clean; but with NO verdict line it means the spec RAN NOTHING)"
+    if code == 124:
+        return "exit 124 (coreutils/`timeout` wall-clock kill)"
+    if code == 143:
+        return "exit 143 (128+15, SIGTERM — usually the kill_monitor watchdog on a >=60s high-CPU run; re-run with SIMPLE_TIMEOUT_SECONDS=3600)"
+    if code == 144:
+        return "exit 144 (from the reporting harness, NOT from any spec; a `pkill -f` that matched its own wrapper produces this)"
+    if code == 255:
+        return "exit 255 (worker killed / daemon request timed out)"
+    if code == -1:
+        return "code -1 (process_run_bounded killed the child at its budget)"
+    "exit {code}"
 
 fn light_request_deadline(expiry_micros: i64, now_micros: i64) -> (bool, i64):
     if expiry_micros == 0:

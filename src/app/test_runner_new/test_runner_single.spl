@@ -28,6 +28,7 @@ use app.io.mod.{env_get}
 use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES}
 use std.string_core.{char_code}
 use std.common.coverage_sdn.{parse_coverage_sdn, merge_coverage, render_coverage_sdn}
+use app.test_daemon.light_protocol.{timeout_verdict_line, has_verdict_line, exit_code_reason}
 
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
@@ -200,6 +201,35 @@ fn spec_exec_limit_directive(file_path: text) -> i64:
     if idx < 0:
         return 0
     var pos = idx + 14
+    val n = content.len()
+    var value: i64 = 0
+    var digits = 0
+    while pos < n:
+        val c = content.char_code_at(pos)
+        if c >= 48 and c <= 57:
+            value = value * 10 + (c - 48)
+            digits = digits + 1
+            pos = pos + 1
+        else:
+            break
+    if digits == 0:
+        return 0
+    value
+
+fn spec_timeout_secs_directive(file_path: text) -> i64:
+    """Parse `# @timeout_secs <N>` from a spec header (0 when absent/invalid).
+
+    The per-spec child wall-clock budget defaults to 120s and the only other
+    lever is the `slow_it` 600s floor. A spec whose HONEST run exceeds 600s
+    therefore had no way to ask for more: the child was killed mid-run and the
+    outer runner printed "Process timed out" with NO verdict line at all — a
+    fail-open hole, because a spec that cannot report a verdict can never
+    report a failure either. Raise-only, same shape as @exec_limit."""
+    val content = rt_file_read_text(file_path)
+    val idx = find_raw(content, "# @timeout_secs ")
+    if idx < 0:
+        return 0
+    var pos = idx + 16
     val n = content.len()
     var value: i64 = 0
     var digits = 0
@@ -806,6 +836,9 @@ fn main() -> i64:
         return 0
     if rt_file_read_text(run.path).contains("slow_it ") and run.timeout_secs < 600:
         run.timeout_secs = 600
+    val declared_timeout = spec_timeout_secs_directive(run.path)
+    if declared_timeout > run.timeout_secs:
+        run.timeout_secs = declared_timeout
 
     rt_env_set("SIMPLE_RUNTIME_MODE", "interpreter")
     rt_env_set("SIMPLE_EXECUTION_MODE", "interpret")
@@ -960,6 +993,16 @@ fn main() -> i64:
         failed = 1
         passed = 0
         print "error: test-runner: file timed out"
+        # Emit a verdict line for the KILLED file. Without it this branch
+        # produced "Process timed out" and nothing else, so a sweep that
+        # counts `^SPEC FILE VERDICT:` lines saw the file as NEVER RUN rather
+        # than BROKEN, and the breakage was invisible. Suppressed when the
+        # child somehow already printed one, so a real verdict is never
+        # shadowed by a synthetic one.
+        # Bug: killed_spec_emits_no_verdict_line_2026-08-09.
+        if not has_verdict_line(combined):
+            print "error: test-runner: {exit_code_reason(code)} after {run.timeout_secs}s budget"
+            print timeout_verdict_line(run.path, "child-timeout", timeout_ms)
     elif code != 0 and assert_ran:
         passed = if has_evidence == 1: evidence_passed else: 0
         failed = if has_evidence == 1 and evidence_failed > 0: evidence_failed else: 1
