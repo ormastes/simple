@@ -6,6 +6,10 @@
 
 use std.common.sdn.parser (parse)
 use std.common.sdn.value.{SdnValue}
+use compiler.driver.cache.integration.shadow_mode.{
+    ShadowActionInputs, shadow_enabled, shadow_on_compile_start,
+    shadow_on_compile_done, shadow_report
+}
 
 # ============================================================================
 # File Fingerprinting
@@ -581,10 +585,20 @@ impl IncrementalCompiler:
         val fp = FileFingerprint.from_file(source)
         if val fingerprint = fp:
             self.cache.update_entry(source, fingerprint, dependencies, outputs)
+        # Cache v2 strict shadow mode (opt-in, compare-only): the legacy cache
+        # above stays authoritative; v2 lookup/publish/compare runs alongside
+        # and never alters build output. Fully off unless
+        # SIMPLE_CACHE_V2_SHADOW=1.
+        if shadow_enabled():
+            val lookup = shadow_on_compile_start(ShadowActionInputs(
+                workspace_root: ".", source: source, dependencies: dependencies))
+            shadow_on_compile_done(lookup, outputs)
 
     me finish():
         """Save cache after build."""
         self.cache.save()
+        if shadow_enabled():
+            shadow_report()
 
     me clean():
         """Clear build cache."""

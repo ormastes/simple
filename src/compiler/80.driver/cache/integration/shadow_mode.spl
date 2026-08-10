@@ -1,0 +1,232 @@
+# Shadow Mode — cache v2 wired into the real build path, COMPARE-ONLY (C8 slice 1).
+#
+# Plan: doc/03_plan/compiler/cache/semantic_incremental_build_v2_plan_2026-08-09.md
+# (Agent C8 row, "strict shadow comparison").
+#
+# The legacy path (.build_cache.sdn + .build/mir_cache/) still makes EVERY
+# decision. Shadow mode runs alongside: it computes the v2 ActionKey digest,
+# does an exact L1/L2 tier lookup, publishes a ResultManifest after a
+# miss-recompile, and COMPARES a v2 hit's stored bytes against the freshly
+# compiled bytes. A divergence is counted as shadow_mismatch — never obeyed.
+#
+# Opt-in via SIMPLE_CACHE_V2_SHADOW=1; default off, zero behavior change.
+# Any v2 internal failure is counted (shadow_errors) and swallowed — shadow
+# mode must NEVER fail or alter the build.
+#
+# Identity reuses action_key.spl's canonical encoder (the ONE hash scheme).
+# Lookup is exact-key only. Publish goes through tier_router_publish, which
+# closure-checks: mapping is admitted only after all artifacts are in CAS.
+# No git identity anywhere near the key.
+
+use compiler.driver.cache.action_key.{ActionKey, ActionDep, action_key_digest}
+use compiler.driver.cache.cas_store.{ResultManifest, cas_put, cas_get}
+use compiler.driver.cache.action_index.action_index.{CacheNamespace}
+use compiler.driver.cache.tier_router.tier_router.{
+    TierRouter, TierLookupResult, TierPublishResult,
+    tier_router_open, tier_router_lookup, tier_router_publish,
+    tier_lookup_result_manifest
+}
+use std.common.crypto.sha256.{sha256_text}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_hash_sha256(path: text) -> text
+extern fn rt_cli_get_args() -> [text]
+
+val SHADOW_DOMAIN: text = "simple/interpreter-module/v1"
+val SHADOW_SCHEMA_VERSION: i64 = 2
+
+# ============================================================================
+# Telemetry counters (process-local)
+# ============================================================================
+
+var _shadow_hits: i64 = 0
+var _shadow_misses: i64 = 0
+var _shadow_mismatches: i64 = 0
+var _shadow_errors: i64 = 0
+
+fn shadow_counts() -> [i64]:
+    [_shadow_hits, _shadow_misses, _shadow_mismatches, _shadow_errors]
+
+fn shadow_reset_counters():
+    _shadow_hits = 0
+    _shadow_misses = 0
+    _shadow_mismatches = 0
+    _shadow_errors = 0
+
+fn shadow_enabled() -> bool:
+    (rt_env_get("SIMPLE_CACHE_V2_SHADOW") ?? "") == "1"
+
+# ============================================================================
+# Inputs + lookup state
+# ============================================================================
+
+# Everything the shadow layer needs to identify one module-compile action.
+struct ShadowActionInputs:
+    workspace_root: text
+    source: text            # module source file path
+    dependencies: [text]    # dependency source file paths
+
+struct ShadowLookup:
+    enabled: bool
+    workspace_root: text
+    action_digest: text
+    hit: bool
+    expected_bytes: [text]  # artifact contents fetched on a v2 hit
+    error: bool
+
+fn shadow_lookup_disabled() -> ShadowLookup:
+    ShadowLookup(enabled: false, workspace_root: "", action_digest: "",
+                 hit: false, expected_bytes: [], error: false)
+
+fn shadow_file_sha(path: text) -> text:
+    if not rt_file_exists(path):
+        return "absent"
+    val digest = rt_file_hash_sha256(path) ?? ""
+    if digest.len() != 64:
+        return "unhashable"
+    digest
+
+fn shadow_compiler_exe_sha() -> text:
+    val args = rt_cli_get_args() ?? []
+    if args.len() > 0:
+        return shadow_file_sha(args[0])
+    "unknown-compiler"
+
+fn shadow_action_key(inputs: ShadowActionInputs) -> ActionKey:
+    var deps: [ActionDep] = []
+    for dep in inputs.dependencies:
+        deps.push(ActionDep(module_id: dep, iface_digest: shadow_file_sha(dep)))
+    ActionKey(
+        domain: SHADOW_DOMAIN,
+        compiler_exe: shadow_compiler_exe_sha(),
+        live_compiler_src: "",
+        schema_version: SHADOW_SCHEMA_VERSION,
+        target_triple: "",
+        host_arch: "",
+        cfg_features: [],
+        stdlib_variant: "",
+        runtime_family: "",
+        source_content: shadow_file_sha(inputs.source),
+        resolution_witness: "",
+        deps: deps,
+        macro_root: "",
+        aop_selection: "",
+        ct_env_inputs: []
+    )
+
+# ============================================================================
+# Entry point 1: compile start — exact-key tier lookup, compare-only.
+# ============================================================================
+
+fn shadow_on_compile_start(inputs: ShadowActionInputs) -> ShadowLookup:
+    if not shadow_enabled():
+        return shadow_lookup_disabled()
+    val digest = action_key_digest(shadow_action_key(inputs))
+    if digest.len() != 64:
+        _shadow_errors = _shadow_errors + 1
+        return shadow_lookup_disabled()
+    val tr = tier_router_open(inputs.workspace_root)
+    val result = tier_router_lookup(tr, CacheNamespace.WorkspaceLocal, digest)
+    val manifest = tier_lookup_result_manifest(result)
+    var hit = false
+    var expected: [text] = []
+    var error = false
+    if val m = manifest:
+        hit = true
+        for d in m.artifact_digests:
+            match cas_get(tr.l1_root, d):
+                case Some(bytes):
+                    expected = expected.push(bytes)
+                case nil:
+                    # Hit whose artifact vanished/corrupt — count as error,
+                    # do not treat as a comparable hit.
+                    hit = false
+                    error = true
+    if error:
+        _shadow_errors = _shadow_errors + 1
+    ShadowLookup(enabled: true, workspace_root: inputs.workspace_root,
+                 action_digest: digest, hit: hit, expected_bytes: expected,
+                 error: error)
+
+# ============================================================================
+# Entry point 2: compile done — publish on miss, compare on hit.
+# ============================================================================
+
+fn shadow_read_produced(produced_paths: [text]) -> [text]:
+    var out: [text] = []
+    for path in produced_paths:
+        if rt_file_exists(path):
+            out = out.push(rt_file_read_text(path) ?? "")
+        else:
+            out = out.push("")
+    out
+
+fn shadow_bytes_equal(a: [text], b: [text]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+fn shadow_on_compile_done(lookup: ShadowLookup, produced_paths: [text]):
+    if not lookup.enabled:
+        return ()
+    if lookup.error:
+        return ()
+    val produced = shadow_read_produced(produced_paths)
+    if lookup.hit:
+        # Strict shadow comparison: v2 answer vs freshly compiled bytes.
+        if shadow_bytes_equal(lookup.expected_bytes, produced):
+            _shadow_hits = _shadow_hits + 1
+        else:
+            _shadow_mismatches = _shadow_mismatches + 1
+        return ()
+    # Miss: publish. Artifacts go into L1 CAS FIRST, then the closure-checked
+    # manifest publish admits the mapping.
+    val tr = tier_router_open(lookup.workspace_root)
+    var artifact_digests: [text] = []
+    var put_failed = false
+    for bytes in produced:
+        val d = cas_put(tr.l1_root, bytes)
+        if d.len() != 64:
+            put_failed = true
+        artifact_digests = artifact_digests.push(d)
+    if put_failed:
+        _shadow_errors = _shadow_errors + 1
+        return ()
+    val m = ResultManifest(
+        action_digest: lookup.action_digest,
+        result_kind: "interpreter_module",
+        artifact_digests: artifact_digests,
+        output_fingerprint: sha256_text(artifact_digests.join("\n")),
+        dependency_manifest: "",
+        producer_schema: SHADOW_SCHEMA_VERSION
+    )
+    match tier_router_publish(tr, CacheNamespace.WorkspaceLocal, lookup.action_digest, m):
+        case TierPublishResult.Published:
+            _shadow_misses = _shadow_misses + 1
+        case TierPublishResult.Conflict(existing, attempted):
+            # Same key already maps to a different result — determinism
+            # divergence surfaced by shadow mode.
+            _shadow_mismatches = _shadow_mismatches + 1
+        case TierPublishResult.ClosureIncomplete:
+            _shadow_errors = _shadow_errors + 1
+    ()
+
+# ============================================================================
+# Entry point 3: one-line summary (printed only when shadow mode is on).
+# ============================================================================
+
+fn shadow_report():
+    if not shadow_enabled():
+        return ()
+    print("cache-v2-shadow: hits={_shadow_hits} misses={_shadow_misses} mismatches={_shadow_mismatches} errors={_shadow_errors}")
+
+export ShadowActionInputs, ShadowLookup
+export shadow_enabled, shadow_on_compile_start, shadow_on_compile_done
+export shadow_report, shadow_counts, shadow_reset_counters
