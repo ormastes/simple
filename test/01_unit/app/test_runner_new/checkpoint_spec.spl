@@ -5,7 +5,9 @@ use std.spec.{describe, it, expect, after_each}
 use std.test_runner.checkpoint.{TestCheckpoint, checkpoint_save, checkpoint_load}
 use std.test_runner.checkpoint.{checkpoint_exists, checkpoint_delete, checkpoint_skip_completed}
 use std.test_runner.checkpoint.{make_empty_checkpoint}
-use app.io.mod.{file_exists, file_read, file_delete}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read, file_delete}
+
+val CHECKPOINT_PATH = "tmp/.simple-test-checkpoint.sdn"
 
 describe "Checkpoint struct":
     it "should create checkpoint with all fields":
@@ -39,21 +41,21 @@ describe "make_empty_checkpoint":
 describe "checkpoint_save and load":
     after_each:
         # Clean up checkpoint file after each test
-        if file_exists(".simple-test-checkpoint.sdn"):
-            file_delete(".simple-test-checkpoint.sdn")
+        if file_exists(CHECKPOINT_PATH):
+            file_delete(CHECKPOINT_PATH)
 
     it "should save checkpoint to file":
         val completed = ["test/unit/a.spl", "test/unit/b.spl"]
         checkpoint_save(completed, 5, 1, 2, "cpu")
 
-        val exists = file_exists(".simple-test-checkpoint.sdn")
+        val exists = file_exists(CHECKPOINT_PATH)
         expect(exists).to_equal(true)
 
     it "should save valid SDN format":
         val completed = ["file1.spl"]
         checkpoint_save(completed, 10, 0, 0, "periodic")
 
-        val content = file_read(".simple-test-checkpoint.sdn")
+        val content = file_read(CHECKPOINT_PATH)
 
         # Check for expected SDN structure
         expect(content.contains("checkpoint {")).to_equal(true)
@@ -70,10 +72,17 @@ describe "checkpoint_save and load":
         expect(loaded.completed_files.len()).to_equal(2)
         expect(loaded.completed_files[0]).to_equal("test/unit/x.spl")
         expect(loaded.completed_files[1]).to_equal("test/unit/y.spl")
+        expect(loaded.timestamp_ms).to_be_greater_than(0)
         expect(loaded.total_passed).to_equal(15)
         expect(loaded.total_failed).to_equal(3)
         expect(loaded.total_skipped).to_equal(5)
         expect(loaded.shutdown_reason).to_equal("memory")
+
+    it "should delete the production checkpoint path":
+        checkpoint_save(["test/unit/delete.spl"], 1, 0, 0, "complete")
+        expect(checkpoint_exists()).to_equal(true)
+        checkpoint_delete()
+        expect(file_exists(CHECKPOINT_PATH)).to_equal(false)
 
 describe "checkpoint_skip_completed":
     it "should return all files when checkpoint empty":
