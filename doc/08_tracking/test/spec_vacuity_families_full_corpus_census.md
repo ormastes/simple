@@ -161,9 +161,113 @@ strictly worse than no benchmark, because it is cited as evidence.
 
 ## Results — family 3 (VTM001/VTM002)
 
-_Pending: the driver run is still in its index phase. Family 3 cannot be
-cross-checked by grep — it requires struct-vs-class kind resolution and
-function-body scoping, which is exactly why the driver exists._
+Family 3 *can* be scored without the driver, because struct-vs-class is
+recoverable by grep: `^(struct|class) Name` across `src/` and `test/` yields a
+kind index (12,879 names; 6,025 `struct`), and a parameter's kind is then a
+lookup, never a guess. An independent scorer was written to the same rules
+(indentation-scoped function bodies, `mut` params excluded, `class` receivers
+excluded, unknown/ambiguous types excluded) and validated against a planted
+control matching the driver's: **5 planted violations fire (field assign,
+nested field-chain `.push`, index assign, `.remove`, `+=`), 8 correct forms
+stay silent.** Only then was it run.
+
+| measure | raw | unnumbered trees |
+|---|---|---|
+| VTM001 (field/index assign through a struct param) | 25 | 6 |
+| VTM002 (in-place mutator through a struct param) | 8 | 3 |
+| **total findings** | **33** | **9** |
+| distinct spec files | 29 | — |
+
+Full list: `doc/08_tracking/test/spec_value_type_mutation_worklist.tsv`.
+
+### Every finding was read. Only 2 are real — and that is the headline
+
+Hand-adjudicating all 33 gives a **true-positive rate of ~6%**. The rule as
+specified is not gate-ready, and shipping it as a gate would have been the
+"lint with a high false-positive rate gets disabled" failure the driver's own
+header warns about. Two false-positive patterns account for nearly all 31:
+
+- **`dict[param.field] = value` is not a mutation of `param`.** Nineteen of the
+  25 VTM001 hits are the single line `functions[func.symbol] = func` inside
+  `make_module(func: MirFunction)` / `make_hir_module(fn_: HirFunction)`
+  helpers across the backend, borrow-check, codegen and resource specs. The
+  param appears only as a *dict key expression*; the assignment target is a
+  local. `mock_manifest_update`'s `entries[e.source_path] = e` is the same
+  shape. An index-assign pattern must require the param to be the **base** of
+  the assignment target, not merely to appear left of the `=`.
+- **`add` is not always a mutator.** `double_f32x4(v: Vec4f) -> Vec4f: v.add(v)`
+  returns a new vector; nothing is mutated. `add` (and `set`, `put`) sit in the
+  driver's mutator token list too, so the driver inherits this. A returned
+  expression whose value is the function's result should never be flagged.
+- Also excluded on inspection: `upsert_count(entries: [CountEntry])` — the
+  param is an **array**, which is likewise a value type, but the function
+  `return`s it and the caller rebinds, so the write-back is real;
+  `append_unique(items: text)` — `text` is a primitive, not an indexed struct.
+
+### The two genuine findings
+
+**1. `test/unit/os/kernel/memory/vmm_vma_spec.spl:72` — `_space_add(space: ProcessVmSpace, area: VmArea)`. This is the payload of the whole census.**
+
+```
+fn _space_add(space: ProcessVmSpace, area: VmArea) -> i32:
+    """Local vma_add implementation for tests — same logic as vmm.spl."""
+    ...
+    space.areas.push(area)
+    space.vma_count = space.vma_count + 1
+```
+
+`ProcessVmSpace` is a `struct`, so **both** writes land on a copy and the
+caller's `var space` never changes. It is called 9+ times, and the assertions
+depend on the writes being visible:
+
+```
+val rc1 = _space_add(space, a1)
+val rc2 = _space_add(space, a2)
+expect(rc2).to_equal(-17)          # -EEXIST, requires a1 to be recorded
+expect(space.vma_count).to_equal(2)
+```
+
+The overlap-rejection scenario is the sharp one: if `a1` was never recorded,
+`_space_add(space, a2)` scans an empty space and returns `0`, not `-17`. So
+either this spec is currently RED, or struct params are being passed by
+reference by the engine that runs it — which would be an engine-divergence
+defect in its own right, since `struct` is specified as a value type. Both
+outcomes are defects and both are worth more than the spec's green tick.
+
+It is simultaneously a **family-4** instance: the docstring says outright
+*"Local vma_add implementation for tests — same logic as vmm.spl"*, and
+`_space_find` likewise. The spec re-implements the kernel VMA allocator and
+asserts against its own copy, so `src/.../vmm.spl`'s `vma_add`/`vma_find` are
+**not covered by this spec at all** — while the known
+`vmm_pml4_reads_zero_blocks_ring3_spawn` defect sits in the same subsystem.
+This is exactly the shape the census exists to find: a green spec standing in
+front of an uncovered, known-fragile kernel path.
+
+**2. `test/{unit,01_unit}/compiler/interpreter/self_field_assign_spec.spl` —
+`write_struct_dict_holder(self: MutableStructDictHolder, key, next)`**
+
+```
+struct MutableStructDictHolder: ...
+fn write_struct_dict_holder(self: MutableStructDictHolder, key: text, next: i32) -> DictWriteResult:
+    self.values[key] = next
+    DictWriteResult.Success
+```
+
+The helper takes the struct **by value** and writes through it; the caller's
+`var holder = MutableStructDictHolder(values: {})` is unaffected. The spec's
+subject is *`self.field` assignment semantics*, so a helper that silently drops
+its own field assignment is self-refuting: it returns
+`DictWriteResult.Success` unconditionally, which is a success signal
+independent of whether the write happened. Present in both mirror trees.
+
+### What this means for gating family 3
+
+The rule is sound; the two token-level patterns are not. Before `VTM001`/
+`VTM002` can be promoted from census to gate, both need tightening — index
+assign must be base-anchored, and mutator tokens must not fire on a returned
+expression. With those two fixes the corpus yield is 2 findings, both real,
+which is a gateable signal. Without them it is 33 findings at 6% precision,
+which is not.
 
 ### Why the driver run is slow — an O(n²) index, recorded not worked around
 
