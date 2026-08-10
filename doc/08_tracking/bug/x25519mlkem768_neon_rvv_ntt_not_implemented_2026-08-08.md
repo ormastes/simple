@@ -23,3 +23,14 @@ is not execution proof.  The required completion work is:
 4. Run each lane on physical AArch64 and RISC-V hosts before promotion.
 
 No configuration-only or synthetic measurement can close this issue.
+
+## Re-verification (2026-08-10)
+
+Confirmed unchanged: `mlkem_ntt_simd_batch` in `src/lib/nogc_sync_mut/simd.spl`
+still gates on `has_avx2()` only (lines 791, 829); no NEON or RVV butterfly
+path exists. This Linux dev host is `x86_64` (`uname -m`), so it has neither
+AArch64 NEON nor RISC-V V hardware to implement or test against — the
+completion checklist (byte-identical NEON/RVV kernels, VLEN-aware chunk
+counts, same-fixture scalar-vs-vector tests, physical-host runs before
+promotion) is unchanged and remains genuinely out of scope for this
+environment. No fix attempted; status remains OPEN/fail-closed as filed.
