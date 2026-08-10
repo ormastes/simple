@@ -1,7 +1,7 @@
 # `rt_*` extern ABI divergence across the three runtime implementations
 
 **Date:** 2026-08-10
-**Status:** 1 FIXED (`rt_file_is_char_device`), 19 RED (filed here)
+**Status:** RESOLVED -- all 19 rows fixed. Class-2 (4) fixed in `52c6089581c`/`3997bffde05`/`1abc0c9d7a7`; Class-1 (15 symbols / 21 baseline rows) fixed 2026-08-10, see "Resolution" at the end. `scripts/check/extern_abi_signature_baseline.txt` is now EMPTY.
 **Parent:** `doc/08_tracking/bug/rt_file_is_char_device_dejit_and_dual_abi_2026-08-10.md`
 
 ## What was fixed
@@ -159,3 +159,84 @@ Note also that the seed's own `libsimple_runtime.so` link does **not** use
 muldefs — it hard-errored `duplicate symbol: rt_file_is_char_device` the moment
 the Rust definition landed. The stale prebuilt `libruntime_sffi_c.a` in
 `target/release` was masking that; a clean build would have caught this one.
+
+
+## Resolution (2026-08-10) -- Class 1 closed, baseline empty
+
+All 15 Class-1 symbols were converted to the `(ptr, len)` ABI in the **C
+runtime** (the layer that was out of step; the Simple and Rust layers already
+agreed). Each was reproduced first, against the real translation units, by
+calling the definition through the ABI the compiler actually emits with a
+**non-NUL-terminated** buffer -- the layout of any `text` produced by slicing or
+concatenation -- and re-verified afterwards in every C link order, since
+`-z muldefs` makes link order decide which definition wins.
+
+Not one proved benign. Representative before/after:
+
+| symbol | before (non-NUL-terminated path) | after |
+|---|---|---|
+| `rt_file_exists` | 0 | 1 |
+| `rt_dir_exists` | 0 | 1 |
+| `rt_file_is_regular_no_follow` | 0 | 1 |
+| `rt_file_size` | -1 | 3 |
+| `rt_file_stat` | 0 | 1755993622 |
+| `rt_file_read_text` | `[]` len=0 | file content |
+| `rt_file_fsync` / `_cached` | 0 | 1 |
+| `rt_file_copy` / `rt_file_move` | 0, no file produced | 1, file produced |
+| `rt_dir_walk` | 0 entries | 2150 entries |
+| `rt_dir_create` | 0, nothing created | 1, tree created |
+| `rt_dir_create_all` | **1, and created `.../zXXXXXXXX...` on disk** | 1, correct path |
+| `rt_dir_remove_all` | -256 (not even a bool) | 1 |
+| `rt_panic` | `PANIC: assertion failed: x > 0XXXXXX...` | `PANIC: assertion failed: x > 0` |
+
+`rt_dir_create_all` is the one to remember: it returned **success** while
+creating a directory whose name carried 64 bytes of trailing heap garbage. The
+`-1` / `0` / empty-string results elsewhere are the reason the class stayed
+silent for so long -- every one of them is also a legitimate "file not found"
+answer, so no caller could tell an ABI defect from a missing file.
+
+### Corrections to this document
+
+* The C-internal caller counts above ("rt_dir_create 4, rt_dir_walk 3") do not
+  survive contact with the source. Actual counts, audited per symbol:
+  `rt_dir_create` 1 real + 5 in `platform/test_*.h`; `rt_dir_remove_all` 1 real
+  (`rt_dir_delete`) + 4 test; `rt_dir_create_all` 1 (`rt_mkdir_p`);
+  `rt_dir_exists` 1; `rt_file_fsync` 2. `rt_dir_walk` has **none**.
+  Where a caller passes a genuine C string, the body was kept as a
+  `*_cpath` worker and the `rt_*` entry point became a thin converting wrapper.
+* `rt_mkdir_p` was listed as a row but has **no `RuntimeFuncSpec`** -- the
+  compiler never calls it. It keeps its C-string signature over the shared
+  worker, and it was never in the baseline.
+
+### Two gaps in the gate, found while closing this
+
+1. **Header definitions are invisible.** The gate parses only
+   `src/runtime/*.c` at depth 1. `rt_dir_create` and `rt_dir_remove_all` are
+   defined in `src/runtime/platform/unix_common.h` and
+   `platform/platform_win.h`, pulled into `runtime.c`'s translation unit by
+   `#include "platform/platform.h"`. The gate never saw those definitions.
+2. **Arity-only comparison misses same-arity defects.** `rt_file_sync` (in
+   BOTH `runtime.c` and `runtime_legacy_core.c`) already had arity 2 and was
+   never flagged -- but it did `(void)path_len;` and used the pointer as a C
+   string, the identical defect. Both copies were fixed here. A parameter-TYPE
+   check would catch that class; a RETURN-type check would catch
+   `rt_file_read_text`, which still returns `char*` where the compiler declares
+   `I64` (a RuntimeValue) -- an open, separate divergence.
+
+### Verification
+
+* Freshly rebuilt `src/compiler_rust/target/release/simple` (`cargo build
+  --release`, 3m22s, no errors). A stale prebuilt `libruntime_sffi_c.a` is what
+  masked this class originally, so nothing prebuilt was trusted.
+* `nm` on that binary: **exactly one** definition of each of the 15 symbols
+  survives -- the release lane links only the Rust SFFI, confirming the C copies
+  serve the AOT/native lanes and must be proven at the C level, which is what the
+  reproduction harness does.
+* Simple-level probe over slice- and concatenation-built paths agrees in the
+  JIT/native and interpreter lanes.
+* `sh scripts/check/check-extern-abi-signatures.shs` ->
+  `PASS -- 470 symbols checked, 0 baselined, 0 new`.
+
+`-z muldefs` was deliberately left in place: removing it is the multi-day
+re-layering described above, and it is not what made this class silent -- the
+missing gate was.
