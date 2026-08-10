@@ -164,7 +164,7 @@ interpreter's. A successful build with empty output is a FAIL. It carries:
 | nested call in interpolation | `print "I={f(f(1))}"` | `I=3` | `I=3` | **(nothing), rc=0 — SILENT** |
 | several placeholders in one literal | `print "J={f()}-{g()}-{f()}"` | `J=5-z-5` | `J=5-z-5` | **(nothing), rc=0 — SILENT** |
 | method call in interpolation | `print "K={c.get()}"` | `K=4` | `K=3` (see sibling 2) | **(nothing), rc=0 — SILENT** |
-| statement whose value is unused | `side()` calling a fn that prints | `SIDE` `L-END` | `SIDE` `L-END` | build UNFINISHED at report time — NOT claimed either way |
+| statement whose value is unused | `side()` calling a fn that prints | `SIDE` `L-END` | `SIDE` `L-END` | `SIDEL-END` — **not dropped** |
 
 `println` shares the defect exactly — it emits its newline and nothing else, so
 it is the same silent drop. `eprint` is a different, LOUD divergence: it
@@ -177,9 +177,13 @@ identically. Concat (`"F=" + f().to_text()`) and a `val`-bound interpolated
 literal are the only two shapes that survive, which is exactly what the
 argument-position root cause predicts.
 
-The one row NOT measured is the unused-value statement (`side()` whose callee
-prints). Its native build had not finished when this was written; it is
-recorded as unfinished rather than assumed passing.
+The unused-value-statement row answers the other half of the family question
+and answers it NEGATIVELY: a statement whose value is discarded is **not**
+dropped in native lowering, and neither is a nested call. So this is not a
+general "native silently drops things" problem. The drop is specific and
+bounded: an interpolated string literal in direct call-argument position, via
+the placeholder-lambda desugar's argument walk. Every row in the table is
+consistent with that single cause and with nothing broader.
 
 ## Siblings found by the family sweep — both OPEN
 
