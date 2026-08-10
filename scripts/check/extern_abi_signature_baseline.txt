@@ -26,40 +26,60 @@
 # file. The 33 rows below were triaged into three groups. Nothing is excluded;
 # everything the gate found is listed, with what is known about it.
 #
-# GROUP A -- compiler declares a result, the definition returns `void`
-# (rt_array_set, rt_channel_send, rt_file_close x2, rt_invlpg, rt_write_cr3)
-# plus the inverse rt_exit. AUDITED PER SYMBOL 2026-08-10; the group does NOT
-# have one direction, it has three, which is why it was never safe to batch:
+# GROUP A -- CLOSED 2026-08-10 (Q35). All 7 rows removed; each fix has an
+# execution proof against the real translation units in all three C link orders
+# (probe: compiler-emitted ABI, X-padded non-NUL-terminated buffer,
+# rt_string_new("hello") as positive control, prior-commit build as revert-proof).
 #
-#   * rt_array_set, rt_channel_send -- FIX THE C DEFINITION. The canonical Rust
-#     definitions already AGREE with the compiler: collections.rs:778 returns
-#     `bool`, channels.rs:103 returns `i64`. Only the runtime_native.c copies
-#     return void, so they are the layer out of step, exactly like the Class-1
-#     rows. No Simple caller currently reads either result, which bounds the
-#     blast radius but does not make it correct.
+#   * rt_array_set -- FIXED in runtime_native.c (void -> int8_t, 1 on write,
+#     0 on null array or out-of-range index). CORRECTION to the previous note
+#     here: it claimed "the canonical Rust definition already agrees,
+#     collections.rs:778 returns bool". There is NO `extern "C"` Rust
+#     definition of rt_array_set at all -- that line is an interpreter
+#     Value-level helper, not a C-ABI symbol. The agreeing third
+#     implementation is src/runtime/simple_core/core_array.spl:182, which
+#     already returned i8. Measured before: an IN-RANGE store returned 42, an
+#     OUT-OF-RANGE store returned 3, a negative index returned 5 -- leftover
+#     argument registers, so a FAILED store reported success. After: 1 / 0 / 1,
+#     identical in all three link orders.
 #
-#   * rt_invlpg, rt_write_cr3 -- FIX THE COMPILER DECLARATION. These are the
-#     opposite case: there is NO Rust counterpart, the C definitions return
-#     void, and every Simple declaration agrees (src/os/kernel/arch/x86_64/cpu.spl
-#     :61,63, x86_32/cpu.spl:58,59, boot/cpu.spl:54 all declare no result) and
-#     every caller discards. runtime_sffi.rs:707-708 declaring `-> &[I64]` is
-#     the anomaly; nothing anywhere produces that value. Correct fix is
-#     `&[I64] -> &[]`, not inventing a return in the kernel's invlpg/cr3 writes.
+#   * rt_channel_send -- FIXED in runtime_native.c, both copies (void ->
+#     int64_t, 1 queued / 0 dropped). Same correction: channels.rs:103 is not
+#     an extern "C" definition either. There IS a live consumer:
+#     src/compiler_rust/lib/std/src/async/sffi/channel.spl:7 declares
+#     `-> bool`. Measured before: a SUCCESSFUL send returned 0 and a send
+#     AFTER CLOSE returned 1 -- the answer was not merely garbage, it was
+#     inverted. After: 1 / 0 / 0, identical in all three link orders.
 #
-#   * rt_file_close -- REAL, AND THE ONLY ONE WITH A LIVE CONSUMER. Compiler
-#     declares `&[I32] -> &[I8]` (fd -> bool), BOTH definitions return void
-#     (descriptor.rs:98, runtime_native.c:8819), and a Simple caller reads it:
-#     src/compiler_rust/lib/std/src/infra/file_io.spl:439
-#     `val success = rt_file_close(fd)`. That `success` is an uninitialised
-#     return register. The three Simple declarations do not even agree with each
-#     other (file/__init__.spl:31 `-> void`, infra/file_io.spl:435 `-> bool`,
-#     context_manager.spl:10 no result). Fix the DEFINITIONS to return bool.
+#   * rt_invlpg, rt_write_cr3 -- FIXED in runtime_sffi.rs:707-708,
+#     `&[I64] -> &[]`, as the previous note prescribed. Nothing anywhere
+#     produced that value.
 #
-#   * rt_exit -- BENIGN, and a gate artifact. env_process.rs:166 is
-#     `fn rt_exit(code: i32) -> !`; `!` is the never type, not a value, so no
-#     return register is ever written OR read -- the function does not return.
-#     The gate's Rust return extractor reads `-> !` as a value class (`int`).
-#     Leave baselined; the gate should learn `!` rather than the code change.
+#   * rt_file_close -- FIXED, and the return value turned out to be the
+#     smaller half of it. The two definitions did not merely disagree on the
+#     return: they disagreed on the PARAMETER. descriptor.rs:98 took an fd
+#     (i32, matching the compiler); runtime_native.c:8819 took a stdio FILE*.
+#     Same arity, so no arity gate could ever have seen it, and under
+#     -z muldefs the C copy won -- `rt_file_close(3)` called fclose((FILE*)3).
+#     Measured: SIGSEGV on every call in all three link orders, at the prior
+#     commit. That C copy is the twin of the fopen() helper a previous commit
+#     had already renamed to rt_file_open_stream; it is now
+#     rt_file_close_stream, leaving the fd-based definition unopposed (0
+#     definitions of rt_file_close remain in the C bundle, verified by nm in
+#     all three orders).
+#     The return: descriptor.rs now returns close(2)'s real status as i8
+#     rather than dropping a File and discarding it, because
+#     src/compiler_rust/lib/std/src/infra/file_io.spl:439 reads it and close()
+#     is where deferred write-back errors (ENOSPC, EIO, EDQUOT) surface -- a
+#     close whose failure is invisible loses data silently. Fixing the caller
+#     to stop reading the value would have removed the only place that error
+#     could ever have been noticed. The three Simple declarations now agree on
+#     `-> bool`.
+#
+#   * rt_exit -- FIXED IN THE GATE, not in the code, exactly as the previous
+#     note prescribed. rust_ret_class now maps `-> !` to a "never" class that
+#     the comparator skips: the never type is not a value, so no return
+#     register is written or read and there is nothing to compare.
 #
 # GROUP B1 -- CLOSED 2026-08-10. All 8 symbols resolved, each with its own
 # reproduction against the real translation units in all three C link orders:
@@ -120,20 +140,13 @@ rt_array_copy	ret:int	ret:ptr	runtime_native.c
 rt_array_new	ret:int	ret:ptr	runtime_native.c
 rt_array_new_with_cap_u64	ret:int	ret:ptr	runtime_native.c
 rt_array_repeat	ret:int	ret:ptr	runtime_native.c
-rt_array_set	ret:int	ret:void	runtime_native.c
 rt_byte_array_new_len	ret:int	ret:ptr	runtime_native.c
 rt_byte_array_new	ret:int	ret:ptr	runtime_native.c
-rt_channel_send	ret:int	ret:void	runtime_native.c
 rt_cli_get_args	ret:int	ret:ptr	runtime.c
 rt_cli_get_args	ret:int	ret:ptr	runtime_native.c
 rt_coverage_dump_sdn	ret:int	ret:ptr	runtime_coverage_core.c
-rt_exit	ret:void	ret:int	env_process.rs
-rt_file_close	ret:int	ret:void	descriptor.rs
-rt_file_close	ret:int	ret:void	runtime_native.c
 rt_get_args	ret:int	ret:ptr	runtime_native.c
 rt_host_gpu_queue_last_payload_text	ret:int	ret:ptr	runtime_native.c
-rt_invlpg	ret:int	ret:void	runtime_native.c
 rt_process_spawn	ret:int	ret:ptr	runtime_native.c
 rt_string_data	ret:int	ret:ptr	runtime_native.c
 rt_value_to_ptr	ret:int	ret:ptr	memory.rs
-rt_write_cr3	ret:int	ret:void	runtime_native.c
