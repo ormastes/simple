@@ -29,26 +29,6 @@ fn bootstrap_runtime_bundle_is_removed(bundle: text) -> bool:
     bundle == "hosted" or bundle == "rust-hosted" or bundle == "rust_hosted" or
     bundle == "hosted-runtime" or bundle == "rust-runtime" or bundle == "all"
 
-fn bootstrap_policy_action(args: [text], i: i64) -> text:
-    if i >= args.len():
-        return ""
-    # Keep indexed text values at their array owner. Flat Stage3 MIR can lose
-    # a text handle copied through a local aggregate slot under closure load.
-    if args[i] == "--help" or args[i] == "-h" or args[i] == "--list-optimizations":
-        return args[i]
-    if args[i] == "--runtime-bundle" and i + 1 < args.len():
-        if bootstrap_runtime_bundle_is_removed(args[i + 1]):
-            return args[i + 1]
-        return bootstrap_policy_action(args, i + 2)
-    if args[i].starts_with("--runtime-bundle="):
-        val bundle = args[i].substring(17)
-        if bootstrap_runtime_bundle_is_removed(bundle):
-            return bundle
-    bootstrap_policy_action(args, i + 1)
-
-fn bootstrap_mode(args: [text]) -> text:
-    focused_native_build_arg_value(args, "--mode")
-
 fn bootstrap_output(args: [text], entry_path: text) -> text:
     var output = focused_native_build_arg_value(args, "--output")
     if output == "":
@@ -92,13 +72,15 @@ fn run_bootstrap_single_file(args: [text], entry_path: text) -> i64:
     1
 
 pub fn run_bootstrap_native_build_dispatch(args: [text]) -> i64:
-    val policy = bootstrap_policy_action(args, 0)
-    if policy == "--help" or policy == "-h" or policy == "--list-optimizations":
+    if (focused_native_build_has_flag(args, "--help") or
+        focused_native_build_has_flag(args, "-h") or
+        focused_native_build_has_flag(args, "--list-optimizations")):
         return rt_bootstrap_native_build(args)
-    if policy != "":
-        print "Error: runtime bundle '{policy}' was removed; use simple-core or core-c-bootstrap"
+    val runtime_bundle = focused_native_build_arg_value(args, "--runtime-bundle")
+    if bootstrap_runtime_bundle_is_removed(runtime_bundle):
+        print "Error: runtime bundle '{runtime_bundle}' was removed; use simple-core or core-c-bootstrap"
         return 1
-    val mode = bootstrap_mode(args)
+    val mode = focused_native_build_arg_value(args, "--mode")
     if mode != "" and mode != "dynload" and mode != "one-binary":
         print "Error: invalid --mode '{mode}' (expected dynload or one-binary)"
         return 1
