@@ -415,6 +415,23 @@ crash — there are no exception frames. `serial_has_production_fault` classifie
 `content-provenance-rejected` as a production fault, which is what turns it into
 `guest-render-fault`.
 
+The retained post-blur run on 2026-08-10 narrows that empty receipt to the
+material producer, before the WM validator. Its bounded diagnostic is:
+
+```text
+[web-style-producer] entry-rejected ... bg=3424591649 gf=4294967295 gt=4294967295 layers_len=0 backdrop_len=25 animation=none
+```
+
+The canonical Aetheric backdrop is the 25-byte
+`blur(30px) saturate(170%)`. Two producer defects are covered in current source
+after that run: the earlier `184aded7e3f` change parses nested
+commas/parentheses in `rgba(...)` gradient stops at their real gradient depth;
+the follow-up backdrop change uses an exact byte grammar and overflow-bounded
+decimal parser instead of freestanding-unsafe text predicate, split/slice, and
+numeric-conversion runtime calls. These changes have focused host tests, but
+are **not live-QEMU evidence**; the status remains failed until a newly admitted
+kernel emits a 64-hex material receipt and `content-presented`.
+
 **QMP input delivery on the x86_64 WM lane has never been proven.** Input
 injection is the branch immediately after readiness, and the run has never reached
 it. Any claim that x86_64 WM input works is unsupported today.

@@ -40,6 +40,53 @@ fn _simple_web_backdrop_rejected() -> SimpleWebBackdropAdmission:
     SimpleWebBackdropAdmission(
         admitted: false, realized_blur_px: 0, realized_saturation_milli: 0)
 
+struct SimpleWebBackdropDecimal:
+    admitted: bool
+    value: i64
+    next: i32
+
+fn _simple_web_backdrop_bytes_match(
+    input: [u8], offset: i32, literal: text
+) -> bool:
+    val expected = literal.bytes()
+    if offset < 0 or offset + expected.len() > input.len():
+        return false
+    var i = 0
+    while i < expected.len():
+        if input[offset + i] != expected[i]:
+            return false
+        i = i + 1
+    true
+
+# Parse one non-empty ASCII decimal at `start` without text predicates,
+# slicing, splitting, or numeric-conversion runtime calls. The caller supplies
+# the semantic ceiling, which also makes multiply/add overflow-proof: once
+# `value > (maximum - digit) / 10`, the token is rejected before arithmetic.
+fn _simple_web_backdrop_decimal_at(
+    input: [u8], start: i32, maximum: i64
+) -> SimpleWebBackdropDecimal:
+    if start < 0 or start >= input.len():
+        return SimpleWebBackdropDecimal(admitted: false, value: 0, next: start)
+    var value: i64 = 0
+    var i = start
+    while i < input.len():
+        val byte = input[i] as i64
+        if byte < 48 or byte > 57:
+            break
+        val digit = byte - 48
+        if value > (maximum - digit) / 10:
+            return SimpleWebBackdropDecimal(
+                admitted: false, value: 0, next: i)
+        value = value * 10 + digit
+        i = i + 1
+    # Preserve one canonical decimal spelling. This keeps receipts stable and
+    # rejects aliases such as `030` that the former reconstruction check also
+    # refused.
+    if i - start > 1 and input[start] == 48:
+        return SimpleWebBackdropDecimal(admitted: false, value: 0, next: i)
+    SimpleWebBackdropDecimal(
+        admitted: i > start, value: value, next: i)
+
 # `blur(Npx)` alone is legitimate CSS (`saturate(...)` is not required
 # alongside `backdrop-filter: blur(...)`) — this admits that single-term
 # form, defaulting realized saturation to 100% (no-op), in addition to the
@@ -51,44 +98,39 @@ fn _simple_web_backdrop_rejected() -> SimpleWebBackdropAdmission:
 # unconditionally rejected, making the canonical WM content-frame wrapper
 # unreachable end to end regardless of caller content.
 fn simple_web_backdrop_admission(backdrop: text) -> SimpleWebBackdropAdmission:
-    val terms = backdrop.split(" ")
-    if terms.len() == 1:
-        val blur_term = terms[0]
-        if not blur_term.starts_with("blur(") or not blur_term.ends_with("px)"):
-            return _simple_web_backdrop_rejected()
-        val blur_text = blur_term.slice(5, blur_term.len() - 3)
-        val blur = blur_text.to_i64()
-        if blur == nil or blur < 0 or blur > 1000000:
-            return _simple_web_backdrop_rejected()
-        if backdrop != "blur({blur}px)":
-            return _simple_web_backdrop_rejected()
+    # Keep the receipt parser entirely byte-indexed. The x86_64 freestanding
+    # WM has already shown boolean text predicates returning the wrong value at
+    # this call depth; admission must not depend on that ABI edge.
+    val input = backdrop.bytes()
+    if not _simple_web_backdrop_bytes_match(input, 0, "blur("):
+        return _simple_web_backdrop_rejected()
+    val blur_decimal = _simple_web_backdrop_decimal_at(input, 5, 1000000)
+    if not blur_decimal.admitted:
+        return _simple_web_backdrop_rejected()
+    val after_blur = blur_decimal.next
+    if not _simple_web_backdrop_bytes_match(input, after_blur, "px)"):
+        return _simple_web_backdrop_rejected()
+    val next_term = after_blur + 3
+    if next_term == input.len():
         return SimpleWebBackdropAdmission(
             admitted: true,
-            realized_blur_px: if blur > 4: 4 else: blur,
+            realized_blur_px: if blur_decimal.value > 4: 4 else: blur_decimal.value,
             realized_saturation_milli: 1000)
-    if terms.len() != 2:
+    if not _simple_web_backdrop_bytes_match(input, next_term, " saturate("):
         return _simple_web_backdrop_rejected()
-    val blur_term = terms[0]
-    val saturation_term = terms[1]
-    if not blur_term.starts_with("blur(") or not blur_term.ends_with("px)"):
+    val saturation_start = next_term + 10
+    val saturation_decimal = _simple_web_backdrop_decimal_at(
+        input, saturation_start, 300)
+    if not saturation_decimal.admitted:
         return _simple_web_backdrop_rejected()
-    if (not saturation_term.starts_with("saturate(") or
-        not saturation_term.ends_with("%)")):
-        return _simple_web_backdrop_rejected()
-    val blur_text = blur_term.slice(5, blur_term.len() - 3)
-    val saturation_text = saturation_term.slice(9, saturation_term.len() - 2)
-    val blur = blur_text.to_i64()
-    val saturation_percent = saturation_text.to_i64()
-    if (blur == nil or saturation_percent == nil or blur < 0 or
-        blur > 1000000 or saturation_percent < 0 or
-        saturation_percent > 300):
-        return _simple_web_backdrop_rejected()
-    if backdrop != "blur({blur}px) saturate({saturation_percent}%)":
+    if (not _simple_web_backdrop_bytes_match(
+            input, saturation_decimal.next, "%)") or
+        saturation_decimal.next + 2 != input.len()):
         return _simple_web_backdrop_rejected()
     SimpleWebBackdropAdmission(
         admitted: true,
-        realized_blur_px: if blur > 4: 4 else: blur,
-        realized_saturation_milli: saturation_percent * 10)
+        realized_blur_px: if blur_decimal.value > 4: 4 else: blur_decimal.value,
+        realized_saturation_milli: saturation_decimal.value * 10)
 
 # Default wall-clock budget for one software render, in milliseconds. Sized
 # for AOT/JIT-compiled execution. Under `bin/simple run` (tree-walking
