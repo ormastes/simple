@@ -49,6 +49,9 @@ impl std::fmt::Debug for RuntimeValue {
         if self.is_float() {
             return write!(f, "RuntimeValue::Float({})", self.as_float());
         }
+        if let Some(value) = self.as_heap_u64() {
+            return write!(f, "RuntimeValue::UInt({value})");
+        }
         match self.tag() {
             tags::TAG_INT => write!(f, "RuntimeValue::Int({})", self.as_int()),
             tags::TAG_FLOAT => write!(f, "RuntimeValue::Float({})", self.as_float()),
@@ -76,6 +79,15 @@ impl PartialEq for RuntimeValue {
         if self.is_float() || other.is_float() {
             return self.is_float() && other.is_float() && self.as_float() == other.as_float();
         }
+        if let Some(left) = self.as_heap_u64() {
+            return other.as_heap_u64().map_or_else(
+                || other.is_int() && left as i64 == other.as_int(),
+                |right| left == right,
+            );
+        }
+        if let Some(right) = other.as_heap_u64() {
+            return self.is_int() && self.as_int() == right as i64;
+        }
         self.0 == other.0
     }
 }
@@ -95,6 +107,8 @@ impl std::hash::Hash for RuntimeValue {
                 d = 0.0;
             }
             d.to_bits().hash(state);
+        } else if let Some(value) = self.as_heap_u64() {
+            RuntimeValue::from_int(value as i64).to_raw().hash(state);
         } else {
             self.0.hash(state);
         }
@@ -114,6 +128,12 @@ impl Ord for RuntimeValue {
         // tag-then-payload ordering below.
         if self.is_float() && other.is_float() {
             return self.as_float().total_cmp(&other.as_float());
+        }
+        match (self.as_heap_u64(), other.as_heap_u64()) {
+            (Some(left), Some(right)) => return left.cmp(&right),
+            (Some(left), None) if other.is_int() => return (left as i64).cmp(&other.as_int()),
+            (None, Some(right)) if self.is_int() => return self.as_int().cmp(&(right as i64)),
+            _ => {}
         }
         // Order by tag first, then by payload
         // This provides a total ordering for BTreeMap/BTreeSet
@@ -284,6 +304,34 @@ impl RuntimeValue {
         f64::from_bits(self.payload() << 3)
     }
 
+    /// Box a u64 losslessly for an erased RuntimeValue slot. All u64 values,
+    /// including 0..=7, use the heap form so payload bits cannot alias tags.
+    #[inline]
+    pub fn from_u64(value: u64) -> Self {
+        let size = std::mem::size_of::<super::heap::HeapUInt>();
+        let Ok(layout) = std::alloc::Layout::from_size_align(size, 8) else {
+            return Self::NIL;
+        };
+        unsafe {
+            let ptr = std::alloc::alloc(layout) as *mut super::heap::HeapUInt;
+            if ptr.is_null() {
+                return Self::NIL;
+            }
+            (*ptr).header = HeapHeader::new(HeapObjectType::UInt, size as u32);
+            (*ptr).value = value;
+            super::collections::track_transient_heap(Self::from_heap_ptr(ptr as *mut HeapHeader))
+        }
+    }
+
+    #[inline]
+    pub fn as_heap_u64(self) -> Option<u64> {
+        if matches!(self.heap_type(), Some(HeapObjectType::UInt)) {
+            Some(unsafe { (*(self.as_heap_ptr() as *const super::heap::HeapUInt)).value })
+        } else {
+            None
+        }
+    }
+
     // =========================================================================
     // Boolean operations
     // =========================================================================
@@ -400,6 +448,9 @@ impl RuntimeValue {
         if self.is_float() {
             return self.as_float() != 0.0;
         }
+        if let Some(value) = self.as_heap_u64() {
+            return value != 0;
+        }
         match self.tag() {
             tags::TAG_INT => self.as_int() != 0,
             tags::TAG_FLOAT => self.as_float() != 0.0,
@@ -500,6 +551,7 @@ impl RuntimeValue {
                 // Unreachable in practice: the early `is_float()` guard above
                 // handles heap-boxed floats before this match.
                 Some(HeapObjectType::Float) => "float",
+                Some(HeapObjectType::UInt) => "int",
                 None => "null",
             },
             _ => "unknown",
@@ -556,6 +608,7 @@ impl RuntimeValue {
                 // Unreachable in practice: the early `is_float()` guard above
                 // handles heap-boxed floats before this match.
                 Some(HeapObjectType::Float) => ValueKind::Float,
+                Some(HeapObjectType::UInt) => ValueKind::Int,
                 None => ValueKind::Nil,
             },
             _ => ValueKind::Nil,

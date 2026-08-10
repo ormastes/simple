@@ -88,6 +88,19 @@ static void* transient_scope_worker(void* unused) {
 }
 
 int main(void) {
+    const uint64_t u64_boundaries[] = {0, 1, 2, 3, 4, 5, 6, 7,
+        UINT64_C(0x1fffffffffffffff), UINT64_C(0x2000000000000000),
+        UINT64_C(0x8000000000000000), UINT64_MAX};
+    for (size_t i = 0; i < sizeof(u64_boundaries) / sizeof(u64_boundaries[0]); i++) {
+        int64_t boxed = rt_value_u64((int64_t)u64_boundaries[i]);
+        int64_t equal_box = rt_value_u64((int64_t)u64_boundaries[i]);
+        int64_t wrapped = rt_enum_new(77, 1, boxed);
+        assert((uint64_t)rt_value_as_u64(rt_enum_payload(wrapped)) == u64_boundaries[i]);
+        assert(rt_native_eq(boxed, equal_box) == 1);
+    }
+    assert(rt_native_eq(rt_value_u64(-1), rt_value_int(-1)) == 1);
+    assert(rt_value_as_int(rt_value_int(-1)) == -1);
+
     int stdout_pipe[2];
     assert(pipe(stdout_pipe) == 0);
     int saved_stdout = dup(STDOUT_FILENO);

@@ -182,7 +182,10 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                                     | TypeId::U64
                             )
                         {
-                            names.insert("rt_value_as_int".to_string());
+                            names.insert(
+                                if *to_ty == TypeId::U64 { "rt_value_as_u64" } else { "rt_value_as_int" }
+                                    .to_string(),
+                            );
                         }
                     }
                     MirInst::Yield { .. } => {
@@ -561,6 +564,7 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_enum_discriminant"
             | "rt_enum_id"
             | "rt_enum_payload"
+            | "rt_value_as_u64"
             | "rt_string_eq"
             // P0 fix (2026-07-22): rt_text_cmp_any backs the codegen/instr/core.rs
             // vreg_is_text fast path for BinOp::Lt/Gt/LtEq/GtEq (mirrors rt_string_eq

@@ -89,6 +89,9 @@ fn value_hash_inner(v: RuntimeValue, depth: u32) -> u64 {
         }
         return fnv1a_bits(d.to_bits());
     }
+    if let Some(value) = v.as_heap_u64() {
+        return fnv1a_bits(RuntimeValue::from_int(value as i64).to_raw());
+    }
     if v.tag() != tags::TAG_HEAP {
         return fnv1a_bits(v.to_raw());
     }
@@ -179,6 +182,14 @@ fn value_eq_inner(a: RuntimeValue, b: RuntimeValue, visited: &mut Vec<(usize, us
     if a.is_float() || b.is_float() {
         return a.is_float() && b.is_float() && a.as_float() == b.as_float();
     }
+    if let Some(left) = a.as_heap_u64() {
+        return b
+            .as_heap_u64()
+            .map_or_else(|| b.is_int() && left as i64 == b.as_int(), |right| left == right);
+    }
+    if let Some(right) = b.as_heap_u64() {
+        return a.is_int() && a.as_int() == right as i64;
+    }
 
     match (a.tag(), b.tag()) {
         (tags::TAG_INT, tags::TAG_INT) => a.as_int() == b.as_int(),
@@ -200,6 +211,7 @@ fn heap_value_eq(a: RuntimeValue, b: RuntimeValue, visited: &mut Vec<(usize, usi
             };
             unsafe { (*sa).as_bytes() == (*sb).as_bytes() }
         }
+        (Some(HeapObjectType::UInt), Some(HeapObjectType::UInt)) => a.as_heap_u64() == b.as_heap_u64(),
         (Some(HeapObjectType::Enum), Some(HeapObjectType::Enum)) => {
             let Some(ea) = get_typed_ptr::<RuntimeEnum>(a, HeapObjectType::Enum) else {
                 return false;
@@ -387,7 +399,8 @@ unsafe fn array_eq_contents(
 }
 
 fn generic_int_eq(value: RuntimeValue, expected: i64) -> bool {
-    value.is_int() && value.as_int() == expected
+    (value.is_int() && value.as_int() == expected)
+        || value.as_heap_u64().is_some_and(|actual| actual == expected as u64)
 }
 
 fn value_compare(a: RuntimeValue, b: RuntimeValue) -> i64 {
@@ -410,6 +423,15 @@ fn value_compare(a: RuntimeValue, b: RuntimeValue) -> i64 {
             return compare_f64(a.as_int() as f64, b.as_float());
         }
         // Float vs non-numeric heap/special: fall through to tag ordering.
+    }
+
+    match (a.as_heap_u64(), b.as_heap_u64()) {
+        (Some(left), Some(right)) => return compare_u64(left, right),
+        (Some(_), None) if b.is_int() && b.as_int() < 0 => return 1,
+        (Some(left), None) if b.is_int() => return compare_u64(left, b.as_int() as u64),
+        (None, Some(_)) if a.is_int() && a.as_int() < 0 => return -1,
+        (None, Some(right)) if a.is_int() => return compare_u64(a.as_int() as u64, right),
+        _ => {}
     }
 
     match (a.tag(), b.tag()) {

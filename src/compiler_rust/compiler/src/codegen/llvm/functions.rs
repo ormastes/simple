@@ -1324,7 +1324,7 @@ impl LlvmBackend {
             MirInst::PatternBind { dest, subject, binding } => {
                 let i64_type = self.runtime_int_type();
                 let subject_val = self.get_vreg_val(subject, vreg_map, i64_type);
-                let result = if binding.path.is_empty() {
+                let mut result = if binding.path.is_empty() {
                     subject_val
                 } else {
                     // Apply binding path steps
@@ -1364,6 +1364,18 @@ impl LlvmBackend {
                     }
                     current
                 };
+                if vreg_types.get(dest).copied() == Some(crate::hir::TypeId::U64) {
+                    let raw_fn = module.get_function("rt_value_as_u64").unwrap_or_else(|| {
+                        let fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                        module.add_function("rt_value_as_u64", fn_type, None)
+                    });
+                    result = builder
+                        .build_call(raw_fn, &[result.into()], "u64_payload")
+                        .map_err(|e| CompileError::Semantic(format!("u64 payload call: {e}")))?
+                        .try_as_basic_value()
+                        .left()
+                        .unwrap_or(result);
+                }
                 vreg_map.insert(*dest, result);
             }
 

@@ -121,6 +121,9 @@ pub(crate) fn compile_pattern_bind<M: Module>(
             BindingStep::FieldName(_) => current,
         };
     }
+    if ctx.vreg_types.get(&dest) == Some(&crate::hir::TypeId::U64) {
+        current = call_runtime_1(ctx, builder, "rt_value_as_u64", current);
+    }
     ctx.vreg_values.insert(dest, current);
 }
 

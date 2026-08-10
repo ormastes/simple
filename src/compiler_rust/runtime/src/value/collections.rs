@@ -150,6 +150,14 @@ pub(crate) fn clear_collection_provider_cache() {}
 
 #[inline]
 fn compare_runtime_values(a: &RuntimeValue, b: &RuntimeValue) -> Ordering {
+    match (a.as_heap_u64(), b.as_heap_u64()) {
+        (Some(left), Some(right)) => return left.cmp(&right),
+        (Some(_), None) if b.is_int() && b.as_int() < 0 => return Ordering::Greater,
+        (Some(left), None) if b.is_int() => return left.cmp(&(b.as_int() as u64)),
+        (None, Some(_)) if a.is_int() && a.as_int() < 0 => return Ordering::Less,
+        (None, Some(right)) if a.is_int() => return (a.as_int() as u64).cmp(&right),
+        _ => {}
+    }
     match (a.is_int(), b.is_int(), a.is_float(), b.is_float()) {
         (true, true, _, _) => a.as_int().cmp(&b.as_int()),
         (_, _, true, true) => a.as_float().partial_cmp(&b.as_float()).unwrap_or(Ordering::Equal),
@@ -1658,7 +1666,13 @@ fn free_transient_heap(value: RuntimeValue) {
         Some(HeapObjectType::Array) => rt_array_free(value),
         Some(HeapObjectType::Tuple) => rt_tuple_free(value),
         Some(HeapObjectType::Dict) => super::dict::rt_dict_free(value),
-        Some(HeapObjectType::Object | HeapObjectType::Closure | HeapObjectType::Enum | HeapObjectType::Float) => unsafe {
+        Some(
+            HeapObjectType::Object
+            | HeapObjectType::Closure
+            | HeapObjectType::Enum
+            | HeapObjectType::Float
+            | HeapObjectType::UInt,
+        ) => unsafe {
             let ptr = value.as_heap_ptr();
             let size = (*ptr).size as usize;
             if let Ok(layout) = std::alloc::Layout::from_size_align(size, 8) {
@@ -3868,6 +3882,9 @@ pub extern "C" fn rt_array_all_truthy(array: RuntimeValue) -> i64 {
             if item.is_int() && item.as_int() == 0 {
                 return 0;
             }
+            if item.as_heap_u64() == Some(0) {
+                return 0;
+            }
             if item.is_float() && item.as_float() == 0.0 {
                 return 0;
             }
@@ -3898,6 +3915,9 @@ pub extern "C" fn rt_array_any_truthy(array: RuntimeValue) -> i64 {
                 continue;
             }
             if item.is_int() && item.as_int() == 0 {
+                continue;
+            }
+            if item.as_heap_u64() == Some(0) {
                 continue;
             }
             if item.is_float() && item.as_float() == 0.0 {
