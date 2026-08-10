@@ -1,0 +1,129 @@
+# AOP reverse dependency tables (design §16.4).
+#
+# Four tables over today's real inputs:
+#   1. selector (WeavingRule stand-in for a pointcut) -> candidate partitions read
+#   2. descriptor field -> selectors whose read-set uses that field
+#   3. target entity -> selected advice (ordered)
+#   4. advice interface (advice_function) -> targets referencing it
+#
+# Selector read-set: there is no query IR (plan §2b), so the read-set is
+# derived by substring scan of predicate_text for the five real
+# JoinPointContext field names. A predicate that names NONE of them is given
+# the FULL read-set — conservative: it can only over-invalidate.
+# Prerequisite for a precise read-set: the normalized pointcut query IR.
+
+use compiler.mdsoc.weaving.weaving_rule.{WeavingRule}
+use compiler.mdsoc.aop_cache.aop_group_keys.{aop_selector_digest}
+
+val AOP_DESCRIPTOR_FIELDS: [text] = ["function_name", "module_path", "signature", "attributes", "effects"]
+
+struct AopSelectorReadSet:
+    selector_id: text          # aop_selector_digest(predicate_text)
+    fields: [text]             # subset of AOP_DESCRIPTOR_FIELDS
+    conservative: bool         # true when the full set was assumed
+
+struct AopSelectorPartitions:
+    selector_id: text
+    partition_key_digests: [text]
+
+struct AopTargetSelection:
+    target_entity: text        # module_path::function_name
+    ordered_advice: [text]     # advice_function names, weave order (semantic)
+
+struct AopAdviceTargets:
+    advice_function: text
+    target_entities: [text]
+
+struct AopReverseIndex:
+    selector_partitions: [AopSelectorPartitions]     # table 1
+    selector_read_sets: [AopSelectorReadSet]         # table 2 (inverted on query)
+    target_selections: [AopTargetSelection]          # table 3
+    advice_targets: [AopAdviceTargets]               # table 4
+
+fn aop_selector_read_set(rule: WeavingRule) -> AopSelectorReadSet:
+    var fields: [text] = []
+    for f in AOP_DESCRIPTOR_FIELDS:
+        if rule.predicate_text.contains(f):
+            fields.push(f)
+    if fields.len() == 0:
+        # Opaque predicate — assume it can read everything (over-invalidate).
+        return AopSelectorReadSet(
+            selector_id: aop_selector_digest(rule.predicate_text),
+            fields: AOP_DESCRIPTOR_FIELDS,
+            conservative: true)
+    AopSelectorReadSet(
+        selector_id: aop_selector_digest(rule.predicate_text),
+        fields: fields,
+        conservative: false)
+
+# Table 2 query: which selectors must be reevaluated when `field` changes
+# on some candidate descriptor.
+fn aop_selectors_reading_field(index: AopReverseIndex, field: text) -> [text]:
+    var out: [text] = []
+    for rs in index.selector_read_sets:
+        var reads = false
+        for f in rs.fields:
+            if f == field:
+                reads = true
+        if reads:
+            out.push(rs.selector_id)
+    out
+
+# Table 1 query.
+fn aop_partitions_of_selector(index: AopReverseIndex, selector_id: text) -> [text]:
+    for sp in index.selector_partitions:
+        if sp.selector_id == selector_id:
+            return sp.partition_key_digests
+    []
+
+# Table 3 query.
+fn aop_selection_of_target(index: AopReverseIndex, target_entity: text) -> [text]:
+    for ts in index.target_selections:
+        if ts.target_entity == target_entity:
+            return ts.ordered_advice
+    []
+
+# Table 4 query.
+fn aop_targets_of_advice(index: AopReverseIndex, advice_function: text) -> [text]:
+    for at in index.advice_targets:
+        if at.advice_function == advice_function:
+            return at.target_entities
+    []
+
+# Build all four tables from rules + their partition reads + per-target
+# ordered selections. selections drive both table 3 and (inverted) table 4.
+fn aop_reverse_index_build(rules: [WeavingRule], rule_partitions: [[text]], selections: [AopTargetSelection]) -> AopReverseIndex:
+    var sel_parts: [AopSelectorPartitions] = []
+    var read_sets: [AopSelectorReadSet] = []
+    var i = 0
+    while i < rules.len():
+        val sid = aop_selector_digest(rules[i].predicate_text)
+        sel_parts.push(AopSelectorPartitions(selector_id: sid, partition_key_digests: rule_partitions[i]))
+        read_sets.push(aop_selector_read_set(rules[i]))
+        i = i + 1
+    # Invert selections into advice -> targets.
+    var advice_names: [text] = []
+    for ts in selections:
+        for a in ts.ordered_advice:
+            var seen = false
+            for n in advice_names:
+                if n == a:
+                    seen = true
+            if not seen:
+                advice_names.push(a)
+    var advice_targets: [AopAdviceTargets] = []
+    for name in advice_names:
+        var targets: [text] = []
+        for ts in selections:
+            var uses = false
+            for a in ts.ordered_advice:
+                if a == name:
+                    uses = true
+            if uses:
+                targets.push(ts.target_entity)
+        advice_targets.push(AopAdviceTargets(advice_function: name, target_entities: targets))
+    AopReverseIndex(
+        selector_partitions: sel_parts,
+        selector_read_sets: read_sets,
+        target_selections: selections,
+        advice_targets: advice_targets)

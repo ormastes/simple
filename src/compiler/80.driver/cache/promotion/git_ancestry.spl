@@ -1,0 +1,125 @@
+# Git ancestry / freshness check — design §15.1:
+#
+#   git fetch --prune origin main
+#   git merge-base --is-ancestor "$BUILD_COMMIT" refs/remotes/origin/main
+#
+# The design is explicit that a developer-controlled STALE local origin/main
+# reference is NOT a trust proof — the freshness of the fetched snapshot is
+# part of the proof, not just the reachability bit. So this module records
+# and checks three things together: the fetched remote identity, the fetch
+# time (for staleness), and the reachability result — never reachability
+# alone.
+#
+# The actual `git` invocation is behind an injectable `GitAncestryOracle`
+# trait so unit tests never depend on real repo state (contract requirement:
+# tests must use a local fake). A thin real-process implementation is
+# provided for production wiring, but nothing in this agent's scope calls it
+# from a write path — read-only lookups and the eligibility gate are the
+# only consumers in this milestone.
+
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_process_run(cmd: text, args: [text]) -> ProcessRunResult
+
+struct ProcessRunResult:
+    exit_code: i64
+    stdout: text
+    stderr: text
+
+# A snapshot of the trusted `origin/main` ref at the moment it was fetched,
+# plus whether the given commit is reachable from it. `fetched_at_unix_micros`
+# is what makes staleness checkable — see `snapshot_is_fresh`.
+struct MainSnapshot:
+    remote_url: text
+    repository_id: text
+    ref_name: text          # e.g. "refs/remotes/origin/main"
+    tip_commit: text
+    fetched_at_unix_micros: i64
+    fetch_authenticated: bool  # the fetch itself was over an authenticated transport
+
+# Injectable oracle. Real implementations shell to `git`; test fakes return
+# canned data — no repo state, no network, no timing flakiness.
+trait GitAncestryOracle:
+    fn fetch_main_snapshot() -> MainSnapshot
+    fn is_ancestor(commit: text, snapshot: MainSnapshot) -> bool
+
+# A snapshot older than this is never trusted as fresh, regardless of the
+# reachability bit — this is the concrete expression of "staleness is not a
+# trust proof". 5 minutes is deliberately tight: promotion is a CI-time
+# operation, not a long-lived developer cache.
+val MAIN_SNAPSHOT_MAX_AGE_MICROS: i64 = 5 * 60 * 1000000
+
+fn snapshot_is_fresh(snapshot: MainSnapshot, now_unix_micros: i64) -> bool:
+    if not snapshot.fetch_authenticated:
+        return false
+    val age = now_unix_micros - snapshot.fetched_at_unix_micros
+    if age < 0:
+        return false
+    age <= MAIN_SNAPSHOT_MAX_AGE_MICROS
+
+# Full reachability decision: fetch, check freshness, check ancestry. Any
+# single failure yields `not reachable` — this function never claims
+# reachability off a stale or unauthenticated snapshot even if the ancestry
+# bit alone would say yes.
+struct AncestryCheckResult:
+    reachable: bool
+    snapshot: MainSnapshot
+    snapshot_fresh: bool
+    reason: text
+
+fn check_commit_reachable_from_main(oracle: GitAncestryOracle, commit: text, now_unix_micros: i64) -> AncestryCheckResult:
+    val snapshot = oracle.fetch_main_snapshot()
+    val fresh = snapshot_is_fresh(snapshot, now_unix_micros)
+    if not fresh:
+        return AncestryCheckResult(
+            reachable: false,
+            snapshot: snapshot,
+            snapshot_fresh: false,
+            reason: "origin/main snapshot is stale or unauthenticated"
+        )
+    val is_anc = oracle.is_ancestor(commit, snapshot)
+    if not is_anc:
+        return AncestryCheckResult(
+            reachable: false,
+            snapshot: snapshot,
+            snapshot_fresh: true,
+            reason: "commit is not an ancestor of the trusted origin/main snapshot"
+        )
+    AncestryCheckResult(
+        reachable: true,
+        snapshot: snapshot,
+        snapshot_fresh: true,
+        reason: "ok"
+    )
+
+# ============================================================================
+# Real (non-test) oracle — shells to git. Never invoked from this agent's
+# code in this milestone; provided so production wiring has a concrete
+# implementation to plug into `check_commit_reachable_from_main` later.
+# ============================================================================
+
+struct RealGitAncestryOracle:
+    repo_dir: text
+    remote_url: text
+    repository_id: text
+
+impl GitAncestryOracle for RealGitAncestryOracle:
+    fn fetch_main_snapshot() -> MainSnapshot:
+        rt_process_run("git", ["-C", self.repo_dir, "fetch", "--prune", "origin", "main"])
+        val tip = rt_process_run("git", ["-C", self.repo_dir, "rev-parse", "refs/remotes/origin/main"])
+        val ok = tip.exit_code == 0
+        MainSnapshot(
+            remote_url: self.remote_url,
+            repository_id: self.repository_id,
+            ref_name: "refs/remotes/origin/main",
+            tip_commit: if ok: tip.stdout.trim() else: "",
+            fetched_at_unix_micros: rt_time_now_unix_micros(),
+            fetch_authenticated: ok
+        )
+
+    fn is_ancestor(commit: text, snapshot: MainSnapshot) -> bool:
+        val result = rt_process_run("git", ["-C", self.repo_dir, "merge-base", "--is-ancestor", commit, snapshot.ref_name])
+        result.exit_code == 0
+
+export MainSnapshot, GitAncestryOracle, AncestryCheckResult, RealGitAncestryOracle
+export MAIN_SNAPSHOT_MAX_AGE_MICROS
+export snapshot_is_fresh, check_commit_reachable_from_main
