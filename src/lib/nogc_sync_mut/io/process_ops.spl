@@ -5,6 +5,7 @@ use std.nogc_sync_mut.io.process_governor (proc_slot_acquire, proc_slot_release)
 
 # Extern fn declarations (runtime resolves at file level)
 
+extern fn rt_stderr_write(s: text)
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_process_run_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64)
 extern fn rt_env_get(key: text) -> text
@@ -544,8 +545,15 @@ fn process_kill(pid: i64) -> bool:
     rt_process_kill(pid)
 
 # ============================================================================
-# Eprint (stderr simulation)
+# Eprint (real stderr, fd 2)
 # ============================================================================
 
+# This function SHADOWS the `eprint` builtin for every module that imports this
+# one, directly or transitively (interpreter_call/mod.rs Priority-1 `has_local_def`
+# escape hatch). It used to be `print "[STDERR] {msg}"`, which sent every
+# diagnostic in the self-hosted compiler to fd 1 with a cosmetic text prefix --
+# `prog > out.txt 2> err.log` put the errors in out.txt and left err.log empty.
+# It must write the real fd 2. Do NOT reintroduce a `print` fallback here.
+# See doc/08_tracking/bug/eprint_in_io_runtime_module_is_rerouted_to_stdout_2026-08-10.md
 fn eprint(msg: text):
-    print "[STDERR] {msg}"
+    rt_stderr_write("{msg}\n")
