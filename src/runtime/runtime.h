@@ -280,6 +280,9 @@ int64_t  rt_value_as_int(int64_t value);
  * instead of being silently truncated (ABI contract §1.1). */
 int64_t  rt_value_int_wide(int64_t value);
 int64_t  rt_value_as_int_wide(int64_t value);
+/* Total tag-aware UnboxInt decode emitted by Cranelift codegen (wide box ->
+ * value, TAG_INT -> >>3, tagged bool -> 1/0, anything else verbatim). */
+int64_t  rt_value_unbox_int(int64_t value);
 int64_t  rt_value_float(int64_t raw_bits);
 double   rt_value_as_float(int64_t value);
 int8_t   rt_value_is_float(int64_t value);

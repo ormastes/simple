@@ -697,6 +697,8 @@ pub use value::{
     rt_value_nil,
     rt_value_to_ptr,
     rt_value_truthy,
+    // Tag-aware UnboxInt decode used by compiled code (wide-int aware)
+    rt_value_unbox_int,
     // Wait operation
     rt_wait,
     // Weak pointer operations

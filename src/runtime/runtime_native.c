@@ -2147,6 +2147,27 @@ int64_t rt_value_as_int_wide(int64_t value) {
     return value >> 3;
 }
 
+/* Total, tag-aware `UnboxInt` decode for compiled code -- the C twin of the Rust
+ * seed's rt_value_unbox_int (runtime/src/value/sffi/value_ops.rs), emitted by the
+ * Cranelift UnboxInt lowering:
+ *
+ *   heap-boxed WIDE int -> its full i64 value;
+ *   TAG_INT scalar      -> value >> 3;
+ *   tagged true/false   -> 1 / 0;
+ *   anything else       -> passed through VERBATIM, so a heap enum/string handle
+ *                          is not >>3-mangled (Task #123).
+ *
+ * Safe on ANY input, including a raw untagged i64 -- that totality is what lets
+ * codegen replace an inline select chain with a single call. */
+int64_t rt_value_unbox_int(int64_t value) {
+    RtCoreWideInt* n = rt_core_as_heap_int(value);
+    if (n) return n->value;
+    if ((((uint64_t)value) & RT_VALUE_TAG_MASK) == RT_VALUE_TAG_INT) return value >> 3;
+    if (value == 11) return 1;  /* TAG_SPECIAL | SPECIAL_TRUE  */
+    if (value == 19) return 0;  /* TAG_SPECIAL | SPECIAL_FALSE */
+    return value;
+}
+
 int64_t rt_value_as_int(int64_t value) {
     /* TEXT reaching an integer cast must be DECODED, not bit-shifted.
      *

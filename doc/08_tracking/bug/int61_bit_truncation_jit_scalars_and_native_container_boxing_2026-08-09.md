@@ -1,8 +1,10 @@
 # Integers needing 61+ bits are corrupted: JIT everywhere, native inside containers
 
-Status: **Defect B (container boxing) FIXED in source — T2+T3 landed 2026-08-09,
-awaiting a bootstrap redeploy for the native-lane re-measurement.
-Defect A (JIT scalars) OPEN — Rust-seed scope, see "Root cause" below.**
+Status: **RESOLVED 2026-08-09 — both defects.** Defect B (container boxing)
+fixed in the C runtime + pure-Simple MIR lowering (`fa518a9148c`), awaiting a
+bootstrap redeploy for the native-lane re-measurement. Defect A (JIT scalars)
+FIXED in the Rust seed (Cranelift codegen + Rust runtime `RuntimeValue`) —
+see "Fix (Defect A)" at the end of this file.
 Found 2026-08-09 by the multi-engine differential harness
 (`scripts/check/check_engine_differential.spl`) on its first run.
 Binary under test: `bin/release/x86_64-unknown-linux-gnu/simple`, sha256
@@ -210,3 +212,87 @@ which this session's environment constraints exclude. No further action
 taken; Defect A remains correctly characterized as Rust-seed-scope OPEN,
 Defect B remains FIXED-in-source pending redeploy, exactly as already stated
 above.
+
+## Fix (Defect A) — 2026-08-09, Cranelift JIT + Rust seed runtime
+
+The earlier note above guessed the site was in `src/compiler/70.backend/`. It is
+not: **the JIT links the RUST runtime**
+(`src/compiler_rust/runtime/src/value/`), not `src/runtime/*.c`, so Defect B's
+C-side `rt_value_int_wide` could not be "reused" — the Rust twin did not exist.
+The fix therefore has two halves.
+
+### 1. Rust runtime — lossless wide-int box (twin of the C `rt_value_int_wide`)
+
+- `value/heap.rs`: new `HeapObjectType::WideInt = 0x1D` + `HeapWideInt { header,
+  value: i64 }` — same shape, registration and lifecycle as `HeapFloat`.
+- `value/core.rs`: `RuntimeValue::from_int` range-checks (`int_fits_tagged`,
+  `[-2^60, 2^60)`), keeping the **bit-identical `i << 3`** immediate in range and
+  heap-boxing only what does not fit; `as_int` decodes a wide box. `is_int()` is
+  deliberately UNCHANGED (172 call sites use it as a tag-shape/handle test).
+- Value-identity follow-through, mirroring exactly what heap-boxed floats
+  already needed: display (`io_print.rs`), `type_name`/`value_kind`, `Debug`,
+  `rt_value_eq`/`rt_value_compare` compare wide ints **by value** not by
+  pointer, and `free_transient_heap` frees the new leaf.
+- `value/sffi/value_ops.rs`: new `rt_value_unbox_int` — a **total** tag-aware
+  decode (wide box -> value; `TAG_INT` -> `>>3`; tagged true/false -> 1/0;
+  anything else verbatim). Totality on any input, including a raw untagged i64,
+  is what lets codegen replace an inline select chain with one call.
+  C twin added in `src/runtime/runtime_native.c` + `runtime.h` for the
+  Cranelift-AOT link.
+
+### 2. Cranelift codegen — stop inlining the unchecked shift
+
+Both live Cranelift paths (`codegen/instr/mod.rs` `compile_instruction`, and the
+`CraneliftEmitter` in `codegen/cranelift_emitter.rs`) inlined `ishl 3` for
+`BoxInt` and a `select` chain for `UnboxInt`, bypassing any runtime range check:
+
+- `BoxInt` now calls `rt_value_int` (exactly mirroring how `BoxFloat` already
+  called `rt_value_float`). The ANY/TypeId>=16 heap-handle passthrough guard and
+  the i8/i16/i32/f32/f64 normalization are unchanged.
+- `UnboxInt` now calls `rt_value_unbox_int`. This is required, not optional: a
+  wide box carries `TAG_HEAP` and the old passthrough arm would have returned a
+  raw pointer.
+- `rt_value_unbox_int` registered in `codegen/runtime_sffi.rs` and as a codegen
+  root in `common_backend.rs` (BoxInt/UnboxInt are synthesized by codegen, never
+  as MIR call nodes, so a missing root = "unresolved external symbol" + silent
+  whole-module drop to the interpreter).
+
+Cost: one call per Box/UnboxInt where there was an inline shift. Correctness
+first; if this shows up in a JIT profile the fast path can be re-inlined behind
+a range-check branch with the call kept as the slow block.
+
+### Evidence
+
+`DIFF_FILTER=i64 DIFF_LANES=interpret,jit`, same fixture, same harness:
+
+| | before (`166c622b30c2257c`) | after (`a4e1e5eb9bf4f88a`) |
+|---|---|---|
+| `i64_boundary_values` | **DIVERGENCE (NEW)** | **AGREE** |
+| jit `p60` | -1152921504606846976 | 1152921504606846976 |
+| jit `p62` | 0 | 4611686018427387904 |
+| jit `imax` | -1 | 9223372036854775807 |
+| jit `inegmax` | 1 | -9223372036854775807 |
+| jit `boxed_*` | corrupt | all correct |
+
+Full harness, both lanes, 11 fixtures: **10 AGREE, 0 NEW divergences** (the one
+remaining divergence is the pre-existing baselined `utf8_slice_boundary`).
+
+Unchanged-behaviour probe (below the cutoff and around it): `2^59`, `2^59 - 1`,
+`-2^59`, `-42`, list elements, `bool` — identical on both lanes before and
+after. (`opt = <value:0x7>` on the JIT is a SEPARATE pre-existing Option/`??`
+defect, present identically on the old binary.)
+
+Test coverage run: `cargo test --release -p simple-runtime` (1117 pass) and
+`-p simple-compiler --lib -- codegen::` (934 pass). The failures in both suites
+(8 and 5 respectively — dict/`is_nil`, VHDL `UnboxInt` unsupported,
+`rt_dir_exists` duplicate spec, `mir_inline` "no entry found for key") were
+**verified pre-existing at HEAD** by re-running them against the HEAD sources.
+
+### Not done / follow-ups
+
+- The **native (LLVM AOT)** lane's `UnboxInt` is in
+  `codegen/llvm/functions.rs`, deliberately out of scope for this change (a
+  concurrent lane owns that file). Defect B's native container fix already
+  landed via the C runtime; the LLVM `BoxInt`/`UnboxInt` inline shift should get
+  the same `rt_value_int`/`rt_value_unbox_int` treatment for full parity.
+- The Cranelift fast path is a call, not an inlined range-check branch.

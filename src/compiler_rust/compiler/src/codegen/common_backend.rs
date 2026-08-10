@@ -607,6 +607,12 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             // See doc/08_tracking/bug/jit_in_operator_unboxed_needle_2026-08-01.md.
             | "rt_value_int"
             | "rt_value_float"
+            // int61 truncation fix (2026-08-09): BoxInt/UnboxInt are emitted by
+            // codegen itself, never as MIR call nodes, so both the boxer
+            // (rt_value_int, above) and the decoder must be codegen roots or the
+            // JIT reports "unresolved external symbol" and drops the whole
+            // module to the interpreter.
+            | "rt_value_unbox_int"
     )
 }
 

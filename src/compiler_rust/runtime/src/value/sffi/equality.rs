@@ -217,6 +217,15 @@ fn value_eq_inner(a: RuntimeValue, b: RuntimeValue, visited: &mut Vec<(usize, us
         return a.is_float() && b.is_float() && a.as_float() == b.as_float();
     }
 
+    // Heap-boxed WIDE integers (|v| >= 2^60, see RuntimeValue::from_int) compare
+    // by VALUE for exactly the same reason floats do: two boxes holding the same
+    // i64 are distinct pointers.
+    if a.is_wide_int() || b.is_wide_int() {
+        let a_num = a.is_wide_int() || a.is_int();
+        let b_num = b.is_wide_int() || b.is_int();
+        return a_num && b_num && a.as_int() == b.as_int();
+    }
+
     match (a.tag(), b.tag()) {
         (tags::TAG_INT, tags::TAG_INT) => a.as_int() == b.as_int(),
         (tags::TAG_FLOAT, tags::TAG_FLOAT) => a.as_float() == b.as_float(),
@@ -447,6 +456,20 @@ fn value_compare(a: RuntimeValue, b: RuntimeValue) -> i64 {
             return compare_f64(a.as_int() as f64, b.as_float());
         }
         // Float vs non-numeric heap/special: fall through to tag ordering.
+    }
+
+    // Heap-boxed wide integers order by VALUE, not by pointer (mirror of the
+    // float-by-value block above).
+    if a.is_wide_int() || b.is_wide_int() {
+        if (a.is_wide_int() || a.is_int()) && (b.is_wide_int() || b.is_int()) {
+            return compare_i64(a.as_int(), b.as_int());
+        }
+        if a.is_wide_int() && b.is_float() {
+            return compare_f64(a.as_int() as f64, b.as_float());
+        }
+        if a.is_float() && b.is_wide_int() {
+            return compare_f64(a.as_float(), b.as_int() as f64);
+        }
     }
 
     match (a.tag(), b.tag()) {

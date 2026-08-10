@@ -1428,8 +1428,14 @@ pub fn compile_instruction<M: Module>(
                 let promoted = builder.ins().fpromote(types::F64, val);
                 val = builder.ins().bitcast(types::I64, MemFlags::new(), promoted);
             }
-            let three = builder.ins().iconst(types::I64, 3);
-            let boxed = builder.ins().ishl(val, three);
+            // int61 truncation (2026-08-09): the old inline `val << 3` had NO
+            // range check, so any |v| >= 2^60 sign-extended back to a DIFFERENT
+            // number (2^60 flipped sign, i64::MAX read as -1, 2^62 as 0).
+            // rt_value_int keeps the bit-identical `v << 3` immediate for
+            // everything that fits the 61-bit payload and heap-boxes only what
+            // does not, so in-range behaviour is unchanged. Mirrors BoxFloat.
+            // doc/08_tracking/bug/int61_bit_truncation_jit_scalars_and_native_container_boxing_2026-08-09.md
+            let boxed = helpers::call_runtime_1(ctx, builder, "rt_value_int", val);
             ctx.vreg_values.insert(*dest, boxed);
         }
 
@@ -1469,18 +1475,14 @@ pub fn compile_instruction<M: Module>(
                 builder.ins().iconst(types::I64, 0)
             });
             let three = builder.ins().iconst(types::I64, 3);
-            let seven = builder.ins().iconst(types::I64, 7);
-            let tag = builder.ins().band(val, seven);
-            let is_int = builder.ins().icmp_imm(IntCC::Equal, tag, 0);
-            let shifted = builder.ins().sshr(val, three);
-            let is_true = builder.ins().icmp_imm(IntCC::Equal, val, 11);
-            let is_false = builder.ins().icmp_imm(IntCC::Equal, val, 19);
-            let is_bool = builder.ins().bor(is_true, is_false);
-            let zero = builder.ins().iconst(types::I64, 0);
-            let one = builder.ins().iconst(types::I64, 1);
-            let raw_bool = builder.ins().select(is_true, one, zero);
-            let int_or_value = builder.ins().select(is_int, shifted, val);
-            let unboxed = builder.ins().select(is_bool, raw_bool, int_or_value);
+            // int61 truncation (2026-08-09): the inline select chain cannot
+            // decode a heap-boxed WIDE int (BoxInt now routes |v| >= 2^60 through
+            // rt_value_int) — a wide box carries TAG_HEAP and would take the
+            // passthrough arm, yielding a raw pointer. rt_value_unbox_int
+            // implements the identical decision table (wide box -> value,
+            // TAG_INT -> >>3, tagged true/false -> 1/0, everything else verbatim)
+            // and is total on any input, including a raw untagged i64.
+            let unboxed = helpers::call_runtime_1(ctx, builder, "rt_value_unbox_int", val);
             ctx.vreg_values.insert(*dest, unboxed);
         }
 

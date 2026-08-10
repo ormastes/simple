@@ -474,6 +474,8 @@ fn heap_value_to_display_string(v: RuntimeValue) -> String {
         return format!("<invalid-heap:0x{:x}>", v.to_raw());
     };
     match object_type {
+        // Heap-boxed wide integer: display as the integer it is, not a pointer.
+        HeapObjectType::WideInt => v.as_int().to_string(),
         HeapObjectType::String => {
             let Some(s) = get_typed_ptr::<RuntimeString>(v, HeapObjectType::String) else {
                 return format!("<invalid-heap:0x{:x}>", v.to_raw());

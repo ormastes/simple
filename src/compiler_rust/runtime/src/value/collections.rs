@@ -1772,7 +1772,13 @@ fn free_transient_heap(value: RuntimeValue) {
         Some(HeapObjectType::Array) => rt_array_free(value),
         Some(HeapObjectType::Tuple) => rt_tuple_free(value),
         Some(HeapObjectType::Dict) => super::dict::rt_dict_free(value),
-        Some(HeapObjectType::Object | HeapObjectType::Closure | HeapObjectType::Enum | HeapObjectType::Float) => unsafe {
+        Some(
+            HeapObjectType::Object
+            | HeapObjectType::Closure
+            | HeapObjectType::Enum
+            | HeapObjectType::Float
+            | HeapObjectType::WideInt,
+        ) => unsafe {
             let ptr = value.as_heap_ptr();
             let size = (*ptr).size as usize;
             if let Ok(layout) = std::alloc::Layout::from_size_align(size, 8) {

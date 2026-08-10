@@ -727,8 +727,16 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
             let promoted = self.builder.ins().fpromote(types::F64, val);
             val = self.builder.ins().bitcast(types::I64, MemFlags::new(), promoted);
         }
-        let three = self.builder.ins().iconst(types::I64, 3);
-        let boxed = self.builder.ins().ishl(val, three);
+        // int61 truncation (DEFECT A, 2026-08-09): the old inline `val << 3` had
+        // NO range check, so any |v| >= 2^60 silently sign-extended back to a
+        // DIFFERENT number (2^60 flipped sign, i64::MAX read as -1, 2^62 as 0) —
+        // nanosecond timestamps, FNV/xxHash seeds and i64::MAX sentinels are all
+        // in range of that. rt_value_int keeps the bit-identical `v << 3`
+        // immediate for everything that fits the 61-bit payload and heap-boxes
+        // only what does not, so in-range behaviour is unchanged.
+        // Mirrors emit_box_float's rt_value_float call exactly.
+        let boxed =
+            super::instr::helpers::call_runtime_1(self.ctx, self.builder, "rt_value_int", val);
         self.ctx.vreg_values.insert(dest, boxed);
         Ok(())
     }
@@ -768,15 +776,18 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
             .get(&value)
             .copied()
             .unwrap_or_else(|| self.builder.ins().iconst(types::I64, 0));
-        let three = self.builder.ins().iconst(types::I64, 3);
-        let seven = self.builder.ins().iconst(types::I64, 7);
-        let tag = self.builder.ins().band(val, seven);
-        let is_int = self
-            .builder
-            .ins()
-            .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, tag, 0);
-        let shifted = self.builder.ins().sshr(val, three);
-        let unboxed = self.builder.ins().select(is_int, shifted, val);
+        // int61 truncation (2026-08-09): the inline `select` cannot decode a
+        // heap-boxed WIDE int (emit_box_int now boxes |v| >= 2^60 through
+        // rt_value_int) — a wide box carries TAG_HEAP and would take the
+        // passthrough arm, yielding a raw pointer. rt_value_unbox_int implements
+        // exactly the same three-way decision plus the wide-int case, and is
+        // total on any input including a raw untagged i64.
+        let unboxed = super::instr::helpers::call_runtime_1(
+            self.ctx,
+            self.builder,
+            "rt_value_unbox_int",
+            val,
+        );
         self.ctx.vreg_values.insert(dest, unboxed);
         Ok(())
     }

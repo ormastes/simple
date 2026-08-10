@@ -549,6 +549,10 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_value_bool", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_value_nil", &[], &[I64]),
     RuntimeFuncSpec::new("rt_value_as_int", &[I64], &[I64]),
+    // Tag-aware UnboxInt decode: wide-int box -> value, TAG_INT -> >>3,
+    // anything else passes through verbatim. Emitted by Cranelift
+    // `emit_unbox_int` (int61 truncation fix, 2026-08-09).
+    RuntimeFuncSpec::new("rt_value_unbox_int", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_value_as_float", &[I64], &[F64]),
     RuntimeFuncSpec::new("rt_value_raw_i64", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_raw_u64_to_string", &[I64], &[I64]),

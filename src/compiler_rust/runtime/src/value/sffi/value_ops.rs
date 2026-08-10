@@ -64,6 +64,38 @@ pub extern "C" fn rt_value_as_int(v: RuntimeValue) -> i64 {
     }
     v.as_int()
 }
+/// Total, tag-aware `UnboxInt` decode for compiled code (the exact semantics the
+/// Cranelift `emit_unbox_int` used to inline, plus wide-int support):
+///
+/// - heap-boxed WIDE int (see `RuntimeValue::from_int`) -> its full i64 value;
+/// - tagged native scalar (TAG_INT, low 3 bits 0)        -> `v >> 3`;
+/// - anything else (heap pointer, float, special)        -> passed through
+///   VERBATIM, so `.unwrap()`/dict-get on a heap-enum Option is not `>> 3`
+///   mangled (Task #123).
+///
+/// It is safe on ANY input, including a raw untagged i64, which is what lets the
+/// JIT replace an inline `select` with a single call.
+/// Bug: doc/08_tracking/bug/int61_bit_truncation_jit_scalars_and_native_container_boxing_2026-08-09.md
+#[no_mangle]
+pub extern "C" fn rt_value_unbox_int(v: RuntimeValue) -> i64 {
+    if v.is_wide_int() {
+        return v.as_int();
+    }
+    if v.tag() == tags::TAG_INT {
+        return (v.to_raw() as i64) >> 3;
+    }
+    // Tagged booleans decode to 0/1 (the raw 11/19 immediates the inlined form
+    // special-cased: TAG_SPECIAL with payload SPECIAL_TRUE / SPECIAL_FALSE).
+    if v.tag() == tags::TAG_SPECIAL {
+        if v.payload() == tags::SPECIAL_TRUE {
+            return 1;
+        }
+        if v.payload() == tags::SPECIAL_FALSE {
+            return 0;
+        }
+    }
+    v.to_raw() as i64
+}
 #[no_mangle]
 pub extern "C" fn rt_value_as_float(v: RuntimeValue) -> f64 {
     v.as_float()
