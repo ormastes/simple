@@ -1,0 +1,69 @@
+use std.spec.{describe, it, expect}
+use app.io.mod.{file_read_text}
+use os.port.qrb2210_evdev_primitive_provider.{
+    Qrb2210EvdevKernelIdentity,
+    Qrb2210EvdevKernelReceipt,
+    qrb2210_evdev_identity_ready,
+    qrb2210_evdev_kernel_receipt_correlates
+}
+use os.port.qrb2210_native_2d_ports.{
+    Qrb2210BoardDeviceHandle,
+    Qrb2210InputDeviceReceipt,
+    QRB2210_DEVICE_INPUT,
+    QRB2210_INPUT_MOVE
+}
+
+val PROVIDER = "src/os/port/qrb2210_evdev_primitive_provider.spl"
+
+fn device(boot: text, generation: i64) -> Qrb2210BoardDeviceHandle:
+    Qrb2210BoardDeviceHandle(
+        board_id: "qrb2210-uno-q", boot_id: boot, owner: QRB2210_DEVICE_INPUT,
+        device_node: "/dev/input/event0", native_handle: 41u64,
+        driver_generation: generation)
+
+fn identity() -> Qrb2210EvdevKernelIdentity:
+    Qrb2210EvdevKernelIdentity(
+        device: device("boot-21", 7), irq_line: 33,
+        event_ring_handle: 92u64, physical_device: true)
+
+fn receipt(irq_sequence: i64, event_sequence: i64) -> Qrb2210EvdevKernelReceipt:
+    Qrb2210EvdevKernelReceipt(
+        event: Qrb2210InputDeviceReceipt(
+            device: device("boot-21", 7), sequence: event_sequence,
+            kind: QRB2210_INPUT_MOVE, x: 12, y: 34, button: 0, wheel: 0,
+            evdev_code: 0, ch: "", down: false,
+            left_ctrl: false, right_ctrl: false,
+            left_alt: false, right_alt: false),
+        irq_sequence: irq_sequence, interrupt_timestamp_ns: 9001u64,
+        event_ring_handle: 92u64, driver_generation: 7)
+
+describe "QRB2210 physical evdev primitive provider":
+    it "requires a physical kernel input identity":
+        expect(qrb2210_evdev_identity_ready(identity())).to_be(true)
+        var no_irq = identity()
+        no_irq.irq_line = 0
+        expect(qrb2210_evdev_identity_ready(no_irq)).to_be(false)
+        var hosted = identity()
+        hosted.physical_device = false
+        expect(qrb2210_evdev_identity_ready(hosted)).to_be(false)
+
+    it "accepts only fresh correlated interrupt receipts":
+        val bound = identity()
+        expect(qrb2210_evdev_kernel_receipt_correlates(bound, receipt(8, 12), 7, 11)).to_be(true)
+        expect(qrb2210_evdev_kernel_receipt_correlates(bound, receipt(7, 12), 7, 11)).to_be(false)
+        expect(qrb2210_evdev_kernel_receipt_correlates(bound, receipt(8, 11), 7, 11)).to_be(false)
+        var wrong_ring = receipt(8, 12)
+        wrong_ring.event_ring_handle = 93u64
+        expect(qrb2210_evdev_kernel_receipt_correlates(bound, wrong_ring, 7, 11)).to_be(false)
+        var stale_boot = receipt(8, 12)
+        stale_boot.event.device.boot_id = "boot-20"
+        expect(qrb2210_evdev_kernel_receipt_correlates(bound, stale_boot, 7, 11)).to_be(false)
+
+    it "has no hosted input or synthetic-event fallback":
+        val source = file_read_text(PROVIDER)
+        expect(source).to_contain("kernel.poll_interrupt_receipt()")
+        expect(source).to_contain("UNO_Q_DESKTOP_STATUS_PORT_UNAVAILABLE")
+        expect(source.contains("rt_process")).to_be(false)
+        expect(source.contains("virtio")).to_be(false)
+        expect(source.contains("android")).to_be(false)
+        expect(source.contains("synthetic")).to_be(false)
