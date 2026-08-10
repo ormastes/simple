@@ -22,6 +22,7 @@ use os.port.qrb2210_native_2d_ports.{
 
 val QRB2210_DRM_FORMAT_XRGB8888: text = "xrgb8888"
 val QRB2210_DRM_CAPTURE_SOURCE: text = "qrb2210-drm-kms-scanout"
+val QRB2210_DRM_PRIMARY_DEVICE_NODE: text = "/dev/dri/card0"
 
 class Qrb2210DrmKmsPhysicalBinding:
     device: Qrb2210BoardDeviceHandle
@@ -97,7 +98,7 @@ fn _qrb2210_drm_same_device(
 
 fn qrb2210_drm_kms_binding_ready(binding: Qrb2210DrmKmsPhysicalBinding) -> bool:
     qrb2210_board_device_handle_ready(binding.device, QRB2210_DEVICE_DISPLAY) and
-        binding.device.device_node.starts_with("/dev/dri/card") and
+        binding.device.device_node == QRB2210_DRM_PRIMARY_DEVICE_NODE and
         binding.kernel_owner_handle > 0u64 and binding.connector_id > 0u64 and
         binding.crtc_id > 0u64 and binding.plane_id > 0u64 and
         binding.framebuffer_handle > 0u64 and binding.mode.width > 0 and
@@ -157,9 +158,19 @@ fn qrb2210_drm_kms_capture_correlates(
         present.present_id > 0 and capture.present_id == present.present_id and
         capture.capture_id > 0 and capture.width == binding.mode.width and
         capture.height == binding.mode.height and
-        capture.byte_count == capture.width.to_i64() * capture.height.to_i64() * 4 and
+        capture.byte_count > 0 and capture.byte_count % 4 == 0 and
+        capture.byte_count / 4 == capture.width.to_i64() * capture.height.to_i64() and
         present.readback_checksum > 0 and capture.readback_checksum == present.readback_checksum and
         capture.source == QRB2210_DRM_CAPTURE_SOURCE
+
+fn qrb2210_drm_kms_present_advances(
+    receipt: Qrb2210DrmKmsKernelPresentReceipt,
+    last_submission_id: i64,
+    last_frame_id: i64,
+    last_present_id: i64
+) -> bool:
+    receipt.submission_id > last_submission_id and
+        receipt.frame_id > last_frame_id and receipt.present_id > last_present_id
 
 fn _qrb2210_drm_kms_provider_ready(
     kernel: Qrb2210DrmKmsKernelPort,
@@ -189,6 +200,9 @@ class Qrb2210DrmKmsDisplayProvider:
     kernel: Qrb2210DrmKmsKernelPort
     binding: Qrb2210DrmKmsPhysicalBinding
     last_present: Qrb2210DrmKmsKernelPresentReceipt?
+    last_submission_id: i64
+    last_frame_id: i64
+    last_present_id: i64
     last_capture_id: i64
 
 impl Qrb2210DisplayPort for Qrb2210DrmKmsDisplayProvider:
@@ -208,8 +222,14 @@ impl Qrb2210DisplayPort for Qrb2210DrmKmsDisplayProvider:
         if not _qrb2210_drm_kms_provider_ready(self.kernel, self.binding):
             return _qrb2210_failed_present(self.binding.device, readback.frame_id)
         val receipt = self.kernel.atomic_present(self.binding, readback)
-        if not qrb2210_drm_kms_present_correlates(self.binding, readback, receipt):
+        if (not qrb2210_drm_kms_present_correlates(self.binding, readback, receipt) or
+            not qrb2210_drm_kms_present_advances(
+                receipt, self.last_submission_id, self.last_frame_id,
+                self.last_present_id)):
             return _qrb2210_failed_present(self.binding.device, readback.frame_id)
+        self.last_submission_id = receipt.submission_id
+        self.last_frame_id = receipt.frame_id
+        self.last_present_id = receipt.present_id
         self.last_present = receipt
         Qrb2210DisplayPresentReceipt(
             device: self.binding.device, frame_id: receipt.frame_id,
@@ -223,6 +243,7 @@ impl Qrb2210DisplayPort for Qrb2210DrmKmsDisplayProvider:
         if val present = self.last_present:
             if present.present_id != present_id or present.frame_id != frame_id:
                 return _qrb2210_failed_capture(self.binding.device, frame_id, present_id)
+            self.last_present = nil
             val capture = self.kernel.capture_scanout(self.binding, present)
             if (capture.capture_id <= self.last_capture_id or
                 not qrb2210_drm_kms_capture_correlates(self.binding, present, capture)):
@@ -236,8 +257,10 @@ impl Qrb2210DisplayPort for Qrb2210DrmKmsDisplayProvider:
         _qrb2210_failed_capture(self.binding.device, frame_id, present_id)
 
 export QRB2210_DRM_FORMAT_XRGB8888, QRB2210_DRM_CAPTURE_SOURCE
+export QRB2210_DRM_PRIMARY_DEVICE_NODE
 export Qrb2210DrmKmsPhysicalBinding, Qrb2210DrmKmsKernelIdentity
 export Qrb2210DrmKmsKernelPresentReceipt, Qrb2210DrmKmsKernelCaptureReceipt
 export Qrb2210DrmKmsKernelPort, Qrb2210DrmKmsDisplayProvider
 export qrb2210_drm_kms_binding_ready, qrb2210_drm_kms_identity_matches_binding
 export qrb2210_drm_kms_present_correlates, qrb2210_drm_kms_capture_correlates
+export qrb2210_drm_kms_present_advances

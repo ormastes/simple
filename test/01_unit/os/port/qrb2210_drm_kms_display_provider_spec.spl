@@ -6,10 +6,12 @@ use os.port.qrb2210_native_2d_ports.{
 }
 use os.port.qrb2210_drm_kms_display_provider.{
     QRB2210_DRM_FORMAT_XRGB8888, QRB2210_DRM_CAPTURE_SOURCE,
+    QRB2210_DRM_PRIMARY_DEVICE_NODE,
     Qrb2210DrmKmsPhysicalBinding, Qrb2210DrmKmsKernelIdentity,
     Qrb2210DrmKmsKernelPresentReceipt, Qrb2210DrmKmsKernelCaptureReceipt,
     qrb2210_drm_kms_binding_ready, qrb2210_drm_kms_identity_matches_binding,
-    qrb2210_drm_kms_present_correlates, qrb2210_drm_kms_capture_correlates
+    qrb2210_drm_kms_present_correlates, qrb2210_drm_kms_capture_correlates,
+    qrb2210_drm_kms_present_advances
 }
 
 val PROVIDER = "src/os/port/qrb2210_drm_kms_display_provider.spl"
@@ -17,7 +19,8 @@ val PROVIDER = "src/os/port/qrb2210_drm_kms_display_provider.spl"
 fn device() -> Qrb2210BoardDeviceHandle:
     Qrb2210BoardDeviceHandle(
         board_id: "qrb2210-uno-q", boot_id: "boot-17", owner: QRB2210_DEVICE_DISPLAY,
-        device_node: "/dev/dri/card0", native_handle: 41u64, driver_generation: 3)
+        device_node: QRB2210_DRM_PRIMARY_DEVICE_NODE,
+        native_handle: 41u64, driver_generation: 3)
 
 fn binding() -> Qrb2210DrmKmsPhysicalBinding:
     Qrb2210DrmKmsPhysicalBinding(
@@ -62,6 +65,12 @@ describe "QRB2210 physical DRM KMS display provider":
         var render_node = binding()
         render_node.device.device_node = "/dev/dri/renderD128"
         expect(qrb2210_drm_kms_binding_ready(render_node)).to_be(false)
+        var secondary_card = binding()
+        secondary_card.device.device_node = "/dev/dri/card1"
+        expect(qrb2210_drm_kms_binding_ready(secondary_card)).to_be(false)
+        var malformed_primary = binding()
+        malformed_primary.device.device_node = "/dev/dri/card0-host"
+        expect(qrb2210_drm_kms_binding_ready(malformed_primary)).to_be(false)
         var no_framebuffer = binding()
         no_framebuffer.framebuffer_handle = 0u64
         expect(qrb2210_drm_kms_binding_ready(no_framebuffer)).to_be(false)
@@ -101,6 +110,18 @@ describe "QRB2210 physical DRM KMS display provider":
         var wrong_checksum = present()
         wrong_checksum.readback_checksum = 11
         expect(qrb2210_drm_kms_present_correlates(binding(), readback(), wrong_checksum)).to_be(false)
+        var cross_boot = present()
+        cross_boot.device.boot_id = "boot-18"
+        expect(qrb2210_drm_kms_present_correlates(binding(), readback(), cross_boot)).to_be(false)
+        var stale_generation = present()
+        stale_generation.driver_generation = 2
+        expect(qrb2210_drm_kms_present_correlates(binding(), readback(), stale_generation)).to_be(false)
+
+    it "rejects replayed submission frame and present identities":
+        expect(qrb2210_drm_kms_present_advances(present(), 70, 71, 72)).to_be(true)
+        expect(qrb2210_drm_kms_present_advances(present(), 71, 71, 72)).to_be(false)
+        expect(qrb2210_drm_kms_present_advances(present(), 70, 72, 72)).to_be(false)
+        expect(qrb2210_drm_kms_present_advances(present(), 70, 71, 73)).to_be(false)
 
     it "admits capture only for the exact presented framebuffer and frame":
         expect(qrb2210_drm_kms_capture_correlates(binding(), present(), capture())).to_be(true)
@@ -116,6 +137,9 @@ describe "QRB2210 physical DRM KMS display provider":
         var incomplete = capture()
         incomplete.completed = false
         expect(qrb2210_drm_kms_capture_correlates(binding(), present(), incomplete)).to_be(false)
+        var malformed_bytes = capture()
+        malformed_bytes.byte_count = 15
+        expect(qrb2210_drm_kms_capture_correlates(binding(), present(), malformed_bytes)).to_be(false)
 
     it "keeps capability promotion outside the provider and calls only kernel receipts":
         val source = file_read_text(PROVIDER)
@@ -123,8 +147,13 @@ describe "QRB2210 physical DRM KMS display provider":
         expect(source).to_contain("self.kernel.atomic_present(self.binding, readback)")
         expect(source).to_contain("self.kernel.capture_scanout(self.binding, present)")
         expect(source).to_contain("capture.capture_id <= self.last_capture_id")
+        expect(source).to_contain("not qrb2210_drm_kms_present_advances(")
         expect(source).to_contain("self.last_present = nil")
         expect(source).to_contain("UNO_Q_DESKTOP_STATUS_PORT_UNAVAILABLE")
         expect(source.contains("uno_q_desktop_backend_status")).to_be(false)
+        expect(source.contains("qemu")).to_be(false)
+        expect(source.contains("ramfb")).to_be(false)
+        expect(source.contains("virtio")).to_be(false)
+        expect(source.contains("fallback")).to_be(false)
         expect(source.contains("rt_process_run")).to_be(false)
         expect(source.contains("rt_env_get")).to_be(false)

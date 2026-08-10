@@ -109,10 +109,10 @@ count, generation, and source `qrb2210-vulkan-device-memory`.
 
 The display adapter now binds a typed SimpleOS DRM/KMS kernel owner beneath the
 existing display port. It correlates boot/device/generation plus kernel-owner,
-connector, CRTC, plane, framebuffer, frame, present, capture, and readback
-checksum identity. Capture consumes only the adapter's last admitted atomic
-present, preventing replay or cross-scanout evidence. This is an adapter, not a
-kernel driver: the kernel transport itself and the physical display owner are
+primary card0 connector, CRTC, plane, framebuffer, frame, present, capture, and
+readback checksum identity. IDs must advance, and capture consumes the adapter's
+last admitted atomic present, preventing replay or cross-scanout evidence. This
+is an adapter, not a kernel driver: the kernel transport itself and the physical display owner are
 still unavailable. Audio also remains unavailable, so canonical capability
 status stays `port-unavailable` and the composition root cannot yet bind. No
 source contract, Debian run, QEMU adapter, hosted Vulkan loader, or
