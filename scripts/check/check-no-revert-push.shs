@@ -91,12 +91,40 @@ CFG_MIN_FILES=5          # incident reverted 26-100; single-file revert is routi
 CFG_HISTORY_DEPTH=30      # commits of path history to search before base
 
 TMPROOT=""
-cleanup() { [ -n "$TMPROOT" ] && rm -rf "$TMPROOT"; }
-trap cleanup EXIT INT TERM
+
+# --- the no-silent-exit invariant -------------------------------------------
+# See doc/08_tracking/bug/pre_push_guards_exit_silently_with_no_verdict_2026-08-10.md
+# The trap used to clean up and print NOTHING, so a SIGTERM (a caller's 600s
+# cap, earlyoom) or any abort left stdout with NO verdict — which a caller
+# cannot distinguish from a run still in progress. That produced a real
+# false-green push on 2026-08-10. Every stop now ends in a verdict.
+VERDICT_EMITTED=0
+cleanup() {
+    cl_status=$?
+    trap - EXIT HUP INT TERM QUIT PIPE
+    if [ "$VERDICT_EMITTED" -eq 0 ]; then
+        case "$cl_status" in
+            129) cl_why="killed by SIGHUP (129)" ;;
+            130) cl_why="interrupted by SIGINT (130)" ;;
+            131) cl_why="killed by SIGQUIT (131)" ;;
+            141) cl_why="killed by SIGPIPE (141)" ;;
+            143) cl_why="killed by SIGTERM (143) — a harness timeout, earlyoom, or an explicit kill. Re-run detached (setsid) with no cap." ;;
+            0)   cl_why="the script stopped without reaching a verdict (exit 0)" ;;
+            *)   cl_why="the script aborted before reaching a verdict (exit $cl_status)" ;;
+        esac
+        echo "$SELF: ERROR — $cl_why" >&2
+        echo "$SELF: ERROR — nothing was checked (exit 2)"
+        cl_status=2
+    fi
+    [ -n "$TMPROOT" ] && rm -rf "$TMPROOT"
+    exit "$cl_status"
+}
+trap cleanup EXIT HUP INT TERM QUIT PIPE
 
 die() {
     code=$1
     shift
+    VERDICT_EMITTED=1
     echo "$SELF: ERROR — $*" >&2
     echo "$SELF: ERROR — nothing was checked (exit $code)"
     exit "$code"
@@ -308,12 +336,14 @@ if ! ( unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
              GIT_CONFIG GIT_CONFIG_COUNT
        cd "$TMPROOT" 2>/dev/null || true
        selftest ); then
+    VERDICT_EMITTED=1
     echo "$SELF: ERROR — selftest failed; the detector is not trustworthy" >&2
     echo "$SELF: ERROR — nothing was checked (exit 2)"
     exit 2
 fi
 
 if [ "${1:-}" = "--selftest" ]; then
+    VERDICT_EMITTED=1
     echo "$SELF: PASS — $SELFTEST_EXPECTED fixture(s) checked (selftest only, scan skipped)"
     exit 0
 fi
@@ -393,9 +423,11 @@ If this is a DELIBERATE, reviewed revert (backing out a bad change), say so
 explicitly in the commit message and re-run with --min-files raised for this
 one push, recording the exception on the record -- do not silently retry.
 EOF
+    VERDICT_EMITTED=1
     echo "$SELF: FAIL — $EV_CHECKED file(s) checked in $range, $EV_MSG"
     exit 1
 fi
 
+VERDICT_EMITTED=1
 echo "$SELF: PASS — $EV_CHECKED file(s) checked, 0 reverts detected"
 exit 0

@@ -79,7 +79,44 @@ set -u
 
 SELF=check-test-tree-divergence
 
+# --- the no-silent-exit invariant -------------------------------------------
+# See the same block in check-tree-size-push.shs. Before 2026-08-10 this guard
+# had a trap that only removed scratch dirs and printed NOTHING, so a SIGTERM (a caller's 600s cap, earlyoom, an explicit
+# kill) ended it with an EMPTY stdout and no verdict — which a caller grepping
+# the output file for a verdict cannot distinguish from a run still in
+# progress, and which on 2026-08-10 produced a real false-green push. Every
+# stop now ends in one of the three verdicts.
+VERDICT_EMITTED=0
+cleanup() {
+    # $1, when given, is the status captured by the trap BEFORE any other
+    # command ran. This is load-bearing: the trap here also sets
+    # `cleanup_extra`, and that assignment resets `$?` to 0 — so reading `$?`
+    # inside cleanup() would turn a FAIL (exit 1) into exit 0, a guard that
+    # prints FAIL and reports success. That regression was caught by the
+    # negative control on 2026-08-10; do not collapse this back to a bare `$?`.
+    cl_status=${1:-$?}
+    trap - EXIT HUP INT TERM QUIT PIPE
+    if [ "$VERDICT_EMITTED" -eq 0 ]; then
+        case "$cl_status" in
+            129) cl_why="killed by SIGHUP (129)" ;;
+            130) cl_why="interrupted by SIGINT (130)" ;;
+            131) cl_why="killed by SIGQUIT (131)" ;;
+            141) cl_why="killed by SIGPIPE (141)" ;;
+            143) cl_why="killed by SIGTERM (143) — a harness timeout, earlyoom, or an explicit kill" ;;
+            0)   cl_why="the script stopped without reaching a verdict (exit 0)" ;;
+            *)   cl_why="the script aborted before reaching a verdict (exit $cl_status)" ;;
+        esac
+        echo "$SELF: ERROR — $cl_why" >&2
+        echo "$SELF: ERROR — nothing was checked (exit 2)"
+        cl_status=2
+    fi
+    [ -n "${cleanup_extra:-}" ] && rm -rf $cleanup_extra
+    exit "$cl_status"
+}
+trap 'cl_t=$?; cleanup "$cl_t"' EXIT HUP INT TERM QUIT PIPE
+
 die() {
+    VERDICT_EMITTED=1
     status="$1"; shift
     echo "$SELF: ERROR: $*" >&2
     echo "$SELF: ERROR — nothing was checked"
@@ -123,7 +160,7 @@ fi
 # copy. Missing file at that ref is an ERROR, never a silent fallback to WC.
 work0=$(mktemp -d "${TMPDIR:-/tmp}/test_tree_divergence_src.XXXXXX") \
     || die 2 "mktemp failed"
-trap 'rm -rf "$work0"' EXIT INT TERM
+trap 'cl_t=$?; cleanup_extra="$work0"; cleanup "$cl_t"' EXIT HUP INT TERM QUIT PIPE
 # (superseded by the wider trap once $work exists, below; this earlier one
 #  guarantees work0 is cleaned even if we die before that point)
 if [ -n "$ref" ]; then
@@ -161,7 +198,7 @@ fi
 # --- 2. scratch state --------------------------------------------------------
 work=$(mktemp -d "${TMPDIR:-/tmp}/test_tree_divergence.XXXXXX") \
     || die 2 "mktemp failed"
-trap 'rm -rf "$work" "$work0"' EXIT INT TERM
+trap 'cl_t=$?; cleanup_extra="$work $work0"; cleanup "$cl_t"' EXIT HUP INT TERM QUIT PIPE
 
 current_diverged="$work/current_diverged.txt"
 : > "$current_diverged"
@@ -345,7 +382,8 @@ fi
 if [ "$generate" -eq 1 ]; then
     cp "$current_diverged" "$BASELINE"
     n=$(wc -l < "$current_diverged" | tr -d ' ')
-    echo "$SELF: baseline written to $BASELINE ($n entries)"
+    VERDICT_EMITTED=1
+    echo "$SELF: PASS — baseline written to $BASELINE ($n entries recorded; no divergence check performed in --generate-baseline mode)"
     exit 0
 fi
 
@@ -403,9 +441,11 @@ if [ "$n_half_landed" -gt 0 ]; then
 fi
 
 if [ "$status" -ne 0 ]; then
+    VERDICT_EMITTED=1
     echo "$SELF: FAIL — $total_diverged diverged vs $n_baseline baselined ($n_new new, $n_fixed fixed-but-still-baselined); $n_mirror_only mirror-only ($n_new_mirror_only unallowlisted, $n_stale_allowlist stale-allowlist); half-landed: $half_landed_note"
     exit 1
 fi
 
+VERDICT_EMITTED=1
 echo "$SELF: PASS — $total_common pairs checked, $total_diverged diverged (all baselined), 0 new, 0 stale-fixed, $n_mirror_only mirror-only (all allowlisted); half-landed: $half_landed_note"
 exit 0

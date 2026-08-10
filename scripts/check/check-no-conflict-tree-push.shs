@@ -75,6 +75,35 @@ set -u
 
 SELF=check-no-conflict-tree-push
 
+# --- the no-silent-exit invariant -------------------------------------------
+# See the same block in check-tree-size-push.shs. Before 2026-08-10 this guard
+# had NO trap at all, so a SIGTERM (a caller's 600s cap, earlyoom, an explicit
+# kill) ended it with an EMPTY stdout and no verdict — which a caller grepping
+# the output file for a verdict cannot distinguish from a run still in
+# progress, and which on 2026-08-10 produced a real false-green push. Every
+# stop now ends in one of the three verdicts.
+VERDICT_EMITTED=0
+cleanup() {
+    cl_status=$?
+    trap - EXIT HUP INT TERM QUIT PIPE
+    if [ "$VERDICT_EMITTED" -eq 0 ]; then
+        case "$cl_status" in
+            129) cl_why="killed by SIGHUP (129)" ;;
+            130) cl_why="interrupted by SIGINT (130)" ;;
+            131) cl_why="killed by SIGQUIT (131)" ;;
+            141) cl_why="killed by SIGPIPE (141)" ;;
+            143) cl_why="killed by SIGTERM (143) — a harness timeout, earlyoom, or an explicit kill" ;;
+            0)   cl_why="the script stopped without reaching a verdict (exit 0)" ;;
+            *)   cl_why="the script aborted before reaching a verdict (exit $cl_status)" ;;
+        esac
+        echo "$SELF: ERROR — $cl_why" >&2
+        echo "$SELF: ERROR — nothing was checked (exit 2)"
+        cl_status=2
+    fi
+    exit "$cl_status"
+}
+trap cleanup EXIT HUP INT TERM QUIT PIPE
+
 # Pin grep: the interactive default on this machine is ugrep, not GNU grep.
 GREP=grep
 [ -x /usr/bin/grep ] && GREP=/usr/bin/grep
@@ -83,6 +112,7 @@ die() {
     # $1 = exit code, rest = message
     code=$1
     shift
+    VERDICT_EMITTED=1
     echo "$SELF: ERROR — $*" >&2
     echo "$SELF: ERROR — nothing was checked (exit $code)"
     exit "$code"
@@ -96,10 +126,11 @@ case "$range" in
     --rev-list-args)
         rawmode=1
         shift
-        [ "$#" -gt 0 ] || { echo "$SELF: ERROR — --rev-list-args needs arguments" >&2
+        [ "$#" -gt 0 ] || { VERDICT_EMITTED=1; echo "$SELF: ERROR — --rev-list-args needs arguments" >&2
                             echo "$SELF: ERROR — nothing was checked (exit 2)"; exit 2; }
         ;;
     --*)
+        VERDICT_EMITTED=1
         echo "$SELF: ERROR — unknown option '$range'; raw mode is '--rev-list-args <args>...'" >&2
         echo "$SELF: ERROR — nothing was checked (exit 2)"
         exit 2
@@ -185,8 +216,9 @@ if [ "$n" -eq 0 ]; then
   caller error (wrong base, wrong tip, or endpoints already equal) — it is NOT
   a clean result, so it is reported as a failure rather than a pass."
     fi
-    echo "$SELF: NOTHING TO PUSH — $range is empty; NO COMMITS WERE CHECKED"
-    exit 0
+    die 2 "the default range '$range' is empty; NO COMMITS WERE CHECKED.
+  There is nothing to push, so there is also nothing this guard can vouch for.
+  A run that checked nothing is ERROR by this convention, never a pass."
 fi
 
 # --- 6. the actual check ---------------------------------------------------
@@ -210,9 +242,11 @@ Resolve first, then re-check:
   jj resolve --list                 # what is conflicted
   jj log -r 'roots(conflicts())'    # resolve the ROOT, descendants auto-rebase
 EOF
+    VERDICT_EMITTED=1
     echo "$SELF: FAIL — conflict tree(s) found in $range ($n commit(s) checked)"
     exit 1
 fi
 
+VERDICT_EMITTED=1
 echo "$SELF: PASS — $n commit(s) checked in $range, 0 conflict trees (repo $toplevel)"
 exit 0

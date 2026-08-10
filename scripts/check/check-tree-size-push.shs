@@ -154,12 +154,50 @@ CFG_SRC_MAX=25
 CFG_PATHS='src/runtime:150 src/os:1200 src/lib:5000 src/compiler:1200 src/app:2000 scripts:500 doc:1000'
 
 TMPROOT=""
-cleanup() { [ -n "$TMPROOT" ] && rm -rf "$TMPROOT"; }
-trap cleanup EXIT INT TERM
+
+# --- the no-silent-exit invariant -------------------------------------------
+# Every exit path must leave a verdict as the LAST line of stdout. Until
+# 2026-08-10 the EXIT trap only removed TMPROOT and printed NOTHING, so any
+# death that was not a `die`/PASS/FAIL — a SIGTERM from a 600s harness cap, an
+# earlyoom kill, a Ctrl-C, or a `set -u` abort — produced an EMPTY stdout with
+# no verdict at all. A caller polling the output file then saw the selftest
+# progress line, read it as a pass, and pushed. That happened for real on
+# a981699b686..95c0703d19d. Silence is the exact failure mode the verdict
+# convention exists to prevent, so it is now impossible: VERDICT_EMITTED is set
+# by every legitimate verdict, and the trap synthesises the ERROR verdict for
+# every other way this process can stop.
+VERDICT_EMITTED=0
+
+cleanup() {
+    cl_status=$?
+    trap - EXIT INT TERM HUP QUIT PIPE
+    if [ "$VERDICT_EMITTED" -eq 0 ]; then
+        # No verdict was printed, so nothing this guard checked can be trusted.
+        # Name the signal when there was one: exit 143/130/129/131 root-cause
+        # very differently (harness cap / Ctrl-C / hangup / quit) from a plain
+        # non-zero abort, and the caller needs that distinction to act.
+        case "$cl_status" in
+            129) cl_why="killed by SIGHUP (129)" ;;
+            130) cl_why="interrupted by SIGINT (130)" ;;
+            131) cl_why="killed by SIGQUIT (131)" ;;
+            141) cl_why="killed by SIGPIPE (141)" ;;
+            143) cl_why="killed by SIGTERM (143) — a harness timeout (the 600s Bash cap), earlyoom, or an explicit kill. This guard forks thousands of git processes; under heavy machine load it can outlast a caller's timeout. Re-run it detached (setsid) with no cap." ;;
+            0)   cl_why="the script stopped without reaching a verdict (exit 0)" ;;
+            *)   cl_why="the script aborted before reaching a verdict (exit $cl_status)" ;;
+        esac
+        echo "$SELF: ERROR — $cl_why" >&2
+        echo "$SELF: ERROR — nothing was checked (exit 2)"
+        cl_status=2
+    fi
+    [ -n "$TMPROOT" ] && rm -rf "$TMPROOT"
+    exit "$cl_status"
+}
+trap cleanup EXIT INT TERM HUP QUIT PIPE
 
 die() {
     code=$1
     shift
+    VERDICT_EMITTED=1
     echo "$SELF: ERROR — $*" >&2
     echo "$SELF: ERROR — nothing was checked (exit $code)"
     exit "$code"
@@ -423,14 +461,23 @@ st_mktree() {
     st_idx="$TMPROOT/st.index"
     rm -f "$st_idx"
     st_blob=$(printf 'x %s\n' "$ST_NONCE" | st_git "$st_repo" hash-object -w --stdin) || return 1
+    # One `git update-index --index-info` fork for the WHOLE fixture instead of
+    # one `--cacheinfo` fork PER FILE. The fixtures add ~1,100 paths in total,
+    # so the old shape forked ~1,100 git processes before the scan even began;
+    # on a loaded machine (load average 48 was observed on 2026-08-10) that
+    # alone ran past a caller's 600s cap and the guard was SIGTERMed with no
+    # verdict. Identical index content — same modes, blobs and paths, still
+    # fail-closed on a non-zero git status — just not once per process.
+    : >"$TMPROOT/mktree.in"
     for st_d in "$@"; do
         st_i=0
         while [ "$st_i" -lt "$st_n" ]; do
-            ST_INDEX="$st_idx" st_git "$st_repo" update-index --add \
-                --cacheinfo "100644,$st_blob,$st_d/f$st_i.txt" >/dev/null || return 1
+            printf '100644 %s\t%s/f%s.txt\n' "$st_blob" "$st_d" "$st_i" >>"$TMPROOT/mktree.in"
             st_i=$(( st_i + 1 ))
         done
     done
+    ST_INDEX="$st_idx" st_git "$st_repo" update-index --add --index-info \
+        <"$TMPROOT/mktree.in" >/dev/null || return 1
     st_tree=$(ST_INDEX="$st_idx" st_git "$st_repo" write-tree) || return 1
     st_git "$st_repo" commit-tree "$st_tree" -m fixture </dev/null
 }
@@ -641,7 +688,8 @@ selftest() {
 # ===========================================================================
 # MAIN
 # ===========================================================================
-TMPROOT=$(mktemp -d) || { echo "$SELF: ERROR — cannot mktemp" >&2
+TMPROOT=$(mktemp -d) || { VERDICT_EMITTED=1
+                          echo "$SELF: ERROR — cannot mktemp" >&2
                           echo "$SELF: ERROR — nothing was checked (exit 2)"; exit 2; }
 
 # Snapshot the settings of the REAL repo that a leaking selftest was PROVED to
@@ -666,6 +714,7 @@ if ! ( unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
              GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE \
              GIT_CONFIG GIT_CONFIG_COUNT
        selftest ); then
+    VERDICT_EMITTED=1
     echo "$SELF: ERROR — selftest failed; the detector is not trustworthy" >&2
     echo "$SELF: ERROR — nothing was checked (exit 2)"
     exit 2
@@ -678,12 +727,14 @@ if [ -n "$real_bare_before" ] || [ -n "$real_user_before" ]; then
         echo "$SELF: ERROR — the selftest MUTATED the repository at $real_gitdir" >&2
         echo "  core.bare: '$real_bare_before' -> '$real_bare_after'" >&2
         echo "  user:      '$real_user_before' -> '$real_user_after'" >&2
+        VERDICT_EMITTED=1
         echo "$SELF: ERROR — nothing was checked (exit 2)"
         exit 2
     fi
 fi
 
 if [ "${1:-}" = "--selftest" ]; then
+    VERDICT_EMITTED=1
     echo "$SELF: PASS — $SELFTEST_EXPECTED fixture(s) checked (selftest only, scan skipped)"
     exit 0
 fi
@@ -817,8 +868,16 @@ if [ "$n" -eq 0 ]; then
   caller error (wrong base, wrong tip, or endpoints already equal) — it is NOT
   a clean result, so it is reported as a failure rather than a pass."
     fi
-    echo "$SELF: NOTHING TO PUSH — $range is empty; NO COMMITS WERE CHECKED"
-    exit 0
+    # An empty default range checked ZERO commits. The convention has exactly
+    # three verdicts and "checked nothing" is ERROR, not PASS — the explicit
+    # range case a few lines above already dies with exit 2 for 0 commits, and
+    # the old `NOTHING TO PUSH ... exit 0` here was the one path that returned
+    # success with no conforming verdict, which is precisely what a caller
+    # grepping for a verdict line cannot distinguish from a clean pass.
+    die 2 "the default range '$range' is empty; NO COMMITS WERE CHECKED.
+  There is nothing to push, so there is also nothing this guard can vouch for.
+  If you genuinely have nothing to push, do not push; if you expected commits
+  here, your bookmark or main@origin is stale — fetch and re-run."
 fi
 
 # --- 7. the actual check ----------------------------------------------------
@@ -857,10 +916,12 @@ expected count (--expect-files <n>, which is recorded in the verdict), or raise
 the threshold in this script TO THE MEASURED BOUNDARY in the same commit. Do not
 relax it to make a run green.
 EOF
+    VERDICT_EMITTED=1
     echo "$SELF: FAIL — $checked commit(s) checked in $range, $found structurally wrong"
     exit 1
 fi
 
+VERDICT_EMITTED=1
 if [ "$base_files" -ge 0 ]; then
     echo "$SELF: PASS — $checked commit(s) checked in $range, reference $base_files file(s) ($base_source), 0 structural faults (repo $toplevel)"
 else

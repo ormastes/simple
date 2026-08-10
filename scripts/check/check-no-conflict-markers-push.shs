@@ -94,12 +94,40 @@ GREP=grep
 TAB=$(printf '\t')
 
 TMPD=$(mktemp -d 2>/dev/null) || TMPD=""
-cleanup() { [ -n "$TMPD" ] && rm -rf "$TMPD"; }
-trap cleanup EXIT HUP INT TERM
+
+# --- the no-silent-exit invariant -------------------------------------------
+# See the same block in check-tree-size-push.shs. The trap used to clean up and
+# print NOTHING, so a SIGTERM (a caller's 600s cap, earlyoom) or any abort left
+# stdout with no verdict at all — indistinguishable, to a caller grepping for a
+# verdict, from a run that had not printed one YET. Every stop now ends in a
+# verdict.
+VERDICT_EMITTED=0
+cleanup() {
+    cl_status=$?
+    trap - EXIT HUP INT TERM QUIT PIPE
+    if [ "$VERDICT_EMITTED" -eq 0 ]; then
+        case "$cl_status" in
+            129) cl_why="killed by SIGHUP (129)" ;;
+            130) cl_why="interrupted by SIGINT (130)" ;;
+            131) cl_why="killed by SIGQUIT (131)" ;;
+            141) cl_why="killed by SIGPIPE (141)" ;;
+            143) cl_why="killed by SIGTERM (143) — a harness timeout, earlyoom, or an explicit kill" ;;
+            0)   cl_why="the script stopped without reaching a verdict (exit 0)" ;;
+            *)   cl_why="the script aborted before reaching a verdict (exit $cl_status)" ;;
+        esac
+        echo "$SELF: ERROR — $cl_why" >&2
+        echo "$SELF: ERROR — nothing was checked (exit 2)"
+        cl_status=2
+    fi
+    [ -n "$TMPD" ] && rm -rf "$TMPD"
+    exit "$cl_status"
+}
+trap cleanup EXIT HUP INT TERM QUIT PIPE
 
 die() {
     code=$1
     shift
+    VERDICT_EMITTED=1
     echo "$SELF: ERROR — $*" >&2
     echo "$SELF: ERROR — nothing was checked (exit $code)"
     exit "$code"
@@ -185,8 +213,9 @@ if [ "$ncommits" -eq 0 ]; then
   caller error (wrong base, wrong tip, or endpoints already equal) — it is NOT
   a clean result, so it is reported as a failure rather than a pass."
     fi
-    echo "$SELF: NOTHING TO PUSH — $range is empty; NO FILES WERE CHECKED"
-    exit 0
+    die 2 "the default range '$range' is empty; NO FILES WERE CHECKED.
+  There is nothing to push, so there is also nothing this guard can vouch for.
+  A run that checked nothing is ERROR by this convention, never a pass."
 fi
 
 # git rev-list lists newest first, so the first line is the range tip — the
@@ -285,9 +314,11 @@ then re-check:
   jj resolve --list
   jj log -r 'roots(conflicts())'    # resolve the ROOT, descendants auto-rebase
 EOF
+    VERDICT_EMITTED=1
     echo "$SELF: FAIL — conflict markers found in $range ($scanned file(s) scanned)"
     exit 1
 fi
 
+VERDICT_EMITTED=1
 echo "$SELF: PASS — $scanned file(s) scanned at $tip across $ncommits commit(s) in $range, 0 conflict markers (repo $toplevel)"
 exit 0
