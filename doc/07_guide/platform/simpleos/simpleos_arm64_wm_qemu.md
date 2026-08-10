@@ -136,9 +136,14 @@ option for a goal-completion run. The scoped one-row output is live ARM64
 evidence, not a replacement for the canonical three-row cross-ISA report
 accepted by `--validate-report`.
 
-The attested wrapper resolves and directly executes an allowlisted deployed
-`bin/release/<host-triple>/simple os build --scenario=arm64-desktop-engine2d`
-executable. It rejects scripts, symlinks, foreign binaries, and mismatched host
+The attested wrapper resolves an allowlisted deployed pure-Simple compiler and
+executes the pinned `native-build` recipe for the ARM64 desktop entry directly,
+then invokes the deterministic `desktop-fonts` disk producer. This keeps the
+QEMU producer usable with an admitted compiler-only Stage 3 artifact; it does
+not require or fall back to the Rust seed or the broad full CLI. The manifest
+records `producer_mode=direct-native-build-v1` plus the exact compiler argv and
+environment, and the consumer reconstructs and validates them. The wrapper
+rejects scripts, symlinks, foreign binaries, and mismatched host
 architectures by checking Mach-O/ELF magic plus native architecture bytes. It
 also rejects compiler paths under `compiler_rust`/debug trees and binary images
 containing the canonical `Rust-built`, `bootstrap seed only`, or `debug build`
@@ -146,8 +151,7 @@ classifiers before any build starts. The `--self-test` command proves a
 host-format clean fixture is admitted while seed-marked and debug-marked
 fixtures are rejected. The
 manifest records and the consumer independently revalidates that format,
-architecture, hash, and version. This is deployed-binary identity evidence, not
-a claim that a canonical Stage3 source-provenance manifest exists. It then publishes
+architecture, hash, version, and compiler receipt. It then publishes
 the ELF/disk/source manifest required by the live QMP input gate. It invalidates
 the kernel stamp/output, disk image, and compiled disk writer before invoking
 the runner, so persistent kernel or disk cache hits cannot masquerade as a

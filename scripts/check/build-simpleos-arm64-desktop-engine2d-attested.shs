@@ -26,10 +26,11 @@ BUILD_LOG="build/os/simpleos_arm64_desktop_engine2d.build.log"
 BUILD_STATUS="${BUILD_LOG}.status.$$"
 GENERATED_LOG_CONFIG="build/os/generated/generated/simpleos_log_config.spl"
 BUILD_COMMAND=""
-BUILD_ENVIRONMENT="-u SIMPLE_BINARY -u SIMPLE_BIN -u SIMPLE_FRONTEND_DELEGATE -u SIMPLE_BOOTSTRAP_DRIVER SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_STRICT_FABRICATED_STUB_RATCHET=1 SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_OS_LOG_MODE=off SIMPLE_OS_BUILD_TIMEOUT_MS=900000"
+BUILD_ENVIRONMENT="-u SIMPLE_BINARY -u SIMPLE_BIN -u SIMPLE_FRONTEND_DELEGATE -u SIMPLE_BOOTSTRAP_DRIVER SIMPLE_BOOTSTRAP=1 SIMPLE_LIB=$ROOT_DIR/src SIMPLE_TARGET_OS=simpleos SIMPLE_TARGET_ARCH=arm64 SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_STRICT_FABRICATED_STUB_RATCHET=1 SIMPLE_OS_LOG_MODE=off"
 ENTRY="examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl"
 PRODUCER_SCRIPT="scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs"
-MANIFEST_SCHEMA="simpleos-arm64-desktop-engine2d-build-manifest-v2"
+MANIFEST_SCHEMA="simpleos-arm64-desktop-engine2d-build-manifest-v3"
+PRODUCER_MODE="direct-native-build-v1"
 MANIFEST_TMP="${BUILD_MANIFEST}.tmp.$$"
 SELF_TEST_DIR=""
 
@@ -229,8 +230,13 @@ validate_pinned_compiler_receipt() {
 reject_fabricated_build_receipts() {
     [ -f "$BUILD_LOG" ] || return 1
     if grep -Eiq \
-        '(^|[[:space:]])FABRICATED(-NEW)?([[:space:]]|$)|Fabricated freestanding stubs:|unbaselined|unmeasured([^[:alnum:]]|$)|weak bodies that RETURN 0|weak[- ](return[- ]?)?zero' \
+        '(^|[[:space:]])FABRICATED(-NEW)?([[:space:]]|$)|unbaselined|unmeasured([^[:alnum:]]|$)|weak bodies that RETURN 0|weak[- ](return[- ]?)?zero' \
         "$BUILD_LOG"; then
+        return 1
+    fi
+    if grep -Fq 'Fabricated freestanding stubs:' "$BUILD_LOG" &&
+            grep -F 'Fabricated freestanding stubs:' "$BUILD_LOG" |
+            grep -Fvxq 'Fabricated freestanding stubs: 0 symbol(s)'; then
         return 1
     fi
     return 0
@@ -290,7 +296,7 @@ resolve_compiler() {
     COMPILER="$compiler_candidate"
     COMPILER_FORMAT="$ARM64_GUEST_COMPILER_FORMAT"
     COMPILER_ARCH="$ARM64_GUEST_COMPILER_ARCH"
-    BUILD_COMMAND="env $BUILD_ENVIRONMENT $COMPILER os build --scenario=arm64-desktop-engine2d"
+    BUILD_COMMAND="env $BUILD_ENVIRONMENT $COMPILER native-build --source build/os/generated --source src/os --source src/lib --source examples/09_embedded/simple_os --backend llvm --opt-level=aggressive --log off --timeout 870 --entry-closure --entry $ENTRY --target aarch64-unknown-none -o $KERNEL --linker-script examples/09_embedded/simple_os/arch/arm64/linker.ld && sh scripts/os/make_os_disk.shs 128 $DISK '' arm64 desktop-fonts"
 }
 
 resolve_compiler ||
@@ -350,14 +356,33 @@ qemu_admission_begin arm64 \
 # A provenance-producing invocation must execute both native-build and the disk
 # producer. Existing kernel/disk/writer artifacts cannot serve as fresh proof.
 rm -f "$BUILD_LOG" "$BUILD_STATUS" || fail_build "build-log-reset-failed"
+printf '%s\n' \
+    'val SIMPLEOS_LOG_COMPILED: bool = false' \
+    '' \
+    'fn simpleos_log_compile_enabled() -> bool:' \
+    '    SIMPLEOS_LOG_COMPILED' \
+    '' \
+    'fn simpleos_log_compile_mode_name() -> text:' \
+    '    if SIMPLEOS_LOG_COMPILED:' \
+    '        return "on"' \
+    '    "off"' \
+    >"$GENERATED_LOG_CONFIG" ||
+    fail_build "generated-log-config-write-failed"
 set +e
 {
     env -u SIMPLE_BINARY -u SIMPLE_BIN -u SIMPLE_FRONTEND_DELEGATE \
-        -u SIMPLE_BOOTSTRAP_DRIVER SIMPLE_NO_STUB_FALLBACK=1 \
+        -u SIMPLE_BOOTSTRAP_DRIVER SIMPLE_BOOTSTRAP=1 \
+        SIMPLE_LIB="$ROOT_DIR/src" SIMPLE_TARGET_OS=simpleos \
+        SIMPLE_TARGET_ARCH=arm64 SIMPLE_NO_STUB_FALLBACK=1 \
         SIMPLE_STRICT_FABRICATED_STUB_RATCHET=1 \
-        SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_OS_LOG_MODE=off \
-        SIMPLE_OS_BUILD_TIMEOUT_MS=900000 \
-        "$COMPILER" os build --scenario=arm64-desktop-engine2d
+        SIMPLE_OS_LOG_MODE=off \
+        "$COMPILER" native-build \
+        --source build/os/generated --source src/os --source src/lib \
+        --source examples/09_embedded/simple_os --backend llvm \
+        --opt-level=aggressive --log off --timeout 870 --entry-closure \
+        --entry "$ENTRY" --target aarch64-unknown-none -o "$KERNEL" \
+        --linker-script examples/09_embedded/simple_os/arch/arm64/linker.ld &&
+        sh scripts/os/make_os_disk.shs 128 "$DISK" '' arm64 desktop-fonts
     echo "$?" >"$BUILD_STATUS"
 } 2>&1 | tee "$BUILD_LOG"
 TEE_CODE=$?
@@ -470,6 +495,7 @@ umask 077
     echo "compiler_receipt_sha256=$COMPILER_RECEIPT_SHA256"
     echo "build_log_path=$BUILD_LOG"
     echo "build_log_sha256=$BUILD_LOG_SHA256"
+    echo "producer_mode=$PRODUCER_MODE"
     echo "build_command=$BUILD_COMMAND"
     echo "build_environment=$BUILD_ENVIRONMENT"
 } >"$MANIFEST_TMP"

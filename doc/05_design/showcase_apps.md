@@ -34,6 +34,14 @@ The 2D scene is divided into labeled primitive, raster/image/text, transform/cli
 
 Errors carry app ID, surface, phase, and backend/transport cause. A blank frame, synthetic handle, CPU mirror presented as GPU readback, static source check, or unavailable window reported as success is an error.
 
+The ARM64 QEMU fixture renders the canonical graphics core at `752x584` inside
+the `2d_showcase_backed_cpu_simd` window. Its live oracle requires the exact
+producer identity, all seven shared section labels, four deterministic
+primitive-color anchors, detailed palette/nonblank ratios, exact guest/RAMFB
+checksum correlation, and ordered input-caused frames. The existing 39 FPS
+plus positive-NEON gate remains a release requirement and must be ported and
+re-proven on current main before this QEMU slice is marked complete.
+
 ## WM showcase: taskbar derivation and capture evidence
 
 Added 2026-08-05 by the documentation lane. **The implementation is owned by a
