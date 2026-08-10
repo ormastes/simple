@@ -1,0 +1,40 @@
+# Non-positional native-build policy and exact Stage4 routing.
+
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use app.cli.bootstrap_focused_native_build_args.{
+    focused_native_build_arg_value, focused_native_build_exact_capsule_entry_allowed,
+    focused_native_build_has_flag
+}
+use app.cli.bootstrap_focused_native_build_plan.{run_focused_native_build_plan}
+
+extern fn rt_bootstrap_native_build(args: [text]) -> i64
+
+fn bootstrap_runtime_bundle_is_removed(bundle: text) -> bool:
+    bundle == "hosted" or bundle == "rust-hosted" or bundle == "rust_hosted" or
+    bundle == "hosted-runtime" or bundle == "rust-runtime" or bundle == "all"
+
+pub fn run_bootstrap_native_nonpositional(args: [text]) -> i64:
+    if (focused_native_build_has_flag(args, "--help") or
+        focused_native_build_has_flag(args, "-h") or
+        focused_native_build_has_flag(args, "--list-optimizations")):
+        return rt_bootstrap_native_build(args)
+    val runtime_bundle = focused_native_build_arg_value(args, "--runtime-bundle")
+    if bootstrap_runtime_bundle_is_removed(runtime_bundle):
+        print "Error: runtime bundle '{runtime_bundle}' was removed; use simple-core or core-c-bootstrap"
+        return 1
+    val mode = focused_native_build_arg_value(args, "--mode")
+    if mode != "" and mode != "dynload" and mode != "one-binary":
+        print "Error: invalid --mode '{mode}' (expected dynload or one-binary)"
+        return 1
+    val explicit_entry = focused_native_build_arg_value(args, "--entry")
+    if explicit_entry == "":
+        return rt_bootstrap_native_build(args)
+    if env_get("SIMPLE_BOOTSTRAP_STAGE4") != "1":
+        return rt_bootstrap_native_build(args)
+    if not focused_native_build_exact_capsule_entry_allowed(explicit_entry):
+        print "Error: Stage4 entry must be src/app/cli/main.spl or src/app/os/main.spl"
+        return 1
+    if mode != "one-binary":
+        print "Error: Stage4 compiler capsule requires --mode one-binary"
+        return 1
+    run_focused_native_build_plan(args, true)

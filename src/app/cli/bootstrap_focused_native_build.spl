@@ -7,9 +7,9 @@
 use compiler.driver.driver.{compiler_driver_create, compiler_driver_run_compile}
 use compiler.common.driver_core_types (CompileMode, driver_core_compile_options_default, compileoptions_normalize_mir_optimization, driver_output_format_native)
 use compiler.common.driver_compile_result.{compile_result_is_success, compile_result_errors}
-use std.nogc_sync_mut.io.env_ops.{env_get, env_set}
+use std.nogc_sync_mut.io.env_ops.{env_set}
 use std.nogc_sync_mut.io_runtime.{file_exists, file_size, dir_create}
-use app.cli.bootstrap_focused_native_build_plan.{run_focused_native_build_plan}
+use app.cli.bootstrap_native_nonpositional.{run_bootstrap_native_nonpositional}
 pub use app.cli.bootstrap_focused_native_build_plan.{focused_native_build_error, run_focused_native_build}
 pub use app.cli.bootstrap_focused_native_build_args.{
     focused_native_build_arg_value, focused_native_build_sources,
@@ -22,13 +22,8 @@ pub use app.cli.bootstrap_focused_native_build_args.{
     focused_native_build_opt_level
 }
 
-extern fn rt_bootstrap_native_build(args: [text]) -> i64
 extern fn rt_bootstrap_native_build_single_spl_positional(args: [text]) -> text
 extern fn rt_path_stem(path: text) -> text
-
-fn bootstrap_runtime_bundle_is_removed(bundle: text) -> bool:
-    bundle == "hosted" or bundle == "rust-hosted" or bundle == "rust_hosted" or
-    bundle == "hosted-runtime" or bundle == "rust-runtime" or bundle == "all"
 
 fn run_bootstrap_single_file(args: [text], entry_path: text) -> i64:
     var output = focused_native_build_arg_value(args, "--output")
@@ -69,30 +64,7 @@ fn run_bootstrap_single_file(args: [text], entry_path: text) -> i64:
     1
 
 pub fn run_bootstrap_native_build_dispatch(args: [text]) -> i64:
-    if (focused_native_build_has_flag(args, "--help") or
-        focused_native_build_has_flag(args, "-h") or
-        focused_native_build_has_flag(args, "--list-optimizations")):
-        return rt_bootstrap_native_build(args)
-    val runtime_bundle = focused_native_build_arg_value(args, "--runtime-bundle")
-    if bootstrap_runtime_bundle_is_removed(runtime_bundle):
-        print "Error: runtime bundle '{runtime_bundle}' was removed; use simple-core or core-c-bootstrap"
-        return 1
-    val mode = focused_native_build_arg_value(args, "--mode")
-    if mode != "" and mode != "dynload" and mode != "one-binary":
-        print "Error: invalid --mode '{mode}' (expected dynload or one-binary)"
-        return 1
-    val explicit_entry = focused_native_build_arg_value(args, "--entry")
-    if explicit_entry != "":
-        if env_get("SIMPLE_BOOTSTRAP_STAGE4") != "1":
-            return rt_bootstrap_native_build(args)
-        if not focused_native_build_exact_capsule_entry_allowed(explicit_entry):
-            print "Error: Stage4 entry must be src/app/cli/main.spl or src/app/os/main.spl"
-            return 1
-        if mode != "one-binary":
-            print "Error: Stage4 compiler capsule requires --mode one-binary"
-            return 1
-        return run_focused_native_build_plan(args, true)
     val entry_path = rt_bootstrap_native_build_single_spl_positional(args)
-    if entry_path == "":
-        return rt_bootstrap_native_build(args)
-    run_bootstrap_single_file(args, entry_path)
+    if entry_path != "":
+        return run_bootstrap_single_file(args, entry_path)
+    run_bootstrap_native_nonpositional(args)
