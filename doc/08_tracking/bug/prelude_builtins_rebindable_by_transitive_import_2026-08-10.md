@@ -403,3 +403,107 @@ accidental math shadows are deleted.**
 Probe sources: `/tmp/q34/{nat_ctl,nat_shadow,natlib,natmid,mmain,mctl,mlib,mmid}.spl`.
 `scripts/check/check-prelude-builtins-unshadowable.shs` and its negative control
 were not modified.
+
+---
+
+# Update 2026-08-10 (Q39) — value-discriminating re-measurement; two plan premises falsified
+
+Binary measured: `bin/release/x86_64-unknown-linux-gnu/simple`, 29577536 bytes,
+mtime **2026-08-09 04:50:31 UTC**. Read/invoke only; nothing relinked.
+
+## 1. Value-discriminating oracle: min/max/abs are NOT shadowable
+
+Probe `/dev/shm/q39/p/s/{q39main,q39mid,q39lib}.spl` — the same 3-module
+transitive shape (`main` -> `q39mid` -> `q39lib`), but every shadow returns a
+distinct marker constant instead of a real result, so "did the shadow win" is
+read off the VALUE, not off resolution success.
+
+Positive control: `mid_helper()` returns `7` via `q39lib.helper`, proving the
+shadow module is in the closure and IS supplying bindings.
+
+| name | shadow marker | observed | winner |
+|---|---|---|---|
+| `min(3,9)` | 111 | **3** | builtin |
+| `max(3,9)` | 112 | **9** | builtin |
+| `abs(-5)` | 113 | **5** | builtin |
+| `sqrt(16)` | 222 | **222** | shadow |
+| `floor(9)` | 333 | **333** | shadow |
+| `ceil(9)` | 555 | **555** | shadow |
+| `pow(2,3)` | 666 | **666** | shadow |
+| `to_int("77")` | 444 | **444** | shadow |
+
+Identical results with `SIMPLE_JIT_STRICT=1 SIMPLE_EXECUTION_MODE=jit` (no JIT
+provenance marker was emitted, so that row is not credited as a distinct lane).
+
+**Consequence:** the "interpreter 50/51 shadowable" figure is an artefact of an
+existence oracle and must not be relied on. `min`/`max`/`abs` are already
+builtin-bound — they are lowered by the MIR special case
+`lower_min_max_abs` (`mir/lower/lowering_expr_builtin.rs:121`), which the earlier
+sweep did not account for. Recommendation 4's premise that fencing `min`/`abs`
+would "silently retarget 30 definitions" is therefore wrong for the host lanes:
+they are already retargeted. `sqrt`/`floor`/`ceil`/`pow`/`to_int` genuinely are
+shadowable.
+
+## 2. The f64 defect: root-caused, one line
+
+`min(1.5, 2.5)` printed directly gives **4609434218613702656**, which is exactly
+`0x3FF8000000000000` — the IEEE-754 bit pattern of `1.5`. The builtin computes
+the RIGHT answer; the result is merely typed as an integer, so the float payload
+is reinterpreted as an int on formatting.
+
+Root cause: `src/compiler_rust/compiler/src/hir/lower/expr/calls.rs:507-509`
+
+```rust
+"abs" | "min" | "max" | "sqrt" | "floor" | "ceil" | "pow" => {
+    Ok(Some(self.lower_builtin_call(name, args, TypeId::I64, ctx)?))
+}
+```
+
+The result `TypeId` is **hard-coded `I64`** for all seven names regardless of
+argument type. `to_int` (line 511) is legitimately I64; these seven are not.
+Fix shape: derive the result type from the lowered argument types (F64 if any
+argument is F32/F64), leaving I64 as the integer-argument default. This is a
+seed-layer change requiring a private-`CARGO_TARGET_DIR` rebuild to verify; it is
+NOT applied here, because an unverified seed edit left in the tree is worse than
+the filed defect.
+
+Secondary observation, filed with it: `sqrt(16.0)` returned **5954099806560**
+on one run and **6163580365312** on the next — non-deterministic, so the float
+argument path has an uninitialised read on top of the type mislabel. That is not
+explained by the `TypeId::I64` line alone.
+
+Methodology consequence, confirmed: **f64 results must never be used as a
+shadowing oracle.**
+
+## 3. The native `exit` fence as specified is not implementable at that site
+
+The recommendation was to fence `exit` in the pure-Simple lane at
+`src/compiler/20.hir/hir_lowering/expressions.spl:50-58` (`is_interp_builtin_fn`).
+Reading the call graph: `is_interp_builtin_fn` is consulted **only** from
+`lower_unresolved_ident` (line 386), which is reached only after
+`self.symbols.lookup` has already MISSED (`case ExprKind.Ident` at line 711-764).
+It is an unresolved-name fallback, not a dispatch fence. Adding `exit` to that
+list would make a bare `exit` resolvable when no shadow exists and would change
+nothing when a shadow does exist — i.e. it would not fence anything. The same
+applies to adding `panic` there (`panic` is already in the list, which is why the
+Q34 control reported it builtin-bound; that is not evidence of a fence).
+
+A real fence must intercept in the `case ExprKind.Ident(name)` arm at line 711,
+**before** `self.symbols.lookup`.
+
+The target condition is the second blocker: baremetal-ness in this lane is
+decided at LINK time (`70.backend/backend/llvm_native_link.spl`), and no target
+signal is plumbed into `HirLowering` at all. So the required
+target-conditional fence needs a target flag threaded from the driver into HIR
+lowering first. That plumbing is the actual next unit of work; it is filed here
+rather than faked with an env-var read.
+
+## 4. Status of Part 1 (the 41 accidental deletions)
+
+Not started in this pass. One input to it is now settled: the widest-reach
+family — `min`/`max`/`abs` (i64) in the three `src/lib/*/runtime_wrappers.spl`,
+re-exported by `src/lib/nogc_sync_mut/__init__.spl:351` — reroutes to a builtin
+that is **measured correct for i64** (`min(3,9)=3`, `max(3,9)=9`, `abs(-5)=5`,
+table above), so the value-equivalence precondition for deleting them holds for
+integer callers. Deleting them must also remove the names from that `export`
+line, or the facade exports an undefined symbol.
