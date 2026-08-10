@@ -2,23 +2,21 @@
 
 ## Tiered Local/Global Cache, Main-Branch Promotion, AOP-Aware Invalidation, Block Reuse, Storage GC, and Lean 4 Verification
 
-**Status:** Proposed integrated architecture
-**Date:** 2026-08-09
-**Relationship to prior document:** Appends after Section 10 of
+**Status:** Proposed integrated architecture and parallel implementation plan
+**Date:** 2026-08-09 (updated 2026-08-10)
+**Relationship to the prior document:** Appends after Section 10 of
 `doc/03_plan/compiler/cache/global_cas_interpreter_cache_option_c_plan_2026-07-24.md`.
-It supersedes any wording that treats the cache as one undifferentiated store or
-AOP as one undifferentiated digest.
-**Implementation plan:** `doc/03_plan/compiler/cache/semantic_incremental_build_v2_plan_2026-08-09.md`
+It supersedes any wording that treats the cache as one undifferentiated store or AOP as one undifferentiated digest.
 
 ---
 
 # 11. Executive decisions
 
-1. **One semantic identity model across all tiers.** Local, machine-global, and remote-global caches use the same canonical `ActionDigest`, artifact digests, dependency fingerprints, AOP group digests, and block keys.
+1. **Use one semantic identity model across all tiers.** Local, machine-global, and remote-global caches use the same canonical `ActionDigest`, artifact digests, dependency fingerprints, AOP group digests, and block keys.
 
-2. **Semantic identity is separate from trust and Git history.** Branch name, Git commit, and CI workflow identity do **not** enter the semantic action key. They enter a separate admission and provenance record. This allows an unchanged action on a feature branch to hit a result produced on `main`.
+2. **Separate semantic identity from trust and Git history.** Branch name, Git commit, and CI workflow identity do **not** enter the semantic action key. They enter a separate admission and provenance record. This allows an unchanged action on a feature branch to hit a result produced on `main`.
 
-3. **Three persistent cache scopes, not merely "local" and "global."**
+3. **Use three persistent cache scopes, not merely "local" and "global."**
    - Workspace-local mutable query state.
    - Machine-global immutable CAS and per-user action indexes.
    - Remote-global CAS and trust-scoped action indexes.
@@ -43,12 +41,12 @@ AOP as one undifferentiated digest.
 
 # 12. Repository baseline and gap analysis
 
-The current tree already contains the foundations:
+The current tree already contains valuable foundations:
 
 - `src/compiler/80.driver/driver_build/incremental.spl` persists file fingerprints, file dependency paths, and generated output paths. It also has an ad hoc symbol-level MIR cache under `.build/mir_cache/`.
 - `src/compiler/80.driver/cache/cas_store.spl` implements a Phase-1 SHA-256 CAS and action manifest store with atomic rename and read-time digest verification.
 - The existing CAS explicitly states that it is not wired into normal load paths and has no GC or remote cache.
-- `doc/03_plan/compiler/cache/global_cas_interpreter_cache_option_c_plan_2026-07-24.md` defines Option C: stamp-fast lookup backed by SHA-256 identity, with strict Option A verification.
+- `doc/03_plan/compiler/cache/global_cas_interpreter_cache_option_c_plan_2026-07-24.md` already defines Option C: stamp-fast lookup backed by SHA-256 identity, with strict Option A verification.
 - `src/verification/cache_identity/` already proves canonical-key field coverage, `no_false_hit`, AOP-field visibility, order independence, and the strict/fast bridge.
 - The aspect-pack design already distinguishes static weaving, advice implementation, optional packs, catalogs, and session-local activation.
 
@@ -72,9 +70,7 @@ target
     + generated Lean model and trace checker
 ```
 
-Do not create a second CAS or a second action-key scheme. Evolve the existing
-Option-C types and make them the storage substrate for the semantic query
-architecture.
+Do not create a second CAS or a second action-key scheme. Evolve the existing Option-C types and make them the storage substrate for the semantic query architecture.
 
 ---
 
@@ -84,7 +80,7 @@ architecture.
 
 | Research/result | Relevant finding | Simple design consequence |
 |---|---|---|
-| **Apostle: A Simple Incremental Weaver for a Dynamic Aspect Language** | Two dependency-table structures suffice for useful incremental reweaving, and work can be proportional to the program change. | Maintain explicit pointcut-to-candidate and target-to-selected-advice reverse indexes. Do not rediscover all relationships by scanning source on every build. |
+| **Apostle: A Simple Incremental Weaver for a Dynamic Aspect Language** | Two dependency-table structures are sufficient for useful incremental reweaving, and work can be proportional to the program change. | Maintain explicit pointcut-to-candidate and target-to-selected-advice reverse indexes. Do not rediscover all relationships by scanning source on every build. |
 | **AspectJ incremental weaving** | Per-class weaving permits local rebuilding, but a changed crosscutting specification can require rechecking every potentially affected class. Narrow pointcuts reduce the candidate universe. | Use per-target weave artifacts, bounded MDSOC candidate partitions, and public pointcut contracts. A broad root pointcut must deliberately pay a broad invalidation cost. |
 | **Crosscutting/pointcut interfaces** | Explicit interfaces improve modularity by exposing stable crosscutting abstractions instead of coupling aspects to volatile implementation details. | A `pub pointcut` is both a language interface and an incremental-build boundary. Its contract, scope, exposed context, and selector schema form the public cache surface. |
 | **AspectJ load-time weaving cache** | Woven bytecode can be cached and reused across later starts. | Cache static weave products as immutable artifacts, but never cache session runtime registries, loaded addresses, or mutable activation state globally. |
@@ -95,9 +91,9 @@ architecture.
 |---|---|---|
 | **Rust red/green query system** | Re-executing a dirty input does not need to invalidate consumers when the output fingerprint remains unchanged. Stable identities are required across sessions. | Apply red/green at module, declaration, function, AOP-selection, and selected block-analysis levels. Stop propagation when a semantic result remains equal. |
 | **Nominal Adapton** | First-class stable names allow reuse across structurally changed executions; the formal model establishes from-scratch consistency. | Derive declaration and block identities from stable semantic anchors, not source lines, transient indexes, or heap addresses. Require a whole-function fallback when correspondence is ambiguous. |
-| **Build Systems à la Carte** | Build systems decompose into reusable components: dependency discovery, scheduling, rebuilding, caching. | Keep query evaluation, storage tiering, trust/admission, scheduling, and GC separate behind narrow interfaces. |
+| **Build Systems à la Carte** | Build systems can be decomposed into reusable components such as dependency discovery, scheduling, rebuilding, and caching. | Keep query evaluation, storage tiering, trust/admission, scheduling, and GC separate behind narrow interfaces. |
 | **Bazel action cache and CAS** | The action cache maps exact action hashes to result metadata, while CAS stores content-addressed blobs; local and remote lookup can be layered. | Preserve the existing `/actions` and `/cas` conceptual split. Trust policy applies primarily to action mappings; CAS bytes are accepted only after digest verification. |
-| **Nix GC roots** | Marking from explicit roots and deleting only unreachable store objects gives a principled safety model. | Pins, retained action manifests, active leases, releases, and current bootstrap products are roots. LRU ranks only unprotected candidates. |
+| **Nix GC roots** | Marking from explicit roots and deleting only unreachable store objects gives a principled safety model. | Pins, action manifests selected for retention, active leases, releases, and current bootstrap products are roots. LRU ranks only unprotected candidates. |
 | **GitHub branch-scoped caches** | A branch can restore default-branch cache entries, while low-trust workflows receive read-only access to the default namespace; storage limits use age/LRU eviction. | Feature branches read trusted main entries. Main writes are CI-only. Branch entries are isolated and short-lived. |
 | **SLSA cache-poisoning guidance** | A build cache should be keyed by the transitive closure of inputs and either be trusted-writer-only or carry verifiable provenance. | Require complete action keys plus trusted promotion receipts. Treat every restored file as untrusted until manifest, provenance, and content digests have been checked. |
 
@@ -106,6 +102,8 @@ architecture.
 # 14. Tiered cache architecture
 
 ## 14.1 Distinguish state, action mappings, and immutable content
+
+The architecture has three different kinds of data:
 
 ```text
 Workspace query state
@@ -164,7 +162,7 @@ L3b Remote-branch cache, optional
     Never implicitly equivalent to main.
 ```
 
-Lookup order:
+Recommended lookup order:
 
 ```text
 process
@@ -175,9 +173,7 @@ process
 → execute action
 ```
 
-Remote main is queried before the branch namespace because it has higher trust.
-Since lookup is exact-key, a changed branch action naturally misses main and can
-then hit its branch namespace.
+Remote main is queried before the branch namespace because it has higher trust. Since lookup is exact-key, a changed branch action naturally misses main and can then hit its branch namespace.
 
 On a remote hit:
 
@@ -201,8 +197,9 @@ Do **not** add these to `ActionDigest`:
 - user name,
 - workspace absolute path.
 
-They reduce cache sharing without representing program semantics. They belong in
-`PromotionReceipt`, `NamespacePolicy`, and GC metadata.
+They reduce cache sharing without representing program semantics.
+
+Instead, these fields belong in `PromotionReceipt`, `NamespacePolicy`, and GC metadata.
 
 The semantic action key continues to include all actual build inputs:
 
@@ -219,8 +216,7 @@ declared compile-time environment
 relevant block/region manifests when the action consumes them
 ```
 
-Absolute source paths are normalized to repository/package-relative stable IDs
-before hashing.
+Absolute source paths are normalized to repository/package-relative stable IDs before hashing.
 
 ## 14.4 Cache namespaces
 
@@ -262,13 +258,9 @@ Conceptual layout:
     quarantine/
 ```
 
-CAS blobs may be physically shared because every read verifies the digest.
-Action mappings are namespace-scoped because a correct content hash does not
-prove that a blob was produced by the claimed action.
+CAS blobs may be physically shared because every read verifies the digest. Action mappings are namespace-scoped because a correct content hash does not prove that a blob was produced by the claimed action.
 
-For private repositories or mutually untrusted tenants, CAS storage must be
-tenant-scoped or encrypted even when action namespaces are separate, to avoid
-presence and content disclosure.
+For private repositories or mutually untrusted tenants, CAS storage must be tenant-scoped or encrypted even when action namespaces are separate, to avoid presence and content disclosure.
 
 ## 14.5 Result and promotion manifests
 
@@ -317,14 +309,15 @@ If the same `ActionDigest` is observed with two different result manifests:
 - force strict recomputation,
 - fail mission-critical/release verification.
 
-The CAS blobs themselves may coexist because their digests differ; the conflict
-is the action mapping.
+The CAS blobs themselves may coexist because their digests differ; the conflict is the action mapping.
 
 ---
 
 # 15. Remote-main admission and branch promotion
 
 ## 15.1 Main eligibility
+
+A result is eligible for the trusted remote-main action namespace only when all conditions hold:
 
 ```text
 clean source tree
@@ -346,9 +339,7 @@ git fetch --prune origin main
 git merge-base --is-ancestor "$BUILD_COMMIT" refs/remotes/origin/main
 ```
 
-The fetched remote identity, remote URL/repository ID, main tip, and fetch time
-are recorded. A developer-controlled stale local `origin/main` reference is not a
-trust proof.
+The fetched remote identity, remote URL/repository ID, main tip, and fetch time are recorded. A developer-controlled stale local `origin/main` reference is not a trust proof.
 
 ## 15.2 Promotion modes
 
@@ -366,10 +357,11 @@ main push/merge CI
     → publish signed main action mappings
 ```
 
+This is the simplest trusted policy.
+
 ### Mode B — attested post-merge promotion; optional optimization
 
-A trusted promotion job may relabel an existing branch result without
-re-executing it only when:
+A trusted promotion job may relabel an existing branch result without re-executing it only when:
 
 - the branch build was performed by an accepted trusted builder,
 - the exact branch commit is now an ancestor of authenticated `origin/main`,
@@ -377,8 +369,7 @@ re-executing it only when:
 - the action is deterministic and globally cacheable,
 - no untrusted dependency or runtime state entered the result.
 
-The promotion operation copies only action-mapping references. CAS blobs are
-already immutable and shared.
+The promotion operation copies only action-mapping references. CAS blobs are already immutable and shared.
 
 ## 15.3 Merge strategy consequences
 
@@ -391,9 +382,7 @@ already immutable and shared.
 | Cherry-pick | Original commit usually no | Main must rebuild/reproduce |
 | Force-pushed main removing commit | No in new snapshot | Existing main entry may remain as immutable historical cache but cannot receive new promotion under that proof |
 
-Source-equivalent squash results may still generate the same semantic
-`ActionDigest`. Main CI can then reproduce or strictly validate them and publish a
-new main receipt for the main commit.
+Source-equivalent squash results may still generate the same semantic `ActionDigest`. Main CI can then reproduce or strictly validate them and publish a new main receipt for the main commit.
 
 ## 15.4 Read and write policy
 
@@ -406,10 +395,7 @@ new main receipt for the main commit.
 | Trusted main CI | Yes | Not needed | Yes |
 | Release CI | Yes, strict verification | No | Yes + pin |
 
-A local build remains successful if remote upload fails. Cache writes are
-best-effort. A release may fail only when required provenance or verification
-evidence cannot be persisted; ordinary cache capacity is not a correctness
-requirement.
+A local build remains successful if remote upload fails. Cache writes are best-effort. A release may fail only when required provenance or verification evidence cannot be persisted; ordinary cache capacity is not a correctness requirement.
 
 ---
 
@@ -417,8 +403,7 @@ requirement.
 
 ## 16.1 Do not retain one opaque `AOP_selection_digest`
 
-A single root digest is a useful summary but insufficient for precise
-invalidation. Split AOP identity into logical groups:
+A single root digest is useful as a summary, but insufficient for precise invalidation. Split AOP identity into logical groups:
 
 ```text
 AopSurfaceGroup
@@ -449,9 +434,7 @@ RuntimeActivationGeneration
     Session-local only.
 ```
 
-Logical invalidation groups are separate from physical storage packs. Small
-records may be packed together for I/O efficiency, but packing must not couple
-their cache validity.
+Logical invalidation groups are separate from physical storage packs. Small records may be packed together for I/O efficiency, but packing must not couple their cache validity.
 
 ## 16.2 Group keys
 
@@ -488,12 +471,9 @@ struct AopWeaveKey:
     backend_policy: Digest
 ```
 
-For symbolic advice calls, `AdviceImplementationDigest` is intentionally not part
-of `AopWeaveKey`. It is consumed by link/load/activation actions.
+For symbolic advice calls, `AdviceImplementationDigest` is intentionally not part of `AopWeaveKey`. It is consumed by link/load/activation actions.
 
-For static inlining, `around` expansion, security-plan embedding, or
-specialization that copies advice body semantics into the target, the relevant
-advice implementation digest **must** enter the weave key.
+For static inlining, `around` expansion, security-plan embedding, or specialization that copies advice body semantics into the target, the relevant advice implementation digest **must** enter the weave key.
 
 ## 16.3 Group manifests and Merkle partitioning
 
@@ -522,10 +502,11 @@ component
               └── JoinPointDescriptor leaves
 ```
 
-A new or changed candidate modifies only the leaf path and its partition root.
-Pointcuts read only the partitions permitted by their public scope.
+A new or changed candidate modifies only the leaf path and its partition root. Pointcuts read only the partitions permitted by their public scope.
 
 ## 16.4 Reverse dependency tables
+
+Adopt the incremental-weaver lesson directly:
 
 ```text
 pointcut group
@@ -561,11 +542,11 @@ call/execution kind
 source annotations
 ```
 
-Changing an attribute does not reevaluate a pointcut that uses only `within`, and
-changing a private body does not reevaluate a pointcut that sees only signature
-and attributes.
+Changing an attribute does not reevaluate a pointcut that uses only `within`, and changing a private body does not reevaluate a pointcut that sees only signature and attributes.
 
 ## 16.5 Invalidation transaction
+
+When an AOP source changes:
 
 1. Recompute the owning aspect/public-surface manifest.
 2. Diff pointcut contracts, normalized queries, advice interfaces, advice bodies, priorities, and pack metadata.
@@ -602,14 +583,15 @@ and attributes.
 - Legacy unpublicized cross-scope pointcuts are errors in mission-critical mode and cannot be promoted to trusted remote main.
 - Runtime-created pointcuts and mutable registries remain session-local unless they instantiate a predeclared deterministic public runtime surface.
 
-A broad public root pointcut is cacheable only when its whole-root candidate index
-is part of the key. It is correct but intentionally expensive.
+A broad public root pointcut is cacheable only when its whole-root candidate index is part of the key. It is correct but intentionally expensive.
 
 ---
 
 # 17. Block-level dependency tracking and reuse
 
 ## 17.1 Scope
+
+Block-level caching is useful for expensive analyses and transformations inside large functions. It must not expose unstable CFG details as public cross-module dependencies.
 
 Persistent public graph:
 
@@ -623,13 +605,20 @@ Function-private subgraph:
 function -> region/SCC -> block -> semantic inputs
 ```
 
-Consumers outside the function depend on the function interface, summary, or
-final artifact, never directly on a basic block.
+Consumers outside the function depend on the function interface, summary, or final artifact, never directly on a basic block.
 
 ## 17.2 Stable block identity
 
-Never key by source line, parser token offset alone, transient MIR block number,
-vector index, pointer/address, or traversal order alone.
+Never key by:
+
+- source line,
+- parser token offset alone,
+- transient MIR block number,
+- vector index,
+- pointer/address,
+- traversal order alone.
+
+Use semantic anchors:
 
 ```simple
 struct BlockKey:
@@ -672,8 +661,7 @@ preweave BlockKey
 + synthesized role
 ```
 
-When matching old and new blocks is ambiguous, invalidate the parent function. A
-false miss is acceptable; a false hit is not.
+When matching old and new blocks is ambiguous, invalidate the parent function. A false miss is acceptable; a false hit is not.
 
 ## 17.3 Block query model
 
@@ -737,7 +725,7 @@ Backward analyses use successors analogously.
 | Null/range/definite-init transfer | Block |
 | Dataflow fixed point | Block worklist within function |
 | Loop-specific optimization | Region or CFG SCC |
-| Dominator construction | Function |
+| Dominator construction | Function, with possible incremental research later |
 | Inlining | Function/call-site |
 | Escape/alias analysis | Function or call-graph SCC |
 | Global value numbering | Function initially |
@@ -745,10 +733,11 @@ Backward analyses use successors analogously.
 | Machine block layout | Function initially |
 | Final object emission | Function/codegen chunk initially |
 
-Do not begin with independently relocatable machine-code blocks. First reuse
-canonical MIR, transfer results, diagnostics, and optimized region artifacts.
+Do not begin with independently relocatable machine-code blocks. First reuse canonical MIR, transfer results, diagnostics, and optimized region artifacts. Function-level codegen remains the safe initial emission boundary.
 
 ## 17.6 AOP interaction
+
+AOP matching operates on stable pre-weave join-point descriptors.
 
 ```text
 source/HIR anchor
@@ -758,6 +747,8 @@ source/HIR anchor
     -> derived post-weave block identities
 ```
 
+Consequences:
+
 - Advice-body-only symbolic changes do not rename target blocks.
 - A selection change invalidates only blocks that contain affected join points plus any dataflow-reachable region within the function.
 - If weaving changes exception edges, control flow, effects, or dominance globally, invalidate the required region or whole function.
@@ -765,6 +756,8 @@ source/HIR anchor
 - Dynamic activation state never appears in persistent block keys.
 
 ## 17.7 Storage packing
+
+Millions of tiny CAS files would create metadata and filesystem overhead. Store one `FunctionBlockManifest` and pack small block results into immutable chunks:
 
 ```simple
 struct FunctionBlockManifest:
@@ -777,13 +770,15 @@ struct FunctionBlockManifest:
     merkle_root: Digest
 ```
 
+Recommended physical policy:
+
 - Small serialized block results are packed into indexed chunks.
 - Large blocks/regions use separate CAS blobs.
 - Logical block digests remain independent even when physically packed.
 - GC marks a pack while any retained manifest references it.
 - Background compaction may repack live small entries without changing logical digests.
 
-Enable persistent block caching only when profiling predicts positive benefit.
+Enable persistent block caching only when profiling predicts positive benefit, for example large functions or passes whose recomputation cost exceeds serialization and lookup cost.
 
 ---
 
@@ -791,11 +786,16 @@ Enable persistent block caching only when profiling predicts positive benefit.
 
 ## 18.1 Policy goals
 
-The cache must never fill the filesystem, never delete an artifact actively being
-consumed, preserve configured main/release/bootstrap roots, tolerate crashes
-during write or GC, repair metadata drift, degrade to a cache miss when capacity
-cannot be obtained, prevent a branch namespace from evicting all high-value main
-entries, and expose why bytes remain protected.
+The cache must:
+
+- never fill the filesystem,
+- never delete an artifact actively being consumed,
+- preserve configured main/release/bootstrap roots,
+- tolerate crashes during write or GC,
+- repair metadata drift,
+- degrade to a cache miss when capacity cannot be obtained,
+- prevent a branch namespace from evicting all high-value main entries,
+- expose why bytes remain protected.
 
 ## 18.2 Configurable limits
 
@@ -829,7 +829,9 @@ cache:
         tmp_hours: 24
 ```
 
-These numbers are starting points, not language semantics.
+These numbers are starting points, not language semantics. An automatic policy should use both an absolute reserve and a filesystem percentage. Explicit administrator configuration wins.
+
+Definitions:
 
 ```text
 high watermark
@@ -845,11 +847,11 @@ minimum free reserve
     Trigger emergency GC even if cache-accounted bytes are below max.
 ```
 
-Without hysteresis, every write near the maximum triggers another small cleanup,
-causing cache thrashing. A normal build never fails because a cache write was
-rejected.
+A normal build does not fail because a cache write was rejected.
 
 ## 18.3 Roots and leases
+
+GC roots:
 
 ```text
 active action/result leases
@@ -863,25 +865,27 @@ verification evidence explicitly retained by policy
 toolchain/schema artifacts required by retained actions
 ```
 
-A lease is created before materializing or mapping an artifact and released after
-the consumer finishes. Leases contain process identity, creation time,
-heartbeat/generation, and referenced manifest/artifact digests. Stale leases may
-be reclaimed only after proving their owning process/session is dead or after a
-conservative timeout plus generation check.
+A lease is created before materializing or mapping an artifact and released after the consumer is finished. Leases contain process identity, creation time, heartbeat/generation, and referenced manifest/artifact digests.
+
+Stale leases may be reclaimed only after proving their owning process/session is dead or after a conservative timeout plus generation check.
 
 ## 18.4 Two-level GC
 
 ### Fast GC
 
+Runs frequently:
+
 1. Delete expired temp files.
 2. Delete expired quarantine files according to policy.
 3. Expire remote-branch action mappings past TTL.
 4. Evict unpinned action mappings in lowest-value namespaces.
-5. Use approximate reference counts to identify CAS blobs with no remaining references.
+5. Use approximate reference counts to identify CAS blobs with no remaining action/manifest references.
 6. Atomically rename candidates into `trash/`.
 7. Delete trash asynchronously.
 
 ### Full mark-and-sweep
+
+Runs periodically or after metadata inconsistency:
 
 1. Snapshot pins, retained action mappings, and active leases.
 2. Mark result manifests reachable from those roots.
@@ -892,10 +896,11 @@ conservative timeout plus generation check.
 7. Rebuild or repair approximate reference counts and size metadata.
 8. Delete trash after a grace period.
 
-Reference counts are an optimization, not the source of truth. Mark-and-sweep
-repairs drift after crashes or races.
+Reference counts are an optimization, not the source of truth. Mark-and-sweep repairs drift after crashes or races.
 
 ## 18.5 Eviction ranking
+
+Safety is determined first. Among deletable action roots, rank by:
 
 ```text
 namespace protection class
@@ -908,7 +913,7 @@ artifact size
 toolchain/target relevance
 ```
 
-Protection order, lowest value first:
+Suggested protection order, lowest value first:
 
 ```text
 expired temporary/quarantine
@@ -924,7 +929,11 @@ release pins
 active leases
 ```
 
+A cost-aware policy can retain a rarely used but very expensive compiler stage over a frequently used tiny parse result. Keep the policy deterministic and observable.
+
 ## 18.6 Admission under storage pressure
+
+Before a large write:
 
 1. Estimate or reserve the maximum expected bytes where possible.
 2. Check cache-accounted size and filesystem free reserve.
@@ -932,9 +941,9 @@ active leases
 4. Reject the cache write when above hard limit or below minimum reserve.
 5. Continue the build without caching.
 6. Emit one rate-limited diagnostic and status metric.
-7. In remote service mode, return a clear resource-exhausted response; never accept half an action closure.
+7. In remote service mode, return a clear resource-exhausted response; do not accept half an action closure.
 
-If protected roots alone exceed the configured maximum:
+If protected roots alone exceed the configured maximum, report:
 
 ```text
 PinnedOverflow:
@@ -958,14 +967,25 @@ Never delete protected roots merely to claim that the maximum was met.
 - Startup cleans abandoned temp files, resumes/deletes trash, verifies schema, and samples or fully checks metadata consistency.
 - Corrupt entries move to quarantine and become misses.
 
-Access timestamps are journaled or batched; do not synchronously rewrite metadata
-on every hot hit.
+Access timestamps are journaled or batched; do not synchronously rewrite metadata on every hot hit.
 
 ---
 
 # 19. Generated Lean 4 verification plan
 
 ## 19.1 Extend, do not replace, the existing cache-identity proofs
+
+The repository already has:
+
+```text
+src/verification/cache_identity/
+    Model.lean
+    Theorems.lean
+```
+
+It proves canonical field coverage, `no_false_hit`, AOP-field visibility, order independence, and stamp-fast/strict equivalence. Extend this into a broader cache protocol model.
+
+Suggested layout:
 
 ```text
 src/verification/cache_protocol/
@@ -996,14 +1016,24 @@ src/verification/cache_protocol/
 
 ## 19.2 One declarative source of truth
 
+Create a schema such as:
+
 ```text
 src/compiler/80.driver/cache/schema/cache_protocol.sdn
 ```
 
-It declares action-key fields and canonical order, set/map normalization rules,
-domain tags and versions, tier and trust states, result-manifest closure, AOP
-invalidation dimensions, block reuse preconditions, GC roots and transitions,
-promotion preconditions, and diagnostics/state names.
+It declares:
+
+- action-key fields and canonical order,
+- set/map normalization rules,
+- domain tags and versions,
+- tier and trust states,
+- result-manifest closure,
+- AOP invalidation dimensions,
+- block reuse preconditions,
+- GC roots and transitions,
+- promotion preconditions,
+- diagnostics and state names.
 
 The generator emits:
 
@@ -1017,7 +1047,7 @@ The generator emits:
 8. An exported-name contract for durable manual proofs.
 9. A schema digest included in every cache identity.
 
-Regeneration may replace `Generated/*`; it must not overwrite `Theorems/*`.
+The generated and handwritten layers stay separate. Regeneration may replace `Generated/*`; it must not overwrite `Theorems/*`.
 
 ## 19.3 Proof model
 
@@ -1087,8 +1117,7 @@ strict_fast_equivalent
 same_action_has_unique_result_or_detected_conflict
 ```
 
-Conditional on explicit assumptions: cryptographic collision resistance and
-deterministic action execution.
+These are conditional on explicit assumptions such as cryptographic collision resistance and deterministic action execution.
 
 ### Promotion safety
 
@@ -1102,8 +1131,7 @@ squash_commit_without_ancestry_cannot_promote
 promotion_preserves_action_and_result_digest
 ```
 
-Lean proves the state-machine policy. Git cryptography, CI identity, and remote
-authentication are trusted boundary inputs represented by checked receipts.
+Lean proves the state-machine policy. Git cryptography, CI identity, and remote authentication are trusted boundary inputs represented by checked receipts.
 
 ### AOP invalidation
 
@@ -1120,10 +1148,11 @@ conservative_unpublicized_mode_has_no_false_hit
 selection_delta_reweaves_all_and_only_changed_targets
 ```
 
-"All and only" splits into soundness and precision theorems; safety is mandatory,
-precision may improve incrementally.
+"All and only" may be split into soundness and precision theorems; safety is mandatory, precision may be improved incrementally.
 
 ### Block reuse
+
+For deterministic local passes:
 
 ```text
 same_block_key_and_inputs_same_result
@@ -1135,8 +1164,7 @@ postweave_block_identity_depends_on_weave_plan
 function_summary_equal_stops_external_propagation
 ```
 
-The generic dataflow theorem assumes a finite lattice and monotone transfer
-functions. Individual analyses instantiate and prove those obligations.
+The generic dataflow theorem assumes a finite lattice and monotone transfer functions. Individual analyses instantiate and prove those obligations.
 
 ### GC and publication
 
@@ -1165,6 +1193,18 @@ publication_order_preserves_manifest_closure
 
 ## 19.5 Generated theorem coverage
 
+For every schema field or invalidation dimension, generate a theorem instance and a coverage manifest.
+
+Example:
+
+```lean
+theorem pointcutQuery_change_visible ...
+theorem ownerScope_change_visible ...
+theorem matcherSchema_change_visible ...
+theorem candidateRoot_change_visible ...
+theorem adviceInterfaceRoot_change_visible ...
+```
+
 CI compares:
 
 ```text
@@ -1177,6 +1217,10 @@ Adding an action-key field without a theorem is a generation failure.
 
 ## 19.6 Implementation correspondence
 
+Formal proofs over an abstract model are insufficient unless implementation behavior is tied to that model.
+
+Required correspondence gates:
+
 1. **Shared generation:** Simple and Lean identity types/encoders come from the same SDN schema.
 2. **Golden vectors:** Simple-generated canonical bytes exactly match Lean-generated/reference bytes.
 3. **Regeneration gate:** Generated files must be current and the Git diff clean after regeneration.
@@ -1186,10 +1230,11 @@ Adding an action-key field without a theorem is a generation failure.
 7. **Strict shadow mode:** Fast local, machine, and remote hits are compared against strict full-hash and/or recomputation during rollout.
 8. **Schema pin:** The schema digest and Lean toolchain identity enter cache/proof result keys.
 
-Routine structural lemmas may be generated from templates. Core semantic proofs
-remain durable manual Lean code that imports generated definitions.
+Routine structural lemmas may be generated from templates. Core semantic proofs remain durable manual Lean code that imports generated definitions.
 
 ## 19.7 Mission-critical formal gate
+
+A mission-critical cache release requires:
 
 ```text
 lake build
@@ -1205,7 +1250,7 @@ remote promotion adversarial suite
 clean versus cached release artifact digest equality
 ```
 
-A cache hit is an optimization, not proof evidence by itself.
+A cache hit is an optimization, not proof evidence by itself. Verification state and signed provenance must remain independently inspectable.
 
 ---
 
@@ -1236,8 +1281,7 @@ simple build why-rebuilt <entity>
 simple build --cache=off|local|machine|remote-read|remote-read-write
 ```
 
-`cache promote` must reject execution outside an authenticated trusted-builder
-context.
+`cache promote` must reject execution outside an authenticated trusted-builder context.
 
 ## 20.2 Explain output
 
@@ -1273,7 +1317,371 @@ component pack: rebuilt
 
 ---
 
-# 21. Acceptance criteria
+# 21. Parallel-agent implementation plan
+
+This extends the prior A0–A13 plan. Freeze shared schemas first, then permit parallel work with exclusive file ownership.
+
+## Wave C0 — serial contract freeze
+
+### Agent C0 — Cache protocol and formal schema owner
+
+**Owns**
+
+```text
+src/compiler/80.driver/cache/schema/
+doc/05_design/compiler/semantic_incremental_build_cache_aop_formal_2026-08-09.md
+```
+
+**Delivers**
+
+- cache tier/trust enums,
+- namespace model,
+- result and promotion manifests,
+- AOP group identities,
+- block key/input/result schemas,
+- GC root/lease/state schemas,
+- canonical encoding rules,
+- generator input and exported-name contract.
+
+**Gate**
+
+- Canonical order fixed.
+- Every semantic field classified as key, provenance, local state, or GC metadata.
+- No production agent invents another cache key.
+
+## Wave C1 — parallel foundations
+
+### Agent C1 — Local and machine CAS/tier router
+
+**Owns**
+
+```text
+src/compiler/80.driver/cache/cas_store.spl
+src/compiler/80.driver/cache/tier_router/
+src/compiler/80.driver/cache/action_index/
+```
+
+**Delivers**
+
+- wire existing CAS into local/machine paths,
+- immutable result manifests,
+- exact lookup and read-through/backfill,
+- action-mapping conflict detection,
+- process single-flight,
+- binary-safe streaming and strict digest verification.
+
+### Agent C2 — Remote-main policy and provenance
+
+**Owns**
+
+```text
+src/compiler/80.driver/cache/remote/
+src/compiler/80.driver/cache/promotion/
+scripts/cache/promotion/
+```
+
+**Delivers**
+
+- remote client/protocol adapter,
+- repository identity,
+- authenticated main snapshot receipt,
+- Git ancestry gate,
+- signed `PromotionReceipt`,
+- main/branch namespace policy,
+- squash/rebase handling,
+- read-only developer mode.
+
+### Agent C3 — Quota, metadata, leases, and GC
+
+**Owns**
+
+```text
+src/compiler/80.driver/cache/gc/
+src/compiler/80.driver/cache/lease/
+src/compiler/80.driver/cache/metadata/
+```
+
+**Delivers**
+
+- high/low/hard watermarks,
+- disk free-space reserve,
+- fast eviction,
+- full mark-and-sweep,
+- pins and active leases,
+- crash-safe trash/quarantine cleanup,
+- refcount repair,
+- dry-run/explain reports.
+
+C3 does not edit `cas_store.spl`; it consumes the storage API owned by C1.
+
+### Agent C4 — AOP cache groups
+
+**Owns**
+
+```text
+src/compiler/85.mdsoc/aop_cache/
+src/compiler/85.mdsoc/aop_index/
+```
+
+**Delivers**
+
+- AOP group manifests,
+- candidate Merkle partitions,
+- selector read sets,
+- reverse dependency tables,
+- per-target selection shards,
+- precise invalidation transaction,
+- public/private/conservative trust eligibility.
+
+### Agent C5 — Block dependency and result cache
+
+**Owns**
+
+```text
+src/compiler/50.mir/incremental/
+src/compiler/60.optimizer/incremental/
+```
+
+**Delivers**
+
+- stable `BlockKey`,
+- block/region manifests,
+- incremental dataflow worklist,
+- function fallback,
+- pass eligibility policy,
+- small-result packing,
+- pre/post-weave identity derivation.
+
+### Agent C6 — Generated Lean model and theorem library
+
+**Owns**
+
+```text
+src/app/gen_cache_model/
+src/verification/cache_protocol/
+scripts/check/check-cache-protocol-formal.shs
+```
+
+**Delivers**
+
+- SDN-to-Simple and SDN-to-Lean generator,
+- generated field-coverage theorems,
+- promotion/AOP/block/GC models,
+- durable manual proof modules,
+- no-trust-bypass gate,
+- executable trace checker,
+- cross-language golden vectors.
+
+### Agent C7 — SSpec and adversarial fixtures
+
+**Owns**
+
+```text
+test/01_unit/compiler/cache_v2/
+test/02_integration/compiler/cache_v2/
+test/03_system/compiler/cache_v2/
+scripts/check/check-cache-v2-*.shs
+```
+
+No production compiler edits.
+
+**Delivers**
+
+- branch/main history fixtures,
+- corruption and poisoning cases,
+- concurrent put/GC/read cases,
+- AOP mutation matrix,
+- block CFG mutation matrix,
+- disk-pressure and crash-recovery tests,
+- clean/cached equivalence harness,
+- baseline performance telemetry.
+
+## Wave C2 — integration
+
+### Agent C8 — Semantic query/build integration
+
+**Depends on:** C1, C3, C4, C5
+
+**Owns**
+
+```text
+src/compiler/80.driver/cache_integration/
+src/compiler/80.driver/query_store/
+```
+
+**Delivers**
+
+- query result manifests,
+- workspace query DB to machine/remote artifact bridge,
+- AOP and block roots in action keys,
+- exact tier lookup,
+- strict shadow comparison,
+- diagnostics and explain paths.
+
+### Agent C9 — CI promotion and remote service integration
+
+**Depends on:** C1, C2, C3, C6
+
+**Owns**
+
+```text
+.github/workflows/cache-*
+scripts/ci/cache-*
+src/app/cache_gateway/
+```
+
+**Delivers**
+
+- trusted-main writer workflow,
+- optional branch namespace,
+- policy gateway or existing remote-cache backend adapter,
+- signed receipts,
+- remote quota/TTL enforcement,
+- metrics and administration.
+
+### Agent C10 — Bootstrap/component cache integration
+
+**Depends on:** C8
+
+**Owns**
+
+```text
+scripts/bootstrap/cache/
+src/app/cli/native_build_cache_v2/
+```
+
+**Delivers**
+
+- componentized bootstrap lookup,
+- retained bootstrap roots,
+- selected-backend closure caching,
+- strict release/bootstrap policy,
+- no full-source probe on warm component build.
+
+## Wave C3 — certification
+
+### Agent C11 — Formal and adversarial certification
+
+**Depends on:** C7, C8, C9, C10
+
+**Owns**
+
+```text
+src/verification/cache_protocol/certification/
+doc/09_report/cache_v2_certification_*.md
+```
+
+**Delivers**
+
+- proof gate results,
+- strict/fast/tier parity,
+- clean/cached artifact equality,
+- remote-main attack simulation,
+- GC model/implementation trace equivalence,
+- AOP precision and soundness report,
+- block incremental/full-analysis equivalence,
+- production-readiness decision.
+
+## Merge order
+
+```text
+C0
+↓
+C1 + C2 + C3 + C4 + C5 + C6 + C7
+↓
+C8 + C9
+↓
+C10
+↓
+C11
+```
+
+## Coordination rules
+
+1. C0 schemas are frozen before parallel implementation.
+2. C1 is the sole owner of `cas_store.spl`.
+3. C3 accesses CAS only through the C1 API.
+4. C4 and C5 emit manifests; C8 is the sole owner of query/action-key wiring.
+5. C6 owns generated formal artifacts and manual cache-protocol proofs.
+6. C7 owns tests but not production fixes.
+7. C9 is the sole owner of remote-main write credentials/workflows.
+8. Each agent supplies an invalidation table and `cache explain` evidence.
+9. No agent declares cache correctness from hit-rate tests alone.
+10. C11 alone declares the feature release-ready.
+
+---
+
+# 22. Migration sequence
+
+## Phase 0 — observability and schema
+
+- Land C0 schema and generator.
+- Record current cache size, build times, file reads, MIR cache usage, and invalidation breadth.
+- Add `cache explain` without changing reuse behavior.
+- Extend existing Lean identity model in compute-only mode.
+
+## Phase 1 — local/machine CAS with bounded storage
+
+- Wire existing CAS into immutable action/result paths.
+- Add metadata, watermarks, leases, and GC before enabling broad writes.
+- Keep legacy cache authoritative; shadow-compare.
+- Verify strict hash parity and corruption behavior.
+
+## Phase 2 — workspace semantic query integration
+
+- Persist declaration/function query records.
+- Store immutable query results in machine CAS.
+- Keep query graph workspace-local.
+- Retire ad hoc filename-sanitized MIR cache paths after equivalence tests.
+
+## Phase 3 — remote-main read-only
+
+- Deploy remote CAS/action backend.
+- Developer and branch builds read main only.
+- Verify all blobs and manifests.
+- Collect hit/miss and non-hermetic-key diagnostics.
+- No remote writes from local machines.
+
+## Phase 4 — trusted main publication
+
+- Enable main CI receipts and protected writer.
+- Detect action mapping conflicts.
+- Pin current bootstrap/release roots.
+- Keep branch cache disabled initially.
+
+## Phase 5 — optional branch namespace and promotion
+
+- Add trusted branch CI namespace with TTL/quota.
+- Implement post-merge ancestry promotion.
+- Keep rebuild-on-main as default.
+- Test merge, rebase, squash, cherry-pick, force-push, and deleted-branch cases.
+
+## Phase 6 — AOP group cache
+
+- Shadow the precise group invalidation against conservative whole-scope invalidation.
+- Require identical selected target/advice sets.
+- Enable public scoped groups first.
+- Keep legacy unpublicized groups conservative.
+- Mission-critical mode rejects unpublicized cross-scope use.
+
+## Phase 7 — block-level cache
+
+- Start with dataflow transfer results and diagnostics.
+- Enable only for selected large/expensive functions.
+- Shadow every reused result against full-function analysis.
+- Add region reuse.
+- Defer block machine-code emission.
+
+## Phase 8 — bootstrap and release default
+
+- Enable componentized bootstrap reads from trusted main.
+- Normal development uses local/machine/remote-read.
+- Release performs strict verification, proofs, provenance validation, and clean/cached equality.
+- Remove legacy path-keyed cache authority.
+
+---
+
+# 23. Acceptance criteria
 
 ## Tiering and promotion
 
@@ -1331,7 +1739,7 @@ component pack: rebuilt
 
 ---
 
-# 22. Non-negotiable invariants
+# 24. Additional non-negotiable invariants
 
 1. Git history controls **admission**, never semantic action identity.
 2. A branch name alone never authorizes main-cache publication.
@@ -1354,6 +1762,25 @@ component pack: rebuilt
 
 ---
 
+# 25. Recommended first integrated milestone
+
+Implement only this vertical slice first:
+
+1. Shared cache-protocol SDN schema and generated Simple/Lean types.
+2. Existing CAS wired as local and machine immutable storage.
+3. Result manifest closure and exact action index.
+4. High/low/hard storage watermarks, leases, and mark/sweep GC.
+5. Remote-main **read-only** client.
+6. Trusted main receipt model, but keep writes disabled.
+7. AOP public-surface, candidate-partition, selection, and advice-implementation digests.
+8. One block-level dataflow cache with whole-function fallback.
+9. Lean proofs for identity, GC root preservation, symbolic advice body separation, and block transfer reuse.
+10. Strict shadow comparison against clean recomputation.
+
+Only after that milestone has zero divergence should remote-main writes, branch promotion, broader AOP group reuse, and more block-level passes be enabled.
+
+---
+
 # References
 
 - [R1] Brian de Alwis and Gregor Kiczales, *Apostle: A Simple Incremental Weaver for a Dynamic Aspect Language*, UBC Technical Report TR-2003-16, 2003.
@@ -1361,7 +1788,7 @@ component pack: rebuilt
 - [R3] William G. Griswold et al., *Modular Software Design with Crosscutting Interfaces*, IEEE Software 23(1), 2006, DOI 10.1109/MS.2006.24.
 - [R4] Matthew A. Hammer et al., *Incremental Computation with Names*, OOPSLA 2015.
 - [R5] Rust Compiler Development Guide, *Incremental compilation* and the red/green algorithm.
-- [R6] Andrey Mokhov, Neil Mitchell, and Simon Peyton Jones, *Build Systems à la Carte: Theory and Practice*, JFP 30, 2020.
+- [R6] Andrey Mokhov, Neil Mitchell, and Simon Peyton Jones, *Build Systems à la Carte: Theory and Practice*, Journal of Functional Programming 30, 2020.
 - [R7] Bazel documentation, *Remote Caching*.
 - [R8] Git documentation, `git merge-base --is-ancestor`.
 - [R9] GitHub Actions documentation, branch cache restrictions, cache security, limits, and eviction.

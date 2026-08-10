@@ -5,6 +5,10 @@
 **Design:** `doc/05_design/compiler/semantic_incremental_build_cache_aop_formal_2026-08-09.md`
 **Supersedes scope of:** `doc/03_plan/compiler/cache/global_cas_interpreter_cache_option_c_plan_2026-07-24.md` (Option C remains the identity substrate; this plan wires it into tiers, GC, AOP groups, block reuse, and Lean verification)
 
+**Companion plans (2026-08-10):**
+- `doc/03_plan/compiler/perf/compiler_interpreter_performance_program_2026-08-10.md` — startup/bytecode/AOP-lazy/daemon performance program (Waves F/S/V/A/Q/J/R). Its F0/S3 schema-and-CAS work is the SAME substrate as C0/C1 here — one schema, one CAS, no forks.
+- `doc/03_plan/compiler/build_system/targeted_build_interface_compat_minimal_bootstrap_2026-08-10.md` — named targets, four-digest interface compatibility, minimal bootstrap (Agents A0–A8). Its A3/A4 interface digests feed this plan's action keys; its Wave 5 replaces the bootstrap-wide cache clear.
+
 ---
 
 ## 1. Scope in one paragraph
@@ -70,7 +74,7 @@ provenance, local state, or GC metadata; no downstream agent invents another key
 | **C2** Remote policy + provenance | `cache/remote/`, `cache/promotion/`, `scripts/cache/promotion/` | remote client; repository identity; authenticated main-snapshot receipt; Git ancestry gate; signed `PromotionReceipt`; main/branch namespace policy; squash/rebase handling; read-only developer mode |
 | **C3** Quota, metadata, leases, GC | `cache/gc/`, `cache/lease/`, `cache/metadata/` | high/low/hard watermarks; free-space reserve; fast eviction; full mark-and-sweep; pins and leases; crash-safe trash/quarantine; refcount repair; dry-run/explain |
 | **C4** AOP cache groups | `src/compiler/85.mdsoc/aop_cache/`, `aop_index/` | group manifests; candidate Merkle partitions; selector read sets; reverse dependency tables; per-target selection shards; precise invalidation transaction; trust eligibility |
-| **C5** Block dependency + result cache | `src/compiler/50.mir/incremental/`, `src/compiler/60.mir_opt/incremental/` | stable `BlockKey`; block/region manifests; incremental dataflow worklist; function fallback; pass eligibility policy; small-result packing; pre/post-weave identity derivation |
+| **C5** Block dependency + result cache | `src/compiler/50.mir/incremental/`, `src/compiler/60.optimizer/incremental/` | stable `BlockKey`; block/region manifests; incremental dataflow worklist; function fallback; pass eligibility policy; small-result packing; pre/post-weave identity derivation |
 | **C6** Generated Lean model | `src/app/gen_cache_model/`, `src/verification/cache_protocol/`, `scripts/check/check-cache-protocol-formal.shs` | SDN→Simple and SDN→Lean generator; generated field-coverage theorems; promotion/AOP/block/GC models; durable manual proofs; no-trust-bypass gate; executable trace checker; golden vectors |
 | **C7** SSpec + adversarial fixtures | `test/0{1,2,3}_*/compiler/cache_v2/`, `scripts/check/check-cache-v2-*.shs` | branch/main history fixtures; corruption and poisoning cases; concurrent put/GC/read; AOP mutation matrix; block CFG mutation matrix; disk-pressure and crash-recovery; clean/cached equivalence harness; baseline telemetry. **No production compiler edits.** |
 
@@ -163,6 +167,29 @@ Anti-clobber rules from `.claude/rules/vcs.md` still apply in full, and matter
 more here because stages land from separate worktrees: rebase onto
 `main@origin` before snapshotting, commit only paths this stage authored, and
 never whole-WC-commit a stale tree.
+
+### Agent-tier policy (mandatory, 2026-08-10)
+
+Cost-tiered model assignment across all waves in this plan and the two
+companion plans:
+
+| Task class | Model | Examples |
+|---|---|---|
+| Mechanical/small: file scaffolding, fixture generation, table transcription, single-file mechanical edits with an exact spec | **haiku** | C7 fixture files, golden-vector emission, `.smeta` fixture writers |
+| Standard implementation with a frozen contract | **sonnet** | tier router, GC eviction loop, watcher adapters, `.sreq` emitters |
+| Design-bearing, cross-cutting, or proof work | **opus/fable** | C0/F0/A0 schema freeze, Lean theorem modules, red/green propagation, bytecode contract V0 |
+
+Rules:
+
+1. Every small-model task ships with a **detailed guide**: exact files, exact
+   signatures/schema, acceptance check command, and what NOT to touch. A small
+   model never makes a design decision.
+2. Every agent result — regardless of tier — is **reviewed by a higher-tier
+   model** before merge (per `feedback_review_every_subagent_result_with_higher_model`):
+   verify SHAs, run the stage gate, sabotage one negative check. Rework with
+   guidance rather than redo.
+3. A reviewer that finds a design gap escalates to the wave's contract owner
+   (C0/F0/A0); it does not patch the contract itself.
 
 ### Coordination rules
 

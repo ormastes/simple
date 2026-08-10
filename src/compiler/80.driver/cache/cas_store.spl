@@ -21,6 +21,7 @@
 # beyond atomic rename, no GC, no remote cache.
 
 use std.crypto.sha256.{sha256_text}
+use compiler.driver.cache.action_key.{canon_str, canon_nat, canon_field, canon_seq}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
@@ -40,6 +41,22 @@ struct ActionManifest:
     action_digest: text
     artifact_digests: [text]
     schema_version: i64
+
+# ResultManifest — C1 widened record (doc/03_plan/compiler/cache/c0_schema_freeze_2026-08-09.md
+# §4). Field subset per schema §14.5 / cache_protocol.sdn `result_manifest`:
+# action_digest, result_kind, artifact_digests, output_fingerprint,
+# dependency_manifest, producer_schema (= the old `schema_version`, renamed).
+# `result_kind` is encoded by NAME (never ordinal), matching the schema rule
+# for every enum in this protocol.
+struct ResultManifest:
+    action_digest: text
+    result_kind: text
+    artifact_digests: [text]
+    output_fingerprint: text
+    dependency_manifest: text
+    producer_schema: i64
+
+val RESULT_MANIFEST_HEADER: text = "simple-result-manifest-v2"
 
 # ============================================================================
 # Root resolution + paths
@@ -198,3 +215,103 @@ fn action_get(root: text, action_digest: text) -> ActionManifest?:
         case nil:
             cas_quarantine(root, path)
             return nil
+
+# ============================================================================
+# Result manifests (C1 — closure-checked publish over ActionManifest)
+# ============================================================================
+
+# Canonical encoding reuses action_key.spl's domain-separated, length-prefixed
+# primitives so the manifest's own digest is collision-safe the same way
+# ActionKey is.
+fn result_manifest_encode(m: ResultManifest) -> text:
+    var artifact_items: [text] = []
+    for d in m.artifact_digests:
+        artifact_items.push(canon_str(d))
+    var fields: [text] = []
+    fields.push(canon_field("actionDigest", canon_str(m.action_digest)))
+    fields.push(canon_field("resultKind", canon_str(m.result_kind)))
+    fields.push(canon_field("artifactDigests", canon_seq(artifact_items)))
+    fields.push(canon_field("outputFingerprint", canon_str(m.output_fingerprint)))
+    fields.push(canon_field("dependencyManifest", canon_str(m.dependency_manifest)))
+    fields.push(canon_field("producerSchema", canon_nat(m.producer_schema)))
+    canon_field(RESULT_MANIFEST_HEADER, canon_seq(fields))
+
+fn result_manifest_serialize(m: ResultManifest) -> text:
+    var lines: [text] = [RESULT_MANIFEST_HEADER, m.action_digest, m.result_kind,
+        m.output_fingerprint, m.dependency_manifest, "{m.producer_schema}"]
+    for d in m.artifact_digests:
+        lines = lines.push(d)
+    lines.join("\n")
+
+fn result_manifest_parse(content: text) -> ResultManifest?:
+    val lines = content.split("\n")
+    if lines.len() < 6:
+        return nil
+    if lines[0] != RESULT_MANIFEST_HEADER:
+        return nil
+    var artifacts: [text] = []
+    var i = 6
+    while i < lines.len():
+        if lines[i] != "":
+            artifacts = artifacts.push(lines[i])
+        i = i + 1
+    val producer_schema = lines[5].to_i64() ?? -1
+    ResultManifest(
+        action_digest: lines[1],
+        result_kind: lines[2],
+        artifact_digests: artifacts,
+        output_fingerprint: lines[3],
+        dependency_manifest: lines[4],
+        producer_schema: producer_schema
+    )
+
+# Closure check: every artifact digest a ResultManifest references must
+# already exist in CAS before the mapping is admitted. Never publish a
+# dangling reference.
+fn result_manifest_closure_complete(root: text, m: ResultManifest) -> bool:
+    for d in m.artifact_digests:
+        if not cas_has(root, d):
+            return false
+    true
+
+# Publish a ResultManifest under its action digest, ONLY if every referenced
+# artifact is already present in CAS (closure check). Refuses a mislabeled
+# manifest the same way action_put does.
+fn result_manifest_put(root: text, action_digest: text, m: ResultManifest) -> bool:
+    if m.action_digest != action_digest:
+        return false
+    if not result_manifest_closure_complete(root, m):
+        return false
+    val path = cas_action_path(root, action_digest)
+    rt_dir_create_all(cas_parent_dir(path))
+    rt_dir_create_all("{root}/tmp")
+    val tmp = "{root}/tmp/result-{action_digest}.{rt_getpid()}.tmp"
+    if not rt_file_write_text(tmp, result_manifest_serialize(m)):
+        return false
+    if not rt_file_move(tmp, path):
+        rt_file_delete(tmp)
+        return rt_file_exists(path)
+    true
+
+fn result_manifest_get(root: text, action_digest: text) -> ResultManifest?:
+    val path = cas_action_path(root, action_digest)
+    if not rt_file_exists(path):
+        return nil
+    val content = rt_file_read_text(path) ?? ""
+    val parsed = result_manifest_parse(content)
+    match parsed:
+        case Some(manifest):
+            if manifest.action_digest != action_digest:
+                cas_quarantine(root, path)
+                return nil
+            return manifest
+        case nil:
+            cas_quarantine(root, path)
+            return nil
+
+export ActionManifest, ResultManifest
+export cas_root, cas_open, cas_put, cas_get, cas_has, cas_quarantine
+export cas_blob_path, cas_action_path, cas_parent_dir
+export action_manifest_serialize, action_manifest_parse, action_put, action_get
+export result_manifest_encode, result_manifest_serialize, result_manifest_parse
+export result_manifest_closure_complete, result_manifest_put, result_manifest_get

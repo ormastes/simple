@@ -1,0 +1,63 @@
+# ModuleIdentity — the per-module digest roots (plan §7.2, first slice §20).
+#
+# Compute-and-log only: NOT wired into any build decision.
+#
+# source_digest         — SHA-256 of raw module source bytes (as text).
+# implementation_digest — SHA-256 of the normalized module (comments and
+#                         trailing/blank-line formatting stripped; bodies kept).
+# compile_interface_digest — see compile_interface.spl.
+# abi_interface_digest / compile_semantic_digest / link_export_digest —
+#   PLACEHOLDERS: currently the compile-interface part set re-hashed under a
+#   distinct domain tag. Real ABI analysis (layout, mangling, vtable slots)
+#   and semantic-export analysis (macros, CTFE, inline bodies) are follow-ups
+#   per plan §7.2/§20 step 8 — do NOT read these as real ABI/semantic facts.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.tools.api_surface.{ApiSurface}
+use compiler.semantics.interface.compile_interface.{
+    compile_interface_parts, compile_interface_digest, interface_digest_with_domain}
+
+val ABI_INTERFACE_DOMAIN: text = "simple/abi-interface/placeholder-v0"
+val COMPILE_SEMANTIC_DOMAIN: text = "simple/compile-semantic/placeholder-v0"
+val LINK_EXPORT_DOMAIN: text = "simple/link-export/placeholder-v0"
+
+struct ModuleIdentity:
+    module: text
+    source_digest: text
+    implementation_digest: text
+    compile_interface_digest: text
+    abi_interface_digest: text
+    compile_semantic_digest: text
+    link_export_digest: text
+
+# Normalize the module for implementation identity: strip whole-line and
+# trailing `#` comments (naive: not string-aware inside `"..."` containing
+# `#` — acceptable for the identity digest first slice), trim trailing
+# whitespace, drop blank lines. Bodies remain, so body edits change it.
+fn normalize_module_source(source: text) -> text:
+    var out: [text] = []
+    for line in source.split("\n"):
+        var code = line
+        val hash_pos = code.index_of("#")
+        if hash_pos >= 0:
+            code = code.substring(0, hash_pos)
+        code = code.trim_end()
+        if code.len() > 0:
+            out.push(code)
+    out.join("\n")
+
+fn implementation_digest_of(source: text) -> text:
+    sha256_text("simple/implementation/v1\n" + normalize_module_source(source))
+
+# Entry point for later agents: identity from the module's public surface +
+# its raw source text.
+fn compute_module_identity(surface: ApiSurface, source: text) -> ModuleIdentity:
+    val parts = compile_interface_parts(surface)
+    ModuleIdentity(
+        module: surface.module,
+        source_digest: sha256_text(source),
+        implementation_digest: implementation_digest_of(source),
+        compile_interface_digest: compile_interface_digest(surface),
+        abi_interface_digest: interface_digest_with_domain(ABI_INTERFACE_DOMAIN, parts),
+        compile_semantic_digest: interface_digest_with_domain(COMPILE_SEMANTIC_DOMAIN, parts),
+        link_export_digest: interface_digest_with_domain(LINK_EXPORT_DOMAIN, parts))

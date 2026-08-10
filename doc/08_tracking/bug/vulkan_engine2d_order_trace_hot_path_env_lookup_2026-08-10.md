@@ -18,10 +18,6 @@ constructing its message. The diagnostic remains opt-in with identical output
 when the variable is set before process startup; disabled frames perform only a
 cached branch and retain the existing DrawIR-to-Engine2D ownership path.
 
-The cached value is intentionally immutable. There is no testing override that
-can leak a stale enabled state between examples; subprocess tests must set the
-environment before startup, matching the production contract.
-
 ## Evidence
 
 `test/01_unit/check/vulkan_engine2d_trace_hot_path_contract_spec.spl` pins the

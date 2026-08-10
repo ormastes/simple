@@ -410,17 +410,6 @@ impl RenderBackend for VulkanBackend:
             self.cpu_fallback_reason = reason
         self.cpu_fallback_used = true
 
-    me _record_primitive_dispatch(dispatched: i64, failure_reason: text):
-        """Commit one primitive dispatch result to backend provenance."""
-        if dispatched > 0:
-            self.dirty = true
-            if dispatched == VK_DISPATCH_COMPLETED_INELIGIBLE:
-                self.mark_cpu_fallback(failure_reason + "-cleanup-ineligible")
-            return
-        self.mark_cpu_fallback(failure_reason)
-        if dispatched < 0:
-            self.completion_unknown = true
-
     me mark_completion_unknown():
         self.completion_unknown = true
 
@@ -518,15 +507,21 @@ impl RenderBackend for VulkanBackend:
         val workgroups = (total + 255) / 256
         val pc = _pack_clear_pc(color, self.w, self.h)
         val dispatched = self._dispatch_framebuffer_checked(self.pipe_clear, pc, workgroups, 1, 1)
-        self._record_primitive_dispatch(dispatched, "clear-dispatch-failed")
+        if dispatched > 0:
+            self.dirty = true
+        else:
+            self.mark_cpu_fallback("clear-dispatch-failed")
+            if dispatched < 0:
+                self.completion_unknown = true
+            elif self.initialized and self.d_framebuffer > 0:
+                self.dirty = true
 
     me draw_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
         if self.completion_unknown: return
         val pc = _pack_rect_pc(x, y, w, h, color, self.w, self.h, self.clip_x, self.clip_y, self.clip_w, self.clip_h, self.clip_enabled)
         val gx = (_i64(w) + 15) / 16
         val gy = (_i64(h) + 15) / 16
-        val dispatched = self._dispatch_framebuffer_checked(self.pipe_rect_outline, pc, gx, gy, 1)
-        self._record_primitive_dispatch(dispatched, "rect-outline-dispatch-failed")
+        self._dispatch_framebuffer_checked(self.pipe_rect_outline, pc, gx, gy, 1)
 
     me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
         if self.completion_unknown: return
@@ -544,7 +539,14 @@ impl RenderBackend for VulkanBackend:
         val gx = (_i64(w) + 15) / 16
         val gy = (_i64(h) + 15) / 16
         val dispatched = self._dispatch_framebuffer_checked(self.pipe_rect_filled, pc, gx, gy, 1)
-        self._record_primitive_dispatch(dispatched, "rect-dispatch-failed")
+        if dispatched > 0:
+            self.dirty = true
+        else:
+            self.mark_cpu_fallback("rect-dispatch-failed")
+            if dispatched < 0:
+                self.completion_unknown = true
+            elif self.initialized and self.d_framebuffer > 0:
+                self.dirty = true
 
     me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
         if self.completion_unknown: return
@@ -570,7 +572,12 @@ impl RenderBackend for VulkanBackend:
             self.clip_enabled)
         val dispatched = self._dispatch_framebuffer_checked(
             self.pipe_line, pc, 1, 1, 1)
-        self._record_primitive_dispatch(dispatched, "line-dispatch-failed")
+        if dispatched > 0:
+            self.dirty = true
+        else:
+            self.mark_cpu_fallback("line-dispatch-failed")
+        if dispatched < 0:
+            self.completion_unknown = true
 
     me draw_circle(cx: i32, cy: i32, r: i32, color: u32):
         if self.completion_unknown: return
@@ -589,8 +596,7 @@ impl RenderBackend for VulkanBackend:
         val gx = (_i64(bw) + 15) / 16
         val gy = (_i64(bh) + 15) / 16
         val pc = _pack_circle_pc(cx, cy, r, color, self.w, self.h, 1, self.clip_x, self.clip_y, self.clip_w, self.clip_h, self.clip_enabled)
-        val dispatched = self._dispatch_framebuffer_checked(self.pipe_circle_filled, pc, gx, gy, 1)
-        self._record_primitive_dispatch(dispatched, "circle-filled-dispatch-failed")
+        self._dispatch_framebuffer_checked(self.pipe_circle_filled, pc, gx, gy, 1)
 
     me draw_rounded_rect(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32):
         if self.completion_unknown: return
@@ -622,16 +628,14 @@ impl RenderBackend for VulkanBackend:
         val gx = (_i64(bw) + 15) / 16
         val gy = (_i64(bh) + 15) / 16
         val pc = _pack_triangle_pc(x1, y1, x2, y2, x3, y3, color, self.w, self.h, min_x, min_y, self.clip_x, self.clip_y, self.clip_w, self.clip_h, self.clip_enabled)
-        val dispatched = self._dispatch_framebuffer_checked(self.pipe_triangle, pc, gx, gy, 1)
-        self._record_primitive_dispatch(dispatched, "triangle-filled-dispatch-failed")
+        self._dispatch_framebuffer_checked(self.pipe_triangle, pc, gx, gy, 1)
 
     me draw_gradient_rect(x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32):
         if self.completion_unknown: return
         val gx = (_i64(w) + 15) / 16
         val gy = (_i64(h) + 15) / 16
         val pc = _pack_gradient_pc(x, y, w, h, top_color, bottom_color, self.w, self.h, self.clip_x, self.clip_y, self.clip_w, self.clip_h, self.clip_enabled)
-        val dispatched = self._dispatch_framebuffer_checked(self.pipe_gradient, pc, gx, gy, 1)
-        self._record_primitive_dispatch(dispatched, "gradient-rect-dispatch-failed")
+        self._dispatch_framebuffer_checked(self.pipe_gradient, pc, gx, gy, 1)
 
     me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
         if self.completion_unknown: return

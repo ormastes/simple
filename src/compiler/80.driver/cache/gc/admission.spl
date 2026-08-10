@@ -1,0 +1,112 @@
+# Pre-write admission control — cache_protocol.sdn `gc.limits.machine`
+# (hard_limit_ratio, min_free_ratio) and `gc.pinned_overflow_report`
+# ("never delete a protected root to meet a size target").
+#
+# A write that would push the store over the hard limit, or that has less
+# than min_free_bytes headroom, is rejected: the caller gets AdmissionSkip
+# and the build continues without caching that one artifact. This is a
+# storage-accounting decision only; it never touches identity/trust classes
+# (see cache_protocol.sdn header note on CAS/TRUST/GC_METADATA separation).
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_size(path: text) -> usize?
+extern fn rt_dir_exists(path: text) -> bool
+extern fn rt_dir_walk(root: text) -> [text]
+
+use compiler.driver.cache.metadata.cache_limits.{
+    CacheLimits, cache_limits_hard_limit_bytes, cache_limits_min_free_bytes,
+}
+use compiler.driver.cache.cas_store.{cas_blob_path}
+
+struct AdmissionResult:
+    admitted: bool
+    reason: text
+
+struct PinnedOverflowReport:
+    protected_bytes: i64
+    configured_max: i64
+    largest_roots: [text]
+    suggested_action: text
+
+fn dir_total_bytes(root: text) -> i64:
+    if not rt_file_exists(root):
+        return 0
+    var total: i64 = 0
+    for path in rt_dir_walk(root):
+        if not rt_dir_exists(path):
+            match rt_file_size(path):
+                case Some(sz):
+                    total = total + sz.to_i64()
+                case nil:
+                    pass_do_nothing
+    total
+
+fn cache_total_bytes(root: text) -> i64:
+    dir_total_bytes("{root}/cas") + dir_total_bytes("{root}/actions")
+
+# Reads pins the same way mark_sweep.spl does (root/pins, one digest/line) —
+# duplicated here rather than imported to keep admission a leaf module gc/
+# fast_gc and gc/mark_sweep can both run without depending on each other.
+fn read_pins(root: text) -> [text]:
+    val path = "{root}/pins"
+    if not rt_file_exists(path):
+        return []
+    val content = rt_file_read_text(path) ?? ""
+    var out: [text] = []
+    for line in content.split("\n"):
+        if line.trim() != "":
+            out = out.push(line.trim())
+    out
+
+# Bytes protected by explicit pins (approximate: sums matching blob sizes).
+fn pinned_bytes(root: text) -> i64:
+    val pins = read_pins(root)
+    if pins.len() == 0:
+        return 0
+    var total: i64 = 0
+    for digest in pins:
+        val path = cas_blob_path(root, digest)
+        match rt_file_size(path):
+            case Some(sz):
+                total = total + sz.to_i64()
+            case nil:
+                pass_do_nothing
+    total
+
+# Pre-write admission check. write_bytes is the size of the write about to
+# happen; pass 0 to check current headroom only (e.g. before a GC pass).
+#
+# min_free_ratio is scoped to the cache's own configured budget (max_bytes),
+# not host filesystem free space — no rt_ runtime symbol exposes real disk
+# free bytes today (checked: unresolvable-here). It reserves a slice of the
+# configured quota so a burst of writes cannot fill 100% of max_bytes before
+# GC gets a chance to run.
+fn admission_check(root: text, limits: CacheLimits, write_bytes: i64) -> AdmissionResult:
+    val hard_limit = cache_limits_hard_limit_bytes(limits)
+    val current = cache_total_bytes(root)
+    val projected = current + write_bytes
+
+    if projected > hard_limit:
+        return AdmissionResult(admitted: false, reason: "over_hard_limit")
+
+    val min_free = cache_limits_min_free_bytes(limits)
+    val headroom = limits.max_bytes - projected
+    if headroom < min_free:
+        return AdmissionResult(admitted: false, reason: "under_min_free_reserve")
+
+    AdmissionResult(admitted: true, reason: "ok")
+
+# PinnedOverflow: protected (pinned) bytes alone exceed max_bytes. Per the
+# schema rule, this NEVER triggers deletion of a protected root — it is a
+# report only, surfaced so an operator/CI can raise the quota or unpin.
+fn pinned_overflow_check(root: text, limits: CacheLimits) -> PinnedOverflowReport?:
+    val protected = pinned_bytes(root)
+    if protected <= limits.max_bytes:
+        return nil
+    PinnedOverflowReport(
+        protected_bytes: protected,
+        configured_max: limits.max_bytes,
+        largest_roots: read_pins(root),
+        suggested_action: "raise max_bytes or unpin roots; protected roots are never auto-deleted",
+    )

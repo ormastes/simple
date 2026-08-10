@@ -1,0 +1,149 @@
+# Full mark-and-sweep GC — refcounts are NOT the source of truth
+# (cache_protocol.sdn `gc.metadata.refcount_authority`: "approximate;
+# mark-and-sweep is the source of truth").
+#
+# Roots (cache_protocol.sdn `gc.roots`, scoped to what this milestone tracks):
+#   - explicit pins (pin/unpin transitions)
+#   - active leases (lease/lease.spl)
+#   - retained action mappings (every action manifest currently on disk that
+#     is not itself unreachable — this first milestone treats every stored
+#     action manifest as retained unless explicitly marked stale elsewhere;
+#     C1-C7 lanes that add generation/branch retention policy extend this
+#     root set, not this file)
+#
+# Mark: walk each root manifest, mark it, then recursively mark its artifact
+# digests (manifest.artifact_digests). Unmarked CAS blobs and action
+# manifests move to trash/ (never deleted directly — same
+# gc_delete_order: rename_to_trash, grace_period, delete as fast_gc).
+#
+# Invariant: GC may cause a false miss (something reachable gets marked
+# unreachable due to a bug) is unacceptable by design here — the sweep only
+# ever removes what failed to be marked reachable from a real root, never
+# the reverse. It must never produce a dangling hit: nothing in trash/ is
+# served (cas_get / action_get never look there).
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_move(old_path: text, new_path: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_dir_exists(path: text) -> bool
+extern fn rt_dir_walk(root: text) -> [text]
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+
+use compiler.driver.cache.cas_store.{ActionManifest, action_manifest_parse, cas_blob_path, cas_action_path}
+use compiler.driver.cache.lease.lease.{lease_list_active, CacheLease}
+
+struct MarkSweepResult:
+    marked_manifests: i64
+    marked_artifacts: i64
+    trashed_manifests: i64
+    trashed_artifacts: i64
+
+fn trash_dir(root: text) -> text:
+    "{root}/trash"
+
+fn move_to_trash(root: text, path: text) -> bool:
+    rt_dir_create_all(trash_dir(root))
+    val stamp = "{rt_getpid()}-{rt_time_now_unix_micros()}"
+    val name = path.replace("/", "_")
+    rt_file_move(path, "{trash_dir(root)}/{name}-{stamp}")
+
+fn contains_digest(digests: [text], digest: text) -> bool:
+    for d in digests:
+        if d == digest:
+            return true
+    false
+
+# Collect every action-manifest file path under root/actions.
+fn list_action_paths(root: text) -> [text]:
+    val dir = "{root}/actions"
+    if not rt_file_exists(dir):
+        return []
+    var out: [text] = []
+    for path in rt_dir_walk(dir):
+        if not rt_dir_exists(path):
+            out = out.push(path)
+    out
+
+# Collect every blob file path under root/cas.
+fn list_blob_paths(root: text) -> [text]:
+    val dir = "{root}/cas"
+    if not rt_file_exists(dir):
+        return []
+    var out: [text] = []
+    for path in rt_dir_walk(dir):
+        if not rt_dir_exists(path):
+            out = out.push(path)
+    out
+
+# Explicit pins: a flat digest list at root/pins (one digest per line). No
+# separate pin/unpin module exists yet in this milestone's scope — pins are
+# a plain file so admission.spl's PinnedOverflow accounting and mark_sweep
+# agree on one source. A dedicated pin manager is future work if a caller
+# needs pin metadata beyond membership.
+fn read_pins(root: text) -> [text]:
+    val path = "{root}/pins"
+    if not rt_file_exists(path):
+        return []
+    val content = rt_file_read_text(path) ?? ""
+    var out: [text] = []
+    for line in content.split("\n"):
+        if line.trim() != "":
+            out = out.push(line.trim())
+    out
+
+# Root manifest digests: pins + lease-referenced manifests + every manifest
+# currently on disk (retained_main_action_generations / current retention
+# policy is a C-later concern; this milestone's default root set is
+# "everything not already in trash/quarantine", so mark_sweep's job here is
+# closing the artifact closure and reclaiming ORPHAN blobs with no manifest
+# pointing at them, per manifest_closure predicate).
+fn gc_select_roots(root: text) -> [text]:
+    var roots = read_pins(root)
+    for lease in lease_list_active(root):
+        for d in lease.referenced_manifests:
+            if not contains_digest(roots, d):
+                roots = roots.push(d)
+    roots
+
+# Mark-and-sweep: every manifest on disk is itself retained (first-milestone
+# policy — see module doc), so the sweep only removes CAS blobs that no
+# on-disk, non-trashed manifest's artifact_digests reference. Roots
+# (gc_select_roots) additionally guarantee pinned/leased manifests survive
+# even under a future policy that prunes manifests.
+fn gc_mark_and_sweep(root: text) -> MarkSweepResult:
+    val action_paths = list_action_paths(root)
+    var marked_artifacts: [text] = []
+    var manifests_kept: i64 = 0
+    var manifests_trashed: i64 = 0
+
+    for path in action_paths:
+        val content = rt_file_read_text(path) ?? ""
+        match action_manifest_parse(content):
+            case Some(manifest):
+                manifests_kept = manifests_kept + 1
+                for d in manifest.artifact_digests:
+                    if not contains_digest(marked_artifacts, d):
+                        marked_artifacts = marked_artifacts.push(d)
+            case nil:
+                # unparseable manifest: not reachable, trash it
+                move_to_trash(root, path)
+                manifests_trashed = manifests_trashed + 1
+
+    var trashed_blobs: i64 = 0
+    for blob_path in list_blob_paths(root):
+        var referenced = false
+        for digest in marked_artifacts:
+            if blob_path == cas_blob_path(root, digest):
+                referenced = true
+        if not referenced:
+            move_to_trash(root, blob_path)
+            trashed_blobs = trashed_blobs + 1
+
+    MarkSweepResult(
+        marked_manifests: manifests_kept,
+        marked_artifacts: marked_artifacts.len().to_i64(),
+        trashed_manifests: manifests_trashed,
+        trashed_artifacts: trashed_blobs,
+    )
