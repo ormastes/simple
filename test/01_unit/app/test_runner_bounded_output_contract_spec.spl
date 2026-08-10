@@ -1,7 +1,9 @@
 use std.spec
 use std.io_runtime.{file_read}
-use app.io.process_ops.{process_run_bounded}
-use std.io.{process_run_with_limits_bounded}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded, process_run_with_limits_bounded}
+use std.nogc_sync_mut.io.file_ops.{file_delete, file_modified_time, file_size_raw, file_write}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 use app.io.env_ops.{host_os}
 
 fn run_bounded_process_case() -> (text, text, i64):
@@ -14,7 +16,17 @@ fn run_bounded_process_case_with_script(posix_script: text, windows_script: text
         process_run_bounded("/bin/sh", ["-c", posix_script], timeout_ms, cap)
 
 describe "test runner bounded output contract":
+    it "keeps Stage4 execution helpers on their concrete IO owners":
+        val source = file_read("src/lib/nogc_sync_mut/test_runner/test_runner_execute.spl")
+        expect(source).to_contain("use std.nogc_sync_mut.io.file_ops.{file_size_raw, file_modified_time}")
+        expect(source).to_contain("use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}")
+        expect(source).to_contain("use std.nogc_sync_mut.io.process_ops.{process_run_bounded, process_run_with_limits_bounded, ProcessResult}")
+        expect(source.contains("use std.io.{file_size_raw, file_modified_time}")).to_equal(false)
+        expect(source.contains("use std.io.{time_now_unix_micros}")).to_equal(false)
+        expect(source.contains("use std.io.{process_run_bounded, process_run_with_limits_bounded, ProcessResult}")).to_equal(false)
+
     it "preserves both streams and nonzero status through the limited result wrapper":
+        val started_at = time_now_unix_micros()
         val posix_script = "printf CHILD_OUT; printf CHILD_ERR >&2; exit 17"
         val windows_script = "<nul set /p \"=CHILD_OUT\" & <nul set /p \"=CHILD_ERR\" 1>&2 & exit /b 17"
         val (stdout, stderr, code) = run_bounded_process_case_with_script(
@@ -30,6 +42,8 @@ describe "test runner bounded output contract":
         expect(limited.stdout).to_equal("CHILD_OUT")
         expect(limited.stderr).to_equal("CHILD_ERR")
         expect(limited.exit_code).to_equal(17)
+        expect(limited.limit_exceeded).to_equal(false)
+        expect(time_now_unix_micros()).to_be_greater_than(started_at)
 
         if host_os() != "windows":
             val late = process_run_with_limits_bounded(
@@ -38,6 +52,16 @@ describe "test runner bounded output contract":
             expect(late.stdout).to_equal("LATE_OUT")
             expect(late.stderr).to_equal("LATE_ERR")
             expect(late.exit_code).to_equal(0)
+
+    it "reads file size and modification time through the adjacent concrete owner":
+        val path = "/tmp/simple-test-runner-execute-metadata-{getpid()}"
+        file_delete(path)
+        file_write(path, "12345")
+        expect(file_size_raw(path)).to_equal(5)
+        expect(file_modified_time(path)).to_be_greater_than(0)
+        expect(file_delete(path)).to_equal(true)
+        expect(file_size_raw(path)).to_equal(0)
+        expect(file_modified_time(path)).to_equal(0)
 
     it "executes the hosted bounded-process ABI instead of a stale missing extern":
         val (stdout, stderr, code) = run_bounded_process_case()
