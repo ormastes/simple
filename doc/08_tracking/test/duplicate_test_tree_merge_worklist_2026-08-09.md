@@ -1308,3 +1308,92 @@ DIVERGENT tauri_equiv/report_spec.spl
 DIVERGENT ui_access/ui_access_hot_paths_spec.spl
 DIVERGENT web_render_chrome/web_paint_cache_spec.spl
 ```
+
+## Step-1 execution log — stream J4 (2026-08-10)
+
+Binary for all verdicts: `src/compiler_rust/target/bootstrap/simple` (33,653,056 bytes, mtime 2026-08-09 23:10).
+
+### FINDING 1 — the line-count proxy is wrong for 64 of the 145 entries (44%)
+
+Re-measuring with **code lines** (non-blank, non-`#`) instead of raw lines flips
+64 entries: the legacy file is NOT ahead. **54 of those 64** legacy files are
+PENDING/DISABLED specs — the body is commented out and replaced by an
+`it "skipped"` / `pending_reason` stub. Their raw line count is high only
+because the dead code is retained as comments. 0 of the 81 genuinely-ahead
+files carry that marker, so the split is clean.
+
+The worklist's flagship example is in the disproven set:
+`test/unit/app/diagram/filter_spec.spl` (199 lines) is 4 lines of `it "skipped"`
+plus 195 lines of commented-out code. The 11-line numbered twin is a real,
+executing API-presence spec. Merging legacy over it would have been a regression.
+
+### FINDING 2 — `test/03_system/os_crypto_ref_helpers.spl` is not a stub
+
+The 6-line numbered file is a deliberate compat re-export shim; the 311-line
+implementation already lives at `test/03_system/os/os_crypto_ref_helpers.spl`.
+Overwriting the shim with legacy content breaks every importing spec.
+REMOVE from the worklist.
+
+### FINDING 3 — the dominant "legacy ahead by 1-2 lines" delta is a STALE IMPORT
+
+For 7 pairs the entire legacy-only content is `use std.test.*` (or
+`use std.test.{describe, it, expect}`) — an import the numbered tree deliberately
+removed. Restoring it makes the spec fail to load: exit 1 and **no verdict line at
+all** (the spec runs nothing). Verified on
+`test/01_unit/compiler/blocks/builder_api_basic_spec.spl`. Same for
+`test/01_unit/app/todo/todo_parser_spec.spl`, whose legacy-only line is
+`use tooling.TodoItem.*` — merged it went rc=1/no-verdict against a green
+`executed=1 passed=1` baseline. All 8 merges were reverted.
+
+### FINDING 4 — numbered "stubs" are a different test STYLE, not placeholders
+
+Many short numbered twins are source-grep API-presence specs
+(`rt_file_read_text(...)` + `expect(source).to_contain(...)`). They are weak
+oracles, but they are not empty, and the legacy behavioural spec is frequently the
+one that is stale. `test/02_integration/lib/std/doctest/discovery_spec.spl` is the
+clearest case: the legacy file imports `std.doctest.discovery`, which does not
+exist anywhere under `src/lib`. The numbered rewrite targets the real
+`std.common.doctest.parser`. Legacy is dead code; do not merge.
+
+### Merged and verified (kept)
+
+Selection rule: legacy is a strict superset in CODE lines (numbered contributes
+zero unique code lines), AND the added content is real test material rather than
+an import.
+
+| numbered file | verdict after merge | note |
+|---|---|---|
+| `test/01_unit/lib/crypto/sha256_x4_spec.spl` | `declared>=7 executed=7 passed=7 failed=0` | fixes a BROKEN import: numbered pulled `sha256_x4` from `std.crypto.sha256`, which does not define it (it lives in `sha256_simd`, no re-export). Unresolved `use` only WARNs, so this was silently wrong. |
+| `test/01_unit/browser_engine/net/cookie_store_spec.spl` | `declared>=32 executed=32 passed=32 failed=0` | +3 examples over the 29-example baseline |
+| `test/01_unit/compiler/u32_array_index_shr_spec.spl` | `declared>=6 executed=6 passed=6 failed=0` | +1 example (AC-1b2 dynamic `[u32; count]` repeat) |
+| `test/01_unit/lib/common/result_ce_spec.spl` | `declared>=27 executed=27 passed=27 failed=0` | |
+| `test/03_system/feature/usage/string_interpolation_spec.spl` | `declared>=15 executed=15 passed=15 failed=0` | +1 example (inline conditional in interpolation) |
+| `test/01_unit/lib/common/string_core_ops_spec.spl` | `declared>=205 executed=205 passed=180 failed=25` | both merged examples PASS; the 25 failures are PRE-EXISTING at origin (`str_index_of`/`str_last_index_of` return -1 unconditionally, `str_ends_with` returns 0) |
+
+`test/01_unit/lib/driver/null_block_driver_test.spl` was a no-op (the pair is
+already identical once the copy is applied).
+
+### Reverted after verification (8) — merging made them WORSE
+
+`builder_api_basic`, `builder_default_parser`, `easy_api_basic`,
+`testing_framework`, `utils_basic` (all `test/01_unit/compiler/blocks/`),
+`compiler/mono/monomorphize_integration`, `compiler/parser/match_empty_array_bug`,
+and `app/todo/todo_parser` — see FINDING 3. All eight now byte-match origin.
+
+### Newly-RED finding filed
+
+`doc/08_tracking/bug/parser_rejects_pub_union_after_attribute_2026-08-10.md` —
+`@doc(...)` + `pub union` is a hard parse error (`expected Fn, found Union`)
+while `pub enum` works. The legacy spec covered it; the numbered twin had the
+coverage deleted instead of the bug fixed.
+
+### What remains (139 of 145)
+
+6 entries merged, 139 untouched. Of those 139: **64 are DISPROVEN** (FINDING 1 —
+close them, do not merge) and **75 need per-file hand merges**. In the near-equal
+band the numbered tree is usually the correct side even when it is shorter
+(stale imports, superseded module paths, corrected semantics), so this residue
+cannot be swept — every one needs the two-way read.
+
+Recommended next step: re-derive the worklist on the CODE-line metric with the
+pending-marker filter applied, which cuts 145 to 81 before any file is opened.
