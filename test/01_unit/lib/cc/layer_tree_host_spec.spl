@@ -72,3 +72,55 @@ describe "LayerTreeHost":
             val l2 = Layer.root(bounds)
             host.pending_tree.add_layer(l2)
             expect(host.active_tree.layer_count()).to_equal(active_count_before)
+
+# clone_tree is the mechanism commit relies on. NOTE: on this lane class
+# assignment is itself a value copy (measured: `var b = a` then mutating `a`
+# leaves `b` untouched), so NO assertion can distinguish `clone_tree()` from a
+# bare `active = pending`. What these examples DO discriminate is a clone_tree
+# that loses state — the realistic defect — so each one goes red if the layer
+# list or the id counter is dropped, reset, or shared.
+describe "LayerTreeImpl.clone_tree":
+    context "state transfer":
+        it "carries over every layer and the id counter, so cloned ids never collide":
+            var tree = LayerTreeImpl.empty()
+            val bounds = SkRect.make_xywh(0.0, 0.0, 32.0, 32.0)
+            val first_id = tree.add_layer(Layer.root(bounds))
+            val second_id = tree.add_layer(Layer.root(bounds))
+            var copy = tree.clone_tree()
+            expect(copy.layer_count()).to_equal(2)
+            # A clone that reset next_id would re-issue first_id/second_id here.
+            val cloned_next = copy.add_layer(Layer.root(bounds))
+            expect(cloned_next > second_id).to_equal(true)
+            expect(cloned_next).to_equal(second_id + 1)
+            expect(first_id).to_equal(1)
+
+    context "bidirectional independence":
+        it "writes to the clone leave the original untouched":
+            var tree = LayerTreeImpl.empty()
+            val bounds = SkRect.make_xywh(0.0, 0.0, 8.0, 8.0)
+            tree.add_layer(Layer.root(bounds))
+            var copy = tree.clone_tree()
+            copy.add_layer(Layer.root(bounds))
+            copy.add_layer(Layer.root(bounds))
+            expect(copy.layer_count()).to_equal(3)
+            expect(tree.layer_count()).to_equal(1)
+
+        it "writes to the original leave the clone untouched":
+            var tree = LayerTreeImpl.empty()
+            val bounds = SkRect.make_xywh(0.0, 0.0, 8.0, 8.0)
+            tree.add_layer(Layer.root(bounds))
+            var copy = tree.clone_tree()
+            tree.add_layer(Layer.root(bounds))
+            tree.add_layer(Layer.root(bounds))
+            expect(tree.layer_count()).to_equal(3)
+            expect(copy.layer_count()).to_equal(1)
+
+    context "commit uses it":
+        it "the committed active tree keeps issuing ids after the pending tree left off":
+            var host = LayerTreeHost.new()
+            val bounds = SkRect.make_xywh(0.0, 0.0, 16.0, 16.0)
+            host.pending_tree.add_layer(Layer.root(bounds))
+            host.pending_tree.add_layer(Layer.root(bounds))
+            host.commit()
+            expect(host.active_tree.layer_count()).to_equal(2)
+            expect(host.active_tree.add_layer(Layer.root(bounds))).to_equal(3)
