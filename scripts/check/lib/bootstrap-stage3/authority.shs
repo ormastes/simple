@@ -141,25 +141,42 @@ bootstrap_stage3_resolve_rust_toolchain() (
     case "$bootstrap_stage3_rust_channel" in
         ''|*[!A-Za-z0-9._-]*) return 1 ;;
     esac
-    bootstrap_stage3_rust_frontend=$(command -v rustc) || return 1
+    bootstrap_stage3_rust_frontend=$(command -v rustc) || {
+        echo "bootstrap Stage 3 Rust authority: rustc is unavailable on the canonical tool PATH" >&2
+        return 1
+    }
     bootstrap_stage3_rust_sysroot=$(
         env -i PATH="$PATH" \
             RUSTUP_TOOLCHAIN="$bootstrap_stage3_rust_channel" \
             "$bootstrap_stage3_rust_frontend" --print sysroot
-    ) || return 1
+    ) || {
+        echo "bootstrap Stage 3 Rust authority: rustc could not resolve the pinned Rust sysroot" >&2
+        return 1
+    }
     bootstrap_stage3_rust_sysroot=$(
         CDPATH= cd -- "$bootstrap_stage3_rust_sysroot" && pwd -P
-    ) || return 1
+    ) || {
+        echo "bootstrap Stage 3 Rust authority: pinned Rust sysroot is unavailable or non-canonical" >&2
+        return 1
+    }
     bootstrap_stage3_rustc="$bootstrap_stage3_rust_sysroot/bin/rustc"
     bootstrap_stage3_cargo="$bootstrap_stage3_rust_sysroot/bin/cargo"
-    for bootstrap_stage3_rust_binary in \
-        "$bootstrap_stage3_rustc" "$bootstrap_stage3_cargo"; do
-        [ -x "$bootstrap_stage3_rust_binary" ] &&
-            [ ! -L "$bootstrap_stage3_rust_binary" ] &&
-            [ "$(bootstrap_stage3_canonical_file \
-                "$bootstrap_stage3_rust_binary")" = \
-                "$bootstrap_stage3_rust_binary" ] || return 1
-    done
+    [ -x "$bootstrap_stage3_rustc" ] &&
+        [ ! -L "$bootstrap_stage3_rustc" ] &&
+        [ "$(bootstrap_stage3_canonical_file \
+            "$bootstrap_stage3_rustc")" = \
+            "$bootstrap_stage3_rustc" ] || {
+        echo "bootstrap Stage 3 Rust authority: pinned rustc executable is unavailable or non-canonical" >&2
+        return 1
+    }
+    [ -x "$bootstrap_stage3_cargo" ] &&
+        [ ! -L "$bootstrap_stage3_cargo" ] &&
+        [ "$(bootstrap_stage3_canonical_file \
+            "$bootstrap_stage3_cargo")" = \
+            "$bootstrap_stage3_cargo" ] || {
+        echo "bootstrap Stage 3 Rust authority: pinned cargo executable is unavailable or non-canonical" >&2
+        return 1
+    }
     printf 'rust-policy-path=%s\nrust-policy-sha256=%s\nrust-channel=%s\n' \
         "$bootstrap_stage3_rust_policy" \
         "$(bootstrap_stage3_hash_file "$bootstrap_stage3_rust_policy")" \
@@ -957,6 +974,25 @@ bootstrap_stage3_seed_inputs_fingerprint() (
     fi
     PATH=$bootstrap_stage3_seed_tool_path
     export PATH
+    # Resolve the pinned Rust authority before the expensive source scan. The
+    # receipt is still appended at its historical position below, so successful
+    # fingerprints retain their record order and digest.
+    bootstrap_stage3_seed_rust_authority=$(
+        bootstrap_stage3_resolve_rust_toolchain \
+            "$bootstrap_stage3_seed_root" "$PATH"
+    ) || return 1
+    bootstrap_stage3_seed_rust_sysroot=$(
+        printf '%s\n' "$bootstrap_stage3_seed_rust_authority" |
+            sed -n 's/^rust-sysroot=//p'
+    ) || return 1
+    [ -n "$bootstrap_stage3_seed_rust_sysroot" ] || {
+        echo "bootstrap Stage 3 seed fingerprint: pinned Rust authority omitted its sysroot receipt" >&2
+        return 1
+    }
+    bootstrap_stage3_seed_rustc=\
+"$bootstrap_stage3_seed_rust_sysroot/bin/rustc"
+    bootstrap_stage3_seed_cargo=\
+"$bootstrap_stage3_seed_rust_sysroot/bin/cargo"
     bootstrap_stage3_seed_tmp=$(
         mktemp -d "${TMPDIR:-/tmp}/bootstrap-stage3-seed.XXXXXX"
     ) || return 1
@@ -1134,20 +1170,6 @@ bootstrap_stage3_seed_inputs_fingerprint() (
         # paths. Ambient SDK/LLVM/general flag variables are therefore not
         # build inputs. The target and its MinGW tool selections are bound
         # above; tool versions and backend/features are bound below.
-        bootstrap_stage3_seed_rust_authority=$(
-            bootstrap_stage3_resolve_rust_toolchain \
-                "$bootstrap_stage3_seed_root" "$PATH"
-        ) || exit 1
-        bootstrap_stage3_seed_rust_sysroot=$(
-            printf '%s\n' "$bootstrap_stage3_seed_rust_authority" |
-                sed -n 's/^rust-sysroot=//p'
-        ) || exit 1
-        bootstrap_stage3_seed_rustc=\
-"$bootstrap_stage3_seed_rust_sysroot/bin/rustc"
-        bootstrap_stage3_seed_cargo=\
-"$bootstrap_stage3_seed_rust_sysroot/bin/cargo"
-        [ -x "$bootstrap_stage3_seed_rustc" ] || exit 1
-        [ -x "$bootstrap_stage3_seed_cargo" ] || exit 1
         printf '%s\n' "$bootstrap_stage3_seed_rust_authority" \
             >>"$bootstrap_stage3_seed_records" || exit 1
         printf 'rustc-toolchain-sha256=%s\ncargo-toolchain-sha256=%s\n' \

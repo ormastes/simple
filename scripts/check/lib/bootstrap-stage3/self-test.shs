@@ -53,6 +53,72 @@ bootstrap_stage3_provenance_self_test() {
         esac
     done
     [ -n "$bootstrap_stage3_test_tool_path" ] || return 1
+
+    # A service-style PATH without rustup must fail before the fingerprint
+    # allocates its scan directory. Keep this fixture self-contained so the
+    # assertion does not depend on where the host installed Rust.
+    bootstrap_stage3_test_preflight_bin=\
+"$bootstrap_stage3_test_root/preflight-bin"
+    bootstrap_stage3_test_mktemp_marker=\
+"$bootstrap_stage3_test_root/preflight-mktemp-called"
+    mkdir -p "$bootstrap_stage3_test_preflight_bin" || return 1
+    for bootstrap_stage3_test_preflight_tool in \
+        awk basename dirname env grep; do
+        bootstrap_stage3_test_preflight_requested=$(
+            command -v "$bootstrap_stage3_test_preflight_tool"
+        ) || return 1
+        ln -s "$bootstrap_stage3_test_preflight_requested" \
+            "$bootstrap_stage3_test_preflight_bin/$bootstrap_stage3_test_preflight_tool" ||
+            return 1
+    done
+    printf '%s\n' '#!/bin/sh' \
+        ": >'$bootstrap_stage3_test_mktemp_marker'" \
+        'exit 97' >"$bootstrap_stage3_test_preflight_bin/mktemp"
+    chmod 700 "$bootstrap_stage3_test_preflight_bin/mktemp"
+    if bootstrap_stage3_test_missing_rust_output=$(
+        TMPDIR="$bootstrap_stage3_test_root" \
+            bootstrap_stage3_seed_inputs_fingerprint \
+                "$bootstrap_stage3_test_root/repo" cranelift none \
+                "$bootstrap_stage3_test_preflight_bin" \
+                x86_64-unknown-linux-gnu 2>&1
+    ); then
+        return 1
+    fi
+    case "$bootstrap_stage3_test_missing_rust_output" in
+        *'Rust authority: rustc is unavailable on the canonical tool PATH'*) ;;
+        *) return 1 ;;
+    esac
+    [ ! -e "$bootstrap_stage3_test_mktemp_marker" ] || return 1
+
+    # A rustc frontend that resolves a sysroot without cargo is a distinct
+    # authority failure and must also stop before source scanning.
+    bootstrap_stage3_test_missing_cargo_sysroot=\
+"$bootstrap_stage3_test_root/missing-cargo-sysroot"
+    mkdir -p "$bootstrap_stage3_test_missing_cargo_sysroot/bin" || return 1
+    printf '%s\n' '#!/bin/sh' \
+        'case "$*" in' \
+        "  '--print sysroot') printf '%s\\n' '$bootstrap_stage3_test_missing_cargo_sysroot' ;;" \
+        '  *) exit 2 ;;' \
+        'esac' >"$bootstrap_stage3_test_preflight_bin/rustc"
+    printf '%s\n' '#!/bin/sh' 'exit 0' \
+        >"$bootstrap_stage3_test_missing_cargo_sysroot/bin/rustc"
+    chmod 700 "$bootstrap_stage3_test_preflight_bin/rustc" \
+        "$bootstrap_stage3_test_missing_cargo_sysroot/bin/rustc"
+    if bootstrap_stage3_test_missing_cargo_output=$(
+        TMPDIR="$bootstrap_stage3_test_root" \
+            bootstrap_stage3_seed_inputs_fingerprint \
+                "$bootstrap_stage3_test_root/repo" cranelift none \
+                "$bootstrap_stage3_test_preflight_bin" \
+                x86_64-unknown-linux-gnu 2>&1
+    ); then
+        return 1
+    fi
+    case "$bootstrap_stage3_test_missing_cargo_output" in
+        *'Rust authority: pinned cargo executable is unavailable or non-canonical'*) ;;
+        *) return 1 ;;
+    esac
+    [ ! -e "$bootstrap_stage3_test_mktemp_marker" ] || return 1
+
     bootstrap_stage3_test_tool_stable=\
 "$bootstrap_stage3_test_root/tool-authority-stable.txt"
     bootstrap_stage3_test_tool_nightly=\
@@ -77,6 +143,13 @@ bootstrap_stage3_provenance_self_test() {
             "$bootstrap_stage3_test_root/repo" cranelift none \
             "$bootstrap_stage3_test_tool_path"
     ) || return 1
+    bootstrap_stage3_test_seed_repeat=$(
+        bootstrap_stage3_seed_inputs_fingerprint \
+            "$bootstrap_stage3_test_root/repo" cranelift none \
+            "$bootstrap_stage3_test_tool_path"
+    ) || return 1
+    [ "$bootstrap_stage3_test_seed_before" = \
+        "$bootstrap_stage3_test_seed_repeat" ] || return 1
     bootstrap_stage3_test_seed_ambient_a=$(
         SDKROOT=/missing/a CFLAGS=-O0 LLVM_SYS_180_PREFIX=/missing/a \
             bootstrap_stage3_seed_inputs_fingerprint \
