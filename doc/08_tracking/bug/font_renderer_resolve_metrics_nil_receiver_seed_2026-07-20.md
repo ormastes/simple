@@ -1,5 +1,14 @@
 # font_renderer: resolve_font_metrics_with_language nil-receiver crash under seed (blocks WM Draw IR composition + widget_draw_ir)
 
+**Status:** STILL OPEN 2026-08-10 (re-verified this pass, third root-fix
+lane) — the mutex mitigation from lane 1 is confirmed still landed and
+holding; the real `bin/simple test` blocker from lane 2 is confirmed still
+present but its failure MODE changed from a silent process crash to a
+120s test-runner timeout. See "Re-verification (2026-08-10)" below. No new
+fix landed — still ARCHITECTURAL-OPEN (Rust-seed interpreter, out of scope
+per repo policy: seed is bootstrap-only, `src/compiler_rust` is off-limits
+for this pass).
+
 **Status:** STILL OPEN 2026-07-21 — two root-fix lanes deep. **Do not read
 this as fixed.**
 
@@ -248,6 +257,66 @@ root-caused reason above. `Test Summary: Files 1, Passed 0, Failed 1,
 Duration ~64.7s` (the test-runner's own aggregation does not currently credit
 real passes recorded before a process-level crash — a separate, pre-existing
 test-runner reporting gap, not addressed here).
+
+## Re-verification (2026-08-10, third lane)
+
+Confirmed the mutex mitigation described above (nil-init module vars +
+guard-clause unwrap in `_font_mutex_acquire`/`_font_mutex_release`,
+`src/lib/nogc_sync_mut/text_layout/font_renderer.spl:144,202-251`) is still
+present in the current tree at origin/main tip `184aded7e3f9`, including the
+`ROOT CAUSE` comment cross-referencing this doc and the sibling SIGSEGV doc.
+No regression there.
+
+Re-ran the real target spec, same command as lane 2:
+
+```
+bin/simple test test/01_unit/lib/common/text_layout/font_renderer_spec.spl
+```
+
+(seed binary `bin/release/x86_64-unknown-linux-gnu/simple`, "bootstrap seed
+only" banner). Needed a >120s budget to observe the real outcome — a first
+attempt with a 200s wall-clock cap produced no output at all (still
+compiling/loading the ~380-module graph), so this was re-run in the
+background with a long budget. Full result:
+
+```
+SFFI font liveness
+  ✓ rejects nil or stale rasterizers through is_current
+  ✓ rejects a truncated selected-asset blob with a clean failure, not a crash
+  ✓ rejects an unmanaged/missing font path with a clean failure, not a crash
+
+Process timed out
+error: test-runner: file timed out
+error: test-runner: code -1 (process_run_bounded killed the child at its budget) after 120s budget
+SPEC FILE VERDICT: test/01_unit/lib/common/text_layout/font_renderer_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0 timeout=1 reason=child-timeout budget_ms=120000
+Test Summary: Files 1, Passed 0, Failed 1, Duration 120096ms
+```
+
+This exactly reproduces lane 2's finding for the first three examples (all
+three still pass, in the same order, with the same text) — the two
+regression examples added in lane 2 are confirmed still real and still
+green. But the fourth example ("renders a selected face from owned
+bytes...") no longer shows as a silent process death within ~65-70s the way
+lane 2 recorded it; instead the test-runner's own 120s per-file budget kills
+it first (`reason=child-timeout`), roughly ~2x lane 2's crash latency. This
+is either (a) the same underlying `sha256_u8_hex` compression-loop defect
+now taking longer to reach its crash point (consistent with lane 2's own
+finding that crash timing is call-stack-depth/iteration-budget sensitive,
+not fixed), or (b) a different slow path being hit first. Not disambiguated
+in this pass — doing so would mean re-adding lane 2's temporary probes,
+which is a similar-scope investigation to lane 2's own multi-probe
+bisection and was not repeated here given the "seed is bootstrap-only,
+fix .spl not Rust, `src/compiler_rust` off-limits" constraints already rule
+out a source-level fix regardless of which of (a)/(b) is true.
+
+**Conclusion:** still genuinely OPEN. The spec is still `Passed: 0 / Failed:
+1` end to end, identical in shape to lane 2's finding, just with a changed
+failure signature (timeout vs. crash). This is an **ARCHITECTURAL-OPEN**
+Rust-seed interpreter defect for the fourth example specifically (needs
+`src/compiler_rust` interpreter work, explicitly out of scope for this
+pass); the mutex bug and the two lane-2 regression examples remain correctly
+fixed/passing. No code change made in this pass — doc-only update landed to
+record the fresh evidence.
 
 ## Old text below is the original 2026-07-20 filing, kept for history.**
 

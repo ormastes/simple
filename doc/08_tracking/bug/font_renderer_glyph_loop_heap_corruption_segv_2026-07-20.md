@@ -1,5 +1,10 @@
 # font_renderer: SIGSEGV in simple_runtime::value::heap after glyph layout, on the Rust seed's `run` evaluator
 
+**Status:** STILL OPEN 2026-08-10 (re-verified, see "Re-verification" below —
+original SIGSEGV signature could not be re-triggered within a bounded budget
+because an unrelated JIT gap now intercepts the same repro first; this is a
+harness-visibility change, not evidence of a fix).
+
 **Status:** OPEN 2026-07-20 — found while root-fixing the mutex crash in
 `font_renderer_resolve_metrics_nil_receiver_seed_2026-07-20.md` (that mutex
 bug's hard-crash half is mitigated on `bin/simple run`; this SIGSEGV is what
@@ -130,6 +135,48 @@ this same heap corruption manifesting as a stall instead of a fault, or an
 unrelated superlinear-parse-class issue (a sibling lane already found one such
 case unrelated to fonts — do not assume this is that same defect without
 checking).
+
+## Re-verification (2026-08-10)
+
+Re-ran the doc's exact minimal repro on the same seed binary
+(`bin/release/x86_64-unknown-linux-gnu/simple`, prints "bootstrap seed only")
+at current origin/main tip (`184aded7e3f9`):
+
+```
+timeout 180 bin/simple run <repro identical to doc's Symptom section>
+```
+
+Result: the process did **not** reach the `prepare_text("A", ...)` call at
+all within 180s. Before that, the JIT now reports:
+
+```
+[jit-fallback] HIR lowering error: Cannot infer field type: struct
+'GlyphBitmap' field 'gbm_width' [...]: whole module dropped to the
+interpreter (expect ~100-1000x slowdown). Set SIMPLE_JIT_STRICT=1 to turn
+this into a hard error.
+```
+
+...and the whole module falls back to the (slow) interpreter, which never
+finished `file_read_bytes` + `FontRenderer.new()` + `try_load_selected_bytes`
++ `prepare_text` inside the 180s budget (confirmed no `"ok=..."` print — the
+first line after `try_load_selected_bytes` — ever appeared in the captured
+log). `SIMPLE_JIT_STRICT=1` confirms this is a real, separate JIT HIR-lowering
+gap (`Cannot infer field type: struct 'GlyphBitmap' field 'gbm_width'`), not
+a red herring.
+
+**Conclusion:** this is not evidence the SIGSEGV is fixed. It is evidence
+that an unrelated, newer JIT type-inference gap on `GlyphBitmap.gbm_width`
+now sits in front of the old crash site on the `run` evaluator, forcing a
+whole-module interpreter fallback that is too slow to reach the original
+crash point within a reasonable bound. The original SIGSEGV was never
+re-confirmed live in this pass, but it was also never disproved — the repro
+just cannot reach that code path anymore without a much longer budget (or
+disabling/fixing the `GlyphBitmap.gbm_width` JIT gap first). Left **OPEN**;
+no fix landed. Whoever picks this up next should either (a) run the repro
+with a multi-hour budget to confirm the SIGSEGV still exists behind the
+interpreter fallback, or (b) fix the `gbm_width` field-type-inference gap
+first so the JIT path (which is what actually reaches the segfault, per the
+original gdb backtrace showing native `rt_native_neq`) is exercised again.
 
 ## Blocked tests
 
