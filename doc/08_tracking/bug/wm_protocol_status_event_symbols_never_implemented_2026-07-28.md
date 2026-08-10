@@ -1,6 +1,8 @@
 # SimpleOS WM IPC protocol: 8 status/event symbols imported by live code were never implemented
 
-**Status:** OPEN
+**Status:** OPEN — architectural (needs a WM wire-protocol design decision from
+an owner who can fix it against the codec byte-for-byte on real hardware;
+re-confirmed 2026-08-10)
 **Found:** 2026-07-28 (dangling-reference triage, `src/os/**` scope)
 **Area:** `src/lib/common/window_protocol/window_protocol.spl`,
 `src/os/services/wm/`, `src/os/userlib/_Window/`, `src/os/desktop/`
@@ -92,3 +94,16 @@ event tag representation, `WmCreateResponse` field order) that
 runs on real hardware. Guessing an encoding would change kernel-adjacent
 behaviour with no test to catch a mismatch. Needs an owner who can fix the
 protocol definition against the codec.
+
+## Re-verification (2026-08-10)
+
+`window_protocol.spl` grew from 88 to 107 lines since this doc was filed, but
+the added lines are unrelated (`WM_INPUT_TEXT_MAX_BYTES` and other
+`WmInputEvent` internals) — all 8 missing symbols
+(`WM_STATUS_OK`/`WM_STATUS_ERROR`/`WM_STATUS_NO_SPACE`/`WmStatus`/
+`WmCreateResponse`/`WmFocusEvent`/`WM_EVENT_FOCUS`/`WM_EVENT_RESIZE`/
+`wm_input_event`/`wm_focus_event`) are still declared nowhere in the file; the
+declared-symbol set (`WM_EVENT_CLOSE`, `WmInputEvent`,
+`WmCreateRequest`/`WmCloseRequest`/`WmResizeRequest`/`WmMoveRequest`) is
+identical to what this doc originally found. No fix attempted here per the
+"why this is not fixed" reasoning above, which still applies unchanged.
