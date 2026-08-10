@@ -631,11 +631,13 @@ char*    spl_sprintf(const char* fmt, ...);
 
 int64_t  spl_shell(const char* cmd);
 char*    spl_shell_output(const char* cmd);  /* capture stdout */
-SplArray* rt_process_run(const char* cmd, uint64_t cmd_len, SplArray* args);
+/* -> RuntimeValue (I64), per runtime_sffi.rs:1419. NOT a bare SplArray*. */
+int64_t   rt_process_run(const char* cmd, uint64_t cmd_len, SplArray* args);
 int64_t   rt_process_run_inherit(const char* cmd, uint64_t cmd_len, SplArray* args);
 int64_t   rt_process_run_inherit_value(int64_t cmd, SplArray* args);
 int64_t   rt_process_spawn_guarded_value(int64_t cmd, SplArray* args);
-SplArray* rt_process_run_timeout(const char* cmd, uint64_t cmd_len, SplArray* args, int64_t timeout_ms);
+/* -> RuntimeValue (I64), per runtime_sffi.rs:1423. NOT a bare SplArray*. */
+int64_t   rt_process_run_timeout(const char* cmd, uint64_t cmd_len, SplArray* args, int64_t timeout_ms);
 SplArray* rt_process_run_bounded(const char* cmd, uint64_t cmd_len, SplArray* args,
                                  int64_t timeout_ms, int64_t max_output_bytes);
 #ifdef _WIN32

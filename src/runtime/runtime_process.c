@@ -505,8 +505,13 @@ finish:
     return result;
 }
 
-SplArray* rt_process_run_timeout(const char* cmd, uint64_t cmd_len, SplArray* args, int64_t timeout_ms) {
-    return win_process_run_capture(cmd, cmd_len, args, timeout_ms, -1);
+/* (cmd_ptr, cmd_len, args, timeout_ms) -> RuntimeValue (array), per
+ * runtime_sffi.rs:1423. The result is built by win_process_run_capture with
+ * rt_array_new / rt_string_new, so it is already a properly tagged
+ * RuntimeValue; only the C return type was spelled `SplArray*`. See the POSIX
+ * twin below. */
+int64_t rt_process_run_timeout(const char* cmd, uint64_t cmd_len, SplArray* args, int64_t timeout_ms) {
+    return (int64_t)(uintptr_t)win_process_run_capture(cmd, cmd_len, args, timeout_ms, -1);
 }
 
 SplArray* rt_process_run_bounded(const char* cmd, uint64_t cmd_len, SplArray* args,
@@ -1476,8 +1481,19 @@ static SplArray* posix_process_run_capture(const char* cmd, uint64_t cmd_len, Sp
     return process_timeout_result(out, err, code, timed_out, timeout_ms);
 }
 
-SplArray* rt_process_run_timeout(const char* cmd, uint64_t cmd_len, SplArray* args, int64_t timeout_ms) {
-    return posix_process_run_capture(cmd, cmd_len, args, timeout_ms, -1);
+/* (cmd_ptr, cmd_len, args, timeout_ms) -> RuntimeValue (array), per
+ * runtime_sffi.rs:1423, matching the canonical Rust definition
+ * (sffi/env_process.rs:1094 -> RuntimeValue).
+ *
+ * The BODY was already correct -- posix_process_run_capture builds the result
+ * with rt_array_new / rt_array_push / rt_string_new, so it carries
+ * RT_VALUE_TAG_HEAP and the rt_core registry owns it. Measured through the ABI
+ * the compiler emits, in all three C link orders: raw=0x...2e1, tag=1,
+ * array_len=3. cmd_len is honoured and forwarded. Only the C RETURN TYPE was
+ * spelled `SplArray*` where the compiler says I64, which is what the extern ABI
+ * gate flagged; this is a signature correction, not a behaviour change. */
+int64_t rt_process_run_timeout(const char* cmd, uint64_t cmd_len, SplArray* args, int64_t timeout_ms) {
+    return (int64_t)(uintptr_t)posix_process_run_capture(cmd, cmd_len, args, timeout_ms, -1);
 }
 
 SplArray* rt_process_run_bounded(const char* cmd, uint64_t cmd_len, SplArray* args,

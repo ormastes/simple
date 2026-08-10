@@ -9002,7 +9002,22 @@ static char* rt_core_shell_quote(const char* s) {
     return out;
 }
 
-SplArray* rt_process_run(const char* cmd, uint64_t cmd_len, SplArray* args) {
+/* (cmd_ptr, cmd_len, args) -> RuntimeValue (array), per runtime_sffi.rs:1419.
+ *
+ * The BODY was already correct: the result is built with rt_array_new /
+ * rt_array_push / rt_string_new, so it carries RT_VALUE_TAG_HEAP and is owned
+ * by the rt_core registry -- exactly what the compiler decodes. Verified in all
+ * three C link orders: raw=0x...2a1, tag=1, array_len=3. cmd_len is honoured
+ * and forwarded, so the (ptr, len) parameter ABI is respected too. Only the C
+ * RETURN TYPE was spelled `SplArray*` where the compiler and the canonical Rust
+ * definition (sffi/env_process.rs:585 -> RuntimeValue) say I64.
+ *
+ * The body is kept as rt_process_run_array() because two C-internal callers
+ * (rt_process_run_tuple, and rt_process_result_to_tuple's contract) want the
+ * SplArray* form; rt_process_run is now the thin entry point that states the
+ * declared result type. Same worker/entry-point split the (ptr, len) parameter
+ * fixes used for rt_dir_create_cpath et al. */
+static SplArray* rt_process_run_array(const char* cmd, uint64_t cmd_len, SplArray* args) {
     SplArray* result = rt_array_new(3);
     if (!cmd || cmd_len == 0) {
         rt_array_push(result, rt_string_new((const uint8_t*)"", 0));
@@ -9150,10 +9165,14 @@ int64_t rt_process_spawn_guarded_value(int64_t cmd, SplArray* args) {
     return pid;
 }
 
+int64_t rt_process_run(const char* cmd, uint64_t cmd_len, SplArray* args) {
+    return (int64_t)(uintptr_t)rt_process_run_array(cmd, cmd_len, args);
+}
+
 int64_t* rt_process_run_tuple(int64_t cmd, SplArray* args) {
     const char* cmd_c = rt_interp_cstr(cmd);
     uint64_t cmd_len = cmd_c ? (uint64_t)strlen(cmd_c) : 0;
-    return rt_process_result_to_tuple(rt_process_run(cmd_c ? cmd_c : "", cmd_len, args));
+    return rt_process_result_to_tuple(rt_process_run_array(cmd_c ? cmd_c : "", cmd_len, args));
 }
 
 int64_t* rt_process_run_timeout_tuple(int64_t cmd, SplArray* args, int64_t timeout_ms) {
