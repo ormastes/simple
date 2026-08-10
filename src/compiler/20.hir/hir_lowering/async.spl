@@ -357,18 +357,42 @@ impl HirLowering:
 
 impl HirLowering:
     me types_equal(a: HirType, b: HirType) -> bool:
-        # Structural equality for HIR types (Phase 1B.4 - TODO #87 ✅)
-        match (a, b):
-            case (Int, Int): true
-            case (Float, Float): true
+        # Structural equality for HIR types (Phase 1B.4 - TODO #87).
+        #
+        # BUG FIX (2026-08-10): this used to `match (a, b):` -- matching the
+        # HirType STRUCTS directly -- against bare HirTypeKind variant names
+        # (some of them not even real HirTypeKind variants: `String`,
+        # `ParserFunction`, `ParserTypeParam` do not exist on this enum; the
+        # real names are `Str`, `Function`, `TypeParam`). Matching a struct
+        # against an enum-variant pattern can never bind, so every arm
+        # silently fell through and the match always took the LAST
+        # structurally-plausible arm's fields as zero-valued defaults,
+        # observed concretely as `types_equal(Int(32,true), Str)` and
+        # `types_equal(Int(32,true), Bool)` both returning `true`. This is
+        # the equality oracle `check_poll_function_signature` uses to check
+        # a `poll` function's `Poll<T>` inner type against the async
+        # function's `Future<T>` inner type, so the check silently accepted
+        # any width/signedness/kind mismatch instead of reporting
+        # `future_type_param_mismatch`. Matching on `.kind` (real
+        # HirTypeKind) with the real variant names fixes it.
+        match (a.kind, b.kind):
+            case (Int(bits_a, signed_a), Int(bits_b, signed_b)):
+                bits_a == bits_b and signed_a == signed_b
+            case (Float(bits_a), Float(bits_b)):
+                bits_a == bits_b
             case (Bool, Bool): true
-            case (String, String): true
+            case (Char, Char): true
+            case (Str, Str): true
             case (Unit, Unit): true
             case (Never, Never): true
             case (Error, Error): true
+            case (Any, Any): true
 
-            case (Array(inner_a), Array(inner_b)):
-                self.types_equal(inner_a, inner_b)
+            case (Array(elem_a, _), Array(elem_b, _)):
+                self.types_equal(elem_a, elem_b)
+
+            case (Slice(elem_a), Slice(elem_b)):
+                self.types_equal(elem_a, elem_b)
 
             case (Tuple(fields_a), Tuple(fields_b)):
                 if fields_a.len() != fields_b.len():
@@ -378,7 +402,7 @@ impl HirLowering:
                         return false
                 true
 
-            case (ParserFunction(params_a, ret_a, _), ParserFunction(params_b, ret_b, _)):
+            case (Function(params_a, ret_a, _), Function(params_b, ret_b, _)):
                 if params_a.len() != params_b.len():
                     return false
                 for i in 0..(params_a.len()):
@@ -392,6 +416,9 @@ impl HirLowering:
             case (Result(ok_a, err_a), Result(ok_b, err_b)):
                 self.types_equal(ok_a, ok_b) and self.types_equal(err_a, err_b)
 
+            case (Dict(key_a, val_a), Dict(key_b, val_b)):
+                self.types_equal(key_a, key_b) and self.types_equal(val_a, val_b)
+
             case (Named(sym_a, args_a), Named(sym_b, args_b)):
                 val symbol_a: SymbolId = sym_a
                 val symbol_b: SymbolId = sym_b
@@ -404,7 +431,7 @@ impl HirLowering:
                         return false
                 true
 
-            case (ParserTypeParam(name_a, _), ParserTypeParam(name_b, _)):
+            case (TypeParam(name_a, _), TypeParam(name_b, _)):
                 name_a == name_b
 
             case (Infer(id_a, _), Infer(id_b, _)):

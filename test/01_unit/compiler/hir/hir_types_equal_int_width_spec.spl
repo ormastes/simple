@@ -1,0 +1,42 @@
+"""
+Regression: `HirLowering.types_equal` (src/compiler/20.hir/hir_lowering/async.spl)
+must distinguish `Int(bits, signed)` and `Float(bits)` payloads, not just their
+outer discriminant. It is the equality oracle `check_poll_function_signature`
+uses (async.spl:281) to decide whether a `poll` function's declared
+`Poll<T>` inner type actually matches the async function's declared
+`Future<T>` inner type -- so if `types_equal` says `i32 == i64`, a poll
+function can declare the wrong-width state payload and this check silently
+accepts it instead of reporting `future_type_param_mismatch`.
+"""
+
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.async.*
+use compiler.hir.hir_types.{HirType, HirTypeKind}
+use compiler.common.diagnostics.span.{Span}
+
+fn dummy_span() -> Span:
+    Span.new(0, 0, 1, 1)
+
+fn int_type(bits: i64, signed: bool) -> HirType:
+    HirType(kind: HirTypeKind.Int(bits, signed), span: dummy_span())
+
+fn float_type(bits: i64) -> HirType:
+    HirType(kind: HirTypeKind.Float(bits), span: dummy_span())
+
+describe "HirLowering.types_equal distinguishes numeric widths":
+    it "treats i64 as equal to itself":
+        var lowering = HirLowering.with_filename("types_equal_probe")
+        expect(lowering.types_equal(int_type(64, true), int_type(64, true))).to_equal(true)
+
+    it "does NOT treat i32 and i64 as equal (different bit widths)":
+        var lowering = HirLowering.with_filename("types_equal_probe")
+        expect(lowering.types_equal(int_type(32, true), int_type(64, true))).to_equal(false)
+
+    it "does NOT treat i64 and u64 as equal (different signedness)":
+        var lowering = HirLowering.with_filename("types_equal_probe")
+        expect(lowering.types_equal(int_type(64, true), int_type(64, false))).to_equal(false)
+
+    it "does NOT treat f32 and f64 as equal (different bit widths)":
+        var lowering = HirLowering.with_filename("types_equal_probe")
+        expect(lowering.types_equal(float_type(32), float_type(64))).to_equal(false)
