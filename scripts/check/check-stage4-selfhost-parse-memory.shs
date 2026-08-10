@@ -37,11 +37,11 @@ RSS_MAX_KIB="${STAGE4_PARSE_MEM_RSS_MAX_KIB:-524288}"
 # self-hosted binary, not the seed).
 SIMPLE_BIN="${STAGE4_PARSE_MEM_BINARY:-bin/simple}"
 
-case "$FUNCS" in ''|*[!0-9]*) echo "error=invalid_funcs"; exit 2 ;; esac
-[ "$FUNCS" -gt 0 ] || { echo "error=invalid_funcs"; exit 2; }
-[ -x /usr/bin/time ] || { echo "error=gnu_time_required"; exit 2; }
-command -v timeout >/dev/null 2>&1 || { echo "error=timeout_required"; exit 2; }
-[ -x "$SIMPLE_BIN" ] || { echo "error=binary_missing:$SIMPLE_BIN"; exit 2; }
+case "$FUNCS" in ''|*[!0-9]*) echo "error=invalid_funcs"; echo "ERROR — nothing was checked: invalid STAGE4_PARSE_MEM_FUNCS=$FUNCS"; exit 2 ;; esac
+[ "$FUNCS" -gt 0 ] || { echo "error=invalid_funcs"; echo "ERROR — nothing was checked: STAGE4_PARSE_MEM_FUNCS must be > 0"; exit 2; }
+[ -x /usr/bin/time ] || { echo "error=gnu_time_required"; echo "ERROR — nothing was checked: /usr/bin/time (GNU time) is required and missing"; exit 2; }
+command -v timeout >/dev/null 2>&1 || { echo "error=timeout_required"; echo "ERROR — nothing was checked: 'timeout' is required and missing"; exit 2; }
+[ -x "$SIMPLE_BIN" ] || { echo "error=binary_missing:$SIMPLE_BIN"; echo "ERROR — nothing was checked: compiler binary '$SIMPLE_BIN' not found or not executable"; exit 2; }
 
 rm -rf "$ROOT"
 mkdir -p "$ROOT"
@@ -72,24 +72,28 @@ set -e
 if [ "$status" -eq 124 ]; then
   echo "error=timed_out_after_${TIME_MAX_S}s (per-file superlinear-parse regression signature -- see doc/08_tracking/bug/bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20.md)"
   tail -n 20 "$ROOT/error.log" || true
+  echo "FAIL — native-build of a synthetic $FUNCS-func file did not finish within ${TIME_MAX_S}s (superlinear-parse regression signature)"
   exit 1
 fi
 
 max_rss_kib="$(sed -n '1p' "$ROOT/max-rss-kib" 2>/dev/null || echo 0)"
 case "$max_rss_kib" in ''|*[!0-9]*) max_rss_kib=0 ;; esac
-[ "$max_rss_kib" -gt 0 ] || { echo "error=no_rss_sample"; cat "$ROOT/error.log" || true; exit 2; }
+[ "$max_rss_kib" -gt 0 ] || { echo "error=no_rss_sample"; cat "$ROOT/error.log" || true; echo "ERROR — nothing was checked: /usr/bin/time produced no RSS sample"; exit 2; }
 
 if [ "$status" -ne 0 ]; then
   echo "error=native_build_failed:$status (peak_rss_kib=$max_rss_kib -- if this is a compile error unrelated to memory/time, the guard's synthetic entry may need updating, not the ceilings)"
   tail -n 20 "$ROOT/error.log" || true
+  echo "FAIL — native-build of the synthetic $FUNCS-func file exited $status (peak_rss_kib=$max_rss_kib)"
   exit 1
 fi
 
 [ "$max_rss_kib" -lt "$RSS_MAX_KIB" ] || {
   echo "error=peak_rss_kib:$max_rss_kib exceeds ceiling $RSS_MAX_KIB"
+  echo "FAIL — peak_rss_kib=$max_rss_kib exceeds ceiling $RSS_MAX_KIB for a synthetic $FUNCS-func file"
   exit 1
 }
 
 echo "stage4_parse_memory_funcs=$FUNCS"
 echo "stage4_parse_memory_max_rss_kib=$max_rss_kib"
 echo "stage4_parse_memory_status=pass"
+echo "PASS — synthetic $FUNCS-func file built in <=${TIME_MAX_S}s, peak_rss_kib=$max_rss_kib (ceiling $RSS_MAX_KIB)"
