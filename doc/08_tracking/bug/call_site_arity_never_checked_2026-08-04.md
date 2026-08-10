@@ -366,7 +366,7 @@ reported at all.
 | `dyn_torch_tensor_{slice,sum_dim,mean_dim,min_dim,max_dim,argmin,argmax}` | 9 | `torch_ndarray.spl` | JIT | **real, NOT fixed** |
 | `ifconfig/1` | 3 | `ifconfig_tool.spl`, `devinfo_tool.spl` | JIT | real, NOT fixed |
 | `pbkdf2_sha256/4` | 4 | `crypto_reference_spec.spl` | blocked | real, NOT fixed |
-| `compile_options_hash_compute/7` | 2 | `object_provider_spec.spl` | blocked | real, NOT fixed |
+| `compile_options_hash_compute/7` | 2 | `object_provider_spec.spl` | blocked | fixed (arity only), see §10.3 |
 | `generate_csrf_token/2` | 2 | `csrf_spec.spl` | interpreter | real, NOT fixed |
 | `verify_rv64_qemu_user_proof_contract/2` | 2 | `os_build_run.spl`, `qemu_runner_part2.spl` | JIT | real, NOT fixed |
 | `read_log/3`, `gui_adapter_new/1`, `scv_export_git_fast_import/4`, `terminal_execute/2` | 4 | assorted `src/` | JIT | real, NOT fixed |
@@ -450,3 +450,180 @@ what `glass_css.spl`'s own dispatch pairs with the default glass theme.
 Command form for all of the above:
 `bin/simple test <spec> --no-cache --no-cover-check`, verdict read from the
 `^Results:` line of a captured log (it is otherwise buried under lint output).
+
+## 10. §8's remaining ranked clusters, worked (2026-08-10)
+
+Six clusters from §8's ranked table were investigated in order. One was
+landed (partially — the arity defect itself is fixed and proven, but the
+spec cannot reach full green for an unrelated pre-existing reason). The rest
+are real defects left untouched, each for a documented reason — either a
+deeper feature gap that an arg edit cannot repair, or no spec reaches the
+call at all so a fix could not be proven by value.
+
+### 10.1 `ifconfig/1` — NOT fixed, deeper than arity
+
+`src/os/userlib/net.spl:126` — `fn ifconfig(if_index: u32) -> Result<NetIfInfo, text>`
+returns info for **one** interface selected by index. All three callers
+(`src/os/tools/net/ifconfig_tool.spl:17,34`, `src/os/tools/dev/devinfo_tool.spl:58`)
+call `ifconfig()` with zero arguments and iterate the result as a **list**
+(`for iface in ifaces`). The mismatch is not just a missing argument — the
+return *type* is wrong for how every caller uses it (`Result<NetIfInfo, text>`
+vs. an expected `[NetIfInfo]`). Making this callable would require a real
+enumerate-all-interfaces feature (loop over indices until a NOT_FOUND result,
+or a new syscall), not a call-site argument. No spec in the repo reaches
+`ifconfig_tool.spl` or `devinfo_tool.spl` (`grep` for `ifconfig_tool\|devinfo_tool\|run_ifconfig`
+under `test/` returns nothing), so there is also no value-level way to prove
+any fix. Left open.
+
+### 10.2 `pbkdf2_sha256/4` — NOT fixed, symbol doesn't exist
+
+`test/01_unit/lib/crypto/crypto_reference_spec.spl:6` imports
+`pbkdf2_sha256, pbkdf2_sha512, pbkdf2_with_algorithm, get_recommended_pbkdf2_iterations`
+from `std.crypto.pbkdf2`. That module
+(`src/lib/crypto/pbkdf2.spl`) re-exports only `pbkdf2_sha256_bytes`,
+`pbkdf2_sha384_bytes`, `pbkdf2_sha512_bytes` from
+`std.common.crypto.pbkdf2` (`src/lib/common/crypto/pbkdf2.spl`) — none of the
+four imported names exist anywhere in that module. This is not a call-site
+arity slip at all: the callee the spec wants was never implemented (a
+text-in/text-out convenience wrapper around the byte-array API, plus an
+algorithm-selection dispatcher and a recommended-iteration-count constant).
+Fixing it means writing three new functions, which is feature work outside a
+call-site-only lane. Left open — matches the doc's existing "blocked" radius
+label in §8's table.
+
+### 10.3 `compile_options_hash_compute/7` — FIXED (partially provable), `1c1a6a0...`
+
+`src/compiler/80.driver/cache/compile_options_hash.spl:103` —
+`fn compile_options_hash_compute(backend: text, opt_level: i64, release: bool, debug_info: bool, gc_off: bool, profile: text, allowed_families: [text]) -> CompileOptionsHash`.
+Two spec-local helpers called it with only the first 5 positional arguments,
+leaving `profile` and `allowed_families` unbound:
+
+- `test/{01_unit,unit}/compiler/linker/fixed_backend_success_spec.spl:77`,
+  `build_fixed_backend_smf()` — `compile_options_hash_compute("llvm", 3, true, false, false)`
+- `test/{01_unit,unit}/compiler/linker/object_provider_spec.spl:25`,
+  `mark_smf_as_pic_for_backend()` — `compile_options_hash_compute(backend, 2, true, true, false)`
+
+Intent: every production caller (`driver_types.spl:338`, `smf_cache.spl:651`,
+`watcher_client.spl:153`, `module_loader.spl:908`) passes `opts.profile` and
+`opts.allowed_families` straight through from `CompileOptions`; there is no
+special-cased "no profile / no family restriction" call anywhere. The
+canonical unrestricted values are `"default"` (the profile literal used
+throughout the driver, e.g. `compile_options_hash_spec.spl`'s whole suite)
+and `[]` (no family filter). Fixed both spec-local call sites to
+`compile_options_hash_compute(<same args>, "default", [])`.
+
+**Verification — `fixed_backend_success_spec.spl` (the one spec whose arity
+error is directly reachable):**
+
+    RED  (pristine, 5-arg call)
+         Results: 1 total, 0 passed, 1 failed
+         semantic: function expects argument for parameter 'profile', but none was provided
+    GREEN (7-arg call, "default", [])
+         Results: 1 total, 0 passed, 1 failed
+         semantic: method `to_bytes` not found on type `str` (receiver value: code)
+
+The arity defect is conclusively fixed — the original error is gone and does
+not recur under sabotage (reverting to the 5-arg call reproduces it verbatim).
+But the spec cannot go green: `build_section_entry()` in the same file calls
+`"code".to_bytes()` at line 53, and `text.to_bytes()` is not a resolvable
+method under this test path — a **separate, pre-existing defect**, unrelated
+to arity and out of this lane's scope (no `text.to_bytes` fix was made).
+Recorded here rather than silently claimed as a full pass.
+
+**`object_provider_spec.spl`** was fixed identically for consistency (same
+callee, same missing arguments, same intended values), but its two `it`
+blocks that reach `mark_smf_as_pic_for_backend()` were already RED for an
+unrelated reason before and after the fix — `semantic: unknown static method
+from_bytes on class SmfHeader` fires while parsing the SMF header, before
+`compile_options_hash_compute` is ever called (`Results: 4 total, 2 passed, 2
+failed`, byte-identical before and after). The arity call there is real but
+currently dead code on every execution path a spec can reach; the fix is
+correct (matches the callee signature and every real caller's intent) but not
+independently provable by this spec. `test/01_unit/compiler/cache/compile_options_hash_spec.spl`
+already calls the 7-arg form correctly throughout and continues to pass.
+
+### 10.4 `generate_csrf_token/2` — NOT fixed, spec targets a nonexistent API surface
+
+`test/unit/lib/http_server/csrf_spec.spl:20,25` call `generate_csrf_token()`
+with zero arguments against
+`src/lib/nogc_async_mut/http_server/csrf.spl:67` — `fn generate_csrf_token(config: CsrfConfig, session_id: text) -> text`.
+A trial fix (constructing a `CsrfConfig` with a non-empty `secret_key` and a
+session id) does eliminate that specific arity error under RED/GREEN
+(`semantic: function expects argument for parameter 'config', but none was
+provided` → gone), but the same spec file's other 8 examples (of 10 total)
+fail with `semantic: function \`validate_csrf_token\` not found` and
+`semantic: function \`is_csrf_exempt_method\` not found` — those two names,
+and `default_csrf_config` that the file also imports, do not exist anywhere
+in `csrf.spl`. This file is a stale duplicate of the current, correct
+`test/01_unit/lib/http_server/csrf_spec.spl` (which already calls
+`generate_csrf_token(config, "session-abc")` correctly and passes) written
+against an older/aspirational API shape that was never implemented. Per the
+task's methodology, the arity edit alone cannot make this spec pass (`Results:
+10 total, 0 passed, 10 failed` before and, for the remaining 8 examples,
+after), so **the trial fix was reverted** and nothing was changed here — left
+open, matching the `pbkdf2_sha256` pattern of "callee never existed."
+
+### 10.5 `verify_rv64_qemu_user_proof_contract/2` — NOT fixed, blocked two ways
+
+`src/lib/hardware/riscv_common/core/riscv_formal.spl:103` —
+`fn verify_rv64_qemu_user_proof_contract(code_start: i64, exit_code: i64) -> Result<text, text>`.
+Both production call sites (`src/os/_QemuRunner/os_build_run.spl:813`,
+`src/os/qemu_runner_part2.spl:682`, near-duplicate files) call it from inside
+`verify_qemu_formal_output(arch: Architecture, output: text)` as
+`verify_rv64_qemu_user_proof_contract(output)` — one `text` argument where the
+callee wants two `i64`s. The wrapping function has no `code_start` in scope at
+all, and `output` is raw QEMU stdout text, not a numeric exit code — turning
+this into a real fix needs the wrapper to actually parse an exit code out of
+`output` and know the code segment's base address, which is feature work, not
+an argument fix. The one spec that calls the underlying function directly,
+`test/01_unit/hardware/riscv_common/riscv_formal_contract_spec.spl:135`
+(`verify_rv64_qemu_user_proof_contract(output)`, also 1-arg), cannot even be
+used to prove a fix: it fails before execution reaches that line with
+`semantic: Cannot resolve module: hardware.riscv_common.core.riscv_formal`
+(`Results: 1 total, 0 passed, 1 failed`) — a pre-existing, unrelated module-path
+defect. Left open on both grounds.
+
+### 10.6 `read_log/3`, `gui_adapter_new/1`, `scv_export_git_fast_import/4`, `terminal_execute/2` — NOT fixed, unprovable (3 of 4) / blocked (1 of 4)
+
+All four are real call-site arity mismatches with an obvious, low-risk
+correct fix, but the task's methodology requires proving each fix by value,
+and none can be:
+
+- **`read_log/3`** (`src/os/userlib/log.spl:50`,
+  `fn read_log(min_level: LogLevel, offset: u64, count: u32) -> Result<[KLogEntry], text>`).
+  `src/os/tools/log/journal.spl:31`, `JournalReader.refresh()`, calls
+  `read_log(self.offset)` — 1 arg. The obvious fix is
+  `read_log(self.filter.min_level ?? LogLevel.Debug, self.offset, <some count>)`,
+  mirroring `read_recent()`'s own `read_log(LogLevel.Debug, 0, count)` two
+  lines below. No spec references `JournalReader` (`grep` under `test/` for
+  `JournalReader` finds nothing related to this file); not touched.
+- **`gui_adapter_new/1`** (`src/app/test_daemon/adapters/gui_adapter.spl:96`,
+  `fn gui_adapter_new(mode: text) -> GuiAdapter`, which already tolerates an
+  empty `mode` by falling back to `"headless"`). `src/app/test_daemon/daemon.spl:495`
+  calls `gui_adapter_new()` — 0 args; `gui_adapter_new("")` is the obvious fix.
+  No spec calls `test_daemon_start()`, the only caller of this line
+  (`grep` for `test_daemon_start` under `test/` finds nothing); not touched.
+- **`scv_export_git_fast_import/4`** (`src/lib/scv/fast_import.spl:217`,
+  `fn scv_export_git_fast_import(root: text, stream_path: text, branch: text, since: text) -> text`).
+  `src/lib/scv/public_remote.spl:61` calls it with 3 args, dropping `since`.
+  Reading `scv_export_dag_commits()` (line 177-190), `since == ""` walks the
+  full history to the root — the obvious fix is
+  `scv_export_git_fast_import(root, "{out_dir}/export.fi", branch, "")`,
+  matching `scv_public_export`'s intent to do a full export. No spec calls
+  `scv_public_export` (`grep` for `scv_public_export` under `test/` finds
+  nothing); not touched.
+- **`terminal_execute/2`** (`src/lib/nogc_sync_mut/terminal/connection.spl:76`,
+  `fn terminal_execute(conn: TerminalConnection, command: text) -> TerminalExecResult`
+  — no timeout parameter exists anywhere in the implementation or its three
+  backends, `ssh_terminal_execute`/`telnet_terminal_execute`/`relay_terminal_execute`).
+  `src/app/test_daemon/adapters/remote_pc_adapter.spl:180` calls
+  `terminal_execute(self.connection, cmd, timeout_ms)` — 3 args, expecting
+  timeout enforcement that does not exist in the callee at any layer. Dropping
+  `timeout_ms` would silently discard the caller's intent (same shape as the
+  already-documented `dyn_torch_tensor_*` `step` truncation in §8) — this is a
+  feature gap, not a call-site fix. Left open.
+
+All six clusters are therefore accounted for: **one landed** (§10.3,
+`compile_options_hash_compute/7`, arity-provably-fixed though the spec stays
+red for an unrelated `text.to_bytes()` gap), **five left open** with the
+specific reason recorded above.
