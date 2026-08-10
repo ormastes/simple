@@ -112,6 +112,18 @@ consumers pending patch-application being proven; touching an internal
 helper's algorithm, even for a bugfix, was judged out of scope for that
 additive-only slice and is left for a dedicated follow-up.
 
+## Follow-up item 1 applied (2026-08-10)
+
+`_draw_ir_style_changed`/`_draw_ir_style_value` in `draw_ir_diff.spl` rewritten
+to use the same raw double-loop membership check already proven safe in
+`draw_ir_patch.spl`'s `_draw_ir_patch_style_changed`, eliminating the
+`T?`-returning-lookup + `== nil` comparison shape that triggers the daemon
+divergence. `_draw_ir_style_value` was removed (no longer called anywhere in
+the file or elsewhere — confirmed via grep). Items 2 (general-class
+investigation) and 3 (repo-wide grep for the same shape) remain open as
+follow-up; they are a broader engine-characterization effort out of scope for
+this file-local fix.
+
 ## Suggested follow-up
 
 1. Rewrite `_draw_ir_style_changed`/`_draw_ir_style_value` in
