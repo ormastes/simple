@@ -5,102 +5,21 @@
 #
 # Pattern: plain fn test_X() with print("PASS:...") / print("FAIL:...").
 # Text-grep verifiable: grep "PASS:" output to confirm each AC.
-# Self-contained — types replicated at module level; no deep import chain
-# so tests run cleanly in interpreter mode.
+# Contract value types are imported from the real product module so this
+# spec exercises the actual contract instead of a same-named shadow. The
+# service-orchestration functions below remain local test doubles (they
+# model the api/service layer for interpreter-mode testing), but the data
+# shapes flowing through them are the real ones.
 #
 # @tag: system, smux, tmux
 # @cover src/os/apps/smux/api.spl 70%
 # @cover src/os/apps/smux/contract.spl 60%
 # @cover src/os/apps/smux/service.spl 40%
 
-# =========================================================================
-# Replicated value types (no import chain needed in interpreter mode)
-# =========================================================================
-
-enum MuxBackendKind:
-    NativeShell
-    HostTmux
-    Stub
-
-class MuxSession:
-    id: text
-    name: text
-    created_at: int
-    generation: int
-
-    me to_text() -> text:
-        return "session[" + self.name + "/" + self.id + "]"
-
-    static fn create(sid: text, sname: text) -> MuxSession:
-        return MuxSession(id: sid, name: sname, created_at: 0, generation: 0)
-
-class MuxWindow:
-    id: text
-    session_id: text
-    name: text
-    is_active: bool
-
-    me to_text() -> text:
-        return "window[" + self.name + "/" + self.id + "]"
-
-    static fn create(wid: text, sid: text, wname: text) -> MuxWindow:
-        return MuxWindow(id: wid, session_id: sid, name: wname, is_active: false)
-
-class MuxPane:
-    id: text
-    window_id: text
-    session_id: text
-    state: text
-    cols: int
-    rows: int
-
-    me to_text() -> text:
-        return "pane[" + self.id + "] " + self.cols.to_text() + "x" + self.rows.to_text()
-
-    static fn create(pid: text, wid: text, sid: text) -> MuxPane:
-        return MuxPane(
-            id: pid,
-            window_id: wid,
-            session_id: sid,
-            state: "running",
-            cols: 80,
-            rows: 24
-        )
-
-class MuxCapture:
-    pane_id: text
-    content: text
-    rows: int
-
-    static fn create(pid: text, lines: text, row_count: int) -> MuxCapture:
-        return MuxCapture(pane_id: pid, content: lines, rows: row_count)
-
-class MuxClientAttachment:
-    client_id: text
-    session_id: text
-    attached: bool
-    cols: int
-    rows: int
-
-    me to_text() -> text:
-        return "client[" + self.client_id + "] -> session[" + self.session_id + "]"
-
-    static fn create(cid: text, sid: text, c: int, r: int) -> MuxClientAttachment:
-        return MuxClientAttachment(
-            client_id: cid,
-            session_id: sid,
-            attached: true,
-            cols: c,
-            rows: r
-        )
-
-class SmuxMetrics:
-    startup_count: int
-    capture_count: int
-    resize_count: int
-
-    static fn zero() -> SmuxMetrics:
-        return SmuxMetrics(startup_count: 0, capture_count: 0, resize_count: 0)
+use os.apps.smux.contract.{
+    MuxBackendKind, MuxSession, MuxWindow, MuxPane, MuxCapture,
+    MuxClientAttachment, SmuxMetrics
+}
 
 # =========================================================================
 # Local service state replicas for interpreter-mode testing
@@ -139,6 +58,7 @@ fn _create_session(name: text) -> MuxSession:
     _panes.push(p)
     _metrics = SmuxMetrics(
         startup_count: _metrics.startup_count + 1,
+        last_startup_ns: _metrics.last_startup_ns,
         capture_count: _metrics.capture_count,
         resize_count: _metrics.resize_count
     )
@@ -227,6 +147,7 @@ fn _resize_pane(pane_id: text, cols: int, rows: int) -> bool:
         return false
     _metrics = SmuxMetrics(
         startup_count: _metrics.startup_count,
+        last_startup_ns: _metrics.last_startup_ns,
         capture_count: _metrics.capture_count,
         resize_count: _metrics.resize_count + 1
     )
@@ -242,6 +163,7 @@ fn _capture(pane_id: text) -> MuxCapture:
         return MuxCapture.create(pane_id, "", 1)
     _metrics = SmuxMetrics(
         startup_count: _metrics.startup_count,
+        last_startup_ns: _metrics.last_startup_ns,
         capture_count: _metrics.capture_count + 1,
         resize_count: _metrics.resize_count
     )
