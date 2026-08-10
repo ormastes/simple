@@ -73,3 +73,36 @@ When the concurrent session commits `src/compiler/80.driver/cache/target_graph.s
 
 **Do not** land A2's 668-line file wholesale at any point — it embeds a snapshot of the
 other session's work as of 2026-08-10 and would revert whatever they did afterward.
+
+## Re-verification (2026-08-10, later same day)
+
+Re-checked independently, not just relayed:
+
+- `git fetch origin -q && git cat-file -e origin/main:src/compiler/80.driver/cache/target_graph.spl`
+  → still `fatal: ... exists on disk, but not in 'origin/main'`. `git status --porcelain`
+  still shows `?? src/compiler/80.driver/cache/target_graph.spl`. Unblock condition
+  (owning session commits the base file) is **still not met**.
+- `git log --all --oneline -- src/compiler/80.driver/cache/target_graph.spl` → empty.
+  This file has **never** been committed to any local ref, ever — not a rebase-in-progress,
+  a genuinely uncommitted working file.
+- File mtime is `2026-08-09 08:51:44` and has not changed since — the owning session is
+  not actively editing it right now, but there is no commit to rebase onto either, so the
+  documented unblock procedure (steps 1-4) still cannot start.
+- Confirmed the worktree `.claude/worktrees/agent-a5cdacdf7286b11a3` (branch
+  `worktree-agent-a5cdacdf7286b11a3`) is still present, its file is still 668 lines, and
+  `diff <(head -281 main-copy) <(head -281 worktree-copy)` is empty — A2's appended
+  section still applies cleanly to the current untracked base, no re-merge needed once
+  the base lands.
+- Did not attempt to commit the untracked base file myself: doing so would be committing
+  another concurrent session's in-flight, never-committed work under this change, which is
+  exactly what `.claude/rules/vcs.md` and
+  `feedback_dont_touch_a_file_another_concurrent_session_is_midflight_on` forbid — the same
+  reasoning the original report already applied. `bin/simple` does not exist in the worktree
+  (worktrees are gitignored for the built binary — see
+  `reference_worktree_isolation_has_no_bin_simple_binary`), so the spec could not be
+  re-executed live from the worktree without a bootstrap build, which is out of scope here.
+
+**Status: remains OPEN / architectural (cross-session coordination block).** No code
+changes made. Next agent to touch this: re-run the exact three fetch/cat-file/status
+commands above before doing anything else — if `origin/main` now has the file tracked,
+follow the existing unblock steps 1-4 verbatim.
