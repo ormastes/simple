@@ -955,6 +955,39 @@ impl Lowerer {
         if matches!(method, "to_float" | "to_f64") && (recv_ty == TypeId::STRING || recv_ty == TypeId::ANY) {
             return TypeId::F64;
         }
+        // Builtin float MATH methods on a float receiver. Exactly the same
+        // mechanism as the `to_float`/`to_f64` case directly above, one layer
+        // over: these are compiler intrinsics lowered inline by
+        // `codegen/instr/methods.rs` (`matches!(method, "sqrt" | "abs" |
+        // "floor" | "ceil" | "round")` -> `builder.ins().sqrt/fabs/floor/
+        // ceil/nearest`), so they have no `method_return_types` entry and fell
+        // through to ANY here. The instruction produces a RAW unboxed f64, and
+        // an ANY-typed expression is assumed to be an already-tagged
+        // RuntimeValue, so MIR's print lowering
+        // (`needs_float_boxing = matches!(arg.ty, F32 | F64)` in
+        // mir/lower/lowering_expr_builtin.rs) emitted no BoxFloat and
+        // `rt_print_value` applied `as_int()` (`raw >> 3`) to the IEEE bit
+        // pattern:
+        //     val b: f64 = 16.0
+        //     print b.sqrt()          -> 577023702256844800 == bits(4.0) / 8
+        //     val c: f64 = b.sqrt()
+        //     print c                 -> 4.0
+        // The typed-local form was correct because the DECLARED local type
+        // supplied the F64 the expression type lacked -- which is exactly what
+        // isolated this to the type stamp rather than the computation. Typing
+        // the call as the receiver's float type makes the existing boxing fire.
+        // The list is deliberately the codegen inline set and nothing more:
+        // `trunc`/`sin`/`pow`/`min`/`max` on an f64 receiver are not
+        // implemented at all today ("Function 'f64.sin' not found"), and
+        // stamping F64 on a method that actually returns a tagged value would
+        // double-box it. Restricted to float receivers so integer `abs` keeps
+        // returning an integer.
+        // doc/08_tracking/bug/float_returning_method_in_argument_position_prints_tagged_bits_2026-08-10.md
+        if matches!(method, "sqrt" | "abs" | "floor" | "ceil" | "round")
+            && matches!(recv_ty, TypeId::F32 | TypeId::F64)
+        {
+            return recv_ty;
+        }
         TypeId::ANY
     }
 

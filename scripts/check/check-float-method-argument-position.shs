@@ -1,0 +1,213 @@
+#!/bin/sh
+# check-float-method-argument-position.shs
+#
+# Fences doc/08_tracking/bug/float_returning_method_in_argument_position_prints_tagged_bits_2026-08-10.md.
+#
+# DEFECT. A float-returning METHOD used directly as a call argument printed the
+# raw IEEE-754 bit pattern shifted right by 3 instead of the value:
+#
+#     val b: f64 = 16.0
+#     print b.sqrt()          # 577023702256844800   (== bits(4.0) / 8)
+#     val c: f64 = b.sqrt()
+#     print c                 # 4.0                  (correct)
+#
+# Same method, same receiver, two different answers. The printed integer is
+# exactly bits(4.0) >> 3, i.e. `rt_print_value` received an UNBOXED f64 in a
+# slot it read as a tagged RuntimeValue and applied `as_int()` (raw >> 3). The
+# computation was always right; only the boxing was missing.
+#
+# ROOT CAUSE. `Lowerer::builtin_numeric_method_result_type`
+# (hir/lower/expr/mod.rs) knew the result type of the CONVERSION methods
+# (to_int/to_f64/...) but not of the float MATH methods (sqrt/floor/ceil/abs/
+# sin/...). Those method calls therefore fell through to a dynamic MethodCall
+# stamped TypeId::ANY, and MIR's print lowering
+# (mir/lower/lowering_expr_builtin.rs, `needs_float_boxing = matches!(arg.ty,
+# F32 | F64)`) saw ANY and emitted no BoxFloat. The typed-local form worked
+# because the DECLARED local type supplied the F64 the expression type lacked.
+#
+# WHY THIS ASSERTS COMPUTED VALUES, NOT EXISTENCE. The broken build printed
+# something, resolved the method, and computed the correct bits. Only comparing
+# the printed decimal to a hand-computed expected value separates broken from
+# fixed. Every assertion is an exact string equality.
+#
+# WHY THE TYPED-LOCAL CONTROL ROWS ARE HERE. They were correct on the broken
+# build. They must stay correct, and each direct-argument row is paired with the
+# identical expression bound to `val x: f64` first: the pair passing together is
+# what proves the two forms agree, which is the whole content of the defect.
+#
+# RELATION TO check-numeric-builtin-result-type.shs. That check deliberately
+# uses free FUNCTIONS (`sqrt(16.0)`) and, for its typed rows, the val-binding
+# form -- precisely so this defect could not confound it. This check is the
+# method-receiver, direct-argument-position complement. Neither subsumes the
+# other; do not merge them.
+#
+# METHODS COVERED, AND THE ONES DELIBERATELY NOT COVERED. The method family was
+# enumerated by measurement against the pre-fix binary, not assumed:
+#
+#   b.sqrt()   577023702256844800   \
+#   b.abs()    578149602163687424    |  computed CORRECTLY, boxing lost
+#   b.floor()  578149602163687424    |  (each == bits(answer) / 8)
+#   b.ceil()   578149602163687424    |
+#   b.round()  578149602163687424   /
+#   b.trunc()  Runtime error: Function 'f64.trunc' not found  \  NOT IMPLEMENTED
+#   b.sin()    Runtime error: Function 'f64.sin'   not found   |  at all -- a
+#   b.pow(2.0) Runtime error: Function 'f64.pow'   not found   |  SEPARATE gap,
+#   b.max(7.0) Runtime error: Function 'f64.max'   not found  /   not this defect
+#
+# So the covered set is exactly {sqrt, abs, floor, ceil, round} -- which is
+# also exactly the inline set in codegen/instr/methods.rs. The missing-method
+# family above is out of scope here on purpose: asserting on it would make this
+# check fail for a reason it does not diagnose. Note that this defect could NOT
+# confound the sibling libm-ABI defect (Defect B) either, because these are
+# METHOD receivers lowered inline, never libm calls.
+#
+# LANES. Interpreter and JIT. SIMPLE_JIT_STRICT=1 is mandatory on the JIT lane:
+# without it a JIT failure silently falls back to the interpreter and the lane
+# reads as a pass while never having exercised the JIT.
+#
+# Verdict line is the last line of stdout:
+#   PASS  -- <n> assertions checked, n > 0    exit 0
+#   FAIL  -- ...                              exit 1
+#   ERROR -- nothing was checked              exit 2
+
+set -u
+
+BIN="${SIMPLE_BIN:-bin/release/x86_64-unknown-linux-gnu/simple}"
+if [ ! -x "$BIN" ]; then
+    echo "ERROR — nothing was checked (no runnable binary at $BIN)"
+    exit 2
+fi
+
+WORK="${TMPDIR:-/tmp}/floatmethodarg.$$"
+mkdir -p "$WORK" || { echo "ERROR — nothing was checked (cannot create $WORK)"; exit 2; }
+trap 'rm -rf "$WORK"' EXIT INT TERM
+
+CHECKED=0
+FAILED=0
+
+run_case() {
+    _label="$1"; _lane="$2"; _src="$3"; _expect="$4"
+    printf '%s\n' "$_src" > "$WORK/case.spl"
+    case "$_lane" in
+        interp) _got=$(SIMPLE_RUST_SEED_WARNING=0 "$BIN" run "$WORK/case.spl" 2>/dev/null) ;;
+        jit)    _got=$(SIMPLE_JIT_STRICT=1 SIMPLE_RUST_SEED_WARNING=0 "$BIN" "$WORK/case.spl" 2>/dev/null) ;;
+        *)      echo "ERROR — nothing was checked (bad lane $_lane)"; exit 2 ;;
+    esac
+    CHECKED=$((CHECKED + 1))
+    if [ "$_got" = "$_expect" ]; then
+        echo "  ok   [$_lane] $_label -> $_got"
+        return 0
+    fi
+    echo "  FAIL [$_lane] $_label: expected '$_expect', got '$_got'"
+    FAILED=$((FAILED + 1))
+    return 1
+}
+
+echo "check-float-method-argument-position — binary: $BIN"
+ls -l "$BIN" 2>/dev/null | awk '{print "  size/mtime: " $5 " " $6 " " $7 " " $8}'
+echo
+
+for LANE in interp jit; do
+    echo "--- lane: $LANE ---"
+
+    # ---- THE REPORTED SYMPTOM. Direct argument position. ----
+    run_case "print b.sqrt()"  "$LANE" 'fn main():
+    val b: f64 = 16.0
+    print b.sqrt()' '4.0'
+    run_case "print d.abs()"   "$LANE" 'fn main():
+    val d: f64 = -1.5
+    print d.abs()' '1.5'
+    run_case "print e.floor()" "$LANE" 'fn main():
+    val e: f64 = 1.7
+    print e.floor()' '1.0'
+    run_case "print e.ceil()"  "$LANE" 'fn main():
+    val e: f64 = 1.2
+    print e.ceil()' '2.0'
+    run_case "print e.round()" "$LANE" 'fn main():
+    val e: f64 = 1.7
+    print e.round()' '2.0'
+
+    # ---- NEGATIVE RECEIVERS. floor/ceil/round must move toward -inf / +inf /
+    # nearest on the FLOAT value. A positive-only oracle would pass even if the
+    # instruction were operating on the integer bit pattern. ----
+    run_case "print n.floor() (neg)" "$LANE" 'fn main():
+    val n: f64 = -1.7
+    print n.floor()' '-2.0'
+    run_case "print n.ceil() (neg)"  "$LANE" 'fn main():
+    val n: f64 = -1.7
+    print n.ceil()' '-1.0'
+
+    # ---- TYPED-LOCAL CONTROL. Correct on the broken build; must agree with
+    # the direct form above, value for value. ----
+    run_case "val c = b.sqrt()"  "$LANE" 'fn main():
+    val b: f64 = 16.0
+    val c: f64 = b.sqrt()
+    print c' '4.0'
+    run_case "val c = d.abs()"   "$LANE" 'fn main():
+    val d: f64 = -1.5
+    val c: f64 = d.abs()
+    print c' '1.5'
+
+    # ---- CHAINED CONVERSION. `.to_text()` on the float result: the receiver
+    # of the conversion is itself the float method call, so the same missing
+    # type stamp lost the boxing one call further along
+    # (measured pre-fix: 577023702256844800). ----
+    run_case "print b.sqrt().to_text()" "$LANE" 'fn main():
+    val b: f64 = 16.0
+    print b.sqrt().to_text()' '4.0'
+
+    # ---- NESTED. A float method call feeding another float method call, then
+    # printed directly: the inner result must be a real f64 for the outer call
+    # to compute at all, and the outer must still box on the way to print. ----
+    run_case "print b.sqrt().sqrt()" "$LANE" 'fn main():
+    val b: f64 = 16.0
+    print b.sqrt().sqrt()' '2.0'
+    run_case "print n.abs().sqrt()" "$LANE" 'fn main():
+    val n: f64 = -16.0
+    print n.abs().sqrt()' '4.0'
+
+    # ---- INSIDE AN EXPRESSION. The result is consumed arithmetically before
+    # reaching print, so the boxing must happen on the SUM, not the call. This
+    # row is what proves the type stamp did not over-fire and box twice. ----
+    run_case "print b.sqrt() + 1.0" "$LANE" 'fn main():
+    val b: f64 = 16.0
+    print b.sqrt() + 1.0' '5.0'
+
+    # ---- MULTIPLE ARGUMENTS in one call, both float method calls. ----
+    run_case "print two args" "$LANE" 'fn main():
+    val b: f64 = 16.0
+    val d: f64 = -1.5
+    print "{b.sqrt()} {d.abs()}"' '4.0 1.5'
+
+    # ---- INTEGER REGRESSION CONTROL. Integer receivers must NOT start
+    # printing floats. If the result type ever defaulted to F64 these fire.
+    # NOTE `i.abs()` on an i64 receiver is NOT usable as a control: it is not
+    # implemented at all on either lane ("Function 'i64.abs' not found"), which
+    # is a separate gap and is why the fix is scoped to float receivers.
+    run_case "print i.to_text() (int)" "$LANE" 'fn main():
+    val i: i64 = 7
+    print i.to_text()' '7'
+
+    # ---- CONVERSION-METHOD CONTROL. These already had a result type and must
+    # keep it; they guard against a blanket "numeric method returns receiver
+    # type" rewrite. ----
+    run_case "print b.to_int()" "$LANE" 'fn main():
+    val b: f64 = 16.0
+    print b.to_int()' '16'
+    run_case "print i.to_f64() (int recv)" "$LANE" 'fn main():
+    val i: i64 = 3
+    print i.to_f64()' '3.0'
+
+    echo
+done
+
+if [ "$CHECKED" -eq 0 ]; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+if [ "$FAILED" -ne 0 ]; then
+    echo "FAIL — $FAILED of $CHECKED assertions failed"
+    exit 1
+fi
+echo "PASS — $CHECKED assertions checked, all matched the computed expected value"
+exit 0
