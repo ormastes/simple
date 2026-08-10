@@ -325,3 +325,63 @@ missing paths sit behind `rt_file_exists(...)` guards in a shim-install helper.
 This family deserves its own gate — it is invisible to the hollow-needle scan,
 because "absent" and "comment-only" are different verdicts and only the latter is
 reported.
+
+## Defect 8 (found after the D-table above) and D8 — a second exact-inversion
+
+### Scanner defect 8: `examples/` and `test/` were not product roots
+
+`product_root_prefixes()` listed only `src/ scripts/ tools/ config/ bin/ doc/`.
+A needle asserted against a file under `examples/` or `test/` therefore had that
+file **dropped from the candidate set** and was scored against whatever other
+paths the spec happens to read. Two confirmed false HOLLOWs:
+
+- `test/03_system/check/wm_multiapp_taskbar_spec.spl:179` — `GuiRenderer.create`
+  is executable code at `examples/06_io/ui/wm_multiapp_taskbar_gui.spl:120`.
+- `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_metal_mac_host_resume_contract_spec.spl:169`
+  — receiver reads `test/02_integration/rendering/engine2d_cpu_metal_parity_run.spl`.
+
+Adding a root only ever ADDS candidates, so it can only turn a false HOLLOW into
+"code". Fixed in `3923a1991ee`.
+
+### D8. WebSocket opcode dispatch — the spec asserted the construct the product FORBIDS (REAL, fixed)
+
+The sharpest instance in this stream, sharper than D4.
+
+`test/02_integration/app/ui.web/ws_e2e_spec.spl:187-192` (and its identical twin
+`test/integration/app/ui.web/ws_e2e_spec.spl`) asserted
+`case WS_OPCODE_TEXT` … `case WS_OPCODE_PONG` against
+`src/lib/nogc_sync_mut/http/ws/ws_parser.spl`.
+
+All six needles matched **only the comment at `ws_parser.spl:248-257`, which
+exists to forbid exactly that construct**:
+
+```
+    # Opcode dispatch MUST use explicit equality, NOT `match`.
+    # WS_OPCODE_* are `val` i64 constants (ws_frame.spl), not enum variants.
+    # In `case` position a bare identifier is an IRREFUTABLE BINDING PATTERN
+    # ... so `match header.opcode:` with `case WS_OPCODE_TEXT:` bound *every*
+    # opcode to the first arm and made the other five arms dead
+```
+
+The real dispatch is `if/elif header.opcode == WS_OPCODE_*` at `:258-287`. The
+adjacent `it "rejects unknown opcodes"` asserted `case _:`, which occurs
+**nowhere in the file at all** — that leg was already correctly RED.
+
+Re-anchored onto the six equality arms and the fall-through
+(`return _build_pong_frame(header, payload)` plus the trailing `return nil`),
+all pre-checked non-comment; the `it` was retitled from "in the match dispatch"
+to "in the equality dispatch". Both twins fixed, both examples green
+(`46 total, 45 passed, 1 failed`; the remaining failure — SHA-1 accept
+computation — is pre-existing and untouched). Commit `928f1737b4c`.
+
+## Standing recommendation
+
+`doc/08_tracking/test/spec_hollow_needle_worklist.tsv` was generated before
+defects 4-8 were fixed and must be **regenerated** before anyone works it
+further —
+`SIMPLE_TIMEOUT_SECONDS=0 bin/simple run scripts/check/census-spec-vacuity.spl --list`
+(the CPU guard SIGTERMs it at 60s otherwise; it runs for tens of minutes under
+the interpreter). Expect the row count to fall sharply: of the 78 rows this
+stream actually examined, every one inspected was either a scanner false
+positive, already fixed by a prior stream, or one of the three genuine findings
+recorded above.
