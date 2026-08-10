@@ -341,3 +341,25 @@ no further action.**
 - Overall doc status stays **OPEN** — findings 1-2 (and 3, now reframed) are
   unresolved design decisions; only finding 4 (and finding 5, previously) are
   closed.
+
+## Re-verification, 2026-08-10 (no changes — architectural findings confirmed unchanged)
+
+Spot-checked the two claims the whole doc's daemon-vs-client conclusion rests
+on, fresh:
+
+- `timeout 20 /usr/bin/grep -rn "rt_boot_tcp_bind" src/runtime/runtime_native.c`
+  -> still **0 hits**; the same symbol is still defined 5 times in
+  `src/os/kernel/arch/riscv64/boot/freestanding_runtime.c`. The daemon's
+  host-bind blocker is unchanged.
+- `timeout 20 /usr/bin/grep -rln "rt_ssh_\|rt_sftp_" src/runtime/` -> still
+  empty. Finding 5's fix (loud-failure diagnostic in `ssh_terminal.spl`,
+  commit `90a4048e4ce2afdf94d02636611e3d649abd4ecf`) remains the correct scope
+  — no runtime primitives exist to back a real implementation.
+
+Findings 1 (two crypto trees), 2 (two AES-GCM layers), 3 (two client stacks,
+now "active WIP, do not delete"), and 6 (legacy spec trees, owned by
+`doc/08_tracking/dedupe/`) are genuine architecture-ownership decisions, not
+bugs with a code-level fix available in this pass — repeating the 2026-08-06
+investigation would not change that. **No code changed in this re-verification
+pass.** Status stays OPEN / architectural, pending an owner ruling on findings
+1-2 and completion of the SSHCLI lane's own next increment for finding 3.
