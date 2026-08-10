@@ -144,6 +144,12 @@ it as PASS. `Current-host scope complete` is narrower than feature completion.
 The authoritative resume plan must name the target host/capability,
 prerequisites, exact command, retained artifacts, owner, and final reviewer.
 
+When a user asks to close an implementation phase with external verification
+still unavailable, record an **implementation handoff** in the plan and Todo
+DB. It may end the coding turn only after code and host-independent tests are
+landed; it must retain each external acceptance criterion as blocked and must
+not be reported as a verify PASS, release, or umbrella-goal completion.
+
 For SimpleOS QEMU host-GPU NFR-006, TODO 566 postpones only unavailable
 non-current native timing rows. Hardware-independent source/parser/self-test
 work and the current Linux native row remain active. Evidence must cover one

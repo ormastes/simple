@@ -42,6 +42,9 @@ This agent CREATES the initial state file. All subsequent agents read and append
      `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
      `.claude/agents/spipe/`, `.claude/commands/`, and `.gemini/commands/`,
      and require that generated SSpec docs read as operator manuals.
+   - If the request asks to close a coding phase with unavailable external
+     evidence, distinguish an implementation handoff from feature completion:
+     require an open Todo DB row and resume plan for every blocked criterion.
    - If the request needs compiler/bootstrap diagnostics, specify whether
      default-off, `--diagnostics=test`, or `--diagnostics=debug` evidence is
      required. Keep AOP tracing as a separately justified scoped opt-in.

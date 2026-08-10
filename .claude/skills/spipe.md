@@ -152,6 +152,12 @@ evidence. Deferral is valid only while the linked TODO remains open and its
 resume plan records the host/capability, prerequisites, exact command, retained
 artifacts, owner, and final reviewer.
 
+If the user asks to close the coding phase while those rows remain unavailable,
+publish an implementation handoff: land the host-independent code/tests, add
+or refresh the Todo DB rows, and update the plan and feature-expert wiki. This
+does not convert the blocked rows into PASS and cannot close verify, release,
+or the umbrella goal.
+
 For QEMU timing evidence, derive native applicability from the retained,
 validated argv that was actually executed, and bind that exact argv to the same
 serial artifact as the timing samples. Cached evidence must fail if its argv or

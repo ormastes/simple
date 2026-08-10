@@ -43,6 +43,16 @@ the thread goal is complete. Report the short session ID, turn state, goal
 state, summarized objective, and latest task without reproducing secrets or
 unrelated prompts.
 
+### External-evidence handoff
+
+When code and host-independent contracts are complete but a required native
+host, device, or admitted compiler is unavailable, record an implementation
+handoff rather than a feature PASS. Keep the affected acceptance criteria
+active, add a Todo DB row with the host/capability, prerequisite, exact resume
+command, retained artifacts, owner, and reviewer, and label executable/manual
+evidence `blocked` or `unsupported`. A handoff may close the current coding
+turn; it cannot mark the verify report, release, or umbrella goal complete.
+
 ---
 
 ## Phase 1: Research

@@ -184,6 +184,25 @@ Score the `Results: N total, N passed, N failed` line **only**:
    above and the old "touched this lane" framing are both now stale —
    `MirToLlvm` is not currently a live blocker for this campaign's specs.
 
+## 2026-08-10 implementation handoff
+
+The implementation and focused-contract phase now has typed same-run SIMD and
+CUDA/Vulkan final-row adapters, a pinned v3 workload binding, and source-aware
+LLVM/Cranelift coverage probes. This is **not** a campaign verification PASS.
+
+- CUDA/Vulkan and AVX2 results are primitive or source-wiring evidence until an
+  admitted Stage4 full-operation runner produces the final row.
+- NEON and RVV QEMU results are correctness-only; physical ARM64/RV64 evidence
+  is still required.
+- Metal remains fail-closed until a reviewed metallib tuple and native macOS
+  receipt exist.
+- CIRCL is the sole executable independent external ML-KEM oracle; local code
+  and fixture data do not make a second oracle.
+
+Use Todo DB **677--680** as the authoritative continuation queue. Their exact
+resume criteria are in the ML-KEM acceleration test plan. Do not close an
+umbrella campaign, verify report, or release from this handoff.
+
 ## Update Rule
 
 Update this skill whenever the campaign's research, requirements, architecture,

@@ -309,3 +309,24 @@ case IDs/digests and equality.
 ## Bounded verification
 
 Each unchanged passing criterion runs once. Maximum three fix/verify cycles. Tests run sequentially on the shared box and capture authoritative result summaries to retained logs.
+
+## Implementation handoff and external verification backlog
+
+The CPU/SIMD/GPU code paths, same-run pinned-workload adapters, source-aware
+native coverage ABI, and focused unit/integration contracts are implemented.
+This is an implementation handoff, not a full campaign PASS: the required
+native evidence remains blocked on prepared hosts and an admitted self-hosted
+Stage4 compiler.
+
+The authoritative follow-up work is tracked in Todo DB entries **677--680**:
+
+- **677** — execute the 30-owner / 18-spec / 346-outcome LLVM-native coverage
+  receipt with an admitted Stage4 runner;
+- **678** — collect physical ARM64 NEON and RV64 RVV full-operation receipts;
+- **679** — collect a native-macOS Metal full-operation receipt after pinning
+  the reviewed metallib tuple; and
+- **680** — provision a second independently maintained offline ML-KEM oracle.
+
+Current-host CUDA/Vulkan, AVX2, NEON-QEMU, and RVV-QEMU checks are deliberately
+narrow primitive evidence. They must remain labelled as such and may not be
+used to close these TODOs or promote a final matrix row.
