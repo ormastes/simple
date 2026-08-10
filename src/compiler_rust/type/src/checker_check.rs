@@ -6,6 +6,35 @@
 // - Node type checking (second pass)
 // - Pattern binding
 
+/// Local (bound) name of a `__simple_flatten_import_binding__=` marker const.
+///
+/// Encoder: `simple_compiler::pipeline::module_loader::import_binding_marker_name`;
+/// canonical full decoder: `simple_compiler::interpreter_state::decode_import_binding_marker`.
+/// Neither is reachable from here -- `simple-compiler` depends on this crate, not
+/// the other way round -- so this reads only the one field it needs, in the same
+/// `<len>:<value>` framing. Keep the framing in sync with the encoder; a format
+/// change makes this return `None`, which restores the previous (broken but not
+/// wrong) behaviour rather than binding a wrong name.
+fn flatten_import_binding_local_name(marker: &str) -> Option<&str> {
+    let mut raw = marker.strip_prefix("__simple_flatten_import_binding__=")?;
+    let mut field = || -> Option<&str> {
+        let colon = raw.find(':')?;
+        let len = raw[..colon].parse::<usize>().ok()?;
+        let rest = &raw[colon + 1..];
+        if len > rest.len() || !rest.is_char_boundary(len) {
+            return None;
+        }
+        let (value, tail) = rest.split_at(len);
+        raw = tail;
+        Some(value)
+    };
+    let _importer = field()?;
+    let local = field()?;
+    // `*` is the glob marker, which binds no name.
+    (local != "*").then_some(local)
+}
+
+
 impl TypeChecker {
     fn register_import_aliases(&mut self, target: &simple_parser::ast::ImportTarget) {
         use simple_parser::ast::ImportTarget;
@@ -163,6 +192,25 @@ impl TypeChecker {
                 Node::Const(c) => {
                     let ty = self.fresh_var();
                     self.env.insert(c.name.clone(), ty);
+                    // A flattened selective-import alias binds a name that has
+                    // no declaration of its own anywhere in the merged unit.
+                    //
+                    // The ENTRY module's `use m.{f as g}` survives flattening as
+                    // a real `UseStmt`, so `register_import_aliases` above binds
+                    // `g`. An IMPORTED module's `use` does NOT survive: the
+                    // flattener replaces it with this marker const, and nothing
+                    // here bound the alias -- so `g` was reported as
+                    // `undefined identifier` and the AOT `compile --native` lane
+                    // aborted the whole unit before HIR lowering ever ran (the
+                    // JIT lane does not gate on this check, which is why the
+                    // same program only failed under AOT).
+                    //
+                    // Bind it exactly as `register_import_aliases` binds the
+                    // entry-module form: a fresh var, refined by use.
+                    if let Some(local) = flatten_import_binding_local_name(&c.name) {
+                        let ty = self.fresh_var();
+                        self.env.insert(local.to_string(), ty);
+                    }
                 }
                 Node::Static(s) => {
                     let ty = self.fresh_var();

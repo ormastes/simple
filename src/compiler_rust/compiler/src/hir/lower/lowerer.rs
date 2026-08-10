@@ -727,9 +727,34 @@ impl Lowerer {
         // compared to silently binding the wrong function. See
         // `doc/08_tracking/bug/flattened_lane_does_not_mangle_duplicate_function_names_2026-08-10.md`.
         let mut definition_counts: HashMap<&str, usize> = HashMap::new();
+        // Every name the flattened unit really DECLARES, function or value. The
+        // alias branch in `lower_identifier` now runs ahead of the
+        // callable/global lookups (see there for why), so an entry recorded here
+        // must be provably free of any real declaration of the alias name --
+        // otherwise the alias could shadow a genuine value, not just a phantom
+        // `use` registration.
+        let mut declared_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for item in &ast_module.items {
-            if let simple_parser::Node::Function(f) = item {
-                *definition_counts.entry(f.name.as_str()).or_insert(0) += 1;
+            match item {
+                simple_parser::Node::Function(f) => {
+                    *definition_counts.entry(f.name.as_str()).or_insert(0) += 1;
+                    declared_names.insert(f.name.as_str());
+                }
+                simple_parser::Node::Const(c) => {
+                    declared_names.insert(c.name.as_str());
+                }
+                simple_parser::Node::Static(st) => {
+                    declared_names.insert(st.name.as_str());
+                }
+                simple_parser::Node::Let(l) => {
+                    if let simple_parser::ast::Pattern::Identifier(name)
+                    | simple_parser::ast::Pattern::MutIdentifier(name)
+                    | simple_parser::ast::Pattern::MoveIdentifier(name) = &l.pattern
+                    {
+                        declared_names.insert(name.as_str());
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -745,10 +770,11 @@ impl Lowerer {
             if local_name == "*" || source_name == "*" || local_name == source_name {
                 continue;
             }
-            // A real local definition of the alias name would win in
-            // `lower_identifier` anyway; recording a mapping at all would be
-            // misleading, so leave it alone.
-            if definition_counts.contains_key(local_name) {
+            // A real declaration of the alias name -- function or value -- wins
+            // over the import. Recording a mapping at all would be misleading,
+            // and since the alias branch now outranks the callable/global
+            // lookups it would actively shadow the real declaration.
+            if declared_names.contains(local_name) {
                 continue;
             }
             // Prefer the owner-mangled symbol. It names exactly the function in

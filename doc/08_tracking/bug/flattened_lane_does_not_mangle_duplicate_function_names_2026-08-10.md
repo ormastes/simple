@@ -197,3 +197,58 @@ The reproducer above prints `R:42` under `SIMPLE_JIT_STRICT=1`, the
 Do not close this by renaming `main` in `runtime_minimal.spl` or by rewriting
 the six `cstart.spl` imports to plain imports. Both hide the defect; the alias
 form is valid grammar and duplicate names across modules are legal.
+
+## Follow-up, same day: selective-import aliases never resolved in the AOT lane
+
+Found while re-measuring the fix above. Both defects below are independent of
+the `main` collision and of each other; both were RESOLVED in the follow-up
+commit, verified by running the linked binary, not by compiling it.
+
+Reproduced isolated from the `cstart.spl` HIR error, on a two/three-file
+synthetic with a plain non-`main` alias (`use target.{base_get as g}`):
+
+| placement of the alias | lane | pre-fix result |
+|---|---|---|
+| ENTRY module | `compile --native` | `error: codegen: undefined symbol: g` |
+| ENTRY module | JIT (`SIMPLE_JIT_STRICT=1`) | `unresolved external symbol 'g'` |
+| IMPORTED module | `compile --native` | `error: semantic: Undefined("undefined identifier: g")` |
+| IMPORTED module | JIT | already green (this is the shape `check-import-alias-codegen.shs` probes) |
+
+**Defect 1 — entry-module alias, BOTH lanes.** The entry module's own `use`
+survives flattening (an imported module's does not), and lowering registers a
+phantom callable *and* global under the ALIAS name from it. In
+`hir/lower/expr/mod.rs::lower_identifier` the alias-map consultation was
+deliberately the LAST attempt, so those two phantom branches won and emitted
+`Global("g")` — a symbol nothing defines. The alias map was correctly populated
+the whole time (probe-confirmed), so this was never a collection failure. Fixed
+by ordering the alias branch after locals but BEFORE the callable/global
+lookups; shadowing of a REAL declaration is prevented at the source instead —
+`collect_flattened_import_aliases` now refuses to record an alias whose local
+name is declared anywhere in the flattened unit (function, const, static or
+module-level let), where it previously checked functions only.
+
+**Defect 2 — imported-module alias, AOT only.** An imported module's `use` is
+replaced at flatten time by a marker const, and the TYPE CHECKER bound nothing
+for it, so `g` was `undefined identifier` and the AOT lane aborted the unit
+before HIR lowering ever ran. The JIT lane does not gate on that check, which is
+exactly why the existing check — whose alias lives in a mid module — stayed
+green while the AOT lane resolved zero aliases. Fixed in
+`type/src/checker_check.rs`: the module pre-pass now binds the marker's local
+name to a fresh var, the same binding `register_import_aliases` already makes
+for the entry-module form.
+
+Both fixes are Rust-seed edits because both defects live in seed-side lowering
+and type checking, the same components as the two fixes preceding them.
+
+Checks: `scripts/check/check-import-alias-aot.shs` — PASS 4/4 after; against the
+pre-fix binary `--expect-fail` reports `negative control live` with both alias
+forms broken and both plain controls still resolving (run live, not asserted).
+`check-import-alias-codegen.shs` PASS 5/5 and `check-flattened-owner-mangling.shs`
+PASS 4/4 unchanged. `cargo test -p simple-compiler --lib`: failure SET identical
+before and after, no new failures.
+
+**`cstart.spl` is still blocked** and this fix does not unblock it. After the
+fix, `simple compile src/os/kernel/arch/x86_64/cstart.spl --native` fails on
+`semantic: Undefined("undefined identifier: Result")`, downstream of the
+separately-tracked `MemoryRuntimeMapping.address_space_root` HIR error. No
+board-runnable claim follows from this change.

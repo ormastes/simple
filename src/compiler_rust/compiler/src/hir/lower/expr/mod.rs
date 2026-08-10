@@ -292,16 +292,6 @@ impl Lowerer {
                 kind: HirExprKind::Local(idx),
                 ty,
             })
-        } else if let Some(ty) = self.named_callable_value_type(name) {
-            Ok(HirExpr {
-                kind: HirExprKind::Global(name.to_string()),
-                ty,
-            })
-        } else if let Some(ty) = self.globals.get(name).copied() {
-            Ok(HirExpr {
-                kind: HirExprKind::Global(name.to_string()),
-                ty,
-            })
         } else if let Some((source, ty)) = self.resolve_import_alias(name).map(str::to_string).and_then(|source| {
             // Selective-import alias (`use m.{f as g}`): module flattening merged
             // the imported symbol in under its ORIGINAL name, so `g` names
@@ -311,10 +301,26 @@ impl Lowerer {
             // under AOT, where baremetal units (`cstart.spl`'s
             // `main as baremetal_main`) have no interpreter to fall back to.
             //
-            // Deliberately the LAST resolution attempt: a local, a same-named
-            // callable, or a same-named global all still win, so an alias
-            // recorded by one module can never hijack a real symbol in another
-            // module of the same flattened unit.
+            // Ordered AFTER locals but BEFORE the callable/global lookups.
+            //
+            // It used to be the last attempt, on the reasoning that a same-named
+            // callable or global should win. That is exactly what broke an alias
+            // declared by the ENTRY module: unlike an imported module's, the
+            // entry module's own `use` statement survives flattening, and
+            // lowering registers a PHANTOM callable + global under the ALIAS
+            // name from it. Those two branches then matched `g` and emitted
+            // `Global("g")` -- a symbol nothing defines -- so every entry-module
+            // `use m.{f as g}` reached codegen unresolved (measured: hard
+            // `codegen: undefined symbol: g` under `compile --native`, silent
+            // whole-module interpreter fallback under the JIT). Aliases used
+            // from an IMPORTED module were unaffected, which is why the existing
+            // check, whose alias lives in a mid module, stayed green.
+            //
+            // Shadowing a REAL declaration is prevented at the source instead:
+            // `collect_flattened_import_aliases` refuses to record an alias
+            // whose local name is declared anywhere in the flattened unit
+            // (function, const, static or module-level let), so any entry that
+            // reaches here provably names no real symbol of its own.
             let ty = self
                 .named_callable_value_type(&source)
                 .or_else(|| self.globals.get(&source).copied())?;
@@ -322,6 +328,16 @@ impl Lowerer {
         }) {
             Ok(HirExpr {
                 kind: HirExprKind::Global(source),
+                ty,
+            })
+        } else if let Some(ty) = self.named_callable_value_type(name) {
+            Ok(HirExpr {
+                kind: HirExprKind::Global(name.to_string()),
+                ty,
+            })
+        } else if let Some(ty) = self.globals.get(name).copied() {
+            Ok(HirExpr {
+                kind: HirExprKind::Global(name.to_string()),
                 ty,
             })
         } else {
