@@ -2621,6 +2621,10 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         | "rt_file_extract_smf_dynlib"
         | "rt_file_create_excl" => Some(&[0, 1]),
         "rt_file_write_bytes" => Some(&[0]),
+        // rt_file_open is (path_ptr, path_len, mode: i32) — descriptor.rs:19.
+        "rt_file_open" => Some(&[0]),
+        // rt_process_run_with_limits: cmd is (ptr, len) — env_process.rs:1269.
+        "rt_process_run_with_limits" => Some(&[0]),
 
         // Directory operations
         "rt_dir_list" | "rt_dir_remove_all" | "rt_dir_walk" | "rt_set_current_dir"

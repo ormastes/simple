@@ -8754,7 +8754,17 @@ int64_t rt_file_write_text_at(int64_t path_value, int64_t offset_value, int64_t 
     return (int64_t)bytes_written;
 }
 
-void* rt_file_open(const char* path, const char* mode) {
+/* NOTE (2026-08-10, rt_extern_abi_divergence_family): this is a stdio FILE*
+ * helper, NOT the compiler's rt_file_open. The compiler declares
+ * `i32 rt_file_open(const uint8_t* path, uint64_t path_len, i32 mode)` and the
+ * canonical implementation is
+ * src/compiler_rust/runtime/src/value/sffi/file_io/descriptor.rs. Sharing the
+ * name meant `-z muldefs` could hand callers this fopen() wrapper instead:
+ * it would read `path` as a NUL-terminated string (a Simple `text` is not),
+ * treat the LENGTH word as a `const char*` mode string, and return a FILE*
+ * where an fd was expected. Renamed so the two can never collide again. Do
+ * not rename it back. */
+void* rt_file_open_stream(const char* path, const char* mode) {
     if (!path || !mode) return NULL;
     return (void*)fopen(path, mode);
 }

@@ -1432,8 +1432,15 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_process_spawn_async", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_spawn_guarded", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_spawn_inherit", &[], &[I64]),
-    // rt_process_run_with_limits(cmd_ptr, cmd_len, args, timeout_ms, memory_mb) -> RuntimeValue
-    RuntimeFuncSpec::new("rt_process_run_with_limits", &[I64, I64, I64, I64, I64], &[I64]),
+    // rt_process_run_with_limits(cmd_ptr, cmd_len, args, timeout_ms,
+    // memory_bytes, cpu_seconds, max_fds, max_procs) -> RuntimeValue.
+    // env_process.rs:1269 takes all eight; the old 5-word spec left the three
+    // trailing setrlimit(2) values reading uninitialised registers.
+    RuntimeFuncSpec::new(
+        "rt_process_run_with_limits",
+        &[I64, I64, I64, I64, I64, I64, I64, I64],
+        &[I64],
+    ),
     // rt_process_exists(pid) -> bool (as i64: 0/1)
     RuntimeFuncSpec::new("rt_process_exists", &[I64], &[I64]),
     // rt_getpid() -> process id
@@ -1892,7 +1899,11 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     // File Descriptor Operations
     // =========================================================================
-    RuntimeFuncSpec::new("rt_file_open", &[I64, I64, I64, I64], &[I32]), // path, mode -> fd
+    // path(ptr,len), mode(i32: 0=RO 1=RW 2=WO) -> fd.
+    // descriptor.rs:19 has exactly three parameters; the old 4-word spec came
+    // from declaring `mode` as a `text` and made the callee read the mode out
+    // of the pattern-length register.
+    RuntimeFuncSpec::new("rt_file_open", &[I64, I64, I32], &[I32]),
     RuntimeFuncSpec::new("rt_file_get_size", &[I32], &[I64]),            // fd -> size
     RuntimeFuncSpec::new("rt_file_close", &[I32], &[I8]),                // fd -> bool
     // =========================================================================
