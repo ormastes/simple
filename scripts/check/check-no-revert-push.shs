@@ -1,0 +1,401 @@
+#!/bin/sh
+# Refuse to push a commit range that REVERTS content a prior commit landed,
+# when the pushing session did not author that revert as its own range.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS EXISTS
+# ---------------------------------------------------------------------------
+# Incident 2026-08-10 (doc/08_tracking/bug/
+# docs_titled_commit_2313821fd77_reverted_five_landed_fixes_2026-08-10.md):
+# a docs-titled commit `2313821fd77` pushed a stale whole-working-copy
+# snapshot that was an EXACT revert of a restore commit `52f3b8c118f`, wiping
+# five independently-verified fixes plus collateral -- 100 files once fully
+# swept -- while adding only one legitimate doc file. Every existing guard
+# passed:
+#   * check-tree-size-push.shs bands on +-0.15% of ~112k files. 26-100 files
+#     is 0.024-0.09%, an order of magnitude INSIDE the band. It is a WIPE
+#     detector, not a REVERT detector -- a targeted revert does not change the
+#     total file count enough to trip a size band.
+#   * `git merge-base --is-ancestor` reported all five fixes "present" --
+#     ancestry proves presence in HISTORY, not in the current TREE. The
+#     revert was a later commit ON TOP, not a history rewrite, so ancestry
+#     checks are structurally blind to it.
+# `.claude/rules/vcs.md` named this gap "still manual" since 2026-08-01. This
+# is the automated half.
+#
+# ---------------------------------------------------------------------------
+# ALGORITHM
+# ---------------------------------------------------------------------------
+# For each file touched in the outgoing range BASE..NEW:
+#   1. Skip if NEW:path == BASE:path (no net change at the endpoints).
+#   2. Walk that path's history BEFORE base (`git log --format=%H BASE --
+#      path`, i.e. commits BASE and older, capped at CFG_HISTORY_DEPTH hops)
+#      and collect the blob each of those commits held for the path.
+#   3. If NEW:path's blob exactly matches one of those PRE-BASE historical
+#      blobs, the push reverted that file to a state it held before an
+#      intervening commit that is NOT part of this push's own BASE..NEW
+#      range -- exactly the incident's signature. Record which commit the
+#      match is against.
+#
+# Then aggregate, because a single reverted file is routine (see FALSE
+# POSITIVES below) but many files reverting to the SAME prior commit in one
+# push is the incident's shape:
+#   * FAIL only when at least CFG_MIN_FILES files revert AND at least
+#     CFG_MIN_FILES of them match blobs from the SAME single ancestor commit
+#     (the "restore commit" the incident clobbered). Scale + a shared target
+#     commit is the discriminator, not "any file matched an old blob".
+#
+# ---------------------------------------------------------------------------
+# FALSE POSITIVES CONSIDERED AND REJECTED
+# ---------------------------------------------------------------------------
+#   * Deliberate revert of a bad change: a human reverting one or two files
+#     on purpose stays under CFG_MIN_FILES and passes. A deliberate revert of
+#     MANY files at once (e.g. `git revert` of a whole bad commit) is
+#     legitimate work this guard cannot distinguish from an accidental one by
+#     content alone -- that is why the verdict message says "if this is
+#     intentional, state it" rather than silently passing; the guard blocks
+#     the push and requires a human to look, it does not claim omniscience.
+#   * A file naturally cycling between few states (a version-number file, a
+#     baseline list): those files change ALONE or in small unrelated sets on
+#     different pushes, so they essentially never accumulate CFG_MIN_FILES
+#     simultaneous matches against ONE shared ancestor commit -- the
+#     same-commit-clustering requirement is what separates "this file
+#     happens to equal an old value" from "this push replayed an old tree".
+#   * A file merely UNCHANGED between base and tip never enters the scan
+#     (step 1 skips it), so long-lived stable files are never flagged.
+#
+# ---------------------------------------------------------------------------
+# VERDICT CONTRACT (matches the sibling guards)
+# ---------------------------------------------------------------------------
+#   PASS — <n> file(s) checked, 0 reverts detected      exit 0, n > 0 always
+#   FAIL — <n> file(s) reverted to pre-<sha> state: <names>   exit 1
+#   ERROR — nothing was checked                          exit 2
+# A run that checks 0 files is ALWAYS an ERROR, never a pass.
+#
+# Usage:
+#   check-no-revert-push.shs                    # default range main@origin..@-
+#   check-no-revert-push.shs '<base>..<new>'     # explicit range
+#   check-no-revert-push.shs --min-files N '<base>..<new>'
+#   check-no-revert-push.shs --selftest          # fixtures only, no scan
+#
+# Exit 0 = safe to push, 1 = revert pattern found, 2 = could not determine.
+
+set -u
+
+SELF=check-no-revert-push
+
+GREP=grep
+[ -x /usr/bin/grep ] && GREP=/usr/bin/grep
+
+CFG_MIN_FILES=5          # incident reverted 26-100; single-file revert is routine
+CFG_HISTORY_DEPTH=30      # commits of path history to search before base
+
+TMPROOT=""
+cleanup() { [ -n "$TMPROOT" ] && rm -rf "$TMPROOT"; }
+trap cleanup EXIT INT TERM
+
+die() {
+    code=$1
+    shift
+    echo "$SELF: ERROR — $*" >&2
+    echo "$SELF: ERROR — nothing was checked (exit $code)"
+    exit "$code"
+}
+
+# ---------------------------------------------------------------------------
+# scan_range <repo> <base> <new> <min_files>
+#   Prints one "path<TAB>matched_commit" line per reverted file to stdout.
+#   Prints total files examined to fd 3. Returns 0 if the harness ran
+#   cleanly (regardless of whether reverts were found), 1 on a hard error.
+# ---------------------------------------------------------------------------
+scan_range() {
+    sr_repo=$1
+    sr_base=$2
+    sr_new=$3
+
+    sr_files="$TMPROOT/changed.out"
+    git -C "$sr_repo" diff --name-only "$sr_base" "$sr_new" -- >"$sr_files" 2>"$TMPROOT/diff.err"
+    sr_st=$?
+    [ "$sr_st" -eq 0 ] || { echo "SR_ERR: git diff --name-only failed (status $sr_st)" >&2; return 1; }
+
+    sr_n=0
+    sr_hits="$TMPROOT/hits.out"
+    : >"$sr_hits"
+
+    while IFS= read -r sr_path; do
+        [ -n "$sr_path" ] || continue
+        sr_n=$((sr_n + 1))
+
+        sr_new_blob=$(git -C "$sr_repo" rev-parse -q --verify "$sr_new:$sr_path" 2>/dev/null)
+        sr_base_blob=$(git -C "$sr_repo" rev-parse -q --verify "$sr_base:$sr_path" 2>/dev/null)
+        # deleted-at-NEW: nothing to compare against a positive revert; skip.
+        [ -n "$sr_new_blob" ] || continue
+        [ "$sr_new_blob" = "$sr_base_blob" ] && continue
+
+        # history of this path AT OR BEFORE base, oldest matches win nothing
+        # special -- we just need membership.
+        sr_hist="$TMPROOT/hist.out"
+        git -C "$sr_repo" log --format=%H -n "$CFG_HISTORY_DEPTH" "$sr_base" -- "$sr_path" >"$sr_hist" 2>/dev/null
+        sr_st=$?
+        [ "$sr_st" -eq 0 ] || { echo "SR_ERR: git log failed on $sr_path (status $sr_st)" >&2; return 1; }
+
+        while IFS= read -r sr_c; do
+            [ -n "$sr_c" ] || continue
+            sr_old_blob=$(git -C "$sr_repo" rev-parse -q --verify "$sr_c:$sr_path" 2>/dev/null)
+            [ -n "$sr_old_blob" ] || continue
+            if [ "$sr_old_blob" = "$sr_new_blob" ]; then
+                printf '%s\t%s\n' "$sr_path" "$sr_c" >>"$sr_hits"
+                break
+            fi
+        done <"$sr_hist"
+    done <"$sr_files"
+
+    echo "$sr_n" >&3
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# evaluate <repo> <base> <new> <min_files>
+#   Returns 0 clean, 1 revert-pattern found (message on stderr, summary in
+#   $EV_MSG), 2 could not determine ($EV_ERR set). Sets $EV_CHECKED.
+# ---------------------------------------------------------------------------
+evaluate() {
+    ev_repo=$1
+    ev_base=$2
+    ev_new=$3
+    ev_min=$4
+    EV_ERR=""
+    EV_MSG=""
+    EV_CHECKED=0
+
+    ev_out="$TMPROOT/scan.out"
+    exec 3>"$TMPROOT/count.out"
+    scan_range "$ev_repo" "$ev_base" "$ev_new" >"$ev_out" 2>"$TMPROOT/scan.err"
+    ev_st=$?
+    exec 3>&-
+    if [ "$ev_st" -ne 0 ]; then
+        EV_ERR=$(cat "$TMPROOT/scan.err")
+        return 2
+    fi
+    ev_checked=$(cat "$TMPROOT/count.out" 2>/dev/null)
+    ev_checked=${ev_checked:-0}
+    EV_CHECKED=$ev_checked
+
+    ev_hits="$TMPROOT/hits.out"
+    [ -f "$ev_hits" ] || : >"$ev_hits"
+    ev_nhits=$(wc -l <"$ev_hits" | tr -d ' ')
+
+    if [ "$ev_nhits" -lt "$ev_min" ]; then
+        return 0
+    fi
+
+    # cluster by matched commit: does any single commit account for >= min
+    # of the hits? That is the incident's shape -- many files reverted to
+    # ONE prior commit's state in a single push.
+    cut -f2 "$ev_hits" | sort | uniq -c | sort -rn >"$TMPROOT/cluster.out"
+    ev_top_count=$(awk '{print $1; exit}' "$TMPROOT/cluster.out")
+    ev_top_commit=$(awk '{print $2; exit}' "$TMPROOT/cluster.out")
+    ev_top_count=${ev_top_count:-0}
+
+    if [ "$ev_top_count" -lt "$ev_min" ]; then
+        return 0
+    fi
+
+    ev_names=$($GREP -P "\t$ev_top_commit\$" "$ev_hits" 2>/dev/null | cut -f1 | head -n 10 | tr '\n' ' ')
+    [ -n "$ev_names" ] || ev_names=$(awk -v c="$ev_top_commit" -F'\t' '$2==c{print $1}' "$ev_hits" | head -n 10 | tr '\n' ' ')
+    EV_MSG="$ev_top_count file(s) reverted to pre-$ev_top_commit state: $ev_names"
+    return 1
+}
+
+# ===========================================================================
+# SELFTEST — proves both directions. Fatal if it does not pass.
+# ===========================================================================
+SELFTEST_EXPECTED=3
+
+selftest() {
+    st_dir="$TMPROOT/selftest"
+    rm -rf "$st_dir"
+    mkdir -p "$st_dir" || return 1
+    ( cd "$st_dir" && git init -q . \
+        && git config user.email selftest@local \
+        && git config user.name selftest ) || return 1
+
+    st_write() {
+        # st_write <name> <content>
+        printf '%s\n' "$2" >"$st_dir/$1"
+    }
+
+    st_commit() {
+        ( cd "$st_dir" && git add -A && git commit -q -m "$1" ) || return 1
+        ( cd "$st_dir" && git rev-parse HEAD )
+    }
+
+    st_ran=0
+    st_fail=0
+
+    # --- Fixture A: replay the actual incident shape --------------------
+    # C0: root state (5 files at v0, an unrelated stable file)
+    st_write f1 v0; st_write f2 v0; st_write f3 v0; st_write f4 v0; st_write f5 v0
+    st_write stable keepme
+    c0=$(st_commit "root v0") || return 1
+
+    # C_fix: the "restore" commit landing real fixes (v0 -> v1)
+    st_write f1 v1; st_write f2 v1; st_write f3 v1; st_write f4 v1; st_write f5 v1
+    c_fix=$(st_commit "fix(runtime): close Group B2 of the rt_* extern ABI family") || return 1
+
+    # C_revert: a docs-titled commit that reverts all five files back to v0
+    # and adds one legitimate doc file -- exactly 2313821fd77's shape.
+    st_write f1 v0; st_write f2 v0; st_write f3 v0; st_write f4 v0; st_write f5 v0
+    st_write newdoc.md "legit doc addition"
+    c_revert=$(st_commit "doc(bug): llvm lane argv boxing gap") || return 1
+
+    st_ran=$((st_ran + 1))
+    evaluate "$st_dir" "$c_fix" "$c_revert" "$CFG_MIN_FILES"
+    st_got=$?
+    if [ "$st_got" -ne 1 ]; then
+        echo "SELFTEST FAIL: incident-replay fixture expected verdict 1 (revert detected), got $st_got" >&2
+        echo "  EV_ERR=$EV_ERR EV_MSG=$EV_MSG" >&2
+        st_fail=1
+    fi
+
+    # --- Fixture B: forward progress, brand-new content, must PASS ------
+    st_write g1 new1; st_write g2 new2; st_write g3 new3; st_write g4 new4; st_write g5 new5
+    c_fwd=$(st_commit "feat: five brand new files, never seen before") || return 1
+
+    st_ran=$((st_ran + 1))
+    evaluate "$st_dir" "$c_revert" "$c_fwd" "$CFG_MIN_FILES"
+    st_got=$?
+    if [ "$st_got" -ne 0 ]; then
+        echo "SELFTEST FAIL: forward-progress fixture expected verdict 0 (clean), got $st_got" >&2
+        echo "  EV_ERR=$EV_ERR EV_MSG=$EV_MSG" >&2
+        st_fail=1
+    fi
+
+    # --- Fixture C: single legitimate revert (one file), must PASS ------
+    # f1 gets one more edit, then a later commit backs THAT OUT alone --
+    # below CFG_MIN_FILES, so it must not trip the guard.
+    st_write f1 v1changed
+    c_f1edit=$(st_commit "tweak f1 again") || return 1
+    st_write f1 v0
+    c_onerevert=$(st_commit "revert: back out bad change to f1 only") || return 1
+
+    st_ran=$((st_ran + 1))
+    evaluate "$st_dir" "$c_f1edit" "$c_onerevert" "$CFG_MIN_FILES"
+    st_got=$?
+    if [ "$st_got" -ne 0 ]; then
+        echo "SELFTEST FAIL: single-file-revert fixture expected verdict 0 (clean, below threshold), got $st_got" >&2
+        echo "  EV_ERR=$EV_ERR EV_MSG=$EV_MSG" >&2
+        st_fail=1
+    fi
+
+    if [ "$st_ran" -ne "$SELFTEST_EXPECTED" ]; then
+        echo "SELFTEST FAIL: expected $SELFTEST_EXPECTED fixtures, ran $st_ran -- the harness did not run" >&2
+        return 1
+    fi
+    [ "$st_fail" -eq 0 ] || return 1
+    echo "$SELF: selftest $st_ran/$SELFTEST_EXPECTED fixtures correct (1 incident-replay, 1 forward-progress, 1 single-file-revert)"
+    return 0
+}
+
+# ===========================================================================
+# MAIN
+# ===========================================================================
+TMPROOT=$(mktemp -d) || { echo "$SELF: ERROR — cannot mktemp" >&2
+                          echo "$SELF: ERROR — nothing was checked (exit 2)"; exit 2; }
+
+if ! ( unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+             GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE \
+             GIT_CONFIG GIT_CONFIG_COUNT
+       cd "$TMPROOT" 2>/dev/null || true
+       selftest ); then
+    echo "$SELF: ERROR — selftest failed; the detector is not trustworthy" >&2
+    echo "$SELF: ERROR — nothing was checked (exit 2)"
+    exit 2
+fi
+
+if [ "${1:-}" = "--selftest" ]; then
+    echo "$SELF: PASS — $SELFTEST_EXPECTED fixture(s) checked (selftest only, scan skipped)"
+    exit 0
+fi
+
+min_files=$CFG_MIN_FILES
+if [ "${1:-}" = "--min-files" ]; then
+    shift
+    [ "$#" -gt 0 ] || die 2 "--min-files needs a number"
+    min_files=$1
+    case "$min_files" in
+        ''|*[!0-9]*) die 2 "--min-files '$min_files' is not a non-negative integer" ;;
+    esac
+    shift
+fi
+
+range="${1:-}"
+explicit=0
+[ -n "$range" ] && explicit=1
+
+toplevel=$(git rev-parse --show-toplevel 2>/dev/null) || toplevel=""
+if [ -z "$toplevel" ]; then
+    die 2 "cwd '$(pwd)' is not inside a git repository.
+  This guard must run from the repo root of the clone you are about to push."
+fi
+toplevel=$(CDPATH= cd -- "$toplevel" && pwd -P) || die 2 "cannot canonicalise toplevel"
+
+if [ "$explicit" -eq 0 ]; then
+    base=$(jj --ignore-working-copy log -r 'main@origin' --no-graph -T 'commit_id' 2>/dev/null) || base=""
+    tip=$(jj --ignore-working-copy log -r '@-' --no-graph -T 'commit_id' 2>/dev/null) || tip=""
+    if [ -z "$base" ] || [ -z "$tip" ]; then
+        die 2 "cannot resolve main@origin..@- via jj (is jj available and is this a jj workspace?).
+  Pass an explicit range instead, e.g. $SELF '<base-sha>..<new-sha>'."
+    fi
+    range="$base..$tip"
+else
+    case "$range" in
+        *..*) : ;;
+        *) die 2 "explicit range '$range' does not contain '..'.
+  A bare revision means 'all history reachable from it' to git, which is not
+  what this guard is for. Pass '<base>..<new>'." ;;
+    esac
+    base=${range%%..*}
+    tip=${range#*..}
+    tip=${tip#.}
+fi
+
+for ep in "$base" "$tip"; do
+    git rev-parse --verify --quiet "$ep^{commit}" >/dev/null 2>&1 \
+        || die 2 "revision '$ep' (from range '$range') does not exist in the repository at $toplevel."
+done
+
+evaluate "$toplevel" "$base" "$tip" "$min_files"
+st=$?
+
+if [ "$st" -eq 2 ]; then
+    die 2 "$EV_ERR"
+fi
+
+if [ "$EV_CHECKED" -eq 0 ]; then
+    die 2 "0 files changed in range '$range' -- nothing to check. If the range is genuinely empty, do not call this guard."
+fi
+
+if [ "$st" -eq 1 ]; then
+    cat >&2 <<EOF
+
+DO NOT PUSH. This range reverts content landed by a prior commit that is not
+part of this push's own range -- the exact shape of the 2026-08-10 incident
+(2313821fd77 silently reverted 52f3b8c118f, erasing five verified fixes).
+
+$EV_MSG
+
+Investigate before doing anything else:
+  git diff --stat <matched-commit>^ <new-tip>    # confirm the exact revert
+  git log -1 --format=%s <matched-commit>        # what this push is undoing
+
+If this is a DELIBERATE, reviewed revert (backing out a bad change), say so
+explicitly in the commit message and re-run with --min-files raised for this
+one push, recording the exception on the record -- do not silently retry.
+EOF
+    echo "$SELF: FAIL — $EV_CHECKED file(s) checked in $range, $EV_MSG"
+    exit 1
+fi
+
+echo "$SELF: PASS — $EV_CHECKED file(s) checked, 0 reverts detected"
+exit 0
