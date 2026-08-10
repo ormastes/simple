@@ -1,6 +1,11 @@
 # Aliased `use ... { x as y }` (and qualified `use m` + `m.f()`) do not bind in the CODEGEN lane
 
-**Status:** OPEN — seed compiler defect, root-caused 2026-08-10. Worked around at one call site.
+**Status:** PARTIALLY FIXED 2026-08-10 — codegen now consumes the alias map;
+`check-import-alias-codegen.shs` PASSes 5/5 and the `--expect-fail` negative
+control correctly FAILs. **One sub-case remains RED:** an alias whose SOURCE
+symbol is `main` (the six `os/kernel/arch/*/cstart.spl` baremetal victims) is
+deliberately left unresolved — see "Remaining RED" below. Worked around at one
+call site.
 **Filed:** 2026-08-10
 **Found by:** diagnosing `wm_action_applier_spec` `reason=zero-examples`
 (`doc/08_tracking/bug/wm_action_applier_spec_dead_on_both_legs_vulkan_order_env_get_2026-08-10.md`).
@@ -74,6 +79,90 @@ different path.
 Fix shape: teach the codegen call-lowering path to consult the same import
 binding map (or rewrite call callees to their source symbol during flattening,
 before codegen sees them), so that all five forms present identical symbols.
+
+## Correction 2: the `qualified` row is NOT broken on current `main`
+
+The family table above was measured with the deployed `bin/simple`
+(2026-08-09 04:50). Re-measured 2026-08-10 with a seed built from `origin/main`
+at `3ac1249c9ec`, only **one** row is broken:
+
+```
+  ok    plain_sel
+  BROKEN alias_sel -- [jit-fallback] unresolved external symbol 'g'
+  ok    wildcard
+  ok    mod_alias
+  ok    qualified          <- binds; the doc's "BROKEN" is stale
+```
+
+Do not re-derive the two-broken-forms claim from the table without re-measuring.
+
+## The check had a fail-open that hid this
+
+`check-import-alias-codegen.shs` invoked the binary as `$OLDPWD/$SIMPLE_BIN`
+from inside each probe's temp dir. With an ABSOLUTE `SIMPLE_BIN` that
+concatenates the repo root onto an already-absolute path, so **every** form ran
+a nonexistent binary and reported `BROKEN ... <no diagnostic>` — and five broken
+forms trivially satisfy "alias_sel and qualified are still broken", so
+`--expect-fail` printed `PASS -- negative control live` over a run that measured
+nothing. Fixed two ways, both strengthenings:
+
+- `SIMPLE_BIN` is resolved to an absolute path once, up front; non-executable is
+  `ERROR` exit 2.
+- New fail-closed **harness sanity** gate: `plain_sel`, `wildcard` and
+  `mod_alias` are CONTROL forms that bind before and after the fix. If any is
+  broken the verdict is `ERROR -- nothing was checked`, exit 2, in **both**
+  modes. A wholly dead binary can no longer read as a live negative control.
+
+## Fix applied (2026-08-10)
+
+`src/compiler_rust/compiler/src/`:
+
+- `interpreter_state.rs` — `decode_marker_field` and a new
+  `decode_import_binding_marker` lifted to `pub(crate)`, so the marker encoding
+  has ONE decoder shared by both lanes. `interpreter_eval.rs` now calls it
+  instead of carrying a private copy.
+- `hir/lower/lowerer.rs` — new `import_alias_bindings: HashMap<String,String>`
+  plus `collect_flattened_import_aliases` (scans the flattened module's marker
+  consts) and `resolve_import_alias`.
+- `hir/lower/module_lowering/module_pass.rs` — collector called from both
+  `lower_module` and `lower_module_with_warnings`, before any expression lowers.
+- `hir/lower/expr/mod.rs` — `lower_identifier` consults the alias map as its
+  **last** resolution attempt, after locals, named callables and globals, so an
+  alias recorded by one module can never hijack a real symbol in another module
+  of the same flattened unit.
+
+## Remaining RED — aliases whose source symbol is `main`
+
+Module flattening does **not** mangle: two modules that both define `main` land
+in `module.items` under the identical name, and only the interpreter's
+`__simple_flatten_module_owner__=` attribute tells them apart — nothing under
+`hir/` or `codegen/` consumes that attribute (`module_pass.rs:390-393` does a
+bare `self.globals.insert(f.name, ...)`, last-wins).
+
+Measured consequence of rewriting such an alias to the bare name:
+
+```
+use target.{main as baremetal_main}   # target.spl defines `main`
+-> thread 'simple-main' has overflowed its stack
+   fatal runtime error: stack overflow
+```
+
+`baremetal_main` bound the ENTRY module's `main`, giving unbounded recursion —
+silently wrong code, which is strictly worse than the unresolved-symbol error it
+replaced. The fix therefore **refuses** to rewrite when the source name is `main`
+(and, generally, when the source name has more than one definition in the unit),
+leaving today's honest hard error:
+
+```
+error: Cranelift JIT compile: SIMPLE_JIT_STRICT: unresolved external symbol
+       'baremetal_main' would NULL-jump in JIT; refusing to fall back
+```
+
+So the **six `src/os/kernel/arch/*/cstart.spl` victims are NOT fixed** — the
+highest-priority group in the victim list. They need owner-aware symbol naming
+in the flattened lane (per-owner mangling, or teaching HIR to consume the
+module-owner attribute), which is a larger change than this one. Filed as its
+own item; do not close this bug as fully fixed.
 
 ## Impact — worse than "one dead spec"
 

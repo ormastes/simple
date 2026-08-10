@@ -1152,6 +1152,10 @@ impl Lowerer {
 
         self.module.name = ast_module.name.clone();
         self.collect_fn_param_defaults(ast_module);
+        // Codegen-side consumer of the flattened import-binding markers, so
+        // `use m.{f as g}` resolves `g` instead of emitting an unresolved
+        // external symbol. Must run before any expression is lowered.
+        self.collect_flattened_import_aliases(ast_module);
 
         // Pass 0: Pre-register all struct/class/enum names to allow self-referential types
         // This registers placeholders so types can reference each other
@@ -1743,6 +1747,10 @@ impl Lowerer {
         // Perform all lowering passes
         self.module.name = ast_module.name.clone();
         self.collect_fn_param_defaults(ast_module);
+        // Codegen-side consumer of the flattened import-binding markers, so
+        // `use m.{f as g}` resolves `g` instead of emitting an unresolved
+        // external symbol. Must run before any expression is lowered.
+        self.collect_flattened_import_aliases(ast_module);
 
         // Pass 0: Pre-register all struct/class/enum names to allow self-referential types
         for item in &ast_module.items {

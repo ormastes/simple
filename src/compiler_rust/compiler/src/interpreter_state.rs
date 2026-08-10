@@ -64,6 +64,41 @@ pub(crate) const FLATTEN_MODULE_OWNER_ATTR_PREFIX: &str = "__simple_flatten_modu
 pub(crate) const FLATTEN_GLOBAL_OWNER_MARKER_PREFIX: &str = "__simple_flatten_global_owner__=";
 pub(crate) const FLATTEN_IMPORT_BINDING_MARKER_PREFIX: &str = "__simple_flatten_import_binding__=";
 
+/// Decode one `<len>:<value>` field of a flatten marker name.
+///
+/// Encoder: `pipeline::module_loader::import_binding_marker_name`.
+pub(crate) fn decode_marker_field<'a>(raw: &mut &'a str) -> Option<&'a str> {
+    let colon = raw.find(':')?;
+    let len = raw[..colon].parse::<usize>().ok()?;
+    let value_and_tail = &raw[colon + 1..];
+    if len > value_and_tail.len() || !value_and_tail.is_char_boundary(len) {
+        return None;
+    }
+    let (value, tail) = value_and_tail.split_at(len);
+    *raw = tail;
+    Some(value)
+}
+
+/// Decode a `__simple_flatten_import_binding__=` marker into
+/// `(importer, local_name, source_owner, source_name)`.
+///
+/// Shared by the interpreter (which builds its module-global binding tables from
+/// it) and by HIR lowering (which needs the same alias->source map so the
+/// CODEGEN lane can resolve `use m.{f as g}`; see
+/// `doc/08_tracking/bug/aliased_use_import_does_not_bind_in_transitive_module_2026-08-10.md`).
+/// Keeping one decoder means the two lanes cannot drift apart.
+pub(crate) fn decode_import_binding_marker(marker: &str) -> Option<(&str, &str, &str, &str)> {
+    let mut raw = marker.strip_prefix(FLATTEN_IMPORT_BINDING_MARKER_PREFIX)?;
+    let importer = decode_marker_field(&mut raw)?;
+    let local_name = decode_marker_field(&mut raw)?;
+    let source_owner = decode_marker_field(&mut raw)?;
+    let source_name = decode_marker_field(&mut raw)?;
+    if !raw.is_empty() {
+        return None;
+    }
+    Some((importer, local_name, source_owner, source_name))
+}
+
 pub(crate) fn tag_function_module_owner(function: &mut FunctionDef, owner: &str) {
     if function
         .attributes

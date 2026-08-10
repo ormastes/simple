@@ -112,6 +112,19 @@ pub struct Lowerer {
     /// owner. Native-project builds populate this before expression lowering
     /// so duplicate bare functions do not turn the namespace into a global.
     pub(super) qualified_import_functions: Option<QualifiedImportFunctions>,
+    /// Local alias -> original symbol name, for selective imports written
+    /// `use m.{f as g}`.
+    ///
+    /// Module flattening merges `f` into the unit under its ORIGINAL name while
+    /// call sites still say `g`, and records the mapping as
+    /// `__simple_flatten_import_binding__=` marker consts. Every consumer of
+    /// those markers used to live in the interpreter, so the codegen lane
+    /// emitted `g` as an unresolved external symbol -- a silent whole-module
+    /// JIT fallback (100-1000x) or a hard E1002 under AOT, where baremetal
+    /// units have no interpreter to fall back to. Populated by
+    /// `collect_flattened_import_aliases`, consumed by `lower_identifier`. See
+    /// `doc/08_tracking/bug/aliased_use_import_does_not_bind_in_transitive_module_2026-08-10.md`.
+    pub(super) import_alias_bindings: HashMap<String, String>,
     /// When true, unknown types resolve to ANY instead of erroring.
     /// This allows compilation to proceed even when imports can't be fully resolved.
     pub(super) lenient_types: bool,
@@ -199,6 +212,7 @@ impl Lowerer {
             capability_env: CapabilityEnv::new(),
             type_aliases: HashMap::new(),
             function_aliases: HashMap::new(),
+            import_alias_bindings: HashMap::new(),
             type_aliases_reverse: HashMap::new(),
             function_aliases_reverse: HashMap::new(),
             deprecated_items: HashMap::new(),
@@ -252,6 +266,7 @@ impl Lowerer {
             capability_env: CapabilityEnv::new(),
             type_aliases: HashMap::new(),
             function_aliases: HashMap::new(),
+            import_alias_bindings: HashMap::new(),
             type_aliases_reverse: HashMap::new(),
             function_aliases_reverse: HashMap::new(),
             deprecated_items: HashMap::new(),
@@ -328,6 +343,7 @@ impl Lowerer {
             capability_env: CapabilityEnv::new(),
             type_aliases: HashMap::new(),
             function_aliases: HashMap::new(),
+            import_alias_bindings: HashMap::new(),
             type_aliases_reverse: HashMap::new(),
             function_aliases_reverse: HashMap::new(),
             deprecated_items: HashMap::new(),
@@ -676,6 +692,79 @@ impl Lowerer {
     /// Resolve a type alias to its original type name
     pub fn resolve_type_alias(&self, name: &str) -> Option<&str> {
         self.type_aliases.get(name).map(|s| s.as_str())
+    }
+
+    /// Build the flattened-import alias map (local alias -> original symbol).
+    ///
+    /// Scans the flattened module for `__simple_flatten_import_binding__=`
+    /// marker consts, the same records the interpreter consumes, and keeps only
+    /// the entries where the local binding differs from the source symbol --
+    /// i.e. genuine `use m.{f as g}` aliases. Plain selective imports and the
+    /// `*` glob marker need no rewrite because local name == original name, and
+    /// recording them would be a no-op mapping that could mask a real symbol.
+    ///
+    /// This is the codegen-side consumer whose absence made aliased imports
+    /// lower to unresolved external symbols.
+    pub(super) fn collect_flattened_import_aliases(&mut self, ast_module: &simple_parser::Module) {
+        use crate::interpreter::decode_import_binding_marker;
+
+        // Flattening does NOT mangle: two modules that both define `main` land in
+        // `module.items` as two functions with the identical name, and only the
+        // interpreter's `__simple_flatten_module_owner__=` attribute tells them
+        // apart. HIR/codegen have no consumer of that attribute, so a bare-name
+        // rewrite of an alias whose SOURCE name is defined more than once would
+        // silently bind the wrong function -- measured as infinite recursion on
+        // exactly the `use ...{main as baremetal_main}` shape that
+        // `src/os/kernel/arch/*/cstart.spl` uses. Wrong code is worse than the
+        // unresolved-symbol error, so ambiguous sources are deliberately left
+        // unresolved and keep today's diagnostic. Tracked in
+        // `doc/08_tracking/bug/aliased_use_import_does_not_bind_in_transitive_module_2026-08-10.md`.
+        let mut definition_counts: HashMap<&str, usize> = HashMap::new();
+        for item in &ast_module.items {
+            if let simple_parser::Node::Function(f) = item {
+                *definition_counts.entry(f.name.as_str()).or_insert(0) += 1;
+            }
+        }
+
+        for item in &ast_module.items {
+            let simple_parser::Node::Const(marker) = item else {
+                continue;
+            };
+            let Some((_importer, local_name, _source_owner, source_name)) =
+                decode_import_binding_marker(&marker.name)
+            else {
+                continue;
+            };
+            if local_name == "*" || source_name == "*" || local_name == source_name {
+                continue;
+            }
+            // Exactly one definition of the source name, and none of the local
+            // name (a real `local` would win in `lower_identifier` anyway, but
+            // recording the mapping at all would be misleading).
+            if definition_counts.get(source_name).copied() != Some(1)
+                || definition_counts.contains_key(local_name)
+            {
+                continue;
+            }
+            // `main` is the program entry symbol and is special-cased by every
+            // downstream lane, so it is NOT disambiguated by the count above:
+            // the entry module's own `main` does not appear in `ast_module.items`
+            // as an ordinary function here. Rewriting an alias to the bare name
+            // `main` therefore binds the ENTRY main, which is how the measured
+            // `use ...{main as baremetal_main}` probe turned into unbounded
+            // recursion. Left unresolved on purpose -- today's hard error is
+            // correct behaviour compared to silently calling the wrong function.
+            if source_name == "main" {
+                continue;
+            }
+            self.import_alias_bindings
+                .insert(local_name.to_string(), source_name.to_string());
+        }
+    }
+
+    /// Resolve a selective-import alias (`use m.{f as g}`) to its original symbol.
+    pub(super) fn resolve_import_alias(&self, name: &str) -> Option<&str> {
+        self.import_alias_bindings.get(name).map(|s| s.as_str())
     }
 
     /// Resolve a function alias to its original function name

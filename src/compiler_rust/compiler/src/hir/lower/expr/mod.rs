@@ -302,6 +302,28 @@ impl Lowerer {
                 kind: HirExprKind::Global(name.to_string()),
                 ty,
             })
+        } else if let Some((source, ty)) = self.resolve_import_alias(name).map(str::to_string).and_then(|source| {
+            // Selective-import alias (`use m.{f as g}`): module flattening merged
+            // the imported symbol in under its ORIGINAL name, so `g` names
+            // nothing in the flattened unit and used to fall through to the
+            // lenient-global path below -- an unresolved external symbol, which
+            // is a silent whole-module JIT fallback (100-1000x) or a hard E1002
+            // under AOT, where baremetal units (`cstart.spl`'s
+            // `main as baremetal_main`) have no interpreter to fall back to.
+            //
+            // Deliberately the LAST resolution attempt: a local, a same-named
+            // callable, or a same-named global all still win, so an alias
+            // recorded by one module can never hijack a real symbol in another
+            // module of the same flattened unit.
+            let ty = self
+                .named_callable_value_type(&source)
+                .or_else(|| self.globals.get(&source).copied())?;
+            Some((source, ty))
+        }) {
+            Ok(HirExpr {
+                kind: HirExprKind::Global(source),
+                ty,
+            })
         } else {
             // E1032 - Self in Static: Special case for 'self' not found
             if name == "self" && self.current_class_type.is_some() {

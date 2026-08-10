@@ -61,33 +61,14 @@ fn record_flattened_global(owner: Option<&Arc<str>>, name: String, value: Value)
     }
 }
 
-fn decode_marker_field<'a>(raw: &mut &'a str) -> Option<&'a str> {
-    let colon = raw.find(':')?;
-    let len = raw[..colon].parse::<usize>().ok()?;
-    let value_and_tail = &raw[colon + 1..];
-    if len > value_and_tail.len() || !value_and_tail.is_char_boundary(len) {
-        return None;
-    }
-    let (value, tail) = value_and_tail.split_at(len);
-    *raw = tail;
-    Some(value)
-}
-
 fn record_flattened_import_binding(marker: &str) {
-    let Some(mut raw) = marker.strip_prefix(FLATTEN_IMPORT_BINDING_MARKER_PREFIX) else {
+    // Decoder shared with HIR lowering -- see
+    // `interpreter_state::decode_import_binding_marker`.
+    let Some((importer, local_name, source_owner, source_name)) =
+        crate::interpreter::decode_import_binding_marker(marker)
+    else {
         return;
     };
-    let (Some(importer), Some(local_name), Some(source_owner), Some(source_name)) = (
-        decode_marker_field(&mut raw),
-        decode_marker_field(&mut raw),
-        decode_marker_field(&mut raw),
-        decode_marker_field(&mut raw),
-    ) else {
-        return;
-    };
-    if !raw.is_empty() {
-        return;
-    }
     let source_owner: Arc<str> = Arc::from(source_owner);
     let mut entries = HashMap::new();
     if local_name == "*" {
@@ -110,7 +91,7 @@ fn record_flattened_import_binding(marker: &str) {
             bindings
                 .borrow()
                 .get(&source_owner)
-                .and_then(|source_bindings| source_bindings.get(source_name))
+                .and_then(|source_bindings| source_bindings.get::<str>(source_name))
                 .cloned()
                 .unwrap_or_else(|| (Arc::clone(&source_owner), source_name.to_owned()))
         });
