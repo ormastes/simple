@@ -67,3 +67,16 @@ Verdicts: `bin/simple test test/01_unit/lib/nogc_async_mut/generator_intensive_s
 → `Results: 33 total, 33 passed, 0 failed`. Same command against the
 `test/unit/...` twin → identical `Results: 33 total, 33 passed, 0 failed`.
 (27 examples before this fix; 6 new examples added.)
+
+## Update 2026-08-10 — mirror retained, real enum now importable but package still blocked
+
+`generators.spl` was fixed and `GeneratorState` is now importable and
+constructible (all 4 variants verified by an import probe). The mirror could
+still NOT be deleted: `use app.interpreter.async_runtime.generators.GeneratorState`
+loads the package `__init__.spl`, which eagerly imports `actors.spl`, an
+unmigrated Rust draft (`static mut`, `unsafe { }`) that does not parse. Details
+and the unblock condition: `generator_async_runtime_module_fails_to_parse_2026-08-10.md`.
+
+The mirror's header comment was rewritten to state the real (transitive)
+reason rather than the original incorrect diagnosis. Both legs re-verified
+byte-identical at `Results: 33 total, 33 passed, 0 failed`.

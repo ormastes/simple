@@ -20,8 +20,30 @@ parse blockers were found:
    `grep -rn "async_runtime" src/app/interpreter/*.spl` returning nothing,
    so the rename is safe and self-contained).
 
-2. **Struct-style enum-variant patterns/literals not accepted by the
-   current grammar**, still open. After fix (1), parsing still fails:
+2. ~~**Struct-style enum-variant patterns/literals not accepted by the
+   current grammar**~~ — **THIS DIAGNOSIS WAS WRONG.** Bisected 2026-08-10
+   by truncation against the seed binary
+   (`bin/release/x86_64-unknown-linux-gnu/simple`, mtime 2026-08-10
+   11:06:25). Every construct blamed below parses FINE:
+   - `Suspended { next_value: Value, env: Environment }` (decl, :12) — OK
+   - `GeneratorState.Suspended { ... }` (construction, :85, :111) — OK
+   - `case GeneratorState.Suspended (next_value, env ):` (:96) — OK
+   - `&Interpreter`, `&mut Generator`, `Box<Block>`, `Array<Value>`,
+     `usize`, `&*g.body` — all OK
+
+   **The actual and ONLY blocker was `generators.spl:130`:**
+   `callback: Fn(Value) -> Result<(), InterpreterError>`.
+   Simple's function-type syntax is `(Args) -> Ret`
+   (cf. `callback: (JsValue) -> JsValue`, `closure: () -> i64`,
+   `type Handler = fn(Event) -> ()`). Capital `Fn(...)` is Rust's `Fn`
+   trait — a **Rust-ism, i.e. INVALID SOURCE, not a parser gap**. Fixed in
+   `.spl`; the parser was correctly rejecting it and was NOT changed.
+
+   Sibling census (`Fn(` in owned source) found exactly 2 sites, both in
+   this same never-imported draft package: `generators.spl:130` and
+   `actors.spl:30`/`:33`. Both fixed.
+
+   Original (now-superseded) symptom:
 
    ```
    error: parse: Cannot parse module ".../generators.spl": Unexpected
@@ -69,4 +91,43 @@ with payload fields elsewhere in `src/app/interpreter/` for the accepted
 shape), then re-point `generator_intensive_spec.spl` at a real `use`
 import instead of the local mirror enum.
 
-## Status: OPEN (parse blocker), reserved-keyword sub-issue FIXED 2026-08-10
+## Resolution 2026-08-10
+
+`generators.spl` **now parses** and `GeneratorState` is importable and
+constructible. Verified by import, not merely by parse — a probe doing
+`use app.interpreter.async_runtime.generators.GeneratorState` constructed
+and pattern-matched all **four** variants (the enum has NO `Yielded`
+variant):
+
+- `Created`, `Running`, `Completed` — constructed + matched
+- `Suspended(next_value: 42, env: 0)` — constructed, destructured, `v=42 e=0`
+
+Fixes applied, all in `.spl` (invalid source), parser untouched:
+- `generators.spl:130` `Fn(Value) ->` -> `(Value) ->`
+- `actors.spl:30,:33` `Fn(Message) ->` -> `(Message) ->`
+- `futures.spl:62` `if value Some(result)` -> `if val Some(result)`
+
+## Status: PARTIALLY RESOLVED — generators.spl FIXED; package import still blocked
+
+The spec still cannot drop its local mirror. `use ...generators.GeneratorState`
+loads the package `__init__.spl`, which eagerly imports **`actors.spl`**, an
+unmigrated Rust draft that does not parse. Remaining blockers there, found by
+iterative bisect and deliberately NOT half-migrated (reverted to avoid leaving
+a partially-rewritten module):
+
+- `actors.spl:53` `static mut NEXT_ACTOR_ID: u64 = 0`
+- `actors.spl:56` `static mut ACTOR_REGISTRY: Dict<u64, Actor> = {}`
+- `actors.spl:60,66,72,94,105` Rust `unsafe { ... }` blocks
+- `actors.spl:59` etc. reserved keyword `actor` used as a parameter/binding
+  name (same class as the original `gen` issue; note `bin/simple run` does
+  NOT enforce this, only `bin/simple test` does)
+
+`static mut` and `unsafe { }` have no Simple equivalent, so unblocking
+requires redesigning this module's global-actor-registry state — an
+unbounded rewrite of a draft that nothing in the tree imports and whose
+semantics are unverifiable (no test exercises it). Filed rather than
+guessed at.
+
+**Unblock condition:** migrate `actors.spl` off `static mut`/`unsafe`/`actor`
+-as-identifier, then re-point `generator_intensive_spec.spl` at the real
+`use` import and delete its mirror enum.
