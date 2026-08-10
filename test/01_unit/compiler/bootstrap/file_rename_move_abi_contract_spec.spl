@@ -9,9 +9,12 @@ describe "file rename and move runtime ABI":
 
         expect(backend).to_contain("declare i1 @rt_file_rename(ptr, i64, ptr, i64)")
         expect(backend).to_contain("declare i1 @rt_file_move(ptr, i64, ptr, i64)")
+        expect(backend.contains("declare i1 @rt_file_rename(ptr, ptr)")).to_equal(false)
         expect(backend.contains("declare i1 @rt_file_move(ptr, ptr)")).to_equal(false)
         expect(library).to_contain("declare_fn(mod_, \"rt_file_rename\", llvm_function_type(i1_ty, [ptr_ty, i64_ty, ptr_ty, i64_ty], false))")
         expect(library).to_contain("declare_fn(mod_, \"rt_file_move\", llvm_function_type(i1_ty, [ptr_ty, i64_ty, ptr_ty, i64_ty], false))")
+        expect(library.contains("declare_fn(mod_, \"rt_file_rename\", llvm_function_type(i1_ty, [ptr_ty, ptr_ty], false))")).to_equal(false)
+        expect(library.contains("declare_fn(mod_, \"rt_file_move\", llvm_function_type(i1_ty, [ptr_ty, ptr_ty], false))")).to_equal(false)
 
     it "keeps generated bindings and native fallback honest":
         val compiler_spec = rt_file_read_text("src/compiler/90.tools/sffi_gen/specs/file_io.spl") ?? ""
@@ -20,5 +23,17 @@ describe "file rename and move runtime ABI":
 
         expect(compiler_spec).to_contain("return_type: \"bool\", runtime_fn: \"rt_file_rename\"")
         expect(app_spec).to_contain("return_type: \"bool\", runtime_fn: \"rt_file_rename\"")
-        expect(stubs.contains("RT_KEEP!(rt_file_rename)")).to_equal(false)
+        expect(stubs.contains("    \"rt_file_rename\",")).to_equal(false)
         expect(stubs.contains("bool rt_file_rename(const char*")).to_equal(false)
+
+    it "publishes cross-device moves without deleting caller destinations":
+        val legacy = rt_file_read_text("src/runtime/runtime.c") ?? ""
+        val native = rt_file_read_text("src/runtime/runtime_native.c") ?? ""
+        for source in [legacy, native]:
+            expect(source).to_contain("errno == EXDEV")
+            expect(source).to_contain("O_WRONLY | O_CREAT | O_EXCL")
+            expect(source).to_contain("if (ok) ok = fsync(fd) == 0")
+            expect(source).to_contain("published = rename(temp_path, dst) == 0")
+            expect(source).to_contain("if (created && !published) remove(temp_path)")
+            expect(source).to_contain("if (published) ok = remove(src) == 0")
+            expect(source.contains("if (!ok) remove(dst)")).to_equal(false)

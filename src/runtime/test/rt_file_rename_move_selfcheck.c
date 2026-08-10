@@ -62,18 +62,69 @@ static size_t path_length(const char* path) {
     return strlen(path);
 }
 
+#if !defined(_WIN32)
+static void check_cross_device_fallback(const char* source,
+                                        const uint8_t* source_exact,
+                                        size_t source_len) {
+    static const char* candidates[] = {"/dev/shm", "/tmp", NULL};
+    struct stat source_device;
+    if (stat(".", &source_device) != 0) {
+        printf("  skip cross-device fallback: source device unavailable\n");
+        return;
+    }
+
+    const char* target_dir = NULL;
+    for (size_t index = 0; candidates[index] != NULL; index++) {
+        struct stat candidate_device;
+        if (stat(candidates[index], &candidate_device) == 0 &&
+            candidate_device.st_dev != source_device.st_dev &&
+            access(candidates[index], W_OK) == 0) {
+            target_dir = candidates[index];
+            break;
+        }
+    }
+    if (!target_dir) {
+        printf("  skip cross-device fallback: distinct writable mount unavailable\n");
+        return;
+    }
+
+    char destination[512];
+    int length = snprintf(destination, sizeof(destination),
+                          "%s/simple-rt-file-move-cross-device-%ld.tmp",
+                          target_dir, (long)getpid());
+    check(length > 0 && (size_t)length < sizeof(destination),
+          "cross-device destination path fits");
+    if (length <= 0 || (size_t)length >= sizeof(destination)) return;
+    remove(destination);
+
+    check(write_file(source, "cross-device payload"),
+          "cross-device source fixture created");
+    check(rt_file_move(source_exact, source_len,
+                       (const uint8_t*)destination, (size_t)length) == 1,
+          "move takes the EXDEV copy-publication fallback");
+    check(!file_exists(source) && file_is(destination, "cross-device payload"),
+          "cross-device fallback publishes before source removal");
+    remove(destination);
+}
+#endif
+
 int main(void) {
     const char* dir = "simple-rt-file-rename-move-selfcheck.tmp";
     const char* source = "simple-rt-file-rename-move-selfcheck.tmp/source.txt";
     const char* renamed = "simple-rt-file-rename-move-selfcheck.tmp/renamed.txt";
     const char* moved = "simple-rt-file-rename-move-selfcheck.tmp/moved.txt";
-    const char source_exact[] = "simple-rt-file-rename-move-selfcheck.tmp/source.txt";
-    const char renamed_exact[] = "simple-rt-file-rename-move-selfcheck.tmp/renamed.txt";
-    const char moved_exact[] = "simple-rt-file-rename-move-selfcheck.tmp/moved.txt";
+    const char* protected_dir = "simple-rt-file-rename-move-selfcheck.tmp/protected";
+    const uint8_t source_exact[sizeof("simple-rt-file-rename-move-selfcheck.tmp/source.txt") - 1] =
+        "simple-rt-file-rename-move-selfcheck.tmp/source.txt";
+    const uint8_t renamed_exact[sizeof("simple-rt-file-rename-move-selfcheck.tmp/renamed.txt") - 1] =
+        "simple-rt-file-rename-move-selfcheck.tmp/renamed.txt";
+    const uint8_t moved_exact[sizeof("simple-rt-file-rename-move-selfcheck.tmp/moved.txt") - 1] =
+        "simple-rt-file-rename-move-selfcheck.tmp/moved.txt";
 
     remove(source);
     remove(renamed);
     remove(moved);
+    RMDIR(protected_dir);
     RMDIR(dir);
     if (MKDIR(dir) != 0 && errno != EEXIST) {
         printf("SELFCHECK FAILED (cannot create %s)\n", dir);
@@ -81,34 +132,51 @@ int main(void) {
     }
 
     check(write_file(source, "rename-move ABI payload"), "source fixture created");
-    check(rt_file_rename((const uint8_t*)source_exact, path_length(source_exact),
-                         (const uint8_t*)renamed_exact, path_length(renamed_exact)) == 1,
-          "rename accepts four text words");
+    check(rt_file_rename(source_exact, sizeof(source_exact),
+                         renamed_exact, sizeof(renamed_exact)) == 1,
+          "rename accepts four text words without C-string sentinels");
     check(!file_exists(source) && file_is(renamed, "rename-move ABI payload"),
           "rename moves the exact source and preserves content");
 
-    check(rt_file_move((const uint8_t*)renamed_exact, path_length(renamed_exact),
-                       (const uint8_t*)moved_exact, path_length(moved_exact)) == 1,
-          "move accepts four text words");
+    check(rt_file_move(renamed_exact, sizeof(renamed_exact),
+                       moved_exact, sizeof(moved_exact)) == 1,
+          "move accepts four text words without C-string sentinels");
     check(!file_exists(renamed) && file_is(moved, "rename-move ABI payload"),
           "move aliases the same exact-path behavior");
 
-    check(rt_file_rename((const uint8_t*)source_exact, path_length(source_exact),
-                         (const uint8_t*)renamed_exact, path_length(renamed_exact)) == 0,
+    check(write_file(renamed, "destination sentinel"),
+          "pre-existing destination fixture created");
+    check(rt_file_rename(source_exact, sizeof(source_exact),
+                         renamed_exact, sizeof(renamed_exact)) == 0,
           "rename reports a missing source");
-    check(rt_file_move((const uint8_t*)source_exact, path_length(source_exact),
-                       (const uint8_t*)renamed_exact, path_length(renamed_exact)) == 0,
+    check(file_is(renamed, "destination sentinel"),
+          "failed rename preserves a pre-existing destination");
+    check(rt_file_move(source_exact, sizeof(source_exact),
+                       renamed_exact, sizeof(renamed_exact)) == 0,
           "move reports a missing source");
+    check(file_is(renamed, "destination sentinel"),
+          "failed move preserves a pre-existing destination");
+
+    check(MKDIR(protected_dir) == 0, "pre-existing destination directory created");
+    check(rt_file_move(source_exact, sizeof(source_exact),
+                       (const uint8_t*)protected_dir, path_length(protected_dir)) == 0,
+          "failed move rejects a destination directory");
+    check(RMDIR(protected_dir) == 0,
+          "failed move preserves a pre-existing destination directory");
 
     const uint8_t embedded_nul[] = {'s', 'o', '\0', 'u', 'r', 'c', 'e'};
     check(rt_file_rename(embedded_nul, sizeof(embedded_nul),
-                         (const uint8_t*)renamed_exact, path_length(renamed_exact)) == 0,
+                         renamed_exact, sizeof(renamed_exact)) == 0,
           "embedded NUL path is rejected");
     check(rt_file_move(embedded_nul, sizeof(embedded_nul),
-                       (const uint8_t*)renamed_exact, path_length(renamed_exact)) == 0,
+                       renamed_exact, sizeof(renamed_exact)) == 0,
           "move rejects an embedded NUL path");
-    check(rt_file_rename(NULL, 1, (const uint8_t*)renamed_exact, path_length(renamed_exact)) == 0,
+    check(rt_file_rename(NULL, 1, renamed_exact, sizeof(renamed_exact)) == 0,
           "null pointer with nonzero length is rejected");
+
+#if !defined(_WIN32)
+    check_cross_device_fallback(source, source_exact, sizeof(source_exact));
+#endif
 
     remove(source);
     remove(renamed);
