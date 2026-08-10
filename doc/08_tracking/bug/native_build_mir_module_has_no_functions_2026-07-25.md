@@ -1,6 +1,6 @@
 # BUG: `native-build` fails with "MIR module has no functions" for extern/return-typed probes
 
-**Status:** OPEN — blocks verification of the Stage4 deep-free chain
+**Status:** ALREADY-FIXED (re-verified 2026-08-10 — see re-verification section at end)
 **Found:** 2026-07-25
 **Blocks:** `doc/09_report/stage4_deepfree_chain_status_2026-07-25.md` step 5
 (reclamation measurement), which blocks Stage4 memory work → redeploy → RISC-V
@@ -170,3 +170,35 @@ working tree, so a dirty tree is part of the input.
 - `--runtime-bundle core-c-bootstrap` stages the **Rust** `libsimple_runtime.a`,
   not `src/runtime/runtime_native.c`, and `cargo build -p simple-runtime`
   refreshes only `target/debug` while that lane links the **bootstrap** profile.
+
+## Re-verification 2026-08-10 — ALREADY-FIXED
+
+Re-ran the exact `varB.spl` isolation fixture from this doc (module-level
+`extern fn rt_heap_registry_count() -> i64` + `fn main(): print "B"`) with the
+exact documented flags, against the current
+`src/compiler_rust/target/debug/simple` (dated 2026-08-09):
+
+```
+$ src/compiler_rust/target/debug/simple native-build /tmp/nbmirprobe/varB.spl \
+    --runtime-bundle core-c-bootstrap --mode one-binary --entry-closure \
+    --cache-dir <fresh> -o /tmp/nbmirprobe/out2
+# exit 0, no "MIR module has no functions" error
+$ /tmp/nbmirprobe/out2
+B
+# exit 0
+```
+
+Also ran the repo's own gate mentioned in this doc:
+
+```
+$ sh scripts/check/check-seed-native-build-invariant.shs
+PASS  seed-native-build-invariant  seed=.../simple native-built + ran the
+cross-module fixture, printed 5
+```
+
+Both the module-level-extern isolation case and the repo's own seed
+native-build gate now pass cleanly — no code change made this session; the
+fix already landed in the Rust seed sometime between 2026-07-25 and
+2026-08-09 (no specific commit identified; `git log` on this doc shows only
+doc/chore syncs, so the fix landed as part of ordinary seed work without a
+doc update). Marking ALREADY-FIXED and closing.
