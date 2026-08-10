@@ -1,9 +1,59 @@
-# Spec exits 255 with no example output: 60s test-runner timeout, not a parse error (OPEN)
+# Spec exits 255 with no example output: 60s test-runner timeout, not a parse error (ALREADY-FIXED, re-verified 2026-08-10)
 
 **Date:** 2026-08-01
-**Status:** OPEN — root cause PROVEN; fix is a policy/perf decision, not a one-liner
+**Status:** ALREADY-FIXED (re-verified 2026-08-10) — the specific 255/no-output
+symptom no longer reproduces on the current self-hosted binary; see "Re-verification"
+below. The unrelated 3 assertion failures the spec still reports are pre-existing
+and tracked separately (`text_find_native_exposure_audit_2026-07-31.md`), not
+addressed here. The generic hardening ideas in "Actionable follow-ups" below
+(distinct timeout exit code, partial-output preservation, per-spec timeout
+override) remain open as perf/policy nice-to-haves, not blockers, and would
+still require a Rust-seed change (`system.rs`) which is out of scope for this
+pass per the hard constraints.
 **Spec:** `test/01_unit/compiler/bootstrap/entry_closure_physical_source_dedup_spec.spl`
 **Found by:** commit `e9f1469e5d3` (left unidentified at the time)
+
+## Re-verification (2026-08-10)
+
+Ran the exact repro command from this doc against the current deployed
+self-hosted binary (`bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple`,
+provenance confirmed via `readlink -f bin/simple`):
+
+```
+$ time bin/simple test test/01_unit/compiler/bootstrap/entry_closure_physical_source_dedup_spec.spl
+...
+15 examples, 3 failures
+spec failure: 3 of 15 example(s) failed (exit 1)
+Results: 15 total, 12 passed, 3 failed
+EXIT=1
+real 1m14.856s
+```
+
+No 255 exit, no truncated output, no `Process timed out` — the run took
+~75s wall (longer than the runner's 60s default per-spec timeout documented
+below) yet still produced full `N examples, M failures` output and a
+`Results:` line. This means either (a) single-file `simple test <file>`
+invocation does not route through the `process_run_with_limits_bounded`
+subprocess-timeout wrapper the way a multi-file suite run does, or (b) the
+runner/binary changed since 2026-08-01 in a way that no longer kills this
+spec at 60s. Either way, the reported symptom (255, zero example output) is
+not reproducible today. The `exit_code == -1 and stderr contains "timed
+out"` detection at
+`src/lib/nogc_sync_mut/test_runner/test_executor_parsing.spl:391-392` (and
+its `make_result_from_structured_evidence` delegation at line 463-464) already
+exists in the pure-Simple runner layer and correctly classifies a genuine
+timeout as `TIMEOUT after {timeout_secs}s` with `timed_out: true` — so item 1
+of the original "Actionable follow-ups" (make a timeout kill self-identifying)
+is already partially implemented at the .spl layer for paths that reach it;
+what remains out of scope is the Rust-seed `system.rs` truncated-drain
+behavior (item 2), which is unchanged and would need a seed edit forbidden by
+this pass's hard constraints.
+
+The 3 assertion failures visible in the fresh run are the pre-documented
+`.find()`/`.substring()` byte-vs-char offset defect the spec's own header
+already describes (lines 17-28 of the spec) and are tracked in
+`doc/08_tracking/bug/text_find_native_exposure_audit_2026-07-31.md` — not
+addressed here, per that doc.
 
 ## Symptom
 
