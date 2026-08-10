@@ -15,6 +15,7 @@ cd "$ROOT_DIR"
 KERNEL="build/os/simpleos_arm64_desktop_engine2d.elf"
 DISK="build/os/fat32-arm64-desktop.img"
 DISK_PRODUCER="build/os/make_os_disk"
+FONT_BUNDLE_MANIFEST="scripts/os/simpleos_font_bundle_companion.sha256"
 BUILD_MANIFEST="build/os/simpleos_arm64_desktop_engine2d.build-manifest.env"
 FROZEN_BUILD_MANIFEST="${BUILD_MANIFEST}.frozen-source-admission.env"
 PRODUCER_SCRIPT="scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs"
@@ -91,6 +92,9 @@ fail_evidence() {
     fail_evidence "canonical-build-manifest-missing"
 [ -f "$FROZEN_BUILD_MANIFEST" ] && [ -s "$FROZEN_BUILD_MANIFEST" ] ||
     fail_evidence "canonical-frozen-source-admission-missing"
+[ -f "$FONT_BUNDLE_MANIFEST" ] && [ -s "$FONT_BUNDLE_MANIFEST" ] &&
+    [ ! -L "$FONT_BUNDLE_MANIFEST" ] ||
+    fail_evidence "canonical-font-bundle-manifest-missing"
 
 for frozen_key in schema repo_revision dirty_state_policy frozen_worktree \
     entry_path entry_sha256 source_roots source_fingerprint source_file_count \
@@ -125,8 +129,12 @@ for key in \
     kernel_sha256 \
     disk_path \
     disk_sha256 \
+    disk_profile \
+    disk_access \
     disk_producer_path \
     disk_producer_sha256 \
+    font_bundle_manifest_path \
+    font_bundle_manifest_sha256 \
     compiler_path \
     compiler_sha256 \
     compiler_version \
@@ -167,8 +175,12 @@ MANIFEST_KERNEL_PATH="$(manifest_field kernel_path)"
 MANIFEST_KERNEL_SHA256="$(manifest_field kernel_sha256)"
 MANIFEST_DISK_PATH="$(manifest_field disk_path)"
 MANIFEST_DISK_SHA256="$(manifest_field disk_sha256)"
+MANIFEST_DISK_PROFILE="$(manifest_field disk_profile)"
+MANIFEST_DISK_ACCESS="$(manifest_field disk_access)"
 MANIFEST_DISK_PRODUCER_PATH="$(manifest_field disk_producer_path)"
 MANIFEST_DISK_PRODUCER_SHA256="$(manifest_field disk_producer_sha256)"
+MANIFEST_FONT_BUNDLE_MANIFEST_PATH="$(manifest_field font_bundle_manifest_path)"
+MANIFEST_FONT_BUNDLE_MANIFEST_SHA256="$(manifest_field font_bundle_manifest_sha256)"
 MANIFEST_COMPILER_PATH="$(manifest_field compiler_path)"
 MANIFEST_COMPILER_SHA256="$(manifest_field compiler_sha256)"
 MANIFEST_COMPILER_VERSION="$(manifest_field compiler_version)"
@@ -260,6 +272,10 @@ printf '%s\n' "$MANIFEST_ENTRY_SHA256" |
     fail_evidence "canonical-build-manifest-kernel-path-mismatch"
 [ "$MANIFEST_DISK_PATH" = "$DISK" ] ||
     fail_evidence "canonical-build-manifest-disk-path-mismatch"
+[ "$MANIFEST_DISK_PROFILE" = "desktop-fonts" ] ||
+    fail_evidence "canonical-build-manifest-disk-profile-mismatch"
+[ "$MANIFEST_DISK_ACCESS" = "read-only" ] ||
+    fail_evidence "canonical-build-manifest-disk-access-mismatch"
 printf '%s\n' "$MANIFEST_KERNEL_SHA256" |
     grep -Eq '^[0-9a-f]{64}$' ||
     fail_evidence "canonical-build-manifest-kernel-sha256-invalid"
@@ -274,6 +290,13 @@ printf '%s\n' "$MANIFEST_DISK_SHA256" |
 printf '%s\n' "$MANIFEST_DISK_PRODUCER_SHA256" |
     grep -Eq '^[0-9a-f]{64}$' ||
     fail_evidence "canonical-build-manifest-disk-producer-sha256-invalid"
+[ "$MANIFEST_FONT_BUNDLE_MANIFEST_PATH" = "$FONT_BUNDLE_MANIFEST" ] ||
+    fail_evidence "canonical-build-manifest-font-bundle-path-mismatch"
+printf '%s\n' "$MANIFEST_FONT_BUNDLE_MANIFEST_SHA256" |
+    grep -Eq '^[0-9a-f]{64}$' ||
+    fail_evidence "canonical-build-manifest-font-bundle-sha256-invalid"
+[ "$(sha256_file "$FONT_BUNDLE_MANIFEST")" = "$MANIFEST_FONT_BUNDLE_MANIFEST_SHA256" ] ||
+    fail_evidence "canonical-build-manifest-font-bundle-sha256-mismatch"
 [ -x "$MANIFEST_COMPILER_PATH" ] && [ -f "$MANIFEST_COMPILER_PATH" ] &&
     [ ! -L "$MANIFEST_COMPILER_PATH" ] ||
     fail_evidence "canonical-build-manifest-compiler-unavailable"
@@ -365,6 +388,8 @@ LAUNCH_KERNEL_SHA256="$(sha256_file "$KERNEL")" ||
     fail_evidence "canonical-kernel-launch-sha256-failed"
 LAUNCH_DISK_SHA256="$(sha256_file "$DISK")" ||
     fail_evidence "canonical-disk-launch-sha256-failed"
+LAUNCH_FONT_BUNDLE_MANIFEST_SHA256="$(sha256_file "$FONT_BUNDLE_MANIFEST")" ||
+    fail_evidence "canonical-font-bundle-manifest-launch-sha256-failed"
 LAUNCH_SOURCE_REVISION="$(git rev-parse --verify HEAD 2>/dev/null)" ||
     fail_evidence "launch-source-revision-unavailable"
 [ "$LAUNCH_SOURCE_REVISION" = "$MANIFEST_SOURCE_REVISION" ] ||
@@ -373,6 +398,8 @@ LAUNCH_SOURCE_REVISION="$(git rev-parse --verify HEAD 2>/dev/null)" ||
     fail_evidence "canonical-kernel-launch-sha256-mismatch"
 [ "$LAUNCH_DISK_SHA256" = "$MANIFEST_DISK_SHA256" ] ||
     fail_evidence "canonical-disk-launch-sha256-mismatch"
+[ "$LAUNCH_FONT_BUNDLE_MANIFEST_SHA256" = "$MANIFEST_FONT_BUNDLE_MANIFEST_SHA256" ] ||
+    fail_evidence "canonical-font-bundle-manifest-launch-sha256-mismatch"
 
 qemu-system-aarch64 \
     -no-user-config \
@@ -389,7 +416,7 @@ qemu-system-aarch64 \
     -device virtio-keyboard-device \
     -device virtio-mouse-device \
     -global virtio-mmio.force-legacy=false \
-    -drive "file=$DISK,if=none,id=armdesktop,format=raw" \
+    -drive "file=$DISK,if=none,id=armdesktop,format=raw,readonly=on" \
     -device virtio-blk-device,drive=armdesktop \
     -qmp "unix:$QMP_SOCKET,server=on,wait=off" \
     >"$QEMU_LOG" 2>&1 &
@@ -1019,12 +1046,17 @@ END_KERNEL_SHA256="$(sha256_file "$KERNEL")" ||
     fail_evidence "canonical-kernel-post-capture-sha256-failed"
 END_DISK_SHA256="$(sha256_file "$DISK")" ||
     fail_evidence "canonical-disk-post-capture-sha256-failed"
-[ ! -L "$KERNEL" ] && [ ! -L "$DISK" ] ||
+END_FONT_BUNDLE_MANIFEST_SHA256="$(sha256_file "$FONT_BUNDLE_MANIFEST")" ||
+    fail_evidence "canonical-font-bundle-manifest-post-capture-sha256-failed"
+[ ! -L "$KERNEL" ] && [ ! -L "$DISK" ] &&
+    [ ! -L "$FONT_BUNDLE_MANIFEST" ] ||
     fail_evidence "canonical-artifact-became-symlink-during-run"
 [ "$END_KERNEL_SHA256" = "$LAUNCH_KERNEL_SHA256" ] ||
     fail_evidence "canonical-kernel-mutated-during-run"
 [ "$END_DISK_SHA256" = "$LAUNCH_DISK_SHA256" ] ||
     fail_evidence "canonical-disk-mutated-during-run"
+[ "$END_FONT_BUNDLE_MANIFEST_SHA256" = "$LAUNCH_FONT_BUNDLE_MANIFEST_SHA256" ] ||
+    fail_evidence "canonical-font-bundle-manifest-mutated-during-run"
 END_PRODUCER_SCRIPT_SHA256="$(sha256_file "$PRODUCER_SCRIPT")" ||
     fail_evidence "canonical-producer-script-post-capture-sha256-failed"
 END_BUILD_LOG_SHA256="$(sha256_file "$MANIFEST_BUILD_LOG_PATH")" ||
@@ -1116,8 +1148,12 @@ mv "$EVIDENCE_REPORT_TMP" "$EVIDENCE_REPORT"
     echo "arm64_qmp_input_kernel_sha256=$LAUNCH_KERNEL_SHA256"
     echo "arm64_qmp_input_disk=$DISK"
     echo "arm64_qmp_input_disk_sha256=$LAUNCH_DISK_SHA256"
+    echo "arm64_qmp_input_disk_profile=$MANIFEST_DISK_PROFILE"
+    echo "arm64_qmp_input_disk_access=$MANIFEST_DISK_ACCESS"
     echo "arm64_qmp_input_disk_producer=$MANIFEST_DISK_PRODUCER_PATH"
     echo "arm64_qmp_input_disk_producer_sha256=$MANIFEST_DISK_PRODUCER_SHA256"
+    echo "arm64_qmp_input_font_bundle_manifest=$MANIFEST_FONT_BUNDLE_MANIFEST_PATH"
+    echo "arm64_qmp_input_font_bundle_manifest_sha256=$LAUNCH_FONT_BUNDLE_MANIFEST_SHA256"
     echo "arm64_qmp_input_pointer_sequences=$(field pointer_sequences)"
     echo "arm64_qmp_input_key_sequences=$(field key_sequences)"
     echo "arm64_qmp_input_serial_watermarks=$(field input_serial_watermarks)"
