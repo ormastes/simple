@@ -165,6 +165,30 @@ impl TypeChecker {
         let err_ty = self.fresh_var();
         self.env.insert("Err".to_string(), err_ty);
 
+        // The builtin enum TYPE names, so the QUALIFIED construction form
+        // (`Result.Ok(x)`, `Option.Some(y)`) resolves as well as the bare
+        // constructor form bound just above.
+        //
+        // A source-declared `enum E` is bound below by the `Node::Enum` arm as
+        // a fresh var, which is what makes `E.A(1)` check. `Option` and
+        // `Result` have no such declaration in a normal compilation unit --
+        // only their VARIANT constructors were ever bound -- so the receiver
+        // `Result` fell through to `checker_infer.rs`'s `Expr::Identifier` arm
+        // and aborted the whole unit with
+        // `Undefined("undefined identifier: Result")` before HIR lowering ran.
+        // The interpreter lane synthesizes real `enum Option` / `enum Result`
+        // declarations (see `interpreter_eval.rs`) and so never hit this; that
+        // lane split is why the qualified form is used ~1.7k times across the
+        // tree yet blocked every baremetal `cstart.spl` entry point under AOT.
+        //
+        // Bound before the declaration pass so a real source-level `enum
+        // Result` (e.g. `lib/std/src/core/result.spl`) in the unit overwrites
+        // this binding rather than being shadowed by it.
+        let option_ty = self.fresh_var();
+        self.env.insert("Option".to_string(), option_ty);
+        let result_ty = self.fresh_var();
+        self.env.insert("Result".to_string(), result_ty);
+
         // First pass: register all function, class, struct, const, static names
         for item in items {
             match item {
