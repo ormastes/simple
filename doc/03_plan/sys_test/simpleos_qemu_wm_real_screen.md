@@ -1026,3 +1026,134 @@ producer, QMP consumer, or Cocoa QEMU launch is permitted from this output.
 The next lane must start from a stable `6471bf9a57` or later source snapshot
 and diagnose the remaining post-parameter return-type conversion without
 reusing this source-unstable candidate as evidence.
+
+## 2026-08-10 rung-(d) minimum-path execution plan (from wm_capture_pipeline_gap research)
+
+Source of truth: `doc/01_research/os/simpleos/wm_capture_pipeline_gap_2026-08-10.md`
+(commit `a3b47107341`). This section turns that research into ordered,
+execution-ready steps. Read the research doc in full before touching anything —
+it carries the exact line numbers and the archived-log census this plan relies on.
+
+### Corrected premise — the page fault is STILL OPEN
+
+An earlier session recorded the `rt_string_concat`/`memcpy` page fault as
+resolved. That claim is WRONG: the two newest archived runs
+(`20260810T083128Z`, `20260810T112327Z`) carry an identical `rip=` distribution
+(`3x 0x800434e`, `3x 0x8004350`, `1x 0x8004bc0`, `1x 0x8004bc2`) and wild
+`cr2=0xffffffffffffff8e`. The "resolved" belief came from one clean-looking run
+that had actually failed earlier for a different reason. Root cause is UNKNOWN —
+only the symptom signature and the crash site region
+(`_engine2d_draw_ir_render_glass_material`,
+`src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl:508`, called from `:698`
+within `_engine2d_draw_ir_render_commands` `:1420`) are known. Root-cause
+investigation is a SEPARATE, HARDER track (Track W2 below); the minimum path to
+rung (d) deliberately does not depend on it.
+
+### Track W1 — chrome-only first frame to rung (d) [minimum path]
+
+Scope IN: gate `runtime_content_frames` behind a guest flag so the first frame
+skips the crashing content-frame paint; readiness fires; host-side capture runs;
+non-uniform baseline PPM produced. Scope OUT (explicitly deferred): fixing the
+fault itself; F11 maximize/restore and browser-event PPM comparisons (they will
+still fail without content painting — expected and correct); any change to
+`check-simpleos-wm-fullscreen-evidence.shs` checks.
+
+Dependency note: this track needs NO paint output at all. With the flag off,
+`render_baremetal_frame` yields an empty `[WmContentFrame]`; every window takes
+the already-tolerated degraded branch (`engine2d_wm_frame_executor.spl:277-287`,
+`renderable_images == 0`, coverage check passes) and the frame composites WM
+chrome only (background, three window frames + titlebars, taskbar) — more than
+enough for a non-uniform PPM. Therefore Track W1 is fully INDEPENDENT of the
+blink paint-pipeline lane (`doc/03_plan/lib/browser/blink_style_paint_plan_2026-08-10.md`);
+the two can proceed in parallel.
+
+Precondition (MANDATORY, from the research doc's implementer trap): sync the
+build tree to origin/main and blob-verify
+`src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs` contains
+`deep_fields: &[crate::mir::AggregateFieldCopy]` before building any kernel.
+The local checkout was 46 lines behind origin on that file; building without the
+struct deep-copy fix will mis-attribute results.
+
+Ordered steps:
+
+1. `src/os/desktop/shell.spl` — add module-level
+   `val _WM_CONTENT_FRAMES_ENABLED: bool = false` next to `_WM_TRACE`
+   (`shell.spl:99`), preferably read from the generated config
+   `build/os/generated/generated/simpleos_log_config.spl` (written by the gate
+   at `check-simpleos-wm-fullscreen-evidence.shs:936`) so it flips without a
+   source edit. Acceptance: flag exists, default off in production, lint clean.
+2. `src/os/desktop/shell.spl:990` (`render_baremetal_frame`, `:971-998`) —
+   guard `val content_frames = self.runtime_content_frames(scene_revision)`
+   to yield an empty `[WmContentFrame]` when the flag is off. Do NOT touch
+   `runtime_content_frames` itself (`shell.spl:1295`) or the executor.
+   Acceptance: with flag off, executor logs
+   `[wm-frame] window-degraded ... (x3)` and `first_frame_revision > 0`.
+   Confirm `host_gpu_required` stays false (`gui_entry_desktop.spl:581` passes
+   `backend_required: false`) — do not change it.
+3. Flip `_WM_TRACE` to `true` for the diagnostic run (`shell.spl:99`, executor
+   receipts at `engine2d_wm_frame_executor.spl:250-282`). This is the highest
+   observability win: `[wm-render-step] at=...` names the step where any future
+   hang occurs. Acceptance: receipts visible in serial log of the diagnostic run.
+4. Run the gate lane. Acceptance oracle (exact expected log, per research §5):
+   `[desktop-gui] first-frame-rendered scene_revision=N` (N>0) →
+   `[engine2d-simd] ...` → font evidence → `[desktop-gui] desktop-ready` →
+   `[production-readiness] ...`; host side:
+   `simpleos_wm_fullscreen_scanout_capture_size=33177600` and four PPMs of
+   `24883215` bytes each, with `baseline.ppm` NON-UNIFORM.
+5. Only if step 4 does not produce a non-uniform PPM: add the belt-and-braces
+   solid fill + one contrasting rect via `FramebufferDriver`
+   (`gui_entry_desktop.spl:424`, between `:428` and `:429`). It proves less;
+   skip it if step 4 succeeds.
+6. Update `doc/08_tracking/bug/freestanding_text_local_recompare_flips_material_admission_2026-08-10.md`
+   § Layer 3 (OPEN) to record the fault persists as of run `20260810T112327Z`,
+   and report the flag run as a DIAGNOSTIC run, not a gate pass.
+
+Hard constraints (do not weaken):
+- `wm_content_frame_web_provenance_valid` and every check in
+  `check-simpleos-wm-fullscreen-evidence.shs` stay untouched. The flag lives in
+  the guest and is off by default.
+- Next hard gate after the frame: `[engine2d-simd] fatal ... zero-runtime-receipt`
+  (`gui_entry_desktop.spl:597-600`) hard-exits if the SIMD fill never ran; a
+  chrome-only frame still fills large regions so this should pass — verify, don't assume.
+
+Measurement traps carried forward:
+- Read ALL archived runs under
+  `build/simpleos_wm_fullscreen_evidence/runs/<ts>/`, not just the newest; the
+  `provlane` runs have NO serial.log — do not use them. `stat -c %y` each
+  `serial.log` — archived logs can predate their directory stamp.
+- Use `/usr/bin/grep` for anything under `build/` — the wrapped ugrep honours
+  `.gitignore` and sees nothing there.
+- Record binary identity (`readlink -f bin/simple` + stat) with every timing/run.
+
+### Track W2 — root-cause the memcpy/rt_string_concat fault [separate, harder]
+
+UNKNOWN root cause; known only: fault signature above, crash region in
+`_engine2d_draw_ir_render_glass_material` /
+`engine2d_draw_ir_glass_material_pixels`, `cr2` a small negative offset off a
+null-ish base (length/index computed as -1 used unsigned, or a struct
+field-index collision — same class as Layer 2 in the bug doc). Do not assume a
+diagnosis. Entry aids: `_WM_TRACE` receipts from W1 step 3; the per-pass
+allocation profile (three content-frame passes, ~2 MiB style buffers + 3x 8 MiB
+`array-repeat` pixel buffers on a never-freeing bump heap — an OOM-into-wild-
+pointer hypothesis is plausible but UNVERIFIED). Tracking anchor stays the
+Layer 3 section of the bug doc. This track gates full acceptance (content
+frames, F11/browser PPM comparisons) but NOT rung (d).
+
+### Cross-track prioritization (2026-08-10, three research tracks)
+
+Order recommendation given tonight's spend-cap pressure:
+1. **Blink `style_paint` lane** (`doc/03_plan/lib/browser/blink_style_paint_plan_2026-08-10.md`)
+   — cheapest and fastest to a REAL green result: two new files, one unit spec,
+   no build, no QEMU, no host contention. Do first.
+2. **WM Track W1 chrome-only rung (d)** (this section) — highest value (unblocks
+   the whole capture pipeline and proves scanout+compositor+capture end to end)
+   at moderate cost: a small guest edit plus one gate run; the main cost is the
+   kernel rebuild + QEMU cycle, and the origin-sync precondition.
+3. **K26 board synthesis** (`doc/03_plan/hardware/riscv/k26_rv32_ddr_bitstream_bringup_plan_2026-08-10.md`)
+   — highest multi-hour-stall risk (30–90 min Vivado, ≥30 GB RAM, collides with
+   any concurrent `native-build`). Run only in a quiet host window; defer
+   rather than override guardrails.
+Do NOT start WM Track W2 (fault root-cause) tonight — unknown root cause,
+open-ended cost; it gates full acceptance but not rung (d).
+All three tracks are code-independent; blink and W1 can run in parallel; the
+board track shares only host resources.
