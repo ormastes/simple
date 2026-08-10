@@ -1,6 +1,29 @@
 # `file_read_bytes` convergence blocked by non-reproducible "test daemon timed out" with no verdict
 
-**Status:** OPEN — cause NOT established; do not treat the cycle theory below as confirmed
+**Status:** OPEN — ARCHITECTURAL/ENVIRONMENTAL; cause NOT established; do not
+treat the cycle theory below as confirmed
+
+**Re-checked 2026-08-09/10:** Reproduced the identical symptom twice more on
+this same contended host (`load average 82-140`, ~270 resident `simple`
+processes, `kill_simple_monitor.shs` and `earlyoom` both live) — once on the
+exact repro spec
+(`test/01_unit/lib/nogc_sync_mut/file_read_bytes_single_definition_spec.spl`)
+and once on an unrelated freshly-written synthetic spec touching a completely
+different module (`std.nogc_sync_mut.io.image_sffi`, no `io_runtime`
+involvement at all). Both runs, with `SIMPLE_TIMEOUT_SECONDS=900` set, ended
+identically: normal compile warnings up through the last `[gc-warning]` line,
+then a **blank line, `EXIT=1`, no `SPEC FILE VERDICT`, and no "timed out"
+text at all** — not even the daemon-timeout message quoted in the Symptom
+section below. That the failure is silent (no diagnostic string, not even
+the harness's own timeout message) and hits an *unrelated* file the same way
+is strong corroboration for this doc's own "Environment confound" section:
+this reads as `kill_simple_monitor.shs` SIGTERM'ing the run outright rather
+than the test daemon's own timeout firing (see
+`.claude/memory` note on the 60s-high-CPU kill guard). This session could not
+get a quiet host to test the import-cycle theory in isolation, so per this
+doc's own "Next step" the correct disposition remains OPEN, now with two
+additional non-reproductions-with-a-verdict as evidence the confound is real
+and current, not stale from 2026-08-09.
 **Found:** 2026-08-09 — stream G2, while converging `file_read_bytes`
 **Severity:** blocker for
 `doc/08_tracking/bug/file_read_bytes_has_six_definitions_with_three_return_types_2026-08-09.md`
