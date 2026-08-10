@@ -1,4 +1,8 @@
-use std.test_runner.test_runner_files.{strip_ansi}
+use std.test_runner.test_runner_files.{strip_ansi, is_test_file, is_skip_marker_file, discover_test_files_slow}
+use std.test_runner.test_runner_args.{parse_test_args}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{file_write}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 
 # Regression coverage for `strip_ansi`
 # (src/lib/nogc_sync_mut/test_runner/test_runner_files.spl).
@@ -60,3 +64,19 @@ describe "strip_ansi":
 
     it "handles an escape sequence immediately followed by more plain text with no separator":
         expect(strip_ansi("\x1b[31mFAIL\x1b[0m: assertion mismatch")).to_equal("FAIL: assertion mismatch")
+
+describe "test runner file discovery owner imports":
+    it "classifies test and skip-marker basenames through the canonical path owner":
+        expect(is_test_file("nested/example_spec.spl")).to_equal(true)
+        expect(is_test_file("nested/.hidden_spec.spl")).to_equal(false)
+        expect(is_skip_marker_file("nested/example_spec.spl.skip")).to_equal(true)
+
+    it "walks a real temporary directory through the canonical directory owner":
+        val root = "/tmp/simple-test-runner-files-{getpid()}"
+        dir_remove_all(root)
+        dir_create_all(root)
+        val spec_path = root + "/owner_import_spec.spl"
+        file_write(spec_path, "describe \"owner import\":\n    it \"runs\":\n        expect(1).to_equal(1)\n")
+        val files = discover_test_files_slow(root, parse_test_args([]))
+        expect(files.contains(spec_path)).to_equal(true)
+        dir_remove_all(root)
