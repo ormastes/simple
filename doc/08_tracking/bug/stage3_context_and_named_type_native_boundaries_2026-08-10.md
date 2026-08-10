@@ -46,3 +46,24 @@ the mandatory three verify/fix cycles for this session were exhausted.
 No Stage 3 artifact was admitted or deployed. No Rust seed was substituted for
 the requested pure-Simple compiler.
 
+## Continuation evidence
+
+The owner-local named-type change passed its former fault. The next run reached
+HIR phase finalization and trapped in another copied-context method call:
+`CompileContext.has_errors <- lower_and_check_impl`. Replacing driver-phase
+`has_errors()` calls with direct `error_count_value` reads removed that trap.
+
+The final bounded run then completed source closure (572 physical files), parse
+(836 module aliases), and HIR, and reached phase 4 without a signal. It failed
+monomorphization because HIR errors were retained on `phase_ctx` while the
+first scalar hardening checked `self.ctx`, making phase 3 appear successful.
+The final source now reads `phase_ctx.error_count_value` directly: this keeps
+the correct returned-context semantics without invoking a method through the
+unstable class boundary. Stage 3 also now explicitly hashes and exports
+`SIMPLE_BOOTSTRAP_STAGE4=0` and `SIMPLE_STAGE4_STREAMING_SURFACES=0`; before
+that boundary was explicit, one run incorrectly entered the Stage4 streaming
+surface lane and reported missing aliases.
+
+This final fail-closed phase-status correction is committed with source
+contracts but unverified because the third continuation build exhausted the
+session's mandatory three-cycle cap.
