@@ -14,10 +14,19 @@ files, 100% of the corpus, scored for VTM001/VTM002 and SHADOW/NOSRC._
 | 2 — needle matches only a comment | see `comment_cheat_spec_census_2026-08-09.md` | — | — |
 
 The `scripts/check/census-spec-vacuity.spl` driver was run over the whole
-corpus in parallel as corroboration; its index phase alone exceeds 10 minutes
-under the interpreter fallback (see the O(n²) note below), which is why the
-scoring above was carried out on an independently-controlled path rather than
-blocked on it. Both scorers implement the same published rules and were each
+corpus in parallel as corroboration. **It never produced a verdict.** Four
+attempts all died inside `build_kind_index`, the longest at 740 s, `setsid`-
+detached with `SIMPLE_TIMEOUT_SECONDS=0` — output stopped at 7 lines (the two
+control lines and the JIT-fallback banner) with **no `REPORT --` and no
+`ERROR --`**. That is the shape this repo has been bitten by before: a run that
+looks like "0 findings" is really a run that scored nothing. Always read the
+verdict line and the exit code; 7 lines of banner is not a result.
+
+So **as of this census the driver cannot complete a whole-corpus scan**, which
+is why the scoring above was carried out on an independently-controlled path
+rather than blocked on it. That is a defect in the driver, not a property of
+the corpus, and it is what the O(n²) note below is about — fixing the index
+is the prerequisite for the driver ever being usable as a gate. Both scorers implement the same published rules and were each
 validated against a planted positive control before being trusted.
 
 ## What this census is, and what it is not
