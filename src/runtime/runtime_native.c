@@ -2682,6 +2682,17 @@ int64_t rt_string_concat(int64_t left, int64_t right) {
     }
     if (!a || !b) return rt_core_nil();
 
+    /* a->len + b->len can wrap uint64_t for adversarial/corrupt inputs. A
+     * wrapped small `len` still succeeds malloc (so the `!out` check below
+     * never fires) but the memcpy calls below still copy the ORIGINAL
+     * un-wrapped a->len/b->len bytes, writing far past the undersized
+     * allocation and corrupting whatever heap object follows it. Reject
+     * loudly via the file's established unrecoverable-error convention
+     * (spl_panic, see rt_panic/panic above) instead of truncating or
+     * returning a plausible-looking nil. */
+    if (a->len > UINT64_MAX - b->len) {
+        spl_panic("rt_string_concat: length overflow");
+    }
     uint64_t len = a->len + b->len;
     RtCoreString* out = (RtCoreString*)malloc(sizeof(RtCoreString) + (size_t)len + 1);
     if (!out) return rt_core_nil();
