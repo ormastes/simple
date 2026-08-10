@@ -613,7 +613,7 @@ impl MirLowering:
                     val let_payload: i64 = rt_enum_payload(stmt_kind_value)
                     val let_symbol: SymbolId = rt_tuple_get(let_payload, 0)
                     val let_symbol_id = mir_stmt_symbol_id_value(let_symbol)
-                    val let_type: HirType? = rt_tuple_get(let_payload, 1)
+                    val let_type: HirType = rt_tuple_get(let_payload, 1)
                     val let_init: HirExpr = rt_tuple_get(let_payload, 2)
 
                     if let_symbol_id >= 0:
@@ -649,46 +649,17 @@ impl MirLowering:
                                     case _:
                                         pass
                             return
-                        val mir_type = match let_type:
-                            case Some(type_value):
-                                match type_value.kind:
-                                    case HirTypeKind.Infer(_, _): MirType.i64()
-                                    case _: self.lower_type(type_value)
-                            case nil:
-                                MirType.i64()
+                        val mir_type = match let_type.kind:
+                            case HirTypeKind.Infer(_, _): MirType.i64()
+                            case _: self.lower_type(let_type)
 
                         var init_local = self.lower_expr(let_init)
-                        match let_type:
-                            case Some(declared_type):
-                                # The staged native lane can preserve the
-                                # optional discriminant while dropping its
-                                # struct payload after an earlier match of the
-                                # same flat optional. Never read `.kind` until
-                                # the payload itself is proven non-nil.
-                                if declared_type != nil:
-                                    match declared_type.kind:
-                                        case HirTypeKind.Optional(_):
-                                            init_local = self.ensure_option_handle(init_local, declared_type)
-                                        case HirTypeKind.Any:
-                                            # any_slot_holds_untagged_scalar_2026-08-05
-                                            # (pure-Simple parity gap): a scalar
-                                            # (bool/i64/f64) stored into an
-                                            # `Any`-typed local must be tagged
-                                            # into a RuntimeValue, exactly like
-                                            # the proven dict-key/array-element
-                                            # sites (literals.spl:79,108,163,174)
-                                            # already do -- otherwise `.to_text()`
-                                            # and `==` on the binding misread the
-                                            # raw bits. box_runtime_value is a
-                                            # no-op for an already-tagged/str/
-                                            # array/dict local (see its own
-                                            # is_runtime_value_local guard), so
-                                            # this is safe to call unconditionally
-                                            # here.
-                                            init_local = self.box_runtime_value(init_local)
-                                        case _:
-                                            ()
-                            case nil:
+                        match let_type.kind:
+                            case HirTypeKind.Optional(_):
+                                init_local = self.ensure_option_handle(init_local, let_type)
+                            case HirTypeKind.Any:
+                                init_local = self.box_runtime_value(init_local)
+                            case _:
                                 ()
                         val annotated_narrow_int = match mir_type.kind:
                             case MirTypeKind.I8 | MirTypeKind.U8 | MirTypeKind.I16 | MirTypeKind.U16 | MirTypeKind.I32 | MirTypeKind.U32: true
@@ -696,7 +667,7 @@ impl MirLowering:
                         val annotated_float = match mir_type.kind:
                             case MirTypeKind.F32 | MirTypeKind.F64: true
                             case _: false
-                        if let_type != nil and (annotated_narrow_int or annotated_float):
+                        if (annotated_narrow_int or annotated_float):
                             var cast_builder = self.builder
                             init_local = cast_builder.emit_cast(mir_operand_copy(init_local), mir_type)
                             self.builder = cast_builder
@@ -794,7 +765,7 @@ impl MirLowering:
                             val annotated_is_dict = match mir_type.kind:
                                 case MirTypeKind.Dict(_, _): true
                                 case _: false
-                            if let_type != nil and annotated_is_dict:
+                            if annotated_is_dict:
                                 mir_type
                             else:
                                 self.local_mir_type_of(init_local) ?? mir_type
@@ -893,11 +864,7 @@ impl MirLowering:
                                     val init_hir_type = found_init_hir_type ?? HirType(kind: HirTypeKind.Error, span: span)
                                     self.remember_local_hir_type(local.id, init_hir_type, self.local_hir_type_isolation_state(init_local.id), self.local_hir_type_resource_state(init_local.id))
                                 else:
-                                    match let_type:
-                                        case Some(declared_type):
-                                            self.remember_local_hir_type(local.id, declared_type, 0, 0)
-                                        case nil:
-                                            ()
+                                    self.remember_local_hir_type(local.id, let_type, 0, 0)
                                 # Bug (array-of-structs field misread), CONFLICT-FLAG
                                 # (mir_lowering_stmts.spl is fenced, touched per the
                                 # fence rule's "CONFLICT-FLAG if must touch"
