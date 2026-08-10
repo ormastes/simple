@@ -8833,26 +8833,42 @@ int rt_file_move(const uint8_t* src_ptr, uint64_t src_len,
     return rename(src, dst) == 0 ? 1 : 0;
 }
 
-char* rt_env_cwd(void) {
-    return rt_getcwd();
+/* () -> RuntimeValue, per runtime_sffi.rs:1773 `RuntimeFuncSpec::new(
+ * "rt_env_cwd", &[], &[I64])`.  The canonical Rust definition
+ * (sffi/env_process.rs:282) returns a RuntimeValue too.  This copy used to
+ * return the raw malloc'd `char*` out of rt_getcwd(); the caller decoded that
+ * heap address as a tagged value and the runtime's own handle validator
+ * rejected it ("probable compiler/FFI ABI mismatch"), so a perfectly good cwd
+ * read back as garbage/empty -- see the rt_file_read_text sibling. */
+int64_t rt_env_cwd(void) {
+    char* cwd = rt_getcwd();
+    /* RT_NIL == 3 (TAG_SPECIAL, payload 0); == RuntimeValue::NIL. */
+    if (!cwd) return 3;
+    int64_t result = rt_string_new((const uint8_t*)cwd, (uint64_t)strlen(cwd));
+    free(cwd);
+    return result;
 }
 
-const char* rt_platform_name(void) {
+/* () -> RuntimeValue, per runtime_sffi.rs:1791.  Used to return a pointer into
+ * .rodata: not merely untagged but not even 8-aligned, so the returned word
+ * carried a nonsense tag (observed tag=4). */
+int64_t rt_platform_name(void) {
 #if defined(_WIN32)
-    return "windows";
+    const char* name = "windows";
 #elif defined(__APPLE__)
-    return "macos";
+    const char* name = "macos";
 #elif defined(__FreeBSD__)
-    return "freebsd";
+    const char* name = "freebsd";
 #elif defined(__linux__)
-    return "linux";
+    const char* name = "linux";
 #elif defined(__illumos__)
-    return "illumos";
+    const char* name = "illumos";
 #elif defined(__sun) && defined(__SVR4)
-    return "solaris";
+    const char* name = "solaris";
 #else
-    return "unknown";
+    const char* name = "unknown";
 #endif
+    return rt_string_new((const uint8_t*)name, (uint64_t)strlen(name));
 }
 
 static int rt_core_file_write_data(

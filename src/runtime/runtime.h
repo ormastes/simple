@@ -678,14 +678,17 @@ void        spl_env_set(const char* key, const char* value);
 bool        rt_env_set(const uint8_t* key, uint64_t key_len, const uint8_t* value, uint64_t value_len);
 bool        rt_lexer_source_set(const uint8_t* source, uint64_t source_len);
 int64_t     rt_lexer_source_slice(int64_t start, int64_t end);
-const char* rt_platform_name(void);
+/* -> RuntimeValue (I64), per runtime_sffi.rs:1791. NOT a C string. */
+int64_t     rt_platform_name(void);
 int64_t     rt_term_enable_ansi(void);
 int64_t     rt_path_join(const uint8_t* left, uint64_t left_len, const uint8_t* right, uint64_t right_len);
 
 /* ===== Cross-Platform System Functions ===== */
 
 char*    rt_getcwd(void);
-char*    rt_env_cwd(void);
+/* -> RuntimeValue (I64), per runtime_sffi.rs:1773. NOT a C string;
+ * use rt_getcwd() above for the C-string form. */
+int64_t  rt_env_cwd(void);
 bool     rt_is_dir(const char* path);
 bool     rt_rename(const char* src, const char* dst);
 void     rt_sleep_ms_native(int64_t ms);
