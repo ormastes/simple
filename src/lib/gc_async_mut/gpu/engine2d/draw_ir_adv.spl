@@ -1451,7 +1451,7 @@ fn _engine2d_embed_offscreen_acquire(
 # offset_x/offset_y are 0 since the surface origin IS the batch origin).
 # Engine2D is value-copied across this free-function boundary (see
 # _engine2d_draw_ir_render_box), so callers reassign the typed outcome engine.
-fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand], offsets: [i32], images: [Engine2dResolvedDrawIrImage], blend_images: bool, metal_device_glass_required: bool, active_clip: DrawIrRect, css_background_pixel_work_budget: i64, material_execution_counts: [i64], reset_surface: bool = false, image_xy: [i64] = []) -> Engine2dDrawIrRenderOutcome:
+fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand], offsets: [i32], images: [Engine2dResolvedDrawIrImage], blend_images: bool, metal_device_glass_required: bool, active_clip: DrawIrRect, css_background_pixel_work_budget: i64, material_execution_counts: [i64], reset_surface: bool = false, image_xy: [i64] = [], engine_owner: [Engine2D] = []) -> Engine2dDrawIrRenderOutcome:
     var eng = engine
     var offset_x: i32 = 0
     var offset_y: i32 = 0
@@ -1775,6 +1775,8 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
         material_execution_counts[3] = metal_device_glass_unfulfilled_count.to_i64()
         material_execution_counts[4] = rendered.to_i64()
         material_execution_counts[5] = skipped.to_i64()
+    if engine_owner.len() > 0:
+        engine_owner[0] = eng
     _engine2d_draw_ir_render_outcome(
         eng,
         rendered,
@@ -1944,7 +1946,7 @@ fn _engine2d_draw_ir_parent_material_padding(batch: DrawIrBatch) -> i32:
 # today's exact direct translate+clip behavior — this is the load-bearing
 # backward-compatibility path: no regression for callers that never opted
 # into a real embedded surface.
-fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch, images: [Engine2dResolvedDrawIrImage], depth: i32, allow_parent_image: bool, css_background_pixel_work_budget: i64, batch_execution_counts: [i64], visual_key: text, batch_offsets: [i32], image_xy: [i64] = []) -> Engine2dDrawIrRenderOutcome:
+fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch, images: [Engine2dResolvedDrawIrImage], depth: i32, allow_parent_image: bool, css_background_pixel_work_budget: i64, batch_execution_counts: [i64], visual_key: text, batch_offsets: [i32], image_xy: [i64] = [], engine_owner: [Engine2D] = []) -> Engine2dDrawIrRenderOutcome:
     var eng = engine
     # Preserve the nested Draw IR struct layout across the native
     # free-function boundary. Native inference has historically treated an
@@ -2148,6 +2150,7 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
         if batch_offsets.len() >= 2:
             direct_offsets[0] = batch_offsets[0]
             direct_offsets[1] = batch_offsets[1]
+        var command_engine_owner: [Engine2D] = [eng]
         val direct = _engine2d_draw_ir_render_commands(
             eng, commands, direct_offsets, images,
             blend_images, batch.backend_target == "metal",
@@ -2158,8 +2161,8 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
             else:
                 draw_ir_no_rect(),
             css_background_pixel_work_budget, direct_material_counts, false,
-            image_xy)
-        eng = direct.engine
+            image_xy, command_engine_owner)
+        eng = command_engine_owner[0]
         if batch_execution_counts.len() >= 6:
             batch_execution_counts[0] = direct_material_counts[0]
             batch_execution_counts[1] = direct_material_counts[1]
@@ -2169,6 +2172,8 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
             batch_execution_counts[5] = direct_material_counts[5]
         if apply_clip:
             eng.clear_clip()
+        if engine_owner.len() > 0:
+            engine_owner[0] = eng
         return _engine2d_draw_ir_render_outcome(
             eng,
             direct.rendered,
@@ -2518,11 +2523,12 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: 
         if profile_wm_batches:
             if profile_batch_index == 6:
                 _e2d_wm_command_profile_active = true
+        var batch_engine_owner: [Engine2D] = [eng]
         val outcome = _engine2d_draw_ir_render_batch_embedded(
             eng, batch, images, 0, allow_parent_image,
             css_background_pixel_work_remaining, batch_execution_counts,
-            prepared_visual_key, batch_offsets, image_xy)
-        eng = outcome.engine
+            prepared_visual_key, batch_offsets, image_xy, batch_engine_owner)
+        eng = batch_engine_owner[0]
         _e2d_wm_command_profile_active = false
         if profile_wm_batches:
             val profile_batch_finished_us = rt_time_now_micros()
