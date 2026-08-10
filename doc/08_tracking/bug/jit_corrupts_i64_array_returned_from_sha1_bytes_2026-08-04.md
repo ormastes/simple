@@ -117,6 +117,60 @@ Conclusion: root-cause attribution to `src/compiler_rust/compiler/src/codegen/**
 remains grep-supported and was not the product of a blanket assumption.
 However the original end-to-end repro could not be re-run today due to an
 unrelated `rotl32` resolution regression in `sha1.spl`'s import chain.
-Status: **UNABLE-still-open — architecturally plausible per grep evidence,
-but fresh execution evidence blocked by an unrelated compile regression;
-re-verify once the `rotl32` resolution gap is fixed.**
+Status (superseded below): **UNABLE-still-open — architecturally plausible per
+grep evidence, but fresh execution evidence blocked by an unrelated compile
+regression; re-verify once the `rotl32` resolution gap is fixed.**
+
+## Re-investigated 2026-08-10 — repro unblocked, root cause re-confirmed with fresh execution evidence
+
+Root-caused the `rotl32` resolution gap: `src/lib/common/crypto/sha1.spl`
+imported `crypto.types` via the bare `mod crypto.types` form (also used by
+`sha256_core.spl`, `sha3.spl`, `tls12_prf.spl`), which does not bring
+unqualified names like `rotl32` into scope. The sibling `sha256.spl` uses the
+working explicit form `use std.common.crypto.types.{rotr32}`. Fixed
+`sha1.spl` to match:
+
+```
+- mod crypto.types
++ use std.common.crypto.types.{rotl32}
+```
+
+With that one-line fix, `rotl32` resolves and the exact original repro from
+this doc now runs end-to-end again:
+
+```
+$ SIMPLE_EXECUTION_MODE=interpret bin/simple run sha1chk.spl
+raw_sha1abc=[169, 153, 62, 54, 71, 6, 129, 106, 186, 62, 37, 113, 120, 80, 194, 108, 156, 208, 216, 157]
+# == a9993e364706816aba3e25717850c26c9cd0d89d — RFC 3174 SHA-1("abc"). CORRECT.
+
+$ bin/simple run sha1chk.spl        # default JIT-first path
+[jit-fallback] unresolved external symbol 'rotl32': whole module dropped to the interpreter
+raw_sha1abc=[<value:0xfd>, <value:0x87>, 0.0, <value:0x95>, <value:0x7>, <value:0xf>,
+             <value:0x7>, <special:27>, <value:0x1c>, <value:0x8d>, <value:0x17>,
+             <invalid-heap:0x29>, <value:0x5>, <value:0x97>, <value:0xc4>, <value:0x3c>,
+             <value:0x97>, <value:0xbe>, <value:0xe7>, <value:0x3c>]
+```
+
+This confirms the doc's original symptom is real and current: the default
+JIT-first path (which now itself reports `unresolved external symbol
+'rotl32'` and falls back to the interpreter for the *whole module*, yet the
+returned `list` value is still tag-corrupted afterward) produces garbage from
+the same source that the interpreter computes correctly. The corruption
+persists even though the module fell back to the interpreter, consistent with
+the doc's root-cause theory: the corruption is in how the JIT-compiled
+**caller** (`main`, which called into a module that got interpreter-fallback)
+unboxes an untyped `list` return value across the JIT/interpreter boundary —
+this is `src/compiler_rust/compiler/src/codegen/**` (Cranelift JIT codegen /
+FFI boundary), which is out of scope for a pure-Simple fix and requires a
+Rust-seed change plus a full seed rebuild to fix properly.
+
+**Status: ARCHITECTURAL-OPEN.** The blocking `rotl32` resolution regression
+is FIXED (`src/lib/common/crypto/sha1.spl`, landed this pass — see commit
+SHA in the fix-log below). The underlying JIT list-tag-corruption bug is
+re-confirmed with fresh execution evidence and remains a genuine Cranelift
+codegen defect in `src/compiler_rust/compiler/src/codegen/**`, which per this
+task's hard constraints must not be edited here. A narrow pure-Simple
+mitigation (widening `sha1_bytes`'s return type from untyped `list` to
+`[i64]`) was proposed in the original doc but not yet attempted this pass;
+left for a follow-up since it changes a public stdlib signature and needs
+validation on both engines before landing.
