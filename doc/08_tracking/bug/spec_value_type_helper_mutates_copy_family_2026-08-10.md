@@ -38,7 +38,7 @@ Scanner: helpers `fn f(p: <UpperType>, ...)` whose body mutates `p`,
 | `test/05_perf/graphics_2d/report_spec.spl` + `test/perf/…` | `TFB` (spec-local) | 17/18 — 1 RED | real trap, 17 blocks VACUOUS, FIXED (`struct`→`class`) |
 | `test/01_unit/lib/service/lease_grant_spec.spl` + `test/unit/…` | `LeaseManager` (spec-local) | 4/10 — 6 RED | real trap, LEFT RED (see below) |
 | `test/01_unit/lib/service/request_queue_spec.spl` + `test/unit/…` | `RequestQueue` (spec-local) | 2/8 — 6 RED | real trap, LEFT RED (see below) |
-| `test/01_unit/app/sj/busy_contract_spec.spl` + `test/unit/…` | `LeaseManager` (spec-local) | not run | same shape, suspect |
+| `test/01_unit/app/sj/busy_contract_spec.spl` + `test/unit/…` | `LeaseManager` (spec-local) | 3/6 — 3 RED | real trap, LEFT RED (same cause) |
 | `test/01_unit/compiler/interpreter/self_field_assign_spec.spl` + twin | `MutableStructDictHolder` | — | INTENTIONAL: the spec exists to characterise this exact semantics |
 
 Not affected (receiver is a `class`, i.e. a reference): `CrsCell`,
