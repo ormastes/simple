@@ -81,9 +81,17 @@ input remains `port-unavailable`.
 
 The Vulkan adapter uses the same physical-device identity discipline. Its GPU
 submit, fence, and readback ports expose one QRB2210 boot/device/generation
-handle, and each kernel receipt must correlate the exact Vulkan device, queue,
-fence or readback handle plus submission/frame identity. A boolean fence result
-or a caller-selected submission ID cannot promote completion.
+handle. `os.port.qrb2210_adreno_vulkan_kernel_transport` is the single
+fail-closed owner between those ports and the SimpleOS Adreno kernel I/O
+boundary. It binds the current boot and device to nonzero firmware, MMU, cache,
+physical/logical Vulkan device, queue, command-pool, fence, and device-readback
+handles. Submission IDs must increase, fence completion must name the exact
+submitted command buffer, and readback is admitted only after that exact fence
+and with a fresh matching frame. Any cross-boot, stale-generation, substituted
+resource, replayed submission, or mismatched readback is returned incomplete.
+The owner does not set capability status and contains no DrawIR or Engine2D
+render path; shared DrawIR/Engine2D/Qualcomm Vulkan remains the only producer
+route.
 
 The display-side primitive adapter is
 `os.port.qrb2210_drm_kms_display_provider`. It accepts only the physical primary
@@ -114,6 +122,7 @@ from the eventual physical composition root and live-board runner.
 
 This host had no authorized ADB device on 2026-08-09, so no live board claim is
 made and the live runner was not executed against hardware. Remaining external
-work is the QRB2210 SimpleOS boot/display/Adreno firmware, MMU/cache, queue and
-fence bring-up, followed by a real transcript and capture from the physical
-board.
+work is the QRB2210 SimpleOS boot/display and the lower Adreno kernel I/O that
+mints the firmware/MMU/cache/queue/command/fence/readback receipts consumed by
+the transport owner, followed by a real transcript and capture from the
+physical board.
