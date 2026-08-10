@@ -1,96 +1,73 @@
-# jit lane: a nested extern call used as an extern ARGUMENT is marshalled raw, arriving as Nil/Bool/garbage
+# jit lane: a nested extern call used as an extern ARGUMENT marshals as Nil/Bool/garbage
 
 *(Filed as "`rt_string_data(text)` evaluates to Nil". That title named the
 symptom, not the defect — `rt_string_data` is fine in isolation in both lanes.
 Kept as the canonical path for inbound links.)*
 
 - **Date:** 2026-08-10
-- **Status:** **FIXED** 2026-08-10 in the jit lane. Fenced by
+- **Status:** **NOT REPRODUCIBLE on current `main`.** It reproduces only on the
+  **stale deployed seed** `bin/release/x86_64-unknown-linux-gnu/simple`
+  (built 2026-08-09 04:50). A seed built from current `main` does not exhibit
+  it in either lane. Fenced going forward by
   `scripts/check/check-jit-nested-extern-arg-marshal.shs`.
-  Two adjacent gaps found on the way are left OPEN and RED below.
-- **Lane:** `jit` only. `interpreter` was always correct. The AOT/`.smf` lane
-  cannot reach this path at all (see OPEN 2).
-- **Class:** engine divergence / silent extern-call failure.
+- **Lane:** `jit` only on the stale seed. `interpreter` was always correct. The
+  AOT/`.smf` lane cannot reach this path at all (OPEN 2).
+- **Class:** engine divergence / silent extern-call failure — plus a
+  **measurement trap**, which is the more useful half of this entry.
 
-## Reproduction
+## Reproduction (stale deployed seed only)
 
-The filed reproduction is real, but the diagnosis in it ("suspect the `text`-typed
-*argument* marshal") was wrong. `rt_string_data` on its own is correct in both
-lanes:
+`rt_string_data` on its own is correct in both lanes, on every binary tested:
 
 ```
-$ cat /tmp/q23/b.spl
 extern fn rt_string_data(value: text) -> i64
-extern fn rt_string_len(value: text) -> i64
-fn main():
-    val line = "Q23B_PAYLOAD"
-    print "ptr_nonzero={rt_string_data(line) != 0} len={rt_string_len(line)}"
-
-interpreter: ptr_nonzero=true len=12
-jit:         ptr_nonzero=true len=12
+val line = "Q23B_PAYLOAD"
+print "ptr_nonzero={rt_string_data(line) != 0} len={rt_string_len(line)}"
+  interpreter: ptr_nonzero=true len=12
+  jit:         ptr_nonzero=true len=12
 ```
 
 The discriminator is **nesting an extern call inside another extern call's
 argument list**:
 
 ```
-extern fn rt_simpleos_log_emit(level: i64, ptr: i64, len: i64) -> bool
-
 val a = rt_simpleos_log_emit(3, rt_string_data(line), rt_string_len(line))  # nested
-val p = rt_string_data(line)
-val n = rt_string_len(line)
+val p = rt_string_data(line); val n = rt_string_len(line)
 val b = rt_simpleos_log_emit(3, p, n)                                       # hoisted
 ```
 
-jit lane, on `bin/simple` before the fix:
+On `bin/simple` (the deployed seed), jit lane:
 
 ```
 ERROR simple_compiler::interpreter_sffi: 806: rt_interp_call error:
   Runtime("rt_simpleos_log_emit: argument 2 must be an int, got Nil")
 ```
 
-…for the **nested** form only; the **hoisted** form is clean. A second run of a
-differently shaped fixture reported `got Bool(true)` for the same slot, and a
-third reported `argument 1` rather than `argument 2` — the decoded value depends
-on the bit pattern of whatever raw scalar landed in the slot, so the symptom is
-not stable. `Nil` is one of several faces of one defect.
+for the **nested** form only. Other fixtures of the same shape reported
+`got Bool(true)`, and `argument 1` rather than `argument 2` — the decoded value
+follows the bit pattern of whatever raw scalar landed in the slot, so `Nil` is
+one face of one defect, not the defect.
 
-The interpreter lane produces no error for any of these forms.
+**The same fixtures on a seed built from current `main` are clean in both
+lanes.** Whatever fixed it landed between the deployed seed's build and now; it
+is not in this session's changes.
 
-## Root cause
+## The mechanism the symptom points at
 
-`src/compiler_rust/compiler/src/codegen/instr/core.rs`, `compile_interp_call`.
+Recorded because it explains the symptom exactly and is worth knowing if this
+recurs. `src/compiler_rust/compiler/src/codegen/instr/core.rs`,
+`compile_interp_call`: the argv-boxing loop picks a boxing helper from
+`ctx.vreg_types` and stores **raw** on a miss (`_ => {}`), while the dest block
+40 lines below states in its own comment that *"call dests carry no entry in
+vreg_types"*. A nested call's dest therefore has no type entry, takes the raw
+arm, and `interp_call_handler`'s `runtime_to_value` decodes the plain integer as
+a NaN-box pattern.
 
-The argv-boxing loop (`core.rs:860-887`) decides how to store each argument by
-looking up `ctx.vreg_types`:
-
-```rust
-match ctx.vreg_types.get(arg).copied() {
-    Some(TypeId::BOOL)  => arg_val = call_runtime_1(.., "rt_value_bool",  arg_val),
-    Some(TypeId::I64 | TypeId::U64)
-                        => arg_val = call_runtime_1(.., "rt_value_int",   arg_val),
-    Some(TypeId::F64)   => arg_val = call_runtime_1(.., "rt_value_float", arg_val),
-    _ => {}                       // <-- stores the value RAW
-}
-builder.ins().store(MemFlags::new(), arg_val, argv, (index * 8) as i32);
-```
-
-and the dest-handling block 40 lines below states the invariant that breaks it,
-in its own comment (`core.rs:900`):
-
-> *"Call dests carry no entry in vreg_types, so the SFFI naming convention is
-> the reliable signal here."*
-
-So for `rt_string_data(line)` the dest vreg is unboxed to a plain `i64` via
-`rt_value_raw_i64` and inserted into `vreg_values` — **with no `vreg_types`
-entry**. When that vreg is then used as an argument, the loop finds nothing,
-takes `_ => {}`, and stores the raw integer into argv. `interp_call_handler`
-(`interpreter_sffi.rs:679`) runs `runtime_to_value` over the slot, which decodes
-the raw scalar as whatever NaN-box pattern its bits match — `Nil`, `Bool(true)`,
-or an unrelated integer.
-
-The two halves of one function disagreed about an invariant, and neither side
-was wrong on its own terms.
+**This was NOT confirmed to be the live cause**, and the obvious repair
+(recording the unboxed type on the dest) was **measured to be a no-op**: a build
+with it and a build without it are both clean. It is not in `main` — see the
+correction note below. If this ever reproduces again, start here, but prove it
+before claiming it.
 
 ## Why it was invisible
 
@@ -103,83 +80,60 @@ bool rt_simpleos_log_emit(int64_t level, int64_t msg_ptr, int64_t msg_len) {
 }
 ```
 
-A hard `return false`, with the arguments explicitly discarded. So the hosted
+A hard `return false` with the arguments explicitly discarded, so the hosted
 path **could not distinguish** "the marshal delivered a real string and the hook
 is stubbed" from "the marshal handed me garbage". Both return `false`, the
-Simple side takes its fallthrough in `logger.spl`, and the log line still
-appears. Every existing logging check was satisfied.
+Simple side takes its fallthrough in `logger.spl`, the log line still appears,
+and every logging check stays green. **That is the real defect that outlived the
+marshal bug**, and it is what this change actually fixes.
 
-## Fix — JIT marshalling code, not `.spl`
+## What this change does
 
-This one genuinely lives in the Rust JIT codegen, not the Simple layer, so per
-the repo's fix-in-`.spl` rule: **stating that explicitly rather than forcing a
-`.spl` workaround.** There is no `.spl` change that could repair it — hoisting
-the nested calls into locals in `logger.spl` would paper over this one call site
-and leave the defect live for every other caller.
-
-`core.rs` now records the unboxed type on the dest, restoring the invariant the
-boxing loop depends on:
-
-```rust
-let v = call_runtime_1(ctx, builder, "rt_value_raw_i64", result);
-ctx.vreg_types.entry(*d).or_insert(TypeId::I64);
-```
-
-and the same for the `rt_value_as_float` arm (`TypeId::F64`). The kept-boxed arm
-deliberately records nothing — those values *are* `RuntimeValue`s, so the loop's
-raw store is already correct there. `or_insert` is used rather than `insert` so a
-real MIR-derived type is never overwritten.
-
-This fixes every nested-extern argument, not just the logging call shape.
-
-## Observability — `runtime_log_hosted.c`
-
-The C stub gains a **default-off, level-gated** probe
-(`SIMPLE_LOG_HOSTED_PROBE=1`) that writes what it actually received to fd 2:
+`runtime_log_hosted.c` gains a **default-off, level-gated** probe
+(`SIMPLE_LOG_HOSTED_PROBE=1`) that writes what the hook actually received to fd 2:
 
 ```
 [HOSTED-LOG-PROBE] emit level=7 len=20 payload=Q23B_MARSHAL_PAYLOAD
+[HOSTED-LOG-PROBE] emit level=9 len=0 payload=<UNREADABLE>      # null ptr
 ```
 
-and `<UNREADABLE>` when the `(ptr,len)` pair is null or implausible. **The return
-value is unchanged in both modes**, so the hosted contract and every existing
-logging check are untouched. This exists because the bare `return false` is the
-reason the defect survived: without it, no check can assert anything stronger
-than "an error message did not appear", and error-absence is exactly the kind of
-assertion that passes on broken code.
+The return value is unchanged in both modes, so the hosted contract and every
+existing logging check are untouched. Without it, no check can assert anything
+stronger than "an error message did not appear" — and error-absence is exactly
+the assertion that passes on broken code.
+
+No compiler change ships with this. Per the repo rule against unused code, the
+`core.rs` edit that could not be shown to do anything was removed rather than
+left in as decoration.
 
 ## Board-runnable — SCOPE OF CLAIM
 
 Per `.claude/rules/board-runnable.md`, stating the limit rather than implying
 coverage:
 
-- **All evidence here is hosted x86_64 Linux**, `interpreter` and `jit` engines.
-- **No board evidence, and no QEMU evidence, was collected.** No claim is made
+- All evidence is **hosted x86_64 Linux**, `interpreter` and `jit` engines.
+- **No board evidence and no QEMU evidence was collected.** No claim is made
   about the physical dev board.
-- The original filing said this "would silently divert every log line away from
-  the device" on a jit baremetal build. **That configuration does not exist in
-  this repo's build graph**: `src/compiler/70.backend/baremetal/` contains no
-  cranelift path, so a board build is AOT-lowered via LLVM and calls
+- The filing's claim that this "would silently divert every log line away from
+  the device" on a jit baremetal build is **withdrawn**: that configuration does
+  not exist in this build graph. `src/compiler/70.backend/baremetal/` contains no
+  cranelift path, so a board build is AOT-lowered and calls
   `src/runtime/startup/baremetal/runtime_log.c` as a direct C symbol, never
-  through `rt_interp_call`. The board-loss framing was speculative and is
-  withdrawn.
-- The defect is nonetheless real and worth fixing on its own terms: the hosted
-  **jit lane is the default developer and spec lane**, and it was silently
-  corrupting every nested-extern argument in the process.
-- What would be needed for a genuine board claim: an AOT/baremetal build that
-  actually links `runtime_log.c` and a serial transcript showing the payload on
-  the UART. That is blocked today by OPEN 2 below.
+  through `rt_interp_call`.
+- A genuine board claim needs an AOT/baremetal build that links `runtime_log.c`
+  plus a serial transcript showing the payload on the UART. That is blocked
+  today by OPEN 2.
 
 ## OPEN 1 — the LLVM lane does not box argv at all
 
 `src/compiler_rust/compiler/src/codegen/llvm/functions/calls.rs:2913-2930` builds
 the same argv array with `coerce_value_to_type(value, i64)` and a raw
-`build_store`, with **no boxing switch whatsoever** — not even the partial one
+`build_store`, with **no boxing switch at all** — not even the partial one
 cranelift has. Whether that is correct depends on an LLVM-lane value
-representation this change did not audit. Left OPEN and unmeasured rather than
+representation this session did not audit. Left OPEN and unmeasured rather than
 asserted either way.
 
-## OPEN 2 — `rt_simpleos_log_emit` is unresolvable in the AOT/`.smf` lane (RED)
+## OPEN 2 — `rt_simpleos_log_emit` is undefined in the AOT/`.smf` lane (RED)
 
 ```
 $ bin/simple compile /tmp/q23/aot.spl -o /tmp/q23/aot.smf     # succeeds
@@ -190,9 +144,16 @@ error: load failed: relocation failed
 ```
 
 The symbol is not exported to the SMF loader, so the third lane cannot execute
-this path at all. Pre-existing, unrelated to this fix, and left RED. It is also
-the reason the board-evidence path above is currently blocked: the AOT lane is
-the one a board build uses.
+this path at all. Pre-existing and left RED. It is also what blocks the board
+evidence path above, since the AOT lane is the one a board build uses.
+
+## OPEN 3 — the deployed seed carries a marshal defect `main` does not (RED)
+
+`bin/simple` reproduces this; a seed built from `main` does not. Every developer
+and every check running on the deployed binary is therefore measuring a compiler
+that differs from `main` in at least this behaviour. Redeploy is blocked by the
+Stage 3 self-host blocker (`.claude/rules/bootstrap.md`). Filed here so the
+divergence is at least written down.
 
 ## Check
 
@@ -202,51 +163,52 @@ the broken code, because the Simple-side fallthrough already prints an
 unlabelled line from another layer, which is precisely how this hid.
 
 - **payload positive** — `[HOSTED-LOG-PROBE] emit level=7 len=20
-  payload=Q23B_MARSHAL_PAYLOAD` must appear, proving the `(ptr,len)` pair
-  survived the marshal and points at the real bytes.
-- **discriminator** — a fixture passing a NULL pointer must make the probe print
-  `<UNREADABLE>`. Without it, both the payload assertion and the `<UNREADABLE>
-  absent` assertion are vacuous. If it does not fire the script exits **2**
-  (`ERROR — nothing was checked`), never PASS.
+  payload=Q23B_MARSHAL_PAYLOAD`, proving the `(ptr,len)` pair survived the
+  marshal and points at the real bytes.
+- **discriminator** — a NULL-pointer fixture must make the probe print
+  `<UNREADABLE>`, or the script exits **2** (`ERROR — nothing was checked`)
+  rather than PASS. Without it the payload assertion would be vacuous.
 - **negative control** — `<UNREADABLE>` absent from the real probe.
 - **signature controls** — `must be an int, got` and `rt_interp_call error`
   absent.
 - **lane control** — interpreter must agree with jit on every value.
-- **probe-off control** — no probe output without the env var, proving default-off.
-
-Measured on a purpose-built seed (`CARGO_TARGET_DIR=/tmp/q23/target`, private so
-the shared `src/compiler_rust/target` could not serve another session's
-artifact — see the measurement note below):
+- **probe-off control** — no probe output without the env var.
 
 ```
-PASS -- 16 assertion(s) checked across 5 probe(s)                      exit 0
+PASS -- 16 assertion(s) checked across 5 probe(s)      exit 0
 ```
 
-Negative evidence, same fixture, pre-fix `bin/simple`:
+Run against the **deployed** `bin/simple`, which predates the C probe, it exits
+**2** (`ERROR — nothing was checked (discriminator silent …)`) rather than
+reporting PASS. That is the fail-closed design working as intended: a binary
+that cannot answer the question must not be scored as if it had. The check
+becomes meaningful on the deployed binary only after a redeploy, which is
+blocked by OPEN 3.
 
-```
-ERROR simple_compiler::interpreter_sffi: 806: rt_interp_call error:
-  Runtime("rt_simpleos_log_emit: argument 2 must be an int, got Nil")     [jit]
-(no such error)                                                  [interpreter]
-```
+## CORRECTION — how this nearly shipped as a false fix
 
-A full revert-and-rebuild proof (delete the `or_insert` line, rebuild, re-run the
-check to a FAIL verdict) was started; the release link did not finish inside the
-session window. The before/after above is on the identical fixture and differs
-only by this change.
+Recorded in full because the trap is more valuable than the bug.
 
-### Measurement note — a stale shared artifact almost produced a false GREEN
+1. Two rebuild attempts used `-p simple_compiler`; the crate is
+   `simple-compiler`. **Cargo errored and built nothing, while the wrapper still
+   reported exit 0** (the trailing `echo`/`tail` masked cargo's status).
+2. `src/compiler_rust/target/release/simple` nevertheless held a binary newer
+   than `bin/simple`, built by a **concurrent session**. Running the fixture
+   against it showed the defect absent — which reads exactly like "my fix
+   works". Caught only by comparing the binary's mtime (08:39:26) with the
+   source edit (08:44:43).
+3. Rebuilt into a **private** `CARGO_TARGET_DIR` with a positive capability
+   probe (`strings | grep -c HOSTED-LOG-PROBE` = 1) to prove the binary really
+   contained the change. The check passed.
+4. **The revert-proof is what caught the rest.** Rebuilding with the `core.rs`
+   fix deleted, the check **still passed** (`PASS — 16 assertions`, exit 0) and
+   the nested fixture was still clean. So the change was a no-op and the
+   "fix" claim was false. It was removed from `main` in the following commit.
 
-The first two rebuild attempts in this session used `-p simple_compiler`; the
-crate is `simple-compiler`, so **cargo errored and built nothing** while the
-wrapper still exited 0. `src/compiler_rust/target/release/simple` nevertheless
-contained a *newer-than-`bin/simple`* binary built by a concurrent session, and
-running the fixture against it showed the defect absent — which reads exactly
-like "my fix works". It was caught only by comparing the binary's mtime
-(08:39:26) against the source edit (08:44:43). Every number above was
-re-measured afterwards on a private target dir with a positive capability probe
-(`strings | grep -c HOSTED-LOG-PROBE` = 1) confirming the binary really contains
-this change.
+Three lessons, all previously known and all re-learned the hard way here:
+a build wrapper's exit code is not cargo's; a shared `target/` can serve another
+session's artifact; and **a check that has not been shown to FAIL has not been
+shown to check anything.**
 
 ## Related
 

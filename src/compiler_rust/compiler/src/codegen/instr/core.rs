@@ -911,36 +911,10 @@ pub(crate) fn compile_interp_call<M: Module>(
         let value = if !keep_boxed_result
             && (ctx.vreg_types.get(d).copied() == Some(TypeId::F64) || interp_call_returns_f64(func_name))
         {
-            let v = call_runtime_1(ctx, builder, "rt_value_as_float", result);
-            // Record the unboxed type -- see the longer note on the i64 arm
-            // below for why the argv-boxing loop depends on this.
-            ctx.vreg_types.entry(*d).or_insert(TypeId::F64);
-            v
+            call_runtime_1(ctx, builder, "rt_value_as_float", result)
         } else if !keep_boxed_result && (is_extern_bridge || vreg_is_native_equality_scalar(ctx, *d)) {
-            let v = call_runtime_1(ctx, builder, "rt_value_raw_i64", result);
-            // RECORD the unboxed type. Call dests carry no entry in
-            // `vreg_types` (see the comment above), and the argv-boxing loop at
-            // the top of this function switches on exactly that map: with no
-            // entry it takes the `_ => {}` arm and stores the value into argv
-            // RAW. For a dest we just unboxed to a plain i64 that is wrong --
-            // `interp_call_handler` runs `runtime_to_value` over the slot and
-            // decodes the raw scalar as whatever NaN-box pattern its bits
-            // happen to match, so a nested extern call in an argument list
-            // arrives as Nil / Bool(true) / garbage rather than the integer.
-            //
-            //   rt_simpleos_log_emit(lvl, rt_string_data(s), rt_string_len(s))
-            //     -> "argument 2 must be an int, got Nil"
-            //
-            // which silently diverted every noalloc log line off its device
-            // sink in the jit lane. Recording the type here restores the
-            // invariant the boxing loop depends on, for every nested-extern
-            // argument, not just this one call shape.
-            // doc/08_tracking/bug/jit_rt_string_data_returns_nil_breaking_extern_calls_2026-08-10.md
-            ctx.vreg_types.entry(*d).or_insert(TypeId::I64);
-            v
+            call_runtime_1(ctx, builder, "rt_value_raw_i64", result)
         } else {
-            // Kept boxed: the value IS a RuntimeValue, so the argv loop's raw
-            // store is already correct. Deliberately no vreg_types entry.
             result
         };
         ctx.vreg_values.insert(*d, value);
