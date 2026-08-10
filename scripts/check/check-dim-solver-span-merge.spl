@@ -1,0 +1,59 @@
+# Runnable check for two dimension-solver defects (both fixed 2026-08-10):
+#
+#  1. `dim_constraints.spl` merged lexer spans via `e1.span.merge(e2.span)`.
+#     `DimExpr.span` is the LEXER `Span` (field `end_pos`), which has no `merge`;
+#     the call bound the unrelated diagnostics `Span::merge` (field `end`) by
+#     name, so EVERY dimension-mismatch diagnostic aborted instead of reporting.
+#     Fixed at 6 sites by using the lexer free function `span_merge`.
+#     Bug: doc/08_tracking/bug/dim_solver_mismatch_path_calls_span_merge_2026-08-10.md
+#
+#  2. `try_eval` never applied the substitution, so a solved dimension variable
+#     never evaluated to a constant.
+#     Bug: doc/08_tracking/bug/dim_solver_try_eval_ignores_substitution_2026-08-10.md
+#
+# Negative control: revert either fix and the corresponding leg FAILs.
+
+use compiler.hir.hir.{DimExpr, DimExprKind}
+use compiler.types.dim_constraints.*
+use compiler.frontend.core.lexer_types.{lex_span_new}
+
+var failures = 0
+
+fn check(name: text, ok: bool, detail: text):
+    if ok:
+        print("PASS " + name + " — " + detail)
+    else:
+        print("FAIL " + name + " — " + detail)
+        failures = failures + 1
+
+fn main():
+    # --- Leg 1: a dimension mismatch must REPORT, not abort ---
+    # Spans [10,14) and [20,26) must merge to [10,26).
+    var bad = DimSolver.new()
+    bad.add_equal(DimExpr(kind: DimExprKind.Literal(value: 4), span: lex_span_new(10, 14, 3, 5)),
+                  DimExpr(kind: DimExprKind.Literal(value: 8), span: lex_span_new(20, 26, 4, 1)),
+                  lex_span_new(10, 26, 3, 5))
+    val r = bad.solve()
+    check("mismatch-returns-err", not r.is_ok(), "solve() -> Err on 4 vs 8")
+    check("mismatch-emits-one-diagnostic", bad.errors.len() == 1,
+          "errors.len() = " + bad.errors.len().to_text())
+    if bad.errors.len() == 1:
+        val e = bad.errors[0]
+        check("mismatch-message", e.message == "dimension mismatch: expected 4, found 8",
+              "message = " + e.message)
+        check("merged-span", e.span.start == 10 and e.span.end_pos == 26,
+              "span start=" + e.span.start.to_text() + " end_pos=" + e.span.end_pos.to_text())
+
+    # --- Leg 2: try_eval must resolve through the substitution ---
+    var s = DimSolver.new()
+    val d = s.fresh_var(lex_span_new(0, 0, 1, 1))
+    s.unify(d, DimExpr(kind: DimExprKind.Literal(value: 16), span: lex_span_new(0, 0, 1, 1)))
+    val direct = s.try_eval(d)
+    check("try_eval-resolves-bound-var", direct.? and direct.unwrap() == 16,
+          "try_eval(d) = " + (if direct.?: direct.unwrap().to_text() else: "nil"))
+
+    if failures == 0:
+        print("VERDICT: PASS — 5 assertions checked, 0 failed")
+    else:
+        print("VERDICT: FAIL — " + failures.to_text() + " assertion(s) failed")
+        exit(1)
