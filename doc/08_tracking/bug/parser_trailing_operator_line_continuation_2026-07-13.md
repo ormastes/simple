@@ -2,7 +2,9 @@
 
 **ID:** parser_trailing_operator_line_continuation_2026-07-13
 **Filed:** 2026-07-13
-**Status:** OPEN — self-hosted dynload recurrence confirmed on 2026-07-23
+**Status:** OPEN — narrowed 2026-08-09/10, see "2026-08-09 re-triage" below: the
+multi-line-body form of this pattern is already fine; only a single-line body on
+the continuation line still reproduces.
 **Severity:** P2 — silently-confusing parse failure on a plausible/idiomatic form
 **Component:** compiler frontend / parser (both the deployed self-hosted `bin/simple`
 and the fresh Rust seed reject the same input)
@@ -66,3 +68,39 @@ are parsed as identifiers. A focused semantic regression and the smallest UFCS
 suppression for Array/Slice `join` are staged. A fresh bootstrap was not run
 because the three-cycle cap had already been reached; Stage 4 remains
 unqualified.
+
+## 2026-08-09 re-triage — bug narrows to single-line body after a continued condition
+
+Reproduced fresh with the seed (`bin/simple run`, `bin/release/x86_64-unknown-linux-gnu/simple`,
+current `bin/simple` deployment) against isolated repro files, binary-searching the
+doc's own minimal repro to find exactly which part still fails:
+
+- `if a or\n   b:\n    return true` — **multi-line indented body** — **PARSES FINE**.
+- `a and\n    b` as a bare trailing statement — **PARSES FINE**.
+- `if a or\n   b: return false` — **single-line body on the same source line as
+  the continuation** — **STILL FAILS**: `Unexpected token: expected expression,
+  found Dedent`. Confirmed this is independent of the `== None`/`== nil`
+  comparison in the original repro (a bare `bool` operand reproduces identically)
+  and independent of `and` vs `or`.
+
+So the fix already landed for `sfnt.spl`-style code (multi-line indented bodies)
+and for bare trailing-operator statements, but the parser still cannot handle a
+condition that spans lines AND resolves to a single-line (colon-suffixed,
+same-line) body. This is a narrower defect than the original filing described:
+the trailing-operator continuation itself works; what fails is specifically the
+lexer/parser's indent-tracking when the continuation's dedent-then-colon
+transitions straight into inline-statement mode instead of an indented block.
+
+**Not fixed this pass.** Root-causing this requires tracing the lexer's
+indent/dedent token stream across the continuation boundary in
+`src/compiler/10.frontend/core/lexer*.spl` and the `if`-statement grammar's
+single-line-body arm in `src/compiler/10.frontend/core/parser_stmts.spl`, then
+verifying no regression across the parser spec suite — a properly-scoped follow-up
+given this session's remaining verification budget only covered isolated repro
+files, not a parser-spec regression sweep. Left OPEN with this narrower
+characterization rather than guessing at a grammar fix.
+
+Repro files used (not checked in): `if a or / b: return false` style single-line
+variants confirmed failing; `if a or / b:\n return true` (indented block) and
+bare `a and / b` confirmed passing, on `bin/simple run` with the current
+`bin/release/x86_64-unknown-linux-gnu/simple` seed.
