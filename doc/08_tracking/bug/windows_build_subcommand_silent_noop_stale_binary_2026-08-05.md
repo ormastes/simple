@@ -1,7 +1,11 @@
 # `bin/simple build` (incl. `build bootstrap`) silently no-ops on native Windows
 
 Date: 2026-08-05
-Status: OPEN
+Status: OPEN — architectural (needs a native-Windows or WSL environment to
+redeploy/cross-build; this Linux dev environment has neither a Windows host
+nor `bin/release/x86_64-pc-windows-msvc/simple.exe` present at all, so the
+binary-staleness claim cannot be independently re-run here; re-confirmed
+2026-08-10)
 Area: bootstrap / deploy / CLI surface (Windows)
 
 ## Symptom
