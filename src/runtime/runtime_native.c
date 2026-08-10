@@ -7567,22 +7567,6 @@ int64_t rt_for_iterable(int64_t collection) {
 
 static char* rt_core_string_to_cpath(int64_t value);
 
-const char* rt_file_read_text(const char* path) {
-    return spl_file_read(path);
-}
-
-int64_t rt_file_read_text_rv(int64_t path_value) {
-    char* path = rt_core_string_to_cpath(path_value);
-    if (!path) return rt_string_new(NULL, 0);
-    char* content = spl_file_read(path);
-    free(path);
-    if (!content) return rt_string_new(NULL, 0);
-    size_t len = strlen(content);
-    int64_t result = rt_string_new((const uint8_t*)content, (uint64_t)len);
-    free(content);
-    return result;
-}
-
 /* ---------------------------------------------------------------------------
  * `text` extern ABI helper -- mirrors rt_text_arg_to_path in runtime.c.
  *
@@ -7601,6 +7585,27 @@ static int rt_text_arg_to_path(const uint8_t* ptr, uint64_t len, char* buf, size
     if (len != 0) memcpy(buf, ptr, (size_t)len);
     buf[(size_t)len] = '\0';
     return 1;
+}
+
+/* (ptr, len): see rt_text_arg_to_path below. The return-type divergence
+ * (compiler declares I64 / RuntimeValue, this returns char*) is tracked
+ * separately -- the extern ABI gate compares arity only. */
+const char* rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return NULL;
+    return spl_file_read(path);
+}
+
+int64_t rt_file_read_text_rv(int64_t path_value) {
+    char* path = rt_core_string_to_cpath(path_value);
+    if (!path) return rt_string_new(NULL, 0);
+    char* content = spl_file_read(path);
+    free(path);
+    if (!content) return rt_string_new(NULL, 0);
+    size_t len = strlen(content);
+    int64_t result = rt_string_new((const uint8_t*)content, (uint64_t)len);
+    free(content);
+    return result;
 }
 
 int rt_file_exists(const uint8_t* path_ptr, uint64_t path_len) {
@@ -8420,8 +8425,9 @@ int64_t rt_gui_get_glyph_8x16(int32_t codepoint) {
     return (int64_t)(uintptr_t)result;
 }
 
-int64_t rt_file_size(const char* path) {
-    if (!path) return -1;
+int64_t rt_file_size(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return -1;
     struct stat st;
     if (stat(path, &st) != 0) return -1;
     return (int64_t)st.st_size;

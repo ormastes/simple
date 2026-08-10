@@ -751,7 +751,7 @@ void        rt_prefetch_wait(void);                /* FFI alias */
 
 /* ===== rt_ Aliases (FFI-compatible wrappers) ===== */
 
-const char* rt_file_read_text(const char* path);
+const char* rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len);
 int64_t     rt_file_read_text_rv(int64_t path);
 int         rt_file_exists(const uint8_t* path_ptr, uint64_t path_len);
 int         rt_file_is_regular_no_follow(const uint8_t* path_ptr, uint64_t path_len);
@@ -764,14 +764,14 @@ int         rt_file_append(const char* path, const char* content);
 int         rt_file_append_text(const uint8_t* path, uint64_t path_len, const uint8_t* content, uint64_t content_len);
 int         rt_file_delete(const char* path);
 int         rt_file_copy(const char* src, const char* dst);
-int64_t     rt_file_size(const char* path);
+int64_t     rt_file_size(const uint8_t* path_ptr, uint64_t path_len);
 int         rt_file_fsync(const char* path);
 int         rt_file_fsync_cached(const char* path);
 int         rt_file_sync(const char* path, int64_t path_len);
 int64_t     rt_crc32_text(const char* text, int64_t text_len);
 int         rt_file_create_excl(const char* path, int64_t path_len,
                                 const char* content, int64_t content_len);
-int64_t     rt_file_stat(const char* path);
+int64_t     rt_file_stat(const uint8_t* path_ptr, uint64_t path_len);
 const char* rt_shell_output(const char* cmd);
 SplArray*   rt_cli_get_args(void);
 int64_t     rt_cli_arg_count(void);

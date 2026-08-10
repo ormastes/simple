@@ -1477,7 +1477,16 @@ void spl_prefetch_wait(void) {}
  * rt_ Aliases (FFI-compatible wrappers)
  * ================================================================ */
 
-const char* rt_file_read_text(const char* path) { return spl_file_read(path); }
+/* (ptr, len): see rt_text_arg_to_path. NOTE: the compiler also declares the
+ * RETURN as I64 (a RuntimeValue), while this definition returns a raw char*.
+ * That return-type divergence is a separate defect from the argument ABI fixed
+ * here and is recorded in the family bug doc; the extern ABI gate compares
+ * arity only. */
+const char* rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return NULL;
+    return spl_file_read(path);
+}
 /* (ptr, len): see rt_text_arg_to_path above -- a Simple `text` is not
  * NUL-terminated and the compiler passes it as a pair. */
 int         rt_file_exists(const uint8_t* path_ptr, uint64_t path_len) {
@@ -1526,7 +1535,11 @@ int         rt_file_copy(const char* src, const char* dst) {
     return 1;
 }
 int         rt_file_delete(const char* path)    { return spl_file_delete(path); }
-int64_t     rt_file_size(const char* path)      { return spl_file_size(path); }
+int64_t     rt_file_size(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return -1;
+    return spl_file_size(path);
+}
 int         rt_file_fsync(const char* path) {
     if (!path) return 0;
     FILE* file = fopen(path, "rb");
@@ -1587,7 +1600,9 @@ int         rt_file_create_excl(const char* path, int64_t path_len,
     return 1;
 }
 
-int64_t rt_file_stat(const char* path) {
+int64_t rt_file_stat(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
     struct stat st;
     if (stat(path, &st) == 0) {
         return (int64_t)st.st_mtime;
