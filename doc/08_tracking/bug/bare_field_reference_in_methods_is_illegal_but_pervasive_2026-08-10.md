@@ -169,6 +169,49 @@ SIMPLE_JIT_STRICT=1 bin/simple run test/fixtures/repro/compiler/bare_field_ref/b
 sh scripts/check/check-bare-field-references.shs
 ```
 
+## Verification
+
+`riscv_dual_arch_spec` moved **22/22 RED → 22/22 GREEN** on both duplicate legs:
+
+```
+SPEC FILE VERDICT: test/unit/os/riscv_dual_arch_spec.spl    declared>=22 executed=22 passed=22 failed=0 dropped=0
+SPEC FILE VERDICT: test/01_unit/os/riscv_dual_arch_spec.spl declared>=22 executed=22 passed=22 failed=0 dropped=0
+```
+
+Fixing it took three passes, each surfacing a distinct spelling of the same defect —
+worth recording because a single-pattern sweep would have left siblings:
+
+1. expression position (`return xlen == 32`) — 42 sites across the 3 modules;
+2. block-condition position (`if rv32_compile:`) — 8 sites, initially missed because a
+   `<name>:` guard meant to skip named arguments also skips block colons;
+3. block-condition position in `fpga_orchestration.spl` — 4 more of the same.
+
+`scripts/check/check-bare-field-references.shs` — verdict line last on stdout,
+`PASS`/`FAIL`/`ERROR` with exits 0/1/2. It carries a **positive control**: it first runs
+the repro fixture and requires the lane to reject the known-bad `Desc.bare()`; if the
+control does not fire it reports `ERROR — nothing was checked` rather than PASS, so a
+clean kernel result can never come from a dead detector.
+
+Live run: `PASS — 4 checks ran, all green`.
+
+**Negative control, proved live.** Reverting exactly one `self.` (line 13 of
+`dual_arch_contract.spl`, `return self.xlen == 32` → `return xlen == 32`) and re-running:
+
+```
+SPEC FILE VERDICT: ... executed=22 passed=21 failed=1 dropped=0
+semantic: variable `xlen` not found
+rc=1
+```
+
+The check goes non-zero on that revert and the fix was restored afterwards
+(line 13 re-verified as `return self.xlen == 32`).
+
+## Follow-up still open
+
+The 59 other files in the sweep are NOT fixed. Each is a latent RED. They should be
+swept module-by-module with a spec written per module, not bulk-rewritten blind — the
+three-pass experience above shows a naive single-pattern rewrite leaves siblings behind.
+
 ## Secondary defect observed (not the subject of this bug)
 
 `bin/simple run` **exits 0** after printing `error: semantic: variable \`xlen\` not found`

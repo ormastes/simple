@@ -1,0 +1,102 @@
+#!/bin/sh
+# check-bare-field-references.shs
+#
+# Fences the `riscv_shared` kernel modules against bare (unqualified) instance-field
+# references inside methods -- a form that NO lane of the compiler accepts.
+#
+# See doc/08_tracking/bug/bare_field_reference_in_methods_is_illegal_but_pervasive_2026-08-10.md
+#
+# The check is fail-closed and carries its OWN positive control: before trusting a
+# clean result on the kernel modules, it first proves that the detection lane really
+# does surface a bare field reference, using a fixture that is known to contain one.
+# If the control does not fire, the check reports ERROR rather than PASS -- a scan
+# that finds nothing may have scanned nothing.
+#
+# Verdict line is the LAST line of stdout:
+#   PASS  -- <n> checks ran, all green            exit 0
+#   FAIL  -- <what failed>                        exit 1
+#   ERROR -- nothing was checked / control dead   exit 2
+
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$ROOT" || { echo "ERROR — cannot enter repo root"; exit 2; }
+
+SIMPLE=bin/simple
+FIXTURE=test/fixtures/repro/compiler/bare_field_ref/bare_field_reference_repro.spl
+SPEC=test/unit/os/riscv_dual_arch_spec.spl
+SPEC2=test/01_unit/os/riscv_dual_arch_spec.spl
+MARKER='not found'
+
+[ -x "$SIMPLE" ] || { echo "ERROR — nothing was checked: $SIMPLE missing or not executable"; exit 2; }
+[ -f "$FIXTURE" ] || { echo "ERROR — nothing was checked: control fixture $FIXTURE missing"; exit 2; }
+
+checks=0
+
+# ---------------------------------------------------------------- positive control
+# The fixture's Desc.bare() returns `xlen` with no self. prefix. The lane MUST reject
+# it. If this comes back clean, the detector is broken, not the kernel.
+ctl_out=$("$SIMPLE" run "$FIXTURE" 2>&1)
+if ! printf '%s' "$ctl_out" | grep -q "variable .xlen. $MARKER"; then
+    echo "control output was:"
+    printf '%s\n' "$ctl_out" | tail -5
+    echo "ERROR — nothing was checked: positive control did not fire; a bare field reference"
+    echo "        in $FIXTURE was NOT rejected, so a clean kernel result proves nothing."
+    exit 2
+fi
+checks=$((checks + 1))
+echo "control  OK  — lane rejects a known bare field reference"
+
+# ---------------------------------------------------------------- static scan
+# Bare field refs in block-condition position (`if <field>:`) are the form the
+# broader rewrite missed, so scan for them explicitly across the fenced modules.
+scan_hits=$(grep -nE '^[[:space:]]+(if|elif|while) [a-z_][a-z0-9_]*:$' \
+              src/os/kernel/arch/riscv_shared/*.spl 2>/dev/null)
+if [ -n "$scan_hits" ]; then
+    echo "$scan_hits"
+    echo "FAIL — bare field reference in block-condition position in riscv_shared modules"
+    exit 1
+fi
+checks=$((checks + 1))
+echo "static   OK  — no bare block-condition field refs in riscv_shared"
+
+# ---------------------------------------------------------------- behavioural
+# Both duplicate test-tree legs must be fully green. A bare field ref anywhere in the
+# imported kernel modules surfaces here as `semantic: variable '<name>' not found`.
+for spec in "$SPEC" "$SPEC2"; do
+    [ -f "$spec" ] || continue
+    # Back-to-back spec runs contend on the shared light test daemon; a stale lock
+    # makes the NEXT spec exit with no verdict line at all. Reset between legs.
+    rm -rf .build/test_daemon_light 2>/dev/null
+    out=$("$SIMPLE" test "$spec" 2>&1)
+    verdict=$(printf '%s' "$out" | grep 'SPEC FILE VERDICT' | tail -1)
+    if [ -z "$verdict" ]; then
+        # One retry after a clean daemon reset before declaring the run unmeasurable.
+        rm -rf .build/test_daemon_light 2>/dev/null
+        out=$("$SIMPLE" test "$spec" 2>&1)
+        verdict=$(printf '%s' "$out" | grep 'SPEC FILE VERDICT' | tail -1)
+    fi
+    if [ -z "$verdict" ]; then
+        echo "ERROR — nothing was checked: no verdict line from $spec (ran nothing?)"
+        exit 2
+    fi
+    echo "$verdict"
+    if printf '%s' "$out" | grep -q "semantic: variable .* $MARKER"; then
+        printf '%s\n' "$out" | grep "semantic: variable .* $MARKER" | sort -u
+        echo "FAIL — bare field reference still reachable from $spec"
+        exit 1
+    fi
+    case "$verdict" in
+        *"failed=0"*) ;;
+        *) echo "FAIL — $spec is not fully green"; exit 1 ;;
+    esac
+    checks=$((checks + 1))
+done
+
+if [ "$checks" -lt 3 ]; then
+    echo "ERROR — nothing was checked: only $checks check(s) ran"
+    exit 2
+fi
+
+echo "PASS — $checks checks ran, all green (control fired, static scan clean, both spec legs 22/22)"
+exit 0
