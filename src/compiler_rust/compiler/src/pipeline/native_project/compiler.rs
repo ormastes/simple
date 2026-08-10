@@ -8,7 +8,7 @@ use rayon::prelude::*;
 use simple_common::target::TargetCpu;
 use simple_parser::ast::{Block, Expr, FunctionDef, Node, ReturnStmt, Type, Visibility};
 
-use crate::codegen::common_backend::{enum_runtime_module_name_from_path, module_prefix_from_path};
+use crate::codegen::common_backend::{enum_runtime_module_name_from_path, module_init_symbol, module_prefix_from_path};
 use crate::codegen::Codegen;
 use crate::hir::Lowerer;
 use crate::module_resolver::ModuleResolver;
@@ -32,6 +32,64 @@ fn persist_compiled_object(cache_path: &Path, object: &[u8]) -> Result<(), Strin
             _ => Err(format!("persist cache object: {}", e.error)),
         },
     }
+}
+
+/// Give the HIR-synthesized runtime-global initializer the same collision-free
+/// physical identity used by both native backends.
+///
+/// HIR lowering runs before native-project path qualification and therefore
+/// emits the legacy bare name. A source-defined function with that spelling
+/// has a span and is not ours to rename. Freestanding lowering already injects
+/// a path-qualified initializer, so it is preserved as well.
+pub(super) fn assign_native_dynamic_initializer_identity(
+    hir: &mut crate::hir::HirModule,
+    module_prefix: &str,
+) -> Result<(), String> {
+    let synthetic: Vec<usize> = hir
+        .functions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, function)| {
+            (function.name == "__module_init_dynamic" && function.span.is_none()).then_some(index)
+        })
+        .collect();
+    if synthetic.is_empty() {
+        return Ok(());
+    }
+    if synthetic.len() != 1 {
+        return Err(format!(
+            "module `{module_prefix}` contains {} synthetic dynamic initializers",
+            synthetic.len()
+        ));
+    }
+
+    let qualified_name = format!("{}_dynamic", module_init_symbol(Some(module_prefix)));
+    let destinations: Vec<usize> = hir
+        .functions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, function)| (index != synthetic[0] && function.name == qualified_name).then_some(index))
+        .collect();
+    if destinations.len() == 1 {
+        let span = hir.functions[destinations[0]].span;
+        let is_compiler_injected_freestanding = span.is_some_and(|span| {
+            span.start == 0 && span.end == 0 && span.line == 0 && span.column == 0
+        });
+        if is_compiler_injected_freestanding {
+            hir.functions.remove(synthetic[0]);
+            return Ok(());
+        }
+    }
+    if !destinations.is_empty() {
+        return Err(format!(
+            "module `{module_prefix}` dynamic initializer destination `{qualified_name}` already exists"
+        ));
+    }
+
+    let function = &mut hir.functions[synthetic[0]];
+    function.name = qualified_name;
+    function.module_path = module_prefix.to_string();
+    Ok(())
 }
 
 fn is_script_statement(node: &Node) -> bool {
@@ -531,6 +589,9 @@ pub(crate) fn compile_file_to_object(
     let mut hir = lowerer
         .lower_module(&ast)
         .map_err(|e| format!("{}: hir: {e}", file_path.display()))?;
+    let module_prefix = module_prefix_from_path(file_path, source_root);
+    assign_native_dynamic_initializer_identity(&mut hir, &module_prefix)
+        .map_err(|e| format!("{}: hir initializer identity: {e}", file_path.display()))?;
     let pipeline =
         crate::pipeline::CompilerPipeline::new().map_err(|e| format!("{}: pipeline: {e}", file_path.display()))?;
     pipeline.rewrite_hir_simd_loops(&mut hir);
@@ -538,7 +599,6 @@ pub(crate) fn compile_file_to_object(
     // MIR
     let mut mir = crate::mir::lower_to_mir_with_global_trait_impls(&hir, imports.trait_impls.as_ref())
         .map_err(|e| format!("{}: mir: {e}", file_path.display()))?;
-    let module_prefix = module_prefix_from_path(file_path, source_root);
     qualify_native_struct_layouts(
         &mut mir,
         &module_prefix,
