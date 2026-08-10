@@ -435,15 +435,21 @@ fn emit_aggregate_block_copy<M: Module>(
     let size_val = builder.ins().iconst(types::I64, alloc_bytes);
     let new_ptr = call_runtime_1(ctx, builder, "rt_alloc", size_val);
 
-    let untag_mask = builder.ins().iconst(types::I64, !1i64);
+    let tag_mask = builder.ins().iconst(types::I64, 7);
+    let untag_mask = builder.ins().iconst(types::I64, !7i64);
     let src_ptr = builder.ins().band(src_tagged, untag_mask);
     let zero = builder.ins().iconst(types::I64, 0);
-    let src_is_null = builder.ins().icmp(IntCC::Equal, src_ptr, zero);
-    let load_ptr = builder.ins().select(src_is_null, new_ptr, src_ptr);
+    let one = builder.ins().iconst(types::I64, 1);
+    let src_tag = builder.ins().band(src_tagged, tag_mask);
+    let src_is_heap = builder.ins().icmp(IntCC::Equal, src_tag, one);
+    let src_nonnull = builder.ins().icmp(IntCC::NotEqual, src_ptr, zero);
+    let src_is_valid = builder.ins().band(src_is_heap, src_nonnull);
+    let load_ptr = builder.ins().select(src_is_valid, src_ptr, new_ptr);
 
     for w in 0..words {
         let off = (w * 8) as i32;
         let word = builder.ins().load(types::I64, MemFlags::new(), load_ptr, off);
+        let word = builder.ins().select(src_is_valid, word, zero);
         builder.ins().store(MemFlags::new(), word, new_ptr, off);
     }
 
@@ -456,8 +462,7 @@ fn emit_aggregate_block_copy<M: Module>(
         let inner = emit_aggregate_block_copy(ctx, builder, word, field.byte_size, &field.nested);
         // Replace only a live tagged heap handle; nil (0) and non-handle
         // words keep their original value (the inner alloc is then unused).
-        let one = builder.ins().iconst(types::I64, 1);
-        let tag_bit = builder.ins().band(word, one);
+        let tag_bit = builder.ins().band(word, tag_mask);
         let is_tagged = builder.ins().icmp(IntCC::Equal, tag_bit, one);
         let payload = builder.ins().band(word, untag_mask);
         let nonnull = builder.ins().icmp(IntCC::NotEqual, payload, zero);
