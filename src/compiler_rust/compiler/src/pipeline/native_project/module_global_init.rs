@@ -10,6 +10,8 @@ use simple_parser::ast::{
 };
 use simple_parser::token::Span;
 
+use crate::codegen::common_backend::module_dynamic_init_symbol;
+
 fn pattern_name(pattern: &Pattern) -> Option<&str> {
     match pattern {
         Pattern::Identifier(name) | Pattern::MutIdentifier(name) | Pattern::MoveIdentifier(name) => Some(name),
@@ -139,22 +141,6 @@ fn already_initialized_without_runtime_assignment(expr: &Expr, declared_type: Op
     }
 }
 
-fn sanitized_component(raw: &str) -> String {
-    let mut result = String::with_capacity(raw.len());
-    for ch in raw.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '_' {
-            result.push(ch);
-        } else {
-            result.push('_');
-        }
-    }
-    if result.is_empty() {
-        "module".to_string()
-    } else {
-        result
-    }
-}
-
 fn runtime_init_function(name: String, statements: Vec<Node>, span: Span) -> Node {
     let mut statements = statements;
     statements.push(Node::Return(ReturnStmt { span, value: None }));
@@ -226,17 +212,15 @@ pub(super) fn inject_freestanding_module_global_init(module: &mut Module, module
         }
     }
 
-    let prefix = sanitized_component(module_prefix);
+    let dynamic_init_name = module_dynamic_init_symbol(Some(module_prefix));
     if !statements.is_empty() {
-        module.items.push(runtime_init_function(
-            format!("__module_init_{}_dynamic", prefix),
-            statements,
-            span,
-        ));
+        module
+            .items
+            .push(runtime_init_function(dynamic_init_name.clone(), statements, span));
     }
     for (declaration_index, assignment) in optional_call_initializers {
         module.items.push(runtime_init_function(
-            format!("__module_init_{}_dynamic_optional_{declaration_index:08}", prefix),
+            format!("{dynamic_init_name}_optional_{declaration_index:08}"),
             vec![assignment],
             span,
         ));

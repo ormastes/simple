@@ -253,6 +253,7 @@ impl LlvmBackend {
                 || module_ir.global_init_arrays.contains_key(name)
                 || module_ir.global_init_functions.contains_key(name)
                 || module_ir.global_init_structs.contains_key(name)
+                || module_ir.dynamic_init_globals.contains(name)
             {
                 return true;
             }
@@ -412,24 +413,27 @@ impl LlvmBackend {
             );
         }
 
-        if module_ir.global_init_strings.is_empty()
-            && module_ir.global_init_arrays.is_empty()
-            && module_ir.global_init_functions.is_empty()
-            && module_ir.global_init_structs.is_empty()
-        {
-            return Ok(());
-        }
-
         let m = self.module.borrow();
         let Some(m) = m.as_ref() else {
             return Ok(());
         };
+        let init_name = crate::codegen::common_backend::module_init_symbol(self.module_prefix.as_deref());
+        let dynamic_init_name =
+            crate::codegen::common_backend::module_dynamic_init_symbol(self.module_prefix.as_deref());
+        let dynamic_init_fn = m.get_function(&dynamic_init_name);
+        if module_ir.global_init_strings.is_empty()
+            && module_ir.global_init_arrays.is_empty()
+            && module_ir.global_init_functions.is_empty()
+            && module_ir.global_init_structs.is_empty()
+            && dynamic_init_fn.is_none()
+        {
+            return Ok(());
+        }
+
         let ctx = self.context_ref();
         let builder = ctx.create_builder();
         let i64_type = self.runtime_int_type();
         let ptr_type = ctx.ptr_type(AddressSpace::default());
-
-        let init_name = crate::codegen::common_backend::module_init_symbol(self.module_prefix.as_deref());
 
         let void_type = ctx.void_type();
         let fn_type = void_type.fn_type(&[], false);
@@ -733,6 +737,12 @@ impl LlvmBackend {
                 }
                 store_to_global(global_name, struct_pi)?;
             }
+        }
+
+        if let Some(dynamic_init_fn) = dynamic_init_fn {
+            builder
+                .build_call(dynamic_init_fn, &[], "dynamic_init")
+                .map_err(|e| crate::error::factory::llvm_build_failed("dynamic initializer call", &e))?;
         }
 
         builder
