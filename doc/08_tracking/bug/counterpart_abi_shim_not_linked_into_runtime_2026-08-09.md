@@ -1,7 +1,14 @@
 # Counterpart ABI shim is not linked into the runtime — `rt_counterpart_*` unresolved
 
 Date: 2026-08-09
-Status: OPEN — blocks the Wave-1 F1 exit gate
+Status: FIXED for the interpreter path (see "Resolution" below); re-verified
+fresh 2026-08-10 against the currently deployed
+`bin/release/x86_64-unknown-linux-gnu/simple`:
+`bin/simple test test/01_unit/infra/counterpart/counterpart_abi_spec.spl` ->
+`declared>=8 executed=8 passed=8 failed=0 dropped=0`, exit 0. Native-build
+wiring remains UNVERIFIED (architectural-open, blocked on the Stage-3
+self-host defect) — see "Still open after this fix" below; do not read this
+Status line as covering that path.
 Severity: high for the counterpart lane; no impact outside it.
 
 ## Symptom
