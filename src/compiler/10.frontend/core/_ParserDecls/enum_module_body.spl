@@ -580,6 +580,19 @@ fn parse_module_body():
     while true:
         i = i + 1
         parser_skip_newlines_and_semicolons()
+        # Module scope is indentation level 0, so a Dedent (182) arriving here is
+        # always structural residue from a nested block that the statement parser
+        # left unconsumed -- most commonly at EOF, where a file whose last line
+        # sits N>1 levels deep emits N Dedents and only some are absorbed. No
+        # module-level declaration ever starts with a Dedent, so nothing can
+        # consume it and the loop below re-reads the same (kind,line,col) triple,
+        # tripping the forward-progress guard and aborting the whole module.
+        # That regressed 55 compiler modules in Stage 3 self-host with
+        # "parser made no forward progress at this token (Dedent '')" at
+        # <last-line>+1:1. Absorb them here, where they are unambiguously noise.
+        while par_kind_get() == 182:
+            parser_advance()
+            parser_skip_newlines_and_semicolons()
         if par_kind_get() == 190:
             break
         val pm_kind = par_kind_get()
