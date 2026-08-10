@@ -732,3 +732,77 @@ cannot be swept — every one needs the two-way read.
 
 Recommended next step: re-derive the worklist on the CODE-line metric with the
 pending-marker filter applied, which cuts 145 to 81 before any file is opened.
+
+---
+
+## Step-2 execution log — stream P4 (2026-08-10): the `genuine-merge` class is EMPTY
+
+Scope taken: all **43** `genuine-merge` entries (2 code-ahead + 41 equal-length).
+**Merges performed: 0.** Not a stop-short — every entry was measured in both
+directions and none has legacy content worth taking. Measured against
+`origin/main @ 46baea155f8` (the same base M4 used) *and* re-measured in the
+working copy; both agree.
+
+### FINDING 4 — 36 of the 43 have ZERO unique code lines on EITHER side
+
+Symmetric two-way `comm` on the code-line sets (non-blank, non-`#`) returns
+`0` legacy-only **and** `0` numbered-only lines for 36 entries. The two files
+differ only in comments, blank lines, and line order. There is nothing to
+merge, at either metric.
+
+The classification rule is the cause. `genuine-merge` was defined as *"numbered
+contributes zero unique code lines"*, which is **trivially true when the code is
+identical**. Rows like `editor_spec.spl` (`code 4/4`, `raw 146/146`,
+`uniq 0/0`) are two copies of the same 4-line stub wrapped in 142 lines of
+comments — the rule cannot distinguish that from a real superset. Every
+equal-length row whose `uniq num/leg` column reads `0/0` is in this bucket.
+**`uniq_leg > 0` — not the class label — is the merge signal.**
+
+### FINDING 5 — where a delta exists, the NUMBERED side is ahead; merging would REGRESS
+
+Four of the seven entries with any delta are `1/1` symmetric, and in three of
+them the legacy line is a **vacuous** `expect(true).to_equal(true)` where the
+numbered line carries the real assertion:
+
+| numbered | numbered has | legacy has |
+|---|---|---|
+| `test/01_unit/lib/database/sql/sql_repository_spec.spl` | `expect(db.table_exists("repo_users")).to_equal(true)` | `expect(true).to_equal(true)` |
+| `test/02_integration/remote_jit/arduino_r4_composite_runner_spec.spl` | `expect(adapter.connected).to_equal(true)` | `expect(true).to_equal(true)` |
+| `test/02_integration/remote_jit/esp32_composite_runner_spec.spl` | `expect(adapter.connected).to_equal(true)` | `expect(true).to_equal(true)` |
+| `test/03_system/feature/usage/no_paren_calls_spec.spl` | `expect(result).to_equal(10)` | `expect(true).to_equal(true)` |
+
+This is the premise of the whole campaign inverted: legacy is not a
+code-superset that lost comments, it is an **older, weaker** spec. The
+two-directions rule earned its keep here — a one-way "legacy has a line the
+numbered file lacks" read would have merged four tautologies into the live tree.
+
+`test/01_unit/compiler/backend/spipe_system_test_spec.spl` (`4/4`) is the same
+shape in structure rather than assertions: legacy indents `enum Color:` and its
+variants inside a block, numbered has them at module level. Numbered is correct.
+
+### FINDING 6 — the 2 code-ahead entries are `//` comment lines, not code
+
+The stripper filters `#` only, so `//`-prefixed lines counted as code.
+
+- `test/01_unit/os/crypto/sm3_kat_spec.spl` (`uniq_leg 11`): all 11 legacy-only
+  lines are `//` comments — six `// ====…` rules and five prose notes.
+- `test/01_unit/compiler/parser/pub_enum_with_attribute_spec.spl` (`uniq_leg 8`):
+  already merged in the working copy by a concurrent session (the numbered file
+  now carries the `pub union Tagged` case and its `it` block). Left untouched —
+  foreign uncommitted work.
+
+`//` appears at line-start in only 5 files under `test/01_unit`, so this is a
+narrow leak, but it is the entire content of the code-ahead half of this class.
+
+### Disposition
+
+All 43 `genuine-merge` entries are **closed unmerged**. No spec file was
+modified by this stream, so no verdict line is attributable to a merge. The
+next stream should not re-open them; the open work is Worklist A/C
+`style-difference` and the ~1,600 legacy-only paths.
+
+**Recommendation:** re-run M4's classifier with (a) `//` added to the comment
+strip, and (b) `genuine-merge` requiring `uniq_leg > 0` rather than
+`uniq_num == 0`. On the numbers above, the `genuine-merge` class goes to zero
+and its 43 rows redistribute into `style-difference` (7) and a new
+`identical-code` class (36) that needs no file opened.
