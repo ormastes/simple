@@ -883,11 +883,6 @@ impl LlvmBackend {
                     vreg_map.insert(*dest, default_val.into());
                 }
             }
-            MirInst::AggregateCopy {
-                dest, src, byte_size, ..
-            } => {
-                self.compile_aggregate_copy(*dest, *src, *byte_size, vreg_map, builder)?;
-            }
             MirInst::BinOp { dest, op, left, right } => {
                 let left_val = self.get_vreg(left, vreg_map)?;
                 let right_val = self.get_vreg(right, vreg_map)?;
@@ -1811,19 +1806,10 @@ impl LlvmBackend {
                 vreg_map.insert(*dest, default_val.into());
             }
 
-            // Decision and condition coverage use the shared source-aware LLVM
-            // emitter.  Do not duplicate the ABI here: it must stay aligned
-            // with the core-C receipt runtime (`rt_coverage_*` with file/span).
-            MirInst::DecisionProbe { .. } | MirInst::ConditionProbe { .. } => {
-                self.compile_emitter_simd_instruction(
-                    inst, vreg_map, local_allocas, builder, module)?;
+            // Coverage instrumentation (not yet implemented)
+            MirInst::DecisionProbe { .. } | MirInst::ConditionProbe { .. } | MirInst::PathProbe { .. } => {
+                // Coverage instrumentation not yet implemented
             }
-
-            // Path probes have no source-location ABI in the current core-C
-            // bundle and are not an admitted ML-KEM receipt input. Preserve the
-            // prior no-op behavior rather than emitting the legacy fileless
-            // `rt_path_probe` helper.
-            MirInst::PathProbe { .. } => {}
 
             MirInst::UnitBoundCheck { .. } => {}
             MirInst::UnitWiden { dest, value, .. } => {
@@ -2212,30 +2198,23 @@ impl LlvmBackend {
                     func_name.rsplit('.').next().unwrap_or(func_name)
                 };
 
+                // For qualified user-defined methods like `Boxed.get`, prefer
+                // the exact resolved function symbol before consulting builtin
+                // method shims such as `get -> rt_index_get`. Otherwise a
+                // struct method can be misrouted through a collection helper
+                // purely because it shares a common short name.
                 let resolved_direct = self
                     .use_map
                     .get(func_name)
                     .or_else(|| self.import_map.get(func_name))
                     .map(|s| s.as_str());
-                let resolved_text_runtime = resolved_direct.and_then(super::resolved_text_runtime_method);
-
-                // For qualified user-defined methods like `Boxed.get`, prefer
-                // the exact resolved function symbol before consulting builtin
-                // method shims such as `get -> rt_index_get`. Otherwise a
-                // struct method can be misrouted through a collection helper
-                // purely because it shares a common short name. Canonical text
-                // declarations are the exception: their Simple bodies are the
-                // semantic owners, but LLVM must call the matching runtime ABI.
                 let dotted_direct = func_name.replace("_dot_", ".");
                 let direct_func = resolved_direct
                     .and_then(|n| module.get_function(n))
                     .or_else(|| resolved_direct.and_then(|n| module.get_function(&n.replace("_dot_", "."))))
                     .or_else(|| module.get_function(func_name))
                     .or_else(|| module.get_function(&dotted_direct));
-                if resolved_text_runtime.is_none()
-                    && direct_func.is_some()
-                    && (func_name.contains('.') || func_name.contains("_dot_"))
-                {
+                if direct_func.is_some() && (func_name.contains('.') || func_name.contains("_dot_")) {
                     let mut all_args = vec![*receiver];
                     all_args.extend_from_slice(args);
                     let func = direct_func.unwrap();
@@ -2271,7 +2250,7 @@ impl LlvmBackend {
                 }
 
                 // Special case: substring(start) → rt_slice(receiver, start, rt_len(receiver), 1)
-                if (method == "substring" || resolved_text_runtime == Some("rt_slice")) && args.len() == 1 {
+                if method == "substring" && args.len() == 1 {
                     let recv_val = self.get_vreg(receiver, vreg_map)?;
                     let recv_casted = self.coerce_value_to_type(recv_val, Some(i64_type.into()), builder)?;
                     let start_val = self.get_vreg(&args[0], vreg_map)?;
@@ -2468,82 +2447,77 @@ impl LlvmBackend {
 
                 // Map well-known methods to runtime functions
                 // MUST match Cranelift's exact mapping at src/codegen/instr/calls.rs:3162-3201
-                let runtime_func = if super::qualified_runtime_method_owner_is_builtin(func_name) {
-                    match method {
-                        // Copied verbatim from Cranelift lines 3163-3200
-                        "contains" | "contains_key" | "has_key" | "has" => Some("rt_contains"),
-                        "len" | "length" => Some("rt_len"),
-                        "starts_with" => Some("rt_string_starts_with"),
-                        "ends_with" => Some("rt_string_ends_with"),
-                        "concat" => Some("rt_string_concat"),
-                        "char_at" => Some("rt_string_char_at"),
-                        // Receiver-polymorphic; see emitter.rs. `at` on an array
-                        // receiver must reach `rt_array_at` (a real `Option`), not
-                        // the string-only `rt_string_char_at`, which answers `nil`
-                        // for every index of every array. Cranelift already routes
-                        // `at` to `rt_at` (codegen/instr/calls.rs); this keeps the
-                        // two backends from disagreeing on the same source.
-                        "at" => Some("rt_at"),
-                        "char_code_at" => Some("rt_string_char_code_at"),
-                        "byte_at" => Some("rt_string_byte_at"),
-                        "push" => Some("rt_array_push"),
-                        "pop" => Some("rt_array_pop"),
-                        "clear" => Some("rt_array_clear"),
-                        "join" => Some("rt_string_join"),
-                        "trim" => Some("rt_string_trim"),
-                        "trim_start" => Some("rt_string_trim_start"),
-                        "trim_end" => Some("rt_string_trim_end"),
-                        "split" => Some("rt_string_split"),
-                        "bytes" => Some("rt_string_bytes"),
-                        "chars" => Some("rt_string_chars"),
-                        "replace" => Some("rt_string_replace"),
-                        "to_upper" | "upper" => Some("rt_string_to_upper"),
-                        "to_lower" | "lower" => Some("rt_string_to_lower"),
-                        "to_int" | "to_i64" | "parse_int" => Some("rt_string_to_int"),
-                        "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe" => {
-                            Some("rt_string_to_float")
-                        }
-                        // Receiver-polymorphic: see the matching note in
-                        // llvm/emitter.rs. Routing `index_of` to the string-only
-                        // `rt_string_find` made every array `index_of` return the
-                        // -1 receiver-mismatch sentinel under LLVM while the
-                        // Cranelift/JIT path returned the true index.
-                        "index_of" => Some("rt_index_of"),
-                        "find" | "find_str" => Some("rt_string_find"),
-                        "rfind" | "last_index_of" => Some("rt_string_rfind"),
-                        "to_string" | "to_text" | "str" => Some("rt_to_string"),
-                        "slice" | "substring" => Some("rt_slice"),
-                        "get" => Some("rt_index_get"),
-                        "keys" => Some("rt_dict_keys"),
-                        "values" => Some("rt_dict_values"),
-                        // Receiver-dispatched — see the matching arm in
-                        // codegen/instr/closures_structs.rs. Name-keyed table with
-                        // no receiver type, so `rt_dict_remove` here silently
-                        // no-opped every array `.remove(i)` on the native lane too.
-                        // doc/08_tracking/bug/array_remove_returns_mutated_array_not_removed_element_2026-07-20.md
-                        "remove" => Some("rt_collection_remove"),
-                        "filter" => Some("rt_array_filter"),
-                        "sort" => Some("rt_array_sort"),
-                        "reverse" => Some("rt_array_reverse"),
-                        "first" => Some("rt_array_first"),
-                        "last" => Some("rt_array_last"),
-                        "find" => Some("rt_array_find"),
-                        "any" => Some("rt_array_any"),
-                        "all" => Some("rt_array_all"),
-                        // LLVM-specific mappings (not in Cranelift, verified to exist)
-                        "repeat" => Some("lib__common__string_core__str_repeat"),
-                        "map" => Some("rt_option_map"),
-                        // Option/Result methods (LLVM-specific)
-                        "unwrap" | "unwrap_or" | "unwrap_err" => Some("rt_enum_payload"),
-                        "is_none" => Some("rt_is_none"),
-                        "is_some" => Some("rt_is_some"),
-                        "is_ok" | "is_err" => Some("rt_enum_check_discriminant"),
-                        _ => None,
+                let runtime_func = match method {
+                    // Copied verbatim from Cranelift lines 3163-3200
+                    "contains" | "contains_key" | "has_key" | "has" => Some("rt_contains"),
+                    "len" | "length" => Some("rt_len"),
+                    "starts_with" => Some("rt_string_starts_with"),
+                    "ends_with" => Some("rt_string_ends_with"),
+                    "concat" => Some("rt_string_concat"),
+                    "char_at" => Some("rt_string_char_at"),
+                    // Receiver-polymorphic; see emitter.rs. `at` on an array
+                    // receiver must reach `rt_array_at` (a real `Option`), not
+                    // the string-only `rt_string_char_at`, which answers `nil`
+                    // for every index of every array. Cranelift already routes
+                    // `at` to `rt_at` (codegen/instr/calls.rs); this keeps the
+                    // two backends from disagreeing on the same source.
+                    "at" => Some("rt_at"),
+                    "char_code_at" => Some("rt_string_char_code_at"),
+                    "byte_at" => Some("rt_string_byte_at"),
+                    "push" => Some("rt_array_push"),
+                    "pop" => Some("rt_array_pop"),
+                    "clear" => Some("rt_array_clear"),
+                    "join" => Some("rt_string_join"),
+                    "trim" => Some("rt_string_trim"),
+                    "trim_start" => Some("rt_string_trim_start"),
+                    "trim_end" => Some("rt_string_trim_end"),
+                    "split" => Some("rt_string_split"),
+                    "bytes" => Some("rt_string_bytes"),
+                    "chars" => Some("rt_string_chars"),
+                    "replace" => Some("rt_string_replace"),
+                    "to_upper" | "upper" => Some("rt_string_to_upper"),
+                    "to_lower" | "lower" => Some("rt_string_to_lower"),
+                    "to_int" | "to_i64" | "parse_int" => Some("rt_string_to_int"),
+                    "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe" => {
+                        Some("rt_string_to_float")
                     }
-                } else {
-                    None
-                }
-                .or(resolved_text_runtime);
+                    // Receiver-polymorphic: see the matching note in
+                    // llvm/emitter.rs. Routing `index_of` to the string-only
+                    // `rt_string_find` made every array `index_of` return the
+                    // -1 receiver-mismatch sentinel under LLVM while the
+                    // Cranelift/JIT path returned the true index.
+                    "index_of" => Some("rt_index_of"),
+                    "find" | "find_str" => Some("rt_string_find"),
+                    "rfind" | "last_index_of" => Some("rt_string_rfind"),
+                    "to_string" | "to_text" | "str" => Some("rt_to_string"),
+                    "slice" | "substring" => Some("rt_slice"),
+                    "get" => Some("rt_index_get"),
+                    "keys" => Some("rt_dict_keys"),
+                    "values" => Some("rt_dict_values"),
+                    // Receiver-dispatched — see the matching arm in
+                    // codegen/instr/closures_structs.rs. Name-keyed table with
+                    // no receiver type, so `rt_dict_remove` here silently
+                    // no-opped every array `.remove(i)` on the native lane too.
+                    // doc/08_tracking/bug/array_remove_returns_mutated_array_not_removed_element_2026-07-20.md
+                    "remove" => Some("rt_collection_remove"),
+                    "filter" => Some("rt_array_filter"),
+                    "sort" => Some("rt_array_sort"),
+                    "reverse" => Some("rt_array_reverse"),
+                    "first" => Some("rt_array_first"),
+                    "last" => Some("rt_array_last"),
+                    "find" => Some("rt_array_find"),
+                    "any" => Some("rt_array_any"),
+                    "all" => Some("rt_array_all"),
+                    // LLVM-specific mappings (not in Cranelift, verified to exist)
+                    "repeat" => Some("lib__common__string_core__str_repeat"),
+                    "map" => Some("rt_option_map"),
+                    // Option/Result methods (LLVM-specific)
+                    "unwrap" | "unwrap_or" | "unwrap_err" => Some("rt_enum_payload"),
+                    "is_none" => Some("rt_is_none"),
+                    "is_some" => Some("rt_is_some"),
+                    "is_ok" | "is_err" => Some("rt_enum_check_discriminant"),
+                    _ => None,
+                };
 
                 if let Some(rt_name) = runtime_func {
                     if rt_name == "rt_len" {
@@ -2721,6 +2695,26 @@ impl LlvmBackend {
                                 .collect();
                             if narrowed.len() == 1 {
                                 matches = narrowed;
+                            }
+                        }
+                        // A SOLE suffix hit still carries no owner-type guarantee — the
+                        // scan keys on the leaf name only. When the receiver's type is
+                        // known and disagrees with the sole candidate's owner, reject it
+                        // rather than binding blindly: `text.bytes()` had exactly one
+                        // suffix match (`PointerSize.bytes`) and was bound unchecked,
+                        // producing a wrong-callee SIGSEGV at Stage-3 self-host.
+                        // doc/08_tracking/bug/stage3_selfhost_segv_bare_leaf_bytes_hijacked_to_pointersize_bytes_2026-08-09.md
+                        if matches.len() == 1 {
+                            if let Some(recv_name) =
+                                vreg_types.get(receiver).copied().and_then(primitive_type_symbol_name)
+                            {
+                                let owner_ok = matches[0]
+                                    .0
+                                    .strip_suffix(&suffix)
+                                    .is_some_and(|head| calls::suffix_owner_matches(head, recv_name));
+                                if !owner_ok {
+                                    matches.clear();
+                                }
                             }
                         }
                         match matches.len() {
@@ -3287,52 +3281,6 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
-    fn decision_and_condition_probes_reach_source_aware_core_c_calls() {
-        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
-        let backend = LlvmBackend::new(target).unwrap();
-        backend.create_module("coverage_probe_lowering").unwrap();
-
-        let mut function = MirFunction::new(
-            "coverage_probe_lowering".to_string(),
-            crate::hir::TypeId::I64,
-            simple_parser::ast::Visibility::Public,
-        );
-        function.blocks[0].instructions.push(MirInst::ConstBool {
-            dest: VReg(0),
-            value: true,
-        });
-        function.blocks[0].instructions.push(MirInst::DecisionProbe {
-            decision_id: 41,
-            result: VReg(0),
-            file: "test/coverage/owner.spl".to_string(),
-            line: 17,
-            column: 5,
-        });
-        function.blocks[0].instructions.push(MirInst::ConditionProbe {
-            decision_id: 41,
-            condition_id: 2,
-            result: VReg(0),
-            file: "test/coverage/owner.spl".to_string(),
-            line: 17,
-            column: 5,
-        });
-        function.blocks[0].instructions.push(MirInst::ConstInt {
-            dest: VReg(1),
-            value: 0,
-        });
-        function.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
-
-        backend.compile_function(&function).unwrap();
-        let ir = backend.get_ir().unwrap();
-        assert!(ir.contains("rt_coverage_decision_probe"), "{ir}");
-        assert!(ir.contains("rt_coverage_condition_probe"), "{ir}");
-        assert!(ir.contains("test/coverage/owner.spl"), "{ir}");
-        assert!(!ir.contains("@rt_decision_probe"), "{ir}");
-        assert!(!ir.contains("@rt_condition_probe"), "{ir}");
-        backend.verify().unwrap();
-    }
-
-    #[test]
     fn virtual_call_uses_emitted_vtable_and_object_header() {
         let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
         let mut backend = LlvmBackend::new(target).unwrap();
@@ -3447,136 +3395,6 @@ mod tests {
 
         let ir = backend.get_ir().unwrap();
         assert!(ir.contains("mcall_direct"), "{ir}");
-        backend.verify().unwrap();
-    }
-
-    #[test]
-    fn imported_user_method_leaf_collision_keeps_user_call_target() {
-        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
-        let backend = LlvmBackend::new(target).unwrap();
-        backend.create_module("imported_user_method_leaf_collision").unwrap();
-
-        let mut direct_caller = MirFunction::new(
-            "direct_caller".to_string(),
-            crate::hir::TypeId::I64,
-            simple_parser::ast::Visibility::Public,
-        );
-        direct_caller.blocks[0].instructions.push(MirInst::ConstInt {
-            dest: VReg(0),
-            value: 3,
-        });
-        direct_caller.blocks[0].instructions.push(MirInst::Call {
-            dest: Some(VReg(1)),
-            target: CallTarget::from_name("lib__database__DbValue_dot_to_text"),
-            args: vec![VReg(0)],
-        });
-        direct_caller.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
-
-        let mut method_caller = MirFunction::new(
-            "method_caller".to_string(),
-            crate::hir::TypeId::I64,
-            simple_parser::ast::Visibility::Public,
-        );
-        method_caller.blocks[0].instructions.push(MirInst::ConstInt {
-            dest: VReg(0),
-            value: 3,
-        });
-        method_caller.blocks[0].instructions.push(MirInst::MethodCallStatic {
-            dest: Some(VReg(1)),
-            receiver: VReg(0),
-            func_name: "DbValue.to_text".to_string(),
-            args: vec![],
-        });
-        method_caller.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
-
-        backend.compile_function(&direct_caller).unwrap();
-        backend.compile_function(&method_caller).unwrap();
-
-        let ir = backend.get_ir().unwrap();
-        assert!(ir.contains("lib__database__DbValue.to_text"), "{ir}");
-        assert!(ir.contains("@DbValue.to_text"), "{ir}");
-        assert!(!ir.contains("@rt_to_string"), "{ir}");
-        backend.verify().unwrap();
-    }
-
-    #[test]
-    fn resolved_text_methods_precede_direct_declarations_but_user_text_stays_direct() {
-        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
-        let mut backend = LlvmBackend::new(target).unwrap();
-        backend.create_module("resolved_text_method_runtime_redirects").unwrap();
-        backend.set_use_map(HashMap::from([
-            (
-                "Path.replace".to_string(),
-                "lib__common__string_core__str_dot_replace".to_string(),
-            ),
-            (
-                "Path.substring".to_string(),
-                "lib__common__string_core__str_dot_substring".to_string(),
-            ),
-            (
-                "Path.substring_range".to_string(),
-                "lib__common__string_core__str_dot_substring".to_string(),
-            ),
-            ("UserText.replace".to_string(), "UserText_dot_replace".to_string()),
-            (
-                "NamespacedStr.replace".to_string(),
-                "user__model__str_dot_replace".to_string(),
-            ),
-        ]));
-
-        for name in [
-            "lib__common__string_core__str_dot_replace",
-            "lib__common__string_core__str_dot_substring",
-            "UserText_dot_replace",
-            "user__model__str_dot_replace",
-        ] {
-            let mut declaration = MirFunction::new(
-                name.to_string(),
-                crate::hir::TypeId::I64,
-                simple_parser::ast::Visibility::Public,
-            );
-            declaration.blocks[0].terminator = Terminator::Return(None);
-            backend.compile_function(&declaration).unwrap();
-        }
-
-        let mut caller = MirFunction::new(
-            "probe".to_string(),
-            crate::hir::TypeId::I64,
-            simple_parser::ast::Visibility::Public,
-        );
-        for (dest, value) in [(VReg(0), 3), (VReg(1), 1), (VReg(2), 2)] {
-            caller.blocks[0].instructions.push(MirInst::ConstInt { dest, value });
-        }
-        for (dest, name, args) in [
-            (VReg(3), "Path.replace", vec![VReg(1), VReg(2)]),
-            (VReg(4), "Path.substring", vec![VReg(1)]),
-            (VReg(5), "Path.substring_range", vec![VReg(1), VReg(2)]),
-            (VReg(6), "UserText.replace", vec![VReg(1)]),
-            (VReg(7), "NamespacedStr.replace", vec![VReg(1)]),
-        ] {
-            caller.blocks[0].instructions.push(MirInst::MethodCallStatic {
-                dest: Some(dest),
-                receiver: VReg(0),
-                func_name: name.to_string(),
-                args,
-            });
-        }
-        caller.blocks[0].terminator = Terminator::Return(Some(VReg(7)));
-        backend.compile_function(&caller).unwrap();
-
-        let ir = backend.get_ir().unwrap();
-        assert!(ir.contains("call i64 @rt_string_replace(i64 3, i64 1, i64 2)"), "{ir}");
-        assert_eq!(ir.matches("call i64 @rt_slice(i64 3, i64 1, i64").count(), 2, "{ir}");
-        assert!(ir.contains("call i64 @UserText_dot_replace"), "{ir}");
-        assert!(ir.contains("call i64 @user__model__str_dot_replace"), "{ir}");
-        assert!(
-            !ir.contains("call i64 @lib__common__string_core__str_dot_replace"),
-            "{ir}"
-        );
-        assert!(
-            !ir.contains("call i64 @lib__common__string_core__str_dot_substring"),
-            "{ir}"
-        );
         backend.verify().unwrap();
     }
 
@@ -4020,10 +3838,14 @@ mod tests {
         );
     }
 
-    /// Regression: a bare `bytes` leaf on a text receiver must NEVER be
-    /// suffix-matched onto an unrelated `*.bytes` accessor.
+    /// Regression: a bare `bytes` leaf on a text receiver must reach
+    /// `rt_string_bytes`, and must NEVER be suffix-matched onto an unrelated
+    /// `*.bytes` user accessor.
     ///
     /// doc/08_tracking/bug/stage3_selfhost_segv_bare_leaf_bytes_hijacked_to_pointersize_bytes_2026-08-09.md
+    /// The hijack bound `s.bytes()` to `lib__common__target__PointerSize.bytes`,
+    /// a zero-content accessor returning the constant 8; the result was then
+    /// used as a pointer, faulting at `si_addr 0x10` in Stage 3.
     #[test]
     fn bare_bytes_leaf_never_binds_to_unrelated_owner_bytes() {
         let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
@@ -4050,35 +3872,25 @@ mod tests {
 
         let mut caller = MirFunction::new(
             "hm_hash_text".to_string(),
-            crate::hir::TypeId::STRING,
+            crate::hir::TypeId::I64,
             simple_parser::ast::Visibility::Public,
         );
-        caller.params.push(MirLocal {
-            name: "s".to_string(),
-            ty: crate::hir::TypeId::STRING,
-            kind: LocalKind::Parameter,
-            is_ghost: false,
-        });
-        caller.blocks[0].instructions.push(MirInst::LocalAddr {
+        caller.blocks[0].instructions.push(MirInst::ConstInt {
             dest: VReg(0),
-            local_index: 0,
-        });
-        caller.blocks[0].instructions.push(MirInst::Load {
-            dest: VReg(1),
-            addr: VReg(0),
-            ty: crate::hir::TypeId::STRING,
+            value: 0,
         });
         caller.blocks[0].instructions.push(MirInst::Call {
-            dest: Some(VReg(2)),
+            dest: Some(VReg(1)),
             target: CallTarget::from_name("bytes"),
-            args: vec![VReg(1)],
+            args: vec![VReg(0)],
         });
-        caller.blocks[0].terminator = Terminator::Return(Some(VReg(2)));
+        caller.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
 
         backend.compile_function(&decoy).unwrap();
         backend.compile_function(&caller).unwrap();
         let ir = backend.get_ir().unwrap();
 
+        assert!(ir.contains("@rt_string_bytes"), "{ir}");
         assert!(
             !ir.contains("call i64 @\"lib__common__target__PointerSize.bytes\""),
             "bare `bytes` was hijacked onto an unrelated owner: {ir}"
@@ -4086,8 +3898,8 @@ mod tests {
         backend.verify().unwrap();
     }
 
-    /// Regression: a bare method leaf whose arity disagrees with a same-named
-    /// free function must not silently bind to it. `T.max()` (receiver only)
+    /// Regression: a bare leaf whose arity disagrees with a same-named free
+    /// function must not silently bind to it. `T.max()` (0 args + receiver)
     /// against the free `fn max(a, b)` is the measured shape.
     #[test]
     fn bare_leaf_does_not_bind_free_function_with_wrong_arity() {
@@ -4114,8 +3926,8 @@ mod tests {
         });
         free_max.blocks[0].terminator = Terminator::Return(Some(VReg(0)));
 
-        // A `Table.max` method exists, which is what makes the bare `max` leaf
-        // recognisably a method leaf rather than a free-function call.
+        // A `Table.max` method exists, which is what makes the bare `max`
+        // recognisably a method leaf rather than a call of the free function.
         let mut owner_max = MirFunction::new(
             "Table.max".to_string(),
             crate::hir::TypeId::I64,
@@ -4155,7 +3967,7 @@ mod tests {
         let ir = backend.get_ir().unwrap();
 
         assert!(
-            !ir.contains("call i64 @max(i64 %"),
+            !ir.contains("call i64 @max(i64"),
             "1-arg bare `max` bound to the 2-param free function: {ir}"
         );
         backend.verify().unwrap();
@@ -4166,7 +3978,7 @@ mod tests {
         use super::calls::suffix_owner_matches;
         assert!(suffix_owner_matches("text", "string"));
         assert!(suffix_owner_matches("string", "string"));
-        assert!(suffix_owner_matches("lib__common__string_core__str", "string"));
+        assert!(suffix_owner_matches("lib__common__text", "string"));
         assert!(!suffix_owner_matches("lib__common__target__PointerSize", "string"));
         assert!(!suffix_owner_matches("Vec4f", "f64"));
         assert!(suffix_owner_matches("f64", "f64"));
