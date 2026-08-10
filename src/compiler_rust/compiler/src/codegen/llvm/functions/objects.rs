@@ -188,31 +188,20 @@ impl LlvmBackend {
             .map_err(|e| crate::error::factory::llvm_build_failed("ptr_to_int", &e))?;
 
         // Untag, then branch-free null guard: a nil aggregate would fault.
-        let tag_mask = i64_type.const_int(7, false);
-        let untag_mask = i64_type.const_int(u64::MAX - 7, false);
+        let untag_mask = i64_type.const_int(u64::MAX - 1, false);
         let src_ptr_i64 = builder
             .build_and(src_tagged, untag_mask, "aggcopy_src_untag")
             .map_err(|e| crate::error::factory::llvm_build_failed("and untag", &e))?;
-        let one = i64_type.const_int(1, false);
-        let src_tag = builder
-            .build_and(src_tagged, tag_mask, "aggcopy_src_tag")
-            .map_err(|e| crate::error::factory::llvm_build_failed("and tag", &e))?;
-        let src_is_heap = builder
-            .build_int_compare(inkwell::IntPredicate::EQ, src_tag, one, "aggcopy_src_heap")
-            .map_err(|e| crate::error::factory::llvm_build_failed("icmp heap", &e))?;
-        let src_nonnull = builder
+        let is_null = builder
             .build_int_compare(
-                inkwell::IntPredicate::NE,
+                inkwell::IntPredicate::EQ,
                 src_ptr_i64,
                 i64_type.const_zero(),
-                "aggcopy_src_nonnull",
+                "aggcopy_src_null",
             )
-            .map_err(|e| crate::error::factory::llvm_build_failed("icmp nonnull", &e))?;
-        let src_is_valid = builder
-            .build_and(src_is_heap, src_nonnull, "aggcopy_src_valid")
-            .map_err(|e| crate::error::factory::llvm_build_failed("and valid", &e))?;
+            .map_err(|e| crate::error::factory::llvm_build_failed("icmp null", &e))?;
         let load_i64 = builder
-            .build_select(src_is_valid, src_ptr_i64, new_i64, "aggcopy_load_src")
+            .build_select(is_null, new_i64, src_ptr_i64, "aggcopy_load_src")
             .map_err(|e| crate::error::factory::llvm_build_failed("select", &e))?
             .into_int_value();
         let load_ptr = builder
@@ -228,9 +217,6 @@ impl LlvmBackend {
             let word = builder
                 .build_load(i64_type, from, "aggcopy_word")
                 .map_err(|e| crate::error::factory::llvm_build_failed("load word", &e))?;
-            let word = builder
-                .build_select(src_is_valid, word, i64_type.const_zero().into(), "aggcopy_word_guarded")
-                .map_err(|e| crate::error::factory::llvm_build_failed("select word", &e))?;
             builder
                 .build_store(to, word)
                 .map_err(|e| crate::error::factory::llvm_build_failed("store word", &e))?;
@@ -254,8 +240,9 @@ impl LlvmBackend {
             let inner = self.emit_aggregate_block_copy(word, field.byte_size, &field.nested, builder)?;
             // Replace only a live tagged heap handle; nil (0) and non-handle
             // words keep their original value.
+            let one = i64_type.const_int(1, false);
             let tag_bit = builder
-                .build_and(word, tag_mask, "aggcopy_deep_tag")
+                .build_and(word, one, "aggcopy_deep_tagbit")
                 .map_err(|e| crate::error::factory::llvm_build_failed("and tag bit", &e))?;
             let is_tagged = builder
                 .build_int_compare(inkwell::IntPredicate::EQ, tag_bit, one, "aggcopy_deep_istag")
@@ -328,7 +315,22 @@ impl LlvmBackend {
         let offset_val = self.context_ref().i32_type().const_int(byte_offset as u64, false);
         let field_ptr = unsafe { builder.build_gep(i8_type, base_ptr, &[offset_val], "field_ptr") }
             .map_err(|e| crate::error::factory::llvm_build_failed("gep", &e))?;
-        let llvm_field_ty = self.llvm_type(field_type)?;
+        // `llvm_type()` always returns the tagged-value integer type (by
+        // design, for the generic tagged-value ABI — see its doc comment),
+        // which for an f64/f32 field would load the field's raw IEEE-754
+        // bit pattern as an untagged IntValue instead of a FloatValue. That
+        // loses the float-ness at the load site, so any later consumer
+        // (e.g. FStringFormat's `val.is_float_value()` check) can no longer
+        // recover it and prints the bit pattern as an integer. Struct
+        // fields are stored packed by their *actual* declared type (see
+        // llvm_type_mapper / CTypeMapper), so float-typed fields must be
+        // loaded with the real float LLVM type, not the tagged-int type.
+        use crate::hir::TypeId as HirTypeId;
+        let llvm_field_ty: inkwell::types::BasicTypeEnum<'static> = match *field_type {
+            HirTypeId::F64 => self.context_ref().f64_type().into(),
+            HirTypeId::F32 => self.context_ref().f32_type().into(),
+            _ => self.llvm_type(field_type)?,
+        };
         let typed_ptr = builder
             .build_pointer_cast(
                 field_ptr,
