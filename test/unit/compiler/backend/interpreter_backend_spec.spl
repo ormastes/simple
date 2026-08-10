@@ -68,21 +68,37 @@ describe "Interpreter Backend":
     it "rejects unknown binary operators before evaluation":
         val flat_source = file_read("src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl")
         val hir_source = file_read("src/compiler/20.hir/hir_lowering/expressions.spl")
+        # The recovered-vs-fatal lowering-error triage lives in the driver's HIR
+        # pipeline module, NOT in driver.spl (now a 139-line shim). This oracle
+        # previously read driver.spl and went RED on the split, even though the
+        # guarantee was intact — retargeted to the file that owns the behaviour.
         val driver_source = file_read("src/compiler/80.driver/driver_hir_pipeline_lowering.spl")
         val guarded = flat_source.contains("assert false, \"unsupported flat binary operator kind") and hir_source.contains("self.error(\"invalid binary operator\"") and driver_source.contains("err.kind == LoweringErrorKind.Recovered")
         expect(guarded).to_equal(true)
+        # Recovered errors must DEMOTE to a warning, never be re-classified fatal.
+        expect(driver_source).to_contain("ctx.add_warning(_format_hir_lowering_error(name, err))")
         expect(driver_source.contains("fn _hir_lowering_error_is_fatal")).to_equal(false)
 
     it "keeps function lookup off shared optional mutation":
         val calls_source = file_read("src/compiler/70.backend/backend/interpreter_calls.spl")
         val interpreter_source = file_read("src/compiler/70.backend/backend/interpreter.spl")
 
+        # Neither call site may accumulate the hit into an optional that is
+        # mutated across loop iterations (the original defect).
         expect(calls_source.contains("var cf_target: HirFunction? = nil")).to_equal(false)
         expect(calls_source.contains("cf_target = Some(cf_f)")).to_equal(false)
-        expect(calls_source).to_contain("val cf_target_hit = self.resolve_function_by_name(f_t.name, ctx)")
         expect(interpreter_source.contains("var cf_named: HirFunction? = nil")).to_equal(false)
         expect(interpreter_source.contains("cf_named = Some(cf_f2)")).to_equal(false)
-        expect(interpreter_source).to_contain("val cf_named_hit = self.resolve_function_by_name(cname_t, ctx)")
+        expect(calls_source.contains("HirFunction? = nil")).to_equal(false)
+        expect(interpreter_source.contains("HirFunction? = nil")).to_equal(false)
+
+        # The two former inline `var cf_*_index = -1` scans were centralized into
+        # one resolver. It must still carry the index-based idiom, and BOTH call
+        # sites must route through it rather than re-rolling their own scan.
+        expect(calls_source).to_contain("fn resolve_function_by_name(name: text, ctx: EvalContext) -> HirFunction?:")
+        expect(calls_source).to_contain("var found_index = -1")
+        expect(calls_source).to_contain("self.resolve_function_by_name(f_t.name, ctx)")
+        expect(interpreter_source).to_contain("self.resolve_function_by_name(cname_t, ctx)")
 
     it "uses runtime enum discriminants for struct-shadowed variants":
         val source = file_read("src/compiler/70.backend/backend/interpreter.spl")
@@ -96,6 +112,43 @@ describe "Interpreter Backend":
         val source = file_read("src/compiler/70.backend/backend/env.spl")
         expect(source).to_contain("self.scopes.pop()")
         expect(source.contains("self.scopes = self.scopes[0:last_idx]")).to_equal(false)
+
+    it "tears down a popped scope so its names stop resolving":
+        # Behavioral oracle for pop_scope. The source-grep above only proves a
+        # spelling; this proves teardown actually happens. `[Dict].pop()`
+        # mutates the receiver IN PLACE and returns the removed element, so
+        # `self.scopes.pop()` as a bare statement is correct and a write-back
+        # (`self.scopes = self.scopes.pop()`) would instead assign the removed
+        # scope over the array. Both halves are asserted here.
+        var env = Environment.new()
+        env.define("outer", Value.Int(1))
+
+        env.push_scope()
+        expect(env.scopes.len()).to_equal(2)
+        env.define("inner", Value.Int(2))
+        assert_true(env.lookup("inner").?)
+
+        env.pop_scope()
+        # depth returns to its prior value ...
+        expect(env.scopes.len()).to_equal(1)
+        # ... the popped scope's name no longer resolves ...
+        assert_false(env.lookup("inner").?)
+        # ... and the surviving outer scope is intact (catches a write-back
+        # that would clobber `scopes` with the removed element).
+        match env.lookup("outer"):
+            case Some(v):
+                match v:
+                    case Value.Int(value): expect(value).to_equal(1)
+                    case _: expect(false).to_equal(true)
+            case _: expect(false).to_equal(true)
+
+    it "keeps the global scope when pop_scope underflows":
+        var env = Environment.new()
+        env.define("only", Value.Int(7))
+        env.pop_scope()
+        env.pop_scope()
+        expect(env.scopes.len()).to_equal(1)
+        assert_true(env.lookup("only").?)
 
     it "snapshots visible closure locals with inner shadowing":
         var env = Environment.new()
