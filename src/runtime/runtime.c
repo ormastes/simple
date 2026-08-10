@@ -960,13 +960,20 @@ int rt_file_is_regular_no_follow(const char* path) {
  * Symlinks are followed (stat, not lstat): the caller wants to know whether
  * the path ultimately resolves to a character device, not whether the leaf
  * entry itself is one. */
-int rt_file_is_char_device(const char* path) {
+int rt_file_is_char_device(const uint8_t* path_ptr, uint64_t path_len) {
 #if defined(_WIN32)
-    (void)path;
+    (void)path_ptr; (void)path_len;
     return 0;
 #else
+    /* The compiler emits the two-argument (ptr, len) form for `text` externs
+     * (runtime_sffi.rs / src/compiler/50.mir/text_extern_abi.spl); a Simple
+     * `text` is NOT NUL-terminated, so the buffer must be copied. */
+    char buf[4096];
+    if (!path_ptr || path_len >= sizeof(buf)) return 0;
+    memcpy(buf, path_ptr, (size_t)path_len);
+    buf[(size_t)path_len] = '\0';
     struct stat st;
-    return path && stat(path, &st) == 0 && S_ISCHR(st.st_mode);
+    return stat(buf, &st) == 0 && S_ISCHR(st.st_mode);
 #endif
 }
 

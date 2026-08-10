@@ -754,7 +754,7 @@ const char* rt_file_read_text(const char* path);
 int64_t     rt_file_read_text_rv(int64_t path);
 int         rt_file_exists(const char* path);
 int         rt_file_is_regular_no_follow(const char* path);
-int         rt_file_is_char_device(const char* path);
+int         rt_file_is_char_device(const uint8_t* path_ptr, uint64_t path_len);
 int         rt_dir_exists(const char* path);
 int         rt_file_write(const char* path, const char* content);
 int64_t     rt_file_atomic_write(int64_t path_value, int64_t content_value);

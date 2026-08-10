@@ -21,10 +21,17 @@
  * doc/03_plan/runtime/native_binding/interpreter_extern_registration_lanes.md
  * lane R2.
  *
- * `rt_file_is_char_device` is also copied here because the Rust seed/JIT
- * runtime deliberately does not link runtime.c or runtime_native.c.  Its
- * caller uses this no-shell stat(2) probe to decide whether a DRM path is a
- * device; a missing definition drops an entire JIT module to the interpreter.
+ * `rt_file_is_char_device` USED to be copied here for the same reason, but
+ * it was a DUPLICATE with an INCOMPATIBLE ABI: this copy took a single
+ * NUL-terminated `const char*` while the compiler emits, and the Rust
+ * runtime's own canonical definition
+ * (compiler_rust/runtime/src/value/sffi/file_io/metadata.rs) accepts, the
+ * two-argument `(ptr, len)` form (runtime_sffi.rs, text_extern_abi.spl).
+ * Under -z muldefs this copy silently WON in the seed/JIT and received a
+ * non-NUL-terminated pointer, so `/dev/zero` and `/dev/null` reported as
+ * NOT char devices.  The Rust definition now provides the symbol; do not
+ * re-add a C copy here.  See
+ * doc/08_tracking/bug/rt_file_is_char_device_dejit_and_dual_abi_2026-08-10.md
  *
  * Both families are fixed-value capability stubs (no real GL or oneAPI/SYCL
  * binding exists anywhere in this tree), so there is no live logic here to
@@ -34,19 +41,6 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include <sys/stat.h>
-
-/* Mirrors runtime.c and runtime_native.c.  stat follows a DRM-node symlink;
- * that is intentional because callers need the resolved node's kind. */
-int rt_file_is_char_device(const char* path) {
-#if defined(_WIN32)
-    (void)path;
-    return 0;
-#else
-    struct stat st;
-    return path && stat(path, &st) == 0 && S_ISCHR(st.st_mode);
-#endif
-}
 
 /* oneAPI */
 bool rt_oneapi_init(void) { return false; }
