@@ -67,3 +67,41 @@ missing resolver, so `browser_engine`'s animation controller could hold
 `[CSSDeclaration]` for diffing and call the cascade to produce a (1) for paint,
 removing the second `ComputedStyle` name. (3) should be renamed rather than
 merged — it is a style *encoding*, not a style.
+
+## 2026-08-10 — unblock condition re-verified after `blink.style.cascade` landed
+
+`src/lib/blink/style/cascade.spl` now exists and resolves
+`CssStyleSheet` + parent style → (1) `blink.entity.computed_style.ComputedStyle`,
+with inheritance, specificity, `!important` and source order. The nominal
+unblock condition is therefore met. **The merge is still NOT done**, for two
+concrete reasons, not a judgment call:
+
+1. **Ownership.** The merge would have to edit
+   `src/lib/gc_async_mut/gpu/browser_engine/style/computed.spl` and its
+   animation controller. That path is owned by another lane and is explicitly
+   off-limits to the cascade task, so this could not be attempted.
+2. **The resolver is not yet callable end-to-end.** `resolve_style` cannot
+   currently resolve any non-empty stylesheet, because
+   `blink.css_parser.selector` is uncallable — `[String]()` at three sites makes
+   every entry point die with `semantic: value is not callable`
+   (`css_selector_spec` is 0/15). See
+   `blink_selector_engine_totally_red_and_dom_node_builder_missing_2026-08-10.md`.
+   Handing `browser_engine` a resolver that cannot match a selector would move
+   a working animation-diff path onto a broken one.
+
+**Merge intent, for whoever owns `browser_engine/**`** (do this, do not add a
+fourth type):
+
+- Keep `browser_engine`'s `[CSSDeclaration]` list as the *unresolved* animation
+  keyframe/diff input, and **rename** it away from `ComputedStyle` — e.g.
+  `DeclarationBlock` — since it is not a computed style.
+- At the point where `browser_engine` needs a paintable style, call
+  `std.blink.style.cascade.resolve_style(...)` and hold the resulting (1).
+- Prerequisite: Defects 1 and 2 in the record above must be fixed first, so the
+  cascade can actually match selectors.
+- (3) `ComputedStyleHot` stays as-is but should be renamed to say "encoding"
+  (e.g. `ComputedStyleSoA`); it is not a merge candidate.
+
+Status stays OPEN. Still: do NOT add a fourth `ComputedStyle`, and note that
+FOUR `LayoutBox`/box variants already exist — the cascade added no style or box
+type of its own, it consumes (1) unchanged.

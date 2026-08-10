@@ -13,7 +13,7 @@ StyleResolver behaviour for a core set of CSS properties.
 """
 
 use std.spipe.*
-use std.blink.dom.node.{DomTree, dom_tree_new, NodeType}
+use std.blink.dom.node.{DomTree, DomNode, dom_tree_new, NodeType, Attribute}
 use std.blink.dom.interaction_state.{
     InteractionState,
     interaction_state_empty, interaction_state_with_hover
@@ -97,6 +97,172 @@ describe "apply_declaration":
         # display should remain the default (Inline)
         val display_ok = updated.display == Display.Inline
         expect(display_ok).to_equal(true)
+
+# ---------------------------------------------------------------------------
+# Cascade-order coverage.
+#
+# These build the DomTree from its constructors rather than the `dom_tree_new`
+# builder API, because that API does not exist yet — see
+# doc/08_tracking/bug/blink_selector_engine_totally_red_and_dom_node_builder_missing_2026-08-10.md
+# The three `resolve_style` / `resolve_style_with_state` examples below that DO
+# use the builder stay RED on purpose until it lands; these examples exercise
+# the same resolver through the types that exist today. They are themselves RED
+# on a second, unrelated defect filed in that same record: `[String]()` in
+# blink/css_parser/selector.spl makes the whole selector engine uncallable
+# (css_selector_spec is 0/15 for the same reason).
+# ---------------------------------------------------------------------------
+
+# One `<div class="btn" id="go">` under a document root.
+fn _cascade_fixture_tree() -> DomTree:
+    val root = DomNode(
+        id: 0, node_type: NodeType.Document, tag_name: "", attributes: [],
+        children: [1], parent: -1, text_content: ""
+    )
+    val attrs = [
+        Attribute(name: "class", value: "btn"),
+        Attribute(name: "id", value: "go")
+    ]
+    val el = DomNode(
+        id: 1, node_type: NodeType.Element, tag_name: "div", attributes: attrs,
+        children: [], parent: 0, text_content: ""
+    )
+    DomTree(nodes: [root, el], root: 0)
+
+# A one-declaration rule.
+fn _cascade_rule(sel: text, prop: text, v: text, imp: bool) -> CssStyleRule:
+    var ds: [CssDeclaration] = []
+    ds.push(CssDeclaration(property: prop, value: v, important: imp))
+    CssStyleRule(selector: sel, declarations: ds)
+
+fn _cascade_sheet(rs: [CssStyleRule]) -> CssStyleSheet:
+    CssStyleSheet(rules: rs, errors: [])
+
+# @manual_section: Cascade ordering
+describe "resolve_style cascade order":
+    """
+    As a browser engine, when several rules set the same property on one
+    element, I want the winner picked by the CSS cascade — !important first,
+    then specificity, then source order — so that pages render the way their
+    authors specified rather than the way the stylesheet happens to be sorted.
+    """
+
+    # @req REQ-BLINK-CASCADE-SPECIFICITY
+    it "the most specific selector wins even when it is listed first":
+        step("author three rules that all set colour on the same div: #go blue, .btn green, div red")
+        val tree = _cascade_fixture_tree()
+        var rs: [CssStyleRule] = []
+        rs.push(_cascade_rule("#go", "color", "blue", false))
+        rs.push(_cascade_rule(".btn", "color", "green", false))
+        rs.push(_cascade_rule("div", "color", "red", false))
+
+        step("resolve the div's style")
+        val result = resolve_style(tree, 1, computed_style_default(), _cascade_sheet(rs))
+
+        step("expect the id rule to win: blue, not the last-listed red")
+        # #go is (1,0,0), .btn (0,1,0), div (0,0,1) — the id rule outranks both
+        # despite appearing first in source order.
+        expect(result.color.b > 0.99).to_equal(true)
+        expect(result.color.r < 0.01).to_equal(true)
+        expect(result.color.g < 0.01).to_equal(true)
+
+    # @req REQ-BLINK-CASCADE-IMPORTANT
+    it "an !important declaration beats a more specific normal one":
+        step("author `#go { color: blue }` and `div { color: red !important }`")
+        val tree = _cascade_fixture_tree()
+        var rs: [CssStyleRule] = []
+        rs.push(_cascade_rule("#go", "color", "blue", false))
+        rs.push(_cascade_rule("div", "color", "red", true))
+
+        step("resolve the div's style")
+        val result = resolve_style(tree, 1, computed_style_default(), _cascade_sheet(rs))
+
+        step("expect red: !important outranks the id selector entirely")
+        expect(result.color.r > 0.99).to_equal(true)
+        expect(result.color.b < 0.01).to_equal(true)
+
+    # @req REQ-BLINK-CASCADE-SOURCE-ORDER
+    it "at equal specificity the later rule wins":
+        step("author `div { color: red }` then `div { color: blue }`")
+        val tree = _cascade_fixture_tree()
+        var rs: [CssStyleRule] = []
+        rs.push(_cascade_rule("div", "color", "red", false))
+        rs.push(_cascade_rule("div", "color", "blue", false))
+
+        step("resolve the div's style")
+        val result = resolve_style(tree, 1, computed_style_default(), _cascade_sheet(rs))
+
+        step("expect blue: the tie is broken by source order, last wins")
+        expect(result.color.b > 0.99).to_equal(true)
+        expect(result.color.r < 0.01).to_equal(true)
+
+# @manual_section: Inheritance
+describe "resolve_style inheritance":
+    """
+    As a browser engine, I want inherited properties to flow down from the
+    parent while non-inherited ones restart at their initial value, so that
+    setting a colour on a container tints its text without also making every
+    descendant a block box.
+    """
+
+    # @req REQ-BLINK-CASCADE-INHERITANCE
+    it "colour inherits from the parent while display restarts at its initial value":
+        step("give the parent red text and a block display, with no rules matching the child")
+        val tree = _cascade_fixture_tree()
+        val base = computed_style_default()
+        val parent = ComputedStyle(
+            display: Display.Block,
+            position: base.position,
+            overflow: base.overflow,
+            visibility: base.visibility,
+            text_align: TextAlign.Center,
+            opacity: base.opacity,
+            color: sk_color4f(1.0, 0.0, 0.0, 1.0),
+            background_color: sk_color4f(0.0, 1.0, 0.0, 1.0),
+            margin_left: base.margin_left,
+            margin_right: base.margin_right
+        )
+        var empty: [CssStyleRule] = []
+
+        step("resolve the child against an empty stylesheet")
+        val result = resolve_style(tree, 1, parent, _cascade_sheet(empty))
+
+        step("expect inherited colour and text-align to carry over")
+        expect(result.color.r > 0.99).to_equal(true)
+        expect(result.text_align == TextAlign.Center).to_equal(true)
+
+        step("expect non-inherited display and background to be back at their initial values")
+        expect(result.display == Display.Inline).to_equal(true)
+        expect(result.background_color.a < 0.01).to_equal(true)
+
+# @manual_section: Interaction state
+describe "resolve_style_with_state on a literal tree":
+    """
+    As a browser engine, I want `:hover` rules to apply only while the pointer
+    is over the element, so hover styling appears and disappears with the
+    pointer rather than sticking.
+    """
+
+    # @req REQ-BLINK-CASCADE-HOVER
+    it "a :hover rule applies only while that node is the hovered node":
+        step("author `.btn:hover { background-color: red }`")
+        val tree = _cascade_fixture_tree()
+        var rs: [CssStyleRule] = []
+        rs.push(_cascade_rule(".btn:hover", "background-color", "red", false))
+        val sheet = _cascade_sheet(rs)
+        val parent = computed_style_default()
+
+        step("resolve with no node hovered")
+        val idle = resolve_style_with_state(tree, 1, parent, sheet, interaction_state_empty())
+
+        step("expect the background to stay at the initial transparent value")
+        expect(idle.background_color.r < 0.99).to_equal(true)
+
+        step("resolve again with this node hovered")
+        val hovered = resolve_style_with_state(tree, 1, parent, sheet, interaction_state_with_hover(1))
+
+        step("expect the background to become red")
+        expect(hovered.background_color.r > 0.99).to_equal(true)
+        expect(hovered.background_color.a > 0.99).to_equal(true)
 
 describe "resolve_style":
     it "rule matching div sets its color":
