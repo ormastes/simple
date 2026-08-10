@@ -123,6 +123,43 @@ than leaving it visible:
 The JIT `<special:N>` corruption (layer 2) is independently a defect and should
 be fixed regardless of which way layer 1 is decided.
 
+## Re-investigated 2026-08-10 — confirmed genuinely architectural, not declined-by-default
+
+Re-checked whether a minimal `.spl`-side validation fix exists (a type-check
+at the call boundary that rejects non-bool args to `bool` params) instead of
+accepting this doc's own "needs semantics decision" framing at face value.
+Searched `src/compiler/35.semantics/` and `src/compiler/20.hir/` for an
+existing call-argument type-checking pass to hook a `bool`-specific rejection
+into (`check_call_args`, `typecheck_call`, `validate_call_args`,
+`infer_call`) — none exists as a general mechanism; the only argument-type
+lint hits are `lint/duplicate_typed_args.spl` and `lint/primitive_api.spl`,
+neither of which checks argument-vs-parameter type compatibility at all.
+There is no boundary to attach a minimal, scoped `bool`-only check to without
+first building general call-site argument type-checking — that is exactly
+the "unmeasured repo-wide blast radius" the original analysis already
+identified, confirmed at the code level rather than asserted.
+
+The JIT half (`<special:N>` corruption) lives in the seed's native codegen
+per `optional_passed_to_bool_param_is_neither_coerced_nor_rejected_2026-08-04.md`'s
+own pin to `arg_binding.rs:84 coerce_param` — that file is
+`src/compiler_rust/**`, out of scope for `.spl`-side work and explicitly off
+limits for this pass.
+
+**Conclusion stands as originally characterized: this is architectural, not
+merely declined.** The two axes are independent and both need dedicated,
+larger-scoped work:
+1. A general call-argument type-checking pass in the pure-Simple semantics
+   layer (does not exist yet at all — this is new infrastructure, not a
+   one-line guard) — needed before a `bool`-specific rejection can be scoped
+   safely.
+2. A Rust-seed JIT fix to `coerce_param` so a wrong-typed value at minimum
+   doesn't get corrupted into a garbage `<special:N>` tag, independent of
+   whether layer 1 ever lands — this is `src/compiler_rust`, off limits here.
+
+No code change made in this pass; re-affirming the prior "needs semantics
+decision" status with the above as the concrete evidence trail (searched
+locations, why no minimal hook point exists, exact off-limits boundary).
+
 **Do not "fix" this by editing the specs.** That already happened:
 `auto_comprehensive_13_spec.spl:95` and `auto_comprehensive_24_spec.spl:95`
 have had `check(opt.?)` rewritten to `check(opt != nil)`, which is why those

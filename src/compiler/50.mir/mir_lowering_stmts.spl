@@ -1836,7 +1836,40 @@ impl MirLowering:
                 self.builder = b_cond
                 is_some_res ?? LocalId(id: 0)
             case _:
-                self.lower_expr(cond)
+                # Bug bare_optional_in_condition_position_wrong_branch: a bare
+                # `T?` used directly as a condition (no `.?`) used to fall
+                # straight through to `lower_expr`, which returns the raw
+                # payload/sentinel i64. `RT_NIL` is the non-zero sentinel `3`,
+                # so an ABSENT optional read as truthy under plain branching
+                # -- silently wrong, not merely permissive. This is a pure bug
+                # fix, not a semantics change: a present optional already
+                # branched correctly (any non-nil payload is truthy), so the
+                # only behavior that changes is the previously-wrong absent
+                # case, which now correctly takes the false branch. `.?` stays
+                # the required spelling for VALUE position; this only affects
+                # CONDITION position, matching the split this function's
+                # docstring already establishes for the `.?` case.
+                val cond_local = self.lower_expr(cond)
+                var cond_is_optional = false
+                if val cond_hir_type = self.find_local_hir_type(cond_local.id):
+                    match cond_hir_type.kind:
+                        case HirTypeKind.Optional(_):
+                            cond_is_optional = true
+                        case _:
+                            ()
+                if cond_is_optional:
+                    var b_bare_opt = self.builder
+                    val is_some_func_bare = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_is_some"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                            params: [MirType.i64()], return_type: MirType.bool(), is_variadic: false
+                        )))
+                    ))
+                    val is_some_res_bare = b_bare_opt.emit_call(is_some_func_bare, [mir_operand_copy(cond_local)], MirType.bool())
+                    self.builder = b_bare_opt
+                    is_some_res_bare ?? LocalId(id: 0)
+                else:
+                    cond_local
 
     me lower_if(cond: HirExpr, then_: HirBlock, else_: HirBlock?, expected_type: HirType?) -> LocalId:
         """Lower if expression."""
