@@ -642,7 +642,10 @@ bootstrap_stage3_directory_snapshot() {
     bootstrap_stage3_directory_snapshot_root=$2
     [ -d "$bootstrap_stage3_directory_snapshot_root" ] &&
         [ ! -L "$bootstrap_stage3_directory_snapshot_root" ] || return 1
-    perl -MDigest::SHA=sha256_hex -MFile::Find -e '
+    # Digest::SHA::addfile streams in binary mode.  Do not slurp authority
+    # artifacts here: bootstrap runtime archives can be hundreds of MiB, and
+    # the snapshot record intentionally needs only their SHA-256 digest.
+    perl -MDigest::SHA -MFile::Find -e '
         use strict;
         use warnings;
         my ($root) = @ARGV;
@@ -655,14 +658,12 @@ bootstrap_stage3_directory_snapshot() {
                     return if $absolute eq $root;
                     -l $absolute and die "authority symlink rejected\n";
                     return unless -f $absolute;
-                    open my $fh, "<:raw", $absolute or die "open\n";
-                    local $/;
-                    my $bytes = <$fh>;
-                    close $fh or die "close\n";
+                    my $sha = Digest::SHA->new(256);
+                    $sha->addfile($absolute, "b") or die "hash\n";
                     my $relative = substr($absolute, length($root) + 1);
                     push @records, join(
                         ":", "file-hex", unpack("H*", $relative),
-                        (-x $absolute ? 1 : 0), sha256_hex($bytes)
+                        (-x $absolute ? 1 : 0), $sha->hexdigest
                     );
                 },
             },
