@@ -225,9 +225,19 @@ mod cuda_driver {
         #[cfg(all(unix, not(target_os = "macos")))]
         const LIB_NAMES: &[&str] = &["libcuda.so.1", "libcuda.so"];
 
+        // `SIMPLE_CUDA_LIB` overrides the driver library name/path. Its purpose
+        // is to make the unavailable branch reachable on a machine that HAS a
+        // driver: pointing it at a bogus path must yield
+        // `SharedObjectInitFailed` (303), never a fabricated success.
+        let override_name = std::env::var("SIMPLE_CUDA_LIB").ok();
+        let names: Vec<&str> = match override_name.as_deref() {
+            Some(name) => vec![name],
+            None => LIB_NAMES.to_vec(),
+        };
+
         let mut lib = None;
-        for name in LIB_NAMES {
-            if let Ok(candidate) = unsafe { Library::new(name) } {
+        for name in &names {
+            if let Ok(candidate) = unsafe { Library::new(*name) } {
                 lib = Some(candidate);
                 break;
             }
