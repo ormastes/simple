@@ -77,3 +77,30 @@ There are two definitions of `gui_shell_run`/`gui_shell_run_sdl`
 (`src/app/editor/gui_shell.spl:53,72` and
 `src/app/editor/gui_shell_core.spl:67,86`). Whichever arm is added should make
 the intended owner explicit; the duplication is a separate concern.
+
+## Resolution (2026-08-10, stream M3)
+
+Fixed via option 1. `src/app/editor/main.spl` now has a `--gui` arm calling
+`gui_shell_run(session)` and a `--tui` arm calling `editor_tui_run(session)`,
+both built from `_editor_session_for(args)` and both placed AFTER the
+`--log-mode=json` early-return, matching the `--gui-sdl` shape from
+`9611cfb661d`. Dispatch is explicit-flag only — a bare `simple editor` and a
+`--log-mode=json` probe still return promptly without entering a shell loop
+(verified: the JSON probe returns immediately). `--tui` was already a known
+launch mode in `src/lib/editor/core/launch.spl`, so it does not trip the
+unknown-option path. The misleading "intended dispatch hooks" header comment
+is gone; `print_help()` now lists `--tui` as well.
+
+Verdicts (`src/compiler_rust/target/bootstrap/simple test --timeout 900`):
+
+- `editor_gui_spec.spl` — the target example `supports --gui flag for GUI mode`
+  now PASSES. File verdict `executed=80 passed=75 failed=5`; the 5 remaining
+  failures are unrelated and pre-existing (quick-switch picker, LSP rename
+  preview, and three MCP tool examples).
+- `editor_buffer_spec.spl` — the target example `calls editor_tui_run with
+  session` now PASSES. File verdict `executed=60 passed=56 failed=4`; the 4
+  remaining failures are unrelated and pre-existing (cursor edit ops, save/
+  save_as, folded header markers, normal-mode keys).
+
+Only `test/03_system/gui/` copies of these two specs exist; there is no
+`test/system/gui/` twin.
