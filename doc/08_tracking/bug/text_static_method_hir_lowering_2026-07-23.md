@@ -3,6 +3,24 @@
 **Found:** 2026-07-23, MCP native rebuild campaign (rMCP11).
 **Status:** OPEN — call site worked around (std.string_core.char_from_code).
 
+## Re-verification (2026-08-10)
+Re-checked against current `main`: `is_static_method_call` still lives in
+`src/compiler/35.semantics/resolve_strategies.spl` (now at line 291, was 271
+at last check — file has moved but the same primitive-receiver gap is intact:
+it still only recognizes `Class | Struct | Enum | Import` symbol kinds, never
+a builtin-type marker symbol). The root cause, the ~15-way `char_from_code`
+tier ambiguity, and the sibling-gap family (`i64.parse`, `f64.parse`,
+`*.from_le_bytes`, `i64.chr`, `text.new/empty/with_capacity/from_bytes/
+from_c_str/from_handle/from_ptr`) are unchanged and not fixed. No code change
+made this session: a correct fix still requires the same
+import-independent/cross-tier target-resolution policy change previously
+assessed as broader than a scoped resolve-pass rule, and two of the
+downstream files in the fix path
+(`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`,
+`src/compiler/50.mir/_MirLowering/module_lowering.spl`) are explicitly
+off-limits this session (owned by a concurrent agent). Status remains
+**OPEN**; workaround must stay in place.
+
 ## Symptom
 `text.from_char_code(ch)` in app.mcp.main_lazy_query_tools dies during
 native entry-closure HIR lowering with `unresolved name: text`: the receiver
