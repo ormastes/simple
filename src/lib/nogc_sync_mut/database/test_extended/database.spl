@@ -99,7 +99,12 @@ class TestDatabaseExtended:
             case Some(strings_table_value):
                 var strings_table = strings_table_value
                 strings_table.clear()
-                for (id, value) in self.interner.all_strings():
+                # Iterate via the uniquely-named db_interner_pairs(), NOT
+                # all_strings()/fields: shared names on `StringInterner`
+                # dispatch by name across the co-loaded same-name classes
+                # (test_runner mirror, seed Rust copy) and abort test-result
+                # persistence with a semantic error right after the summary.
+                for (id, value) in self.interner.db_interner_pairs():
                     val row = SdnRow.empty()
                     row.set("id", "{id}")
                     row.set("value", value)
@@ -314,7 +319,10 @@ class TestDatabaseExtended:
         for row in runs_table.rows:
             val status = row.get("status") ?? ""
             if status == "running":
-                val start_time = row.get("start_time") ?? "" .to_int_or(0)
+                # `?? "" .to_int_or(0)` binds as `?? ("".to_int_or(0))`, leaving
+                # start_time a STRING on a hit; `now - start_time` then aborts the
+                # whole persistence block with "cannot convert string to int".
+                val start_time = (row.get("start_time") ?? "0").parse_int() ?? 0
                 val age = now - start_time
                 if age > max_age_micros:
                     row.set("status", "crashed")
@@ -342,7 +350,7 @@ class TestDatabaseExtended:
         for row in runs_table.rows:
             val run_id = row.get("run_id") ?? ""
             if run_id != "":
-                val start_time = row.get("start_time") ?? "" .to_int_or(0)
+                val start_time = (row.get("start_time") ?? "0").parse_int() ?? 0
                 all_runs.push((run_id, start_time))
 
         # Sort by start_time descending (most recent first) - bubble sort

@@ -91,6 +91,18 @@ class StringInterner:
     fn all_strings() -> Dict<i32, text>:
         self.id_to_str
 
+    # Uniquely-named accessor for the save path. Several classes named
+    # `StringInterner` used to co-load under the test-runner lane and the
+    # seed interpreter resolves class members by NAME across modules, so
+    # shared names (all_strings/to_sdn/len/get) could dispatch into the
+    # wrong class body and abort test-result persistence with a semantic
+    # error. The colliders were renamed, but keep the save path on a name
+    # that exists only here so a future same-name class cannot break it.
+    # See doc/08_tracking/bug/
+    # interp_class_name_collision_breaks_test_db_persistence_2026-08-10.md
+    fn db_interner_pairs() -> Dict<i32, text>:
+        self.id_to_str
+
     # Load from SDN table
     static fn from_sdn(table: SdnTable) -> StringInterner:
         var interner = StringInterner(str_to_id: {}, id_to_str: {}, next_id: StringId(value: 0))
@@ -470,8 +482,17 @@ class SdnDatabase:
     me save() -> bool:
         var sections: [text] = []
 
-        # Write strings table first
-        val strings_table: SdnTable = self.interner.to_sdn()
+        # Write strings table first. Built via the uniquely-named
+        # db_interner_pairs() rather than interner.to_sdn(): shared method
+        # names on `StringInterner` can dispatch into a different co-loaded
+        # class of the same name (see note on db_interner_pairs) and abort
+        # the save with a semantic error.
+        val strings_table = SdnTable(name: "strings", columns: ["id", "value"], rows: [], index: {})
+        for (id, value) in self.interner.db_interner_pairs():
+            val row = SdnRow(fields: {}, _version: 0)
+            row.set("id", "{id}")
+            row.set("value", value)
+            strings_table.add_row(row)
         sections.push(strings_table.to_sdn())
 
         # Write all other tables
