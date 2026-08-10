@@ -44,6 +44,13 @@ EOF
 
 export SIMPLE_BOOTSTRAP_STAGE3_MEMORY_SAMPLE_INTERVAL_SECONDS=0
 export SIMPLE_BOOTSTRAP_STAGE3_PROCESS_SNAPSHOT="$process_fixture"
+runner_executable=$(readlink -f "$(command -v sh)")
+[ -x "$runner_executable" ] && [ ! -L "$runner_executable" ] ||
+    fail "could not resolve runner fixture executable"
+cat >"$test_dir/native-build" <<'EOF'
+sleep 2
+:
+EOF
 
 # Linux: earlyoom reserves 10% of total memory; added headroom must remain.
 low_fixture="$test_dir/linux-low"
@@ -66,6 +73,7 @@ set -e
 assert_value blocked status "$low_evidence"
 assert_value linux-host-below-reserve-plus-headroom reason "$low_evidence"
 assert_value 3 concurrent_process_count "$low_evidence"
+assert_value informational-only process_scan_effect "$low_evidence"
 assert_value 101 process_1_pid "$low_evidence"
 assert_value 'sh scripts/bootstrap/bootstrap-from-scratch.sh --jobs=2' \
     process_1_cmd "$low_evidence"
@@ -84,9 +92,10 @@ ready_evidence="$test_dir/linux-ready.env"
 export SIMPLE_BOOTSTRAP_STAGE3_MEMORY_SAMPLE_FIXTURE="$ready_fixture"
 bootstrap_stage3_memory_admission_preflight "$ready_evidence" ||
     fail "sufficient Linux memory was refused"
-sleep 1 &
+(CDPATH= cd -- "$test_dir" && exec "$runner_executable" native-build) &
 runner=$!
-bootstrap_stage3_memory_record_runner "$ready_evidence" "$runner" ||
+bootstrap_stage3_memory_record_runner "$ready_evidence" "$runner" \
+    "$runner_executable" ||
     fail "could not bind runner"
 wait "$runner"
 bootstrap_stage3_memory_verify_evidence "$ready_evidence" ||
@@ -94,6 +103,64 @@ bootstrap_stage3_memory_verify_evidence "$ready_evidence" ||
 assert_value ready status "$ready_evidence"
 assert_value 7340032 sample_3_cgroup_available_kib "$ready_evidence"
 assert_value "$runner" stage3_runner_pid "$ready_evidence"
+assert_value "$runner_executable" stage3_runner_executable "$ready_evidence"
+
+# The transcribed launcher publishes the PID that execs the requested binary,
+# not the background shell-function PID waiting around it.
+observed_evidence="$test_dir/observed-runner.env"
+bootstrap_stage3_memory_admission_preflight "$observed_evidence" ||
+    fail "observed-runner preflight failed"
+mkdir "$test_dir/observed-home" "$test_dir/observed-tmp"
+observed_pid_file="$test_dir/observed-runner.pid"
+BOOTSTRAP_STAGE3_RUNNER_PID_FILE="$observed_pid_file" \
+bootstrap_stage3_run_transcribed "$test_dir/observed.transcript" \
+    "$test_dir" "$test_dir/observed.log" "$test_dir/observed-home" \
+    "$test_dir/observed-tmp" /usr/bin:/bin -- \
+    "$runner_executable" native-build &
+observed_wrapper=$!
+observed_wait=0
+while [ ! -s "$observed_pid_file" ] && [ "$observed_wait" -lt 5 ]; do
+    sleep 1
+    observed_wait=$((observed_wait + 1))
+done
+[ -s "$observed_pid_file" ] || fail "launcher did not publish executable PID"
+observed_runner=$(sed -n '1p' "$observed_pid_file")
+[ "$observed_runner" != "$observed_wrapper" ] ||
+    fail "launcher published shell-function PID"
+observed_recorded=0
+observed_wait=0
+while [ "$observed_wait" -lt 5 ]; do
+    if bootstrap_stage3_memory_record_runner "$observed_evidence" \
+        "$observed_runner" "$runner_executable"; then
+        observed_recorded=1
+        break
+    fi
+    sleep 1
+    observed_wait=$((observed_wait + 1))
+done
+[ "$observed_recorded" -eq 1 ] || fail "actual executable PID was not accepted"
+wait "$observed_wrapper"
+bootstrap_stage3_memory_verify_evidence "$observed_evidence" ||
+    fail "observed executable evidence did not verify"
+
+# Both sample intervals are real and the third sample is a distinct final
+# pre-launch recheck.
+cadence_evidence="$test_dir/cadence.env"
+export SIMPLE_BOOTSTRAP_STAGE3_MEMORY_SAMPLE_INTERVAL_SECONDS=1
+cadence_started=$(date +%s)
+bootstrap_stage3_memory_admission_preflight "$cadence_evidence" ||
+    fail "cadence fixture was refused"
+cadence_finished=$(date +%s)
+[ $((cadence_finished - cadence_started)) -ge 2 ] ||
+    fail "three samples did not include both intervals"
+cadence_1=$(bootstrap_stage3_manifest_value sample_1_epoch "$cadence_evidence")
+cadence_2=$(bootstrap_stage3_manifest_value sample_2_epoch "$cadence_evidence")
+cadence_3=$(bootstrap_stage3_manifest_value sample_3_epoch "$cadence_evidence")
+[ $((cadence_2 - cadence_1)) -ge 1 ] &&
+    [ $((cadence_3 - cadence_2)) -ge 1 ] ||
+    fail "sample epochs do not prove 1->2 and 2->3 cadence"
+assert_value sample-3 prelaunch_recheck "$cadence_evidence"
+export SIMPLE_BOOTSTRAP_STAGE3_MEMORY_SAMPLE_INTERVAL_SECONDS=0
 
 linux_unknown_fixture="$test_dir/linux-cgroup-unknown"
 write_three "$linux_unknown_fixture" \
@@ -113,9 +180,10 @@ export SIMPLE_BOOTSTRAP_STAGE3_MEMORY_PLATFORM=Plan9
 export SIMPLE_BOOTSTRAP_STAGE3_MEMORY_SAMPLE_FIXTURE="$unknown_fixture"
 bootstrap_stage3_memory_admission_preflight "$unknown_evidence" ||
     fail "unknown provider blocked"
-sleep 1 &
+(CDPATH= cd -- "$test_dir" && exec "$runner_executable" native-build) &
 runner=$!
-bootstrap_stage3_memory_record_runner "$unknown_evidence" "$runner" ||
+bootstrap_stage3_memory_record_runner "$unknown_evidence" "$runner" \
+    "$runner_executable" ||
     fail "could not bind unknown runner"
 wait "$runner"
 bootstrap_stage3_memory_verify_evidence "$unknown_evidence" ||
@@ -130,6 +198,23 @@ bootstrap_stage3_memory_admission_preflight "$bad_evidence" ||
     fail "unparseable provider blocked"
 assert_value unknown status "$bad_evidence"
 assert_value provider-unparseable reason "$bad_evidence"
+
+# A live shell PID is not acceptable evidence for a different executable.
+fake_evidence="$test_dir/fake-runner.env"
+export SIMPLE_BOOTSTRAP_STAGE3_MEMORY_SAMPLE_FIXTURE="$ready_fixture"
+bootstrap_stage3_memory_admission_preflight "$fake_evidence" ||
+    fail "fake-runner preflight failed"
+sh -c 'sleep 2' &
+fake_pid=$!
+sleep_executable=$(readlink -f "$(command -v sleep)")
+set +e
+bootstrap_stage3_memory_record_runner "$fake_evidence" "$fake_pid" \
+    "$sleep_executable"
+fake_status=$?
+set -e
+wait "$fake_pid"
+[ "$fake_status" -ne 0 ] || fail "shell PID accepted as executable runner"
+assert_value no runner_recorded "$fake_evidence"
 
 # macOS primary and fallback parsers are independently injected.
 darwin_pressure="$test_dir/darwin-pressure"
@@ -176,6 +261,35 @@ set -e
 [ "$symlink_status" -eq 2 ] || fail "symlink evidence returned $symlink_status"
 [ "$(sed -n '1p' "$symlink_target")" = sentinel ] ||
     fail "symlink target was modified"
+
+# Dangling symlinks at both derived temporary targets are rejected before any
+# redirect can follow them.
+tmp_evidence="$test_dir/tmp-symlink.env"
+ln -s "$test_dir/missing-tmp-target" "${tmp_evidence}.tmp.$$"
+export SIMPLE_BOOTSTRAP_STAGE3_MEMORY_SAMPLE_FIXTURE="$ready_fixture"
+set +e
+bootstrap_stage3_memory_admission_preflight "$tmp_evidence"
+tmp_status=$?
+set -e
+[ "$tmp_status" -eq 2 ] || fail "dangling preflight temp symlink accepted"
+[ ! -e "$test_dir/missing-tmp-target" ] || fail "preflight temp target created"
+
+runner_link_evidence="$test_dir/runner-symlink.env"
+bootstrap_stage3_memory_admission_preflight "$runner_link_evidence" ||
+    fail "runner symlink preflight failed"
+ln -s "$test_dir/missing-runner-target" \
+    "${runner_link_evidence}.runner.$$"
+(CDPATH= cd -- "$test_dir" && exec "$runner_executable" native-build) &
+runner=$!
+set +e
+bootstrap_stage3_memory_record_runner "$runner_link_evidence" "$runner" \
+    "$runner_executable"
+runner_link_status=$?
+set -e
+wait "$runner"
+[ "$runner_link_status" -ne 0 ] || fail "dangling runner temp symlink accepted"
+[ ! -e "$test_dir/missing-runner-target" ] || fail "runner temp target created"
+assert_value no runner_recorded "$runner_link_evidence"
 
 bundle_snapshot="$test_dir/helper-bundle"
 bootstrap_stage3_helper_bundle_snapshot "$bundle_snapshot" ||

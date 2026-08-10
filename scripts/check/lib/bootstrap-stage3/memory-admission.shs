@@ -26,6 +26,10 @@ bootstrap_stage3_memory_sanitize_text() {
     printf '%s' "$1" | tr '\n\r' '__'
 }
 
+bootstrap_stage3_memory_epoch() {
+    date +%s 2>/dev/null
+}
+
 bootstrap_stage3_memory_earlyoom_percent_from_args() {
     printf '%s\n' "$1" | sed -n \
         -e 's/.*[[:space:]]-m[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
@@ -384,13 +388,13 @@ ${SIMPLE_BOOTSTRAP_STAGE3_PROCESS_SNAPSHOT:-}
             bootstrap_stage3_memory_is_uint "$bootstrap_stage3_memory_ppid" &&
             bootstrap_stage3_memory_is_uint "$bootstrap_stage3_memory_rss" || continue
         case "$bootstrap_stage3_memory_cmd" in
-            *simple*replay*missing-build-log.json*)
+            *'/simple replay missing-build-log.json'*)
                 bootstrap_stage3_memory_kind=replay-chain
                 bootstrap_stage3_memory_replay_count=$((bootstrap_stage3_memory_replay_count + 1)) ;;
             *scripts/bootstrap/bootstrap-from-scratch.sh*)
                 bootstrap_stage3_memory_kind=bootstrap
                 bootstrap_stage3_memory_bootstrap_count=$((bootstrap_stage3_memory_bootstrap_count + 1)) ;;
-            *simple*native-build*)
+            *'/simple native-build '*|*'/simple native-build')
                 bootstrap_stage3_memory_kind=native-build
                 bootstrap_stage3_memory_native_count=$((bootstrap_stage3_memory_native_count + 1)) ;;
             *) continue ;;
@@ -416,6 +420,7 @@ ${SIMPLE_BOOTSTRAP_STAGE3_PROCESS_SNAPSHOT:-}
     {
         echo 'process_scan_status=available'
         printf 'process_scan_source=%s\n' "$bootstrap_stage3_memory_process_source"
+        echo 'process_scan_effect=informational-only'
         printf 'concurrent_process_count=%s\n' "$bootstrap_stage3_memory_process_count"
         printf 'concurrent_bootstrap_count=%s\n' "$bootstrap_stage3_memory_bootstrap_count"
         printf 'concurrent_native_build_count=%s\n' "$bootstrap_stage3_memory_native_count"
@@ -437,6 +442,8 @@ bootstrap_stage3_memory_emit_sample() {
             "$bootstrap_stage3_memory_threshold"
         printf 'sample_%s_raw=%s\n' "$bootstrap_stage3_memory_emit_index" \
             "$(bootstrap_stage3_memory_sanitize_text "$bootstrap_stage3_memory_raw")"
+        printf 'sample_%s_epoch=%s\n' "$bootstrap_stage3_memory_emit_index" \
+            "$(bootstrap_stage3_memory_epoch)"
         printf 'sample_%s_total_kib=%s\n' "$bootstrap_stage3_memory_emit_index" \
             "$bootstrap_stage3_memory_total_kib"
         printf 'sample_%s_available_kib=%s\n' "$bootstrap_stage3_memory_emit_index" \
@@ -476,7 +483,8 @@ ${SIMPLE_BOOTSTRAP_DARWIN_MEMORY_MIN_PERCENT:-15}
         [ "$bootstrap_stage3_memory_darwin_min_percent" -le 99 ] || return 2
     bootstrap_stage3_memory_headroom_kib=$((bootstrap_stage3_memory_headroom_mib * 1024))
     bootstrap_stage3_memory_tmp="${bootstrap_stage3_memory_evidence}.tmp.$$"
-    [ ! -e "$bootstrap_stage3_memory_tmp" ] || return 2
+    [ ! -e "$bootstrap_stage3_memory_tmp" ] &&
+        [ ! -L "$bootstrap_stage3_memory_tmp" ] || return 2
     umask 077
     {
         echo 'schema=simple-bootstrap-stage3-memory-admission-v2'
@@ -513,15 +521,13 @@ ${SIMPLE_BOOTSTRAP_DARWIN_MEMORY_MIN_PERCENT:-15}
             bootstrap_stage3_memory_final_status=unknown
             bootstrap_stage3_memory_final_reason=$bootstrap_stage3_memory_reason
         fi
-        if [ "$bootstrap_stage3_memory_i" -eq 1 ] &&
-            [ "$bootstrap_stage3_memory_interval" -gt 0 ]; then
-            sleep "$bootstrap_stage3_memory_interval"
-        elif [ "$bootstrap_stage3_memory_i" -eq 2 ]; then
+        if [ "$bootstrap_stage3_memory_i" -eq 2 ]; then
             bootstrap_stage3_memory_append_processes \
                 "$bootstrap_stage3_memory_tmp" || {
                 {
                     echo 'process_scan_status=unavailable'
                     echo 'process_scan_source=unavailable'
+                    echo 'process_scan_effect=informational-only'
                     echo 'concurrent_process_count=0'
                     echo 'concurrent_bootstrap_count=0'
                     echo 'concurrent_native_build_count=0'
@@ -529,12 +535,17 @@ ${SIMPLE_BOOTSTRAP_DARWIN_MEMORY_MIN_PERCENT:-15}
                 } >>"$bootstrap_stage3_memory_tmp"
             }
         fi
+        if [ "$bootstrap_stage3_memory_i" -lt 3 ] &&
+            [ "$bootstrap_stage3_memory_interval" -gt 0 ]; then
+            sleep "$bootstrap_stage3_memory_interval"
+        fi
         bootstrap_stage3_memory_i=$((bootstrap_stage3_memory_i + 1))
     done
     {
         printf 'provider=%s\n' "$bootstrap_stage3_memory_final_provider"
         printf 'status=%s\n' "$bootstrap_stage3_memory_final_status"
         printf 'reason=%s\n' "$bootstrap_stage3_memory_final_reason"
+        echo 'prelaunch_recheck=sample-3'
         echo 'runner_recorded=no'
     } >>"$bootstrap_stage3_memory_tmp" || {
         rm -f "$bootstrap_stage3_memory_tmp"; return 2; }
@@ -550,14 +561,51 @@ ${SIMPLE_BOOTSTRAP_DARWIN_MEMORY_MIN_PERCENT:-15}
     esac
 }
 
-bootstrap_stage3_memory_record_runner() {
+bootstrap_stage3_memory_runner_identity() {
     [ "$#" -eq 2 ] || return 1
+    bootstrap_stage3_memory_identity_pid=$1
+    bootstrap_stage3_memory_identity_expected=$2
+    [ -x "$bootstrap_stage3_memory_identity_expected" ] &&
+        [ ! -L "$bootstrap_stage3_memory_identity_expected" ] || return 1
+    bootstrap_stage3_memory_identity_expected=$(bootstrap_stage3_canonical_file \
+        "$bootstrap_stage3_memory_identity_expected") || return 1
+    bootstrap_stage3_memory_identity_args=$(ps -p "$bootstrap_stage3_memory_identity_pid" \
+        -o args= 2>/dev/null || true)
+    case "$bootstrap_stage3_memory_identity_args" in
+        "$bootstrap_stage3_memory_identity_expected native-build "*|\
+        "$bootstrap_stage3_memory_identity_expected native-build") ;;
+        *) return 1 ;;
+    esac
+    if [ -e "/proc/$bootstrap_stage3_memory_identity_pid/exe" ]; then
+        bootstrap_stage3_memory_identity_actual=$(readlink \
+            "/proc/$bootstrap_stage3_memory_identity_pid/exe" 2>/dev/null) || return 1
+        [ "$bootstrap_stage3_memory_identity_actual" = \
+            "$bootstrap_stage3_memory_identity_expected" ] || return 1
+    else
+        bootstrap_stage3_memory_identity_comm=$(ps -p \
+            "$bootstrap_stage3_memory_identity_pid" -o comm= 2>/dev/null || true)
+        case "$bootstrap_stage3_memory_identity_comm" in
+            "$bootstrap_stage3_memory_identity_expected"|\
+            "$(basename -- "$bootstrap_stage3_memory_identity_expected")") ;;
+            *) return 1 ;;
+        esac
+    fi
+    return 0
+}
+
+bootstrap_stage3_memory_record_runner() {
+    [ "$#" -eq 3 ] || return 1
     bootstrap_stage3_memory_evidence=$1
     bootstrap_stage3_memory_runner_pid=$2
+    bootstrap_stage3_memory_runner_expected=$3
     bootstrap_stage3_memory_safe_evidence_path "$bootstrap_stage3_memory_evidence" &&
         [ -f "$bootstrap_stage3_memory_evidence" ] || return 1
     bootstrap_stage3_memory_is_uint "$bootstrap_stage3_memory_runner_pid" || return 1
     [ "$bootstrap_stage3_memory_runner_pid" -gt 0 ] || return 1
+    bootstrap_stage3_memory_runner_identity "$bootstrap_stage3_memory_runner_pid" \
+        "$bootstrap_stage3_memory_runner_expected" || return 1
+    bootstrap_stage3_memory_runner_expected=$(bootstrap_stage3_canonical_file \
+        "$bootstrap_stage3_memory_runner_expected") || return 1
     [ "$(bootstrap_stage3_manifest_value runner_recorded \
         "$bootstrap_stage3_memory_evidence")" = no ] || return 1
     bootstrap_stage3_memory_runner_record=$(ps -p "$bootstrap_stage3_memory_runner_pid" \
@@ -573,12 +621,20 @@ bootstrap_stage3_memory_record_runner() {
     bootstrap_stage3_memory_runner_cmd=$(bootstrap_stage3_memory_sanitize_text \
         "$bootstrap_stage3_memory_runner_cmd")
     bootstrap_stage3_memory_runner_tmp="${bootstrap_stage3_memory_evidence}.runner.$$"
+    [ ! -e "$bootstrap_stage3_memory_runner_tmp" ] &&
+        [ ! -L "$bootstrap_stage3_memory_runner_tmp" ] || return 1
     sed 's/^runner_recorded=no$/runner_recorded=yes/' \
         "$bootstrap_stage3_memory_evidence" >"$bootstrap_stage3_memory_runner_tmp" || return 1
     {
         printf 'stage3_runner_pid=%s\n' "$bootstrap_stage3_memory_runner_pid"
         printf 'stage3_runner_rss_kib=%s\n' "$bootstrap_stage3_memory_runner_rss"
         printf 'stage3_runner_cmd=%s\n' "$bootstrap_stage3_memory_runner_cmd"
+        printf 'stage3_runner_executable=%s\n' \
+            "$bootstrap_stage3_memory_runner_expected"
+        printf 'stage3_runner_executable_sha256=%s\n' \
+            "$(bootstrap_stage3_hash_file "$bootstrap_stage3_memory_runner_expected")"
+        printf 'stage3_runner_observed_epoch=%s\n' \
+            "$(bootstrap_stage3_memory_epoch)"
         echo 'evidence_finalized=yes'
     } >>"$bootstrap_stage3_memory_runner_tmp" || {
         rm -f "$bootstrap_stage3_memory_runner_tmp"; return 1; }
@@ -594,7 +650,9 @@ bootstrap_stage3_memory_verify_evidence() {
             "$bootstrap_stage3_memory_verify" ] || return 1
     for bootstrap_stage3_memory_key in schema stage sample_count provider status \
         reason runner_recorded stage3_runner_pid stage3_runner_rss_kib \
-        stage3_runner_cmd evidence_finalized process_scan_status \
+        stage3_runner_cmd stage3_runner_executable \
+        stage3_runner_executable_sha256 stage3_runner_observed_epoch \
+        evidence_finalized process_scan_status process_scan_effect \
         process_scan_source concurrent_process_count concurrent_bootstrap_count \
         concurrent_native_build_count runaway_replay_chain_count; do
         bootstrap_stage3_manifest_value "$bootstrap_stage3_memory_key" \
@@ -610,7 +668,7 @@ bootstrap_stage3_memory_verify_evidence() {
         status "$bootstrap_stage3_memory_verify") || return 1
     bootstrap_stage3_memory_verify_derived=ready
     for bootstrap_stage3_memory_index in 1 2 3; do
-        for bootstrap_stage3_memory_suffix in provider status reason threshold raw; do
+        for bootstrap_stage3_memory_suffix in provider status reason threshold raw epoch; do
             bootstrap_stage3_manifest_value \
                 "sample_${bootstrap_stage3_memory_index}_${bootstrap_stage3_memory_suffix}" \
                 "$bootstrap_stage3_memory_verify" >/dev/null || return 1
@@ -626,8 +684,51 @@ bootstrap_stage3_memory_verify_evidence() {
     done
     [ "$bootstrap_stage3_memory_verify_final" = \
         "$bootstrap_stage3_memory_verify_derived" ] || return 1
+    [ "$(bootstrap_stage3_manifest_value prelaunch_recheck \
+        "$bootstrap_stage3_memory_verify")" = sample-3 ] || return 1
+    bootstrap_stage3_memory_verify_interval=$(bootstrap_stage3_manifest_value \
+        sample_interval_seconds "$bootstrap_stage3_memory_verify") || return 1
+    bootstrap_stage3_memory_is_uint "$bootstrap_stage3_memory_verify_interval" || return 1
+    bootstrap_stage3_memory_previous_epoch=
+    for bootstrap_stage3_memory_index in 1 2 3; do
+        bootstrap_stage3_memory_sample_epoch=$(bootstrap_stage3_manifest_value \
+            "sample_${bootstrap_stage3_memory_index}_epoch" \
+            "$bootstrap_stage3_memory_verify") || return 1
+        bootstrap_stage3_memory_is_uint "$bootstrap_stage3_memory_sample_epoch" || return 1
+        if [ -n "$bootstrap_stage3_memory_previous_epoch" ]; then
+            [ $((bootstrap_stage3_memory_sample_epoch - \
+                bootstrap_stage3_memory_previous_epoch)) -ge \
+                "$bootstrap_stage3_memory_verify_interval" ] || return 1
+        fi
+        bootstrap_stage3_memory_previous_epoch=$bootstrap_stage3_memory_sample_epoch
+    done
+    bootstrap_stage3_memory_runner_epoch=$(bootstrap_stage3_manifest_value \
+        stage3_runner_observed_epoch "$bootstrap_stage3_memory_verify") || return 1
+    bootstrap_stage3_memory_is_uint "$bootstrap_stage3_memory_runner_epoch" &&
+        [ "$bootstrap_stage3_memory_runner_epoch" -ge \
+            "$bootstrap_stage3_memory_previous_epoch" ] &&
+        [ $((bootstrap_stage3_memory_runner_epoch - \
+            bootstrap_stage3_memory_previous_epoch)) -le 10 ] || return 1
     case "$(bootstrap_stage3_manifest_value status "$bootstrap_stage3_memory_verify")" in
         ready|unknown) ;;
+        *) return 1 ;;
+    esac
+    bootstrap_stage3_memory_recorded_executable=$(bootstrap_stage3_manifest_value \
+        stage3_runner_executable "$bootstrap_stage3_memory_verify") || return 1
+    [ -x "$bootstrap_stage3_memory_recorded_executable" ] &&
+        [ ! -L "$bootstrap_stage3_memory_recorded_executable" ] &&
+        [ "$(bootstrap_stage3_canonical_file \
+            "$bootstrap_stage3_memory_recorded_executable")" = \
+            "$bootstrap_stage3_memory_recorded_executable" ] &&
+        [ "$(bootstrap_stage3_hash_file \
+            "$bootstrap_stage3_memory_recorded_executable")" = \
+            "$(bootstrap_stage3_manifest_value stage3_runner_executable_sha256 \
+                "$bootstrap_stage3_memory_verify")" ] || return 1
+    bootstrap_stage3_memory_recorded_cmd=$(bootstrap_stage3_manifest_value \
+        stage3_runner_cmd "$bootstrap_stage3_memory_verify") || return 1
+    case "$bootstrap_stage3_memory_recorded_cmd" in
+        "$bootstrap_stage3_memory_recorded_executable native-build "*|\
+        "$bootstrap_stage3_memory_recorded_executable native-build") ;;
         *) return 1 ;;
     esac
     bootstrap_stage3_memory_is_uint "$(bootstrap_stage3_manifest_value \

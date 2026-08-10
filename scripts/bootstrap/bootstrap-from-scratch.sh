@@ -1074,6 +1074,7 @@ else
   stage2_sanity_evidence="${stage3_provenance_dir}/stage2-sanity.env"
   stage3_sanity_evidence="${stage3_provenance_dir}/stage3-sanity.env"
   stage3_memory_evidence="${stage3_provenance_dir}/stage3-memory-admission.env"
+  stage3_runner_pid_file="${stage3_provenance_dir}/stage3-runner.pid"
   stage2_provenance_cache="${stage3_provenance_dir}/stage2-native-cache"
   stage3_provenance_cache="${stage3_provenance_dir}/stage3-native-cache"
   stage2_provenance_home="${stage3_provenance_dir}/stage2-home"
@@ -1096,12 +1097,17 @@ else
     echo "error: could not thaw previous Stage 3 provenance output" >&2
     exit 1
   }
+  [ ! -L "${stage3_memory_evidence}" ] &&
+    [ ! -L "${stage3_runner_pid_file}" ] || {
+    echo "error: symlinked Stage 3 memory admission state" >&2
+    exit 1
+  }
   rm -f "${stage3_provenance_manifest}" \
     "${stage3_source_before}" "${stage3_source_after}" \
     "${stage3_git_before}" "${stage3_git_after}" \
     "${stage2_command_transcript}" "${stage3_command_transcript}" \
     "${stage2_sanity_evidence}" "${stage3_sanity_evidence}" \
-    "${stage3_memory_evidence}"
+    "${stage3_memory_evidence}" "${stage3_runner_pid_file}"
   rm -rf "${stage2_provenance_cache}" "${stage3_provenance_cache}" \
     "${stage2_provenance_home}" "${stage2_provenance_tmp}" \
     "${stage3_provenance_home}" "${stage3_provenance_tmp}" \
@@ -1401,6 +1407,8 @@ else
       "$(absolute_path "${stage3_memory_evidence}")"
     stage3_memory_status=$?
     if [ "${stage3_memory_status}" -eq 0 ]; then
+      BOOTSTRAP_STAGE3_RUNNER_PID_FILE=\
+"$(absolute_path "${stage3_runner_pid_file}")" \
       bootstrap_stage3_run_transcribed \
         "$(absolute_path "${stage3_command_transcript}")" "${repo_root}" \
         "$(absolute_path "${log_dir}/stage3-native-build.log")" \
@@ -1430,12 +1438,34 @@ else
         --runtime-path "${stage_runtime_absolute}" \
         --entry src/app/cli/bootstrap_main.spl \
         -o "${stage3_bin}" &
-      stage3_runner_pid=$!
-      stage3_memory_record_status=0
-      bootstrap_stage3_memory_record_runner \
-        "$(absolute_path "${stage3_memory_evidence}")" \
-        "${stage3_runner_pid}" || stage3_memory_record_status=$?
-      wait "${stage3_runner_pid}"
+      stage3_wrapper_pid=$!
+      stage3_runner_pid=
+      stage3_runner_wait=0
+      while [ "${stage3_runner_wait}" -lt 10 ]; do
+        if [ -s "${stage3_runner_pid_file}" ] &&
+          [ ! -L "${stage3_runner_pid_file}" ]; then
+          stage3_runner_pid=$(sed -n '1p' "${stage3_runner_pid_file}")
+          break
+        fi
+        kill -0 "${stage3_wrapper_pid}" 2>/dev/null || break
+        sleep 1
+        stage3_runner_wait=$((stage3_runner_wait + 1))
+      done
+      stage3_memory_record_status=1
+      stage3_runner_wait=0
+      while [ -n "${stage3_runner_pid}" ] &&
+        [ "${stage3_runner_wait}" -lt 10 ]; do
+        if bootstrap_stage3_memory_record_runner \
+          "$(absolute_path "${stage3_memory_evidence}")" \
+          "${stage3_runner_pid}" "${stage2_admitted_absolute}"; then
+          stage3_memory_record_status=0
+          break
+        fi
+        kill -0 "${stage3_wrapper_pid}" 2>/dev/null || break
+        sleep 1
+        stage3_runner_wait=$((stage3_runner_wait + 1))
+      done
+      wait "${stage3_wrapper_pid}"
       stage3_status=$?
       if [ "${stage3_memory_record_status}" -ne 0 ]; then
         echo "error: could not bind Stage 3 runner to memory evidence" >&2
