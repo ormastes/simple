@@ -475,9 +475,16 @@ impl<'a> MirLowerer<'a> {
                             // authoritative module-qualified layout decision.
                             let owner_has_vtable = None;
 
-                            // F1/S5 site H — storing a DECLARED VALUE TYPE
-                            // into a field must snapshot it, not alias it.
-                            let val_reg = self.copy_if_value_type(val_reg, ty)?;
+                            // F1/S5 site H — storing an existing declared
+                            // value-type PLACE into a field must snapshot it.
+                            // A fresh constructor/call/enum result transfers
+                            // directly; re-copying it can reinterpret aggregate
+                            // return material as an aliased heap handle.
+                            let val_reg = if Self::hir_expr_is_place(&value.kind) {
+                                self.copy_if_value_type(val_reg, ty)?
+                            } else {
+                                val_reg
+                            };
 
                             self.with_func(|func, current_block| {
                                 let block = func.block_mut(current_block).unwrap();
