@@ -346,7 +346,7 @@ pub(crate) fn compile_struct_init<M: Module>(
     vtable_data_id: Option<cranelift_module::DataId>,
 ) {
     let size_val = builder.ins().iconst(types::I64, struct_size as i64);
-    let ptr = call_runtime_1(ctx, builder, "rt_alloc", size_val);
+    let ptr = call_runtime_1(ctx, builder, "rt_struct_alloc", size_val);
 
     // Write vtable pointer at offset 0 if this struct implements a trait
     if let Some(data_id) = vtable_data_id {
