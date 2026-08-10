@@ -249,7 +249,8 @@ run_guard() {
 }
 
 pushed_sha_file=$(mktemp) || exit 1
-trap 'rm -f "$pushed_sha_file"' EXIT INT TERM
+pushed_base_file=$(mktemp) || exit 1
+trap 'rm -f "$pushed_sha_file" "$pushed_base_file"' EXIT INT TERM
 
 while read -r _local_ref local_sha _remote_ref remote_sha; do
     # Deleting a remote ref: nothing to inspect.
@@ -262,6 +263,14 @@ while read -r _local_ref local_sha _remote_ref remote_sha; do
     # runs in a subshell (stdin is a pipe from git), so a plain variable does
     # not survive past `done`.
     printf '%s\n' "$local_sha" > "$pushed_sha_file"
+    # Same trick for the range BASE, needed by the divergence guard's
+    # half-landed-fix check (--base): it must see which paths the outgoing
+    # range actually edited. Empty for a new ref (no base to diff against);
+    # the guard then reports the half-landed check as skipped rather than
+    # silently passing it.
+    if [ "$remote_sha" != "$zero" ]; then
+        printf '%s\n' "$remote_sha" > "$pushed_base_file"
+    fi
 
     if [ "$remote_sha" = "$zero" ]; then
         # New ref: bound the walk by whatever the remote already has, so we do
@@ -470,7 +479,10 @@ run_guard "$utf8_slice_audit_live_guard" "utf8-slice-audit-instrument liveness p
 # sends committed content. `--ref <pushed-sha>` makes it compare the
 # COMMITTED tree actually being pushed instead (see pushed_sha_file above).
 pushed_sha=$(cat "$pushed_sha_file" 2>/dev/null)
-if [ -n "$pushed_sha" ]; then
+pushed_base=$(cat "$pushed_base_file" 2>/dev/null)
+if [ -n "$pushed_sha" ] && [ -n "$pushed_base" ]; then
+    run_guard "$test_tree_divergence_guard" "test-tree mirrored-pair divergence + half-landed-fix meta-guard" --ref "$pushed_sha" --base "$pushed_base"
+elif [ -n "$pushed_sha" ]; then
     run_guard "$test_tree_divergence_guard" "test-tree mirrored-pair divergence meta-guard (full scan, not range-bound)" --ref "$pushed_sha"
 else
     # No non-deleted ref went out (e.g. a delete-only push) -- nothing was

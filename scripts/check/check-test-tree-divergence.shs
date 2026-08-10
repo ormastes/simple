@@ -44,7 +44,12 @@
 #     this repo has been bitten by repeatedly.
 #   * The verdict line always states how many pairs were actually compared.
 #
-# Usage: check-test-tree-divergence.shs [--generate-baseline] [--ref <commit-ish>]
+#   (c) a HALF-LANDED FIX: a commit in the outgoing range edited ONE leg of a
+#       pair while leaving the twin untouched AND still divergent. Requires
+#       --base + --ref. A one-leg edit that CONVERGES the pair passes — that
+#       is what a correct reconciliation looks like.
+#
+# Usage: check-test-tree-divergence.shs [--generate-baseline] [--ref <commit-ish>] [--base <commit-ish>]
 #   --generate-baseline   overwrite the baseline file with the CURRENT
 #                          diverged-pair list (only for deliberate,
 #                          reviewed baseline updates — never run this to
@@ -90,16 +95,23 @@ BASELINE="${TEST_TREE_DIVERGENCE_BASELINE:-$toplevel/scripts/check/test_tree_div
 
 generate=0
 ref=""
+base=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --generate-baseline) generate=1; shift ;;
         --ref) ref="${2:-}"; [ -n "$ref" ] || die 2 "--ref requires a commit-ish argument"; shift 2 ;;
+        --base) base="${2:-}"; [ -n "$base" ] || die 2 "--base requires a commit-ish argument"; shift 2 ;;
         *) die 2 "unrecognized argument: $1" ;;
     esac
 done
 if [ -n "$ref" ]; then
     git rev-parse --verify --quiet "${ref}^{commit}" >/dev/null \
         || die 2 "--ref '$ref' does not resolve to a commit"
+fi
+if [ -n "$base" ]; then
+    [ -n "$ref" ] || die 2 "--base requires --ref (the half-landed check reads the range base..ref)"
+    git rev-parse --verify --quiet "${base}^{commit}" >/dev/null \
+        || die 2 "--base '$base' does not resolve to a commit"
 fi
 
 # --- 1. which pairs to check ------------------------------------------------
@@ -233,6 +245,65 @@ n_mirror_only=$(wc -l < "$mirror_only" | tr -d ' ')
 n_new_mirror_only=$(wc -l < "$work/new_mirror_only.txt" | tr -d ' ')
 n_stale_allowlist=$(wc -l < "$work/stale_allowlist.txt" | tr -d ' ')
 
+# --- 3c. HALF-LANDED FIX check (one-leg edit that leaves the pair diverged) --
+# The baseline check above only fires on a pair that becomes NEWLY diverged.
+# A pair that is ALREADY baselined can drift arbitrarily far apart and stay
+# silent — which is exactly how 26 half-landed fixes accumulated (a fix commit
+# landed on one leg, the twin left broken, and the bug doc marked FIXED). See
+# doc/08_tracking/test/half_landed_fixes_across_duplicate_test_trees_2026-08-10.md
+#
+# So: intersect the OUTGOING DIFF with the pair table. If a commit in the range
+# edits one leg of a pair, the twin must EITHER also be edited, OR the pair must
+# be IDENTICAL after the edit (which is precisely what a correct reconciliation
+# looks like — adopting one leg wholesale converges the pair by touching only
+# the stale leg, and must keep passing).
+#
+# Cost is the already-computed name-only diff, not the content scan above.
+n_half_landed=0
+half_landed_checked=0
+half_landed_note="skipped (no --base)"
+if [ -n "$ref" ] && [ -n "$base" ]; then
+    git diff --name-only "$base" "$ref" -- 'test/*' > "$work/range_files.txt" 2>/dev/null
+    dr=$?
+    [ "$dr" -eq 0 ] || die 2 "git diff --name-only $base..$ref failed (status $dr)"
+    sort -u "$work/range_files.txt" -o "$work/range_files.txt"
+    : > "$work/half_landed.txt"
+
+    oldifs2="$IFS"
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        case "$f" in *.spl) ;; *) continue ;; esac
+        twin=""
+        IFS='
+'
+        for line in $pairs_raw; do
+            IFS="$oldifs2"
+            [ -n "$line" ] || continue
+            c=$(printf '%s' "$line" | cut -d: -f2)
+            s=$(printf '%s' "$line" | cut -d: -f3)
+            case "$f" in
+                "$c"/*) twin="$s/${f#"$c"/}"; break ;;
+                "$s"/*) twin="$c/${f#"$s"/}"; break ;;
+            esac
+            IFS='
+'
+        done
+        IFS="$oldifs2"
+        [ -n "$twin" ] || continue
+        # twin absent at the tip => mirror-only / canonical-only, handled in 3b
+        git cat-file -e "$ref:$twin" 2>/dev/null || continue
+        half_landed_checked=$((half_landed_checked + 1))
+        # twin edited in the same range => both legs moved, fine
+        if /usr/bin/grep -qxF "$twin" "$work/range_files.txt"; then continue; fi
+        # pair converged after the edit => a correct one-leg reconciliation
+        if git diff --quiet "$ref:$f" "$ref:$twin" 2>/dev/null; then continue; fi
+        echo "$f  (twin untouched and still divergent: $twin)" >> "$work/half_landed.txt"
+        n_half_landed=$((n_half_landed + 1))
+    done < "$work/range_files.txt"
+    IFS="$oldifs2"
+    half_landed_note="$half_landed_checked leg-edit(s) checked, $n_half_landed half-landed"
+fi
+
 # --- 4. --generate-baseline: write and stop ---------------------------------
 if [ "$generate" -eq 1 ]; then
     cp "$current_diverged" "$BASELINE"
@@ -285,10 +356,19 @@ if [ "$n_stale_allowlist" -gt 0 ]; then
     status=1
 fi
 
+if [ "$n_half_landed" -gt 0 ]; then
+    echo "$SELF: HALF-LANDED fix(es): one leg of a duplicate test-tree pair was edited in" >&2
+    echo "$SELF:   $base..$ref while its twin was left untouched AND still divergent." >&2
+    echo "$SELF:   Both legs execute — apply the same change to the twin, or adopt one leg" >&2
+    echo "$SELF:   wholesale so the pair converges (a converging one-leg edit passes)." >&2
+    sed 's/^/  ! /' "$work/half_landed.txt" >&2
+    status=1
+fi
+
 if [ "$status" -ne 0 ]; then
-    echo "$SELF: FAIL — $total_diverged diverged vs $n_baseline baselined ($n_new new, $n_fixed fixed-but-still-baselined); $n_mirror_only mirror-only ($n_new_mirror_only unallowlisted, $n_stale_allowlist stale-allowlist)"
+    echo "$SELF: FAIL — $total_diverged diverged vs $n_baseline baselined ($n_new new, $n_fixed fixed-but-still-baselined); $n_mirror_only mirror-only ($n_new_mirror_only unallowlisted, $n_stale_allowlist stale-allowlist); half-landed: $half_landed_note"
     exit 1
 fi
 
-echo "$SELF: PASS — $total_common pairs checked, $total_diverged diverged (all baselined), 0 new, 0 stale-fixed, $n_mirror_only mirror-only (all allowlisted)"
+echo "$SELF: PASS — $total_common pairs checked, $total_diverged diverged (all baselined), 0 new, 0 stale-fixed, $n_mirror_only mirror-only (all allowlisted); half-landed: $half_landed_note"
 exit 0
