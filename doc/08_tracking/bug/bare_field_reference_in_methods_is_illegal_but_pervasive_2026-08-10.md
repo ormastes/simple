@@ -355,3 +355,124 @@ named vendor exclusions was scanned by this heuristic. This is NOT a claim of
 risk of under-matching in files with unusual formatting (e.g. multi-line
 conditions, semicolon-joined statements) that this line-oriented heuristic
 does not attempt to handle. No sites were fixed in this pass.
+
+## Reconciliation with the field-aware guard (`4f390bb9379`, 2026-08-10)
+
+A sibling change replaced the regex-based detector with a field-aware
+analyzer (embedded AWK in `scripts/check/check-bare-field-references.shs`):
+it flags an identifier only when it names a declared field of the enclosing
+class, is not a parameter/local of the current method, and is not
+`self.`/`me.`-qualified — a strictly stronger check than either this census's
+line-heuristic or the original regex proxy. That guard's baseline
+(`scripts/check/bare_field_reference_baseline.txt`) records **134 sites /
+12 files**, but only over its six named clusters (`riscv_shared`, `domain/`,
+`vhdl_*.spl`, `smux_*.spl`, `os/http/**`, `os/hosted/**`) — a scope chosen
+from the original 62-file guess, not a whole-tree scan.
+
+This census's 1,550-row TSV lists 210 candidate files; 199 of them (all but
+11) fall **outside** that six-cluster scope, so they are the part of the
+tree the guard does not yet fence. To check whether that outside area hides
+real sites the guard is blind to, the field-aware AWK analyzer (extracted
+verbatim from the guard script, not reimplemented) was re-run directly
+against those 199 files:
+
+- **Raw result**: 347 `file<TAB>class<TAB>field` triples across 108 files.
+- **Positive control**: the same extracted analyzer correctly flags the
+  guard's own known-good fixture
+  (`test/fixtures/repro/compiler/bare_field_ref/bare_field_reference_repro.spl`,
+  `Desc.xlen`), confirming the extraction did not silently break the tool
+  before trusting a low/zero count from it.
+- **Precision spot-check** (12 triples read in full source context, spanning
+  `src/compiler_rust/lib/std/src/physics/**`, `src/os/kernel/arch/riscv64/**`,
+  `src/lib/gc_async_mut/**`, `src/lib/nogc_sync_mut/**`,
+  `src/compiler/90.tools/perf/trace.spl`, `src/compiler_rust/lib/std/src/sdn/lexer.spl`,
+  `src/app/ui.electron/main.spl`): **0 of 12 were genuine bare-field sites.**
+  Every one traced to the analyzer's docstring blind spot — it strips `#`
+  comments and quoted-string literals but does **not** strip triple-quoted
+  `"""..."""` docstring blocks, so a class/method docstring that merely
+  *mentions* a field name (`"""ref_count starts at 0 after create()..."""`)
+  gets misread as a field-declaration or method-body line. In every checked
+  case the actual code already used `self.<field>` correctly at every real
+  use site.
+- **Conclusion**: this sample gives **no confirmed evidence of real
+  bare-field sites outside the guard's six-cluster scope.** The 347/108
+  figure is very likely dominated by the same docstring artifact, not a
+  larger hidden defect population. This is a negative result, not a null
+  one — checked and not found, on a 12-triple sample out of 347.
+- **Caveat**: 12 of 347 is a small sample (~3.5%); it rules out "the outside
+  area is full of real sites" but does not prove zero. A rigorous close-out
+  would either (a) teach the analyzer to strip `"""..."""` blocks and re-run
+  the outside-scope pass, or (b) hand-triage a larger stratified sample. Not
+  done here — out of scope for a census-only pass.
+- **This census's own TSV vs. the baseline**: not directly comparable — the
+  TSV's line-level heuristic (which does not distinguish field names from
+  same-named locals) and the analyzer's field-aware check disagree by
+  construction; the TSV should be read as a superset candidate list requiring
+  the same per-site triage demonstrated here, not as an independent
+  confirmed count.
+
+**Net effect on scope**: the widely-cited 740/62 estimate is superseded.
+Verified counts are now: 134 sites / 12 files fenced and confirmed-real
+(guard baseline), plus this census's 1,550-row unfenced candidate superset
+(210 files) which — on the one sample checked — does not appear to contain a
+large population of additional genuine sites beyond what the guard already
+covers, pending the docstring-stripping fix above.
+
+## Docstring blind spot FIXED — analyzer now strips `"""..."""` (2026-08-10)
+
+Option (a) from the section above is done. `doc_filter()` was added to the
+embedded AWK analyzer in `scripts/check/check-bare-field-references.shs`. It
+runs as the **first** rule on every record, carries its open state across
+records so multi-line blocks are stripped, handles a same-line `"""..."""`
+pair in place (keeping the surrounding code), and resets per file (`FNR == 1`)
+so an unterminated block cannot leak into the next file. The existing `#`
+comment and quoted-string stripping in `strip_strings()` is untouched.
+
+Measured before/after (reference binary
+`bin/release/x86_64-unknown-linux-gnu/simple`, 181524312 bytes, mtime
+2026-08-10 11:06:25 UTC; analyzer extracted verbatim from the guard for the
+out-of-scope legs):
+
+| property | before fix | after fix |
+|---|---|---|
+| guard baseline, 6 clusters / 80 files | 134 triples / 12 files | **134 / 12 — unchanged** |
+| out-of-scope re-scan, 199 files | 347 triples / 108 files | **181 triples / 44 files** |
+| `riscv_shared/` (fixed cluster) | 0 | 0 |
+| `domain_hardening.spl` (fixed) | 0 | 0 |
+| `domain_hardening.spl` at `904dc148477^` (pre-fix) | 8 triples / 16 hit-lines | 8 / 16 — unchanged |
+| control A (compiler lane rejects fixture) | fires | fires |
+| control B (analyzer flags fixture) | fires | fires |
+
+`sh scripts/check/check-bare-field-references.shs --static-only` →
+`PASS — 3 checks ran, all green`, exit 0.
+
+**Answer to "are baselined triples docstring artifacts?": no — zero of the
+134.** The baseline is byte-identical before and after the fix, so no
+regeneration/shrink was needed and the two-way ratchet is undisturbed. The 39
+in-scope files that do contain `"""` (notably `vhdl_subprogram_{diag,model,
+select}.spl`, 22-24 blocks each) happen to place their docstrings where the
+class/method state machine already ignored them.
+
+**Out-of-scope result: 347 → 181, i.e. 166 triples / 64 files were docstring
+artifacts, confirming the sibling's 12-triple diagnosis as the dominant
+cause.** The remaining 181 are NOT genuine sites either — they are a
+**second, distinct false-positive family** in the analyzer's local/param
+tracking, which the six fenced clusters do not happen to exercise. Sampling
+the 291 residual hit-lines:
+
+- **pattern bindings** (~45): `case Some(parent):`, `Ok(gdb):` — the binder
+  introduced by a `case`/`if val` arm is not registered as a local.
+- **constructor param shadowing** (~42): `self.min_distance = min_distance`
+  — the RHS is the ctor parameter, but the param list spans multiple lines
+  and only the single-line `(...)` form is parsed into `params`.
+- **named-argument positions** (~40): `worker_id: worker_id,` inside a
+  multi-line call — the `nxt != ":"` guard only suppresses the *label*, not
+  the value, and the value is again a param.
+
+TODO(2026-08-10): teach the analyzer multi-line parameter lists and
+`case`/`if val` binder locals, then re-run the 199-file out-of-scope pass. Only
+after that is the "are there real sites outside the six clusters" question
+genuinely closed; today's answer is "the docstring half is closed, and the
+residue is a known analyzer gap, not a defect population". The guard's scope
+was deliberately NOT widened in this change, because widening it now would
+baseline 181 known-false triples.
