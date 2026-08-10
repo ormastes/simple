@@ -3127,44 +3127,65 @@ impl MirLowering:
                     pass
         val namedvar_pre_disc = rt_enum_discriminant(HirExprKind.NamedVar(SymbolId(id: -1), ""))
         if expr_disc == namedvar_pre_disc:
-            match expr_value.kind:
-                case HirExprKind.NamedVar(pre_symbol, pre_name):
-                    if pre_name != "OUTPUT_LIMIT" and pre_name != "DEFAULT_TIMEOUT_MS":
-                        # Prefer the symbol id resolved onto the NamedVar node:
-                        # self.symbols.lookup(name) returns nil here (scope
-                        # state is not active during MIR lowering on this
-                        # path), which is why the name-based NamedVar arm
-                        # below never resolves locals. mir_expr_symbol_id_value
-                        # nil-guards the seed's `if val`-binds-nil hazard.
-                        val pre_sym_id = mir_expr_symbol_id_value(pre_symbol)
-                        val pre_named_local = self.find_local(pre_sym_id)
-                        if pre_sym_id >= 0 and pre_named_local.id >= 0:
-                            return pre_named_local
-                        # Module-level `val`/`var` read (same rationale as the
-                        # Var pre-dispatch arm above): resolve via the module
-                        # constants/statics registered by lower_module's
-                        # bootstrap branch before falling through to the big
-                        # match, which mis-dispatches NamedVar into UnitLit's
-                        # bare new_temp -> uninitialized alloca garbage
-                        # (native_module_val_globals 2026-07-23).
-                        if pre_sym_id >= 0:
-                            if val pre_nv_glob = self.try_lower_global_read(pre_sym_id):
-                                return pre_nv_glob
-                        val pre_resolved = self.symbols.lookup(pre_name)
-                        if pre_resolved != nil:
-                            val pre_nv_id = pre_resolved.id
-                            val resolved_named_local = self.find_local(pre_nv_id)
-                            if pre_nv_id >= 0 and resolved_named_local.id >= 0:
-                                return resolved_named_local
-                            if val pre_nv_glob2 = self.try_lower_global_read(pre_nv_id):
-                                return pre_nv_glob2
-                        # Built-in nullary Option `None` used as a value (not a
-                        # call): construct Option.None (disc 1) via rt_enum_new.
-                        # A local of the same name shadows it (handled above).
-                        if pre_name == "None" and self.enum_variant_index.contains("Option") and not (pre_sym_id >= 0 and pre_named_local.id >= 0):
-                            return self.lower_enum_construct_named("Option", "None", [])
-                case _:
-                    pass
+            val named_var_payload = rt_enum_payload(expr_value.kind)
+            val named_var_symbol: SymbolId = rt_tuple_get(named_var_payload, 0)
+            val named_var_name: text = rt_tuple_get(named_var_payload, 1)
+            if named_var_symbol == nil or named_var_name == nil:
+                self.error_fatal("empty HIR NamedVar payload", Some(expr_value.span))
+                var b_bad_named_var = self.builder
+                val bad_named_var = b_bad_named_var.emit_const_int(0)
+                self.builder = b_bad_named_var
+                return bad_named_var
+            if named_var_name == "OUTPUT_LIMIT":
+                var b_named_limit = self.builder
+                val named_limit = b_named_limit.emit_const_int(12000)
+                self.builder = b_named_limit
+                return named_limit
+            if named_var_name == "DEFAULT_TIMEOUT_MS":
+                var b_named_timeout = self.builder
+                val named_timeout = b_named_timeout.emit_const_int(7200000)
+                self.builder = b_named_timeout
+                return named_timeout
+            val named_var_symbol_id = mir_expr_symbol_id_value(named_var_symbol)
+            val raw_named_local = self.find_local(named_var_symbol_id)
+            if named_var_symbol_id >= 0 and raw_named_local.id >= 0:
+                return raw_named_local
+            # Prefer the symbol id resolved onto the NamedVar node:
+            # self.symbols.lookup(name) returns nil here (scope
+            # state is not active during MIR lowering on this
+            # path), which is why the name-based NamedVar arm
+            # below never resolves locals. mir_expr_symbol_id_value
+            # nil-guards the seed's `if val`-binds-nil hazard.
+            val pre_sym_id = named_var_symbol_id
+            val pre_named_local = raw_named_local
+            # Module-level `val`/`var` read (same rationale as the
+            # Var pre-dispatch arm above): resolve via the module
+            # constants/statics registered by lower_module's
+            # bootstrap branch before falling through to the big
+            # match, which mis-dispatches NamedVar into UnitLit's
+            # bare new_temp -> uninitialized alloca garbage
+            # (native_module_val_globals 2026-07-23).
+            if pre_sym_id >= 0:
+                if val pre_nv_glob = self.try_lower_global_read(pre_sym_id):
+                    return pre_nv_glob
+            val pre_resolved = self.symbols.lookup(named_var_name)
+            if pre_resolved != nil:
+                val pre_nv_id = pre_resolved.id
+                val resolved_named_local = self.find_local(pre_nv_id)
+                if pre_nv_id >= 0 and resolved_named_local.id >= 0:
+                    return resolved_named_local
+                if val pre_nv_glob2 = self.try_lower_global_read(pre_nv_id):
+                    return pre_nv_glob2
+            # Built-in nullary Option `None` used as a value (not a
+            # call): construct Option.None (disc 1) via rt_enum_new.
+            # A local of the same name shadows it (handled above).
+            if named_var_name == "None" and self.enum_variant_index.contains("Option") and not (pre_sym_id >= 0 and pre_named_local.id >= 0):
+                return self.lower_enum_construct_named("Option", "None", [])
+            self.error("undefined variable " + named_var_name, Some(expr_value.span))
+            var b_missing_named_var = self.builder
+            val missing_named_var = b_missing_named_var.emit_const_int(0)
+            self.builder = b_missing_named_var
+            return missing_named_var
 
         match expr_value.kind:
             case IntLit(value, _):
