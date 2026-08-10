@@ -220,3 +220,108 @@ contains a given heading. That is a fourth vacuity shape and is out of scope her
 Do not resolve any ABSENT row by relaxing or deleting the spec. A correctly-failing
 spec is a legitimate artifact (`.claude/rules/testing.md`). The fix is the missing
 capability.
+
+---
+
+# Stream Q24 (2026-08-10) — working the corrected 101-row worklist
+
+Input: `doc/08_tracking/test/spec_hollow_needle_worklist.tsv` (101 deduped rows,
+commit `3795acc2b77`). 23 rows were already settled by the prior pass
+(heavy_work_preflight, macos_gui_live_window_gate_source, simpleos_crypto_random_gate,
+context_ponytail_mimic, riscv_product_ports_source, x86_64_fs_exec_spawn = fixed;
+arm64_user_exit_return_contract, simpleos_green_hardware_handoff_blocker, boot_smoke,
+qemu_runner, riscv32_boot_qemu = ABSENT/filed; sugar_plugin, evalops_export_and_text_at,
+stdlib_intensive, mcp_lsp_tools = AMBIGUOUS) and were skipped. 78 rows remained.
+
+## The headline finding: the 101-row list is still ~75% scanner false positives
+
+Four MORE comment-detection defects were found and fixed in
+`scripts/check/census-spec-vacuity.spl`, each with a control fixture:
+
+| # | defect | effect | commit |
+|---|---|---|---|
+| 4 | **Markdown headings read as comments.** `.md/.json/.html/.txt/.csv/.tsv/.xml/.rst` have no `#` line-comment syntax, but they fell through `is_comment_line`'s unknown-extension branch, which treats any `#`-prefixed line as a comment. `doc/` is a product root, so every spec asserting a heading in a plan/tracking document (`"## Go Profile Evidence Agent"`, `"## Parallel Peak RSS"`, …) was reported HOLLOW. **~30 of the 78 rows.** | false HOLLOW | `e46ebc94f10` |
+| 5 | **`to_be(false)` not recognised as an absence assertion.** `is_negative_assertion` knew `to_equal(false)` only. `stage4_final_symbol_closure_spec.spl:1035` is `expect(source.contains("runtime_dynload.c")).to_be(false)` — a comment-only match is the *desired* state there. | false HOLLOW | `04fe443860b` |
+| 6 | **Receiver never checked per assertion.** `reads_source_text` is a whole-FILE test: one `file_read` anywhere in a spec licensed every needle in it. So subprocess stdout (`timeout_spec.spl:50` → `process_run("echo",["hello"])`), product-function return values (`native_link_hardening_spec.spl:179` → `native_all_gnu_support_args(...)`; `riscv_fpga_linux_spec.spl:40` → `proof_acceptance_markers()`) and spec-local literals (`test_runner_simple_spec.spl:197` → `name.contains("_test.")`; `bootstrap_intensive_spec.spl:144`) were all reported HOLLOW although none of them ever greps a product file. Needles now require a receiver bound to a read call, directly or via a zero-arg helper that reads within 12 lines; identifier matching is token-boundary aware (a plain substring test matched `a` inside `to_contain`). | false HOLLOW | `73bd1b72eab` |
+| 7 | **The spec's own comment lines were harvested for needles.** `check_entry_target_routing_contract_spec.spl:7` had ALREADY been re-anchored by an earlier stream; its explanatory comment quotes the needle it removed (``Was `to_contain("a source")` ``) and the scanner re-reported it. | self-perpetuating row | `73bd1b72eab` |
+
+Defects 1-3 were the previous round; the pattern is now five rounds deep. The
+practical rule for anyone reading a hollow-needle list: **a HOLLOW row is a
+hypothesis, not a finding.** Every row in this stream that was accepted was
+confirmed by reading the product file directly.
+
+## ABSENT — new genuine defects
+
+### D5. SimpleOS cross-build wrappers lost their pure-Simple provenance needle (REAL, fixed)
+
+`test/01_unit/os/native_build_compiler_provenance_spec.spl:10-11` asserted
+`SIMPLE_BUILD_COMPILER:-bin/release/simple` in
+`scripts/os/simpleos-native-build-aarch64.shs` and `-riscv64.shs`. That string
+now occurs in each file **exactly once, inside the comment recording its
+removal** (`aarch64.shs:30`, `riscv64.shs:28`). Both wrappers were upgraded to a
+seed-rejecting, capability-probing selection — so the capability is present in a
+*stronger* form and the spec was simply stale. Re-anchored onto
+`simple_compiler_select --root "$REPO_ROOT" --builder-target "$TARGET"`
+(aarch64:37-38) and `is_bootstrap_seed` / `compiler_can_build_target`
+(riscv64:98,101,105); all anchors pre-checked as non-comment source. Example is
+green. Commit `e08d256d8ba`.
+
+### D6. Lint entrypoints are NOT wired to the staged workspace-root audit helper (ABSENT, already RED)
+
+`test/01_unit/app/workspace_root_write_guard_spec.spl:37` (and its identical
+twin `test/unit/app/workspace_root_write_guard_spec.spl:37`) assert
+`read_file("src/app/cli/lint_entry.spl").contains("cli_run_lint")`.
+
+`cli_run_lint` **does not occur in `src/app/cli/lint_entry.spl` at all.** The
+entrypoint dispatches to `run_lint_command(filtered_args)` (`lint_entry.spl:64`);
+`cli_run_lint` is defined at `src/app/io/_CliCommands/run_commands.spl:206` and
+called from `src/app/build/cli_entry.spl:54`. The scanner called the row HOLLOW
+because the needle appears as a comment in `src/app/io/cli_ops.spl:394`, which is
+another file the spec reads — a defect-3 residue.
+
+Measured: `bin/simple test test/01_unit/app/workspace_root_write_guard_spec.spl`
+→ `Results: 7 total, 5 passed, 2 failed`; the two failures are
+"wires lint entrypoints to the staged audit helper" and "wires tracked CLI lint
+to staged audit". **This spec is already correctly RED** — the workspace-root
+write guard is not reached from the `simple lint` entrypoint. Left RED.
+
+**Unblock:** route `src/app/cli/lint_entry.spl` through the staged audit helper
+(`_cli_run_workspace_root_guard()`), or state which entrypoint is authoritative
+and re-anchor the spec there.
+
+### D7. The RISC-V QEMU HTTP smoke scripts do not exist (ABSENT, already RED)
+
+`test/system/simpleos_riscv_network_gate_spec.spl` and its
+`test/03_system/os/` twin read `scripts/qemu_rv64_http_test.shs` (lines 102, 129,
+264) and `scripts/qemu_rv32_http_test.shs` (line 277) and assert the whole
+deferred-boundary contract against them (`--expect-deferred`,
+`--expect-http-only`, `PMM OK`, `HEAP OK`, `--backend llvm`, …).
+
+**Neither file exists, and neither has ever existed at that path** (`git log --
+scripts/qemu_rv64_http_test.shs` is empty; no `scripts/*rv64*`/`*rv32*`/`*riscv*`
+file exists). Measured: `Results: 18 total, 8 passed, 10 failed`. Already
+correctly RED; recorded here because it is a **distinct vacuity shape** — a spec
+whose assertions target a path that does not exist. Per `.claude/rules/board-runnable.md`
+this also means the RV32/RV64 QEMU HTTP lanes have no runnable harness at all.
+
+## Nonexistent-path family (new, own shape)
+
+Sweep over all 57 specs in the worklist, restricted to path literals appearing on
+a line with a read/exists call, filtering shell-glob and fixture placeholders:
+
+| spec:line | path asserted | status |
+|---|---|---|
+| `test/01_unit/compiler/driver/native_build_cache_plumbing_spec.spl:117` | `src/compiler/80.driver/driver/incremental.spl` | missing |
+| `test/01_unit/compiler/driver/native_build_cache_plumbing_spec.spl:252` | `src/compiler/80.driver/driver/parallel.spl` | missing |
+| `test/01_unit/os/.spipe_wrapped_entry_qemu_runner_spec.spl:159` | `scripts/mlk_s02_100t_generated_linux.shs` | missing |
+| `test/03_system/feature/usage/multicore_green_agent_plan_spec.spl:139` | `doc/06_spec/test/03_system/feature/usage/multicore_green_tracking_spec.md` | missing |
+| `test/03_system/feature/usage/multicore_green_tracking_spec.spl:625` | `doc/06_spec/test/05_perf/stress/multicore_green_fanout_spec.md` | missing |
+| `test/system/simpleos_riscv_network_gate_spec.spl:102,129,264` | `scripts/qemu_rv64_http_test.shs` | missing (D7) |
+| `test/system/simpleos_riscv_network_gate_spec.spl:277` | `scripts/qemu_rv32_http_test.shs` | missing (D7) |
+
+Excluded as legitimate: `test/unit/os/qemu_runner_spec.spl:108,111`, where the
+missing paths sit behind `rt_file_exists(...)` guards in a shim-install helper.
+
+This family deserves its own gate — it is invisible to the hollow-needle scan,
+because "absent" and "comment-only" are different verdicts and only the latter is
+reported.
