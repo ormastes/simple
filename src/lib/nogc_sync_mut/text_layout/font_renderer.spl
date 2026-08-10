@@ -1699,7 +1699,23 @@ class FontRenderer:
         FontTextPayload(valid: true, width: width, height: height, offset_x: min_x, offset_y: min_y, pixels: pixels)
 
     me _reset_font_atlas(face_generation: i64, font_identity: text):
-        self.atlas_pixels = [0u32; FONT_ATLAS_WIDTH * FONT_ATLAS_HEIGHT]
+        # Reuse the existing 8 MiB atlas buffer in place instead of
+        # `[0u32; FONT_ATLAS_WIDTH * FONT_ATLAS_HEIGHT]`. On the freestanding
+        # x86_64 lane the bump allocator never frees, so every reset used to
+        # burn a fresh 8 MiB (`[array-repeat] big count=0x100000`) buffer that
+        # was permanently lost. `_reset_font_atlas` is called on every atlas
+        # eviction/overflow during a single frame's glyph-run measure/cache
+        # cycle -- repeated resets exhausted the 1 GiB baremetal heap on the
+        # first 4K frame (`[PANIC] heap exhausted`). Zeroing in place keeps
+        # allocation count bounded to one per FontRenderer instance.
+        val expected_len = FONT_ATLAS_WIDTH * FONT_ATLAS_HEIGHT
+        if self.atlas_pixels.len() == expected_len:
+            var i = 0
+            while i < expected_len:
+                self.atlas_pixels[i] = 0u32
+                i = i + 1
+        else:
+            self.atlas_pixels = [0u32; expected_len]
         self.atlas_codepoints = []
         self.atlas_face_ids = []
         self.atlas_face_generations = []
