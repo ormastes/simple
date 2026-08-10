@@ -44,28 +44,53 @@ together. Verdict lines below are from `bin/simple test <path>`.
 | 1 | `compiler/core_intensive_spec.spl` | `test/integration` + `test/02_integration` | 32 total, 29 passed, 3 failed | fixed (interner tests all green; 3 failures PRE-EXISTING, identical on parent) | `7c43f6e8c10` |
 | 2 | `lib/database_core_spec.spl` | `test/integration` + `test/02_integration` | 35 total, 35 passed, 0 failed | fixed, fully green | `b95b116c04a` |
 | 3 | `lib/database/database_core_spec.spl` | `test/unit` + `test/01_unit` | 35 total, 35 passed, 0 failed | fixed, fully green | `9cc848b84ac` |
-| 4 | `lib/database/database_spec.spl` | `test/unit` + `test/01_unit` | 27 total, 26 passed, 1 failed | fixed, 1 left RED on purpose (see below) | `ac40801103b` |
+| 4 | `lib/database/database_spec.spl` | `test/unit` + `test/01_unit` | 27 total, 27 passed, 0 failed (was 26/1) | fixed, `from_sdn` id-0 defect FIXED (see below) | `ac40801103b` (spec) + follow-up (fix) |
 
 Specs 2, 3 and 4 also had local fake `SdnRow`/`SdnTable` classes; those were
 removed too, since the real `from_sdn`/`to_sdn`/`valid_rows` tests cannot be
 exercised without the real table types. The real `SdnTable` API turned out to
 be a superset of each fake.
 
-### Blocking finding: `from_sdn` silently drops id 0
+### Blocking finding: `from_sdn` silently drops id 0 — FIXED 2026-08-10
 
 Rewriting spec 4 immediately surfaced a genuine product defect that the shadow
 had been hiding for as long as it existed:
 
-`StringInterner.from_sdn` guards row loading with `if id > 0`, but `intern()`
-hands out ids starting at **0**. So the **first string ever interned is lost on
-every save/load round-trip**. Measured directly against the real type:
-a table containing rows `(id=0,"test1")` and `(id=1,"test2")` loads as
+`StringInterner.from_sdn` guarded row loading with `if id > 0`, but `intern()`
+hands out ids starting at **0**. So the **first string ever interned was lost
+on every save/load round-trip**. Measured directly against the real type:
+a table containing rows `(id=0,"test1")` and `(id=1,"test2")` loaded as
 `get(0) -> Option::None`, `get(1) -> Option::Some(test2)`.
 
 The removed local fake accepted id 0, which is exactly why no spec ever caught
 this. Per the no-weakening rule the assertion was left intact and RED, with a
-`FIXME` in place at the test. Fix `from_sdn` to accept id 0 (or make `intern`
-start at 1) — do not adjust the test.
+`FIXME` in place at the test.
+
+**Fix chosen**: widen the guard to `if id >= 0` in
+`src/lib/nogc_sync_mut/database/core.spl:113`, keeping `intern()` starting at
+0 unchanged. Ruled out the alternative (`intern()` starting ids at 1) because:
+no `.sdn` fixture, test data, or other call site in the repo depends on the
+current 0-based numbering (`/usr/bin/grep -rn "from_sdn"` /
+`"intern("` across `src/` and `test/` found no other consumer coupled to the
+starting value), and no code near the interner treats id 0 as an
+absent/sentinel marker — the other two `id > 0` hits in the database library
+(`atomic.spl:167` process-id liveness check, `test_extended/factory.spl:141`
+unrelated generic id filter) are unrelated to `StringInterner`. Widening the
+guard is therefore the minimal, format-compatible fix.
+
+**Verification**: round-trip of `{0: "test1", 1: "test2"}` through
+`to_sdn()`/`from_sdn()` now returns both entries via `get(0)` and `get(1)`, per
+the (unweakened) spec assertion. Both duplicate-tree legs
+(`test/01_unit/lib/database/database_spec.spl`,
+`test/unit/lib/database/database_spec.spl`) now pass fully: **27 total, 27
+passed, 0 failed** (previously 26 passed / 1 failed, matching the pinned
+baseline). Negative control: reverting the guard back to `if id > 0` and
+re-running reproduces the pinned failure exactly — "loads from SDN table" is
+the sole failing example, 26/27 — confirming the assertion is not vacuous
+before the fix was reapplied. The FIXME comment in both legs of
+`database_spec.spl` was replaced with a RESOLVED note; the assertion itself
+(`check(interner.get(0)? == "test1")`) was not weakened, only the guard
+comment/status changed.
 
 ### Remaining sibling shadows (tracked, not silently accepted)
 
