@@ -119,6 +119,49 @@ working copy, so that delta is not solely attributable.
 DEFINITIONS per symbol, driven to one. Signature agreement is not the goal and
 optimising for it makes the codebase less diagnosable.
 
+## 2026-08-10 — first verified reduction landed: mod_stub facade dedup
+
+Mechanism confirmed: this is the SAME root cause as
+`duplicate_hirtype_enum_decls_drop_module_to_interpreter_2026-08-04.md` /
+`duplicate_struct_decls_shadow_field_types_2026-08-10.md` (seed JIT registers
+declarations by BARE NAME; commit `1d68beb0dca` deduped struct decls), applied
+to functions. The struct fix was "delete/rename to one definition per bare
+name" — exactly the metric this doc already mandates for functions.
+
+Largest single contributor measured: `src/lib/nogc_sync_mut/io/mod_stub.spl`
+appeared in **56 of 357** collision warnings (baseline re-measured 2026-08-10
+via `SIMPLE_DIAG_SAME_SIGNATURE_COLLISION=1 bin/simple test
+test/01_unit/compiler/cache/action_key_spec.spl`). It locally DEFINED ~50
+duplicate-named fns: error-print `cli_*` stubs (Class B vs the real
+`src/app/io/**` handlers and `src/lib/nogc_sync_mut/sffi/cli.spl` — if a stub
+silently wins, subcommands print "requires Rust SFFI", i.e. the historical
+"bin/simple lost all subcommands" shape) plus thin extern wrappers duplicating
+`dir_ops`/`env_ops`/`process_ops`. Zero importers of any of those names via
+mod_stub except `is_dir` (2 call sites).
+
+Fix applied (safe under this doc's rule — it DELETES definitions, converging
+nothing): mod_stub is now a pure `export use` facade over the canonical owners
+(file_ops/dir_ops/env_ops/process_ops), mirroring the conversion already done
+in `src/lib/gc_async_mut/io/mod_stub.spl`. Measured: 357 → **345** warnings,
+and mod_stub appears in **0** of them (56 → 0); many 2-def groups (cli_compile,
+cli_constr, cli_gen_lean, all cli_run_*) are now 1-def. action_key_spec still
+32/32 green; re-export surface probed live (`is_dir`/`cwd`/`file_exists`).
+Regression guard: `test/01_unit/lib/io/mod_stub_no_duplicate_definitions_spec.spl`
+(sabotage-verified: re-adding a local fn turns it red).
+
+What the remaining "tree-consolidation decision" actually is (still OPEN):
+- `src/app/io/{cli_ops,process_ops,context_ops,_CliCommands/**}` vs
+  `src/lib/nogc_sync_mut/{io/**, sffi/{cli,io}.spl, io_runtime.spl}` — the
+  cli_*/process_*/dir_* surface still has 2 live definition families (real app
+  handlers vs real SFFI wrappers, both with importers; neither is deletable
+  without choosing an owner for the CLI surface — app-owner call).
+- Other parallel pairs unrelated to io: `nogc_sync_mut/path.spl` vs
+  `nogc_async_mut/path.spl` (28+28 warnings), `common/binary_io.spl` vs
+  `nogc_async_mut/binary_io.spl` (17+17), `nogc_sync_mut/cuda/mod.spl` vs
+  `gc_async_mut/cuda/__init__.spl` (21+21), fix-rule impls (20+16). These are
+  the stdlib-tier families duplicated across memory tiers — consolidating them
+  is a stdlib-tier architecture decision, not a rename.
+
 ## Recommended approach
 
 1. Decide whether `src/app/io/**` and `src/lib/nogc_sync_mut/io/**` should both

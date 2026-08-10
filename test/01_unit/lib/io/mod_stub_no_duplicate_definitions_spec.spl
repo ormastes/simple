@@ -1,0 +1,50 @@
+# Regression guard: io mod_stub facades must not DEFINE functions, only re-export.
+#
+# Bug: doc/08_tracking/bug/duplicate_public_symbols_differing_return_types_jit_misdispatch_2026-08-09.md
+# Under co-compilation, every duplicate-named public fn collides in the seed
+# JIT's bare-name symbol table. Identical-signature duplicates (Class B) let one
+# body silently win; the old mod_stub error-print stubs could win over the real
+# app/io and sffi/cli implementations ("bin/simple lost all subcommands" shape).
+# Fix (2026-08-10): src/lib/nogc_sync_mut/io/mod_stub.spl carries only
+# `export use` re-exports of the canonical owners — zero local fn definitions.
+# The metric for this bug family is DEFINITIONS PER SYMBOL DRIVEN TO ONE, so a
+# facade must never re-grow a local body.
+
+use std.nogc_sync_mut.io.file_ops.{file_read, file_exists}
+use std.nogc_sync_mut.io.mod_stub.{is_dir}
+
+val stub_path = "src/lib/nogc_sync_mut/io/mod_stub.spl"
+
+fn local_fn_definition_lines(src: text) -> [text]:
+    var hits: [text] = []
+    for line in src.split("\n"):
+        val t = line.trim()
+        if t.starts_with("fn ") or t.starts_with("pub fn ") or t.starts_with("extern fn "):
+            hits.push(line)
+    hits
+
+describe "io mod_stub facade stays definition-free":
+    it "exists and still re-exports the canonical is_dir (behavioral wire-through)":
+        # @req: mod_stub re-export surface remains importable and functional
+        expect file_exists(stub_path) == true
+        expect is_dir("/tmp") == true
+        expect is_dir("/nonexistent_path_for_mod_stub_spec") == false
+
+    it "contains zero local fn definitions - only export use re-exports":
+        # @req: no duplicate-named fn bodies may re-grow in the mod_stub facade
+        val src = file_read(stub_path)
+        expect src.len() > 0
+        val hits = local_fn_definition_lines(src)
+        if hits.len() > 0:
+            print "mod_stub regrew local definitions (Class B collision risk):"
+            for h in hits:
+                print "  {h}"
+        expect hits.len() == 0
+
+    it "re-exports each canonical owner group":
+        # @req: dir/env/process/file surfaces delegate to their single owners
+        val src = file_read(stub_path)
+        expect src.contains("export use std.nogc_sync_mut.io.dir_ops.") == true
+        expect src.contains("export use std.nogc_sync_mut.io.env_ops.") == true
+        expect src.contains("export use std.nogc_sync_mut.io.process_ops.") == true
+        expect src.contains("export use std.nogc_sync_mut.io.file_ops.") == true
