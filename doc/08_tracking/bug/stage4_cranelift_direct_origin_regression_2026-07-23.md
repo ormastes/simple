@@ -2,7 +2,15 @@
 
 **Date:** 2026-07-23
 **Lane:** stage4 full-CLI binary, `native-build --backend cranelift` (cranelift-direct)
-**Status:** OPEN — filed by the AOT probe campaign; regressing commits verified only on the flat/LLVM lanes
+**Status:** OPEN — ARCHITECTURAL, confirmed out-of-scope for a source-only
+session (2026-08-10). Diagnosing/bisecting this requires repeated stage4
+full-CLI native-build rebuilds with `--backend cranelift` (each probe rebuild
+is a stage4 cycle per the doc's own repro) and this session operates under a
+hard constraint of never running `bin/simple build bootstrap` / stage4
+rebuild cycles (too slow/disruptive to the shared working copy). No
+compiler-source fix was attempted without being able to run the cranelift
+probe matrix to verify it. Left open for a lane with stage4 rebuild capacity.
+Original text below, unchanged. — filed by the AOT probe campaign; regressing commits verified only on the flat/LLVM lanes
 
 ## Symptoms (origin-pure 4b7945435459, clean-cache stage4 rebuild)
 
