@@ -59,4 +59,5 @@ int64_t rt_atexit_check(void) {
 #define SPL_TERMINAL_SCOPE_BEGIN rt_hosted_terminal_signal_scope_begin
 #define SPL_TERMINAL_SCOPE_READ rt_hosted_terminal_read_byte_interruptible
 #define SPL_TERMINAL_SCOPE_END rt_hosted_terminal_signal_scope_end
+#define SPL_TERMINAL_SCOPE_EMERGENCY_RESTORE rt_hosted_terminal_signal_scope_emergency_restore
 #include "runtime_terminal_signal_scope_impl.h"
