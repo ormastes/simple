@@ -1,0 +1,34 @@
+use std.spec.{describe, it, expect}
+use compiler.frontend.core.interpreter.env.{env_init, env_define_global, env_define_global_const}
+use compiler.frontend.core.interpreter.eval.{match_bare_ident_const_result}
+use compiler.frontend.core.interpreter.value.{val_make_text}
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "bare identifier constants in match arms":
+    it "resolves immutable constants before creating capture bindings":
+        val hir = rt_file_read_text("src/compiler/20.hir/hir_lowering/expressions.spl") ?? ""
+        val interpreter = rt_file_read_text("src/compiler/10.frontend/core/interpreter/eval.spl") ?? ""
+        val mir = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl") ?? ""
+
+        expect(hir).to_contain("resolve_match_const_pattern_symbol")
+        expect(interpreter).to_contain("match_bare_ident_const_result")
+        expect(mir).to_contain("while idx < norm_arms.len()")
+        expect(mir).to_contain("val arm = norm_arms[idx]")
+
+    it "matches the second immutable text constant instead of capturing the first name":
+        env_init()
+        env_define_global_const("ITF_ERR_AUTH", val_make_text("auth"))
+        env_define_global_const("ITF_ERR_USAGE", val_make_text("usage"))
+        val usage = val_make_text("usage")
+
+        expect(match_bare_ident_const_result(usage, "ITF_ERR_AUTH")).to_equal(0)
+        expect(match_bare_ident_const_result(usage, "ITF_ERR_USAGE")).to_equal(1)
+
+    it "leaves mutable globals and unbound names available as capture patterns":
+        env_init()
+        env_define_global("MUTABLE_TAG", val_make_text("before"))
+        val subject = val_make_text("after")
+
+        expect(match_bare_ident_const_result(subject, "MUTABLE_TAG")).to_equal(-1)
+        expect(match_bare_ident_const_result(subject, "fresh_binding")).to_equal(-1)

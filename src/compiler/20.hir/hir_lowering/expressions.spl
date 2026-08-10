@@ -1105,6 +1105,16 @@ impl HirLowering:
             return HirUnaryOp.Transpose
         HirUnaryOp.Neg
 
+    me resolve_match_const_pattern_symbol(name: text) -> SymbolId?:
+        val found = self.symbols.lookup(name)
+        if val symbol_id = found:
+            if symbol_id != nil:
+                val symbol = self.symbols.get_symbol_raw(symbol_id.id)
+                if val symbol_value = symbol:
+                    if symbol_value.kind == SymbolKind.Const and not symbol_value.is_mutable:
+                        return Some(symbol_id)
+        nil
+
     me lower_pattern(p: Pattern) -> HirPattern:
         val kind = match p.kind:
             case Wildcard:
@@ -1114,6 +1124,18 @@ impl HirLowering:
                 HirPatternKind.Literal(self.lower_hir_expr(value))
 
             case Binding(name, mutable):
+                if val const_symbol = self.resolve_match_const_pattern_symbol(name):
+                    val display_name = self.symbols.symbol_display_name(const_symbol, name)
+                    val constant_ref = HirExpr(
+                        kind: HirExprKind.NamedVar(const_symbol, display_name),
+                        type_: nil,
+                        span: p.span
+                    )
+                    return HirPattern(
+                        kind: HirPatternKind.Literal(constant_ref),
+                        type_: nil,
+                        span: p.span
+                    )
                 val symbol = self.symbols.define(name, SymbolKind.Variable, nil, p.span, false, mutable, nil)
                 # Level-gated (default off): traces every pattern binding that
                 # is actually entered into the current scope. A binding that
