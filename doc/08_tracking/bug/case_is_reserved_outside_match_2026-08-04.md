@@ -1,6 +1,9 @@
 # `case` is reserved everywhere, so `for case in …` kills the whole file at parse
 
-**Status:** OPEN (grammar); the one spec it was blocking has been unblocked
+**Status:** OPEN — but narrowed: ARCHITECTURAL-OPEN, Rust-seed-only (see
+2026-08-10 re-triage below). The pure-Simple `.spl` frontend already accepts
+`case` as a for-loop binding; only the seed lexer hard-reserves it. The one
+spec it was blocking has been unblocked.
 **Found:** 2026-08-04
 **Severity:** medium — a parse error rejects the entire file, so one loop
 variable cost every example in it, and `case` is not on the documented
@@ -130,3 +133,86 @@ made this cost a whole file.
 
 **Not fixed here** (unchanged from the original disposition): the grammar is
 untouched, and the rename in `sfnt_spec.spl:147` remains the only mitigation.
+
+## Re-triage 2026-08-10 — the 08-08 dual-front-end claim was WRONG; only the Rust seed reserves `case`
+
+The 2026-08-08 note above claimed the pure-Simple `.spl` front end *also*
+hard-reserves `case`, citing the `KwCase` entry in
+`src/compiler/10.frontend/lexer_types.spl:50` and its membership in the
+keyword group at `lexer_types.spl:216`. That citation is real but the
+conclusion doesn't follow: `lexer_types.spl`'s `TokenKind`/`is_keyword()` is
+used by the **treesitter outline/highlighter** path
+(`src/compiler/10.frontend/treesitter/outline_lexer.spl` and friends) and by
+`const_eval.spl`/the flat-AST bridge, not by the actual statement parser. The
+parser that runs for `compile`/`native-build` uses the *separate* integer
+token-kind table in `src/compiler/10.frontend/core/tokens.spl`
+(`TOK_KW_CASE`, defined at `tokens.spl:385`, name lookup at `tokens.spl:246`)
+via `src/compiler/10.frontend/core/lexer_struct.spl`.
+
+Direct test against the self-hosted `bootstrap/stage3/simple` binary (built
+from this `.spl` frontend, not the Rust seed) with the exact repro from the
+2026-08-08 note:
+
+```simple
+fn main():
+    var t = 0
+    for case in [1, 2, 3]:
+        t = t + case
+    print "sum={t}"
+main()
+```
+
+```
+$ bootstrap/stage3/simple compile case_repro.spl --format=smf
+[ERROR] MIR error: MIR lowering error: unsupported MIR type kind [wildcard-arm] disc=-1: <value:0x4>
+```
+
+No parse error — `case` is accepted as the loop-binding identifier. The MIR
+error is a **pre-existing, unrelated** defect: swapping the binding name to
+plain `x` (`for x in [1, 2, 3]: t = t + x`) reproduces the *identical* error
+message and disc value, proving it's a `for`-over-array-literal MIR-lowering
+gap (an unhandled `HirTypeKind` arm in
+`src/compiler/50.mir/_MirLowering/function_lowering.spl:805`, a generic
+catch-all `case _:` fallback, not anything specific to the text "case"), not
+a keyword-scoping issue. That MIR gap is out of scope for this bug and not
+further investigated here.
+
+Why the parser already accepts it: `parse_for_binding_name()`
+(`src/compiler/10.frontend/core/parser_stmts.spl:1152-1169`) has a
+soft-keyword fallback —
+
+```
+val kind_name = tok_kind_name(par_kind_get())
+if keyword_lookup(kind_name) == par_kind_get():
+    parser_advance()
+    return kind_name
+```
+
+— which accepts *any* keyword token as a for-loop binding name and uses its
+canonical spelling as the identifier text. This same pattern (`*_is_kw =
+keyword_lookup(...) == par_kind_get()`) is already used at several other
+binding sites in `parser_stmts.spl` (`val`/`var` decl names at lines 908 and
+975, type-decl variant names at 1850/1866/1893/1909) and in
+`parser_expr.spl`/`parser_identifiers.spl`/`parser_decls_use.spl` for member
+and segment names. So the pure-Simple frontend's keyword-as-identifier
+mechanism for `case` in binding position is not merely fixable — **it is
+already implemented and working**, and needs no change.
+
+**Corrected scope:** this bug is confined entirely to the Rust seed's lexer,
+which hard-reserves `case` unconditionally with no contextual exception:
+
+```
+src/compiler_rust/parser/src/lexer/identifiers.rs:138:    "case" => TokenKind::Case,
+```
+
+Per the task boundary (`src/compiler_rust/**` is off-limits to edit), this is
+**ARCHITECTURAL-OPEN**: the fix is a one-line-looking change in the seed
+lexer/parser to make `Case` a soft/contextual keyword like the `.spl`
+frontend already does, but making that change safely (i.e. auditing every
+place the seed parser currently assumes `Case` can't appear as a plain
+identifier token, and updating the seed's own match-arm/pattern parsing to
+disambiguate) is Rust-seed parser work outside this task's remit. No fix is
+landed for the seed; the standalone repro above and the file:line citations
+are the verification evidence. The pure-Simple side required no change
+because it was never actually broken — only mis-diagnosed as broken by an
+unverified grep-only claim in the 2026-08-08 note.
