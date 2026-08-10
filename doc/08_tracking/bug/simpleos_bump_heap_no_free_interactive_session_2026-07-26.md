@@ -121,3 +121,19 @@ nil-coalesce does not fire and the `as i32` does not truncate. Same class as
 `native_to_i64_nil_coalesce_print_tagbox_leak_2026-07-20.md`. **Not** the cause
 of this panic — the scan itself uses the portable `find_from`, so the builtin's
 result is only compared, never used. The divergence receipt did its job.
+
+## Re-verification (2026-08-10)
+
+Status confirmed unchanged: `free()` in
+`examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c` is still
+a no-op bump allocator (checked the current file). The root fix (per-frame
+reclamation with a separated retained/frame-local allocation path) is C
+runtime work exercised only through `scripts/check/check-simpleos-wm-fullscreen-evidence.shs`
+(SimpleOS x QEMU/board lane) — both editing the baremetal C allocator and
+re-running the QEMU/board evidence lane are out of this sweep's scope (no
+`bin/simple build bootstrap`, and this sweep is a `.spl`-source doc-tracking
+pass, not a hardware/QEMU verification pass). No `.spl`-source workaround
+exists because the defect is in the freestanding C allocator itself, not in
+compiler-generated code. Leaving **OPEN — ARCHITECTURAL** (requires baremetal
+C allocator redesign + fresh QEMU/board evidence, out of scope for this
+sweep). The 512MB mitigation remains landed and is not further downgraded.
