@@ -53,6 +53,7 @@ pub(super) fn gpu_dummy_expr() -> HirExpr {
 /// Helper: set up MirLowerer for GPU tests
 pub(super) fn gpu_lowerer_setup() -> MirLowerer<'static> {
     let mut lowerer = MirLowerer::new();
+    lowerer.type_registry = Some(failing_expr_registry());
     let mut func = MirFunction::new(
         "gpu_test".to_string(),
         hir::TypeId::I64,
@@ -70,13 +71,38 @@ pub(super) fn gpu_result_is_materialized_nil(func: &MirFunction, result: crate::
         .any(|i| matches!(i, MirInst::ConstInt { dest, value } if *dest == result && *value == 3))
 }
 
-/// Helper: make an expression that causes lower_expr to return Err
-/// (unknown enum variant with no registry)
+/// Helper: make an expression that causes lower_expr to return Err.
+///
+/// `Bogus` is a REGISTERED enum (see `failing_expr_registry`) that positively
+/// does not declare `Nope`, which is what makes `lower_global_expr` reject it.
+/// An unregistered head is deliberately NOT enough: unresolved heads stay
+/// permissive so cross-module type-registry metadata loss cannot fail a build.
 pub(super) fn failing_expr() -> HirExpr {
     HirExpr {
         kind: HirExprKind::Global("Bogus::Nope".to_string()),
         ty: hir::TypeId::I64,
     }
+}
+
+/// A leaked registry declaring `enum Bogus { Real }` so `failing_expr()` resolves
+/// its head positively and its tail negatively.
+pub(super) fn failing_expr_registry() -> &'static hir::TypeRegistry {
+    use std::sync::OnceLock;
+    static REGISTRY: OnceLock<&'static hir::TypeRegistry> = OnceLock::new();
+    REGISTRY.get_or_init(|| {
+        let mut registry = hir::TypeRegistry::new();
+        registry.register_named(
+            "Bogus".to_string(),
+            hir::HirType::Enum {
+                name: "Bogus".to_string(),
+                variants: vec![("Real".to_string(), None)],
+                generic_params: vec![],
+                is_generic_template: false,
+                type_bindings: Default::default(),
+            },
+        );
+        Box::leak(Box::new(registry))
+    })
 }
 
 /// Helper: build a MirFunction with one block, push instructions, return it.

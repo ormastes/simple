@@ -48,6 +48,59 @@ the GPU-intrinsic argument-error branches these 51 tests target are
 All 51 consumers of `failing_expr()` currently fail, so there is no passing
 consumer to protect when this is addressed.
 
+### RESOLVED 2026-08-10 — it was a LATENT COMPILER DEFECT, now fixed
+
+**Verdict: the fail-open is wrong, not the tests.** Archaeology + an end-to-end
+probe settle it.
+
+*Archaeology.* `name.contains("::")` entered on 2026-02-27 (`6da00decc78`, "fix:
+improve parser for native-build success (62→52 failures)") as the **error gate** —
+`if name.contains("::") { return Err("unknown enum variant") }`, commented
+"genuine error". Some later commit inverted it into the **success** condition
+(`variant_exists || ANY || contains("::")`). Every commit that touched the
+predicate since is a `chore:`/`wip:` bulk sync or a tree-wipe/restructure, so the
+inversion has no reviewed rationale anywhere in history — only the in-code
+"rather than failing the build" comment, written to unblock a *different* defect
+(cross-module type-registry losing an enum's metadata for `Effect::Compute`).
+
+*Downstream severity: dangerous, not harmless.* Real program, seed compiler:
+
+    enum Color: Red / Green
+    val d = Color.Nope        # or Color::Nope
+    match d: case Color.Red … case Color.Green …
+
+JIT/MIR path: **compiles clean, runs, matches no arm, exits 0.** Interpreter on
+the identical file: `error: semantic: unknown variant or method 'Nope' on enum
+Color`. `EnumUnit` never consults the variant list, so the fabricated value's
+discriminant is a hash of the undeclared name — same silent-garbage class as the
+sibling `E.no_such_name()` call-path defect.
+
+*Narrow fix, and it already had a precedent.* `lowering_expr_call.rs:467` fixed
+exactly this for the **call** path with a tri-state guard; the **ident** path was
+simply missed (an unswept sibling). Applied the same guard to
+`lowering_expr_ident.rs`: reject only when `enum_declares_variant(head, tail) ==
+Some(false)` and the name is neither a registered global nor a lowered function.
+`enum_declares_variant` returns `None` for any head that does not positively
+resolve to a concrete enum, so the metadata-loss case the widening was written
+for (`Effect::Compute`, enum missing from the registry) **stays permissive** — the
+build it was protecting cannot regress.
+
+*Consequence for these 51 tests.* They are legitimate; only the fixture was
+stale. `Bogus::Nope` on a registry-less lowerer is indistinguishable from
+metadata loss, so `helpers.rs` now registers `enum Bogus { Real }` and points
+`gpu_lowerer_setup` at it — the fixture fails for the right reason and all 51
+assertions are restored unweakened.
+
+Changed: `src/compiler_rust/compiler/src/mir/lower/lowering_expr_ident.rs`,
+`.../tests/branch_coverage/helpers.rs`, `.../tests/branch_coverage/types.rs`
+(two new regression tests: undeclared variant rejected for both `::` and `.`
+spellings; declared variant *and* unresolved head still emit `EnumUnit`).
+
+**Still open (separate, unfixed):** `lower_expr` remains structurally fail-open
+for the other five shapes the triage probed (`Deref`, `FieldAccess` on i64,
+`Await`, `Index`, `StructInit` with a bogus `TypeId`) — none of them can error.
+That is a wider audit, not covered here.
+
 ## Category C — FIXED: C-style comments in Simple source fixtures (6)
 
 `lint::tests::test_allow_*` / `test_known_attribute_no_warning` failed with
@@ -103,10 +156,9 @@ toolchain-environment issues, not absent inputs.
 
 1. **Category A poison guards** — one-line change, un-masks 25 results and stops
    every future run from lying about which test broke. Do this first.
-2. **Category B (51 tests)** — biggest single block. Decide: is
-   `lower_expr` being fail-open for unknown globals correct? If yes, delete the
-   51 tests and the dead error branches. If no, that fail-open is itself a
-   latent compiler defect worth its own bug.
+2. ~~**Category B (51 tests)**~~ — RESOLVED 2026-08-10: it was a latent compiler
+   defect (silent acceptance of undeclared enum variants). Narrow fix + fixture
+   repair landed; see the Category B section above.
 3. **Category D hir::lower actor/optional-struct inference (4)** — smells like
    one shared root cause in field-type inference; highest fix-per-effort ratio.
 4. **Category E** — needs a toolchain/runtime owner; start with the SIGABRT,

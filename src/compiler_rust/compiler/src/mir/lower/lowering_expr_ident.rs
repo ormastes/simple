@@ -42,6 +42,27 @@ impl<'a> MirLowerer<'a> {
             // `Effect::Compute` when lowering the whole compiler driver). Emit
             // EnumUnit by name anyway — same RuntimeEnum-by-name path the ANY-typed
             // branch already relies on — rather than failing the build.
+            // Sibling guard to the one in `lowering_expr_call.rs` (`E.no_such()`):
+            // when the head POSITIVELY resolves to a concrete enum and the tail is
+            // POSITIVELY not one of its declared variants, do not fabricate an
+            // EnumUnit. `EnumUnit` does not consult the variant list, so
+            // `Color.Nope` used to lower to an enum-shaped value whose
+            // discriminant is a hash of the undeclared name — matching no `case`
+            // arm, reported as no error at all, while the interpreter correctly
+            // rejects the same program with `unknown variant or method`.
+            // `enum_declares_variant` returns `None` whenever the head does not
+            // positively resolve to a concrete enum, so the metadata-loss case
+            // described below (registry lost `Effect`) stays permissive.
+            if self.enum_declares_variant(enum_name, variant) == Some(false)
+                && !self.global_types.contains_key(name.as_str())
+                && !self.available_functions.contains(name.as_str())
+            {
+                return Err(MirLowerError::Unsupported(format!(
+                    "unknown variant or method '{}' on enum {}",
+                    variant, enum_name
+                )));
+            }
+
             if variant_exists || expr_ty == TypeId::ANY || name.contains("::") {
                 // Emit EnumUnit instruction for proper RuntimeEnum creation
                 return self.with_func(|func, current_block| {

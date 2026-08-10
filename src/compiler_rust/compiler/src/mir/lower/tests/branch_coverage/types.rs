@@ -544,3 +544,85 @@ fn union_wrap_type_not_found() {
     assert_eq!(result.unwrap(), crate::mir::instructions::VReg(0));
     lowerer.end_function().unwrap();
 }
+
+// =============================================================================
+// Undeclared enum variant in a Global ident must NOT be fabricated
+// (sibling of the `E.no_such()` call-path guard in lowering_expr_call.rs).
+// =============================================================================
+
+#[test]
+fn global_undeclared_enum_variant_is_rejected() {
+    let mut registry = hir::TypeRegistry::new();
+    registry.register_named(
+        "Color".to_string(),
+        hir::HirType::Enum {
+            name: "Color".to_string(),
+            variants: vec![("Red".to_string(), None), ("Green".to_string(), None)],
+            generic_params: vec![],
+            is_generic_template: false,
+            type_bindings: Default::default(),
+        },
+    );
+
+    for name in ["Color::Nope", "Color.Nope"] {
+        let mut lowerer = MirLowerer::new();
+        lowerer.type_registry = Some(&registry);
+        let mut func = MirFunction::new(
+            "t".to_string(),
+            hir::TypeId::I64,
+            simple_parser::ast::Visibility::Private,
+        );
+        func.new_block();
+        lowerer.begin_function(func, "t", false).unwrap();
+        let expr = hir::HirExpr {
+            kind: hir::HirExprKind::Global(name.to_string()),
+            ty: hir::TypeId::I64,
+        };
+        let result = lowerer.lower_expr(&expr);
+        assert!(
+            result.is_err(),
+            "{name}: undeclared variant of a known enum must not lower to an EnumUnit"
+        );
+    }
+}
+
+#[test]
+fn global_declared_enum_variant_still_lowers() {
+    let mut registry = hir::TypeRegistry::new();
+    registry.register_named(
+        "Color".to_string(),
+        hir::HirType::Enum {
+            name: "Color".to_string(),
+            variants: vec![("Red".to_string(), None)],
+            generic_params: vec![],
+            is_generic_template: false,
+            type_bindings: Default::default(),
+        },
+    );
+
+    // Declared variant, plus an entirely unresolved head: both stay permissive so
+    // cross-module registry metadata loss cannot fail an otherwise-valid build.
+    for name in ["Color::Red", "Effect::Compute"] {
+        let mut lowerer = MirLowerer::new();
+        lowerer.type_registry = Some(&registry);
+        let mut func = MirFunction::new(
+            "t".to_string(),
+            hir::TypeId::I64,
+            simple_parser::ast::Visibility::Private,
+        );
+        func.new_block();
+        lowerer.begin_function(func, "t", false).unwrap();
+        let expr = hir::HirExpr {
+            kind: hir::HirExprKind::Global(name.to_string()),
+            ty: hir::TypeId::I64,
+        };
+        assert!(lowerer.lower_expr(&expr).is_ok(), "{name} must still lower");
+        let done = lowerer.end_function().unwrap();
+        assert!(
+            done.blocks
+                .iter()
+                .any(|b| b.instructions.iter().any(|i| matches!(i, MirInst::EnumUnit { .. }))),
+            "{name} must emit EnumUnit"
+        );
+    }
+}
