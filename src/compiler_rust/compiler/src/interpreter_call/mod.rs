@@ -355,6 +355,49 @@ fn call_value_as_callable(
 }
 
 #[allow(clippy::borrowed_box)] // reason: Box<dyn Trait> is the required storage type for this dispatch point
+thread_local! {
+    /// Prelude names already reported by `warn_prelude_shadow_once`, so a
+    /// shadowed builtin called in a loop warns once rather than per call.
+    static PRELUDE_SHADOW_WARNED: std::cell::RefCell<std::collections::HashSet<String>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+/// Report, once per name, that a user `fn` shadows a prelude builtin.
+///
+/// `fenced` distinguishes the two policies: a `PRELUDE_UNSHADOWABLE` name is
+/// reported as *ignored* (the builtin still wins), any other prelude name is
+/// reported as an *active* rebind so the hijack is at least visible.
+///
+/// Silenced by `SIMPLE_NO_PRELUDE_SHADOW_WARNING=1` for lanes that knowingly
+/// ship shims; it is a diagnostic, not a gate.
+fn warn_prelude_shadow_once(name: &str, functions: &HashMap<String, Arc<FunctionDef>>, fenced: bool) {
+    if std::env::var("SIMPLE_NO_PRELUDE_SHADOW_WARNING").as_deref() == Ok("1") {
+        return;
+    }
+    let first = PRELUDE_SHADOW_WARNED.with(|c| c.borrow_mut().insert(name.to_string()));
+    if !first {
+        return;
+    }
+    let where_ = functions
+        .get(name)
+        .map(|f| format!("line {}", f.span.line))
+        .unwrap_or_else(|| "an overloaded definition".to_string());
+    if fenced {
+        eprintln!(
+            "WARNING: `fn {name}` at {where_} shadows the prelude builtin `{name}`, \
+             which is process-control and cannot be rebound -- the builtin is being used. \
+             Rename the local function."
+        );
+    } else {
+        eprintln!(
+            "WARNING: `fn {name}` at {where_} shadows the prelude builtin `{name}` \
+             and is being called INSTEAD of it. This applies to the whole program, \
+             including modules that only imported this one transitively. Rename the \
+             local function if that was not intended."
+        );
+    }
+}
+
 pub(crate) fn evaluate_call(
     callee: &Box<Expr>,
     args: &[Argument],
@@ -389,9 +432,29 @@ pub(crate) fn evaluate_call(
         // over that coincidental extern registration — only fall back to
         // extern dispatch when no local definition exists. See
         // doc/08_tracking/bug/seed_native_build_unknown_extern_rt_array_len_safe_2026-07-12.md.
-        let has_local_def = is_extern
+        //
+        // HOWEVER: `PRELUDE_EXTERN_FUNCTIONS` (print/exit/abs/...) lands in the
+        // same `EXTERN_FUNCTIONS` set as those coincidental runtime symbols, so
+        // this hatch used to apply to prelude builtins too -- a top-level
+        // `fn exit` anywhere in the *transitive* import closure silently rebound
+        // `exit` for the whole program. Two fences now apply:
+        //   1. `PRELUDE_UNSHADOWABLE` names (process control) ignore the hatch
+        //      entirely and always reach the builtin.
+        //   2. Any other user-facing prelude name that IS shadowed warns once,
+        //      naming the builtin and the shadowing definition's line.
+        // See doc/08_tracking/bug/prelude_builtins_rebindable_by_transitive_import_2026-08-10.md
+        let mut has_local_def = is_extern
             && (functions.contains_key(name.as_str())
                 || FUNCTION_OVERLOADS.with(|cell| cell.borrow().contains_key(name.as_str())));
+        if has_local_def && super::interpreter_eval::is_user_facing_prelude(name.as_str()) {
+            if super::interpreter_eval::PRELUDE_UNSHADOWABLE.contains(&name.as_str()) {
+                // Fence: the builtin always wins for process-control names.
+                has_local_def = false;
+                warn_prelude_shadow_once(name.as_str(), functions, true);
+            } else {
+                warn_prelude_shadow_once(name.as_str(), functions, false);
+            }
+        }
         if is_extern && !has_local_def {
             if runtime_profile::is_profiling_active() {
                 runtime_profile::record_full_call(name, None, vec![], runtime_profile::CallType::Ffi);
@@ -403,7 +466,17 @@ pub(crate) fn evaluate_call(
             return result;
         }
 
-        // Priority 2: Try built-ins (before user functions, so builtins can't be shadowed)
+        // Priority 2: Try built-ins.
+        //
+        // NOTE: this used to claim "so builtins can't be shadowed". That was
+        // FALSE for every prelude name the Priority-1 hatch above reaches: when
+        // `has_local_def` was true the extern/builtin dispatch was skipped and
+        // control fell through to the user function at Priority 4. Measured
+        // 2026-08-10: 50 of the 51 user-facing prelude names were rebindable by
+        // a transitively-imported top-level `fn` in the interpreter lane (43 of
+        // 51 in the JIT lane). The fences added at Priority 1 are what actually
+        // protects the names listed in `PRELUDE_UNSHADOWABLE`; every other
+        // prelude name remains shadowable *by design*, but now warns.
         if let Some(result) = builtins::eval_builtin(name, args, env, functions, classes, enums, impl_methods)? {
             return Ok(result);
         }

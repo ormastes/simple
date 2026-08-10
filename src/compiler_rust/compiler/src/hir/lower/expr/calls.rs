@@ -510,6 +510,18 @@ impl Lowerer {
             "to_string" => Ok(Some(self.lower_builtin_call(name, args, TypeId::STRING, ctx)?)),
             "to_int" => Ok(Some(self.lower_builtin_call(name, args, TypeId::I64, ctx)?)),
             "panic" => Ok(Some(self.lower_builtin_call("rt_panic", args, TypeId::NIL, ctx)?)),
+            // `exit` must lower as a builtin for the same reason `panic` does,
+            // and for one more: it is process control. Names this dispatch does
+            // NOT recognize fall through to ordinary function resolution, so a
+            // top-level `fn exit` anywhere in the transitive import closure won
+            // dispatch in the JIT/native lanes -- and because such a shim need
+            // not terminate, failure paths kept running and the process exited
+            // 0. (The interpreter lane had the same hole via a different
+            // mechanism, the Priority-1 `has_local_def` hatch in
+            // interpreter_call/mod.rs; both are fenced now, and this name is
+            // listed in `PRELUDE_UNSHADOWABLE`.)
+            // doc/08_tracking/bug/prelude_builtins_rebindable_by_transitive_import_2026-08-10.md
+            "exit" => Ok(Some(self.lower_builtin_call("rt_exit", args, TypeId::NIL, ctx)?)),
             // Option/Result constructors (needed for stdlib)
             "Some" | "Ok" => {
                 // Wrap value in Some/Ok variant - return ANY since it's a generic wrapper

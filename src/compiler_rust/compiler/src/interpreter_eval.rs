@@ -368,6 +368,41 @@ pub const PRELUDE_EXTERN_FUNCTIONS: &[&str] = &[
     "rt_cuda_get_error_string",
 ];
 
+/// Prelude names that a user `fn` must NEVER be able to rebind.
+///
+/// `evaluate_call`'s Priority-1 `has_local_def` escape hatch (see
+/// `interpreter_call/mod.rs`) exists so a *coincidental* runtime-symbol
+/// registration -- `rt_array_len_safe` and friends, bulk-seeded from
+/// `RUNTIME_SYMBOL_NAMES` -- loses to a real local definition. But
+/// `PRELUDE_EXTERN_FUNCTIONS` lands in the same `EXTERN_FUNCTIONS` set, so the
+/// hatch silently applied to prelude builtins too: a top-level `fn exit`
+/// anywhere in a module's *transitive* import closure rebound `exit` for the
+/// whole program, and because such a shim need not terminate, failure paths
+/// kept running and the process exited 0. That is a false-GREEN generator for
+/// any harness that reads exit status.
+///
+/// Process-control names are therefore fenced: they always dispatch to the
+/// builtin, never to a local definition. Every one of the 16 top-level
+/// `fn exit` definitions in `src/**` delegates to `rt_exit`, so fencing `exit`
+/// is behaviour-preserving for the interpreter lane; the baremetal kernel
+/// `cstart.spl` variants (which map `exit` to `__spl_exit`) are never
+/// interpreted.
+///
+/// See doc/08_tracking/bug/prelude_builtins_rebindable_by_transitive_import_2026-08-10.md
+pub const PRELUDE_UNSHADOWABLE: &[&str] = &["exit"];
+
+/// True for the user-facing prelude names (`print`, `exit`, `abs`, ...) as
+/// opposed to the `rt_*` / `compiler__*` runtime-bridge entries that share
+/// `PRELUDE_EXTERN_FUNCTIONS`. Shadowing an `rt_*` symbol is legitimate (that
+/// is what the escape hatch is for); shadowing a user-facing prelude name is
+/// the hazard we want to be loud about.
+pub fn is_user_facing_prelude(name: &str) -> bool {
+    !name.starts_with("rt_")
+        && !name.starts_with("compiler__")
+        && !name.starts_with("__")
+        && PRELUDE_EXTERN_FUNCTIONS.contains(&name)
+}
+
 pub(crate) fn initialize_extern_functions() {
     EXTERN_FUNCTIONS.with(|cell| {
         let mut externs = cell.borrow_mut();
