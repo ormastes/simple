@@ -1,6 +1,13 @@
 # 26 duplicate `enum HirType` declarations collide with the canonical struct, dropping a whole module to the interpreter
 
-**Status:** OPEN (symbol registry / enum resolution).
+**Status:** SYMPTOM NO LONGER REPRODUCES (2026-08-10). The identical time-boxed
+repro (`SIMPLE_TIMEOUT_SECONDS=0 timeout 200 bin/simple test`) now shows 0
+`irrefutable BINDING` lines; the single `[jit-fallback]` at startup is a
+DIFFERENT defect in the same duplicate-name family — see
+`duplicate_struct_decls_shadow_field_types_2026-08-10.md` (struct field-type
+shadowing, partially fixed there). The 26 duplicate `enum HirType` decls still
+exist and remain a latent hazard; the guidance below (make the diagnostic name
+the winning declaration) still applies if this resurfaces.
 **Found:** 2026-08-04, while taking a fresh full-suite baseline.
 **Impact:** suite-wide. The compiler itself reports
 `whole module dropped to the interpreter (expect ~100-1000x slowdown)`.
