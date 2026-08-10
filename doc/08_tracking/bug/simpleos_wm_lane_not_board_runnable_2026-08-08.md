@@ -105,6 +105,35 @@ SIMPLEOS_FONT_DISK=<font-disk.img> \
 Board-runnable then requires a third, currently unstarted step: the same kernel
 built for and booted on real hardware with a serial transcript.
 
+## Re-verification (2026-08-10)
+
+Fresh gate re-run confirms the table above is unchanged: `check-kv260-simpleos-boot-release.shs`
+still `BLOCKED reason=bitstream-missing:build/fpga/k26_rv32_ddr/k26_rv32_ddr.bit`
+(now reports `BLOCKED` rather than a bare `SKIP`, exit 0, but still states
+"NOTHING was checked" — the vacuous-pass gate defect noted below is unchanged).
+
+**Hardware-presence correction, stated plainly per `.claude/rules/board-runnable.md`:**
+this host is NOT hardware-free. `lsusb`/`udevadm` confirm a real, physically
+attached Xilinx **ML Carrier Card (FT4232H Quad UART/JTAG, serial
+`XFL1OSWWFM2B`)** exposing `/dev/ttyUSB0`-`/dev/ttyUSB3` — the carrier board
+used for Kria K26/KV260 bring-up per `doc/07_guide/hardware/fpga/
+kria_k26_ml_carrier_bringup.md`. So the earlier framing ("no board evidence
+exists at all") is accurate only in the narrow sense that no boot/serial
+*transcript* exists yet — it is not because hardware is absent. The actual
+blocker is a missing **build artifact**: `k26_rv32_ddr.bit` (an FPGA
+bitstream) has never been synthesized on this host, and Vivado bitstream
+synthesis is a multi-hour job, not something this pass's scope covers. This
+correction does not change the doc's bottom line (still no board-runnable WM
+evidence) but it changes *why*: reachable hardware + missing bitstream build,
+not missing hardware. Producing that bitstream and a subsequent real
+boot/serial transcript is the concrete unblock step and remains out of scope
+for this triage pass; leaving it filed here rather than silently implying
+either "no hardware" or "board-runnable."
+
+Status remains **OPEN**, unchanged in substance from 2026-08-08 — this
+re-verification only sharpens the hardware-availability claim with fresh
+evidence from this host and confirms no gate result has drifted.
+
 ## Related
 
 - `doc/03_plan/ui/perf/render_perf_redesign_plan_2026-08-06.md` §7 (lanes U0–U3)
