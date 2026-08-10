@@ -316,13 +316,19 @@ fn _benc_decode_int_at(data: text, pos: i64) -> _BencDecResult:
         # i0e => 0
         val total_consumed = next_pos + 1 - pos
         return _benc_ok(BencodeValue.BInt(0), total_consumed)
-    # Accumulate digits
+    # Accumulate digits. i64 magnitude range is asymmetric: max is
+    # 9223372036854775807 (last digit 7) but min is -9223372036854775808
+    # (last digit 8) -- the extra magnitude unit only exists on the negative
+    # side, so the last-digit ceiling must be 8 when `negative` and 7
+    # otherwise, or "i-9223372036854775808e" (a legal bencode integer) is
+    # wrongly rejected as InvalidInteger.
+    val last_digit_ceiling = if negative: 8 else: 7
     var n: i64 = 0
     while (cur < dlen and _benc_is_digit(_benc_char_at(data, cur))):
         val digit = _benc_digit_val(_benc_char_at(data, cur))
         if n > 922337203685477580:
             return _benc_err(BencodeError.InvalidInteger)
-        if n == 922337203685477580 and digit > 7:
+        if n == 922337203685477580 and digit > last_digit_ceiling:
             return _benc_err(BencodeError.InvalidInteger)
         n = n * 10 + digit
         cur = cur + 1
