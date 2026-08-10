@@ -23,7 +23,30 @@ use os.port.qrb2210_native_2d_ports.{
     QRB2210_DEVICE_INPUT,
     QRB2210_DEVICE_AUDIO,
     QRB2210_DEVICE_GPU,
-    qrb2210_board_device_handle_ready
+    qrb2210_board_device_handle_ready,
+    Qrb2210DisplayPort,
+    Qrb2210AudioPort,
+    Qrb2210DisplayPresentReceipt,
+    Qrb2210DisplayCaptureReceipt,
+    Qrb2210InputDeviceReceipt,
+    Qrb2210AudioSubmitReceipt,
+    Qrb2210AudioCompletionReceipt,
+    Qrb2210GpuSubmitReceipt,
+    Qrb2210GpuFenceReceipt,
+    Qrb2210DeviceReadbackReceipt,
+    qrb2210_display_capture_correlated,
+    qrb2210_audio_completion_correlated
+}
+use os.port.qrb2210_evdev_primitive_provider.{
+    Qrb2210EvdevKernelPort,
+    Qrb2210EvdevInputProvider
+}
+use os.port.qrb2210_vulkan_primitive_provider.{
+    Qrb2210VulkanKernelPort,
+    Qrb2210VulkanPhysicalBinding,
+    Qrb2210VulkanGpuSubmitProvider,
+    Qrb2210VulkanGpuFenceProvider,
+    Qrb2210VulkanDeviceReadbackProvider
 }
 
 val QRB2210_NATIVE_2D_ROUTE: text = "shared-wm-drawir-engine2d-qualcomm-vulkan"
@@ -42,6 +65,29 @@ class Qrb2210Native2dCompositionRoot:
 class Qrb2210Native2dSharedFrame:
     frame_id: i64
     composition: DrawIrComposition
+
+# DRM/KMS and PCM DMA adapters intentionally remain abstract until their
+# SimpleOS kernel owners exist. The assembly boundary still names them so the
+# board entry cannot substitute a hosted or QEMU implementation.
+class Qrb2210Native2dKernelOwners:
+    drm: Qrb2210DisplayPort
+    evdev: Qrb2210EvdevKernelPort
+    pcm: Qrb2210AudioPort
+    adreno: Qrb2210VulkanKernelPort
+    adreno_binding: Qrb2210VulkanPhysicalBinding
+
+class Qrb2210Native2dFrameEvidence:
+    generation: i64
+    input_frame_id: i64
+    audio_frame_id: i64
+    present: Qrb2210DisplayPresentReceipt
+    capture: Qrb2210DisplayCaptureReceipt
+    input: Qrb2210InputDeviceReceipt
+    audio_submit: Qrb2210AudioSubmitReceipt
+    audio_completion: Qrb2210AudioCompletionReceipt
+    gpu_submit: Qrb2210GpuSubmitReceipt
+    gpu_fence: Qrb2210GpuFenceReceipt
+    readback: Qrb2210DeviceReadbackReceipt
 
 fn _qrb2210_owner_admission(capability: i64, owner: text) -> Qrb2210Native2dCompositionAdmission:
     val status = uno_q_desktop_backend_status(UNO_Q_QRB2210_BOARD_ID, capability)
@@ -72,6 +118,10 @@ fn qrb2210_native_2d_composition_admission() -> Qrb2210Native2dCompositionAdmiss
             return admission
     Qrb2210Native2dCompositionAdmission(
         admitted: true, missing_owner: "", reason: "", route: QRB2210_NATIVE_2D_ROUTE)
+
+fn qrb2210_native_2d_factory_admission() -> Qrb2210Native2dCompositionAdmission:
+    """Admission-only factory probe; it never accesses a provider."""
+    qrb2210_native_2d_composition_admission()
 
 fn _qrb2210_same_boot(left: Qrb2210BoardDeviceHandle, right: Qrb2210BoardDeviceHandle) -> bool:
     left.board_id == right.board_id and left.boot_id == right.boot_id
@@ -125,6 +175,111 @@ fn qrb2210_native_2d_bind_root(
     Ok(Qrb2210Native2dCompositionRoot(
         engine: engine, ports: ports, route: QRB2210_NATIVE_2D_ROUTE))
 
+fn qrb2210_native_2d_assemble_root(
+    engine: Engine2D,
+    owners: Qrb2210Native2dKernelOwners
+) -> Result<Qrb2210Native2dCompositionRoot, text>:
+    """Assemble the sole physical root after canonical owner admission.
+
+    The admission check is deliberately first. On the current source it
+    returns before reading DRM, evdev, PCM, or Adreno identity/readiness.
+    """
+    val admission = qrb2210_native_2d_factory_admission()
+    if not admission.admitted:
+        return Err("{admission.missing_owner}:{admission.reason}")
+    val ports = Qrb2210Native2dPlatformPorts(
+        display: owners.drm,
+        input: Qrb2210EvdevInputProvider(
+            kernel: owners.evdev, last_irq_sequence: 0, last_event_sequence: 0),
+        audio: owners.pcm,
+        gpu_submit: Qrb2210VulkanGpuSubmitProvider(
+            kernel: owners.adreno, binding: owners.adreno_binding),
+        gpu_fence: Qrb2210VulkanGpuFenceProvider(
+            kernel: owners.adreno, binding: owners.adreno_binding),
+        device_readback: Qrb2210VulkanDeviceReadbackProvider(
+            kernel: owners.adreno, binding: owners.adreno_binding)
+    )
+    qrb2210_native_2d_bind_root(engine, ports)
+
+fn _qrb2210_same_device(left: Qrb2210BoardDeviceHandle, right: Qrb2210BoardDeviceHandle) -> bool:
+    (left.board_id == right.board_id and left.boot_id == right.boot_id and
+        left.owner == right.owner and left.device_node == right.device_node and
+        left.native_handle == right.native_handle and
+        left.driver_generation == right.driver_generation)
+
+fn qrb2210_native_2d_provider_identity_correlates(
+    display: Qrb2210BoardDeviceHandle,
+    input: Qrb2210BoardDeviceHandle,
+    audio: Qrb2210BoardDeviceHandle,
+    gpu: Qrb2210BoardDeviceHandle,
+    generation: i64
+) -> bool:
+    """Require one board boot and assembly generation across all owners."""
+    (generation > 0 and
+        qrb2210_board_device_handle_ready(display, QRB2210_DEVICE_DISPLAY) and
+        qrb2210_board_device_handle_ready(input, QRB2210_DEVICE_INPUT) and
+        qrb2210_board_device_handle_ready(audio, QRB2210_DEVICE_AUDIO) and
+        qrb2210_board_device_handle_ready(gpu, QRB2210_DEVICE_GPU) and
+        display.boot_id == input.boot_id and display.boot_id == audio.boot_id and
+        display.boot_id == gpu.boot_id and
+        display.driver_generation == generation and
+        input.driver_generation == generation and
+        audio.driver_generation == generation and
+        gpu.driver_generation == generation)
+
+fn qrb2210_native_2d_frame_ids_correlate(
+    submit_frame_id: i64,
+    readback_frame_id: i64,
+    present_frame_id: i64,
+    capture_frame_id: i64,
+    input_frame_id: i64,
+    audio_frame_id: i64
+) -> bool:
+    """Require every frame-scoped provider receipt to name one frame."""
+    (submit_frame_id > 0 and submit_frame_id == readback_frame_id and
+        submit_frame_id == present_frame_id and
+        submit_frame_id == capture_frame_id and
+        submit_frame_id == input_frame_id and
+        submit_frame_id == audio_frame_id)
+
+fn qrb2210_native_2d_frame_evidence_correlates(
+    ports: Qrb2210Native2dPlatformPorts,
+    evidence: Qrb2210Native2dFrameEvidence
+) -> bool:
+    """Correlate one frame across DRM, evdev, PCM, and Adreno owners."""
+    if evidence.generation <= 0:
+        return false
+    val display = ports.display.device_handle()
+    val input = ports.input.device_handle()
+    val audio = ports.audio.device_handle()
+    val gpu = ports.gpu_submit.device_handle()
+    if (not _qrb2210_physical_handles_correlate(ports) or
+        not qrb2210_native_2d_provider_identity_correlates(
+            display, input, audio, gpu, evidence.generation)):
+        return false
+    if (not _qrb2210_same_device(display, evidence.present.device) or
+        not _qrb2210_same_device(display, evidence.capture.device) or
+        not _qrb2210_same_device(input, evidence.input.device) or
+        not _qrb2210_same_device(audio, evidence.audio_submit.device) or
+        not _qrb2210_same_device(audio, evidence.audio_completion.device)):
+        return false
+    if (not qrb2210_display_capture_correlated(evidence.present, evidence.capture) or
+        not qrb2210_audio_completion_correlated(
+            evidence.audio_submit, evidence.audio_completion)):
+        return false
+    (evidence.gpu_submit.accepted and evidence.gpu_fence.completed and
+        evidence.gpu_submit.submission_id > 0 and
+        evidence.gpu_submit.submission_id == evidence.gpu_fence.submission_id and
+        evidence.gpu_submit.submission_id == evidence.readback.submission_id and
+        evidence.gpu_submit.native_device_handle == gpu.native_handle and
+        qrb2210_native_2d_frame_ids_correlate(
+            evidence.gpu_submit.frame_id, evidence.readback.frame_id,
+            evidence.present.frame_id, evidence.capture.frame_id,
+            evidence.input_frame_id, evidence.audio_frame_id) and
+        evidence.readback.source == "qrb2210-vulkan-device-memory" and
+        evidence.readback.checksum > 0 and
+        evidence.readback.checksum == evidence.present.readback_checksum)
+
 fn qrb2210_native_2d_shared_frame(
     root: Qrb2210Native2dCompositionRoot,
     composition: DrawIrComposition,
@@ -138,5 +293,10 @@ fn qrb2210_native_2d_shared_frame(
 export QRB2210_NATIVE_2D_ROUTE
 export Qrb2210Native2dCompositionAdmission, Qrb2210Native2dCompositionRoot
 export Qrb2210Native2dSharedFrame
-export qrb2210_native_2d_composition_admission, qrb2210_native_2d_bind_root
+export Qrb2210Native2dKernelOwners, Qrb2210Native2dFrameEvidence
+export qrb2210_native_2d_composition_admission, qrb2210_native_2d_factory_admission
+export qrb2210_native_2d_bind_root, qrb2210_native_2d_assemble_root
+export qrb2210_native_2d_provider_identity_correlates
+export qrb2210_native_2d_frame_ids_correlate
+export qrb2210_native_2d_frame_evidence_correlates
 export qrb2210_native_2d_shared_frame

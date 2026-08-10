@@ -67,6 +67,24 @@ The outstanding physical driver binding is tracked in
 Until those SimpleOS device nodes mint the typed handles and hardware receipts,
 all six canonical capabilities remain unavailable.
 
+The canonical assembly factory is now
+`qrb2210_native_2d_assemble_root`. Its typed owner bundle accepts only the
+QRB2210 DRM/KMS display port, evdev kernel port, PCM DMA audio port, and Adreno
+Vulkan kernel port/binding. It queries canonical capability admission before
+accessing any owner, so the current missing DRM/KMS and PCM DMA kernel adapters
+block construction without probing hardware or promoting a capability. Once
+those owners exist, the factory constructs the shared evdev and Vulkan
+submit/fence/readback adapters and delegates final identity/readiness checks to
+`qrb2210_native_2d_bind_root`.
+
+Accepted frame evidence must carry one QRB2210 boot and assembly generation
+across display, input, audio, and GPU identities. Each receipt must match its
+own exact device handle; Adreno submit/fence/readback share the exact GPU
+device. Submission, readback, DRM present/capture, input dispatch, and audio
+completion must identify one frame, while fence/readback share the exact
+submission and display capture shares the exact present. Any cross-boot,
+cross-device, stale-generation, or cross-frame combination fails closed.
+
 The input-side primitive adapter is
 `os.port.qrb2210_evdev_primitive_provider`. A QRB2210 kernel input owner must
 bind a physical IRQ line and event-ring handle, then supply receipts carrying
