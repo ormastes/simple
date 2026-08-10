@@ -43,14 +43,66 @@ Report the FIRST such line, not the last.
 aware it MASKS real failures as a bare `rc=1`; never accept `rc=1` with no
 `^error:` line as a diagnosis.
 
-## Observed so far
+## Outcome: KILLED BY `earlyoom` AT ~60 MIN — NOT a compiler failure
 
-- **29 minutes elapsed, process alive, zero `^error:` lines.**
-- Progress point: past the frontend, into HIR lowering. The only log output is
-  the field-type probe:
-  `[hir-field-type] struct=CompiledUnit field=entry_point …` and
-  `[hir-field-type] struct=BackendError field=span …`.
-- No candidate binary at `$OUT/stage3_simple` yet.
+The run was SIGTERMed after 60 minutes with **zero `^error:` lines ever
+emitted**. This is an infrastructure ceiling, **not** a verdict on
+`ee89798a19f`.
+
+Memory trajectory (RSS of the stage2 binary compiling stage3):
+
+| elapsed | RSS | host `available` |
+|---|---|---|
+| 17 min | 3.8 GB | — |
+| 30 min | 26.5 GB | 40 GB |
+| 39 min | 31.9 GB | 40 GB |
+| 59 min | **52.5 GB** | 20 GB |
+| ~60 min | SIGTERM (exit **143**) | — |
+
+Growth was linear at roughly 1 GB/min with no plateau, entirely within the
+frontend/HIR phase — the native cache dir stayed at **0 entries / 0 bytes**, so
+it never reached codegen emission.
+
+### The killer
+
+```
+/usr/bin/earlyoom -r 3600 \
+  --prefer '^(simple|rustc|cc1|cc1plus|lto1|collect2|qemu-system|ld)' \
+  --avoid  '^(claude|codex|gemini|node|sshd|dockerd|containerd|systemd|jj|git|bash)$'
+```
+
+`earlyoom` runs on this host and is configured to **preferentially SIGTERM
+processes named `simple`**. Under memory pressure it picks the stage3 build
+first, by design.
+
+**This is a measurement trap that reads exactly like a build failure.** The
+symptoms are: exit `143`, no verdict line, no `^error:` output, and a log that
+simply stops. `SIMPLE_TIMEOUT_SECONDS=3600` does NOT protect against it — that
+governs the compiler's own timeout, not an external reaper. Do not report a
+`143` as "stage 3 fails"; check `pgrep -af earlyoom` and the RSS trajectory
+first. This is a plausible explanation for earlier streams "dying
+mid-verification" on this same question.
+
+### Consequence
+
+Stage-3 status after `ee89798a19f` remains **UNKNOWN**. What is established:
+
+- The build gets **at least 60 minutes and through the frontend into HIR
+  lowering** without a single `^error:` line.
+- Neither previously documented blocker (`ByteOrder`, `Effect` facade) fired in
+  that window.
+- The binding constraint on this host is **memory**, not a type error: stage3
+  needs >52 GB RSS in the frontend/HIR phase and grows unbounded from there.
+
+### To actually answer the question
+
+Re-run on a host with substantially more free RAM, or with `earlyoom`
+temporarily stopped, or with `--threads 2` as the recorded transcript
+specifies (this run used `--threads 4`, an unforced deviation that may have
+inflated peak memory — though the phase that ballooned appears to be
+frontend/HIR, which is not obviously thread-scaled, so 2 threads may not be
+enough to fit). **The unbounded frontend/HIR memory growth is itself worth
+filing as a separate defect** if it reproduces at 2 threads.
 
 ## The two previously documented blockers
 
