@@ -248,3 +248,110 @@ confirms this batch did not regress the riscv_shared fence).
 in the default lane. Only `SIMPLE_JIT_STRICT=1` produced `rc=1`. A fatal semantic error
 that exits 0 is a fail-open measurement trap of the same family as the ones already
 catalogued. Worth its own entry.
+
+## 2026-08-10 full-tree census (verified, bounded)
+
+A whole-`src/` census was run to replace the never-independently-verified "740
+sites / 62 files" estimate. **Scope: full coverage, whole tree** — all 14,394
+`.spl` files under `src/` were scanned (excluding the six vendored paths named
+in the task: `src/compiler_rust/vendor/**`, `src/runtime/vendor/**`,
+`src/runtime/miniaudio.h`, `src/runtime/stb_image.h`,
+`src/runtime/stb_truetype.h`). No part of `src/` was skipped for size/time
+reasons — the whole-tree Python scan completed in ~20s.
+
+**Tool**: `scripts/check/census-bare-field-references.shs` (wraps
+`scripts/check/census_bare_field_references_scan.py`, new, read-only,
+NOT wired into any pipeline/CI, does not touch or replace
+`scripts/check/check-bare-field-references.shs`, which remains scoped only to
+`riscv_shared`). Method: for each `class`/`struct`, collect its declared field
+names from the block header, then scan every non-`static` method body
+(indentation-delimited) for bare occurrences of those names not preceded by
+`self.`/`me.`, word-boundary matched.
+
+**Syntactic positions scanned** (per task requirement, enumerated before
+scanning): `if <field>` block-condition, `while <field>` block-condition,
+`return <field>`/`return <expr with field>`, assignment RHS
+(`x = <expr with field>`), and general expression position (method calls,
+comparisons, interpolation, arithmetic). All five appear in the emitted TSV's
+`syntactic_position` column (`if-cond`, `while-cond`, `return`, `assign-rhs`,
+`expr`).
+
+**Positive control (proves the scanner is not silently empty)**: took the
+already-fixed `domain_hardening.spl`, reverted `me.parse_status` back to bare
+`parse_status` in a scratch copy, and reran the scanner against it in
+isolation — it reported exactly 1 candidate site at the reverted line, both
+before and after each round of false-positive-filter tightening described
+below. The unmodified fixed file, and the two already-checked-clean VHDL
+files (`vhdl_cdc_primitives.spl`, `vhdl_device_target.spl`), and the 3 fixed
+`riscv_shared` modules, all return **0** hits from the full-tree scan —
+consistent with prior fixes, not silently blind.
+
+**Verified totals**: **1,550 candidate sites across 210 files** (after
+false-positive filtering described below) — well above the unverified "62
+files" and, while below "740 sites" as a raw count, the underlying claim that
+740/62 was an undercount is confirmed on the file-count axis (210 vs 62,
+3.4x) and plausible on the site axis once precision is taken into account
+(see below). 421 rows are `high` confidence (`if-cond`/`while-cond`/`return`
+positions), 1,129 are `medium` (`expr`/`assign-rhs`).
+
+**Precision estimate and method**: manual eyeball triage of two independent
+random 100-row samples (`shuf` seeded via `/dev/urandom`/fixed streams for
+reproducibility) drawn from the full candidate list, reading each site's full
+source line in context. Iteratively identified and filtered four dominant
+false-positive shapes that a single-pattern grep would have missed: (1)
+`self.<f> = <f>` / `me.<f> = <f>` constructor-body idiom, where the bare RHS
+is the incoming parameter, not a field read; (2) `key: value` named-argument
+position, both the simple `field: field,` form and (3) multi-line docstring
+prose using a field name as an ordinary English word (only single-line
+`"""..."""` and quoted-string-only lines are filtered; mid-block docstring
+continuation lines are NOT filtered — a known residual false-positive
+source); (4) inline trailing `#` comments (only whole-line comments are
+filtered). After these filters, a fresh 100-row sample showed the visible
+false-positive rate down to roughly 1-in-10 to 1-in-7 (consistent with the
+task's own 1-in-7 expectation), concentrated almost entirely in the two
+residual categories: mid-docstring prose and value-position identifiers
+wrapped in another call (e.g. `Some(x)`, `bridge.resume()` where `bridge` may
+be a local). **This is a heuristic census, not a compiler** — the TSV's
+`confidence` column is the mitigation: treat `medium` rows as needing a
+before-fix read of the surrounding block, `high` rows (bare comparisons/
+conditions/returns) as the most reliable class.
+
+**Per-cluster breakdown** (top-level dir groups, candidate-site counts):
+
+| cluster | sites |
+|---|---:|
+| src/compiler_rust/lib | 345 |
+| src/lib/gc_async_mut | 281 |
+| src/lib/nogc_sync_mut | 189 |
+| src/lib/nogc_async_mut | 179 |
+| src/compiler/70.backend | 124 |
+| src/os/http | 69 |
+| src/compiler/10.frontend | 58 |
+| src/os/compositor | 54 |
+| src/lib/common | 49 |
+| src/os/kernel | 46 |
+| src/os/smf | 33 |
+| src/os/apps | 33 |
+| src/app/dashboard | 18 |
+| src/os/crypto | 15 |
+| src/app/dap | 11 |
+| src/os/drivers | 10 |
+| (18 smaller clusters) | 36 |
+
+Note: `src/compiler_rust/lib` (725 `.spl` files, a mirrored stdlib tree used
+by the Rust-seed build path, distinct from the vendored Rust crates in
+`src/compiler_rust/vendor/**`) was in-scope per the task's exclude list — it
+is NOT one of the six named exclusions — and is the single largest cluster.
+Whether it should be treated as a duplicate of `src/lib/**` for fix-dedup
+purposes is a follow-up question, not resolved by this census.
+
+**TSV**: `doc/08_tracking/test/bare_field_reference_sites_2026-08-10.tsv`,
+1,550 data rows, columns `file, line, field_name, syntactic_position,
+prefix_convention, confidence, class`, sorted by file for cluster-batching.
+
+**Coverage statement**: 100% of `src/**/*.spl` (14,394 files) outside the six
+named vendor exclusions was scanned by this heuristic. This is NOT a claim of
+100% recall — the false-positive filtering work above implies a symmetric
+risk of under-matching in files with unusual formatting (e.g. multi-line
+conditions, semicolon-joined statements) that this line-oriented heuristic
+does not attempt to handle. No sites were fixed in this pass.
