@@ -1,7 +1,8 @@
 # MIR qualified struct-field key namespace mismatch: b9e23914a0e's new tier cannot fire across an import
 
 **Date:** 2026-08-08
-**Status:** OPEN
+**Status:** OPEN — see "Re-confirmed 2026-08-10" at the end before acting on
+this doc
 **Severity:** High (the landed fix is plausibly a NO-OP on the case it claims to fix)
 **Area:** `src/compiler/50.mir`, `src/compiler/20.hir`
 **Relates to:** `b9e23914a0e`, and the diagnosis chain
@@ -615,4 +616,26 @@ Not more static scoping — that is now done. It needs **a compiler-source oracl
 cheaper than a full Stage 3**. Until one exists, this bug stays OPEN by design,
 and the correct action on it is to land nothing.
 
+## Re-confirmed 2026-08-10
+
+Fresh pass over this doc. `git status` shows every file in this doc's namespace
+chain currently modified in this shared working copy
+(`src/compiler/50.mir/_MirLowering/module_lowering.spl`,
+`src/compiler/50.mir/_MirLoweringExpr/{expr_dispatch,switch_operators_calls}.spl`,
+`src/compiler/50.mir/mir_data.spl`,
+`src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl`) — another
+session is actively working this exact area right now. Two independent
+reasons not to touch code in this pass: (1)
+`src/compiler/50.mir/_MirLowering/module_lowering.spl` is explicitly
+off-limits for this session (another session owns it), and it is the file
+Finding 1's root cause lives in; (2) editing any of the other listed files
+while they carry uncommitted concurrent changes risks clobbering that
+session's in-flight work, per this repo's own shared-WC lore. No code
+changed. **Classification: ARCHITECTURAL/OUT-OF-SCOPE for this pass** —
+blocked by (a) a forbidden file and (b) live concurrent ownership of every
+other file in the fix path, not by any new technical finding. The doc's own
+prior conclusion ("land nothing until a compiler-source oracle exists")
+still holds independently.
+
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>

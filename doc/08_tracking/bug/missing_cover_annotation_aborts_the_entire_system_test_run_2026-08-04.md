@@ -100,3 +100,33 @@ Note for anyone measuring this tier: **every measurement in this lane required
 `--no-cover-check`**, and any historical "0 total" result for
 `test/03_system/{compiler,core,stdlib}` should be re-read as "the gate fired",
 not "there are no tests".
+
+## Re-confirmed 2026-08-10 — still OPEN, source-level
+
+`src/lib/nogc_sync_mut/test_runner/test_runner_main.spl:154-168` still
+contains the unmodified early-return: the gate computes `missing_covers` and,
+if non-empty, returns `TestRunResult(files: [], total_passed: 0,
+total_failed: missing_covers.len(), ...)` — the exact code quoted in "Root
+cause" above, byte-for-byte unchanged. `bin/simple test test/03_system/stdlib`
+was re-attempted for a live repro but the currently-deployed `bin/simple` is
+the Rust seed (`bin/simple --version` prints the bootstrap-seed warning) and
+the invocation did not return within 20-60s, consistent with this repo's
+documented seed-hang lore rather than a fresh finding — not used as evidence
+either way.
+
+Chose not to land the "narrow the blast radius" fix (option 1) in this pass:
+the doc's own analysis is correct that the three accumulation paths
+(session-daemon return at `test_runner_main.spl:220`, parallel-mode return at
+`:243`, and the sequential loop's own totals) would each need the
+`missing_covers.len()` folded into `total_failed` independently, and this file
+is the **shared** test runner every concurrent session in this working copy
+depends on — a wrong thread-through here corrupts every session's verdict,
+not just this investigation's. Given the current shared-WC session load, that
+edit needs a dedicated, low-traffic pass with real execution verification
+across all three paths, not a fast patch.
+
+**Status stays OPEN.** Classified **ARCHITECTURAL/OUT-OF-SCOPE for this pass**
+per the standing mandate: the fix is well-specified (see "Why not fixed now"
+above) but requires touching a shared, heavily-depended-on file across three
+independent code paths, which is unsafe to do quickly in a shared working
+copy. No code changed this pass.
