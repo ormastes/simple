@@ -58,13 +58,14 @@ files it actually examined, so a vacuous run cannot be mistaken for a real one.
 file for "non-empty".** All the guards print progress lines (selftest results,
 per-commit findings) long before the verdict. On 2026-08-10 an agent polled for
 non-empty output, matched `check-tree-size-push: selftest 16/16 fixtures
-correct`, called it a PASS and pushed — while the guard went on to be SIGTERMed
-by a 600s cap and **printed no verdict at all**. Until that date ALL FIVE guards
-could die silently: their traps cleaned up a temp dir and printed nothing (the
-conflict-tree guard had no trap at all), so a killed run left empty stdout,
-indistinguishable from one still in progress. Every guard now synthesises
-`ERROR — nothing was checked (exit 2)` on any death without a verdict and names
-the signal (143 = harness cap/earlyoom, 130 = Ctrl-C; `timeout` reports 124).
+correct`, called it a PASS and pushed — **while the guard was still running**.
+A guard that has not finished looks exactly like a guard that found nothing.
+(The first writeup of this blamed a silent exit on SIGTERM; that was a
+measurement error — the output file was read before the process finished.
+Measured properly: SIGTERM yields `ERROR ... (exit 2)` both before and after the
+fix, and SIGKILL is untrappable and silent in both. The guards now also
+synthesise `ERROR — nothing was checked (exit 2)` for any stop the shell can
+observe, but that is hardening, not the cure.)
 These guards fork thousands of git processes and the tree-size selftest alone
 takes ~4 minutes on a loaded machine, so run them **detached (`setsid`) with no
 timeout** and wait for the verdict. `NOTHING TO PUSH ... exit 0` no longer

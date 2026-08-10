@@ -1,125 +1,116 @@
-# All four pre-push guards could exit SILENTLY with no verdict line (2026-08-10)
+# Pre-push guards: no verdict reached before the caller gave up (2026-08-10)
 
-Status: FIXED (this commit). Severity: HIGH — produced a real false-green push.
+Status: FIXED (perf + one real fail-open). Severity: HIGH — produced a real
+false-green push.
 
-## Symptom
+## CORRECTION (read this first)
 
-`scripts/check/check-tree-size-push.shs` produced **no verdict line at all** on
-a real commit range. An agent polling the guard's output file for "non-empty"
-matched the guard's *selftest progress* line
-(`selftest 16/16 fixtures correct`), read that as a pass, and pushed. Re-running
-the guard retroactively on the landed range `a981699b686..95c0703d19d` still
-emitted no verdict.
+The first version of this file — and the commit message of `a2fa7c59431`, which
+cannot be edited — claimed that all five guards **exited silently** on SIGTERM
+and that the trap fix converted that silence into an ERROR verdict. **That claim
+was wrong, and it was wrong because of a measurement error.**
 
-That particular push happened to be structurally sound (hand-verified: 112,726
-files, delta 0; 16 `src/` entries in the 13..25 band; 206 `src/runtime` files
-above the 150 canary; 0 duplicate tree entries) — but the guard did not
-establish that. It established nothing.
+I read the guard's output file **while the process was still running**, saw it
+empty, and recorded "0 bytes, no verdict" as proof. The file filled in later.
+That is precisely the mistake this whole investigation is about — reading a slow
+guard's output before it has finished — committed while proving a fix for it.
 
-## Root cause
+The corrected measurement waits for full process exit each time:
 
-`scripts/check/check-tree-size-push.shs:157-158` (pre-fix):
+| case | exit | stdout bytes | verdict |
+|------|------|--------------|---------|
+| **pre-fix** guard + SIGTERM | 2 | 160 | `ERROR — nothing was checked (exit 2)` |
+| **post-fix** guard + SIGTERM | 2 | 160 | `ERROR — nothing was checked (exit 2)` |
+| **pre-fix** guard + SIGKILL | 137 | **0** | none |
+| **post-fix** guard + SIGKILL | 137 | **0** | none |
 
-    cleanup() { [ -n "$TMPROOT" ] && rm -rf "$TMPROOT"; }
-    trap cleanup EXIT INT TERM
+So: **SIGTERM already produced an ERROR verdict before the fix**, and **SIGKILL
+is untrappable and stays silent after it**. The `VERDICT_EMITTED` trap has no
+demonstrated behavioural effect under either signal. No silent-exit path was
+ever reproduced.
 
-The trap removed the temp dir and **printed nothing**. So every way the process
-could stop that was not an explicit `die` / PASS / FAIL — a SIGTERM from a
-caller's 600s Bash cap, an earlyoom kill, a Ctrl-C, a `set -u` abort — ended the
-run with an **empty stdout and no verdict**.
+Why the pre-fix guard still ERRORed on SIGTERM: its `cleanup` deleted `TMPROOT`
+and did **not** exit, so the script limped on with its scratch dir gone, the
+next git redirect failed (`cannot create /tmp/tmp.X/ls.out: Directory
+nonexistent`), and `die 2 "cannot measure the base commit"` fired.
 
-Two things made that reachable rather than theoretical:
+## What actually caused the false green
 
-1. **The guard is slow enough to hit a caller's timeout.** `st_mktree`
-   (line ~418) forked one `git update-index --add --cacheinfo` process **per
-   fixture file**; the fixtures add ~1,100 paths, so ~1,100 git process forks
-   ran before the real scan even started. On a loaded machine (load average 48
-   measured on 2026-08-10, with 10+ concurrent guard runs from parallel agent
-   sessions) that alone outlasted the 600s cap.
-2. **Silence is indistinguishable from "not finished yet."** A caller polling
-   the output file cannot tell "killed, checked nothing" from "still running",
-   which is exactly the confusion that produced the false green.
+**The guard is far slower than its callers wait, and the caller read its output
+before it finished.** The agent polled the output file for "non-empty", matched
+the *selftest progress* line (`selftest 16/16 fixtures correct`), read that as a
+pass, and pushed while the guard was still running.
 
-## Reproduction (measured)
+`st_mktree` (line ~418) forked one `git update-index --add --cacheinfo` process
+**per fixture file**; the fixtures add ~1,100 paths, so ~1,100 git process forks
+ran before the real scan even started. Measured on 2026-08-10 with load average
+48-77 and 38 concurrent guard processes from parallel agent sessions, the
+selftest alone was still running at 8+ minutes — past a 600s cap.
 
-| run | exit | stdout |
-|-----|------|--------|
-| pre-fix guard, SIGTERM at 20s | 143 | **empty — 0 bytes, no verdict** |
-| pre-fix guard under 600s cap | 124 | no verdict reached |
-| pre-fix `--selftest`, loaded machine | — | still running at 8+ min |
+The push itself happened to be structurally sound (hand-verified: 112,726 files,
+delta 0; 16 `src/` entries in the 13..25 band; 206 `src/runtime` files above the
+150 canary; 0 duplicate tree entries), and the guard now confirms that number
+itself — `PASS — 6 commit(s) checked ..., reference 112726 file(s)`. But at the
+time the guard established nothing, because nobody waited for it.
 
-## The same defect in ALL FIVE guards
+## Fixes, and how much each is worth
 
-This was never a one-guard bug. Every mandatory pre-push guard — including
-`check-no-revert-push.shs`, which landed at origin *while this fix was being
-written* — had a trap that cleaned up and printed nothing, or no trap at all:
-
-| guard | pre-fix trap |
-|-------|--------------|
-| `check-tree-size-push.shs` | `trap cleanup EXIT INT TERM` — cleanup printed nothing |
-| `check-no-conflict-markers-push.shs` | `trap cleanup EXIT HUP INT TERM` — cleanup printed nothing |
-| `check-no-conflict-tree-push.shs` | **no trap at all** |
-| `check-test-tree-divergence.shs` | `trap 'rm -rf ...' EXIT INT TERM` — printed nothing |
-| `check-no-revert-push.shs` | `trap cleanup EXIT INT TERM` — cleanup printed nothing |
-
-So *any* "guards PASS" claim made by polling a guard's output file, rather than
-by reading its exit code AND a verdict line, is unsound for all five. That the
-newest guard was written with the same defect, by a different session, on the
-same day, is the point: the verdict convention was documented but the
-**silence** case was never part of it, so each new guard reproduced the hole.
-The convention now covers it explicitly (`.claude/rules/vcs.md`), and any sixth
-guard must carry the `VERDICT_EMITTED` trap.
-
-## Fix
-
-1. **The no-silent-exit invariant, in all four guards.** A `VERDICT_EMITTED`
-   flag is set by every legitimate verdict (`die`, every PASS, every FAIL). The
-   EXIT/HUP/INT/TERM/QUIT/PIPE trap synthesises
-   `ERROR — nothing was checked (exit 2)` whenever the process stops without
-   one, and names the signal (143 harness cap / earlyoom, 130 Ctrl-C, 129
-   SIGHUP, 131 SIGQUIT, 141 SIGPIPE) because those root-cause differently.
-2. **The `NOTHING TO PUSH ... exit 0` path is now `ERROR` exit 2** in the
-   tree-size, conflict-tree and markers guards. It was the one path that
-   returned success with no conforming verdict — and the explicit-range branch
-   directly above it already treated 0 commits as ERROR, so this is the
-   consistent reading of the convention, not a new rule. A run that checked
-   nothing cannot report a pass.
-3. **`st_mktree` batches the index writes** into a single
+1. **The cure: `st_mktree` batches its index writes** into a single
    `git update-index --add --index-info` per fixture instead of one fork per
    file. Identical index content — same modes, blobs, paths, still fail-closed
-   on non-zero git status — so the selftest still asserts all 16 fixtures. The
-   selftest went from >600s (unfinished) to **246s** on the same loaded machine.
-   This is what lets the guard reach its verdict inside a caller's timeout; it
-   does not reduce what is checked.
+   on non-zero git status — so all 16 fixtures are still asserted. Selftest goes
+   from **>600s (unfinished, killed)** to **246s** on the same loaded machine.
+   This is the change that lets the guard reach a verdict inside a caller's
+   budget.
+
+2. **A real fail-open, closed:** `NOTHING TO PUSH ... exit 0` becomes `ERROR`
+   exit 2 in the tree-size, conflict-tree and markers guards. This was the one
+   path that genuinely returned **success with no conforming verdict**, and the
+   explicit-range branch directly beside it already treated 0 commits as ERROR.
+   Demonstrated: empty range now exits 2 on all three.
+
+3. **Hardening, with no demonstrated signal-case benefit:** `VERDICT_EMITTED`
+   plus an EXIT/HUP/INT/TERM/QUIT/PIPE trap in all five guards, and `cleanup`
+   now **exits** rather than letting a signalled run limp on with a deleted
+   temp dir. Keep it — a run that stops without a verdict is reported rather
+   than assumed — but it did not fix the incident and must not be described as
+   though it did.
 
 Nothing was weakened: no threshold moved, no fixture dropped, no check skipped.
+
+## Verified verdict matrix (`check-tree-size-push.shs`, real range)
+
+| control | exit | verdict |
+|---------|------|---------|
+| SIGTERM mid-run | 2 | `ERROR — nothing was checked` |
+| empty range | 2 | `ERROR — nothing was checked` |
+| forced violation (`--expect-files 5`) | 1 | `FAIL — 6 commit(s) checked, 6 structurally wrong` |
+| clean range | 0 | `PASS — 6 commit(s) checked, reference 112726 file(s), 0 structural faults` |
+
+Siblings on the same range: conflict-tree `PASS — 6 commit(s)`, markers
+`PASS — 13 file(s)`, revert `PASS — 13 file(s), 0 reverts`, divergence
+`FAIL ... exit 1`. Empty range on conflict-tree/markers/revert: exit 2.
 
 ### A regression the negative controls caught
 
 The first version of the trap in `check-test-tree-divergence.shs` read `$?`
 inside `cleanup()`, but that guard's trap ALSO sets `cleanup_extra=...` first,
 and a variable assignment resets `$?` to 0. The result was a guard that printed
-`FAIL — 856 diverged ...` and **exited 0** — strictly worse than the bug being
-fixed. The trap now captures the status in the trap body (`cl_t=$?`) and passes
-it in. This is exactly why each verdict path needs its own negative control:
-the happy path was green throughout.
+`FAIL — 856 diverged ...` and **exited 0** — strictly worse than anything being
+fixed. The status is now captured in the trap body (`cl_t=$?`) and passed in.
+The happy path was green throughout; only a per-path control found it.
 
-### What a trap can and cannot do
+## The actual lesson
 
-A SIGTERM arriving while the shell waits on a foreground child is handled only
-after that child returns, so a killed guard prints its ERROR verdict *late*
-rather than instantly (measured: ~2 min later, mid-selftest). And **no trap can
-catch SIGKILL**. The trap therefore guarantees a verdict for every stop the
-shell can observe; staying inside the caller's budget is what the performance
-fix buys, and running the guards detached with no cap is the caller's half of
-the contract.
+**Read the exit code AND the last line of stdout. Never poll a guard's output
+file for "non-empty".** All the guards print progress lines long before the
+verdict, and these guards fork thousands of git processes — under load the
+tree-size selftest alone takes ~4 minutes. Run them detached (`setsid`) with no
+cap and wait for the verdict line.
 
-## How to call these guards correctly
-
-Read the **exit code** and the **last line of stdout**. Do not poll the output
-file for "non-empty" — the guards print progress lines (selftest results,
-per-commit findings) long before the verdict, and matching one of those is what
-caused this incident.
+A guard that has not finished looks exactly like a guard that found nothing.
+That, not a silent exit, is what produced the false green — and it caught the
+author of this fix as well as the agent that pushed.
 
 ## Unrelated finding surfaced during this work
 
