@@ -39,9 +39,6 @@ extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 fn simple_bin() -> text:
     rt_env_get("SIMPLE_BIN") ?? "bin/simple"
 
-fn ensure_low_dependency_dynsmf_artifacts() -> (text, text, i64):
-    rt_process_run("/bin/sh", ["scripts/check/check-low-dependency-dynsmf-build-plans.shs"])
-
 fn run_app_root_dynsmf(args: [text]) -> (text, text, i64):
     val joined = args.join(" ")
     rt_process_run("/bin/sh", [
@@ -69,48 +66,38 @@ describe "dynSMF startup autoload policy":
         expect(session.evidence[2].status).to_equal("failed")
         expect(session.evidence[2].reason).to_equal("artifact_missing_file")
 
-    it "autoloads all seven default stdlib-like dynSMF entries for startup":
-        var session = dynsmf_startup_session_from_values([], "", "", "integration-default")
-        if session.loaded.len() != 7:
-            val build = ensure_low_dependency_dynsmf_artifacts()
-            expect(build.2).to_equal(0)
-            session = dynsmf_startup_session_from_values([], "", "", "integration-default")
-        expect(session.loaded.len()).to_equal(7)
-        expect(session.evidence.len()).to_equal(7)
-        expect(session.evidence[0].library_id).to_equal("file_io")
-        expect(session.evidence[5].library_id).to_equal("tui_renderer")
-        expect(session.evidence[5].reason).to_equal("smf_dlopen")
-        expect(session.evidence[6].library_id).to_equal("ui_html")
-        expect(session.evidence[6].reason).to_equal("smf_dlopen")
+    it "demand-load policy: default startup loads nothing and queues nothing":
+        # Perf program 2026-08-10: the seven stdlib-like entries are
+        # demand-loaded, so a plain startup session performs zero loads,
+        # zero background-compile queueing, and zero spawns.
+        val session = dynsmf_startup_session_from_values([], "", "", "integration-default")
+        expect(session.loaded.len()).to_equal(0)
+        expect(session.evidence.len()).to_equal(0)
 
-    it "honors skip-all startup policy from args and env values":
+    it "skip-all startup policy still yields an empty demand-load startup session":
         val by_arg = dynsmf_startup_session_from_values(["--no-dynsmf"], "", "", "integration-no-arg")
         expect(by_arg.loaded.len()).to_equal(0)
-        expect(by_arg.evidence.len()).to_equal(7)
-        expect(by_arg.evidence[0].action).to_equal("skip")
-        expect(by_arg.evidence[0].policy_source).to_equal("arg:--no-dynsmf")
+        expect(by_arg.policy.source).to_equal("arg:--no-dynsmf")
+        expect(by_arg.evidence.len()).to_equal(0)
 
         val by_env = dynsmf_startup_session_from_values([], "0", "", "integration-no-env")
         expect(by_env.loaded.len()).to_equal(0)
-        expect(by_env.evidence[5].action).to_equal("skip")
-        expect(by_env.evidence[5].policy_source).to_equal("env:SIMPLE_DYNSMF")
+        expect(by_env.policy.source).to_equal("env:SIMPLE_DYNSMF")
+        expect(by_env.evidence.len()).to_equal(0)
 
-    it "honors per-id startup disable policy while loading other libraries":
-        var session = dynsmf_startup_session_from_values(["--disable-dynsmf=web_renderer,tui_renderer"], "", "", "integration-disable")
-        if session.loaded.len() != 5:
-            val build = ensure_low_dependency_dynsmf_artifacts()
-            expect(build.2).to_equal(0)
-            session = dynsmf_startup_session_from_values(["--disable-dynsmf=web_renderer,tui_renderer"], "", "", "integration-disable")
-        expect(session.loaded.len()).to_equal(5)
-        expect(session.evidence[3].library_id).to_equal("web_renderer")
-        expect(session.evidence[3].action).to_equal("skip")
-        expect(session.evidence[5].library_id).to_equal("tui_renderer")
-        expect(session.evidence[5].action).to_equal("skip")
+    it "honors per-id disable policy on an explicit autoload manifest":
+        val manifest = [
+            DynSmfManifestEntry(id: "tui_renderer", path: "build/dynsmf/policy_tui_renderer.smf", source_module: "app.ui.render.tui_widgets", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: true, exports: ["render_tui_tree"])
+        ]
+        val session = dynsmf_startup_session_for_manifest_from_values(["--disable-dynsmf=tui_renderer"], "", "", "integration-disable", manifest)
+        expect(session.loaded.len()).to_equal(0)
+        var saw_skip = false
+        for row in session.evidence:
+            if row.library_id == "tui_renderer" and row.action == "skip":
+                saw_skip = true
+        expect(saw_skip).to_equal(true)
 
     it "exposes app root dynSMF status evidence without noisy plain startup":
-        val build = ensure_low_dependency_dynsmf_artifacts()
-        expect(build.2).to_equal(0)
-
         val (plain_out, plain_err, plain_code) = run_app_root_dynsmf([])
         expect(plain_code).to_equal(0)
         expect(plain_out).to_equal("")
@@ -118,13 +105,10 @@ describe "dynSMF startup autoload policy":
         val (out, err, code) = run_app_root_dynsmf(["--dynsmf-status"])
         expect(code).to_equal(0)
         expect(out).to_contain("dynsmf session=app-root")
-        expect(out).to_contain("loaded=7")
-        expect(out).to_contain("tui_renderer:load:default:loaded:smf_dlopen")
+        expect(out).to_contain("loaded=0")
 
     it "exposes app root dynSMF opt-out evidence":
         val (out, err, code) = run_app_root_dynsmf(["--no-dynsmf", "--dynsmf-status"])
         expect(code).to_equal(0)
         expect(out).to_contain("policy=arg:--no-dynsmf")
         expect(out).to_contain("loaded=0")
-        expect(out).to_contain("skipped=7")
-        expect(out).to_contain("file_io:skip:arg:--no-dynsmf:skipped:disabled")

@@ -117,9 +117,11 @@ describe "dynSMF manifest":
         expect(manifest.len()).to_equal(12)
         expect(dynsmf_manifest_all_precompiled(manifest)).to_equal(true)
         expect(manifest[0].artifact_kind).to_equal("precompiled_smf")
-        expect(manifest[0].default_autoload).to_equal(true)
-        expect(manifest[5].default_autoload).to_equal(true)
-        expect(manifest[6].default_autoload).to_equal(true)
+        # Demand-load policy (perf program 2026-08-10): no manifest entry is
+        # autoloaded at startup; capabilities load on first use.
+        expect(manifest[0].default_autoload).to_equal(false)
+        expect(manifest[5].default_autoload).to_equal(false)
+        expect(manifest[6].default_autoload).to_equal(false)
 
     it "gates the 5 new toolchain entries out of default autoload (on-demand only)":
         val manifest = dynsmf_default_manifest()
@@ -260,9 +262,17 @@ describe "dynSMF policy":
         expect(dynsmf_id_disabled(policy, "file_io")).to_equal(false)
         expect(policy.source).to_equal("env:SIMPLE_DYNSMF_DISABLE")
 
+fn eager_default_manifest() -> [DynSmfManifestEntry]:
+    # Lifecycle tests exercise the autoload MECHANISM; the shipped default
+    # manifest is demand-load-only, so force the flag on here.
+    var out: [DynSmfManifestEntry] = []
+    for e in dynsmf_default_manifest():
+        out.push(DynSmfManifestEntry(id: e.id, path: e.path, source_module: e.source_module, artifact_kind: e.artifact_kind, abi_version: e.abi_version, default_autoload: e.id != "mcp_diag_tools" and e.id != "fmt_tool" and e.id != "lint_tool" and e.id != "fix_tool" and e.id != "todo_scan", exports: e.exports))
+    out
+
 describe "dynSMF session lifecycle":
     it "autoloads tui_renderer and records evidence":
-        val manifest = dynsmf_default_manifest()
+        val manifest = eager_default_manifest()
         val session = dynsmf_session_autoload(dynsmf_session_new("test", dynsmf_policy_default()), manifest)
         expect(session.loaded.len()).to_equal(7)
         expect(session.loaded[0].id).to_equal("file_io")
@@ -274,7 +284,7 @@ describe "dynSMF session lifecycle":
         expect(session.evidence[0].to_text()).to_contain("default:loaded")
 
     it "records skip evidence when tui_renderer is disabled while loading other defaults":
-        val manifest = dynsmf_default_manifest()
+        val manifest = eager_default_manifest()
         val policy = dynsmf_policy_from_args_env(["--disable-dynsmf=tui_renderer"], "", "")
         val session = dynsmf_session_autoload(dynsmf_session_new("test", policy), manifest)
         expect(session.loaded.len()).to_equal(6)
@@ -286,7 +296,7 @@ describe "dynSMF session lifecycle":
         expect(session.evidence[6].action).to_equal("load")
 
     it "records skip evidence for every default when all dynSMF loading is disabled":
-        val manifest = dynsmf_default_manifest()
+        val manifest = eager_default_manifest()
         val policy = dynsmf_policy_from_args_env(["--no-dynsmf"], "", "")
         val session = dynsmf_session_autoload(dynsmf_session_new("test", policy), manifest)
         expect(session.loaded.len()).to_equal(0)
@@ -308,7 +318,7 @@ describe "dynSMF session lifecycle":
         expect(session.evidence[0].reason).to_equal("artifact_missing_file")
 
     it "can append symbol and stale lookups to session evidence":
-        val manifest = dynsmf_default_manifest()
+        val manifest = eager_default_manifest()
         val loaded = dynsmf_session_autoload(dynsmf_session_new("test", dynsmf_policy_default()), manifest)
         val with_symbol = dynsmf_session_record_symbol(loaded, "tui_renderer", "render_tui_tree")
         expect(with_symbol.evidence.len()).to_equal(8)
@@ -322,7 +332,7 @@ describe "dynSMF session lifecycle":
         expect(with_stale.evidence[9].reason).to_equal("unloaded")
 
     it "unloads, reports stale symbol lookup, and reloads with fresh generation":
-        val manifest = dynsmf_default_manifest()
+        val manifest = eager_default_manifest()
         val loaded = dynsmf_session_autoload(dynsmf_session_new("test", dynsmf_policy_default()), manifest)
         val symbol_before = dynsmf_session_symbol(loaded, "tui_renderer", "render_tui_tree")
         expect(symbol_before.status).to_equal("ok")
@@ -454,7 +464,7 @@ describe "dynSMF abi_version + interface-hash hardening (fail-closed sidecars)":
 
 describe "dynSMF toolchain entries — fresh-sidecar status transitions (on-demand, default_autoload:false)":
     it "reports each new toolchain entry ready when abi and srchash sidecars match current source":
-        val manifest = dynsmf_default_manifest()
+        val manifest = eager_default_manifest()
         val plans = dynsmf_build_plans(manifest)
         var idx = 7
         while idx < 12:
@@ -471,7 +481,7 @@ describe "dynSMF toolchain entries — fresh-sidecar status transitions (on-dema
             idx = idx + 1
 
     it "flags a missing abi sidecar as abi_mismatch for a new toolchain entry too (fail-closed applies uniformly)":
-        val manifest = dynsmf_default_manifest()
+        val manifest = eager_default_manifest()
         val plans = dynsmf_build_plans(manifest)
         val entry = manifest[11]
         val source_path = plans[11].source_path
