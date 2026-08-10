@@ -70,6 +70,54 @@ DISTINCT, still-unresolved fault in the WM/compositor first-frame boot path — 
 string-runtime bug and NOT reproduced by parse_html/render on heap HTML in isolation. Do NOT
 claim 4K PASS until that separate fault is root-caused.
 
+## Re-verified 2026-08-10 — split-ABI fix CONFIRMED STILL LANDED; WM boot fault remains OPEN, now a DIFFERENT symptom
+
+Re-checked both halves fresh rather than trusting the existing write-up:
+
+1. **Split-ABI fix, confirmed present in source today.** 
+   `examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c:9944`
+   (`rt_string_split`) still returns the tagged `ENCODE_PTR` array handle from
+   `rt_array_new`/`rt_array_push_handle`, with the exact comment referencing
+   this bug doc explaining why. This part of the fix is genuinely landed and
+   did not regress — status **ALREADY-FIXED** for the split-ABI half
+   specifically.
+
+2. **WM/compositor boot fault: still RED, but the failure signature has
+   changed since 2026-07-13**, which this doc did not previously note. The
+   harness (`scripts/check/check-simpleos-wm-fullscreen-evidence.shs`) was run
+   most recently (by a concurrent session) on 2026-08-09 — see
+   `doc/09_report/simpleos_wm_fullscreen_evidence_2026-08-09.md` — and still
+   reports `status: fail`, but now with
+   `reason: dynamic-scanout-or-desktop-readiness-missing` and zero-byte
+   PPM/font-region captures, not the `reason=guest-render-fault` /
+   `decode_string` cr2 mis-decode originally documented here. This means the
+   fault this doc root-caused (or failed to root-cause) in July is no longer
+   the current blocker as observed on 2026-08-09; a fresh serial-log-level
+   investigation is needed before attributing the current RED to the same
+   cause, and this doc's "STILL BLOCKING" section should not be read as
+   describing today's failure mode without that re-check.
+   `doc/09_report/simpleos_wm_fullscreen_evidence_2026-*.md` shows this
+   harness has been actively iterated on daily by other sessions throughout
+   July-August (most recently `92af22801ef`, `e64bd8009b7`,
+   `dc4b3d2f339`, `e83b3df9596` touching
+   `scripts/check/check-simpleos-wm-fullscreen-evidence.shs` itself) as part
+   of an ongoing shared WM/render/SimpleOS campaign.
+
+**Disposition: stays OPEN, but scoped precisely.** This is genuinely
+architectural/out-of-scope for a single pass here: it requires booting a full
+SimpleOS kernel + FAT32 disk image under QEMU with a live desktop compositor,
+correlating QMP input-injection sequences against WM state machine markers in
+the serial log, and root-causing a boot-order-dependent memory-decode fault —
+real hardware/QEMU work, actively shared with multiple other concurrent
+sessions on the same harness and kernel sources (touching this without
+coordination risks clobbering in-flight work per the shared-WC rules in
+`.claude/rules/vcs.md`). No code change made in this pass beyond this status
+correction. Per `.claude/rules/board-runnable.md`: this remains QEMU-only
+today (no board evidence has been produced for the WM/desktop path in any of
+the linked reports) — that gap should be treated as a defect requiring an
+explicit board bring-up path or a filed hardware-unavailability exception,
+not silently accepted as "QEMU is enough."
+
 ---
 
 ### Original report (2026-07-12)
