@@ -36,6 +36,29 @@ use simple_runtime::value::{
     rt_array_get, rt_array_len, rt_string_data, rt_string_len, rt_tuple_new, rt_tuple_set, RuntimeValue,
 };
 
+/// Emit the bootstrap FFI boundary receipt without routing path/text carriers
+/// through the self-hosted frontend that this receipt is measuring.
+#[no_mangle]
+pub extern "C" fn rt_bootstrap_native_build_progress(state: i64) {
+    let Ok(path) = std::env::var("SIMPLE_BUILD_PROGRESS_EVENTS") else {
+        return;
+    };
+    if path.is_empty() {
+        return;
+    }
+    let terminal = if state == 0 { "running" } else { "returned" };
+    let event = format!(
+        "event=build_progress phase=bootstrap_ffi unit_kind=seed_native_build done=0 total=1 remaining=1 tasks_done=0 tasks_total=1 tasks_remaining=1 failed=0 cached=0 current=rt_native_build terminal={terminal}\n"
+    );
+    if let Ok(mut progress) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = progress.write_all(event.as_bytes());
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn rt_jit_cleanup(handle: i64) -> i64 {
     simple_compiler::native_jit_cleanup_handle(handle)

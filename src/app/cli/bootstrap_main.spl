@@ -1,5 +1,7 @@
 extern fn sys_get_args() -> [text]
 extern fn rt_native_build(args: [text]) -> i64
+extern fn rt_path_stem(path: text) -> text
+extern fn rt_bootstrap_native_build_progress(state: i64)
 
 # Non-lazy AND direct-from-defining-module: `use lazy` deferred the driver to
 # a dynload lib that was never implemented (#99), linking as undefined
@@ -18,20 +20,11 @@ use std.nogc_sync_mut.io.file_ops.{file_append}
 fn native_build_help() -> i64:
     0
 
-# Stem (filename without extension) computed with rfind + `>= 0`/`> 0`
-# checks, NOT std.path.stem/extension: those match rfind's raw i64 result
-# against Some(idx)/nil, and under native MIR codegen a bare i64 never
-# matches that Option pattern (crashes with "match expression exhausted...
-# for i64 value N" -- verified live against this exact bootstrap capsule,
-# not hypothesized). See compile_targets.spl's `_cli_native_build_stem`.
+# Keep path parsing in the canonical runtime owner. Besides sharing exact path
+# semantics, this avoids transporting a chain of text-method receiver
+# aggregates through the flat Stage3 MIR capsule.
 fn _bootstrap_default_stem(path_text: text) -> text:
-    val slash = path_text.rfind("/")
-    val base = if slash >= 0: path_text.substring(slash + 1) else: path_text
-    val dot = base.rfind(".")
-    if dot > 0:
-        base.substring(0, dot)
-    else:
-        base
+    rt_path_stem(path_text)
 
 # NOTE: this function's name is a hardcoded "known bootstrap builtin" in the
 # Stage3/4 self-hosting capsule lowering (see is_bootstrap_builtin_fn /
@@ -117,24 +110,18 @@ fn native_build_runtime_bundle_is_removed(bundle: text) -> i64:
 fn native_build_policy_action_from_args(args: [text], i: i64) -> text:
     if i >= args.len():
         return ""
-    val arg = args[i]
-    if arg == "--help" or arg == "-h" or arg == "--list-optimizations":
-        return arg
-    if arg == "--runtime-bundle" and i + 1 < args.len():
-        val bundle = args[i + 1]
-        if native_build_runtime_bundle_is_removed(bundle) == 1:
-            return bundle
+    # Keep indexed text values at their array owner. Native flat-MIR can lose
+    # a text handle copied through a local aggregate slot under closure load.
+    if args[i] == "--help" or args[i] == "-h" or args[i] == "--list-optimizations":
+        return args[i]
+    if args[i] == "--runtime-bundle" and i + 1 < args.len():
+        if native_build_runtime_bundle_is_removed(args[i + 1]) == 1:
+            return args[i + 1]
         return native_build_policy_action_from_args(args, i + 2)
-    if arg.starts_with("--runtime-bundle="):
-        val bundle = arg.substring(17)
-        if native_build_runtime_bundle_is_removed(bundle) == 1:
-            return bundle
+    if args[i].starts_with("--runtime-bundle="):
+        if native_build_runtime_bundle_is_removed(args[i].substring(17)) == 1:
+            return args[i].substring(17)
     native_build_policy_action_from_args(args, i + 1)
-
-fn bootstrap_native_build_ffi_progress(state: text):
-    val path = env_get("SIMPLE_BUILD_PROGRESS_EVENTS") ?? ""
-    if path != "":
-        val _ = file_append(path, "event=build_progress phase=bootstrap_ffi unit_kind=seed_native_build done=0 total=1 remaining=1 tasks_done=0 tasks_total=1 tasks_remaining=1 failed=0 cached=0 current=rt_native_build terminal={state}\n")
 
 fn run_rt_native_build(args: [text]) -> i64:
     val entry = native_build_entry_from_args(args, 0)
@@ -152,9 +139,9 @@ fn run_rt_native_build(args: [text]) -> i64:
         env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "0")
     elif has_entry_closure == 1:
         env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
-    bootstrap_native_build_ffi_progress("running")
+    rt_bootstrap_native_build_progress(0)
     val result = rt_native_build(args)
-    bootstrap_native_build_ffi_progress("returned")
+    rt_bootstrap_native_build_progress(1)
     if entry != "" and has_entry_closure == 1:
         env_set("SIMPLE_NATIVE_BUILD_ENTRY", old_entry)
         env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", old_entry_closure)

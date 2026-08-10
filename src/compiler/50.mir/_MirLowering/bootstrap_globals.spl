@@ -301,6 +301,30 @@ fn bootstrap_register_flat_function_values():
                 bootstrap_fn_ret_hir_type_register(func.name, func.return_type)
         module_index = module_index + 1
 
+fn bootstrap_flat_entry_signature_matches(module_index: i64) -> bool:
+    # The entry source can share a physical surface whose accumulator name is
+    # the canonical provider rather than the requested logical alias. Resolve
+    # that case by the bootstrap capsule's exact function signature, never by
+    # first/last-module position or a generic `main` alone.
+    val functions = bootstrap_hir_module_functions_at(module_index)
+    var has_main = false
+    var has_help = false
+    var has_output_parser = false
+    var has_native_build = false
+    var function_index = 0
+    while function_index < functions.len():
+        val function_name: text = functions[function_index].name
+        if function_name == "main":
+            has_main = true
+        elif function_name == "native_build_help":
+            has_help = true
+        elif function_name == "bootstrap_output_from_args":
+            has_output_parser = true
+        elif function_name == "run_native_build_bootstrap":
+            has_native_build = true
+        function_index = function_index + 1
+    has_main and has_help and has_output_parser and has_native_build
+
 fn bootstrap_lower_flat_hir_module_to_mir(module_index: i64, target_context: MirTargetContext, is_entry: bool) -> (MirModule, i64):
     val module_name = bootstrap_hir_module_name_at(module_index)
     val logical_module_name = bootstrap_mir_logical_module_name(module_name)
@@ -329,7 +353,10 @@ fn bootstrap_lower_flat_hir_module_to_mir(module_index: i64, target_context: Mir
     lowered_module.name = module_name
 
     var instruction_total = 0
-    for hir_fn in functions:
+    var hir_function_index = 0
+    while hir_function_index < functions.len():
+        val hir_fn: HirFunction = functions[hir_function_index]
+        hir_function_index = hir_function_index + 1
         if hir_fn.is_extern:
             continue
         val function_name = bootstrap_flat_function_symbol_name(symbols, hir_fn)
@@ -340,10 +367,15 @@ fn bootstrap_lower_flat_hir_module_to_mir(module_index: i64, target_context: Mir
         else:
             "{logical_module_name}.{function_name}"
         lowering.symbols = symbols
+        eprint("[flat-mir-function] start module={logical_module_name} function={emitted_name}\n")
         val mir_fn = lowering.lower_function(hir_fn)
+        eprint("[flat-mir-function] done module={logical_module_name} function={emitted_name}\n")
         bootstrap_mir_functions_add(emitted_name, mir_fn, mir_module_index)
-        for block in mir_fn.blocks:
-            instruction_total = instruction_total + block.instructions.len()
+        var mir_block_index = 0
+        while mir_block_index < mir_fn.blocks.len():
+            val mir_block: MirBlock = mir_fn.blocks[mir_block_index]
+            instruction_total = instruction_total + mir_block.instructions.len()
+            mir_block_index = mir_block_index + 1
         var builder = lowering.builder
         lowered_module = builder.module
         lowered_module.name = module_name
@@ -365,8 +397,19 @@ fn bootstrap_lower_flat_hir_modules_to_mir_for_target(entry_module_name: text, t
     val entry_index = bootstrap_hir_entry_index()
     var module_index = 0
     if entry_index < 0:
-        eprint("error: bootstrap flat HIR entry module was not captured: {entry_module_name}\n")
-        rt_exit(1)
+        var signature_index = -1
+        var signature_matches = 0
+        module_index = 0
+        while module_index < bootstrap_hir_module_count():
+            if bootstrap_flat_entry_signature_matches(module_index):
+                signature_index = module_index
+                signature_matches = signature_matches + 1
+            module_index = module_index + 1
+        if signature_matches != 1:
+            eprint("error: bootstrap flat HIR entry module was not captured uniquely: {entry_module_name} signature_matches={signature_matches}\n")
+            rt_exit(1)
+        entry_index = signature_index
+        eprint("[bootstrap-entry-alias] requested={entry_module_name} captured={bootstrap_mir_logical_module_name(bootstrap_hir_module_name_at(entry_index))}\n")
 
     val entry_function_count = bootstrap_hir_module_functions_at(entry_index).len()
     eprint("[bootstrap-flat-entry] index={entry_index} modules={bootstrap_hir_module_count()} functions={entry_function_count}\n")

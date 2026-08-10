@@ -6,6 +6,8 @@ val LOWERING = "src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl"
 val ORCHESTRATION = "src/compiler/80.driver/driver_orchestration.spl"
 val SOURCE_PARSING = "src/compiler/80.driver/driver_source_pipeline_parsing.spl"
 val HIR_LOWERING = "src/compiler/80.driver/driver_hir_pipeline_lowering.spl"
+val HIR_PASSES = "src/compiler/80.driver/driver_hir_pipeline_passes.spl"
+val MIR_BOOTSTRAP = "src/compiler/50.mir/_MirLowering/bootstrap_globals.spl"
 val PRODUCER = "scripts/bootstrap/bootstrap-from-scratch.sh"
 val RUNTIME = "src/runtime/runtime_native.c"
 val RUNTIME_CHECK = "src/runtime/test/rt_transient_heap_scope_selfcheck.c"
@@ -15,10 +17,62 @@ val RUST_MEMORY = "src/runtime/runtime_memory.c"
 describe "Stage4 streaming surface ownership":
     it "derives HIR phase status from scalar state without method dispatch":
         val driver = file_read(HIR_LOWERING)
-        expect(driver).to_contain("if phase_ctx.error_count_value > 0:")
-        expect(driver).to_contain("(phase_ctx, phase_ctx.error_count_value == 0)")
+        expect(driver).to_contain("if self.ctx.error_count_value > 0 or phase_ctx.error_count_value > 0:")
+        expect(driver).to_contain("(phase_ctx, self.ctx.error_count_value == 0 and phase_ctx.error_count_value == 0)")
         expect(driver).to_not_contain("phase_ctx.has_errors()")
         expect(driver).to_not_contain("bootstrap_ctx.has_errors()")
+
+    it "does not re-read stale context status after the successful HIR phase return":
+        val passes = file_read(HIR_PASSES)
+        expect(passes).to_contain("Phase 3 is the authoritative fail-closed error gate")
+        expect(passes).to_not_contain("if self.ctx.error_count_value > 0:\n            return false")
+
+    it "resets the flat HIR closure once at the driver phase owner":
+        val driver = file_read(HIR_LOWERING)
+        val lowering = file_read(LOWERING)
+        expect(driver).to_contain("bootstrap_hir_modules_reset()")
+        expect(driver).to_contain("This phase owns the flat-HIR accumulator lifecycle")
+        expect(lowering).to_not_contain("if bootstrap_flat_mode and (not bootstrap_closure or hir_module_is_bootstrap_entry(module.name))")
+        expect(driver).to_contain("bootstrap_hir_modules_add_alias(source.module_name, flat_source_index)")
+        expect(driver).to_contain("flat_index_by_surface")
+        expect(driver).to_contain("bootstrap_hir_modules_has_exact_name(requested_entry_name)")
+        expect(driver).to_contain("Flat HIR entry ownership was not captured after exact re-lowering")
+        expect(driver).to_contain("bootstrap_hir_modules_add_alias(requested_entry_name, flat_count_before_entry)")
+        expect(driver).to_contain("Flat HIR entry source was not found")
+        expect(driver).to_contain("val requested_bootstrap_entry_name: text = bootstrap_entry_module_name(self.ctx)")
+        expect(driver).to_contain("Non-streaming flat HIR entry ownership was not captured")
+        expect(driver).to_contain("Bootstrap logical ParserModule owner is missing")
+        expect(driver).to_contain("bootstrap_hir_set_requested_entry_name(requested_bootstrap_entry_name)")
+        expect(driver).to_contain("bootstrap_hir_set_current_module_is_entry(is_requested_bootstrap_entry)")
+        expect(driver).to_contain("bootstrap_hir_set_current_module_is_entry(false)")
+        expect(lowering).to_contain("bootstrap_use_flat_entry_functions")
+        expect(lowering).to_contain("flat_bootstrap_function_at(bootstrap_decl_idx)")
+
+    it "resolves a physical entry alias only through one exact bootstrap signature":
+        val mir = file_read(MIR_BOOTSTRAP)
+        expect(mir).to_contain("fn bootstrap_flat_entry_signature_matches")
+        expect(mir).to_contain("has_main and has_help and has_output_parser and has_native_build")
+        expect(mir).to_contain("if signature_matches != 1:")
+        expect(mir).to_contain("[bootstrap-entry-alias]")
+        expect(mir).to_contain("val hir_fn: HirFunction = functions[hir_function_index]")
+        expect(mir).to_contain("val mir_block: MirBlock = mir_fn.blocks[mir_block_index]")
+        expect(mir).to_contain("[flat-mir-function] start")
+
+    it "binds the requested entry from a fresh Phase 2 parser owner":
+        val parsing = file_read(SOURCE_PARSING)
+        expect(parsing).to_contain("Physical dedup fan-out above intentionally reuses one boxed")
+        expect(parsing).to_contain("entry_modules[requested_source.module_name] = requested_module")
+        expect(parsing).to_contain("requested native entry parse owner is not unique")
+
+    it "keeps bootstrap stem parsing in the canonical runtime owner":
+        val producer = file_read("src/app/cli/bootstrap_main.spl")
+        expect(producer).to_contain("extern fn rt_path_stem(path: text) -> text")
+        expect(producer).to_contain("fn _bootstrap_default_stem(path_text: text) -> text:\n    rt_path_stem(path_text)")
+        expect(producer).to_contain("Keep indexed text values at their array owner")
+        expect(producer).to_not_contain("val bundle = args[i + 1]")
+        expect(producer).to_contain("extern fn rt_bootstrap_native_build_progress(state: i64)")
+        expect(producer).to_contain("rt_bootstrap_native_build_progress(0)")
+        expect(producer).to_contain("rt_bootstrap_native_build_progress(1)")
 
     it "retains type aliases and required declaration carriers":
         val surface = file_read(SURFACE)

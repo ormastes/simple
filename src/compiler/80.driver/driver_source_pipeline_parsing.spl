@@ -290,6 +290,33 @@ impl CompilerDriver:
                         "internal entry-closure parsed module box missing for {source.path}")
                     return (self.ctx, false)
                 entry_modules[source.module_name] = parsed_box.value
+            # Physical dedup fan-out above intentionally reuses one boxed
+            # ParserModule for aliases. Native aggregate projection can retain
+            # the shell while losing its nested functions Dict. Reparse only
+            # the explicitly requested entry here, while Phase 2 still owns
+            # source text/parser state, and bind that fresh aggregate directly
+            # to the requested logical key.
+            if native_entry != "":
+                var requested_parse_matches = 0
+                var requested_parse_index = 0
+                while requested_parse_index < entry_sources.len():
+                    val requested_source = entry_sources[requested_parse_index]
+                    if requested_source.path == native_entry or requested_source.path.ends_with("/" + native_entry):
+                        val requested_module = parse_full_frontend(
+                            requested_source.content,
+                            requested_source.path,
+                            requested_source.module_name,
+                            self.ctx.logger
+                        )
+                        if par_had_error_get():
+                            self.ctx.add_error("parse error in requested native entry {requested_source.path}")
+                            return (self.ctx, false)
+                        entry_modules[requested_source.module_name] = requested_module
+                        requested_parse_matches = requested_parse_matches + 1
+                    requested_parse_index = requested_parse_index + 1
+                if requested_parse_matches != 1:
+                    self.ctx.add_error("requested native entry parse owner is not unique: {native_entry} matches={requested_parse_matches}")
+                    return (self.ctx, false)
             var entry_ctx: CompileContext = self.ctx
             entry_ctx.modules = entry_modules
             entry_ctx.sources = unique_entry_sources

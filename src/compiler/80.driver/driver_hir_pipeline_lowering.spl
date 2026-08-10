@@ -9,6 +9,7 @@ use compiler.hir.hir.*
 use compiler.hir.hir_lowering.items.{bootstrap_hir_modules_reset}
 use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module, hirlowering_for_module_with_diagnostics, LoweringError, LoweringErrorKind}
 use compiler.hir.hir_lowering.module_surface.{ModuleSurface, ModuleSurfacesByName, module_surface_source_matches, module_surfaces_from_modules}
+use compiler.hir.hir_lowering.items.{bootstrap_hir_modules_reset, bootstrap_hir_module_count, bootstrap_hir_modules_add_alias, bootstrap_hir_modules_has_exact_name, bootstrap_hir_set_requested_entry_name, bootstrap_hir_set_current_module_is_entry}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
 use compiler.core.ast.{ast_reset}
@@ -48,7 +49,12 @@ fn _driver_collect_hir_errors(ctx: CompileContext, name: text, errors: [Lowering
         if err.kind == LoweringErrorKind.Recovered:
             ctx.add_warning(_format_hir_lowering_error(name, err))
         else:
-            ctx.add_error(_format_hir_lowering_error(name, err))
+            val rendered_error = _format_hir_lowering_error(name, err)
+            # Emit at the diagnostic owner. Native Stage 3 can retain the
+            # scalar error count while losing later array projection, which
+            # otherwise leaves only blank summary lines at the CLI boundary.
+            eprint(rendered_error)
+            ctx.add_error(rendered_error)
 
 fn _driver_module_surface_index_for_source(registry: ModuleSurfacesByName, source: SourceFile, source_index: i64) -> i64:
     # Validate against physical source identity, not ParserModule.name. A
@@ -149,12 +155,14 @@ impl CompilerDriver:
         val surfaces = self.ctx.module_surfaces.unwrap()
         var lowering: HirLowering = hirlowering_for_module("", surfaces)
         var lowered_by_surface: Dict<i64, HirModule> = {}
+        var flat_index_by_surface: Dict<i64, i64> = {}
         var phase_hir_modules: Dict<text, HirModule> = self.ctx.hir_modules
         var validation_module_keys: [text] = []
         var validation_module_values: [HirModule] = []
         var phase_entry_hir: HirModule? = nil
         val entry_source_index = bootstrap_entry_source_index(self.ctx)
         var source_index = 0
+        var requested_entry_source_index = -1
         var progress_hir_done = 0
         bootstrap_hir_modules_reset()
         log_build_progress("hir", "modules", 0, surfaces.surfaces.len(),
@@ -199,6 +207,7 @@ impl CompilerDriver:
                 source_index = source_index + 1
                 continue
             val hir_module = lower_result.unwrap()
+            val captured_flat_index = bootstrap_hir_module_count() - 1
             _driver_collect_hir_errors(self.ctx, source.module_name, lowering.errors)
             if self.ctx.error_count() > module_errors_before:
                 # Drop the partially-lowered aggregate (never store it) and
@@ -211,6 +220,8 @@ impl CompilerDriver:
                 source_index = source_index + 1
                 continue
             lowered_by_surface[surface_index] = hir_module
+            if captured_flat_index >= 0:
+                flat_index_by_surface[surface_index] = captured_flat_index
             progress_hir_done = progress_hir_done + 1
             phase_hir_modules[source.module_name] = hir_module
             # An alias source reuses lowered_by_surface above and deliberately
@@ -230,6 +241,38 @@ impl CompilerDriver:
                     surfaces.surfaces.len(), source.module_name,
                     2, 6, 0, 0, "running")
             source_index = source_index + 1
+
+        # Physical-surface dedup may satisfy phase HIR through an alias without
+        # creating the logical entry's flat record. The MIR flat path requires
+        # that exact identity, so re-lower only the requested source under a
+        # fresh owner when it is absent. This is an admission repair, not a
+        # positional or function-name fallback.
+        val requested_entry_name = bootstrap_entry_module_name(self.ctx)
+        if requested_entry_source_index < 0:
+            var entry_lookup_index = 0
+            while entry_lookup_index < self.ctx.sources.len():
+                val entry_lookup_source = self.ctx.sources[entry_lookup_index]
+                if entry_lookup_source.module_name == requested_entry_name or _driver_is_bootstrap_entry_source(entry_lookup_source.path, entry_lookup_source.module_name):
+                    requested_entry_source_index = entry_lookup_index
+                    break
+                entry_lookup_index = entry_lookup_index + 1
+        if requested_entry_source_index >= 0 and not bootstrap_hir_modules_has_exact_name(requested_entry_name):
+            val entry_source = self.ctx.sources[requested_entry_source_index]
+            var entry_lowering: HirLowering = hirlowering_for_module("", surfaces)
+            entry_lowering.begin_module(entry_source.path)
+            val flat_count_before_entry = bootstrap_hir_module_count()
+            val entry_result = self.lower_streaming_surface_source(entry_lowering, entry_source)
+            if entry_result.is_err():
+                self.ctx.add_error("Flat HIR entry ownership lowering failed: {entry_result.unwrap_err()}")
+                return (self.ctx, false)
+            _driver_collect_hir_errors(self.ctx, entry_source.module_name, entry_lowering.errors)
+            if not bootstrap_hir_modules_has_exact_name(requested_entry_name):
+                if bootstrap_hir_module_count() <= flat_count_before_entry or not bootstrap_hir_modules_add_alias(requested_entry_name, flat_count_before_entry):
+                    self.ctx.add_error("Flat HIR entry ownership was not captured after exact re-lowering: {requested_entry_name}")
+                    return (self.ctx, false)
+        elif requested_entry_source_index < 0:
+            self.ctx.add_error("Flat HIR entry source was not found: {requested_entry_name}")
+            return (self.ctx, false)
 
         # Collect-all summary (streaming surfaces path). Same provenance marker
         # as the non-streaming loop -- see the comment there.
@@ -252,10 +295,10 @@ impl CompilerDriver:
         phase_ctx.bootstrap_entry_hir = phase_entry_hir
         # Poisoned/error-bearing HIR is deliberately excluded from every
         # downstream aggregate pass. Validate layouts only for a clean phase.
-        if phase_ctx.error_count_value > 0:
+        if self.ctx.error_count_value > 0 or phase_ctx.error_count_value > 0:
             return (phase_ctx, false)
         _driver_validate_value_struct_layouts(phase_ctx, validation_module_keys, validation_module_values)
-        if phase_ctx.error_count_value > 0:
+        if self.ctx.error_count_value > 0 or phase_ctx.error_count_value > 0:
             return (phase_ctx, false)
         ast_reset()
         phase_ctx.modules = {}
@@ -269,6 +312,7 @@ impl CompilerDriver:
     me lower_and_check_impl() -> (CompileContext, bool):
         if driver_streaming_surface_enabled(self.ctx):
             return self.lower_and_check_streaming_surfaces_impl()
+        bootstrap_hir_modules_reset()
         val log = self.ctx.logger
 
         # Build module_name -> source_path map so each module gets the right
@@ -381,6 +425,8 @@ impl CompilerDriver:
             val is_requested_bootstrap_entry = source_idx == entry_source_index
             val is_bootstrap_entry = is_requested_bootstrap_entry
             dtrace("[DRV] lac-loop name={name} content_len={src.content.len()}")
+            val flat_count_before_module = bootstrap_hir_module_count()
+            bootstrap_hir_set_current_module_is_entry(is_requested_bootstrap_entry)
             val hir_module: HirModule = if is_bootstrap_entry:
                 dtrace("[DRV] branch=bootstrap_entry")
                 # The phase-2 cached ParserModule can still be non-nil after
@@ -572,10 +618,10 @@ impl CompilerDriver:
         var phase_ctx: CompileContext = self.ctx
         phase_ctx.hir_modules = phase_hir_modules
         phase_ctx.bootstrap_entry_hir = phase_entry_hir
-        if phase_ctx.error_count_value > 0:
+        if self.ctx.error_count_value > 0 or phase_ctx.error_count_value > 0:
             return (phase_ctx, false)
         _driver_validate_value_struct_layouts(phase_ctx, validation_module_keys, validation_module_values)
-        if phase_ctx.error_count_value > 0:
+        if self.ctx.error_count_value > 0 or phase_ctx.error_count_value > 0:
             return (phase_ctx, false)
 
         # Phase 3 (opt-in, warn-only): HM type inference + visibility diagnostics.
@@ -628,7 +674,7 @@ impl CompilerDriver:
                 log_warn(safety_warnings[sw_idx])
                 sw_idx = sw_idx + 1
 
-        (phase_ctx, phase_ctx.error_count_value == 0)
+        (phase_ctx, self.ctx.error_count_value == 0 and phase_ctx.error_count_value == 0)
 
     # --------------------------------------------------------------------------
     # Phase 3a: Lower to HIR (standalone, kept for compatibility)
