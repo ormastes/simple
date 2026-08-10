@@ -2550,6 +2550,10 @@ static volatile uint64_t g_gui_simd_fill_chunks = 0;
 static volatile uint64_t g_gui_simd_fill_tail_pixels = 0;
 static volatile uint64_t g_gui_simd_fill_scalar_parity_checks = 0;
 static volatile uint64_t g_gui_simd_fill_scalar_parity_failures = 0;
+#define GUI_PREPARED_PACKED_CACHE_PIXELS 786432u
+static uint32_t g_gui_prepared_scanout[GUI_PREPARED_PACKED_CACHE_PIXELS];
+static uint64_t g_gui_prepared_scanout_len = 0;
+static uint32_t g_gui_prepared_scanout_ready = 0;
 
 RuntimeValue rt_gui_set_fb(RuntimeValue addr, RuntimeValue w)
 {
@@ -2720,6 +2724,47 @@ RuntimeValue rt_gui_blit_row4(RuntimeValue pixels_value, RuntimeValue src_offset
         g_gui_simd_fill_chunks += chunks;
     }
     g_gui_simd_fill_tail_pixels += count - chunks * 4u;
+    return 1;
+}
+
+RuntimeValue rt_gui_capture_prepared_packed_scanout(RuntimeValue ignored)
+{
+    (void)ignored;
+    uint64_t count = (uint64_t)g_fb_w * 768u;
+    if (!g_fb_addr || !g_fb_w || count == 0 ||
+        count > GUI_PREPARED_PACKED_CACHE_PIXELS) return 0;
+    volatile uint32_t *src = (volatile uint32_t *)(uintptr_t)g_fb_addr;
+    for (uint64_t i = 0; i < count; i++) g_gui_prepared_scanout[i] = src[i];
+    g_gui_prepared_scanout_len = count;
+    g_gui_prepared_scanout_ready = 1;
+    return 1;
+}
+
+RuntimeValue rt_gui_replay_prepared_packed_scanout(RuntimeValue ignored)
+{
+    (void)ignored;
+    uint64_t count = (uint64_t)g_fb_w * 768u;
+    if (!g_fb_addr || !g_fb_w || !g_gui_prepared_scanout_ready ||
+        count == 0 || count != g_gui_prepared_scanout_len) return 0;
+    volatile uint32_t *dst = (volatile uint32_t *)(uintptr_t)g_fb_addr;
+    uint64_t i = 0;
+#if defined(__aarch64__)
+    while (i + 16u <= count) {
+        for (uint32_t block = 0; block < 4u; block++) {
+            __asm__ volatile(
+                "ld1 {v0.4s}, [%1]\n\t"
+                "st1 {v0.4s}, [%0]"
+                :
+                : "r" (dst + i + (uint64_t)block * 4u),
+                  "r" (g_gui_prepared_scanout + i + (uint64_t)block * 4u)
+                : "v0", "memory");
+        }
+        i += 16u;
+    }
+#endif
+    while (i < count) { dst[i] = g_gui_prepared_scanout[i]; i++; }
+    g_gui_simd_fill_hits++;
+    g_gui_simd_fill_chunks += count / 4u;
     return 1;
 }
 
