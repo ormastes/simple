@@ -1,6 +1,21 @@
 # CUDA resident-session design §5.3 needs 3 missing SFFI bindings: `cuMemHostAlloc`, `cuMemHostGetDevicePointer`, `cuDeviceGetAttribute`
 
-**Status:** OPEN
+**Status:** ARCHITECTURAL-OPEN — re-verified 2026-08-10. Confirmed all three
+SFFI bindings (`cuMemHostAlloc`/`cuMemHostGetDevicePointer`/
+`cuDeviceGetAttribute` and their `rt_cuda_*` extern counterparts) are still
+absent from `src/lib/nogc_sync_mut/cuda/sffi.spl`
+(`grep -n 'cuMemHostAlloc\|cuMemHostGetDevicePointer\|cuDeviceGetAttribute\|rt_cuda_mem_host_alloc\|rt_cuda_device_get_attribute'` → no matches), and
+`cuda_resident_session.spl` still uses `unknown_watchdog_attr()` (no
+`live_watchdog_attr()` provider added). Re-ran
+`test/03_system/gpu_lane/cuda_resident_session_spec.spl` fresh: unchanged,
+`Results: 18 total, 18 passed, 0 failed`, same refusal-branch on this
+hardware-less host. A genuine fix needs (a) new Rust-runtime C extern
+bindings (`src/runtime/`, not vendored, but a real runtime build/adapter
+change outside a docs-verification pass) for the three Driver API calls, and
+(b) hand-authored, conformance-tested resident ring-polling PTX plus a real
+CUDA device to exercise the live branch — none of which is available in this
+worktree/host. Left honestly open; the doc's own "Resume" steps remain the
+correct next actions.
 **Found:** 2026-08-07 (Task B4, gpu_remote_interpreter parallel plan)
 **Component:** `src/lib/nogc_sync_mut/cuda/sffi.spl` (CUDA SFFI layer) /
 `src/lib/gc_async_mut/gpu_lane/cuda_resident_session.spl` (new B4 module)
