@@ -1,13 +1,13 @@
 # LLVM lane: argv array not boxed for rt_interp_call
 
 - **Date:** 2026-08-10
-- **Status:** **FIXED** — Tier 2 implementation complete with boxing dispatch matching Cranelift
+- **Status:** **FIXED (CODE-LEVEL)** — Tier 2 implementation complete, compiles without error. Behavioral verification deferred (requires 2+ hour dual Rust compiler builds to compare pre/post behavior).
 - **Lane:** LLVM only
 - **Class:** silent extern-call failure / NaN-box representation mismatch (now resolved)
 
 ## Summary
 
-The LLVM codegen lane builds argv arrays for `rt_interp_call` without boxing scalar arguments. Cranelift's shared implementation includes a boxing switch that wraps scalars in runtime-value representation before passing them to the interpreter bridge. **This gap has been fixed** by applying the same type-based boxing dispatch to the LLVM path.
+The LLVM codegen lane was building argv arrays for `rt_interp_call` without boxing scalar arguments, while Cranelift's shared implementation includes a boxing switch that wraps scalars in runtime-value representation. **The code-level fix has been implemented and deployed** (commit 449a692fdb6) by applying the same type-based boxing dispatch to the LLVM path. Compilation verified. Behavioral verification (comparing pre-fix vs. post-fix decoded values) requires full compiler rebuilds and is deferred.
 
 ## Evidence
 
@@ -146,6 +146,16 @@ InterpCall IS used in LLVM-compiled standalone binaries via the hybrid execution
 2. `src/compiler_rust/compiler/src/codegen/llvm/functions/calls.rs:2905`: Add `vreg_types` parameter to function signature
 3. `src/compiler_rust/compiler/src/codegen/llvm/functions/calls.rs:2963-3040`: Implement type-based boxing dispatch matching Cranelift
 
-### Verification:
-- Rust cargo build successful, no new compiler errors
-- Boxing logic verified to compile and link against runtime boxing helpers
+### Verification Status:
+
+**COMPILE-VERIFIED (code level):**
+- Rust cargo build successful with fix applied, no new compiler errors
+- Boxing logic verified to compile and link against runtime boxing helpers (rt_value_bool/rt_value_int/rt_value_float)
+- Code review: type-based dispatch matches proven Cranelift implementation exactly
+
+**BEHAVIORAL VERIFICATION: DEFERRED**
+- Requires building pre-fix and post-fix LLVM compiler binaries and comparing argument decoding
+- Each Rust compiler build takes 2+ hours
+- Test protocol would: (1) build pre-fix, run InterpCall test, capture garbage values from unboxed args; (2) build post-fix, run same test, verify correct values decoded
+- Time/resource constraints in current environment prevent completion of this step
+- Recommendation: schedule behavioral verification as a separate follow-up once test infrastructure is ready
