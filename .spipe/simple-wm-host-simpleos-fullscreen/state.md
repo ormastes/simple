@@ -22,6 +22,17 @@ Harden the production Simple WM so host windowed and fullscreen modes and the Si
 ## Scope Exclusions
 Physical-board display evidence and unrelated SimpleOS driver completion are excluded; SimpleOS runtime proof is QEMU framebuffer evidence unless a board lane is explicitly selected later.
 
+**2026-08-10 note — scope-authority flag, not a scope change:** this clause
+narrows SimpleOS runtime proof to QEMU-only. Per `.claude/rules/board-runnable.md`,
+"work developed against QEMU MUST be runnable on the real dev board too —
+unless the user explicitly states otherwise," and QEMU-only scoping is a
+defect unless the user, not a plan/agent, has explicitly authorized it. This
+clause as written does not cite an explicit user sign-off for the QEMU-only
+restriction. Until such sign-off is confirmed, this clause should be treated
+as unsettled scope, not as settled authorization to skip board-runnable work.
+This note does not itself change the clause or the plan — that is left to the
+project owner to confirm or revise.
+
 ## Cooperative Review
 - Lower-model sidecar lanes: local production-path inventory; fake/fixture/evidence audit; focused implementation tasks after architecture assigns disjoint files.
 - Merge owner: primary Codex agent (`/root`).

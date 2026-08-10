@@ -396,3 +396,35 @@ sed -n '1221p;1312p;1327,1336p;1359,1390p' scripts/check/check-simpleos-wm-fulls
 ```
 Use `/usr/bin/grep` — the wrapped `grep` on PATH is ugrep honouring `.gitignore`
 and will not see anything under `build/`.
+
+## 2026-08-10 addendum — page-fault-as-blocker claim SUPERSEDED
+
+This document's § "The page fault is **NOT** resolved — correct the working
+premise" and its "Primary: (d) ... first-frame paint [faults on
+memcpy/rt_string_concat]" classification are **SUPERSEDED**. Wider evidence
+across the archived run set (13 runs, not the 2 examined here) shows this
+`memcpy`/`rt_string_concat` page fault **self-recovers** — the serial log's own
+`*** END FRAME (recovering) ***` marker, present in both runs quoted above,
+means execution continued past it. Only 2 of 13 archived runs show the fault
+at all, so it cannot be the rung-(d) blocker on its own evidentiary terms (it
+is absent from the majority of runs that still failed to reach rung (d)).
+
+The actual rung-(d) blocker was `render_baremetal_first_frame` never
+returning — a TIMEOUT (the guest is killed by the gate's 300 s readiness
+timeout, exactly as this document itself observes: "the guest is killed by
+the gate's 300 s readiness timeout while still inside the first frame") that
+the gate misclassified as `reason=guest-render-fault`/
+`reason=dynamic-scanout-or-desktop-readiness-missing`. Root cause: the
+font-atlas 8 MiB buffer being reallocated on every reset
+(`_reset_font_atlas`, `src/lib/nogc_sync_mut/text_layout/font_renderer.spl`),
+exhausting the 1 GiB baremetal bump heap before the render loop could
+complete a frame — consistent with this document's own § 2 observation of
+repeated `[array-repeat] big count=0x100000` (8 MiB) allocations on "a
+never-freeing bump heap". Fixed by commit `4e1d05ba67a4` ("fix(simpleos):
+reuse font atlas buffer in place instead of leaking 8MiB per reset"). See
+`doc/08_tracking/bug/freestanding_text_local_recompare_flips_material_admission_2026-08-10.md`
+(Layer 5 + 2026-08-10 addendum) for the full chain.
+
+This correction does not touch this document's separate, still-accurate
+finding that the local checkout was behind origin on
+`closures_structs.rs` — that trap-for-the-implementer note stands.

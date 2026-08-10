@@ -2,6 +2,16 @@
 
 **Status:** layers 1–2 worked around (comparison hoisting, dimension threading);
 layer 3 (page faults in the CPU glass composite) OPEN and now the rung-(d) blocker
+**SUPERSEDED 2026-08-10 (see addendum at end of file):** the layer-3 page fault
+was never the rung-(d) blocker — it self-recovers (`*** END FRAME (recovering)
+***`) and appears in only 2 of 13 archived runs. The actual rung-(d) blocker,
+per this file's own Layer 5 below plus the fix that landed after it, was
+`render_baremetal_first_frame` never returning — a TIMEOUT the gate
+misclassified as `reason=guest-render-fault` — caused by the font-atlas 8 MiB
+buffer being reallocated on every reset and exhausting the 1 GiB bump heap
+(`_reset_font_atlas`, `src/lib/nogc_sync_mut/text_layout/font_renderer.spl`).
+Fixed in commit `4e1d05ba67a4` ("fix(simpleos): reuse font atlas buffer in
+place instead of leaking 8MiB per reset").
 **Date:** 2026-08-10
 **Lane:** SimpleOS WM fullscreen evidence (`scripts/check/check-simpleos-wm-fullscreen-evidence.shs`)
 **File:** `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core.spl` (`compute_styles_with_material`)
@@ -423,3 +433,36 @@ reaches the render loop can `cpu_executed` be re-measured.
 No fix landed in this pass. No check weakened; `wm_content_frame_web_provenance_valid`
 untouched; no composite stubbed; no bounds check relaxed; OVMF pflash unchanged;
 no gate run performed (the finding is derived entirely from archived per-run logs).
+
+## 2026-08-10 addendum — blocker resolved, page-fault framing corrected
+
+This file's own Layer 5 (above) already concluded `cpu_executed=0` is a
+downstream symptom of heap exhaustion during the style pass, not an
+independent second defect, and identified the never-freed `[array-repeat]`
+8 MiB buffers as the prerequisite blocker. That diagnosis is confirmed and the
+fix has since landed: `_reset_font_atlas`
+(`src/lib/nogc_sync_mut/text_layout/font_renderer.spl`) reallocated an 8 MiB
+buffer on every atlas reset instead of reusing it in place, exhausting the
+1 GiB baremetal bump heap and causing `render_baremetal_first_frame` to never
+return. The gate's 300 s readiness timeout then misclassified that
+non-termination as `reason=guest-render-fault`. Fixed by commit
+`4e1d05ba67a4` ("fix(simpleos): reuse font atlas buffer in place instead of
+leaking 8MiB per reset"), verified: post-fix runs show zero
+`[engine2d-glass]` receipts (the composite is never reached at all), matching
+this document's own evidence table above — not two separable blockers.
+
+The "layer 3 (page faults ... OPEN)" status line at the top of this document,
+and the classification of the `memcpy`/`rt_string_concat` page fault as *the*
+rung-(d) blocker, is **SUPERSEDED**: that fault self-recovers
+(`*** END FRAME (recovering) ***` in the serial log) and is present in only 2
+of 13 archived runs. It was never the blocking condition — the heap
+exhaustion documented in this file's own Layer 5 was. The hypothesis is kept
+here, marked superseded, rather than deleted.
+
+The pre-existing `fb_w=49`/`fb_h=33` framebuffer-extent corruption discussed
+above (§ Layer 4) was **already fixed before this document's session**, by
+commit `439d64e2b3e` ("fix(simpleos): restore WM material provenance witness
+on freestanding lane"). This document's Layer 4 correctly identified it as
+already-fixed and did not claim to have newly fixed it — no correction needed
+on that point, restated here only for cross-reference with the other docs in
+this campaign.
