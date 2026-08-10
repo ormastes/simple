@@ -442,27 +442,12 @@ impl MirLowering:
         `outer.items` where `items` is a struct's array field, `arr[i]`
         when `arr` holds nested arrays, ...).
 
-        Materializes a private per-binding copy with a synthesized counted
-        loop (rt_array_len -> rt_array_new(len) -> per-index rt_array_get +
-        rt_array_push), the EXACT same shape as lower_array_map/
-        lower_array_filter in method_calls_literals.spl -- NOT a call to
-        core_array_ops.spl's `rt_array_copy`, even though that helper exists
-        and does the equivalent memcpy in one call: this project's default
-        native-build link step compiles/links the hand-written C runtime
-        (src/runtime/runtime_native.c), not the pure-Simple `simple_core`
-        layer, and runtime_native.c implements rt_array_len/rt_array_new/
-        rt_array_get/rt_array_push but NOT rt_array_copy -- a first attempt
-        wiring a bare `rt_array_copy` call hit "undefined symbol:
-        rt_array_copy" at the ld.lld link step. Adding rt_array_copy to
-        runtime_native.c was avoided on purpose (repo hard rule: never wire
-        a new `extern fn rt_*` into a CLI-closure module here); the loop
-        form needs zero new runtime surface. Mirrors lower_array_filter's
-        "push the ORIGINAL tagged element unchanged" step (not
-        lower_array_map's decode/re-box round trip): a copy must preserve
-        every element's raw tagged word bit-for-bit, matching
-        rt_array_copy's own memcpy semantics -- this remains a SHALLOW array
-        copy (an array of structs copies each element's pointer, not the
-        pointed-to struct). Nested fields inside a directly copied struct use
+        Materializes a private per-binding shallow copy through the canonical
+        `rt_array_copy` runtime owner. Both the Rust bootstrap runtime and
+        runtime_native.c now provide it, preserving every tagged element word
+        exactly while avoiding a fragile synthesized MIR loop. An array of
+        structs still copies each element pointer, not the pointed-to struct.
+        Nested fields inside a directly copied struct use
         copy_struct_value_recursive above; array element depth is separate.
         Returns the fresh copy's LocalId (already flag-propagated -- NOT yet
         bound into local_map, unlike maybe_copy_struct_value, since the
@@ -473,81 +458,15 @@ impl MirLowering:
         the one case that actually needs it, per repo perf-review rules)."""
         if not init_is_place or not self.local_is_runtime_array(init_local):
             return LocalId(id: -1)
-        val loop_ty = MirType.i64()
-
-        var b_len = self.builder
-        val len_call = b_len.emit_call(self.rt_array_len_operand(), [mir_operand_copy(init_local)], MirType.i64())
-        val len_local = len_call ?? b_len.new_temp(MirType.i64())
-        self.builder = b_len
-
-        # Pre-size the result at the source's exact length (unlike
-        # lower_array_map/filter, which start from an unknown-length 0-cap
-        # array since a map/filter result length isn't known up front) --
-        # a copy's length IS known up front, so allocate it once instead of
-        # growing via push reallocation.
-        var b_new = self.builder
-        val new_call = b_new.emit_call(MirOperand(kind: MirOperandKind.Const(
-            MirConstValue.Str("rt_array_new"),
-            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: effective_type, is_variadic: false)))
-        )), [mir_operand_copy(len_local)], effective_type)
-        val result_arr = new_call ?? b_new.new_temp(effective_type)
-        self.builder = b_new
+        var b_copy = self.builder
+        val copy_call = b_copy.emit_call(MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_array_copy"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [effective_type], return_type: effective_type, is_variadic: false)))
+        )), [mir_operand_copy(init_local)], effective_type)
+        val result_arr = copy_call ?? b_copy.new_temp(effective_type)
+        self.builder = b_copy
         self.runtime_array_locals[result_arr.id] = true
         self.mark_runtime_value_local(result_arr.id)
-
-        var b_init = self.builder
-        val counter = b_init.new_local(nil, loop_ty, LocalKind.Var)
-        val zero = b_init.new_temp(loop_ty)
-        b_init.emit_const(zero, MirConstValue.Int(0), loop_ty)
-        b_init.emit_copy(counter, zero)
-        val one = b_init.new_temp(loop_ty)
-        b_init.emit_const(one, MirConstValue.Int(1), loop_ty)
-        self.builder = b_init
-
-        var b_blocks = self.builder
-        val cond_block = b_blocks.new_block(Some("arrcopy_cond"))
-        val body_block = b_blocks.new_block(Some("arrcopy_body"))
-        val inc_block = b_blocks.new_block(Some("arrcopy_inc"))
-        val exit_block = b_blocks.new_block(Some("arrcopy_exit"))
-        self.builder = b_blocks
-
-        var b_goto = self.builder
-        b_goto.terminate_goto(cond_block)
-        b_goto.switch_to_block(cond_block)
-        self.builder = b_goto
-
-        var b_cond = self.builder
-        val cond_result = b_cond.emit_binop(MirBinOp.Lt, mir_operand_copy(counter), mir_operand_copy(len_local), MirType.bool())
-        b_cond.terminate_if(mir_operand_copy(cond_result), body_block, exit_block)
-        b_cond.switch_to_block(body_block)
-        self.builder = b_cond
-
-        var b_get = self.builder
-        val get_call = b_get.emit_call(self.rt_array_get_operand(), [mir_operand_copy(init_local), mir_operand_copy(counter)], MirType.i64())
-        val elem_tagged = get_call ?? b_get.new_temp(MirType.i64())
-        self.builder = b_get
-
-        var b_push = self.builder
-        b_push.emit_call(self.rt_array_push_operand(), [mir_operand_copy(result_arr), mir_operand_copy(elem_tagged)], MirType(kind: MirTypeKind.I8))
-        self.builder = b_push
-
-        var b_body_end = self.builder
-        if not b_body_end.current_block_has_explicit_terminator():
-            b_body_end.terminate_goto(inc_block)
-        self.builder = b_body_end
-
-        var b_inc = self.builder
-        b_inc.switch_to_block(inc_block)
-        val incremented = b_inc.emit_binop(MirBinOp.Add, mir_operand_copy(counter), mir_operand_copy(one), loop_ty)
-        b_inc.emit_copy(counter, incremented)
-        self.builder = b_inc
-        var b_back = self.builder
-        b_back.terminate_goto(cond_block)
-        self.builder = b_back
-
-        var b_exit = self.builder
-        b_exit.switch_to_block(exit_block)
-        self.builder = b_exit
 
         if self.nil_locals.contains(init_local.id):
             self.nil_locals[result_arr.id] = true
