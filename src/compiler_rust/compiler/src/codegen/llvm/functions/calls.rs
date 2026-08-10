@@ -168,8 +168,9 @@ fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         "rt_file_write_bytes" => Some(&[0]),
 
         // Directory operations
-        "rt_dir_list" | "rt_dir_remove" | "rt_dir_remove_all" | "rt_dir_glob" | "rt_dir_walk"
+        "rt_dir_list" | "rt_dir_remove" | "rt_dir_remove_all" | "rt_dir_walk"
         | "rt_set_current_dir" | "rt_dir_exists" => Some(&[0]),
+        "rt_dir_glob" => Some(&[0, 1]),
         "rt_file_find" => Some(&[0, 1]),
 
         // Async I/O driver text arguments
