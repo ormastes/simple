@@ -80,9 +80,9 @@ submit/fence/readback adapters and delegates final identity/readiness checks to
 Accepted frame evidence must carry one QRB2210 boot and assembly generation
 across display, input, audio, and GPU identities. Each receipt must match its
 own exact device handle; Adreno submit/fence/readback share the exact GPU
-device. Submission, readback, DRM present/capture, input dispatch, and audio
-completion must identify one frame, while fence/readback share the exact
-submission and display capture shares the exact present. Any cross-boot,
+device. Submission, fence, readback, DRM present/capture, input dispatch, and
+audio submit/completion must embed the exact same submission identity and one
+frame; display capture also shares the exact present. Any cross-boot,
 cross-device, stale-generation, or cross-frame combination fails closed.
 
 The input-side primitive adapter is
