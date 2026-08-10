@@ -418,7 +418,7 @@ impl MirLowering:
             return self.copy_struct_value_recursive(init_local, struct_type_name, type_symbol, [struct_type_name])
         nil
 
-    me maybe_copy_array_value(init_local: LocalId, effective_type: MirType, init_is_place: bool) -> LocalId?:
+    me maybe_copy_array_value(init_local: LocalId, effective_type: MirType, init_is_place: bool) -> LocalId:
         """Bug #186 (native array local-alias copy missing): sibling to Bug
         #177's struct local-alias fix (maybe_copy_struct_value above), for
         runtime arrays' separate rt_array mechanism -- struct_value_syms /
@@ -472,7 +472,7 @@ impl MirLowering:
         fresh-construction initializer -- keeps the extra loop confined to
         the one case that actually needs it, per repo perf-review rules)."""
         if not init_is_place or not self.local_is_runtime_array(init_local):
-            return nil
+            return LocalId(id: -1)
         val loop_ty = MirType.i64()
 
         var b_len = self.builder
@@ -558,7 +558,7 @@ impl MirLowering:
             val ael_name = ael_sym ?? ""
             if ael_name != "":
                 self.array_element_struct_syms[result_arr.id] = ael_name
-        Some(result_arr)
+        result_arr
 
     me lower_stmt(stmt: HirStmt):
         """Lower HIR statement to MIR.
@@ -812,7 +812,7 @@ impl MirLowering:
                         val struct_sym = self.struct_value_syms.get(init_local.id)
                         val struct_move_hir_type = self.find_local_hir_type(init_local.id)
                         val struct_is_place_iso = struct_sym != nil and mir_expr_kind_is_place(let_init.kind) and self.local_hir_type_isolation_state(init_local.id) == 1
-                        val struct_copy = if struct_is_place_iso:
+                        val struct_copy = if struct_is_place_iso or struct_sym == nil:
                             nil
                         else:
                             self.maybe_copy_struct_value(init_local, struct_sym, mir_expr_kind_is_place(let_init.kind))
@@ -848,8 +848,8 @@ impl MirLowering:
                             # literal/call-result initializer falls through to
                             # the unchanged new_local+emit_copy path below.
                             val array_copy = self.maybe_copy_array_value(init_local, effective_type, mir_expr_kind_is_place(let_init.kind))
-                            if val array_copy_local = array_copy:
-                                self.bind_local(symbol_value_id, array_copy_local)
+                            if array_copy.id >= 0:
+                                self.bind_local(symbol_value_id, array_copy)
                             else:
                                 var b = self.builder
                                 val local = b.new_local(nil, effective_type, LocalKind.Var)
@@ -1061,9 +1061,9 @@ impl MirLowering:
                             # disc==1 early-Let path above -- kept in sync
                             # (this arm is dead today, see the comment above
                             # effective_type).
-                            val array_copy2 = if has_init: self.maybe_copy_array_value(init_local, effective_type, init_is_place) else: nil
-                            if val array_copy2_local = array_copy2:
-                                self.bind_local(symbol_id, array_copy2_local)
+                            val array_copy2 = if has_init: self.maybe_copy_array_value(init_local, effective_type, init_is_place) else: LocalId(id: -1)
+                            if array_copy2.id >= 0:
+                                self.bind_local(symbol_id, array_copy2)
                             else:
                                 var b = self.builder
                                 val local = b.new_local(nil, effective_type, LocalKind.Var)
