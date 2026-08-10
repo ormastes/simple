@@ -659,10 +659,11 @@ fn _engine2d_draw_ir_render_glass_material(
 # concrete Engine2D owner mutable across this boundary; returning it inside the
 # old box-outcome aggregate lost the receiver on freestanding native builds.
 fn _engine2d_draw_ir_render_box(
-    mut eng: Engine2D, command: DrawIrCommand,
+    engine: Engine2D, command: DrawIrCommand,
     x: i32, y: i32, w: i32, h: i32,
     mut execution_i64: [i64], mut execution_text: [text]
-) -> i32:
+) -> Engine2D:
+    var eng = engine
     # Reset and draw through the exact caller-owned receiver. Evidence remains
     # in the caller-owned scalar sidecars; no Engine2D value crosses back in a
     # nested result.
@@ -732,7 +733,7 @@ fn _engine2d_draw_ir_render_box(
                 eng, typed_shadows.layers, x, y, w, h, effective_corners)
         val border_engine_ignored = _engine2d_draw_ir_render_borders(
             eng, style, x, y, w, h, radius)
-        return 1
+        return eng
     val bg_image = _engine2d_draw_ir_style_value(style, "background-image")
     if typed_nonuniform:
         val background_engine_ignored = engine2d_draw_ir_render_typed_background(
@@ -787,7 +788,7 @@ fn _engine2d_draw_ir_render_box(
             eng, typed_shadows.layers, x, y, w, h, effective_corners)
     val clipped_border_engine_ignored = _engine2d_draw_ir_render_borders(
         eng, style, x, y, w, h, radius)
-    1
+    eng
 fn engine2d_resolved_draw_ir_image(image_uri: text, width: i32, height: i32, pixels: [u32]) -> Engine2dResolvedDrawIrImage:
     var opaque = (
         width > 0 and height > 0 and
@@ -1513,7 +1514,7 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
             material_execution_i64[1] = 0
             material_execution_i64[2] = 0
             material_execution_text[0] = ""
-            val box_status = _engine2d_draw_ir_render_box(
+            eng = _engine2d_draw_ir_render_box(
                 eng, command, x, y, command.width, command.height,
                 material_execution_i64, material_execution_text)
             if _engine2d_draw_ir_style_value(
@@ -2158,6 +2159,7 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
                 draw_ir_no_rect(),
             css_background_pixel_work_budget, direct_material_counts, false,
             image_xy)
+        eng = direct.engine
         if batch_execution_counts.len() >= 6:
             batch_execution_counts[0] = direct_material_counts[0]
             batch_execution_counts[1] = direct_material_counts[1]
@@ -2289,12 +2291,13 @@ fn engine2d_draw_ir_adv_batch(engine: Engine2D, batch: DrawIrBatch, gpu_availabl
 
 fn engine2d_draw_ir_adv_batch_with_images(engine: Engine2D, batch: DrawIrBatch, gpu_available: bool, images: [Engine2dResolvedDrawIrImage]) -> Engine2dDrawIrAdvResult:
     val plan = simple_2d_draw_ir_adv_plan(batch, gpu_available)
+    var eng = engine
     var batch_execution_counts: [i64] = [0, 0, 0, 0, 0, 0]
     var batch_offsets: [i32] = [batch.embedding.x, batch.embedding.y]
     val outcome = _engine2d_draw_ir_render_batch_embedded(
-        engine, batch, images, 0, false,
-        engine.width().to_i64() * engine.height().to_i64(), batch_execution_counts, "", batch_offsets)
-    val eng = engine
+        eng, batch, images, 0, false,
+        eng.width().to_i64() * eng.height().to_i64(), batch_execution_counts, "", batch_offsets)
+    eng = outcome.engine
     var unsupported_kinds = outcome.unsupported_kinds
     if unsupported_kinds == "":
         unsupported_kinds = "none"
@@ -2519,6 +2522,7 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: 
             eng, batch, images, 0, allow_parent_image,
             css_background_pixel_work_remaining, batch_execution_counts,
             prepared_visual_key, batch_offsets, image_xy)
+        eng = outcome.engine
         _e2d_wm_command_profile_active = false
         if profile_wm_batches:
             val profile_batch_finished_us = rt_time_now_micros()
