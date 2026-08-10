@@ -1,6 +1,6 @@
 # Compiler hangs on cross-tier diamond import + call (2026-07-31)
 
-**Status:** OPEN — compiler defect, no workaround applied.
+**Status:** ALREADY-FIXED (re-verified 2026-08-10) — see "Re-verification 2026-08-10" below.
 **Impact:** `test/01_unit/lib/common/ui/widget_draw_ir_theme_spec.spl` can never
 run. It has never produced a `Results:` line. Any spec combining these two
 imports with a real call is equally unrunnable.
@@ -211,3 +211,33 @@ assertions were deleted. Fixing this is compiler-internals work, outside the
 
 Found by: unified 2D event/panel campaign, Wave A.
 Plan: `doc/03_plan/ui/unified_2d_engine/unified_2d_event_panel_offload_2026-07-30.md`
+
+## Re-verification 2026-08-10 (ALREADY-FIXED)
+
+Re-ran both the 9-line minimal reproducer (recreated verbatim from this doc,
+since the `scratchpad/lane_backup/compiler_bug_repro/` copies were session-local
+and no longer present) and the originally-cited spec file, against the current
+deployed `bin/simple` (`bin/release/x86_64-unknown-linux-gnu/simple`):
+
+- Minimal reproducer (both imports + the call): **`Results: 1 total, 1 passed,
+  0 failed`**, exit 0, completes in well under the 90s timeout used. Only 57
+  `gc-warning` lines total in the full ~2063-line log (not the reported
+  byte-identical 1,938-line stop with `Process timed out`).
+- `test/01_unit/lib/common/ui/widget_draw_ir_theme_spec.spl` (the originally
+  "can never run" spec): **`Results: 8 total, 8 passed, 0 failed`**, exit 0.
+
+Both edges of the claimed diamond
+(`src/lib/common/ui/widget_draw_ir.spl` → `nogc_sync_mut.text_layout.font_renderer`,
+`src/lib/nogc_sync_mut/ui/theme_package.spl` → `common.ui.theme_render_snapshot`)
+are still present in current source, so the import graph shape is unchanged;
+whatever fixed this was a change to the loader's behavior around it (module
+cache / warning emission / cycle handling in
+`src/compiler_rust/compiler/src/module_loader.rs` and/or `module_cache.rs`),
+consistent with proposal (1)/(3) sketched in the "Static analysis 2026-08-01"
+section above, though the exact landing commit was not bisected — out of scope
+for this re-verification pass under the "no bootstrap rebuild" constraint. No
+hang, no timeout, no workaround, spec is not skipped. Marking ALREADY-FIXED;
+regression coverage already exists as the real spec file
+(`widget_draw_ir_theme_spec.spl`), which now runs cleanly under normal `bin/simple
+test`.
+
