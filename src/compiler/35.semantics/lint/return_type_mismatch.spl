@@ -376,6 +376,20 @@ fn rtm_compatible(declared: text, actual: text) -> bool:
 # Statement shape
 # ============================================================================
 
+# Whole-keyword statement test.
+#
+# A bare `starts_with(kw)` also swallows every identifier that merely BEGINS
+# with the keyword, which is how `breakpoints`, `break_count`, `pass_name` and
+# `pass_list` -- all perfectly ordinary tail expressions -- were reported as
+# statements yielding no value. The keyword only counts when the token ENDS
+# there, i.e. when the next character cannot continue an identifier.
+fn rtm_is_kw_stmt(s: text, kw: text) -> bool:
+    if s == kw:
+        return true
+    if not s.starts_with(kw):
+        return false
+    not rtm_is_ident_char(s.substring(kw.len(), kw.len() + 1))
+
 # A statement that provably yields no value, so a function declaring a
 # non-void return type and ending on one returns nothing at all.
 fn rtm_is_valueless_stmt(t: text) -> bool:
@@ -386,14 +400,20 @@ fn rtm_is_valueless_stmt(t: text) -> bool:
     # `loop` must be matched as a WHOLE keyword. A bare `starts_with("loop")`
     # also swallows the identifiers `loopback` and `loop_ref`, which turned two
     # perfectly correct tail expressions into RET004 findings.
-    if t == "loop" or t.starts_with("loop:") or t.starts_with("loop ")
-        or t.starts_with("loop\t"):
+    if rtm_is_kw_stmt(t, "loop"):
         return true
     if t.starts_with("print(") or t.starts_with("println(") or t.starts_with("eprint("):
         return true
-    if t == "pass" or t.starts_with("pass_"):
+    # `pass_` as a bare PREFIX is the same defect: it matched `pass_name`,
+    # `pass_list`, `pass_manager` and every other identifier starting with those
+    # five characters. Only the three reserved no-op words are statements, and
+    # only when the token ends there or opens an argument list.
+    if t == "pass" or rtm_is_stub_word(t, "pass_todo")
+        or rtm_is_stub_word(t, "pass_do_nothing") or rtm_is_stub_word(t, "pass_dn"):
         return true
-    if t.starts_with("break") or t.starts_with("continue"):
+    # Likewise `break`/`continue`: `breakpoints`, `break_count` and
+    # `continue_flag` are ordinary identifiers, not control flow.
+    if rtm_is_kw_stmt(t, "break") or rtm_is_kw_stmt(t, "continue"):
         return true
     # Bare assignment `x = e` / `x.y = e` / compound assigns.
     if rtm_top_has(t, " = ") and not rtm_top_has(t, " == "):
@@ -413,9 +433,28 @@ fn rtm_is_inline_branch(t: text) -> bool:
 
 # A body that is only a placeholder marker, i.e. a declaration stub rather
 # than logic that got its return value wrong.
+# `pass_` as a bare PREFIX test is too loose: it matches any expression whose
+# first token merely begins with those five characters. A real body reading
+# `pass_name == "inline_functions"` -- an ordinary comparison on a parameter
+# called `pass_name` -- was reported as a placeholder stub twice in
+# `src/compiler/60.mir_opt/mir_opt/mod.spl`. Only the reserved no-op words are
+# stubs, and only when the token ENDS there or opens an argument list
+# (`pass_todo("...")`).
+fn rtm_is_stub_word(s: text, w: text) -> bool:
+    if s == w:
+        return true
+    if not s.starts_with(w):
+        return false
+    # the character right after the keyword decides: `(` opens its argument
+    # list, anything identifier-ish means this was a longer identifier.
+    s.substring(w.len(), w.len() + 1) == "("
+
 fn rtm_is_stub_body(t: text) -> bool:
     val s = t.trim()
-    s == "pass" or s.starts_with("pass_") or s == "..." or s == "todo()"
+    s == "pass" or s == "..." or s == "todo()"
+        or rtm_is_stub_word(s, "pass_todo")
+        or rtm_is_stub_word(s, "pass_do_nothing")
+        or rtm_is_stub_word(s, "pass_dn")
 
 # A block header opens a construct whose value comes from its branches; the
 # tail-expression rule cannot be applied to it textually.
