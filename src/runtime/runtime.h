@@ -192,8 +192,10 @@ int64_t  spl_file_size(const char* path);
 
 /* ===== Directory Operations ===== */
 
-bool     rt_dir_create(const char* path, bool recursive);
-bool     rt_dir_remove_all(const char* path);
+bool     rt_dir_create(const uint8_t* path_ptr, uint64_t path_len, bool recursive);
+bool     rt_dir_create_cpath(const char* path, bool recursive);
+bool     rt_dir_remove_all(const uint8_t* path_ptr, uint64_t path_len);
+bool     rt_dir_remove_all_cpath(const char* path);
 const char** rt_dir_list(const char* path, int64_t* out_count);
 void     rt_dir_list_free(const char** entries, int64_t count);
 
@@ -783,9 +785,9 @@ SplValue    rt_cli_arg_at(int64_t index);
 #else
 int64_t     rt_cli_arg_at(int64_t index);
 #endif
-SplArray*   rt_dir_walk(const char* path);
+SplArray*   rt_dir_walk(const uint8_t* path_ptr, uint64_t path_len);
 SplArray*   rt_dir_list_array(const char* path);
-int         rt_dir_create_all(const char* path);
+int         rt_dir_create_all(const uint8_t* path_ptr, uint64_t path_len);
 int         rt_mkdir_p(const char* path);
 
 /* ===== Dynamic Loading (WFFI) ===== */

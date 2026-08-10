@@ -53,7 +53,10 @@ static int unlink_cb(const char *fpath, const struct stat *sb,
     return remove(fpath);
 }
 
-bool rt_dir_create(const char* path, bool recursive) {
+/* C-string worker. The public rt_dir_* entry point lives in runtime.c and
+ * converts the compiler's (ptr, len) `text` pair before calling this; a Simple
+ * `text` is not NUL-terminated. See rt_text_arg_to_path in runtime.c. */
+bool rt_dir_create_cpath(const char* path, bool recursive) {
     if (!path) return false;
     
     if (!recursive) {
@@ -150,7 +153,10 @@ void rt_dir_list_free(const char** entries, int64_t count) {
     free((void*)entries);
 }
 
-bool rt_dir_remove_all(const char* path) {
+/* C-string worker. The public rt_dir_* entry point lives in runtime.c and
+ * converts the compiler's (ptr, len) `text` pair before calling this; a Simple
+ * `text` is not NUL-terminated. See rt_text_arg_to_path in runtime.c. */
+bool rt_dir_remove_all_cpath(const char* path) {
     if (!path) return false;
     return nftw(path, unlink_cb, 64, FTW_DEPTH | FTW_PHYS) == 0;
 }

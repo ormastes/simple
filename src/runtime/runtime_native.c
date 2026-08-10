@@ -50,7 +50,9 @@
 #include <pthread.h>
 #endif
 
-bool rt_dir_create(const char* path, bool recursive) {
+/* C-string worker; the public (ptr, len) entry point is below. Named to match
+ * the workers in platform/unix_common.h and platform/platform_win.h. */
+bool rt_dir_create_cpath(const char* path, bool recursive) {
     if (!path || !*path) return false;
     if (!recursive) {
 #if defined(_WIN32)
@@ -8649,7 +8651,7 @@ int64_t rt_file_atomic_write(int64_t path_value, int64_t content_value) {
         /* C-internal caller: `parent` IS a real NUL-terminated C string, so it
          * must be passed through the (ptr, len) `text` extern ABI explicitly. */
         if (!rt_dir_exists((const uint8_t*)parent, (uint64_t)strlen(parent)) &&
-            !rt_dir_create(parent, true)) {
+            !rt_dir_create_cpath(parent, true)) {
             free(parent);
             free(path);
             return 0;
@@ -8877,7 +8879,8 @@ static int rt_core_mkdir_one(const char* path) {
     return rt_is_dir(path) ? 1 : 0;
 }
 
-int rt_dir_create_all(const char* path) {
+/* C-string worker for rt_dir_create_all / rt_mkdir_p. */
+static int rt_dir_create_all_cpath(const char* path) {
     if (!path || !*path) return 0;
     char* copy = spl_strdup(path);
     if (!copy) return 0;
@@ -8900,8 +8903,22 @@ int rt_dir_create_all(const char* path) {
     return ok;
 }
 
+int rt_dir_create_all(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
+    return rt_dir_create_all_cpath(path);
+}
+
+/* rt_mkdir_p has no RuntimeFuncSpec -- the compiler never calls it -- so it
+ * stays a C-string helper over the same worker. */
 int rt_mkdir_p(const char* path) {
-    return rt_dir_create_all(path);
+    return rt_dir_create_all_cpath(path);
+}
+
+bool rt_dir_create(const uint8_t* path_ptr, uint64_t path_len, bool recursive) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return false;
+    return rt_dir_create_cpath(path, recursive);
 }
 
 const char* lib__nogc_sync_mut__debug__remote__session_model__DebugExecutionMode_dot_to_string(int64_t value) {
@@ -9203,8 +9220,12 @@ SplArray* rt_bytes_from_raw(int64_t ptr, int64_t len) {
 /* rt_dir_create is already in runtime.h (takes path + recursive) but
  * LLVM IR declares it as rt_dir_create(ptr) -> i1 (single arg).
  * Provide the single-arg version. */
+/* C-internal caller: `path` is a real NUL-terminated C string, so the (ptr,
+ * len) pair is spelled out explicitly. rt_dir_delete itself has no
+ * RuntimeFuncSpec, so it keeps the C-string signature. */
 int rt_dir_delete(const char* path) {
-    return rt_dir_remove_all(path) ? 1 : 0;
+    if (!path) return 0;
+    return rt_dir_remove_all((const uint8_t*)path, (uint64_t)strlen(path)) ? 1 : 0;
 }
 
 int rt_dir_exists(const uint8_t* path_ptr, uint64_t path_len) {

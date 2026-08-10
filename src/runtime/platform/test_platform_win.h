@@ -11,12 +11,12 @@ TEST(dir_create_recursive_windows) {
     const char* root = ".\\rt_test_win_mkdir";
     const char* leaf = ".\\rt_test_win_mkdir\\a\\b\\c";
     if (spl_file_exists(root)) {
-        rt_dir_remove_all(root);
+        rt_dir_remove_all_cpath(root);
     }
-    ASSERT(rt_dir_create(leaf, true));
+    ASSERT(rt_dir_create_cpath(leaf, true));
     ASSERT(spl_file_exists(".\\rt_test_win_mkdir\\a"));
     ASSERT(spl_file_exists(leaf));
-    ASSERT(rt_dir_remove_all(root));
+    ASSERT(rt_dir_remove_all_cpath(root));
 }
 
 static void run_platform_tests(void) {

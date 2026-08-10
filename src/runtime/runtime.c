@@ -1812,11 +1812,29 @@ static void rt_dir_walk_impl(const char* path, SplArray* result) {
 }
 #endif
 
-SplArray* rt_dir_walk(const char* path) {
+SplArray* rt_dir_walk(const uint8_t* path_ptr, uint64_t path_len) {
     SplArray* result = spl_array_new();
-    if (!path) return result;
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return result;
     rt_dir_walk_impl(path, result);
     return result;
+}
+
+/* Public (ptr, len) entry points over the C-string workers that
+ * platform/unix_common.h and platform/platform_win.h define. Those headers are
+ * pulled into THIS translation unit by the #include of platform/platform.h at
+ * the top of this file, which is why the extern ABI gate -- which parses only
+ * src/runtime/*.c -- never saw these two definitions at all. */
+bool rt_dir_create(const uint8_t* path_ptr, uint64_t path_len, bool recursive) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return false;
+    return rt_dir_create_cpath(path, recursive);
+}
+
+bool rt_dir_remove_all(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return false;
+    return rt_dir_remove_all_cpath(path);
 }
 
 SplArray* rt_dir_list_array(const char* path) {

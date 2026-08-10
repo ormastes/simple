@@ -140,9 +140,16 @@ static void core_dir_walk_impl(const char* path, SplArray* result) {
 }
 #endif
 
-SplArray* rt_dir_walk(const char* path) {
+/* (ptr, len): the compiler's `text` extern ABI (runtime_sffi.rs:1896 declares
+ * &[I64, I64]). A Simple `text` is not NUL-terminated. */
+SplArray* rt_dir_walk(const uint8_t* path_ptr, uint64_t path_len) {
     SplArray* result = spl_array_new();
-    if (path) core_dir_walk_impl(path, result);
+    char path[4096];
+    if (!path_ptr && path_len != 0) return result;
+    if (path_len >= sizeof(path)) return result;
+    if (path_len != 0) memcpy(path, path_ptr, (size_t)path_len);
+    path[(size_t)path_len] = '\0';
+    if (path[0]) core_dir_walk_impl(path, result);
     return result;
 }
 
@@ -408,9 +415,16 @@ int rt_file_append(const char* path, const char* content) {
     return n == len ? 1 : 0;
 }
 
-int rt_file_sync(const char* path, int64_t path_len) {
-    (void)path_len;
-    FILE* f = path ? fopen(path, "rb") : NULL;
+/* This copy had the right ARITY (2), so the extern ABI signature gate never
+ * flagged it -- but it did `(void)path_len;` and used the pointer as a C
+ * string, carrying the same non-NUL-terminated-`text` defect invisibly. Same
+ * shape as the runtime.c copy. */
+int rt_file_sync(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[4096];
+    if (!path_ptr || path_len == 0 || path_len >= sizeof(path)) return 0;
+    memcpy(path, path_ptr, (size_t)path_len);
+    path[(size_t)path_len] = '\0';
+    FILE* f = fopen(path, "rb");
     if (!f) return 0;
 #if defined(_WIN32)
     int ok = _commit(_fileno(f)) == 0;
@@ -524,8 +538,16 @@ static bool core_dir_remove_all_impl(const char* path) {
 }
 #endif
 
-bool rt_dir_remove_all(const char* path) {
-    return path && *path && core_dir_remove_all_impl(path);
+/* (ptr, len): runtime_sffi.rs:1890 declares &[I64, I64]. Deleting a tree with
+ * a path read past its end is the highest-consequence member of this family --
+ * a truncated or extended path removes the wrong directory. */
+bool rt_dir_remove_all(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[4096];
+    if (!path_ptr || path_len == 0) return false;
+    if (path_len >= sizeof(path)) return false;
+    memcpy(path, path_ptr, (size_t)path_len);
+    path[(size_t)path_len] = '\0';
+    return core_dir_remove_all_impl(path);
 }
 
 char* rt_getcwd(void) {

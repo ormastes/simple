@@ -52,38 +52,38 @@ TEST(dir_remove_all) {
     system("touch /tmp/rt_test_dir/subdir/file2.txt");
 
     /* Remove all should work */
-    ASSERT(rt_dir_remove_all("/tmp/rt_test_dir"));
+    ASSERT(rt_dir_remove_all_cpath("/tmp/rt_test_dir"));
     ASSERT(!spl_file_exists("/tmp/rt_test_dir"));
 }
 
 TEST(dir_remove_all_null) {
-    ASSERT(!rt_dir_remove_all(NULL));
+    ASSERT(!rt_dir_remove_all_cpath(NULL));
 }
 
 TEST(dir_create_empty_path) {
-    ASSERT(!rt_dir_create("", false));
-    ASSERT(!rt_dir_create("", true));
+    ASSERT(!rt_dir_create_cpath("", false));
+    ASSERT(!rt_dir_create_cpath("", true));
 }
 
 TEST(dir_create_recursive) {
     const char* root = "/tmp/rt_test_mkdir_recursive";
     const char* leaf = "/tmp/rt_test_mkdir_recursive/a/b/c";
     if (spl_file_exists(root)) {
-        rt_dir_remove_all(root);
+        rt_dir_remove_all_cpath(root);
     }
-    ASSERT(rt_dir_create(leaf, true));
+    ASSERT(rt_dir_create_cpath(leaf, true));
     ASSERT(spl_file_exists("/tmp/rt_test_mkdir_recursive/a"));
     ASSERT(spl_file_exists(leaf));
-    ASSERT(rt_dir_remove_all(root));
+    ASSERT(rt_dir_remove_all_cpath(root));
 }
 
 TEST(dir_create_nonrecursive_missing_parent) {
     const char* root = "/tmp/rt_test_mkdir_nonrecursive";
     const char* leaf = "/tmp/rt_test_mkdir_nonrecursive/a/b";
     if (spl_file_exists(root)) {
-        rt_dir_remove_all(root);
+        rt_dir_remove_all_cpath(root);
     }
-    ASSERT(!rt_dir_create(leaf, false));
+    ASSERT(!rt_dir_create_cpath(leaf, false));
     ASSERT(!spl_file_exists(leaf));
     ASSERT(!spl_file_exists(root));
 }
