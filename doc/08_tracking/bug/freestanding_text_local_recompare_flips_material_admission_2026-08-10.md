@@ -223,3 +223,71 @@ in run A and `0x83d27fe` in run B — different builds, same shape).
 
 No check was weakened; `wm_content_frame_web_provenance_valid` untouched; no
 composite stubbed; no gate run was performed for this trace (analysis only).
+
+## Layer 4 (2026-08-10, opus): the real rung-(d) blocker — `render_baremetal_first_frame` NEVER RETURNS
+
+Evidence base: archived per-run logs only (canonical `serial.log` is racy).
+Furthest-reaching run `build/simpleos_wm_fullscreen_evidence/runs/20260810T083128Z-fail/`
+(421 lines; next `20260810T112327Z-fail`, 415). Kernel
+sha256 `cfa3c112...b901bcdb`, builder `build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple`
+sha256 `bed40ba3...490710d9`.
+
+### Classification: READINESS NEVER SATISFIED (not "capture fails")
+`[production-readiness]` appears in **0 of 8** archived runs. It is emitted at
+`examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl:626` — NOT in
+`src/os/**`, which is why prior repo-wide `src/` greps found only the *expected*
+copy in `src/os/desktop_qemu_contract.spl:118`. The gate entry is
+`ENTRY="examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl"`
+(`scripts/check/check-simpleos-wm-fullscreen-evidence.shs:886`).
+
+### Exact stop point
+The guest reaches, in order (log lines 234-236):
+- `:566` `[desktop-gui] process-owned-surfaces-ready count=3`
+- `:569` `[desktop-gui] launcher apps=15`
+- `:581` `Engine2dWmFrameExecutor.create_host_gpu(...)` -> `[wm-frame] host-gpu-fallback`
+
+then enters `:587 shell.render_baremetal_first_frame(wm_frame_executor)` **and
+never leaves it**. Proof: none of the four unconditional prints that follow the
+call ever appear in ANY run — `[engine2d-simd] arch=x86_64 ...` (`:601`),
+`[font-evidence*]` (`:620/622/624`), `[desktop-gui] desktop-ready` (`:625`),
+`[production-readiness]` (`:626`). Nor does the failure branch `:590`
+`[production-readiness-failed] reason=simple2d-or-simple-web-frame-invalid`.
+Neither success nor failure is emitted => the call did not return.
+
+`qemu.out` ends `terminating on signal 15 from pid ... (sh)` — the wrapper
+SIGTERMed a still-running QEMU. The guest was alive and rendering when killed;
+this is a **non-termination/timeout**, not a crash and not the page fault.
+`reason=guest-render-fault` is a misclassification by
+`check-simpleos-wm-fullscreen-evidence.shs:1317` keying off the (self-recovering)
+fault frames that happen to be present.
+
+### What the frame is doing when time runs out
+Tail of the log is an unbounded repeat of first-frame paint work:
+- `[rfm]` measure/cache cycles per glyph run,
+- `[array-repeat] big count=0x100000` (1,048,576 elems) x6, each followed by
+  `[heap] alloc sz=0x800020` (8 MiB), heap offset climbing 0x194->0x1c7 (~475 MiB),
+- `[engine2d-glass] not-composited reason=bounds x=0 y=0 w=392 h=204 **fb_w=49** fb_h=204`
+  and `... w=452 h=264 fb_w=452 **fb_h=33**` -> both glass composites rejected on
+  bogus framebuffer extents (real fb is 3840x2160), falling into
+  `uncounted-contract-rect ... reason=glass-material-fallback-painted`,
+- `[web-material-provenance] witness-unconverted cpu_witness=1 cpu_executed=0`.
+
+So the first frame at 4K is repeatedly re-allocating 8 MiB scratch buffers on the
+glass **fallback** path (taken because `fb_w`/`fb_h` arrive corrupt), and does not
+converge before the wrapper's timeout.
+
+### Consequence for Track W1
+The `runtime_content_frames` flag gating cannot help: the non-termination is in
+`render_baremetal_first_frame`, upstream of and independent from the degraded
+content-frame paint. That is why W1 still reported `reason=guest-render-fault`.
+
+### Next lead (NOT contained; no fix landed)
+Chase the corrupt `fb_w=49` / `fb_h=33` reaching the glass bounds check — one
+truncated extent per rect, each wrong on a different axis, smells like the same
+class as the already-filed
+`native_trailing_default_param_reads_uninitialized_2026-08-09.md` defect that bit
+`create_host_gpu`'s `backend_required` two lines earlier (`:573-581`). Fixing the
+extents should take both glass rects off the allocating fallback path.
+
+No check was weakened; `wm_content_frame_web_provenance_valid` untouched; no
+composite stubbed; no readiness marker faked; OVMF pflash unchanged.
