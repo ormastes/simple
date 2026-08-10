@@ -1,0 +1,52 @@
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.common.diagnostics.span.{Span}
+use compiler.mir.mir_data.*
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "MIR text codegen function signature":
+    it "keeps the trait and LLVM implementation on the same span-aware contract":
+        val trait_source = rt_file_read_text(
+            "src/compiler/70.backend/backend/common/mir_text_codegen.spl"
+        ) ?? ""
+        val llvm_source = rt_file_read_text(
+            "src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl"
+        ) ?? ""
+
+        val signature = "me translate_function(name: text, body: MirBody, span: Span)"
+        expect(trait_source).to_contain(r"use compiler.common.diagnostics.span.{Span}")
+        expect(trait_source).to_contain(signature)
+        expect(llvm_source).to_contain(signature)
+
+    it "accepts the span argument and emits the requested LLVM function":
+        var translator = MirToLlvm.create(
+            "test.mir_text_codegen_signature",
+            CodegenTarget.X86_64,
+            nil
+        )
+        translator.builder.emit_module_header()
+        val body = MirBody(
+            name: "trait_signature_probe",
+            blocks: [
+                MirBlock(
+                    id: BlockId.entry(),
+                    label: Some("entry"),
+                    instructions: [],
+                    terminator: MirTerminator.Ret(nil)
+                )
+            ],
+            locals: [],
+            arg_count: 0,
+            return_ty: MirType.unit()
+        )
+
+        translator.translate_function(
+            "trait_signature_probe",
+            body,
+            Span.empty()
+        )
+        val ir = translator.builder.build()
+
+        expect(ir).to_contain("define void @trait_signature_probe()")
+        expect(ir).to_contain("ret void")
