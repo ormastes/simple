@@ -112,6 +112,43 @@ bootstrap_stage3_args_sha256() {
     printf '%s\n' "$@" | bootstrap_stage3_hash_stream
 }
 
+bootstrap_stage3_memory_admission_preflight() {
+    memory_evidence=$1
+    memory_status=ready
+    memory_result=0
+    if [ -f "$(dirname -- "$memory_evidence")/.fixture-memory-blocked" ]; then
+        memory_status=blocked
+        memory_result=75
+    fi
+    {
+        echo schema=fake-stage3-memory-admission
+        echo status="$memory_status"
+        echo provider=fixture
+        echo runner_recorded=no
+    } >"$memory_evidence"
+    return "$memory_result"
+}
+
+bootstrap_stage3_memory_record_runner() {
+    memory_evidence=$1
+    runner_pid=$2
+    expected_executable=$3
+    [ "$(bootstrap_stage3_manifest_value runner_recorded \
+        "$memory_evidence")" = no ] || return 1
+    sed 's/^runner_recorded=no$/runner_recorded=yes/' "$memory_evidence" \
+        >"$memory_evidence.tmp" || return 1
+    {
+        printf 'stage3_runner_pid=%s\n' "$runner_pid"
+        printf 'stage3_runner_executable=%s\n' "$expected_executable"
+    } >>"$memory_evidence.tmp"
+    mv "$memory_evidence.tmp" "$memory_evidence"
+}
+
+bootstrap_stage3_memory_verify_evidence() {
+    [ "$(bootstrap_stage3_manifest_value status "$1")" = ready ] &&
+        [ "$(bootstrap_stage3_manifest_value runner_recorded "$1")" = yes ]
+}
+
 bootstrap_stage3_run_transcribed() {
     transcript=$1
     fixture_root=$2
@@ -139,6 +176,9 @@ bootstrap_stage3_run_transcribed() {
         printf 'argv:%s:%s\n' "$argv_index" "$arg" >>"$transcript"
         argv_index=$((argv_index + 1))
     done
+    if [ -n "${BOOTSTRAP_STAGE3_RUNNER_PID_FILE:-}" ]; then
+        printf '1\n' >"$BOOTSTRAP_STAGE3_RUNNER_PID_FILE"
+    fi
     # Fixture paths contain no whitespace; production command quoting is covered
     # by the canonical command-transcript helper tests.
     env -i HOME="$home" TMPDIR="$tmpdir" PATH="$path" LC_ALL=C LANG=C \
@@ -148,11 +188,13 @@ bootstrap_stage3_run_transcribed() {
 bootstrap_stage3_write_manifest() {
     [ -d "$BSTAGE3_LOCK" ] || return 1
     [ -x "$BSTAGE3_STAGE3" ] || return 1
+    bootstrap_stage3_memory_verify_evidence "$BSTAGE3_STAGE3_MEMORY" || return 1
     {
         echo schema=fake-stage3-provenance
         echo status=pass
         echo stage2_sha256="$(bootstrap_stage3_hash_file "$BSTAGE3_STAGE2")"
         echo stage3_sha256="$(bootstrap_stage3_hash_file "$BSTAGE3_STAGE3")"
+        echo stage3_memory_admission_status=ready
         echo no_stub_fallback=1
     } >"$BSTAGE3_MANIFEST"
 }
@@ -355,6 +397,9 @@ sh "$fixture_root/scripts/bootstrap/resume-stage3-from-admitted.sh" \
 [ "$(sed -n 's/^status=//p' "$stage3/provenance.env")" = pass ] || \
     fail "resume did not write passing provenance"
 [ -f "$stage3/provenance.env.verified" ] || fail "manifest was not verified"
+[ "$(sed -n 's/^runner_recorded=//p' \
+    "$stage3/stage3-memory-admission.env")" = yes ] || \
+    fail "resume did not attest its Stage 3 runner"
 [ "$(wc -l <"$fixture_root/stage2-sanity-replay.events")" = 1 ] || \
     fail "Stage 2 sanity was not replayed exactly once before recovery"
 [ "$(wc -l <"$stage3/stage3-native-build.calls")" = 1 ] || \
@@ -404,6 +449,10 @@ make_fixture stale-manifest
 printf 'status=stale\n' >"$stage3/provenance.env"
 run_refusal stale-manifest
 
+make_fixture memory-blocked
+: >"$stage3/.fixture-memory-blocked"
+run_refusal memory-blocked
+
 make_fixture symlink-receipt
 mv "$stage3/stage2-sanity.env" "$stage3/stage2-sanity.real"
 ln -s stage2-sanity.real "$stage3/stage2-sanity.env"
@@ -412,6 +461,14 @@ run_refusal symlink-receipt
 make_fixture symlink-recovery
 ln -s "$tmp" "$stage3/stage3-resume-archive"
 run_refusal symlink-recovery
+
+make_fixture symlink-memory-evidence
+ln -s "$tmp" "$stage3/stage3-memory-admission.env"
+run_refusal symlink-memory-evidence
+
+make_fixture symlink-runner-pid
+ln -s "$tmp" "$stage3/stage3-resume-runner.pid"
+run_refusal symlink-runner-pid
 
 make_fixture locked-output
 mkdir "$output.lock"

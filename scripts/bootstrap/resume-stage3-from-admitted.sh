@@ -37,6 +37,8 @@ manifest="$stage3/provenance.env"
 stage3_transcript="$stage3/stage3-command.transcript"
 stage3_log="$output/logs/$platform/stage3-native-build.log"
 stage3_sanity="$stage3/stage3-sanity.env"
+stage3_memory="$stage3/stage3-memory-admission.env"
+stage3_runner_pid_file="$stage3/stage3-resume-runner.pid"
 stage2_cache="$stage3/stage2-native-cache"
 stage3_cache="$stage3/stage3-native-cache"
 home="$stage3/stage3-resume-home"
@@ -83,7 +85,8 @@ fi
   exit 1
 }
 for mutable in "$candidate" "$stage3_transcript" "$stage3_log" \
-  "$stage3_sanity" "$stage3_cache" "$home" "$tmp" \
+  "$stage3_sanity" "$stage3_memory" "$stage3_runner_pid_file" \
+  "$stage3_cache" "$home" "$tmp" \
   "$resume_source_before" "$resume_source_after" \
   "$resume_git_before" "$resume_git_after" \
   "$resume_tool_before" "$resume_tool_after" \
@@ -136,6 +139,7 @@ run_archive=$(mktemp -d "$archive/run.XXXXXX")
 [ -d "$run_archive" ] && [ ! -L "$run_archive" ] &&
   [ "$(bootstrap_stage3_canonical_path "$run_archive")" = "$run_archive" ] || exit 1
 for old in "$candidate" "$stage3_transcript" "$stage3_log" "$stage3_sanity" \
+  "$stage3_memory" "$stage3_runner_pid_file" \
   "$stage3_cache" "$home" "$tmp" "$resume_source_before" \
   "$resume_source_after" "$resume_git_before" "$resume_git_after" \
   "$resume_tool_before" "$resume_tool_after" \
@@ -239,6 +243,13 @@ stage3_args=$(bootstrap_stage3_args_sha256 \
   --runtime-path "$runtime" --entry src/app/cli/bootstrap_main.spl -o "$candidate")
 
 set +e
+bootstrap_stage3_memory_admission_preflight "$stage3_memory"
+memory_status=$?
+set -e
+[ "$memory_status" -eq 0 ] || exit "$memory_status"
+
+set +e
+BOOTSTRAP_STAGE3_RUNNER_PID_FILE="$stage3_runner_pid_file" \
 bootstrap_stage3_run_transcribed "$stage3_transcript" "$root" "$stage3_log" \
   "$home" "$tmp" "$path" "RUST_LOG=$rust_log" \
   "LIBRARY_PATH=$library_path" \
@@ -252,10 +263,36 @@ bootstrap_stage3_run_transcribed "$stage3_transcript" "$root" "$stage3_log" \
   "SIMPLE_BINARY=$admitted" -- "$admitted" native-build \
   --target "$platform" --backend cranelift --runtime-bundle core-c-bootstrap \
   --entry-closure --threads 1 --cache-dir "$stage3_cache" --mode dynload \
-  --runtime-path "$runtime" --entry src/app/cli/bootstrap_main.spl -o "$candidate"
+  --runtime-path "$runtime" --entry src/app/cli/bootstrap_main.spl -o "$candidate" &
+wrapper_pid=$!
+runner_pid=
+runner_wait=0
+while [ "$runner_wait" -lt 10 ]; do
+  if [ -s "$stage3_runner_pid_file" ] && [ ! -L "$stage3_runner_pid_file" ]; then
+    runner_pid=$(sed -n '1p' "$stage3_runner_pid_file")
+    break
+  fi
+  kill -0 "$wrapper_pid" 2>/dev/null || break
+  sleep 1
+  runner_wait=$((runner_wait + 1))
+done
+runner_record_status=1
+runner_wait=0
+while [ -n "$runner_pid" ] && [ "$runner_wait" -lt 10 ]; do
+  if bootstrap_stage3_memory_record_runner "$stage3_memory" "$runner_pid" \
+    "$admitted"; then
+    runner_record_status=0
+    break
+  fi
+  kill -0 "$wrapper_pid" 2>/dev/null || break
+  sleep 1
+  runner_wait=$((runner_wait + 1))
+done
+wait "$wrapper_pid"
 status=$?
 set -e
 [ "$status" -eq 0 ] || exit "$status"
+[ "$runner_record_status" -eq 0 ] || exit "$runner_record_status"
 [ -x "$candidate" ] && [ ! -L "$candidate" ] || exit 1
 [ "$(bootstrap_stage3_hash_file "$admitted")" = "$admitted_sha" ] || exit 1
 bootstrap_stage3_directory_snapshot "$resume_runtime_after" "$runtime"
@@ -343,6 +380,7 @@ BSTAGE3_SEED_INPUTS_FINGERPRINT=$seed_fingerprint BSTAGE3_SEED_FEATURES=
 BSTAGE3_GIT_BEFORE=$resume_git_before BSTAGE3_GIT_AFTER=$resume_git_after
 BSTAGE3_STAGE2_TRANSCRIPT=$stage2_transcript BSTAGE3_STAGE3_TRANSCRIPT=$stage3_transcript
 BSTAGE3_STAGE2_SANITY=$stage2_sanity BSTAGE3_STAGE3_SANITY=$stage3_sanity
+BSTAGE3_STAGE3_MEMORY=$stage3_memory
 BSTAGE3_LOCK=$lock BSTAGE3_RUST_LOG=$rust_log
 export BSTAGE3_ROOT BSTAGE3_MANIFEST BSTAGE3_PLATFORM BSTAGE3_BACKEND BSTAGE3_MODE \
   BSTAGE3_SEED BSTAGE3_SEED_STAMP BSTAGE3_NATIVE_ALL BSTAGE3_BACKFILL \
@@ -357,6 +395,6 @@ export BSTAGE3_ROOT BSTAGE3_MANIFEST BSTAGE3_PLATFORM BSTAGE3_BACKEND BSTAGE3_MO
   BSTAGE3_BOOTSTRAP_SCRIPT_SHA256_BEFORE BSTAGE3_SEED_INPUTS_FINGERPRINT \
   BSTAGE3_SEED_FEATURES BSTAGE3_GIT_BEFORE BSTAGE3_GIT_AFTER \
   BSTAGE3_STAGE2_TRANSCRIPT BSTAGE3_STAGE3_TRANSCRIPT BSTAGE3_STAGE2_SANITY \
-  BSTAGE3_STAGE3_SANITY BSTAGE3_LOCK BSTAGE3_RUST_LOG
+  BSTAGE3_STAGE3_SANITY BSTAGE3_STAGE3_MEMORY BSTAGE3_LOCK BSTAGE3_RUST_LOG
 bootstrap_stage3_write_manifest
 bootstrap_stage3_verify_manifest "$manifest" "$root" "$candidate"
