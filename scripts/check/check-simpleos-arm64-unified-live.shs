@@ -43,6 +43,7 @@ esac
 
 out_dir=${SIMPLEOS_ARM64_UNIFIED_EVIDENCE_DIR:-build/verify/simpleos-arm64-unified-live}
 simple=${SIMPLE_BIN:-bin/release/x86_64-unknown-linux-gnu/simple}
+compiler_manifest=${SIMPLE_COMPILER_PROVENANCE:-${simple}.provenance.env}
 # The host-GPU checker remains the build/runtime owner for this daemon. This
 # adapter consumes that canonical artifact and never forks its runtime bundle.
 daemon=${SIMPLEOS_GPU_HOST_BIN:-build/simpleos_host_gpu_2d/simpleos_gpu_host}
@@ -62,6 +63,11 @@ font_disk=${SIMPLEOS_ARM64_FONT_DISK:-build/os/fat32-arm64-desktop.img}
 font_manifest=${SIMPLEOS_ARM64_FONT_DISK_MANIFEST:-$out_dir/font-disk.manifest.env}
 showcase_combined_rss_budget_kib=${SIMPLEOS_ARM64_COMBINED_RSS_BUDGET_KIB:-1048576}
 mkdir -p "$out_dir" build/os/generated/generated
+test -d "$out_dir" && test ! -L "$out_dir" || {
+    echo simpleos_arm64_unified_live_status=fail
+    echo simpleos_arm64_unified_live_reason=evidence-directory-symlink
+    exit 1
+}
 
 qemu_pid=
 daemon_pid=
@@ -99,7 +105,6 @@ version=$($simple --version 2>&1 || true)
 case "$version" in
     *'Rust-built'*|*'bootstrap seed only'*) fail compiler-is-bootstrap-seed ;;
     *'simple-bootstrap'*)
-        compiler_manifest=${SIMPLE_COMPILER_PROVENANCE:-${simple}.provenance.env}
         test -s "$compiler_manifest" || fail compiler-provenance-missing
         compiler_sha=$(sha256sum "$simple" | awk '{print $1}')
         grep -Fqx status=pass "$compiler_manifest" || fail compiler-provenance-status
@@ -114,7 +119,7 @@ if test "$build" = yes; then
         >"$out_dir/font-disk-build.log" 2>&1 || fail deterministic-font-disk-build-failed
     font_disk_sha=$(sha256sum "$font_disk" | awk '{print $1}')
     font_bundle_sha=$(sha256sum scripts/os/simpleos_font_bundle_companion.sha256 | awk '{print $1}')
-    font_manifest_tmp=${font_manifest}.tmp.$$
+    font_manifest_tmp=$(mktemp "${font_manifest}.tmp.XXXXXX") || fail font-manifest-temp-create-failed
     {
         echo schema=simpleos-arm64-unified-font-disk-v1
         echo status=pass
@@ -132,7 +137,6 @@ if test "$build" = yes; then
         scripts/check/check-simpleos-arm64-unified-live.shs \
         scripts/check/lib/simpleos-arm64-unified-kernel-manifest.shs || fail kernel-source-snapshot-failed
     compiler_sha=$(arm64_unified_sha256 "$simple") || fail compiler-hash-failed
-    compiler_manifest=${SIMPLE_COMPILER_PROVENANCE:-${simple}.provenance.env}
     test -f "$compiler_manifest" && test ! -L "$compiler_manifest" || fail compiler-provenance-missing
     test "$(arm64_unified_manifest_field status "$compiler_manifest")" = pass || fail compiler-provenance-status
     test "$(arm64_unified_manifest_field artifact_kind "$compiler_manifest")" = pure-simple-bootstrap-compiler || fail compiler-provenance-kind
@@ -160,7 +164,7 @@ if test "$build" = yes; then
     source_revision=$(git rev-parse --verify HEAD) || fail source-revision-unavailable
     source_fingerprint=$(sed -n 's/^source_fingerprint=//p' "$source_after")
     source_file_count=$(sed -n 's/^source_file_count=//p' "$source_after")
-    kernel_manifest_tmp=${kernel_manifest}.tmp.$$
+    kernel_manifest_tmp=$(mktemp "${kernel_manifest}.tmp.XXXXXX") || fail kernel-manifest-temp-create-failed
     umask 077
     {
         echo schema=simpleos-arm64-unified-kernel-manifest-v1
@@ -196,7 +200,11 @@ if test "$build" = yes; then
     mv "$kernel_manifest_tmp" "$kernel_manifest"
 fi
 test -s "$kernel" || fail unified-kernel-missing
-arm64_unified_validate_manifest "$kernel_manifest" "$kernel" "$font_disk" "$entry" || fail canonical-kernel-manifest-invalid
+arm64_unified_validate_manifest "$kernel_manifest" "$kernel" "$font_disk" "$entry" \
+    "$linker_script" "$simple" "$compiler_manifest" "$font_manifest" \
+    build/os/generated src/os src/lib examples/09_embedded/simple_os \
+    scripts/check/check-simpleos-arm64-unified-live.shs \
+    scripts/check/lib/simpleos-arm64-unified-kernel-manifest.shs || fail canonical-kernel-manifest-invalid
 test -x "$daemon" || fail canonical-gpu-host-daemon-missing
 test -f "$font_disk" && test ! -L "$font_disk" && test -s "$font_disk" || fail deterministic-font-disk-missing
 test -f "$font_manifest" && test ! -L "$font_manifest" && test -s "$font_manifest" || fail deterministic-font-manifest-missing
@@ -232,6 +240,14 @@ set -- -no-user-config -machine virt -accel tcg -cpu cortex-a72 -m 512M \
     -audiodev driver=none,id=audio0 -device virtio-sound-device,audiodev=audio0 \
     -qmp "unix:$qmp,server=on,wait=off"
 qemu_args=$(printf '%s\n' "$@" | sha256sum | awk '{print $1}')
+# Revalidate after daemon startup and immediately before QEMU consumes the
+# paths. This rejects mutation during readiness waits as well as --no-build
+# reuse of stale or substituted artifacts.
+arm64_unified_validate_manifest "$kernel_manifest" "$kernel" "$font_disk" "$entry" \
+    "$linker_script" "$simple" "$compiler_manifest" "$font_manifest" \
+    build/os/generated src/os src/lib examples/09_embedded/simple_os \
+    scripts/check/check-simpleos-arm64-unified-live.shs \
+    scripts/check/lib/simpleos-arm64-unified-kernel-manifest.shs || fail prelaunch-kernel-manifest-invalid
 qemu-system-aarch64 "$@" >"$qemu_log" 2>&1 &
 qemu_pid=$!
 

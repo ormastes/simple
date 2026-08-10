@@ -194,8 +194,11 @@ the consumer revalidates the exact source fingerprint and revision shape,
 unified entry and linker hashes, Cranelift backend, bare-metal AArch64 target,
 admitted compiler and adjacent provenance hashes, executable ELF64 AArch64
 header and nonzero entry, kernel hash, and read-only desktop-font disk plus disk
-manifest hashes. `--no-build` consumes the same manifest and cannot admit a
-loose ELF or disk. Run
+manifest hashes. Validation recomputes the current source snapshot, requires
+the configured entry, linker, compiler, provenance, and disk-manifest paths,
+rejects symlink inputs, and runs again immediately before QEMU starts.
+`--no-build` consumes the same gate and cannot admit a loose, stale, or
+substituted ELF or disk. Run
 `sh scripts/check/check-simpleos-arm64-unified-kernel-manifest.shs` for the
 bounded static wiring contract; it neither invokes a compiler nor launches
 QEMU and does not manufacture runtime evidence.
