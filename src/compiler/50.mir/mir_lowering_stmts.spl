@@ -18,7 +18,8 @@ use compiler.frontend.resource_registry.{resource_is_declared}
 # cannot resolve it — declare the runtime extern directly.
 extern fn rt_dict_contains(dict: i64, key: Any) -> bool
 extern fn rt_enum_discriminant(value: HirStmtKind) -> i64
-extern fn rt_enum_payload(value: HirStmtKind) -> HirExpr
+extern fn rt_enum_payload(value: HirStmtKind) -> i64
+extern fn rt_tuple_get(tuple: i64, index: i64) -> i64
 extern fn rt_env_get(key: text) -> text
 
 fn mir_stmt_symbol_id_value(symbol: SymbolId) -> i64:
@@ -604,34 +605,16 @@ impl MirLowering:
                 val fallback_type = HirType(kind: HirTypeKind.Unit, span: Span.empty())
                 val fallback_expr = HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: fallback_type, span: span)
                 val let_disc = mir_hir_stmt_kind_disc(HirStmtKind.Let(SymbolId(id: -1), fallback_type, fallback_expr))
-                # The discriminator fast path below re-extracts the same Let
-                # payload through several independent matches. On the staged
-                # native compiler that crashes before the initializer reaches
-                # lower_expr. Use the single-match Let arm below instead; it
-                # keeps symbol, type, and initializer in one extraction scope.
-                if mir_hir_stmt_kind_disc(stmt_kind_value) == let_disc and false:
-                    # Keep the resolved SymbolId scalar across this staged
-                    # boundary. Wrapping the enum payload in SymbolId? and
-                    # then unwrapping it can preserve the option tag while
-                    # losing the payload in the self-hosted native lane.
-                    val let_symbol_id = match stmt_kind_value:
-                        case HirStmtKind.Let(symbol, _, _):
-                            if symbol != nil:
-                                mir_stmt_symbol_id_value(symbol)
-                            else:
-                                -1
-                        case _:
-                            -1
-                    val let_type = match stmt_kind_value:
-                        case HirStmtKind.Let(_, type_, _):
-                            type_
-                        case _:
-                            nil
-                    val let_init = match stmt_kind_value:
-                        case HirStmtKind.Let(_, _, init):
-                            init
-                        case _:
-                            fallback_expr
+                # Decode the three-slot Let payload exactly once. Repeated
+                # enum matches on this native lane can return the `Some`
+                # discriminator itself as the nullable HirType payload, then
+                # fault on `type_value.kind`.
+                if mir_hir_stmt_kind_disc(stmt_kind_value) == let_disc:
+                    val let_payload: i64 = rt_enum_payload(stmt_kind_value)
+                    val let_symbol: SymbolId = rt_tuple_get(let_payload, 0)
+                    val let_symbol_id = mir_stmt_symbol_id_value(let_symbol)
+                    val let_type: HirType? = rt_tuple_get(let_payload, 1)
+                    val let_init: HirExpr = rt_tuple_get(let_payload, 2)
 
                     if let_symbol_id >= 0:
                         val symbol_value_id = let_symbol_id
