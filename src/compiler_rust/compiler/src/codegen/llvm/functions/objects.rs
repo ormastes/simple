@@ -229,7 +229,7 @@ impl LlvmBackend {
                 .build_load(i64_type, from, "aggcopy_word")
                 .map_err(|e| crate::error::factory::llvm_build_failed("load word", &e))?;
             let word = builder
-                .build_select(src_is_valid, word, i64_type.const_zero(), "aggcopy_word_guarded")
+                .build_select(src_is_valid, word, i64_type.const_zero().into(), "aggcopy_word_guarded")
                 .map_err(|e| crate::error::factory::llvm_build_failed("select word", &e))?;
             builder
                 .build_store(to, word)
