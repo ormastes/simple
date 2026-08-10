@@ -1,6 +1,7 @@
 # `type X = Y` does not resolve as a static-call receiver — `X.new()` sees nil
 
-**Status:** OPEN
+**Status:** OPEN — architectural (needs a Rust-seed interpreter name-resolution
+change, out of scope per repo rules; re-confirmed 2026-08-10)
 **Found:** 2026-08-04
 
 ## Symptom
@@ -86,6 +87,32 @@ exercise the back-compat names directly
 still ~12 failures). Those specs are correct as written and were deliberately
 left red rather than rewritten onto the canonical names, which would have hidden
 this defect.
+
+## Re-verification (2026-08-10)
+
+Confirmed the root cause still holds: `bin/simple` is a symlink to
+`bin/release/x86_64-unknown-linux-gnu/simple` (the Rust bootstrap seed), and
+`bin/simple test` on the exact repro spec in this doc still routes spec-body
+evaluation through the seed. A live re-run of the repro
+(`test/02_integration/storage/dbfs/dbfs_engine_intent_log_spec.spl`, which
+depends on the same alias-resolution path) was attempted but hit this
+environment's known long-startup/timeout ceiling before printing a verdict
+line, so it is not usable as fresh pass/fail evidence either way (consistent
+with the documented "long test runs get killed before a verdict" measurement
+trap) — this re-verification instead relies on source audit, which is
+conclusive for the mechanism.
+
+Also checked whether the pure-Simple HIR layer has grown a receiver-resolution
+path for `module.type_aliases` since this doc was filed: it has grown
+additional *consumers* of `type_aliases` in
+`src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl` and
+`src/compiler/20.hir/hir_lowering/module_surface.spl` (import/symbol-kind
+resolution, e.g. resolving an imported name's `item_kind` to `"type_alias"`).
+None of this reaches static-call **receiver** value resolution, and none of it
+matters for `bin/simple test` regardless, since spec bodies are evaluated by
+the Rust seed interpreter, not this pure-Simple HIR/MIR pipeline. The doc's
+"only consumers are lint + VHDL" claim is therefore now slightly stale for the
+pure-Simple side, but the bug and its architectural blocker are unchanged.
 
 ## Related
 
