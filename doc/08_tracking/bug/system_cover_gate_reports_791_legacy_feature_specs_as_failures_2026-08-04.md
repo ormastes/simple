@@ -1,6 +1,6 @@
 # The `# @cover` gate reports 791 un-annotated legacy feature specs as test FAILURES
 
-**Status:** OPEN
+**Status:** OPEN (re-verified 2026-08-10, architectural — root cause unchanged)
 **Found:** 2026-08-04
 **Severity:** high · **Area:** test runner / legacy feature suite
 **Found during:** legacy-feature-test triage (`test/03_system/feature/**`)
@@ -81,3 +81,24 @@ deliberately and not as a side effect of a test-triage session.
 ## Workaround
 
 `--no-cover-check` gives the real behavioural verdict for the legacy tree.
+
+## 2026-08-10 re-verification
+
+Re-read `src/lib/nogc_sync_mut/test_runner/test_runner_main.spl:154-168` —
+the early `return TestRunResult(files: [], total_passed: 0,
+total_failed: missing_covers.len(), ...)` on a non-empty `missing_covers`
+list is byte-for-byte unchanged from the original report. Root cause and
+scope assessment both still hold:
+
+- Item 1 (791 missing `# @cover` annotations) is a per-spec, per-owner-module
+  content migration, not a code fix — out of scope for a single session.
+- Item 2 (gate mis-reported as `total_failed`, aborting the whole directory)
+  is a real, fixable defect, but the fix changes the meaning of the
+  `Results:` line that other lanes/CI parse as the authoritative verdict
+  (`testing.md` "Results line is authoritative" rule). Landing it requires
+  auditing every consumer of that line first; doing so as a drive-by inside
+  an unrelated 4-doc sweep in a shared working copy risks a silent,
+  wide-blast-radius change to CI semantics. Left OPEN and
+  architectural/deferred, not silently downgraded.
+
+No code changed for this doc; only this confirmation note.
