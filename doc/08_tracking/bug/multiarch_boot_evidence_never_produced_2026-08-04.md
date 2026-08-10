@@ -1,6 +1,6 @@
 # Multi-arch AC-4/AC-6 specs assert on QEMU boot evidence that no lane ever produces
 
-**Status:** OPEN
+**Status:** ARCHITECTURAL-OPEN (re-confirmed 2026-08-10; requires `--arch` dispatch + real QEMU/board boots, out of scope for a hosted lane)
 **Found:** 2026-08-04
 
 ## Symptom
@@ -93,3 +93,11 @@ Status remains **ARCHITECTURAL-OPEN**: closing this requires implementing
 `.claude/rules/board-runnable.md`, board-runnable evidence, not QEMU-only),
 which is out of scope for a hosted, non-QEMU verification pass. No code
 changed this pass.
+
+## Re-confirmed 2026-08-10
+
+Re-checked again: `--arch` still absent from `bootstrap-from-scratch.sh`
+(grep exit 1), `build/multiarch/` still contains only
+`riscv64/bootstrap_result.json`. Facts and scope unchanged from the
+2026-08-09 pass; header `Status:` field aligned to `ARCHITECTURAL-OPEN` to
+match the body (it previously said plain `OPEN`). No code change.
