@@ -1,0 +1,36 @@
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use compiler.core.ast.{ast_reset, module_get_decls, decl_get_ret_type}
+use compiler.core.types.{is_union_tag, union_tag_to_id, union_type_get_members}
+use compiler.frontend.core.frontend.{core_frontend_parse_reset}
+
+fn union_members_for_decl(decl_id: i64) -> [i64]:
+    val tag = decl_get_ret_type(decl_id)
+    if not is_union_tag(tag):
+        return []
+    union_type_get_members(union_tag_to_id(tag))
+
+describe "value declaration union parser owner":
+    it "binds the union parser beside the existing concrete parser owner":
+        val source = file_read("src/compiler/10.frontend/core/parser_decls_use.spl")
+        expect(source).to_contain("use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_parse_type, parser_parse_type_with_union}")
+        expect(source.count("parser_parse_type_with_union()")).to_equal(3)
+
+    it "parses val lazy val and var union annotations independently":
+        ast_reset()
+        val source = "val first: i64 | text = 1\nlazy val second: text | bool = \"x\"\nvar third: bool | i64 = true\n"
+        expect(core_frontend_parse_reset(source, "union_decl_owner.spl")).to_equal(true)
+        val decls = module_get_decls()
+        expect(decls.len()).to_equal(3)
+        # Fixed flat-AST wire tags: bool=1, i64=2, text=4. Keep Stage4
+        # protocol checks independent of imported compiler constant values.
+        expect(union_members_for_decl(decls[0])).to_equal([2, 4])
+        expect(union_members_for_decl(decls[1])).to_equal([4, 1])
+        expect(union_members_for_decl(decls[2])).to_equal([1, 2])
+
+    it "reuses an identical union without contaminating an adjacent scalar":
+        ast_reset()
+        val source = "val first: i64 | text = 1\nval second: i64 | text = 2\nval scalar: bool = true\n"
+        expect(core_frontend_parse_reset(source, "union_reuse_owner.spl")).to_equal(true)
+        val decls = module_get_decls()
+        expect(decl_get_ret_type(decls[0])).to_equal(decl_get_ret_type(decls[1]))
+        expect(decl_get_ret_type(decls[2])).to_equal(1)
