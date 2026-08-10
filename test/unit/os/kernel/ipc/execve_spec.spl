@@ -1,5 +1,5 @@
 use std.spec.{describe, it, expect}
-use os.kernel.ipc.syscall.{syscall_handler}
+use os.kernel.ipc.syscall.{syscall_handler, syscall_handler_ipc_state}
 use os.kernel.types.syscall_types.{SyscallArgs}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
@@ -11,10 +11,31 @@ use os.kernel.memory.vmm.{vmm_teardown_user_space, vmm_new_process_space}
 use os.kernel.types.vmspace_types.{ProcessVmSpace, VmArea, VMA_READ, VMA_WRITE, VMA_EXEC, VMA_ANON}
 use os.posix.fd_table.{fd_table_init, fd_activate_task}
 
+fn _capable_ipc_for(task: TaskId) -> IpcManager:
+    """IpcManager seeded with a full capability record for `task`.
+
+    Production spawn (`_handle_spawn`/`_handle_spawn_binary`/`fs_exec_spawn`)
+    never calls `CapabilityManager.init_task_record()`/`.init_task()` for a
+    newly created task — see
+    doc/08_tracking/bug/execve_spec_blocked_by_dead_ipc_cap_gate_and_missing_rt_copy_user_byte_2026-08-06.md.
+    Every `_cap_check`-gated syscall (Spawn, SpawnBinary, Fork, Exec, DlOpen,
+    Brk, SystemReboot, EnterUserBlocking) is therefore unconditionally EPERM
+    for any real caller today. This helper seeds the grant the caller SHOULD
+    already hold by the time it reaches these syscalls, so this spec can
+    exercise `execve`'s own dispatch/error/PID-preservation behavior instead
+    of being blanket-denied before `_handle_exec` ever runs. One instance is
+    reused across a caller's whole syscall sequence, mirroring the persistent
+    `g_trap_ipc`/`g_shim_ipc` production pattern (a fresh `IpcManager.new()`
+    per call has no record of any prior grant)."""
+    var ipc = IpcManager.new()
+    ipc.cap_manager.init_task_record(task, true)
+    ipc
+
 extern fn rt_string_data(s: text) -> i64
 extern fn rt_alloc(size: i64) -> i64
 extern fn rt_free(ptr: i64)
 extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
+extern fn rt_copy_user_byte(ptr_addr: u64) -> u8
 
 """
 Execve Syscall Specification
@@ -96,8 +117,15 @@ fn _make_x86_64_exec() -> [u8]:
     # Pad to file offset 0x1000
     while bytes.len() < 0x1000:
         bytes.push(0.to_u8())
-    # RET instruction at entry
+    # p_filesz above is 4, so the PT_LOAD segment's file-backed range is
+    # [0x1000, 0x1004) — the loader's bounds check (byte_utils.in_range)
+    # requires the whole declared filesz to actually be present in the file,
+    # not just the entry byte. RET instruction followed by 3 padding NOPs
+    # keeps p_filesz/p_memsz (4) truthful about what's on disk.
     bytes.push(0xC3.to_u8())
+    bytes.push(0x90.to_u8())
+    bytes.push(0x90.to_u8())
+    bytes.push(0x90.to_u8())
     bytes
 
 fn _setup_test_scheduler() -> Scheduler:
@@ -127,26 +155,41 @@ describe "execve syscall":
         _clear_synthetic_vfs_for_test()
         _set_synthetic_vfs_file_for_test(path, _make_x86_64_exec())
 
-        # First spawn a process that will call exec
+        # First spawn a process that will call exec. syscall_handler_ipc_state
+        # is the explicit-state-threading entry point (mirrors IpcSyscallState/
+        # SpawnBinaryDirectState): Scheduler/IpcManager instances behave as
+        # value-copied across a plain syscall_handler(...) call boundary, so
+        # the spawned task would otherwise only exist in the callee's copy —
+        # see doc/08_tracking/bug/execve_spec_blocked_by_dead_ipc_cap_gate_and_missing_rt_copy_user_byte_2026-08-06.md.
         var sched = Scheduler.new()
-        val spawn_result = syscall_handler(
+        var ipc = _capable_ipc_for(sched.get_current())
+        val spawn_state = syscall_handler_ipc_state(
             SyscallArgs(id: 13, arg0: rt_string_data(path) as u64, arg1: path.len() as u64, arg2: 2, arg3: 0, arg4: 0, arg5: 0),
             sched,
-            IpcManager.new(),
+            ipc,
             KernelLog.new(16)
         )
-        expect(spawn_result.value).to_be_greater_than(0)
-        val spawned_pid = spawn_result.value as u64
+        expect(spawn_state.result.value).to_be_greater_than(0)
+        sched = spawn_state.scheduler
+        ipc = spawn_state.ipc
+
+        # Advance the scheduler onto the newly spawned (now-ready) task so
+        # exec targets it. Scheduler.new()'s bare `current` sentinel is
+        # TaskId(id: 0), which is never itself a real task — in production a
+        # spawned task only gets to call exec on itself after being
+        # context-switched onto a CPU via schedule(); this mirrors that.
+        _ = sched.schedule()
+        ipc.cap_manager.init_task_record(sched.get_current(), true)
 
         # Now call exec (syscall 59) to replace the image
-        val exec_result = syscall_handler(
+        val exec_state = syscall_handler_ipc_state(
             SyscallArgs(id: 59, arg0: rt_string_data(path) as u64, arg1: path.len() as u64, arg2: 0, arg3: 0, arg4: 0, arg5: 0),
             sched,
-            IpcManager.new(),
+            ipc,
             KernelLog.new(16)
         )
         # exec returns 0 on success
-        expect(exec_result.value).to_equal(0)
+        expect(exec_state.result.value).to_equal(0)
         _clear_synthetic_vfs_for_test()
 
 # ============================================================================
@@ -162,7 +205,7 @@ describe "execve error handling":
         val result = syscall_handler(
             SyscallArgs(id: 59, arg0: rt_string_data(bad_path) as u64, arg1: bad_path.len() as u64, arg2: 0, arg3: 0, arg4: 0, arg5: 0),
             sched,
-            IpcManager.new(),
+            _capable_ipc_for(sched.get_current()),
             KernelLog.new(16)
         )
         # -2 is ENOENT (file not found)
@@ -185,7 +228,7 @@ describe "execve error handling":
         val result = syscall_handler(
             SyscallArgs(id: 59, arg0: rt_string_data(path) as u64, arg1: path.len() as u64, arg2: 0, arg3: 0, arg4: 0, arg5: 0),
             sched,
-            IpcManager.new(),
+            _capable_ipc_for(sched.get_current()),
             KernelLog.new(16)
         )
         # -8 is ENOEXEC (exec format error, image build failed)
@@ -198,7 +241,7 @@ describe "execve error handling":
         val result = syscall_handler(
             SyscallArgs(id: 59, arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0),
             sched,
-            IpcManager.new(),
+            _capable_ipc_for(sched.get_current()),
             KernelLog.new(16)
         )
         # arg0==0 or arg1==0 returns -EINVAL
@@ -211,7 +254,7 @@ describe "execve error handling":
         val result = syscall_handler(
             SyscallArgs(id: 59, arg0: 1, arg1: 1024, arg2: 0, arg3: 0, arg4: 0, arg5: 0),
             sched,
-            IpcManager.new(),
+            _capable_ipc_for(sched.get_current()),
             KernelLog.new(16)
         )
         expect(result.value).to_be_less_than(0)
@@ -227,27 +270,38 @@ describe "execve PID preservation":
         _clear_synthetic_vfs_for_test()
         _set_synthetic_vfs_file_for_test(path, _make_x86_64_exec())
 
-        # Spawn a task first
+        # Spawn a task first. syscall_handler_ipc_state threads the mutated
+        # Scheduler/IpcManager back explicitly — see the state-threading note
+        # in the "dispatches exec" test above.
         var sched = Scheduler.new()
-        val spawn_result = syscall_handler(
+        var ipc = _capable_ipc_for(sched.get_current())
+        val spawn_state = syscall_handler_ipc_state(
             SyscallArgs(id: 13, arg0: rt_string_data(path) as u64, arg1: path.len() as u64, arg2: 2, arg3: 0, arg4: 0, arg5: 0),
             sched,
-            IpcManager.new(),
+            ipc,
             KernelLog.new(16)
         )
-        expect(spawn_result.value).to_be_greater_than(0)
-        val pid_before = spawn_result.value as u64
+        expect(spawn_state.result.value).to_be_greater_than(0)
+        sched = spawn_state.scheduler
+        ipc = spawn_state.ipc
+        val pid_before = spawn_state.result.value as u64
         val tcb_before = sched.get_task(TaskId(id: pid_before))
         expect(tcb_before).to_not_equal(nil)
 
+        # Advance current onto the spawned task before it execs itself (see
+        # note above — TaskId(id: 0) is a sentinel, never a real task).
+        _ = sched.schedule()
+        ipc.cap_manager.init_task_record(sched.get_current(), true)
+
         # Exec replaces the image; scheduler.exec_image preserves TaskId
-        val exec_result = syscall_handler(
+        val exec_state = syscall_handler_ipc_state(
             SyscallArgs(id: 59, arg0: rt_string_data(path) as u64, arg1: path.len() as u64, arg2: 0, arg3: 0, arg4: 0, arg5: 0),
             sched,
-            IpcManager.new(),
+            ipc,
             KernelLog.new(16)
         )
-        expect(exec_result.value).to_equal(0)
+        sched = exec_state.scheduler
+        expect(exec_state.result.value).to_equal(0)
 
         # The task at the same PID slot must still exist
         val tcb_after = sched.get_task(TaskId(id: pid_before))
