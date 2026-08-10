@@ -1,0 +1,97 @@
+// Test database cold start - regression spec
+//
+// Background: for an unknown period every `bin/simple test` run ended with
+// "Warning: Could not load test database" and recorded nothing to
+// doc/08_tracking/test/test_db.sdn or test_result.md. `load_with_migration`
+// returned nil when no database file existed yet, and nothing anywhere in the
+// tree ever creates that file, so the very first run could never succeed and
+// neither could any run after it. Two independent observation channels (the
+// per-file verdict lines and the test database) went dark at the same time.
+//
+// @manual_section Test result recording
+
+use std.database.test_extended.{load_with_migration, load_test_database_extended}
+use std.io.{file_exists, file_read, file_write, file_delete, dir_create}
+
+fn scratch_base(name: text) -> text:
+    dir_create("build/test/test_db_cold_start", recursive: true)
+    "build/test/test_db_cold_start/{name}"
+
+describe "test database cold start":
+    """
+    As a developer running the test suite for the first time in a fresh
+    checkout, I want my results recorded even though no test database file
+    exists yet, so that the suite's own reporting is never silently dark.
+    """
+
+    it "creates a usable database when no database file exists yet":
+        // @req REQ-TESTDB-COLDSTART-001
+        step("choose a base path with no database file present")
+        val base = scratch_base("fresh")
+        file_delete("{base}.sdn")
+        assert_false(file_exists("{base}.sdn"))
+
+        step("load the test database at that base path")
+        val db_opt = load_with_migration(path: base)
+
+        step("a database is returned instead of nil")
+        // This is the exact regression: nil here is what produced
+        // "Warning: Could not load test database" on every single run.
+        assert_true(db_opt.?)
+
+    it "persists a run so results survive to the database file on disk":
+        // @req REQ-TESTDB-COLDSTART-002
+        step("cold-start a database at a fresh base path")
+        val base = scratch_base("persist")
+        file_delete("{base}.sdn")
+        val db_opt = load_with_migration(path: base)
+        assert_true(db_opt.?)
+
+        step("record a run and save it")
+        match db_opt:
+            case Some(db):
+                val run_id = db.start_run()
+                db.update_test_result(
+                    file_path: "test/example_spec.spl",
+                    suite_name: "spec",
+                    test_name: "test/example_spec.spl",
+                    status: "passed",
+                    duration_ms: 1.0,
+                    run_id: run_id
+                )
+                db.complete_run(run_id: run_id, test_count: 1, passed: 1, failed: 0, timed_out: 0)
+                assert_true(db.save())
+            case None:
+                assert_true(false)
+
+        step("the database file now exists on disk")
+        assert_true(file_exists("{base}.sdn"))
+
+        step("and reloading it reads back the recorded run")
+        val reloaded = load_test_database_extended("{base}.sdn")
+        assert_true(reloaded.?)
+        match reloaded:
+            case Some(db2):
+                val counts = db2.test_count_by_status()
+                // Total must be non-zero: an empty reload means the run was
+                // accepted in memory but never actually recorded.
+                assert_true(counts.0 > 0)
+            case None:
+                assert_true(false)
+
+    it "leaves an existing database file untouched when merely loading it":
+        // @req REQ-TESTDB-COLDSTART-003
+        step("write a database file with known content")
+        val base = scratch_base("existing")
+        val marker = "this is not a valid sdn database"
+        file_write("{base}.sdn", marker)
+
+        step("load at that base path")
+        // The cold-start branch must fire only when NO file exists. If it also
+        // fired for an existing-but-unreadable file it would silently discard
+        // real recorded history.
+        val _db_opt = load_with_migration(path: base)
+
+        step("the file on disk is not overwritten by a fresh empty database")
+        assert_true(file_exists("{base}.sdn"))
+        assert_equal(file_read("{base}.sdn"), marker)
