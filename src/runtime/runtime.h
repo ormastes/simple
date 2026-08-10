@@ -296,6 +296,8 @@ int8_t   rt_value_is_float(int64_t value);
 int64_t  rt_value_bool(int64_t value);
 int64_t  rt_value_nil(void);
 void*    rt_alloc(int64_t size);
+void*    rt_struct_alloc(int64_t size);
+int8_t   rt_struct_receiver_valid(int64_t receiver, int64_t byte_offset, int64_t access_width);
 void*    rt_realloc(void* ptr, int64_t size);
 void     rt_free(void* ptr);
 void*    rt_memcpy(void* dst, const void* src, int64_t n);

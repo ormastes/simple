@@ -579,6 +579,8 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_len"
             | "rt_slice"
             | "rt_alloc"
+            | "rt_struct_alloc"
+            | "rt_struct_receiver_valid"
             | "rt_array_new"
             | "rt_byte_array_new"
             | "rt_array_len"
@@ -2393,7 +2395,7 @@ impl<M: Module> CodegenBackend<M> {
         } else {
             None
         };
-        let alloc_id = if init_functions.is_empty() && init_structs.is_empty() {
+        let alloc_id = if init_functions.is_empty() {
             None
         } else {
             Some(
@@ -2401,6 +2403,16 @@ impl<M: Module> CodegenBackend<M> {
                     .runtime_funcs
                     .get("rt_alloc")
                     .ok_or_else(|| BackendError::ModuleError("rt_alloc not declared".into()))?,
+            )
+        };
+        let struct_alloc_id = if init_structs.is_empty() {
+            None
+        } else {
+            Some(
+                *self
+                    .runtime_funcs
+                    .get("rt_struct_alloc")
+                    .ok_or_else(|| BackendError::ModuleError("rt_struct_alloc not declared".into()))?,
             )
         };
 
@@ -2640,14 +2652,14 @@ impl<M: Module> CodegenBackend<M> {
             }
         }
 
-        // Struct-literal globals: rt_alloc(n*8) + sequential field stores.
+        // Struct-literal globals: rt_struct_alloc(n*8) + sequential field stores.
         // Field representation matches compile_struct_init: ints/bools raw,
         // nil tagged 3, strings rt_string_new handles, arrays rt_array_new
-        // handles; the struct value itself is the raw rt_alloc pointer.
+        // handles; the struct value itself is the registered raw allocation pointer.
         let mut sorted_structs: Vec<_> = init_structs.iter().collect();
         sorted_structs.sort_by_key(|(name, _)| (*name).clone());
         for (global_name, init) in &sorted_structs {
-            let alloc_ref = self.module.declare_func_in_func(alloc_id.unwrap(), builder.func);
+            let alloc_ref = self.module.declare_func_in_func(struct_alloc_id.unwrap(), builder.func);
             let size = (init.fields.len().max(1) * 8) as i64;
             let size_val = builder.ins().iconst(types::I64, size);
             let call_inst = builder.ins().call(alloc_ref, &[size_val]);

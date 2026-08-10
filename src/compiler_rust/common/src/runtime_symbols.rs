@@ -120,6 +120,8 @@ pub const CORE_REQUIRED_RUNTIME_SYMBOLS: &[&str] = &[
     "__simple_runtime_shutdown",
     "rt_is_interpreter_runtime",
     "rt_alloc",
+    "rt_struct_alloc",
+    "rt_struct_receiver_valid",
     "rt_free",
     "rt_realloc",
     "rt_memcpy",
@@ -636,6 +638,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_enum_payload",
     // Raw memory allocation
     "rt_alloc",
+    "rt_struct_alloc",
+    "rt_struct_receiver_valid",
     "rt_free",
     "rt_ptr_to_value",
     "rt_value_to_ptr",
