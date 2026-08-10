@@ -31,6 +31,17 @@ fn link_failure_output(stdout: &[u8], stderr: &[u8]) -> String {
     format!("{}{}", stdout, stderr)
 }
 
+fn remove_dynamic_initializers_owned_by_wrappers(init_names: &mut Vec<String>) {
+    let all_names: HashSet<String> = init_names.iter().cloned().collect();
+    init_names.retain(|name| {
+        if name == "__module_init_dynamic" {
+            return false;
+        }
+        name.strip_suffix("_dynamic")
+            .is_none_or(|wrapper_name| !all_names.contains(wrapper_name))
+    });
+}
+
 #[cfg(target_os = "macos")]
 fn add_macos_base_link_args(cmd: &mut std::process::Command) {
     cmd.arg("-Wl,-ld_classic").arg("-Wl,-dead_strip");
@@ -826,27 +837,15 @@ int main(int argc, char** argv) {
                 if !normalized.starts_with("__module_init_") {
                     continue;
                 }
-                // `__module_init_dynamic` is the HIR-synthesized initializer for
-                // module-level globals whose initializer needs genuine runtime
-                // evaluation (hir/lower/module_lowering/module_pass.rs). It keeps
-                // that literal, unmangled name (native_project/mangle.rs), so it
-                // matches this prefix scan -- but it is ALREADY called from the
-                // module's own `__module_init[_<prefix>]` body, wired up by
-                // codegen/common_backend.rs `generate_module_init`. Calling it
-                // from here too evaluates every such initializer TWICE, so the
-                // initializer's side effects are duplicated.
-                //
-                // The per-module freestanding `__module_init_<prefix>_dynamic`
-                // functions from native_project/module_global_init.rs carry the
-                // module prefix in their name, so they are a different thing and
-                // must stay in the scan -- nothing else calls those.
-                if normalized == "__module_init_dynamic" {
-                    continue;
-                }
                 let sanitized = normalized.replace('.', "_dot_");
                 init_names.push(sanitized);
             }
         }
+        // Cranelift emits a `__module_init_<prefix>` wrapper that calls the
+        // corresponding qualified `_dynamic` body. Keep only the wrapper in
+        // that pair so startup evaluates the body once. A backend/object that
+        // exposes a dynamic initializer without a wrapper still keeps it in
+        // the aggregate (notably the current LLVM-only-dynamic shape).
         // Always emit the caller, even when this entry has no module init
         // functions. The generated main stub references
         // `__simple_call_module_inits`; ELF accepts that weak undefined symbol,
@@ -854,6 +853,7 @@ int main(int argc, char** argv) {
         // the hosted link contract identical on every Unix platform.
         init_names.sort();
         init_names.dedup();
+        remove_dynamic_initializers_owned_by_wrappers(&mut init_names);
 
         let cross_target = effective_target();
         let cxx = target_cxx_compiler(cross_target);
@@ -2359,6 +2359,27 @@ mod linker_tests {
         );
         assert!(diagnostics.contains("LNK2019: unresolved external symbol missing_provider"));
         assert!(diagnostics.contains("clang-cl: error: linker command failed"));
+    }
+
+    #[test]
+    fn module_init_scan_prefers_wrapper_but_preserves_unwrapped_dynamic_owners() {
+        let mut names = vec![
+            "__module_init_dynamic".to_string(),
+            "__module_init_app__wrapped".to_string(),
+            "__module_init_app__wrapped_dynamic".to_string(),
+            "__module_init_app__llvm_only_dynamic".to_string(),
+            "__module_init_app__optional_dynamic_optional_00000002".to_string(),
+        ];
+        remove_dynamic_initializers_owned_by_wrappers(&mut names);
+
+        assert_eq!(
+            names,
+            vec![
+                "__module_init_app__wrapped".to_string(),
+                "__module_init_app__llvm_only_dynamic".to_string(),
+                "__module_init_app__optional_dynamic_optional_00000002".to_string(),
+            ]
+        );
     }
 
     #[test]

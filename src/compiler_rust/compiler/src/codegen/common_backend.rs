@@ -474,24 +474,15 @@ pub(crate) fn module_init_symbol(module_prefix: Option<&str>) -> String {
 }
 
 fn make_module_init_dynamic_name(module_name: &str) -> String {
-    let normalized = module_name
-        .replace('.', "_")
-        .replace('/', "_")
-        .replace('-', "_");
-    if normalized.is_empty() {
-        "__module_init_dynamic".to_string()
-    } else {
-        format!("__module_init_{normalized}_dynamic")
-    }
+    let module_prefix = (!module_name.is_empty()).then_some(module_name);
+    format!("{}_dynamic", module_init_symbol(module_prefix))
 }
 
 fn find_dynamic_init_func_id(
     func_ids: &BTreeMap<String, cranelift_module::FuncId>,
-    module_name: &Option<String>,
+    module_name: Option<&str>,
 ) -> Option<cranelift_module::FuncId> {
-    let names = module_name
-        .as_ref()
-        .map(|name| make_module_init_dynamic_name(name));
+    let names = module_name.map(make_module_init_dynamic_name);
     names.and_then(|name| func_ids.get(&name).copied()).or_else(|| {
         // Compatibility with older plain-name emission.
         if let Some(id) = func_ids.get("__module_init_dynamic").copied() {
@@ -2174,7 +2165,11 @@ impl<M: Module> CodegenBackend<M> {
         // body); the only wiring generate_module_init does is call it, so it
         // runs automatically wherever __module_init already does (JIT's
         // run_module_init_once, and the native binary's startup code).
-        let dynamic_init_func_id = find_dynamic_init_func_id(&self.func_ids, &mir.name);
+        // Native-project compilation assigns dynamic initializer identity from
+        // the physical module prefix before either backend runs. Prefer that
+        // authority over an optional/logical HIR module name.
+        let dynamic_module_name = self.module_prefix.as_deref().or(mir.name.as_deref());
+        let dynamic_init_func_id = find_dynamic_init_func_id(&self.func_ids, dynamic_module_name);
         if !mir.global_init_strings.is_empty()
             || !mir.global_init_arrays.is_empty()
             || !mir.global_init_functions.is_empty()
