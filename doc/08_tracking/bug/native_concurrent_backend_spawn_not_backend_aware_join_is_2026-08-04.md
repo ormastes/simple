@@ -1,6 +1,6 @@
 # BUG: with the "native" concurrent backend, spawn stores the result in the pure_std map but join reads the native registry — every join returns nil
 
-**Status:** OPEN
+**Status:** ARCHITECTURAL-OPEN (re-confirmed 2026-08-10; fix requires editing src/compiler_rust, out of scope for a .spl-lane pass)
 **Found:** 2026-08-04
 **Severity:** high — every thread spawned while the concurrent backend is
 `"native"` joins to `nil`, silently. No error, no warning; the value is simply
@@ -124,3 +124,22 @@ the normal tool), and a verifiable landing would additionally require a
 bootstrap rebuild, out of scope for this pass. No `.spl`/`.shs` source change
 is possible here without touching the Rust seed. Left OPEN as originally
 scoped; no spec changes made.
+
+## Re-confirmed 2026-08-10
+
+Re-ran the failing spec fresh:
+
+```
+$ bin/simple test test/01_unit/std/perf_optimization_spec.spl
+  expected nil to equal 42
+  expected nil to equal 5
+  expected nil to equal native_result
+  expected nil to equal 9
+Results: 51 total, 47 passed, 4 failed
+```
+
+Identical four failures, identical shape, as originally documented. Root
+cause location (`concurrency.rs:207`/`:272` spawn missing the
+`get_concurrent_registry()` backend branch that `:339` join has) is unchanged
+and remains in `src/compiler_rust/`, which this session's hard constraints
+forbid editing. Status remains ARCHITECTURAL-OPEN; no code or spec changed.
