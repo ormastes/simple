@@ -122,3 +122,104 @@ not a gate pass.
   is at risk. The compiler-level defect (text locals corrupted across call-rich
   regions / spill paths) needs its own reduction and fix; this doc is the
   tracking anchor.
+
+## Track W2 — page-fault root-cause trace (2026-08-10)
+
+Budget-boxed 45min trace. No fix landed; the fault is now precisely localised
+and two whole hypothesis families are RULED OUT. Evidence is archived-per-run
+only (`build/simpleos_wm_fullscreen_evidence/runs/<ts>/serial.log`); the
+canonical `serial.log` was not used.
+
+### The fault is 4 RECOVERED PAIRS, not one crash
+
+Only 2 of 13 archived runs contain any `[fault]` at all
+(`20260810T083128Z-fail`, `20260810T112327Z-fail`); both contain exactly 8
+frames, and every frame ends `*** END FRAME (recovering) ***` — execution
+continues afterwards (`[rfm] at=default-font` resumes). The 8 frames are 4
+PAIRS, and the pairing is the whole story:
+
+| pair | rip | cr2 run A | cr2 run B | role |
+|---|---|---|---|---|
+| 1 | `0x8004bc0` / `0x8004bc2` | `0x2bfd659d8` / `0xff..ff8c` | `0x37b49f258` / `0xff..ff8c` | load src / store dst |
+| 2 | `0x800434e` / `0x8004350` | `0x2bfd659e0` / `0xff..ff8e` | `0x37b49f260` / `0xff..ff8e` | load / store |
+| 3 | same | `...9e1` / `ff8e` | `...261` / `ff8e` | load / store |
+| 4 | same | `...9e2` / `ff8e` | `...262` / `ff8e` | load / store |
+
+The **source** address increments `+8, +1, +1` (one qword then bytes — a
+memcpy tail) and **differs between runs**. The **destination** address is a
+small negative that does NOT advance (each store faults and is skipped by the
+recovering handler, so `rdi` never commits).
+
+### `cr2 = 0xffffffffffffff8e` — hypothesis CONFIRMED and made concrete
+
+It is not a wild address and not "null plus an offset". In
+`rt_string_concat` (`src/runtime/runtime_native.c:2670-2699`):
+
+```c
+uint64_t len = a->len + b->len;
+RtCoreString* out = malloc(sizeof(RtCoreString) + (size_t)len + 1);
+...
+if (a->len > 0) memcpy(out->data, a->data, (size_t)a->len);
+if (b->len > 0) memcpy(out->data + a->len, b->data, (size_t)b->len);
+```
+
+`0xff..ff8e` is `out->data + a->len` **wrapping** — i.e. `a->len` is a huge /
+negative-as-signed value. `len = a->len + b->len` is **unsigned and
+unchecked**, so it wraps to a small number, `malloc` SUCCEEDS (so the `!out`
+guard never fires), and the subsequent `memcpy` is then handed the *un-wrapped*
+`a->len`. That is the wild walk. The paired source address is `a->data`, also
+garbage (~11-15 GB, well past guest RAM; heap bump offsets at fault time are
+only ~`0x1c74_5690` ≈ 475 MB).
+
+### Ruled OUT
+
+- **Shallow-copy aliasing / struct copy.** Already ruled out by `4f755fdeb930`
+  and `2009e71905e4` leaving the signature identical; this trace agrees —
+  nothing here is a copied struct.
+- **Untagged integer aliasing `RT_VALUE_TAG_HEAP`** (the classic family
+  documented at `rt_core_register_enum`). `rt_core_as_string`
+  (`runtime_native.c:1659-1667`) is fully fenced: it rejects `raw < 4096`,
+  checks the tag, then does a **pure pointer-membership test**
+  (`rt_core_is_registered_string` -> `rt_core_is_registered_immortal_ptr`)
+  BEFORE touching `->kind`. So `a` is a genuinely registered, runtime-allocated
+  `RtCoreString`. Its **header fields (`len`, `data`) are corrupted in place** —
+  this is heap-header corruption, not a bogus handle.
+
+This *refines* the existing "text local corrupted across call-rich regions"
+finding above: the local is fine, the **string object header is overwritten**.
+
+### Localised to one statement region
+
+Both faulting runs fault immediately after
+`[web-style-producer] cpu-entries-ready count=1 len=368`, emitted at
+`src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core.spl:3166`
+(end of `compute_styles`). `material_entries[0]` is built by repeated `+`
+interpolated concatenation (lines 3110-3137). Contradiction worth chasing: the
+string is only **368 bytes**, yet the immediately preceding log lines are
+repeated `[array-repeat] big count=0x100000` / `[heap] alloc sz=0x800020`
+(1,048,576 elements, 8 MB per allocation, several in a row, `caller=0x83d265e`
+in run A and `0x83d27fe` in run B — different builds, same shape).
+
+### Strongest remaining lead (in priority order)
+
+1. **Find who writes the 8 MB / 1M-element `array-repeat` allocations during
+   style computation.** A 368-byte result should never need them. If that
+   count is itself a corrupted length, the same corrupt value plausibly
+   explains `a->len`. Start at the `[array-repeat] big` probe and resolve
+   `caller=0x83d265e` against the run's map file.
+2. **Determine whether the baremetal `malloc` bump allocator bounds-checks its
+   arena.** Heap is at ~475 MB and each array-repeat burns 8 MB; if the arena
+   is overrun and a non-NULL out-of-arena pointer is returned, subsequent
+   `RtCoreString` header writes land on foreign memory — which is exactly the
+   observed in-place header corruption.
+3. **Harden `rt_string_concat` regardless of root cause.** It has no length
+   sanity check and its `a->len + b->len` unsigned overflow converts a corrupt
+   header into a wild `memcpy` instead of a detectable error. A guard there
+   (reject `a->len`/`b->len` beyond a sane bound, and reject the addition
+   overflow) would turn this silent corruption into a diagnosable failure and
+   very likely move the gate past this point. This is hardening, not a fix, and
+   was deliberately NOT landed here so the underlying corruptor is not masked
+   before lead 1 is chased.
+
+No check was weakened; `wm_content_frame_web_provenance_valid` untouched; no
+composite stubbed; no gate run was performed for this trace (analysis only).
