@@ -120,7 +120,7 @@ fn _driver_validate_value_struct_layouts(ctx: CompileContext, module_keys: [text
         val _woven = weave_forward_advice(ctx.hir_modules)
 
 impl CompilerDriver:
-    me lower_streaming_surface_source(lowering: HirLowering, source: SourceFile) -> Result<HirModule, text>:
+    me lower_streaming_surface_source(lowering: HirLowering, source: SourceFile, is_entry: bool) -> Result<HirModule, text>:
         if not rt_transient_array_scope_begin():
             return Err("transient parser scope unavailable for {source.path}")
         val module = parse_full_frontend(source.content, source.path, source.module_name, self.ctx.logger)
@@ -130,7 +130,7 @@ impl CompilerDriver:
         if not rt_transient_array_scope_pause():
             val _ended = driver_end_transient_parse_scope()
             return Err("transient parser scope pause failed for {source.path}")
-        val hir_module = lowering.lower_parser_module_unstub(module)
+        val hir_module = lowering.lower_parser_module_unstub(module, is_entry)
         if not rt_transient_heap_promote(hir_module):
             val _ended = driver_end_transient_parse_scope()
             return Err("HIR ownership promotion failed for {source.path}")
@@ -184,7 +184,7 @@ impl CompilerDriver:
             # Baseline for the per-module poison check: pre-existing errors
             # belong to EARLIER modules and must not poison this one.
             val module_errors_before: i64 = self.ctx.error_count()
-            val lower_result = self.lower_streaming_surface_source(lowering, source)
+            val lower_result = self.lower_streaming_surface_source(lowering, source, is_requested_bootstrap_entry)
             if lower_result.is_err():
                 # No HIR aggregate exists for this unit (parse/ownership
                 # failure), so it is poisoned by definition -- but the other
@@ -382,16 +382,16 @@ impl CompilerDriver:
                 dtrace("[DRV] branch=bootstrap_entry")
                 val entry_module_for_hir = self.ctx.modules[name]
                 if entry_module_for_hir != nil:
-                    lowering.lower_parser_module_unstub(entry_module_for_hir)
+                    lowering.lower_parser_module_unstub(entry_module_for_hir, is_bootstrap_entry)
                 else:
                     val reparsed_entry_module = parse_full_frontend(src.content, src.path, name, self.ctx.logger)
-                    lowering.lower_parser_module_unstub(reparsed_entry_module)
+                    lowering.lower_parser_module_unstub(reparsed_entry_module, is_bootstrap_entry)
             elif unstub_hir and (self.ctx.modules[name] != nil):
                 # Reuse phase 2's parsed closure module. Re-parsing every source
                 # makes entry-closure HIR lowering superlinear and bypasses the
                 # object cache before code generation starts.
                 dtrace("[DRV] branch=unstub_cached")
-                lowering.lower_parser_module_unstub(self.ctx.modules[name])
+                lowering.lower_parser_module_unstub(self.ctx.modules[name], is_bootstrap_entry)
             elif unstub_hir and (src.content != "") and (not self.ctx.options.low_memory):
                 # Opt-in real lowering via a fresh frontend re-parse (see caveat above).
                 # MUST call the uniquely-named lower_parser_module_unstub: a plain
@@ -400,7 +400,7 @@ impl CompilerDriver:
                 # HIR lowering body never runs.
                 dtrace("[DRV] branch=unstub_reparse")
                 val entry_module_for_hir = parse_full_frontend(src.content, src.path, name, self.ctx.logger)
-                val lowered_hm: HirModule = lowering.lower_parser_module_unstub(entry_module_for_hir)
+                val lowered_hm: HirModule = lowering.lower_parser_module_unstub(entry_module_for_hir, is_bootstrap_entry)
                 dtrace("[DRV] lowered funcs={lowered_hm.functions.len()} name={lowered_hm.name}")
                 lowered_hm
             else:
