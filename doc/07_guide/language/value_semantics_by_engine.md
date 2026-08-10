@@ -109,15 +109,39 @@ as `doc/08_tracking/bug/jit_struct_assignment_aliases_not_copies_2026-08-10.md`.
 The interpreter's rejection of `m[1][0] = 9` is a second, smaller divergence
 (same bug doc).
 
-Native/AOT (`native-build`) status: **STILL UNMEASURED, now with a concrete
-blocker.** On the fresh 2026-08-10 seed, `native-build` of both the minimal
-P1 probe and the full matrix fails deterministically in the LLVM backend:
-`llc-20: <ir>.ll:64:4x: error: void type only allowed for function results`
-(`AOT compile error ... Compile error in backend (llvm): llc failed`). This
-is an invalid-IR emission defect for struct-bearing programs, not host
-saturation (the two earlier 300s/550s no-output attempts on 2026-08-09 were
-saturation). The AOT column of the truth table remains unmeasured — do not
-infer it from either other engine.
+Native/AOT (`native-build`) status: **MEASURED 2026-08-10.** The llc
+void-type blocker does NOT reproduce at current WC: the guard in
+`translate_alloc` (`src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl`
+~L2015-2026, landed 2026-08-08) backs void-typed spill slots with `i64`, and
+`native-build` interprets the WC compiler `.spl` live, so both the minimal
+probe and the full matrix now build and RUN. Binary:
+`bin/release/x86_64-unknown-linux-gnu/simple` (29,577,536 B, mtime
+2026-08-09 04:50; the 2026-08-10 04:16 seed named in the bug doc no longer
+exists, and a freshly rebuilt seed cannot reach the backend due to unrelated
+WC semantic drift). Measured AOT column (i64-field probes, printed values):
+
+| Position | AOT (native-build) |
+|---|---|
+| plain assignment (`var b = a; b.n = 2`) | **COPY** (a.n=1) |
+| argument passing (callee sets `.n=100`) | **COPY** (c.n=3) |
+| return value | copy-consistent (r.n=6) |
+| list element extraction (`var e = lst[0]; e.n = 11`) | **ALIAS** (lst[0].n=11) |
+| dict value extraction (`var dv = d["k"]; dv.n = 21`) | **ALIAS** (d["k"].n=21) |
+| nested struct field (`var o2 = o; o2.inner.v = 31`) | **COPY** (o.inner.v=30) |
+| arrays (`var arr2 = arr; arr2[0] = 9`) | COPY (arr[0]=1) |
+| text | COPY (t=abc) |
+| `m[1][0] = 9` | ACCEPTED and works (m10=9); extracted row not aliased (row0=3) |
+
+So AOT matches neither other lane exactly: it copies where the post-F1 JIT
+copies AND on the nested-field case (where JIT still aliases via shallow
+`AggregateCopy`), but **container extraction (list AND dict) aliases under
+AOT** where interp and post-F1 JIT copy. New AOT-only defect observed while
+measuring: an `f64` struct field interpolated into text prints its **raw i64
+bit pattern** (`f.a=4607182418800017408` for 1.0) — the copy/alias verdict
+for the f64 probe was still readable from the distinct bit patterns
+(1.0 vs 7.0 = COPY). Durable gate: `scripts/check/check-aot-smoke.shs`
+(native-builds, runs, and output-asserts a struct probe; PASS/FAIL/ERROR
+verdict convention).
 
 ## Probe source
 
