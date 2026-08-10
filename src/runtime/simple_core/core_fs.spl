@@ -361,7 +361,15 @@ pub fn rt_file_rename(src_ptr: i64, src_len: i64, dst_ptr: i64, dst_len: i64) ->
     if result == 0: 1 else: 0
 
 pub fn rt_file_move(src_ptr: i64, src_len: i64, dst_ptr: i64, dst_len: i64) -> i8:
-    rt_file_rename(src_ptr, src_len, dst_ptr, dst_len)
+    # `rename` is atomic and preserves metadata when the provider supports
+    # it, but POSIX can reject it across filesystems.  Keep the move ABI
+    # useful for SimpleOS mounts by falling back to copy-then-remove only
+    # after the atomic operation fails.
+    if rt_file_rename(src_ptr, src_len, dst_ptr, dst_len) == 1:
+        return 1
+    if rt_file_copy(src_ptr, src_len, dst_ptr, dst_len) != 1:
+        return 0
+    rt_file_remove(src_ptr, src_len)
 
 # ponytail: guest stat lacks mtime; zero disables cache freshness until VFS stat returns it.
 pub fn rt_file_stat(path_ptr: i64, path_len: i64) -> i64:
