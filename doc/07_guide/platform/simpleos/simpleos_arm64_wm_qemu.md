@@ -186,6 +186,20 @@ as localized-damage proof, and the receipt contract alone is not a live PASS.
 (default 5,000,000 microseconds); exceeding it rejects the run rather than
 silently extending the evidence timeout.
 
+The unified Vulkan/input/audio lane uses
+`scripts/check/check-simpleos-arm64-unified-live.shs`. A successful admitted
+build now atomically publishes
+`simpleos_arm64_unified_primitive.build-manifest.env`. Before QEMU can start,
+the consumer revalidates the exact source fingerprint and revision shape,
+unified entry and linker hashes, Cranelift backend, bare-metal AArch64 target,
+admitted compiler and adjacent provenance hashes, executable ELF64 AArch64
+header and nonzero entry, kernel hash, and read-only desktop-font disk plus disk
+manifest hashes. `--no-build` consumes the same manifest and cannot admit a
+loose ELF or disk. Run
+`sh scripts/check/check-simpleos-arm64-unified-kernel-manifest.shs` for the
+bounded static wiring contract; it neither invokes a compiler nor launches
+QEMU and does not manufacture runtime evidence.
+
 Before injecting any input, the gate requires exactly one guest
 `[engine2d-simd]` receipt. The receipt must identify `aarch64`/NEON, report
 SIMD enabled, positive target-native fill hits and vector chunks, the complete

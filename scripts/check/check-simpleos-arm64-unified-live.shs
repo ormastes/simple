@@ -7,6 +7,7 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "$root"
+. scripts/check/lib/simpleos-arm64-unified-kernel-manifest.shs
 
 build=yes
 case "${1:-}" in
@@ -29,6 +30,9 @@ case "${1:-}" in
         grep -Fq 'showcase-combined-rss-budget-exceeded' "$0"
         grep -Fq -- '-device virtio-blk-device,drive=fontdisk' "$0"
         grep -Fq 'font_disk_sha256' "$0"
+        grep -Fq 'simpleos-arm64-unified-kernel-manifest-v1' "$0"
+        grep -Fq 'arm64_unified_validate_manifest' "$0"
+        grep -Fq 'elf_machine=aarch64' "$0"
         grep -Fq 'fence_completed=true' "$0"
         grep -Fq 'validate-simpleos-arm64-unified-live-receipt.spl' "$0"
         echo simpleos_arm64_unified_live_self_test=pass
@@ -43,6 +47,7 @@ simple=${SIMPLE_BIN:-bin/release/x86_64-unknown-linux-gnu/simple}
 # adapter consumes that canonical artifact and never forks its runtime bundle.
 daemon=${SIMPLEOS_GPU_HOST_BIN:-build/simpleos_host_gpu_2d/simpleos_gpu_host}
 kernel=$out_dir/simpleos_arm64_unified_primitive.elf
+kernel_manifest=$out_dir/simpleos_arm64_unified_primitive.build-manifest.env
 serial=$out_dir/serial.log
 daemon_log=$out_dir/daemon.log
 qemu_log=$out_dir/qemu.log
@@ -52,6 +57,7 @@ receipt=$out_dir/evidence.env
 capture=$out_dir/showcase-device-frame.ppm
 validator=scripts/check/validate-simpleos-arm64-unified-live-receipt.spl
 entry=examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop_linux_qemu_unified.spl
+linker_script=examples/09_embedded/simple_os/arch/arm64/linker.ld
 font_disk=${SIMPLEOS_ARM64_FONT_DISK:-build/os/fat32-arm64-desktop.img}
 font_manifest=${SIMPLEOS_ARM64_FONT_DISK_MANIFEST:-$out_dir/font-disk.manifest.env}
 showcase_combined_rss_budget_kib=${SIMPLEOS_ARM64_COMBINED_RSS_BUDGET_KIB:-1048576}
@@ -103,6 +109,7 @@ case "$version" in
 esac
 
 if test "$build" = yes; then
+    rm -f "$kernel" "$kernel_manifest" || fail stale-kernel-attestation-invalidation-failed
     /bin/sh scripts/os/make_os_disk.shs 128 "$font_disk" "" arm64 desktop-fonts \
         >"$out_dir/font-disk-build.log" 2>&1 || fail deterministic-font-disk-build-failed
     font_disk_sha=$(sha256sum "$font_disk" | awk '{print $1}')
@@ -118,16 +125,78 @@ if test "$build" = yes; then
     } >"$font_manifest_tmp"
     mv "$font_manifest_tmp" "$font_manifest"
     cp src/generated/simpleos_log_config.spl build/os/generated/generated/simpleos_log_config.spl
+    source_before=$out_dir/kernel-source-before.env
+    source_after=$out_dir/kernel-source-after.env
+    arm64_unified_source_snapshot "$source_before" \
+        build/os/generated src/os src/lib examples/09_embedded/simple_os \
+        scripts/check/check-simpleos-arm64-unified-live.shs \
+        scripts/check/lib/simpleos-arm64-unified-kernel-manifest.shs || fail kernel-source-snapshot-failed
+    compiler_sha=$(arm64_unified_sha256 "$simple") || fail compiler-hash-failed
+    compiler_manifest=${SIMPLE_COMPILER_PROVENANCE:-${simple}.provenance.env}
+    test -f "$compiler_manifest" && test ! -L "$compiler_manifest" || fail compiler-provenance-missing
+    test "$(arm64_unified_manifest_field status "$compiler_manifest")" = pass || fail compiler-provenance-status
+    test "$(arm64_unified_manifest_field artifact_kind "$compiler_manifest")" = pure-simple-bootstrap-compiler || fail compiler-provenance-kind
+    test "$(arm64_unified_manifest_field output_sha256 "$compiler_manifest")" = "$compiler_sha" || fail compiler-provenance-sha
+    compiler_manifest_sha=$(arm64_unified_sha256 "$compiler_manifest") || fail compiler-provenance-hash-failed
+    entry_sha=$(arm64_unified_sha256 "$entry") || fail entry-hash-failed
+    linker_sha=$(arm64_unified_sha256 "$linker_script") || fail linker-script-hash-failed
     SIMPLE_BOOT_MINIMAL=1 SIMPLE_OS_LOG_MODE=on SIMPLE_NO_STUB_FALLBACK=1 \
         "$simple" native-build \
         --source build/os/generated --source src/os --source src/lib \
         --source examples/09_embedded/simple_os --backend cranelift \
         --opt-level=aggressive --log on --entry-closure --entry "$entry" \
         --target aarch64-unknown-none --output "$kernel" \
-        --linker-script examples/09_embedded/simple_os/arch/arm64/linker.ld \
+        --linker-script "$linker_script" \
         >"$out_dir/kernel-build.log" 2>&1 || fail guest-build-failed
+    arm64_unified_source_snapshot "$source_after" \
+        build/os/generated src/os src/lib examples/09_embedded/simple_os \
+        scripts/check/check-simpleos-arm64-unified-live.shs \
+        scripts/check/lib/simpleos-arm64-unified-kernel-manifest.shs || fail kernel-source-resnapshot-failed
+    cmp -s "$source_before" "$source_after" || fail kernel-source-changed-during-build
+    arm64_unified_elf_identity "$kernel" || fail kernel-not-aarch64-executable-elf
+    kernel_sha=$(arm64_unified_sha256 "$kernel") || fail kernel-hash-failed
+    disk_sha=$(arm64_unified_sha256 "$font_disk") || fail disk-hash-failed
+    disk_manifest_sha=$(arm64_unified_sha256 "$font_manifest") || fail disk-manifest-hash-failed
+    source_revision=$(git rev-parse --verify HEAD) || fail source-revision-unavailable
+    source_fingerprint=$(sed -n 's/^source_fingerprint=//p' "$source_after")
+    source_file_count=$(sed -n 's/^source_file_count=//p' "$source_after")
+    kernel_manifest_tmp=${kernel_manifest}.tmp.$$
+    umask 077
+    {
+        echo schema=simpleos-arm64-unified-kernel-manifest-v1
+        echo status=pass
+        echo artifact_kind=simpleos-arm64-unified-qemu-kernel
+        echo source_revision="$source_revision"
+        echo source_fingerprint="$source_fingerprint"
+        echo source_file_count="$source_file_count"
+        echo entry_path="$entry"
+        echo entry_sha256="$entry_sha"
+        echo backend=cranelift
+        echo target=aarch64-unknown-none
+        echo linker_script_path="$linker_script"
+        echo linker_script_sha256="$linker_sha"
+        echo compiler_path="$simple"
+        echo compiler_sha256="$compiler_sha"
+        echo compiler_provenance_path="$compiler_manifest"
+        echo compiler_provenance_sha256="$compiler_manifest_sha"
+        echo kernel_path="$kernel"
+        echo kernel_sha256="$kernel_sha"
+        echo elf_class="$ARM64_UNIFIED_ELF_CLASS"
+        echo elf_endian="$ARM64_UNIFIED_ELF_ENDIAN"
+        echo elf_type="$ARM64_UNIFIED_ELF_TYPE"
+        echo elf_machine="$ARM64_UNIFIED_ELF_MACHINE"
+        echo elf_entry_hex="$ARM64_UNIFIED_ELF_ENTRY_HEX"
+        echo disk_path="$font_disk"
+        echo disk_sha256="$disk_sha"
+        echo disk_manifest_path="$font_manifest"
+        echo disk_manifest_sha256="$disk_manifest_sha"
+        echo disk_profile=desktop-fonts
+        echo disk_access=read-only
+    } >"$kernel_manifest_tmp"
+    mv "$kernel_manifest_tmp" "$kernel_manifest"
 fi
 test -s "$kernel" || fail unified-kernel-missing
+arm64_unified_validate_manifest "$kernel_manifest" "$kernel" "$font_disk" "$entry" || fail canonical-kernel-manifest-invalid
 test -x "$daemon" || fail canonical-gpu-host-daemon-missing
 test -f "$font_disk" && test ! -L "$font_disk" && test -s "$font_disk" || fail deterministic-font-disk-missing
 test -f "$font_manifest" && test ! -L "$font_manifest" && test -s "$font_manifest" || fail deterministic-font-manifest-missing

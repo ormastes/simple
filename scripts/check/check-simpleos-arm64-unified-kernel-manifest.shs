@@ -1,0 +1,41 @@
+#!/bin/sh
+set -eu
+
+# Bounded static contract: no compiler invocation and no QEMU launch. This
+# checks that the unified lane cannot reach QEMU without exact artifact binding.
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$root"
+
+producer=scripts/check/check-simpleos-arm64-unified-live.shs
+contract=scripts/check/lib/simpleos-arm64-unified-kernel-manifest.shs
+
+sh -n "$producer" "$contract"
+for token in \
+    simpleos-arm64-unified-kernel-manifest-v1 \
+    source_fingerprint source_file_count entry_sha256 backend=cranelift \
+    target=aarch64-unknown-none linker_script_sha256 compiler_sha256 \
+    compiler_provenance_sha256 kernel_sha256 elf_class elf_endian elf_type \
+    elf_machine elf_entry_hex disk_sha256 disk_manifest_sha256
+do
+    grep -Fq "$token" "$producer" || {
+        echo "simpleos_arm64_unified_kernel_manifest_status=fail"
+        echo "simpleos_arm64_unified_kernel_manifest_reason=missing-$token"
+        exit 1
+    }
+done
+
+validate_line=$(grep -n 'arm64_unified_validate_manifest.*|| fail canonical-kernel-manifest-invalid' "$producer" | cut -d: -f1)
+qemu_line=$(grep -n '^qemu-system-aarch64 "\$@"' "$producer" | cut -d: -f1)
+test -n "$validate_line" && test -n "$qemu_line" && test "$validate_line" -lt "$qemu_line" || {
+    echo simpleos_arm64_unified_kernel_manifest_status=fail
+    echo simpleos_arm64_unified_kernel_manifest_reason=validation-does-not-dominate-qemu
+    exit 1
+}
+
+grep -Fq '0200b700' "$contract"
+grep -Eq 'artifact_kind.*pure-simple-bootstrap-compiler' "$contract"
+grep -Eq 'kernel_sha256.*arm64_unified_sha256' "$contract"
+grep -Eq 'disk_sha256.*arm64_unified_sha256' "$contract"
+
+echo simpleos_arm64_unified_kernel_manifest_status=pass
