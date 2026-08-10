@@ -1,11 +1,19 @@
 # All three GPU accelerator session modules do not exist, and the coverage manifests count them as covered
 
-**Status:** OPEN — manifest half FIXED (see Next steps 2); module half changed
-state mid-day. `src/lib/gc_async_mut/crypto_accel/{cuda,metal,vulkan}_session.spl`
-appeared at `2026-08-05 06:36:14` from a parallel session and are still
-untracked. Everything below describes the tree BEFORE that. Whether the three
-providers now resolve their session types, and whether they still drop to the
-interpreter, is NOT re-verified here.
+**Status:** ALREADY-FIXED — re-verified 2026-08-10. Both halves of the defect
+are resolved: the three session modules
+(`src/lib/gc_async_mut/crypto_accel/{cuda,metal,vulkan}_session.spl`) are
+committed to origin/main (landed `aff29a24dfec9` on 2026-08-08, confirmed via
+`git ls-tree origin/main`) and declare `CryptoCudaSession`,
+`CryptoMetalSession`, `CryptoVulkanSession` as classes
+(`grep -rnE '^\s*class\s+Crypto(Cuda|Metal|Vulkan)Session\b' src/` finds all
+3). The manifest existence gate
+(`test/01_unit/app/test/x25519mlkem768_manifest_existence_gate_spec.spl`) was
+re-run fresh on the deployed seed
+(`bin/release/x86_64-unknown-linux-gnu/simple`) and is GREEN with a real
+executed verdict: `SPEC FILE VERDICT: ... declared>=8 executed=8 passed=8
+failed=0 dropped=0` / `Results: 8 total, 8 passed, 0 failed`. Everything below
+describes the tree BEFORE the 2026-08-08 landing and is retained for history.
 **Found:** 2026-08-05
 **Component:** `src/os/crypto/x25519_mlkem768/{cuda,metal,vulkan}_ntt_provider.spl`,
 `src/app/test/x25519mlkem768_{coverage_contract,critical_inventory}.spl`
