@@ -66,6 +66,23 @@ E0063 site. It is not — that line is an unrelated
 `warning: value assigned to \`last_value\` is never read`, adjacent in the compiler
 output. All 9 E0063 errors were in `tests.rs`.
 
+## Verification
+
+`cargo test -p simple-compiler --lib --no-run` now succeeds. The suite runs:
+3,500+ tests pass, including both tests that directly construct the literals this
+change touched — `native_project_extra_provider_resolves_symbol_and_suppresses_stub`
+(the `ModuleImports` literal at line 305) and
+`test_cross_module_layout_fingerprint_sensitivity_and_stability` (which consumes
+`empty_import_map_result`). Both are `ok`, so the empty-index choice preserves
+what they assert.
+
+Failures remain across the suite (HIR lowering, codegen, and ~37
+`native_project` runtime-bundle / runtime-archive discovery tests). These are
+**not attributable to this change** — they depend on built runtime artifacts in
+`target/`, and there is no "before" baseline for any of them because the target
+did not compile at all until this fix. They need separate triage now that the
+suite is runnable again.
+
 ## Prevention
 
 Consider `#[derive(Default)]` on `ImportMapResult` plus a test-only
