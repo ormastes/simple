@@ -77,3 +77,34 @@ Share, don't re-duplicate: hoist the interpreter's unresolved-variable semantic
 check to run before/within JIT lowering (one shared resolver verdict for both
 lanes), and make the JIT's indirect-call lowering refuse non-callable callee
 values with a diagnostic instead of jumping.
+
+## Re-verification (2026-08-10, independent session)
+
+Confirmed OPEN, unchanged, by re-running the fence live against the currently
+deployed binary (`bin/release/x86_64-unknown-linux-gnu/simple`, 29577536
+bytes, built 2026-08-09 04:50:31 UTC — one day after this doc's original
+filing, so the underlying seed has already moved once since this bug was
+found and the defect still reproduces):
+
+```
+$ sh scripts/check/check-jit-unresolved-symbol-guard.shs
+FAIL — 2 of 6 lane-cases regressed:
+  [typed_ctor/jit: CRASH (rc=139, signal death — expected a semantic diagnostic)]
+  [undef_var/jit: SILENT PASS (rc=0 on bad input)]
+```
+
+Both regressed cases match the original report exactly (`[i64]()` SIGSEGVs
+the JIT lane, `undefined_var_xyz` reads execute silently with rc=0). Root
+cause remains in `src/compiler_rust/compiler/src/codegen/jit.rs`
+(`JitCompiler::call_i64_void` and the JIT's variable-resolution path), which
+this session's constraints explicitly forbid editing (`src/compiler_rust/**`
+is out of scope; "Fix .spl not Rust" standing rule). No pure-Simple-side
+workaround exists: the pure-Simple `native-build` lane was independently
+re-confirmed correct (clean `unresolved name: i64` diagnostic, not a crash),
+so there is nothing to fix outside the seed.
+
+**End state: confirmed ARCHITECTURAL / genuinely out-of-scope for this
+session.** Left honestly OPEN, fence stays RED on the roster as designed
+(it is the coverage fix, not the bug fix). No code changes made. Next step
+unchanged: a seed-authorized session must land the shared resolver-verdict
+fix in `src/compiler_rust`.
