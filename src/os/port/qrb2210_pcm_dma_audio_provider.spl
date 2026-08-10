@@ -23,6 +23,7 @@ val QRB2210_PCM_MAX_FRAMES: i64 = 8192
 
 class Qrb2210PcmDmaKernelIdentity:
     device: Qrb2210BoardDeviceHandle
+    irq_line: i64
     kernel_owner_handle: u64
     submit_ring_handle: u64
     completion_ring_handle: u64
@@ -61,7 +62,10 @@ class Qrb2210PcmDmaCompletionReceipt:
     completed_sample_count: i64
     pcm_checksum: i64
     completion_id: i64
+    irq_line: i64
+    irq_sequence: i64
     interrupt_timestamp_ns: u64
+    driver_generation: i64
     completed: bool
 
 trait Qrb2210PcmDmaKernelPort:
@@ -72,7 +76,8 @@ trait Qrb2210PcmDmaKernelPort:
 
 fn qrb2210_pcm_dma_identity_ready(identity: Qrb2210PcmDmaKernelIdentity) -> bool:
     qrb2210_board_device_handle_ready(identity.device, QRB2210_DEVICE_AUDIO) and
-        identity.physical_device and identity.kernel_owner_handle > 0u64 and
+        identity.physical_device and identity.irq_line > 0 and
+        identity.kernel_owner_handle > 0u64 and
         identity.submit_ring_handle > 0u64 and identity.completion_ring_handle > 0u64 and
         identity.dma_pool_handle > 0u64 and
         (identity.channels == 1 or identity.channels == 2) and
@@ -132,7 +137,7 @@ fn qrb2210_pcm_submit_correlates(
         receipt.submit_ring_handle == identity.submit_ring_handle and
         receipt.dma_pool_handle == identity.dma_pool_handle and
         receipt.dma_buffer_handle > 0u64 and receipt.submission_id > 0 and
-        receipt.submit_sequence > previous_submit_sequence and
+        receipt.submit_sequence > 0 and receipt.submit_sequence > previous_submit_sequence and
         receipt.first_frame_id > 0 and receipt.frame_count == frame_count and
         receipt.sample_count == samples.len and
         receipt.pcm_checksum == qrb2210_pcm_s16le_checksum(samples) and
@@ -142,7 +147,8 @@ fn qrb2210_pcm_completion_correlates(
     identity: Qrb2210PcmDmaKernelIdentity,
     submit: Qrb2210PcmDmaSubmitReceipt,
     completion: Qrb2210PcmDmaCompletionReceipt,
-    previous_completion_sequence: i64
+    previous_completion_sequence: i64,
+    previous_irq_sequence: i64
 ) -> bool:
     """Require a fresh IRQ completion for the exact accepted DMA frame."""
     (qrb2210_pcm_dma_identity_ready(identity) and
@@ -169,12 +175,16 @@ fn qrb2210_pcm_completion_correlates(
         completion.dma_buffer_handle == submit.dma_buffer_handle and
         completion.submission_id == submit.submission_id and
         completion.submit_sequence == submit.submit_sequence and
+        completion.completion_sequence > 0 and
         completion.completion_sequence > previous_completion_sequence and
         completion.first_frame_id == submit.first_frame_id and
         completion.completed_frame_count == submit.frame_count and
         completion.completed_sample_count == submit.sample_count and
         completion.pcm_checksum == submit.pcm_checksum and
-        completion.completion_id > 0 and completion.interrupt_timestamp_ns > 0u64 and
+        completion.completion_id > 0 and completion.irq_line == identity.irq_line and
+        completion.irq_sequence > 0 and completion.irq_sequence > previous_irq_sequence and
+        completion.interrupt_timestamp_ns > 0u64 and
+        completion.driver_generation == identity.device.driver_generation and
         completion.completed)
 
 fn _qrb2210_rejected_submit(device: Qrb2210BoardDeviceHandle) -> Qrb2210AudioSubmitReceipt:
@@ -186,6 +196,7 @@ class Qrb2210PcmDmaAudioProvider:
     kernel: Qrb2210PcmDmaKernelPort
     last_submit_sequence: i64
     last_completion_sequence: i64
+    last_irq_sequence: i64
     active_submission_id: i64
     active_dma_buffer_handle: u64
     active_submit_sequence: i64
@@ -193,6 +204,12 @@ class Qrb2210PcmDmaAudioProvider:
     active_frame_count: i64
     active_sample_count: i64
     active_pcm_checksum: i64
+    active_boot_id: text
+    active_native_handle: u64
+    active_driver_generation: i64
+    active_kernel_owner_handle: u64
+    active_submit_ring_handle: u64
+    active_dma_pool_handle: u64
 
 impl Qrb2210AudioPort for Qrb2210PcmDmaAudioProvider:
     fn readiness_status() -> i64:
@@ -216,6 +233,10 @@ impl Qrb2210AudioPort for Qrb2210PcmDmaAudioProvider:
         val receipt = self.kernel.submit_pcm_dma(samples, channels, sample_rate_hz)
         if not qrb2210_pcm_submit_correlates(
             identity, receipt, samples, self.last_submit_sequence):
+            # An accepted-but-malformed kernel receipt may describe a real DMA
+            # transfer. Poison the sole slot instead of risking a second flight.
+            if receipt.accepted:
+                self.active_submission_id = -1
             return _qrb2210_rejected_submit(identity.device)
         self.last_submit_sequence = receipt.submit_sequence
         self.active_submission_id = receipt.submission_id
@@ -225,6 +246,12 @@ impl Qrb2210AudioPort for Qrb2210PcmDmaAudioProvider:
         self.active_frame_count = receipt.frame_count
         self.active_sample_count = receipt.sample_count
         self.active_pcm_checksum = receipt.pcm_checksum
+        self.active_boot_id = receipt.device.boot_id
+        self.active_native_handle = receipt.device.native_handle
+        self.active_driver_generation = receipt.device.driver_generation
+        self.active_kernel_owner_handle = receipt.kernel_owner_handle
+        self.active_submit_ring_handle = receipt.submit_ring_handle
+        self.active_dma_pool_handle = receipt.dma_pool_handle
         Qrb2210AudioSubmitReceipt(
             device: receipt.device, submission_id: receipt.submission_id,
             buffer_handle: receipt.dma_buffer_handle,
@@ -236,6 +263,13 @@ impl Qrb2210AudioPort for Qrb2210PcmDmaAudioProvider:
             not qrb2210_pcm_dma_identity_ready(identity)):
             return nil
         if submission_id <= 0 or submission_id != self.active_submission_id:
+            return nil
+        if (identity.device.boot_id != self.active_boot_id or
+            identity.device.native_handle != self.active_native_handle or
+            identity.device.driver_generation != self.active_driver_generation or
+            identity.kernel_owner_handle != self.active_kernel_owner_handle or
+            identity.submit_ring_handle != self.active_submit_ring_handle or
+            identity.dma_pool_handle != self.active_dma_pool_handle):
             return nil
         if val completion = self.kernel.poll_pcm_dma_completion(submission_id):
             val submit = Qrb2210PcmDmaSubmitReceipt(
@@ -250,9 +284,11 @@ impl Qrb2210AudioPort for Qrb2210PcmDmaAudioProvider:
                 sample_count: self.active_sample_count,
                 pcm_checksum: self.active_pcm_checksum, accepted: true)
             if not qrb2210_pcm_completion_correlates(
-                identity, submit, completion, self.last_completion_sequence):
+                identity, submit, completion, self.last_completion_sequence,
+                self.last_irq_sequence):
                 return nil
             self.last_completion_sequence = completion.completion_sequence
+            self.last_irq_sequence = completion.irq_sequence
             self.active_submission_id = 0
             self.active_dma_buffer_handle = 0u64
             self.active_submit_sequence = 0
@@ -260,6 +296,12 @@ impl Qrb2210AudioPort for Qrb2210PcmDmaAudioProvider:
             self.active_frame_count = 0
             self.active_sample_count = 0
             self.active_pcm_checksum = 0
+            self.active_boot_id = ""
+            self.active_native_handle = 0u64
+            self.active_driver_generation = 0
+            self.active_kernel_owner_handle = 0u64
+            self.active_submit_ring_handle = 0u64
+            self.active_dma_pool_handle = 0u64
             return Qrb2210AudioCompletionReceipt(
                 device: completion.device, submission_id: completion.submission_id,
                 buffer_handle: completion.dma_buffer_handle,
