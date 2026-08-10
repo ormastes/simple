@@ -8,7 +8,7 @@
 bool rt_coverage_enabled(void);
 void rt_coverage_decision_probe(uint32_t, bool, const char *, uint32_t, uint32_t);
 void rt_coverage_condition_probe(uint32_t, uint32_t, bool, const char *, uint32_t, uint32_t);
-char *rt_coverage_dump_sdn(void);
+char *rt_coverage_dump_sdn_cstr(void);
 void rt_coverage_free_sdn(char *);
 void rt_coverage_clear(void);
 
@@ -21,8 +21,8 @@ int main(void) {
     rt_coverage_decision_probe(2, true, "a%2Cspl", 1, 2);
     rt_coverage_condition_probe(9, 7, true, "z.spl", 3, 5);
     rt_coverage_condition_probe(9, 7, false, "z.spl", 3, 5);
-    char *first = rt_coverage_dump_sdn();
-    char *second = rt_coverage_dump_sdn();
+    char *first = rt_coverage_dump_sdn_cstr();
+    char *second = rt_coverage_dump_sdn_cstr();
     assert(first && second && strcmp(first, second) == 0);
     assert(strstr(first, "coverage_extension: decision-condition-v1\n"));
     assert(strstr(first, "    2, a%2Cspl, 1, 2, 0, 1\n"));
@@ -38,7 +38,7 @@ int main(void) {
     rt_coverage_clear();
     assert(setenv("SIMPLE_COVERAGE", "0", 1) == 0);
     rt_coverage_decision_probe(1, true, "disabled.spl", 1, 1);
-    first = rt_coverage_dump_sdn();
+    first = rt_coverage_dump_sdn_cstr();
     assert(first && !strstr(first, "disabled.spl"));
     rt_coverage_free_sdn(first);
     return 0;
