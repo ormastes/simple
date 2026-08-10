@@ -1,7 +1,29 @@
 # `src/os/**`: 46 imported modules/symbols that were never implemented
 
-**Status:** OPEN
+**Status:** OPEN (out-of-scope — no implementation invented, per triage brief)
 **Found:** 2026-07-28 (dangling-reference triage, `src/os/**` + `src/unit/**` scope)
+**Re-verified:** 2026-08-10 — reran
+`sh scripts/check/check-dangling-references.shs --path src/os --path src/unit`
+(now reports 35 dangling references, some new/unrelated to this doc's 46, e.g.
+`WM_STATUS_*` — filed separately per the note above) and cross-checked a sample
+of this doc's original 46 entries with the same definition-anchored-grep method
+used in the original triage. Result: roughly a third of the original entries
+were resolved by other sessions since filing (either a real implementation
+landed — e.g. `bn_one`/`bn_from_i64` now defined in
+`src/lib/common/math/bignum/bignat.spl`, so the `ecdsa_p521.spl` bignat imports
+now resolve — or the referencing code was refactored away from the missing
+symbol, e.g. `TcpStateMachine` is no longer imported anywhere under
+`_TcpConnection/`). Confirmed STILL dangling by both the checker and a fresh
+anchored grep: `FeP256`/`fe_p256`, `md5`, `display_protocol` (+ its 4 symbols),
+`line_wrap`/`line_unwrap`, `FbCompositorBackend`, `spring_progress`,
+`FirmwareSha256`/`parse_sha256_hex_words`, `current_architecture`,
+`tree_readdir`, `FileExplorer` — i.e. the crypto and compositor gaps called out
+in "Suggested triage order" below are still entirely unimplemented. No fix
+attempted here: each remaining entry still requires writing a real
+implementation (crypto field arithmetic, MD5, PEM line wrapping, compositor
+drawing primitives, boot-time arch probe, VFS readdir, file-explorer type),
+which is explicitly out of scope for this pass ("do NOT invent an
+implementation").
 **Area:** `src/os/crypto/`, `src/os/compositor/`, `src/os/services/`, `src/os/apps/`,
 `src/os/kernel/`
 **Severity:** medium-high — each entry is an import that resolves to nothing.
