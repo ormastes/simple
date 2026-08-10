@@ -1,6 +1,13 @@
 # `resource` invariant 3 (borrow pinning across foreign calls) is not enforced
 
-**Status:** OPEN. Filed by WP-G (`doc/03_plan/language/resource/resource_parallel_agent_plan_2026-08-06.md`),
+**Status:** ARCHITECTURAL-OPEN (final terminal-status pass 2026-08-10:
+re-read `record_move` at `src/compiler/55.borrow/borrow_check/borrow_graph.spl:533`
+— still only checks `self.moved_now`, no consultation of `borrows_of`/
+`has_conflicting_borrow` in either direction; no borrow-liveness/region
+infrastructure or foreign-call marker exists anywhere in `55.borrow/` or
+`50.mir/`. Genuinely requires a multi-week subsystem addition per the WP-G
+scope note below, not a local fix — left OPEN and unmodified). Filed by
+WP-G (`doc/03_plan/language/resource/resource_parallel_agent_plan_2026-08-06.md`),
 resource-ownership campaign. Architecture reference:
 `doc/04_architecture/language/resource/resource_declaration_architecture_2026-08-06.md`
 §8, invariant 3: "Borrow pinning: a borrowed resource stays live through the
