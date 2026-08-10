@@ -136,6 +136,50 @@ the specs must be RED and must not be read as board-runnable evidence.
   asserts against it, never reading the product. A worse defect than comment-cheating,
   out of scope here — it needs rewriting, not re-anchoring.
 
+## Third cross-check (C) — receiver-aware, and why 46 is an UPPER bound
+
+Methods A and B both treat *any* `to_contain("...")` / `.contains("...")` as a
+source-text needle. That is wrong in two ways, and manual review of the 46 found
+both live:
+
+- **The receiver is often not source text.** `simplebox_build_spec.spl` asserts on
+  `simplebox_native_build_cmd("x86_64-unknown-none").contains(...)` — the return
+  value of a product function. `ghdl_riscv32_mailbox_spec.spl` asserts on
+  `adapter.runner_path`. `wm_host_freebsd_refusal_spec.spl`'s `host.spl` "needle"
+  is a *path argument* to `file_exists` / `source_contains`, not a needle at all.
+  None of these can comment-cheat; they never grep a product file.
+- **Negative assertions invert the meaning.** `core_c_bootstrap_runtime_capsule_
+  contract_spec.spl:43` is `expect(source.contains("bin/" + "simple")).to_equal(false)`
+  — an *absence* check. A comment-only match is the correct and desired state.
+
+Scan C therefore requires: positive assertion, and a receiver bound to
+`read_file`/`read_text`/`read_source` of a literal product path (or the
+`source_contains(path, needle)` form). It reports **7 sites / 2 specs** — a strict
+lower bound, since it cannot follow needles routed through helper functions or
+non-literal paths.
+
+**Honest bracket: 7 (C, strict) ≤ true comment-cheat count ≤ 46 (A ∩ B).** The
+"~46" headline is an upper bound, not a count. The ABSENT defects D1-D3 above were
+each confirmed by reading the product source directly, so they do not depend on
+which bound you take — and scan C independently reconfirms D2, surfacing a second
+comment-only symbol alongside it:
+
+| spec:line | needle | product | verdict |
+|---|---|---|---|
+| `simpleos_green_hardware_handoff_blocker_spec.spl:219` | `rt_syscall_dispatch` | `src/os/kernel/arch/x86_64/cpu.spl:126` | ABSENT (D2) |
+| `simpleos_green_hardware_handoff_blocker_spec.spl:218` | `kernel_syscall_entry_asm` | `src/os/kernel/arch/x86_64/cpu.spl:127,176` | ABSENT — same defect, second symbol |
+
+That spec also anchors three needles on **doc/ tracking files** (its own bug record
+and a report), not on product source at all — asserting that a bug document still
+contains a given heading. That is a fourth vacuity shape and is out of scope here.
+
+### Scanner false-positive modes, for whoever automates this gate
+
+1. `*`-prefixed line is a comment only in C-family files; in shell it is a `case` arm.
+2. `#` in `.c`/`.h` is a preprocessor directive, i.e. code.
+3. The receiver must be verified to hold file source before a needle counts.
+4. Negative assertions (`to_equal(false)`, `to_be_falsy`) must be excluded.
+
 ## Standing note
 
 Do not resolve any ABSENT row by relaxing or deleting the spec. A correctly-failing
