@@ -86,3 +86,26 @@ runtime — `_keepalive` is discarded), or (b) gate `_shim_keepalive()`'s call
 site behind a compile-time/native-only condition so `shim_init()` itself
 becomes interpreter-safe without weakening the DCE guarantee for the native
 build.
+
+## Re-verification (2026-08-10)
+
+Status confirmed unchanged: `_shim_keepalive()` in
+`src/os/kernel/abi/syscall_shim.spl` still performs six `spl_handle_* as u64`
+function-pointer-to-integer casts, called unconditionally from `shim_init()`
+(lines ~139-145, ~232-239 unchanged). This is a `.spl`-source-visible
+construct, but the failure is in the **tree-walk interpreter's runtime**
+(`src/compiler_rust/` — the interpreter has no runtime representation for a
+function-value-to-`u64` cast), which is out of scope per this sweep's hard
+constraint against editing `src/compiler_rust/**`. No `@cfg`/conditional-
+compilation primitive exists in the `.spl` language today to gate the
+`_shim_keepalive()` call site behind "native-only" at the source level
+(checked `src/compiler/10.frontend/core/cfg_platform.spl` and
+`parser_preprocessor.spl` — these implement OS/arch target `cfg()`, not an
+engine-selector such as interpreter-vs-native), so suggested fix (b) is also
+currently blocked without new frontend work, itself out of this sweep's
+scope (broad language-feature addition, not a narrow bug fix).
+`test/01_unit/os/kernel/abi/syscall_shim_process_state_spec.spl`'s workaround
+(direct `g_shim_scheduler`/`g_shim_ipc`/`g_shim_klog` assignment, bypassing
+`shim_init()`) remains the correct mitigation and still passes. Leaving
+**OPEN — ARCHITECTURAL** (requires Rust-seed interpreter runtime work, out of
+scope for this sweep).
