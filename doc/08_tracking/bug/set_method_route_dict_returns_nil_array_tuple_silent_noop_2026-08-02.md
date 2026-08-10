@@ -1,9 +1,35 @@
 # `set` method: dict returns nil on the JIT; array/tuple silently no-op when a dict `.set` shares the module
 
 Date: 2026-08-02
-Status: OPEN — re-verified 2026-08-09; still architectural/out-of-scope for a
-.spl/.shs-only lane. Superseded characterization (more precise root cause,
-self-hosted lane): `dict_set_bracket_write_parity_2026-08-07.md`.
+Status: ARCHITECTURAL-OPEN — re-verified 2026-08-09 and again fresh
+2026-08-10; still architectural/out-of-scope for a .spl/.shs-only lane.
+Superseded characterization (more precise root cause, self-hosted lane):
+`dict_set_bracket_write_parity_2026-08-07.md`.
+
+### Re-verification 2026-08-10
+
+Re-ran Defect 1's minimal repro against the currently deployed seed
+(`bin/release/x86_64-unknown-linux-gnu/simple`):
+
+```
+var d = {"a": 1}
+val ret = d.set("b", 2)
+print "ret={ret}"; print "b={d[\"b\"]}"
+```
+
+- default JIT: `ret=nil`, `b=2` — matches doc exactly (mutation lands, return
+  value is wrong).
+- `SIMPLE_EXECUTION_MODE=interpreter`: `ret={a: 1, b: 2}`, `b=2` — correct,
+  matches doc exactly.
+
+Confirms Defect 1 is unchanged. Root cause remains in the Rust seed's
+Cranelift codegen (`src/compiler_rust/**`, off-limits to this and any
+.spl-only lane), and the self-hosted-lane companion defect (`.set`/`.insert`
+missing from `is_dict_method_name` in
+`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`) sits in a
+file this task's own hard constraints explicitly forbid editing (owned by a
+concurrent session). No further action possible from this lane; leaving
+OPEN/ARCHITECTURAL as previously assessed.
 
 ## Re-verification 2026-08-09
 
