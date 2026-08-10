@@ -936,6 +936,11 @@ impl<'a> MirLowerer<'a> {
         if byte_size == 0 {
             return Ok(src);
         }
+        // F1/S5 deep-copy: statically resolve which field slots hold a nested
+        // declared value type; those must be copied too, or `o2.inner.a = x`
+        // writes through the shared inner block (2026-08-10 bug).
+        let mut path = vec![name.clone()];
+        let deep_fields = Self::struct_deep_fields(registry, &self.type_value_kinds, fields, &mut path);
         self.with_func(|func, current_block| {
             let dest = func.new_vreg();
             let block = func.block_mut(current_block).unwrap();
@@ -944,9 +949,59 @@ impl<'a> MirLowerer<'a> {
                 src,
                 byte_size,
                 type_name: Some(name),
+                deep_fields,
             });
             dest
         })
+    }
+
+    /// Build the recursive deep-copy descriptor for a struct's fields. A field
+    /// participates only under the SAME fail-closed gate as the outer copy:
+    /// resolvable name, `type_value_kinds == Some(true)` (declared `struct`),
+    /// and a concrete non-empty `HirType::Struct` field list. Class/actor,
+    /// array, text, dict and every unknown type stay shallow — arrays/text
+    /// already copy correctly through their own paths and classes must alias.
+    ///
+    /// Termination: `path` carries the type names on the current descent and a
+    /// repeated name stops recursion (a by-value self-referential struct is
+    /// ill-formed anyway — infinite size — but we fail closed rather than
+    /// loop). A depth cap of 16 bounds pathological chains.
+    fn struct_deep_fields(
+        registry: &crate::hir::TypeRegistry,
+        type_value_kinds: &std::collections::HashMap<String, bool>,
+        fields: &[(String, TypeId)],
+        path: &mut Vec<String>,
+    ) -> Vec<crate::mir::AggregateFieldCopy> {
+        if path.len() >= 16 {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for (i, (_fname, fty)) in fields.iter().enumerate() {
+            let Some(fname_ty) = registry.get_type_name(*fty).map(str::to_owned) else {
+                continue;
+            };
+            if type_value_kinds.get(&fname_ty) != Some(&true) {
+                continue;
+            }
+            if path.iter().any(|p| *p == fname_ty) {
+                continue;
+            }
+            let Some(crate::hir::HirType::Struct { fields: inner, .. }) = registry.get(*fty) else {
+                continue;
+            };
+            if inner.is_empty() {
+                continue;
+            }
+            path.push(fname_ty);
+            let nested = Self::struct_deep_fields(registry, type_value_kinds, inner, path);
+            path.pop();
+            out.push(crate::mir::AggregateFieldCopy {
+                word_index: i as u32,
+                byte_size: (inner.len() as u32) * 8,
+                nested,
+            });
+        }
+        out
     }
 
     /// F1/S6 — site J: an incoming struct-typed parameter is caller-owned

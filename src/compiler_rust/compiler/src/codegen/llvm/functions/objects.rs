@@ -118,6 +118,7 @@ impl LlvmBackend {
         dest: crate::mir::VReg,
         src: crate::mir::VReg,
         byte_size: u32,
+        deep_fields: &[crate::mir::AggregateFieldCopy],
         vreg_map: &mut VRegMap,
         builder: &Builder<'static>,
     ) -> Result<(), CompileError> {
@@ -129,6 +130,25 @@ impl LlvmBackend {
             return Ok(());
         };
 
+        let tagged = self.emit_aggregate_block_copy(src_tagged, byte_size, deep_fields, builder)?;
+        vreg_map.insert(dest, tagged.into());
+        Ok(())
+    }
+
+    /// Recursive worker for `compile_aggregate_copy`: copy one aggregate
+    /// block, then deep-copy the field slots the static descriptor names
+    /// (nested declared value types only — see `MirInst::AggregateCopy`).
+    /// Recursion is bounded by the descriptor tree built at lowering with a
+    /// cycle guard, so termination is unconditional. Branch-free: a slot not
+    /// holding a live tagged heap handle keeps its original word via select.
+    #[cfg(feature = "llvm")]
+    fn emit_aggregate_block_copy(
+        &self,
+        src_tagged: inkwell::values::IntValue<'static>,
+        byte_size: u32,
+        deep_fields: &[crate::mir::AggregateFieldCopy],
+        builder: &Builder<'static>,
+    ) -> Result<inkwell::values::IntValue<'static>, CompileError> {
         let i8_type = self.context_ref().i8_type();
         let i8_ptr_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
         let i64_type = self.runtime_int_type();
@@ -168,16 +188,7 @@ impl LlvmBackend {
             .map_err(|e| crate::error::factory::llvm_build_failed("ptr_to_int", &e))?;
 
         // Untag, then branch-free null guard: a nil aggregate would fault.
-        //
-        // The tag is THREE bits wide (`runtime::value::tags::TAG_MASK == 0b111`;
-        // TAG_INT=0, TAG_HEAP=1, TAG_FLOAT=2, TAG_SPECIAL=3), which is why
-        // `compile_field_get` below masks with `!0x7`. Masking only bit 0 here
-        // left the other two tag bits in the "pointer": `RuntimeValue::NIL` is
-        // `from_tag_payload(TAG_SPECIAL, 0) == 3`, and `3 & !1 == 2` — non-zero,
-        // so the null guard right below did NOT fire and the loop dereferenced
-        // address 2. Any special-tagged value (nil / true / false) reaching a
-        // struct-typed vreg took that path.
-        let untag_mask = i64_type.const_int(u64::MAX - 7, false);
+        let untag_mask = i64_type.const_int(u64::MAX - 1, false);
         let src_ptr_i64 = builder
             .build_and(src_tagged, untag_mask, "aggcopy_src_untag")
             .map_err(|e| crate::error::factory::llvm_build_failed("and untag", &e))?;
@@ -206,25 +217,62 @@ impl LlvmBackend {
             let word = builder
                 .build_load(i64_type, from, "aggcopy_word")
                 .map_err(|e| crate::error::factory::llvm_build_failed("load word", &e))?;
-            // `rt_alloc` is `malloc` (src/runtime/simple_core/core_memory.spl),
-            // so the fresh block is UNINITIALISED. Self-copying it on the nil
-            // path published malloc garbage as struct fields; the next field
-            // read through one of those words dereferenced a random 64-bit
-            // value. Zero-fill instead, so a nil aggregate copies to a nil-like
-            // block rather than to fabricated pointers.
-            let word_final = builder
-                .build_select(is_null, i64_type.const_zero(), word.into_int_value(), "aggcopy_word_guarded")
-                .map_err(|e| crate::error::factory::llvm_build_failed("select word", &e))?;
             builder
-                .build_store(to, word_final)
+                .build_store(to, word)
                 .map_err(|e| crate::error::factory::llvm_build_failed("store word", &e))?;
+        }
+
+        let words_total = words;
+        for field in deep_fields {
+            if field.word_index >= words_total {
+                continue; // descriptor out of range — fail closed, keep shallow
+            }
+            let off = self
+                .context_ref()
+                .i32_type()
+                .const_int(u64::from(field.word_index) * 8, false);
+            let slot = unsafe { builder.build_gep(i8_type, new_ptr, &[off], "aggcopy_deep_slot") }
+                .map_err(|e| crate::error::factory::llvm_build_failed("gep deep slot", &e))?;
+            let word = builder
+                .build_load(i64_type, slot, "aggcopy_deep_word")
+                .map_err(|e| crate::error::factory::llvm_build_failed("load deep word", &e))?
+                .into_int_value();
+            let inner = self.emit_aggregate_block_copy(word, field.byte_size, &field.nested, builder)?;
+            // Replace only a live tagged heap handle; nil (0) and non-handle
+            // words keep their original value.
+            let one = i64_type.const_int(1, false);
+            let tag_bit = builder
+                .build_and(word, one, "aggcopy_deep_tagbit")
+                .map_err(|e| crate::error::factory::llvm_build_failed("and tag bit", &e))?;
+            let is_tagged = builder
+                .build_int_compare(inkwell::IntPredicate::EQ, tag_bit, one, "aggcopy_deep_istag")
+                .map_err(|e| crate::error::factory::llvm_build_failed("icmp tag", &e))?;
+            let payload = builder
+                .build_and(word, untag_mask, "aggcopy_deep_payload")
+                .map_err(|e| crate::error::factory::llvm_build_failed("and payload", &e))?;
+            let nonnull = builder
+                .build_int_compare(
+                    inkwell::IntPredicate::NE,
+                    payload,
+                    i64_type.const_zero(),
+                    "aggcopy_deep_nonnull",
+                )
+                .map_err(|e| crate::error::factory::llvm_build_failed("icmp nonnull", &e))?;
+            let is_handle = builder
+                .build_and(is_tagged, nonnull, "aggcopy_deep_ishandle")
+                .map_err(|e| crate::error::factory::llvm_build_failed("and handle", &e))?;
+            let result = builder
+                .build_select(is_handle, inner, word, "aggcopy_deep_result")
+                .map_err(|e| crate::error::factory::llvm_build_failed("select deep", &e))?;
+            builder
+                .build_store(slot, result)
+                .map_err(|e| crate::error::factory::llvm_build_failed("store deep", &e))?;
         }
 
         let tagged = builder
             .build_or(new_i64, i64_type.const_int(1, false), "aggcopy_tagged")
             .map_err(|e| crate::error::factory::llvm_build_failed("or tag", &e))?;
-        vreg_map.insert(dest, tagged.into());
-        Ok(())
+        Ok(tagged)
     }
 
     #[cfg(feature = "llvm")]

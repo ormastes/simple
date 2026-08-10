@@ -397,6 +397,7 @@ pub(crate) fn compile_aggregate_copy<M: Module>(
     dest: VReg,
     src: VReg,
     byte_size: u32,
+    deep_fields: &[crate::mir::AggregateFieldCopy],
 ) {
     let Some(&src_tagged) = ctx.vreg_values.get(&src) else {
         // Undefined source: behave exactly as `Copy` does — define nothing.
@@ -410,6 +411,23 @@ pub(crate) fn compile_aggregate_copy<M: Module>(
         return;
     }
 
+    let tagged = emit_aggregate_block_copy(ctx, builder, src_tagged, byte_size, deep_fields);
+    ctx.vreg_values.insert(dest, tagged);
+}
+
+/// Recursive worker for `compile_aggregate_copy`: copy one aggregate block,
+/// then deep-copy the field slots the descriptor names. Recursion depth is
+/// the STATIC descriptor tree's depth (built with a cycle guard at lowering),
+/// so termination is unconditional. Branch-free like the shallow copy: a slot
+/// that does not currently hold a live tagged heap handle (nil, or a raw
+/// scalar left by an untyped path) keeps its original word via `select`.
+fn emit_aggregate_block_copy<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    src_tagged: cranelift_codegen::ir::Value,
+    byte_size: u32,
+    deep_fields: &[crate::mir::AggregateFieldCopy],
+) -> cranelift_codegen::ir::Value {
     // Round up to whole 8-byte words and never allocate zero.
     let words = byte_size.div_ceil(8).max(1);
     let alloc_bytes = i64::from(words) * 8;
@@ -417,11 +435,7 @@ pub(crate) fn compile_aggregate_copy<M: Module>(
     let size_val = builder.ins().iconst(types::I64, alloc_bytes);
     let new_ptr = call_runtime_1(ctx, builder, "rt_alloc", size_val);
 
-    // The tag is THREE bits (`runtime::value::tags::TAG_MASK == 0b111`), not
-    // one. Masking only bit 0 left TAG_SPECIAL values looking like pointers:
-    // `RuntimeValue::NIL == 3`, and `3 & !1 == 2`, so the null guard below did
-    // not fire and the loop dereferenced address 2.
-    let untag_mask = builder.ins().iconst(types::I64, !7i64);
+    let untag_mask = builder.ins().iconst(types::I64, !1i64);
     let src_ptr = builder.ins().band(src_tagged, untag_mask);
     let zero = builder.ins().iconst(types::I64, 0);
     let src_is_null = builder.ins().icmp(IntCC::Equal, src_ptr, zero);
@@ -430,17 +444,30 @@ pub(crate) fn compile_aggregate_copy<M: Module>(
     for w in 0..words {
         let off = (w * 8) as i32;
         let word = builder.ins().load(types::I64, MemFlags::new(), load_ptr, off);
-        // `rt_alloc` is `malloc`, so the fresh block is UNINITIALISED and the
-        // nil-path self-copy published malloc garbage as struct fields — the
-        // next read through one of those words dereferenced a random 64-bit
-        // value. Zero-fill the nil case instead.
-        let word = builder.ins().select(src_is_null, zero, word);
         builder.ins().store(MemFlags::new(), word, new_ptr, off);
     }
 
+    for field in deep_fields {
+        let off = (field.word_index * 8) as i32;
+        if field.word_index >= words {
+            continue; // descriptor out of range — fail closed, keep shallow
+        }
+        let word = builder.ins().load(types::I64, MemFlags::new(), new_ptr, off);
+        let inner = emit_aggregate_block_copy(ctx, builder, word, field.byte_size, &field.nested);
+        // Replace only a live tagged heap handle; nil (0) and non-handle
+        // words keep their original value (the inner alloc is then unused).
+        let one = builder.ins().iconst(types::I64, 1);
+        let tag_bit = builder.ins().band(word, one);
+        let is_tagged = builder.ins().icmp(IntCC::Equal, tag_bit, one);
+        let payload = builder.ins().band(word, untag_mask);
+        let nonnull = builder.ins().icmp(IntCC::NotEqual, payload, zero);
+        let is_handle = builder.ins().band(is_tagged, nonnull);
+        let result = builder.ins().select(is_handle, inner, word);
+        builder.ins().store(MemFlags::new(), result, new_ptr, off);
+    }
+
     let heap_tag = builder.ins().iconst(types::I64, 1);
-    let tagged = builder.ins().bor(new_ptr, heap_tag);
-    ctx.vreg_values.insert(dest, tagged);
+    builder.ins().bor(new_ptr, heap_tag)
 }
 
 fn widen_struct_field_value(

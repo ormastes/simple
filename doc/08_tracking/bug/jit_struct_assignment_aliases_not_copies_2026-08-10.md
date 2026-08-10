@@ -12,15 +12,29 @@
 > return, list-element and dict-value extraction now COPY under the JIT,
 > matching the interpreter (probe printed 1.0 in all five, CONTROL=42).
 >
-> **RESIDUAL (open):**
-> 1. **Nested struct field aliases through a copy**: `var o2 = o;
->    o2.inner.a = 9.0` mutates `o.inner.a` under JIT (interp: 1.0, JIT: 9.0).
->    Cause: `AggregateCopy` (`codegen/instr/closures_structs.rs::
->    compile_aggregate_copy`) is a shallow `fields.len()*8`-byte copy; a
->    struct-typed field is a pointer, so the inner struct stays shared. Fix
->    direction: recursive copy of value-kind struct fields at the copy sites,
->    or deep AggregateCopy. Not patched here — the F1 campaign owns these
->    files and the change needs its own probe matrix.
+> **RESIDUAL item 1 FIXED 2026-08-10.** `MirInst::AggregateCopy` gained a
+> `deep_fields: Vec<AggregateFieldCopy>` descriptor, built at MIR lowering
+> (`lowering_core.rs::struct_deep_fields`, gated by the same fail-closed
+> `type_value_kinds == Some(true)` check as the outer copy, with a
+> visited-type-name path guard + depth cap 16 for termination on
+> self-referential shapes) and consumed recursively by both backends
+> (`codegen/instr/closures_structs.rs::emit_aggregate_block_copy` for
+> Cranelift/JIT, `codegen/llvm/functions/objects.rs::
+> emit_aggregate_block_copy` for LLVM/AOT). `var o2 = o; o2.inner.a = 33.0`
+> now leaves `o.inner.a` at its original value under both interpreter and JIT
+> (verified via `test/03_system/language/value_semantics/probe/
+> p2_nested_struct_field.spl`: interp and JIT both print `S2b o.inner.a=99.0
+> o2.inner.a=33.0`). Sabotage-tested: forcing `deep_fields` to `&[]` at the
+> Cranelift call site (`codegen/instr/mod.rs`) reproduces the exact original
+> divergence (`o.inner.a=33.0` under JIT vs `99.0` under interp), confirming
+> the fix — not a coincidental pass — closes the gap. Arrays and text are
+> deliberately NOT deep-copied through this path (already correct on every
+> engine; would add a perf cliff). Perf cost measured on a 300k-iteration
+> struct-copy-with-nested-field microbenchmark: ~100ns/copy added for one
+> nested field (0.157s deep vs 0.127s shallow-only, same binary) — not
+> alarming.
+>
+> **RESIDUAL (still open):**
 > 2. **`m[1][0] = 9` divergence unchanged**: interpreter rejects
 >    (`interpreter/node_exec.rs:1481`, final `else` of a chain whose wording
 >    — "nested field access not fully supported" — reads as an unimplemented
