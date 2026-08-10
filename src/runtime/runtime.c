@@ -1477,15 +1477,34 @@ void spl_prefetch_wait(void) {}
  * rt_ Aliases (FFI-compatible wrappers)
  * ================================================================ */
 
-/* (ptr, len): see rt_text_arg_to_path. NOTE: the compiler also declares the
- * RETURN as I64 (a RuntimeValue), while this definition returns a raw char*.
- * That return-type divergence is a separate defect from the argument ABI fixed
- * here and is recorded in the family bug doc; the extern ABI gate compares
- * arity only. */
-const char* rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len) {
+/* (ptr, len) -> RuntimeValue: see rt_text_arg_to_path.
+ *
+ * The compiler declares BOTH sides of this signature --
+ * runtime_sffi.rs:1852 `RuntimeFuncSpec::new("rt_file_read_text", &[I64, I64],
+ * &[I64])` -- and the `&[I64]` result is a RuntimeValue, exactly what the
+ * canonical Rust definition (file_io/file_ops.rs:253) returns. This copy used
+ * to return a raw malloc'd `char*`; every caller in the AOT/native lane decoded
+ * that heap pointer as a tagged RuntimeValue, so a successful read came back
+ * as a value with no string tag -- observed as `len=0`, indistinguishable from
+ * an empty file or a missing one. The runtime's own handle validator prints
+ * "probable compiler/FFI ABI mismatch" on it. */
+int64_t rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
-    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return NULL;
-    return spl_file_read(path);
+    /* RT_NIL: TAG_SPECIAL(0b011) with payload 0 == 3; matches
+     * RuntimeValue::NIL in src/compiler_rust/runtime/src/value/core.rs:152,
+     * which is what the Rust definition returns for an unreadable path. */
+    const int64_t rt_nil = 3;
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return rt_nil;
+    /* spl_file_read returns an EMPTY STRING (not NULL) when the open fails, so
+     * it cannot tell "missing" from "empty". The Rust definition returns NIL
+     * for an unreadable path, and Simple callers spell `... ?? ""`, which only
+     * fires on nil -- so probe openability first or the `??` arm is dead. */
+    { FILE* probe = fopen(path, "rb"); if (!probe) return rt_nil; fclose(probe); }
+    char* content = spl_file_read(path);
+    if (!content) return rt_nil;
+    int64_t result = rt_string_new((const uint8_t*)content, (uint64_t)strlen(content));
+    free(content);
+    return result;
 }
 /* (ptr, len): see rt_text_arg_to_path above -- a Simple `text` is not
  * NUL-terminated and the compiler passes it as a pair. */

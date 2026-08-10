@@ -7589,13 +7589,25 @@ static int rt_text_arg_to_path(const uint8_t* ptr, uint64_t len, char* buf, size
     return 1;
 }
 
-/* (ptr, len): see rt_text_arg_to_path below. The return-type divergence
- * (compiler declares I64 / RuntimeValue, this returns char*) is tracked
- * separately -- the extern ABI gate compares arity only. */
-const char* rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len) {
+/* (ptr, len) -> RuntimeValue: see rt_text_arg_to_path above.
+ *
+ * runtime_sffi.rs:1852 declares `&[I64, I64] -> &[I64]`; the result is a
+ * RuntimeValue, not a raw C string. This copy used to return the malloc'd
+ * `char*` straight out of spl_file_read, which the caller then decoded as a
+ * tagged value -- see the sibling comment in runtime.c. */
+int64_t rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
-    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return NULL;
-    return spl_file_read(path);
+    /* RT_NIL == 3 (TAG_SPECIAL, payload 0); == RuntimeValue::NIL. */
+    const int64_t rt_nil = 3;
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return rt_nil;
+    /* spl_file_read returns "" (not NULL) on open failure; the Rust definition
+     * returns NIL, and Simple's `?? ""` only fires on nil. Probe openability. */
+    { FILE* probe = fopen(path, "rb"); if (!probe) return rt_nil; fclose(probe); }
+    char* content = spl_file_read(path);
+    if (!content) return rt_nil;
+    int64_t result = rt_string_new((const uint8_t*)content, (uint64_t)strlen(content));
+    free(content);
+    return result;
 }
 
 int64_t rt_file_read_text_rv(int64_t path_value) {

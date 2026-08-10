@@ -753,7 +753,8 @@ void        rt_prefetch_wait(void);                /* FFI alias */
 
 /* ===== rt_ Aliases (FFI-compatible wrappers) ===== */
 
-const char* rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len);
+/* -> RuntimeValue (I64), per runtime_sffi.rs:1852. NOT a C string. */
+int64_t     rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len);
 int64_t     rt_file_read_text_rv(int64_t path);
 int         rt_file_exists(const uint8_t* path_ptr, uint64_t path_len);
 int         rt_file_is_regular_no_follow(const uint8_t* path_ptr, uint64_t path_len);
