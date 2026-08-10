@@ -1870,9 +1870,36 @@ bool rt_dir_remove_all(const uint8_t* path_ptr, uint64_t path_len) {
     return rt_dir_remove_all_cpath(path);
 }
 
+/* (ptr, len) -> RuntimeValue (array of text), per runtime_sffi.rs:1888, and
+ * matching the canonical Rust definition (sffi/file_io/directory.rs:40 ->
+ * RuntimeValue).
+ *
+ * Until now there was NO definition of this shape anywhere in C: the only
+ * `rt_dir_list` the C lanes had was the platform header's C-string worker
+ * `(const char* path, int64_t* out_count)`. Both take two arguments, so the
+ * gate's arity check saw nothing -- but the compiler passes a path LENGTH as
+ * the second argument, which that worker dereferenced as an out-parameter and
+ * wrote through. SIGSEGV in all three C link orders, for an existing directory
+ * and for a missing one alike. The worker is now rt_dir_list_cpath and this is
+ * the entry point the compiler actually calls. */
+int64_t rt_dir_list(const uint8_t* path_ptr, uint64_t path_len) {
+    int64_t result = (int64_t)(uintptr_t)rt_array_new(0);
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return result;
+    int64_t count = 0;
+    const char** entries = rt_dir_list_cpath(path, &count);
+    for (int64_t i = 0; i < count; i++) {
+        const char* e = entries[i] ? entries[i] : "";
+        rt_array_push((SplArray*)(uintptr_t)result,
+                      rt_string_new((const uint8_t*)e, (uint64_t)strlen(e)));
+    }
+    if (entries) rt_dir_list_free(entries, count);
+    return result;
+}
+
 SplArray* rt_dir_list_array(const char* path) {
     int64_t count = 0;
-    const char** entries = rt_dir_list(path, &count);
+    const char** entries = rt_dir_list_cpath(path, &count);
     SplArray* result = spl_array_new_cap(count + 1);
     for (int64_t i = 0; i < count; i++) {
         spl_array_push(result, spl_str(entries[i]));
