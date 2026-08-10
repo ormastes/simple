@@ -86,7 +86,62 @@ Any proposed mechanism must satisfy all of:
 4. Absent (or far weaker) in the **STAGE4** lane, which has its own separate,
    already-filed and separately-guarded blowup.
 
-## Leading suspect (NOT yet established — see verdict)
+## MEASURED 2026-08-10: the O(F²) suspect below is **REFUTED**
+
+The discriminating sweep called for in "Next measurement" was run. **It did not
+reproduce the growth at all**, and it refutes the leading suspect.
+
+Harness: `build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple native-build
+--entry-closure --threads 1`, `SIMPLE_BOOTSTRAP=1` with
+**`SIMPLE_BOOTSTRAP_STAGE4` unset** (so `bootstrap_flat_mode` is TRUE and the
+`_bootstrap_hir_*` accumulators DO execute), synthetic `mod0..modN` import chain.
+Peak RSS from `/usr/bin/time -f %M`.
+
+**Sweep A — functions per file, 20 files:**
+
+| funcs/file | secs | peak RSS |
+|---|---|---|
+| 20 | 10 | 157.3 MB |
+| 40 | 15 | 158.1 MB |
+| 80 | 94 | 158.8 MB |
+
+**Sweep B — file count, 10 funcs/file:**
+
+| files | secs | peak RSS |
+|---|---|---|
+| 20 | 9 | 157.2 MB |
+| 60 | 14 | 158.0 MB |
+| 120 | 20 | 158.5 MB |
+
+**RSS is FLAT — within 1% — across a 4x span of functions-per-file and a 6x span
+of file count.** The O(F²) push-clone hypothesis predicted ~16x on Sweep A; even
+plain linear retention predicted ~4x and ~6x. Both are refuted. Note Sweep A's
+*time* is superlinear (10s → 94s) while memory is not — so the accumulators may
+well be a real **compile-time** cost, but they are **not** the memory mechanism.
+
+### Trap: the first version of this sweep was VACUOUS
+
+The generator copied from `check-stage4-selfhost-parse-memory-multifile.shs`
+makes each module export exactly ONE function and `main` call only that one. Under
+`--entry-closure` the rest are dead-code-eliminated and never lowered:
+`out.bin` was **byte-identical at 22832 bytes** for 20, 40 and 80 funcs/file, i.e.
+4x the source produced 0% more output. The tables above are from the corrected
+generator, where `f_j` calls `f_(j-1)` and `f_0` calls the previous module's last
+function, so every generated function is live (out.bin then does grow, and Sweep
+A's time cost appears). **Any future sweep here must assert that `out.bin` size
+or a lowered-function count actually changes with the swept parameter** — flat
+RSS on a vacuous corpus reads exactly like a refutation.
+
+### What this means
+
+The synthetic N-file × M-function corpus **cannot reach the regime** that grows
+at 1 GB/min: it stays pinned at the ~157 MB floor, which is just the compiler's
+own baseline. The mechanism therefore depends on something the synthetic corpus
+does not contain — plausibly generics/traits/impls, dictionaries, cross-module
+type resolution, or the sheer symbol-table size of the real compiler tree — not
+on raw function or module *count*.
+
+## Leading suspect (REFUTED as the memory mechanism — see above)
 
 `src/compiler/20.hir/hir_lowering/_Items/lowering_helpers.spl:30-107` holds
 seven module-level **global accumulator arrays** written through a
@@ -125,7 +180,11 @@ guard **never executes the `_bootstrap_hir_*` accumulators at all**. The Stage-3
 lane has **no memory guard of its own**. That gap is itself a defect: it is why
 this class could grow to 52 GB with every gate green.
 
-## Repro without a 60-minute build
+## Repro without a 60-minute build (ATTEMPTED — DOES NOT REPRODUCE)
+
+**This section is retained for the record; the sweep it proposes was run and came
+back flat. See "MEASURED 2026-08-10" above before spending time here.**
+
 
 `build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple` (the binary that
 compiles Stage-3) driving a small synthetic N-file `--entry-closure` chain with
@@ -138,17 +197,48 @@ linear. Probe harness kept out of tree at
 
 ## Verdict
 
-**Root cause NOT established.** A concrete, well-fitting suspect is named above
-with file:line, but the discriminating measurement has not been completed.
+**Root cause NOT established**, and the previously-leading suspect is now
+**refuted** by direct measurement (see "MEASURED 2026-08-10" above). The
+discriminating sweep was completed and came back negative on both axes: peak RSS
+is flat within 1% across 4x functions-per-file and 6x file count.
 
-**Next measurement (cheap, bounded — do this before anything else):** the
-functions-per-file sweep in "Repro" above at fixed file count (e.g. 20 files ×
-{20, 80} funcs/file, 1 thread, `ulimit -v`, `timeout`). A **~16x** RSS jump for a
-4x funcs/file increase confirms the O(F²) push-clone; a **~4x** jump refutes it
-and points instead at plain per-module retention (i.e. the flat-AST arenas
+Two further facts constrain what remains:
+
+1. **The real trace is LINEAR, not quadratic.** 26.5 GB @30 min → 52.5 GB @59
+   min is a 1.98x RSS rise over a 1.97x time rise. Any *quadratic* accumulator
+   (including the `arr = arr.push(x)` clone idiom) is the wrong shape for this
+   curve regardless of the sweep. The mechanism is **constant retention per unit
+   of work**, i.e. something allocated per item and simply never freed under the
+   no-GC bootstrap runtime.
+2. **`bootstrap_hir_functions_reset()` is per-module**, not per-run
+   (`_Items/module_lowering.spl:2040`, gated only on `bootstrap_mode`), so
+   `_bootstrap_hir_functions` is bounded by the largest single module. Only the
+   seven `_bootstrap_hir_module_*` arrays survive across modules
+   (`bootstrap_hir_modules_reset()` at `:1811` runs entry-module-only under
+   `SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1`) — and Sweep B shows growing the module
+   count 6x does not move RSS.
+
+**Next measurement:** stop using a synthetic corpus — it cannot leave the ~157 MB
+floor. Instead compile a **real bounded subset of the compiler tree** (e.g.
+`--entry-closure` from a mid-sized real module under `src/compiler/10.frontend/`),
+with an RSS sampler at ~10 s and `SIMPLE_COMPILER_PHASE_PROFILE=1`, and bisect on
+*source features* rather than counts: confirm growth appears, then remove
+generics/traits/impls/dicts from the closure until the slope dies. The failed
+sweeps prove the driver of the 1 GB/min is a **feature** of the real source, not
+its size. Second-choice measurement if that is still too slow: attach
+`heaptrack`/`massif` to a 5-minute prefix of the real Stage-3 run and read the
+top retained allocation site directly — the growth is visible within minutes, so
+a bounded prefix is sufficient and does not need the 60-minute run.
+
+Still-unexcluded structural candidate (not yet tested, and NOT promoted to
+"suspect" — it has no measurement behind it): the flat-AST arenas
 `decl_*`/`stmt_*`/`expr_*` in `src/compiler/10.frontend/core/_Ast/`, which the
-streaming driver only clears via a **single** `ast_reset()` **after all modules
-are lowered** — `src/compiler/80.driver/driver_hir_pipeline_lowering.spl:229`).
+streaming driver clears via a **single** `ast_reset()` **after all modules are
+lowered** (`src/compiler/80.driver/driver_hir_pipeline_lowering.spl:230`). This
+retains every module's flat AST for the whole run and is linear in total source
+size — the right *shape* for the observed curve. Sweep B did not move it, but
+Sweep B's modules are trivial; per-module AST bytes, not module count, is the
+quantity that matters.
 
 ## Follow-on work regardless of verdict
 
