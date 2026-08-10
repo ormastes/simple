@@ -77,6 +77,11 @@ rt_index_of|ab773bb5d5e|.? operator fix
 ambiguous LLVM method resolution|(pre-existing)|LLVM codegen linked (Rust-side diagnostic)'
 
 rc=0
+examined=0
+simple_bearing=0
+marker_checks=0
+marker_failures=0
+fail_detail=""
 
 for b in $BINS; do
   [ -n "$b" ] || continue
@@ -87,6 +92,7 @@ for b in $BINS; do
     continue
   fi
 
+  examined=$((examined + 1))
   real=$(readlink -f "$b")
   echo "path    : $b"
   if [ "$real" != "$b" ]; then
@@ -129,13 +135,46 @@ for b in $BINS; do
   echo "backends: llvm::=$llvm_syms lld::=$lld_syms  (llvm:: >> 0 with lld::=0 means LLVM CODEGEN is linked, not just the linker)"
 
   # --- commit markers ---
+  # A binary that carries real Simple-compiled code (HYBRID or pure-Simple
+  # lineage -- i.e. simple_syms > 0) is expected to contain every marker with
+  # a real commit hash: those fixes landed long enough ago that any current
+  # build should have them baked in. A binary missing one is either stale
+  # (built before the fix) or the fix regressed -- either way this gate must
+  # go RED, not just report it. Markers tagged "(pre-existing)" are
+  # diagnostic-only (e.g. confirms LLVM is linked) and are not asserted.
+  #
+  # The per-marker loop below runs in a pipeline subshell (`echo | while`),
+  # so counters written inside it are lost when the subshell exits -- POSIX
+  # sh has no shared-variable pipe-to-parent. Route the loop's verdicts
+  # through a temp file instead of trying to mutate outer-shell counters
+  # from inside the pipe.
+  markerfile=$(mktemp)
   echo "markers :"
   echo "$MARKERS" | while IFS='|' read -r lit commit what; do
     [ -n "$lit" ] || continue
     n=$(strings -a "$real" 2>/dev/null | grep -cF "$lit" || true)
     if [ "${n:-0}" -gt 0 ]; then st="PRESENT"; else st="absent "; fi
     printf '          %s  %-14s %-3s  %s\n' "$st" "$commit" "$n" "$what"
+    if [ "$commit" != "(pre-existing)" ]; then
+      printf '%s|%s\n' "$st" "$commit" >> "$markerfile"
+    fi
   done
+
+  if [ "${simple_syms:-0}" -gt 0 ]; then
+    simple_bearing=$((simple_bearing + 1))
+    while IFS='|' read -r st commit; do
+      [ -n "$st" ] || continue
+      marker_checks=$((marker_checks + 1))
+      case "$st" in
+        "absent "*)
+          marker_failures=$((marker_failures + 1))
+          fail_detail="$fail_detail
+  $real: marker for $commit is ABSENT despite simple_syms=$simple_syms (expected present -- stale build or regression)"
+          ;;
+      esac
+    done < "$markerfile"
+  fi
+  rm -f "$markerfile"
 
   # --- reachability (only with --probe) ---
   if [ "$PROBE" = 1 ]; then
@@ -162,4 +201,29 @@ if [ "$PROBE" = 0 ]; then
   echo "note: run with --probe to test whether a linked backend is actually"
   echo "      SELECTABLE. Symbol presence alone does not prove reachability."
 fi
-exit $rc
+
+# Fail-closed verdict line, always the LAST line of stdout.
+#
+#   ERROR  no binary at all was examined (all named paths missing), or every
+#          examined binary was RUST-SEED/UNKNOWN so zero marker assertions
+#          were possible -- a run that classified nothing is not evidence of
+#          anything, and must not read as a silent pass.
+#   FAIL   a Simple-symbol-bearing binary is missing a marker for a real,
+#          already-landed commit -- provenance says it should have the fix
+#          and it does not.
+#   PASS   every examined Simple-symbol-bearing binary carries every
+#          real-commit marker.
+if [ "$examined" -eq 0 ]; then
+  echo "ERROR — nothing was checked: 0 of the named binaries exist"
+  exit 2
+fi
+if [ "$marker_checks" -eq 0 ]; then
+  echo "ERROR — nothing was checked: $examined binary(ies) examined but 0 carried Simple-compiled code (simple_syms>0), so 0 marker assertions were possible"
+  exit 2
+fi
+if [ "$marker_failures" -gt 0 ]; then
+  echo "FAIL — $marker_failures/$marker_checks marker check(s) failed across $simple_bearing Simple-symbol-bearing binary(ies):$fail_detail"
+  exit 1
+fi
+echo "PASS — $marker_checks marker check(s) verified present across $simple_bearing Simple-symbol-bearing binary(ies) ($examined binary(ies) examined total)"
+exit 0
