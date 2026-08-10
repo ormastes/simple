@@ -26,3 +26,30 @@ describe "HostedSdl2Backend":
     it "rejects negative dimensions":
         val result = HostedSdl2Backend.try_create(-1, -1, "test")
         expect(result).to_equal(nil)
+
+    # Regression coverage for doc/04_architecture/ui/sdl2_seam_subset_audit.md:
+    # `clear`/`fill_rect`/`present` used to call rt_sdl2_clear/rt_sdl2_fill_rect/
+    # rt_sdl2_present, none of which exist in runtime_sdl2.c. clear/fill_rect/
+    # put_pixel are fixed to be CPU-buffer-only (there is no native
+    # per-primitive draw entry point, only whole-frame rt_sdl2_present_rgba);
+    # this exercises that buffer directly via a hand-built instance, bypassing
+    # try_create (which needs a real display and returns nil headless).
+    it "clear/fill_rect/put_pixel update the CPU pixel buffer directly":
+        val be = HostedSdl2Backend(window_handle: 0, w: 4, h: 4, pixels: [0u32; 16])
+        be.clear(0xAABBCCDDu32)
+        expect(be.read_pixel(0, 0)).to_equal(0xAABBCCDDu32)
+        be.fill_rect(1, 1, 2, 2, 0x11223344u32)
+        expect(be.read_pixel(1, 1)).to_equal(0x11223344u32)
+        be.put_pixel(3, 3, 0x99999999u32)
+        expect(be.read_pixel(3, 3)).to_equal(0x99999999u32)
+
+    # `resize_window` used to call a nonexistent rt_sdl2_resize_window; fixed
+    # to call the real (void) rt_sdl2_set_window_size. Since SDL reports no
+    # native failure signal for that call, resize() can only honestly refuse
+    # on its one checkable precondition — a live window handle — which this
+    # proves it does rather than silently reporting success.
+    it "resize() refuses on a dead window handle instead of reporting fake success":
+        val be = HostedSdl2Backend(window_handle: 0, w: 4, h: 4, pixels: [0u32; 16])
+        expect(be.resize(8, 8)).to_equal(false)
+        expect(be.width()).to_equal(4)
+        expect(be.height()).to_equal(4)
