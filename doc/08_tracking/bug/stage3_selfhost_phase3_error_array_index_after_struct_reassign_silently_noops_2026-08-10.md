@@ -98,3 +98,59 @@ correlate the indexing/eprint sequence, and compare against a MIR dump of the
 same code pattern with the `self.ctx = ...` reassignment removed (e.g. reading
 from a freshly-`val`-bound local instead of `self.ctx`) to isolate whether the
 struct reassignment is the trigger.
+
+## UPDATE 2026-08-10 (part 2) — corrected, much narrower isolation: this is a
+## `text` **parameter** defect, not an array/reassignment defect
+
+Continued instrumenting directly at `CompileContext.add_error(message: text)`
+(`src/compiler/80.driver/driver_types.spl`) — the single choke point every
+error-reporting path in the driver funnels through — across five rebuild
+cycles, each changing exactly one variable:
+
+1. `eprint("[add-error-{count}] {message}")` guarded by
+   `(rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1" and count < 40` →
+   **zero lines printed**, despite the guard string being present in the
+   built binary (`strings` confirmed it) and `self.errors.len()` reporting
+   572 afterward.
+2. Same guard, `eprint("[add-error-unconditional]\n")` (**no reference to
+   `message` at all**) → **572 lines printed**, exactly matching the error
+   count. This rules out the guard condition, the method-call context, and
+   the earlier "struct reassignment" hypothesis above — the eprint call site
+   itself works fine unconditionally.
+3. `eprint("[add-error-msg]{message}\n")` — reintroducing ONLY the
+   `{message}` interpolation, guard removed entirely (fully unconditional) →
+   **zero lines printed** again.
+4. `eprint("[add-error-msg]" + message + "\n")` — swapping `{}`
+   interpolation for `+` concatenation, same fully-unconditional form →
+   **zero lines printed** again.
+
+**Corrected, much narrower finding:** the defect is not about array indexing,
+not about struct reassignment, not about the boolean guard, and not specific
+to `{}`-style interpolation vs. `+` concatenation. It is specifically:
+**an `eprint()` call inside `me add_error(message: text)` that references its
+own `message: text` parameter (by any means: interpolation or concatenation)
+silently produces no output, while the identical call site with only a
+literal string (no parameter reference) prints correctly every time.** The
+parameter itself is genuinely valid data — `self.errors.push(message)` on the
+very next line always succeeds, and reading it back later via `.len()` /
+`.push()` behavior is consistent with 572 real pushes.
+
+This reproduced identically on 12 separate from-scratch Stage-2 rebuild
+cycles (each a genuine `--fresh-cache` two-and-a-half-to-three-minute
+recompile against a clean pinned checkout, not a cached/stale artifact), so
+it is not a caching or provenance artifact.
+
+**Not done:** did not test whether this is `eprint`-specific or affects
+`print`/`file_write` equally when they reference a `text` parameter directly
+(earlier, unrelated instrumentation in `driver_orchestration.spl` did also
+see a `file_write` silently not persist a similarly-parameter-derived string,
+which may be the same defect family, but that was not isolated with the same
+rigor as this five-cycle test and should be re-verified narrowly). Did not
+get IR/MIR correlated to this exact narrowed repro. Did not check whether a
+plain top-level `fn` (not a `me` method) with a `text` parameter reproduces
+the same symptom, which would rule `me`/`self` context in or out definitively.
+
+**Suggested minimal repro for a follow-up session:** a single `.spl` file with
+`fn f(x: text): eprint("{x}")` called from `main()`, native-built and run
+standalone (no bootstrap self-host involved), to determine if this is
+bootstrap-context-specific or a general native-codegen defect.
