@@ -32,7 +32,10 @@
 > engine; would add a perf cliff). Perf cost measured on a 300k-iteration
 > struct-copy-with-nested-field microbenchmark: ~100ns/copy added for one
 > nested field (0.157s deep vs 0.127s shallow-only, same binary) — not
-> alarming.
+> alarming. Landed as commit `4f755fdeb930`; confirmed an ancestor of this
+> doc's base at push time — a sibling session's doc-only push had briefly
+> reverted this paragraph's TEXT back to "open" while the underlying CODE fix
+> was already landed and unaffected; restored here to match the actual code.
 >
 > **RESIDUAL (still open):**
 > 2. **`m[1][0] = 9` divergence unchanged**: interpreter rejects
@@ -49,6 +52,56 @@
 >
 > Deployed `bin/release/x86_64-unknown-linux-gnu/simple` is STALE w.r.t. all
 > of this until redeployed from a post-`9106761fe76` build.
+
+> **RESIDUAL item 3 (AOT lane) — MEASURED 2026-08-10 (later session).** Base:
+> local HEAD `f223b75ed66` (contains `7dd296f2ef6`, the missing
+> `MirInst::AggregateCopy` LLVM dispatch arm — the `llc` void-type blocker
+> mentioned above was actually a build break that ALSO silently dropped struct
+> copies on AOT) plus uncommitted WC edits matching `4f755fdeb930` (deep
+> `deep_fields` struct-field copy, confirmed a real ancestor commit by push
+> time — see the note on item 1 above). Binary: fresh `cargo build --release`
+> of `src/compiler_rust/target/release/simple`, 59,083,512 B, mtime
+> 2026-08-10 10:39:29 UTC, sha256
+> `978922ae4f72ac7e7306e0f81669eb82e84fd20e28485e14371952a0c03e9e89`.
+>
+> A separate, still-open, pre-existing defect blocks the probe corpus
+> as-shipped: every `p*.spl` probe ends with a top-level bare `main()` call,
+> which lowers to a `global void` LLVM initializer that `llc-20` rejects —
+> reproduces for ANY top-level call, struct or not (confirmed on a
+> struct-free `print("hi")` probe). Worked around by dropping the trailing
+> `main()` line per probe (relying on `fn main():` auto-invocation, same as
+> `scripts/check/check-aot-smoke.shs`) — probe bodies were not edited.
+>
+> Measured (p1–p6; p7–p9 not reached — host saturated by concurrent parallel
+> stage2/stage3 bootstrap builds, repeated `native-build` attempts hit
+> 120–280s wrapper timeouts with no verdict, reported unreachable not as a
+> result):
+>
+> | Position | AOT now |
+> |---|---|
+> | plain assignment | COPY (`f.a`≠`f2.a` bit patterns) |
+> | nested struct field via copy | **COPY** (first run where the deep-copy path is actually wired and exercised) |
+> | argument passing | COPY |
+> | return value | COPY |
+> | list element extraction | **ALIAS — unchanged** |
+> | dict value extraction | **ALIAS — unchanged** |
+>
+> The two container-extraction ALIAS cells did **not** flip: both fixes are
+> scoped to `MirInst::AggregateCopy` (assignment/copy of a whole struct
+> value), not to the list/dict element-read lowering path, so this is the
+> expected (not surprising) outcome, not a regression. Full printed values:
+> `doc/07_guide/language/value_semantics_by_engine.md`.
+>
+> **Harness gap confirmed**: `test/03_system/language/value_semantics/
+> cross_engine_value_semantics_spec.spl`'s `describe "the AOT lane is either
+> measured or blocked by a FILED defect"` only classifies native-build
+> *reachability* (`blocked_known_llc20` / `unreachable_timeout_or_killed` /
+> `build_ok_unmeasured`) via `p1_plain_assignment.spl` **unmodified** (with its
+> trailing `main()` call) — it will currently always land in
+> `blocked_known_llc20` because of the void-type issue above, and it never
+> asserts or compares AOT struct-copy *values* against interp/JIT. AOT is not
+> wired into the value-comparison harness at all; only interp vs JIT are
+> compared for values.
 
 - Date: 2026-08-10
 - Severity: HIGH (silent cross-engine semantic divergence; corrupts any code

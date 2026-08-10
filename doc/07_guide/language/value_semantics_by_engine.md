@@ -1,5 +1,64 @@
 # Value vs Alias Semantics, Per Engine (measured 2026-08-10)
 
+> **RE-MEASURED 2026-08-10 (later session) — AOT column, post-AggregateCopy-dispatch-fix.**
+> Base: local HEAD `f223b75ed66` (contains `7dd296f2ef6`, the missing
+> `MirInst::AggregateCopy` LLVM dispatch arm fix) **plus** uncommitted WC edits
+> in `src/compiler_rust/compiler/src/codegen/**` and `mir/**` that match commit
+> `4f755fdeb930` (deep-copy of struct-typed fields via `deep_fields`) verbatim
+> — confirmed by `grep deep_fields src/compiler_rust/compiler/src/codegen/llvm/functions/objects.rs`
+> returning the same call sites as that commit's diff. `4f755fdeb930` itself is
+> NOT a local ancestor (it lives 39 commits ahead on `origin/main`,
+> `107ac5b382b`, not yet fetched/rebased into this WC) but its code is present
+> uncommitted. Binary: freshly `cargo build --release`'d
+> `src/compiler_rust/target/release/simple`, 59,083,512 B, mtime
+> 2026-08-10 10:39:29 UTC, sha256
+> `978922ae4f72ac7e7306e0f81669eb82e84fd20e28485e14371952a0c03e9e89` — built
+> from the WC state above, so both fixes are compiled in.
+>
+> **Corpus caveat:** every probe in
+> `test/03_system/language/value_semantics/probe/p*.spl` ends with a top-level
+> bare `main()` call. That call is itself lowered to a module-level global
+> initializer that LLVM sees as `global void`, which `llc-20` rejects
+> (`void type only allowed for function results`) — reproduces identically on
+> BOTH the old deployed seed and the fresh one, for ANY program with a
+> top-level call (verified on a trivial `print("hi")` probe with no structs at
+> all). This is a **separate, pre-existing, still-open defect**, not something
+> the two struct-copy fixes touch. To measure the AOT lane at all, each probe
+> file was copied unmodified except for deleting the trailing `main()` line
+> (relying on `fn main():` auto-invocation, the same pattern
+> `scripts/check/check-aot-smoke.shs` already uses) — no probe *body* was
+> edited. p1–p6 were built and run this way; p7–p9 (arrays/nested-index/text)
+> could not be measured this session — the host was saturated by concurrent
+> stage3/stage2 bootstrap builds from parallel sessions (two `native-build`
+> invocations pinned at ~100% CPU throughout), and repeated attempts hit the
+> shell's 120–280s wrapper timeouts with no verdict. Reported as **unreachable
+> this session**, not as a result.
+>
+> **Result — the two ALIAS cells (list element extraction, dict value
+> extraction) did NOT flip to COPY.** They remain aliased under AOT, exactly
+> as before these two fixes landed — expected, since both fixes are scoped to
+> `MirInst::AggregateCopy` (struct assignment/copy), not to list/dict element
+> read paths.
+>
+> | Position | AOT (this measurement) | printed values |
+> |---|---|---|
+> | plain assignment (p1) | **COPY** | `f.a` bits(1.0)=4607182418800017408, `f2.a` bits(7.0)=4619567317775286272 — distinct |
+> | nested struct field via copy (p2) | **COPY** | `o.inner.a`=bits(99.0)=4636666922610458624, `o2.inner.a`=bits(33.0)=4629841154425225216 — distinct, unchanged from S2 write |
+> | argument passing (p3) | **COPY** | `g.a`=bits(1.0)=4607182418800017408 (callee's `.a=55.0` did not leak out) |
+> | return value (p4) | **COPY** | `r.a`=bits(1.0)=4607182418800017408, `r2.a`=bits(88.0)=4635892866424504320 — distinct |
+> | list element extraction (p5) | **ALIAS (unchanged)** | `lst[0].a`=`e.a`=same bit pattern after `e.a=77.0` — mutation leaked into the list |
+> | dict value extraction (p6) | **ALIAS (unchanged)** | `d["k"].a`=`de.a`=44.0 (decimal, this path formats fine) — mutation leaked into the dict |
+> | arrays (p7) | **NOT MEASURED** — host-starved, no verdict this session |
+> | `m[1][0]=9` (p8) | **NOT MEASURED** — host-starved, no verdict this session |
+> | text (p9) | **NOT MEASURED** — host-starved, no verdict this session |
+>
+> f64 struct fields still interpolate as raw IEEE-754 bit patterns under AOT
+> (pre-existing, separate defect, noted in the prior measurement below) — the
+> copy/alias verdict is still readable from whether the two bit patterns
+> match. The full 9-position table below (recorded by the prior session on an
+> older binary) is preserved for its list/dict/array/text rows, which this
+> session did not re-run; only the six rows above were re-verified just now.
+
 > **RE-MEASURED 2026-08-10 on a FRESH seed build — the table below describes a
 > STALE binary.** The deployed `bin/release/x86_64-unknown-linux-gnu/simple`
 > used for the original measurement was built 2026-08-09 04:50, BEFORE the
@@ -142,6 +201,14 @@ for the f64 probe was still readable from the distinct bit patterns
 (1.0 vs 7.0 = COPY). Durable gate: `scripts/check/check-aot-smoke.shs`
 (native-builds, runs, and output-asserts a struct probe; PASS/FAIL/ERROR
 verdict convention).
+
+**RE-CONFIRMED 2026-08-10 (later session)**, after both `7dd296f2ef6` (missing
+`AggregateCopy` LLVM dispatch arm) and `4f755fdeb930` (deep `deep_fields`
+struct-field copy) landed: the nested-struct-field row above stays **COPY**
+(now for the right reason — deep copy actually runs, not merely absent
+divergence) and the two ALIAS rows (list element extraction, dict value
+extraction) are **unchanged — still ALIAS**. See the top-of-file block for the
+full re-measurement, printed values, and the corpus/host caveats.
 
 ## Probe source
 
