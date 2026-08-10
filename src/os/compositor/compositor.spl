@@ -535,6 +535,24 @@ class Compositor:
             step = step + 1
         self.focused_idx = -1
 
+    me cycle_focus_preserve_order():
+        """Cycle keyboard focus without conflating focus with z-order raise."""
+        if self.surfaces.len() == 0:
+            self.focused_idx = -1
+            return
+        var step = 1
+        while step <= self.surfaces.len():
+            val idx = (self.focused_idx + step) % self.surfaces.len()
+            if (self.surfaces[idx].visible and
+                wm_window_state_accepts_input(self.surfaces[idx].state)):
+                self.focused_idx = idx
+                var surface = self.surfaces[idx]
+                surface.dirty = true
+                self.surfaces[idx] = surface
+                return
+            step = step + 1
+        self.focused_idx = -1
+
     me move_window(id: i32, x: i32, y: i32):
         val i = self.surface_index(id as u64)
         if i >= 0:
@@ -1690,6 +1708,31 @@ class Compositor:
         self.pending_wm_pointer_window_id = hit_id
         self.pending_wm_pointer_local_x = hit_local_x
         self.pending_wm_pointer_local_y = hit_local_y
+
+    me handle_pointer_step_scalars(
+        new_x: i32,
+        new_y: i32,
+        pointer_button_code: i32,
+        pointer_kind_code: i32
+    ):
+        """Canonical post-device pointer reducer for scalar OS adapters."""
+        var cursor_ref = self.cursor
+        cursor_ref.x = new_x
+        cursor_ref.y = new_y
+        self.cursor = cursor_ref
+        self.note_pending_wm_pointer_step(
+            new_x, new_y, pointer_button_code, pointer_kind_code)
+        if pointer_kind_code == 1 and pointer_button_code == 1:
+            var hit_idx = -1
+            var wi = 0
+            while wi < self.surfaces.len():
+                val surface = self.surfaces[wi]
+                if (new_x >= surface.x and new_x < surface.x + surface.width and
+                    new_y >= surface.y and new_y < surface.y + surface.height):
+                    hit_idx = wi
+                wi = wi + 1
+            if hit_idx >= 0:
+                self.focus_window(self.surfaces[hit_idx].id)
 
     # NOTE(2026-07-26): the has_pending_wm_pointer_step / pending_wm_pointer_*_value
     # `fn` accessors were DELETED, not left unused. On the freestanding
