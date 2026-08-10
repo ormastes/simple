@@ -1,7 +1,29 @@
 # The `# @cover` gate marks 227 system tests FAILED without running a single one
 
-**Status:** OPEN
+**Status:** ARCHITECTURAL-OPEN (re-confirmed 2026-08-10) — policy/rollout
+decision needed, not a code bug
 **Found:** 2026-08-04
+
+## 2026-08-10 re-verification
+
+`validate_system_test_covers` still lives at
+`src/lib/nogc_sync_mut/test_runner/test_runner_files.spl:203` (line moved
+slightly since 2026-08-04) and still gates by path predicate. Re-measured the
+gap directly (`/usr/bin/grep -rL '# @cover' test/03_system/ --include='*.spl'`
+vs. total `*.spl` count under `test/03_system/`): **2,326 of 4,115** files
+under `test/03_system/` currently have no `# @cover` line anywhere in them
+(a cruder whole-file grep than the doc's original first-30-lines measure, so
+not directly comparable number-for-number, but confirms the same order of
+magnitude and that the annotation gap has not closed — if anything the
+corpus has grown since 2026-08-04's 2,122/3,879). The gate itself is
+unchanged and still fails closed with zero examples executed, exactly as
+described.
+
+This remains a rollout/policy decision (dated exemption list vs. a measured
+annotation pass with coverage collection on), not something a bug-triage
+session can resolve unilaterally without either fabricating coverage claims
+across thousands of files or weakening a gate the repo rules explicitly
+forbid weakening. Left open, consistent with the original report.
 **Severity:** high — `test/03_system/app` reports 227 failures that are not test
 results, and the same gate covers 2,122 specs repo-wide
 
