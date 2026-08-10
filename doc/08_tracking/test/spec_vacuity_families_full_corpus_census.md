@@ -1,8 +1,164 @@
-# Spec-Vacuity Families 3 & 4 — Full-Corpus Census
+# Spec-Vacuity Families 3, 4 & 5 — Full-Corpus Census
 
-_Driver: `scripts/check/census-spec-vacuity.spl` (landed `bbe4682d52b`)._
-_Status: **COMPLETE for families 3 and 4** — 19,599 raw / 9,940 unique spec
-files, 100% of the corpus, scored for VTM001/VTM002 and SHADOW/NOSRC._
+_Driver: `scripts/check/census-spec-vacuity.spl` (landed `bbe4682d52b`,
+**corrected `3795acc2b77`**)._
+_Status: **COMPLETE for families 3, 4 and 5** — 19,597 spec files, 100% of the
+corpus, scored for VTM001/VTM002, SHADOW/NOSRC and HOLLOW._
+
+## CORRECTED RESULTS — 2026-08-10, `3795acc2b77`
+
+Everything below the next horizontal rule is the **superseded** 2026-08-10
+first-pass census, kept for the audit trail. Six defects in the driver have
+since been fixed (five correctness, one performance) and the whole corpus has
+been re-scanned. **This is the first driver run in the project's history to
+reach a verdict line.**
+
+```
+=== spec vacuity census: value-type helpers, self-reimplementation, comment cheats ===
+spec files scanned            : 19597
+struct/class names indexed    : 12862
+dedup: true duplicates        : 5008
+dedup: numbered-tree files with NO twin  : 5721
+dedup: paired but CONTENT-DIVERGENT      : 965   [counted, not deduped]
+
+--- family 3: value-type helper mutates a copy (deduped / raw) ---
+VTM001 field/index assign via struct param : 2 / 2
+VTM002 in-place mutator via struct param   : 0 / 0
+total                                      : 2 / 2
+
+--- family 4: spec re-implements the code under test ---
+SHADOW spec files declaring a src/ type name : 409 / 577
+distinct shadowed type names                 : 623
+NOSRC  spec files importing nothing at all   : 2597 / 3656   [LOW PRECISION]
+
+--- family 5: comment-cheat / hollow source assertion ---
+HOLLOW needles comment-only in every referenced file : 101 / 109
+needles located as real CODE                         : 19626
+needles not located in any referenced file           : 17188   [heuristic residue]
+product files read into the cache                    : 2104
+
+REPORT -- 19597 file(s) scanned, 2 deduped VTM finding(s), 2 raw; 409 deduped
+SHADOW file(s); 101 deduped HOLLOW needle(s)
+rc=0 wall=1685s
+```
+
+Run conditions: `setsid`-detached, `SIMPLE_TIMEOUT_SECONDS=0` set on the census
+process itself, `bin/simple` (Rust bootstrap seed) **not touched or relinked**,
+module dropped to the interpreter as before. Wall **1,685 s** (28 min) against
+four prior attempts that never finished, the longest at 740 s.
+
+### Corrected vs published numbers
+
+| measure | published (first pass) | corrected | why |
+|---|---|---|---|
+| VTM001 | 25 raw / 6 dedup | **2 / 2** | 19 hits were `dict[param.field] = v`; the rest were argument/consumed positions. Hand-adjudication had already put the true-positive count at 2. |
+| VTM002 | 8 raw / 3 dedup | **0 / 0** | all were `add`/`set`/`put` whose result is returned or bound, plus an `[Array]` param the driver never watched. |
+| SHADOW spec files | 583 raw / 275 dedup | **577 / 409** | raw drift is corpus churn; the dedup column rose because the old predicate dropped 5,721 twin-less specs. |
+| distinct shadowed names | 626 | **623** | corpus churn. |
+| SHADOW ∧ imports-nothing | 410 raw / 199 dedup | not re-derived | the driver reports SHADOW and NOSRC separately; the intersection is a doc-side join and is **not** re-computed here. Treat 410/199 as stale. |
+| HOLLOW (comment-cheat) | 183 raw / 108 dedup (2026-08-09 ad-hoc scan) | **109 / 101** | the ~3x over-report was the shell-`case`-arm, C-preprocessor and mis-paired-path rules; the ad-hoc scan also had no scanner in the repo — family 5 is now implemented in the driver. |
+
+The two surviving VTM findings are both `write_struct_dict_holder(self:
+MutableStructDictHolder)` in `test/{unit,01_unit}/compiler/interpreter/
+self_field_assign_spec.spl`. The other genuine finding from the first pass,
+`_space_add(space: ProcessVmSpace)` in `vmm_vma_spec.spl`, is **gone from the
+corpus** — it was replaced by `_cow_space_add`, which returns the space and the
+caller rebinds (`parent = _cow_space_add(parent, ...)`). That is the correct
+pattern, so its absence is remediation, not a scanner regression.
+
+### The six defects fixed
+
+1. **A leading `*` is a comment only in C-family files.** In shell it is a
+   `case` arm (`*rust-built*|*rust*seed*`) — executable dispatch, often the
+   exact behaviour the gate exists to prove. 16 sound gates were falsely
+   hollowed.
+2. **`#` in a `.c`/`.h` file is a preprocessor directive, not a comment.**
+   `#include "runtime_memtrack.h"` and `#define FORK_CAPTURE_LIMIT 64` are code.
+3. **Nearest-preceding-path pairing.** A needle is now classified against the
+   **union** of every product path the spec references; HOLLOW requires
+   comment-only in *all* of them. Specs that never read source text (assertions
+   against return values or subprocess stdout), path **arguments**, and negative
+   /absence assertions are excluded — the three exclusion classes that made 12
+   of 18 surviving first-pass rows wrong.
+4. **`dict[param.field] = v` is not a mutation of `param`.** A statement-head
+   gate requires the receiver to begin the statement, so a parameter appearing
+   as a subscript expression or as a call argument is never an assignment
+   target.
+5. **`add` is not always a mutator.** A mutator call whose result is *consumed*
+   (`return v.add(v)`, `val x = v.add(v)`) is not an in-place-mutation claim;
+   VTM002 now requires the chain to be the whole statement.
+6. **`build_kind_index` was O(n²)** — a linear scan of the accumulated name list
+   on every one of ~13k inserts, executed by the tree-walk interpreter. Replaced
+   with a chained hash (2,048 buckets; flat parallel arrays plus a per-bucket
+   linked list held on a `class`, so no array copying and no `char_code_at`).
+   This is what turned "never finishes" into 1,685 s.
+
+### The control was grown, and proven non-vacuous
+
+The positive control now carries a planted case for **every** false-positive
+pattern above — shell `case` arm, `.c` preprocessor line, `.c` `#define`,
+mis-paired path (needle is code in the *second* referenced file), negative
+assertion, `dict[param.field] = v`, `return v.add(v)`, `val x = v.add(v)` — all
+of which must stay SILENT, alongside the 5 planted VTM violations and 2 planted
+comment-only needles that must FIRE.
+
+Non-vacuity proof: reverting the five correctness rules **in place** (uniform
+`#`/`//`/`*`/`/*` comment rule, first-path-only pairing, no statement-head gate,
+no discarded-result gate) and re-running `--selftest` produces
+
+```
+  control MISMATCH ctrl_ok_returned_add: detected=true expected=false
+  control MISMATCH ctrl_ok_bound_add: detected=true expected=false
+  control MISMATCH hollow/shell_case_arm: got=comment expected=code
+  control MISMATCH hollow/c_preprocessor: got=comment expected=code
+  control MISMATCH hollow/c_define: got=comment expected=code
+  control MISMATCH hollow/mispaired_path: got=comment expected=code
+ERROR -- positive control did not reproduce; scan not attempted
+rc=2
+```
+
+**Honest caveat:** the `ctrl_ok_dict_index_by_field` case passes both before and
+after, so it does *not* by itself prove the statement-head gate. The published
+19 `functions[func.symbol] = func` hits came from the separate hand-written
+scorer, not from this driver — the driver's postfix walk already broke on the
+closing `]`. The gate makes that suppression explicit and principled rather than
+incidental, and the control pins it against future regression, but it is not
+evidence of a fix to a driver behaviour that was ever observed.
+
+### Dedup is now real (item 4)
+
+`is_duplicate_tree` was a bare prefix test. It is replaced by an actual pair
+test: a file is a duplicate only when its twin exists at the mirrored path
+**and** the two files are byte-identical.
+
+| bucket | count |
+|---|---|
+| true duplicates (twin exists, content identical) | 5,008 |
+| numbered-tree specs with **no twin at all** | 5,721 |
+| paired but **content-divergent** (two different tests) | 965 |
+
+Both the orphans and the divergent pairs are now counted in the deduped column
+instead of being silently dropped, which is why the deduped SHADOW count rose
+from 275 to 409 even as the raw count fell. The deduped column is no longer a
+fail-open lower bound.
+
+### Family 5 residue, stated plainly
+
+`needles not located in any referenced file` is **17,188** — larger than the
+located population. That is the heuristic's residue, not a finding: a needle may
+be asserted against a transformed or concatenated buffer, or the spec may
+reference a path it does not read the needle from. It is reported so the ratio
+is visible, and it is deliberately excluded from HOLLOW. HOLLOW is only claimed
+when the needle **was** located and every located occurrence, in every
+referenced file, is a comment.
+
+Worklists: `spec_value_type_mutation_worklist.tsv` (2 rows),
+`spec_hollow_needle_worklist.tsv` (101 rows),
+`spec_shadow_reimplementation_worklist.tsv` (ranked triage subset of the 409).
+
+---
+
+_Superseded first-pass census follows._
 
 ## Coverage
 

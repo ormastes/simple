@@ -73,3 +73,28 @@ None of the three can hide a real cheat, so the gate is fail-loud, not fail-open
 but the noise is high enough that the headline count is not usable as a count.
 See the honest-bracket note in
 `doc/08_tracking/bug/comment_cheat_absent_capabilities_2026-08-10.md`.
+
+## RESOLVED 2026-08-10 — `3795acc2b77`
+
+All three defects above are fixed in `scripts/check/census-spec-vacuity.spl`,
+together with two further family-3 rule bugs (`dict[param.field] = v` is not a
+mutation of `param`; `add` is not a mutator when its result is consumed) and the
+O(n²) `build_kind_index` that made a whole-corpus scan impossible.
+
+- **D-S1** — `*`-continuation is now restricted to C-family extensions; in
+  `.shs`/`.sh`/`.spl` only `#` starts a comment, so a `case` arm is CODE.
+- **D-S2** — `#` is no longer a comment in C-family files; only `//`, `/*` and
+  `*`-continuations are.
+- **D-S3** — a needle is classified against the **union** of every product path
+  the spec references, not the nearest preceding literal. Specs that never read
+  source text, path arguments, and negative/absence assertions are excluded.
+
+Comment-cheat detection did not previously exist as a committed scanner (the
+2026-08-09 census was ad-hoc); it is now family 5 (`HOLLOW`) inside the driver,
+with a planted positive control for each false-positive pattern named above.
+
+Corrected whole-corpus result — the first driver run ever to reach a verdict
+line — is **101 deduped / 109 raw HOLLOW needles** (19,597 spec files, wall
+1,685 s, `rc=0`), against the published 183 raw / 108 deduped. Detail, including
+the pre-fix `control MISMATCH` proof that the grown control is non-vacuous:
+`doc/08_tracking/test/spec_vacuity_families_full_corpus_census.md`.
