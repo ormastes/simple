@@ -1,6 +1,6 @@
 ---
 id: web_presenter_interp_perf_2026-07-05
-status: OPEN
+status: ALREADY-FIXED (for the 320x240 gate; re-verified 2026-08-10 — see "Fixes"/"Result" sections below. Larger-resolution interpreter per-pixel loops remain a separate, lower-priority lever gated by SIMPLE_ONE_CALL_READBACK.)
 severity: high
 discovered: 2026-07-05
 discovered_by: Profiling tools/pixel_compare/render_simple_html.spl under check-macos-metal-browser-backing-evidence.shs
@@ -73,6 +73,8 @@ by `_pixels_json`**, not `draw_image` marshalling:
 bit-exact checksum **329775811848360**, `engine2d_readback_source=device_readback
 gpu_backend_used=true`. Slow path (no flag): ~4.85s, same checksum.
 
-Status: OPEN → largely resolved for the gate; interpreter per-pixel loops at
+Status: ALREADY-FIXED for the gate (re-verified 2026-08-10: `_write_pixels_json`
+in `tools/pixel_compare/render_simple_html.spl:32` confirms the O(n) fix is
+still present, not reverted). Interpreter per-pixel loops at
 very large physical resolutions remain the next lever (the one-call externs
 address them when `SIMPLE_ONE_CALL_READBACK=1`).
