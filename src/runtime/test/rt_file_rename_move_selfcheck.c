@@ -4,7 +4,15 @@
  * trailing C sentinel.  The test deliberately passes exact-length buffers so
  * a two-pointer implementation cannot accidentally appear to work.
  */
+#if defined(SIMPLE_RT_FILE_MOVE_RENAME_ONLY)
+#include <stdint.h>
+extern int8_t rt_file_rename(const uint8_t* src_ptr, uint64_t src_len,
+                             const uint8_t* dst_ptr, uint64_t dst_len);
+extern int8_t rt_file_move(const uint8_t* src_ptr, uint64_t src_len,
+                           const uint8_t* dst_ptr, uint64_t dst_len);
+#else
 #include "../runtime.h"
+#endif
 
 #include <errno.h>
 #include <stdio.h>
@@ -99,11 +107,20 @@ static void check_cross_device_fallback(const char* source,
 
     check(write_file(source, "cross-device payload"),
           "cross-device source fixture created");
+#if defined(SIMPLE_RT_FILE_MOVE_RENAME_ONLY)
+    check(rt_file_move(source_exact, source_len,
+                       (const uint8_t*)destination, (size_t)length) == 0,
+          "rename-only move reports the EXDEV boundary");
+    check(file_is(source, "cross-device payload") && !file_exists(destination),
+          "rename-only EXDEV failure preserves source and destination");
+#else
     check(rt_file_move(source_exact, source_len,
                        (const uint8_t*)destination, (size_t)length) == 1,
           "move takes the EXDEV copy-publication fallback");
     check(!file_exists(source) && file_is(destination, "cross-device payload"),
           "cross-device fallback publishes before source removal");
+#endif
+    remove(source);
     remove(destination);
 }
 #endif
