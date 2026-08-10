@@ -151,32 +151,106 @@ else
     RUNTIME_PATH_IS_DEFAULT=1
 fi
 LINUX_DEFAULT_RUNTIME_PATH=$LINUX_RUNTIME_TARGET/bootstrap
- 
- linux_runtime_artifact_is_valid() {
-     runtime_dir=$1
-     [ -s "$runtime_dir/libsimple_runtime.a" ] || return 1
-     set -- "$runtime_dir"/.fingerprint/simple-runtime-*/lib-simple_runtime.json
-     [ "$#" -eq 1 ] && [ -f "$1" ] || return 1
-     features=$(sed -n 's/^.*"features":"\(.*\)","declared_features":.*$/\1/p' "$1")
-     case "$features" in *'\"cuda\"'*) ;; *) return 1 ;; esac
-     case "$features" in *'\"vulkan\"'*) ;; *) return 1 ;; esac
-     case "$features" in *'\"runtime-symbol-table\"'*) ;; *) return 1 ;; esac
- }
- 
- prepare_linux_runtime() {
-     linux_runtime_artifact_is_valid "$RUNTIME_PATH" && return 0
-     [ "$ACTIVE_HOST" = linux ] || return 1
-     [ "$RUNTIME_PATH_IS_DEFAULT" = 1 ] || return 1
-     [ "$RUNTIME_PATH" = "$LINUX_DEFAULT_RUNTIME_PATH" ] || return 1
-     command -v cargo >/dev/null 2>&1 || return 1
-     rm -rf "$LINUX_RUNTIME_TARGET"
-     mkdir -p "$(dirname "$LINUX_RUNTIME_TARGET")"
-     CARGO_TARGET_DIR="$ROOT_DIR/$LINUX_RUNTIME_TARGET" cargo build --locked \
-         --manifest-path "$ROOT_DIR/src/compiler_rust/Cargo.toml" \
-         --package simple-runtime --lib --profile bootstrap --features vulkan,cuda,runtime-symbol-table \
-         >"$BUILD_DIR/runtime-build.log" 2>&1 || return 1
-     linux_runtime_artifact_is_valid "$RUNTIME_PATH"
- }
+
+# This is the smallest shared provider closure proven by the retained daemon
+# link failure and the Vulkan path selected below. Cargo feature metadata alone
+# is not provider evidence: an old archive can carry the right fingerprint and
+# still omit newly exported runtime entry points.
+LINUX_DAEMON_RUNTIME_SYMBOLS="
+rt_tls13_sha256
+rt_sleep_nanos
+rt_vulkan_init
+rt_vulkan_compile_spirv_raw
+rt_vulkan_create_compute_pipeline
+"
+
+archive_has_text_symbol() {
+    archive=$1
+    expected=$2
+    command -v nm >/dev/null 2>&1 || return 1
+    nm -g --defined-only "$archive" 2>/dev/null |
+        awk -v expected="$expected" '
+            NF >= 2 {
+                type = $(NF - 1)
+                symbol = $NF
+                sub(/^_/, "", symbol)
+                if ((type == "T" || type == "W") && symbol == expected) found = 1
+            }
+            END { exit(found ? 0 : 1) }
+        '
+}
+
+linux_runtime_provider_closure_valid() {
+    archive=$1
+    [ -s "$archive" ] || return 1
+    for symbol in $LINUX_DAEMON_RUNTIME_SYMBOLS; do
+        archive_has_text_symbol "$archive" "$symbol" || return 1
+    done
+}
+
+linux_runtime_artifact_is_valid() {
+    runtime_dir=$1
+    runtime_archive="$runtime_dir/libsimple_runtime.a"
+    linux_runtime_provider_closure_valid "$runtime_archive" || return 1
+    set -- "$runtime_dir"/.fingerprint/simple-runtime-*/lib-simple_runtime.json
+    [ "$#" -eq 1 ] && [ -f "$1" ] || return 1
+    features=$(sed -n 's/^.*"features":"\(.*\)","declared_features":.*$/\1/p' "$1")
+    case "$features" in *'\"cuda\"'*) ;; *) return 1 ;; esac
+    case "$features" in *'\"vulkan\"'*) ;; *) return 1 ;; esac
+    case "$features" in *'\"runtime-symbol-table\"'*) ;; *) return 1 ;; esac
+}
+
+prepare_linux_runtime() {
+    linux_runtime_artifact_is_valid "$RUNTIME_PATH" && return 0
+    [ "$ACTIVE_HOST" = linux ] || return 1
+    [ "$RUNTIME_PATH_IS_DEFAULT" = 1 ] || return 1
+    [ "$RUNTIME_PATH" = "$LINUX_DEFAULT_RUNTIME_PATH" ] || return 1
+    command -v cargo >/dev/null 2>&1 || return 1
+    mkdir -p "$(dirname "$LINUX_RUNTIME_TARGET")"
+    CARGO_TARGET_DIR="$ROOT_DIR/$LINUX_RUNTIME_TARGET" cargo build --locked \
+        --manifest-path "$ROOT_DIR/src/compiler_rust/Cargo.toml" \
+        --package simple-runtime --lib --profile bootstrap --features vulkan,cuda,runtime-symbol-table \
+        >"$BUILD_DIR/runtime-build.log" 2>&1 || return 1
+    linux_runtime_artifact_is_valid "$RUNTIME_PATH"
+}
+
+runtime_provider_closure_self_test() {
+    command -v cc >/dev/null 2>&1 || return 1
+    command -v ar >/dev/null 2>&1 || return 1
+    fixture=$(mktemp -d)
+    trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+    {
+        for symbol in $LINUX_DAEMON_RUNTIME_SYMBOLS; do
+            printf 'void %s(void) {}\n' "$symbol"
+        done
+    } >"$fixture/complete.c"
+    {
+        for symbol in $LINUX_DAEMON_RUNTIME_SYMBOLS; do
+            printf 'extern void %s(void);\n' "$symbol"
+        done
+        printf 'int main(void) {\n'
+        for symbol in $LINUX_DAEMON_RUNTIME_SYMBOLS; do
+            printf '    %s();\n' "$symbol"
+        done
+        printf '    return 0;\n}\n'
+    } >"$fixture/consumer.c"
+    cc -c "$fixture/complete.c" -o "$fixture/complete.o"
+    ar rcs "$fixture/complete.a" "$fixture/complete.o"
+    linux_runtime_provider_closure_valid "$fixture/complete.a"
+    cc "$fixture/consumer.c" "$fixture/complete.a" -o "$fixture/complete-link"
+    sed '/rt_sleep_nanos/d' "$fixture/complete.c" >"$fixture/incomplete.c"
+    cc -c "$fixture/incomplete.c" -o "$fixture/incomplete.o"
+    ar rcs "$fixture/incomplete.a" "$fixture/incomplete.o"
+    if linux_runtime_provider_closure_valid "$fixture/incomplete.a"; then
+        return 1
+    fi
+    if cc "$fixture/consumer.c" "$fixture/incomplete.a" -o "$fixture/incomplete-link" >/dev/null 2>&1; then
+        return 1
+    fi
+    rm -rf "$fixture"
+    trap - EXIT HUP INT TERM
+    echo simpleos_qemu_host_gpu_runtime_provider_closure_self_test=pass
+}
 bootstrap_diagnostic_binary_is_valid() (
     candidate=$1
     [ "$ALLOW_BOOTSTRAP_DIAGNOSTIC" = 1 ] || return 1
@@ -2627,6 +2701,11 @@ if [ "${1:-}" = --self-test-daemon-ready ]; then
     daemon_ready_self_test
     exit $?
 fi
+if [ "${1:-}" = --self-test-runtime-provider ]; then
+    [ "$#" -eq 1 ] || exit 2
+    runtime_provider_closure_self_test
+    exit $?
+fi
 if [ "${1:-}" = --self-test-metrics ]; then
     self_test_metrics
     exit 0
@@ -2760,6 +2839,16 @@ if [ -z "${SIMPLEOS_GPU_HOST_BIN:-}" ]; then
         runtime_reason=metal-runtime-artifact-missing
     elif [ "$host" = windows ]; then
         runtime_reason=directx-runtime-artifact-missing
+    fi
+    if [ "$host" = linux ] && ! prepare_linux_runtime; then
+        runtime_provider_log=none
+        [ ! -f "$BUILD_DIR/runtime-build.log" ] || runtime_provider_log="$BUILD_DIR/runtime-build.log"
+        for isa in $GUEST_ISAS; do emit_row "$host" "$isa" blocked runtime-provider-closure-missing "$runtime_provider_log"; done
+        echo "simpleos_qemu_host_gpu_2d_host=$host"
+        echo "simpleos_qemu_host_gpu_2d_host_arch=$HOST_ARCH"
+        echo "simpleos_qemu_host_gpu_2d_status=blocked"
+        echo "simpleos_qemu_host_gpu_2d_reason=runtime-provider-closure-missing"
+        exit 1
     fi
     if [ ! -d "$RUNTIME_PATH" ] || { [ "$host" = macos ] && ! core_c_bootstrap_runtime_available; }; then
         for isa in $GUEST_ISAS; do emit_row "$host" "$isa" blocked "$runtime_reason" none; done

@@ -546,6 +546,7 @@ The canonical multi-ISA wrapper is:
 ```sh
 sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --preflight
 sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --self-test-qemu-accel
+sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --self-test-runtime-provider
 sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --self-test
 sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --self-test-metrics
 sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs
@@ -577,6 +578,18 @@ Interpret the fields strictly:
   Vulkan, or device-origin readback;
 - `status=ready` permits the bounded build/boot gate to start, but is not a GPU
   PASS.
+
+On Linux, the live wrapper admits the Vulkan/CUDA runtime archive only after
+checking both its Cargo feature fingerprint and its exported daemon-provider
+closure. The archive must define the retained crypto and frame-clock owners
+(`rt_tls13_sha256`, `rt_sleep_nanos`) plus the Vulkan initialization, raw SPIR-V
+compile, and compute-pipeline owners. A default archive that fails this check is
+rebuilt once, without clearing its Cargo cache, through the canonical
+`simple-runtime` target and checked again before native daemon linking. An explicit incomplete archive fails closed
+as `runtime-provider-closure-missing`; the linker is never used as the provider
+discovery mechanism. `--self-test-runtime-provider` compiles and links a
+complete fixture archive, then proves that both archive admission and consumer
+linking reject a missing-provider fixture.
 
 The 2026-07-26 Apple Silicon preflight is retained in
 `doc/09_report/simpleos_qemu_macos_gpu_preflight_2026-07-26.md`. Homebrew QEMU

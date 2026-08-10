@@ -7,6 +7,25 @@ Host-only work completed on 2026-07-15:
 - Host-side passthrough preflight classified unavailable guest-direct passthrough; live passthrough remains postponed.
 - Linux host-daemon linking reached the Engine2D provider-closure boundary.
 
+## Linux daemon runtime-provider closure repair (2026-08-10)
+
+Retained `daemon-build.log` evidence showed two direct unresolved owners:
+`lib.common.crypto.sha256.sha256_text -> rt_tls13_sha256` and
+`HostFrameClock.sleep_until -> rt_sleep_nanos`. The canonical QEMU wrapper had
+a runtime rebuild function, but never called it, and its archive admission
+checked only Cargo feature strings. A stale archive with the right feature
+fingerprint could therefore reach native linking without those providers.
+
+The wrapper now validates actual global archive definitions for the retained
+crypto/clock owners and the Vulkan init, raw SPIR-V compile, and compute
+pipeline owners. It invokes the existing default-target rebuild path once when
+that exact closure is absent, revalidates the produced archive, and otherwise
+fails closed with `runtime-provider-closure-missing`. The focused
+`--self-test-runtime-provider` command proves that a complete archive admits and
+links, while archive admission and consumer linking both reject an archive
+missing `rt_sleep_nanos`. This repairs build admission only; it does not claim a
+compiler, daemon execution, GPU submission, or live QEMU PASS.
+
 Postponed until the required lane or hardware is available:
 
 - **TODO658**: UNO Q native GPU board row is physically unavailable in this lane. Add this as the explicit remaining blocker before finalizing the request:
