@@ -1,6 +1,6 @@
 # `bin/simple run` (JIT) exits 0 and prints NOTHING on a hard semantic error
 
-**Status:** OPEN
+**Status:** ARCHITECTURAL-OPEN (re-verified 2026-08-09/10, fabricates a const-0 result and reports success; root cause in Rust seed JIT driver, src/compiler_rust/**, out of scope for a .spl fix)
 **Found:** 2026-08-04
 **Severity:** high · **Area:** compiler / JIT driver
 **Found during:** legacy-feature-test triage (`test/03_system/feature/language`)
