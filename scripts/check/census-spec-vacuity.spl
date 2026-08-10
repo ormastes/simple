@@ -1,0 +1,762 @@
+# Census driver for two UNGATED spec-vacuity families.
+#
+# Family 3 -- VALUE-TYPE HELPER MUTATES A COPY (codes VTM001/VTM002).
+#   A `struct` in Simple is a VALUE type. A spec helper declared
+#       fn delete_key(tree: BTree, k: text):
+#           tree.root.keys.remove(k)
+#   mutates a COPY; the caller's `var` is untouched, so the call is a silent
+#   no-op. The failure is ASYMMETRIC: positive/presence assertions sail
+#   through a no-op, only negative/absence assertions go red -- which is why
+#   these sat green for months. `class` receivers are REFERENCES and are NOT
+#   affected, so the type kind must be resolved, never guessed: a checker
+#   that flagged classes too would drown in false positives.
+#   A `mut` parameter writes back and is CORRECT -- never flagged.
+#   Background: doc/08_tracking/bug/spec_value_type_helper_mutates_copy_family_2026-08-10.md
+#
+# Family 4 -- SPEC RE-IMPLEMENTS THE CODE UNDER TEST (codes SHADOW/NOSRC).
+#   `lease_grant_spec`, `request_queue_spec` and `busy_contract_spec` each
+#   re-declare their own `struct LeaseManager` / `RequestQueue` and
+#   reimplement the logic inside the spec, so they never touch
+#   src/lib/nogc_sync_mut/service/*. Such a spec can be 100% green while
+#   testing nothing in src/.
+#   SHADOW is precise (name-level collision with a src/ declaration).
+#   NOSRC (a spec importing nothing from src/) is a LOW-PRECISION signal and
+#   is reported as a bare count for triage only -- it is deliberately not
+#   itemised as a finding, because a lint with a high false-positive rate
+#   gets disabled and is worse than nothing.
+#
+# Usage:
+#   bin/simple run scripts/check/census-spec-vacuity.spl [roots...]
+#   bin/simple run scripts/check/census-spec-vacuity.spl --selftest
+#   bin/simple run scripts/check/census-spec-vacuity.spl --list [roots...]
+#
+# This is a CENSUS at WARNING severity, not a gate: it exits 0 whenever it
+# actually scanned something, however many findings it reports. It is wired
+# into no blocking check.
+#
+#   REPORT -- <n> file(s) scanned, <m> finding(s)   (exit 0)
+#   ERROR  -- nothing was scanned                   (exit 2)
+#
+# --selftest runs a positive control before every scan and is FATAL. A
+# "0 findings" result from a scorer whose control never fired is
+# indistinguishable from a scorer that silently stopped working, so this
+# script refuses to scan at all rather than report a vacuous zero.
+
+use std.nogc_sync_mut.io_runtime.{file_read, dir_walk, dir_exists, get_args, exit}
+
+# ------------------------------------------------------------------ utilities
+
+fn list_has(xs: [text], v: text) -> bool:
+    for x in xs:
+        if x == v:
+            return true
+    false
+
+fn norm_path(p: text) -> text:
+    var s = p
+    while s.starts_with("./"):
+        s = s.substring(2, s.len())
+    s
+
+fn index_from(s: text, needle: text, start: i64) -> i64:
+    if needle.len() == 0:
+        return -1
+    var i = start
+    while i + needle.len() <= s.len():
+        if s.substring(i, i + needle.len()) == needle:
+            return i
+        i = i + 1
+    -1
+
+fn index_of(s: text, needle: text) -> i64:
+    index_from(s, needle, 0)
+
+fn is_ident_char(c: text) -> bool:
+    if c == "_":
+        return true
+    if c >= "a" and c <= "z":
+        return true
+    if c >= "A" and c <= "Z":
+        return true
+    if c >= "0" and c <= "9":
+        return true
+    false
+
+fn indent_of(line: text) -> i64:
+    var i: i64 = 0
+    while i < line.len():
+        if line.substring(i, i + 1) != " ":
+            return i
+        i = i + 1
+    i
+
+fn strip_comment(line: text) -> text:
+    # Drop a trailing `#` comment unless it sits inside a quoted run.
+    var out: text = ""
+    var i: i64 = 0
+    var q = ""
+    while i < line.len():
+        val c = line.substring(i, i + 1)
+        if q == "":
+            if c == "#":
+                return out
+            if c == "\"" or c == "'":
+                q = c
+        else:
+            if c == q:
+                q = ""
+        out = out + c
+        i = i + 1
+    out
+
+fn should_scan_spl(path: text) -> bool:
+    if not path.ends_with(".spl"):
+        return false
+    if path.contains("/vendor/") or path.contains("/node_modules/"):
+        return false
+    if path.contains("/target/") or path.contains("/build/"):
+        return false
+    true
+
+fn is_spec_file(path: text) -> bool:
+    path.ends_with("_spec.spl")
+
+# test/01_unit is a byte-duplicate tree of test/unit (likewise 03_system vs
+# system, 02_integration vs integration, 05_perf vs perf) and BOTH execute,
+# so a raw count double-reports every finding in them. The census reports
+# both numbers and this predicate marks the copy.
+fn is_duplicate_tree(p: text) -> bool:
+    p.contains("test/01_unit/") or p.contains("test/02_integration/")
+        or p.contains("test/03_system/") or p.contains("test/04_external/")
+        or p.contains("test/05_perf/")
+
+# -------------------------------------------------------------- type-kind index
+#
+# Family 3 hinges entirely on struct-vs-class, so the kind is RESOLVED from
+# declarations, never inferred from the name. A name declared BOTH ways
+# anywhere in the corpus is marked ambiguous and never flagged.
+
+struct TypeKinds:
+    names: [text]
+    kinds: [text]
+
+fn decl_name_on(line: text, kw: text) -> text:
+    if not line.starts_with(kw + " "):
+        return ""
+    var rest = line.substring(kw.len() + 1, line.len())
+    var i: i64 = 0
+    while i < rest.len() and is_ident_char(rest.substring(i, i + 1)):
+        i = i + 1
+    rest.substring(0, i)
+
+fn kind_index_add(idx: TypeKinds, name: text, kind: text) -> TypeKinds:
+    var names = idx.names
+    var kinds = idx.kinds
+    var i: i64 = 0
+    while i < names.len():
+        if names[i] == name:
+            if kinds[i] != kind:
+                kinds[i] = "ambiguous"
+            return TypeKinds(names: names, kinds: kinds)
+        i = i + 1
+    names.push(name)
+    kinds.push(kind)
+    TypeKinds(names: names, kinds: kinds)
+
+fn kind_of(idx: TypeKinds, name: text) -> text:
+    var i: i64 = 0
+    while i < idx.names.len():
+        if idx.names[i] == name:
+            return idx.kinds[i]
+        i = i + 1
+    ""
+
+fn index_source(idx: TypeKinds, src: text) -> TypeKinds:
+    var acc = idx
+    for raw in src.split("\n"):
+        val line = strip_comment(raw)
+        val s = decl_name_on(line, "struct")
+        if s != "":
+            acc = kind_index_add(acc, s, "struct")
+            continue
+        val c = decl_name_on(line, "class")
+        if c != "":
+            acc = kind_index_add(acc, c, "class")
+    acc
+
+fn build_kind_index(roots: [text]) -> TypeKinds:
+    var idx = TypeKinds(names: [], kinds: [])
+    for root in roots:
+        if not dir_exists(root):
+            continue
+        for p in dir_walk(root):
+            if should_scan_spl(p):
+                idx = index_source(idx, file_read(p))
+    idx
+
+# ---------------------------------------------------------- family 3: scoring
+
+struct Param:
+    name: text
+    type_: text
+    is_mut: bool
+
+fn base_type(t: text) -> text:
+    var s = t.trim()
+    # Drop a default value, an optional marker and any generic arguments.
+    var i: i64 = 0
+    while i < s.len() and is_ident_char(s.substring(i, i + 1)):
+        i = i + 1
+    s.substring(0, i)
+
+fn split_top_commas(s: text) -> [text]:
+    var out: [text] = []
+    var depth: i64 = 0
+    var cur: text = ""
+    var i: i64 = 0
+    var q = ""
+    while i < s.len():
+        val c = s.substring(i, i + 1)
+        if q != "":
+            if c == q:
+                q = ""
+            cur = cur + c
+            i = i + 1
+            continue
+        if c == "\"" or c == "'":
+            q = c
+            cur = cur + c
+            i = i + 1
+            continue
+        if c == "(" or c == "[" or c == "<" or c == "{":
+            depth = depth + 1
+        if c == ")" or c == "]" or c == ">" or c == "}":
+            depth = depth - 1
+        if c == "," and depth == 0:
+            out.push(cur)
+            cur = ""
+            i = i + 1
+            continue
+        cur = cur + c
+        i = i + 1
+    if cur.trim() != "":
+        out.push(cur)
+    out
+
+fn parse_params(header: text) -> [Param]:
+    # header is a full `fn name(...)` line (comment already stripped).
+    val open = index_of(header, "(")
+    if open < 0:
+        return []
+    var depth: i64 = 0
+    var i = open
+    var inner: text = ""
+    while i < header.len():
+        val c = header.substring(i, i + 1)
+        if c == "(":
+            depth = depth + 1
+            if depth == 1:
+                i = i + 1
+                continue
+        if c == ")":
+            depth = depth - 1
+            if depth == 0:
+                break
+        inner = inner + c
+        i = i + 1
+    var out: [Param] = []
+    for piece in split_top_commas(inner):
+        var p = piece.trim()
+        if p == "" or p == "self":
+            continue
+        var is_mut = false
+        if p.starts_with("mut "):
+            is_mut = true
+            p = p.substring(4, p.len()).trim()
+        val colon = index_of(p, ":")
+        if colon < 0:
+            continue
+        val nm = p.substring(0, colon).trim()
+        val ty = base_type(p.substring(colon + 1, p.len()))
+        if nm == "" or ty == "":
+            continue
+        out.push(Param(name: nm, type_: ty, is_mut: is_mut))
+    out
+
+fn mutator_names() -> [text]:
+    ["push", "pop", "insert", "remove", "set", "clear", "sort", "reverse",
+     "extend", "append", "truncate", "resize", "fill", "push_str", "add",
+     "delete", "put", "retain", "drain", "swap"]
+
+# Does `line` mutate the receiver named `p`? Returns "" or a finding code.
+#   VTM001 -- field / index assignment through the parameter
+#   VTM002 -- a known in-place mutator method called through the parameter
+fn mutation_code(line: text, p: text) -> text:
+    var i: i64 = 0
+    while i >= 0:
+        val at = index_from(line, p, i)
+        if at < 0:
+            return ""
+        i = at + p.len()
+        # word boundary on both sides
+        if at > 0 and is_ident_char(line.substring(at - 1, at)):
+            continue
+        if i >= line.len():
+            continue
+        val nxt = line.substring(i, i + 1)
+        if nxt != "." and nxt != "[":
+            continue
+        # Walk the postfix chain after the receiver.
+        var j = i
+        var saw_call = false
+        var last_method: text = ""
+        var depth: i64 = 0
+        while j < line.len():
+            val c = line.substring(j, j + 1)
+            if c == "(" or c == "[":
+                depth = depth + 1
+                j = j + 1
+                continue
+            if c == ")" or c == "]":
+                depth = depth - 1
+                if depth < 0:
+                    break
+                j = j + 1
+                continue
+            if depth > 0:
+                j = j + 1
+                continue
+            if c == ".":
+                var k = j + 1
+                var nm: text = ""
+                while k < line.len() and is_ident_char(line.substring(k, k + 1)):
+                    nm = nm + line.substring(k, k + 1)
+                    k = k + 1
+                if k < line.len() and line.substring(k, k + 1) == "(":
+                    saw_call = true
+                    last_method = nm
+                j = k
+                continue
+            if c == " ":
+                j = j + 1
+                continue
+            # A compound assignment (`+=`, `-=`, `*=`, `/=`) mutates too.
+            if c == "+" or c == "-" or c == "*" or c == "/":
+                if j + 1 < line.len() and line.substring(j + 1, j + 2) == "=":
+                    return "VTM001"
+                break
+            if c == "=":
+                # An assignment TARGET, but not `==`, `!=`, `>=`, `<=`.
+                if j + 1 < line.len() and line.substring(j + 1, j + 2) == "=":
+                    break
+                if j > 0:
+                    val prev = line.substring(j - 1, j).trim()
+                    if prev == "!" or prev == ">" or prev == "<" or prev == "+" or prev == "-":
+                        # `+=` / `-=` on a field is still a mutation of the copy.
+                        if prev == "+" or prev == "-":
+                            return "VTM001"
+                        break
+                return "VTM001"
+            break
+        if saw_call and list_has(mutator_names(), last_method):
+            return "VTM002"
+    ""
+
+# ------------------------------------------------------------------- findings
+
+struct Row:
+    file: text
+    code: text
+    fn_name: text
+    param: text
+    type_: text
+    line: i64
+    dup: bool
+
+fn fn_name_of(line: text) -> text:
+    var rest = line.substring(3, line.len())
+    var i: i64 = 0
+    var nm: text = ""
+    while i < rest.len() and is_ident_char(rest.substring(i, i + 1)):
+        nm = nm + rest.substring(i, i + 1)
+        i = i + 1
+    nm
+
+# Scores one file's SOURCE for family 3. Kept separate from file IO so the
+# positive control exercises exactly the code the census runs.
+fn check_value_helper_mutation(src: text, idx: TypeKinds) -> [Row]:
+    var rows: [Row] = []
+    val lines = src.split("\n")
+    var i: i64 = 0
+    var in_triple = false
+    while i < lines.len():
+        val raw = lines[i]
+        # Triple-quoted blocks contain arbitrary column-0 text; skip them so
+        # a docstring can never be read as code.
+        var tcount: i64 = 0
+        var s2: i64 = 0
+        while s2 + 3 <= raw.len():
+            if raw.substring(s2, s2 + 3) == "\"\"\"":
+                tcount = tcount + 1
+                s2 = s2 + 3
+                continue
+            s2 = s2 + 1
+        if tcount % 2 == 1:
+            in_triple = not in_triple
+            i = i + 1
+            continue
+        if in_triple:
+            i = i + 1
+            continue
+        val line = strip_comment(raw)
+        val ind = indent_of(line)
+        val trimmed = line.trim()
+        if not trimmed.starts_with("fn "):
+            i = i + 1
+            continue
+        val fname = fn_name_of(trimmed)
+        val params = parse_params(trimmed)
+        # Only value-typed (struct) parameters that are not `mut` can be hit.
+        var watched: [Param] = []
+        for p in params:
+            if p.is_mut:
+                continue
+            if kind_of(idx, p.type_) == "struct":
+                watched.push(p)
+        if watched.len() == 0:
+            i = i + 1
+            continue
+        # Walk the body: every line strictly more indented than the header.
+        var j = i + 1
+        var reported: [text] = []
+        while j < lines.len():
+            val braw = lines[j]
+            if braw.trim() == "":
+                j = j + 1
+                continue
+            if indent_of(braw) <= ind:
+                break
+            val b = strip_comment(braw)
+            for p in watched:
+                if list_has(reported, p.name):
+                    continue
+                val code = mutation_code(b, p.name)
+                if code != "":
+                    reported.push(p.name)
+                    rows.push(Row(file: "", code: code, fn_name: fname,
+                                  param: p.name, type_: p.type_,
+                                  line: j + 1, dup: false))
+            j = j + 1
+        i = j
+    rows
+
+# ---------------------------------------------------------- family 4: scoring
+#
+# SHADOW: a spec file declares a type whose name is ALSO declared under src/.
+# That is the exact shape of lease_grant_spec / request_queue_spec: the spec
+# owns a private `struct LeaseManager` and never reaches the real one.
+
+fn declared_types(src: text) -> [text]:
+    var out: [text] = []
+    for raw in src.split("\n"):
+        val line = strip_comment(raw)
+        val s = decl_name_on(line, "struct")
+        if s != "" and not list_has(out, s):
+            out.push(s)
+        val c = decl_name_on(line, "class")
+        if c != "" and not list_has(out, c):
+            out.push(c)
+        val e = decl_name_on(line, "enum")
+        if e != "" and not list_has(out, e):
+            out.push(e)
+    out
+
+fn imports_anything(src: text) -> bool:
+    for raw in src.split("\n"):
+        val line = strip_comment(raw).trim()
+        if line.starts_with("use "):
+            return true
+    false
+
+fn src_type_names(roots: [text]) -> [text]:
+    var out: [text] = []
+    for root in roots:
+        if not dir_exists(root):
+            continue
+        for p in dir_walk(root):
+            if not should_scan_spl(p):
+                continue
+            for t in declared_types(file_read(p)):
+                if not list_has(out, t):
+                    out.push(t)
+    out
+
+# ------------------------------------------------------------- positive control
+#
+# Written as in-memory source strings so a deliberately-broken .spl can never
+# be picked up by lint, the test runner or any other repo sweep, and cannot
+# drift away from this checker.
+#
+# The SILENT half is not decoration: a scorer that flagged every helper would
+# look identical to a working one without it. In particular `class` receivers
+# and `mut` parameters MUST stay silent -- flagging either is precisely the
+# false-positive flood that would get this disabled.
+
+fn control_index() -> TypeKinds:
+    var idx = TypeKinds(names: [], kinds: [])
+    idx = kind_index_add(idx, "CtrlStruct", "struct")
+    idx = kind_index_add(idx, "CtrlClass", "class")
+    idx
+
+fn control_source() -> text:
+    var s: text = ""
+    # --- MUST FIRE
+    s = s + "fn ctrl_field_assign(t: CtrlStruct, k: text):\n"
+    s = s + "    t.count = 1\n"
+    s = s + "\n"
+    s = s + "fn ctrl_nested_push(t: CtrlStruct, k: text):\n"
+    s = s + "    t.root.keys.push(k)\n"
+    s = s + "\n"
+    s = s + "fn ctrl_index_assign(t: CtrlStruct, i: i64):\n"
+    s = s + "    t.cells[i] = 3\n"
+    s = s + "\n"
+    s = s + "fn ctrl_remove(t: CtrlStruct, k: text):\n"
+    s = s + "    t.keys.remove(k)\n"
+    s = s + "\n"
+    s = s + "fn ctrl_plus_eq(t: CtrlStruct):\n"
+    s = s + "    t.count += 1\n"
+    s = s + "\n"
+    # --- MUST STAY SILENT
+    # A class receiver is a REFERENCE: mutation writes back and is correct.
+    s = s + "fn ctrl_ok_class(t: CtrlClass, k: text):\n"
+    s = s + "    t.root.keys.push(k)\n"
+    s = s + "\n"
+    # `mut` writes back to the caller and is correct.
+    s = s + "fn ctrl_ok_mut(mut t: CtrlStruct, k: text):\n"
+    s = s + "    t.root.keys.push(k)\n"
+    s = s + "\n"
+    # Read-only use of a struct parameter is correct.
+    s = s + "fn ctrl_ok_read(t: CtrlStruct) -> i64:\n"
+    s = s + "    t.count + t.other.len()\n"
+    s = s + "\n"
+    # A comparison is not an assignment.
+    s = s + "fn ctrl_ok_compare(t: CtrlStruct) -> bool:\n"
+    s = s + "    t.count == 1\n"
+    s = s + "\n"
+    # A non-mutating method call is correct.
+    s = s + "fn ctrl_ok_query(t: CtrlStruct, k: text) -> bool:\n"
+    s = s + "    t.keys.contains(k)\n"
+    s = s + "\n"
+    # An unknown / unindexed type must not be guessed at.
+    s = s + "fn ctrl_ok_unknown(t: MysteryType, k: text):\n"
+    s = s + "    t.keys.push(k)\n"
+    s = s + "\n"
+    # A LOCAL of the same base name, declared inside the body, is a different
+    # thing -- but the parameter itself is only read here.
+    s = s + "fn ctrl_ok_prefix(t: CtrlStruct, k: text) -> i64:\n"
+    s = s + "    val total = t.count\n"
+    s = s + "    total\n"
+    s = s + "\n"
+    # Mutating a DIFFERENT local, not the parameter.
+    s = s + "fn ctrl_ok_other(t: CtrlStruct, k: text) -> [text]:\n"
+    s = s + "    var acc: [text] = []\n"
+    s = s + "    acc.push(t.name)\n"
+    s = s + "    acc\n"
+    s
+
+fn control_names() -> [text]:
+    ["ctrl_field_assign", "ctrl_nested_push", "ctrl_index_assign",
+     "ctrl_remove", "ctrl_plus_eq",
+     "ctrl_ok_class", "ctrl_ok_mut", "ctrl_ok_read", "ctrl_ok_compare",
+     "ctrl_ok_query", "ctrl_ok_unknown", "ctrl_ok_prefix", "ctrl_ok_other"]
+
+fn control_must_fire(name: text) -> bool:
+    not name.starts_with("ctrl_ok_")
+
+fn run_control() -> bool:
+    var ok = true
+    var fired: [text] = []
+    var codes: [text] = []
+    for r in check_value_helper_mutation(control_source(), control_index()):
+        if not list_has(fired, r.fn_name):
+            fired.push(r.fn_name)
+        codes.push(r.fn_name + "=" + r.code)
+    for want in control_names():
+        val hit = list_has(fired, want)
+        val need = control_must_fire(want)
+        if hit != need:
+            ok = false
+            print("  control MISMATCH {want}: detected={hit} expected={need}")
+    if not list_has(codes, "ctrl_field_assign=VTM001"):
+        ok = false
+        print("  control MISMATCH ctrl_field_assign did not land in VTM001")
+    if not list_has(codes, "ctrl_remove=VTM002"):
+        ok = false
+        print("  control MISMATCH ctrl_remove did not land in VTM002")
+
+    # Family 4 control: a spec type name colliding with a src/ name fires;
+    # a name unique to the spec stays silent.
+    val spec_src = "struct LeaseManager:\n    n: i64\n\nstruct SpecOnlyThing:\n    n: i64\n"
+    val known = ["LeaseManager", "RequestQueue"]
+    var shadow: [text] = []
+    for t in declared_types(spec_src):
+        if list_has(known, t):
+            shadow.push(t)
+    if not list_has(shadow, "LeaseManager"):
+        ok = false
+        print("  control MISMATCH SHADOW did not detect the LeaseManager collision")
+    if list_has(shadow, "SpecOnlyThing"):
+        ok = false
+        print("  control MISMATCH SHADOW fired on a spec-only type")
+
+    if ok:
+        print("control: 5 planted VTM violations detected, 8 correct forms silent")
+        print("control: SHADOW fires on a colliding name, silent on a spec-only name")
+    ok
+
+# ------------------------------------------------------------------------ scan
+
+fn count_spec_files(roots: [text]) -> i64:
+    var n: i64 = 0
+    for root in roots:
+        if not dir_exists(root):
+            continue
+        for p in dir_walk(root):
+            if should_scan_spl(p) and is_spec_file(p):
+                n = n + 1
+    n
+
+fn total(rows: [Row], deduped: bool) -> i64:
+    var n: i64 = 0
+    for r in rows:
+        if deduped and r.dup:
+            continue
+        n = n + 1
+    n
+
+fn count_code(rows: [Row], code: text, deduped: bool) -> i64:
+    var n: i64 = 0
+    for r in rows:
+        if deduped and r.dup:
+            continue
+        if r.code == code:
+            n = n + 1
+    n
+
+fn main():
+    val argv = get_args()
+    var roots: [text] = []
+    var selftest = false
+    var listing = false
+    var i: i64 = 0
+    while i < argv.len():
+        val a = argv[i]
+        if a == "--selftest":
+            selftest = true
+            i = i + 1
+            continue
+        if a == "--list":
+            listing = true
+            i = i + 1
+            continue
+        if a.starts_with("--") or a.ends_with("/simple") or a == "run" or a.ends_with(".spl"):
+            i = i + 1
+            continue
+        roots.push(a)
+        i = i + 1
+
+    if not run_control():
+        print("ERROR -- positive control did not reproduce; scan not attempted")
+        exit(2)
+        return
+    if selftest:
+        print("REPORT -- positive control reproduced")
+        return
+
+    if roots.len() == 0:
+        roots.push("test")
+
+    # The struct/class index must cover src/ as well as the spec roots: a
+    # spec helper's parameter type is usually declared in src/.
+    var index_roots: [text] = ["src"]
+    for r in roots:
+        index_roots.push(r)
+    val idx = build_kind_index(index_roots)
+    val src_types = src_type_names(["src"])
+
+    var rows: [Row] = []
+    var shadow_files: [text] = []
+    var shadow_names: [text] = []
+    var shadow_dup: i64 = 0
+    var shadow_raw: i64 = 0
+    var nosrc_raw: i64 = 0
+    var nosrc_dedup: i64 = 0
+    var nspec: i64 = 0
+
+    for root in roots:
+        if not dir_exists(root):
+            continue
+        for p in dir_walk(root):
+            if not should_scan_spl(p) or not is_spec_file(p):
+                continue
+            nspec = nspec + 1
+            val rel = norm_path(p)
+            val dup = is_duplicate_tree(rel)
+            val src = file_read(p)
+            for r in check_value_helper_mutation(src, idx):
+                rows.push(Row(file: rel, code: r.code, fn_name: r.fn_name,
+                              param: r.param, type_: r.type_, line: r.line,
+                              dup: dup))
+            var hit = false
+            for t in declared_types(src):
+                if list_has(src_types, t):
+                    hit = true
+                    if not list_has(shadow_names, t):
+                        shadow_names.push(t)
+            if hit:
+                shadow_raw = shadow_raw + 1
+                if dup:
+                    shadow_dup = shadow_dup + 1
+                else:
+                    shadow_files.push(rel)
+            if not imports_anything(src):
+                nosrc_raw = nosrc_raw + 1
+                if not dup:
+                    nosrc_dedup = nosrc_dedup + 1
+
+    print("=== spec vacuity census: value-type helpers + self-reimplementation ===")
+    print("spec files scanned            : {nspec}")
+    print("struct/class names indexed    : {idx.names.len()}")
+    print("")
+    print("--- family 3: value-type helper mutates a copy (deduped / raw) ---")
+    print("VTM001 field/index assign via struct param : {count_code(rows, \"VTM001\", true)} / {count_code(rows, \"VTM001\", false)}")
+    print("VTM002 in-place mutator via struct param   : {count_code(rows, \"VTM002\", true)} / {count_code(rows, \"VTM002\", false)}")
+    print("total                                      : {total(rows, true)} / {total(rows, false)}")
+    print("")
+    print("--- family 4: spec re-implements the code under test ---")
+    print("SHADOW spec files declaring a src/ type name : {shadow_files.len()} / {shadow_raw}")
+    print("distinct shadowed type names                 : {shadow_names.len()}")
+    print("NOSRC  spec files importing nothing at all   : {nosrc_dedup} / {nosrc_raw}   [LOW PRECISION -- triage signal only]")
+
+    if listing:
+        print("")
+        print("--- family 3 findings ---")
+        for r in rows:
+            var tag = ""
+            if r.dup:
+                tag = "  [dup-tree]"
+            print("  {r.code} {r.file}:{r.line} fn {r.fn_name}({r.param}: {r.type_}){tag}")
+        print("")
+        print("--- family 4 SHADOW files (deduped) ---")
+        for f in shadow_files:
+            print("  SHADOW {f}")
+        print("")
+        print("--- shadowed type names ---")
+        for n in shadow_names:
+            print("  {n}")
+
+    if nspec == 0:
+        print("ERROR -- nothing was scanned")
+        exit(2)
+        return
+    print("REPORT -- {nspec} file(s) scanned, {total(rows, true)} deduped VTM finding(s), {total(rows, false)} raw; {shadow_files.len()} deduped SHADOW file(s)")
