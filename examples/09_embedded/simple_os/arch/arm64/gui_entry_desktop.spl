@@ -53,6 +53,7 @@ use common.gpu.simpleos_host_gpu_protocol.{
     SIMPLEOS_HOST_GPU_BACKEND_METAL,
     SIMPLEOS_HOST_GPU_ISA_AARCH64
 }
+use std.gc_async_mut.gpu.engine2d.graphics_2d_showcase_core.{graphics_2d_showcase_render_pixels}
 
 extern fn rt_gui_set_fb(addr: u64, width: u64)
 extern fn rt_simpleos_frame_heap_checkpoint() -> u64
@@ -207,22 +208,56 @@ pub fn gui_entry_desktop_start(file_backed_ram_tail_base: u64):
         screen_height
     )
 
-    val terminal_id = compositor.compositor_materialize_process_surface_scalar(
-        "Terminal", 60, 60, 420, 260, 0, "terminal",
-        "<pre>simple$ uname -m\naarch64\nsimple$ simple check\nAll checks passed\nsimple$</pre>"
+    val showcase_window_width: i32 = 760
+    val showcase_window_height: i32 = 620
+    val showcase_content_width = showcase_window_width - 8
+    val showcase_content_height = showcase_window_height - 36
+    val showcase_id = compositor.compositor_materialize_process_surface_scalar(
+        "2d_showcase_backed_cpu_simd", 32, 40,
+        showcase_window_width, showcase_window_height, 0,
+        "graphics_2d_showcase", ""
     )
-    val editor_id = compositor.compositor_materialize_process_surface_scalar(
-        "Editor", 300, 160, 480, 300, 0, "editor",
-        "<pre>fn main():\n    val x = 42\n    print x\n\n# Comment\nfn square(n):\n    n * n</pre>"
+    val controls_id = compositor.compositor_materialize_process_surface_scalar(
+        "Showcase Controls", 806, 60, 190, 240, 0, "showcase_controls",
+        "<h2>Input</h2><p>Pointer</p><p>Click</p><p>Tab key</p><p>CPU SIMD</p>"
     )
-    val finder_id = compositor.compositor_materialize_process_surface_scalar(
-        "Finder", 540, 300, 360, 240, 0, "finder",
-        "<h2>Favorites</h2><p>Desktop</p><p>Documents</p><p>Downloads</p><h3>Project</h3><p>Photos</p>"
+    val evidence_id = compositor.compositor_materialize_process_surface_scalar(
+        "Showcase Evidence", 806, 330, 190, 240, 0, "showcase_evidence",
+        "<h2>Sections</h2><p>Shapes</p><p>Image/Text</p><p>Clip/Mask</p><p>Blend</p>"
     )
-    if terminal_id <= 0 or editor_id <= 0 or finder_id <= 0:
+    if showcase_id <= 0 or controls_id <= 0 or evidence_id <= 0:
         uart_writeln("[desktop-gui-arm64] fatal reason=surface-materialization")
         return
-    compositor.focus_window(editor_id.to_i32())
+    val showcase_pixels = graphics_2d_showcase_render_pixels(
+        showcase_content_width, showcase_content_height)
+    if showcase_pixels.len() != showcase_content_width * showcase_content_height:
+        uart_writeln("[desktop-gui-arm64] fatal reason=showcase-render pixel_count={showcase_pixels.len()}")
+        return
+    val showcase_handle = compositor.create_pixel_content(
+        showcase_content_width, showcase_content_height, 0xff101522u32)
+    if showcase_handle <= 0:
+        uart_writeln("[desktop-gui-arm64] fatal reason=showcase-pixel-owner")
+        return
+    var showcase_index: i64 = 0
+    var showcase_checksum: i64 = 17
+    var showcase_nonbackground: i64 = 0
+    while showcase_index < showcase_pixels.len():
+        val showcase_color = showcase_pixels[showcase_index]
+        if not compositor.set_pixel_content(
+                showcase_handle, showcase_index, showcase_color):
+            uart_writeln("[desktop-gui-arm64] fatal reason=showcase-pixel-write index={showcase_index}")
+            return
+        showcase_checksum = (showcase_checksum * 131 +
+            (showcase_color.to_i64() & 0xffffffff)) & 0x7fffffffffffffff
+        if showcase_color != 0xff101522u32:
+            showcase_nonbackground = showcase_nonbackground + 1
+        showcase_index = showcase_index + 1
+    if not compositor.attach_window_pixel_content(
+            showcase_id.to_u64(), showcase_handle):
+        uart_writeln("[desktop-gui-arm64] fatal reason=showcase-pixel-attach")
+        return
+    uart_writeln("[showcase-launch] app_id=graphics_2d_showcase surface=simpleos_wm title=2d_showcase_backed_cpu_simd width={showcase_content_width} height={showcase_content_height} pixel_count={showcase_pixels.len()} nonbackground={showcase_nonbackground} checksum={showcase_checksum} status=success")
+    compositor.focus_window(showcase_id.to_i32())
 
     var shell = DesktopShell.new(compositor)
     shell.init_baremetal()
