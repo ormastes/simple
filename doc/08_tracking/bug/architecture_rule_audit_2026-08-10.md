@@ -86,3 +86,48 @@ hard language rules (no inheritance, `<>` generics) hold with zero violations,
 the revert-recovery left nothing structurally half-restored, and the enforced
 workspace guard passes. One real new violation (Perl scripts) and two
 pre-existing structural gaps (directory fan-out, blink/ECS) are filed above.
+
+## Addendum: Perl-scripts finding re-examined — the split was deliberate
+
+A follow-up pass investigated porting the two `.pl` files and found the original
+framing was incomplete. Commit `9a0cfd1e5d6` did **not** add two orphan Perl
+scripts. It added them together with `scripts/check/lib/portable-process-lock.shs`
+— an already-`.shs` orchestration layer doing claim files, manifest parsing,
+the deadline loop, stale-recovery protocol, and release-all bookkeeping — which
+calls the Perl helpers via `PORTABLE_LOCK_ATOMIC_HELPER_PATH`. **The prior
+author already performed the natural split and left only the two genuinely
+delicate atomic primitives in Perl.**
+
+What those primitives actually do, and why they are delicate:
+
+- `portable-hardlink-lock.pl` — atomic `link(2)` create-or-fail; dev:ino
+  identity via `lstat` (rejecting symlinks); and PID-liveness via a **double
+  `ps -o lstart=` snapshot bracketing a `pgid` read**, so a snapshot is trusted
+  only if `lstart` is unchanged before and after. That construction exists
+  specifically to defeat PID-reuse TOCTOU — it is not incidental.
+- `portable-session-exec.pl` — `setsid()` a new session leader and `exec` into
+  it, with a fork-fallback for the legitimate `EPERM` case where the caller is
+  already a process-group leader, so lock ownership binds to an independently
+  recoverable session rather than the parent's process group.
+
+**Portability determination: technically possible, not free.** `ln` provides the
+same atomic `link(2)` create-or-fail; the double-snapshot liveness pattern is
+expressible via command substitution; the `unlink-if-match` manifest check is
+already duplicated in `.shs`. The one real gap is `stat`'s dev/inode flags
+differing GNU (`-c`) vs BSD/macOS (`-f`), needing a platform-detect shim — a
+portability chore, not an unavailable primitive.
+
+**Recommendation (needs a human decision, not an agent's):** grant a scoped,
+documented exception to the `.spl`/`.shs`-only rule for exactly these two files,
+on the grounds that they are an intentionally-minimized atomic-primitive layer
+beneath an already-conforming orchestration layer. Reserve an actual port for a
+session with budget to run the full differential suite — N-simultaneous-acquire
+(exactly one winner per round), kill-and-reclaim (stale lock recoverable), and
+clean-exit-release — side by side against the Perl original **before** any `.pl`
+is deleted.
+
+**Explicitly not done:** no port was attempted. This is live bootstrap-lock
+infrastructure that concurrent sessions are exercising right now; a blind swap
+of atomic primitives under live locks, unproven by concurrency testing, would
+risk corrupting other sessions' builds. A correct Perl script beats a subtly
+racy `.shs` one.
