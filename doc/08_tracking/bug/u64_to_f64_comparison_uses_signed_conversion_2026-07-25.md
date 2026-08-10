@@ -11,10 +11,21 @@ related: scripts/check/check-cranelift-aot-aggregate-cross.shs
 
 # Mixed `u64`/`f64` comparison converts the `u64` operand with a SIGNED int→float conversion
 
-**Status:** OPEN. Reproduces on ALL execution paths — interpreter, x86_64 native
-(cranelift, one-binary), and aarch64 native (cranelift, run on both qemu-aarch64
-and a real Arduino UNO Q / Qualcomm QRB2210 Cortex-A53 board). This is NOT
-aarch64-specific; it is a cross-backend front/middle-end semantics bug.
+**Status:** FIXED (interpreter + pure-Simple MIR lowering; see "Fix status"
+section below). Originally reproduced on ALL execution paths — interpreter,
+x86_64 native (cranelift, one-binary), and aarch64 native (cranelift, run on
+both qemu-aarch64 and a real Arduino UNO Q / Qualcomm QRB2210 Cortex-A53
+board). This was NOT aarch64-specific; it was a cross-backend front/middle-end
+semantics bug. Re-verified 2026-08-10: both fixed call sites
+(`interp_int_to_f64` in `src/compiler/70.backend/backend/interpreter.spl:55`
+and `hir_expr_static_unsigned` in
+`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:88`) are present and
+unreverted on `origin/main`. Residual gap, still open: `CRANELIFT_CROSS_EXECUTE`
+still defaults to 0 in `scripts/check/check-cranelift-aot-aggregate-cross.shs`,
+so the cross-module fixture's runtime result still isn't asserted in routine CI
+(source-fix confirmed by audit + regression spec, not by a green CI execution
+gate), and the Rust-seed (`src/compiler_rust`) native codegen path remains
+unaudited (out of scope for this doc — seed edits are off-limits).
 
 ## Summary
 
