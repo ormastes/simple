@@ -48,3 +48,22 @@ Confirmed by blob swap: restore the pure `origin/main` blob, run the spec, still
 Also note the guard checks 8 named files and does **not** include
 `..._decl_apply.spl` (created after the spec was written), so that file is
 currently unguarded at 110 KB.
+
+## Re-measured 2026-08-10 — grown well past the original finding
+
+```
+150,915  simple_web_html_layout_renderer_layout.spl        (was 135,289)
+155,941  simple_web_html_layout_renderer_core.spl           (was under)
+165,305  simple_web_html_layout_renderer_paint_layout.spl   (was 127,363)
+118,336  simple_web_html_layout_renderer_decl_apply.spl     (was 110,534, still unguarded)
+125,999  simple_web_html_layout_renderer.spl                (new, near the line)
+```
+
+Three files are now over the 131,072-byte limit, not one, and the overage on
+`_paint_layout.spl` alone is 34 KB. `_paint_layout.spl` is also currently
+owned by another parallel agent session (do-not-touch list), so any split
+touching it must be sequenced after that lane. Status stays
+**ARCHITECTURAL-OPEN**: a correct fix is a dedicated, lossless module-split
+change per file (verified by total-byte-count non-decrease, per the warning
+above about a prior split that silently dropped 663 lines) — not something to
+attempt inside a mixed bug-sweep pass. No code changed by this note.
