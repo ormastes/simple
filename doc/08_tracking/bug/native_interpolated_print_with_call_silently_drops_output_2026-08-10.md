@@ -161,14 +161,25 @@ interpreter's. A successful build with empty output is a FAIL. It carries:
 | `println` + interpolated direct arg | `println "G={f()}"` | hard error: "`println` is deprecated" | `G=5` | **(newline only), rc=0 — SILENT, same drop** |
 | `eprint` + interpolated direct arg | `eprint "H={f()}"` | `H=5` | `H=5` | **build FAILS loudly**: `unresolved name: eprint` |
 | `print` + concat instead | `print "F=" + f().to_text()` | `F=5` | `F=5` | `F=5` — unaffected |
-| statement whose value is unused | `side()` calling a fn that prints | `SIDE` `L-END` | `SIDE` `L-END` | (build unfinished at report time) |
+| nested call in interpolation | `print "I={f(f(1))}"` | `I=3` | `I=3` | **(nothing), rc=0 — SILENT** |
+| several placeholders in one literal | `print "J={f()}-{g()}-{f()}"` | `J=5-z-5` | `J=5-z-5` | **(nothing), rc=0 — SILENT** |
+| method call in interpolation | `print "K={c.get()}"` | `K=4` | `K=3` (see sibling 2) | **(nothing), rc=0 — SILENT** |
+| statement whose value is unused | `side()` calling a fn that prints | `SIDE` `L-END` | `SIDE` `L-END` | build UNFINISHED at report time — NOT claimed either way |
 
 `println` shares the defect exactly — it emits its newline and nothing else, so
 it is the same silent drop. `eprint` is a different, LOUD divergence: it
-resolves in the interpreter and JIT but has no native lowering at all, so it can
-never fail open. Two further rows (nested calls in interpolation, several
-placeholders in one literal) were still building when this was written and are
-NOT reported as passing.
+resolves in the interpreter and JIT but has no native lowering at all
+(`unresolved name: eprint`), so it can never fail open.
+
+Nesting, placeholder count, and call kind (free function vs method) make no
+difference: every interpolated literal in direct argument position drops
+identically. Concat (`"F=" + f().to_text()`) and a `val`-bound interpolated
+literal are the only two shapes that survive, which is exactly what the
+argument-position root cause predicts.
+
+The one row NOT measured is the unused-value statement (`side()` whose callee
+prints). Its native build had not finished when this was written; it is
+recorded as unfinished rather than assumed passing.
 
 ## Siblings found by the family sweep — both OPEN
 
