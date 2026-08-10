@@ -2,6 +2,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "runtime.h"
+
 static const char* simple_contract_kind_name(int64_t kind) {
     switch (kind) {
         case 1: return "Postcondition";
@@ -13,6 +15,12 @@ static const char* simple_contract_kind_name(int64_t kind) {
     }
 }
 
+static void simple_contract_abort(void) {
+    (void)rt_terminal_disable_raw_mode();
+    rt_terminal_signal_scope_emergency_restore();
+    abort();
+}
+
 void simple_contract_check(int64_t condition, int64_t kind,
                            const uint8_t* func_name, int64_t func_name_len) {
     if (condition != 0) return;
@@ -20,7 +28,7 @@ void simple_contract_check(int64_t condition, int64_t kind,
             simple_contract_kind_name(kind),
             func_name && func_name_len > 0 ? (int)func_name_len : 9,
             func_name && func_name_len > 0 ? (const char*)func_name : "<unknown>");
-    abort();
+    simple_contract_abort();
 }
 
 void simple_contract_check_msg(int64_t condition, int64_t kind,
@@ -35,5 +43,5 @@ void simple_contract_check_msg(int64_t condition, int64_t kind,
         fprintf(stderr, " (%.*s)", (int)message_len, (const char*)message);
     }
     fputc('\n', stderr);
-    abort();
+    simple_contract_abort();
 }

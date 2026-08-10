@@ -9,7 +9,12 @@
   observes resize then stop, restores termios, and proves the prior SIGWINCH
   handler and signal mask return after teardown.
 - Negative cases cover second begin rollback, invalid handle, repeated close,
-  `EINVAL`, and descriptor ownership.
+  `EINVAL`, partial-install rollback, an in-flight handler, and exact retired
+  write-descriptor reuse with an observable empty pipe.
+- Native Simple assertion and Rust-hosted contract entrypoints run under a PTY
+  and must restore canonical/echo mode before abort. Windows compile coverage
+  is mandatory; live mode/resize coverage reports blocked when no console or
+  ConPTY is available.
 - ITF integration launches a real Simple subprocess with stdout captured
   directly by the bounded process facade; default and `NO_COLOR` output
   contain no ANSI while force-color does, and the child exit status is retained.

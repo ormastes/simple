@@ -20,5 +20,8 @@ Status: selected corrective requirements (2026-08-10)
   `runtime_native.c`, `runtime_hosted_signal.c`, the Rust hosted runtime, and
   the tree-walking interpreter registry/provider.
 - REQ-TTY-007: Linux PTY tests prove stop wakeup, resize retry, handler
-  restoration, and termios restoration. A real stdout-pipe test proves ITF
-  color suppression.
+  restoration, termios restoration, contract/assert emergency restoration,
+  BEGIN rollback fencing, and exact write-descriptor reuse safety. Windows
+  providers must compile cross-host; live raw-mode/resize execution requires a
+  real console or ConPTY and is reported blocked rather than passed otherwise.
+  A real stdout-pipe test proves ITF color suppression.

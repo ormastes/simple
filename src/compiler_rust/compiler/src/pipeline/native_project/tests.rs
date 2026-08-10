@@ -3317,6 +3317,129 @@ fn test_terminal_signal_scope_focus_contract() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn test_terminal_signal_scope_exact_fd_reuse_contract() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
+    let temp = tempfile::tempdir().unwrap();
+    let executable = temp.path().join("terminal_signal_scope_fd_reuse_test");
+    let status = std::process::Command::new(find_c_compiler())
+        .arg("-std=gnu11")
+        .arg("-I").arg(repo_root.join("src/runtime"))
+        .arg(repo_root.join("test/01_unit/runtime/terminal_signal_scope_fd_reuse_test.c"))
+        .arg("-lpthread")
+        .arg("-o").arg(&executable)
+        .status().unwrap();
+    assert!(status.success(), "failed to compile exact-fd terminal scope contract");
+    let output = std::process::Command::new(&executable).output().unwrap();
+    assert!(output.status.success(),
+        "exact-fd terminal scope contract failed: status={} stdout={:?} stderr={:?}",
+        output.status, String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr));
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn test_terminal_signal_scope_windows_live_contract() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
+    let temp = tempfile::tempdir().unwrap();
+    let executable = temp.path().join("terminal_signal_scope_windows_focus_test.exe");
+    let compiler = find_c_compiler();
+    let is_msvc = Path::new(&compiler)
+        .file_stem().and_then(|stem| stem.to_str())
+        .is_some_and(|stem| stem.eq_ignore_ascii_case("cl"));
+    let mut command = std::process::Command::new(compiler);
+    if is_msvc {
+        command.arg("/std:c11")
+            .arg(format!("/I{}", repo_root.join("src/runtime").display()))
+            .arg(repo_root.join("test/01_unit/runtime/terminal_signal_scope_windows_focus_test.c"))
+            .arg(format!("/Fe:{}", executable.display()));
+    } else {
+        command.arg("-std=gnu11")
+            .arg("-I").arg(repo_root.join("src/runtime"))
+            .arg(repo_root.join("test/01_unit/runtime/terminal_signal_scope_windows_focus_test.c"))
+            .arg("-o").arg(&executable);
+    }
+    let status = command.status().unwrap();
+    assert!(status.success(), "failed to compile Windows terminal scope contract");
+    let output = std::process::Command::new(&executable).output().unwrap();
+    if output.status.code() == Some(77) {
+        eprintln!("{}", String::from_utf8_lossy(&output.stderr).trim());
+        return;
+    }
+    assert!(output.status.success(),
+        "Windows terminal scope contract failed: status={} stdout={:?} stderr={:?}",
+        output.status, String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_simple_assert_failure_restores_terminal_contract() {
+    use std::mem::MaybeUninit;
+    use std::os::unix::process::CommandExt;
+
+    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
+    let temp = tempfile::tempdir().unwrap();
+    let executable = temp.path().join("terminal_assert_failure");
+    NativeProjectBuilder::new(repo_root.clone(), executable.clone())
+        .config(NativeBuildConfig {
+            entry_closure: true,
+            runtime_bundle: "core-c".to_string(),
+            incremental: false,
+            ..NativeBuildConfig::default()
+        })
+        .source_dir(repo_root.join("src/lib"))
+        .entry_file(repo_root.join("test/fixtures/runtime/terminal_assert_failure.spl"))
+        .build()
+        .expect("actual Simple assertion fixture should native-build");
+
+    let mut master = -1;
+    let mut slave = -1;
+    assert_eq!(unsafe {
+        libc::openpty(
+            &mut master, &mut slave, std::ptr::null_mut(),
+            std::ptr::null(), std::ptr::null())
+    }, 0);
+    let mut before = MaybeUninit::<libc::termios>::zeroed();
+    assert_eq!(unsafe { libc::tcgetattr(slave, before.as_mut_ptr()) }, 0);
+    let before = unsafe { before.assume_init() };
+
+    let mut command = std::process::Command::new(&executable);
+    unsafe {
+        command.pre_exec(move || {
+            if libc::dup2(slave, libc::STDIN_FILENO) != libc::STDIN_FILENO {
+                return Err(std::io::Error::last_os_error());
+            }
+            libc::close(master);
+            libc::close(slave);
+            Ok(())
+        });
+    }
+    let output = command.output().unwrap();
+    assert!(!output.status.success(), "intentional Simple assertion unexpectedly passed");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Assertion violation"),
+        "actual assertion did not reach contract runtime: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut after = MaybeUninit::<libc::termios>::zeroed();
+    assert_eq!(unsafe { libc::tcgetattr(slave, after.as_mut_ptr()) }, 0);
+    let after = unsafe { after.assume_init() };
+    assert_eq!(
+        before.c_lflag & (libc::ICANON | libc::ECHO),
+        after.c_lflag & (libc::ICANON | libc::ECHO)
+    );
+    unsafe {
+        libc::close(master);
+        libc::close(slave);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn test_stage4_compiler_entries_prepare_dedicated_backfill_through_gate() {
     let _guard = runtime_bundle_env_lock().lock().unwrap();
     let old_bootstrap = std::env::var_os("SIMPLE_BOOTSTRAP");
