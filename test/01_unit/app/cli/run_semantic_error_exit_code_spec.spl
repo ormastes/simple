@@ -1,0 +1,84 @@
+"""
+# `bin/simple run` exit-code contract on semantic errors
+
+As a user scripting around `bin/simple run`, I need the exit code to tell me
+whether my program actually ran correctly: a program that hits a genuine
+semantic error (an undefined identifier) must exit non-zero with a diagnostic,
+and a correct program must still exit 0. Regression guard for
+doc/08_tracking/bug/jit_run_exits_zero_and_silent_on_semantic_error_2026-08-04.md,
+where the default JIT lane fabricated a const-0 for an unresolved identifier
+and reported success (rc=0, no diagnostic), making every exit-code sweep over
+the corpus fail-open.
+
+@manual_section cli/run_exit_codes
+"""
+
+use std.spec.*
+use std.io_runtime.{shell, file_write, file_delete}
+
+val PROBE_DIR = "build/probe_run_exit_code"
+val GOOD = "{PROBE_DIR}/good_probe.spl"
+val BAD = "{PROBE_DIR}/undef_var_probe.spl"
+
+fn write_probes():
+    shell("mkdir -p {PROBE_DIR}")
+    file_write(GOOD, "fn main():\n    print \"control-ok\"\n")
+    # The probe must USE the unresolved value in plain value position
+    # (interpolation), not via a method call: unresolved METHOD calls already
+    # fail closed (rc=70); only value-position reads hit the const-0 fail-open.
+    val brace_open = "{"
+    file_write(BAD, "fn main():\n    print \"before\"\n    val x = totally_undefined_thing_xyz\n    print \"after " + brace_open + "x}\"\n")
+
+fn run_engine(engine_env: text, file: text) -> (text, i64):
+    val r = shell("env SIMPLE_TIMEOUT_SECONDS=0 {engine_env} timeout 60 bin/simple run {file} 2>&1")
+    (r.stdout + r.stderr, r.exit_code)
+
+describe "bin/simple run exit-code contract":
+    """
+    Both directions are asserted: the control MUST exit 0 (a harness that
+    fails everything would otherwise look like a fix), and the
+    undefined-identifier probe MUST exit non-zero on every engine.
+    """
+
+    it "control program exits 0 on interpreter and JIT":
+        # @req REQ-CLI-EXIT-001
+        step("write a correct probe and an undefined-identifier probe")
+        write_probes()
+        step("run the correct probe on both engines and read exit codes")
+        val (_out_i, rc_i) = run_engine("SIMPLE_EXECUTION_MODE=interpreter", GOOD)
+        val (_out_j, rc_j) = run_engine("SIMPLE_EXECUTION_MODE=jit", GOOD)
+        assert_equal(rc_i, 0)
+        assert_equal(rc_j, 0)
+
+    it "undefined identifier exits non-zero with a diagnostic on the interpreter":
+        # @req REQ-CLI-EXIT-002
+        write_probes()
+        step("run the undefined-identifier probe on the interpreter")
+        val (out, rc) = run_engine("SIMPLE_EXECUTION_MODE=interpreter", BAD)
+        assert_not_equal(rc, 0)
+        assert_contains(out, "not found")
+
+    it "undefined identifier exits non-zero on the default JIT lane instead of fabricating 0":
+        """
+        This is the historical fail-open: the JIT emitted `iconst 0` for a
+        truly unresolved GlobalLoad, printed `after 0`, and exited 0. The
+        fixed contract is: JIT compilation fails, the run falls back to the
+        interpreter, the real semantic diagnostic is printed, and the exit
+        code is non-zero.
+        """
+        # @req REQ-CLI-EXIT-003
+        write_probes()
+        step("run the undefined-identifier probe on the default (JIT) engine")
+        # Explicit engine env: the test daemon exports the interpreter mode to
+        # children, so an empty env here would silently re-test the interpreter.
+        val (out, rc) = run_engine("SIMPLE_EXECUTION_MODE=jit", BAD)
+        assert_not_equal(rc, 0)
+        step("confirm no fabricated value was printed as a successful result")
+        assert_false(out.contains("after 0") and rc == 0)
+
+    it "undefined identifier is a hard error under SIMPLE_JIT_STRICT=1":
+        # @req REQ-CLI-EXIT-003
+        write_probes()
+        step("run the undefined-identifier probe with SIMPLE_JIT_STRICT=1")
+        val (_out, rc) = run_engine("SIMPLE_EXECUTION_MODE=jit SIMPLE_JIT_STRICT=1", BAD)
+        assert_not_equal(rc, 0)

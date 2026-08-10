@@ -1,0 +1,162 @@
+#!/bin/sh
+# check-native-print-stdout-oracle.shs
+#
+# ORACLE = ACTUAL STDOUT BYTES, never build success.
+#
+# This gate exists because of a specific fail-open class: a native-build can
+# exit 0, produce a runnable binary, and that binary can print NOTHING where
+# the interpreter prints correctly. Every native probe whose PASS row was
+# scored on `native-build` exit status is blind to that. See
+#   doc/08_tracking/bug/native_interpolated_print_with_call_silently_drops_output_2026-08-10.md
+#
+# For each fixture the check builds a native binary, RUNS it, and requires its
+# stdout to equal the interpreter's stdout byte for byte. A build failure is a
+# FAIL, but a successful build with wrong/empty output is ALSO a FAIL -- that
+# is the whole point.
+#
+# Fixture roles:
+#   pc_plain     POSITIVE CONTROL. Non-interpolated print. If this fails the
+#                native lane is broken generally and the other rows say nothing.
+#   interp_var   interpolation, no call.
+#   interp_call  interpolation + call  <- the reported defect shape.
+#   interp_multi several call placeholders in one literal.
+#   nc_mismatch  NEGATIVE CONTROL. Its expectation is deliberately wrong, so
+#                this row MUST report a mismatch. If it does not, the
+#                comparison itself is not running and every PASS above it is
+#                vacuous.
+#
+# Verdict line is the last line of stdout:
+#   PASS -- <n> fixture(s) checked, stdout compared against interpreter oracle
+#   FAIL -- ...
+#   ERROR -- nothing was checked   (exit 2; a run comparing 0 fixtures is never a pass)
+
+set -u
+
+REPO=$(cd "$(dirname "$0")/../.." && pwd)
+SIMPLE="${SIMPLE_BINARY:-$REPO/bin/simple}"
+WORK="${TMPDIR:-/tmp}/native-print-stdout-oracle.$$"
+BUILD_TIMEOUT="${NATIVE_BUILD_TIMEOUT:-600}"
+
+if [ ! -x "$SIMPLE" ]; then
+    echo "ERROR -- nothing was checked (no simple binary at $SIMPLE)"
+    exit 2
+fi
+
+mkdir -p "$WORK" || { echo "ERROR -- nothing was checked (cannot create $WORK)"; exit 2; }
+trap 'rm -rf "$WORK"' EXIT
+
+emit() {
+    # $1 = fixture name, $2 = source body
+    printf '%s\n' "$2" > "$WORK/$1.spl"
+}
+
+emit pc_plain 'fn main():
+    print "PLAIN-OK"'
+
+emit interp_var 'fn main():
+    val x = 7
+    print "V={x}"'
+
+emit interp_call 'fn f() -> i64:
+    5
+fn main():
+    print "C={f()}"'
+
+emit interp_multi 'fn f() -> i64:
+    5
+fn g() -> text:
+    "z"
+fn main():
+    print "M={f()}-{g()}-{f()}"'
+
+emit nc_mismatch 'fn main():
+    print "ACTUAL"'
+
+# The negative control asserts a string the program provably does not print.
+NC_EXPECT="THIS-IS-NOT-WHAT-THE-PROGRAM-PRINTS"
+
+checked=0
+failed=0
+nc_saw_mismatch=0
+
+strip_seed_banner() {
+    grep -v '^WARNING: this Rust-built Simple binary is a bootstrap seed only' \
+        | grep -v '^Build and use the pure-Simple bin/simple instead\.'
+}
+
+for fx in pc_plain interp_var interp_call interp_multi nc_mismatch; do
+    src="$WORK/$fx.spl"
+    bin="$WORK/bin_$fx"
+
+    if [ "$fx" = "nc_mismatch" ]; then
+        oracle="$NC_EXPECT"
+    else
+        oracle=$(SIMPLE_EXECUTION_MODE=interpret "$SIMPLE" run "$src" 2>/dev/null | strip_seed_banner)
+        if [ -z "$oracle" ]; then
+            echo "FAIL -- $fx: interpreter oracle produced no output; cannot compare"
+            failed=$((failed + 1))
+            checked=$((checked + 1))
+            continue
+        fi
+    fi
+
+    "$SIMPLE" native-build --source "$WORK" --entry "$src" -o "$bin" \
+        > "$WORK/$fx.build.log" 2>&1
+    build_rc=$?
+
+    if [ ! -x "$bin" ]; then
+        echo "FAIL -- $fx: native-build produced no binary (rc=$build_rc); see $WORK/$fx.build.log"
+        failed=$((failed + 1))
+        checked=$((checked + 1))
+        continue
+    fi
+
+    actual=$(timeout "$BUILD_TIMEOUT" "$bin" 2>/dev/null)
+    run_rc=$?
+
+    checked=$((checked + 1))
+
+    if [ "$actual" = "$oracle" ]; then
+        if [ "$fx" = "nc_mismatch" ]; then
+            echo "FAIL -- nc_mismatch: negative control MATCHED its deliberately wrong"
+            echo "        expectation. The stdout comparison is not actually running,"
+            echo "        so every other row in this check is vacuous."
+            failed=$((failed + 1))
+        else
+            echo "ok -- $fx: stdout matches interpreter oracle [$actual]"
+        fi
+    else
+        if [ "$fx" = "nc_mismatch" ]; then
+            nc_saw_mismatch=1
+            echo "ok -- nc_mismatch: negative control correctly reported a mismatch"
+            echo "      (expected [$oracle], got [$actual]) -- the comparison is live"
+        else
+            echo "FAIL -- $fx: native stdout DIVERGES from the interpreter oracle"
+            echo "        expected [$oracle]"
+            echo "        actual   [$actual]   (binary exit=$run_rc, build rc=$build_rc)"
+            if [ -z "$actual" ]; then
+                echo "        actual is EMPTY: the print was silently dropped in the"
+                echo "        native lane. A build-success-only probe reads this as PASS."
+            fi
+            failed=$((failed + 1))
+        fi
+    fi
+done
+
+if [ "$checked" -eq 0 ]; then
+    echo "ERROR -- nothing was checked"
+    exit 2
+fi
+
+if [ "$nc_saw_mismatch" -ne 1 ]; then
+    echo "ERROR -- nothing was checked (negative control never ran to a verdict)"
+    exit 2
+fi
+
+if [ "$failed" -ne 0 ]; then
+    echo "FAIL -- $failed of $checked fixture(s) diverged from the interpreter stdout oracle"
+    exit 1
+fi
+
+echo "PASS -- $checked fixture(s) checked, stdout compared against interpreter oracle"
+exit 0

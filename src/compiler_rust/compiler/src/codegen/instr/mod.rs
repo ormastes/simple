@@ -328,9 +328,9 @@ pub fn compile_instruction<M: Module>(
         }
 
         MirInst::AggregateCopy {
-            dest, src, byte_size, ..
+            dest, src, byte_size, deep_fields, ..
         } => {
-            closures_structs::compile_aggregate_copy(ctx, builder, *dest, *src, *byte_size);
+            closures_structs::compile_aggregate_copy(ctx, builder, *dest, *src, *byte_size, deep_fields);
         }
 
         MirInst::BinOp { dest, op, left, right } => {
@@ -486,10 +486,20 @@ pub fn compile_instruction<M: Module>(
                     }
                 }
             } else {
-                // Truly unresolved - likely a local variable that MIR incorrectly
-                // treated as a global. Use zero to allow compilation to proceed.
-                let val = builder.ins().iconst(types::I64, 0);
-                ctx.vreg_values.insert(*dest, val);
+                // Truly unresolved: not a declared global, not a const-data name,
+                // not a known function, and not in use_map/import_map. This used to
+                // emit `iconst 0`, which fabricated a 0 value for genuinely
+                // undefined identifiers and made `bin/simple run` on such programs
+                // exit 0 with no diagnostic at all (fail-open; see
+                // doc/08_tracking/bug/jit_run_exits_zero_and_silent_on_semantic_error_2026-08-04.md).
+                // Failing compilation here makes the default JIT lane fall back to
+                // the interpreter, which reports the real semantic error and exits
+                // non-zero; under SIMPLE_JIT_STRICT=1 it is a hard error.
+                return Err(format!(
+                    "GlobalLoad: unresolved identifier '{}' (not a global, function, \
+                     const-data name, or import)",
+                    global_name
+                ));
             }
         }
 

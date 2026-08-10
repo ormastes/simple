@@ -413,8 +413,47 @@ pub(crate) fn exec_block_value(
             let captured_clone = Env::clone(&captured);
             exec_block_closure(&nodes, &captured_clone, functions, classes, enums, impl_methods)
         }
-        _ => Ok(Value::Nil),
+        // A pending example (`it "x"` with no body) legitimately has a Nil body.
+        Value::Nil => Ok(Value::Nil),
+        other => Err(CompileError::semantic(format!(
+            "BDD block expected a block or lambda, got {}; the body was not executed. \
+             This is usually a named argument (e.g. `tag:`) occupying the block position.",
+            value_kind_name(&other)
+        ))),
     }
+}
+
+/// Short type name for a Value, for diagnostics.
+fn value_kind_name(v: &Value) -> &'static str {
+    match v {
+        Value::Nil => "nil",
+        Value::Bool(_) => "bool",
+        Value::Int(_) => "int",
+        Value::Float(_) => "float",
+        Value::Str(_) => "text",
+        Value::Symbol(_) => "symbol",
+        Value::Array(_) => "array",
+        Value::Lambda { .. } => "lambda",
+        Value::BlockClosure { .. } => "block",
+        _ => "value",
+    }
+}
+
+/// Index of the block argument for a BDD keyword.
+///
+/// The block is always the LAST positional (unnamed, unlabelled) argument.
+/// Selecting by hard-coded index 1 meant a named argument such as
+/// `tag: ["only-compiled"]` occupied the block slot and the tag array was
+/// executed as the body -- silently deleting it.
+/// Falls back to 1 when there is no trailing positional past the description,
+/// so a description-only call keeps relying on `eval_arg`'s out-of-range Nil.
+fn trailing_block_index(args: &[Argument]) -> usize {
+    for (i, arg) in args.iter().enumerate().rev() {
+        if arg.name.is_none() && arg.label.is_none() {
+            return if i >= 1 { i } else { 1 };
+        }
+    }
+    1
 }
 
 /// Extract the description string from the first argument of an `it`/`describe`/`context` call
@@ -559,7 +598,16 @@ pub(super) fn eval_bdd_builtin(
                 }
             };
 
-            let block = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            let block = eval_arg(
+                args,
+                trailing_block_index(args),
+                Value::Nil,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
 
             let indent = BDD_INDENT.with(|cell| *cell.borrow());
             let indent_str = "  ".repeat(indent);
@@ -667,7 +715,7 @@ pub(super) fn eval_bdd_builtin(
             let name_str = extract_desc_str(args, "unnamed");
             // For limited_it, extract named resource_limits argument
             let mut resource_limits = None;
-            let mut block_index = 1;
+            let mut block_index = trailing_block_index(args);
             if keyword == "limited_it" {
                 // Look for named "resource_limits" argument
                 for (i, arg) in args.iter().enumerate() {
