@@ -1,5 +1,29 @@
 # Value vs Alias Semantics, Per Engine (measured 2026-08-10)
 
+> **RE-MEASURED 2026-08-10 on a FRESH seed build — the table below describes a
+> STALE binary.** The deployed `bin/release/x86_64-unknown-linux-gnu/simple`
+> used for the original measurement was built 2026-08-09 04:50, BEFORE the
+> F1 struct-value-semantics campaign landed the same day (`735bbd4b606` S3
+> declaration-kind carry, `cf992112a2d` S5 AggregateCopy sites F–I,
+> `9106761fe76` S6 param-copy site J). On a fresh
+> `src/compiler_rust/target/release/simple` (cargo build, 59,000,784 bytes,
+> mtime 2026-08-10 04:16), the 6-position matrix CONVERGES on 5 of 6:
+>
+> | Position | Interp | JIT (fresh seed) |
+> |---|---|---|
+> | plain assignment | copy (1.0) | **copy (1.0)** |
+> | nested struct field via copy (`o2.inner.a=9.0`) | copy (1.0) | **STILL ALIAS (9.0)** |
+> | argument passing | copy (1.0) | copy (1.0) |
+> | return value | copy (1.0) | copy (1.0) |
+> | list element extraction | copy (1.0) | copy (1.0) |
+> | dict value extraction | copy (1.0) | copy (1.0) |
+>
+> Residual defect: `AggregateCopy` is SHALLOW — a struct-typed field is stored
+> as a pointer, so copying the outer struct aliases the inner one. Filed in
+> the bug doc (residual section). `m[1][0]=9` divergence UNCHANGED on the
+> fresh seed (interp rejects, JIT works). Everything below is the stale-binary
+> record, kept for provenance.
+
 **Settles the contradiction between "structs/arrays/text are value types" and
 the `ca750206e0c7` probe showing `var f2 = f; f2.a = 7.0` mutating `f`.**
 Both observations were real. The discriminator is **(kind, engine)**:
@@ -75,12 +99,15 @@ as `doc/08_tracking/bug/jit_struct_assignment_aliases_not_copies_2026-08-10.md`.
 The interpreter's rejection of `m[1][0] = 9` is a second, smaller divergence
 (same bug doc).
 
-Native/AOT (`native-build`) status: **NOT REACHED**. Two build attempts of the
-probe (`bin/simple native-build tmp_probe/probe.spl`, 300s and 550s wall,
-second with `SIMPLE_TIMEOUT_SECONDS=3600`) produced no output lines and no
-binary before termination, on a host saturated by concurrent stage3
-native-builds. The AOT column of the truth table is unmeasured — do not infer
-it from either other engine.
+Native/AOT (`native-build`) status: **STILL UNMEASURED, now with a concrete
+blocker.** On the fresh 2026-08-10 seed, `native-build` of both the minimal
+P1 probe and the full matrix fails deterministically in the LLVM backend:
+`llc-20: <ir>.ll:64:4x: error: void type only allowed for function results`
+(`AOT compile error ... Compile error in backend (llvm): llc failed`). This
+is an invalid-IR emission defect for struct-bearing programs, not host
+saturation (the two earlier 300s/550s no-output attempts on 2026-08-09 were
+saturation). The AOT column of the truth table remains unmeasured — do not
+infer it from either other engine.
 
 ## Probe source
 

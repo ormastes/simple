@@ -1,5 +1,41 @@
 # BUG: JIT struct assignment ALIASES instead of copying (interpreter copies)
 
+> **MOSTLY RESOLVED 2026-08-10 — stale-binary measurement.** The binary
+> measured below (deployed 2026-08-09 04:50) predates the F1 campaign that
+> landed later the same day: `735bbd4b606` (S3: carry struct-vs-class
+> declaration kind into seed HIR/MIR), `cf992112a2d` (S5: `MirInst::
+> AggregateCopy` primitive + copy sites F–I in
+> `src/compiler_rust/compiler/src/mir/lower/lowering_stmt.rs` /
+> `lowering_core.rs::copy_if_value_type`), `9106761fe76` (S6: struct param
+> copy site J). Re-run on a fresh seed (`src/compiler_rust/target/release/
+> simple`, 59,000,784 B, 2026-08-10 04:16): plain assignment, argument,
+> return, list-element and dict-value extraction now COPY under the JIT,
+> matching the interpreter (probe printed 1.0 in all five, CONTROL=42).
+>
+> **RESIDUAL (open):**
+> 1. **Nested struct field aliases through a copy**: `var o2 = o;
+>    o2.inner.a = 9.0` mutates `o.inner.a` under JIT (interp: 1.0, JIT: 9.0).
+>    Cause: `AggregateCopy` (`codegen/instr/closures_structs.rs::
+>    compile_aggregate_copy`) is a shallow `fields.len()*8`-byte copy; a
+>    struct-typed field is a pointer, so the inner struct stays shared. Fix
+>    direction: recursive copy of value-kind struct fields at the copy sites,
+>    or deep AggregateCopy. Not patched here — the F1 campaign owns these
+>    files and the change needs its own probe matrix.
+> 2. **`m[1][0] = 9` divergence unchanged**: interpreter rejects
+>    (`interpreter/node_exec.rs:1481`, final `else` of a chain whose wording
+>    — "nested field access not fully supported" — reads as an unimplemented
+>    gap, not a deliberate restriction; nothing in doc/ says it is intended),
+>    JIT lowers it fine (`mir/lower/lowering_stmt.rs:490` lowers the receiver
+>    expression first). ADR-004 says compound-assignment lvalue writes "stay
+>    valid", so the interpreter is the nonconforming side.
+> 3. **AOT lane now has a concrete blocker**: `native-build` of even the
+>    minimal struct probe fails with `llc-20: void type only allowed for
+>    function results` (invalid LLVM IR emission). AOT struct semantics
+>    remain unmeasured.
+>
+> Deployed `bin/release/x86_64-unknown-linux-gnu/simple` is STALE w.r.t. all
+> of this until redeployed from a post-`9106761fe76` build.
+
 - Date: 2026-08-10
 - Severity: HIGH (silent cross-engine semantic divergence; corrupts any code
   that assigns a struct and mutates the copy)
