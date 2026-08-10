@@ -9230,15 +9230,27 @@ int rt_file_truncate(const char* path, uint64_t size) {
     return rc == 0 ? 1 : 0;
 }
 
-SplArray* rt_bytes_from_raw(int64_t ptr, int64_t len) {
+/* (ptr, len) -> RuntimeValue (byte array), per runtime_sffi.rs:1876.
+ *
+ * The BODY was already correct: rt_byte_array_new_len returns a value the
+ * rt_core registry owns and that carries RT_VALUE_TAG_HEAP, which is exactly
+ * what the compiler decodes -- verified in all three C link orders
+ * (raw=0x...2a1, tag=1, array_len=5 for a 5-byte source). Only the C RETURN
+ * TYPE was spelled `SplArray*` where the compiler and the canonical Rust
+ * definition (sffi/file_io/file_ops.rs:1006 -> RuntimeValue) say I64, which is
+ * what the extern ABI gate flagged. Spelling it int64_t makes the C signature
+ * state what the function actually returns; it is not a behaviour change.
+ * src/runtime/test/rt_browser_http_job_provider_selfcheck.c:17 already
+ * declared it `RuntimeValue`. */
+int64_t rt_bytes_from_raw(int64_t ptr, int64_t len) {
     /* Create a byte array ([u8]) from a raw memory pointer.
      * Used by LLVM memory buffer emission to avoid temp file I/O. */
-    if (ptr == 0 || len <= 0) return rt_byte_array_new_len(0);
+    if (ptr == 0 || len <= 0) return (int64_t)(uintptr_t)rt_byte_array_new_len(0);
     SplArray* result = rt_byte_array_new_len((uint64_t)len);
     RtCoreArray* array = rt_core_array_ptr(result);
-    if (!array || !array->data) return result;
+    if (!array || !array->data) return (int64_t)(uintptr_t)result;
     memcpy(array->data, (const void*)(uintptr_t)ptr, (size_t)len);
-    return result;
+    return (int64_t)(uintptr_t)result;
 }
 
 /* ================================================================

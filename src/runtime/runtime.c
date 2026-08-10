@@ -3068,13 +3068,27 @@ int64_t rt_text_to_bytes(const char* text) {
     return (int64_t)(uintptr_t)bb;
 }
 
-/* rt_bytes_to_text: convert byte array handle back to text (null-terminated) */
-const char* rt_bytes_to_text(int64_t handle) {
-    if (!handle) return SPL_STRDUP("", "str");
-    rt_byte_buf* bb = rt_byte_buf_from_handle(handle);
-    if (!bb->data || bb->len <= 0) return SPL_STRDUP("", "str");
-    char* result = (char*)SPL_MALLOC((size_t)bb->len + 1, "str");
-    memcpy(result, bb->data, (size_t)bb->len);
-    result[bb->len] = '\0';
-    return result;
+/* rt_bytes_to_text: byte-array RuntimeValue -> text RuntimeValue.
+ *
+ * runtime_sffi.rs:251 declares `RuntimeFuncSpec::new("rt_bytes_to_text",
+ * &[I64], &[I64])` -- BOTH sides are RuntimeValues, and the canonical Rust
+ * definition (sffi/file_io/file_ops.rs:1127) is
+ * `fn(bytes: RuntimeValue) -> RuntimeValue`.  runtime_native.c:5966 already
+ * agrees.  This copy used to decode the argument as a private `rt_byte_buf*`
+ * and return a raw malloc'd `const char*`: under -z muldefs, whenever THIS
+ * definition won the link, the tagged array handle the compiler passes was
+ * dereferenced as an rt_byte_buf and the process SIGSEGV'd, and any survivor
+ * came back as an untagged address that reads as an empty string.
+ *
+ * The `rt_byte_buf` world below is reachable only through rt_text_to_bytes,
+ * which has no RuntimeFuncSpec (the compiler never calls it) and no C-internal
+ * caller of rt_bytes_to_text exists, so nothing was relying on the old
+ * interpretation. */
+int64_t rt_bytes_to_text(int64_t bytes_value) {
+    int64_t len = rt_array_len_safe(bytes_value);
+    if (bytes_value == 0 || len <= 0) return rt_string_new(NULL, 0);
+    const uint8_t* data =
+        (const uint8_t*)(uintptr_t)rt_array_data_ptr_u8((SplArray*)(uintptr_t)bytes_value);
+    if (!data) return rt_string_new(NULL, 0);
+    return rt_string_new(data, (uint64_t)len);
 }
