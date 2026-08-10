@@ -129,3 +129,19 @@
 - Retry 3 was then killed by earlyoom: host available memory fell below 10%, and earlyoom SIGTERM'd the Stage4 `simple` process at 29293 MiB RSS. No HIR/compiler error was emitted.
 - The three-attempt cap is reached. Next fresh cycle: run from the preserved cache in tmux only when host memory headroom can accommodate at least the observed 30 GiB compiler RSS plus the earlyoom reserve.
 - No Stage4 candidate exists. Candidate smoke/install, ARM64 attestation, QMP primitive-WM receipts, macOS, ARM, and Uno-Q remain pending.
+
+## Current memory frontier and reviewed next lane (2026-08-10)
+
+- Evidence: durable Stage4 attempts were killed by earlyoom at 29.3 GiB and 21.4 GiB RSS while unrelated workloads reduced host reserve.
+- Scheduler: `build/bootstrap-recovery/run-stage4-memory-gated.sh` is running in tmux `codex-stage4-memory-gated-3`, preserving `build/bootstrap-recovery/stage4-native-cache` and admitting only when `MemAvailable >= 75 GiB` with no runnable competing `simple` process.
+- Smaller-model ownership reviews found that retained `HirModule` values directly alias mutable `SymbolTable` and HIR values. Therefore in-place reset/reuse is rejected as corrupting prior modules.
+- Highest-capability review accepted a Stage4-only two-pass fused HIR-to-MIR architecture and rejected eliminating the temporary `HirLowering` wrapper as immaterial.
+
+Implementation slices after the queued baseline finishes:
+
+1. Compact whole-program surface index: value-struct layouts, return types, generic dependencies, provenance, and MIR struct prescan inputs.
+2. Module-local fused lowering: transient parse -> HIR -> semantic/mono -> MIR, promoting only MIR/index outputs.
+3. Regression tests: two-module symbol isolation, cross-module generic monomorphization, value-struct layout, diagnostic lifetime, and source-fingerprint/nonempty-output gates.
+4. Peak-RSS comparison against the canonical Stage4 command, followed by x86 smoke/install and ARM64 SimpleOS QEMU attestation.
+
+Merge owner: main Stage4 lane. Smaller sidecars may own disjoint test/index slices only. Final reviewer: highest-capability model before broad acceptance or a done mark.

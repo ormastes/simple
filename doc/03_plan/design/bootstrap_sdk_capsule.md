@@ -314,3 +314,16 @@ The preserved-cache Stage4 closure now passes loader typing and exposed three la
 ## 2026-08-10 Durable Stage4 execution and memory evidence
 
 Codegen JIT ownership and cleanup are fixed with focused native evidence. Canonical Stage4 now runs beyond the previous phase-4 error frontiers and exceeds the command transport's 30-minute lifetime, so long attempts must run in a dedicated tmux session with a separate status receipt. The first durable attempt reached roughly 48 minutes and 29.3 GiB RSS before host-wide earlyoom terminated it at the configured 10% available-memory threshold; no compiler diagnostic occurred. This is a host scheduling/headroom constraint, not evidence that Stage4 or QEMU works. Preserve the cache and retry in a fresh cycle only with sufficient host memory. Do not weaken low-memory, provenance, candidate smoke, attestation, or QMP gates.
+
+## Stage4 fused HIR-to-MIR memory lane (2026-08-10 review)
+
+Observed pure-Simple Stage4 compiler peaks of 21.4 GiB and 29.3 GiB are dominated by retained whole-program HIR, not by the reusable `HirLowering` wrapper. Each promoted `HirModule` retains its mutable `SymbolTable` and reachable function/type graph, and the current streaming-surface path keeps every module until MIR lowering. In-place resets are forbidden because they mutate previously retained modules.
+
+The material low-memory architecture is a Stage4-only two-pass fused lane:
+
+1. Build a compact whole-program index from `ModuleSurface` data for value-struct layout, function returns, generic/monomorphization dependencies, symbol provenance, and the MIR struct prescan.
+2. For each source module, enter one transient scope, parse and lower to HIR, run required semantic/monomorphization work, lower that module to MIR, promote only the retained MIR/index outputs, and end the scope before processing the next module.
+3. Preserve the existing source-fingerprint, nonempty-MIR, nonempty-object, native generic, runtime provenance, and bootstrap attestation gates unchanged.
+4. Keep `SymbolTable`, trait, and HIR function objects module-private until their module MIR is complete; never clear aliased HIR containers in place.
+
+Acceptance evidence must compare peak RSS for the same Stage4 command, prove multi-module generic/value-struct behavior, exercise diagnostics across transient-scope reclamation, and produce the same attested native candidate. A narrow removal of structured diagnostic promotion may be safe but is not accepted as the memory remedy because successful builds do not retain meaningful error graphs.
