@@ -4,9 +4,9 @@
 # Note: In interpreter mode, it blocks are closures — runtime behavior
 # is verified by file loading without errors (standard test runner behavior).
 
-use std.test_runner.test_manifest_scanner.{count_sdoctest_blocks, manifest_full_scan, scan_sdoctest_file}
+use std.test_runner.test_manifest_scanner.{count_sdoctest_blocks, manifest_full_scan, manifest_incremental_update, scan_sdoctest_file}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all}
-use std.nogc_sync_mut.io.file_ops.{file_write}
+use std.nogc_sync_mut.io.file_ops.{file_read, file_write}
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 
 describe "TestManifest Data Model":
@@ -65,6 +65,13 @@ describe "TestManifest Serialization Format":
         expect(header).to_contain("entry_count=5")
 
 describe "TestManifest Scanner Logic":
+    it "keeps Stage4 manifest scanning off the transitive std.io facade":
+        val source = file_read("src/lib/nogc_sync_mut/test_runner/test_manifest_scanner.spl")
+        expect(source).to_contain("use std.nogc_sync_mut.io.dir_ops.{dir_walk_native}")
+        expect(source).to_contain("use std.nogc_sync_mut.io.sysinfo_ops.{path_basename}")
+        expect(source.contains("use std.io.{dir_walk_native}")).to_equal(false)
+        expect(source.contains("use std.io.{path_basename}")).to_equal(false)
+
     it "detects unit test level from path":
         val path = "test/unit/parser/foo_spec.spl"
         var level = 0
@@ -129,6 +136,34 @@ describe "TestManifest Scanner Logic":
         val manifest = manifest_full_scan([root])
         expect(manifest.entries.len()).to_equal(1)
         expect(manifest.entries[0].path).to_equal(spec_path)
+        dir_remove_all(root)
+
+    it "incrementally discovers visible specs and ignores hidden neighbors":
+        val root = "/tmp/simple-test-manifest-incremental-{getpid()}"
+        dir_remove_all(root)
+        dir_create_all(root)
+        val first_path = root + "/first_spec.spl"
+        val second_path = root + "/second_test.spl"
+        val hidden_path = root + "/.hidden_spec.spl"
+        file_write(first_path, "describe \"first\":\n    it \"runs\":\n        expect(1).to_equal(1)\n")
+        val initial = manifest_full_scan([root])
+        file_write(second_path, "describe \"second\":\n    it \"runs\":\n        expect(2).to_equal(2)\n")
+        file_write(hidden_path, "describe \"hidden\":\n    it \"does not register\":\n        expect(3).to_equal(3)\n")
+        val updated = manifest_incremental_update(initial, [root])
+        var found_first = false
+        var found_second = false
+        var found_hidden = false
+        for entry in updated.entries:
+            if entry.path == first_path:
+                found_first = true
+            elif entry.path == second_path:
+                found_second = true
+            elif entry.path == hidden_path:
+                found_hidden = true
+        expect(updated.entries.len()).to_equal(2)
+        expect(found_first).to_equal(true)
+        expect(found_second).to_equal(true)
+        expect(found_hidden).to_equal(false)
         dir_remove_all(root)
 
     it "extracts platform tags from content":
