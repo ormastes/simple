@@ -153,3 +153,28 @@ are baselined in `runtime_symbol_lane_divergence_baseline.txt` so the check
 is quiet today; it fails only when a symbol not already in that baseline
 starts being defined by two different C files. Run:
 `sh scripts/check/check-runtime-symbol-lane-divergence.shs`
+
+## Re-confirmed 2026-08-10
+
+Re-ran `sh scripts/check/check-runtime-symbol-lane-divergence.shs` fresh. It
+flagged 2 pairs added to the tree since the baseline was written and not yet
+triaged: `rt_file_is_char_device` (`runtime.c`,`runtime_native.c`) and
+`rt_mem_guard_stats` (`runtime_memory.c`,`runtime_native.c`). Diffed both
+pairs' bodies: `rt_file_is_char_device` is a byte-for-byte mirrored
+implementation (the `runtime_native.c` copy's own comment says "mirrors
+runtime.c's rt_file_is_char_device"), and `rt_mem_guard_stats` is a trivial
+one-line forwarder (`return rt_mem_guard_stats_native();`) identical in both
+files — neither is a representation divergence like the `rt_enum_new`
+flagship case. Added both to
+`scripts/check/runtime_symbol_lane_divergence_baseline.txt` (alongside a
+one-line reason in this section) so the check is green again
+(`runtime_symbol_lane_divergence_new=0`, `_ok=true`); this is routine baseline
+maintenance, not a fix to the underlying bug.
+
+The flagship divergence itself (`rt_enum_new`/`rt_atomic_*`/`rt_bdd_*` etc.,
+Lane C's `runtime.c` untagged representation vs Lane B's tagged
+`runtime_native.c`/`runtime_legacy_core.c`) is unchanged and still requires
+the source-list swap in `native.spl` described under "Fix direction" above,
+which still needs its own dedicated symbol-completeness verification pass —
+not done here. **Status remains OPEN / latent**, characterization otherwise
+unchanged from the original report.
