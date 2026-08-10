@@ -166,22 +166,6 @@ pub fn runtime_funcs_for_target(_target: &simple_common::target::Target) -> Vec<
     RUNTIME_FUNCS.iter().collect()
 }
 
-/// Look up the declared spec for a runtime symbol by exact name.
-///
-/// This exists so a backend can declare a runtime import with the signature the
-/// runtime actually has instead of assuming every slot is a `RuntimeValue`-wide
-/// integer. `codegen/llvm/emitter.rs::call_runtime_void` assumed exactly that
-/// and declared `void(i64, ...)` for symbols such as
-/// `rt_decision_probe(u64, bool)` and `rt_condition_probe(u64, u32, bool)`.
-///
-/// Returns `None` for symbols with no spec, which is a real answer and not an
-/// error: several emitted names (`rt_contract_check`, `rt_unit_bound_check`,
-/// `rt_generator_yield`) have no entry here and no definition in either
-/// runtime, and must keep failing loudly rather than acquire a fabricated one.
-pub fn spec_for(name: &str) -> Option<&'static RuntimeFuncSpec> {
-    RUNTIME_FUNCS.iter().find(|spec| spec.name == name)
-}
-
 /// Specification for a runtime SFFI function signature.
 #[derive(Debug, Clone)]
 pub struct RuntimeFuncSpec {
@@ -240,10 +224,6 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     RuntimeFuncSpec::new("rt_array_new", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_free", &[I64], &[]),
-    // Deep (recursive) array free. Unlike rt_array_free it RETURNS i64
-    // (1 = whole structure reclaimed, 0 = refused having freed nothing) --
-    // the rt_string_free shape below, not the void shape above.
-    RuntimeFuncSpec::new("rt_array_free_deep", &[I64], &[I64]),
     // Unlike rt_array_free, this RETURNS i64 (1 = reclaimed, 0 = refused).
     RuntimeFuncSpec::new("rt_string_free", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_byte_array_new", &[I64], &[I64]),
@@ -271,27 +251,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_array_last", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_filter", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_find", &[I64, I64], &[I64]),
-    // Receiver-polymorphic find, for the type-BLIND dispatch tables that cannot
-    // see a static receiver type. NOTE the return SHAPE differs by receiver —
-    // tagged element for an array, raw index for text — which is the contract
-    // hir/lower/expr/mod.rs already encodes. See rt_find.
-    RuntimeFuncSpec::new("rt_find", &[I64, I64], &[I64]),
-    // rt_array_map(array, closure) -> array; rt_array_each(array, closure) -> receiver.
-    RuntimeFuncSpec::new("rt_array_map", &[I64, I64], &[I64]),
-    // Receiver-polymorphic map (array or Option), for the two type-BLIND
-    // dispatch tables that cannot see a static receiver type. See rt_map.
-    RuntimeFuncSpec::new("rt_map", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_array_each", &[I64, I64], &[I64]),
-    // rt_array_reduce(array, init, closure): `init` FIRST, matching the
-    // interpreter's `reduce(init, func)` argument order.
-    RuntimeFuncSpec::new("rt_array_reduce", &[I64, I64, I64], &[I64]),
-    // In-place reverse, returns bool. Nothing dispatches the `reverse` METHOD
-    // here any more — that goes to rt_reverse / rt_array_reversed, matching the
-    // interpreter, which never mutates the receiver.
     RuntimeFuncSpec::new("rt_array_reverse", &[I64], &[I8]),
-    // Copying reverse, returns the new array. Emitted by the type-AWARE LLVM
-    // table for ("Array", "reverse").
-    RuntimeFuncSpec::new("rt_array_reversed", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_sort", &[I64], &[I8]),
     // Bug seed_array_local_alias_cow_bypass_2026-07-17: private shallow copy
     // used by `HirStmt::Let` lowering to break the local-alias COW bypass
@@ -320,35 +280,27 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_dict_insert", &[I64, I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_dict_contains", &[I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_dict_remove", &[I64, I64], &[I8]),
-    // Array `remove(index)`: removes IN PLACE, returns the REMOVED ELEMENT.
-    // `rt_remove` is the receiver-dispatching entry point that a bare,
-    // type-erased `.remove(k)` must go through — codegen's method table is keyed
-    // on the name alone, and routing every `.remove` to `rt_dict_remove` made
-    // array removal a silent no-op returning nil.
-    // doc/08_tracking/bug/array_remove_returns_mutated_array_not_removed_element_2026-07-20.md
-    RuntimeFuncSpec::new("rt_array_remove", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_collection_remove", &[I64, I64], &[I64]),
     // =========================================================================
     // Fast DB operations (runtime_db.c)
     // =========================================================================
-    RuntimeFuncSpec::new("rt_db_table_create", &[I64, I64, I64, I64], &[I64]), // name(ptr,len), num_cols, pk_col
+    RuntimeFuncSpec::new("rt_db_table_create", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_db_table_destroy", &[I64], &[]),
-    RuntimeFuncSpec::new("rt_db_put", &[I64, I64, I64, I64], &[I64]), // handle, pk(ptr,len), num_values
+    RuntimeFuncSpec::new("rt_db_put", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_db_put_value_int", &[I64, I64, I64, I64], &[]),
-    RuntimeFuncSpec::new("rt_db_put_value_text", &[I64, I64, I64, I64, I64], &[]), // handle, row, col, value(ptr,len)
-    RuntimeFuncSpec::new("rt_db_get", &[I64, I64, I64], &[I64]), // handle, pk(ptr,len)
+    RuntimeFuncSpec::new("rt_db_put_value_text", &[I64, I64, I64, I64], &[]),
+    RuntimeFuncSpec::new("rt_db_get", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_db_get_int", &[I64, I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_db_get_text", &[I64, I64, I64], &[I64]), // handle, row, col -> RuntimeValue(text)
+    RuntimeFuncSpec::new("rt_db_get_text", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_db_scan_range", &[I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_db_scan_result", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_db_delete", &[I64, I64, I64], &[I64]), // handle, pk(ptr,len)
+    RuntimeFuncSpec::new("rt_db_delete", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_db_row_count", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_db_col_count", &[I64], &[I64]),
     // Batched DB operations (reduce extern call overhead)
-    RuntimeFuncSpec::new("rt_db_put_row3", &[I64, I64, I64, I64, I64, I64, I64], &[I64]), // handle, pk(ptr,len), mask, v0..v2
-    RuntimeFuncSpec::new("rt_db_get_int_by_pk", &[I64, I64, I64, I64, I64], &[I64]), // handle, pk(ptr,len), col, default
-    RuntimeFuncSpec::new("rt_db_update_int", &[I64, I64, I64, I64, I64], &[I64]), // handle, pk(ptr,len), col, value
-    RuntimeFuncSpec::new("rt_db_update_text", &[I64, I64, I64, I64, I64, I64], &[I64]), // handle, pk(ptr,len), col, value(ptr,len)
+    RuntimeFuncSpec::new("rt_db_put_row3", &[I64, I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_db_get_int_by_pk", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_db_update_int", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_db_update_text", &[I64, I64, I64, I64], &[I64]),
     // Integer-PK DB operations (zero string alloc from caller)
     RuntimeFuncSpec::new("rt_db_iput3", &[I64, I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_db_iget_int", &[I64, I64, I64, I64], &[I64]),
@@ -455,45 +407,9 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // Byte-indexed (not char-indexed) raw byte read; see rt_string_char_code_at.
     RuntimeFuncSpec::new("rt_string_byte_at", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_split", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_string_split_limit", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_bytes", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_chars", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_lines", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_tls13_sha256", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_string_repeat", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_string_is_digit", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_string_is_alpha", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_string_is_alnum", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_string_is_whitespace", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_string_char_count", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_string_capitalize", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_string_swapcase", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_string_title", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_string_chomp", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_string_trim_start_matches", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_string_trim_end_matches", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_string_remove_prefix", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_string_remove_suffix", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_string_squeeze", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_string_replace_first", &[I64, I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_string_pad_left", &[I64, I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_string_pad_right", &[I64, I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_string_center", &[I64, I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_string_zfill", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_string_find_all", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_string_substr", &[I64, I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_string_substr_from", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_reverse", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_reverse_mut", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_sort", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_push", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_pop", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_clear", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_take", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_drop", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_string_sorted", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_string_partition", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_string_rpartition", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_replace", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_trim", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_trim_start", &[I64], &[I64]),
@@ -545,14 +461,12 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // Value creation/conversion
     // =========================================================================
     RuntimeFuncSpec::new("rt_value_int", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_value_u64", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_value_float", &[F64], &[I64]),
     RuntimeFuncSpec::new("rt_value_bool", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_value_nil", &[], &[I64]),
     RuntimeFuncSpec::new("rt_value_as_int", &[I64], &[I64]),
-    // Tag-aware UnboxInt decode: wide-int box -> value, TAG_INT -> >>3,
-    // anything else passes through verbatim. Emitted by Cranelift
-    // `emit_unbox_int` (int61 truncation fix, 2026-08-09).
-    RuntimeFuncSpec::new("rt_value_unbox_int", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_value_as_u64", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_value_as_float", &[I64], &[F64]),
     RuntimeFuncSpec::new("rt_value_raw_i64", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_raw_u64_to_string", &[I64], &[I64]),
@@ -571,12 +485,6 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_value_compare", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_native_eq", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_native_neq", &[I64, I64], &[I64]),
-    // 2026-08-01: ordering counterpart of rt_native_eq. Emitted directly by
-    // codegen/instr/core.rs's BinOp::Lt/Gt/LtEq/GtEq arm when neither operand
-    // is statically typed, so that a tagged heap string is content-compared
-    // instead of address-compared. See
-    // doc/08_tracking/bug/jit_text_ordering_pointer_compare_2026-08-01.md.
-    RuntimeFuncSpec::new("rt_native_cmp", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_value_truthy", &[I64], &[I8]),
     // =========================================================================
     // Math shims (C ABI: f64 in/out — see runtime/src/value/sffi/math.rs).
@@ -705,13 +613,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_ltr", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_read_cr2", &[], &[I64]),
     RuntimeFuncSpec::new("rt_read_cr3", &[], &[I64]),
-    // No result. Both are write-only CPU control operations: every C
-    // definition returns void, every Simple declaration (os/kernel/arch/
-    // x86_64/cpu.spl:61,63, x86_32/cpu.spl:58,59, boot/cpu.spl:54) declares
-    // no result, and every caller discards. The old `&[I64]` made callers
-    // decode a return register nothing ever writes.
-    RuntimeFuncSpec::new("rt_write_cr3", &[I64], &[]),
-    RuntimeFuncSpec::new("rt_invlpg", &[I64], &[]),
+    RuntimeFuncSpec::new("rt_write_cr3", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_invlpg", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_read_msr", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_write_msr", &[I64, I64], &[I64]),
     // =========================================================================
@@ -1347,8 +1250,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_coverage_path_probe", &[I32, I32], &[]),
     // rt_coverage_path_finalize(path_id: u32) -> ()
     RuntimeFuncSpec::new("rt_coverage_path_finalize", &[I32], &[]),
-    // rt_coverage_dump_sdn() -> RuntimeValue (text). The raw *mut i8 form is
-    // rt_coverage_dump_sdn_cstr; see the 2026-08-10 B2 measurement.
+    // rt_coverage_dump_sdn() -> *mut i8
     RuntimeFuncSpec::new("rt_coverage_dump_sdn", &[], &[I64]),
     // rt_coverage_free_sdn(ptr: *mut i8) -> ()
     RuntimeFuncSpec::new("rt_coverage_free_sdn", &[I64], &[]),
@@ -1439,15 +1341,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_process_spawn_async", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_spawn_guarded", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_spawn_inherit", &[], &[I64]),
-    // rt_process_run_with_limits(cmd_ptr, cmd_len, args, timeout_ms,
-    // memory_bytes, cpu_seconds, max_fds, max_procs) -> RuntimeValue.
-    // env_process.rs:1269 takes all eight; the old 5-word spec left the three
-    // trailing setrlimit(2) values reading uninitialised registers.
-    RuntimeFuncSpec::new(
-        "rt_process_run_with_limits",
-        &[I64, I64, I64, I64, I64, I64, I64, I64],
-        &[I64],
-    ),
+    // rt_process_run_with_limits(cmd_ptr, cmd_len, args, timeout_ms, memory_mb) -> RuntimeValue
+    RuntimeFuncSpec::new("rt_process_run_with_limits", &[I64, I64, I64, I64, I64], &[I64]),
     // rt_process_exists(pid) -> bool (as i64: 0/1)
     RuntimeFuncSpec::new("rt_process_exists", &[I64], &[I64]),
     // rt_getpid() -> process id
@@ -1745,7 +1640,6 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_cuda_mem_alloc", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_mem_free", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_memset", &[I64, I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_cuda_memset_d32", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_memcpy_dtoh", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_module_load_data", &[I64, I64], &[I64]), // ptx_ptr, ptx_len -> module
     RuntimeFuncSpec::new("rt_cuda_module_load_data_bytes", &[I64, I64], &[I64]), // ptx_ptr, ptx_len -> module
@@ -1802,7 +1696,10 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_terminal_enable_raw_mode", &[], &[I64]), // () -> RuntimeValue (bool)
     RuntimeFuncSpec::new("rt_terminal_disable_raw_mode", &[], &[I64]), // () -> RuntimeValue (bool)
     RuntimeFuncSpec::new("rt_terminal_is_tty", &[], &[I64]), // () -> RuntimeValue (bool)
-    RuntimeFuncSpec::new("rt_terminal_stdout_is_tty", &[], &[I64]), // () -> RuntimeValue (bool)
+    RuntimeFuncSpec::new("rt_terminal_is_tty_handle", &[I64], &[I8]), // (fd) -> C bool
+    RuntimeFuncSpec::new("rt_terminal_signal_scope_begin", &[], &[I64]), // () -> opaque handle
+    RuntimeFuncSpec::new("rt_terminal_read_byte_interruptible", &[I64], &[I64]), // handle -> byte/outcome
+    RuntimeFuncSpec::new("rt_terminal_signal_scope_end", &[I64], &[I8]), // handle -> C bool
     RuntimeFuncSpec::new("rt_stdin_read_byte", &[], &[I64]), // () -> byte or -1
     RuntimeFuncSpec::new("stdin_read_char", &[], &[I64]), // legacy source-level char read -> RuntimeValue(text)
     RuntimeFuncSpec::new("rt_ssh_userauth_password_only_failure_payload", &[], &[I64]),
@@ -1814,42 +1711,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // expansion entry that turns the Simple-level `text` argument into this
     // (ptr, len) pair.
     RuntimeFuncSpec::new("rt_mem_attr_set_owner", &[I64, I64], &[]),
-    // =========================================================================
-    // Package SFFI (runtime/src/value/sffi/package.rs)
-    // =========================================================================
-    // These were absent from RUNTIME_FUNCS entirely, so `compile_call` never
-    // took the `ctx.runtime_funcs.get(sffi_name)` branch and therefore never
-    // reached ANY text-argument expansion: the JIT handed the raw tagged
-    // RuntimeValue straight to the C symbol as if it were a pointer, and every
-    // member of the family failed closed (rt_package_exists answered 0 for an
-    // existing file, rt_package_chmod answered -1, leaving credential keys at
-    // 0664). Each text parameter is a (ptr, len) pair; see the matching
-    // text_arg_indices() entries in codegen/instr/calls.rs and
-    // doc/08_tracking/bug/rt_package_chmod_family_fails_from_jit_key_left_world_readable_2026-08-08.md
-    //
-    // rt_package_sha256 IS listed now. It used to be excluded because its
-    // `*mut c_char` RETURN cannot be repaired by an argument-index table --
-    // codegen has no lowering from a raw C pointer back to a Simple `text`.
-    // The runtime function now returns a RuntimeValue text instead (see
-    // runtime/src/value/sffi/package.rs), which is the same convention every
-    // rt_file_read_text-class entry point uses, so a plain &[I64] result is
-    // correct here.
-    // rt_package_free_string takes a raw pointer (not text) and needs nothing;
-    // after the rt_package_sha256 return-type fix below it has no producer left.
-    RuntimeFuncSpec::new("rt_package_sha256", &[I64, I64], &[I64]), // path_ptr, path_len -> RuntimeValue(text)
-    RuntimeFuncSpec::new("rt_package_exists", &[I64, I64], &[I32]), // path_ptr, path_len -> i32
-    RuntimeFuncSpec::new("rt_package_is_dir", &[I64, I64], &[I32]), // path_ptr, path_len -> i32
-    RuntimeFuncSpec::new("rt_package_file_size", &[I64, I64], &[I64]), // path_ptr, path_len -> i64
-    RuntimeFuncSpec::new("rt_package_mkdir_all", &[I64, I64], &[I32]), // path_ptr, path_len -> i32
-    RuntimeFuncSpec::new("rt_package_remove_dir_all", &[I64, I64], &[I32]), // path_ptr, path_len -> i32
-    RuntimeFuncSpec::new("rt_package_chmod", &[I64, I64, I32], &[I32]), // path_ptr, path_len, mode -> i32
-    RuntimeFuncSpec::new("rt_package_copy_file", &[I64, I64, I64, I64], &[I32]), // src(ptr,len), dst(ptr,len) -> i32
-    RuntimeFuncSpec::new("rt_package_create_symlink", &[I64, I64, I64, I64], &[I32]), // target(ptr,len), link(ptr,len) -> i32
-    RuntimeFuncSpec::new("rt_package_create_tarball", &[I64, I64, I64, I64], &[I32]), // src(ptr,len), out(ptr,len) -> i32
-    RuntimeFuncSpec::new("rt_package_extract_tarball", &[I64, I64, I64, I64], &[I32]), // tar(ptr,len), dest(ptr,len) -> i32
     RuntimeFuncSpec::new("rt_file_exists", &[I64, I64], &[I8]), // path_ptr, path_len -> bool
     RuntimeFuncSpec::new("rt_file_is_regular_no_follow", &[I64, I64], &[I8]), // path_ptr, path_len -> bool
-    RuntimeFuncSpec::new("rt_file_is_char_device", &[I64, I64], &[I8]), // path_ptr, path_len -> bool
     RuntimeFuncSpec::new("rt_dir_exists", &[I64, I64], &[I8]),  // path_ptr, path_len -> bool
     RuntimeFuncSpec::new("rt_file_stat", &[I64, I64], &[I64]),  // path_ptr, path_len -> i64 (mtime seconds)
     // =========================================================================
@@ -1895,22 +1758,15 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_dir_list", &[I64, I64], &[I64]),      // path -> RuntimeValue (array)
     RuntimeFuncSpec::new("rt_dir_remove", &[I64, I64, I8], &[I8]), // path_ptr, path_len, recursive -> bool
     RuntimeFuncSpec::new("rt_dir_remove_all", &[I64, I64], &[I8]), // path -> bool
-    // dir(ptr,len), pattern(ptr,len), recursive -> RuntimeValue.
-    // directory.rs:97 has a trailing `recursive: bool`; omitting it made the
-    // callee read an uninitialised register.
-    RuntimeFuncSpec::new("rt_file_find", &[I64, I64, I64, I64, I8], &[I64]),
-    RuntimeFuncSpec::new("rt_dir_glob", &[I64, I64, I64, I64], &[I64]), // dir, pattern -> RuntimeValue (array)
+    RuntimeFuncSpec::new("rt_file_find", &[I64, I64, I64, I64], &[I64]), // dir, pattern -> RuntimeValue
+    RuntimeFuncSpec::new("rt_dir_glob", &[I64, I64], &[I64]),      // pattern -> RuntimeValue (array)
     RuntimeFuncSpec::new("rt_dir_walk", &[I64, I64], &[I64]),      // path -> RuntimeValue (array)
     RuntimeFuncSpec::new("rt_current_dir", &[], &[I64]),           // () -> RuntimeValue
     RuntimeFuncSpec::new("rt_set_current_dir", &[I64, I64], &[I8]), // path -> bool
     // =========================================================================
     // File Descriptor Operations
     // =========================================================================
-    // path(ptr,len), mode(i32: 0=RO 1=RW 2=WO) -> fd.
-    // descriptor.rs:19 has exactly three parameters; the old 4-word spec came
-    // from declaring `mode` as a `text` and made the callee read the mode out
-    // of the pattern-length register.
-    RuntimeFuncSpec::new("rt_file_open", &[I64, I64, I32], &[I32]),
+    RuntimeFuncSpec::new("rt_file_open", &[I64, I64, I64, I64], &[I32]), // path, mode -> fd
     RuntimeFuncSpec::new("rt_file_get_size", &[I32], &[I64]),            // fd -> size
     RuntimeFuncSpec::new("rt_file_close", &[I32], &[I8]),                // fd -> bool
     // =========================================================================

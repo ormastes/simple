@@ -63,11 +63,16 @@ pub fn compile_cast<M: Module>(
             | TypeId::U16
             | TypeId::U32
             | TypeId::U64 => {
+                let unwrap_name = if to_ty == TypeId::U64 {
+                    "rt_value_as_u64"
+                } else {
+                    "rt_value_as_int"
+                };
                 let unwrap_id = ctx
                     .runtime_funcs
-                    .get("rt_value_as_int")
+                    .get(unwrap_name)
                     .copied()
-                    .ok_or_else(|| "Cast: runtime function rt_value_as_int not declared".to_string())?;
+                    .ok_or_else(|| format!("Cast: runtime function {unwrap_name} not declared"))?;
                 let unwrap_ref = ctx.module.declare_func_in_func(unwrap_id, builder.func);
                 let unwrapped = adapted_call(builder, unwrap_ref, &[src_val]);
                 let raw_i64 = builder.inst_results(unwrapped)[0];

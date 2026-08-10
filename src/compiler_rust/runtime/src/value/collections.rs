@@ -4,7 +4,7 @@
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::HashSet;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 use super::byte_kernels::{
     avx2_byte_find, avx2_byte_rfind, byte_split_ranges_for_tier, neon_byte_find, neon_byte_rfind, scalar_byte_find,
@@ -17,12 +17,9 @@ use super::heap::{
     unregister_heap_ptr_checked,
     HeapHeader, HeapObjectType,
 };
-use super::objects::{
-    rt_closure_func_ptr, rt_option_map, rt_option_none, rt_option_some, RuntimeClosure, RuntimeEnum, RuntimeObject,
-};
+use super::objects::{rt_closure_func_ptr, rt_option_none, rt_option_some, RuntimeClosure, RuntimeEnum, RuntimeObject};
 use super::primitive_sort;
-use simple_simd::{clear_host_cpu_config_cache, detect_profile, host_cpu_config, SimdTier};
-use simple_simd::HostCpuConfigError;
+use simple_simd::{active_simd_tier, SimdTier};
 
 thread_local! {
     static U8_ARRAY_SCRATCH: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
@@ -108,26 +105,6 @@ struct CollectionProviders {
     simd_tier: SimdTier,
 }
 
-#[derive(Clone, Copy)]
-struct CollectionProviderCache {
-    host_simd_tier: Option<SimdTier>,
-    providers: Option<CollectionProviders>,
-    provider_simd_tier: Option<SimdTier>,
-    resolutions: usize,
-}
-
-fn collection_provider_cache() -> &'static Mutex<CollectionProviderCache> {
-    static CACHE: OnceLock<Mutex<CollectionProviderCache>> = OnceLock::new();
-    CACHE.get_or_init(|| {
-        Mutex::new(CollectionProviderCache {
-            host_simd_tier: None,
-            providers: None,
-            provider_simd_tier: None,
-            resolutions: 0,
-        })
-    })
-}
-
 fn providers_for_tier(tier: SimdTier) -> CollectionProviders {
     match tier {
         SimdTier::X86_64Sse2 => CollectionProviders {
@@ -161,77 +138,26 @@ fn providers_for_tier(tier: SimdTier) -> CollectionProviders {
     }
 }
 
-fn configured_simd_tier_override() -> Option<SimdTier> {
-    std::env::var("SIMPLE_SIMD_TIER").ok()?.parse().ok()
-}
-
-fn resolve_host_simd_tier() -> (SimdTier, bool) {
-    host_cpu_config()
-        .map(|config| (config.enabled.simd_tier, true))
-        .unwrap_or_else(|error| {
-            let cacheable = !matches!(error, HostCpuConfigError::Unstable(_));
-            (detect_profile().best_available_implementation(), cacheable)
-        })
-}
-
 fn collection_providers() -> CollectionProviders {
-    let override_tier = configured_simd_tier_override();
-    let mut cache = collection_provider_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-    let (simd_tier, cacheable) = if let Some(override_tier) = override_tier {
-        (override_tier, true)
-    } else if let Some(host_simd_tier) = cache.host_simd_tier {
-        (host_simd_tier, true)
-    } else {
-        let (host_simd_tier, cacheable) = resolve_host_simd_tier();
-        if cacheable {
-            cache.host_simd_tier = Some(host_simd_tier);
-        }
-        (host_simd_tier, cacheable)
-    };
-
-    if cacheable && cache.provider_simd_tier == Some(simd_tier) {
-        if let Some(providers) = cache.providers {
-            return providers;
-        }
-    }
-
-    let providers = providers_for_tier(simd_tier);
-    cache.resolutions += 1;
-    if cacheable {
-        cache.provider_simd_tier = Some(simd_tier);
-        cache.providers = Some(providers);
-    }
-    providers
+    providers_for_tier(active_simd_tier())
 }
 
 pub(crate) fn active_collection_simd_tier() -> SimdTier {
     collection_providers().simd_tier
 }
 
-pub(crate) fn clear_collection_provider_cache() {
-    let mut cache = collection_provider_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    cache.host_simd_tier = None;
-    cache.providers = None;
-    cache.provider_simd_tier = None;
-    cache.resolutions = 0;
-    clear_host_cpu_config_cache();
-}
-
-#[cfg(test)]
-pub(crate) fn collection_provider_resolution_count_for_tests() -> usize {
-    collection_provider_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .resolutions
-}
+pub(crate) fn clear_collection_provider_cache() {}
 
 #[inline]
 fn compare_runtime_values(a: &RuntimeValue, b: &RuntimeValue) -> Ordering {
+    match (a.as_heap_u64(), b.as_heap_u64()) {
+        (Some(left), Some(right)) => return left.cmp(&right),
+        (Some(_), None) if b.is_int() && b.as_int() < 0 => return Ordering::Greater,
+        (Some(left), None) if b.is_int() => return left.cmp(&(b.as_int() as u64)),
+        (None, Some(_)) if a.is_int() && a.as_int() < 0 => return Ordering::Less,
+        (None, Some(right)) if a.is_int() => return (a.as_int() as u64).cmp(&right),
+        _ => {}
+    }
     match (a.is_int(), b.is_int(), a.is_float(), b.is_float()) {
         (true, true, _, _) => a.as_int().cmp(&b.as_int()),
         (_, _, true, true) => a.as_float().partial_cmp(&b.as_float()).unwrap_or(Ordering::Equal),
@@ -336,7 +262,7 @@ fn mark_string_shared(value: RuntimeValue) {
 
 static SHORT_STRING_CACHE: OnceLock<[RuntimeValue; 257]> = OnceLock::new();
 
-fn rt_string_new_uncached_untracked(bytes: *const u8, len: u64) -> RuntimeValue {
+fn rt_string_new_uncached(bytes: *const u8, len: u64) -> RuntimeValue {
     unsafe {
         let Some(ptr) = alloc_runtime_string(len) else {
             return RuntimeValue::NIL;
@@ -354,18 +280,14 @@ fn rt_string_new_uncached_untracked(bytes: *const u8, len: u64) -> RuntimeValue 
     }
 }
 
-fn rt_string_new_uncached(bytes: *const u8, len: u64) -> RuntimeValue {
-    track_transient_heap(rt_string_new_uncached_untracked(bytes, len))
-}
-
 fn short_string_cache() -> &'static [RuntimeValue; 257] {
     SHORT_STRING_CACHE.get_or_init(|| {
         std::array::from_fn(|index| {
             let value = if index == 0 {
-                rt_string_new_uncached_untracked(std::ptr::null(), 0)
+                rt_string_new_uncached(std::ptr::null(), 0)
             } else {
                 let byte = [(index - 1) as u8];
-                rt_string_new_uncached_untracked(byte.as_ptr(), 1)
+                rt_string_new_uncached(byte.as_ptr(), 1)
             };
             // Process-wide, handed to every len<=1 caller: never freeable.
             mark_string_shared(value);
@@ -1633,111 +1555,6 @@ pub extern "C" fn rt_array_pop(array: RuntimeValue) -> RuntimeValue {
     }
 }
 
-/// Remove the element at `index` from an array IN PLACE and return THAT ELEMENT.
-///
-/// This function did not exist until 2026-08-08, even though
-/// `method_registry/builtins.rs` had declared array `remove` as
-/// `RuntimeFn::Simple("rt_array_remove")` all along — the symbol was referenced
-/// by the registry and implemented nowhere. Codegen's name-keyed method table
-/// therefore mapped a bare `.remove(i)` to `rt_dict_remove` for EVERY receiver,
-/// and `rt_dict_remove` type-checks its receiver as a Dict: on an Array it took
-/// the `as_typed_ptr!` early-out, returned NIL, and mutated nothing. So
-/// `arr.remove(1)` was a complete no-op on the compiled lane that also discarded
-/// the element it was supposed to return.
-/// See doc/08_tracking/bug/array_remove_returns_mutated_array_not_removed_element_2026-07-20.md
-///
-/// CONTRACT — returns the REMOVED ELEMENT, mutates the receiver in place. This
-/// matches the sibling `rt_array_pop` directly above (in-place, returns the
-/// element, declared `is_mutating: true`) and `rt_dict_remove` (removes the
-/// entry, returns the VALUE). Returning the mutated array — what the AST
-/// interpreter used to do — had no runtime implementation, no HIR type, and no
-/// spec behind it.
-///
-/// An out-of-range index is a NO-OP returning NIL, mirroring `rt_array_pop` on
-/// an empty array. It must never panic: this is `extern "C"` and unwinding
-/// across the FFI boundary from JIT-compiled code is undefined behaviour.
-///
-/// All three storage layouts are handled, exactly as `rt_array_pop` does. Byte-
-/// and u64-packed arrays store raw scalars rather than tagged `RuntimeValue`s,
-/// so their element must be read through the correctly-sized pointer and
-/// re-tagged with `from_int`; reading a packed array as `RuntimeValue` would
-/// hand back a raw, untagged integer that the caller then misdecodes.
-#[no_mangle]
-pub extern "C" fn rt_array_remove(array: RuntimeValue, index: i64) -> RuntimeValue {
-    let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
-    unsafe {
-        let len = (*arr).len;
-        if (*arr).data.is_null() || index < 0 || (index as u64) >= len {
-            return RuntimeValue::NIL;
-        }
-        let idx = index as usize;
-        let last = (len - 1) as usize;
-
-        if (*arr).is_byte_packed() {
-            let base = (*arr).data as *mut u8;
-            let removed = *base.add(idx) as i64;
-            // Shift the tail down one slot. `copy` (memmove) is required, not
-            // `copy_nonoverlapping`: source and destination overlap by design.
-            std::ptr::copy(base.add(idx + 1), base.add(idx), last - idx);
-            (*arr).len -= 1;
-            return RuntimeValue::from_int(removed);
-        }
-        if (*arr).is_u64_packed() {
-            let base = (*arr).data as *mut u64;
-            let removed = *base.add(idx) as i64;
-            std::ptr::copy(base.add(idx + 1), base.add(idx), last - idx);
-            (*arr).len -= 1;
-            return RuntimeValue::from_int(removed);
-        }
-
-        let base = (*arr).data;
-        let removed = *base.add(idx);
-        std::ptr::copy(base.add(idx + 1), base.add(idx), last - idx);
-        (*arr).len -= 1;
-        removed
-    }
-}
-
-/// `remove`: receiver-dispatched, so a bare `.remove(k)` is safe on an untyped
-/// receiver.
-///
-/// Codegen's method table is keyed on the METHOD NAME ALONE and carries no
-/// receiver type (see `is_bare_builtin_collection_method` in
-/// codegen/instr/closures_structs.rs, where `("remove", 1)` is already listed
-/// as an erased-receiver hazard). Routing that name straight to
-/// `rt_dict_remove` is what silently broke every array `.remove(i)` on the
-/// compiled lane. This dispatcher inspects the receiver's heap type at runtime
-/// and picks the right implementation, the same shape already used by
-/// `rt_pop`, `rt_reverse` and `rt_index_of`.
-///
-/// A non-Array, non-Dict receiver falls through to `rt_dict_remove`, preserving
-/// the previous behaviour for every receiver that is not an array — this change
-/// only ever ADDS the array case.
-///
-/// NAMED `rt_collection_remove`, NOT `rt_remove`. `rt_remove` is already taken,
-/// by the POSIX file-deletion wrapper `int64_t rt_remove(const char *path)` in
-/// `src/runtime/runtime_hosted_fs.c` (and `src/runtime/runtime.c`). Defining a
-/// second `rt_remove` produced a hard `rust-lld: error: duplicate symbol` —
-/// which is the GOOD outcome. The repo builds some link steps with `-z muldefs`
-/// (see reference: "muldefs makes duplicate symbols silent, not fatal"), and
-/// under that flag the linker would silently pick one definition: every
-/// `arr.remove(i)` would have called `unlink()` on a pointer-shaped index, or
-/// every file delete would have gone to the collection helper.
-#[no_mangle]
-pub extern "C" fn rt_collection_remove(receiver: RuntimeValue, key: RuntimeValue) -> RuntimeValue {
-    if get_typed_ptr::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
-        // Array indices arrive as TAGGED ints; `as_int` untags (an arithmetic
-        // shift). It is explicitly documented as UNDEFINED on a non-int, so the
-        // `is_int` test is required, not defensive padding — calling it on, say,
-        // a heap pointer would yield a garbage index. A non-integer index on an
-        // array is out of range by definition, and `rt_array_remove` treats a
-        // negative index as a no-op.
-        let index = if key.is_int() { key.as_int() } else { -1 };
-        return rt_array_remove(receiver, index);
-    }
-    crate::value::dict::rt_dict_remove(receiver, key)
-}
-
 /// Clear all elements from an array
 #[no_mangle]
 pub extern "C" fn rt_array_clear(array: RuntimeValue) -> bool {
@@ -1846,9 +1663,6 @@ fn transient_heap_children(value: RuntimeValue) -> Option<Vec<RuntimeValue>> {
 
 fn free_transient_heap(value: RuntimeValue) {
     match value.heap_type() {
-        Some(HeapObjectType::String) => {
-            let _ = rt_string_free(value);
-        }
         Some(HeapObjectType::Array) => rt_array_free(value),
         Some(HeapObjectType::Tuple) => rt_tuple_free(value),
         Some(HeapObjectType::Dict) => super::dict::rt_dict_free(value),
@@ -1857,7 +1671,7 @@ fn free_transient_heap(value: RuntimeValue) {
             | HeapObjectType::Closure
             | HeapObjectType::Enum
             | HeapObjectType::Float
-            | HeapObjectType::WideInt,
+            | HeapObjectType::UInt,
         ) => unsafe {
             let ptr = value.as_heap_ptr();
             let size = (*ptr).size as usize;
@@ -1980,189 +1794,6 @@ pub extern "C" fn rt_array_free(array: RuntimeValue) {
         unregister_heap_ptr(ptr as *mut HeapHeader);
         std::alloc::dealloc(ptr as *mut u8, header_layout);
     }
-}
-
-/// Bounds the planner's own memory; exceeding it refuses rather than grows.
-/// Same value as `RT_CORE_DEEP_FREE_MAX_NODES` in runtime_native.c.
-const RT_DEEP_FREE_MAX_NODES: usize = 1 << 22;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum DeepFreeKind {
-    Array,
-    String,
-}
-
-enum DeepFreeClass {
-    /// Nothing to free and nothing to strand.
-    Leaf,
-    /// Not provably freeable — refuses the WHOLE call.
-    Refuse,
-    Node(*mut HeapHeader, DeepFreeKind),
-}
-
-/// Classify one element slot for `rt_array_free_deep`.
-///
-/// Every dereference is gated on a registry membership test (a pure pointer
-/// comparison inside `get_typed_ptr_mut`), so a raw i64 that merely aliases the
-/// heap tag is never dereferenced. Twin of `rt_core_deep_free_classify`
-/// (runtime_native.c:5311).
-fn deep_free_classify(value: RuntimeValue) -> DeepFreeClass {
-    // Immediates (int / float / nil / bool) hold no heap reference. Mirrors the
-    // C `raw < 4096` + `tag != TAG_HEAP` leaf tests.
-    if !value.is_heap() {
-        return DeepFreeClass::Leaf;
-    }
-    if let Some(ptr) = get_typed_ptr_mut::<RuntimeArray>(value, HeapObjectType::Array) {
-        return DeepFreeClass::Node(ptr as *mut HeapHeader, DeepFreeKind::Array);
-    }
-    if let Some(ptr) = get_typed_ptr_mut::<RuntimeString>(value, HeapObjectType::String) {
-        // RT_STRING_FLAG_SHARED marks the process-wide short-string cache and
-        // the literal intern table, whose objects are handed to unrelated
-        // holders — rt_string_free's own rule.
-        if unsafe { (*ptr).header.reserved & RT_STRING_FLAG_SHARED } != 0 {
-            return DeepFreeClass::Refuse;
-        }
-        return DeepFreeClass::Node(ptr as *mut HeapHeader, DeepFreeKind::String);
-    }
-    // Heap-tagged but neither a registered array nor a freeable registered
-    // string: dicts, tuples, objects, closures, enums, foreign pointers,
-    // already-freed pointers, and raw i64 payloads that alias the tag bits.
-    // Freeing the holding buffer would strand them irreversibly, so refuse.
-    DeepFreeClass::Refuse
-}
-
-/// Deep (recursive) array free. Returns 1 only if the ENTIRE reachable
-/// structure was reclaimed, 0 if the call was refused having freed NOTHING.
-///
-/// Rust-side twin of `rt_array_free_deep` in src/runtime/runtime_native.c
-/// (:5335), matching its contract bit for bit so the C-linked self-hosted lane
-/// and the Rust seed/JIT lane resolve the same symbol with the same semantics.
-/// `rt_array_free` above is SHALLOW: it releases the outer buffer and header
-/// and leaks every heap element the buffer pointed at.
-///
-/// PARTIAL-FREE POLICY: ALL-OR-NOTHING, decided in two phases. Phase 1 walks
-/// the whole structure READ-ONLY and classifies every reachable node, freeing
-/// nothing; if any node is not provably freeable the call returns 0 having
-/// freed nothing at all. Only a fully-provable structure reaches phase 2.
-///
-/// Rejecting the "free the outer buffer anyway" alternative: a refused element
-/// is reachable ONLY through the buffer that holds it, so freeing the buffer
-/// makes it simultaneously unreachable AND unfreeable — a permanent leak.
-/// Refusing also leaks, but reversibly: the caller still holds the root and can
-/// retry, free the elements individually, or fall back to `rt_array_free`. A
-/// reversible leak strictly dominates an irreversible one.
-///
-/// Provably freeable: byte-packed / u64-packed payloads (no heap references by
-/// construction, element scan skipped), immediate elements, non-shared
-/// registered heap strings, and registered arrays recursively under these same
-/// rules. Everything else refuses.
-///
-/// ALIASING AND CYCLES: `RuntimeValue` is `Copy`, so an element may be the
-/// array itself or appear twice. Phase 1 keeps a `seen` pointer set and the
-/// second sighting of any node refuses the whole call, proving the reachable
-/// structure is a TREE — which is what makes freeing it safe. That can only
-/// rule out aliases INTERNAL to the structure: an interior node aliased from
-/// OUTSIDE is undetectable here, exactly as `rt_string_free` cannot detect a
-/// second holder. The caller must own the whole subtree, not merely the root.
-/// Likewise not thread-safe against a concurrent free of the same objects.
-#[no_mangle]
-pub extern "C" fn rt_array_free_deep(value: RuntimeValue) -> i64 {
-    // The root must be a registered array; a string root belongs to
-    // rt_string_free, not here.
-    let Some(root) = get_typed_ptr_mut::<RuntimeArray>(value, HeapObjectType::Array) else {
-        return 0;
-    };
-
-    // `plan` doubles as the BFS worklist, so this is iterative — a deeply
-    // nested structure cannot blow the stack.
-    let mut plan: Vec<(*mut HeapHeader, DeepFreeKind)> = vec![(root as *mut HeapHeader, DeepFreeKind::Array)];
-    let mut seen: HashSet<usize> = HashSet::new();
-    seen.insert(root as usize);
-
-    // Phase 1: read-only breadth-first classification.
-    let mut refused = false;
-    let mut index = 0usize;
-    while !refused && index < plan.len() {
-        let (ptr, kind) = plan[index];
-        index += 1;
-        if kind != DeepFreeKind::Array {
-            continue;
-        }
-        let array = ptr as *mut RuntimeArray;
-        let slots: Vec<RuntimeValue> = unsafe {
-            if (*array).is_byte_packed() || (*array).is_u64_packed() || (*array).data.is_null() {
-                continue;
-            }
-            (*array).as_slice().to_vec()
-        };
-        for slot in slots {
-            match deep_free_classify(slot) {
-                DeepFreeClass::Leaf => continue,
-                DeepFreeClass::Refuse => {
-                    refused = true;
-                    break;
-                }
-                DeepFreeClass::Node(child, child_kind) => {
-                    // Second sighting = alias or cycle: refuse.
-                    if !seen.insert(child as usize) {
-                        refused = true;
-                        break;
-                    }
-                    if plan.len() >= RT_DEEP_FREE_MAX_NODES {
-                        refused = true;
-                        break;
-                    }
-                    plan.push((child, child_kind));
-                }
-            }
-        }
-    }
-
-    if refused {
-        return 0;
-    }
-
-    // Phase 2: commit. Reached only when every node is provably freeable, so no
-    // partial state is observable. Freeing top-down is safe because phase 1
-    // already copied out every child pointer.
-    for (ptr, kind) in plan {
-        unsafe {
-            match kind {
-                DeepFreeKind::Array => {
-                    let array = ptr as *mut RuntimeArray;
-                    if !unregister_heap_ptr_checked(ptr) {
-                        continue;
-                    }
-                    if !(*array).data.is_null() {
-                        let data_layout = if (*array).is_byte_packed() {
-                            byte_array_data_layout((*array).capacity)
-                        } else {
-                            array_data_layout((*array).capacity)
-                        };
-                        note_aux_free(HeapObjectType::Array as u8, data_layout.size() as u64);
-                        std::alloc::dealloc((*array).data as *mut u8, data_layout);
-                        (*array).data = std::ptr::null_mut();
-                    }
-                    let header_layout =
-                        std::alloc::Layout::from_size_align(std::mem::size_of::<RuntimeArray>(), 8).unwrap();
-                    std::alloc::dealloc(ptr as *mut u8, header_layout);
-                }
-                DeepFreeKind::String => {
-                    let string = ptr as *mut RuntimeString;
-                    // Read len BEFORE unregistering: it sizes the dealloc
-                    // layout and must match `alloc_runtime_string` exactly.
-                    let len = (*string).len;
-                    if !unregister_heap_ptr_checked(ptr) {
-                        continue;
-                    }
-                    let size = std::mem::size_of::<RuntimeString>() + len as usize;
-                    let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
-                    std::alloc::dealloc(ptr as *mut u8, layout);
-                }
-            }
-        }
-    }
-    1
 }
 
 /// Free a heap string. Returns 1 if the object was reclaimed, 0 if refused.
@@ -2314,7 +1945,7 @@ pub extern "C" fn rt_string_new_literal(bytes: *const u8, len: u64) -> RuntimeVa
             return RuntimeValue::from_raw(raw);
         }
     }
-    let value = rt_string_new_uncached_untracked(bytes, len);
+    let value = rt_string_new(bytes, len);
     // Owned by the intern table from here on: every later evaluation of this
     // literal site returns this same object, so rt_string_free must refuse it.
     mark_string_shared(value);
@@ -2361,7 +1992,7 @@ pub(crate) fn rt_string_new_with_len_hash(bytes: *const u8, len: u64) -> Runtime
         }
         (*ptr).hash = len;
 
-        track_transient_heap(RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader))
+        RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader)
     }
 }
 
@@ -2471,792 +2102,6 @@ pub extern "C" fn rt_any_add(left: RuntimeValue, right: RuntimeValue) -> Runtime
     }
 
     RuntimeValue::from_int(left.as_int() + right.as_int())
-}
-
-/// Shared body for the `is_*` character-class predicates.
-///
-/// Mirrors the tree-walking interpreter (`interpreter_method/string.rs`, arms
-/// `"is_numeric"`, `"is_alpha"`, `"is_digit"`, `"is_alphanumeric"`,
-/// `"is_whitespace"`): the empty string is FALSE for every class, and a
-/// non-empty string is true only when every `char` satisfies the predicate.
-///
-/// Classification is per-`char`, not per-byte, so it agrees with the
-/// interpreter's `s.chars().all(..)` on non-ASCII input. Invalid UTF-8 is
-/// reported as false rather than being silently classified byte-wise, which
-/// would disagree with the interpreter.
-fn string_all_chars(string: RuntimeValue, pred: fn(char) -> bool) -> i64 {
-    let str_len = rt_string_len(string);
-    if str_len <= 0 {
-        // Includes the non-text receiver case (len < 0): no class claim.
-        return 0;
-    }
-    let data = rt_string_data(string);
-    if data.is_null() {
-        return 0;
-    }
-    let bytes = unsafe { std::slice::from_raw_parts(data, str_len as usize) };
-    match std::str::from_utf8(bytes) {
-        Ok(s) => i64::from(s.chars().all(pred)),
-        Err(_) => 0,
-    }
-}
-
-/// `is_digit` / `is_numeric`: non-empty and all ASCII digits.
-///
-/// The interpreter gives these two spellings the same ASCII-digit body, so they
-/// share one runtime entry point here.
-#[no_mangle]
-pub extern "C" fn rt_string_is_digit(string: RuntimeValue) -> i64 {
-    string_all_chars(string, |c| c.is_ascii_digit())
-}
-
-/// `is_alpha` / `is_alphabetic`: non-empty and all alphabetic (Unicode).
-#[no_mangle]
-pub extern "C" fn rt_string_is_alpha(string: RuntimeValue) -> i64 {
-    string_all_chars(string, char::is_alphabetic)
-}
-
-/// `is_alphanumeric` / `is_alnum`: non-empty and all alphanumeric (Unicode).
-#[no_mangle]
-pub extern "C" fn rt_string_is_alnum(string: RuntimeValue) -> i64 {
-    string_all_chars(string, char::is_alphanumeric)
-}
-
-/// `is_whitespace`: non-empty and all whitespace.
-#[no_mangle]
-pub extern "C" fn rt_string_is_whitespace(string: RuntimeValue) -> i64 {
-    string_all_chars(string, char::is_whitespace)
-}
-
-// ---------------------------------------------------------------------------
-// Text methods that had NO runtime definition at all.
-//
-// Every function below existed only in the tree-walking interpreter
-// (`interpreter_method/string.rs`). On the compiled lanes the method name fell
-// through the dispatch tables to `rt_method_not_found`, which used to fabricate
-// the SPECIAL_ERROR sentinel (stringifies as `error`) and keep going. Each one
-// mirrors its interpreter arm exactly; where the arm is quoted in a doc comment
-// the line number refers to that file.
-//
-// Convention shared with the pre-existing text functions here: a non-text
-// receiver is detected by `rt_string_len(..) < 0` and the receiver is returned
-// unchanged rather than a fabricated value.
-// ---------------------------------------------------------------------------
-
-/// Borrow a `RuntimeValue` as `&str`, or `None` when it is not valid UTF-8 text.
-///
-/// `None` also covers the non-text receiver (`rt_string_len` returns a negative
-/// length for anything that is not a heap string), which every caller below
-/// turns into "return the receiver unchanged".
-///
-/// # Safety
-/// The returned slice borrows the runtime string's buffer. Runtime strings are
-/// registered with the collector and outlive the call, matching what the
-/// surrounding `from_utf8_unchecked` call sites already assume.
-fn string_as_str<'a>(string: RuntimeValue) -> Option<&'a str> {
-    let len = rt_string_len(string);
-    if len < 0 {
-        return None;
-    }
-    if len == 0 {
-        return Some("");
-    }
-    let data = rt_string_data(string);
-    if data.is_null() {
-        return Some("");
-    }
-    let bytes = unsafe { std::slice::from_raw_parts(data, len as usize) };
-    std::str::from_utf8(bytes).ok()
-}
-
-/// Allocate a new runtime string from a Rust `str`.
-fn new_string(s: &str) -> RuntimeValue {
-    rt_string_new(s.as_ptr(), s.len() as u64)
-}
-
-/// `char_count`: number of Unicode scalar values, as opposed to `len`, which is
-/// the BYTE count. Returns -1 for a non-text receiver, matching `rt_string_len`
-/// and `rt_len`.
-#[no_mangle]
-pub extern "C" fn rt_string_char_count(string: RuntimeValue) -> i64 {
-    match string_as_str(string) {
-        Some(s) => s.chars().count() as i64,
-        None => -1,
-    }
-}
-
-/// `capitalize`: uppercase the first character, lowercase the rest.
-#[no_mangle]
-pub extern "C" fn rt_string_capitalize(string: RuntimeValue) -> RuntimeValue {
-    let Some(s) = string_as_str(string) else {
-        return string;
-    };
-    let mut chars = s.chars();
-    let Some(first) = chars.next() else {
-        return new_string("");
-    };
-    let mut out: String = first.to_uppercase().collect();
-    for c in chars {
-        out.extend(c.to_lowercase());
-    }
-    new_string(&out)
-}
-
-/// `swapcase`: uppercase characters become lowercase and vice versa.
-#[no_mangle]
-pub extern "C" fn rt_string_swapcase(string: RuntimeValue) -> RuntimeValue {
-    let Some(s) = string_as_str(string) else {
-        return string;
-    };
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        if c.is_uppercase() {
-            out.extend(c.to_lowercase());
-        } else {
-            out.extend(c.to_uppercase());
-        }
-    }
-    new_string(&out)
-}
-
-/// `title` / `titlecase`: uppercase the first character of each word.
-///
-/// A word boundary is whitespace OR ASCII punctuation, exactly as the
-/// interpreter's arm defines it -- not Unicode punctuation, so `"a-b"` titles
-/// to `"A-B"` while `"a\u{2010}b"` (non-ASCII hyphen) titles to `"A\u{2010}b"`.
-#[no_mangle]
-pub extern "C" fn rt_string_title(string: RuntimeValue) -> RuntimeValue {
-    let Some(s) = string_as_str(string) else {
-        return string;
-    };
-    let mut out = String::with_capacity(s.len());
-    let mut capitalize_next = true;
-    for c in s.chars() {
-        if c.is_whitespace() || c.is_ascii_punctuation() {
-            out.push(c);
-            capitalize_next = true;
-        } else if capitalize_next {
-            out.extend(c.to_uppercase());
-            capitalize_next = false;
-        } else {
-            out.extend(c.to_lowercase());
-        }
-    }
-    new_string(&out)
-}
-
-/// `chomp`: strip ONE trailing line terminator -- `\r\n`, `\n`, or `\r`.
-#[no_mangle]
-pub extern "C" fn rt_string_chomp(string: RuntimeValue) -> RuntimeValue {
-    let Some(s) = string_as_str(string) else {
-        return string;
-    };
-    let out = s
-        .strip_suffix("\r\n")
-        .or_else(|| s.strip_suffix('\n'))
-        .or_else(|| s.strip_suffix('\r'))
-        .unwrap_or(s);
-    new_string(out)
-}
-
-/// `trim_start_matches`: repeatedly strip `pattern` from the front.
-#[no_mangle]
-pub extern "C" fn rt_string_trim_start_matches(string: RuntimeValue, pattern: RuntimeValue) -> RuntimeValue {
-    let (Some(s), Some(p)) = (string_as_str(string), string_as_str(pattern)) else {
-        return string;
-    };
-    new_string(s.trim_start_matches(p))
-}
-
-/// `trim_end_matches`: repeatedly strip `pattern` from the end.
-#[no_mangle]
-pub extern "C" fn rt_string_trim_end_matches(string: RuntimeValue, pattern: RuntimeValue) -> RuntimeValue {
-    let (Some(s), Some(p)) = (string_as_str(string), string_as_str(pattern)) else {
-        return string;
-    };
-    new_string(s.trim_end_matches(p))
-}
-
-/// `removeprefix` / `remove_prefix`: strip `prefix` ONCE if present.
-#[no_mangle]
-pub extern "C" fn rt_string_remove_prefix(string: RuntimeValue, prefix: RuntimeValue) -> RuntimeValue {
-    let (Some(s), Some(p)) = (string_as_str(string), string_as_str(prefix)) else {
-        return string;
-    };
-    match s.strip_prefix(p) {
-        Some(rest) => new_string(rest),
-        None => string,
-    }
-}
-
-/// `removesuffix` / `remove_suffix`: strip `suffix` ONCE if present.
-#[no_mangle]
-pub extern "C" fn rt_string_remove_suffix(string: RuntimeValue, suffix: RuntimeValue) -> RuntimeValue {
-    let (Some(s), Some(p)) = (string_as_str(string), string_as_str(suffix)) else {
-        return string;
-    };
-    match s.strip_suffix(p) {
-        Some(rest) => new_string(rest),
-        None => string,
-    }
-}
-
-/// `squeeze`: collapse runs of the same adjacent character.
-///
-/// The optional argument restricts the collapse to characters in that set. The
-/// dispatch site pads a missing argument with tagged nil (bit pattern 3), which
-/// is not a heap string, so `string_as_str` yields `None` -- that is exactly the
-/// "no argument, squeeze everything" case. A caller who passes an explicit
-/// empty string gets `Some("")`, which squeezes nothing, matching the
-/// interpreter's `set.contains(c)` against an empty set.
-#[no_mangle]
-pub extern "C" fn rt_string_squeeze(string: RuntimeValue, set: RuntimeValue) -> RuntimeValue {
-    let Some(s) = string_as_str(string) else {
-        return string;
-    };
-    if s.is_empty() {
-        return new_string("");
-    }
-    let set = string_as_str(set);
-    let mut out = String::with_capacity(s.len());
-    let mut prev: Option<char> = None;
-    for c in s.chars() {
-        let squeezable = match set {
-            Some(set) => set.contains(c),
-            None => true,
-        };
-        if !squeezable || Some(c) != prev {
-            out.push(c);
-        }
-        prev = Some(c);
-    }
-    new_string(&out)
-}
-
-/// `replace_first`: replace only the FIRST occurrence of `pattern`.
-#[no_mangle]
-pub extern "C" fn rt_string_replace_first(
-    string: RuntimeValue,
-    pattern: RuntimeValue,
-    replacement: RuntimeValue,
-) -> RuntimeValue {
-    let (Some(s), Some(p), Some(r)) = (
-        string_as_str(string),
-        string_as_str(pattern),
-        string_as_str(replacement),
-    ) else {
-        return string;
-    };
-    new_string(&s.replacen(p, r, 1))
-}
-
-/// The character a pad-family method should use when the caller omitted the
-/// optional pad argument.
-///
-/// `adapt_args_to_signature` pads a missing argument with tagged nil (bit
-/// pattern 3), which is not a heap string, so `string_as_str` yields `None`.
-/// That is unambiguous here because the parameter is a TEXT slot -- unlike an
-/// INT slot, where tagged nil and the integer 3 are the same 64 bits.
-///
-/// A supplied argument contributes its FIRST character, matching the
-/// interpreter's `.chars().next().unwrap_or(' ')`.
-fn pad_char_or_space(pad: RuntimeValue) -> char {
-    string_as_str(pad).and_then(|s| s.chars().next()).unwrap_or(' ')
-}
-
-/// `pad_left` / `pad_start`: left-pad to `width` CHARACTERS.
-///
-/// Width is a character count, not a byte count, matching the interpreter's
-/// `s.chars().count()`. A width at or below the current length returns the
-/// receiver unchanged, so a negative width is a no-op rather than a panic --
-/// the interpreter reached this through `eval_arg_usize`, which used to cast
-/// `-5` to `18446744073709551611` and PANIC with "capacity overflow".
-#[no_mangle]
-pub extern "C" fn rt_string_pad_left(string: RuntimeValue, width: i64, pad: RuntimeValue) -> RuntimeValue {
-    let Some(s) = string_as_str(string) else {
-        return string;
-    };
-    let current = s.chars().count() as i64;
-    if width <= current {
-        return string;
-    }
-    let c = pad_char_or_space(pad);
-    let mut out = String::new();
-    for _ in 0..(width - current) {
-        out.push(c);
-    }
-    out.push_str(s);
-    new_string(&out)
-}
-
-/// `pad_right` / `pad_end`: right-pad to `width` CHARACTERS.
-#[no_mangle]
-pub extern "C" fn rt_string_pad_right(string: RuntimeValue, width: i64, pad: RuntimeValue) -> RuntimeValue {
-    let Some(s) = string_as_str(string) else {
-        return string;
-    };
-    let current = s.chars().count() as i64;
-    if width <= current {
-        return string;
-    }
-    let c = pad_char_or_space(pad);
-    let mut out = String::from(s);
-    for _ in 0..(width - current) {
-        out.push(c);
-    }
-    new_string(&out)
-}
-
-/// `center`: pad both sides to `width` CHARACTERS, extra character on the RIGHT.
-#[no_mangle]
-pub extern "C" fn rt_string_center(string: RuntimeValue, width: i64, pad: RuntimeValue) -> RuntimeValue {
-    let Some(s) = string_as_str(string) else {
-        return string;
-    };
-    let current = s.chars().count() as i64;
-    if width <= current {
-        return string;
-    }
-    let total = width - current;
-    let left = total / 2;
-    let c = pad_char_or_space(pad);
-    let mut out = String::new();
-    for _ in 0..left {
-        out.push(c);
-    }
-    out.push_str(s);
-    for _ in 0..(total - left) {
-        out.push(c);
-    }
-    new_string(&out)
-}
-
-/// `zfill`: left-pad with `0` to `width` CHARACTERS, keeping a leading sign in
-/// front of the zeros (`"-7".zfill(4)` is `"-007"`, not `"00-7"`).
-#[no_mangle]
-pub extern "C" fn rt_string_zfill(string: RuntimeValue, width: i64) -> RuntimeValue {
-    let Some(s) = string_as_str(string) else {
-        return string;
-    };
-    let current = s.chars().count() as i64;
-    if width <= current {
-        return string;
-    }
-    let (sign, rest) = match s.as_bytes().first() {
-        Some(b'+') | Some(b'-') => s.split_at(1),
-        _ => ("", s),
-    };
-    let mut out = String::from(sign);
-    for _ in 0..(width - current) {
-        out.push('0');
-    }
-    out.push_str(rest);
-    new_string(&out)
-}
-
-/// `find_all` / `find_indices`: BYTE offsets of every non-overlapping match.
-///
-/// Byte offsets, matching `find`/`index_of`/`rfind` in both engines. An empty
-/// needle yields an empty array rather than an offset per position, matching the
-/// interpreter's explicit empty-needle guard.
-#[no_mangle]
-pub extern "C" fn rt_string_find_all(string: RuntimeValue, needle: RuntimeValue) -> RuntimeValue {
-    let (Some(s), Some(n)) = (string_as_str(string), string_as_str(needle)) else {
-        return rt_array_new(0);
-    };
-    if n.is_empty() {
-        return rt_array_new(0);
-    }
-    let result = rt_array_new(0);
-    for (idx, _) in s.match_indices(n) {
-        rt_array_push(result, RuntimeValue::from_int(idx as i64));
-    }
-    result
-}
-
-/// `substr(start, length)`: CHARACTER-indexed substring by start and length.
-///
-/// Deliberately NOT `rt_slice`: that one is byte-indexed (and `slice`/
-/// `substring` keep those semantics on purpose), while the interpreter's
-/// `substr` walks `chars()`. Routing `substr` to `rt_slice` would have been a
-/// silent JIT-vs-interpreter divergence on any multi-byte receiver.
-///
-/// Negative `start` or `length` clamps to 0, matching the saturating
-/// `eval_arg_usize` the interpreter now uses.
-#[no_mangle]
-pub extern "C" fn rt_string_substr(string: RuntimeValue, start: i64, length: i64) -> RuntimeValue {
-    let Some(s) = string_as_str(string) else {
-        return string;
-    };
-    let start = start.max(0) as usize;
-    let length = length.max(0) as usize;
-    let out: String = s.chars().skip(start).take(length).collect();
-    new_string(&out)
-}
-
-/// `substr(start)`: CHARACTER-indexed substring from `start` to the end.
-///
-/// A separate entry point rather than a default argument: the omitted-argument
-/// slot is padded with tagged nil, whose bit pattern IS the integer 3, so an
-/// integer parameter cannot tell "absent" from "3". The dispatch site therefore
-/// selects between the two symbols on the argument count.
-#[no_mangle]
-pub extern "C" fn rt_string_substr_from(string: RuntimeValue, start: i64) -> RuntimeValue {
-    let Some(s) = string_as_str(string) else {
-        return string;
-    };
-    let start = start.max(0) as usize;
-    let out: String = s.chars().skip(start).collect();
-    new_string(&out)
-}
-
-/// Refuse a non-text receiver LOUDLY.
-///
-/// The dispatch tables in `codegen/instr/{calls,closures_structs}.rs` are keyed
-/// on the method NAME only -- they have no receiver type -- so a name shared
-/// with an array or dict method reaches the text entry point with the wrong
-/// receiver. Returning a plausible-looking value there is how this whole bug
-/// started: it trades a loud failure for a silent wrong answer. These names had
-/// no compiled implementation at all before, so exiting here is exactly as loud
-/// as the behaviour it replaces, and never quieter.
-fn refuse_non_text_receiver(method: &str) -> ! {
-    eprintln!(
-        "Runtime error: str.{method} was called on a receiver that is not text. \
-         This method has no compiled implementation for that receiver type -- a \
-         code-generation dispatch gap, not a program error. Refusing to \
-         substitute a value."
-    );
-    std::process::exit(70);
-}
-
-/// `rev` / `reversed`: reverse by CHARACTER for text, by ELEMENT for an array.
-///
-/// Receiver-dispatched, following the `rt_at`/`rt_array_at` precedent: the
-/// dispatch table cannot tell the two receivers apart, so the runtime must.
-///
-/// `reverse` now routes here too, on every type-blind dispatch table. It used
-/// to route to `rt_array_reverse`, which reverses IN PLACE and returns a
-/// `bool`, for EVERY receiver including text — so text got the `false`
-/// receiver-mismatch answer, and an array got its receiver MUTATED. The
-/// interpreter is the spec and it mutates nothing: `interpreter_method/
-/// collections.rs` `"rev" | "reverse"` copies then reverses
-/// (`Value::array(new_arr)`), `interpreter_method/string.rs` `"rev" |
-/// "reverse"` builds a new text, and the tuple arm builds a new tuple. This
-/// function matches that: a NEW array (via `rt_array_reversed`), a NEW text, or
-/// a loud refusal on any other receiver. `rt_array_reverse` keeps its in-place
-/// semantics for callers that ask for it by name; nothing dispatches `reverse`
-/// to it any more.
-#[no_mangle]
-pub extern "C" fn rt_reverse(receiver: RuntimeValue) -> RuntimeValue {
-    if get_typed_ptr::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
-        return rt_array_reversed(receiver);
-    }
-    match string_as_str(receiver) {
-        Some(s) => new_string(&s.chars().rev().collect::<String>()),
-        None => refuse_non_text_receiver("rev"),
-    }
-}
-
-/// `reverse`: the MUTATING spelling. Reverses an ARRAY in place and returns
-/// that same array.
-///
-/// `reverse` and `rev`/`reversed` are NOT synonyms in this language, and that
-/// is the whole reason this function exists separately from `rt_reverse`.
-/// `interpreter_method/mod.rs` lists `"reverse"` in `MUTATING_METHODS` and
-/// deliberately does NOT list `"rev"` or `"reversed"`, so the interpreter
-/// writes the result back to the receiver binding for `reverse` only. The two
-/// spellings share one arm in `interpreter_method/collections.rs`, which is why
-/// reading that arm alone makes them look identical — they are not. Measured:
-///
-/// ```text
-/// var a = [1, 2, 3]
-/// a.reverse()   # -> [3,2,1] AND a == [3,2,1]   (mutating spelling)
-/// a.rev()       # -> [3,2,1] AND a == [1,2,3]   (pure spelling)
-/// ```
-///
-/// Routing `reverse` to the copying `rt_reverse` therefore left the receiver
-/// unmodified under JIT/native while the interpreter rebound it — a silent
-/// wrong answer on the aliasing axis. `rt_reverse` itself is CORRECT; it is
-/// the `rev`/`reversed` helper and keeps every one of its guarantees.
-///
-/// TEXT is passed through to the copying behaviour unchanged. The interpreter
-/// currently also rebinds a text receiver here, but that contradicts its own
-/// documented rule that "strings in Simple are value types with NO mutating
-/// methods" (`interpreter_method/mod.rs`), and the same rebinding affects
-/// string `push`/`pop`/`clear` too. That is a separate, larger defect recorded
-/// in the bug tracker rather than decided here — this change deliberately
-/// leaves text behaviour byte-for-byte as it was.
-#[no_mangle]
-pub extern "C" fn rt_reverse_mut(receiver: RuntimeValue) -> RuntimeValue {
-    if get_typed_ptr::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
-        rt_array_reverse(receiver);
-        return receiver;
-    }
-    match string_as_str(receiver) {
-        Some(s) => new_string(&s.chars().rev().collect::<String>()),
-        None => refuse_non_text_receiver("reverse"),
-    }
-}
-
-/// A receiver `sort` has no compiled implementation for. Loud, never a value.
-///
-/// Distinct from `refuse_non_text_receiver` because `sort` is the opposite
-/// shape: text is the INVALID receiver here, not the valid one.
-fn refuse_non_array_sort_receiver() -> ! {
-    eprintln!(
-        "Runtime error: sort() was called on a receiver that is not an array. \
-         The interpreter refuses this outright (\"method `sort` not found on \
-         type `str`\"), so there is no correct value to return. Refusing to \
-         substitute one."
-    );
-    std::process::exit(70);
-}
-
-/// `sort`: sort an ARRAY in place and return that same array.
-///
-/// The interpreter is the spec, and the spec is NOT what reading
-/// `interpreter_method/collections.rs` alone suggests. That arm builds a copy
-/// (`arr.to_vec()` -> `Value::array(new_arr)`), but `interpreter_method/mod.rs`
-/// then WRITES THE RESULT BACK to the receiver binding, because `"sort"` is in
-/// its `MUTATING_METHODS` list. Measured end to end on the interpreter:
-///
-/// ```text
-/// var a = [3, 1, 2]
-/// val b = a.sort()     // b = [1, 2, 3]  AND  a = [1, 2, 3]
-/// "cba".sort()         // error: method `sort` not found on type `str`  (rc=1)
-/// ```
-///
-/// So `sort` must (a) leave the receiver sorted and (b) evaluate to the sorted
-/// array, and (c) refuse a text receiver rather than inventing an answer.
-/// Returning a fresh copy and leaving the receiver alone would satisfy only
-/// (b) — a silent wrong answer on the aliasing axis.
-///
-/// What was actually broken about `"sort" => rt_array_sort`:
-///   * `rt_array_sort` returns a `bool`, not a collection, so the value was
-///     only correct while `sort` sat in the codegen `in_place` set that
-///     substitutes the receiver vreg.
-///   * On a TEXT receiver it returned `false` and the `in_place` substitution
-///     handed back the unsorted receiver — silently, where the interpreter
-///     errors.
-///   * `runtime_native.c` has never defined `rt_array_sort`, so `arr.sort()`
-///     did not link at all on the native lane.
-///
-/// `rt_sort` fixes all three and returns the right value on its own, which is
-/// why `sort` is also removed from the `in_place` set: with `rt_sort` the
-/// substitution would defeat the text refusal.
-#[no_mangle]
-pub extern "C" fn rt_sort(receiver: RuntimeValue) -> RuntimeValue {
-    if get_typed_ptr::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
-        rt_array_sort(receiver);
-        return receiver;
-    }
-    refuse_non_array_sort_receiver()
-}
-
-/// `push`: append to an ARRAY in place, or build a NEW text.
-///
-/// Receiver-dispatched, same shape as `rt_reverse_mut` / `rt_sort` / `rt_at`.
-/// The type-blind dispatch tables used to send every `push` to
-/// `rt_array_push`, which `as_typed_ptr!`-fails closed on a text receiver and
-/// returns `false` — so `var t = "abc"; t.push("d")` evaluated to `0` on the
-/// compiled lane while the interpreter answered `"abcd"`. Measured before this
-/// helper existed (JIT / interpreter): `0` / `"abcd"`.
-///
-/// TEXT IS A VALUE TYPE, so the text branch returns a new text and never
-/// touches the receiver — the rule `interpreter_method/mod.rs` states and that
-/// `interpreter_method/string.rs`'s own `push` arm has always implemented
-/// ("Returns a new string with the character appended (strings are
-/// immutable)"). The array branch keeps the measured array contract exactly:
-/// the receiver is mutated AND the expression evaluates to that same array.
-///
-/// The concatenation goes through `rt_string_concat` so a non-text argument is
-/// rendered exactly as `push_str` already renders it (`push_str` has always
-/// dispatched to `rt_string_concat`).
-#[no_mangle]
-pub extern "C" fn rt_push(receiver: RuntimeValue, value: RuntimeValue) -> RuntimeValue {
-    if get_typed_ptr::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
-        rt_array_push(receiver, value);
-        return receiver;
-    }
-    if string_as_str(receiver).is_some() {
-        return rt_string_concat(receiver, value);
-    }
-    refuse_non_text_receiver("push")
-}
-
-/// `pop`: remove and return the last ELEMENT of an array, or return the last
-/// CHARACTER of a text without modifying it.
-///
-/// Receiver-dispatched. `rt_array_pop` fails closed to nil on a text receiver,
-/// so `var t = "abc"; t.pop()` evaluated to `nil` on the compiled lane while
-/// the interpreter answered `Option::Some("c")` — two different wrong answers
-/// (measured JIT / interpreter: `nil` / `Option::Some(c)`).
-///
-/// The return shape is the ELEMENT, not an `Option`: measured on BOTH engines,
-/// `[1, 2, 3].pop()` evaluates to `3`, never `Some(3)`. Text was the only
-/// `pop` in the language that wrapped, and that wrapping was unreachable from
-/// any compiled lane (the JIT has no Option constructor for text). The
-/// interpreter's text arm now returns the bare character too.
-///
-/// An empty text has no last character and yields the empty text. That is
-/// unambiguous — no real character is ever the empty text — and it mirrors
-/// popping an empty array, which is a no-op on both engines.
-#[no_mangle]
-pub extern "C" fn rt_pop(receiver: RuntimeValue) -> RuntimeValue {
-    if get_typed_ptr::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
-        return rt_array_pop(receiver);
-    }
-    match string_as_str(receiver) {
-        Some(s) => match s.chars().last() {
-            Some(c) => new_string(&c.to_string()),
-            None => new_string(""),
-        },
-        None => refuse_non_text_receiver("pop"),
-    }
-}
-
-/// `clear`: empty an ARRAY in place, or return the empty text.
-///
-/// Receiver-dispatched. `rt_array_clear` fails closed to `false` on a text
-/// receiver, and `clear` also sat in the LLVM `in_place` set that substitutes
-/// the receiver vreg for the call result — so `var t = "abc"; t.clear()`
-/// handed back the UNCLEARED receiver `"abc"` (measured on the JIT), which is
-/// the worst shape available: a plausible value that is silently wrong.
-///
-/// TEXT IS A VALUE TYPE: the text branch returns the empty text and leaves the
-/// receiver alone, exactly as `interpreter_method/string.rs`'s `clear` arm
-/// already documented ("Returns empty string (strings are immutable)"). The
-/// array branch keeps the measured array contract: receiver emptied AND the
-/// expression evaluates to that same (now empty) array.
-#[no_mangle]
-pub extern "C" fn rt_clear(receiver: RuntimeValue) -> RuntimeValue {
-    if get_typed_ptr::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
-        rt_array_clear(receiver);
-        return receiver;
-    }
-    if string_as_str(receiver).is_some() {
-        return new_string("");
-    }
-    refuse_non_text_receiver("clear")
-}
-
-/// `take` / `taken`: first `n` CHARACTERS of text, or first `n` ELEMENTS of an
-/// array. Receiver-dispatched. A negative `n` yields an empty result, matching
-/// the saturating `eval_arg_usize` the interpreter now uses.
-#[no_mangle]
-pub extern "C" fn rt_take(receiver: RuntimeValue, n: i64) -> RuntimeValue {
-    let n = n.max(0);
-    if get_typed_ptr::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
-        let len = rt_array_len(receiver);
-        let take = n.min(len.max(0));
-        let out = rt_array_new(take.max(0) as u64);
-        for i in 0..take {
-            rt_array_push(out, rt_array_get(receiver, i));
-        }
-        return out;
-    }
-    match string_as_str(receiver) {
-        Some(s) => new_string(&s.chars().take(n as usize).collect::<String>()),
-        None => refuse_non_text_receiver("take"),
-    }
-}
-
-/// `drop` / `dropped` / `skip`: all but the first `n` CHARACTERS of text, or all
-/// but the first `n` ELEMENTS of an array. Receiver-dispatched.
-#[no_mangle]
-pub extern "C" fn rt_drop(receiver: RuntimeValue, n: i64) -> RuntimeValue {
-    let n = n.max(0);
-    if get_typed_ptr::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
-        let len = rt_array_len(receiver).max(0);
-        let start = n.min(len);
-        let out = rt_array_new((len - start).max(0) as u64);
-        for i in start..len {
-            rt_array_push(out, rt_array_get(receiver, i));
-        }
-        return out;
-    }
-    match string_as_str(receiver) {
-        Some(s) => new_string(&s.chars().skip(n as usize).collect::<String>()),
-        None => refuse_non_text_receiver("drop"),
-    }
-}
-
-/// `sorted` on TEXT: the receiver's characters in codepoint order.
-///
-/// TEXT ONLY, on purpose. `sorted` is also an array method, but ordering an
-/// array means ordering tag-boxed values of mixed type, and the C runtime has no
-/// such comparator (nor an `rt_array_sorted`). Implementing it in the Rust
-/// runtime alone would make the two lanes disagree on `arr.sorted()`; declining
-/// loudly keeps them identical and leaves array `sorted` exactly as unwired as
-/// it is today.
-#[no_mangle]
-pub extern "C" fn rt_string_sorted(string: RuntimeValue) -> RuntimeValue {
-    let Some(s) = string_as_str(string) else {
-        refuse_non_text_receiver("sorted");
-    };
-    let mut chars: Vec<char> = s.chars().collect();
-    chars.sort_unstable();
-    new_string(&chars.into_iter().collect::<String>())
-}
-
-/// Shared body for `partition` / `rpartition`: `[before, separator, after]`.
-///
-/// An empty separator, or a separator that does not occur, yields the receiver
-/// in ONE of the three slots and two empty strings -- first slot for
-/// `partition`, LAST slot for `rpartition`, matching the interpreter arms.
-fn string_partition_at(s: &str, sep: &str, from_end: bool) -> RuntimeValue {
-    let hit = if sep.is_empty() {
-        None
-    } else if from_end {
-        s.rfind(sep)
-    } else {
-        s.find(sep)
-    };
-    let out = rt_array_new(3);
-    match hit {
-        Some(idx) => {
-            rt_array_push(out, new_string(&s[..idx]));
-            rt_array_push(out, new_string(sep));
-            rt_array_push(out, new_string(&s[idx + sep.len()..]));
-        }
-        None if from_end => {
-            rt_array_push(out, new_string(""));
-            rt_array_push(out, new_string(""));
-            rt_array_push(out, new_string(s));
-        }
-        None => {
-            rt_array_push(out, new_string(s));
-            rt_array_push(out, new_string(""));
-            rt_array_push(out, new_string(""));
-        }
-    }
-    out
-}
-
-/// `partition`: split at the FIRST occurrence into `[before, sep, after]`.
-///
-/// TEXT ONLY. `partition` is also an array method, but the array form takes a
-/// PREDICATE and returns `[passing, failing]` -- a different arity, a different
-/// argument type and a different result shape. Guessing between them from a
-/// tagged value would be a silent wrong answer; the array form additionally
-/// needs to invoke a closure, which this runtime cannot do from here.
-#[no_mangle]
-pub extern "C" fn rt_string_partition(string: RuntimeValue, sep: RuntimeValue) -> RuntimeValue {
-    let Some(s) = string_as_str(string) else {
-        refuse_non_text_receiver("partition");
-    };
-    let sep = string_as_str(sep).unwrap_or("");
-    string_partition_at(s, sep, false)
-}
-
-/// `rpartition`: split at the LAST occurrence into `[before, sep, after]`.
-#[no_mangle]
-pub extern "C" fn rt_string_rpartition(string: RuntimeValue, sep: RuntimeValue) -> RuntimeValue {
-    let Some(s) = string_as_str(string) else {
-        refuse_non_text_receiver("rpartition");
-    };
-    let sep = string_as_str(sep).unwrap_or("");
-    string_partition_at(s, sep, true)
 }
 
 /// Check if string starts with prefix
@@ -3426,24 +2271,11 @@ pub extern "C" fn rt_text_cmp_any(string1: RuntimeValue, string2: RuntimeValue) 
 #[no_mangle]
 pub extern "C" fn rt_string_char_at(string: RuntimeValue, index: i64) -> RuntimeValue {
     let len = rt_string_len(string);
-    if len < 0 {
-        // Receiver is not a text value at all — that stays NIL.
-        return RuntimeValue::NIL;
-    }
-    if index >= len {
+    if len < 0 || index >= len {
         // `index >= len` is a permissive fast reject: the byte length
         // upper-bounds the character count, and chars().nth enforces the
         // real character bound below.
-        //
-        // Forward over-run returns EMPTY TEXT, not NIL. The tree-walk
-        // interpreter (interpreter_method/string.rs `"char_at" | "at"`)
-        // returns `""` here, so the pervasive loop-termination idiom
-        // `if ch == "": break` was FAIL-OPEN on the compiled path only —
-        // `nil == ""` is false, so the guard never fired and the loop ran
-        // past the end. Divergence measured 2026-08-06:
-        // `"Café".char_at(99) == ""` was false on JIT, true on interpret.
-        // See doc/08_tracking/bug/text_byte_len_vs_codepoint_index_family_2026-08-06.md.
-        return new_string("");
+        return RuntimeValue::NIL;
     }
 
     let data = rt_string_data(string);
@@ -3474,14 +2306,7 @@ pub extern "C" fn rt_string_char_at(string: RuntimeValue, index: i64) -> Runtime
             let char_str = c.encode_utf8(&mut buf);
             rt_string_new(char_str.as_ptr(), char_str.len() as u64)
         } else {
-            // Real CHARACTER-bound over-run (index passed the byte-length fast
-            // reject above but is >= the codepoint count — the common case for
-            // non-ASCII text, e.g. `"Café".char_at(4)`, 5 bytes / 4 chars).
-            // Same contract as the fast reject: empty text, not NIL, so
-            // `if ch == "": break` terminates on the compiled path too.
-            // A negative index cannot reach here: `adjusted >= 0` implies
-            // `adjusted < chars().count()`.
-            new_string("")
+            RuntimeValue::NIL
         }
     }
 }
@@ -3702,58 +2527,6 @@ pub extern "C" fn rt_string_split(string: RuntimeValue, delimiter: RuntimeValue)
     }
 }
 
-/// Split a string at most `limit - 1` times, preserving the remainder.
-#[no_mangle]
-pub extern "C" fn rt_string_split_limit(
-    string: RuntimeValue,
-    delimiter: RuntimeValue,
-    limit: i64,
-) -> RuntimeValue {
-    if limit <= 0 {
-        return rt_string_split(string, delimiter);
-    }
-    let str_len = rt_string_len(string);
-    let del_len = rt_string_len(delimiter);
-    if str_len < 0 || del_len < 0 {
-        return rt_array_new(0);
-    }
-    let str_data = rt_string_data(string);
-    let del_data = rt_string_data(delimiter);
-    if str_data.is_null() || (del_len > 0 && del_data.is_null()) {
-        return rt_array_new(0);
-    }
-    unsafe {
-        let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(str_data, str_len as usize));
-        let d = std::str::from_utf8_unchecked(std::slice::from_raw_parts(del_data, del_len as usize));
-        let result = rt_array_new(limit.max(1) as u64);
-        if limit == 1 {
-            rt_array_push(result, string);
-            return result;
-        }
-        if d.is_empty() {
-            let mut start = 0usize;
-            while start < s.len() && (start as i64) < limit - 1 {
-                let end = start + 1;
-                rt_array_push(result, rt_string_new(s[start..end].as_ptr(), 1));
-                start = end;
-            }
-            rt_array_push(result, rt_string_new(s[start..].as_ptr(), (s.len() - start) as u64));
-            return result;
-        }
-        let mut start = 0usize;
-        let mut count = 1i64;
-        while count < limit {
-            let Some(relative) = s[start..].find(d) else { break };
-            let end = start + relative;
-            rt_array_push(result, rt_string_new(s[start..end].as_ptr(), (end - start) as u64));
-            start = end + d.len();
-            count += 1;
-        }
-        rt_array_push(result, rt_string_new(s[start..].as_ptr(), (s.len() - start) as u64));
-        result
-    }
-}
-
 /// Return the UTF-8 bytes of a string as an array of ints (one per byte).
 /// Mirrors the interpreter's `text.bytes()` (`interpreter_method/string.rs`)
 /// so JIT/native code can call `.bytes()` instead of only the interpreter.
@@ -3858,57 +2631,6 @@ pub extern "C" fn rt_string_replace(
         let r = std::str::from_utf8_unchecked(std::slice::from_raw_parts(rep_data, rep_len as usize));
         let result = s.replace(p, r);
         rt_string_new(result.as_ptr(), result.len() as u64)
-    }
-}
-
-/// Repeat a string `count` times.
-///
-/// Mirrors the tree-walking interpreter (`interpreter_method/string.rs`, arm
-/// `"repeat"`) and the pure-Simple `str_repeat` in
-/// `src/lib/common/string_core.spl`: a non-positive `count` yields the empty
-/// string.
-///
-/// This function had no definition in EITHER runtime, so the Cranelift JIT's
-/// method table had nothing to route `.repeat()` to. `" ".repeat(n)` therefore
-/// raised `Function 'str.repeat' not found` and substituted the SPECIAL_ERROR
-/// sentinel, which stringifies as `error` -- silently corrupting every
-/// indentation string built that way (notably EasyFix replacement text).
-#[no_mangle]
-pub extern "C" fn rt_string_repeat(string: RuntimeValue, count: i64) -> RuntimeValue {
-    let str_len = rt_string_len(string);
-    if str_len < 0 {
-        // Not a text receiver: preserve the value rather than fabricating one.
-        return string;
-    }
-    if count <= 0 || str_len == 0 {
-        return rt_string_new(b"".as_ptr(), 0);
-    }
-    if count == 1 {
-        return string;
-    }
-
-    let data = rt_string_data(string);
-    if data.is_null() {
-        return rt_string_new(b"".as_ptr(), 0);
-    }
-
-    // Refuse an allocation that cannot be expressed, instead of wrapping and
-    // returning a short string that would silently truncate caller output.
-    let total = match (str_len as u64).checked_mul(count as u64) {
-        Some(total) if total <= isize::MAX as u64 => total as usize,
-        _ => {
-            eprintln!("Runtime error: str.repeat overflow (len={str_len}, count={count})");
-            std::process::exit(70);
-        }
-    };
-
-    unsafe {
-        let bytes = std::slice::from_raw_parts(data, str_len as usize);
-        let mut out = Vec::with_capacity(total);
-        for _ in 0..count {
-            out.extend_from_slice(bytes);
-        }
-        rt_string_new(out.as_ptr(), out.len() as u64)
     }
 }
 
@@ -4519,23 +3241,6 @@ pub extern "C" fn rt_slice(collection: RuntimeValue, start: i64, end: i64, step:
                 }
 
                 let data = str_ptr.add(1) as *const u8;
-
-                // UTF-8 slice audit, stage 1 (COUNTING ONLY, default off).
-                // This range is copied RAW, so a boundary that falls inside a
-                // multi-byte codepoint stores invalid bytes and only the byte
-                // length betrays it -- stdout's sanitizer renders valid and
-                // invalid identically. Record it; do not fail. See
-                // simple_runtime::text_slice_audit.
-                if crate::text_slice_audit::enabled() {
-                    let src = std::slice::from_raw_parts(data, len as usize);
-                    crate::text_slice_audit::note(
-                        crate::text_slice_audit::site::RT_SLICE_RUST,
-                        start,
-                        end,
-                        src,
-                        &src[start as usize..end as usize],
-                    );
-                }
                 rt_string_new(data.add(start as usize), (end - start) as u64)
             }
         }
@@ -4725,186 +3430,6 @@ pub extern "C" fn rt_array_find(array: RuntimeValue, closure: RuntimeValue) -> R
         }
     }
     RuntimeValue::NIL
-}
-
-/// Receiver-polymorphic `find`, in the same shape as the in-tree `rt_at`,
-/// `rt_index_of` and `rt_map` precedents — with ONE difference that is stated
-/// here rather than hidden: the two receivers return DIFFERENT SHAPES in the
-/// same machine word.
-///
-/// - ARRAY receiver AND a callable closure argument → `rt_array_find`, i.e. the
-///   matching ELEMENT as a tagged `RuntimeValue`, or tagged NIL when no element
-///   matches.
-/// - EVERYTHING ELSE → `rt_string_find`, i.e. a RAW `i64` byte index, or -1.
-///   Text behaviour is bit-for-bit what it was before this symbol existed.
-///
-/// The dual shape is not a new design choice, it is the PRE-EXISTING contract:
-/// `hir/lower/expr/mod.rs` types `find` as `TypeId::I64` only inside its
-/// `if is_string` arm, and the array arm gives `find` no type at all, so the
-/// consumer's interpretation is already derived from the receiver's static
-/// type. Returning one tagged shape for both would therefore have CHANGED text
-/// `find`, which is exactly what this fix must not do.
-///
-/// Why the symbol is needed: `codegen/instr/calls.rs` and the type-blind table
-/// in `codegen/llvm/functions.rs` each contained TWO `"find"` arms in one
-/// `match` — `"find" | "find_str" => rt_string_find` and, further down,
-/// `"find" => rt_array_find`. Rust `match` is first-match-wins, so the array
-/// arm was UNREACHABLE; `instr/closures_structs.rs` and `llvm/emitter.rs`
-/// mapped the bare name to `rt_string_find` with no array arm at all. Every
-/// `arr.find(pred)` on a type-blind path therefore answered the `-1`
-/// receiver-mismatch sentinel — including when the match sat at index 0 —
-/// while the type-AWARE LLVM table answered with the element. Same source, two
-/// answers per backend, no error, exit 0.
-///
-/// The array branch requires BOTH an array receiver and a callable closure, so
-/// an array receiver with a non-closure argument keeps its exact previous
-/// answer instead of silently acquiring a new one.
-#[no_mangle]
-pub extern "C" fn rt_find(receiver: RuntimeValue, arg: RuntimeValue) -> i64 {
-    if get_typed_ptr::<RuntimeArray>(receiver, HeapObjectType::Array).is_some()
-        && !rt_closure_func_ptr(arg).is_null()
-    {
-        return rt_array_find(receiver, arg).to_raw() as i64;
-    }
-    rt_string_find(receiver, arg)
-}
-
-/// Apply `closure` to every element and return a NEW array of the results.
-///
-/// Codegen contract: the LLVM backend maps `("Array"|"array", "map")` to this
-/// symbol (`codegen/llvm/functions.rs`) and emits `receiver + args` verbatim, so
-/// the call shape is exactly `rt_array_map(array, closure)`. Before this
-/// existed, any `arr.map(f)` compiled under the LLVM backend failed at LINK time
-/// with `undefined reference to 'rt_array_map'`.
-///
-/// Closure ABI matches `rt_array_filter` / `rt_array_find` / `rt_option_map`:
-/// the lifted target takes the closure handle as its first argument so it can
-/// reach its captures, then the element.
-///
-/// Iteration is by INDEX rather than over a borrowed slice: the closure is
-/// arbitrary user code and may push to or clear the receiver, which would
-/// invalidate a slice taken once up front. `rt_array_get` re-reads the header
-/// each call and returns NIL past the end, so a shrinking receiver terminates
-/// instead of reading freed memory.
-#[no_mangle]
-pub extern "C" fn rt_array_map(array: RuntimeValue, closure: RuntimeValue) -> RuntimeValue {
-    let _ = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
-    let result = rt_array_new(0);
-    if result.is_nil() {
-        return result;
-    }
-
-    let func_ptr = rt_closure_func_ptr(closure);
-    if func_ptr.is_null() {
-        return result;
-    }
-
-    let func: extern "C" fn(RuntimeValue, RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(func_ptr) };
-    let mut i: i64 = 0;
-    while i < rt_array_len(array) {
-        let item = rt_array_get(array, i);
-        rt_array_push(result, func(closure, item));
-        i += 1;
-    }
-    result
-}
-
-/// Receiver-dispatching `map`, in the same shape as `rt_at` and `rt_index_of`.
-///
-/// The two type-BLIND dispatch tables — the Cranelift
-/// `codegen/instr/closures_structs.rs` `"map"` arm and the LLVM
-/// `codegen/llvm/emitter.rs` `runtime_method_name` table — mapped the method
-/// name `map` straight to `rt_option_map` with no receiver test. A comment at
-/// the Cranelift site claimed this "also works for arrays since rt_option_map
-/// checks if the value is an enum with Some/None". It does not, and the claim
-/// was wrong in a way that produced a silent wrong answer rather than an error:
-///
-///   * `rt_is_none(array)` is false — an array is not an Option enum — so the
-///     early return does not fire;
-///   * `rt_enum_payload(array)` takes the `get_typed_ptr::<RuntimeEnum>(_,
-///     HeapObjectType::Enum)` path, which fails on an Array and returns NIL;
-///   * the closure is then invoked EXACTLY ONCE, on that NIL, and the result is
-///     wrapped in `Some`.
-///
-/// So `[1,2,3].map(f)` yielded `Some(f(nil))` — one call instead of three, on a
-/// value that was never in the receiver, boxed in an Option that the source
-/// never asked for. No error, no crash, exit 0.
-///
-/// The test is done here, at runtime, rather than at the two codegen sites
-/// because those sites dispatch purely on the method name and have no reliable
-/// static receiver type available (`try_compile_builtin_method_call` does not
-/// even take one). The type-AWARE LLVM table in `codegen/llvm/functions.rs`
-/// already routed `("Array", "map")` to `rt_array_map` and is left untouched.
-///
-/// Option behaviour is intentionally unchanged: a non-array receiver still goes
-/// to `rt_option_map` and keeps its exact previous result, including the `Some`
-/// wrap and the None/nil pass-through. Only the array receiver — which had no
-/// correct implementation on these two lanes — changes.
-#[no_mangle]
-pub extern "C" fn rt_map(receiver: RuntimeValue, closure: RuntimeValue) -> RuntimeValue {
-    if get_typed_ptr::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
-        return rt_array_map(receiver, closure);
-    }
-    rt_option_map(receiver, closure)
-}
-
-/// Apply `closure` to every element for its side effects and return the
-/// RECEIVER, so `arr.each(f)` is chainable and never yields nil.
-///
-/// Codegen contract: the LLVM backend maps both `each` and `for_each` to this
-/// symbol and emits `rt_array_each(array, closure)`. The call site is typed as
-/// returning i64 unconditionally, which is why the receiver is returned rather
-/// than a unit/nil value — a nil there would be indistinguishable from failure.
-#[no_mangle]
-pub extern "C" fn rt_array_each(array: RuntimeValue, closure: RuntimeValue) -> RuntimeValue {
-    let _ = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
-    let func_ptr = rt_closure_func_ptr(closure);
-    if func_ptr.is_null() {
-        return array;
-    }
-
-    let func: extern "C" fn(RuntimeValue, RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(func_ptr) };
-    let mut i: i64 = 0;
-    while i < rt_array_len(array) {
-        let item = rt_array_get(array, i);
-        func(closure, item);
-        i += 1;
-    }
-    array
-}
-
-/// Left fold: seed the accumulator with `init` and combine each element with
-/// `closure(acc, item)`.
-///
-/// Codegen contract: the LLVM backend maps both `reduce` and `fold` to this
-/// symbol and emits `receiver + args` verbatim, so the call shape is
-/// `rt_array_reduce(array, init, closure)` — matching the interpreter, where
-/// `reduce`/`fold` take `(init, func)` in that order
-/// (`interpreter_method/collections.rs`) and invoke the function as
-/// `(acc, item)` (`interpreter_helpers/collections.rs`). Getting that order
-/// wrong would be a silently wrong answer for any non-commutative combiner, so
-/// it is pinned to the interpreter rather than guessed.
-///
-/// The lifted closure target therefore has THREE parameters: the closure handle
-/// (for captures), the accumulator, and the element.
-#[no_mangle]
-pub extern "C" fn rt_array_reduce(array: RuntimeValue, init: RuntimeValue, closure: RuntimeValue) -> RuntimeValue {
-    let _ = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, init);
-    let func_ptr = rt_closure_func_ptr(closure);
-    if func_ptr.is_null() {
-        return init;
-    }
-
-    let func: extern "C" fn(RuntimeValue, RuntimeValue, RuntimeValue) -> RuntimeValue =
-        unsafe { std::mem::transmute(func_ptr) };
-    let mut acc = init;
-    let mut i: i64 = 0;
-    while i < rt_array_len(array) {
-        let item = rt_array_get(array, i);
-        acc = func(closure, acc, item);
-        i += 1;
-    }
-    acc
 }
 
 /// Find the index of a value in an array
@@ -5357,6 +3882,9 @@ pub extern "C" fn rt_array_all_truthy(array: RuntimeValue) -> i64 {
             if item.is_int() && item.as_int() == 0 {
                 return 0;
             }
+            if item.as_heap_u64() == Some(0) {
+                return 0;
+            }
             if item.is_float() && item.as_float() == 0.0 {
                 return 0;
             }
@@ -5365,47 +3893,9 @@ pub extern "C" fn rt_array_all_truthy(array: RuntimeValue) -> i64 {
     }
 }
 
-/// `arr.all(pred)`: true when `pred` is truthy for EVERY element.
-///
-/// Codegen contract: all four backend dispatch sites — `codegen/llvm/
-/// functions.rs` (both the type-blind fallback table and the
-/// `("Array", "all")` table), `codegen/llvm/emitter.rs` and the Cranelift
-/// `codegen/instr/{calls,closures_structs}.rs` — map `all` here and emit
-/// `receiver + args` verbatim, i.e. `rt_array_all(array, closure)`. This
-/// function previously took only `(array)` and forwarded to
-/// `rt_array_all_truthy`, so the predicate operand was accepted by the ABI and
-/// then DISCARDED: `[1,2,3].all(x => x > 10)` answered `true` (every element is
-/// truthy) instead of `false`, and the predicate was never invoked even once.
-///
-/// Semantics are pinned to the interpreter (`interpreter_helpers/collections.rs`
-/// `eval_array_all`), not guessed: the predicate is called with the element
-/// alone, iteration SHORT-CIRCUITS on the first falsy result, and an empty
-/// receiver is vacuously `true`.
-///
-/// The zero-predicate spelling is a SEPARATE symbol, not a defaulted argument:
-/// `arr.all_truthy()` lowers to `rt_array_all_truthy(array)` via its own MIR arm
-/// (`mir/lower/lowering_expr_method.rs`), so no caller reaches this function
-/// with one operand. A non-closure `closure` (nil, or a value that is not a
-/// registered closure) therefore still degrades to element truthiness rather
-/// than calling through an unvalidated address — the same bail-out
-/// `rt_array_filter`/`rt_array_find`/`rt_array_map` use.
 #[no_mangle]
-pub extern "C" fn rt_array_all(array: RuntimeValue, closure: RuntimeValue) -> i64 {
-    let _ = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, 0);
-    let func_ptr = rt_closure_func_ptr(closure);
-    if func_ptr.is_null() {
-        return rt_array_all_truthy(array);
-    }
-
-    let func: extern "C" fn(RuntimeValue, RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(func_ptr) };
-    let mut i: i64 = 0;
-    while i < rt_array_len(array) {
-        if !func(closure, rt_array_get(array, i)).truthy() {
-            return 0;
-        }
-        i += 1;
-    }
-    1
+pub extern "C" fn rt_array_all(array: RuntimeValue) -> i64 {
+    rt_array_all_truthy(array)
 }
 
 /// Check if any element is truthy
@@ -5427,6 +3917,9 @@ pub extern "C" fn rt_array_any_truthy(array: RuntimeValue) -> i64 {
             if item.is_int() && item.as_int() == 0 {
                 continue;
             }
+            if item.as_heap_u64() == Some(0) {
+                continue;
+            }
             if item.is_float() && item.as_float() == 0.0 {
                 continue;
             }
@@ -5436,30 +3929,9 @@ pub extern "C" fn rt_array_any_truthy(array: RuntimeValue) -> i64 {
     }
 }
 
-/// `arr.any(pred)`: true when `pred` is truthy for AT LEAST ONE element.
-///
-/// See `rt_array_all` for the full codegen contract and the arity divergence
-/// this fixes; the two are the same defect. Semantics pinned to
-/// `eval_array_any` (`interpreter_helpers/collections.rs`): the predicate takes
-/// the element alone, iteration SHORT-CIRCUITS on the first truthy result, and
-/// an empty receiver is `false`.
 #[no_mangle]
-pub extern "C" fn rt_array_any(array: RuntimeValue, closure: RuntimeValue) -> i64 {
-    let _ = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, 0);
-    let func_ptr = rt_closure_func_ptr(closure);
-    if func_ptr.is_null() {
-        return rt_array_any_truthy(array);
-    }
-
-    let func: extern "C" fn(RuntimeValue, RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(func_ptr) };
-    let mut i: i64 = 0;
-    while i < rt_array_len(array) {
-        if func(closure, rt_array_get(array, i)).truthy() {
-            return 1;
-        }
-        i += 1;
-    }
-    0
+pub extern "C" fn rt_array_any(array: RuntimeValue) -> i64 {
+    rt_array_any_truthy(array)
 }
 
 /// Fill array with a value (in place)
@@ -5620,16 +4092,7 @@ mod tests;
 /// under the lock; an unlocked absolute count would flake against other tests.
 #[cfg(test)]
 mod string_free_contract_tests {
-    use super::{
-        rt_array_new, rt_array_push, rt_string_free, rt_string_len, rt_string_new,
-        rt_string_new_literal, rt_transient_array_scope_begin, rt_transient_array_scope_end,
-        rt_transient_array_scope_pause, rt_transient_heap_promote,
-    };
-    use crate::value::dict::{rt_dict_get, rt_dict_new, rt_dict_set};
-    use crate::value::objects::{
-        rt_closure_get_capture, rt_closure_new, rt_closure_set_capture, rt_enum_new,
-        rt_enum_payload,
-    };
+    use super::{rt_string_free, rt_string_len, rt_string_new, rt_string_new_literal};
     use crate::value::heap::rt_heap_registry_count;
     use std::sync::Mutex;
 
@@ -5701,102 +4164,6 @@ mod string_free_contract_tests {
         let refreed = (1..N).step_by(2).filter(|&i| rt_string_free(v[i]) == 1).count();
         assert_eq!(refreed, N / 2, "every survivor still found and freed");
     }
-
-    #[test]
-    fn transient_ordinary_string_is_reclaimed_and_aliases_free_once() {
-        let _g = GUARD.lock().unwrap();
-        let before = rt_heap_registry_count();
-        assert!(rt_transient_array_scope_begin());
-        let string = mkstr("transient ordinary rust string");
-        let left = rt_array_new(1);
-        let right = rt_array_new(1);
-        assert!(rt_array_push(left, string));
-        assert!(rt_array_push(right, string));
-        assert_eq!(rt_heap_registry_count(), before + 3);
-        assert!(rt_transient_array_scope_end());
-        assert_eq!(rt_heap_registry_count(), before, "string and aliases reclaim exactly once");
-        assert_eq!(rt_string_len(string), -1, "reclaimed string is no longer readable");
-    }
-
-    #[test]
-    fn promoted_string_and_reachable_alias_graph_survive() {
-        extern "C" fn retained_closure_target() {}
-
-        let _g = GUARD.lock().unwrap();
-        let before = rt_heap_registry_count();
-        assert!(rt_transient_array_scope_begin());
-        let text = mkstr("promoted graph string");
-        let unreachable = mkstr("unreachable sibling string");
-        let root = rt_array_new(3);
-        let dict = rt_dict_new(0);
-        let en = rt_enum_new(700_003, 1, text);
-        let closure = rt_closure_new(retained_closure_target as *const () as *const u8, 1);
-        assert!(rt_closure_set_capture(closure, 0, text));
-        assert!(rt_array_push(root, text));
-        assert!(rt_array_push(root, dict));
-        assert!(rt_array_push(root, closure));
-        assert!(rt_dict_set(dict, text, en));
-        assert!(rt_dict_set(dict, en, root));
-        assert!(rt_transient_array_scope_pause());
-        assert!(rt_transient_heap_promote(root));
-        assert!(rt_transient_array_scope_end());
-        assert_eq!(rt_string_len(text), 21);
-        assert_eq!(rt_dict_get(dict, text), en);
-        assert_eq!(rt_enum_payload(en), text);
-        assert_eq!(rt_closure_get_capture(closure, 0), text);
-        assert_eq!(rt_string_len(unreachable), -1, "unreachable sibling is reclaimed");
-        assert_eq!(rt_heap_registry_count(), before + 5, "only five promoted graph nodes survive");
-    }
-
-    #[test]
-    fn direct_promoted_shared_interned_and_post_pause_strings_obey_boundaries() {
-        const LIT: &[u8] = b"scope-created shared literal rust";
-        let _g = GUARD.lock().unwrap();
-
-        assert!(rt_transient_array_scope_begin());
-        let direct = mkstr("direct promoted rust string");
-        let short = mkstr("q");
-        let literal = rt_string_new_literal(LIT.as_ptr(), LIT.len() as u64);
-        assert!(rt_transient_array_scope_pause());
-        assert!(rt_transient_heap_promote(direct));
-        let post_pause = mkstr("post pause persistent rust string");
-        assert!(rt_transient_array_scope_end());
-
-        assert_eq!(rt_string_len(direct), 27);
-        assert_eq!(rt_string_len(post_pause), 33);
-        assert_eq!(mkstr("q"), short, "short cache stays pointer-identical");
-        assert_eq!(
-            rt_string_new_literal(b"q".as_ptr(), 1),
-            short,
-            "one-byte literal reuses the ordinary short cache"
-        );
-        assert_eq!(rt_string_new_literal(LIT.as_ptr(), LIT.len() as u64), literal);
-        assert_eq!(rt_string_free(short), 0, "shared short string remains protected");
-        assert_eq!(
-            rt_string_free(rt_string_new_literal(b"q".as_ptr(), 1)),
-            0,
-            "one-byte literal remains shared and refuses free"
-        );
-        assert_eq!(rt_string_free(literal), 0, "interned literal remains protected");
-        assert_eq!(rt_string_free(direct), 1);
-        assert_eq!(rt_string_free(post_pause), 1);
-    }
-
-    #[test]
-    fn repeated_transient_string_scopes_return_to_fixed_registry_bound() {
-        let _g = GUARD.lock().unwrap();
-        let before = rt_heap_registry_count();
-        for round in 0..128 {
-            assert!(rt_transient_array_scope_begin());
-            for item in 0..256 {
-                let value = format!("rust-scope-{round}-transient-{item}");
-                let string = rt_string_new(value.as_ptr(), value.len() as u64);
-                assert!(rt_string_len(string) > 1);
-            }
-            assert!(rt_transient_array_scope_end());
-            assert_eq!(rt_heap_registry_count(), before, "registry drift after round {round}");
-        }
-    }
 }
 
 /// Lane-L3 aux-byte accounting: array backing-buffer capacity bytes must rise
@@ -5840,159 +4207,5 @@ mod aux_byte_accounting_tests {
             freed <= grown - BYTES,
             "free must return capacity bytes: grown={grown} freed={freed}"
         );
-    }
-}
-
-/// Contract tests for `rt_array_free_deep`, the Rust twin of the C primitive at
-/// src/runtime/runtime_native.c:5335.
-///
-/// The two runtimes must agree bit for bit or the same `.spl` leaks on one
-/// backend and frees on the other — the exact divergence class the
-/// `rt_string_free` twin tests above exist to catch. These assert the
-/// all-or-nothing policy: a refused call must leave the registry EXACTLY where
-/// it was, because a partial free is the irreversible failure the contract is
-/// built to prevent.
-///
-/// The heap registry is process-global and `cargo test` runs in parallel, so
-/// every case serializes on GUARD and asserts on registry DELTAS.
-#[cfg(test)]
-mod array_free_deep_contract_tests {
-    use super::{
-        rt_array_free_deep, rt_array_get, rt_array_new, rt_array_push, rt_byte_array_new, rt_string_len, rt_string_new,
-        rt_string_new_literal,
-    };
-    use crate::value::dict::rt_dict_new;
-    use crate::value::heap::rt_heap_registry_count;
-    use crate::value::RuntimeValue;
-    use std::sync::Mutex;
-
-    static GUARD: Mutex<()> = Mutex::new(());
-
-    fn mkstr(s: &str) -> RuntimeValue {
-        rt_string_new(s.as_ptr(), s.len() as u64)
-    }
-
-    #[test]
-    fn array_of_strings_is_freed_whole_and_registry_returns_to_baseline() {
-        let _g = GUARD.lock().unwrap();
-        let before = rt_heap_registry_count();
-        let a = rt_array_new(4);
-        assert!(rt_array_push(a, mkstr("deep free element one, long enough to avoid the cache")));
-        assert!(rt_array_push(a, mkstr("deep free element two, long enough to avoid the cache")));
-        assert!(rt_array_push(a, mkstr("deep free element three, long enough to avoid the cache")));
-        assert_eq!(rt_heap_registry_count(), before + 4, "array + three strings register");
-        assert_eq!(rt_array_free_deep(a), 1, "tree of non-shared strings is reclaimed");
-        assert_eq!(rt_heap_registry_count(), before, "every node returned to the registry baseline");
-    }
-
-    #[test]
-    fn nested_arrays_are_freed_recursively() {
-        let _g = GUARD.lock().unwrap();
-        let before = rt_heap_registry_count();
-        let inner = rt_array_new(4);
-        assert!(rt_array_push(inner, mkstr("nested deep free leaf string, unique and long")));
-        let outer = rt_array_new(4);
-        assert!(rt_array_push(outer, inner));
-        assert!(rt_array_push(outer, RuntimeValue::from_int(41)));
-        assert_eq!(rt_heap_registry_count(), before + 3, "outer + inner + leaf string");
-        assert_eq!(rt_array_free_deep(outer), 1, "nested tree is reclaimed");
-        assert_eq!(rt_heap_registry_count(), before, "recursion reached every level");
-    }
-
-    #[test]
-    fn immediate_only_array_is_freed_and_needs_no_element_scan() {
-        let _g = GUARD.lock().unwrap();
-        let before = rt_heap_registry_count();
-        let a = rt_array_new(4);
-        for n in 0..4i64 {
-            assert!(rt_array_push(a, RuntimeValue::from_int(n)));
-        }
-        assert_eq!(rt_array_free_deep(a), 1, "immediates are leaves, nothing to strand");
-        assert_eq!(rt_heap_registry_count(), before);
-    }
-
-    #[test]
-    fn byte_packed_array_is_freed_without_reading_payload_as_values() {
-        let _g = GUARD.lock().unwrap();
-        let before = rt_heap_registry_count();
-        let a = rt_byte_array_new(64);
-        assert_eq!(rt_array_free_deep(a), 1, "packed payload holds no heap refs by construction");
-        assert_eq!(rt_heap_registry_count(), before);
-    }
-
-    /// The load-bearing case: a dict element cannot be freed here (no free path
-    /// that would not strand its entries buffer), so the WHOLE call must refuse
-    /// and the sibling string must remain both registered and readable.
-    #[test]
-    fn dict_element_refuses_whole_call_and_frees_nothing() {
-        let _g = GUARD.lock().unwrap();
-        let survivor = mkstr("sibling that must survive a refused deep free, unique");
-        let a = rt_array_new(4);
-        assert!(rt_array_push(a, survivor));
-        assert!(rt_array_push(a, rt_dict_new(8)));
-        let before = rt_heap_registry_count();
-        assert_eq!(rt_array_free_deep(a), 0, "unfreeable element refuses the call");
-        assert_eq!(rt_heap_registry_count(), before, "ALL-OR-NOTHING: nothing was freed");
-        assert!(rt_string_len(rt_array_get(a, 0)) > 0, "survivor still readable");
-    }
-
-    /// A shared (interned literal) string is handed to unrelated holders, so it
-    /// refuses exactly as `rt_string_free` refuses it — and takes the whole
-    /// call with it.
-    #[test]
-    fn shared_string_element_refuses_whole_call() {
-        let _g = GUARD.lock().unwrap();
-        let lit = "an interned literal that other holders share, rust twin";
-        let interned = rt_string_new_literal(lit.as_ptr(), lit.len() as u64);
-        let a = rt_array_new(4);
-        assert!(rt_array_push(a, mkstr("ordinary sibling of a shared string, unique")));
-        assert!(rt_array_push(a, interned));
-        let before = rt_heap_registry_count();
-        assert_eq!(rt_array_free_deep(a), 0, "SHARED element refuses");
-        assert_eq!(rt_heap_registry_count(), before, "nothing freed");
-        assert!(rt_string_len(interned) > 0, "interned literal still readable");
-    }
-
-    /// Phase 1's `seen` set proves the reachable structure is a TREE. A self
-    /// reference is the smallest cycle; freeing it bottom-up would double-free.
-    #[test]
-    fn self_referencing_array_refuses() {
-        let _g = GUARD.lock().unwrap();
-        let a = rt_array_new(4);
-        assert!(rt_array_push(a, a));
-        let before = rt_heap_registry_count();
-        assert_eq!(rt_array_free_deep(a), 0, "cycle refuses");
-        assert_eq!(rt_heap_registry_count(), before, "nothing freed");
-    }
-
-    #[test]
-    fn duplicated_element_alias_refuses() {
-        let _g = GUARD.lock().unwrap();
-        let shared_child = mkstr("one string reachable through two slots, unique and long");
-        let a = rt_array_new(4);
-        assert!(rt_array_push(a, shared_child));
-        assert!(rt_array_push(a, shared_child));
-        let before = rt_heap_registry_count();
-        assert_eq!(rt_array_free_deep(a), 0, "internal alias refuses");
-        assert_eq!(rt_heap_registry_count(), before, "nothing freed");
-        assert!(rt_string_len(shared_child) > 0, "aliased string still readable");
-    }
-
-    #[test]
-    fn non_array_root_and_double_free_are_refused() {
-        let _g = GUARD.lock().unwrap();
-        assert_eq!(
-            rt_array_free_deep(mkstr("a string root belongs to rt_string_free, unique")),
-            0,
-            "string root refused"
-        );
-        assert_eq!(rt_array_free_deep(RuntimeValue::from_int(7)), 0, "immediate root refused");
-        assert_eq!(rt_array_free_deep(RuntimeValue::NIL), 0, "nil root refused");
-        let a = rt_array_new(4);
-        assert!(rt_array_push(a, mkstr("freed exactly once by the deep path, unique")));
-        assert_eq!(rt_array_free_deep(a), 1);
-        let after_first = rt_heap_registry_count();
-        assert_eq!(rt_array_free_deep(a), 0, "double deep-free refused");
-        assert_eq!(rt_heap_registry_count(), after_first, "refusal does not decrement");
     }
 }

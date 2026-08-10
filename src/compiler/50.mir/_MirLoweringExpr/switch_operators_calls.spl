@@ -394,6 +394,15 @@ impl MirLowering:
     me enum_payload_value(raw: LocalId, result_type: MirType) -> LocalId:
         """Recover an untagged enum payload word using its semantic type."""
         match result_type.kind:
+            case MirTypeKind.U64:
+                var b = self.builder
+                val unbox = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_value_as_u64"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                ))
+                val value = b.emit_call(unbox, [mir_operand_copy(raw)], MirType.i64())
+                self.builder = b
+                value ?? raw
             case MirTypeKind.F64:
                 var b = self.builder
                 val value = b.emit_bitcast(mir_operand_copy(raw), result_type)
@@ -407,6 +416,16 @@ impl MirLowering:
                 value
             case _:
                 raw
+
+    me box_u64_runtime_value(raw: LocalId) -> LocalId:
+        var b = self.builder
+        val box = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_value_u64"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+        ))
+        val value = b.emit_call(box, [mir_operand_copy(raw)], MirType.i64())
+        self.builder = b
+        value ?? raw
 
     me ensure_option_handle(local: LocalId, option_type: HirType) -> LocalId:
         """Promote a typed Optional value to the canonical enum-id-1 handle."""
@@ -2445,10 +2464,14 @@ impl MirLowering:
                     val payload_hir_type: HirType? = match result_payload_type:
                         case Some(known_payload_type): known_payload_type
                         case _:
-                            val bind_symbol = self.symbols.get_symbol_raw(bind_syms[0].id)
-                            match bind_symbol:
-                                case Some(found_bind_symbol): found_bind_symbol.type_
-                                case _: nil
+                            val declared_payload = self.enum_single_payload_types.get(payload_key)
+                            match declared_payload:
+                                case Some(known): Some(known)
+                                case _:
+                                    val bind_symbol = self.symbols.get_symbol_raw(bind_syms[0].id)
+                                    match bind_symbol:
+                                        case Some(found_bind_symbol): found_bind_symbol.type_
+                                        case _: nil
                     val bound_payload = match payload_hir_type:
                         case Some(found_payload_type): self.enum_payload_value(pl, self.lower_type(found_payload_type))
                         case _: pl
@@ -3094,6 +3117,9 @@ impl MirLowering:
                 case Tuple(values):
                     if values.len() == 1:
                         payload_local = self.lower_expr(values[0])
+                        val payload_ty = self.local_mir_type_of(payload_local)
+                        if payload_ty != nil and (payload_ty ?? MirType.i64()).kind == MirTypeKind.U64:
+                            payload_local = self.box_u64_runtime_value(payload_local)
                         has_payload = true
                         # Same struct-value chain fix as lower_enum_construct_named
                         # -- see enum_payload_struct_names' own field comment.
@@ -3190,6 +3216,9 @@ impl MirLowering:
         var payload_local = LocalId(id: 0)
         if args.len() == 1:
             payload_local = self.lower_expr(args[0].value)
+            val payload_ty = self.local_mir_type_of(payload_local)
+            if payload_ty != nil and (payload_ty ?? MirType.i64()).kind == MirTypeKind.U64:
+                payload_local = self.box_u64_runtime_value(payload_local)
             # Struct-value chain fix: a single-field payload (`Ok(make(3))`,
             # `Circle(make_point())`) may itself be a struct VALUE. Record
             # "{enum_name}::{variant}" -> that struct's NAME here, at the
@@ -4053,6 +4082,7 @@ impl MirLowering:
                 lw.struct_method_return_is_array = self.struct_method_return_is_array
                 lw.struct_method_return_is_optional = self.struct_method_return_is_optional
                 lw.enum_payload_struct_names = self.enum_payload_struct_names
+                lw.enum_single_payload_types = self.enum_single_payload_types
                 lw.enum_variant_index = self.enum_variant_index
                 # Carry the collision registry into the sub-lowering too, or its
                 # miss diagnostics lose the colliding-owner half of the message.

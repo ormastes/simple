@@ -557,6 +557,9 @@ fn heap_value_to_display_string(v: RuntimeValue) -> String {
             Some(fp) => format_float_display(unsafe { (*fp).value }),
             None => format!("<heap@{ptr:p}>"),
         },
+        HeapObjectType::UInt => v
+            .as_heap_u64()
+            .map_or_else(|| format!("<heap@{ptr:p}>"), |value| value.to_string()),
         _ => format!("<heap@{ptr:p}>"),
     }
 }

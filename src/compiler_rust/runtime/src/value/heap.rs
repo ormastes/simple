@@ -42,12 +42,8 @@ pub enum HeapObjectType {
     // a container/Any float loses precision ([0.1][0] != 0.1). Container floats
     // are boxed here instead, preserving the full double losslessly.
     Float = 0x1C,
-    // Heap-boxed i64. The inline TAG_INT representation stores only 61 bits
-    // (`v << 3`), so any |v| >= 2^60 silently sign-extended back to a DIFFERENT
-    // number (2^60 flipped sign, i64::MAX read as -1, 2^62 read as 0). Integers
-    // outside the tagged payload are boxed here instead, losslessly.
-    // See doc/08_tracking/bug/int61_bit_truncation_jit_scalars_and_native_container_boxing_2026-08-09.md
-    WideInt = 0x1D,
+    /// Heap-backed full-width unsigned integer at erased RuntimeValue boundaries.
+    UInt = 0x1D,
 }
 
 /// Header for all heap-allocated objects
@@ -70,19 +66,17 @@ pub struct HeapHeader {
 /// `HEAP_ALLOCATION_REGISTRY` HashSet (a pure membership test, performed
 /// before any `->value`/`->header` dereference), so a stray i64 that merely
 /// aliases TAG_HEAP is never dereferenced.
-/// Heap-boxed i64 (see `HeapObjectType::WideInt`). Same shape and lifecycle as
-/// `HeapFloat`: a leaf object holding the full 64-bit value, discriminated via
-/// the registry membership test before any dereference.
-#[repr(C)]
-pub struct HeapWideInt {
-    pub header: HeapHeader,
-    pub value: i64,
-}
-
 #[repr(C)]
 pub struct HeapFloat {
     pub header: HeapHeader,
     pub value: f64,
+}
+
+/// Heap-boxed u64. This is a leaf object, like `HeapFloat`.
+#[repr(C)]
+pub struct HeapUInt {
+    pub header: HeapHeader,
+    pub value: u64,
 }
 
 /// GC flag bits stored in HeapHeader::gc_flags
@@ -488,8 +482,7 @@ impl From<HeapObjectType> for ValueKind {
             HeapObjectType::FfiObject => ValueKind::FfiObject,
             // Heap-boxed float presents as a plain float to the value system.
             HeapObjectType::Float => ValueKind::Float,
-            // Heap-boxed wide int presents as a plain int.
-            HeapObjectType::WideInt => ValueKind::Int,
+            HeapObjectType::UInt => ValueKind::Int,
         }
     }
 }
