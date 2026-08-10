@@ -53,25 +53,7 @@ fn _is_delim(t: CssToken, ch: String) -> bool:
     val is_d = t.kind == CssTokenKind.Delim
     is_d and t.text == ch
 
-# _attaches_forward — a delimiter that binds to the token after it, so no space
-# may be inserted between them. `.` + `b` must rejoin as `.b`, not `. b`: the
-# tokenizer emits them separately, and a blank-joined ". b" reads to the
-# selector parser as a descendant combinator that matches nothing.
-fn _attaches_forward(t: CssToken) -> bool:
-    val d = t.kind == CssTokenKind.Delim
-    d and (t.text == "." or t.text == "#" or t.text == "[" or
-           t.text == ":" or t.text == "*" or t.text == "!")
-
-# _attaches_backward — a token that binds to the token before it.
-fn _attaches_backward(t: CssToken) -> bool:
-    val d = t.kind == CssTokenKind.Delim
-    d and (t.text == "." or t.text == "#" or t.text == "[" or t.text == "]" or
-           t.text == ":" or t.text == "=" or t.text == ")" or t.text == "(")
-
-# _join_tokens — joins tokens[start..end) with single spaces, except where a
-# delimiter attaches to its neighbour (see the two predicates above). Whitespace
-# between identifiers is preserved because it is the CSS descendant combinator
-# and, in a declaration value, a real value separator ("1px solid red").
+# _token_source_text — reconstructs the literal source spelling of a token.
 fn _token_source_text(t: CssToken) -> String:
     # The tokenizer strips the leading `#` from a Hash token ("#abc" -> "abc"),
     # so rejoining raw `text` would turn `#main` into a type selector and
@@ -81,19 +63,30 @@ fn _token_source_text(t: CssToken) -> String:
     else:
         t.text
 
+# _join_tokens — reconstructs source text from tokens[start..end) directly.
+# The tokenizer now emits real Whitespace tokens, so no adjacency guessing is
+# needed: a Whitespace token becomes a single space, everything else is
+# concatenated literally. This is what makes "div .foo" (descendant
+# combinator) tokenize and rejoin differently from "div.foo" (compound
+# selector) — they used to collapse to the same string. Leading/trailing
+# whitespace in the range is trimmed (it is insignificant at the range
+# boundary — callers use ranges like "between `{` and `}`").
 fn _join_tokens(tokens: [CssToken], start: i64, end: i64) -> String:
+    var lo = start
+    while lo < end and _peek_token(tokens, lo).kind == CssTokenKind.Whitespace:
+        lo = lo + 1
+    var hi = end
+    while hi > lo and _peek_token(tokens, hi - 1).kind == CssTokenKind.Whitespace:
+        hi = hi - 1
+
     var result: String = ""
-    var i = start
-    while i < end:
+    var i = lo
+    while i < hi:
         val t = _peek_token(tokens, i)
-        if i == start:
-            result = _token_source_text(t)
+        if t.kind == CssTokenKind.Whitespace:
+            result = result + " "
         else:
-            val prev = _peek_token(tokens, i - 1)
-            if _attaches_forward(prev) or _attaches_backward(t):
-                result = result + _token_source_text(t)
-            else:
-                result = result + " " + _token_source_text(t)
+            result = result + _token_source_text(t)
         i = i + 1
     result
 
@@ -101,22 +94,40 @@ fn _join_tokens(tokens: [CssToken], start: i64, end: i64) -> String:
 fn _collect_selector_text(tokens: [CssToken], start: i64, end: i64) -> String:
     _join_tokens(tokens, start, end)
 
-# _is_important — checks whether tokens[start..end) ends with "!" followed by "important".
-fn _is_important(tokens: [CssToken], start: i64, end: i64) -> bool:
-    # Need at least 2 tokens: "!" and "important"
-    if end - start < 2:
-        return false
-    val bang = _peek_token(tokens, end - 2)
-    val word = _peek_token(tokens, end - 1)
-    val bang_ok = _is_delim(bang, "!")
+# _important_bang_pos — index of the "!" delim that starts a trailing
+# "!important" in tokens[start..end) (ignoring insignificant whitespace
+# tokens before/after it), or -1 if the range does not end with one.
+fn _important_bang_pos(tokens: [CssToken], start: i64, end: i64) -> i64:
+    var hi = end
+    while hi > start and _peek_token(tokens, hi - 1).kind == CssTokenKind.Whitespace:
+        hi = hi - 1
+    if hi - start < 1:
+        return -1
+    val word = _peek_token(tokens, hi - 1)
     val word_ok = word.kind == CssTokenKind.Identifier and word.text == "important"
-    bang_ok and word_ok
+    if not word_ok:
+        return -1
+    var bang_pos = hi - 2
+    while bang_pos >= start and _peek_token(tokens, bang_pos).kind == CssTokenKind.Whitespace:
+        bang_pos = bang_pos - 1
+    if bang_pos < start:
+        return -1
+    if _is_delim(_peek_token(tokens, bang_pos), "!"):
+        bang_pos
+    else:
+        -1
+
+# _is_important — checks whether tokens[start..end) ends with "!" followed by
+# "important" (ignoring insignificant trailing/inner whitespace tokens).
+fn _is_important(tokens: [CssToken], start: i64, end: i64) -> bool:
+    _important_bang_pos(tokens, start, end) >= 0
 
 # _collect_value_text — joins text of tokens[start..end), stripping trailing !important.
 fn _collect_value_text(tokens: [CssToken], start: i64, end: i64) -> String:
+    val bang_pos = _important_bang_pos(tokens, start, end)
     var real_end = end
-    if _is_important(tokens, start, end):
-        real_end = end - 2
+    if bang_pos >= 0:
+        real_end = bang_pos
     _join_tokens(tokens, start, real_end)
 
 # ============================================================================
@@ -190,8 +201,11 @@ fn parse_css(tokens: [CssToken]) -> CssStyleSheet:
                 errors.push("Unexpected end of tokens inside rule block for selector '" + sel_text + "'")
                 break
 
-            # Skip comments and stray semicolons inside a block
+            # Skip comments, whitespace, and stray semicolons inside a block
             if t.kind == CssTokenKind.Comment:
+                pos = pos + 1
+                continue
+            if t.kind == CssTokenKind.Whitespace:
                 pos = pos + 1
                 continue
             if _is_delim(t, ";"):
@@ -211,6 +225,10 @@ fn parse_css(tokens: [CssToken]) -> CssStyleSheet:
 
             val prop_text = t.text
             pos = pos + 1
+
+            # Skip whitespace between property name and `:`
+            while pos < n and _peek_token(tokens, pos).kind == CssTokenKind.Whitespace:
+                pos = pos + 1
 
             # Expect `:`
             val colon = _peek_token(tokens, pos)

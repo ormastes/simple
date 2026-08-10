@@ -7,15 +7,18 @@
 #   - At-keywords (@media, @import)
 #   - Hash (#id, #rrggbb)
 #   - Delim (any non-identifier single char: : ; { } , ( ) etc.)
-#   - Whitespace (skipped — not emitted)
+#   - Whitespace (runs of space/tab/CR/LF/FF collapsed into one token)
 #   - Comments (/* ... */) — emitted as Comment tokens so downstream
 #       consumers can preserve source-map fidelity if desired.
 #
 # Out of scope: URL token, unicode escapes, bad-string/bad-url recovery.
 #
 # Design notes:
-#   - Whitespace is skipped entirely (no Whitespace token emitted). The CSS
-#       parser reconstructs whitespace-sensitivity from token adjacency.
+#   - Whitespace is significant and IS emitted as a CssTokenKind.Whitespace
+#       token (CSS Syntax Level 3: whitespace is the descendant combinator in
+#       selectors, and a value separator in declarations — "div .foo" and
+#       "div.foo" are different selectors and must tokenize differently). A
+#       run of consecutive whitespace bytes collapses into a single token.
 #   - Strings: the delimiting quotes are stripped from `text` (so "'hello'"
 #       yields text "hello"). Escape sequences are NOT interpreted.
 #   - AtKeyword: the leading `@` is stripped from `text` ("@media" -> "media").
@@ -121,14 +124,20 @@ fn tokenize_css(source: String) -> [CssToken]:
     while i < n:
         val c = _peek(source, i)
 
-        # --- whitespace (skipped — not emitted) ---
+        # --- whitespace (run collapsed into one Whitespace token) ---
         if _is_whitespace(c):
-            if c == 10:
-                line = line + 1
-                col = 1
-            else:
-                col = col + 1
-            i = i + 1
+            val ws_start_line = line
+            val ws_start_col = col
+            val ws_start = i
+            while i < n and _is_whitespace(_peek(source, i)):
+                if _peek(source, i) == 10:
+                    line = line + 1
+                    col = 1
+                else:
+                    col = col + 1
+                i = i + 1
+            val text = _slice_text(source, ws_start, i)
+            tokens.push(CssToken(kind: CssTokenKind.Whitespace, text: text, line: ws_start_line, column: ws_start_col))
             continue
 
         # --- block comment `/* ... */` (emitted) ---
