@@ -105,3 +105,30 @@ fourth type):
 Status stays OPEN. Still: do NOT add a fourth `ComputedStyle`, and note that
 FOUR `LayoutBox`/box variants already exist — the cascade added no style or box
 type of its own, it consumes (1) unchanged.
+
+## 2026-08-10 (later) — Defect 2 confirmed fixed; ownership blocker (a) re-verified, still open
+
+Re-ran `test/01_unit/lib/blink/css_selector_spec.spl`:
+`SPEC FILE VERDICT: ... declared>=22 executed=22 passed=22 failed=0 dropped=0`
+(was 0/15). `git log` shows `718c4b2b62d fix(blink): selector engine callable
++ real char codes` and `8cd9c8523e3 test(blink): cover matches_complex
+combinators` already landed this on `main`. So blocker (b) (resolver can't
+match a selector) is genuinely gone.
+
+Checked blocker (a) precisely: there is **no FILE.md, OWNERS file, or
+access-control mechanism** at `src/lib/gc_async_mut/gpu/browser_engine/`
+(none found by search). "Ownership" here is a **task-scope convention
+recorded only in this doc's own text**, not a repo-enforced rule. `git
+status` shows zero uncommitted changes anywhere under
+`src/lib/gc_async_mut/gpu/browser_engine/**` right now, so no other agent is
+actively mid-flight on those files at this moment either.
+
+Even so, this doc itself states the restriction three separate times
+("owned by another lane and is explicitly off-limits to the cascade task",
+"paths this task was explicitly forbidden to touch") as a deliberate scope
+boundary set by whoever dispatched the cascade task — not a technical lock
+this session has standing to lift unilaterally. Re-verifying it's
+*unenforced by tooling* is not the same as it being *rescinded*. Left
+unmerged: (1)+(2) merge into `browser_engine/style/computed.spl` still
+requires explicit sign-off from that lane's owner before a session outside
+this task's stated scope edits it. No merge performed. Status stays OPEN.
