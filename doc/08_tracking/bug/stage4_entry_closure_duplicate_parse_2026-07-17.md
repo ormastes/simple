@@ -1,7 +1,20 @@
 # Stage4 entry closure parses duplicate sources and exceeds bounded runtime
 
 **Date:** 2026-07-17  
-**Status:** OPEN  
+**Status:** OPEN — ARCHITECTURAL, confirmed out-of-scope for a source-only
+session (2026-08-10). This doc's own continuations already fixed the
+duplicate-parse/dedup issue in the entry-closure source-collection logic
+(unique physical-source plan, 2,020 collected / 1,246 unique, one-parse-per-
+path) — what remains open per the doc's last entries is purely "executable
+Stage4 acceptance": running the full `src/app/cli/main.spl` closure to
+completion, which needs multi-hundred-second, multi-GiB-RSS stage4 rebuild
+cycles under the "three-cycle cap" the doc itself imposes. This session
+operates under a hard constraint of never running
+`bin/simple build bootstrap` / stage4 rebuild cycles, so the remaining
+acceptance step cannot be attempted or re-verified here. No regression to the
+dedup fix was found by inspection, and no further source change was made.
+Left open for a lane with stage4 rebuild capacity to run the final executable
+acceptance pass.
 **Owner:** compiler driver entry-closure source collection
 
 ## Evidence
