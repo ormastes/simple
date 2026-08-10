@@ -84,6 +84,7 @@ RUNTIME_STATUS=$(git status --porcelain --untracked-files=all -- "$RUNTIME_DIR")
 
 SOURCE_FILES="
 runtime_native.c
+runtime_contracts.c
 runtime_coverage_core.c
 runtime_framebuffer.c
 runtime_directx_core.c
@@ -248,6 +249,8 @@ REPEAT_ARCHIVE_SHA256=$(hash_file "$REPEAT_ARCHIVE")
     die "archive-nm-failed"
 "$NM_PATH" -g "$OBJECT_DIR/runtime_native.o" >"$TMP_DIR/runtime_native.nm.txt" 2>&1 ||
     die "runtime-native-nm-failed"
+"$NM_PATH" -g "$OBJECT_DIR/runtime_contracts.o" >"$TMP_DIR/runtime_contracts.nm.txt" 2>&1 ||
+    die "runtime-contracts-nm-failed"
 "$NM_PATH" -g "$OBJECT_DIR/runtime_coverage_core.o" >"$TMP_DIR/runtime_coverage_core.nm.txt" 2>&1 ||
     die "runtime-coverage-core-nm-failed"
 
@@ -270,8 +273,8 @@ nm_has_text_symbol "$TMP_DIR/runtime_native.nm.txt" rt_string_free ||
 for symbol in simple_contract_check simple_contract_check_msg; do
     nm_has_text_symbol "$TMP_DIR/archive.nm.txt" "$symbol" ||
         die "archive-$symbol-provider-missing"
-    nm_has_text_symbol "$TMP_DIR/runtime_native.nm.txt" "$symbol" ||
-        die "runtime-native-$symbol-provider-missing"
+    nm_has_text_symbol "$TMP_DIR/runtime_contracts.nm.txt" "$symbol" ||
+        die "runtime-contracts-$symbol-provider-missing"
 done
 for symbol in rt_file_rename rt_file_move; do
     nm_has_text_symbol "$TMP_DIR/archive.nm.txt" "$symbol" ||
@@ -303,6 +306,26 @@ done
     die "rt-string-free-provider-count"
 [ "$(sed -n '1p' "$PROVIDER_FILE")" = "runtime_native.o" ] ||
     die "rt-string-free-provider-not-runtime-native"
+
+for symbol in simple_contract_check simple_contract_check_msg; do
+    CONTRACT_PROVIDER_FILE="$TMP_DIR/$symbol.providers.txt"
+    : >"$CONTRACT_PROVIDER_FILE"
+    for object in $OBJECT_DIR/*.o; do
+        "$NM_PATH" -g "$object" 2>/dev/null |
+            awk -v expected="$symbol" -v member="$(basename "$object")" '
+                NF >= 3 {
+                    type = $(NF - 1)
+                    symbol = $NF
+                    sub(/^_/, "", symbol)
+                    if (type == "T" && symbol == expected) print member
+                }
+            ' >>"$CONTRACT_PROVIDER_FILE"
+    done
+    [ "$(wc -l <"$CONTRACT_PROVIDER_FILE" | tr -d ' ')" = "1" ] ||
+        die "$symbol-provider-count"
+    [ "$(sed -n '1p' "$CONTRACT_PROVIDER_FILE")" = "runtime_contracts.o" ] ||
+        die "$symbol-provider-not-runtime-contracts"
+done
 
 SELF_CHECK_BIN="$TMP_DIR/rt_string_free_selfcheck"
 SELF_CHECK_LOG="$TMP_DIR/rt_string_free_selfcheck.out"
@@ -404,9 +427,9 @@ MANIFEST="$TMP_DIR/capsule.manifest"
     echo "rt_transient_heap_scope_selfcheck=pass"
     echo "rt_transient_heap_scope_selfcheck_output_sha256=$(hash_file "$TRANSIENT_SELF_CHECK_LOG")"
     echo "simple_contract_check_archive_symbol=T"
-    echo "simple_contract_check_provider=runtime_native.o"
+    echo "simple_contract_check_provider=runtime_contracts.o"
     echo "simple_contract_check_msg_archive_symbol=T"
-    echo "simple_contract_check_msg_provider=runtime_native.o"
+    echo "simple_contract_check_msg_provider=runtime_contracts.o"
     echo "producer_script_sha256=$(hash_file scripts/check/build-core-c-bootstrap-runtime-capsule.shs)"
     while IFS= read -r input; do
         key=$(printf '%s' "${input#"$RUNTIME_DIR/"}" | tr '/.' '__')
