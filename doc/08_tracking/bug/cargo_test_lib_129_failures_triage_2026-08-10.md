@@ -23,6 +23,48 @@ Re-ran all 29 in isolation: **25 pass** (22 of 26 `native_project`, all 3
 **Action:** these guards should use `lock().unwrap_or_else(|e| e.into_inner())`
 so one panic stops laundering 25 unrelated results.
 
+### RESOLVED 2026-08-10 — poison recovery applied, 24 results un-masked
+
+Applied `lock().unwrap_or_else(|e| e.into_inner())` to every test-serialization
+`Mutex<()>` guard (these serialize env-var mutation between tests; they guard no
+shared data, so recovering the inner guard after a panic is sound):
+
+- `pipeline/native_project/tests.rs` — all `*_lock().lock().unwrap()` call sites
+  for the three guards at lines 227 (`simd_tier_env_lock`), 232
+  (`process_dir_lock`), 636 (`no_stub_fallback_env_lock`), plus every
+  `runtime_bundle_env_lock()` site (35 lines total).
+- `pipeline/execution.rs` — 10 `runtime_bundle_env_lock()` test sites (the guard
+  itself is defined here as `runtime_bundle_env_lock_for_tests`, line 138).
+- `interpreter_extern/gpu.rs` — 4 `TEST_LOCK` sites in `device_mem_counter_tests`.
+
+`VK_STATE` and `DEVICE_ALLOCS` were deliberately left alone — those protect real
+shared state, where poisoning is meaningful.
+
+**Measured on this commit's parent vs. this commit** (`cargo test -p
+simple-compiler --lib`, full suite both sides; the baseline had already drifted
+from 129 to 78 failures because of sibling fixes landing the same day):
+
+| | before | after |
+|---|---|---|
+| passed | 3,616 | 3,640 |
+| failed | 78 | **54** |
+| `PoisonError` occurrences | 26 | **0** |
+
+Set-diff: **24 fixed, 0 new**. All 24 were masked results that pass once
+un-masked — 22 `native_project::tests::*` (the `runtime_bundle_*` /
+`stage4_*` family) and 2 `device_mem_counter_tests`
+(`free_of_untracked_ptr_is_a_safe_noop`,
+`live_and_peak_externs_read_the_same_atomics`). None of the un-masked tests
+turned out to be a genuine failure.
+
+The remaining genuine failures in these modules are **still visible and now
+report their real messages** rather than `PoisonError` — e.g.
+`device_mem_counter_tests::alloc_bumps_live_and_peak_bytes` and
+`::peak_survives_free_seeded_leak` now show `assertion left == right failed` at
+`gpu.rs:108`, and 15 `native_project::tests::*` (core-c lane / stage4 / import-map)
+continue to fail on their own assertions. This change altered only how results
+are reported; it hid nothing.
+
 ## Category B — assertion on a production branch that no longer exists (51)
 
 50 `mir::lower::tests::branch_coverage::gpu_errors` + 1 `…::memory`, all

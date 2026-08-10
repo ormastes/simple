@@ -100,7 +100,7 @@ mod device_mem_counter_tests {
 
     #[test]
     fn alloc_bumps_live_and_peak_bytes() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         simple_runtime::value::heap::mem_attr_enable();
         let before_live = DEVICE_LIVE_BYTES.load(Ordering::Relaxed);
 
@@ -118,7 +118,7 @@ mod device_mem_counter_tests {
 
     #[test]
     fn peak_survives_free_seeded_leak() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         simple_runtime::value::heap::mem_attr_enable();
         // Baseline off `DEVICE_LIVE_BYTES`, not `DEVICE_PEAK_BYTES`: this
         // process (or an earlier `cargo test` run sharing the binary) may
@@ -150,7 +150,7 @@ mod device_mem_counter_tests {
 
     #[test]
     fn free_of_untracked_ptr_is_a_safe_noop() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         simple_runtime::value::heap::mem_attr_enable();
         let before_live = DEVICE_LIVE_BYTES.load(Ordering::Relaxed);
         // Never allocated through `note_device_alloc` — must not underflow
@@ -161,7 +161,7 @@ mod device_mem_counter_tests {
 
     #[test]
     fn live_and_peak_externs_read_the_same_atomics() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         simple_runtime::value::heap::mem_attr_enable();
         note_device_alloc(0xD300_0001, 256);
         let live = rt_gpu_mem_live_bytes_fn(&[]).unwrap();

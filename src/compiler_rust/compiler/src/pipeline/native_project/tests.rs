@@ -639,7 +639,7 @@ fn no_stub_fallback_env_lock() -> &'static Mutex<()> {
 }
 
 fn with_simd_tier_env<T>(value: &str, f: impl FnOnce() -> T) -> T {
-    let _guard = simd_tier_env_lock().lock().unwrap();
+    let _guard = simd_tier_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let previous = std::env::var("SIMPLE_SIMD_TIER").ok();
     std::env::set_var("SIMPLE_SIMD_TIER", value);
     reset_host_cpu_config_cache_for_tests();
@@ -654,7 +654,7 @@ fn with_simd_tier_env<T>(value: &str, f: impl FnOnce() -> T) -> T {
 }
 
 fn with_simd_envs<T>(simd_tier: Option<&str>, cpu_config_path: Option<&Path>, f: impl FnOnce() -> T) -> T {
-    let _guard = simd_tier_env_lock().lock().unwrap();
+    let _guard = simd_tier_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let previous_simd_tier = std::env::var("SIMPLE_SIMD_TIER").ok();
     let previous_cpu_config_path = std::env::var("SIMPLE_CPU_CONFIG_PATH").ok();
 
@@ -760,7 +760,7 @@ fn config_document(base: &HostCpuConfig, enabled_tier: SimdTier) -> String {
 }
 
 fn with_current_dir<T>(dir: &std::path::Path, f: impl FnOnce() -> T) -> T {
-    let _guard = process_dir_lock().lock().unwrap();
+    let _guard = process_dir_lock().lock().unwrap_or_else(|e| e.into_inner());
     let previous = std::env::current_dir().unwrap();
     std::env::set_current_dir(dir).unwrap();
     let result = f();
@@ -1879,7 +1879,7 @@ fn test_discover_files_from_entry_uses_matching_source_root() {
 
 #[test]
 fn test_runtime_bundle_auto_prefers_core_c_bootstrap_for_non_compiler_entry_when_simple_core_is_absent() {
-    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let temp = tempfile::tempdir().unwrap();
     let runtime = temp.path().join("libsimple_runtime.a");
     let native_all = temp.path().join("libsimple_native_all.a");
@@ -1906,7 +1906,7 @@ fn test_runtime_bundle_auto_prefers_core_c_bootstrap_for_non_compiler_entry_when
 
 #[test]
 fn test_runtime_bundle_auto_prefers_core_c_for_compiler_entry() {
-    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let temp = tempfile::tempdir().unwrap();
     let runtime = temp.path().join("libsimple_runtime.a");
     let native_all = temp.path().join("libsimple_native_all.a");
@@ -1931,7 +1931,7 @@ fn test_runtime_bundle_auto_prefers_core_c_for_compiler_entry() {
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[test]
 fn test_runtime_path_cli_archive_does_not_require_optional_lifecycle_hooks() {
-    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("runtime.c");
     let object = temp.path().join("runtime.o");
@@ -1983,7 +1983,7 @@ void rt_process_run(void) {}
 
 #[test]
 fn test_runtime_bundle_auto_prefers_core_c_for_compiler_source_root() {
-    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let temp = tempfile::tempdir().unwrap();
     let runtime = temp.path().join("libsimple_runtime.a");
     let native_all = temp.path().join("libsimple_native_all.a");
@@ -2011,7 +2011,7 @@ fn test_runtime_bundle_auto_prefers_core_c_for_compiler_source_root() {
 
 #[test]
 fn test_runtime_bundle_auto_falls_back_to_core_c_when_simple_core_is_incomplete() {
-    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let temp = tempfile::tempdir().unwrap();
     let simple_core_dir = temp.path().join("simple-core");
     std::fs::create_dir_all(&simple_core_dir).unwrap();
@@ -2037,7 +2037,7 @@ fn test_runtime_bundle_auto_falls_back_to_core_c_when_simple_core_is_incomplete(
 
 #[test]
 fn test_core_lane_runtime_archives_expose_required_abi_symbols() {
-    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let temp = tempfile::tempdir().unwrap();
 
     let core_c = with_core_c_https_openssl_env(None, || {
@@ -2218,7 +2218,7 @@ fn test_core_lane_runtime_archives_expose_required_abi_symbols() {
 
 #[test]
 fn test_stage4_c_runtime_archive_includes_hosted_font_and_sqlite() {
-    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let temp = tempfile::tempdir().unwrap();
     let archive = build_stage4_c_runtime_library(temp.path()).expect("Stage 4 C runtime archive should build");
     let symbols = archive_defined_symbols(&archive).expect("Stage 4 C runtime symbols should be readable");
@@ -2428,7 +2428,7 @@ int main(void) {
 #[cfg(target_os = "linux")]
 #[test]
 fn test_core_lane_runtime_required_abi_stdout_stderr_and_values() {
-    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let repo_root = manifest_dir
         .parent()
@@ -3185,7 +3185,7 @@ __attribute__((constructor)) static void discarded_ctor(void) { rt_unrequested_e
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn test_stage4_compiler_entry_authorization_requires_both_envs_and_exact_entry() {
-    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let old_bootstrap = std::env::var_os("SIMPLE_BOOTSTRAP");
     let old_stage4 = std::env::var_os("SIMPLE_BOOTSTRAP_STAGE4");
     let old_compiler_entry = std::env::var_os("SIMPLE_COMPILER_ENTRY_STAGE4");
@@ -3269,7 +3269,7 @@ fn test_stage4_compiler_entry_authorization_requires_both_envs_and_exact_entry()
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn test_standalone_compiler_driver_selects_dedicated_backfill_without_bootstrap_env() {
-    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let old_bootstrap = std::env::var_os("SIMPLE_BOOTSTRAP");
     let old_stage4 = std::env::var_os("SIMPLE_BOOTSTRAP_STAGE4");
     let old_compiler_entry = std::env::var_os("SIMPLE_COMPILER_ENTRY_STAGE4");
@@ -3316,7 +3316,7 @@ fn test_standalone_compiler_driver_selects_dedicated_backfill_without_bootstrap_
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 #[test]
 fn test_stage4_compiler_entry_is_disabled_without_supported_capsule_linker() {
-    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let old_bootstrap = std::env::var_os("SIMPLE_BOOTSTRAP");
     let old_stage4 = std::env::var_os("SIMPLE_BOOTSTRAP_STAGE4");
     unsafe {
@@ -3343,7 +3343,7 @@ fn test_stage4_compiler_entry_is_disabled_without_supported_capsule_linker() {
 #[cfg(target_os = "linux")]
 #[test]
 fn test_stage4_compiler_entries_select_only_dedicated_compiler_backfill() {
-    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let old_bootstrap = std::env::var_os("SIMPLE_BOOTSTRAP");
     let old_stage4 = std::env::var_os("SIMPLE_BOOTSTRAP_STAGE4");
     unsafe {
@@ -3445,7 +3445,7 @@ fn test_stage4_compiler_entries_select_only_dedicated_compiler_backfill() {
 #[cfg(target_os = "linux")]
 #[test]
 fn test_core_c_runtime_native_focus_contract() {
-    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
@@ -3482,7 +3482,7 @@ fn test_core_c_runtime_native_focus_contract() {
 #[cfg(target_os = "linux")]
 #[test]
 fn test_stage4_compiler_entries_prepare_dedicated_backfill_through_gate() {
-    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let old_bootstrap = std::env::var_os("SIMPLE_BOOTSTRAP");
     let old_stage4 = std::env::var_os("SIMPLE_BOOTSTRAP_STAGE4");
     unsafe {
@@ -3537,7 +3537,7 @@ fn test_stage4_compiler_entries_prepare_dedicated_backfill_through_gate() {
 #[cfg(target_os = "linux")]
 #[test]
 fn test_stage4_compiler_entries_force_fresh_core_c_over_runtime_path_decoys() {
-    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let old_bootstrap = std::env::var_os("SIMPLE_BOOTSTRAP");
     let old_stage4 = std::env::var_os("SIMPLE_BOOTSTRAP_STAGE4");
     unsafe {
@@ -3578,7 +3578,7 @@ fn test_stage4_compiler_entries_force_fresh_core_c_over_runtime_path_decoys() {
 
 #[test]
 fn test_runtime_bundle_auto_ignores_native_all_for_non_compiler_entry() {
-    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let temp = tempfile::tempdir().unwrap();
     let native_all = temp.path().join("libsimple_native_all.a");
     std::fs::write(&native_all, b"all").unwrap();
@@ -3604,7 +3604,7 @@ fn test_runtime_bundle_auto_ignores_native_all_for_non_compiler_entry() {
 
 #[test]
 fn test_runtime_bundle_hosted_is_removed_for_non_compiler_entry() {
-    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let temp = tempfile::tempdir().unwrap();
     let native_all = temp.path().join("libsimple_native_all.a");
     std::fs::write(&native_all, b"all").unwrap();
@@ -3630,7 +3630,7 @@ fn test_runtime_bundle_hosted_is_removed_for_non_compiler_entry() {
 
 #[test]
 fn test_runtime_bundle_hosted_is_allowed_for_bootstrap_entry_only() {
-    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let old_bootstrap = std::env::var_os("SIMPLE_BOOTSTRAP");
     unsafe { std::env::set_var("SIMPLE_BOOTSTRAP", "1") };
     let temp = tempfile::tempdir().unwrap();
@@ -3662,7 +3662,7 @@ fn test_runtime_bundle_hosted_is_allowed_for_bootstrap_entry_only() {
 #[cfg(target_os = "linux")]
 #[test]
 fn test_bootstrap_mutex_capsule_exports_only_canonical_mutex_abi() {
-    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let temp = tempfile::tempdir().unwrap();
     let core = build_core_c_runtime_library(&temp.path().join("core")).unwrap();
     let capsule =
@@ -3694,7 +3694,7 @@ fn test_bootstrap_mutex_capsule_exports_only_canonical_mutex_abi() {
 #[cfg(target_os = "linux")]
 #[test]
 fn test_runtime_bundle_host_gpu_rejects_missing_engine2d_queue_symbols() {
-    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let temp = tempfile::tempdir().unwrap();
     build_compiler_backfill_test_archive(
         temp.path(),
@@ -3718,7 +3718,7 @@ fn test_runtime_bundle_host_gpu_rejects_missing_engine2d_queue_symbols() {
 #[cfg(target_os = "linux")]
 #[test]
 fn test_runtime_bundle_host_gpu_discovers_cargo_deps_runtime_archive() {
-    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let temp = tempfile::tempdir().unwrap();
     let deps = temp.path().join("deps");
     std::fs::create_dir_all(&deps).unwrap();
@@ -3739,7 +3739,7 @@ fn test_runtime_bundle_host_gpu_discovers_cargo_deps_runtime_archive() {
 #[cfg(target_os = "linux")]
 #[test]
 fn test_runtime_bundle_host_gpu_discovers_target_root_bootstrap_authority() {
-    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let temp = tempfile::tempdir().unwrap();
     let target_root = temp.path().join("target");
     let authority = target_root.join("bootstrap/deps");
@@ -3759,7 +3759,7 @@ fn test_runtime_bundle_host_gpu_discovers_target_root_bootstrap_authority() {
 #[cfg(target_os = "linux")]
 #[test]
 fn test_runtime_bundle_host_gpu_accepts_adjacent_bootstrap_root() {
-    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let temp = tempfile::tempdir().unwrap();
     let bootstrap_root = temp.path().join("target/bootstrap");
     let authority = bootstrap_root.join("deps");
@@ -3779,7 +3779,7 @@ fn test_runtime_bundle_host_gpu_accepts_adjacent_bootstrap_root() {
 #[cfg(target_os = "linux")]
 #[test]
 fn test_runtime_bundle_host_gpu_missing_authority_fails_closed() {
-    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let temp = tempfile::tempdir().unwrap();
     let mut config = NativeBuildConfig {
         runtime_path: Some(temp.path().to_path_buf()),
@@ -3795,7 +3795,7 @@ fn test_runtime_bundle_host_gpu_missing_authority_fails_closed() {
 
 #[test]
 fn test_runtime_bundle_hosted_is_rejected_without_full_stage4_authorization() {
-    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let old_bootstrap = std::env::var_os("SIMPLE_BOOTSTRAP");
     let old_stage4 = std::env::var_os("SIMPLE_BOOTSTRAP_STAGE4");
     unsafe {
@@ -3828,7 +3828,7 @@ fn test_runtime_bundle_hosted_is_rejected_without_full_stage4_authorization() {
 
 #[test]
 fn test_runtime_bundle_core_c_bootstrap_alias_prefers_runtime_for_non_compiler_entry() {
-    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let temp = tempfile::tempdir().unwrap();
     let runtime = temp.path().join("libsimple_runtime.a");
     let native_all = temp.path().join("libsimple_native_all.a");
@@ -3853,7 +3853,7 @@ fn test_runtime_bundle_core_c_bootstrap_alias_prefers_runtime_for_non_compiler_e
 
 #[test]
 fn test_runtime_bundle_simple_core_prefers_simple_core_archive_when_available() {
-    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let temp = tempfile::tempdir().unwrap();
     let simple_core_dir = temp.path().join("simple-core");
     std::fs::create_dir_all(&simple_core_dir).unwrap();
@@ -3879,7 +3879,7 @@ fn test_runtime_bundle_simple_core_prefers_simple_core_archive_when_available() 
 
 #[test]
 fn test_runtime_bundle_simple_core_errors_when_archive_is_missing() {
-    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let temp = tempfile::tempdir().unwrap();
     let runtime = temp.path().join("libsimple_runtime.a");
     std::fs::write(&runtime, b"core-c").unwrap();
@@ -3901,7 +3901,7 @@ fn test_runtime_bundle_simple_core_errors_when_archive_is_missing() {
 
 #[test]
 fn test_runtime_bundle_legacy_all_alias_is_removed() {
-    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let temp = tempfile::tempdir().unwrap();
     let native_all = temp.path().join("libsimple_native_all.a");
     std::fs::write(&native_all, b"all").unwrap();
@@ -5639,7 +5639,7 @@ fn empty_module_init_set_still_emits_main_stub_owner() {
 #[cfg(not(target_os = "windows"))]
 #[test]
 fn test_bootstrap_stub_mode_defers_libc_process_symbols_to_linker() {
-    let _guard = no_stub_fallback_env_lock().lock().unwrap();
+    let _guard = no_stub_fallback_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
     if std::process::Command::new(&cc).arg("--version").output().is_err() {
         return;
@@ -5715,7 +5715,7 @@ int main(void) {
 #[cfg(not(target_os = "windows"))]
 #[test]
 fn test_no_stub_fallback_defers_unresolved_host_symbols_to_linker() {
-    let _guard = no_stub_fallback_env_lock().lock().unwrap();
+    let _guard = no_stub_fallback_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
     if std::process::Command::new(&cc).arg("--version").output().is_err() {
         return;
@@ -5784,7 +5784,7 @@ int main(void) {
 #[cfg(not(target_os = "windows"))]
 #[test]
 fn test_no_stub_fallback_keeps_resolved_simple_aliases() {
-    let _guard = no_stub_fallback_env_lock().lock().unwrap();
+    let _guard = no_stub_fallback_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
     if std::process::Command::new(&cc).arg("--version").output().is_err() {
         return;
