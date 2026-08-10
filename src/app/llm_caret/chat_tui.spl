@@ -545,8 +545,8 @@ fn _draw_frame(ui: ChatTui, io: CaretIo):
 
 # Reads one prompt line, redrawing the frame on each keystroke. Returns the
 # (updated ui, submitted text, status) where status: 0 = line submitted,
-# 1 = exit requested (Ctrl-C / Ctrl-D / EOF).
-fn _read_line(ui0: ChatTui, io: CaretIo) -> (ChatTui, text, i64):
+# 1 = input exit, 2 = scoped stop signal, 3 = terminal I/O failure.
+fn _read_line(ui0: ChatTui, io: CaretIo, signal_scope: i64 = 0) -> (ChatTui, text, i64):
     var ui = ui0
     var done = false
     var result_text = ""
@@ -554,7 +554,21 @@ fn _read_line(ui0: ChatTui, io: CaretIo) -> (ChatTui, text, i64):
     var raw_line = make_raw_line_state(ui.input)
     while not done:
         _draw_frame(ui, io)
-        val b = io.read_byte()
+        val b = if signal_scope > 0:
+            io.read_byte_interruptible(signal_scope)
+        else:
+            io.read_byte()
+        if b == -3:
+            # Resize owns no input byte. Redraw from a fresh geometry snapshot.
+            continue
+        if b == -2:
+            status = 2
+            done = true
+            continue
+        if b == -4:
+            status = 3
+            done = true
+            continue
         val next = step_raw_line_byte(raw_line, b)
         raw_line = next.state
         ui = _ui_set_input(ui, raw_line.input)
@@ -660,9 +674,9 @@ fn run_chat_tui_submission(
         submitted_to_model: submitted_to_model
     )
 
-# Full-screen lifecycle. Raw mode is acquired before any visible mutation and
-# every modeled exit restores cursor, alternate screen, then raw mode. Hard
-# runtime panics still require a future runtime atexit/signal cleanup hook.
+# Full-screen lifecycle. The signal scope is acquired before raw mode or any
+# visible mutation. Every exit restores cursor, alternate screen, raw mode,
+# then the preceding process signal handlers.
 fn run_chat_tui(
     ui0: ChatTui,
     policy: PermissionPolicy,
@@ -676,7 +690,16 @@ fn run_chat_tui(
     var conv = initial_conv
     var session_id = hooks.session_id
     _render_history(conv)
+    val signal_scope = io.begin_signal_scope()
+    if signal_scope <= 0:
+        return CaretLoopResult(
+            mode: "tui",
+            ok: false,
+            exit_reason: "signal-scope-unavailable",
+            error: "terminal signal scope unavailable"
+        )
     if not io.enter_raw():
+        val _scope_restored = io.end_signal_scope(signal_scope)
         return CaretLoopResult(
             mode: "tui",
             ok: false,
@@ -688,13 +711,21 @@ fn run_chat_tui(
     var ui = ui0
     var running = true
     var exit_reason = "input_exit"
+    var input_failed = false
     while running:
-        val rl = _read_line(ui, io)
+        val rl = _read_line(ui, io, signal_scope)
         ui = rl.0
         val submitted = rl.1
         val status = rl.2
         if status == 1:
             running = false
+        elif status == 2:
+            running = false
+            exit_reason = "signal_stop"
+        elif status == 3:
+            running = false
+            input_failed = true
+            exit_reason = "input_error"
         else:
             val trimmed = submitted.trim()
             val model_turn = trimmed != "" and
@@ -717,12 +748,27 @@ fn run_chat_tui(
     io.show_cursor()
     io.exit_alt()
     val restored = io.exit_raw()
+    val signal_restored = io.end_signal_scope(signal_scope)
     if not restored:
         return CaretLoopResult(
             mode: "tui",
             ok: false,
             exit_reason: exit_reason,
             error: "failed to restore terminal raw mode"
+        )
+    if not signal_restored:
+        return CaretLoopResult(
+            mode: "tui",
+            ok: false,
+            exit_reason: exit_reason,
+            error: "failed to restore terminal signal scope"
+        )
+    if input_failed:
+        return CaretLoopResult(
+            mode: "tui",
+            ok: false,
+            exit_reason: exit_reason,
+            error: "terminal input failed"
         )
     io.emit("chat session ended\n")
     CaretLoopResult(mode: "tui", ok: true, exit_reason: exit_reason, error: "")

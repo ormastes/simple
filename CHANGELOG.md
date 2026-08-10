@@ -5,6 +5,9 @@ All notable changes to Simple Language will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **Caret terminal signal teardown** — isolate interactive HUP/INT/TERM/WINCH
+  handling in a scoped self-pipe, distinguish resize/stop/EOF/error outcomes,
+  and restore the preceding handlers after cursor, screen, and raw-mode cleanup.
 - **ITF redirected-output color policy** — probe stdout through the canonical
   terminal ABI, omit ANSI by default for pipes/files, allow
   `ITF_FORCE_COLOR=1`, and keep `NO_COLOR` authoritative over forcing.

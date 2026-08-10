@@ -304,6 +304,7 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         "runtime_simd_dispatch.c",
         "runtime_value.h",
         "runtime.h",
+        "runtime_terminal_signal_scope_impl.h",
         "runtime_fork.h",
         "runtime_memtrack.h",
         "runtime_simd_dispatch.h",

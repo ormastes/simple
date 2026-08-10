@@ -14,6 +14,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../../runtime/runtime_directx_core.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_rocm.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_hosted_signal.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_terminal_signal_scope_impl.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_hosted_fs.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_font.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_value.h");

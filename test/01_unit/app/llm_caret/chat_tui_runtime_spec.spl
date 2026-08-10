@@ -24,6 +24,8 @@ val RUNTIME_WS = "build/tmp/llm_caret_tui_runtime_spec"
 var IO_TTY = true
 var IO_ENTER_RAW_OK = true
 var IO_EXIT_RAW_OK = true
+var IO_SIGNAL_SCOPE = 41
+var IO_END_SIGNAL_OK = true
 var IO_COLS = 80
 var IO_ROWS = 24
 var IO_SIZE_CALLS = 0
@@ -98,6 +100,19 @@ fn _fake_read_byte() -> i64:
     IO_BYTE_INDEX = IO_BYTE_INDEX + 1
     value
 
+fn _fake_begin_signal_scope() -> i64:
+    _record("begin_scope")
+    IO_SIGNAL_SCOPE
+
+fn _fake_read_byte_interruptible(scope: i64) -> i64:
+    if scope != IO_SIGNAL_SCOPE:
+        return -4
+    _fake_read_byte()
+
+fn _fake_end_signal_scope(scope: i64) -> bool:
+    _record("end_scope")
+    scope == IO_SIGNAL_SCOPE and IO_END_SIGNAL_OK
+
 fn _fake_read_line() -> text?:
     if IO_LINE_INDEX >= IO_LINES.len():
         return nil
@@ -123,6 +138,9 @@ fn _fake_io() -> CaretIo:
         draw_at: _fake_draw_at,
         flush: _fake_flush,
         read_byte: _fake_read_byte,
+        begin_signal_scope: _fake_begin_signal_scope,
+        read_byte_interruptible: _fake_read_byte_interruptible,
+        end_signal_scope: _fake_end_signal_scope,
         read_line: _fake_read_line,
         emit: _fake_emit
     )
@@ -131,6 +149,8 @@ fn _reset_fakes():
     IO_TTY = true
     IO_ENTER_RAW_OK = true
     IO_EXIT_RAW_OK = true
+    IO_SIGNAL_SCOPE = 41
+    IO_END_SIGNAL_OK = true
     IO_COLS = 80
     IO_ROWS = 24
     IO_SIZE_CALLS = 0
@@ -424,6 +444,20 @@ describe "REQ-LLM-CARET-TUI-HARDEN-009: frame and input behavior":
         check_promptless_dispatch(cases, result)
 
 describe "REQ-LLM-CARET-TUI-HARDEN-007: lifecycle and routing":
+    it "should fail signal scope entry before raw or visible terminal mutation":
+        step("Reject scoped signal setup through the production TUI loop")
+        _reset_fakes()
+        IO_SIGNAL_SCOPE = 0
+        val result = run_chat_tui(
+            make_chat_tui("Caret"), _policy(), _responder, _hooks(), [],
+            _fake_io()
+        )
+        expect(result.mode).to_equal("tui")
+        expect(result.ok).to_be(false)
+        expect(result.exit_reason).to_equal("signal-scope-unavailable")
+        expect(result.error).to_equal("terminal signal scope unavailable")
+        expect(IO_EVENTS).to_equal("begin_scope|")
+
     it "should fail raw entry before alternate screen or cursor mutation":
         step("Reject raw mode acquisition through the production TUI loop")
         _reset_fakes()
@@ -436,7 +470,7 @@ describe "REQ-LLM-CARET-TUI-HARDEN-007: lifecycle and routing":
         expect(result.ok).to_be(false)
         expect(result.exit_reason).to_equal("raw-mode-unavailable")
         expect(result.error).to_equal("terminal raw mode unavailable")
-        expect(IO_EVENTS).to_equal("enter_raw|")
+        expect(IO_EVENTS).to_equal("begin_scope|enter_raw|end_scope|")
 
     it "should restore cursor screen and raw mode in lifecycle order":
         step("Exit by command after entering the full-screen production loop")
@@ -448,8 +482,8 @@ describe "REQ-LLM-CARET-TUI-HARDEN-007: lifecycle and routing":
         )
         expect(result.ok).to_be(true)
         expect(result.exit_reason).to_equal("command_exit")
-        expect(IO_EVENTS).to_start_with("enter_raw|enter_alt|hide|")
-        expect(IO_EVENTS).to_contain("show|exit_alt|exit_raw|emit|")
+        expect(IO_EVENTS).to_start_with("begin_scope|enter_raw|enter_alt|hide|")
+        expect(IO_EVENTS).to_contain("show|exit_alt|exit_raw|end_scope|emit|")
         expect(IO_OUTPUT).to_equal("chat session ended\n")
 
     it "should report restore failure after all visible cleanup":
@@ -464,7 +498,7 @@ describe "REQ-LLM-CARET-TUI-HARDEN-007: lifecycle and routing":
         expect(result.ok).to_be(false)
         expect(result.exit_reason).to_equal("command_exit")
         expect(result.error).to_equal("failed to restore terminal raw mode")
-        expect(IO_EVENTS).to_end_with("show|exit_alt|exit_raw|")
+        expect(IO_EVENTS).to_end_with("show|exit_alt|exit_raw|end_scope|")
         expect(IO_OUTPUT).to_equal("")
 
     it "should restore after slash exit":
@@ -476,7 +510,7 @@ describe "REQ-LLM-CARET-TUI-HARDEN-007: lifecycle and routing":
             _fake_io()
         )
         expect(result.exit_reason).to_equal("command_exit")
-        expect(IO_EVENTS).to_contain("show|exit_alt|exit_raw|")
+        expect(IO_EVENTS).to_contain("show|exit_alt|exit_raw|end_scope|")
 
     it "should restore after Ctrl-C":
         step("Leave the production TUI with Ctrl-C")
@@ -487,7 +521,7 @@ describe "REQ-LLM-CARET-TUI-HARDEN-007: lifecycle and routing":
             _fake_io()
         )
         expect(result.exit_reason).to_equal("input_exit")
-        expect(IO_EVENTS).to_contain("show|exit_alt|exit_raw|")
+        expect(IO_EVENTS).to_contain("show|exit_alt|exit_raw|end_scope|")
 
     it "should restore after Ctrl-D":
         step("Leave the production TUI with Ctrl-D")
@@ -498,7 +532,7 @@ describe "REQ-LLM-CARET-TUI-HARDEN-007: lifecycle and routing":
             _fake_io()
         )
         expect(result.exit_reason).to_equal("input_exit")
-        expect(IO_EVENTS).to_contain("show|exit_alt|exit_raw|")
+        expect(IO_EVENTS).to_contain("show|exit_alt|exit_raw|end_scope|")
 
     it "should restore after byte-stream EOF":
         step("Leave the production TUI when byte input reaches EOF")
@@ -509,7 +543,58 @@ describe "REQ-LLM-CARET-TUI-HARDEN-007: lifecycle and routing":
             _fake_io()
         )
         expect(result.exit_reason).to_equal("input_exit")
-        expect(IO_EVENTS).to_contain("show|exit_alt|exit_raw|")
+        expect(IO_EVENTS).to_contain("show|exit_alt|exit_raw|end_scope|")
+
+    it "should redraw after resize and continue reading the same line":
+        step("Wake the scoped reader with resize before Ctrl-C")
+        _reset_fakes()
+        IO_BYTES = [-3, 3]
+        val result = run_chat_tui(
+            make_chat_tui("Caret"), _policy(), _responder, _hooks(), [],
+            _fake_io()
+        )
+        expect(result.ok).to_be(true)
+        expect(result.exit_reason).to_equal("input_exit")
+        expect(IO_SIZE_CALLS).to_be_greater_than(1)
+        expect(IO_EVENTS).to_contain("show|exit_alt|exit_raw|end_scope|")
+
+    it "should distinguish a scoped stop from EOF and restore the terminal":
+        step("Wake the scoped reader with an orderly stop signal")
+        _reset_fakes()
+        IO_BYTES = [-2]
+        val result = run_chat_tui(
+            make_chat_tui("Caret"), _policy(), _responder, _hooks(), [],
+            _fake_io()
+        )
+        expect(result.ok).to_be(true)
+        expect(result.exit_reason).to_equal("signal_stop")
+        expect(IO_EVENTS).to_contain("show|exit_alt|exit_raw|end_scope|")
+
+    it "should distinguish terminal I/O failure and still restore the scope":
+        step("Return the scoped reader I/O failure outcome")
+        _reset_fakes()
+        IO_BYTES = [-4]
+        val result = run_chat_tui(
+            make_chat_tui("Caret"), _policy(), _responder, _hooks(), [],
+            _fake_io()
+        )
+        expect(result.ok).to_be(false)
+        expect(result.exit_reason).to_equal("input_error")
+        expect(result.error).to_equal("terminal input failed")
+        expect(IO_EVENTS).to_contain("show|exit_alt|exit_raw|end_scope|")
+
+    it "should report scoped-handler restoration failure after raw cleanup":
+        step("Fail signal scope teardown after restoring visible terminal state")
+        _reset_fakes()
+        IO_END_SIGNAL_OK = false
+        IO_BYTES = [3]
+        val result = run_chat_tui(
+            make_chat_tui("Caret"), _policy(), _responder, _hooks(), [],
+            _fake_io()
+        )
+        expect(result.ok).to_be(false)
+        expect(result.error).to_equal("failed to restore terminal signal scope")
+        expect(IO_EVENTS).to_end_with("show|exit_alt|exit_raw|end_scope|")
 
     it "should force TUI routing without a tty":
         step("Request TUI mode while the injected tty probe is false")
@@ -521,7 +606,7 @@ describe "REQ-LLM-CARET-TUI-HARDEN-007: lifecycle and routing":
             _hooks(), [], _fake_io()
         )
         expect(result.mode).to_equal("tui")
-        expect(IO_EVENTS).to_contain("enter_raw")
+        expect(IO_EVENTS).to_contain("begin_scope|enter_raw")
 
     it "should force plain routing on a tty":
         step("Request plain mode while the injected tty probe is true")
@@ -545,7 +630,7 @@ describe "REQ-LLM-CARET-TUI-HARDEN-007: lifecycle and routing":
             _hooks(), [], _fake_io()
         )
         expect(result.mode).to_equal("tui")
-        expect(IO_EVENTS).to_start_with("is_tty|enter_raw|")
+        expect(IO_EVENTS).to_start_with("is_tty|begin_scope|enter_raw|")
 
     it "should automatically route non-tty input to plain mode":
         step("Select automatic mode without an injected tty")

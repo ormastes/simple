@@ -40,10 +40,12 @@ turns. Entry point: `caret_chat(ui, policy, responder, ui_mode)` in
 | `"tui"` | Always the full-screen TUI |
 | `"plain"` | Always plain line output (pipes / CI / server) |
 
-`"auto"` probes `$TERM` (no `isatty` extern exists in the stdlib). `$TERM` is
-inherited even under a pipe, so **pass an explicit `ui_mode` ("plain"/"tui")
-in CI and servers**. In-TUI keys: `Enter` sends, `/exit` or `/quit` leaves,
-`Ctrl-C`/`Ctrl-D` aborts.
+`"auto"` requires both a real stdin terminal and a supported `$TERM`, so pipes
+and CI route to plain mode without relying on inherited terminal variables.
+In-TUI keys: `Enter` sends, `/exit` or `/quit` leaves, `Ctrl-C`/`Ctrl-D`
+abort. On POSIX hosts the TUI owns a scoped HUP/INT/TERM/WINCH self-pipe:
+resize wakes and redraws without consuming input, while stop signals return
+through cursor, alternate-screen, raw-mode, and handler restoration in order.
 
 Assistant replies render after completion (non-streaming); `std.tui` has no
 incremental re-render yet — that is the documented upgrade path.
