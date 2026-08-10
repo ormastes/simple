@@ -93,10 +93,20 @@ int main(void) {
     check(!file_exists(renamed) && file_is(moved, "rename-move ABI payload"),
           "move aliases the same exact-path behavior");
 
+    check(rt_file_rename((const uint8_t*)source_exact, path_length(source_exact),
+                         (const uint8_t*)renamed_exact, path_length(renamed_exact)) == 0,
+          "rename reports a missing source");
+    check(rt_file_move((const uint8_t*)source_exact, path_length(source_exact),
+                       (const uint8_t*)renamed_exact, path_length(renamed_exact)) == 0,
+          "move reports a missing source");
+
     const uint8_t embedded_nul[] = {'s', 'o', '\0', 'u', 'r', 'c', 'e'};
     check(rt_file_rename(embedded_nul, sizeof(embedded_nul),
                          (const uint8_t*)renamed_exact, path_length(renamed_exact)) == 0,
           "embedded NUL path is rejected");
+    check(rt_file_move(embedded_nul, sizeof(embedded_nul),
+                       (const uint8_t*)renamed_exact, path_length(renamed_exact)) == 0,
+          "move rejects an embedded NUL path");
     check(rt_file_rename(NULL, 1, (const uint8_t*)renamed_exact, path_length(renamed_exact)) == 0,
           "null pointer with nonzero length is rejected");
 
