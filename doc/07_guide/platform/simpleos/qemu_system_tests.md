@@ -583,10 +583,14 @@ On Linux, the live wrapper admits the Vulkan/CUDA runtime archive only after
 checking both its Cargo feature fingerprint and its exported daemon-provider
 closure. The archive must define the retained crypto and frame-clock owners
 (`rt_tls13_sha256`, `rt_sleep_nanos`) plus the Vulkan initialization, raw SPIR-V
-compile, and compute-pipeline owners. A default archive that fails this check is
+compile, compute-pipeline, and provider availability/device-count owners. A
+default archive that fails this check is
 rebuilt once, without clearing its Cargo cache, through the canonical
-`simple-runtime` target and checked again before native daemon linking. An explicit incomplete archive fails closed
-as `runtime-provider-closure-missing`; the linker is never used as the provider
+`simple-runtime` target and checked again before native daemon linking. The
+same admitted `libsimple_runtime.a` is supplied explicitly through
+`SIMPLE_LINK_OBJECTS`; `core-c-bootstrap` does not infer Rust providers from
+`--runtime-path`. An explicit incomplete archive fails closed as
+`runtime-provider-closure-missing`; the linker is never used as the provider
 discovery mechanism. `--self-test-runtime-provider` compiles and links a
 complete fixture archive, then proves that both archive admission and consumer
 linking reject a missing-provider fixture.

@@ -159,6 +159,8 @@ LINUX_DEFAULT_RUNTIME_PATH=$LINUX_RUNTIME_TARGET/bootstrap
 LINUX_DAEMON_RUNTIME_SYMBOLS="
 rt_tls13_sha256
 rt_sleep_nanos
+rt_vulkan_provider_is_available
+rt_vulkan_provider_device_count
 rt_vulkan_init
 rt_vulkan_compile_spirv_raw
 rt_vulkan_create_compute_pipeline
@@ -168,7 +170,10 @@ archive_has_text_symbol() {
     archive=$1
     expected=$2
     command -v nm >/dev/null 2>&1 || return 1
-    nm -g --defined-only "$archive" 2>/dev/null |
+    # GNU nm accepts --defined-only; Apple/BSD nm does not consistently do so.
+    # The parser already rejects U/u and non-text definitions, so -g is the
+    # portable common denominator for archive admission.
+    nm -g "$archive" 2>/dev/null |
         awk -v expected="$expected" '
             NF >= 2 {
                 type = $(NF - 1)
@@ -192,9 +197,15 @@ linux_runtime_artifact_is_valid() {
     runtime_dir=$1
     runtime_archive="$runtime_dir/libsimple_runtime.a"
     linux_runtime_provider_closure_valid "$runtime_archive" || return 1
-    set -- "$runtime_dir"/.fingerprint/simple-runtime-*/lib-simple_runtime.json
-    [ "$#" -eq 1 ] && [ -f "$1" ] || return 1
-    features=$(sed -n 's/^.*"features":"\(.*\)","declared_features":.*$/\1/p' "$1")
+    newest_fingerprint=
+    for candidate in "$runtime_dir"/.fingerprint/simple-runtime-*/lib-simple_runtime.json; do
+        [ -f "$candidate" ] || continue
+        if [ -z "$newest_fingerprint" ] || [ "$candidate" -nt "$newest_fingerprint" ]; then
+            newest_fingerprint=$candidate
+        fi
+    done
+    [ -n "$newest_fingerprint" ] || return 1
+    features=$(sed -n 's/^.*"features":"\(.*\)","declared_features":.*$/\1/p' "$newest_fingerprint")
     case "$features" in *'\"cuda\"'*) ;; *) return 1 ;; esac
     case "$features" in *'\"vulkan\"'*) ;; *) return 1 ;; esac
     case "$features" in *'\"runtime-symbol-table\"'*) ;; *) return 1 ;; esac
@@ -212,6 +223,26 @@ prepare_linux_runtime() {
         --package simple-runtime --lib --profile bootstrap --features vulkan,cuda,runtime-symbol-table \
         >"$BUILD_DIR/runtime-build.log" 2>&1 || return 1
     linux_runtime_artifact_is_valid "$RUNTIME_PATH"
+}
+
+run_linux_daemon_native_build() (
+    # core-c-bootstrap intentionally compiles the C runtime and does not infer
+    # Rust providers from --runtime-path. Select the admitted archive explicitly
+    # at the compiler's canonical external-provider boundary.
+    [ "$ACTIVE_HOST" = linux ] || return 1
+    runtime_archive="$RUNTIME_PATH/libsimple_runtime.a"
+    linux_runtime_provider_closure_valid "$runtime_archive" || return 1
+    SIMPLE_LINK_OBJECTS="$runtime_archive"
+    export SIMPLE_LINK_OBJECTS
+    run_pinned_native_build "$@"
+)
+
+run_daemon_native_build() {
+    if [ "$ACTIVE_HOST" = linux ]; then
+        run_linux_daemon_native_build "$@"
+    else
+        run_pinned_native_build "$@"
+    fi
 }
 
 runtime_provider_closure_self_test() {
@@ -235,9 +266,15 @@ runtime_provider_closure_self_test() {
         printf '    return 0;\n}\n'
     } >"$fixture/consumer.c"
     cc -c "$fixture/complete.c" -o "$fixture/complete.o"
-    ar rcs "$fixture/complete.a" "$fixture/complete.o"
-    linux_runtime_provider_closure_valid "$fixture/complete.a"
-    cc "$fixture/consumer.c" "$fixture/complete.a" -o "$fixture/complete-link"
+    ar rcs "$fixture/libsimple_runtime.a" "$fixture/complete.o"
+    linux_runtime_provider_closure_valid "$fixture/libsimple_runtime.a"
+    cc "$fixture/consumer.c" "$fixture/libsimple_runtime.a" -o "$fixture/complete-link"
+    expected_link_objects="$fixture/libsimple_runtime.a"
+    run_pinned_native_build() {
+        [ "${SIMPLE_LINK_OBJECTS:-}" = "$expected_link_objects" ] &&
+            [ "${1:-}" = --provider-self-test ]
+    }
+    RUNTIME_PATH=$fixture ACTIVE_HOST=linux run_daemon_native_build --provider-self-test
     sed '/rt_sleep_nanos/d' "$fixture/complete.c" >"$fixture/incomplete.c"
     cc -c "$fixture/incomplete.c" -o "$fixture/incomplete.o"
     ar rcs "$fixture/incomplete.a" "$fixture/incomplete.o"
@@ -2858,7 +2895,7 @@ if [ -z "${SIMPLEOS_GPU_HOST_BIN:-}" ]; then
         echo "simpleos_qemu_host_gpu_2d_reason=$runtime_reason"
         exit 1
     fi
-    if ! run_pinned_native_build \
+    if ! run_daemon_native_build \
         --backend cranelift --source src/app --source src/lib --entry-closure \
         --entry "$daemon_entry" --runtime-bundle core-c-bootstrap \
         --runtime-path "$RUNTIME_PATH" --cache-dir "$BUILD_DIR/daemon-cache" \

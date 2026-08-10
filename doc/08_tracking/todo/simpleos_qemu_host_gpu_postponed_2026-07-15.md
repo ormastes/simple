@@ -18,9 +18,13 @@ fingerprint could therefore reach native linking without those providers.
 
 The wrapper now validates actual global archive definitions for the retained
 crypto/clock owners and the Vulkan init, raw SPIR-V compile, and compute
-pipeline owners. It invokes the existing default-target rebuild path once when
-that exact closure is absent, revalidates the produced archive, and otherwise
-fails closed with `runtime-provider-closure-missing`. The focused
+pipeline owners plus the provider-only availability/device-count roots with
+portable global-symbol output. It invokes the existing
+default-target rebuild path once when that exact closure is absent, preserves
+Cargo's target cache, revalidates the produced archive, and otherwise fails
+closed with `runtime-provider-closure-missing`. Daemon native-build then passes
+that exact admitted archive through `SIMPLE_LINK_OBJECTS`; `--runtime-path`
+alone is not provider selection for the `core-c-bootstrap` bundle. The focused
 `--self-test-runtime-provider` command proves that a complete archive admits and
 links, while archive admission and consumer linking both reject an archive
 missing `rt_sleep_nanos`. This repairs build admission only; it does not claim a
