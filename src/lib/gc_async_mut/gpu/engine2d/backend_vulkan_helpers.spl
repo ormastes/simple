@@ -41,9 +41,16 @@ val VK_DISPATCH_COMPLETED_INELIGIBLE: i64 = 2
 # Submission-order probe (level-gated, default OFF)
 # ============================================================================
 
-fn vulkan_order_trace_enabled() -> bool:
-    """True when SIMPLE_VK_ORDER_TRACE=1 arms the `[vk-order]` probe."""
+val _VULKAN_ORDER_TRACE_ENABLED =
     (vulkan_order_env_get("SIMPLE_VK_ORDER_TRACE") ?? "") == "1"
+
+fn vulkan_order_trace_enabled() -> bool:
+    """True when SIMPLE_VK_ORDER_TRACE=1 armed the `[vk-order]` probe.
+
+    Resolve this process-scoped configuration once: primitive dispatch is a
+    render hot path and must not perform an environment lookup for every draw.
+    """
+    _VULKAN_ORDER_TRACE_ENABLED
 
 fn vulkan_order_trace(message: text):
     """Emit one `[vk-order]` line when the probe is armed, else do nothing.
@@ -52,9 +59,10 @@ fn vulkan_order_trace(message: text):
     do framebuffer mutations actually reach the device relative to the font
     route's snapshot/restore? The run-lane truncation bug
     (`doc/08_tracking/bug/run_lane_render_truncation_divergence_2026-08-02.md`)
-    was mis-diagnosed twice because that ordering was invisible. Default OFF so
-    it costs one `env_get` per dispatch and nothing else; arm with
-    `SIMPLE_VK_ORDER_TRACE=1`.
+    was mis-diagnosed twice because that ordering was invisible. Configuration
+    is cached once and callers guard message construction, so disabled tracing
+    costs one cached boolean branch. Arm with `SIMPLE_VK_ORDER_TRACE=1` before
+    starting the process.
     """
     if vulkan_order_trace_enabled():
         print("[vk-order] " + message)
@@ -193,7 +201,8 @@ impl VulkanBackend:
     me _flush_pending_compute() -> i64:
         """Submit one Engine-managed primitive batch and release dependencies."""
         val flush_rc = self._flush_pending_compute_impl()
-        vulkan_order_trace("flush rc={flush_rc} dirty={self.dirty} cpu_fallback={self.cpu_fallback_used} completion_unknown={self.completion_unknown}")
+        if vulkan_order_trace_enabled():
+            vulkan_order_trace("flush rc={flush_rc} dirty={self.dirty} cpu_fallback={self.cpu_fallback_used} completion_unknown={self.completion_unknown}")
         flush_rc
 
     me _flush_pending_compute_impl() -> i64:
@@ -321,7 +330,8 @@ impl VulkanBackend:
         # still reports rc=1 and dirty=true. That is indistinguishable from a
         # healthy frame in every other receipt -- see the run-lane truncation
         # bug's "What is still open".
-        vulkan_order_trace("dispatch pipe={pipe} batched={self.frame_batching_enabled} rc={dispatched} fb={self.d_framebuffer} pending_cmd={self.pending_compute_command} pending_n={self.pending_compute_count} clip_on={self.clip_enabled} clip={self.clip_x},{self.clip_y},{self.clip_w},{self.clip_h}")
+        if vulkan_order_trace_enabled():
+            vulkan_order_trace("dispatch pipe={pipe} batched={self.frame_batching_enabled} rc={dispatched} fb={self.d_framebuffer} pending_cmd={self.pending_compute_command} pending_n={self.pending_compute_count} clip_on={self.clip_enabled} clip={self.clip_x},{self.clip_y},{self.clip_w},{self.clip_h}")
         dispatched
 
     me _gpu_draw_text_fallback(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
