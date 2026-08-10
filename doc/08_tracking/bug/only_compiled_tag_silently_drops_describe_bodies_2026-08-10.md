@@ -1,6 +1,7 @@
 # `only-compiled` is a dead tag; a `tag:` named argument silently DELETES the describe body
 
-**Status:** OPEN — root-caused with an empirical fixture; fix NOT applied (see "Why unfixed").
+**Status:** FIXED 2026-08-10 (Q36) — patch applied to `bdd.rs`; check now PASSes and the
+`--expect-fail` negative control correctly FAILs. See "Fix applied".
 **Filed:** 2026-08-10
 **Found by:** Q31, from `doc/08_tracking/bug/app_mcp_intensive_spec_is_84s_not_a_hang_eight_real_failures_2026-08-10.md`
 **Runnable check:** `sh scripts/check/check-bdd-tagged-block-drop.shs`
@@ -120,7 +121,45 @@ Once fixed, `only-compiled` should be deleted from all 146 files (it has never
 meant anything) or given a real implementation. Do not leave a tag that reads as
 a filter but is not one.
 
-## Why unfixed in this change
+## Fix applied (2026-08-10, Q36)
+
+`src/compiler_rust/compiler/src/interpreter_call/bdd.rs`:
+
+- New `trailing_block_index(args)` — scans `args` in reverse for the last
+  argument with `name.is_none() && label.is_none()`, returns it when `>= 1`,
+  else falls back to `1`. Used by `describe`/`context` and by
+  `it`/`slow_it`/`limited_it` (as the `block_index` seed, so `limited_it`'s
+  existing `resource_limits` handling still wins).
+- `exec_block_value`'s `_ => Ok(Value::Nil)` fallthrough split into
+  `Value::Nil => Ok(Value::Nil)` (a pending `it` with no body is legal) and
+  `other => Err(CompileError::semantic(...))` naming the received type via a new
+  `value_kind_name` helper.
+
+Measured with a locally built `simple-driver` (release, 2026-08-10 09:46),
+NOT the deployed `bin/simple` (2026-08-09 04:50, which still reproduces the bug):
+
+```
+before: SPEC FILE VERDICT: ... declared>=2 executed=2 passed=1 failed=1 dropped=0
+        FAIL -- 2 of 4 example(s) vanished and the verdict line reported dropped=0
+after:  SPEC FILE VERDICT: ... declared>=2 executed=4 passed=1 failed=3 dropped=0
+        PASS -- all 4 declared example(s) accounted for (executed=4 dropped=0)
+--expect-fail after: FAIL -- negative control: expected examples to vanish, but
+        all 4 were accounted for (defect fixed? update this check)
+```
+
+The verdict now reports the drop honestly: the 2 previously-vanished examples
+execute and FAIL, instead of being absent under a `dropped=0` assertion.
+
+**Consequence, left RED on purpose:** previously invisible examples now run and
+some fail. Tracked in
+`doc/08_tracking/bug/only_compiled_unhidden_examples_now_red_2026-08-10.md`.
+
+Note the `--expect-fail` negative control is now inverted by design: it asserted
+the defect was live. It should be retired or re-pointed once the corpus is
+triaged; it is deliberately left as-is so a regression that re-hides bodies
+turns it green again and is noticed.
+
+## Why it was unfixed in the filing change
 
 `src/compiler_rust/compiler/src/interpreter_call/bdd.rs` is **actively contested**.
 A concurrent session landed `47ba20fda2b fix(spec-dsl): fail vacuous expect()...`
