@@ -90,3 +90,45 @@ boundary.
 
 The exact command completes under the normal resource guard with real MCP
 assertions, and an adjacent MCP regression covering the same owner path passes.
+
+## Superseding implementation evidence (2026-08-10)
+
+The earlier native-artifact and Rust-authorization statements describe the
+initial reproduction, not current state. Pure-Simple delegation was confirmed:
+the declaration, interpreter implementation, and C runtime implementation of
+`rt_file_is_char_device` were already correct. The defect was below that
+boundary, so the common JIT symbol list and Rust runtime metadata/export chain
+were repaired with unrelated shared-file hunks preserved.
+
+Host MCP and LSP MCP binaries now exist with matching SHA-256 admission
+sidecars. Direct production-wrapper probes return real initialize responses
+with exit 0 for both servers. The first-run LSP functional probe also retained
+its initialize/list/`lsp_symbols` checks, but its allowance increased from 10
+to 30 seconds because the real probe completed in about 9 seconds under load
+and raced the former threshold. These results close the original
+missing-artifact handshake failure; they do not close the interpreter gate.
+
+The remaining bootstrap loop is now bounded with stronger evidence:
+
+- the deployed `bin/simple` is still the 2026-08-09 Rust seed, SHA-256
+  `166c622b30c2257c9b0fbb0a5f08078f27f51d2c491305533ecf6a21ba5a35fb`;
+- the old admitted Stage-2 compiler completes a synthetic 40-module dense-glob
+  closure in 26.13 seconds and 80 modules in 122.17 seconds, but the 160-module
+  row times out after 600.01 seconds with no artifact (159,488 KiB max RSS),
+  proving superlinear time rather than memory exhaustion for that reproducer;
+- canonical isolated Stage-2 seed builds with LLVM fail because both available
+  Rust seeds lack LLVM support;
+- the available Cranelift launcher returned before its native-build child. The
+  child reached about 184% lifetime CPU and 327 MiB RSS, then its only child
+  (`simple-main`, PID 876298) became a zombie while the parent (PID 876269)
+  slept on a futex. No output artifact or cache file existed. This is the exact
+  failure family tracked by
+  `native_build_worker_zombie_parent_hang_2026-07-03.md`; both owned PIDs were
+  terminated after confirmation.
+
+Three distinct bootstrap probes are exhausted for this session. Unblock now
+requires a fresh session to use the tracked direct-run bootstrap workaround
+(bypassing the broken native-build worker wrapper), sanity-pass its pure-Simple
+compiler, and then prove Stage-3 self-host equivalence. Only that compiler may
+run the exact MCP interpreter gate for the after-fix wall/RSS comparison and
+final scenario verdict.

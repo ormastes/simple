@@ -79,16 +79,16 @@ Restart Claude Desktop after config changes.
 
 ### Verify Installation
 
-> **Current source/deploy caveat (2026-08-10):** explicit interpreter mode is
-> now excluded from the compiler driver's whole-project bulk-source loader in
-> `driver_source_pipeline_loading.spl`; imports remain lazy through the
-> interpreter module resolver. The deployed `bin/simple` predates that source
-> change until a fresh self-hosted compiler is admitted. With the stale binary,
-> the integration command below is killed near the normal 60-second CPU guard
-> before scenarios begin (observed 68.18 s / 1.34 GiB), so this is not yet a
-> reachable performance claim. Resume from
-> `.spipe/mcp-failures-interpreter-perf/state.md` and require a real scenario
-> verdict from the fresh binary.
+> **Current source/deploy caveat (2026-08-10):** host-native MCP and LSP MCP
+> artifacts are hash-admitted and their wrappers return real initialize
+> responses. Explicit interpreter mode is also excluded in source from the
+> compiler driver's whole-project bulk loader; imports remain lazy through the
+> interpreter module resolver. However, deployed `bin/simple` still predates
+> that loader fix and the JIT symbol registration. Its focused integration gate
+> was killed before scenarios at 68.18 s / 1.34 GiB (a raised diagnostic reached
+> 111.33 s / 2.50 GiB). This is not after-fix performance evidence: admit and
+> deploy a fresh pure-Simple compiler, then require a real scenario verdict and
+> before/after timing from `.spipe/mcp-failures-interpreter-perf/state.md`.
 
 ```bash
 # Check the source-hosted Simple MCP entry

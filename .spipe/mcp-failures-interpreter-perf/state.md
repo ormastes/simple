@@ -104,3 +104,36 @@ implementation in progress; fresh compiler deployment required for runtime proof
   owner files remain dirty under other sessions. Continuing cannot produce
   trustworthy fresh-binary evidence or safely repair the overlapping JIT
   provider until that external state changes.
+- runtime repair: Registered `rt_file_is_char_device` through the common JIT
+  symbol list and Rust runtime metadata/export boundary after confirming the
+  pure-Simple declaration, interpreter implementation, and C runtime owner were
+  already correct. Preserved unrelated hunks in the shared Rust files.
+- native artifacts: Built and hash-admitted host MCP/LSP binaries at
+  `bin/release/x86_64-unknown-linux-gnu/`. Direct wrapper initialize evidence is
+  `mcp_rc=0` with a real initialize response and `lsp_wrapper_rc=0` with a real
+  initialize response. A temporary fresh Codex pane showed no MCP startup
+  failure and was closed after capture.
+- startup infrastructure: Raised the first-run LSP functional-probe allowance
+  from 10 to 30 seconds because the real initialize/list/`lsp_symbols` probe
+  completed in about 9 seconds under load and raced the old timeout. Corrected
+  the stale CI integration-spec path and added short wrapper/lazy-loader gates.
+- current blocker: `bin/simple` still resolves to the unchanged 2026-08-09 Rust
+  bootstrap seed (`sha256
+  166c622b30c2257c9b0fbb0a5f08078f27f51d2c491305533ecf6a21ba5a35fb`).
+  No admitted Stage-3/Stage-4 compiler exists yet. Full native smoke reaches
+  its preliminary interface-cache checks but reports the stale seed's missing
+  `rt_file_is_char_device` JIT symbol, so AC-5 through AC-7 and the interpreter
+  before/after measurement remain open until a fresh pure-Simple compiler is
+  admitted and deployed.
+- bootstrap audit: The old admitted Stage-2 compiler shows dense-glob closure
+  scaling of 26.13 s (40 modules), 122.17 s (80), and timeout at 600.01 s
+  without an artifact (160; 159,488 KiB max RSS). This is a superlinear-time
+  bootstrap blocker, not the earlier high-RSS signature. Both available Rust
+  seeds reject LLVM as unavailable. The canonical isolated Cranelift Stage-2
+  launcher returned before its native-build child. That child reached about
+  184% lifetime CPU and 327 MiB RSS, then its only child (`simple-main`, PID
+  876298) became a zombie while the parent (PID 876269) slept on a futex with
+  no artifact or cache files. This reproduces the tracked native-build
+  wrapper-zombie hang. Both owned PIDs were terminated after confirmation.
+  Three distinct bootstrap probes are exhausted for this session; the tracked
+  direct-run workaround is the next fresh-session route, not a fourth retry.
