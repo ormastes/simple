@@ -318,9 +318,50 @@ fn run_scoped_spl_doctest(args: [text]) -> i64:
 # Mirror test_runner_single.spl's slow_it floor so the outer bounded wait
 # never undercuts the inner runner's raised per-file bound.
 fn effective_timeout_secs(path: text, timeout_secs: i64) -> i64:
-    if timeout_secs < 600 and rt_file_read_text(path).contains("slow_it "):
-        return 600
-    timeout_secs
+    val content = rt_file_read_text(path)
+    var effective = timeout_secs
+    if effective < 600 and content.contains("slow_it "):
+        effective = 600
+    # `# @timeout_secs <N>` header directive — mirrors the parser in
+    # test_runner_single.spl / test_runner_main.spl. Without the directive
+    # half of this mirror, a spec declaring more than 600s is still cut off
+    # out here and reports a timeout instead of a real verdict.
+    val declared = _spec_timeout_secs_directive_text(content)
+    if declared > effective:
+        effective = declared
+    effective
+
+# Raw scan instead of index_of, for the same reason test_runner_single.spl's
+# find_raw exists: Option<i64> value 3 reads as None on the seed-JIT flat-i64
+# path (jit_option_i64_value3_reads_as_none_2026-07-24.md), so a directive
+# that happened to sit at offset 3 would silently vanish.
+fn _spec_timeout_secs_directive_text(content: text) -> i64:
+    val key = "# @timeout_secs "
+    val klen = key.len()
+    val n = content.len()
+    var idx = -1
+    var i = 0
+    while i + klen <= n:
+        if content[i:i + klen] == key:
+            idx = i
+            break
+        i = i + 1
+    if idx < 0:
+        return 0
+    var pos = idx + klen
+    var value: i64 = 0
+    var digits = 0
+    while pos < n:
+        val c = content.char_code_at(pos)
+        if c >= 48 and c <= 57:
+            value = value * 10 + (c - 48)
+            digits = digits + 1
+            pos = pos + 1
+        else:
+            break
+    if digits == 0:
+        return 0
+    value
 
 # Run one spec file directly, bypassing the daemon. `--no-session-daemon`
 # routes to test_runner_single.spl (no daemon, no recursion).

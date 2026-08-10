@@ -116,6 +116,40 @@ pub fn generate_spipe_docs_for_results(results: [TestFileResult], options: TestO
 # single scalar path; the remaining targets were dropped with no diagnostic.
 # Discovery now unions all of them, and the per-target counts are reported so a
 # target that contributes nothing is visible in the log rather than silent.
+fn spec_timeout_secs_directive(file_path: text) -> i64:
+    """Parse `# @timeout_secs <N>` from a spec header (0 when absent/invalid).
+
+    Mirrors test_runner_single.spl / test_runner_client.spl. Raw scan rather
+    than index_of for the same reason those do it: Option<i64> value 3 reads
+    as None on the seed-JIT flat-i64 path."""
+    val content = file_read(file_path) ?? ""
+    val key = "# @timeout_secs "
+    val klen = key.len()
+    val n = content.len()
+    var idx = -1
+    var i = 0
+    while i + klen <= n:
+        if content[i:i + klen] == key:
+            idx = i
+            break
+        i = i + 1
+    if idx < 0:
+        return 0
+    var pos = idx + klen
+    var value: i64 = 0
+    var digits = 0
+    while pos < n:
+        val c = content.char_code_at(pos)
+        if c >= 48 and c <= 57:
+            value = value * 10 + (c - 48)
+            digits = digits + 1
+            pos = pos + 1
+        else:
+            break
+    if digits == 0:
+        return 0
+    value
+
 fn discover_all_requested_files(options: TestOptions, use_cache: bool) -> [text]:
     val requested = if options.paths.len() > 0: options.paths else: [options.path]
     if requested.len() == 1:
@@ -657,6 +691,13 @@ fn run_single_test(file_path: text, options: TestOptions) -> TestFileResult:
             effective_options.timeout = chaos_timeout
     if file_has_slow_test(file_path) and effective_options.timeout < 600:
         effective_options.timeout = 600
+    # `# @timeout_secs <N>` header directive — mirrors
+    # test_runner_single.spl/test_runner_client.spl. Raise-only: a spec whose
+    # honest run exceeds even the slow_it 600s floor declares what it needs,
+    # instead of being killed mid-run and reporting no verdict line at all.
+    val declared_timeout = spec_timeout_secs_directive(file_path)
+    if declared_timeout > effective_options.timeout:
+        effective_options.timeout = declared_timeout
 
     val monitor_timeout = env_get("SIMPLE_TIMEOUT_SECONDS") ?? ""
     # to_int("") throws, and the interpreter evaluates both sides of `and`,
