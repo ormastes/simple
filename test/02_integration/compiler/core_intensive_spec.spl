@@ -13,28 +13,17 @@ fn check_msg(condition: bool, message: text):
 fn dict_keys(d) -> [text]:
     d.keys()
 
-# Stub: StringInterner
-class StringInterner:
-    strings: {text: i64}
-    reverse: {text: text}
-    next_id: i64
-    me intern(s: text) -> i64:
-        if self.strings.has(s):
-            return self.strings[s]
-        val id = self.next_id
-        self.strings[s] = id
-        self.reverse["{id}"] = s
-        self.next_id = self.next_id + 1
-        id
-    fn get(s: text):
-        if self.strings.has(s):
-            return Some(self.strings[s])
-        nil
-    fn lookup(id: i64):
-        val key = "{id}"
-        if self.reverse.has(key):
-            return Some(self.reverse[key])
-        nil
+# The local fake StringInterner that used to live here was removed 2026-08-10:
+# it declared fields strings/reverse/next_id: i64, none of which exist on the
+# product type (str_to_id/id_to_str/next_id: StringId), so this spec only ever
+# tested its own copy. Its fake `get(s: text)` was also INVERTED relative to the
+# product API -- the real forward (string -> id) lookup is `get_id`, while the
+# real `get(id)` is the reverse (id -> string) lookup. Call sites were remapped.
+# NOTE: the SdnRow/SdnTable stubs below are still local fakes (this file's fake
+# SdnTable is schema-based and structurally unrelated to the product SdnTable);
+# they are tracked as remaining siblings in the bug doc, not silently accepted.
+# See doc/08_tracking/bug/database_specs_shadow_stringinterner_with_wrong_fields_2026-08-10.md
+use std.database.core (StringInterner)
 
 # Stub: SdnRow
 class SdnRow:
@@ -124,7 +113,7 @@ fn cleanup_test_file(path: text):
 describe "StringInterner - Intensive":
     context "stress testing":
         it "handles 500 unique strings":
-            var interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+            var interner = StringInterner.empty()
 
             # Intern 500 unique strings (reduced from 10K to avoid timeout)
             for i in 0..500:
@@ -133,11 +122,11 @@ describe "StringInterner - Intensive":
                 check(id >= 0)
 
             # Verify total count
-            val strings = dict_keys(interner.strings)
+            val strings = dict_keys(interner.str_to_id)
             check(strings.len() == 500)
 
         it "handles duplicate strings efficiently":
-            var interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+            var interner = StringInterner.empty()
 
             # Intern same string 100 times (reduced from 1000 to avoid timeout)
             var first_id = -1
@@ -149,11 +138,11 @@ describe "StringInterner - Intensive":
                     check(id == first_id) # Same ID for duplicates
 
             # Should only have 1 entry
-            val strings = dict_keys(interner.strings)
+            val strings = dict_keys(interner.str_to_id)
             check(strings.len() == 1)
 
         it "handles unicode edge cases":
-            var interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+            var interner = StringInterner.empty()
 
             val unicode_strings = [
                 "测试",              # Chinese
@@ -172,7 +161,7 @@ describe "StringInterner - Intensive":
                 check(lookup? == s)
 
         it "handles empty string":
-            var interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+            var interner = StringInterner.empty()
 
             val id = interner.intern("")
             check(id >= 0)
@@ -182,7 +171,7 @@ describe "StringInterner - Intensive":
             check(lookup? == "")
 
         it "handles whitespace-only strings":
-            var interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+            var interner = StringInterner.empty()
 
             val whitespace_strings = [
                 " ",
@@ -200,7 +189,7 @@ describe "StringInterner - Intensive":
                 check(lookup? == s)
 
         it "handles strings with newlines and tabs":
-            var interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+            var interner = StringInterner.empty()
 
             val s = "line1\nline2\tcolumn2\r\nline3"
             val id = interner.intern(s)
@@ -209,14 +198,14 @@ describe "StringInterner - Intensive":
             check(lookup? == s)
 
         it "maintains bidirectional mapping":
-            var interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+            var interner = StringInterner.empty()
 
             for i in 0..50:
                 val s = "test_{i}"
                 val id = interner.intern(s)
 
                 # Forward lookup: string -> id
-                val forward = interner.get(s)
+                val forward = interner.get_id(s)
                 check(forward.?)
                 check(forward? == id)
 
@@ -227,25 +216,25 @@ describe "StringInterner - Intensive":
 
     context "edge cases":
         it "handles get on non-existent string":
-            val interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+            val interner = StringInterner.empty()
 
-            val result = interner.get("nonexistent")
+            val result = interner.get_id("nonexistent")
             check(not result.?)
 
         it "handles lookup on invalid ID":
-            val interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+            val interner = StringInterner.empty()
 
             val result = interner.lookup(999999)
             check(not result.?)
 
         it "handles negative ID lookup":
-            val interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+            val interner = StringInterner.empty()
 
             val result = interner.lookup(-1)
             check(not result.?)
 
         it "handles ID sequence correctly":
-            var interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+            var interner = StringInterner.empty()
 
             val id1 = interner.intern("first")
             val id2 = interner.intern("second")
@@ -254,7 +243,7 @@ describe "StringInterner - Intensive":
             check(id1 == 0)
             check(id2 == 1)
             check(id3 == 2)
-            check(interner.next_id == 3)
+            check(interner.next_id.value == 3)
 
 describe "SdnRow - Intensive":
     context "field operations":
