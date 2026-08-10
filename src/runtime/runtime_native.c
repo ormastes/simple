@@ -8806,8 +8806,16 @@ void rt_file_close(void* handle) {
     if (handle) fclose((FILE*)handle);
 }
 
-int rt_file_move(const char* src, const char* dst) {
-    if (!src || !dst) return 0;
+/* Two `text` arguments -> FOUR machine words; runtime_sffi.rs:1881 declares
+ * &[I64, I64, I64, I64]. The old two-parameter form read both paths past
+ * their ends -- and a rename() with a corrupted destination does not fail
+ * safe, it moves the file somewhere unintended. */
+int rt_file_move(const uint8_t* src_ptr, uint64_t src_len,
+                 const uint8_t* dst_ptr, uint64_t dst_len) {
+    char src[RT_TEXT_PATH_MAX];
+    char dst[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(src_ptr, src_len, src, sizeof(src))) return 0;
+    if (!rt_text_arg_to_path(dst_ptr, dst_len, dst, sizeof(dst))) return 0;
     return rename(src, dst) == 0 ? 1 : 0;
 }
 

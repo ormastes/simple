@@ -1510,7 +1510,15 @@ int         rt_file_write(const char* path, const char* content) {
 int         rt_file_append(const char* path, const char* content) {
     return spl_file_append(path, content);
 }
-int         rt_file_copy(const char* src, const char* dst) {
+/* Two `text` arguments -> FOUR machine words (src_ptr, src_len, dst_ptr,
+ * dst_len); runtime_sffi.rs:1868 declares &[I64, I64, I64, I64]. The old
+ * two-parameter form read BOTH paths past their ends. */
+int         rt_file_copy(const uint8_t* src_ptr, uint64_t src_len,
+                         const uint8_t* dst_ptr, uint64_t dst_len) {
+    char src[RT_TEXT_PATH_MAX];
+    char dst[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(src_ptr, src_len, src, sizeof(src))) return 0;
+    if (!rt_text_arg_to_path(dst_ptr, dst_len, dst, sizeof(dst))) return 0;
     FILE* in = fopen(src, "rb");
     if (!in) return 0;
     
