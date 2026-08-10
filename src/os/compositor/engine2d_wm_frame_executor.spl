@@ -114,10 +114,13 @@ class Engine2dWmFrameExecutor:
     prepared_image_xy: [i64]
     prepared_image_x0: i64
     prepared_image_y0: i64
+    prepared_image_w0: i64
     prepared_image_x1: i64
     prepared_image_y1: i64
+    prepared_image_w1: i64
     prepared_image_x2: i64
     prepared_image_y2: i64
+    prepared_image_w2: i64
     prepared_scene_revision: i64
     prepared_taskbar_revision: i64
     prepared_clock_label: text
@@ -126,7 +129,7 @@ class Engine2dWmFrameExecutor:
 
     static fn create(engine: Engine2D, framebuffer: FramebufferDriver, fb_w: i64 = 0, fb_h: i64 = 0, cpu_simd_enabled: bool = false) -> Engine2dWmFrameExecutor:
         val local_target = engine2d_wm_draw_ir_backend_target(false, "", cpu_simd_enabled)
-        Engine2dWmFrameExecutor(engine: engine, framebuffer: framebuffer, host_gpu_base: 0u64, host_gpu_run_id_hash: 0, host_gpu_backend: "", host_gpu_backend_code: 0, draw_ir_backend_target: local_target, local_draw_ir_backend_target: local_target, fb_w: fb_w, fb_h: fb_h, image_resource_revisions: [], emit_repeated_evidence: true, profile_emitted: false, prepared_composition: DrawIrComposition(schema: "", composition_id: "", scene_key: "", backend_target: "", batches: []), prepared_images: [], prepared_scanout_pixels: [], prepared_scanout_valid: false, prepared_image_xy: [], prepared_image_x0: 0, prepared_image_y0: 0, prepared_image_x1: 0, prepared_image_y1: 0, prepared_image_x2: 0, prepared_image_y2: 0, prepared_scene_revision: 0, prepared_taskbar_revision: 0, prepared_clock_label: "", prepared_backend_target: "", prepared_valid: false)
+        Engine2dWmFrameExecutor(engine: engine, framebuffer: framebuffer, host_gpu_base: 0u64, host_gpu_run_id_hash: 0, host_gpu_backend: "", host_gpu_backend_code: 0, draw_ir_backend_target: local_target, local_draw_ir_backend_target: local_target, fb_w: fb_w, fb_h: fb_h, image_resource_revisions: [], emit_repeated_evidence: true, profile_emitted: false, prepared_composition: DrawIrComposition(schema: "", composition_id: "", scene_key: "", backend_target: "", batches: []), prepared_images: [], prepared_scanout_pixels: [], prepared_scanout_valid: false, prepared_image_xy: [], prepared_image_x0: 0, prepared_image_y0: 0, prepared_image_w0: 0, prepared_image_x1: 0, prepared_image_y1: 0, prepared_image_w1: 0, prepared_image_x2: 0, prepared_image_y2: 0, prepared_image_w2: 0, prepared_scene_revision: 0, prepared_taskbar_revision: 0, prepared_clock_label: "", prepared_backend_target: "", prepared_valid: false)
 
     static fn create_host_gpu(engine: Engine2D, framebuffer: FramebufferDriver, base: u64, guest_isa_code: i64, backend_code: i64, fb_width: i64, fb_height: i64, negotiation_started_us: i64, cpu_simd_enabled: bool = false) -> Engine2dWmFrameExecutor:
         var executor = Engine2dWmFrameExecutor.create(engine, framebuffer, fb_width, fb_height, cpu_simd_enabled)
@@ -244,13 +247,36 @@ class Engine2dWmFrameExecutor:
         serial_println("[wm-frame] host-gpu-presented backend={self.host_gpu_backend} generation={generation} run={self.host_gpu_run_id_hash} frame={generation} checksum={receipt.output_checksum}")
         true
 
-    me replay_prepared_input_frame() -> i64:
+    me replay_prepared_input_frame(focused_idx: i64, semantic_revision: i64) -> i64:
         """Present the last admitted scanout for an input-only pointer step."""
         if not self.prepared_valid or not self.prepared_scanout_valid:
             return 0
         engine2d_draw_ir_adv_replay_prepared_scanout(
             self.engine, self.fb_w.to_i32(), self.fb_h.to_i32())
-        self.prepared_scene_revision
+        var focus_x: i64 = 0
+        var focus_y: i64 = 0
+        var focus_w: i64 = 0
+        if focused_idx == 0:
+            focus_x = self.prepared_image_x0 - 4
+            focus_y = self.prepared_image_y0 - 32
+            focus_w = self.prepared_image_w0 + 8
+        elif focused_idx == 1:
+            focus_x = self.prepared_image_x1 - 4
+            focus_y = self.prepared_image_y1 - 32
+            focus_w = self.prepared_image_w1 + 8
+        elif focused_idx == 2:
+            focus_x = self.prepared_image_x2 - 4
+            focus_y = self.prepared_image_y2 - 32
+            focus_w = self.prepared_image_w2 + 8
+        if focus_w > 0:
+            self.engine.clear_clip()
+            self.engine.clear_mask()
+            self.engine.draw_rect_filled(
+                focus_x.to_i32(), focus_y.to_i32(), focus_w.to_i32(), 4,
+                0xffffcc00u32)
+            self.engine.submit_batch()
+            self.engine.present()
+        if semantic_revision > 0: semantic_revision else: self.prepared_scene_revision
 
     me render(scene: SharedWmScene, taskbar: TaskbarModel, content_frames: [WmContentFrame], scene_revision: i64, taskbar_revision: i64, clock_label: text) -> i64:
         val profile_started_us = boot_monotonic_now_us()
@@ -585,11 +611,14 @@ class Engine2dWmFrameExecutor:
     me set_repeated_evidence(enabled: bool):
         self.emit_repeated_evidence = enabled
 
-    me set_top_content_positions(x0: i64, y0: i64, x1: i64, y1: i64, x2: i64, y2: i64):
+    me set_top_content_positions(x0: i64, y0: i64, w0: i64, x1: i64, y1: i64, w1: i64, x2: i64, y2: i64, w2: i64):
         """Install owner-derived positions for the three prepared WM images."""
         self.prepared_image_x0 = x0
         self.prepared_image_y0 = y0
+        self.prepared_image_w0 = w0
         self.prepared_image_x1 = x1
         self.prepared_image_y1 = y1
+        self.prepared_image_w1 = w1
         self.prepared_image_x2 = x2
         self.prepared_image_y2 = y2
+        self.prepared_image_w2 = w2
