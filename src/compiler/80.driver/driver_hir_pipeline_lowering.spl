@@ -50,6 +50,17 @@ fn _driver_collect_hir_errors(ctx: CompileContext, name: text, errors: [Lowering
         else:
             ctx.add_error(_format_hir_lowering_error(name, err))
 
+fn _driver_module_surface_index(registry: ModuleSurfacesByName, name: text) -> i64:
+    # The ordered scalar arrays are the native-safe authority. The dictionary
+    # remains a compatibility API, but staged lookup can lose its receiver
+    # under full-closure aggregate pressure.
+    var position = 0
+    while position < registry.ordered_names.len() and position < registry.ordered_indices.len():
+        if registry.ordered_names[position] == name:
+            return registry.ordered_indices[position]
+        position = position + 1
+    -1
+
 # Concrete, NOT generic. The native build path has no monomorphization
 # (#158 Phase B, gated in hir_lowering/_Items/declaration_lowering.spl), so the
 # former `<K, V>` form was a hard stop for Stage-3 self-host. This helper has
@@ -501,10 +512,10 @@ impl CompilerDriver:
             phase_hir_modules[name] = hir_module
             if source_idx < 3:
                 eprint("[bootstrap-error-count] source_idx={source_idx} point=post-store count={self.ctx.error_count()}")
-            if not retained_module_surfaces.index_by_name.contains_key(name):
+            val validation_surface_index = _driver_module_surface_index(retained_module_surfaces, name)
+            if validation_surface_index < 0:
                 self.ctx.add_error("Missing module surface alias for {name}")
             else:
-                val validation_surface_index = retained_module_surfaces.index_by_name[name]
                 if validation_surface_index < 0 or validation_surface_index >= retained_module_surfaces.surfaces.len():
                     self.ctx.add_error("Invalid module surface index for {name}: {validation_surface_index}")
                 elif not validation_surface_indices.contains_key(validation_surface_index):
