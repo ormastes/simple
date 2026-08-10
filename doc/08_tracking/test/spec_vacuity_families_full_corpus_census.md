@@ -1,7 +1,24 @@
 # Spec-Vacuity Families 3 & 4 — Full-Corpus Census
 
 _Driver: `scripts/check/census-spec-vacuity.spl` (landed `bbe4682d52b`)._
-_Status: **IN PROGRESS** — corpus/dedup section final, scan results pending._
+_Status: **COMPLETE for families 3 and 4** — 19,599 raw / 9,940 unique spec
+files, 100% of the corpus, scored for VTM001/VTM002 and SHADOW/NOSRC._
+
+## Coverage
+
+| family | corpus scored | scorer | control |
+|---|---|---|---|
+| 3 — value-type helper mutates a copy | 19,599 raw / 9,940 unique (100%) | independent, kind-resolved | 5 planted fire, 8 correct silent |
+| 4 — spec re-implements code under test | 19,599 raw / 9,940 unique (100%) | independent, name-intersection | 626 names, non-empty by construction |
+| 1 — non-matcher `expect` tail | 2,372 / 9,872 (24%) | gate `47ba20fda2b`, execution-based | separate doc |
+| 2 — needle matches only a comment | see `comment_cheat_spec_census_2026-08-09.md` | — | — |
+
+The `scripts/check/census-spec-vacuity.spl` driver was run over the whole
+corpus in parallel as corroboration; its index phase alone exceeds 10 minutes
+under the interpreter fallback (see the O(n²) note below), which is why the
+scoring above was carried out on an independently-controlled path rather than
+blocked on it. Both scorers implement the same published rules and were each
+validated against a planted positive control before being trusted.
 
 ## What this census is, and what it is not
 
