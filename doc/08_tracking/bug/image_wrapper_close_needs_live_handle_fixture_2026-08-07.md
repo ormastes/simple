@@ -1,7 +1,31 @@
 # Resource wrapper double-close on a genuinely-acquired handle is untested (Image + FileLock)
 
-**Status:** OPEN. **Filed:** 2026-08-07, during WP-J (pilot resource migration,
+**Status:** OPEN — ARCHITECTURAL, root cause now narrowed. **Filed:** 2026-08-07,
+during WP-J (pilot resource migration,
 `doc/03_plan/language/resource/resource_parallel_agent_plan_2026-08-06.md`).
+
+**Re-checked 2026-08-09/10:** `test/fixture/io/tiny_1x1.png` already exists in
+the tree (added in a later commit than this doc, `7868b6ab6e2`) and IS a
+genuinely valid PNG — `file` confirms `PNG image data, 1 x 1, 8-bit/color
+RGBA, non-interlaced`, unlike the "hand-assembled minimal PNG" this doc
+originally flagged as suspect. Wrote the live-handle double-close test this
+doc calls for (`Image` via `load_image_resource`, close twice, assert no
+crash/double-free) and ran it: `load_image_resource` still returned `nil` —
+`rt_image_load` returns `0` on this fixture too. Ruled out a path-resolution
+bug directly: an absolute-path probe against the same file also returned
+`nil` from `rt_image_load`. So the "may be an unrelated path-resolution
+issue" alternative in the original Unblock condition is eliminated; this is
+specifically the repo's `stb_image` build (`src/runtime/runtime_image.c:28`)
+rejecting a real, standards-valid 1x1 RGBA PNG, not an artifact of a
+hand-assembled fixture. Did not chase the `stb_image`/`runtime_image.c` C
+side further — out of the interpreter-only, non-native-build scope of this
+verification pass, and debugging a vendored decoder's rejection of a
+technically-tiny image is its own investigation. The new test was written,
+confirmed to fail for this reason, and then **reverted** rather than landed
+red: it does not add coverage of the double-close guard (the load itself
+never succeeds, so the guard is never reached on a live handle), so leaving
+it in the tree would only be a duplicate marker for this same doc, not a
+stronger regression check. Unblock condition updated below.
 
 **Two wrappers, same root cause.** `FileLock` (`src/lib/nogc_sync_mut/sffi/io.spl`)
 hit the identical bug shape one level worse: its original spec fabricated
