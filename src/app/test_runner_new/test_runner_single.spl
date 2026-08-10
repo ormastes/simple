@@ -28,7 +28,7 @@ use app.io.mod.{env_get}
 use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES}
 use std.string_core.{char_code}
 use std.common.coverage_sdn.{parse_coverage_sdn, merge_coverage, render_coverage_sdn}
-use app.test_daemon.light_protocol.{timeout_verdict_line, has_verdict_line, exit_code_reason}
+use app.test_daemon.light_protocol.{timeout_verdict_line, has_verdict_line, exit_code_reason, unrun_verdict_line, unrun_reason}
 
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
@@ -1057,6 +1057,19 @@ fn main() -> i64:
         failed = 1
         passed = 0
         print "error: test-runner: no examples executed"
+        # Emit a verdict line for the file that RAN NOTHING. The exit code was
+        # already correct here (this branch fails closed at exit 1), but with no
+        # `^SPEC FILE VERDICT:` line the file was invisible to every sweep that
+        # counts verdict lines rather than exit codes — reading as NOT YET RUN
+        # instead of BROKEN. That is the same invisibility the timeout branch
+        # above closed, and it is why 24 unresolvable render-lane modules sat
+        # undetected. Suppressed when the child already printed a verdict, so a
+        # real verdict is never shadowed by a synthetic one.
+        # Bug: unrun_spec_emits_no_verdict_line_2026-08-10.
+        if not has_verdict_line(combined):
+            val unrun_why = unrun_reason(combined)
+            print "error: test-runner: spec executed nothing ({unrun_why})"
+            print unrun_verdict_line(run.path, unrun_why)
     else:
         # BUG FIX (spec_runner_describe_tail_expression_exit_code): when a
         # `describe(...)` block is the TAIL EXPRESSION of `fn main()`, its

@@ -66,6 +66,43 @@ fn timeout_verdict_line(path: text, reason: text, budget_ms: i64) -> text:
 fn has_verdict_line(output: text) -> bool:
     output.contains("SPEC FILE VERDICT:")
 
+# Unrun verdict emission (bug: unrun_spec_emits_no_verdict_line_2026-08-10)
+# ---------------------------------------------------------------------------
+# Same invisibility mechanism as the timeout line above, different cause. A
+# spec that CANNOT LOAD — its `use` names a module that does not exist, it does
+# not parse, or it otherwise reaches the driver epilogue having executed
+# nothing — never emits a verdict line either. The exit code is already correct
+# and loud (the `real_executed == 0` guard in test_runner_single.spl fails
+# closed at exit 1), but any sweep that counts `^SPEC FILE VERDICT:` lines
+# instead of exit codes reads such a file as NOT YET RUN rather than BROKEN.
+# That is how 24 missing render-lane modules / 25 specs stayed invisible: the
+# per-file exit code was never what the automation looked at.
+#
+# The shape is byte-compatible with report_spec_file_verdict and with
+# timeout_verdict_line. `executed=0 dropped=1` is the load-bearing pair: it
+# distinguishes a spec that DECLARED examples but could not load (this line)
+# from a spec that honestly declares zero examples, and it keeps the file RED
+# under the existing `dropped == 0` greenwash gate in test_runner_single.spl,
+# which refuses to treat any verdict with dropped>0 as positive evidence of
+# completion. `unrun=1` and `reason=` are appended AFTER dropped= so no
+# existing parser is disturbed.
+fn unrun_verdict_line(path: text, reason: text) -> text:
+    "SPEC FILE VERDICT: {path} declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason={reason}"
+
+# Classify WHY a spec executed nothing, from the child's combined output. The
+# reason is a grep-able token on the verdict line so a sweep can separate a
+# missing module (an infrastructure gap someone must land) from a spec that
+# genuinely declares no examples (an authoring gap). Ordered most-specific
+# first; falls back to a token that never claims more than it knows.
+fn unrun_reason(output: text) -> text:
+    if output.contains("Cannot resolve module:"):
+        return "unresolved-module"
+    if output.contains("compile failed: parse:") or output.contains("error: parse") or output.contains("error: syntax") or output.contains("Unexpected token"):
+        return "parse-error"
+    if output.contains("Cannot resolve") or output.contains("unresolved symbol"):
+        return "unresolved-symbol"
+    return "zero-examples"
+
 # Human-readable gloss for a process exit status seen on the test lane. Exit
 # codes here have repeatedly been misread (144 was chased as a spec defect when
 # it comes from the reporting harness), so every timeout/abort report prints
