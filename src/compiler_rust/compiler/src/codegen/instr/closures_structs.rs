@@ -417,7 +417,11 @@ pub(crate) fn compile_aggregate_copy<M: Module>(
     let size_val = builder.ins().iconst(types::I64, alloc_bytes);
     let new_ptr = call_runtime_1(ctx, builder, "rt_alloc", size_val);
 
-    let untag_mask = builder.ins().iconst(types::I64, !1i64);
+    // The tag is THREE bits (`runtime::value::tags::TAG_MASK == 0b111`), not
+    // one. Masking only bit 0 left TAG_SPECIAL values looking like pointers:
+    // `RuntimeValue::NIL == 3`, and `3 & !1 == 2`, so the null guard below did
+    // not fire and the loop dereferenced address 2.
+    let untag_mask = builder.ins().iconst(types::I64, !7i64);
     let src_ptr = builder.ins().band(src_tagged, untag_mask);
     let zero = builder.ins().iconst(types::I64, 0);
     let src_is_null = builder.ins().icmp(IntCC::Equal, src_ptr, zero);
@@ -426,6 +430,11 @@ pub(crate) fn compile_aggregate_copy<M: Module>(
     for w in 0..words {
         let off = (w * 8) as i32;
         let word = builder.ins().load(types::I64, MemFlags::new(), load_ptr, off);
+        // `rt_alloc` is `malloc`, so the fresh block is UNINITIALISED and the
+        // nil-path self-copy published malloc garbage as struct fields — the
+        // next read through one of those words dereferenced a random 64-bit
+        // value. Zero-fill the nil case instead.
+        let word = builder.ins().select(src_is_null, zero, word);
         builder.ins().store(MemFlags::new(), word, new_ptr, off);
     }
 

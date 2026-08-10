@@ -168,7 +168,16 @@ impl LlvmBackend {
             .map_err(|e| crate::error::factory::llvm_build_failed("ptr_to_int", &e))?;
 
         // Untag, then branch-free null guard: a nil aggregate would fault.
-        let untag_mask = i64_type.const_int(u64::MAX - 1, false);
+        //
+        // The tag is THREE bits wide (`runtime::value::tags::TAG_MASK == 0b111`;
+        // TAG_INT=0, TAG_HEAP=1, TAG_FLOAT=2, TAG_SPECIAL=3), which is why
+        // `compile_field_get` below masks with `!0x7`. Masking only bit 0 here
+        // left the other two tag bits in the "pointer": `RuntimeValue::NIL` is
+        // `from_tag_payload(TAG_SPECIAL, 0) == 3`, and `3 & !1 == 2` — non-zero,
+        // so the null guard right below did NOT fire and the loop dereferenced
+        // address 2. Any special-tagged value (nil / true / false) reaching a
+        // struct-typed vreg took that path.
+        let untag_mask = i64_type.const_int(u64::MAX - 7, false);
         let src_ptr_i64 = builder
             .build_and(src_tagged, untag_mask, "aggcopy_src_untag")
             .map_err(|e| crate::error::factory::llvm_build_failed("and untag", &e))?;
@@ -197,8 +206,17 @@ impl LlvmBackend {
             let word = builder
                 .build_load(i64_type, from, "aggcopy_word")
                 .map_err(|e| crate::error::factory::llvm_build_failed("load word", &e))?;
+            // `rt_alloc` is `malloc` (src/runtime/simple_core/core_memory.spl),
+            // so the fresh block is UNINITIALISED. Self-copying it on the nil
+            // path published malloc garbage as struct fields; the next field
+            // read through one of those words dereferenced a random 64-bit
+            // value. Zero-fill instead, so a nil aggregate copies to a nil-like
+            // block rather than to fabricated pointers.
+            let word_final = builder
+                .build_select(is_null, i64_type.const_zero(), word.into_int_value(), "aggcopy_word_guarded")
+                .map_err(|e| crate::error::factory::llvm_build_failed("select word", &e))?;
             builder
-                .build_store(to, word)
+                .build_store(to, word_final)
                 .map_err(|e| crate::error::factory::llvm_build_failed("store word", &e))?;
         }
 

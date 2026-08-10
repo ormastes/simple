@@ -309,3 +309,79 @@ start lands near `+10514`; cross-reference which MIR `Copy`/`AggregateCopy`
 instruction it lowers from, and which source-level struct/Dict operation
 that MIR instruction traces back to via the MIR-to-source span table if one
 exists.
+
+---
+
+## UPDATE 2026-08-10 (part 2) — `AggregateCopy` untag mask is 1 bit wide but the
+## tag is 3 bits; `RuntimeValue::NIL` therefore dereferences address 2. FIXED.
+
+Pinned base commit for this pass: `9299f90c6cf12e34d68cd4c000300928a00141db`
+(worktree checkout, `origin/main` at `64871e70eae280e521b6a04c42ee286561657303`
+carried no change to either file touched here).
+
+### Two concrete defects, both in `compile_aggregate_copy`
+
+**1. Wrong untag mask (the crash).** The runtime tag is THREE bits —
+`src/compiler_rust/runtime/src/value/tags.rs`: `TAG_MASK = 0b111`,
+`TAG_INT=0`, `TAG_HEAP=1`, `TAG_FLOAT=2`, `TAG_SPECIAL=3`. `compile_field_get`
+(same file, ~60 lines below) correctly masks with `!0x7`. `compile_aggregate_copy`
+masked with `u64::MAX - 1` (LLVM) / `!1i64` (Cranelift) — bit 0 only.
+`RuntimeValue::NIL == from_tag_payload(TAG_SPECIAL, 0) == 3`, and `3 & !1 == 2`,
+which is **non-zero**, so the "branch-free null guard" immediately below did not
+fire and the copy loop loaded from address `0x2`.
+
+**2. Nil path published malloc garbage.** `rt_alloc` is plain `malloc`
+(`src/runtime/simple_core/core_memory.spl:16`), so the fresh block is
+uninitialised. The null path self-copied that block, i.e. it published malloc
+garbage as the struct's fields. A later read through one of those words then
+dereferences a random 64-bit value — which is exactly the shape of the
+`rax = 0x7e273dfd379406e6` fault recorded in the UPDATE above (low 3 bits `110`
+is not a valid tag, so that value was never a `RuntimeValue` at all). The
+doc-comment claim that the guard "cannot turn a wrong answer into a crash" was
+therefore false; it deferred the crash instead of preventing it.
+
+### Minimal reproduction (real native execution, not a spec harness)
+
+```simple
+struct Item:
+    a: i64
+    b: i64
+
+fn main() -> i64:
+    var d: Dict<text, Item> = {}
+    d["hit"] = Item(a: 1, b: 2)
+    val miss: Item = d["nope"]      # dict MISS -> RuntimeValue::NIL == 3
+    print "miss.a={miss.a} miss.b={miss.b}"
+    0
+```
+
+Before (seed built from the pinned commit, `--features llvm`), under gdb:
+
+```
+Thread 2 "simple-main" received signal SIGSEGV, Segmentation fault.
+rax  0x2   2
+=> mov (%rax),%rsi
+```
+
+After the fix: `miss.a=0 miss.b=0`, exit 0. A write-then-read-back case
+(`d[k] = v` immediately followed by `val x: T = d[k]`, the pattern at
+`module_assembly.spl:202-205`) also runs clean and prints correct field values.
+
+### Verdict on the (a)/(b)/(c) question from the UPDATE above
+
+**(b)** — a valid MIR-level handle that CODEGEN mishandles. No frontend `.spl`
+defect and no MIR-lowering ordering bug is involved; `module_assembly.spl` needs
+no change. `copy_if_value_type` correctly emits `AggregateCopy` for a
+declared-`struct` binding; the two backends then mis-decode the handle.
+
+### Still open
+
+- Not re-verified end-to-end against a fresh Stage-2/Stage-3 bootstrap — the
+  crashing binary from the earlier campaign was not available (the `bootstrap/`
+  artifacts on disk are the stale 2026-08-09 stripped ones). The minimal repro
+  above is a real native-execution oracle for the mechanism, not a full
+  bootstrap re-run.
+- No regression test added: an in-process `.spl` spec cannot reach the JIT/native
+  lane (see `reference_in_process_specs_cannot_reach_jit`), so a spec here would
+  be fail-open. A native-lane fixture for this belongs with the existing
+  `check-no-call-zero.shs`-style bootstrap gates.
