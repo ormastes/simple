@@ -605,14 +605,18 @@ impl MirLowering:
                 val fallback_expr = HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: fallback_type, span: span)
                 val let_disc = mir_hir_stmt_kind_disc(HirStmtKind.Let(SymbolId(id: -1), fallback_type, fallback_expr))
                 if mir_hir_stmt_kind_disc(stmt_kind_value) == let_disc:
-                    val let_symbol = match stmt_kind_value:
+                    # Keep the resolved SymbolId scalar across this staged
+                    # boundary. Wrapping the enum payload in SymbolId? and
+                    # then unwrapping it can preserve the option tag while
+                    # losing the payload in the self-hosted native lane.
+                    val let_symbol_id = match stmt_kind_value:
                         case HirStmtKind.Let(symbol, _, _):
                             if symbol != nil:
-                                Some(symbol)
+                                mir_stmt_symbol_id_value(symbol)
                             else:
-                                nil
+                                -1
                         case _:
-                            nil
+                            -1
                     val let_type = match stmt_kind_value:
                         case HirStmtKind.Let(_, type_, _):
                             type_
@@ -624,12 +628,8 @@ impl MirLowering:
                         case _:
                             fallback_expr
 
-                    if let_symbol.?:
-                        val symbol_value = let_symbol ?? SymbolId(id: -1)
-                        val symbol_value_id = mir_stmt_symbol_id_value(symbol_value)
-                        if symbol_value_id < 0:
-                            self.error("let binding has no resolved symbol", Some(span))
-                            return
+                    if let_symbol_id >= 0:
+                        val symbol_value_id = let_symbol_id
                         # `val f = \x: ...` -- keep the existing bind-time
                         # capture snapshot, and materialize non-capturing lambdas
                         # through the same lifted FuncPtr used for lambda args.
