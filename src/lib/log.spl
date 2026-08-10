@@ -660,9 +660,17 @@ fn log_dispatch_text(level: i64, subsys: i64, msg: text):
     # Non-panic stderr decision: backend kind=2 ("console", see
     # LogBackendOps.kind) has no implementation anywhere in this facade -
     # _dispatch_to_backends only ever handles kind==1 (ring). Until a real
-    # console backend exists, stderr intentionally stays panic-only; this is
-    # a documented decision, not a silent gap.
-    if _g_panic_mode:
+    # console backend exists, sub-ERROR levels stay ring-only.
+    #
+    # ERROR/FATAL additionally go straight to stderr. Without this the ONLY
+    # backend is the ring buffer (kind==1), which nothing drains on a CLI exit
+    # path -- so every `std.log.error(...)` in every command wrapper produced
+    # no output at all and the process exited non-zero SILENTLY. That is the
+    # exact shape that hid the `simple replay` unbounded self-spawn for days
+    # (doc/08_tracking/bug/simple_replay_self_spawns_unbounded_process_chain_2026-08-10.md):
+    # the diagnostic was written, but never surfaced. Levels below ERROR stay
+    # ring-only, so this does not reintroduce log spam.
+    if _g_panic_mode or level >= LOG_ERROR:
         rt_stderr_write(msg)
         rt_stderr_write("\n")
         rt_stderr_flush()
