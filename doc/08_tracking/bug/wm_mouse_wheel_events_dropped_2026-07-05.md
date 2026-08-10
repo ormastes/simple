@@ -69,3 +69,18 @@ Scrolling with mouse wheel or trackpad inside real SimpleOS hosted WM or real UI
 
 ## Next Step
 Add EVT_MOUSE_WHEEL case to both entrypoints; wire wheel delta through to widget/session layer. Also add right/middle button handling in hosted_entry.spl to match ui.browser behavior.
+
+## 2026-08-10 — this FIXED status was only HALF TRUE until now
+
+`test/01_unit` and `test/unit` (and `test/02_integration`/`test/integration`)
+are duplicate trees and **both execute** — `test_runner_new` has no path
+allowlist. The fix recorded above landed on only ONE leg of
+`os/drivers/input/ps2_mouse_spec.spl`. The legacy leg held 39 assertions against the numbered leg's 115, so the wheel/scroll-event oracles never ran on it.
+So this document read FIXED while the defect was still live on a tree that
+runs on every `bin/simple test`.
+
+Completed 2026-08-10 in commit `e57b019ca2d75ae4380c9a2013b987200297290d`, which converges the pair and trims
+`scripts/check/test_tree_divergence_baseline.txt` accordingly. Census and
+method: `doc/08_tracking/test/half_landed_fixes_across_duplicate_test_trees_2026-08-10.md`.
+The class is now fenced: `scripts/check/check-test-tree-divergence.shs`
+fails a push whose range edits one leg and leaves the twin divergent.

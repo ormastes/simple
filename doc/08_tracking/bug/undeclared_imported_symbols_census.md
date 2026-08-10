@@ -867,3 +867,18 @@ python3 scratchpad/undecl_census/sample.py               # 40-entry hand-verific
 | `test/fixtures/concurrency_api_misuse/spawn_limited_number_suffix_alias.spl` (L1) | 1 | `spawn_limited2` | `std.concurrent.thread` |
 | `test/fixtures/concurrency_api_misuse/thread_spawn_number_suffix_alias.spl` (L1) | 1 | `thread_spawn2` | `std.concurrent.thread` |
 | `test/system/simpleos_desktop_framebuffer_spec.spl` (L75) | 1 | `send_harness_marker` | `os.compositor.qemu_capture` |
+
+## 2026-08-10 — this FIXED status was only HALF TRUE until now
+
+`test/01_unit` and `test/unit` (and `test/02_integration`/`test/integration`)
+are duplicate trees and **both execute** — `test_runner_new` has no path
+allowlist. The fix recorded above landed on only ONE leg of
+`os/compositor/wm_action_applier_spec.spl and lib/common/window_protocol/input_translator_spec.spl`. For \`input_translator_spec\` the divergence was pure block order; for \`wm_action_applier_spec\` the two legs had each received a DIFFERENT repair, so that one needed a genuine merge — and the merged spec is RED for an unrelated, pre-existing reason filed as \`wm_action_applier_spec_dead_on_both_legs_vulkan_order_env_get_2026-08-10.md\`.
+So this document read FIXED while the defect was still live on a tree that
+runs on every `bin/simple test`.
+
+Completed 2026-08-10 in commit `f6a6145ad4d5002731d019f3b0cc13b19c4c8b54 / b5119f4889e5fa2226451f845f53b55b80f5029e`, which converges the pair and trims
+`scripts/check/test_tree_divergence_baseline.txt` accordingly. Census and
+method: `doc/08_tracking/test/half_landed_fixes_across_duplicate_test_trees_2026-08-10.md`.
+The class is now fenced: `scripts/check/check-test-tree-divergence.shs`
+fails a push whose range edits one leg and leaves the twin divergent.

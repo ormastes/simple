@@ -135,3 +135,18 @@ matcher usage) is otherwise correct — see
 - `reference_jit_option_i64_value3_none_collision` (session memory) — same
   shape of bug (a legitimate small-integer payload colliding with a
   none/invalid sentinel), different site
+
+## 2026-08-10 — this FIXED status was only HALF TRUE until now
+
+`test/01_unit` and `test/unit` (and `test/02_integration`/`test/integration`)
+are duplicate trees and **both execute** — `test_runner_new` has no path
+allowlist. The fix recorded above landed on only ONE leg of
+`compiler/hir/resolve_import_symbols_spec.spl`. The legacy leg carried 3 \`it\` blocks / 119 lines against the numbered leg's 27 / 750 — five separate bug docs, this one included, all recorded FIXED against a spec whose other executing copy had none of the repairs.
+So this document read FIXED while the defect was still live on a tree that
+runs on every `bin/simple test`.
+
+Completed 2026-08-10 in commit `6f66d2a6c9885c70fd8fb0163e445cadd0881e1c`, which converges the pair and trims
+`scripts/check/test_tree_divergence_baseline.txt` accordingly. Census and
+method: `doc/08_tracking/test/half_landed_fixes_across_duplicate_test_trees_2026-08-10.md`.
+The class is now fenced: `scripts/check/check-test-tree-divergence.shs`
+fails a push whose range edits one leg and leaves the twin divergent.

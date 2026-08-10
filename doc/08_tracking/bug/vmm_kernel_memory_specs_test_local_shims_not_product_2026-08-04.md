@@ -291,3 +291,18 @@ returns -EEXIST. **The allocator itself is correct**; only the spec was vacuous.
 `vmm_cow_spec.spl` was checked: both legs are byte-identical and both already
 carry the `_SimCowResult` fix. No other os/kernel memory spec has a by-value
 struct-param mutation helper.
+
+## 2026-08-10 — this FIXED status was only HALF TRUE until now
+
+`test/01_unit` and `test/unit` (and `test/02_integration`/`test/integration`)
+are duplicate trees and **both execute** — `test_runner_new` has no path
+allowlist. The fix recorded above landed on only ONE leg of
+`os/kernel/ipc/execve_spec.spl`. This is the SECOND half-truth in this document (the first, \`vmm_vma_spec\`, was completed in \`b4c4382e0c5\`): the legacy leg still called plain \`syscall_handler(...)\` with a fresh \`IpcManager.new()\` per call, so every \`_cap_check\`-gated syscall was blanket-EPERM and the spawned task existed only in the callee's value-copy — the leg never reached \`_handle_exec\` at all.
+So this document read FIXED while the defect was still live on a tree that
+runs on every `bin/simple test`.
+
+Completed 2026-08-10 in commit `6788fd65c4c0e5c0189bf497727fb7fce2273ac5`, which converges the pair and trims
+`scripts/check/test_tree_divergence_baseline.txt` accordingly. Census and
+method: `doc/08_tracking/test/half_landed_fixes_across_duplicate_test_trees_2026-08-10.md`.
+The class is now fenced: `scripts/check/check-test-tree-divergence.shs`
+fails a push whose range edits one leg and leaves the twin divergent.

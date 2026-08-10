@@ -140,3 +140,18 @@ the new behavioural spec red. Guard added at
 `test/01_unit/compiler/backend/interpreter_backend_spec.spl` ("tears down a
 popped scope so its names stop resolving") replacing reliance on the
 pre-existing source-grep-only check.
+
+## 2026-08-10 — this FIXED status was only HALF TRUE until now
+
+`test/01_unit` and `test/unit` (and `test/02_integration`/`test/integration`)
+are duplicate trees and **both execute** — `test_runner_new` has no path
+allowlist. The fix recorded above landed on only ONE leg of
+`compiler/backend/interpreter_backend_spec.spl`. The legacy leg held 38 assertions against the numbered leg's 52; the retarget commit \`45351f15d5c\` was half-landed on the same pair.
+So this document read FIXED while the defect was still live on a tree that
+runs on every `bin/simple test`.
+
+Completed 2026-08-10 in commit `0e8a8cc87bc94e22c90ceb7eaab1e50aec668083`, which converges the pair and trims
+`scripts/check/test_tree_divergence_baseline.txt` accordingly. Census and
+method: `doc/08_tracking/test/half_landed_fixes_across_duplicate_test_trees_2026-08-10.md`.
+The class is now fenced: `scripts/check/check-test-tree-divergence.shs`
+fails a push whose range edits one leg and leaves the twin divergent.
