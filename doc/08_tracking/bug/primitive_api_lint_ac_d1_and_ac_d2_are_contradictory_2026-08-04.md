@@ -1,7 +1,12 @@
 # primitive_api lint: AC-D1 and AC-D2 assert opposite verdicts on the same signature shape
 
-**Status:** OPEN — confirmed genuine spec/rule-design contradiction, not a
-code bug (re-verified 2026-08-09)
+**Status:** ARCHITECTURAL-OPEN — confirmed genuine spec/rule-design
+contradiction, not a code bug (re-verified 2026-08-09, final terminal-status
+pass 2026-08-10: `_all_same_primitive` at
+`src/compiler/90.tools/fix/rules/impl_/lint_primitive_api.spl:160` unchanged,
+contradiction still reproduces exactly as described; resolving it requires an
+owner to choose an AST/body-aware discriminator, a deliberate `deny`-level
+lint-semantics change, not a drive-by fix)
 **Found:** 2026-08-04
 
 ## Re-verification (2026-08-09)
