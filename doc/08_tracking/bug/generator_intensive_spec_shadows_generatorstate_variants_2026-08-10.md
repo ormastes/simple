@@ -35,3 +35,35 @@ Rewrite the spec against the real `GeneratorState` enum and `Generator`
 class in `src/app/interpreter/async_runtime/generators.spl`, exercising all
 four real variants (including `Suspended`'s `env` payload across a real
 yield/resume), not just a two-state `Yielded`/`Completed` model.
+
+## Status: FIXED (partially, via documented mirror) 2026-08-10
+
+Both spec copies (`test/01_unit/lib/nogc_async_mut/generator_intensive_spec.spl`
+and `test/unit/lib/nogc_async_mut/generator_intensive_spec.spl`, kept
+byte-identical) now declare `enum GeneratorState { Created, Suspended
+(next_value, env), Running, Completed }` — matching the real product enum's
+variant names and payload shape — instead of the old `Yielded`/`Completed`
+shadow. All four variants have direct predicate coverage, and a new
+`LifecycleGenerator` class + "Generator Lifecycle (real GeneratorState state
+machine)" describe block drives a generator through
+`Created -> Suspended -> ... -> Completed` end to end, asserting on the
+`env` payload advancing across resumes.
+
+A true `use`-import of the real `GeneratorState`/`Generator` type was
+attempted rather than a local mirror. It hit a second, deeper defect: the
+defining module `src/app/interpreter/async_runtime/generators.spl` does not
+parse under the current grammar (struct-style enum-variant construction,
+`&T`/`Box<T>` reference/generic syntax). One parse blocker in that module
+(`gen` used as a parameter name, a reserved keyword) was fixed in this pass
+since the module is unreferenced elsewhere in the tree and the rename is
+safe; the remaining parse blockers are filed as a new, separate bug:
+`doc/08_tracking/bug/generator_async_runtime_module_fails_to_parse_2026-08-10.md`.
+The spec's local enum is explicitly documented (in its own header comment)
+as a stand-in mirror pending that fix, not a silent shadow — variant names
+and payload arity now match the real type exactly, only `env`'s payload
+type is downgraded from `Environment` to a placeholder `i64`.
+
+Verdicts: `bin/simple test test/01_unit/lib/nogc_async_mut/generator_intensive_spec.spl`
+→ `Results: 33 total, 33 passed, 0 failed`. Same command against the
+`test/unit/...` twin → identical `Results: 33 total, 33 passed, 0 failed`.
+(27 examples before this fix; 6 new examples added.)

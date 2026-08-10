@@ -13,14 +13,37 @@ finite and infinite (bounded) generators, and GeneratorState transitions.
 """
 
 # ─── GeneratorState ───────────────────────────────────────────
+#
+# Mirrors the REAL product `GeneratorState` in
+# src/app/interpreter/async_runtime/generators.spl:10 (`Created`, `Running`,
+# `Suspended(next_value, env)`, `Completed`) rather than the old shadow enum
+# (`Yielded`/`Completed` only). The real module cannot be imported directly:
+# even after fixing its `gen` reserved-keyword parameter name, it still fails
+# to parse (struct-style enum-variant construction, `&T`/`Box<T>` reference
+# syntax) under the current grammar — see
+# doc/08_tracking/bug/generator_async_runtime_module_fails_to_parse_2026-08-10.md.
+# `env` is therefore mirrored here as a placeholder `i64` token (the resume
+# counter) rather than the real `Environment` struct.
 
 enum GeneratorState:
-    Yielded(value: i64)
+    Created
+    Suspended(next_value: i64, env: i64)
+    Running
     Completed
 
 impl GeneratorState:
-    fn is_yielded() -> bool:
-        if val GeneratorState.Yielded(_) = self:
+    fn is_created() -> bool:
+        if val GeneratorState.Created = self:
+            return true
+        return false
+
+    fn is_suspended() -> bool:
+        if val GeneratorState.Suspended(_, _) = self:
+            return true
+        return false
+
+    fn is_running() -> bool:
+        if val GeneratorState.Running = self:
             return true
         return false
 
@@ -29,10 +52,15 @@ impl GeneratorState:
             return true
         return false
 
-    fn get_value() -> i64:
-        if val GeneratorState.Yielded(v) = self:
+    fn get_next_value() -> i64:
+        if val GeneratorState.Suspended(v, _e) = self:
             return v
         return 0
+
+    fn get_env() -> i64:
+        if val GeneratorState.Suspended(_v, e) = self:
+            return e
+        return -1
 
 # ─── CountingGenerator ───────────────────────────────────────
 
@@ -50,7 +78,7 @@ class CountingGenerator:
         self.current = self.current + 1
         if self.current >= self.limit:
             self.done = true
-        return GeneratorState.Yielded(value: self.current)
+        return GeneratorState.Suspended(next_value: self.current, env: 0)
 
     fn is_complete() -> bool:
         return self.done
@@ -60,7 +88,7 @@ fn collect_counting(cg: CountingGenerator, max_items: i64) -> [i64]:
     var count = 0
     while count < max_items and not cg.is_complete():
         var state = cg.next()
-        if val GeneratorState.Yielded(v) = state:
+        if val GeneratorState.Suspended(v, _e) = state:
             results = results + [v]
         count = count + 1
     return results
@@ -83,7 +111,7 @@ class FibGenerator:
         self.prev = self.curr
         self.curr = next_curr
         self.remaining = self.remaining - 1
-        return GeneratorState.Yielded(value: value)
+        return GeneratorState.Suspended(next_value: value, env: 0)
 
     fn is_complete() -> bool:
         return self.remaining <= 0
@@ -93,7 +121,7 @@ fn collect_fib(fg: FibGenerator, max_items: i64) -> [i64]:
     var count = 0
     while count < max_items and not fg.is_complete():
         var state = fg.next()
-        if val GeneratorState.Yielded(v) = state:
+        if val GeneratorState.Suspended(v, _e) = state:
             results = results + [v]
         count = count + 1
     return results
@@ -114,7 +142,7 @@ class RangeGenerator:
         self.current = self.current + 1
         if self.current >= self.end_val - 1:
             self.done = true
-        return GeneratorState.Yielded(value: self.current)
+        return GeneratorState.Suspended(next_value: self.current, env: 0)
 
     fn is_complete() -> bool:
         return self.done
@@ -124,7 +152,7 @@ fn collect_range(rg: RangeGenerator, max_items: i64) -> [i64]:
     var count = 0
     while count < max_items and not rg.is_complete():
         var state = rg.next()
-        if val GeneratorState.Yielded(v) = state:
+        if val GeneratorState.Suspended(v, _e) = state:
             results = results + [v]
         count = count + 1
     return results
@@ -142,7 +170,7 @@ class SingleValueGenerator:
         if self.done:
             return GeneratorState.Completed
         self.done = true
-        return GeneratorState.Yielded(value: self.val_data)
+        return GeneratorState.Suspended(next_value: self.val_data, env: 0)
 
     fn is_complete() -> bool:
         return self.done
@@ -152,7 +180,7 @@ fn collect_single(sg: SingleValueGenerator, max_items: i64) -> [i64]:
     var count = 0
     while count < max_items and not sg.is_complete():
         var state = sg.next()
-        if val GeneratorState.Yielded(v) = state:
+        if val GeneratorState.Suspended(v, _e) = state:
             results = results + [v]
         count = count + 1
     return results
@@ -188,7 +216,7 @@ class StepGenerator:
         self.current = self.current + self.step
         if self.current >= self.limit:
             self.done = true
-        return GeneratorState.Yielded(value: self.current)
+        return GeneratorState.Suspended(next_value: self.current, env: 0)
 
     fn is_complete() -> bool:
         return self.done
@@ -198,7 +226,7 @@ fn collect_step(sg: StepGenerator, max_items: i64) -> [i64]:
     var count = 0
     while count < max_items and not sg.is_complete():
         var state = sg.next()
-        if val GeneratorState.Yielded(v) = state:
+        if val GeneratorState.Suspended(v, _e) = state:
             results = results + [v]
         count = count + 1
     return results
@@ -213,8 +241,8 @@ class DoublingGenerator:
 
     me next() -> GeneratorState:
         var state = self.source.next()
-        if val GeneratorState.Yielded(v) = state:
-            return GeneratorState.Yielded(value: v * 2)
+        if val GeneratorState.Suspended(v, _e) = state:
+            return GeneratorState.Suspended(next_value: v * 2, env: 0)
         return GeneratorState.Completed
 
     fn is_complete() -> bool:
@@ -225,7 +253,7 @@ fn collect_doubling(dg: DoublingGenerator, max_items: i64) -> [i64]:
     var count = 0
     while count < max_items and not dg.is_complete():
         var state = dg.next()
-        if val GeneratorState.Yielded(v) = state:
+        if val GeneratorState.Suspended(v, _e) = state:
             results = results + [v]
         count = count + 1
     return results
@@ -240,8 +268,8 @@ class IdentityGenerator:
 
     me next() -> GeneratorState:
         var state = self.source.next()
-        if val GeneratorState.Yielded(v) = state:
-            return GeneratorState.Yielded(value: v)
+        if val GeneratorState.Suspended(v, _e) = state:
+            return GeneratorState.Suspended(next_value: v, env: 0)
         return GeneratorState.Completed
 
     fn is_complete() -> bool:
@@ -252,7 +280,7 @@ fn collect_identity(ig: IdentityGenerator, max_items: i64) -> [i64]:
     var count = 0
     while count < max_items and not ig.is_complete():
         var state = ig.next()
-        if val GeneratorState.Yielded(v) = state:
+        if val GeneratorState.Suspended(v, _e) = state:
             results = results + [v]
         count = count + 1
     return results
@@ -268,9 +296,9 @@ class EvenFilterGenerator:
     me next() -> GeneratorState:
         while not self.source.is_complete():
             var state = self.source.next()
-            if val GeneratorState.Yielded(v) = state:
+            if val GeneratorState.Suspended(v, _e) = state:
                 if v % 2 == 0:
-                    return GeneratorState.Yielded(value: v)
+                    return GeneratorState.Suspended(next_value: v, env: 0)
         return GeneratorState.Completed
 
     fn is_complete() -> bool:
@@ -281,7 +309,7 @@ fn collect_even_filter(ef: EvenFilterGenerator, max_items: i64) -> [i64]:
     var count = 0
     while count < max_items and not ef.is_complete():
         var state = ef.next()
-        if val GeneratorState.Yielded(v) = state:
+        if val GeneratorState.Suspended(v, _e) = state:
             results = results + [v]
         count = count + 1
     return results
@@ -296,8 +324,8 @@ class PassAllFilterGenerator:
 
     me next() -> GeneratorState:
         var state = self.source.next()
-        if val GeneratorState.Yielded(v) = state:
-            return GeneratorState.Yielded(value: v)
+        if val GeneratorState.Suspended(v, _e) = state:
+            return GeneratorState.Suspended(next_value: v, env: 0)
         return GeneratorState.Completed
 
     fn is_complete() -> bool:
@@ -308,7 +336,7 @@ fn collect_pass_all(pf: PassAllFilterGenerator, max_items: i64) -> [i64]:
     var count = 0
     while count < max_items and not pf.is_complete():
         var state = pf.next()
-        if val GeneratorState.Yielded(v) = state:
+        if val GeneratorState.Suspended(v, _e) = state:
             results = results + [v]
         count = count + 1
     return results
@@ -334,17 +362,17 @@ describe "Generator Next":
     it "first next yields a value":
         var g =CountingGenerator.new(0, 5)
         var state = g.next()
-        expect(state.is_yielded()).to_equal(true)
-        expect(state.get_value()).to_equal(1)
+        expect(state.is_suspended()).to_equal(true)
+        expect(state.get_next_value()).to_equal(1)
 
     it "subsequent nexts yield incremented values":
         var g =CountingGenerator.new(0, 10)
         var s1 = g.next()
         var s2 = g.next()
         var s3 = g.next()
-        expect(s1.get_value()).to_equal(1)
-        expect(s2.get_value()).to_equal(2)
-        expect(s3.get_value()).to_equal(3)
+        expect(s1.get_next_value()).to_equal(1)
+        expect(s2.get_next_value()).to_equal(2)
+        expect(s3.get_next_value()).to_equal(3)
 
 describe "Counting Generator":
 
@@ -402,15 +430,15 @@ describe "Single Value Generator":
     it "yields one value then completes":
         var g =SingleValueGenerator.new(99)
         var state = g.next()
-        expect(state.is_yielded()).to_equal(true)
-        expect(state.get_value()).to_equal(99)
+        expect(state.is_suspended()).to_equal(true)
+        expect(state.get_next_value()).to_equal(99)
         expect(g.is_complete()).to_equal(true)
 
     it "next after single value returns Completed":
         var g =SingleValueGenerator.new(42)
         var s1 = g.next()
         var s2 = g.next()
-        expect(s1.is_yielded()).to_equal(true)
+        expect(s1.is_suspended()).to_equal(true)
         expect(s2.is_completed()).to_equal(true)
 
 describe "Empty Generator":
@@ -426,22 +454,37 @@ describe "Empty Generator":
 
 describe "GeneratorState":
 
-    it "Yielded state has a value":
-        var state = GeneratorState.Yielded(value: 10)
-        expect(state.is_yielded()).to_equal(true)
-        expect(state.get_value()).to_equal(10)
+    it "Suspended state has a next_value and env payload":
+        var state = GeneratorState.Suspended(next_value: 10, env: 3)
+        expect(state.is_suspended()).to_equal(true)
+        expect(state.get_next_value()).to_equal(10)
+        expect(state.get_env()).to_equal(3)
 
     it "Completed state has no value":
         var state = GeneratorState.Completed
         expect(state.is_completed()).to_equal(true)
-        expect(state.get_value()).to_equal(0)
+        expect(state.get_next_value()).to_equal(0)
 
-    it "is_yielded returns false for Completed":
+    it "is_suspended returns false for Completed":
         var state = GeneratorState.Completed
-        expect(state.is_yielded()).to_equal(false)
+        expect(state.is_suspended()).to_equal(false)
 
-    it "is_completed returns false for Yielded":
-        var state = GeneratorState.Yielded(value: 5)
+    it "is_completed returns false for Suspended":
+        var state = GeneratorState.Suspended(next_value: 5, env: 0)
+        expect(state.is_completed()).to_equal(false)
+
+    it "Created state reports is_created and nothing else":
+        var state = GeneratorState.Created
+        expect(state.is_created()).to_equal(true)
+        expect(state.is_running()).to_equal(false)
+        expect(state.is_suspended()).to_equal(false)
+        expect(state.is_completed()).to_equal(false)
+
+    it "Running state reports is_running and nothing else":
+        var state = GeneratorState.Running
+        expect(state.is_running()).to_equal(true)
+        expect(state.is_created()).to_equal(false)
+        expect(state.is_suspended()).to_equal(false)
         expect(state.is_completed()).to_equal(false)
 
 describe "Collect Helper":
@@ -466,7 +509,7 @@ describe "Generator After Completion":
         var s1 = g.next()
         var s2 = g.next()
         var s3 = g.next()
-        expect(s1.is_yielded()).to_equal(true)
+        expect(s1.is_suspended()).to_equal(true)
         expect(s2.is_completed()).to_equal(true)
         expect(s3.is_completed()).to_equal(true)
 
@@ -529,3 +572,76 @@ describe "Step Generator":
         expect(vals[1]).to_equal(10)
         expect(vals[2]).to_equal(15)
         expect(vals[3]).to_equal(20)
+
+# ─── LifecycleGenerator ────────────────────────────────────────
+#
+# Exposes its own `state: GeneratorState` field so tests can observe the
+# real product's four-state cycle directly (Created -> Running -> Suspended
+# -> ... -> Completed), rather than inferring state only through the
+# yielded value the way the other generators above do.
+
+class LifecycleGenerator:
+    state: GeneratorState
+    values: [i64]
+    idx: i64
+
+    static fn new(values: [i64]) -> LifecycleGenerator:
+        return LifecycleGenerator(state: GeneratorState.Created, values: values, idx: 0)
+
+    me next() -> GeneratorState:
+        if val GeneratorState.Completed = self.state:
+            return self.state
+        self.state = GeneratorState.Running
+        if self.idx >= self.values.len():
+            self.state = GeneratorState.Completed
+            return self.state
+        var v = self.values[self.idx]
+        self.idx = self.idx + 1
+        self.state = GeneratorState.Suspended(next_value: v, env: self.idx)
+        return self.state
+
+    fn current_state() -> GeneratorState:
+        return self.state
+
+describe "Generator Lifecycle (real GeneratorState state machine)":
+
+    it "starts in the Created state before any next() call":
+        var lg = LifecycleGenerator.new([10, 20])
+        expect(lg.current_state().is_created()).to_equal(true)
+
+    it "moves Created -> Suspended on the first next(), carrying next_value and env":
+        var lg = LifecycleGenerator.new([10, 20])
+        var state = lg.next()
+        expect(state.is_suspended()).to_equal(true)
+        expect(state.get_next_value()).to_equal(10)
+        expect(state.get_env()).to_equal(1)
+        expect(lg.current_state().is_suspended()).to_equal(true)
+
+    it "moves Suspended -> Suspended across repeated resumes, env advancing each time":
+        var lg = LifecycleGenerator.new([10, 20, 30])
+        var s1 = lg.next()
+        var s2 = lg.next()
+        var s3 = lg.next()
+        expect(s1.get_next_value()).to_equal(10)
+        expect(s1.get_env()).to_equal(1)
+        expect(s2.get_next_value()).to_equal(20)
+        expect(s2.get_env()).to_equal(2)
+        expect(s3.get_next_value()).to_equal(30)
+        expect(s3.get_env()).to_equal(3)
+
+    it "moves Suspended -> Completed once all values are exhausted":
+        var lg = LifecycleGenerator.new([1])
+        var s1 = lg.next()
+        var s2 = lg.next()
+        expect(s1.is_suspended()).to_equal(true)
+        expect(s2.is_completed()).to_equal(true)
+        expect(lg.current_state().is_completed()).to_equal(true)
+
+    it "stays Completed on further next() calls, never re-entering Created":
+        var lg = LifecycleGenerator.new([])
+        var s1 = lg.next()
+        var s2 = lg.next()
+        var s3 = lg.next()
+        expect(s1.is_completed()).to_equal(true)
+        expect(s2.is_completed()).to_equal(true)
+        expect(s3.is_completed()).to_equal(true)
