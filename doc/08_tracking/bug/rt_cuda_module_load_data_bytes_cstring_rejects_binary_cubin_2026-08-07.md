@@ -1,6 +1,11 @@
 # `rt_cuda_module_load_data_bytes` rejects real cubin/fatbin binaries containing embedded NUL bytes
 
-**Status:** OPEN
+**Status:** ARCHITECTURAL-OPEN — fix location is entirely inside
+`src/compiler_rust/**` (both `runtime/src/cuda_runtime.rs:2402` and
+`compiler/src/interpreter_extern/gpu.rs:1540`), which is out of edit scope
+for a pure-Simple-only pass; verifying a fix additionally needs a real CUDA
+device, which this host lacks (confirmed final terminal-status pass
+2026-08-10: `CString::new(bytes)` is still present unchanged at both sites).
 **Found:** 2026-08-07
 **Component:** `src/compiler_rust/runtime/src/cuda_runtime.rs:2393`
 (`rt_cuda_module_load_data_bytes`, `feature = "cuda"` path) and its new
