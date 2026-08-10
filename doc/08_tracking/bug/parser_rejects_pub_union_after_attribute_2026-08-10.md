@@ -1,8 +1,6 @@
 # Parser rejects `pub union` after an attribute (`pub enum` works)
 
-**Status:** ARCHITECTURAL-OPEN — root-caused and fix verified, but the fix is
-a `src/compiler_rust/**` (Rust seed) edit, out of scope for a pure-Simple-only
-pass. See "Investigated 2026-08-10" below.
+**Status:** RESOLVED 2026-08-10 (stream N3) — see "Resolution" at the bottom.
 **Found:** 2026-08-10 by stream J4 (duplicate-test-tree merge, step 1)
 **Component:** `src/compiler/10.frontend/core/_ParserDecls/`
 **Binary:** `src/compiler_rust/target/bootstrap/simple` (33,653,056 bytes, mtime 2026-08-09 23:10)
@@ -106,3 +104,36 @@ permission: add the `TokenKind::Union` arm shown above at
 (~line 502), rebuild the seed, re-run the legacy + numbered
 `pub_enum_with_attribute_spec.spl` pair, then restore the union block to the
 numbered spec.
+
+## Resolution (2026-08-10, stream N3)
+
+Landed the `TokenKind::Union` arm in the live decorator-dispatch match of
+`parse_attributed_item()`
+(`src/compiler_rust/parser/src/parser_impl/items.rs`, next to the existing
+`Enum` arm), exactly as characterized above. The pure-Simple frontend
+(`src/compiler/10.frontend/`) was checked first and has **no `union`
+declaration parsing at all** — `union` as a declaration keyword is a
+seed-only construct there, so `items.rs` is the only place this can be fixed.
+
+Seed rebuilt (`cargo build --profile bootstrap --bin simple`) and redeployed
+to `src/compiler_rust/target/bootstrap/simple` (33,759,648 bytes). The repro
+from this doc now runs clean (`ok`, exit 0).
+
+The union block was then restored to
+`test/01_unit/compiler/parser/pub_enum_with_attribute_spec.spl`, making it
+identical to its legacy twin.
+
+Verdicts (`src/compiler_rust/target/bootstrap/simple test --timeout 900`):
+
+BEFORE (deployed seed without the arm):
+- `test/unit/compiler/parser/pub_enum_with_attribute_spec.spl` —
+  `declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=parse-error`
+  (`Unexpected token: expected Fn, found Union`)
+- `test/01_unit/compiler/parser/pub_enum_with_attribute_spec.spl` —
+  `declared>=2 executed=2 passed=2 failed=0 dropped=0` (union case absent)
+
+AFTER (rebuilt seed + restored coverage):
+- `test/unit/compiler/parser/pub_enum_with_attribute_spec.spl` —
+  `declared>=3 executed=3 passed=3 failed=0 dropped=0`
+- `test/01_unit/compiler/parser/pub_enum_with_attribute_spec.spl` —
+  `declared>=3 executed=3 passed=3 failed=0 dropped=0`

@@ -500,6 +500,17 @@ impl<'a> Parser<'a> {
                         }
                         return Ok(node);
                     }
+                    TokenKind::Union => {
+                        // `union` lowers to an enum node; without this arm a
+                        // decorator-shaped attribute (`@doc("...")`) before a
+                        // union fell through to the function parser and failed
+                        // with "expected Fn, found Union".
+                        let mut node = self.parse_union_with_attrs(attributes)?;
+                        if let Node::Enum(ref mut e) = node {
+                            e.visibility = visibility;
+                        }
+                        return Ok(node);
+                    }
                     TokenKind::Extern => {
                         let mut node = self.parse_extern_with_attrs(attributes)?;
                         if let Node::Extern(ref mut e) = node {
