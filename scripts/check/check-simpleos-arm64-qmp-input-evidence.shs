@@ -899,6 +899,68 @@ if (
 ):
     raise RuntimeError("QMP capture dimensions do not match guest RAMFB receipt")
 
+# Reject generic, chrome-only, or cursor-only substitutes for the canonical
+# detailed Simple2D showcase. The guest receipt establishes producer identity;
+# independent RAMFB anchors prove several primitive groups reached scanout.
+showcase_launch = re.search(
+    r"^\[showcase-launch\] app_id=graphics_2d_showcase "
+    r"surface=simpleos_wm title=2d_showcase_backed_cpu_simd "
+    r"width=(\d+) height=(\d+) pixel_count=(\d+) "
+    r"nonbackground=(\d+) checksum=(\d+) status=success\r?$",
+    serial, re.M,
+)
+if not showcase_launch:
+    raise RuntimeError("canonical SimpleOS graphics showcase launch receipt missing")
+showcase_width = int(showcase_launch.group(1))
+showcase_height = int(showcase_launch.group(2))
+showcase_pixel_count = int(showcase_launch.group(3))
+showcase_nonbackground = int(showcase_launch.group(4))
+showcase_checksum = int(showcase_launch.group(5))
+if (
+    showcase_width != 752 or showcase_height != 584 or
+    showcase_pixel_count != showcase_width * showcase_height or
+    showcase_nonbackground <= showcase_pixel_count // 4 or
+    showcase_checksum <= 0
+):
+    raise RuntimeError("canonical SimpleOS graphics showcase receipt is invalid")
+
+window_rois = [
+    (36, 72, 752, 584),
+    (790, 92, 182, 204),
+    (810, 362, 182, 204),
+]
+for roi_index, (rx, ry, rw, rh) in enumerate(window_rois):
+    if rx < 0 or ry < 0 or rx + rw > before_w or ry + rh > before_h:
+        raise RuntimeError("window ROI %d is outside RAMFB" % roi_index)
+    palette = set()
+    nonblack = 0
+    for y in range(ry, ry + rh):
+        for x in range(rx, rx + rw):
+            offset = (y * before_w + x) * 3
+            pixel = bytes(before_pixels[offset:offset + 3])
+            palette.add(pixel)
+            if pixel != b"\x00\x00\x00":
+                nonblack += 1
+    if len(palette) < 3:
+        raise RuntimeError("window ROI %d lacks detailed palette" % roi_index)
+    if nonblack * 2 < rw * rh:
+        raise RuntimeError("window ROI %d is predominantly blank" % roi_index)
+
+showcase_anchors = [
+    (139, 164, (34, 211, 238), "filled-rect"),
+    (388, 174, (34, 197, 94), "filled-circle"),
+    (416, 232, (168, 85, 247), "filled-ellipse"),
+    (572, 266, (59, 130, 246), "effect-rect"),
+]
+for x, y, expected, name in showcase_anchors:
+    offset = (y * before_w + x) * 3
+    actual = tuple(before_pixels[offset:offset + 3])
+    if any(abs(actual[channel] - expected[channel]) > 24 for channel in range(3)):
+        raise RuntimeError(
+            "showcase anchor %s mismatch: expected=%r actual=%r" %
+            (name, expected, actual)
+        )
+
 damage_bounds = [
     commit["region"] for commit in input_commits
     if commit["region"][2] > 0 and commit["region"][3] > 0
