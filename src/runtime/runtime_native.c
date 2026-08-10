@@ -573,6 +573,8 @@ SPL_CORE_C_WEAK bool rt_terminal_is_tty_handle(int64_t handle) {
 #endif
 }
 
+#include "runtime_terminal_signal_scope_impl.h"
+
 #undef SPL_CORE_C_WEAK
 
 static int64_t rt_host_gpu_queue_now_us(void) {

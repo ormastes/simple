@@ -130,19 +130,27 @@ process or installed-wrapper evidence.
 
 ## REQ-LLM-CARET-TUI-HARDEN-007: lifecycle and routing
 
+### should fail signal scope entry before raw or visible terminal mutation
+
+**Step:** Reject scoped signal setup through the production TUI loop.
+
+**Expected:** The typed result reports `signal-scope-unavailable`; raw mode,
+alternate screen, cursor state, and scope teardown are untouched.
+
 ### should fail raw entry before alternate screen or cursor mutation
 
 **Step:** Reject raw-mode acquisition through the production TUI loop.
 
-**Expected:** The typed result reports `raw-mode-unavailable`; no alternate
-screen, cursor, draw, cleanup, or success-output action occurs.
+**Expected:** The typed result reports `raw-mode-unavailable`; the acquired
+signal scope is restored without alternate-screen or cursor mutation.
 
 ### should restore cursor screen and raw mode in lifecycle order
 
 **Step:** Exit by command after entering the full-screen production loop.
 
-**Expected:** Acquisition is raw, alternate screen, cursor hide. Cleanup is
-cursor show, alternate-screen exit, raw restore, then the success message.
+**Expected:** Acquisition is signal scope, raw, alternate screen, cursor hide.
+Cleanup is cursor show, alternate-screen exit, raw restore, signal-scope
+restore, then the success message.
 
 ### should report restore failure after all visible cleanup
 
@@ -174,6 +182,34 @@ restore error, and emits no success message.
 **Step:** Leave the production TUI when byte input reaches EOF.
 
 **Expected:** The loop reports `input_exit` and completes all cleanup actions.
+
+### should redraw after resize and continue reading the same line
+
+**Step:** Wake the scoped reader with resize before Ctrl-C.
+
+**Expected:** Resize causes another geometry snapshot and redraw; it is not
+treated as input or exit, and the following Ctrl-C completes normal cleanup.
+
+### should distinguish a scoped stop from EOF and restore the terminal
+
+**Step:** Wake the scoped reader with an orderly stop signal.
+
+**Expected:** The result reports `signal_stop`, distinct from EOF, after all
+terminal and signal-scope cleanup.
+
+### should distinguish terminal I/O failure and still restore the scope
+
+**Step:** Return the scoped reader I/O failure outcome.
+
+**Expected:** The result reports `input_error` and `terminal input failed`
+after cleanup; it cannot be mistaken for EOF or an orderly stop.
+
+### should report scoped-handler restoration failure after raw cleanup
+
+**Step:** Fail signal-scope teardown after restoring visible terminal state.
+
+**Expected:** The typed error names signal-scope restoration and the trace
+proves cursor, screen, and raw mode were restored first.
 
 ### should force TUI routing without a tty
 

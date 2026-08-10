@@ -162,6 +162,35 @@ pub fn rt_terminal_is_tty_handle(args: &[Value]) -> Result<Value, CompileError> 
     native_io::native_is_tty(args)
 }
 
+/// Begin one process-scoped, interruptible terminal signal session.
+pub fn rt_terminal_signal_scope_begin(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(
+        simple_runtime::value::sffi::env_process::rt_terminal_signal_scope_begin(),
+    ))
+}
+
+/// Read one byte or a negative terminal outcome from a scoped session.
+pub fn rt_terminal_read_byte_interruptible(args: &[Value]) -> Result<Value, CompileError> {
+    let scope = match args.first() {
+        Some(Value::Int(scope)) => *scope,
+        _ => return Ok(Value::Int(-4)),
+    };
+    Ok(Value::Int(
+        simple_runtime::value::sffi::env_process::rt_terminal_read_byte_interruptible(scope),
+    ))
+}
+
+/// Tear down a scoped terminal session and restore the prior handlers.
+pub fn rt_terminal_signal_scope_end(args: &[Value]) -> Result<Value, CompileError> {
+    let scope = match args.first() {
+        Some(Value::Int(scope)) => *scope,
+        _ => return Ok(Value::Bool(false)),
+    };
+    Ok(Value::Bool(
+        simple_runtime::value::sffi::env_process::rt_terminal_signal_scope_end(scope),
+    ))
+}
+
 /// `rt_terminal_get_size` — bridges to `native_get_term_size` on stdout
 /// (handle 1, matching `fill_terminal_size`'s `STDOUT_FILENO` in
 /// env_process.rs). `native_get_term_size` returns `[rows, cols]`; the `rt_`

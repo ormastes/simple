@@ -361,6 +361,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_terminal_disable_raw_mode", terminal::rt_terminal_disable_raw_mode);
     insert_simple!("rt_terminal_is_tty", terminal::rt_terminal_is_tty);
     insert_simple!("rt_terminal_is_tty_handle", terminal::rt_terminal_is_tty_handle);
+    insert_simple!("rt_terminal_signal_scope_begin", terminal::rt_terminal_signal_scope_begin);
+    insert_simple!("rt_terminal_read_byte_interruptible", terminal::rt_terminal_read_byte_interruptible);
+    insert_simple!("rt_terminal_signal_scope_end", terminal::rt_terminal_signal_scope_end);
     insert_simple!("rt_terminal_get_size", terminal::rt_terminal_get_size);
     insert_simple!("native_http_send", network::native_http_send);
     insert_simple!("rt_http_request", network::rt_http_request);

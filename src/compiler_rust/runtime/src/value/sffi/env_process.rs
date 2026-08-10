@@ -1468,6 +1468,27 @@ pub extern "C" fn rt_terminal_is_tty_handle(handle: i64) -> bool {
     }
 }
 
+unsafe extern "C" {
+    fn rt_hosted_terminal_signal_scope_begin() -> i64;
+    fn rt_hosted_terminal_read_byte_interruptible(scope: i64) -> i64;
+    fn rt_hosted_terminal_signal_scope_end(scope: i64) -> bool;
+}
+
+#[no_mangle]
+pub extern "C" fn rt_terminal_signal_scope_begin() -> i64 {
+    unsafe { rt_hosted_terminal_signal_scope_begin() }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_terminal_read_byte_interruptible(scope: i64) -> i64 {
+    unsafe { rt_hosted_terminal_read_byte_interruptible(scope) }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_terminal_signal_scope_end(scope: i64) -> bool {
+    unsafe { rt_hosted_terminal_signal_scope_end(scope) }
+}
+
 // Saved termios state for stdin (fd 0), captured by rt_terminal_enable_raw_mode
 // and restored by rt_terminal_disable_raw_mode. Previously these two externs
 // were no-op stubs that always returned true without touching the terminal at
@@ -1596,6 +1617,32 @@ mod tests {
             assert!(rt_array_push(array, value));
         }
         array
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminal_signal_scope_rust_wrapper_preserves_handle_lifecycle() {
+        unsafe {
+            let child = libc::fork();
+            assert!(child >= 0);
+            if child == 0 {
+                let scope = rt_terminal_signal_scope_begin();
+                if scope <= 0 || rt_terminal_signal_scope_begin() != 0 {
+                    libc::_exit(21);
+                }
+                if !rt_terminal_signal_scope_end(scope) {
+                    libc::_exit(22);
+                }
+                if rt_terminal_signal_scope_end(scope) {
+                    libc::_exit(23);
+                }
+                libc::_exit(0);
+            }
+            let mut status = 0;
+            assert_eq!(libc::waitpid(child, &mut status, 0), child);
+            assert!(libc::WIFEXITED(status));
+            assert_eq!(libc::WEXITSTATUS(status), 0);
+        }
     }
 
     #[test]
