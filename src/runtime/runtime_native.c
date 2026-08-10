@@ -9178,8 +9178,16 @@ int64_t* rt_process_run_tuple(int64_t cmd, SplArray* args) {
 int64_t* rt_process_run_timeout_tuple(int64_t cmd, SplArray* args, int64_t timeout_ms) {
     const char* cmd_c = rt_interp_cstr(cmd);
     uint64_t cmd_len = cmd_c ? (uint64_t)strlen(cmd_c) : 0;
+    // rt_process_run_timeout's declared return type is int64_t (RuntimeValue
+    // ABI, see commit 072c6754e09 "state the RuntimeValue return type for
+    // rt_process_run{,_timeout}"); it still returns an SplArray* handle
+    // widened to an integer, exactly like rt_process_run above does at
+    // `(int64_t)(uintptr_t)rt_process_run_array(...)`. This call site was left
+    // uncast by that change, so -Wint-conversion made runtime_native.c fail to
+    // compile -- which broke the LLVM native-link step of EVERY native-build,
+    // for every program, including `print "x"`.
     return rt_process_result_to_tuple(
-        rt_process_run_timeout(cmd_c ? cmd_c : "", cmd_len, args, timeout_ms));
+        (SplArray*)(uintptr_t)rt_process_run_timeout(cmd_c ? cmd_c : "", cmd_len, args, timeout_ms));
 }
 
 int64_t* rt_process_run_bounded_tuple(int64_t cmd, SplArray* args, int64_t timeout_ms,
