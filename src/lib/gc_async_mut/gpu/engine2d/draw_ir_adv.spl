@@ -27,7 +27,6 @@ use std.common.ui.draw_ir.{
 }
 use std.gc_async_mut.gpu.engine2d.engine_target.{Engine2D, DrawIrTargetFontEvidence, engine2d_target_draw_ir_blit_image_prepared_opaque_status, engine2d_target_replay_prepared_scanout_status, engine2d_target_capture_prepared_scanout_status}
 use std.gc_async_mut.gpu.engine2d.backend.{Engine2DReadback, engine2d_readback, engine2d_readback_with_identity}
-extern fn rt_time_now_micros() -> i64
 use std.nogc_sync_mut.text_layout.font_types.{FontRenderBatch}
 use std.gc_async_mut.gpu.engine2d.draw_ir_glass_material.{
     Engine2dGlassExecutionResult,
@@ -67,13 +66,8 @@ val _E2D_TEXT_PROBE: bool = false
 var _e2d_text_probe_count: i32 = 0
 val _E2D_MATERIAL_TRACE: bool = false
 var _e2d_material_bounds_rejection_logged: bool = false
-var _e2d_wm_batch_profile_emitted: bool = false
-var _e2d_wm_prepared_batch_profile_emitted: bool = false
-var _e2d_wm_command_profile_active: bool = false
-var _e2d_exact_image_probe_count: i32 = 0
 var _e2d_prepared_image_xy: [i64] = []
 var _e2d_prepared_image_xy_active: bool = false
-var _e2d_prepared_image_xy_profiled: bool = false
 var _e2d_owner_image_xy_active: bool = false
 var _e2d_owner_image_x0: i64 = 0
 var _e2d_owner_image_y0: i64 = 0
@@ -83,11 +77,6 @@ var _e2d_owner_image_x2: i64 = 0
 var _e2d_owner_image_y2: i64 = 0
 var _e2d_retained_readback_pixels: [u32] = []
 var _e2d_command_owner_readback_pixels: [u32] = []
-var _e2d_command_owner_probe_count: i32 = 0
-var _e2d_box_owner_probe_count: i32 = 0
-var _e2d_glass_owner_probe_count: i32 = 0
-var _e2d_glass_owner_post_probe_count: i32 = 0
-var _e2d_glass_center_run_probe_count: i32 = 0
 
 fn engine2d_draw_ir_adv_retained_readback_pixels(expected_count: i32) -> [u32]:
     if expected_count <= 0 or _e2d_retained_readback_pixels.len() != expected_count:
@@ -643,21 +632,12 @@ fn _engine2d_draw_ir_render_glass_material(
         print "[engine2d-material-exec] rejected=cpu-pixel-span capability={capability} pixels={pixels.len()} expected={material_width.to_i64() * material_height.to_i64()} device_reason={device_execution.failure_reason}"
         return Engine2dDrawIrGlassOutcome(
             engine: eng, composited: false, execution: unavailable)
-    if _e2d_glass_owner_probe_count < 3:
-        _e2d_glass_owner_probe_count = _e2d_glass_owner_probe_count + 1
-        val glass_center = (
-            (material_height / 2).to_i64() * material_width.to_i64() +
-            (material_width / 2).to_i64())
-        print "[draw-ir-glass-pixels] color={surface_color} alpha={surface_alpha_milli} size={material_width}x{material_height} center={pixels[glass_center]}"
     # The current freestanding Stage3 ABI loses `[u32]` contents when this
     # owner passes the realized image through Engine2D into SoftwareBackend.
     # Opaque material pixels can be transported exactly as scalar same-color
     # row runs: raw image copy and opaque rect fill have identical ARGB output.
     # Keep the canonical image path for any translucent result.
     val glass_scalar_backend = eng.backend_name()
-    var glass_opaque_runs: i32 = 0
-    var glass_raw_pixels: i32 = 0
-    var glass_center_issued = false
     if glass_scalar_backend == "software":
         var material_row = 0
         while material_row < material_height:
@@ -675,26 +655,11 @@ fn _engine2d_draw_ir_render_glass_material(
                         break
                     run_length = run_length + 1
                 if run_alpha == 0xFFu32:
-                    glass_opaque_runs = glass_opaque_runs + 1
                     eng.draw_span_raw_bounded_owner(
                         material_x + material_column,
                         material_y + material_row,
                         run_length,
                         run_color)
-                    if (material_row == material_height / 2 and
-                        material_column <= material_width / 2 and
-                        material_column + run_length > material_width / 2):
-                        glass_center_issued = true
-                        if _e2d_glass_center_run_probe_count < 3:
-                            _e2d_glass_center_run_probe_count = (
-                                _e2d_glass_center_run_probe_count + 1)
-                            val center_run_pixels = eng.read_pixels()
-                            val center_run_x = material_x + material_width / 2
-                            val center_run_y = material_y + material_height / 2
-                            val center_run_index = (
-                                center_run_y.to_i64() * eng.width().to_i64() +
-                                center_run_x.to_i64())
-                            print "[draw-ir-glass-center-run] color={run_color} length={run_length} pixel={center_run_pixels[center_run_index]}"
                 else:
                     var raw_column = 0
                     while raw_column < run_length:
@@ -703,29 +668,12 @@ fn _engine2d_draw_ir_render_glass_material(
                             material_y + material_row,
                             1,
                             run_color)
-                        glass_raw_pixels = glass_raw_pixels + 1
-                        if (material_row == material_height / 2 and
-                            material_column + raw_column == material_width / 2):
-                            glass_center_issued = true
                         raw_column = raw_column + 1
                 material_column = material_column + run_length
             material_row = material_row + 1
     else:
         eng.draw_image(
             material_x, material_y, material_width, material_height, pixels)
-    if _e2d_glass_owner_post_probe_count < 3:
-        _e2d_glass_owner_post_probe_count = _e2d_glass_owner_post_probe_count + 1
-        print "[draw-ir-glass-route] backend={glass_scalar_backend} opaque_runs={glass_opaque_runs} raw_pixels={glass_raw_pixels} center_issued={glass_center_issued}"
-        val glass_owner_pixels = eng.read_pixels()
-        val glass_owner_x = material_x + material_width / 2
-        val glass_owner_y = material_y + material_height / 2
-        val glass_owner_index = (
-            glass_owner_y.to_i64() * eng.width().to_i64() +
-            glass_owner_x.to_i64())
-        if (glass_owner_x >= 0 and glass_owner_y >= 0 and
-            glass_owner_x < eng.width() and glass_owner_y < eng.height() and
-            glass_owner_pixels.len() == eng.width().to_i64() * eng.height().to_i64()):
-            print "[draw-ir-glass-owner] xy={material_x},{material_y} size={material_width}x{material_height} center={glass_owner_pixels[glass_owner_index]}"
     execution_i64[0] = 1
     execution_i64[1] = 0
     execution_i64[2] = 0
@@ -870,19 +818,6 @@ fn _engine2d_draw_ir_render_box(
             eng.draw_rounded_rect(x, y, w, h, radius, command.color)
         else:
             eng.draw_rect_filled(x, y, w, h, command.color)
-    if (_e2d_box_owner_probe_count < 3 and x > 4 and y > 4 and w > 300 and
-        _engine2d_draw_ir_has_visible_alpha(command.color)):
-        val box_pixels = eng.read_pixels()
-        if box_pixels.len() == eng.width().to_i64() * eng.height().to_i64():
-            _e2d_box_owner_probe_count = _e2d_box_owner_probe_count + 1
-            val box_probe_x = x + w / 2
-            val box_probe_y = y + h / 2
-            val box_probe_index = (
-                box_probe_y.to_i64() * eng.width().to_i64() +
-                box_probe_x.to_i64())
-            if (box_probe_x >= 0 and box_probe_y >= 0 and
-                box_probe_x < eng.width() and box_probe_y < eng.height()):
-                print "[draw-ir-box-pixels] color={command.color} xy={x},{y} size={w}x{h} radius={radius} probe={box_pixels[box_probe_index]}"
     if shadow_admitted:
         val clipped_inset_shadow_engine_ignored = engine2d_draw_ir_render_typed_inset_shadows(
             eng, typed_shadows.layers, x, y, w, h, effective_corners)
@@ -1596,7 +1531,6 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
             skipped = skipped + 1
             continue
         val command_kind: text = command.kind
-        val profile_command_started_us = rt_time_now_micros()
         val x = offset_x + command.x
         val y = offset_y + command.y
         val command_clip = command.clip_rect
@@ -1840,9 +1774,6 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
                                 else:
                                     packed_exact_status = eng.draw_ir_blit_image_exact_status(
                                         packed_x, packed_y, image.width, image.height, image.pixels)
-                    if _e2d_exact_image_probe_count < 6:
-                        _e2d_exact_image_probe_count = _e2d_exact_image_probe_count + 1
-                        print "[engine2d-image-profile] packed_status={packed_exact_status} xy={packed_x},{packed_y} command={command.width}x{command.height} image={image.width}x{image.height} pixels={image.pixels.len()} backend={eng.backend_name()}"
                     if packed_exact_status <= 0 and blend_images and not _engine2d_draw_ir_image_is_opaque(image):
                         if command.width == image.width and command.height == image.height:
                             eng.draw_image_blend(x, y, image.width, image.height, image.pixels)
@@ -1875,9 +1806,6 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
                 )
             else:
                 eng.clear_clip()
-        if _e2d_wm_command_profile_active:
-            val profile_command_finished_us = rt_time_now_micros()
-            print "[engine2d-command-profile] kind={command_kind} id={command.component_id} elapsed_us={profile_command_finished_us - profile_command_started_us}"
     if material_execution_counts.len() >= 6:
         material_execution_counts[0] = cpu_composited_material_count.to_i64()
         material_execution_counts[1] = metal_device_glass_material_count.to_i64()
@@ -1894,14 +1822,6 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
         # in Engine2DReadback recreates the nested aggregate projection defect
         # this owner-side path exists to avoid.
         _e2d_command_owner_readback_pixels = eng.read_pixels()
-        if (_e2d_command_owner_probe_count < 3 and
-            _e2d_command_owner_readback_pixels.len() ==
-                eng.width().to_i64() * eng.height().to_i64()):
-            _e2d_command_owner_probe_count = _e2d_command_owner_probe_count + 1
-            val owner_center = (
-                (eng.height() / 2).to_i64() * eng.width().to_i64() +
-                (eng.width() / 2).to_i64())
-            print "[draw-ir-owner-pixels] width={eng.width()} height={eng.height()} first={_e2d_command_owner_readback_pixels[0]} center={_e2d_command_owner_readback_pixels[owner_center]} last={_e2d_command_owner_readback_pixels[_e2d_command_owner_readback_pixels.len() - 1]}"
     if engine_owner.len() > 0:
         engine_owner[0] = eng
     _engine2d_draw_ir_render_outcome(
@@ -2518,11 +2438,6 @@ fn engine2d_draw_ir_adv_composition_present_prepared_with_images_xy_evidence(eng
     val transport = Engine2dDrawIrTransport(destination: [], status: [], evidence_i64: evidence_i64, evidence_text: evidence_text)
     _e2d_prepared_image_xy = image_xy
     _e2d_prepared_image_xy_active = true
-    if not _e2d_prepared_image_xy_profiled:
-        _e2d_prepared_image_xy_profiled = true
-        val xy0 = if image_xy.len() > 0: image_xy[0] else: -1
-        val xy1 = if image_xy.len() > 1: image_xy[1] else: -1
-        print "[engine2d-image-sidecar] active=true len={image_xy.len()} xy0={xy0},{xy1}"
     val result = _engine2d_draw_ir_adv_composition_with_images(
         engine, composition, gpu_available, images, false, true, false,
         transport, composition.scene_key, image_xy)
@@ -2626,15 +2541,6 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: 
     # restructure this loop (stable sort + re-derive rendered/skipped
     # accounting) for no behavior change against any current producer, so it
     # is left as a documented limitation rather than done speculatively.
-    var profile_wm_batches = false
-    if composition.batches.len() == 9:
-        if prepared_visual_key != "" and not _e2d_wm_prepared_batch_profile_emitted:
-            profile_wm_batches = true
-            _e2d_wm_prepared_batch_profile_emitted = true
-        elif prepared_visual_key == "" and not _e2d_wm_batch_profile_emitted:
-            profile_wm_batches = true
-            _e2d_wm_batch_profile_emitted = true
-    var profile_batch_index: i32 = 0
     for batch in composition.batches:
         var batch_execution_counts: [i64] = [0, 0, 0, 0, 0, 0]
         var batch_offsets: [i32] = [batch.embedding.x, batch.embedding.y]
@@ -2647,22 +2553,12 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: 
                 if batch.batch_id.starts_with("content-"):
                     batch_offsets[0] = 0
                     batch_offsets[1] = 0
-        val profile_batch_started_us = rt_time_now_micros()
-        if profile_wm_batches:
-            if profile_batch_index == 6:
-                _e2d_wm_command_profile_active = true
         var batch_engine_owner: [Engine2D] = [eng]
         val outcome = _engine2d_draw_ir_render_batch_embedded(
             eng, batch, images, 0, allow_parent_image,
             css_background_pixel_work_remaining, batch_execution_counts,
             prepared_visual_key, batch_offsets, image_xy, batch_engine_owner)
         eng = batch_engine_owner[0]
-        _e2d_wm_command_profile_active = false
-        if profile_wm_batches:
-            val profile_batch_finished_us = rt_time_now_micros()
-            val profile_mode = if prepared_visual_key != "": "prepared" else: "fresh"
-            print "[engine2d-batch-profile] mode={profile_mode} index={profile_batch_index} commands={batch.commands.len()} surface={batch.embedding.surface_id} elapsed_us={profile_batch_finished_us - profile_batch_started_us} cpu_material={batch_execution_counts[0]} rendered={batch_execution_counts[4]} skipped={batch_execution_counts[5]}"
-        profile_batch_index = profile_batch_index + 1
         if outcome.css_background_pixel_work_remaining >= 0:
             css_background_pixel_work_remaining = (
                 outcome.css_background_pixel_work_remaining)
