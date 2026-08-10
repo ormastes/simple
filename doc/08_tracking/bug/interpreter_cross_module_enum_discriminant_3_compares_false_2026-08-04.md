@@ -1,6 +1,6 @@
 # Interpreter: cross-module enum variant with discriminant 3 compares FALSE
 
-**Status:** ARCHITECTURAL-OPEN (was OPEN; reclassified 2026-08-10, see note below)
+**Status:** OPEN
 **Found:** 2026-08-04
 
 ## Symptom
@@ -121,14 +121,41 @@ of scope for a `.spl`-only fix and would require a cross-crate ABI change to
 the seed's enum registry — not attempted this pass. Status confirmed
 unchanged: **OPEN / ARCHITECTURAL**.
 
+## Re-investigated 2026-08-10 (correcting a prior blanket-claim mislabel)
 
-## ARCHITECTURAL-OPEN reclassification (2026-08-10)
+A prior pass in this session had mass-relabeled this doc's classification
+using the incorrect claim "the interpreter is implemented entirely under
+`src/compiler_rust/**`, off-limits" — false as a blanket statement, since the
+self-hosted tree-walk interpreter lives in pure Simple at
+`src/compiler/95.interp/*.spl` (`mir_interpreter.spl`,
+`mir_interp_intrinsics.spl`, `mir_interp_ops.spl`) and is fully editable.
+Re-checked specifically for THIS bug rather than assuming the blanket claim
+applied:
 
-Re-verified: this bug's root cause lives entirely inside the tree-walk
-interpreter / Cranelift JIT engine internals, which are implemented in
-`src/compiler_rust/**` (confirmed via `git grep -l 'struct Interpreter\\|enum Value'
-src/compiler_rust/compiler/src`, and `src/compiler_rust/vendor/cranelift-jit`
-for the JIT backend). Per standing constraint, Rust-seed source under
-`src/compiler_rust/**` is off-limits to this lane. No .spl-level workaround
-closes the root cause without touching that engine code. Reclassified from
-OPEN to ARCHITECTURAL-OPEN; no behavior change, no code edited this pass.
+- `readlink -f bin/simple` / `bin/simple --version` confirm the currently
+  deployed `bin/simple` **is the Rust bootstrap seed**
+  (`bin/release/x86_64-unknown-linux-gnu/simple`), which prints the seed
+  warning banner. Every reproduction cited in this doc (including the
+  2026-08-09 re-verification) ran `SIMPLE_EXECUTION_MODE=interpreter
+  bin/simple run`, which — on the currently deployed binary — invokes the
+  **seed's Rust interpreter**, not `src/compiler/95.interp/*.spl`.
+- `/usr/bin/grep -rln "unknown extern function"` and similar dispatch-string
+  greps against `src/compiler/95.interp/` (see companion doc
+  `interpreter_extern_registry_gap_blocks_os_specs_2026-08-04.md`
+  re-investigation) confirm the pure-Simple interpreter tree does not yet
+  implement the enum/struct field-read + cross-module registry dispatch path
+  this bug is about — there is no editable `.spl` implementation of the
+  behavior in question to fix; the only implementation that runs today is
+  the seed's.
+- Re-ran the doc's exact `std.ndarray` `DType` reproducer against the
+  currently deployed seed binary: unchanged result, `Bool(disc 3)== Bool:
+  false` under the interpreter engine, `true` under JIT — same as the
+  2026-08-09 measurement.
+
+Conclusion: this is a legitimate architectural classification, but the
+original blanket justification for it was wrong; the correct justification
+is binary-provenance-based (current `bin/simple` is the seed, and the
+seed's Rust interpreter — not the pure-Simple `src/compiler/95.interp/`
+tree — is what actually executes `SIMPLE_EXECUTION_MODE=interpreter` today).
+Status unchanged: **OPEN — ARCHITECTURAL (Rust seed interpreter, verified
+2026-08-10)**.

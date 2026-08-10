@@ -1,6 +1,6 @@
 # JIT returns a tag-corrupted `[i64]` from `sha1_bytes` — floats, `nil` and heap tags inside an i64 list
 
-**Status:** ARCHITECTURAL-OPEN (was OPEN; reclassified 2026-08-10, see note below)
+**Status:** OPEN
 **Found:** 2026-08-04
 
 ## Symptom
@@ -83,14 +83,40 @@ mitigation and should be tried first, but it must be validated on both engines
 before it is claimed — an untested signature change here would just move the
 corruption.
 
+## Re-investigated 2026-08-10 (correcting a prior blanket-claim mislabel)
 
-## ARCHITECTURAL-OPEN reclassification (2026-08-10)
+A prior pass in this session had mass-relabeled this doc using the incorrect
+claim "the interpreter/JIT is implemented entirely under
+`src/compiler_rust/**`, off-limits" as a blanket rule. Checked specifically
+for THIS bug rather than assuming the blanket claim:
 
-Re-verified: this bug's root cause lives entirely inside the tree-walk
-interpreter / Cranelift JIT engine internals, which are implemented in
-`src/compiler_rust/**` (confirmed via `git grep -l 'struct Interpreter\\|enum Value'
-src/compiler_rust/compiler/src`, and `src/compiler_rust/vendor/cranelift-jit`
-for the JIT backend). Per standing constraint, Rust-seed source under
-`src/compiler_rust/**` is off-limits to this lane. No .spl-level workaround
-closes the root cause without touching that engine code. Reclassified from
-OPEN to ARCHITECTURAL-OPEN; no behavior change, no code edited this pass.
+- `/usr/bin/grep -n "numeric_cast_target"
+  src/compiler_rust/compiler/src/codegen/instr/methods.rs` — hits at lines
+  117 and 130, confirming the doc's secondary-finding citation
+  (`methods.rs:131`, off by one line vs. the `if let Some(to_ty) =` check at
+  130 — close enough to be the same construct) is real and current. This is
+  Cranelift-specific codegen (`src/compiler_rust/compiler/src/codegen/`),
+  genuinely off-limits, not the tree-walk interpreter.
+- Attempted to re-run the exact repro
+  (`build/tmp_gap/sha1chk.spl` via `use std.common.crypto.sha1.{sha1_bytes}`)
+  against the current source tree: it **no longer compiles** —
+  `error[E1002]: function 'rotl32' not found`, even though
+  `src/lib/common/crypto/types.spl:110` still defines `fn rotl32(...)`. This
+  is an unrelated regression (a resolution/export gap unrelated to the JIT
+  list-tagging bug this doc is about) that blocks a fresh end-to-end repro of
+  the ORIGINAL bug this pass. Did not chase the `rotl32` resolution failure
+  further — out of scope for this doc.
+- Because the original repro path is currently blocked by this unrelated
+  compile error, I could not re-confirm the exact JIT-corrupted-list output
+  today. The root-cause attribution (Cranelift codegen boxing/unboxing of
+  untyped `list` returns) is still grep-backed via the `numeric_cast_target`
+  citation above, but the top-level symptom itself is **unconfirmed this
+  pass**.
+
+Conclusion: root-cause attribution to `src/compiler_rust/compiler/src/codegen/**`
+remains grep-supported and was not the product of a blanket assumption.
+However the original end-to-end repro could not be re-run today due to an
+unrelated `rotl32` resolution regression in `sha1.spl`'s import chain.
+Status: **UNABLE-still-open — architecturally plausible per grep evidence,
+but fresh execution evidence blocked by an unrelated compile regression;
+re-verify once the `rotl32` resolution gap is fixed.**

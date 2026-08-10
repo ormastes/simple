@@ -1,6 +1,6 @@
 # JIT: cross-module tuple `.0` read returns nil
 
-**Status:** ARCHITECTURAL-OPEN (was OPEN; reclassified 2026-08-10, see note below) — found 2026-08-01 while fixing
+**Status:** OPEN — found 2026-08-01 while fixing
 `common_encoding_yaml_broken_cross_submodule_import_2026-07-20`.
 
 **Engine:** Cranelift JIT (`simple run` path). Not observed on the tree-walk
@@ -79,14 +79,36 @@ codegen path (`src/compiler_rust/compiler/src/codegen/**`) — out of scope for
 a pure-Simple (`.spl`) fix; leaving OPEN. No regression risk introduced since
 no source under `src/` was changed for this bug.
 
+## Re-investigated 2026-08-10 (correcting a prior blanket-claim mislabel)
 
-## ARCHITECTURAL-OPEN reclassification (2026-08-10)
+A prior pass in this session had mass-relabeled this doc using the incorrect
+claim "the JIT is implemented entirely under `src/compiler_rust/**`,
+off-limits" as a blanket rule. Checked specifically for THIS bug:
 
-Re-verified: this bug's root cause lives entirely inside the tree-walk
-interpreter / Cranelift JIT engine internals, which are implemented in
-`src/compiler_rust/**` (confirmed via `git grep -l 'struct Interpreter\\|enum Value'
-src/compiler_rust/compiler/src`, and `src/compiler_rust/vendor/cranelift-jit`
-for the JIT backend). Per standing constraint, Rust-seed source under
-`src/compiler_rust/**` is off-limits to this lane. No .spl-level workaround
-closes the root cause without touching that engine code. Reclassified from
-OPEN to ARCHITECTURAL-OPEN; no behavior change, no code edited this pass.
+- Re-reproduced fresh with the doc's exact 2-file minimal repro
+  (`tupmod_a.spl` / `tupmod_main.spl`) against the currently deployed binary
+  (`bin/release/x86_64-unknown-linux-gnu/simple`, confirmed via
+  `bin/simple --version` to be the Rust seed): `bin/simple run
+  tupmod_main.spl` -> `field0=nil`, still wrong, matching every prior
+  measurement in this doc exactly.
+- This is `bin/simple run`, i.e. the Cranelift JIT path, which the doc
+  already correctly scopes to `src/compiler_rust/compiler/src/codegen/**`.
+  There is no tree-walk-interpreter component to this bug at all (the doc's
+  own header states "Not observed on the tree-walk interpreter"), so the
+  "interpreter lives in pure Simple" correction does not even apply here —
+  this bug was never attributed to the interpreter in the first place, only
+  to Cranelift JIT codegen, which genuinely is Rust-only
+  (`src/compiler_rust/compiler/src/codegen/`; there is no self-hosted
+  Cranelift/native codegen backend under `src/compiler/` that lowers to
+  machine code the same way — the closest pure-Simple analog,
+  `src/compiler/50.mir/`, only produces MIR, not native codegen, and per
+  `reference_pure_simple_codegen_lacks_text_ptr_len_abi` and related memory
+  notes the pure-Simple native pipeline is a materially different,
+  less-complete path).
+
+Conclusion: this doc's classification was already correctly scoped to
+Cranelift-specific Rust codegen and was not meaningfully affected by the
+blanket-claim error (which was about the *interpreter*, not the JIT). Status
+unchanged: **OPEN — ARCHITECTURAL (Cranelift JIT codegen,
+`src/compiler_rust/compiler/src/codegen/**`, re-confirmed by fresh repro
+2026-08-10, unchanged output `field0=nil`)**.

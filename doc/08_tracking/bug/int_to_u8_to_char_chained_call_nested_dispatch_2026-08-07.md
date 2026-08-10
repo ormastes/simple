@@ -1,6 +1,6 @@
 # `(i64).to_u8().to_char()` chained call fails in nested-call dispatch context
 
-**Status:** ARCHITECTURAL-OPEN (was OPEN; reclassified 2026-08-10, see note below)
+**Status:** OPEN
 **Found:** 2026-08-07, U4.2 coverage-closure unit (WM/GUI/web system-test
 coverage plan, `doc/03_plan/ui/testing/wm_gui_web_system_test_coverage_plan_2026-08-07.md`)
 **Area:** interpreter / nested-call method dispatch (Rust seed)
@@ -116,14 +116,34 @@ undeployed (as was true for the enum fix at the time its doc was written).
 Requires a seed rebuild + `bin/simple` redeploy to verify — out of scope for
 this unit per this session's "no cargo/bootstrap" constraint.
 
+## Re-investigated 2026-08-10 (correcting a prior blanket-claim mislabel)
 
-## ARCHITECTURAL-OPEN reclassification (2026-08-10)
+A prior pass in this session had mass-relabeled this doc using the incorrect
+claim "the interpreter is implemented entirely under `src/compiler_rust/**`,
+off-limits" as a blanket rule — false in general, since the self-hosted
+tree-walk interpreter is pure Simple at `src/compiler/95.interp/*.spl` and IS
+editable. Re-checked specifically for THIS bug:
 
-Re-verified: this bug's root cause lives entirely inside the tree-walk
-interpreter / Cranelift JIT engine internals, which are implemented in
-`src/compiler_rust/**` (confirmed via `git grep -l 'struct Interpreter\\|enum Value'
-src/compiler_rust/compiler/src`, and `src/compiler_rust/vendor/cranelift-jit`
-for the JIT backend). Per standing constraint, Rust-seed source under
-`src/compiler_rust/**` is off-limits to this lane. No .spl-level workaround
-closes the root cause without touching that engine code. Reclassified from
-OPEN to ARCHITECTURAL-OPEN; no behavior change, no code edited this pass.
+- Reproduced fresh: `bin/simple run` on
+  `val a = (key + 32).to_u8().to_char()` reproduces the exact error text
+  `error: semantic: method 'to_char' not found on value of type i64 in nested
+  call context` on the currently deployed seed binary
+  (`bin/release/x86_64-unknown-linux-gnu/simple`, seed banner confirmed).
+- `/usr/bin/grep -n "nested call context"
+  src/compiler_rust/compiler/src/interpreter_helpers/method_dispatch.rs` —
+  hit at line 855 (`"method '{}' not found on value of type {} in nested call
+  context"`), the exact source of the error string. This confirms the doc's
+  cited file is real and current.
+- `/usr/bin/grep -rln "nested call context" src/compiler/` — **zero hits**.
+  The pure-Simple `src/compiler/95.interp/` interpreter does not implement a
+  separate nested/chained-call dispatcher at all (no such error string
+  exists there), so there is no editable `.spl` counterpart to add a
+  primitive-receiver arm to — the only implementation reachable today is the
+  seed's `method_dispatch.rs`.
+
+Conclusion: legitimate architectural classification, correctly re-justified
+by direct grep evidence (`src/compiler_rust/compiler/src/interpreter_helpers/method_dispatch.rs:855`)
+rather than a blanket assumption. The call-site workaround already landed in
+`host_gui_event_router.spl` remains the correct interim mitigation. Status
+unchanged: **OPEN — ARCHITECTURAL (Rust seed nested-call dispatcher, verified
+2026-08-10, evidence: `method_dispatch.rs:855`)**.

@@ -1,6 +1,6 @@
 # BUG: baremetal externs have no interpreter binding — `unsafe_addr_of` and `rt_x86_syscall` fail closed in hosted unit specs
 
-**Status:** ARCHITECTURAL-OPEN (was OPEN; reclassified 2026-08-10, see note below)
+**Status:** OPEN
 **Found:** 2026-08-04
 **Severity:** medium — 3 confirmed failing examples in
 `test/01_unit/os/posix/`. The failure is a hard error, so the affected
@@ -110,14 +110,39 @@ Binary identity: `bin/simple` → `bin/release/x86_64-unknown-linux-gnu/simple`
 to `src/compiler_rust/target/debug/simple`. Findings attribute to the **seed**
 interpreter.
 
+## Re-investigated 2026-08-10 (correcting a prior blanket-claim mislabel)
 
-## ARCHITECTURAL-OPEN reclassification (2026-08-10)
+A prior pass in this session had mass-relabeled this doc using the incorrect
+claim "the interpreter is implemented entirely under `src/compiler_rust/**`,
+off-limits" as a blanket rule. That is false in general — the self-hosted
+tree-walk interpreter is pure Simple at `src/compiler/95.interp/*.spl` and IS
+editable — but checking THIS specific bug rather than assuming the blanket
+claim:
 
-Re-verified: this bug's root cause lives entirely inside the tree-walk
-interpreter / Cranelift JIT engine internals, which are implemented in
-`src/compiler_rust/**` (confirmed via `git grep -l 'struct Interpreter\\|enum Value'
-src/compiler_rust/compiler/src`, and `src/compiler_rust/vendor/cranelift-jit`
-for the JIT backend). Per standing constraint, Rust-seed source under
-`src/compiler_rust/**` is off-limits to this lane. No .spl-level workaround
-closes the root cause without touching that engine code. Reclassified from
-OPEN to ARCHITECTURAL-OPEN; no behavior change, no code edited this pass.
+- `/usr/bin/grep -rn "unsafe_addr_of\|rt_x86_syscall" src/compiler_rust/compiler/src/interpreter_extern/mod.rs` —
+  **zero hits** for either name (confirmed absent from the seed's extern
+  registry, matching the doc's claim exactly).
+- `/usr/bin/grep -rln "unknown extern function" src/compiler/` — **zero
+  hits**. The pure-Simple `src/compiler/95.interp/` tree does not contain any
+  extern-dispatch table or the "unknown extern function" error string at all;
+  it is a materially less-complete reimplementation that doesn't yet reach
+  extern registration. There is no pure-Simple registry to add these two
+  names to.
+- Confirmed current `bin/simple` is the Rust seed
+  (`bin/release/x86_64-unknown-linux-gnu/simple`, seed banner via
+  `bin/simple --version`), so `bin/simple test test/01_unit/os/posix/` runs
+  through the Rust `interpreter_extern` registry cited above, not the
+  pure-Simple interpreter tree.
+- Re-ran `SIMPLE_TIMEOUT_SECONDS=0 bin/simple test --no-cache --no-cover-check
+  test/01_unit/os/posix/fd_io_route_spec.spl` — spec still runs and the
+  underlying registry gap for `unsafe_addr_of` is unchanged in source (grep
+  above); did not re-diff the full posix directory run this pass.
+
+Conclusion: legitimate architectural classification for the two confirmed
+names (`unsafe_addr_of`, `rt_x86_syscall`) — they are genuinely baremetal
+primitives with no pure-Simple implementation to add them to, and the
+registry gap is in `src/compiler_rust/compiler/src/interpreter_extern/mod.rs`,
+off-limits per repo rules. The prior blanket justification was wrong in
+general but happens to be correct for this specific bug, now backed by
+grep evidence rather than assumption. Status unchanged: **OPEN —
+ARCHITECTURAL for the 2 confirmed names, verified 2026-08-10**.
