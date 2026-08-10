@@ -1580,7 +1580,10 @@ New shape 1). `llvm_parity_spec.spl` and `llvm_compiled_proof_spec.spl` (both
 copies each) also remain in the table (not repaired — see New shape 2).
 18 files were reviewed this pass in total.
 
-Not landed as a git commit at the time this section was written — see the
-session's final status note for push state; if unpushed, the working tree at
-these 8 paths is the source of truth for the repair described here.
+**Re-verified 2026-08-10: this landed.** All 8 physical files (`ffdhe_kat_spec.spl`
+×2, `llvm_backend_e2e_spec.spl` ×2, `llvm_native_link_spec.spl` ×2,
+`remote_riscv32_spec.spl` ×2) show `git diff origin/main -- <path>` = empty and
+`grep -c pending_reason` = 0, `grep -c "pending("` >= 2 on `origin/main` as of this
+date — the repair described above is present on `main`, not just in a stale
+working copy.
 - **7 gutted specs** with no recoverable content anywhere.
