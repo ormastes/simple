@@ -8,6 +8,7 @@ use compiler.core.types.{TYPE_ARRAY_I64, TYPE_ARRAY_TEXT, TYPE_ARRAY_BOOL, TYPE_
 use compiler.core.types.{TYPE_OPTION_I64, TYPE_OPTION_F64, TYPE_OPTION_TEXT, TYPE_OPTION_BOOL}
 use compiler.core.types.{TYPE_OPTION, TYPE_RESULT}
 use compiler.core.types.{TYPE_ANY, TYPE_NAMED_BASE, TYPE_ARRAY_GENERIC_BASE}
+use compiler.core.types.{is_option_generic_tag, option_generic_tag_to_id, option_generic_type_get_inner}
 
 fn parse(source: text, path: text):
     ast_reset()
@@ -40,10 +41,16 @@ describe "Option Generic Type Branches":
         val ret = get_ret_type("fn f() -> Option<bool>:\n    nil\n")
         expect(ret).to_equal(TYPE_OPTION_BOOL)
 
-    # Covers: Option<Unknown> -> TYPE_OPTION (fallback)
-    it "Option<CustomType> returns TYPE_OPTION":
+    # Covers: Option<NamedType> -> TYPE_OPTION_GENERIC_BASE + id, which PRESERVES
+    # the inner named type. It used to collapse to bare TYPE_OPTION, erasing the
+    # class identity all the way into MIR and making `opt.unwrap().method()`
+    # unlowerable on the native lane (bug:
+    # native_option_unwrap_receiver_unresolved_2026-08-09).
+    it "Option<CustomType> preserves the named inner type":
         val ret = get_ret_type("fn f() -> Option<CustomType>:\n    nil\n")
-        expect(ret).to_equal(TYPE_OPTION)
+        expect(is_option_generic_tag(ret)).to_equal(true)
+        val inner = option_generic_type_get_inner(option_generic_tag_to_id(ret))
+        expect(inner >= TYPE_NAMED_BASE).to_equal(true)
 
 
 describe "Result Generic Type Branches":
@@ -92,10 +99,13 @@ describe "Postfix ? Type Branches":
         val ret = get_ret_type("fn f() -> bool?:\n    nil\n")
         expect(ret).to_equal(TYPE_OPTION_BOOL)
 
-    # Covers: CustomType? -> TYPE_OPTION (fallback)
-    it "CustomType? returns TYPE_OPTION":
+    # Covers: NamedType? -- the shorthand spelling of Option<NamedType>, which
+    # must preserve the inner type exactly as the generic spelling does above.
+    it "CustomType? preserves the named inner type":
         val ret = get_ret_type("fn f() -> CustomType?:\n    nil\n")
-        expect(ret).to_equal(TYPE_OPTION)
+        expect(is_option_generic_tag(ret)).to_equal(true)
+        val inner = option_generic_type_get_inner(option_generic_tag_to_id(ret))
+        expect(inner >= TYPE_NAMED_BASE).to_equal(true)
 
 
 describe "Simple Type Branches":

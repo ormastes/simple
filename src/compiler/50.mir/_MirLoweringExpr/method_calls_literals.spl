@@ -664,6 +664,28 @@ impl MirLowering:
             # struct-valued Dict.get landmine this same change fixes.
             if self.struct_value_syms.contains(receiver_local.id):
                 self.struct_value_syms[result_local_uw.id] = self.struct_value_syms[receiver_local.id]
+            elif inner_type_uw != nil:
+                # The receiver is an Option HANDLE -- a boxed enum payload, not
+                # a construction site -- so it carries no struct_value_syms
+                # entry of its own and the propagation above misses. The
+                # Option's own type ARGUMENT is the second source of truth and
+                # names exactly one concrete type, so recover the owner name
+                # from it. Without this, `opt.unwrap().method()` reaches the
+                # Unresolved arm with no owner name and lowering hard-fails
+                # with `unresolved method call` (bug:
+                # native_option_unwrap_receiver_unresolved_2026-08-09). This
+                # only became reachable once the flat parser stopped erasing
+                # the inner type to bare TYPE_OPTION -- see
+                # TYPE_OPTION_GENERIC_BASE in 10.frontend/core/types.spl.
+                val owner_inner_uw = inner_type_uw ?? HirType(kind: HirTypeKind.Error, span: receiver.span)
+                match owner_inner_uw.kind:
+                    case HirTypeKind.Named(inner_owner_symbol, _):
+                        match self.symbols.get_symbol_raw(inner_owner_symbol.id):
+                            case Some(inner_owner_sym):
+                                if inner_owner_sym.name != "":
+                                    self.struct_value_syms[result_local_uw.id] = inner_owner_sym.name
+                            case _: ()
+                    case _: ()
 
             var b_merge_uw = self.builder
             b_merge_uw.switch_to_block(merge_block_uw)

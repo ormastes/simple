@@ -50,6 +50,7 @@ use compiler.core.types.{union_type_register}
 use compiler.core.types.{dict_type_register}
 use compiler.core.types.{tuple_type_register}
 use compiler.core.types.{array_generic_type_register}
+use compiler.core.types.{option_generic_type_register}
 use compiler.core.types.{result_type_register}
 use compiler.core.types.{isolated_type_register}
 use compiler.core.types.{exclusive_type_register}
@@ -705,6 +706,16 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
                     return parser_absorb_optional_suffix(TYPE_OPTION_TEXT)
                 if inner_type == TYPE_BOOL:
                     return parser_absorb_optional_suffix(TYPE_OPTION_BOOL)
+                # A non-primitive inner (a user class/struct/enum) has no
+                # dedicated TYPE_OPTION_<T> tag, so it used to collapse to bare
+                # TYPE_OPTION and erase the payload identity -- see
+                # TYPE_OPTION_GENERIC_BASE and bug:
+                # native_option_unwrap_receiver_unresolved_2026-08-09. Register
+                # the inner tag instead, mirroring Result<T,E>/Dict<K,V> above.
+                if inner_type >= TYPE_NAMED_BASE:
+                    val opt_generic_tag = option_generic_type_register(inner_type)
+                    if opt_generic_tag >= 0:
+                        return parser_absorb_optional_suffix(opt_generic_tag)
                 return parser_absorb_optional_suffix(TYPE_OPTION)
             # Preserve Result<T,E> generic args for match payload typing.
             if type_name == "Result":
@@ -750,6 +761,16 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
                 opt_result = TYPE_OPTION_TEXT
             elif type_name == "bool":
                 opt_result = TYPE_OPTION_BOOL
+            else:
+                # `Drv2?` is the shorthand spelling of `Option<Drv2>`; keep the
+                # class identity via the inner-type registry rather than
+                # collapsing to bare TYPE_OPTION (same rationale as the
+                # `Option<T>` generic branch above).
+                val postfix_nid = named_type_find(type_name)
+                if postfix_nid >= 0:
+                    val postfix_opt_tag = option_generic_type_register(TYPE_NAMED_BASE + postfix_nid)
+                    if postfix_opt_tag >= 0:
+                        opt_result = postfix_opt_tag
             # Loop for additional ? marks (i64?? or i64???)
             for qi in 0..10:
                 if kind == 130:

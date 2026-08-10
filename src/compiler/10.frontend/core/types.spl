@@ -254,6 +254,18 @@ val TYPE_I16 = 32
 val TYPE_I32 = 33
 # Encoded ranges: union/intersection/refinement IDs are encoded into type tags
 # TYPE_UNION_BASE + id => specific union, TYPE_INTERSECTION_BASE + id => specific intersection, etc.
+# Option<T> generic-arg specializations (bug:
+# native_option_unwrap_receiver_unresolved_2026-08-09). TYPE_OPTION (=14) and
+# the four TYPE_OPTION_{I64,F64,TEXT,BOOL} tags cover primitive inners only, so
+# `Option<Drv2>` / `Drv2?` collapsed to bare TYPE_OPTION and erased the class
+# identity all the way through the AST bridge into HIR -- MIR's
+# option_inner_hir_type then saw Optional(Any) and static devirtualization of
+# `opt.unwrap().method()` had no owner name to recover, hard-failing with
+# `unresolved method call`. Mirrors the array element-type registry: register
+# the inner tag and encode TYPE_OPTION_GENERIC_BASE + id. 300..500 is the free
+# gap below TYPE_UNION_BASE.
+val TYPE_OPTION_GENERIC_BASE = 300
+val TYPE_OPTION_GENERIC_LIMIT = 500
 val TYPE_UNION_BASE = 500
 val TYPE_INTERSECTION_BASE = 600
 val TYPE_REFINEMENT_BASE = 700
@@ -365,6 +377,12 @@ fn is_tuple_type_tag(tag: i64) -> bool:
 
 fn tuple_type_tag_to_id(tag: i64) -> i64:
     tag - TYPE_TUPLE_BASE
+
+fn is_option_generic_tag(tag: i64) -> bool:
+    tag >= TYPE_OPTION_GENERIC_BASE and tag < TYPE_OPTION_GENERIC_LIMIT
+
+fn option_generic_tag_to_id(tag: i64) -> i64:
+    tag - TYPE_OPTION_GENERIC_BASE
 
 fn is_array_generic_tag(tag: i64) -> bool:
     tag >= TYPE_ARRAY_GENERIC_BASE and tag < TYPE_ARRAY_GENERIC_LIMIT
@@ -1217,6 +1235,30 @@ fn result_type_get_err(result_id: i64) -> i64:
 
 var array_generic_elem_tags: [i64] = []
 
+# ===== Option Inner-Type Specialization Registry =====
+# Tracks Option<T> inner types with no dedicated flat tag (bug:
+# native_option_unwrap_receiver_unresolved_2026-08-09) -- see
+# TYPE_OPTION_GENERIC_BASE.
+
+var option_generic_inner_tags: [i64] = []
+
+fn option_generic_type_register(inner_tag: i64) -> i64:
+    var existing = 0
+    while existing < option_generic_inner_tags.len():
+        if option_generic_inner_tags[existing] == inner_tag:
+            return TYPE_OPTION_GENERIC_BASE + existing
+        existing = existing + 1
+    val idx = option_generic_inner_tags.len()
+    if idx >= TYPE_OPTION_GENERIC_LIMIT - TYPE_OPTION_GENERIC_BASE:
+        return -1
+    option_generic_inner_tags.push(inner_tag)
+    TYPE_OPTION_GENERIC_BASE + idx
+
+fn option_generic_type_get_inner(option_id: i64) -> i64:
+    if option_id >= 0 and option_id < option_generic_inner_tags.len():
+        return option_generic_inner_tags[option_id]
+    TYPE_ANY
+
 fn array_generic_type_register(elem_tag: i64) -> i64:
     var existing = 0
     while existing < array_generic_elem_tags.len():
@@ -1449,6 +1491,7 @@ fn reset_all_pools():
     result_type_ok = clear_i64_pool(result_type_ok)
     result_type_err = clear_i64_pool(result_type_err)
     array_generic_elem_tags = clear_i64_pool(array_generic_elem_tags)
+    option_generic_inner_tags = clear_i64_pool(option_generic_inner_tags)
     isolated_inner_tags = clear_i64_pool(isolated_inner_tags)
     exclusive_inner_tags = clear_i64_pool(exclusive_inner_tags)
     reference_inner_tags = clear_i64_pool(reference_inner_tags)
@@ -1473,6 +1516,8 @@ export TYPE_RESULT_BASE, is_result_tag, result_tag_to_id
 export result_type_register, result_type_get_ok, result_type_get_err
 export TYPE_ARRAY_GENERIC_BASE, is_array_generic_tag, array_generic_tag_to_id
 export array_generic_type_register, array_generic_type_get_elem
+export TYPE_OPTION_GENERIC_BASE, is_option_generic_tag, option_generic_tag_to_id
+export option_generic_type_register, option_generic_type_get_inner
 export TYPE_ISOLATED_BASE, is_isolated_tag, isolated_tag_to_id
 export isolated_type_register, isolated_type_get_inner
 export TYPE_EXCLUSIVE_BASE, is_exclusive_tag, exclusive_tag_to_id

@@ -31,6 +31,7 @@ use compiler.core.types.{is_dict_tag, dict_tag_to_id, dict_type_get_key, dict_ty
 use compiler.core.types.{is_result_tag, result_tag_to_id, result_type_get_ok, result_type_get_err}
 use compiler.core.types.{is_tuple_type_tag, tuple_type_tag_to_id, tuple_type_get_elems}
 use compiler.core.types.{is_array_generic_tag, array_generic_tag_to_id, array_generic_type_get_elem}
+use compiler.core.types.{is_option_generic_tag, option_generic_tag_to_id, option_generic_type_get_inner}
 use compiler.core.types.{is_isolated_tag, isolated_tag_to_id, isolated_type_get_inner}
 use compiler.core.types.{is_exclusive_tag, exclusive_tag_to_id, exclusive_type_get_inner}
 use compiler.core.types.{is_reference_tag, reference_tag_to_id, reference_type_get_inner, reference_type_is_mutable}
@@ -391,6 +392,19 @@ fn convert_flat_type(type_expr_idx: i64) -> Type:
     # silently collapsing to bare TYPE_ARRAY_I64 -- see
     # TYPE_ARRAY_GENERIC_BASE. Must precede the generic `>= TYPE_UNION_BASE`
     # catch-all below, same as the dict/result/tuple checks.
+    # Option inner-type specialization (bug:
+    # native_option_unwrap_receiver_unresolved_2026-08-09): the type parser has
+    # dedicated flat tags only for Option<i64/f64/text/bool>; a named
+    # class/struct/enum inner (`Option<Drv2>`, `Drv2?`) registers its inner tag
+    # here instead of collapsing to the bare, argless `Named("Option", [])`
+    # above -- which erased the payload identity and left MIR's static
+    # devirtualization with no owner name for `opt.unwrap().method()`. Must
+    # precede the generic `>= TYPE_UNION_BASE` catch-all below, same as the
+    # dict/result/tuple/array checks.
+    if is_option_generic_tag(type_expr_idx):
+        val option_generic_id = option_generic_tag_to_id(type_expr_idx)
+        val option_inner_tag = option_generic_type_get_inner(option_generic_id)
+        return Type(kind: TypeKind.Named("Option", [convert_flat_type(option_inner_tag)]), span: make_span())
     if is_array_generic_tag(type_expr_idx):
         val arr_generic_id = array_generic_tag_to_id(type_expr_idx)
         val arr_elem_tag = array_generic_type_get_elem(arr_generic_id)

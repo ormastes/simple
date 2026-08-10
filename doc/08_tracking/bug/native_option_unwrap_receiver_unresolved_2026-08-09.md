@@ -1,8 +1,15 @@
 # native-build: a method call on an `Option<T>.unwrap()` receiver fails MIR lowering
 
 - **Date:** 2026-08-09
-- **Status:** OPEN. Root cause located and measured to the exact line; the fix
-  locus is upstream in HIR type lowering (see "Why this was not fixed here").
+- **Status:** **RESOLVED 2026-08-10.** The erasure was one layer further
+  upstream than this doc originally concluded — not HIR type lowering but the
+  **flat parser's integer type-tag registry**, which had dedicated
+  `Option<T>` tags only for `i64/f64/text/bool` and collapsed every other
+  inner type to bare `TYPE_OPTION` (14). Fixed by adding an Option inner-type
+  specialization registry, mirroring the existing `Result<T,E>` / `Dict<K,V>` /
+  `[T]` element registries. See "Resolution" at the bottom. The analysis below
+  is preserved as written at investigation time; note that the "Why this was
+  not fixed here" section's HIR diagnosis is **superseded**.
 - **Lane:** `native-build` (AOT / MIR lowering). NOT reproducible under
   `bin/simple test` — the tree-walk interpreter resolves these receivers fine,
   so no `*_spec.spl` can observe it.
@@ -256,3 +263,123 @@ be closed as a duplicate of the trait bug or made to wait on that policy call.
   freestanding fault handler was hardened in the C8-CLOSE lane but is the
   reason this whole family historically presented as wild-jump storms rather
   than clean traps.
+
+## Resolution (2026-08-10)
+
+### The actual erasure point
+
+The investigation above correctly proved that MIR received `Optional(<not
+Named>)` and correctly concluded the identity was gone before MIR ran. It
+placed the loss in `20.hir/hir_lowering/types.spl`. It is in fact one layer
+earlier, and that file was innocent: `lower_named_kind` already builds a real
+`HirTypeKind.Optional(inner)` from `Named("Option", [T])` — it simply never
+received a `T`.
+
+`src/compiler/10.frontend/core/parser.spl`, the `Option<T>` branch of
+`parser_parse_type_impl`, tests the inner tag against exactly four dedicated
+flat tags and otherwise discards it:
+
+```
+if type_name == "Option":
+    if inner_type == TYPE_I64:   return ...(TYPE_OPTION_I64)
+    if inner_type == TYPE_F64:   return ...(TYPE_OPTION_F64)
+    if inner_type == TYPE_TEXT:  return ...(TYPE_OPTION_TEXT)
+    if inner_type == TYPE_BOOL:  return ...(TYPE_OPTION_BOOL)
+    return parser_absorb_optional_suffix(TYPE_OPTION)   # <-- identity dropped
+```
+
+The postfix-`?` shorthand branch (`Drv2?`) had the identical four-primitive
+chain and the identical `TYPE_OPTION` fallback. The flat AST is an integer-tag
+representation with no room for a type argument, so `Option<Drv2>` and `Drv2?`
+both arrived at the bridge as the bare tag 14, which
+`_FlatAstBridge/convert_nodes.spl` faithfully rendered as the argless
+`Named("Option", [])`. HIR then produced `Optional(Any)` — the `inner kind =
+OTHER` the probe measured. The comment at
+`35.semantics/lint/option_me_call.spl:35` had already recorded this exact gap
+("there is no `TYPE_OPTION_<named>` encoding") without connecting it to this
+failure.
+
+### The fix
+
+The repo already had the answer three times over: `Result<T,E>`, `Dict<K,V>`
+and `[T]` all solved the same "no room in an integer tag" problem with a
+side-table registry whose id is encoded into an out-of-band tag range. Option
+now has the fourth, modelled directly on the single-argument array-element one.
+
+1. `src/compiler/10.frontend/core/types.spl` — `TYPE_OPTION_GENERIC_BASE`
+   (300..500, the free gap below `TYPE_UNION_BASE`), `is_option_generic_tag`,
+   `option_generic_tag_to_id`, `option_generic_type_register`,
+   `option_generic_type_get_inner`, pool clear, exports.
+2. `src/compiler/10.frontend/core/parser.spl` — both the `Option<T>` generic
+   branch and the postfix-`?` branch register a **named-base** inner tag
+   instead of collapsing to `TYPE_OPTION`. Deliberately scoped to
+   `>= TYPE_NAMED_BASE` inners: that is exactly the defect, and it leaves every
+   other Option spelling on its existing path.
+3. `src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl` — decode the new
+   tag range into `Named("Option", [<inner>])`, placed with the sibling
+   dict/result/tuple/array checks before the `>= TYPE_UNION_BASE` catch-all.
+4. `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl` — the
+   `elif` the recipe called for, now with real data to read: when the receiver
+   carries no `struct_value_syms` entry, recover the owner name from the
+   Option's inner `Named` symbol via `symbols.get_symbol_raw(...).name` and
+   register it on the unwrap-result local, so the Unresolved arm devirtualizes.
+
+Steps 1-3 are the fix; step 4 alone is the inert change this doc already
+documented as reverted.
+
+### Evidence
+
+- `sh scripts/check/check-native-option-unwrap-receiver.shs`
+  -> `PASS — 2 fixtures checked: control=CONTROL=9, repro=OPTUNWRAP=9
+  (Option-unwrap receiver resolves correctly on the native lane)`.
+  The repro now BUILDS AND RUNS with the correct value; it previously passed
+  only via the known-open `unresolved method call` branch.
+- **The fence was tightened, not just re-run.** The `KNOWN-OPEN` acceptance
+  branch is deleted: a build failure carrying `unresolved method call` is now a
+  hard `FAIL — REGRESSION`, and any other build failure is a hard FAIL too. The
+  fail-open direction (builds, prints a wrong value) remains a hard FAIL. Exactly
+  one outcome passes, so the fence is closed in both directions.
+- **Sabotage-proved.** Disabling the parser registration alone
+  (`if inner_type >= TYPE_NAMED_BASE` -> `if false`) reproduced the original
+  failure through the tightened fence:
+  `FAIL — REGRESSION: the Option-unwrap receiver is unresolvable again
+  ('unresolved method call')`. Restored byte-identical (verified by `diff -q`),
+  fence re-run -> PASS.
+- Regression specs (interpreter lane, `bin/simple test`, real verdict lines):
+  - `test/01_unit/compiler_core/parser_option_coverage_spec.spl` executed=29
+    passed=29 failed=0
+  - `test/01_unit/compiler/qualified_result_option_no_import_spec.spl`
+    executed=6 passed=6 failed=0
+  - `test/01_unit/language/dict_get_option_match_spec.spl` executed=2 passed=2
+    failed=0
+  - `test/01_unit/language/option_i64_value3_sentinel_spec.spl` executed=5
+    passed=5 failed=0
+- `parser_option_coverage_spec.spl` initially went 27/29. **Both failures were
+  the spec asserting the defect**: `Option<CustomType> returns TYPE_OPTION` and
+  `CustomType? returns TYPE_OPTION` (`expected 300 to equal 14`). They were
+  rewritten to assert the inner type is PRESERVED — a strictly stronger oracle
+  than the equality they replaced, not a loosened one.
+- `sh scripts/check/check-native-trailing-default-param.shs` FAILS on this tree
+  (garbage trailing default values, e.g. `times=123328077358976`). **Measured
+  pre-existing, not caused by this change**: re-running it with both parser
+  registrations disabled produced the identical FAIL. Unrelated lane; not
+  investigated here.
+
+### Attribution
+
+`bin/simple` self-reports as the Rust bootstrap seed, but every file changed
+here is pure-Simple `src/compiler/**` driven by `native-build`, and the
+sabotage/restore cycle above is direct positive proof that these `.spl` sources
+are the ones live on that lane. The Rust seed (`src/compiler_rust/**`) was not
+touched, and its own lane is unaffected and unmeasured.
+
+### Follow-on still open
+
+`src/os/services/vfs/vfs_boot_init.spl:383` still carries the unconditional
+`if true:` skip and the stale `blockdevice-dispatch-codegen-bug` marker. The
+compiler defect that actually kept it switched off is now fixed, so lifting the
+skip is newly viable — but that requires a real x86_64 QEMU + NVMe boot to
+claim, which was NOT done here and must not be assumed from this fix alone.
+The sibling `native_trait_typed_return_receiver_unresolved_2026-08-09.md`
+remains OPEN and is genuinely blocked on its multi-impl policy question; this
+fix does not address it, exactly as that doc's "Relationship" section predicted.
