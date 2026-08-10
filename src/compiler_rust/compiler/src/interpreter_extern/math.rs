@@ -13,151 +13,157 @@ use simple_runtime::value::sffi::math::{
     rt_math_is_finite,
 };
 
-/// Absolute value of an integer
+/// True when this value is floating point, so the numeric builtins below can
+/// pick a float path instead of forcing everything through `as_int()`.
 ///
-/// Callable from Simple as: `abs(n)`
-pub fn abs(args: &[Value]) -> Result<Value, CompileError> {
-    let val = args.first().ok_or_else(|| {
-        let ctx = ErrorContext::new()
-            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
-            .with_help("abs expects exactly 1 argument");
-        CompileError::semantic_with_context("abs expects 1 argument".to_string(), ctx)
-    })?;
-    match val {
-        Value::Int(i) => Ok(Value::Int(i.abs())),
+/// `as_int()` on a float TRUNCATES: it turned `min(1.5, 2.5)` into `1` in this
+/// lane (the whole-module interpreter fallback), silently losing the fraction.
+/// That was invisible for a long time because
+/// `src/lib/nogc_sync_mut/runtime_wrappers.spl` accidentally SHADOWED these
+/// builtins with pure-Simple reimplementations that happened to be
+/// float-tolerant, so most callers never reached this code at all. Removing
+/// those shadows reroutes callers here, which is why these paths had to become
+/// float-correct first.
+/// doc/08_tracking/bug/numeric_builtins_hardcode_i64_result_type_2026-08-10.md
+fn is_float(v: &Value) -> bool {
+    matches!(v, Value::Float(_) | Value::Float32(_))
+}
+
+/// Coerce to `f64` for the float path. Integers widen, which is what makes
+/// mixed calls like `pow(2.0, 3)` evaluate as floats rather than erroring.
+fn as_f64(v: &Value) -> Result<f64, CompileError> {
+    match v {
+        Value::Float(f) => Ok(*f),
+        Value::Float32(f) => Ok(*f as f64),
+        Value::Int(i) => Ok(*i as f64),
         _ => {
             let ctx = ErrorContext::new()
                 .with_code(codes::TYPE_MISMATCH)
-                .with_help("abs expects an integer argument");
+                .with_help("expected a numeric argument");
             Err(CompileError::semantic_with_context(
-                "abs expects integer".to_string(),
+                "expected numeric".to_string(),
                 ctx,
             ))
         }
     }
 }
 
-/// Minimum of two integers
+fn arg_at<'a>(args: &'a [Value], index: usize, name: &str, arity: usize) -> Result<&'a Value, CompileError> {
+    args.get(index).ok_or_else(|| {
+        let ctx = ErrorContext::new()
+            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+            .with_help(format!("{} expects exactly {} argument(s)", name, arity));
+        CompileError::semantic_with_context(format!("{} expects {} argument(s)", name, arity), ctx)
+    })
+}
+
+/// Absolute value
 ///
-/// Callable from Simple as: `min(a, b)`
+/// Callable from Simple as: `abs(n)`. Integer in, integer out; float in,
+/// float out.
+pub fn abs(args: &[Value]) -> Result<Value, CompileError> {
+    let val = arg_at(args, 0, "abs", 1)?;
+    match val {
+        Value::Int(i) => Ok(Value::Int(i.abs())),
+        v if is_float(v) => Ok(Value::Float(as_f64(v)?.abs())),
+        _ => {
+            let ctx = ErrorContext::new()
+                .with_code(codes::TYPE_MISMATCH)
+                .with_help("abs expects a numeric argument");
+            Err(CompileError::semantic_with_context(
+                "abs expects a number".to_string(),
+                ctx,
+            ))
+        }
+    }
+}
+
+/// Minimum of two numbers
+///
+/// Callable from Simple as: `min(a, b)`. Float if either argument is float.
 pub fn min(args: &[Value]) -> Result<Value, CompileError> {
-    let a = args
-        .first()
-        .ok_or_else(|| {
-            let ctx = ErrorContext::new()
-                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
-                .with_help("min expects exactly 2 arguments");
-            CompileError::semantic_with_context("min expects 2 arguments".to_string(), ctx)
-        })?
-        .as_int()?;
-    let b = args
-        .get(1)
-        .ok_or_else(|| {
-            let ctx = ErrorContext::new()
-                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
-                .with_help("min expects exactly 2 arguments");
-            CompileError::semantic_with_context("min expects 2 arguments".to_string(), ctx)
-        })?
-        .as_int()?;
-    Ok(Value::Int(a.min(b)))
+    let a = arg_at(args, 0, "min", 2)?;
+    let b = arg_at(args, 1, "min", 2)?;
+    if is_float(a) || is_float(b) {
+        return Ok(Value::Float(as_f64(a)?.min(as_f64(b)?)));
+    }
+    Ok(Value::Int(a.as_int()?.min(b.as_int()?)))
 }
 
-/// Maximum of two integers
+/// Maximum of two numbers
 ///
-/// Callable from Simple as: `max(a, b)`
+/// Callable from Simple as: `max(a, b)`. Float if either argument is float.
 pub fn max(args: &[Value]) -> Result<Value, CompileError> {
-    let a = args
-        .first()
-        .ok_or_else(|| {
-            let ctx = ErrorContext::new()
-                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
-                .with_help("max expects exactly 2 arguments");
-            CompileError::semantic_with_context("max expects 2 arguments".to_string(), ctx)
-        })?
-        .as_int()?;
-    let b = args
-        .get(1)
-        .ok_or_else(|| {
-            let ctx = ErrorContext::new()
-                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
-                .with_help("max expects exactly 2 arguments");
-            CompileError::semantic_with_context("max expects 2 arguments".to_string(), ctx)
-        })?
-        .as_int()?;
-    Ok(Value::Int(a.max(b)))
+    let a = arg_at(args, 0, "max", 2)?;
+    let b = arg_at(args, 1, "max", 2)?;
+    if is_float(a) || is_float(b) {
+        return Ok(Value::Float(as_f64(a)?.max(as_f64(b)?)));
+    }
+    Ok(Value::Int(a.as_int()?.max(b.as_int()?)))
 }
 
-/// Square root of an integer (returns integer result)
+/// Square root
 ///
-/// Callable from Simple as: `sqrt(n)`
+/// Callable from Simple as: `sqrt(n)`. A float argument returns a float
+/// (`sqrt(16.0)` => `4.0`); an integer argument keeps the previous
+/// truncating-to-integer behaviour so integer callers are unchanged.
 pub fn sqrt(args: &[Value]) -> Result<Value, CompileError> {
-    let val = args
-        .first()
-        .ok_or_else(|| {
-            let ctx = ErrorContext::new()
-                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
-                .with_help("sqrt expects exactly 1 argument");
-            CompileError::semantic_with_context("sqrt expects 1 argument".to_string(), ctx)
-        })?
-        .as_int()?;
-    Ok(Value::Int((val as f64).sqrt() as i64))
+    let val = arg_at(args, 0, "sqrt", 1)?;
+    if is_float(val) {
+        return Ok(Value::Float(as_f64(val)?.sqrt()));
+    }
+    Ok(Value::Int((val.as_int()? as f64).sqrt() as i64))
 }
 
-/// Floor function (no-op for integers)
+/// Floor
 ///
-/// Callable from Simple as: `floor(n)`
+/// Callable from Simple as: `floor(n)`. Genuinely rounds down for floats
+/// (`floor(1.7)` => `1.0`); a no-op for integers, as before.
 pub fn floor(args: &[Value]) -> Result<Value, CompileError> {
-    let val = args
-        .first()
-        .ok_or_else(|| {
-            let ctx = ErrorContext::new()
-                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
-                .with_help("floor expects exactly 1 argument");
-            CompileError::semantic_with_context("floor expects 1 argument".to_string(), ctx)
-        })?
-        .as_int()?;
-    Ok(Value::Int(val))
+    let val = arg_at(args, 0, "floor", 1)?;
+    if is_float(val) {
+        return Ok(Value::Float(as_f64(val)?.floor()));
+    }
+    Ok(Value::Int(val.as_int()?))
 }
 
-/// Ceiling function (no-op for integers)
+/// Ceiling
 ///
-/// Callable from Simple as: `ceil(n)`
+/// Callable from Simple as: `ceil(n)`. Genuinely rounds up for floats
+/// (`ceil(1.2)` => `2.0`); a no-op for integers, as before.
 pub fn ceil(args: &[Value]) -> Result<Value, CompileError> {
-    let val = args
-        .first()
-        .ok_or_else(|| {
-            let ctx = ErrorContext::new()
-                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
-                .with_help("ceil expects exactly 1 argument");
-            CompileError::semantic_with_context("ceil expects 1 argument".to_string(), ctx)
-        })?
-        .as_int()?;
-    Ok(Value::Int(val))
+    let val = arg_at(args, 0, "ceil", 1)?;
+    if is_float(val) {
+        return Ok(Value::Float(as_f64(val)?.ceil()));
+    }
+    Ok(Value::Int(val.as_int()?))
 }
 
 /// Power function (base^exponent)
 ///
-/// Callable from Simple as: `pow(base, exponent)`
+/// Callable from Simple as: `pow(base, exponent)`. Float if either argument is
+/// float. The integer path additionally rejects a NEGATIVE exponent instead of
+/// casting it to `u32`: `(exp as u32)` wrapped a negative exponent to a huge
+/// unsigned value, and `i64::pow` then panicked or overflowed rather than
+/// reporting anything useful.
 pub fn pow(args: &[Value]) -> Result<Value, CompileError> {
-    let base = args
-        .first()
-        .ok_or_else(|| {
-            let ctx = ErrorContext::new()
-                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
-                .with_help("pow expects exactly 2 arguments");
-            CompileError::semantic_with_context("pow expects 2 arguments".to_string(), ctx)
-        })?
-        .as_int()?;
-    let exp = args
-        .get(1)
-        .ok_or_else(|| {
-            let ctx = ErrorContext::new()
-                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
-                .with_help("pow expects exactly 2 arguments");
-            CompileError::semantic_with_context("pow expects 2 arguments".to_string(), ctx)
-        })?
-        .as_int()?;
-    Ok(Value::Int(base.pow(exp as u32)))
+    let base = arg_at(args, 0, "pow", 2)?;
+    let exp = arg_at(args, 1, "pow", 2)?;
+    if is_float(base) || is_float(exp) {
+        return Ok(Value::Float(as_f64(base)?.powf(as_f64(exp)?)));
+    }
+    let b = base.as_int()?;
+    let e = exp.as_int()?;
+    if e < 0 {
+        let ctx = ErrorContext::new()
+            .with_code(codes::TYPE_MISMATCH)
+            .with_help("use a float base for a negative exponent, e.g. pow(2.0, -3)");
+        return Err(CompileError::semantic_with_context(
+            "pow with a negative exponent requires a float base".to_string(),
+            ctx,
+        ));
+    }
+    Ok(Value::Int(b.saturating_pow(e.min(u32::MAX as i64) as u32)))
 }
 
 // ============================================================================

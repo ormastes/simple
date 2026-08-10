@@ -704,13 +704,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_ltr", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_read_cr2", &[], &[I64]),
     RuntimeFuncSpec::new("rt_read_cr3", &[], &[I64]),
-    // No result. Both are write-only CPU control operations: every C
-    // definition returns void, every Simple declaration (os/kernel/arch/
-    // x86_64/cpu.spl:61,63, x86_32/cpu.spl:58,59, boot/cpu.spl:54) declares
-    // no result, and every caller discards. The old `&[I64]` made callers
-    // decode a return register nothing ever writes.
-    RuntimeFuncSpec::new("rt_write_cr3", &[I64], &[]),
-    RuntimeFuncSpec::new("rt_invlpg", &[I64], &[]),
+    RuntimeFuncSpec::new("rt_write_cr3", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_invlpg", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_read_msr", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_write_msr", &[I64, I64], &[I64]),
     // =========================================================================
@@ -1346,8 +1341,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_coverage_path_probe", &[I32, I32], &[]),
     // rt_coverage_path_finalize(path_id: u32) -> ()
     RuntimeFuncSpec::new("rt_coverage_path_finalize", &[I32], &[]),
-    // rt_coverage_dump_sdn() -> RuntimeValue (text). The raw *mut i8 form is
-    // rt_coverage_dump_sdn_cstr; see the 2026-08-10 B2 measurement.
+    // rt_coverage_dump_sdn() -> *mut i8
     RuntimeFuncSpec::new("rt_coverage_dump_sdn", &[], &[I64]),
     // rt_coverage_free_sdn(ptr: *mut i8) -> ()
     RuntimeFuncSpec::new("rt_coverage_free_sdn", &[I64], &[]),
