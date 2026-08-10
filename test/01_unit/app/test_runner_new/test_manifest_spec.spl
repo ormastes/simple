@@ -4,7 +4,10 @@
 # Note: In interpreter mode, it blocks are closures — runtime behavior
 # is verified by file loading without errors (standard test runner behavior).
 
-use std.test_runner.test_manifest_scanner.{count_sdoctest_blocks, scan_sdoctest_file}
+use std.test_runner.test_manifest_scanner.{count_sdoctest_blocks, manifest_full_scan, scan_sdoctest_file}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{file_write}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 
 describe "TestManifest Data Model":
     it "creates empty manifest with version 1":
@@ -116,6 +119,17 @@ describe "TestManifest Scanner Logic":
     it "registers source-comment doctests with the execution extractor":
         val entry = scan_sdoctest_file("src/compiler/00.common/gc_config.spl")
         expect(entry.block_count).to_be_greater_than(0)
+
+    it "discovers a real spec through canonical directory and path owners":
+        val root = "/tmp/simple-test-manifest-owner-{getpid()}"
+        dir_remove_all(root)
+        dir_create_all(root)
+        val spec_path = root + "/owner_import_spec.spl"
+        file_write(spec_path, "describe \"owner import\":\n    it \"runs\":\n        expect(1).to_equal(1)\n")
+        val manifest = manifest_full_scan([root])
+        expect(manifest.entries.len()).to_equal(1)
+        expect(manifest.entries[0].path).to_equal(spec_path)
+        dir_remove_all(root)
 
     it "extracts platform tags from content":
         val content = "# @platform: linux\ncode\n# @platform: interpreter"
