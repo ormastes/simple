@@ -1,7 +1,9 @@
 # Tree-wipe damage census — surviving modules destroyed or truncated
 
 **Date:** 2026-08-04  
-**Status:** OPEN (inventory complete; 1 of 39 truncations restored)  
+**Status:** OPEN (inventory complete; 3 of 39 truncations restored — 4 more
+found already restored by other lanes since the census date: see "Already
+restored by others" below)  
 **Scope:** owned `src/` `.spl` only (vendor excluded)
 
 ## Why this exists
@@ -125,7 +127,7 @@ from history (high = suspect a rewrite); `cons` counts deduped consumers.
 | 13 | `src/lib/common/win_fs/window_record.spl` | peripheral | 58 | 141 | 2 | 3 | 36% |
 | 14 | `src/os/drivers/framebuffer/ramfb.spl` | peripheral | 323 | 418 | 2 | 2 | 2% |
 | 15 | `src/app/fix/rules/impl/lint_spec.spl` | peripheral | 15 | 185 | 2 | 1 | 100% |
-| 16 | `src/os/compositor/qemu_capture.spl` | web-render | 220 | 242 | 1 | 4 | 0% |
+| 16 | `src/os/compositor/qemu_capture.spl` — **RESTORED, see "Restored" below** | web-render | ~~220~~ | 242 | 0 | 4 | 0% |
 | 17 | `src/lib/gc_async_mut/gpu/browser_engine/style/animation.spl` | web-render | 545 | 473 | 1 | 3 | 31% |
 | 18 | `src/lib/nogc_sync_mut/io/tcp.spl` | peripheral | 526 | 539 | 1 | 2 | 0% |
 | 19 | `src/lib/common/wine_hello_fixture.spl` | peripheral | 22 | 168 | 1 | 2 | 100% |
@@ -139,7 +141,7 @@ from history (high = suspect a rewrite); `cons` counts deduped consumers.
 | 27 | `src/lib/common/crypto/chacha20.spl` | security | 207 | 612 | 1 | 1 | 34% |
 | 28 | `src/lib/common/hpack/encoder.spl` | peripheral | 202 | 202 | 1 | 1 | 12% |
 | 29 | `src/lib/gc_async_mut/gpu/engine2d/font_owner.spl` | web-render | 37 | 36 | 1 | 1 | 58% |
-| 30 | `src/lib/nogc_sync_mut/db/dbfs_engine/raw_nvme_arena.spl` | peripheral | 486 | 490 | 1 | 1 | 0% |
+| 30 | `src/lib/nogc_sync_mut/db/dbfs_engine/raw_nvme_arena.spl` — **RESTORED, see "Restored" below** | peripheral | ~~486~~ | 490 | 0 | 1 | 0% |
 | 31 | `src/lib/nogc_async_mut/fs_driver/fat32_parsers.spl` | peripheral | 152 | 246 | 1 | 1 | 40% |
 | 32 | `src/os/apps/browser_demo/browser_demo.spl` | peripheral | 44 | 451 | 1 | 1 | 77% |
 | 33 | `src/lib/common/animation/spring.spl` | peripheral | 58 | 141 | 1 | 1 | 29% |
@@ -274,6 +276,83 @@ only the leading character and leaves the rest alone, so `"HELLO_WORLD"` gave
 `"HELLOWORLD"`. The contract was **not guessed** — the function's own embedded
 sdoctest pins `to_pascal_case("HELLO_WORLD") == "HelloWorld"`, and `.lower()`
 is already the in-module idiom (line 718).
+
+### `src/os/compositor/qemu_capture.spl` — 219 → 241 lines
+
+- **Authoritative source:** blob `e804057092e93c30e4c5374708e2ff9304418935`
+  (11,823 B, 241 lines) — the largest of 10,484 historical blobs at this path.
+- **Clean truncation, verified by diff.** Every line of the current 219-line
+  file appears verbatim in the historical blob; the only changes are a
+  narrower `use std.nogc_sync_mut.qemu.qmp_client.{...}` import (missing
+  `qemu_render_ack_write_line`) and the missing `use
+  std.nogc_sync_mut.ffi.io.{file_delete}`. Restoring adds back two whole
+  functions that were silently dropped: `prepare_qemu_screendump_output`
+  (clears a stale screendump artifact before a QMP capture, so a leftover file
+  from a prior run can't be mistaken for new evidence) and
+  `send_harness_marker` (writes one capture-correlation line over the COM2
+  socket). Diff: 23 removed lines restored, 1 line changed (import list), 0
+  lines from history dropped.
+- **Verification:** restored content written verbatim from `git show
+  e804057092e93c30e4c5374708e2ff9304418935:src/os/compositor/qemu_capture.spl`.
+  `bin/simple lint` was not run (no usable pure-Simple binary reachable in this
+  session within budget); the restore is by-value (verbatim historical blob,
+  not retyped) and the diff was reviewed line-by-line.
+
+### `src/lib/nogc_sync_mut/db/dbfs_engine/raw_nvme_arena.spl` — 485 → 489 lines
+
+- **Authoritative source:** blob `541b2aa5bd9f22139ae0c906f06f759f40fbb7a4`
+  (18,342 B, 489 lines) — the largest of 10,145 historical blobs at this path.
+- **Clean truncation, verified by diff.** The only difference is one missing
+  function: `nvme_arena_registered_count()` (an introspection helper returning
+  the number of registered arena slots, marked in its own docstring as
+  "debug/spec support"). All other current content matches verbatim (0 lines
+  from history dropped elsewhere).
+- **Verification:** restored content written verbatim from `git show
+  541b2aa5bd9f22139ae0c906f06f759f40fbb7a4:src/lib/nogc_sync_mut/db/dbfs_engine/raw_nvme_arena.spl`.
+  Same lint/test caveat as above — by-value restore, diff-reviewed, not
+  independently re-lint-verified in this session.
+
+## Already restored by others (found during this pass, not touched here)
+
+Four rows from the ranked inventory below are stale: their current working-tree
+content is now **byte-for-byte identical** to the largest historical blob at
+that path, meaning another lane already fixed them after the 2026-08-04
+census and before this pass. No action was needed or taken.
+
+| Module | Doc's cur/hist (stale) | Current lines | Verified against |
+|---|---|---|---|
+| `src/lib/common/compress/utilities.spl` | 167/487 | 490 | blob `0a32bd82d325b8dac1273b3c8dd3cee668740bdd` — 0-line diff |
+| `src/os/qemu_systest_contract.spl` | 375/396 | 418 | blob `bb6740025aee7d157e26f4e3a14f02a437cd95a3` — 0-line diff |
+| `src/lib/nogc_sync_mut/io/tcp.spl` | 526/539 | 604 | blob `ba506fa7136f91ad49bbf1238223dd29ffb9e1fb` — 0-line diff |
+| `src/lib/gc_async_mut/gpu/browser_engine/dom_accessors.spl` | 1450/2073 | 2220 | blob `bdd7a04660d58855510316d21b797bc92a60d397` — 1-line diff, and that 1 line is a `_SABOTAGE` test-fixture artifact in the historical blob itself, not real damage |
+
+## Checked and confirmed SKIP — divergent rewrite, do not restore
+
+Four more candidates from the ranked inventory were checked by-value in this
+pass and found to be genuine divergent rewrites (current has real newer work
+the historical blob never had), matching the doc's own caution above:
+
+- **`src/lib/common/crypto/chacha20.spl`** (207/612, 34% novel) — current is a
+  different scalar u32 implementation (`_lc_chacha20_*` helper names) not
+  present in history at all; historical blob uses a different internal
+  structure. Restoring would delete real current code.
+- **`src/lib/gc_async_mut/gpu/browser_engine/layout_core.spl`** (654/708, 1%
+  novel per the table, but by-value diff shows real conflicting work) — current
+  uses a `css_get_float_code(child_style).value` / `css_get_clear_code(...)`
+  accessor API and adds `layout_contents` / emergency-break word-wrap logic
+  that history lacks; history uses direct `.float_code` field access instead.
+  This is an API refactor in flight, not a truncation.
+- **`src/os/drivers/framebuffer/ramfb.spl`** (323/418, 2% novel) — current has
+  its own `find_ramfb_selector` implementation; history has a different,
+  differently-structured one built on a generic `find_fwcfg_file` helper plus
+  `FWCFG_MAX_FILES`/`SIMPLEOS_BOOT_ID_FWCFG_NAME` constants current lacks.
+  Genuine divergence in both directions — skip.
+- **`src/lib/gc_async_mut/gpu/engine2d/generated_kernel_dispatch.spl`**
+  (806/772, 8% novel) — current (805 lines) already exceeds every historical
+  blob found (max 772 lines); nothing to restore, already ahead of history.
+- **`src/lib/common/hpack/encoder.spl`** (202/202, 12% novel) — current
+  (201 lines) is already byte-identical (0-line diff) to the largest
+  historical blob; the "12% novel" figure in the table is stale.
 
 ## Not restored, and why
 

@@ -3,7 +3,14 @@ use os.compositor.electron_capture.{CaptureResult, capture_error}
 use os.compositor.wm_scene.{WmSceneSpec, render_scene_to_backend}
 use os.compositor.shared_mdi_framebuffer_scene.{render_shared_mdi_framebuffer_scene}
 use std.common.image.ppm_decode.{decode_ppm_to_argb}
-use std.nogc_sync_mut.qemu.qmp_client.{QmpClient, qmp_connect, qmp_disconnect, qmp_screendump}
+use std.nogc_sync_mut.qemu.qmp_client.{
+    QmpClient,
+    qmp_connect,
+    qmp_disconnect,
+    qemu_render_ack_write_line,
+    qmp_screendump
+}
+use std.nogc_sync_mut.ffi.io.{file_delete}
 
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_size(path: text) -> i64
@@ -40,10 +47,21 @@ fn decode_qemu_screendump_ppm(data: [u8]) -> CaptureResult:
         Err(msg):
             capture_error("qemu_vm", 0, 0, "QEMU screendump PPM decode failed: {msg}")
 
+fn prepare_qemu_screendump_output(out_path: text) -> bool:
+    """Remove any prior artifact so only this QMP command can satisfy capture."""
+    if out_path == "":
+        return false
+    if rt_file_exists(out_path):
+        return file_delete(out_path)
+    true
+
 fn qemu_screendump_to_file(qmp_socket: text, out_path: text) -> QemuScreendumpCommandResult:
     # Drive the persistent pure-Simple QMP client (greeting + capabilities +
     # screendump HMC). QEMU writes the framebuffer asynchronously, so poll the
     # output file until it has bytes (up to ~5s) before reporting success.
+    # A non-empty file from a prior QEMU run is not evidence for this command.
+    if not prepare_qemu_screendump_output(out_path):
+        return QemuScreendumpCommandResult(success: false, error: "could not remove stale screendump: {out_path}")
     val client = qmp_connect(qmp_socket)
     if client.fd < 0:
         return QemuScreendumpCommandResult(success: false, error: "QMP connect failed for socket: {qmp_socket}")
@@ -61,6 +79,10 @@ fn qemu_screendump_to_file(qmp_socket: text, out_path: text) -> QemuScreendumpCo
         return QemuScreendumpCommandResult(success: true, error: "")
     val detail = if not sent: "screendump command rejected" else: "screendump produced no output within timeout"
     QemuScreendumpCommandResult(success: false, error: detail)
+
+fn send_harness_marker(qmp_socket: text, marker: text) -> bool:
+    """Send one capture-correlation line over the dedicated COM2 socket."""
+    qemu_render_ack_write_line(qmp_socket, marker)
 
 fn capture_qemu_vm(qmp_socket: text, out_path: text) -> CaptureResult:
     if qmp_socket.len() == 0:
