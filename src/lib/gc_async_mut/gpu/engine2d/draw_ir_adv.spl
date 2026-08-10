@@ -648,8 +648,44 @@ fn _engine2d_draw_ir_render_glass_material(
             (material_height / 2).to_i64() * material_width.to_i64() +
             (material_width / 2).to_i64())
         print "[draw-ir-glass-pixels] color={surface_color} alpha={surface_alpha_milli} size={material_width}x{material_height} center={pixels[glass_center]}"
-    eng.draw_image(
-        material_x, material_y, material_width, material_height, pixels)
+    # The current freestanding Stage3 ABI loses `[u32]` contents when this
+    # owner passes the realized image through Engine2D into SoftwareBackend.
+    # Opaque material pixels can be transported exactly as scalar same-color
+    # row runs: raw image copy and opaque rect fill have identical ARGB output.
+    # Keep the canonical image path for any translucent result.
+    var material_opaque = true
+    var material_index: i64 = 0
+    while material_index < pixels.len():
+        if ((pixels[material_index] >> 24) & 0xFFu32) != 0xFFu32:
+            material_opaque = false
+            break
+        material_index = material_index + 1
+    if material_opaque:
+        var material_row = 0
+        while material_row < material_height:
+            var material_column = 0
+            while material_column < material_width:
+                val run_index = (
+                    material_row.to_i64() * material_width.to_i64() +
+                    material_column.to_i64())
+                val run_color = pixels[run_index]
+                var run_length = 1
+                while material_column + run_length < material_width:
+                    val next_index = run_index + run_length.to_i64()
+                    if pixels[next_index] != run_color:
+                        break
+                    run_length = run_length + 1
+                eng.draw_rect_filled(
+                    material_x + material_column,
+                    material_y + material_row,
+                    run_length,
+                    1,
+                    run_color)
+                material_column = material_column + run_length
+            material_row = material_row + 1
+    else:
+        eng.draw_image(
+            material_x, material_y, material_width, material_height, pixels)
     if _e2d_glass_owner_post_probe_count < 3:
         _e2d_glass_owner_post_probe_count = _e2d_glass_owner_post_probe_count + 1
         val glass_owner_pixels = eng.read_pixels()
