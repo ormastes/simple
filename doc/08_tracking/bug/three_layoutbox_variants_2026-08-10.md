@@ -64,23 +64,57 @@ So the containers get the **rename-for-clarity** outcome, and the one part that
   `block_flow.spl` header, replacing the old "do not add a fourth" note (which
   was already wrong — there were four).
 
+## Merge DONE (2026-08-10)
+
+`BoxGeometry` no longer declares its own twelve edges. It now nests
+`common.layout.box_model.BoxModel` as `spacing`, keeping only `width`/`height`
+of its own (BoxModel deliberately carries no dimensions). The duplication is
+gone: there is now ONE edge declaration reached by both lanes.
+
+**Field identity re-verified before the change** (not inherited from this doc):
+all twelve names, order and `f64` types matched exactly.
+
+**Why the old blocker no longer applied.** The doc said four of five blink specs
+were RED on a statics failure. The real reason is `reason=unresolved-module` —
+they import `std.blink.{dom.form_state,input.event,paint.paint_tree_walker}`,
+which do not exist anywhere (see
+`blink_specs_import_unimplemented_modules_2026-08-10.md`). They never execute a
+test, so they cannot regress. They also only touch `box_geometry_new` /
+`box_geometry_zero`, whose signatures are unchanged, so they needed no edit.
+
+**Verdicts (foreground, relative paths, Rust bootstrap seed `bin/simple`):**
+
+| spec | before | after |
+|---|---|---|
+| `test/01_unit/lib/common/layout/box_model_spec.spl` | 9/9 | **9/9** |
+| `test/01_unit/lib/blink/block_flow_spec.spl` | 7/7 | **7/7** |
+| `test/01_unit/lib/blink/hit_test_spec.spl` | `reason=unresolved-module` | **unchanged** |
+
+**Cross-lane sabotage proof — the point of the merge.** Setting `border_top: 7.0`
+in `BoxModel.zero()` (a single edit in `common/`, touching no blink file) now
+turns **both** lanes RED:
+
+- `box_model_spec` 9/9 -> **7/9**
+- `block_flow_spec` 7/7 -> **6/7**
+
+Before the merge, this exact class of sabotage turned `box_model_spec` RED while
+`block_flow_spec` stayed **GREEN 7/7**. The blink lane now feels a `common/`
+change — that is the duplication actually being gone, not merely renamed.
+`box_model.spl` was restored and verified byte-identical to HEAD afterwards.
+
+**Language check before committing to the nesting.** Nested struct writes were
+probed, not assumed: `o.inner.a = 99.0` persists. A control probe showed struct
+assignment on this engine aliases for *flat* structs too (`var f2 = f; f2.a = 7`
+mutates `f`), so nesting is no worse than what BoxGeometry already had. Note
+this contradicts the "structs are value types, assignment copies" premise —
+recorded here as an observation, not fixed (pre-existing, out of scope).
+
+**Fail-open observed:** reading a field that no longer exists (`geo.margin_top`
+after the merge) did not raise a compile error — the specs ran and silently
+returned wrong values (9->6, 7->5). Field-existence is not checked on this lane;
+only the assertions caught it. Worth a separate bug.
+
 ## Remaining
-
-`BoxGeometry`'s twelve edges are still a copy of `BoxModel`. The merge is to
-give `BoxGeometry` a nested `spacing: BoxModel` field and drop the twelve flat
-fields.
-
-**Not done here because** it changes the field-read surface
-(`geo.margin_top` → `geo.spacing.margin_top`) across five blink specs, and
-**four of those five specs are already RED** for an unrelated pre-existing
-statics-initialisation failure (`STATICS_FAILED_KEY`, `Results: 1 total, 0
-passed, 1 failed` in `hit_test`, `paint_tree_walker`, `form_paint`,
-`image_paint`). Editing them would be broad and unverifiable — the change could
-not be proved not to break them.
-
-**Unblock condition:** once the blink statics failure is fixed and all five
-blink specs are green, nest `BoxModel` inside `BoxGeometry` and re-run all five.
-The parity spec added above is the regression net for that change.
 
 `render_scene.box_types` and `browser_engine/layout_box.spl` are owned by other
 lanes and were not touched.

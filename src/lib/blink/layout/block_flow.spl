@@ -23,46 +23,43 @@
 # lookup and skia rects, which `common/` (a no-skia-dependency tier) must not
 # acquire. Renamed to `BlockFlowBox` so the four cannot be conflated.
 #
-# STILL DUPLICATED: `BoxGeometry`'s twelve spacing edges are field-for-field
-# identical to `common.layout.box_model.BoxModel`. Consolidation is tracked in
-# doc/08_tracking/bug/three_layoutbox_variants_2026-08-10.md — do not add a
-# fifth spacing record; nest `BoxModel` here instead.
+# SPACING IS SHARED (merged 2026-08-10): `BoxGeometry` no longer declares its
+# own twelve spacing edges. It nests `common.layout.box_model.BoxModel`, which
+# was field-for-field identical, as `spacing`. Reach edges through it
+# (`geo.spacing.margin_top`). Do not reintroduce a parallel edge record — the
+# whole point is that a change to BoxModel is now felt by this lane too. See
+# doc/08_tracking/bug/three_layoutbox_variants_2026-08-10.md.
+#
+# `width`/`height` stay on BoxGeometry: BoxModel deliberately carries no
+# dimensions (its own consumer, `common.layout.LayoutBox`, holds w/h alongside
+# it), so nesting adds the edges without importing a sizing policy.
 
 use std.skia.entity.geometry.{SkRect}
+use std.common.layout.box_model.{BoxModel}
 
 struct BoxGeometry:
-    """CSS box-model edges for one box, in device-independent pixels."""
+    """Box dimensions plus the shared CSS edge record, in device-independent pixels."""
     width: f64
     height: f64
-    margin_top: f64
-    margin_right: f64
-    margin_bottom: f64
-    margin_left: f64
-    padding_top: f64
-    padding_right: f64
-    padding_bottom: f64
-    padding_left: f64
-    border_top: f64
-    border_right: f64
-    border_bottom: f64
-    border_left: f64
+    spacing: BoxModel
 
 fn box_geometry_zero() -> BoxGeometry:
     """Return a geometry with every edge and dimension at zero."""
-    BoxGeometry(
-        width: 0.0, height: 0.0,
-        margin_top: 0.0, margin_right: 0.0, margin_bottom: 0.0, margin_left: 0.0,
-        padding_top: 0.0, padding_right: 0.0, padding_bottom: 0.0, padding_left: 0.0,
-        border_top: 0.0, border_right: 0.0, border_bottom: 0.0, border_left: 0.0
-    )
+    BoxGeometry(width: 0.0, height: 0.0, spacing: BoxModel.zero())
 
 fn box_geometry_new(width: f64, height: f64, margin: f64, padding: f64, border: f64) -> BoxGeometry:
     """Return a geometry with uniform margin, padding and border on all four sides."""
     BoxGeometry(
-        width: width, height: height,
-        margin_top: margin, margin_right: margin, margin_bottom: margin, margin_left: margin,
-        padding_top: padding, padding_right: padding, padding_bottom: padding, padding_left: padding,
-        border_top: border, border_right: border, border_bottom: border, border_left: border
+        width: width,
+        height: height,
+        spacing: BoxModel(
+            margin_top: margin, margin_right: margin,
+            margin_bottom: margin, margin_left: margin,
+            padding_top: padding, padding_right: padding,
+            padding_bottom: padding, padding_left: padding,
+            border_top: border, border_right: border,
+            border_bottom: border, border_left: border
+        )
     )
 
 class BlockFlowBox:
@@ -140,8 +137,8 @@ impl LayoutContext:
         var stack: [(i64, f64, f64)] = []
 
         val root_geo = self.boxes[root_idx as i32].geometry
-        val root_left = root_geo.margin_left
-        val root_top = root_geo.margin_top
+        val root_left = root_geo.spacing.margin_left
+        val root_top = root_geo.spacing.margin_top
         laid_idx.push(root_idx)
         laid_rect.push(SkRect(
             left: root_left,
@@ -158,14 +155,14 @@ impl LayoutContext:
             val top = frame.2
             val parent = self.boxes[idx as i32]
             val pg = parent.geometry
-            val content_left = left + pg.border_left + pg.padding_left
-            var cursor = top + pg.border_top + pg.padding_top
+            val content_left = left + pg.spacing.border_left + pg.spacing.padding_left
+            var cursor = top + pg.spacing.border_top + pg.spacing.padding_top
             for cid in parent.children_ids:
                 val cidx = self.index_of(cid)
                 if cidx >= 0:
                     val cg = self.boxes[cidx as i32].geometry
-                    val ctop = cursor + cg.margin_top
-                    val cleft = content_left + cg.margin_left
+                    val ctop = cursor + cg.spacing.margin_top
+                    val cleft = content_left + cg.spacing.margin_left
                     laid_idx.push(cidx)
                     laid_rect.push(SkRect(
                         left: cleft,
@@ -174,7 +171,7 @@ impl LayoutContext:
                         bottom: ctop + cg.height
                     ))
                     stack.push((cidx, cleft, ctop))
-                    cursor = ctop + cg.height + cg.margin_bottom
+                    cursor = ctop + cg.height + cg.spacing.margin_bottom
 
         # Rebuild the arena with the computed rects (element write-back by value).
         var updated: [BlockFlowBox] = []

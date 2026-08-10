@@ -115,40 +115,44 @@ describe "Layout box hit testing":
 
 describe "Spacing parity across the layout lanes":
     """
-    Two lanes keep their own spacing record: `common.layout.box_model.BoxModel`
-    for the ui.browser recursive layout tree, and
-    `blink.layout.block_flow.BoxGeometry` for the arena-based blink render
-    lane. The container types are genuinely different — one is a recursive
-    value tree, the other is an id arena holding skia rects — but the twelve
-    spacing edges must keep meaning exactly the same thing in both, or a fix
-    applied to one lane silently fails to reach the other. These are the tests
-    that go red when the two drift.
+    The two lanes no longer keep their own spacing record. As of 2026-08-10
+    `blink.layout.block_flow.BoxGeometry` NESTS `common.layout.box_model.
+    BoxModel` as its `spacing` field, so the twelve edges are one declaration,
+    not two that must be kept in step. The container types remain genuinely
+    different — one is a recursive value tree, the other an id arena holding
+    skia rects — and only the edge record is shared.
+
+    These tests therefore assert IDENTITY, not parity: the blink lane must
+    reach the very same `BoxModel` API (`horizontal_space()`, `vertical_space()`,
+    `BoxModel.zero()`) rather than a look-alike. If someone reintroduces a
+    private edge record on BoxGeometry, `g.spacing` stops being a BoxModel and
+    these go red.
     """
 
-    it "agrees edge-for-edge with the blink geometry record built the same way":
-        step("Build both spacing records with 6px margin and 2px padding")
+    it "exposes the shared BoxModel itself, edge-for-edge, as its spacing field":
+        step("Build the shared record directly and via the blink constructor")
         val m = BoxModel.uniform(6.0, 2.0)
         val g = box_geometry_new(100.0, 40.0, 6.0, 2.0, 0.0)
 
         step("Verify all four margin edges match between the two lanes")
-        assert_true(approx_eq(m.margin_top, g.margin_top))
-        assert_true(approx_eq(m.margin_right, g.margin_right))
-        assert_true(approx_eq(m.margin_bottom, g.margin_bottom))
-        assert_true(approx_eq(m.margin_left, g.margin_left))
+        assert_true(approx_eq(m.margin_top, g.spacing.margin_top))
+        assert_true(approx_eq(m.margin_right, g.spacing.margin_right))
+        assert_true(approx_eq(m.margin_bottom, g.spacing.margin_bottom))
+        assert_true(approx_eq(m.margin_left, g.spacing.margin_left))
 
         step("Verify all four padding edges match between the two lanes")
-        assert_true(approx_eq(m.padding_top, g.padding_top))
-        assert_true(approx_eq(m.padding_right, g.padding_right))
-        assert_true(approx_eq(m.padding_bottom, g.padding_bottom))
-        assert_true(approx_eq(m.padding_left, g.padding_left))
+        assert_true(approx_eq(m.padding_top, g.spacing.padding_top))
+        assert_true(approx_eq(m.padding_right, g.spacing.padding_right))
+        assert_true(approx_eq(m.padding_bottom, g.spacing.padding_bottom))
+        assert_true(approx_eq(m.padding_left, g.spacing.padding_left))
 
         step("Verify all four border edges match between the two lanes")
-        assert_true(approx_eq(m.border_top, g.border_top))
-        assert_true(approx_eq(m.border_right, g.border_right))
-        assert_true(approx_eq(m.border_bottom, g.border_bottom))
-        assert_true(approx_eq(m.border_left, g.border_left))
+        assert_true(approx_eq(m.border_top, g.spacing.border_top))
+        assert_true(approx_eq(m.border_right, g.spacing.border_right))
+        assert_true(approx_eq(m.border_bottom, g.spacing.border_bottom))
+        assert_true(approx_eq(m.border_left, g.spacing.border_left))
 
-    it "agrees on total consumed space computed from the blink record's edges":
+    it "lets the blink lane call the shared spacing helpers directly":
         step("Build both spacing records with 5px margin, 3px padding, 1px border")
         val m = BoxModel(
             margin_top: 5.0, margin_right: 5.0, margin_bottom: 5.0, margin_left: 5.0,
@@ -158,16 +162,22 @@ describe "Spacing parity across the layout lanes":
         val g = box_geometry_new(100.0, 40.0, 5.0, 3.0, 1.0)
 
         step("Compute the blink lane's horizontal space by hand from its own edges")
-        val g_horizontal = g.margin_left + g.padding_left + g.border_left +
-            g.border_right + g.padding_right + g.margin_right
+        val g_horizontal = g.spacing.margin_left + g.spacing.padding_left +
+            g.spacing.border_left + g.spacing.border_right +
+            g.spacing.padding_right + g.spacing.margin_right
 
         step("Verify the shared helper reports the same 18px total")
         assert_true(approx_eq(m.horizontal_space(), 18.0))
         assert_true(approx_eq(m.horizontal_space(), g_horizontal))
 
+        step("Verify the blink record answers the shared helper identically")
+        assert_true(approx_eq(g.spacing.horizontal_space(), 18.0))
+        assert_true(approx_eq(g.spacing.vertical_space(), m.vertical_space()))
+
         step("Compute the blink lane's vertical space by hand and verify parity")
-        val g_vertical = g.margin_top + g.padding_top + g.border_top +
-            g.border_bottom + g.padding_bottom + g.margin_bottom
+        val g_vertical = g.spacing.margin_top + g.spacing.padding_top +
+            g.spacing.border_top + g.spacing.border_bottom +
+            g.spacing.padding_bottom + g.spacing.margin_bottom
         assert_true(approx_eq(m.vertical_space(), g_vertical))
 
     it "agrees that a zeroed record consumes no space in either lane":
@@ -176,10 +186,11 @@ describe "Spacing parity across the layout lanes":
         val g = box_geometry_zero()
 
         step("Verify every blink edge is zero, matching BoxModel.zero()")
-        assert_true(approx_eq(m.margin_top, g.margin_top))
-        assert_true(approx_eq(m.padding_left, g.padding_left))
-        assert_true(approx_eq(m.border_bottom, g.border_bottom))
+        assert_true(approx_eq(m.margin_top, g.spacing.margin_top))
+        assert_true(approx_eq(m.padding_left, g.spacing.padding_left))
+        assert_true(approx_eq(m.border_bottom, g.spacing.border_bottom))
 
         step("Verify the shared helper agrees no space is consumed")
         assert_true(approx_eq(m.horizontal_space(), 0.0))
         assert_true(approx_eq(m.vertical_space(), 0.0))
+        assert_true(approx_eq(g.spacing.horizontal_space(), 0.0))
