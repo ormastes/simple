@@ -125,3 +125,35 @@ Consequences of the new `_join_tokens` heuristic:
 The real fix is for the tokenizer to emit `Whitespace` tokens (as CSS Syntax L3 requires)
 so the joiner reconstructs source text instead of guessing. Filed here as an observation;
 no code changed by this review lane.
+
+## Addendum: subsequent landings silently inherited the revert
+
+Between the revert (`2313821fd77`) and the recovery (`e99a5b76d11`), at least two
+unrelated commits landed on top of the clobbered tip without detecting anything wrong:
+
+- `7cecc26f11b` (docs) — a fresh AOT re-measurement doc explicitly states "Landed as
+  commit `4f755fdeb930`" and reports results that depend on that commit's code being
+  present. It was fetched, based, and pushed against the reverted tip. Its claim was
+  false at push time and only became true again once recovery landed `4f755fdeb930`'s
+  content in `e99a5b76d11`.
+- `175678881b2` (new HTML tokenizer) — built and pushed cleanly on the reverted tip.
+  Its own work was self-contained and undamaged, but it shipped an `__init__.spl` that
+  re-exported `token.spl`/`tree_builder.spl` from `4332b49cb3a` — files that **did not
+  exist in that tree** at the time, because the revert had deleted them. That tip was
+  broken in a way neither author noticed.
+
+Neither author was at fault: `git merge-base --is-ancestor` said their prerequisite
+commits were present, and nothing in the standard landing protocol checks tree content
+against a *specific named prior commit* the new work assumes is live. This is the same
+gap the incident's root cause exploits, one layer up: not just "was my own diff
+reverted" but "does the tree I'm building on actually contain what my new work assumes
+is already there."
+
+**Structural takeaway:** a revert this size (100 files once fully swept, not the ~26
+first estimated) does not just erase — it also invisibly corrupts every subsequent
+commit that assumes the erased content is present. The window between a silent revert
+and its detection is not idle; it accumulates false claims. Recovery must include a
+sweep for this class of collateral (docs asserting landed-but-absent commits, code
+assuming absent files exist) in addition to restoring the reverted files themselves —
+done here via the AOT-smoke and `render_lane_pipeline_spec` spot-checks, which happened
+to also validate `7cecc26f11b`'s claim and `175678881b2`'s missing dependency.
