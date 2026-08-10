@@ -225,4 +225,7 @@ direct primitive routes now share `_record_primitive_dispatch`: completion
 marks readback dirty, rejection records the first typed fallback reason, and an
 unknown submitted completion freezes further mutation. Focused coverage in
 `backend_vulkan_drawing_spec.spl` exercises every unavailable-pipeline route and
-first-failure preservation without fabricating a GPU receipt.
+first-failure preservation without fabricating a GPU receipt. The low-level
+dispatch helper only returns the checked status; the primitive owner is the
+single provenance writer, so a rejected dispatch cannot preempt its typed
+reason or falsely mark device readback dirty.
