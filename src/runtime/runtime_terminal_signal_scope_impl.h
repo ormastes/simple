@@ -18,38 +18,77 @@
 #define SPL_TERMINAL_SCOPE_EMERGENCY_RESTORE rt_terminal_signal_scope_emergency_restore
 #endif
 
+#ifndef SPL_TERMINAL_SCOPE_TEST_HANDLER_TARGET_LOADED
+#define SPL_TERMINAL_SCOPE_TEST_HANDLER_TARGET_LOADED(target) ((void)(target))
+#endif
+#ifndef SPL_TERMINAL_SCOPE_TEST_AFTER_RETIRE
+#define SPL_TERMINAL_SCOPE_TEST_AFTER_RETIRE() ((void)0)
+#endif
+#ifndef SPL_TERMINAL_SCOPE_TEST_QUIESCE_WAIT
+#define SPL_TERMINAL_SCOPE_TEST_QUIESCE_WAIT() ((void)0)
+#endif
+#ifndef SPL_TERMINAL_SCOPE_TEST_BEFORE_CLOSE
+#define SPL_TERMINAL_SCOPE_TEST_BEFORE_CLOSE(target) ((void)(target))
+#endif
+
 #if defined(_WIN32)
 
 #include <io.h>
 #include <windows.h>
 
-static HANDLE spl_terminal_signal_event;
+enum {
+    SPL_TERMINAL_SCOPE_IDLE = 0,
+    SPL_TERMINAL_SCOPE_ACTIVE = 1,
+    SPL_TERMINAL_SCOPE_CLOSING = 2,
+    SPL_TERMINAL_READ_EOF = -1,
+    SPL_TERMINAL_READ_STOP = -2,
+    SPL_TERMINAL_READ_RESIZE = -3,
+    SPL_TERMINAL_READ_ERROR = -4
+};
+
+static PVOID volatile spl_terminal_signal_event;
 static volatile LONG spl_terminal_stop_pending;
-static volatile LONG spl_terminal_scope_active;
+static volatile LONG spl_terminal_scope_lifecycle;
+static volatile LONG spl_terminal_handlers_inflight;
 static int64_t spl_terminal_scope_handle;
 
 static BOOL WINAPI spl_terminal_console_handler(DWORD event) {
     if (event == CTRL_C_EVENT || event == CTRL_BREAK_EVENT ||
         event == CTRL_CLOSE_EVENT || event == CTRL_LOGOFF_EVENT ||
         event == CTRL_SHUTDOWN_EVENT) {
+        InterlockedIncrement(&spl_terminal_handlers_inflight);
         InterlockedExchange(&spl_terminal_stop_pending, 1);
-        if (spl_terminal_signal_event != NULL) SetEvent(spl_terminal_signal_event);
+        HANDLE wake = (HANDLE)InterlockedCompareExchangePointer(
+            &spl_terminal_signal_event, NULL, NULL);
+        SPL_TERMINAL_SCOPE_TEST_HANDLER_TARGET_LOADED(wake);
+        if (wake != NULL) SetEvent(wake);
+        InterlockedDecrement(&spl_terminal_handlers_inflight);
         return TRUE;
     }
     return FALSE;
 }
 
+static void spl_terminal_wait_for_console_handlers(void) {
+    while (InterlockedCompareExchange(&spl_terminal_handlers_inflight, 0, 0) != 0) {
+        SPL_TERMINAL_SCOPE_TEST_QUIESCE_WAIT();
+        SwitchToThread();
+    }
+}
+
 int64_t SPL_TERMINAL_SCOPE_BEGIN(void) {
-    if (InterlockedCompareExchange(&spl_terminal_scope_active, 1, 0) != 0) {
+    if (InterlockedCompareExchange(&spl_terminal_scope_lifecycle,
+                                   SPL_TERMINAL_SCOPE_ACTIVE,
+                                   SPL_TERMINAL_SCOPE_IDLE) != SPL_TERMINAL_SCOPE_IDLE) {
         errno = EBUSY;
         return 0;
     }
-    spl_terminal_signal_event = CreateEventW(NULL, TRUE, FALSE, NULL);
-    if (spl_terminal_signal_event == NULL ||
-        !SetConsoleCtrlHandler(spl_terminal_console_handler, TRUE)) {
-        if (spl_terminal_signal_event != NULL) CloseHandle(spl_terminal_signal_event);
-        spl_terminal_signal_event = NULL;
-        InterlockedExchange(&spl_terminal_scope_active, 0);
+    HANDLE wake = CreateEventW(NULL, TRUE, FALSE, NULL);
+    InterlockedExchangePointer(&spl_terminal_signal_event, wake);
+    if (wake == NULL || !SetConsoleCtrlHandler(spl_terminal_console_handler, TRUE)) {
+        HANDLE rollback = (HANDLE)InterlockedExchangePointer(
+            &spl_terminal_signal_event, NULL);
+        if (rollback != NULL) CloseHandle(rollback);
+        InterlockedExchange(&spl_terminal_scope_lifecycle, SPL_TERMINAL_SCOPE_IDLE);
         errno = EIO;
         return 0;
     }
@@ -60,48 +99,101 @@ int64_t SPL_TERMINAL_SCOPE_BEGIN(void) {
 }
 
 int64_t SPL_TERMINAL_SCOPE_READ(int64_t scope) {
-    if (InterlockedCompareExchange(&spl_terminal_scope_active, 1, 1) == 0 ||
+    if (InterlockedCompareExchange(&spl_terminal_scope_lifecycle, 0, 0) !=
+            SPL_TERMINAL_SCOPE_ACTIVE ||
         scope <= 0 || scope != spl_terminal_scope_handle) {
         errno = EINVAL;
-        return -4;
+        return SPL_TERMINAL_READ_ERROR;
     }
     HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
-    HANDLE waits[2] = {input, spl_terminal_signal_event};
+    HANDLE wake = (HANDLE)InterlockedCompareExchangePointer(
+        &spl_terminal_signal_event, NULL, NULL);
+    if (input == NULL || input == INVALID_HANDLE_VALUE || wake == NULL) {
+        errno = EIO;
+        return SPL_TERMINAL_READ_ERROR;
+    }
+    HANDLE waits[2] = {input, wake};
     for (;;) {
+        if (InterlockedExchange(&spl_terminal_stop_pending, 0) != 0)
+            return SPL_TERMINAL_READ_STOP;
         DWORD ready = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
         if (ready == WAIT_OBJECT_0 + 1) {
-            ResetEvent(spl_terminal_signal_event);
-            if (InterlockedExchange(&spl_terminal_stop_pending, 0) != 0) return -2;
+            ResetEvent(wake);
+            if (InterlockedExchange(&spl_terminal_stop_pending, 0) != 0)
+                return SPL_TERMINAL_READ_STOP;
             continue;
         }
-        if (ready != WAIT_OBJECT_0) { errno = EIO; return -4; }
+        if (ready != WAIT_OBJECT_0) {
+            errno = EIO;
+            return SPL_TERMINAL_READ_ERROR;
+        }
+
+        DWORD console_mode = 0;
+        if (GetConsoleMode(input, &console_mode)) {
+            for (;;) {
+                INPUT_RECORD record;
+                DWORD available = 0;
+                if (!PeekConsoleInputW(input, &record, 1, &available)) {
+                    errno = EIO;
+                    return SPL_TERMINAL_READ_ERROR;
+                }
+                if (available == 0) break;
+                if (record.EventType == WINDOW_BUFFER_SIZE_EVENT) {
+                    DWORD consumed = 0;
+                    if (!ReadConsoleInputW(input, &record, 1, &consumed) || consumed != 1) {
+                        errno = EIO;
+                        return SPL_TERMINAL_READ_ERROR;
+                    }
+                    return SPL_TERMINAL_READ_RESIZE;
+                }
+                if (record.EventType == KEY_EVENT && record.Event.KeyEvent.bKeyDown) break;
+                DWORD consumed = 0;
+                if (!ReadConsoleInputW(input, &record, 1, &consumed) || consumed != 1) {
+                    errno = EIO;
+                    return SPL_TERMINAL_READ_ERROR;
+                }
+            }
+        }
         unsigned char byte = 0;
         int count = _read(0, &byte, 1);
         if (count == 1) return (int64_t)byte;
-        if (count == 0) return -1;
+        if (count == 0) return SPL_TERMINAL_READ_EOF;
         if (errno == EINTR) continue;
-        return -4;
+        return SPL_TERMINAL_READ_ERROR;
     }
 }
 
 bool SPL_TERMINAL_SCOPE_END(int64_t scope) {
-    if (InterlockedCompareExchange(&spl_terminal_scope_active, 1, 1) == 0 ||
-        scope <= 0 || scope != spl_terminal_scope_handle) {
+    if (scope <= 0 || scope != spl_terminal_scope_handle ||
+        InterlockedCompareExchange(&spl_terminal_scope_lifecycle,
+                                   SPL_TERMINAL_SCOPE_CLOSING,
+                                   SPL_TERMINAL_SCOPE_ACTIVE) != SPL_TERMINAL_SCOPE_ACTIVE) {
         errno = EINVAL;
         return false;
     }
-    bool ok = SetConsoleCtrlHandler(spl_terminal_console_handler, FALSE) != 0;
-    HANDLE event = spl_terminal_signal_event;
-    spl_terminal_signal_event = NULL;
-    InterlockedExchange(&spl_terminal_scope_active, 0);
+    if (!SetConsoleCtrlHandler(spl_terminal_console_handler, FALSE)) {
+        InterlockedExchange(&spl_terminal_scope_lifecycle, SPL_TERMINAL_SCOPE_ACTIVE);
+        errno = EIO;
+        return false;
+    }
+    HANDLE wake = (HANDLE)InterlockedExchangePointer(&spl_terminal_signal_event, NULL);
+    SPL_TERMINAL_SCOPE_TEST_AFTER_RETIRE();
+    spl_terminal_wait_for_console_handlers();
+    bool ok = true;
+    if (wake != NULL) {
+        SPL_TERMINAL_SCOPE_TEST_BEFORE_CLOSE(wake);
+        if (!CloseHandle(wake)) ok = false;
+    }
+    spl_terminal_scope_handle = 0;
     InterlockedExchange(&spl_terminal_stop_pending, 0);
-    if (event != NULL && !CloseHandle(event)) ok = false;
+    InterlockedExchange(&spl_terminal_scope_lifecycle, SPL_TERMINAL_SCOPE_IDLE);
     if (!ok) errno = EIO;
     return ok;
 }
 
 void SPL_TERMINAL_SCOPE_EMERGENCY_RESTORE(void) {
-    if (InterlockedCompareExchange(&spl_terminal_scope_active, 1, 1) != 0)
+    if (InterlockedCompareExchange(&spl_terminal_scope_lifecycle, 0, 0) ==
+        SPL_TERMINAL_SCOPE_ACTIVE)
         (void)SPL_TERMINAL_SCOPE_END(spl_terminal_scope_handle);
 }
 
@@ -113,6 +205,11 @@ void SPL_TERMINAL_SCOPE_EMERGENCY_RESTORE(void) {
 #include <stdatomic.h>
 #include <string.h>
 #include <unistd.h>
+
+#ifndef SPL_TERMINAL_SCOPE_SIGACTION
+#define SPL_TERMINAL_SCOPE_SIGACTION(signum, action, previous) \
+    sigaction((signum), (action), (previous))
+#endif
 
 _Static_assert(ATOMIC_INT_LOCK_FREE == 2,
                "terminal signal handler descriptors require lock-free atomics");
@@ -135,7 +232,12 @@ typedef struct SplTerminalSignalScopeState {
 } SplTerminalSignalScopeState;
 
 static SplTerminalSignalScopeState spl_terminal_signal_scope = {
-    false, 0, -1, -1, 0, {{0}}
+    .active = false,
+    .handle = 0,
+    .pipe_read = -1,
+    .pipe_write = -1,
+    .installed_handlers = 0,
+    .previous_handlers = {{{0}}}
 };
 static _Atomic int spl_terminal_signal_pipe_write = -1;
 static _Atomic unsigned spl_terminal_signal_handlers_inflight = 0;
@@ -165,6 +267,7 @@ static void spl_terminal_scope_signal_handler(int signum) {
     }
     int fd = atomic_load_explicit(&spl_terminal_signal_pipe_write,
                                   memory_order_acquire);
+    SPL_TERMINAL_SCOPE_TEST_HANDLER_TARGET_LOADED(fd);
     if (fd >= 0) {
         unsigned char wake = (unsigned char)signum;
         (void)write(fd, &wake, 1);
@@ -185,25 +288,47 @@ static bool spl_terminal_configure_pipe_fd(int fd) {
 
 static void spl_terminal_restore_handlers(int installed_handlers, int* first_errno) {
     for (int i = installed_handlers - 1; i >= 0; i--) {
-        if (sigaction(spl_terminal_managed_signals[i],
-                      &spl_terminal_signal_scope.previous_handlers[i], NULL) != 0 &&
+        if (SPL_TERMINAL_SCOPE_SIGACTION(
+                spl_terminal_managed_signals[i],
+                &spl_terminal_signal_scope.previous_handlers[i], NULL) != 0 &&
             *first_errno == 0) {
             *first_errno = errno;
         }
     }
 }
 
-static void spl_terminal_close_pipe(int* first_errno) {
-    if (spl_terminal_signal_scope.pipe_read >= 0 &&
-        close(spl_terminal_signal_scope.pipe_read) != 0 && *first_errno == 0) {
-        *first_errno = errno;
+static void spl_terminal_wait_for_handlers(void) {
+    while (atomic_load_explicit(&spl_terminal_signal_handlers_inflight,
+                                memory_order_acquire) != 0) {
+        SPL_TERMINAL_SCOPE_TEST_QUIESCE_WAIT();
     }
-    if (spl_terminal_signal_scope.pipe_write >= 0 &&
-        close(spl_terminal_signal_scope.pipe_write) != 0 && *first_errno == 0) {
-        *first_errno = errno;
+}
+
+static void spl_terminal_close_pipe(int* first_errno) {
+    if (spl_terminal_signal_scope.pipe_read >= 0) {
+        SPL_TERMINAL_SCOPE_TEST_BEFORE_CLOSE(spl_terminal_signal_scope.pipe_read);
+        if (close(spl_terminal_signal_scope.pipe_read) != 0 && *first_errno == 0) {
+            *first_errno = errno;
+        }
+    }
+    if (spl_terminal_signal_scope.pipe_write >= 0) {
+        SPL_TERMINAL_SCOPE_TEST_BEFORE_CLOSE(spl_terminal_signal_scope.pipe_write);
+        if (close(spl_terminal_signal_scope.pipe_write) != 0 && *first_errno == 0) {
+            *first_errno = errno;
+        }
     }
     spl_terminal_signal_scope.pipe_read = -1;
     spl_terminal_signal_scope.pipe_write = -1;
+}
+
+static void spl_terminal_retire_restore_wait_close(int installed_handlers,
+                                                   int* first_errno) {
+    atomic_store_explicit(&spl_terminal_signal_pipe_write, -1,
+                          memory_order_release);
+    SPL_TERMINAL_SCOPE_TEST_AFTER_RETIRE();
+    spl_terminal_restore_handlers(installed_handlers, first_errno);
+    spl_terminal_wait_for_handlers();
+    spl_terminal_close_pipe(first_errno);
 }
 
 static int64_t spl_terminal_take_pending_signal(void) {
@@ -267,14 +392,12 @@ int64_t SPL_TERMINAL_SCOPE_BEGIN(void) {
     sigemptyset(&action.sa_mask);
     action.sa_flags = 0;
     for (int i = 0; i < SPL_TERMINAL_SCOPE_SIGNAL_COUNT; i++) {
-        if (sigaction(spl_terminal_managed_signals[i], &action,
-                      &spl_terminal_signal_scope.previous_handlers[i]) != 0) {
+        if (SPL_TERMINAL_SCOPE_SIGACTION(
+                spl_terminal_managed_signals[i], &action,
+                &spl_terminal_signal_scope.previous_handlers[i]) != 0) {
             failure_errno = errno;
-            atomic_store_explicit(&spl_terminal_signal_pipe_write, -1,
-                                  memory_order_release);
-            spl_terminal_restore_handlers(spl_terminal_signal_scope.installed_handlers,
-                                          &failure_errno);
-            spl_terminal_close_pipe(&failure_errno);
+            spl_terminal_retire_restore_wait_close(
+                spl_terminal_signal_scope.installed_handlers, &failure_errno);
             spl_terminal_signal_scope.installed_handlers = 0;
             (void)sigprocmask(SIG_SETMASK, &previous_mask, NULL);
             errno = failure_errno;
@@ -294,11 +417,8 @@ int64_t SPL_TERMINAL_SCOPE_BEGIN(void) {
         failure_errno = errno;
         spl_terminal_signal_scope.active = false;
         spl_terminal_signal_scope.handle = 0;
-        atomic_store_explicit(&spl_terminal_signal_pipe_write, -1,
-                              memory_order_release);
-        spl_terminal_restore_handlers(spl_terminal_signal_scope.installed_handlers,
-                                      &failure_errno);
-        spl_terminal_close_pipe(&failure_errno);
+        spl_terminal_retire_restore_wait_close(
+            spl_terminal_signal_scope.installed_handlers, &failure_errno);
         spl_terminal_signal_scope.installed_handlers = 0;
         errno = failure_errno;
         return 0;
@@ -369,14 +489,8 @@ bool SPL_TERMINAL_SCOPE_END(int64_t scope) {
     bool masked = sigprocmask(SIG_BLOCK, &managed, &previous_mask) == 0;
     int first_errno = masked ? 0 : errno;
 
-    atomic_store_explicit(&spl_terminal_signal_pipe_write, -1,
-                          memory_order_release);
-    spl_terminal_restore_handlers(spl_terminal_signal_scope.installed_handlers,
-                                  &first_errno);
-    while (atomic_load_explicit(&spl_terminal_signal_handlers_inflight,
-                                memory_order_acquire) != 0) {
-    }
-    spl_terminal_close_pipe(&first_errno);
+    spl_terminal_retire_restore_wait_close(
+        spl_terminal_signal_scope.installed_handlers, &first_errno);
     spl_terminal_signal_scope.active = false;
     spl_terminal_signal_scope.handle = 0;
     spl_terminal_signal_scope.installed_handlers = 0;
@@ -405,5 +519,12 @@ void SPL_TERMINAL_SCOPE_EMERGENCY_RESTORE(void) {
 #undef SPL_TERMINAL_SCOPE_READ
 #undef SPL_TERMINAL_SCOPE_END
 #undef SPL_TERMINAL_SCOPE_EMERGENCY_RESTORE
+#undef SPL_TERMINAL_SCOPE_TEST_HANDLER_TARGET_LOADED
+#undef SPL_TERMINAL_SCOPE_TEST_AFTER_RETIRE
+#undef SPL_TERMINAL_SCOPE_TEST_QUIESCE_WAIT
+#undef SPL_TERMINAL_SCOPE_TEST_BEFORE_CLOSE
+#ifdef SPL_TERMINAL_SCOPE_SIGACTION
+#undef SPL_TERMINAL_SCOPE_SIGACTION
+#endif
 
 #endif

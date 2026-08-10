@@ -1456,7 +1456,10 @@ pub extern "C" fn rt_terminal_is_tty_handle(handle: i64) -> bool {
     }
     #[cfg(windows)]
     {
-        matches!(handle, 0..=2) && unsafe { libc::_isatty(handle as libc::c_int) != 0 }
+        extern "C" {
+            fn _isatty(handle: i32) -> i32;
+        }
+        matches!(handle, 0..=2) && unsafe { _isatty(handle as i32) != 0 }
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -1502,6 +1505,9 @@ pub(crate) fn terminal_emergency_restore_for_panic() {
 static SAVED_TERMIOS: std::sync::OnceLock<std::sync::Mutex<Option<nix::sys::termios::Termios>>> =
     std::sync::OnceLock::new();
 
+#[cfg(windows)]
+static SAVED_CONSOLE_MODE: std::sync::OnceLock<std::sync::Mutex<Option<u32>>> = std::sync::OnceLock::new();
+
 #[no_mangle]
 pub extern "C" fn rt_terminal_enable_raw_mode() -> RuntimeValue {
     #[cfg(unix)]
@@ -1524,9 +1530,45 @@ pub extern "C" fn rt_terminal_enable_raw_mode() -> RuntimeValue {
         }
         RuntimeValue::from_bool(true)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
+        use std::os::windows::io::AsRawHandle;
+
+        extern "system" {
+            fn GetConsoleMode(handle: isize, mode: *mut u32) -> i32;
+            fn SetConsoleMode(handle: isize, mode: u32) -> i32;
+        }
+
+        const ENABLE_PROCESSED_INPUT: u32 = 0x0001;
+        const ENABLE_LINE_INPUT: u32 = 0x0002;
+        const ENABLE_ECHO_INPUT: u32 = 0x0004;
+        const ENABLE_WINDOW_INPUT: u32 = 0x0008;
+        const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
+
+        let slot = SAVED_CONSOLE_MODE.get_or_init(|| std::sync::Mutex::new(None));
+        let Ok(mut saved) = slot.lock() else {
+            return RuntimeValue::from_bool(false);
+        };
+        if saved.is_some() {
+            return RuntimeValue::from_bool(false);
+        }
+        let handle = std::io::stdin().as_raw_handle() as isize;
+        let mut original = 0u32;
+        if unsafe { GetConsoleMode(handle, &mut original) } == 0 {
+            return RuntimeValue::from_bool(false);
+        }
+        let base_raw =
+            (original & !(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT)) | ENABLE_WINDOW_INPUT;
+        let vt_ok = unsafe { SetConsoleMode(handle, base_raw | ENABLE_VIRTUAL_TERMINAL_INPUT) } != 0;
+        if !vt_ok && unsafe { SetConsoleMode(handle, base_raw) } == 0 {
+            return RuntimeValue::from_bool(false);
+        }
+        *saved = Some(original);
         RuntimeValue::from_bool(true)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        RuntimeValue::from_bool(false)
     }
 }
 
@@ -1547,7 +1589,29 @@ pub extern "C" fn rt_terminal_disable_raw_mode() -> RuntimeValue {
             None => RuntimeValue::from_bool(true),
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+
+        extern "system" {
+            fn SetConsoleMode(handle: isize, mode: u32) -> i32;
+        }
+
+        let slot = SAVED_CONSOLE_MODE.get_or_init(|| std::sync::Mutex::new(None));
+        let Ok(mut saved) = slot.lock() else {
+            return RuntimeValue::from_bool(false);
+        };
+        let Some(original) = *saved else {
+            return RuntimeValue::from_bool(true);
+        };
+        let handle = std::io::stdin().as_raw_handle() as isize;
+        if unsafe { SetConsoleMode(handle, original) } == 0 {
+            return RuntimeValue::from_bool(false);
+        }
+        *saved = None;
+        RuntimeValue::from_bool(true)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         RuntimeValue::from_bool(true)
     }
@@ -1578,7 +1642,58 @@ fn fill_terminal_size(cols: &mut i32, rows: &mut i32) {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn fill_terminal_size(cols: &mut i32, rows: &mut i32) {
+    use std::os::windows::io::AsRawHandle;
+
+    #[repr(C)]
+    struct Coord {
+        x: i16,
+        y: i16,
+    }
+    #[repr(C)]
+    struct SmallRect {
+        left: i16,
+        top: i16,
+        right: i16,
+        bottom: i16,
+    }
+    #[repr(C)]
+    struct ConsoleScreenBufferInfo {
+        size: Coord,
+        cursor_position: Coord,
+        attributes: u16,
+        window: SmallRect,
+        maximum_window_size: Coord,
+    }
+    extern "system" {
+        fn GetConsoleScreenBufferInfo(handle: isize, info: *mut ConsoleScreenBufferInfo) -> i32;
+    }
+
+    let handle = std::io::stdout().as_raw_handle() as isize;
+    let mut info = ConsoleScreenBufferInfo {
+        size: Coord { x: 0, y: 0 },
+        cursor_position: Coord { x: 0, y: 0 },
+        attributes: 0,
+        window: SmallRect {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        },
+        maximum_window_size: Coord { x: 0, y: 0 },
+    };
+    if unsafe { GetConsoleScreenBufferInfo(handle, &mut info) } != 0 {
+        let width = i32::from(info.window.right) - i32::from(info.window.left) + 1;
+        let height = i32::from(info.window.bottom) - i32::from(info.window.top) + 1;
+        if width > 0 && height > 0 {
+            *cols = width;
+            *rows = height;
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 fn fill_terminal_size(_cols: &mut i32, _rows: &mut i32) {}
 
 // ============================================================================
@@ -1645,6 +1760,43 @@ mod tests {
             assert!(libc::WIFEXITED(status));
             assert_eq!(libc::WEXITSTATUS(status), 0);
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn terminal_windows_raw_mode_and_size_live_contract() {
+        use std::os::windows::io::AsRawHandle;
+
+        extern "system" {
+            fn GetConsoleMode(handle: isize, mode: *mut u32) -> i32;
+        }
+        const ENABLE_PROCESSED_INPUT: u32 = 0x0001;
+        const ENABLE_LINE_INPUT: u32 = 0x0002;
+        const ENABLE_ECHO_INPUT: u32 = 0x0004;
+        const ENABLE_WINDOW_INPUT: u32 = 0x0008;
+
+        if !rt_terminal_is_tty_handle(0) {
+            eprintln!("terminal-windows-provider: BLOCKED (real console unavailable)");
+            return;
+        }
+        let input = std::io::stdin().as_raw_handle() as isize;
+        let mut before = 0u32;
+        assert_ne!(unsafe { GetConsoleMode(input, &mut before) }, 0);
+        assert!(rt_terminal_enable_raw_mode().as_bool());
+        let mut raw = 0u32;
+        assert_ne!(unsafe { GetConsoleMode(input, &mut raw) }, 0);
+        assert_eq!(
+            raw & (ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT),
+            0
+        );
+        assert_ne!(raw & ENABLE_WINDOW_INPUT, 0);
+        let size = rt_terminal_get_size();
+        assert!(unsafe { rt_tuple_get(size, 0) }.as_int() > 0);
+        assert!(unsafe { rt_tuple_get(size, 1) }.as_int() > 0);
+        assert!(rt_terminal_disable_raw_mode().as_bool());
+        let mut after = 0u32;
+        assert_ne!(unsafe { GetConsoleMode(input, &mut after) }, 0);
+        assert_eq!(after, before);
     }
 
     #[test]

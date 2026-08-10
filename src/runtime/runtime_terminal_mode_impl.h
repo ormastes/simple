@@ -12,9 +12,14 @@ static bool spl_terminal_has_saved_console_mode;
 bool rt_terminal_enable_raw_mode(void) {
     HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
     DWORD mode = 0;
-    if (input == INVALID_HANDLE_VALUE || !GetConsoleMode(input, &mode)) return false;
+    if (spl_terminal_has_saved_console_mode || input == NULL ||
+        input == INVALID_HANDLE_VALUE || !GetConsoleMode(input, &mode)) return false;
     DWORD raw = mode & ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT);
-    if (!SetConsoleMode(input, raw)) return false;
+    raw |= ENABLE_WINDOW_INPUT | ENABLE_VIRTUAL_TERMINAL_INPUT;
+    if (!SetConsoleMode(input, raw)) {
+        raw &= ~ENABLE_VIRTUAL_TERMINAL_INPUT;
+        if (!SetConsoleMode(input, raw)) return false;
+    }
     spl_terminal_saved_console_mode = mode;
     spl_terminal_has_saved_console_mode = true;
     return true;

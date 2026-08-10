@@ -33,8 +33,11 @@ descriptor. No global atexit callback writes terminal escapes.
 The scope is process-global and begin/end are owned by the terminal session
 thread. Signal delivery may occur on any thread: a lock-free in-flight counter
 guards the short handler section, and teardown retires the descriptor before
-waiting for that counter. The runtime panic path restores production raw mode
-and the active signal scope directly before abort, without an atexit handler.
+restoring handlers, waiting for that counter, and closing. BEGIN rollback uses
+the same order. Windows applies the same lifecycle to its console event with
+interlocked publication and a closing state. Runtime panic, contract, and
+assert paths restore production raw mode and the active signal scope directly
+before abort, without an atexit handler.
 
 ## Verification
 
@@ -44,6 +47,10 @@ sends WINCH then TERM and verifies resize does not exit, TERM wakes promptly,
 the child restores termios, and the parent's preinstalled handler is restored
 after scope teardown. The existing native focus test redirects stdout through
 a real pipe and verifies the TTY boundary reports false.
-The same test invokes the production raw-mode APIs, proves panic restoration on
-a PTY, and delivers WINCH concurrently with teardown before checking that a
-subsequently opened descriptor remains valid.
+The same test invokes the production raw-mode APIs and proves panic restoration
+on a PTY. `terminal_signal_scope_fd_reuse_test.c` deterministically parks a
+handler after it loads the write descriptor, forces partial BEGIN rollback and
+normal END, and proves close waits before the exact descriptor is reused by an
+empty probe pipe. An actual Simple assertion fixture and Rust-hosted contract
+tests prove fatal restoration. The Windows focus test injects a console resize;
+without a real console/ConPTY it exits with the explicit blocked status `77`.
