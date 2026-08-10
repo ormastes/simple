@@ -266,16 +266,9 @@ impl LlvmTypeMapper:
             case Unit: 0
             case Ptr(_, _):
                 self.target_bits / 8  # 4 bytes on 32-bit, 8 on 64-bit
-            case Struct(_):
-                # Struct kind carries only a SymbolId (see MirTypeKind.Struct in
-                # mir_types.spl), never an inline field list -- the previous
-                # `fields.map(self.size_of(_.1)).sum()` treated the SymbolId
-                # payload as a tuple list and crashed with "tuple index access
-                # on non-tuple type object" on every real MIR struct type.
-                # Aggregates are pointer-passed at the LLVM ABI boundary
-                # (64-bit), matching the fix already applied to
-                # CraneliftTypeMapper/CTypeMapper.
-                self.target_bits / 8
+            case Struct(fields):
+                # Sum of field sizes (no padding in this simple version)
+                fields.map(self.size_of(_.1)).sum()
             case Array(elem, size):
                 self.size_of(elem) * size
             case Tuple(elements):
@@ -302,11 +295,11 @@ impl LlvmTypeMapper:
             case I8 | U8 | Bool: 1
             case Ptr(_, _):
                 self.target_bits / 8
-            case Struct(_):
-                # See size_of: Struct carries only a SymbolId, so this must
-                # not destructure a field list. Pointer-sized/aligned, same
-                # as CraneliftTypeMapper/CTypeMapper.
-                self.target_bits / 8
+            case Struct(fields):
+                if fields.len() == 0:
+                    1
+                else:
+                    fields.map(self.align_of(_.1)).max()
             case Array(elem, _):
                 self.align_of(elem)
             case Tuple(elements):

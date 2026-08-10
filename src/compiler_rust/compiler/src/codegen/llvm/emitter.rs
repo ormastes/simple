@@ -422,9 +422,9 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         Ok(())
     }
 
-    fn emit_aggregate_copy(&mut self, dest: VReg, src: VReg, byte_size: u32, deep_fields: &[crate::mir::AggregateFieldCopy]) -> Result<(), String> {
+    fn emit_aggregate_copy(&mut self, dest: VReg, src: VReg, byte_size: u32) -> Result<(), String> {
         self.backend
-            .compile_aggregate_copy(dest, src, byte_size, deep_fields, self.vreg_map, self.builder)
+            .compile_aggregate_copy(dest, src, byte_size, self.vreg_map, self.builder)
             .map_err(|e| e.to_string())
     }
 

@@ -704,13 +704,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_ltr", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_read_cr2", &[], &[I64]),
     RuntimeFuncSpec::new("rt_read_cr3", &[], &[I64]),
-    // No result. Both are write-only CPU control operations: every C
-    // definition returns void, every Simple declaration (os/kernel/arch/
-    // x86_64/cpu.spl:61,63, x86_32/cpu.spl:58,59, boot/cpu.spl:54) declares
-    // no result, and every caller discards. The old `&[I64]` made callers
-    // decode a return register nothing ever writes.
-    RuntimeFuncSpec::new("rt_write_cr3", &[I64], &[]),
-    RuntimeFuncSpec::new("rt_invlpg", &[I64], &[]),
+    RuntimeFuncSpec::new("rt_write_cr3", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_invlpg", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_read_msr", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_write_msr", &[I64, I64], &[I64]),
     // =========================================================================

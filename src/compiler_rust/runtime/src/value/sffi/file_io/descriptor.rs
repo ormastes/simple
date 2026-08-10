@@ -93,25 +93,18 @@ pub extern "C" fn rt_file_get_size(fd: i32) -> u64 {
     }
 }
 
-/// Close file descriptor. Returns 1 on success, 0 on failure.
-///
-/// runtime_sffi.rs:1908 declares `&[I32] -> &[I8]` and
-/// src/compiler_rust/lib/std/src/infra/file_io.spl:439 reads the result
-/// (`val success = rt_file_close(fd)`), but this function used to return
-/// nothing, so `success` was an uninitialised register. Silencing the caller
-/// would have been the wrong repair: close(2) is where deferred write-back
-/// errors (ENOSPC, EIO, EDQUOT on NFS) are reported, so a close whose failure
-/// is invisible loses data with no diagnostic anywhere. The status is real --
-/// it is close(2)'s / CloseHandle's, not a constant.
+/// Close file descriptor
 #[no_mangle]
-pub extern "C" fn rt_file_close(fd: i32) -> i8 {
+pub extern "C" fn rt_file_close(fd: i32) {
     #[cfg(unix)]
     {
-        // Deliberately NOT `File::from_raw_fd(fd)` + drop: std's Drop
-        // discards close(2)'s return value, which is the very thing the
-        // caller is asking for.
-        let rc = unsafe { libc::close(fd) };
-        i8::from(rc == 0)
+        use std::os::unix::io::FromRawFd;
+
+        unsafe {
+            // Wrap fd in File and let it drop to close
+            let _file = std::fs::File::from_raw_fd(fd);
+            // File is closed when dropped
+        }
     }
 
     #[cfg(windows)]
@@ -121,7 +114,6 @@ pub extern "C" fn rt_file_close(fd: i32) -> i8 {
         unsafe {
             let _file = std::fs::File::from_raw_handle(fd as *mut _);
         }
-        1
     }
 }
 
