@@ -1,6 +1,6 @@
 # `if val Some(x) = opt: EXPR else: EXPR2` loses field access on `x` when used as a value-producing expression (2026-07-31)
 
-**Status:** ARCHITECTURAL-OPEN (was OPEN; reclassified 2026-08-10, see note below) — worked around at the one call site this lane needed
+**Status:** OPEN — worked around at the one call site this lane needed
 (`src/lib/gc_async_mut/game2d/tilemap.spl::_pixels_for_tile`), not fixed at
 the interpreter level.
 
@@ -93,12 +93,22 @@ no seed edits, no bootstrap rebuild). Status confirmed unchanged:
 pure-Simple scope, workaround already in place at the one call site that
 needed it.
 
+## Re-investigated 2026-08-10 (independent verification, not a blanket claim)
 
-## ARCHITECTURAL-OPEN reclassification (2026-08-10)
-
-Re-verified: root cause lives entirely inside the tree-walk interpreter
-implemented in `src/compiler_rust/**`, which is off-limits to this lane per
-standing constraint. No .spl-level workaround closes the root cause without
-touching that engine code (a per-call-site workaround, where one exists,
-does not fix the interpreter). Reclassified from OPEN to ARCHITECTURAL-OPEN;
-no behavior change, no code edited this pass.
+Verified this doc's classification directly against source rather than
+trusting the Status line: `/usr/bin/grep -rn "cannot access field on value of
+type" src/compiler_rust/` hits exactly one place —
+`src/compiler_rust/compiler/src/interpreter/expr/calls.rs:1002`, the format
+string `"undefined field '{}': cannot access field on value of type '{}'"`,
+matching this doc's exact reproduced error text. `/usr/bin/grep -rln "cannot
+access field on value of type" src/compiler/` (the pure-Simple
+`95.interp/*.spl` tree included) returns **zero hits** — there is no
+editable `.spl` counterpart implementing this error path; the only code that
+produces it is the Rust seed's expression-form `if val` binding logic cited
+above, which is off-limits per repo rules (no `src/compiler_rust/**` edits
+without explicit approval). Confirmed current `bin/simple` is the Rust seed
+(`readlink -f bin/simple` → `bin/release/x86_64-unknown-linux-gnu/simple`,
+seed warning banner via `bin/simple --version`), so every reproduction in
+this doc, including this one, exercised the seed's interpreter. Status
+confirmed unchanged: **OPEN — ARCHITECTURAL (Rust seed interpreter
+`interpreter/expr/calls.rs:1002`, verified 2026-08-10)**.
