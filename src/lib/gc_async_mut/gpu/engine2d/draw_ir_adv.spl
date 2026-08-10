@@ -82,6 +82,7 @@ var _e2d_owner_image_y1: i64 = 0
 var _e2d_owner_image_x2: i64 = 0
 var _e2d_owner_image_y2: i64 = 0
 var _e2d_retained_readback_pixels: [u32] = []
+var _e2d_command_owner_readback_pixels: [u32] = []
 
 fn engine2d_draw_ir_adv_retained_readback_pixels(expected_count: i32) -> [u32]:
     if expected_count <= 0 or _e2d_retained_readback_pixels.len() != expected_count:
@@ -1775,6 +1776,13 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
         material_execution_counts[3] = metal_device_glass_unfulfilled_count.to_i64()
         material_execution_counts[4] = rendered.to_i64()
         material_execution_counts[5] = skipped.to_i64()
+    # Freestanding native class values are copied at free-function boundaries.
+    # Capture software pixels while `eng` is still the exact command receiver;
+    # transporting Engine2D through an aggregate or array sidecar loses this
+    # owner on the current Stage3 ABI.
+    if eng.backend_name() == "software" and rendered > 0:
+        val command_owner_readback = eng.read_pixels_with_source()
+        _e2d_command_owner_readback_pixels = command_owner_readback.pixels
     if engine_owner.len() > 0:
         engine_owner[0] = eng
     _engine2d_draw_ir_render_outcome(
@@ -2459,6 +2467,7 @@ fn engine2d_draw_ir_adv_fresh_device_composition_with_images(engine: Engine2D, c
     _engine2d_draw_ir_adv_composition_with_images(prepared.0, composition, true, images, true, false, true, transport, "")
 
 fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: DrawIrComposition, gpu_available: bool, images: [Engine2dResolvedDrawIrImage], allow_parent_image: bool, present_frame: bool, readback_frame: bool, transport: Engine2dDrawIrTransport, prepared_visual_key: text, image_xy: [i64] = []) -> Engine2dDrawIrAdvResult:
+    _e2d_command_owner_readback_pixels = []
     val plan = simple_2d_draw_ir_adv_composition_plan(composition, gpu_available)
     # Preserve the public fallback invariant from the original inputs. The
     # native cross-module aggregate path can lose this bool from `plan`.
@@ -2580,7 +2589,11 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: 
     var readback = engine2d_readback([], "not_requested")
     if readback_frame:
         readback = eng.read_pixels_with_source()
-        _e2d_retained_readback_pixels = readback.pixels
+        if (_e2d_command_owner_readback_pixels.len() ==
+            eng.width().to_i64() * eng.height().to_i64()):
+            _e2d_retained_readback_pixels = _e2d_command_owner_readback_pixels
+        else:
+            _e2d_retained_readback_pixels = readback.pixels
     if transport.destination.len() > 0 and transport.status.len() > 0:
         if readback.pixels.len() == transport.destination.len():
             var transport_index: i32 = 0
