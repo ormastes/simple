@@ -113,3 +113,66 @@ interrupt occurred.
    progress, replay and reboot rejection, underrun/error fail-closed behavior,
    and audible/capture evidence from the real board. Only that evidence may
    close this item or promote the audio capability.
+## Adreno lower-owner audit (2026-08-10)
+
+Repository audit result: the concrete lower owner required by
+`Qrb2210AdrenoKernelIo` does not exist and cannot be assembled from the current
+kernel APIs without inventing hardware behavior. Keep the Vulkan capabilities
+`port-unavailable`.
+
+Present and reusable infrastructure is limited to generic mechanisms:
+
+- ARM64 GIC registration, enable, acknowledge, and dispatch;
+- volatile MMIO reads/writes and memory barriers;
+- DMA allocation, physical/virtual address lookup, and CPU/device sync;
+- ARM64 data-cache clean/invalidate operations;
+- generic device-grant and IOMMU *metadata* types;
+- shared Engine2D `VulkanBackend`, Qualcomm delegation, and the already-landed
+  fail-closed submit/fence/readback correlation transport.
+
+Those mechanisms are necessary but not sufficient. There is no QRB2210/Adreno
+kernel implementation for any of the following owner APIs:
+
+1. board firmware discovery and authenticated loading for the exact Adreno/GMU
+   firmware set, including immutable digest/version receipts;
+2. GPU power, clock, reset, GMU bring-up, register-map discovery, and fault IRQ
+   handling for the board's actual silicon revision;
+3. an ARM SMMU domain owner that maps/unmaps GPU DMA virtual addresses, enforces
+   access permissions, invalidates translations, and reports faults;
+4. coherent Adreno buffer objects with explicit CPU/GPU ownership transitions;
+5. ring-buffer allocation, command submission, doorbell/write-pointer update,
+   interrupt-driven retirement, reset recovery, and monotonic submission IDs;
+6. a Vulkan-capable Adreno userspace/ICD owner (or equivalent native SimpleOS
+   Vulkan implementation) that creates the physical/logical device, queue,
+   command pool/buffers, and fences consumed by the shared backend;
+7. fence wait with bounded timeout, device-loss/fault propagation, and no
+   polling-only success claim;
+8. device-origin image-to-staging copy, post-fence cache invalidation, exact
+   RGBA extraction, and a readback-buffer lifetime retained through completion.
+
+Do not substitute the hosted Vulkan SFFI, Mesa/Turnip on Linux or Android,
+KGSL/DRM ioctls from another OS, QEMU/virtio, CPU rasterization, or constructed
+handles for these owners.
+
+### Staged implementation order
+
+Each stage remains unavailable until its predecessor has physical-board proof:
+
+1. Add a QRB2210 device-tree/boot identity owner and signed firmware manifest;
+   prove exact SoC/GPU revision and firmware bytes on one SimpleOS boot.
+2. Add GPU power/reset/clock/GMU plus fault-IRQ ownership; prove reset and fault
+   containment before queue creation.
+3. Add the QRB2210 ARM SMMU mapper and coherent GPU buffer owner; prove map,
+   permission rejection, translation invalidation, and cache ownership transfer.
+4. Add Adreno ring submission and interrupt-retired fence owners; prove strictly
+   increasing submissions, timeout, fault, reset-generation, and replay rejection.
+5. Bind the shared Vulkan backend through a real SimpleOS Adreno Vulkan device,
+   queue, command pool/buffer, and fence implementation; no private DrawIR path.
+6. Add same-submission device readback and implement `Qrb2210AdrenoKernelIo`;
+   mint receipts only from the owners above, preserving boot/device/generation.
+7. Run the physical UNO Q showcase and admit capability status only after exact
+   animation, input, font, audio, fence, readback, capture, and performance proof.
+
+The completion gate is a board-acquired receipt and capture from the canonical
+live runner. Unit construction of receipt values proves only rejection and
+correlation logic, never the missing kernel owner.
