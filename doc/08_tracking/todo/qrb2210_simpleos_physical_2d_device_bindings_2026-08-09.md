@@ -22,8 +22,8 @@ Remaining physical work:
 - SimpleOS QRB2210 input device nodes must mint monotonically sequenced evdev
   receipts from real pointer and keyboard interrupts. The physical adapter now
   exists in `os.port.qrb2210_evdev_primitive_provider`: it requires a bound
-  IRQ line, kernel event-ring handle, boot/device/generation identity, monotonic
-  interrupt and event sequences, and a nonzero interrupt timestamp. It remains
+  IRQ line, kernel-owner and event-ring handles, boot/device/generation identity,
+  monotonic interrupt and event sequences, and a nonzero interrupt timestamp. It remains
   unavailable until the QRB2210 kernel input driver supplies that owner;
 - SimpleOS QRB2210 audio device node must submit PCM DMA and mint completion
   receipts only after the hardware completion interrupt;

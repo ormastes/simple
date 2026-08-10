@@ -70,10 +70,12 @@ all six canonical capabilities remain unavailable.
 The input-side primitive adapter is
 `os.port.qrb2210_evdev_primitive_provider`. A QRB2210 kernel input owner must
 bind a physical IRQ line and event-ring handle, then supply receipts carrying
-the same boot, native device handle, driver generation, event-ring handle,
+the same boot, native device handle, driver generation, IRQ line, kernel-owner
+handle, and event-ring handle,
 monotonic interrupt/event sequences, and a nonzero interrupt timestamp. The
 adapter rejects stale, replayed, cross-boot, and cross-ring receipts before the
-existing input port can normalize them to canonical `HostInputEvent` values.
+existing input port can normalize them to canonical `HostInputEvent` values;
+malformed or unmapped event payloads are rejected at the adapter boundary.
 The adapter does not change capability status; without the real kernel owner,
 input remains `port-unavailable`.
 

@@ -4,13 +4,20 @@ use os.port.qrb2210_evdev_primitive_provider.{
     Qrb2210EvdevKernelIdentity,
     Qrb2210EvdevKernelReceipt,
     qrb2210_evdev_identity_ready,
-    qrb2210_evdev_kernel_receipt_correlates
+    qrb2210_evdev_kernel_receipt_correlates,
+    qrb2210_evdev_kernel_receipt_admissible
 }
+use common.ui.host_input_event.{HOST_BTN_LEFT}
 use os.port.qrb2210_native_2d_ports.{
     Qrb2210BoardDeviceHandle,
     Qrb2210InputDeviceReceipt,
     QRB2210_DEVICE_INPUT,
-    QRB2210_INPUT_MOVE
+    QRB2210_INPUT_MOVE,
+    QRB2210_INPUT_DOWN,
+    QRB2210_INPUT_DRAG,
+    QRB2210_INPUT_UP,
+    QRB2210_INPUT_WHEEL,
+    QRB2210_INPUT_KEY
 }
 
 val PROVIDER = "src/os/port/qrb2210_evdev_primitive_provider.spl"
@@ -24,18 +31,37 @@ fn device(boot: text, generation: i64) -> Qrb2210BoardDeviceHandle:
 fn identity() -> Qrb2210EvdevKernelIdentity:
     Qrb2210EvdevKernelIdentity(
         device: device("boot-21", 7), irq_line: 33,
-        event_ring_handle: 92u64, physical_device: true)
+        kernel_owner_handle: 91u64, event_ring_handle: 92u64,
+        physical_device: true)
 
-fn receipt(irq_sequence: i64, event_sequence: i64) -> Qrb2210EvdevKernelReceipt:
+fn receipt_kind(
+    irq_sequence: i64,
+    event_sequence: i64,
+    kind: text,
+    button: i64,
+    wheel: i32,
+    evdev_code: i64,
+    down: bool,
+    left_ctrl: bool,
+    right_ctrl: bool,
+    left_alt: bool,
+    right_alt: bool
+) -> Qrb2210EvdevKernelReceipt:
     Qrb2210EvdevKernelReceipt(
         event: Qrb2210InputDeviceReceipt(
             device: device("boot-21", 7), sequence: event_sequence,
-            kind: QRB2210_INPUT_MOVE, x: 12, y: 34, button: 0, wheel: 0,
-            evdev_code: 0, ch: "", down: false,
-            left_ctrl: false, right_ctrl: false,
-            left_alt: false, right_alt: false),
-        irq_sequence: irq_sequence, interrupt_timestamp_ns: 9001u64,
+            kind: kind, x: 12, y: 34, button: button, wheel: wheel,
+            evdev_code: evdev_code, ch: if evdev_code == 30: "a" else: "", down: down,
+            left_ctrl: left_ctrl, right_ctrl: right_ctrl,
+            left_alt: left_alt, right_alt: right_alt),
+        irq_line: 33, irq_sequence: irq_sequence,
+        interrupt_timestamp_ns: 9001u64, kernel_owner_handle: 91u64,
         event_ring_handle: 92u64, driver_generation: 7)
+
+fn receipt(irq_sequence: i64, event_sequence: i64) -> Qrb2210EvdevKernelReceipt:
+    receipt_kind(
+        irq_sequence, event_sequence, QRB2210_INPUT_MOVE, 0, 0, 0, false,
+        false, false, false, false)
 
 describe "QRB2210 physical evdev primitive provider":
     it "requires a physical kernel input identity":
@@ -46,6 +72,9 @@ describe "QRB2210 physical evdev primitive provider":
         var hosted = identity()
         hosted.physical_device = false
         expect(qrb2210_evdev_identity_ready(hosted)).to_be(false)
+        var no_owner = identity()
+        no_owner.kernel_owner_handle = 0u64
+        expect(qrb2210_evdev_identity_ready(no_owner)).to_be(false)
 
     it "accepts only fresh correlated interrupt receipts":
         val bound = identity()
@@ -55,9 +84,43 @@ describe "QRB2210 physical evdev primitive provider":
         var wrong_ring = receipt(8, 12)
         wrong_ring.event_ring_handle = 93u64
         expect(qrb2210_evdev_kernel_receipt_correlates(bound, wrong_ring, 7, 11)).to_be(false)
+        var wrong_irq = receipt(8, 12)
+        wrong_irq.irq_line = 34
+        expect(qrb2210_evdev_kernel_receipt_correlates(bound, wrong_irq, 7, 11)).to_be(false)
+        var wrong_owner = receipt(8, 12)
+        wrong_owner.kernel_owner_handle = 93u64
+        expect(qrb2210_evdev_kernel_receipt_correlates(bound, wrong_owner, 7, 11)).to_be(false)
         var stale_boot = receipt(8, 12)
         stale_boot.event.device.boot_id = "boot-20"
         expect(qrb2210_evdev_kernel_receipt_correlates(bound, stale_boot, 7, 11)).to_be(false)
+
+    it "admits only canonical pointer wheel and left/right modifier payloads":
+        val bound = identity()
+        expect(qrb2210_evdev_kernel_receipt_admissible(bound, receipt(8, 12), 7, 11)).to_be(true)
+        expect(qrb2210_evdev_kernel_receipt_admissible(bound, receipt_kind(
+            8, 12, QRB2210_INPUT_DOWN, HOST_BTN_LEFT, 0, 0, false,
+            false, false, false, false), 7, 11)).to_be(true)
+        expect(qrb2210_evdev_kernel_receipt_admissible(bound, receipt_kind(
+            8, 12, QRB2210_INPUT_DRAG, HOST_BTN_LEFT, 0, 0, false,
+            false, false, false, false), 7, 11)).to_be(true)
+        expect(qrb2210_evdev_kernel_receipt_admissible(bound, receipt_kind(
+            8, 12, QRB2210_INPUT_UP, HOST_BTN_LEFT, 0, 0, false,
+            false, false, false, false), 7, 11)).to_be(true)
+        expect(qrb2210_evdev_kernel_receipt_admissible(bound, receipt_kind(
+            8, 12, QRB2210_INPUT_WHEEL, 0, -2, 0, false,
+            false, false, false, false), 7, 11)).to_be(true)
+        expect(qrb2210_evdev_kernel_receipt_admissible(bound, receipt_kind(
+            8, 12, QRB2210_INPUT_KEY, 0, 0, 30, true,
+            true, false, false, true), 7, 11)).to_be(true)
+        expect(qrb2210_evdev_kernel_receipt_admissible(bound, receipt_kind(
+            8, 12, QRB2210_INPUT_KEY, 0, 0, 97, false,
+            false, true, false, false), 7, 11)).to_be(true)
+        expect(qrb2210_evdev_kernel_receipt_admissible(bound, receipt_kind(
+            8, 12, QRB2210_INPUT_KEY, 0, 0, 100, true,
+            false, false, true, false), 7, 11)).to_be(true)
+        expect(qrb2210_evdev_kernel_receipt_admissible(bound, receipt_kind(
+            8, 12, QRB2210_INPUT_WHEEL, 0, 0, 0, false,
+            false, false, false, false), 7, 11)).to_be(false)
 
     it "has no hosted input or synthetic-event fallback":
         val source = file_read_text(PROVIDER)

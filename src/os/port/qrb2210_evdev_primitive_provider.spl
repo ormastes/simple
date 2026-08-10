@@ -14,19 +14,23 @@ use os.port.qrb2210_native_2d_ports.{
     Qrb2210InputDeviceReceipt,
     Qrb2210InputPort,
     QRB2210_DEVICE_INPUT,
-    qrb2210_board_device_handle_ready
+    qrb2210_board_device_handle_ready,
+    qrb2210_normalize_input_receipt
 }
 
 class Qrb2210EvdevKernelIdentity:
     device: Qrb2210BoardDeviceHandle
     irq_line: i64
+    kernel_owner_handle: u64
     event_ring_handle: u64
     physical_device: bool
 
 class Qrb2210EvdevKernelReceipt:
     event: Qrb2210InputDeviceReceipt
+    irq_line: i64
     irq_sequence: i64
     interrupt_timestamp_ns: u64
+    kernel_owner_handle: u64
     event_ring_handle: u64
     driver_generation: i64
 
@@ -38,6 +42,7 @@ trait Qrb2210EvdevKernelPort:
 fn qrb2210_evdev_identity_ready(identity: Qrb2210EvdevKernelIdentity) -> bool:
     qrb2210_board_device_handle_ready(identity.device, QRB2210_DEVICE_INPUT) and
         identity.physical_device and identity.irq_line > 0 and
+        identity.kernel_owner_handle > 0u64 and
         identity.event_ring_handle > 0u64
 
 fn qrb2210_evdev_kernel_receipt_correlates(
@@ -53,10 +58,23 @@ fn qrb2210_evdev_kernel_receipt_correlates(
         receipt.event.device.native_handle == identity.device.native_handle and
         receipt.event.device.driver_generation == identity.device.driver_generation and
         receipt.driver_generation == identity.device.driver_generation and
+        receipt.irq_line == identity.irq_line and
+        receipt.kernel_owner_handle == identity.kernel_owner_handle and
         receipt.event_ring_handle == identity.event_ring_handle and
         receipt.interrupt_timestamp_ns > 0u64 and
         receipt.irq_sequence > 0 and receipt.irq_sequence > previous_irq_sequence and
         receipt.event.sequence > 0 and receipt.event.sequence > previous_event_sequence)
+
+fn qrb2210_evdev_kernel_receipt_admissible(
+    identity: Qrb2210EvdevKernelIdentity,
+    receipt: Qrb2210EvdevKernelReceipt,
+    previous_irq_sequence: i64,
+    previous_event_sequence: i64
+) -> bool:
+    """Require correlated hardware evidence and a canonical input payload."""
+    qrb2210_evdev_kernel_receipt_correlates(
+        identity, receipt, previous_irq_sequence, previous_event_sequence) and
+        qrb2210_normalize_input_receipt(receipt.event).is_ok()
 
 class Qrb2210EvdevInputProvider:
     kernel: Qrb2210EvdevKernelPort
@@ -78,7 +96,7 @@ impl Qrb2210InputPort for Qrb2210EvdevInputProvider:
             return nil
         val identity = self.kernel.physical_identity()
         if val receipt = self.kernel.poll_interrupt_receipt():
-            if not qrb2210_evdev_kernel_receipt_correlates(
+            if not qrb2210_evdev_kernel_receipt_admissible(
                 identity, receipt, self.last_irq_sequence, self.last_event_sequence):
                 return nil
             self.last_irq_sequence = receipt.irq_sequence
@@ -89,3 +107,4 @@ impl Qrb2210InputPort for Qrb2210EvdevInputProvider:
 export Qrb2210EvdevKernelIdentity, Qrb2210EvdevKernelReceipt
 export Qrb2210EvdevKernelPort, Qrb2210EvdevInputProvider
 export qrb2210_evdev_identity_ready, qrb2210_evdev_kernel_receipt_correlates
+export qrb2210_evdev_kernel_receipt_admissible
