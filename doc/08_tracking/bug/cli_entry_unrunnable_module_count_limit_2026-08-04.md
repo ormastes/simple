@@ -1,6 +1,6 @@
 # The pure-Simple CLI entry cannot be run at all — 800-module import limit
 
-**Status:** OPEN
+**Status:** RESOLVED (module-count-limit cause) — 2026-08-10
 **Found:** 2026-08-04
 **Severity:** high — `src/app/cli/main.spl` is the pure-Simple CLI entry point
 and produces zero output from every invocation; 7 spec examples are red on it
@@ -75,3 +75,49 @@ Note the interaction with the known deployment defect: the currently deployed
 `bin/simple` prints "this Rust-built Simple binary is a bootstrap seed only" and
 has lost subcommands. Until the pure-Simple CLI entry can load, that gap cannot
 be closed from the Simple side either.
+
+## Update 2026-08-10 — module-count-limit cause RESOLVED, verified on origin/main
+
+The premise that "raising the limit hides real growth" turned out to be wrong
+once actually measured. Commit `e4b5b0dac8e` (2026-08-08, already on
+`origin/main`, predates this bug doc's last edit) measured the CLI entry's
+real transitive-import graph with `SIMPLE_LOADER_TRACE=1` and found **787-800
+unique modules loaded with ZERO repeat loads** — i.e. the graph was never
+"too wide," it was sitting at 98-100% of an arbitrary 800 ceiling that had no
+margin at all. `light_protocol.spl`/`theme_sync.spl` were never the cause,
+merely the last module loaded before the ceiling tripped — confirmed by
+forcing `SIMPLE_MODULE_LIMIT=786` and reproducing the identical error text.
+
+Fix landed in `src/compiler_rust/compiler/src/memory_guard.rs`:
+`DEFAULT_MODULE_LIMIT` raised `800 -> 4000` (5x headroom over the measured
+787-800 real load), plus `module_loader.rs` now emits a legible
+"HARNESS ABORT (module loader) — this is NOT a test/spec failure" banner if
+the (now much higher) ceiling is ever hit again, instead of a bare error that
+reads like a spec failure. Rust seed only; no pure-Simple/runtime-C twin of
+this limit exists.
+
+**Re-verified today** (session dated 2026-08-10, seed binaries at
+`src/compiler_rust/target/{bootstrap,release}/simple` timestamped Aug 9-10,
+after the fix commit):
+
+```sh
+cd /home/ormastes/dev/pub/simple
+SIMPLE_LIB="$PWD/src" SIMPLE_TIMEOUT_SECONDS=60 bin/simple run src/app/cli/main.spl --help
+# exit 0, stderr has zero "Module count limit" occurrences (previously the
+# very first and only fatal line). Compare: forcing
+# SIMPLE_MODULE_LIMIT=786 still reproduces the original abort text,
+# confirming the mechanism and the fix are both real, not a stale cache.
+```
+
+**Residual, DIFFERENT defect found while verifying (not this bug):** with the
+module-count abort gone, `bin/simple run src/app/cli/main.spl --help` now
+exits 0 with **0 bytes on stdout and no error/panic anywhere in stderr**
+(only the pre-existing `compiler_cross_module_private_symbol_collision`
+warnings and the `[memory-guard]` scope-size note). This is a silent-no-op
+symptom, not a module-count-limit symptom, and needs its own investigation
+(likely `run` not forwarding `--help` into the script's own arg parsing, or
+`fn main` in `_CliMain/main_and_help.spl` not being reached/printing). Not
+chased further here — out of scope for this bug, and `bin/simple test
+test/02_integration/app/cli_log_modes_spec.spl` was not re-verified to green
+in this session (the daemon-bypass path timed out at 100s during
+verification, a separate harness-speed issue, not re-diagnosed here).
