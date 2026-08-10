@@ -35,6 +35,32 @@ pub unsafe extern "C" fn rt_file_is_regular_no_follow(path_ptr: *const u8, path_
         .unwrap_or(false)
 }
 
+/// Check whether a path resolves to a character device.
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_is_char_device(path_ptr: *const u8, path_len: u64) -> bool {
+    if path_ptr.is_null() {
+        return false;
+    }
+
+    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
+    let Ok(path) = std::str::from_utf8(path_bytes) else {
+        return false;
+    };
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        std::fs::metadata(path)
+            .map(|metadata| metadata.file_type().is_char_device())
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        false
+    }
+}
+
 /// Check if a path exists and is a directory.
 #[no_mangle]
 pub unsafe extern "C" fn rt_dir_exists(path_ptr: *const u8, path_len: u64) -> bool {

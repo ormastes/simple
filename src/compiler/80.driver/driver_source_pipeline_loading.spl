@@ -264,8 +264,14 @@ impl CompilerDriver:
         # Add core source roots only when compiling project sources (self-hosted build).
         # native-build --entry-closure suppresses this implicit whole-src bulk-load
         # so a small userland entry doesn't compile all of src/{app,lib,compiler,runtime}.
+        # Interpret mode resolves imported modules lazily through the interpreter
+        # module loader. Bulk-loading the four trees here defeats that contract:
+        # even a one-file test or the native-build worker parses 600+ unrelated
+        # modules before its entry can run, exceeding the normal CPU/RSS guard.
         val nb_entry_closure = (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
-        if has_project_source and self.ctx.options.mode != CompileMode.Check and not nb_entry_closure:
+        val compile_mode = self.ctx.options.mode
+        val needs_bulk_project_sources = compile_mode != CompileMode.Check and compile_mode != CompileMode.Interpret
+        if has_project_source and needs_bulk_project_sources and not nb_entry_closure:
             val paths = ["src/app", "src/lib", "src/compiler", "src/runtime"]
             val bulk_loaded = _driver_collect_sources_via_find(paths)
             if bulk_loaded.len() > 0:
