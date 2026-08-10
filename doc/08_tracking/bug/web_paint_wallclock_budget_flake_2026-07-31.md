@@ -1,6 +1,16 @@
 # Web paint path has a wall-clock deadline that makes pixel tests flaky (2026-07-31)
 
 **Status:** OPEN — not fixed, out of scope of the campaign that found it.
+Re-verified 2026-08-10: `_web_budget_expired_at`/`_web_budget_expired` (now in
+`simple_web_html_layout_renderer_foundation.spl`) and the
+`SIMPLE_WEB_RENDER_BUDGET_MS` env override for raising the budget both still
+exist, but the override is used only by
+`merged_cascade_decl_quota_spec.spl` and
+`chrome_stage_comparison_receipts_spec.spl` — not by
+`browser_renderer_web_gap_close_spec.spl` (this doc's repro) or by the test
+harness generally, so the wall-clock deadline is still armed, unraised, and
+untest-gated for ordinary pixel specs. The underlying flake mechanism is
+unchanged.
 **Severity:** any pixel-verifying spec on the web renderer is non-deterministic
 under concurrent load. This produces FALSE FAILURES that look like real
 rendering regressions.
