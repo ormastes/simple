@@ -1,0 +1,71 @@
+use compiler.common._Attributes.decl_attrs.{
+    DriverManifestAttr, DriverManifestAttrKind, VhdlClockedMetadata,
+    VhdlResetPolarity, VhdlResetSynchrony
+}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_instruction_graph.{mir_fold_binop}
+use compiler.mir.mir_instruction_support.{
+    GpuBarrierScope, GpuMemoryScope, MirBinOp, VhdlClockEdge,
+    vhdl_clock_domain_from_metadata
+}
+use compiler.mir.mir_types.{
+    MirConstValue, MirConstant, MirFieldDef, MirStatic, MirType,
+    MirTypeDefKind, MirTypeKind
+}
+
+fn main() -> i64:
+    val scalar = MirType(kind: MirTypeKind.I32)
+    val constant = MirConstant(
+        symbol: SymbolId(id: 7), name: "owner_constant",
+        type_: scalar, value: MirConstValue.Int(5)
+    )
+    val field = MirFieldDef(
+        name: "value", type_: scalar, offset: 0,
+        has_bits_attr: false, bits_width: 0
+    )
+    val type_kind = MirTypeDefKind.Struct([field])
+    val static_ = MirStatic(
+        symbol: SymbolId(id: 8), name: "owner_static", type_: scalar,
+        init: Some(constant), is_mutable: true
+    )
+    val manifest = DriverManifestAttr(
+        kind: DriverManifestAttrKind.Driver, driver_class: 0,
+        vendor: 0, device_ids: [1], version: "1", abi: ""
+    )
+    val metadata = VhdlClockedMetadata(
+        clock_signal: "clk", reset_signal: "rst", has_reset: true,
+        reset_polarity: VhdlResetPolarity.ActiveLow,
+        reset_synchrony: VhdlResetSynchrony.Async, domain: "core",
+        is_valid: true, validation_errors: []
+    )
+    val domain = vhdl_clock_domain_from_metadata(metadata)
+    val folded = mir_fold_binop(
+        MirBinOp.Add, MirConstValue.Int(2), MirConstValue.Int(5)
+    )
+    val enum_ok = (GpuMemoryScope.Device == GpuMemoryScope.Device and
+        GpuBarrierScope.Subgroup == GpuBarrierScope.Subgroup)
+    val metadata_ok = (domain.name == "core" and
+        domain.clock_signal == "clk" and domain.reset_signal == Some("rst") and
+        domain.reset_synchrony == VhdlResetSynchrony.Async and
+        domain.edge == VhdlClockEdge.Rising)
+    val values_ok = (constant.value == MirConstValue.Int(5) and
+        field.name == "value" and static_.init == Some(constant) and
+        manifest.kind == DriverManifestAttrKind.Driver and
+        Visibility.Public == Visibility.Public)
+    val type_ok = match type_kind:
+        Struct(fields): fields.len() == 1
+        _: false
+    if folded == nil:
+        print "MIR_FOLD_CALL_RETURNED_NONE"
+    else:
+        print "MIR_FOLD_CALL_RETURNED_VALUE"
+    if enum_ok and metadata_ok and values_ok and type_ok:
+        print "MIR_VHDL_OWNER_IMPORTS_PASS"
+        return 0
+    print "MIR_VHDL_OWNER_IMPORTS_FAIL"
+    print enum_ok
+    print metadata_ok
+    print values_ok
+    print type_ok
+    1
