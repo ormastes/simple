@@ -843,9 +843,9 @@ int main(int argc, char** argv) {
         }
         // Cranelift emits a `__module_init_<prefix>` wrapper that calls the
         // corresponding qualified `_dynamic` body. Keep only the wrapper in
-        // that pair so startup evaluates the body once. A backend/object that
-        // exposes a dynamic initializer without a wrapper still keeps it in
-        // the aggregate (notably the current LLVM-only-dynamic shape).
+        // that pair so startup evaluates the body once. An older or external
+        // object that exposes a dynamic initializer without a wrapper still
+        // keeps it in the aggregate for compatibility.
         // Always emit the caller, even when this entry has no module init
         // functions. The generated main stub references
         // `__simple_call_module_inits`; ELF accepts that weak undefined symbol,

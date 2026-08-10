@@ -238,7 +238,10 @@ pub(crate) fn mangle_mir(
         }
     }
 
-    // Phase 2: Rename globals in mir.globals, global_init_values, local_globals
+    // Phase 2: Rename globals and every metadata key that controls their
+    // storage/linkage. Dynamic-init globals must stay aligned with their
+    // GlobalStore instructions so LLVM leaves immutable `val` storage writable
+    // for the synthesized runtime initializer.
     let mut new_globals = Vec::new();
     for (name, ty, is_mut) in &mir.globals {
         if let Some(mangled) = local_global_mangled.get(name) {
@@ -317,6 +320,15 @@ pub(crate) fn mangle_mir(
             mir.local_globals.insert(mangled.clone());
         } else {
             mir.local_globals.insert(name);
+        }
+    }
+
+    let old_dynamic_init_globals = std::mem::take(&mut mir.dynamic_init_globals);
+    for name in old_dynamic_init_globals {
+        if let Some(mangled) = local_global_mangled.get(&name) {
+            mir.dynamic_init_globals.insert(mangled.clone());
+        } else {
+            mir.dynamic_init_globals.insert(name);
         }
     }
 

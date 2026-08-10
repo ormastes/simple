@@ -473,9 +473,16 @@ pub(crate) fn module_init_symbol(module_prefix: Option<&str>) -> String {
     }
 }
 
+/// Compute the dynamic initializer body paired with a module-init wrapper.
+/// Keep this as the sole spelling authority for HIR identity assignment,
+/// freestanding AST injection, and both native backends.
+pub(crate) fn module_dynamic_init_symbol(module_prefix: Option<&str>) -> String {
+    format!("{}_dynamic", module_init_symbol(module_prefix))
+}
+
 fn make_module_init_dynamic_name(module_name: &str) -> String {
     let module_prefix = (!module_name.is_empty()).then_some(module_name);
-    format!("{}_dynamic", module_init_symbol(module_prefix))
+    module_dynamic_init_symbol(module_prefix)
 }
 
 fn find_dynamic_init_func_id(

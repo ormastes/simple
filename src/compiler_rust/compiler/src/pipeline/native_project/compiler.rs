@@ -8,7 +8,9 @@ use rayon::prelude::*;
 use simple_common::target::TargetCpu;
 use simple_parser::ast::{Block, Expr, FunctionDef, Node, ReturnStmt, Type, Visibility};
 
-use crate::codegen::common_backend::{enum_runtime_module_name_from_path, module_init_symbol, module_prefix_from_path};
+use crate::codegen::common_backend::{
+    enum_runtime_module_name_from_path, module_dynamic_init_symbol, module_prefix_from_path,
+};
 use crate::codegen::Codegen;
 use crate::hir::Lowerer;
 use crate::module_resolver::ModuleResolver;
@@ -63,7 +65,7 @@ pub(super) fn assign_native_dynamic_initializer_identity(
         ));
     }
 
-    let qualified_name = format!("{}_dynamic", module_init_symbol(Some(module_prefix)));
+    let qualified_name = module_dynamic_init_symbol(Some(module_prefix));
     let destinations: Vec<usize> = hir
         .functions
         .iter()
