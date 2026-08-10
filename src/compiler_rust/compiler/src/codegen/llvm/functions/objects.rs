@@ -188,20 +188,31 @@ impl LlvmBackend {
             .map_err(|e| crate::error::factory::llvm_build_failed("ptr_to_int", &e))?;
 
         // Untag, then branch-free null guard: a nil aggregate would fault.
-        let untag_mask = i64_type.const_int(u64::MAX - 1, false);
+        let tag_mask = i64_type.const_int(7, false);
+        let untag_mask = i64_type.const_int(u64::MAX - 7, false);
         let src_ptr_i64 = builder
             .build_and(src_tagged, untag_mask, "aggcopy_src_untag")
             .map_err(|e| crate::error::factory::llvm_build_failed("and untag", &e))?;
-        let is_null = builder
+        let one = i64_type.const_int(1, false);
+        let src_tag = builder
+            .build_and(src_tagged, tag_mask, "aggcopy_src_tag")
+            .map_err(|e| crate::error::factory::llvm_build_failed("and tag", &e))?;
+        let src_is_heap = builder
+            .build_int_compare(inkwell::IntPredicate::EQ, src_tag, one, "aggcopy_src_heap")
+            .map_err(|e| crate::error::factory::llvm_build_failed("icmp heap", &e))?;
+        let src_nonnull = builder
             .build_int_compare(
-                inkwell::IntPredicate::EQ,
+                inkwell::IntPredicate::NE,
                 src_ptr_i64,
                 i64_type.const_zero(),
-                "aggcopy_src_null",
+                "aggcopy_src_nonnull",
             )
-            .map_err(|e| crate::error::factory::llvm_build_failed("icmp null", &e))?;
+            .map_err(|e| crate::error::factory::llvm_build_failed("icmp nonnull", &e))?;
+        let src_is_valid = builder
+            .build_and(src_is_heap, src_nonnull, "aggcopy_src_valid")
+            .map_err(|e| crate::error::factory::llvm_build_failed("and valid", &e))?;
         let load_i64 = builder
-            .build_select(is_null, new_i64, src_ptr_i64, "aggcopy_load_src")
+            .build_select(src_is_valid, src_ptr_i64, new_i64, "aggcopy_load_src")
             .map_err(|e| crate::error::factory::llvm_build_failed("select", &e))?
             .into_int_value();
         let load_ptr = builder
@@ -217,6 +228,9 @@ impl LlvmBackend {
             let word = builder
                 .build_load(i64_type, from, "aggcopy_word")
                 .map_err(|e| crate::error::factory::llvm_build_failed("load word", &e))?;
+            let word = builder
+                .build_select(src_is_valid, word, i64_type.const_zero().into(), "aggcopy_word_guarded")
+                .map_err(|e| crate::error::factory::llvm_build_failed("select word", &e))?;
             builder
                 .build_store(to, word)
                 .map_err(|e| crate::error::factory::llvm_build_failed("store word", &e))?;
@@ -240,9 +254,8 @@ impl LlvmBackend {
             let inner = self.emit_aggregate_block_copy(word, field.byte_size, &field.nested, builder)?;
             // Replace only a live tagged heap handle; nil (0) and non-handle
             // words keep their original value.
-            let one = i64_type.const_int(1, false);
             let tag_bit = builder
-                .build_and(word, one, "aggcopy_deep_tagbit")
+                .build_and(word, tag_mask, "aggcopy_deep_tag")
                 .map_err(|e| crate::error::factory::llvm_build_failed("and tag bit", &e))?;
             let is_tagged = builder
                 .build_int_compare(inkwell::IntPredicate::EQ, tag_bit, one, "aggcopy_deep_istag")
