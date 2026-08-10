@@ -1,7 +1,16 @@
 # `it` block reads a STALE module-level `var` after a helper writes it
 
-**Status:** OPEN
+**Status:** OPEN (ARCHITECTURAL — Rust seed spec-runner registration; not pure-Simple fixable)
 **Found:** 2026-08-04
+**Re-verified:** 2026-08-10 — reproduced fresh via
+`test/03_system/feature/baremetal/modvar2_spec.spl` (regression coverage added,
+left RED on purpose per `.claude/rules/testing.md`):
+`SIMPLE_TIMEOUT_SECONDS=120 bin/simple test --no-cache --no-cover-check
+test/03_system/feature/baremetal/modvar2_spec.spl` → `4 examples, 1 failure`,
+case B `expected -999 to equal 16`, exit 1 — identical to the original repro.
+Root cause remains in the Rust bootstrap seed's `it`-body closure registration
+(`rt_bdd_*` intrinsics / capture-by-value semantics), outside the
+`.spl`/`.shs`-only, no-seed-rebuild constraints of this pass. No change made.
 
 ## Symptom
 
