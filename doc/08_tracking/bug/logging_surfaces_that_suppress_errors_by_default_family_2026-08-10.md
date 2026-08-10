@@ -191,6 +191,53 @@ writes to the repo's `tmp/security_audit.log`.
 `audit_append` calls `rt_file_write_text` and nothing else. Its `-> bool` result
 is not checked either, so a failed audit write is itself silent.
 
+### OPEN 3 — FIXED 2026-08-10
+
+**Enumerated first:** the glob matches **four** files, not one. Only
+`src/lib/nogc_sync_mut/service/audit_log.spl` (59 lines) holds an implementation;
+`gc_async_mut` and `nogc_async_mut` are `export use` facades over it, and
+`gc_sync_mut` is a `export use ... .*` facade over `gc_async_mut`. One fix covers
+all four, but the check exercises all four import paths rather than assuming it,
+since a facade can drift out of its re-export list.
+
+**Reproduced.** Appending a `LEASE_GRANTED` record to a path under `/proc`
+(unwritable) produced **0** stderr lines and the program continued normally, in
+both lanes. The record was simply gone.
+
+**Fix, both halves:** `audit_append` now checks `rt_mkdir_p`'s and
+`rt_file_write_text`'s `-> bool` results, reports a failure on stderr as
+`[ERROR] [audit_log] ...`, and **returns** `bool`. The six typed wrappers
+(`audit_lease_granted`, `audit_command`, `audit_daemon_start`, …) propagate it.
+The return type is additive — the only in-tree callers,
+`service/daemon_base.spl:71,76`, ignore it and still compile, but can no longer
+do so *unknowingly*.
+
+**Before → after:** failed append stderr `0` → `1` labelled line, return value
+`(none)` → `false`; successful append unchanged at `0` stderr lines and now
+returns `true`.
+
+**Runnable check:** `scripts/check/check-service-audit-write-failure-is-loud.shs`.
+Asserts the labelled line *and* the returned `false` — the latter is the half a
+stderr-only fix would leave broken, which no amount of output-grepping would
+notice. Negative control: a **successful** append emits **zero** stderr lines and
+the total is asserted as *exactly* 4 (the 4 failing appends), which is what stops
+a "fix" that shouts on every append — this is a hot path on every lease grant.
+Environment positive-control: the check exits `2` if `/proc/...` turns out to be
+writable, so the failure path can never be silently un-exercised.
+**Oracle proof:** dropping both result checks yields `FAIL -- 4 of 16`, exit 1,
+in both lanes.
+
+**Side effect caught — a second defect, filed separately.** The first
+implementation used the `eprint` builtin, and the check went RED: `eprint` inside
+a module that imports `std.io_runtime` (this one does) is **re-routed to STDOUT**
+with a literal `[STDERR] ` text prefix, and nothing reaches the real stderr fd.
+The same builtin in `targets.spl` (OPEN 1, no `io_runtime` import) reaches stderr
+correctly, so it is the import that discriminates. Worked around here by
+declaring the `rt_stderr_write` extern directly, as
+`common/security/audit_log.spl` already did — which is why OPEN 2 never hit it.
+See `doc/08_tracking/bug/eprint_in_io_runtime_module_is_rerouted_to_stdout_2026-08-10.md`.
+The check asserts on the real fd, so a regression back to `eprint` here is caught.
+
 **OPEN 4 — inverse defect in `gpu/browser_engine/shared/logging.spl`.**
 `should_log()` binds `val _level = msg_level` and then ignores it, so the level
 filter does nothing and everything prints. Note this is the failure the negative

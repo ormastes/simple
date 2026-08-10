@@ -11,6 +11,11 @@ extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_mkdir_p(path: text) -> bool
+# Real stderr. NOT `eprint`: in a module that imports std.io_runtime (this one),
+# eprint is captured and re-emitted on STDOUT with a literal "[STDERR] " prefix,
+# so it would land in the data stream -- the exact failure this fix exists to
+# remove. See doc/08_tracking/bug/eprint_in_io_runtime_module_is_rerouted_to_stdout_2026-08-10.md
+extern fn rt_stderr_write(msg: text)
 
 struct AuditLog:
     path: text
@@ -29,31 +34,50 @@ fn _parent_dir(path: text) -> text:
         i = i + 1i64
     out.join("/")
 
-fn audit_append(log: AuditLog, event: text, detail: text):
+# Append one record. Returns whether the record actually reached the log.
+#
+# Both halves of this used to fail silently: rt_file_write_text's -> bool result
+# was discarded, and there was no stderr path at all, so an audit write that
+# failed -- an unwritable directory, a full disk, a permissions change -- left no
+# trace anywhere. An audit trail that loses records without saying so is worse
+# than no audit trail, because it still looks authoritative.
+#
+# A failed write is reported on stderr and to the caller. `-> bool` is additive:
+# callers that ignore it are unaffected, but they can no longer do so
+# *unknowingly*.
+#
+# doc/08_tracking/bug/logging_surfaces_that_suppress_errors_by_default_family_2026-08-10.md (OPEN 3)
+fn audit_append(log: AuditLog, event: text, detail: text) -> bool:
     val parent = _parent_dir(log.path)
-    rt_mkdir_p(parent)
+    if not rt_mkdir_p(parent):
+        rt_stderr_write("[ERROR] [audit_log] cannot create audit directory '{parent}' for '{log.path}' -- audit record {event} was NOT written\n")
+        return false
     val ts = rt_time_now_unix_micros()
     val line = "{ts}\t{event}\t{detail}\n"
     val existing = rt_file_read_text(log.path)
+    var ok = false
     if existing.len() > 0i64:
-        rt_file_write_text(log.path, existing + line)
+        ok = rt_file_write_text(log.path, existing + line)
     else:
-        rt_file_write_text(log.path, line)
+        ok = rt_file_write_text(log.path, line)
+    if not ok:
+        rt_stderr_write("[ERROR] [audit_log] failed to write audit record {event} to '{log.path}' -- the audit trail is INCOMPLETE\n")
+    ok
 
-fn audit_lease_granted(log: AuditLog, lease_id: text, pid: i64, kind: text):
+fn audit_lease_granted(log: AuditLog, lease_id: text, pid: i64, kind: text) -> bool:
     audit_append(log, "LEASE_GRANTED", "id={lease_id} pid={pid} kind={kind}")
 
-fn audit_lease_released(log: AuditLog, lease_id: text):
+fn audit_lease_released(log: AuditLog, lease_id: text) -> bool:
     audit_append(log, "LEASE_RELEASED", "id={lease_id}")
 
-fn audit_lease_reclaimed(log: AuditLog, lease_id: text, reason: text):
+fn audit_lease_reclaimed(log: AuditLog, lease_id: text, reason: text) -> bool:
     audit_append(log, "LEASE_RECLAIMED", "id={lease_id} reason={reason}")
 
-fn audit_command(log: AuditLog, lease_id: text, command: text, exit_code: i64):
+fn audit_command(log: AuditLog, lease_id: text, command: text, exit_code: i64) -> bool:
     audit_append(log, "COMMAND", "lease={lease_id} cmd={command} exit={exit_code}")
 
-fn audit_daemon_start(log: AuditLog, pid: i64):
+fn audit_daemon_start(log: AuditLog, pid: i64) -> bool:
     audit_append(log, "DAEMON_START", "pid={pid}")
 
-fn audit_daemon_stop(log: AuditLog, pid: i64):
+fn audit_daemon_stop(log: AuditLog, pid: i64) -> bool:
     audit_append(log, "DAEMON_STOP", "pid={pid}")

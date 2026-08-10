@@ -1,0 +1,191 @@
+#!/bin/sh
+# check-service-audit-write-failure-is-loud.shs
+#
+# Fences src/lib/nogc_sync_mut/service/audit_log.spl (OPEN 3 of
+# doc/08_tracking/bug/logging_surfaces_that_suppress_errors_by_default_family_2026-08-10.md).
+#
+# audit_append called rt_file_write_text and nothing else. It had no stderr path
+# at all, AND it discarded the -> bool write result. Reproduction: appending a
+# LEASE_GRANTED record to a path under /proc (unwritable) produced ZERO stderr
+# lines and the program continued normally, in both lanes. An audit trail that
+# loses records without saying so is worse than no audit trail -- it still looks
+# authoritative.
+#
+# Both halves are fixed and both halves are asserted here: the failure is
+# reported on stderr, and it is returned to the caller.
+#
+# The four sibling modules src/lib/{gc_async_mut,gc_sync_mut,nogc_async_mut}/
+# service/audit_log.spl are pure `export use` facades over this one, so they
+# inherit the fix. The check exercises each of the four import paths rather than
+# assuming that, because a facade can silently drift out of the re-export list.
+#
+# TWO-SIDED. A positive-only probe would pass on a module that printed an error
+# on EVERY append, successful or not -- which would be its own defect (a log that
+# cries wolf is ignored, and this is a hot path on every lease grant):
+#   positive         -- a failed append emits a LABELLED
+#                       "[ERROR] [audit_log] ..." line on stderr. The label is
+#                       the assertion that bites; a bare line is not attributable.
+#   result checked   -- the failed append RETURNS false. This is the half that a
+#                       stderr-only fix would leave broken, and no amount of
+#                       output-grepping would notice.
+#   negative control -- a SUCCESSFUL append to a writable path emits ZERO stderr
+#                       lines and returns true. Without this the check passes on
+#                       a "fix" that unconditionally shouts.
+#   facade coverage  -- all four std.*.service.audit_log import paths behave
+#                       identically.
+#
+# Verdict line is the last line of stdout:
+#   PASS -- <n> assertion(s) checked ...   exit 0
+#   FAIL -- ...                            exit 1
+#   ERROR -- nothing was checked           exit 2
+#
+# Usage: sh scripts/check/check-service-audit-write-failure-is-loud.shs
+
+set -u
+
+REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$REPO_ROOT" || { echo "ERROR -- nothing was checked (cannot cd to repo root)"; exit 2; }
+
+SIMPLE_BIN="./bin/simple"
+if [ ! -e "$SIMPLE_BIN" ]; then
+    echo "ERROR -- nothing was checked (no $SIMPLE_BIN in $REPO_ROOT)"
+    exit 2
+fi
+
+WORK=$(mktemp -d) || { echo "ERROR -- nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "$WORK"' EXIT INT TERM
+
+# Positive control on the environment itself: the "unwritable" path must really
+# be unwritable, or the whole check is vacuous.
+BADPATH="/proc/q21_audit_nope/audit.log"
+if mkdir -p "$(dirname "$BADPATH")" 2>/dev/null; then
+    echo "ERROR -- nothing was checked (expected $BADPATH to be unwritable, but mkdir -p succeeded; the failure path cannot be exercised here)"
+    exit 2
+fi
+
+GOODLOG="$WORK/good_audit.log"
+
+FIXTURE="$WORK/service_audit_probe.spl"
+cat > "$FIXTURE" <<SPL
+# Fixture for check-service-audit-write-failure-is-loud.shs.
+use std.nogc_sync_mut.service.audit_log as A
+use std.gc_async_mut.service.audit_log as B
+use std.gc_sync_mut.service.audit_log as C
+use std.nogc_async_mut.service.audit_log as D
+
+fn main():
+    # --- failing append: must be loud, and must return false ---------------
+    val bad = A.audit_log_new("$BADPATH")
+    val ok_bad = A.audit_append(bad, "Q21_LEASE", "detail=AUDITMARK_BAD")
+    if ok_bad:
+        print "AUDITRC_BAD_RETURNED_TRUE"
+    else:
+        print "AUDITRC_BAD_RETURNED_FALSE"
+
+    # --- succeeding append: must be silent, and must return true -----------
+    val good = A.audit_log_new("$GOODLOG")
+    val ok_good = A.audit_append(good, "Q21_OK", "detail=AUDITMARK_GOOD")
+    if ok_good:
+        print "AUDITRC_GOOD_RETURNED_TRUE"
+    else:
+        print "AUDITRC_GOOD_RETURNED_FALSE"
+
+    # --- the three facades must inherit the same behaviour ------------------
+    val fb = B.audit_log_new("$BADPATH")
+    if B.audit_append(fb, "Q21_FACADE_B", "detail=AUDITMARK_FB"):
+        print "AUDITRC_FACADE_B_TRUE"
+    else:
+        print "AUDITRC_FACADE_B_FALSE"
+
+    val fc = C.audit_log_new("$BADPATH")
+    if C.audit_append(fc, "Q21_FACADE_C", "detail=AUDITMARK_FC"):
+        print "AUDITRC_FACADE_C_TRUE"
+    else:
+        print "AUDITRC_FACADE_C_FALSE"
+
+    val fd = D.audit_log_new("$BADPATH")
+    if D.audit_append(fd, "Q21_FACADE_D", "detail=AUDITMARK_FD"):
+        print "AUDITRC_FACADE_D_TRUE"
+    else:
+        print "AUDITRC_FACADE_D_FALSE"
+SPL
+
+FAILURES=0
+ASSERTIONS=0
+
+fail() {
+    echo "  FAIL: $1"
+    FAILURES=$((FAILURES + 1))
+}
+
+for MODE in interpreter jit; do
+    echo "== lane: $MODE =="
+    rm -f "$GOODLOG"
+
+    SIMPLE_EXECUTION_MODE="$MODE" timeout 300 "$SIMPLE_BIN" run "$FIXTURE" \
+        > "$WORK/out.$MODE" 2> "$WORK/err.$MODE"
+    RC=$?
+    if [ $RC -ne 0 ]; then
+        fail "$MODE: fixture exited $RC (expected 0)"
+        ASSERTIONS=$((ASSERTIONS + 1))
+        continue
+    fi
+
+    O="$WORK/out.$MODE"
+    E="$WORK/err.$MODE"
+
+    # --- POSITIVE: the failure is announced, and labelled ------------------
+    ASSERTIONS=$((ASSERTIONS + 1))
+    if ! grep -q '\[ERROR\] \[audit_log\]' "$E"; then
+        fail "$MODE: a failed audit write produced no labelled '[ERROR] [audit_log] ...' line on stderr -- a lost audit record is silent"
+    fi
+
+    # --- RESULT CHECKED: the half a stderr-only fix would miss -------------
+    ASSERTIONS=$((ASSERTIONS + 1))
+    if ! grep -q 'AUDITRC_BAD_RETURNED_FALSE' "$O"; then
+        fail "$MODE: a failed audit write did not return false -- the -> bool result is still not propagated to the caller"
+    fi
+
+    # --- NEGATIVE CONTROL: success is silent and true ----------------------
+    ASSERTIONS=$((ASSERTIONS + 1))
+    if ! grep -q 'AUDITRC_GOOD_RETURNED_TRUE' "$O"; then
+        fail "$MODE: a successful audit write did not return true"
+    fi
+
+    ASSERTIONS=$((ASSERTIONS + 1))
+    if ! grep -q 'AUDITMARK_GOOD' "$GOODLOG" 2>/dev/null; then
+        fail "$MODE: the successful append did not actually reach $GOODLOG"
+    fi
+
+    # The count assertion that stops a "shout on every append" fix. Exactly the
+    # four failing appends (1 direct + 3 facades) may report; the successful one
+    # must contribute nothing.
+    N_ERR=$(grep -c '\[ERROR\] \[audit_log\]' "$E")
+    ASSERTIONS=$((ASSERTIONS + 1))
+    if [ "$N_ERR" -ne 4 ]; then
+        fail "$MODE: negative control -- expected exactly 4 '[ERROR] [audit_log]' lines (the 4 failing appends), got $N_ERR; a successful append must stay silent"
+    fi
+
+    # --- FACADE COVERAGE ---------------------------------------------------
+    for F in B C D; do
+        ASSERTIONS=$((ASSERTIONS + 1))
+        if ! grep -q "AUDITRC_FACADE_${F}_FALSE" "$O"; then
+            fail "$MODE: facade $F did not return false on a failed audit write -- its re-export may have drifted"
+        fi
+    done
+
+    echo "  audit_log ERROR line(s)=$N_ERR (expect 4); good append reached file: $(grep -c AUDITMARK_GOOD "$GOODLOG" 2>/dev/null || echo 0)"
+done
+
+if [ "$ASSERTIONS" -eq 0 ]; then
+    echo "ERROR -- nothing was checked"
+    exit 2
+fi
+
+if [ "$FAILURES" -ne 0 ]; then
+    echo "FAIL -- $FAILURES of $ASSERTIONS assertion(s) failed across 2 execution lanes"
+    exit 1
+fi
+
+echo "PASS -- $ASSERTIONS assertion(s) checked across 2 execution lanes (interpreter, jit), including the returned-result assertion, the silent-on-success negative control, and all 4 facade import paths"
+exit 0
