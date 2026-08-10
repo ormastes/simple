@@ -1,6 +1,6 @@
 ---
 id: cranelift_direct_string_constant_null_pointer_2026-07-12
-status: FIX-IMPLEMENTED-UNVERIFIED-E2E
+status: FIX-IMPLEMENTED-UNVERIFIED-E2E (re-confirmed 2026-08-10, see note below)
 severity: blocking
 discovered: 2026-07-12
 discovered_by: native-build --entry-closure self-host closure build (agent session)
@@ -10,6 +10,38 @@ related: src/lib/nogc_sync_mut/ffi/codegen.spl
 ---
 
 # `native-build --backend cranelift`: string constants always compile to a null pointer (SIGSEGV / silent no-op)
+
+## 2026-08-10 re-verification (ARCHITECTURAL-OPEN confirmed, no regression, no new e2e proof)
+
+Re-read `cl_translate_const_value`'s `Str(v)` arm in
+`src/compiler/70.backend/backend/cranelift_codegen_adapter.spl` (now at
+line 1029, code moved since 2026-07-12). The fix described below is present
+and has progressed further than this doc's last update: it now calls
+`rt_string_new_literal` (an interned-literal variant, per an inline comment
+citing this doc plus
+`bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20.md`) rather than
+plain `rt_string_new`, and `rt_cranelift_declare_string_data` /
+`cranelift_declare_string_data` are present and wired in
+`src/lib/nogc_sync_mut/ffi/codegen.spl:331-336`. The `rt_array_len_safe`
+local-vs-extern collision named as the concrete e2e blocker in the
+2026-07-12 update no longer greps as present in
+`src/compiler/10.frontend/core/lexer.spl` (that exact function is gone from
+the file), suggesting that specific wall may have been cleared incidentally
+by unrelated lexer changes — **not confirmed**, since actually exercising
+`native-build --backend cranelift --entry-closure` end-to-end was not
+attempted this session: the doc's own "Performance note" measures the real
+closure's parse phase alone at many minutes to over an hour, which is out of
+budget for a re-verification pass, and a partial/truncated run would not be
+honest evidence either way.
+
+**Verdict: left OPEN (ARCHITECTURAL-OPEN class — needs an e2e native-build
+run this session's budget cannot afford, not a quick fix).** The code-level
+claims in the original report are stale in one respect (the `Str(v)` arm no
+longer emits a bare null constant — that part of the mechanism fix is
+real and in the tree) but the doc's own bottom line was already "fix
+implemented, e2e unverified," which remains accurate. No code change made
+here; this is a documentation-only re-confirmation.
+
 
 ## 2026-07-17 blocker update
 
