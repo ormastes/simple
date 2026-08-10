@@ -103,6 +103,38 @@ fn unrun_reason(output: text) -> text:
         return "unresolved-symbol"
     return "zero-examples"
 
+# Did this spec fail to LOAD, as opposed to running and failing an assertion?
+# The distinction is the whole point of the unrun line: a spec that asserted
+# something and got the wrong answer is a product defect; a spec that could not
+# be loaded at all is an infrastructure gap, and it declared examples nobody
+# ever evaluated. `unrun_reason` is the single classifier — this is a named
+# predicate over it, NOT a second copy of the token list, so the two can never
+# drift apart.
+fn is_load_failure(output: text) -> bool:
+    unrun_reason(output) != "zero-examples"
+
+# Verdict line for a spec the AGGREGATING (directory) lane actually ran.
+#
+# Bug: directory_lane_emits_no_verdict_line_2026-08-10. The directory lane was
+# the missing half of 0ff267a366a: that commit taught the SINGLE-FILE lane
+# (test_runner_single.spl) to emit an unrun line, and it does — measured, one
+# verdict line, reason=unresolved-module. But `bin/simple test <dir>` never
+# routed through that branch at all. It aggregates per-file TestFileResult
+# records and prints its own `PASS`/`FAIL <path> (n passed, m failed)` summary
+# lines, so it emitted ZERO `SPEC FILE VERDICT:` lines for EVERY file in the
+# directory -- passing files included, not just the unloadable ones. A sweep
+# counting verdict lines therefore read an entire green directory as "not yet
+# run" exactly as it read a broken one. The single-file fix could never have
+# closed that, because the gap was not in the classification of a failure; it
+# was that this lane emitted no verdict lines whatsoever.
+#
+# `dropped` is 0 here: this file RAN. Skips are reported separately and must
+# not be laundered into `dropped`, which the greenwash gate reads as evidence
+# that a file did not complete.
+fn ran_verdict_line(path: text, passed: i64, failed: i64) -> text:
+    val executed = passed + failed
+    "SPEC FILE VERDICT: {path} declared>={executed} executed={executed} passed={passed} failed={failed} dropped=0"
+
 # Human-readable gloss for a process exit status seen on the test lane. Exit
 # codes here have repeatedly been misread (144 was chased as a spec defect when
 # it comes from the reporting harness), so every timeout/abort report prints
