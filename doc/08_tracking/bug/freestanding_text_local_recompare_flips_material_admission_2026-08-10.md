@@ -291,3 +291,64 @@ extents should take both glass rects off the allocating fallback path.
 
 No check was weakened; `wm_content_frame_web_provenance_valid` untouched; no
 composite stubbed; no readiness marker faked; OVMF pflash unchanged.
+
+## Layer 4 (2026-08-10, ~13:20Z): trailing-default-param lead REFUTED; fb_w/fb_h already fixed; blocker MOVED
+
+### The lead is refuted, on two independent grounds
+1. `native_trailing_default_param_reads_uninitialized_2026-08-09.md` is status
+   **FIXED** (MIR call-lowering pad landed; fence in `check-aot-lane-fences.shs`).
+   It cannot be the live cause of anything today.
+2. The corrupt extents were never a default-param bind at all. The sole producer
+   is `_engine2d_draw_ir_render_glass_material`
+   (`src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl:508`, log at `:542`), whose
+   `fb_w`/`fb_h` are **explicit positional args** at its one call site (`:699`),
+   threaded from `_engine2d_draw_ir_render_commands` (`:1420`). No omitted
+   trailing default exists anywhere in that chain.
+
+### The fb_w/fb_h corruption was ALREADY FIXED before this pass
+Commit **`439d64e2b3e`** ("fix(simpleos): restore WM material provenance witness
+on freestanding lane", 2026-08-10 09:01Z, ancestor of HEAD) hoisted the surface
+dimension read to loop entry (`val surface_fb_w = eng.width()` at `:1426`) and
+threads it down, precisely because deep `eng.width()`/`eng.height()` re-reads
+returned garbage on the freestanding lane. The in-source comment at `:528-535`
+records the same `fb_w=49` / `fb_h=33` measurements this chain chased. Attributed
+there to the **struct field-index-collision** class, not the default-param class.
+
+### Gate evidence: the fix worked, and the blocker moved
+Archived runs (`build/simpleos_wm_fullscreen_evidence/runs/`), all still `fail`:
+
+| run | `reason=bounds` | `[GUI] fb_w` | `array-repeat` | ending |
+|---|---|---|---|---|
+| `20260810T083128Z` (pre-fix) | **present**, `fb_w=452 fb_h=33` | `0xf00` (3840) | 6 | truncated mid-stream (timeout) |
+| `20260810T112327Z` (post-fix) | **none** | `0xf00` | 6 | truncated mid-stream |
+| `20260810T123139Z` (post-fix) | **none** | `0xf00` | 3 | clean `[PANIC] heap exhausted` |
+
+So the extent corruption is genuinely gone, and the failure mode changed from
+non-termination to a **terminating, diagnosable panic**:
+`[PANIC] heap_off=0x3fffa5e0 req=0xb4d0 limit=0x40000000` — the 1 GiB baremetal
+bump heap is exhausted by never-freed `sz=0x800020` (8 MiB) `array-repeat
+count=0x100000 caller=0x83d477e` buffers plus `sz=0x1dc020` (~1.9 MiB) runs.
+
+### The real remaining blocker (unchanged by the fb_w fix)
+`[web-material-provenance] witness-unconverted cpu_witness=1 **cpu_executed=0**
+metal_executed=0 sha_len=64` is present in **all three** runs, including the two
+where the bounds check no longer rejects anything. The bounds rejection was
+therefore **not** the cause of `cpu_executed=0`; removing it did not convert a
+single witness. Rung (d) is blocked on the CPU material composite never
+executing, plus 1 GiB heap exhaustion on the first 4K frame.
+
+### Next concrete step
+Two separable items, in order:
+1. Find why `cpu_executed` stays 0 with a bounds-admitted, contract-length-
+   capability glass rect — instrument the arms after the bounds check in
+   `_engine2d_draw_ir_render_glass_material` (`realized-props-missing`,
+   `device-glass-state-unknown`, `cpu-glass-pixels`); none of those receipts
+   appear in the post-fix logs either, so the rect may not be reaching this
+   function at all post-`typed_nonuniform` (`:690`).
+2. The 8 MiB `array-repeat count=0x100000` at `caller=0x83d477e` is allocated
+   per attempt and never freed; at 1 GiB it caps the first frame regardless.
+   1,048,576 elems is not a 3840x2160 surface (8,294,400) — identify the buffer.
+
+No check was weakened; `wm_content_frame_web_provenance_valid` untouched; no
+composite stubbed; no bounds check relaxed; OVMF pflash unchanged. No code
+changed in this pass — findings only.
