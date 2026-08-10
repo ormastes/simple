@@ -14,7 +14,7 @@ extern fn rt_bootstrap_native_build_single_spl_positional(args: [text]) -> text
 use compiler.driver.driver.{compiler_driver_create, compiler_driver_run_compile}
 use compiler.common.driver_core_types (CompileMode, CompileResult, driver_core_compile_options_default, compileoptions_normalize_mir_optimization, driver_output_format_native, driver_output_format_smf, compile_result_is_success, compile_result_errors)
 use app.cli.bootstrap_identity.{bootstrap_version}
-use app.cli.bootstrap_focused_native_build.{run_exact_stage4_focused_capsule}
+use app.cli.bootstrap_focused_native_build.{run_bootstrap_native_build_dispatch}
 use std.nogc_sync_mut.io_runtime.{env_get, env_set, file_exists, file_size, remove_file_if_exists, dir_create}
 use std.nogc_sync_mut.io.file_ops.{file_append}
 
@@ -197,111 +197,19 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
     run_native_build_dispatch(args)
 
 fn run_native_build_dispatch(args: [text]) -> i64:
-    val removed_bundle = native_build_policy_action_from_args(args, 0)
-    if removed_bundle == "--help" or removed_bundle == "-h" or removed_bundle == "--list-optimizations":
-        return run_rt_native_build(args)
-    if removed_bundle != "":
-        print "Error: runtime bundle '{removed_bundle}' was removed; use simple-core or core-c-bootstrap"
-        return 1
-    val mode = native_build_mode_from_args(args, 0)
-    if mode != "" and mode != "dynload" and mode != "one-binary":
-        print "Error: invalid --mode '{mode}' (expected dynload or one-binary)"
-        return 1
-    val explicit_entry = native_build_entry_from_args(args, 0)
-    if explicit_entry != "":
-        return run_native_build_explicit_entry(args, explicit_entry, mode)
-    run_native_build_positional(args)
+    run_bootstrap_native_build_dispatch(args)
 
 fn run_native_build_explicit_entry(args: [text], explicit_entry: text, mode: text) -> i64:
-    if env_get("SIMPLE_BOOTSTRAP_STAGE4") != "1":
-        if native_build_has_source_arg(args, 0) == 0:
-            print "note: --entry without --source scans the DEFAULT source roots (whole project) and stays silent while loading that import graph; pass --source <dir> to bound it"
-        return run_rt_native_build(args)
-    if explicit_entry != "src/app/cli/main.spl" and explicit_entry != "src/app/os/main.spl":
-        print "Error: Stage4 entry must be src/app/cli/main.spl or src/app/os/main.spl"
-        return 1
-    if mode != "one-binary":
-        print "Error: Stage4 compiler capsule requires --mode one-binary"
-        return 1
-    # Seed only the entry. The driver resolves its transitive imports and then
-    # enables closure mode; pre-enabling it while passing whole source roots
-    # made Stage 4 parse every file before it could prune anything.
-    run_exact_stage4_focused_capsule(args)
+    run_bootstrap_native_build_dispatch(args)
 
 fn run_native_build_positional(args: [text]) -> i64:
-    val entry_path = native_build_single_spl_positional(args)
-    if entry_path == "":
-        return run_rt_native_build(args)
-    run_native_build_single_file(args, entry_path)
+    run_bootstrap_native_build_dispatch(args)
 
 # Keep the policy/Stage4 dispatcher above small enough for flat Stage3 MIR.
 # This helper remains the pure-Simple in-process compiler owner; only the
 # already-decided single-file lane enters it.
 fn run_native_build_single_file(args: [text], entry_path: text) -> i64:
-    val output_arg = bootstrap_output_from_args(args, 0)
-    val output = if output_arg != "": output_arg else: "build/native/{_bootstrap_default_stem(entry_path)}"
-    # rfind + `> 0` (not path.dirname/Option-match on rfind): rfind returns a
-    # raw i64 (-1 if absent), and matching it as Some(idx)/nil mis-binds
-    # idx=-1 to the Some arm, corrupting the "no slash" case.
-    val out_slash = output.rfind("/")
-    if out_slash > 0:
-        dir_create(output.substring(0, out_slash), true)
-    val backend = native_build_backend_from_args(args, 0)
-    # Seed both scalar and array input channels: compiled struct transport can
-    # lose input_files. Leave closure discovery enabled so Driver can load the
-    # entry's imports before it flips SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE to 1.
-    env_set("SIMPLE_NATIVE_BUILD_ENTRY", entry_path)
-    env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "0")
-    # Build directly through the pure-Simple CompilerDriver (unique symbol
-    # names -- avoids the `aot_native_file_with_backend` duplicate-name
-    # collision between driver_public_compile [subprocess facade] and
-    # driver_api_native_single [in-process]).
-    var options = driver_core_compile_options_default()
-    options.input_files = [entry_path]
-    options.bootstrap_input_count = 1
-    options.bootstrap_input_0 = entry_path
-    options.mode = CompileMode.Aot
-    # Belt-and-braces TEXT mode channel (same idiom as _CliCompile/
-    # compile_targets.spl): in a COMPILED stage2 the enum options.mode does
-    # not survive the struct transport into the driver -- mode.to_text()
-    # came back as none of aot/jit/interpret and compile() logged
-    # "[WARN] no mode matched, falling through", returning Success with NO
-    # binary while exiting 0 (verified on both the base and patched stage2).
-    # cli_mode_text is the override compile() consults first, exactly for
-    # this lane.
-    options.cli_mode_text = "aot"
-    options.output_file = Some(output)
-    options.output_format = driver_output_format_native()
-    options.backend = backend
-    options.release = true
-    options.opt_level = 3
-    options.no_borrow_check = native_build_no_borrow_check_from_args(args, 0)
-    options = compileoptions_normalize_mir_optimization(options)
-    val driver = compiler_driver_create(options)
-    val result = compiler_driver_run_compile(driver)
-    # Free-function accessors, NOT result.is_success()/.get_errors(): this
-    # entry is MIR-lowered without HIR type inference, so method calls on the
-    # lazy-import-returned result never resolve (Task #145 erased-receiver
-    # class); plain imported calls resolve by symbol name.
-    if compile_result_is_success(result):
-        # Positive-artifact assertion, same contract as run_compile_bootstrap's
-        # SMF path: a Success verdict is NOT evidence a binary was emitted. The
-        # cli_mode_text lane above exists precisely because compile() could fall
-        # through with no mode matched, report Success, emit nothing, and exit 0
-        # -- which made every `--native` measurement vacuous instead of failing
-        # loudly. Never report success without checking the file on disk.
-        if not file_exists(output):
-            print "error: in-process native-build reported success without creating '{output}'"
-            return 1
-        val output_bytes = file_size(output)
-        if output_bytes <= 300:
-            print "error: in-process native-build produced a stub artifact ({output_bytes} bytes)"
-            return 1
-        return 0
-    else:
-        for err in compile_result_errors(result):
-            print "error: in-process native-build: {err}"
-        return 1
+    run_bootstrap_native_build_dispatch(args)
 
 fn bootstrap_compile_option_takes_value(arg: text) -> bool:
     arg == "-o" or arg == "--output" or arg == "--backend" or arg == "--format" or arg == "--opt-level" or arg == "--target" or arg == "--cpu"
