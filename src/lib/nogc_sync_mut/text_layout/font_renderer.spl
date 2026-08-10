@@ -87,7 +87,7 @@ use std.nogc_sync_mut.io.font_sffi.{font_face_ascent, free_font, font_face_ident
 use std.nogc_sync_mut.sffi.io.{file_read_bytes}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
 use std.common.encoding.sfnt_glyf.{SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYPH_SELECTOR_INDEX, sfnt_measure_glyph_into, sfnt_render_glyph_into}
-use std.common.encoding.font_registry.{FontAssetCandidate, selected_font_asset_candidates, selected_font_asset_candidate_for_path, selected_font_asset_candidate_for_identity, selected_font_asset_for_language_category, selected_font_asset_identity, selected_font_asset_identity_for_path, selected_font_asset_local_path_for_identity, selected_font_asset_physical_path, selected_font_language_ranks, selected_font_simple_tuple_accepted}
+use std.common.encoding.font_registry.{FontAssetCandidate, selected_font_asset_candidates, selected_font_asset_candidate_for_path, selected_font_asset_candidate_for_identity, selected_font_asset_for_language_category, selected_font_asset_identity, selected_font_asset_identity_for_path, selected_font_asset_local_path_for_identity, selected_font_asset_physical_path, selected_font_language_ranks, selected_font_simple_tuple_accepted, validate_selected_font_asset}
 use std.common.encoding.utf8.{text_codepoints}
 use std.common.ui.draw_ir.{DrawIrGlyphRunPayload, draw_ir_empty_glyph_run_payload, draw_ir_glyph_run_payload}
 use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_lock, mutex_unlock}
@@ -408,21 +408,47 @@ fn _font_renderer_reset_registered_selected_bytes_for_test():
     _registered_selected_font_paths = []
     _registered_selected_font_blobs = []
     _registered_selected_fonts_only = false
+    _last_selected_registration_reason = ""
+
+# Receipt for the LAST font_renderer_register_selected_bytes call. A module
+# global scalar/text, not a returned aggregate: the baremetal lane loses
+# returned aggregates (see the FLATTENED notes above), and the caller is a
+# kernel entry that reads its receipts back one scalar at a time. Diagnostics
+# only — nothing branches on this value.
+var _last_selected_registration_reason: text = ""
+
+fn font_renderer_last_selected_registration_reason() -> text:
+    """Why the last register_selected_bytes call refused, or "" when it
+    accepted. `unmanaged` (path not in the pinned catalog), `identity`
+    (loaded but identity mismatch), `runtime` (validation passed, the sfnt
+    runtime probe refused), or the validator's own reason: `byte-length`,
+    `sha256`, `default-axes`, `format`, `tables`, `names`."""
+    _last_selected_registration_reason
 
 fn font_renderer_register_selected_bytes(path: text, blob: [u8]) -> bool:
     """Register exact pinned bytes for producer metrics and executor loading."""
     # Path-based identity instead of `candidate.?` + field access: unwrapping
     # the Option-returning candidate lookup and touching fields faults on
     # baremetal (cr2=0x0 class, 2026-07-18); "" doubles as the unmanaged gate.
+    _last_selected_registration_reason = ""
     val expected_identity: text = selected_font_asset_identity_for_path(path)
     if expected_identity == "":
+        _last_selected_registration_reason = "unmanaged"
         return false
     var renderer = FontRenderer.new()
     if not renderer.try_load_selected_bytes(path, blob):
+        # Diagnostics only: the load path (spl_fonts `_load_selected_bytes`)
+        # reduces the validation to `.valid` and drops `.reason`, so recompute
+        # it HERE, on the refusal path only, to name which gate refused. When
+        # validation itself says valid the refusal came from the later
+        # `font_runtime_ttf_default_supported` probe instead.
+        val refusal = validate_selected_font_asset(path, blob)
+        _last_selected_registration_reason = if refusal.valid: "runtime" else: refusal.reason
         return false
     val identity = renderer.current_font_identity()
     renderer.clear_ttf()
     if identity != expected_identity:
+        _last_selected_registration_reason = "identity"
         return false
     val active_lock = _browser_default_font_lock_acquire()
     for registered_path in _registered_selected_font_paths:
