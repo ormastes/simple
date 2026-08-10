@@ -96,9 +96,27 @@ fn emu_draw_image_blend(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32,
     core.draw_image(x, y, w, h, result)
 
 # ============================================================================
-# Box Blur — full O((2*radius+1)^2) 2D convolution on framebuffer region
-# (NOT separable: each output pixel re-sums the full square tap window rather
-# than a horizontal pass followed by a vertical pass)
+# Box Blur — SEPARABLE sliding-window box blur over a framebuffer region.
+#
+# Output is bit-identical to the former full O(w*h*(2r+1)^2) square-window
+# convolution, at O(w*h) work INDEPENDENT of radius. Why the separable form is
+# exactly equivalent: the old code summed only in-bounds taps and divided by
+# `cnt`, the number of in-bounds taps. In-bounds-ness factorises —
+# a tap (fx, fy) is in bounds iff (0 <= fx < fb_w) AND (0 <= fy < fb_h) — so
+# both the channel sums and the tap COUNT are separable. Pass 1 accumulates
+# per-row horizontal sums *and* horizontal in-bounds counts; a source row whose
+# fy is off-framebuffer contributes all-zero accumulators (count included), which
+# reproduces the vertical clamping exactly. Pass 2 slides a vertical window over
+# those per-row sums and counts, so the final `cnt` equals the old in-bounds tap
+# count and `sum/cnt` uses the identical i32 division.
+#
+# Pass 1 covers source rows ri in 0 .. h+2*radius-1 (fy = y - radius + ri), so
+# every row pass 2 needs (ri in [py, py+2*radius], py < h) always exists and no
+# clamping is required in pass 2.
+#
+# Inlined color_r/g/b/a (2D-1 perf fix) is preserved: same bit math as
+# color_r/g/b/a in color.spl, output-identical, but without 4 free-fn dispatches
+# per tap in the interpreter.
 # ============================================================================
 
 fn emu_draw_blur_rect(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32, radius: i32):
@@ -107,41 +125,103 @@ fn emu_draw_blur_rect(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32, r
     val fb: [u32] = core.read_pixels()
     val fb_w = core.width()
     val fb_h = core.height()
-    var temp: [u32] = [0u32; w * h]
-    var py: i32 = 0
-    # cpu-lane-loop-ok: box blur scanline walk: one iteration per destination row
-    while py < h:
-        var px: i32 = 0
-        # cpu-lane-loop-ok: box blur per-pixel column walk; the blur body is explicitly designated a CPU lane reference in design section 6
-        while px < w:
+    val rows = h + 2 * radius
+    val span = rows * w
+    var hr: [i32] = [0; span]
+    var hg: [i32] = [0; span]
+    var hb: [i32] = [0; span]
+    var ha: [i32] = [0; span]
+    var hc: [i32] = [0; span]
+    var ri: i32 = 0
+    # cpu-lane-loop-ok: box blur horizontal pass row walk: one iteration per source row
+    while ri < rows:
+        val fy = y - radius + ri
+        if fy >= 0 and fy < fb_h:
+            val row_base = fy * fb_w
+            val out_base = ri * w
+            # Sliding window over fx in [x+px-radius, x+px+radius] ∩ [0, fb_w).
             var sr: i32 = 0
             var sg: i32 = 0
             var sb: i32 = 0
             var sa: i32 = 0
             var cnt: i32 = 0
-            var ky = -radius
-            while ky <= radius:
-                var kx = -radius
-                while kx <= radius:
-                    val fx = x + px + kx
-                    val fy = y + py + ky
-                    if fx >= 0 and fx < fb_w and fy >= 0 and fy < fb_h:
-                        val p = fb[fy * fb_w + fx]
-                        # Inlined color_r/g/b/a (2D-1 perf fix): the tap loop runs
-                        # O((2r+1)^2) times per call, so 4 free-fn dispatches per
-                        # tap add up fast in the interpreter. Same bit math as
-                        # color_r/g/b/a in color.spl, output-identical.
-                        sr = sr + (((p >> 16) & 0xFFu32) as i32)
-                        sg = sg + (((p >> 8) & 0xFFu32) as i32)
-                        sb = sb + ((p & 0xFFu32) as i32)
-                        sa = sa + (((p >> 24) & 0xFFu32) as i32)
-                        cnt = cnt + 1
-                    kx = kx + 1
-                ky = ky + 1
+            var fx = x - radius
+            while fx <= x + radius:
+                if fx >= 0 and fx < fb_w:
+                    val p = fb[row_base + fx]
+                    sr = sr + (((p >> 16) & 0xFFu32) as i32)
+                    sg = sg + (((p >> 8) & 0xFFu32) as i32)
+                    sb = sb + ((p & 0xFFu32) as i32)
+                    sa = sa + (((p >> 24) & 0xFFu32) as i32)
+                    cnt = cnt + 1
+                fx = fx + 1
+            var px: i32 = 0
+            # cpu-lane-loop-ok: box blur horizontal per-pixel column walk; the blur body is explicitly designated a CPU lane reference in design section 6
+            while px < w:
+                hr[out_base + px] = sr
+                hg[out_base + px] = sg
+                hb[out_base + px] = sb
+                ha[out_base + px] = sa
+                hc[out_base + px] = cnt
+                # Step the window one column right: drop the leaving column,
+                # add the entering one.
+                val leave = x + px - radius
+                if leave >= 0 and leave < fb_w:
+                    val pl = fb[row_base + leave]
+                    sr = sr - (((pl >> 16) & 0xFFu32) as i32)
+                    sg = sg - (((pl >> 8) & 0xFFu32) as i32)
+                    sb = sb - ((pl & 0xFFu32) as i32)
+                    sa = sa - (((pl >> 24) & 0xFFu32) as i32)
+                    cnt = cnt - 1
+                val enter = x + px + radius + 1
+                if enter >= 0 and enter < fb_w:
+                    val pe = fb[row_base + enter]
+                    sr = sr + (((pe >> 16) & 0xFFu32) as i32)
+                    sg = sg + (((pe >> 8) & 0xFFu32) as i32)
+                    sb = sb + ((pe & 0xFFu32) as i32)
+                    sa = sa + (((pe >> 24) & 0xFFu32) as i32)
+                    cnt = cnt + 1
+                px = px + 1
+        ri = ri + 1
+    var temp: [u32] = [0u32; w * h]
+    var px2: i32 = 0
+    # cpu-lane-loop-ok: box blur vertical pass column walk: one iteration per destination column
+    while px2 < w:
+        var sr: i32 = 0
+        var sg: i32 = 0
+        var sb: i32 = 0
+        var sa: i32 = 0
+        var cnt: i32 = 0
+        var k: i32 = 0
+        while k <= 2 * radius:
+            val idx = k * w + px2
+            sr = sr + hr[idx]
+            sg = sg + hg[idx]
+            sb = sb + hb[idx]
+            sa = sa + ha[idx]
+            cnt = cnt + hc[idx]
+            k = k + 1
+        var py: i32 = 0
+        # cpu-lane-loop-ok: box blur vertical per-pixel scanline walk; the blur body is explicitly designated a CPU lane reference in design section 6
+        while py < h:
             if cnt > 0:
-                temp[py * w + px] = rgba(sr / cnt, sg / cnt, sb / cnt, sa / cnt)
-            px = px + 1
-        py = py + 1
+                temp[py * w + px2] = rgba(sr / cnt, sg / cnt, sb / cnt, sa / cnt)
+            # Step the vertical window one row down over the pass-1 rows.
+            val leave = py * w + px2
+            val enter = (py + 2 * radius + 1) * w + px2
+            sr = sr - hr[leave]
+            sg = sg - hg[leave]
+            sb = sb - hb[leave]
+            sa = sa - ha[leave]
+            cnt = cnt - hc[leave]
+            if py + 2 * radius + 1 < rows:
+                sr = sr + hr[enter]
+                sg = sg + hg[enter]
+                sb = sb + hb[enter]
+                sa = sa + ha[enter]
+                cnt = cnt + hc[enter]
+            py = py + 1
+        px2 = px2 + 1
     core.draw_image(x, y, w, h, temp)
 
 # ============================================================================
