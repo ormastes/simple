@@ -212,6 +212,36 @@ The 59 other files in the sweep are NOT fixed. Each is a latent RED. They should
 swept module-by-module with a spec written per module, not bulk-rewritten blind — the
 three-pass experience above shows a naive single-pattern rewrite leaves siblings behind.
 
+### 2026-08-10 follow-up batch: `src/compiler/10.frontend/domain/domain_hardening.spl`
+
+Fixed 11 genuine bare-field-reference sites (expression position only, all inside
+one-line `me foo(): return <expr>` bodies — no block-condition-position sites in this
+file) across 4 classes: `DomainHardenEntry`, `HardenReport`, `DomainKindRegistry`,
+`DomainRegistryReport`. File uses the `me` convention (no `self.` anywhere in the
+file), so fixes use `me.<field>` to match existing style.
+
+No spec exists for this module (`test/**/domain_hardening*` — none found), and
+`bin/simple test` on a throwaway spec importing it timed out (>2min, daemon/whole-repo
+compile cost, not specific to this fix) even after a `.build/test_daemon_light` reset —
+consistent with the known daemon-contention trap. Verified instead via direct
+execution: copied the fixed module to a scratch file, appended calls exercising every
+touched method through `main()`, and ran `SIMPLE_JIT_STRICT=1 bin/simple run
+<scratch>.spl` (binary: `bin/release/x86_64-unknown-linux-gnu/simple`, size
+181524312, mtime 2026-08-10 11:06:25 UTC) — `ALL PASS`, `rc=0`. Negative control:
+reverted `me.parse_status` back to bare `parse_status` in the scratch copy only and
+re-ran — reproduced the exact codegen/semantic failure (`GlobalLoad: unresolved
+identifier 'parse_status'` / `semantic: variable \`parse_status\` not found`, `rc=1`),
+confirming the oracle actually discriminates. No spec/CI artifact was added for this
+module in this pass (out of scope — tracked here as still needed); no deeper defect
+(mismatched/nonexistent field) was found in this file, all touched identifiers are
+declared fields on their enclosing class.
+
+`scripts/check/check-bare-field-references.shs` is scoped only to
+`src/os/kernel/arch/riscv_shared/*.spl` (both by its static-scan glob and its spec
+targets) — it does not cover this file or the wider family, and was not extended in
+this pass. Re-run for completeness: `PASS — 4 checks ran, all green` (unchanged,
+confirms this batch did not regress the riscv_shared fence).
+
 ## Secondary defect observed (not the subject of this bug)
 
 `bin/simple run` **exits 0** after printing `error: semantic: variable \`xlen\` not found`
