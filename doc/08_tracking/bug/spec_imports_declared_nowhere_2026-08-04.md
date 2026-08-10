@@ -1,6 +1,6 @@
 # Spec imports that resolve to no declaration anywhere in owned `src/`
 
-**Status:** OPEN  
+**Status:** ARCHITECTURAL/OUT-OF-SCOPE-OPEN (triaged 2026-08-10)  
 **Filed:** 2026-08-04  
 **Measured at:** `53492af8dc4bb95e8bb11c18ec813f63e065b479` (pristine detached worktree)  
 **Tool used:** deployed `bin/release/x86_64-unknown-linux-gnu/simple` (Rust bootstrap seed — the only
@@ -690,6 +690,41 @@ These are the ones where a file exists and an API surface was specified but neve
 **`test/unit/compiler/mir_opt/collection_opt_spec.spl`** (2) <- `compiler.mir.mir_types`, `compiler.mir_opt.mir_opt.collection_opt`
 
 > `collection_opt_optimize_function`, `mir_type_is_text`
+
+## 9. Triage (2026-08-10)
+
+This report is a census, not a single reproducible defect: it enumerates **782 distinct
+missing modules** and **1003 distinct missing names** across **294 spec files**, spanning
+whole unimplemented subsystems (blink layout, riscv64gc formal contract, canvas WebGL/WebGPU
+constants, wine/proton process-session surfaces, compress SIMD tiers, LLVM backend for six
+targets, http_server rate-limit/csrf/validation, etc). Closing it means writing hundreds of
+missing modules and APIs — that is a large, multi-owner implementation backlog, not a
+targeted root-cause fix a single triage pass can land.
+
+The one genuinely *fixable, scoped* defect this report surfaces is the mechanism in §5.2:
+a `use module.{A, B, C}` resolves and registers the whole target **module's** surface: the
+braced name list is never checked member-by-member against it, so `B` can be nonexistent and
+the spec still loads/passes silently (warning-only, buried in ~1,700 lines of lint noise) —
+while an unresolvable **module** path is a hard error. That inconsistency (name-level:
+warning + still-runs; module-level: hard error) is already tracked by its own reference note
+(`reference_importing_one_symbol_registers_a_whole_module`) and is the correct place to land
+a targeted fix (e.g. promote an unresolved braced-import name to an error, or at minimum
+surface it above the lint-noise fold) — that is a compiler-frontend change to import-name
+resolution, out of scope to bundle into this pass without risking a change that is itself
+untouchable per this session's file-ownership constraints
+(`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`,
+`src/compiler/50.mir/_MirLowering/module_lowering.spl` are owned by another concurrent
+session, and import-name resolution surface area was not independently re-scoped here).
+
+**Disposition:** left OPEN as ARCHITECTURAL/OUT-OF-SCOPE for a single-pass fix. Re-verified
+2026-08-10 that the underlying phenomenon (§5.2 sabotage proof) is unchanged — braced-import
+names are still not checked against the resolved module's real surface — by inspection of
+the current `module_loader_resolve.spl` name-registration path; a full re-run of the
+`chacha20_spec.spl` mutation-arm proof was not repeated in this pass. Recommended next step:
+file a scoped follow-up bug specifically for "braced `use` names not validated against module
+surface" (name-checking behavior only, not the 782-module content backlog), and let the
+1003-name/782-module backlog itself get triaged spec-family by spec-family (canvas/webgpu,
+blink, riscv, wine/proton, llvm-backend, http_server) rather than as one bug.
 
 ## 8. Reproduce
 
