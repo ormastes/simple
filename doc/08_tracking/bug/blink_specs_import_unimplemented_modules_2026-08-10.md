@@ -139,3 +139,22 @@ superset** — the mirror is the stale copy:
 Recommended merge: delete `test/unit/lib/blink/` in favour of
 `test/01_unit/lib/blink/`. Not done here — the mirror tree is repo-wide and
 deleting one leaf of it is out of scope for this bug.
+
+## Independent re-verification (2026-08-10, second pass)
+
+Re-checked the core claim from a fresh session before touching anything else:
+
+```
+/usr/bin/find src/lib/blink -maxdepth 3 -type f -name '*.spl'
+```
+
+confirms `src/lib/blink/` contains only `css_parser/`, `dom/{interaction_state.spl,node.spl}`,
+`entity/`, `layout/block_flow.spl`, `style/cascade.spl`, `url/url_parser.spl`. All four
+paths this doc names as missing were checked directly and are still absent:
+`src/lib/blink/paint/paint_tree_walker.spl`, `src/lib/blink/input/event.spl`,
+`src/lib/blink/input/hit_test.spl`, `src/lib/blink/dom/form_state.spl`. `find src -type
+d -name blink` still returns the single `src/lib/blink` hit. Confirmed: this is a
+genuine, precisely-characterized ARCHITECTURAL/feature-gap end-state, not a
+misdiagnosis and not something fixable by a compiler change. No code changes made in
+this pass — implementing the three missing modules is real feature work (per the doc's
+own "Fix recipe ... do not guess" caveat), not bug-triage scope. Status left OPEN.
