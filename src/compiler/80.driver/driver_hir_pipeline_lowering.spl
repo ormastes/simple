@@ -14,8 +14,7 @@ use compiler.core.ast.{ast_reset}
 use compiler.core.parser.{par_had_error_get}
 use compiler.frontend.parser_types.*
 use compiler.driver.driver_source_pipeline_impl.{dtrace, driver_end_transient_parse_scope}
-use compiler.driver.driver_source_loading.{_driver_is_bootstrap_entry_source}
-use compiler.driver.driver_bootstrap.{bootstrap_entry_module_name}
+use compiler.driver.driver_bootstrap.{bootstrap_entry_module_name, bootstrap_entry_source_index}
 use compiler.driver.driver_orchestration.{driver_streaming_surface_enabled}
 use compiler.driver.driver_log_helpers.{log_debug, log_trace, log_warn, log_error, log_phase, log_build_progress}
 use compiler.driver.driver_hir_pipeline_passes.{
@@ -152,7 +151,8 @@ impl CompilerDriver:
         var phase_hir_modules: Dict<text, HirModule> = self.ctx.hir_modules
         var validation_module_keys: [text] = []
         var validation_module_values: [HirModule] = []
-        var phase_entry_hir: HirModule? = self.ctx.bootstrap_entry_hir
+        var phase_entry_hir: HirModule? = nil
+        val entry_source_index = bootstrap_entry_source_index(self.ctx)
         var source_index = 0
         var progress_hir_done = 0
         log_build_progress("hir", "modules", 0, surfaces.surfaces.len(),
@@ -164,15 +164,11 @@ impl CompilerDriver:
                 self.ctx.add_error("Missing module surface alias for {source.module_name}")
                 return (self.ctx, false)
             val surface_index = surfaces.index_by_name[source.module_name]
-            val expected_entry_name = bootstrap_entry_module_name(self.ctx)
-            val expected_default_entry = expected_entry_name.ends_with("app.cli.bootstrap_main")
-            val is_requested_bootstrap_entry = _driver_is_bootstrap_entry_source(source.path, source.module_name) or source.module_name == expected_entry_name or (expected_default_entry and (source.path.ends_with("app/cli/bootstrap_main.spl") or source.module_name.ends_with("app.cli.bootstrap_main")))
+            val is_requested_bootstrap_entry = source_index == entry_source_index
 
             if lowered_by_surface.contains_key(surface_index):
                 val alias_hir = lowered_by_surface[surface_index]
                 phase_hir_modules[source.module_name] = alias_hir
-                if is_requested_bootstrap_entry:
-                    phase_entry_hir = Some(alias_hir)
                 source_index = source_index + 1
                 continue
             if surface_index < 0 or surface_index >= surfaces.surfaces.len():
@@ -341,7 +337,8 @@ impl CompilerDriver:
         var phase_hir_modules: Dict<text, HirModule> = self.ctx.hir_modules
         var validation_module_keys: [text] = []
         var validation_module_values: [HirModule] = []
-        var phase_entry_hir: HirModule? = self.ctx.bootstrap_entry_hir
+        var phase_entry_hir: HirModule? = nil
+        val entry_source_index = bootstrap_entry_source_index(self.ctx)
         var source_idx = 0
         while source_idx < self.ctx.sources.len():
             val src = self.ctx.sources[source_idx]
@@ -378,9 +375,7 @@ impl CompilerDriver:
             # escape hatch forcing the empty-HIR stub (pre-2026-07-03 behavior) if a
             # stage4 lowering regression ever needs to be bypassed in the field.
             val unstub_hir = (rt_env_get("SIMPLE_STUB_HIR") ?? "") != "1"
-            val expected_entry_name = bootstrap_entry_module_name(self.ctx)
-            val expected_default_entry = expected_entry_name.ends_with("app.cli.bootstrap_main")
-            val is_requested_bootstrap_entry = _driver_is_bootstrap_entry_source(src.path, name) or name == expected_entry_name or (expected_default_entry and (src.path.ends_with("app/cli/bootstrap_main.spl") or name.ends_with("app.cli.bootstrap_main")))
+            val is_requested_bootstrap_entry = source_idx == entry_source_index
             val is_bootstrap_entry = is_requested_bootstrap_entry
             dtrace("[DRV] lac-loop name={name} content_len={src.content.len()}")
             val hir_module: HirModule = if is_bootstrap_entry:
