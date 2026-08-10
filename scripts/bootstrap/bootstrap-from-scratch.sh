@@ -668,6 +668,7 @@ bootstrap_native_build_main() {
 seed_bin="src/compiler_rust/target/bootstrap/simple${exe_suffix}"
 native_all_lib="src/compiler_rust/target/bootstrap/${archive_prefix}simple_native_all${archive_suffix}"
 compiler_backfill_lib="src/compiler_rust/target/bootstrap/${archive_prefix}simple_compiler_backfill${archive_suffix}"
+stage4_runtime_staticlib="src/compiler_rust/target/bootstrap/deps/${archive_prefix}simple_runtime${archive_suffix}"
 
 # Detect stale seed OR stale runtime library by CONTENT, not mtime.
 #
@@ -923,9 +924,12 @@ if [ "${full_bootstrap}" -eq 0 ]; then
     echo "Normal bootstrap does not rebuild Rust. Re-run with --full-bootstrap to build them." >&2
     exit 1
   fi
-  if [ "${full_cli}" -eq 1 ] && [ ! -f "${compiler_backfill_lib}" ]; then
-    echo "error: full CLI bootstrap needs the compiler backfill archive: ${compiler_backfill_lib}" >&2
-    echo "Re-run with --full-bootstrap to build it." >&2
+  if [ "${full_cli}" -eq 1 ] && \
+     { [ ! -f "${compiler_backfill_lib}" ] || [ ! -f "${stage4_runtime_staticlib}" ]; }; then
+    echo "error: full CLI bootstrap needs the compiler backfill and no-LTO runtime archives:" >&2
+    echo "  backfill: ${compiler_backfill_lib}" >&2
+    echo "  runtime:  ${stage4_runtime_staticlib}" >&2
+    echo "Re-run with --full-bootstrap to build and admit them." >&2
     exit 1
   fi
   if [ "${full_cli}" -eq 1 ] && [ "${seed_stale}" -eq 1 ]; then
@@ -985,6 +989,33 @@ if [ "${full_bootstrap}" -eq 1 ] \
   cp -p "${rust_authority_profile_dir}/${archive_prefix}simple_compiler_backfill${archive_suffix}" \
     "${compiler_backfill_lib}"
   compiler_backfill_rebuilt=1
+fi
+if [ "${full_bootstrap}" -eq 1 ] && \
+   { [ "${rust_rebuilt}" -eq 1 ] || [ ! -f "${stage4_runtime_staticlib}" ]; }; then
+  rust_runtime_profile_staticlib=\
+"${rust_authority_profile_dir}/deps/${archive_prefix}simple_runtime${archive_suffix}"
+  if [ "${rust_rebuilt}" -ne 1 ] && [ ! -s "${rust_runtime_profile_staticlib}" ]; then
+    # A no-op full-bootstrap can reuse the already admitted top-level archive;
+    # a rebuilding full-bootstrap must use the freshly produced deps artifact.
+    rust_runtime_profile_staticlib=\
+"src/compiler_rust/target/bootstrap/${archive_prefix}simple_runtime${archive_suffix}"
+  fi
+  [ -s "${rust_runtime_profile_staticlib}" ] || {
+    echo "error: full CLI bootstrap cannot stage the no-LTO Rust runtime staticlib" >&2
+    exit 1
+  }
+  mkdir -p "$(dirname -- "${stage4_runtime_staticlib}")"
+  cp -p "${rust_runtime_profile_staticlib}" "${stage4_runtime_staticlib}"
+fi
+if [ "${full_cli}" -eq 1 ]; then
+  bootstrap_stage3_runtime_authority_ready \
+    "$(absolute_path src/compiler_rust/target/bootstrap)" \
+    "${archive_prefix}simple_native_all${archive_suffix}" \
+    "${archive_prefix}simple_runtime${archive_suffix}" \
+    "${archive_prefix}simple_compiler_backfill${archive_suffix}" 1 || {
+    echo "error: full CLI runtime authority is missing a Stage 4 provider" >&2
+    exit 1
+  }
 fi
 if [ "${rust_rebuilt}" -eq 1 ] || [ "${compiler_backfill_rebuilt}" -eq 1 ]; then
   bootstrap_stage3_write_seed_stamp "${seed_stamp}" \
