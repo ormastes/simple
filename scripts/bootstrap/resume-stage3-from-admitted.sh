@@ -194,6 +194,7 @@ bootstrap_stage3_verify_sanity_evidence "$stage2_sanity" "$stage2" "$root" \
 bootstrap_stage3_source_snapshot "$resume_source_before" "$root"
 cmp -s "$original_source_before" "$resume_source_before"
 bootstrap_stage3_git_state "$root" "$resume_git_before"
+cmp -s "$original_git_before" "$resume_git_before"
 bootstrap_stage3_tool_authority_snapshot "$resume_tool_before" "$path" "$root"
 cmp -s "$original_tool_before" "$resume_tool_before"
 bootstrap_stage3_directory_snapshot "$resume_runtime_before" "$runtime"
