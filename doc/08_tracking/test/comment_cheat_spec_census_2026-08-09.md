@@ -236,3 +236,29 @@ stream J2 owned concurrently. The bulk of the remainder is SimpleOS / QEMU /
 GUI-evidence shell-script gates (`simpleos_*`, `macos_*`, `wm_host_*`,
 `cpu_hotloop_gate`, `gui_showcase_perf_*`), which need a runnable-evidence review
 rather than a syntax anchor.
+
+### Anchoring pitfall: `{...}` in a needle is INTERPOLATION, not text
+
+Anyone continuing this work will hit this immediately, because real product code
+is full of interpolated strings and `use mod.{A, B}` imports — exactly the lines
+you most want to anchor on.
+
+A matched `{...}` pair inside a Simple text literal is **string interpolation**.
+A source-grep needle containing one never becomes the literal text it appears to
+be, and it fails in one of two silent ways:
+
+- the name is not in scope → the whole `it` block dies with
+  `semantic: variable 'X' not found` **before reaching any assertion**;
+- the name IS in scope → the needle silently becomes different text, and the
+  assertion tests something nobody wrote.
+
+Write `{{` / `}}`, which render as literal `{` / `}` (verified against the
+bootstrap binary). An unmatched opening brace (`...compiler_sffi.{`) is also
+safe, but the doubled form keeps the needle readable and complete.
+
+This was already live in the corpus before this campaign:
+`runtime_surface_spec.spl`'s "runtime facade keeps the curated export list"
+example contained `module_loader.{moduleloader_execute_smf}` and had therefore
+**never executed a single assertion** — it aborted on the unresolved name every
+run. Worth a dedicated sweep: `grep -nE '^\s*(expect|check)\(' test/**/*.spl |
+grep -E '[^{]\{[A-Za-z_][A-Za-z0-9_]*\}[^}]'`.
