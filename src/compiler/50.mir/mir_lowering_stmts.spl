@@ -70,22 +70,6 @@ fn mir_expr_kind_is_place(k: HirExprKind) -> bool:
         case _:
             false
 
-fn mir_hir_type_is_isolated(t: HirType?) -> bool:
-    """LANE ISO1 (2026-07-29): true when a HIR type is the `iso` capability
-    wrapper (HirTypeKind.Isolated). Used at variable-to-variable binding
-    sites to choose emit_move over emit_copy so the NLL borrow checker sees
-    a real Move fact for iso-typed bindings (see MirBuilder.emit_move,
-    mir_data.spl, for the prior "no caller yet" state this wires up)."""
-    match t:
-        case Some(ht):
-            match ht.kind:
-                case HirTypeKind.Isolated(_):
-                    true
-                case _:
-                    false
-        case nil:
-            false
-
 # ============================================================================
 # Statement Lowering
 # ============================================================================
@@ -840,7 +824,7 @@ impl MirLowering:
                         # is false, i.e. every pre-existing case).
                         val struct_sym = self.struct_value_syms.get(init_local.id)
                         val struct_move_hir_type = self.find_local_hir_type(init_local.id)
-                        val struct_is_place_iso = struct_sym != nil and mir_expr_kind_is_place(let_init.kind) and mir_hir_type_is_isolated(struct_move_hir_type)
+                        val struct_is_place_iso = struct_sym != nil and mir_expr_kind_is_place(let_init.kind) and self.local_hir_type_isolation_state(init_local.id) == 1
                         val struct_copy = if struct_is_place_iso:
                             nil
                         else:
@@ -932,7 +916,7 @@ impl MirLowering:
                                 # move is reported; non-iso code is unaffected
                                 # (mir_hir_type_is_isolated is false for every
                                 # pre-existing HirTypeKind).
-                                if mir_expr_kind_is_place(let_init.kind) and mir_hir_type_is_isolated(found_init_hir_type):
+                                if mir_expr_kind_is_place(let_init.kind) and self.local_hir_type_isolation_state(init_local.id) == 1:
                                     b2.emit_move(local, init_local)
                                     # WP-E: a `val b = a` move of an owned
                                     # resource local transfers ownership --
@@ -1259,7 +1243,7 @@ impl MirLowering:
                 # NLL checker sees a real Move fact for `var`-reassignment
                 # too; non-iso code (found type not Isolated, or a fresh
                 # construction rather than a place read) is unaffected.
-                if mir_expr_kind_is_place(value_kind) and mir_hir_type_is_isolated(self.find_local_hir_type(assigned_value.id)):
+                if mir_expr_kind_is_place(value_kind) and self.local_hir_type_isolation_state(assigned_value.id) == 1:
                     b.emit_move(local, assigned_value)
                 else:
                     b.emit_copy(local, assigned_value)
@@ -1385,7 +1369,7 @@ impl MirLowering:
                 # a compound `obj.f += a` combines through a binop and is
                 # never itself a place-read transfer of `a`.
                 var store_value = assigned_field_value
-                if not op.? and mir_expr_kind_is_place(value_kind) and mir_hir_type_is_isolated(self.find_local_hir_type(assigned_field_value.id)):
+                if not op.? and mir_expr_kind_is_place(value_kind) and self.local_hir_type_isolation_state(assigned_field_value.id) == 1:
                     var b_fmove = self.builder
                     val fmove_ty = self.local_mir_type_of(assigned_field_value) ?? MirType.i64()
                     val fmove_local = b_fmove.new_temp(fmove_ty)
@@ -1439,7 +1423,7 @@ impl MirLowering:
                     # insert a synthetic emit_move ahead of boxing. Scoped to
                     # the plain (non-compound) store only, same rationale as
                     # the field-store site.
-                    if not op.? and mir_expr_kind_is_place(value_kind) and mir_hir_type_is_isolated(self.find_local_hir_type(dict_value.id)):
+                    if not op.? and mir_expr_kind_is_place(value_kind) and self.local_hir_type_isolation_state(dict_value.id) == 1:
                         var b_dmove = self.builder
                         val dmove_ty = self.local_mir_type_of(dict_value) ?? MirType.i64()
                         val dmove_local = b_dmove.new_temp(dmove_ty)
@@ -1519,7 +1503,7 @@ impl MirLowering:
                 # runtime-call emission with no instruction to hang a Move
                 # on, so an iso value stored into an array was silently
                 # Copy-only. Same guard, same scoping (plain store only).
-                if not op.? and mir_expr_kind_is_place(value_kind) and mir_hir_type_is_isolated(self.find_local_hir_type(elem_value.id)):
+                if not op.? and mir_expr_kind_is_place(value_kind) and self.local_hir_type_isolation_state(elem_value.id) == 1:
                     var b_amove = self.builder
                     val amove_ty = self.local_mir_type_of(elem_value) ?? MirType.i64()
                     val amove_local = b_amove.new_temp(amove_ty)

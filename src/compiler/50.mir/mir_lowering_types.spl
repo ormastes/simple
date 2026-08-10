@@ -28,6 +28,10 @@ struct MirLowering:
     # local_symbol_ids/local_symbol_values above.
     local_hir_type_ids: [i64]
     local_hir_type_values: [HirType]
+    # Scalar sidecar for staged-native-safe isolation decisions. Kept in
+    # lockstep with local_hir_type_ids/local_hir_type_values so queries never
+    # need to transport or inspect a HirType value.
+    local_hir_type_isolation_states: [i64]
     # Function symbol ID -> declared HIR return type, recorded straight from
     # the HirFunction declarations in a lower_module pre-pass. The symbol
     # table's type_ for fn symbols is NOT reliably a Function(...) kind on
@@ -401,17 +405,32 @@ impl MirLowering:
     me remember_local_hir_type(local_id: i64, type_: HirType):
         var ids = self.local_hir_type_ids
         var values = self.local_hir_type_values
+        var states = self.local_hir_type_isolation_states
+        var isolation_state = 0
+        match type_:
+            case HirType(kind, _):
+                match kind:
+                    case HirTypeKind.Isolated(_):
+                        isolation_state = 1
+                    case _:
+                        isolation_state = 2
+            case _:
+                isolation_state = 0
         var i = 0
         while i < ids.len():
             if ids[i] == local_id:
                 values[i] = type_
+                states[i] = isolation_state
                 self.local_hir_type_values = values
+                self.local_hir_type_isolation_states = states
                 return
             i = i + 1
         ids.push(local_id)
         values.push(type_)
+        states.push(isolation_state)
         self.local_hir_type_ids = ids
         self.local_hir_type_values = values
+        self.local_hir_type_isolation_states = states
 
     fn find_local_hir_type(local_id: i64) -> HirType?:
         var i = self.local_hir_type_ids.len() - 1
@@ -421,17 +440,36 @@ impl MirLowering:
             i = i - 1
         nil
 
+    fn local_hir_type_isolation_state(local_id: i64) -> i64:
+        """Return scalar isolation state for one MIR local.
+
+        State 0 means missing or malformed metadata, state 1 means an
+        isolated HIR type, and state 2 means a present non-isolated type.
+        This deliberately scans only the aligned scalar arrays and never
+        reads or transports a `HirType` value across the staged-native
+        boundary.
+        """
+        var i = self.local_hir_type_ids.len() - 1
+        while i >= 0:
+            if self.local_hir_type_ids[i] == local_id:
+                return self.local_hir_type_isolation_states[i]
+            i = i - 1
+        0
+
     me forget_local_hir_type(local_id: i64):
         var ids: [i64] = []
         var values: [HirType] = []
+        var states: [i64] = []
         var i = 0
         while i < self.local_hir_type_ids.len():
             if self.local_hir_type_ids[i] != local_id:
                 ids.push(self.local_hir_type_ids[i])
                 values.push(self.local_hir_type_values[i])
+                states.push(self.local_hir_type_isolation_states[i])
             i = i + 1
         self.local_hir_type_ids = ids
         self.local_hir_type_values = values
+        self.local_hir_type_isolation_states = states
 
     me mark_runtime_value_local(local_id: i64):
         if self.is_runtime_value_local(local_id):

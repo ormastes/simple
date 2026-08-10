@@ -53,7 +53,7 @@ use compiler.core.ast.{decl_get_name, decl_get_fields, decl_get_derives, decl_se
 use compiler.core.ast.{module_set_path, module_add_decl}
 use compiler.frontend.core.lexer.{lex_token_start_get, lex_token_end_get, lex_live_line_get, lex_live_col_get, lex_force_set_pos}
 use compiler.frontend.core.lexer.{lex_source_char_at, lex_source_len, lex_source_slice}
-use compiler.frontend.core.lexer.{lex_snapshot_save, lex_snapshot_restore}
+use compiler.frontend.core.lexer.{lex_snapshot_save, lex_snapshot_commit, lex_snapshot_rollback}
 use compiler.core.types.{TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_BOOL, TYPE_VOID, flat_span_new}
 use compiler.core.types.{TYPE_OPTION, TYPE_OPTION_I64, TYPE_OPTION_F64, TYPE_OPTION_TEXT, TYPE_OPTION_BOOL}
 use compiler.core.types.{TYPE_RESULT, TYPE_NAMED_BASE, TYPE_DICT, TYPE_FN, TYPE_ANY}
@@ -102,11 +102,11 @@ fn parser_skip_mut_if_present() -> bool:
     # a free-function `mut` param must reach MIR lowering to bind by-reference
     # instead of taking the Bug #167 defensive struct-value-copy.
     if par_kind_get() == 6 and par_text_get() == "mut":
-        val (mut_snap_nums, mut_snap_txts) = lex_snapshot_save()
+        val mut_snap = lex_snapshot_save()
         val (mut_tok_nums, mut_tok_text) = parser_tok_save()
         parser_advance()
         val next_is_param_name = par_kind_get() == 6 or par_kind_get() == 38
-        lex_snapshot_restore(mut_snap_nums, mut_snap_txts)
+        lex_snapshot_rollback(mut_snap)
         parser_tok_restore(mut_tok_nums, mut_tok_text)
         if next_is_param_name:
             parser_advance()
@@ -148,11 +148,11 @@ fn current_ident_followed_by_lbrace() -> bool:
     # for UTF-8. Raw source lookahead therefore missed `{` whenever a Unicode
     # comment occurred before the declaration. Token lookahead is both cheaper
     # and encoding-independent; preserve all lexer/parser state for the caller.
-    val (lb_snap_nums, lb_snap_texts) = lex_snapshot_save()
+    val lb_snap = lex_snapshot_save()
     val (lb_tok_nums, lb_tok_text) = parser_tok_save()
     parser_advance()
     val followed_by_lbrace = par_kind_get() == TOK_LBRACE
-    lex_snapshot_restore(lb_snap_nums, lb_snap_texts)
+    lex_snapshot_rollback(lb_snap)
     parser_tok_restore(lb_tok_nums, lb_tok_text)
     followed_by_lbrace
 
@@ -438,11 +438,11 @@ fn has_seen_name(names: [text], target: text) -> bool:
 # fields.  Peek without consuming parser/lexer state so the body dispatcher can
 # distinguish those forms before it commits to either route.
 fn parser_class_member_followed_by_colon() -> bool:
-    val (cm_snap_nums, cm_snap_texts) = lex_snapshot_save()
+    val cm_snap = lex_snapshot_save()
     val (cm_tok_nums, cm_tok_text) = parser_tok_save()
     parser_advance()
     val followed_by_colon = par_kind_get() == TOK_COLON
-    lex_snapshot_restore(cm_snap_nums, cm_snap_texts)
+    lex_snapshot_rollback(cm_snap)
     parser_tok_restore(cm_tok_nums, cm_tok_text)
     followed_by_colon
 
@@ -452,11 +452,11 @@ fn parser_class_member_followed_by_colon() -> bool:
 fn parser_newline_starts_indented_block() -> bool:
     if par_kind_get() != TOK_NEWLINE:
         return false
-    val (nl_snap_nums, nl_snap_texts) = lex_snapshot_save()
+    val nl_snap = lex_snapshot_save()
     val (nl_tok_nums, nl_tok_text) = parser_tok_save()
     parser_skip_newlines()
     val starts_indented_block = par_kind_get() == TOK_INDENT
-    lex_snapshot_restore(nl_snap_nums, nl_snap_texts)
+    lex_snapshot_rollback(nl_snap)
     parser_tok_restore(nl_tok_nums, nl_tok_text)
     starts_indented_block
 
@@ -466,14 +466,15 @@ fn parser_newline_starts_indented_block() -> bool:
 fn parser_try_skip_signature_layout_before_colon() -> bool:
     if par_kind_get() != TOK_NEWLINE:
         return false
-    val (sl_snap_nums, sl_snap_texts) = lex_snapshot_save()
+    val sl_snap = lex_snapshot_save()
     val (sl_tok_nums, sl_tok_text) = parser_tok_save()
     parser_skip_newlines()
     if par_kind_get() == TOK_INDENT:
         parser_advance()
     if par_kind_get() == TOK_COLON:
+        lex_snapshot_commit(sl_snap)
         return true
-    lex_snapshot_restore(sl_snap_nums, sl_snap_texts)
+    lex_snapshot_rollback(sl_snap)
     parser_tok_restore(sl_tok_nums, sl_tok_text)
     false
 
@@ -910,7 +911,7 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
         # "unexpected token in class body" report) rather than being silently
         # swallowed.
         if par_kind_get() == 171:
-            val (lf_snap_nums, lf_snap_txts) = lex_snapshot_save()
+            val lf_snap = lex_snapshot_save()
             val (lf_tok_nums, lf_tok_text) = parser_tok_save()
             parser_advance()
             val lf_is_layer_field: bool = par_kind_get() == 6 and par_text_get() == "layer_field"
@@ -924,8 +925,9 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
                     parser_error("expected target field name in '@layer_field(NAME)'")
                 parser_expect(141)
                 parser_skip_newlines_and_semicolons()
+                lex_snapshot_commit(lf_snap)
                 continue
-            lex_snapshot_restore(lf_snap_nums, lf_snap_txts)
+            lex_snapshot_rollback(lf_snap)
             parser_tok_restore(lf_tok_nums, lf_tok_text)
 
         # Associated types: type Item = T (skip for now, just parse and ignore).

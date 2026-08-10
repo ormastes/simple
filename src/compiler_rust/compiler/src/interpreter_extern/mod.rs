@@ -339,6 +339,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("memory_usage", memory::memory_usage);
     insert_simple!("memory_usage_percent", memory::memory_usage_percent);
     insert_simple!("rt_heap_registry_count", memory::rt_heap_registry_count);
+    insert_simple!("rt_heap_live_bytes", memory::rt_heap_live_bytes);
+    insert_simple!("rt_heap_aux_live_bytes", memory::rt_heap_aux_live_bytes);
+    insert_simple!("rt_heap_array_capacity_bytes", memory::rt_heap_array_capacity_bytes);
     insert_simple!("rt_heap_live_bytes_by_kind", memory::rt_heap_live_bytes_by_kind);
     insert_simple!("rt_heap_live_count_by_kind", memory::rt_heap_live_count_by_kind);
     insert_simple!("rt_mem_profile_abi_version", memory::rt_mem_profile_abi_version);
@@ -2860,6 +2863,39 @@ mod tests {
             matches!(result, Ok(Value::Int(count)) if count >= 1),
             "rt_heap_registry_count() should observe a registered heap pointer: {result:?}"
         );
+    }
+
+    #[test]
+    fn dispatch_registers_heap_metric_queries() {
+        let names = [
+            "rt_heap_live_bytes",
+            "rt_heap_aux_live_bytes",
+            "rt_heap_array_capacity_bytes",
+        ];
+        for name in names {
+            assert!(EXTERN_DISPATCH.contains_key(name), "missing {name}");
+        }
+
+        let mut env = Env::new();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods = HashMap::new();
+        for name in names {
+            let result = call_extern_function_with_values(
+                name,
+                &[],
+                &mut env,
+                &mut functions,
+                &mut classes,
+                &enums,
+                &impl_methods,
+            );
+            assert!(
+                matches!(result, Ok(Value::Int(value)) if value >= 0),
+                "{name}() should return a non-negative metric: {result:?}"
+            );
+        }
     }
 
     #[test]

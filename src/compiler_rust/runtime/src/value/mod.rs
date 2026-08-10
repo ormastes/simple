@@ -1091,6 +1091,12 @@ pub use net::clear_socket_registry;
 use std::sync::Mutex;
 use std::collections::HashMap as StdHashMap;
 
+#[cfg(test)]
+pub(crate) fn runtime_env_registry_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 lazy_static::lazy_static! {
     static ref GLOBAL_VARIABLES: Mutex<StdHashMap<String, i64>> = Mutex::new(StdHashMap::new());
 }

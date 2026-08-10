@@ -7,6 +7,8 @@ use compiler.frontend.flat_ast_bridge.*
 # frontend path when the newer parser surface is unavailable.
 
 use compiler.core.parser.{parser_has_errors, parser_get_errors, parser_init_with_path, parser_error}
+use compiler.frontend.core.string_interpolation_expand.{expand_string_interpolations}
+use compiler.frontend.desugar.placeholder_lambda.{transform_placeholder_call_args_after_interpolation}
 use compiler.semantics.layer_dag_checker.{LayerDagRegistry, check_layer_dag}
 use compiler.core.parser_decls.{parse_module_body}
 use compiler.core.ast.*
@@ -935,6 +937,12 @@ pub fn parse_and_build_module_scoped(source: text, path: text, streaming_scope: 
     # arena is cleared.
     val transient_scope = if streaming_scope: rt_transient_array_scope_begin() else: false
     parse_module_body()
+    # String interpolation fragments are parsed only after the enclosing module
+    # body. Reapply placeholder shorthand at that point so `{_}` / `{_1}` in a
+    # call argument produces its enclosing callback lambda before the bridge
+    # converts flat nodes into ParserModule expressions.
+    expand_string_interpolations(0)
+    transform_placeholder_call_args_after_interpolation()
     # Driver/native-build path only: promote + desugar placeholder lambdas that
     # were written as interpolated string call arguments. The interpreter path
     # gets this from core_frontend_parse(); this path does not go through it.

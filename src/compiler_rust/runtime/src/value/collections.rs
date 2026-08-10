@@ -4,7 +4,7 @@
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::HashSet;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use super::byte_kernels::{
     avx2_byte_find, avx2_byte_rfind, byte_split_ranges_for_tier, neon_byte_find, neon_byte_rfind, scalar_byte_find,
@@ -21,7 +21,8 @@ use super::objects::{
     rt_closure_func_ptr, rt_option_map, rt_option_none, rt_option_some, RuntimeClosure, RuntimeEnum, RuntimeObject,
 };
 use super::primitive_sort;
-use simple_simd::{active_simd_tier, SimdTier};
+use simple_simd::{clear_host_cpu_config_cache, detect_profile, host_cpu_config, SimdTier};
+use simple_simd::HostCpuConfigError;
 
 thread_local! {
     static U8_ARRAY_SCRATCH: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
@@ -107,6 +108,26 @@ struct CollectionProviders {
     simd_tier: SimdTier,
 }
 
+#[derive(Clone, Copy)]
+struct CollectionProviderCache {
+    host_simd_tier: Option<SimdTier>,
+    providers: Option<CollectionProviders>,
+    provider_simd_tier: Option<SimdTier>,
+    resolutions: usize,
+}
+
+fn collection_provider_cache() -> &'static Mutex<CollectionProviderCache> {
+    static CACHE: OnceLock<Mutex<CollectionProviderCache>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        Mutex::new(CollectionProviderCache {
+            host_simd_tier: None,
+            providers: None,
+            provider_simd_tier: None,
+            resolutions: 0,
+        })
+    })
+}
+
 fn providers_for_tier(tier: SimdTier) -> CollectionProviders {
     match tier {
         SimdTier::X86_64Sse2 => CollectionProviders {
@@ -140,15 +161,74 @@ fn providers_for_tier(tier: SimdTier) -> CollectionProviders {
     }
 }
 
+fn configured_simd_tier_override() -> Option<SimdTier> {
+    std::env::var("SIMPLE_SIMD_TIER").ok()?.parse().ok()
+}
+
+fn resolve_host_simd_tier() -> (SimdTier, bool) {
+    host_cpu_config()
+        .map(|config| (config.enabled.simd_tier, true))
+        .unwrap_or_else(|error| {
+            let cacheable = !matches!(error, HostCpuConfigError::Unstable(_));
+            (detect_profile().best_available_implementation(), cacheable)
+        })
+}
+
 fn collection_providers() -> CollectionProviders {
-    providers_for_tier(active_simd_tier())
+    let override_tier = configured_simd_tier_override();
+    let mut cache = collection_provider_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let (simd_tier, cacheable) = if let Some(override_tier) = override_tier {
+        (override_tier, true)
+    } else if let Some(host_simd_tier) = cache.host_simd_tier {
+        (host_simd_tier, true)
+    } else {
+        let (host_simd_tier, cacheable) = resolve_host_simd_tier();
+        if cacheable {
+            cache.host_simd_tier = Some(host_simd_tier);
+        }
+        (host_simd_tier, cacheable)
+    };
+
+    if cacheable && cache.provider_simd_tier == Some(simd_tier) {
+        if let Some(providers) = cache.providers {
+            return providers;
+        }
+    }
+
+    let providers = providers_for_tier(simd_tier);
+    cache.resolutions += 1;
+    if cacheable {
+        cache.provider_simd_tier = Some(simd_tier);
+        cache.providers = Some(providers);
+    }
+    providers
 }
 
 pub(crate) fn active_collection_simd_tier() -> SimdTier {
     collection_providers().simd_tier
 }
 
-pub(crate) fn clear_collection_provider_cache() {}
+pub(crate) fn clear_collection_provider_cache() {
+    let mut cache = collection_provider_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache.host_simd_tier = None;
+    cache.providers = None;
+    cache.provider_simd_tier = None;
+    cache.resolutions = 0;
+    clear_host_cpu_config_cache();
+}
+
+#[cfg(test)]
+pub(crate) fn collection_provider_resolution_count_for_tests() -> usize {
+    collection_provider_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .resolutions
+}
 
 #[inline]
 fn compare_runtime_values(a: &RuntimeValue, b: &RuntimeValue) -> Ordering {

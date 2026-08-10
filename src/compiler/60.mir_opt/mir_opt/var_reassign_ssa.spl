@@ -144,6 +144,11 @@ fn ssa_local_id_value(local: LocalId) -> i64:
         case LocalId(raw_id): raw_id
         case _: 0
 
+fn ssa_local_payload_valid(local: LocalId) -> bool:
+    match local:
+        case LocalId(raw_id): raw_id >= 0
+        case _: false
+
 fn ssa_block_id_value(block: BlockId) -> i64:
     match block:
         case BlockId(raw_id): raw_id
@@ -254,12 +259,11 @@ fn ssa_max_local_from_inst(current: i64, inst: MirInst) -> i64:
 
 fn ssa_max_local_from_term(current: i64, term: MirTerminator) -> i64:
     match term:
-        case Ret(value):
-            if value.?:
-                val ret_value = value.unwrap()
-                ssa_max_local_from_operand(current, ret_value)
-            else:
-                current
+        case Ret(_):
+            # The staged-native alloca lane never decodes return payloads.
+            # Value returns are rejected by admission; void returns have no
+            # local use to contribute to the max scan.
+            current
         case If(cond, _, _):
             ssa_max_local_from_operand(current, cond)
         case Switch(value, _, _):
@@ -836,10 +840,20 @@ fn ssa_instructions_supported_for_phi(blocks: [MirBlock]) -> bool:
     true
 
 fn ssa_operand_local_payload_valid(operand: MirOperand) -> bool:
-    match operand.kind:
-        case Copy(local): local != nil
-        case Move(local): local != nil
-        case Const(_, _): true
+    match operand:
+        case MirOperand(kind):
+            match kind:
+                case Copy(local): ssa_local_payload_valid(local)
+                case Move(local): ssa_local_payload_valid(local)
+                case Const(_, _): true
+        case _: false
+
+fn ssa_term_has_value_return(term: MirTerminator) -> bool:
+    # Presence is the only safe question here. Never unwrap or inspect the
+    # staged-native MirOperand payload of Ret(Some(...)).
+    match term:
+        case Ret(value): value != nil
+        case _: false
 
 fn ssa_operand_list_payloads_valid(operands: [MirOperand]) -> bool:
     for operand in operands:
@@ -849,6 +863,8 @@ fn ssa_operand_list_payloads_valid(operands: [MirOperand]) -> bool:
 
 fn ssa_inst_operand_payloads_valid(inst: MirInst) -> bool:
     match inst.kind:
+        case Copy(_, src): src != nil
+        case Move(_, src): src != nil
         case BinOp(_, _, left, right):
             ssa_operand_local_payload_valid(left) and ssa_operand_local_payload_valid(right)
         case UnaryOp(_, _, operand): ssa_operand_local_payload_valid(operand)
@@ -871,6 +887,15 @@ fn ssa_inst_operand_payloads_valid(inst: MirInst) -> bool:
             ssa_operand_local_payload_valid(ptr) and ssa_operand_list_payloads_valid(args)
         case Intrinsic(_, _, args): ssa_operand_list_payloads_valid(args)
         case StoreGlobal(_, value): ssa_operand_local_payload_valid(value)
+        case _: true
+
+fn ssa_term_operand_payloads_valid(term: MirTerminator) -> bool:
+    match term:
+        case Ret(_): true
+        case If(cond, _, _): ssa_operand_local_payload_valid(cond)
+        case Switch(value, _, _): ssa_operand_local_payload_valid(value)
+        case CallTerminator(_, func, args, _, _):
+            ssa_operand_local_payload_valid(func) and ssa_operand_list_payloads_valid(args)
         case _: true
 
 fn ssa_instructions_supported_for_alloca(blocks: [MirBlock]) -> bool:
@@ -1145,15 +1170,27 @@ fn ssa_operand_push_local(locals: [i64], operand: MirOperand) -> [i64]:
     # var_reassign_operand_local i64? helper): under the bootstrap seed the
     # Option round-trip through that cross-module helper made this fn return
     # nil for Const operands, nil-poisoning the caller's accumulator list.
-    match operand.kind:
-        case Copy(local):
-            # Keep nested MirOperand -> LocalId payload decoding in this
-            # module. The staged-native ABI can lose the value-type payload
-            # when it crosses into var_reassign_analysis, yielding nil there.
-            local_list_push_unique(locals, ssa_local_id_value(local))
-        case Move(local):
-            local_list_push_unique(locals, ssa_local_id_value(local))
-        case Const(_, _):
+    if operand == nil:
+        return locals
+    match operand:
+        case MirOperand(kind):
+            match kind:
+                case Copy(local):
+                    # Keep nested MirOperand -> LocalId payload decoding in
+                    # this module. The staged-native ABI can lose the
+                    # value-type payload when it crosses the module boundary.
+                    if ssa_local_payload_valid(local):
+                        local_list_push_unique(locals, ssa_local_id_value(local))
+                    else:
+                        locals
+                case Move(local):
+                    if ssa_local_payload_valid(local):
+                        local_list_push_unique(locals, ssa_local_id_value(local))
+                    else:
+                        locals
+                case Const(_, _):
+                    locals
+        case _:
             locals
 
 fn ssa_collect_inst_operand_locals(locals: [i64], inst: MirInst) -> [i64]:
@@ -1213,9 +1250,10 @@ fn ssa_collect_inst_operand_locals(locals: [i64], inst: MirInst) -> [i64]:
 fn ssa_collect_term_operand_locals(locals: [i64], term: MirTerminator) -> [i64]:
     var result = locals
     match term:
-        case Ret(value):
-            if value.?:
-                result = ssa_operand_push_local(result, value.unwrap())
+        case Ret(_):
+            # Value returns are not admitted to the alloca lane. Ret(nil) has
+            # no operand use and must remain a no-op here.
+            pass_do_nothing
         case If(cond, _, _):
             result = ssa_operand_push_local(result, cond)
         case Switch(value, _, _):
@@ -1283,26 +1321,32 @@ fn ssa_reassigned_param_locals(blocks: [MirBlock], mir_locals: [MirLocal]) -> [i
 # --- read-side: rewrite a use of a possibly-reassigned local into a Load ---
 
 fn ssa_alloca_rewrite_operand(operand: MirOperand, slot_keys: [i64], slot_values: [i64], next_temp: i64) -> (MirOperand, [MirInst], i64):
-    match operand.kind:
-        case Copy(local):
-            val idx = local_count_index(slot_keys, ssa_local_id_value(local))
-            if idx >= 0:
-                val slot_id = slot_values[idx]
-                val load_dest = next_temp
-                val load_inst = MirInst(kind: MirInstKind.Load(ssa_local(load_dest), MirOperand(kind: MirOperandKind.Copy(ssa_local(slot_id)))), span: nil)
-                (MirOperand(kind: MirOperandKind.Copy(ssa_local(load_dest))), [load_inst], next_temp + 1)
-            else:
-                (operand, [], next_temp)
-        case Move(local):
-            val idx = local_count_index(slot_keys, ssa_local_id_value(local))
-            if idx >= 0:
-                val slot_id = slot_values[idx]
-                val load_dest = next_temp
-                val load_inst = MirInst(kind: MirInstKind.Load(ssa_local(load_dest), MirOperand(kind: MirOperandKind.Copy(ssa_local(slot_id)))), span: nil)
-                (MirOperand(kind: MirOperandKind.Move(ssa_local(load_dest))), [load_inst], next_temp + 1)
-            else:
-                (operand, [], next_temp)
-        case Const(_, _):
+    if not ssa_operand_local_payload_valid(operand):
+        return (operand, [], next_temp)
+    match operand:
+        case MirOperand(kind):
+            match kind:
+                case Copy(local):
+                    val idx = local_count_index(slot_keys, ssa_local_id_value(local))
+                    if idx >= 0:
+                        val slot_id = slot_values[idx]
+                        val load_dest = next_temp
+                        val load_inst = MirInst(kind: MirInstKind.Load(ssa_local(load_dest), MirOperand(kind: MirOperandKind.Copy(ssa_local(slot_id)))), span: nil)
+                        (MirOperand(kind: MirOperandKind.Copy(ssa_local(load_dest))), [load_inst], next_temp + 1)
+                    else:
+                        (operand, [], next_temp)
+                case Move(local):
+                    val idx = local_count_index(slot_keys, ssa_local_id_value(local))
+                    if idx >= 0:
+                        val slot_id = slot_values[idx]
+                        val load_dest = next_temp
+                        val load_inst = MirInst(kind: MirInstKind.Load(ssa_local(load_dest), MirOperand(kind: MirOperandKind.Copy(ssa_local(slot_id)))), span: nil)
+                        (MirOperand(kind: MirOperandKind.Move(ssa_local(load_dest))), [load_inst], next_temp + 1)
+                    else:
+                        (operand, [], next_temp)
+                case Const(_, _):
+                    (operand, [], next_temp)
+        case _:
             (operand, [], next_temp)
 
 fn ssa_alloca_rewrite_operand_list(operands: [MirOperand], slot_keys: [i64], slot_values: [i64], next_temp_start: i64) -> ([MirOperand], [MirInst], i64):
@@ -1558,12 +1602,9 @@ fn ssa_alloca_rewrite_inst(inst: MirInst, slot_keys: [i64], slot_values: [i64], 
 
 fn ssa_alloca_rewrite_term(term: MirTerminator, slot_keys: [i64], slot_values: [i64], next_temp: i64) -> ([MirInst], MirTerminator, i64):
     match term:
-        case Ret(value):
-            if value.?:
-                val r = ssa_alloca_rewrite_operand(value.unwrap(), slot_keys, slot_values, next_temp)
-                (r[1], MirTerminator.Ret(Some(r[0])), r[2])
-            else:
-                ([], term, next_temp)
+        case Ret(_):
+            # Admission rejects Ret(Some(...)); Ret(nil) is preserved.
+            ([], term, next_temp)
         case If(cond, then_, else_):
             val r = ssa_alloca_rewrite_operand(cond, slot_keys, slot_values, next_temp)
             (r[1], MirTerminator.If(r[0], then_, else_), r[2])
@@ -1625,6 +1666,11 @@ fn ssa_alloca_transform_blocks(blocks: [MirBlock], mir_locals: [MirLocal], entry
         return ssa_var_transform_reject("empty function", blocks, [])
     if not ssa_instructions_supported_for_alloca(blocks):
         return ssa_var_transform_reject("unsupported instruction", blocks, [])
+    for block in blocks:
+        if ssa_term_has_value_return(block.terminator):
+            return ssa_var_transform_reject("unsupported value return terminator", blocks, [])
+        if not ssa_term_operand_payloads_valid(block.terminator):
+            return ssa_var_transform_reject("invalid terminator operands", blocks, [])
 
     # Union of the multi-def set and the cross-block-live set. A multi-def
     # local is already covered by reassigned; the cross-block pass adds

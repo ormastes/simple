@@ -1206,23 +1206,32 @@ mod tests {
     use super::*;
     use std::sync::{Mutex, OnceLock};
 
-    fn simd_tier_env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+    fn simd_tier_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::value::runtime_env_registry_test_lock()
+    }
+
+    struct SimdTierEnvRestoreGuard {
+        previous: Option<String>,
+    }
+
+    impl Drop for SimdTierEnvRestoreGuard {
+        fn drop(&mut self) {
+            match self.previous.as_deref() {
+                Some(value) => std::env::set_var("SIMPLE_SIMD_TIER", value),
+                None => std::env::remove_var("SIMPLE_SIMD_TIER"),
+            }
+            clear_numeric_kernel_provider_cache();
+        }
     }
 
     fn with_simd_tier_override<T>(value: &str, test: impl FnOnce() -> T) -> T {
-        let _guard = simd_tier_env_lock().lock().unwrap();
-        let previous = std::env::var("SIMPLE_SIMD_TIER").ok();
+        let _guard = simd_tier_env_lock();
+        let _restore = SimdTierEnvRestoreGuard {
+            previous: std::env::var("SIMPLE_SIMD_TIER").ok(),
+        };
         std::env::set_var("SIMPLE_SIMD_TIER", value);
         clear_numeric_kernel_provider_cache();
-        let result = test();
-        clear_numeric_kernel_provider_cache();
-        match previous {
-            Some(value) => std::env::set_var("SIMPLE_SIMD_TIER", value),
-            None => std::env::remove_var("SIMPLE_SIMD_TIER"),
-        }
-        result
+        test()
     }
 
     fn runtime_array_to_f64s(value: RuntimeValue) -> Vec<f64> {

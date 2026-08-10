@@ -77,7 +77,7 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 
 # Import expression parsing
 use compiler.frontend.core.parser_expr.{parse_expr, parse_or, parse_postfix_on, parse_binary_from}
-use compiler.frontend.core.lexer.{lex_snapshot_save, lex_snapshot_restore}
+use compiler.frontend.core.lexer.{lex_snapshot_save, lex_snapshot_commit, lex_snapshot_rollback}
 use compiler.core.parser.{parser_tok_save, parser_tok_restore}
 use compiler.core.ast.{expr_assign, expr_compound_assign}
 use compiler.frontend.core._ParserPrimary.primary_expr.{parse_fn_lambda_after_kw}
@@ -219,11 +219,11 @@ fn infer_expr_type_from_parse(expr_id: i64) -> i64:
 # leaving the token stream exactly as found (snapshot-restored).
 fn try_parse_bare_ident_string_call() -> (bool, i64):
     val bc_name = par_text_get()
-    val (bc_snap_n, bc_snap_t) = lex_snapshot_save()
+    val bc_snap = lex_snapshot_save()
     val (bc_tok_n, bc_tok_t) = parser_tok_save()
     parser_advance()
     if par_kind_get() != TOK_STRING_LIT:
-        lex_snapshot_restore(bc_snap_n, bc_snap_t)
+        lex_snapshot_rollback(bc_snap)
         parser_tok_restore(bc_tok_n, bc_tok_t)
         return (false, 0)
     val bc_arg = parse_expr()
@@ -234,6 +234,7 @@ fn try_parse_bare_ident_string_call() -> (bool, i64):
         parser_advance()
         val next_arg = parse_expr()
         bc_args.push(next_arg)
+    lex_snapshot_commit(bc_snap)
     (true, expr_call(expr_ident(bc_name, 0), bc_args, 0))
 
 fn parse_trailing_colon_block_arg(call_expr: i64) -> i64:
@@ -441,11 +442,11 @@ fn parse_statement() -> i64:
     # by the primary_expr.spl fallback -- since that path carries
     # break-with-value semantics that are out of scope here.
     if kind == TOK_KW_LOOP:
-        val (loop_snap_nums, loop_snap_txts) = lex_snapshot_save()
+        val loop_snap = lex_snapshot_save()
         val (loop_tok_nums, loop_tok_text) = parser_tok_save()
         parser_advance()
         val is_loop_stmt = par_kind_get() == TOK_COLON
-        lex_snapshot_restore(loop_snap_nums, loop_snap_txts)
+        lex_snapshot_rollback(loop_snap)
         parser_tok_restore(loop_tok_nums, loop_tok_text)
         if is_loop_stmt:
             return parse_loop_stmt()
@@ -585,14 +586,15 @@ fn parse_statement() -> i64:
         # (set in lexer.spl's `lex_next()`), so anchor the lookahead there
         # instead via plain source-char access.
         if ident_text == "unsafe" or ident_text == "danger":
-            val (uns_snap_nums, uns_snap_txts) = lex_snapshot_save()
+            val uns_snap = lex_snapshot_save()
             val (uns_tok_nums, uns_tok_text) = parser_tok_save()
             parser_advance()
             if par_kind_get() == TOK_COLON:
                 parser_advance()
                 val unsafe_body = parse_block()
+                lex_snapshot_commit(uns_snap)
                 return stmt_expr_stmt(expr_unsafe_block(unsafe_body, 0), 0)
-            lex_snapshot_restore(uns_snap_nums, uns_snap_txts)
+            lex_snapshot_rollback(uns_snap)
             parser_tok_restore(uns_tok_nums, uns_tok_text)
         if ident_text == "todo":
             parser_advance()
@@ -647,7 +649,7 @@ fn parse_statement() -> i64:
         # to ordinary identifier-expression parsing so `with` stays usable as
         # a plain identifier everywhere else.
         if ident_text == "with":
-            val (with_snap_nums, with_snap_txts) = lex_snapshot_save()
+            val with_snap = lex_snapshot_save()
             val (with_tok_nums, with_tok_text) = parser_tok_save()
             parser_advance()  # consume 'with'
             # `as` is ALSO the cast operator (parser_expr.spl's parse_unary /
@@ -702,9 +704,10 @@ fn parse_statement() -> i64:
                 val with_close_call = expr_method_call(expr_ident(with_name, 0), "close", with_close_args, 0)
                 with_stmts.push(stmt_expr_stmt(with_close_call, 0))
                 val with_block_expr = expr_block(with_stmts, -1, 0)
+                lex_snapshot_commit(with_snap)
                 return stmt_expr_stmt(with_block_expr, 0)
             # Not `with EXPR as NAME:` -- backtrack, `with` is a plain ident.
-            lex_snapshot_restore(with_snap_nums, with_snap_txts)
+            lex_snapshot_rollback(with_snap)
             parser_tok_restore(with_tok_nums, with_tok_text)
 
     # `me NAME(...) [-> T]: body` in statement position (a class's methods
@@ -714,15 +717,16 @@ fn parse_statement() -> i64:
     # expressions (`me.backend.move_cursor(...)` in office/editor code),
     # which must fall through to the expression path — backtrack then.
     if kind == 34:
-        val (me_snap_nums, me_snap_txts) = lex_snapshot_save()
+        val me_snap = lex_snapshot_save()
         val (me_tok_nums, me_tok_text) = parser_tok_save()
         parser_advance()  # consume me
         if par_kind_get() == TOK_IDENT:
             val me_stmt_name = par_text_get()
             parser_advance()
             val me_stmt_lambda = parse_fn_lambda_after_kw()
+            lex_snapshot_commit(me_snap)
             return stmt_val_decl(me_stmt_name, 0, me_stmt_lambda, 0)
-        lex_snapshot_restore(me_snap_nums, me_snap_txts)
+        lex_snapshot_rollback(me_snap)
         parser_tok_restore(me_tok_nums, me_tok_text)
 
     # G_named_nested_fn: `fn NAME(...): body` as a STATEMENT — a named nested

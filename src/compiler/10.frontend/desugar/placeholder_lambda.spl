@@ -28,14 +28,19 @@ use compiler.core.ast_expr.{
     expr_ident, expr_binary, expr_unary, expr_call, expr_method_call,
     expr_field_access, expr_index, expr_if_expr, expr_array_lit, expr_dict_lit,
     expr_null_coalesce, expr_cast, expr_spread, expr_lambda, expr_tuple, expr_slice,
-    expr_match_expr
+    expr_match_expr, expr_get_arg_names, expr_call_args_set
 }
 use compiler.frontend.core._AstExpr.accessors.{expr_interpolated_string}
-use compiler.core.ast.{expr_count, expr_get_arg_names, expr_call_args_set}
+use compiler.core.ast.{expr_count, expr_get_arg_names, expr_call_args_set, arm_pattern}
 
 # ===== Placeholder Counter (module-level for mutation in recursive walk) =====
 
 var _ph_counter: i64 = 0
+
+# Post-interpolation rewriting runs after the complete module has been parsed,
+# so it must retain the parser's distinction between real call arguments and
+# match-pattern syntax. This array is rebuilt for each pass from arm_pattern.
+var _ph_pattern_node_marks: [bool] = []
 
 # ===== Interpolation-region suppression =====
 #
@@ -293,6 +298,86 @@ fn transform_placeholder_lambda(eid: i64) -> i64:
     var body_stmts: [i64] = []
     body_stmts.push(body)
     expr_lambda(param_names, body_stmts, 0)
+
+# ===== Post-interpolation call-argument transform =====
+
+fn mark_placeholder_pattern_tree(eid: i64, expr_limit: i64):
+    """Mark one match-pattern expression tree, including nested payloads.
+
+    Pattern constructors use the normal flat expression arena (`Ok((x, _))`
+    is a call containing a tuple), so a whole-arena call scan cannot infer
+    context from the call tag alone. The match-arm arena is the authoritative
+    source of pattern roots.
+    """
+    if eid < 0 or eid >= expr_limit:
+        return
+    if _ph_pattern_node_marks[eid]:
+        return
+    _ph_pattern_node_marks[eid] = true
+
+    val left = expr_left[eid]
+    if left >= 0:
+        mark_placeholder_pattern_tree(left, expr_limit)
+    val right = expr_right[eid]
+    if right >= 0:
+        mark_placeholder_pattern_tree(right, expr_limit)
+    val extra = expr_extra[eid]
+    if extra >= 0:
+        mark_placeholder_pattern_tree(extra, expr_limit)
+
+    # EXPR_MATCH stores arm arena IDs in ARGS, not expression IDs. A match is
+    # not a valid pattern subtree, so never interpret those IDs as children.
+    if expr_tag[eid] == EXPR_MATCH:
+        return
+    val children = expr_args[eid]
+    var child_index = 0
+    while child_index < children.len():
+        mark_placeholder_pattern_tree(children[child_index], expr_limit)
+        child_index = child_index + 1
+
+fn transform_placeholder_call_args_after_interpolation():
+    """Apply placeholder shorthand after string interpolation promotion.
+
+    The parser applies the normal transform while parsing each call argument,
+    before a string token's `{...}` fragments have become AST expressions.
+    This bounded second pass runs after promotion so `_` and `_N` inside an
+    interpolated string receive the same enclosing lambda as ordinary
+    placeholder arguments. Snapshot the arena size: wrapping an argument
+    allocates new nodes, which must not be walked again by this pass.
+    """
+    val initial_expr_count = expr_tag.len()
+    _ph_pattern_node_marks = []
+    while _ph_pattern_node_marks.len() < initial_expr_count:
+        _ph_pattern_node_marks.push(false)
+    var arm_index = 0
+    while arm_index < arm_pattern.len():
+        mark_placeholder_pattern_tree(arm_pattern[arm_index], initial_expr_count)
+        arm_index = arm_index + 1
+
+    var eid = 0
+    while eid < initial_expr_count:
+        val tag = expr_tag[eid]
+        if not _ph_pattern_node_marks[eid] and (tag == EXPR_CALL or tag == EXPR_METHOD_CALL):
+            val old_args = expr_args[eid]
+            val old_names = expr_get_arg_names(eid)
+            var new_args: [i64] = []
+            var changed = false
+            var arg_index = 0
+            while arg_index < old_args.len():
+                val old_arg = old_args[arg_index]
+                var new_arg = old_arg
+                if old_arg >= 0 and old_arg < initial_expr_count:
+                    # Existing shorthand already produced a lambda during
+                    # parsing. Do not traverse or wrap it a second time.
+                    if expr_tag[old_arg] != EXPR_LAMBDA:
+                        new_arg = transform_placeholder_lambda(old_arg)
+                new_args.push(new_arg)
+                if new_arg != old_arg:
+                    changed = true
+                arg_index = arg_index + 1
+            if changed:
+                expr_call_args_set(eid, new_args, old_names)
+        eid = eid + 1
 
 # ===== Count Placeholders (unnumbered mode) =====
 

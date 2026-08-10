@@ -155,11 +155,12 @@ impl HirLowering:
         # impls each declaring `static fn code()` otherwise collide on the bare
         # symbol name — one shared symbol id AND a duplicate bare `code` symbol
         # in the emitted LLVM IR ("invalid redefinition of function").
-        if (fn_.is_method or fn_.is_static) and self.current_method_self_type.?:
-            match self.current_method_self_type.unwrap().kind:
-                case Named(owner_symbol, _):
-                    fn_symbol_name = self.symbols.method_symbol_name(owner_symbol, fn_.name)
-                case _: ()
+        if fn_.is_method or fn_.is_static:
+            if val owner_type = self.current_method_self_type:
+                match owner_type.kind:
+                    case Named(owner_symbol, _):
+                        fn_symbol_name = self.symbols.method_symbol_name(owner_symbol, fn_.name)
+                    case _: ()
         val fn_symbol_kind = if fn_.is_method and not fn_.is_static: SymbolKind.Method else: SymbolKind.Function
         # Static impl/class methods arrive with is_method=false, so the
         # qualification above never applies to them: the lookup below misses
@@ -181,10 +182,10 @@ impl HirLowering:
         # signature so call-result typing works exactly like the predeclared
         # instance-method path. Statics have no receiver param, so no owner
         # context is needed.
-        val fn_fallback_type: HirType? = if fn_.is_static and self.current_method_self_type.?:
-            self.declared_callable_type(fn_, nil)
-        else:
-            nil
+        var fn_fallback_type: HirType? = nil
+        if fn_.is_static:
+            if val owner_type = self.current_method_self_type:
+                fn_fallback_type = Some(self.declared_callable_type(fn_, nil))
         # The bare-name bootstrap fast path below owns ONLY the compiler's own
         # fixed set of top-level CLI entry functions (bootstrap_version,
         # main, ...) -- bootstrap_hir_symbol_known_name is that same fixed
@@ -305,13 +306,16 @@ impl HirLowering:
         # into nothing (Bug native_me_receiver_no_mutate). Exclude "me" here so
         # it stays the sole receiver, exactly like an explicit `self`.
         var needs_implicit_self = false
-        if fn_.is_method and not fn_.is_static and self.current_method_self_type.?:
-            if fn_params.len() == 0:
-                needs_implicit_self = true
-            elif fn_params[0].name != "self" and fn_params[0].name != "me":
-                needs_implicit_self = true
+        var implicit_self_type = HirType(kind: HirTypeKind.Unit, span: fn_.span)
+        if fn_.is_method and not fn_.is_static:
+            if val bound_self_type = self.current_method_self_type:
+                implicit_self_type = bound_self_type
+                if fn_params.len() == 0:
+                    needs_implicit_self = true
+                elif fn_params[0].name != "self" and fn_params[0].name != "me":
+                    needs_implicit_self = true
         if needs_implicit_self:
-            val self_type = self.current_method_self_type.unwrap()
+            val self_type = implicit_self_type
             val self_symbol = self.symbols.define("self", SymbolKind.Parameter, Some(self_type), fn_.span, Visibility.Private, false, nil)
             params = params.push(HirParam(
                 symbol: self_symbol,
@@ -659,11 +663,7 @@ impl HirLowering:
             val lowered_field: HirField = self.lower_field(sf)
             if (struct_name == "BackendError" and lowered_field.name == "span") or (struct_name == "CompiledUnit" and lowered_field.name == "entry_point"):
                 val actual_disc = rt_enum_discriminant(lowered_field.type_.kind)
-                val optional_disc = rt_enum_discriminant(HirTypeKind.Optional(lowered_field.type_))
-                val infer_disc = rt_enum_discriminant(HirTypeKind.Infer(0, 0))
-                val error_disc = rt_enum_discriminant(HirTypeKind.Error)
-                val named_disc = rt_enum_discriminant(HirTypeKind.Named(SymbolId(id: -1), []))
-                eprint("[hir-field-type] struct={struct_name} field={lowered_field.name} actual={actual_disc} optional={optional_disc} infer={infer_disc} error={error_disc} named={named_disc}\n")
+                eprint("[hir-field-type] struct={struct_name} field={lowered_field.name} actual={actual_disc}\n")
             fields = fields.push(lowered_field)
 
         # Compute effective visibility using filename matching

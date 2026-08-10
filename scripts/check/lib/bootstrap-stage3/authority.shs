@@ -828,6 +828,323 @@ bootstrap_stage3_verify_seed_stamp() {
     fi
 }
 
+bootstrap_stage3_valid_fingerprint() {
+    [ "$#" -eq 1 ] || return 1
+    [ "${#1}" -eq 64 ] || return 1
+    case "$1" in *[!0-9a-f]*) return 1 ;; esac
+}
+
+bootstrap_stage3_safe_generation_name() {
+    [ "$#" -eq 1 ] || return 1
+    case "$1" in ''|.|..|*/*|*\\*|*[!A-Za-z0-9._-]*) return 1 ;; esac
+}
+
+bootstrap_stage3_rust_tuple_requires_complete_rebuild() {
+    [ "$#" -eq 4 ] || return 1
+    [ -x "$1" ] && [ -f "$2" ] && [ -f "$3" ] && [ "$4" -eq 0 ] &&
+        return 1
+    return 0
+}
+
+bootstrap_stage3_pin_private_authority() {
+    [ "$#" -eq 4 ] || return 1
+    bootstrap_stage3_private_root=$1
+    bootstrap_stage3_private_seed_name=$2
+    bootstrap_stage3_private_native_name=$3
+    bootstrap_stage3_private_backfill_name=$4
+    [ -d "$bootstrap_stage3_private_root" ] &&
+        [ ! -L "$bootstrap_stage3_private_root" ] &&
+        [ -x "$bootstrap_stage3_private_root/$bootstrap_stage3_private_seed_name" ] &&
+        [ -f "$bootstrap_stage3_private_root/$bootstrap_stage3_private_native_name" ] &&
+        [ -f "$bootstrap_stage3_private_root/$bootstrap_stage3_private_backfill_name" ] || return 1
+    BOOTSTRAP_STAGE3_PRIVATE_RUNTIME=$bootstrap_stage3_private_root
+    BOOTSTRAP_STAGE3_PRIVATE_SEED=\
+"$bootstrap_stage3_private_root/$bootstrap_stage3_private_seed_name"
+    BOOTSTRAP_STAGE3_PRIVATE_NATIVE_ALL=\
+"$bootstrap_stage3_private_root/$bootstrap_stage3_private_native_name"
+    BOOTSTRAP_STAGE3_PRIVATE_BACKFILL=\
+"$bootstrap_stage3_private_root/$bootstrap_stage3_private_backfill_name"
+}
+
+# Prepare and publish immutable Rust authority generations. The current marker
+# is the commit record; a generation is never mutated after marker admission.
+bootstrap_stage3_prepare_seed_generation() {
+    [ "$#" -eq 7 ] || return 1
+    bootstrap_stage3_generation_source=$1
+    bootstrap_stage3_generation_root=$2
+    bootstrap_stage3_generation_inputs=$3
+    bootstrap_stage3_generation_seed_name=$4
+    bootstrap_stage3_generation_native_name=$5
+    bootstrap_stage3_generation_backfill_name=$6
+    bootstrap_stage3_generation_nonce=$7
+    bootstrap_stage3_valid_fingerprint "$bootstrap_stage3_generation_inputs" || return 1
+    bootstrap_stage3_generation_staging=\
+"$bootstrap_stage3_generation_root/.staging.$bootstrap_stage3_generation_nonce"
+    rm -rf "$bootstrap_stage3_generation_staging"
+    mkdir -p "$bootstrap_stage3_generation_root" || return 1
+    bootstrap_stage3_copy_authority "$bootstrap_stage3_generation_source" \
+        "$bootstrap_stage3_generation_staging" || return 1
+    chmod 700 "$bootstrap_stage3_generation_staging" || return 1
+    bootstrap_stage3_generation_stamp=\
+"$bootstrap_stage3_generation_staging/$bootstrap_stage3_generation_seed_name.inputs.sha256"
+    bootstrap_stage3_write_seed_stamp "$bootstrap_stage3_generation_stamp" \
+        "$bootstrap_stage3_generation_inputs" \
+        "$bootstrap_stage3_generation_staging/$bootstrap_stage3_generation_seed_name" \
+        "$bootstrap_stage3_generation_staging/$bootstrap_stage3_generation_native_name" \
+        "$bootstrap_stage3_generation_staging/$bootstrap_stage3_generation_backfill_name" || return 1
+    chmod 400 "$bootstrap_stage3_generation_stamp" || return 1
+    bootstrap_stage3_verify_seed_stamp "$bootstrap_stage3_generation_stamp" \
+        "$bootstrap_stage3_generation_inputs" \
+        "$bootstrap_stage3_generation_staging/$bootstrap_stage3_generation_seed_name" \
+        "$bootstrap_stage3_generation_staging/$bootstrap_stage3_generation_native_name" \
+        "$bootstrap_stage3_generation_staging/$bootstrap_stage3_generation_backfill_name" || return 1
+    bootstrap_stage3_generation_snapshot=\
+"$bootstrap_stage3_generation_root/.snapshot.$bootstrap_stage3_generation_nonce"
+    bootstrap_stage3_directory_snapshot "$bootstrap_stage3_generation_snapshot" \
+        "$bootstrap_stage3_generation_staging" || return 1
+    bootstrap_stage3_generation_hash=$(bootstrap_stage3_hash_file \
+        "$bootstrap_stage3_generation_snapshot") || return 1
+    rm -f "$bootstrap_stage3_generation_snapshot"
+    BOOTSTRAP_STAGE3_PREPARED_GENERATION=\
+"$bootstrap_stage3_generation_root/$bootstrap_stage3_generation_inputs-$bootstrap_stage3_generation_hash"
+    BOOTSTRAP_STAGE3_PREPARED_STAGING=$bootstrap_stage3_generation_staging
+    BOOTSTRAP_STAGE3_PREPARED_HASH=$bootstrap_stage3_generation_hash
+    chmod 500 "$bootstrap_stage3_generation_staging" || return 1
+}
+
+bootstrap_stage3_publish_seed_generation() {
+    [ "$#" -eq 7 ] || return 1
+    bootstrap_stage3_publish_staging=$1
+    bootstrap_stage3_publish_final=$2
+    bootstrap_stage3_publish_marker=$3
+    bootstrap_stage3_publish_inputs=$4
+    bootstrap_stage3_publish_hash=$5
+    bootstrap_stage3_publish_observed_inputs=$6
+    bootstrap_stage3_publish_compatibility=$7
+    [ "$bootstrap_stage3_publish_inputs" = \
+        "$bootstrap_stage3_publish_observed_inputs" ] || return 1
+    bootstrap_stage3_valid_fingerprint "$bootstrap_stage3_publish_inputs" || return 1
+    bootstrap_stage3_valid_fingerprint "$bootstrap_stage3_publish_hash" || return 1
+    bootstrap_stage3_publish_root=$(dirname -- "$bootstrap_stage3_publish_final")
+    bootstrap_stage3_publish_name=$(basename -- "$bootstrap_stage3_publish_final")
+    bootstrap_stage3_safe_generation_name "$bootstrap_stage3_publish_name" || return 1
+    [ "$bootstrap_stage3_publish_name" = \
+        "$bootstrap_stage3_publish_inputs-$bootstrap_stage3_publish_hash" ] || return 1
+    if [ -d "$bootstrap_stage3_publish_staging" ]; then
+        bootstrap_stage3_publish_material=$bootstrap_stage3_publish_staging
+    elif [ -d "$bootstrap_stage3_publish_final" ]; then
+        bootstrap_stage3_publish_material=$bootstrap_stage3_publish_final
+    else
+        return 1
+    fi
+    set -- "$bootstrap_stage3_publish_material"/*.inputs.sha256
+    [ "$#" -eq 1 ] && [ -f "$1" ] || return 1
+    bootstrap_stage3_publish_stamp=$1
+    [ "$(bootstrap_stage3_manifest_value inputs_fingerprint \
+        "$bootstrap_stage3_publish_stamp")" = \
+        "$bootstrap_stage3_publish_inputs" ] || return 1
+    bootstrap_stage3_publish_stamp_hash=$(bootstrap_stage3_hash_file \
+        "$bootstrap_stage3_publish_stamp") || return 1
+    if [ -d "$bootstrap_stage3_publish_final" ]; then
+        bootstrap_stage3_publish_existing=\
+"$bootstrap_stage3_publish_root/.existing.$$"
+        bootstrap_stage3_directory_snapshot "$bootstrap_stage3_publish_existing" \
+            "$bootstrap_stage3_publish_final" || return 1
+        [ "$(bootstrap_stage3_hash_file "$bootstrap_stage3_publish_existing")" = \
+            "$bootstrap_stage3_publish_hash" ] || return 1
+        rm -f "$bootstrap_stage3_publish_existing"
+        chmod -R u+w "$bootstrap_stage3_publish_staging" 2>/dev/null || true
+        rm -rf "$bootstrap_stage3_publish_staging"
+    else
+        mv "$bootstrap_stage3_publish_staging" \
+            "$bootstrap_stage3_publish_final" || return 1
+    fi
+    bootstrap_stage3_publish_transaction="$bootstrap_stage3_publish_marker.transaction"
+    bootstrap_stage3_publish_transaction_tmp=\
+"$bootstrap_stage3_publish_transaction.tmp.$$"
+    {
+        echo 'schema=simple-bootstrap-authority-transaction-v1'
+        echo "generation=$bootstrap_stage3_publish_name"
+        echo "inputs_fingerprint=$bootstrap_stage3_publish_inputs"
+        echo "generation_sha256=$bootstrap_stage3_publish_hash"
+        echo "stamp_sha256=$bootstrap_stage3_publish_stamp_hash"
+    } >"$bootstrap_stage3_publish_transaction_tmp" || return 1
+    mv "$bootstrap_stage3_publish_transaction_tmp" \
+        "$bootstrap_stage3_publish_transaction" || return 1
+    bootstrap_stage3_publish_compatibility_pointer \
+        "$bootstrap_stage3_publish_compatibility" \
+        "$bootstrap_stage3_publish_final" \
+        "$bootstrap_stage3_publish_root" || return 1
+    if [ "${BOOTSTRAP_STAGE3_TEST_STOP_AFTER_COMPATIBILITY:-0}" = 1 ]; then
+        return 99
+    fi
+    bootstrap_stage3_publish_tmp="$bootstrap_stage3_publish_marker.tmp.$$"
+    {
+        echo 'schema=simple-bootstrap-authority-current-v1'
+        echo "generation=$bootstrap_stage3_publish_name"
+        echo "inputs_fingerprint=$bootstrap_stage3_publish_inputs"
+        echo "generation_sha256=$bootstrap_stage3_publish_hash"
+        echo "stamp_sha256=$bootstrap_stage3_publish_stamp_hash"
+    } >"$bootstrap_stage3_publish_tmp" || return 1
+    mv "$bootstrap_stage3_publish_tmp" "$bootstrap_stage3_publish_marker" || return 1
+    rm -f "$bootstrap_stage3_publish_transaction"
+}
+
+bootstrap_stage3_recover_seed_transaction() {
+    [ "$#" -eq 3 ] || return 1
+    bootstrap_stage3_recover_root=$1
+    bootstrap_stage3_recover_marker=$2
+    bootstrap_stage3_recover_compatibility=$3
+    bootstrap_stage3_recover_transaction=\
+"$bootstrap_stage3_recover_marker.transaction"
+    [ -f "$bootstrap_stage3_recover_transaction" ] &&
+        [ ! -L "$bootstrap_stage3_recover_transaction" ] || return 1
+    [ "$(bootstrap_stage3_manifest_value schema \
+        "$bootstrap_stage3_recover_transaction")" = \
+        simple-bootstrap-authority-transaction-v1 ] || return 1
+    bootstrap_stage3_recover_name=$(bootstrap_stage3_manifest_value generation \
+        "$bootstrap_stage3_recover_transaction") || return 1
+    bootstrap_stage3_recover_inputs=$(bootstrap_stage3_manifest_value \
+        inputs_fingerprint "$bootstrap_stage3_recover_transaction") || return 1
+    bootstrap_stage3_recover_hash=$(bootstrap_stage3_manifest_value \
+        generation_sha256 "$bootstrap_stage3_recover_transaction") || return 1
+    bootstrap_stage3_recover_stamp_hash=$(bootstrap_stage3_manifest_value \
+        stamp_sha256 "$bootstrap_stage3_recover_transaction") || return 1
+    bootstrap_stage3_safe_generation_name "$bootstrap_stage3_recover_name" || return 1
+    bootstrap_stage3_valid_fingerprint "$bootstrap_stage3_recover_inputs" || return 1
+    bootstrap_stage3_valid_fingerprint "$bootstrap_stage3_recover_hash" || return 1
+    bootstrap_stage3_valid_fingerprint "$bootstrap_stage3_recover_stamp_hash" || return 1
+    [ "$bootstrap_stage3_recover_name" = \
+        "$bootstrap_stage3_recover_inputs-$bootstrap_stage3_recover_hash" ] || return 1
+    bootstrap_stage3_recover_generation=\
+"$bootstrap_stage3_recover_root/$bootstrap_stage3_recover_name"
+    [ -d "$bootstrap_stage3_recover_generation" ] &&
+        [ ! -L "$bootstrap_stage3_recover_generation" ] || return 1
+    bootstrap_stage3_recover_snapshot="$bootstrap_stage3_recover_root/.recover.$$"
+    bootstrap_stage3_directory_snapshot "$bootstrap_stage3_recover_snapshot" \
+        "$bootstrap_stage3_recover_generation" || return 1
+    [ "$(bootstrap_stage3_hash_file "$bootstrap_stage3_recover_snapshot")" = \
+        "$bootstrap_stage3_recover_hash" ] || return 1
+    rm -f "$bootstrap_stage3_recover_snapshot"
+    set -- "$bootstrap_stage3_recover_generation"/*.inputs.sha256
+    [ "$#" -eq 1 ] && [ -f "$1" ] || return 1
+    [ "$(bootstrap_stage3_hash_file "$1")" = \
+        "$bootstrap_stage3_recover_stamp_hash" ] || return 1
+    [ "$(bootstrap_stage3_manifest_value inputs_fingerprint "$1")" = \
+        "$bootstrap_stage3_recover_inputs" ] || return 1
+    bootstrap_stage3_publish_compatibility_pointer \
+        "$bootstrap_stage3_recover_compatibility" \
+        "$bootstrap_stage3_recover_generation" \
+        "$bootstrap_stage3_recover_root" || return 1
+    bootstrap_stage3_recover_tmp="$bootstrap_stage3_recover_marker.tmp.$$"
+    {
+        echo 'schema=simple-bootstrap-authority-current-v1'
+        echo "generation=$bootstrap_stage3_recover_name"
+        echo "inputs_fingerprint=$bootstrap_stage3_recover_inputs"
+        echo "generation_sha256=$bootstrap_stage3_recover_hash"
+        echo "stamp_sha256=$bootstrap_stage3_recover_stamp_hash"
+    } >"$bootstrap_stage3_recover_tmp" || return 1
+    mv "$bootstrap_stage3_recover_tmp" "$bootstrap_stage3_recover_marker" || return 1
+    rm -f "$bootstrap_stage3_recover_transaction"
+    bootstrap_stage3_resolve_committed_seed "$bootstrap_stage3_recover_root" \
+        "$bootstrap_stage3_recover_marker"
+}
+
+bootstrap_stage3_resolve_committed_seed() {
+    [ "$#" -eq 2 ] || return 1
+    bootstrap_stage3_resolve_root=$1
+    bootstrap_stage3_resolve_marker=$2
+    [ -d "$bootstrap_stage3_resolve_root" ] &&
+        [ ! -L "$bootstrap_stage3_resolve_root" ] &&
+        [ -f "$bootstrap_stage3_resolve_marker" ] &&
+        [ ! -L "$bootstrap_stage3_resolve_marker" ] || return 1
+    [ ! -e "$bootstrap_stage3_resolve_marker.transaction" ] || return 1
+    [ "$(bootstrap_stage3_manifest_value schema \
+        "$bootstrap_stage3_resolve_marker")" = \
+        simple-bootstrap-authority-current-v1 ] || return 1
+    bootstrap_stage3_resolve_name=$(bootstrap_stage3_manifest_value generation \
+        "$bootstrap_stage3_resolve_marker") || return 1
+    bootstrap_stage3_safe_generation_name "$bootstrap_stage3_resolve_name" || return 1
+    bootstrap_stage3_resolve_inputs=$(bootstrap_stage3_manifest_value \
+        inputs_fingerprint "$bootstrap_stage3_resolve_marker") || return 1
+    bootstrap_stage3_valid_fingerprint "$bootstrap_stage3_resolve_inputs" || return 1
+    bootstrap_stage3_resolve_marker_hash=$(bootstrap_stage3_manifest_value \
+        generation_sha256 "$bootstrap_stage3_resolve_marker") || return 1
+    bootstrap_stage3_valid_fingerprint \
+        "$bootstrap_stage3_resolve_marker_hash" || return 1
+    [ "$bootstrap_stage3_resolve_name" = \
+        "$bootstrap_stage3_resolve_inputs-$bootstrap_stage3_resolve_marker_hash" ] || return 1
+    bootstrap_stage3_resolve_dir=\
+"$bootstrap_stage3_resolve_root/$bootstrap_stage3_resolve_name"
+    [ -d "$bootstrap_stage3_resolve_dir" ] &&
+        [ ! -L "$bootstrap_stage3_resolve_dir" ] || return 1
+    bootstrap_stage3_resolve_snapshot="$bootstrap_stage3_resolve_root/.resolve.$$"
+    bootstrap_stage3_directory_snapshot "$bootstrap_stage3_resolve_snapshot" \
+        "$bootstrap_stage3_resolve_dir" || return 1
+    bootstrap_stage3_resolve_hash=$(bootstrap_stage3_hash_file \
+        "$bootstrap_stage3_resolve_snapshot") || return 1
+    rm -f "$bootstrap_stage3_resolve_snapshot"
+    [ "$bootstrap_stage3_resolve_hash" = \
+        "$bootstrap_stage3_resolve_marker_hash" ] || return 1
+    set -- "$bootstrap_stage3_resolve_dir"/*.inputs.sha256
+    [ "$#" -eq 1 ] && [ -f "$1" ] || return 1
+    [ "$(bootstrap_stage3_manifest_value inputs_fingerprint "$1")" = \
+        "$bootstrap_stage3_resolve_inputs" ] || return 1
+    [ "$(bootstrap_stage3_hash_file "$1")" = \
+        "$(bootstrap_stage3_manifest_value stamp_sha256 \
+            "$bootstrap_stage3_resolve_marker")" ] || return 1
+    BOOTSTRAP_STAGE3_COMMITTED_AUTHORITY=$bootstrap_stage3_resolve_dir
+}
+
+bootstrap_stage3_publish_compatibility_pointer() {
+    [ "$#" -eq 3 ] || return 1
+    bootstrap_stage3_compatibility_path=$1
+    bootstrap_stage3_compatibility_generation=$2
+    bootstrap_stage3_compatibility_root=$3
+    bootstrap_stage3_compatibility_marker=\
+"$bootstrap_stage3_compatibility_path.migration.env"
+    bootstrap_stage3_compatibility_name=$(basename -- \
+        "$bootstrap_stage3_compatibility_generation")
+    {
+        echo 'schema=simple-bootstrap-authority-migration-v1'
+        echo "generation=$bootstrap_stage3_compatibility_name"
+    } >"$bootstrap_stage3_compatibility_marker.tmp.$$" || return 1
+    mv "$bootstrap_stage3_compatibility_marker.tmp.$$" \
+        "$bootstrap_stage3_compatibility_marker" || return 1
+    if [ -d "$bootstrap_stage3_compatibility_path" ] &&
+        [ ! -L "$bootstrap_stage3_compatibility_path" ]; then
+        bootstrap_stage3_compatibility_snapshot=\
+"$bootstrap_stage3_compatibility_root/.legacy.$$"
+        bootstrap_stage3_directory_snapshot \
+            "$bootstrap_stage3_compatibility_snapshot" \
+            "$bootstrap_stage3_compatibility_path" || return 1
+        bootstrap_stage3_compatibility_legacy_hash=$(bootstrap_stage3_hash_file \
+            "$bootstrap_stage3_compatibility_snapshot") || return 1
+        rm -f "$bootstrap_stage3_compatibility_snapshot"
+        bootstrap_stage3_compatibility_legacy=\
+"$bootstrap_stage3_compatibility_root/legacy-$bootstrap_stage3_compatibility_legacy_hash"
+        if [ ! -e "$bootstrap_stage3_compatibility_legacy" ]; then
+            mv "$bootstrap_stage3_compatibility_path" \
+                "$bootstrap_stage3_compatibility_legacy" || return 1
+        else
+            return 1
+        fi
+    fi
+    bootstrap_stage3_compatibility_parent=$(dirname -- \
+        "$bootstrap_stage3_compatibility_path")
+    bootstrap_stage3_compatibility_relative=\
+"$(basename -- "$bootstrap_stage3_compatibility_root")/$bootstrap_stage3_compatibility_name"
+    bootstrap_stage3_compatibility_tmp=\
+"$bootstrap_stage3_compatibility_parent/.bootstrap-link.$$"
+    rm -f "$bootstrap_stage3_compatibility_tmp"
+    ln -s "$bootstrap_stage3_compatibility_relative" \
+        "$bootstrap_stage3_compatibility_tmp" || return 1
+    perl -e 'rename($ARGV[0], $ARGV[1]) or die "rename: $!\n"' \
+        "$bootstrap_stage3_compatibility_tmp" \
+        "$bootstrap_stage3_compatibility_path" || return 1
+    rm -f "$bootstrap_stage3_compatibility_marker"
+}
+
 # Bind the checked-out commit plus the actual tracked dirty bytes/symlink
 # targets and untracked bytes/symlink targets.  A porcelain path list alone is
 # insufficient because an already-dirty file can change without changing it.

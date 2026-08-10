@@ -35,6 +35,7 @@ use compiler.core.ast.{lexer_cur_suffix2_get, lexer_cur_suffix2_set}
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_env_get(key: text) -> text
 extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_array_free(array: i64)
 fn lexer_array_len<T>(array: [T]) -> i64:
     return array.len()
 
@@ -226,10 +227,7 @@ fn lex_source_char_at(pos: i64) -> text:
     # instead of re-slicing the raw byte-indexed text.
     if lexer_array_len(current_core_lexer_slot) > 0:
         val lx = current_core_lexer_slot[0]
-        val chars = lx.source_chars
-        if pos < 0 or pos >= chars.len():
-            return ""
-        return chars[pos]
+        return lx.char_at_pos(pos)
     val source = current_core_source_get()
     val source_len = source.len()
     if pos < 0 or pos >= source_len:
@@ -241,21 +239,7 @@ fn lex_source_slice(start: i64, end: i64) -> text:
     # cur_start/pos when a CoreLexer is active.
     if lexer_array_len(current_core_lexer_slot) > 0:
         val lx = current_core_lexer_slot[0]
-        val chars = lx.source_chars
-        var s = start
-        var e = end
-        if s < 0:
-            s = 0
-        if e > chars.len():
-            e = chars.len()
-        if e <= s:
-            return ""
-        var result = ""
-        var i = s
-        while i < e:
-            result = result + chars[i]
-            i = i + 1
-        return result
+        return lx.char_slice(start, end)
     val source = current_core_source_get()
     if start < 0:
         start = 0
@@ -738,25 +722,39 @@ fn lex_cur_suffix_get() -> text:
 #   [7]  lex_cur_kind_direct[0]  (kind of the token that is "current")
 #   [8]  lex_cur_line_direct[0]
 #   [9]  lex_cur_col_direct[0]
+#   [10] CoreLexer.cur_kind
+#   [11] lex_generic_close_pending[0] (1 = pending)
 #
-# Text fields (par_text, lex_cur_text) are stored alongside as a [text].
+# Text fields (par_text, lex_cur_text, suffix) are stored alongside as [text].
 
-fn lex_snapshot_save() -> ([i64], [text]):
+struct LexSnapshot:
+    nums: [i64]
+    texts: [text]
+    indent_stack: [i64]
+
+fn lex_snapshot_save() -> LexSnapshot:
     if lexer_array_len(current_core_lexer_slot) == 0:
         current_core_lexer_slot = [current_core_lexer_load()]
     val lx = current_core_lexer_slot[0]
     var at_ls_i: i64 = 0
     if lx.at_line_start:
         at_ls_i = 1
-    var nums: [i64] = [lx.pos, lx.line, lx.col, lx.pending_dedents, at_ls_i, lx.paren_depth, lx.cur_start, lex_cur_kind_direct[0], lex_cur_line_direct[0], lex_cur_col_direct[0]]
-    val indent_stack_text = current_core_indent_stack_format(lx.indent_stack)
-    var txts: [text] = [lex_cur_text_direct[0], indent_stack_text, lex_cur_suffix_direct[0]]
-    (nums, txts)
+    var generic_pending_i: i64 = 0
+    if lexer_array_len(lex_generic_close_pending) > 0 and lex_generic_close_pending[0]:
+        generic_pending_i = 1
+    var nums: [i64] = [lx.pos, lx.line, lx.col, lx.pending_dedents, at_ls_i, lx.paren_depth, lx.cur_start, lex_cur_kind_direct[0], lex_cur_line_direct[0], lex_cur_col_direct[0], lx.cur_kind, generic_pending_i]
+    var saved_indent_stack: [i64] = []
+    for indent in lx.indent_stack:
+        saved_indent_stack = saved_indent_stack.push(indent)
+    var txts: [text] = [lex_cur_text_direct[0], lex_cur_suffix_direct[0]]
+    LexSnapshot(nums: nums, texts: txts, indent_stack: saved_indent_stack)
 
-fn lex_snapshot_restore(nums: [i64], txts: [text]):
+fn lex_snapshot_restore(snapshot: LexSnapshot):
     # Rebuild the CoreLexer from saved fields
     if lexer_array_len(current_core_lexer_slot) == 0:
         current_core_lexer_slot = [current_core_lexer_load()]
+    val nums = snapshot.nums
+    val txts = snapshot.texts
     var lx = current_core_lexer_slot[0]
     lx.pos = nums[0]
     lx.line = nums[1]
@@ -765,35 +763,54 @@ fn lex_snapshot_restore(nums: [i64], txts: [text]):
     lx.at_line_start = nums[4] == 1
     lx.paren_depth = nums[5]
     lx.cur_start = nums[6]
-    # Restore indent stack (txts[1] if present, else default)
-    var saved_indent_raw = "0"
-    if txts.len() > 1:
-        saved_indent_raw = txts[1]
-    val restored_indent_stack = current_core_indent_stack_parse(saved_indent_raw)
-    lx.indent_stack = restored_indent_stack
+    if nums.len() > 10:
+        lx.cur_kind = nums[10]
+    if lexer_array_len(lex_generic_close_pending) == 0:
+        lex_generic_close_pending = [false]
+    if nums.len() > 11:
+        lex_generic_close_pending[0] = nums[11] == 1
+    # Restore the independent stack captured by lex_snapshot_save. Speculative
+    # restore must not serialize through text or environment-backed state.
+    rt_array_free(lx.indent_stack)
+    lx.indent_stack = snapshot.indent_stack
     current_core_lexer_slot[0] = lx
-    current_core_lexer_save(lx)
-    # Sync indent stack to env-var-backed state used by lex_next
-    current_core_indent_stack_set(restored_indent_stack)
-    # Restore lex_cur_* direct slots and env vars
+    # Restore direct slots only. Environment mirrors are synchronized by the
+    # explicit lexer boundary paths, never by speculative parser restore.
     val saved_kind = nums[7]
     val saved_line = nums[8]
     val saved_col  = nums[9]
     val saved_text = txts[0]
     var saved_suffix = ""
-    if txts.len() > 2:
-        saved_suffix = txts[2]
-    lex_cur_kind_set(saved_kind)
-    lex_cur_line_set(saved_line)
-    lex_cur_col_set(saved_col)
-    lex_cur_text_set(saved_text)
-    lex_cur_suffix_set(saved_suffix)
+    if txts.len() > 1:
+        saved_suffix = txts[1]
+    lex_cur_kind_direct[0] = saved_kind
+    lex_cur_line_direct[0] = saved_line
+    lex_cur_col_direct[0] = saved_col
+    lex_cur_text_direct[0] = saved_text
+    lex_cur_suffix_direct[0] = saved_suffix
+    lx.cur_text = saved_text
+    lx.cur_line = saved_line
+    lx.cur_col = saved_col
+    current_core_lexer_slot[0] = lx
     # Restore token offsets for lex_token_start/end snapshot consumers.
     lex_token_start_direct[0] = nums[6]
     lex_token_end_direct[0] = nums[0]
-    if lex_env_save_enabled[0]:
-        rt_env_set("SIMPLE_BOOTSTRAP_LEX_TOKEN_START", "{nums[6]}")
-        rt_env_set("SIMPLE_BOOTSTRAP_LEX_TOKEN_END", "{nums[0]}")
+
+fn lex_snapshot_release(snapshot: LexSnapshot, release_indent_stack: bool):
+    rt_array_free(snapshot.nums)
+    rt_array_free(snapshot.texts)
+    if release_indent_stack:
+        rt_array_free(snapshot.indent_stack)
+
+fn lex_snapshot_commit(snapshot: LexSnapshot):
+    # No lexer transfer occurred: the snapshot owns every array.
+    lex_snapshot_release(snapshot, true)
+
+fn lex_snapshot_rollback(snapshot: LexSnapshot):
+    # Restore transfers snapshot.indent_stack into CoreLexer. Only the current
+    # speculative stack and the remaining snapshot metadata are released.
+    lex_snapshot_restore(snapshot)
+    lex_snapshot_release(snapshot, false)
 
 # ===== Convenience: Tokenize All =====
 # Tokenizes entire source and returns arrays of token data.

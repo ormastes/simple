@@ -16,11 +16,13 @@ grep -Fq -- 'cannot deploy, release, or relink' scripts/bootstrap/bootstrap-from
 
 for script in \
   scripts/bootstrap/bootstrap-from-scratch.sh \
+  scripts/bootstrap/bootstrap-authority-wiring.shs \
   scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs \
   scripts/check/check-bootstrap-essential-tools-smoke.shs \
   scripts/check/check-freebsd-bootstrap-qemu.shs \
   scripts/check/check-native-seed-parity.shs \
   scripts/check/check-stage4-hosted-dynload-provider-archive.shs \
+  scripts/check/lib/portable-process-lock.shs \
   scripts/check/lib/bootstrap-stage3/authority.shs \
   scripts/check/lib/bootstrap-stage3/manifest-write.shs \
   scripts/check/lib/bootstrap-stage3/manifest-verify.shs \
@@ -30,6 +32,46 @@ for script in \
   scripts/setup/setup.shs; do
   sh -n "${script}" || fail "shell syntax: ${script}"
 done
+perl -c scripts/check/lib/portable-hardlink-lock.pl >/dev/null ||
+  fail "Perl syntax: portable-hardlink-lock.pl"
+perl -c scripts/check/lib/portable-session-exec.pl >/dev/null ||
+  fail "Perl syntax: portable-session-exec.pl"
+portable_session_identity=$(perl scripts/check/lib/portable-session-exec.pl \
+  perl scripts/check/lib/portable-session-exec.pl --identity-current) ||
+  fail "native portable session identity probe"
+portable_session_pid=$(printf '%s\n' "${portable_session_identity}" |
+  sed -n 's/^pid=//p')
+portable_session_pgid=$(printf '%s\n' "${portable_session_identity}" |
+  sed -n 's/^pgid=//p')
+[ -n "${portable_session_pid}" ] &&
+  [ "${portable_session_pid}" = "${portable_session_pgid}" ] ||
+  fail "native session probe did not produce PID=PGID"
+portable_session_fallback_status=0
+perl scripts/check/lib/portable-session-exec.pl perl \
+  scripts/check/lib/portable-session-exec.pl --require-fallback \
+  sh -c 'exit 37' || portable_session_fallback_status=$?
+[ "${portable_session_fallback_status}" -eq 37 ] ||
+  fail "setsid EPERM fallback lost child status"
+if grep -Fq -- '--runtime-path "$(pwd)/src/compiler_rust/target/bootstrap"' \
+  scripts/bootstrap/bootstrap-from-scratch.sh; then
+  fail "Stage 4 still hardcodes mutable bootstrap runtime authority"
+fi
+if grep -Fq 'SIMPLE_RUNTIME_PATH="$(pwd)/src/compiler_rust/target/bootstrap"' \
+  scripts/bootstrap/bootstrap-from-scratch.sh; then
+  fail "Stage 4 environment still selects mutable bootstrap runtime authority"
+fi
+for authority_wiring in \
+  bootstrap_authority_recover_or_refuse \
+  bootstrap_authority_materialize_legacy_file \
+  bootstrap_authority_migrate_complete_legacy \
+  bootstrap_authority_pin_stage4; do
+  grep -Fq "${authority_wiring}" scripts/bootstrap/bootstrap-from-scratch.sh ||
+    fail "bootstrap does not invoke production authority wiring: ${authority_wiring}"
+done
+sh test/01_unit/scripts/portable_process_lock_test.shs ||
+  fail "portable bootstrap process lock"
+sh test/01_unit/scripts/bootstrap_from_scratch_rust_authority_contract_test.shs ||
+  fail "immutable bootstrap authority publication"
 bash -n scripts/bootstrap/bootstrap-windows.sh || fail "shell syntax: bootstrap-windows.sh"
 sh test/02_integration/bootstrap_stage3_source_snapshot_test.shs ||
   fail "Stage 3 source snapshot symlinks"

@@ -1,7 +1,34 @@
 use std.spec.*
 use std.io_runtime.{file_read}
+use compiler.driver.driver_aot_output.{driver_native_sources_fingerprint}
+use compiler.common.driver_core_types.{SourceFile}
 
 describe "native object cache granularity":
+    it "invalidates dependents when a provider changes from struct to class":
+        val dependent = SourceFile(
+            path: "consumer.spl",
+            content: "use provider.{Surface}\nfn owner(value: Surface) -> text: value.owner",
+            module_name: "consumer"
+        )
+        val struct_provider = SourceFile(
+            path: "provider.spl",
+            content: "pub struct Surface:\n    owner: text",
+            module_name: "provider"
+        )
+        val class_provider = SourceFile(
+            path: "provider.spl",
+            content: "pub class Surface:\n    owner: text",
+            module_name: "provider"
+        )
+
+        step("Keep the dependent source unchanged across the ABI change")
+        expect(dependent.content).to_equal(dependent.content)
+
+        step("Require the source-closure fingerprint to invalidate dependent objects")
+        val before = driver_native_sources_fingerprint([struct_provider, dependent])
+        val after = driver_native_sources_fingerprint([class_provider, dependent])
+        assert_not_equal(before, after)
+
     it "keeps coarse invalidation until sound module dependency keys exist":
         val incremental = file_read("src/compiler/80.driver/driver_build/incremental.spl")
         val native_output = file_read("src/compiler/80.driver/driver_aot_native_output.spl")

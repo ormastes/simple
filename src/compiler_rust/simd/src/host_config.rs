@@ -39,6 +39,7 @@ pub enum HostCpuConfigError {
     Io(std::io::Error),
     Parse(String),
     MissingPath,
+    Unstable(PathBuf),
 }
 
 impl fmt::Display for HostCpuConfigError {
@@ -47,6 +48,7 @@ impl fmt::Display for HostCpuConfigError {
             Self::Io(err) => write!(f, "I/O error: {err}"),
             Self::Parse(err) => write!(f, "parse error: {err}"),
             Self::MissingPath => write!(f, "could not determine CPU config path"),
+            Self::Unstable(path) => write!(f, "CPU config changed while being read: {}", path.display()),
         }
     }
 }
@@ -66,13 +68,28 @@ struct CachedConfig {
     config: HostCpuConfig,
 }
 
+struct HostCpuConfigCache {
+    cached: Option<CachedConfig>,
+    resolutions: usize,
+}
+
 /// Cheap on-disk staleness marker: (mtime, length). Detected via `fs::metadata`
 /// (a `stat`/`statx` syscall), never `openat` — unlike reading the full file
 /// content, this lets `host_cpu_config()` re-verify freshness on every call
 /// without re-opening `cpu_config.sdn` when nothing has changed.
 type ConfigFingerprint = (std::time::SystemTime, u64);
+const MAX_CONFIG_STABILITY_ATTEMPTS: usize = 2;
 
 fn config_fingerprint(path: &Path) -> Result<Option<ConfigFingerprint>, HostCpuConfigError> {
+    #[cfg(test)]
+    if let Some(fingerprint) = test_fingerprint_sequence()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .pop()
+    {
+        return Ok(fingerprint);
+    }
+
     match fs::metadata(path) {
         Ok(meta) => {
             let modified = meta.modified()?;
@@ -83,14 +100,58 @@ fn config_fingerprint(path: &Path) -> Result<Option<ConfigFingerprint>, HostCpuC
     }
 }
 
-fn config_cache() -> &'static Mutex<Option<CachedConfig>> {
-    static CACHE: OnceLock<Mutex<Option<CachedConfig>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(None))
+#[cfg(test)]
+fn test_fingerprint_sequence() -> &'static Mutex<Vec<Option<ConfigFingerprint>>> {
+    static SEQUENCE: OnceLock<Mutex<Vec<Option<ConfigFingerprint>>>> = OnceLock::new();
+    SEQUENCE.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+#[cfg(test)]
+struct FingerprintSequenceGuard;
+
+#[cfg(test)]
+fn install_test_fingerprint_sequence(sequence: Vec<Option<ConfigFingerprint>>) -> FingerprintSequenceGuard {
+    *test_fingerprint_sequence()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = sequence;
+    FingerprintSequenceGuard
+}
+
+#[cfg(test)]
+impl Drop for FingerprintSequenceGuard {
+    fn drop(&mut self) {
+        test_fingerprint_sequence()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+    }
+}
+
+fn config_cache() -> &'static Mutex<HostCpuConfigCache> {
+    static CACHE: OnceLock<Mutex<HostCpuConfigCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HostCpuConfigCache { cached: None, resolutions: 0 }))
+}
+
+#[doc(hidden)]
+pub fn clear_host_cpu_config_cache() {
+    let mut cache = config_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache.cached = None;
+    cache.resolutions = 0;
 }
 
 #[doc(hidden)]
 pub fn reset_host_cpu_config_cache_for_tests() {
-    *config_cache().lock().unwrap() = None;
+    clear_host_cpu_config_cache();
+}
+
+#[doc(hidden)]
+pub fn host_cpu_config_resolution_count_for_tests() -> usize {
+    config_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .resolutions
 }
 
 pub fn active_simd_tier() -> SimdTier {
@@ -107,17 +168,35 @@ pub fn active_simd_tier() -> SimdTier {
 
 pub fn host_cpu_config() -> Result<HostCpuConfig, HostCpuConfigError> {
     let path = cpu_config_path().ok_or(HostCpuConfigError::MissingPath)?;
+    let mut guard = config_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let fingerprint = config_fingerprint(&path)?;
-    let mut guard = config_cache().lock().unwrap();
-    if let Some(cached) = guard.as_ref() {
+    if let Some(cached) = guard.cached.as_ref() {
         if cached.path == path && cached.fingerprint == fingerprint {
             return Ok(cached.config.clone());
         }
     }
 
-    let config = load_or_initialize_config(&path)?;
-    let fingerprint = config_fingerprint(&path)?;
-    *guard = Some(CachedConfig {
+    guard.cached = None;
+    guard.resolutions += 1;
+    let mut before = fingerprint;
+    let (config, fingerprint) = {
+        let mut attempts = 0;
+        loop {
+        let config = load_or_initialize_config(&path)?;
+        let after = config_fingerprint(&path)?;
+            attempts += 1;
+            if before == after || attempts >= MAX_CONFIG_STABILITY_ATTEMPTS {
+                if before != after {
+                    return Err(HostCpuConfigError::Unstable(path.clone()));
+                }
+                break (config, after);
+            }
+            before = after;
+        }
+    };
+    guard.cached = Some(CachedConfig {
         path,
         fingerprint,
         config: config.clone(),
@@ -159,8 +238,9 @@ fn load_or_initialize_config(path: &Path) -> Result<HostCpuConfig, HostCpuConfig
         let source = fs::read_to_string(path)?;
         let parsed = parse_config_document(&source, &detected)?;
         let canonical = canonicalize_enabled(parsed.clone(), &detected);
-        let _changed = canonical != parsed;
-        write_config(path, &canonical)?;
+        if canonical != parsed {
+            write_config(path, &canonical)?;
+        }
         return Ok(canonical);
     }
 
@@ -491,9 +571,9 @@ mod tests {
         let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         let previous = std::env::var(SIMPLE_CPU_CONFIG_PATH).ok();
         std::env::set_var(SIMPLE_CPU_CONFIG_PATH, path);
-        *config_cache().lock().unwrap_or_else(|err| err.into_inner()) = None;
+        clear_host_cpu_config_cache();
         let result = f();
-        *config_cache().lock().unwrap_or_else(|err| err.into_inner()) = None;
+        clear_host_cpu_config_cache();
         match previous.as_deref() {
             Some(value) => std::env::set_var(SIMPLE_CPU_CONFIG_PATH, value),
             None => std::env::remove_var(SIMPLE_CPU_CONFIG_PATH),
@@ -505,9 +585,9 @@ mod tests {
         let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         let previous = std::env::var(SIMPLE_CPU_CONFIG_PATH).ok();
         std::env::set_var(SIMPLE_CPU_CONFIG_PATH, path);
-        *config_cache().lock().unwrap_or_else(|err| err.into_inner()) = None;
+        clear_host_cpu_config_cache();
         let result = f();
-        *config_cache().lock().unwrap_or_else(|err| err.into_inner()) = None;
+        clear_host_cpu_config_cache();
         match previous.as_deref() {
             Some(value) => std::env::set_var(SIMPLE_CPU_CONFIG_PATH, value),
             None => std::env::remove_var(SIMPLE_CPU_CONFIG_PATH),
@@ -528,6 +608,56 @@ mod tests {
 
             let parsed = host_cpu_config().unwrap();
             assert_eq!(parsed, config);
+        });
+    }
+
+    #[test]
+    fn does_not_rewrite_semantically_unchanged_cpu_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("cpu_config.sdn");
+
+        with_cpu_config_path(&path, || {
+            let initial = host_cpu_config().unwrap();
+            let source = fs::read_to_string(&path).unwrap();
+            let equivalent_source = source.replacen("version: 1", "version:  1", 1);
+            assert_ne!(equivalent_source, source);
+            fs::write(&path, &equivalent_source).unwrap();
+            reset_host_cpu_config_cache_for_tests();
+
+            assert_eq!(host_cpu_config().unwrap(), initial);
+            assert_eq!(fs::read_to_string(&path).unwrap(), equivalent_source);
+        });
+    }
+
+    #[test]
+    fn host_cpu_config_returns_unstable_after_bounded_fingerprint_retry_without_caching() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("cpu_config.sdn");
+
+        with_cpu_config_path(&path, || {
+            let detected = detected_config();
+            fs::write(&path, render_config(&detected)).unwrap();
+
+            let epoch = std::time::SystemTime::UNIX_EPOCH;
+            let fingerprints = vec![
+                Some((epoch + std::time::Duration::from_secs(2), 3)),
+                Some((epoch + std::time::Duration::from_secs(1), 3)),
+                Some((epoch, 3)),
+            ];
+            let _sequence = install_test_fingerprint_sequence(fingerprints);
+            let error = host_cpu_config().unwrap_err();
+            assert!(matches!(error, HostCpuConfigError::Unstable(ref actual) if actual == &path));
+            assert_eq!(host_cpu_config_resolution_count_for_tests(), 1);
+            drop(_sequence);
+
+            let mut changed = detected;
+            changed.enabled.simd_tier = SimdTier::Scalar;
+            changed.enabled.instruction_sets.clear();
+            fs::write(&path, render_config(&changed)).unwrap();
+
+            let reloaded = host_cpu_config().unwrap();
+            assert_eq!(reloaded.enabled.simd_tier, SimdTier::Scalar);
+            assert_eq!(host_cpu_config_resolution_count_for_tests(), 2);
         });
     }
 

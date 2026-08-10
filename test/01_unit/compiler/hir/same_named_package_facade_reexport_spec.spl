@@ -108,6 +108,32 @@ fn expect_actual_no_init_host_facade_chain_resolves(reverse_discovery: bool):
     expect(hir.symbols.lookup("time_now_unix_micros").?).to_be_truthy()
     expect(hir.symbols.lookup("getpid").?).to_be_truthy()
 
+fn expect_cyclic_facades_terminate_and_preserve_reachable_exports():
+    val log = facade_test_logger()
+    val owner_source = "pub fn reachable() -> i64:\n    42"
+    val left_source = "use graph.cycle.right.*\nexport reachable, missing"
+    val right_source = "use graph.cycle.left.*\nuse graph.cycle.owner.\{reachable\}\nexport reachable, missing"
+    val consumer_source = "use graph.cycle.left.\{reachable, missing\}\nfn main() -> i64:\n    reachable()"
+
+    var modules: Dict<text, Module> = {}
+    modules["graph.cycle.owner"] = facade_test_module(owner_source, "graph.cycle.owner", log)
+    modules["graph.cycle.left"] = facade_test_module(left_source, "graph.cycle.left", log)
+    modules["graph.cycle.right"] = facade_test_module(right_source, "graph.cycle.right", log)
+    modules["graph.cycle.consumer"] = facade_test_module(consumer_source, "graph.cycle.consumer", log)
+
+    val sources = [
+        SourceFile(path: "graph/cycle/owner.spl", content: owner_source, module_name: "graph.cycle.owner"),
+        SourceFile(path: "graph/cycle/left.spl", content: left_source, module_name: "graph.cycle.left"),
+        SourceFile(path: "graph/cycle/right.spl", content: right_source, module_name: "graph.cycle.right")
+    ]
+    val surfaces_result = module_surfaces_from_modules(modules, sources)
+    expect(surfaces_result.is_ok()).to_be_truthy()
+    var lowering = hirlowering_for_module("graph.cycle.consumer", surfaces_result.unwrap())
+    val hir = lowering.lower_module(modules["graph.cycle.consumer"])
+
+    expect(hir.symbols.lookup("reachable").?).to_be_truthy()
+    expect(hir.symbols.lookup("missing").?).to_be_falsy()
+
 describe "same-named file and directory facade re-exports":
     it "reaches host owners when package facades are discovered first":
         expect_host_facade_chain_resolves(false)
@@ -121,3 +147,7 @@ describe "actual Stage4 host facades without init surfaces":
 
     it "converges with the adjacent facade discovery order reversed":
         expect_actual_no_init_host_facade_chain_resolves(true)
+
+describe "cyclic facade re-exports":
+    it "terminates misses while preserving a reachable owner":
+        expect_cyclic_facades_terminate_and_preserve_reachable_exports()

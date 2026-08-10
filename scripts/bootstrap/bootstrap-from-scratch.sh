@@ -1,4 +1,36 @@
 #!/bin/sh
+
+# Keep bootstrap and every non-detached descendant in one dedicated kernel
+# process group. Lock recovery remains fail-closed while any group member lives.
+bootstrap_entry_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || exit 70
+bootstrap_session_helper=\
+"${bootstrap_entry_dir}/../check/lib/portable-session-exec.pl"
+if [ "${SIMPLE_BOOTSTRAP_SESSION_READY:-0}" = 1 ]; then
+  bootstrap_session_identity=$(perl "${bootstrap_session_helper}" \
+    --identity-parent) || {
+    echo "error: bootstrap could not verify its native session identity" >&2
+    exit 70
+  }
+  bootstrap_session_pid=$(printf '%s\n' "${bootstrap_session_identity}" |
+    sed -n 's/^pid=//p')
+  bootstrap_session_pgid=$(printf '%s\n' "${bootstrap_session_identity}" |
+    sed -n 's/^pgid=//p')
+  case "${bootstrap_session_pid}" in
+    ''|*[!0-9]*) bootstrap_session_pid=invalid ;;
+  esac
+  case "${bootstrap_session_pgid}" in
+    ''|*[!0-9]*) bootstrap_session_pgid=invalid ;;
+  esac
+  [ "${bootstrap_session_pid}" = "${bootstrap_session_pgid}" ] || {
+    echo "error: bootstrap session guard was bypassed without PID=PGID" >&2
+    exit 70
+  }
+else
+  SIMPLE_BOOTSTRAP_SESSION_READY=1
+  export SIMPLE_BOOTSTRAP_SESSION_READY
+  exec perl "${bootstrap_session_helper}" \
+    /bin/sh "$0" "$@"
+fi
 set -eu
 
 # Bootstrap wrapper for Linux, macOS, Windows/MSYS2, and FreeBSD.
@@ -306,6 +338,13 @@ BOOTSTRAP_STAGE3_FACADE_PATH=\
 "${repo_root}/scripts/check/lib/bootstrap-stage3-provenance.shs"
 export BOOTSTRAP_STAGE3_FACADE_PATH
 . "${BOOTSTRAP_STAGE3_FACADE_PATH}"
+PORTABLE_LOCK_ATOMIC_HELPER_PATH=\
+"${repo_root}/scripts/check/lib/portable-hardlink-lock.pl"
+export PORTABLE_LOCK_ATOMIC_HELPER_PATH
+. "${repo_root}/scripts/check/lib/portable-process-lock.shs"
+. "${repo_root}/scripts/bootstrap/bootstrap-authority-wiring.shs"
+bootstrap_runtime_authority_path=\
+"${repo_root}/src/compiler_rust/target/bootstrap"
 bootstrap_script_path="${repo_root}/scripts/bootstrap/bootstrap-from-scratch.sh"
 bootstrap_script_sha256_before=$(bootstrap_stage3_hash_file "${bootstrap_script_path}")
 bootstrap_provenance_helper="${repo_root}/scripts/check/lib/bootstrap-stage3-provenance.shs"
@@ -327,25 +366,23 @@ stage4_provenance_helper_sha256_before=$(
 # and race binary writes (observed 2026-07-24: twin stage2 builds truncated
 # each other's linked binary to 0 KB, and target/bootstrap/simple was clobbered
 # to 0 bytes by the same class of race). Directory-based lock, stale-safe.
-bootstrap_lock="${output_dir}.lock"
-mkdir -p "$(dirname -- "${bootstrap_lock}")"
-if ! mkdir "${bootstrap_lock}" 2>/dev/null; then
-  holder_pid=$(cat "${bootstrap_lock}/pid" 2>/dev/null || echo "")
-  if [ -n "${holder_pid}" ] && kill -0 "${holder_pid}" 2>/dev/null; then
-    echo "error: another bootstrap (pid ${holder_pid}) already runs against ${output_dir}." >&2
-    echo "Wait for it to finish, or run with --output=<other-dir> for an isolated build." >&2
-    exit 1
-  fi
-  echo "warning: removing stale bootstrap lock ${bootstrap_lock} (holder gone)" >&2
-  rm -rf "${bootstrap_lock}"
-  if ! mkdir "${bootstrap_lock}" 2>/dev/null; then
-    echo "error: could not acquire bootstrap lock ${bootstrap_lock}" >&2
-    exit 1
-  fi
-fi
-echo "$$" > "${bootstrap_lock}/pid"
+bootstrap_lock_handle=
+rust_target_lock_handle=
+portable_lock_canonical_output "${output_dir}" || {
+  echo "error: invalid or inaccessible bootstrap output path: ${output_dir}" >&2
+  exit 1
+}
+output_dir=${PORTABLE_LOCK_CANONICAL_OUTPUT}
+bootstrap_lock_root="$(dirname -- "${output_dir}")/.simple-bootstrap-locks"
+bootstrap_lock_name="output-$(bootstrap_stage3_args_sha256 "${output_dir}")"
+portable_lock_acquire "${bootstrap_lock_root}" "${bootstrap_lock_name}" \
+  "${SIMPLE_BOOTSTRAP_LOCK_WAIT_SECONDS:-30}" || {
+  echo "error: timed out waiting for bootstrap output ownership: ${output_dir}" >&2
+  exit 1
+}
+bootstrap_lock_handle=${PORTABLE_LOCK_HANDLE}
 bootstrap_progress_pid=
-deploy_lock=
+deploy_lock_handle=
 bootstrap_progress_state=
 build_progress_events=
 bootstrap_progress_event() {
@@ -387,8 +424,9 @@ bootstrap_progress_mark() {
   esac
 }
 bootstrap_cleanup() {
-  bootstrap_status=$?
-  trap - EXIT INT TERM
+  bootstrap_status=${1:-$?}
+  trap - EXIT HUP INT QUIT TERM
+  set +e
   if [ -n "${progress_log}" ] && [ -n "${bootstrap_progress_state}" ]; then
     bootstrap_progress_mark "exit-${bootstrap_status}" ""
   fi
@@ -396,13 +434,34 @@ bootstrap_cleanup() {
     kill "${bootstrap_progress_pid}" 2>/dev/null || true
     wait "${bootstrap_progress_pid}" 2>/dev/null || true
   fi
-  rm -rf "${bootstrap_lock}"
-  if [ -n "${deploy_lock}" ]; then
-    rm -rf "${deploy_lock}"
+  if [ -z "${bootstrap_abnormal_signal:-}" ]; then
+    if [ -n "${deploy_lock_handle}" ]; then
+      portable_lock_release "${deploy_lock_handle}"
+      deploy_lock_handle=
+    fi
+    if [ -n "${rust_target_lock_handle}" ]; then
+      portable_lock_release "${rust_target_lock_handle}"
+      rust_target_lock_handle=
+    fi
+    if [ -n "${bootstrap_lock_handle}" ]; then
+      portable_lock_release "${bootstrap_lock_handle}"
+      bootstrap_lock_handle=
+    fi
   fi
   exit "${bootstrap_status}"
 }
-trap bootstrap_cleanup EXIT INT TERM
+bootstrap_signal_exit() {
+  bootstrap_abnormal_signal=$1
+  bootstrap_signal_status=$2
+  trap - HUP INT QUIT TERM
+  exit "${bootstrap_signal_status}"
+}
+bootstrap_abnormal_signal=
+trap 'bootstrap_cleanup $?' EXIT
+trap 'bootstrap_signal_exit HUP 129' HUP
+trap 'bootstrap_signal_exit INT 130' INT
+trap 'bootstrap_signal_exit QUIT 131' QUIT
+trap 'bootstrap_signal_exit TERM 143' TERM
 
 if [ -n "${progress_log}" ]; then
   [ "${progress_log}" != default ] || progress_log="${output_dir}/bootstrap-progress.log"
@@ -791,6 +850,9 @@ bootstrap_stage_sanity() (
   sanity_tmpdir=$4
   sanity_path=$5
   for sanity_env_name in $(env | sed 's/=.*//'); do
+    case "${sanity_env_name}" in
+      ''|[0-9]*|*[!A-Za-z0-9_]*) continue ;;
+    esac
     unset "${sanity_env_name}"
   done
   HOME=${sanity_home}
@@ -877,7 +939,7 @@ bootstrap_native_build_main() {
     --cache-dir "${native_cache_dir}" \
     --mode one-binary \
     --entry src/app/cli/main.spl \
-    --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
+    --runtime-path "${bootstrap_runtime_authority_path}" \
     -o "${output}"
   env RUST_LOG="${RUST_LOG:-error}" \
     SIMPLE_BOOTSTRAP=1 \
@@ -891,7 +953,7 @@ bootstrap_native_build_main() {
     SIMPLE_NATIVE_BUILD_TARGET="${PLATFORM}" \
     SIMPLE_NATIVE_BUILD_THREADS="${selfhost_jobs}" \
     SIMPLE_NATIVE_BUILD_CACHE_DIR="${native_cache_dir}" \
-    SIMPLE_RUNTIME_PATH="$(pwd)/src/compiler_rust/target/bootstrap" \
+    SIMPLE_RUNTIME_PATH="${bootstrap_runtime_authority_path}" \
     LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
     SIMPLE_NO_STUB_FALLBACK=1 \
     SIMPLE_BINARY="$(absolute_path "${compiler}")" \
@@ -905,6 +967,26 @@ bootstrap_native_build_main() {
 seed_bin="src/compiler_rust/target/bootstrap/simple${exe_suffix}"
 native_all_lib="src/compiler_rust/target/bootstrap/${archive_prefix}simple_native_all${archive_suffix}"
 compiler_backfill_lib="src/compiler_rust/target/bootstrap/${archive_prefix}simple_compiler_backfill${archive_suffix}"
+rust_authority_lock_root="${repo_root}/src/compiler_rust/target/.bootstrap-authority-locks"
+rust_authority_generation_root="${repo_root}/src/compiler_rust/target/bootstrap.generations"
+rust_authority_current_marker="${repo_root}/src/compiler_rust/target/bootstrap.current.env"
+rust_authority_compatibility_path="${repo_root}/src/compiler_rust/target/bootstrap"
+
+bootstrap_acquire_rust_authority() {
+  [ -z "${rust_target_lock_handle}" ] || return 0
+  portable_lock_acquire "${rust_authority_lock_root}" authority \
+    "${SIMPLE_BOOTSTRAP_AUTHORITY_LOCK_WAIT_SECONDS:-120}" || {
+    echo "error: timed out waiting for shared Rust authority publication" >&2
+    return 1
+  }
+  rust_target_lock_handle=${PORTABLE_LOCK_HANDLE}
+}
+
+bootstrap_release_rust_authority() {
+  [ -n "${rust_target_lock_handle}" ] || return 0
+  portable_lock_release "${rust_target_lock_handle}" || return 1
+  rust_target_lock_handle=
+}
 
 if [ "${diagnostic_sweep}" -eq 1 ]; then
   if [ "${deploy}" -eq 1 ] || [ "${release_tests}" -eq 1 ] || [ "${full_cli}" -eq 1 ]; then
@@ -953,6 +1035,21 @@ seed_inputs_hash() {
 seed_stale=0
 rust_rebuilt=0
 compiler_backfill_rebuilt=0
+if [ -e "${rust_authority_current_marker}.transaction" ]; then
+  bootstrap_acquire_rust_authority || exit 1
+  bootstrap_authority_recover_or_refuse "${full_bootstrap}" \
+    "${rust_authority_generation_root}" "${rust_authority_current_marker}" \
+    "${rust_authority_compatibility_path}" \
+    "${rust_target_lock_handle}" || {
+    if [ "${full_bootstrap}" -eq 0 ]; then
+      echo "error: Rust authority publication is incomplete; run --full-bootstrap to recover" >&2
+    else
+      echo "error: full bootstrap could not recover Rust authority publication" >&2
+    fi
+    exit 1
+  }
+  bootstrap_release_rust_authority || exit 1
+fi
 # (content-hash staleness gate runs below, after backend/llvm_features settle)
 
 # Detect LLVM 18 availability for LLVM backends.
@@ -1222,7 +1319,9 @@ if [ "${full_bootstrap}" -eq 0 ]; then
     echo "WARNING: Rust sources changed; reusing the existing seed because --full-bootstrap was not given."
   fi
   echo "Pure-Simple mode: ${bootstrap_mode}; reusing Rust seed, rebuilding only pure-Simple stages."
-elif [ ! -x "${seed_bin}" ] || [ ! -f "${native_all_lib}" ] || [ "${seed_stale}" -eq 1 ]; then
+elif bootstrap_stage3_rust_tuple_requires_complete_rebuild \
+  "${seed_bin}" "${native_all_lib}" "${compiler_backfill_lib}" \
+  "${seed_stale}"; then
   echo "Building Rust seed compiler + runtime library..."
   # Split into two cargo invocations to defeat feature unification:
   # `simple-native-all` enables `driver-hooks` on `simple-runtime`, which gates
@@ -1249,16 +1348,6 @@ elif [ ! -x "${seed_bin}" ] || [ ! -f "${native_all_lib}" ] || [ "${seed_stale}"
     build --locked --offline \
     --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap \
     --target "${PLATFORM}" -p simple-runtime --features runtime-symbol-table
-  mkdir -p "$(dirname -- "${seed_bin}")"
-  cp -p "${rust_authority_profile_dir}/simple${exe_suffix}" "${seed_bin}"
-  cp -p "${rust_authority_profile_dir}/${archive_prefix}simple_native_all${archive_suffix}" \
-    "${native_all_lib}"
-  for rust_runtime_artifact in \
-    "${rust_authority_profile_dir}/${archive_prefix}simple_runtime"* \
-    "${rust_authority_profile_dir}/simple_runtime.dll"; do
-    [ -f "${rust_runtime_artifact}" ] || continue
-    cp -p "${rust_runtime_artifact}" "$(dirname -- "${seed_bin}")/"
-  done
   rust_rebuilt=1
 fi
 
@@ -1268,24 +1357,68 @@ if [ "${full_bootstrap}" -eq 1 ] \
     build --locked --offline \
     --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap \
     --target "${PLATFORM}" -p simple-compiler-backfill
-  cp -p "${rust_authority_profile_dir}/${archive_prefix}simple_compiler_backfill${archive_suffix}" \
-    "${compiler_backfill_lib}"
   compiler_backfill_rebuilt=1
 fi
 if [ "${rust_rebuilt}" -eq 1 ] || [ "${compiler_backfill_rebuilt}" -eq 1 ]; then
-  bootstrap_stage3_write_seed_stamp "${seed_stamp}" \
-    "${seed_inputs_fingerprint}" "${seed_bin}" "${native_all_lib}" \
-    "${compiler_backfill_lib}" || {
-    echo "error: could not bind Rust seed/runtime artifact tuple" >&2
+  seed_inputs_fingerprint_after=$(seed_inputs_hash) || {
+    echo "error: failed to re-fingerprint Rust seed inputs after Cargo" >&2
     exit 1
   }
+  if [ "${seed_inputs_fingerprint_after}" != "${seed_inputs_fingerprint}" ]; then
+    echo "error: Rust inputs changed during full bootstrap; refusing to publish a stale seed" >&2
+    exit 1
+  fi
+  seed_inputs_fingerprint="${seed_inputs_fingerprint_after}"
+  rust_generation_nonce=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
+  case "${rust_generation_nonce}" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+    *) echo "error: could not generate Rust authority nonce" >&2; exit 1 ;;
+  esac
+  bootstrap_stage3_prepare_seed_generation \
+    "${rust_authority_profile_dir}" "${rust_authority_generation_root}" \
+    "${seed_inputs_fingerprint}" "simple${exe_suffix}" \
+    "${archive_prefix}simple_native_all${archive_suffix}" \
+    "${archive_prefix}simple_compiler_backfill${archive_suffix}" \
+    "${rust_generation_nonce}" || {
+    echo "error: could not prepare immutable Rust authority generation" >&2
+    exit 1
+  }
+  bootstrap_acquire_rust_authority || exit 1
+  seed_inputs_fingerprint_commit=$(seed_inputs_hash) || {
+    echo "error: failed to fingerprint Rust inputs before authority commit" >&2
+    exit 1
+  }
+  [ "${seed_inputs_fingerprint_commit}" = "${seed_inputs_fingerprint}" ] || {
+    echo "error: Rust inputs changed while waiting to publish authority" >&2
+    exit 1
+  }
+  bootstrap_stage3_publish_seed_generation \
+    "${BOOTSTRAP_STAGE3_PREPARED_STAGING}" \
+    "${BOOTSTRAP_STAGE3_PREPARED_GENERATION}" \
+    "${rust_authority_current_marker}" "${seed_inputs_fingerprint}" \
+    "${BOOTSTRAP_STAGE3_PREPARED_HASH}" \
+    "${seed_inputs_fingerprint_commit}" \
+    "${rust_authority_compatibility_path}" || {
+    echo "error: could not commit immutable Rust authority generation" >&2
+    exit 1
+  }
+  bootstrap_stage3_resolve_committed_seed \
+    "${rust_authority_generation_root}" \
+    "${rust_authority_current_marker}" || {
+    echo "error: committed Rust authority generation failed verification" >&2
+    exit 1
+  }
+  seed_bin="src/compiler_rust/target/bootstrap/simple${exe_suffix}"
+  native_all_lib="src/compiler_rust/target/bootstrap/${archive_prefix}simple_native_all${archive_suffix}"
+  compiler_backfill_lib="src/compiler_rust/target/bootstrap/${archive_prefix}simple_compiler_backfill${archive_suffix}"
+  seed_stamp="${seed_bin}.inputs.sha256"
 fi
 
 # Force manual bootstrap — ensures SIMPLE_RUNTIME_PATH is used for linking
 # The full CLI `build bootstrap` command doesn't forward the runtime path
 can_full_bootstrap=0
 
-export SIMPLE_RUNTIME_PATH="$(pwd)/src/compiler_rust/target/bootstrap"
+export SIMPLE_RUNTIME_PATH="${bootstrap_runtime_authority_path}"
 export SIMPLE_BOOTSTRAP=1
 echo "Running bootstrap pipeline..."
 echo "  runtime:  ${SIMPLE_RUNTIME_PATH}"
@@ -1304,7 +1437,7 @@ if [ "${can_full_bootstrap}" -eq 1 ]; then
   # Full CLI available — use high-level staged bootstrap
   echo "  mode:     full CLI (build bootstrap)"
   RUST_LOG="${RUST_LOG:-error}" \
-    SIMPLE_RUNTIME_PATH="$(pwd)/src/compiler_rust/target/bootstrap" \
+    SIMPLE_RUNTIME_PATH="${bootstrap_runtime_authority_path}" \
     SIMPLE_BUILD_PROGRESS_EVENTS="${build_progress_events}" \
     "${seed_bin}" run src/app/cli/main.spl build bootstrap "--backend=${backend}" "--output=${output_dir}"
 else
@@ -1377,6 +1510,11 @@ else
   fi
   mkdir -p "${stage2_provenance_home}" "${stage2_provenance_tmp}" \
     "${stage3_provenance_home}" "${stage3_provenance_tmp}"
+  bootstrap_acquire_rust_authority || exit 1
+  bootstrap_authority_require_owned_lock "${rust_target_lock_handle}" || {
+    echo "error: Rust authority lock ownership was lost before legacy normalization" >&2
+    exit 1
+  }
   runtime_origin_absolute=$(bootstrap_stage3_physical_directory \
     "$(absolute_path src/compiler_rust/target/bootstrap)") || {
     echo "error: missing Rust runtime authority" >&2
@@ -1418,11 +1556,45 @@ else
       echo "error: missing Rust compiler archive authority target" >&2
       exit 1
     }
-    runtime_compiler_archive_materialized="${runtime_compiler_archive_link}.materialized.$$"
-    cp -pL "${runtime_compiler_archive_link}" \
-      "${runtime_compiler_archive_materialized}" || exit 1
-    mv -f "${runtime_compiler_archive_materialized}" \
-      "${runtime_compiler_archive_link}" || exit 1
+    bootstrap_authority_materialize_legacy_file \
+      "${rust_target_lock_handle}" "${runtime_compiler_archive_link}" || {
+      echo "error: could not materialize Rust compiler archive under authority lock" >&2
+      exit 1
+    }
+  fi
+  if [ ! -f "${rust_authority_current_marker}" ]; then
+    bootstrap_stage3_verify_seed_stamp "${seed_stamp}" \
+      "${seed_inputs_fingerprint}" "${seed_bin}" "${native_all_lib}" \
+      "${compiler_backfill_lib}" || {
+      echo "error: markerless legacy Rust authority is incomplete or stale" >&2
+      echo "Run with --full-bootstrap to publish a complete immutable tuple." >&2
+      exit 1
+    }
+    legacy_generation_nonce=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
+    legacy_observed_fingerprint=$(seed_inputs_hash) || exit 1
+    bootstrap_authority_migrate_complete_legacy \
+      "${runtime_origin_absolute}" "${rust_authority_generation_root}" \
+      "${rust_authority_current_marker}" \
+      "${rust_authority_compatibility_path}" \
+      "${seed_inputs_fingerprint}" \
+      "simple${exe_suffix}" \
+      "${archive_prefix}simple_native_all${archive_suffix}" \
+      "${archive_prefix}simple_compiler_backfill${archive_suffix}" \
+      "${legacy_generation_nonce}" "${rust_target_lock_handle}" \
+      "${legacy_observed_fingerprint}" || {
+      echo "error: complete legacy Rust authority migration failed" >&2
+      exit 1
+    }
+    runtime_origin_absolute=${BOOTSTRAP_STAGE3_COMMITTED_AUTHORITY}
+  fi
+  if [ -f "${rust_authority_current_marker}" ]; then
+    bootstrap_stage3_resolve_committed_seed \
+      "${rust_authority_generation_root}" \
+      "${rust_authority_current_marker}" || {
+      echo "error: committed Rust authority is not admissible" >&2
+      exit 1
+    }
+    runtime_origin_absolute=${BOOTSTRAP_STAGE3_COMMITTED_AUTHORITY}
   fi
   bootstrap_stage3_directory_snapshot \
     "$(absolute_path "${runtime_origin_before}")" \
@@ -1446,6 +1618,27 @@ else
     echo "error: Rust runtime authority changed during private admission" >&2
     exit 1
   }
+  bootstrap_release_rust_authority || {
+    echo "error: could not release Rust authority after private admission" >&2
+    exit 1
+  }
+  bootstrap_authority_pin_stage4 \
+    "$(absolute_path "${stage2_runtime_authority}")" \
+    "simple${exe_suffix}" \
+    "${archive_prefix}simple_native_all${archive_suffix}" \
+    "${archive_prefix}simple_compiler_backfill${archive_suffix}" || {
+    echo "error: private admitted Rust authority is incomplete" >&2
+    exit 1
+  }
+  stage_runtime_absolute=${BOOTSTRAP_STAGE4_RUNTIME_PATH}
+  stage2_seed_absolute=${BOOTSTRAP_STAGE4_SEED}
+  seed_bin=${BOOTSTRAP_STAGE4_SEED}
+  native_all_lib=${BOOTSTRAP_STAGE4_NATIVE_ALL}
+  compiler_backfill_lib=${BOOTSTRAP_STAGE4_BACKFILL}
+  seed_stamp="${seed_bin}.inputs.sha256"
+  SIMPLE_RUNTIME_PATH=${stage_runtime_absolute}
+  bootstrap_runtime_authority_path=${stage_runtime_absolute}
+  export SIMPLE_RUNTIME_PATH
   bootstrap_stage3_tool_authority_snapshot \
     "$(absolute_path "${tool_authority_before}")" "${PATH}" \
     "${repo_root}" || {
@@ -1888,7 +2081,7 @@ else
       --cache-dir "${stage2_capability_cache}" \
       --mode "${bootstrap_mode}" \
       --entry test/04_smoke/windows_native_hello.spl \
-      --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
+      --runtime-path "${stage_runtime_absolute}" \
       -o "${stage2_capability_bin}" \
       >"${log_dir}/stage2-capability.log" 2>&1
     stage2_capability_status=$?
@@ -2063,7 +2256,7 @@ run_logged stage4b-ui-backend env RUST_LOG="${RUST_LOG:-error}" \
   --source src/compiler --source src/app --source src/lib \
   --entry-closure --threads "${jobs}" --cache-dir "${native_cache_dir}" \
   --mode "${bootstrap_mode}" --entry src/app/ui/main.spl \
-  --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
+  --runtime-path "${stage_runtime_absolute}" \
   -o "${ui_backend_bin}"
 [ -x "${ui_backend_bin}" ] || { echo "error: failed to compile cached UI backend" >&2; exit 1; }
 echo "Full CLI binary: ${full_bin}"
@@ -2105,7 +2298,7 @@ if [ "${build_mcp}" -eq 1 ]; then
       --cache-dir "${native_cache_dir}" \
       --mode "${bootstrap_mode}" \
       --entry "${mcp_spl}" \
-      --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
+      --runtime-path "${stage_runtime_absolute}" \
       -o "${full_dir}/${mcp_name}${exe_suffix}" \
       >"${log_dir}/${mcp_log}.log" 2>&1
     mcp_status=$?
@@ -2159,12 +2352,13 @@ if [ "${deploy}" -eq 1 ]; then
     echo "ERROR: deploy refused - symlinked deployment directory: ${deploy_dir}" >&2
     exit 1
   fi
-  deploy_lock_candidate="${deploy_dir}/.bootstrap-deploy.lock"
-  if ! mkdir "${deploy_lock_candidate}" 2>/dev/null; then
-    echo "ERROR: deploy refused - deployment is locked: ${deploy_lock_candidate}" >&2
+  deploy_lock_root="${deploy_dir}/.bootstrap-deploy-locks"
+  if ! portable_lock_acquire "${deploy_lock_root}" deployment \
+    "${SIMPLE_BOOTSTRAP_LOCK_WAIT_SECONDS:-30}"; then
+    echo "ERROR: deploy refused - deployment is locked: ${deploy_dir}" >&2
     exit 1
   fi
-  deploy_lock="${deploy_lock_candidate}"
+  deploy_lock_handle=${PORTABLE_LOCK_HANDLE}
 
   # Deploy gate: never swap bin/simple to the self-hosted stage4 binary unless
   # a working seed driver exists at the delegate path. Without it the stage4

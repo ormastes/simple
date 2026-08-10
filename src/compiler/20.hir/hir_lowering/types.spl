@@ -154,18 +154,21 @@ class HirLowering:
     # depth 8 can still be re-expanded from a shallower arrival, which is what
     # keeps the depth cap's reachable set intact.
     glob_expand_memo: {text: i64}
-    # RXM1 (2026-08-06): negative memo for find_reexport_source
-    # (module_lowering.spl), the direct analogue of glob_expand_memo above. That
-    # function's `depth > 8` bail was its ONLY terminator -- the same state GLB2
-    # found the glob walker in -- and it has THREE recursive call sites over the
-    # same cyclic import graph, so a miss re-walks exponentially many paths to
-    # the cap. Maps "<facade key>\t<wanted item>" -> the SHALLOWEST depth at
-    # which that pair was already proven absent; shallowest-wins because a
-    # shallower arrival carries more budget and can reach further. Valid for the
-    # whole build (the function reads no per-file state, only module_surfaces)
-    # and keyed to the surface COUNT so it self-invalidates if that set grows.
-    reexport_miss_memo: {text: i64}
-    reexport_memo_surfaces: i64
+    # Parallel scalar re-export caches keyed by physical surface index and
+    # wanted item. Registry aliases therefore share one cache entry and no
+    # concatenated facade-name key is allocated during traversal.
+    reexport_root_surface_indices: [i64]
+    reexport_root_wanted: [text]
+    reexport_root_found: [bool]
+    reexport_root_terminal_indices: [i64]
+    reexport_root_items: [text]
+    reexport_visit_surface_indices: [i64]
+    reexport_visit_wanted: [text]
+    reexport_visit_depths: [i64]
+    reexport_generation: i64
+    reexport_registry_valid: bool
+    reexport_walk_complete: bool
+    reexport_walk_valid: bool
     # Work counters for the blowup measurement; reported only when
     # SIMPLE_HIR_REEXPORT_STATS=1 (level-gated, default off).
     reexport_chase_calls: i64
@@ -187,7 +190,7 @@ enum LoweringErrorKind:
 
 fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages: [text], diagnostic_recovered: [bool]) -> HirLowering:
     val empty_loaded_modules: [text] = []
-    val empty_module_surfaces = ModuleSurfacesByName(surfaces: [], index_by_name: {})
+    val empty_module_surfaces = ModuleSurfacesByName.empty()
     val empty_impl_functions: HirImplFunctions = {}
     val empty_traits: HirTraitsByName = {}
     val empty_imported_traits: HirImportedTraitsByName = {}
@@ -202,7 +205,14 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
     val empty_enum_variant_names: {text: bool} = {}
     val empty_fn_tuple_returns: {text: [HirType]} = {}
     val empty_glob_expand_memo: {text: i64} = {}
-    val empty_reexport_miss_memo: {text: i64} = {}
+    val empty_reexport_root_surface_indices: [i64] = []
+    val empty_reexport_root_wanted: [text] = []
+    val empty_reexport_root_found: [bool] = []
+    val empty_reexport_root_terminal_indices: [i64] = []
+    val empty_reexport_root_items: [text] = []
+    val empty_reexport_visit_surface_indices: [i64] = []
+    val empty_reexport_visit_wanted: [text] = []
+    val empty_reexport_visit_depths: [i64] = []
     HirLowering(
         symbols: SymbolTable.new(),
         errors: errors,
@@ -231,8 +241,18 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         registering_import_symbols: false,
         fn_tuple_returns: empty_fn_tuple_returns,
         glob_expand_memo: empty_glob_expand_memo,
-        reexport_miss_memo: empty_reexport_miss_memo,
-        reexport_memo_surfaces: -1,
+        reexport_root_surface_indices: empty_reexport_root_surface_indices,
+        reexport_root_wanted: empty_reexport_root_wanted,
+        reexport_root_found: empty_reexport_root_found,
+        reexport_root_terminal_indices: empty_reexport_root_terminal_indices,
+        reexport_root_items: empty_reexport_root_items,
+        reexport_visit_surface_indices: empty_reexport_visit_surface_indices,
+        reexport_visit_wanted: empty_reexport_visit_wanted,
+        reexport_visit_depths: empty_reexport_visit_depths,
+        reexport_generation: 0,
+        reexport_registry_valid: false,
+        reexport_walk_complete: true,
+        reexport_walk_valid: true,
         reexport_chase_calls: 0,
         reexport_chase_memo_hits: 0
     )
@@ -260,13 +280,16 @@ impl HirLowering:
         val preserved_surfaces = self.module_surfaces
         val preserved_traits = self.lowered_traits
         val preserved_inference_config = self.type_inference_config
-        # RXM1: the re-export miss memo is a pure function of `module_surfaces`,
-        # which is preserved across modules, so it must be preserved too --
-        # clearing it per file would re-pay the exponential chase 542 times
-        # over, which is most of the cost this memo exists to remove. Counters
-        # accumulate so the reported total covers the whole build.
-        val preserved_reexport_memo = self.reexport_miss_memo
-        val preserved_reexport_surfaces = self.reexport_memo_surfaces
+        # Root hit/miss results are pure for the frozen registry and are
+        # preserved across modules. Visit-depth state is per-root and is reset
+        # by find_reexport_source before each traversal.
+        val preserved_reexport_root_surface_indices = self.reexport_root_surface_indices
+        val preserved_reexport_root_wanted = self.reexport_root_wanted
+        val preserved_reexport_root_found = self.reexport_root_found
+        val preserved_reexport_root_terminal_indices = self.reexport_root_terminal_indices
+        val preserved_reexport_root_items = self.reexport_root_items
+        val preserved_reexport_generation = self.reexport_generation
+        val preserved_reexport_registry_valid = self.reexport_registry_valid
         val preserved_reexport_calls = self.reexport_chase_calls
         val preserved_reexport_hits = self.reexport_chase_memo_hits
         val fresh = hirlowering_new()
@@ -298,8 +321,18 @@ impl HirLowering:
         self.registering_import_symbols = fresh.registering_import_symbols
         self.fn_tuple_returns = fresh.fn_tuple_returns
         self.glob_expand_memo = fresh.glob_expand_memo
-        self.reexport_miss_memo = preserved_reexport_memo
-        self.reexport_memo_surfaces = preserved_reexport_surfaces
+        self.reexport_root_surface_indices = preserved_reexport_root_surface_indices
+        self.reexport_root_wanted = preserved_reexport_root_wanted
+        self.reexport_root_found = preserved_reexport_root_found
+        self.reexport_root_terminal_indices = preserved_reexport_root_terminal_indices
+        self.reexport_root_items = preserved_reexport_root_items
+        self.reexport_visit_surface_indices = fresh.reexport_visit_surface_indices
+        self.reexport_visit_wanted = fresh.reexport_visit_wanted
+        self.reexport_visit_depths = fresh.reexport_visit_depths
+        self.reexport_generation = preserved_reexport_generation
+        self.reexport_registry_valid = preserved_reexport_registry_valid
+        self.reexport_walk_complete = fresh.reexport_walk_complete
+        self.reexport_walk_valid = fresh.reexport_walk_valid
         self.reexport_chase_calls = preserved_reexport_calls
         self.reexport_chase_memo_hits = preserved_reexport_hits
 

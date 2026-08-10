@@ -100,26 +100,46 @@ use crate::value::{
     clear_all_runtime_registries, rt_dict_clear, rt_dict_contains, rt_dict_get, rt_dict_len, rt_dict_new,
     rt_dict_remove, rt_dict_set, RuntimeValue,
 };
+use crate::value::collections;
 use simple_simd::SimdTier;
-use std::sync::{Mutex, OnceLock};
+fn simd_tier_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    crate::value::runtime_env_registry_test_lock()
+}
 
-fn simd_tier_env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+struct RuntimeEnvRestoreGuard {
+    simd_tier: Option<String>,
+    cpu_config_path: Option<String>,
+}
+
+impl RuntimeEnvRestoreGuard {
+    fn capture() -> Self {
+        Self {
+            simd_tier: std::env::var("SIMPLE_SIMD_TIER").ok(),
+            cpu_config_path: std::env::var("SIMPLE_CPU_CONFIG_PATH").ok(),
+        }
+    }
+}
+
+impl Drop for RuntimeEnvRestoreGuard {
+    fn drop(&mut self) {
+        match self.simd_tier.as_deref() {
+            Some(value) => std::env::set_var("SIMPLE_SIMD_TIER", value),
+            None => std::env::remove_var("SIMPLE_SIMD_TIER"),
+        }
+        match self.cpu_config_path.as_deref() {
+            Some(value) => std::env::set_var("SIMPLE_CPU_CONFIG_PATH", value),
+            None => std::env::remove_var("SIMPLE_CPU_CONFIG_PATH"),
+        }
+        clear_all_runtime_registries();
+    }
 }
 
 fn with_simd_tier_override<T>(value: &str, test: impl FnOnce() -> T) -> T {
-    let _guard = simd_tier_env_lock().lock().unwrap();
-    let previous = std::env::var("SIMPLE_SIMD_TIER").ok();
+    let _guard = simd_tier_env_lock();
+    let _restore = RuntimeEnvRestoreGuard::capture();
     std::env::set_var("SIMPLE_SIMD_TIER", value);
     clear_all_runtime_registries();
-    let result = test();
-    clear_all_runtime_registries();
-    match previous {
-        Some(value) => std::env::set_var("SIMPLE_SIMD_TIER", value),
-        None => std::env::remove_var("SIMPLE_SIMD_TIER"),
-    }
-    result
+    test()
 }
 
 // ============================================================================
@@ -426,6 +446,100 @@ fn test_collection_provider_refreshes_when_active_tier_changes() {
         assert_eq!(active_collection_simd_tier(), SimdTier::X86_64Sse2);
         std::env::set_var("SIMPLE_SIMD_TIER", "scalar");
         assert_eq!(active_collection_simd_tier(), SimdTier::Scalar);
+    });
+}
+
+#[test]
+fn test_collection_provider_resolves_once_per_tier_epoch_and_reset() {
+    with_simd_tier_override("x86_64_sse2", || {
+        assert_eq!(collections::collection_provider_resolution_count_for_tests(), 0);
+        assert_eq!(active_collection_simd_tier(), SimdTier::X86_64Sse2);
+        assert_eq!(active_collection_simd_tier(), SimdTier::X86_64Sse2);
+        assert_eq!(collections::collection_provider_resolution_count_for_tests(), 1);
+
+        std::env::set_var("SIMPLE_SIMD_TIER", "scalar");
+        assert_eq!(active_collection_simd_tier(), SimdTier::Scalar);
+        assert_eq!(active_collection_simd_tier(), SimdTier::Scalar);
+        assert_eq!(collections::collection_provider_resolution_count_for_tests(), 2);
+
+        collections::clear_collection_provider_cache();
+        assert_eq!(collections::collection_provider_resolution_count_for_tests(), 0);
+        assert_eq!(active_collection_simd_tier(), SimdTier::Scalar);
+        assert_eq!(collections::collection_provider_resolution_count_for_tests(), 1);
+    });
+}
+
+#[test]
+fn test_rt_string_split_reuses_host_and_provider_resolution_without_override() {
+    with_simd_tier_override("invalid", || {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("cpu_config.sdn");
+        std::env::set_var("SIMPLE_CPU_CONFIG_PATH", &path);
+        collections::clear_collection_provider_cache();
+
+        let value_bytes = b"one,two";
+        let delimiter_bytes = b",";
+        let value = collections::rt_string_new(value_bytes.as_ptr(), value_bytes.len() as u64);
+        let delimiter =
+            collections::rt_string_new(delimiter_bytes.as_ptr(), delimiter_bytes.len() as u64);
+
+        let host_epoch_start = simple_simd::host_cpu_config_resolution_count_for_tests();
+        let provider_epoch_start = collections::collection_provider_resolution_count_for_tests();
+        let invalid_result = collections::rt_string_split(value, delimiter);
+        assert_eq!(collections::rt_array_len(invalid_result), 2);
+        assert_eq!(
+            simple_simd::host_cpu_config_resolution_count_for_tests() - host_epoch_start,
+            1
+        );
+        assert_eq!(
+            collections::collection_provider_resolution_count_for_tests() - provider_epoch_start,
+            1
+        );
+
+        std::env::remove_var("SIMPLE_SIMD_TIER");
+        for _ in 0..3 {
+            let result = collections::rt_string_split(value, delimiter);
+            assert_eq!(collections::rt_array_len(result), 2);
+        }
+        assert_eq!(
+            simple_simd::host_cpu_config_resolution_count_for_tests() - host_epoch_start,
+            1
+        );
+        assert_eq!(
+            collections::collection_provider_resolution_count_for_tests() - provider_epoch_start,
+            1
+        );
+
+        let source = std::fs::read_to_string(&path).unwrap();
+        let equivalent_source = source.replacen("version: 1", "version:  1", 1);
+        std::fs::write(&path, &equivalent_source).unwrap();
+        let result = collections::rt_string_split(value, delimiter);
+        assert_eq!(collections::rt_array_len(result), 2);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), equivalent_source);
+        assert_eq!(
+            simple_simd::host_cpu_config_resolution_count_for_tests() - host_epoch_start,
+            1
+        );
+        assert_eq!(
+            collections::collection_provider_resolution_count_for_tests() - provider_epoch_start,
+            1
+        );
+
+        collections::clear_collection_provider_cache();
+        let refreshed_host_epoch_start = simple_simd::host_cpu_config_resolution_count_for_tests();
+        let refreshed_provider_epoch_start = collections::collection_provider_resolution_count_for_tests();
+        let result = collections::rt_string_split(value, delimiter);
+        assert_eq!(collections::rt_array_len(result), 2);
+        assert_eq!(
+            simple_simd::host_cpu_config_resolution_count_for_tests() - refreshed_host_epoch_start,
+            1
+        );
+        assert_eq!(
+            collections::collection_provider_resolution_count_for_tests()
+                - refreshed_provider_epoch_start,
+            1
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), equivalent_source);
     });
 }
 

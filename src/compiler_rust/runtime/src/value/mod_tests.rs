@@ -1,9 +1,6 @@
 use super::*;
-use std::sync::{Mutex, OnceLock};
-
-fn simd_tier_env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+fn simd_tier_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    crate::value::runtime_env_registry_test_lock()
 }
 
 #[test]
@@ -135,7 +132,7 @@ fn test_sffi_functions() {
 
 #[test]
 fn clear_all_runtime_registries_resets_tier_sensitive_provider_caches() {
-    let _guard = simd_tier_env_lock().lock().unwrap();
+    let _guard = simd_tier_env_lock();
     let previous = std::env::var("SIMPLE_SIMD_TIER").ok();
     let cached_a = rt_string_new("a".as_ptr(), 1);
 

@@ -2,7 +2,6 @@
 
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.{HirStruct}
-use compiler.hir.hir_lowering.items.{hir_module_logical_name_from_path}
 
 struct ValueStructLayoutWalk:
     node_key: text
@@ -23,27 +22,54 @@ fn value_layout_symbol_is_struct(symbol: HirSymbol) -> bool:
         case _: false
 
 fn value_layout_node_key(module_name: text, struct_name: text) -> text:
-    hir_module_logical_name_from_path(module_name) + "|" + struct_name
+    # Both values are compiler-owned scalar identities. Re-normalizing a key
+    # through HIR path logic is unnecessary and crosses a fragile native text
+    # boundary after full-closure HIR allocation.
+    module_name + "|" + struct_name
 
-fn validate_value_struct_layouts(modules: Dict<text, HirModule>) -> [text]:
-    """Return the first resolved direct by-value struct cycle, if any."""
+fn validate_value_struct_layouts(
+    module_keys: [text],
+    module_values: [HirModule]
+) -> [text]:
+    """Return the first resolved direct by-value struct cycle, if any.
+
+    The validator accepts a deliberately aligned, physical-module view instead
+    of `Dict<text, HirModule>`. Native bootstrap can retain a dictionary key
+    while dropping its aggregate HIR value; direct array indexing preserves the
+    paired module identity and aggregate value across this post-HIR boundary.
+    Callers must deduplicate registry aliases before constructing this view.
+    """
+    if module_keys.len() != module_values.len():
+        return ["internal error: value struct layout module keys and values are misaligned"]
     var structs: Dict<text, HirStruct> = {}
-    var owners: Dict<text, HirModule> = {}
-    var canonical_by_alias: Dict<text, text> = {}
+    var owner_module_indices: Dict<text, i64> = {}
     var roots: [text] = []
+    var seen_module_keys: [text] = []
 
-    for module_key in modules.keys():
-        val module: HirModule = modules[module_key]
-        for struct_ in module.structs.values():
+    var module_index = 0
+    while module_index < module_keys.len():
+        val module_key: text = module_keys[module_index]
+        if seen_module_keys.contains(module_key):
+            return ["internal error: value struct layout module keys contain a duplicate canonical key: " + module_key]
+        seen_module_keys.push(module_key)
+        val module: HirModule = module_values[module_index]
+        val struct_names: [text] = module.structs.keys()
+        var struct_index = 0
+        while struct_index < struct_names.len():
+            val struct_name: text = struct_names[struct_index]
+            val struct_: HirStruct = module.structs[struct_name]
             if struct_.type_params.len() > 0 or struct_.is_generic_template:
+                struct_index = struct_index + 1
                 continue
-            val canonical = value_layout_node_key(module.name, struct_.name)
+            # Use the stable scalar owner key. HirModule.name is unsafe when
+            # projected from an aggregate Dict value under closure pressure.
+            val canonical = value_layout_node_key(module_key, struct_.name)
             structs[canonical] = struct_
-            owners[canonical] = module
-            canonical_by_alias[canonical] = canonical
-            canonical_by_alias[value_layout_node_key(module_key, struct_.name)] = canonical
+            owner_module_indices[canonical] = module_index
             if not roots.contains(canonical):
                 roots.push(canonical)
+            struct_index = struct_index + 1
+        module_index = module_index + 1
 
     # ponytail: per-root walks are simplest for today's sparse type graphs;
     # replace with a color-map DFS only if dense graphs make this measurable.
@@ -59,7 +85,11 @@ fn validate_value_struct_layouts(modules: Dict<text, HirModule>) -> [text]:
             visited.push(walk.node_key)
 
             val struct_ = structs[walk.node_key]
-            val owner = owners[walk.node_key]
+            val owner_module_index = owner_module_indices[walk.node_key]
+            if owner_module_index < 0 or owner_module_index >= module_values.len():
+                return ["internal error: value struct layout owner module index is invalid"]
+            val owner_module_key = module_keys[owner_module_index]
+            val owner: HirModule = module_values[owner_module_index]
             for field in struct_.fields:
                 val named_symbol = value_layout_named_symbol(field.type_)
                 if not named_symbol.?:
@@ -71,9 +101,9 @@ fn validate_value_struct_layouts(modules: Dict<text, HirModule>) -> [text]:
                 if not value_layout_symbol_is_struct(resolved):
                     continue
 
-                val defining_module = resolved.defining_module ?? owner.name
+                val defining_module = resolved.defining_module ?? owner_module_key
                 val unresolved_key = value_layout_node_key(defining_module, resolved.name)
-                val target = (if canonical_by_alias.contains_key(unresolved_key): canonical_by_alias[unresolved_key] else: unresolved_key)
+                val target = unresolved_key
                 if not structs.has(target):
                     continue
 

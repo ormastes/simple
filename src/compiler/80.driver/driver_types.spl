@@ -81,6 +81,7 @@ class CompileContext:
     # (50.mir/_MirLowering/bootstrap_globals.spl:784).
     bootstrap_entry_mir_name: text
     errors: [text]
+    error_count_value: i64
     warnings: [text]
     visibility_warnings: [text]  # Visibility warnings (W0401)
     # Modules whose own diagnostics made their lowered aggregate unusable.
@@ -90,6 +91,10 @@ class CompileContext:
     # :344. Recording the name instead of returning lets the phase keep
     # checking the REMAINING modules and report the whole family in one run.
     poisoned_modules: [text]
+    # Native empty-array field reads can carry a nil aggregate at late phase
+    # boundaries. Keep the count scalar so summary/budget checks do not need
+    # to dereference the array when no module was poisoned.
+    poisoned_module_count_value: i64
     vhdl_hardware_metadata_rows: [VhdlHardwareMetadataFlatRow]
 
     static fn create(options: CompileOptions) -> CompileContext:
@@ -182,14 +187,17 @@ class CompileContext:
             bootstrap_entry_mir: nil,
             bootstrap_entry_mir_name: "",
             errors: [],
+            error_count_value: 0,
             warnings: [],
             visibility_warnings: [],
             poisoned_modules: [],
+            poisoned_module_count_value: 0,
             vhdl_hardware_metadata_rows: []
         )
 
     me add_error(message: text):
         self.errors.push(message)
+        self.error_count_value = self.error_count_value + 1
 
     me add_warning(message: text):
         self.warnings.push(message)
@@ -198,7 +206,10 @@ class CompileContext:
         self.visibility_warnings.push(message)
 
     fn has_errors() -> bool:
-        self.errors.len() > 0
+        self.error_count_value > 0
+
+    fn error_count() -> i64:
+        self.error_count_value
 
     # ------------------------------------------------------------------
     # Collect-all-errors policy (default) / SIMPLE_COMPILE_FAIL_FAST=1 opt-out.
@@ -209,10 +220,11 @@ class CompileContext:
     # Poison a module: its diagnostics are already recorded in `errors`, but
     # its aggregate must NOT reach downstream passes. Callers keep iterating.
     me mark_module_poisoned(name: text):
-        self.poisoned_modules.push(name)
+        self.poisoned_modules = self.poisoned_modules.push(name)
+        self.poisoned_module_count_value = self.poisoned_module_count_value + 1
 
     fn poisoned_module_count() -> i64:
-        self.poisoned_modules.len()
+        self.poisoned_module_count_value
 
     fn is_module_poisoned(name: text) -> bool:
         var idx = 0
@@ -236,7 +248,7 @@ class CompileContext:
 
     # True when this phase must stop iterating units.
     fn poison_budget_exhausted() -> bool:
-        self.poisoned_modules.len() >= self.poison_budget()
+        self.poisoned_module_count_value >= self.poison_budget()
 
     fn get_extension(name: text) -> Any:
         # Resolve a named extension, returning nil if not registered

@@ -276,6 +276,27 @@ pub fn rt_heap_registry_count(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(simple_runtime::value::heap::rt_heap_registry_count()))
 }
 
+/// Return live heap-object header bytes.
+///
+/// Callable from Simple as: `rt_heap_live_bytes() -> i64`
+pub fn rt_heap_live_bytes(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(simple_runtime::value::heap::rt_heap_live_bytes()))
+}
+
+/// Return live container backing-buffer bytes.
+///
+/// Callable from Simple as: `rt_heap_aux_live_bytes() -> i64`
+pub fn rt_heap_aux_live_bytes(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(simple_runtime::value::heap::rt_heap_aux_live_bytes()))
+}
+
+/// Return live array element-buffer capacity bytes.
+///
+/// Callable from Simple as: `rt_heap_array_capacity_bytes() -> i64`
+pub fn rt_heap_array_capacity_bytes(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(simple_runtime::value::heap::rt_heap_array_capacity_bytes()))
+}
+
 /// Live header bytes for one `HeapObjectType` tag (0 for out-of-range kinds).
 ///
 /// Callable from Simple as: `rt_heap_live_bytes_by_kind(kind: i64) -> i64`

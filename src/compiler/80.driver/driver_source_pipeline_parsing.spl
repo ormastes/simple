@@ -134,10 +134,15 @@ impl CompilerDriver:
             self.ctx.add_error(
                 "Module surface extraction error: {origin_result.unwrap_err()}")
             return (self.ctx, false)
+        val finished_surfaces = builder.finish()
+        if finished_surfaces.is_err():
+            self.ctx.add_error(
+                "Module surface alignment error: {finished_surfaces.unwrap_err()}")
+            return (self.ctx, false)
         var streaming_ctx = self.ctx
-        streaming_ctx.module_surfaces = Some(builder.finish())
+        streaming_ctx.module_surfaces = Some(finished_surfaces.unwrap())
         streaming_ctx.modules = {}
-        (streaming_ctx, streaming_ctx.errors.len() == 0)
+        (streaming_ctx, not streaming_ctx.has_errors())
 
     me parse_all_impl() -> (CompileContext, bool):
         if driver_streaming_surface_enabled(self.ctx):
@@ -163,7 +168,7 @@ impl CompilerDriver:
                     # Refuse a stale substitute when one exact entry was requested.
                     if native_entry != "" and not native_entry_closure:
                         if not requested_entry_match:
-                            self.ctx.errors.push(
+                            self.ctx.add_error(
                                 "native-build entry mismatch: requested entry '{native_entry}' but resolver also selected '{source.path}' (module {source.module_name}) — refusing silent substitution")
                             return (self.ctx, false)
                     entry_sources = entry_sources.push(source)
@@ -217,11 +222,12 @@ impl CompilerDriver:
                     # next source. `--fail-fast` / SIMPLE_COMPILE_FAIL_FAST=1
                     # reproduces the old stop-at-first behavior via the same
                     # poison_budget() cap used by HIR lowering.
-                    self.ctx.errors.push(
+                    self.ctx.add_error(
                         "parse error in {source.path} (see [parser_error] output above)")
-                    self.ctx.mark_module_poisoned(source.module_name)
+                    val poison_ctx: CompileContext = self.ctx
+                    poison_ctx.mark_module_poisoned(source.module_name)
                     poisoned_physical_keys = poisoned_physical_keys.push(physical_key)
-                    if self.ctx.poison_budget_exhausted():
+                    if poison_ctx.poison_budget_exhausted():
                         return (self.ctx, false)
                     progress_parse_done = progress_parse_done + 1
                     continue
@@ -267,7 +273,7 @@ impl CompilerDriver:
                         # internal error -- skip it and let collect-all report
                         # the parse error already recorded for it.
                         continue
-                    self.ctx.errors.push(
+                    self.ctx.add_error(
                         "internal entry-closure parse cache miss for {source.path}")
                     return (self.ctx, false)
                 # NOTE: `entry_modules = entry_modules.set(k, v)` (fluent-style
@@ -280,7 +286,7 @@ impl CompilerDriver:
                 # See doc/07_guide/language/dict_native_pitfalls.md.
                 val parsed_box = parsed_entry_modules[parsed_idx]
                 if parsed_box == nil:
-                    self.ctx.errors.push(
+                    self.ctx.add_error(
                         "internal entry-closure parsed module box missing for {source.path}")
                     return (self.ctx, false)
                 entry_modules[source.module_name] = parsed_box.value
@@ -288,9 +294,9 @@ impl CompilerDriver:
             entry_ctx.modules = entry_modules
             entry_ctx.sources = unique_entry_sources
             if entry_sources.len() == 0:
-                entry_ctx.errors.push(
+                entry_ctx.add_error(
                     "native entry source not found: {native_entry}")
-            return (entry_ctx, entry_ctx.errors.len() == 0)
+            return (entry_ctx, not entry_ctx.has_errors())
         if ((rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and
             (rt_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1"):
             var bootstrap_modules: Dict<text, ParserModule> = self.ctx.modules
@@ -313,10 +319,11 @@ impl CompilerDriver:
                         # entry, so Stage-3 failures surfaced as downstream
                         # unresolved-symbol noise instead of the parse error
                         # that caused them. Collect-all applies here too.
-                        self.ctx.errors.push(
+                        self.ctx.add_error(
                             "parse error in {source.path} (see [parser_error] output above)")
-                        self.ctx.mark_module_poisoned(source.module_name)
-                        if self.ctx.poison_budget_exhausted():
+                        val poison_ctx: CompileContext = self.ctx
+                        poison_ctx.mark_module_poisoned(source.module_name)
+                        if poison_ctx.poison_budget_exhausted():
                             var boot_poisoned_ctx: CompileContext = self.ctx
                             boot_poisoned_ctx.modules = bootstrap_modules
                             return (boot_poisoned_ctx, false)
@@ -359,7 +366,7 @@ impl CompilerDriver:
             bootstrap_parse_ctx.modules = bootstrap_modules
             return (
                 bootstrap_parse_ctx,
-                bootstrap_parse_ctx.errors.len() == 0
+                not bootstrap_parse_ctx.has_errors()
             )
 
         var parsed_modules: Dict<text, ParserModule> = self.ctx.modules
@@ -402,10 +409,11 @@ impl CompilerDriver:
                 # (parser.spl:254), so continuing cannot leak a stale flag into
                 # the next source. `--fail-fast` / SIMPLE_COMPILE_FAIL_FAST=1
                 # restores stop-at-first via the shared poison_budget cap.
-                self.ctx.errors.push(
+                self.ctx.add_error(
                     "parse error in {source.path} (see [parser_error] output above)")
-                self.ctx.mark_module_poisoned(source.module_name)
-                if self.ctx.poison_budget_exhausted():
+                val poison_ctx: CompileContext = self.ctx
+                poison_ctx.mark_module_poisoned(source.module_name)
+                if poison_ctx.poison_budget_exhausted():
                     var poisoned_ctx: CompileContext = self.ctx
                     poisoned_ctx.modules = parsed_modules
                     return (poisoned_ctx, false)
@@ -448,7 +456,7 @@ impl CompilerDriver:
         log_debug("parsing done")
         var parsed_all_ctx: CompileContext = self.ctx
         parsed_all_ctx.modules = parsed_modules
-        (parsed_all_ctx, parsed_all_ctx.errors.len() == 0)
+        (parsed_all_ctx, not parsed_all_ctx.has_errors())
 
     fn parse_source(source: SourceFile) -> ParserModule:
         print "[parse_source] start {source.path} module {source.module_name} len {source.content.len()}"
@@ -464,7 +472,7 @@ impl CompilerDriver:
             # inspects ctx.errors cannot mistake a truncated AST for a clean
             # parse. No poison_budget/continue here -- there is no loop to
             # continue, and the caller decides what to do with the module.
-            self.ctx.errors.push(
+            self.ctx.add_error(
                 "parse error in {source.path} (see [parser_error] output above)")
             self.ctx.mark_module_poisoned(source.module_name)
         module
