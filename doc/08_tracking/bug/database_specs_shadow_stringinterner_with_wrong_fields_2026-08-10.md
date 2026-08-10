@@ -32,7 +32,55 @@ local reimplementation, which drifted from the real API (the real class also
 carries `SdnDatabase`/`SdnTable`/WAL-related behavior not modeled locally at
 all).
 
-## Why not fixed in this pass
+## RESOLVED 2026-08-10 — all four rewritten against the real type
+
+All four specs now import the real `StringInterner` from
+`src/lib/nogc_sync_mut/database/core.spl`; the local fakes are deleted. Both
+duplicate tree legs were verified identical before and after and are fixed
+together. Verdict lines below are from `bin/simple test <path>`.
+
+| # | spec | legs | verdict | outcome | commit |
+|---|------|------|---------|---------|--------|
+| 1 | `compiler/core_intensive_spec.spl` | `test/integration` + `test/02_integration` | 32 total, 29 passed, 3 failed | fixed (interner tests all green; 3 failures PRE-EXISTING, identical on parent) | `7c43f6e8c10` |
+| 2 | `lib/database_core_spec.spl` | `test/integration` + `test/02_integration` | 35 total, 35 passed, 0 failed | fixed, fully green | `b95b116c04a` |
+| 3 | `lib/database/database_core_spec.spl` | `test/unit` + `test/01_unit` | 35 total, 35 passed, 0 failed | fixed, fully green | `9cc848b84ac` |
+| 4 | `lib/database/database_spec.spl` | `test/unit` + `test/01_unit` | 27 total, 26 passed, 1 failed | fixed, 1 left RED on purpose (see below) | `ac40801103b` |
+
+Specs 2, 3 and 4 also had local fake `SdnRow`/`SdnTable` classes; those were
+removed too, since the real `from_sdn`/`to_sdn`/`valid_rows` tests cannot be
+exercised without the real table types. The real `SdnTable` API turned out to
+be a superset of each fake.
+
+### Blocking finding: `from_sdn` silently drops id 0
+
+Rewriting spec 4 immediately surfaced a genuine product defect that the shadow
+had been hiding for as long as it existed:
+
+`StringInterner.from_sdn` guards row loading with `if id > 0`, but `intern()`
+hands out ids starting at **0**. So the **first string ever interned is lost on
+every save/load round-trip**. Measured directly against the real type:
+a table containing rows `(id=0,"test1")` and `(id=1,"test2")` loads as
+`get(0) -> Option::None`, `get(1) -> Option::Some(test2)`.
+
+The removed local fake accepted id 0, which is exactly why no spec ever caught
+this. Per the no-weakening rule the assertion was left intact and RED, with a
+`FIXME` in place at the test. Fix `from_sdn` to accept id 0 (or make `intern`
+start at 1) — do not adjust the test.
+
+### Remaining sibling shadows (tracked, not silently accepted)
+
+`test/integration/compiler/core_intensive_spec.spl` still declares local fake
+`SdnRow`/`SdnTable`. Its fake `SdnTable` is `schema`-based and structurally
+unrelated to the product `SdnTable` (`columns`/`index`), so it is not a bounded
+import swap. Its 3 pre-existing failures live in those stub tests.
+
+That file's fake `StringInterner` had also **inverted** the API: its
+`get(s: text)` was the forward string->id lookup, whereas the product `get(id)`
+is the reverse id->string lookup and the forward one is `get_id`. Call sites
+were remapped to the real meaning, matching the test's own
+`# Forward lookup: string -> id` comment.
+
+## Why it was not fixed in the filing pass (historical)
 
 Same class of finding as `narrowing_spec`/`riscv_dual_arch_spec`/
 `type_infer_correctness_spec`: 3 of 4 files need every constructor site and
