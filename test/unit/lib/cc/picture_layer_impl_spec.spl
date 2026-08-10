@@ -1,30 +1,88 @@
 # @cover src/lib/cc/feature/picture_layer_impl.spl 80%
+#
+# PictureLayerImpl is the compositor-side layer that owns a RasterSource.
+# These examples deliberately OBSERVE the raster source (op count, cull rect,
+# emptiness) and the drawability decision derived from it, rather than merely
+# echoing back the Layer that was handed to the constructor. A stub that
+# stores its arguments and returns default/empty values fails here: the
+# recorded-vs-empty picture pair below must produce DIFFERENT answers.
 
 use std.spipe.*
-use std.cc.entity.layer.{Layer}
+use std.cc.entity.layer.{Layer, LayerKind}
 use std.cc.feature.raster_source.{RasterSource}
 use std.cc.feature.picture_layer_impl.{PictureLayerImpl}
 use std.skia.entity.geometry.{SkRect}
-use std.skia.entity.picture.{SkPicture, SkPictureOp}
+use std.skia.entity.paint.{SkPaint, sk_paint_new}
+use std.skia.entity.picture.{SkPicture, SkPictureOp, sk_picture_op_draw_rect}
+
+fn _bounds() -> SkRect:
+    SkRect(left: 0.0, top: 0.0, right: 256.0, bottom: 256.0)
+
+# A picture that actually recorded two draw ops covering `_bounds()`.
+fn _recorded_picture() -> SkPicture:
+    val paint = sk_paint_new()
+    val ops = [
+        sk_picture_op_draw_rect(SkRect(left: 0.0, top: 0.0, right: 128.0, bottom: 128.0), paint),
+        sk_picture_op_draw_rect(SkRect(left: 128.0, top: 128.0, right: 256.0, bottom: 256.0), paint)
+    ]
+    SkPicture(cull_rect: _bounds(), op_count: 2, ops: ops)
+
+# A picture that recorded nothing at all.
+fn _blank_picture() -> SkPicture:
+    val no_ops: [SkPictureOp] = []
+    SkPicture(cull_rect: SkRect(left: 0.0, top: 0.0, right: 0.0, bottom: 0.0),
+              op_count: 0, ops: no_ops)
+
+fn _layer(id: i64) -> Layer:
+    Layer(id: id, kind: LayerKind.Picture, bounds: _bounds(),
+          opacity: 1.0, draws_content: true)
+
+describe "RasterSource":
+    it "carries the recorded op count of the picture it wraps":
+        val rs = RasterSource.from_picture(_recorded_picture())
+        expect(rs.op_count()).to_equal(2)
+
+    it "is not empty when the picture recorded ops":
+        val rs = RasterSource.from_picture(_recorded_picture())
+        expect(rs.is_empty()).to_equal(false)
+
+    it "is empty when the picture recorded nothing":
+        val rs = RasterSource.from_picture(_blank_picture())
+        expect(rs.is_empty()).to_equal(true)
+        expect(rs.op_count()).to_equal(0)
+
+    it "adopts the picture's cull rect as its rasterizable area":
+        val rs = RasterSource.from_picture(_recorded_picture())
+        expect(rs.cull_rect.right).to_equal(256.0)
+        expect(rs.cull_rect.bottom).to_equal(256.0)
 
 describe "PictureLayerImpl":
-    it "from_layer wires base id":
-        val bounds = SkRect(left: 0.0, top: 0.0, right: 256.0, bottom: 256.0)
-        val base = Layer.root(bounds)
-        val layer = Layer(
-            id: 7,
-            parent_id: base.parent_id,
-            kind: base.kind,
-            bounds: base.bounds,
-            transform_id: base.transform_id,
-            clip_id: base.clip_id,
-            effect_id: base.effect_id,
-            scroll_id: base.scroll_id,
-            contents_opaque: base.contents_opaque,
-            is_drawable: base.is_drawable,
-            needs_display: base.needs_display
-        )
-        val pic = SkPicture(cull_rect: bounds, op_count: 0, ops: [SkPictureOp]())
-        val rs = RasterSource.from_picture(pic)
-        val impl = PictureLayerImpl.from_layer(layer, rs)
+    it "from_layer keeps the layer it was given":
+        val impl = PictureLayerImpl.from_layer(_layer(7),
+                                               RasterSource.from_picture(_recorded_picture()))
         expect(impl.base.id).to_equal(7)
+
+    it "exposes the raster source's recorded content, not a fresh empty one":
+        val impl = PictureLayerImpl.from_layer(_layer(7),
+                                               RasterSource.from_picture(_recorded_picture()))
+        expect(impl.raster_source.op_count()).to_equal(2)
+        expect(impl.raster_source.is_empty()).to_equal(false)
+
+    # The positive/negative pair is the discriminator: a stub returning a
+    # constant for is_drawable() fails one of these two examples.
+    it "is drawable when its raster source has recorded ops":
+        val impl = PictureLayerImpl.from_layer(_layer(7),
+                                               RasterSource.from_picture(_recorded_picture()))
+        expect(impl.is_drawable()).to_equal(true)
+
+    it "is not drawable when its raster source recorded nothing":
+        val impl = PictureLayerImpl.from_layer(_layer(7),
+                                               RasterSource.from_picture(_blank_picture()))
+        expect(impl.is_drawable()).to_equal(false)
+
+    it "is not drawable when the base layer does not draw content":
+        val quiet = Layer(id: 7, kind: LayerKind.Picture, bounds: _bounds(),
+                          opacity: 1.0, draws_content: false)
+        val impl = PictureLayerImpl.from_layer(quiet,
+                                               RasterSource.from_picture(_recorded_picture()))
+        expect(impl.is_drawable()).to_equal(false)
