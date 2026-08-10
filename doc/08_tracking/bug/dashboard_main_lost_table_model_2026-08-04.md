@@ -1,6 +1,19 @@
 # BUG: `app.dashboard.main` no longer defines the table model its own siblings import
 
-**Status:** OPEN
+**Status:** ARCHITECTURAL-OPEN — re-verified 2026-08-10. `src/app/dashboard/main.spl`
+is now 3,094 bytes (grown from the originally-reported 382-byte stub, so the
+CLI entry-point work continued), but still defines none of the ten table-model
+symbols: `grep -c 'DASHBOARD_CACHE_PATH\s*=\|TABLE_NAMES\s*=\|fn load_table\|fn ensure_dirs' src/app/dashboard/main.spl` is 0, and the tree-wide grep from the
+original repro still finds no dashboard-specific definition (only unrelated
+`ensure_dirs` in other apps). `dashboard_collectors.spl:8` and
+`dashboard_export_runtime.spl:7` still `use app.dashboard.main.{...}` those
+exact ten symbols — unchanged. Not fixed here: restoring the 26,786-byte
+recoverable blob (`2ee3fed72cd8e6538646983b84765c4787fc175a`) is a stdlib-API
+port, not a mechanical revert, AND the doc's own "Ownership warning" section
+explicitly says this path is active `llm-caret`-lane development and must not
+be restored unilaterally by another session. Left honestly open, respecting
+that ownership boundary; the recovery path recorded below remains valid and
+unclaimed by anyone outside that lane.
 **Found:** 2026-08-04
 **Severity:** high — two dashboard modules import ten symbols that exist nowhere
 in the tree, so every dashboard data path is dead code that still "compiles"
