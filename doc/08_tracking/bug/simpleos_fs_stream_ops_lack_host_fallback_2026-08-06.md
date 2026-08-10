@@ -1,8 +1,58 @@
 # SimpleOS libc: fopen/fread/fwrite bypass the Linux-host syscall fallback
 
-Status: OPEN
+Status: FIXED (2026-08-10)
 Found: 2026-08-06, while fixing
 `simpleos_libc_file_struct_odr_mismatch_2026-08-06.md`
+
+## Fix (2026-08-10)
+
+Implemented the "better" option from the original report: the FILE-stream layer
+in `src/os/libc/simpleos_fs.c` no longer calls `simpleos_syscall` with hardcoded
+numbers for open/read/write/close/seek. It now calls the libc's own
+`open`/`read`/`write`/`close`/`lseek` (all defined with `running_on_linux_host()`
+dispatch in `simpleos_libc.c`, and `lseek` in `simpleos_fs.c` itself) instead:
+
+- `fopen`, `freopen`: now call `open()` instead of `simpleos_syscall(30, ...)`.
+- `fclose`: now calls `close()` instead of `simpleos_syscall(33, ...)`.
+- `fread`, `fgets`, `fgetc`: now call `read()` instead of `simpleos_syscall(31, ...)`.
+- `fwrite`: now calls `write()` instead of `simpleos_syscall(32, ...)`.
+- `fseek`, `ftell`: now call the file's own `lseek()` (which already had a host
+  fallback) instead of `simpleos_syscall(46, ...)`.
+
+`opendir`/`readdir`/`closedir`/`rewinddir` were intentionally left untouched —
+directory listing has no Linux-host equivalent worth emulating and was not part
+of the reported gap.
+
+### Verification (host x86_64 Linux, real execution, not simulated)
+
+Compiled `src/os/libc/simpleos_fs.c` + `simpleos_libc.c` +
+`src/os/libc/test/file_stream_roundtrip.c` as ordinary host objects (`gcc -O0
+-g`, with minimal stand-in definitions for the freestanding-only symbols
+`simpleos_syscall`/`simpleos_epoll_*`/`_fmt_float` that this test does not
+exercise), linked, and ran the binary directly on the dev host.
+
+Before the fix: `fopen("...", "w")` returned `NULL` (the FILE-stream syscall
+numbers 30-33/46 collide with unrelated Linux x86_64 syscalls — 30 is `shmat`,
+etc. — so on host they either erred or silently misbehaved), and the test's
+Part 2 hit its `SKIP` branch.
+
+After the fix: full round trip passes for real —
+`fopen(w)`/`fwrite`/`fclose`/`fopen(r)`/`fread`/`memcmp` round-trip,
+`fgetc`-to-`EOF` sets `feof`, `clearerr` clears it, std-stream state stays
+intact throughout. Output: `RESULT: PASS (0)`, exit code 0, no `SKIP` line.
+
+Also fixed a latent, unrelated bug found while verifying: the test's hardcoded
+path `/tmp_file_stream_roundtrip.dat` is at the filesystem *root* (`/`), not
+inside `/tmp/`, so it failed with `EACCES` for any non-root user — a red
+herring that would have kept masking this exact fix as a false SKIP. Path is
+now `/tmp/tmp_file_stream_roundtrip.dat`; the test also now prints `errno` on
+an unexpected `fopen` failure instead of the old "no Linux-host fallback"
+message that is no longer accurate.
+
+No spec/build harness currently compiles+runs `file_stream_roundtrip.c`
+automatically (it is a standalone regression probe with build instructions in
+its header comment) — this remains true; a `check-*.shs` wrapper to run it on
+every host-libc change would be a good follow-up but is out of scope here.
 
 ## Summary
 

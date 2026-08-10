@@ -222,13 +222,12 @@ FILE *fopen(const char *path, const char *mode) {
         return NULL;
     }
 
-    int fd = (int)simpleos_syscall(30, (int64_t)path, (int64_t)strlen(path),
-                                    flags, 0644, 0);
-    if (fd < 0) { errno = (int)(-fd); return NULL; }
+    int fd = open(path, flags, 0644);
+    if (fd < 0) return NULL; /* open() already set errno */
 
     FILE *fp = (FILE *)malloc(sizeof(struct __simpleos_FILE));
     if (!fp) {
-        simpleos_syscall(33, fd, 0, 0, 0, 0);
+        close(fd);
         errno = ENOMEM;
         return NULL;
     }
@@ -298,14 +297,14 @@ int fclose(FILE *fp) {
     } else {
         free(fp);
     }
-    int64_t r = simpleos_syscall(33, fd, 0, 0, 0, 0);
+    int r = close(fd);
     return r < 0 ? EOF : 0;
 }
 
 size_t fread(void *buf, size_t size, size_t nmemb, FILE *fp) {
     if (!fp || size == 0 || nmemb == 0) return 0;
     size_t total = size * nmemb;
-    int64_t r = simpleos_syscall(31, fp->fd, (int64_t)buf, (int64_t)total, 0, 0);
+    ssize_t r = read(fp->fd, buf, total);
     if (r <= 0) {
         if (r == 0) fp->eof = 1;
         else        fp->error = 1;
@@ -317,7 +316,7 @@ size_t fread(void *buf, size_t size, size_t nmemb, FILE *fp) {
 size_t fwrite(const void *buf, size_t size, size_t nmemb, FILE *fp) {
     if (!fp || size == 0 || nmemb == 0) return 0;
     size_t total = size * nmemb;
-    int64_t r = simpleos_syscall(32, fp->fd, (int64_t)buf, (int64_t)total, 0, 0);
+    ssize_t r = write(fp->fd, buf, total);
     if (r < 0) {
         fp->error = 1;
         return 0;
@@ -327,16 +326,16 @@ size_t fwrite(const void *buf, size_t size, size_t nmemb, FILE *fp) {
 
 int fseek(FILE *fp, long offset, int whence) {
     if (!fp) { errno = EBADF; return -1; }
-    int64_t r = simpleos_syscall(46, fp->fd, (int64_t)offset, whence, 0, 0);
-    if (r < 0) { errno = (int)(-r); return -1; }
+    off_t r = lseek(fp->fd, (off_t)offset, whence);
+    if (r < 0) return -1; /* lseek() already set errno */
     fp->eof = 0;
     return 0;
 }
 
 long ftell(FILE *fp) {
     if (!fp) { errno = EBADF; return -1; }
-    int64_t r = simpleos_syscall(46, fp->fd, 0, SEEK_CUR, 0, 0);
-    if (r < 0) { errno = (int)(-r); return -1; }
+    off_t r = lseek(fp->fd, 0, SEEK_CUR);
+    if (r < 0) return -1; /* lseek() already set errno */
     return (long)r;
 }
 
@@ -377,7 +376,7 @@ char *fgets(char *s, int n, FILE *fp) {
     int i = 0;
     while (i < n - 1) {
         char c;
-        int64_t r = simpleos_syscall(31, fp->fd, (int64_t)&c, 1, 0, 0);
+        ssize_t r = read(fp->fd, &c, 1);
         if (r <= 0) {
             if (r == 0 && i == 0) { fp->eof = 1; return NULL; }
             if (r < 0)  { fp->error = 1; if (i == 0) return NULL; }
@@ -393,7 +392,7 @@ char *fgets(char *s, int n, FILE *fp) {
 int fgetc(FILE *fp) {
     if (!fp) return EOF;
     unsigned char c;
-    int64_t r = simpleos_syscall(31, fp->fd, (int64_t)&c, 1, 0, 0);
+    ssize_t r = read(fp->fd, &c, 1);
     if (r <= 0) {
         if (r == 0) fp->eof = 1;
         else        fp->error = 1;
@@ -582,7 +581,7 @@ char *tmpnam(char *s) {
 FILE *freopen(const char *path, const char *mode, FILE *stream) {
     if (!stream) { errno = EBADF; return NULL; }
     /* Close old fd */
-    simpleos_syscall(33, stream->fd, 0, 0, 0, 0);
+    close(stream->fd);
 
     /* Parse mode flags (reuse fopen logic) */
     int flags = 0;
@@ -606,9 +605,8 @@ FILE *freopen(const char *path, const char *mode, FILE *stream) {
         return NULL;
     }
 
-    int fd = (int)simpleos_syscall(30, (int64_t)path, (int64_t)strlen(path),
-                                    flags, 0644, 0);
-    if (fd < 0) { errno = (int)(-fd); return NULL; }
+    int fd = open(path, flags, 0644);
+    if (fd < 0) return NULL; /* open() already set errno */
 
     stream->fd    = fd;
     stream->eof   = 0;

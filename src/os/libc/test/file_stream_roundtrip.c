@@ -14,6 +14,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <errno.h>
 
 /* Independent restatement of the ABI this program depends on. If the libc ever
  * splits the definition again, the sizes stop agreeing and this fails to build
@@ -34,7 +35,7 @@ static void check(int cond, const char *what) {
 }
 
 int main(void) {
-    const char *path = "/tmp_file_stream_roundtrip.dat";
+    const char *path = "/tmp/tmp_file_stream_roundtrip.dat";
     const char *payload = "SimpleOS FILE round-trip payload 0123456789";
     size_t n = strlen(payload);
 
@@ -59,17 +60,19 @@ int main(void) {
           "std stream fds are still 0/1/2 after all of the above");
 
     /* ------------------------------------------------------------------
-     * PART 2 — fopen/fread/fwrite. These go straight to simpleos_syscall
-     * with no Linux-host fallback (unlike write(2)), so they only work
-     * under a SimpleOS kernel. Probe once and skip the rest on a host
-     * rather than reporting a spurious failure.
+     * PART 2 — fopen/fread/fwrite/fseek/ftell/fclose. These now route
+     * through open()/read()/write()/lseek()/close() in simpleos_libc.c,
+     * which already have a Linux-host syscall fallback, so this half
+     * runs for real on a host too (fixed 2026-08-10; previously these
+     * called simpleos_syscall directly and always failed/misbehaved on
+     * a host). The guard below is kept as defensive fallback only.
      * See simpleos_fs_stream_ops_lack_host_fallback_2026-08-06.md
      * ------------------------------------------------------------------ */
     FILE *w = fopen(path, "w");
     if (!w) {
         fprintf(stdout,
-                "SKIP - fopen/fread/fwrite need a SimpleOS kernel "
-                "(no Linux-host fallback); std-stream checks above did run\n");
+                "SKIP - fopen failed unexpectedly (errno=%d); "
+                "std-stream checks above did run\n", errno);
         fprintf(stdout, failures ? "RESULT: FAIL (%d)\n" : "RESULT: PASS (%d)\n",
                 failures);
         return failures ? 1 : 0;
