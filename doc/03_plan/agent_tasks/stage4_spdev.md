@@ -119,3 +119,13 @@
 - The retry-3 parser frontier is fixed and pushed. The three-attempt cap is reached; reuse the preserved cache in the next fresh cycle.
 - Sidecar follow-up inventory: compatibility loader JIT types/imports and five optional/result return signatures remain candidates only; fix them when authoritative HIR reaches that frontier.
 - No Stage4 candidate exists. Candidate smoke/install, ARM64 attestation, QMP primitive-WM receipts, macOS, ARM, and Uno-Q remain pending.
+
+## 2026-08-10 Stage4 codegen and host-memory cycle
+
+- Pushed `20b1731ab8f`: bind codegen JIT types at module scope, use canonical `file_delete`, and construct all compatibility `JitInstantiatorConfig` fields. Focused native codegen fixture passes.
+- Retry 1 advanced to codegen `rt_file_delete`/JIT bindings after about 25 minutes.
+- Retry 2 reached the execution transport's 30-minute SIGTERM ceiling with no compiler diagnostic; this was not a compiler failure.
+- Retry 3 was moved to durable tmux and progressed for about 48 minutes to `driver_pipeline.spl` during phase 3 with `heap_registry=390166489`.
+- Retry 3 was then killed by earlyoom: host available memory fell below 10%, and earlyoom SIGTERM'd the Stage4 `simple` process at 29293 MiB RSS. No HIR/compiler error was emitted.
+- The three-attempt cap is reached. Next fresh cycle: run from the preserved cache in tmux only when host memory headroom can accommodate at least the observed 30 GiB compiler RSS plus the earlyoom reserve.
+- No Stage4 candidate exists. Candidate smoke/install, ARM64 attestation, QMP primitive-WM receipts, macOS, ARM, and Uno-Q remain pending.

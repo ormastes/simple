@@ -310,3 +310,7 @@ The canonical Stage4 closure now passes the prior file-stat frontier and exposed
 ## 2026-08-09 AOT import and parser ownership recovery
 
 The preserved-cache Stage4 closure now passes loader typing and exposed three later native-HIR boundaries: EasyFix legacy integer aliases, function-local AOT/cache/manifest imports, and missing parser `Lexer` ownership. All were corrected with concrete primitives or module-scope direct-owner imports, focused native evidence, and higher-model architecture review for the broad AOT import change. The final attempt progressed for roughly 28 minutes before the parser frontier, materially later than prior failures. Its fix is pushed but awaits a fresh-cycle canonical retry. No candidate or primitive-WM QEMU verification may be claimed yet.
+
+## 2026-08-10 Durable Stage4 execution and memory evidence
+
+Codegen JIT ownership and cleanup are fixed with focused native evidence. Canonical Stage4 now runs beyond the previous phase-4 error frontiers and exceeds the command transport's 30-minute lifetime, so long attempts must run in a dedicated tmux session with a separate status receipt. The first durable attempt reached roughly 48 minutes and 29.3 GiB RSS before host-wide earlyoom terminated it at the configured 10% available-memory threshold; no compiler diagnostic occurred. This is a host scheduling/headroom constraint, not evidence that Stage4 or QEMU works. Preserve the cache and retry in a fresh cycle only with sufficient host memory. Do not weaken low-memory, provenance, candidate smoke, attestation, or QMP gates.
