@@ -1,6 +1,21 @@
 # Minimal noalloc logger facade.
+#
+# Hosted vs baremetal dispatch. On baremetal, rt_simpleos_log_emit (runtime_log.c)
+# writes to the UART and returns true, so _log_emit returns immediately. On a
+# hosted build runtime_log_hosted.c stubs every hook to false, and _log_emit
+# falls through to the Simple-side path. That fallthrough is real -- it lands in
+# targets.spl's target_device_write, whose own extern also fails hosted and ends
+# at `print`. See doc/08_tracking/bug/
+# logging_surfaces_that_suppress_errors_by_default_family_2026-08-10.md, whose
+# OPEN 1 asserted the fallthrough did not exist; it does, and hosted errors were
+# never dropped.
+#
+# What WAS wrong: that fallthrough sent every level, including ERROR and FATAL,
+# to STDOUT. `prog 2>errors.log` captured nothing and the diagnostics were
+# interleaved into the program's data stream. ERROR/FATAL now go to stderr on the
+# hosted path; sub-error levels keep the stdout/device path unchanged.
 
-use targets.{TARGET_DEVICE, TARGET_SEMIHOST, TARGET_HOST_FILE, target_device_write, target_semihost_write, target_file_write}
+use targets.{TARGET_DEVICE, TARGET_SEMIHOST, TARGET_HOST_FILE, target_device_write, target_semihost_write, target_file_write, target_stderr_write}
 
 val LOG_TRACE: i32 = 0
 val LOG_DEBUG: i32 = 1
@@ -103,6 +118,11 @@ fn _log_emit(level: i32, msg: text):
         return
     val line = "[" + log_level_name(level) + "] " + msg
     if rt_simpleos_log_emit(level.to_i64(), rt_string_data(line), rt_string_len(line)):
+        return
+    # Hosted fallthrough. Diagnostics must not be mixed into the data stream:
+    # an operator redirecting stdout would otherwise lose every error.
+    if level >= LOG_ERROR:
+        target_stderr_write(line)
         return
     log_raw(line)
 

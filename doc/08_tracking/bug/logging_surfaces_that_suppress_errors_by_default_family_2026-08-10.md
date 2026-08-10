@@ -77,7 +77,10 @@ silently turn on file logging.
 
 ## OPEN items (not fixed here — each needs its own change)
 
-**OPEN 1 — `nogc_async_mut_noalloc/log/logger.spl` drops hosted errors.**
+**OPEN 1 — FIXED, and the original filing was WRONG.** See the correction under
+"OPEN 1 correction" below. Original text kept for the record:
+
+**OPEN 1 (as originally filed) — `nogc_async_mut_noalloc/log/logger.spl` drops hosted errors.**
 `runtime_log_hosted.c` stubs every hook to `false`, and its header comment
 claims the Simple side then "falls through to its interpreter-safe path
 (println / stdio)". It does not: `log_raw` only dispatches to
@@ -85,6 +88,62 @@ claims the Simple side then "falls through to its interpreter-safe path
 no `println` branch. On a hosted build an error-level message is dropped unless
 `targets.spl` happens to map DEVICE to stdout. The comment documents a
 fallthrough that was never implemented. Verify `.../log/targets.spl` first.
+
+### OPEN 1 correction (2026-08-10) — errors were never dropped; the SINK was wrong
+
+Reproduction contradicted the filing. A probe calling `log_error`/`log_fatal`/
+`log_debug` on a hosted build emitted, in **both** the interpreter and jit lanes:
+
+```
+[ERROR] Q21_ERROR_MARK
+[FATAL] Q21_FATAL_MARK
+```
+
+The `println` fallthrough the `runtime_log_hosted.c` header comment promises
+**does exist** — it is just not in `logger.spl`. `log_raw` dispatches to
+`targets.spl`'s `target_device_write`, whose *own* extern
+(`rt_log_target_device_write_bytes`) also fails on a hosted build and ends at
+`print msg`. The C comment is accurate; the filing did not read `targets.spl`,
+which is exactly what its own last line said to do first. No C change is needed
+and none was made.
+
+**The real defect** is which sink that fallthrough used: ERROR and FATAL went to
+**stdout**. Under `prog > data.txt 2> errors.log` the diagnostics landed in
+`data.txt` and `errors.log` was empty. A diagnostic mixed into the data stream is
+the same silent-failure class as one that is dropped — nothing an operator
+watches ever shows it.
+
+**Fix:** `targets.spl` gains `target_stderr_write`, built on the `eprint`
+*builtin* — not an extern, so it costs a baremetal link nothing, the same reason
+`print` is already safe there. `_log_emit` routes `level >= LOG_ERROR` to it on
+the hosted fallthrough only. Baremetal is untouched: `rt_simpleos_log_emit`
+succeeds there and returns before the fallthrough is reached. Sub-error levels
+keep the device/stdout path.
+
+**Before → after (hosted, both lanes):** stderr `0` → `2` ERROR/FATAL lines;
+stdout `3` → `1` (WARN only). DEBUG stayed `0` throughout.
+
+**Runnable check:** `scripts/check/check-noalloc-log-error-reaches-stderr.shs`.
+Four-sided: labelled-line positives on stderr; a **sink control** (ERROR/FATAL
+must have *left* stdout — without it the check passes on the unfixed code, since
+`2>&1` hides the sink); a **negative control** (DEBUG, below the default
+`LOG_INFO`, emits zero lines on *both* sinks, catching a fix that deleted the
+gate); and a **level-scope control** (WARN still appears, and still on stdout,
+catching a fix that redirected everything).
+**Oracle proof:** removing the `level >= LOG_ERROR` branch yields
+`FAIL -- 8 of 14`, exit 1, in both lanes.
+
+**Side effect checked:** none. `logger.spl` has no in-tree consumer
+(`/usr/bin/grep -rn` over `src/`, `scripts/`, `config/` found zero importers), and
+no new extern symbol was introduced, so no link surface changed.
+
+**Adjacent defect found, filed separately, NOT fixed here:** in the **jit** lane
+`rt_string_data(line)` evaluates to Nil, so every `rt_simpleos_log_emit` call
+raises `rt_simpleos_log_emit: argument 2 must be an int, got Nil` on stderr. The
+call fails to `false`, which is why the fallthrough runs at all — the hosted path
+works *by accident of a broken argument marshal*. The interpreter lane does not
+do this. See
+`doc/08_tracking/bug/jit_rt_string_data_returns_nil_breaking_extern_calls_2026-08-10.md`.
 
 **OPEN 2 — `common/security/audit_log.spl` never surfaces security events.**
 `AuditConfig.default()` sets `log_to_stdout: false`, so a Critical security
