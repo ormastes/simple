@@ -1,6 +1,8 @@
 # `use std.spec.*` silently drops `expect_not` — the matcher the linter tells you to use
 
-**Status:** OPEN
+**Status:** OPEN — architectural (needs either a Rust-seed `bdd.rs` intrinsic-table
+change + bootstrap rebuild, or module-resolver wildcard-export-expansion work
+with tree-wide blast radius; re-confirmed 2026-08-10)
 **Found:** 2026-08-04
 **Severity:** high — `checker_spipe.rs` emits `expect_not(condition)` as a
 recommended *auto-fix*, so following the linter's advice in a file that imports
@@ -104,6 +106,18 @@ Two candidate fixes, both outside what this session can land safely:
 
 Until one lands, the linter's `expect_not` suggestion should not be offered as
 an auto-fix — a rule that reddens correct code is worse than no rule.
+
+## Re-verification (2026-08-10)
+
+Confirmed both halves of the root cause are unchanged:
+`src/compiler_rust/compiler/src/interpreter_call/bdd.rs` still has no
+`"expect_not"` entry in the intrinsic table, and `expect_not` is still a plain
+pure-Simple `pub fn` (now at `src/lib/nogc_sync_mut/spec.spl:657`, moved from
+:533 by unrelated edits but otherwise identical). Both candidate fixes remain
+out of scope for a docs/measurement-lane pass: the intrinsic-table fix needs a
+Rust-seed edit + bootstrap rebuild (both off-limits here), and the
+wildcard-export-expansion fix touches every `export use …*` in the tree with
+no regression harness available in this pass.
 
 ## Related
 
