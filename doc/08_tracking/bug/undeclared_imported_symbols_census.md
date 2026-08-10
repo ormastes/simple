@@ -1,14 +1,25 @@
 # Census: imported symbols that are declared nowhere in the repo
 
-**Status:** OPEN — enumerated, triaged, not fixed
+**Status:** OPEN — enumerated, triaged, not fixed (confirmed still accurate,
+re-verified 2026-08-10)
 **Filed:** 2026-08-05
 **Scope:** owned `src/**` + `test/**` `.spl` (39,984 files). Vendored excluded:
 `src/compiler_rust/vendor/**`, `src/runtime/vendor/**`,
 `src/runtime/{miniaudio,stb_image,stb_truetype}.h`.
-**Instrument:** static census, `scratchpad/undecl_census/census.py` (rerunnable).
+**Instrument:** static census, `scratchpad/undecl_census/census.py` (rerunnable
+in principle — the script itself no longer exists on disk as of 2026-08-10,
+since `scratchpad/` is per-session/ephemeral and was never committed; a fresh
+full re-run of §9's four-step pipeline was not attempted this pass because
+rebuilding the instrument is out of scope for a spot-check).
 **Cross-checked against:** 4 real spec runs (see §5) and the compiler's own
 `[use-warning]` oracle (see §6 — the oracle is **not deployed**, which is itself a
-finding).
+finding). **Spot-check 2026-08-10:** the first Appendix A.1 entry
+(`src/app/dashboard/dashboard_collectors.spl:8` importing `DASHBOARD_TABLE_DIR`,
+`load_table`, etc. from `app.dashboard.main`) was re-checked against
+`src/app/dashboard/main.spl` — none of those names are declared there today,
+confirming the census entry is still accurate and the underlying gap is still
+unfixed. This is a spot-check of one cluster, not a full re-run; treat the
+1,226-entry totals in §3 as last-measured 2026-08-05, not re-confirmed in full.
 
 ## 1. The family
 
