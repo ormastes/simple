@@ -794,7 +794,19 @@ int64_t rt_host_gpu_queue_last_backend_handle(void) { return rt_host_gpu_queue_l
 int64_t rt_host_gpu_queue_last_device_time_us(void) { return rt_host_gpu_queue_last_device_time_us_value; }
 int64_t rt_host_gpu_queue_last_payload_size(void) { return rt_host_gpu_queue_last_payload_size_value; }
 int64_t rt_host_gpu_queue_last_payload_hash(void) { return rt_host_gpu_queue_last_payload_hash_value; }
-const char* rt_host_gpu_queue_last_payload_text(void) { return rt_host_gpu_queue_last_payload_text_value; }
+/* Raw form, for in-C callers. */
+const char* rt_host_gpu_queue_last_payload_text_cstr(void) { return rt_host_gpu_queue_last_payload_text_value; }
+
+/* Both Simple declarations spell this `-> text` and RuntimeFuncSpec
+ * (runtime_sffi.rs:1058) spells it `&[I64]` -- a RuntimeValue. Returning the
+ * static `char*` handed the caller an UNTAGGED word. MEASURED 2026-08-10 as
+ * tag=0 through the compiler's emitted ABI in all three C link orders; same
+ * defect class as rt_file_read_text. rt_string_new is defined below in this
+ * same TU. */
+int64_t rt_host_gpu_queue_last_payload_text(void) {
+    const char* raw = rt_host_gpu_queue_last_payload_text_value;
+    return rt_string_new((const uint8_t*)raw, (uint64_t)strlen(raw));
+}
 
 /* RT_CORE_STRING_FLAG_SHARED marks a string owned by a process-wide cache
  * (rt_core_short_string_cache or rt_literal_intern_table). Those objects are
@@ -6022,23 +6034,28 @@ int64_t rt_array_last(SplArray* a) {
     return rt_array_get(a, -1);
 }
 
-void rt_array_set(SplArray* a, int64_t idx, int64_t val) {
+/* Returns 1 when the element was written, 0 when the array was null or the
+ * (possibly negative) index was out of range. runtime_sffi.rs:257 declares
+ * `&[I64, I64, I64] -> &[I8]` and src/runtime/simple_core/core_array.spl:182
+ * already returns i8; this copy returning void meant the caller decoded an
+ * uninitialised return register as the store's success flag. */
+int8_t rt_array_set(SplArray* a, int64_t idx, int64_t val) {
     RtCoreArray* array = rt_core_array_ptr(a);
-    if (!array) return;
+    if (!array) return 0;
     if (idx < 0) idx = array->len + idx;
-    if (idx < 0 || idx >= array->len) return;
+    if (idx < 0 || idx >= array->len) return 0;
     if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
         ((uint8_t*)array->data)[idx] = (uint8_t)(rt_core_numeric_arg(val) & 0xff);
     } else {
         ((int64_t*)array->data)[idx] = val;
     }
+    return 1;
 }
 
 int8_t rt_array_set_text(SplArray* a, int64_t idx, int64_t val) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return 0;
-    rt_array_set(a, idx, val);
-    return 1;
+    return rt_array_set(a, idx, val);
 }
 
 int8_t rt_array_push(SplArray* a, int64_t val) {
@@ -8816,7 +8833,16 @@ void* rt_file_open_stream(const char* path, const char* mode) {
     return (void*)fopen(path, mode);
 }
 
-void rt_file_close(void* handle) {
+/* NOTE (2026-08-10, rt_extern_abi_divergence_family, Q35): renamed from
+ * rt_file_close for the same reason its partner rt_file_open became
+ * rt_file_open_stream. The compiler declares `i8 rt_file_close(i32 fd)` and
+ * the canonical implementation is descriptor.rs:98, which closes a FILE
+ * DESCRIPTOR. This copy takes a stdio FILE*. Under `-z muldefs` whichever
+ * copy won the link decided whether `rt_file_close(3)` closed fd 3 or called
+ * fclose() on the address 0x3 -- the second is undefined behaviour, not a
+ * failed close. Same arity, so no arity gate could ever have seen it. Do not
+ * rename it back. */
+void rt_file_close_stream(void* handle) {
     if (handle) fclose((FILE*)handle);
 }
 
@@ -9178,8 +9204,16 @@ int64_t* rt_process_run_tuple(int64_t cmd, SplArray* args) {
 int64_t* rt_process_run_timeout_tuple(int64_t cmd, SplArray* args, int64_t timeout_ms) {
     const char* cmd_c = rt_interp_cstr(cmd);
     uint64_t cmd_len = cmd_c ? (uint64_t)strlen(cmd_c) : 0;
+    // rt_process_run_timeout's declared return type is int64_t (RuntimeValue
+    // ABI, see commit 072c6754e09 "state the RuntimeValue return type for
+    // rt_process_run{,_timeout}"); it still returns an SplArray* handle
+    // widened to an integer, exactly like rt_process_run above does at
+    // `(int64_t)(uintptr_t)rt_process_run_array(...)`. This call site was left
+    // uncast by that change, so -Wint-conversion made runtime_native.c fail to
+    // compile -- which broke the LLVM native-link step of EVERY native-build,
+    // for every program, including `print "x"`.
     return rt_process_result_to_tuple(
-        rt_process_run_timeout(cmd_c ? cmd_c : "", cmd_len, args, timeout_ms));
+        (SplArray*)(uintptr_t)rt_process_run_timeout(cmd_c ? cmd_c : "", cmd_len, args, timeout_ms));
 }
 
 int64_t* rt_process_run_bounded_tuple(int64_t cmd, SplArray* args, int64_t timeout_ms,
@@ -10028,10 +10062,15 @@ int64_t rt_channel_new(void) {
     return -1;
 }
 
-void rt_channel_send(int64_t id, int64_t value) {
-    if (id < 0 || id >= RT_CHAN_MAX) return;
+/* Returns 1 when the value was queued, 0 when the channel id was invalid,
+ * unused, or already closed. runtime_sffi.rs:811 declares `-> &[I64]` and
+ * src/compiler_rust/lib/std/src/async/sffi/channel.spl:7 declares
+ * `-> bool` and is a LIVE consumer, so the void form handed that caller an
+ * uninitialised register as "the send succeeded". */
+int64_t rt_channel_send(int64_t id, int64_t value) {
+    if (id < 0 || id >= RT_CHAN_MAX) return 0;
     RtChannel* ch = &rt_channels[id];
-    if (!ch->in_use || ch->closed) return;
+    if (!ch->in_use || ch->closed) return 0;
     pthread_mutex_lock(&ch->lock);
     if (ch->count == ch->capacity) {
         int new_capacity = ch->capacity * 2;
@@ -10055,6 +10094,7 @@ void rt_channel_send(int64_t id, int64_t value) {
     ch->count++;
     pthread_cond_signal(&ch->not_empty);
     pthread_mutex_unlock(&ch->lock);
+    return 1;
 }
 
 int64_t rt_channel_recv(int64_t id) {
@@ -10106,7 +10146,7 @@ int64_t rt_channel_is_closed(int64_t id) {
 
 #else
 int64_t rt_channel_new(void) { return -1; }
-void rt_channel_send(int64_t id, int64_t v) { (void)id; (void)v; }
+int64_t rt_channel_send(int64_t id, int64_t v) { (void)id; (void)v; return 0; }
 int64_t rt_channel_recv(int64_t id) { (void)id; return 0; }
 int64_t rt_channel_try_recv(int64_t id) { (void)id; return 0; }
 void rt_channel_close(int64_t id) { (void)id; }

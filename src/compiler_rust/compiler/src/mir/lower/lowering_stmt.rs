@@ -303,11 +303,17 @@ impl<'a> MirLowerer<'a> {
                         self.tagged_locals.remove(&local_idx);
                     }
 
-                    // F1/S5 site G — binding a DECLARED VALUE TYPE is a copy
-                    // site. Without this the tagged heap pointer is stored
-                    // as-is and `val b = a` aliases `a`. No-op for classes,
-                    // actors and every unknown type.
-                    let vreg = self.copy_if_value_type(vreg, effective_declared_ty)?;
+                    // F1/S5 site G — binding an existing declared value-type
+                    // PLACE is a copy site (`val b = a`). Fresh call and
+                    // constructor results already have unique ownership and
+                    // transfer directly into the binding; copying those
+                    // results can reinterpret an aggregate return value as an
+                    // aliased heap handle during staged bootstrap.
+                    let vreg = if Self::hir_expr_is_place(&val.kind) {
+                        self.copy_if_value_type(vreg, effective_declared_ty)?
+                    } else {
+                        vreg
+                    };
 
                     self.with_func(|func, current_block| {
                         let dest = func.new_vreg();

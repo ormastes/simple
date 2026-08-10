@@ -26,34 +26,111 @@
 # file. The 33 rows below were triaged into three groups. Nothing is excluded;
 # everything the gate found is listed, with what is known about it.
 #
-# GROUP A -- compiler declares a result, the definition returns `void`
-# (6 rows: rt_array_set, rt_channel_send, rt_file_close x2, rt_invlpg,
-# rt_write_cr3) plus the inverse rt_exit (declared void, Rust returns i64).
-# REAL: the caller reads a return register the callee never wrote. Bounded in
-# practice only by callers discarding the value, which the ABI does not
-# guarantee. Not fixed here -- each needs its own call-site audit and per-lane
-# reproduction, the standard the Class-1 rows were held to.
+# GROUP A -- CLOSED 2026-08-10 (Q35). All 7 rows removed; each fix has an
+# execution proof against the real translation units in all three C link orders
+# (probe: compiler-emitted ABI, X-padded non-NUL-terminated buffer,
+# rt_string_new("hello") as positive control, prior-commit build as revert-proof).
 #
-# GROUP B1 -- SAME CLASS AS rt_file_read_text, NOT YET FIXED (8 symbols):
-#   rt_bytes_from_raw, rt_bytes_to_text, rt_dir_list, rt_dir_walk, rt_env_cwd,
-#   rt_platform_name, rt_process_run, rt_process_run_timeout
-# For each of these the canonical Rust definition returns a TAGGED
-# `RuntimeValue` while the C copy returns a raw `char*`/pointer. That is
-# exactly the defect just fixed for rt_file_read_text: in any lane where the C
-# copy wins the (-z muldefs) link, a successful call decodes as an untagged
-# value and reads as empty -- indistinguishable from "not found". These are
-# baselined, not dismissed; each needs the same reproduce-fix-verify-in-three-
-# link-orders treatment.
+#   * rt_array_set -- FIXED in runtime_native.c (void -> int8_t, 1 on write,
+#     0 on null array or out-of-range index). CORRECTION to the previous note
+#     here: it claimed "the canonical Rust definition already agrees,
+#     collections.rs:778 returns bool". There is NO `extern "C"` Rust
+#     definition of rt_array_set at all -- that line is an interpreter
+#     Value-level helper, not a C-ABI symbol. The agreeing third
+#     implementation is src/runtime/simple_core/core_array.spl:182, which
+#     already returned i8. Measured before: an IN-RANGE store returned 42, an
+#     OUT-OF-RANGE store returned 3, a negative index returned 5 -- leftover
+#     argument registers, so a FAILED store reported success. After: 1 / 0 / 1,
+#     identical in all three link orders.
+#
+#   * rt_channel_send -- FIXED in runtime_native.c, both copies (void ->
+#     int64_t, 1 queued / 0 dropped). Same correction: channels.rs:103 is not
+#     an extern "C" definition either. There IS a live consumer:
+#     src/compiler_rust/lib/std/src/async/sffi/channel.spl:7 declares
+#     `-> bool`. Measured before: a SUCCESSFUL send returned 0 and a send
+#     AFTER CLOSE returned 1 -- the answer was not merely garbage, it was
+#     inverted. After: 1 / 0 / 0, identical in all three link orders.
+#
+#   * rt_invlpg, rt_write_cr3 -- FIXED in runtime_sffi.rs:707-708,
+#     `&[I64] -> &[]`, as the previous note prescribed. Nothing anywhere
+#     produced that value.
+#
+#   * rt_file_close -- FIXED, and the return value turned out to be the
+#     smaller half of it. The two definitions did not merely disagree on the
+#     return: they disagreed on the PARAMETER. descriptor.rs:98 took an fd
+#     (i32, matching the compiler); runtime_native.c:8819 took a stdio FILE*.
+#     Same arity, so no arity gate could ever have seen it, and under
+#     -z muldefs the C copy won -- `rt_file_close(3)` called fclose((FILE*)3).
+#     Measured: SIGSEGV on every call in all three link orders, at the prior
+#     commit. That C copy is the twin of the fopen() helper a previous commit
+#     had already renamed to rt_file_open_stream; it is now
+#     rt_file_close_stream, leaving the fd-based definition unopposed (0
+#     definitions of rt_file_close remain in the C bundle, verified by nm in
+#     all three orders).
+#     The return: descriptor.rs now returns close(2)'s real status as i8
+#     rather than dropping a File and discarding it, because
+#     src/compiler_rust/lib/std/src/infra/file_io.spl:439 reads it and close()
+#     is where deferred write-back errors (ENOSPC, EIO, EDQUOT) surface -- a
+#     close whose failure is invisible loses data silently. Fixing the caller
+#     to stop reading the value would have removed the only place that error
+#     could ever have been noticed. The three Simple declarations now agree on
+#     `-> bool`.
+#
+#   * rt_exit -- FIXED IN THE GATE, not in the code, exactly as the previous
+#     note prescribed. rust_ret_class now maps `-> !` to a "never" class that
+#     the comparator skips: the never type is not a value, so no return
+#     register is written or read and there is nothing to compare.
+#
+# GROUP B1 -- CLOSED 2026-08-10. All 8 symbols resolved, each with its own
+# reproduction against the real translation units in all three C link orders:
+#   REAL DEFECTS, fixed: rt_env_cwd (tag=0 raw address), rt_platform_name
+#     (tag=4, a .rodata pointer that is not even 8-aligned), rt_bytes_to_text
+#     (SIGSEGV when the runtime.c copy won the link), rt_dir_walk (legacy
+#     SplValue array returned untagged; a 3-file directory read as 0 entries),
+#     rt_dir_list (SIGSEGV on EVERY call in EVERY link order -- the compiler's
+#     path LENGTH was written through as an `int64_t* out_count`).
+#   SPELLING ONLY, bodies already returned correctly tagged values (verified
+#     tag=1 with decodable contents before and after): rt_bytes_from_raw,
+#     rt_process_run, rt_process_run_timeout.
+# Five of eight were real. None was benign by assumption.
 #
 # GROUP B2 -- pointer-sized value that is genuinely a raw address (rt_alloc,
 # rt_array_new/_copy/_repeat/_with_cap_u64, rt_byte_array_new/_len,
 # rt_string_data, rt_value_to_ptr, rt_process_spawn). `I64` is how
-# RuntimeFuncSpec spells "pointer-sized" and no RuntimeValue-returning
-# counterpart exists, so pointer and I64 occupy the same return register and
-# the row is ABI-compatible. NOTE the residual: for rt_cli_get_args,
-# rt_get_args, rt_coverage_dump_sdn and
-# rt_host_gpu_queue_last_payload_text there is no Rust counterpart to compare
-# against, so they are placed here for lack of evidence, NOT proven benign.
+# RuntimeFuncSpec spells "pointer-sized", so pointer and I64 occupy the same
+# return register and the row is ABI-compatible.
+#
+# MEASURED 2026-08-10 (part 3) -- the four residual rows are now resolved.
+#
+# All four were called through the COMPILER'S emitted ABI against the real
+# translation units, in three C link orders, with rt_string_new("hello") from a
+# non-NUL-terminated X-padded buffer as the positive control (decoded as a
+# heap string of len 5 in every run).
+#
+#   * rt_coverage_dump_sdn -- WAS A REAL DEFECT, now FIXED, row removed.
+#     Measured raw_tag=0 (untagged malloc'd char*) where every Simple
+#     declaration says `-> text` and RuntimeFuncSpec says `&[I64]`. The raw
+#     producer is now rt_coverage_dump_sdn_cstr (runtime_coverage_core.c,
+#     runtime/src/coverage.rs) for the in-process Rust caller and the C
+#     selfcheck; rt_coverage_dump_sdn itself returns rt_string_new(...).
+#     After: raw_tag=1, len=219, in all three link orders.
+#
+#   * rt_host_gpu_queue_last_payload_text -- WAS A REAL DEFECT, now FIXED,
+#     row removed. Measured raw_tag=0 (static char[4096]). The C raw form is
+#     now rt_host_gpu_queue_last_payload_text_cstr; the Rust side no longer
+#     exports the *const c_char function under the bare name -- the
+#     RuntimeValue-returning rt_host_gpu_queue_last_payload_text_rv carries
+#     `#[export_name = "rt_host_gpu_queue_last_payload_text"]` instead.
+#     After: raw_tag=1, len=0 (empty queue), in all three link orders.
+#
+#   * rt_cli_get_args, rt_get_args -- MEASURED COMPATIBLE, rows KEPT.
+#     No longer "unmeasured". Both returned raw_tag=1 (TAG_HEAP) and decoded
+#     as a well-formed RuntimeValue array via rt_array_len/rt_array_get in all
+#     three link orders. The C copies spell the result `SplArray*` where
+#     RuntimeFuncSpec spells it I64, but rt_array_new-built arrays are
+#     correctly HEAP-tagged, so this is the same spelling-only case as
+#     rt_process_run -- now confirmed by execution rather than inferred.
+#
 #
 # Removing a row from this file is the correct outcome of fixing it; the
 # ratchet enforces that.
@@ -63,22 +140,11 @@ rt_array_copy	ret:int	ret:ptr	runtime_native.c
 rt_array_new	ret:int	ret:ptr	runtime_native.c
 rt_array_new_with_cap_u64	ret:int	ret:ptr	runtime_native.c
 rt_array_repeat	ret:int	ret:ptr	runtime_native.c
-rt_array_set	ret:int	ret:void	runtime_native.c
 rt_byte_array_new_len	ret:int	ret:ptr	runtime_native.c
 rt_byte_array_new	ret:int	ret:ptr	runtime_native.c
-rt_channel_send	ret:int	ret:void	runtime_native.c
 rt_cli_get_args	ret:int	ret:ptr	runtime.c
 rt_cli_get_args	ret:int	ret:ptr	runtime_native.c
-rt_coverage_dump_sdn	ret:int	ret:ptr	runtime_coverage_core.c
-rt_dir_list	ret:int	ret:ptr	platform_win.h
-rt_dir_list	ret:int	ret:ptr	unix_common.h
-rt_exit	ret:void	ret:int	env_process.rs
-rt_file_close	ret:int	ret:void	descriptor.rs
-rt_file_close	ret:int	ret:void	runtime_native.c
 rt_get_args	ret:int	ret:ptr	runtime_native.c
-rt_host_gpu_queue_last_payload_text	ret:int	ret:ptr	runtime_native.c
-rt_invlpg	ret:int	ret:void	runtime_native.c
 rt_process_spawn	ret:int	ret:ptr	runtime_native.c
 rt_string_data	ret:int	ret:ptr	runtime_native.c
 rt_value_to_ptr	ret:int	ret:ptr	memory.rs
-rt_write_cr3	ret:int	ret:void	runtime_native.c

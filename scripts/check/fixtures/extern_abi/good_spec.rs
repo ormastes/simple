@@ -12,4 +12,9 @@ pub static SELFTEST_SPECS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_selftest_ret", &[I64, I64], &[I64]),
     // Header-coverage row: definition lives in platform/good_hdr_defs.h.
     RuntimeFuncSpec::new("rt_selftest_hdr", &[I64, I64], &[I8]),
+    // Pure-Simple LLVM backend declaration rows: definitions (declarations,
+    // really -- they generate the callee signature the backend emits against)
+    // live in good_spl_decls.spl / bad_spl_decls.spl, one per declaration shape.
+    RuntimeFuncSpec::new("rt_selftest_spl_text", &[I64, I64], &[I8]),
+    RuntimeFuncSpec::new("rt_selftest_spl_fn", &[I64, I64], &[I8]),
 ];

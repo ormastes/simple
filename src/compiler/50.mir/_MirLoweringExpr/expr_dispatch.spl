@@ -2996,8 +2996,37 @@ impl MirLowering:
                     var field_type = MirType.i64()
                     if val field_elem_type = field_elem_type_override:
                         field_type = MirType(kind: MirTypeKind.Array(self.lower_type(field_elem_type), 0))
-                    elif val expr_type = expr_value.type_:
-                        field_type = self.lower_type(expr_type)
+                    else:
+                        # native_aot_f64_struct_field_interp_bitcast: same fix
+                        # as compound_field_mir_type (mir_lowering_stmts.spl)
+                        # applies to the READ side here -- prefer the OWNER
+                        # struct's declared field type (struct_field_hir_type,
+                        # already consulted a few lines below via
+                        # remember_local_hir_type, but only for HIR-type
+                        # provenance, not for THIS field_type/dest MIR type)
+                        # over `expr_value.type_`, which is nil/unreliable for
+                        # a plain field-access expr. Leaving field_type at the
+                        # MirType.i64() default here registered an f64 field's
+                        # GetField dest as i64, so downstream string-
+                        # interpolation type dispatch (coerce_concat_operand,
+                        # keyed off local_mir_type_of) chose
+                        # rt_raw_i64_to_string over rt_raw_f64_to_string and
+                        # printed the field's raw IEEE-754 bit pattern as a
+                        # decimal integer instead of formatting it as a float.
+                        var declared_field_resolved = false
+                        if val owner_pre = base_struct_name_pre:
+                            if self.struct_field_hir_type.contains(owner_pre):
+                                val field_types_pre = self.struct_field_hir_type[owner_pre]
+                                if field_idx >= 0 and field_idx < field_types_pre.len():
+                                    val declared_field_type_pre = field_types_pre[field_idx]
+                                    match declared_field_type_pre.kind:
+                                        case HirTypeKind.Error: ()
+                                        case _:
+                                            field_type = self.lower_type(declared_field_type_pre)
+                                            declared_field_resolved = true
+                        if not declared_field_resolved:
+                            if val expr_type = expr_value.type_:
+                                field_type = self.lower_type(expr_type)
                     val projected_struct_name = self.resolve_base_struct_name(base, base_local)
                     if val psn = projected_struct_name:
                         if self.struct_field_repr_name.contains(psn):
@@ -3913,8 +3942,34 @@ impl MirLowering:
                 var field_type = MirType.i64()
                 if val field_elem_type3 = field_elem_type_override2:
                     field_type = MirType(kind: MirTypeKind.Array(self.lower_type(field_elem_type3), 0))
-                elif val expr_type = expr_value.type_:
-                    field_type = self.lower_type(expr_type)
+                else:
+                    # native_aot_f64_struct_field_interp_bitcast: prefer the
+                    # OWNER struct's declared field type (same
+                    # struct_field_hir_type table compound_field_mir_type
+                    # uses for `obj.f += v`'s read side) over the HIR
+                    # field-access expr's own `.type_` annotation, which is
+                    # unreliable/nil here and silently fell through to the
+                    # `MirType.i64()` default above -- so an f64 field's
+                    # GetField dest was registered as i64, and downstream
+                    # string-interpolation type dispatch
+                    # (coerce_concat_operand, which trusts local_mir_type_of)
+                    # picked rt_raw_i64_to_string over rt_raw_f64_to_string,
+                    # printing the field's raw IEEE-754 bit pattern as a
+                    # decimal integer instead of formatting it as a float.
+                    var declared_field_resolved = false
+                    if val owner_name3 = base_struct_name_pre2:
+                        if self.struct_field_hir_type.contains(owner_name3):
+                            val field_types3 = self.struct_field_hir_type[owner_name3]
+                            if field_idx >= 0 and field_idx < field_types3.len():
+                                val declared_field_type3 = field_types3[field_idx]
+                                match declared_field_type3.kind:
+                                    case HirTypeKind.Error: ()
+                                    case _:
+                                        field_type = self.lower_type(declared_field_type3)
+                                        declared_field_resolved = true
+                    if not declared_field_resolved:
+                        if val expr_type = expr_value.type_:
+                            field_type = self.lower_type(expr_type)
                 val projected_struct_name2 = self.resolve_base_struct_name(base, base_local)
                 if val psn2 = projected_struct_name2:
                     if self.struct_field_repr_name.contains(psn2):

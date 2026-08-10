@@ -157,7 +157,18 @@ static void coverage_append(char *out, size_t capacity, size_t *offset, const ch
     *offset += length;
 }
 
-char *rt_coverage_dump_sdn(void) {
+/* Raw producer. `rt_coverage_dump_sdn` itself is DECLARED as a Simple `text`
+ * return in every Simple declaration (src/lib/nogc_sync_mut/{ffi,sffi,io,
+ * test_runner}/coverage*.spl, compiler_rust/lib/std/src/tooling/coverage.spl)
+ * and as `&[I64]` (RuntimeValue) in RuntimeFuncSpec (runtime_sffi.rs:1350).
+ * A malloc'd `char*` is an UNTAGGED word: tag bits 0, not TAG_HEAP, so the
+ * caller decodes it as a non-string RuntimeValue. MEASURED 2026-08-10 through
+ * the compiler's emitted ABI in all three C link orders. Same class as the
+ * rt_file_read_text defect. The raw form is kept under an explicit _cstr name
+ * for the in-process Rust caller (compiler/src/coverage.rs) and the C
+ * selfcheck, both of which want the malloc'd buffer and free it with
+ * rt_coverage_free_sdn. */
+char *rt_coverage_dump_sdn_cstr(void) {
     static const char decision_header[] = "# Coverage Report\nversion: 1.0\ncoverage_extension: decision-condition-v1\n\ndecisions |id, file, line, column, true_count, false_count|\n";
     static const char condition_header[] = "\nconditions |decision_id, condition_id, file, line, column, true_count, false_count|\n";
     coverage_lock();
@@ -219,6 +230,21 @@ char *rt_coverage_dump_sdn(void) {
 }
 
 void rt_coverage_free_sdn(char *report) { free(report); }
+
+/* Declared in runtime_native.c, which is present in every bundle that carries
+ * runtime_coverage_core.c (see scripts/check/build-core-c-bootstrap-runtime-
+ * capsule.shs). Returns a TAG_HEAP RuntimeValue. */
+extern int64_t rt_string_new(const uint8_t *bytes, uint64_t len);
+
+/* The ABI-correct entry point: what every Simple `extern fn
+ * rt_coverage_dump_sdn() -> text` declaration and RuntimeFuncSpec promise. */
+int64_t rt_coverage_dump_sdn(void) {
+    char *raw = rt_coverage_dump_sdn_cstr();
+    if (!raw) return rt_string_new(NULL, 0);
+    int64_t value = rt_string_new((const uint8_t *)raw, (uint64_t)strlen(raw));
+    free(raw);
+    return value;
+}
 
 void rt_coverage_clear(void) {
     coverage_lock();

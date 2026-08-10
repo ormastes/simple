@@ -4,6 +4,19 @@
 //
 // This section contains the main MirInst enum with all 80+ instruction variants.
 
+/// One nested struct-valued field slot of an `AggregateCopy` that must be
+/// deep-copied (F1/S5 deep-copy extension, 2026-08-10). `word_index` is the
+/// 8-byte slot index within the parent's storage. The tree is built at MIR
+/// lowering from the HIR type registry with a visited-type-name path guard,
+/// so it is finite by construction even for (ill-formed) self-referential
+/// value types; codegen recursion is bounded by this static tree's depth.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AggregateFieldCopy {
+    pub word_index: u32,
+    pub byte_size: u32,
+    pub nested: Vec<AggregateFieldCopy>,
+}
+
 /// MIR instruction
 #[derive(Debug, Clone, PartialEq)]
 pub enum MirInst {
@@ -36,9 +49,12 @@ pub enum MirInst {
     /// sibling. See
     /// `doc/03_plan/ui/perf/f1_class_identity_kind_propagation_plan_2026-08-09.md` §4.
     ///
-    /// Shallow by design: it duplicates `byte_size` bytes of the aggregate's
-    /// own storage. Nested aggregates reached through a field are separate
-    /// copy sites and get their own instruction.
+    /// Copies `byte_size` bytes of the aggregate's own storage, then
+    /// deep-copies exactly the field slots listed in `deep_fields` — the
+    /// fields lowering positively established to hold a nested DECLARED
+    /// VALUE TYPE (`struct`). Class/actor/array/text/unknown fields stay
+    /// shallow, preserving identity semantics and array/text's own
+    /// already-correct copy paths.
     AggregateCopy {
         dest: VReg,
         src: VReg,
@@ -48,6 +64,10 @@ pub enum MirInst {
         /// Declared type name the kind decision was made on. Diagnostic only —
         /// the decision is already taken by the time this exists.
         type_name: Option<String>,
+        /// Statically-resolved nested struct-valued field slots that must be
+        /// deep-copied. Built at lowering (where the type registry lives);
+        /// codegen follows this tree blindly. Empty = plain shallow copy.
+        deep_fields: Vec<AggregateFieldCopy>,
     },
 
     /// Binary operation

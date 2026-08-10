@@ -2,7 +2,14 @@
 #
 # Provides HTTP header parsing, formatting, and manipulation.
 
-import common from "std/http/common"
+use std.gc_async_mut.http.common.{
+    parse_headers as common_parse_headers,
+    parse_header as common_parse_header,
+    format_headers as common_format_headers,
+    parse_int as common_parse_int,
+    index_of as common_index_of,
+    hex_to_int as common_hex_to_int
+}
 
 # ============================================================================
 # HTTP Headers
@@ -10,16 +17,16 @@ import common from "std/http/common"
 
 # Parse list of header lines into list of (name, value) tuples
 fn parse_headers(lines: list) -> list:
-    return common.parse_headers(lines)
+    return common_parse_headers(lines)
 
 # Parse single header line
 # Example: "Content-Type: application/json" -> ("Content-Type", "application/json")
 fn parse_header(line: text) -> tuple:
-    return common.parse_header(line)
+    return common_parse_header(line)
 
 # Format headers list into HTTP header text
 fn format_headers(headers: list) -> text:
-    return common.format_headers(headers)
+    return common_format_headers(headers)
 
 # Get header value by name (case-insensitive)
 # Returns nil if not found
@@ -119,7 +126,7 @@ fn get_content_length(headers: list) -> i64:
     if length_str == nil:
         return 0
 
-    return common.parse_int(length_str)
+    return common_parse_int(length_str)
 
 # Check if response uses chunked encoding
 fn is_chunked(headers: list) -> bool:
@@ -188,7 +195,7 @@ fn decode_chunked(encoded: text) -> Result<text, text>:
 
     while pos < encoded.length():
         # Find end of chunk size line
-        val size_end = common.index_of(encoded, "\r\n", pos)
+        val size_end = common_index_of(encoded, "\r\n", pos)
 
         if size_end < 0:
             return Err("chunk size line not terminated by CRLF")
@@ -281,7 +288,7 @@ fn parse_hex_text(hex: text) -> i64:
 
 # Convert hex digit to integer
 fn hex_to_int(ch: text) -> i64:
-    return common.hex_to_int(ch)
+    return common_hex_to_int(ch)
 
 # ============================================================================
 # Range Header Handling
@@ -305,11 +312,11 @@ fn parse_range_header(header: text) -> tuple:
 
     var start = 0
     if start_str.length() > 0:
-        start = common.parse_int(start_str)
+        start = common_parse_int(start_str)
 
     var end = 0
     if end_str.length() > 0:
-        end = common.parse_int(end_str)
+        end = common_parse_int(end_str)
 
     return (start, end)
 
@@ -353,9 +360,12 @@ fn parse_multipart(body: text, boundary: text) -> list:
 fn parse_multipart_part(part_text: text) -> tuple:
     val lines = part_text.split("\r\n")
 
-    # Find empty line separating headers from body
-    var header_end = 0
-    var i = 0
+    # part_text always starts with the CRLF that terminated the boundary
+    # line (left attached by the caller's body.split(delimiter)), so
+    # lines[0] is always "". Skip it before scanning for the real empty
+    # line that separates headers from body.
+    var header_end = -1
+    var i = 1
     while i < lines.length():
         val line = lines[i]
         if line == "":
@@ -363,12 +373,12 @@ fn parse_multipart_part(part_text: text) -> tuple:
             break
         i = i + 1
 
-    if header_end == 0:
+    if header_end < 0:
         return nil
 
-    # Parse headers
+    # Parse headers (skip lines[0], the leading empty artifact line)
     var header_lines = []
-    var j = 0
+    var j = 1
     while j < header_end:
         header_lines.push(lines[j])
         j = j + 1

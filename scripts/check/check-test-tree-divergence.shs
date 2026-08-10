@@ -91,7 +91,8 @@ toplevel=$(git rev-parse --show-toplevel 2>/dev/null)
 [ -n "$toplevel" ] || die 2 "not inside a git repository (cwd=$(pwd))"
 cd "$toplevel" || die 2 "cannot cd to repo root $toplevel"
 
-BASELINE="${TEST_TREE_DIVERGENCE_BASELINE:-$toplevel/scripts/check/test_tree_divergence_baseline.txt}"
+BASELINE_PATH_REL="scripts/check/test_tree_divergence_baseline.txt"
+ALLOWLIST_PATH_REL="scripts/check/test_tree_mirror_only_allowlist.txt"
 
 generate=0
 ref=""
@@ -114,6 +115,41 @@ if [ -n "$base" ]; then
         || die 2 "--base '$base' does not resolve to a commit"
 fi
 
+# --- 0b. baseline/allowlist source: committed content at --ref, else disk ---
+# In --ref mode the tree comparison already reads committed content via
+# `git ls-tree`/`cat-file` (see section 3) — the baseline and allowlist MUST
+# come from the SAME commit, or the verdict depends on whatever another
+# session's uncommitted scratch happens to have left in the shared working
+# copy. Missing file at that ref is an ERROR, never a silent fallback to WC.
+work0=$(mktemp -d "${TMPDIR:-/tmp}/test_tree_divergence_src.XXXXXX") \
+    || die 2 "mktemp failed"
+trap 'rm -rf "$work0"' EXIT INT TERM
+# (superseded by the wider trap once $work exists, below; this earlier one
+#  guarantees work0 is cleaned even if we die before that point)
+if [ -n "$ref" ]; then
+    [ -z "${TEST_TREE_DIVERGENCE_BASELINE:-}" ] \
+        || die 2 "TEST_TREE_DIVERGENCE_BASELINE override is not supported with --ref (baseline must come from \$ref)"
+    [ -z "${TEST_TREE_MIRROR_ONLY_ALLOWLIST:-}" ] \
+        || die 2 "TEST_TREE_MIRROR_ONLY_ALLOWLIST override is not supported with --ref (allowlist must come from \$ref)"
+    git cat-file -e "$ref:$BASELINE_PATH_REL" 2>/dev/null \
+        || die 2 "baseline file missing at ref $ref: $BASELINE_PATH_REL"
+    BASELINE="$work0/baseline_from_ref.txt"
+    git show "$ref:$BASELINE_PATH_REL" > "$BASELINE" 2>/dev/null \
+        || die 2 "git show $ref:$BASELINE_PATH_REL failed"
+    if git cat-file -e "$ref:$ALLOWLIST_PATH_REL" 2>/dev/null; then
+        ALLOWLIST="$work0/allowlist_from_ref.txt"
+        git show "$ref:$ALLOWLIST_PATH_REL" > "$ALLOWLIST" 2>/dev/null \
+            || die 2 "git show $ref:$ALLOWLIST_PATH_REL failed"
+    else
+        # no allowlist file at this ref is legitimate (treated as empty list
+        # below via the `[ -f "$ALLOWLIST" ]` check), not an error.
+        ALLOWLIST="/nonexistent/no-allowlist-at-ref"
+    fi
+else
+    BASELINE="${TEST_TREE_DIVERGENCE_BASELINE:-$toplevel/$BASELINE_PATH_REL}"
+    ALLOWLIST="${TEST_TREE_MIRROR_ONLY_ALLOWLIST:-$toplevel/$ALLOWLIST_PATH_REL}"
+fi
+
 # --- 1. which pairs to check ------------------------------------------------
 if [ -n "${TEST_TREE_DIVERGENCE_PAIRS:-}" ]; then
     pairs_raw=$(printf '%s' "$TEST_TREE_DIVERGENCE_PAIRS" | tr ';' '\n')
@@ -125,7 +161,7 @@ fi
 # --- 2. scratch state --------------------------------------------------------
 work=$(mktemp -d "${TMPDIR:-/tmp}/test_tree_divergence.XXXXXX") \
     || die 2 "mktemp failed"
-trap 'rm -rf "$work"' EXIT INT TERM
+trap 'rm -rf "$work" "$work0"' EXIT INT TERM
 
 current_diverged="$work/current_diverged.txt"
 : > "$current_diverged"
@@ -233,7 +269,8 @@ sort -u "$mirror_only" -o "$mirror_only"
 # reviewed exceptions live in the allowlist file (label:relpath per line,
 # '#' comments allowed). The allowlist is hand-maintained — there is NO
 # --generate flag for it, by design: never auto-generate it to force green.
-ALLOWLIST="${TEST_TREE_MIRROR_ONLY_ALLOWLIST:-$toplevel/scripts/check/test_tree_mirror_only_allowlist.txt}"
+# (ALLOWLIST is set in section 0b, above: from $ref via `git show` in --ref
+# mode, from disk otherwise — never re-sourced here.)
 if [ -f "$ALLOWLIST" ]; then
     /usr/bin/grep -v '^[[:space:]]*#' "$ALLOWLIST" | /usr/bin/grep -v '^[[:space:]]*$' | sort -u > "$work/allowlist_sorted.txt"
 else
