@@ -1,6 +1,18 @@
 # seed JIT: `me`-method write-back into a `self` array-of-structs field crashes ("nil receiver")
 
-**Status:** OPEN (seed JIT/native only; interpreter correct). Workaround in place.
+**Status:** ARCHITECTURAL-OPEN (seed JIT/native only; interpreter correct). Workaround in place.
+Root cause lives in the Rust seed's cranelift/native lowering
+(`src/compiler_rust/**`), which is off-limits to edit from pure-Simple sessions
+per repo policy — this is not fixable in `.spl` source. Re-verified fresh on
+2026-08-10 with the exact repro below:
+- `bin/simple run /tmp/repro/r1.spl` (default seed JIT,
+  `bin/release/x86_64-unknown-linux-gnu/simple`) → `runtime error: field access
+  on nil receiver` (crash), matching the doc exactly.
+- `SIMPLE_EXECUTION_MODE=interpreter bin/simple run /tmp/repro/r1.spl` →
+  `N DONE pumps=2` (correct), matching the doc exactly.
+Workaround (functional free-function pattern in
+`src/lib/hardware/link_mux/mux.spl`) remains the correct mitigation until a
+Rust-seed session picks this up.
 **Found:** 2026-07-23, building `src/lib/hardware/link_mux/mux.spl`.
 **Severity:** medium — silently crashes (SIGILL, exit 132) any program that uses
 the natural stateful-object idiom below under the default JIT; interpreter is
