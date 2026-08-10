@@ -599,11 +599,24 @@ fn is_hash_comment_lang(path: text) -> bool:
         or path.ends_with(".yml") or path.ends_with(".yaml") or path.ends_with(".cmake")
         or path.ends_with(".mk") or path.ends_with("Makefile") or path.ends_with(".bash")
 
+# DEFECT 4: markup/data formats have NO `#` line-comment syntax. Markdown `##`
+# is a HEADING -- content, not a comment -- and `doc/` is a product root here, so
+# the unknown-extension fallback silently hollowed every spec that asserts a
+# heading in a plan/tracking document. Same for JSON/HTML/CSV/TSV/TXT/SVG.
+fn is_markup_or_data_lang(path: text) -> bool:
+    path.ends_with(".md") or path.ends_with(".markdown") or path.ends_with(".txt")
+        or path.ends_with(".json") or path.ends_with(".html") or path.ends_with(".htm")
+        or path.ends_with(".svg") or path.ends_with(".csv") or path.ends_with(".tsv")
+        or path.ends_with(".xml") or path.ends_with(".rst")
+
 # Is `line` (raw) a comment line in the language of `path`?
 fn is_comment_line(path: text, line: text) -> bool:
     val t = line.trim()
     if t == "":
         return true
+    if is_markup_or_data_lang(path):
+        # No line-comment syntax at all: every non-blank line is content.
+        return false
     if is_c_family(path):
         # `#` is a preprocessor directive here -- CODE. (DEFECT 2)
         if t.starts_with("//") or t.starts_with("/*"):
@@ -871,6 +884,8 @@ fn control_cache() -> SMap:
     c = smap_put(c, "src/ctrl_hollow.spl", "# TODO: ctrl_hollow_needle is not implemented yet\nfn nothing():\n    0\n")
     # A C-family block comment continuation -- `*` IS a comment here.
     c = smap_put(c, "src/runtime/ctrl_block.c", "/*\n * ctrl_block_needle is only documented\n */\nint x = 1;\n")
+    # A MARKDOWN heading -- `##` is CONTENT here, never a comment. (DEFECT 4)
+    c = smap_put(c, "doc/ctrl_plan.md", "# Plan\n\n## Ctrl Heading Agent\n\nbody text\n")
     c
 
 struct HollowCase:
@@ -890,6 +905,8 @@ fn control_hollow_cases() -> [HollowCase]:
                         paths: ["src/runtime/ctrl_preproc.c"], want: "code"))
     out.push(HollowCase(label: "mispaired_path", needle: "ctrl_paired_needle",
                         paths: ["src/ctrl_decoy.spl", "src/ctrl_real.spl"], want: "code"))
+    out.push(HollowCase(label: "markdown_heading", needle: "## Ctrl Heading Agent",
+                        paths: ["doc/ctrl_plan.md"], want: "code"))
     # MUST FIRE
     out.push(HollowCase(label: "genuine_hollow", needle: "ctrl_hollow_needle",
                         paths: ["src/ctrl_hollow.spl"], want: "comment"))
@@ -979,7 +996,7 @@ fn run_control() -> bool:
         print("control: SHADOW fires on a colliding name, silent on a spec-only name")
         print("control: HOLLOW fires on 2 planted comment-only needles, silent on")
         print("         shell case arm, C preprocessor, C define, mispaired path,")
-        print("         negative assertion")
+        print("         markdown heading, negative assertion")
     ok
 
 # ------------------------------------------------------------------------ scan
