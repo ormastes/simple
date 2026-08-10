@@ -469,10 +469,101 @@ the 291 residual hit-lines:
   multi-line call — the `nxt != ":"` guard only suppresses the *label*, not
   the value, and the value is again a param.
 
-TODO(2026-08-10): teach the analyzer multi-line parameter lists and
+TODO(2026-08-10) — DONE later the same day; see the final section of this file
+for the fixtures, the six eliminated families, and the widened scope. Original
+text: teach the analyzer multi-line parameter lists and
 `case`/`if val` binder locals, then re-run the 199-file out-of-scope pass. Only
 after that is the "are there real sites outside the six clusters" question
 genuinely closed; today's answer is "the docstring half is closed, and the
 residue is a known analyzer gap, not a defect population". The guard's scope
 was deliberately NOT widened in this change, because widening it now would
 baseline 181 known-false triples.
+
+## 2026-08-10 (later): all analyzer false-positive families eliminated; scope widened
+
+The TODO above ("teach the analyzer multi-line parameter lists and `case`/`if val`
+binder locals, then re-run the 199-file out-of-scope pass") is **resolved**.
+
+Binary measured: `bin/release/x86_64-unknown-linux-gnu/simple` (the `bin/simple`
+symlink target), size 181524312, mtime 2026-08-10 11:06:25 UTC; read-only use.
+Analyzer claims use `--static-only`, gated on exit code AND the verdict line.
+
+### Fixture-first: every family reproduced before it was fixed
+
+`test/fixtures/repro/compiler/bare_field_ref/bare_field_reference_false_positive_repro.spl`
+holds one class per family, plus `GenuineSite.real_field` — a real bare field
+reference — as the fixture's own positive control. Before the fix the analyzer
+reported **10 false triples + the genuine one**; after, it reports **exactly the
+genuine one**. This is now wired into the guard as **control C**, which ERRORs
+(exit 2) both when the analyzer reports more than that one triple (an FP family
+regressed) and when it reports none (the analyzer went blind).
+
+| # | family | example | fix |
+|---|---|---|---|
+| 1 | `case`/`if val` binders | `case Some(entry):` | `register_binders()` registers lowercase pattern identifiers as locals; for `if/while val` only the pattern side (before `=`) is scanned, so the RHS stays checked |
+| 2 | multi-line parameter lists | `self.min_distance = min_distance` | signature lines are re-joined until parens balance (`paren_balance`), then parsed once (`parse_params`) |
+| 3 | named-argument VALUES | `worker_id: worker_id,` | falls out of 1+2; the value is a binder or a multi-line param |
+| 4 | pipe/arrow match arms | `\| Some(threshold) ->` | same binder registration, `\|`-form |
+| 5 | escaped quotes in literals | `out + ",\"tid\":"` | `strip_strings()` now honours `\` escapes; without it the escaped quote flipped the quote state and the literal body was scanned as code |
+| 6 | call targets / kwarg labels | `ticks()`, `device=self.device` | an identifier followed by `(` or `=` is a call target or a label, not a read |
+
+Families 4-6 were **not** in the prior triage — they were found by hand-reading
+the residue after families 1-3 were fixed, exactly the "fourth FP family"
+question this pass was asked to answer.
+
+### Measured, per property (all re-proven after every change)
+
+| property | before | after |
+|---|---|---|
+| control A (compiler lane rejects positive fixture) | fires | fires |
+| control B (analyzer flags positive fixture) | fires | fires |
+| control C (analyzer reports exactly 1 triple on FP fixture) | n/a (new) | holds |
+| `riscv_shared/*.spl` | 0 | **0** |
+| `domain_hardening.spl` | 0 | **0** |
+| `domain_hardening.spl` at `904dc148477^` (pre-fix) | 8 | **8 — detection preserved** |
+| in-scope baseline (old 6 clusters) | 134 / 12 files | **130 / 10 files** |
+| out-of-scope, 199 census files | 181 / 44 files (296 hit-lines) | **52 / 4 files (79 hit-lines)** |
+| guard, widened scope | 134 / 80 files | **182 / 122 files** |
+
+**The in-scope baseline moved, and every entry was investigated.** Seven triples
+left (all false) and three arrived (all genuine):
+
+- **-6** `src/os/hosted/hosted_browser_renderer_registry.spl` (5, family 2/3: a
+  multi-line `static fn create(...)` whose params feed `window_id: window_id,`)
+  and `src/os/hosted/hosted_web_content_session.spl` (1, family 1: `Ok(bookmark_store):`).
+  Read in full source context — all six were binder/parameter reads, not field reads.
+- **-1** `src/compiler/10.frontend/domain/schema_contract.spl` `identity`, which
+  occurs only inside `"\"x-identity\":\"{self.identity}\""` (family 5).
+- **+3** `src/os/http/ws_deflate_auth.spl` `DigestResponse.{username,realm,nonce}`
+  at line 146, `return "Digest username=\"" + username + ...` — **genuine**, and
+  previously MASKED by the escape bug. The escape fix made the guard stronger,
+  not weaker.
+
+### Residue hand-verified, then scope widened
+
+All **79** residual hit-lines (not a sample — the whole set) were read in source
+context. Every one has the same shape as the original defect: `me is_runtime()
+-> bool: return role_name == "runtime"`. There is no fourth FP family left in the
+residue. Independently confirmed on the compiler lane, following the guard's own
+stderr-marker pattern rather than an exit code:
+
+```
+$ bin/simple run <driver calling LibraryRole.runtime(1).is_runtime()>
+error: semantic: variable `role_name` not found
+```
+
+Because the residue is **all genuine**, the guard's scope was widened to
+`src/os/kernel/arch/riscv64/*.spl` (35 files, 31 sites) and `src/os/smf/*.spl`
+(7 files, 21 sites) — the only two clusters the residue lives in. Scanning those
+whole directories adds exactly the 52 verified triples and nothing else, so no
+unverified site was baselined. The file-count floor rose 60 → 100 and the
+full-mode check floor 5 → 6 so neither gate got looser as scope grew.
+
+`sh scripts/check/check-bare-field-references.shs --static-only` →
+`static OK — 122 files scanned, 182 known site(s), 0 new, 0 stale` /
+`PASS — 4 checks ran, all green`, exit 0.
+
+**Remaining work is now product-side, not analyzer-side**: the 182 baselined
+sites are real dead methods and still need fixing. The analyzer no longer has a
+known false-positive family, so a further scope widening is a scanning decision,
+not a precision one.

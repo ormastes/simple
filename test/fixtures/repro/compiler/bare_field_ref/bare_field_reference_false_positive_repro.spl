@@ -1,0 +1,105 @@
+# Negative-control fixture for the bare-field-reference static analyzer.
+#
+# Every class below uses a name that is ALSO a field of the enclosing class, but
+# in a position where the name resolves to a pattern binder, a parameter, or a
+# local -- NOT to the field. None of these is a bare field reference, so the
+# analyzer must NOT flag any of them. Each class reproduces one of the three
+# false-positive families measured on 2026-08-10 (see
+# doc/08_tracking/bug/bare_field_reference_in_methods_is_illegal_but_pervasive_2026-08-10.md).
+#
+# The last class, `GenuineSite`, DOES contain a real bare field reference. It is
+# the fixture's own positive control: a run of the analyzer over this file must
+# report exactly one triple, `GenuineSite <TAB> real_field`. If it reports zero,
+# the analyzer is dead and the negative result above proves nothing.
+
+# family 1: `case`/`if val` pattern binders introduce locals
+class BinderFP:
+    entry: i32
+    parent: i32
+
+    me lookup(slot: Option<i32>) -> i32:
+        match slot:
+            case Some(entry):
+                return entry
+            case None:
+                return 0
+
+    me climb(slot: Option<i32>) -> i32:
+        if val Some(parent) = slot:
+            return parent
+        return 0
+
+# family 2: constructor parameter list spanning multiple lines
+class MultiLineParamFP:
+    min_distance: f64
+    max_distance: f64
+    stiffness: f64
+
+    me configure(
+        min_distance: f64,
+        max_distance: f64,
+        stiffness: f64
+    ):
+        self.min_distance = min_distance
+        self.max_distance = max_distance
+        self.stiffness = stiffness
+
+# family 3: named-argument VALUE positions (the label was already excluded).
+# The value is a parameter of a multi-line signature or a match-arm binder, so
+# this family is measured as a distinct symptom even though it shares roots with
+# families 1 and 2. The bare (`case`-less) match-arm form is included because it
+# is what real code uses (src/app/ui.electron/main.spl).
+class NamedArgFP:
+    worker_id: i32
+    backend: text
+
+    me spawn(
+        worker_id: i32,
+        port: i32
+    ) -> Result<NamedArgFP, text>:
+        val be = open_backend(port)
+        match be:
+            Ok(backend):
+                return Ok(NamedArgFP(
+                    worker_id: worker_id,
+                    backend: backend
+                ))
+            Err(e):
+                return Err(e)
+
+# family 4: the pipe/arrow match-arm form, `| Some(x) ->`, also binds a local
+class PipeArmFP:
+    threshold: f64
+
+    me over(value: Option<f64>) -> bool:
+        match value:
+            | Some(threshold) -> return threshold > 0.0
+            | None -> return false
+
+# family 5: field names mentioned only INSIDE a string literal that contains
+# BACKSLASH-ESCAPED quotes -- the escape flipped the string-stripper's state, so
+# the literal body was scanned as code
+class EscapedStringFP:
+    tid: i32
+    title: text
+
+    me emit() -> text:
+        var out = "{\"tid\":" + self.tid.to_text()
+        out = out + ",\"title\":\"" + self.title + "\""
+        return out
+
+# family 6: a name that is both a field and a callable/keyword-argument label
+class CallAndKwargFP:
+    ticks: i64
+    device: text
+
+    me sample() -> i64:
+        val now = ticks()
+        return now
+
+# positive control: a genuine bare field reference, which MUST still be flagged
+class GenuineSite:
+    real_field: i32
+
+    me read() -> i32:
+        return real_field
