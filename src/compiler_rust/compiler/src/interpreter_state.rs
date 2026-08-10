@@ -99,6 +99,43 @@ pub(crate) fn decode_import_binding_marker(marker: &str) -> Option<(&str, &str, 
     Some((importer, local_name, source_owner, source_name))
 }
 
+/// Owner-unique symbol name for a free function that cannot keep its bare name
+/// once its module is flattened into the single compilation unit.
+///
+/// This mirrors the native-project lane, which has always disambiguated
+/// same-named free functions from different owning modules by prefixing the
+/// declaring module (`pipeline/native_project/imports.rs`: `raw_to_mangled`
+/// stores `format!("{module_prefix}__{name}")`, sanitized). The flattened lane
+/// had no equivalent, so an imported `main` was simply DROPPED
+/// (`pipeline::module_loader::strip_flattened_import_nodes`) and an alias to it
+/// bound the ENTRY module's `main` instead -- measured as unbounded recursion.
+/// See `doc/08_tracking/bug/flattened_lane_does_not_mangle_duplicate_function_names_2026-08-10.md`.
+///
+/// `owner` is a `normalize_path_key` string, which is exactly what the import
+/// binding marker records as its `source_owner` field, so the producer
+/// (flattening) and the consumer (HIR lowering) derive the identical symbol
+/// without having to share a side table. The name only has to be stable and
+/// unique *within one compilation*, so embedding the normalized path is enough;
+/// it is hashed to keep the symbol bounded and host-linker legal.
+pub(crate) fn flatten_owner_mangled_name(owner: &str, name: &str) -> String {
+    // FNV-1a over the owner path: deterministic, no external dependency, and
+    // stable across the two call sites within a single run.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in owner.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    // A readable stem keeps the symbol diagnosable in a symbol table dump.
+    let stem: String = owner
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(owner)
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    format!("__spl_flat_{stem}_{hash:016x}__{name}")
+}
+
 pub(crate) fn tag_function_module_owner(function: &mut FunctionDef, owner: &str) {
     if function
         .attributes

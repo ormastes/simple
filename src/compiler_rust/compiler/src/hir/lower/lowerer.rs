@@ -706,19 +706,26 @@ impl Lowerer {
     /// This is the codegen-side consumer whose absence made aliased imports
     /// lower to unresolved external symbols.
     pub(super) fn collect_flattened_import_aliases(&mut self, ast_module: &simple_parser::Module) {
-        use crate::interpreter::decode_import_binding_marker;
+        use crate::interpreter::{decode_import_binding_marker, flatten_owner_mangled_name};
 
-        // Flattening does NOT mangle: two modules that both define `main` land in
-        // `module.items` as two functions with the identical name, and only the
-        // interpreter's `__simple_flatten_module_owner__=` attribute tells them
-        // apart. HIR/codegen have no consumer of that attribute, so a bare-name
-        // rewrite of an alias whose SOURCE name is defined more than once would
-        // silently bind the wrong function -- measured as infinite recursion on
-        // exactly the `use ...{main as baremetal_main}` shape that
-        // `src/os/kernel/arch/*/cstart.spl` uses. Wrong code is worse than the
-        // unresolved-symbol error, so ambiguous sources are deliberately left
-        // unresolved and keep today's diagnostic. Tracked in
-        // `doc/08_tracking/bug/aliased_use_import_does_not_bind_in_transitive_module_2026-08-10.md`.
+        // Flattening merges every imported module's items into one namespace. An
+        // imported free function whose bare name cannot survive that merge is
+        // given an owner-unique symbol by
+        // `pipeline::module_loader::strip_flattened_import_nodes` (which is what
+        // the native-project lane has always done via its `raw_to_mangled`
+        // module-prefix scheme). `main` is the case that matters: it used to be
+        // DROPPED at flatten time, so an alias to it bound the ENTRY module's
+        // `main` and recursed forever.
+        //
+        // The marker records `source_owner` as the same `normalize_path_key`
+        // string the flattener mangles with, so recomputing the mangled symbol
+        // here resolves the alias to the exact function the `use` names -- no
+        // side table, and no reliance on the bare name being unique.
+        //
+        // A source name that is still ambiguous after that is left UNRESOLVED on
+        // purpose: the resulting unresolved-symbol error is correct behaviour
+        // compared to silently binding the wrong function. See
+        // `doc/08_tracking/bug/flattened_lane_does_not_mangle_duplicate_function_names_2026-08-10.md`.
         let mut definition_counts: HashMap<&str, usize> = HashMap::new();
         for item in &ast_module.items {
             if let simple_parser::Node::Function(f) = item {
@@ -730,7 +737,7 @@ impl Lowerer {
             let simple_parser::Node::Const(marker) = item else {
                 continue;
             };
-            let Some((_importer, local_name, _source_owner, source_name)) =
+            let Some((_importer, local_name, source_owner, source_name)) =
                 decode_import_binding_marker(&marker.name)
             else {
                 continue;
@@ -738,27 +745,29 @@ impl Lowerer {
             if local_name == "*" || source_name == "*" || local_name == source_name {
                 continue;
             }
-            // Exactly one definition of the source name, and none of the local
-            // name (a real `local` would win in `lower_identifier` anyway, but
-            // recording the mapping at all would be misleading).
-            if definition_counts.get(source_name).copied() != Some(1)
-                || definition_counts.contains_key(local_name)
-            {
+            // A real local definition of the alias name would win in
+            // `lower_identifier` anyway; recording a mapping at all would be
+            // misleading, so leave it alone.
+            if definition_counts.contains_key(local_name) {
                 continue;
             }
-            // `main` is the program entry symbol and is special-cased by every
-            // downstream lane, so it is NOT disambiguated by the count above:
-            // the entry module's own `main` does not appear in `ast_module.items`
-            // as an ordinary function here. Rewriting an alias to the bare name
-            // `main` therefore binds the ENTRY main, which is how the measured
-            // `use ...{main as baremetal_main}` probe turned into unbounded
-            // recursion. Left unresolved on purpose -- today's hard error is
-            // correct behaviour compared to silently calling the wrong function.
-            if source_name == "main" {
+            // Prefer the owner-mangled symbol. It names exactly the function in
+            // the module the `use` names, so it is unambiguous by construction
+            // and is checked for existence before it is trusted.
+            let owner_mangled = flatten_owner_mangled_name(source_owner, source_name);
+            let resolved = if definition_counts.get(owner_mangled.as_str()).copied() == Some(1) {
+                owner_mangled
+            } else if definition_counts.get(source_name).copied() == Some(1) {
+                // Unmangled and unique in the flattened unit: the bare name is
+                // the only candidate, so binding it is safe.
+                source_name.to_string()
+            } else {
+                // Absent or ambiguous. Do NOT guess -- leave the alias
+                // unresolved so the lane reports an unresolved symbol instead of
+                // calling the wrong function.
                 continue;
-            }
-            self.import_alias_bindings
-                .insert(local_name.to_string(), source_name.to_string());
+            };
+            self.import_alias_bindings.insert(local_name.to_string(), resolved);
         }
     }
 

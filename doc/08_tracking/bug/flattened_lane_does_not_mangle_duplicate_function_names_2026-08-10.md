@@ -1,5 +1,102 @@
 # Module flattening does not mangle duplicate free-function names, so codegen cannot tell two `main`s apart
 
+**Status:** FIXED in the flattened HIR/codegen (JIT) lane, 2026-08-10.
+The six `cstart.spl` files are NOT yet buildable — see "What is still blocked".
+
+## Resolution (2026-08-10)
+
+The filed root cause was close but not exact, and the difference matters.
+Flattening does not merely *fail to rename* a duplicate `main`: for an IMPORTED
+module it **dropped the function outright**.
+`pipeline::module_loader::strip_flattened_import_nodes` had
+
+```rust
+Node::Function(function) => {
+    if function.name == "main" {
+        continue;          // <- imported `main` discarded
+    }
+```
+
+so there was never a second `main` to disambiguate. The alias had no definition
+to bind to and resolved to the ENTRY module's `main`, which is why the probe
+recursed. Mangling duplicates alone would therefore NOT have fixed this — there
+was nothing to mangle.
+
+The fix keeps the drop's original intent (an imported `main` must never become
+or collide with the program entry symbol) while preserving the body:
+
+1. `strip_flattened_import_nodes` **renames** the imported `main` to
+   `flatten_owner_mangled_name(owner, "main")` instead of dropping it.
+2. `interpreter_state::flatten_owner_mangled_name` is the new shared helper,
+   ported from the native-project lane's long-standing scheme
+   (`pipeline/native_project/imports.rs`, `raw_to_mangled`, which stores
+   `sanitize_mangled(format!("{module_prefix}__{name}"))`). The native lane
+   compiles module-by-module, so its `all_mangled`/`use_map` tables could not be
+   reused wholesale; the *scheme* — owner path prefix + sanitize — is what
+   ports.
+3. `Lowerer::collect_flattened_import_aliases` recomputes the same symbol from
+   the import marker's `source_owner` field (`normalize_path_key`, the identical
+   string the flattener mangles with), so producer and consumer agree without a
+   side table. The blanket `source_name == "main"` refusal is gone; a source
+   that is still absent or ambiguous is left UNRESOLVED on purpose.
+
+This is a **Rust seed** change, not `.spl`: the flattener, the import-binding
+markers and HIR lowering are all in `src/compiler_rust/compiler/src/`. The
+defect lives there, so the fix does too.
+
+### Evidence
+
+| lane | before | after |
+|---|---|---|
+| interpreter | `R:42` | `R:42` |
+| codegen, alias left unresolved (shipped state) | hard error on `baremetal_main` | — |
+| codegen, naive bare-name rewrite | `fatal runtime error: stack overflow`, rc=134 (reproduced independently) | — |
+| codegen, this fix, `SIMPLE_JIT_STRICT=1` | — | **`R:42`** |
+
+`R:42` is `argc + 41` from `target.spl`, a value reachable ONLY from the correct
+function; the entry `main` returns nothing and recurses. Resolution is verified,
+not compilation.
+
+- `scripts/check/check-flattened-owner-mangling.shs` — **PASS, 4 cases**. Run
+  against the pre-fix binary it is **FAIL 4/4** (proved live, not asserted).
+- `scripts/check/check-import-alias-codegen.shs` — still **PASS 5/5**.
+- `cargo test -p simple-compiler --release --lib --tests` — 44 failures before
+  the change and the **same 44** after (`comm` diff empty in both directions).
+  All 44 pre-exist on `origin/main` and are unrelated (GPU counters, VHDL, C
+  linker detection, native_project stage4).
+
+### What is still blocked
+
+The six `src/os/kernel/arch/*/cstart.spl` files (`arm32`, `arm64`, `riscv32`,
+`riscv64`, `x86_32`, `x86_64` — note `arm64`, not `aarch64` as first filed) are
+**still not buildable**, for two reasons unrelated to mangling:
+
+1. They abort earlier in HIR lowering on `Cannot infer field type: struct
+   'MemoryRuntimeMapping' field 'address_space_root'` — identically before and
+   after this fix. Running the files is consequently NOT a valid oracle for this
+   defect; it cannot distinguish bound from unbound.
+2. The AOT `simple compile` lane resolves no selective-import alias at all, not
+   just `main`: a plain `use t.{helper as aliased_helper}` also fails with
+   `Undefined("undefined identifier: aliased_helper")`. That is the parent bug
+   (`aliased_use_import_does_not_bind_in_transitive_module_2026-08-10.md`) still
+   open for the AOT path, and it is the one that actually gates baremetal.
+
+Their shared import line IS verified: case 4 of the check compiles
+`use os.runtime.baremetal.runtime_minimal.{main as baremetal_main, __spl_exit}`
+— byte-identical to `cstart.spl:5` — against the real module and confirms
+execution reaches `runtime_minimal.main`, whose body is `__simple_main() as i32`
+(positive identification via the `__simple_main not found` report, not inferred
+from an absent error). Pre-fix that case reports unresolved `baremetal_main`.
+
+**No board or QEMU real-firmware evidence exists for this change**, and none is
+claimed: the six units still do not compile, so nothing was booted. Per
+`.claude/rules/board-runnable.md` this is scoped explicitly — the fix is
+verified at the symbol-resolution level in the JIT codegen lane only.
+
+---
+
+**Original report (root cause partly superseded — see above).**
+
 **Status:** OPEN — root-caused 2026-08-10 with a measured reproducer.
 **Filed:** 2026-08-10
 **Parent:** `doc/08_tracking/bug/aliased_use_import_does_not_bind_in_transitive_module_2026-08-10.md`

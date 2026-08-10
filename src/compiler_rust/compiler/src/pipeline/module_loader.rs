@@ -14,8 +14,9 @@ use simple_parser::Parser;
 
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
-    normalize_path_key, tag_function_module_owner, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX,
-    FLATTEN_IMPORT_BINDING_MARKER_PREFIX, FLATTEN_MODULE_OWNER_ATTR_PREFIX,
+    flatten_owner_mangled_name, normalize_path_key, tag_function_module_owner,
+    FLATTEN_GLOBAL_OWNER_MARKER_PREFIX, FLATTEN_IMPORT_BINDING_MARKER_PREFIX,
+    FLATTEN_MODULE_OWNER_ATTR_PREFIX,
 };
 use crate::stdlib_variant::stdlib_root_candidates;
 use crate::CompileError as _;
@@ -665,9 +666,22 @@ fn strip_flattened_import_nodes(module: Module, module_path: &Path) -> Module {
                 }
                 next_global_already_tagged = false;
             }
-            Node::Function(function) => {
+            Node::Function(mut function) => {
                 if function.name == "main" {
-                    continue;
+                    // An IMPORTED `main` must never become, or collide with,
+                    // the program entry symbol -- which is why this used to
+                    // `continue` and drop the node outright. Dropping it also
+                    // destroyed the only definition `use m.{main as g}` could
+                    // bind to, so the alias resolved to the ENTRY module's
+                    // `main` and recursed forever (measured: `fatal runtime
+                    // error: stack overflow`). Renaming keeps the original
+                    // intent -- it is still not called `main`, so it cannot be
+                    // mistaken for the entry point -- while preserving the body
+                    // under an owner-unique symbol the alias can resolve to,
+                    // the same way the native-project lane has always
+                    // disambiguated same-named free functions by owner. See
+                    // `doc/08_tracking/bug/flattened_lane_does_not_mangle_duplicate_function_names_2026-08-10.md`.
+                    function.name = flatten_owner_mangled_name(&owner_name, "main");
                 }
                 items.push(Node::Function(function));
                 next_global_already_tagged = false;
