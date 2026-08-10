@@ -1,6 +1,8 @@
 # `window_record_encode` is imported by the SPM client but defined nowhere; its spec only length-compares two self-generated encodings
 
-**Status:** OPEN
+**Status:** OPEN — architectural/out-of-scope for a measurement lane (needs SPM
+wire-format investigation before an encoder can be written; re-confirmed
+2026-08-10)
 **Found:** 2026-08-04
 
 ## Symptom
@@ -45,6 +47,14 @@ There is no `window_record_encode` — and no `WindowState` either, though
 `wm_spm_client_spec.spl:15` imports that from the same module. An unresolved
 `use` is only a WARNING, so both the module and the spec load and the failure
 surfaces at the first call.
+
+**Re-verified 2026-08-10:** `window_record.spl` has since grown a
+`WindowState` enum (unrelated partial progress since this doc was filed), but
+`window_record_encode` is still declared nowhere in `src/` — confirmed with
+`grep -rn "fn window_record_encode" src/lib src/app src/os` (zero hits). The
+core defect and the reasoning for leaving it open (writing an encoder from
+this spec alone would prove nothing about the actual wire format) are
+unchanged.
 
 ## Why not fixed now — and a vacuity warning
 
