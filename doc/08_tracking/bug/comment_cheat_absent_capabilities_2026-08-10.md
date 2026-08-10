@@ -123,6 +123,41 @@ documented physical-board build+boot path per `board-runnable.md`, then anchor t
 specs on the firmware-proxy invocation rather than on the memory-map prose. Until then
 the specs must be RED and must not be read as board-runnable evidence.
 
+### D4. `AT_EXECFN` auxv entry is absent — the needle matched the comment DENYING it (1 site)
+
+Found while working the REAL list (stream Q10, 2026-08-10). This is the sharpest
+instance of the family found so far: the needle is satisfied by the very comment
+that states the capability is **not** present.
+
+Spec: `test/01_unit/os/kernel/loader/x86_64_fs_exec_spawn_spec.spl:51`
+(`expect(source).to_contain("AT_EXECFN")`).
+Product: `src/os/kernel/loader/x86_64_fs_exec_ring3.spl:133-134`
+
+```
+    # argc, argv+NULL, envp+NULL, then AT_PAGESZ, AT_RANDOM, AT_NULL pairs —
+    # exactly the auxv set of the PROVEN clang --version frame (no AT_EXECFN).
+```
+
+`_build_sysv_stack_frame` declares exactly three auxv constants — `AT_PAGESZ = 6`
+(:102), `AT_RANDOM = 25` (:103), `AT_NULL = 0` (:104) — and writes exactly those
+three pairs (:180-185). There is no `AT_EXECFN` constant, no `31`, and no fourth
+auxv pair. The local named `execfn_addr` (:158) is the **argv[0] string pointer**,
+not an auxv value; the name is itself misleading and is worth renaming.
+
+Re-anchored onto the executable form `val AT_EXECFN: u64 = 31`, so the spec is now
+correctly **RED** instead of vacuously green.
+
+**Two candidate resolutions, both needing an owner decision — do not pick one to
+get green:**
+1. Implement the `AT_EXECFN` auxv pair (constant 31, pointing at the binary-path
+   string already written at :161) and bump `fixed_slots` from `+ 6` to `+ 8`; or
+2. If the omission is deliberate (the comment claims parity with a PROVEN clang
+   `--version` frame), the assertion is wrong and should be dropped — which
+   requires approval, per `.claude/rules/testing.md`.
+
+The `test/unit/` twin of this spec has genuinely diverged and does not carry the
+needle; only the `test/01_unit/` leg was re-anchored.
+
 ## AMBIGUOUS — not defects, do not "fix"
 
 - `sugar_plugin_spec.spl` (2): the `[STATIC-NEXT]` contract asserts marker **comments**
