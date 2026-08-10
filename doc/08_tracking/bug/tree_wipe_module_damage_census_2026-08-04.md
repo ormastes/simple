@@ -3,7 +3,8 @@
 **Date:** 2026-08-04  
 **Status:** OPEN (inventory complete; 3 of 39 truncations restored — 4 more
 found already restored by other lanes since the census date: see "Already
-restored by others" below)  
+restored by others" below; 3 more candidates checked 2026-08-10, none
+restorable — see "Checked 2026-08-10" below)  
 **Scope:** owned `src/` `.spl` only (vendor excluded)
 
 ## Why this exists
@@ -353,6 +354,43 @@ the historical blob never had), matching the doc's own caution above:
 - **`src/lib/common/hpack/encoder.spl`** (202/202, 12% novel) — current
   (201 lines) is already byte-identical (0-line diff) to the largest
   historical blob; the "12% novel" figure in the table is stale.
+
+## Checked 2026-08-10
+
+Three more ranked-inventory candidates checked by-value; none were clean
+truncations, so none were restored:
+
+- **`src/lib/gc_async_mut/gpu/browser_engine/script/navigator_api.spl`** — not
+  a clean subset. Diffed against an old historical blob
+  (`0de71fe094ba136ae3b39a512e4e7edc02667b97`, 134 lines): current imports
+  `Origin`/`PermissionSet` types the historical blob never had, and the
+  historical blob has a `BrowserNavigatorGPU`/`BrowserGPUAdapter` WebGPU API
+  the current file lacks. Both sides have content the other doesn't —
+  divergent rewrite, not truncation. Skip.
+- **`src/lib/common/win_fs/window_record.spl`** — not a clean subset. Diffed
+  against `9b0d3ace927ccd41c0dac0ea833c2ccf6d7280b7` (140 lines): different
+  header/docstring style, `class Rect`/`class BufferRef` (historical) vs
+  `struct Rect`/`struct BufferRef` (current), and a different import path
+  (`lib.common.privilege.id_path` vs `std.common.privilege.id_path`). Genuine
+  divergent rewrite. Skip.
+- **`src/lib/nogc_async_mut/http_server/request_validation.spl`** — checked
+  against `bbd1a4090f96276b35c70f9ed630e8968972c601` (129 lines): the diff runs
+  the *other* direction from a truncation — the **current** file (150 lines)
+  already contains a `contains_crlf()` CRLF-injection check and its call site
+  that this particular historical blob does not have. That blob is simply an
+  older pre-hardening version, not the tree-wipe's largest historical version.
+  Current is not behind it. Not confirmed damaged; would need the true max
+  historical blob (full `rev-list --all --objects` walk for this path timed
+  out at 2 minutes in this session — 10,621 commits touch this path) to settle
+  definitively. Left as an open lead, not restored.
+
+Full enumeration of the remaining ~30 candidates (`rev-list --all --objects`
+per path) is expensive at this repo's history size (thousands of commits per
+path) and was not completed this session within budget. Progress remains 3
+restored + 4 confirmed already-fixed-by-others = 7 of 39 accounted for as
+non-damaged-or-fixed, 5 confirmed genuine divergent rewrites (skip), 27
+divergent rewrites in the original table (skip), leaving the remainder as
+open leads for a future pass with more budget for the history walk.
 
 ## Not restored, and why
 
