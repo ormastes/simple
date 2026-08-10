@@ -176,7 +176,15 @@ fn compile_c_runtime_sources() {
         // log-lib fallback (5 names -- this is the deliberate hosted
         // counterpart to the baremetal src/runtime/startup/baremetal/runtime_log.c,
         // which is NOT compiled here and never has been, so there is no
-        // duplicate-symbol risk), and the standalone rt_socket_set_nonblocking
+        // duplicate-symbol risk. The baremetal counterpart is cross-compiled
+        // into the SimpleOS sysroot's libsimple_runtime_native.a instead, by
+        // src/os/port/llvm/sysroot.shs, scripts/os/simpleos-sysroot-aarch64.shs
+        // and scripts/os/simpleos-sysroot-riscv64.shs. The two definitions are
+        // mutually exclusive by ARCHIVE: this host archive never gets the
+        // baremetal object and the freestanding sysroot archives never get the
+        // hosted one, so neither lane needs -z muldefs. Do NOT add
+        // startup/baremetal/runtime_log.c to this list), and the standalone
+        // rt_socket_set_nonblocking
         // extraction (see that file's header comment for why the whole
         // async_linux_epoll.c it was extracted from is not linked here).
         // runtime_framebuffer.c (rt_fb_*, 2 names) already appears above in

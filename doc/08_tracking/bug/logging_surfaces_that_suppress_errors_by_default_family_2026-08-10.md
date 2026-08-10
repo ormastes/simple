@@ -362,3 +362,77 @@ the next session doing SimpleOS logging/board work does not have to
 re-derive it. Filed rather than fixed because standing up the SimpleOS
 image-build C compile step, sysroot, and a real-firmware QEMU boot check is a
 multi-file infra task outside a single narrow-scope change.
+
+## Follow-up 2 (2026-08-10) — baremetal emitter WIRED for aarch64 + riscv64; x86_64 still blocked on `rt_port_outb` ownership
+
+The previous follow-up's premise ("this needs a SimpleOS image-build C compile
+step that does not exist") was **wrong on the first half**. That step already
+exists and has for a while — it is just not in `build.rs`:
+
+- `build.rs` is **host-only**. It produces `libruntime_sffi_c.a` for the Rust
+  seed. Adding `startup/baremetal/runtime_log.c` there would be an ODR
+  collision with `startup/common/runtime_log_hosted.c` in the *same* archive and
+  would still never reach a board. `build.rs` was correctly left alone (only its
+  explanatory comment was corrected).
+- The real cross-compile pattern is a `for rt_src in runtime_native
+  runtime_simd_utf8 ... runtime_memtrack` loop over `src/runtime/$rt_src.c` with
+  freestanding `RT_CFLAGS`, archived into the sysroot's
+  `libsimple_runtime_native.a` / `libsimpleos_all.a`. It appears in three
+  places: `src/os/port/llvm/sysroot.shs` (x86_64 lane ~line 164, aarch64 lane
+  ~line 359), `scripts/os/simpleos-sysroot-aarch64.shs:109`, and
+  `scripts/os/simpleos-sysroot-riscv64.shs:225`.
+- The two `rt_simpleos_log_emit` definitions are therefore **mutually exclusive
+  by archive**, not by preprocessor: the host archive never gets the baremetal
+  object, the freestanding sysroot archives never get the hosted one. No
+  `-z muldefs` is involved on either lane.
+
+**Wired (aarch64, riscv64, and the aarch64 lane of `sysroot.shs`):**
+`startup/baremetal/runtime_log` added to the loop; the loop's `-o` now uses
+`$(basename "$rt_src").o` so a subdirectory source lands flat in `$RT_BUILD`.
+
+Evidence (`clang`/`ld.lld`, all with
+`-Werror=int-conversion -Werror=incompatible-pointer-types -Wall -Wextra`):
+
+| target | compile | undefined syms in `runtime_log.o` | freestanding link | ODR collisions vs the other 9 RT objects |
+|---|---|---|---|---|
+| `aarch64-unknown-none-elf` | clean | **0** | `probe_aarch64.elf` OK | 0 (678 RT syms vs 6 log syms) |
+| `riscv64-unknown-none-elf` | clean | **0** | `probe_riscv64.elf` OK | 0 |
+| `x86_64-unknown-none-elf` | clean | **2** (`rt_port_outb`, `rt_port_inb`) | **FAILS** | n/a |
+
+`llvm-objdump -d --disassemble-symbols=rt_log_target_device_write_bytes
+probe_aarch64.elf` shows the real per-byte MMIO loop branching on device kind
+(`cmp #0x3` NS16550 / `cmp #0x2` PL011 / `cmp #0x1` COM1) with **no libc call**,
+and `llvm-nm -u probe_aarch64.elf` is **0** — so the definition linked in is
+`runtime_log.c`, not the hosted stub (which has the same six exported names but
+reaches libc, and cannot link `-nostdlib`).
+
+**Still blocked — x86_64 only.** On x86 the COM1 path calls
+`rt_port_outb`/`rt_port_inb`. Nothing in the built sysroot defines them
+(`nm` over `libsimpleos_c.a`, `libsimple_runtime.a`,
+`libsimple_runtime_native.a`: 0 hits). The only definitions in the tree are in
+`src/runtime/startup/baremetal/runtime_minimal.c:204`, and that TU **duplicates
+11 symbols already owned by `runtime_native.o`** in the same archive:
+`rt_invlpg`, `rt_read_cr3`, `rt_write_cr3`, and
+`rt_volatile_{read,write}_u{8,16,32,64}`. So `runtime_minimal.c` cannot simply
+be appended to the x86_64 loop, and appending `runtime_log.c` *alone* would put
+an unresolvable `rt_port_outb` into `libsimple_runtime_native.a` — breaking the
+SimpleOS link for every program that reaches the log lib. Note also that
+`runtime_native.c`'s versions are **host-semantics fakes** (`rt_read_cr3`
+returns a static variable, `rt_invlpg` is a no-op), so it is not the right owner
+of real port I/O either, and it is compiled into the *host* archive by
+`build.rs` too — adding real `outb` there would fault in userspace.
+
+**Next step for x86_64:** decide which TU owns the port-I/O + MMIO family on the
+SimpleOS target (split `rt_port_*` out of `runtime_minimal.c` into its own
+freestanding TU, or split the 11 shared primitives out of `runtime_native.c`),
+then add both to the x86_64 loop. Deliberately not forced here — a partial
+wiring would have shipped a broken link. A `TODO(x86_64 UART log)` comment at
+the loop in `src/os/port/llvm/sysroot.shs` points back to this entry.
+
+**Board-evidence scope:** this is **AOT-buildable / link-verified only.** No
+physical board and no real-firmware QEMU proxy (OVMF pflash / OpenSBI / EDK2)
+was run, so per `.claude/rules/board-runnable.md` this is explicitly **NOT** a
+board-runnable claim — nothing here demonstrates bytes reaching a UART. The
+hosted lane is unaffected: `build.rs`'s source list is byte-identical apart from
+a comment, and `runtime_log_hosted.c` still compiles clean under the same
+`-Werror` gate.
