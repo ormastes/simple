@@ -427,6 +427,27 @@ fn get_compiler_version() -> text:
 
     "unknown"
 
+# Compare two dotted-numeric version strings ("0.9.0" vs "0.10.0")
+# segment-by-segment as integers rather than lexicographically, so
+# "0.9.0" correctly compares LESS than "0.10.0" (a plain text `<`/`>=`
+# would compare '9' > '1' and get this backwards). Returns -1, 0, or 1.
+# A non-numeric segment falls back to 0 (treated equal) for that
+# position rather than throwing, since callers only need ordering.
+fn _compare_versions(a: text, b: text) -> i64:
+    val a_parts = a.split(".")
+    val b_parts = b.split(".")
+    var i = 0
+    val len = if a_parts.len() > b_parts.len(): a_parts.len() else: b_parts.len()
+    while i < len:
+        val a_seg = if i < a_parts.len(): (a_parts[i].to_i64() ?? 0) else: 0
+        val b_seg = if i < b_parts.len(): (b_parts[i].to_i64() ?? 0) else: 0
+        if a_seg < b_seg:
+            return 0 - 1
+        if a_seg > b_seg:
+            return 1
+        i = i + 1
+    0
+
 fn check_version_constraint(constraint: text) -> bool:
     """Check if compiler version satisfies constraint.
 
@@ -440,19 +461,19 @@ fn check_version_constraint(constraint: text) -> bool:
     # Parse constraint
     if constraint.starts_with(">="):
         val required = constraint[2:].trim()
-        return version >= required
+        return _compare_versions(version, required) >= 0
 
     if constraint.starts_with(">"):
         val required = constraint[1:].trim()
-        return version > required
+        return _compare_versions(version, required) > 0
 
     if constraint.starts_with("<="):
         val required = constraint[2:].trim()
-        return version <= required
+        return _compare_versions(version, required) <= 0
 
     if constraint.starts_with("<"):
         val required = constraint[1:].trim()
-        return version < required
+        return _compare_versions(version, required) < 0
 
     if constraint.starts_with("=="):
         val required = constraint[2:].trim()
