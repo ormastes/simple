@@ -47,9 +47,22 @@ SIMPLE_STAGE4_BINARY=/absolute/path/to/full/simple \
   --mode=interpreter --clean --fail-fast
 ```
 
+The canonical admission wrapper retains the binary identities, negative Phase
+3 boundary outputs, Phase 4 system-test transcript, and final result receipt:
+
+```bash
+sh scripts/check/check-llm-caret-phase4-cli-admission.shs \
+  /absolute/path/to/stage3/simple /absolute/path/to/full/simple
+```
+
 This gate is intentionally RED while TODO 681 is blocked. A Phase 3
 `native-build` success, source inspection, Rust seed, stale full CLI, or carrier
 files without matching provenance cannot satisfy it.
+
+The 2026-08-10 recovery attempt ended with status 143 during Phase 4 HIR
+lowering after 1,474 cache objects and produced no executable. That attempt is
+diagnostic evidence only; resume from the preserved cache before invoking the
+admission wrapper.
 
 | Requirement | Executable system coverage | Evidence |
 |---|---|---|
