@@ -3,10 +3,12 @@
 **Read this first: none of what follows is wired into your build yet.**
 
 As of 2026-08-10 the semantic build cache v2 modules exist, are tested, and are
-formally modelled — but **no normal compile path consumes them**. If you run
-`bin/simple build` or `bin/simple test` today, you are using the legacy cache
-(`.build_cache.sdn` plus `.build/mir_cache/`). There is no user-facing command
-that turns v2 on, because there is nothing to turn on yet.
+formally modelled. The legacy cache (`.build_cache.sdn` plus `.build/mir_cache/`)
+still makes **every** build decision. The one v2 code path a normal build can
+reach is **shadow mode** — opt-in via `SIMPLE_CACHE_V2_SHADOW=1`, which runs v2
+lookup/publish/byte-compare alongside the legacy path in the incremental driver
+and prints one summary line (hits/misses/mismatches/errors). Shadow mode never
+changes build output; a v2 failure is counted, never propagated.
 
 This guide documents what is in the tree and what is deliberately not, so you can
 tell the difference. It will grow a "how to use it" section when there is one.
@@ -22,6 +24,9 @@ tell the difference. It will grow a "how to use it" section when there is one.
 | Storage watermarks, leases, GC | implemented, tested | **No** |
 | Remote-main lookup | read-only stub, no transport | **No** |
 | Remote-main writes | **deliberately disabled** | **No — and must stay that way** |
+| Shadow mode (v2 alongside legacy, compare-only) | implemented, opt-in env | **Yes** — `SIMPLE_CACHE_V2_SHADOW=1`; recompiled modules only; coarse key (see gaps) |
+| Block dependency cache (C5 slice 1) | keys + worklist + manifests, in-memory | **No** — consumed by nothing yet |
+| CI promotion gateway (C9 slice 1) | local validator + main-only workflow | CI-only; no remote write step exists |
 | AOP invalidation groups | implemented, mostly conservative | **No** |
 | `CompileInterfaceDigest` | compute-and-log | **No** |
 | Lean proofs of the identity model | 74 theorems, green | Yes — via the gate script |

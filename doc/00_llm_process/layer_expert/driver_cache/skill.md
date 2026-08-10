@@ -75,6 +75,13 @@ confidently, or live data deleted while all tests stay green.
 
 ## Status caveat
 
-Nothing in this layer is consumed by the normal compile path yet. The live cache
-is still `.build_cache.sdn` + `.build/mir_cache/`. Do not write a guide or commit
-message implying otherwise.
+The live cache is still `.build_cache.sdn` + `.build/mir_cache/` — legacy makes
+every decision. The only reachable v2 path is **shadow mode**
+(`src/compiler/80.driver/cache/integration/shadow_mode.spl`, opt-in
+`SIMPLE_CACHE_V2_SHADOW=1`, hooked in `driver_build/incremental.spl`): it
+compares, never decides. Its ActionKey is coarser than the frozen 15-field
+intent (empty target/cfg/witness fields) — safe only because shadow output is
+advisory; do NOT promote shadow to authoritative before real interface digests
+populate the key. Shadow sees recompiled modules only (legacy hits bypass it).
+C5 block cache (`cache/block/`) and the C9 gateway (`src/app/cache_gateway/`)
+exist but have no consumers.
