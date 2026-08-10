@@ -63,7 +63,24 @@ fn log_security_event(entry: AuditEntry, config: AuditConfig):
     val corr = _sanitize_log_field(entry.correlation_id)
     val mod_path = _sanitize_log_field(entry.module_path)
     val line = "[{_severity_name(entry.severity)}] corr={corr} module={mod_path} {_event_text(entry.event)}\n"
-    if config.log_to_stdout:
+    # Error and Critical security events reach stderr UNCONDITIONALLY.
+    #
+    # `log_to_stdout` defaults to false, which meant a Critical event -- a
+    # detected privilege escalation, an auth failure -- went only into
+    # tmp/security_audit.log. The file sink works (verified: entries do land),
+    # so the events were not lost, but nothing an operator watches ever showed
+    # them, and a security audit log no human reads by default is the worst
+    # instance of the silent-failure class. Security-relevant defaults do not
+    # get to be quiet.
+    #
+    # `log_to_stdout` keeps its meaning for everything BELOW Error: it selects
+    # whether routine Debug/Info/Warn audit traffic is mirrored to stderr. It is
+    # deliberately not an opt-out for Error/Critical -- `enabled: false` and
+    # `min_severity` remain the supported ways to turn auditing down, and both
+    # are still honoured above.
+    #
+    # doc/08_tracking/bug/logging_surfaces_that_suppress_errors_by_default_family_2026-08-10.md (OPEN 2)
+    if config.log_to_stdout or _severity_rank(entry.severity) >= _severity_rank(SecuritySeverity.Error):
         rt_stderr_write(line)
     if config.log_file.len() > 0:
         rt_file_append_text(config.log_file, line)

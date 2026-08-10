@@ -150,6 +150,43 @@ do this. See
 event goes only into `tmp/security_audit.log`. A security audit log that no
 human reads by default is the worst instance of this class.
 
+### OPEN 2 — FIXED 2026-08-10
+
+**Reproduced.** A probe logging a **Critical** `AuthFailure` under
+`AuditConfig.default()` emitted **0** stderr lines in both the interpreter and
+jit lanes. The file sink was checked rather than assumed, per the filing: it
+**works** — `tmp/security_audit.log` gained one `[CRITICAL] ...` entry per run.
+So the events were quiet, not lost. That is still the worst instance of this
+class: a security audit log no human reads by default.
+
+**Fix:** `log_security_event` now writes to stderr when
+`log_to_stdout` is set **or** the severity is `Error`/`Critical`.
+`log_to_stdout` keeps its meaning for levels below `Error`. `enabled: false` and
+`min_severity` remain the supported ways to turn auditing down, and both are
+still honoured — deliberately, the unconditional path sits *after* those two
+gates, not before them. `AuditConfig.default()` itself is unchanged, so no
+caller's config shape moves.
+
+**Before → after (default config, both lanes):** stderr `0` → `2`
+(`[CRITICAL]`, `[ERROR]`); file sink unchanged at `3`; Info stayed `0`.
+
+**Runnable check:** `scripts/check/check-security-audit-critical-reaches-stderr.shs`.
+Positives assert the **labelled** `[CRITICAL]`/`[ERROR]` line, not a count.
+Controls: sub-`Error` Info emits zero stderr lines (catches a fix that deleted
+the filter instead of flooring it); a `min_severity: Critical` config still
+suppresses an `Error` event on **both** sinks (proves the unconditional path did
+not bypass the floor); `enabled: false` still suppresses a Critical event; and
+the file sink must still receive the event (catches a regression that traded the
+file for stderr). **Oracle proof:** restoring the bare `if config.log_to_stdout:`
+yields `FAIL -- 4 of 14`, exit 1, stderr 2 → 0 in both lanes.
+
+**Side effect checked:** the sibling fix in this family accidentally enabled
+on-disk logging repo-wide by raising a level that `_ensure_initialized()` keyed
+off. No equivalent here — this module has no lazy-init hook, and the file sink is
+governed independently by `config.log_file`, which this change does not touch. The
+check also points its fixture's `log_file` at a temp dir so running it never
+writes to the repo's `tmp/security_audit.log`.
+
 **OPEN 3 — `src/lib/*/service/audit_log.spl` has no stderr path at all.**
 `audit_append` calls `rt_file_write_text` and nothing else. Its `-> bool` result
 is not checked either, so a failed audit write is itself silent.
