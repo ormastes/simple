@@ -691,17 +691,33 @@ static inline int64_t _rt_now_nanos(void) {{
     if (!QueryPerformanceFrequency(&freq) || !QueryPerformanceCounter(&count)) return 0;
     return (int64_t)((double)count.QuadPart / (double)freq.QuadPart * 1000000000.0);
 }}
+static inline int64_t _rt_wall_nanos(void) {{
+    FILETIME ft; ULARGE_INTEGER u;
+    GetSystemTimeAsFileTime(&ft);
+    u.LowPart = ft.dwLowDateTime; u.HighPart = ft.dwHighDateTime;
+    /* FILETIME is 100ns ticks since 1601-01-01; 11644473600s to Unix epoch. */
+    return (int64_t)(u.QuadPart - 116444736000000000ULL) * 100LL;
+}}
 #else
 #include <time.h>
 static inline int64_t _rt_now_nanos(void) {{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
+}}
+static inline int64_t _rt_wall_nanos(void) {{
     struct timespec ts;
     if (clock_gettime(CLOCK_REALTIME, &ts) != 0) return 0;
     return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
 }}
 #endif
+/* Epoch contract, pinned by test/unit/runtime/time_epoch_convergence_spec.spl:
+ * rt_time_now_nanos/micros are MONOTONIC (durations), rt_time_now_unix_micros
+ * is WALL-CLOCK (absolute). Until 2026-08-10 all three read CLOCK_REALTIME
+ * here, so the two monotonic names were wall-clock in this lane only. */
 {w}int64_t rt_time_now_nanos(void) {{ return _rt_now_nanos(); }}
 {w}int64_t rt_time_now_micros(void) {{ return _rt_now_nanos() / 1000; }}
-{w}int64_t rt_time_now_unix_micros(void) {{ return _rt_now_nanos() / 1000; }}
+{w}int64_t rt_time_now_unix_micros(void) {{ return _rt_wall_nanos() / 1000; }}
 {w}char* rt_hostname(void) {{ return (char*)""; }}
 {wv}void* get_global_SCOPE_LEVELS(void) {{ return 0; }}
 {wv}int64_t count_by_severity(void) {{ return 0; }}

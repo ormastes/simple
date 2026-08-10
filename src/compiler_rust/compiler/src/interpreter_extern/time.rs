@@ -296,24 +296,36 @@ pub fn rt_timestamp_diff_days(args: &[Value]) -> Result<Value, CompileError> {
 // High-Resolution Time Stubs (interpreter mode)
 // ============================================================================
 
-/// Get current time in nanoseconds since epoch
-pub fn rt_time_now_nanos(_args: &[Value]) -> Result<Value, CompileError> {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as i64;
-    Ok(Value::Int(nanos))
+/// Shared process-start monotonic baseline for the interpreter's
+/// `rt_time_now_nanos` / `rt_time_now_micros`. Both MUST read the same
+/// baseline, otherwise the two names sit on two different epochs.
+fn interp_monotonic_nanos() -> i64 {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    static BASELINE: OnceLock<Instant> = OnceLock::new();
+    BASELINE.get_or_init(Instant::now).elapsed().as_nanos() as i64
 }
 
-/// Get current time in microseconds since epoch
+/// Get monotonic time in nanoseconds.
+///
+/// EPOCH CONTRACT (pinned by `test/unit/runtime/time_epoch_convergence_spec.spl`):
+/// this is MONOTONIC, matching `runtime.h:251`, `runtime_time.c`,
+/// `runtime_native.c`, `platform/unix_common.h`, `platform/platform_win.h`, and
+/// the pure-Simple `src/runtime/simple_core/core_process.spl`. It returned
+/// wall-clock nanos here until 2026-08-10 — a ~50-year epoch gap behind one
+/// symbol name, so a timestamp taken under the interpreter could not be
+/// compared against one taken under JIT/native. Every in-tree caller uses the
+/// reading as a DELTA (`now - started`), which is what monotonic is for.
+/// Callers wanting an ABSOLUTE wall-clock time must use
+/// `rt_time_now_unix_micros`, which is separately named for exactly that.
+pub fn rt_time_now_nanos(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(interp_monotonic_nanos()))
+}
+
+/// Get monotonic time in microseconds. Same epoch contract as
+/// `rt_time_now_nanos` above; use `rt_time_now_unix_micros` for wall-clock.
 pub fn rt_time_now_micros(_args: &[Value]) -> Result<Value, CompileError> {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let micros = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros() as i64;
-    Ok(Value::Int(micros))
+    Ok(Value::Int(interp_monotonic_nanos() / 1000))
 }
 
 /// Get monotonic time in nanoseconds since an arbitrary process-start baseline.
