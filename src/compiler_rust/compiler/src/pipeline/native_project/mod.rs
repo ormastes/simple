@@ -22,6 +22,8 @@ mod tools;
 mod tests;
 #[cfg(test)]
 mod entry_closure_global_init_tests;
+#[cfg(test)]
+mod dynamic_initializer_identity_tests;
 
 pub use config::*;
 pub use compiler::*;
