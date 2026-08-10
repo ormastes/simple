@@ -57,6 +57,30 @@ describe "collection-desugar scalar-merge gate":
         val hir = hir_lowering.lower_module(parsed)
         expect(hir.name).to_equal("testdata/des1_scalar_int.spl")
 
+    it "leaves x = x + 1i64 (SUFFIXED scalar literal) as plain Assign arithmetic, not a merge rewrite":
+        # Bug: doc/08_tracking/bug/class_scalar_field_assignment_fails_native_mir_lowering_2026-08-10.md
+        # `1i64` is tagged EXPR_SUFFIXED_LIT, a DISTINCT arena tag from
+        # EXPR_INT_LIT. The gate originally listed only EXPR_INT_LIT, so a
+        # suffixed addend fell through and Pattern B rewrote `x = x + 1i64`
+        # into `x.merge(1i64)`. `merge` has no MIR lowering, so every
+        # native/AOT build of such a program died with
+        # `unresolved method call: merge` -- reproduced at origin with a
+        # passing positive control, and proven to be about the SUFFIX (not
+        # about classes or field assignment) by an A/B pair differing in one
+        # character: `c.n = c.n + 1i64` failed to native-build, `c.n = c.n + 1`
+        # built and linked fine.
+        #
+        # This asserts rewrite_count()==0, the same load-bearing signal the
+        # sibling examples use. Its NEGATIVE CONTROL is the very next example
+        # (`xs = xs + [2]` must still rewrite, count==1): without that control
+        # a gate that suppressed EVERY rewrite would pass this example.
+        val src = "fn bump(x: i64) -> i64:\n" +
+            "    x = x + 1i64\n" +
+            "    x\n"
+        val parsed = parse_full_frontend(src, "testdata/des1_scalar_suffixed.spl", "des1_scalar_suffixed", Logger(level: 0))
+        expect(parsed.functions.contains("bump")).to_equal(true)
+        expect(collection_desugar_rewrite_count()).to_equal(0)
+
     it "still rewrites xs = xs + [2] (single-element array literal) into a push":
         val src = "fn append_one() -> [i64]:\n" +
             "    var xs = [1]\n" +

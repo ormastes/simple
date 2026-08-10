@@ -24,7 +24,7 @@ use compiler.core.ast_expr.{
     EXPR_METHOD_CALL, EXPR_COMPOUND_ASSIGN, EXPR_INDEX,
     EXPR_FIELD_ACCESS, EXPR_FOR, EXPR_LIST_COMP,
     EXPR_INT_LIT, EXPR_FLOAT_LIT, EXPR_STRING_LIT, EXPR_BOOL_LIT,
-    EXPR_UNARY, EXPR_INTERPOLATED_STRING,
+    EXPR_UNARY, EXPR_INTERPOLATED_STRING, EXPR_SUFFIXED_LIT,
     expr_tag, expr_i_val, expr_s_val, expr_left, expr_right,
     expr_args, expr_count
 }
@@ -140,8 +140,21 @@ fn is_definite_scalar_addend(e: i64) -> bool:
     a collection -- so rewriting `target = target + e` into a `.merge(e)`
     MethodCall would be wrong regardless of `target`'s (unknown) type."""
     val tag = expr_tag[e]
+    # EXPR_SUFFIXED_LIT (`1i64`, `2u8`, `1.5f32`) is a DISTINCT arena tag from
+    # EXPR_INT_LIT/EXPR_FLOAT_LIT -- a suffixed literal is NOT tagged as a
+    # plain int/float literal. Omitting it let `c.n = c.n + 1i64` fall through
+    # this gate, so Pattern B below rewrote it into `c.n.merge(1i64)`; `merge`
+    # has no MIR lowering, so EVERY native/AOT build of a program that
+    # increments a scalar by a suffixed literal died with
+    # `unresolved method call: merge`. Proven by an A/B pair that differs in
+    # exactly one character: `c.n = c.n + 1i64` failed to native-build while
+    # `c.n = c.n + 1` built fine. A suffixed numeric literal can no more be a
+    # collection than a bare one. EXPR_CAST is deliberately NOT listed here:
+    # `x as [i64]` casts to a COLLECTION, so gating on it would wrongly
+    # suppress a legitimate Pattern B rewrite.
     tag == EXPR_INT_LIT or tag == EXPR_FLOAT_LIT or tag == EXPR_BOOL_LIT or
         tag == EXPR_STRING_LIT or tag == EXPR_INTERPOLATED_STRING or
+        tag == EXPR_SUFFIXED_LIT or
         tag == EXPR_UNARY or tag == EXPR_BINARY
 
 # ============================================================================
