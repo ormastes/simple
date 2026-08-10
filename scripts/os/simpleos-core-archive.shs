@@ -20,6 +20,41 @@ BACKEND="${SIMPLE_CORE_BACKEND:-llvm}"
 SIMPLE_BINARY="${SIMPLE_BINARY:-bin/release/simple}"
 CORE_SOURCE_DIR="${SIMPLE_CORE_SOURCE_DIR:-src/runtime/simple_core}"
 
+# The compiler emits GNU-format target archives. macOS /usr/bin/ar cannot
+# reliably extract them, so prefer a format-portable LLVM archive tool.
+if [ -n "${AR:-}" ]; then
+  if command -v "$AR" >/dev/null 2>&1; then
+    ARCHIVE_TOOL="$(command -v "$AR")"
+  elif [ -x "$AR" ]; then
+    ARCHIVE_TOOL="$AR"
+  else
+    echo "error: configured AR is not executable: $AR" >&2
+    exit 1
+  fi
+elif command -v llvm-ar >/dev/null 2>&1; then
+  ARCHIVE_TOOL="$(command -v llvm-ar)"
+else
+  ARCHIVE_TOOL=""
+  for candidate in \
+    /opt/homebrew/opt/llvm/bin/llvm-ar \
+    /opt/homebrew/opt/llvm@22/bin/llvm-ar \
+    /opt/homebrew/opt/llvm@18/bin/llvm-ar \
+    /usr/local/opt/llvm/bin/llvm-ar
+  do
+    if [ -x "$candidate" ]; then
+      ARCHIVE_TOOL="$candidate"
+      break
+    fi
+  done
+  if [ -z "$ARCHIVE_TOOL" ] && command -v ar >/dev/null 2>&1; then
+    ARCHIVE_TOOL="$(command -v ar)"
+  fi
+fi
+[ -n "$ARCHIVE_TOOL" ] && [ -x "$ARCHIVE_TOOL" ] || {
+  echo "error: no usable llvm-ar/ar archive tool found" >&2
+  exit 1
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --target)   shift; TARGET="$1" ;;
@@ -47,6 +82,7 @@ mkdir -p "$PART_DIR/objects"
 echo "Compiler: $SIMPLE_BINARY"
 echo "Target:   $TARGET"
 echo "Backend:  $BACKEND"
+echo "Archive:  $ARCHIVE_TOOL"
 echo "Output:   $CORE_ARCHIVE"
 rm -f "$CORE_ARCHIVE"
 
@@ -74,7 +110,7 @@ for core_entry in "$CORE_SOURCE_DIR"/*.spl; do
     continue
   fi
   mkdir -p "$PART_DIR/objects/$part_name"
-  (cd "$PART_DIR/objects/$part_name" && ar x "../../$part_name.a")
+  (cd "$PART_DIR/objects/$part_name" && "$ARCHIVE_TOOL" x "../../$part_name.a")
   BUILT=$((BUILT + 1))
   echo "part ok: $part_name"
 done
@@ -84,5 +120,5 @@ if [ "$FAILED" -ne 0 ] || [ "$BUILT" -eq 0 ]; then
   exit 1
 fi
 
-ar rcs "$CORE_ARCHIVE" "$PART_DIR"/objects/*/*.o
+"$ARCHIVE_TOOL" rcs "$CORE_ARCHIVE" "$PART_DIR"/objects/*/*.o
 echo "archive=$CORE_ARCHIVE parts_built=$BUILT parts_failed=$FAILED"
