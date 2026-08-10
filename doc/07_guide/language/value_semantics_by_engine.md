@@ -72,6 +72,16 @@ the ORIGINAL binding after mutating the copy/callee/extracted value.
   (bare `simple foo.spl` = JIT), where structs alias. Nested
   `o.inner.a = 99.0` persisting is not evidence either way — a write through
   a field path persists under both semantics (S2 shows both engines agree).
+- **Dict field inside a `struct`, mutated through a by-value receiver — now
+  MEASURED, and it diverges** (2026-08-10): `self.values[k] = v` in a free
+  function taking a `struct` by value is a silent **no-op in the interpreter**
+  and **persists in JIT and native/AOT**. Same probe, absence-controlled, three
+  engines. The `class` twin persists everywhere. The intended copy DEPTH for a
+  collection-valued struct field is **undocumented** — see
+  `doc/08_tracking/bug/struct_dict_field_mutation_engine_divergence_2026-08-10.md`
+  for the matrix, the design question, and the production blast radius.
+  Until it is decided: never mutate a collection field through a by-value
+  struct — the result depends on the lane.
 - Dict-of-dict "propagation" reports are consistent with dicts being
   reference-backed containers in at least some lanes; the safe rule remains:
   **never rely on copy-out-mutate for any container — write back through the

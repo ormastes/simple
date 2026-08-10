@@ -1,6 +1,12 @@
 # struct field dict mutation through a free function is a silent no-op
 
 - **Status:** OPEN — spec left RED deliberately
+- **SUPERSEDED FRAMING — read first:**
+  `struct_dict_field_mutation_engine_divergence_2026-08-10.md`. The "value
+  semantics, write discarded" conclusion below was drawn from the INTERPRETER
+  only. Measured across all three engines with absence controls: interpreter
+  `false`, **JIT `true`, native/AOT `true`**. It is an engine divergence, and
+  the intended copy DEPTH for a Dict field inside a struct is UNDOCUMENTED.
 - **Filed:** 2026-08-10
 - **Spec (both duplicate trees, both execute):**
   - `test/unit/compiler/interpreter/self_field_assign_spec.spl` — `Results: 13 total, 12 passed, 1 failed`
