@@ -75,6 +75,28 @@ fn mir_expr_kind_is_place(k: HirExprKind) -> bool:
 # ============================================================================
 
 impl MirLowering:
+    me mir_hir_type_is_resource_direct(t: HirType) -> bool:
+        match t:
+            case HirType(kind, _):
+                match kind:
+                    case HirTypeKind.Isolated(inner):
+                        match inner:
+                            case HirType(inner_kind, _):
+                                match inner_kind:
+                                    case HirTypeKind.Named(sym, _):
+                                        if val found = self.symbols.get_symbol_raw(sym.id):
+                                            resource_is_declared(found.name)
+                                        else:
+                                            false
+                                    case _:
+                                        false
+                            case _:
+                                false
+                    case _:
+                        false
+            case _:
+                false
+
     me mir_hir_type_is_resource(t: HirType?) -> bool:
         """WP-E (resource ownership, doc/03_plan/language/resource/
         resource_parallel_agent_plan_2026-08-06.md): true when a HIR type is
@@ -529,7 +551,7 @@ impl MirLowering:
         if self.nil_locals.contains(init_local.id):
             self.nil_locals[result_arr.id] = true
         if val init_hir_type = self.find_local_hir_type(init_local.id):
-            self.remember_local_hir_type(result_arr.id, init_hir_type)
+            self.remember_local_hir_type(result_arr.id, init_hir_type, self.local_hir_type_isolation_state(init_local.id), self.local_hir_type_resource_state(init_local.id))
         val ael_sym = self.array_element_struct_syms.get(init_local.id)
         if ael_sym != nil:
             val ael_name = ael_sym ?? ""
@@ -840,13 +862,13 @@ impl MirLowering:
                             self.builder = b_smove
                             self.bind_local(symbol_value_id, smove_local)
                             val remembered_iso_type = struct_move_hir_type ?? HirType(kind: HirTypeKind.Error, span: span)
-                            self.remember_local_hir_type(smove_local.id, remembered_iso_type)
+                            self.remember_local_hir_type(smove_local.id, remembered_iso_type, self.local_hir_type_isolation_state(init_local.id), self.local_hir_type_resource_state(init_local.id))
                             # WP-E parity: an iso struct is exactly the shape
                             # of a resource handle, so a move of one transfers
                             # drop-ownership too (mirrors the scalar emit_move
                             # branch's mir_hir_type_is_resource handling
                             # around line 847).
-                            if self.mir_hir_type_is_resource(struct_move_hir_type):
+                            if self.local_hir_type_resource_state(init_local.id) == 1:
                                 self.consumed_resource_locals[init_local.id] = true
                                 var owned3 = self.resource_owned_locals
                                 owned3.push(smove_local)
@@ -881,11 +903,11 @@ impl MirLowering:
                                 val found_init_hir_type = self.find_local_hir_type(init_local.id)
                                 if found_init_hir_type.?:
                                     val init_hir_type = found_init_hir_type ?? HirType(kind: HirTypeKind.Error, span: span)
-                                    self.remember_local_hir_type(local.id, init_hir_type)
+                                    self.remember_local_hir_type(local.id, init_hir_type, self.local_hir_type_isolation_state(init_local.id), self.local_hir_type_resource_state(init_local.id))
                                 else:
                                     match let_type:
                                         case Some(declared_type):
-                                            self.remember_local_hir_type(local.id, declared_type)
+                                            self.remember_local_hir_type(local.id, declared_type, 0, 0)
                                         case nil:
                                             ()
                                 # Bug (array-of-structs field misread), CONFLICT-FLAG
@@ -923,7 +945,7 @@ impl MirLowering:
                                     # `a` is consumed (no drop owed at `a`'s
                                     # own scope exit) and `b` becomes the new
                                     # owner needing its own drop edge.
-                                    if self.mir_hir_type_is_resource(found_init_hir_type):
+                                    if self.local_hir_type_resource_state(init_local.id) == 1:
                                         self.consumed_resource_locals[init_local.id] = true
                                         var owned = self.resource_owned_locals
                                         owned.push(local)
@@ -959,7 +981,7 @@ impl MirLowering:
                                     # iso Res = fresh_call()` registers too,
                                     # not only a type-inferred one.
                                     val fresh_hir_type = self.find_local_hir_type(local.id)
-                                    if self.mir_hir_type_is_resource(fresh_hir_type):
+                                    if self.local_hir_type_resource_state(local.id) == 1:
                                         var owned2 = self.resource_owned_locals
                                         owned2.push(local)
                                         self.resource_owned_locals = owned2
@@ -1098,11 +1120,11 @@ impl MirLowering:
                                     val found_init_hir_type = self.find_local_hir_type(init_local.id)
                                     if found_init_hir_type.?:
                                         val init_hir_type = found_init_hir_type ?? HirType(kind: HirTypeKind.Error, span: span)
-                                        self.remember_local_hir_type(local.id, init_hir_type)
+                                        self.remember_local_hir_type(local.id, init_hir_type, self.local_hir_type_isolation_state(init_local.id), self.local_hir_type_resource_state(init_local.id))
                                     else:
                                         match type_:
                                             case Some(declared_type):
-                                                self.remember_local_hir_type(local.id, declared_type)
+                                                self.remember_local_hir_type(local.id, declared_type, 0, 0)
                                             case nil:
                                                 ()
                                 # Bug (array-of-structs field misread), CONFLICT-FLAG
@@ -1271,7 +1293,7 @@ impl MirLowering:
                 val found_assigned_hir_type = self.find_local_hir_type(assigned_value.id)
                 if found_assigned_hir_type.?:
                     val assigned_hir_type = found_assigned_hir_type ?? HirType(kind: HirTypeKind.Error, span: span)
-                    self.remember_local_hir_type(local.id, assigned_hir_type)
+                    self.remember_local_hir_type(local.id, assigned_hir_type, self.local_hir_type_isolation_state(assigned_value.id), self.local_hir_type_resource_state(assigned_value.id))
                 else:
                     self.forget_local_hir_type(local.id)
                 # Bug (array-of-structs field misread), CONFLICT-FLAG
@@ -1988,7 +2010,7 @@ impl MirLowering:
         self.builder = b6
 
         if val found_expected = expected_type:
-            self.remember_local_hir_type(result.id, found_expected)
+            self.remember_local_hir_type(result.id, found_expected, 0, 0)
             match found_expected.kind:
                 case HirTypeKind.Optional(_):
                     self.option_value_locals[result.id] = true

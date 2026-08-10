@@ -32,6 +32,9 @@ struct MirLowering:
     # lockstep with local_hir_type_ids/local_hir_type_values so queries never
     # need to transport or inspect a HirType value.
     local_hir_type_isolation_states: [i64]
+    # Scalar resource state aligned with the local HIR metadata arrays.
+    # 0 means not-resource or unknown; 1 means declared resource.
+    local_hir_type_resource_states: [i64]
     # Function symbol ID -> declared HIR return type, recorded straight from
     # the HirFunction declarations in a lower_module pre-pass. The symbol
     # table's type_ for fn symbols is NOT reliably a Function(...) kind on
@@ -402,35 +405,37 @@ impl MirLowering:
             i = i - 1
         LocalId(id: -1)
 
-    me remember_local_hir_type(local_id: i64, type_: HirType):
+    me remember_local_hir_type(local_id: i64, type_: HirType, isolation_state: i64, resource_state: i64):
         var ids = self.local_hir_type_ids
         var values = self.local_hir_type_values
         var states = self.local_hir_type_isolation_states
-        var isolation_state = 0
-        match type_:
-            case HirType(kind, _):
-                match kind:
-                    case HirTypeKind.Isolated(_):
-                        isolation_state = 1
-                    case _:
-                        isolation_state = 2
-            case _:
-                isolation_state = 0
+        var resource_states = self.local_hir_type_resource_states
+        val normalized_state = if isolation_state == 1:
+            1
+        elif isolation_state == 2:
+            2
+        else:
+            0
+        val normalized_resource_state = if resource_state == 1: 1 else 0
         var i = 0
         while i < ids.len():
             if ids[i] == local_id:
                 values[i] = type_
-                states[i] = isolation_state
+                states[i] = normalized_state
+                resource_states[i] = normalized_resource_state
                 self.local_hir_type_values = values
                 self.local_hir_type_isolation_states = states
+                self.local_hir_type_resource_states = resource_states
                 return
             i = i + 1
         ids.push(local_id)
         values.push(type_)
-        states.push(isolation_state)
+        states.push(normalized_state)
+        resource_states.push(normalized_resource_state)
         self.local_hir_type_ids = ids
         self.local_hir_type_values = values
         self.local_hir_type_isolation_states = states
+        self.local_hir_type_resource_states = resource_states
 
     fn find_local_hir_type(local_id: i64) -> HirType?:
         var i = self.local_hir_type_ids.len() - 1
@@ -456,20 +461,31 @@ impl MirLowering:
             i = i - 1
         0
 
+    fn local_hir_type_resource_state(local_id: i64) -> i64:
+        var i = self.local_hir_type_ids.len() - 1
+        while i >= 0:
+            if self.local_hir_type_ids[i] == local_id:
+                return self.local_hir_type_resource_states[i]
+            i = i - 1
+        0
+
     me forget_local_hir_type(local_id: i64):
         var ids: [i64] = []
         var values: [HirType] = []
         var states: [i64] = []
+        var resource_states: [i64] = []
         var i = 0
         while i < self.local_hir_type_ids.len():
             if self.local_hir_type_ids[i] != local_id:
                 ids.push(self.local_hir_type_ids[i])
                 values.push(self.local_hir_type_values[i])
                 states.push(self.local_hir_type_isolation_states[i])
+                resource_states.push(self.local_hir_type_resource_states[i])
             i = i + 1
         self.local_hir_type_ids = ids
         self.local_hir_type_values = values
         self.local_hir_type_isolation_states = states
+        self.local_hir_type_resource_states = resource_states
 
     me mark_runtime_value_local(local_id: i64):
         if self.is_runtime_value_local(local_id):

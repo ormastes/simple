@@ -57,6 +57,7 @@ impl MirLowering:
         self.local_hir_type_ids = []
         self.local_hir_type_values = []
         self.local_hir_type_isolation_states = []
+        self.local_hir_type_resource_states = []
         self.bitfield_value_syms = {}
         self.struct_value_syms = {}
         self.runtime_array_locals = {}
@@ -202,7 +203,11 @@ impl MirLowering:
             # missing or stale inferred type; method lowering must be able to
             # recover the declaration attached to this exact local. This is
             # also the established ownership source for isolated parameters.
-            self.remember_local_hir_type(local.id, param.type_)
+            val param_isolation_state = match param.type_.kind:
+                case HirTypeKind.Isolated(_): 1
+                case _: 2
+            val param_resource_state = if self.mir_hir_type_is_resource_direct(param.type_): 1 else 0
+            self.remember_local_hir_type(local.id, param.type_, param_isolation_state, param_resource_state)
             match param.type_.kind:
                 case HirTypeKind.Isolated(_):
                     # WP-E (resource ownership): an `iso`-wrapped `resource`
@@ -211,7 +216,7 @@ impl MirLowering:
                     # emit_pending_resource_drops can drop it at every real
                     # exit unless it is moved out (let-binding move site
                     # above), returned, or consumed by `.close()`.
-                    if self.mir_hir_type_is_resource(param.type_):
+                    if param_resource_state == 1:
                         var owned = self.resource_owned_locals
                         owned.push(local)
                         self.resource_owned_locals = owned
@@ -880,7 +885,7 @@ impl MirLowering:
             # recording the stale Option type would mislead every downstream
             # consumer of local_hir_types (option handling, field resolution).
             if value.has_type_ and not tail_coerced_to_bool:
-                self.remember_local_hir_type(local.id, value.type_)
+                self.remember_local_hir_type(local.id, value.type_, 0, 0)
             if trace_enabled:
                 print "[mir-lower] block:value-lowered"
             if bootstrap_trace:
