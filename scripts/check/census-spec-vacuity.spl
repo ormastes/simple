@@ -92,6 +92,12 @@ fn indent_of(line: text) -> i64:
 
 fn strip_comment(line: text) -> text:
     # Drop a trailing `#` comment unless it sits inside a quoted run.
+    # Fast path: the char-by-char walk below rebuilds the text one character
+    # at a time, which is quadratic on a value-type `text`. Most lines carry
+    # no `#` at all, and paying that cost on every line of src/ made a full
+    # corpus scan unbounded under the interpreter fallback.
+    if not line.contains("#"):
+        return line
     var out: text = ""
     var i: i64 = 0
     var q = ""
@@ -136,7 +142,11 @@ fn is_duplicate_tree(p: text) -> bool:
 # declarations, never inferred from the name. A name declared BOTH ways
 # anywhere in the corpus is marked ambiguous and never flagged.
 
-struct TypeKinds:
+# A `class`, deliberately: this index is built by ~10k successive inserts, and
+# with a `struct` (value type) every insert copies both arrays -- the very
+# value-semantics trap this census exists to find, here as an O(n^2) blowup
+# that made a whole-corpus scan never finish.
+class TypeKinds:
     names: [text]
     kinds: [text]
 
@@ -150,18 +160,16 @@ fn decl_name_on(line: text, kw: text) -> text:
     rest.substring(0, i)
 
 fn kind_index_add(idx: TypeKinds, name: text, kind: text) -> TypeKinds:
-    var names = idx.names
-    var kinds = idx.kinds
     var i: i64 = 0
-    while i < names.len():
-        if names[i] == name:
-            if kinds[i] != kind:
-                kinds[i] = "ambiguous"
-            return TypeKinds(names: names, kinds: kinds)
+    while i < idx.names.len():
+        if idx.names[i] == name:
+            if idx.kinds[i] != kind:
+                idx.kinds[i] = "ambiguous"
+            return idx
         i = i + 1
-    names.push(name)
-    kinds.push(kind)
-    TypeKinds(names: names, kinds: kinds)
+    idx.names.push(name)
+    idx.kinds.push(kind)
+    idx
 
 fn kind_of(idx: TypeKinds, name: text) -> text:
     var i: i64 = 0
@@ -174,7 +182,12 @@ fn kind_of(idx: TypeKinds, name: text) -> text:
 fn index_source(idx: TypeKinds, src: text) -> TypeKinds:
     var acc = idx
     for raw in src.split("\n"):
-        val line = strip_comment(raw)
+        # A declaration is column-anchored, so a trailing comment cannot
+        # change the name; skipping strip_comment here is what makes a
+        # whole-corpus index affordable.
+        if not (raw.starts_with("struct ") or raw.starts_with("class ")):
+            continue
+        val line = raw
         val s = decl_name_on(line, "struct")
         if s != "":
             acc = kind_index_add(acc, s, "struct")
@@ -459,7 +472,9 @@ fn check_value_helper_mutation(src: text, idx: TypeKinds) -> [Row]:
 fn declared_types(src: text) -> [text]:
     var out: [text] = []
     for raw in src.split("\n"):
-        val line = strip_comment(raw)
+        if not (raw.starts_with("struct ") or raw.starts_with("class ") or raw.starts_with("enum ")):
+            continue
+        val line = raw
         val s = decl_name_on(line, "struct")
         if s != "" and not list_has(out, s):
             out.push(s)
