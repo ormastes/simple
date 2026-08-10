@@ -209,6 +209,8 @@ describe "resolve_style inheritance":
             margin_bottom: base.margin_bottom,
             padding_left: base.padding_left,
             padding_top: base.padding_top,
+            padding_right: base.padding_right,
+            padding_bottom: base.padding_bottom,
             width: base.width,
             height: base.height
         )
@@ -323,3 +325,106 @@ describe "resolve_style_with_state: :hover pseudo-class":
         val hover_g_ok = hovered.background_color.g < 0.01
         expect(hover_r_ok).to_equal(true)
         expect(hover_g_ok).to_equal(true)
+
+# @manual_section: Box-model shorthand expansion
+describe "apply_declaration: margin/padding shorthand expansion":
+    """
+    As a browser engine, I want the `margin`/`padding` shorthand's 1/2/3/4-value
+    forms expanded to their four longhands exactly as CSS defines them, and I
+    want a shorthand and its longhands to obey normal cascade ordering against
+    each other, so that `margin: 10px` actually moves a box instead of being a
+    silent no-op.
+    """
+
+    # @req REQ-BLINK-CASCADE-SHORTHAND-1VALUE
+    it "margin: 10px sets all four sides to 10px":
+        step("apply the single-value margin shorthand")
+        val style = computed_style_default()
+        val decl = CssDeclaration(property: "margin", value: "10px", important: false)
+        val updated = apply_declaration(style, decl)
+
+        step("expect top, right, bottom, left all 10px")
+        expect(updated.margin_top.value > 9.9 and updated.margin_top.value < 10.1).to_equal(true)
+        expect(updated.margin_right.value > 9.9 and updated.margin_right.value < 10.1).to_equal(true)
+        expect(updated.margin_bottom.value > 9.9 and updated.margin_bottom.value < 10.1).to_equal(true)
+        expect(updated.margin_left.value > 9.9 and updated.margin_left.value < 10.1).to_equal(true)
+
+    # @req REQ-BLINK-CASCADE-SHORTHAND-2VALUE
+    it "margin: 10px 20px sets vertical 10px and horizontal 20px":
+        step("apply the two-value margin shorthand")
+        val style = computed_style_default()
+        val decl = CssDeclaration(property: "margin", value: "10px 20px", important: false)
+        val updated = apply_declaration(style, decl)
+
+        step("expect top/bottom 10px, left/right 20px")
+        expect(updated.margin_top.value > 9.9 and updated.margin_top.value < 10.1).to_equal(true)
+        expect(updated.margin_bottom.value > 9.9 and updated.margin_bottom.value < 10.1).to_equal(true)
+        expect(updated.margin_left.value > 19.9 and updated.margin_left.value < 20.1).to_equal(true)
+        expect(updated.margin_right.value > 19.9 and updated.margin_right.value < 20.1).to_equal(true)
+
+    # @req REQ-BLINK-CASCADE-SHORTHAND-3VALUE
+    it "margin: 10px 20px 30px sets top 10px, left/right 20px, bottom 30px":
+        step("apply the three-value margin shorthand")
+        val style = computed_style_default()
+        val decl = CssDeclaration(property: "margin", value: "10px 20px 30px", important: false)
+        val updated = apply_declaration(style, decl)
+
+        step("expect top 10px, right/left 20px, bottom 30px — the classic 3-value trap")
+        expect(updated.margin_top.value > 9.9 and updated.margin_top.value < 10.1).to_equal(true)
+        expect(updated.margin_right.value > 19.9 and updated.margin_right.value < 20.1).to_equal(true)
+        expect(updated.margin_left.value > 19.9 and updated.margin_left.value < 20.1).to_equal(true)
+        expect(updated.margin_bottom.value > 29.9 and updated.margin_bottom.value < 30.1).to_equal(true)
+
+    # @req REQ-BLINK-CASCADE-SHORTHAND-4VALUE
+    it "margin: 10px 20px 30px 40px sets top/right/bottom/left clockwise":
+        step("apply the four-value margin shorthand")
+        val style = computed_style_default()
+        val decl = CssDeclaration(property: "margin", value: "10px 20px 30px 40px", important: false)
+        val updated = apply_declaration(style, decl)
+
+        step("expect top 10, right 20, bottom 30, left 40 — clockwise from the top")
+        expect(updated.margin_top.value > 9.9 and updated.margin_top.value < 10.1).to_equal(true)
+        expect(updated.margin_right.value > 19.9 and updated.margin_right.value < 20.1).to_equal(true)
+        expect(updated.margin_bottom.value > 29.9 and updated.margin_bottom.value < 30.1).to_equal(true)
+        expect(updated.margin_left.value > 39.9 and updated.margin_left.value < 40.1).to_equal(true)
+
+    # @req REQ-BLINK-CASCADE-SHORTHAND-PADDING
+    it "padding: 5px 6px 7px 8px sets all four padding longhands clockwise":
+        step("apply the four-value padding shorthand")
+        val style = computed_style_default()
+        val decl = CssDeclaration(property: "padding", value: "5px 6px 7px 8px", important: false)
+        val updated = apply_declaration(style, decl)
+
+        step("expect top 5, right 6, bottom 7, left 8")
+        expect(updated.padding_top.value > 4.9 and updated.padding_top.value < 5.1).to_equal(true)
+        expect(updated.padding_right.value > 5.9 and updated.padding_right.value < 6.1).to_equal(true)
+        expect(updated.padding_bottom.value > 6.9 and updated.padding_bottom.value < 7.1).to_equal(true)
+        expect(updated.padding_left.value > 7.9 and updated.padding_left.value < 8.1).to_equal(true)
+
+    # @req REQ-BLINK-CASCADE-SHORTHAND-LONGHAND-AFTER
+    it "a later longhand overrides an earlier shorthand for that one side":
+        step("author `margin: 10px; margin-top: 20px` in source order via resolve_style")
+        val tree = _cascade_fixture_tree()
+        var rs: [CssStyleRule] = []
+        rs.push(_cascade_rule("div", "margin", "10px", false))
+        rs.push(_cascade_rule("div", "margin-top", "20px", false))
+        val result = resolve_style(tree, 1, computed_style_default(), _cascade_sheet(rs))
+
+        step("expect top 20px (longhand won) but right/bottom/left still 10px from the shorthand")
+        expect(result.margin_top.value > 19.9 and result.margin_top.value < 20.1).to_equal(true)
+        expect(result.margin_right.value > 9.9 and result.margin_right.value < 10.1).to_equal(true)
+        expect(result.margin_bottom.value > 9.9 and result.margin_bottom.value < 10.1).to_equal(true)
+        expect(result.margin_left.value > 9.9 and result.margin_left.value < 10.1).to_equal(true)
+
+    # @req REQ-BLINK-CASCADE-SHORTHAND-BEFORE
+    it "a later shorthand overrides an earlier longhand on every side":
+        step("author `margin-top: 20px; margin: 10px` in source order via resolve_style")
+        val tree = _cascade_fixture_tree()
+        var rs: [CssStyleRule] = []
+        rs.push(_cascade_rule("div", "margin-top", "20px", false))
+        rs.push(_cascade_rule("div", "margin", "10px", false))
+        val result = resolve_style(tree, 1, computed_style_default(), _cascade_sheet(rs))
+
+        step("expect top 10px too: the shorthand, applied later, overwrites the earlier longhand")
+        expect(result.margin_top.value > 9.9 and result.margin_top.value < 10.1).to_equal(true)
+        expect(result.margin_right.value > 9.9 and result.margin_right.value < 10.1).to_equal(true)

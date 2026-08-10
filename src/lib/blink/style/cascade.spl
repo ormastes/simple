@@ -24,9 +24,11 @@
 # Deliberate non-goals (kept out on purpose; add only with a spec that needs it):
 #   - No `@media`/`@supports`/`@import` — `CssStyleSheet` carries only style
 #     rules today.
-#   - No shorthand expansion: `margin`, `background`, `font` are not split into
-#     longhands. Only the longhands backing `ComputedStyle`'s ten fields are
-#     understood; every other property is ignored, not errored.
+#   - Shorthand expansion: `margin` and `padding` (the CSS 1/2/3/4-value box
+#     shorthands) are split into their four longhands. `background`, `font`,
+#     `border`, `flex` and other multi-axis shorthands are NOT expanded — only
+#     the longhands backing `ComputedStyle`'s fields are understood; every
+#     other property is ignored, not errored.
 #   - No `inherit`/`initial`/`unset`/`revert` keywords, no custom properties or
 #     `var()`, no `calc()`.
 #   - No unit resolution: `parse_length_value` keeps the authored unit verbatim,
@@ -156,6 +158,64 @@ fn parse_color_value(raw: text) -> SkColor4f:
                 )
     sk_color4f(0.0, 0.0, 0.0, 1.0)
 
+# Split `s` on runs of ASCII whitespace, dropping empty tokens. Used only to
+# tokenize box-shorthand values (`margin`/`padding`); manual scan rather than
+# `.split(" ")` so repeated spaces between values don't yield empty tokens.
+fn _split_ws(s: text) -> [text]:
+    """Return the whitespace-separated tokens of `s`, skipping empty runs."""
+    var out: [text] = []
+    var i = 0
+    var start = 0
+    var in_token = false
+    while i < s.len():
+        val c = s.slice(i, i + 1)
+        val ws = (c == " " or c == "\t" or c == "\n")
+        if ws:
+            if in_token:
+                out.push(s.slice(start, i))
+                in_token = false
+        else:
+            if not in_token:
+                start = i
+                in_token = true
+        i = i + 1
+    if in_token:
+        out.push(s.slice(start, i))
+    out
+
+# Expand a CSS box-model shorthand value (`margin`/`padding`) into its four
+# longhands, following the standard 1/2/3/4-value forms:
+#   1 value  -> all four sides
+#   2 values -> vertical(top/bottom), horizontal(left/right)
+#   3 values -> top, horizontal(left/right), bottom
+#   4 values -> top, right, bottom, left (clockwise, starting at top)
+# Any other token count leaves all four at the CSS-zero length — an
+# unparsable shorthand contributes nothing, matching this module's existing
+# error-handling rule for single-value properties.
+fn _expand_box_shorthand(raw: text) -> (Length, Length, Length, Length):
+    """Return (top, right, bottom, left) Lengths for box shorthand `raw`."""
+    val tokens = _split_ws(raw)
+    val n = tokens.len()
+    if n == 1:
+        val all = parse_length_value(tokens[0 as i32])
+        return (all, all, all, all)
+    if n == 2:
+        val v = parse_length_value(tokens[0 as i32])
+        val h = parse_length_value(tokens[1 as i32])
+        return (v, h, v, h)
+    if n == 3:
+        val top = parse_length_value(tokens[0 as i32])
+        val h = parse_length_value(tokens[1 as i32])
+        val bottom = parse_length_value(tokens[2 as i32])
+        return (top, h, bottom, h)
+    if n == 4:
+        val top = parse_length_value(tokens[0 as i32])
+        val right = parse_length_value(tokens[1 as i32])
+        val bottom = parse_length_value(tokens[2 as i32])
+        val left = parse_length_value(tokens[3 as i32])
+        return (top, right, bottom, left)
+    (Length.zero(), Length.zero(), Length.zero(), Length.zero())
+
 # ============================================================================
 # Declaration application
 # ============================================================================
@@ -188,6 +248,8 @@ fn apply_declaration(style: ComputedStyle, decl: CssDeclaration) -> ComputedStyl
     var margin_bottom = style.margin_bottom
     var padding_left = style.padding_left
     var padding_top = style.padding_top
+    var padding_right = style.padding_right
+    var padding_bottom = style.padding_bottom
     var width = style.width
     var height = style.height
 
@@ -252,10 +314,26 @@ fn apply_declaration(style: ComputedStyle, decl: CssDeclaration) -> ComputedStyl
         margin_top = parse_length_value(raw)
     elif prop == "margin-bottom":
         margin_bottom = parse_length_value(raw)
+    elif prop == "margin":
+        val expanded = _expand_box_shorthand(raw)
+        margin_top = expanded.0
+        margin_right = expanded.1
+        margin_bottom = expanded.2
+        margin_left = expanded.3
     elif prop == "padding-left":
         padding_left = parse_length_value(raw)
     elif prop == "padding-top":
         padding_top = parse_length_value(raw)
+    elif prop == "padding-right":
+        padding_right = parse_length_value(raw)
+    elif prop == "padding-bottom":
+        padding_bottom = parse_length_value(raw)
+    elif prop == "padding":
+        val expanded = _expand_box_shorthand(raw)
+        padding_top = expanded.0
+        padding_right = expanded.1
+        padding_bottom = expanded.2
+        padding_left = expanded.3
     elif prop == "width":
         width = parse_length_value(raw)
     elif prop == "height":
@@ -276,6 +354,8 @@ fn apply_declaration(style: ComputedStyle, decl: CssDeclaration) -> ComputedStyl
         margin_bottom: margin_bottom,
         padding_left: padding_left,
         padding_top: padding_top,
+        padding_right: padding_right,
+        padding_bottom: padding_bottom,
         width: width,
         height: height
     )
@@ -339,6 +419,8 @@ fn _inherited_from(parent: ComputedStyle) -> ComputedStyle:
         margin_bottom: initial.margin_bottom,
         padding_left: initial.padding_left,
         padding_top: initial.padding_top,
+        padding_right: initial.padding_right,
+        padding_bottom: initial.padding_bottom,
         width: initial.width,
         height: initial.height
     )
