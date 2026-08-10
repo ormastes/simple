@@ -136,3 +136,64 @@ describe "Lease Grant - Ghost Reclaim":
         val first = try_acquire_exclusive(mgr, dead_pid, 30000i64)
         expect(first.ok).to_equal(true)
         expect(active_lease_count(mgr)).to_equal(0i64)
+
+describe "Lease Grant - Lease ID Monotonicity (regression: every id was lease-1)":
+    # Regression guard for
+    # doc/08_tracking/bug/struct_dict_field_mutation_engine_divergence_2026-08-10.md
+    # `next_id` was a scalar field mutated through a BY-VALUE `struct`
+    # receiver, so the increment landed on a discarded copy and every lease
+    # came back as `lease-1`. LeaseManager is now a `class` (reference type),
+    # so the counter advances in the interpreter, the JIT and native alike.
+    #
+    # NEGATIVE CONTROLS are mandatory here: a presence/positive assertion
+    # ("a lease was granted", "the id is non-empty") passes just as happily
+    # against the broken code, which is exactly how this shipped.
+
+    it "issues three DISTINCT ids across acquire/release cycles":
+        var mgr = lease_manager_new()
+        val pid = rt_getpid()
+        val a = try_acquire_exclusive(mgr, pid, 30000i64)
+        release_lease(mgr, a.lease_id)
+        val b = try_acquire_exclusive(mgr, pid, 30000i64)
+        release_lease(mgr, b.lease_id)
+        val c = try_acquire_exclusive(mgr, pid, 30000i64)
+        val a_id = a.lease_id
+        val b_id = b.lease_id
+        val c_id = c.lease_id
+        expect(a_id == b_id).to_equal(false)
+        expect(b_id == c_id).to_equal(false)
+        expect(a_id == c_id).to_equal(false)
+        # NEGATIVE CONTROL: text equality must still report `true` for an id
+        # compared with itself. Without this, an `==` that always answered
+        # `false` would make the three assertions above vacuous.
+        expect(a_id == a_id).to_equal(true)
+
+    it "advances the counter monotonically (lease-1, lease-2, lease-3)":
+        var mgr = lease_manager_new()
+        val pid = rt_getpid()
+        val a = try_acquire_exclusive(mgr, pid, 30000i64)
+        release_lease(mgr, a.lease_id)
+        val b = try_acquire_exclusive(mgr, pid, 30000i64)
+        release_lease(mgr, b.lease_id)
+        val c = try_acquire_exclusive(mgr, pid, 30000i64)
+        expect(a.lease_id).to_equal("lease-1")
+        expect(b.lease_id).to_equal("lease-2")
+        expect(c.lease_id).to_equal("lease-3")
+        # NEGATIVE CONTROL: an id the manager never issued must NOT match,
+        # so `to_equal` is not trivially satisfied.
+        expect(c.lease_id == "lease-99").to_equal(false)
+
+    it "keeps ids distinct across two INDEPENDENT managers' own sequences":
+        # Absence control on cross-contamination: a second manager starts its
+        # own sequence at lease-1 and does NOT see the first manager's leases.
+        var m1 = lease_manager_new()
+        var m2 = lease_manager_new()
+        val pid = rt_getpid()
+        val x = try_acquire_exclusive(m1, pid, 30000i64)
+        val y = try_acquire_exclusive(m2, pid, 30000i64)
+        expect(x.ok).to_equal(true)
+        expect(y.ok).to_equal(true)
+        expect(active_lease_count(m1)).to_equal(1i64)
+        expect(active_lease_count(m2)).to_equal(1i64)
+        # NEGATIVE CONTROL: m1 must NOT have absorbed m2's lease.
+        expect(active_lease_count(m1) == 2i64).to_equal(false)
