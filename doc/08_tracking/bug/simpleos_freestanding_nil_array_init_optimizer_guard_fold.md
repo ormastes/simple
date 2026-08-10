@@ -49,3 +49,22 @@ changes that must clear `bin/simple build bootstrap` before landing, which the
 in-progress toolchain redeploy currently blocks. Harness to reproduce:
 `scripts/os/fsexec_mkimg_simple.spl` + `scripts/os/ssh_simple_hello_uefi.shs`
 (OVMF board gate, landed).
+
+## Re-verification (2026-08-10)
+
+Status confirmed unchanged and remains **OPEN — ARCHITECTURAL**.
+`scratchpad/laneb_recover/` (where the staged partial fixes were held) no
+longer exists in this working copy — scratch state, expected to not persist
+across sessions per known scratch-sweep behavior — so the staged patches are
+not available to re-verify or land here. Both compounding root causes require
+work explicitly out of this sweep's scope: (1) freestanding one-binary
+module-init codegen is a `src/compiler` central-compiler change that "must
+clear `bin/simple build bootstrap` before landing" — running
+`bin/simple build bootstrap` is forbidden by this sweep's hard constraints;
+(2) the Rust seed's optimizer guard-fold is a `src/compiler_rust/` change,
+also forbidden by this sweep's hard constraints. No `.spl`-only workaround is
+available: the fault is in the in-guest interpreter's own runtime C helpers
+(`rt_string_join`, `rt_array_len_safe`) and in the freestanding module-init
+codegen path itself, not in `.spl` source that a spec-level workaround could
+route around. Leaving OPEN/ARCHITECTURAL; re-attempt requires a session that
+can run a full bootstrap and touch `src/compiler_rust/`.
