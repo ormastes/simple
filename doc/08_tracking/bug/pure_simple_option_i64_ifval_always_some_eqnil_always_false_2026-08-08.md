@@ -1,6 +1,28 @@
 # Pure-Simple AOT lane: `i64?` value-3 collision does NOT reproduce, but `if val`/`== nil` are broken worse
 
-**Status:** OPEN (new defects; scoping task for `jit_option_i64_value3_reads_as_none_2026-07-24.md`)
+**Status:** LIKELY FIXED, unconfirmed on the AOT lane — 2026-08-10 re-check. A fix
+matching this doc's own "candidate (a)" is already present in
+`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl` (the `nil_check_operand`
+/ `rt_is_none`/`rt_is_some` block, ~line 2680-2718), landed by a separate session
+via a "chore: sync" commit and explicitly commented as closing this bug ID. It
+routes `opt == nil` / `opt != nil` (and the `if val` desugar, which reaches this
+same code via `lower_cond_expr`'s fallthrough) through `rt_is_some`/`rt_is_none`
+whenever the operand's STATIC HIR type is `Optional(_)` — type-driven, not
+payload- or registration-driven, so it should apply uniformly to `i64?`, `bool?`,
+`text?`. A quick interpreter/seed-JIT sanity run of the doc's own probe
+(`bin/simple run`, current deployed seed) now shows correct `eq_nil`/`ifval`
+behavior across `i64?` (0, 3, -1, real nil), `bool?` (true/false/nil), and
+`text?` ("hi"/nil) — including the real-`nil` rows that were previously always
+wrong. **However**, this doc's mandated verification bar is specifically the
+pure-Simple **AOT `native-build`** lane, not the seed/interpreter, and that sweep
+did not finish within this session's time budget (a full-compiler `native-build`
+of the probe program was still compiling after 500s+ and was not waited out).
+Leaving status as OPEN/unconfirmed rather than declaring FIXED without the
+required AOT evidence — see "2026-08-10 partial verification" below for exactly
+what was and wasn't checked. Follow-up: re-run
+`env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 bin/simple native-build
+--source <probe> --entry-closure --entry <probe> -o <out>` to completion and
+sweep the full truth table from this doc's "Verification bar" section.
 **Engines:** Pure-Simple `native-build` (AOT). Seed JIT (`bin/simple run`) reproduces the
 already-documented value-3 collision exactly as recorded.
 **Scope of this doc:** answers "does the pure-Simple lane carry the seed's `Option<i64>`
@@ -171,3 +193,25 @@ Sweep the full table — `Some(0..4)`, `Some(-1)`, real `nil` — across `if val
 `bool?`, and `text?`. Rows whose correct answer is already "no-match"/"None" pass
 by coincidence and prove nothing; the match-expected rows are the ones that
 matter. `??`/`.is_none()`/`.is_some()` are correct TODAY and must not regress.
+
+## 2026-08-10 partial verification (seed/interpreter only, AOT sweep incomplete)
+
+Probe (`bin/simple run`, deployed seed `bin/release/x86_64-unknown-linux-gnu/simple`):
+
+```
+i64 v=0: eq_nil=false ne_nil=true ifval=SOME 0
+i64 v=3: eq_nil=true ne_nil=false ifval=NONE          <- seed's own known value-3 collision, unrelated
+i64 v=-1: eq_nil=false ne_nil=true ifval=SOME -1
+i64 nil: eq_nil=true ne_nil=false ifval=NONE           <- correct, was broken pre-fix
+bool v=true: eq_nil=false ne_nil=true ifval=SOME true
+bool v=false: eq_nil=false ne_nil=true ifval=SOME false
+bool nil: eq_nil=true ne_nil=false ifval=NONE
+text v=hi: eq_nil=false ne_nil=true ifval=SOME hi
+text nil: eq_nil=true ne_nil=false ifval=NONE
+```
+
+All non-value-3 rows are correct, including every real-`nil` row, which is the
+symptom this bug is about. **This is the seed JIT, not the pure-Simple AOT lane
+this doc's verification bar requires** — `bin/simple native-build` on the same
+probe was started but did not finish compiling within this session's time
+budget. Do not close this doc until that AOT sweep is run and matches.
