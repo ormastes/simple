@@ -103,3 +103,24 @@ default would have hidden this defect in the other direction.
 
 **Do not "fix" the spec** by removing the `rt_set_concurrent_backend("native")`
 calls: those four examples are the only coverage the native backend has.
+
+## Re-confirmed 2026-08-09
+
+Re-inspected `src/compiler_rust/compiler/src/interpreter_extern/concurrency.rs`
+fresh: `rt_thread_join` (line 339-340) still opens with
+`let registry = get_concurrent_registry();` and branches on
+`registry.backend()`, while `rt_thread_spawn_isolated_with_context` (line 207)
+and `rt_thread_spawn_isolated_with_args_context` (line 272) still have **no**
+`get_concurrent_registry()` call at all — grep of every `get_concurrent_registry`
+call site in the file confirms spawn is absent from that list while join and
+nine other functions have it. Root cause and fix location are unchanged from
+the original report.
+
+Characterized as **ARCHITECTURAL-OPEN**: the fix must land in
+`src/compiler_rust/compiler/src/interpreter_extern/concurrency.rs`, which is
+explicitly out of scope for `.spl`-lane fixes per
+`.claude/memory/feedback_fix_spl_not_rust.md` (Rust tree = bootstrap seed, not
+the normal tool), and a verifiable landing would additionally require a
+bootstrap rebuild, out of scope for this pass. No `.spl`/`.shs` source change
+is possible here without touching the Rust seed. Left OPEN as originally
+scoped; no spec changes made.

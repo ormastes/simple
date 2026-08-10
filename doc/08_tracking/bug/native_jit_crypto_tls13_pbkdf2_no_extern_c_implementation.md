@@ -73,3 +73,22 @@ never-implemented-anywhere class). No regression check added for this gap in
 this session — flagging via this bug doc per repo rule ("record a concrete
 bug/feature request instead of silently normalizing the workaround") rather
 than silently leaving it undocumented.
+
+## Re-confirmed 2026-08-10
+
+Re-checked `src/compiler_rust/common/src/runtime_symbols.rs`: `rt_tls13_sha256`
+(line 943), `rt_pbkdf2_hmac_sha256` (line 1221), and the orphaned
+`rt_native_profile_count` (line 1744) are all still present in
+`RUNTIME_SYMBOL_NAMES`. A repo-wide search for `extern "C"` / `no_mangle`
+definitions of `rt_tls13_sha256` found none — the gap described (interpreter-
+only Rust builtin, no native/JIT-callable counterpart) is unchanged.
+
+Characterized as **ARCHITECTURAL-OPEN**, confirmed correct: (1) the fix is
+real cryptographic implementation work (TLS 1.3 HKDF/X25519/Ed25519, PBKDF2)
+that per this repo's own security rule must not be a drive-by patch; (2) it
+belongs in `src/compiler_rust/`, which this task must never edit; (3) the
+doc's own "Blast radius" analysis already shows this fails safely today (hard
+linker error in normal native builds, loud stderr warning only under
+`SIMPLE_BOOTSTRAP=1`/`SIMPLE_STUB_MISSING_RT=1`) — there is no silent
+corruption to urgently contain. No source change made this pass; status and
+severity unchanged.

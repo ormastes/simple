@@ -48,3 +48,26 @@ preserve non-empty, distinct module names for explicit source files. Add a
 native entry-closure regression using an imported struct field, produce an
 admitted compiler, then rebuild the daemon incrementally and run
 `device-warm-production`.
+
+## Re-confirmed 2026-08-09
+
+Both source files still exist as described: `src/lib/common/ui/draw_ir.spl`
+(defines `Simple2dDrawIrPlan`) and
+`src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl` (imports it, uses it as a
+typed parameter at lines 220 and 1275). The exact diagnostic string
+`"cannot resolve import: module path segment \`{segment}\` not found"` is
+still emitted by the live resolver at
+`src/compiler/99.loader/module_resolver/resolution.spl:336`, i.e. the
+mechanism this bug describes is still present in the current tree — nothing
+here has been silently fixed.
+
+Attempted a fast host-tooling repro (`bin/simple check` on the single file)
+as a stand-in for the full daemon path; it did not return within 90s, and the
+documented repro is explicitly a multi-cycle `simpleos_gpu_host` Stage3
+entry-closure daemon build (`device-warm-production`, three retained build
+cycles). That is precisely the very-long native/daemon build class this pass
+is scoped to characterize rather than attempt. No `.spl`/`.shs` fix was made
+this pass — the required repair (tracing the entry-closure loader's fallback
+exhaustion and the empty-module-name collision, per "Required Repair" above)
+needs a dedicated session with the daemon build budget this task does not
+have. Left OPEN, characterization otherwise unchanged.
