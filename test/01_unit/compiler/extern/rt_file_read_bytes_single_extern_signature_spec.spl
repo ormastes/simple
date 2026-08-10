@@ -1,0 +1,128 @@
+use std.io_runtime.{shell_output}
+
+# STATUS: intentionally RED on ONE example, as of 2026-08-09.
+#
+#   ✗ "declares exactly one return type repo-wide" -- expected 4 to equal 1
+#
+# That failure is the tracked remaining work, not a broken test. Do NOT make it
+# green by relaxing the assertion, widening the accepted set, deleting the
+# example, or marking it pending -- converge the declarations. The other
+# examples pass, including the two that guard the shapes actually fixed
+# (`i64` and `List<i32>`), which is the part of the convergence that landed.
+#
+# Guards:
+#   doc/08_tracking/bug/rt_file_read_bytes_declared_with_six_return_types_2026-08-09.md
+# Layer above (already converged by stream G2, commit 47adbf730ca):
+#   test/01_unit/lib/nogc_sync_mut/file_read_bytes_single_definition_spec.spl
+#
+# WHY THIS MATTERS. `rt_file_read_bytes` is an `extern`, so every module that
+# wants it re-declares it locally, and at HEAD on 2026-08-09 there were 93 such
+# declarations across SIX mutually incompatible return types:
+#
+#   [u8]        65   <- authoritative
+#   [u8]?       23   invents an absence path the ABI does not have
+#   [i64]?       2   FOUR-TO-EIGHT-fold element-width disagreement
+#   [i64]        1   same
+#   List<i32>    1   same (fixed)
+#   i64          1   raw tagged handle, no array decode at all (fixed)
+#
+# The compiler resolves an extern by NAME, so which declaration a module sees
+# depends on its import closure. A caller can silently start decoding a
+# different element width because an UNRELATED module entered the closure --
+# and nothing at the call site changes.
+#
+# THE AUTHORITY IS THE C RUNTIME, NOT AGREEMENT BETWEEN THE DECLARATIONS.
+# `src/runtime/runtime_native.c:9071`:
+#
+#   int64_t rt_file_read_bytes(const uint8_t* path_ptr, uint64_t path_len)
+#
+# returns a tagged pointer to an array built by `rt_byte_array_new_len` --
+# ONE-BYTE elements -- or 0 on failure. The interpreter binding
+# (`src/compiler_rust/compiler/src/interpreter_extern/file_io.rs:546`) returns a
+# bare `Value::Array` on success and `Value::Nil` on failure, explicitly NOT an
+# `Option::Some`/`None`. So the one correct declaration is:
+#
+#   extern fn rt_file_read_bytes(path: text) -> [u8]
+#
+# `SIMPLE_DIAG_SAME_SIGNATURE_COLLISION=1` reports only the pair that collided
+# in one particular closure, so it UNDERSTATES the problem. This spec therefore
+# asserts the whole-repo property directly.
+
+# Scan roots are named explicitly. A recursive grep from the repo root walks
+# `build/`, `.git/`, and `src/compiler_rust/target/` and does NOT finish inside
+# a 120s budget -- and a TIMED-OUT grep returns EMPTY, which reads as "no
+# declarations, all clean". Measured on 2026-08-09: root scan killed at 120s
+# with empty output; these four roots complete in seconds. Never widen this to
+# `.` without re-checking the wall time.
+val SCAN_ROOTS = "src test scripts examples"
+
+val ANCHOR = "^[[:space:]]*extern fn rt_file_read_bytes\\("
+
+fn decl_return_types() -> text:
+    # Distinct return types of anchored top-level `extern fn` declarations.
+    # The anchor is what keeps the two in-string occurrences in
+    # test/*/sffi/rsa_sha512_reference_import_spec.spl (a source fixture the
+    # spec compiles at runtime) out of the count -- they are preceded by a
+    # quote, not by whitespace.
+    val cmd = "/usr/bin/grep -rh --include='*.spl' -E '" + ANCHOR + "' src test scripts examples "
+        + "| /usr/bin/grep -v '/vendor/' "
+        + "| sed 's/.*-> //' | sort -u | tr '\\n' ' '"
+    shell_output(cmd).trim()
+
+fn decl_type_count() -> i64:
+    val cmd = "/usr/bin/grep -rh --include='*.spl' -E '" + ANCHOR + "' src test scripts examples "
+        + "| /usr/bin/grep -v '/vendor/' "
+        + "| sed 's/.*-> //' | sort -u | wc -l"
+    shell_output(cmd).trim().to_i64()
+
+fn decls_with_return(ret: text) -> i64:
+    val cmd = "/usr/bin/grep -rh --include='*.spl' -E '" + ANCHOR + ".*-> " + ret + "$' src test scripts examples "
+        + "| /usr/bin/grep -v '/vendor/' | wc -l"
+    shell_output(cmd).trim().to_i64()
+
+describe "rt_file_read_bytes has a single extern signature":
+
+    # --- Oracle self-checks -------------------------------------------------
+    # A symbol-sweep oracle in this repo fails open three ways: the scan can
+    # silently match nothing, match everything, or return empty because the
+    # command errored (a TIMED-OUT grep returns empty and reads as "clean").
+    # These three examples close those holes, so a green verdict below means
+    # something.
+
+    it "positive control: the scanner finds the declarations that certainly exist":
+        # There are dozens of `-> [u8]` declarations. Zero means the scan
+        # broke, not that the repo is clean.
+        expect(decls_with_return("\\[u8\\]") >= 20).to_equal(true)
+
+    it "negative control: the anchor does not match a return type nobody uses":
+        expect(decls_with_return("NoSuchReturnTypeXyzzy")).to_equal(0)
+
+    it "control: the scan produces a non-empty type set":
+        # Distinguishes "clean" from "the command errored and printed nothing".
+        expect(decl_return_types() == "").to_equal(false)
+
+    # --- Shapes that were converged away ------------------------------------
+
+    it "no module declares the raw i64 handle form":
+        # `-> i64` skipped array decoding entirely and exposed the tagged
+        # pointer. Removed from src/compiler_rust/lib/std/src/sys/sffi/io.spl.
+        expect(decls_with_return("i64")).to_equal(0)
+
+    it "no module declares a List<i32> element width":
+        # `List<i32>` decodes 4-byte elements out of a 1-byte-element array.
+        # Converged in src/compiler_rust/lib/std/src/infra/file_io.spl.
+        expect(decls_with_return("List<i32>")).to_equal(0)
+
+    # --- The actual property ------------------------------------------------
+
+    it "declares exactly one return type repo-wide":
+        # Surfacing the type set makes a failure self-diagnosing: it names the
+        # shapes that are still disagreeing.
+        expect(decl_return_types()).to_equal("[u8]")
+        expect(decl_type_count()).to_equal(1)
+
+    it "the one return type matches the C runtime ABI":
+        # Not "whatever the declarations agree on" -- what the C actually
+        # returns. `rt_byte_array_new_len` is the byte-array constructor.
+        val cmd = "/usr/bin/grep -c 'rt_byte_array_new_len' src/runtime/runtime_native.c"
+        expect(shell_output(cmd).trim().to_i64() >= 1).to_equal(true)
