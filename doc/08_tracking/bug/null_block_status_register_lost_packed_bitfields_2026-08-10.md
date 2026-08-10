@@ -1,6 +1,6 @@
 # NullBlockStatusRegister lost its `@packed` bitfields in a file move (2026-08-10)
 
-Status: **OPEN — spec left RED on purpose**
+Status: **RESOLVED 2026-08-10 (fix landed as 27867c91c5c; status corrected by stream N3)**
 Found by: stream K4, while verifying comment-cheat anchor fixes
 
 ## Symptom
@@ -76,3 +76,27 @@ be updated together — both trees execute.
 
 Do not resolve by deleting the assertion or repointing it at a file that merely
 mentions the struct name.
+
+## Resolution (2026-08-10)
+
+The packed declaration was restored in
+`src/lib/nogc_sync_mut/driver/null_block_driver.spl` (commit `27867c91c5c`):
+
+```
+@packed
+struct NullBlockStatusRegister:
+    ready: u32:1
+    readonly: u32:1
+    reserved: u32:30
+```
+
+`null_block_status_register()` still assigns `status.ready = 1` /
+`status.readonly = 1` and reads back correctly under the bitfield widths.
+
+Re-verified by stream N3 with
+`src/compiler_rust/target/bootstrap/simple test --timeout 900`:
+
+- `test/01_unit/compiler/packed_struct_bitfield_spec.spl` —
+  `declared>=4 executed=4 passed=4 failed=0 dropped=0`
+- `test/unit/compiler/packed_struct_bitfield_spec.spl` —
+  `declared>=4 executed=4 passed=4 failed=0 dropped=0`
