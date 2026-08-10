@@ -4,9 +4,27 @@
 **Lane:** S57 (found while disproving the `{}` land-war; filed, not fixed here)
 **Severity:** P2 (silent wrong result / garbage handle, no crash) on the seed's
 `--native --backend=cranelift` path only
-**Status:** OPEN — reproduced and characterized, NOT root-caused to a line, NOT
-fixed (orthogonal to lane S57's assigned `{}` mission; risky cranelift codegen
-change; belongs to a codegen lane with its own gates).
+**Status:** ALREADY-FIXED — re-verified fresh 2026-08-10. Re-ran the exact
+repro from this doc using the real native-compile path (the original
+characterization ran `simple <file> --native --backend=cranelift`, which that
+seed CLI silently ignores for run-mode — `simple compile <file> --native
+--backend=cranelift -o <out>` followed by running `<out>` is the actual native
+path):
+
+```
+cd src/compiler_rust
+./target/bootstrap/simple compile /tmp/repro/scratch_probe_ret2.spl --native --backend=cranelift -o /tmp/repro/ret2_native
+/tmp/repro/ret2_native
+# LEN=2  HAS_A=true  A=11  ITER=2  LIST_LEN=3   (matches interpreter, was -1/false/3/0/3)
+
+./target/bootstrap/simple compile /tmp/repro/scratch_probe_ret2.spl --native --backend=cranelift --opt-level none -o /tmp/repro/ret2_native_noopt
+/tmp/repro/ret2_native_noopt
+# LEN=2  HAS_A=true  A=11  ITER=2  LIST_LEN=3   (also fixed at opt-level none)
+```
+
+Both previously-broken rows now match the interpreter's correct output. The
+`Dict`-return-value native cranelift ABI defect described below is resolved by
+prior codegen work; no further action needed. (Kept below for history/context.)
 
 ## Symptom
 
