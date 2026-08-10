@@ -1,6 +1,12 @@
 # BUG: `std.parser.treesitter_node` does not exist, and its spec asserts nothing anyway
 
-**Status:** OPEN
+**Status:** OPEN (architectural — blocked on owner decision, not a lane-fixable defect)
+**Re-verified:** 2026-08-10 — `find src/lib -iname '*treesitter*'` still returns
+nothing; `std.parser.treesitter_node` still does not exist and the spec still
+fails to load. Root cause and vacuous-assertion analysis below are unchanged.
+Resolving this requires a decision this lane cannot make alone (implement a
+real TreeSitter `Node` FFI wrapper with non-tautological assertions, or delete
+the spec) — see "Why not fixed now" below.
 **Found:** 2026-08-04
 **Severity:** medium — one permanently-red spec in `test/01_unit/std/`, and the
 spec is written so that implementing the module would prove nothing.

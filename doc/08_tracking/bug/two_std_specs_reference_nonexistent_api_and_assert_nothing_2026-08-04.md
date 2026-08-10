@@ -1,6 +1,15 @@
 # BUG: two `test/01_unit/std` specs are permanently red — one imports a class that does not exist, one asserts nothing
 
-**Status:** OPEN
+**Status:** OPEN (architectural — blocked on owner decision, not a lane-fixable defect)
+**Re-verified:** 2026-08-10 — `bin/simple test test/01_unit/std/mock_simple_spec.spl`
+still fails identically: `semantic: variable \`Mock\` not found`,
+`SPEC FILE VERDICT ... executed=1 passed=0 failed=1`. `grep -rnE "(pub )?class
+Mock\b" src/lib/` still returns zero hits (only `MockFunction`, `MockRegistry`,
+etc. exist) — root cause is unchanged. `standalone_test.spl` still has no
+`describe`/`it`/`expect` and is still a zero-assertion script. Neither can be
+resolved without an owner choosing feature-vs-delete (see "Why not fixed now"
+below); doing either unilaterally would manufacture a false green, which this
+repo's mandate explicitly forbids.
 **Found:** 2026-08-04
 **Severity:** low-medium — two permanently-failing files, and one of them is
 counted as a test while containing zero assertions.
