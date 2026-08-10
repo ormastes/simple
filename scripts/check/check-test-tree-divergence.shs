@@ -117,6 +117,8 @@ trap 'rm -rf "$work"' EXIT INT TERM
 
 current_diverged="$work/current_diverged.txt"
 : > "$current_diverged"
+mirror_only="$work/mirror_only.txt"
+: > "$mirror_only"
 total_common=0
 total_identical=0
 total_diverged=0
@@ -156,7 +158,13 @@ for line in $pairs_raw; do
             [ -n "$shpath" ] || continue
             relpath=${shpath#"$shadow_rel"/}
             canon_path="$canon_rel/$relpath"
-            git cat-file -e "$ref:$canon_path" 2>/dev/null || continue   # not mirrored — out of scope
+            if ! git cat-file -e "$ref:$canon_path" 2>/dev/null; then
+                # MIRROR-ONLY: file exists only in the shadow tree. Canonical-only
+                # is the norm (the shadow is a partial subset); mirror-only almost
+                # always means a spec was authored into the wrong tree.
+                echo "$label:$relpath" >> "$mirror_only"
+                continue
+            fi
             total_common=$((total_common + 1))
             if git diff --quiet "$ref:$canon_path" "$ref:$shpath" 2>/dev/null; then
                 total_identical=$((total_identical + 1))
@@ -179,7 +187,11 @@ for line in $pairs_raw; do
             [ -n "$f" ] || continue
             relpath=${f#"$shadow_dir"/}
             canon_file="$canon_dir/$relpath"
-            [ -f "$canon_file" ] || continue   # not a mirrored path — out of scope
+            if [ ! -f "$canon_file" ]; then
+                # MIRROR-ONLY (see committed-mode note above).
+                echo "$label:$relpath" >> "$mirror_only"
+                continue
+            fi
             total_common=$((total_common + 1))
             if cmp -s "$canon_file" "$f"; then
                 total_identical=$((total_identical + 1))
@@ -195,9 +207,31 @@ done
 IFS="$oldifs"
 
 sort -u "$current_diverged" -o "$current_diverged"
+sort -u "$mirror_only" -o "$mirror_only"
 
 [ "$total_common" -gt 0 ] \
     || die 2 "0 mirrored pairs found across all pair specs — nothing was compared"
+
+# --- 3b. mirror-only check ---------------------------------------------------
+# Canonical-only paths are the NORM (the shadow trees are deliberate partial
+# subsets: 2,535 canonical-only unit paths as of 2026-08-10) and stay silent.
+# MIRROR-ONLY paths — a file in test/unit/** or test/integration/** with no
+# canonical twin — are anomalous: they almost always mean a spec was authored
+# into the wrong tree (h2_server_text_to_u8_spec.spl, c5881931d97). Known,
+# reviewed exceptions live in the allowlist file (label:relpath per line,
+# '#' comments allowed). The allowlist is hand-maintained — there is NO
+# --generate flag for it, by design: never auto-generate it to force green.
+ALLOWLIST="${TEST_TREE_MIRROR_ONLY_ALLOWLIST:-$toplevel/scripts/check/test_tree_mirror_only_allowlist.txt}"
+if [ -f "$ALLOWLIST" ]; then
+    /usr/bin/grep -v '^[[:space:]]*#' "$ALLOWLIST" | /usr/bin/grep -v '^[[:space:]]*$' | sort -u > "$work/allowlist_sorted.txt"
+else
+    : > "$work/allowlist_sorted.txt"
+fi
+comm -23 "$mirror_only" "$work/allowlist_sorted.txt" > "$work/new_mirror_only.txt"
+comm -13 "$mirror_only" "$work/allowlist_sorted.txt" > "$work/stale_allowlist.txt"
+n_mirror_only=$(wc -l < "$mirror_only" | tr -d ' ')
+n_new_mirror_only=$(wc -l < "$work/new_mirror_only.txt" | tr -d ' ')
+n_stale_allowlist=$(wc -l < "$work/stale_allowlist.txt" | tr -d ' ')
 
 # --- 4. --generate-baseline: write and stop ---------------------------------
 if [ "$generate" -eq 1 ]; then
@@ -238,11 +272,23 @@ if [ "$n_fixed" -gt 0 ]; then
     sed 's/^/  - /' "$work/fixed_baseline.txt" >&2
     status=1
 fi
+if [ "$n_new_mirror_only" -gt 0 ]; then
+    echo "$SELF: MIRROR-ONLY file(s) with no canonical twin and not in $ALLOWLIST:" >&2
+    echo "$SELF:   (a spec authored into test/unit/ or test/integration/ belongs in the canonical tree —" >&2
+    echo "$SELF:    mirror it to test/01_unit/ / test/02_integration/, or add a reviewed allowlist entry)" >&2
+    sed 's/^/  + /' "$work/new_mirror_only.txt" >&2
+    status=1
+fi
+if [ "$n_stale_allowlist" -gt 0 ]; then
+    echo "$SELF: allowlist entries that are NO LONGER mirror-only (stale — remove these lines from $ALLOWLIST):" >&2
+    sed 's/^/  - /' "$work/stale_allowlist.txt" >&2
+    status=1
+fi
 
 if [ "$status" -ne 0 ]; then
-    echo "$SELF: FAIL — $total_diverged diverged vs $n_baseline baselined ($n_new new, $n_fixed fixed-but-still-baselined)"
+    echo "$SELF: FAIL — $total_diverged diverged vs $n_baseline baselined ($n_new new, $n_fixed fixed-but-still-baselined); $n_mirror_only mirror-only ($n_new_mirror_only unallowlisted, $n_stale_allowlist stale-allowlist)"
     exit 1
 fi
 
-echo "$SELF: PASS — $total_common pairs checked, $total_diverged diverged (all baselined), 0 new, 0 stale-fixed"
+echo "$SELF: PASS — $total_common pairs checked, $total_diverged diverged (all baselined), 0 new, 0 stale-fixed, $n_mirror_only mirror-only (all allowlisted)"
 exit 0
