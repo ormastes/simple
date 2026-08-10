@@ -65,6 +65,8 @@ Options:
   --verbose          Accepted for compatibility
   --jobs=<n|full|half|min|auto>
                      Native build workers (default: half CPUs locally, 2 on GitHub Actions)
+                     Stage 3 uses a three-sample portable memory admission;
+                     override added headroom with SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB
   --no-mcp           Skip MCP server builds (Stage 5)
   --keep-artifacts   Accepted for compatibility; artifacts are kept
   --no-verify        Accepted for compatibility; hash verification still runs
@@ -1071,6 +1073,7 @@ else
   stage3_command_transcript="${stage3_provenance_dir}/stage3-command.transcript"
   stage2_sanity_evidence="${stage3_provenance_dir}/stage2-sanity.env"
   stage3_sanity_evidence="${stage3_provenance_dir}/stage3-sanity.env"
+  stage3_memory_evidence="${stage3_provenance_dir}/stage3-memory-admission.env"
   stage2_provenance_cache="${stage3_provenance_dir}/stage2-native-cache"
   stage3_provenance_cache="${stage3_provenance_dir}/stage3-native-cache"
   stage2_provenance_home="${stage3_provenance_dir}/stage2-home"
@@ -1097,7 +1100,8 @@ else
     "${stage3_source_before}" "${stage3_source_after}" \
     "${stage3_git_before}" "${stage3_git_after}" \
     "${stage2_command_transcript}" "${stage3_command_transcript}" \
-    "${stage2_sanity_evidence}" "${stage3_sanity_evidence}"
+    "${stage2_sanity_evidence}" "${stage3_sanity_evidence}" \
+    "${stage3_memory_evidence}"
   rm -rf "${stage2_provenance_cache}" "${stage3_provenance_cache}" \
     "${stage2_provenance_home}" "${stage2_provenance_tmp}" \
     "${stage3_provenance_home}" "${stage3_provenance_tmp}" \
@@ -1391,37 +1395,57 @@ else
       "${stage3_provenance_dir}/runtime-before-stage3.txt" || exit 1
   fi
   set +e
-  [ "${stage2_status}" -eq 0 ] && [ -x "${stage2_bin}" ] && \
-  bootstrap_stage3_run_transcribed \
-    "$(absolute_path "${stage3_command_transcript}")" "${repo_root}" \
-    "$(absolute_path "${log_dir}/stage3-native-build.log")" \
-    "${stage3_home_absolute}" "${stage3_tmp_absolute}" "${stage_build_path}" \
-    RUST_LOG="${stage_build_rust_log}" \
-    LIBRARY_PATH="${bootstrap_link_library_path}" \
-    SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256="${bootstrap_link_compat_sha256}" \
-    SIMPLE_BOOTSTRAP=1 \
-    SIMPLE_NO_DEPRECATED_WARNINGS=1 \
-    SIMPLE_NATIVE_ARENA_DECLS=1 \
-    SIMPLE_NO_STUB_FALLBACK=1 \
-    LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
-    SIMPLE_NATIVE_BUILD_TARGET="${PLATFORM}" \
-    SIMPLE_NATIVE_BUILD_THREADS="${selfhost_jobs}" \
-    SIMPLE_NATIVE_BUILD_CACHE_DIR="${stage3_cache_absolute}" \
-    SIMPLE_RUNTIME_PATH="${stage_runtime_absolute}" \
-    SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap \
-    SIMPLE_BINARY="${stage2_admitted_absolute}" -- \
-    "${stage2_admitted_absolute}" native-build \
-    --target "${PLATFORM}" \
-    --backend "${backend}" \
-    --runtime-bundle core-c-bootstrap \
-    --entry-closure \
-    --threads "${selfhost_jobs}" \
-    --cache-dir "${stage3_cache_absolute}" \
-    --mode "${bootstrap_mode}" \
-    --runtime-path "${stage_runtime_absolute}" \
-    --entry src/app/cli/bootstrap_main.spl \
-    -o "${stage3_bin}"
-  stage3_status=$?
+  stage3_status=1
+  if [ "${stage2_status}" -eq 0 ] && [ -x "${stage2_bin}" ]; then
+    bootstrap_stage3_memory_admission_preflight \
+      "$(absolute_path "${stage3_memory_evidence}")"
+    stage3_memory_status=$?
+    if [ "${stage3_memory_status}" -eq 0 ]; then
+      bootstrap_stage3_run_transcribed \
+        "$(absolute_path "${stage3_command_transcript}")" "${repo_root}" \
+        "$(absolute_path "${log_dir}/stage3-native-build.log")" \
+        "${stage3_home_absolute}" "${stage3_tmp_absolute}" "${stage_build_path}" \
+        RUST_LOG="${stage_build_rust_log}" \
+        LIBRARY_PATH="${bootstrap_link_library_path}" \
+        SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256="${bootstrap_link_compat_sha256}" \
+        SIMPLE_BOOTSTRAP=1 \
+        SIMPLE_NO_DEPRECATED_WARNINGS=1 \
+        SIMPLE_NATIVE_ARENA_DECLS=1 \
+        SIMPLE_NO_STUB_FALLBACK=1 \
+        LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
+        SIMPLE_NATIVE_BUILD_TARGET="${PLATFORM}" \
+        SIMPLE_NATIVE_BUILD_THREADS="${selfhost_jobs}" \
+        SIMPLE_NATIVE_BUILD_CACHE_DIR="${stage3_cache_absolute}" \
+        SIMPLE_RUNTIME_PATH="${stage_runtime_absolute}" \
+        SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap \
+        SIMPLE_BINARY="${stage2_admitted_absolute}" -- \
+        "${stage2_admitted_absolute}" native-build \
+        --target "${PLATFORM}" \
+        --backend "${backend}" \
+        --runtime-bundle core-c-bootstrap \
+        --entry-closure \
+        --threads "${selfhost_jobs}" \
+        --cache-dir "${stage3_cache_absolute}" \
+        --mode "${bootstrap_mode}" \
+        --runtime-path "${stage_runtime_absolute}" \
+        --entry src/app/cli/bootstrap_main.spl \
+        -o "${stage3_bin}" &
+      stage3_runner_pid=$!
+      stage3_memory_record_status=0
+      bootstrap_stage3_memory_record_runner \
+        "$(absolute_path "${stage3_memory_evidence}")" \
+        "${stage3_runner_pid}" || stage3_memory_record_status=$?
+      wait "${stage3_runner_pid}"
+      stage3_status=$?
+      if [ "${stage3_memory_record_status}" -ne 0 ]; then
+        echo "error: could not bind Stage 3 runner to memory evidence" >&2
+        stage3_status=${stage3_memory_record_status}
+      fi
+    else
+      stage3_status=${stage3_memory_status}
+      echo "error: Stage 3 launch refused by memory admission (status ${stage3_memory_status})" >&2
+    fi
+  fi
   set -e
   if [ "${stage2_admitted_sha_before_stage3}" != absent ]; then
     [ "${stage2_admitted_sha_before_stage3}" = \
@@ -1440,6 +1464,7 @@ else
   fi
 
   echo "  stage3-native-build log: ${log_dir}/stage3-native-build.log"
+  echo "  stage3-memory evidence: ${stage3_memory_evidence}"
   if [ "${stage3_status}" -eq 0 ] && [ -x "${output_dir}/stage3/${PLATFORM}/simple${exe_suffix}" ]; then
     if bootstrap_stage_sanity "${stage3_bin}" \
       "$(absolute_path "${stage3_sanity_evidence}")" \
@@ -1525,6 +1550,7 @@ else
     BSTAGE3_STAGE3_TRANSCRIPT="$(absolute_path "${stage3_command_transcript}")"
     BSTAGE3_STAGE2_SANITY="$(absolute_path "${stage2_sanity_evidence}")"
     BSTAGE3_STAGE3_SANITY="$(absolute_path "${stage3_sanity_evidence}")"
+    BSTAGE3_STAGE3_MEMORY="$(absolute_path "${stage3_memory_evidence}")"
     BSTAGE3_LOCK="$(absolute_path "${bootstrap_lock}")"
     BSTAGE3_RUST_LOG="${stage_build_rust_log}"
     export BSTAGE3_ROOT BSTAGE3_MANIFEST BSTAGE3_PLATFORM BSTAGE3_BACKEND \
@@ -1546,7 +1572,8 @@ else
       BSTAGE3_SEED_INPUTS_FINGERPRINT BSTAGE3_SEED_FEATURES \
       BSTAGE3_GIT_BEFORE BSTAGE3_GIT_AFTER \
       BSTAGE3_STAGE2_TRANSCRIPT BSTAGE3_STAGE3_TRANSCRIPT \
-      BSTAGE3_STAGE2_SANITY BSTAGE3_STAGE3_SANITY BSTAGE3_LOCK \
+      BSTAGE3_STAGE2_SANITY BSTAGE3_STAGE3_SANITY BSTAGE3_STAGE3_MEMORY \
+      BSTAGE3_LOCK \
       BSTAGE3_RUST_LOG
     bootstrap_stage3_write_manifest || {
       echo "error: refusing Stage 3 without canonical provenance" >&2

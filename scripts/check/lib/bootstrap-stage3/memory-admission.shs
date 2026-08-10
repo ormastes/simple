@@ -1,0 +1,637 @@
+#!/bin/sh
+# Portable, observational Stage 3 memory admission.
+#
+# Providers return ready, blocked, or unknown.  Unknown is deliberately
+# non-blocking: an unavailable platform probe must never be converted into a
+# fabricated zero-memory reading.  The gate never signals another process.
+
+bootstrap_stage3_memory_is_uint() {
+    case "${1-}" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac
+}
+
+bootstrap_stage3_memory_safe_evidence_path() {
+    [ "$#" -eq 1 ] || return 1
+    bootstrap_stage3_memory_safe_path=$1
+    bootstrap_stage3_memory_safe_parent=$(dirname -- "$bootstrap_stage3_memory_safe_path")
+    [ -d "$bootstrap_stage3_memory_safe_parent" ] &&
+        [ ! -L "$bootstrap_stage3_memory_safe_parent" ] &&
+        [ "$(bootstrap_stage3_canonical_path "$bootstrap_stage3_memory_safe_parent")" = \
+            "$bootstrap_stage3_memory_safe_parent" ] &&
+        [ ! -L "$bootstrap_stage3_memory_safe_path" ] &&
+        [ "$(bootstrap_stage3_canonical_path "$bootstrap_stage3_memory_safe_path")" = \
+            "$bootstrap_stage3_memory_safe_path" ]
+}
+
+bootstrap_stage3_memory_sanitize_text() {
+    printf '%s' "$1" | tr '\n\r' '__'
+}
+
+bootstrap_stage3_memory_earlyoom_percent_from_args() {
+    printf '%s\n' "$1" | sed -n \
+        -e 's/.*[[:space:]]-m[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+        -e 's/.*[[:space:]]-m\([0-9][0-9]*\).*/\1/p' | tail -n 1
+}
+
+bootstrap_stage3_memory_linux_earlyoom() {
+    bootstrap_stage3_memory_earlyoom_status=inactive
+    bootstrap_stage3_memory_earlyoom_percent=
+    bootstrap_stage3_memory_earlyoom_source=none
+    bootstrap_stage3_memory_earlyoom_args=${SIMPLE_BOOTSTRAP_EARLYOOM_ARGS:-}
+    bootstrap_stage3_memory_earlyoom_config=\
+${SIMPLE_BOOTSTRAP_EARLYOOM_CONFIG_PATH:-/etc/default/earlyoom}
+
+    if [ -n "${SIMPLE_BOOTSTRAP_EARLYOOM_STATUS:-}" ]; then
+        bootstrap_stage3_memory_earlyoom_status=$SIMPLE_BOOTSTRAP_EARLYOOM_STATUS
+    elif command -v pgrep >/dev/null 2>&1 && pgrep -x earlyoom >/dev/null 2>&1; then
+        bootstrap_stage3_memory_earlyoom_status=active
+    fi
+    case "$bootstrap_stage3_memory_earlyoom_status" in
+        active|inactive) ;;
+        *) return 1 ;;
+    esac
+
+    if [ -n "${SIMPLE_BOOTSTRAP_EARLYOOM_MEM_PERCENT:-}" ]; then
+        bootstrap_stage3_memory_earlyoom_percent=$SIMPLE_BOOTSTRAP_EARLYOOM_MEM_PERCENT
+        bootstrap_stage3_memory_earlyoom_source=environment
+    elif [ "$bootstrap_stage3_memory_earlyoom_status" = active ]; then
+        if [ -z "$bootstrap_stage3_memory_earlyoom_args" ] &&
+            [ -r "$bootstrap_stage3_memory_earlyoom_config" ]; then
+            bootstrap_stage3_memory_earlyoom_args=$(sed -n \
+                's/^[[:space:]]*EARLYOOM_ARGS[[:space:]]*=[[:space:]]*//p' \
+                "$bootstrap_stage3_memory_earlyoom_config" | tail -n 1)
+        fi
+        bootstrap_stage3_memory_earlyoom_percent=$( \
+            bootstrap_stage3_memory_earlyoom_percent_from_args \
+                "$bootstrap_stage3_memory_earlyoom_args")
+        if [ -n "$bootstrap_stage3_memory_earlyoom_percent" ]; then
+            bootstrap_stage3_memory_earlyoom_source=config
+        else
+            bootstrap_stage3_memory_earlyoom_percent=10
+            bootstrap_stage3_memory_earlyoom_source=earlyoom-default
+        fi
+    fi
+    if [ -n "$bootstrap_stage3_memory_earlyoom_percent" ]; then
+        bootstrap_stage3_memory_is_uint "$bootstrap_stage3_memory_earlyoom_percent" &&
+            [ "$bootstrap_stage3_memory_earlyoom_percent" -ge 1 ] &&
+            [ "$bootstrap_stage3_memory_earlyoom_percent" -le 99 ] || return 1
+    fi
+}
+
+bootstrap_stage3_memory_fixture_sample() {
+    bootstrap_stage3_memory_fixture=$1
+    bootstrap_stage3_memory_fixture_index=$2
+    [ -f "$bootstrap_stage3_memory_fixture" ] &&
+        [ ! -L "$bootstrap_stage3_memory_fixture" ] || return 1
+    bootstrap_stage3_memory_fixture_line=$(sed -n \
+        "${bootstrap_stage3_memory_fixture_index}p" "$bootstrap_stage3_memory_fixture")
+    [ -n "$bootstrap_stage3_memory_fixture_line" ] || return 1
+    IFS='|' read -r bootstrap_stage3_memory_fixture_kind \
+        bootstrap_stage3_memory_fixture_a bootstrap_stage3_memory_fixture_b \
+        bootstrap_stage3_memory_fixture_c bootstrap_stage3_memory_fixture_d \
+        bootstrap_stage3_memory_fixture_e bootstrap_stage3_memory_fixture_f <<EOF
+$bootstrap_stage3_memory_fixture_line
+EOF
+    case "$bootstrap_stage3_memory_fixture_kind" in
+        linux)
+            bootstrap_stage3_memory_provider=linux-proc-meminfo-cgroup-v2
+            bootstrap_stage3_memory_total_kib=$bootstrap_stage3_memory_fixture_a
+            bootstrap_stage3_memory_available_kib=$bootstrap_stage3_memory_fixture_b
+            bootstrap_stage3_memory_cgroup_current=$bootstrap_stage3_memory_fixture_c
+            bootstrap_stage3_memory_cgroup_max=$bootstrap_stage3_memory_fixture_d
+            bootstrap_stage3_memory_earlyoom_percent=$bootstrap_stage3_memory_fixture_e
+            bootstrap_stage3_memory_earlyoom_source=$bootstrap_stage3_memory_fixture_f
+            bootstrap_stage3_memory_earlyoom_status=active
+            ;;
+        darwin-pressure)
+            bootstrap_stage3_memory_provider=darwin-memory-pressure
+            bootstrap_stage3_memory_pressure_percent=$bootstrap_stage3_memory_fixture_a
+            ;;
+        darwin-vmstat)
+            bootstrap_stage3_memory_provider=darwin-vm-stat
+            bootstrap_stage3_memory_total_bytes=$bootstrap_stage3_memory_fixture_a
+            bootstrap_stage3_memory_page_size=$bootstrap_stage3_memory_fixture_b
+            bootstrap_stage3_memory_free_pages=$bootstrap_stage3_memory_fixture_c
+            bootstrap_stage3_memory_inactive_pages=$bootstrap_stage3_memory_fixture_d
+            bootstrap_stage3_memory_speculative_pages=$bootstrap_stage3_memory_fixture_e
+            ;;
+        freebsd)
+            bootstrap_stage3_memory_provider=freebsd-sysctl-advisory
+            bootstrap_stage3_memory_total_bytes=$bootstrap_stage3_memory_fixture_a
+            bootstrap_stage3_memory_page_size=$bootstrap_stage3_memory_fixture_b
+            bootstrap_stage3_memory_free_pages=$bootstrap_stage3_memory_fixture_c
+            bootstrap_stage3_memory_inactive_pages=$bootstrap_stage3_memory_fixture_d
+            bootstrap_stage3_memory_cache_pages=$bootstrap_stage3_memory_fixture_e
+            ;;
+        unknown)
+            bootstrap_stage3_memory_provider=unsupported
+            bootstrap_stage3_memory_reason=$(bootstrap_stage3_memory_sanitize_text \
+                "$bootstrap_stage3_memory_fixture_a")
+            bootstrap_stage3_memory_status=unknown
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+bootstrap_stage3_memory_linux_sample() {
+    bootstrap_stage3_memory_meminfo=${SIMPLE_BOOTSTRAP_MEMINFO_PATH:-/proc/meminfo}
+    [ -r "$bootstrap_stage3_memory_meminfo" ] || return 1
+    bootstrap_stage3_memory_provider=linux-proc-meminfo-cgroup-v2
+    bootstrap_stage3_memory_total_kib=$(awk '/^MemTotal:/ { print $2; exit }' \
+        "$bootstrap_stage3_memory_meminfo")
+    bootstrap_stage3_memory_available_kib=$(awk '/^MemAvailable:/ { print $2; exit }' \
+        "$bootstrap_stage3_memory_meminfo")
+    bootstrap_stage3_memory_cgroup_current=unavailable
+    bootstrap_stage3_memory_cgroup_max=max
+    bootstrap_stage3_memory_cgroup_current_path=\
+${SIMPLE_BOOTSTRAP_CGROUP_MEMORY_CURRENT_PATH:-/sys/fs/cgroup/memory.current}
+    bootstrap_stage3_memory_cgroup_max_path=\
+${SIMPLE_BOOTSTRAP_CGROUP_MEMORY_MAX_PATH:-/sys/fs/cgroup/memory.max}
+    if [ -r "$bootstrap_stage3_memory_cgroup_current_path" ] &&
+        [ -r "$bootstrap_stage3_memory_cgroup_max_path" ]; then
+        bootstrap_stage3_memory_cgroup_current=$(sed -n '1p' \
+            "$bootstrap_stage3_memory_cgroup_current_path")
+        bootstrap_stage3_memory_cgroup_max=$(sed -n '1p' \
+            "$bootstrap_stage3_memory_cgroup_max_path")
+    fi
+    bootstrap_stage3_memory_linux_earlyoom || return 1
+}
+
+bootstrap_stage3_memory_darwin_sample() {
+    bootstrap_stage3_memory_pressure_output=
+    if [ -n "${SIMPLE_BOOTSTRAP_DARWIN_MEMORY_PRESSURE_PATH:-}" ]; then
+        [ -r "$SIMPLE_BOOTSTRAP_DARWIN_MEMORY_PRESSURE_PATH" ] || return 1
+        bootstrap_stage3_memory_pressure_output=$(cat \
+            "$SIMPLE_BOOTSTRAP_DARWIN_MEMORY_PRESSURE_PATH")
+    elif command -v memory_pressure >/dev/null 2>&1; then
+        bootstrap_stage3_memory_pressure_output=$(LC_ALL=C memory_pressure -Q 2>/dev/null || true)
+    fi
+    bootstrap_stage3_memory_pressure_percent=$(printf '%s\n' \
+        "$bootstrap_stage3_memory_pressure_output" | sed -n \
+        's/.*[Ff]ree percentage:[[:space:]]*\([0-9][0-9]*\)%.*/\1/p' | tail -n 1)
+    if bootstrap_stage3_memory_is_uint "$bootstrap_stage3_memory_pressure_percent"; then
+        bootstrap_stage3_memory_provider=darwin-memory-pressure
+        return 0
+    fi
+
+    command -v vm_stat >/dev/null 2>&1 && command -v sysctl >/dev/null 2>&1 || return 1
+    bootstrap_stage3_memory_vmstat=$(LC_ALL=C vm_stat 2>/dev/null) || return 1
+    bootstrap_stage3_memory_provider=darwin-vm-stat
+    bootstrap_stage3_memory_total_bytes=$(sysctl -n hw.memsize 2>/dev/null) || return 1
+    bootstrap_stage3_memory_page_size=$(printf '%s\n' "$bootstrap_stage3_memory_vmstat" |
+        sed -n '1s/.*page size of \([0-9][0-9]*\) bytes.*/\1/p')
+    bootstrap_stage3_memory_free_pages=$(printf '%s\n' "$bootstrap_stage3_memory_vmstat" |
+        awk -F: '/Pages free/ { gsub(/[^0-9]/, "", $2); print $2; exit }')
+    bootstrap_stage3_memory_inactive_pages=$(printf '%s\n' "$bootstrap_stage3_memory_vmstat" |
+        awk -F: '/Pages inactive/ { gsub(/[^0-9]/, "", $2); print $2; exit }')
+    bootstrap_stage3_memory_speculative_pages=$(printf '%s\n' "$bootstrap_stage3_memory_vmstat" |
+        awk -F: '/Pages speculative/ { gsub(/[^0-9]/, "", $2); print $2; exit }')
+}
+
+bootstrap_stage3_memory_freebsd_sample() {
+    command -v sysctl >/dev/null 2>&1 || return 1
+    bootstrap_stage3_memory_provider=freebsd-sysctl-advisory
+    bootstrap_stage3_memory_total_bytes=$(sysctl -n hw.physmem 2>/dev/null) || return 1
+    bootstrap_stage3_memory_page_size=$(sysctl -n hw.pagesize 2>/dev/null) || return 1
+    bootstrap_stage3_memory_free_pages=$(sysctl -n vm.stats.vm.v_free_count 2>/dev/null) || return 1
+    bootstrap_stage3_memory_inactive_pages=$(sysctl -n vm.stats.vm.v_inactive_count 2>/dev/null) || return 1
+    bootstrap_stage3_memory_cache_pages=$(sysctl -n vm.stats.vm.v_cache_count 2>/dev/null || echo 0)
+}
+
+bootstrap_stage3_memory_evaluate_linux() {
+    for bootstrap_stage3_memory_value in "$bootstrap_stage3_memory_total_kib" \
+        "$bootstrap_stage3_memory_available_kib"; do
+        bootstrap_stage3_memory_is_uint "$bootstrap_stage3_memory_value" || return 1
+    done
+    [ "$bootstrap_stage3_memory_total_kib" -gt 0 ] || return 1
+    bootstrap_stage3_memory_reserve_kib=0
+    if [ "$bootstrap_stage3_memory_earlyoom_status" = active ]; then
+        bootstrap_stage3_memory_is_uint "$bootstrap_stage3_memory_earlyoom_percent" || return 1
+        bootstrap_stage3_memory_reserve_kib=$((
+            bootstrap_stage3_memory_total_kib * bootstrap_stage3_memory_earlyoom_percent / 100))
+    fi
+    bootstrap_stage3_memory_required_kib=$((
+        bootstrap_stage3_memory_reserve_kib + bootstrap_stage3_memory_headroom_kib))
+    bootstrap_stage3_memory_threshold=\
+"host>${bootstrap_stage3_memory_required_kib}KiB;cgroup>${bootstrap_stage3_memory_headroom_kib}KiB"
+    bootstrap_stage3_memory_cgroup_available=unlimited
+    if [ "$bootstrap_stage3_memory_cgroup_max" != max ] &&
+        [ "$bootstrap_stage3_memory_cgroup_max" != unavailable ]; then
+        bootstrap_stage3_memory_is_uint "$bootstrap_stage3_memory_cgroup_max" &&
+            bootstrap_stage3_memory_is_uint "$bootstrap_stage3_memory_cgroup_current" || return 1
+        [ "$bootstrap_stage3_memory_cgroup_max" -ge \
+            "$bootstrap_stage3_memory_cgroup_current" ] || return 1
+        bootstrap_stage3_memory_cgroup_available=$((
+            (bootstrap_stage3_memory_cgroup_max - bootstrap_stage3_memory_cgroup_current) / 1024))
+    fi
+    bootstrap_stage3_memory_raw=\
+"MemTotal_kib:$bootstrap_stage3_memory_total_kib;MemAvailable_kib:$bootstrap_stage3_memory_available_kib;memory.current_bytes:$bootstrap_stage3_memory_cgroup_current;memory.max_bytes:$bootstrap_stage3_memory_cgroup_max;earlyoom:$bootstrap_stage3_memory_earlyoom_status/$bootstrap_stage3_memory_earlyoom_percent/$bootstrap_stage3_memory_earlyoom_source"
+    if [ "$bootstrap_stage3_memory_available_kib" -le \
+        "$bootstrap_stage3_memory_required_kib" ]; then
+        bootstrap_stage3_memory_status=blocked
+        bootstrap_stage3_memory_reason=linux-host-below-reserve-plus-headroom
+    elif [ "$bootstrap_stage3_memory_cgroup_max" = unavailable ]; then
+        bootstrap_stage3_memory_status=unknown
+        bootstrap_stage3_memory_reason=linux-cgroup-v2-unavailable
+    elif [ "$bootstrap_stage3_memory_cgroup_available" != unlimited ] &&
+        [ "$bootstrap_stage3_memory_cgroup_available" -le \
+            "$bootstrap_stage3_memory_headroom_kib" ]; then
+        bootstrap_stage3_memory_status=blocked
+        bootstrap_stage3_memory_reason=linux-cgroup-below-headroom
+    else
+        bootstrap_stage3_memory_status=ready
+        bootstrap_stage3_memory_reason=linux-headroom-ready
+    fi
+}
+
+bootstrap_stage3_memory_evaluate_darwin() {
+    if [ "$bootstrap_stage3_memory_provider" = darwin-memory-pressure ]; then
+        bootstrap_stage3_memory_is_uint "$bootstrap_stage3_memory_pressure_percent" || return 1
+        bootstrap_stage3_memory_threshold="free-percent>${bootstrap_stage3_memory_darwin_min_percent}"
+        bootstrap_stage3_memory_raw=\
+"memory_pressure_free_percent:$bootstrap_stage3_memory_pressure_percent"
+        if [ "$bootstrap_stage3_memory_pressure_percent" -le \
+            "$bootstrap_stage3_memory_darwin_min_percent" ]; then
+            bootstrap_stage3_memory_status=blocked
+            bootstrap_stage3_memory_reason=darwin-memory-pressure-low
+        else
+            bootstrap_stage3_memory_status=ready
+            bootstrap_stage3_memory_reason=darwin-memory-pressure-ready
+        fi
+        return 0
+    fi
+    for bootstrap_stage3_memory_value in "$bootstrap_stage3_memory_total_bytes" \
+        "$bootstrap_stage3_memory_page_size" "$bootstrap_stage3_memory_free_pages" \
+        "$bootstrap_stage3_memory_inactive_pages" \
+        "$bootstrap_stage3_memory_speculative_pages"; do
+        bootstrap_stage3_memory_is_uint "$bootstrap_stage3_memory_value" || return 1
+    done
+    bootstrap_stage3_memory_available_kib=$((
+        (bootstrap_stage3_memory_free_pages + bootstrap_stage3_memory_inactive_pages +
+         bootstrap_stage3_memory_speculative_pages) * bootstrap_stage3_memory_page_size / 1024))
+    bootstrap_stage3_memory_total_kib=$((bootstrap_stage3_memory_total_bytes / 1024))
+    bootstrap_stage3_memory_raw=\
+"hw.memsize_bytes:$bootstrap_stage3_memory_total_bytes;page_size_bytes:$bootstrap_stage3_memory_page_size;free_pages:$bootstrap_stage3_memory_free_pages;inactive_pages:$bootstrap_stage3_memory_inactive_pages;speculative_pages:$bootstrap_stage3_memory_speculative_pages"
+    bootstrap_stage3_memory_threshold="available>${bootstrap_stage3_memory_headroom_kib}KiB"
+    if [ "$bootstrap_stage3_memory_available_kib" -le \
+        "$bootstrap_stage3_memory_headroom_kib" ]; then
+        bootstrap_stage3_memory_status=blocked
+        bootstrap_stage3_memory_reason=darwin-vm-stat-below-headroom
+    else
+        bootstrap_stage3_memory_status=ready
+        bootstrap_stage3_memory_reason=darwin-vm-stat-ready
+    fi
+}
+
+bootstrap_stage3_memory_evaluate_freebsd() {
+    for bootstrap_stage3_memory_value in "$bootstrap_stage3_memory_total_bytes" \
+        "$bootstrap_stage3_memory_page_size" "$bootstrap_stage3_memory_free_pages" \
+        "$bootstrap_stage3_memory_inactive_pages" "$bootstrap_stage3_memory_cache_pages"; do
+        bootstrap_stage3_memory_is_uint "$bootstrap_stage3_memory_value" || return 1
+    done
+    bootstrap_stage3_memory_available_kib=$((
+        (bootstrap_stage3_memory_free_pages + bootstrap_stage3_memory_inactive_pages +
+         bootstrap_stage3_memory_cache_pages) * bootstrap_stage3_memory_page_size / 1024))
+    bootstrap_stage3_memory_total_kib=$((bootstrap_stage3_memory_total_bytes / 1024))
+    bootstrap_stage3_memory_raw=\
+"hw.physmem_bytes:$bootstrap_stage3_memory_total_bytes;hw.pagesize_bytes:$bootstrap_stage3_memory_page_size;free_pages:$bootstrap_stage3_memory_free_pages;inactive_pages:$bootstrap_stage3_memory_inactive_pages;cache_pages:$bootstrap_stage3_memory_cache_pages"
+    bootstrap_stage3_memory_threshold="advisory-available>${bootstrap_stage3_memory_headroom_kib}KiB"
+    bootstrap_stage3_memory_status=unknown
+    if [ "$bootstrap_stage3_memory_available_kib" -le \
+        "$bootstrap_stage3_memory_headroom_kib" ]; then
+        bootstrap_stage3_memory_reason=freebsd-advisory-low-unvalidated
+    else
+        bootstrap_stage3_memory_reason=freebsd-advisory-ready-unvalidated
+    fi
+}
+
+bootstrap_stage3_memory_sample() {
+    bootstrap_stage3_memory_sample_index=$1
+    bootstrap_stage3_memory_status=unknown
+    bootstrap_stage3_memory_reason=probe-unavailable
+    bootstrap_stage3_memory_threshold=unavailable
+    bootstrap_stage3_memory_total_kib=unavailable
+    bootstrap_stage3_memory_available_kib=unavailable
+    bootstrap_stage3_memory_cgroup_current=unavailable
+    bootstrap_stage3_memory_cgroup_max=unavailable
+    bootstrap_stage3_memory_cgroup_available=unavailable
+    bootstrap_stage3_memory_earlyoom_status=unavailable
+    bootstrap_stage3_memory_earlyoom_percent=unavailable
+    bootstrap_stage3_memory_earlyoom_source=unavailable
+    bootstrap_stage3_memory_pressure_percent=unavailable
+    bootstrap_stage3_memory_raw=unavailable
+
+    bootstrap_stage3_memory_platform=${SIMPLE_BOOTSTRAP_STAGE3_MEMORY_PLATFORM:-$(uname -s 2>/dev/null || echo unknown)}
+    if [ -n "${SIMPLE_BOOTSTRAP_STAGE3_MEMORY_SAMPLE_FIXTURE:-}" ]; then
+        bootstrap_stage3_memory_fixture_sample \
+            "$SIMPLE_BOOTSTRAP_STAGE3_MEMORY_SAMPLE_FIXTURE" \
+            "$bootstrap_stage3_memory_sample_index" || return 1
+    else
+        case "$bootstrap_stage3_memory_platform" in
+            Linux) bootstrap_stage3_memory_linux_sample || return 1 ;;
+            Darwin) bootstrap_stage3_memory_darwin_sample || return 1 ;;
+            FreeBSD) bootstrap_stage3_memory_freebsd_sample || return 1 ;;
+            *)
+                bootstrap_stage3_memory_provider=unsupported
+                bootstrap_stage3_memory_status=unknown
+                bootstrap_stage3_memory_reason=unsupported-platform
+                return 0
+                ;;
+        esac
+    fi
+    case "$bootstrap_stage3_memory_provider" in
+        linux-*) bootstrap_stage3_memory_evaluate_linux || return 1 ;;
+        darwin-*) bootstrap_stage3_memory_evaluate_darwin || return 1 ;;
+        freebsd-*) bootstrap_stage3_memory_evaluate_freebsd || return 1 ;;
+        unsupported) ;;
+        *) return 1 ;;
+    esac
+}
+
+bootstrap_stage3_memory_append_processes() {
+    bootstrap_stage3_memory_process_output=$1
+    bootstrap_stage3_memory_process_fixture=\
+${SIMPLE_BOOTSTRAP_STAGE3_PROCESS_SNAPSHOT:-}
+    bootstrap_stage3_memory_process_tmp=$(mktemp \
+        "${TMPDIR:-/tmp}/stage3-memory-processes.XXXXXX") || return 1
+    if [ -n "$bootstrap_stage3_memory_process_fixture" ]; then
+        [ -f "$bootstrap_stage3_memory_process_fixture" ] &&
+            [ ! -L "$bootstrap_stage3_memory_process_fixture" ] || {
+            rm -f "$bootstrap_stage3_memory_process_tmp"; return 1; }
+        cp "$bootstrap_stage3_memory_process_fixture" \
+            "$bootstrap_stage3_memory_process_tmp" || {
+            rm -f "$bootstrap_stage3_memory_process_tmp"; return 1; }
+        bootstrap_stage3_memory_process_source=fixture
+    elif command -v ps >/dev/null 2>&1; then
+        ps -eo pid=,ppid=,rss=,args= 2>/dev/null | awk '
+            { pid=$1; ppid=$2; rss=$3; $1=""; $2=""; $3=""; sub(/^  */, "");
+              print pid "|" ppid "|" rss "|" $0 }
+        ' >"$bootstrap_stage3_memory_process_tmp" || {
+            rm -f "$bootstrap_stage3_memory_process_tmp"; return 1; }
+        bootstrap_stage3_memory_process_source=ps
+    else
+        rm -f "$bootstrap_stage3_memory_process_tmp"
+        return 1
+    fi
+    bootstrap_stage3_memory_process_count=0
+    bootstrap_stage3_memory_bootstrap_count=0
+    bootstrap_stage3_memory_native_count=0
+    bootstrap_stage3_memory_replay_count=0
+    while IFS='|' read -r bootstrap_stage3_memory_pid \
+        bootstrap_stage3_memory_ppid bootstrap_stage3_memory_rss \
+        bootstrap_stage3_memory_cmd; do
+        bootstrap_stage3_memory_is_uint "$bootstrap_stage3_memory_pid" &&
+            bootstrap_stage3_memory_is_uint "$bootstrap_stage3_memory_ppid" &&
+            bootstrap_stage3_memory_is_uint "$bootstrap_stage3_memory_rss" || continue
+        case "$bootstrap_stage3_memory_cmd" in
+            *simple*replay*missing-build-log.json*)
+                bootstrap_stage3_memory_kind=replay-chain
+                bootstrap_stage3_memory_replay_count=$((bootstrap_stage3_memory_replay_count + 1)) ;;
+            *scripts/bootstrap/bootstrap-from-scratch.sh*)
+                bootstrap_stage3_memory_kind=bootstrap
+                bootstrap_stage3_memory_bootstrap_count=$((bootstrap_stage3_memory_bootstrap_count + 1)) ;;
+            *simple*native-build*)
+                bootstrap_stage3_memory_kind=native-build
+                bootstrap_stage3_memory_native_count=$((bootstrap_stage3_memory_native_count + 1)) ;;
+            *) continue ;;
+        esac
+        bootstrap_stage3_memory_process_count=$((bootstrap_stage3_memory_process_count + 1))
+        bootstrap_stage3_memory_cmd_safe=$(bootstrap_stage3_memory_sanitize_text \
+            "$bootstrap_stage3_memory_cmd")
+        {
+            printf 'process_%s_kind=%s\n' "$bootstrap_stage3_memory_process_count" \
+                "$bootstrap_stage3_memory_kind"
+            printf 'process_%s_pid=%s\n' "$bootstrap_stage3_memory_process_count" \
+                "$bootstrap_stage3_memory_pid"
+            printf 'process_%s_ppid=%s\n' "$bootstrap_stage3_memory_process_count" \
+                "$bootstrap_stage3_memory_ppid"
+            printf 'process_%s_rss_kib=%s\n' "$bootstrap_stage3_memory_process_count" \
+                "$bootstrap_stage3_memory_rss"
+            printf 'process_%s_cmd=%s\n' "$bootstrap_stage3_memory_process_count" \
+                "$bootstrap_stage3_memory_cmd_safe"
+        } >>"$bootstrap_stage3_memory_process_output" || {
+            rm -f "$bootstrap_stage3_memory_process_tmp"; return 1; }
+    done <"$bootstrap_stage3_memory_process_tmp"
+    rm -f "$bootstrap_stage3_memory_process_tmp"
+    {
+        echo 'process_scan_status=available'
+        printf 'process_scan_source=%s\n' "$bootstrap_stage3_memory_process_source"
+        printf 'concurrent_process_count=%s\n' "$bootstrap_stage3_memory_process_count"
+        printf 'concurrent_bootstrap_count=%s\n' "$bootstrap_stage3_memory_bootstrap_count"
+        printf 'concurrent_native_build_count=%s\n' "$bootstrap_stage3_memory_native_count"
+        printf 'runaway_replay_chain_count=%s\n' "$bootstrap_stage3_memory_replay_count"
+    } >>"$bootstrap_stage3_memory_process_output"
+}
+
+bootstrap_stage3_memory_emit_sample() {
+    bootstrap_stage3_memory_emit_file=$1
+    bootstrap_stage3_memory_emit_index=$2
+    {
+        printf 'sample_%s_provider=%s\n' "$bootstrap_stage3_memory_emit_index" \
+            "$bootstrap_stage3_memory_provider"
+        printf 'sample_%s_status=%s\n' "$bootstrap_stage3_memory_emit_index" \
+            "$bootstrap_stage3_memory_status"
+        printf 'sample_%s_reason=%s\n' "$bootstrap_stage3_memory_emit_index" \
+            "$bootstrap_stage3_memory_reason"
+        printf 'sample_%s_threshold=%s\n' "$bootstrap_stage3_memory_emit_index" \
+            "$bootstrap_stage3_memory_threshold"
+        printf 'sample_%s_raw=%s\n' "$bootstrap_stage3_memory_emit_index" \
+            "$(bootstrap_stage3_memory_sanitize_text "$bootstrap_stage3_memory_raw")"
+        printf 'sample_%s_total_kib=%s\n' "$bootstrap_stage3_memory_emit_index" \
+            "$bootstrap_stage3_memory_total_kib"
+        printf 'sample_%s_available_kib=%s\n' "$bootstrap_stage3_memory_emit_index" \
+            "$bootstrap_stage3_memory_available_kib"
+        printf 'sample_%s_cgroup_current_bytes=%s\n' "$bootstrap_stage3_memory_emit_index" \
+            "$bootstrap_stage3_memory_cgroup_current"
+        printf 'sample_%s_cgroup_max_bytes=%s\n' "$bootstrap_stage3_memory_emit_index" \
+            "$bootstrap_stage3_memory_cgroup_max"
+        printf 'sample_%s_cgroup_available_kib=%s\n' "$bootstrap_stage3_memory_emit_index" \
+            "$bootstrap_stage3_memory_cgroup_available"
+        printf 'sample_%s_earlyoom_status=%s\n' "$bootstrap_stage3_memory_emit_index" \
+            "$bootstrap_stage3_memory_earlyoom_status"
+        printf 'sample_%s_earlyoom_percent=%s\n' "$bootstrap_stage3_memory_emit_index" \
+            "$bootstrap_stage3_memory_earlyoom_percent"
+        printf 'sample_%s_earlyoom_source=%s\n' "$bootstrap_stage3_memory_emit_index" \
+            "$bootstrap_stage3_memory_earlyoom_source"
+        printf 'sample_%s_pressure_percent=%s\n' "$bootstrap_stage3_memory_emit_index" \
+            "$bootstrap_stage3_memory_pressure_percent"
+    } >>"$bootstrap_stage3_memory_emit_file"
+}
+
+bootstrap_stage3_memory_admission_preflight() {
+    [ "$#" -eq 1 ] || return 2
+    bootstrap_stage3_memory_evidence=$1
+    bootstrap_stage3_memory_safe_evidence_path "$bootstrap_stage3_memory_evidence" || return 2
+    bootstrap_stage3_memory_interval=\
+${SIMPLE_BOOTSTRAP_STAGE3_MEMORY_SAMPLE_INTERVAL_SECONDS:-2}
+    bootstrap_stage3_memory_headroom_mib=\
+${SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HEADROOM_MIB:-2048}
+    bootstrap_stage3_memory_darwin_min_percent=\
+${SIMPLE_BOOTSTRAP_DARWIN_MEMORY_MIN_PERCENT:-15}
+    bootstrap_stage3_memory_is_uint "$bootstrap_stage3_memory_interval" &&
+        bootstrap_stage3_memory_is_uint "$bootstrap_stage3_memory_headroom_mib" &&
+        bootstrap_stage3_memory_is_uint "$bootstrap_stage3_memory_darwin_min_percent" || return 2
+    [ "$bootstrap_stage3_memory_interval" -le 60 ] &&
+        [ "$bootstrap_stage3_memory_headroom_mib" -gt 0 ] &&
+        [ "$bootstrap_stage3_memory_darwin_min_percent" -le 99 ] || return 2
+    bootstrap_stage3_memory_headroom_kib=$((bootstrap_stage3_memory_headroom_mib * 1024))
+    bootstrap_stage3_memory_tmp="${bootstrap_stage3_memory_evidence}.tmp.$$"
+    [ ! -e "$bootstrap_stage3_memory_tmp" ] || return 2
+    umask 077
+    {
+        echo 'schema=simple-bootstrap-stage3-memory-admission-v2'
+        echo 'stage=stage3'
+        echo 'sample_count=3'
+        printf 'headroom_mib=%s\n' "$bootstrap_stage3_memory_headroom_mib"
+        printf 'sample_interval_seconds=%s\n' "$bootstrap_stage3_memory_interval"
+    } >"$bootstrap_stage3_memory_tmp" || return 2
+
+    bootstrap_stage3_memory_final_status=ready
+    bootstrap_stage3_memory_final_reason=all-samples-ready
+    bootstrap_stage3_memory_final_provider=
+    bootstrap_stage3_memory_i=1
+    while [ "$bootstrap_stage3_memory_i" -le 3 ]; do
+        if bootstrap_stage3_memory_sample "$bootstrap_stage3_memory_i"; then :; else
+            bootstrap_stage3_memory_provider=unparseable
+            bootstrap_stage3_memory_status=unknown
+            bootstrap_stage3_memory_reason=provider-unparseable
+            bootstrap_stage3_memory_threshold=unavailable
+        fi
+        bootstrap_stage3_memory_emit_sample "$bootstrap_stage3_memory_tmp" \
+            "$bootstrap_stage3_memory_i" || { rm -f "$bootstrap_stage3_memory_tmp"; return 2; }
+        if [ -z "$bootstrap_stage3_memory_final_provider" ]; then
+            bootstrap_stage3_memory_final_provider=$bootstrap_stage3_memory_provider
+        elif [ "$bootstrap_stage3_memory_final_provider" != \
+            "$bootstrap_stage3_memory_provider" ]; then
+            bootstrap_stage3_memory_final_provider=mixed
+        fi
+        if [ "$bootstrap_stage3_memory_status" = blocked ]; then
+            bootstrap_stage3_memory_final_status=blocked
+            bootstrap_stage3_memory_final_reason=$bootstrap_stage3_memory_reason
+        elif [ "$bootstrap_stage3_memory_status" = unknown ] &&
+            [ "$bootstrap_stage3_memory_final_status" = ready ]; then
+            bootstrap_stage3_memory_final_status=unknown
+            bootstrap_stage3_memory_final_reason=$bootstrap_stage3_memory_reason
+        fi
+        if [ "$bootstrap_stage3_memory_i" -eq 1 ] &&
+            [ "$bootstrap_stage3_memory_interval" -gt 0 ]; then
+            sleep "$bootstrap_stage3_memory_interval"
+        elif [ "$bootstrap_stage3_memory_i" -eq 2 ]; then
+            bootstrap_stage3_memory_append_processes \
+                "$bootstrap_stage3_memory_tmp" || {
+                {
+                    echo 'process_scan_status=unavailable'
+                    echo 'process_scan_source=unavailable'
+                    echo 'concurrent_process_count=0'
+                    echo 'concurrent_bootstrap_count=0'
+                    echo 'concurrent_native_build_count=0'
+                    echo 'runaway_replay_chain_count=0'
+                } >>"$bootstrap_stage3_memory_tmp"
+            }
+        fi
+        bootstrap_stage3_memory_i=$((bootstrap_stage3_memory_i + 1))
+    done
+    {
+        printf 'provider=%s\n' "$bootstrap_stage3_memory_final_provider"
+        printf 'status=%s\n' "$bootstrap_stage3_memory_final_status"
+        printf 'reason=%s\n' "$bootstrap_stage3_memory_final_reason"
+        echo 'runner_recorded=no'
+    } >>"$bootstrap_stage3_memory_tmp" || {
+        rm -f "$bootstrap_stage3_memory_tmp"; return 2; }
+    mv "$bootstrap_stage3_memory_tmp" "$bootstrap_stage3_memory_evidence" || return 2
+    case "$bootstrap_stage3_memory_final_status" in
+        ready) return 0 ;;
+        unknown)
+            echo "warning: Stage 3 memory admission unknown ($bootstrap_stage3_memory_final_reason); proceeding with evidence" >&2
+            return 0
+            ;;
+        blocked) return 75 ;;
+        *) return 2 ;;
+    esac
+}
+
+bootstrap_stage3_memory_record_runner() {
+    [ "$#" -eq 2 ] || return 1
+    bootstrap_stage3_memory_evidence=$1
+    bootstrap_stage3_memory_runner_pid=$2
+    bootstrap_stage3_memory_safe_evidence_path "$bootstrap_stage3_memory_evidence" &&
+        [ -f "$bootstrap_stage3_memory_evidence" ] || return 1
+    bootstrap_stage3_memory_is_uint "$bootstrap_stage3_memory_runner_pid" || return 1
+    [ "$bootstrap_stage3_memory_runner_pid" -gt 0 ] || return 1
+    [ "$(bootstrap_stage3_manifest_value runner_recorded \
+        "$bootstrap_stage3_memory_evidence")" = no ] || return 1
+    bootstrap_stage3_memory_runner_record=$(ps -p "$bootstrap_stage3_memory_runner_pid" \
+        -o rss= -o args= 2>/dev/null || true)
+    bootstrap_stage3_memory_runner_rss=$(printf '%s\n' \
+        "$bootstrap_stage3_memory_runner_record" | awk '{print $1; exit}')
+    bootstrap_stage3_memory_is_uint "$bootstrap_stage3_memory_runner_rss" ||
+        bootstrap_stage3_memory_runner_rss=unavailable
+    bootstrap_stage3_memory_runner_cmd=$(printf '%s\n' \
+        "$bootstrap_stage3_memory_runner_record" | sed 's/^[[:space:]]*[0-9][0-9]*[[:space:]]*//')
+    [ -n "$bootstrap_stage3_memory_runner_cmd" ] ||
+        bootstrap_stage3_memory_runner_cmd=unavailable
+    bootstrap_stage3_memory_runner_cmd=$(bootstrap_stage3_memory_sanitize_text \
+        "$bootstrap_stage3_memory_runner_cmd")
+    bootstrap_stage3_memory_runner_tmp="${bootstrap_stage3_memory_evidence}.runner.$$"
+    sed 's/^runner_recorded=no$/runner_recorded=yes/' \
+        "$bootstrap_stage3_memory_evidence" >"$bootstrap_stage3_memory_runner_tmp" || return 1
+    {
+        printf 'stage3_runner_pid=%s\n' "$bootstrap_stage3_memory_runner_pid"
+        printf 'stage3_runner_rss_kib=%s\n' "$bootstrap_stage3_memory_runner_rss"
+        printf 'stage3_runner_cmd=%s\n' "$bootstrap_stage3_memory_runner_cmd"
+        echo 'evidence_finalized=yes'
+    } >>"$bootstrap_stage3_memory_runner_tmp" || {
+        rm -f "$bootstrap_stage3_memory_runner_tmp"; return 1; }
+    mv "$bootstrap_stage3_memory_runner_tmp" "$bootstrap_stage3_memory_evidence"
+}
+
+bootstrap_stage3_memory_verify_evidence() {
+    [ "$#" -eq 1 ] || return 1
+    bootstrap_stage3_memory_verify=$1
+    [ -f "$bootstrap_stage3_memory_verify" ] &&
+        [ ! -L "$bootstrap_stage3_memory_verify" ] &&
+        [ "$(bootstrap_stage3_canonical_file "$bootstrap_stage3_memory_verify")" = \
+            "$bootstrap_stage3_memory_verify" ] || return 1
+    for bootstrap_stage3_memory_key in schema stage sample_count provider status \
+        reason runner_recorded stage3_runner_pid stage3_runner_rss_kib \
+        stage3_runner_cmd evidence_finalized process_scan_status \
+        process_scan_source concurrent_process_count concurrent_bootstrap_count \
+        concurrent_native_build_count runaway_replay_chain_count; do
+        bootstrap_stage3_manifest_value "$bootstrap_stage3_memory_key" \
+            "$bootstrap_stage3_memory_verify" >/dev/null || return 1
+    done
+    [ "$(bootstrap_stage3_manifest_value schema "$bootstrap_stage3_memory_verify")" = \
+        simple-bootstrap-stage3-memory-admission-v2 ] &&
+        [ "$(bootstrap_stage3_manifest_value stage "$bootstrap_stage3_memory_verify")" = stage3 ] &&
+        [ "$(bootstrap_stage3_manifest_value sample_count "$bootstrap_stage3_memory_verify")" = 3 ] &&
+        [ "$(bootstrap_stage3_manifest_value runner_recorded "$bootstrap_stage3_memory_verify")" = yes ] &&
+        [ "$(bootstrap_stage3_manifest_value evidence_finalized "$bootstrap_stage3_memory_verify")" = yes ] || return 1
+    bootstrap_stage3_memory_verify_final=$(bootstrap_stage3_manifest_value \
+        status "$bootstrap_stage3_memory_verify") || return 1
+    bootstrap_stage3_memory_verify_derived=ready
+    for bootstrap_stage3_memory_index in 1 2 3; do
+        for bootstrap_stage3_memory_suffix in provider status reason threshold raw; do
+            bootstrap_stage3_manifest_value \
+                "sample_${bootstrap_stage3_memory_index}_${bootstrap_stage3_memory_suffix}" \
+                "$bootstrap_stage3_memory_verify" >/dev/null || return 1
+        done
+        bootstrap_stage3_memory_sample_status=$(bootstrap_stage3_manifest_value \
+            "sample_${bootstrap_stage3_memory_index}_status" \
+            "$bootstrap_stage3_memory_verify") || return 1
+        case "$bootstrap_stage3_memory_sample_status" in
+            ready) ;;
+            unknown) bootstrap_stage3_memory_verify_derived=unknown ;;
+            blocked|*) return 1 ;;
+        esac
+    done
+    [ "$bootstrap_stage3_memory_verify_final" = \
+        "$bootstrap_stage3_memory_verify_derived" ] || return 1
+    case "$(bootstrap_stage3_manifest_value status "$bootstrap_stage3_memory_verify")" in
+        ready|unknown) ;;
+        *) return 1 ;;
+    esac
+    bootstrap_stage3_memory_is_uint "$(bootstrap_stage3_manifest_value \
+        stage3_runner_pid "$bootstrap_stage3_memory_verify")" &&
+        [ "$(bootstrap_stage3_manifest_value stage3_runner_pid \
+            "$bootstrap_stage3_memory_verify")" -gt 0 ]
+}
