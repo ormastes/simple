@@ -31,6 +31,11 @@ fn mir_stmt_local_id_value(local: LocalId) -> i64:
 fn mir_hir_stmt_kind_disc(k: HirStmtKind) -> i64:
     rt_enum_discriminant(k)
 
+fn mir_stmt_let_init_value(kind: HirStmtKind, fallback: HirExpr) -> HirExpr:
+    match kind:
+        case HirStmtKind.Let(_, _, init): init
+        case _: fallback
+
 # Rank-4 caller-of-lower_expr probe (stage3 self-host blocker, 2026-08-05:
 # doc/08_tracking/bug/stage3_selfhost_nil_receiver_sigill_in_lower_expr_caller_2026-08-05.md).
 # lower_expr itself was proven to complete cleanly on every crashing run to
@@ -604,7 +609,7 @@ impl MirLowering:
                 val stmt_kind_value: HirStmtKind = stmt.kind
                 val fallback_type = HirType(kind: HirTypeKind.Unit, span: Span.empty())
                 val fallback_expr = HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: fallback_type, span: span)
-                val let_disc = mir_hir_stmt_kind_disc(HirStmtKind.FlatLet(SymbolId(id: -1), fallback_expr))
+                val let_disc = mir_hir_stmt_kind_disc(HirStmtKind.Let(SymbolId(id: -1), fallback_type, fallback_expr))
                 # Decode the three-slot Let payload exactly once. Repeated
                 # enum matches on this native lane can return the `Some`
                 # discriminator itself as the nullable HirType payload, then
@@ -613,8 +618,8 @@ impl MirLowering:
                     val let_payload: i64 = rt_enum_payload(stmt_kind_value)
                     val let_symbol: SymbolId = rt_tuple_get(let_payload, 0)
                     val let_symbol_id = mir_stmt_symbol_id_value(let_symbol)
-                    val let_type = HirType(kind: HirTypeKind.Infer(0, 0), span: span)
-                    val let_init: HirExpr = rt_tuple_get(let_payload, 1)
+                    val let_type: HirType = rt_tuple_get(let_payload, 1)
+                    val let_init = mir_stmt_let_init_value(stmt_kind_value, fallback_expr)
 
                     if let_symbol_id >= 0:
                         val symbol_value_id = let_symbol_id
