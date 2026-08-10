@@ -1251,15 +1251,26 @@ class PureDatabase:
                 ti = _find_idx(self._tbl_names, table)
             if ti < 0:
                 return Err(DbError.QueryFailed(sql: sql, message: "no such table: {table}"))
-            self._ensure_pk_map(ti)
-            val key_txt = params[0].to_text()
-            val pkm = self._tbl_pk_map[ti]
-            if pkm.has(key_txt):
-                val tidx = pkm[key_txt]
-                val typed = self._tbl_typed[ti]
-                if tidx >= 0 and tidx < typed.len() as i32:
-                    rows.push(DbRow(columns: self._tbl_cols[ti], values: typed[tidx]))
-            return Ok(rows)
+            # This fast path is only correct when the table really has a primary
+            # key on a column named "id" — the pk map is keyed by that column.
+            # Without a declared PK the map stays empty, so taking this path
+            # would silently return zero rows; fall through to the full SELECT
+            # instead. See pure_db_spec "supports parameterized queries".
+            var pk_is_id = false
+            if ti < self._tbl_pk_col.len() as i32:
+                val pk_ci0 = self._tbl_pk_col[ti]
+                if pk_ci0 >= 0 and pk_ci0 < self._tbl_cols[ti].len() as i32:
+                    pk_is_id = self._tbl_cols[ti][pk_ci0].to_lower() == "id"
+            if pk_is_id:
+                self._ensure_pk_map(ti)
+                val key_txt = params[0].to_text()
+                val pkm = self._tbl_pk_map[ti]
+                if pkm.has(key_txt):
+                    val tidx = pkm[key_txt]
+                    val typed = self._tbl_typed[ti]
+                    if tidx >= 0 and tidx < typed.len() as i32:
+                        rows.push(DbRow(columns: self._tbl_cols[ti], values: typed[tidx]))
+                return Ok(rows)
         # ── SELECT result cache: skip parse+scan for repeated queries ──
         if params.len() == 0:
             _reset_param_idx()
@@ -1354,6 +1365,10 @@ class PureDatabase:
         self._fts_columns[ti] = selected_cols
         self._tbl_fts_doc_ids[ti] = doc_ids
         self._tbl_fts_next_doc_id[ti] = visible.len()
+        # See _ensure_fts_index_typed: FTS column metadata is persisted, so a
+        # rebuild must mark the db dirty for checkpoint()/close() to write it.
+        if self._path != "":
+            self._dirty = true
 
     me _ensure_fts_index_typed(ti: i32, col_names: [text], selected_cols: [text], typed_rows: [[DbValue]], visible_indices: [i32]):
         if ti < 0 or ti >= self._fts_indexes.len() as i32:
@@ -1375,6 +1390,11 @@ class PureDatabase:
         self._fts_columns[ti] = selected_cols
         self._tbl_fts_doc_ids[ti] = doc_ids
         self._tbl_fts_next_doc_id[ti] = visible_indices.len()
+        # FTS column metadata is part of the on-disk format ("fts|<table>|<cols>");
+        # building the index changes persistable state, so mark the db dirty or
+        # checkpoint()/close() will skip the write and the metadata is lost.
+        if self._path != "":
+            self._dirty = true
 
     me search(table: text, columns: [text], query: text, algorithm: PureSearchAlgorithm, limit: i64) -> Result<[PureSearchResult], DbError>:
         if not self.is_open:
@@ -2663,7 +2683,7 @@ class PureDatabase:
                             val inner = _unwrap_as_expr(cexpr)
                             val col_alias = _get_as_alias(cexpr)
                             if inner.kind == SqlExprKind.Column:
-                                val idx = _find_idx(col_names, inner.value)
+                                val idx = _resolve_col_in_names(col_names, inner.value)
                                 if col_alias != "":
                                     out_cols.push(col_alias)
                                 else:
@@ -3022,7 +3042,9 @@ fn _project_row(sel: SqlSelect, col_names: [text], row_vals: [DbValue]) -> DbRow
         val inner = _unwrap_as_expr(expr)
         val col_alias = _get_as_alias(expr)
         if inner.kind == SqlExprKind.Column:
-            val idx = _find_idx(col_names, inner.value)
+            # Qualified select-list refs ("products.name") must resolve to the
+            # bare column, otherwise the projection silently yields NULL.
+            val idx = _resolve_col_in_names(col_names, inner.value)
             if col_alias != "":
                 proj_cols.push(col_alias)
             else:

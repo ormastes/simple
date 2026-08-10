@@ -55,9 +55,30 @@ fn _build_col_map(cols: [text]) -> Dict<text, i32>:
         i = i + 1
     m
 
+# Resolve a (possibly qualified) column reference against a bare-name column
+# list. Row column lists — including the combined list a JOIN builds — hold bare
+# names, so "products.id" must fall back to "id".
+fn _resolve_col_in_names(names: [text], name: text) -> i32:
+    val direct = _find_idx(names, name)
+    if direct >= 0:
+        return direct
+    val dot = name.last_index_of(".")
+    if dot >= 0 and dot + 1 < name.len() as i32:
+        return _find_idx(names, name.slice(dot + 1, name.len() as i32))
+    -1
+
 fn _col_idx(m: Dict<text, i32>, name: text) -> i32:
     if m.has(name):
         return m[name]
+    # Qualified reference ("table.column"): column maps are keyed by bare column
+    # names (including the combined map a JOIN builds), so fall back to the part
+    # after the last dot. Without this, `ON products.id = orders.product_id` and
+    # `SELECT products.name` resolve to nothing and silently yield NULL / no rows.
+    val dot = name.last_index_of(".")
+    if dot >= 0 and dot + 1 < name.len() as i32:
+        val bare = name.slice(dot + 1, name.len() as i32)
+        if m.has(bare):
+            return m[bare]
     -1
 
 # ── Row serialization ────────────────────────────────────────────────────────
@@ -778,7 +799,7 @@ fn _eval_expr(expr: SqlExpr, cols: [text], vals: [DbValue], params: [DbValue]) -
         val rv = _eval_expr(expr.right, cols, vals, params)
         return _apply_binop(expr.value, lv, rv)
     if expr.kind == SqlExprKind.Column:
-        val idx = _find_idx(cols, expr.value)
+        val idx = _resolve_col_in_names(cols, expr.value)
         if idx >= 0:
             return vals[idx]
         return DbValue.Null
