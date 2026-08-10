@@ -1,6 +1,6 @@
 # DimSolver dimension-mismatch error path aborts: `Span` has no `merge`
 
-- **Status**: OPEN (RED spec left in place)
+- **Status**: FIXED 2026-08-10 — all 6 sites now call the free `span_merge`; both spec legs 20/20.
 - **Product code**: `src/compiler/30.types/dim_constraints.spl:75,104,111,140,142,144`
 - **Spec**: `test/unit/compiler/type_infer/type_infer_correctness_spec.spl`
   → `Dimension constraint solving` → `accepts matching dimensions and rejects a mismatch`

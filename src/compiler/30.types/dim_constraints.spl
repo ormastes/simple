@@ -11,6 +11,12 @@
 
 use compiler.hir.hir.{DimExpr, DimExprKind, HirType, DeviceType}
 use compiler.common.diagnostics.span.{Span}
+# `DimExpr.span` carries the LEXER `Span` (field `end_pos`), not the diagnostics
+# `Span` (field `end`) named above. The two are distinct structs with colliding
+# member names, so the former `e1.span.merge(e2.span)` bound the diagnostics
+# `Span::merge` by name and aborted at runtime. Merge lexer spans through the
+# lexer module's free function instead.
+use compiler.frontend.core.lexer_types.{span_merge}
 use dim_constraints_types.*
 
 struct DimSolver:
@@ -72,7 +78,7 @@ impl DimSolver:
                 if v1 == v2:
                     Ok(e1)
                 else:
-                    Err(DimError.mismatch(e1, e2, e1.span.merge(e2.span)))
+                    Err(DimError.mismatch(e1, e2, span_merge(e1.span, e2.span)))
 
             # Variable bindings
             case (Var(id1), _):
@@ -101,14 +107,14 @@ impl DimSolver:
                 if n1 == n2:
                     Ok(e1)
                 else:
-                    Err(DimError.mismatch(e1, e2, e1.span.merge(e2.span)))
+                    Err(DimError.mismatch(e1, e2, span_merge(e1.span, e2.span)))
 
             # Const params
             case (ConstParam(n1), ConstParam(n2)):
                 if n1 == n2:
                     Ok(e1)
                 else:
-                    Err(DimError.mismatch(e1, e2, e1.span.merge(e2.span)))
+                    Err(DimError.mismatch(e1, e2, span_merge(e1.span, e2.span)))
 
             # Arithmetic - try to evaluate
             case (Add(l1, r1), Add(l2, r2)):
@@ -137,11 +143,11 @@ impl DimSolver:
                                 if v1 == v2:
                                     Ok(DimExpr.literal(v1, e1.span))
                                 else:
-                                    Err(DimError.mismatch(e1, e2, e1.span.merge(e2.span)))
+                                    Err(DimError.mismatch(e1, e2, span_merge(e1.span, e2.span)))
                             case nil:
-                                Err(DimError.mismatch(e1, e2, e1.span.merge(e2.span)))
+                                Err(DimError.mismatch(e1, e2, span_merge(e1.span, e2.span)))
                     case nil:
-                        Err(DimError.mismatch(e1, e2, e1.span.merge(e2.span)))
+                        Err(DimError.mismatch(e1, e2, span_merge(e1.span, e2.span)))
 
     me bind_var(id: i64, expr: DimExpr):
         """Bind a variable to an expression."""
@@ -183,6 +189,10 @@ impl DimSolver:
 
     fn try_eval(expr: DimExpr) -> i64?:
         """Try to evaluate a dimension expression to a constant."""
+        # Normalise through the substitution first, exactly as `unify`,
+        # `occurs_in` and `solve_constraint` do. Without this a solved
+        # dimension variable falls through to `case _: nil` and never
+        # evaluates, even though the substitution already binds it.
         match expr.kind:
             case Literal(v): Some(v)
             case Add(l, r):
