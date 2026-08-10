@@ -931,7 +931,35 @@ int spl_file_exists(const char* path) {
     return 0;
 }
 
-int rt_file_is_regular_no_follow(const char* path) {
+/* ---------------------------------------------------------------------------
+ * `text` extern ABI helper.
+ *
+ * The compiler emits TWO machine words for every `text` extern argument --
+ * (ptr, len) -- see RuntimeFuncSpec in
+ * src/compiler_rust/compiler/src/codegen/runtime_sffi.rs and the decomposition
+ * in src/compiler/50.mir/text_extern_abi.spl. A Simple `text` is NOT
+ * NUL-terminated: a `text` produced by slicing or concatenation points into
+ * the middle of a larger buffer. Any rt_* definition that takes a single
+ * `const char*` therefore reads past the end of the value, which is exactly
+ * how rt_file_is_char_device reported /dev/zero as not-a-character-device
+ * (fixed 81fca37cdd4).
+ *
+ * Every rt_* entry point taking a path must copy through this helper before
+ * calling libc. Returns 0 when the text cannot be represented as a path.
+ * ------------------------------------------------------------------------- */
+#define RT_TEXT_PATH_MAX 4096
+static int rt_text_arg_to_path(const uint8_t* ptr, uint64_t len, char* buf, size_t buf_size) {
+    if (!ptr && len != 0) return 0;
+    if (len >= (uint64_t)buf_size) return 0;
+    if (len != 0) memcpy(buf, ptr, (size_t)len);
+    buf[(size_t)len] = '\0';
+    return 1;
+}
+
+int rt_file_is_regular_no_follow(const uint8_t* path_ptr, uint64_t path_len) {
+    char path_buf[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path_buf, sizeof(path_buf))) return 0;
+    const char* path = path_buf;
 #if defined(_WIN32)
     if (!path) return 0;
     int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
@@ -1450,8 +1478,18 @@ void spl_prefetch_wait(void) {}
  * ================================================================ */
 
 const char* rt_file_read_text(const char* path) { return spl_file_read(path); }
-int         rt_file_exists(const char* path)    { return spl_file_exists(path); }
-int         rt_dir_exists(const char* path)     { return rt_is_dir(path) ? 1 : 0; }
+/* (ptr, len): see rt_text_arg_to_path above -- a Simple `text` is not
+ * NUL-terminated and the compiler passes it as a pair. */
+int         rt_file_exists(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
+    return spl_file_exists(path);
+}
+int         rt_dir_exists(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
+    return rt_is_dir(path) ? 1 : 0;
+}
 int         rt_file_write(const char* path, const char* content) {
     if (!path) return 0;
     FILE* f = fopen(path, "w");

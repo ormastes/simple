@@ -7583,14 +7583,38 @@ int64_t rt_file_read_text_rv(int64_t path_value) {
     return result;
 }
 
-int rt_file_exists(const char* path) {
-    if (!path) return 0;
+/* ---------------------------------------------------------------------------
+ * `text` extern ABI helper -- mirrors rt_text_arg_to_path in runtime.c.
+ *
+ * The compiler emits TWO machine words for every `text` extern argument,
+ * (ptr, len): see RuntimeFuncSpec in
+ * src/compiler_rust/compiler/src/codegen/runtime_sffi.rs and the decomposition
+ * in src/compiler/50.mir/text_extern_abi.spl. A Simple `text` is NOT
+ * NUL-terminated, so a `const char*` parameter reads past the end of the value.
+ * That is the rt_file_is_char_device defect (fixed 81fca37cdd4); every rt_*
+ * path entry point must copy through this helper before calling libc.
+ * ------------------------------------------------------------------------- */
+#define RT_TEXT_PATH_MAX 4096
+static int rt_text_arg_to_path(const uint8_t* ptr, uint64_t len, char* buf, size_t buf_size) {
+    if (!ptr && len != 0) return 0;
+    if (len >= (uint64_t)buf_size) return 0;
+    if (len != 0) memcpy(buf, ptr, (size_t)len);
+    buf[(size_t)len] = '\0';
+    return 1;
+}
+
+int rt_file_exists(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
     FILE* f = fopen(path, "r");
     if (f) { fclose(f); return 1; }
     return 0;
 }
 
-int rt_file_is_regular_no_follow(const char* path) {
+int rt_file_is_regular_no_follow(const uint8_t* path_ptr, uint64_t path_len) {
+    char path_buf[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path_buf, sizeof(path_buf))) return 0;
+    const char* path = path_buf;
 #if defined(_WIN32)
     if (!path) return 0;
     int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
@@ -8616,7 +8640,10 @@ int64_t rt_file_atomic_write(int64_t path_value, int64_t content_value) {
     if (slash) {
         if (slash == parent || (slash == parent + 2 && parent[1] == ':')) slash[1] = '\0';
         else *slash = '\0';
-        if (!rt_dir_exists(parent) && !rt_dir_create(parent, true)) {
+        /* C-internal caller: `parent` IS a real NUL-terminated C string, so it
+         * must be passed through the (ptr, len) `text` extern ABI explicitly. */
+        if (!rt_dir_exists((const uint8_t*)parent, (uint64_t)strlen(parent)) &&
+            !rt_dir_create(parent, true)) {
             free(parent);
             free(path);
             return 0;
@@ -9166,7 +9193,9 @@ int rt_dir_delete(const char* path) {
     return rt_dir_remove_all(path) ? 1 : 0;
 }
 
-int rt_dir_exists(const char* path) {
+int rt_dir_exists(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
     return rt_is_dir(path) ? 1 : 0;
 }
 
