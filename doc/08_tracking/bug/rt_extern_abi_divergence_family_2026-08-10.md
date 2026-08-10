@@ -208,7 +208,117 @@ answer, so no caller could tell an ABI defect from a missing file.
   compiler never calls it. It keeps its C-string signature over the shared
   worker, and it was never in the baseline.
 
-### Two gaps in the gate, found while closing this
+## Return-type divergence closed, and the gate extended (2026-08-10, part 2)
+
+`rt_file_read_text` was the last known open row: the compiler declares
+`RuntimeFuncSpec::new("rt_file_read_text", &[I64, I64], &[I64])`
+(`runtime_sffi.rs:1852`) -- the result is a **RuntimeValue** -- while both C
+copies returned a raw `const char*` straight out of `spl_file_read`.
+
+**The compiler's declaration is the authority for RETURNS as well as
+parameters,** for the same reason: it is the only layer that all three
+implementations are compiled against, the canonical Rust definition
+(`file_io/file_ops.rs:253 -> RuntimeValue`) already agrees with it, and every
+Simple-side caller spells the result as `text`. The C copies were out of step.
+
+### Reproduction
+
+Against the real translation units (`runtime.c`, `runtime_native.c`,
+`runtime_legacy_core.c`, `-z muldefs`), calling through the ABI the compiler
+emits -- `int64_t rt_file_read_text(const uint8_t*, uint64_t)` -- with a
+**non-NUL-terminated** path buffer padded with `X`:
+
+```
+before:  [simple-runtime][error] rejected invalid array handle before dereference;
+                                 probable compiler/FFI ABI mismatch (value_bits=0x00005fcc10dbb530)
+         raw=0x00005fcc10dbb530   read_len=0        <- a 4-byte file read as EMPTY
+         control (rt_string_new "hello") = 0x...551  len=5
+```
+
+The returned word is a bare heap address with no tag; the runtime's own handle
+validator says so. `read_len=0` is the reason this stayed silent: it is also
+the answer for an empty file and for a missing one.
+
+After the fix, all three outcomes are distinguishable, in **all three C link
+orders** (muldefs makes link order pick the winner):
+
+| case | raw | class | len |
+|---|---|---|---|
+| existing file | `0x...541` | str | 4 (`abc\n`) |
+| empty file | `0x...e31` | str | 0 |
+| missing file | `0x0000000000000003` | NIL | — |
+
+Returning NIL for a missing path also required an explicit openability probe:
+`spl_file_read` returns `""` (not NULL) when the open fails, so the C lane
+could not distinguish missing from empty at all, and Simple's `... ?? ""` arm
+was dead. The Rust definition returns NIL; the C copies now do too.
+
+There are **zero** C-internal callers of `rt_file_read_text`, so the change is
+closed. `runtime.h` was updated to match.
+
+### Gate extension: RETURN types
+
+`scripts/check/check-extern-abi-signatures.shs` now compares a return **ABI
+class** -- `void` / `int` / `float` / `ptr` / `multiN` -- across the compiler
+declaration and every C and Rust definition, alongside the existing arity
+check. Rows are emitted as `<sym>  ret:<decl>  ret:<def>  <file>` into the same
+baseline ratchet.
+
+Both gaps recorded below are also closed:
+
+* **Header coverage.** The scan now reads `src/runtime/**/*.h` at any depth
+  (vendored trees pruned) as well as `src/runtime/*.c`. Pure declarations are
+  still skipped, because the C extractor requires `{` on the declarator line.
+  Four **per-location** positive controls run on the real tree and are fatal
+  if any yields zero: `src/runtime/*.c` = 1278 defs, `src/runtime/**/*.h` = 79,
+  `src/runtime/platform/*.h` = 79, Rust SFFI = 399. The header path immediately
+  produced real rows (`rt_dir_list` in both `unix_common.h` and
+  `platform_win.h`) -- previously invisible.
+* **Alias return consistency.** `codegen/instr/calls.rs` and
+  `codegen/llvm/functions/calls.rs` rewrite call names before emission
+  (`rt_file_read_text` -> `rt_file_read_text_rv`). Neither states a return
+  type, so there is nothing there to compare directly; instead the gate asserts
+  that both ends of every alias pair declare the same result class (6 pairs).
+
+Selftest is still fatal and runs before every scan, now with 7 fixtures: a
+return-type fixture (`bad_ret_defs.c`, same arity on purpose, so only the
+return check can see it) and a header-location positive control
+(`platform/good_hdr_defs.h`, which must be extracted AND must not flag).
+
+Verdict: `PASS — 470 symbols checked, 33 baselined, 0 new`.
+
+### What the gate still cannot catch
+
+* **Semantics behind an identical signature.** `rt_file_sync` had the right
+  arity and still used the pointer as a C string with `(void)path_len;`. That
+  was found by hand and nothing in this gate would find the next one.
+* **`ptr` vs `int` is a SEMANTIC signal, not an ABI one.** On every supported
+  target a pointer and an `I64` share the return register, so the 26 `ret:int`
+  vs `ret:ptr` rows are all ABI-compatible. `rt_file_read_text` was fatal for a
+  semantic reason -- the value was consumed as a *tagged* RuntimeValue. The
+  gate cannot tell a tagged value from a raw address; the baseline records the
+  human triage. Eight of those rows (`rt_bytes_from_raw`, `rt_bytes_to_text`,
+  `rt_dir_list`, `rt_dir_walk`, `rt_env_cwd`, `rt_platform_name`,
+  `rt_process_run`, `rt_process_run_timeout`) are the **same class as
+  rt_file_read_text and are still open** -- their Rust definitions return
+  `RuntimeValue` while the C copies return `char*`.
+* **Return WIDTH inside `int`.** `I8` vs `I32` vs `I64` is not compared, so a
+  callee that writes only the low 32 bits where the caller reads 64 is invisible.
+* **Parameter TYPES.** Only parameter *count* is compared. A `const char*`
+  where a `uint64_t` is declared, at the same arity, is still invisible.
+* **Multi-line `RuntimeFuncSpec::new(` forms** (~14 of them) are not parsed by
+  the line-oriented declaration extractor, so those symbols are simply absent
+  from the comparison rather than wrongly compared.
+* **Only `rt_*` symbols**, and only definitions matching the accepted C
+  declarator shape (`{` on the declarator line, column 0, non-`static`).
+* The pure-Simple LLVM backends carry their own stale extern lists
+  (`llvm_backend.spl:388` `declare ptr @rt_file_read_text(ptr)`,
+  `llvm_lib_translate.spl:279`), which still spell the whole file-I/O family
+  with a single `ptr` parameter. The gate does not read those files. Whether
+  they are reachable was not established here -- filed as a separate follow-up,
+  not claimed as fixed.
+
+### Two gaps in the gate, found while closing this (both now CLOSED -- see above)
 
 1. **Header definitions are invisible.** The gate parses only
    `src/runtime/*.c` at depth 1. `rt_dir_create` and `rt_dir_remove_all` are

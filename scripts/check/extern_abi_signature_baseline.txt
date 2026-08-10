@@ -3,45 +3,90 @@
 # Family: doc/08_tracking/bug/rt_extern_abi_divergence_family_2026-08-10.md
 #
 # Format (tab-separated, exactly as the gate emits it):
-#   <symbol>  <compiler_arity>  <definition_arity>  <defining_file>
-#
-# Every row here is a CLASS-1 defect: the C copy still takes a single
-# `const char*` where the compiler and the Rust SFFI definition agree on a
-# (ptr, len) pair. They are latent only while the Rust definition wins the
-# link in a given lane; in any lane where the C copy wins they read a
-# non-NUL-terminated Simple `text` as a C string and return wrong answers --
-# exactly the rt_file_is_char_device failure fixed in 81fca37cdd4.
+#   ARITY  row:  <symbol>  <compiler_arity>  <definition_arity>  <defining_file>
+#   RETURN row:  <symbol>  ret:<compiler_class>  ret:<definition_class>  <file>
 #
 # This baseline is a TWO-WAY ratchet. A new mismatch fails the gate, AND a
 # baselined row that stops reproducing fails it as a stale baseline -- so
 # fixing a row here without deleting its line is caught too. That is
 # deliberate: it is the difference between a baseline and a permanent
-# exclusion.
+# exclusion. Do not add a row here to make a red gate green.
 #
-# The four CLASS-2 rows (rt_dir_glob, rt_file_find, rt_file_open,
-# rt_process_run_with_limits) were fixed, not baselined.
+# ---------------------------------------------------------------------------
+# ARITY rows: NONE. All 21 Class-1 rows (15 symbols) were converted to the
+# (ptr, len) ABI, each with a reproduction against the real translation units
+# and a re-run in every C link order. The Class-2 rows were fixed, not
+# baselined. Header definitions (platform/unix_common.h, platform/platform_win.h)
+# are now scanned as well, and added no arity rows.
+# ---------------------------------------------------------------------------
 #
-# THIS FILE IS NOW EMPTY. All 21 Class-1 rows (15 symbols) were converted to
-# the (ptr, len) ABI and removed one group at a time, each with a reproduction
-# against the real translation units and a re-run in every C link order. The
-# empty state is the goal state: the gate still runs, still selftests, and a
-# NEW mismatch fails it immediately. Do not add a row here to make a red gate
-# green -- the baseline existed only for the enumerated Class-1 backlog, and
-# that backlog is closed.
+# RETURN rows: the return-type comparison is NEW. It was added to catch
+# rt_file_read_text, which returned `const char*` where the compiler declares
+# `&[I64]` -- a RuntimeValue. That symbol is FIXED and is therefore NOT in this
+# file. The 33 rows below were triaged into three groups. Nothing is excluded;
+# everything the gate found is listed, with what is known about it.
 #
-# Two gaps this exercise exposed, worth knowing before trusting a PASS:
+# GROUP A -- compiler declares a result, the definition returns `void`
+# (6 rows: rt_array_set, rt_channel_send, rt_file_close x2, rt_invlpg,
+# rt_write_cr3) plus the inverse rt_exit (declared void, Rust returns i64).
+# REAL: the caller reads a return register the callee never wrote. Bounded in
+# practice only by callers discarding the value, which the ABI does not
+# guarantee. Not fixed here -- each needs its own call-site audit and per-lane
+# reproduction, the standard the Class-1 rows were held to.
 #
-#  1. The gate parses only src/runtime/*.c at depth 1. It never saw
-#     rt_dir_create / rt_dir_remove_all, which are DEFINED in
-#     src/runtime/platform/unix_common.h and platform/platform_win.h and pulled
-#     into runtime.c's translation unit via #include "platform/platform.h".
-#     Definitions in headers are invisible to it.
+# GROUP B1 -- SAME CLASS AS rt_file_read_text, NOT YET FIXED (8 symbols):
+#   rt_bytes_from_raw, rt_bytes_to_text, rt_dir_list, rt_dir_walk, rt_env_cwd,
+#   rt_platform_name, rt_process_run, rt_process_run_timeout
+# For each of these the canonical Rust definition returns a TAGGED
+# `RuntimeValue` while the C copy returns a raw `char*`/pointer. That is
+# exactly the defect just fixed for rt_file_read_text: in any lane where the C
+# copy wins the (-z muldefs) link, a successful call decodes as an untagged
+# value and reads as empty -- indistinguishable from "not found". These are
+# baselined, not dismissed; each needs the same reproduce-fix-verify-in-three-
+# link-orders treatment.
 #
-#  2. The gate compares ARITY only. rt_file_sync (runtime.c and
-#     runtime_legacy_core.c) already had the correct arity and so was never
-#     flagged, but it did `(void)path_len;` and used the pointer as a C string
-#     -- the identical defect, invisible to an arity check. Both copies were
-#     fixed alongside this family. A parameter-TYPE check (const char* where the
-#     spec says a text pair) would catch that class; so would a return-type
-#     check, which would catch rt_file_read_text still returning char* where
-#     the compiler declares I64.
+# GROUP B2 -- pointer-sized value that is genuinely a raw address (rt_alloc,
+# rt_array_new/_copy/_repeat/_with_cap_u64, rt_byte_array_new/_len,
+# rt_string_data, rt_value_to_ptr, rt_process_spawn). `I64` is how
+# RuntimeFuncSpec spells "pointer-sized" and no RuntimeValue-returning
+# counterpart exists, so pointer and I64 occupy the same return register and
+# the row is ABI-compatible. NOTE the residual: for rt_cli_get_args,
+# rt_get_args, rt_coverage_dump_sdn and
+# rt_host_gpu_queue_last_payload_text there is no Rust counterpart to compare
+# against, so they are placed here for lack of evidence, NOT proven benign.
+#
+# Removing a row from this file is the correct outcome of fixing it; the
+# ratchet enforces that.
+rt_alloc	ret:int	ret:ptr	runtime_memory.c
+rt_alloc	ret:int	ret:ptr	runtime_native.c
+rt_array_copy	ret:int	ret:ptr	runtime_native.c
+rt_array_new	ret:int	ret:ptr	runtime_native.c
+rt_array_new_with_cap_u64	ret:int	ret:ptr	runtime_native.c
+rt_array_repeat	ret:int	ret:ptr	runtime_native.c
+rt_array_set	ret:int	ret:void	runtime_native.c
+rt_byte_array_new_len	ret:int	ret:ptr	runtime_native.c
+rt_byte_array_new	ret:int	ret:ptr	runtime_native.c
+rt_bytes_from_raw	ret:int	ret:ptr	runtime_native.c
+rt_bytes_to_text	ret:int	ret:ptr	runtime.c
+rt_channel_send	ret:int	ret:void	runtime_native.c
+rt_cli_get_args	ret:int	ret:ptr	runtime.c
+rt_cli_get_args	ret:int	ret:ptr	runtime_native.c
+rt_coverage_dump_sdn	ret:int	ret:ptr	runtime_coverage_core.c
+rt_dir_list	ret:int	ret:ptr	platform_win.h
+rt_dir_list	ret:int	ret:ptr	unix_common.h
+rt_dir_walk	ret:int	ret:ptr	runtime.c
+rt_dir_walk	ret:int	ret:ptr	runtime_legacy_core.c
+rt_env_cwd	ret:int	ret:ptr	runtime_native.c
+rt_exit	ret:void	ret:int	env_process.rs
+rt_file_close	ret:int	ret:void	descriptor.rs
+rt_file_close	ret:int	ret:void	runtime_native.c
+rt_get_args	ret:int	ret:ptr	runtime_native.c
+rt_host_gpu_queue_last_payload_text	ret:int	ret:ptr	runtime_native.c
+rt_invlpg	ret:int	ret:void	runtime_native.c
+rt_platform_name	ret:int	ret:ptr	runtime_native.c
+rt_process_run	ret:int	ret:ptr	runtime_native.c
+rt_process_run_timeout	ret:int	ret:ptr	runtime_process.c
+rt_process_spawn	ret:int	ret:ptr	runtime_native.c
+rt_string_data	ret:int	ret:ptr	runtime_native.c
+rt_value_to_ptr	ret:int	ret:ptr	memory.rs
+rt_write_cr3	ret:int	ret:void	runtime_native.c

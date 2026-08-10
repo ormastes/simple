@@ -81,18 +81,39 @@ verdict_error() {
 # The params array is the FIRST &[...] after the name.
 # ---------------------------------------------------------------------------
 AWK_DECLS='
+    # ABI return CLASS, not spelling. Four classes -- void / int / float / ptr --
+    # chosen because they are the distinctions the calling convention actually
+    # makes for a single return register on every supported target, and because
+    # they are decidable from all three sources without a C or Rust parser.
+    # A raw pointer returned where the compiler declared an integer
+    # (RuntimeValue) is the rt_file_read_text defect. WIDTH divergence inside
+    # `int` (I8 vs I32 vs I64) is deliberately NOT compared -- see the residual
+    # section of the family bug doc.
+    function decl_ret_class(rets,   n, parts) {
+        if (rets == "") return "void"
+        n = split(rets, parts, ",")
+        if (n > 1) return "multi" n
+        if (parts[1] == "F64" || parts[1] == "F32") return "float"
+        return "int"
+    }
     {
         line = $0
-        while (match(line, /RuntimeFuncSpec::new\("rt_[A-Za-z0-9_]+"[[:space:]]*,[[:space:]]*&\[[^]]*\]/)) {
+        while (match(line, /RuntimeFuncSpec::new\("rt_[A-Za-z0-9_]+"[[:space:]]*,[[:space:]]*&\[[^]]*\][[:space:]]*,[[:space:]]*&\[[^]]*\]/)) {
             m = substr(line, RSTART, RLENGTH)
             line = substr(line, RSTART + RLENGTH)
             if (match(m, /"rt_[A-Za-z0-9_]+"/) == 0) continue
             sym = substr(m, RSTART + 1, RLENGTH - 2)
-            if (match(m, /&\[[^]]*\]/) == 0) continue
-            args = substr(m, RSTART + 2, RLENGTH - 3)
+            rest = m
+            if (match(rest, /&\[[^]]*\]/) == 0) continue
+            args = substr(rest, RSTART + 2, RLENGTH - 3)
+            rest = substr(rest, RSTART + RLENGTH)
             gsub(/[[:space:]]/, "", args)
             n = (args == "") ? 0 : split(args, parts, ",")
-            print sym "\t" n
+            # SECOND &[...] is the RESULT list.
+            if (match(rest, /&\[[^]]*\]/) == 0) continue
+            rets = substr(rest, RSTART + 2, RLENGTH - 3)
+            gsub(/[[:space:]]/, "", rets)
+            print sym "\t" n "\t" decl_ret_class(rets)
         }
     }
 '
@@ -102,7 +123,27 @@ AWK_DECLS='
 # signatures). Counts top-level commas between the parens.
 # ---------------------------------------------------------------------------
 AWK_RUST='
-    function emit(  args, inner, depth, i, ch, n) {
+    # Same four ABI classes as decl_ret_class / c_ret_class, plus "unknown".
+    # `tail` is everything after the signature`s closing paren on the collected
+    # text. If the body brace has not been seen yet the return type is still
+    # being continued on a later line, and the class is reported as "unknown"
+    # so the comparator SKIPS it rather than guessing "void" -- guessing there
+    # would manufacture a false mismatch for every rustfmt-wrapped signature.
+    function rust_ret_class(tail,   t) {
+        gsub(/[[:space:]]+/, " ", tail)
+        if (index(tail, "->") == 0) {
+            if (index(tail, "{") == 0) return "unknown"
+            return "void"
+        }
+        t = substr(tail, index(tail, "->") + 2)
+        if (index(t, "{") > 0) t = substr(t, 1, index(t, "{") - 1)
+        gsub(/^ | $/, "", t)
+        if (t == "") return "unknown"
+        if (index(t, "*") > 0 || t ~ /^&/) return "ptr"
+        if (t == "f64" || t == "f32") return "float"
+        return "int"
+    }
+    function emit(tail,   args, inner, depth, i, ch, n, rc) {
         gsub(/[[:space:]]+/, " ", sig)
         if (match(sig, /\(/) == 0) return
         args = substr(sig, RSTART + 1)
@@ -119,7 +160,8 @@ AWK_RUST='
         gsub(/^[[:space:]]+|[[:space:]]+$/, "", inner)
         sub(/,$/, "", inner)
         gsub(/^[[:space:]]+|[[:space:]]+$/, "", inner)
-        if (inner == "") { print sym "\t0\t" FILENAME; return }
+        rc = rust_ret_class(tail)
+        if (inner == "") { print sym "\t0\t" FILENAME "\t" rc; return }
         depth = 0; n = 1
         for (i = 1; i <= length(inner); i++) {
             ch = substr(inner, i, 1)
@@ -127,7 +169,7 @@ AWK_RUST='
             else if (ch == ")" || ch == "]" || ch == ">") depth--
             else if (ch == "," && depth == 0) n++
         }
-        print sym "\t" n "\t" FILENAME
+        print sym "\t" n "\t" FILENAME "\t" rc
     }
     /extern[[:space:]]+"C"[[:space:]]+fn[[:space:]]+rt_/ {
         collecting = 1; sig = ""; sym = ""
@@ -151,7 +193,7 @@ AWK_RUST='
         for (i = 1; i <= length(sig); i++) {
             ch = substr(sig, i, 1)
             if (ch == "(") depth++
-            else if (ch == ")") { depth--; if (depth == 0) { emit(); collecting = 0; break } }
+            else if (ch == ")") { depth--; if (depth == 0) { emit(substr(sig, i + 1)); collecting = 0; break } }
         }
     }
 '
@@ -162,6 +204,24 @@ AWK_RUST='
 # sibling duplicate-symbol gate documents).
 # ---------------------------------------------------------------------------
 AWK_C='
+    # Same four ABI classes as decl_ret_class. `pre` is everything before the
+    # symbol name on the declarator line, i.e. the return type plus any
+    # storage/attribute keywords.
+    function c_ret_class(pre, sym,   t, k, parts, i, base) {
+        t = pre
+        gsub(/\r/, "", t)
+        if (index(t, "*") > 0) return "ptr"
+        k = split(t, parts, /[^A-Za-z0-9_]+/)
+        base = ""
+        for (i = 1; i <= k; i++) {
+            if (parts[i] == "" || parts[i] == sym) continue
+            if (parts[i] ~ /^(static|inline|extern|const|volatile|unsigned|signed|_Noreturn|SPL_API|RT_API|__attribute__)$/) continue
+            base = parts[i]
+        }
+        if (base == "void" || base == "") return "void"
+        if (base == "float" || base == "double") return "float"
+        return "int"
+    }
     /^[A-Za-z_]/ && /rt_[A-Za-z0-9_]*[[:space:]]*\(/ && /\)[[:space:]]*\{/ {
         if ($0 ~ /^static[[:space:]]/) next
         line = $0
@@ -179,7 +239,8 @@ AWK_C='
         args = substr(line, p + 1)
         sub(/\)[[:space:]]*$/, "", args)
         gsub(/^[[:space:]]+|[[:space:]]+$/, "", args)
-        if (args == "" || args == "void") { print sym "\t0\t" FILENAME; next }
+        rc = c_ret_class(pre, sym)
+        if (args == "" || args == "void") { print sym "\t0\t" FILENAME "\t" rc; next }
         depth = 0; cnt = 1
         for (i = 1; i <= length(args); i++) {
             ch = substr(args, i, 1)
@@ -187,7 +248,7 @@ AWK_C='
             else if (ch == ")" || ch == "]") depth--
             else if (ch == "," && depth == 0) cnt++
         }
-        print sym "\t" cnt "\t" FILENAME
+        print sym "\t" cnt "\t" FILENAME "\t" rc
     }
 '
 
@@ -198,13 +259,18 @@ AWK_C='
 compare_arities() {
     _decls="$1"; _defs="$2"; _out="$3"
     awk -F'\t' '
-        NR == FNR { if (!($1 in d)) d[$1] = $2; next }
+        NR == FNR { if (!($1 in d)) { d[$1] = $2; r[$1] = $3 } ; next }
         {
             if (!($1 in d)) next
-            if (d[$1] + 0 == $2 + 0) next
             f = $3
             sub(/^.*\//, "", f)
-            print $1 "\t" d[$1] "\t" $2 "\t" f
+            if (d[$1] + 0 != $2 + 0) print $1 "\t" d[$1] "\t" $2 "\t" f
+            # RETURN class. "unknown" on either side means the extractor could
+            # not decide, and a guess is worse than a skip -- but an unknown is
+            # counted so a wholesale extractor breakage cannot read as clean.
+            if ($4 == "" || $4 == "unknown" || r[$1] == "" || r[$1] == "unknown") next
+            if (r[$1] == $4) next
+            print $1 "\tret:" r[$1] "\tret:" $4 "\t" f
         }
     ' "$_decls" "$_defs" | sort -u >"$_out"
 }
@@ -216,7 +282,8 @@ run_selftest() {
     [ -d "$FIXTURES" ] || verdict_error "selftest: fixture dir missing: $FIXTURES"
 
     for f in good_spec.rs good_defs.c good_defs.rs \
-             bad_cstr_defs.c bad_arity_defs.rs; do
+             bad_cstr_defs.c bad_arity_defs.rs bad_ret_defs.c \
+             platform/good_hdr_defs.h; do
         [ -f "$FIXTURES/$f" ] || verdict_error "selftest: missing fixture $FIXTURES/$f"
     done
 
@@ -227,9 +294,18 @@ run_selftest() {
     # -- positive control: matching definitions must produce NO mismatch --
     awk "$AWK_C" "$FIXTURES/good_defs.c" >"$TMP_DIR/st_good_c.tsv"
     awk "$AWK_RUST" "$FIXTURES/good_defs.rs" >"$TMP_DIR/st_good_rs.tsv"
+    # Per-LOCATION positive control: a definition inside a nested HEADER must
+    # be extracted, not assumed. This is the location the depth-1 *.c scan
+    # missed for rt_dir_create / rt_dir_remove_all.
+    awk "$AWK_C" "$FIXTURES/platform/good_hdr_defs.h" >"$TMP_DIR/st_good_h.tsv"
     [ -s "$TMP_DIR/st_good_c.tsv" ] || verdict_error "selftest: C extractor found 0 defs in good_defs.c"
     [ -s "$TMP_DIR/st_good_rs.tsv" ] || verdict_error "selftest: Rust extractor found 0 defs in good_defs.rs"
-    cat "$TMP_DIR/st_good_c.tsv" "$TMP_DIR/st_good_rs.tsv" >"$TMP_DIR/st_good.tsv"
+    grep -q '^rt_selftest_hdr	2	' "$TMP_DIR/st_good_h.tsv" \
+        || verdict_error "selftest: HEADER extractor did not see rt_selftest_hdr -- header coverage is vacuous"
+    if grep -q '^rt_selftest_hdr_decl_only	' "$TMP_DIR/st_good_h.tsv"; then
+        verdict_error "selftest: a pure DECLARATION was counted as a definition"
+    fi
+    cat "$TMP_DIR/st_good_c.tsv" "$TMP_DIR/st_good_rs.tsv" "$TMP_DIR/st_good_h.tsv" >"$TMP_DIR/st_good.tsv"
     compare_arities "$st_decls" "$TMP_DIR/st_good.tsv" "$TMP_DIR/st_good_out.tsv"
     if [ -s "$TMP_DIR/st_good_out.tsv" ]; then
         echo "selftest: FALSE POSITIVE on agreeing fixtures:" >&2
@@ -249,11 +325,22 @@ run_selftest() {
     grep -q '^rt_selftest_arity	4	5	' "$TMP_DIR/st_bad2_out.tsv" \
         || verdict_error "selftest: class-2 fixture (arity mismatch) was NOT detected -- the gate is vacuous"
 
-    echo "extern_abi_selftest=pass (3 fixtures: 1 positive control, 2 planted defects)"
+    # -- class 3: RETURN type mismatch at IDENTICAL arity --
+    awk "$AWK_C" "$FIXTURES/bad_ret_defs.c" >"$TMP_DIR/st_bad3.tsv"
+    [ -s "$TMP_DIR/st_bad3.tsv" ] || verdict_error "selftest: C extractor found 0 defs in bad_ret_defs.c"
+    compare_arities "$st_decls" "$TMP_DIR/st_bad3.tsv" "$TMP_DIR/st_bad3_out.tsv"
+    grep -q '^rt_selftest_ret	ret:int	ret:ptr	' "$TMP_DIR/st_bad3_out.tsv" \
+        || verdict_error "selftest: class-3 fixture (return-type mismatch) was NOT detected -- the gate is vacuous"
+    # ... and it must be the RETURN check that fired, not a smuggled arity row.
+    if grep -q '^rt_selftest_ret	2	' "$TMP_DIR/st_bad3_out.tsv"; then
+        verdict_error "selftest: class-3 fixture reported an ARITY row; the return check is not what detected it"
+    fi
+
+    echo "extern_abi_selftest=pass (7 fixtures: 2 positive controls incl. header location, 3 planted defects)"
 }
 
 run_selftest
-[ "$MODE" = "selftest" ] && { echo "PASS — selftest only, 3 fixtures checked"; exit 0; }
+[ "$MODE" = "selftest" ] && { echo "PASS — selftest only, 7 fixtures checked"; exit 0; }
 
 # ---------------------------------------------------------------------------
 # REAL SCAN
@@ -271,7 +358,19 @@ DEFS="$TMP_DIR/defs.tsv"
 : >"$DEFS"
 
 # C bundle definitions. Vendored sources are out of scope by repo rule.
+#
+# COVERAGE: depth-1 *.c is NOT enough. rt_dir_create and rt_dir_remove_all are
+# DEFINED (body and all) in src/runtime/platform/unix_common.h and
+# platform/platform_win.h, pulled into runtime.c's translation unit by
+# `#include "platform/platform.h"`. The depth-1 .c-only scan never saw them --
+# recorded as gap 1 in the family bug doc. Headers are now scanned at any depth
+# alongside the .c files. A pure DECLARATION (`...);`) is still skipped, because
+# AWK_C requires `{` on the declarator line, so runtime.h does not double-count.
+# Vendored trees are excluded by name, per the repo's owned-code scope rule.
 find "$RUNTIME_DIR" -maxdepth 1 -name '*.c' -print >"$TMP_DIR/cfiles.txt"
+find "$RUNTIME_DIR" \( -path "$RUNTIME_DIR/vendor" -o -name 'miniaudio.h' \
+        -o -name 'stb_image.h' -o -name 'stb_truetype.h' \) -prune -o \
+     -name '*.h' -print >>"$TMP_DIR/cfiles.txt"
 [ -s "$TMP_DIR/cfiles.txt" ] || verdict_error "found 0 C files under $RUNTIME_DIR"
 while IFS= read -r cf; do
     awk "$AWK_C" "$cf" >>"$DEFS"
@@ -286,6 +385,59 @@ done <"$TMP_DIR/rsfiles.txt"
 
 def_count=$(cut -f1 "$DEFS" | sort -u | wc -l | tr -d ' ')
 [ "$def_count" -gt 0 ] || verdict_error "extracted 0 rt_* definitions (extractors are broken)"
+
+# ---------------------------------------------------------------------------
+# PER-LOCATION positive controls, on the REAL tree (not the fixtures).
+# A nonzero grand total does not prove each location was read: the depth-1
+# *.c scan had a nonzero total for months while contributing ZERO rows from
+# src/runtime/platform/*.h. Each location is asserted separately, and a
+# location that yields nothing is an ERROR, not a silent pass.
+# ---------------------------------------------------------------------------
+loc_count() { awk -F'\t' -v p="$1" '$3 ~ p { n++ } END { print n + 0 }' "$DEFS"; }
+n_c=$(loc_count '^src/runtime/[^/]*[.]c$')
+n_h=$(loc_count '^src/runtime/.*[.]h$')
+n_ph=$(loc_count '^src/runtime/platform/.*[.]h$')
+n_rs=$(loc_count '^src/compiler_rust/runtime/src/value/sffi/')
+echo "extern_abi_defs_src_runtime_c=$n_c"
+echo "extern_abi_defs_src_runtime_headers=$n_h"
+echo "extern_abi_defs_src_runtime_platform_headers=$n_ph"
+echo "extern_abi_defs_rust_sffi=$n_rs"
+[ "$n_c"  -gt 0 ] || verdict_error "0 definitions from src/runtime/*.c -- that location was not read"
+[ "$n_h"  -gt 0 ] || verdict_error "0 definitions from src/runtime/**/*.h -- header coverage is vacuous"
+[ "$n_ph" -gt 0 ] || verdict_error "0 definitions from src/runtime/platform/*.h -- the exact blind spot recorded in the family bug doc is back"
+[ "$n_rs" -gt 0 ] || verdict_error "0 definitions from the Rust SFFI tree -- that location was not read"
+
+# ---------------------------------------------------------------------------
+# Alias RETURN consistency.
+#
+# codegen/instr/calls.rs and codegen/llvm/functions/calls.rs rewrite some call
+# names before emission -- `rt_file_read_text` is emitted as
+# `rt_file_read_text_rv`. Neither file states a return type, so there is no
+# return type there to compare; what CAN go wrong is the two ends of an alias
+# declaring different result classes, which silently changes what the caller
+# decodes. Assert every alias pair agrees.
+# ---------------------------------------------------------------------------
+CALLS_RS="src/compiler_rust/compiler/src/codegen/instr/calls.rs"
+LLVM_CALLS_RS="src/compiler_rust/compiler/src/codegen/llvm/functions/calls.rs"
+[ -f "$CALLS_RS" ] || verdict_error "missing $CALLS_RS"
+[ -f "$LLVM_CALLS_RS" ] || verdict_error "missing $LLVM_CALLS_RS"
+ALIASES="$TMP_DIR/aliases.tsv"
+sed -n 's/^[[:space:]]*"\(rt_[A-Za-z0-9_]*\)"[[:space:]]*=>[[:space:]]*\(Some(\)\?"\(rt_[A-Za-z0-9_]*\)".*/\1\t\3/p' \
+    "$CALLS_RS" "$LLVM_CALLS_RS" | sort -u >"$ALIASES"
+alias_count=$(wc -l <"$ALIASES" | tr -d ' ')
+[ "$alias_count" -gt 0 ] || verdict_error "parsed 0 rt_* call aliases out of $CALLS_RS / $LLVM_CALLS_RS"
+echo "extern_abi_alias_pairs=$alias_count"
+ALIAS_BAD="$TMP_DIR/alias_bad.txt"
+awk -F'\t' '
+    NR == FNR { r[$1] = $3; next }
+    { if (($1 in r) && ($2 in r) && r[$1] != r[$2]) print $1 " -> " $2 " (" r[$1] " vs " r[$2] ")" }
+' "$DECLS" "$ALIASES" >"$ALIAS_BAD"
+if [ -s "$ALIAS_BAD" ]; then
+    echo "A call-name alias maps to a target with a DIFFERENT declared result class:" >&2
+    cat "$ALIAS_BAD" >&2
+    echo "FAIL — $alias_count alias pairs checked, $(wc -l <"$ALIAS_BAD" | tr -d ' ') divergent"
+    exit 1
+fi
 
 # Symbols actually compared = those with BOTH a declaration and >=1 definition.
 COMPARED="$TMP_DIR/compared.txt"
