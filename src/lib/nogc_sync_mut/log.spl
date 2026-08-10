@@ -2,8 +2,8 @@
 # Log Module - Runtime-guarded logging
 #
 # Lightweight, interpreter-safe log module that reads SIMPLE_LOG env var
-# once at module load time. When logging is disabled (default), log calls
-# cost only a single integer comparison (~1ns).
+# once at module load time. Below the error threshold (the default), a log
+# call costs only a single integer comparison (~1ns).
 #
 # Usage:
 #   use std.log.{log_debug, log_info, log_warn, log_error}
@@ -17,7 +17,11 @@
 #   SIMPLE_LOG=info    → show info + above
 #   SIMPLE_LOG=warn    → show warn + error only
 #   SIMPLE_LOG=error   → show errors only
-#   (unset or "off")   → silent (all log calls become no-ops)
+#   (unset)            → show error + fatal only (the DEFAULT floor; see
+#                        _DEFAULT_LOG_LEVEL -- errors are never suppressed
+#                        just because no env var was set)
+#   SIMPLE_LOG=off     → silent (all log calls become no-ops); the only way
+#                        to suppress errors, and it must be deliberate
 #
 # Note: Due to module import limitations, this module may not be directly
 # importable via `use std.log.{...}` from all contexts. For files loaded
@@ -88,9 +92,27 @@ val LOG_TRACE = 6
 val LOG_VERBOSE = 7
 val LOG_ALL = 10
 
+# Floor that SIMPLE_LOG cannot lower except by an explicit "off"/"fatal".
+#
+# SIMPLE_LOG selects VERBOSITY BELOW the error threshold; it does not decide
+# whether errors exist at all. Before 2026-08-10 `_parse_log_level()` returned
+# 0 (== LOG_OFF) whenever SIMPLE_LOG was unset, so `error()`/`fatal()` never
+# produced their labelled `[ERROR] [scope] msg` line for any operator who had
+# not happened to set an env var. That is the same class as the std.log defect
+# fixed in src/lib/log.spl by c5fee72e5b4 (log_dispatch_text wrote only to a
+# ring buffer nothing drains), and it is the shape that hides bugs: a silent
+# non-zero exit. See
+# doc/08_tracking/bug/std_log_error_never_reaches_stderr_silent_nonzero_exit_2026-08-10.md
+#
+# `SIMPLE_LOG=off` still silences everything -- opting out stays possible, it
+# just has to be deliberate.
+val _DEFAULT_LOG_LEVEL = 2   # == LOG_ERROR
+
 # Read SIMPLE_LOG once at module load time
 fn _parse_log_level() -> i64:
     val env = rt_env_get("SIMPLE_LOG") ?? ""
+    if env == "off":
+        return LOG_OFF
     if env == "all":
         return 10
     if env == "verbose":
@@ -107,7 +129,8 @@ fn _parse_log_level() -> i64:
         return 2
     if env == "fatal":
         return 1
-    0
+    # Unset or unrecognised: ERROR/FATAL still reach the operator.
+    _DEFAULT_LOG_LEVEL
 
 # Global mutable state (Note: May not persist across module imports in interpreter)
 # FIXED: Don't call _parse_log_level() at module init (causes SFFI hang in interpreter)
@@ -125,9 +148,16 @@ fn _ensure_initialized():
             _LOG_FILE_PATH = file_env
         else:
             val log_dir = rt_env_get("SIMPLE_LOG_DIR") ?? ""
+            val log_env = rt_env_get("SIMPLE_LOG") ?? ""
             if log_dir.len() > 0:
                 _LOG_FILE_PATH = log_dir + "/simple_app.log"
-            elif GLOBAL_LOG_LEVEL > 0:
+            elif GLOBAL_LOG_LEVEL > 0 and log_env.len() > 0:
+                # Requires SIMPLE_LOG to be set EXPLICITLY. The default level is
+                # now LOG_ERROR rather than LOG_OFF (see _DEFAULT_LOG_LEVEL), so
+                # a bare `GLOBAL_LOG_LEVEL > 0` test would make every process in
+                # the repo start creating and appending to .simple/logs/ with no
+                # operator having asked for it. Surfacing errors on stderr must
+                # not silently turn on on-disk logging.
                 _LOG_FILE_PATH = ".simple/logs/simple_app.log"
 
 # Emit log line to stderr and optionally to file
