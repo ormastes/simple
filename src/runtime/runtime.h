@@ -693,6 +693,10 @@ int         rt_file_append(const char* path, const char* content);
 int         rt_file_append_text(const uint8_t* path, uint64_t path_len, const uint8_t* content, uint64_t content_len);
 int         rt_file_delete(const char* path);
 int         rt_file_copy(const char* src, const char* dst);
+int         rt_file_rename(const uint8_t* src_ptr, uint64_t src_len,
+                           const uint8_t* dst_ptr, uint64_t dst_len);
+int         rt_file_move(const uint8_t* src_ptr, uint64_t src_len,
+                         const uint8_t* dst_ptr, uint64_t dst_len);
 int64_t     rt_file_size(const char* path);
 int         rt_file_fsync(const char* path);
 int         rt_file_fsync_cached(const char* path);

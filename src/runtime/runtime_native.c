@@ -6431,7 +6431,8 @@ int64_t rt_file_size(const char* path) {
 }
 
 static char* rt_core_text_arg_to_cstr(const uint8_t* ptr, uint64_t len) {
-    if (!ptr && len != 0) return NULL;
+    if ((!ptr && len != 0) || len > (uint64_t)(SIZE_MAX - 1) ||
+        (len != 0 && memchr(ptr, '\0', (size_t)len) != NULL)) return NULL;
     char* out = (char*)malloc((size_t)len + 1);
     if (!out) return NULL;
     if (len != 0) memcpy(out, ptr, (size_t)len);
@@ -6771,9 +6772,24 @@ void rt_file_close(void* handle) {
     if (handle) fclose((FILE*)handle);
 }
 
-int rt_file_move(const char* src, const char* dst) {
-    if (!src || !dst) return 0;
-    return rename(src, dst) == 0 ? 1 : 0;
+int rt_file_rename(const uint8_t* src_ptr, uint64_t src_len,
+                   const uint8_t* dst_ptr, uint64_t dst_len) {
+    char* src = rt_core_text_arg_to_cstr(src_ptr, src_len);
+    char* dst = rt_core_text_arg_to_cstr(dst_ptr, dst_len);
+    if (!src || !dst) {
+        free(src);
+        free(dst);
+        return 0;
+    }
+    int ok = rename(src, dst) == 0;
+    free(src);
+    free(dst);
+    return ok ? 1 : 0;
+}
+
+int rt_file_move(const uint8_t* src_ptr, uint64_t src_len,
+                 const uint8_t* dst_ptr, uint64_t dst_len) {
+    return rt_file_rename(src_ptr, src_len, dst_ptr, dst_len);
 }
 
 char* rt_env_cwd(void) {
