@@ -1,4 +1,7 @@
 use std.spec.{describe, it, expect}
+use compiler.frontend.core.interpreter.text_split_limit.{text_split_with_limit}
+
+extern fn rt_file_read_text(path: text) -> text
 
 describe "nested string split dispatch":
     it "splits a temporary string receiver":
@@ -7,3 +10,33 @@ describe "nested string split dispatch":
         expect(parts.len()).to_equal(2)
         expect(parts[0]).to_equal("a")
         expect(parts[1]).to_equal("b")
+
+    it "routes limited splits through the pure-Simple owner in every active lane":
+        val methods = rt_file_read_text("src/compiler/10.frontend/core/interpreter/eval_methods.spl") ?? ""
+        val active = rt_file_read_text("src/compiler/10.frontend/core/interpreter/_EvalOps/access_literal_assign_eval.spl") ?? ""
+        val mir = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl") ?? ""
+        val runtime = rt_file_read_text("src/runtime/simple_core/core_string.spl") ?? ""
+        val llvm = rt_file_read_text("src/compiler/70.backend/backend/llvm_lib_translate.spl") ?? ""
+
+        expect(methods).to_contain("text_split_with_limit(s, sep, limit)")
+        expect(active).to_contain("text_split_with_limit(s, sep, limit)")
+        expect(mir).to_contain("case \"split\": args.len() == 1 or args.len() == 2")
+        expect(mir).to_contain("case \"split\": if args.len() == 2: \"rt_string_split_limit\" else: \"rt_string_split\"")
+        expect(runtime).to_contain("pub fn rt_string_split_limit(value: i64, delimiter: i64, limit: i64) -> i64:")
+        expect(llvm).to_contain("declare_fn(mod_, \"rt_string_split_limit\", llvm_function_type(ptr_ty, [ptr_ty, ptr_ty, i64_ty], false))")
+
+    it "preserves the remainder when the split limit is reached":
+        val parts = text_split_with_limit("a:b:c", ":", 2)
+
+        expect(parts.len()).to_equal(2)
+        expect(parts[0]).to_equal("a")
+        expect(parts[1]).to_equal("b:c")
+
+    it "handles one, zero, and multi-character delimiter limits without dropping text":
+        val one = text_split_with_limit("a--b--c", "--", 1)
+        val zero = text_split_with_limit("a--b--c", "--", 0)
+        val two = text_split_with_limit("a--b--c", "--", 2)
+
+        expect(one).to_equal(["a--b--c"])
+        expect(zero).to_equal([])
+        expect(two).to_equal(["a", "b--c"])
