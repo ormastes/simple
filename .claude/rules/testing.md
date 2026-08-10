@@ -86,6 +86,29 @@ weighted dimensions → `SSpec documentization score: N/100`). Operator manual:
   purpose/audience) → `SSDOC-TRC-001` (no `# @req REQ-*` traceability). Fix
   ORA-001 first: replace the scaffold with a real oracle or delete the spec.
 
+## Measurement traps (all three observed 2026-08-10)
+
+These produced wrong verdicts in a single review session. They are cheap to avoid
+and expensive to miss.
+
+- **Never A/B across two trees.** An agent measured "before" in the main checkout
+  and "after" in its worktree and reported a **12.4× speedup**; the controlled A/B
+  in one tree with one binary gave **13%**. The shared checkout carries a large
+  pile of uncommitted files and different cache state. Toggle ONLY the change under
+  test, hold the tree and binary fixed, and state which produced each number.
+- **A pipe launders the exit code.** `sh guard.shs | tail -1; echo $?` reports
+  `tail`'s status — this read a correctly fail-closed gate (exit 2) as exit 0,
+  i.e. "the guard fails open" when it did not. Capture first:
+  `out=$(sh guard.shs); rc=$?`.
+- **A scan that finds nothing may have scanned nothing.** A `sorry`/`admit` grep
+  came back clean against a path that did not exist. Pair every absence check with
+  a control that MUST produce a hit; if the control is silent, the scan is broken,
+  not the code.
+
+Related, already documented elsewhere but same family: a silently-failed `git
+fetch` makes a comparison run against an empty object and report a false
+divergence; `simple test <ABSOLUTE path>` runs nothing and exits 0.
+
 ## Commands
 ```bash
 bin/simple test                     # All tests
