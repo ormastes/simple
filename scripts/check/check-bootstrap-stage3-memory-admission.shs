@@ -1,0 +1,188 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+BOOTSTRAP_STAGE3_FACADE_PATH=\
+"$repo_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+
+test_dir=$(mktemp -d "${TMPDIR:-/tmp}/stage3-memory-test.XXXXXX")
+cleanup() {
+    rm -rf "$test_dir"
+}
+trap cleanup EXIT HUP INT TERM
+
+fail() {
+    echo "FAIL: $*" >&2
+    exit 1
+}
+
+assert_value() {
+    expected=$1
+    key=$2
+    file=$3
+    actual=$(bootstrap_stage3_manifest_value "$key" "$file") ||
+        fail "$key missing from $file"
+    [ "$actual" = "$expected" ] ||
+        fail "$key expected '$expected', got '$actual'"
+}
+
+write_three() {
+    file=$1
+    line=$2
+    printf '%s\n%s\n%s\n' "$line" "$line" "$line" >"$file"
+}
+
+process_fixture="$test_dir/processes"
+cat >"$process_fixture" <<'EOF'
+101|1|8192|sh scripts/bootstrap/bootstrap-from-scratch.sh --jobs=2
+102|101|16384|build/stage2/simple native-build --threads 2
+103|102|32768|bin/simple replay missing-build-log.json
+104|1|100|unrelated process
+EOF
+
+export SIMPLE_BOOTSTRAP_STAGE3_MEMORY_SAMPLE_INTERVAL_SECONDS=0
+export SIMPLE_BOOTSTRAP_STAGE3_PROCESS_SNAPSHOT="$process_fixture"
+
+# Linux: earlyoom reserves 10% of total memory; added headroom must remain.
+low_fixture="$test_dir/linux-low"
+write_three "$low_fixture" \
+    'linux|134217728|14000000|0|max|10|fixture'
+low_evidence="$test_dir/linux-low.env"
+export SIMPLE_BOOTSTRAP_STAGE3_MEMORY_PLATFORM=Linux
+export SIMPLE_BOOTSTRAP_STAGE3_MEMORY_SAMPLE_FIXTURE="$low_fixture"
+launched="$test_dir/launched"
+set +e
+if bootstrap_stage3_memory_admission_preflight "$low_evidence"; then
+    : >"$launched"
+    low_status=0
+else
+    low_status=$?
+fi
+set -e
+[ "$low_status" -eq 75 ] || fail "low-memory refusal returned $low_status"
+[ ! -e "$launched" ] || fail "low-memory refusal launched Stage 3"
+assert_value blocked status "$low_evidence"
+assert_value linux-host-below-reserve-plus-headroom reason "$low_evidence"
+assert_value 3 concurrent_process_count "$low_evidence"
+assert_value 101 process_1_pid "$low_evidence"
+assert_value 'sh scripts/bootstrap/bootstrap-from-scratch.sh --jobs=2' \
+    process_1_cmd "$low_evidence"
+assert_value 102 process_2_pid "$low_evidence"
+assert_value 103 process_3_pid "$low_evidence"
+assert_value 1 concurrent_bootstrap_count "$low_evidence"
+assert_value 1 concurrent_native_build_count "$low_evidence"
+assert_value 1 runaway_replay_chain_count "$low_evidence"
+
+# Sufficient Linux memory is ready, includes finite cgroup headroom, and can be
+# finalized only after the exact launched runner is attached.
+ready_fixture="$test_dir/linux-ready"
+write_three "$ready_fixture" \
+    'linux|134217728|20000000|1073741824|8589934592|10|fixture'
+ready_evidence="$test_dir/linux-ready.env"
+export SIMPLE_BOOTSTRAP_STAGE3_MEMORY_SAMPLE_FIXTURE="$ready_fixture"
+bootstrap_stage3_memory_admission_preflight "$ready_evidence" ||
+    fail "sufficient Linux memory was refused"
+sleep 1 &
+runner=$!
+bootstrap_stage3_memory_record_runner "$ready_evidence" "$runner" ||
+    fail "could not bind runner"
+wait "$runner"
+bootstrap_stage3_memory_verify_evidence "$ready_evidence" ||
+    fail "ready evidence did not verify"
+assert_value ready status "$ready_evidence"
+assert_value 7340032 sample_3_cgroup_available_kib "$ready_evidence"
+assert_value "$runner" stage3_runner_pid "$ready_evidence"
+
+linux_unknown_fixture="$test_dir/linux-cgroup-unknown"
+write_three "$linux_unknown_fixture" \
+    'linux|134217728|20000000|unavailable|unavailable|10|fixture'
+linux_unknown_evidence="$test_dir/linux-cgroup-unknown.env"
+export SIMPLE_BOOTSTRAP_STAGE3_MEMORY_SAMPLE_FIXTURE="$linux_unknown_fixture"
+bootstrap_stage3_memory_admission_preflight "$linux_unknown_evidence" ||
+    fail "unavailable Linux cgroup v2 probe blocked"
+assert_value unknown status "$linux_unknown_evidence"
+assert_value linux-cgroup-v2-unavailable reason "$linux_unknown_evidence"
+
+# Unsupported and unparseable providers are UNKNOWN and remain non-blocking.
+unknown_fixture="$test_dir/unknown"
+write_three "$unknown_fixture" 'unknown|unsupported-fixture'
+unknown_evidence="$test_dir/unknown.env"
+export SIMPLE_BOOTSTRAP_STAGE3_MEMORY_PLATFORM=Plan9
+export SIMPLE_BOOTSTRAP_STAGE3_MEMORY_SAMPLE_FIXTURE="$unknown_fixture"
+bootstrap_stage3_memory_admission_preflight "$unknown_evidence" ||
+    fail "unknown provider blocked"
+sleep 1 &
+runner=$!
+bootstrap_stage3_memory_record_runner "$unknown_evidence" "$runner" ||
+    fail "could not bind unknown runner"
+wait "$runner"
+bootstrap_stage3_memory_verify_evidence "$unknown_evidence" ||
+    fail "unknown evidence did not verify"
+assert_value unknown status "$unknown_evidence"
+
+bad_fixture="$test_dir/unparseable"
+write_three "$bad_fixture" 'linux|not-a-number|bogus|0|max|10|fixture'
+bad_evidence="$test_dir/unparseable.env"
+export SIMPLE_BOOTSTRAP_STAGE3_MEMORY_SAMPLE_FIXTURE="$bad_fixture"
+bootstrap_stage3_memory_admission_preflight "$bad_evidence" ||
+    fail "unparseable provider blocked"
+assert_value unknown status "$bad_evidence"
+assert_value provider-unparseable reason "$bad_evidence"
+
+# macOS primary and fallback parsers are independently injected.
+darwin_pressure="$test_dir/darwin-pressure"
+write_three "$darwin_pressure" 'darwin-pressure|16'
+export SIMPLE_BOOTSTRAP_STAGE3_MEMORY_PLATFORM=Darwin
+export SIMPLE_BOOTSTRAP_STAGE3_MEMORY_SAMPLE_FIXTURE="$darwin_pressure"
+darwin_pressure_evidence="$test_dir/darwin-pressure.env"
+bootstrap_stage3_memory_admission_preflight "$darwin_pressure_evidence" ||
+    fail "Darwin pressure-ready fixture blocked"
+assert_value ready status "$darwin_pressure_evidence"
+assert_value darwin-memory-pressure sample_3_provider "$darwin_pressure_evidence"
+
+darwin_vmstat="$test_dir/darwin-vmstat"
+write_three "$darwin_vmstat" \
+    'darwin-vmstat|17179869184|4096|600000|100000|10000'
+export SIMPLE_BOOTSTRAP_STAGE3_MEMORY_SAMPLE_FIXTURE="$darwin_vmstat"
+darwin_vmstat_evidence="$test_dir/darwin-vmstat.env"
+bootstrap_stage3_memory_admission_preflight "$darwin_vmstat_evidence" ||
+    fail "Darwin vm_stat-ready fixture blocked"
+assert_value ready status "$darwin_vmstat_evidence"
+assert_value darwin-vm-stat sample_3_provider "$darwin_vmstat_evidence"
+
+# FreeBSD figures are recorded as advisory UNKNOWN until calibrated live.
+freebsd_fixture="$test_dir/freebsd"
+write_three "$freebsd_fixture" \
+    'freebsd|17179869184|4096|600000|100000|10000'
+export SIMPLE_BOOTSTRAP_STAGE3_MEMORY_PLATFORM=FreeBSD
+export SIMPLE_BOOTSTRAP_STAGE3_MEMORY_SAMPLE_FIXTURE="$freebsd_fixture"
+freebsd_evidence="$test_dir/freebsd.env"
+bootstrap_stage3_memory_admission_preflight "$freebsd_evidence" ||
+    fail "FreeBSD advisory fixture blocked"
+assert_value unknown status "$freebsd_evidence"
+assert_value freebsd-sysctl-advisory sample_3_provider "$freebsd_evidence"
+
+# Evidence output cannot traverse or replace a symlink.
+symlink_target="$test_dir/symlink-target"
+printf 'sentinel\n' >"$symlink_target"
+symlink_evidence="$test_dir/symlink-evidence"
+ln -s "$symlink_target" "$symlink_evidence"
+set +e
+bootstrap_stage3_memory_admission_preflight "$symlink_evidence"
+symlink_status=$?
+set -e
+[ "$symlink_status" -eq 2 ] || fail "symlink evidence returned $symlink_status"
+[ "$(sed -n '1p' "$symlink_target")" = sentinel ] ||
+    fail "symlink target was modified"
+
+bundle_snapshot="$test_dir/helper-bundle"
+bootstrap_stage3_helper_bundle_snapshot "$bundle_snapshot" ||
+    fail "could not snapshot provenance helper bundle"
+memory_module="$repo_root/scripts/check/lib/bootstrap-stage3/memory-admission.shs"
+expected_memory_hash=$(bootstrap_stage3_hash_file "$memory_module")
+grep -Fqx "$expected_memory_hash  $memory_module" "$bundle_snapshot" ||
+    fail "memory provider missing from provenance helper fingerprint"
+
+echo "PASS: bootstrap Stage 3 memory admission"
