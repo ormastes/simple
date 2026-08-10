@@ -15,7 +15,15 @@ related: src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer
 **Status:** OPEN. Worked around by capping the CSS path at
 `WM_SCENE_CSS_RENDER_PIXEL_CAP = 10000` px in `render_scene_to_backend`; larger
 scenes use a direct-rect rasterizer fallback (which now paints the real scene
-elements instead of a near-blank fill).
+elements instead of a near-blank fill). Re-verified 2026-08-10: the cap
+constant is unchanged at 10000 (`wm_scene.spl:457`), and the fallback path has
+grown an additional `engine2d_fast_metal_available()` branch
+(`wm_scene.spl:479`) since this doc was filed — a live re-measurement of the
+~6s fixed cost was not attempted this pass (would need the same interpreter
+timing harness the original measurement used, which is expensive), so the
+"fix directions" below remain unconfirmed as either done or not done; treat
+the cap and the perf gap itself as still live based on the unchanged
+constant.
 
 ## Summary
 
