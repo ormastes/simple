@@ -95,6 +95,38 @@ fn current_ident_is_layer_decl() -> bool:
         return false
     is_ident_start_char(lex_source_char_at(pos))
 
+# Soft-keyword lookahead for the `on pc{...} use handler form [priority N]`
+# AOP advice decl. "on" is NOT a reserved word at the lexer level -- it is an
+# extremely common parameter/variable name (boolean toggle) and reserving it
+# globally broke any file using it as an identifier, with a badly-localized
+# error pointing at unrelated AOP pointcut grammar (see
+# doc/08_tracking/bug/aop_on_hard_keyword_blocks_identifier_2026-07-25.md).
+# The module-body dispatcher only treats "on" as the start of an AOP advice
+# decl when the current identifier is exactly "on" AND raw source lookahead
+# finds: whitespace, then the literal identifier "pc" immediately followed by
+# "{". Any other shape (`on:`, `on)`, `on` alone at EOL, `if on:`, ...) is
+# left as a normal identifier for the generic statement/expression parser.
+fn current_ident_is_on_advice_decl() -> bool:
+    var pos = lex_token_end_get()
+    val source_len = lex_source_len()
+    var saw_space = false
+    while pos < source_len:
+        val ch = lex_source_char_at(pos)
+        if ch == " " or ch == "\t":
+            saw_space = true
+            pos = pos + 1
+            continue
+        break
+    if not saw_space or pos >= source_len:
+        return false
+    if pos + 2 >= source_len:
+        return false
+    if lex_source_char_at(pos) != "p":
+        return false
+    if lex_source_char_at(pos + 1) != "c":
+        return false
+    lex_source_char_at(pos + 2) == "{"
+
 # Parses `layer NAME` and `layer NAME uses A, B, ...` (M0: no body, no
 # fields, no methods -- zero runtime effect). The declared facts are lowered
 # into a `__layer_decl(name, uses_csv)` marker call wrapped in an ordinary
@@ -1405,8 +1437,11 @@ fn parse_module_body():
         elif par_kind_get() == 181:
             # Stray indent at module level -- skip it
             parser_advance()
-        elif par_kind_get() == 216:
-            # on pc{...} use handler form [priority N]
+        elif par_kind_get() == 6 and par_text_get() == "on" and current_ident_is_on_advice_decl():
+            # on pc{...} use handler form [priority N] ("on" is a soft
+            # keyword, not reserved, so it never shadows identifiers/params
+            # like `fn showcase_trace(on: bool, ...)`; see
+            # current_ident_is_on_advice_decl()).
             val d = parse_aop_advice_decl()
             module_add_decl(d)
             parser_reset_pending_vhdl_decorators()
