@@ -42,3 +42,49 @@ Rewrite both specs to import `CallRecorder`/`CallVerifier` (and `Mock`/`Spy`/
 reimplementation entirely, and confirm the existing assertions still hold
 against the real `VerifyCount`-based verification semantics. Consider
 deduplicating the two near-identical twin files at the same time.
+
+## Status: FIXED 2026-08-10
+
+Both specs now import the real classes via `use std.spec.mock.{...}`
+(confirmed working import path; `use spec.mock.{...}` fails with `Module
+"spec" does not export 'mock'`, and `use spec.{Mock}` — the shape used by the
+pre-existing `test/unit/std/mock_simple_spec.spl` — fails at runtime with
+`variable Mock not found`, both pre-existing/unrelated to this fix).
+
+- **`test/unit/lib/common/mock_spec.spl`** (canonical): fully rewritten,
+  local `CallInfo`/`CallRecorder`/`CallVerifier`/`StubEntry`/`Mock`/`Spy`
+  classes deleted, all 625 lines replaced with imports of the real
+  `Mock`/`Spy`/`Stub`/`CallRecorder`/`CallVerifier`/`VerifyCount`/
+  `ArgMatcher`/`arg_*`/`matches_arg`/`mock_policy_*` from `std.spec.mock`.
+  Every original test case's intent was ported. **Result: 41/41 passed.**
+  - The old "matches arguments" case asserted `m.call("find_by_id",[123]) ==
+    456` — that was testing a BUG in the fake (last-registered stub always
+    won, ignoring the first arg-specific stub). The real `Mock` correctly
+    keys stubs by `method:arg1:arg2:...` when `with_args()` is used, so the
+    rewritten case now asserts the correct per-argument values (`123` then
+    `456`).
+  - The old "in_range()" case was marked pending with the comment "enum
+    variant InRange(i64, i64) constructor broken — creates tuple instead of
+    enum". That was describing the FAKE's own broken reimplementation
+    (`InRange`), not the real module (`ArgMatcher.Range` via `arg_in_range`).
+    Tested directly against the real API: **it works** — no gap, no new bug
+    filed for this case.
+  - Real `CallVerifier.verify()` is panic-on-mismatch and returns nothing
+    (not a bool like the fake's `count_type`-based verifier), so each
+    verification case now calls `.verify()` as the panic-gated assertion and
+    separately asserts the underlying `recorder`/`get_matching_calls()`
+    state, rather than comparing `.verify()`'s return to `true`.
+- **`test/unit/std/mock_spec.spl`** (twin): the near-byte-identical
+  duplicate (593 vs 625 lines, `diff` confirmed only cosmetic loop-shape
+  differences, e.g. dict-literal `Stub.values` vs manual key/value list
+  scan) was **replaced with a 4-case smoke test** that imports the same real
+  `std.spec.mock` classes, instead of re-duplicating all 41 cases a second
+  time. The full 41-case suite lives only in the canonical
+  `test/unit/lib/common/mock_spec.spl` per this doc's own "consider
+  deduplicating" unblock note. **Result: 4/4 passed.**
+- No new gap bug docs were filed — every case ported cleanly against the
+  real module, including the one case that looked like a candidate gap.
+- Verified with `bin/simple test <path>` (per `.claude/rules/testing.md`),
+  binary `bin/release/x86_64-unknown-linux-gnu/simple` (mtime
+  2026-08-10 11:06:25 UTC; prints the Rust-seed WARNING banner per the
+  known Stage-3 self-host blocker, `bin/simple --version`).
