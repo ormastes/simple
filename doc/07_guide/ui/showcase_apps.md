@@ -58,7 +58,16 @@ Host-WM graphics and web catalog adapters are not yet accepted. Do not substitut
 
 ## SimpleOS/QEMU
 
-No showcase entry is accepted in the installed SimpleOS launcher yet. A valid result must show the installed `/sys/apps/*_showcase.smf` identity, guest PID/window ownership, nonblank guest framebuffer, and a post-input state/pixel change. Host wrappers and fixed serial markers are insufficient.
+The ARM64 real-screen fixture renders the canonical graphics core in a
+compositor-owned `graphics_2d_showcase` surface. Its attested producer and QMP
+consumer require detailed RAMFB section anchors rather than accepting generic
+chrome or cursor-only pixels. Current-main verification remains pending until
+the strict build, input correlation, and 39 FPS/NEON gate pass together.
+
+No showcase entry is accepted in the installed SimpleOS launcher yet. That
+separate result must show the installed `/sys/apps/*_showcase.smf` identity,
+guest PID/window ownership, nonblank guest framebuffer, and a post-input
+state/pixel change. Host wrappers and fixed serial markers are insufficient.
 
 ## Verification flow
 
