@@ -26,7 +26,7 @@ use os.port.qrb2210_vulkan_primitive_provider.{
 trait Qrb2210AdrenoKernelIo:
     fn readiness_status() -> i64
     fn physical_identity() -> Qrb2210VulkanKernelIdentity
-    me submit_command(command_buffer_handle: u64) -> Qrb2210VulkanKernelSubmitReceipt
+    me submit_command(frame_id: i64, command_buffer_handle: u64) -> Qrb2210VulkanKernelSubmitReceipt
     me wait_fence(submission_id: i64, timeout_ns: u64) -> Qrb2210VulkanKernelFenceReceipt
     me readback_frame(
         submission_id: i64,
@@ -59,13 +59,15 @@ fn qrb2210_adreno_binding_matches(
 
 fn qrb2210_adreno_submit_correlates(
     binding: Qrb2210VulkanPhysicalBinding,
+    frame_id: i64,
     command_buffer_handle: u64,
     receipt: Qrb2210VulkanKernelSubmitReceipt,
     previous_submission_id: i64
 ) -> bool:
     (qrb2210_vulkan_binding_has_kernel_handles(binding) and
-        command_buffer_handle > 0u64 and receipt.accepted and
+        frame_id > 0 and command_buffer_handle > 0u64 and receipt.accepted and
         receipt.submission_id > previous_submission_id and
+        receipt.frame_id == frame_id and
         receipt.boot_id == binding.device.boot_id and
         receipt.device_handle == binding.device.native_handle and
         receipt.firmware_handle == binding.firmware_handle and
@@ -81,11 +83,13 @@ fn qrb2210_adreno_submit_correlates(
 fn qrb2210_adreno_fence_correlates(
     binding: Qrb2210VulkanPhysicalBinding,
     submission_id: i64,
+    frame_id: i64,
     command_buffer_handle: u64,
     receipt: Qrb2210VulkanKernelFenceReceipt
 ) -> bool:
-    (submission_id > 0 and command_buffer_handle > 0u64 and receipt.completed and
+    (submission_id > 0 and frame_id > 0 and command_buffer_handle > 0u64 and receipt.completed and
         receipt.submission_id == submission_id and
+        receipt.frame_id == frame_id and
         receipt.command_buffer_handle == command_buffer_handle and
         receipt.boot_id == binding.device.boot_id and
         receipt.device_handle == binding.device.native_handle and
@@ -97,6 +101,14 @@ fn qrb2210_adreno_fence_correlates(
         receipt.queue_handle == binding.queue_handle and
         receipt.fence_handle == binding.fence_handle and
         receipt.driver_generation == binding.device.driver_generation)
+
+fn qrb2210_adreno_fence_is_fresh(
+    submission_id: i64,
+    last_submission_id: i64,
+    last_fence_submission_id: i64
+) -> bool:
+    submission_id > 0 and submission_id == last_submission_id and
+        submission_id != last_fence_submission_id
 
 fn qrb2210_adreno_readback_correlates(
     binding: Qrb2210VulkanPhysicalBinding,
@@ -118,6 +130,8 @@ fn qrb2210_adreno_readback_correlates(
         receipt.cache_domain_handle == binding.cache_domain_handle and
         receipt.command_pool_handle == binding.command_pool_handle and
         receipt.logical_device_handle == binding.logical_device_handle and
+        receipt.queue_handle == binding.queue_handle and
+        receipt.fence_handle == binding.fence_handle and
         receipt.readback_handle == binding.readback_handle and
         receipt.driver_generation == binding.device.driver_generation and
         receipt.width == width and receipt.height == height and
@@ -126,7 +140,7 @@ fn qrb2210_adreno_readback_correlates(
 
 fn _qrb2210_rejected_submit(command_buffer_handle: u64) -> Qrb2210VulkanKernelSubmitReceipt:
     Qrb2210VulkanKernelSubmitReceipt(
-        boot_id: "", submission_id: 0, device_handle: 0u64,
+        boot_id: "", submission_id: 0, frame_id: 0, device_handle: 0u64,
         firmware_handle: 0u64, mmu_context_handle: 0u64,
         cache_domain_handle: 0u64, command_pool_handle: 0u64,
         command_buffer_handle: command_buffer_handle, logical_device_handle: 0u64,
@@ -135,7 +149,8 @@ fn _qrb2210_rejected_submit(command_buffer_handle: u64) -> Qrb2210VulkanKernelSu
 
 fn _qrb2210_rejected_fence(submission_id: i64) -> Qrb2210VulkanKernelFenceReceipt:
     Qrb2210VulkanKernelFenceReceipt(
-        boot_id: "", submission_id: submission_id, command_buffer_handle: 0u64,
+        boot_id: "", submission_id: submission_id, frame_id: 0,
+        command_buffer_handle: 0u64,
         device_handle: 0u64, firmware_handle: 0u64, mmu_context_handle: 0u64,
         cache_domain_handle: 0u64, command_pool_handle: 0u64,
         logical_device_handle: 0u64, queue_handle: 0u64, fence_handle: 0u64,
@@ -150,13 +165,15 @@ fn _qrb2210_rejected_readback(
         command_buffer_handle: 0u64, device_handle: 0u64, firmware_handle: 0u64,
         mmu_context_handle: 0u64, cache_domain_handle: 0u64,
         command_pool_handle: 0u64, logical_device_handle: 0u64,
-        readback_handle: 0u64, driver_generation: 0, width: 0, height: 0,
+        queue_handle: 0u64, fence_handle: 0u64, readback_handle: 0u64,
+        driver_generation: 0, width: 0, height: 0,
         pixels: [], source: "", completed: false)
 
 class Qrb2210AdrenoVulkanKernelTransport:
     io: Qrb2210AdrenoKernelIo
     binding: Qrb2210VulkanPhysicalBinding
     last_submission_id: i64
+    last_submission_frame_id: i64
     last_command_buffer_handle: u64
     last_fence_submission_id: i64
     last_readback_frame_id: i64
@@ -175,18 +192,21 @@ impl Qrb2210VulkanKernelPort for Qrb2210AdrenoVulkanKernelTransport:
 
     me queue_submit(
         binding: Qrb2210VulkanPhysicalBinding,
+        frame_id: i64,
         command_buffer_handle: u64
     ) -> Qrb2210VulkanKernelSubmitReceipt:
         if (self.readiness_status() != UNO_Q_DESKTOP_STATUS_OK or
             not qrb2210_adreno_binding_matches(binding, self.binding) or
-            command_buffer_handle == 0u64):
+            frame_id <= 0 or command_buffer_handle == 0u64):
             return _qrb2210_rejected_submit(command_buffer_handle)
-        val receipt = self.io.submit_command(command_buffer_handle)
+        val receipt = self.io.submit_command(frame_id, command_buffer_handle)
         if not qrb2210_adreno_submit_correlates(
-                self.binding, command_buffer_handle, receipt, self.last_submission_id)):
+                self.binding, frame_id, command_buffer_handle,
+                receipt, self.last_submission_id)):
             receipt.accepted = false
             return receipt
         self.last_submission_id = receipt.submission_id
+        self.last_submission_frame_id = frame_id
         self.last_command_buffer_handle = command_buffer_handle
         self.last_fence_submission_id = 0
         receipt
@@ -198,11 +218,14 @@ impl Qrb2210VulkanKernelPort for Qrb2210AdrenoVulkanKernelTransport:
     ) -> Qrb2210VulkanKernelFenceReceipt:
         if (self.readiness_status() != UNO_Q_DESKTOP_STATUS_OK or timeout_ns == 0u64 or
             not qrb2210_adreno_binding_matches(binding, self.binding) or
-            submission_id != self.last_submission_id):
+            not qrb2210_adreno_fence_is_fresh(
+                submission_id, self.last_submission_id,
+                self.last_fence_submission_id)):
             return _qrb2210_rejected_fence(submission_id)
         val receipt = self.io.wait_fence(submission_id, timeout_ns)
         if not qrb2210_adreno_fence_correlates(
-                self.binding, submission_id, self.last_command_buffer_handle, receipt)):
+                self.binding, submission_id, self.last_submission_frame_id,
+                self.last_command_buffer_handle, receipt)):
             receipt.completed = false
             return receipt
         self.last_fence_submission_id = submission_id
@@ -219,6 +242,7 @@ impl Qrb2210VulkanKernelPort for Qrb2210AdrenoVulkanKernelTransport:
             not qrb2210_adreno_binding_matches(binding, self.binding) or
             submission_id != self.last_submission_id or
             submission_id != self.last_fence_submission_id or
+            frame_id != self.last_submission_frame_id or
             frame_id <= self.last_readback_frame_id or width <= 0 or height <= 0):
             return _qrb2210_rejected_readback(submission_id, frame_id)
         val receipt = self.io.readback_frame(submission_id, frame_id, width, height)
@@ -234,3 +258,4 @@ impl Qrb2210VulkanKernelPort for Qrb2210AdrenoVulkanKernelTransport:
 export Qrb2210AdrenoKernelIo, Qrb2210AdrenoVulkanKernelTransport
 export qrb2210_adreno_binding_matches, qrb2210_adreno_submit_correlates
 export qrb2210_adreno_fence_correlates, qrb2210_adreno_readback_correlates
+export qrb2210_adreno_fence_is_fresh

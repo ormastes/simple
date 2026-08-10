@@ -85,10 +85,12 @@ handle. `os.port.qrb2210_adreno_vulkan_kernel_transport` is the single
 fail-closed owner between those ports and the SimpleOS Adreno kernel I/O
 boundary. It binds the current boot and device to nonzero firmware, MMU, cache,
 physical/logical Vulkan device, queue, command-pool, fence, and device-readback
-handles. Submission IDs must increase, fence completion must name the exact
-submitted command buffer, and readback is admitted only after that exact fence
-and with a fresh matching frame. Any cross-boot, stale-generation, substituted
-resource, replayed submission, or mismatched readback is returned incomplete.
+handles. Submission IDs must increase; submission and fence receipts must name
+the exact frame and command buffer, and each fence completion is consumed only
+once. Readback is admitted only after that exact fence and from the bound
+queue, fence, and readback buffer for the submitted fresh frame. Any
+cross-boot, stale-generation, substituted resource, replayed submission/fence,
+or mismatched readback is returned incomplete.
 The owner does not set capability status and contains no DrawIR or Engine2D
 render path; shared DrawIR/Engine2D/Qualcomm Vulkan remains the only producer
 route.

@@ -13,17 +13,19 @@ any one resource rejects the binding.
 
 ## Submission and fence chain
 
-A submission receipt must carry a strictly newer submission ID and the exact
-command buffer and resource identity. Fence completion must refer to that same
-submission and command buffer. Replay, command substitution, stale generation,
-or boolean-only completion is rejected.
+A submission receipt must carry a strictly newer submission ID, exact frame
+ID, command buffer, and resource identity. Fence completion must refer to that
+same submission, frame, and command buffer and is consumed only once. Replay,
+frame/command substitution, stale generation, or boolean-only completion is
+rejected.
 
 ## Device readback chain
 
-Readback is accepted only after the exact fence completion, for a fresh exact
-frame, from the bound device readback buffer. Dimensions, pixel count, and the
-canonical device-memory source must agree. Cross-device, short, or CPU-source
-readbacks are rejected.
+Readback is accepted only after the exact fence completion, for the submitted
+fresh frame, from the bound queue, fence, and device readback buffer.
+Dimensions, pixel count, and the canonical device-memory source must agree.
+Cross-device, cross-queue, cross-fence, short, or CPU-source readbacks are
+rejected.
 
 ## Ownership boundary
 

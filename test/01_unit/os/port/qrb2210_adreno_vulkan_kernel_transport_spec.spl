@@ -12,6 +12,7 @@ use os.port.qrb2210_adreno_vulkan_kernel_transport.{
     qrb2210_adreno_binding_matches,
     qrb2210_adreno_submit_correlates,
     qrb2210_adreno_fence_correlates,
+    qrb2210_adreno_fence_is_fresh,
     qrb2210_adreno_readback_correlates
 }
 
@@ -29,7 +30,7 @@ fn binding() -> Qrb2210VulkanPhysicalBinding:
 
 fn submit() -> Qrb2210VulkanKernelSubmitReceipt:
     Qrb2210VulkanKernelSubmitReceipt(
-        boot_id: "boot-17", submission_id: 41, device_handle: 10u64,
+        boot_id: "boot-17", submission_id: 41, frame_id: 9, device_handle: 10u64,
         firmware_handle: 101u64, mmu_context_handle: 102u64,
         cache_domain_handle: 103u64, command_pool_handle: 104u64,
         command_buffer_handle: 201u64, logical_device_handle: 12u64,
@@ -38,7 +39,8 @@ fn submit() -> Qrb2210VulkanKernelSubmitReceipt:
 
 fn fence() -> Qrb2210VulkanKernelFenceReceipt:
     Qrb2210VulkanKernelFenceReceipt(
-        boot_id: "boot-17", submission_id: 41, command_buffer_handle: 201u64,
+        boot_id: "boot-17", submission_id: 41, frame_id: 9,
+        command_buffer_handle: 201u64,
         device_handle: 10u64, firmware_handle: 101u64,
         mmu_context_handle: 102u64, cache_domain_handle: 103u64,
         command_pool_handle: 104u64, logical_device_handle: 12u64,
@@ -51,7 +53,8 @@ fn readback() -> Qrb2210VulkanKernelReadbackReceipt:
         command_buffer_handle: 201u64, device_handle: 10u64,
         firmware_handle: 101u64, mmu_context_handle: 102u64,
         cache_domain_handle: 103u64, command_pool_handle: 104u64,
-        logical_device_handle: 12u64, readback_handle: 15u64,
+        logical_device_handle: 12u64, queue_handle: 13u64,
+        fence_handle: 14u64, readback_handle: 15u64,
         driver_generation: 3, width: 2, height: 2,
         pixels: [1u32, 2u32, 3u32, 4u32],
         source: QRB2210_DEVICE_READBACK_SOURCE, completed: true)
@@ -77,22 +80,27 @@ describe "QRB2210 Adreno Vulkan kernel transport owner":
         expect(qrb2210_adreno_binding_matches(wrong_queue, owned)).to_be(false)
 
     it "rejects replay and command substitution at submit":
-        expect(qrb2210_adreno_submit_correlates(binding(), 201u64, submit(), 40)).to_be(true)
-        expect(qrb2210_adreno_submit_correlates(binding(), 201u64, submit(), 41)).to_be(false)
-        expect(qrb2210_adreno_submit_correlates(binding(), 202u64, submit(), 40)).to_be(false)
+        expect(qrb2210_adreno_submit_correlates(binding(), 9, 201u64, submit(), 40)).to_be(true)
+        expect(qrb2210_adreno_submit_correlates(binding(), 9, 201u64, submit(), 41)).to_be(false)
+        expect(qrb2210_adreno_submit_correlates(binding(), 10, 201u64, submit(), 40)).to_be(false)
+        expect(qrb2210_adreno_submit_correlates(binding(), 9, 202u64, submit(), 40)).to_be(false)
         var wrong_generation = submit()
         wrong_generation.driver_generation = 2
-        expect(qrb2210_adreno_submit_correlates(binding(), 201u64, wrong_generation, 40)).to_be(false)
+        expect(qrb2210_adreno_submit_correlates(binding(), 9, 201u64, wrong_generation, 40)).to_be(false)
 
     it "requires the exact command and fence completion":
-        expect(qrb2210_adreno_fence_correlates(binding(), 41, 201u64, fence())).to_be(true)
-        expect(qrb2210_adreno_fence_correlates(binding(), 42, 201u64, fence())).to_be(false)
+        expect(qrb2210_adreno_fence_correlates(binding(), 41, 9, 201u64, fence())).to_be(true)
+        expect(qrb2210_adreno_fence_correlates(binding(), 42, 9, 201u64, fence())).to_be(false)
+        expect(qrb2210_adreno_fence_correlates(binding(), 41, 10, 201u64, fence())).to_be(false)
         var wrong_command = fence()
         wrong_command.command_buffer_handle = 202u64
-        expect(qrb2210_adreno_fence_correlates(binding(), 41, 201u64, wrong_command)).to_be(false)
+        expect(qrb2210_adreno_fence_correlates(binding(), 41, 9, 201u64, wrong_command)).to_be(false)
         var incomplete = fence()
         incomplete.completed = false
-        expect(qrb2210_adreno_fence_correlates(binding(), 41, 201u64, incomplete)).to_be(false)
+        expect(qrb2210_adreno_fence_correlates(binding(), 41, 9, 201u64, incomplete)).to_be(false)
+        expect(qrb2210_adreno_fence_is_fresh(41, 41, 0)).to_be(true)
+        expect(qrb2210_adreno_fence_is_fresh(41, 41, 41)).to_be(false)
+        expect(qrb2210_adreno_fence_is_fresh(40, 41, 0)).to_be(false)
 
     it "requires exact device readback generation and frame identity":
         expect(qrb2210_adreno_readback_correlates(
@@ -115,12 +123,21 @@ describe "QRB2210 Adreno Vulkan kernel transport owner":
         wrong_source.source = "cpu-copy"
         expect(qrb2210_adreno_readback_correlates(
             binding(), 41, 9, 201u64, 2, 2, wrong_source)).to_be(false)
+        var wrong_queue = readback()
+        wrong_queue.queue_handle = 99u64
+        expect(qrb2210_adreno_readback_correlates(
+            binding(), 41, 9, 201u64, 2, 2, wrong_queue)).to_be(false)
+        var wrong_fence = readback()
+        wrong_fence.fence_handle = 99u64
+        expect(qrb2210_adreno_readback_correlates(
+            binding(), 41, 9, 201u64, 2, 2, wrong_fence)).to_be(false)
 
     it "owns transport only and cannot promote capability or render privately":
         val source = file_read_text(OWNER)
         expect(source).to_contain("impl Qrb2210VulkanKernelPort")
         expect(source).to_contain("submission_id != self.last_fence_submission_id")
         expect(source).to_contain("frame_id <= self.last_readback_frame_id")
+        expect(source).to_contain("qrb2210_adreno_fence_is_fresh")
         expect(source.contains("uno_q_desktop_set")).to_be(false)
         expect(source.contains("DrawIrComposition")).to_be(false)
         expect(source.contains("Engine2D")).to_be(false)

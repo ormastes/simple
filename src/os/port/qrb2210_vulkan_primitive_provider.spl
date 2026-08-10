@@ -61,6 +61,7 @@ class Qrb2210VulkanKernelIdentity:
 class Qrb2210VulkanKernelSubmitReceipt:
     boot_id: text
     submission_id: i64
+    frame_id: i64
     device_handle: u64
     firmware_handle: u64
     mmu_context_handle: u64
@@ -76,6 +77,7 @@ class Qrb2210VulkanKernelSubmitReceipt:
 class Qrb2210VulkanKernelFenceReceipt:
     boot_id: text
     submission_id: i64
+    frame_id: i64
     command_buffer_handle: u64
     device_handle: u64
     firmware_handle: u64
@@ -99,6 +101,8 @@ class Qrb2210VulkanKernelReadbackReceipt:
     cache_domain_handle: u64
     command_pool_handle: u64
     logical_device_handle: u64
+    queue_handle: u64
+    fence_handle: u64
     readback_handle: u64
     driver_generation: i64
     width: i32
@@ -112,6 +116,7 @@ trait Qrb2210VulkanKernelPort:
     me physical_identity(binding: Qrb2210VulkanPhysicalBinding) -> Qrb2210VulkanKernelIdentity
     me queue_submit(
         binding: Qrb2210VulkanPhysicalBinding,
+        frame_id: i64,
         command_buffer_handle: u64
     ) -> Qrb2210VulkanKernelSubmitReceipt
     me fence_wait(
@@ -203,8 +208,10 @@ impl Qrb2210GpuSubmitPort for Qrb2210VulkanGpuSubmitProvider:
                 submission_id: 0, frame_id: batch.frame_id,
                 native_device_handle: 0u64, device_identity: "", accepted: false)
         val identity = self.kernel.physical_identity(self.binding)
-        val receipt = self.kernel.queue_submit(self.binding, batch.command_buffer_handle)
+        val receipt = self.kernel.queue_submit(
+            self.binding, batch.frame_id, batch.command_buffer_handle)
         val accepted = receipt.accepted and receipt.submission_id > 0 and
+            receipt.frame_id == batch.frame_id and
             receipt.boot_id == self.binding.device.boot_id and
             receipt.command_buffer_handle == batch.command_buffer_handle and
             receipt.device_handle == self.binding.device.native_handle and
@@ -242,6 +249,7 @@ impl Qrb2210GpuFencePort for Qrb2210VulkanGpuFenceProvider:
         val receipt = self.kernel.fence_wait(
             self.binding, submission_id, QRB2210_FENCE_TIMEOUT_NS)
         val completed = receipt.completed and receipt.submission_id == submission_id and
+            receipt.frame_id > 0 and
             receipt.boot_id == self.binding.device.boot_id and
             receipt.device_handle == self.binding.device.native_handle and
             receipt.firmware_handle == self.binding.firmware_handle and
@@ -293,6 +301,8 @@ impl Qrb2210DeviceReadbackPort for Qrb2210VulkanDeviceReadbackProvider:
             receipt.cache_domain_handle == self.binding.cache_domain_handle and
             receipt.command_pool_handle == self.binding.command_pool_handle and
             receipt.logical_device_handle == self.binding.logical_device_handle and
+            receipt.queue_handle == self.binding.queue_handle and
+            receipt.fence_handle == self.binding.fence_handle and
             receipt.readback_handle == self.binding.readback_handle and
             receipt.driver_generation == self.binding.device.driver_generation and
             receipt.width == width and receipt.height == height and
