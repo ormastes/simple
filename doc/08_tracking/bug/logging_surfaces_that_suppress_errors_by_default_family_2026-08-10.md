@@ -436,3 +436,80 @@ board-runnable claim — nothing here demonstrates bytes reaching a UART. The
 hosted lane is unaffected: `build.rs`'s source list is byte-identical apart from
 a comment, and `runtime_log_hosted.c` still compiles clean under the same
 `-Werror` gate.
+
+## Follow-up 3 (2026-08-10) — x86_64 UNBLOCKED and wired; `rt_port_*` gets its own TU
+
+The ownership question is resolved. Per-symbol analysis of the two candidate
+owners:
+
+| symbol(s) | `runtime_minimal.c` | `runtime_native.c` | correct freestanding owner |
+|---|---|---|---|
+| `rt_port_{inb,outb,inw,outw,inl,outl,io_wait}` | **real** `in`/`out` asm under `#if __x86_64__ \|\| __i386__`, no-op stubs elsewhere | **not defined at all** | `runtime_minimal.c`'s — and there is **no conflict**, this family is unique to it |
+| `rt_read_cr3`, `rt_write_cr3`, `rt_invlpg` | **real** `mov %cr3` / `invlpg` asm | **host fakes** (`rt_read_cr3` returns a `static uint64_t`, `rt_invlpg` is `(void)addr;`) | `runtime_minimal.c`'s — but not needed by the log lane |
+| `rt_volatile_{read,write}_u{8,16,32,64}` (8) | real volatile deref | **identical** real volatile deref | either; genuinely duplicate, semantically equal |
+
+So the previously-recorded "11 duplicated symbols" splits into 3 host-fakes and
+8 semantic duplicates — and **none of them is `rt_port_*`**. That reframes the
+blocker: it was never an ODR conflict over port I/O, only a barrier to adding
+`runtime_minimal.c` *wholesale*.
+
+**Split chosen:** move the `rt_port_*` family out of `runtime_minimal.c` into a
+new freestanding TU `src/runtime/startup/baremetal/runtime_port_io.c`, and add
+both it and `startup/baremetal/runtime_log` to the x86_64 loop in
+`src/os/port/llvm/sysroot.shs`.
+
+Why this and not the alternatives:
+- It is the **exact minimal cut**. `rt_port_*` is the only part of
+  `runtime_minimal.c` the sysroot needs and the only part with zero overlap
+  against `runtime_native.o`, so nothing else has to move or be decided.
+- **Moved, not copied** — one global definition site, so no lane can ever see
+  two. A `#ifdef`-guarded `runtime_minimal.c` (option b) would have left two
+  archives able to drift apart on a preprocessor condition, and would still
+  have dragged the BSS/halt/descriptor-table code into every sysroot link.
+- It **cascades nowhere**: an exhaustive grep shows no build system compiles
+  `runtime_minimal.c` at all (`build.rs` is host-only and lists neither file;
+  the sole compile site is the inline `clang` line in
+  `test/02_integration/baremetal_build_spec.spl`, which links only
+  `crt0.o + runtime_minimal.o` and references no `rt_port_*`). The three
+  host-fake symbols therefore never meet their real counterparts anywhere.
+- Side benefit: `src/os/kernel/arch/x86/com1_common.spl`, `arch/reset.spl` and
+  `arch/x86_32/cpu.spl` already declare `extern fn rt_port_*`; those references
+  had **no definition in any sysroot archive** before this change.
+
+**Verification (x86_64), all five gates:**
+
+1. **Compile** — full `sh src/os/port/llvm/sysroot.shs` run exits **0**; the
+   new TUs compile clean under
+   `-Werror=int-conversion -Werror=incompatible-pointer-types -Wall -Wextra`
+   for `x86_64/aarch64/riscv64-unknown-none-elf` **and** `armv7m-none-eabi`.
+2. **Undefined symbols** — `llvm-nm -u runtime_port_io.o` = **0**;
+   `runtime_log.o`'s 2 (`rt_port_inb`, `rt_port_outb`) are now satisfied by
+   `runtime_port_io.o` **in the same archive**.
+   `libsimple_runtime_native.a` = 10 members (was 8).
+3. **Freestanding link** — `ld.lld -nostdlib --entry=_start probe.o
+   runtime_log.o runtime_port_io.o -o probe_x86_64.elf` succeeds;
+   `llvm-nm -u probe_x86_64.elf` = **0**.
+4. **ODR** — across all 10 members, 656 exported defs, the new objects add
+   **0 collisions**. (Pre-existing, unrelated: 14 duplicate defs among
+   `runtime_native.o` / `runtime_memory.o` / `runtime_time.o` — `rt_alloc`,
+   `rt_free`, `rt_memcpy`, `rt_memset`, `copy_mem`, `rt_ptr_*`,
+   `rt_time_now_*`, `rt_mem_guard_stats`. Not introduced here; worth its own
+   entry.)
+5. **Disassembly** — `llvm-objdump -d` shows
+   `rt_log_target_device_write_bytes` branching `cmpl $0x3/$0x2/$0x1` and
+   `callq <rt_port_inb>` / `<rt_port_outb>`, whose bodies are the real
+   `outb %al, %dx` / `inb` instructions. **0** libc symbols in the ELF.
+
+**Regression** — `scripts/os/simpleos-sysroot-aarch64.shs` and
+`scripts/os/simpleos-sysroot-riscv64.shs` both exit **0**; `runtime_log.o` is
+present in each `libsimpleos_all.a` with **0** undefined symbols. Host build
+untouched: `build.rs` compiles neither `runtime_minimal.c` nor
+`runtime_port_io.c` (its only mentions are comments). The armv7m
+`runtime_minimal.o` used by `baremetal_build_spec.spl` still compiles clean and
+carries **0** `rt_port_*` references, so removing them broke nothing there.
+
+**Board-evidence scope:** still **AOT-buildable / link-verified only.** No
+physical board and no real-firmware QEMU proxy (OVMF pflash) run was performed,
+so per `.claude/rules/board-runnable.md` this is explicitly **NOT** a
+board-runnable claim — nothing here demonstrates bytes reaching a real COM1.
+The remaining step for a board claim is an OVMF-pflash boot with serial capture.

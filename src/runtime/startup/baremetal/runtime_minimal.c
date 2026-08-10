@@ -190,56 +190,15 @@ void rt_store_barrier(void) {
 }
 
 /* ========================================================================
- * x86 Port I/O — for PS/2 keyboard, PIC, serial, PCI config space.
+ * x86 Port I/O (rt_port_inb/outb/inw/outw/inl/outl/io_wait) MOVED
+ * 2026-08-10 to `runtime_port_io.c` in this directory, which is now their
+ * single global definition site. The move lets the SimpleOS x86_64 sysroot
+ * link `runtime_log.c` (its COM1 path calls rt_port_outb/inb) without
+ * pulling in this TU, whose rt_read_cr3/rt_write_cr3/rt_invlpg/
+ * rt_volatile_* definitions would collide with runtime_native.o in that
+ * archive. See src/os/port/llvm/sysroot.shs and
+ * doc/08_tracking/bug/logging_surfaces_that_suppress_errors_by_default_family_2026-08-10.md
  * ======================================================================== */
-
-#if defined(__x86_64__) || defined(__i386__)
-
-uint8_t rt_port_inb(uint16_t port) {
-    uint8_t result;
-    __asm__ volatile ("inb %1, %0" : "=a"(result) : "Nd"(port));
-    return result;
-}
-
-void rt_port_outb(uint16_t port, uint8_t value) {
-    __asm__ volatile ("outb %0, %1" : : "a"(value), "Nd"(port));
-}
-
-uint16_t rt_port_inw(uint16_t port) {
-    uint16_t result;
-    __asm__ volatile ("inw %1, %0" : "=a"(result) : "Nd"(port));
-    return result;
-}
-
-void rt_port_outw(uint16_t port, uint16_t value) {
-    __asm__ volatile ("outw %0, %1" : : "a"(value), "Nd"(port));
-}
-
-uint32_t rt_port_inl(uint16_t port) {
-    uint32_t result;
-    __asm__ volatile ("inl %1, %0" : "=a"(result) : "Nd"(port));
-    return result;
-}
-
-void rt_port_outl(uint16_t port, uint32_t value) {
-    __asm__ volatile ("outl %0, %1" : : "a"(value), "Nd"(port));
-}
-
-/* I/O wait — short delay for slow I/O devices */
-void rt_port_io_wait(void) {
-    __asm__ volatile ("outb %%al, $0x80" : : "a"(0));
-}
-
-#else
-/* Stubs for non-x86 */
-uint8_t rt_port_inb(uint16_t port) { (void)port; return 0; }
-void rt_port_outb(uint16_t port, uint8_t value) { (void)port; (void)value; }
-uint16_t rt_port_inw(uint16_t port) { (void)port; return 0; }
-void rt_port_outw(uint16_t port, uint16_t value) { (void)port; (void)value; }
-uint32_t rt_port_inl(uint16_t port) { (void)port; return 0; }
-void rt_port_outl(uint16_t port, uint32_t value) { (void)port; (void)value; }
-void rt_port_io_wait(void) {}
-#endif
 
 /* ========================================================================
  * x86 special registers — CR3, MSR access for kernel.

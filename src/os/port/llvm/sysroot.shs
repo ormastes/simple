@@ -161,23 +161,23 @@ build_libc_runtime() {
                 -ffunction-sections -fdata-sections -O2 -D__simpleos__=1 \
                 -isystem $LIBC_DIR/include"
             RT_OBJS=""
-            # TODO(x86_64 UART log): startup/baremetal/runtime_log.c is
-            # deliberately NOT in this list, unlike the aarch64/riscv64 sysroot
-            # lanes which DO build it (its PL011/NS16550 paths are pure MMIO and
-            # resolve with zero undefined symbols). On x86_64 its COM1 path calls
-            # rt_port_outb/rt_port_inb, which nothing in this sysroot defines:
-            # the only definitions live in startup/baremetal/runtime_minimal.c,
-            # and that TU duplicates 11 symbols already owned by runtime_native.o
-            # here (rt_read_cr3, rt_write_cr3, rt_invlpg,
-            # rt_volatile_{read,write}_u{8,16,32,64}), so it cannot just be
-            # appended. Adding runtime_log.o alone would put an unresolvable
-            # rt_port_outb into this archive and break the SimpleOS link for any
-            # program that reaches the log lib. Resolving it needs a decision on
-            # which TU owns the port-I/O + MMIO family on the SimpleOS target --
-            # see doc/08_tracking/bug/logging_surfaces_that_suppress_errors_by_default_family_2026-08-10.md
+            # startup/baremetal/runtime_log provides the real UART emitter
+            # (rt_simpleos_log_emit + rt_log_target_device_write_bytes). On
+            # x86_64 its COM1 path calls rt_port_outb/rt_port_inb, so
+            # startup/baremetal/runtime_port_io must be built alongside it --
+            # that TU is the single global owner of the rt_port_* family
+            # (moved out of startup/baremetal/runtime_minimal.c on 2026-08-10,
+            # which cannot be added here because its rt_read_cr3 /
+            # rt_write_cr3 / rt_invlpg / rt_volatile_{read,write}_u{8,16,32,64}
+            # would collide with runtime_native.o in this same archive).
+            # runtime_native.c defines no rt_port_* at all, so there is no ODR
+            # overlap. See
+            # doc/08_tracking/bug/logging_surfaces_that_suppress_errors_by_default_family_2026-08-10.md
             for rt_src in runtime_native runtime_simd_utf8 runtime_contracts \
                           runtime_memory runtime_time runtime_timestamp \
-                          runtime_pool runtime_memtrack
+                          runtime_pool runtime_memtrack \
+                          startup/baremetal/runtime_port_io \
+                          startup/baremetal/runtime_log
             do
                 rt_obj="$RT_BUILD/$(basename "$rt_src").o"
                 "$CC" $RT_CFLAGS -c "$REPO_ROOT/src/runtime/$rt_src.c" \
