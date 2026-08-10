@@ -719,9 +719,100 @@ struct Needle:
     text_: text
     line: i64
 
+# DEFECT 6: a needle only counts when its RECEIVER holds product source text.
+# `expect(stdout.trim()).to_contain("hello")` (subprocess output),
+# `expect(mingw).to_contain("-lgcc")` (a list returned by a product function) and
+# `name.contains("_test.")` (a spec-local literal) can never comment-cheat, yet
+# every one of them was reported HOLLOW because `reads_source_text` is a
+# whole-FILE test: one file_read anywhere licensed every needle in the spec.
+#
+# Source-bound names are collected two ways: `val X = <read call>` bindings, and
+# zero-argument helper `fn X()` whose body performs a read within 12 lines.
+fn is_read_call(line: text) -> bool:
+    line.contains("file_read") or line.contains("read_file")
+        or line.contains("read_to_string") or line.contains("read_text")
+        or line.contains("read_source")
+
+fn binding_name(line: text) -> text:
+    val t = line.trim()
+    var kw = ""
+    if t.starts_with("val "):
+        kw = "val "
+    if t.starts_with("var "):
+        kw = "var "
+    if kw == "":
+        return ""
+    var rest = t.substring(kw.len(), t.len())
+    var i: i64 = 0
+    while i < rest.len() and is_ident_char(rest.substring(i, i + 1)):
+        i = i + 1
+    rest.substring(0, i)
+
+fn fn_decl_name(line: text) -> text:
+    val t = line.trim()
+    if not t.starts_with("fn "):
+        return ""
+    var rest = t.substring(3, t.len())
+    var i: i64 = 0
+    while i < rest.len() and is_ident_char(rest.substring(i, i + 1)):
+        i = i + 1
+    rest.substring(0, i)
+
+fn source_bound_names(src: text) -> [text]:
+    var out: [text] = []
+    val lines = src.split("\n")
+    var i: i64 = 0
+    while i < lines.len():
+        val raw = lines[i]
+        if is_read_call(raw):
+            val b = binding_name(raw)
+            if b != "" and not list_has(out, b):
+                out.push(b)
+        val f = fn_decl_name(raw)
+        if f != "":
+            var j = i + 1
+            var lim = i + 13
+            if lim > lines.len():
+                lim = lines.len()
+            while j < lim:
+                if is_read_call(lines[j]):
+                    if not list_has(out, f):
+                        out.push(f)
+                    j = lim
+                else:
+                    j = j + 1
+        i = i + 1
+    out
+
+# Identifier match must respect token boundaries: a bare `line.contains(name)`
+# matched `a` inside `to_contain`, which re-admitted every excluded receiver.
+fn contains_token(line: text, name: text) -> bool:
+    if name == "":
+        return false
+    var at = index_of(line, name)
+    while at >= 0:
+        var okl = true
+        var okr = true
+        if at > 0 and is_ident_char(line.substring(at - 1, at)):
+            okl = false
+        val e = at + name.len()
+        if e < line.len() and is_ident_char(line.substring(e, e + 1)):
+            okr = false
+        if okl and okr:
+            return true
+        at = index_from(line, name, at + 1)
+    false
+
+fn line_has_source_receiver(line: text, bound: [text]) -> bool:
+    for n in bound:
+        if contains_token(line, n):
+            return true
+    false
+
 fn spec_needles(src: text, paths: [text]) -> [Needle]:
     var out: [Needle] = []
     var seen: [text] = []
+    val bound = source_bound_names(src)
     val lines = src.split("\n")
     var i: i64 = 0
     while i < lines.len():
@@ -729,7 +820,14 @@ fn spec_needles(src: text, paths: [text]) -> [Needle]:
         i = i + 1
         if not (raw.contains("to_contain(\"") or raw.contains(".contains(\"")):
             continue
+        # DEFECT 7: the spec's OWN comments were harvested for needles, so a spec
+        # already re-anchored ("Was `to_contain(\"a source\")`, which matched only
+        # the rationale comment.") kept re-reporting the needle it had removed.
+        if raw.trim().starts_with("#"):
+            continue
         if is_negative_assertion(raw):
+            continue
+        if not line_has_source_receiver(raw, bound):
             continue
         for lit in string_literals(raw):
             if lit.len() < 4:
@@ -929,6 +1027,9 @@ fn control_spec_source() -> text:
     s = s + "        expect(b).to_contain(\"ctrl_paired_needle\")\n"
     s = s + "        expect(a).to_not_contain(\"ctrl_absent_needle\")\n"
     s = s + "        expect(a.contains(\"ctrl_tobe_false_needle\")).to_be(false)\n"
+    s = s + "        val (outp, _e, _c) = process_run(\"echo\", [\"hi\"])\n"
+    s = s + "        expect(outp).to_contain(\"ctrl_stdout_needle\")\n"
+    s = s + "        # expect(b).to_contain(\"ctrl_commented_needle\")\n"
     s
 
 fn run_control() -> bool:
@@ -988,6 +1089,12 @@ fn run_control() -> bool:
     if list_has(cneedles, "ctrl_tobe_false_needle"):
         ok = false
         print("  control MISMATCH hollow/to_be_false: to_be(false) absence assertion became a needle")
+    if list_has(cneedles, "ctrl_stdout_needle"):
+        ok = false
+        print("  control MISMATCH hollow/non_source_receiver: subprocess stdout became a needle")
+    if list_has(cneedles, "ctrl_commented_needle"):
+        ok = false
+        print("  control MISMATCH hollow/spec_comment: a commented-out spec line became a needle")
     if not list_has(cneedles, "ctrl_paired_needle"):
         ok = false
         print("  control MISMATCH hollow/positive_needle: real needle was not collected")
@@ -1005,7 +1112,8 @@ fn run_control() -> bool:
         print("control: SHADOW fires on a colliding name, silent on a spec-only name")
         print("control: HOLLOW fires on 2 planted comment-only needles, silent on")
         print("         shell case arm, C preprocessor, C define, mispaired path,")
-        print("         markdown heading, negative assertion")
+        print("         markdown heading, negative assertion, non-source receiver,")
+        print("         commented-out spec line")
     ok
 
 # ------------------------------------------------------------------------ scan
