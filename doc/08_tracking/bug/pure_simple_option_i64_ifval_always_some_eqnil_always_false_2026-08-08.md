@@ -215,3 +215,34 @@ symptom this bug is about. **This is the seed JIT, not the pure-Simple AOT lane
 this doc's verification bar requires** — `bin/simple native-build` on the same
 probe was started but did not finish compiling within this session's time
 budget. Do not close this doc until that AOT sweep is run and matches.
+
+## 2026-08-10 AOT native-build attempt — blocked by an unrelated SIGSEGV
+
+The `native-build` for the full probe (`i64?`/`bool?`/`text?` truth table)
+eventually completed (~500s+ full-compiler build, no incremental cache hit) and
+produced a binary, but running it crashes immediately:
+
+```
+[simple-runtime] Fatal: SIGSEGV at address 0x1000000
+Backtrace: probe_bin(+0x32c4) -> libc -> libc -> probe_bin(+0x3129) -> probe_bin(+0x2e88)
+```
+
+Three-frame backtrace, crash at a suspiciously round low address, before any of
+the probe's own print output appears — this looks like an unrelated
+runtime/entry-point defect (possibly in `native-build`'s `--entry-closure`
+startup path for a standalone script outside the main compiler tree), not
+something caused by the Option/nil fix under test. Confirming that
+categorization, and getting a full AOT truth-table result, needs another
+build-and-run cycle that this session's time budget does not allow (each
+native-build of the full compiler for this single-file probe costs 500s+, with
+no faster incremental path found).
+
+**Net status unchanged: OPEN/unconfirmed on the AOT lane.** The seed/interpreter
+evidence above still stands as partial confirmation that the fix's logic is
+correct; the AOT lane specifically remains unverified, now for two compounding
+reasons: (1) the required build is very slow, (2) the resulting binary hit an
+apparently-unrelated crash before this session could observe the truth-table
+output. Follow-up should first isolate whether the SIGSEGV is generic to any
+`native-build --entry-closure` single-file probe (try the simplest possible
+`fn main(): print("hi")` through the same path) before re-attempting this bug's
+specific sweep.
