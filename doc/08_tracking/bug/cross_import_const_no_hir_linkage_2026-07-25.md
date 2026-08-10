@@ -1,6 +1,26 @@
 # BUG: an imported module-level const has no cross-module HIR linkage
 
-**Status:** OPEN — root-caused statically, fix NOT applied (see hazard below)
+**Status:** OPEN — re-verified 2026-08-10, still blocked (see hazard below)
+
+**Re-verification (2026-08-10):** Reproduced fresh on
+`bin/release/x86_64-unknown-linux-gnu/simple` (seed) via `native-build
+--runtime-bundle core-c-bootstrap --mode one-binary --entry-closure`:
+- Cross-import case (`use owner.{BASE}` + `print(BASE)`): still fails with
+  `MIR lowering error: undefined variable: BASE` — exact match to the
+  original symptom.
+- Blocking-bug control case (`val BASE: i64 = 5` + `print(BASE)` in the SAME
+  module, no import): still fails to build, now with a different error
+  (`MIR lowering error: unsupported MIR type kind [infer-arm]:
+  HirTypeKind::Infer((0, 0))` instead of the originally-reported "MIR module
+  has no functions" message) — the blocking bug
+  (`native_build_mir_module_has_no_functions_2026-07-25.md`) is itself
+  unresolved, so the doc's own precondition ("verify against a control that
+  passes") still cannot be met. Root cause at
+  `src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl` (missing
+  `qualify_imported_function_symbol`-equivalent for `Const` imports) is
+  unchanged on inspection. Left OPEN and blocked, per the doc's own ordering
+  — applying the const-import fix without the `lower_static` bypass and a
+  passing control remains an active link-time-duplicate-symbol hazard.
 **Found:** 2026-07-25
 **Related:** `952d2ca34d7` fixed the SAME-module half of this defect.
 **Blocked by:** `doc/08_tracking/bug/native_build_mir_module_has_no_functions_2026-07-25.md`
