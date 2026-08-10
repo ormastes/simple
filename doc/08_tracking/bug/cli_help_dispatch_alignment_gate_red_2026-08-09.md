@@ -1,7 +1,11 @@
 # `cli_help_alignment_spec` is RED — help text and dispatch have drifted by 18 commands
 
 Date: 2026-08-09
-Status: OPEN — pre-existing, not caused by the change that found it.
+Status: OPEN — pre-existing, not caused by the change that found it. Item 1 of
+the unblock condition (the `val`/`push` spec defect) is FIXED as of 2026-08-10;
+items 2-4 (the real 25-command help/dispatch gap, `check-capsule`, and the
+`verify`/`gen-lean` experimental tags) remain open and are CLI-surface work,
+not a test-repair fix.
 Severity: medium. The gate that is supposed to keep `simple --help` honest is
 itself failing, so help/dispatch drift is currently unpoliced.
 
@@ -44,11 +48,37 @@ Byte-identical failure set, and the 33-vs-51 counts are unchanged, so the new
 subcommand contributes nothing to the gap. The file was restored byte-exactly
 afterwards (`git hash-object` matched, `git status` clean).
 
+## Re-verify 2026-08-10 — item 1 FIXED, real gap now measured
+
+`val missing_from_help_non_experimental: [text] = []` in
+`test/01_unit/app/cli_help_alignment_spec.spl:197` was changed to `var` (the
+array is `.push`ed in the loop below it, which requires a mutable binding).
+Re-ran `bin/simple run test/01_unit/app/cli_help_alignment_spec.spl`:
+
+```
+declared>=15 executed=15 passed=10 failed=5   exit 1
+```
+
+Same pass/fail count as before (the spec-defect failure is replaced by a real
+one), but the third example now actually executes and reports the true gap:
+
+```
+✗ every dispatch command has help text or is tagged experimental
+  expected 25 to equal 0
+```
+
+i.e. 25 dispatch-only commands lack help text or an experimental tag (larger
+than the 18 estimated from the count mismatch). The other four failures
+(`check-capsule`, the 33-vs-51 count, and the `verify`/`gen-lean` experimental
+tags) are unchanged and still require real CLI-surface changes to
+`src/app/cli/_CliMain/main_and_help.spl` / `src/app/cli/cli_helpers.spl` —
+out of scope for this pass; left OPEN.
+
 ## Unblock condition
 
-1. Fix the `val` → `var` defect on `missing_from_help_non_experimental` so the
+1. ~~Fix the `val` → `var` defect on `missing_from_help_non_experimental` so the
    third example can actually execute; expect it to then report the real list of
-   dispatch commands missing help text.
+   dispatch commands missing help text.~~ DONE 2026-08-10.
 2. Reconcile the 18-command gap between `print_cli_help()` and the dispatcher —
    either add help entries or tag the commands experimental/hidden.
 3. Remove `check-capsule` from help, or implement its dispatch branch.
