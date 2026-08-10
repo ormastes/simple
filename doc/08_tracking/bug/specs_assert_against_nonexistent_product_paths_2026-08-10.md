@@ -229,6 +229,96 @@ re-verified green (3 controls unaffected: planted-missing still flagged,
 existing-path still silent, comment-only still ignored). Census row count:
 2004 -> 2002.
 
+## Q35 (2026-08-10): all 63 remaining RENAMED-CANDIDATE-UNVERIFIED rows resolved
+
+Reviewed each of the 63 rows left open by Q34. For every row, the target
+basename match was confirmed present in the committed tree, then judged on
+two axes: (a) is the rename family coherent (same file, not a generic
+filename collision) -- verified by reading the target's actual content, not
+just its path; (b) does the missing-path literal sit in file-read position
+(`read_file`/`read_text`/`rt_file_read_text`/`file_read`/`rt_file_exists`/
+`file_exists`) in the referring spec, not inside a `to_contain`/`to_equal`
+content or algorithm assertion, and not inside a classification/categorizer
+fixture where the string is merely an example input that need not resolve
+on disk.
+
+**8 confirmed genuine renames, fixed** (4 commits, all pushed):
+
+| before | after | legs |
+|---|---|---|
+| `src/hardware/fpga_linux/riscv_fpga_linux.spl` | `src/lib/hardware/fpga_linux/riscv_fpga_linux.spl` | `fpga_linux_split_spec.spl` + `rtl_mdsoc_capsule_boundary_spec.spl`, both `test/03_system`+`test/system` legs (4 files) |
+| `src/compiler/80.driver/build/layer_check.spl` | `src/compiler/90.tools/coupling/layer_check.spl` | `layer_ci_spec.spl`, `test/01_unit`+`test/unit` legs (2 files) |
+| `test/util/game2d_pin_golden_hash.spl` | `test/fixtures/repro/game2d/game2d_pin_golden_hash.spl` | `game2d_golden_spec.spl`, `test/03_system`+`test/system` legs (2 files) |
+| `src/app/llm_caret/claude_full/commands/extra-usage/extra-usage-core.spl` | `doc/11_archive/llm_caret_claude_full_hyphen_port/commands/extra-usage/extra-usage-core.spl` | `extra_usage_command_spec.spl` (no twin) |
+| `.../extra-usage/extra-usage-noninteractive.spl` | `doc/11_archive/.../extra-usage/extra-usage-noninteractive.spl` | `extra_usage_command_spec.spl` (no twin) |
+| `.../extra-usage/extra-usage.spl` | `doc/11_archive/.../extra-usage/extra-usage.spl` | `extra_usage_command_spec.spl` (no twin) |
+| `.../commands/sandbox-toggle/sandbox-toggle.spl` | `doc/11_archive/.../commands/sandbox-toggle/sandbox-toggle.spl` | `review_rewind_sandbox_spec.spl` (no twin) |
+| `.../ink/log-update.spl` | `doc/11_archive/.../ink/log-update.spl` | `log-update_spec.spl` (no twin) |
+
+Each fix was verified: target content matches the referring spec's own
+description (fpga facade module content, `LayerViolation`/
+`find_layer_violations` in layer_check.spl, the FNV-1a determinism script
+comment in game2d, and the 83-line `sandbox-toggle.spl` matching the
+spec's `> 81` line-count assertion). The `src/compiler/80.driver/build/
+baremetal.spl` -> `src/compiler/90.tools/verify/baremetal.spl` candidate
+was checked the same way and **rejected**: the target is a ported
+`verify-baremetal-setup.sh` script, not the `TargetPreset` struct file the
+spec describes (`compile_to_llvm_ir_pure` -- 0 matches in the target).
+
+**55 reclassified UNRESOLVED-DELETED-OR-NEVER-EXISTED** (not fixed, not
+re-chaseable):
+
+- **Coincidental basename collisions** (target content or context
+  unrelated to the referring spec): three `multicore_green.spl` tier
+  variants, three `crt0.s` arch variants (all basename-collide the same
+  `arm32/boot/crt0.s`), `dep.spl`/`mod_b.spl`/`new.spl`/`module.spl`/
+  `empty.spl`/`g.spl`/generic-name fixture paths, `login.spl`,
+  `date.spl`, `api_spec.spl` (x2 sites), `hello_spec.spl`,
+  `crypto_spec.spl`, `graph_spec.spl`, `tutorial.md` (vendored jj-cli
+  docs, unrelated), `persistent.spl`, `alloc.spl`, `init.spl`.
+- **Genuine target but never in file-read position** -- literal appears
+  only inside a `to_contain`/`to_equal` content assertion, a
+  classification/categorizer fixture string (`mock_categorize`,
+  `infer_qemu_arch`, `screenshot_dir_for_spec`, `categorize_test_file`,
+  etc. -- the string is a synthetic example input to an algorithm, not a
+  path the spec reads), or a path-construction/normalization test
+  (`llvm_backend.spl`, `F64.spl` -- asserting a naming convention's
+  output, not reading the file): the 6 rows already flagged non-fixable
+  in Q34 (`mcp_command_and_response_gap_analysis...md`,
+  `mcp_protocol_compliance.md`, `security_aop.md`,
+  `simple_mcp_debug_design.md`, `security_aop_spec.md`, `test_db.sdn`),
+  plus `shb_types.spl`, `check-executable-size-budgets.shs`,
+  `repo_hygiene_gate.spl`, `module_tests.rs`, `INDEX.md` (no longer found
+  in the referring `.spl` source at all -- only in the generated
+  `doc/06_spec/**.md` manual, which is out of scope to edit), the whole
+  test-tree "reorg-shaped" family (`arm64_boot_spec.spl`,
+  `remote_baremetal_runtime_spec.spl`, `tmux_rest_api_spec.spl`,
+  `collections_qemu_spec.spl`, `runtime_error_stack.spl`,
+  `riscv32_spec.spl`) -- all used only as example path strings fed to a
+  categorizer/dir-resolver function, never read from disk -- and
+  `km.spl`, whose spec *deliberately* asserts both the `.com` and
+  non-`.com` on-disk spellings are tolerated (not a stale reference at
+  all).
+- **Extraction artifacts, not real single paths**: 4
+  `multicore_green_*` rows whose "missing path" is actually a full shell
+  command string (`src/compiler_rust/target/debug/simple test ...`)
+  swept up from a `to_contain` assertion, and one
+  `profile_report_contract_test.shs; ...; profile_binary_autoselect_test.shs`
+  row that is a semicolon-joined multi-path string from a single
+  assertion line, not one path.
+
+No spec was weakened, skipped, or had an assertion softened. Every edit
+touched only a `read_file`/`read_text`/`rt_file_read_text`/`file_read`/
+`rt_file_exists` literal argument.
+
+Updated: `doc/08_tracking/test/spec_missing_path_classification_2026-08-10.tsv`
+(60 RENAMED-CONFIRMED / 0 RENAMED-CANDIDATE-UNVERIFIED / 966
+UNRESOLVED-DELETED-OR-NEVER-EXISTED of 1026 total).
+
+Commits: `8d8fc6b8bec` (fpga_linux), `3536ae52127` (layer_check.spl),
+`2f8750351fb` (game2d_pin_golden_hash.spl), `f725c3c96e2` (llm_caret
+archive family), `854b5ce5888` (TSV reclassification).
+
 ### Terminal note on the 911 UNRESOLVED bucket
 
 Re-confirmed this bucket is **closed, not partially worked**: every one of
