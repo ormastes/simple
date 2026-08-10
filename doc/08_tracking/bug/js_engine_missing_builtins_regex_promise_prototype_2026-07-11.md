@@ -1,6 +1,6 @@
 ---
 id: js_engine_missing_builtins_regex_promise_prototype_2026-07-11
-status: OPEN
+status: PARTIALLY-FIXED (2/3 fixed 2026-08-10; regex replace still open)
 severity: medium
 discovered: 2026-07-11
 discovered_by: famous-page JS conformance probe (tools/pixel_compare/probe_js_char.spl)
@@ -10,7 +10,31 @@ related: src/lib/common/js/engine/runtime.spl
 
 # JS engine: regex String.replace is a no-op, Promise undefined, prototype methods not introspectable
 
-**Status:** OPEN. Engine-core; filed by the browser-script-API agent (does not
+**Status 2026-08-10:** Items 2 and 3 FIXED; item 1 (regex replace) still OPEN.
+
+The engine is pure Simple (`src/lib/nogc_sync_mut/js/engine/**`), not Rust seed.
+Root cause of 2+3: `eval_unary`'s `typeof <Identifier>` branch used a
+cache-only global lookup and never fell through to the normal identifier
+resolution path (which already knew `Promise`, timers, and host globals) —
+`src/lib/nogc_sync_mut/js/engine/interpreter_eval.spl` (typeof branch, was
+lines 378-397). And `eval_member` returned `Undefined` for builtin prototype
+method names because those are dispatched by NAME at call sites only
+(`interpreter_eval.spl` eval_call `_is_array_method`/`_is_string_method`
+checks), never materialized as values —
+`src/lib/nogc_sync_mut/js/engine/interpreter_eval_member.spl` fallthrough.
+
+Fix: typeof-Identifier now delegates to `eval_expression` (ReferenceError
+suppression preserved: unknown identifiers still yield "undefined"), and
+`eval_member` surfaces known array/string prototype methods as function
+values. Regression spec (sabotage-verified RED→GREEN):
+`test/01_unit/lib/js/typeof_builtin_introspection_spec.spl`.
+
+Item 1 remains OPEN: regex literals reach `eval_call`'s string-method dispatch
+but `replace` in `interpreter_string_methods.spl` only handles string search
+arguments; a full regexp engine exists at `src/lib/common/js/builtins/regexp.spl`
+but the nogc engine does not integrate it.
+
+**Originally:** OPEN. Engine-core; filed by the browser-script-API agent (does not
 own `js/engine/**` or `common/js/**`).
 
 ## Summary
@@ -43,23 +67,6 @@ Working for reference (so the gaps above are specific, not a dead interpreter):
 => 8.
 
 Reproduce: `bin/simple run tools/pixel_compare/probe_js_char.spl`.
-
-## 2026-08-09 re-verification (worktree agent)
-
-Re-ran `tools/pixel_compare/probe_js_char.spl` fresh in an isolated worktree
-(seed binary, no self-hosted `bin/simple` deployed there). Non-DOM builtins
-still behave as the doc's "working for reference" list states (`[8] 8.0`,
-`[9] 2,4,6` for arithmetic/array-map-join), and the probe still reports the
-DOM-blocked slots as `undefined` (see sibling doc
-`js_engine_no_dom_bom_globals_2026-07-11.md` for that overlap). Did not
-isolate a standalone regex/Promise/prototype-introspection-only repro in this
-pass; the gaps this doc names (regex-`replace` no-op, `Promise` undefined,
-`typeof obj.method`) are genuine subset-interpreter feature gaps in
-`src/lib/nogc_sync_mut/js/engine/interpreter.spl` /
-`src/lib/common/js/engine/runtime.spl` — implementing regex substitution, a
-`Promise` object, and prototype-property reflection is new engine-core
-functionality, not a scoped bugfix. **Confirmed ARCHITECTURAL-OPEN**, left as
-filed; no root-cause fix applied in this session.
 
 ## Expected
 

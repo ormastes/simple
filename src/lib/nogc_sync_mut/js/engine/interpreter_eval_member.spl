@@ -206,13 +206,24 @@ impl JsInterpreter:
                 val len_val = self.get_object_property(obj_id, "length")
                 if not strict_equals(len_val, JsValue.Undefined):
                     return Ok(len_val)
-            return Ok(self._proto_lookup(obj_id, property))
+            val proto_val = self._proto_lookup(obj_id, property)
+            if strict_equals(proto_val, JsValue.Undefined) and _is_array_method(property):
+                # Builtin prototype methods are dispatched by name at call
+                # sites, so plain property reads used to yield undefined and
+                # feature-detection (`if (arr.forEach)`) took the wrong branch
+                # (bug js_engine_missing_builtins_regex_promise_prototype_2026-07-11).
+                # Surface them as function values for introspection.
+                return Ok(JsValue.Function(id: self._register_native("__proto_method_" + property, -1)))
+            return Ok(proto_val)
         # String — use typeof_value to avoid match destructuring
         val tv = typeof_value(obj_val)
         if tv == "string":
             if property == "length":
                 val str_val = js_to_string(obj_val)
                 return Ok(JsValue.Number(v: str_val.len().to_f64()))
+            if _is_string_method(property):
+                # Same introspection gap as array methods above.
+                return Ok(JsValue.Function(id: self._register_native("__proto_method_" + property, -1)))
         # TypeError: Cannot read properties of undefined/null
         if tv == "undefined" or strict_equals(obj_val, JsValue.Null):
             self.thrown_value = JsValue.String(v: "TypeError: Cannot read properties of " + tv)

@@ -11,8 +11,22 @@ related: src/lib/gc_async_mut/gpu/browser_engine/script/script_runner.spl
 
 # JS engine binds no DOM/BOM globals — famous-page DOM JS silently no-ops
 
-**Status:** OPEN. Engine-core; filed by the browser-script-API agent (owns
-`browser_engine/script/*`, does not own `js/engine/**`).
+**Status:** OPEN — but re-characterized 2026-08-10. The engine is pure Simple
+(`src/lib/nogc_sync_mut/js/engine/**`, NOT Rust seed), and it ALREADY has host
+DOM/BOM identifier hooks: `window`/`self`/`document`/`location`/`navigator`/
+`chrome`/`sessionStorage`/`localStorage` resolve at
+`src/lib/nogc_sync_mut/js/engine/interpreter_eval.spl:39-54` whenever the
+corresponding `host_*_id >= 0`, and `document.title`/`cookie`/`body`/`location`
+plus `body.innerHTML`/`textContent` member reads are handled in
+`src/lib/nogc_sync_mut/js/engine/interpreter_eval_member.spl` (host_document_id
+branch). The actual gap is the WIRING: the `run_page_scripts` lane
+(`src/lib/gc_async_mut/gpu/browser_engine/script/script_runner.spl`) creates
+`js_runtime_with_default_logger` per script and never populates the host ids
+from the parsed `BeDomNode` tree, so every `host_*_id` stays -1 and the
+identifiers fall through to "undefined". Fix belongs in the script_runner /
+ScriptHost bridge, not in engine core. (`typeof document` etc. now at least
+route through the same identifier path after the 2026-08-10 typeof fix, so
+wiring the host ids will make both evaluation and feature detection work.)
 
 ## Summary
 
@@ -54,24 +68,6 @@ A browser `JsRuntime` should expose at minimum `document` (with
 `window`/`window.location`, `navigator.userAgent`, and `localStorage`, bridged
 to the existing `browser_engine/script/*` API and the parsed `BeDomNode` tree
 the `ScriptHost` already holds.
-
-## 2026-08-09 re-verification (worktree agent)
-
-Re-ran `tools/pixel_compare/probe_js_char.spl` fresh in an isolated worktree
-(no `bin/simple` deployed there; used the main repo's seed binary). Confirmed
-still reproducing exactly as described:
-
-```
-[WARN] [page-scripts] ReferenceError: document is not defined
-[0] undefined   ... [7] undefined   (DOM/BOM-dependent probes)
-[8] 8.0                              (non-DOM arithmetic, works)
-[9] 2,4,6                            (non-DOM array ops, works)
-```
-
-`document` is still unresolved in the JS interpreter's global environment;
-non-DOM builtins are unaffected. This is genuine engine-core work (new global
-object surface + bridging to `browser_engine/script/dom_api.spl`), not a
-scoped bugfix — **confirmed ARCHITECTURAL-OPEN**, left as filed.
 
 ## Notes
 

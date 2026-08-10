@@ -378,23 +378,20 @@ impl JsInterpreter:
         if op == "typeof":
             match operand:
                 JsExpression.Identifier(name):
-                    if env == self.global_env:
-                        val cached = self.lookup_global_value(name)
-                        if val Some(v) = cached:
-                            return Ok(JsValue.String(v: typeof_value(v)))
-                        if name == "setImmediate":
-                            val immediate_fn = JsValue.Function(id: self._register_native("setImmediate", NATIVE_SET_IMMEDIATE))
-                            self.define_global_value("setImmediate", immediate_fn)
-                            return Ok(JsValue.String(v: typeof_value(immediate_fn)))
-                        if name == "clearImmediate":
-                            val clear_immediate_fn = JsValue.Function(id: self._register_native("clearImmediate", NATIVE_CLEAR_IMMEDIATE))
-                            self.define_global_value("clearImmediate", clear_immediate_fn)
-                            return Ok(JsValue.String(v: typeof_value(clear_immediate_fn)))
-                        return Ok(JsValue.String(v: "undefined"))
-                    val lookup = self.env_stack.get_var(env, name)
-                    if val Some(v) = lookup:
-                        return Ok(JsValue.String(v: typeof_value(v)))
-                    return Ok(JsValue.String(v: "undefined"))
+                    # typeof must resolve through the SAME identifier path as
+                    # normal evaluation (Promise, host document/window/navigator/
+                    # localStorage, timer globals, ...). A separate cache-only
+                    # lookup here made `typeof Promise` report "undefined" even
+                    # though `Promise.resolve(...)` worked (bug
+                    # js_engine_missing_builtins_regex_promise_prototype_2026-07-11).
+                    # eval_expression on an unknown identifier returns Undefined
+                    # (warn only), matching typeof's ReferenceError suppression.
+                    val v = self.eval_expression(operand, env)?
+                    # Constructors modeled as namespace objects still report
+                    # "function" per spec.
+                    if name == "Promise" and typeof_value(v) == "object":
+                        return Ok(JsValue.String(v: "function"))
+                    return Ok(JsValue.String(v: typeof_value(v)))
                 _:
                     val v = self.eval_expression(operand, env)?
                     return Ok(JsValue.String(v: typeof_value(v)))
