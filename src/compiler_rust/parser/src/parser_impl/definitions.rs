@@ -66,6 +66,10 @@ impl<'a> Parser<'a> {
         self.parse_mixin()
     }
 
+    pub(super) fn parse_trait_with_attrs(&mut self, _attributes: Vec<Attribute>) -> Result<Node, ParseError> {
+        self.parse_trait()
+    }
+
     /// Parse a class/struct/enum alias: `alias NewName = OldName`
     ///
     /// # Syntax

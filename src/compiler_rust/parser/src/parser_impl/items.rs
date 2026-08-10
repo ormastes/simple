@@ -519,6 +519,14 @@ impl<'a> Parser<'a> {
                         return Ok(node);
                     }
                     TokenKind::Mixin => return self.parse_mixin_with_attrs(attributes),
+                    TokenKind::Trait => {
+                        // Without this arm a decorator-shaped attribute
+                        // (`@doc("...")`) before a trait fell through to the
+                        // function parser and failed with "expected Fn,
+                        // found Trait" — same root cause as the Union arm
+                        // above.
+                        return self.parse_trait_with_attrs(attributes);
+                    }
                     _ => {}
                 }
                 let mut node = self.parse_function_with_attrs(decorators, attributes)?;
