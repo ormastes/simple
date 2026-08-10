@@ -1,6 +1,7 @@
 # BUG: `use std.spec.*` does not import `expect_not` — only the explicit form does
 
-**Status:** OPEN
+**Status:** OPEN (re-verified 2026-08-10) — architectural, needs compiler
+module-resolution work, not a source-level fix
 **Found:** 2026-08-04
 **Severity:** medium — the documented boolean-assertion shortcut is unreachable
 through the import form the specs actually use, and the repo's own lint rules
@@ -92,3 +93,39 @@ them apart needs a lane that can rebuild/bootstrap and re-measure:
 Separately, `src/lib/nogc_sync_mut/spec.spl` should get its missing `export`
 list on general principle (all three sibling tiers have one) — but land that
 with a test that actually observes it, not as a speculative fix for this bug.
+
+## 2026-08-10 re-verification
+
+Re-ran the doc's own repro on Linux (self-hosted-tooling not deployed here —
+`bin/simple` resolves to the Rust seed
+`bin/release/x86_64-unknown-linux-gnu/simple`, same "bootstrap seed only"
+delegation the original report flagged):
+
+```
+$ SIMPLE_TIMEOUT_SECONDS=180 bin/simple test test/01_unit/std/spec_expect_bool_shortcut_spec.spl
+    semantic: function `expect_not` not found
+SPEC FILE VERDICT: ... declared>=3 executed=3 passed=2 failed=1 dropped=0
+```
+
+Identical to the original report (2 passed / 1 failed, same "function
+`expect_not` not found" message). This confirms: (a) the bug is real and
+reproducible on Linux, not Windows-specific; (b) it survives to the current
+`main` unchanged.
+
+`src/lib/nogc_sync_mut/spec.spl` still has **zero** `^export` lines (`grep -c
+'^export' src/lib/nogc_sync_mut/spec.spl` → 0) — the missing-export-list wart
+noted above is still present and still unfixed, and per the doc's own record
+that fix was already tried and found NOT to resolve the star-import failure
+(refuted, see above), so it was not retried here.
+
+This is left OPEN as architectural: root-causing requires either (a) tracing
+the Rust-seed's `use std.X.*` resolution path to determine whether star
+imports re-walk `export use module.{...}` re-export lists (the
+`nogc_async_mut/spec.spl` probe shows they don't, even though `expect_not` is
+explicitly named there), or (b) confirming the seed compiles specs against a
+baked-in stdlib snapshot rather than `src/lib` on disk. Both require
+instrumenting or rebuilding the Rust seed (`src/compiler_rust/**`), which is
+out of scope for a pure-Simple source fix and excluded from this session's
+edit scope. No regression was added beyond the existing
+`test/01_unit/std/spec_expect_bool_shortcut_spec.spl`, which already pins the
+failure precisely and continues to fail for the right reason.
