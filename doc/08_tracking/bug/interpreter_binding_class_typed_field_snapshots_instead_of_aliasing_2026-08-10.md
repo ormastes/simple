@@ -78,3 +78,82 @@ GREEN and guard the fix that did land.
 Interpreter materialises a class-typed field read as the same instance the
 aggregate holds. Then P6 reads 1 in both engines and the RED example goes
 green with no change to its assertions.
+
+---
+
+## Root cause located (2026-08-10) — still OPEN, fix is a value-model change
+
+### Reproduction re-confirmed, with lane attribution actually checked
+
+`build/q18/probe_nesting.spl`, deployed seed, both lanes in one session:
+
+| lane | P6 | NEGCTL | `[jit-fallback]` lines on stderr |
+|---|---|---|---|
+| interpreter (`SIMPLE_EXECUTION_MODE=interpret`) | `back_through_root=0` | 0 | — |
+| JIT (default `run`) | `back_through_root=1` | 0 | **0** |
+
+The JIT run was confirmed to be a genuine JIT run (zero `[jit-fallback]`
+diagnostics), so the divergence is real and not a mis-attributed fallback.
+
+### Why it happens
+
+The interpreter is the **Rust seed**, and it has no true reference values. In
+`src/compiler_rust/compiler/src/value.rs:1114` a class instance is
+
+```rust
+Object { class: String, fields: Arc<HashMap<String, Value>> }
+```
+
+— an `Arc` used for cheap cloning with **copy-on-write** mutation via
+`Arc::make_mut`. Struct and class instances share this one representation.
+Binding `val mid = c3.inner` clones the `Value`, so the `Arc` is now shared;
+the first mutation through `mid` calls `Arc::make_mut`, which **clones the map
+because it is shared**, and the root never observes the write.
+
+Reference semantics are not modelled; they are *simulated* at call boundaries
+only. `src/compiler_rust/compiler/src/interpreter_call/core/function_exec.rs:953`
+defines `is_value_type_struct` over `ClassDef::is_value_type` (declared in
+`src/compiler_rust/parser/src/ast/nodes/definitions.rs:393`, whose own doc
+comment states structs are VALUE types and `class` are REFERENCE types), and
+lines 1065/1088 use it to **copy the callee's value back** into the caller after
+a call. That machinery covers only `ArgSource::Ident` and `ArgSource::Field`
+argument positions.
+
+That is exactly why P2–P5 pass and only P6 fails: `co.c.bump()` resolves as a
+*place* rooted at the real variable (`interpreter/place.rs:90` pushes
+`Projection::Field`), so the mutation lands on the root. `val mid = c3.inner`
+severs that provenance — `mid` is a fresh root with no record that it came from
+`c3.inner`, and no copy-back path exists for local bindings.
+
+### Why this is not a small patch
+
+1. **There is no other interpreter to fix.** `src/compiler/10.frontend/core/interpreter/eval.spl`
+   is a constant-expression evaluator — it contains no `FieldAccess`/`Object`
+   handling at all. User programs run on the Rust seed, so this cannot be fixed
+   in pure `.spl`, which collides with the repo's "fix .spl not Rust" rule and
+   needs an explicit ruling.
+2. **A correct fix changes the value model.** Genuine aliasing needs shared
+   interior mutability (e.g. `Arc<RwLock<..>>`) for class instances; there are
+   **210 non-vendor `Value::Object` match sites**. The alternative — recording
+   alias provenance for local bindings and propagating writes back up the field
+   path after every mutating statement — keeps the model but extends an already
+   ad-hoc copy-back simulation into local scopes.
+3. **An existing test locks the current behaviour.**
+   `interpreter/node_exec.rs::field_assignment_cow_protects_struct_local_alias`
+   asserts that aliasing an object to a second local and mutating through it must
+   NOT leak. It builds its object with an **empty `classes` map**, so
+   `is_value_type_struct` returns false and the instance is treated as a
+   reference type — meaning a naive "non-value-type objects alias" fix breaks
+   this test. Any fix must consult a populated class registry and keep unknown
+   classes on value semantics, and that test should be updated to register its
+   `Point` as `is_value_type: true` to say what it actually means.
+4. **It sits on the deferred axis.** This is adjacent to the open
+   struct deep-copy-vs-shared-handle question, which is reserved for the repo
+   owner. `class` is unambiguously a reference type, but the *mechanism* chosen
+   here will determine the struct answer too, so it should be decided together.
+
+### Status
+
+Root-caused with file:line, not fixed. The blocked example in
+`sj_daemon_mutual_exclusion_spec.spl` therefore **remains RED**, correctly, and
+was not touched or softened.
