@@ -33,3 +33,11 @@ Backend contract:
 The 2D scene is divided into labeled primitive, raster/image/text, transform/clip, and blend sections. The web page is `examples/06_io/ui/browser_common_elements_showcase.html`. The GUI scene retains the existing widget gallery and exposes semantic state for every interactive control.
 
 Errors carry app ID, surface, phase, and backend/transport cause. A blank frame, synthetic handle, CPU mirror presented as GPU readback, static source check, or unavailable window reported as success is an error.
+
+The ARM64 QEMU fixture renders the canonical graphics core at `752x584` inside
+the `2d_showcase_backed_cpu_simd` window. Its acceptance wrapper verifies the
+exact `graphics_2d_showcase` identity receipt, all seven section labels in the
+shared source, four deterministic primitive-color anchors, detailed palette
+and nonblank ratios, 4 warmup plus 64 guest-timed frames at at least 39 FPS,
+positive native NEON counters, ordered pointer/button/Tab events, and a
+non-cursor-only titlebar change in real RAMFB screendumps.
