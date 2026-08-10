@@ -505,22 +505,41 @@ fn _engine2d_draw_ir_render_borders(engine: Engine2D, style: [DrawIrStyleProp], 
         eng.draw_rect_filled(x + w - right_w, y, right_w, h, right_c)
     eng
 
-fn _engine2d_draw_ir_render_glass_material(engine: Engine2D, command: DrawIrCommand, x: i32, y: i32, w: i32, h: i32, radius: i32) -> Engine2dDrawIrGlassOutcome:
+fn _engine2d_draw_ir_render_glass_material(engine: Engine2D, command: DrawIrCommand, x: i32, y: i32, w: i32, h: i32, radius: i32, fb_w: i32, fb_h: i32) -> Engine2dDrawIrGlassOutcome:
     var eng = engine
     val unavailable = engine2d_glass_execution_unavailable(
         "glass-material-not-composited")
     val style: [DrawIrStyleProp] = command.computed_style
     val capability = _engine2d_draw_ir_style_value(
         style, "backdrop-filter-capability")
+    # LENGTH-gated defect receipts (bounded: only fires for a command whose
+    # capability text is contract-length, i.e. a node the paint layer marked
+    # material-ready). Length is used instead of `==` so the receipt still
+    # fires if the freestanding text-compare defect corrupts the equality
+    # below — that failure mode would otherwise be indistinguishable from a
+    # non-material rect.
+    val cap_is_contract_len = capability.len() >= 30
     if (capability != "engine2d-composited-glass-material-v1" and
         capability != "engine2d-cpu-composited-material-v1"):
+        if cap_is_contract_len:
+            print "[engine2d-glass] not-composited reason=capability-compare cap={capability} cap_len={capability.len()}"
         return Engine2dDrawIrGlassOutcome(
             engine: eng, composited: false, execution: unavailable)
-    val framebuffer_width = eng.width()
-    val framebuffer_height = eng.height()
+    # fb_w/fb_h are threaded from the render-loop entry instead of re-read
+    # here: on the freestanding x86_64 lane, `eng.width()`/`eng.height()` at
+    # this call depth returned corrupted values (measured fb_w=49 for a 392px
+    # surface and fb_h=33 for a 264px one — one field garbage per read, the
+    # struct field-index-collision class), which made the bounds check below
+    # reject every correctly-sized full-surface material rect and silently
+    # zeroed cpu_composited_material_count. Fall back to the engine reads only
+    # when a caller did not supply dimensions.
+    val framebuffer_width = if fb_w > 0: fb_w else: eng.width()
+    val framebuffer_height = if fb_h > 0: fb_h else: eng.height()
     if (x < 0 or y < 0 or w <= 0 or h <= 0 or
         x.to_i64() + w.to_i64() > framebuffer_width.to_i64() or
         y.to_i64() + h.to_i64() > framebuffer_height.to_i64()):
+        if cap_is_contract_len:
+            print "[engine2d-glass] not-composited reason=bounds x={x} y={y} w={w} h={h} fb_w={framebuffer_width} fb_h={framebuffer_height}"
         return Engine2dDrawIrGlassOutcome(
             engine: eng, composited: false, execution: unavailable)
     val backdrop = _engine2d_draw_ir_style_value(style, "backdrop-filter")
@@ -530,6 +549,8 @@ fn _engine2d_draw_ir_render_glass_material(engine: Engine2D, command: DrawIrComm
     val realized_saturation_text = _engine2d_draw_ir_style_value(
         style, "backdrop-filter-realized-saturation-milli")
     if realized_blur_text == "" or realized_saturation_text == "":
+        if cap_is_contract_len:
+            print "[engine2d-glass] not-composited reason=realized-props-missing blur_len={realized_blur_text.len()} sat_len={realized_saturation_text.len()}"
         return Engine2dDrawIrGlassOutcome(
             engine: eng, composited: false, execution: unavailable)
     val realized_blur = _engine2d_draw_ir_nth_int(
@@ -593,11 +614,15 @@ fn _engine2d_draw_ir_render_glass_material(engine: Engine2D, command: DrawIrComm
         return Engine2dDrawIrGlassOutcome(
             engine: eng, composited: true, execution: device_execution)
     if device_execution.failure_reason == "device-glass-state-unknown":
+        if cap_is_contract_len:
+            print "[engine2d-glass] not-composited reason=device-glass-state-unknown"
         return Engine2dDrawIrGlassOutcome(
             engine: eng, composited: false, execution: device_execution)
     val pixels = engine2d_draw_ir_glass_material_pixels(
         eng.read_pixels(), config)
     if pixels.len() != w.to_i64() * h.to_i64():
+        if cap_is_contract_len:
+            print "[engine2d-glass] not-composited reason=cpu-glass-pixels len={pixels.len()} expected={w.to_i64() * h.to_i64()}"
         return Engine2dDrawIrGlassOutcome(
             engine: eng, composited: false, execution: unavailable)
     eng.draw_image(x, y, w, h, pixels)
@@ -614,7 +639,7 @@ fn _engine2d_draw_ir_render_glass_material(engine: Engine2D, command: DrawIrComm
 # box that still has a border or shadow paints instead of vanishing. Engine2D is
 # value-copied across this free-function boundary, so the caller MUST reassign
 # from the returned engine.
-fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32, y: i32, w: i32, h: i32) -> Engine2dDrawIrBoxOutcome:
+fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32, y: i32, w: i32, h: i32, fb_w: i32, fb_h: i32) -> Engine2dDrawIrBoxOutcome:
     var eng = engine
     val style: [DrawIrStyleProp] = command.computed_style
     val typed_shadows = engine2d_draw_ir_typed_box_shadows(style)
@@ -671,7 +696,7 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
         )
     else:
         _engine2d_draw_ir_render_glass_material(
-            eng, command, x, y, w, h, radius)
+            eng, command, x, y, w, h, radius, fb_w, fb_h)
     eng = glass.engine
     if glass.composited:
         if shadow_admitted:
@@ -1394,6 +1419,12 @@ fn _engine2d_embed_offscreen_acquire(owner: Engine2D, w: i32, h: i32) -> Result<
 # _engine2d_draw_ir_render_box), so callers reassign the typed outcome engine.
 fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand], offset_x: i32, offset_y: i32, images: [Engine2dResolvedDrawIrImage], blend_images: bool, metal_device_glass_required: bool, active_clip: DrawIrRect, css_background_pixel_work_budget: i64) -> Engine2dDrawIrRenderOutcome:
     var eng = engine
+    # Surface dimensions read ONCE at loop entry and threaded down to the
+    # glass-material bounds check; deep re-reads of eng.width()/height()
+    # returned corrupted values on the freestanding lane (see
+    # _engine2d_draw_ir_render_glass_material).
+    val surface_fb_w = eng.width()
+    val surface_fb_h = eng.height()
     var rendered = 0
     var skipped = 0
     var unsupported_kinds = ""
@@ -1438,7 +1469,8 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
                 metal_device_glass_requested_count = (
                     metal_device_glass_requested_count + 1)
             val box = _engine2d_draw_ir_render_box(
-                eng, command, x, y, command.width, command.height)
+                eng, command, x, y, command.width, command.height,
+                surface_fb_w, surface_fb_h)
             eng = box.engine
             if box.glass_execution.execution_target == "cpu-scalar-glass-v1":
                 cpu_composited_material_count = cpu_composited_material_count + 1
@@ -1451,6 +1483,13 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
                     glass_execution_target = box.glass_execution.execution_target
                     glass_backend_handle = box.glass_execution.backend_handle
                     glass_device_identity = box.glass_execution.device_identity
+            elif _engine2d_draw_ir_style_value(
+                    command.computed_style,
+                    "backdrop-filter-capability").len() >= 30:
+                # Contract-marked rect whose execution did not land on either
+                # counted target. Length-gated (not ==) so the receipt still
+                # fires if the equality above is itself the corrupted step.
+                print "[engine2d-glass] uncounted-contract-rect target={box.glass_execution.execution_target} target_len={box.glass_execution.execution_target.len()} reason={box.glass_execution.failure_reason}"
             if metal_requested and not (
                 box.glass_execution.execution_target ==
                     "metal-device-glass-v1" and

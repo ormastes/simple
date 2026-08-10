@@ -3006,9 +3006,22 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
             print "[web-style-producer] contract-attr index={i} attrs_len={nd.attrs_raw.len()} raw_len={wm_fallback_attr.len()} trimmed_len={wm_fallback_trimmed.len()} lower_len={wm_fallback.len()} raw_match={probe_raw_match} final_match={probe_final_match}"
         val wm_material_mode: text = attr_value(
             nd.attrs_raw, "data-wm-theme-material-mode")
+        # Bind every contract comparison ONCE, immediately after extraction.
+        # Re-comparing these text locals ~120 lines later (after the font
+        # resolver and style cascade calls) has been observed to flip on the
+        # freestanding x86_64 lane: the same iteration printed
+        # `contract-attr ... final_match=1` and then took NEITHER the admitted
+        # nor the rejected branch, so the material witness silently stayed
+        # "none" and the WM degraded every window
+        # (content-provenance-rejected). Same defect class as the chained
+        # attr_value(...).trim().lower() corruption documented above; the fix
+        # idiom is the same — evaluate at extraction depth, carry booleans.
+        val wm_fallback_is_solid: bool = wm_fallback == "solid-material"
+        val wm_mode_is_cpu: bool =
+            wm_material_mode == "engine2d-cpu-composited-material-v1"
+        val wm_mode_is_empty: bool = wm_material_mode == ""
         if (
-            wm_fallback == "solid-material" and
-            wm_material_mode != "engine2d-cpu-composited-material-v1"
+            wm_fallback_is_solid and not wm_mode_is_cpu
         ):
             val wm_bg_attr: text = attr_value(nd.attrs_raw, "data-wm-theme-bg")
             val wm_bg: text = wm_bg_attr.trim()
@@ -3091,8 +3104,8 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
         val static_material = st.animation_name == "none"
         val cpu_admitted = (
             material_channel_ready and static_material and
-            wm_material_mode == "engine2d-cpu-composited-material-v1" and
-            wm_fallback == "solid-material" and declared_opaque and
+            wm_mode_is_cpu and
+            wm_fallback_is_solid and declared_opaque and
             translucent_surface and mat_layers == "" and
             typed_stops_valid and backdrop.admitted)
         if cpu_admitted:
@@ -3112,7 +3125,7 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
             cpu_material_nodes.push(i)
         val solid_admitted = (
             material_channel_ready and static_material and
-            wm_material_mode == "" and wm_fallback == "solid-material" and
+            wm_mode_is_empty and wm_fallback_is_solid and
             declared_opaque and opaque_surface and mat_backdrop == "" and
             mat_layers == "" and typed_stops_absent)
         if solid_admitted:
@@ -3125,10 +3138,14 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
             solid_material_entry_count = solid_material_entry_count + 1
             solid_material_nodes.push(i)
         if (
-            wm_fallback == "solid-material" and
+            wm_fallback_is_solid and
             not cpu_admitted and not solid_admitted
         ):
             print "[web-style-producer] entry-rejected index={i} mode={wm_material_mode} bg={mat_bg} gf={mat_gf} gt={mat_gt} layers_len={mat_layers.len()} backdrop_len={mat_backdrop.len()} animation={st.animation_name}"
+            # Bounded conjunct receipt (contract nodes only): names the exact
+            # admission clause that failed instead of forcing inference from
+            # the aggregate line above.
+            print "[web-style-producer] entry-rejected-detail index={i} channel={material_channel_ready} static={static_material} mode_ok={wm_mode_is_cpu} declared_opaque={declared_opaque} declared_argb={declared_argb} declared_attr_len={declared_bg_attr.len()} translucent={translucent_surface} opaque={opaque_surface} stops_valid={typed_stops_valid} backdrop_admitted={backdrop.admitted} backdrop={mat_backdrop}"
         if _font_style_trace_on:
             print "[font-inherit-trace] index={i} final_font_family={st.font_family} final_font_size={st.font_size}"
         styles[i] = st
