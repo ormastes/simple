@@ -2,7 +2,19 @@
 
 **Date:** 2026-07-06
 **Area:** os/llvm_self_hosting, cross toolchain, SimpleOS Phase 4 (clang_static)
-**Status:** OPEN
+**Status:** ARCHITECTURAL-OPEN (re-verified 2026-08-10)
+
+**Re-verification (2026-08-10):** The referenced binary
+`build/os/llvm/cross-x86_64-unknown-simpleos/bin/clang-20` does not exist in
+this working copy — it is a build artifact (not source-controlled) produced
+by a full LLVM cross-toolchain build (see `scripts/os/build_simpleos_llvm_image.shs`
+and `doc/03_plan/os/simpleos/toolchain_selfhost_bootstrap_plan.md`). Confirming
+or fixing the SIGABRT requires rebuilding that LLVM cross toolchain with
+assertions enabled (a bootstrap-scale LLVM build), which is out of scope for
+a routine verification pass (no bootstrap-scale rebuilds). No source-level fix
+is available without that rebuild + backend bisection. Left honestly open per
+the doc's own "Next Check" section; the host-clang workaround remains the
+only unblocked path for Phase 4 codegen.
 
 ## Symptom
 
