@@ -3,7 +3,7 @@
 - **Filed:** 2026-08-09
 - **Lane:** G4 (NILQ follow-on)
 - **Severity:** High — 16 sites return a wrong value; the rest are accidentally correct
-- **Status:** Open. **Operator semantics RULED CORRECT — do not "fix" `.?`.**
+- **Status:** FIXED 2026-08-10 (stream J1) — all 16 genuinely-wrong sites rewritten as explicit predicates; the 26 accidentally-correct sites are untouched (conformance sweep still open). **Operator semantics RULED CORRECT — do not "fix" `.?`.**
 - **Companions:** `dotq_existence_check_is_scalar_truthiness_on_jit_2026-07-27.md`,
   `dotq_zero_test_hazard_call_sites_2026-07-27.md`,
   `dot_question_truthy_op_returns_payload_as_call_arg_2026-07-20.md`
@@ -94,3 +94,57 @@ lib/app/test sites, then sweep the 26 accidentally-correct ones for conformance.
 Declared return types are not enforced — see
 `declared_return_type_not_enforced_2026-08-09.md`. Every one of these 42 functions
 returns a non-`bool` from a `-> bool` signature with no diagnostic from any engine.
+
+## Fix landed 2026-08-10 (stream J1)
+
+All 16 genuinely-wrong sites replaced with explicit predicates. `EXPR_EXISTS_CHECK`
+untouched, guard-position `.?` untouched.
+
+| site | fix |
+|---|---|
+| effects_cache.spl:54 `has_violations` | `not self.violations.is_empty()` |
+| verification_checker.spl:142 `has_violations` | `not self.violations.is_empty()` |
+| infer.spl:214 `has_errors` | `not self.errors.is_empty()` |
+| checker.spl:276 `has_errors` | `not self.errors.is_empty()` |
+| binding_specializer.spl:39 `has_bindings` | `self.bindings.len() > 0` |
+| package.registry/auth.spl:44 | `write_result.ok` (already a bool field) |
+| nogc_sync_mut/src/db.spl:165 | `write_result.ok` |
+| interpreter/core/symbol.spl:118 `contains` | `self.map.has(s)` |
+| nogc_sync_mut/conf.spl:69 `conf_has` | `c.entries.has(key)` |
+| persistent_dict/dict.spl:73 `contains` | `self.get(key) != nil` |
+| actor/mailbox.spl:45 `expects_reply` | `self.reply_id != nil` |
+| dbfs_engine_btree_delete_rebalance_spec.spl:37 `has` (+ `test/integration/` twin) | `result != nil` |
+| app_mcp_intensive_spec.spl:521 `validate_mcp_response` (+ 2 twins) | `response.get("jsonrpc") != nil and response.get("id") != nil` |
+
+`!= nil` was chosen over `.? != nil` for the Option sites specifically because it
+is the only form that keeps a **zero/empty payload** present: probe on
+`src/compiler_rust/target/bootstrap/simple` (33,653,056 bytes, mtime Aug 9 23:10),
+identical on the seed/JIT and `SIMPLE_EXECUTION_MODE=interpreter`:
+
+```
+has_a=true has_b=true has_z=false            # Dict.has, "a" maps to ""
+i64 Some0=true nil=false Some5=true          # Some(0) is PRESENT
+txt SomeEmpty=true nil=false SomeX=true      # Some("") is PRESENT
+```
+
+Under the old `.?` both `Some(0)` and `Some("")` read as absent — that was the
+`mailbox.expects_reply` (reply id 0) and `conf_has` (empty value) hazard.
+
+### Regression spec
+
+`test/01_unit/compiler/diagnostic_predicate_empty_state_spec.spl` — 6 cases over
+the real `CachedFunctionEffectInfo`, `VerificationChecker` and `BindingSpecializer`,
+pinning empty-state to `false` and populated-state to `true`.
+
+- seed/JIT: `executed=6 passed=6 failed=0`
+- interpreter: `executed=6 passed=6 failed=0`
+- **sabotage** (three helpers reverted to bare `.?`): `passed=0 failed=6` on
+  **both** engines. The spec is not a no-op.
+
+### Side effect worth recording
+
+`dbfs_engine_btree_delete_rebalance_spec.spl` went **0/11 -> 6/11** on the seed.
+Its `has()` helper previously returned a truthy payload for every lookup, so the
+spec could never distinguish present from absent. The 5 residual failures are
+real BTree delete/rebalance defects that the broken predicate had been masking;
+they are pre-existing and out of scope for this fix.
