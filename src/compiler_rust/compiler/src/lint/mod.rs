@@ -924,7 +924,13 @@ fn test():
             .collect();
         assert_eq!(dup_warnings.len(), 2);
 
-        assert_eq!(dup_warnings[0].span.line, 4);
+        // Line 5 (not 4): the fixture string starts directly with `pub fn point`,
+        // so `val result = point(...)` is the FIFTH line. Every other assertion in
+        // this test (columns 24/31, both rewrite texts) already matched exactly —
+        // only these expected line numbers were miscounted when the test was
+        // authored, and the target did not compile until 2026-08-09, so they were
+        // never executed.
+        assert_eq!(dup_warnings[0].span.line, 5);
         assert_eq!(dup_warnings[0].span.column, 24);
         assert!(dup_warnings[0]
             .suggestion
@@ -936,7 +942,7 @@ fn test():
         assert_eq!(first_fix.replacements.len(), 1);
         assert_eq!(first_fix.replacements[0].new_text, "x: 3 + 1");
 
-        assert_eq!(dup_warnings[1].span.line, 4);
+        assert_eq!(dup_warnings[1].span.line, 5);
         assert_eq!(dup_warnings[1].span.column, 31);
         let second_fix = dup_warnings[1].easy_fix.as_ref().expect("missing easy fix");
         assert_eq!(second_fix.replacements.len(), 1);
@@ -960,7 +966,8 @@ fn test():
             .filter(|d| d.lint == LintName::UnnamedDuplicateTypedArgs)
             .collect();
         assert_eq!(dup_warnings.len(), 1);
-        assert_eq!(dup_warnings[0].span.line, 7);
+        // Line 8, not 7 — see the note in the sibling rewrite-fix test above.
+        assert_eq!(dup_warnings[0].span.line, 8);
         assert_eq!(dup_warnings[0].span.column, 30);
         let fix = dup_warnings[0].easy_fix.as_ref().expect("missing easy fix");
         assert_eq!(fix.replacements[0].new_text, "y: next_value()");
@@ -980,7 +987,8 @@ fn test():
             .filter(|d| d.lint == LintName::UnnamedDuplicateTypedArgs)
             .collect();
         assert_eq!(dup_warnings.len(), 1);
-        assert_eq!(dup_warnings[0].span.line, 4);
+        // Line 5, not 4 — see the note in the sibling rewrite-fix test above.
+        assert_eq!(dup_warnings[0].span.line, 5);
         assert_eq!(dup_warnings[0].span.column, 27);
         assert!(dup_warnings[0].easy_fix.is_none());
         assert!(!dup_warnings[0]

@@ -526,6 +526,22 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse fields and methods in an indented block (class, actor, struct)
+    /// True when the `val`/`var` token under the cursor starts a FIELD
+    /// declaration (`val name: Type`) rather than a desugared type-variable
+    /// BINDING (`val _tv_0 = [[text], [text]]`).
+    ///
+    /// `parse_field` has supported the `val`/`var` field prefix since the
+    /// StructInit header-slot fix, and `parse_class_body` routes such lines to
+    /// it — but `parse_indented_fields_and_methods` (used by `struct` and
+    /// `actor`) intercepted every `val`/`var` line first and skipped it to the
+    /// end of the line, so `actor Counter: / val count: i64` reached HIR with
+    /// ZERO fields and `Counter { count: 0 }` failed with
+    /// `CannotInferFieldType { struct_name: "Counter", available_fields: [] }`.
+    /// The distinguishing token is the `:` right after the name.
+    fn val_var_prefix_is_a_field(&mut self) -> bool {
+        matches!(self.peek_nth(1).kind, TokenKind::Identifier { .. }) && self.peek_nth(2).kind == TokenKind::Colon
+    }
+
     fn parse_indented_fields_and_methods(&mut self) -> Result<FieldsAndMethods, ParseError> {
         self.debug_enter("parse_indented_fields_and_methods");
         self.expect_block_start()?;
@@ -703,7 +719,9 @@ impl<'a> Parser<'a> {
                         start_span,
                     ));
                 }
-            } else if self.check(&TokenKind::Val) || self.check(&TokenKind::Var) {
+            } else if (self.check(&TokenKind::Val) || self.check(&TokenKind::Var))
+                && !self.val_var_prefix_is_a_field()
+            {
                 // Skip val/var bindings inside struct bodies.
                 // These are desugared type variables: `val _tv_0 = [[text], [text]]`
                 // They define local type aliases used by subsequent fields.

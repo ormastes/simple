@@ -212,3 +212,123 @@ Same theme as the predecessor: a compile-broken test target let both a stale
 production premise (B) and a bulk-edit syntax error (C) sit invisible. Gate
 `cargo test -p simple-compiler --lib --no-run` in CI so the target can never
 silently stop compiling again.
+
+## Category D triage round 2 — 2026-08-10 (measured against `origin/main`)
+
+**Re-derived baseline, not the stale 129/17.** Measured in a PINNED tree
+(`git archive origin/main` @ `29cbe704e59`, private `CARGO_TARGET_DIR`) because
+the shared working copy is 231 commits behind origin and carries other agents'
+in-flight LLVM/codegen edits.
+
+    cargo test -p simple-compiler --lib   ->   3,640 passed / 54 failed
+
+Category B's 51 `gpu_errors` failures are gone, confirming that fix landed.
+Three Category D items root-caused and fixed below; **54 -> 47**, set-diff
+**8 genuine fixed, 0 genuine new** (two entries flip in and out across runs and
+are pre-existing flakes, see the note at the end).
+
+### D-1 FIXED — `val`/`var`-prefixed fields silently DROPPED in `struct` and `actor` bodies
+
+`test_actor_type_visible_in_hir_scope`, `test_actor_usable_after_declaration`
+both failed `CannotInferFieldType { struct_name: "Counter", field: "count",
+available_fields: [] }`.
+
+Bisected by probe. Rewriting the identical fixture with `class` instead of
+`actor` lowers CLEAN, so it is not an HIR-registration bug at all:
+
+    PROBE register_class name=Counter fields=[("count", TypeId(5))]   # class
+    PROBE parse_actor    Counter fields=0 methods=0                   # actor
+    PROBE register_class name=Counter fields=[]                       # actor
+
+The actor reaches HIR with **zero fields**. Root cause is in the PARSER:
+`parse_class_body` (`parser/src/types_def/mod.rs:736`) routes a `val name: Type`
+line to `parse_field`, which has explicitly supported the `val`/`var` field
+prefix since the StructInit header-slot fix. But `parse_indented_fields_and_methods`
+(line 529 — the helper used by `parse_struct` **and** `parse_actor`, NOT by
+`parse_class`) intercepted every `Val`/`Var` token first and skipped to end of
+line, with the comment "Skip val/var bindings inside struct bodies … desugared
+type variables: `val _tv_0 = [[text], [text]]`".
+
+That skip is right for a type-variable BINDING and wrong for a FIELD. The
+distinguishing token is the `:` right after the name. Added
+`val_var_prefix_is_a_field()` (2-token lookahead via the existing `peek_nth`)
+and gated the skip on it; a real field now falls through to `parse_field`.
+
+Downstream severity note: a dropped field does not fail closed. `get_field_info`
+falls back to a global "search every struct for a field with this name" heuristic
+(`type_resolver.rs:602-646`), so `s.count` on a field-less struct silently
+resolves to some OTHER struct's byte offset. Same silent-garbage class as the
+enum-variant defect in Category B.
+
+**Blast radius: zero on existing sources.** An indentation-aware scan of every
+`.spl` under `src/` finds no `val`/`var`-prefixed field in any real `struct` or
+`actor` body (the only two textual hits are inside a `tensor.spl` docstring, i.e.
+lexed as a string). No existing struct layout can shift; the fix unblocks the
+syntax and the two actor tests. `cargo test -p simple-parser` stays 459/459 green.
+
+Changed: `src/compiler_rust/parser/src/types_def/mod.rs`.
+
+### D-2 FIXED — stdlib public-API lint exemption only matched ABSOLUTE paths
+
+`test_public_api_lints_skip_stdlib_{infra,testing,tooling}_paths` (3 tests).
+
+`LintChecker::is_non_surface_path` (`compiler/src/lint/checker_core.rs:176-178`)
+tested `path.contains("/src/compiler_rust/lib/std/src/infra/")` — with a LEADING
+SLASH. Lint is routinely invoked with a repository-relative path
+(`bin/simple lint src/compiler_rust/lib/std/src/infra/x.spl`), which never
+matches, so the same file got `PrimitiveApi`/`BareBool` surface lints depending
+on how its path was spelled. Production defect, not a test defect. Dropped the
+leading `/` from the three patterns; the match stays anchored on
+`src/compiler_rust/lib/std/src/…`.
+
+Changed: `src/compiler_rust/compiler/src/lint/checker_core.rs`.
+
+### D-3 FIXED (stale fixture) — `unnamed_duplicate_typed_args` expected line numbers off by one
+
+`test_unnamed_duplicate_typed_args_same_file_named_rewrite_fix` (left 5, right 4),
+`…_same_file_partial_named_rewrite_fix` (8 vs 7), `…_wrong_label_has_no_easy_fix`
+(5 vs 4).
+
+**The production line numbers are correct; the expectations were miscounted.**
+Each fixture string starts directly with `pub fn point(...)` (no leading newline),
+so the offending call site is the 5th/5th/8th line, not the 4th/4th/7th. Probed
+every other assertion in the same tests and all of them already matched EXACTLY:
+
+    named_rewrite[0] line=5 col=24 new_text="x: 3 + 1"
+    named_rewrite[1] line=5 col=31 new_text="y: 4 * 2"
+    partial          line=8 col=30 new_text="y: next_value()"
+    wrong_label      line=5 col=27 easy_fix_none=true
+
+A correct column on a wrong line is not possible from a diagnostic that is
+genuinely off by one — the span points at the right token. `git log -L` shows the
+three tests entered in a single bulk commit and the target has not compiled since,
+so these three integers were never executed. Corrected the expected lines to the
+verified values with an in-test note; no assertion was weakened or removed.
+
+Changed: `src/compiler_rust/compiler/src/lint/mod.rs`.
+
+### Measurement / flakes
+
+Four full-suite runs in the pinned tree: 54 (base), 50, 49, 47. Three tests move
+in and out of the failure set independently of any change and PASS in isolation —
+`interpreter_sffi::tests::test_definition_snapshot_seeds_worker_thread`,
+`watchdog::tests::test_watchdog_triggers_timeout`,
+`watchdog::tests::test_watchdog_crash_log_includes_spec_context`. They are
+order/timing-dependent on shared global state, are pre-existing, and should not be
+attributed to any fix in this document. Excluding them the result is
+**8 fixed, 0 new**.
+
+### Still open in Category D (investigated, NOT fixed)
+
+- `hir::lower::tests::expression_tests::{text_rfind_uses_string_method_lowering,
+  uppercase_string_is_empty_uses_string_method_lowering}` and the 6 sibling
+  `expression_tests` failures — these assert `HirExprKind::MethodCall` with
+  `DispatchMode::Static` for string-method lowering. NOT attempted here:
+  `expression_tests.rs` and the ident/field-inference lowering path they exercise
+  are being edited concurrently by another agent (campaign 7c), and a fix would
+  collide. Needs a separate pass once that tree settles.
+- `pipeline::native_project` import-map / layout (vtable_type_owners anchoring,
+  cross-module optional-struct payload type, duplicate-struct sidecar
+  `UnknownType { type_name: "CompilerContext" }`) — untouched; `native_project`
+  files are off-limits this session.
+- Category E heavyweight archive/runtime contract tests — unchanged.

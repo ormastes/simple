@@ -173,9 +173,14 @@ impl LintChecker {
         Self::is_test_like_path(source_file)
             || path.contains("/fixtures/")
             || path.ends_with("_fixture.spl")
-            || path.contains("/src/compiler_rust/lib/std/src/testing/")
-            || path.contains("/src/compiler_rust/lib/std/src/tooling/")
-            || path.contains("/src/compiler_rust/lib/std/src/infra/")
+            // No leading `/`: lint is routinely invoked with a REPOSITORY-RELATIVE
+            // path (`bin/simple lint src/compiler_rust/lib/std/src/infra/x.spl`),
+            // and requiring the leading slash made the exemption apply only to
+            // absolute paths — the same file linted by relative path got the
+            // public-API surface lints anyway.
+            || path.contains("src/compiler_rust/lib/std/src/testing/")
+            || path.contains("src/compiler_rust/lib/std/src/tooling/")
+            || path.contains("src/compiler_rust/lib/std/src/infra/")
     }
 
     pub fn new() -> Self {
