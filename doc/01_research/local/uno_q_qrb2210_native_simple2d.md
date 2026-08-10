@@ -29,10 +29,14 @@ RAMFB, virtio, ivshmem, or audio adapters. When physical drivers and a board
 composition root are implemented, that root must reuse WM → DrawIR → Engine2D
 → Qualcomm Vulkan and feed live correlated receipts to the existing admission.
 
-The next source slice types that lower boundary in
+The lower boundary is typed in
 `os.port.qrb2210_native_2d_ports`: display, canonical `HostInputEvent`, PCM
 audio, Engine2D command-batch submit, fence completion, and device-origin
 readback remain distinct provider responsibilities. The matching
 `qrb2210_native_2d_composition_root` admits only the shared WM -> DrawIR ->
-Engine2D -> Qualcomm Vulkan route. No provider implementation was found or
-added, and all six QRB2210 capability statuses remain `port-unavailable`.
+Engine2D -> Qualcomm Vulkan route. Kernel-receipt adapters now exist for Vulkan,
+evdev, and DRM/KMS display/capture. The DRM/KMS adapter requires exact physical
+boot/device/kernel-owner/generation/framebuffer/CRTC/plane identity and binds
+capture to the last admitted present. These adapters do not implement the
+missing SimpleOS kernel owners and do not promote capability status; all six
+QRB2210 capabilities remain `port-unavailable`.

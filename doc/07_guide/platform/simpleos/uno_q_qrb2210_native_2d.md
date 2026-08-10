@@ -85,6 +85,22 @@ handle, and each kernel receipt must correlate the exact Vulkan device, queue,
 fence or readback handle plus submission/frame identity. A boolean fence result
 or a caller-selected submission ID cannot promote completion.
 
+The display-side primitive adapter is
+`os.port.qrb2210_drm_kms_display_provider`. It accepts only a physical primary
+`/dev/dri/card*` display handle minted for the current QRB2210 boot and a complete
+kernel-owned DRM/KMS binding: kernel-owner handle, connector, CRTC, plane,
+framebuffer, driver generation, and an XRGB8888 mode. Atomic-present receipts
+must match that identity and the exact Vulkan device-readback submission,
+frame, dimensions, pixel count, source, and checksum. Capture is allowed only
+for the provider's last admitted present and must return the same boot, device,
+owner, generation, connector, CRTC, plane, framebuffer, frame, present ID,
+dimensions, and checksum with source `qrb2210-drm-kms-scanout`. A missing or
+mismatched field returns an incomplete receipt; capture IDs must increase and
+a failed new present invalidates the retained present. The adapter does not alter
+`uno_q_desktop_contract`; display remains `port-unavailable` until a real
+SimpleOS QRB2210 kernel owner supplies these receipts and capability promotion
+is reviewed separately.
+
 The QRB2210 boot target is
 `examples/09_embedded/simple_os/arch/qrb2210/gui_entry_desktop.spl`. At present
 it intentionally terminates with `UNO_Q_QRB2210_DESKTOP_BLOCKED` after querying

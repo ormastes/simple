@@ -454,6 +454,12 @@ offset, expected/actual byte, pixel coordinate, channel, and total
   `qrb2210_native_2d_composition_root`, preserving
   Shared WM -> DrawIrComposition -> Engine2D -> Qualcomm Vulkan. Debian
   results remain readiness only and cannot change canonical provider status.
+  The display adapter below this boundary accepts only a SimpleOS kernel-owned
+  DRM/KMS identity and exact atomic-present/capture receipts correlated by
+  boot, display handle, driver generation, owner, connector, CRTC, plane,
+  framebuffer, frame, present ID, dimensions, and checksum. It retains the last
+  admitted present to reject capture replay. The adapter must not promote the
+  canonical display capability before the physical kernel owner exists.
 - VisionFive 2: preserve a vendor-driver experiment separately; do not begin
   native promotion until the exact BXE BVNC, firmware, kernel, and Mesa support
   are proven. Current upstream Mesa classification is unsupported.

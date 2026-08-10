@@ -1,0 +1,130 @@
+use std.spec.{describe, it, expect}
+use app.io.mod.{file_read_text}
+use os.port.qrb2210_native_2d_ports.{
+    Qrb2210BoardDeviceHandle, Qrb2210DisplayMode, Qrb2210DeviceReadbackReceipt,
+    QRB2210_DEVICE_DISPLAY
+}
+use os.port.qrb2210_drm_kms_display_provider.{
+    QRB2210_DRM_FORMAT_XRGB8888, QRB2210_DRM_CAPTURE_SOURCE,
+    Qrb2210DrmKmsPhysicalBinding, Qrb2210DrmKmsKernelIdentity,
+    Qrb2210DrmKmsKernelPresentReceipt, Qrb2210DrmKmsKernelCaptureReceipt,
+    qrb2210_drm_kms_binding_ready, qrb2210_drm_kms_identity_matches_binding,
+    qrb2210_drm_kms_present_correlates, qrb2210_drm_kms_capture_correlates
+}
+
+val PROVIDER = "src/os/port/qrb2210_drm_kms_display_provider.spl"
+
+fn device() -> Qrb2210BoardDeviceHandle:
+    Qrb2210BoardDeviceHandle(
+        board_id: "qrb2210-uno-q", boot_id: "boot-17", owner: QRB2210_DEVICE_DISPLAY,
+        device_node: "/dev/dri/card0", native_handle: 41u64, driver_generation: 3)
+
+fn binding() -> Qrb2210DrmKmsPhysicalBinding:
+    Qrb2210DrmKmsPhysicalBinding(
+        device: device(), kernel_owner_handle: 51u64, connector_id: 61u64,
+        crtc_id: 62u64, plane_id: 63u64, framebuffer_handle: 64u64,
+        mode: Qrb2210DisplayMode(
+            width: 2, height: 2, stride_bytes: 8, format: QRB2210_DRM_FORMAT_XRGB8888))
+
+fn identity() -> Qrb2210DrmKmsKernelIdentity:
+    Qrb2210DrmKmsKernelIdentity(
+        device: device(), kernel_owner_handle: 51u64, connector_id: 61u64,
+        crtc_id: 62u64, plane_id: 63u64, framebuffer_handle: 64u64,
+        driver_generation: 3, physical_device: true)
+
+fn readback() -> Qrb2210DeviceReadbackReceipt:
+    Qrb2210DeviceReadbackReceipt(
+        submission_id: 71, frame_id: 72, width: 2, height: 2,
+        pixels: [1u32, 2u32, 3u32, 4u32], checksum: 10,
+        source: "qrb2210-vulkan-device-memory")
+
+fn present() -> Qrb2210DrmKmsKernelPresentReceipt:
+    Qrb2210DrmKmsKernelPresentReceipt(
+        device: device(), kernel_owner_handle: 51u64, connector_id: 61u64,
+        crtc_id: 62u64, plane_id: 63u64, framebuffer_handle: 64u64,
+        driver_generation: 3, submission_id: 71, frame_id: 72,
+        present_id: 73, readback_checksum: 10, presented: true)
+
+fn capture() -> Qrb2210DrmKmsKernelCaptureReceipt:
+    Qrb2210DrmKmsKernelCaptureReceipt(
+        device: device(), kernel_owner_handle: 51u64, connector_id: 61u64,
+        crtc_id: 62u64, plane_id: 63u64, framebuffer_handle: 64u64,
+        driver_generation: 3, frame_id: 72, present_id: 73, capture_id: 74,
+        width: 2, height: 2, byte_count: 16, readback_checksum: 10,
+        source: QRB2210_DRM_CAPTURE_SOURCE, completed: true)
+
+describe "QRB2210 physical DRM KMS display provider":
+    it "requires one complete physical scanout binding":
+        expect(qrb2210_drm_kms_binding_ready(binding())).to_be(true)
+        var no_owner = binding()
+        no_owner.kernel_owner_handle = 0u64
+        expect(qrb2210_drm_kms_binding_ready(no_owner)).to_be(false)
+        var render_node = binding()
+        render_node.device.device_node = "/dev/dri/renderD128"
+        expect(qrb2210_drm_kms_binding_ready(render_node)).to_be(false)
+        var no_framebuffer = binding()
+        no_framebuffer.framebuffer_handle = 0u64
+        expect(qrb2210_drm_kms_binding_ready(no_framebuffer)).to_be(false)
+        var wrong_format = binding()
+        wrong_format.mode.format = "argb8888"
+        expect(qrb2210_drm_kms_binding_ready(wrong_format)).to_be(false)
+        var short_stride = binding()
+        short_stride.mode.stride_bytes = 7
+        expect(qrb2210_drm_kms_binding_ready(short_stride)).to_be(false)
+
+    it "binds identity to boot device owner generation framebuffer CRTC and plane":
+        expect(qrb2210_drm_kms_identity_matches_binding(identity(), binding())).to_be(true)
+        var stale_boot = identity()
+        stale_boot.device.boot_id = "boot-16"
+        expect(qrb2210_drm_kms_identity_matches_binding(stale_boot, binding())).to_be(false)
+        var wrong_owner = identity()
+        wrong_owner.kernel_owner_handle = 52u64
+        expect(qrb2210_drm_kms_identity_matches_binding(wrong_owner, binding())).to_be(false)
+        var stale_generation = identity()
+        stale_generation.driver_generation = 2
+        expect(qrb2210_drm_kms_identity_matches_binding(stale_generation, binding())).to_be(false)
+        var wrong_crtc = identity()
+        wrong_crtc.crtc_id = 99u64
+        expect(qrb2210_drm_kms_identity_matches_binding(wrong_crtc, binding())).to_be(false)
+        var wrong_plane = identity()
+        wrong_plane.plane_id = 99u64
+        expect(qrb2210_drm_kms_identity_matches_binding(wrong_plane, binding())).to_be(false)
+
+    it "admits a present only for the exact Vulkan readback and scanout identity":
+        expect(qrb2210_drm_kms_present_correlates(binding(), readback(), present())).to_be(true)
+        var wrong_frame = present()
+        wrong_frame.frame_id = 75
+        expect(qrb2210_drm_kms_present_correlates(binding(), readback(), wrong_frame)).to_be(false)
+        var wrong_fb = present()
+        wrong_fb.framebuffer_handle = 65u64
+        expect(qrb2210_drm_kms_present_correlates(binding(), readback(), wrong_fb)).to_be(false)
+        var wrong_checksum = present()
+        wrong_checksum.readback_checksum = 11
+        expect(qrb2210_drm_kms_present_correlates(binding(), readback(), wrong_checksum)).to_be(false)
+
+    it "admits capture only for the exact presented framebuffer and frame":
+        expect(qrb2210_drm_kms_capture_correlates(binding(), present(), capture())).to_be(true)
+        var wrong_present = capture()
+        wrong_present.present_id = 75
+        expect(qrb2210_drm_kms_capture_correlates(binding(), present(), wrong_present)).to_be(false)
+        var wrong_plane = capture()
+        wrong_plane.plane_id = 65u64
+        expect(qrb2210_drm_kms_capture_correlates(binding(), present(), wrong_plane)).to_be(false)
+        var cross_boot = capture()
+        cross_boot.device.boot_id = "boot-18"
+        expect(qrb2210_drm_kms_capture_correlates(binding(), present(), cross_boot)).to_be(false)
+        var incomplete = capture()
+        incomplete.completed = false
+        expect(qrb2210_drm_kms_capture_correlates(binding(), present(), incomplete)).to_be(false)
+
+    it "keeps capability promotion outside the provider and calls only kernel receipts":
+        val source = file_read_text(PROVIDER)
+        expect(source).to_contain("trait Qrb2210DrmKmsKernelPort:")
+        expect(source).to_contain("self.kernel.atomic_present(self.binding, readback)")
+        expect(source).to_contain("self.kernel.capture_scanout(self.binding, present)")
+        expect(source).to_contain("capture.capture_id <= self.last_capture_id")
+        expect(source).to_contain("self.last_present = nil")
+        expect(source).to_contain("UNO_Q_DESKTOP_STATUS_PORT_UNAVAILABLE")
+        expect(source.contains("uno_q_desktop_backend_status")).to_be(false)
+        expect(source.contains("rt_process_run")).to_be(false)
+        expect(source.contains("rt_env_get")).to_be(false)
