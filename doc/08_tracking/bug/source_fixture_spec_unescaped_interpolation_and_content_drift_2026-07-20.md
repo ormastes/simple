@@ -95,6 +95,45 @@ SIMPLE_RUST_SEED_WARNING=0 timeout 90 "$BIN" test \
 # semantic: variable `rt_dict_keys` not found ; 1 example, 1 failure
 ```
 
+## Re-verification (2026-08-10)
+
+Fresh re-run of the repro against the current deployed self-hosted binary
+confirms the bug is unchanged:
+
+```
+$ bin/simple test test/01_unit/compiler/hir/module_lowering_dict_keys_source_spec.spl
+semantic: variable `rt_dict_keys` not found
+Results: 1 total, 0 passed, 1 failed
+```
+
+Layer-2 drift also unchanged, confirmed by direct source read:
+- `src/compiler/20.hir/hir_types.spl:271` still uses `scope.symbols.get(name)`
+  (the exact pattern the spec/file's own comment at line 458 calls out as
+  "mis-dispatched"), alongside `rt_dict_contains` guards used elsewhere in the
+  same file (lines 416, 442) — a real, unfinished migration, not a stale spec.
+- `src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl` still has 41
+  `.keys()` call sites and 0 `rt_dict_keys` call sites.
+
+**Staying OPEN, not fixed here, for two independent reasons:**
+1. Per this doc's own analysis, a real fix requires a product-source migration
+   decision (touch `hir_types.spl` / `hir_lowering/_Items/module_lowering.spl`
+   to complete the `rt_dict_contains`/`rt_dict_keys`/`lookup_or_invalid()`
+   migration, or a product-owner call to retire the spec's invariant) — a
+   mechanical spec-only fix cannot turn this green and the HARD RULE against
+   weakening assertions forbids papering over it.
+2. `src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl` — one of the
+   two files layer-2 would need to touch — is a file this pass's task
+   instructions explicitly list as off-limits (a concurrent session's
+   in-progress work in the adjacent `50.mir` tree made the whole
+   `module_lowering.spl` family sensitive this session; this repo's git status
+   at session start also showed a staged, uncommitted edit to this exact
+   20.hir path). Editing it now risks colliding with that other session's
+   work. No code or doc change made to that file.
+
+Status remains **OPEN — filed, not fixed**, unchanged from 2026-07-20; this
+re-verification only refreshes the evidence with today's date and confirms
+nothing has drifted further.
+
 ## Suggested follow-up
 
 1. Fix layer 1 mechanically everywhere (raw/single-quoted strings for
