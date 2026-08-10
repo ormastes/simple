@@ -157,6 +157,27 @@ There is no defect in binding a method-call result to a variable or placing it
 in a list literal. The real silent-rc=0 shape is the unresolved-**variable** row
 above, i.e. this bug, which was already filed on 2026-08-04.
 
+## 2026-08-09 re-verification (worktree agent)
+
+Re-ran the original bare-enum-variant repro fresh in an isolated worktree with
+no pure-Simple `bin/simple` deployed (gitignored symlink target absent), using
+the main repo's seed binary directly
+(`/home/ormastes/dev/pub/simple/bin/release/x86_64-unknown-linux-gnu/simple`,
+which still self-identifies as "bootstrap seed only"):
+
+```
+$ bin/simple run probe_enum.spl
+bare-module-level: 0
+EXIT=0
+```
+
+Confirms the doc's "fabricates 0" finding exactly — same fabricated-const-0,
+rc=0 behavior as the 2026-08-09 table above. Root cause remains in the Rust
+seed's JIT driver (`src/compiler_rust/**`), which is out of scope for a
+`.spl`/`.shs`-only fix per this session's mandate. **Confirmed
+ARCHITECTURAL-OPEN** — no safe root-cause fix available in pure-Simple source;
+leaving OPEN with this fresh evidence rather than closing.
+
 ## Why it matters here
 
 Any legacy spec or probe that shells out to `bin/simple run` and scores the exit

@@ -95,6 +95,21 @@ the repo's over-engineering/no-shortcuts rules warn against.
    captured stderr) contains the expected owner name, size, and
    classification — not just that the process crashed.
 
+## Re-verification 2026-08-09
+
+Status confirmed **ARCHITECTURAL-OPEN**. Re-ran the doc's own grep evidence:
+
+- `/usr/bin/grep -n "sigaction\|SIGSEGV" src/compiler_rust/compiler/src/interpreter_extern/mem_guard.rs src/runtime/runtime_memory_guard.h` → 3 hits, all comments/doc-prose (`architecturally different mechanism from POSIX SIGSEGV`, `SIGSEGV the test runner by design`, `a small overflow SIGSEGVs on the guard`) — zero `sigaction(` calls, zero installed handler. Confirms the doc's claim: no signal handler exists.
+- `RtMemGuardSlot` in `runtime_memory_guard.h` still has no `owner` field.
+
+The `mem_guard_fault_handler` mechanism the design doc's §2 promises still
+does not exist on either backend. Building it (process-wide `SIGSEGV`
+handler, async-signal-safe page-range lookup, free-site capture) is real,
+independently-scoped design/implementation work — not a bounded fix that
+belongs in a bug-doc verification pass, and touching a global signal handler
+without review risk is exactly the kind of undersized, unreviewed addition
+the repo's rules warn against. No code changed; doc left OPEN.
+
 ## Related
 
 - `doc/05_design/runtime/memory_analysis/m2_guard_and_harden_design.md` §2 —

@@ -118,7 +118,19 @@ prerequisite summary and must not be treated as a completion pass.
   plus schema/linkage extraction, deployable manifest status, passing eval
   status, dataset checksum, eval sample count, and deployable handoff usage.
 
-## Done Criteria
+## Re-verification 2026-08-09
+
+Status confirmed **ARCHITECTURAL-OPEN**. All five blockers
+(`dashboard`/`vllm_host`/`svllm_local`/`torch_optimizer`/`finetune_guard`)
+require live external resources not present in this environment: a reachable
+dashboard base URL + auth, a locally-installed `vllm` binary/Python module,
+native `read_range`/pinned-buffer device staging support, a
+Simple/libtorch-visible CUDA build, and a completed fine-tune retry6/7
+training-eval cycle. None of these are code defects fixable by editing
+`.spl`/`.shs` in this pass — each `next action` in the blockers table above is
+an infra/install/run step, not a patch. No attempt was made to install vLLM,
+libtorch, or run a fine-tune cycle in this isolated worktree (out of scope
+and would not be verifiable here). No code changed; doc left OPEN.
 
 This tracker can close only when:
 

@@ -89,3 +89,18 @@ guessing an equivalent would fabricate coverage. Deleting them is also wrong on
 its own: the *intent* they encode (bootstrap imports resolve, schemas
 initialise, the JSON helpers round-trip) is still worth asserting — it just has
 to be re-pointed at the live API.
+
+## 2026-08-09 re-verification (worktree agent)
+
+Re-checked the symbol-removal claim fresh: `/usr/bin/grep -rl "McpState"
+src/app/mcp src/lib/nogc_sync_mut/mcp` and the same for `init_core_schemas`
+both return zero hits in this worktree — confirms neither symbol exists
+anywhere under the current MCP source tree, matching the doc's table exactly.
+The live MCP server (`src/app/mcp/main.spl` + `main_dispatch*.spl` +
+`main_lazy_*.spl`) has no `session`/`McpState` shape to port these tests onto,
+so a same-session rewrite would be a guess, not a verified equivalent —
+exactly the fabrication risk the doc already flags. **Confirmed
+ARCHITECTURAL-OPEN**: this needs an MCP-owner decision on the restructured
+server's intended contract before the 22 stale smoke tests can be rewritten as
+real assertions; no mechanical fix is safely in scope here. Left OPEN with
+this fresh confirmation; no code change made.

@@ -28,3 +28,16 @@ Remaining fix:
 
 Outside the implemented slice, GPU remains a candidate and falls back with an
 explicit reason before device submission.
+
+## 2026-08-09 re-verification (worktree agent)
+
+Re-read this doc against the current worktree; no `bin/simple` self-hosted
+binary is deployed there (gitignored symlink target, as expected for an
+isolated worktree) and the doc's own remaining item 1 explicitly requires "the
+production self-hosted CLI when a complete Stage4 binary is available" — that
+precondition is unmet here and in the main repo alike. Items 2 and 3
+(expanding the bounded GPU admission slice; shaped complex-script line
+breaking pending a semantic shaping contract) are scoped feature growth, not
+defects with a bounded root-cause fix. **Confirmed ARCHITECTURAL-OPEN** —
+status and remaining-work list left unchanged as an accurate characterization;
+no code change made.

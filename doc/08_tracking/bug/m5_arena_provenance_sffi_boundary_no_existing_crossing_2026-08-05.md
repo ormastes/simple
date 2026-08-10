@@ -101,3 +101,20 @@ not an implementation one — out of scope for this pass.
 **Blocked on bootstrap?** No — this was pure investigation (grep across
 `src/compiler_rust/compiler/src/interpreter_extern/*.rs` and
 `src/compiler/10.frontend/**`), no build attempted.
+
+## Re-verification 2026-08-09
+
+Status confirmed **ARCHITECTURAL-OPEN**, and the finding still holds. Re-ran
+the doc's own grep methodology in this worktree:
+
+- `/usr/bin/grep -rn "nodes.spl\|arena_idx\|expr_owner" src/compiler_rust/compiler/src/interpreter_extern/*.rs` → 0 hits (same as originally reported).
+- `_AstExpr/nodes.spl` and `_AstExpr/accessors.spl` still declare no `extern
+  fn` that accepts/forwards an arena index to Rust — the only `extern fn`s
+  present are the `rt_env_get`/`rt_env_set`/`rt_env_remove` bootstrap-mode
+  mirror, unrelated to this crossing.
+
+The conclusion is unchanged: there is no live call site where a `nodes.spl`
+arena index crosses into `interpreter_extern` today, so there is nothing to
+instrument without first inventing an unbuilt bridge feature — which is a
+design decision, not an implementation task, and stays out of scope here. No
+code changed; doc left OPEN.

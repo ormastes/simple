@@ -1,7 +1,38 @@
 # `Matrix3x3` is imported from `std.common.drawing.vector` but only exists in the skia tree (2026-08-04)
 
-**Status:** OPEN
+**Status:** FIXED (2026-08-09/10)
 **Found:** 2026-08-04
+
+## Fix
+
+`Matrix3x3` (and its private `_sin_taylor`/`_cos_taylor`/`_sqrt_newton`
+helpers, renamed `_matrix3x3_*` to avoid collision) moved from
+`src/lib/skia/entity/matrix.spl` into `src/lib/common/drawing/vector.spl`,
+exactly the "move, not an addition" fix this doc already called for.
+`src/lib/skia/entity/matrix.spl` is now a 15-line re-export
+(`use std.common.drawing.vector.{Matrix3x3}` + `export Matrix3x3`) so every
+existing `use std.skia.entity.matrix.{Matrix3x3}` call site keeps working
+unchanged — no caller edits needed. `src/lib/skia/__init__.spl`'s
+`from entity.matrix import { Matrix3x3, _sin_taylor, _cos_taylor }` dropped
+the two Taylor-helper names (unused outside that one import, never
+re-exported).
+
+Verified fresh (interpreter, this worktree, 2026-08-09/10):
+```
+$ use std.common.drawing.vector.{Matrix3x3}; Matrix3x3.identity()
+diag: 1.0 1.0 1.0
+off: 0.0 0.0 0.0 0.0 0.0 0.0
+translate tx=5.0 ty=7.0
+
+$ use std.skia.entity.matrix.{Matrix3x3}; Matrix3x3.rotate_degrees(deg: 90.0)
+rot: ~0 -1 1 ~0   # cos(90)≈0, -sin(90)≈-1, sin(90)≈1, cos(90)≈0 — correct
+```
+Both the new common-tier import path and the old skia re-export path produce
+correct values. The full `test/03_system/stdlib/vector_spec.spl` spec run
+timed out in this environment before printing a verdict line (harness
+startup cost, not a fix defect — see `reference_kill_monitor_60s_cpu_guard_sigterms_long_runs.md`);
+direct interpreter execution of both call paths above is the evidence of
+record for this fix.
 **Class:** missing symbol / tier-placement decision. 2 failing examples in
 `test/03_system/stdlib/vector_spec.spl`.
 

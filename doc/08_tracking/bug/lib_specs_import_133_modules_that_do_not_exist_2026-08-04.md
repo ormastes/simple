@@ -129,6 +129,27 @@ small gap and is repeatedly mistaken for one. Some genuinely are small — the
 `chacha20_poly1305_seal`/`_open` pair fixed this session was exactly this
 shape and took a thin wrapper over the existing verified core. Most are not.
 
+## Re-verification 2026-08-09
+
+Status confirmed **ARCHITECTURAL-OPEN** (this is a feature-completeness gap,
+not a defect with a code fix).
+
+- The doc's own headline "Symptom" repro module,
+  `src/lib/common/math/bignum/{limb,bignat,fixed}.spl`, already exists on
+  disk — it was implemented in the same original 2026-08-04 session per the
+  doc's own "Root cause" section, and this pass confirms the files are
+  present (this worktree has no deployed `bin/simple` to re-run the spec
+  suite directly, per known worktree-isolation limits, so re-execution was
+  not attempted; file presence is the honest check available here).
+- The remaining claim — 133 distinct `std.*` module paths across whole
+  feature areas (game2d, blink, hardware RTL, database, editor, nvfs, etc.)
+  that were specced ahead of implementation — is not something this pass can
+  responsibly reduce: each block is an independent feature (some actively
+  owned by other concurrent sessions per the doc's own "Why not fixed now"),
+  and building any of them out is out of scope for a bug-doc verification
+  pass. No new code written against this doc this pass; it correctly remains
+  OPEN and triaged as "implement per-feature-area", not "fix".
+
 ## Related
 
 - `doc/08_tracking/bug/fe_p256_field_module_missing_2026-08-04.md` — the one

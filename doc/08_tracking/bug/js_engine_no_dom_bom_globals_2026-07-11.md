@@ -55,6 +55,24 @@ A browser `JsRuntime` should expose at minimum `document` (with
 to the existing `browser_engine/script/*` API and the parsed `BeDomNode` tree
 the `ScriptHost` already holds.
 
+## 2026-08-09 re-verification (worktree agent)
+
+Re-ran `tools/pixel_compare/probe_js_char.spl` fresh in an isolated worktree
+(no `bin/simple` deployed there; used the main repo's seed binary). Confirmed
+still reproducing exactly as described:
+
+```
+[WARN] [page-scripts] ReferenceError: document is not defined
+[0] undefined   ... [7] undefined   (DOM/BOM-dependent probes)
+[8] 8.0                              (non-DOM arithmetic, works)
+[9] 2,4,6                            (non-DOM array ops, works)
+```
+
+`document` is still unresolved in the JS interpreter's global environment;
+non-DOM builtins are unaffected. This is genuine engine-core work (new global
+object surface + bridging to `browser_engine/script/dom_api.spl`), not a
+scoped bugfix — **confirmed ARCHITECTURAL-OPEN**, left as filed.
+
 ## Notes
 
 Google's inline scripts in `google_live.html` (11 script bodies) all `eval`

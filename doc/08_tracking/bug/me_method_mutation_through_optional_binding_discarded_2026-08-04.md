@@ -371,6 +371,34 @@ whole signal.
 **Do not build this as a general dataflow framework.** The rule is purely local:
 one call site, one receiver type, one declaration lookup.
 
+## Re-verification 2026-08-09
+
+Status confirmed **ARCHITECTURAL-OPEN** (compiler/language defect; the
+`OPTME001` lint backstop is the shippable mitigation already landed).
+
+Spot-checked the class-(c) "uncertain" rows this pass, since they looked like
+the cheapest remaining win:
+
+- `src/os/services/display/display_service.spl:124-225` (`gpu_ref` ←
+  `self.gpu`, calls like `cmd_resource_create_2d`/`flush_rect`/etc.): these
+  resolve via UFCS to **free functions** in
+  `src/os/drivers/virtio/virtio_gpu_ops.spl` (`fn virtio_gpu_cmd_resource_create_2d(drv: VirtioGpuDriver, ...)`),
+  not `me` methods — `OPTME001`'s scan correctly can't classify them as (a),
+  because they aren't the shape either the rule or this defect targets.
+  Whether mutation is lost here depends on whether `VirtioGpuDriver` (`struct
+  VirtioGpuDriver` in `virtio_gpu.spl:154`) is value or reference under
+  UFCS-through-`Option`, which is a *different* open question from the
+  `me`-on-`T?` defect this doc tracks — conflating the two would be a guess,
+  not a fix, so left alone per the doc's own no-blind-edit rule.
+- No safe, verifiable subset of the remaining class (a)/(c) rows was found
+  this pass: all require either GPU hardware this host lacks, or an owner
+  call on driver-mutation semantics. The real fix — reject/auto-writeback
+  `me` calls on `T?` receivers at type-check time — is a compiler front-end
+  change with no scoped, low-risk slice smaller than the whole feature; it
+  also risks the forbidden MIR/HIR lowering files listed for this pass.
+
+No code changed by this re-verification pass; doc left OPEN/architectural.
+
 ## Provenance of these measurements
 
 Measured in the shared working copy, which was **~64 commits behind

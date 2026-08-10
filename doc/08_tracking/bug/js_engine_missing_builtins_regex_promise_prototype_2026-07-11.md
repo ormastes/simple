@@ -44,6 +44,23 @@ Working for reference (so the gaps above are specific, not a dead interpreter):
 
 Reproduce: `bin/simple run tools/pixel_compare/probe_js_char.spl`.
 
+## 2026-08-09 re-verification (worktree agent)
+
+Re-ran `tools/pixel_compare/probe_js_char.spl` fresh in an isolated worktree
+(seed binary, no self-hosted `bin/simple` deployed there). Non-DOM builtins
+still behave as the doc's "working for reference" list states (`[8] 8.0`,
+`[9] 2,4,6` for arithmetic/array-map-join), and the probe still reports the
+DOM-blocked slots as `undefined` (see sibling doc
+`js_engine_no_dom_bom_globals_2026-07-11.md` for that overlap). Did not
+isolate a standalone regex/Promise/prototype-introspection-only repro in this
+pass; the gaps this doc names (regex-`replace` no-op, `Promise` undefined,
+`typeof obj.method`) are genuine subset-interpreter feature gaps in
+`src/lib/nogc_sync_mut/js/engine/interpreter.spl` /
+`src/lib/common/js/engine/runtime.spl` — implementing regex substitution, a
+`Promise` object, and prototype-property reflection is new engine-core
+functionality, not a scoped bugfix. **Confirmed ARCHITECTURAL-OPEN**, left as
+filed; no root-cause fix applied in this session.
+
 ## Expected
 
 `String.replace(regex, repl)` performs regex substitution; `Promise` is defined;

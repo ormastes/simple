@@ -1,7 +1,37 @@
 # JIT: `if nil:` takes the TRUE branch — a nil condition is truthy under Cranelift, falsy under the interpreter (2026-08-04)
 
-**Status:** OPEN
+**Status:** ARCHITECTURAL-OPEN (re-verified 2026-08-09, still reproduces)
 **Found:** 2026-08-04
+
+## Re-verification (2026-08-09)
+
+Reproduced fresh in this isolated worktree with a minimal repro
+(`takes_bool(b: bool) -> text` returning `"TRUE"`/`"FALSE"` from `if b:`,
+called as `takes_bool(nil)`, plus a bare `if nil:`):
+
+```
+$ bin/simple run niltest.spl                          # seed JIT (default)
+  nil is TRUTHY
+C takes_bool(nil) = TRUE
+
+$ SIMPLE_EXECUTION_MODE=interpreter bin/simple run niltest.spl
+C takes_bool(nil) = FALSE
+```
+
+Confirms the original finding exactly: JIT still treats a nil condition as
+truthy; the interpreter is still correct. No regression, no fix landed
+upstream since 2026-08-04.
+
+**Disposition for this lane:** confirmed genuinely architectural, not fixed
+here. The defect lives in the Rust seed's Cranelift branch-condition
+lowering (`src/compiler_rust/compiler/src/codegen/`), which this lane is
+explicitly barred from touching (only `.spl`/`.shs` root-cause fixes are
+in scope, and `src/compiler_rust/**` is out of bounds by the standing
+mandate). A real fix requires: (1) a `--full-bootstrap` cargo rebuild of the
+seed, and (2) a decided repo-wide truthiness table (nil, `0`, `""`, empty
+collections) so JIT and interpreter converge on one semantics rather than
+diverging per-engine — a language-semantics decision, not a local patch.
+That combination is out of scope for a `.spl`-only lane.
 **Related:** `bool_typed_parameter_accepts_non_bool_and_jit_corrupts_it_2026-08-04.md`
 (parallel lane, unit tier) records the JIT re-tagging a wrong-typed `bool`
 parameter into `<special:N>`; this file isolates the branch-condition half — a

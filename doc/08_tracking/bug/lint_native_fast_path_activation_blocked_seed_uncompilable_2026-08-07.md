@@ -54,3 +54,19 @@ redeployed, and that is blocked twice over:
 
 Until then the deployed `bin/release/<triple>/simple_lint` artifact can be
 invoked directly (`simple_lint lint <targets>`) to skip the tax.
+
+## Re-verification 2026-08-09
+
+Status confirmed **ARCHITECTURAL-OPEN**. This worktree has no deployed
+`bin/simple`/seed binary at all (known worktree-isolation limit — see
+`.claude/memory` note on worktree agents lacking `bin/simple`), so the
+blocking `cargo check -p simple-compiler` E0425 at
+`interpreter_extern/mod.rs:557-558` could not be independently re-probed from
+here. The fix this doc describes is already landed (the native-lint build
+script, the driver's `try_cached_lint_native` hook, and the `lint_entry.spl`
+argv[0] dispatch) — what remains is activation, gated on a seed rebuild that
+is itself blocked by an unrelated, pre-existing Rust compile break plus the
+Stage 3 self-host block. Both blockers are owned by other tracked docs
+(`t3_full_bootstrap_stage3_unresolved_type_byteorder_cache_validator_2026-08-06.md`)
+and are out of scope to fix here per `.claude/rules/bootstrap.md` (no ad-hoc
+seed hand-copy). No code changed.

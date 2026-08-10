@@ -130,6 +130,24 @@ regardless of backend. Worth fixing separately (probe `llvm-config-18 --prefix` 
 - `config/mcp/install.shs`: resolve both MCP native binaries from the canonical deploy dir
   (commit 67ab978) — correct for a healthy repo; does not address the codegen bugs here.
 
+## Re-verification 2026-08-09
+
+Status confirmed **ARCHITECTURAL-OPEN** for remaining defects C (bootstrap
+stage4 broken full CLI) and D (Linux LLVM-18 detection). Defects A and B are
+already marked resolved/historical by the 2026-07-15 update at the top of
+this doc. This worktree has no deployed `bin/simple`/seed binary (known
+worktree-isolation limit), so re-running `bootstrap-from-scratch.sh --deploy`
+or a fresh `native-build` of `src/app/cli/main.spl` was not possible here,
+and the instructions for this pass explicitly forbid running
+`bin/simple build bootstrap`. Defect D (`bootstrap-from-scratch.sh:227` only
+probing `/opt/homebrew/opt/llvm@18`, never `/usr/lib/llvm-18` on Linux) is a
+real, cheap, scoped fix in principle, but it lives in
+`scripts/bootstrap/bootstrap-from-scratch.sh` and the doc itself states
+fixing detection does **not** unblock C (stage4 forces cranelift when using
+the seed regardless of backend) — so fixing D alone would be an unverifiable,
+low-value change in isolation without the seed rebuild path to prove it
+against. Left OPEN; no code changed this pass.
+
 ## Suggested fix order
 1. Fix the bootstrap smoke-test `set -e` gap so a failing stage4 binary triggers the
    restore path instead of aborting the script before it.
