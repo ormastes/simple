@@ -655,18 +655,17 @@ fn _engine2d_draw_ir_render_glass_material(
 # fill: box-shadow first (behind), then background (linear-gradient beats a solid
 # fill; a corner radius routes the solid fill to a rounded rect), then per-side
 # borders. Each sub-feature is checked independently so a transparent-background
-# box that still has a border or shadow paints instead of vanishing. Engine2D is
-# value-copied across this free-function boundary, so the caller MUST reassign
-# from the returned engine.
+# box that still has a border or shadow paints instead of vanishing. Keep the
+# concrete Engine2D owner mutable across this boundary; returning it inside the
+# old box-outcome aggregate lost the receiver on freestanding native builds.
 fn _engine2d_draw_ir_render_box(
-    engine: Engine2D, command: DrawIrCommand,
+    mut eng: Engine2D, command: DrawIrCommand,
     x: i32, y: i32, w: i32, h: i32,
     mut execution_i64: [i64], mut execution_text: [text]
-) -> Engine2dDrawIrBoxOutcome:
-    var eng = engine
-    # This free-function boundary projects Engine2D once more. Reset the exact
-    # receiver used by all box draws, then retain it instead of replacing it
-    # with helper-outcome aggregate fields.
+) -> i32:
+    # Reset and draw through the exact caller-owned receiver. Evidence remains
+    # in the caller-owned scalar sidecars; no Engine2D value crosses back in a
+    # nested result.
     eng.clear_mask()
     val style: [DrawIrStyleProp] = command.computed_style
     val typed_shadows = engine2d_draw_ir_typed_box_shadows(style)
@@ -733,10 +732,7 @@ fn _engine2d_draw_ir_render_box(
                 eng, typed_shadows.layers, x, y, w, h, effective_corners)
         val border_engine_ignored = _engine2d_draw_ir_render_borders(
             eng, style, x, y, w, h, radius)
-        return Engine2dDrawIrBoxOutcome(
-            engine: eng,
-            glass_execution: engine2d_glass_execution_unavailable(
-                "execution-owned-by-sidecar"))
+        return 1
     val bg_image = _engine2d_draw_ir_style_value(style, "background-image")
     if typed_nonuniform:
         val background_engine_ignored = engine2d_draw_ir_render_typed_background(
@@ -791,11 +787,7 @@ fn _engine2d_draw_ir_render_box(
             eng, typed_shadows.layers, x, y, w, h, effective_corners)
     val clipped_border_engine_ignored = _engine2d_draw_ir_render_borders(
         eng, style, x, y, w, h, radius)
-    Engine2dDrawIrBoxOutcome(
-        engine: eng,
-        glass_execution: engine2d_glass_execution_unavailable(
-            "glass-material-fallback-painted")
-    )
+    1
 fn engine2d_resolved_draw_ir_image(image_uri: text, width: i32, height: i32, pixels: [u32]) -> Engine2dResolvedDrawIrImage:
     var opaque = (
         width > 0 and height > 0 and
@@ -1521,7 +1513,7 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
             material_execution_i64[1] = 0
             material_execution_i64[2] = 0
             material_execution_text[0] = ""
-            val box_ignored = _engine2d_draw_ir_render_box(
+            val box_status = _engine2d_draw_ir_render_box(
                 eng, command, x, y, command.width, command.height,
                 material_execution_i64, material_execution_text)
             if _engine2d_draw_ir_style_value(
