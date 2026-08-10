@@ -1,0 +1,96 @@
+#!/bin/sh
+# check-import-alias-codegen.shs
+#
+# Runnable check for the import-form x codegen-lane defect family.
+#
+# DEFECT: `use m.{f as g}` and `use m` + `m.f()` do not bind in the CODE
+# GENERATION lane. Under the JIT this silently drops the whole module to the
+# interpreter (100-1000x slowdown); under native/AOT it is a hard
+# `error[E1002]: function ... not found` that aborts the compilation unit and
+# turns any spec into `reason=zero-examples`.
+#
+# The interpreter binds all five forms correctly, which is why this is invisible
+# to the ordinary spec corpus. SIMPLE_JIT_STRICT=1 is what makes the codegen
+# lane speak instead of silently falling back -- it is the negative control's
+# whole point and must not be removed.
+#
+# Verdict line is the LAST line of stdout:
+#   PASS -- <n> form(s) checked, all bind in the codegen lane
+#   FAIL -- <form> does not bind in the codegen lane
+#   ERROR -- nothing was checked
+#
+# Negative control (proves the check is live): pass --expect-fail. The two
+# currently-broken forms MUST fail; if they pass, either the defect was fixed
+# (update this script) or the check is not measuring the codegen lane at all.
+
+set -u
+
+SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+[ -x "$SIMPLE_BIN" ] || SIMPLE_BIN="$(command -v simple 2>/dev/null || echo bin/simple)"
+
+EXPECT_FAIL=0
+[ "${1:-}" = "--expect-fail" ] && EXPECT_FAIL=1
+
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
+CHECKED=0
+BAD=""
+
+# $1 = form name, $2 = import line, $3 = call expression
+probe() {
+    name="$1"; imp="$2"; call="$3"
+    d="$WORK/$name"
+    mkdir -p "$d"
+    printf 'pub fn base_get(k: text) -> text:\n    return "V:" + k\n' > "$d/target.spl"
+    printf '%s\n\npub fn mid_call() -> text:\n    return %s\n' "$imp" "$call" > "$d/mid.spl"
+    printf 'use mid.{mid_call}\n\nfn main():\n    print(mid_call())\n' > "$d/entry.spl"
+
+    out="$( cd "$d" && SIMPLE_JIT_STRICT=1 timeout 180 "$OLDPWD/$SIMPLE_BIN" run entry.spl 2>&1 )"
+    CHECKED=$((CHECKED + 1))
+
+    if printf '%s' "$out" | grep -q '^V:x'; then
+        echo "  ok    $name"
+        return 0
+    fi
+    reason="$(printf '%s' "$out" | grep -iE 'unresolved external symbol|not found' | head -1)"
+    echo "  BROKEN $name -- ${reason:-<no diagnostic>}"
+    BAD="$BAD $name"
+    return 1
+}
+
+echo "import-form x codegen-lane binding check (SIMPLE_JIT_STRICT=1)"
+echo "binary: $SIMPLE_BIN"
+
+probe plain_sel  'use target.{base_get}'      'base_get("x")'
+probe alias_sel  'use target.{base_get as g}' 'g("x")'
+probe wildcard   'use target.*'               'base_get("x")'
+probe mod_alias  'use target as T'            'T.base_get("x")'
+probe qualified  'use target'                 'target.base_get("x")'
+
+if [ "$CHECKED" -eq 0 ]; then
+    echo "ERROR -- nothing was checked"
+    exit 2
+fi
+
+if [ "$EXPECT_FAIL" -eq 1 ]; then
+    # Negative control: the two known-broken forms must still be broken.
+    miss=""
+    for want in alias_sel qualified; do
+        case " $BAD " in *" $want "*) ;; *) miss="$miss $want" ;; esac
+    done
+    if [ -n "$miss" ]; then
+        echo "FAIL -- negative control: expected these to be broken but they bound:$miss"
+        exit 1
+    fi
+    echo "PASS -- $CHECKED form(s) checked, negative control live (alias_sel, qualified still broken)"
+    exit 0
+fi
+
+if [ -n "$BAD" ]; then
+    echo "FAIL --$BAD do not bind in the codegen lane"
+    exit 1
+fi
+
+echo "PASS -- $CHECKED form(s) checked, all bind in the codegen lane"
+exit 0
