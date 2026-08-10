@@ -96,3 +96,16 @@ bundle path, well outside a test-repair lane. Adding the `# capsule:` markers
 to the nine existing emitters is the one cheap half, but landing it alone would
 turn `rtl_mdsoc_capsule_boundary_spec.spl` from 22 red to ~13 red while leaving
 the other two specs untouched, so it should go with the reorg it documents.
+
+## Re-verified 2026-08-10
+
+Fresh independent check (`test -f` on each of the 8 asserted SA-3/SA-4
+module paths, plus `/usr/bin/grep -rl "# capsule:" src/compiler/70.backend/backend/`):
+all 8 modules are still absent from the tree exactly as documented, and zero
+files anywhere under `src/compiler/70.backend/backend/` carry a `# capsule:`
+marker (still 0, not even the "cheap half" landed). `src/hardware/fpga_linux/`
+was not independently re-listed but the module-path checks above are
+sufficient — no new evidence of any Phase 5 SA-3/SA-4 work having landed since
+2026-08-04. Characterization is confirmed accurate and unchanged: this is
+genuine unbuilt design-owned feature work, correctly ARCHITECTURAL/OPEN, not a
+defect. No code change made. Status stays OPEN.
