@@ -1186,6 +1186,24 @@ fn is_gradient_angle_token(s: text) -> bool:
     val suffix = s.substring(i, n)
     suffix == "deg" or suffix == "grad" or suffix == "rad" or suffix == "turn"
 
+# Index of the `)` that closes the `(` at `lp`, or -1. A gradient whose stops
+# are `rgba(...)`/`rgb(...)`/`hsl(...)` functions carries nested parens, so the
+# first `)` after `lp` is NOT the gradient's own close paren.
+fn gradient_matching_close(s: text, lp: i32) -> i32:
+    var depth = 0
+    var i = lp
+    val n = s.len()
+    while i < n:
+        val c = s.char_at(i)
+        if c == "(":
+            depth = depth + 1
+        elif c == ")":
+            depth = depth - 1
+            if depth == 0:
+                return i
+        i = i + 1
+    -1
+
 fn parse_linear_gradient_color(raw: text, target: i32) -> u32:
     # BUG (fixed here): a numeric angle token ("45deg", ...) used to fall
     # through to `elif item_index == target: return parse_color_any(part)`
@@ -1198,26 +1216,28 @@ fn parse_linear_gradient_color(raw: text, target: i32) -> u32:
     val start = text_index_of(lower, "linear-gradient(")
     if start < 0:
         return 0u32
+    # BUG (fixed here, second defect): the close paren used to be the FIRST
+    # `)` after `lp`, and the stop scan split `inner` on EVERY comma. Both
+    # break as soon as a stop is itself a function -- for
+    # `linear-gradient(180deg, rgba(255,255,255,0.09), rgba(...))` the inner
+    # text was truncated to `180deg, rgba(255,255,255,0.09` and then shredded
+    # into `rgba(255` / `255` / `255` / `0.09`, so BOTH from and to came back
+    # 0u32 and the layer was never recognised as a typed gradient at all.
     val lp = find_from(raw, "(", start)
-    val rp = find_from(raw, ")", lp + 1)
-    if lp < 0 or rp <= lp:
+    if lp < 0:
+        return 0u32
+    val rp = gradient_matching_close(raw, lp)
+    if rp <= lp:
         return 0u32
     val inner = raw.substring(lp + 1, rp)
     var item_index = 0
-    var pos = 0
-    val inner_len = inner.len()
-    while pos <= inner_len:
-        val comma = find_from(inner, ",", pos)
-        val end = if comma >= 0: comma else: inner_len
-        val part = inner.substring(pos, end).trim()
+    for raw_part in split_top_level_commas_paren_aware(inner):
+        val part = raw_part.trim()
         if part.starts_with("to ") or part == "top" or part == "bottom" or part == "left" or part == "right" or is_gradient_angle_token(part):
             item_index = item_index - 1
         elif item_index == target:
             return parse_color_any(part)
-        if comma < 0:
-            break
         item_index = item_index + 1
-        pos = comma + 1
     0u32
 
 # ============================================================================
@@ -1270,7 +1290,9 @@ fn gradient_inner(raw: text) -> text:
     if start < 0:
         return ""
     val lp = start + open_len - 1
-    val rp = find_from(raw, ")", lp + 1)
+    # Same nested-paren defect as parse_linear_gradient_color above: the first
+    # `)` closes an `rgba(...)` stop, not the gradient.
+    val rp = gradient_matching_close(raw, lp)
     if rp <= lp:
         return ""
     raw.substring(lp + 1, rp)

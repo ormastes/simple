@@ -280,14 +280,86 @@ fn _apply_decls_without_grid(
                 background_clip_v = shorthand.clip
                 bg_layers_raw_v = ""
             else:
-                bg_v = parse_color_alpha(bgs)
-                background_gradient_from_v = 0u32
-                background_gradient_to_v = 0u32
-                background_gradient_stop_colors_v = []
-                background_gradient_stop_positions_v = []
-                background_gradient_angle_deg_v = 180
-                background_gradient_is_radial_v = false
-                bg_layers_raw_v = bgs
+                # GAP-3: `background: <typed gradient>, <base colour>` is the
+                # shape every glass panel uses. `_parse_background_shorthand`
+                # fails closed on any `gradient(` and on >1 top-level layer, so
+                # this fell into the raw branch below: the typed stops were
+                # zeroed and `bg` collapsed to whatever colour token
+                # `parse_color_alpha` found first anywhere in the string
+                # (the *gradient's* first stop, not the base colour). The node
+                # was then unrepresentable to the CPU-composited material gate,
+                # which demands an empty `background-layers-raw`. Project the
+                # exact two-layer shape onto the one typed image layer the
+                # renderer has. Everything else still stays raw and fails
+                # closed.
+                val over_layers = split_top_level_commas(bgs.trim())
+                var over_typed = false
+                var over_radial = false
+                var over_color = 0u32
+                var over_image = ""
+                if over_layers.len() == 2:
+                    over_image = over_layers[0].trim()
+                    val over_base = over_layers[1].trim()
+                    val over_base_lower = over_base.lower()
+                    # The base layer must be a plain colour: no image function
+                    # and no unresolved var(). Without this guard
+                    # `parse_color_alpha` would happily pick `red` out of a
+                    # second `linear-gradient(90deg, red, blue)` layer.
+                    val over_base_is_color = (
+                        not over_base_lower.contains("gradient(") and
+                        not over_base_lower.contains("url(") and
+                        not over_base_lower.contains("image-set(") and
+                        not over_base_lower.contains("cross-fade(") and
+                        not over_base_lower.contains("element(") and
+                        not over_base_lower.contains("paint(") and
+                        not over_base_lower.contains("var(")
+                    )
+                    if over_base_is_color:
+                        over_color = parse_color_alpha(over_base)
+                        if over_color != 0u32:
+                            val over_from = parse_linear_gradient_color(over_image, 0)
+                            val over_to = parse_linear_gradient_color(over_image, 1)
+                            if _background_is_exact_typed_linear_layer(
+                                over_image, over_from, over_to, false
+                            ):
+                                over_typed = true
+                                background_gradient_from_v = over_from
+                                background_gradient_to_v = over_to
+                            elif is_radial_gradient(over_image):
+                                over_typed = true
+                                over_radial = true
+                                # A radial layer has no meaningful 2-colour
+                                # projection; the stop list below carries it.
+                                background_gradient_from_v = 0u32
+                                background_gradient_to_v = 0u32
+                if over_typed:
+                    bg_v = over_color
+                    background_image_uri_v = ""
+                    val over_stops = parse_gradient_stops(over_image)
+                    var over_stop_colors: [u32] = []
+                    var over_stop_positions: [i32] = []
+                    var over_idx = 0
+                    while over_idx < over_stops.len():
+                        over_stop_colors.push(over_stops[over_idx].color)
+                        over_stop_positions.push(over_stops[over_idx].pos_permille)
+                        over_idx = over_idx + 1
+                    background_gradient_stop_colors_v = over_stop_colors
+                    background_gradient_stop_positions_v = over_stop_positions
+                    background_gradient_angle_deg_v = (
+                        if over_radial: 180
+                        else: parse_gradient_angle_deg(over_image)
+                    )
+                    background_gradient_is_radial_v = over_radial
+                    bg_layers_raw_v = ""
+                else:
+                    bg_v = parse_color_alpha(bgs)
+                    background_gradient_from_v = 0u32
+                    background_gradient_to_v = 0u32
+                    background_gradient_stop_colors_v = []
+                    background_gradient_stop_positions_v = []
+                    background_gradient_angle_deg_v = 180
+                    background_gradient_is_radial_v = false
+                    bg_layers_raw_v = bgs
         else:
             bg_v = parse_color_alpha(bg)
             background_gradient_from_v = 0u32
