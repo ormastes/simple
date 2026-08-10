@@ -1,0 +1,198 @@
+#!/bin/sh
+# check-spec-missing-path-vacuity.shs
+#
+# VACUITY SHAPE: a spec asserts against a product file that DOES NOT EXIST.
+#
+# A spec that reads a missing path gets empty content back. Any NEGATIVE leg
+# --- to_equal(false), a negated to_contain, an absence check --- then passes
+# VACUOUSLY. This overturns the previously-assumed rule that "negative /
+# absence assertions cannot be vacuous". They can, and seven confirmed sites
+# were found by hand before this scanner existed (Q24, e46ebc94f10..5de52d5ae0c).
+#
+# WHAT IT DOES
+#   For every *_spec.spl under test/, extract every string literal that looks
+#   like a repo-relative product path, and report the ones that do not exist in
+#   the committed tree (git ls-files) nor on disk.
+#
+# NON-VACUITY / FAIL-CLOSED CONTRACT
+#   * --selftest runs BEFORE every scan and is FATAL. It plants a fixture spec
+#     naming a path that cannot exist and requires the scanner to flag it, then
+#     removes the fixture defect and requires the scanner to fall silent. A
+#     scanner that flags nothing in the positive case, or flags the negative
+#     case, aborts with ERROR exit 2 --- it cannot be used to certify anything.
+#   * A run that examines ZERO specs is an ERROR (exit 2), never a pass.
+#   * The verdict line is ALWAYS the last line of stdout:
+#       PASS  -- <n> specs checked, 0 missing-path references   exit 0
+#       FAIL  -- <n> specs checked, <m> missing-path references exit 1
+#       ERROR -- nothing was checked                            exit 2
+#
+# EXTRACTION RULES (hand-verified against a sample; see the header note in
+# doc/08_tracking/ for the audit)
+#   * Comment lines in the SPEC ITSELF are skipped --- a prior scanner in this
+#     repo harvested its own commentary as needles and produced noise.
+#   * Only literals with a '/' and a known repo root prefix are considered:
+#     src/ scripts/ test/ tools/ examples/ config/ bin/ doc/ .spipe/
+#   * Literals containing interpolation ({...}), globs (*?[]), or a trailing
+#     path separator are skipped --- they are not single concrete paths.
+#   * A path is considered PRESENT if git ls-files matches it exactly, or if it
+#     is a tracked DIRECTORY prefix, or if it exists on disk (build outputs).
+#
+# Usage:
+#   sh scripts/check/check-spec-missing-path-vacuity.shs [--selftest-only] [ROOT...]
+
+set -u
+
+REPO=$(git rev-parse --show-toplevel 2>/dev/null) || {
+  echo "ERROR -- nothing was checked"
+  exit 2
+}
+cd "$REPO" || { echo "ERROR -- nothing was checked"; exit 2; }
+
+WORK=$(mktemp -d) || { echo "ERROR -- nothing was checked"; exit 2; }
+trap 'rm -rf "$WORK"' EXIT INT TERM
+
+TRACKED="$WORK/tracked.txt"
+git ls-files > "$TRACKED" 2>/dev/null
+if [ ! -s "$TRACKED" ]; then
+  echo "ERROR -- nothing was checked"
+  exit 2
+fi
+# Directory prefixes of every tracked file, so a spec naming a directory counts.
+awk '{ n = split($0, seg, "/"); acc = seg[1]; for (i = 2; i < n; i++) { print acc; acc = acc "/" seg[i] } if (n > 1) print acc }' "$TRACKED" \
+  | sort -u > "$WORK/dirs.txt"
+sort -u "$TRACKED" "$WORK/dirs.txt" > "$WORK/known.txt"
+
+# extract_paths <specfile> -> stdout: one candidate path per line
+extract_paths() {
+  awk '
+    # skip comment lines in the spec itself
+    /^[ \t]*#/ { next }
+    {
+      line = $0
+      # strip trailing line comments conservatively: only when # follows
+      # whitespace and no quote is open is hard to know, so we rely on the
+      # per-literal filters below instead.
+      n = split(line, parts, "\"")
+      for (i = 2; i <= n; i += 2) {
+        s = parts[i]
+        if (s !~ /\//) continue
+        if (s ~ /[{}*?\[\]]/) continue
+        if (s ~ /\/$/) continue
+        if (s ~ /[ \t]/) continue
+        if (s ~ /^(src|scripts|test|tools|examples|config|bin|doc)\// ||
+            s ~ /^\.spipe\//) print s
+      }
+    }
+  ' "$1"
+}
+
+scan() {
+  # $1 = file listing specs to scan; writes hits to $2; echoes "<specs> <hits>"
+  _list="$1"; _out="$2"
+  : > "$_out"
+  _cand="$_out.cand"
+  : > "$_cand"
+  _nspecs=0
+  while IFS= read -r spec; do
+    [ -f "$spec" ] || continue
+    _nspecs=$((_nspecs + 1))
+    extract_paths "$spec" | sort -u | while IFS= read -r p; do
+      [ -n "$p" ] || continue
+      printf '%s\t%s\n' "$p" "$spec" >> "$_cand"
+    done
+  done < "$_list"
+  # Batch existence check: one pass over the known-path set, not one grep per
+  # candidate (a per-candidate grep over 110k tracked paths does not terminate).
+  if [ -s "$_cand" ]; then
+    sort -u "$_cand" > "$_cand.s"
+    awk -F'\t' 'NR==FNR { known[$0]=1; next } { if (!($1 in known)) print $2 "\t" $1 }' \
+      "$WORK/known.txt" "$_cand.s" > "$_cand.missing"
+    # second gate: present on disk but untracked (build outputs) is NOT a miss
+    while IFS="$(printf '\t')" read -r sp pp; do
+      [ -n "$pp" ] || continue
+      [ -e "$pp" ] && continue
+      printf '%s\t%s\n' "$sp" "$pp" >> "$_out"
+    done < "$_cand.missing"
+  fi
+  echo "$_nspecs"
+}
+
+# ---------------------------------------------------------------------------
+# SELFTEST (fatal, runs before every scan)
+# ---------------------------------------------------------------------------
+selftest() {
+  st="$WORK/st"; mkdir -p "$st"
+  # POSITIVE control: a spec naming a path that cannot exist -> MUST be flagged.
+  cat > "$st/pos_spec.spl" <<'EOF'
+describe "positive control":
+    it "reads a nonexistent product file":
+        val c = read_file("src/compiler/__q28_selftest_absent__/nope.spl")
+        expect(c.contains("anything")).to_equal(false)
+EOF
+  # NEGATIVE control: same spec shape, but the path exists -> MUST NOT be flagged.
+  cat > "$st/neg_spec.spl" <<'EOF'
+describe "negative control":
+    it "reads a real product file":
+        val c = read_file("scripts/check/check-spec-missing-path-vacuity.shs")
+        expect(c.contains("anything")).to_equal(false)
+EOF
+  # CONTROL 3: the needle appears only inside a spec COMMENT -> MUST NOT be flagged.
+  cat > "$st/cmt_spec.spl" <<'EOF'
+# see src/compiler/__q28_selftest_absent__/nope.spl for background
+describe "comment control":
+    it "asserts nothing about a path":
+        expect(1).to_equal(1)
+EOF
+  echo "$st/pos_spec.spl" > "$st/pos.list"
+  echo "$st/neg_spec.spl" > "$st/neg.list"
+  echo "$st/cmt_spec.spl" > "$st/cmt.list"
+
+  np=$(scan "$st/pos.list" "$st/pos.hits")
+  nn=$(scan "$st/neg.list" "$st/neg.hits")
+  nc=$(scan "$st/cmt.list" "$st/cmt.hits")
+
+  ok=1
+  [ "$np" = "1" ] || { echo "selftest: positive spec not counted"; ok=0; }
+  [ -s "$st/pos.hits" ] || { echo "selftest: FAILED -- planted missing path was NOT flagged (scanner is vacuous)"; ok=0; }
+  [ "$nn" = "1" ] || { echo "selftest: negative spec not counted"; ok=0; }
+  [ -s "$st/neg.hits" ] && { echo "selftest: FAILED -- existing path was flagged (false positive)"; ok=0; }
+  [ -s "$st/cmt.hits" ] && { echo "selftest: FAILED -- path inside a spec comment was harvested"; ok=0; }
+  [ "$ok" = "1" ] || return 1
+  echo "selftest: OK -- 3 controls (missing flagged, present silent, comment ignored)"
+  return 0
+}
+
+if ! selftest; then
+  echo "ERROR -- nothing was checked"
+  exit 2
+fi
+
+case "${1:-}" in
+  --selftest-only)
+    echo "PASS -- selftest only, 3 controls checked"
+    exit 0
+    ;;
+esac
+
+ROOTS="$*"
+[ -n "$ROOTS" ] || ROOTS="test"
+find $ROOTS -name '*_spec.spl' -type f 2>/dev/null | sort > "$WORK/specs.list"
+if [ ! -s "$WORK/specs.list" ]; then
+  echo "ERROR -- nothing was checked"
+  exit 2
+fi
+
+N=$(scan "$WORK/specs.list" "$WORK/hits.txt")
+if [ -z "$N" ] || [ "$N" -eq 0 ] 2>/dev/null; then
+  echo "ERROR -- nothing was checked"
+  exit 2
+fi
+
+M=$(wc -l < "$WORK/hits.txt" | tr -d ' ')
+if [ "$M" -gt 0 ]; then
+  sort -u "$WORK/hits.txt"
+  echo "FAIL -- $N specs checked, $M missing-path references"
+  exit 1
+fi
+echo "PASS -- $N specs checked, 0 missing-path references"
+exit 0
