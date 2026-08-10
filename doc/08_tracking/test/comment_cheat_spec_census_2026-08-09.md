@@ -171,3 +171,68 @@ load-bearing. Code-vs-comment split among *located* needles: 8,316 code / 199 bo
 - Better still: replace source-grep assertions with behavioural ones where a runnable
   path exists. A needle that can match a comment proves nothing about behaviour.
 - Nothing was fixed by this pass; it is enumeration only.
+
+---
+
+## Remediation status (stream K4, 2026-08-10)
+
+Landed as `4e83c9abaf8`, `8d0f432102c`, `f2bcadfc51c`. Method: anchor each needle
+to real declaration/dispatch syntax so a comment cannot satisfy it. No needle was
+relaxed; nothing was dropped without an equal-or-stronger real-code replacement.
+Every replacement needle was pre-checked to exist in the product file on a
+non-comment line before the spec was run.
+
+### FIXED — 43 sites / 28 specs
+
+`annotation_intrinsics` (4), `concurrency_api_misuse` (4), `platform_capsule` (4),
+`keyof` (3), `file_class_introspection` (3), `trait_desugar` (2),
+`native_build_cache_plumbing` (2), `editor_gui` (2), and one site each in
+`pragma_msg`, `mixin_expr`, `traits`, `packed_struct_bitfield`, `generic_syntax`,
+`ignored_return_warning`, `preprocess_conditionals`, `entity_span`,
+`star_export_lint`, `runtime_surface`, `check_entry_target_routing_contract`,
+`cross_build_plan`, `database_test_extended`, `mcp_debug_log`, `editor_buffer`,
+`editor_gui_sdl`, `editor_md_language`, `cli_native_build_main_contract`,
+`entry_closure_physical_source_dedup`, `processing_cuda_backend`.
+
+Duplicate-tree copies were fixed in lockstep where they carried the same needle
+(`test/system/...`, `test/unit/...`); several duplicates turned out to be pending
+stubs and needed no change.
+
+### NEWLY RED — 1 real defect the hollow needles were hiding
+
+`editor_gui_spec.spl` + `editor_buffer_spec.spl`: `src/app/editor/main.spl`
+advertises `--gui` in `print_help()` but has no dispatch arm for it, and never
+calls `editor_tui_run`. Both needles matched only main.spl:6-7, a comment calling
+those calls "the intended dispatch hooks". Filed as
+`doc/08_tracking/bug/editor_main_gui_and_tui_dispatch_missing_2026-08-10.md`;
+the specs are LEFT RED.
+
+Two other specs were STALE rather than defective and were repointed:
+`editor_md_language` (`char_at` replaced by a byte slice in the product; only the
+change-log comment still mentions it) and `cli_native_build_main_contract`.
+
+### NOT A FINDING — 7 sites (deliberate pins / heuristic mis-pairs)
+
+- `sugar_plugin_spec.spl` (2): the `[STATIC-NEXT]` marker contract asserts that
+  marker COMMENTS exist at three named sites. Asserting a comment IS the contract.
+- `evalops_export_and_text_at_spec.spl` (3): an `it` block explicitly named
+  "documents text .at as a deliberate divergence from the seed" pins the rationale
+  comment on purpose, inside an `arm_body`-bounded slice.
+- `stdlib_intensive_spec.spl` (1): the needle is spec-internal control flow
+  (`if line.contains("name"):  # Skip header`), not an assertion.
+- `database_test_extended_spec.spl` `timing_runs`: real code in
+  `test_extended/database.spl:66`; the census paired it with the wrong file.
+
+`mcp_analysis_tools_spec.spl` and `mcp_lsp_tools_spec.spl` are a different and
+worse defect than comment-cheating: they build the string under test inside the
+spec and then assert against it, so they never read the product at all. Out of
+scope here; they need rewriting, not anchoring.
+
+### REMAINING — 46 sites
+
+Everything in the table above not listed as FIXED or NOT A FINDING, minus the 12
+sites in `qemu_runner_spec.spl` (7) and `wm_multiapp_taskbar_spec.spl` (5), which
+stream J2 owned concurrently. The bulk of the remainder is SimpleOS / QEMU /
+GUI-evidence shell-script gates (`simpleos_*`, `macos_*`, `wm_host_*`,
+`cpu_hotloop_gate`, `gui_showcase_perf_*`), which need a runnable-evidence review
+rather than a syntax anchor.
