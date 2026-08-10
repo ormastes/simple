@@ -1,6 +1,6 @@
 ---
 id: be_dom_event_missing_prevent_default_stop_propagation_2026-07-11
-status: OPEN
+status: FIXED
 severity: low
 discovered: 2026-07-11
 discovered_by: event_api_spec (test/01_unit/browser/script/event_api_spec.spl)
@@ -10,8 +10,8 @@ related: src/lib/gc_async_mut/gpu/browser_engine/script/event_api.spl
 
 # BeDomEvent lacks prevent_default/stop_propagation methods and state
 
-**Status:** OPEN. Gap lives in `dom.spl` (`BeDomEvent`), not owned by the
-browser-script-API agent.
+**Status:** FIXED (see Resolution below). Frontmatter `status:` corrected
+2026-08-10 — it had been left as OPEN even though the fix landed 2026-07-17.
 
 ## Summary
 
