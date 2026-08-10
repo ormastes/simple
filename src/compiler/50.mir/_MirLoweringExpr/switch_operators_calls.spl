@@ -623,9 +623,10 @@ impl MirLowering:
 
         result
 
-    me emit_if_chain_dispatch(scrut_local: LocalId, int_cases: [(i64, HirBlock)], default_body: HirBlock, default_binding: SymbolId?, expected_type: HirType?) -> LocalId:
-        """Emit a nested If chain for sparse / small int matches.
-        Cheaper than a jump table when arms < 4 or key span > 1024."""
+    me emit_if_chain_dispatch(scrut_local: LocalId, int_cases: [(i64, HirBlock)], text_cases: [(text, HirBlock)], default_body: HirBlock, default_binding: SymbolId?, expected_type: HirType?) -> LocalId:
+        """Emit a nested If chain for sparse int, bool, and text matches.
+        Cheaper than a jump table when arms < 4 or key span > 1024; text
+        constants always use this path and compare by content."""
         var b = self.builder
         val result = b.new_temp(self.match_result_mir_type(expected_type))
         # Arm-type inference fallback: HIR match exprs usually carry NO type_
@@ -639,19 +640,42 @@ impl MirLowering:
 
         var result_defined = false
         var i = 0
-        while i < int_cases.len():
-            val key = int_cases[i].0
-            val body = int_cases[i].1
+        val case_count = int_cases.len() + text_cases.len()
+        while i < case_count:
+            val body = if i < int_cases.len(): int_cases[i].1 else: text_cases[i - int_cases.len()].1
 
             # Build `scrut == key` into a bool local.
             var b_cmp = self.builder
-            val key_local = b_cmp.emit_const_int(key)
-            val cmp_local = b_cmp.emit_binop(
-                MirBinOp.Eq,
-                mir_operand_copy(scrut_local),
-                mir_operand_copy(key_local),
-                MirType.bool()
-            )
+            var cmp_local = LocalId(id: 0)
+            if i < int_cases.len():
+                val key_local = b_cmp.emit_const_int(int_cases[i].0)
+                cmp_local = b_cmp.emit_binop(
+                    MirBinOp.Eq,
+                    mir_operand_copy(scrut_local),
+                    mir_operand_copy(key_local),
+                    MirType.bool()
+                )
+            else:
+                val text_key = text_cases[i - int_cases.len()].0
+                val key_local = b_cmp.emit_const_str(text_key)
+                val eq_func = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_text_eq_any"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                ))
+                val eq_result = b_cmp.emit_call(
+                    eq_func,
+                    [mir_operand_copy(scrut_local), mir_operand_copy(key_local)],
+                    MirType.i64()
+                )
+                if val eq_local = eq_result:
+                    cmp_local = b_cmp.emit_binop(
+                        MirBinOp.Eq,
+                        mir_operand_copy(eq_local),
+                        mir_operand_const_int(1),
+                        MirType.bool()
+                    )
+                else:
+                    cmp_local = b_cmp.emit_const_int(0)
             val arm_block = b_cmp.new_block(Some("match_arm"))
             val next_block = b_cmp.new_block(Some("match_next"))
             b_cmp.terminate_if(mir_operand_copy(cmp_local), arm_block, next_block)

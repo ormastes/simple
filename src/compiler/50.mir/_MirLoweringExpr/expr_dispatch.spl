@@ -3181,6 +3181,29 @@ impl MirLowering:
                         ))
                     else:
                         norm_arms = norm_arms.push(arm0)
+                case Literal(const_ref):
+                    var replaced_const_ref = false
+                    match const_ref.kind:
+                        case NamedVar(const_symbol, _):
+                            if self.global_const_exprs.contains(const_symbol.id):
+                                val const_value = self.global_const_exprs[const_symbol.id]
+                                val const_pattern = HirPattern(
+                                    kind: HirPatternKind.Literal(const_value),
+                                    type_: arm0.pattern.type_,
+                                    span: arm0.pattern.span
+                                )
+                                norm_arms = norm_arms.push(HirMatchArm(
+                                    pattern: const_pattern,
+                                    has_guard: arm0.has_guard,
+                                    guard: arm0.guard,
+                                    body: arm0.body,
+                                    span: arm0.span
+                                ))
+                                replaced_const_ref = true
+                        case _:
+                            ()
+                    if not replaced_const_ref:
+                        norm_arms = norm_arms.push(arm0)
                 case _:
                     norm_arms = norm_arms.push(arm0)
             norm_i = norm_i + 1
@@ -3204,6 +3227,7 @@ impl MirLowering:
         # is present, emit a Phase 2 diagnostic naming the offending kind
         # and bail out with a unit temp.
         var int_cases: [(i64, HirBlock)] = []
+        var text_cases: [(text, HirBlock)] = []
         var has_default_body = false
         var default_body_value = HirBlock(stmts: [], value: nil, span: scrutinee.span)
         var has_default_binding = false
@@ -3250,6 +3274,10 @@ impl MirLowering:
                     match lit_expr.kind:
                         case IntLit(n, _):
                             int_cases = int_cases.push((n, arm.body))
+                        case BoolLit(value):
+                            int_cases = int_cases.push((if value: 1 else: 0, arm.body))
+                        case StringLit(value, _):
+                            text_cases = text_cases.push((value, arm.body))
                         case _:
                             self.error(
                                 "B5b Phase 2 not yet implemented: pattern kind Literal(non-IntLit)",
@@ -3379,10 +3407,10 @@ impl MirLowering:
         # Decide dense vs sparse. Same heuristic as Rust seed:
         #   arms >= 4 and (max - min) <= 1024  =>  Switch
         #   otherwise                          =>  If chain
-        val use_switch = self.should_emit_switch(int_cases)
+        val use_switch = text_cases.len() == 0 and self.should_emit_switch(int_cases)
         val default_binding = if has_default_binding: Some(default_binding_value) else: nil
 
         if use_switch:
             self.emit_switch_dispatch(scrut_local, int_cases, default_body_value, default_binding, expected_type)
         else:
-            self.emit_if_chain_dispatch(scrut_local, int_cases, default_body_value, default_binding, expected_type)
+            self.emit_if_chain_dispatch(scrut_local, int_cases, text_cases, default_body_value, default_binding, expected_type)
