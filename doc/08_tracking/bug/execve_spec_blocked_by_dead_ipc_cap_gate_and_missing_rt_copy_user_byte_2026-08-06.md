@@ -1,7 +1,14 @@
 # execve_spec 4/8 red: dead IPC capability gate, then a missing `rt_copy_user_byte` intrinsic
 
 **Date:** 2026-08-06
-**Status:** OPEN (root cause 2 fixed same-day by a prior commit; a follow-up ELF64
+**Status:** ALREADY-FIXED at the spec level, re-verified 2026-08-10 — fresh run:
+`SIMPLE_TIMEOUT_SECONDS=280 bin/simple test test/01_unit/os/kernel/ipc/execve_spec.spl
+--no-cover-check` → `Results: 8 total, 8 passed, 0 failed`. Both the spec-level
+workaround (`_capable_ipc_for`) and the `rt_copy_user_byte` intrinsic (root
+cause 2) are landed and hold. The underlying production wiring gap (root
+cause 1 — `ipc.cap_manager` records are never granted outside tests, so the
+six syscalls gated by it are still dead code on any real `syscall_handler`
+path) is unchanged and remains ARCHITECTURAL-OPEN; a follow-up ELF64
 loader symbol-collision bug and a scheduler cross-call state-loss bug were
 found and triaged below — see "2026-08-06 follow-up" at the bottom)
 **Severity:** High (the capability gate makes several syscalls dead code on the

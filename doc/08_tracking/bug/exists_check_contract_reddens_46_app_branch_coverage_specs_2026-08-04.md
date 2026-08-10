@@ -1,8 +1,14 @@
 # App-scope blast radius of the `T?`-into-`bool`-parameter defect: 46 branch-coverage specs
 
-**Status:** OPEN
+**Status:** ALREADY-FIXED, re-verified 2026-08-10 — the root cause (seed
+`coerce_param` had no bool arm, `src/compiler_rust/compiler/src/interpreter_call/core/arg_binding.rs`)
+was fixed upstream (`present_value_as_bool_arg`, landed by commit
+`aff29a24dfe`, 2026-08-08). Fresh run: `bin/simple test
+test/01_unit/app/branch_coverage_1_spec.spl --no-cache --no-cover-check` →
+`Results: 78 total, 78 passed, 0 failed` (previously 75/78, 3 red). The
+138-example blast radius recorded below is resolved by that same upstream fix.
 **Found:** 2026-08-04
-**Severity:** high — largest single failure cluster under `test/*/app/`
+**Severity:** high — largest single failure cluster under `test/*/app/` (historical, now resolved)
 **This file is a blast-radius record, not a second root cause.**
 
 ## Root cause — already filed elsewhere, do not fix here

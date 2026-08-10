@@ -1,8 +1,12 @@
 # `exec_cap_check`'s scalar-caller ABI cannot carry a real `CapabilitySet` — every non-kernel caller is unconditionally denied, not "checked"
 
 **Date:** 2026-08-07
-**Status:** OPEN (real capability-matching logic now exists and is proven;
-threading a real caller identity into it is the remaining gap)
+**Status:** ARCHITECTURAL-OPEN (real capability-matching logic now exists and is
+proven — re-verified 2026-08-10: `bin/simple test
+test/01_unit/os/kernel/loader/cap_exec_gate_spec.spl --no-cover-check` →
+`Results: 8 total, 8 passed, 0 failed`; threading a real caller identity into
+it still requires the `Scheduler`/`TaskControlBlock` architecture change
+described below and is out of scope for a spec-only or gate-only change)
 **Severity:** Medium — not a live security hole (see "Reachability audit"
 below: nothing userspace-reachable calls the affected entry points with a
 nonzero caller today), but it blocks WP-21's stated goal of a genuinely

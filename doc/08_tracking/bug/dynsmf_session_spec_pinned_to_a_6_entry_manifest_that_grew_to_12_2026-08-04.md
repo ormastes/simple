@@ -1,6 +1,12 @@
 # `dynsmf_session_unload_reload_spec` pins a 6-entry manifest that the product grew to 12 — red since the 2026-07-17 toolchain additions (2026-08-04)
 
-**Status:** OPEN
+**Status:** ARCHITECTURAL-OPEN, re-verified 2026-08-10 — fresh run:
+`SIMPLE_TIMEOUT_SECONDS=190 bin/simple test
+test/03_system/stdlib/dynload/dynsmf_session_unload_reload_spec.spl
+--no-cover-check` → `Results: 4 total, 0 passed, 4 failed`, same 4 examples,
+same causes as originally recorded. Fix requires a requirements decision
+(whether `ui_html` belongs in startup autoload) plus a `build/dynsmf/*.smf`
+build step — both out of scope for this session.
 **Found:** 2026-08-04
 **Class:** spec/product drift + missing build prerequisite. 4 of 4 examples in
 `test/03_system/stdlib/dynload/dynsmf_session_unload_reload_spec.spl` fail.
