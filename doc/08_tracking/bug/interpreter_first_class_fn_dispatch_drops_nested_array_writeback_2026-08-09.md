@@ -1,6 +1,6 @@
 # Interpreter: two mutating `me` calls inside one first-class-function-dispatched invocation drop the first write
 
-**Status:** ARCHITECTURAL-OPEN (was OPEN; reclassified 2026-08-10, see note below) — root-caused with a minimal, sockets-free repro; not fixed
+**Status:** OPEN — root-caused with a minimal, sockets-free repro; not fixed
 (compiler/interpreter internals, out of scope for the application-level task
 that found it).
 **Engine:** tree-walk interpreter (`SIMPLE_EXECUTION_MODE=interpreter`) —
@@ -195,12 +195,34 @@ a cloned copy gets written back to the shared slot.
    the parent bug doc — it survives even a single combined mutating call,
    so it is a distinct (likely larger) defect from this one.
 
+## Re-investigated 2026-08-10 (independent verification, binary-provenance-based)
 
-## ARCHITECTURAL-OPEN reclassification (2026-08-10)
+Reproduced the exact minimal repro fresh (no HTTP/sockets) against the
+currently deployed `bin/simple`: `SIMPLE_EXECUTION_MODE=interpreter bin/simple
+run` on the doc's verbatim snippet still prints `events_len=1`, matching the
+filed symptom exactly.
 
-Re-verified: root cause lives entirely inside the tree-walk interpreter
-implemented in `src/compiler_rust/**`, which is off-limits to this lane per
-standing constraint. No .spl-level workaround closes the root cause without
-touching that engine code (a per-call-site workaround, where one exists,
-does not fix the interpreter). Reclassified from OPEN to ARCHITECTURAL-OPEN;
-no behavior change, no code edited this pass.
+`readlink -f bin/simple` / `bin/simple --version` confirm the deployed binary
+is the Rust bootstrap seed (`bin/release/x86_64-unknown-linux-gnu/simple`,
+seed warning banner). `/usr/bin/grep -rl "Closure\|FnValue\|first.class"
+src/compiler/95.interp/` and a listing of the pure-Simple interpreter tree
+(`mir_interpreter.spl`, `mir_interp_ops.spl`, `mir_interp_intrinsics.spl`,
+`interpreter/{operators,pattern}.spl` — 1,856 lines total) turn up **no
+first-class-function-value dispatch or closure-call machinery at all**: no
+code path represents "a function stored in a variable and invoked via
+`f()`" as a distinct case from a direct named call. There is therefore no
+editable `.spl` counterpart to the module-global/`self` env-snapshot
+machinery this bug implicates — the only implementation that runs the
+doc's repro today is the Rust seed's interpreter (environment/place
+handling for stored function values, per the "Suggested next step" section
+above, not yet localized to a specific seed file:line by this pass either).
+
+Conclusion: legitimate architectural classification, now backed by a
+binary-provenance check (deployed `bin/simple` is confirmed seed) and a
+structural check of the pure-Simple tree (no closure/first-class-fn dispatch
+implementation exists there to fix). The underlying trigger condition
+remains genuinely unpinned to a narrow root cause even within the seed —
+consistent with the original investigation's conclusion not to attempt a
+partial/wrong fix. Status unchanged: **OPEN — ARCHITECTURAL (Rust seed
+interpreter, no pure-Simple first-class-fn dispatch implementation exists to
+fix instead, verified 2026-08-10)**.
