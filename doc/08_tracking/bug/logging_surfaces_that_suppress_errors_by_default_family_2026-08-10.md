@@ -1,8 +1,12 @@
 # Logging surfaces that suppress error-level output by default (family sweep)
 
 - **Date:** 2026-08-10
-- **Status:** PARTIALLY FIXED — `src/lib/nogc_sync_mut/log.spl` fixed here; the
-  rest below are OPEN and filed.
+- **Status:** ALL FIXED — `src/lib/nogc_sync_mut/log.spl` fixed here; OPEN 1-4
+  fixed 2026-08-10 (see the per-item sections below). OPEN 1 was a
+  misdiagnosis and is corrected rather than "fixed". Two adjacent defects were
+  found on the way and filed separately, NOT fixed:
+  `jit_rt_string_data_returns_nil_breaking_extern_calls_2026-08-10.md` and
+  `eprint_in_io_runtime_module_is_rerouted_to_stdout_2026-08-10.md`.
 - **Class:** silent non-zero exit. An error is written, and no human ever sees
   it. This is the shape that hid the `simple replay` unbounded self-spawn and
   two sibling fork bombs for days.
@@ -58,12 +62,12 @@ silently turn on file logging.
 | `src/lib/nogc_async_mut/log.spl` | `export use` re-export | inherits | YES (inherited) |
 | `src/lib/gc_async_mut/log.spl` | `export use` re-export | inherits | YES (inherited) |
 | `src/lib/gc_sync_mut/log.spl` | `export use` re-export | inherits | YES (inherited) |
-| `src/lib/nogc_async_mut_noalloc/log/logger.spl` | `log_error` → `rt_simpleos_log_emit`, else `log_raw` | `g_log_level=LOG_INFO`, `g_log_targets=TARGET_DEVICE` | **NO on hosted — OPEN 1** |
+| `src/lib/nogc_async_mut_noalloc/log/logger.spl` | `log_error` → `rt_simpleos_log_emit`, else `log_raw` | `g_log_level=LOG_INFO`, `g_log_targets=TARGET_DEVICE` | YES — was emitted but to **stdout**; ERROR/FATAL now stderr (OPEN 1 fixed, filing was wrong) |
 | `src/lib/nogc_sync_mut/diag.spl` | `_emit` → stderr, ungated | callers return early unless a `SIMPLE_DIAG` facet is on | YES once called; facets opt-in **by design** |
 | `src/lib/common/web/logging.spl` | `Logger.error` → `print` | `min_level` default Info | YES |
-| `src/lib/common/security/audit_log.spl` | file append; stderr only if `log_to_stdout` | `log_to_stdout` defaults **false** | **NO — OPEN 2** |
-| `src/lib/*/service/audit_log.spl` | `audit_append` → `rt_file_write_text` only | none | **NO — OPEN 3** |
-| `src/lib/gc_async_mut/gpu/browser_engine/shared/logging.spl` | `log()` → `print` | `should_log()` discards its level argument | YES — but **inverse defect, OPEN 4** |
+| `src/lib/common/security/audit_log.spl` | file append; stderr only if `log_to_stdout` | ERROR/Critical ungated; `log_to_stdout` for lower | YES (OPEN 2 fixed) |
+| `src/lib/*/service/audit_log.spl` | `audit_append` → `rt_file_write_text`, failure → `rt_stderr_write` | none | YES, and the `-> bool` result is now checked and returned (OPEN 3 fixed) |
+| `src/lib/gc_async_mut/gpu/browser_engine/shared/logging.spl` | `log()` → `print` | `should_log()` compares rank against the stored `min_level` | YES (OPEN 4 fixed: the level filter now actually filters) |
 | `src/lib/nogc_async_mut/http_server/access_log.spl` | `print` | handler | N-A (access log, no error level) |
 | `src/lib/nogc_async_mut/mcp/log_store.spl` | — | — | N-A (formatter only) |
 | `src/lib/nogc_sync_mut/cli_output/log_writer.spl` | `stderr.write_text` | none | YES |
@@ -75,7 +79,7 @@ silently turn on file logging.
 | `src/runtime/startup/baremetal/runtime_log.c` | `rt_simpleos_log_emit` → UART | `g_log_level=INFO`, targets=DEVICE | YES (serial console) |
 | `src/runtime/startup/common/runtime_log_hosted.c` | all hooks stubbed `false` | — | N-A by design (see OPEN 1) |
 
-## OPEN items (not fixed here — each needs its own change)
+## OPEN items — ALL NOW FIXED (each took its own change; original filings kept for the record)
 
 **OPEN 1 — FIXED, and the original filing was WRONG.** See the correction under
 "OPEN 1 correction" below. Original text kept for the record:
@@ -243,6 +247,46 @@ The check asserts on the real fd, so a regression back to `eprint` here is caugh
 filter does nothing and everything prints. Note this is the failure the negative
 control in the runnable check exists to catch: a "fix" that removes the gate
 rather than flooring it.
+
+### OPEN 4 — FIXED 2026-08-10
+
+**Reproduced.** A `Logger` built with threshold `Error` printed **all five**
+levels (`TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`) in both lanes.
+
+**Two defects, not one.** The filing named `should_log` binding
+`val _level = msg_level` and returning an unconditional `true`. There was a
+second, compounding half: `Logger.new(name, level)` accepted a level and
+**discarded** it, because the class had no field to hold it. The filter was inert
+at both ends, so fixing only `should_log` would have had nothing to compare
+against.
+
+**Fix:** `Logger` gains a `min_level` field that `new` actually stores; a
+`_level_rank` helper mirrors the ranking used elsewhere in this family; and
+`should_log` becomes `_level_rank(msg_level) >= _level_rank(self.min_level)`.
+It changes from `fn` to `me` since it now reads `self`.
+
+**Before → after (threshold Error / Info / Trace, of 5 levels, both lanes):**
+`5/5, 5/5, 5/5` → `1/5, 3/5, 5/5`.
+
+**Runnable check:** `scripts/check/check-browser-logger-honours-level.shs`. Here
+the **negative** assertion is the one that bites — a positive-only probe passed
+on the broken code precisely because the broken code printed everything. Each of
+the four sub-threshold levels is asserted individually so a failure names the
+level that leaked. Plus an `Info` **boundary** case (exactly TRACE/DEBUG
+suppressed, INFO/WARN/ERROR emitted once each), which catches a `>` vs `>=`
+off-by-one that a single-threshold test would miss; a labelled-line positive at
+the threshold, guarding against over-correcting into suppressing everything; and
+a permissive `Trace` end proving the gate is level-driven rather than hardcoded
+to a new fixed threshold. **Oracle proof:** restoring the `true` body yields
+`FAIL -- 12 of 22`, exit 1, in both lanes.
+
+**Side effect checked:** none. `should_log` has no callers outside this file, and
+**nothing in the tree constructs this `Logger`** — the browser-engine subsystems
+(`net/dns.spl`, `net/fetch.spl`, `style/animation.spl`, …) only *accept* one as a
+parameter. The `Logger(name: ...)` literals in `js/engine/` are a different class
+of the same name, unaffected. The constructor signature is unchanged, so no call
+site moves. Per the log-retention rule no logging was deleted — the sub-threshold
+messages are now level-gated, which is what their callers already asked for.
 
 ## Runnable check
 
