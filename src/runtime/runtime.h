@@ -620,6 +620,7 @@ int64_t  rt_signal_install(int64_t signal_num);
 int64_t  rt_signal_check(int64_t signal_num);
 int64_t  rt_atexit_install(void);
 int64_t  rt_atexit_check(void);
+bool     rt_terminal_is_tty_handle(int64_t handle);
 
 /* ===== Memory ===== */
 

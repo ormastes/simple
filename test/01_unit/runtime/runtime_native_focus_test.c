@@ -88,6 +88,16 @@ static void* transient_scope_worker(void* unused) {
 }
 
 int main(void) {
+    int stdout_pipe[2];
+    assert(pipe(stdout_pipe) == 0);
+    int saved_stdout = dup(STDOUT_FILENO);
+    assert(saved_stdout >= 0);
+    assert(dup2(stdout_pipe[1], STDOUT_FILENO) == STDOUT_FILENO);
+    close(stdout_pipe[1]);
+    assert(!rt_terminal_is_tty_handle(STDOUT_FILENO));
+    assert(dup2(saved_stdout, STDOUT_FILENO) == STDOUT_FILENO);
+    close(saved_stdout);
+    close(stdout_pipe[0]);
     assert(!rt_is_interpreter_runtime());
 
     const uint8_t bounded_env_key[] = {

@@ -564,6 +564,15 @@ SPL_CORE_C_WEAK int64_t rt_atexit_check(void) {
     return 1;
 }
 
+SPL_CORE_C_WEAK bool rt_terminal_is_tty_handle(int64_t handle) {
+    if (handle < 0 || handle > 2) return false;
+#if defined(_WIN32)
+    return _isatty((int)handle) != 0;
+#else
+    return isatty((int)handle) != 0;
+#endif
+}
+
 #undef SPL_CORE_C_WEAK
 
 static int64_t rt_host_gpu_queue_now_us(void) {

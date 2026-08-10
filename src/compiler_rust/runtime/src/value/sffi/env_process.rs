@@ -1448,6 +1448,26 @@ pub extern "C" fn rt_terminal_get_size() -> RuntimeValue {
     rt_term_get_size()
 }
 
+#[no_mangle]
+pub extern "C" fn rt_terminal_is_tty_handle(handle: i64) -> bool {
+    #[cfg(unix)]
+    {
+        matches!(handle, 0..=2) && unsafe {
+            libc::isatty(handle as libc::c_int) != 0
+        }
+    }
+    #[cfg(windows)]
+    {
+        matches!(handle, 0..=2) && unsafe {
+            libc::_isatty(handle as libc::c_int) != 0
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        false
+    }
+}
+
 // Saved termios state for stdin (fd 0), captured by rt_terminal_enable_raw_mode
 // and restored by rt_terminal_disable_raw_mode. Previously these two externs
 // were no-op stubs that always returned true without touching the terminal at

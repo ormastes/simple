@@ -383,10 +383,17 @@ pub fn native_is_tty(args: &[Value]) -> Result<Value, CompileError> {
         Ok(Value::Bool(is_tty))
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        // On Windows, assume TTY for standard handles
-        Ok(Value::Bool(handle >= 0 && handle <= 2))
+        let is_tty = matches!(handle, 0..=2) && unsafe {
+            libc::_isatty(handle as libc::c_int) != 0
+        };
+        Ok(Value::Bool(is_tty))
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        Ok(Value::Bool(false))
     }
 }
 

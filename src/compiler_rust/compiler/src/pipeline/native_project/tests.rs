@@ -3293,6 +3293,30 @@ fn test_core_c_runtime_native_focus_contract() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn test_terminal_signal_scope_focus_contract() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = build_core_c_runtime_library(temp.path())
+        .expect("core-c runtime archive should build");
+    let executable = temp.path().join("terminal_signal_scope_focus_test");
+    let status = std::process::Command::new(find_c_compiler())
+        .arg("-I").arg(repo_root.join("src/runtime"))
+        .arg(repo_root.join("test/01_unit/runtime/terminal_signal_scope_focus_test.c"))
+        .arg(&runtime)
+        .args(["-lutil", "-lpthread", "-ldl", "-lm"])
+        .arg("-o").arg(&executable).status().unwrap();
+    assert!(status.success(), "failed to compile terminal signal scope PTY contract");
+    let output = std::process::Command::new(&executable).output().unwrap();
+    assert!(output.status.success(),
+        "terminal signal scope PTY contract failed: status={} stdout={:?} stderr={:?}",
+        output.status, String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn test_stage4_compiler_entries_prepare_dedicated_backfill_through_gate() {
     let _guard = runtime_bundle_env_lock().lock().unwrap();
     let old_bootstrap = std::env::var_os("SIMPLE_BOOTSTRAP");

@@ -157,6 +157,11 @@ pub fn rt_terminal_is_tty(_args: &[Value]) -> Result<Value, CompileError> {
     native_io::native_is_tty(&[Value::Int(0)])
 }
 
+/// Query a standard stream handle (0=stdin, 1=stdout, 2=stderr).
+pub fn rt_terminal_is_tty_handle(args: &[Value]) -> Result<Value, CompileError> {
+    native_io::native_is_tty(args)
+}
+
 /// `rt_terminal_get_size` — bridges to `native_get_term_size` on stdout
 /// (handle 1, matching `fill_terminal_size`'s `STDOUT_FILENO` in
 /// env_process.rs). `native_get_term_size` returns `[rows, cols]`; the `rt_`

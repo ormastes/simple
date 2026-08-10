@@ -42,6 +42,9 @@
 #include <errno.h>
 #include <signal.h>
 #include <stdatomic.h>
+#ifdef _WIN32
+#include <io.h>
+#endif
 #ifndef _WIN32
 #include <execinfo.h>
 #include <unistd.h>
@@ -1418,13 +1421,13 @@ int         rt_file_append(const char* path, const char* content) {
 int         rt_file_copy(const char* src, const char* dst) {
     FILE* in = fopen(src, "rb");
     if (!in) return 0;
-    
+
     FILE* out = fopen(dst, "wb");
     if (!out) {
         fclose(in);
         return 0;
     }
-    
+
     char buf[8192];
     size_t n;
     while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
@@ -1434,7 +1437,7 @@ int         rt_file_copy(const char* src, const char* dst) {
             return 0;
         }
     }
-    
+
     fclose(in);
     fclose(out);
     return 1;
@@ -1968,6 +1971,15 @@ int64_t rt_atexit_check(void) {
         return 1;
     }
     return 0;
+}
+
+bool rt_terminal_is_tty_handle(int64_t handle) {
+    if (handle < 0 || handle > 2) return false;
+#ifdef _WIN32
+    return _isatty((int)handle) != 0;
+#else
+    return isatty((int)handle) != 0;
+#endif
 }
 
 /* ================================================================

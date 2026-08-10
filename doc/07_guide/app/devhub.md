@@ -280,7 +280,9 @@ shorthand, `--stdout`/`--tui` (output surface), `--progress
 <summary\|count\|dot\|none>`, `--dots`/`--count`/`--no-progress`,
 `--quiet`/`--verbose`.
 
-Color respects `NO_COLOR` (disables) and `ITF_FORCE_COLOR=1` (forces). Editor
+Color is enabled by default only when stdout is a terminal. `NO_COLOR`
+disables it for terminals and redirected output; `ITF_FORCE_COLOR=1` enables
+it for redirected output unless `NO_COLOR` is also present. Editor
 resolution order: `ITF_EDITOR` > `GH_EDITOR` > `EDITOR` > `VISUAL` > `vi`.
 Pager: `ITF_PAGER` env var, else `PAGER`.
 
@@ -301,10 +303,6 @@ directly (no `--backend` selection — each talks to exactly one system):
 
 Honest, currently-open gaps — do not expect these to work:
 
-- **Non-tty color leak**: `should_use_color()` has no real `isatty` check
-  (`rt_is_tty` extern doesn't exist yet), so piped/redirected output still
-  gets ANSI color codes unless you set `NO_COLOR=1` explicitly (bug
-  `itf-color-nontty-gap`).
 - **`storage ls -r`/`--recursive` is a no-op**: listing is *always* fully
   recursive today; there is no folder-collapsed non-recursive mode yet
   (prints a note saying so). See `facade_storage.md` §3.

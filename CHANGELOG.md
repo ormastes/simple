@@ -4,6 +4,11 @@ All notable changes to Simple Language will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **ITF redirected-output color policy** — probe stdout through the canonical
+  terminal ABI, omit ANSI by default for pipes/files, allow
+  `ITF_FORCE_COLOR=1`, and keep `NO_COLOR` authoritative over forcing.
+
 ### Added
 - **LLVM/Clang 23.1 provider and SimpleOS browser path** — add a signed
   `llvmorg-23.1.0-rc2` provider workflow, exact 23.1 admission in the
