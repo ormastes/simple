@@ -62,8 +62,33 @@ Two things follow, and both matter for any gate built on these numbers:
   `scripts/check/check-test-tree-divergence.shs` against
   `scripts/check/test_tree_divergence_baseline.txt`.
 
-The driver's own `dup` flag classifies a path as duplicate-tree by prefix, and
-every finding count below is reported **deduped / raw**.
+### The driver's dedup is fail-open — 5,731 specs are silently dropped
+
+The driver's `is_duplicate_tree` is a **prefix predicate**: every path under
+`test/01_unit/`, `test/02_integration/`, `test/03_system/`, `test/04_external/`
+or `test/05_perf/` is marked `dup` and excluded from the deduped column. That
+assumes the numbered trees are copies. They are not — they are supersets, and a
+large fraction of their files have **no twin at all** in the unnumbered tree:
+
+| numbered tree | specs | paired with twin | **orphans (no twin)** |
+|---|---|---|---|
+| `test/01_unit` | 7,497 | 5,006 | **2,491** |
+| `test/03_system` | 3,363 | 336 | **3,027** |
+| `test/02_integration` | 735 | 586 | **149** |
+| `test/05_perf` | 102 | 38 | **64** |
+| `test/04_external` | 0 | 0 | 0 |
+| **total** | | | **5,731** |
+
+A VTM/SHADOW finding in any of those 5,731 files is counted in the **raw**
+column only and vanishes from the **deduped** column, even though nothing else
+in the corpus covers it. So the deduped column is a *lower bound*, not a true
+unique count — read the raw column as the real exposure, and treat any gate
+built on the deduped number as fail-open by construction. Fixing this requires
+the predicate to check for an actual twin at the mirrored path (and compare
+content), not to match a prefix.
+
+Every finding count below is reported **deduped / raw** as the driver emits it,
+with that caveat attached.
 
 ## Method notes (reproducibility)
 
