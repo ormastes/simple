@@ -430,6 +430,7 @@ impl CompilerDriver:
             # owner methods return only scalar/text projections, avoiding the
             # stage4 array-of-struct transport failure under closure pressure.
             val module_error_count: i64 = lowering.lowering_error_count()
+            val bootstrap_mode = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
             val bootstrap_diag = (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
             if bootstrap_diag and module_error_count > 0 and source_idx < 20:
                 eprint("[bootstrap-hir-module-errors] source_idx={source_idx} path={src.path} count={module_error_count}")
@@ -441,7 +442,14 @@ impl CompilerDriver:
                 if bootstrap_diag and source_idx < 20 and module_error_idx < 20:
                     eprint("[bootstrap-hir-module-error] source_idx={source_idx} error_idx={module_error_idx} len={module_error_message.len()} recovered={module_error_recovered} text={module_error_message}")
                 if module_error_recovered:
-                    self.ctx.add_warning(module_error_message)
+                    # Recovered diagnostics are advisory. During staged
+                    # bootstrap, mutating CompileContext.warnings through its
+                    # aggregate field can corrupt the adjacent scalar
+                    # error_count_value on the old compiler ABI. Keep them
+                    # visible through bounded debug output above, but do not
+                    # let advisory storage turn a clean module fatal.
+                    if not bootstrap_mode:
+                        self.ctx.add_warning(module_error_message)
                 else:
                     if bootstrap_diag and module_fatal_error_count < 5:
                         eprint("[bootstrap-hir-module-fatal] source_idx={source_idx} error_idx={module_error_idx} len={module_error_message.len()} text={module_error_message}")
