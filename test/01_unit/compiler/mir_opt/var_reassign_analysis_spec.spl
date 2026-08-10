@@ -177,6 +177,23 @@ describe "var reassignment analysis":
         for kind in absent:
             expect_optional_dest_alloca_rewrite(kind, false)
 
+    it "rejects a nil local nested in a call-indirect move operand":
+        val sig = MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)
+        val blocks = one_block(
+            [
+                inst(MirInstKind.Const(local(0), MirConstValue.Int(1), MirType.i64())),
+                inst(MirInstKind.Const(local(0), MirConstValue.Int(2), MirType.i64())),
+                inst(MirInstKind.CallIndirect(nil, int_operand(91), [MirOperand(kind: MirOperandKind.Move(nil))], sig))
+            ],
+            MirTerminator.Ret(nil)
+        )
+        val locals = [MirLocal(id: local(0), name: nil, type_: MirType.i64(), kind: LocalKind.Var, is_ghost: false)]
+        val result = ssa_alloca_transform_blocks(blocks, locals, BlockId.entry())
+
+        expect(result.applied).to_equal(false)
+        expect(result.reason).to_equal("unsupported instruction")
+        expect(result.blocks[0].instructions.len()).to_equal(3)
+
     it "marks repeated local definitions as SSA-transformable when local and borrow-safe":
         val blocks = one_block(
             [
