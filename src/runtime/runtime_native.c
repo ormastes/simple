@@ -6787,6 +6787,88 @@ int rt_file_rename(const uint8_t* src_ptr, uint64_t src_len,
     return ok ? 1 : 0;
 }
 
+static atomic_uint_fast64_t rt_core_file_move_sequence = 0;
+
+static int rt_core_file_move_cross_device(const char* src, const char* dst) {
+    FILE* in = fopen(src, "rb");
+    if (!in) return 0;
+
+    size_t dst_len = strlen(dst);
+    if (dst_len > SIZE_MAX - 64) {
+        fclose(in);
+        return 0;
+    }
+    char* temp_path = (char*)malloc(dst_len + 64);
+    if (!temp_path) {
+        fclose(in);
+        return 0;
+    }
+
+    int fd = -1;
+    for (int attempt = 0; attempt < 64 && fd < 0; attempt++) {
+        unsigned long long sequence = (unsigned long long)atomic_fetch_add_explicit(
+            &rt_core_file_move_sequence, 1, memory_order_relaxed);
+        int temp_len = snprintf(temp_path, dst_len + 64,
+                                "%s.simple-move.tmp.%llu", dst, sequence);
+        if (temp_len < 0 || (size_t)temp_len >= dst_len + 64) break;
+#if defined(_WIN32)
+        fd = _open(temp_path, _O_WRONLY | _O_CREAT | _O_EXCL | _O_BINARY,
+                   _S_IREAD | _S_IWRITE);
+#else
+        fd = open(temp_path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+#endif
+        if (fd < 0 && errno != EEXIST) break;
+    }
+
+#if defined(_WIN32)
+    FILE* out = fd < 0 ? NULL : _fdopen(fd, "wb");
+#else
+    FILE* out = fd < 0 ? NULL : fdopen(fd, "wb");
+#endif
+    int created = fd >= 0;
+    int ok = out != NULL;
+    char buffer[8192];
+    while (ok) {
+        size_t count = fread(buffer, 1, sizeof(buffer), in);
+        if (count > 0 && fwrite(buffer, 1, count, out) != count) ok = 0;
+        if (count < sizeof(buffer)) {
+            if (ferror(in)) ok = 0;
+            break;
+        }
+    }
+    if (ok) ok = fflush(out) == 0;
+#if defined(_WIN32)
+    if (ok) ok = _commit(fd) == 0;
+#else
+    if (ok) ok = fsync(fd) == 0;
+#endif
+    if (fclose(in) != 0) ok = 0;
+    if (out) {
+        if (fclose(out) != 0) ok = 0;
+    } else if (fd >= 0) {
+#if defined(_WIN32)
+        _close(fd);
+#else
+        close(fd);
+#endif
+    }
+
+    int published = 0;
+    if (ok) {
+#if defined(_WIN32)
+        published = MoveFileExA(temp_path, dst,
+                                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+#else
+        published = rename(temp_path, dst) == 0;
+#endif
+    }
+    if (created && !published) remove(temp_path);
+    if (published) ok = remove(src) == 0;
+    else ok = 0;
+    free(temp_path);
+    return ok ? 1 : 0;
+}
+
 int rt_file_move(const uint8_t* src_ptr, uint64_t src_len,
                  const uint8_t* dst_ptr, uint64_t dst_len) {
     char* src = rt_core_text_arg_to_cstr(src_ptr, src_len);
@@ -6797,24 +6879,7 @@ int rt_file_move(const uint8_t* src_ptr, uint64_t src_len,
         return 0;
     }
     int ok = rename(src, dst) == 0;
-    if (!ok) {
-        FILE* in = fopen(src, "rb");
-        FILE* out = in ? fopen(dst, "wb") : NULL;
-        ok = in && out;
-        char buffer[8192];
-        while (ok) {
-            size_t n = fread(buffer, 1, sizeof(buffer), in);
-            if (n > 0 && fwrite(buffer, 1, n, out) != n) ok = 0;
-            if (n < sizeof(buffer)) {
-                if (ferror(in)) ok = 0;
-                break;
-            }
-        }
-        if (in && fclose(in) != 0) ok = 0;
-        if (out && fclose(out) != 0) ok = 0;
-        if (ok) ok = remove(src) == 0;
-        if (!ok) remove(dst);
-    }
+    if (!ok && errno == EXDEV) ok = rt_core_file_move_cross_device(src, dst);
     free(src);
     free(dst);
     return ok ? 1 : 0;

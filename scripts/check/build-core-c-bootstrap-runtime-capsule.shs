@@ -189,6 +189,8 @@ for declared_input in $SOURCE_FILES $HEADER_FILES; do
     printf '%s\n' "$RUNTIME_DIR/$declared_input" >>"$LOCAL_INPUTS_FILE"
 done
 printf '%s\n' "$RUNTIME_DIR/test/rt_string_free_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
+printf '%s\n' "$RUNTIME_DIR/runtime.c" >>"$LOCAL_INPUTS_FILE"
+printf '%s\n' "$RUNTIME_DIR/test/rt_file_rename_move_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
 printf '%s\n' "$RUNTIME_DIR/test/runtime_coverage_core_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
 printf '%s\n' "$RUNTIME_DIR/test/rt_transient_heap_scope_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
 sort -u -o "$LOCAL_INPUTS_FILE" "$LOCAL_INPUTS_FILE"
@@ -353,6 +355,25 @@ RENAME_MOVE_SELF_CHECK_LOG="$TMP_DIR/rt_file_rename_move_selfcheck.out"
 grep -q '^SELFCHECK PASSED (0 failures)$' "$RENAME_MOVE_SELF_CHECK_LOG" ||
     die "rt-file-rename-move-selfcheck-receipt-missing"
 
+LEGACY_RENAME_MOVE_SELF_CHECK_BIN="$TMP_DIR/rt_file_rename_move_legacy_selfcheck"
+LEGACY_RENAME_MOVE_SELF_CHECK_LOG="$TMP_DIR/rt_file_rename_move_legacy_selfcheck.out"
+LEGACY_DEAD_STRIP_FLAG="-Wl,--gc-sections"
+[ "$PLATFORM" != "Darwin" ] || LEGACY_DEAD_STRIP_FLAG="-Wl,-dead_strip"
+# runtime.c is the legacy provider and is deliberately not an archive member.
+# Function-section dead stripping isolates this ABI self-check from unrelated
+# legacy runtime bridges while still compiling and executing the real provider.
+# shellcheck disable=SC2086
+"$CC_PATH" -std=gnu11 -O1 -ffunction-sections -fdata-sections $TARGET_FLAGS \
+    -I"$RUNTIME_DIR" -I"$RUNTIME_DIR/platform" \
+    "$RUNTIME_DIR/test/rt_file_rename_move_selfcheck.c" \
+    "$RUNTIME_DIR/runtime.c" $LEGACY_DEAD_STRIP_FLAG $SELF_CHECK_LIBS \
+    -o "$LEGACY_RENAME_MOVE_SELF_CHECK_BIN" ||
+    die "rt-file-rename-move-legacy-selfcheck-link-failed"
+"$LEGACY_RENAME_MOVE_SELF_CHECK_BIN" >"$LEGACY_RENAME_MOVE_SELF_CHECK_LOG" 2>&1 ||
+    die "rt-file-rename-move-legacy-selfcheck-failed"
+grep -q '^SELFCHECK PASSED (0 failures)$' "$LEGACY_RENAME_MOVE_SELF_CHECK_LOG" ||
+    die "rt-file-rename-move-legacy-selfcheck-receipt-missing"
+
 COVERAGE_SELF_CHECK_BIN="$TMP_DIR/runtime_coverage_core_selfcheck"
 COVERAGE_SELF_CHECK_LOG="$TMP_DIR/runtime_coverage_core_selfcheck.out"
 # shellcheck disable=SC2086
@@ -419,6 +440,8 @@ MANIFEST="$TMP_DIR/capsule.manifest"
     echo "rt_string_free_selfcheck_output_sha256=$(hash_file "$SELF_CHECK_LOG")"
     echo "rt_file_rename_move_selfcheck=pass"
     echo "rt_file_rename_move_selfcheck_output_sha256=$(hash_file "$RENAME_MOVE_SELF_CHECK_LOG")"
+    echo "rt_file_rename_move_legacy_selfcheck=pass"
+    echo "rt_file_rename_move_legacy_selfcheck_output_sha256=$(hash_file "$LEGACY_RENAME_MOVE_SELF_CHECK_LOG")"
     echo "rt_file_rename_symbol=T"
     echo "rt_file_move_symbol=T"
     echo "runtime_coverage_core_selfcheck=pass"
