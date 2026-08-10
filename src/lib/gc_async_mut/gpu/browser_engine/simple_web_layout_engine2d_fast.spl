@@ -276,9 +276,19 @@ fn _simple_web_layout_render_draw_ir_composition_into(
         engine, composition, true, images, destination,
         evidence_i64, evidence_text
     )
+    # The DrawIR module owns execution, but native/freestanding indexed writes
+    # to its caller-owned destination are not observable on this Stage3 ABI.
+    # Copy from the still-live Engine2D surface through the proven framebuffer
+    # owner before shutdown; this remains the same one-render execution.
+    val readback_status = engine.copy_pixels_region_into(
+        0, 0, width, height, destination)
+    val delivered_status = if transport_status == 1 and readback_status == width * height:
+        1
+    else:
+        0
     val material = simple_web_layout_material_provenance_after_backend_execution(
         material_witness, evidence_i64[0].to_i32(),
-        if transport_status == 1: destination.len() else: 0,
+        if delivered_status == 1: destination.len() else: 0,
         width * height, evidence_i64[1].to_i32(),
         evidence_i64[2].to_i32(), evidence_text[0], evidence_text[1],
         evidence_i64[3], evidence_i64[4]
@@ -295,7 +305,7 @@ fn _simple_web_layout_render_draw_ir_composition_into(
         material_receipt[7] = evidence_i64[1].to_text()
         material_receipt[8] = evidence_i64[2].to_text()
     engine.shutdown()
-    transport_status
+    delivered_status
 
 fn _simple_web_layout_render_html_engine2d_execution(
     html: text, width: i32, height: i32, backend_name: text,
