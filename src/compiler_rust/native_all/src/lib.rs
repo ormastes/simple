@@ -60,6 +60,50 @@ pub extern "C" fn rt_bootstrap_native_build_progress(state: i64) {
 }
 
 #[no_mangle]
+pub extern "C" fn rt_bootstrap_native_build(args: RuntimeValue) -> i64 {
+    let argv = extract_rt_string_array(args);
+    let mut entry = String::new();
+    let mut has_entry_closure = false;
+    let mut index = 0usize;
+    while index < argv.len() {
+        if argv[index] == "--entry-closure" {
+            has_entry_closure = true;
+        } else if argv[index] == "--entry" && index + 1 < argv.len() {
+            entry = argv[index + 1].clone();
+            index += 1;
+        } else if let Some(value) = argv[index].strip_prefix("--entry=") {
+            entry = value.to_string();
+        }
+        index += 1;
+    }
+
+    let old_entry = std::env::var_os("SIMPLE_NATIVE_BUILD_ENTRY");
+    let old_entry_closure = std::env::var_os("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE");
+    if has_entry_closure {
+        if entry.is_empty() {
+            std::env::set_var("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1");
+        } else {
+            std::env::set_var("SIMPLE_NATIVE_BUILD_ENTRY", &entry);
+            std::env::set_var("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "0");
+        }
+    }
+
+    rt_bootstrap_native_build_progress(0);
+    let result = rt_native_build(args);
+    rt_bootstrap_native_build_progress(1);
+
+    match old_entry {
+        Some(value) => std::env::set_var("SIMPLE_NATIVE_BUILD_ENTRY", value),
+        None => std::env::remove_var("SIMPLE_NATIVE_BUILD_ENTRY"),
+    }
+    match old_entry_closure {
+        Some(value) => std::env::set_var("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", value),
+        None => std::env::remove_var("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE"),
+    }
+    result
+}
+
+#[no_mangle]
 pub extern "C" fn rt_jit_cleanup(handle: i64) -> i64 {
     simple_compiler::native_jit_cleanup_handle(handle)
 }

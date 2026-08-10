@@ -1,7 +1,7 @@
 extern fn sys_get_args() -> [text]
 extern fn rt_native_build(args: [text]) -> i64
 extern fn rt_path_stem(path: text) -> text
-extern fn rt_bootstrap_native_build_progress(state: i64)
+extern fn rt_bootstrap_native_build(args: [text]) -> i64
 
 # Non-lazy AND direct-from-defining-module: `use lazy` deferred the driver to
 # a dynload lib that was never implemented (#99), linking as undefined
@@ -124,30 +124,10 @@ fn native_build_policy_action_from_args(args: [text], i: i64) -> text:
     native_build_policy_action_from_args(args, i + 1)
 
 fn run_rt_native_build(args: [text]) -> i64:
-    val entry = native_build_entry_from_args(args, 0)
-    val has_entry_closure = native_build_has_entry_closure(args)
-    var old_entry = env_get("SIMPLE_NATIVE_BUILD_ENTRY")
-    var old_entry_closure = env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
-    # The seed interpreter can resolve this explicit import to an optional
-    # same-named env_get from another loaded module.
-    if old_entry == nil:
-        old_entry = ""
-    if old_entry_closure == nil:
-        old_entry_closure = ""
-    if entry != "" and has_entry_closure == 1:
-        env_set("SIMPLE_NATIVE_BUILD_ENTRY", entry)
-        env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "0")
-    elif has_entry_closure == 1:
-        env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
-    rt_bootstrap_native_build_progress(0)
-    val result = rt_native_build(args)
-    rt_bootstrap_native_build_progress(1)
-    if entry != "" and has_entry_closure == 1:
-        env_set("SIMPLE_NATIVE_BUILD_ENTRY", old_entry)
-        env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", old_entry_closure)
-    elif has_entry_closure == 1:
-        env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", old_entry_closure)
-    result
+    # Keep the bootstrap-only environment/progress transaction in the same
+    # native-all owner as rt_native_build. Transporting its text/optional
+    # locals through flat Stage3 MIR crashes before the first expression.
+    rt_bootstrap_native_build(args)
 
 # rt_native_build's Rust arg parser (src/compiler_rust/native_all/src/lib.rs)
 # treats any bare positional that isn't consumed by a value-taking flag as a
