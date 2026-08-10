@@ -1,0 +1,190 @@
+# Blink block-flow layout — blink.layout.block_flow
+#
+# A minimal Block Formatting Context (BFC): boxes stack vertically inside their
+# parent's content box, offset by the parent's border + padding and by each
+# child's own margins.
+#
+# Scope (deliberate non-goals — see doc/08_tracking/bug/
+# render_lane_specs_import_nonexistent_modules_2026-08-08.md):
+#   - NO margin collapsing (adjacent/parent-child margins are additive)
+#   - NO auto/percentage sizing, NO shrink-to-fit; width/height are as given
+#   - NO floats, NO absolute/fixed positioning, NO writing-mode/RTL
+#   - NO intrinsic sizing: a parent's height is its declared height, it is not
+#     grown to fit children
+# Consumers: blink/paint/paint_tree_walker.spl, blink/input/hit_test.spl
+
+use std.skia.entity.geometry.{SkRect}
+
+struct BoxGeometry:
+    """CSS box-model edges for one box, in device-independent pixels."""
+    width: f64
+    height: f64
+    margin_top: f64
+    margin_right: f64
+    margin_bottom: f64
+    margin_left: f64
+    padding_top: f64
+    padding_right: f64
+    padding_bottom: f64
+    padding_left: f64
+    border_top: f64
+    border_right: f64
+    border_bottom: f64
+    border_left: f64
+
+fn box_geometry_zero() -> BoxGeometry:
+    """Return a geometry with every edge and dimension at zero."""
+    BoxGeometry(
+        width: 0.0, height: 0.0,
+        margin_top: 0.0, margin_right: 0.0, margin_bottom: 0.0, margin_left: 0.0,
+        padding_top: 0.0, padding_right: 0.0, padding_bottom: 0.0, padding_left: 0.0,
+        border_top: 0.0, border_right: 0.0, border_bottom: 0.0, border_left: 0.0
+    )
+
+fn box_geometry_new(width: f64, height: f64, margin: f64, padding: f64, border: f64) -> BoxGeometry:
+    """Return a geometry with uniform margin, padding and border on all four sides."""
+    BoxGeometry(
+        width: width, height: height,
+        margin_top: margin, margin_right: margin, margin_bottom: margin, margin_left: margin,
+        padding_top: padding, padding_right: padding, padding_bottom: padding, padding_left: padding,
+        border_top: border, border_right: border, border_bottom: border, border_left: border
+    )
+
+class LayoutBox:
+    """One participant in the block flow: its geometry, children, and laid-out rect."""
+    id: i64
+    geometry: BoxGeometry
+    children_ids: [i64]
+    computed_rect: SkRect
+
+fn layout_box_new(id: i64, geometry: BoxGeometry) -> LayoutBox:
+    """Create an unlaid-out box with no children and an empty computed rect."""
+    LayoutBox(
+        id: id,
+        geometry: geometry,
+        children_ids: [],
+        computed_rect: SkRect(left: 0.0, top: 0.0, right: 0.0, bottom: 0.0)
+    )
+
+class LayoutContext:
+    """An arena of layout boxes plus the viewport they are laid out in."""
+    viewport_width: f64
+    viewport_height: f64
+    boxes: [LayoutBox]
+    root_id: i64
+
+fn layout_context_new(viewport_width: f64, viewport_height: f64) -> LayoutContext:
+    """Create an empty layout context for the given viewport size."""
+    LayoutContext(
+        viewport_width: viewport_width,
+        viewport_height: viewport_height,
+        boxes: [],
+        root_id: -1
+    )
+
+impl LayoutContext:
+    fn add_box(box: LayoutBox):
+        """Add a box to the arena. Ids are not checked for uniqueness."""
+        self.boxes.push(box)
+
+    fn set_root(id: i64):
+        """Designate which box id compute_layout starts from."""
+        self.root_id = id
+
+    fn index_of(id: i64) -> i64:
+        """Return the arena index of a box id, or -1 when absent."""
+        var i = 0
+        while i < self.boxes.len():
+            if self.boxes[i as i32].id == id:
+                return i
+            i = i + 1
+        -1
+
+    fn get_box(id: i64) -> LayoutBox?:
+        """Look up a box by id. Returns nil when no such box was added."""
+        val idx = self.index_of(id)
+        if idx < 0:
+            return nil
+        Some(self.boxes[idx as i32])
+
+    fn compute_layout():
+        """Lay out the tree from the root, stacking children vertically.
+
+        No-op when no root was set or the root id is absent.
+        """
+        if self.root_id < 0:
+            return
+        val root_idx = self.index_of(self.root_id)
+        if root_idx < 0:
+            return
+
+        # Recorded results, parallel arrays: laid_idx[k] gets rect laid_rect[k].
+        var laid_idx: [i64] = []
+        var laid_rect: [SkRect] = []
+        # Work stack of (arena index, border-box left, border-box top).
+        var stack: [(i64, f64, f64)] = []
+
+        val root_geo = self.boxes[root_idx as i32].geometry
+        val root_left = root_geo.margin_left
+        val root_top = root_geo.margin_top
+        laid_idx.push(root_idx)
+        laid_rect.push(SkRect(
+            left: root_left,
+            top: root_top,
+            right: root_left + root_geo.width,
+            bottom: root_top + root_geo.height
+        ))
+        stack.push((root_idx, root_left, root_top))
+
+        while stack.len() > 0:
+            val frame = stack.pop()
+            val idx = frame.0
+            val left = frame.1
+            val top = frame.2
+            val parent = self.boxes[idx as i32]
+            val pg = parent.geometry
+            val content_left = left + pg.border_left + pg.padding_left
+            var cursor = top + pg.border_top + pg.padding_top
+            for cid in parent.children_ids:
+                val cidx = self.index_of(cid)
+                if cidx >= 0:
+                    val cg = self.boxes[cidx as i32].geometry
+                    val ctop = cursor + cg.margin_top
+                    val cleft = content_left + cg.margin_left
+                    laid_idx.push(cidx)
+                    laid_rect.push(SkRect(
+                        left: cleft,
+                        top: ctop,
+                        right: cleft + cg.width,
+                        bottom: ctop + cg.height
+                    ))
+                    stack.push((cidx, cleft, ctop))
+                    cursor = ctop + cg.height + cg.margin_bottom
+
+        # Rebuild the arena with the computed rects (element write-back by value).
+        var updated: [LayoutBox] = []
+        var i = 0
+        while i < self.boxes.len():
+            val b = self.boxes[i as i32]
+            var rect = b.computed_rect
+            var k = 0
+            while k < laid_idx.len():
+                if laid_idx[k as i32] == i:
+                    rect = laid_rect[k as i32]
+                k = k + 1
+            updated.push(LayoutBox(
+                id: b.id,
+                geometry: b.geometry,
+                children_ids: b.children_ids,
+                computed_rect: rect
+            ))
+            i = i + 1
+        self.boxes = updated
+
+    fn total_height_for(id: i64) -> f64:
+        """Border-box height of a laid-out box; 0.0 when the id is absent."""
+        val idx = self.index_of(id)
+        if idx < 0:
+            return 0.0
+        val r = self.boxes[idx as i32].computed_rect
+        r.bottom - r.top
