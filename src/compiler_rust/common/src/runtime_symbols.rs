@@ -125,6 +125,7 @@ pub const CORE_REQUIRED_RUNTIME_SYMBOLS: &[&str] = &[
     "rt_memcpy",
     "rt_memset",
     "rt_value_as_int",
+    "rt_value_as_u64",
     "rt_array_new",
     "rt_array_free",
     "rt_transient_array_scope_begin",
@@ -191,6 +192,7 @@ pub const CORE_REQUIRED_RUNTIME_SYMBOLS: &[&str] = &[
     "rt_entropy_hardware_ready",
     "rt_sleep_ms",
     "rt_value_int",
+    "rt_value_u64",
     "rt_value_float",
     "rt_value_bool",
     "rt_value_nil",
@@ -616,6 +618,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_math_is_finite",
     // Value creation/conversion
     "rt_value_int",
+    "rt_value_u64",
     "rt_value_float",
     "rt_value_bool",
     "rt_value_nil",
@@ -2147,6 +2150,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_sleep_ms",
     "rt_str_hash",
     "rt_value_as_int",
+    "rt_value_as_u64",
     // Vulkan graphics entry points defined unconditionally in the
     // vulkan_graphics_runtime_* modules: a real implementation under the vulkan
     // feature and a stub under its negation, so they are always linkable. Their
