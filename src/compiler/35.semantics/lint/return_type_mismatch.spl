@@ -1,0 +1,818 @@
+# Declared-Return-Type Mismatch Lint (WARNING phase)
+#
+# RET001: tail expression type does not match the declared return type   WARNING
+# RET002: `.?` (Option-yielding) in a value position of a non-Option fn  WARNING
+# RET003: `return <literal>` type does not match the declared return type WARNING
+# RET004: declared a non-void return type but the tail yields no value   WARNING
+#
+# WHY THIS EXISTS
+# ---------------
+# `doc/08_tracking/bug/declared_return_type_not_enforced_2026-08-09.md`:
+# declared return types are not enforced by ANY engine. Proven by execution:
+#
+#     fn ret_text() -> bool:
+#         "not-a-bool"            # runs to EXIT 0, yields <special:129>
+#
+# Every `-> T` in the tree is documentation, not a contract. That is how 42
+# `.?` call sites survived in `-> bool` functions
+# (`doc/08_tracking/bug/dotq_tail_position_in_bool_returning_fns_2026-08-09.md`).
+#
+# The real fix belongs in the type checker and must reconcile tail
+# expressions, `return` in every branch, lambdas, trait impls and generics.
+# Landing that as a hard error against an uncensused corpus turns the build
+# red. The agreed sequence is warn -> census -> error. This module is the
+# WARN half. It emits WARNING severity only and MUST NOT fail a build.
+#
+# WHY IT IS TEXT-BASED
+# --------------------
+# Deliberately. A warn-phase censuser has to run over the whole corpus
+# cheaply and must never itself be the thing that breaks a build. It also
+# has to be runnable standalone (see
+# `scripts/check/census-return-type-mismatch.spl`) before the checker it
+# will eventually justify exists at all.
+#
+# FAIL-QUIET BY CONSTRUCTION
+# --------------------------
+# An expression is only classified when the classification is beyond doubt
+# (literals, comparisons, `not`, `.?`). Anything involving a call, a
+# variable, a field access, a generic, or an `if`/`match` block classifies
+# as UNKNOWN and is never reported. The declared side is likewise only
+# scored for bool / int / float / text / array; Option, Result and all
+# user types accept anything. So the counts this produces are a FLOOR on
+# the true violation count, never a ceiling -- which is the correct bias
+# for a number that will be used to decide whether to promote to error.
+
+# ============================================================================
+# Warning Struct
+# ============================================================================
+
+struct ReturnTypeWarning:
+    code: text
+    severity: text
+    message: text
+    hint: text
+    line_num: i64
+    fn_name: text
+    declared: text
+    actual: text
+    kind: text
+
+    fn fmt() -> text:
+        "[{self.code}] {self.severity}: line {self.line_num} — {self.message} — {self.hint}"
+
+# ============================================================================
+# Low-level text primitives
+# ============================================================================
+
+fn rtm_ident_chars() -> text:
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+
+fn rtm_is_ident_char(c: text) -> bool:
+    if c == "":
+        return false
+    rtm_ident_chars().contains(c)
+
+fn rtm_is_digit(c: text) -> bool:
+    if c == "":
+        return false
+    "0123456789".contains(c)
+
+fn rtm_indent_of(ln: text) -> i64:
+    var i: i64 = 0
+    val n = ln.len()
+    while i < n:
+        val c = ln.substring(i, i + 1)
+        if c != " " and c != "\t":
+            return i
+        i = i + 1
+    n
+
+fn rtm_read_ident(s: text, start: i64) -> i64:
+    var i = start
+    val n = s.len()
+    while i < n:
+        if not rtm_is_ident_char(s.substring(i, i + 1)):
+            break
+        i = i + 1
+    i
+
+fn rtm_skip_ws(s: text, start: i64) -> i64:
+    var i = start
+    val n = s.len()
+    while i < n:
+        val c = s.substring(i, i + 1)
+        if c != " " and c != "\t":
+            break
+        i = i + 1
+    i
+
+# Strip a trailing `# ...` comment, but never one that lives inside a string
+# literal -- `"# not a comment"` is a text value and misreading it as a
+# comment would turn a correct `-> text` tail into a phantom RET004.
+fn rtm_strip_comment(s: text) -> text:
+    var i: i64 = 0
+    val n = s.len()
+    var q: text = ""
+    while i < n:
+        val c = s.substring(i, i + 1)
+        if q != "":
+            if c == "\\":
+                i = i + 2
+                continue
+            if c == q:
+                q = ""
+            i = i + 1
+            continue
+        if c == "\"" or c == "'":
+            q = c
+            i = i + 1
+            continue
+        if c == "#":
+            return s.substring(0, i)
+        i = i + 1
+    s
+
+# Does `op` occur at bracket depth 0 and outside every string literal?
+fn rtm_top_has(s: text, op: text) -> bool:
+    var i: i64 = 0
+    val n = s.len()
+    val m = op.len()
+    var depth: i64 = 0
+    var q: text = ""
+    while i < n:
+        val c = s.substring(i, i + 1)
+        if q != "":
+            if c == "\\":
+                i = i + 2
+                continue
+            if c == q:
+                q = ""
+            i = i + 1
+            continue
+        if c == "\"" or c == "'":
+            q = c
+            i = i + 1
+            continue
+        if c == "(" or c == "[" or c == "{":
+            depth = depth + 1
+        else if c == ")" or c == "]" or c == "}":
+            depth = depth - 1
+        if depth == 0 and i + m <= n:
+            if s.substring(i, i + m) == op:
+                return true
+        i = i + 1
+    false
+
+# Is the whole of `s` a single closed string literal (optionally followed by
+# `+ <more>` concatenation, which is still text)?
+fn rtm_is_text_expr(s: text) -> bool:
+    val t = s.trim()
+    if t.len() < 2:
+        return false
+    val open = t.substring(0, 1)
+    if open != "\"" and open != "'":
+        return false
+    # Walk to the matching close quote; whatever follows must be a `+` chain.
+    var i: i64 = 1
+    val n = t.len()
+    while i < n:
+        val c = t.substring(i, i + 1)
+        if c == "\\":
+            i = i + 2
+            continue
+        if c == open:
+            break
+        i = i + 1
+    if i >= n:
+        return false
+    val rest = t.substring(i + 1, n).trim()
+    if rest == "":
+        return true
+    rest.starts_with("+")
+
+fn rtm_is_int_literal(s: text) -> bool:
+    var t = s.trim()
+    if t.starts_with("-"):
+        t = t.substring(1, t.len()).trim()
+    if t == "":
+        return false
+    var i: i64 = 0
+    while i < t.len():
+        val c = t.substring(i, i + 1)
+        if not (rtm_is_digit(c) or c == "_"):
+            return false
+        i = i + 1
+    true
+
+fn rtm_is_float_literal(s: text) -> bool:
+    var t = s.trim()
+    if t.starts_with("-"):
+        t = t.substring(1, t.len()).trim()
+    if t == "" or not t.contains("."):
+        return false
+    var dots: i64 = 0
+    var digits: i64 = 0
+    var i: i64 = 0
+    while i < t.len():
+        val c = t.substring(i, i + 1)
+        if c == ".":
+            dots = dots + 1
+        else if rtm_is_digit(c):
+            digits = digits + 1
+        else if c != "_":
+            return false
+        i = i + 1
+    dots == 1 and digits > 0
+
+fn rtm_is_array_literal(s: text) -> bool:
+    val t = s.trim()
+    t.starts_with("[") and t.ends_with("]")
+
+# Replace every triple-quoted region with an empty string literal, so the
+# line-based scan never reads prose or embedded JS/C as Simple code.
+#
+# This is load-bearing, not tidiness. A `"""..."""` block whose CONTENT has a
+# line at column 0 (embedded HTML, JS, or a linker script -- e.g.
+# src/lib/nogc_async_mut/web_framework/live_reload.spl) terminates the
+# indentation-based body walk early, so the function looks like it ends on
+# `val js = """` and gets reported as yielding no value. Docstrings hit the
+# same path. Ten of the eleven RET004 findings in the previous census run were
+# this one shape.
+fn rtm_mask_triple_quoted(lines: [text]) -> [text]:
+    var out: [text] = []
+    var in_tq = false
+    for ln in lines:
+        if in_tq:
+            val idx = ln.find("\"\"\"")
+            if idx < 0:
+                out.push("")
+                continue
+            in_tq = false
+            val rest = ln.substring(idx + 3, ln.len())
+            if rest.trim() == "":
+                out.push("")
+            else:
+                out.push(rest)
+            continue
+        var cur = ln
+        var res: text = ""
+        var guard: i64 = 0
+        while guard < 64:
+            guard = guard + 1
+            val a = cur.find("\"\"\"")
+            if a < 0:
+                res = res + cur
+                break
+            val head = cur.substring(0, a)
+            val rest = cur.substring(a + 3, cur.len())
+            val b = rest.find("\"\"\"")
+            if b < 0:
+                res = res + head + "\"\""
+                in_tq = true
+                break
+            res = res + head + "\"\""
+            cur = rest.substring(b + 3, rest.len())
+        out.push(res)
+    out
+
+# ============================================================================
+# Expression classification -- UNKNOWN unless certain
+# ============================================================================
+
+# Returns one of: "bool" "i64" "f64" "text" "array" "option" "nil" or ""
+# for unknown. Anything containing a call, an identifier, a field access or
+# a generic falls through to "" and is never reported.
+fn rtm_classify(expr: text) -> text:
+    val t = rtm_strip_comment(expr).trim()
+    if t == "":
+        return ""
+    if t == "nil":
+        return "nil"
+    if t == "true" or t == "false":
+        return "bool"
+    # `.?` yields an Option regardless of receiver -- this is the exact shape
+    # of the 42-site companion bug.
+    if t.ends_with(".?"):
+        return "option"
+    # An expression with an embedded conditional yields from its arms; the
+    # comparison operators visible in the CONDITION say nothing about the
+    # value. Real shape this protects (src/lib/editor/view/wiki_panel.spl):
+    #   prefix + row.icon + if row.detail != "" then "  " + row.detail else: ""
+    if rtm_top_has(t, " if ") or rtm_top_has(t, " then ") or rtm_top_has(t, " else"):
+        return ""
+    if t.starts_with("not ") or t.starts_with("not("):
+        return "bool"
+    # `and` / `or` are DELIBERATELY not treated as bool evidence: they are also
+    # the bitwise operators on integers, so `(ppn << 10) or flags or PTE_V`
+    # (test/unit/hardware/rv64gc/rv64_sv39_spec.spl) is an i64, not a bool.
+    # Only the unambiguous comparisons are scored.
+    if rtm_top_has(t, " == ") or rtm_top_has(t, " != ")
+        or rtm_top_has(t, " <= ") or rtm_top_has(t, " >= "):
+        return "bool"
+    if rtm_is_text_expr(t):
+        return "text"
+    if rtm_is_int_literal(t):
+        return "i64"
+    if rtm_is_float_literal(t):
+        return "f64"
+    if rtm_is_array_literal(t):
+        return "array"
+    ""
+
+# ============================================================================
+# Declared-type classification
+# ============================================================================
+
+fn rtm_norm_ret(r: text) -> text:
+    var s = rtm_strip_comment(r).trim()
+    while s.ends_with(":"):
+        s = s.substring(0, s.len() - 1).trim()
+    s.trim()
+
+# Returns "bool" "int" "float" "text" "array" or "" for
+# "not scored" (Option, Result, generics, user types, void).
+fn rtm_declared_kind(r: text) -> text:
+    val s = rtm_norm_ret(r)
+    if s == "":
+        return ""
+    # Anything optional or fallible accepts values this checker cannot model.
+    if s.ends_with("?") or s.starts_with("Option<") or s.starts_with("Result<"):
+        return ""
+    if s == "bool":
+        return "bool"
+    if s == "text" or s == "str" or s == "string" or s == "String":
+        return "text"
+    if s == "i8" or s == "i16" or s == "i32" or s == "i64" or s == "int"
+        or s == "u8" or s == "u16" or s == "u32" or s == "u64" or s == "usize" or s == "isize":
+        return "int"
+    if s == "f32" or s == "f64" or s == "float":
+        return "float"
+    if s.starts_with("[") and s.ends_with("]"):
+        return "array"
+    ""
+
+# Is an expression of class `actual` acceptable where `declared` is required?
+# Unknowns are always acceptable. This is the fail-quiet gate.
+fn rtm_compatible(declared: text, actual: text) -> bool:
+    if declared == "" or actual == "":
+        return true
+    if actual == "nil":
+        # nil into a non-Option slot is a separate defect family; out of scope.
+        return true
+    if declared == "bool":
+        return actual == "bool"
+    if declared == "text":
+        return actual == "text"
+    if declared == "int":
+        return actual == "i64"
+    if declared == "float":
+        # An integer literal in a float slot is a widening, not a defect.
+        return actual == "f64" or actual == "i64"
+    if declared == "array":
+        return actual == "array"
+    true
+
+# ============================================================================
+# Statement shape
+# ============================================================================
+
+# A statement that provably yields no value, so a function declaring a
+# non-void return type and ending on one returns nothing at all.
+fn rtm_is_valueless_stmt(t: text) -> bool:
+    if t.starts_with("var ") or t.starts_with("val ") or t.starts_with("let "):
+        return true
+    if t.starts_with("while ") or t.starts_with("for "):
+        return true
+    # `loop` must be matched as a WHOLE keyword. A bare `starts_with("loop")`
+    # also swallows the identifiers `loopback` and `loop_ref`, which turned two
+    # perfectly correct tail expressions into RET004 findings.
+    if t == "loop" or t.starts_with("loop:") or t.starts_with("loop ")
+        or t.starts_with("loop\t"):
+        return true
+    if t.starts_with("print(") or t.starts_with("println(") or t.starts_with("eprint("):
+        return true
+    if t == "pass" or t.starts_with("pass_"):
+        return true
+    if t.starts_with("break") or t.starts_with("continue"):
+        return true
+    # Bare assignment `x = e` / `x.y = e` / compound assigns.
+    if rtm_top_has(t, " = ") and not rtm_top_has(t, " == "):
+        return true
+    if rtm_top_has(t, " += ") or rtm_top_has(t, " -= ")
+        or rtm_top_has(t, " *= ") or rtm_top_has(t, " /= "):
+        return true
+    false
+
+# An inline body whose value comes from branches rather than from the text of
+# the line itself. Classifying such a line as a single expression reads the
+# CONDITION instead of the arms.
+fn rtm_is_inline_branch(t: text) -> bool:
+    val s = t.trim()
+    s.starts_with("if ") or s.starts_with("if(") or s.starts_with("match ")
+        or s.starts_with("try") or s.starts_with("when ")
+
+# A body that is only a placeholder marker, i.e. a declaration stub rather
+# than logic that got its return value wrong.
+fn rtm_is_stub_body(t: text) -> bool:
+    val s = t.trim()
+    s == "pass" or s.starts_with("pass_") or s == "..." or s == "todo()"
+
+# A block header opens a construct whose value comes from its branches; the
+# tail-expression rule cannot be applied to it textually.
+fn rtm_is_block_header(t: text) -> bool:
+    if not t.ends_with(":"):
+        return false
+    if t.starts_with("if ") or t.starts_with("elif ") or t.starts_with("else")
+        or t.starts_with("match ") or t.starts_with("try") or t.starts_with("with ")
+        or t.starts_with("while ") or t.starts_with("for ") or t.starts_with("case "):
+        return true
+    true
+
+# ============================================================================
+# Signature parsing
+# ============================================================================
+
+struct RtmSig:
+    ok: bool
+    name: text
+    ret: text
+    has_body: bool
+    inline_body: text
+    end_line: i64
+    generic: bool
+
+fn rtm_is_modifier(w: text) -> bool:
+    w == "pub" or w == "pri" or w == "priv" or w == "static" or w == "extern"
+        or w == "async" or w == "var" or w == "mut" or w == "abstract"
+        or w == "override" or w == "virtual" or w == "to" or w == "gen"
+
+struct RtmHdr:
+    ok: bool
+    name: text
+    name_end: i64
+    generic: bool
+
+# Recognise `[modifiers] fn NAME[<..>](` and `[modifiers] me NAME[<..>](`.
+fn rtm_fn_header(ln: text) -> RtmHdr:
+    var i = rtm_skip_ws(ln, 0)
+    var saw_me = false
+    while true:
+        val e = rtm_read_ident(ln, i)
+        if e == i:
+            return RtmHdr(ok: false, name: "", name_end: -1, generic: false)
+        val w = ln.substring(i, e)
+        if w == "fn":
+            i = rtm_skip_ws(ln, e)
+            break
+        if w == "me":
+            if saw_me:
+                return RtmHdr(ok: false, name: "", name_end: -1, generic: false)
+            saw_me = true
+            i = rtm_skip_ws(ln, e)
+            continue
+        if rtm_is_modifier(w):
+            i = rtm_skip_ws(ln, e)
+            continue
+        if saw_me:
+            break
+        return RtmHdr(ok: false, name: "", name_end: -1, generic: false)
+    val ne = rtm_read_ident(ln, i)
+    if ne == i:
+        return RtmHdr(ok: false, name: "", name_end: -1, generic: false)
+    val nm = ln.substring(i, ne)
+    var k = rtm_skip_ws(ln, ne)
+    var gen = false
+    if k < ln.len() and ln.substring(k, k + 1) == "<":
+        val gt = ln.find(">")
+        if gt < 0:
+            return RtmHdr(ok: false, name: "", name_end: -1, generic: false)
+        gen = true
+        k = rtm_skip_ws(ln, gt + 1)
+    if k >= ln.len() or ln.substring(k, k + 1) != "(":
+        return RtmHdr(ok: false, name: "", name_end: -1, generic: false)
+    RtmHdr(ok: true, name: nm, name_end: ne, generic: gen)
+
+# Parse a possibly multi-line signature starting at line `i`, returning the
+# declared return type, whether a body follows, any inline one-liner body,
+# and the line the signature closes on.
+fn rtm_parse_sig(lines: [text], i: i64, h: RtmHdr) -> RtmSig:
+    var depth: i64 = 0
+    var tail: text = ""
+    var j = i
+    var opened = false
+    var closed = false
+    val nlines = lines.len()
+    while j < nlines:
+        val ln = lines[j]
+        var k: i64 = 0
+        if j == i:
+            k = h.name_end
+        val n = ln.len()
+        var closed_here = false
+        while k < n:
+            val ch = ln.substring(k, k + 1)
+            if ch == "#" and depth == 0 and opened:
+                break
+            if ch == "(":
+                depth = depth + 1
+                opened = true
+            else if ch == ")":
+                depth = depth - 1
+                if depth == 0:
+                    tail = ln.substring(k + 1, n)
+                    closed_here = true
+                    break
+            k = k + 1
+        if closed_here:
+            closed = true
+            break
+        if j - i > 24:
+            break
+        j = j + 1
+    if not closed:
+        return RtmSig(ok: false, name: "", ret: "", has_body: false,
+                      inline_body: "", end_line: i, generic: h.generic)
+
+    val t = rtm_strip_comment(tail)
+    var ret: text = ""
+    var has_body = false
+    var inline_body: text = ""
+    val arrow = t.find("->")
+    if arrow >= 0:
+        val after = t.substring(arrow + 2, t.len())
+        var d: i64 = 0
+        var cut = after.len()
+        var idx: i64 = 0
+        while idx < after.len():
+            val ch = after.substring(idx, idx + 1)
+            if ch == "(" or ch == "[" or ch == "{" or ch == "<":
+                d = d + 1
+            else if ch == ")" or ch == "]" or ch == "}" or ch == ">":
+                d = d - 1
+            else if ch == ":" and d <= 0:
+                cut = idx
+                has_body = true
+                break
+            idx = idx + 1
+        ret = after.substring(0, cut).trim()
+        if has_body:
+            inline_body = after.substring(cut + 1, after.len()).trim()
+        val w = ret.find(" where ")
+        if w >= 0:
+            ret = ret.substring(0, w).trim()
+    else:
+        has_body = t.trim().ends_with(":")
+    RtmSig(ok: true, name: h.name, ret: ret, has_body: has_body,
+           inline_body: inline_body, end_line: j, generic: h.generic)
+
+# ============================================================================
+# Block walking
+# ============================================================================
+
+fn rtm_block_end(lines: [text], start: i64, hdr_indent: i64) -> i64:
+    var i = start + 1
+    var end = start + 1
+    val n = lines.len()
+    while i < n:
+        val ln = lines[i]
+        val s = ln.trim()
+        if s == "" or s.starts_with("#"):
+            i = i + 1
+            continue
+        if rtm_indent_of(ln) <= hdr_indent:
+            break
+        end = i + 1
+        i = i + 1
+    end
+
+# The kind of the innermost enclosing declaration block, used to classify a
+# finding as free_fn / impl_method / trait_method / class_method.
+fn rtm_enclosing_kind(lines: [text], fn_line: i64, fn_indent: i64) -> text:
+    if fn_indent == 0:
+        return "free_fn"
+    var i = fn_line - 1
+    while i >= 0:
+        val ln = lines[i]
+        val s = ln.trim()
+        if s == "" or s.starts_with("#"):
+            i = i - 1
+            continue
+        val ind = rtm_indent_of(ln)
+        if ind < fn_indent:
+            if s.starts_with("impl ") or s.starts_with("pub impl "):
+                if s.contains(" for "):
+                    return "trait_impl"
+                return "impl_method"
+            if s.starts_with("trait ") or s.starts_with("pub trait "):
+                return "trait_method"
+            if s.starts_with("class ") or s.starts_with("pub class "):
+                return "class_method"
+            if s.starts_with("struct ") or s.starts_with("pub struct "):
+                return "struct_method"
+            if s.starts_with("enum ") or s.starts_with("pub enum "):
+                return "enum_method"
+            return "nested_fn"
+        i = i - 1
+    "free_fn"
+
+# ============================================================================
+# Main entry point
+# ============================================================================
+
+fn check_return_type_mismatch(source: text) -> [ReturnTypeWarning]:
+    """Run the declared-return-type lint over source text.
+
+    Emits WARNING-severity findings only. Never errors, never throws, and
+    classifies an expression only when the classification is certain, so
+    the result is a lower bound on the real violation count.
+    """
+    var out: [ReturnTypeWarning] = []
+    if not source.contains("->"):
+        return out
+    val lines = rtm_mask_triple_quoted(source.split("\n"))
+    val n = lines.len()
+
+    var i: i64 = 0
+    while i < n:
+        val ln = lines[i]
+        val s = ln.trim()
+        if s == "" or s.starts_with("#"):
+            i = i + 1
+            continue
+        val h = rtm_fn_header(ln)
+        if not h.ok:
+            i = i + 1
+            continue
+        val sig = rtm_parse_sig(lines, i, h)
+        if not sig.ok:
+            i = i + 1
+            continue
+        val fn_indent = rtm_indent_of(ln)
+        val decl = rtm_declared_kind(sig.ret)
+        val kind_base = rtm_enclosing_kind(lines, i, fn_indent)
+        var kind = kind_base
+        if sig.generic:
+            kind = kind_base + "+generic"
+
+        # A declaration with no body (trait signature, extern) has nothing to
+        # check; advance past the signature and move on.
+        if not sig.has_body:
+            i = sig.end_line + 1
+            continue
+        if sig.ret == "":
+            i = sig.end_line + 1
+            continue
+
+        # --- one-liner body: `fn f() -> bool: "x"`
+        if sig.inline_body != "":
+            # A one-liner `if c: 1 else: 0` yields from its BRANCHES. Reading
+            # the whole line as one expression sees the `==` in the condition
+            # and misclassifies it as bool -- which is how
+            # `fn is_continuation_frame(op: i64) -> i64: if op == C: 1 else: 0`
+            # was reported as a mismatch when it is entirely correct.
+            if not rtm_is_inline_branch(sig.inline_body):
+                for w in rtm_score_expr(sig.inline_body, decl, sig, kind, i + 1, "RET001",
+                                        "tail expression"):
+                    out.push(w)
+            i = sig.end_line + 1
+            continue
+
+        val body_hi = rtm_block_end(lines, sig.end_line, fn_indent)
+        if body_hi <= sig.end_line + 1:
+            i = sig.end_line + 1
+            continue
+
+        # Body top-level indent = indent of the first real body line.
+        var body_indent: i64 = -1
+        var b = sig.end_line + 1
+        while b < body_hi:
+            val bl = lines[b]
+            val bs = bl.trim()
+            if bs != "" and not bs.starts_with("#"):
+                body_indent = rtm_indent_of(bl)
+                break
+            b = b + 1
+        if body_indent < 0:
+            i = sig.end_line + 1
+            continue
+
+        # --- explicit `return <expr>` at any depth, skipping nested fns.
+        var k = sig.end_line + 1
+        var nested_until: i64 = -1
+        var last_stmt: i64 = -1
+        while k < body_hi:
+            val kl = lines[k]
+            val ks = rtm_strip_comment(kl).trim()
+            if ks == "" or kl.trim().starts_with("#"):
+                k = k + 1
+                continue
+            if k < nested_until:
+                k = k + 1
+                continue
+            val nh = rtm_fn_header(kl)
+            if nh.ok:
+                val nsig = rtm_parse_sig(lines, k, nh)
+                if nsig.ok:
+                    nested_until = rtm_block_end(lines, nsig.end_line, rtm_indent_of(kl))
+                    k = k + 1
+                    continue
+            if rtm_indent_of(kl) == body_indent:
+                last_stmt = k
+            if ks.starts_with("return "):
+                val rexpr = ks.substring(7, ks.len()).trim()
+                # `return if c: 1 else: 0` yields from the ARMS. Without this
+                # guard the condition's `>=` is read as the returned value and
+                # every such return is reported -- 42 of the 48 RET003 hits in
+                # the first census were exactly this shape and all were correct.
+                if not rtm_is_inline_branch(rexpr):
+                    for w in rtm_score_expr(rexpr, decl, sig, kind, k + 1, "RET003",
+                                            "`return` expression"):
+                        out.push(w)
+            k = k + 1
+
+        # --- tail expression: the last top-level statement of the body.
+        if last_stmt >= 0:
+            val tl = rtm_strip_comment(lines[last_stmt]).trim()
+            # `decl == ""` covers `-> void` / `-> ()` / `-> nil` / `-> Never`
+            # as well as Option, Result, generics and user types. A void
+            # function ending on an assignment is CORRECT, and a user type is
+            # unmodellable here, so RET004 must be gated on a scored value
+            # type exactly like RET001/RET003 are. Without this gate the
+            # census over-reported by 224 of 538 findings, nearly all of them
+            # `-> void` bodies doing precisely the right thing.
+            # `rtm_is_inline_branch` is needed here as well as on the one-liner
+            # path: `if c: 1 else: 0` as the last line of a normal body does
+            # NOT end in ':', so the block-header test does not catch it.
+            if decl != "" and tl != "" and not tl.starts_with("return")
+                and not rtm_is_block_header(tl) and not rtm_is_inline_branch(tl):
+                if rtm_is_stub_body(tl):
+                    # A `pass` body under a non-void signature is a real hole,
+                    # but it is a DECLARATION STUB, not a logic error that got
+                    # its return value wrong. Mixing the two would let ~12
+                    # trait-stub placeholders inflate the count that the
+                    # promote-to-error decision is based on.
+                    out.push(ReturnTypeWarning(
+                        code: "RET005",
+                        severity: "WARNING",
+                        message: "`{sig.name}` declares `-> {rtm_norm_ret(sig.ret)}` but its body is the placeholder `{tl}`",
+                        hint: "a stub under a value-returning signature yields nothing at run time; implement it or drop the declared type",
+                        line_num: last_stmt + 1,
+                        fn_name: sig.name,
+                        declared: rtm_norm_ret(sig.ret),
+                        actual: "<stub>",
+                        kind: kind))
+                else if rtm_is_valueless_stmt(tl):
+                    out.push(ReturnTypeWarning(
+                        code: "RET004",
+                        severity: "WARNING",
+                        message: "`{sig.name}` declares `-> {rtm_norm_ret(sig.ret)}` but its body ends on a statement that yields no value",
+                        hint: "add an explicit `return` or make the last line an expression of type `{rtm_norm_ret(sig.ret)}`",
+                        line_num: last_stmt + 1,
+                        fn_name: sig.name,
+                        declared: rtm_norm_ret(sig.ret),
+                        actual: "<no value>",
+                        kind: kind))
+                else:
+                    for w in rtm_score_expr(tl, decl, sig, kind, last_stmt + 1, "RET001",
+                                            "tail expression"):
+                        out.push(w)
+
+        i = sig.end_line + 1
+    out
+
+# Score one expression against the declared return type, returning either an
+# empty list or a single finding. It returns rather than mutating an out
+# parameter because arrays are VALUE types in this language -- pushing into a
+# parameter would be silently discarded at the call site.
+#
+# RET002 takes priority over the caller's code when the actual class is
+# `option`, because `.?` is the known 42-site family and deserves its own
+# bucket in the census.
+fn rtm_score_expr(expr: text, decl: text, sig: RtmSig,
+                  kind: text, line_num: i64, code: text, what: text) -> [ReturnTypeWarning]:
+    var out: [ReturnTypeWarning] = []
+    if decl == "":
+        return out
+    val actual = rtm_classify(expr)
+    if actual == "":
+        return out
+    if rtm_compatible(decl, actual):
+        return out
+    var use_code = code
+    var msg = "`{sig.name}` declares `-> {rtm_norm_ret(sig.ret)}` but its {what} yields `{actual}`"
+    var hint = "declared return types are not enforced by any engine — this value is passed through raw (see doc/08_tracking/bug/declared_return_type_not_enforced_2026-08-09.md)"
+    if actual == "option":
+        use_code = "RET002"
+        msg = "`{sig.name}` declares `-> {rtm_norm_ret(sig.ret)}` but its {what} is a `.?` operation, which yields an Option"
+        hint = "`.?` never yields the declared type here; see doc/08_tracking/bug/dotq_tail_position_in_bool_returning_fns_2026-08-09.md"
+    out.push(ReturnTypeWarning(
+        code: use_code,
+        severity: "WARNING",
+        message: msg,
+        hint: hint,
+        line_num: line_num,
+        fn_name: sig.name,
+        declared: rtm_norm_ret(sig.ret),
+        actual: actual,
+        kind: kind))
+    out
