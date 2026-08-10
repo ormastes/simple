@@ -1,9 +1,4 @@
-extern fn rt_string_contains(s: text, substr: text) -> bool
-extern fn rt_string_ends_with(s: text, suffix: text) -> bool
-extern fn rt_string_find(s: text, needle: text) -> i64
 extern fn rt_string_len(s: text) -> i64
-extern fn rt_string_rfind(s: text, needle: text) -> i64
-extern fn rt_string_starts_with(s: text, prefix: text) -> bool
 extern fn rt_text_to_bytes(s: text) -> [u8]
 
 # Basic string operations
@@ -51,20 +46,65 @@ fn str_char_at(s: text, idx: i64) -> text:
     s[idx:idx + 1]
 
 # Search
-fn str_contains(s: text, sub: text) -> bool:
-    rt_string_contains(s, sub)
-
+#
+# These are implemented with the language's own slice expression rather than the
+# `rt_string_contains` / `rt_string_starts_with` / `rt_string_ends_with` /
+# `rt_string_find` / `rt_string_rfind` externs, for exactly the reason recorded
+# above `str_slice`: those five externs are declared for the LLVM/C backends but
+# NONE of them is registered in the interpreter's extern table. Unlike `rt_slice`
+# that did not raise "unknown extern function" — it silently yielded the return
+# type's zero value, so `str_index_of` / `str_last_index_of` answered -1 for
+# every input and `str_contains` / `str_starts_with` / `str_ends_with` answered
+# false for every input, including inputs that plainly match. -1 is the
+# "not found" sentinel, so callers quietly took the absent branch instead of
+# failing. `s[a:b]` is lowered natively by all three engines.
 fn str_starts_with(s: text, prefix: text) -> bool:
-    rt_string_starts_with(s, prefix)
+    val plen = prefix.len()
+    if plen == 0:
+        return true
+    if plen > s.len():
+        return false
+    s[0:plen] == prefix
 
 fn str_ends_with(s: text, suffix: text) -> bool:
-    rt_string_ends_with(s, suffix)
+    val slen = s.len()
+    val flen = suffix.len()
+    if flen == 0:
+        return true
+    if flen > slen:
+        return false
+    s[slen - flen:slen] == suffix
 
 fn str_index_of(s: text, sub: text) -> i64:
-    rt_string_find(s, sub)
+    val slen = s.len()
+    val sublen = sub.len()
+    if sublen == 0:
+        return 0
+    if sublen > slen:
+        return -1
+    var i = 0
+    while i <= slen - sublen:
+        if s[i:i + sublen] == sub:
+            return i
+        i = i + 1
+    -1
 
 fn str_last_index_of(s: text, sub: text) -> i64:
-    rt_string_rfind(s, sub)
+    val slen = s.len()
+    val sublen = sub.len()
+    if sublen == 0:
+        return slen
+    if sublen > slen:
+        return -1
+    var i = slen - sublen
+    while i >= 0:
+        if s[i:i + sublen] == sub:
+            return i
+        i = i - 1
+    -1
+
+fn str_contains(s: text, sub: text) -> bool:
+    str_index_of(s, sub) >= 0
 
 # Whitespace helpers
 fn is_whitespace_char(c: text) -> bool:
