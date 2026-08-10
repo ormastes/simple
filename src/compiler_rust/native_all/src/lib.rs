@@ -103,6 +103,65 @@ pub extern "C" fn rt_bootstrap_native_build(args: RuntimeValue) -> i64 {
     result
 }
 
+fn bootstrap_flag_needs_value(flag: &str) -> bool {
+    matches!(
+        flag,
+        "-o"
+            | "--output"
+            | "--source"
+            | "--entry"
+            | "--threads"
+            | "--timeout"
+            | "--cache-dir"
+            | "--backend"
+            | "--runtime-bundle"
+            | "--runtime-path"
+            | "--mode"
+            | "--target"
+            | "--linker-script"
+            | "--log"
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn rt_bootstrap_native_build_single_spl_positional(args: RuntimeValue) -> i64 {
+    let argv = extract_rt_string_array(args);
+    let mut index = 0usize;
+    let mut scanning = false;
+    let mut has_source_input = false;
+    let mut entries = Vec::new();
+    while index < argv.len() {
+        let arg = &argv[index];
+        if arg == "native-build" {
+            scanning = true;
+            index += 1;
+        } else if !scanning {
+            index += 1;
+        } else if arg == "--source" {
+            has_source_input = true;
+            index += 2;
+        } else if arg.starts_with("--source=") {
+            has_source_input = true;
+            index += 1;
+        } else if bootstrap_flag_needs_value(arg) {
+            index += 2;
+        } else if arg.starts_with('-') {
+            index += 1;
+        } else if arg.ends_with(".spl") {
+            entries.push(arg.as_str());
+            index += 1;
+        } else {
+            has_source_input = true;
+            index += 1;
+        }
+    }
+    if entries.len() == 1 && !has_source_input {
+        stub_make_string(entries[0])
+    } else {
+        stub_make_string("")
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn rt_jit_cleanup(handle: i64) -> i64 {
     simple_compiler::native_jit_cleanup_handle(handle)
