@@ -1,6 +1,6 @@
 # `if val Some(x) = opt: EXPR else: EXPR2` loses field access on `x` when used as a value-producing expression (2026-07-31)
 
-**Status:** OPEN — worked around at the one call site this lane needed
+**Status:** ARCHITECTURAL-OPEN (was OPEN; reclassified 2026-08-10, see note below) — worked around at the one call site this lane needed
 (`src/lib/gc_async_mut/game2d/tilemap.spl::_pixels_for_tile`), not fixed at
 the interpreter level.
 
@@ -92,3 +92,13 @@ no seed edits, no bootstrap rebuild). Status confirmed unchanged:
 **OPEN / ARCHITECTURAL** — genuinely reproducible, root cause outside
 pure-Simple scope, workaround already in place at the one call site that
 needed it.
+
+
+## ARCHITECTURAL-OPEN reclassification (2026-08-10)
+
+Re-verified: root cause lives entirely inside the tree-walk interpreter
+implemented in `src/compiler_rust/**`, which is off-limits to this lane per
+standing constraint. No .spl-level workaround closes the root cause without
+touching that engine code (a per-call-site workaround, where one exists,
+does not fix the interpreter). Reclassified from OPEN to ARCHITECTURAL-OPEN;
+no behavior change, no code edited this pass.

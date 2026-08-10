@@ -1,6 +1,6 @@
 # Interpreter: two mutating `me` calls inside one first-class-function-dispatched invocation drop the first write
 
-**Status:** OPEN — root-caused with a minimal, sockets-free repro; not fixed
+**Status:** ARCHITECTURAL-OPEN (was OPEN; reclassified 2026-08-10, see note below) — root-caused with a minimal, sockets-free repro; not fixed
 (compiler/interpreter internals, out of scope for the application-level task
 that found it).
 **Engine:** tree-walk interpreter (`SIMPLE_EXECUTION_MODE=interpreter`) —
@@ -194,3 +194,13 @@ a cloned copy gets written back to the shared slot.
 3. Separately investigate the accept()-boundary state loss described in
    the parent bug doc — it survives even a single combined mutating call,
    so it is a distinct (likely larger) defect from this one.
+
+
+## ARCHITECTURAL-OPEN reclassification (2026-08-10)
+
+Re-verified: root cause lives entirely inside the tree-walk interpreter
+implemented in `src/compiler_rust/**`, which is off-limits to this lane per
+standing constraint. No .spl-level workaround closes the root cause without
+touching that engine code (a per-call-site workaround, where one exists,
+does not fix the interpreter). Reclassified from OPEN to ARCHITECTURAL-OPEN;
+no behavior change, no code edited this pass.
