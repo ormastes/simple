@@ -85,3 +85,31 @@ Those types do exist (`src/lib/common/types.spl`), so repointing to
 `src/lib/common/__init__.spl` is worth filing separately if package-root
 imports of `std.common` are meant to work — 193 entries live in that directory
 and none of them are reachable that way today.
+
+## Re-verified 2026-08-10
+
+Static re-check confirms nothing has changed:
+
+```
+/usr/bin/grep -rn '^class Set' src/                          # -> no matches (Settings/SettlementBuilder only, unrelated)
+/usr/bin/grep -rn 'std.common.iterable' src/                  # -> no real matches (only build-artifact false hits)
+ls src/lib/common/__init__.spl                                 # -> No such file or directory
+find src -iname 'set_utils.spl'                                 # -> src/compiler_rust/lib/std/src/tooling/set_utils.spl (only)
+```
+
+Fresh execution of the one spec whose failure mode doesn't require a full
+20-minute suite run:
+
+```
+SIMPLE_TIMEOUT_SECONDS=0 bin/simple test --no-cache --no-cover-check \
+  test/system/code_quality/allow_suppressions_spec.spl
+...
+✗ AC-2: Set operations compile with explicit imports (no star_import suppression)
+Results: 4 total, 3 passed, 1 failed
+```
+
+Same `variable `Set` not found` failure as originally recorded. Status
+confirmed **ARCHITECTURAL-OPEN**: (2) `std.common.iterable` and (3) a `Set`
+collection type are still unwritten library surface (feature work owned by
+whoever owns `src/lib/common/`), not a test-repair fix. No code change
+lands with this re-verification.
