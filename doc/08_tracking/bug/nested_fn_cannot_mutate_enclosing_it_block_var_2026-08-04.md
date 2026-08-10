@@ -1,7 +1,26 @@
 # Nested `fn` cannot mutate an enclosing `it`-block `var`; compound assignment fails "variable not found"
 
-**Status:** OPEN
+**Status:** OPEN — architectural (Rust-seed interpreter), out of scope for this lane
 **Found:** 2026-08-04
+
+**Re-confirmed 2026-08-10:** re-ran the doc's exact `nested_spec.spl` repro
+verbatim against the deployed Rust seed
+(`bin/release/x86_64-unknown-linux-gnu/simple`, seed banner confirmed via
+`--version`) with `SIMPLE_TIMEOUT_SECONDS=0 bin/simple test --no-cache
+--no-cover-check`. Both cases still fail exactly as documented: `sees the
+write` → `expected false to equal true`; `counter increments` → `semantic:
+variable \`n\` not found`. `Results: 2 total, 0 passed, 2 failed`. Checked
+`git log --oneline -10 -- src/compiler_rust/compiler/src/interpreter` — the
+recent commits touching that path are trait/struct collision and coverage
+probe fixes, unrelated to closure/scope capture, so nothing has moved on this
+since 2026-08-04. Root cause and fix location are unchanged: interpreter
+closure/environment handling in the Rust seed
+(`src/compiler_rust/compiler/src/interpreter/expr/control.rs`), which this
+lane is barred from editing (hard constraint: never edit
+`src/compiler_rust/**`) and which the standing "Fix .spl not Rust" / "Pure
+Simple First" rules also direct away from. Left honestly OPEN.
+**Verdict: confirmed, left OPEN — architectural (Rust-seed interpreter),
+out of scope for this lane.**
 
 ## Symptom
 

@@ -18,6 +18,15 @@ mid-session while other sessions are live in this tree — squarely against the
 root-cause fix is available at this layer.
 **Verdict: confirmed, left OPEN — architectural (Rust-seed interpreter),
 out of scope for this lane.**
+
+**Re-confirmed 2026-08-10:** independently re-ran Arm B (val-bound `buf`
+captured by a nested `fn r8` inside an `it` block) against the deployed Rust
+seed (`bin/release/x86_64-unknown-linux-gnu/simple`, seed banner confirmed).
+Still fails identically: `semantic: variable \`buf\` not found`,
+`Results: 1 total, 0 passed, 1 failed`. No change since the 2026-08-09
+re-confirmation. Root cause and scope unchanged (Rust-seed interpreter
+closure/scope handling, off-limits per this lane's hard constraint against
+editing `src/compiler_rust/**`). Left honestly OPEN.
 **Found:** 2026-08-04
 **Severity:** high — the silent arm produces **wrong values with no error**, so
 affected specs fail with plausible-looking assertion mismatches that read like
