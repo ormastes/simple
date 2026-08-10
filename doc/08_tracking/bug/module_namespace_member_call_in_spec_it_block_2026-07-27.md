@@ -2,8 +2,28 @@
 
 **Date:** 2026-07-27
 **Lane:** FSDICT
-**Status:** OPEN (compiler defect — not patched here; both compiler trees have live lanes)
+**Status:** UNABLE-still-open (re-verified 2026-08-10, reproduces identically; root cause is in the interpreter's implicit-self injection for `it`-block closures calling module-namespace dict members — requires a real interpreter/HIR fix, not attempted this session given scope)
 **Severity:** high — silently reds whole spec files and is easy to misread as "the module didn't resolve"
+
+## Re-verification (2026-08-10)
+
+Reproduced fresh with the exact repro pattern (module-namespace `fs.exists(P)`
+called inside an `it` block via `print "{...}"` interpolation), run through
+`bin/simple test <spec>`:
+
+```
+semantic: function expects 1 argument(s), but 2 were provided
+2 examples, 1 failure
+spec failure: 1 of 2 example(s) failed (exit 1)
+```
+
+Identical to the originally documented symptom — the `it`-block closure still
+injects an implicit `self` when calling `X.member(arg)` on a `use std.X`
+module-namespace dict, for members not independently present as a bare global
+name. No commit since 2026-07-27 touches this path (`git log` on this doc
+shows only doc/chore syncs, no code fix). Left OPEN; this is a genuine
+interpreter/HIR defect in the flat-registry / implicit-self family, not
+something safely root-caused and fixed within this session's scope.
 
 ## Summary
 
