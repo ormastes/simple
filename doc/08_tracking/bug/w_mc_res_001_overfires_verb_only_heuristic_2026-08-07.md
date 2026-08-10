@@ -173,3 +173,13 @@ acquire needs the declared handle type from `@sffi(handle: ...)` /
 a check keyed on it today would be vacuous. That is the blocker for the rest,
 and it is the same blocker as the wider migration: the seed cannot parse
 `resource` syntax in production source. The v2 `deny` promotion stays blocked.
+
+**Re-verified 2026-08-10:** the return-type gate (`_ufr_is_nonhandle_return_type`
+/ `_ufr_nonhandle_externs`, `unwrapped_foreign_resource.spl:161,168`) is still
+present and unreverted. `grep -rn "^resource " src/lib src/app src/compiler`
+now finds **7** matches (up from the 0 measured when this doc was filed) —
+some `resource` declarations now exist, so the registry is no longer
+literally empty, but this was not re-measured against the seed's parse
+capability or the lint checker's actual consumption of that registry in this
+pass, so it is noted as a fact, not treated as closing the blocker. The
+164-finding residual and the `deny`-promotion block remain open.
