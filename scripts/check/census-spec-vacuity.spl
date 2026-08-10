@@ -1,4 +1,4 @@
-# Census driver for two UNGATED spec-vacuity families.
+# Census driver for THREE ungated spec-vacuity families.
 #
 # Family 3 -- VALUE-TYPE HELPER MUTATES A COPY (codes VTM001/VTM002).
 #   A `struct` in Simple is a VALUE type. A spec helper declared
@@ -8,22 +8,23 @@
 #   no-op. The failure is ASYMMETRIC: positive/presence assertions sail
 #   through a no-op, only negative/absence assertions go red -- which is why
 #   these sat green for months. `class` receivers are REFERENCES and are NOT
-#   affected, so the type kind must be resolved, never guessed: a checker
-#   that flagged classes too would drown in false positives.
+#   affected, so the type kind must be resolved, never guessed.
 #   A `mut` parameter writes back and is CORRECT -- never flagged.
 #   Background: doc/08_tracking/bug/spec_value_type_helper_mutates_copy_family_2026-08-10.md
 #
 # Family 4 -- SPEC RE-IMPLEMENTS THE CODE UNDER TEST (codes SHADOW/NOSRC).
-#   `lease_grant_spec`, `request_queue_spec` and `busy_contract_spec` each
-#   re-declare their own `struct LeaseManager` / `RequestQueue` and
-#   reimplement the logic inside the spec, so they never touch
-#   src/lib/nogc_sync_mut/service/*. Such a spec can be 100% green while
-#   testing nothing in src/.
+#   A spec that re-declares its own `struct LeaseManager` and reimplements the
+#   logic inside the spec never touches src/. Such a spec can be 100% green
+#   while testing nothing in src/.
 #   SHADOW is precise (name-level collision with a src/ declaration).
 #   NOSRC (a spec importing nothing from src/) is a LOW-PRECISION signal and
-#   is reported as a bare count for triage only -- it is deliberately not
-#   itemised as a finding, because a lint with a high false-positive rate
-#   gets disabled and is worse than nothing.
+#   is reported as a bare count for triage only.
+#
+# Family 5 -- COMMENT-CHEAT / HOLLOW SOURCE ASSERTION (code HOLLOW).
+#   A spec reads a product file and asserts a needle appears in it, but the
+#   needle only ever occurs inside a COMMENT of that file. The assertion is
+#   green while the behaviour is absent.
+#   Background: doc/08_tracking/bug/census_spec_vacuity_comment_detection_false_positives_2026-08-10.md
 #
 # Usage:
 #   bin/simple run scripts/check/census-spec-vacuity.spl [roots...]
@@ -31,10 +32,9 @@
 #   bin/simple run scripts/check/census-spec-vacuity.spl --list [roots...]
 #
 # This is a CENSUS at WARNING severity, not a gate: it exits 0 whenever it
-# actually scanned something, however many findings it reports. It is wired
-# into no blocking check.
+# actually scanned something, however many findings it reports.
 #
-#   REPORT -- <n> file(s) scanned, <m> finding(s)   (exit 0)
+#   REPORT -- <n> file(s) scanned, ...              (exit 0)
 #   ERROR  -- nothing was scanned                   (exit 2)
 #
 # --selftest runs a positive control before every scan and is FATAL. A
@@ -42,7 +42,7 @@
 # indistinguishable from a scorer that silently stopped working, so this
 # script refuses to scan at all rather than report a vacuous zero.
 
-use std.nogc_sync_mut.io_runtime.{file_read, dir_walk, dir_exists, get_args, exit}
+use std.nogc_sync_mut.io_runtime.{file_read, file_exists, dir_walk, dir_exists, get_args, exit}
 
 # ------------------------------------------------------------------ utilities
 
@@ -93,9 +93,7 @@ fn indent_of(line: text) -> i64:
 fn strip_comment(line: text) -> text:
     # Drop a trailing `#` comment unless it sits inside a quoted run.
     # Fast path: the char-by-char walk below rebuilds the text one character
-    # at a time, which is quadratic on a value-type `text`. Most lines carry
-    # no `#` at all, and paying that cost on every line of src/ made a full
-    # corpus scan unbounded under the interpreter fallback.
+    # at a time, which is quadratic on a value-type `text`.
     if not line.contains("#"):
         return line
     var out: text = ""
@@ -127,28 +125,88 @@ fn should_scan_spl(path: text) -> bool:
 fn is_spec_file(path: text) -> bool:
     path.ends_with("_spec.spl")
 
-# test/01_unit is a byte-duplicate tree of test/unit (likewise 03_system vs
-# system, 02_integration vs integration, 05_perf vs perf) and BOTH execute,
-# so a raw count double-reports every finding in them. The census reports
-# both numbers and this predicate marks the copy.
-fn is_duplicate_tree(p: text) -> bool:
-    p.contains("test/01_unit/") or p.contains("test/02_integration/")
-        or p.contains("test/03_system/") or p.contains("test/04_external/")
-        or p.contains("test/05_perf/")
+# ------------------------------------------------------------------ hashed map
+#
+# PERFORMANCE DEFECT (fixed here): the previous index was a linear scan over a
+# flat name array, so building it cost O(n^2) over 13,232 corpus type names and
+# never finished under the interpreter -- four whole-corpus attempts died inside
+# the index phase with no verdict line, which reads as "0 findings".
+#
+# This is an open-addressing-free chained hash: flat parallel arrays plus a
+# per-bucket singly-linked list of indices. All arrays are fields of a `class`
+# (a REFERENCE) so pushes do not copy, and no nested arrays are used.
+#
+# The hash never calls char_code_at (quadratic on this runtime); it mixes the
+# length with the ordinal of three characters looked up in a fixed alphabet,
+# which is constant time per call.
+
+val HASH_ALPHA: text = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_/.-"
+val HASH_BUCKETS: i64 = 2048
+
+fn hash_bucket(s: text) -> i64:
+    var h: i64 = s.len() * 131
+    if s.len() > 0:
+        h = h + (index_of(HASH_ALPHA, s.substring(0, 1)) + 2) * 7
+    if s.len() > 1:
+        h = h + (index_of(HASH_ALPHA, s.substring(s.len() - 1, s.len())) + 2) * 1301
+    if s.len() > 3:
+        h = h + (index_of(HASH_ALPHA, s.substring(2, 3)) + 2) * 17
+    var r = h % HASH_BUCKETS
+    if r < 0:
+        r = 0 - r
+    r
+
+class SMap:
+    heads: [i64]
+    keys: [text]
+    vals: [text]
+    nxt: [i64]
+
+fn smap_new() -> SMap:
+    var h: [i64] = []
+    var i: i64 = 0
+    while i < HASH_BUCKETS:
+        h.push(-1)
+        i = i + 1
+    SMap(heads: h, keys: [], vals: [], nxt: [])
+
+fn smap_find(m: SMap, k: text) -> i64:
+    var e = m.heads[hash_bucket(k)]
+    while e >= 0:
+        if m.keys[e] == k:
+            return e
+        e = m.nxt[e]
+    -1
+
+fn smap_get(m: SMap, k: text) -> text:
+    val e = smap_find(m, k)
+    if e < 0:
+        return ""
+    m.vals[e]
+
+fn smap_has(m: SMap, k: text) -> bool:
+    smap_find(m, k) >= 0
+
+fn smap_put(m: SMap, k: text, v: text) -> SMap:
+    val e = smap_find(m, k)
+    if e >= 0:
+        m.vals[e] = v
+        return m
+    val b = hash_bucket(k)
+    m.keys.push(k)
+    m.vals.push(v)
+    m.nxt.push(m.heads[b])
+    m.heads[b] = m.keys.len() - 1
+    m
+
+fn smap_len(m: SMap) -> i64:
+    m.keys.len()
 
 # -------------------------------------------------------------- type-kind index
 #
 # Family 3 hinges entirely on struct-vs-class, so the kind is RESOLVED from
 # declarations, never inferred from the name. A name declared BOTH ways
 # anywhere in the corpus is marked ambiguous and never flagged.
-
-# A `class`, deliberately: this index is built by ~10k successive inserts, and
-# with a `struct` (value type) every insert copies both arrays -- the very
-# value-semantics trap this census exists to find, here as an O(n^2) blowup
-# that made a whole-corpus scan never finish.
-class TypeKinds:
-    names: [text]
-    kinds: [text]
 
 fn decl_name_on(line: text, kw: text) -> text:
     if not line.starts_with(kw + " "):
@@ -159,27 +217,18 @@ fn decl_name_on(line: text, kw: text) -> text:
         i = i + 1
     rest.substring(0, i)
 
-fn kind_index_add(idx: TypeKinds, name: text, kind: text) -> TypeKinds:
-    var i: i64 = 0
-    while i < idx.names.len():
-        if idx.names[i] == name:
-            if idx.kinds[i] != kind:
-                idx.kinds[i] = "ambiguous"
-            return idx
-        i = i + 1
-    idx.names.push(name)
-    idx.kinds.push(kind)
+fn kind_index_add(idx: SMap, name: text, kind: text) -> SMap:
+    val prev = smap_get(idx, name)
+    if prev == "":
+        return smap_put(idx, name, kind)
+    if prev != kind:
+        return smap_put(idx, name, "ambiguous")
     idx
 
-fn kind_of(idx: TypeKinds, name: text) -> text:
-    var i: i64 = 0
-    while i < idx.names.len():
-        if idx.names[i] == name:
-            return idx.kinds[i]
-        i = i + 1
-    ""
+fn kind_of(idx: SMap, name: text) -> text:
+    smap_get(idx, name)
 
-fn index_source(idx: TypeKinds, src: text) -> TypeKinds:
+fn index_source(idx: SMap, src: text) -> SMap:
     var acc = idx
     for raw in src.split("\n"):
         # A declaration is column-anchored, so a trailing comment cannot
@@ -187,18 +236,17 @@ fn index_source(idx: TypeKinds, src: text) -> TypeKinds:
         # whole-corpus index affordable.
         if not (raw.starts_with("struct ") or raw.starts_with("class ")):
             continue
-        val line = raw
-        val s = decl_name_on(line, "struct")
+        val s = decl_name_on(raw, "struct")
         if s != "":
             acc = kind_index_add(acc, s, "struct")
             continue
-        val c = decl_name_on(line, "class")
+        val c = decl_name_on(raw, "class")
         if c != "":
             acc = kind_index_add(acc, c, "class")
     acc
 
-fn build_kind_index(roots: [text]) -> TypeKinds:
-    var idx = TypeKinds(names: [], kinds: [])
+fn build_kind_index(roots: [text]) -> SMap:
+    var idx = smap_new()
     for root in roots:
         if not dir_exists(root):
             continue
@@ -216,7 +264,6 @@ struct Param:
 
 fn base_type(t: text) -> text:
     var s = t.trim()
-    # Drop a default value, an optional marker and any generic arguments.
     var i: i64 = 0
     while i < s.len() and is_ident_char(s.substring(i, i + 1)):
         i = i + 1
@@ -257,7 +304,6 @@ fn split_top_commas(s: text) -> [text]:
     out
 
 fn parse_params(header: text) -> [Param]:
-    # header is a full `fn name(...)` line (comment already stripped).
     val open = index_of(header, "(")
     if open < 0:
         return []
@@ -296,6 +342,11 @@ fn parse_params(header: text) -> [Param]:
         out.push(Param(name: nm, type_: ty, is_mut: is_mut))
     out
 
+# DEFECT 5 (fixed): `add` was treated as an unconditional in-place mutator, but
+# `Vector.add` is a PURE combinator -- `return v.add(v)` produces a new value and
+# is not a mutation of anything. `add` therefore stays in the list, but the
+# discarded-result gate below is what makes it sound: a call whose result is
+# consumed is never a claim of in-place mutation.
 fn mutator_names() -> [text]:
     ["push", "pop", "insert", "remove", "set", "clear", "sort", "reverse",
      "extend", "append", "truncate", "resize", "fill", "push_str", "add",
@@ -304,6 +355,22 @@ fn mutator_names() -> [text]:
 # Does `line` mutate the receiver named `p`? Returns "" or a finding code.
 #   VTM001 -- field / index assignment through the parameter
 #   VTM002 -- a known in-place mutator method called through the parameter
+#
+# DEFECT 4 (fixed): the receiver occurrence must begin the STATEMENT. Everything
+# to its left on the line must be blank. Two false-positive families die here:
+#
+#   * `dict[param.field] = v`  -- the assignment target is `dict`, not `param`;
+#     `param.field` is a subscript READ. 19 of the 33 published hits (the
+#     `make_module` / `make_hir_module` helper family, e.g.
+#     `functions[func.symbol] = func`) were exactly this shape.
+#   * `acc.push(param.name)` / `return param.add(param)` -- the parameter is an
+#     ARGUMENT or the call's result is CONSUMED, so nothing is being mutated
+#     in place through the parameter.
+#
+# The residual cost is that a mutation tucked into an inline `if c: p.x = 1`
+# body is not reported. That is a deliberate under-report: the silent-no-op
+# failure mode this census exists to find is a statement whose ONLY effect is
+# the discarded mutation.
 fn mutation_code(line: text, p: text) -> text:
     var i: i64 = 0
     while i >= 0:
@@ -318,6 +385,9 @@ fn mutation_code(line: text, p: text) -> text:
             continue
         val nxt = line.substring(i, i + 1)
         if nxt != "." and nxt != "[":
+            continue
+        # STATEMENT-HEAD gate -- see the DEFECT 4 note above.
+        if at > 0 and line.substring(0, at).trim() != "":
             continue
         # Walk the postfix chain after the receiver.
         var j = i
@@ -365,14 +435,17 @@ fn mutation_code(line: text, p: text) -> text:
                 if j > 0:
                     val prev = line.substring(j - 1, j).trim()
                     if prev == "!" or prev == ">" or prev == "<" or prev == "+" or prev == "-":
-                        # `+=` / `-=` on a field is still a mutation of the copy.
                         if prev == "+" or prev == "-":
                             return "VTM001"
                         break
                 return "VTM001"
             break
         if saw_call and list_has(mutator_names(), last_method):
-            return "VTM002"
+            # The chain must be the WHOLE statement: a trailing `=`, `)` or
+            # operator means the result is consumed, not discarded.
+            val tail = line.substring(j, line.len()).trim()
+            if tail == "":
+                return "VTM002"
     ""
 
 # ------------------------------------------------------------------- findings
@@ -397,7 +470,7 @@ fn fn_name_of(line: text) -> text:
 
 # Scores one file's SOURCE for family 3. Kept separate from file IO so the
 # positive control exercises exactly the code the census runs.
-fn check_value_helper_mutation(src: text, idx: TypeKinds) -> [Row]:
+fn check_value_helper_mutation(src: text, idx: SMap) -> [Row]:
     var rows: [Row] = []
     val lines = src.split("\n")
     var i: i64 = 0
@@ -439,7 +512,6 @@ fn check_value_helper_mutation(src: text, idx: TypeKinds) -> [Row]:
         if watched.len() == 0:
             i = i + 1
             continue
-        # Walk the body: every line strictly more indented than the header.
         var j = i + 1
         var reported: [text] = []
         while j < lines.len():
@@ -449,7 +521,7 @@ fn check_value_helper_mutation(src: text, idx: TypeKinds) -> [Row]:
                 continue
             if indent_of(braw) <= ind:
                 break
-            val b = strip_comment(braw)
+            val b = strip_comment(braw).trim()
             for p in watched:
                 if list_has(reported, p.name):
                     continue
@@ -464,24 +536,19 @@ fn check_value_helper_mutation(src: text, idx: TypeKinds) -> [Row]:
     rows
 
 # ---------------------------------------------------------- family 4: scoring
-#
-# SHADOW: a spec file declares a type whose name is ALSO declared under src/.
-# That is the exact shape of lease_grant_spec / request_queue_spec: the spec
-# owns a private `struct LeaseManager` and never reaches the real one.
 
 fn declared_types(src: text) -> [text]:
     var out: [text] = []
     for raw in src.split("\n"):
         if not (raw.starts_with("struct ") or raw.starts_with("class ") or raw.starts_with("enum ")):
             continue
-        val line = raw
-        val s = decl_name_on(line, "struct")
+        val s = decl_name_on(raw, "struct")
         if s != "" and not list_has(out, s):
             out.push(s)
-        val c = decl_name_on(line, "class")
+        val c = decl_name_on(raw, "class")
         if c != "" and not list_has(out, c):
             out.push(c)
-        val e = decl_name_on(line, "enum")
+        val e = decl_name_on(raw, "enum")
         if e != "" and not list_has(out, e):
             out.push(e)
     out
@@ -493,8 +560,8 @@ fn imports_anything(src: text) -> bool:
             return true
     false
 
-fn src_type_names(roots: [text]) -> [text]:
-    var out: [text] = []
+fn src_type_names(roots: [text]) -> SMap:
+    var out = smap_new()
     for root in roots:
         if not dir_exists(root):
             continue
@@ -502,25 +569,207 @@ fn src_type_names(roots: [text]) -> [text]:
             if not should_scan_spl(p):
                 continue
             for t in declared_types(file_read(p)):
-                if not list_has(out, t):
-                    out.push(t)
+                out = smap_put(out, t, "1")
     out
+
+# ------------------------------------------------- family 5: comment-cheat rules
+#
+# DEFECT 1 (fixed): a leading `*` is a block-comment CONTINUATION only in
+# C-family files. In shell, `*)` opens a `case` arm -- executable dispatch, and
+# frequently the exact behaviour the gate exists to prove. Treating shell case
+# arms as comments falsely hollowed 16 sound gates
+# (check-simpleos-wm-fullscreen-evidence.shs:802, macos-gui-run.shs:72,
+#  check-widget-showcase-4k-200fps.shs:38, check-macos-gpu-2d-live-evidence.shs:10).
+#
+# DEFECT 2 (fixed): `#` in a C-family file is a PREPROCESSOR DIRECTIVE, not a
+# comment. `#include "runtime_memtrack.h"` and `#define FORK_CAPTURE_LIMIT ...`
+# are code (runtime_fork.c:50,74; runtime_thread.c:13; runtime_sdl3.c:30,33;
+# freestanding_runtime.c:1657; runtime_simd_dispatch.c:657,871,939).
+
+fn is_c_family(path: text) -> bool:
+    path.ends_with(".c") or path.ends_with(".h") or path.ends_with(".cpp")
+        or path.ends_with(".cc") or path.ends_with(".hpp") or path.ends_with(".cxx")
+        or path.ends_with(".js") or path.ends_with(".ts") or path.ends_with(".ld")
+        or path.ends_with(".rs") or path.ends_with(".java") or path.ends_with(".m")
+        or path.ends_with(".mm") or path.ends_with(".css")
+
+fn is_hash_comment_lang(path: text) -> bool:
+    path.ends_with(".spl") or path.ends_with(".shs") or path.ends_with(".sh")
+        or path.ends_with(".py") or path.ends_with(".sdn") or path.ends_with(".toml")
+        or path.ends_with(".yml") or path.ends_with(".yaml") or path.ends_with(".cmake")
+        or path.ends_with(".mk") or path.ends_with("Makefile") or path.ends_with(".bash")
+
+# Is `line` (raw) a comment line in the language of `path`?
+fn is_comment_line(path: text, line: text) -> bool:
+    val t = line.trim()
+    if t == "":
+        return true
+    if is_c_family(path):
+        # `#` is a preprocessor directive here -- CODE. (DEFECT 2)
+        if t.starts_with("//") or t.starts_with("/*"):
+            return true
+        if t.starts_with("*"):
+            return true
+        return false
+    if is_hash_comment_lang(path):
+        # `*` here is a shell `case` arm or a glob -- CODE. (DEFECT 1)
+        return t.starts_with("#")
+    # Unknown extension: accept the union of the two conservative markers, but
+    # still never treat a bare `*` as a comment.
+    t.starts_with("#") or t.starts_with("//") or t.starts_with("/*")
+
+# Extract every double-quoted literal on a line.
+fn string_literals(line: text) -> [text]:
+    var out: [text] = []
+    var i: i64 = 0
+    var inq = false
+    var cur: text = ""
+    while i < line.len():
+        val c = line.substring(i, i + 1)
+        if c == "\\":
+            if inq:
+                cur = cur + c
+            i = i + 2
+            continue
+        if c == "\"":
+            if inq:
+                out.push(cur)
+                cur = ""
+                inq = false
+            else:
+                inq = true
+            i = i + 1
+            continue
+        if inq:
+            cur = cur + c
+        i = i + 1
+    out
+
+fn product_root_prefixes() -> [text]:
+    ["src/", "scripts/", "tools/", "config/", "bin/", "doc/"]
+
+fn looks_like_product_path(s: text) -> bool:
+    if s.contains(" ") or s.len() < 5:
+        return false
+    if not s.contains("."):
+        return false
+    var ok = false
+    for pre in product_root_prefixes():
+        if s.starts_with(pre):
+            ok = true
+    if not ok:
+        return false
+    # must have a file extension after the last slash
+    var last: i64 = -1
+    var i: i64 = 0
+    while i < s.len():
+        if s.substring(i, i + 1) == "/":
+            last = i
+        i = i + 1
+    s.substring(last + 1, s.len()).contains(".")
+
+# A spec line that asserts ABSENCE cannot be comment-cheated: the needle is
+# claimed NOT to be there. Same for a negated matcher.
+fn is_negative_assertion(line: text) -> bool:
+    line.contains("to_not") or line.contains("not_to") or line.contains("never")
+        or line.contains("assert_false") or line.contains("not ")
+        or line.contains("to_equal(false)") or line.contains("== false")
+
+# Does this spec actually read product SOURCE TEXT? If it does not, its needles
+# are asserted against RETURN VALUES or runtime output and can never be
+# comment-cheats (bug D-S3: 5 of 18 surviving rows were exactly this).
+fn reads_source_text(src: text) -> bool:
+    src.contains("file_read") or src.contains("read_file")
+        or src.contains("read_to_string") or src.contains("read_text")
+
+# Every product path the spec references -- NOT just the nearest preceding one.
+# DEFECT 3 (fixed): nearest-preceding-path pairing mis-attributed 12 of 18
+# surviving rows to a file the spec never reads. A needle is now classified
+# against the UNION of all product files the spec references, so a hollow
+# verdict requires the needle to be comment-only in EVERY candidate.
+fn spec_product_paths(src: text) -> [text]:
+    var out: [text] = []
+    for raw in src.split("\n"):
+        if not raw.contains("\""):
+            continue
+        for lit in string_literals(raw):
+            if looks_like_product_path(lit) and not list_has(out, lit):
+                out.push(lit)
+    out
+
+struct Needle:
+    text_: text
+    line: i64
+
+fn spec_needles(src: text, paths: [text]) -> [Needle]:
+    var out: [Needle] = []
+    var seen: [text] = []
+    val lines = src.split("\n")
+    var i: i64 = 0
+    while i < lines.len():
+        val raw = lines[i]
+        i = i + 1
+        if not (raw.contains("to_contain(\"") or raw.contains(".contains(\"")):
+            continue
+        if is_negative_assertion(raw):
+            continue
+        for lit in string_literals(raw):
+            if lit.len() < 4:
+                continue
+            # A path ARGUMENT is not an assertion needle. (bug: path arguments)
+            if looks_like_product_path(lit) or list_has(paths, lit):
+                continue
+            if list_has(seen, lit):
+                continue
+            seen.push(lit)
+            out.push(Needle(text_: lit, line: i))
+    out
+
+# "code" | "comment" | "absent"
+fn classify_needle(needle: text, paths: [text], cache: SMap) -> text:
+    var found_comment = false
+    for p in paths:
+        if not smap_has(cache, p):
+            continue
+        val content = smap_get(cache, p)
+        if not content.contains(needle):
+            continue
+        for line in content.split("\n"):
+            if not line.contains(needle):
+                continue
+            if is_comment_line(p, line):
+                found_comment = true
+            else:
+                return "code"
+    if found_comment:
+        return "comment"
+    "absent"
+
+fn load_paths(cache: SMap, paths: [text]) -> SMap:
+    var acc = cache
+    for p in paths:
+        if smap_has(acc, p):
+            continue
+        if not file_exists(p):
+            continue
+        acc = smap_put(acc, p, file_read(p))
+    acc
 
 # ------------------------------------------------------------- positive control
 #
 # Written as in-memory source strings so a deliberately-broken .spl can never
-# be picked up by lint, the test runner or any other repo sweep, and cannot
-# drift away from this checker.
+# be picked up by lint, the test runner or any other repo sweep.
 #
 # The SILENT half is not decoration: a scorer that flagged every helper would
-# look identical to a working one without it. In particular `class` receivers
-# and `mut` parameters MUST stay silent -- flagging either is precisely the
-# false-positive flood that would get this disabled.
+# look identical to a working one without it. Every false-positive family named
+# in the bug record has a planted case here that MUST stay silent.
 
-fn control_index() -> TypeKinds:
-    var idx = TypeKinds(names: [], kinds: [])
+fn control_index() -> SMap:
+    var idx = smap_new()
     idx = kind_index_add(idx, "CtrlStruct", "struct")
     idx = kind_index_add(idx, "CtrlClass", "class")
+    idx = kind_index_add(idx, "MirFunction", "struct")
+    idx = kind_index_add(idx, "Vec4f", "struct")
     idx
 
 fn control_source() -> text:
@@ -566,8 +815,7 @@ fn control_source() -> text:
     s = s + "fn ctrl_ok_unknown(t: MysteryType, k: text):\n"
     s = s + "    t.keys.push(k)\n"
     s = s + "\n"
-    # A LOCAL of the same base name, declared inside the body, is a different
-    # thing -- but the parameter itself is only read here.
+    # A LOCAL of the same base name is a different thing.
     s = s + "fn ctrl_ok_prefix(t: CtrlStruct, k: text) -> i64:\n"
     s = s + "    val total = t.count\n"
     s = s + "    total\n"
@@ -577,16 +825,88 @@ fn control_source() -> text:
     s = s + "    var acc: [text] = []\n"
     s = s + "    acc.push(t.name)\n"
     s = s + "    acc\n"
+    s = s + "\n"
+    # DEFECT 4 -- `dict[param.field] = v` assigns to `dict`, not to `func`.
+    # This is the `make_module` helper family: 19 of 33 published hits.
+    s = s + "fn ctrl_ok_dict_index_by_field(func: MirFunction) -> i64:\n"
+    s = s + "    var functions: Dict<SymbolId, MirFunction> = {}\n"
+    s = s + "    functions[func.symbol] = func\n"
+    s = s + "    functions.len()\n"
+    s = s + "\n"
+    # DEFECT 5 -- `add` is a PURE combinator here; the result is returned.
+    s = s + "fn ctrl_ok_returned_add(v: Vec4f) -> Vec4f:\n"
+    s = s + "    return v.add(v)\n"
+    s = s + "\n"
+    # Same shape without `return`, still consumed.
+    s = s + "fn ctrl_ok_bound_add(v: Vec4f) -> Vec4f:\n"
+    s = s + "    val doubled = v.add(v)\n"
+    s = s + "    doubled\n"
     s
 
 fn control_names() -> [text]:
     ["ctrl_field_assign", "ctrl_nested_push", "ctrl_index_assign",
      "ctrl_remove", "ctrl_plus_eq",
      "ctrl_ok_class", "ctrl_ok_mut", "ctrl_ok_read", "ctrl_ok_compare",
-     "ctrl_ok_query", "ctrl_ok_unknown", "ctrl_ok_prefix", "ctrl_ok_other"]
+     "ctrl_ok_query", "ctrl_ok_unknown", "ctrl_ok_prefix", "ctrl_ok_other",
+     "ctrl_ok_dict_index_by_field", "ctrl_ok_returned_add", "ctrl_ok_bound_add"]
 
 fn control_must_fire(name: text) -> bool:
     not name.starts_with("ctrl_ok_")
+
+# Family 5 control: in-memory "product files" with the exact shapes the bug
+# record proved were misclassified.
+fn control_cache() -> SMap:
+    var c = smap_new()
+    # A SHELL case arm -- leading `*` is CODE here. (DEFECT 1)
+    c = smap_put(c, "scripts/ctrl_case_arm.shs",
+        "case \"$mode\" in\n  bootstrap*seed) echo seed ;;\n  *rust-built*|*rust*seed*) echo rustbuilt ;;\nesac\n")
+    # A C preprocessor directive -- `#` is CODE here. (DEFECT 2)
+    c = smap_put(c, "src/runtime/ctrl_preproc.c",
+        "// header\n#include \"runtime_memtrack.h\"\n#define FORK_CAPTURE_LIMIT 64\n")
+    # DEFECT 3 -- the needle is real CODE, but in the SECOND path the spec
+    # references, not the nearest preceding one.
+    c = smap_put(c, "src/ctrl_decoy.spl", "# ctrl_paired_needle appears here only in a comment\nfn other():\n    0\n")
+    c = smap_put(c, "src/ctrl_real.spl", "fn ctrl_paired_needle() -> i64:\n    1\n")
+    # A genuinely hollow file: the needle exists ONLY in a comment.
+    c = smap_put(c, "src/ctrl_hollow.spl", "# TODO: ctrl_hollow_needle is not implemented yet\nfn nothing():\n    0\n")
+    # A C-family block comment continuation -- `*` IS a comment here.
+    c = smap_put(c, "src/runtime/ctrl_block.c", "/*\n * ctrl_block_needle is only documented\n */\nint x = 1;\n")
+    c
+
+struct HollowCase:
+    label: text
+    needle: text
+    paths: [text]
+    want: text
+
+fn control_hollow_cases() -> [HollowCase]:
+    var out: [HollowCase] = []
+    # MUST BE SILENT (classified as code)
+    out.push(HollowCase(label: "shell_case_arm", needle: "rust-built",
+                        paths: ["scripts/ctrl_case_arm.shs"], want: "code"))
+    out.push(HollowCase(label: "c_preprocessor", needle: "runtime_memtrack.h",
+                        paths: ["src/runtime/ctrl_preproc.c"], want: "code"))
+    out.push(HollowCase(label: "c_define", needle: "FORK_CAPTURE_LIMIT",
+                        paths: ["src/runtime/ctrl_preproc.c"], want: "code"))
+    out.push(HollowCase(label: "mispaired_path", needle: "ctrl_paired_needle",
+                        paths: ["src/ctrl_decoy.spl", "src/ctrl_real.spl"], want: "code"))
+    # MUST FIRE
+    out.push(HollowCase(label: "genuine_hollow", needle: "ctrl_hollow_needle",
+                        paths: ["src/ctrl_hollow.spl"], want: "comment"))
+    out.push(HollowCase(label: "c_block_continuation", needle: "ctrl_block_needle",
+                        paths: ["src/runtime/ctrl_block.c"], want: "comment"))
+    out
+
+fn control_spec_source() -> text:
+    var s: text = ""
+    s = s + "use std.nogc_sync_mut.io_runtime.{file_read}\n"
+    s = s + "describe \"ctrl\":\n"
+    s = s + "    it \"reads\":\n"
+    s = s + "        val a = file_read(\"src/ctrl_decoy.spl\")\n"
+    s = s + "        val b = file_read(\"src/ctrl_real.spl\")\n"
+    s = s + "        expect(b).to_contain(\"ctrl_paired_needle\")\n"
+    s = s + "        expect(a).to_not_contain(\"ctrl_absent_needle\")\n"
+    s
 
 fn run_control() -> bool:
     var ok = true
@@ -609,8 +929,7 @@ fn run_control() -> bool:
         ok = false
         print("  control MISMATCH ctrl_remove did not land in VTM002")
 
-    # Family 4 control: a spec type name colliding with a src/ name fires;
-    # a name unique to the spec stays silent.
+    # Family 4 control.
     val spec_src = "struct LeaseManager:\n    n: i64\n\nstruct SpecOnlyThing:\n    n: i64\n"
     val known = ["LeaseManager", "RequestQueue"]
     var shadow: [text] = []
@@ -624,22 +943,66 @@ fn run_control() -> bool:
         ok = false
         print("  control MISMATCH SHADOW fired on a spec-only type")
 
+    # Family 5 control -- one planted case per named false-positive pattern.
+    val cache = control_cache()
+    for hc in control_hollow_cases():
+        val got = classify_needle(hc.needle, hc.paths, cache)
+        if got != hc.want:
+            ok = false
+            print("  control MISMATCH hollow/{hc.label}: got={got} expected={hc.want}")
+    # Path pairing must see BOTH referenced paths, not just the nearest.
+    val cpaths = spec_product_paths(control_spec_source())
+    if not (list_has(cpaths, "src/ctrl_decoy.spl") and list_has(cpaths, "src/ctrl_real.spl")):
+        ok = false
+        print("  control MISMATCH hollow/path_union: did not collect both referenced paths")
+    # A negative assertion must not become a needle.
+    var cneedles: [text] = []
+    for n in spec_needles(control_spec_source(), cpaths):
+        cneedles.push(n.text_)
+    if list_has(cneedles, "ctrl_absent_needle"):
+        ok = false
+        print("  control MISMATCH hollow/negative_assertion: absence assertion became a needle")
+    if not list_has(cneedles, "ctrl_paired_needle"):
+        ok = false
+        print("  control MISMATCH hollow/positive_needle: real needle was not collected")
+
+    # Hash index control: a name declared both ways is ambiguous, never flagged.
+    var ki = smap_new()
+    ki = kind_index_add(ki, "Dual", "struct")
+    ki = kind_index_add(ki, "Dual", "class")
+    if kind_of(ki, "Dual") != "ambiguous":
+        ok = false
+        print("  control MISMATCH kind index did not mark a dual declaration ambiguous")
+
     if ok:
-        print("control: 5 planted VTM violations detected, 8 correct forms silent")
+        print("control: 5 planted VTM violations detected, 11 correct forms silent")
         print("control: SHADOW fires on a colliding name, silent on a spec-only name")
+        print("control: HOLLOW fires on 2 planted comment-only needles, silent on")
+        print("         shell case arm, C preprocessor, C define, mispaired path,")
+        print("         negative assertion")
     ok
 
 # ------------------------------------------------------------------------ scan
+#
+# DEDUP -- DEFECT (fixed): `is_duplicate_tree` was a bare PREFIX test, so every
+# file under test/01_unit/ etc. was dropped from the "deduped" column whether or
+# not a twin existed. The numbered trees are SUPERSETS: 5,731 files have no twin
+# at all, and 888 paired files genuinely DIVERGE in content -- two different
+# tests, not one counted twice. A file is now a duplicate only when its twin
+# EXISTS and its content is IDENTICAL.
 
-fn count_spec_files(roots: [text]) -> i64:
-    var n: i64 = 0
-    for root in roots:
-        if not dir_exists(root):
-            continue
-        for p in dir_walk(root):
-            if should_scan_spl(p) and is_spec_file(p):
-                n = n + 1
-    n
+fn twin_path(p: text) -> text:
+    if p.starts_with("test/01_unit/"):
+        return "test/unit/" + p.substring(13, p.len())
+    if p.starts_with("test/02_integration/"):
+        return "test/integration/" + p.substring(20, p.len())
+    if p.starts_with("test/03_system/"):
+        return "test/system/" + p.substring(15, p.len())
+    if p.starts_with("test/04_external/"):
+        return "test/external/" + p.substring(17, p.len())
+    if p.starts_with("test/05_perf/"):
+        return "test/perf/" + p.substring(13, p.len())
+    ""
 
 fn total(rows: [Row], deduped: bool) -> i64:
     var n: i64 = 0
@@ -691,8 +1054,6 @@ fn main():
     if roots.len() == 0:
         roots.push("test")
 
-    # The struct/class index must cover src/ as well as the spec roots: a
-    # spec helper's parameter type is usually declared in src/.
     var index_roots: [text] = ["src"]
     for r in roots:
         index_roots.push(r)
@@ -707,6 +1068,15 @@ fn main():
     var nosrc_raw: i64 = 0
     var nosrc_dedup: i64 = 0
     var nspec: i64 = 0
+    var ndup: i64 = 0
+    var nunpaired: i64 = 0
+    var ndiverged: i64 = 0
+    var hollow_rows: [text] = []
+    var hollow_raw: i64 = 0
+    var hollow_dedup: i64 = 0
+    var needles_code: i64 = 0
+    var needles_absent: i64 = 0
+    var cache = smap_new()
 
     for root in roots:
         if not dir_exists(root):
@@ -716,15 +1086,28 @@ fn main():
                 continue
             nspec = nspec + 1
             val rel = norm_path(p)
-            val dup = is_duplicate_tree(rel)
             val src = file_read(p)
+
+            # --- dedup: pair existence AND content identity
+            var dup = false
+            val twin = twin_path(rel)
+            if twin != "":
+                if not file_exists(twin):
+                    nunpaired = nunpaired + 1
+                else:
+                    if file_read(twin) == src:
+                        dup = true
+                        ndup = ndup + 1
+                    else:
+                        ndiverged = ndiverged + 1
+
             for r in check_value_helper_mutation(src, idx):
                 rows.push(Row(file: rel, code: r.code, fn_name: r.fn_name,
                               param: r.param, type_: r.type_, line: r.line,
                               dup: dup))
             var hit = false
             for t in declared_types(src):
-                if list_has(src_types, t):
+                if smap_has(src_types, t):
                     hit = true
                     if not list_has(shadow_names, t):
                         shadow_names.push(t)
@@ -739,9 +1122,30 @@ fn main():
                 if not dup:
                     nosrc_dedup = nosrc_dedup + 1
 
-    print("=== spec vacuity census: value-type helpers + self-reimplementation ===")
+            # --- family 5
+            if reads_source_text(src):
+                val paths = spec_product_paths(src)
+                if paths.len() > 0:
+                    cache = load_paths(cache, paths)
+                    for n in spec_needles(src, paths):
+                        val verdict = classify_needle(n.text_, paths, cache)
+                        if verdict == "code":
+                            needles_code = needles_code + 1
+                            continue
+                        if verdict == "absent":
+                            needles_absent = needles_absent + 1
+                            continue
+                        hollow_raw = hollow_raw + 1
+                        if not dup:
+                            hollow_dedup = hollow_dedup + 1
+                            hollow_rows.push("HOLLOW {rel}:{n.line} needle=\"{n.text_}\"")
+
+    print("=== spec vacuity census: value-type helpers, self-reimplementation, comment cheats ===")
     print("spec files scanned            : {nspec}")
-    print("struct/class names indexed    : {idx.names.len()}")
+    print("struct/class names indexed    : {smap_len(idx)}")
+    print("dedup: true duplicates        : {ndup}")
+    print("dedup: numbered-tree files with NO twin  : {nunpaired}")
+    print("dedup: paired but CONTENT-DIVERGENT      : {ndiverged}   [counted, not deduped]")
     print("")
     print("--- family 3: value-type helper mutates a copy (deduped / raw) ---")
     print("VTM001 field/index assign via struct param : {count_code(rows, \"VTM001\", true)} / {count_code(rows, \"VTM001\", false)}")
@@ -752,6 +1156,12 @@ fn main():
     print("SHADOW spec files declaring a src/ type name : {shadow_files.len()} / {shadow_raw}")
     print("distinct shadowed type names                 : {shadow_names.len()}")
     print("NOSRC  spec files importing nothing at all   : {nosrc_dedup} / {nosrc_raw}   [LOW PRECISION -- triage signal only]")
+    print("")
+    print("--- family 5: comment-cheat / hollow source assertion ---")
+    print("HOLLOW needles comment-only in every referenced file : {hollow_dedup} / {hollow_raw}")
+    print("needles located as real CODE                         : {needles_code}")
+    print("needles not located in any referenced file           : {needles_absent}   [heuristic residue, not a finding]")
+    print("product files read into the cache                    : {smap_len(cache)}")
 
     if listing:
         print("")
@@ -769,9 +1179,13 @@ fn main():
         print("--- shadowed type names ---")
         for n in shadow_names:
             print("  {n}")
+        print("")
+        print("--- family 5 HOLLOW findings (deduped) ---")
+        for h in hollow_rows:
+            print("  {h}")
 
     if nspec == 0:
         print("ERROR -- nothing was scanned")
         exit(2)
         return
-    print("REPORT -- {nspec} file(s) scanned, {total(rows, true)} deduped VTM finding(s), {total(rows, false)} raw; {shadow_files.len()} deduped SHADOW file(s)")
+    print("REPORT -- {nspec} file(s) scanned, {total(rows, true)} deduped VTM finding(s), {total(rows, false)} raw; {shadow_files.len()} deduped SHADOW file(s); {hollow_dedup} deduped HOLLOW needle(s)")
