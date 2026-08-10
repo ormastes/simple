@@ -1,6 +1,8 @@
 # Bare `T?` in condition position silently takes the WRONG branch
 
-**Status:** FIXED 2026-08-10 — see "Fix landed" below. Originally found
+**Status:** FIX WRITTEN, STRUCTURALLY SOUND, EXECUTION-UNVERIFIED — needs a
+T3 full bootstrap to confirm. See "Fix landed" below for the precise reason
+this cannot be closed as FIXED yet. Originally found
 2026-08-01 while triaging
 `optional_query_operator_identity_passthrough_2026-07-20` (which was itself
 INVALID; this is the real defect in the neighbourhood).
@@ -84,19 +86,67 @@ This does not touch or resolve `bool_typed_parameter_accepts_non_bool_and_jit_co
 `.?`-return-type documentation contradiction noted in that file — both remain
 open.
 
-**Verification:** repo policy forbids running `bin/simple build bootstrap`
-(3-stage self-compile) in this session, and the only locally available
-self-hosted binaries (`bootstrap/stage3/simple`, etc.) predate this edit and
-cannot be rebuilt from source without that forbidden step, so this fix is
-verified by code review only (the added arm is a direct structural mirror of
-the pre-existing, already-proven-correct `ExistsCheck` arm nine lines above
-it, using the same runtime call, same operand construction, same
-sentinel/box-encoding contract) — NOT by an end-to-end execution trace. Anyone
-picking this up with bootstrap access should confirm with the repro from
-the top of this file:
+## Verification — what was actually tried, and why it stops short of runtime proof
+
+**Tried:** ran the exact repro through `bin/simple test` against a live spec
+(`describe/it/expect` wrapping `if lookup(false): ... else: ...`) to check
+whether compiler-source edits are live under the deployed binary the way
+library-source edits sometimes are. Result: the spec still FAILED
+(`expected then to equal else`) with the fix present in source. This is not
+evidence the fix is wrong -- `bin/simple --version` identifies the currently
+deployed binary as the **Rust bootstrap seed**, which has its own independent
+Rust implementation of MIR lowering (`src/compiler_rust/**`) and never reads
+or executes `src/compiler/50.mir/mir_lowering_stmts.spl` at all. Editing that
+file cannot be "live" under the seed by construction -- there is no code path
+from this pure-Simple source file to seed execution. (The seed's own
+interpreter appears to have the *same class* of bug independently, but that
+is `src/compiler_rust`, explicitly off-limits for this pass and a separate
+defect to file, not to fix here.)
+
+Checked `.claude/rules/bootstrap.md`'s verification tiers before assuming T3
+was really required: T0 ("hosted seed probe") applies to logic that the seed
+can run directly, which is exactly the case that just failed for the reason
+above -- the seed cannot exercise pure-Simple compiler-internals source at
+all, hosted or not. T1 ("incremental kernel build") is explicitly scoped to
+"a small pure-Simple **lib** change ... that feeds the freestanding kernel";
+this change is to `src/compiler` itself, which the same doc's own T3 line
+states in so many words: "T3 — full bootstrap. ONLY when the compiler itself
+changed (`src/compiler_rust` seed or `src/compiler` pure-Simple)." There is
+no narrower tier for a change to the self-hosted compiler's own MIR-lowering
+source -- confirmed structurally (which module the file lives under), not
+merely assumed. T3 requires exactly the `bin/simple build bootstrap` /
+`scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap` step this
+session's mandate forbids running, and no locally cached self-hosted binary
+post-dates this edit (checked `bootstrap/stage3/simple` etc. -- all built
+2026-08-09, before this change, and rebuilding them requires the same
+forbidden step).
+
+**What IS backed by real execution today:** a source-content regression spec,
+`test/01_unit/compiler/driver/bare_optional_condition_rt_is_some_guard_spec.spl`,
+sabotage-verified in this pass:
+1. GREEN with the fix present (`declared>=1 executed=1 passed=1 failed=0`).
+2. Reverted the fix in place (restored the original one-line `case _:
+   self.lower_expr(cond)` fallthrough) -> spec went RED
+   (`passed=0 failed=1`, `expected then to equal else` no longer applies here
+   since the guard spec is content-based, but the failure was the missing
+   fix-marker strings).
+3. Restored the fix -> spec back to GREEN, and `git hash-object` confirmed
+   the restored file is byte-identical to the version already pushed to
+   `origin/main` (`33a55d749f3a6ddd79e8bd6732d53953063262a4`).
+
+This proves the fix is present, syntactically well-formed enough to compile
+under this test run, and covered by a regression guard that will catch a
+future accidental revert. It does **not** prove the fixed MIR lowering
+produces the correct branch at runtime, because nothing that runs in this
+session's environment executes that lowering path. **Anyone with T3
+bootstrap access:** rebuild the self-hosted binary from this commit, deploy
+it as `bin/simple`, and run the repro directly:
 ```
-if lookup(false):      # now: else branch (was: THEN branch, wrong)
+if lookup(false):      # expected after fix: else branch (was: THEN branch, wrong)
 ```
+plus the behavioral spec at `/tmp/probe_spec/bare_optional_cond_probe_spec.spl`
+(not committed -- recreate from the "Symptom" repro above) to get the actual
+runtime confirmation this doc cannot provide from this session alone.
 
 ## Related
 
