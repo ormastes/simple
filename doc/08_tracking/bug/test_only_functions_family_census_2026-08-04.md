@@ -1,6 +1,8 @@
 # Test-only functions: a vacuity family nobody had enumerated (2026-08-04)
 
-**Status:** OPEN (census landed; individual class-(ii) items to be filed/fixed per lane)
+**Status:** OPEN (census landed; individual class-(ii) items to be filed/fixed per
+lane; re-verified 2026-08-10 — the "Fixed in this change" deletion below is only
+partially present on current `main`, see re-verification note)
 
 A function whose *only* callers are tests is a function a green suite proves nothing
 about. Two independent instances surfaced in one investigation
@@ -431,6 +433,19 @@ action, per the project rule that unused code is deleted completely and a test
 guarding deleted code goes with it. The two collector tests were kept — they cover
 `count()`, `has_warnings()` and `summary()`, which are real — and rewritten to
 construct warnings exactly the way production does.
+
+### Re-verification (2026-08-10): this fix did not fully survive to current `main`
+
+Re-checked `src/compiler_rust/compiler/src/hir/lower/memory_warning.rs` on current
+`main`: only `warn_escaping_borrow` is actually gone. The other five —
+`warn_shared_mutation`, `warn_unique_copied`, `warn_mutable_shared`,
+`warn_potential_cycle`, `warn_missing_mut` — are still defined (`pub fn` at
+:203/:213/:222/:232/:241) and still referenced only from the test module (:376-389).
+So the "six-function dead convenience layer" described below was not fully deleted
+in whatever landed, or was partially reverted since. `src/compiler_rust/**` is
+off-limits to edit this session (hard constraint), so this was not re-fixed here —
+recorded as-is so the discrepancy isn't silently lost. Re-doing the deletion for the
+remaining five is unclaimed follow-up work.
 
 ### Evidence
 
