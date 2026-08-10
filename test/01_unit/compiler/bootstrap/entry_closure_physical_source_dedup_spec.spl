@@ -265,7 +265,10 @@ describe "entry-closure physical source deduplication":
         # Phase 1's own fail-fast ordering (driver_source_pipeline_loading.spl):
         # an unresolved-import error is raised before an empty-import error,
         # both precede committing `all_sources` onto the returned context, and
-        # the phase's returned bool is derived from the post-commit error count.
+        # the phase's returned bool is derived from the stable owner scalar.
+        # Do not call a CompileContext method through the local `loaded_ctx`
+        # copy at this tuple-return boundary: Stage 3 native lowering can lose
+        # that copied class receiver even though `self.ctx` remains live.
         val loading = rt_file_read_text("src/compiler/80.driver/driver_source_pipeline_loading.spl") ?? ""
         val unresolved_error = loading.index_of("self.ctx.add_error(\"unresolved import '")
         val empty_import_error = loading.index_of("self.ctx.add_error(\"import '")
@@ -273,7 +276,8 @@ describe "entry-closure physical source deduplication":
         expect(unresolved_error).to_be_greater_than(-1)
         expect(empty_import_error).to_be_greater_than(unresolved_error)
         expect(sources_commit).to_be_greater_than(empty_import_error)
-        expect(loading.substring(sources_commit)).to_contain("loaded_ctx.errors.len() == 0")
+        expect(loading.substring(sources_commit)).to_contain("self.ctx.error_count_value == 0")
+        expect(loading.substring(sources_commit)).to_not_contain("loaded_ctx.has_errors()")
 
         # Phase 2's fail-fast (driver_source_pipeline_parsing.spl): a parse
         # error returns immediately instead of continuing to the next source.

@@ -134,11 +134,6 @@ fn _hir_expr_symbol_or_invalid(kind: HirExprKind) -> SymbolId:
         case HirExprKind.NamedVar(symbol, _): symbol
         case _: SymbolId(id: -1)
 
-fn _hir_named_type_symbol(type_: HirType) -> SymbolId?:
-    match type_.kind:
-        case HirTypeKind.Named(symbol, _): symbol
-        case _: nil
-
 fn _hir_missing_field_type() -> HirType:
     HirType(kind: HirTypeKind.Error, span: Span.empty())
 
@@ -229,8 +224,14 @@ impl HirLowering:
         if val self_type = self.current_method_self_type:
             if val base_definition = self.symbols.get_symbol_raw(raw_base_symbol_id):
                 if base_definition.name == "self" or base_definition.name == "me":
-                    if val owner_symbol = _hir_named_type_symbol(self_type):
-                        return self.field_type_for_owner_raw(owner_symbol.id, field_name)
+                    # Match the retained method-self type in this owner. A
+                    # helper boundary carrying HirType by value is unsafe in
+                    # the native Stage 3 lane even when its result is scalar.
+                    val owner_symbol_id: i64 = match self_type.kind:
+                        case HirTypeKind.Named(symbol, _): symbol.id
+                        case _: -1
+                    if owner_symbol_id >= 0:
+                        return self.field_type_for_owner_raw(owner_symbol_id, field_name)
         _hir_missing_field_type()
 
     me combine_pattern_conditions(conditions: [HirExpr], count: i64, op: HirBinOp, span: Span) -> HirExpr:
