@@ -306,7 +306,8 @@ int64_t  rt_entropy_hardware_ready(void);
 void     rt_sleep_nanos(int64_t ns);
 void     rt_sleep_ms(int64_t ms);
 void     rt_sleep_secs(int64_t seconds);
-void     rt_panic(const char* msg);
+/* (ptr, len): the compiler's `text` extern ABI. See runtime_native.c. */
+void     rt_panic(const uint8_t* msg_ptr, uint64_t msg_len);
 void     simple_contract_check(
     int64_t condition,
     int64_t kind,

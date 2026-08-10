@@ -9340,8 +9340,23 @@ void rt_ptr_write_i64(int64_t addr, int64_t offset, int64_t value) {
  * 2 times"; the now-orphaned rt_contract_fail/rt_contract_kind_name/
  * rt_contract_arg_len statics were removed with them. */
 
-void rt_panic(const char* msg) {
-    spl_panic(msg);
+/* The compiler emits the two-argument (ptr, len) form for every `text` extern
+ * argument (runtime_sffi.rs:1789 declares rt_panic as &[I64, I64];
+ * src/compiler/50.mir/text_extern_abi.spl decomposes the `text`). A Simple
+ * `text` is NOT NUL-terminated, so the message must be copied into a bounded
+ * buffer before it can be handed to spl_panic as a C string -- the same defect
+ * fixed for rt_file_is_char_device in 81fca37cdd4. This one is on the FAILURE
+ * path: reading past the end here corrupts the very diagnostic you would use
+ * to find every other defect, so the copy is onto the stack and never
+ * allocates. */
+void rt_panic(const uint8_t* msg_ptr, uint64_t msg_len) {
+    char buf[1024];
+    if (!msg_ptr) { spl_panic("panic"); return; }
+    size_t n = (size_t)msg_len;
+    if (n >= sizeof(buf)) n = sizeof(buf) - 1;
+    memcpy(buf, msg_ptr, n);
+    buf[n] = '\0';
+    spl_panic(buf);
 }
 
 void panic(int64_t msg) {
