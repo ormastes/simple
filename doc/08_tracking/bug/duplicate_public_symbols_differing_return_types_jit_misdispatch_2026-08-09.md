@@ -155,12 +155,30 @@ What the remaining "tree-consolidation decision" actually is (still OPEN):
   cli_*/process_*/dir_* surface still has 2 live definition families (real app
   handlers vs real SFFI wrappers, both with importers; neither is deletable
   without choosing an owner for the CLI surface — app-owner call).
-- Other parallel pairs unrelated to io: `nogc_sync_mut/path.spl` vs
-  `nogc_async_mut/path.spl` (28+28 warnings), `common/binary_io.spl` vs
-  `nogc_async_mut/binary_io.spl` (17+17), `nogc_sync_mut/cuda/mod.spl` vs
+- Other parallel pairs unrelated to io: `nogc_sync_mut/cuda/mod.spl` vs
   `gc_async_mut/cuda/__init__.spl` (21+21), fix-rule impls (20+16). These are
   the stdlib-tier families duplicated across memory tiers — consolidating them
-  is a stdlib-tier architecture decision, not a rename.
+  is a stdlib-tier architecture decision, not a rename. (The cuda pair was left
+  untouched 2026-08-10 because another session had heavy uncommitted work in
+  flight across the cuda modules.)
+
+FIXED 2026-08-10 (path + binary_io pairs): inspection showed these were NOT
+architecture decisions — `nogc_async_mut/path.spl` was a byte-identical copy of
+`nogc_sync_mut/path.spl` (only a comment-line diff), and
+`nogc_async_mut/binary_io.spl` was semantically identical to
+`common/binary_io.spl` (only match-binding variable renames, `raw` vs `v`).
+Both async variants converted to pure `export use` facades (same pattern as
+mod_stub and the pre-existing `gc_sync_mut/path.spl` →
+`std.gc_async_mut.path.*` facade). Measured on the action_key_spec harness:
+**345 → 302** co-compiled collision warnings (−43); the only residual
+path-named line is an unrelated `is_absolute_path` 2-def group. action_key_spec
+still 32/32 green; facade surface probed live (`basename`/`is_absolute`/
+`ByteOrder` import). `test/01_unit/lib/io/binary_io_spec.spl` fails identically
+before and after (`expected 0 to equal 67305985` — pre-existing, unrelated).
+Regression guard:
+`test/01_unit/lib/io/path_binary_io_facade_no_duplicate_definitions_spec.spl`
+(sabotage-verified: re-adding a local `pub fn` to the path facade turns it red
+3/4).
 
 ## Recommended approach
 
