@@ -1,9 +1,12 @@
 # font_renderer: SIGSEGV in simple_runtime::value::heap after glyph layout, on the Rust seed's `run` evaluator
 
-**Status:** STILL OPEN 2026-08-10 (re-verified, see "Re-verification" below —
-original SIGSEGV signature could not be re-triggered within a bounded budget
-because an unrelated JIT gap now intercepts the same repro first; this is a
-harness-visibility change, not evidence of a fix).
+**Status:** STILL OPEN 2026-08-10 (re-verified twice, see "Re-verification"
+and "Re-verification attempt 2" below — original SIGSEGV signature could not
+be re-triggered because an unrelated JIT gap now intercepts the same repro
+first, and the interpreter fallback that substitutes for the JIT is
+confirmed too slow to reach even the pre-crash setup calls within a bounded
+multi-minute observation; this is a harness-visibility change, not evidence
+of a fix).
 
 **Status:** OPEN 2026-07-20 — found while root-fixing the mutex crash in
 `font_renderer_resolve_metrics_nil_receiver_seed_2026-07-20.md` (that mutex
@@ -177,6 +180,66 @@ with a multi-hour budget to confirm the SIGSEGV still exists behind the
 interpreter fallback, or (b) fix the `gbm_width` field-type-inference gap
 first so the JIT path (which is what actually reaches the segfault, per the
 original gdb backtrace showing native `rt_native_neq`) is exercised again.
+
+## Blocked tests
+
+## Re-verification attempt 2 (2026-08-10)
+
+Followed up on the 2026-08-10 re-verification's option (a) — run the exact
+minimal repro under the forced interpreter-fallback path with a much longer
+budget, to get behind the `GlyphBitmap.gbm_width` JIT gap and back to the
+original crash site.
+
+- Confirmed there is no dedicated "force interpreter" flag that skips the JIT
+  compile attempt: `SIMPLE_JIT_STRICT` only controls whether the JIT gap is a
+  hard error vs. a silent whole-module fallback (`src/compiler_rust/compiler/
+  src/codegen/jit.rs:173`); the fallback that already fires is the only
+  interpreter path available, so this pass exercised it directly rather than
+  looking for a bypass.
+- Confirmed `gbm_width: i64` is explicitly typed in the source
+  (`src/lib/nogc_sync_mut/sffi/spl_fonts.spl:102`, constructed at lines 354
+  and 408 from an `[i64]`-typed array index and an `i64` local respectively).
+  The `CannotInferFieldType` error is raised from
+  `src/compiler_rust/compiler/src/hir/lower/expr/access.rs` /
+  `type_resolver.rs` — genuinely inside the off-limits Rust seed compiler
+  (`src/compiler_rust/**`), not reachable or fixable from `.spl` source in
+  this task's scope.
+- Ran the doc's exact minimal repro (`bin/simple run`) as a detached
+  background process and observed it directly (not via a notifier — none
+  exists in this environment) for **193s** of wall-clock, sampling `ps`
+  (confirming a live, single-threaded process pegged at 97-99% CPU the whole
+  time — not hung/blocked) and the process's own stdout log every 15-20s.
+  Result: the log reached its 96th line (the last of the compile-time
+  `[use-warning]`/`[gc-warning]` module-load diagnostics) within the first
+  ~30s and **never advanced past it** for the remaining ~160s+ observed — no
+  `ok={...}` print (the first line the script emits, immediately after
+  `try_load_selected_bytes` returns) ever appeared. The process was still
+  100% CPU-busy (genuinely interpreting, not deadlocked) when killed.
+- This means even *loading the 1.7MB TTF file and constructing the
+  `FontRenderer`* — two calls that occur **before** `prepare_text` (the call
+  that reaches the actual SIGSEGV site) — did not complete inside a
+  multi-minute budget under the forced interpreter fallback. Extrapolating
+  from the doc's own "~100-1000x slowdown" estimate, reaching the glyph-loop
+  crash site itself (deeper still, inside a rasterize/quad loop over every
+  glyph) is bounded at hours, not minutes, under this evaluator.
+
+**Conclusion:** the crash site remains **UNREACHABLE by any means available
+in this task's scope and time budget**. The blocking mechanism is now
+precisely characterized as two independent, additive constraints, not just
+"budget ran out":
+1. The JIT path that originally reached the SIGSEGV (native `rt_native_neq`
+   frame in the gdb backtrace) is blocked by a `CannotInferFieldType` gap on
+   `GlyphBitmap.gbm_width`, whose fix lives entirely inside
+   `src/compiler_rust/**` — explicitly off-limits to edit for this task.
+2. The interpreter fallback that substitutes for the JIT is confirmed (not
+   just estimated) too slow to reach even the pre-crash setup calls within a
+   bounded multi-minute observation, making a full-repro confirmation a
+   multi-hour undertaking outside this task's practical budget.
+No fix landed in this pass; the original SIGSEGV is still neither
+reconfirmed nor refuted. Left **STILL OPEN**. Whoever picks this up next
+either needs (a) a `src/compiler_rust` change to close the `gbm_width`
+JIT gap (out of scope for `.spl`-only tasks), or (b) a genuinely multi-hour
+unattended budget to run the interpreter-fallback repro to completion.
 
 ## Blocked tests
 
