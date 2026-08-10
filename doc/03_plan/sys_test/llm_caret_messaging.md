@@ -29,3 +29,29 @@ Run focused unit specs, the four system specs, docgen/manual review, lint, dupli
 - Correlate hook events to canonical task, room, and agent IDs.
 - Assert task-event history, milestone/terminal room updates, and handled
   receipts without allowing `agent_update` to trigger another task.
+## Phase 3/4 CLI verification
+
+`test/03_system/app/llm_caret/feature/llm_caret_messaging_phase_cli_spec.spl`
+keeps the compiler/product boundary fail-closed. Phase 3 must identify as
+`simple-bootstrap` and reject `run`, `test`, and `caret`. The exact admitted
+Phase 4 binary must run source, execute a real SSpec assertion, expose
+`caret messaging`, and report every compiled carrier provenance-ready.
+
+Run with retained noncanonical artifacts as:
+
+```bash
+SIMPLE_STAGE3_BINARY=/absolute/path/to/stage3/simple \
+SIMPLE_STAGE4_BINARY=/absolute/path/to/full/simple \
+/absolute/path/to/full/simple test \
+  test/03_system/app/llm_caret/feature/llm_caret_messaging_phase_cli_spec.spl \
+  --mode=interpreter --clean --fail-fast
+```
+
+This gate is intentionally RED while TODO 681 is blocked. A Phase 3
+`native-build` success, source inspection, Rust seed, stale full CLI, or carrier
+files without matching provenance cannot satisfy it.
+
+| Requirement | Executable system coverage | Evidence |
+|---|---|---|
+| REQ-LLM-MSG-013 | Phase 3 rejects product commands; Phase 4 runs source/tests and exposes Caret Messaging help | Exact binary paths, SHA-256, stdout/stderr, exit codes |
+| REQ-LLM-MSG-016 | Phase 4 reports database/MCP/hook/bridge/server ready | Fresh carrier artifacts and matching provenance records |
