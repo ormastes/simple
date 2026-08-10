@@ -7,10 +7,13 @@
 # Scope (deliberate non-goals — see doc/08_tracking/bug/
 # render_lane_specs_import_nonexistent_modules_2026-08-08.md):
 #   - NO margin collapsing (adjacent/parent-child margins are additive)
-#   - NO auto/percentage sizing, NO shrink-to-fit; width/height are as given
+#   - NO percentage sizing, NO shrink-to-fit; width is always as given
 #   - NO floats, NO absolute/fixed positioning, NO writing-mode/RTL
-#   - NO intrinsic sizing: a parent's height is its declared height, it is not
-#     grown to fit children
+#   - Auto-height is minimal (added 2026-08-10, see `compute_layout`): a box
+#     with a 0.0 (undeclared/`auto`) height grows to fit the content height it
+#     just stacked. This is the narrow case needed so a text box's height
+#     shows up in its parent's own rect; it is not real CSS shrink-to-fit
+#     (no min/max-height, no interaction with floats or intrinsic width).
 # Consumers: blink/paint/paint_tree_walker.spl, blink/input/hit_test.spl
 #
 # NAMING — this type was called `LayoutBox` until 2026-08-10, which collided
@@ -156,7 +159,8 @@ impl LayoutContext:
             val parent = self.boxes[idx as i32]
             val pg = parent.geometry
             val content_left = left + pg.spacing.border_left + pg.spacing.padding_left
-            var cursor = top + pg.spacing.border_top + pg.spacing.padding_top
+            val content_top = top + pg.spacing.border_top + pg.spacing.padding_top
+            var cursor = content_top
             for cid in parent.children_ids:
                 val cidx = self.index_of(cid)
                 if cidx >= 0:
@@ -172,6 +176,28 @@ impl LayoutContext:
                     ))
                     stack.push((cidx, cleft, ctop))
                     cursor = ctop + cg.height + cg.spacing.margin_bottom
+
+            # Minimal auto-height (2026-08-10): a box with NO declared height
+            # (`pg.height == 0.0`, CSS `auto`'s effective value in this lane,
+            # since there is no separate "unset" sentinel on `f64`) grows to
+            # fit the content it just stacked, rather than staying pinned to
+            # 0. This is intentionally narrow — declared-nonzero heights are
+            # left exactly as authored (still no shrink-to-fit, no
+            # min/max-height) — but it is the minimum needed for a text box's
+            # height to ever be visible in its parent's own rect, which is
+            # the concrete gap this change closes. `cursor` has already
+            # advanced past every child's margin-bottom, so
+            # `cursor - content_top` is the stacked content height; add back
+            # the padding/border the box still owes below that content.
+            if pg.height == 0.0 and parent.children_ids.len() > 0:
+                val auto_height = (cursor - content_top) + pg.spacing.padding_bottom + pg.spacing.border_bottom
+                var k = 0
+                while k < laid_idx.len():
+                    if laid_idx[k as i32] == idx:
+                        var r = laid_rect[k as i32]
+                        r.bottom = r.top + auto_height
+                        laid_rect[k as i32] = r
+                    k = k + 1
 
         # Rebuild the arena with the computed rects (element write-back by value).
         var updated: [BlockFlowBox] = []

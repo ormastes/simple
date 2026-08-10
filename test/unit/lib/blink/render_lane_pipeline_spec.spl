@@ -178,6 +178,64 @@ describe "HTML plus CSS through to laid-out boxes":
             None:
                 expect(true).to_equal(true)
 
+    it "gives a text node its own box, sized from the parent's font-size":
+        step("build <body><p>hello</p></body> directly on the DOM arena")
+        var tree = dom_tree_new()
+        val body_id = tree.create_element("body")
+        tree.append_child(tree.root_id, body_id)
+        val p_id = tree.create_element("p")
+        tree.append_child(body_id, p_id)
+        val text_id = tree.create_text("hello")
+        tree.append_child(p_id, text_id)
+
+        step("size the body and set a font-size on the paragraph")
+        val css = "body { width: 200px; } p { width: 100px; font-size: 20px; }"
+        val layout = build_styled_layout(tree, _sheet(css), 800.0, 600.0)
+
+        step("the text node laid out a box wider and taller than zero")
+        match layout.rect_for(text_id):
+            Some(r):
+                expect(r.2 - r.0).to_be_greater_than(0.0)
+                expect(r.3 - r.1).to_be_greater_than(0.0)
+                # height = font-size(20px) * the 1.2 line-height multiplier = 24px
+                expect(_near(r.3 - r.1, 24.0)).to_equal(true)
+                # width = the containing block's (p's) content width = 100px
+                expect(_near(r.2 - r.0, 100.0)).to_equal(true)
+            None:
+                expect("text node laid out").to_equal("it did not")
+
+    it "a block containing text is taller than an equivalent empty block":
+        step("build two parallel <div> subtrees, one with a text child, one empty")
+        var tree = dom_tree_new()
+        val body_id = tree.create_element("body")
+        tree.append_child(tree.root_id, body_id)
+        val with_text_id = tree.create_element("div")
+        tree.set_attribute(with_text_id, "class", "with-text")
+        tree.append_child(body_id, with_text_id)
+        val text_id = tree.create_text("hello")
+        tree.append_child(with_text_id, text_id)
+        val empty_id = tree.create_element("div")
+        tree.set_attribute(empty_id, "class", "empty")
+        tree.append_child(body_id, empty_id)
+
+        step("give both divs a width but no declared height (auto)")
+        val css = "body { width: 200px; } div { width: 100px; }"
+        val layout = build_styled_layout(tree, _sheet(css), 800.0, 600.0)
+
+        step("the text-bearing div's own box is taller than the empty div's")
+        match layout.rect_for(with_text_id):
+            Some(with_text_r):
+                match layout.rect_for(empty_id):
+                    Some(empty_r):
+                        val with_text_h = with_text_r.3 - with_text_r.1
+                        val empty_h = empty_r.3 - empty_r.1
+                        expect(_near(empty_h, 0.0)).to_equal(true)
+                        expect(with_text_h).to_be_greater_than(empty_h)
+                    None:
+                        expect("empty div laid out").to_equal("it did not")
+            None:
+                expect("text-bearing div laid out").to_equal("it did not")
+
     it "leaves every box at the origin when the stylesheet declares nothing":
         step("lay the same page out against an empty stylesheet")
         val layout = build_styled_layout(_page_tree(), _sheet(""), 800.0, 600.0)

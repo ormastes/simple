@@ -41,6 +41,36 @@ use std.blink.layout.block_flow.{
 }
 use std.common.layout.box_model.{BoxModel}
 
+# Line-height multiplier used to turn a resolved `font-size` into a text box's
+# height, absent any real font metrics (this lane has no glyph/font-metrics
+# reachable — see the module doc below). 1.2 is the CSS `normal` line-height
+# keyword's typical UA resolution (e.g. Chromium/Firefox default stylesheets),
+# so a text box at least occupies the same vertical space a real line box
+# would at that font-size, rather than an arbitrary unrelated constant.
+val TEXT_LINE_HEIGHT_MULTIPLIER = 1.2
+
+# Build the box a single text node contributes to its containing block.
+#
+# Deliberately minimal (first step, not a text engine — see module doc):
+#   - Height: `parent_style.font_size.to_px() * TEXT_LINE_HEIGHT_MULTIPLIER`.
+#     Text nodes have no ComputedStyle of their own (the cascade only resolves
+#     Elements), so font-size is read off the *parent's* resolved style, which
+#     is exactly CSS inheritance for `font-size`.
+#   - Width: the containing block's own content width (`container_width`,
+#     already resolved in px by the caller). A per-character average-width
+#     approximation was considered and rejected: it would invent a pixel
+#     metric with no font backing it, whereas "fills the line box" is what a
+#     block-level container's inline content does by default in CSS, and it
+#     needs no extra data this lane doesn't already have.
+#   - No line breaking: one box regardless of text length or container width.
+fn _text_box_geometry(parent_style: ComputedStyle, container_width: f64) -> BoxGeometry:
+    """Return the minimal single-line box geometry for a text node's content."""
+    BoxGeometry(
+        width: container_width,
+        height: parent_style.font_size.to_px() * TEXT_LINE_HEIGHT_MULTIPLIER,
+        spacing: BoxModel.zero()
+    )
+
 # Convert one resolved style into the geometry block-flow layout consumes.
 # Every value goes through `Length.to_px`, so an `em`/`%` length contributes 0
 # rather than a silently wrong pixel count.
@@ -97,9 +127,11 @@ impl StyledLayout:
 #
 # Walks `tree` from its root, resolves each Element node against `sheet` with
 # its parent's resolved style, converts the result to geometry, and lays the
-# resulting arena out in a `viewport_width` x `viewport_height` viewport. Text
-# and comment nodes generate no box (there is no inline layout in this lane).
-# The first element child of the document becomes the layout root.
+# resulting arena out in a `viewport_width` x `viewport_height` viewport. A
+# non-empty Text node generates a minimal single-line box (see
+# `_text_box_geometry` — no line breaking, no real font metrics); comment
+# nodes still generate no box. The first element child of the document
+# becomes the layout root.
 pub fn build_styled_layout(
     tree: DomTree,
     sheet: CssStyleSheet,
@@ -153,6 +185,21 @@ pub fn build_styled_layout(
                                         kids.push(cid2)
                                         stack_ids.push(cid2)
                                         stack_styles.push(style)
+                                    elif c2.node_type == NodeType.Text:
+                                        # Text nodes generate a box directly here
+                                        # (not via the work stack): they never
+                                        # get their own cascade pass, so there is
+                                        # nothing for the stack's Element branch
+                                        # above to resolve for them.
+                                        if c2.text_content.len() > 0:
+                                            var tbox = block_flow_box_new(
+                                                cid2,
+                                                _text_box_geometry(style, box.geometry.width)
+                                            )
+                                            ctx.add_box(tbox)
+                                            kids.push(cid2)
+                                            node_ids.push(cid2)
+                                            styles.push(style)
                                     cid2 = c2.next_sibling
                                 None:
                                     cid2 = -1
