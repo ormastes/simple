@@ -145,3 +145,21 @@ Implementation slices after the queued baseline finishes:
 4. Peak-RSS comparison against the canonical Stage4 command, followed by x86 smoke/install and ARM64 SimpleOS QEMU attestation.
 
 Merge owner: main Stage4 lane. Smaller sidecars may own disjoint test/index slices only. Final reviewer: highest-capability model before broad acceptance or a done mark.
+
+## 2026-08-10 Follow-up Lanes from Highest-Model Review
+
+- **Uno-Q hardware lane:** implement QRB2210-specific display, input, and
+  runtime owners before adding `arch/qrb2210/gui_entry_desktop.spl`. Reusing the
+  QEMU `virt` RAMFB/PL011/virtio entry is explicitly prohibited. Merge owner:
+  SimpleOS platform owner. Final reviewer: highest-capability model plus live
+  Uno-Q evidence.
+- **Guest bootstrap protocol lane:** define and implement an encoded boot
+  command protocol in the guest, hashed producer manifests, per-run nonce, and
+  ordered version/compile/run serial receipts. Add behavioral forged/stale and
+  path-traversal prevention tests. Merge owner: bootstrap/QEMU owner. Final
+  reviewer: highest-capability model plus live x86_64 and AArch64 QEMU receipts.
+- **QEMU transport lane:** bind x86_64 and AArch64 storage devices explicitly to
+  transports supported by each guest and retain canonical serial/image
+  receipts. Do not claim completion from host cross-build or static markers.
+
+All three lanes remain pending until the trusted x86 Stage4 compiler exists.

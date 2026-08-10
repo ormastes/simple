@@ -327,3 +327,28 @@ The material low-memory architecture is a Stage4-only two-pass fused lane:
 4. Keep `SymbolTable`, trait, and HIR function objects module-private until their module MIR is complete; never clear aliased HIR containers in place.
 
 Acceptance evidence must compare peak RSS for the same Stage4 command, prove multi-module generic/value-struct behavior, exercise diagnostics across transient-scope reclamation, and produce the same attested native candidate. A narrow removal of structured diagnostic promotion may be safe but is not accepted as the memory remedy because successful builds do not retain meaningful error graphs.
+
+## 2026-08-10 Hardware and Guest-Evidence Review
+
+Highest-capability review rejected two tempting shortcuts that must remain
+fail-closed:
+
+- Uno-Q/QRB2210 must not delegate its production `spl_start` to the QEMU `virt`
+  ARM64 desktop entry. That entry owns RAMFB, PL011, and virtio input, none of
+  which proves QRB2210 display or input hardware. The Uno-Q row requires a
+  board-specific display/input/runtime owner and live board receipts before a
+  canonical desktop entry can exist.
+- The compiler-in-filesystem QEMU gate must not trust caller-written provenance
+  labels or fixed serial marker strings. Its producer must emit hashed kernel,
+  filesystem, compiler, sysroot, and source manifests. Each launch must create
+  a nonce that the guest includes in ordered version, compile, and run receipts,
+  together with the actual version and hello output. Guest command transport
+  must be encoded and consumed by an implemented guest boot protocol, not
+  interpolated as raw kernel command-line text.
+- The checker must use architecture-specific storage transports, canonicalize
+  evidence paths before cleanup, and include behavioral fake-QEMU tests that
+  reject stale/forged/out-of-order receipts. A static substring contract is not
+  acceptance evidence.
+
+These are implementation blockers, not permission to weaken the x86 Stage4,
+pure-Simple provenance, QEMU, or Uno-Q gates.
