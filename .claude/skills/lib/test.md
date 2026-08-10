@@ -114,6 +114,30 @@ Start servers: `bin/simple ui web app.ui.sdn --port 9001`
 
 Key files: `src/lib/nogc_sync_mut/ui_test/client.spl`, `src/app/ui.test_api/handler.spl`, `test/03_system/ui/helpers/ui_test_helpers.spl`
 
+## SAML comment-embedded cases (`.saml`)
+
+Alongside declared `test` blocks, a `.saml` `llm fn` carries cases in comments
+adjacent to the declaration — parsed by `parse_example_comment`:
+
+```
+# example: ExtractResume("Grace Hopper, Rear Admiral") => name == "Grace Hopper"
+# counter-example: ExtractResume("") => error
+```
+
+- Expectations are **predicates over the parsed result**, not a transcript of it.
+  A full literal object dump makes the case brittle for reasons unrelated to the
+  behaviour under test — the Python-doctest failure mode.
+- A `# counter-example:` is required, not optional: it is the sabotage probe in
+  declaration form, and `evidence_state` will not reach `red_proven` without one.
+  `examples_only` and `unevidenced` are unfinished, same bar as a RED test.
+- Naming: hyphen in the source comment (`counter-example`), underscore in the IR
+  and analysis output (`counter_example`). Both spellings are load-bearing; grep
+  for the one matching the layer you are in.
+- `examples` is a reserved word in named-argument position — SAML fields use
+  `example_cases` (`.claude/rules/language.md`).
+
+Background: `doc/01_research/infra/llm/saml_ergonomics_research_2026-08-10.md`.
+
 ## See Also
 
 - `/spipe` skill, `.claude/templates/spipe_template.spl`

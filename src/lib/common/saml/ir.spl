@@ -1,0 +1,206 @@
+# SAML IR — canonical semantic model for Simply A Made-up Language
+#
+# SAML (`simple-saml`, never the OASIS SAML) declares typed LLM functions and
+# their schemas. Source `.saml` files are authoritative; every other artifact
+# (BAML source, SDN manifest, Markdown manual, generated Simple) is a
+# projection of the `SamlModule` records below.
+#
+# Design: doc/05_design/infra/llm/saml_baml_integration_research_design_plan_2026-08-09.md
+# Behavior is specified by test/01_unit/lib/saml/saml_spec.spl.
+
+# One field of an LLM-visible `class`.
+struct SamlField:
+    name: text
+    type_name: text        # element type, without `?` or `[]` decoration
+    optional: bool
+    is_list: bool
+    alias: text            # @alias("..."), "" when absent
+    description: text      # @description("..."), "" when absent
+    sensitive: text        # @sensitive(pii), "" when absent
+    line: i64
+
+# An LLM-visible schema object. Projects to a BAML `class`.
+struct SamlClass:
+    name: text
+    fields: [SamlField]
+    line: i64
+
+# One member of an enum, with its optional wire alias.
+struct SamlEnumValue:
+    name: text
+    alias: text
+    line: i64
+
+struct SamlEnum:
+    name: text
+    values: [SamlEnumValue]
+    line: i64
+
+# A native Simple runtime type. Never projected into the BAML schema.
+struct SamlStruct:
+    name: text
+    fields: [SamlField]
+    line: i64
+
+struct SamlParam:
+    name: text
+    type_name: text
+    optional: bool
+    is_list: bool
+
+# A comment-embedded test found next to a declaration.
+#
+#     # example: ExtractResume("Grace Hopper, Rear Admiral") => name == "Grace Hopper"
+#     # counter-example: ExtractResume("") => error
+#
+# `counter_example` cases are the deliberate-red half: an oracle that cannot
+# fail proves nothing, so a function whose only evidence is positive examples
+# is reported as weaker than one carrying both.
+struct SamlExample:
+    kind: text             # "example" | "counter_example"
+    input_text: text
+    expect_text: text
+    line: i64
+
+# A typed LLM function — the unit an author writes and a reader reviews.
+struct SamlFunction:
+    name: text
+    params: [SamlParam]
+    return_type: text
+    client: text
+    prompt: text
+    attributes: [text]     # raw attribute source, e.g. "trace", "parse(strictness: strict)"
+    example_cases: [SamlExample]
+    doc: text
+    line: i64
+
+# A declared `test` block binding fixtures and assertions to functions.
+struct SamlTest:
+    name: text
+    functions: [text]
+    asserts: [text]
+    evidence_source: text  # fixture | replay | simulated_provider | live_provider | ""
+    line: i64
+
+struct SamlDiagnostic:
+    code: text             # E-SAML-1xxx family, see the design doc
+    severity: text         # "error" | "warning"
+    message: text
+    line: i64
+
+struct SamlModule:
+    name: text
+    classes: [SamlClass]
+    enums: [SamlEnum]
+    structs: [SamlStruct]
+    functions: [SamlFunction]
+    tests: [SamlTest]
+    diagnostics: [SamlDiagnostic]
+    source_path: text
+
+fn empty_module(source_path: text) -> SamlModule:
+    """Build an empty module shell for a source file."""
+    SamlModule(
+        name: "",
+        classes: [],
+        enums: [],
+        structs: [],
+        functions: [],
+        tests: [],
+        diagnostics: [],
+        source_path: source_path
+    )
+
+# `text?` and `[text]` both carry the element name `text`; render the source
+# spelling back out for docs, diagnostics, and the BAML projection.
+fn type_display(type_name: text, optional: bool, is_list: bool) -> text:
+    var base = type_name
+    if is_list:
+        base = "[" + base + "]"
+    if optional:
+        base = base + "?"
+    base
+
+# SAML primitive names and their BAML equivalents. An unknown name is a
+# reference to a declared class or enum and passes through unchanged.
+fn baml_type_name(type_name: text) -> text:
+    """Map a SAML primitive type name onto its BAML spelling."""
+    if type_name == "text":
+        return "string"
+    if type_name == "i64":
+        return "int"
+    if type_name == "f64":
+        return "float"
+    if type_name == "bool":
+        return "bool"
+    if type_name == "nil":
+        return "null"
+    type_name
+
+fn is_primitive_type(type_name: text) -> bool:
+    """True when the name is a SAML built-in rather than a declared symbol."""
+    if type_name == "text":
+        return true
+    if type_name == "i64":
+        return true
+    if type_name == "f64":
+        return true
+    if type_name == "bool":
+        return true
+    if type_name == "nil":
+        return true
+    false
+
+fn find_class(module: SamlModule, name: text) -> SamlClass:
+    """Return the named class, or nil when the module does not declare it."""
+    for c in module.classes:
+        if c.name == name:
+            return c
+    nil
+
+fn find_enum(module: SamlModule, name: text) -> SamlEnum:
+    """Return the named enum, or nil when the module does not declare it."""
+    for e in module.enums:
+        if e.name == name:
+            return e
+    nil
+
+fn find_struct(module: SamlModule, name: text) -> SamlStruct:
+    """Return the named struct, or nil when the module does not declare it."""
+    for s in module.structs:
+        if s.name == name:
+            return s
+    nil
+
+fn find_function(module: SamlModule, name: text) -> SamlFunction:
+    """Return the named llm fn, or nil when the module does not declare it."""
+    for f in module.functions:
+        if f.name == name:
+            return f
+    nil
+
+# Attributes are stored as raw source so unknown ones survive round-trips.
+# `has_attribute(f, "trace")` matches both `@trace` and `@trace(...)`.
+fn has_attribute(attributes: [text], name: text) -> bool:
+    """True when an attribute with this head name is present."""
+    for a in attributes:
+        if a == name:
+            return true
+        if a.starts_with(name + "("):
+            return true
+    false
+
+fn attribute_body(attributes: [text], name: text) -> text:
+    """Return the argument text of `@name(...)`, or "" when absent/bare."""
+    for a in attributes:
+        if a.starts_with(name + "("):
+            if a.ends_with(")"):
+                val start = name.len() + 1
+                return a.slice(start, a.len() - 1)
+    ""
+
+export SamlField, SamlClass, SamlEnumValue, SamlEnum, SamlStruct, SamlParam
+export SamlExample, SamlFunction, SamlTest, SamlDiagnostic, SamlModule
+export empty_module, type_display, baml_type_name, is_primitive_type
+export find_class, find_enum, find_struct, find_function
+export has_attribute, attribute_body

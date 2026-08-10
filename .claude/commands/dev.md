@@ -74,3 +74,40 @@ If yes, update it in the SAME change as the work.
       confirm your copy is a forward delta that reverts nothing.
 - [ ] After pushing, VERIFY: `git merge-base --is-ancestor <sha> origin/main`
       plus a tree-integrity check. A clean push exit is not proof.
+
+### 5. SAML — only when a `.saml` file changed
+Skip this section entirely otherwise; do not answer it `N/A` on unrelated work.
+
+Run it with (note: `bin/simple saml ...` does NOT work — the Rust seed's argv
+parser never consults the Simple dispatch table):
+
+```bash
+bin/simple run src/app/saml/main.spl analyze <file.saml>   # the evidence: lines
+bin/simple run src/app/saml/main.spl check   <file.saml>   # rc=1 on errors
+bin/simple run src/app/saml/main.spl doc --out <dir> <file.saml>
+```
+
+- [ ] Regenerated the analysis (`emit_analysis_report`) and the generated manual
+      (`emit_markdown_manual`) from the edited source, and committed the manual
+      alongside it. Both render from the same record on purpose — never
+      hand-edit a file carrying the generated banner, and never let the manual
+      lag the source it projects.
+- [ ] Read the per-function `evidence:` line. `unevidenced` or `examples_only`
+      is an UNFINISHED deliverable, not a warning to note and move past — the
+      same bar as a RED test. Say which functions are still on those rungs.
+- [ ] Every `llm fn` you touched carries a `# counter-example:`, so its state is
+      `red_proven`. This is the sabotage probe (§1) expressed in the language:
+      positive examples alone cannot show the oracle can fail. `tested` with no
+      counter-example is not done.
+- [ ] `errors=` is 0 and each remaining `!` warning is either fixed or filed
+      with file:line under `doc/08_tracking/bug/`.
+- [ ] `red_proven` today means a counter-example is *declared*, not observed to
+      fail — examples are counted, not executed. Do not report it as proof.
+      See `doc/01_research/infra/llm/saml_ergonomics_research_2026-08-10.md`.
+- [ ] Coverage discovered from `test/**/*_spec.spl` (via `--specs DIR` /
+      MCP `spec_dir`, landed 2026-08-10) counts toward `tested` and shows as
+      an `external:<path>:<it_title>` entry in `tests=[...]`, but it can
+      **never** raise a function to `red_proven` — that rung still requires
+      an in-file `# counter-example:`. Do not credit a function as fully
+      proven just because `--specs` found an external test; if it has no
+      counter-example, `E-SAML-1810` will say so.
