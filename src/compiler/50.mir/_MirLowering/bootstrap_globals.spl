@@ -20,7 +20,7 @@ use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, mir_operand_const_int}
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
-use compiler.hir.hir_lowering.items.{bootstrap_hir_module_count, bootstrap_hir_entry_index, bootstrap_hir_module_name_at, bootstrap_hir_module_symbols_at, bootstrap_hir_module_functions_at, bootstrap_hir_module_function_count, bootstrap_hir_module_function_at, bootstrap_hir_module_constants_at, bootstrap_hir_module_enums_at, bootstrap_hir_module_structs_at, bootstrap_hir_module_classes_at}
+use compiler.hir.hir_lowering.items.{bootstrap_hir_module_count, bootstrap_hir_entry_index, bootstrap_hir_module_name_at, bootstrap_hir_module_symbols_at, bootstrap_hir_module_functions_at, bootstrap_hir_module_constants_at, bootstrap_hir_module_enums_at, bootstrap_hir_module_structs_at, bootstrap_hir_module_classes_at}
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 extern fn rt_exit(code: i64)
@@ -290,11 +290,8 @@ fn bootstrap_register_flat_function_values():
     while module_index < bootstrap_hir_module_count():
         val module_name = bootstrap_mir_logical_module_name(bootstrap_hir_module_name_at(module_index))
         val symbols = bootstrap_flat_symbol_table(module_index)
-        val function_count = bootstrap_hir_module_function_count(module_index)
-        var function_index = 0
-        while function_index < function_count:
-            val func: HirFunction = bootstrap_hir_module_function_at(module_index, function_index)
-            function_index = function_index + 1
+        val functions = bootstrap_hir_module_functions_at(module_index)
+        for func in functions:
             val function_name = bootstrap_flat_function_symbol_name(symbols, func)
             _bootstrap_function_value_names.push(function_name)
             if not func.is_method:
@@ -309,14 +306,14 @@ fn bootstrap_flat_entry_signature_matches(module_index: i64) -> bool:
     # the canonical provider rather than the requested logical alias. Resolve
     # that case by the bootstrap capsule's exact function signature, never by
     # first/last-module position or a generic `main` alone.
+    val functions = bootstrap_hir_module_functions_at(module_index)
     var has_main = false
     var has_help = false
     var has_output_parser = false
     var has_native_build = false
     var function_index = 0
-    val function_count = bootstrap_hir_module_function_count(module_index)
-    while function_index < function_count:
-        val function_name: text = bootstrap_hir_module_function_at(module_index, function_index).name
+    while function_index < functions.len():
+        val function_name: text = functions[function_index].name
         if function_name == "main":
             has_main = true
         elif function_name == "native_build_help":
@@ -332,6 +329,7 @@ fn bootstrap_lower_flat_hir_module_to_mir(module_index: i64, target_context: Mir
     val module_name = bootstrap_hir_module_name_at(module_index)
     val logical_module_name = bootstrap_mir_logical_module_name(module_name)
     val symbols = bootstrap_flat_symbol_table(module_index)
+    val functions = bootstrap_hir_module_functions_at(module_index)
     val constants = bootstrap_hir_module_constants_at(module_index)
     var lowering = MirLowering.new_for_target(symbols, target_context)
     lowering.current_function_names = _bootstrap_function_value_names
@@ -356,9 +354,8 @@ fn bootstrap_lower_flat_hir_module_to_mir(module_index: i64, target_context: Mir
 
     var instruction_total = 0
     var hir_function_index = 0
-    val hir_function_count = bootstrap_hir_module_function_count(module_index)
-    while hir_function_index < hir_function_count:
-        val hir_fn: HirFunction = bootstrap_hir_module_function_at(module_index, hir_function_index)
+    while hir_function_index < functions.len():
+        val hir_fn: HirFunction = functions[hir_function_index]
         hir_function_index = hir_function_index + 1
         if hir_fn.is_extern:
             continue
