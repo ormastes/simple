@@ -6,6 +6,7 @@
 
 use std.common.sdn.parser (parse)
 use std.common.sdn.value.{SdnValue}
+use compiler.core.cfg_platform.{cfg_normalize_os, cfg_normalize_arch}
 
 # ============================================================================
 # File Fingerprinting
@@ -24,6 +25,7 @@ extern fn rt_getpid() -> i64
 extern fn rt_dir_exists(path: text) -> bool
 extern fn rt_dir_list(path: text) -> [text]
 extern fn rt_file_delete(path: text) -> bool
+extern fn rt_env_get(key: text) -> text
 
 fn incremental_file_exists(path: text) -> bool:
     rt_file_exists(path)
@@ -119,6 +121,27 @@ fn native_build_compiler_identity() -> text:
     # Fail closed: an unknown compiler must not reuse another compiler's cache.
     "uncacheable-{rt_getpid()}-{rt_time_now_unix_micros()}"
 
+fn native_build_cfg_scope_value(raw: text, normalized: text) -> text:
+    if normalized != "":
+        return normalized
+    val trimmed = raw.trim().lower()
+    if trimmed == "":
+        return "default"
+    "unknown-" + trimmed
+
+fn native_build_cfg_scope_identity_for(os_raw: text, arch_raw: text, cpu_raw: text) -> text:
+    val os = native_build_cfg_scope_value(os_raw, cfg_normalize_os(os_raw))
+    val arch = native_build_cfg_scope_value(arch_raw, cfg_normalize_arch(arch_raw))
+    val cpu = native_build_cfg_scope_value(cpu_raw, cfg_normalize_arch(cpu_raw))
+    "os={os};arch={arch};cpu={cpu}"
+
+fn native_build_cfg_scope_identity() -> text:
+    native_build_cfg_scope_identity_for(
+        rt_env_get("SIMPLE_TARGET_OS") ?? "",
+        rt_env_get("SIMPLE_TARGET_ARCH") ?? "",
+        rt_env_get("SIMPLE_TARGET_CPU") ?? ""
+    )
+
 fn native_build_cache_scope_key(backend: text?, target_cpu: text?, target_features: [text], optimization: i32, compiler_identity: text) -> text:
     val backend_text = match backend:
         case Some(name): name
@@ -127,7 +150,8 @@ fn native_build_cache_scope_key(backend: text?, target_cpu: text?, target_featur
         case Some(cpu): cpu
         case nil: "native"
     val feature_text = target_features.join(",")
-    "backend={backend_text};cpu={cpu_text};features={feature_text};opt={optimization};compiler={compiler_identity}"
+    val cfg_identity = native_build_cfg_scope_identity()
+    "backend={backend_text};cpu={cpu_text};features={feature_text};opt={optimization};cfg={cfg_identity};compiler={compiler_identity}"
 
 fn incremental_mkdir_p(path: text) -> bool:
     rt_dir_create_all(path)
@@ -699,4 +723,4 @@ fn merge_mir(cached_fns: {text: text}, new_fns: {text: text}) -> {text: text}:
 
 export FileFingerprint, DependencyEntry, ChangeKind, IncrChangeSet
 export BuildCache, IncrementalCompiler
-export merge_mir, native_build_cache_scope_key, native_build_compiler_identity, native_build_compiler_executable_hash
+export merge_mir, native_build_cache_scope_key, native_build_cfg_scope_identity, native_build_cfg_scope_identity_for, native_build_compiler_identity, native_build_compiler_executable_hash

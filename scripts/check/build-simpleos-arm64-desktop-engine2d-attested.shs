@@ -25,8 +25,12 @@ BUILD_STAMP="${KERNEL}.build_stamp"
 BUILD_LOG="build/os/simpleos_arm64_desktop_engine2d.build.log"
 BUILD_STATUS="${BUILD_LOG}.status.$$"
 GENERATED_LOG_CONFIG="build/os/generated/generated/simpleos_log_config.spl"
+NATIVE_CACHE="build/native_cache"
+NATIVE_THREADS="8"
+SIMPLE_CORE_DIR="$ROOT_DIR/build/os/simple-core-simpleos-aarch64"
+SIMPLE_CORE_ARCHIVE="$SIMPLE_CORE_DIR/libsimple_runtime.a"
 BUILD_COMMAND=""
-BUILD_ENVIRONMENT="-u SIMPLE_BINARY -u SIMPLE_BIN -u SIMPLE_FRONTEND_DELEGATE -u SIMPLE_BOOTSTRAP_DRIVER SIMPLE_BOOTSTRAP=1 SIMPLE_LIB=$ROOT_DIR/src SIMPLE_TARGET_OS=simpleos SIMPLE_TARGET_ARCH=arm64 SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_STRICT_FABRICATED_STUB_RATCHET=1 SIMPLE_OS_LOG_MODE=off"
+BUILD_ENVIRONMENT="-u SIMPLE_BINARY -u SIMPLE_BIN -u SIMPLE_FRONTEND_DELEGATE -u SIMPLE_BOOTSTRAP_DRIVER -u SIMPLE_ALLOW_FREESTANDING_STUBS SIMPLE_BOOTSTRAP=1 SIMPLE_LIB=$ROOT_DIR/src SIMPLE_TARGET_OS=simpleos SIMPLE_TARGET_ARCH=arm64 SIMPLE_NATIVE_BUILD_ENTRY=$ENTRY SIMPLE_SIMPLE_CORE_PATH=$SIMPLE_CORE_DIR SIMPLE_NATIVE_RUNTIME_BUNDLE=simple-core SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_STRICT_FABRICATED_STUB_RATCHET=1 SIMPLE_OS_LOG_MODE=off"
 ENTRY="examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl"
 PRODUCER_SCRIPT="scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs"
 MANIFEST_SCHEMA="simpleos-arm64-desktop-engine2d-build-manifest-v3"
@@ -296,13 +300,16 @@ resolve_compiler() {
     COMPILER="$compiler_candidate"
     COMPILER_FORMAT="$ARM64_GUEST_COMPILER_FORMAT"
     COMPILER_ARCH="$ARM64_GUEST_COMPILER_ARCH"
-    BUILD_COMMAND="env $BUILD_ENVIRONMENT $COMPILER native-build --source build/os/generated --source src/os --source src/lib --source examples/09_embedded/simple_os --backend llvm --opt-level=aggressive --log off --timeout 870 --entry-closure --entry $ENTRY --target aarch64-unknown-none -o $KERNEL --linker-script examples/09_embedded/simple_os/arch/arm64/linker.ld && sh scripts/os/make_os_disk.shs 128 $DISK '' arm64 desktop-fonts"
+    BUILD_COMMAND="env $BUILD_ENVIRONMENT $COMPILER native-build --source build/os/generated --source src/os --source src/lib --source examples/09_embedded/simple_os --backend llvm --opt-level=aggressive --log off --timeout 870 --threads $NATIVE_THREADS --cache-dir $NATIVE_CACHE --runtime-bundle simple-core --entry-closure --entry $ENTRY --target aarch64-unknown-none -o $KERNEL --linker-script examples/09_embedded/simple_os/arch/arm64/linker.ld && sh scripts/os/make_os_disk.shs 128 $DISK '' arm64 desktop-fonts"
 }
 
 resolve_compiler ||
     fail_build "${COMPILER_REJECTION_REASON:-canonical-pure-simple-compiler-unavailable}"
 [ -x "$COMPILER" ] || fail_build "canonical-compiler-missing"
 [ ! -L "$COMPILER" ] || fail_build "canonical-compiler-symlink-rejected"
+[ -f "$SIMPLE_CORE_ARCHIVE" ] && [ -s "$SIMPLE_CORE_ARCHIVE" ] &&
+    [ ! -L "$SIMPLE_CORE_ARCHIVE" ] ||
+    fail_build "canonical-simple-core-runtime-unavailable"
 # The runner owns this transient source and recreates/removes it around every
 # build. Normalize stale crash residue before taking the pre-build snapshot.
 mkdir -p build/os/generated/generated
@@ -325,6 +332,8 @@ PRE_SOURCE_FILE_COUNT="$ARM64_GUEST_SOURCE_FILE_COUNT"
 SOURCE_ROOTS="$ARM64_GUEST_SOURCE_ROOTS"
 PRE_COMPILER_SHA256="$(sha256_file "$COMPILER")" ||
     fail_build "canonical-compiler-sha256-failed"
+PRE_SIMPLE_CORE_SHA256="$(sha256_file "$SIMPLE_CORE_ARCHIVE")" ||
+    fail_build "canonical-simple-core-runtime-sha256-failed"
 PRE_ENTRY_SHA256="$(sha256_file "$ENTRY")" ||
     fail_build "canonical-entry-sha256-failed"
 PRE_PRODUCER_SCRIPT_SHA256="$(sha256_file "$PRODUCER_SCRIPT")" ||
@@ -345,6 +354,7 @@ QEMU_ADMISSION_COMMAND="$BUILD_COMMAND"
 qemu_admission_begin arm64 \
     "$ENTRY" \
     "$COMPILER" "$QEMU_ADMISSION_COMMAND" \
+    "$SIMPLE_CORE_ARCHIVE" \
     build/os/generated src/os src/lib examples/09_embedded/simple_os \
     scripts/os/make_os_disk.shs scripts/os/make_os_disk.c \
     scripts/os/simpleos_font_bundle_companion.sha256 assets/fonts \
@@ -371,15 +381,21 @@ printf '%s\n' \
 set +e
 {
     env -u SIMPLE_BINARY -u SIMPLE_BIN -u SIMPLE_FRONTEND_DELEGATE \
-        -u SIMPLE_BOOTSTRAP_DRIVER SIMPLE_BOOTSTRAP=1 \
+        -u SIMPLE_BOOTSTRAP_DRIVER -u SIMPLE_ALLOW_FREESTANDING_STUBS \
+        SIMPLE_BOOTSTRAP=1 \
         SIMPLE_LIB="$ROOT_DIR/src" SIMPLE_TARGET_OS=simpleos \
-        SIMPLE_TARGET_ARCH=arm64 SIMPLE_NO_STUB_FALLBACK=1 \
+        SIMPLE_TARGET_ARCH=arm64 SIMPLE_NATIVE_BUILD_ENTRY="$ENTRY" \
+        SIMPLE_SIMPLE_CORE_PATH="$SIMPLE_CORE_DIR" \
+        SIMPLE_NATIVE_RUNTIME_BUNDLE=simple-core \
+        SIMPLE_NO_STUB_FALLBACK=1 \
         SIMPLE_STRICT_FABRICATED_STUB_RATCHET=1 \
         SIMPLE_OS_LOG_MODE=off \
         "$COMPILER" native-build \
         --source build/os/generated --source src/os --source src/lib \
         --source examples/09_embedded/simple_os --backend llvm \
-        --opt-level=aggressive --log off --timeout 870 --entry-closure \
+        --opt-level=aggressive --log off --timeout 870 \
+        --threads "$NATIVE_THREADS" --cache-dir "$NATIVE_CACHE" \
+        --runtime-bundle simple-core --entry-closure \
         --entry "$ENTRY" --target aarch64-unknown-none -o "$KERNEL" \
         --linker-script examples/09_embedded/simple_os/arch/arm64/linker.ld &&
         sh scripts/os/make_os_disk.shs 128 "$DISK" '' arm64 desktop-fonts
@@ -421,6 +437,8 @@ POST_SOURCE_FINGERPRINT="$ARM64_GUEST_SOURCE_FINGERPRINT"
 POST_SOURCE_FILE_COUNT="$ARM64_GUEST_SOURCE_FILE_COUNT"
 POST_COMPILER_SHA256="$(sha256_file "$COMPILER")" ||
     fail_build "post-build-compiler-sha256-failed"
+POST_SIMPLE_CORE_SHA256="$(sha256_file "$SIMPLE_CORE_ARCHIVE")" ||
+    fail_build "post-build-simple-core-runtime-sha256-failed"
 POST_ENTRY_SHA256="$(sha256_file "$ENTRY")" ||
     fail_build "entry-changed-during-build"
 POST_PRODUCER_SCRIPT_SHA256="$(sha256_file "$PRODUCER_SCRIPT")" ||
@@ -440,6 +458,8 @@ POST_COMPILER_RECEIPT_SHA256="$(sha256_file "$COMPILER_RECEIPT")" ||
     fail_build "guest-source-file-count-changed-during-build"
 [ "$POST_COMPILER_SHA256" = "$PRE_COMPILER_SHA256" ] ||
     fail_build "compiler-changed-during-build"
+[ "$POST_SIMPLE_CORE_SHA256" = "$PRE_SIMPLE_CORE_SHA256" ] ||
+    fail_build "simple-core-runtime-changed-during-build"
 [ "$POST_ENTRY_SHA256" = "$PRE_ENTRY_SHA256" ] ||
     fail_build "entry-changed-during-build"
 [ "$POST_PRODUCER_SCRIPT_SHA256" = "$PRE_PRODUCER_SCRIPT_SHA256" ] ||
@@ -493,6 +513,8 @@ umask 077
     echo "compiler_arch=$COMPILER_ARCH"
     echo "compiler_receipt_path=$COMPILER_RECEIPT"
     echo "compiler_receipt_sha256=$COMPILER_RECEIPT_SHA256"
+    echo "simple_core_path=$SIMPLE_CORE_ARCHIVE"
+    echo "simple_core_sha256=$PRE_SIMPLE_CORE_SHA256"
     echo "build_log_path=$BUILD_LOG"
     echo "build_log_sha256=$BUILD_LOG_SHA256"
     echo "producer_mode=$PRODUCER_MODE"
