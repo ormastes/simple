@@ -99,6 +99,16 @@ fn hir_expr_static_unsigned(e: HirExpr) -> bool:
         case _:
             false
 
+fn hir_expr_is_optional_type(e: HirExpr) -> bool:
+    if e == nil or not e.has_type_:
+        return false
+    val t = e.type_
+    if t == nil:
+        return false
+    match t.kind:
+        case HirTypeKind.Optional(_): true
+        case _: false
+
 # ============================================================================
 # Expression Lowering
 # ============================================================================
@@ -2199,18 +2209,12 @@ impl MirLowering:
                     case NilLit: true
                     case _: false
                 var nil_check_operand = LocalId(id: -1)
-                if op_is_eq_or_neq and right_is_nil_lit and not left_is_nil_lit and left.has_type_:
-                    match left.type_.kind:
-                        case HirTypeKind.Optional(_):
-                            nil_check_operand = left_local
-                        case _:
-                            ()
-                elif op_is_eq_or_neq and left_is_nil_lit and not right_is_nil_lit and right.has_type_:
-                    match right.type_.kind:
-                        case HirTypeKind.Optional(_):
-                            nil_check_operand = right_local
-                        case _:
-                            ()
+                if op_is_eq_or_neq and right_is_nil_lit and not left_is_nil_lit:
+                    if hir_expr_is_optional_type(left) or self.option_value_locals.contains(left_local.id):
+                        nil_check_operand = left_local
+                elif op_is_eq_or_neq and left_is_nil_lit and not right_is_nil_lit:
+                    if hir_expr_is_optional_type(right) or self.option_value_locals.contains(right_local.id):
+                        nil_check_operand = right_local
                 if nil_check_operand.id >= 0:
                     eprint("MARKER_RT_IS_NONE_ARM_REACHED")
                     val nil_check_func_name = match op:
