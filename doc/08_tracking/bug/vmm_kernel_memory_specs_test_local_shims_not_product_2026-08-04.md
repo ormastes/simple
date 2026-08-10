@@ -252,3 +252,42 @@ missing `@cover` annotation aborts the run so zero specs execute. Both read
 as "clean". Directory runs must also be sequential
 (`.claude/rules/testing.md` F2). Treat any `0 total` result as **unmeasured**,
 not passing — the counts above were all taken with both flags set.
+
+## Follow-up 2026-08-10 — the fix landed on only ONE of the two duplicate test trees
+
+`test/01_unit/` and `test/unit/` are duplicate trees and **both execute**. The
+2026-08-04 fix was applied to `test/01_unit/os/kernel/memory/vmm_vma_spec.spl`
+only; `test/unit/os/kernel/memory/vmm_vma_spec.spl` still carried the original
+vacuous shims (`_space_add`/`_vma_overlaps_local`/`_space_find`, lines 68-98)
+and was therefore still both re-implementing the code under test and relying on
+by-value `ProcessVmSpace` mutation.
+
+Vacuity re-proved by execution (interpreter, the engine `bin/simple test` uses),
+running the stale `_space_add` shim standalone:
+
+```
+rc1(expect 0)         = 0
+rc2(spec asserts -17) = 0      <-- EEXIST never fires
+vma_count after 2 adds (spec asserts 1) = 0
+areas.len()           = 0
+```
+
+`space.areas.push(...)` and `space.vma_count = ...` mutate a discarded copy, so
+the second add sees an empty list and cannot detect the overlap. The
+`expect(rc2).to_equal(-17)` assertion in the stale leg could never have been
+testing overlap rejection.
+
+The `test/unit` leg is now synced to the product-calling version. Verdicts:
+
+| leg | before | after |
+|-----|--------|-------|
+| `test/unit/.../vmm_vma_spec.spl` | exit 1 (stale shims) | **18 total, 18 passed, 0 failed** |
+
+Oracle liveness confirmed by sabotage: flipping `expect(r2.code).to_equal(-17)`
+to `-18` gives `expected -17 to equal -18`, `18 total, 17 passed, 1 failed`,
+exit 1 — the real `vma_add` (`src/os/kernel/memory/vmm_vma.spl:98`) genuinely
+returns -EEXIST. **The allocator itself is correct**; only the spec was vacuous.
+
+`vmm_cow_spec.spl` was checked: both legs are byte-identical and both already
+carry the `_SimCowResult` fix. No other os/kernel memory spec has a by-value
+struct-param mutation helper.
