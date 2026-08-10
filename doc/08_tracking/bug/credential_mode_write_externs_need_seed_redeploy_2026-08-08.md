@@ -1,8 +1,49 @@
 # Mode-carrying write externs exist in the seed source but not in the deployed binary
 
-**Status:** OPEN (blocked on seed redeploy)
+**Status:** FIXED (2026-08-10) — deployed binary now carries the externs; call site adopted
 **Filed:** 2026-08-08
 **Severity:** medium — no regression shipped; two fixes are written but cannot be adopted
+
+## Resolution (2026-08-10)
+
+The blocker described below is resolved: a redeploy landed between 2026-08-08
+and 2026-08-10 (by another lane/session; not this one) that put
+`rt_file_atomic_write_mode` / `rt_file_mode` into
+`bin/release/x86_64-unknown-linux-gnu/simple`. Re-measured:
+
+```
+strings src/compiler_rust/target/bootstrap/simple  | grep -c rt_file_atomic_write_mode   -> 2
+strings bin/release/x86_64-unknown-linux-gnu/simple | grep -c rt_file_atomic_write_mode  -> 2   (was 0)
+```
+
+Adopted the one-line swap named below at
+`credential_key_generate` in `src/lib/nogc_sync_mut/terminal/credential/store.spl`:
+the write-then-`rt_package_chmod` sequence (which the doc already established
+is broken from the JIT — see
+`doc/08_tracking/bug/rt_package_chmod_family_fails_from_jit_key_left_world_readable_2026-08-08.md`)
+is replaced by a single `rt_file_atomic_write_mode(path, content, KEY_FILE_MODE)`
+call, closing the write-then-chmod window entirely rather than narrowing it.
+
+Evidence (measured against the deployed binary, `bin/simple test`):
+
+| spec | before | after |
+|---|---|---|
+| `credential_upgrade_persist_spec.spl` | `passed=4 failed=8` (all `unknown extern function`) | `passed=11 failed=1` |
+| `credential_key_file_format_spec.spl` (exercises `credential_key_generate` directly) | not re-run before this fix | `passed=12 failed=0` |
+
+The one remaining `credential_upgrade_persist_spec.spl` failure
+(`unknown extern function: rt_ensure_dir`) is a **different, still-missing**
+extern — confirmed absent from both the seed source binary and the deployed
+binary (`strings ... rt_ensure_dir` → 0 in both). It is unrelated to the two
+externs this doc tracks and is not fixed here; worth its own tracking doc if
+not already filed.
+
+The `oauth2.spl` copies (`nogc_sync_mut`, `gc_async_mut`, `nogc_async_mut`)
+named in the "Secret-writer sweep" table below were **not** touched by this
+change — that adoption is a separate, larger edit (three files, temp-name
+collision fix) left for a follow-up now that the blocker is confirmed clear.
+
+## Original report (2026-08-08, superseded by the fix above)
 
 ## Summary
 
