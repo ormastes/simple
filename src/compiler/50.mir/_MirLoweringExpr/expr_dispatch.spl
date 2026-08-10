@@ -2080,6 +2080,729 @@ impl MirLowering:
             eprint("[mir-lower-expr] span-builder-written method={span_method_name} id={span_result.id}\n")
         span_result
 
+    me lower_binary_expr(expr_value: HirExpr, op: HirBinOp, left: HirExpr, right: HirExpr) -> LocalId:
+
+        match op:
+            case PipeForward | Compose | ComposeBack | Parallel | LayerConnect:
+                val special_result = self.lower_binop_special(op, left, right)
+                if val special_local = special_result:
+                    special_local
+                else:
+                    var b_special = self.builder
+                    val temp = b_special.new_temp(MirType.i64())
+                    self.builder = b_special
+                    temp
+            case And | Or:
+                val left_local = self.lower_expr(left)
+                var b_logic = self.builder
+                val rhs_block = b_logic.new_block(Some("logic_rhs"))
+                val short_block = b_logic.new_block(Some("logic_short"))
+                val merge_block = b_logic.new_block(Some("logic_merge"))
+                # The merge slot has function lifetime. Keep its alloca in
+                # entry so a logical expression inside a loop does not grow
+                # the native stack on every iteration.
+                val result_slot = b_logic.emit_entry_alloc(MirType.i64())
+                match op:
+                    case And: b_logic.terminate_if(mir_operand_copy(left_local), rhs_block, short_block)
+                    case _: b_logic.terminate_if(mir_operand_copy(left_local), short_block, rhs_block)
+                self.builder = b_logic
+
+                var b_short = self.builder
+                b_short.switch_to_block(short_block)
+                val short_int = match op:
+                    case And: 0
+                    case _: 1
+                val short_value = b_short.emit_const_int(short_int)
+                b_short.emit_store(mir_operand_copy(result_slot), mir_operand_copy(short_value))
+                b_short.terminate_goto(merge_block)
+                self.builder = b_short
+
+                var b_rhs = self.builder
+                b_rhs.switch_to_block(rhs_block)
+                self.builder = b_rhs
+                val right_local = self.lower_expr(right)
+                var right_value = right_local
+                var b_rhs_done = self.builder
+                if val right_type = self.local_mir_type_of(right_local):
+                    match right_type.kind:
+                        case MirTypeKind.Bool:
+                            right_value = b_rhs_done.emit_cast(mir_operand_copy(right_local), MirType.i64())
+                        case _: ()
+                b_rhs_done.emit_store(mir_operand_copy(result_slot), mir_operand_copy(right_value))
+                b_rhs_done.terminate_goto(merge_block)
+                b_rhs_done.switch_to_block(merge_block)
+                # The merge slot itself stays i64 (both arms store 0/1
+                # ints; a Bool rhs is zext'd above), but the RESULT
+                # local must be typed Bool: downstream type dispatch --
+                # lower_bootstrap_print_call, coerce_concat_operand --
+                # keys off local_mir_type_of, and an I64-typed result
+                # routes print(a and b) to rt_raw_i64_to_string ("0"/
+                # "1") instead of rt_raw_bool_to_string ("true"/
+                # "false") (strict-llvm parity case
+                # logical_short_circuit). Normalize via `!= 0` -- a
+                # compare with i64 operands and a Bool dest is the
+                # established legal pattern (see the tagged-bool decode
+                # above: emit_binop(Eq, raw, true_value, bool)); it
+                # avoids the illegal i64->i1 narrowing bitcast that
+                # loading the slot directly as Bool would risk.
+                val merged_int = b_rhs_done.emit_load(mir_operand_copy(result_slot), MirType.i64())
+                val logic_zero = b_rhs_done.emit_const_int(0)
+                val logic_result = b_rhs_done.emit_binop(MirBinOp.Ne, mir_operand_copy(merged_int), mir_operand_copy(logic_zero), MirType.bool())
+                self.builder = b_rhs_done
+                logic_result
+            case _:
+                val left_local = self.lower_expr(left)
+                val right_local = self.lower_expr(right)
+                # Custom enum values are tagged runtime handles, so a
+                # raw backend Eq compares allocation addresses. Route
+                # only operands proven to share one declared enum type
+                # before Named values can enter struct-dunder dispatch;
+                # all user enums currently share enum_id=0.
+                # `opt == nil` / `opt != nil` (and the `if val v =
+                # opt:` -> `v != nil` desugar that reaches here via
+                # lower_cond_expr's `case _: self.lower_expr(cond)`
+                # fallthrough, mir_lowering_stmts.spl:1773) against a
+                # STATICALLY Optional-typed operand: route straight
+                # through rt_is_some/rt_is_none instead of the
+                # enum-equality machinery below. rt_is_none
+                # (runtime_native.c) already discriminates BOTH
+                # representations an Optional value can carry at this
+                # point -- the boxed `rt_enum_new` handle every real
+                # producer creates via ensure_option_handle (function
+                # returns, Some()/None() literals, annotated var
+                # decls), AND the flat sentinel-or-payload word `.?`
+                # (HirExprKind.ExistsCheck) produces directly (its
+                # condition-position lowering right above already
+                # calls rt_is_some on that exact representation) --
+                # so this needs no option_value_locals/nil_locals
+                # bookkeeping and is correct regardless of whether
+                # the compiler's own registration tracking followed
+                # the value through every intervening copy. Checked
+                # via the operands' STATIC HIR type (`left.type_` /
+                # `right.type_`, populated by the type-checker on
+                # every HirExpr), not local-id registration, so a
+                # copy or an unregistered call result is still
+                # detected correctly. Closes bug
+                # pure_simple_option_i64_ifval_always_some_eqnil_always_false_2026-08-08
+                # (both `if val` always-Some and `== nil`
+                # always-false were the SAME representation-blind raw
+                # scalar compare fixed for Option<bool> literals in
+                # ab773bb5d5e/ab3af6f728e, just never extended to a
+                # nil-vs-Optional-typed-operand pairing).
+                val op_is_eq_or_neq = match op:
+                    case Eq | NotEq: true
+                    case _: false
+                val left_is_nil_lit = match left.kind:
+                    case NilLit: true
+                    case _: false
+                val right_is_nil_lit = match right.kind:
+                    case NilLit: true
+                    case _: false
+                var nil_check_operand = LocalId(id: -1)
+                if op_is_eq_or_neq and right_is_nil_lit and not left_is_nil_lit and left.has_type_:
+                    match left.type_.kind:
+                        case HirTypeKind.Optional(_):
+                            nil_check_operand = left_local
+                        case _:
+                            ()
+                elif op_is_eq_or_neq and left_is_nil_lit and not right_is_nil_lit and right.has_type_:
+                    match right.type_.kind:
+                        case HirTypeKind.Optional(_):
+                            nil_check_operand = right_local
+                        case _:
+                            ()
+                if nil_check_operand.id >= 0:
+                    eprint("MARKER_RT_IS_NONE_ARM_REACHED")
+                    val nil_check_func_name = match op:
+                        case Eq: "rt_is_none"
+                        case _: "rt_is_some"
+                    val nil_check_func = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str(nil_check_func_name),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                            params: [MirType.i64()], return_type: MirType.bool(), is_variadic: false
+                        )))
+                    ))
+                    val nil_check_res = self.emit_resolved_direct_call(nil_check_func, [mir_operand_copy(nil_check_operand)], MirType.bool())
+                    if val nil_check_local = nil_check_res:
+                        return nil_check_local
+                var bin_is_enum_eq = false
+                var eq_left_local = left_local
+                var eq_right_local = right_local
+                match op:
+                    case Eq | NotEq:
+                        val left_enum_type = self.local_enum_type_id(left_local)
+                        val right_enum_type = self.local_enum_type_id(right_local)
+                        bin_is_enum_eq = left_enum_type >= 0 and left_enum_type == right_enum_type
+                        if not bin_is_enum_eq:
+                            # `Some(true) == true` (an Option<bool> compared
+                            # against a bare bool/nil literal): the Option
+                            # side is a boxed rt_enum_new handle registered in
+                            # option_value_locals, but Option locals never get
+                            # a declared HIR enum type recorded (see
+                            # lower_enum_construct_named -- the "Option" arm
+                            # deliberately skips remember_local_hir_type), and
+                            # a raw `true`/`false`/`nil` literal never has one
+                            # either. local_enum_type_id therefore returns -1
+                            # for BOTH sides here, so the check above always
+                            # misses this pairing and it falls through to a
+                            # raw scalar Eq that compares a boxed
+                            # pointer/handle against a 0/1/3 word -- always
+                            # false regardless of the actual value (verified
+                            # empirically: `Some(true) == true` printed
+                            # "false"). Box the literal side into the same
+                            # canonical Option handle representation
+                            # (ensure_option_handle, used by `??`/field-
+                            # default lowering) so both operands are boxed
+                            # handles rt_native_eq already knows how to
+                            # compare. ensure_option_handle itself consults
+                            # nil_locals to pick Some vs None, so a `nil`
+                            # literal on the wrapped side round-trips to a
+                            # real None handle for free.
+                            val left_is_option = self.option_value_locals.contains(left_local.id)
+                            val right_is_option = self.option_value_locals.contains(right_local.id)
+                            val opt_bool_type = HirType(kind: HirTypeKind.Optional(HirType(kind: HirTypeKind.Bool, span: nil)), span: nil)
+                            if left_is_option and not right_is_option:
+                                var right_wrappable = self.nil_locals.contains(right_local.id)
+                                if not right_wrappable:
+                                    if val right_ty = self.local_mir_type_of(right_local):
+                                        match right_ty.kind:
+                                            case MirTypeKind.Bool: right_wrappable = true
+                                            case _: ()
+                                if right_wrappable:
+                                    eq_right_local = self.ensure_option_handle(right_local, opt_bool_type)
+                                    bin_is_enum_eq = true
+                            elif right_is_option and not left_is_option:
+                                var left_wrappable = self.nil_locals.contains(left_local.id)
+                                if not left_wrappable:
+                                    if val left_ty = self.local_mir_type_of(left_local):
+                                        match left_ty.kind:
+                                            case MirTypeKind.Bool: left_wrappable = true
+                                            case _: ()
+                                if left_wrappable:
+                                    eq_left_local = self.ensure_option_handle(left_local, opt_bool_type)
+                                    bin_is_enum_eq = true
+                    case _:
+                        ()
+                if bin_is_enum_eq:
+                    val enum_eq_func = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_native_eq"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                    ))
+                    var b_enum_eq = self.builder
+                    val enum_eq_res = b_enum_eq.emit_call(enum_eq_func, [mir_operand_copy(eq_left_local), mir_operand_copy(eq_right_local)], MirType.i64())
+                    self.builder = b_enum_eq
+                    if val enum_eq_local = enum_eq_res:
+                        val enum_raw_bool = match op:
+                            case NotEq:
+                                var b_enum_neq = self.builder
+                                val inverted = b_enum_neq.emit_binop(MirBinOp.BitXor, mir_operand_copy(enum_eq_local), mir_operand_const_int(1), MirType.i64())
+                                self.builder = b_enum_neq
+                                inverted
+                            case _: enum_eq_local
+                        var b_enum_narrow = self.builder
+                        val enum_bool = b_enum_narrow.emit_binop(MirBinOp.Eq, mir_operand_copy(enum_raw_bool), mir_operand_const_int(1), MirType.bool())
+                        self.builder = b_enum_narrow
+                        return enum_bool
+                # #168: struct-operand binary ops must dispatch to the
+                # user's own __add__/__sub__/__mul__/__div__/__eq__/
+                # __lt__/__gt__ impl method instead of falling through
+                # to the generic emit_binop below. A struct value is a
+                # POINTER to an aggregate (see lower_struct_construct),
+                # so the generic path's raw i64 ADD/CMP on that
+                # pointer bit pattern produces a garbage
+                # pointer/comparison result that SIGBUSes on first
+                # deref (verified empirically: `a + b` on two structs
+                # with a user `__add__` crashed with SIGBUS before this
+                # fix -- previously silent-wrong at build time, only
+                # failing at runtime). struct_value_syms/
+                # struct_method_syms is the same #156-derived registry
+                # the Unresolved
+                # MethodCall arm (method_calls_literals.spl) already
+                # uses to fast-dispatch untyped struct instance-method
+                # calls; reuse them here so operator syntax gets the
+                # identical dispatch a written-out `.method()` call
+                # already gets.
+                # struct_value_syms is a Dict<LocalId, text> spanning the
+                # WHOLE lowering pass (all functions), but LocalId
+                # numbering restarts per function -- a plain i64 local
+                # in one function can numerically collide with a
+                # *different*, earlier function's struct-typed local id
+                # (verified empirically: `r * r` inside an unrelated
+                # `area(s: Shape)` function using a numeric match arm
+                # falsely matched a stale "Vec2" entry left behind by
+                # `main`, because `r`'s LocalId happened to equal a
+                # Vec2-typed local's id in main). Gate the name lookup
+                # on the local's own MIR type actually being a Struct so
+                # a same-numbered plain int/float local from another
+                # function can never be misread as a struct operand.
+                var binop_left_is_struct = false
+                if val binop_left_ty = self.local_mir_type_of(left_local):
+                    match binop_left_ty.kind:
+                        case MirTypeKind.Struct(_): binop_left_is_struct = true
+                        case _: ()
+                var binop_right_is_struct = false
+                if val binop_right_ty = self.local_mir_type_of(right_local):
+                    match binop_right_ty.kind:
+                        case MirTypeKind.Struct(_): binop_right_is_struct = true
+                        case _: ()
+                val binop_left_struct = if binop_left_is_struct: self.struct_value_syms.get(left_local.id) ?? "" else: ""
+                val binop_right_struct = if binop_right_is_struct: self.struct_value_syms.get(right_local.id) ?? "" else: ""
+                val binop_struct_name = if binop_left_struct != "": binop_left_struct else: binop_right_struct
+                if binop_struct_name != "":
+                    var binop_dunder = ""
+                    match op:
+                        case Add: binop_dunder = "__add__"
+                        case Sub: binop_dunder = "__sub__"
+                        case Mul: binop_dunder = "__mul__"
+                        case Div: binop_dunder = "__div__"
+                        case Eq: binop_dunder = "__eq__"
+                        case Lt: binop_dunder = "__lt__"
+                        case Gt: binop_dunder = "__gt__"
+                        case _: ()
+                    var binop_dispatched = false
+                    if binop_dunder != "":
+                        val binop_method_key = "{binop_struct_name}::{binop_dunder}"
+                        if self.struct_method_syms.contains(binop_method_key):
+                            val binop_method_id = self.struct_method_syms[binop_method_key]
+                            val binop_method_operand = self.symbol_to_operand(binop_method_id)
+                            val binop_return_type = self.resolved_call_return_type(binop_method_id)
+                            var b_op = self.builder
+                            val binop_call_result = b_op.emit_call(binop_method_operand, [mir_operand_copy(left_local), mir_operand_copy(right_local)], binop_return_type)
+                            self.builder = b_op
+                            binop_dispatched = true
+                            if val binop_result_local = binop_call_result:
+                                # Register the call result's STRUCT name
+                                # (mirrors lower_struct_construct/
+                                # self-param-copy registration) so a
+                                # later multi-field access (`c.y`) on
+                                # the operator's result resolves the
+                                # right field order instead of
+                                # defaulting to field 0. Plain
+                                # (non-operator) struct-returning
+                                # method calls have this same gap in
+                                # general (verified: `a.add_method(b)`
+                                # loses field order caller-side too) --
+                                # that broader gap is out of scope for
+                                # #168 (it isn't specific to operator
+                                # overloading), but this new dispatch
+                                # site can register its own result.
+                                var binop_result_struct_name = ""
+                                if val binop_method_sym = self.symbols.get_symbol_raw(binop_method_id.id):
+                                    if val binop_method_sym_type = binop_method_sym.type_:
+                                        match binop_method_sym_type.kind:
+                                            case HirTypeKind.Function(_, binop_ret_hir_type, _):
+                                                match binop_ret_hir_type.kind:
+                                                    case Named(binop_ret_named_sym, _):
+                                                        if val binop_ret_struct_sym = self.symbols.get_symbol_raw(binop_ret_named_sym.id):
+                                                            binop_result_struct_name = binop_ret_struct_sym.name
+                                                    case _: ()
+                                            case _: ()
+                                # Arithmetic dunders (__add__/__sub__/__mul__/__div__) return
+                                # Self by convention (mirrors the newtype auto-derive shape:
+                                # `fn __add__(self, other: T) -> T`), so fall back to the
+                                # OPERAND's own struct name when the declared-return-type
+                                # resolution above didn't find a Named type (native path HIR
+                                # types are frequently Infer/nil).
+                                if binop_result_struct_name == "":
+                                    match op:
+                                        case Add | Sub | Mul | Div:
+                                            binop_result_struct_name = binop_struct_name
+                                        case _: ()
+                                if binop_result_struct_name != "":
+                                    self.struct_value_syms[binop_result_local.id] = binop_result_struct_name
+                                return binop_result_local
+                            var b_op2 = self.builder
+                            val binop_temp = b_op2.new_temp(MirType.i64())
+                            b_op2.emit_const(binop_temp, MirConstValue.Int(0), MirType.i64())
+                            self.builder = b_op2
+                            return binop_temp
+                    if not binop_dispatched:
+                        # No matching (or an ambiguous) dunder method for
+                        # this op -- the generic emit_binop below is
+                        # guaranteed wrong for a struct-typed operand
+                        # (raw pointer arithmetic/compare), so fail
+                        # loudly instead of silently returning garbage.
+                        # Message prefix matches _mir_error_is_fatal's
+                        # allowlist (80.driver/driver_pipeline.spl).
+                        self.error("unresolved method call: operator overload for struct {binop_struct_name} (no matching __add__/__sub__/__mul__/__div__/__eq__/__lt__/__gt__ impl)", Some(expr_value.span))
+                        var b_err_op = self.builder
+                        val err_op_temp = b_err_op.emit_const_int(0)
+                        self.builder = b_err_op
+                        return err_op_temp
+                # String `+` is CONCATENATION, not arithmetic. On the
+                # native path a string is (at the MIR-type level) an
+                # Opaque "str" value, so `a + b` must call a runtime
+                # concat helper instead of falling through to the
+                # generic emit_binop(Add) below, which would
+                # integer-ADD the two operand bit patterns, yielding a
+                # garbage pointer that SIGSEGVs on any deref
+                # (`print(c)`, `c.len`). Detect string operands by
+                # their MIR local type (Opaque str) because HIR
+                # `.type_` is nil on this path; any non-string
+                # arithmetic keeps the generic binop.
+                #
+                # Concat-drop fix: this used to call rt_strcat, which
+                # returns a RAW malloc'd char* with no RtCoreString
+                # tag. Downstream consumers that tag-validate their
+                # operands (e.g. the Rust-side extract_rt_string_array
+                # feeding rt_native_build) silently DROP such untagged
+                # values -- e.g. a `[text]` array holding one
+                # concat-produced element and one plain literal lost
+                # the concat element on that path. rt_strcat_tagged
+                # (runtime_native.c) normalizes both operands via the
+                # same tagged-or-raw autodetection rt_interp_cstr uses
+                # (bug #136) and returns a PROPERLY TAGGED heap string,
+                # so concat results survive tag-validating consumers.
+                # The destination MIR type stays Opaque("str") (same
+                # as before) so local_is_str() keeps routing further
+                # uses of the result (chained `a + b + c`, `.len()`,
+                # `==`, `.starts_with()`) through the existing
+                # tagged-or-raw-tolerant helpers (rt_len,
+                # rt_text_eq_any, rt_interp_cstr) unchanged. Do NOT
+                # change lower_string_interpolation/emit_raw_strcat
+                # (string-interpolation `{expr}` splicing and
+                # [...].join in method_calls_literals.spl) -- those
+                # still expect and produce a raw char*, which is what
+                # rt_print/rt_println consume there; they keep calling
+                # rt_strcat unchanged.
+                # native_array_concat_segv: array `+` is CONCATENATION
+                # (same convention as string `+` just above), not
+                # arithmetic -- an array-typed operand is (at the
+                # runtime level) a heap SplArray* pointer, so falling
+                # through to the generic emit_binop(Add) below would
+                # integer-ADD the two pointer bit patterns, yielding a
+                # garbage pointer that SIGSEGVs on first deref (the
+                # very next `.len()`/element read). Detect array
+                # operands via local_is_runtime_array (keyed off the
+                # local's registered runtime_array_locals entry OR its
+                # MIR Array/Slice type, mirroring local_is_str's
+                # MIR-type-keyed detection just above -- HIR `.type_`
+                # is frequently nil on this path). rt_array_concat
+                # (runtime_native.c) already exists and takes/returns
+                # SplArray* heap handles -- the exact representation
+                # `lower_array_lit` (method_calls_literals.spl)
+                # constructs via rt_array_new/rt_array_push -- so no
+                # runtime helper needed, only wiring the call here.
+                var bin_is_array_concat = false
+                match op:
+                    case Add:
+                        if self.local_is_runtime_array(left_local) or self.local_is_runtime_array(right_local):
+                            bin_is_array_concat = true
+                    case _:
+                        ()
+                if bin_is_array_concat:
+                    # Result element/array MIR type: prefer whichever
+                    # operand carries a concrete Array/Slice MIR type
+                    # (both operands are expected to share one element
+                    # type for a well-typed `arr1 + arr2`); fall back
+                    # to a generic i64-element Array type (matches
+                    # decode_runtime_value's own Array/Slice fallback
+                    # convention) when neither operand's MIR type is
+                    # known -- e.g. `[] + [1]` where the empty-literal
+                    # operand's element type defaults to i64 anyway
+                    # (lower_array_lit's own default).
+                    var array_result_type = MirType(kind: MirTypeKind.Array(MirType.i64(), 0))
+                    var array_result_type_known = false
+                    if val left_arr_ty = self.local_mir_type_of(left_local):
+                        match left_arr_ty.kind:
+                            case MirTypeKind.Array(_, _) | MirTypeKind.Slice(_):
+                                array_result_type = left_arr_ty
+                                array_result_type_known = true
+                            case _: ()
+                    if not array_result_type_known:
+                        if val right_arr_ty = self.local_mir_type_of(right_local):
+                            match right_arr_ty.kind:
+                                case MirTypeKind.Array(_, _) | MirTypeKind.Slice(_):
+                                    array_result_type = right_arr_ty
+                                case _: ()
+                    # Bug #149 (same class): the FuncPtr's declared
+                    # `return_type` is what registers rt_array_concat's
+                    # KNOWN return type at codegen time -- it MUST
+                    # match `array_result_type` (Array/Slice kind ->
+                    # "ptr"), the type the call's DESTINATION local is
+                    # declared with just below. A mismatched i64
+                    # declared-return (while the destination itself is
+                    # Array/Slice-typed) emits the call as `call i64
+                    # @rt_array_concat(...)` while later consumers
+                    # (a second chained `+`, `.len()`, indexing) still
+                    # see the Array/Slice-typed dest and treat it as a
+                    # pointer -- invalid IR ('%lNN defined with type
+                    # i64 but expected ptr'), verified empirically on
+                    # chained `a + [3,4] + [5]`. rt_array_concat
+                    # genuinely returns SplArray* in C (matches the
+                    # static `declare ptr @rt_array_concat(ptr, ptr)`
+                    # in llvm_lib_translate.spl), so array_result_type
+                    # (-> ptr) is correct for params too.
+                    val array_cat_func = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_array_concat"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                            params: [array_result_type, array_result_type],
+                            return_type: array_result_type,
+                            is_variadic: false
+                        )))
+                    ))
+                    var b_array_cat = self.builder
+                    val array_cat_res = b_array_cat.emit_call(array_cat_func, [mir_operand_copy(left_local), mir_operand_copy(right_local)], array_result_type)
+                    self.builder = b_array_cat
+                    if val array_cat_local = array_cat_res:
+                        self.runtime_array_locals[array_cat_local.id] = true
+                        self.mark_runtime_value_local(array_cat_local.id)
+                        val left_elem_syms = self.array_element_struct_syms.get(left_local.id)
+                        if left_elem_syms != nil:
+                            val les = left_elem_syms ?? ""
+                            if les != "":
+                                self.array_element_struct_syms[array_cat_local.id] = les
+                        return array_cat_local
+
+                var bin_is_str_concat = false
+                match op:
+                    case Add:
+                        if self.local_is_str(left_local) or self.local_is_str(right_local):
+                            bin_is_str_concat = true
+                    case _:
+                        ()
+                if bin_is_str_concat:
+                    # strconcat2: one operand may be a non-str scalar
+                    # (`"n=" + 5`) -- stringify it via
+                    # coerce_concat_operand BEFORE it reaches
+                    # rt_strcat_tagged (see that helper's comment for
+                    # why a raw scalar SIGSEGVs there). A str operand
+                    # passes through unchanged, so text+text is
+                    # unaffected.
+                    val cat_left = self.coerce_concat_operand(left_local)
+                    val cat_right = self.coerce_concat_operand(right_local)
+                    val cat_func = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_strcat_tagged"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
+                    ))
+                    var b_cat = self.builder
+                    val cat_res = b_cat.emit_call(cat_func, [cat_left, cat_right], MirType(kind: MirTypeKind.Opaque("str")))
+                    self.builder = b_cat
+                    if val cat_local = cat_res:
+                        return cat_local
+
+                # #148: untyped/native-path text `==`/`!=` must compare
+                # CONTENT, not raw i64 identity. A "str"-typed MIR local
+                # (mir_type_is_str) can be materialized as either a
+                # TAGGED heap-string handle (rt_string_new -- e.g. argv
+                # elements from rt_get_args) or a RAW char* pointer (a
+                # bootstrap string literal, emit_bootstrap_str_const),
+                # and the two representations are statically
+                # undiscriminable here (same as the Add/concat case
+                # above). The generic emit_binop(Eq/Ne) below performs a
+                # plain `icmp eq/ne i64` on the two operands as opaque
+                # integers -- a tagged handle can never numerically
+                # equal a raw literal pointer, so `a == "hello"` always
+                # failed regardless of content. Only intercept when at
+                # least one operand is provably string-typed
+                # (local_is_str); a blanket intercept of all untyped
+                # `==` would wrongly route plain int compares through a
+                # string-content check. rt_text_eq_any normalizes both
+                # operands (tagged-or-raw, autodetected -- mirrors the
+                # rt_interp_cstr coercion bug #136 already established)
+                # to a raw buffer and compares bytes.
+                var bin_is_str_eq = false
+                match op:
+                    case Eq | NotEq:
+                        if self.local_is_str(left_local) or self.local_is_str(right_local):
+                            bin_is_str_eq = true
+                    case _:
+                        ()
+                if bin_is_str_eq:
+                    val eq_func = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_text_eq_any"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                    ))
+                    var b_eq = self.builder
+                    val eq_res = b_eq.emit_call(eq_func, [mir_operand_copy(left_local), mir_operand_copy(right_local)], MirType.i64())
+                    self.builder = b_eq
+                    if val eq_local = eq_res:
+                        val raw_bool_val = match op:
+                            case NotEq:
+                                var b_neq = self.builder
+                                val neq_local = b_neq.emit_binop(MirBinOp.BitXor, mir_operand_copy(eq_local), mir_operand_const_int(1), MirType.i64())
+                                self.builder = b_neq
+                                neq_local
+                            case _: eq_local
+                        # rt_text_eq_any returns a raw i64 0/1 (its real
+                        # C ABI return, matching `declare i64
+                        # @rt_text_eq_any(...)`), not a native i1 --
+                        # unlike `rt_is_some` (declared `i1`), so the
+                        # result CANNOT simply be relabeled Bool: any
+                        # later consumer that reads the MIR-declared
+                        # type expects a genuine i1 value, and print()'s
+                        # bool-vs-int render-fn dispatch
+                        # (lower_bootstrap_print_call's is_bool check
+                        # via local_mir_type_of) only fires on a true
+                        # Bool-typed local, else text == text prints
+                        # "1"/"0" instead of "true"/"false" (parity
+                        # case option_is_none_map_llvm's final
+                        # `.unwrap_or(...) == "..."` assertions).
+                        # Narrow via a genuine icmp (mirrors
+                        # decode_runtime_value's Bool-tag decode
+                        # pattern in this same file) rather than
+                        # bitcasting/relabeling the wide value.
+                        var b_narrow = self.builder
+                        val bool_local = b_narrow.emit_binop(MirBinOp.Eq, mir_operand_copy(raw_bool_val), mir_operand_const_int(1), MirType.bool())
+                        self.builder = b_narrow
+                        return bool_local
+
+                var bin_is_str_order = false
+                match op:
+                    case Lt | LtEq | Gt | GtEq:
+                        if self.local_is_str(left_local) or self.local_is_str(right_local):
+                            bin_is_str_order = true
+                    case _:
+                        ()
+                if bin_is_str_order:
+                    val cmp_func = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_text_cmp_any"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                    ))
+                    var b_cmp = self.builder
+                    val cmp_res = b_cmp.emit_call(cmp_func, [mir_operand_copy(left_local), mir_operand_copy(right_local)], MirType.i64())
+                    self.builder = b_cmp
+                    if val cmp_local = cmp_res:
+                        var b_order = self.builder
+                        val ordered = b_order.emit_binop(self.lower_binop(op), mir_operand_copy(cmp_local), mir_operand_const_int(0), MirType.bool())
+                        self.builder = b_order
+                        return ordered
+
+                val mir_op = self.lower_binop(op)
+                # Float arithmetic must carry an F64 dest: infer_binop_type
+                # defaults arithmetic to i64, which makes translate_binop
+                # emit integer add/mul on the operands' double BIT PATTERNS
+                # (e.g. `2.5 * 4.0` natively computed garbage). Detect float
+                # operands by their MIR local type (HIR `.type_` is nil on
+                # this path), mirroring the string-concat detection above.
+                var result_type = self.infer_binop_type(op)
+                match op:
+                    case Add | Sub | Mul | Div | Mod | Pow:
+                        if self.local_is_float(left_local) or self.local_is_float(right_local):
+                            result_type = if self.local_is_f32(left_local) and self.local_is_f32(right_local): MirType(kind: MirTypeKind.F32) else: MirType.f64()
+                    case _:
+                        ()
+                var b = self.builder
+                var left_binop = left_local
+                var right_binop = right_local
+                var left_f32 = false
+                var left_f64 = false
+                var right_f32 = false
+                var right_f64 = false
+                var left_i64 = false
+                var right_i64 = false
+                var left_narrow_int = false
+                var right_narrow_int = false
+                var left_binop_type = MirType.i64()
+                var right_binop_type = MirType.i64()
+                if val left_type = self.local_mir_type_of(left_local):
+                    left_binop_type = left_type
+                    match left_type.kind:
+                        case MirTypeKind.F32: left_f32 = true
+                        case MirTypeKind.F64: left_f64 = true
+                        case MirTypeKind.I64 | MirTypeKind.U64: left_i64 = true
+                        case MirTypeKind.I8 | MirTypeKind.U8 | MirTypeKind.I16 | MirTypeKind.U16 | MirTypeKind.I32 | MirTypeKind.U32: left_narrow_int = true
+                        case _: ()
+                if val right_type = self.local_mir_type_of(right_local):
+                    right_binop_type = right_type
+                    match right_type.kind:
+                        case MirTypeKind.F32: right_f32 = true
+                        case MirTypeKind.F64: right_f64 = true
+                        case MirTypeKind.I64 | MirTypeKind.U64: right_i64 = true
+                        case MirTypeKind.I8 | MirTypeKind.U8 | MirTypeKind.I16 | MirTypeKind.U16 | MirTypeKind.I32 | MirTypeKind.U32: right_narrow_int = true
+                        case _: ()
+                var result_f64 = false
+                match result_type.kind:
+                    case MirTypeKind.F64: result_f64 = true
+                    case _: ()
+                if left_f32 and (right_f64 or result_f64):
+                    left_binop = b.emit_cast(mir_operand_copy(left_binop), MirType.f64())
+                if right_f32 and (left_f64 or result_f64):
+                    right_binop = b.emit_cast(mir_operand_copy(right_binop), MirType.f64())
+                var comparison = false
+                var ordered_comparison = false
+                match op:
+                    case Eq | NotEq | Lt | LtEq | Gt | GtEq: comparison = true
+                    case _: ()
+                match op:
+                    case Lt | LtEq | Gt | GtEq: ordered_comparison = true
+                    case _: ()
+                var vulkan_u32_numeric = false
+                if self.current_gpu_kernel_target == "vulkan":
+                    if left_binop_type.kind == MirTypeKind.U32 or right_binop_type.kind == MirTypeKind.U32:
+                        vulkan_u32_numeric = true
+                if vulkan_u32_numeric:
+                    left_binop = self.vulkan_u32_local(left_binop)
+                    right_binop = self.vulkan_u32_local(right_binop)
+                    b = self.builder
+                    if not comparison:
+                        result_type = MirType(kind: MirTypeKind.U32)
+                val left_float = left_f32 or left_f64
+                val right_float = right_f32 or right_f64
+                val left_int = left_i64 or left_narrow_int
+                val right_int = right_i64 or right_narrow_int
+                val mixed_numeric_kinds = (left_float and right_int) or (left_int and right_float)
+                if mixed_numeric_kinds:
+                    match op:
+                        case Eq:
+                            val strict_eq = b.emit_const_bool(false)
+                            self.builder = b
+                            return strict_eq
+                        case NotEq:
+                            val strict_ne = b.emit_const_bool(true)
+                            self.builder = b
+                            return strict_ne
+                        case _: ()
+                # An unsigned int operand promoted to f64 for a mixed
+                # int/float comparison must use an UNSIGNED int->float
+                # convert (uitofp / fcvt_from_uint); a signed convert
+                # reads a high-bit u64 (>= 2^63) as negative, so
+                # `(2^63 as u64) > 0.0` wrongly yields false (bug
+                # u64_to_f64_comparison_uses_signed_conversion_2026-07-25).
+                # The u64 suffix/annotation is frequently flattened to an
+                # I64 MIR local on this path, so consult BOTH the MIR
+                # local type and the operand's static HIR type; when
+                # unsigned, retype the operand to U64 before the f64 cast
+                # so the backend's Cast lowering (which keys off the
+                # source operand type) selects the unsigned convert.
+                var left_int_unsigned = false
+                match left_binop_type.kind:
+                    case MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64: left_int_unsigned = true
+                    case _: ()
+                if not left_int_unsigned:
+                    left_int_unsigned = hir_expr_static_unsigned(left)
+                var right_int_unsigned = false
+                match right_binop_type.kind:
+                    case MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64: right_int_unsigned = true
+                    case _: ()
+                if not right_int_unsigned:
+                    right_int_unsigned = hir_expr_static_unsigned(right)
+                if ordered_comparison and mixed_numeric_kinds:
+                    if not left_f64:
+                        if left_int_unsigned:
+                            left_binop = b.emit_cast(mir_operand_copy(left_binop), MirType(kind: MirTypeKind.U64))
+                        left_binop = b.emit_cast(mir_operand_copy(left_binop), MirType.f64())
+                    if not right_f64:
+                        if right_int_unsigned:
+                            right_binop = b.emit_cast(mir_operand_copy(right_binop), MirType(kind: MirTypeKind.U64))
+                        right_binop = b.emit_cast(mir_operand_copy(right_binop), MirType.f64())
+                if comparison and left_narrow_int and right_i64:
+                    right_binop = b.emit_cast(mir_operand_copy(right_binop), left_binop_type)
+                elif comparison and left_i64 and right_narrow_int:
+                    left_binop = b.emit_cast(mir_operand_copy(left_binop), right_binop_type)
+                if comparison and self.is_runtime_value_local(left_binop.id) and self.nil_locals.contains(right_binop.id):
+                    self.builder = b
+                    right_binop = self.box_runtime_value(right_binop)
+                    b = self.builder
+                elif comparison and self.nil_locals.contains(left_binop.id) and self.is_runtime_value_local(right_binop.id):
+                    self.builder = b
+                    left_binop = self.box_runtime_value(left_binop)
+                    b = self.builder
+                val binop_result = b.emit_binop(mir_op, mir_operand_copy(left_binop), mir_operand_copy(right_binop), result_type)
+                self.builder = b
+                binop_result
+
+
     me lower_expr_impl(expr: HirExpr) -> LocalId:
         """Lower HIR expression to MIR, return result local. Body of
         lower_expr; only reached through the lower_expr wrapper above so
@@ -2146,6 +2869,41 @@ impl MirLowering:
             eprint("[mir-lower-expr] disc-table Try={d_try} Await={d_await} Throw={d_throw} Yield={d_yield} Range={d_range}\n")
             eprint("[mir-lower-expr] disc-table Var={d_var} NamedVar={d_namedvar} ArrayRepeat={d_arrayrepeat} Break={d_break} Continue={d_continue}\n")
         val expr_disc = rt_enum_discriminant(expr_value.kind)
+        # Native recursive enum matching can misbind Binary's tuple payload on
+        # the condition path. Decode the live payload explicitly, then route
+        # through the same helper used by the ordinary Binary arm so operator
+        # semantics remain single-sourced.
+        val binary_disc = rt_enum_discriminant(HirExprKind.Binary(HirBinOp.Add, nil_expr, nil_expr))
+        if expr_disc == binary_disc:
+            val binary_payload = rt_enum_payload(expr_value.kind)
+            val binary_op: HirBinOp = rt_tuple_get(binary_payload, 0)
+            val binary_left: HirExpr = rt_tuple_get(binary_payload, 1)
+            val binary_right: HirExpr = rt_tuple_get(binary_payload, 2)
+            if binary_left == nil or binary_right == nil or rt_enum_discriminant(binary_op) < 0:
+                self.error_fatal("empty HIR Binary payload", Some(expr_value.span))
+                return self.builder.emit_const_int(0)
+            return self.lower_binary_expr(expr_value, binary_op, binary_left, binary_right)
+        # Decode If explicitly before the native pattern-dispatch match below.
+        # The staged native bridge can misbind a multi-field enum arm's first
+        # payload as nil even though the boxed HirExprKind.If is valid. That
+        # nil reaches lower_cond_expr, whose `cond.kind` read then traps while
+        # the generated match is about to call rt_enum_check_discriminant.
+        # Decode the payload tuple directly, as done for Cast and Index above,
+        # and reject malformed mandatory fields before any aggregate deref.
+        val if_disc = rt_enum_discriminant(HirExprKind.If(nil_expr, HirBlock(stmts: [], has: false, value: nil, span: nil_span), nil))
+        if expr_disc == if_disc:
+            val if_payload = rt_enum_payload(expr_value.kind)
+            val if_cond: HirExpr = rt_tuple_get(if_payload, 0)
+            val if_then: HirBlock = rt_tuple_get(if_payload, 1)
+            val if_else: HirBlock? = rt_tuple_get(if_payload, 2)
+            if if_cond == nil or if_then == nil:
+                self.error_fatal("empty HIR If payload", Some(expr_value.span))
+                var b_bad_if = self.builder
+                val bad_if = b_bad_if.new_temp(MirType.unit())
+                self.builder = b_bad_if
+                return bad_if
+            val expected_if_type: HirType? = if expr_value.has_type_: expr_value.type_ else: nil
+            return self.lower_if(if_cond, if_then, if_else, expected_if_type)
         val field_disc = rt_enum_discriminant(HirExprKind.Field(nil_expr, "", nil))
         if expr_disc == field_disc:
             match expr_value.kind:
@@ -2575,726 +3333,7 @@ impl MirLowering:
                         err_tmp2
 
             case Binary(op, left, right):
-
-                match op:
-                    case PipeForward | Compose | ComposeBack | Parallel | LayerConnect:
-                        val special_result = self.lower_binop_special(op, left, right)
-                        if val special_local = special_result:
-                            special_local
-                        else:
-                            var b_special = self.builder
-                            val temp = b_special.new_temp(MirType.i64())
-                            self.builder = b_special
-                            temp
-                    case And | Or:
-                        val left_local = self.lower_expr(left)
-                        var b_logic = self.builder
-                        val rhs_block = b_logic.new_block(Some("logic_rhs"))
-                        val short_block = b_logic.new_block(Some("logic_short"))
-                        val merge_block = b_logic.new_block(Some("logic_merge"))
-                        # The merge slot has function lifetime. Keep its alloca in
-                        # entry so a logical expression inside a loop does not grow
-                        # the native stack on every iteration.
-                        val result_slot = b_logic.emit_entry_alloc(MirType.i64())
-                        match op:
-                            case And: b_logic.terminate_if(mir_operand_copy(left_local), rhs_block, short_block)
-                            case _: b_logic.terminate_if(mir_operand_copy(left_local), short_block, rhs_block)
-                        self.builder = b_logic
-
-                        var b_short = self.builder
-                        b_short.switch_to_block(short_block)
-                        val short_int = match op:
-                            case And: 0
-                            case _: 1
-                        val short_value = b_short.emit_const_int(short_int)
-                        b_short.emit_store(mir_operand_copy(result_slot), mir_operand_copy(short_value))
-                        b_short.terminate_goto(merge_block)
-                        self.builder = b_short
-
-                        var b_rhs = self.builder
-                        b_rhs.switch_to_block(rhs_block)
-                        self.builder = b_rhs
-                        val right_local = self.lower_expr(right)
-                        var right_value = right_local
-                        var b_rhs_done = self.builder
-                        if val right_type = self.local_mir_type_of(right_local):
-                            match right_type.kind:
-                                case MirTypeKind.Bool:
-                                    right_value = b_rhs_done.emit_cast(mir_operand_copy(right_local), MirType.i64())
-                                case _: ()
-                        b_rhs_done.emit_store(mir_operand_copy(result_slot), mir_operand_copy(right_value))
-                        b_rhs_done.terminate_goto(merge_block)
-                        b_rhs_done.switch_to_block(merge_block)
-                        # The merge slot itself stays i64 (both arms store 0/1
-                        # ints; a Bool rhs is zext'd above), but the RESULT
-                        # local must be typed Bool: downstream type dispatch --
-                        # lower_bootstrap_print_call, coerce_concat_operand --
-                        # keys off local_mir_type_of, and an I64-typed result
-                        # routes print(a and b) to rt_raw_i64_to_string ("0"/
-                        # "1") instead of rt_raw_bool_to_string ("true"/
-                        # "false") (strict-llvm parity case
-                        # logical_short_circuit). Normalize via `!= 0` -- a
-                        # compare with i64 operands and a Bool dest is the
-                        # established legal pattern (see the tagged-bool decode
-                        # above: emit_binop(Eq, raw, true_value, bool)); it
-                        # avoids the illegal i64->i1 narrowing bitcast that
-                        # loading the slot directly as Bool would risk.
-                        val merged_int = b_rhs_done.emit_load(mir_operand_copy(result_slot), MirType.i64())
-                        val logic_zero = b_rhs_done.emit_const_int(0)
-                        val logic_result = b_rhs_done.emit_binop(MirBinOp.Ne, mir_operand_copy(merged_int), mir_operand_copy(logic_zero), MirType.bool())
-                        self.builder = b_rhs_done
-                        logic_result
-                    case _:
-                        val left_local = self.lower_expr(left)
-                        val right_local = self.lower_expr(right)
-                        # Custom enum values are tagged runtime handles, so a
-                        # raw backend Eq compares allocation addresses. Route
-                        # only operands proven to share one declared enum type
-                        # before Named values can enter struct-dunder dispatch;
-                        # all user enums currently share enum_id=0.
-                        # `opt == nil` / `opt != nil` (and the `if val v =
-                        # opt:` -> `v != nil` desugar that reaches here via
-                        # lower_cond_expr's `case _: self.lower_expr(cond)`
-                        # fallthrough, mir_lowering_stmts.spl:1773) against a
-                        # STATICALLY Optional-typed operand: route straight
-                        # through rt_is_some/rt_is_none instead of the
-                        # enum-equality machinery below. rt_is_none
-                        # (runtime_native.c) already discriminates BOTH
-                        # representations an Optional value can carry at this
-                        # point -- the boxed `rt_enum_new` handle every real
-                        # producer creates via ensure_option_handle (function
-                        # returns, Some()/None() literals, annotated var
-                        # decls), AND the flat sentinel-or-payload word `.?`
-                        # (HirExprKind.ExistsCheck) produces directly (its
-                        # condition-position lowering right above already
-                        # calls rt_is_some on that exact representation) --
-                        # so this needs no option_value_locals/nil_locals
-                        # bookkeeping and is correct regardless of whether
-                        # the compiler's own registration tracking followed
-                        # the value through every intervening copy. Checked
-                        # via the operands' STATIC HIR type (`left.type_` /
-                        # `right.type_`, populated by the type-checker on
-                        # every HirExpr), not local-id registration, so a
-                        # copy or an unregistered call result is still
-                        # detected correctly. Closes bug
-                        # pure_simple_option_i64_ifval_always_some_eqnil_always_false_2026-08-08
-                        # (both `if val` always-Some and `== nil`
-                        # always-false were the SAME representation-blind raw
-                        # scalar compare fixed for Option<bool> literals in
-                        # ab773bb5d5e/ab3af6f728e, just never extended to a
-                        # nil-vs-Optional-typed-operand pairing).
-                        val op_is_eq_or_neq = match op:
-                            case Eq | NotEq: true
-                            case _: false
-                        val left_is_nil_lit = match left.kind:
-                            case NilLit: true
-                            case _: false
-                        val right_is_nil_lit = match right.kind:
-                            case NilLit: true
-                            case _: false
-                        var nil_check_operand = LocalId(id: -1)
-                        if op_is_eq_or_neq and right_is_nil_lit and not left_is_nil_lit and left.has_type_:
-                            match left.type_.kind:
-                                case HirTypeKind.Optional(_):
-                                    nil_check_operand = left_local
-                                case _:
-                                    ()
-                        elif op_is_eq_or_neq and left_is_nil_lit and not right_is_nil_lit and right.has_type_:
-                            match right.type_.kind:
-                                case HirTypeKind.Optional(_):
-                                    nil_check_operand = right_local
-                                case _:
-                                    ()
-                        if nil_check_operand.id >= 0:
-                            eprint("MARKER_RT_IS_NONE_ARM_REACHED")
-                            val nil_check_func_name = match op:
-                                case Eq: "rt_is_none"
-                                case _: "rt_is_some"
-                            val nil_check_func = MirOperand(kind: MirOperandKind.Const(
-                                MirConstValue.Str(nil_check_func_name),
-                                MirType(kind: MirTypeKind.FuncPtr(MirSignature(
-                                    params: [MirType.i64()], return_type: MirType.bool(), is_variadic: false
-                                )))
-                            ))
-                            val nil_check_res = self.emit_resolved_direct_call(nil_check_func, [mir_operand_copy(nil_check_operand)], MirType.bool())
-                            if val nil_check_local = nil_check_res:
-                                return nil_check_local
-                        var bin_is_enum_eq = false
-                        var eq_left_local = left_local
-                        var eq_right_local = right_local
-                        match op:
-                            case Eq | NotEq:
-                                val left_enum_type = self.local_enum_type_id(left_local)
-                                val right_enum_type = self.local_enum_type_id(right_local)
-                                bin_is_enum_eq = left_enum_type >= 0 and left_enum_type == right_enum_type
-                                if not bin_is_enum_eq:
-                                    # `Some(true) == true` (an Option<bool> compared
-                                    # against a bare bool/nil literal): the Option
-                                    # side is a boxed rt_enum_new handle registered in
-                                    # option_value_locals, but Option locals never get
-                                    # a declared HIR enum type recorded (see
-                                    # lower_enum_construct_named -- the "Option" arm
-                                    # deliberately skips remember_local_hir_type), and
-                                    # a raw `true`/`false`/`nil` literal never has one
-                                    # either. local_enum_type_id therefore returns -1
-                                    # for BOTH sides here, so the check above always
-                                    # misses this pairing and it falls through to a
-                                    # raw scalar Eq that compares a boxed
-                                    # pointer/handle against a 0/1/3 word -- always
-                                    # false regardless of the actual value (verified
-                                    # empirically: `Some(true) == true` printed
-                                    # "false"). Box the literal side into the same
-                                    # canonical Option handle representation
-                                    # (ensure_option_handle, used by `??`/field-
-                                    # default lowering) so both operands are boxed
-                                    # handles rt_native_eq already knows how to
-                                    # compare. ensure_option_handle itself consults
-                                    # nil_locals to pick Some vs None, so a `nil`
-                                    # literal on the wrapped side round-trips to a
-                                    # real None handle for free.
-                                    val left_is_option = self.option_value_locals.contains(left_local.id)
-                                    val right_is_option = self.option_value_locals.contains(right_local.id)
-                                    val opt_bool_type = HirType(kind: HirTypeKind.Optional(HirType(kind: HirTypeKind.Bool, span: nil)), span: nil)
-                                    if left_is_option and not right_is_option:
-                                        var right_wrappable = self.nil_locals.contains(right_local.id)
-                                        if not right_wrappable:
-                                            if val right_ty = self.local_mir_type_of(right_local):
-                                                match right_ty.kind:
-                                                    case MirTypeKind.Bool: right_wrappable = true
-                                                    case _: ()
-                                        if right_wrappable:
-                                            eq_right_local = self.ensure_option_handle(right_local, opt_bool_type)
-                                            bin_is_enum_eq = true
-                                    elif right_is_option and not left_is_option:
-                                        var left_wrappable = self.nil_locals.contains(left_local.id)
-                                        if not left_wrappable:
-                                            if val left_ty = self.local_mir_type_of(left_local):
-                                                match left_ty.kind:
-                                                    case MirTypeKind.Bool: left_wrappable = true
-                                                    case _: ()
-                                        if left_wrappable:
-                                            eq_left_local = self.ensure_option_handle(left_local, opt_bool_type)
-                                            bin_is_enum_eq = true
-                            case _:
-                                ()
-                        if bin_is_enum_eq:
-                            val enum_eq_func = MirOperand(kind: MirOperandKind.Const(
-                                MirConstValue.Str("rt_native_eq"),
-                                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
-                            ))
-                            var b_enum_eq = self.builder
-                            val enum_eq_res = b_enum_eq.emit_call(enum_eq_func, [mir_operand_copy(eq_left_local), mir_operand_copy(eq_right_local)], MirType.i64())
-                            self.builder = b_enum_eq
-                            if val enum_eq_local = enum_eq_res:
-                                val enum_raw_bool = match op:
-                                    case NotEq:
-                                        var b_enum_neq = self.builder
-                                        val inverted = b_enum_neq.emit_binop(MirBinOp.BitXor, mir_operand_copy(enum_eq_local), mir_operand_const_int(1), MirType.i64())
-                                        self.builder = b_enum_neq
-                                        inverted
-                                    case _: enum_eq_local
-                                var b_enum_narrow = self.builder
-                                val enum_bool = b_enum_narrow.emit_binop(MirBinOp.Eq, mir_operand_copy(enum_raw_bool), mir_operand_const_int(1), MirType.bool())
-                                self.builder = b_enum_narrow
-                                return enum_bool
-                        # #168: struct-operand binary ops must dispatch to the
-                        # user's own __add__/__sub__/__mul__/__div__/__eq__/
-                        # __lt__/__gt__ impl method instead of falling through
-                        # to the generic emit_binop below. A struct value is a
-                        # POINTER to an aggregate (see lower_struct_construct),
-                        # so the generic path's raw i64 ADD/CMP on that
-                        # pointer bit pattern produces a garbage
-                        # pointer/comparison result that SIGBUSes on first
-                        # deref (verified empirically: `a + b` on two structs
-                        # with a user `__add__` crashed with SIGBUS before this
-                        # fix -- previously silent-wrong at build time, only
-                        # failing at runtime). struct_value_syms/
-                        # struct_method_syms is the same #156-derived registry
-                        # the Unresolved
-                        # MethodCall arm (method_calls_literals.spl) already
-                        # uses to fast-dispatch untyped struct instance-method
-                        # calls; reuse them here so operator syntax gets the
-                        # identical dispatch a written-out `.method()` call
-                        # already gets.
-                        # struct_value_syms is a Dict<LocalId, text> spanning the
-                        # WHOLE lowering pass (all functions), but LocalId
-                        # numbering restarts per function -- a plain i64 local
-                        # in one function can numerically collide with a
-                        # *different*, earlier function's struct-typed local id
-                        # (verified empirically: `r * r` inside an unrelated
-                        # `area(s: Shape)` function using a numeric match arm
-                        # falsely matched a stale "Vec2" entry left behind by
-                        # `main`, because `r`'s LocalId happened to equal a
-                        # Vec2-typed local's id in main). Gate the name lookup
-                        # on the local's own MIR type actually being a Struct so
-                        # a same-numbered plain int/float local from another
-                        # function can never be misread as a struct operand.
-                        var binop_left_is_struct = false
-                        if val binop_left_ty = self.local_mir_type_of(left_local):
-                            match binop_left_ty.kind:
-                                case MirTypeKind.Struct(_): binop_left_is_struct = true
-                                case _: ()
-                        var binop_right_is_struct = false
-                        if val binop_right_ty = self.local_mir_type_of(right_local):
-                            match binop_right_ty.kind:
-                                case MirTypeKind.Struct(_): binop_right_is_struct = true
-                                case _: ()
-                        val binop_left_struct = if binop_left_is_struct: self.struct_value_syms.get(left_local.id) ?? "" else: ""
-                        val binop_right_struct = if binop_right_is_struct: self.struct_value_syms.get(right_local.id) ?? "" else: ""
-                        val binop_struct_name = if binop_left_struct != "": binop_left_struct else: binop_right_struct
-                        if binop_struct_name != "":
-                            var binop_dunder = ""
-                            match op:
-                                case Add: binop_dunder = "__add__"
-                                case Sub: binop_dunder = "__sub__"
-                                case Mul: binop_dunder = "__mul__"
-                                case Div: binop_dunder = "__div__"
-                                case Eq: binop_dunder = "__eq__"
-                                case Lt: binop_dunder = "__lt__"
-                                case Gt: binop_dunder = "__gt__"
-                                case _: ()
-                            var binop_dispatched = false
-                            if binop_dunder != "":
-                                val binop_method_key = "{binop_struct_name}::{binop_dunder}"
-                                if self.struct_method_syms.contains(binop_method_key):
-                                    val binop_method_id = self.struct_method_syms[binop_method_key]
-                                    val binop_method_operand = self.symbol_to_operand(binop_method_id)
-                                    val binop_return_type = self.resolved_call_return_type(binop_method_id)
-                                    var b_op = self.builder
-                                    val binop_call_result = b_op.emit_call(binop_method_operand, [mir_operand_copy(left_local), mir_operand_copy(right_local)], binop_return_type)
-                                    self.builder = b_op
-                                    binop_dispatched = true
-                                    if val binop_result_local = binop_call_result:
-                                        # Register the call result's STRUCT name
-                                        # (mirrors lower_struct_construct/
-                                        # self-param-copy registration) so a
-                                        # later multi-field access (`c.y`) on
-                                        # the operator's result resolves the
-                                        # right field order instead of
-                                        # defaulting to field 0. Plain
-                                        # (non-operator) struct-returning
-                                        # method calls have this same gap in
-                                        # general (verified: `a.add_method(b)`
-                                        # loses field order caller-side too) --
-                                        # that broader gap is out of scope for
-                                        # #168 (it isn't specific to operator
-                                        # overloading), but this new dispatch
-                                        # site can register its own result.
-                                        var binop_result_struct_name = ""
-                                        if val binop_method_sym = self.symbols.get_symbol_raw(binop_method_id.id):
-                                            if val binop_method_sym_type = binop_method_sym.type_:
-                                                match binop_method_sym_type.kind:
-                                                    case HirTypeKind.Function(_, binop_ret_hir_type, _):
-                                                        match binop_ret_hir_type.kind:
-                                                            case Named(binop_ret_named_sym, _):
-                                                                if val binop_ret_struct_sym = self.symbols.get_symbol_raw(binop_ret_named_sym.id):
-                                                                    binop_result_struct_name = binop_ret_struct_sym.name
-                                                            case _: ()
-                                                    case _: ()
-                                        # Arithmetic dunders (__add__/__sub__/__mul__/__div__) return
-                                        # Self by convention (mirrors the newtype auto-derive shape:
-                                        # `fn __add__(self, other: T) -> T`), so fall back to the
-                                        # OPERAND's own struct name when the declared-return-type
-                                        # resolution above didn't find a Named type (native path HIR
-                                        # types are frequently Infer/nil).
-                                        if binop_result_struct_name == "":
-                                            match op:
-                                                case Add | Sub | Mul | Div:
-                                                    binop_result_struct_name = binop_struct_name
-                                                case _: ()
-                                        if binop_result_struct_name != "":
-                                            self.struct_value_syms[binop_result_local.id] = binop_result_struct_name
-                                        return binop_result_local
-                                    var b_op2 = self.builder
-                                    val binop_temp = b_op2.new_temp(MirType.i64())
-                                    b_op2.emit_const(binop_temp, MirConstValue.Int(0), MirType.i64())
-                                    self.builder = b_op2
-                                    return binop_temp
-                            if not binop_dispatched:
-                                # No matching (or an ambiguous) dunder method for
-                                # this op -- the generic emit_binop below is
-                                # guaranteed wrong for a struct-typed operand
-                                # (raw pointer arithmetic/compare), so fail
-                                # loudly instead of silently returning garbage.
-                                # Message prefix matches _mir_error_is_fatal's
-                                # allowlist (80.driver/driver_pipeline.spl).
-                                self.error("unresolved method call: operator overload for struct {binop_struct_name} (no matching __add__/__sub__/__mul__/__div__/__eq__/__lt__/__gt__ impl)", Some(expr_value.span))
-                                var b_err_op = self.builder
-                                val err_op_temp = b_err_op.emit_const_int(0)
-                                self.builder = b_err_op
-                                return err_op_temp
-                        # String `+` is CONCATENATION, not arithmetic. On the
-                        # native path a string is (at the MIR-type level) an
-                        # Opaque "str" value, so `a + b` must call a runtime
-                        # concat helper instead of falling through to the
-                        # generic emit_binop(Add) below, which would
-                        # integer-ADD the two operand bit patterns, yielding a
-                        # garbage pointer that SIGSEGVs on any deref
-                        # (`print(c)`, `c.len`). Detect string operands by
-                        # their MIR local type (Opaque str) because HIR
-                        # `.type_` is nil on this path; any non-string
-                        # arithmetic keeps the generic binop.
-                        #
-                        # Concat-drop fix: this used to call rt_strcat, which
-                        # returns a RAW malloc'd char* with no RtCoreString
-                        # tag. Downstream consumers that tag-validate their
-                        # operands (e.g. the Rust-side extract_rt_string_array
-                        # feeding rt_native_build) silently DROP such untagged
-                        # values -- e.g. a `[text]` array holding one
-                        # concat-produced element and one plain literal lost
-                        # the concat element on that path. rt_strcat_tagged
-                        # (runtime_native.c) normalizes both operands via the
-                        # same tagged-or-raw autodetection rt_interp_cstr uses
-                        # (bug #136) and returns a PROPERLY TAGGED heap string,
-                        # so concat results survive tag-validating consumers.
-                        # The destination MIR type stays Opaque("str") (same
-                        # as before) so local_is_str() keeps routing further
-                        # uses of the result (chained `a + b + c`, `.len()`,
-                        # `==`, `.starts_with()`) through the existing
-                        # tagged-or-raw-tolerant helpers (rt_len,
-                        # rt_text_eq_any, rt_interp_cstr) unchanged. Do NOT
-                        # change lower_string_interpolation/emit_raw_strcat
-                        # (string-interpolation `{expr}` splicing and
-                        # [...].join in method_calls_literals.spl) -- those
-                        # still expect and produce a raw char*, which is what
-                        # rt_print/rt_println consume there; they keep calling
-                        # rt_strcat unchanged.
-                        # native_array_concat_segv: array `+` is CONCATENATION
-                        # (same convention as string `+` just above), not
-                        # arithmetic -- an array-typed operand is (at the
-                        # runtime level) a heap SplArray* pointer, so falling
-                        # through to the generic emit_binop(Add) below would
-                        # integer-ADD the two pointer bit patterns, yielding a
-                        # garbage pointer that SIGSEGVs on first deref (the
-                        # very next `.len()`/element read). Detect array
-                        # operands via local_is_runtime_array (keyed off the
-                        # local's registered runtime_array_locals entry OR its
-                        # MIR Array/Slice type, mirroring local_is_str's
-                        # MIR-type-keyed detection just above -- HIR `.type_`
-                        # is frequently nil on this path). rt_array_concat
-                        # (runtime_native.c) already exists and takes/returns
-                        # SplArray* heap handles -- the exact representation
-                        # `lower_array_lit` (method_calls_literals.spl)
-                        # constructs via rt_array_new/rt_array_push -- so no
-                        # runtime helper needed, only wiring the call here.
-                        var bin_is_array_concat = false
-                        match op:
-                            case Add:
-                                if self.local_is_runtime_array(left_local) or self.local_is_runtime_array(right_local):
-                                    bin_is_array_concat = true
-                            case _:
-                                ()
-                        if bin_is_array_concat:
-                            # Result element/array MIR type: prefer whichever
-                            # operand carries a concrete Array/Slice MIR type
-                            # (both operands are expected to share one element
-                            # type for a well-typed `arr1 + arr2`); fall back
-                            # to a generic i64-element Array type (matches
-                            # decode_runtime_value's own Array/Slice fallback
-                            # convention) when neither operand's MIR type is
-                            # known -- e.g. `[] + [1]` where the empty-literal
-                            # operand's element type defaults to i64 anyway
-                            # (lower_array_lit's own default).
-                            var array_result_type = MirType(kind: MirTypeKind.Array(MirType.i64(), 0))
-                            var array_result_type_known = false
-                            if val left_arr_ty = self.local_mir_type_of(left_local):
-                                match left_arr_ty.kind:
-                                    case MirTypeKind.Array(_, _) | MirTypeKind.Slice(_):
-                                        array_result_type = left_arr_ty
-                                        array_result_type_known = true
-                                    case _: ()
-                            if not array_result_type_known:
-                                if val right_arr_ty = self.local_mir_type_of(right_local):
-                                    match right_arr_ty.kind:
-                                        case MirTypeKind.Array(_, _) | MirTypeKind.Slice(_):
-                                            array_result_type = right_arr_ty
-                                        case _: ()
-                            # Bug #149 (same class): the FuncPtr's declared
-                            # `return_type` is what registers rt_array_concat's
-                            # KNOWN return type at codegen time -- it MUST
-                            # match `array_result_type` (Array/Slice kind ->
-                            # "ptr"), the type the call's DESTINATION local is
-                            # declared with just below. A mismatched i64
-                            # declared-return (while the destination itself is
-                            # Array/Slice-typed) emits the call as `call i64
-                            # @rt_array_concat(...)` while later consumers
-                            # (a second chained `+`, `.len()`, indexing) still
-                            # see the Array/Slice-typed dest and treat it as a
-                            # pointer -- invalid IR ('%lNN defined with type
-                            # i64 but expected ptr'), verified empirically on
-                            # chained `a + [3,4] + [5]`. rt_array_concat
-                            # genuinely returns SplArray* in C (matches the
-                            # static `declare ptr @rt_array_concat(ptr, ptr)`
-                            # in llvm_lib_translate.spl), so array_result_type
-                            # (-> ptr) is correct for params too.
-                            val array_cat_func = MirOperand(kind: MirOperandKind.Const(
-                                MirConstValue.Str("rt_array_concat"),
-                                MirType(kind: MirTypeKind.FuncPtr(MirSignature(
-                                    params: [array_result_type, array_result_type],
-                                    return_type: array_result_type,
-                                    is_variadic: false
-                                )))
-                            ))
-                            var b_array_cat = self.builder
-                            val array_cat_res = b_array_cat.emit_call(array_cat_func, [mir_operand_copy(left_local), mir_operand_copy(right_local)], array_result_type)
-                            self.builder = b_array_cat
-                            if val array_cat_local = array_cat_res:
-                                self.runtime_array_locals[array_cat_local.id] = true
-                                self.mark_runtime_value_local(array_cat_local.id)
-                                val left_elem_syms = self.array_element_struct_syms.get(left_local.id)
-                                if left_elem_syms != nil:
-                                    val les = left_elem_syms ?? ""
-                                    if les != "":
-                                        self.array_element_struct_syms[array_cat_local.id] = les
-                                return array_cat_local
-
-                        var bin_is_str_concat = false
-                        match op:
-                            case Add:
-                                if self.local_is_str(left_local) or self.local_is_str(right_local):
-                                    bin_is_str_concat = true
-                            case _:
-                                ()
-                        if bin_is_str_concat:
-                            # strconcat2: one operand may be a non-str scalar
-                            # (`"n=" + 5`) -- stringify it via
-                            # coerce_concat_operand BEFORE it reaches
-                            # rt_strcat_tagged (see that helper's comment for
-                            # why a raw scalar SIGSEGVs there). A str operand
-                            # passes through unchanged, so text+text is
-                            # unaffected.
-                            val cat_left = self.coerce_concat_operand(left_local)
-                            val cat_right = self.coerce_concat_operand(right_local)
-                            val cat_func = MirOperand(kind: MirOperandKind.Const(
-                                MirConstValue.Str("rt_strcat_tagged"),
-                                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
-                            ))
-                            var b_cat = self.builder
-                            val cat_res = b_cat.emit_call(cat_func, [cat_left, cat_right], MirType(kind: MirTypeKind.Opaque("str")))
-                            self.builder = b_cat
-                            if val cat_local = cat_res:
-                                return cat_local
-
-                        # #148: untyped/native-path text `==`/`!=` must compare
-                        # CONTENT, not raw i64 identity. A "str"-typed MIR local
-                        # (mir_type_is_str) can be materialized as either a
-                        # TAGGED heap-string handle (rt_string_new -- e.g. argv
-                        # elements from rt_get_args) or a RAW char* pointer (a
-                        # bootstrap string literal, emit_bootstrap_str_const),
-                        # and the two representations are statically
-                        # undiscriminable here (same as the Add/concat case
-                        # above). The generic emit_binop(Eq/Ne) below performs a
-                        # plain `icmp eq/ne i64` on the two operands as opaque
-                        # integers -- a tagged handle can never numerically
-                        # equal a raw literal pointer, so `a == "hello"` always
-                        # failed regardless of content. Only intercept when at
-                        # least one operand is provably string-typed
-                        # (local_is_str); a blanket intercept of all untyped
-                        # `==` would wrongly route plain int compares through a
-                        # string-content check. rt_text_eq_any normalizes both
-                        # operands (tagged-or-raw, autodetected -- mirrors the
-                        # rt_interp_cstr coercion bug #136 already established)
-                        # to a raw buffer and compares bytes.
-                        var bin_is_str_eq = false
-                        match op:
-                            case Eq | NotEq:
-                                if self.local_is_str(left_local) or self.local_is_str(right_local):
-                                    bin_is_str_eq = true
-                            case _:
-                                ()
-                        if bin_is_str_eq:
-                            val eq_func = MirOperand(kind: MirOperandKind.Const(
-                                MirConstValue.Str("rt_text_eq_any"),
-                                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
-                            ))
-                            var b_eq = self.builder
-                            val eq_res = b_eq.emit_call(eq_func, [mir_operand_copy(left_local), mir_operand_copy(right_local)], MirType.i64())
-                            self.builder = b_eq
-                            if val eq_local = eq_res:
-                                val raw_bool_val = match op:
-                                    case NotEq:
-                                        var b_neq = self.builder
-                                        val neq_local = b_neq.emit_binop(MirBinOp.BitXor, mir_operand_copy(eq_local), mir_operand_const_int(1), MirType.i64())
-                                        self.builder = b_neq
-                                        neq_local
-                                    case _: eq_local
-                                # rt_text_eq_any returns a raw i64 0/1 (its real
-                                # C ABI return, matching `declare i64
-                                # @rt_text_eq_any(...)`), not a native i1 --
-                                # unlike `rt_is_some` (declared `i1`), so the
-                                # result CANNOT simply be relabeled Bool: any
-                                # later consumer that reads the MIR-declared
-                                # type expects a genuine i1 value, and print()'s
-                                # bool-vs-int render-fn dispatch
-                                # (lower_bootstrap_print_call's is_bool check
-                                # via local_mir_type_of) only fires on a true
-                                # Bool-typed local, else text == text prints
-                                # "1"/"0" instead of "true"/"false" (parity
-                                # case option_is_none_map_llvm's final
-                                # `.unwrap_or(...) == "..."` assertions).
-                                # Narrow via a genuine icmp (mirrors
-                                # decode_runtime_value's Bool-tag decode
-                                # pattern in this same file) rather than
-                                # bitcasting/relabeling the wide value.
-                                var b_narrow = self.builder
-                                val bool_local = b_narrow.emit_binop(MirBinOp.Eq, mir_operand_copy(raw_bool_val), mir_operand_const_int(1), MirType.bool())
-                                self.builder = b_narrow
-                                return bool_local
-
-                        var bin_is_str_order = false
-                        match op:
-                            case Lt | LtEq | Gt | GtEq:
-                                if self.local_is_str(left_local) or self.local_is_str(right_local):
-                                    bin_is_str_order = true
-                            case _:
-                                ()
-                        if bin_is_str_order:
-                            val cmp_func = MirOperand(kind: MirOperandKind.Const(
-                                MirConstValue.Str("rt_text_cmp_any"),
-                                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
-                            ))
-                            var b_cmp = self.builder
-                            val cmp_res = b_cmp.emit_call(cmp_func, [mir_operand_copy(left_local), mir_operand_copy(right_local)], MirType.i64())
-                            self.builder = b_cmp
-                            if val cmp_local = cmp_res:
-                                var b_order = self.builder
-                                val ordered = b_order.emit_binop(self.lower_binop(op), mir_operand_copy(cmp_local), mir_operand_const_int(0), MirType.bool())
-                                self.builder = b_order
-                                return ordered
-
-                        val mir_op = self.lower_binop(op)
-                        # Float arithmetic must carry an F64 dest: infer_binop_type
-                        # defaults arithmetic to i64, which makes translate_binop
-                        # emit integer add/mul on the operands' double BIT PATTERNS
-                        # (e.g. `2.5 * 4.0` natively computed garbage). Detect float
-                        # operands by their MIR local type (HIR `.type_` is nil on
-                        # this path), mirroring the string-concat detection above.
-                        var result_type = self.infer_binop_type(op)
-                        match op:
-                            case Add | Sub | Mul | Div | Mod | Pow:
-                                if self.local_is_float(left_local) or self.local_is_float(right_local):
-                                    result_type = if self.local_is_f32(left_local) and self.local_is_f32(right_local): MirType(kind: MirTypeKind.F32) else: MirType.f64()
-                            case _:
-                                ()
-                        var b = self.builder
-                        var left_binop = left_local
-                        var right_binop = right_local
-                        var left_f32 = false
-                        var left_f64 = false
-                        var right_f32 = false
-                        var right_f64 = false
-                        var left_i64 = false
-                        var right_i64 = false
-                        var left_narrow_int = false
-                        var right_narrow_int = false
-                        var left_binop_type = MirType.i64()
-                        var right_binop_type = MirType.i64()
-                        if val left_type = self.local_mir_type_of(left_local):
-                            left_binop_type = left_type
-                            match left_type.kind:
-                                case MirTypeKind.F32: left_f32 = true
-                                case MirTypeKind.F64: left_f64 = true
-                                case MirTypeKind.I64 | MirTypeKind.U64: left_i64 = true
-                                case MirTypeKind.I8 | MirTypeKind.U8 | MirTypeKind.I16 | MirTypeKind.U16 | MirTypeKind.I32 | MirTypeKind.U32: left_narrow_int = true
-                                case _: ()
-                        if val right_type = self.local_mir_type_of(right_local):
-                            right_binop_type = right_type
-                            match right_type.kind:
-                                case MirTypeKind.F32: right_f32 = true
-                                case MirTypeKind.F64: right_f64 = true
-                                case MirTypeKind.I64 | MirTypeKind.U64: right_i64 = true
-                                case MirTypeKind.I8 | MirTypeKind.U8 | MirTypeKind.I16 | MirTypeKind.U16 | MirTypeKind.I32 | MirTypeKind.U32: right_narrow_int = true
-                                case _: ()
-                        var result_f64 = false
-                        match result_type.kind:
-                            case MirTypeKind.F64: result_f64 = true
-                            case _: ()
-                        if left_f32 and (right_f64 or result_f64):
-                            left_binop = b.emit_cast(mir_operand_copy(left_binop), MirType.f64())
-                        if right_f32 and (left_f64 or result_f64):
-                            right_binop = b.emit_cast(mir_operand_copy(right_binop), MirType.f64())
-                        var comparison = false
-                        var ordered_comparison = false
-                        match op:
-                            case Eq | NotEq | Lt | LtEq | Gt | GtEq: comparison = true
-                            case _: ()
-                        match op:
-                            case Lt | LtEq | Gt | GtEq: ordered_comparison = true
-                            case _: ()
-                        var vulkan_u32_numeric = false
-                        if self.current_gpu_kernel_target == "vulkan":
-                            if left_binop_type.kind == MirTypeKind.U32 or right_binop_type.kind == MirTypeKind.U32:
-                                vulkan_u32_numeric = true
-                        if vulkan_u32_numeric:
-                            left_binop = self.vulkan_u32_local(left_binop)
-                            right_binop = self.vulkan_u32_local(right_binop)
-                            b = self.builder
-                            if not comparison:
-                                result_type = MirType(kind: MirTypeKind.U32)
-                        val left_float = left_f32 or left_f64
-                        val right_float = right_f32 or right_f64
-                        val left_int = left_i64 or left_narrow_int
-                        val right_int = right_i64 or right_narrow_int
-                        val mixed_numeric_kinds = (left_float and right_int) or (left_int and right_float)
-                        if mixed_numeric_kinds:
-                            match op:
-                                case Eq:
-                                    val strict_eq = b.emit_const_bool(false)
-                                    self.builder = b
-                                    return strict_eq
-                                case NotEq:
-                                    val strict_ne = b.emit_const_bool(true)
-                                    self.builder = b
-                                    return strict_ne
-                                case _: ()
-                        # An unsigned int operand promoted to f64 for a mixed
-                        # int/float comparison must use an UNSIGNED int->float
-                        # convert (uitofp / fcvt_from_uint); a signed convert
-                        # reads a high-bit u64 (>= 2^63) as negative, so
-                        # `(2^63 as u64) > 0.0` wrongly yields false (bug
-                        # u64_to_f64_comparison_uses_signed_conversion_2026-07-25).
-                        # The u64 suffix/annotation is frequently flattened to an
-                        # I64 MIR local on this path, so consult BOTH the MIR
-                        # local type and the operand's static HIR type; when
-                        # unsigned, retype the operand to U64 before the f64 cast
-                        # so the backend's Cast lowering (which keys off the
-                        # source operand type) selects the unsigned convert.
-                        var left_int_unsigned = false
-                        match left_binop_type.kind:
-                            case MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64: left_int_unsigned = true
-                            case _: ()
-                        if not left_int_unsigned:
-                            left_int_unsigned = hir_expr_static_unsigned(left)
-                        var right_int_unsigned = false
-                        match right_binop_type.kind:
-                            case MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64: right_int_unsigned = true
-                            case _: ()
-                        if not right_int_unsigned:
-                            right_int_unsigned = hir_expr_static_unsigned(right)
-                        if ordered_comparison and mixed_numeric_kinds:
-                            if not left_f64:
-                                if left_int_unsigned:
-                                    left_binop = b.emit_cast(mir_operand_copy(left_binop), MirType(kind: MirTypeKind.U64))
-                                left_binop = b.emit_cast(mir_operand_copy(left_binop), MirType.f64())
-                            if not right_f64:
-                                if right_int_unsigned:
-                                    right_binop = b.emit_cast(mir_operand_copy(right_binop), MirType(kind: MirTypeKind.U64))
-                                right_binop = b.emit_cast(mir_operand_copy(right_binop), MirType.f64())
-                        if comparison and left_narrow_int and right_i64:
-                            right_binop = b.emit_cast(mir_operand_copy(right_binop), left_binop_type)
-                        elif comparison and left_i64 and right_narrow_int:
-                            left_binop = b.emit_cast(mir_operand_copy(left_binop), right_binop_type)
-                        if comparison and self.is_runtime_value_local(left_binop.id) and self.nil_locals.contains(right_binop.id):
-                            self.builder = b
-                            right_binop = self.box_runtime_value(right_binop)
-                            b = self.builder
-                        elif comparison and self.nil_locals.contains(left_binop.id) and self.is_runtime_value_local(right_binop.id):
-                            self.builder = b
-                            left_binop = self.box_runtime_value(left_binop)
-                            b = self.builder
-                        val binop_result = b.emit_binop(mir_op, mir_operand_copy(left_binop), mir_operand_copy(right_binop), result_type)
-                        self.builder = b
-                        binop_result
+                self.lower_binary_expr(expr_value, op, left, right)
 
             case Unary(op, operand):
 
