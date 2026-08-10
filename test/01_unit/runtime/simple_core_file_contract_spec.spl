@@ -6,14 +6,15 @@ describe "Simple-core file move ABI":
         expect(source).to_contain("pub fn rt_file_rename(src_ptr: i64, src_len: i64, dst_ptr: i64, dst_len: i64) -> i8:")
         expect(source).to_contain("pub fn rt_file_move(src_ptr: i64, src_len: i64, dst_ptr: i64, dst_len: i64) -> i8:")
 
-    it "tries atomic rename before copy and source removal fallback":
+    it "stays rename-only when provider errno is unavailable":
         val source = file_read("src/runtime/simple_core/core_fs.spl")
         val move_start = source.index_of("pub fn rt_file_move(")
         expect(move_start).to_be_greater_than(-1)
         val move_body = source.substring(move_start)
-        expect(move_body).to_contain("if rt_file_rename(src_ptr, src_len, dst_ptr, dst_len) == 1:")
-        expect(move_body).to_contain("if rt_file_copy(src_ptr, src_len, dst_ptr, dst_len) != 1:")
-        expect(move_body).to_contain("rt_file_remove(src_ptr, src_len)")
+        expect(move_body).to_contain("rt_file_rename(src_ptr, src_len, dst_ptr, dst_len)")
+        expect(move_body.contains("rt_file_copy(src_ptr, src_len, dst_ptr, dst_len)")).to_equal(false)
+        expect(move_body.contains("rt_file_remove(src_ptr, src_len)")).to_equal(false)
+        expect(move_body).to_contain("cannot yet read the provider errno")
 
     it "rejects malformed text buffers before filesystem calls":
         val source = file_read("src/runtime/simple_core/core_fs.spl")
@@ -22,3 +23,11 @@ describe "Simple-core file move ABI":
         val helper_body = source.substring(helper_start)
         expect(helper_body).to_contain("if ptr < 1 or len < 0:")
         expect(helper_body).to_contain("if byte == 0:")
+
+    it "executes the rename-only provider behavior from the emitted archive":
+        val gate = file_read("scripts/check/check-simple-core-runtime-smoke.shs")
+        expect(gate).to_contain("-DSIMPLE_RT_FILE_MOVE_RENAME_ONLY=1")
+        expect(gate).to_contain("src/runtime/test/rt_file_rename_move_selfcheck.c")
+        expect(gate).to_contain("\"$CORE_ARCHIVE\"")
+        expect(gate).to_contain("simple_core_file_move_selfcheck=true")
+        expect(gate).to_contain("SELFCHECK PASSED (0 failures)")

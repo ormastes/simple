@@ -19,6 +19,8 @@ TUI_ENTRY="$BUILD_DIR/minimal_tui_smoke_entry.spl"
 TUI_BIN="$BUILD_DIR/minimal_tui_smoke_simple_core"
 TUI_APP_ENTRY="$BUILD_DIR/minimal_tui_app_entry.spl"
 TUI_APP_BIN="$BUILD_DIR/minimal_tui_app_simple_core"
+MOVE_SELF_CHECK_BIN="$BUILD_DIR/rt_file_rename_move_simple_core_selfcheck"
+MOVE_SELF_CHECK_LOG="$BUILD_DIR/rt_file_rename_move_simple_core_selfcheck.out"
 
 mkdir -p "$BUILD_DIR" "$CORE_DIR"
 
@@ -101,6 +103,41 @@ if archive_has_symbol "__simple_call_module_inits"; then
     exit 1
 fi
 
+CC_NAME="${CC:-cc}"
+command -v "$CC_NAME" >/dev/null 2>&1 || {
+    echo "simple_core_file_move_selfcheck=false"
+    echo "error=cc_not_found:$CC_NAME"
+    exit 1
+}
+SELF_CHECK_LIBS="-lm -lpthread"
+DEAD_STRIP_FLAG="-Wl,--gc-sections"
+if [ "$(uname -s)" = "Linux" ]; then
+    SELF_CHECK_LIBS="$SELF_CHECK_LIBS -ldl"
+else
+    DEAD_STRIP_FLAG="-Wl,-dead_strip"
+fi
+# shellcheck disable=SC2086
+"$CC_NAME" -std=gnu11 -O1 -DSIMPLE_RT_FILE_MOVE_RENAME_ONLY=1 \
+    -ffunction-sections -fdata-sections \
+    -I"src/runtime" -I"src/runtime/platform" \
+    src/runtime/test/rt_file_rename_move_selfcheck.c \
+    "$CORE_ARCHIVE" $DEAD_STRIP_FLAG $SELF_CHECK_LIBS \
+    -o "$MOVE_SELF_CHECK_BIN" || {
+        echo "simple_core_file_move_selfcheck=false"
+        echo "error=file_move_selfcheck_link_failed"
+        exit 1
+    }
+"$MOVE_SELF_CHECK_BIN" >"$MOVE_SELF_CHECK_LOG" 2>&1 || {
+    echo "simple_core_file_move_selfcheck=false"
+    echo "error=file_move_selfcheck_failed log=$MOVE_SELF_CHECK_LOG"
+    exit 1
+}
+if ! grep -q '^SELFCHECK PASSED (0 failures)$' "$MOVE_SELF_CHECK_LOG"; then
+    echo "simple_core_file_move_selfcheck=false"
+    echo "error=file_move_selfcheck_receipt_missing log=$MOVE_SELF_CHECK_LOG"
+    exit 1
+fi
+
 case "$CORE_ARCHIVE" in
     /*) SIMPLE_CORE_RUNTIME_PATH="$CORE_ARCHIVE" ;;
     *) SIMPLE_CORE_RUNTIME_PATH="$ROOT_DIR/$CORE_ARCHIVE" ;;
@@ -110,6 +147,7 @@ export SIMPLE_CORE_RUNTIME_PATH
 if [ "$ARCHIVE_ONLY" = "1" ]; then
     echo "simple_core_archive=$CORE_ARCHIVE"
     echo "simple_core_archive_complete=true"
+    echo "simple_core_file_move_selfcheck=true"
     exit 0
 fi
 
@@ -206,6 +244,7 @@ if [ "$HOSTED_MARKERS" != "0" ] || [ "$UNWIND_MARKERS" != "0" ]; then
 fi
 
 echo "simple_core_archive=$CORE_ARCHIVE"
+echo "simple_core_file_move_selfcheck=true"
 echo "simple_core_hello=true"
 echo "simple_core_char_from_code=true"
 echo "simple_core_standalone_tui=true"
