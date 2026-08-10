@@ -10,8 +10,13 @@
 #[no_mangle]
 pub unsafe extern "C" fn rt_panic(message_ptr: *const u8, message_len: u64) {
     let message = string_arg_or_unknown(message_ptr, message_len as i64);
-    let message = if message == "<unknown>" { "panic".to_string() } else { message };
+    let message = if message == "<unknown>" {
+        "panic".to_string()
+    } else {
+        message
+    };
     eprintln!("{message}");
+    super::env_process::terminal_emergency_restore_for_panic();
     std::process::abort();
 }
 

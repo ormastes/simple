@@ -9,8 +9,28 @@
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
+#include <pthread.h>
+#include <stdatomic.h>
 
 static volatile sig_atomic_t prior_winch_seen;
+static atomic_int race_phase;
+
+static void* signal_during_teardown(void* unused) {
+    (void)unused;
+    bool acknowledged = false;
+    for (;;) {
+        int phase = atomic_load_explicit(&race_phase, memory_order_acquire);
+        if (phase == 2) break;
+        if (phase == 1 || phase == 3) {
+            assert(raise(SIGWINCH) == 0);
+            if (!acknowledged) {
+                acknowledged = true;
+                atomic_store_explicit(&race_phase, 3, memory_order_release);
+            }
+        }
+    }
+    return NULL;
+}
 
 static void prior_winch(int signum) {
     (void)signum;
@@ -44,9 +64,10 @@ int main(void) {
 
         struct termios before;
         assert(tcgetattr(STDIN_FILENO, &before) == 0);
-        struct termios raw = before;
-        cfmakeraw(&raw);
-        assert(tcsetattr(STDIN_FILENO, TCSANOW, &raw) == 0);
+        assert(rt_terminal_enable_raw_mode());
+        struct termios active_raw;
+        assert(tcgetattr(STDIN_FILENO, &active_raw) == 0);
+        assert((active_raw.c_lflag & (ICANON | ECHO)) == 0);
         struct sigaction prior = {0};
         prior.sa_handler = prior_winch;
         assert(sigaction(SIGWINCH, &prior, NULL) == 0);
@@ -68,7 +89,7 @@ int main(void) {
         char proceed = 0;
         assert(read(ack[0], &proceed, 1) == 1 && proceed == 'T');
         assert(rt_terminal_read_byte_interruptible(scope) == -2);
-        assert(tcsetattr(STDIN_FILENO, TCSANOW, &before) == 0);
+        assert(rt_terminal_disable_raw_mode());
         assert(rt_terminal_signal_scope_end(scope));
         int ownership_probe = open("/dev/null", O_RDONLY);
         assert(ownership_probe >= 0);
@@ -111,6 +132,53 @@ int main(void) {
     close(ready[0]);
     close(ack[1]);
     assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+
+    /* Exact panic reproducer: production panic must restore the PTY instead
+       of leaving the invoking shell in raw mode. */
+    int panic_master = -1;
+    int panic_slave = -1;
+    assert(openpty(&panic_master, &panic_slave, NULL, NULL, NULL) == 0);
+    struct termios panic_before;
+    assert(tcgetattr(panic_slave, &panic_before) == 0);
+    pid_t panic_child = fork();
+    assert(panic_child >= 0);
+    if (panic_child == 0) {
+        close(panic_master);
+        assert(dup2(panic_slave, STDIN_FILENO) == STDIN_FILENO);
+        close(panic_slave);
+        assert(rt_terminal_signal_scope_begin() > 0);
+        assert(rt_terminal_enable_raw_mode());
+        rt_panic("intentional terminal restoration contract");
+        _exit(99);
+    }
+    close(panic_slave);
+    assert(waitpid(panic_child, &status, 0) == panic_child);
+    assert((WIFSIGNALED(status)) ||
+           (WIFEXITED(status) && WEXITSTATUS(status) != 0));
+    struct termios panic_after;
+    assert(tcgetattr(panic_master, &panic_after) == 0);
+    assert((panic_before.c_lflag & (ICANON | ECHO)) ==
+           (panic_after.c_lflag & (ICANON | ECHO)));
+    close(panic_master);
+
+    /* Adjacent prevention: signal delivery from another thread may overlap
+       teardown, but must never write through a descriptor after it is reused. */
+    atomic_store(&race_phase, 0);
+    pthread_t sender;
+    assert(pthread_create(&sender, NULL, signal_during_teardown, NULL) == 0);
+    int64_t race_scope = rt_terminal_signal_scope_begin();
+    assert(race_scope > 0);
+    atomic_store_explicit(&race_phase, 1, memory_order_release);
+    while (atomic_load_explicit(&race_phase, memory_order_acquire) != 3) {
+    }
+    assert(rt_terminal_read_byte_interruptible(race_scope) == -3);
+    assert(rt_terminal_signal_scope_end(race_scope));
+    int reused_probe = open("/dev/null", O_RDONLY);
+    assert(reused_probe >= 0);
+    atomic_store_explicit(&race_phase, 2, memory_order_release);
+    assert(pthread_join(sender, NULL) == 0);
+    assert(fcntl(reused_probe, F_GETFD) >= 0);
+    close(reused_probe);
 
     int eof_input[2];
     int eof_ready[2];

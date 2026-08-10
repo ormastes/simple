@@ -14,24 +14,95 @@
 #ifndef SPL_TERMINAL_SCOPE_END
 #define SPL_TERMINAL_SCOPE_END rt_terminal_signal_scope_end
 #endif
+#ifndef SPL_TERMINAL_SCOPE_EMERGENCY_RESTORE
+#define SPL_TERMINAL_SCOPE_EMERGENCY_RESTORE rt_terminal_signal_scope_emergency_restore
+#endif
 
 #if defined(_WIN32)
 
+#include <io.h>
+#include <windows.h>
+
+static HANDLE spl_terminal_signal_event;
+static volatile LONG spl_terminal_stop_pending;
+static volatile LONG spl_terminal_scope_active;
+static int64_t spl_terminal_scope_handle;
+
+static BOOL WINAPI spl_terminal_console_handler(DWORD event) {
+    if (event == CTRL_C_EVENT || event == CTRL_BREAK_EVENT ||
+        event == CTRL_CLOSE_EVENT || event == CTRL_LOGOFF_EVENT ||
+        event == CTRL_SHUTDOWN_EVENT) {
+        InterlockedExchange(&spl_terminal_stop_pending, 1);
+        if (spl_terminal_signal_event != NULL) SetEvent(spl_terminal_signal_event);
+        return TRUE;
+    }
+    return FALSE;
+}
+
 int64_t SPL_TERMINAL_SCOPE_BEGIN(void) {
-    errno = ENOSYS;
-    return 0;
+    if (InterlockedCompareExchange(&spl_terminal_scope_active, 1, 0) != 0) {
+        errno = EBUSY;
+        return 0;
+    }
+    spl_terminal_signal_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (spl_terminal_signal_event == NULL ||
+        !SetConsoleCtrlHandler(spl_terminal_console_handler, TRUE)) {
+        if (spl_terminal_signal_event != NULL) CloseHandle(spl_terminal_signal_event);
+        spl_terminal_signal_event = NULL;
+        InterlockedExchange(&spl_terminal_scope_active, 0);
+        errno = EIO;
+        return 0;
+    }
+    InterlockedExchange(&spl_terminal_stop_pending, 0);
+    spl_terminal_scope_handle++;
+    if (spl_terminal_scope_handle <= 0) spl_terminal_scope_handle = 1;
+    return spl_terminal_scope_handle;
 }
 
 int64_t SPL_TERMINAL_SCOPE_READ(int64_t scope) {
-    (void)scope;
-    errno = EINVAL;
-    return -4;
+    if (InterlockedCompareExchange(&spl_terminal_scope_active, 1, 1) == 0 ||
+        scope <= 0 || scope != spl_terminal_scope_handle) {
+        errno = EINVAL;
+        return -4;
+    }
+    HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
+    HANDLE waits[2] = {input, spl_terminal_signal_event};
+    for (;;) {
+        DWORD ready = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
+        if (ready == WAIT_OBJECT_0 + 1) {
+            ResetEvent(spl_terminal_signal_event);
+            if (InterlockedExchange(&spl_terminal_stop_pending, 0) != 0) return -2;
+            continue;
+        }
+        if (ready != WAIT_OBJECT_0) { errno = EIO; return -4; }
+        unsigned char byte = 0;
+        int count = _read(0, &byte, 1);
+        if (count == 1) return (int64_t)byte;
+        if (count == 0) return -1;
+        if (errno == EINTR) continue;
+        return -4;
+    }
 }
 
 bool SPL_TERMINAL_SCOPE_END(int64_t scope) {
-    (void)scope;
-    errno = EINVAL;
-    return false;
+    if (InterlockedCompareExchange(&spl_terminal_scope_active, 1, 1) == 0 ||
+        scope <= 0 || scope != spl_terminal_scope_handle) {
+        errno = EINVAL;
+        return false;
+    }
+    bool ok = SetConsoleCtrlHandler(spl_terminal_console_handler, FALSE) != 0;
+    HANDLE event = spl_terminal_signal_event;
+    spl_terminal_signal_event = NULL;
+    InterlockedExchange(&spl_terminal_scope_active, 0);
+    InterlockedExchange(&spl_terminal_stop_pending, 0);
+    if (event != NULL && !CloseHandle(event)) ok = false;
+    if (!ok) errno = EIO;
+    return ok;
+}
+
+void SPL_TERMINAL_SCOPE_EMERGENCY_RESTORE(void) {
+    if (InterlockedCompareExchange(&spl_terminal_scope_active, 1, 1) != 0)
+        (void)SPL_TERMINAL_SCOPE_END(spl_terminal_scope_handle);
 }
 
 #else
@@ -39,8 +110,12 @@ bool SPL_TERMINAL_SCOPE_END(int64_t scope) {
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <string.h>
 #include <unistd.h>
+
+_Static_assert(ATOMIC_INT_LOCK_FREE == 2,
+               "terminal signal handler descriptors require lock-free atomics");
 
 enum {
     SPL_TERMINAL_SCOPE_SIGNAL_COUNT = 4,
@@ -57,14 +132,15 @@ typedef struct SplTerminalSignalScopeState {
     int pipe_write;
     int installed_handlers;
     struct sigaction previous_handlers[SPL_TERMINAL_SCOPE_SIGNAL_COUNT];
-    volatile sig_atomic_t stop_pending;
-    volatile sig_atomic_t resize_pending;
 } SplTerminalSignalScopeState;
 
 static SplTerminalSignalScopeState spl_terminal_signal_scope = {
-    false, 0, -1, -1, 0, {{0}}, 0, 0
+    false, 0, -1, -1, 0, {{0}}
 };
-static volatile sig_atomic_t spl_terminal_signal_pipe_write = -1;
+static _Atomic int spl_terminal_signal_pipe_write = -1;
+static _Atomic unsigned spl_terminal_signal_handlers_inflight = 0;
+static _Atomic int spl_terminal_stop_pending = 0;
+static _Atomic int spl_terminal_resize_pending = 0;
 static int64_t spl_terminal_signal_next_handle = 1;
 
 static const int spl_terminal_managed_signals[SPL_TERMINAL_SCOPE_SIGNAL_COUNT] = {
@@ -80,16 +156,21 @@ static void spl_terminal_managed_signal_set(sigset_t* signals) {
 
 static void spl_terminal_scope_signal_handler(int signum) {
     int saved_errno = errno;
+    atomic_fetch_add_explicit(&spl_terminal_signal_handlers_inflight, 1,
+                              memory_order_acquire);
     if (signum == SIGWINCH) {
-        spl_terminal_signal_scope.resize_pending = 1;
+        atomic_store_explicit(&spl_terminal_resize_pending, 1, memory_order_release);
     } else {
-        spl_terminal_signal_scope.stop_pending = 1;
+        atomic_store_explicit(&spl_terminal_stop_pending, 1, memory_order_release);
     }
-    int fd = (int)spl_terminal_signal_pipe_write;
+    int fd = atomic_load_explicit(&spl_terminal_signal_pipe_write,
+                                  memory_order_acquire);
     if (fd >= 0) {
         unsigned char wake = (unsigned char)signum;
         (void)write(fd, &wake, 1);
     }
+    atomic_fetch_sub_explicit(&spl_terminal_signal_handlers_inflight, 1,
+                              memory_order_release);
     errno = saved_errno;
 }
 
@@ -130,10 +211,10 @@ static int64_t spl_terminal_take_pending_signal(void) {
     sigset_t previous_mask;
     spl_terminal_managed_signal_set(&managed);
     bool masked = sigprocmask(SIG_BLOCK, &managed, &previous_mask) == 0;
-    sig_atomic_t stop = spl_terminal_signal_scope.stop_pending;
-    sig_atomic_t resize = spl_terminal_signal_scope.resize_pending;
-    spl_terminal_signal_scope.stop_pending = 0;
-    spl_terminal_signal_scope.resize_pending = 0;
+    int stop = atomic_exchange_explicit(&spl_terminal_stop_pending, 0,
+                                        memory_order_acq_rel);
+    int resize = atomic_exchange_explicit(&spl_terminal_resize_pending, 0,
+                                          memory_order_acq_rel);
     if (masked) {
         (void)sigprocmask(SIG_SETMASK, &previous_mask, NULL);
     }
@@ -174,10 +255,11 @@ int64_t SPL_TERMINAL_SCOPE_BEGIN(void) {
 
     spl_terminal_signal_scope.pipe_read = pipe_fds[0];
     spl_terminal_signal_scope.pipe_write = pipe_fds[1];
-    spl_terminal_signal_scope.stop_pending = 0;
-    spl_terminal_signal_scope.resize_pending = 0;
+    atomic_store(&spl_terminal_stop_pending, 0);
+    atomic_store(&spl_terminal_resize_pending, 0);
     spl_terminal_signal_scope.installed_handlers = 0;
-    spl_terminal_signal_pipe_write = pipe_fds[1];
+    atomic_store_explicit(&spl_terminal_signal_pipe_write, pipe_fds[1],
+                          memory_order_release);
 
     struct sigaction action;
     memset(&action, 0, sizeof(action));
@@ -188,7 +270,8 @@ int64_t SPL_TERMINAL_SCOPE_BEGIN(void) {
         if (sigaction(spl_terminal_managed_signals[i], &action,
                       &spl_terminal_signal_scope.previous_handlers[i]) != 0) {
             failure_errno = errno;
-            spl_terminal_signal_pipe_write = -1;
+            atomic_store_explicit(&spl_terminal_signal_pipe_write, -1,
+                                  memory_order_release);
             spl_terminal_restore_handlers(spl_terminal_signal_scope.installed_handlers,
                                           &failure_errno);
             spl_terminal_close_pipe(&failure_errno);
@@ -211,7 +294,8 @@ int64_t SPL_TERMINAL_SCOPE_BEGIN(void) {
         failure_errno = errno;
         spl_terminal_signal_scope.active = false;
         spl_terminal_signal_scope.handle = 0;
-        spl_terminal_signal_pipe_write = -1;
+        atomic_store_explicit(&spl_terminal_signal_pipe_write, -1,
+                              memory_order_release);
         spl_terminal_restore_handlers(spl_terminal_signal_scope.installed_handlers,
                                       &failure_errno);
         spl_terminal_close_pipe(&failure_errno);
@@ -285,15 +369,19 @@ bool SPL_TERMINAL_SCOPE_END(int64_t scope) {
     bool masked = sigprocmask(SIG_BLOCK, &managed, &previous_mask) == 0;
     int first_errno = masked ? 0 : errno;
 
-    spl_terminal_signal_pipe_write = -1;
+    atomic_store_explicit(&spl_terminal_signal_pipe_write, -1,
+                          memory_order_release);
     spl_terminal_restore_handlers(spl_terminal_signal_scope.installed_handlers,
                                   &first_errno);
+    while (atomic_load_explicit(&spl_terminal_signal_handlers_inflight,
+                                memory_order_acquire) != 0) {
+    }
     spl_terminal_close_pipe(&first_errno);
     spl_terminal_signal_scope.active = false;
     spl_terminal_signal_scope.handle = 0;
     spl_terminal_signal_scope.installed_handlers = 0;
-    spl_terminal_signal_scope.stop_pending = 0;
-    spl_terminal_signal_scope.resize_pending = 0;
+    atomic_store(&spl_terminal_stop_pending, 0);
+    atomic_store(&spl_terminal_resize_pending, 0);
 
     if (masked && sigprocmask(SIG_SETMASK, &previous_mask, NULL) != 0 &&
         first_errno == 0) {
@@ -306,10 +394,16 @@ bool SPL_TERMINAL_SCOPE_END(int64_t scope) {
     return true;
 }
 
+void SPL_TERMINAL_SCOPE_EMERGENCY_RESTORE(void) {
+    if (spl_terminal_signal_scope.active)
+        (void)SPL_TERMINAL_SCOPE_END(spl_terminal_signal_scope.handle);
+}
+
 #endif
 
 #undef SPL_TERMINAL_SCOPE_BEGIN
 #undef SPL_TERMINAL_SCOPE_READ
 #undef SPL_TERMINAL_SCOPE_END
+#undef SPL_TERMINAL_SCOPE_EMERGENCY_RESTORE
 
 #endif

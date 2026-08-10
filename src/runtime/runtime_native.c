@@ -574,6 +574,7 @@ SPL_CORE_C_WEAK bool rt_terminal_is_tty_handle(int64_t handle) {
 }
 
 #include "runtime_terminal_signal_scope_impl.h"
+#include "runtime_terminal_mode_impl.h"
 
 #undef SPL_CORE_C_WEAK
 
@@ -7288,10 +7289,14 @@ void rt_ptr_write_i64(int64_t addr, int64_t offset, int64_t value) {
  * rt_contract_arg_len statics were removed with them. */
 
 void rt_panic(const char* msg) {
+    (void)rt_terminal_disable_raw_mode();
+    rt_terminal_signal_scope_emergency_restore();
     spl_panic(msg);
 }
 
 void panic(int64_t msg) {
+    (void)rt_terminal_disable_raw_mode();
+    rt_terminal_signal_scope_emergency_restore();
     RtCoreString* text = rt_core_as_string(msg);
     spl_panic(text ? text->data : "panic");
 }

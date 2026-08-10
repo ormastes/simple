@@ -30,6 +30,12 @@ end. Invalid handles, repeated end, or reads after end return the documented
 error result with `errno = EINVAL`; they never close a potentially recycled
 descriptor. No global atexit callback writes terminal escapes.
 
+The scope is process-global and begin/end are owned by the terminal session
+thread. Signal delivery may occur on any thread: a lock-free in-flight counter
+guards the short handler section, and teardown retires the descriptor before
+waiting for that counter. The runtime panic path restores production raw mode
+and the active signal scope directly before abort, without an atexit handler.
+
 ## Verification
 
 `test/01_unit/runtime/terminal_signal_scope_focus_test.c` is the red-before
@@ -38,3 +44,6 @@ sends WINCH then TERM and verifies resize does not exit, TERM wakes promptly,
 the child restores termios, and the parent's preinstalled handler is restored
 after scope teardown. The existing native focus test redirects stdout through
 a real pipe and verifies the TTY boundary reports false.
+The same test invokes the production raw-mode APIs, proves panic restoration on
+a PTY, and delivers WINCH concurrently with teardown before checking that a
+subsequently opened descriptor remains valid.

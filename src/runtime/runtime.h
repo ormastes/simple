@@ -624,6 +624,9 @@ bool     rt_terminal_is_tty_handle(int64_t handle);
 int64_t  rt_terminal_signal_scope_begin(void);
 int64_t  rt_terminal_read_byte_interruptible(int64_t scope);
 bool     rt_terminal_signal_scope_end(int64_t scope);
+void     rt_terminal_signal_scope_emergency_restore(void);
+bool     rt_terminal_enable_raw_mode(void);
+bool     rt_terminal_disable_raw_mode(void);
 
 /* ===== Memory ===== */
 

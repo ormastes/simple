@@ -1983,6 +1983,7 @@ bool rt_terminal_is_tty_handle(int64_t handle) {
 }
 
 #include "runtime_terminal_signal_scope_impl.h"
+#include "runtime_terminal_mode_impl.h"
 
 /* ================================================================
  * Byte / Encoding / Crypto / Network Externs

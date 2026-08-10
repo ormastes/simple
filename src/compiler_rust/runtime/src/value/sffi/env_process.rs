@@ -1452,15 +1452,11 @@ pub extern "C" fn rt_terminal_get_size() -> RuntimeValue {
 pub extern "C" fn rt_terminal_is_tty_handle(handle: i64) -> bool {
     #[cfg(unix)]
     {
-        matches!(handle, 0..=2) && unsafe {
-            libc::isatty(handle as libc::c_int) != 0
-        }
+        matches!(handle, 0..=2) && unsafe { libc::isatty(handle as libc::c_int) != 0 }
     }
     #[cfg(windows)]
     {
-        matches!(handle, 0..=2) && unsafe {
-            libc::_isatty(handle as libc::c_int) != 0
-        }
+        matches!(handle, 0..=2) && unsafe { libc::_isatty(handle as libc::c_int) != 0 }
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -1472,6 +1468,7 @@ unsafe extern "C" {
     fn rt_hosted_terminal_signal_scope_begin() -> i64;
     fn rt_hosted_terminal_read_byte_interruptible(scope: i64) -> i64;
     fn rt_hosted_terminal_signal_scope_end(scope: i64) -> bool;
+    fn rt_hosted_terminal_signal_scope_emergency_restore();
 }
 
 #[no_mangle]
@@ -1487,6 +1484,11 @@ pub extern "C" fn rt_terminal_read_byte_interruptible(scope: i64) -> i64 {
 #[no_mangle]
 pub extern "C" fn rt_terminal_signal_scope_end(scope: i64) -> bool {
     unsafe { rt_hosted_terminal_signal_scope_end(scope) }
+}
+
+pub(crate) fn terminal_emergency_restore_for_panic() {
+    let _ = rt_terminal_disable_raw_mode();
+    unsafe { rt_hosted_terminal_signal_scope_emergency_restore() };
 }
 
 // Saved termios state for stdin (fd 0), captured by rt_terminal_enable_raw_mode
@@ -1803,12 +1805,7 @@ mod tests {
             let value = b"ok";
             for name in ["", "TEST=INVALID", "TEST\0INVALID"] {
                 let (name_ptr, name_len) = str_to_ptr(name);
-                assert!(!rt_env_set(
-                    name_ptr,
-                    name_len,
-                    value.as_ptr(),
-                    value.len() as u64
-                ));
+                assert!(!rt_env_set(name_ptr, name_len, value.as_ptr(), value.len() as u64));
             }
 
             let (name_ptr, name_len) = str_to_ptr("TEST_ENV_NUL_SIMPLE");
