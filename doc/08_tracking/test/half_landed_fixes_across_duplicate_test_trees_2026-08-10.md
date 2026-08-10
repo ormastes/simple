@@ -1,6 +1,8 @@
 # Half-landed fixes across the duplicate test trees — census + repairs (Q14)
 
-**Status:** OPEN — 26 half-landed fixes identified, 7 repaired and landed.
+**Status:** OPEN — 26 half-landed fixes identified, 15 repaired and landed.
+The guard recommended at the bottom of this document is now IMPLEMENTED
+(`879108c80c2`); see "Guard — landed" below.
 **Measured against:** committed tree at `origin/main` = `9072192c4ff` (never the
 shared working copy). Repairs landed on later tips; shas listed below.
 **Predecessor:** `duplicate_test_tree_merge_worklist_2026-08-09.md` (v3),
@@ -112,24 +114,74 @@ on that leg for four days while the bug doc read FIXED.
 `scripts/check/test_tree_divergence_baseline.txt` is trimmed by one line per
 converged pair, as `b4c4382e0c5` did.
 
-## Remaining half-landed fixes — not yet repaired
+## Second repair wave (2026-08-10) — 8 more converged
 
-19 of the 26 remain. The tractable ones (numbered leg is a strict superset, zero
-deletions, so adoption loses nothing):
+Every one verified by running **both** legs and reading the real verdict line.
+No assertion was weakened, skipped or softened anywhere in this wave.
 
-- `lib/common/format_spec.spl` (24+/0-)
-- `os/compositor/hosted_backend_sdl2_spec.spl` (27+/0-)
-- `compiler/hir/resolve_import_symbols_spec.spl` (660+/29-) — largest; five bug
-  docs depend on it
-- `os/drivers/input/ps2_mouse_spec.spl` (402+/1-)
-- `compiler/lint/stub_impl_spec.spl` (195+/9-)
+| # | spec | commit | verdict (both legs) |
+|---|---|---|---|
+| 6 | `os/drivers/input/ps2_mouse_spec.spl` | `e57b019ca2d` | 42 total, 42 passed, 0 failed |
+| 7 | `compiler/hir/resolve_import_symbols_spec.spl` | `6f66d2a6c98` | 27 total, 27 passed, 0 failed |
+| 8 | `compiler/lint/stub_impl_spec.spl` | `c8b688dbee4` | 60 total, 60 passed, 0 failed |
+| 9 | `compiler/mono/monomorphize_integration_spec.spl` | `6908bc797cd` | **18 total, 17 passed, 1 failed — RED, left RED** |
+| 10 | `lib/common/window_protocol/input_translator_spec.spl` | `f6a6145ad4d` | 8 total, 8 passed, 0 failed |
+| 11 | `compiler/backend/interpreter_backend_spec.spl` | `0e8a8cc87bc` | 13 total, 13 passed, 0 failed |
+| 12 | `os/kernel/ipc/execve_spec.spl` | `6788fd65c4c` | 8 total, 8 passed, 0 failed |
+| 13 | `os/compositor/wm_action_applier_spec.spl` | `b5119f4889e` | **1 total, 0 passed, 1 failed (zero-examples) — RED, pre-existing** |
 
-`monomorphize_integration_spec.spl` is inverted: the **legacy** leg is the
-superset (0+/19-) and the numbered leg holds zero assertions.
+Three of these needed a genuine merge rather than adoption:
 
-The rest (`execve_spec`, `var_reassign_analysis_spec`, `wm_action_applier_spec`,
-`image_builder_artifact_spec`, …) are genuine merges — each leg received a
-*different* fix commit — and need hand review, not adoption.
+- **`monomorphize_integration_spec`** was inverted — the LEGACY leg held the
+  only real oracle, and it had never run there (a stale `use std.test.*` made
+  the whole file report `executed=0 ... reason=unresolved-module`), while the
+  numbered leg had deleted the oracle outright. Merged: numbered leg's import
+  removal + legacy leg's oracle. It is now RED against a real driver
+  regression — filed as
+  `doc/08_tracking/bug/driver_hir_pipeline_error_guard_regressed_to_raw_errors_len_2026-08-10.md`.
+- **`wm_action_applier_spec`** — the numbered leg gained five `it` blocks the
+  legacy leg lacked, but the legacy leg held the ONLY coverage of
+  `Compositor.create_windows_from_shared_scene`. Adoption would have deleted
+  it; the merged file has 18 blocks, a superset of both. Both legs are RED for
+  an unrelated pre-existing reason (`vulkan_order_env_get` not found makes the
+  file report `zero-examples`) — filed as
+  `doc/08_tracking/bug/wm_action_applier_spec_dead_on_both_legs_vulkan_order_env_get_2026-08-10.md`.
+  This was verified as PRE-EXISTING by running the unmodified committed content
+  of both legs at the base first.
+- **`stub_impl_spec`** — the legacy leg's three unique contexts assert the
+  PRE-WP-8 semantics and directly contradict the product (they expect
+  `pass_do_nothing("intentional")` to warn and `_noop_load` to be exempt; the
+  product now does the opposite). Adopting the numbered leg is correct; keeping
+  them would have re-asserted deleted behaviour.
+
+`execve_spec` and `resolve_import_symbols_spec` looked like genuine merges from
+the diffstat but are not: in both cases the `it`-name sets are identical (or the
+legacy set is a strict subset) and every apparent deletion is a call site the
+numbered leg rewrote into a better form.
+
+## Still remaining
+
+- `lib/common/format_spec.spl` (24+/0-) — **CONTESTED**, deliberately untouched.
+  A prior agent's sync of this file was clobbered mid-session; it needs a writer
+  who can confirm no other session is active on it.
+- The remaining sites named in the census table above that neither wave reached.
+
+## Guard — landed
+
+`879108c80c2` implements the extension recommended below. `--base` + `--ref`
+now intersect the outgoing `git diff --name-only` with the pair table and fail
+when a range edits one leg and leaves the twin untouched AND divergent; a
+one-leg edit that CONVERGES the pair passes, so the concurrent reconciliation
+campaign is unaffected. pre-push records the range base alongside the pushed
+sha and passes both. Proven non-vacuous with planted fixtures (base control
+PASS `half-landed: 0 checked, 0`; one-leg-divergent fixture FAIL with
+`1 checked, 1 half-landed` and `0 new, 0 fixed-but-still-baselined`, i.e. the
+new check was the only thing that fired; converging fixture `1 checked, 0`).
+
+Also worth recording: the "8 mirror-only (6 unallowlisted)" caveat at the
+bottom of this document is **no longer reproducible** — the base control on
+2026-08-10 reads `PASS — 5732 pairs checked, ... 2 mirror-only (all
+allowlisted)`, exit 0. It was fixed upstream between the two waves.
 
 ## Guard recommendation
 
