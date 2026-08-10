@@ -1,6 +1,28 @@
 # Interpreter class-name collision breaks test-DB persistence (2026-08-10)
 
-## Status: WORKED AROUND (renames); interpreter defect still OPEN
+## Status: WORKED AROUND (renames); DIAGNOSTIC NOW LANDED; by-name resolution still OPEN
+
+Update 2026-08-10: the duplicate-symbol warning is extended from functions to
+classes/structs on BOTH interpreter paths:
+- Pure-Simple: `struct_table_register` in
+  `src/compiler/10.frontend/core/interpreter/eval_tables.spl` warns when a
+  class name re-registers from a different `module_get_path()`, memoised per
+  name; `struct_table_collisions()` is the observability hook. Proven by
+  `test/01_unit/compiler/interpreter/class_name_collision_warning_spec.spl`
+  (executed=2 passed=2; warning names BOTH module paths, quiet on
+  same-module re-registration).
+- Rust seed: `warn_duplicate_private_signatures` in
+  `src/compiler_rust/compiler/src/pipeline/module_loader.rs` now also
+  collects `Node::Class` by name and warns (always-on, once per
+  name+owner-set) when one flattened module carries same-named classes from
+  ≥2 owner modules.
+
+Census 2026-08-10 (`/usr/bin/grep` over owned `src/**.spl`, vendor
+excluded): 1,917 class/struct names are defined in more than one file;
+1,160 of those have ≥2 definitions under `src/lib/` alone (co-loadable in
+principle). Empirically LIVE in the heaviest lane (full compiler+stdlib
+graph, post-renames): 0 — only the deliberate sabotage fixture warned.
+Given ~1,900 latent names, the diagnostic is a WARNING, not an error.
 
 ## Symptom
 Every `bin/simple test <dir>` run printed its `Results:` banner and then died

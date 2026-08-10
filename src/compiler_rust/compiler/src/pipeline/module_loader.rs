@@ -1469,16 +1469,39 @@ fn warn_duplicate_private_signatures(module: &Module) {
     use std::sync::{Mutex, OnceLock};
 
     let mut by_name: HashMap<&str, Vec<(String, &str)>> = HashMap::new();
+    // Classes live in the same flat by-name registry as functions (see
+    // `classes.insert(c.name.clone(), ...)` in interpreter/node_exec.rs), so two
+    // co-loaded modules that each define a same-named class cross-dispatch method
+    // bodies onto instances of the wrong class. The symptom does NOT look like a
+    // collision — it reads as "method not found" or "no field named X" on a class
+    // that plainly has the member. See
+    // doc/08_tracking/bug/interp_class_name_collision_breaks_test_db_persistence_2026-08-10.md
+    let mut classes_by_name: HashMap<&str, Vec<&str>> = HashMap::new();
     for item in &module.items {
-        if let Node::Function(f) = item {
-            // Every top-level function participates in the flat registry: private
-            // helpers, public free functions, and qualified `Type.method` entries
-            // alike. Do NOT reintroduce a `starts_with('_')` / `contains('.')` skip
-            // here — that is precisely the blind spot documented above.
-            by_name
-                .entry(f.name.as_str())
-                .or_default()
-                .push((render_signature(f), function_owner_module(f)));
+        match item {
+            Node::Function(f) => {
+                // Every top-level function participates in the flat registry: private
+                // helpers, public free functions, and qualified `Type.method` entries
+                // alike. Do NOT reintroduce a `starts_with('_')` / `contains('.')` skip
+                // here — that is precisely the blind spot documented above.
+                by_name
+                    .entry(f.name.as_str())
+                    .or_default()
+                    .push((render_signature(f), function_owner_module(f)));
+            }
+            Node::Class(c) => {
+                // ClassDef itself carries no owner tag; its methods do (the flatten
+                // pass stamps every method via `tag_node_function_owners`), so the
+                // first method's owner attributes the class. A method-less class
+                // falls back to "<entry file>".
+                let owner = c
+                    .methods
+                    .first()
+                    .map(function_owner_module)
+                    .unwrap_or("<entry file>");
+                classes_by_name.entry(c.name.as_str()).or_default().push(owner);
+            }
+            _ => {}
         }
     }
 
@@ -1586,6 +1609,46 @@ fn warn_duplicate_private_signatures(module: &Module) {
             sigs.len(),
             distinct.len(),
             distinct.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" vs "),
+        );
+    }
+
+    // Class-name collisions. Unlike functions there is no signature to compare —
+    // the interpreter's class registry is keyed on the bare name alone, so ANY
+    // cross-module duplicate mis-dispatches. Always-on (not behind the same-sig
+    // env gate): the census of the whole repo is large, but co-loading into ONE
+    // flattened module is exactly the live, wrong-answer case. Warn once per
+    // (name, owner-set) per process. Same-file redefinition is left to local
+    // redefinition checks.
+    let mut class_names: Vec<&str> = classes_by_name.keys().copied().collect();
+    class_names.sort();
+    for name in class_names {
+        let entries = &classes_by_name[name];
+        if entries.len() < 2 {
+            continue;
+        }
+        let mut owners: Vec<&str> = entries.clone();
+        owners.sort();
+        owners.dedup();
+        if owners.len() < 2 {
+            continue;
+        }
+        let key = format!("class|{name}|{}", owners.join("|"));
+        if let Ok(mut set) = warned.lock() {
+            if !set.insert(key) {
+                continue;
+            }
+        }
+        eprintln!(
+            "warning: class `{}` has {} co-compiled definitions across {} modules; the \
+             interpreter resolves class members by NAME across modules, so method bodies \
+             from one definition execute against instances of the other — the failure reads \
+             as `method not found` or `no field named ...` on a class that has the member. \
+             Defined in: {}. Rename one of the classes to a unique name. \
+             [compiler_cross_module_private_symbol_collision]",
+            name,
+            entries.len(),
+            owners.len(),
+            owners.join(", "),
         );
     }
 }

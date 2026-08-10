@@ -597,11 +597,37 @@ fn struct_table_reset():
     st_nexts = []
     st_module_paths = []
 
+# Class/struct-name collision diagnostic — the type-table sibling of
+# `_ftr_warn_collision` above. The struct table is keyed on the bare name, so
+# two co-loaded modules that each define a same-named class/struct clobber each
+# other and method bodies cross-dispatch onto instances of the wrong class. The
+# symptom does NOT look like a collision: it reads as "method not found" or
+# "no field named X" on a class that plainly has the member. See
+# doc/08_tracking/bug/interp_class_name_collision_breaks_test_db_persistence_2026-08-10.md
+var _st_collision_warned: [text] = []
+
+fn _st_warn_collision(name: text, old_path: text, new_path: text):
+    if old_path == new_path:
+        return
+    var j = 0
+    while j < _st_collision_warned.len():
+        if _st_collision_warned[j] == name:
+            return
+        j = j + 1
+    _st_collision_warned.push(name)
+    print "[WARN] class/struct '{name}' has co-compiled definitions in multiple modules ({old_path} vs {new_path}); the interpreter resolves class members by NAME, so method bodies from one definition execute against instances of the other — the failure reads as 'method not found' or 'no field named ...' on a class that has the member. Rename one of the classes. [compiler_cross_module_private_symbol_collision]"
+
+# Observability hook for specs: names that have warned so far this process.
+fn struct_table_collisions() -> [text]:
+    _st_collision_warned
+
 fn struct_table_register(name: text, decl_id: i64):
     val bucket = hm_hash_text(name) % HM_SIZE
     var idx = st_buckets[bucket]
     while idx != -1:
         if st_keys[idx] == name:
+            if st_vals[idx] != decl_id:
+                _st_warn_collision(name, st_module_paths[idx], module_get_path())
             st_vals[idx] = decl_id
             st_module_paths[idx] = module_get_path()
             return
