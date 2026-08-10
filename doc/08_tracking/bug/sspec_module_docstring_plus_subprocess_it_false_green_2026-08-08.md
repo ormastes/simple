@@ -1,9 +1,13 @@
 # A large module `"""..."""` docstring + subprocess-heavy `it` blocks silently false-greens later assertions
 
 **Date:** 2026-08-08
-**Status:** OPEN — isolated to a minimal repro, root cause NOT diagnosed (compiler-internal;
-out of scope for the task that found it, per instruction to record rather than
-fix a difficult failure)
+**Status:** OPEN, narrowed 2026-08-10 — NOT reproducible on a genuinely
+Linux-built seed binary with the doc's own repro shape; root cause NOT
+diagnosed (compiler-internal; out of scope for the task that found it, per
+instruction to record rather than fix a difficult failure). The original
+report's platform-unconfirmed flag is resolved: this is evidence the trigger
+is Windows-(.exe)-specific, or at minimum not present on Linux under the
+tested shape.
 **Severity:** high — a spec file can report 100% pass while containing a
 provably-false assertion; `--clean` does NOT avoid it
 **Component:** `simple test` runner, most likely the SSpec doc-comment/module-docstring
@@ -149,3 +153,38 @@ someone else has separately checked it.
    HOUSE STYLE per testing.md), this should be escalated in priority once
    picked up — it undermines trust in exactly the kind of spec the codebase
    is steering authors toward writing.
+
+## 2026-08-10 Linux re-verification
+
+Reproduced the doc's shape (73-line module docstring, 2 `it` blocks, first
+genuinely passing via `process_run("sh", ...)`, second deliberately wrong —
+`process_run` succeeds but the assertion checks stdout `.to_contain(...)` for
+a string that provably does not appear) on a genuinely Linux-built binary:
+`bin/simple` here resolves to `bin/release/x86_64-unknown-linux-gnu/simple`
+(the Rust seed — no self-hosted pure-Simple binary is currently deployed in
+this working copy).
+
+```
+$ SIMPLE_TIMEOUT_SECONDS=600 bin/simple test <repro.spl> --clean
+SPEC FILE VERDICT: ... declared>=2 executed=2 passed=1 failed=1 dropped=0
+Results: 2 total, 1 passed, 1 failed
+```
+
+**Result: correctly FAILED (1/2)** — the false green does NOT reproduce on
+Linux with this repro shape and this (seed) binary. This directly answers one
+of the doc's open questions ("Not tested on a genuinely Linux-built binary...
+UNKNOWN whether this is Windows-specific") — on the tested shape it is either
+Windows-specific or specific to the exact seed build used in the original
+report (a June-2026 Windows `.exe`), not a general defect present in the
+current Linux seed.
+
+This does not fully close the doc: the exact 5-`it`/2-describe/`--selftest`+
+multi-step-git-fixture combination from the original discovery context was
+not re-run verbatim (this session used a smaller, deliberately-minimal 2-block
+shape per the doc's own "smallest confirmed trigger" row), and no Windows
+environment was available to re-test the original binary. Left OPEN, with
+narrowed scope: reproduction now requires either a Windows-built seed or the
+untested larger/original shape. No fix attempted — this remains a black-box
+characterization, and diagnosing further requires tracing the seed's SSpec
+runner internals (`src/compiler_rust/**`), which is out of this session's
+edit scope.
