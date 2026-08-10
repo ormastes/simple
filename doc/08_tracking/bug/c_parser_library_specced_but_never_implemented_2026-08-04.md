@@ -1,7 +1,20 @@
 # `src/lib/common/c_parser/` is specced by 56 system-test examples but has never existed (2026-08-04)
 
-**Status:** OPEN
+**Status:** ARCHITECTURAL-OPEN (re-confirmed 2026-08-10)
 **Found:** 2026-08-04
+
+## 2026-08-10 re-verification
+
+Re-confirmed, no code change: `ls src/lib/common/c_parser/` still
+`No such file or directory`; `git log --oneline -- 'src/lib/common/c_parser'`
+still returns nothing. This is unchanged from the original report — the
+directory has never existed. The fix genuinely requires implementing a C
+type model, a `#define`/preprocessor pass, and a C-name matcher as new
+modules (a feature, not a bug fix), reconciled against the partial
+`src/compiler/10.frontend/c_import/__init__.spl` model to avoid a duplicate
+C type system — exactly as scoped below. Left honestly open; not attempted
+this session (out of scope for a bug-triage lane, per the doc's own "Why not
+fixed now" section).
 **Class:** specced-but-unimplemented. 56 failing examples across three specs in
 `test/03_system/compiler/`.
 
