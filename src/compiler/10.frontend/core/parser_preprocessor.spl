@@ -255,6 +255,31 @@ fn _pp_extract_cfg_condition(line: text) -> text:
             return "{key}={value}"
     raw
 
+fn _pp_concat_nonempty_text_parts(parts: [text]) -> text:
+    if parts.len() == 0:
+        return ""
+    var result = parts[0]
+    var part_index: i64 = 1
+    while part_index < parts.len():
+        result = result + parts[part_index]
+        part_index = part_index + 1
+    result
+
+fn _pp_join_lines_preserving_empty(lines: [text]) -> text:
+    # Seed with one real character so staged AOT never concatenates through a
+    # nil-backed empty accumulator. Strip only this private prefix afterward;
+    # original empty and whitespace-only lines remain byte-for-byte intact.
+    var result = "#"
+    var line_index: i64 = 0
+    while line_index < lines.len():
+        if line_index > 0:
+            result = result + "\n"
+        val line = lines[line_index]
+        if line.len() > 0:
+            result = result + line
+        line_index = line_index + 1
+    result.substring(1, result.len())
+
 fn _pp_split_lines(source: text) -> [text]:
     var lines: [text] = []
     var line_chars: [text] = []
@@ -264,12 +289,18 @@ fn _pp_split_lines(source: text) -> [text]:
             break
         val ch = source[i]
         if ch == "\n":
-            lines.push(line_chars.join(""))
+            if line_chars.len() == 0:
+                lines.push("")
+            else:
+                lines.push(_pp_concat_nonempty_text_parts(line_chars))
             line_chars = []
         else:
             line_chars.push(ch)
         i = i + 1
-    lines.push(line_chars.join(""))
+    if line_chars.len() == 0:
+        lines.push("")
+    else:
+        lines.push(_pp_concat_nonempty_text_parts(line_chars))
     lines
 
 fn _pp_may_have_conditionals(source: text) -> bool:
@@ -517,7 +548,7 @@ fn _pp_preprocess_conditionals(source: text) -> text:
         final_lines.push(ol)
         i = i + 1
 
-    final_lines.join("\n")
+    _pp_join_lines_preserving_empty(final_lines)
 
 # ===== Public API =====
 
