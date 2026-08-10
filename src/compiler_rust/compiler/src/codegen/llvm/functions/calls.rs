@@ -2908,6 +2908,7 @@ impl LlvmBackend {
         func_name: &str,
         args: &[crate::mir::VReg],
         vreg_map: &mut VRegMap,
+        vreg_types: &super::VRegTypes,
         builder: &Builder<'static>,
         module: &Module<'static>,
     ) -> Result<(), CompileError> {
@@ -2961,7 +2962,96 @@ impl LlvmBackend {
                 .map_err(|e| crate::error::factory::llvm_build_failed("int_to_ptr", &e))?;
 
             for (index, arg) in args.iter().enumerate() {
-                let value = self.get_vreg(arg, vreg_map)?;
+                let mut value = self.get_vreg(arg, vreg_map)?;
+
+                // Box scalar arguments using rt_value_* helpers (NaN-box encoding)
+                // to match Cranelift's implementation and avoid interpreter corruption
+                if let Some(arg_type) = vreg_types.get(arg).copied() {
+                    use crate::hir::TypeId;
+                    match arg_type {
+                        TypeId::BOOL => {
+                            // Call rt_value_bool to box boolean
+                            let bool_fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                            let bool_fn = module
+                                .get_function("rt_value_bool")
+                                .unwrap_or_else(|| module.add_function("rt_value_bool", bool_fn_type, None));
+                            let call_result = builder
+                                .build_call(bool_fn, &[value.into()], "boxed_bool")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("rt_value_bool call", &e))?;
+                            value = call_result
+                                .try_as_basic_value()
+                                .left()
+                                .ok_or_else(|| crate::error::factory::llvm_build_failed("rt_value_bool result", &"missing return value"))?;
+                        }
+                        TypeId::I8 | TypeId::I16 | TypeId::I32 => {
+                            // Sign-extend to i64, then call rt_value_int
+                            let extended = builder
+                                .build_int_s_extend(value.into_int_value(), i64_type, "sext_arg")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("sext", &e))?;
+                            let int_fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                            let int_fn = module
+                                .get_function("rt_value_int")
+                                .unwrap_or_else(|| module.add_function("rt_value_int", int_fn_type, None));
+                            let call_result = builder
+                                .build_call(int_fn, &[extended.into()], "boxed_int")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("rt_value_int call", &e))?;
+                            value = call_result
+                                .try_as_basic_value()
+                                .left()
+                                .ok_or_else(|| crate::error::factory::llvm_build_failed("rt_value_int result", &"missing return value"))?;
+                        }
+                        TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::CHAR => {
+                            // Zero-extend to i64, then call rt_value_int
+                            let extended = builder
+                                .build_int_z_extend(value.into_int_value(), i64_type, "zext_arg")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("zext", &e))?;
+                            let int_fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                            let int_fn = module
+                                .get_function("rt_value_int")
+                                .unwrap_or_else(|| module.add_function("rt_value_int", int_fn_type, None));
+                            let call_result = builder
+                                .build_call(int_fn, &[extended.into()], "boxed_int")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("rt_value_int call", &e))?;
+                            value = call_result
+                                .try_as_basic_value()
+                                .left()
+                                .ok_or_else(|| crate::error::factory::llvm_build_failed("rt_value_int result", &"missing return value"))?;
+                        }
+                        TypeId::I64 | TypeId::U64 => {
+                            // Call rt_value_int to box
+                            let int_fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                            let int_fn = module
+                                .get_function("rt_value_int")
+                                .unwrap_or_else(|| module.add_function("rt_value_int", int_fn_type, None));
+                            let call_result = builder
+                                .build_call(int_fn, &[value.into()], "boxed_int")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("rt_value_int call", &e))?;
+                            value = call_result
+                                .try_as_basic_value()
+                                .left()
+                                .ok_or_else(|| crate::error::factory::llvm_build_failed("rt_value_int result", &"missing return value"))?;
+                        }
+                        TypeId::F64 => {
+                            // Call rt_value_float to box
+                            let float_fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                            let float_fn = module
+                                .get_function("rt_value_float")
+                                .unwrap_or_else(|| module.add_function("rt_value_float", float_fn_type, None));
+                            let call_result = builder
+                                .build_call(float_fn, &[value.into()], "boxed_float")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("rt_value_float call", &e))?;
+                            value = call_result
+                                .try_as_basic_value()
+                                .left()
+                                .ok_or_else(|| crate::error::factory::llvm_build_failed("rt_value_float result", &"missing return value"))?;
+                        }
+                        _ => {
+                            // For unknown types, store raw (matches Cranelift fallthrough)
+                        }
+                    }
+                }
+
+                // Coerce to i64 if needed (for non-boxed types or fallthrough)
                 let casted = self.coerce_value_to_type(value, Some(i64_type.into()), builder)?;
                 let offset = self
                     .context_ref()

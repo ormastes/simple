@@ -1008,7 +1008,7 @@ impl LlvmBackend {
             MirInst::InterpCall {
                 dest, func_name, args, ..
             } => {
-                self.compile_interp_call(*dest, func_name, args, vreg_map, builder, module)?;
+                self.compile_interp_call(*dest, func_name, args, vreg_map, vreg_types, builder, module)?;
             }
             MirInst::InterpEval { dest, expr_index } => {
                 self.compile_interp_eval(*dest, *expr_index as usize, vreg_map, builder, module)?;
