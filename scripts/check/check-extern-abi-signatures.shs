@@ -253,6 +253,92 @@ AWK_C='
 '
 
 # ---------------------------------------------------------------------------
+# Extractor 4: rt_* declarations inside the PURE-SIMPLE LLVM backends.
+#
+# These are not definitions -- they are the callee signatures the Simple
+# backends declare and then emit calls against, so a stale one is exactly as
+# live as a stale C definition. Four such lists exist and all four had drifted
+# off the (ptr, len) text ABI; asm_constraints_helpers.spl went further and
+# EMITTED `call void @rt_panic(ptr %p)` -- a one-argument call to a
+# two-argument callee, i.e. the length register read uninitialised on every
+# unsupported-op panic. Nothing read these files until this extractor existed,
+# which is precisely why they drifted.
+#
+# Two declaration shapes, one per backend flavour:
+#   textual IR : self.builder.emit("declare i1 @rt_x(ptr, i64)")
+#                decls = decls + "declare i1 @rt_x(ptr, i64)\n"
+#   LLVM-C API : declare_fn(mod_, "rt_x", llvm_function_type(i1_ty, [ptr_ty, i64_ty], false))
+#
+# ARITY only. The RETURN class is deliberately NOT compared for this source:
+# these lists spell a RuntimeValue result as LLVM `ptr` throughout, while
+# RuntimeFuncSpec spells the same thing `I64`, and on every supported target
+# those are the same return register. Comparing them would produce ~70 rows of
+# a single known-compatible spelling difference and drown the arity signal --
+# the same reasoning the GROUP B2 note in the baseline records. Arity, by
+# contrast, is a hard register-count disagreement with no compatible reading.
+# A variadic declaration (`(...)`) is emitted as arity "var" and skipped.
+AWK_SPL='
+    function llvm_ret_class(t) {
+        if (t == "void") return "void"
+        if (t == "ptr") return "ptr"
+        if (t == "double" || t == "float") return "float"
+        if (t ~ /^i[0-9]+$/) return "int"
+        return "unknown"
+    }
+    {
+        line = $0
+        while (match(line, /declare[[:space:]]+[A-Za-z0-9_]+[[:space:]]*@rt_[A-Za-z0-9_]+\([^)]*\)/)) {
+            m = substr(line, RSTART, RLENGTH)
+            line = substr(line, RSTART + RLENGTH)
+            if (match(m, /@rt_[A-Za-z0-9_]+/) == 0) continue
+            sym = substr(m, RSTART + 1, RLENGTH - 1)
+            if (match(m, /declare[[:space:]]+[A-Za-z0-9_]+/) == 0) continue
+            r = substr(m, RSTART, RLENGTH)
+            sub(/^declare[[:space:]]+/, "", r)
+            if (match(m, /\([^)]*\)/) == 0) continue
+            a = substr(m, RSTART + 1, RLENGTH - 2)
+            gsub(/[[:space:]]/, "", a)
+            if (a == "...") n = "var"
+            else if (a == "") n = 0
+            else n = split(a, pp, ",")
+            print sym "\t" n "\t" FILENAME "\t" llvm_ret_class(r)
+        }
+    }
+    /declare_fn\(mod_,[[:space:]]*"rt_/ {
+        l2 = $0
+        if (match(l2, /"rt_[A-Za-z0-9_]+"/) == 0) next
+        sym2 = substr(l2, RSTART + 1, RLENGTH - 2)
+        if (match(l2, /llvm_function_type\([A-Za-z0-9_]+,[[:space:]]*\[[^]]*\]/) == 0) next
+        t2 = substr(l2, RSTART, RLENGTH)
+        if (match(t2, /llvm_function_type\([A-Za-z0-9_]+/) == 0) next
+        rt2 = substr(t2, RSTART + 19, RLENGTH - 19)
+        sub(/_ty$/, "", rt2)
+        if (match(t2, /\[[^]]*\]/) == 0) next
+        a2 = substr(t2, RSTART + 1, RLENGTH - 2)
+        gsub(/[[:space:]]/, "", a2)
+        n2 = (a2 == "") ? 0 : split(a2, qq, ",")
+        print sym2 "\t" n2 "\t" FILENAME "\t" llvm_ret_class(rt2)
+    }
+'
+
+# Arity-only comparator for the AWK_SPL source (see the note above on why the
+# return class is not compared there). Emits the SAME row shape as
+# compare_arities so a mismatch reads identically in the output.
+compare_spl_arities() {
+    _decls="$1"; _defs="$2"; _out="$3"
+    awk -F'\t' '
+        NR == FNR { if (!($1 in d)) d[$1] = $2 ; next }
+        {
+            if (!($1 in d)) next
+            if ($2 == "var") next
+            f = $3
+            sub(/^.*\//, "", f)
+            if (d[$1] + 0 != $2 + 0) print $1 "\t" d[$1] "\t" $2 "\t" f
+        }
+    ' "$_decls" "$_defs" | sort -u >"$_out"
+}
+
+# ---------------------------------------------------------------------------
 # Core comparison. Given a decls file and a defs file, emit mismatch rows:
 #   <sym><TAB><decl_arity><TAB><def_arity><TAB><basename>
 # ---------------------------------------------------------------------------
@@ -283,6 +369,7 @@ run_selftest() {
 
     for f in good_spec.rs good_defs.c good_defs.rs \
              bad_cstr_defs.c bad_arity_defs.rs bad_ret_defs.c \
+             good_spl_decls.spl bad_spl_decls.spl \
              platform/good_hdr_defs.h; do
         [ -f "$FIXTURES/$f" ] || verdict_error "selftest: missing fixture $FIXTURES/$f"
     done
@@ -336,11 +423,31 @@ run_selftest() {
         verdict_error "selftest: class-3 fixture reported an ARITY row; the return check is not what detected it"
     fi
 
-    echo "extern_abi_selftest=pass (7 fixtures: 2 positive controls incl. header location, 3 planted defects)"
+    # -- class 4: a pure-Simple LLVM backend declaration that lost its length
+    #    word. Positive control first, so a broken AWK_SPL cannot read as clean.
+    awk "$AWK_SPL" "$FIXTURES/good_spl_decls.spl" >"$TMP_DIR/st_good_spl.tsv"
+    grep -q '^rt_selftest_spl_text	2	' "$TMP_DIR/st_good_spl.tsv" \
+        || verdict_error "selftest: AWK_SPL did not see the TEXTUAL declare shape -- spl coverage is vacuous"
+    grep -q '^rt_selftest_spl_fn	2	' "$TMP_DIR/st_good_spl.tsv" \
+        || verdict_error "selftest: AWK_SPL did not see the declare_fn shape -- spl coverage is vacuous"
+    compare_spl_arities "$st_decls" "$TMP_DIR/st_good_spl.tsv" "$TMP_DIR/st_good_spl_out.tsv"
+    if [ -s "$TMP_DIR/st_good_spl_out.tsv" ]; then
+        echo "selftest: FALSE POSITIVE on agreeing .spl declarations:" >&2
+        cat "$TMP_DIR/st_good_spl_out.tsv" >&2
+        verdict_error "selftest failed"
+    fi
+    awk "$AWK_SPL" "$FIXTURES/bad_spl_decls.spl" >"$TMP_DIR/st_bad4.tsv"
+    compare_spl_arities "$st_decls" "$TMP_DIR/st_bad4.tsv" "$TMP_DIR/st_bad4_out.tsv"
+    grep -q '^rt_selftest_spl_text	2	1	' "$TMP_DIR/st_bad4_out.tsv" \
+        || verdict_error "selftest: class-4 fixture (textual .spl declare lost its length word) was NOT detected"
+    grep -q '^rt_selftest_spl_fn	2	1	' "$TMP_DIR/st_bad4_out.tsv" \
+        || verdict_error "selftest: class-4 fixture (declare_fn lost its length word) was NOT detected"
+
+    echo "extern_abi_selftest=pass (11 fixtures: 3 positive controls incl. header and .spl-declaration locations, 5 planted defects)"
 }
 
 run_selftest
-[ "$MODE" = "selftest" ] && { echo "PASS — selftest only, 7 fixtures checked"; exit 0; }
+[ "$MODE" = "selftest" ] && { echo "PASS — selftest only, 11 fixtures checked"; exit 0; }
 
 # ---------------------------------------------------------------------------
 # REAL SCAN
@@ -436,6 +543,58 @@ if [ -s "$ALIAS_BAD" ]; then
     echo "A call-name alias maps to a target with a DIFFERENT declared result class:" >&2
     cat "$ALIAS_BAD" >&2
     echo "FAIL — $alias_count alias pairs checked, $(wc -l <"$ALIAS_BAD" | tr -d ' ') divergent"
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# PURE-SIMPLE LLVM BACKEND declaration lists.
+#
+# Four files, all reachable, none of which any gate read until now:
+#   70.backend/backend/llvm_backend.spl          (textual IR string list)
+#   70.backend/backend/llvm_backend_tools.spl    (textual IR string list)
+#   70.backend/backend/llvm_lib_translate.spl    (LLVM-C declare_fn list)
+#   70.backend/backend/_MirToLlvm/asm_constraints_helpers.spl (textual, and
+#       the one that also EMITS a call -- see AWK_SPL's header note)
+# Arity only, no baseline: every row this found (34, across 16 symbols) was
+# fixed in the same change, so the correct steady state here is zero.
+# ---------------------------------------------------------------------------
+SPL_DECL_FILES="src/compiler/70.backend/backend/llvm_backend.spl
+src/compiler/70.backend/backend/llvm_backend_tools.spl
+src/compiler/70.backend/backend/llvm_lib_translate.spl
+src/compiler/70.backend/backend/_MirToLlvm/asm_constraints_helpers.spl"
+SPL_DEFS="$TMP_DIR/spl_defs.tsv"
+: >"$SPL_DEFS"
+for sf in $SPL_DECL_FILES; do
+    [ -f "$sf" ] || verdict_error "missing pure-Simple backend declaration list $sf"
+    awk "$AWK_SPL" "$sf" >"$TMP_DIR/spl_one.tsv"
+    # PER-FILE positive control. A grand total proves nothing about any single
+    # file -- that is exactly how the platform/*.h blind spot survived.
+    [ -s "$TMP_DIR/spl_one.tsv" ] \
+        || verdict_error "0 rt_* declarations extracted from $sf -- that list was not read"
+    cat "$TMP_DIR/spl_one.tsv" >>"$SPL_DEFS"
+done
+spl_rows=$(wc -l <"$SPL_DEFS" | tr -d ' ')
+spl_syms=$(cut -f1 "$SPL_DEFS" | sort -u | wc -l | tr -d ' ')
+echo "extern_abi_spl_backend_declaration_rows=$spl_rows"
+echo "extern_abi_spl_backend_declaration_symbols=$spl_syms"
+SPL_BAD="$TMP_DIR/spl_bad.tsv"
+compare_spl_arities "$DECLS" "$SPL_DEFS" "$SPL_BAD"
+spl_bad_count=$(wc -l <"$SPL_BAD" | tr -d ' ')
+echo "extern_abi_spl_backend_arity_mismatches=$spl_bad_count"
+if [ "$spl_bad_count" -gt 0 ]; then
+    {
+        echo "A pure-Simple LLVM backend declares an rt_* symbol with the WRONG ARITY."
+        echo ""
+        echo "Row format: <symbol> <compiler_arity> <declared_arity> <file>"
+        echo ""
+        cat "$SPL_BAD"
+        echo ""
+        echo "These lists are the callee signatures the Simple backends emit"
+        echo "calls against. A text argument declared as a bare \`ptr\` after the"
+        echo "runtime moved to (ptr, len) makes the callee read the length from"
+        echo "an uninitialised register. Fix the list to match $SPEC_RS."
+    } >&2
+    echo "FAIL — $spl_rows pure-Simple backend declarations checked, $spl_bad_count arity mismatch(es)"
     exit 1
 fi
 
