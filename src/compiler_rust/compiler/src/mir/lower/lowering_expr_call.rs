@@ -116,6 +116,9 @@ impl<'a> MirLowerer<'a> {
     /// `doc/08_tracking/bug/enum_field_i64_zero_destructure_2026-04-28.md`);
     /// the `Some`/`Ok`/`Err` fast paths above bypassed that logic.
     fn box_enum_payload_if_needed(&mut self, value: VReg, arg_ty: TypeId) -> MirLowerResult<VReg> {
+        if arg_ty == TypeId::U64 {
+            return self.box_u64_runtime_value(value);
+        }
         let needs_box = matches!(
             arg_ty,
             TypeId::I8
@@ -125,7 +128,6 @@ impl<'a> MirLowerer<'a> {
                 | TypeId::U8
                 | TypeId::U16
                 | TypeId::U32
-                | TypeId::U64
                 | TypeId::BOOL
         );
         if !needs_box {
@@ -145,7 +147,9 @@ impl<'a> MirLowerer<'a> {
             arg_ty,
             TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
         ) || (arg_ty == TypeId::ANY && matches!(arg_expr.kind, HirExprKind::Integer(_)));
-        if needs_int_box {
+        if arg_ty == TypeId::U64 {
+            self.box_u64_runtime_value(arg)
+        } else if needs_int_box {
             self.with_func(|func, current_block| {
                 let boxed = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();
@@ -485,10 +489,11 @@ impl<'a> MirLowerer<'a> {
                                 | TypeId::U8
                                 | TypeId::U16
                                 | TypeId::U32
-                                | TypeId::U64
                                 | TypeId::BOOL
                         );
-                        if needs_box {
+                        if arg_ty == TypeId::U64 {
+                            self.box_u64_runtime_value(arg_regs[0])?
+                        } else if needs_box {
                             self.with_func(|func, current_block| {
                                 let boxed = func.new_vreg();
                                 let block = func.block_mut(current_block).unwrap();
@@ -532,7 +537,6 @@ impl<'a> MirLowerer<'a> {
                                     | TypeId::U8
                                     | TypeId::U16
                                     | TypeId::U32
-                                    | TypeId::U64
                                     | TypeId::BOOL
                             );
                             // Float payloads need BoxFloat (lossless heap box):
@@ -543,7 +547,9 @@ impl<'a> MirLowerer<'a> {
                             // lowering_expr_method.rs; see
                             // doc/08_tracking/bug/seed_f64_array_element_precision_mask_2026-07-19.md.
                             let needs_float_box = matches!(arg_ty, TypeId::F32 | TypeId::F64);
-                            let push_arg = if needs_box || needs_float_box {
+                            let push_arg = if arg_ty == TypeId::U64 {
+                                self.box_u64_runtime_value(*arg)?
+                            } else if needs_box || needs_float_box {
                                 self.with_func(|func, current_block| {
                                     let boxed = func.new_vreg();
                                     let block = func.block_mut(current_block).unwrap();

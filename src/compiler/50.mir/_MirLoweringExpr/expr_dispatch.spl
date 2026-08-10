@@ -522,7 +522,15 @@ impl MirLowering:
             return local
         var b = self.builder
         val boxed = match type_.kind:
-            case MirTypeKind.I8 | MirTypeKind.U8 | MirTypeKind.I16 | MirTypeKind.U16 | MirTypeKind.I32 | MirTypeKind.U32 | MirTypeKind.I64 | MirTypeKind.U64 | MirTypeKind.Char:
+            case MirTypeKind.U64:
+                val widened = b.emit_cast(mir_operand_copy(local), MirType.i64())
+                val box_fn = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_value_u64"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                ))
+                val boxed_opt = b.emit_call(box_fn, [mir_operand_copy(widened)], MirType.i64())
+                boxed_opt ?? widened
+            case MirTypeKind.I8 | MirTypeKind.U8 | MirTypeKind.I16 | MirTypeKind.U16 | MirTypeKind.I32 | MirTypeKind.U32 | MirTypeKind.I64 | MirTypeKind.Char:
                 val widened = b.emit_cast(mir_operand_copy(local), MirType.i64())
                 val shift = b.emit_const_int(3)
                 b.emit_binop(MirBinOp.Shl, mir_operand_copy(widened), mir_operand_copy(shift), MirType.i64())
@@ -626,6 +634,15 @@ impl MirLowering:
         var b = self.builder
         val disc = rt_enum_discriminant(result_type.kind)
         val is_integer = self.mir_type_is_integer(result_type)
+        if disc == rt_enum_discriminant(MirTypeKind.U64):
+            val unbox_fn = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_value_as_u64"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+            ))
+            val call_res = b.emit_call(unbox_fn, [mir_operand_copy(raw)], MirType.i64())
+            val decoded = call_res ?? raw
+            self.builder = b
+            return decoded
         if is_integer:
             val shift = b.emit_const_int(3)
             val value = b.emit_binop(MirBinOp.Shr, mir_operand_copy(raw), mir_operand_copy(shift), MirType.i64())

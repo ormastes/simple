@@ -37,16 +37,21 @@ impl LlvmBackend {
                         .coerce_value_to_type(source_val, Some(rv_type.into()), builder)?
                         .into_int_value();
                     let fn_type = rv_type.fn_type(&[rv_type.into()], false);
+                    let unwrap_name = if *to_type == crate::hir::TypeId::U64 {
+                        "rt_value_as_u64"
+                    } else {
+                        "rt_value_as_int"
+                    };
                     let func = module
-                        .get_function("rt_value_as_int")
-                        .unwrap_or_else(|| module.add_function("rt_value_as_int", fn_type, None));
+                        .get_function(unwrap_name)
+                        .unwrap_or_else(|| module.add_function(unwrap_name, fn_type, None));
                     let call = builder
-                        .build_call(func, &[src_int.into()], "rt_value_as_int")
+                        .build_call(func, &[src_int.into()], unwrap_name)
                         .map_err(|e| crate::error::factory::llvm_build_failed("call rt_value_as_int", &e))?;
                     let raw_i64 = call
                         .try_as_basic_value()
                         .left()
-                        .ok_or_else(|| CompileError::semantic("rt_value_as_int returned no value".to_string()))?
+                        .ok_or_else(|| CompileError::semantic(format!("{unwrap_name} returned no value")))?
                         .into_int_value();
                     let narrowed = match *to_type {
                         crate::hir::TypeId::I8 | crate::hir::TypeId::U8 => builder

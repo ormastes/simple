@@ -208,7 +208,9 @@ impl<'a> MirLowerer<'a> {
             );
             let needs_float_unbox = matches!(expr_ty, TypeId::F32 | TypeId::F64);
 
-            if needs_int_unbox {
+            if expr_ty == TypeId::U64 {
+                return self.unbox_u64_runtime_value(raw_result);
+            } else if needs_int_unbox {
                 // FR-DRIVER-0002b: narrow after UnboxInt so the dest VReg gets
                 // stamped with the correct narrow TypeId (U8/U16/U32/I8/I16/I32).
                 let (to_bits, signed_opt): (u8, Option<bool>) = match expr_ty {

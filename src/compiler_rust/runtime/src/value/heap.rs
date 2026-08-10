@@ -42,6 +42,8 @@ pub enum HeapObjectType {
     // a container/Any float loses precision ([0.1][0] != 0.1). Container floats
     // are boxed here instead, preserving the full double losslessly.
     Float = 0x1C,
+    /// Heap-backed full-width unsigned integer at erased RuntimeValue boundaries.
+    UInt = 0x1D,
 }
 
 /// Header for all heap-allocated objects
@@ -68,6 +70,13 @@ pub struct HeapHeader {
 pub struct HeapFloat {
     pub header: HeapHeader,
     pub value: f64,
+}
+
+/// Heap-boxed u64. This is a leaf object, like `HeapFloat`.
+#[repr(C)]
+pub struct HeapUInt {
+    pub header: HeapHeader,
+    pub value: u64,
 }
 
 /// GC flag bits stored in HeapHeader::gc_flags
@@ -473,6 +482,7 @@ impl From<HeapObjectType> for ValueKind {
             HeapObjectType::FfiObject => ValueKind::FfiObject,
             // Heap-boxed float presents as a plain float to the value system.
             HeapObjectType::Float => ValueKind::Float,
+            HeapObjectType::UInt => ValueKind::Int,
         }
     }
 }

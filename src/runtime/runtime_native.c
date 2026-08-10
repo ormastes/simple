@@ -111,6 +111,7 @@ bool rt_dir_create(const char* path, bool recursive) {
  * RT_VALUE_HEAP_STRING's "STR1") so a validated pointer's kind read is
  * unambiguous. */
 #define RT_VALUE_HEAP_FLOAT 0x464C5431U
+#define RT_VALUE_HEAP_UINT 0x55494E54U
 #define RT_CORE_ARRAY_FLAG_BYTES 0x08U
 #define RT_CORE_ARRAY_FLAG_U64_PACKED 0x10U
 /* Internal-only marker distinguishing a tuple from a plain array. Both share
@@ -879,6 +880,11 @@ typedef struct RtCoreFloat {
     uint32_t transient_scope_id;
     double value;
 } RtCoreFloat;
+typedef struct RtCoreUInt {
+    uint32_t kind;
+    uint32_t transient_scope_id;
+    uint64_t value;
+} RtCoreUInt;
 
 static RtCoreDict* rt_core_as_dict(int64_t value);
 static int64_t rt_core_dict_lookup(RtCoreDict* d, int64_t key);
@@ -927,7 +933,7 @@ static void rt_core_heap_lifecycle_release(void) {
 
 static uint32_t rt_core_registered_object_kind(void* ptr) {
     uint32_t wide_kind = *(uint32_t*)ptr;
-    if (wide_kind == RT_VALUE_HEAP_STRING || wide_kind == RT_VALUE_HEAP_FLOAT) {
+    if (wide_kind == RT_VALUE_HEAP_STRING || wide_kind == RT_VALUE_HEAP_FLOAT || wide_kind == RT_VALUE_HEAP_UINT) {
         return wide_kind;
     }
     return *(uint8_t*)ptr;
@@ -1449,6 +1455,9 @@ static void rt_core_reclaim_transient_immortal(uint32_t scope_id) {
             case RT_VALUE_HEAP_FLOAT:
                 object_scope = &((RtCoreFloat*)ptr)->transient_scope_id;
                 break;
+            case RT_VALUE_HEAP_UINT:
+                object_scope = &((RtCoreUInt*)ptr)->transient_scope_id;
+                break;
             default:
                 break; /* strings remain process-persistent */
         }
@@ -1496,6 +1505,13 @@ static inline RtCoreFloat* rt_core_as_heap_float(int64_t value) {
     if (!rt_core_is_registered_float(f)) return NULL;
     if (f->kind != RT_VALUE_HEAP_FLOAT) return NULL;
     return f;
+}
+
+static inline RtCoreUInt* rt_core_as_heap_uint(int64_t value) {
+    if ((((uint64_t)value) & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) return NULL;
+    RtCoreUInt* u = (RtCoreUInt*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK);
+    if (!u || !rt_core_is_registered_immortal_ptr(u) || u->kind != RT_VALUE_HEAP_UINT) return NULL;
+    return u;
 }
 
 static inline int64_t rt_core_from_special(uint64_t payload) {
@@ -1626,6 +1642,7 @@ enum {
     RT_CORE_TRANSIENT_DICT,
     RT_CORE_TRANSIENT_ENUM,
     RT_CORE_TRANSIENT_FLOAT,
+    RT_CORE_TRANSIENT_UINT,
     RT_CORE_TRANSIENT_CLOSURE,
     RT_CORE_TRANSIENT_RAW
 };
@@ -1720,6 +1737,9 @@ static int rt_core_transient_classify(int64_t value, RtCoreTransientNode* node) 
             case RT_VALUE_HEAP_FLOAT:
                 *node = (RtCoreTransientNode){ptr, RT_CORE_TRANSIENT_FLOAT, 0};
                 return 1;
+            case RT_VALUE_HEAP_UINT:
+                *node = (RtCoreTransientNode){ptr, RT_CORE_TRANSIENT_UINT, 0};
+                return 1;
             case RT_VALUE_HEAP_CLOSURE:
                 *node = (RtCoreTransientNode){ptr, RT_CORE_TRANSIENT_CLOSURE, 0};
                 return 1;
@@ -1792,6 +1812,7 @@ int8_t rt_transient_heap_promote(int64_t value) {
                 case RT_CORE_TRANSIENT_DICT: object_scope = &((RtCoreDict*)node.ptr)->transient_scope_id; break;
                 case RT_CORE_TRANSIENT_ENUM: object_scope = &((RtCoreEnum*)node.ptr)->transient_scope_id; break;
                 case RT_CORE_TRANSIENT_FLOAT: object_scope = &((RtCoreFloat*)node.ptr)->transient_scope_id; break;
+                case RT_CORE_TRANSIENT_UINT: object_scope = &((RtCoreUInt*)node.ptr)->transient_scope_id; break;
                 case RT_CORE_TRANSIENT_CLOSURE: object_scope = &((RtCoreClosure*)node.ptr)->transient_scope_id; break;
                 case RT_CORE_TRANSIENT_RAW: {
                     RtCoreTransientRawAlloc* raw =
@@ -1974,8 +1995,26 @@ int64_t rt_value_int(int64_t value) {
     return (int64_t)(((uint64_t)value << 3) | RT_VALUE_TAG_INT);
 }
 
+int64_t rt_value_u64(int64_t bits) {
+    RtCoreUInt* u = (RtCoreUInt*)malloc(sizeof(RtCoreUInt));
+    if (!u) return rt_core_nil();
+    u->kind = RT_VALUE_HEAP_UINT;
+    u->value = (uint64_t)bits;
+    if (!rt_core_register_scoped_immortal(u, &u->transient_scope_id)) {
+        free(u);
+        return rt_core_nil();
+    }
+    return (int64_t)(((uint64_t)(uintptr_t)u) | RT_VALUE_TAG_HEAP);
+}
+
+int64_t rt_value_as_u64(int64_t value) {
+    RtCoreUInt* u = rt_core_as_heap_uint(value);
+    return u ? (int64_t)u->value : value >> 3;
+}
+
 int64_t rt_value_as_int(int64_t value) {
-    return value >> 3;
+    RtCoreUInt* u = rt_core_as_heap_uint(value);
+    return u ? (int64_t)u->value : value >> 3;
 }
 
 /* Box an f64 (passed as its raw i64 bit pattern) into the tagged RuntimeValue
@@ -2499,6 +2538,11 @@ int64_t rt_to_string(int64_t value) {
     }
 
     char buf[64];
+    RtCoreUInt* u = rt_core_as_heap_uint(value);
+    if (u) {
+        int len = snprintf(buf, sizeof(buf), "%llu", (unsigned long long)u->value);
+        return rt_string_new((const uint8_t*)buf, len > 0 ? (uint64_t)len : 0);
+    }
     if (rt_core_is_int(value)) {
         /* ARITHMETIC shift: a boxed negative int is stored as (v << 3), so the
          * unbox must sign-extend. A logical >>3 rendered boxed -1 as
@@ -2879,7 +2923,9 @@ static int rt_core_value_eq_inner(
     size_t visited_len);
 
 static int rt_core_generic_int_eq(int64_t value, int64_t expected) {
-    return rt_core_is_int(value) && rt_core_as_int(value) == expected;
+    RtCoreUInt* u = rt_core_as_heap_uint(value);
+    return (rt_core_is_int(value) && rt_core_as_int(value) == expected) ||
+        (u && u->value == (uint64_t)expected);
 }
 
 static int rt_core_array_eq(
@@ -2961,6 +3007,14 @@ static int rt_core_value_eq_inner(
         return rt_core_is_float(left) && rt_core_is_float(right) &&
             rt_core_as_float(left) == rt_core_as_float(right);
     }
+    RtCoreUInt* left_uint = rt_core_as_heap_uint(left);
+    RtCoreUInt* right_uint = rt_core_as_heap_uint(right);
+    if (left_uint || right_uint) {
+        if (left_uint && right_uint) return left_uint->value == right_uint->value;
+        if (left_uint && rt_core_is_int(right)) return (int64_t)left_uint->value == rt_core_as_int(right);
+        if (right_uint && rt_core_is_int(left)) return rt_core_as_int(left) == (int64_t)right_uint->value;
+        return 0;
+    }
     if (rt_core_is_special(left) || rt_core_is_special(right)) return 0;
     RtCoreString* a = rt_core_as_string(left);
     RtCoreString* b = rt_core_as_string(right);
@@ -2986,6 +3040,14 @@ int64_t rt_native_eq(int64_t left, int64_t right) {
     if (rt_core_is_float(left) || rt_core_is_float(right)) {
         return rt_core_is_float(left) && rt_core_is_float(right) &&
             rt_core_as_float(left) == rt_core_as_float(right);
+    }
+    RtCoreUInt* left_uint = rt_core_as_heap_uint(left);
+    RtCoreUInt* right_uint = rt_core_as_heap_uint(right);
+    if (left_uint || right_uint) {
+        if (left_uint && right_uint) return left_uint->value == right_uint->value;
+        if (left_uint && rt_core_is_int(right)) return (int64_t)left_uint->value == rt_core_as_int(right);
+        if (right_uint && rt_core_is_int(left)) return rt_core_as_int(left) == (int64_t)right_uint->value;
+        return 0;
     }
     if (rt_core_is_special(left) || rt_core_is_special(right)) return 0;
     RtCoreString* left_string = rt_core_as_string(left);
@@ -5237,7 +5299,8 @@ void rt_bdd_expect_eq_rv(int64_t actual, int64_t expected) {
 }
 
 void rt_bdd_expect_truthy_rv(int64_t value) {
-    if (value == 0 || value == rt_core_nil()) {
+    RtCoreUInt* u = rt_core_as_heap_uint(value);
+    if (value == 0 || value == rt_core_nil() || (u && u->value == 0)) {
         rt_bdd_current_failed = 1;
     }
 }
@@ -5352,6 +5415,8 @@ static int64_t rt_core_dict_canon_key(int64_t k) {
         memcpy(&bits, &d, sizeof(bits));
         return (int64_t)((bits & ~RT_VALUE_TAG_MASK) | RT_VALUE_TAG_FLOAT);
     }
+    RtCoreUInt* u = rt_core_as_heap_uint(k);
+    if (u) return rt_value_int((int64_t)u->value);
     if (rt_core_is_heap(k)) return k;
     return rt_value_int(rt_core_numeric_arg(k));
 }

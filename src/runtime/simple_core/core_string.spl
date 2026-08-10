@@ -491,12 +491,31 @@ pub fn rt_len(value: i64) -> i64:
             return rt_dict_len(value)
     return 0
 
+fn runtime_integer_matches(value: i64, expected: i64) -> i64:
+    if (value & 7) == 0:
+        return if (value >> 3) == expected: 1 else: 0
+    if (value & 7) == 1:
+        val ptr = value & -8
+        if ptr >= 4096 and (spl_load_i64(ptr, 0) & 4294967295) == 0x55494E54:
+            return if spl_load_i64(ptr, 8) == expected: 1 else: 0
+    return 0
+
 fn rt_native_eq_inner(left: i64, right: i64, depth: i64) -> i64:
     if left == right:
         return 1
     # ponytail: the depth guard safely rejects cyclic aggregate graphs; add
     # visited-pair tracking only if cyclic structural equality is required.
     if depth >= 64:
+        return 0
+    val left_uint = if (left & 7) == 1 and (left & -8) >= 4096 and (spl_load_i64(left & -8, 0) & 4294967295) == 0x55494E54: 1 else: 0
+    val right_uint = if (right & 7) == 1 and (right & -8) >= 4096 and (spl_load_i64(right & -8, 0) & 4294967295) == 0x55494E54: 1 else: 0
+    if left_uint > 0 or right_uint > 0:
+        if left_uint > 0 and right_uint > 0:
+            return if spl_load_i64(left & -8, 8) == spl_load_i64(right & -8, 8): 1 else: 0
+        if left_uint > 0 and (right & 7) == 0:
+            return if spl_load_i64(left & -8, 8) == (right >> 3): 1 else: 0
+        if right_uint > 0 and (left & 7) == 0:
+            return if (left >> 3) == spl_load_i64(right & -8, 8): 1 else: 0
         return 0
     val left_disc = rt_enum_discriminant(left)
     val right_disc = rt_enum_discriminant(right)
@@ -555,7 +574,7 @@ fn rt_native_eq_inner(left: i64, right: i64, depth: i64) -> i64:
                         return 0
                 else:
                     val other = spl_load_i64(right_items, i * 8)
-                    if (other & 7) != 0 or (other >> 3) != value:
+                    if runtime_integer_matches(other, value) < 1:
                         return 0
             elif right_bytes:
                 val value = spl_load_u8(right_items, i)
@@ -564,15 +583,15 @@ fn rt_native_eq_inner(left: i64, right: i64, depth: i64) -> i64:
                         return 0
                 else:
                     val other = spl_load_i64(left_items, i * 8)
-                    if (other & 7) != 0 or (other >> 3) != value:
+                    if runtime_integer_matches(other, value) < 1:
                         return 0
             elif left_u64:
                 val other = spl_load_i64(right_items, i * 8)
-                if (other & 7) != 0 or (other >> 3) != spl_load_i64(left_items, i * 8):
+                if runtime_integer_matches(other, spl_load_i64(left_items, i * 8)) < 1:
                     return 0
             elif right_u64:
                 val other = spl_load_i64(left_items, i * 8)
-                if (other & 7) != 0 or (other >> 3) != spl_load_i64(right_items, i * 8):
+                if runtime_integer_matches(other, spl_load_i64(right_items, i * 8)) < 1:
                     return 0
             else:
                 if rt_native_eq_inner(spl_load_i64(left_items, i * 8), spl_load_i64(right_items, i * 8), depth + 1) < 1:
