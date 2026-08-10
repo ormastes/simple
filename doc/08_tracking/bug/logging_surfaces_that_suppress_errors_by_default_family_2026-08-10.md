@@ -311,3 +311,54 @@ agreed at every step here.
 
 **Oracle proof:** reverting `_DEFAULT_LOG_LEVEL` to `0` makes the check FAIL —
 4 of 11 assertions, exit 1, ERROR marker count dropping 2 → 1 in both lanes.
+
+## Follow-up (2026-08-10) — `rt_simpleos_log_emit` baremetal side is never compiled by anything in-tree; NOT a board-runnable result
+
+Investigated per the board-runnable rule (`.claude/rules/board-runnable.md`)
+after the hosted-lane fixes above landed, to check whether they carry any
+SimpleOS/board evidence. They do not, and the gap is narrower and more
+specific than "undefined at link time" — it is "never built at all":
+
+- `extern fn rt_simpleos_log_emit(level: i64, msg_ptr: i64, msg_len: i64) -> bool`
+  is declared once, at `src/lib/nogc_async_mut_noalloc/log/logger.spl:40`, and
+  called at `logger.spl:120`.
+- Two C definitions exist, matching arity/types exactly:
+  `src/runtime/startup/baremetal/runtime_log.c:133` (the real UART emitter,
+  intended for SimpleOS) and `src/runtime/startup/common/runtime_log_hosted.c:82`
+  (hosted stub, returns `false`).
+- `src/compiler_rust/runtime/build.rs:16` and `:185` compile and
+  `rerun-if-changed` **only** `startup/common/runtime_log_hosted.c` into
+  `libruntime_sffi_c.a` (confirmed present there via `nm`:
+  `0000000000000000 T rt_simpleos_log_emit`). `startup/baremetal/runtime_log.c`
+  is referenced **only in a comment** at `build.rs:177` — no compile rule, no
+  `rerun-if-changed`, nothing.
+  `/usr/bin/grep -rl "startup/baremetal" src scripts doc` (excluding
+  `compiler_rust/target`) turns up exactly `simpleos_log.rs`, `memory.rs`,
+  `build.rs` (comment only), `src/os/kernel/interrupts/idt.spl`,
+  `src/os/runtime/baremetal/runtime_minimal.spl`, and
+  `scripts/check/check-jit-nested-extern-arg-marshal.shs` — none of which
+  contain a compile/link rule for `runtime_log.c`. No SimpleOS image-build
+  script under `scripts/os/` (`simpleos-native-build.shs`,
+  `build_simpleos_install_image*.shs`, `build_simpleos_llvm_image.shs`, etc.)
+  references `runtime_log.c` either.
+- So the earlier "OPEN 1 correction" note above ("Baremetal is untouched:
+  `rt_simpleos_log_emit` succeeds there") is true only as a statement about the
+  *hosted* fallthrough not needing to change — it does not mean the baremetal
+  emitter has ever been exercised. `check-jit-nested-extern-arg-marshal.shs:53-54`
+  already flags this precisely: its own probe is "NOT board evidence and does
+  not exercise the baremetal UART emitter ... which is a different translation
+  unit."
+
+**Net:** this is a **build-wiring gap**, not a missing/mismatched extern
+declaration and not something a source-level ABI fix (in the style of the
+`rt_dir_walk`/`rt_file_read_text` `(ptr,len)` fixes) can address — the arity
+and types already match on both sides. What's missing is a SimpleOS AOT/.smf
+build step that compiles `src/runtime/startup/baremetal/runtime_log.c` and
+links it into a kernel/board image, plus real-firmware-proxy (OVMF/OpenSBI/
+EDK2, never `-kernel`/`isa-debug-exit`) or physical-board evidence that the
+resulting emitter reaches UART. Neither exists in-tree today. **No code was
+changed for this follow-up** — this entry only records the confirmed gap so
+the next session doing SimpleOS logging/board work does not have to
+re-derive it. Filed rather than fixed because standing up the SimpleOS
+image-build C compile step, sysroot, and a real-firmware QEMU boot check is a
+multi-file infra task outside a single narrow-scope change.
