@@ -352,3 +352,74 @@ Two separable items, in order:
 No check was weakened; `wm_content_frame_web_provenance_valid` untouched; no
 composite stubbed; no bounds check relaxed; OVMF pflash unchanged. No code
 changed in this pass — findings only.
+
+## Layer 5 (2026-08-10, ~14:00Z): `cpu_executed=0` trace — Layer 4's conclusion is REFUTED; the post-fix experiment never ran
+
+### Exact emission sites (both ends of the gap)
+- **Receipt:** `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:601`,
+  inside `simple_web_layout_material_provenance_after_backend_execution` (`:568`).
+  `cpu_witness` = `witness.cpu_composited_count` (style-pass sidecar);
+  `cpu_executed` = the `executed_cpu_material_count` **parameter**. This function
+  computes nothing — it only reports what a caller handed it.
+- **Callers (all three pass `render.cpu_composited_material_count`):**
+  `simple_web_layout_engine2d_fast.spl:230`, `src/os/compositor/simple_web_window_renderer.spl:436`
+  and `:553`.
+- **Sole producer:** `draw_ir_adv.spl:1476` —
+  `if box.glass_execution.execution_target == "cpu-scalar-glass-v1": cpu_composited_material_count + 1`,
+  where `box` comes from `_engine2d_draw_ir_render_box` (`:642`), which reaches the
+  composite only via `_engine2d_draw_ir_render_glass_material` (`:508`) and skips it
+  entirely when `typed_nonuniform` (`:690`).
+
+So `cpu_executed=1` requires exactly one thing: the glass rect reaching `:508`
+and passing capability (`:523`) + bounds (`:538`).
+
+### The decisive measurement: ZERO `[engine2d-glass]` receipts in the post-fix runs
+Archived logs, token census over the whole file:
+
+| run | any `[engine2d-glass]` line | `witness-unconverted` | its `readback=` field | ending |
+|---|---|---|---|---|
+| `20260810T083128Z` (pre-fb-fix) | **4** (`reason=bounds` x2, `uncounted-contract-rect` x2) | 4 | 2x empty, 2x `cpu_fallback` | timeout |
+| `20260810T112327Z` (post-fix) | **0** | 2 | **both empty** | timeout |
+| `20260810T123139Z` (post-fix) | **0** | 1 | **empty** | `[PANIC] heap exhausted` |
+
+The `[engine2d-glass]` receipts are **length-gated, not equality-gated** (`:517`,
+`cap_is_contract_len`) precisely so they fire even under text-compare corruption.
+Their total absence therefore proves `_engine2d_draw_ir_render_glass_material` was
+**never entered** in either post-fix run — not that it entered and passed bounds.
+
+### What that means for Layer 4's claim
+Layer 4 read "`reason=bounds` none in post-fix runs" as *the bounds check no longer
+rejects anything*, and concluded "removing the bounds rejection converted no
+witness, so the composite is independently broken". Both post-fix runs simply
+**died before the render loop reached the glass command** (`123139Z` panics in
+`css-props-stage3`; `112327Z` is truncated mid style pass). The experiment was
+never performed.
+
+### The surviving `witness-unconverted` lines are the PRE-execution decision
+In the pre-fix run the two receipts per window are distinguishable by their
+`readback=` field: the first (`:267`, `target= readback=`) is emitted **before**
+any `[engine2d-glass]` line, the second (`:291`, `readback=cpu_fallback`) after.
+The post-fix runs contain **only the empty-`readback` variety**. A provenance
+decision taken on a render whose `readback_source` is still empty is one taken
+before the backend executed — `cpu_executed=0` there is structurally expected,
+not a defect. There is no evidence of a witness that formed, reached an executed
+composite, and failed to convert.
+
+### Conclusion: `cpu_executed=0` is a DOWNSTREAM SYMPTOM, not the blocker
+The rung-(d) blocker is the item Layer 4 filed second: the never-freed
+`[array-repeat] big count=0x100000` / `[heap] alloc sz=0x800020` (8 MiB) buffers
+at `caller=0x83d477e`/`0x83d27fe` exhausting the 1 GiB baremetal bump heap
+(`heap_off=0x3fffa5e0 limit=0x40000000`) during the style pass, before the draw-IR
+render loop runs. Until that is fixed no run can reach `:508`, and any statement
+about the composite's behaviour is unfalsifiable.
+
+### Strongest remaining lead (unchanged in substance, now unambiguously first)
+Resolve `caller=0x83d477e` against the run's map file and identify the
+1,048,576-element buffer (**not** a 3840x2160 surface = 8,294,400). It is
+allocated repeatedly per style-pass attempt and never freed. Fixing or bounding
+it is the prerequisite for every further rung-(d) measurement; only after a run
+reaches the render loop can `cpu_executed` be re-measured.
+
+No fix landed in this pass. No check weakened; `wm_content_frame_web_provenance_valid`
+untouched; no composite stubbed; no bounds check relaxed; OVMF pflash unchanged;
+no gate run performed (the finding is derived entirely from archived per-run logs).
