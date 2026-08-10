@@ -210,3 +210,129 @@ describe "matches_compound_with_state: :focus":
         val compound = result.unwrap().compounds[0]
         val state = interaction_state_empty()
         expect(matches_compound_with_state(node, 11, compound, state)).to_equal(false)
+
+# ---------------------------------------------------------------------------
+# matches_complex tests — combinator resolution over a real DomTree
+# ---------------------------------------------------------------------------
+
+# @manual_section: Combinator matching over the DOM tree
+
+"""
+`matches_complex` anchors on the rightmost compound and walks the tree's
+parent pointers right-to-left. These examples build real `DomTree` fixtures
+(arena ids, linked parent/sibling pointers) and assert both matches and
+non-matches, so a broken tree or a collapsed combinator distinction turns
+this spec red instead of passing vacuously.
+"""
+
+describe "matches_complex: descendant combinator over the tree":
+    # @req REQ-BLINK-SEL-DESCENDANT
+    it "div p matches a p nested two levels below the div":
+        step("build document > div > section > p")
+        var tree = dom_tree_new()
+        val div_id = tree.create_element("div")
+        val section_id = tree.create_element("section")
+        val p_id = tree.create_element("p")
+        tree.append_child(0, div_id)
+        tree.append_child(div_id, section_id)
+        tree.append_child(section_id, p_id)
+        step("match the p against selector 'div p'")
+        val sel = parse_selector("div p").unwrap()
+        expect(matches_complex(tree, p_id, sel)).to_equal(true)
+
+    # @req REQ-BLINK-SEL-DESCENDANT
+    it "div p does NOT match a p that is outside the div":
+        step("build document > div (empty) and document > p as siblings")
+        var tree = dom_tree_new()
+        val div_id = tree.create_element("div")
+        val p_id = tree.create_element("p")
+        tree.append_child(0, div_id)
+        tree.append_child(0, p_id)
+        step("match the sibling p against 'div p' and expect a rejection")
+        val sel = parse_selector("div p").unwrap()
+        expect(matches_complex(tree, p_id, sel)).to_equal(false)
+
+describe "matches_complex: child combinator requires the IMMEDIATE parent":
+    # @req REQ-BLINK-SEL-CHILD
+    it "ul > li matches an li whose direct parent is the ul":
+        step("build document > ul > li")
+        var tree = dom_tree_new()
+        val ul_id = tree.create_element("ul")
+        val li_id = tree.create_element("li")
+        tree.append_child(0, ul_id)
+        tree.append_child(ul_id, li_id)
+        step("match the li against 'ul > li'")
+        val sel = parse_selector("ul > li").unwrap()
+        expect(matches_complex(tree, li_id, sel)).to_equal(true)
+
+    # @req REQ-BLINK-SEL-CHILD
+    it "div > p rejects a p whose parent is a section INSIDE the div":
+        step("build document > div > section > p — p is a grandchild of div")
+        var tree = dom_tree_new()
+        val div_id = tree.create_element("div")
+        val section_id = tree.create_element("section")
+        val p_id = tree.create_element("p")
+        tree.append_child(0, div_id)
+        tree.append_child(div_id, section_id)
+        tree.append_child(section_id, p_id)
+        step("child combinator must reject the grandchild; descendant must accept it")
+        val child_sel = parse_selector("div > p").unwrap()
+        expect(matches_complex(tree, p_id, child_sel)).to_equal(false)
+        val desc_sel = parse_selector("div p").unwrap()
+        expect(matches_complex(tree, p_id, desc_sel)).to_equal(true)
+
+describe "matches_complex: right-to-left anchoring on the candidate node":
+    # @req REQ-BLINK-SEL-RTL-ANCHOR
+    it "div p anchors on the rightmost compound: the div itself never matches":
+        step("build document > div > p")
+        var tree = dom_tree_new()
+        val div_id = tree.create_element("div")
+        val p_id = tree.create_element("p")
+        tree.append_child(0, div_id)
+        tree.append_child(div_id, p_id)
+        step("candidate is the DIV — rightmost compound 'p' must fail on it")
+        val sel = parse_selector("div p").unwrap()
+        expect(matches_complex(tree, div_id, sel)).to_equal(false)
+        step("candidate is the P — the same selector matches")
+        expect(matches_complex(tree, p_id, sel)).to_equal(true)
+
+describe "matches_complex: three-compound chain mixing both combinators":
+    # @req REQ-BLINK-SEL-CHAIN
+    it "div ul > li matches only when the li's parent is a ul under a div":
+        step("build document > div > ul > li  AND  document > ol > li")
+        var tree = dom_tree_new()
+        val div_id = tree.create_element("div")
+        val ul_id = tree.create_element("ul")
+        val li_id = tree.create_element("li")
+        val ol_id = tree.create_element("ol")
+        val stray_li = tree.create_element("li")
+        tree.append_child(0, div_id)
+        tree.append_child(div_id, ul_id)
+        tree.append_child(ul_id, li_id)
+        tree.append_child(0, ol_id)
+        tree.append_child(ol_id, stray_li)
+        step("the ul-parented li matches; the ol-parented li does not")
+        val sel = parse_selector("div ul > li").unwrap()
+        expect(matches_complex(tree, li_id, sel)).to_equal(true)
+        expect(matches_complex(tree, stray_li, sel)).to_equal(false)
+
+describe "matches_complex: descendant walk must consider EVERY matching ancestor":
+    # @req REQ-BLINK-SEL-BACKTRACK
+    it ".a > .b .c matches when a farther .b ancestor satisfies the child step":
+        step("build document > x(.a) > y(.b) > z(.b) > c(.c)")
+        var tree = dom_tree_new()
+        val x_id = tree.create_element("div")
+        tree.set_attribute(x_id, "class", "a")
+        val y_id = tree.create_element("div")
+        tree.set_attribute(y_id, "class", "b")
+        val z_id = tree.create_element("div")
+        tree.set_attribute(z_id, "class", "b")
+        val c_id = tree.create_element("span")
+        tree.set_attribute(c_id, "class", "c")
+        tree.append_child(0, x_id)
+        tree.append_child(x_id, y_id)
+        tree.append_child(y_id, z_id)
+        tree.append_child(z_id, c_id)
+        step("the NEAREST .b ancestor (z) fails '.a > .b', but y succeeds — a greedy walk without backtracking wrongly rejects")
+        val sel = parse_selector(".a > .b .c").unwrap()
+        expect(matches_complex(tree, c_id, sel)).to_equal(true)
