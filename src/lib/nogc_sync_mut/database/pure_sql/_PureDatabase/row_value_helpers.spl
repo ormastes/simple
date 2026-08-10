@@ -1361,6 +1361,24 @@ fn _compute_agg(name: text, vals: [DbValue]) -> DbValue:
     if up == "COUNT":
         return DbValue.Integer(value: vals.len() as i64)
     if up == "SUM":
+        # A REAL cell coerced through _dbval_as_i64 reads as 0, so SUM over a
+        # REAL column silently returned 0 for every row. Track whether any
+        # operand is non-integer numeric and sum in f64 on that path so REAL
+        # (and mixed INTEGER/REAL) columns sum correctly; pure-INTEGER columns
+        # keep exact integer results.
+        var has_real = false
+        var i0: i32 = 0
+        while i0 < vals.len() as i32:
+            if not _dbval_is_int(vals[i0]):
+                has_real = true
+            i0 = i0 + 1
+        if has_real:
+            var sf: f64 = 0.0
+            var fi: i32 = 0
+            while fi < vals.len() as i32:
+                sf = sf + _dbval_as_f64(vals[fi])
+                fi = fi + 1
+            return DbValue.Real(value: sf)
         var s: i64 = 0
         var i: i32 = 0
         while i < vals.len() as i32:
@@ -1370,6 +1388,19 @@ fn _compute_agg(name: text, vals: [DbValue]) -> DbValue:
     if up == "AVG":
         if vals.len() == 0:
             return DbValue.Null
+        var has_real_avg = false
+        var a0: i32 = 0
+        while a0 < vals.len() as i32:
+            if not _dbval_is_int(vals[a0]):
+                has_real_avg = true
+            a0 = a0 + 1
+        if has_real_avg:
+            var sf2: f64 = 0.0
+            var afi: i32 = 0
+            while afi < vals.len() as i32:
+                sf2 = sf2 + _dbval_as_f64(vals[afi])
+                afi = afi + 1
+            return DbValue.Real(value: sf2 / (vals.len() as f64))
         var s: i64 = 0
         var i: i32 = 0
         while i < vals.len() as i32:
