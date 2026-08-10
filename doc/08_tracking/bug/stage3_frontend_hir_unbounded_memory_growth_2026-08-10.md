@@ -1,7 +1,13 @@
 # Stage-3 self-host build: unbounded RSS growth in frontend/HIR lowering (~1 GB/min, no plateau)
 
 - **ID:** stage3_frontend_hir_unbounded_memory_growth_2026-08-10
-- **Status:** OPEN
+- **Status:** ROOT CAUSE ESTABLISHED — **the Stage-3 compiler does not leak.**
+  The 1 GB/min is an unbounded **self-spawning chain of `simple` PROCESSES**
+  belonging to a *different* command (`simple replay`), which drives the host
+  into `earlyoom`; earlyoom then SIGTERMs the (innocent, preferred-victim)
+  Stage-3 build. See "MEASURED 2026-08-10 (Q6)" below. Reclassified: the
+  compiler-side half of this bug is CLOSED/NOT-A-DEFECT; the live defect is
+  split out as the process-chain bug named below.
 - **Severity:** high — Stage-3 self-host cannot complete on a 64 GB host; the run
   is killed before codegen is ever reached.
 - **Lane:** Stage-3 bootstrap (`SIMPLE_BOOTSTRAP=1`, **without**
@@ -141,6 +147,175 @@ does not contain — plausibly generics/traits/impls, dictionaries, cross-module
 type resolution, or the sheer symbol-table size of the real compiler tree — not
 on raw function or module *count*.
 
+## MEASURED 2026-08-10 (Q6): cause ESTABLISHED — it is a PROCESS CHAIN, not a heap leak
+
+### Tooling actually used
+
+`heaptrack`, `valgrind` and `massif` are **all absent on this host** (only
+`/usr/bin/memusage` exists, and it reports only at exit). So the fallback named
+in "Next measurement" was used: a **bounded 10-minute prefix of the REAL Stage-3
+build**, single process, sampled with `/proc/PID/smaps_rollup` every 10 s.
+
+The prefix replays the recorded Stage-3 argv verbatim from
+`build/bootstrap/stage3/x86_64-unknown-linux-gnu/stage2-command.transcript`,
+with the Stage-2 binary as the compiler and a private output/cache dir so
+nothing under `build/bootstrap/**` or `bin/**` is disturbed:
+
+```
+HOME=<scratch>/home TMPDIR=<scratch>/tmp LC_ALL=C LANG=C RUST_LOG=error LIBRARY_PATH= \
+SIMPLE_BOOTSTRAP=1 SIMPLE_NO_DEPRECATED_WARNINGS=1 SIMPLE_NATIVE_BUILD_RUST=1 \
+SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent \
+SIMPLE_TRACE_AST_RESET=1 SIMPLE_COMPILER_PHASE_PROFILE=1 \
+SIMPLE_BINARY=<...>/stage2-runtime-authority/simple \
+build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple native-build \
+  --target x86_64-unknown-linux-gnu --backend llvm \
+  --runtime-bundle core-c-bootstrap \
+  --source src/compiler --source src/app --source src/lib \
+  --entry-closure --threads 1 --cache-dir <scratch>/cache --mode dynload \
+  --entry src/app/cli/bootstrap_main.spl \
+  --runtime-path <...>/stage2-runtime-authority -o <scratch>/out.bin
+```
+
+### Result A — the Stage-3 build process is FLAT
+
+| elapsed | RSS of the build process |
+|---|---|
+| 30 s | 200 MB |
+| 100 s | 249 MB |
+| 350 s | 249 MB |
+| 390 s | 267 MB |
+| 470 s | 360 MB |
+| 490 s | 428 MB |
+| 510 s | 428 MB |
+| **520 s** | **303 MB — RSS goes DOWN** |
+| 560 s | 292 MB |
+| 565 s | SIGTERM from earlyoom at 285 MiB (see Result A2) |
+
+**Bounded at 200-430 MB across the whole prefix**, and — the decisive point —
+**RSS falls** at 520 s (428 → 303 MB). A no-GC monotonic leak cannot give memory
+back. The curve is a staircase of phase working sets that are reclaimed, not a
+ramp. Extrapolating the *steepest* observed segment (267 → 428 MB over 100 s,
+≈ 100 MB/min, and it plateaued and then dropped) gives ~6 GB at 60 minutes, not
+52 GB — and that segment is bounded phase work, not a slope.
+
+The process was demonstrably doing real
+work throughout (`/proc/PID/io` `rchar` = 513 MB of source read; the process
+tree has **exactly one** member, so per-process RSS is the whole story here —
+`native-build` did NOT fan out to worker children in this lane, so per-process
+RSS is not undercounting). At the claimed 1 GB/min this process should have been
+near 9 GB by 530 s. It was at 0.29 GB, having peaked at 0.43 GB. **There is no
+1 GB/min heap growth inside the Stage-3 compiler.**
+
+### Result A2 — the symptom reproduced END-TO-END on a 285 MiB process
+
+The prefix run did not reach its 600 s stop. At 565 s **earlyoom SIGTERMed it**:
+
+```
+Aug 10 07:42:09 dl earlyoom[1479]: sending SIGTERM to process 2888987 uid 1000 "simple": badness 968, VmRSS 285 MiB
+```
+
+That is this bug's entire reported signature — a Stage-3 `native-build` dying
+mid-frontend, no verdict line, empty log, killed from outside — reproduced on a
+process using **285 MiB**. The victim's own footprint is irrelevant to whether it
+is chosen; only the host's free memory and the `--prefer '^simple'` name match
+are. This is the report's exit-143 death, caught in the act, with the leak
+hypothesis excluded by construction.
+
+### Result B — where the 1 GB/min actually is
+
+While the above ran, the host held a **monotonically growing chain of `simple`
+processes**, each the direct child of the previous one, each ~62 MB RSS, with
+**every ancestor still alive** (`State: S`, blocked in wait). All of them:
+
+```
+./bin/simple replay missing-build-log.json
+```
+
+The chain root is orphaned (`PPid 1`). Measured growth, host-wide, over a
+152-second window:
+
+| t (s) | `simple` processes | aggregate `simple` RSS |
+|---|---|---|
+| 0 | 1101 | 67.6 GB |
+| 60 | 1225 | 75.4 GB |
+| 121 | 1349 | 85.0 GB |
+| 152 | 1411 | 88.8 GB |
+
+= **~124 processes/min, ~8.4 GB/min, perfectly linear, no plateau.** Earlier in
+the same session the count went 952 → 1608. This is the curve the bug report
+describes, at the same shape and (given a slower spawn rate on the original run)
+the same order of magnitude.
+
+This satisfies **every** constraint the report imposed, and explains why nothing
+else could:
+
+1. **Linear, no plateau** — one fixed-size process added per unit time.
+2. **Thread-count invariant** — `--threads` cannot affect another command's
+   process chain.
+3. **"Confined to frontend/HIR lowering, native cache never populated"** — the
+   Stage-3 build was simply still in phase 2/3 when it was killed. Nothing about
+   it was leaking; it was a bystander.
+4. **Absent in the STAGE4 lane** — nothing to do with the lane; it depends only
+   on whether the chain happened to be running.
+5. **Synthetic corpora pinned at the 157 MB floor** — of course: the floor *is*
+   the compiler's true footprint. `/usr/bin/time -f %M` measures one process and
+   was measuring an honest, non-leaking one.
+
+### Result C — the kill mechanism, confirmed live
+
+`free -g` showed 97 of 125 GB used with 1 GB free while the chain ran, and
+`journalctl` recorded earlyoom firing repeatedly and SIGTERMing 61 MiB chain
+members:
+
+```
+Aug 10 07:28:03 dl earlyoom[1479]: mem avail: 11988 of 128683 MiB ( 9.32%) ...
+Aug 10 07:28:03 dl earlyoom[1479]: sending SIGTERM to process 2614312 uid 1000 "simple": badness 966, VmRSS 61 MiB
+```
+
+Because earlyoom's `--prefer '^(simple|...)'` matches by **process name**, a
+healthy 270 MB Stage-3 build is an equally-preferred victim of pressure created
+entirely by a different `simple` command. That is the exit 143 + no verdict
+line, in full.
+
+### The `ast_reset()` candidate at `driver_hir_pipeline_lowering.spl:230` — REFUTED, twice
+
+Asked directly, and answered without needing the profiler:
+
+1. **The arenas are already reset per module.** `parser_init_with_path`
+   (`src/compiler/10.frontend/core/parser.spl:263`) calls `ast_reset()`
+   unconditionally on **every** parse, and `ast_reset()` is the only thing that
+   clears the flat-AST pools (`decl_tag.clear()` and siblings at
+   `src/compiler/10.frontend/core/_Ast/module_state.spl:571`). Every module goes
+   through `parse_and_build_module_scoped`
+   (`src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl:930`) →
+   `parser_init_with_path`. The flat AST is therefore bounded by the **largest
+   single module**, not by the whole run. (Note `reset_all_pools()` at
+   `module_assembly.spl:929` clears only the token/symbol/type pools —
+   `types.spl:1455` — so it is *not* what bounds the AST arenas; the per-parse
+   `ast_reset()` is.)
+2. **`:230` is not even on the Stage-3 code path.** That line lives in
+   `lower_and_check_streaming_surfaces_impl`, reachable only through
+   `driver_streaming_surface_enabled`
+   (`src/compiler/80.driver/driver_orchestration.spl:27-33`), which requires
+   **`SIMPLE_BOOTSTRAP_STAGE4=1`**. The Stage-3 lane is defined by that variable
+   being *unset*, so Stage-3 uses the non-streaming `lower_and_check_impl` and
+   never executes `:230` at all. The `ast_reset()` there is a final teardown for
+   the STAGE4 streaming lane, not a whole-run retention point.
+
+No change is warranted at `:230`, and a "per-module reset" there would have been
+a no-op fix for a non-problem.
+
+### What to do instead
+
+The compiler-side half of this bug is **closed as not-a-defect**. The live
+defect is the unbounded self-spawning `simple` process chain (see the follow-on
+list). Operationally, before attributing any `simple` death on this host to a
+compiler defect: run `ps -eo comm= | grep -c '^simple$'`. A count in the
+hundreds means the host is under a fork chain and **every** RSS number and
+every exit 143 collected during that window is suspect — including, quite
+possibly, the 26.5/31.9/52.5 GB trace at the top of this report, which was never
+shown to be a single process's RSS.
+
 ## Leading suspect (REFUTED as the memory mechanism — see above)
 
 `src/compiler/20.hir/hir_lowering/_Items/lowering_helpers.spl:30-107` holds
@@ -195,7 +370,12 @@ linear. Probe harness kept out of tree at
 `<scratchpad>/probe.sh` (mirrors the STAGE4 guard's generator, minus
 `SIMPLE_BOOTSTRAP_STAGE4=1`).
 
-## Verdict
+## Verdict (SUPERSEDED 2026-08-10 by "MEASURED 2026-08-10 (Q6)" above)
+
+The text below was written before the process-chain measurement and is retained
+for the record. Its conclusion — "root cause not established" — no longer holds;
+its reasoning about the *shape* of the curve was correct and is exactly what a
+fixed-size-process-per-unit-time chain produces.
 
 **Root cause NOT established**, and the previously-leading suspect is now
 **refuted** by direct measurement (see "MEASURED 2026-08-10" above). The
@@ -250,3 +430,12 @@ quantity that matters.
    favour of reading the already-retained `HirModule`s.
 3. Never read exit 143 from a `simple` process as a build failure without first
    excluding earlyoom.
+4. **(NEW, and now the only live defect here)** Fix the unbounded self-spawning
+   `simple` process chain — filed as
+   `doc/08_tracking/bug/simple_replay_self_spawns_unbounded_process_chain_2026-08-10.md`.
+   Until that is fixed, no memory measurement on this host is trustworthy.
+5. **(NEW)** Add a host-hygiene precondition to every memory guard: assert
+   `ps -eo comm= | grep -c '^simple$'` is small before recording a number.
+   Item 1's proposed Stage-3 memory guard would have gone RED here for a reason
+   that has nothing to do with the compiler, which is a false-red as bad as the
+   false-green it was meant to replace.
