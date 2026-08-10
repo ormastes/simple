@@ -1,14 +1,30 @@
-use std.daemon_sdk.types.{daemon_request_new}
-use nogc_sync_mut.daemon_sdk.protocol.{write_daemon_request}
+use std.daemon_sdk.types.{daemon_request_new, daemon_response_new}
+use nogc_sync_mut.daemon_sdk.protocol.{write_daemon_request, write_daemon_response}
 
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
 
 fn main() -> i64:
     val request = daemon_request_new(7)
-    val request_path = write_daemon_request(request, "/tmp")
-    val passed = request_path != "" and rt_file_exists(request_path)
-    if request_path != "":
-        rt_file_delete(request_path)
+    val root = "/tmp"
+    val request_path = write_daemon_request(request, root)
+    if request_path == "" or not rt_file_exists(request_path): return 41
+    if rt_file_exists("{request_path}.tmp"): return 42
+    val request_text = rt_file_read_text(request_path) ?? ""
+    if not request_text.contains("id={request.id}"): return 43
+
+    val response = daemon_response_new(request.id, 23)
+    if not write_daemon_response(response, root): return 44
+    val response_path = "{root}/{request.id}.resp"
+    if not rt_file_exists(response_path): return 45
+    if rt_file_exists("{response_path}.tmp"): return 46
+    val response_text = rt_file_read_text(response_path) ?? ""
+    if not response_text.contains("request_id={request.id}"): return 47
+    if not response_text.contains("status=23"): return 48
+
+    rt_file_delete(request_path)
+    rt_file_delete(response_path)
+    val passed = true
     print("daemon protocol atomic rename resolved: {passed}")
     if passed: 0 else: 1
