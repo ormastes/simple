@@ -214,3 +214,15 @@ composition) is desired for these three primitives. #4 (`blit`) and #5
 ## Related
 - `web_render_gpu_backend_provenance_fabricated_2026-06-17.md`
 - `rt_vulkan_only_executes_under_classic_interpret_2026-06-17.md`
+
+## Dispatch provenance hardening — 2026-08-10
+
+The real `rect_outline`, `circle_filled`, `triangle_filled`, and
+`gradient_rect` routes previously discarded the checked-dispatch result. A
+successful standalone primitive therefore did not mark the framebuffer dirty,
+and a rejected or indeterminate dispatch could retain device provenance. All
+direct primitive routes now share `_record_primitive_dispatch`: completion
+marks readback dirty, rejection records the first typed fallback reason, and an
+unknown submitted completion freezes further mutation. Focused coverage in
+`backend_vulkan_drawing_spec.spl` exercises every unavailable-pipeline route and
+first-failure preservation without fabricating a GPU receipt.
