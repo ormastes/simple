@@ -1,0 +1,75 @@
+"""
+# Stage3 Real Entry Body Regression
+
+This fail-closed system spec proves that an admitted pure-Simple Stage3 can
+compile and execute a nontrivial positional entry.  A link-valid ret-0 stub
+cannot satisfy the runtime marker assertion.
+"""
+
+use std.spec.*
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+val BUILD_DIR: text = "build/test/bootstrap_stage3_real_body"
+val SOURCE_PATH: text = BUILD_DIR + "/main.spl"
+val CACHE_DIR: text = BUILD_DIR + "/cache"
+val NATIVE_PATH: text = BUILD_DIR + "/probe"
+val MARKER: text = "STAGE3_REAL_BODY_OK_73"
+
+fn shell(command: text) -> (text, i64):
+    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+    (stdout + stderr, code)
+
+fn probe_source() -> text:
+    [
+        "fn helper() -> i64:\n",
+        "    73\n",
+        "\n",
+        "fn main() -> i64:\n",
+        "    val result = helper()\n",
+        "    if result != 73:\n",
+        "        return 9\n",
+        "    println(\"" + MARKER + "\")\n",
+        "    0\n"
+    ].join("")
+
+describe "pure-Simple Stage3 real entry body":
+    it "builds and executes a nontrivial bare positional entry":
+        val stage3 = rt_env_get("SIMPLE_STAGE3_BIN") ?? ""
+
+        step("Require an explicit admitted pure-Simple Stage3 binary")
+        expect(stage3.len()).to_be_greater_than(0)
+        expect(rt_file_exists(stage3)).to_equal(true)
+        val (authority_out, authority_code) = shell("case '" + stage3 + "' in *src/compiler_rust*) exit 41;; esac; test -x '" + stage3 + "'")
+        expect(authority_code).to_equal(0)
+        expect(authority_out).to_equal("")
+
+        step("Verify the selected compiler identifies as the bootstrap compiler")
+        val (version_out, version_code) = shell("'" + stage3 + "' --version")
+        expect(version_code).to_equal(0)
+        expect(version_out).to_contain("simple-bootstrap 1.0.0-beta")
+
+        step("Write a helper-calling entry whose observable marker requires real body execution")
+        val (mkdir_out, mkdir_code) = shell("rm -rf '" + BUILD_DIR + "' && mkdir -p '" + BUILD_DIR + "'")
+        expect(mkdir_code).to_equal(0)
+        expect(mkdir_out).to_equal("")
+        expect(rt_file_write_text(SOURCE_PATH, probe_source())).to_equal(true)
+
+        step("Build through Stage3 using the canonical bare positional entry form")
+        val command = [
+            "env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH ",
+            "SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB=src '", stage3, "' native-build ",
+            "--backend cranelift --entry-closure --cache-dir '", CACHE_DIR,
+            "' --output '", NATIVE_PATH, "' '", SOURCE_PATH, "'"
+        ].join("")
+        val (build_out, build_code) = shell(command)
+        expect(build_code).to_equal(0)
+        expect(rt_file_exists(NATIVE_PATH)).to_equal(true)
+
+        step("Execute the artifact and reject a link-valid ret-0 stub")
+        val (run_out, run_code) = shell("'" + NATIVE_PATH + "'")
+        expect(run_code).to_equal(0)
+        expect(run_out).to_contain(MARKER)
