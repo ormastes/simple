@@ -385,3 +385,28 @@ the interpreter). Expect the row count to fall sharply: of the 78 rows this
 stream actually examined, every one inspected was either a scanner false
 positive, already fixed by a prior stream, or one of the three genuine findings
 recorded above.
+
+## New vacuity shape: a NEGATIVE assertion against a MISSING file always passes
+
+`test/01_unit/compiler/driver/native_build_cache_plumbing_spec.spl` reads
+`src/compiler/80.driver/driver/incremental.spl` (:117) and
+`src/compiler/80.driver/driver/parallel.spl` (:252). **The whole
+`src/compiler/80.driver/driver/` directory does not exist** — the modules live in
+`driver_build/`, and `class LegacyBuildCache:` occurs nowhere in `src/compiler/`.
+
+The consequence is asymmetric and worth naming, because it is the same asymmetry
+as the value-type-helper family (#3):
+
+- the two POSITIVE legs (`expect(driver_src).to_contain("class LegacyBuildCache:")`
+  :119, and `to_contain("if all_done and not self.ready_queue.contains(dep_id):")`
+  :254) are correctly RED;
+- but the SIX negative legs (:120-126, `expect(driver_src.contains(X)).to_equal(false)`)
+  **pass vacuously** — a missing file contains nothing, so every absence
+  assertion against it is trivially satisfied.
+
+The prior stream's scan-C rule "negative assertions cannot comment-cheat, exclude
+them" is correct for comment-cheating and **wrong as a general vacuity
+exclusion**: a negative assertion is vacuous whenever its receiver is empty,
+whether from a missing path, a failed read, or a renamed module. A future gate
+should assert that every path passed to a read call exists, independently of
+needle classification — the 7-site table above is the seed for it.
