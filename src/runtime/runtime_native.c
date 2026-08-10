@@ -4181,6 +4181,25 @@ static const char* rt_pad_char(int64_t pad, uint64_t* w) {
     return p->data;
 }
 
+/* Shared checked-length arithmetic for string ops that combine a caller- or
+ * content-controlled length into an allocation size (pad/zfill/replace_first
+ * below; see also rt_string_concat above). An unchecked `a + b` (or `a * b`)
+ * can wrap uint64_t, making a tiny malloc succeed while the SUBSEQUENT
+ * memcpy/memset calls still use the ORIGINAL un-wrapped operands -- writing
+ * past the undersized allocation and silently corrupting adjacent heap
+ * memory. Reject loudly via the file's established unrecoverable-error
+ * convention (spl_panic) instead of truncating or returning a
+ * plausible-looking value. */
+static inline uint64_t rt_checked_add_u64(uint64_t a, uint64_t b, const char* ctx) {
+    if (a > UINT64_MAX - b) spl_panic(ctx);
+    return a + b;
+}
+
+static inline uint64_t rt_checked_mul_u64(uint64_t a, uint64_t b, const char* ctx) {
+    if (a != 0 && b > UINT64_MAX / a) spl_panic(ctx);
+    return a * b;
+}
+
 /* pad_left / pad_start: left-pad to `width` CHARACTERS (not bytes).
  * A width at or below the current length is a no-op, so a negative width
  * returns the receiver rather than attempting a huge allocation. */
@@ -4191,7 +4210,8 @@ int64_t rt_string_pad_left(int64_t value, int64_t width, int64_t pad) {
     if (width <= current) return value;
     uint64_t pw; const char* pc = rt_pad_char(pad, &pw);
     uint64_t n = (uint64_t)(width - current);
-    uint64_t out_len = n * pw + s->len;
+    uint64_t npw = rt_checked_mul_u64(n, pw, "rt_string_pad_left: length overflow");
+    uint64_t out_len = rt_checked_add_u64(npw, s->len, "rt_string_pad_left: length overflow");
     char* out = (char*)malloc((size_t)out_len);
     if (!out) return value;
     for (uint64_t i = 0; i < n; i++) memcpy(out + i * pw, pc, (size_t)pw);
@@ -4209,7 +4229,8 @@ int64_t rt_string_pad_right(int64_t value, int64_t width, int64_t pad) {
     if (width <= current) return value;
     uint64_t pw; const char* pc = rt_pad_char(pad, &pw);
     uint64_t n = (uint64_t)(width - current);
-    uint64_t out_len = s->len + n * pw;
+    uint64_t npw = rt_checked_mul_u64(n, pw, "rt_string_pad_right: length overflow");
+    uint64_t out_len = rt_checked_add_u64(s->len, npw, "rt_string_pad_right: length overflow");
     char* out = (char*)malloc((size_t)out_len);
     if (!out) return value;
     memcpy(out, s->data, (size_t)s->len);
@@ -4229,7 +4250,9 @@ int64_t rt_string_center(int64_t value, int64_t width, int64_t pad) {
     uint64_t total = (uint64_t)(width - current);
     uint64_t left = total / 2;
     uint64_t right = total - left;
-    uint64_t out_len = (left + right) * pw + s->len;
+    uint64_t lr_pw = rt_checked_mul_u64(rt_checked_add_u64(left, right, "rt_string_center: length overflow"),
+                                         pw, "rt_string_center: length overflow");
+    uint64_t out_len = rt_checked_add_u64(lr_pw, s->len, "rt_string_center: length overflow");
     char* out = (char*)malloc((size_t)out_len);
     if (!out) return value;
     uint64_t o = 0;
@@ -4250,7 +4273,7 @@ int64_t rt_string_zfill(int64_t value, int64_t width) {
     if (width <= current) return value;
     uint64_t sign = (s->len > 0 && (s->data[0] == '+' || s->data[0] == '-')) ? 1 : 0;
     uint64_t zeros = (uint64_t)(width - current);
-    uint64_t out_len = s->len + zeros;
+    uint64_t out_len = rt_checked_add_u64(s->len, zeros, "rt_string_zfill: length overflow");
     char* out = (char*)malloc((size_t)out_len);
     if (!out) return value;
     if (sign) out[0] = s->data[0];
@@ -4655,7 +4678,8 @@ int64_t rt_string_replace_first(int64_t value, int64_t pattern, int64_t replacem
      * arm does. */
     for (uint64_t i = 0; i + p->len <= s->len; i++) {
         if (memcmp(s->data + i, p->data, (size_t)p->len) != 0) continue;
-        uint64_t out_len = s->len - p->len + r->len;
+        uint64_t out_len = rt_checked_add_u64(s->len - p->len, r->len,
+                                               "rt_string_replace_first: length overflow");
         char* out = (char*)malloc((size_t)out_len > 0 ? (size_t)out_len : 1);
         if (!out) return value;
         memcpy(out, s->data, (size_t)i);
