@@ -1,6 +1,6 @@
 # Interpreter: cross-module enum variant with discriminant 3 compares FALSE
 
-**Status:** OPEN
+**Status:** ARCHITECTURAL-OPEN (was OPEN; reclassified 2026-08-10, see note below)
 **Found:** 2026-08-04
 
 ## Symptom
@@ -120,3 +120,15 @@ collision family), which per repo rules
 of scope for a `.spl`-only fix and would require a cross-crate ABI change to
 the seed's enum registry — not attempted this pass. Status confirmed
 unchanged: **OPEN / ARCHITECTURAL**.
+
+
+## ARCHITECTURAL-OPEN reclassification (2026-08-10)
+
+Re-verified: this bug's root cause lives entirely inside the tree-walk
+interpreter / Cranelift JIT engine internals, which are implemented in
+`src/compiler_rust/**` (confirmed via `git grep -l 'struct Interpreter\\|enum Value'
+src/compiler_rust/compiler/src`, and `src/compiler_rust/vendor/cranelift-jit`
+for the JIT backend). Per standing constraint, Rust-seed source under
+`src/compiler_rust/**` is off-limits to this lane. No .spl-level workaround
+closes the root cause without touching that engine code. Reclassified from
+OPEN to ARCHITECTURAL-OPEN; no behavior change, no code edited this pass.

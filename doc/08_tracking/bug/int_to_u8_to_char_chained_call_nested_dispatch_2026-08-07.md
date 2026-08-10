@@ -1,6 +1,6 @@
 # `(i64).to_u8().to_char()` chained call fails in nested-call dispatch context
 
-**Status:** OPEN
+**Status:** ARCHITECTURAL-OPEN (was OPEN; reclassified 2026-08-10, see note below)
 **Found:** 2026-08-07, U4.2 coverage-closure unit (WM/GUI/web system-test
 coverage plan, `doc/03_plan/ui/testing/wm_gui_web_system_test_coverage_plan_2026-08-07.md`)
 **Area:** interpreter / nested-call method dispatch (Rust seed)
@@ -115,3 +115,15 @@ confirm/rebuild+redeploy if such an arm already exists in seed source but is
 undeployed (as was true for the enum fix at the time its doc was written).
 Requires a seed rebuild + `bin/simple` redeploy to verify — out of scope for
 this unit per this session's "no cargo/bootstrap" constraint.
+
+
+## ARCHITECTURAL-OPEN reclassification (2026-08-10)
+
+Re-verified: this bug's root cause lives entirely inside the tree-walk
+interpreter / Cranelift JIT engine internals, which are implemented in
+`src/compiler_rust/**` (confirmed via `git grep -l 'struct Interpreter\\|enum Value'
+src/compiler_rust/compiler/src`, and `src/compiler_rust/vendor/cranelift-jit`
+for the JIT backend). Per standing constraint, Rust-seed source under
+`src/compiler_rust/**` is off-limits to this lane. No .spl-level workaround
+closes the root cause without touching that engine code. Reclassified from
+OPEN to ARCHITECTURAL-OPEN; no behavior change, no code edited this pass.

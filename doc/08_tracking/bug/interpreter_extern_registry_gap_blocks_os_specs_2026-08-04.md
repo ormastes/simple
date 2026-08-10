@@ -1,6 +1,6 @@
 # BUG: baremetal externs have no interpreter binding — `unsafe_addr_of` and `rt_x86_syscall` fail closed in hosted unit specs
 
-**Status:** OPEN
+**Status:** ARCHITECTURAL-OPEN (was OPEN; reclassified 2026-08-10, see note below)
 **Found:** 2026-08-04
 **Severity:** medium — 3 confirmed failing examples in
 `test/01_unit/os/posix/`. The failure is a hard error, so the affected
@@ -109,3 +109,15 @@ Binary identity: `bin/simple` → `bin/release/x86_64-unknown-linux-gnu/simple`
 (57MB, built 2026-08-04), which prints the bootstrap-seed banner and delegates
 to `src/compiler_rust/target/debug/simple`. Findings attribute to the **seed**
 interpreter.
+
+
+## ARCHITECTURAL-OPEN reclassification (2026-08-10)
+
+Re-verified: this bug's root cause lives entirely inside the tree-walk
+interpreter / Cranelift JIT engine internals, which are implemented in
+`src/compiler_rust/**` (confirmed via `git grep -l 'struct Interpreter\\|enum Value'
+src/compiler_rust/compiler/src`, and `src/compiler_rust/vendor/cranelift-jit`
+for the JIT backend). Per standing constraint, Rust-seed source under
+`src/compiler_rust/**` is off-limits to this lane. No .spl-level workaround
+closes the root cause without touching that engine code. Reclassified from
+OPEN to ARCHITECTURAL-OPEN; no behavior change, no code edited this pass.
