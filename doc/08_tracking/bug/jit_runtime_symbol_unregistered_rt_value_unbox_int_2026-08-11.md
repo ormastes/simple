@@ -81,3 +81,71 @@ PASS — 4 checked                                            # check-native-unw
 There is no gate that fails when codegen emits a runtime symbol missing from
 `RUNTIME_SYMBOL_NAMES`. That check is mechanical (the diff above is ~20 lines
 of script) and would have caught this at build time rather than at run time.
+
+## Follow-up IMPLEMENTED 2026-08-11
+
+Added `#[test] every_emitted_runtime_symbol_is_registered_or_allowlisted` in
+`src/compiler_rust/compiler/tests/runtime_symbol_registration_gate.rs`. It
+re-derives, from source text, both sides of the diff the incident audit did by
+hand:
+
+- **Listed set**: parses `RUNTIME_SYMBOL_NAMES` out of
+  `common/src/runtime_symbols.rs` with the exact same line-scan
+  `runtime/build.rs` itself uses (copied, not imported, so the test stays
+  honest about what the build actually sees).
+- **Emitted set**: regex-scans every `.rs` file under `compiler/src/codegen/`
+  for `rt_*` literals passed to the four name-resolution call shapes:
+  `call_runtime_*(ctx, builder, "rt_x", ...)`, `runtime_funcs.get("rt_x")`,
+  `.declare_function("rt_x", ...)`, `get_function[_ptr]("rt_x")`.
+- Fails, naming every offending symbol, if `emitted - listed` is non-empty and
+  not in `ALLOWED_UNLISTED` — the 12-name audited allowlist (`rt_await`,
+  `rt_contract_check`, `rt_unit_bound_check`, `rt_generator_yield`,
+  `rt_par_for_each`, `rt_future_get_ctx/get_state/set_state` — all undefined
+  anywhere in the runtime — and `rt_monoio_future_get_ctx/get_result/
+  set_async_state`, `rt_monoio_poll` — defined but registered through the
+  monoio executor's own linkage, not this list).
+- Also fails if any `ALLOWED_UNLISTED` name becomes newly listed (stale
+  allowlist entry), and both extraction passes assert non-vacuity (file count
+  / symbol count floors) so a path or pattern drift can't silently pass green.
+
+Runs under plain `cargo test -p simple-compiler
+--test runtime_symbol_registration_gate`; no new crate, no build.rs change,
+no proc macro — uses `regex`, already a normal dependency of the crate.
+
+**Negative control** (pristine worktree at `origin/main` `ec88f23e190`,
+`CARGO_TARGET_DIR=/mnt/data/cargo-target-symgate`): removed `"rt_dict_insert"`
+from `RUNTIME_SYMBOL_NAMES` — test failed, naming exactly `["rt_dict_insert"]`
+and pointing at this bug doc in the panic message. Restored the line — test
+passed. `cargo build` is unaffected (the test file only exists under
+`compiler/tests/`, not compiled into the library or binary).
+
+**Scope: which of the three runtimes does this gate, and why no more was
+added.** The 2026-08-11 incident actually hit two independently-gated
+runtimes, not one:
+1. Hosted (Rust `runtime/src/value/...` and C `src/runtime/runtime_native.c`)
+   via the JIT's `RUNTIME_SYMBOL_NAMES` registration list — this gate, added
+   here. `runtime/build.rs`'s `collect_defined_runtime_symbols` scans BOTH the
+   Rust runtime source and the C runtime dir to populate
+   `RUNTIME_SYMBOL_ENTRIES`, so one list gates both hosted implementations;
+   no second hosted-C-specific check is needed.
+2. Baremetal (`examples/09_embedded/simple_os/arch/x86_64/boot/
+   baremetal_stubs.c`), which failed differently the same day
+   (`rt_value_unbox_int`, `rt_collection_remove` reported `FABRICATED-NEW` by
+   commit `bb02bc5bd7b`) — this is **already gated** by an existing,
+   independent, stronger mechanism:
+   `generate_stub_object_freestanding` in
+   `src/compiler_rust/compiler/src/pipeline/native_project/stubs.rs`, which
+   runs *inside the real freestanding linker pipeline*
+   (`clang --target=x86_64-unknown-elf`) and inspects the linker's own
+   unresolved-symbol list — not a static text heuristic — then NEW-ONLY
+   ratchets any newly-fabricated (`return 0` weak-stub) symbol against
+   `config/freestanding_fabricated_stub_baseline.sdn`, invoked from
+   `scripts/check/check-simpleos-x86-kernel-elf.shs` and
+   `scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs` during
+   SimpleOS kernel builds. Because it reads real link-time truth (what the
+   linker actually could not resolve) rather than re-deriving emitted-symbol
+   sets from source text, it is strictly more precise than anything this
+   text-based Rust test could add for the baremetal path, so no second check
+   was written here — doing so would duplicate, not strengthen, existing
+   coverage. Net: all three runtime implementations now have a build/link-time
+   gate for this exact defect shape; none did before today.
