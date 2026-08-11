@@ -2103,7 +2103,23 @@ impl MirLowering:
                     self.builder = b_special
                     temp
             case And | Or:
-                val left_local = self.lower_expr(left)
+                # Both operands of `and`/`or` sit in CONDITION position, so
+                # they must go through lower_cond_expr, not the raw value
+                # dispatcher. lower_cond_expr's docstring
+                # (mir_lowering_stmts.spl:1836) already ASSERTS this
+                # invariant -- "not/and/or already funnel their operands back
+                # through the condition path via their own lowering, so they
+                # need nothing here" -- but this arm called lower_expr, so the
+                # invariant was false and the whole `.?`/bare-optional
+                # condition normalization was skipped for logical operands.
+                # Consequence: `opt.? and rhs()` / `opt and rhs()` branched on
+                # the RAW payload-or-sentinel word, and RT_NIL is the NON-ZERO
+                # integer 3, so an ABSENT optional tested TRUE -- the left
+                # operand was effectively ignored, silently taking the wrong
+                # branch. Same class of bug as
+                # bare_optional_in_condition_position_wrong_branch, which fixed
+                # `if`/`while` but left `and`/`or` behind.
+                val left_local = self.lower_cond_expr(left)
                 var b_logic = self.builder
                 val rhs_block = b_logic.new_block(Some("logic_rhs"))
                 val short_block = b_logic.new_block(Some("logic_short"))
@@ -2130,7 +2146,10 @@ impl MirLowering:
                 var b_rhs = self.builder
                 b_rhs.switch_to_block(rhs_block)
                 self.builder = b_rhs
-                val right_local = self.lower_expr(right)
+                # RHS is in condition position too -- same reasoning as the
+                # LHS above. The Bool->i64 normalization below still applies
+                # on top of whatever lower_cond_expr returns.
+                val right_local = self.lower_cond_expr(right)
                 var right_value = right_local
                 var b_rhs_done = self.builder
                 if val right_type = self.local_mir_type_of(right_local):
