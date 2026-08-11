@@ -205,8 +205,20 @@ run dir holding old content is the NORMAL signature of a run that has *started*.
   author rules; `<link>` explicitly deferred — the adapter takes an in-memory
   HTML string with no fetch capability, closing this needs either real fetch
   or a signature change, left to whoever owns the interface. (6)
-  `check-electron-simple-web-layout-bitmap-evidence.shs` green with the flag
-  ON — not run. The flip stays blocked on (3) inline `style=` and (6).
+  `check-electron-simple-web-layout-bitmap-evidence.shs` — **run, and found
+  the gate itself can't test this criterion.** Its fixture imports
+  `simple_web_render_html_to_pixels` from `browser_engine` directly, never
+  `render_lane.browser_render_html_to_pixel_array`, and never reads
+  `SIMPLE_BROWSER_RENDER_LANE` — live-lane and blink-lane runs produced
+  byte-identical output because the flag is never consulted. Separately, both
+  runs also hit `simple-layout-render-failed` (SIGSEGV, exit 139) rendering
+  the gate's scene through the live renderer before blink is even reached —
+  consistent with tonight's no-working-self-hosted-binary situation, not a
+  blink defect. Filed:
+  `doc/08_tracking/bug/electron_simple_web_layout_gate_bypasses_render_lane_flag_2026-08-11.md`.
+  Criterion 6 needs the gate fixed before it can be evaluated at all. Inline
+  `style=` (3) is genuinely CLOSED (verified collision-free at `3d80fd897723`)
+  — the flip now stays blocked on (6) only.
 - Note: blink has **zero production callers** in `src/app/**` or `src/os/**`.
   This is a build-out, not a repair.
 
