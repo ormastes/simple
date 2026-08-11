@@ -65,9 +65,35 @@ that bite hardest restated:
 - **B1/B2 hardware not present in this environment.** Both lanes can complete stages
   2 and 3 on a host cross-compile against Mesa; stage 4 needs the board. Stated here
   rather than implied, per the board-runnable rule.
-- **B0 QEMU side unproven** — `virtio-gpu-gl` reportedly fails to load on the host
-  in `doc/01_research/os/vulkan/venus_virtio_gpu_protocol_facts.md`. B0 stage 4 is
-  blocked on that, independently of any board.
+- **B0 QEMU side: venus is DEFINITIVELY UNAVAILABLE on this host** (measured
+  2026-08-11, lane V1 — previously recorded here as "reportedly fails", which is
+  what let it stay ambiguous for days). `qemu-system-x86_64` 8.2.2 cannot load
+  `virtio-gpu-gl` at all: `hw-display-virtio-gpu-gl.so: undefined symbol:
+  qemu_egl_display`. That symbol should be defined in the main binary when built
+  `--enable-opengl`; `nm -D` finds it in neither the binary nor any of the six
+  `.so` files in the installed `qemu-system-modules-opengl`. QEMU's own diagnosis
+  is `-device virtio-gpu-gl: opengl is not available`. `venus=on` never even gets
+  evaluated — the failure is one layer BELOW virgl/venus negotiation.
+  `libvirglrenderer1` 1.0.0-1ubuntu2 *is* installed (correcting an earlier "not
+  found" note), but it is moot. Root cause is host QEMU packaging, fixable only by
+  a rebuilt or different QEMU package — no flag or device property helps. Filed:
+  `doc/08_tracking/bug/host_qemu_virtio_gpu_gl_missing_egl_symbol_2026-08-11.md`.
+
+  **Consequence for the whole plan:** this was the last route to a `submit` stage
+  that did not require absent silicon. With it closed, stages 3 and 4 are
+  unreachable on this host for all four backends — three for want of a GPU or a
+  QEMU model, and B0 for want of a working OpenGL build. What remains achievable
+  here is stage 2 (done, earned via Khronos validation) and hardening of code that
+  executes as pure computation.
+
+- **Directory fan-out now FAILS partly because of this effort** (measured
+  2026-08-11): `sh scripts/check/check-directory-fanout.shs` reports 7 directories
+  over the 10-file limit, and three are ours —
+  `src/os/drivers/gpu/board_vulkan` (~20 files), `test/01_unit/os/vulkan`, and
+  `doc/08_tracking/bug`. `structure.md` sets the limit; these lanes blew past it
+  without noticing. Not reorganised here because a rename mid-flight across several
+  active lanes is riskier than the violation, but it is a real debt this effort
+  created, not an inherited one.
 - **Encoders not written.** Stages 2–4 for all three board lanes are unimplemented;
   the profile flags say so and the spec asserts the zero.
 
