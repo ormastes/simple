@@ -24,7 +24,9 @@ backends, flagged `qemu_only`.
      |  (QEMU only)|    i915      |   drm-msm    |  drm-powervr |
      +-------------+--------------+--------------+--------------+
        counterpart:   counterpart:   counterpart:   counterpart:
-       virglrenderer  Mesa anv       Mesa turnip    Mesa powervr
+       Mesa venus     Mesa anv       Mesa turnip    Mesa powervr
+       (guest ICD)
+       ... all four counterparts are ONE independent reference (group `mesa`)
 ```
 
 Backends are one file each under `src/os/drivers/gpu/board_vulkan/` precisely so
@@ -65,11 +67,26 @@ hardware would make the portable correctness lane depend on a board, which the
 counterpart CI matrix forbids (tiers 0–4 carry correctness; 5–7 prove real
 execution).
 
-**Independence groups matter here.** turnip, anv and powervr are all Mesa, so they
-are group `mesa` — three Mesa drivers are *one* independent reference, not three.
-venus's counterpart is virglrenderer, a separate group. Any run whose executed
-sources collapse into one group is rejected as vacuous by
-`counterpart_run_vacuity_failures`.
+**Independence groups matter here, and they are worse than first written.**
+turnip, anv, powervr *and Mesa's venus guest ICD* are all Mesa, so all four are
+group `mesa` — they are **one** independent reference, not four. This file
+originally put venus in a separate `virglrenderer` group; that was wrong, and two
+lanes caught it independently. virglrenderer/vtest is the host-side *transport*
+the guest driver talks to, a different upstream, and it is not installed on this
+host at all (measured, lane L4).
+
+The consequence is load-bearing: any run whose executed sources collapse into one
+group is rejected as vacuous by `counterpart_run_vacuity_failures`. So on this
+host, *every* board-Vulkan boundary run is structurally one-reference-only —
+Simple plus one Mesa — and cannot satisfy the independence gate. The measured
+exceptions are glslang (`khronos-glslang`) for the SPIR-V *compilation* boundary
+only, and NVIDIA's proprietary ICD (`nvidia-proprietary`, driver 580.126.16,
+confirmed live), which is the sole genuinely independent ICD-execution reference
+available here.
+
+Independence groups are, today, **unverified declarations** — nothing derives a
+provider's group from the package that built it, so a mislabelled provider
+silently inflates the reference count. That gap is tracked, not fixed.
 
 ## Migration of existing Vulkan work
 
