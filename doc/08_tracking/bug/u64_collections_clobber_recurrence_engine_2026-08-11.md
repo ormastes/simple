@@ -45,29 +45,74 @@ Scan of every clone on this host for a commit with that author date:
 | `/home/ormastes/dev/pub/simple-llm-caret-integration-20260811/` | `6e2f613d302` | YES |
 | `/home/ormastes/dev/pub/simple-stage3-fix-codex/` | `05520066d13` | YES |
 
-## The 7th recurrence is armed RIGHT NOW
+## CORRECTION (same day): the "7th recurrence is armed" claim was WRONG
 
-The shared working copy that most sessions push from:
+An earlier revision of this doc claimed the shared working copy was primed to
+clobber the file a seventh time, based on:
 
 ```
-/home/ormastes/dev/pub/simple
-HEAD                              = 3063ec2aa9b
-HEAD is ancestor of origin/main   = NO
-commits in HEAD not in origin/main= 44
-HEAD contains 5f3066c9ca3         = YES
-HEAD:collections.rs               = 4211 lines   <-- STALE
+/home/ormastes/dev/pub/simple   HEAD = 3063ec2aa9b
+44 commits not in origin/main, containing 5f3066c9ca3
+HEAD:collections.rs = 4211 lines
 ```
 
-`origin/main` is currently healthy (6012 lines, restored at
-`81fffaf2b8d5ea87b2feedf42b3b04cc9228dd10`). But the shared WC's HEAD still
-holds the stale blob inside a 44-commit unpushed stack. **Any session that
-rebases that HEAD onto origin and pushes — the normal documented flow — will
-clobber `collections.rs` for the seventh time.** No malice and no mistake is
-required; the standard sync procedure is sufficient.
+**That is no longer true, and the alarming part of it was a measurement error.**
+Re-measured after the restore landed:
 
-This also explains why the clobber correlates with commits whose titles have
-nothing to do with the runtime: the stale file rides along inside whatever
-stack is being pushed.
+```
+HEAD = 1c4d4dbfd57
+HEAD:collections.rs blob == origin/main:collections.rs blob   (both 6012 lines)
+HEAD contains 5f3066c9ca3 = NO
+commits not in origin/main = 0
+no unpushed commit carries the stale blob 95b6ac77e5
+```
+
+The shared WC had simply not yet caught up when first measured; it has since
+advanced to origin. **There is no armed replay in the shared working copy.**
+
+Two distinct mistakes are worth recording, because both are easy to repeat:
+
+1. **`git show HEAD:<path>` is not the working copy.** The original measurement
+   read *committed* content and reported it as the state of the tree on disk.
+   The disk file was never the 4211-line stale version.
+2. **A stale HEAD in a shared clone reads as a threat that isn't there.** The
+   44-commit "unpushed stack" was just lag behind origin, not divergence.
+
+The historical finding — one commit authored 08-10 06:40:36 replayed six times,
+same blob `95b6ac77e5` — stands unchanged and is verified. Only the claim about
+current, forward-looking risk was wrong.
+
+## The disk WIP is real work — do NOT overwrite it
+
+The working copy's `collections.rs` (6024 lines, blob `fac4d4a3`) is **not**
+corruption and not the stale blob. It has the **same 231 functions** as origin's
+restored version (set-compared both directions, nothing missing either way).
+It is active WIP on the u64 feature, matching the
+`simple-u64-runtimevalue-v2-wt` worktree. Differences are narrow: extra
+`as_heap_u64()` comparison branches in `compare_runtime_values`,
+`rt_array_all_truthy`, `rt_array_any_truthy`; a naming difference; plus
+rustfmt line-wrapping.
+
+**The naming difference is the trap, and it is almost certainly the origin of
+the E0599 that broke `main` in the first place.** The two sides are each
+internally consistent, differing only by a rename of one enum variant that
+keeps the same discriminant:
+
+| | `heap.rs` defines | `collections.rs` uses |
+|---|---|---|
+| disk WC | `WideInt = 0x1D` | `HeapObjectType::WideInt` |
+| origin/main | `UInt = 0x1D` | `HeapObjectType::UInt` |
+
+So committing the disk `collections.rs` **alone** onto origin produces exactly
+`error[E0599]: no variant named 'WideInt' found for enum 'HeapObjectType'` —
+the same class of break that started this whole incident. The rename must move
+as one atomic unit across `heap.rs`, `collections.rs`, and every consumer, or
+not at all.
+
+**Recommended reconciliation (for the u64 WIP owner):** rebuild the branch on
+top of the now-fixed origin tip and re-apply the u64 changes there, rather than
+anyone guessing which side wins per-hunk. Nobody should overwrite this file in
+either direction without that owner.
 
 ## Fix (must be done in the source clones, not on origin)
 
