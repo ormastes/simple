@@ -1,0 +1,156 @@
+#!/bin/sh
+# check-hook-installation.shs — fence the pre-push hook WIRING itself.
+#
+# Why this exists (2026-08-11, the FOURTH tree wipe: 6f86ff32a7d wiped 113,027
+# tracked files including all of src/). Every content guard was SOUND — replayed
+# against the incident range, check-tree-size-push.shs FAILs exit 1 as designed.
+# The wipe landed anyway because the hook that INVOKES those guards never ran,
+# for two independent, silent, fail-OPEN reasons:
+#
+#   1. .git/config carried  core.hooksPath = /tmp/simple-stage4-push.85KIAn/.git-hooks
+#      — a temp directory that no longer exists. Git does not warn when hooksPath
+#      points at a missing directory; it simply runs no hooks at all, and the
+#      .git/hooks/pre-push symlink is bypassed entirely.
+#   2. The hook target scripts/check/pre-push-conflict-tree-guard.shs was mode
+#      0664, not executable. Git's only signal is a `hint:` line buried in push
+#      output that nobody reads, and it proceeds with the push.
+#
+# Either defect alone silently downgrades EVERY guard in this repo to advisory.
+# Neither is visible in `git status`, in any guard verdict, or in a normal push.
+# The content guards cannot detect this — a guard that is never invoked cannot
+# report that it was never invoked. That is what this script is for.
+#
+# It is NOT a content guard. It answers one question: if I push right now, will
+# the guards actually run? Run it before any plumbing landing, and the pre-push
+# hook runs it first so a half-installed hook fails loudly instead of open.
+#
+# Cheap by construction (no git object walks, no selftest corpus) so there is no
+# incentive to skip it.
+#
+# Verdict convention matches the other guards — last line of stdout:
+#   PASS  — <n> check(s) performed, hook wiring intact       exit 0
+#   FAIL  — ...                                              exit 1
+#   ERROR — nothing was checked                              exit 2
+# A run that performs 0 checks is an ERROR, never a pass.
+
+set -u
+
+name="check-hook-installation"
+checks=0
+fails=0
+
+fail() {
+    fails=$((fails + 1))
+    printf '%s: DEFECT — %s\n' "$name" "$1"
+    [ -n "${2:-}" ] && printf '    fix: %s\n' "$2"
+}
+
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || {
+    printf '%s: not inside a git repository\n' "$name"
+    printf '%s: ERROR — nothing was checked (exit 2)\n' "$name"
+    exit 2
+}
+git_dir=$(git rev-parse --git-common-dir 2>/dev/null) || git_dir="$repo_root/.git"
+case "$git_dir" in
+    /*) ;;
+    *) git_dir="$repo_root/$git_dir" ;;
+esac
+
+expected_guard="$repo_root/scripts/check/pre-push-conflict-tree-guard.shs"
+
+# --- check 1: core.hooksPath must be unset, or point at a real directory that
+# actually contains a pre-push hook. This is the exact defect that let the
+# fourth wipe through.
+checks=$((checks + 1))
+hooks_path=$(git config --get core.hooksPath 2>/dev/null || true)
+if [ -n "$hooks_path" ]; then
+    case "$hooks_path" in
+        /*) resolved="$hooks_path" ;;
+        *) resolved="$repo_root/$hooks_path" ;;
+    esac
+    if [ ! -d "$resolved" ]; then
+        fail "core.hooksPath is set to '$hooks_path' but that directory does not exist. Git silently runs NO hooks in this state — every pre-push guard is disabled." \
+             "git config --unset core.hooksPath"
+    elif [ ! -e "$resolved/pre-push" ]; then
+        fail "core.hooksPath='$hooks_path' exists but contains no pre-push hook. Guards are disabled." \
+             "git config --unset core.hooksPath"
+    else
+        case "$hooks_path" in
+            /tmp/*|/var/tmp/*|/run/*|/dev/shm/*)
+                fail "core.hooksPath='$hooks_path' lives in volatile temp storage. It will vanish on reboot or cleanup and silently disable every guard." \
+                     "git config --unset core.hooksPath"
+                ;;
+        esac
+    fi
+fi
+
+# --- check 2: the pre-push hook must exist.
+checks=$((checks + 1))
+hook="$git_dir/hooks/pre-push"
+if [ -n "$hooks_path" ] && [ -d "${resolved:-}" ] && [ -e "${resolved:-}/pre-push" ]; then
+    hook="$resolved/pre-push"
+fi
+if [ ! -e "$hook" ]; then
+    fail "no pre-push hook at $hook — nothing invokes the guards on push." \
+         "ln -sf ../../scripts/check/pre-push-conflict-tree-guard.shs $git_dir/hooks/pre-push"
+else
+    # --- check 3: the hook must be EXECUTABLE. Git only emits a `hint:` and
+    # proceeds when it is not; this was the second half of the 2026-08-11 wipe.
+    checks=$((checks + 1))
+    if [ ! -x "$hook" ]; then
+        fail "pre-push hook $hook is not executable. Git IGNORES it with only a 'hint:' line and pushes anyway." \
+             "chmod +x $(readlink -f "$hook" 2>/dev/null || echo "$hook")"
+    fi
+
+    # --- check 4: the hook must actually resolve to the repo's guard driver,
+    # not to some unrelated or stale script.
+    checks=$((checks + 1))
+    target=$(readlink -f "$hook" 2>/dev/null || echo "$hook")
+    expected_real=$(readlink -f "$expected_guard" 2>/dev/null || echo "$expected_guard")
+    if [ "$target" != "$expected_real" ]; then
+        if ! grep -q 'check-tree-size-push' "$target" 2>/dev/null; then
+            fail "pre-push hook resolves to '$target', which is not the repo guard driver and does not invoke check-tree-size-push.shs." \
+                 "ln -sf ../../scripts/check/pre-push-conflict-tree-guard.shs $git_dir/hooks/pre-push"
+        fi
+    fi
+fi
+
+# --- check 5: the guard driver and the load-bearing content guards it shells
+# out to must themselves be executable. The driver invokes most of them via
+# `sh <path>`, which tolerates mode 0664, but any that are exec'd directly and
+# any that a human runs from the shell must not be silently unrunnable.
+checks=$((checks + 1))
+if [ ! -x "$expected_guard" ]; then
+    fail "guard driver $expected_guard is not executable." "chmod +x $expected_guard"
+fi
+
+for g in check-tree-size-push check-no-conflict-tree-push check-no-conflict-markers-push check-no-revert-push; do
+    checks=$((checks + 1))
+    p="$repo_root/scripts/check/$g.shs"
+    if [ ! -f "$p" ]; then
+        fail "mandatory guard $g.shs is missing from scripts/check/." "restore it from git history"
+    fi
+done
+
+# --- check 6: no repo-local push policy that blanket-disables verification.
+checks=$((checks + 1))
+if [ "$(git config --get --type=bool core.verify 2>/dev/null || true)" = "false" ]; then
+    fail "core.verify=false disables all hooks on push." "git config --unset core.verify"
+fi
+
+if [ "$checks" -eq 0 ]; then
+    printf '%s: ERROR — nothing was checked (exit 2)\n' "$name"
+    exit 2
+fi
+
+if [ "$fails" -gt 0 ]; then
+    printf '\n'
+    printf '%s: A guard that is never INVOKED cannot report that it was never\n' "$name"
+    printf '  invoked. Every content guard in this repo is sound and still fails\n'
+    printf '  open in this configuration. Fix the wiring above before pushing.\n'
+    printf '%s: FAIL — %d check(s) performed, %d defect(s) in hook wiring\n' "$name" "$checks" "$fails"
+    exit 1
+fi
+
+printf '%s: PASS — %d check(s) performed, hook wiring intact\n' "$name" "$checks"
+exit 0
