@@ -4,6 +4,20 @@ Status: FIRST-PASS TRIAGE (static analysis only, not re-verified line-by-line
 for every gate). See "Confidence / follow-up" section — do not treat the
 per-gate bucket assignments below as final without a full manual read.
 
+**2026-08-11 follow-up correction applied:** all 9 named UNCERTAIN scripts
+have since been read in full and resolved (see the "UNCERTAIN — RESOLVED"
+section below); one Tier-3 EXIT-CODE-ONLY entry
+(`check-try-operator-error-propagation.shs`) was a genuine
+misclassification and has been corrected in place; the
+`pre-push-conflict-tree-guard.shs` note was reworded to distinguish its
+(exit-code-based, and sound) dispatch layer from its leaf gates. A separate
+investigation of `scripts/check/lib/bootstrap-stage3/manifest-verify.shs`
+found it recomputes real file hashes via `bootstrap_stage3_hash_file` (which
+shells out to `sha256sum`, see `scripts/check/lib/bootstrap-stage3/authority.shs`
+lines 12-15) at several call sites (e.g. lines 411, 415, 601, 604, 658) — so
+any claim that this gate is pure manifest-field string-equality with no real
+hashing is false; no such claim is made in this doc.
+
 ## Why this doc exists
 
 Measured today: `bin/simple run` exits 0 after a fatal `error: semantic:`;
@@ -38,7 +52,7 @@ false zero.
 | STDOUT-ORACLE | 7 |
 | EXECUTING (asserts on actual run output/log) | ~30 |
 | EXIT-CODE-ONLY (confirmed via `$?`/`rc=`/`exit_code` pattern) | ~39 |
-| UNCERTAIN — needs full manual read before final bucket | 17 |
+| UNCERTAIN — needs full manual read before final bucket | ~17 (only 9 ever named; see correction below — this is an unverified upper bound, not a confirmed count) |
 | **Total lane-invoking scripts** | **112** |
 | N/A (no build/compile/run lane at all) | 423 of the 535 |
 
@@ -104,16 +118,30 @@ gate is "fixed."
   `check-build-defaults-collect-all-and-incremental.shs`, `check-implicit-self-field-assignment.shs`,
   `check-stage4-selfhost-parse-memory.shs`, `check-heavy-work-preflight.shs`,
   `check-widget-showcase-4k-200fps.shs`, `check-simpleos-wm-host-seam-evidence.shs`,
-  `check-simpleos-screen-type-qemu-evidence.shs`, `pre-push-conflict-tree-guard.shs`
-  *(note: this one already emits the verdict-line convention — see below — but its
-  build/compile sub-steps are still exit-code-only)*,
+  `check-simpleos-screen-type-qemu-evidence.shs`
+  *(note on `pre-push-conflict-tree-guard.shs`, moved out of this list — see
+  the CORRECTION under "Verdict-line convention" below: its dispatch layer is
+  exit-code-based, but that is not itself unsound, and the leaf gates it
+  delegates to are not exit-code-only)*,
   `check-macos-metal-browser-backing-evidence.shs`, `check-named-ctor-unknown-field-rejected.shs`,
   `sync-native-health-guard.shs`, `check-riscv-hardware-gates.shs`,
   `check-production-gui-web-host-gpu-queue-readback-evidence.shs`,
   `check-render-perf-v-lane-suite.shs`, `check-simpleos-wm-qmp-drag-delta-evidence.shs`,
   `check-simpleos-memory-leveling-qemu.shs`, `check-untyped-list-element-shift.shs`,
   `check-simpleos-x86-64-wm-hello-lifecycle-evidence.shs`,
-  `check-simpleos-screen-evidence-gate-proof.shs`, `check-try-operator-error-propagation.shs`
+  `check-simpleos-screen-evidence-gate-proof.shs`
+
+  **CORRECTION (2026-08-11 follow-up read):** `check-try-operator-error-propagation.shs`
+  was originally filed in this Tier-3 EXIT-CODE-ONLY list; a full read shows
+  that is wrong. Lines 119-130 run three independent grep-based stdout
+  assertions per engine (default/interpret/jit): `grep -aq '^err=ERR:boom$'`,
+  an exact count of a `FELL_THROUGH` marker, and `grep -aq
+  '^ok=OK:bound:payload$'`, plus fail-closed handling of empty output
+  (line 109/114-115). This is **STDOUT-ORACLE/EXECUTING**, not
+  exit-code-only. The original grep-pattern-only pass over-triggered on the
+  file's `set -u`/`oops()`/`exit 2` scaffolding (lines 49-62) without reading
+  past it to the real assertions. Removed from this list; no fix owed to the
+  gate itself.
 
   **Recommended oracle:** case-by-case — most of these assert a language
   or runtime *behavior* (enum match, array OOB, try-operator propagation,
@@ -123,14 +151,68 @@ gate is "fixed."
   they likely already capture logs but may not be *asserting* on them
   beyond process exit; that needs the manual read below to confirm.
 
-## UNCERTAIN — needs full manual read before final classification
-`check-electron-vulkan-web-parity.shs`, `check-engine-differential.shs`,
-`check-native-object-cache-granularity.shs`,
-`check-linux-hosted-wm-live-window-evidence.shs` (leans ARTIFACT-INSPECTING,
-sha256 check around line 128), `check-u32-array-not-packed.shs`,
-`check-trait-solver-method-resolution-variant.shs`, `check-seed-extern-registry.shs`,
-`check-simpleos-servers-qemu.shs`, `check-native-tuple-to-text.shs` (spot-read:
-actually EXECUTING, not exit-code-only — grep-only pass mis-bucketed it).
+## UNCERTAIN — RESOLVED (2026-08-11 follow-up read)
+
+**Count correction:** this section originally said "~17 UNCERTAIN" in the
+counts table above, but only ever named 9 scripts. A follow-up pass read all
+9 named scripts in full; no further UNCERTAIN scripts could be identified
+without re-running the full enumeration methodology, so the "~17" figure in
+the counts table should be read as **9 confirmed-named, remainder
+unenumerated** rather than a hard count — treat "~17" as an upper bound from
+the first grep pass, not a verified total. None of the 9 named scripts
+resolved to EXIT-CODE-ONLY.
+
+All 9 named scripts, resolved:
+
+1. `check-electron-vulkan-web-parity.shs` → **EXECUTING**. Line 67 diffs
+   actual pixel buffers (`e.pixels[i] !== v.pixels[i]`), fails on any
+   mismatch (line 69 `process.exit(1)`).
+2. `check-engine-differential.shs` → thin dispatcher; bucket **inherited from
+   its delegate**. Line 42 just runs `"$SIMPLE" run
+   scripts/check/check_engine_differential.spl`; the wrapper itself is only
+   cwd/binary preflight (lines 26-40) — classify by the delegated `.spl`
+   harness's oracle, not this file.
+3. `check-native-object-cache-granularity.shs` → **STDOUT-ORACLE**. Line 182
+   `if [ "$onefile_hits" -eq 2 ]` parses a `[NATIVE] cache: N hits` receipt
+   out of build-log text and asserts an exact count, with fail-closed
+   handling of unparseable receipts (lines 104-111, 159-166).
+4. `check-linux-hosted-wm-live-window-evidence.shs` → **ARTIFACT-INSPECTING**
+   (confirms the "leans ARTIFACT-INSPECTING" note). Lines 462-463 hash the
+   entry binary and `compositor_engine2d.spl` via `sha256_file`, plus
+   screenshot pixel-crop comparisons via xdotool/import/convert (lines
+   250-351).
+5. `check-u32-array-not-packed.shs` → **EXECUTING** (mixed hard-assert +
+   observational canary). Line 70 `if [ "$buf8" != "32" ]` hard-asserts exact
+   byte lengths from a real run's stdout (Part 1); the RSS-delta leg (Part 2)
+   is explicitly documented (lines 28-37) as observational-only and never
+   sets `fail` — that is a deliberate canary, not a soundness gap.
+6. `check-trait-solver-method-resolution-variant.shs` → **STDOUT-ORACLE**
+   (static source-pattern guard). Line 78 `grep -aq 'MethodResolution\.'`
+   against an extracted function body — not EXECUTING because the buggy code
+   path is documented unreachable at runtime (lines 26-34), with a self-test
+   proving it rejects the known-bad shape (lines 94-151). Correct instrument
+   given the documented unreachability; flag for promotion to EXECUTING once
+   the solver is wired live.
+7. `check-seed-extern-registry.shs` → **STDOUT-ORACLE** (grep-census over
+   source plus a baseline diff), not exit-code-only. Line 74
+   `if [ "$comp_new" -gt 0 ]; then ... exit 1` derives the exit code directly
+   from a stdout-line count computed via `grep` over `src/compiler_rust`
+   against a baseline file. Soundness gap worth separately tracking: the
+   "informational, exit 0" fallback when no baseline file exists (lines
+   70-73) silently disables the gate.
+8. `check-simpleos-servers-qemu.shs` → **EXECUTING**. Line 152
+   `echo "$HTTP_ROOT" | grep -q "200 OK"` drives a real QEMU boot, issues
+   real TCP/nc probes (ssh, http, dbd RESP protocol), asserts on serial-log
+   markers and protocol responses, including a reboot-persistence leg (lines
+   208-221) — one of the more rigorous gates in the corpus.
+9. `check-native-tuple-to-text.shs` → **EXECUTING** (confirms the original
+   spot-read note below). Line 41 `if [ "$flat" != "(1, 2, 3)" ]` runs a real
+   `native-build` binary and asserts on its stdout across 7 distinct value
+   shapes (i64 tuple, mixed-type, f64 field read).
+
+**Net result:** 4 EXECUTING, 3 STDOUT-ORACLE, 1 ARTIFACT-INSPECTING, 1 thin
+dispatcher (bucket inherited from its delegate). Zero of the 9 turned out to
+be plain EXIT-CODE-ONLY once read in full.
 
 ## Verdict-line convention (`PASS — <n> ... checked` / `FAIL` / `ERROR — nothing was checked`)
 
@@ -144,9 +226,23 @@ not fully computed this pass — follow-up: intersect the 112 lane-invoking
 list against verdict-line grep hits.
 
 One concrete finding: `scripts/check/pre-push-conflict-tree-guard.shs`
-emits the verdict-line convention at its top level, but internally still
-treats a build/compile sub-step's exit code as sufficient — the convention
-covers the guard's own PASS/FAIL, not the soundness of what it measured.
+emits the verdict-line convention at its top level, and internally its
+`run_guard()` dispatcher does treat delegated sub-guards' exit codes as the
+signal (e.g. line 588, `run_guard "$native_object_cache_granularity_guard"
+...`).
+
+**CORRECTION (2026-08-11 follow-up read):** the original wording here
+("build/compile sub-steps are still exit-code-only") over-claimed. It is
+true only of the *dispatch layer* — `run_guard()` legitimately treats a
+sub-guard's exit code as sufficient, which is the correct thing for a
+dispatcher to do. It does not mean the delegated sub-guards themselves are
+unsound: `check-native-object-cache-granularity.shs`, one of the sub-guards
+it dispatches to, is a real STDOUT-ORACLE gate with its own fail-closed
+log-parsing (see the UNCERTAIN-bucket resolution, item 3, above), not a bare
+`$?` check. So the convention does cover the guard's own PASS/FAIL, and the
+dispatch-by-exit-code pattern is sound *given* that the leaf gates it calls
+are themselves sound — which, at least for this sub-guard, they are. Treat
+this as a wording fix, not evidence that the leaf gates need a new oracle.
 
 ## Prioritised worklist (worst consequence first)
 
@@ -157,7 +253,10 @@ covers the guard's own PASS/FAIL, not the soundness of what it measured.
 2. **Native-build/link-parity Tier 2 list above (14 gates)** — retrofit with
    the existing `check-native-build-artifact-has-functions.shs` FUNC-symbol
    helper rather than bespoke checks.
-3. **17 UNCERTAIN gates** — full manual read first; do not guess bucket.
+3. **UNCERTAIN gates** — the 9 named ones are now resolved (see "UNCERTAIN —
+   RESOLVED" above; none were EXIT-CODE-ONLY). The "~17" figure was never
+   fully enumerated; re-run the full methodology if the remainder need
+   identifying.
 4. **Remaining Tier 3 exit-code-only gates (~30)** — batch review, apply
    EXECUTING or ARTIFACT-INSPECTING oracle per the specific claim each gate
    makes; do not blanket-apply one instrument to all of them.
