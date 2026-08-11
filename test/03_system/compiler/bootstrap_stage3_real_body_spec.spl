@@ -32,7 +32,7 @@ fn probe_source() -> text:
         "    val result = helper()\n",
         "    if result != 73:\n",
         "        return 9\n",
-        "    println(\"" + MARKER + "\")\n",
+        "    println(\"STAGE3_REAL_BODY_OK_\" + result.to_string())\n",
         "    0\n"
     ].join("")
 
@@ -43,13 +43,12 @@ describe "pure-Simple Stage3 real entry body":
         step("Require an explicit admitted pure-Simple Stage3 binary")
         expect(stage3.len()).to_be_greater_than(0)
         expect(rt_file_exists(stage3)).to_equal(true)
-        val (authority_out, authority_code) = shell("case '" + stage3 + "' in *src/compiler_rust*) exit 41;; esac; test -x '" + stage3 + "'")
-        expect(authority_code).to_equal(0)
-        expect(authority_out).to_equal("")
+        expect(stage3.contains("src/compiler_rust")).to_equal(false)
 
         step("Verify the selected compiler identifies as the bootstrap compiler")
-        val (version_out, version_code) = shell("'" + stage3 + "' --version")
+        val (version_out, version_err, version_code) = rt_process_run(stage3, ["--version"])
         expect(version_code).to_equal(0)
+        expect(version_err).to_equal("")
         expect(version_out).to_contain("simple-bootstrap 1.0.0-beta")
 
         step("Write a helper-calling entry whose observable marker requires real body execution")
@@ -59,17 +58,25 @@ describe "pure-Simple Stage3 real entry body":
         expect(rt_file_write_text(SOURCE_PATH, probe_source())).to_equal(true)
 
         step("Build through Stage3 using the canonical bare positional entry form")
-        val command = [
-            "env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH ",
-            "SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB=src '", stage3, "' native-build ",
-            "--backend cranelift --entry-closure --cache-dir '", CACHE_DIR,
-            "' --output '", NATIVE_PATH, "' '", SOURCE_PATH, "'"
-        ].join("")
-        val (build_out, build_code) = shell(command)
+        val (build_out, build_err, build_code) = rt_process_run("/usr/bin/env", [
+            "-u", "SIMPLE_BOOTSTRAP",
+            "-u", "SIMPLE_RUNTIME_PATH",
+            "SIMPLE_NO_STUB_FALLBACK=1",
+            "SIMPLE_LIB=src",
+            stage3,
+            "native-build",
+            "--backend", "cranelift",
+            "--entry-closure",
+            "--cache-dir", CACHE_DIR,
+            "--output", NATIVE_PATH,
+            SOURCE_PATH
+        ])
         expect(build_code).to_equal(0)
+        expect(build_err).to_equal("")
         expect(rt_file_exists(NATIVE_PATH)).to_equal(true)
 
         step("Execute the artifact and reject a link-valid ret-0 stub")
-        val (run_out, run_code) = shell("'" + NATIVE_PATH + "'")
+        val (run_out, run_err, run_code) = rt_process_run(NATIVE_PATH, [])
         expect(run_code).to_equal(0)
+        expect(run_err).to_equal("")
         expect(run_out).to_contain(MARKER)
