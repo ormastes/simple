@@ -113,10 +113,19 @@ QEMU launch contracts:
 
 ```bash
 sh scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs --self-test
-sh scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs
+SIMPLEOS_ARM64_ATTESTED_COMPILER=/absolute/path/to/stage3/simple \
+SIMPLEOS_ARM64_COMPILER_RECEIPT=/absolute/path/to/compiler-receipt.env \
+SIMPLEOS_ARM64_STAGE3_PROVENANCE=/absolute/path/to/stage3/provenance.env \
+  sh scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs
 bin/simple os run --scenario=arm64-desktop-engine2d
 bin/simple os test --scenario=arm64-desktop-engine2d
 ```
+
+The producer accepts no unbound clean-binary claim: the strict compiler receipt
+and the canonical current Phase 3 provenance manifest must both identify the
+exact compiler and remain unchanged through the build. The QMP consumer
+revalidates that Phase 3 manifest before launch. Missing or stale provenance is
+an admission failure, not a reason to invoke Stage 1 or use the Rust seed.
 
 For the macOS host-GPU evidence lane, select only the current AArch64 probe and
 desktop guest without running the unrelated cross-ISA rows:

@@ -189,8 +189,15 @@ transport and every identity are READY.
    bootstrap.  Build the AArch64 desktop path through:
 
    ```sh
-   sh scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs
+   SIMPLEOS_ARM64_ATTESTED_COMPILER=/absolute/path/to/stage3/simple \
+   SIMPLEOS_ARM64_COMPILER_RECEIPT=/absolute/path/to/compiler-receipt.env \
+   SIMPLEOS_ARM64_STAGE3_PROVENANCE=/absolute/path/to/stage3/provenance.env \
+     sh scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs
    ```
+
+   The producer and QMP consumer both validate the exact canonical Stage 3
+   manifest against the clean source root. A custom smoke receipt alone is not
+   sufficient; absence of a current Stage 3 provenance chain is a blocker.
 
 4. Re-run aggregate preflight once:
 

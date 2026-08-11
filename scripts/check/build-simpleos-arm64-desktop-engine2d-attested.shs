@@ -10,12 +10,17 @@ cd "$ROOT_DIR"
 
 . scripts/check/lib/simpleos-arm64-guest-source-fingerprint.shs
 . scripts/check/lib/qemu-frozen-source-admission.shs
+BOOTSTRAP_STAGE3_FACADE_PATH="$ROOT_DIR/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
 
 COMPILER=""
 COMPILER_REJECTION_REASON=""
 PINNED_COMPILER="${SIMPLEOS_ARM64_ATTESTED_COMPILER:-}"
 COMPILER_RECEIPT="${SIMPLEOS_ARM64_COMPILER_RECEIPT:-}"
 COMPILER_RECEIPT_SHA256=""
+STAGE3_PROVENANCE="${SIMPLEOS_ARM64_STAGE3_PROVENANCE:-}"
+STAGE3_PROVENANCE_SHA256=""
 KERNEL="build/os/simpleos_arm64_desktop_engine2d.elf"
 DISK="build/os/fat32-arm64-desktop.img"
 DISK_PRODUCER="build/os/make_os_disk"
@@ -227,6 +232,33 @@ validate_pinned_compiler_receipt() {
         COMPILER_REJECTION_REASON="pinned-compiler-receipt-sha256-failed"
         return 1
     }
+    [ -n "$STAGE3_PROVENANCE" ] || {
+        COMPILER_REJECTION_REASON="stage3-provenance-missing"
+        return 1
+    }
+    [ -f "$STAGE3_PROVENANCE" ] && [ ! -L "$STAGE3_PROVENANCE" ] || {
+        COMPILER_REJECTION_REASON="stage3-provenance-unavailable"
+        return 1
+    }
+    STAGE3_PROVENANCE="$(bootstrap_stage3_canonical_file \
+        "$STAGE3_PROVENANCE")" || {
+        COMPILER_REJECTION_REASON="stage3-provenance-not-canonical"
+        return 1
+    }
+    STAGE3_PROVENANCE_SHA256="$(sha256_file "$STAGE3_PROVENANCE")" || {
+        COMPILER_REJECTION_REASON="stage3-provenance-sha256-failed"
+        return 1
+    }
+    bootstrap_stage3_verify_manifest "$STAGE3_PROVENANCE" "$ROOT_DIR" \
+        "$PINNED_COMPILER" >/dev/null || {
+        COMPILER_REJECTION_REASON="stage3-provenance-invalid"
+        return 1
+    }
+    [ "$STAGE3_PROVENANCE_SHA256" = "$(sha256_file \
+        "$STAGE3_PROVENANCE")" ] || {
+        COMPILER_REJECTION_REASON="stage3-provenance-changed-during-verification"
+        return 1
+    }
 }
 
 reject_fabricated_build_receipts() {
@@ -419,6 +451,8 @@ POST_COMPILER_VERSION="$(printf '%s\n' "$POST_COMPILER_VERSION_OUTPUT" |
     sed -n '1p')"
 POST_COMPILER_RECEIPT_SHA256="$(sha256_file "$COMPILER_RECEIPT")" ||
     fail_build "post-build-compiler-receipt-sha256-failed"
+POST_STAGE3_PROVENANCE_SHA256="$(sha256_file "$STAGE3_PROVENANCE")" ||
+    fail_build "post-build-stage3-provenance-sha256-failed"
 
 [ "$POST_HEAD" = "$PRE_HEAD" ] ||
     fail_build "source-revision-changed-during-build"
@@ -438,6 +472,8 @@ POST_COMPILER_RECEIPT_SHA256="$(sha256_file "$COMPILER_RECEIPT")" ||
     fail_build "compiler-version-changed-during-build"
 [ "$POST_COMPILER_RECEIPT_SHA256" = "$COMPILER_RECEIPT_SHA256" ] ||
     fail_build "compiler-receipt-changed-during-build"
+[ "$POST_STAGE3_PROVENANCE_SHA256" = "$STAGE3_PROVENANCE_SHA256" ] ||
+    fail_build "stage3-provenance-changed-during-build"
 validate_pinned_compiler_receipt ||
     fail_build "post-build-compiler-receipt-revalidation-failed"
 
@@ -487,6 +523,8 @@ umask 077
     echo "compiler_arch=$COMPILER_ARCH"
     echo "compiler_receipt_path=$COMPILER_RECEIPT"
     echo "compiler_receipt_sha256=$COMPILER_RECEIPT_SHA256"
+    echo "stage3_provenance_path=$STAGE3_PROVENANCE"
+    echo "stage3_provenance_sha256=$STAGE3_PROVENANCE_SHA256"
     echo "build_log_path=$BUILD_LOG"
     echo "build_log_sha256=$BUILD_LOG_SHA256"
     echo "build_command=$BUILD_COMMAND"
