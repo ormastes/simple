@@ -81,12 +81,12 @@ impl PartialEq for RuntimeValue {
         }
         if let Some(left) = self.as_heap_u64() {
             return other.as_heap_u64().map_or_else(
-                || other.is_int() && left as i64 == other.as_int(),
+                || other.is_int() && other.as_int() >= 0 && left == other.as_int() as u64,
                 |right| left == right,
             );
         }
         if let Some(right) = other.as_heap_u64() {
-            return self.is_int() && self.as_int() == right as i64;
+            return self.is_int() && self.as_int() >= 0 && self.as_int() as u64 == right;
         }
         self.0 == other.0
     }
@@ -108,7 +108,12 @@ impl std::hash::Hash for RuntimeValue {
             }
             d.to_bits().hash(state);
         } else if let Some(value) = self.as_heap_u64() {
-            RuntimeValue::from_int(value as i64).to_raw().hash(state);
+            if value <= ((1u64 << 60) - 1) {
+                RuntimeValue::from_int(value as i64).to_raw().hash(state);
+            } else {
+                0x5549_4e54_5f55_3634u64.hash(state);
+                value.hash(state);
+            }
         } else {
             self.0.hash(state);
         }
@@ -131,8 +136,10 @@ impl Ord for RuntimeValue {
         }
         match (self.as_heap_u64(), other.as_heap_u64()) {
             (Some(left), Some(right)) => return left.cmp(&right),
-            (Some(left), None) if other.is_int() => return (left as i64).cmp(&other.as_int()),
-            (None, Some(right)) if self.is_int() => return self.as_int().cmp(&(right as i64)),
+            (Some(_), None) if other.is_int() && other.as_int() < 0 => return std::cmp::Ordering::Greater,
+            (Some(left), None) if other.is_int() => return left.cmp(&(other.as_int() as u64)),
+            (None, Some(_)) if self.is_int() && self.as_int() < 0 => return std::cmp::Ordering::Less,
+            (None, Some(right)) if self.is_int() => return (self.as_int() as u64).cmp(&right),
             _ => {}
         }
         // Order by tag first, then by payload

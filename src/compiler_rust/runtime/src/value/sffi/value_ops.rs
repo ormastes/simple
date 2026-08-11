@@ -93,7 +93,9 @@ pub extern "C" fn rt_is_error(v: RuntimeValue) -> bool {
 mod u64_boundary_tests {
     use super::{rt_value_as_u64, rt_value_u64};
     use crate::value::sffi::equality::{rt_value_compare, rt_value_eq, value_hash};
-    use crate::value::{rt_enum_new, rt_enum_payload, RuntimeValue};
+    use crate::value::{
+        rt_dict_get, rt_dict_len, rt_dict_new, rt_dict_set, rt_enum_new, rt_enum_payload, RuntimeValue,
+    };
 
     #[test]
     fn boxed_u64_has_lossless_value_semantics_and_signed_int_parity() {
@@ -128,13 +130,25 @@ mod u64_boundary_tests {
 
         let unsigned_minus_one = rt_value_u64(-1);
         let signed_minus_one = RuntimeValue::from_int(-1);
-        assert_eq!(rt_value_eq(unsigned_minus_one, signed_minus_one), 1);
-        assert_eq!(value_hash(unsigned_minus_one), value_hash(signed_minus_one));
+        assert_eq!(rt_value_eq(unsigned_minus_one, signed_minus_one), 0);
         assert_eq!(rt_value_compare(unsigned_minus_one, signed_minus_one), 1);
+        let unsigned_seven = rt_value_u64(7);
+        let signed_seven = RuntimeValue::from_int(7);
+        assert_eq!(rt_value_eq(unsigned_seven, signed_seven), 1);
+        assert_eq!(value_hash(unsigned_seven), value_hash(signed_seven));
         assert_eq!(
             signed_minus_one.as_int(),
             -1,
             "signed BoxInt behavior must remain unchanged"
         );
+
+        let dict = rt_dict_new(8);
+        let zero_key = rt_value_u64(0);
+        let high_key = rt_value_u64((1i64 << 61) as i64);
+        assert!(rt_dict_set(dict, zero_key, RuntimeValue::from_int(10)));
+        assert!(rt_dict_set(dict, high_key, RuntimeValue::from_int(20)));
+        assert_eq!(rt_dict_len(dict), 2);
+        assert_eq!(rt_dict_get(dict, rt_value_u64(0)).as_int(), 10);
+        assert_eq!(rt_dict_get(dict, rt_value_u64(1i64 << 61)).as_int(), 20);
     }
 }
