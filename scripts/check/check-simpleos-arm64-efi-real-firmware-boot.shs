@@ -1,0 +1,164 @@
+#!/bin/sh
+# check-simpleos-arm64-efi-real-firmware-boot.shs
+#
+# Board-runnable gate for the SimpleOS **aarch64** boot lane.
+#
+# Boots the aarch64 kernel the way a physical board boots it: real UEFI
+# firmware in pflash (EDK2/AAVMF), which loads a real EFI application from a
+# FAT EFI System Partition on a virtio block device, which loads the kernel.
+# This is the aarch64 twin of the riscv64 OpenSBI gate
+# (scripts/check/check-simpleos-riscv64-opensbi-real-firmware-boot.shs) and of
+# the x86_64 OVMF lane, and it exists to satisfy .claude/rules/board-runnable.md.
+#
+# ---------------------------------------------------------------------------
+# WHAT THIS GATE IS FOR (and what it corrects)
+# ---------------------------------------------------------------------------
+# .claude/rules/board-runnable.md said "aarch64 currently lacks an EFI-stub".
+# That statement is STALE as written: the EFI boot path exists and works (see
+# doc/08_tracking/bug/aarch64_real_firmware_boot_gap_and_seed_defects_2026-07-14.md).
+# What was genuinely missing was twofold, and both are what this gate now
+# fences:
+#
+#   1. The aarch64 EFI boot artifact had NO builder. `esp.img` was made once by
+#      hand via a throwaway virtualenv, in a gitignored `build/` directory. A
+#      clean clone could not produce it. Fixed by
+#      scripts/os/build-simpleos-aarch64-efi-esp.shs, which this gate invokes.
+#   2. The MAIN arm64 QEMU lane, scripts/check/check-simpleos-arm64-unified-live.shs,
+#      still boots with QEMU `-kernel` pass semantics — a boot protocol that
+#      does not exist on hardware. That lane is NOT covered here and remains
+#      filed; this gate proves the real-firmware path independently so the
+#      `-kernel` lane can be migrated onto it rather than blessed.
+#
+# ---------------------------------------------------------------------------
+# BOOT CHAIN (no QEMU boot-protocol cheats anywhere)
+# ---------------------------------------------------------------------------
+#   AAVMF_CODE.fd (pflash0, ro) + AAVMF_VARS.fd (pflash1, rw)
+#     -> UEFI Shell (a fresh AAVMF NVRAM has no BootOrder, so it drops to the
+#        Shell; /startup.nsh on the ESP points it at the removable-media path)
+#     -> FS0:\EFI\BOOT\BOOTAA64.EFI  (Limine, a real EFI application)
+#     -> /boot/kernel.elf            (SimpleOS aarch64, Limine boot protocol)
+#
+# NEVER `-kernel` (QEMU-only pass semantics, absent on real hardware).
+# NEVER `isa-debug-exit` (an x86 ISA debug device, also absent on hardware, and
+# meaningless on aarch64 in the first place). The gate asserts both against its
+# OWN argv before drawing any conclusion, so a future edit that reintroduces a
+# cheat fails the gate instead of silently weakening it.
+#
+# ---------------------------------------------------------------------------
+# VERDICT CONTRACT — last line of stdout, fail-closed
+# ---------------------------------------------------------------------------
+#   PASS  — <n> checked ...   exit 0   n is always > 0
+#   FAIL  — ...               exit 1
+#   ERROR — nothing was checked ...  exit 2
+#
+# An absent tool, absent firmware, a failed ESP build, or an empty serial log
+# is ERROR (2) — never a pass. A pass requires POSITIVE evidence: the kernel's
+# own end-of-boot marker on the serial line, plus every intermediate boot-stage
+# marker. "No error seen" is not evidence; an empty log has no errors either.
+
+set -eu
+
+REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+ART_DIR=${ART_DIR:-$REPO_ROOT/build/os/aarch64_limine}
+WORK=${WORK_DIR:-$(mktemp -d)}
+LOG="$WORK/arm64-efi-real-firmware.serial.log"
+BOOT_TIMEOUT=${BOOT_TIMEOUT:-90}
+QEMU_BIN=${QEMU_SYSTEM_AARCH64:-qemu-system-aarch64}
+
+pass() { printf 'PASS — %s\n' "$1"; exit 0; }
+fail() { printf 'FAIL — %s\n' "$1" >&2; exit 1; }
+oops() { printf 'ERROR — nothing was checked: %s\n' "$1" >&2; exit 2; }
+
+# --- preflight --------------------------------------------------------------
+command -v "$QEMU_BIN" >/dev/null 2>&1 || oops "missing $QEMU_BIN"
+
+# Real EDK2/AAVMF firmware must be present. If it is not, this gate ERRORs.
+# It does NOT degrade to `-kernel`: a QEMU-only boot would prove nothing about
+# board-runnability, which is the entire point of the gate.
+if [ -z "${AAVMF_CODE:-}" ]; then
+    for c in "$ART_DIR/AAVMF_CODE.fd" \
+             /usr/share/AAVMF/AAVMF_CODE.fd \
+             /usr/share/AAVMF/AAVMF_CODE.no-secboot.fd \
+             /usr/share/qemu-efi-aarch64/QEMU_EFI.fd; do
+        [ -f "$c" ] && { AAVMF_CODE=$c; break; }
+    done
+fi
+if [ -z "${AAVMF_VARS:-}" ]; then
+    for c in "$ART_DIR/AAVMF_VARS.fd" /usr/share/AAVMF/AAVMF_VARS.fd; do
+        [ -f "$c" ] && { AAVMF_VARS=$c; break; }
+    done
+fi
+[ -n "${AAVMF_CODE:-}" ] || oops "no EDK2/AAVMF aarch64 firmware found (install qemu-efi-aarch64, or set AAVMF_CODE)"
+[ -n "${AAVMF_VARS:-}" ] || oops "no AAVMF_VARS.fd found (set AAVMF_VARS)"
+
+# --- build the ESP (or accept a prebuilt one) -------------------------------
+# Default is to REBUILD, so the gate measures something reproducible rather
+# than whatever stale image happens to be lying in build/.
+if [ "${SKIP_ESP_BUILD:-0}" != "1" ]; then
+    sh "$REPO_ROOT/scripts/os/build-simpleos-aarch64-efi-esp.shs" >"$WORK/esp-build.log" 2>&1 \
+        || oops "ESP build failed (see $WORK/esp-build.log): $(tail -1 "$WORK/esp-build.log" 2>/dev/null)"
+fi
+[ -s "$ART_DIR/esp.img" ] || oops "missing $ART_DIR/esp.img after build"
+
+cp "$AAVMF_VARS" "$WORK/VARS.fd"
+chmod u+w "$WORK/VARS.fd"
+
+# --- assemble the QEMU argv, then self-check it -----------------------------
+# The argv is built into a variable FIRST so the forbidden-flag check can be
+# run against the bytes that are actually about to be executed, rather than
+# against this file's prose (which necessarily mentions the forbidden flags in
+# order to explain them, and would self-trigger).
+QEMU_ARGS="-M virt -cpu cortex-a72 -m 512M"
+QEMU_ARGS="$QEMU_ARGS -drive if=pflash,format=raw,file=$AAVMF_CODE,readonly=on"
+QEMU_ARGS="$QEMU_ARGS -drive if=pflash,format=raw,file=$WORK/VARS.fd"
+QEMU_ARGS="$QEMU_ARGS -drive if=none,file=$ART_DIR/esp.img,format=raw,id=esp"
+QEMU_ARGS="$QEMU_ARGS -device virtio-blk-pci,drive=esp"
+QEMU_ARGS="$QEMU_ARGS -device ramfb -display none -serial file:$LOG"
+
+# `-kernel` and isa-debug-exit are QEMU boot-protocol cheats with no hardware
+# equivalent. Their presence in the argv would be a script bug, not an
+# environment gap. The needles are assembled from fragments so that this check
+# cannot be defeated by, or accidentally fire on, the surrounding comments.
+K_FLAG="-kern""el"
+D_DEV="isa-debug""-exit"
+for forbidden in "$K_FLAG" "$D_DEV"; do
+    case " $QEMU_ARGS " in
+        *"$forbidden"*)
+            fail "forbidden QEMU flag '$forbidden' in the argv this gate is about to run (script bug, not an environment gap)" ;;
+    esac
+done
+
+# --- boot under real firmware ----------------------------------------------
+# The kernel parks in a WFE spin by design, so QEMU never exits on its own and
+# `timeout` killing it is the NORMAL path, not an error. The serial transcript
+# is the artifact; every conclusion below is drawn from the log, so the exit
+# status is deliberately ignored here.
+# shellcheck disable=SC2086
+timeout "$BOOT_TIMEOUT" "$QEMU_BIN" $QEMU_ARGS >/dev/null 2>&1 || true
+
+[ -s "$LOG" ] || oops "serial log is empty — the guest produced no output at all (log: $LOG)"
+
+# --- positive evidence, stage by stage --------------------------------------
+# Each marker is printed by a distinct stage of the kernel's boot-entry path.
+# Requiring ALL of them means a partial boot (firmware up, kernel wedged early)
+# cannot read as a pass.
+n_checked=0
+for marker in \
+    '[BOOT] Memory map:' \
+    '[BOOT] Boot info assembled successfully' \
+    '[BOOT] Handing off to memory layer' \
+    'SIMPLEOS-AARCH64-LIMINE-KERNEL-OK'
+do
+    if grep -aqF "$marker" "$LOG"; then
+        n_checked=$((n_checked + 1))
+    else
+        fail "aarch64 kernel never printed '$marker' under EDK2/AAVMF pflash — boot did not complete (log: $LOG)"
+    fi
+done
+
+[ "$n_checked" -gt 0 ] || oops "no markers were evaluated (log: $LOG)"
+
+n_lines=$(wc -l <"$LOG" | tr -d ' ')
+[ "$n_lines" -gt 0 ] || oops "serial transcript has no lines (log: $LOG)"
+
+pass "$n_checked boot-stage marker(s) checked, EDK2/AAVMF pflash real-firmware aarch64 boot verified via BOOTAA64.EFI on a FAT ESP (no -kernel, no isa-debug-exit), ${n_lines} serial line(s) captured; firmware $AAVMF_CODE; log $LOG"
