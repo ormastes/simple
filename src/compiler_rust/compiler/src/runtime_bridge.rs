@@ -65,7 +65,7 @@ pub fn value_to_runtime(v: &Value) -> RuntimeValue {
     match v {
         Value::Nil => RuntimeValue::NIL,
         Value::Int(i) => RuntimeValue::from_int(*i),
-        Value::UInt { value, .. } => RuntimeValue::from_int(*value as i64),
+        Value::UInt { value, .. } => RuntimeValue::from_u64(*value),
         Value::Float(f) => RuntimeValue::from_float(*f),
         Value::Float32(f) => RuntimeValue::from_float(*f as f64),
         Value::Bool(b) => RuntimeValue::from_bool(*b),
@@ -192,6 +192,10 @@ pub fn runtime_to_value(rv: RuntimeValue) -> Value {
                 let obj_type = (*header).object_type;
 
                 match obj_type {
+                    HeapObjectType::UInt => Value::UInt {
+                        value: rv.as_heap_u64().expect("HeapUInt type must carry a u64 payload"),
+                        width: 64,
+                    },
                     HeapObjectType::Array => {
                         // Decode array
                         let len = rt_array_len(rv) as usize;
@@ -323,6 +327,16 @@ mod tests {
         assert_eq!(runtime_to_value(RuntimeValue::NIL), Value::Nil);
         assert_eq!(runtime_to_value(RuntimeValue::from_int(42)), Value::Int(42));
         assert_eq!(runtime_to_value(RuntimeValue::TRUE), Value::Bool(true));
+    }
+
+    #[test]
+    fn high_bit_u64_runtime_roundtrip_is_lossless_and_remains_unsigned() {
+        for value in [0, 7, 1u64 << 61, 1u64 << 63, u64::MAX] {
+            let source = Value::UInt { value, width: 64 };
+            let runtime = value_to_runtime(&source);
+            assert_eq!(runtime.as_heap_u64(), Some(value));
+            assert_eq!(runtime_to_value(runtime), source);
+        }
     }
 
     #[test]
