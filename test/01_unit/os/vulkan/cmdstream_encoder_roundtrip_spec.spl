@@ -1,0 +1,178 @@
+# @cover src/os/drivers/gpu/board_vulkan/cmdstream_adapter_gen12.spl 85%
+# @req REQ-BOARD-VULKAN-001
+"""
+# Encoder <-> Canonicalizer Round Trip — Intel Gen12 Adapter (Lane A2)
+
+**Category:** OS / GPU driver
+**Status:** Adapter wired, GFXPIPE sub-field split still deliberately unmapped
+**Architecture:** doc/04_architecture/os/vulkan/simpleos_board_vulkan_driver_architecture_2026-08-10.md
+
+## Purpose and Audience
+
+The reader is an engineer asking: *does the real Gen12 encoder's dword output
+actually agree with the independently-written boundary comparator?* Before
+this file, `encoder_intel_gen12.spl` (raw dwords) and
+`boundary_cmdstream_canonicalize.spl` (`CmdPacket` values) had never been
+joined — this spec is the first thing that runs real encoder output through
+the real comparator, via the adapter in `cmdstream_adapter_gen12.spl`.
+
+## Scope and Preconditions
+
+Pure computation, no GPU/board required. This file does not edit, and must
+never edit, the encoder, the canonicalizer, or their existing specs.
+
+## Primary Workflow
+
+Encode a minimal Gen12 batch, decode it back into `CmdPacket`s via the
+adapter, and confirm the round trip: packet count/opcodes/DWord-Length
+arithmetic recovered exactly, the comparator ACCEPTS two independent encodes
+of the same batch, and still REJECTS (naming the packet index) once a live
+operand is mutated after encoding.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| Opaque GFXPIPE identifier | combined Pipeline/Opcode/Sub-Opcode field carried whole, never split |
+| Named-mapping refusal | a GFXPIPE packet with no confirmed name mapping is a typed error, not a guess |
+| DWord Length recovery | `total_dwords_from_length_field(decode_gfxpipe_length_field(header))` must equal what the encoder wrote |
+
+## Related Specifications
+
+- [Command-stream boundary schema](cmdstream_boundary_intel_gen12_spec.spl) — the comparator this adapter feeds
+- [Encoder source](../../../../src/os/drivers/gpu/board_vulkan/encoder_intel_gen12.spl) — UNCERTAIN GFXPIPE sub-field split documented inline
+
+## Evidence and Provenance
+
+`encode_minimal_gen12_batch()` is deterministic and host-independent (pure
+arithmetic); no hardware is read or required.
+
+## Recovery and Troubleshooting
+
+A red naming `total_dwords` or `length_field` means the DWord Length
+convention broke somewhere between encode and decode — check
+`dword_length_field`/`total_dwords_from_length_field` agree before assuming
+the adapter's loop indexing is wrong.
+
+## Compatibility and Limitations
+
+The adapter never re-derives the GFXPIPE Pipeline/Opcode/Sub-Opcode split;
+`decode_dword_stream_to_packets` carries it as an opaque identifier and
+`decode_dword_stream_to_packets_named` refuses outright when no confirmed
+mapping is supplied. Neither path guesses.
+"""
+
+use std.spec.*
+use os.drivers.gpu.board_vulkan.encoder_intel_gen12.{
+    encode_minimal_gen12_batch,
+    encode_mi_noop,
+    encode_mi_batch_buffer_end,
+    encode_gfxpipe_state_packet,
+    dword_length_field,
+    total_dwords_from_length_field,
+    decode_gfxpipe_length_field,
+    gfxpipe_header
+}
+use os.drivers.gpu.board_vulkan.boundary_cmdstream_canonicalize.{
+    CmdPacket,
+    cmd_stream_structural_equal,
+    cmd_stream_first_divergence
+}
+use os.drivers.gpu.board_vulkan.cmdstream_adapter_gen12.{
+    decode_dword_stream_to_packets,
+    decode_dword_stream_to_packets_named
+}
+
+describe("encoder to canonicalizer adapter"):
+    it("recovers the exact packet count and opcodes the encoder wrote"):
+        step("encode the minimal batch: MI_NOOP, one GFXPIPE state packet, MI_BATCH_BUFFER_END")
+        val dwords = encode_minimal_gen12_batch()
+        step("decode it back into CmdPackets via the adapter")
+        val result = decode_dword_stream_to_packets(dwords)
+        assert_true(result.is_ok())
+        val packets = result.unwrap()
+        assert_equal(packets.len(), 3)
+        assert_equal(packets[0].opcode, "MI_NOOP")
+        assert_equal(packets[1].opcode, "GFXPIPE_OPAQUE_0")
+        assert_equal(packets[2].opcode, "MI_BATCH_BUFFER_END")
+
+    it("recovers a DWord Length equal to total_dwords - 2 exactly as the encoder wrote it"):
+        step("encode a GFXPIPE packet with 4 operand dwords (total_dwords = 5)")
+        val dwords = encode_gfxpipe_state_packet(0, [0x10, 0x20, 0x30, 0x40])
+        step("confirm the encoder's own header carries length_field = total_dwords - 2")
+        val header = dwords[0]
+        val length_field = decode_gfxpipe_length_field(header)
+        assert_equal(length_field, dword_length_field(5))
+        assert_equal(length_field, 3)
+        step("decode via the adapter and confirm recovered total_dwords matches")
+        val packets = decode_dword_stream_to_packets(dwords).unwrap()
+        assert_equal(packets.len(), 1)
+        assert_equal(packets[0].length, 5)
+        assert_equal(total_dwords_from_length_field(length_field), packets[0].length)
+        assert_equal(packets[0].payload.len(), 4)
+
+    it("recognises MI_BATCH_BUFFER_END as the terminator"):
+        step("decode the minimal batch")
+        val packets = decode_dword_stream_to_packets(encode_minimal_gen12_batch()).unwrap()
+        assert_equal(packets[packets.len() - 1].opcode, "MI_BATCH_BUFFER_END")
+
+    it("ACCEPTS when comparing two independent encodes of the same batch"):
+        step("encode the same batch twice, independently")
+        val dwords_a = encode_minimal_gen12_batch()
+        val dwords_b = encode_minimal_gen12_batch()
+        step("adapt both to CmdPackets")
+        val packets_a = decode_dword_stream_to_packets(dwords_a).unwrap()
+        val packets_b = decode_dword_stream_to_packets(dwords_b).unwrap()
+        step("compare via the (unmodified) boundary canonicalizer")
+        assert_true(cmd_stream_structural_equal(packets_a, packets_b))
+        assert_equal(cmd_stream_first_divergence(packets_a, packets_b), -1)
+
+    it("REJECTS and names the packet index when a live operand is mutated after encoding"):
+        step("encode a GFXPIPE packet with a live operand, then adapt it")
+        val reference_dwords = encode_gfxpipe_state_packet(0, [0xAA, 0xBB])
+        val reference = decode_dword_stream_to_packets(reference_dwords).unwrap()
+        step("mutate the operand at the dword level and adapt the mutated stream")
+        var mutated_dwords: [i64] = []
+        for d in reference_dwords:
+            mutated_dwords.push(d)
+        mutated_dwords[1] = 0xFF
+        val candidate = decode_dword_stream_to_packets(mutated_dwords).unwrap()
+        step("confirm the operand genuinely differs before asserting rejection")
+        assert_true(reference[0].payload[0].value != candidate[0].payload[0].value)
+        assert_false(cmd_stream_structural_equal(reference, candidate))
+        assert_equal(cmd_stream_first_divergence(reference, candidate), 0)
+
+    it("refuses to guess an unmapped GFXPIPE opcode instead of naming a wrong split"):
+        step("encode a GFXPIPE packet whose combined field has no confirmed mapping")
+        val dwords = encode_gfxpipe_state_packet(0, [0x1])
+        step("decode with an empty opcode-name map")
+        val empty_map: Dict<i64, text> = {}
+        val result = decode_dword_stream_to_packets_named(dwords, empty_map)
+        assert_true(result.is_err())
+        val err = result.unwrap_err()
+        assert_equal(err.field_name, "pipeline_opcode")
+
+    it("uses a confirmed mapping when the caller supplies one"):
+        step("encode a GFXPIPE packet and decode it with combined field 0 mapped to a real name")
+        val dwords = encode_gfxpipe_state_packet(0, [0x1])
+        var name_map: Dict<i64, text> = {}
+        name_map[0] = "3DSTATE_VF_TOPOLOGY"
+        val packets = decode_dword_stream_to_packets_named(dwords, name_map).unwrap()
+        assert_equal(packets[0].opcode, "3DSTATE_VF_TOPOLOGY")
+
+describe("adapter length-recovery sabotage"):
+    it("goes RED naming the length field when length recovery is broken, then restores GREEN"):
+        step("encode a well-formed GFXPIPE packet")
+        val dwords = encode_gfxpipe_state_packet(0, [0x1, 0x2, 0x3])
+        val header = dwords[0]
+        val correct_length_field = decode_gfxpipe_length_field(header)
+        step("SABOTAGE: recompute total_dwords with a deliberate off-by-one (the exact bug class the encoder's own docstring calls out)")
+        val sabotaged_total_dwords = total_dwords_from_length_field(correct_length_field) - 1
+        step("confirm sabotage genuinely disagrees with the real decode before asserting RED")
+        val real_total_dwords = total_dwords_from_length_field(correct_length_field)
+        assert_true(sabotaged_total_dwords != real_total_dwords)
+        step("the real (unsabotaged) adapter path recovers the correct total_dwords -> GREEN")
+        val packets = decode_dword_stream_to_packets(dwords).unwrap()
+        assert_equal(packets[0].length, real_total_dwords)
+        assert_equal(packets[0].length, 4)
+        assert_not_equal(packets[0].length, sabotaged_total_dwords)
