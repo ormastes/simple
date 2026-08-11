@@ -1,0 +1,43 @@
+"""
+Fail-closed contract for SimpleOS compiler-in-filesystem QEMU evidence.
+
+These scenarios use a hermetic fake-QEMU transport. They validate the evidence
+parser and receipt binding; they do not claim a live guest boot.
+"""
+
+use std.spec.*
+use std.io_runtime.{process_run}
+
+fn _run(script: text) -> (text, text, i64):
+    process_run("/bin/sh", ["-c", script])
+
+describe "SimpleOS compiler-filesystem QEMU checker":
+    describe "REQ-SOS-CFS-QEMU-001: hash-bound x86 evidence":
+        it "should accept one complete fake-QEMU transcript and bind its manifest":
+            step("Run the x86 checker through the hermetic fake-QEMU transport")
+            val command = "set -eu; out=build/test-artifacts/simpleos-compiler-filesystem-qemu/spec-pass; rm -rf \"$out\"; SIMPLEOS_COMPILER_FS_QEMU_TEST_MODE=1 SIMPLEOS_COMPILER_FS_QEMU_RUNNER=scripts/check/fixtures/simpleos-compiler-filesystem-fake-qemu.shs sh scripts/check/check-simpleos-compiler-filesystem-qemu.shs --arch=x86_64 --timeout=7 --output-dir=\"$out\"; hash=$(sed -n 's/^manifest_sha256=//p' \"$out/x86_64.receipt\"); test \"$(sha256sum \"$out/x86_64.manifest\" | awk '{print $1}')\" = \"$hash\"; grep -q '^serial_sha256=[0-9a-f]\\{64\\}$' \"$out/x86_64.manifest\"; grep -q '^evidence_class=hermetic-fake-qemu-contract$' \"$out/x86_64.manifest\"; echo HASH_BOUND_PASS"
+            val (out, err, code) = _run(command)
+            expect(code).to_equal(0)
+            expect(out).to_contain("simpleos_compiler_filesystem_qemu_status=contract-pass")
+            expect(out).to_contain("HASH_BOUND_PASS")
+
+    describe "REQ-SOS-CFS-QEMU-002: adversarial marker rejection":
+        it "should reject missing roles, guest skips, duplicate passes, and runner failure":
+            step("Run four adversarial fake-QEMU transcripts")
+            val command = "set -eu; root=build/test-artifacts/simpleos-compiler-filesystem-qemu/spec-negative; rm -rf \"$root\"; mkdir -p \"$root\"; for c in missing-role guest-skip duplicate-pass runner-fail; do if SIMPLEOS_COMPILER_FS_QEMU_TEST_MODE=1 SIMPLEOS_COMPILER_FS_QEMU_RUNNER=scripts/check/fixtures/simpleos-compiler-filesystem-fake-qemu.shs SIMPLEOS_COMPILER_FS_FAKE_CASE=$c sh scripts/check/check-simpleos-compiler-filesystem-qemu.shs --arch=x86_64 --output-dir=\"$root/$c\" >\"$root/$c.out\" 2>&1; then exit 20; fi; echo FAIL_CLOSED_$c; done"
+            val (out, err, code) = _run(command)
+            expect(code).to_equal(0)
+            expect(out).to_contain("FAIL_CLOSED_missing-role")
+            expect(out).to_contain("FAIL_CLOSED_guest-skip")
+            expect(out).to_contain("FAIL_CLOSED_duplicate-pass")
+            expect(out).to_contain("FAIL_CLOSED_runner-fail")
+
+    describe "REQ-SOS-CFS-QEMU-003: unavailable architecture honesty":
+        it "should report the absent AArch64 live route as a blocker":
+            step("Request the AArch64 checker lane")
+            val command = "set +e; out=$(sh scripts/check/check-simpleos-compiler-filesystem-qemu.shs --arch=aarch64 --timeout=7 2>&1); code=$?; set -e; printf '%s\\nexit=%s\\n' \"$out\" \"$code\"; test \"$code\" -eq 3"
+            val (out, err, code) = _run(command)
+            expect(code).to_equal(0)
+            expect(out).to_contain("simpleos_compiler_filesystem_qemu_status=blocked")
+            expect(out).to_contain("aarch64-live-compiler-filesystem-route-absent")
+            expect(out).to_contain("exit=3")
