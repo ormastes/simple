@@ -498,6 +498,31 @@ RuntimeValue rt_string_eq(RuntimeValue a, RuntimeValue b)
     return ENCODE_INT(1);
 }
 
+/* Text ordering is required by UI/theme de-duplication and browser style
+ * matching.  A weak zero stub would collapse every distinct key to equal. */
+RuntimeValue rt_text_cmp_any(RuntimeValue left, RuntimeValue right)
+{
+    if (!IS_HEAP(left) || !IS_HEAP(right))
+        return (RuntimeValue)(left == right ? 0 : (left < right ? -1 : 1));
+
+    HeapHeader *left_header = (HeapHeader *)DECODE_PTR(left);
+    HeapHeader *right_header = (HeapHeader *)DECODE_PTR(right);
+    if (!left_header || !right_header ||
+        left_header->type != HEAP_STRING || right_header->type != HEAP_STRING)
+        return (RuntimeValue)(left == right ? 0 : (left < right ? -1 : 1));
+
+    RuntimeString *a = (RuntimeString *)left_header;
+    RuntimeString *b = (RuntimeString *)right_header;
+    uint64_t count = a->len < b->len ? a->len : b->len;
+    for (uint64_t i = 0; i < count; i++) {
+        uint8_t a_byte = (uint8_t)a->data[i];
+        uint8_t b_byte = (uint8_t)b->data[i];
+        if (a_byte != b_byte)
+            return (RuntimeValue)(a_byte < b_byte ? -1 : 1);
+    }
+    return (RuntimeValue)(a->len == b->len ? 0 : (a->len < b->len ? -1 : 1));
+}
+
 RuntimeValue rt_string_data(RuntimeValue str)
 {
     if (!IS_HEAP(str)) return 0;
@@ -883,6 +908,56 @@ RuntimeValue rt_value_as_int(RuntimeValue v)
 {
     if (IS_INT(v)) return DECODE_INT(v);
     return 0;
+}
+
+/* The ABI returns raw f64 bits in a RuntimeValue-sized register. */
+RuntimeValue rt_value_as_float(RuntimeValue v)
+{
+    if (!IS_FLOAT(v)) return 0;
+    return (RuntimeValue)((uint64_t)v & ~TAG_MASK);
+}
+
+/* Minimal freestanding strtoll for Simple core string conversion.  ARM64
+ * kernel images link no hosted libc, so this must not be left unresolved. */
+long long strtoll(const char *text, char **endptr, int base)
+{
+    const char *cursor = text;
+    int negative = 0;
+    unsigned long long value = 0;
+    while (*cursor == ' ' || *cursor == '\t' || *cursor == '\n' ||
+           *cursor == '\r' || *cursor == '\f' || *cursor == '\v') cursor++;
+    if (*cursor == '+' || *cursor == '-') {
+        negative = *cursor == '-';
+        cursor++;
+    }
+    if (base == 0) {
+        if (cursor[0] == '0' && (cursor[1] == 'x' || cursor[1] == 'X')) {
+            base = 16;
+            cursor += 2;
+        } else if (cursor[0] == '0') {
+            base = 8;
+            cursor++;
+        } else base = 10;
+    } else if (base == 16 && cursor[0] == '0' &&
+               (cursor[1] == 'x' || cursor[1] == 'X')) {
+        cursor += 2;
+    }
+    if (base < 2 || base > 36) {
+        if (endptr) *endptr = (char *)text;
+        return 0;
+    }
+    const char *digits = cursor;
+    for (;;) {
+        unsigned char ch = (unsigned char)*cursor;
+        int digit = ch >= '0' && ch <= '9' ? (int)(ch - '0')
+                  : ch >= 'a' && ch <= 'z' ? (int)(ch - 'a') + 10
+                  : ch >= 'A' && ch <= 'Z' ? (int)(ch - 'A') + 10 : base;
+        if (digit >= base) break;
+        value = value * (unsigned int)base + (unsigned int)digit;
+        cursor++;
+    }
+    if (endptr) *endptr = (char *)(cursor == digits ? text : cursor);
+    return negative ? -(long long)value : (long long)value;
 }
 
 /* --- text hashing: FNV-1a over the string bytes (adapted to RuntimeString) --- */
