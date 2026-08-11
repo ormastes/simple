@@ -1,7 +1,7 @@
 # Stage-3 self-host reaches MIR lowering for the first time — new blocker: entry HIR module not captured in the flat accumulator
 
 - **ID:** stage3_selfhost_reaches_mir_entry_module_not_captured_2026-08-10
-- **Status:** ROOT-CAUSED (partially), NOT FIXED. Milestone: after landing
+- **Status:** FIX CANDIDATE PUSHED, VALIDATION PENDING. Milestone: after landing
   `17a55168a11`, `7dd296f2ef6`, `1f81b2b4f0b`, `67055c4d3f1` (this session) plus
   a large flurry of peer-session fixes tonight (`6834081f503` through
   `b1c1bb1045b` — HIR diagnostic isolation/preservation, layout dedup, etc.),
@@ -97,3 +97,52 @@ how fast this area is moving (peer commits landing every few minutes tonight),
 re-check `git log --oneline -20 -- src/compiler/50.mir/_MirLowering/
 bootstrap_globals.spl` before starting — this may already be fixed by the time
 this doc is read.
+
+## 2026-08-11 continuation: scalar ownership and zero-function entry
+
+The suggested write-side investigation above was completed. Entry ownership
+is now represented by a scalar registry index rather than a second module-name
+search, and MIR consumes that index directly. The resulting receipt proved
+that the entry row is present and readable:
+
+```text
+[bootstrap-flat-entry] index=0 modules=573 functions=0
+error: bootstrap entry lowered to 0 MIR instructions (ret-0 stub module)
+```
+
+This supersedes the earlier conclusion that the entry row was absent or that
+index 0 was unreadable. The row exists, but its parser/HIR function collection
+is empty. HIR diagnostics remained clean at all recorded checkpoints.
+
+### Fixes pushed
+
+- `27c67653759` materialized registry functions directly from
+  `lowered_module.functions.values()` instead of reconstructing them through
+  the global bootstrap function accumulator. The next receipt remained
+  `functions=0`, proving the authoritative `HirModule` was already empty.
+- `84b8f601128` excluded ephemeral Codex `*/.codex/tmp/arg0/*` PATH shims from
+  bootstrap tool authority. Those directories existed at startup but vanished
+  during long Rust builds, causing `could not bind bootstrap tool authority`.
+  A later cycle passed this authority gate and entered Stage 2/3.
+- `5a4bf40c007` changed the bootstrap entry HIR branch to reparse authoritative
+  source content immediately before lowering instead of trusting a non-nil,
+  arena-backed phase-2 `ParserModule` whose `functions` dictionary was empty.
+
+An executable regression spec was also added at
+`test/03_system/compiler/bootstrap_stage3_real_body_spec.spl`. It requires an
+explicit pure-Simple Stage 3 binary, uses the canonical bare positional entry,
+builds a helper-calling program, executes the artifact, and checks a marker
+computed from the helper result so a link-valid ret-0 module cannot pass.
+
+### Validation status
+
+The last completed cycle before `5a4bf40c007` again reported
+`index=0 modules=573 functions=0`. A post-fix incremental validation cycle was
+started and completed its Rust seed rebuild, but was intentionally interrupted
+with exit 130 when work was narrowed to documentation only. Therefore the
+fresh-entry reparse is a pushed fix candidate, not a verified Stage 3 PASS.
+
+The next session should run one incremental debug bootstrap, retain the new
+`[bootstrap-flat-entry]` receipt, and require `functions > 0` before proceeding
+to Stage 4. Do not cite the older zero-function log as evidence against
+`5a4bf40c007`; it predates that fix.
