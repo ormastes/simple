@@ -109,6 +109,7 @@ esac
 tree_guard="$repo_root/scripts/check/check-no-conflict-tree-push.shs"
 markers_guard="$repo_root/scripts/check/check-no-conflict-markers-push.shs"
 size_guard="$repo_root/scripts/check/check-tree-size-push.shs"
+seed_build_guard="$repo_root/scripts/check/check-seed-builds-push.shs"
 jit_guard="$repo_root/scripts/check/check-jit-closure-blockers.shs"
 try_op_guard="$repo_root/scripts/check/check-try-operator-error-propagation.shs"
 list_shift_guard="$repo_root/scripts/check/check-untyped-list-element-shift.shs"
@@ -184,7 +185,7 @@ lint_cached_guard="$repo_root/scripts/check/lint-cached.shs"
 # other native-build probe guards below for verification detail.
 native_trailing_default_param_guard="$repo_root/scripts/check/check-native-trailing-default-param.shs"
 
-for g in "$tree_guard" "$markers_guard" "$size_guard" "$jit_guard" \
+for g in "$tree_guard" "$markers_guard" "$size_guard" "$seed_build_guard" "$jit_guard" \
          "$try_op_guard" "$list_shift_guard" \
          "$cuda_ntt_guard" "$vulkan_ntt_guard" \
          "$spec_tail_verdict_guard" "$use_warning_oracle_guard" \
@@ -294,6 +295,10 @@ while read -r _local_ref local_sha _remote_ref remote_sha; do
             --rev-list-args "$local_sha" --not --remotes=origin
         run_guard "$size_guard" "new ref $local_sha (not on origin)" \
             --rev-list-args "$local_sha" --not --remotes=origin
+        # check-seed-builds-push.shs: cannot resolve a two-endpoint range on a
+        # brand-new ref via --rev-list-args (it needs base..new, not a
+        # rev-list exclusion set), so it is skipped here and relies on the
+        # markers-range branch below when one can be derived.
     else
         markers_range="$remote_sha..$local_sha"
         run_guard "$tree_guard" "$remote_sha..$local_sha" "$remote_sha..$local_sha"
@@ -301,6 +306,14 @@ while read -r _local_ref local_sha _remote_ref remote_sha; do
         # exactly the tree this push replaces — as the reference count for the
         # relative band.
         run_guard "$size_guard" "$remote_sha..$local_sha" "$remote_sha..$local_sha"
+        # check-seed-builds-push.shs (added 2026-08-11, incident:
+        # origin_main_unbuildable_rust_seed_2026-08-11.md): none of the
+        # structural guards above compile anything, so a structurally clean
+        # tree could still fail `cargo build`. Fast path-filtered (PASS
+        # immediately if the range doesn't touch src/compiler_rust or
+        # src/runtime); only runs `cargo check --release --bin simple`
+        # against an isolated worktree of the pushed tip when it does.
+        run_guard "$seed_build_guard" "$remote_sha..$local_sha" "$remote_sha..$local_sha"
     fi
 
     if [ -z "$markers_range" ]; then
