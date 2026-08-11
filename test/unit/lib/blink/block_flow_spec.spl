@@ -92,7 +92,7 @@ describe "compute_layout single root":
 # ============================================================================
 
 describe "compute_layout two children":
-    it "two child boxes stack vertically — second top = first bottom + margins":
+    it "two child boxes stack vertically with their facing margins collapsed":
         val parent_geo = box_geometry_new(300.0, 0.0, 0.0, 0.0, 0.0)
         val parent = block_flow_box_new(1, parent_geo)
         parent.children_ids.push(2)
@@ -119,14 +119,27 @@ describe "compute_layout two children":
         val b1 = opt1.unwrap()
         val b2 = opt2.unwrap()
 
-        # child1 top = parent_top + border + padding + child1.margin_top = 0 + 0 + 0 + 5 = 5
+        # The parent has no border and no padding, so child1's margin-top of 5
+        # collapses OUT into the parent's own margin-top of 0 (CSS 2.1
+        # §8.3.1). The pair present one margin of max(0, 5) = 5, which places
+        # the parent's border box — and therefore its content box, there being
+        # no border or padding — at y = 5. child1 then sits flush at the top of
+        # that content box: 5 + 0 = 5. Note this is the SAME number the older,
+        # non-collapsing version of this engine produced, by a different route:
+        # it put the parent at 0 and pushed the child down 5. The collapse is
+        # visible in the parent's position, not the child's.
         expect(approx_eq(b1.computed_rect.top, 5.0)).to_equal(true)
 
-        # child2 top = child1.margin_top + child1.height + child1.margin_bottom + child2.margin_top
-        #            = 5 + 40 + 5 + 8 = 58
+        # child2's top is where the collapsing rule shows up directly. child1's
+        # margin-bottom of 5 and child2's margin-top of 8 are adjoining, so
+        # they collapse to a single gap of max(5, 8) = 8 rather than summing to
+        # 13. child2 top = child1 bottom (5 + 40 = 45) + 8 = 53, and its bottom
+        # is 53 + 60 = 113. Before floats/margin-collapsing landed this spec
+        # asserted 58/118, i.e. the additive 5 + 8; those numbers were the
+        # documented non-goal, not the CSS answer.
         expect(b2.computed_rect.top).to_be_greater_than(b1.computed_rect.bottom)
-        expect(approx_eq(b2.computed_rect.top, 58.0)).to_equal(true)
-        expect(approx_eq(b2.computed_rect.bottom, 118.0)).to_equal(true)
+        expect(approx_eq(b2.computed_rect.top, 53.0)).to_equal(true)
+        expect(approx_eq(b2.computed_rect.bottom, 113.0)).to_equal(true)
 
 # ============================================================================
 # compute_layout: nested padding shifts child

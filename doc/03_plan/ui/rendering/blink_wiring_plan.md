@@ -146,7 +146,35 @@ scoped out, before the corresponding live-lane call site can be re-pointed.
    outline `..._declarations.spl:496`. blink: none.
 7. **Floats / clear / margin-collapse / tables / containment.**
    `layout_core.spl:132-173`, `layout_float.spl`, `layout_table.spl`,
-   `containment.spl:129`. blink `block_flow.spl` is pure block flow only.
+   `containment.spl:129`.
+   **CLOSED for floats, clear, margin collapsing and tables (2026-08-11);
+   containment still open.** Following the Stage-1 mechanism, the rules landed
+   in `common/` and blink drives them, so nothing was copied:
+   `src/lib/common/layout/margin_collapse.spl` (CSS 2.1 §8.3.1 arithmetic plus
+   the suppression predicates and `establishes_bfc`),
+   `src/lib/common/layout/float_bands.spl` (`FloatArea` exclusion bands,
+   §9.5.1 placement search, `clear`), `src/lib/common/layout/table_grid.spl`
+   (§17.5.2 auto column resolution, colspan, `border-spacing`). blink's faces
+   are the rewritten `blink/layout/block_flow.spl` and the new
+   `blink/layout/table_flow.spl`, which measures cells through
+   `layout/inline_text.spl` so widths are codepoint-correct.
+   Specs (87 examples, all green, mirrored into `test/01_unit/` and
+   `test/unit/`): `lib/common/layout/{margin_collapse,float_bands,table_grid}_spec.spl`,
+   `lib/blink/{block_flow_floats,table_flow}_spec.spl`.
+   **Two divergences from the live lane are deliberate and are the correct
+   side:** `layout_core.spl:170`'s collapse expression reduces to
+   `max(prev_mb, child_mt)`, which is wrong for negative margins (spec: max of
+   positives + min of negatives); and `layout_table.spl:111
+   _compute_col_widths` divides the table width equally regardless of content,
+   where blink now sizes `table-layout: auto` columns from measured content.
+   Also fixed in passing: blink's auto-height formula measured from
+   `content_top` and so omitted the box's own top border and padding.
+   **Still unhandled, stated rather than silently approximated:** floats do not
+   escape their parent (every box gets its own float area); in-flow boxes
+   beside a float are shifted but not narrowed (blink has no auto width); line
+   boxes are not shortened by floats; self-collapsing empty boxes; rowspan
+   height redistribution; `border-collapse: collapse`; and containment
+   (`containment.spl:129`), which is untouched.
 8. **`calc()` lengths.** `browser_renderer_utils.spl:257`. blink: none.
 9. **Visual effects.** box-shadow `simple_web_css_box_effects.spl:282`,
    `dom_visual_effects.spl`; transforms `style/transform.spl:158`;
