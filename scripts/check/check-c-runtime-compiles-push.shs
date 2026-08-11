@@ -1,0 +1,398 @@
+#!/bin/sh
+# Refuse to push a C runtime that does not compile.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS EXISTS
+# ---------------------------------------------------------------------------
+# Incident 2026-08-11 (doc/08_tracking/bug/
+# runtime_native_c_uncompilable_unsigned_box_never_implemented_2026-08-11.md):
+# `src/runtime/runtime_native.c` referenced the type `RtCoreUInt` and the
+# functions `rt_core_as_heap_uint` / `rt_value_u64` at 8 sites with ZERO
+# declarations anywhere in the tree. `clang -fsyntax-only` fails outright.
+# The file has NEVER compiled, and it sat in `main` looking green.
+#
+# It looked green because none of the five mandatory pre-push guards compiles
+# anything at all:
+#   * check-no-conflict-tree-push.shs    -- inspects tree entries for
+#                                           .jjconflict* names
+#   * check-no-conflict-markers-push.shs -- greps blob CONTENT for marker text
+#   * check-tree-size-push.shs           -- counts files / entries / bands
+#   * check-test-tree-divergence.shs     -- diffs duplicate test trees
+#   * check-no-revert-push.shs           -- compares blobs against history
+# Every one of them is a TEXT-AND-TREE check. Source that is syntactically
+# well-formed as bytes, non-conflicted, correctly sized, and forward-moving
+# passes all five while being complete nonsense to a compiler. This guard is
+# the missing axis: does the C actually build.
+#
+# ---------------------------------------------------------------------------
+# ALGORITHM
+# ---------------------------------------------------------------------------
+# 1. Enumerate every `*.c` under `src/runtime/` EXCLUDING vendored code
+#    (see VENDOR SCOPE below).
+# 2. For each, run `$CC -fsyntax-only $CFLAGS <file>` -- a parse + semantic
+#    analysis pass with no codegen, no linking, and therefore no build-system
+#    or external-library setup required.
+# 3. Take the exit status DIRECTLY from that invocation. NEVER through a
+#    pipe. A pipeline's `$?` is the LAST command's status (`tail`, `grep`,
+#    `head`), which is almost always 0 -- this repo has produced false greens
+#    exactly that way. Diagnostics go to a temp file; the status comes from
+#    the compiler process itself.
+# 4. Classify each result:
+#      OK      exit 0                              -> counts as compiled
+#      SKIP    exit != 0 AND the only fatal is a
+#              missing header that is NOT in the
+#              repo (an external SDK: wasmtime.h,
+#              a generated ABI header, ...)       -> counts as skipped
+#      FAIL    exit != 0 for any other reason      -> named in the verdict
+#    A SKIP is an honest "this file needs an SDK that is not installed here",
+#    NOT a pass. Skips are reported separately and never inflate the compiled
+#    count. A missing header that DOES exist in the repo is a FAIL, not a
+#    skip -- that is a broken include path, a real defect.
+#
+# ---------------------------------------------------------------------------
+# WHY -fsyntax-only AND NOT A FULL BUILD
+# ---------------------------------------------------------------------------
+# A full build needs CMake, the vendored deps, SDL/GLFW/OpenSSL/SQLite dev
+# packages, and minutes of wall time -- a guard nobody runs is not a guard.
+# `-fsyntax-only` is seconds, needs no libraries, and catches exactly the
+# class of defect that got through: undeclared types, undeclared functions,
+# bad signatures, broken includes. It does NOT catch link errors (a declared
+# but never-defined symbol). That limit is stated here rather than papered
+# over; closing it is a separate, heavier gate.
+#
+# ---------------------------------------------------------------------------
+# VENDOR SCOPE (per CLAUDE.md "Owned-Code Scope")
+# ---------------------------------------------------------------------------
+# Third-party runtime source is NOT ours to fix and is excluded:
+#   src/runtime/vendor/**, miniaudio.h, stb_image.h, stb_truetype.h
+# The three headers are excluded from being COMPILED as translation units;
+# a file of ours that #includes one is still compiled normally.
+#
+# ---------------------------------------------------------------------------
+# NON-VACUITY
+# ---------------------------------------------------------------------------
+# A run that compiled 0 files is an ERROR (exit 2), never a pass. This repo
+# has been bitten repeatedly by checks that scanned nothing and reported
+# success (see .claude/rules/vcs.md). The verdict always states how many
+# files were actually fed to a compiler, so a vacuous run cannot masquerade
+# as a real one. Likewise, if no C compiler exists on this machine, that is
+# ERROR -- absence of a compiler is absence of evidence, not evidence of
+# absence.
+#
+# ---------------------------------------------------------------------------
+# VERDICT CONTRACT (matches the sibling guards)
+# ---------------------------------------------------------------------------
+#   PASS — <n> file(s) compiled, 0 errors            exit 0, n > 0 always
+#   FAIL — <n> file(s) failed to compile: <names>    exit 1
+#   ERROR — nothing was checked                      exit 2
+# The verdict is ALWAYS the last line of stdout.
+#
+# Usage:
+#   check-c-runtime-compiles-push.shs             # scan the working tree
+#   check-c-runtime-compiles-push.shs --root DIR  # scan an alternate root
+#   check-c-runtime-compiles-push.shs --selftest  # fixtures only, no scan
+#   check-c-runtime-compiles-push.shs --verbose   # echo per-file results
+#
+# NOTE ON RANGE: unlike the five range-based guards, this one checks the
+# WORKING TREE (or --root), not a BASE..NEW commit range. Compilability is a
+# property of a tree, not of a delta: a push that changes only a header can
+# break a .c file it never touched, so a changed-files-only scan would be
+# fail-open. Landing a specific commit means checking out / exporting that
+# commit and pointing --root at it.
+
+set -u
+
+SELF_NAME='check-c-runtime-compiles-push'
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+CFG_ROOT=''
+CFG_VERBOSE=0
+CFG_SELFTEST_ONLY=0
+CFG_MAX_NAMES=12          # how many offender names to print in the verdict
+
+# Relative to the repo root.
+CFG_SCAN_DIR='src/runtime'
+
+# ---------------------------------------------------------------------------
+# Verdict helpers -- every exit from this script goes through one of these,
+# so it is impossible to terminate without a verdict line.
+# ---------------------------------------------------------------------------
+verdict_pass() {
+    printf 'PASS — %s\n' "$1"
+    exit 0
+}
+verdict_fail() {
+    printf 'FAIL — %s\n' "$1"
+    exit 1
+}
+verdict_error() {
+    printf 'ERROR — nothing was checked (%s)\n' "$1"
+    exit 2
+}
+
+TMPROOT=''
+cleanup() {
+    [ -n "$TMPROOT" ] && [ -d "$TMPROOT" ] && rm -rf "$TMPROOT"
+}
+# Any observable stop still emits a verdict: a guard that dies quietly reads
+# exactly like a guard that found nothing.
+on_signal() {
+    cleanup
+    printf 'ERROR — nothing was checked (interrupted)\n'
+    exit 2
+}
+trap cleanup EXIT
+trap on_signal INT TERM HUP
+
+# ---------------------------------------------------------------------------
+# Compiler discovery -- honest about availability.
+# ---------------------------------------------------------------------------
+detect_cc() {
+    if [ -n "${CC:-}" ] && command -v "$CC" >/dev/null 2>&1; then
+        printf '%s' "$CC"
+        return 0
+    fi
+    for c in clang cc gcc; do
+        if command -v "$c" >/dev/null 2>&1; then
+            printf '%s' "$c"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# compile_one <cc> <root> <file> <diagfile>
+# Returns: 0 = OK, 1 = FAIL, 2 = SKIP (external dependency unavailable)
+#
+# The compiler's status is captured DIRECTLY into $rc on the line after the
+# invocation. There is no pipe anywhere in this function.
+# ---------------------------------------------------------------------------
+compile_one() {
+    _cc="$1"; _root="$2"; _file="$3"; _diag="$4"
+
+    "$_cc" -fsyntax-only \
+        -I "$_root/$CFG_SCAN_DIR" \
+        -I "$_root/$CFG_SCAN_DIR/include" \
+        -Wno-deprecated-pragma \
+        "$_file" >"$_diag" 2>&1
+    _rc=$?
+
+    if [ "$_rc" -eq 0 ]; then
+        return 0
+    fi
+
+    # Distinguish "needs an SDK we do not have" from "the code is wrong".
+    # A missing header is a SKIP only when EVERY error line is a
+    # file-not-found AND the named header does not exist inside the repo.
+    # NOTE: `grep -c` exits 1 on zero matches, so a naive
+    # `$(grep -c ... || echo 0)` yields the two-line string "0\n0" and every
+    # later `[ "$x" -gt 0 ]` dies with "Illegal number". Count via `wc -l` on
+    # grep's OUTPUT instead, which is always a single clean integer.
+    _errlines=$(grep 'error:' "$_diag" 2>/dev/null | wc -l | tr -d ' ')
+    _misslines=$(grep 'file not found' "$_diag" 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$_errlines" -gt 0 ] && [ "$_errlines" -eq "$_misslines" ]; then
+        # Every error is a missing include. Is any of them ours?
+        _ours=0
+        for _h in $(sed -n "s/.*fatal error: '\\([^']*\\)' file not found.*/\\1/p" "$_diag"); do
+            _base=$(basename "$_h")
+            if find "$_root/$CFG_SCAN_DIR" -name "$_base" -not -path '*/vendor/*' 2>/dev/null | grep -q .; then
+                _ours=1
+            fi
+        done
+        if [ "$_ours" -eq 0 ]; then
+            return 2
+        fi
+    fi
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# scan <root> -- prints counts to stdout via globals; no verdict of its own.
+# Sets: SCAN_OK SCAN_SKIP SCAN_FAIL SCAN_FAILNAMES
+# ---------------------------------------------------------------------------
+scan_tree() {
+    _root="$1"; _cc="$2"
+    SCAN_OK=0; SCAN_SKIP=0; SCAN_FAIL=0; SCAN_FAILNAMES=''
+
+    _diag="$TMPROOT/diag.txt"
+    _list="$TMPROOT/list.txt"
+
+    # Vendored trees excluded; the three vendored headers are not .c files
+    # so they cannot appear here, but the -name guards make that explicit
+    # rather than incidental.
+    find "$_root/$CFG_SCAN_DIR" -type f -name '*.c' \
+        -not -path '*/vendor/*' \
+        -not -name 'miniaudio.c' \
+        -not -name 'stb_image.c' \
+        -not -name 'stb_truetype.c' \
+        2>/dev/null | sort >"$_list"
+
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        compile_one "$_cc" "$_root" "$f" "$_diag"
+        _r=$?
+        _rel=${f#"$_root"/}
+        case "$_r" in
+            0) SCAN_OK=$((SCAN_OK + 1))
+               [ "$CFG_VERBOSE" -eq 1 ] && printf '  ok    %s\n' "$_rel" ;;
+            2) SCAN_SKIP=$((SCAN_SKIP + 1))
+               printf '  skip  %s (external dependency header unavailable)\n' "$_rel" ;;
+            *) SCAN_FAIL=$((SCAN_FAIL + 1))
+               SCAN_FAILNAMES="$SCAN_FAILNAMES $_rel"
+               printf '  FAIL  %s\n' "$_rel"
+               sed -n 's/^/          /p' "$_diag" | grep 'error:' | head -3 ;;
+        esac
+    done <"$_list"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# SELFTEST -- fatal, runs before every scan.
+#
+# Fixtures are real C files compiled by the real compile_one(), so the test
+# exercises the actual classifier, not a reimplementation of it.
+#
+#  1 must-PASS  : a well-formed translation unit                -> OK
+#  2 must-FAIL  : uses an undeclared TYPE (the incident's shape) -> FAIL
+#  3 must-FAIL  : calls an undeclared FUNCTION (also the shape)  -> FAIL
+#  4 must-SKIP  : includes a header that exists nowhere          -> SKIP
+#  5 must-FAIL  : includes a header that EXISTS in the repo but
+#                 is unreachable from the include path -- a broken
+#                 include path is a defect, never a skip           -> FAIL
+#  6 must-FAIL  : plain syntax error                             -> FAIL
+#  7 non-vacuity: a scan of an empty tree yields 0 compiled       -> ERROR
+#  8 vendor excl: a .c under vendor/ is NOT scanned               -> 0 files
+# ---------------------------------------------------------------------------
+selftest() {
+    _cc="$1"
+    _fx="$TMPROOT/fx"
+    mkdir -p "$_fx/src/runtime" "$_fx/src/runtime/vendor"
+    _diag="$TMPROOT/fxdiag.txt"
+    _pass=0; _total=0; _bad=''
+
+    _expect() { # <name> <expected-rc> <file>
+        _total=$((_total + 1))
+        compile_one "$_cc" "$_fx" "$3" "$_diag"
+        _got=$?
+        if [ "$_got" -eq "$2" ]; then
+            _pass=$((_pass + 1))
+        else
+            _bad="$_bad $1(want=$2,got=$_got)"
+        fi
+    }
+
+    printf 'int spl_fx_ok(int x) { return x + 1; }\n' >"$_fx/src/runtime/fx_ok.c"
+    _expect fixture1_wellformed 0 "$_fx/src/runtime/fx_ok.c"
+
+    # The exact incident shape: an undeclared struct type.
+    printf 'int spl_fx(void *v) { RtCoreUInt *u = v; return u ? 1 : 0; }\n' \
+        >"$_fx/src/runtime/fx_undeclared_type.c"
+    _expect fixture2_undeclared_type 1 "$_fx/src/runtime/fx_undeclared_type.c"
+
+    printf 'long spl_fx2(long b) { return rt_value_u64(b); }\n' \
+        >"$_fx/src/runtime/fx_undeclared_fn.c"
+    _expect fixture3_undeclared_fn 1 "$_fx/src/runtime/fx_undeclared_fn.c"
+
+    printf '#include <definitely_not_a_real_sdk_header.h>\nint spl_fx3(void){return 0;}\n' \
+        >"$_fx/src/runtime/fx_missing_ext.c"
+    _expect fixture4_external_dep_skip 2 "$_fx/src/runtime/fx_missing_ext.c"
+
+    # A header that IS ours but is not on the include path: must FAIL, not skip.
+    mkdir -p "$_fx/src/runtime/deep/nested"
+    printf 'enum { FX_OURS = 1 };\n' >"$_fx/src/runtime/deep/nested/fx_ours.h"
+    printf '#include <fx_ours.h>\nint spl_fx4(void){return FX_OURS;}\n' \
+        >"$_fx/src/runtime/fx_bad_include_path.c"
+    _expect fixture5_repo_header_unreachable 1 "$_fx/src/runtime/fx_bad_include_path.c"
+
+    printf 'int spl_fx5(void) { return ; ; ) }\n' >"$_fx/src/runtime/fx_syntax.c"
+    _expect fixture6_syntax_error 1 "$_fx/src/runtime/fx_syntax.c"
+
+    # Non-vacuity: an empty runtime dir must produce zero compiled files, so
+    # the caller is forced into ERROR rather than a vacuous PASS.
+    _total=$((_total + 1))
+    _empty="$TMPROOT/fxempty"
+    mkdir -p "$_empty/src/runtime"
+    ( scan_tree "$_empty" "$_cc" >/dev/null 2>&1; [ "$SCAN_OK" -eq 0 ] ) \
+        && _pass=$((_pass + 1)) || _bad="$_bad fixture7_empty_tree_is_vacuous"
+
+    # Vendor exclusion: a BROKEN .c under vendor/ must not be scanned at all.
+    _total=$((_total + 1))
+    _vd="$TMPROOT/fxvendor"
+    mkdir -p "$_vd/src/runtime/vendor"
+    printf 'this is not valid C at all ]]]\n' >"$_vd/src/runtime/vendor/broken.c"
+    _vout=$( scan_tree "$_vd" "$_cc" >/dev/null 2>&1; printf '%s:%s' "$SCAN_OK" "$SCAN_FAIL" )
+    if [ "$_vout" = "0:0" ]; then
+        _pass=$((_pass + 1))
+    else
+        _bad="$_bad fixture8_vendor_excluded(got=$_vout)"
+    fi
+
+    printf '%s: selftest %s/%s fixtures correct\n' "$SELF_NAME" "$_pass" "$_total"
+    if [ "$_pass" -ne "$_total" ]; then
+        printf '%s: FAILING FIXTURES:%s\n' "$SELF_NAME" "$_bad"
+        return 1
+    fi
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) CFG_SELFTEST_ONLY=1; shift ;;
+        --verbose|-v) CFG_VERBOSE=1; shift ;;
+        --root) shift; [ $# -gt 0 ] || verdict_error "--root needs a value"; CFG_ROOT="$1"; shift ;;
+        --help|-h)
+            sed -n '2,60p' "$0"
+            printf 'ERROR — nothing was checked (help requested)\n'
+            exit 2 ;;
+        *) verdict_error "unknown argument: $1" ;;
+    esac
+done
+
+TMPROOT=$(mktemp -d "${TMPDIR:-/tmp}/$SELF_NAME.XXXXXX") || \
+    verdict_error "could not create a temporary directory"
+
+CC_BIN=$(detect_cc) || \
+    verdict_error "no C compiler found (looked for \$CC, clang, cc, gcc)"
+printf '%s: compiler = %s\n' "$SELF_NAME" "$CC_BIN"
+
+# Determine the root to scan.
+if [ -z "$CFG_ROOT" ]; then
+    CFG_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || CFG_ROOT=''
+    [ -n "$CFG_ROOT" ] || verdict_error "not inside a git repository and no --root given"
+fi
+[ -d "$CFG_ROOT/$CFG_SCAN_DIR" ] || \
+    verdict_error "$CFG_ROOT/$CFG_SCAN_DIR does not exist"
+
+# ---------------------------------------------------------------------------
+# Selftest is FATAL and runs before every scan.
+# ---------------------------------------------------------------------------
+if ! selftest "$CC_BIN"; then
+    verdict_error "selftest failed -- the guard itself is not trustworthy"
+fi
+if [ "$CFG_SELFTEST_ONLY" -eq 1 ]; then
+    verdict_pass "selftest only, no scan requested (8 fixture(s) correct)"
+fi
+
+printf '%s: scanning %s/%s\n' "$SELF_NAME" "$CFG_ROOT" "$CFG_SCAN_DIR"
+scan_tree "$CFG_ROOT" "$CC_BIN"
+
+# ---------------------------------------------------------------------------
+# Verdict
+# ---------------------------------------------------------------------------
+_checked=$((SCAN_OK + SCAN_FAIL))
+if [ "$_checked" -eq 0 ]; then
+    verdict_error "0 files were fed to a compiler under $CFG_SCAN_DIR (skipped: $SCAN_SKIP)"
+fi
+
+if [ "$SCAN_FAIL" -gt 0 ]; then
+    _names=$(printf '%s' "$SCAN_FAILNAMES" | tr ' ' '\n' | grep -v '^$' | head -"$CFG_MAX_NAMES" | tr '\n' ' ')
+    verdict_fail "$SCAN_FAIL file(s) failed to compile: $_names($SCAN_OK compiled clean, $SCAN_SKIP skipped for unavailable external dependencies)"
+fi
+
+verdict_pass "$SCAN_OK file(s) compiled, 0 errors ($SCAN_SKIP skipped for unavailable external dependencies)"
