@@ -525,3 +525,120 @@ describe "apply_declaration: margin/padding shorthand expansion":
         step("expect top 10px too: the shorthand, applied later, overwrites the earlier longhand")
         expect(result.margin_top.value > 9.9 and result.margin_top.value < 10.1).to_equal(true)
         expect(result.margin_right.value > 9.9 and result.margin_right.value < 10.1).to_equal(true)
+
+# ---------------------------------------------------------------------------
+# Border + box-shadow: exit criterion 4 (borders/box-shadow/transforms/
+# gradients). These cover the longhand write directly (`apply_declaration`)
+# and the shorthand->longhand wiring through `resolve_style`
+# (`border: ...`/`border-top: ...` now expand via
+# `blink.style.shorthand.expand_declarations`, called from
+# `resolve_style_with_state` before any declaration reaches
+# `apply_declaration`).
+# ---------------------------------------------------------------------------
+
+# @req REQ-BLINK-CASCADE-BORDER
+describe "apply_declaration: border longhands":
+    it "border-top-width/-style/-color set only the top side":
+        val style = computed_style_default()
+        val s1 = apply_declaration(style, CssDeclaration(
+            property: "border-top-width", value: "3px", important: false))
+        val s2 = apply_declaration(s1, CssDeclaration(
+            property: "border-top-style", value: "solid", important: false))
+        val s3 = apply_declaration(s2, CssDeclaration(
+            property: "border-top-color", value: "red", important: false))
+
+        step("top side carries the new width/style/colour")
+        expect(s3.border_top_width.value > 2.9 and s3.border_top_width.value < 3.1).to_equal(true)
+        expect(s3.border_top_style).to_equal("solid")
+        expect(s3.border_top_color.r > 0.99).to_equal(true)
+
+        step("every other side is untouched (still the CSS initial: none, 0px)")
+        expect(s3.border_right_style).to_equal("none")
+        expect(s3.border_bottom_style).to_equal("none")
+        expect(s3.border_left_style).to_equal("none")
+
+    it "an unrecognised border-style keyword leaves the current value alone":
+        val style = computed_style_default()
+        val updated = apply_declaration(style, CssDeclaration(
+            property: "border-top-style", value: "not-a-real-style", important: false))
+        expect(updated.border_top_style).to_equal("none")
+
+# @req REQ-BLINK-CASCADE-BORDER
+describe "resolve_style: border shorthand expansion":
+    it "border: 2px solid red expands to all 4 sides via resolve_style":
+        step("author `div { border: 2px solid red; }`")
+        var rs: [CssStyleRule] = []
+        rs.push(_cascade_rule("div", "border", "2px solid red", false))
+        val sheet = _cascade_sheet(rs)
+        val tree = _cascade_fixture_tree()
+        val result = resolve_style(tree, 1, computed_style_default(), sheet)
+
+        step("all four sides resolved from the one shorthand declaration")
+        expect(result.border_top_style).to_equal("solid")
+        expect(result.border_right_style).to_equal("solid")
+        expect(result.border_bottom_style).to_equal("solid")
+        expect(result.border_left_style).to_equal("solid")
+        expect(result.border_top_width.value > 1.9 and result.border_top_width.value < 2.1).to_equal(true)
+        expect(result.border_left_color.r > 0.99).to_equal(true)
+        expect(result.border_left_color.g < 0.01).to_equal(true)
+
+    it "border-top: 1px dashed blue only expands the top side":
+        step("author `div { border-top: 1px dashed blue; }`")
+        var rs: [CssStyleRule] = []
+        rs.push(_cascade_rule("div", "border-top", "1px dashed blue", false))
+        val sheet = _cascade_sheet(rs)
+        val tree = _cascade_fixture_tree()
+        val result = resolve_style(tree, 1, computed_style_default(), sheet)
+
+        step("top side takes the shorthand's values")
+        expect(result.border_top_style).to_equal("dashed")
+        expect(result.border_top_color.b > 0.99).to_equal(true)
+
+        step("other sides stay at the CSS initial (none)")
+        expect(result.border_right_style).to_equal("none")
+        expect(result.border_bottom_style).to_equal("none")
+        expect(result.border_left_style).to_equal("none")
+
+    it "border is NOT an inherited property: a child does not pick up its parent's border":
+        val parent = apply_declaration(computed_style_default(), CssDeclaration(
+            property: "border-top-style", value: "solid", important: false))
+        var rs: [CssStyleRule] = []
+        val sheet = _cascade_sheet(rs)
+        val tree = _cascade_fixture_tree()
+        val result = resolve_style(tree, 1, parent, sheet)
+        expect(result.border_top_style).to_equal("none")
+
+# @req REQ-BLINK-CASCADE-BOX-SHADOW
+describe "apply_declaration: box-shadow":
+    it "box-shadow: 4px 6px black sets offset and colour and marks it set":
+        val style = computed_style_default()
+        val updated = apply_declaration(style, CssDeclaration(
+            property: "box-shadow", value: "4px 6px black", important: false))
+
+        expect(updated.box_shadow_set).to_equal(true)
+        expect(updated.box_shadow_x.value > 3.9 and updated.box_shadow_x.value < 4.1).to_equal(true)
+        expect(updated.box_shadow_y.value > 5.9 and updated.box_shadow_y.value < 6.1).to_equal(true)
+        expect(updated.box_shadow_color.r < 0.01).to_equal(true)
+        expect(updated.box_shadow_color.a > 0.99).to_equal(true)
+
+    it "box-shadow: 2px 2px 5px red (with a blur token) still resolves offset+colour":
+        val style = computed_style_default()
+        val updated = apply_declaration(style, CssDeclaration(
+            property: "box-shadow", value: "2px 2px 5px red", important: false))
+
+        step("blur radius is accepted syntactically but not modelled (see border_paint.spl header)")
+        expect(updated.box_shadow_set).to_equal(true)
+        expect(updated.box_shadow_color.r > 0.99).to_equal(true)
+
+    it "box-shadow: none clears a previously-set shadow":
+        val shadowed = apply_declaration(computed_style_default(), CssDeclaration(
+            property: "box-shadow", value: "4px 6px black", important: false))
+        val cleared = apply_declaration(shadowed, CssDeclaration(
+            property: "box-shadow", value: "none", important: false))
+        expect(cleared.box_shadow_set).to_equal(false)
+
+    it "an unparsable box-shadow (no colour) leaves the style unchanged":
+        val style = computed_style_default()
+        val updated = apply_declaration(style, CssDeclaration(
+            property: "box-shadow", value: "4px 6px", important: false))
+        expect(updated.box_shadow_set).to_equal(false)

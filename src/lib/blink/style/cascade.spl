@@ -20,15 +20,32 @@
 #     `!important` then selector specificity (a=id, b=class/attr/pseudo-class,
 #     c=type), with source order breaking ties. The last write wins, so the
 #     strongest declaration is applied last.
+#   - Inline `style="..."` attribute: parsed via
+#     `blink.css_parser.parser.blink_parse_declarations` and folded into the same
+#     weighted ordering as the stylesheet rules — it outranks every normal
+#     stylesheet declaration (as if matched at effectively-infinite
+#     specificity) but a stylesheet `!important` declaration still outranks a
+#     normal inline one; an inline `!important` declaration outranks
+#     everything. See `_inline_weight`.
 #
 # Deliberate non-goals (kept out on purpose; add only with a spec that needs it):
 #   - No `@media`/`@supports`/`@import` — `CssStyleSheet` carries only style
 #     rules today.
 #   - Shorthand expansion: `margin` and `padding` (the CSS 1/2/3/4-value box
-#     shorthands) are split into their four longhands. `background`, `font`,
-#     `border`, `flex` and other multi-axis shorthands are NOT expanded — only
-#     the longhands backing `ComputedStyle`'s fields are understood; every
-#     other property is ignored, not errored.
+#     shorthands) are split into their four longhands right here (see
+#     `_expand_box_shorthand`). `border`/`border-<side>`/`border-width`/
+#     `border-style`/`border-color` ARE expanded, but via a different path:
+#     `resolve_style_with_state` runs every declaration block through
+#     `blink.style.shorthand.expand_declarations` (shared with the rest of the
+#     CSS-reading lanes) before weighting, so `apply_declaration` itself only
+#     ever sees the 12 `border-<side>-<width|style|color>` longhands, never the
+#     shorthand text. `background`, `font`, `flex` and other multi-axis
+#     shorthands are still NOT expanded — only the longhands backing
+#     `ComputedStyle`'s fields are understood; every other property is
+#     ignored, not errored. `box-shadow` is not a shorthand in this model (CSS
+#     does not decompose it into other named properties) and is parsed
+#     directly in `apply_declaration`, single-shadow only — see
+#     `blink.paint.border_paint`'s header for the stated scope.
 #   - No `inherit`/`initial`/`unset`/`revert` keywords, no custom properties or
 #     `var()`, no `calc()`.
 #   - No unit resolution: `parse_length_value` keeps the authored unit verbatim,
@@ -54,10 +71,11 @@ use std.blink.entity.computed_style.{
     ComputedStyle, Display, Position, Overflow, Visibility, TextAlign, Length,
     computed_style_default
 }
-use std.blink.css_parser.parser.{CssStyleSheet, CssStyleRule, CssDeclaration}
+use std.blink.css_parser.parser.{CssStyleSheet, CssStyleRule, CssDeclaration, blink_parse_declarations}
 use std.blink.css_parser.selector.{
     SimpleSelectorKind, ComplexSelector, parse_selector, matches_complex_with_state
 }
+use std.blink.style.shorthand.{expand_declarations}
 use std.skia.entity.color.{SkColor4f, sk_color4f_from_color}
 use std.common.color.css.{parse_css_color}
 
@@ -190,6 +208,51 @@ fn _expand_box_shorthand(raw: text) -> (Length, Length, Length, Length):
         return (top, right, bottom, left)
     (Length.zero(), Length.zero(), Length.zero(), Length.zero())
 
+# CSS `<line-style>` keywords `border-<side>-style` accepts. Anything else is
+# an invalid declaration and is dropped (leaves the style's current value),
+# same error-handling rule as every other property here.
+fn _is_border_style_keyword(value: text) -> bool:
+    """Return true when `value` is a CSS <line-style> keyword."""
+    value == "none" or value == "hidden" or value == "dotted" or value == "dashed"
+        or value == "solid" or value == "double" or value == "groove"
+        or value == "ridge" or value == "inset" or value == "outset"
+
+# Parse the (non-shorthand) `box-shadow` property: `<offset-x> <offset-y>
+# [<blur-radius>] [<spread-radius>] <color> [inset]`, in any order for the
+# trailing color/inset per spec, but this parser only accepts the common
+# `offset-x offset-y [blur] color [inset]` and `offset-x offset-y color`
+# forms — anything it cannot decompose into at least two lengths and one
+# resolvable color leaves the current shadow state alone (dropped, not
+# guessed). Only a SINGLE shadow is read; a comma-separated shadow list keeps
+# only the first (`split_css_comma_list`-equivalent not needed here since
+# nothing downstream reads a second shadow anyway — see module header for the
+# stated scope). Blur/spread radii and `inset` are recognised as valid tokens
+# (so their presence does not make the declaration invalid) but are not
+# themselves modelled — see `blink.paint.border_paint`'s header.
+fn _parse_box_shadow(raw: text) -> (Length, Length, SkColor4f, bool):
+    """Return (offset-x, offset-y, color, ok) for `box-shadow` value `raw`."""
+    val first_shadow_raw: text = raw.trim()
+    var first_shadow = first_shadow_raw
+    val comma_at = first_shadow.index_of(",")
+    if comma_at >= 0:
+        first_shadow = first_shadow.slice(0, comma_at)
+    val tokens = _split_ws(first_shadow)
+    if tokens.len() < 3:
+        return (Length.zero(), Length.zero(), sk_color4f(0.0, 0.0, 0.0, 0.0), false)
+    val offset_x = parse_length_value(tokens[0 as i32])
+    val offset_y = parse_length_value(tokens[1 as i32])
+    var color: SkColor4f? = nil
+    var i = 2
+    while i < tokens.len():
+        val tok = tokens[i as i32]
+        if tok != "inset":
+            if val c = parse_color_value(tok):
+                color = c
+        i = i + 1
+    if val resolved = color:
+        return (offset_x, offset_y, resolved, true)
+    (Length.zero(), Length.zero(), sk_color4f(0.0, 0.0, 0.0, 0.0), false)
+
 # ============================================================================
 # Declaration application
 # ============================================================================
@@ -227,6 +290,22 @@ fn apply_declaration(style: ComputedStyle, decl: CssDeclaration) -> ComputedStyl
     var width = style.width
     var height = style.height
     var font_size = style.font_size
+    var border_top_width = style.border_top_width
+    var border_right_width = style.border_right_width
+    var border_bottom_width = style.border_bottom_width
+    var border_left_width = style.border_left_width
+    var border_top_style = style.border_top_style
+    var border_right_style = style.border_right_style
+    var border_bottom_style = style.border_bottom_style
+    var border_left_style = style.border_left_style
+    var border_top_color = style.border_top_color
+    var border_right_color = style.border_right_color
+    var border_bottom_color = style.border_bottom_color
+    var border_left_color = style.border_left_color
+    var box_shadow_x = style.box_shadow_x
+    var box_shadow_y = style.box_shadow_y
+    var box_shadow_color = style.box_shadow_color
+    var box_shadow_set = style.box_shadow_set
 
     if prop == "display":
         if value == "inline":
@@ -315,6 +394,44 @@ fn apply_declaration(style: ComputedStyle, decl: CssDeclaration) -> ComputedStyl
         height = parse_length_value(raw)
     elif prop == "font-size":
         font_size = parse_length_value(raw)
+    elif prop == "border-top-width":
+        border_top_width = parse_length_value(raw)
+    elif prop == "border-right-width":
+        border_right_width = parse_length_value(raw)
+    elif prop == "border-bottom-width":
+        border_bottom_width = parse_length_value(raw)
+    elif prop == "border-left-width":
+        border_left_width = parse_length_value(raw)
+    elif prop == "border-top-style":
+        if _is_border_style_keyword(value):
+            border_top_style = value
+    elif prop == "border-right-style":
+        if _is_border_style_keyword(value):
+            border_right_style = value
+    elif prop == "border-bottom-style":
+        if _is_border_style_keyword(value):
+            border_bottom_style = value
+    elif prop == "border-left-style":
+        if _is_border_style_keyword(value):
+            border_left_style = value
+    elif prop == "border-top-color":
+        border_top_color = _apply_color(style.border_top_color, raw)
+    elif prop == "border-right-color":
+        border_right_color = _apply_color(style.border_right_color, raw)
+    elif prop == "border-bottom-color":
+        border_bottom_color = _apply_color(style.border_bottom_color, raw)
+    elif prop == "border-left-color":
+        border_left_color = _apply_color(style.border_left_color, raw)
+    elif prop == "box-shadow":
+        if value == "none":
+            box_shadow_set = false
+        else:
+            val parsed = _parse_box_shadow(raw)
+            if parsed.3:
+                box_shadow_x = parsed.0
+                box_shadow_y = parsed.1
+                box_shadow_color = parsed.2
+                box_shadow_set = true
 
     ComputedStyle(
         display: display,
@@ -335,7 +452,23 @@ fn apply_declaration(style: ComputedStyle, decl: CssDeclaration) -> ComputedStyl
         padding_bottom: padding_bottom,
         width: width,
         height: height,
-        font_size: font_size
+        font_size: font_size,
+        border_top_width: border_top_width,
+        border_right_width: border_right_width,
+        border_bottom_width: border_bottom_width,
+        border_left_width: border_left_width,
+        border_top_style: border_top_style,
+        border_right_style: border_right_style,
+        border_bottom_style: border_bottom_style,
+        border_left_style: border_left_style,
+        border_top_color: border_top_color,
+        border_right_color: border_right_color,
+        border_bottom_color: border_bottom_color,
+        border_left_color: border_left_color,
+        box_shadow_x: box_shadow_x,
+        box_shadow_y: box_shadow_y,
+        box_shadow_color: box_shadow_color,
+        box_shadow_set: box_shadow_set
     )
 
 # ============================================================================
@@ -378,6 +511,26 @@ fn _weight(specificity: i64, important: bool) -> i64:
     else:
         specificity
 
+# Weight of an inline `style="..."` declaration (from the element's own
+# `style` attribute, not a stylesheet rule). Per the CSS cascade, an inline
+# declaration behaves as if it had the highest possible selector specificity
+# — it is not itself matched by a selector, so there is no `_specificity` to
+# compute — but a stylesheet `!important` declaration still outranks it, and
+# an inline `!important` declaration outranks everything, including a
+# stylesheet `!important`. `_INLINE_WEIGHT` therefore sits strictly between
+# every normal stylesheet weight (`_specificity` alone, uncapped but never
+# reaching this in practice) and the `!important` floor
+# (`specificity + 1000000000`, minimum `1000000000`); `_INLINE_IMPORTANT_WEIGHT`
+# sits above every stylesheet `!important` weight this module can produce.
+val _INLINE_WEIGHT: i64 = 999999999
+val _INLINE_IMPORTANT_WEIGHT: i64 = 2000000000
+
+fn _inline_weight(important: bool) -> i64:
+    if important:
+        _INLINE_IMPORTANT_WEIGHT
+    else:
+        _INLINE_WEIGHT
+
 # Start the cascade from the parent: the inherited properties of our bag carry
 # the parent's resolved value, everything else starts at its initial value.
 fn _inherited_from(parent: ComputedStyle) -> ComputedStyle:
@@ -401,7 +554,23 @@ fn _inherited_from(parent: ComputedStyle) -> ComputedStyle:
         padding_bottom: initial.padding_bottom,
         width: initial.width,
         height: initial.height,
-        font_size: parent.font_size
+        font_size: parent.font_size,
+        border_top_width: initial.border_top_width,
+        border_right_width: initial.border_right_width,
+        border_bottom_width: initial.border_bottom_width,
+        border_left_width: initial.border_left_width,
+        border_top_style: initial.border_top_style,
+        border_right_style: initial.border_right_style,
+        border_bottom_style: initial.border_bottom_style,
+        border_left_style: initial.border_left_style,
+        border_top_color: initial.border_top_color,
+        border_right_color: initial.border_right_color,
+        border_bottom_color: initial.border_bottom_color,
+        border_left_color: initial.border_left_color,
+        box_shadow_x: initial.box_shadow_x,
+        box_shadow_y: initial.box_shadow_y,
+        box_shadow_color: initial.box_shadow_color,
+        box_shadow_set: initial.box_shadow_set
     )
 
 # Resolve one element's style against `sheet`, taking `:hover`/`:focus` from
@@ -427,15 +596,35 @@ fn resolve_style_with_state(
         if val sel = parsed:
             if matches_complex_with_state(tree, node_id, sel, state):
                 val spec = _specificity(sel)
+                # Expand shorthands (e.g. `border: 1px solid red`) into their
+                # longhands FIRST, in place, so a shorthand and a longhand
+                # from the same rule still weigh identically (same
+                # specificity, same !important) and the usual weight-order
+                # sort below decides between them same as any other pair.
+                val expanded = expand_declarations(rule.declarations).declarations
                 var di = 0
-                while di < rule.declarations.len():
-                    val decl = rule.declarations[di as i32]
+                while di < expanded.len():
+                    val decl = expanded[di as i32]
                     props.push(decl.property)
                     values.push(decl.value)
                     importants.push(decl.important)
                     weights.push(_weight(spec, decl.important))
                     di = di + 1
         ri = ri + 1
+
+    # Inline `style="..."` declarations, if the element carries one. These are
+    # not matched by any selector — the element carrying the attribute IS the
+    # match — so they get `_inline_weight` instead of `_weight(_specificity(...))`.
+    if val style_attr = tree.get_attribute(node_id, "style"):
+        val inline_decls = expand_declarations(blink_parse_declarations(style_attr)).declarations
+        var ii = 0
+        while ii < inline_decls.len():
+            val decl = inline_decls[ii as i32]
+            props.push(decl.property)
+            values.push(decl.value)
+            importants.push(decl.important)
+            weights.push(_inline_weight(decl.important))
+            ii = ii + 1
 
     # Stable ascending order by weight: each index is inserted after every
     # index already placed whose weight is no greater, so equal weights keep

@@ -1,0 +1,148 @@
+# @cover src/lib/blink/paint/border_paint.spl 85%
+# @req REQ-BLINK-BORDER-PAINT-001
+"""
+# Border + Box-Shadow Paint Specification
+
+**Category:** Browser / Blink
+**Status:** Active
+
+## Overview
+
+Closes exit criterion 4 ("borders, box-shadow, transforms, gradients") for
+the blink render lane, borders and simple box-shadow only — see
+`src/lib/blink/paint/border_paint.spl`'s header for exactly what is and is
+not covered (no border-radius, no shadow blur/spread, no dash/dot pattern
+distinction, no transforms, no gradients).
+
+These examples build a real HTML+CSS document through the same
+parse->cascade->layout pipeline `style_paint_spec.spl` already proves, run it
+through `paint_border_chunks_from_styled_layout` /
+`paint_box_shadow_chunks_from_styled_layout`, and assert on the resulting
+rect/colour arrays directly — same "inspect the data, not the pixels" scope
+as the sibling spec.
+
+@manual_section Browser Rendering
+"""
+
+use std.spipe.*
+use std.blink.dom.node.{DomTree}
+use std.blink.html_parser.token.{HtmlToken, HtmlTokenKind, HtmlAttribute}
+use std.blink.html_parser.tree_builder.{build_html_tree}
+use std.blink.css_parser.tokenizer.{tokenize_css}
+use std.blink.css_parser.parser.{parse_css, CssStyleSheet}
+use std.blink.layout.style_bridge.{build_styled_layout, StyledLayout}
+use std.blink.paint.border_paint.{
+    paint_border_chunks_from_styled_layout, paint_box_shadow_chunks_from_styled_layout
+}
+use std.skia.entity.color.{sk_color_argb}
+
+fn _start(name: text) -> HtmlToken:
+    var attrs: [HtmlAttribute] = []
+    HtmlToken(kind: HtmlTokenKind.StartTag, name: name, data: "",
+              attributes: attrs, self_closing: false)
+
+fn _start_class(name: text, cls: text) -> HtmlToken:
+    var attrs: [HtmlAttribute] = [HtmlAttribute(name: "class", value: cls)]
+    HtmlToken(kind: HtmlTokenKind.StartTag, name: name, data: "",
+              attributes: attrs, self_closing: false)
+
+fn _end(name: text) -> HtmlToken:
+    var attrs: [HtmlAttribute] = []
+    HtmlToken(kind: HtmlTokenKind.EndTag, name: name, data: "",
+              attributes: attrs, self_closing: false)
+
+# <body><div class="a"></div><div class="b"></div></body>
+fn _page_tree() -> DomTree:
+    var tokens: [HtmlToken] = [
+        _start("body"),
+        _start_class("div", "a"), _end("div"),
+        _start_class("div", "b"), _end("div"),
+        _end("body")
+    ]
+    build_html_tree(tokens)
+
+fn _sheet(source: text) -> CssStyleSheet:
+    parse_css(tokenize_css(source))
+
+describe "paint_border_chunks_from_styled_layout":
+    it "emits 4 edge rects for a box with a uniform solid border on all sides":
+        step("style the first div with a 4px solid green border, sized 100x50")
+        val css = "div { width: 100px; height: 50px; border: 4px solid green; }"
+        val layout = build_styled_layout(_page_tree(), _sheet(css), 800.0, 600.0)
+
+        step("flatten border edges into paint rects")
+        val rects = paint_border_chunks_from_styled_layout(layout)
+
+        step("sabotage oracle: exactly 8 edge rects (4 per div, 2 divs) — not 0 (no-op) and not 1 per box (flat-rect shortcut)")
+        expect(rects.rect_count).to_equal(8)
+
+        step("every emitted rect is coloured opaque green")
+        var i = 0
+        while i < rects.rect_count:
+            expect(rects.colour[i as i32]).to_equal(sk_color_argb(255, 0, 128, 0))
+            i = i + 1
+
+        step("the top edge of the first div is 4px thick and spans the box width")
+        expect(rects.rect_h[0]).to_equal(4)
+        expect(rects.rect_w[0]).to_equal(100)
+
+    it "contributes no rect for a box with border-style: none (the CSS default)":
+        step("size a div but declare no border at all")
+        val css = "div { width: 40px; height: 20px; }"
+        val layout = build_styled_layout(_page_tree(), _sheet(css), 800.0, 600.0)
+
+        val rects = paint_border_chunks_from_styled_layout(layout)
+
+        step("no side paints: style defaults to none on every side of every box")
+        expect(rects.rect_count).to_equal(0)
+
+    it "only the declared side paints when a single side is styled":
+        step("style only border-left on the first div")
+        val css = "div { width: 60px; height: 30px; } .a { border-left: 3px solid blue; }"
+        val layout = build_styled_layout(_page_tree(), _sheet(css), 800.0, 600.0)
+
+        val rects = paint_border_chunks_from_styled_layout(layout)
+
+        step("exactly one edge rect: only .a's left side, nothing for .b (unstyled)")
+        expect(rects.rect_count).to_equal(1)
+        expect(rects.rect_w[0]).to_equal(3)
+        expect(rects.rect_h[0]).to_equal(30)
+        expect(rects.colour[0]).to_equal(sk_color_argb(255, 0, 0, 255))
+
+    it "a zero-width border paints nothing even when border-style is solid":
+        step("declare a solid style but 0px width")
+        val css = "div { width: 40px; height: 20px; border: 0px solid red; }"
+        val layout = build_styled_layout(_page_tree(), _sheet(css), 800.0, 600.0)
+
+        val rects = paint_border_chunks_from_styled_layout(layout)
+        expect(rects.rect_count).to_equal(0)
+
+describe "paint_box_shadow_chunks_from_styled_layout":
+    it "emits one shadow rect per box that declares box-shadow, offset and sized to the box":
+        step("give the first div a 5px/5px black shadow, sized 20x10")
+        val css = "div { width: 20px; height: 10px; } .a { box-shadow: 5px 5px black; }"
+        val layout = build_styled_layout(_page_tree(), _sheet(css), 800.0, 600.0)
+
+        val rects = paint_box_shadow_chunks_from_styled_layout(layout)
+
+        step("sabotage oracle: exactly 1 rect (only .a declared box-shadow, not .b or body)")
+        expect(rects.rect_count).to_equal(1)
+
+        step("the shadow rect is the same size as the box, opaque black")
+        expect(rects.rect_w[0]).to_equal(20)
+        expect(rects.rect_h[0]).to_equal(10)
+        expect(rects.colour[0]).to_equal(sk_color_argb(255, 0, 0, 0))
+
+        step("the shadow rect is offset from the box's own top-left by (5, 5)")
+        match layout.rect_for(2):
+            Some(r):
+                expect(rects.rect_x[0]).to_equal(r.0.to_i64() + 5)
+                expect(rects.rect_y[0]).to_equal(r.1.to_i64() + 5)
+            None:
+                expect("first div laid out").to_equal("it did not")
+
+    it "contributes no rect when no box declares box-shadow":
+        val css = "div { width: 20px; height: 10px; }"
+        val layout = build_styled_layout(_page_tree(), _sheet(css), 800.0, 600.0)
+        val rects = paint_box_shadow_chunks_from_styled_layout(layout)
+        expect(rects.rect_count).to_equal(0)

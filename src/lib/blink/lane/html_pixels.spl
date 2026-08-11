@@ -20,6 +20,8 @@
 #     -> tokenize_css -> parse_css -> CssStyleSheet   (blink.css_parser)
 #     -> build_styled_layout  -> StyledLayout         (blink.layout.style_bridge)
 #     -> paint_chunks_from_styled_layout -> PaintChunkRects (blink.paint.style_paint)
+#     -> paint_border_chunks_from_styled_layout,
+#        paint_box_shadow_chunks_from_styled_layout -> PaintChunkRects (blink.paint.border_paint)
 #     -> paint_rect per rect  -> [u32]     (common.ui.render_opt.paint_chunk_rasterizer)
 #
 # Two deliberate composition choices, both stated rather than silently assumed:
@@ -57,7 +59,30 @@
 #   - NO TEXT RENDERING. `paint_chunks_from_styled_layout` emits one background
 #     rect per box and no glyphs at all. Any consumer that needs readable text
 #     pixels is blocked on this.
-#   - NO BORDERS, no box-shadow, no transforms, no gradients.
+#   - BORDERS and simple BOX-SHADOW: NO LONGER A FULL DIVERGENCE, PARTIAL
+#     COVERAGE. `blink.paint.border_paint` now paints solid per-side border
+#     edges (`border-<side>-width/-style/-color`, all 4 sides, both the
+#     shorthand and longhand forms — `blink.style.cascade` now runs every
+#     declaration block through `blink.style.shorthand.expand_declarations`
+#     first) and a single, non-blurred `box-shadow`. Explicitly NOT covered,
+#     stated rather than silently assumed: `border-radius` (the rasterizer
+#     only draws axis-aligned rects, no rounded-corner mask), any visual
+#     distinction between `solid`/`dashed`/`dotted`/`double`/`groove`/`ridge`
+#     (all paint as one opaque edge rect), `box-shadow` blur/spread radius,
+#     multiple comma-separated shadows (only the first is read), and `inset`
+#     shadows (treated identically to outer). Border thickness also does not
+#     reserve layout space — a thick border paints over the box's own outer
+#     pixels rather than pushing content inward, since `style_bridge`'s
+#     `BoxModel` still hardcodes border widths to 0 for layout purposes. See
+#     `blink.paint.border_paint`'s own header for the full, itemised list.
+#   - TRANSFORMS and GRADIENTS: STILL A FULL DIVERGENCE, NOT ATTEMPTED THIS
+#     LANDING. Both need a materially different paint primitive than this
+#     pipeline has: `paint_rect` is a flat axis-aligned solid-colour STORE,
+#     with no coordinate-space transform and no per-pixel colour ramp. Rather
+#     than ship a rushed, likely-wrong implementation of either just to close
+#     the exit criterion on paper, this is left explicitly open — a real
+#     `paint_rect` alternative (a transform matrix threaded through the paint
+#     step, and a gradient interpolator) is follow-up work, not landed here.
 #   - INLINE `style=` ATTRIBUTES ARE NOT APPLIED. `blink.css_parser` can parse
 #     them (`parse_inline_style`), but `blink.style.cascade.resolve_style`
 #     consults only the stylesheet, so nothing feeds them in.
@@ -73,6 +98,9 @@ use std.blink.css_parser.parser.{parse_css, CssStyleSheet}
 use std.blink.layout.style_bridge.{build_styled_layout}
 use std.blink.paint.style_paint.{paint_chunks_from_styled_layout}
 use std.blink.paint.text_paint.{text_paint_chunks_from_styled_layout}
+use std.blink.paint.border_paint.{
+    paint_border_chunks_from_styled_layout, paint_box_shadow_chunks_from_styled_layout
+}
 use std.common.ui.render_opt.paint_chunk_rasterizer.{ChunkRasterBuffer, paint_rect}
 use std.skia.entity.color.{sk_color_argb}
 
@@ -128,8 +156,22 @@ pub fn blink_render_html_to_pixel_array(html: text, width: i32, height: i32) -> 
     val tree = build_html_tree(tokenize_html(html))
     val sheet = blink_lane_stylesheet(tree)
     val layout = build_styled_layout(tree, sheet, w.to_f64(), h.to_f64())
+    val shadow_rects = paint_box_shadow_chunks_from_styled_layout(layout)
     val rects = paint_chunks_from_styled_layout(layout)
+    val border_rects = paint_border_chunks_from_styled_layout(layout)
     val glyph_rects = text_paint_chunks_from_styled_layout(tree, layout, w.to_f64(), h.to_f64())
+
+    # box-shadow paints FIRST, underneath everything else: `paint_rect` is a
+    # STORE, so a shadow rect that a box's own background/border later
+    # overpaints is legitimately erased there, leaving only the offset sliver
+    # visible — exactly what a zero-blur `box-shadow` looks like (see
+    # `border_paint.spl`'s header). Shadow rects are already alpha-checked by
+    # the producer, so no alpha-0 skip needed here.
+    var sk: i64 = 0
+    while sk < shadow_rects.rect_count:
+        paint_rect(buf, shadow_rects.rect_x[sk], shadow_rects.rect_y[sk],
+                   shadow_rects.rect_w[sk], shadow_rects.rect_h[sk], shadow_rects.colour[sk])
+        sk = sk + 1
 
     # Document order == paint order for this flat block-flow list, so a later
     # rect legitimately overpaints an earlier one. Fully transparent rects
@@ -146,8 +188,18 @@ pub fn blink_render_html_to_pixel_array(html: text, width: i32, height: i32) -> 
                        rects.rect_w[k], rects.rect_h[k], argb)
         k = k + 1
 
-    # Glyph pixels paint on top of the background rects above, document order
-    # again being paint order. Each glyph rect is already 1x1 and opaque (see
+    # Border edges paint on top of backgrounds (a border sits on the box's own
+    # outer edge, visually above its fill) but before text, so glyph pixels
+    # still show on top of a border-crossing text box. Already alpha- and
+    # style-filtered by the producer.
+    var bk: i64 = 0
+    while bk < border_rects.rect_count:
+        paint_rect(buf, border_rects.rect_x[bk], border_rects.rect_y[bk],
+                   border_rects.rect_w[bk], border_rects.rect_h[bk], border_rects.colour[bk])
+        bk = bk + 1
+
+    # Glyph pixels paint on top of everything above, document order again
+    # being paint order. Each glyph rect is already 1x1 and opaque (see
     # `text_paint.spl`); no alpha-0 skip needed since glyph pixels are only
     # ever emitted for "on" bits of the bitmap font.
     var gk: i64 = 0
