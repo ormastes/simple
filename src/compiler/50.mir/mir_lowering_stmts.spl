@@ -74,11 +74,6 @@ fn mir_expr_kind_is_place(k: HirExprKind) -> bool:
 # Statement Lowering
 # ============================================================================
 
-struct MirLetParts:
-    symbol: SymbolId
-    type_: HirType?
-    init: HirExpr
-
 impl MirLowering:
     me mir_hir_type_is_resource_direct(t: HirType) -> bool:
         match t:
@@ -610,21 +605,24 @@ impl MirLowering:
                 val fallback_expr = HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: fallback_type, span: span)
                 val let_disc = mir_hir_stmt_kind_disc(HirStmtKind.Let(SymbolId(id: -1), fallback_type, fallback_expr))
                 if mir_hir_stmt_kind_disc(stmt_kind_value) == let_disc:
-                    # Destructure the flat enum payload exactly once. Repeated
-                    # matches on the same staged HirStmtKind preserved the Let
-                    # discriminant but lost the 48-byte HirExpr payload by the
-                    # third extraction, producing a null copy in Stage3.
-                    val let_parts = match stmt_kind_value:
-                        case HirStmtKind.Let(symbol, type_, init):
-                            MirLetParts(symbol: symbol, type_: type_, init: init)
+                    val let_symbol = match stmt_kind_value:
+                        case HirStmtKind.Let(symbol, _, _):
+                            if symbol != nil:
+                                Some(symbol)
+                            else:
+                                nil
                         case _:
-                            MirLetParts(symbol: SymbolId(id: -1), type_: nil, init: fallback_expr)
-                    val let_symbol: SymbolId? = if let_parts.symbol != nil:
-                        Some(let_parts.symbol)
-                    else:
-                        nil
-                    val let_type = let_parts.type_
-                    val let_init = let_parts.init
+                            nil
+                    val let_type = match stmt_kind_value:
+                        case HirStmtKind.Let(_, type_, _):
+                            type_
+                        case _:
+                            nil
+                    val let_init = match stmt_kind_value:
+                        case HirStmtKind.Let(_, _, init):
+                            init
+                        case _:
+                            fallback_expr
 
                     if let_symbol.?:
                         val symbol_value = let_symbol ?? SymbolId(id: -1)
