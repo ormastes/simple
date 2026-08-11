@@ -17,7 +17,7 @@ FAILURES=0
 CASE_TIMEOUT_SECONDS=20
 
 usage() {
-    printf '%s\n' "usage: sh scripts/check/check-llm-caret-tui-pty.shs --case <prerequisites|routing|lifecycle|editing|hidden|promptless|offline-claude|raw-failure|all>"
+    printf '%s\n' "usage: sh scripts/check/check-llm-caret-tui-pty.shs --case <prerequisites|routing|lifecycle|editing|hidden|promptless|offline-claude|provider-error|raw-failure|all>"
 }
 
 fail_prerequisite() {
@@ -371,6 +371,9 @@ write_input() {
             ;;
         fixture-success)
             printf 'fixture-success\r/exit\r' >"${input_path}"
+            ;;
+        fixture-error)
+            printf 'fixture-error\r/exit\r' >"${input_path}"
             ;;
         *)
             return 1
@@ -781,11 +784,21 @@ run_pty_case() {
          ! grep -a -F "You: a界c!" "${capture}" >/dev/null 2>&1; then
         record_failure "${label}" "utf8_edited_submission_missing" "${case_dir}"
     elif [ "${provider_mode}" = "fixture-claude" ] &&
+         [ "${input_kind}" = "fixture-success" ] &&
          ! grep -a -F "You: fixture-success" "${capture}" >/dev/null 2>&1; then
         record_failure "${label}" "offline_claude_user_transcript_missing" "${case_dir}"
     elif [ "${provider_mode}" = "fixture-claude" ] &&
+         [ "${input_kind}" = "fixture-success" ] &&
          ! grep -a -F "Assistant: fixture-ok" "${capture}" >/dev/null 2>&1; then
         record_failure "${label}" "offline_claude_assistant_transcript_missing" "${case_dir}"
+    elif [ "${provider_mode}" = "fixture-claude" ] &&
+         [ "${input_kind}" = "fixture-error" ] &&
+         ! grep -a -F "You: fixture-error" "${capture}" >/dev/null 2>&1; then
+        record_failure "${label}" "offline_claude_error_user_transcript_missing" "${case_dir}"
+    elif [ "${provider_mode}" = "fixture-claude" ] &&
+         [ "${input_kind}" = "fixture-error" ] &&
+         ! grep -a -F "[REDACTED:" "${capture}" >/dev/null 2>&1; then
+        record_failure "${label}" "offline_claude_redacted_error_missing" "${case_dir}"
     elif [ "${provider_mode}" = "fixture-claude" ] &&
          grep -a -F "sk-ant-fixture-secret" \
              "${capture}" "${driver_stdout}" "${driver_stderr}" >/dev/null 2>&1; then
@@ -999,6 +1012,11 @@ run_offline_claude() {
         "fixture-claude"
 }
 
+run_provider_error() {
+    run_pty_case "offline-claude-provider-error" "forced" "fixture-error" "12x80" \
+        "fixture-claude"
+}
+
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --case)
@@ -1050,6 +1068,9 @@ case "${CASE_NAME}" in
     offline-claude)
         run_offline_claude
         ;;
+    provider-error)
+        run_provider_error
+        ;;
     raw-failure)
         run_raw_failure_case
         ;;
@@ -1060,6 +1081,7 @@ case "${CASE_NAME}" in
         run_hidden
         run_promptless
         run_offline_claude
+        run_provider_error
         run_raw_failure_case
         ;;
     *)

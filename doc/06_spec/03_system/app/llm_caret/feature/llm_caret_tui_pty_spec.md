@@ -6,7 +6,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|-------:|--------:|--------:|
-| 7 | 7 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 This manual records zero executed scenarios and does not claim PASS because
 cached process execution is blocked until a qualified Caret artifact exists.
@@ -182,6 +182,38 @@ step("Send a prompt through the visible input")
 expect(result.stdout).to_contain("case=forced-tui-without-tty status=PASS")
 step("Check transcript and status")
 expect(result.stdout).to_contain("evidence_status=PASS")
+expect(result.exit_code).to_equal(0)
+```
+
+</details>
+
+#### should show a redacted offline Claude provider error while restoring the terminal
+
+- Load the cached Caret artifact.
+  - Expected: the wrapper is pinned to a provenance-qualified pure-Simple
+    artifact before the PTY child starts.
+- Invoke the offline Caret CLI provider.
+  - Expected: the fixture submits `fixture-error`; its Claude CLI process exits
+    with the deterministic authorization error, Caret renders a `[REDACTED:`
+    error marker, and no `sk-ant-fixture-secret` appears in the ANSI capture or
+    script streams.
+- Check captured output and status.
+  - Expected: the terminal mode and requested 12x80 geometry are restored,
+    the child records `caret_exit=0`, and the checker reports zero failures.
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+step("Load the cached Caret artifact")
+val result = run_caret_pty_case("provider-error")
+step("Invoke the offline Caret CLI provider")
+expect(result.stdout).to_contain(
+    "case=offline-claude-provider-error status=PASS"
+)
+step("Check captured output and status")
+expect(result.stdout).to_contain("evidence_status=PASS")
+expect(result.stdout).to_contain("failed_cases=0")
 expect(result.exit_code).to_equal(0)
 ```
 
