@@ -4,8 +4,11 @@ Selected profile: **N1 — Balanced Local Tooling**.
 
 ## NFR-OFFICE-CLI-UI-001 — Runtime provenance
 
-Deployed commands and acceptance evidence shall use the pure-Simple self-hosted
-runtime. Raw-source and Rust-seed fallbacks are prohibited for production
+The product under test shall be `OFFICE_BINARY`, a native standalone Office
+artifact built by a Phase-3 self-host compiler. `SIMPLE_TEST_DRIVER` may execute
+SSpec/check orchestration and a separately cached UI client may speak
+`simple.access/v1`; neither is part of the Office application closure. Raw-source,
+Rust-seed, and full-Simple-CLI launch fallbacks are prohibited for product
 acceptance.
 
 ## NFR-OFFICE-CLI-UI-002 — Startup
@@ -32,9 +35,9 @@ access-layer RSS delta shall be at most 20 MiB on the measurement fixture.
 Hot request paths shall contain no retry sleeps, subprocess calls, or repeated
 full-tree scans.
 
-The interpreter-only app-development SSpec records RSS as
-`not_measured_app_dev`; the 20 MiB process measurement remains a deployment
-verification item and does not require an application bootstrap.
+RSS is measured from the launched `OFFICE_BINARY`. Building that artifact may
+use an existing Phase-3 compiler; it does not require producing or deploying a
+full Simple CLI.
 
 ## NFR-OFFICE-CLI-UI-006 — Deterministic evidence
 
@@ -52,9 +55,9 @@ malformed formulas shall fail closed.
 
 ## NFR-OFFICE-CLI-UI-008 — Architecture hygiene
 
-The production Calc closure shall contain no SGTTI/test-only import and no new
-dependency cycle. New imports shall use narrow owner modules rather than broad
-re-export hubs.
+The production Calc closure shall contain no compiler, unified CLI,
+SGTTI/test-only import, or new dependency cycle. New imports shall use narrow
+owner modules rather than broad re-export hubs.
 
 ## NFR-OFFICE-CLI-UI-009 — Verification quality
 

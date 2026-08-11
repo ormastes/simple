@@ -101,21 +101,22 @@ fallback are not accepted deployment paths.
 
 ## Calc TUI and LLM Debug Access
 
-The preferred live Calc command is:
+The primary live Calc command is the standalone Phase-3-built artifact:
 
 ```bash
-simple office calc [FILE] --tui
+office calc [FILE] --tui
 ```
 
-`FILE` is optional for a new workbook. Existing `sheets` and
-`edit-sheet FILE --tui` commands remain compatibility aliases.
+`FILE` is optional for a new workbook. `simple office` may remain only as a
+cached-artifact compatibility delegate; it is not required for application
+launch and must not execute raw Office source.
 
 Semantic access is an explicit loopback service attachment. Start Calc with an
 available local port and then use the shared `simple.access/v1` operator
 protocol against that service:
 
 ```bash
-simple office calc [FILE] --tui --ui-access-port PORT
+office calc [FILE] --tui --ui-access-port PORT
 ```
 
 The normal `--tui` command remains the human terminal route. It must render the
@@ -185,15 +186,19 @@ Note the duplication that hid this: capability rows are declared in
 bin/simple ide --feature-check --tui   # requires a deployed pure-Simple binary
 bin/simple ide --feature-check --gui
 bin/simple test test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl
-SIMPLE_BINARY="$PWD/bin/simple" bin/simple test test/03_system/app/office/feature/office_cli_tui_ui_access_spec.spl --mode=interpreter
+OFFICE_BINARY="$PWD/bin/office" SIMPLE_TEST_DRIVER="$PWD/bin/simple" SIMPLE_UI_CLIENT="$PWD/bin/simple" bin/simple test test/03_system/app/office/feature/office_cli_tui_ui_access_spec.spl --mode=interpreter
 bin/simple spipe-docgen test/03_system/app/office/feature/office_cli_tui_ui_access_spec.spl --output doc/06_spec --no-index
 find doc/06_spec -name '*_spec.spl' | wc -l
 ```
 
-The Office SSpec creates one unique run ID and invokes the deployed gate once;
-its visible workflow and folded error/NFR scenarios consume only that run. As
+The Office SSpec creates one unique run ID and invokes the deployed gate once.
+`OFFICE_BINARY` is the application under test; `SIMPLE_TEST_DRIVER` and
+`SIMPLE_UI_CLIENT` are orchestration/protocol tools and are not part of its
+closure. Building Office with an existing Phase-3 compiler does not require a
+full Simple CLI bootstrap. Its visible workflow and folded error/NFR scenarios
+consume only that run. As
 long as the generated manual carries its stale-evidence banner, AC-5 remains
-open. Regenerate only after the focused self-hosted test passes. The docgen
+open. Regenerate only after the focused split-artifact test passes. The docgen
 result must read like an operator manual and report `0 stubs`; the final command
 must print `0`.
 

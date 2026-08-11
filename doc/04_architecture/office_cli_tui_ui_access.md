@@ -11,14 +11,17 @@ protocol is authorized.
 
 ## Decision
 
-Expose Calc through the deployed command:
+Expose Calc primarily through the Phase-3-built standalone artifact:
 
 ```text
-simple office calc [FILE] --tui
+office calc [FILE] --tui
 ```
 
-The deployed `simple ide --feature-check --tui|--gui` and `simple office`
-commands receive startup-light CLI ownership before global option filtering.
+`src/app/office_cli/main.spl` is the application entry and does not import the
+full Simple CLI or compiler. `simple office` is optional compatibility plumbing:
+when present it delegates to the cached standalone artifact rather than loading
+Office source. `simple ide --feature-check --tui|--gui` remains a separate IDE
+diagnostic surface, not an Office launch dependency.
 Calc composes its existing sheet model, formula evaluator, real ANSI TUI, and
 the existing UI access session/service. Operators and LLM tools use the
 canonical flow:
@@ -52,7 +55,8 @@ evaluator. Neither behavior is reimplemented in the controller or UI adapter.
 @layout dag
 @direction LR
 SimpleCLI -> IdeCliEntry
-SimpleCLI -> OfficeCliEntry
+Phase3Compiler -> OfficeArtifact
+OfficeArtifact -> OfficeCliEntry
 OfficeCliEntry -> CalcSessionHost
 CalcSessionHost -> CalcController
 CalcController -> SheetModel
@@ -60,10 +64,10 @@ SheetModel -> FormulaEvaluator
 CalcSessionHost -> CalcTuiRenderer
 CalcSessionHost -> UISession
 UISession -> UiAccessService
-SimpleUiCLI -> UiAccessService
+UiClientArtifact -> UiAccessService
 UiAccessService -> AccessStore
 SystemSpec -> DeployedCommands
-DeployedCommands -> SimpleCLI
+DeployedCommands -> OfficeArtifact
 SystemSpec -> EvidenceBundle
 CalcTuiRenderer -> EvidenceBundle
 UiAccessService -> EvidenceBundle
@@ -73,11 +77,10 @@ UiAccessService -> EvidenceBundle
 <details class="sdn-ascii" open><summary>Diagram</summary>
 
 ```ascii generated-from=office_cli_tui_ui_access.architecture hash=sha256:auto
-simple CLI -> IDE entry
-          -> Office entry -> Calc controller -> sheet -> formula evaluator
+Phase-3 build -> standalone Office artifact -> Calc controller -> sheet -> formula evaluator
                                            -> real ANSI TUI
                                            -> UI session -> access service -> bounded store
-simple ui -----------------------------------------------^
+cached UI client ----------------------------------------^
 system spec -> deployed commands + TUI/protocol/artifact evidence
 ```
 
@@ -88,8 +91,9 @@ system spec -> deployed commands + TUI/protocol/artifact evidence
 
 | Concern | Owner | Constraint |
 |---|---|---|
-| Unified dispatch | startup-light CLI entry modules | Preserve Office/IDE arguments until their owner parses them |
-| Command grammar | Office and IDE CLI entry modules | Preferred Calc spelling is `office calc [FILE] --tui`; preserve legacy aliases |
+| Product entry | `src/app/office_cli/main.spl` | Native standalone artifact; no full CLI/compiler closure at launch |
+| Compatibility dispatch | optional `simple office` delegate | Execute the cached Office artifact; never execute raw Office source |
+| Command grammar | standalone Office entry | Primary spelling is `office calc [FILE] --tui`; preserve optional legacy aliases |
 | Sheet state | existing `Sheet`/workbook modules | Single authoritative values, formulas, cached display, and save state |
 | Formula semantics | existing formula evaluator | `*` remains expression syntax; `AVG` forwards to `AVERAGE` |
 | Interaction orchestration | Calc controller | Own selection, edit buffer, confirmation, recalculation, tree rebuild |
@@ -172,10 +176,12 @@ the existing formula serialization owner already canonicalizes names.
 
 ## Startup and Hot Paths
 
-- The unified CLI must dispatch Office and IDE before global filtering removes
-  owner-specific options.
-- Production wrappers execute cached compiled artifacts; raw `.spl` entrypoint
-  fallback and Rust-seed delegation are forbidden.
+- Phase 3 builds `OFFICE_BINARY` from the narrow Office entry closure; application
+  launch executes that cached artifact directly.
+- A full Simple CLI build is not an Office build or launch prerequisite.
+- `SIMPLE_TEST_DRIVER` and the versioned UI client are test infrastructure, not
+  imports or runtime children of the Office product.
+- Raw `.spl` entrypoint fallback and Rust-seed delegation are forbidden.
 - The rendered snapshot, normal TUI, and live `UISession` action tree expose
   the same visible 20x30 grid. A cell returned by discovery is always an
   addressable action target.
@@ -221,13 +227,15 @@ On the checked-in realistic fixture:
 
 ## Verification Boundary
 
-The system gate launches a self-hosted deployed command/service, records a
-unique run ID, and writes actual PTY plus protocol evidence. The SSpec invokes
-that gate and rejects stale or mismatched receipts. A receipt-reading-only
-SSpec is not valid acceptance evidence.
+The system gate uses `SIMPLE_TEST_DRIVER` only to execute SSpec/check
+orchestration and launches `OFFICE_BINARY` as the product process. A separately
+cached UI client drives `simple.access/v1`. The gate records the Office artifact
+path/hash/mtime, one unique run ID, and actual PTY plus protocol evidence. A
+receipt-reading-only SSpec or a test-driver process substituted for Office is
+not valid acceptance evidence.
 
 Test-only orchestration and SGTTI may exist in the executable spec/check gate.
-The normal Office entry, Calc controller, real TUI, IDE entry, and unified CLI
+The standalone Office entry, Calc controller, and real TUI
 must exclude `std.ui_test.sgtti`, `SgttiTestDriver`, and test-only snapshot
 construction.
 

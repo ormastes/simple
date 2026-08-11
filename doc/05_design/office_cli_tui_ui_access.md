@@ -12,7 +12,7 @@ create final requirement documents.
 | Component | Suggested path | Responsibility |
 |---|---|---|
 | IDE startup-light entry | `src/app/ide/main.spl` | Parse `ide --feature-check --tui|--gui` before global filtering |
-| Office startup-light entry | `src/app/office/mod.spl` | Parse `office calc [FILE] --tui`, compatibility aliases, help/errors |
+| Standalone Office entry | `src/app/office_cli/main.spl` | Parse `office calc [FILE] --tui`, compatibility aliases, help/errors without importing the full CLI |
 | Calc controller | `src/app/office/sheets/access_controller.spl` | Own loaded sheet, active cell, pending edit, revision, snapshot, and frame rendering |
 | Calc session host | `src/app/office/sheets/calc_session_host.spl` | Sole owner of controller/session; interleaves terminal bytes and loopback access requests |
 | Calc access adapter | `src/app/office/sheets/access_server.spl` | Route optional access port to the same terminal/session host |
@@ -109,14 +109,15 @@ The minimum acceptance nodes are `main#cell_A1`,
 Preferred forms:
 
 ```text
-simple office calc --tui
-simple office calc FILE --tui
+office calc --tui
+office calc FILE --tui
 simple ide --feature-check --tui
 simple ide --feature-check --gui
 ```
 
-Compatibility forms continue to work, including the existing
-`office edit-sheet FILE --tui` route. Unknown options fail with a stable
+`simple office` is an optional compatibility delegate to the cached standalone
+artifact. Existing `office edit-sheet FILE --tui` compatibility may continue.
+No alias may execute raw Office source. Unknown options fail with a stable
 nonzero diagnostic.
 
 The semantic action form is:
@@ -150,12 +151,14 @@ The system spec calls exactly once per SSpec process:
 scripts/check/check-office-cli-tui-ui-access.spl --scenario all --run-id <unique-id>
 ```
 
-through the self-hosted `SIMPLE_BINARY`. No other scenario selector is a public
-gate contract. The gate runs deployed CLI, PTY, UI protocol, formula,
+through `SIMPLE_TEST_DRIVER`, with `OFFICE_BINARY` naming the Phase-3-built
+product and a separately cached UI client naming the protocol driver. No other
+scenario selector is a public gate contract. The gate runs the standalone
+Office PTY, UI protocol, formula,
 rejection, history, performance, provenance, and cleanup checks as one atomic
 evidence campaign.
 
-The `all` scenario executes a deployed self-hosted gate once, fails nonzero on
+The `all` scenario executes the test-driver gate once, fails nonzero on
 any missing requirement, and writes a unique run-ID receipt to `suite.txt`.
 The SSpec invokes the gate and verifies the run ID across independent
 PTY/protocol artifacts; it must never merely read pre-existing evidence.
@@ -169,7 +172,8 @@ The helper is represented in the manual-first source by the inline scenario
 `@prev(...)` to expand that setup into its manual flow without executing a
 second gate.
 
-There are no silent placeholder helpers. A missing runtime, gate, command,
+There are no silent placeholder helpers. A missing test driver, Office artifact,
+UI client, gate, command,
 surface, artifact, or marker is an immediate test failure.
 
 ## Evidence Layout

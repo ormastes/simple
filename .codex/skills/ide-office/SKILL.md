@@ -59,19 +59,23 @@ simple spipe-docgen test/03_system/app/ide/feature/ide_office_plugin_suite_spec.
 find doc/06_spec -name '*_spec.spl' | wc -l
 ```
 
-For Calc UI-access acceptance, use an observed pure-Simple self-hosted deployed
-runtime. The SSpec invokes `--scenario all --run-id <unique>` exactly once and
+For Calc UI-access acceptance, build the narrow standalone Office entry with an
+existing Phase-3 compiler. A full Simple CLI bootstrap is not required.
+`OFFICE_BINARY` is the product; `SIMPLE_TEST_DRIVER` executes the SSpec/check,
+and `SIMPLE_UI_CLIENT` is a separately cached protocol client. The SSpec invokes
+`--scenario all --run-id <unique>` exactly once and
 shares only that fresh run across its visible workflow and folded error/NFR
 scenarios:
 
 ```bash
-SIMPLE_BINARY="$PWD/bin/simple" bin/simple test test/03_system/app/office/feature/office_cli_tui_ui_access_spec.spl --mode=interpreter
+OFFICE_BINARY="$PWD/bin/office" SIMPLE_TEST_DRIVER="$PWD/bin/simple" SIMPLE_UI_CLIENT="$PWD/bin/simple" bin/simple test test/03_system/app/office/feature/office_cli_tui_ui_access_spec.spl --mode=interpreter
 bin/simple spipe-docgen test/03_system/app/office/feature/office_cli_tui_ui_access_spec.spl --output doc/06_spec --no-index
 find doc/06_spec -name '*_spec.spl' | wc -l
 ```
 
-Do not run Office acceptance or docgen through `bin/simple-interp`, a Rust seed,
-raw Office source, or a shared prior evidence directory.
+Do not substitute the test driver for `OFFICE_BINARY`, and do not run Office
+acceptance or docgen through `bin/simple-interp`, a Rust seed, raw Office source,
+or a shared prior evidence directory.
 
 The generated manual at
 `doc/06_spec/03_system/app/ide/feature/ide_office_plugin_suite_spec.md` must

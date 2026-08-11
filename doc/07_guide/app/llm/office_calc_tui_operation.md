@@ -15,22 +15,22 @@ not evidence.
 
 ## Launch Rule
 
-For development, use the existing pure-Simple runtime to launch the executable
-Office owner. Do not bootstrap merely to test an Office application change.
-Do not launch `src/app/cli/main.spl` as UI evidence because it is a re-export
-module; use the Office command owner or a compiled CLI application artifact.
+Build `src/app/office_cli/main.spl` with an existing Phase-3 compiler and launch
+the resulting cached `office` artifact directly. Do not bootstrap the full
+Simple CLI merely to test or run Office. A test driver and UI protocol client
+may be separate cached tools; neither is the Office application.
 
-The preferred installed command remains:
+The primary installed command is:
 
 ```text
-simple office calc [FILE] --tui
+office calc [FILE] --tui
 ```
 
 For semantic LLM/debug access, launch the opt-in loopback service on an
 available port and point the normal `simple ui` client at that endpoint:
 
 ```text
-simple office calc [FILE] --tui --ui-access-port PORT
+office calc [FILE] --tui --ui-access-port PORT
 ```
 
 Do not call a controller in-process or reuse prior artifacts as an operator

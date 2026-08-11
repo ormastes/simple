@@ -6,7 +6,7 @@
 This design covers the selected F1/N1 Calc TUI launched by:
 
 ```text
-simple office calc [FILE] --tui
+office calc [FILE] --tui
 ```
 
 The semantic UI surface and the terminal frame expose the same controller

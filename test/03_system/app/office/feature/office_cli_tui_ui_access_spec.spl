@@ -1,9 +1,13 @@
 # codex-system-test
 # @evidence-display: embed_tui
-"""# Office CLI, Calc TUI, and Semantic UI Access
+"""# Standalone Office Calc TUI and Semantic UI Access
 
-As an Office operator, I run one unique deployed-runtime evidence campaign and
+As an Office operator, I run one unique evidence campaign against
+`OFFICE_BINARY`, the standalone artifact produced by a Phase-3 compiler, and
 inspect the same Calc session through its terminal and semantic UI surfaces.
+`SIMPLE_TEST_DRIVER` executes orchestration and `SIMPLE_UI_CLIENT` drives the
+versioned access protocol; neither tool is the Office product or an application
+launch dependency.
 The scenarios never read a shared or prior evidence directory: one inline
 setup creates the run id and invokes the gate, then every scenario validates
 only that run's command, PTY, and protocol receipts.
@@ -13,14 +17,16 @@ NFR-OFFICE-CLI-UI-001 through NFR-OFFICE-CLI-UI-010.
 
 ## Operator steps
 
-1. Set `SIMPLE_BINARY` to a pure-Simple self-hosted executable.
-2. Launch the deployed IDE and Calc CLI commands.
-3. Start one deployed Calc process under a 124x37 PTY with UI access enabled.
+1. Set `OFFICE_BINARY` to the Phase-3-built standalone Office artifact.
+2. Set `SIMPLE_TEST_DRIVER` and `SIMPLE_UI_CLIENT` to existing orchestration and
+   protocol-client artifacts; do not bootstrap the full CLI for Office launch.
+3. Launch `office calc` directly under a 124x37 PTY with UI access enabled.
 4. Discover `main`, edit A1, A2, B1, C1 through `simple ui` structured
    actions, then capture that same process's final terminal frame.
 5. Inspect independent snapshots, history, rejection diagnostics, and captures.
 
-Missing runtime, a seed runtime, a stale run id, a non-PTY capture, a server
+Missing Office artifact, substituting the test driver for Office, a seed-built
+product, a stale run id, a non-PTY capture, a server
 that does not answer the public protocol, or stale evidence is a failure.
 """
 
@@ -31,8 +37,14 @@ val OFFICE_UI_GATE: text = "scripts/check/check-office-cli-tui-ui-access.spl"
 val OFFICE_UI_BASE: text = "build/test-artifacts/03_system/app/office/feature/office_cli_tui_ui_access/runs/"
 
 fn _runtime() -> text:
+    val driver = env_get("SIMPLE_TEST_DRIVER")
+    if driver != nil and driver != "": return driver
     val runtime = env_get("SIMPLE_BINARY")
     if runtime == nil: "" else: runtime
+
+fn _configured_binary(name: text, fallback: text) -> text:
+    val configured = env_get(name)
+    if configured == nil or configured == "": fallback else: configured
 
 fn _run_id() -> text:
     "sspec_" + getpid().to_text() + "_" + time_now_unix_micros().to_text()
@@ -54,11 +66,19 @@ fn setup_office_cli_tui_ui_access() -> text:
         return office_ui_gate_state.run_root
     val runtime = _runtime()
     if runtime == "":
-        fail("SIMPLE_BINARY must name a deployed pure-Simple executable")
+        fail("SIMPLE_TEST_DRIVER or SIMPLE_BINARY must name a deployed pure-Simple test runner")
     if runtime.contains("compiler_rust"):
         fail("the Rust bootstrap seed cannot provide Office acceptance evidence")
     if not file_exists(runtime):
-        fail("SIMPLE_BINARY does not exist: " + runtime)
+        fail("Simple test driver does not exist: " + runtime)
+    val ui_client = _configured_binary("SIMPLE_UI_CLIENT", _configured_binary("SIMPLE_BINARY", runtime))
+    val office_binary = _configured_binary("OFFICE_BINARY", ui_client)
+    if not file_exists(ui_client):
+        fail("SIMPLE_UI_CLIENT does not exist: " + ui_client)
+    if not file_exists(office_binary):
+        fail("OFFICE_BINARY does not exist: " + office_binary)
+    if ui_client.contains("compiler_rust") or office_binary.contains("compiler_rust"):
+        fail("Rust bootstrap seeds cannot provide UI-client or Office evidence")
     val run_id = _run_id()
     val root = OFFICE_UI_BASE + run_id
     if file_exists(root + "/suite.txt"):
@@ -78,7 +98,7 @@ fn check_office_gate() -> text:
     expect(file_exists(root + "/suite.txt")).to_be(true)
     root
 
-describe "Office CLI, Calc TUI, formulas, and semantic UI access":
+describe "Standalone Office Calc TUI, formulas, and semantic UI access":
     # @inline
     it "has one fresh deployed Office evidence run":
         step("Create one unique deployed Office evidence run")
@@ -104,7 +124,7 @@ describe "Office CLI, Calc TUI, formulas, and semantic UI access":
     # @req REQ-OFFICE-CLI-UI-010
     # @troubleshooting(symptom: "Calc deployed workflow fails", fix: "Read only the unique run directory named in the gate receipt; do not reuse an earlier capture")
     it "should launch Calc and complete the live semantic formula workflow":
-        step("Launch Calc through the deployed Office command")
+        step("Launch Calc through the standalone Office artifact")
         val root = check_office_gate()
         step("List active Office windows")
         expect(file_exists(root + "/protocol/windows.json")).to_be(true)
@@ -163,10 +183,15 @@ describe "Office CLI, Calc TUI, formulas, and semantic UI access":
         val root = check_office_gate()
         val provenance = file_read(root + "/exec/runtime-provenance.txt")
         val artifact = file_read(root + "/exec/runtime-artifact.txt")
+        val office_artifact = file_read(root + "/exec/office-artifact.txt")
+        val office_provenance = file_read(root + "/exec/office-product-provenance.txt")
         val commands = file_read(root + "/exec/commands.txt")
         expect(provenance.lower().contains("bootstrap seed only")).to_be(false)
         expect(artifact).to_contain("runtime_sha256=")
         expect(artifact).to_contain("runtime_mtime_epoch=")
+        expect(office_artifact).to_contain("office_sha256=")
+        expect(office_artifact).to_contain("office_mtime_epoch=")
+        expect(office_provenance.lower().contains("bootstrap seed only")).to_be(false)
         expect(commands).to_contain("invalid_office")
         expect(commands).to_contain("invalid_ide")
         step("Review stale, missing, and unsupported action rejection")

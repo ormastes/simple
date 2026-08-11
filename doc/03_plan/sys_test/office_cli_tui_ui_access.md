@@ -11,11 +11,11 @@ that selected contract and the frozen user interface.
 
 | ID | Contract |
 |---|---|
-| REQ-OFFICE-CLI-UI-001..003,012 | Deployed IDE/Office CLI owns its options, exposes `office calc [FILE] --tui`, preserves compatibility, and fails invalid arguments |
+| REQ-OFFICE-CLI-UI-001..003,012 | Phase-3 build produces standalone `office calc [FILE] --tui`; optional `simple office` delegates to its cache; IDE checks remain separate; invalid arguments fail |
 | REQ-OFFICE-CLI-UI-004..006 | Calc exposes `main` through windows/snapshot/surface/find/act/history with stable IDs, revisions, value actions, post-state, and correlated history |
 | REQ-OFFICE-CLI-UI-007..008 | Real Calc entry produces A1=6, A2=8, B1=`=A1*A2`=>48, and C1=`=AVG(A1:A2)`=>7 |
 | REQ-OFFICE-CLI-UI-009..011 | Retained TUI/protocol evidence, generated operator manual, and production isolation are verified by the evidence, isolation, and manual gates |
-| NFR-OFFICE-CLI-UI-001 | Commands and evidence use self-hosted Simple, with no raw-source or seed fallback |
+| NFR-OFFICE-CLI-UI-001 | `OFFICE_BINARY` is a Phase-3-built native product distinct from `SIMPLE_TEST_DRIVER`/UI client, with no full-CLI, raw-source, or seed launch fallback |
 | NFR-OFFICE-CLI-UI-002..005 | Deployed startup/query/action/RSS/history limits hold on the measurement fixture |
 | NFR-OFFICE-CLI-UI-006..010 | Deterministic evidence, restoration, hygiene, verification, and manual quality hold |
 
@@ -23,7 +23,7 @@ that selected contract and the frozen user interface.
 
 Included:
 
-- Office/IDE command-owner dispatch exercised through the existing runtime;
+- standalone Office artifact launch plus separate IDE diagnostic routing;
 - real Calc TUI/controller and canonical UI access service;
 - stable semantic IDs and value-bearing actions;
 - multiplication and `AVG` through the live sheet;
@@ -41,14 +41,17 @@ Excluded:
 
 ## Environment
 
-- `SIMPLE_BINARY` names a verified self-hosted deployed Simple runtime.
+- `OFFICE_BINARY` names the Phase-3-built standalone product under test.
+- `SIMPLE_TEST_DRIVER` names the existing tool that executes SSpec/check
+  orchestration; it is not the Office product or an application dependency.
+- `SIMPLE_UI_CLIENT` names a cached `simple.access/v1` client artifact when the
+  test driver does not provide that client directly.
 - `SIMPLE_LIB=src` is allowed for test module resolution, not production
   source-entry fallback.
 - Loopback UI access service and an available primary-host PTY are required.
 - The gate uses a fixed 124x37 terminal and an isolated fixture/artifact root.
-- Stale evidence, persisted-store act, raw-source dispatch, and seed-runtime
-  fallback fail. The system gate must not downgrade deployment requirements
-  to an app-development exception.
+- Stale evidence, persisted-store act, raw-source dispatch, using the test driver
+  as the Office process, and seed/full-CLI product fallback fail.
 
 ## Manual Flow and Capture Policy
 
@@ -88,7 +91,7 @@ separate gate selectors.
 
 ## Frozen Manual Steps
 
-- Launch Calc through the deployed Office command
+- Launch Calc through the standalone Office artifact
 - List active Office windows
 - Capture the Calc semantic snapshot
 - Inspect the main Calc surface
@@ -135,7 +138,7 @@ capture = 124x37
    and the check gate.
 2. Run the focused spec once:
 
-   `SIMPLE_BINARY="$PWD/bin/simple" SIMPLE_LIB=src bin/simple test test/03_system/app/office/feature/office_cli_tui_ui_access_spec.spl --mode=interpreter`
+   `OFFICE_BINARY="$PWD/bin/office" SIMPLE_TEST_DRIVER="$PWD/bin/simple" SIMPLE_UI_CLIENT="$PWD/bin/simple" SIMPLE_LIB=src bin/simple test test/03_system/app/office/feature/office_cli_tui_ui_access_spec.spl --mode=interpreter`
 
 3. If the spec executes rather than failing to compile or resolve symbols,
    generate its manual:
@@ -161,7 +164,10 @@ or gate cannot run.
 
 ## Failure Triage
 
-- Missing `SIMPLE_BINARY`: provide the existing Simple runtime path.
+- Missing `OFFICE_BINARY`: build the narrow Office entry with the existing
+  Phase-3 compiler; do not bootstrap the full CLI.
+- Missing `SIMPLE_TEST_DRIVER`/`SIMPLE_UI_CLIENT`: provide the existing test
+  orchestration/client artifacts without substituting them for Office.
 - Gate nonzero: inspect the named scenario and `gate.out` receipt.
 - Source unavailable: confirm Calc started the established loopback service.
 - Missing target: inspect `protocol/snapshot-before.json` and stable IDs.

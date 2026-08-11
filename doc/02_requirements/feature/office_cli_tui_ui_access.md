@@ -4,7 +4,7 @@ Selected feature option: **F1 — Calc-First Shared UI Controller**.
 
 ## Goal
 
-Provide deployed, discoverable IDE/Office CLI entry points and a real Calc TUI
+Provide a deployed, discoverable standalone Office entry point and a real Calc TUI
 that human debuggers and LLM operators can inspect and edit through the existing
 `simple.access/v1` UI protocol.
 
@@ -12,10 +12,11 @@ that human debuggers and LLM operators can inspect and edit through the existing
 
 ### REQ-OFFICE-CLI-UI-001 — Deployed command ownership
 
-The deployed CLI shall route `simple ide` and `simple office` to startup-light
-command-owner entry points before global option filtering consumes
-command-specific mode flags. It shall not execute raw `.spl` source or fall back
-to the Rust seed in the production command path.
+The Phase-3 build shall produce a standalone `office` artifact from
+`src/app/office_cli/main.spl`. Application launch shall execute that artifact
+directly, without the full Simple CLI, raw `.spl` execution, compiler invocation,
+or bootstrap fallback. `simple office` may exist only as an optional compatibility
+delegate to the cached `office` artifact.
 
 ### REQ-OFFICE-CLI-UI-002 — IDE feature-check routing
 
@@ -25,15 +26,16 @@ implementation and return deterministic mode-appropriate output.
 
 ### REQ-OFFICE-CLI-UI-003 — Calc launch grammar
 
-The preferred command shall be:
+The primary command shall be:
 
 ```text
-simple office calc [FILE] --tui
+office calc [FILE] --tui
 ```
 
 When `FILE` is omitted, Calc shall create a new in-memory workbook suitable for
-editing. Existing `sheets` and `edit-sheet FILE --tui` routes shall remain
-compatible.
+editing. Existing `simple office`, `sheets`, and `edit-sheet FILE --tui` routes
+may remain as compatibility aliases, but shall not be required to launch the
+standalone application and shall not execute Office source.
 
 ### REQ-OFFICE-CLI-UI-004 — Canonical semantic surface
 
@@ -69,7 +71,8 @@ the calculated value `7`.
 
 ### REQ-OFFICE-CLI-UI-009 — Real TUI evidence
 
-The authoritative system scenario shall launch the deployed Calc command in a
+The authoritative system scenario shall launch the Phase-3-built standalone
+`office` artifact in a
 terminal-compatible environment, retain its ANSI/text screen capture, drive
 the semantic discovery/action/history flow, and assert the independently
 observed formula results.
@@ -82,14 +85,15 @@ edge/error scenarios, troubleshooting guidance, and zero docgen stubs.
 
 ### REQ-OFFICE-CLI-UI-011 — Production isolation
 
-The normal IDE/Office/Calc production closure shall not import SGTTI or
-test-only capture modules. Debug access shall use the existing opt-in access
-service/store boundary.
+The standalone Office/Calc production closure shall not import the unified
+Simple CLI, compiler, SGTTI, or test-only capture modules. Debug access shall
+use the existing opt-in access service/store boundary.
 
 ### REQ-OFFICE-CLI-UI-012 — Compatibility and diagnostics
 
 Unknown app/mode/action combinations shall return deterministic diagnostics and
-non-zero status. Existing documented Office aliases shall retain their behavior.
+non-zero status. When packaged, optional Office aliases shall preserve argument
+and exit semantics while delegating to the cached standalone artifact.
 
 ## Exclusions
 
