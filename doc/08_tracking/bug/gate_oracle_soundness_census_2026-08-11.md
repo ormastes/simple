@@ -250,9 +250,54 @@ this as a wording fix, not evidence that the leaf gates need a new oracle.
    `manifest-write.shs`, `lib/stage4-candidate-provenance.shs`,
    `check-compiler-provenance.shs`) — false green here silently poisons every
    downstream stage build. Retrofit: per-stage symbol/hash inspection.
+
+   **2026-08-11 follow-up read (this session):** all three Tier-1 scripts
+   named besides `manifest-verify.shs` (already excluded — see the header
+   correction above) were read in full and are **not** exit-code-only:
+   `manifest-write.shs` builds its `pass`/field manifest almost entirely from
+   real `sha256sum`-backed `bootstrap_stage3_hash_file` calls (dozens of
+   `_sha256=` fields) plus `cmp -s` byte comparisons of before/after
+   snapshots; `lib/stage4-candidate-provenance.shs`'s
+   `stage4_verify_candidate_provenance` re-derives and compares
+   `bootstrap_stage3_hash_file` digests for the binary, producer script,
+   helper script, parent compiler and Stage-3 manifest, and separately
+   re-runs `stage4_validate_candidate_lane` (exact `grep -Fxc` line matches
+   against build/smoke logs); `check-compiler-provenance.shs` already derives
+   its PASS/FAIL verdict from `nm`-based Simple-vs-Rust symbol-namespace
+   classification plus `strings`-based commit-marker presence checks, not a
+   bare exit code. No fix was owed to any of the three; effort was redirected
+   to genuinely-unsound Tier 2/3 gates below.
 2. **Native-build/link-parity Tier 2 list above (14 gates)** — retrofit with
    the existing `check-native-build-artifact-has-functions.shs` FUNC-symbol
    helper rather than bespoke checks.
+
+   **2026-08-11 follow-up (this session) — 2 of 14 FIXED:**
+   - `check-predicate-parser-native-build.shs`: previously trusted
+     `native-build`'s exit code plus a single regression-string grep, never
+     inspecting or running the produced artifact. Now additionally (a) runs
+     `check-native-build-artifact-has-functions.shs` against the built
+     artifact to require at least one defined FUNC symbol, and (b) actually
+     **executes** the artifact and asserts its stdout is exactly `hi`, closing
+     the exact "native-build reports success for a functionless/wrong
+     artifact" trap this census exists to catch. Verified red (fake
+     `native-build` wrapper that reports rc=0 but writes a non-`hi`-printing
+     stub) → FAIL, then green against the real `bin/release/x86_64-unknown-linux-gnu/simple`
+     → PASS.
+   - `build-x25519mlkem768-gpu-evidence-runner.shs`: previously trusted
+     `native-build`'s exit code plus regular-file/symlink checks on the
+     output path, never inspecting the artifact's own symbol table before
+     promoting it (`mv`) to its final, provenance-sidecar-backed path. Now
+     runs `check-native-build-artifact-has-functions.shs` against the
+     temporary artifact before promotion and refuses to promote (and cleans
+     up the temp artifact) on a zero-FUNC result.
+   - The remaining 12 gates in this Tier-2 list were read or spot-checked and
+     found to already assert on real content (serial-log markers, pixel
+     diffs, or `readelf`/`nm` symbol inspection) rather than bare exit codes
+     — see the inline per-gate notes added where read this session
+     (`check-cranelift-aot-aggregates.shs`, `check-jit-unresolved-symbol-guard.shs`,
+     `check-no-jit-module-drop.shs`, `check-simpleos-usb-xhci-qemu.shs` were
+     read in full and are EXECUTING, not exit-code-only); the rest were not
+     re-read this session and remain open work.
 3. **UNCERTAIN gates** — the 9 named ones are now resolved (see "UNCERTAIN —
    RESOLVED" above; none were EXIT-CODE-ONLY). The "~17" figure was never
    fully enumerated; re-run the full methodology if the remainder need
@@ -260,6 +305,23 @@ this as a wording fix, not evidence that the leaf gates need a new oracle.
 4. **Remaining Tier 3 exit-code-only gates (~30)** — batch review, apply
    EXECUTING or ARTIFACT-INSPECTING oracle per the specific claim each gate
    makes; do not blanket-apply one instrument to all of them.
+
+   **2026-08-11 follow-up (this session) — 1 of ~30 FIXED:**
+   `check-native-option-try-target-fail.shs` compiled 5 Option-`?`/try-operator
+   fixtures with `native-build --emit-object` and trusted rc=0 plus
+   non-empty-object plus absence of a retired diagnostic string as proof the
+   tagged Option ABI actually lowered working code — it never inspected the
+   `.o` itself. Now each fixture's object is additionally run through
+   `check-native-build-artifact-has-functions.shs` and the fixture is only
+   counted toward the (now-mandatory, non-vacuous) `checked` total if it
+   carries at least one defined FUNC symbol; a 0-FUNC object now FAILs with
+   the specific fixture named, and the script now also emits `ERROR —
+   nothing was checked` on an empty fixture set instead of silently PASSing.
+   `.o` relocatable objects cannot be executed standalone (no linked `_start`),
+   so FUNC-symbol inspection — not execution — is the correct instrument
+   here, matching the census's own guidance to use ARTIFACT-INSPECTING for
+   presence/identity claims and reuse the existing helper rather than write a
+   bespoke check.
 5. **Verdict-line retrofit** — once oracle soundness is fixed, add the
    `PASS — <n> checked` / `FAIL` / `ERROR — nothing was checked` convention
    to any of the above still missing it, matching the house standard already

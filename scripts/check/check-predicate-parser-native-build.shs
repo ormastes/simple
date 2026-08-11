@@ -47,4 +47,40 @@ if grep -q "llvm global load referenced undeclared symbol" "$LOG"; then
     exit 1
 fi
 
-echo "PASS — src/compiler/00.common native-build clean, 1 file checked"
+# native-build reporting rc=0 is NOT proof anything runnable was produced --
+# see doc/08_tracking/bug/native_build_reports_success_for_functionless_artifact_2026-08-10.md
+# and scripts/check/check-native-build-artifact-has-functions.shs, whose model
+# this retrofit reuses. Two independent real checks replace the former
+# exit-code-only trust:
+#   1. the artifact carries at least one defined FUNC symbol (structurally not
+#      empty), via the existing FUNC-symbol helper script.
+#   2. the artifact actually EXECUTES and produces the expected program output
+#      ("hi"), not merely that the linker/compiler pipeline returned 0.
+FUNC_HELPER="$REPO_ROOT/scripts/check/check-native-build-artifact-has-functions.shs"
+if [ ! -x "$OUT" ] && [ ! -f "$OUT" ]; then
+    echo "FAIL — native-build reported success but produced no artifact at $OUT" >&2
+    exit 1
+fi
+if ! sh "$FUNC_HELPER" "$OUT" > "$WORK/func-check.log" 2>&1; then
+    echo "FAIL — native-build artifact has no defined FUNC symbols (structurally empty)" >&2
+    cat "$WORK/func-check.log" >&2
+    exit 1
+fi
+
+RUN_LOG="$WORK/run.log"
+if [ ! -x "$OUT" ]; then
+    chmod +x "$OUT" 2>/dev/null || true
+fi
+if ! "$OUT" > "$RUN_LOG" 2>&1; then
+    echo "FAIL — native-build artifact built and has FUNC symbols but failed to execute" >&2
+    cat "$RUN_LOG" >&2
+    exit 1
+fi
+if [ "$(cat "$RUN_LOG")" != "hi" ]; then
+    echo "FAIL — native-build artifact executed but printed unexpected output" >&2
+    echo "  expected: hi" >&2
+    echo "  actual:   $(cat "$RUN_LOG")" >&2
+    exit 1
+fi
+
+echo "PASS — 3 check(s) verified: src/compiler/00.common native-build clean, artifact has FUNC symbols, artifact executes and prints 'hi'"
