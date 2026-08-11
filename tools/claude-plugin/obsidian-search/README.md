@@ -22,3 +22,7 @@ If the servers are ever brought into this repo, they must ship the same way the
 other MCP servers do: a `bin/<name>` POSIX wrapper that hash-admits and probes a
 cached native artifact under `bin/release/<triple>/`, never a raw `.spl` launch
 (see `scripts/check/check-mcp-wrapper-contract.shs`).
+
+Its `.lsp.json` was removed for the same reason: it launched
+`bin/simple run examples/obsidian-search/src/main_lsp.spl`, a raw-source command
+whose target directory does not exist in this repo.
