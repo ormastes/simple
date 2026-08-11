@@ -113,3 +113,32 @@ corrective-implementation-and-evidence
   the recalculated workbook/session synchronized, and replaces the semantic
   grid only when scrolling changes its visible identities. Malformed formula
   commits fail before mutating the cell.
+- manual-first correction (2026-08-11): The executable SSpec now invokes the
+  unique-run deployed gate through one cached setup helper, presents the live
+  discovery/formula/capture flow as the visible operator scenario, and folds
+  fail-closed command/action plus N1 evidence scenarios. Plans, detail design,
+  guide, and Office skill now describe the single `all --run-id` contract.
+  The generated manual remains intentionally stale until a current self-hosted
+  runtime executes the spec and regenerates it with zero stubs.
+- parallel corrective lanes (2026-08-11): `office_spipe_docs_audit`,
+  `office_spipe_gate_audit`, and `office_spipe_impl_audit` independently
+  reviewed and corrected manual structure, deployed evidence, and production
+  transport ownership. The gate now binds runtime hash/mtime, validates every
+  protocol envelope, proves malformed-formula no-mutation, terminal restore,
+  child exit, port closure, exact frame geometry, and live 48/7 results.
+- focused verification (2026-08-11): access-controller 11/11, standalone Calc
+  CLI 5/5, file-formats 10/10, and session-host isolation 2/2 passed. The old
+  deployed runner could not parse the current shared-grid spec; its tautology
+  failure branches were replaced with explicit `fail(...)` and remain pending
+  the current Stage 4 runner.
+- Stage 4 build blocker (2026-08-11): Three bounded build/fix cycles used
+  `/tmp/simple-stage3-aarch64-apple-darwin/simple` (SHA-256
+  `f34f81f6bf1fc81cc5bcb10f8d3d037615113b97e3145198641e6ea991a6f5e6`).
+  The first exposed a missing `MdBlockResult` declaration, now fixed. The
+  retained third log `/tmp/office-stage4/build.log` fails closed on ambiguous
+  `RiscvTargetAbi.to_text` resolution in the two `LlvmTargetConfig` builders;
+  explicit `RiscvTargetContract` annotations are now applied but, per the
+  three-cycle guard, are not rebuilt in this turn. Resume with the same
+  Stage 3 binary, stable `/tmp/office-stage4/cache`, and output
+  `/tmp/office-stage4/out/simple`; only a fresh artifact may run the gate and
+  regenerate the manual. Owner and final reviewer remain `/root`.

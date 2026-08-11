@@ -149,12 +149,19 @@ Rust bootstrap seed — check with `bin/simple --version`, which then prints
 "this Rust-built Simple binary is a bootstrap seed only" — `bin/simple ide`
 fails with `error: file not found: ide`, because the seed has no `ide` handler
 and treats the word as a filename. That is a **deployment** gap, not a missing
-feature: run the entry point directly until a pure-Simple binary is deployed.
+feature. A source-entry run may diagnose IDE capability ownership, but it is
+not Office CLI/TUI acceptance evidence and must not regenerate its manual.
+
+If an explicit development interpreter is installed, a raw entry may diagnose
+IDE capability ownership only:
 
 ```bash
-bin/simple run src/app/ide/main.spl --feature-check --tui   # works on a seed
-bin/simple run src/app/ide/main.spl --feature-check --gui
+bin/simple-interp src/app/ide/main.spl --feature-check --tui
+bin/simple-interp src/app/ide/main.spl --feature-check --gui
 ```
+
+Do not route these diagnostics through a seed-shaped `bin/simple run`; a seed
+without `run` is itself the deployment failure being diagnosed.
 
 Verified 2026-07-30: both exit 0 and report 11 capabilities. Four of the 11
 (`draw-sdd`, `designer`, `base`, `math`) still report only
@@ -178,13 +185,17 @@ Note the duplication that hid this: capability rows are declared in
 bin/simple ide --feature-check --tui   # requires a deployed pure-Simple binary
 bin/simple ide --feature-check --gui
 bin/simple test test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl
-bin/simple test test/03_system/app/office/feature/office_cli_tui_ui_access_spec.spl
+SIMPLE_BINARY="$PWD/bin/simple" bin/simple test test/03_system/app/office/feature/office_cli_tui_ui_access_spec.spl --mode=interpreter
 bin/simple spipe-docgen test/03_system/app/office/feature/office_cli_tui_ui_access_spec.spl --output doc/06_spec --no-index
 find doc/06_spec -name '*_spec.spl' | wc -l
 ```
 
-The docgen result must read like an operator manual and report `0 stubs`. The
-final command must print `0`.
+The Office SSpec creates one unique run ID and invokes the deployed gate once;
+its visible workflow and folded error/NFR scenarios consume only that run. As
+long as the generated manual carries its stale-evidence banner, AC-5 remains
+open. Regenerate only after the focused self-hosted test passes. The docgen
+result must read like an operator manual and report `0 stubs`; the final command
+must print `0`.
 
 The production IDE entrypoint also exposes
 `simple ide --interaction-check [--tui|--gui] [file]`. It opens an editor

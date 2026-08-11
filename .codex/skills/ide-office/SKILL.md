@@ -48,7 +48,8 @@ capsules, feature-check behavior, and plugin architecture rules.
 
 ## Verification
 
-Run the focused checks before handing off:
+The raw-source IDE probes below diagnose capability ownership only. They do not
+satisfy Calc CLI/TUI acceptance and must not regenerate its manual:
 
 ```bash
 bin/simple-interp src/app/ide/main.spl --feature-check --tui
@@ -57,6 +58,20 @@ SIMPLE_LIB=src bin/simple-interp test/03_system/app/ide/feature/ide_office_plugi
 simple spipe-docgen test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl --output doc/06_spec --no-index
 find doc/06_spec -name '*_spec.spl' | wc -l
 ```
+
+For Calc UI-access acceptance, use an observed pure-Simple self-hosted deployed
+runtime. The SSpec invokes `--scenario all --run-id <unique>` exactly once and
+shares only that fresh run across its visible workflow and folded error/NFR
+scenarios:
+
+```bash
+SIMPLE_BINARY="$PWD/bin/simple" bin/simple test test/03_system/app/office/feature/office_cli_tui_ui_access_spec.spl --mode=interpreter
+bin/simple spipe-docgen test/03_system/app/office/feature/office_cli_tui_ui_access_spec.spl --output doc/06_spec --no-index
+find doc/06_spec -name '*_spec.spl' | wc -l
+```
+
+Do not run Office acceptance or docgen through `bin/simple-interp`, a Rust seed,
+raw Office source, or a shared prior evidence directory.
 
 The generated manual at
 `doc/06_spec/03_system/app/ide/feature/ide_office_plugin_suite_spec.md` must
