@@ -56,9 +56,14 @@ are independent; do not sequence one behind the other.
    collision instance exists downstream. See
    `doc/08_tracking/bug/stage3_native_build_segv_generic_codegen_link_path_2026-08-06.md`
    for the full investigation. This item does **not** depend on Track A step 3.
-5. Then: And/Or codegen validation; sha256_core x8-boxing fix + FIPS regression
-   specs (**specs last** — filed first they land permanently RED); determine why
-   `sha256_simd_parity_spec` did not catch a wrong live digest.
+5. **And/Or codegen fix — LANDED (`f35ef97dc58c`)**, sabotage-verified (revert
+   the two `lower_cond_expr` call sites → spec goes RED, restore → GREEN). Caveat:
+   this is a source-content regression guard, not a runtime execution spec — no
+   self-hosted binary was available this session to exercise native/JIT codegen
+   directly, so the fix's effect at runtime is still unproven by execution.
+6. sha256_core x8-boxing fix + FIPS regression specs (**specs last** — filed
+   first they land permanently RED); determine why `sha256_simd_parity_spec` did
+   not catch a wrong live digest. In progress.
 
 **Guard duplication found and resolved (2026-08-11):** two agents independently
 built overlapping C-runtime-compiles pre-push guards
@@ -149,6 +154,18 @@ QEMU-only result is a defect, not a completion.
   files read as `??`/`M`. Compare blobs against a freshly fetched tip with
   `git rev-parse --verify` (without `--verify` it echoes the input and fakes
   drift). This misled three separate decisions.
+- **`rules.sdl` was never actually broken tonight — a stale phantom staged
+  deletion faked it.** ~10 agents independently hit `check-rules-sdl.shs`
+  ERRORing and used `--no-verify` to route around it, believing `rules.sdl`
+  was uncommitted. It was already landed at origin (`86d39fbe8d2`,
+  `a369b5578bc`), byte-identical locally and remotely. The real defect: this
+  shared worktree's git index carried a stale `git rm --cached`-style staged
+  deletion of `rules.sdl` from an earlier session, so `git status` showed it as
+  both `D` and `??` simultaneously while the file sat safely committed. Fixed
+  with `git restore --staged rules.sdl`. Lesson: a gate failure that "everyone
+  hits" is worth checking against committed refs before assuming the content is
+  really missing and reaching for `--no-verify` — `git status` in this worktree
+  is not reliable evidence of what's actually committed.
 - **Five measurement errors this session, one shape:** a query answered
   correctly, interpreted against an assumption that does not hold here (`pub` is
   not the export form; a loose `pgrep` counts probe shells; a glob that doesn't
