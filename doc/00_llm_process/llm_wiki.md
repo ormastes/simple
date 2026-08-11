@@ -409,6 +409,35 @@ production hot paths in a cached SMF library or native executable even when the
 top-level tool is launched in interpreter mode. LLM Caret's server, MCP, hook,
 bridge, and database workers are examples of this carrier pattern.
 
+## SOSIX/QEMU matrix ownership
+
+All agents testing SimpleOS filesystem execution must reuse
+`scripts/qemu/simple-qemu-settings.shs` and
+`scripts/qemu/simple-big-storage-root.shs`; do not copy QEMU argv or invent a
+private artifact root. Storage resolves in this order:
+`SIMPLE_BIG_STORAGE_ROOT`, the workspace-local config selected by
+`SIMPLE_BIG_STORAGE_CONFIG`, then `$HOME/.simple`. This host selects
+`/mnt/data/.simple`.
+
+The release matrix is exactly four actual hosts (Linux, Windows, macOS, and
+FreeBSD) by six guests (x86_32, x86_64, ARM32, ARM64, RISC-V32, and RISC-V64).
+Unix agents use `scripts/check/check-sosix-qemu-matrix.shs`; Windows agents use
+the PowerShell peer. `--all-guests --parallel`/`-AllGuests -Parallel` runs six
+isolated rows and waits for every result. Never relabel the current host.
+
+Every PASS needs boot, mount, target-side directory listing, one
+filesystem-loaded target-native program, clean commit/tree identity, exact
+argv and hashes, resolved firmware identity/mode with boot-stage correlation,
+and a run nonce literally correlated with the retained serial transcript.
+Compiler-bearing media additionally needs target-native
+`simple --version` plus nonce-bound hello compile/run artifacts. Import cross-
+host bundles only through `collect-sosix-qemu-evidence.shs`; missing hosts or
+media remain owned `blocked` rows with exact resume commands. TCG proves
+correctness only, and macOS postponement is not PASS.
+
+Canonical operator detail is
+`doc/07_guide/platform/simpleos/sosix_qemu_shared_settings.md`.
+
 ## SSpec documentization maintenance
 
 Treat `simple sspec-maintain` as the SSpec/manual peer of lint and
@@ -469,3 +498,21 @@ from timing output or a zero-stub count alone.
 - Runner/input: exact full candidate plus adjacent absolute provenance.
 - Meaning: current content/lineage and unchanged retained tool-smoke evidence.
 - Never substitute a seed, wrapper, stale path, repeated smoke, or platform evidence.
+
+## rules.sdl (LLM fraud prevention)
+
+- **Canonical meaning:** root-level registry of counts/files/lists/lanes that may grow
+  but never shrink without a reviewed, recorded decision.
+- **Implementation:** `rules.sdl`; `scripts/check/check-rules-sdl.shs` (gates, `--group
+  quick|full`, `--ref`, `--selftest`); `scripts/check/check-rules-sdl-integrity.shs`
+  (the registry may not shrink to escape the registry).
+- **Use for:** deciding whether a change may reduce test/script/lane coverage, and
+  proving it did not. Wired to pre-push (quick) and bootstrap (full).
+- **Do not substitute:** not a replacement for the four mandatory pre-push guards —
+  those prove the tree is structurally sound, none notices a tree that is intact but
+  contains fewer tests.
+- **Primary guide:** `doc/07_guide/infra/llm_fraud_prevention.md`
+- **Expert note:** baseline a gate with the gate's OWN command at a commit; a working-copy
+  census compares a different population and reads as a phantom shrink. Zero evaluated
+  gates is `ERROR`, never `PASS`. `status: planned` lanes report `SKIPPED — NOT VERIFIED`
+  and may never report PASS.

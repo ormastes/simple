@@ -1,0 +1,89 @@
+# Startup argument parser — only DECLARED arguments are ever parsed.
+#
+# The pre-main startup path (src/app/startup/host_startup.spl) exists so an executable
+# can parse a handful of flags and mmap-preload the files it needs BEFORE main runs.
+# The security-relevant half of that contract is negative: the parser accepts exactly
+# the names in `SimpleArtifactManifest.argument_schema` and nothing else, and only
+# DECLARED preloads are ever opened -- no directory scanning, no ambient argv.
+#
+# A spec that only checks "a declared flag parses" would pass just as happily on a
+# parser that accepts everything, so every example below pairs a positive case with the
+# negative one that discriminates it.
+#
+# Companion: test/02_integration/app/startup_argparse_mmap_perf_spec.spl covers the
+# latency budgets. This one covers the acceptance contract.
+#
+# @manual_section Startup
+
+use std.spipe.*
+use app.startup.host_startup.{startup_parse_file_arguments, StartupFileArguments}
+use os.kernel.loader.artifact_manifest.{ManifestArgument}
+
+fn schema_with_one_flag() -> [ManifestArgument]:
+    [ManifestArgument(
+        name: "--config",
+        value_kind: "text",
+        required: false,
+        default_value: "default.sdn"
+    )]
+
+fn value_of(parsed: StartupFileArguments, name: text) -> text:
+    var found = ""
+    for entry in parsed.values:
+        if entry.name == name:
+            found = entry.value
+    found
+
+describe "Startup declared-argument parser":
+
+    it "parses a declared argument and carries its value through":
+        step("Declare a single --config argument in the artifact schema")
+        val schema = schema_with_one_flag()
+
+        step("Parse a command line that supplies it")
+        val parsed = startup_parse_file_arguments("/app/entry.spl", ["--config", "prod.sdn"], schema)
+
+        step("Confirm the parse succeeded and the supplied value survived")
+        expect(parsed.ok).to_be(true)
+        expect(value_of(parsed, "--config")).to_equal("prod.sdn")
+
+    it "applies the declared default when the argument is absent":
+        step("Parse an empty command line against the same schema")
+        val parsed = startup_parse_file_arguments("/app/entry.spl", [], schema_with_one_flag())
+
+        step("Confirm the schema default was applied rather than an empty value")
+        expect(parsed.ok).to_be(true)
+        expect(value_of(parsed, "--config")).to_equal("default.sdn")
+
+    it "refuses to parse an argument the manifest never declared":
+        # The discriminating case: a parser that accepts everything passes the two
+        # examples above and fails this one.
+        step("Parse a command line carrying an UNDECLARED --secret flag")
+        val parsed = startup_parse_file_arguments("/app/entry.spl", ["--secret", "hunter2"], schema_with_one_flag())
+
+        step("Confirm the undeclared name produced no parsed value")
+        expect(value_of(parsed, "--secret")).to_equal("")
+
+    it "reports an error rather than a silent empty when a required argument is missing":
+        step("Declare a REQUIRED argument with no default")
+        val schema = [ManifestArgument(
+            name: "--input",
+            value_kind: "text",
+            required: true,
+            default_value: ""
+        )]
+
+        step("Parse a command line that omits it")
+        val parsed = startup_parse_file_arguments("/app/entry.spl", [], schema)
+
+        step("Confirm the parser failed closed and said why, instead of yielding an empty value")
+        expect(parsed.ok).to_be(false)
+        expect(parsed.error.len()).to_be_greater_than(0)
+
+    it "keeps an empty schema from parsing anything at all":
+        step("Parse a populated command line against an EMPTY schema")
+        val empty_schema: [ManifestArgument] = []
+        val parsed = startup_parse_file_arguments("/app/entry.spl", ["--anything", "value"], empty_schema)
+
+        step("Confirm nothing was parsed — an empty schema is not a wildcard")
+        expect(parsed.values.len()).to_equal(0)

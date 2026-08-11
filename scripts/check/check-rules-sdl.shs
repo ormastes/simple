@@ -1,0 +1,174 @@
+#!/bin/sh
+# check-rules-sdl.shs — evaluate the shrink gates declared in rules.sdl.
+#
+# Counts that represent coverage may grow freely and may never shrink. Every gate
+# reads COMMITTED content (via $REF), never the shared working copy, because a
+# working copy under concurrent sessions disagrees with what is actually pushed.
+#
+# Verdict is the LAST LINE of stdout; exit status is corroboration only:
+#   PASS — <n> gates checked, ...            exit 0   (n is always > 0)
+#   FAIL — ...                               exit 1
+#   ERROR — nothing was checked              exit 2
+# A run that evaluates zero gates is an ERROR, never a pass. Failing open by
+# checking nothing is the single most common guard defect in this repo.
+#
+# Guide: doc/07_guide/infra/llm_fraud_prevention.md
+set -u
+
+REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+RULES="$REPO_ROOT/rules.sdl"
+GROUP=quick
+REF=HEAD
+SELFTEST_ONLY=0
+
+usage() {
+    echo "usage: $0 [--group quick|full] [--ref <commit>] [--rules <file>] [--selftest]" >&2
+    exit 2
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --group) [ $# -ge 2 ] || usage; GROUP=$2; shift 2 ;;
+        --ref)   [ $# -ge 2 ] || usage; REF=$2;   shift 2 ;;
+        --rules) [ $# -ge 2 ] || usage; RULES=$2; shift 2 ;;
+        --selftest) SELFTEST_ONLY=1; shift ;;
+        -h|--help) usage ;;
+        *) echo "unknown argument: $1" >&2; usage ;;
+    esac
+done
+
+case "$GROUP" in quick|full) ;; *) echo "ERROR — nothing was checked (bad --group: $GROUP)"; exit 2 ;; esac
+
+# Parse rules.sdl into pipe-separated records: id|group|status|min|cmd
+# Split each line on the FIRST ": " only — cmd values legitimately contain colons.
+parse_rules() {
+    awk '
+        function flush() {
+            if (id != "") printf "%s|%s|%s|%s|%s\n", id, grp, status, min, cmd
+            id=""; grp="quick"; status=""; min=""; cmd=""
+        }
+        {
+            line = $0
+            sub(/^[ \t]*/, "", line)
+            if (line ~ /^- id: /)      { flush(); id  = substr(line, 7); next }
+            if (id == "") next
+            if (line ~ /^group: /)     { grp    = substr(line, 8);  next }
+            if (line ~ /^status: /)    { status = substr(line, 9);  next }
+            if (line ~ /^min: /)       { min    = substr(line, 6);  next }
+            if (line ~ /^cmd: /)       { cmd    = substr(line, 6);  next }
+        }
+        END { flush() }
+    ' "$1"
+}
+
+run_scan() {
+    rules_file=$1
+    scan_group=$2
+    scan_ref=$3
+
+    if [ ! -f "$rules_file" ]; then
+        echo "ERROR — nothing was checked (rules file not found: $rules_file)"
+        return 2
+    fi
+    if ! git -C "$REPO_ROOT" rev-parse --verify --quiet "$scan_ref^{commit}" >/dev/null 2>&1; then
+        echo "ERROR — nothing was checked (unresolvable --ref: $scan_ref)"
+        return 2
+    fi
+
+    checked=0; failed=0; skipped=0
+    records=$(parse_rules "$rules_file")
+    [ -n "$records" ] || { echo "ERROR — nothing was checked (no gates parsed from $rules_file)"; return 2; }
+
+    # A gate runs when its group matches, or when scanning the full superset.
+    echo "$records" | while IFS='|' read -r id grp status min cmd; do
+        [ -n "$id" ] || continue
+        if [ "$scan_group" = quick ] && [ "$grp" != quick ]; then continue; fi
+
+        if [ "$status" = planned ]; then
+            echo "SKIPPED — gate '$id' NOT VERIFIED (declared status: planned)"
+            echo "skip" >> "$TALLY"
+            continue
+        fi
+
+        actual=$(REF="$scan_ref" sh -c "cd '$REPO_ROOT' && $cmd" 2>/dev/null | tr -d ' \t\n')
+        case "$actual" in
+            ''|*[!0-9]*)
+                echo "FAILGATE $id: command produced no integer (got: '${actual:-<empty>}')"
+                echo "fail" >> "$TALLY"
+                continue ;;
+        esac
+        if [ "$actual" -lt "$min" ] 2>/dev/null; then
+            echo "FAILGATE $id: $actual < min $min — SHRANK by $((min - actual))"
+            echo "fail" >> "$TALLY"
+        else
+            echo "ok $id: $actual >= $min"
+            echo "ok" >> "$TALLY"
+        fi
+    done
+
+    # awk, not `grep -c ... || echo 0`: grep prints 0 AND exits 1 on no-match, so the
+    # fallback appends a second 0 and every arithmetic test downstream goes illegal.
+    checked=$(awk '/^ok$/   {n++} END {print n+0}' "$TALLY")
+    failed=$(awk  '/^fail$/ {n++} END {print n+0}' "$TALLY")
+    skipped=$(awk '/^skip$/ {n++} END {print n+0}' "$TALLY")
+
+    if [ "$failed" -gt 0 ]; then
+        echo "FAIL — $failed gate(s) shrank, $checked passed, $skipped skipped (ref $scan_ref, group $scan_group)"
+        return 1
+    fi
+    if [ "$checked" -eq 0 ]; then
+        echo "ERROR — nothing was checked ($skipped skipped, 0 evaluated)"
+        return 2
+    fi
+    echo "PASS — $checked gates checked, 0 shrank, $skipped skipped (ref $scan_ref, group $scan_group)"
+    return 0
+}
+
+# --- selftest: fatal, runs before every real scan -------------------------------
+# Calibrates that the guard reports red when a gate shrinks and ERROR when it
+# checks nothing. A guard never observed failing is not known to work.
+selftest() {
+    st_dir=$(mktemp -d) || return 1
+    rc=0
+
+    # fixture 1: a gate that trivially passes
+    printf 'rules:\n  count_gates:\n    - id: fx_pass\n      group: quick\n      cmd: echo 5\n      min: 3\n' > "$st_dir/pass.sdl"
+    TALLY=$(mktemp); out=$(run_scan "$st_dir/pass.sdl" quick HEAD); code=$?; rm -f "$TALLY"
+    case "$out" in *"PASS — 1 gates checked"*) ;; *) echo "selftest: expected PASS fixture, got: $out" >&2; rc=1 ;; esac
+    [ $code -eq 0 ] || { echo "selftest: pass fixture exit $code" >&2; rc=1; }
+
+    # fixture 2: a gate that shrank must be RED
+    printf 'rules:\n  count_gates:\n    - id: fx_shrink\n      group: quick\n      cmd: echo 2\n      min: 9\n' > "$st_dir/shrink.sdl"
+    TALLY=$(mktemp); out=$(run_scan "$st_dir/shrink.sdl" quick HEAD); code=$?; rm -f "$TALLY"
+    case "$out" in *"FAIL — 1 gate(s) shrank"*) ;; *) echo "selftest: expected FAIL fixture, got: $out" >&2; rc=1 ;; esac
+    [ $code -eq 1 ] || { echo "selftest: shrink fixture exit $code (want 1)" >&2; rc=1; }
+
+    # fixture 3: a non-integer command fails CLOSED, never passes
+    printf 'rules:\n  count_gates:\n    - id: fx_garbage\n      group: quick\n      cmd: echo not-a-number\n      min: 1\n' > "$st_dir/garbage.sdl"
+    TALLY=$(mktemp); out=$(run_scan "$st_dir/garbage.sdl" quick HEAD); code=$?; rm -f "$TALLY"
+    case "$out" in *FAIL*) ;; *) echo "selftest: expected garbage fixture to fail closed, got: $out" >&2; rc=1 ;; esac
+
+    # fixture 4: zero evaluated gates is ERROR, not PASS
+    printf 'rules:\n  count_gates:\n    - id: fx_planned\n      group: quick\n      status: planned\n      cmd: echo 1\n      min: 1\n' > "$st_dir/planned.sdl"
+    TALLY=$(mktemp); out=$(run_scan "$st_dir/planned.sdl" quick HEAD); code=$?; rm -f "$TALLY"
+    case "$out" in *"ERROR — nothing was checked"*) ;; *) echo "selftest: expected ERROR fixture, got: $out" >&2; rc=1 ;; esac
+    [ $code -eq 2 ] || { echo "selftest: planned fixture exit $code (want 2)" >&2; rc=1; }
+
+    # fixture 5: a missing rules file is ERROR, not a vacuous pass
+    TALLY=$(mktemp); out=$(run_scan "$st_dir/nonexistent.sdl" quick HEAD); code=$?; rm -f "$TALLY"
+    [ $code -eq 2 ] || { echo "selftest: missing-file fixture exit $code (want 2)" >&2; rc=1; }
+
+    rm -rf "$st_dir"
+    return $rc
+}
+
+if ! selftest; then
+    echo "ERROR — nothing was checked (selftest failed; the guard itself is broken)"
+    exit 2
+fi
+[ "$SELFTEST_ONLY" -eq 1 ] && { echo "PASS — 5 selftest fixtures checked, guard calibrated"; exit 0; }
+
+TALLY=$(mktemp) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -f "$TALLY"' EXIT
+run_scan "$RULES" "$GROUP" "$REF"
+exit $?

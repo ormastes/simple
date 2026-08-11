@@ -12,6 +12,7 @@ FILE.md files) are allowed.
 | `FILE.md` | This manifest |
 | `CLAUDE.md` | Claude Code project instructions |
 | `README.md` | Project readme |
+| `rules.sdl` | LLM fraud-prevention registry — counts/lists that may never shrink |
 | `AGENTS.md` | Agent definitions |
 | `GEMINI.md` | Gemini instructions |
 | `MCP.md` | MCP server documentation |

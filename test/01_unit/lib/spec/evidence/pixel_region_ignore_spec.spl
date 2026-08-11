@@ -1,0 +1,74 @@
+# GUI image compare — target comparison with IGNORE sections.
+#
+# Comparing a captured screen against a target is only useful if regions that are
+# legitimately non-deterministic (a clock, a blinking cursor, an anti-aliased glyph
+# run) can be masked. Before this, `pixel_region` was a declared selector kind with no
+# constructor, so a rectangle could not be named and the ignore-section case could not
+# be expressed at all.
+#
+# The rule that makes masking safe rather than a hole: an ignored region owes a REASON,
+# and an oracle where every check is an ignore asserts nothing and must fail. A fully
+# masked image comparison passing would be the purest form of the fraud this whole
+# layer exists to stop.
+#
+# @manual_section SSpec capture and compare
+
+use std.spipe.*
+use common.spec.evidence.model.{
+    selector_pixel_region,
+    pixel_region_x, pixel_region_y, pixel_region_width, pixel_region_height,
+    selector_kind_name,
+    check_ignore, check_exact_selector, oracle_spec
+}
+
+describe "GUI image compare — ignore sections":
+
+    it "names a rectangular region of the captured image":
+        step("Select a 120x40 region at offset (16, 8) — a status bar, say")
+        val region = selector_pixel_region(16, 8, 120, 40)
+
+        step("Confirm the rectangle round-trips exactly through the selector")
+        expect(pixel_region_x(region)).to_equal(16)
+        expect(pixel_region_y(region)).to_equal(8)
+        expect(pixel_region_width(region)).to_equal(120)
+        expect(pixel_region_height(region)).to_equal(40)
+
+        step("Confirm it is carried as a pixel_region, not silently downgraded")
+        expect(selector_kind_name(region.kind)).to_equal("pixel_region")
+
+    it "keeps a large region's extent intact rather than truncating it":
+        # The rect is packed two-per-field; a naive 32-bit pack corrupts a 4K capture.
+        step("Select a region spanning a 4K framebuffer")
+        val region = selector_pixel_region(0, 0, 3840, 2160)
+
+        step("Confirm both extents survive the packing")
+        expect(pixel_region_width(region)).to_equal(3840)
+        expect(pixel_region_height(region)).to_equal(2160)
+
+    it "records why a region is masked instead of dropping it silently":
+        step("Mask the clock region, stating the reason it cannot be compared")
+        val clock = selector_pixel_region(900, 4, 100, 20)
+        val ignored = check_ignore("clock", "wall-clock text differs on every capture")
+
+        step("Confirm the reason travelled with the check")
+        expect(ignored.reason.len()).to_be_greater_than(0)
+        expect(ignored.reason).to_contain("wall-clock")
+
+        step("Confirm the masked rectangle is still fully described")
+        expect(pixel_region_width(clock)).to_equal(100)
+        expect(pixel_region_height(clock)).to_equal(20)
+
+    it "pairs a masked region with a positive check over the rest of the image":
+        # An oracle needs at least one positive claim; the comparator rejects an
+        # all-ignore spec ("oracle has no positive production check"). This example
+        # documents the shape a real GUI comparison must take.
+        step("Build an oracle that masks the clock but still checks the title bar")
+        val title = selector_pixel_region(0, 0, 400, 24)
+        val checks = [
+            check_exact_selector(title, "title-bar-digest"),
+            check_ignore("clock", "wall-clock text differs on every capture")
+        ]
+        val spec = oracle_spec("gui.image.v1", checks)
+
+        step("Confirm both checks are carried — the mask did not replace the oracle")
+        expect(spec.checks.len()).to_equal(2)

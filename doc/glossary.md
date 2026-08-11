@@ -1133,3 +1133,35 @@ precedent recorded in `.claude/memory/feedback_interp_struct_name_collision_glob
 runs a pure-Simple database hot path. Interpreter-hosted applications should
 supervise this carrier instead of interpreting database operations; this does
 not mean a C SQLite SFFI wrapper.
+
+## LLM Fraud Prevention (rules.sdl)
+
+**rules.sdl** — Root-level registry (SDN syntax, `.sdl` extension) enumerating the
+counts, files, lists, and lanes the repo promises to keep. Coverage may grow freely
+and may never shrink without a reviewed, recorded decision. Enforced by
+`scripts/check/check-rules-sdl.shs` on pre-push (quick group) and on bootstrap (full
+group). Guide: `doc/07_guide/infra/llm_fraud_prevention.md`.
+
+**Shrink gate** — A gate holding a floor rather than an exact value. `actual < min`
+is a failure; `actual > min` is fine. It targets the three cheap ways an agent shows
+green: delete the failing test, shorten the list the checker walks, skip the lane.
+Distinct from a *ratchet baseline* (e.g. the test-tree divergence baseline), which
+pins an exact offender set rather than a floor.
+
+**Quick group / full group** — The two run tiers. `quick` is the pre-push default and
+stays cheap enough not to be routed around. `full` adds the heavy scenario lanes
+(QEMU boot-and-compile, FPGA RISC-V Linux, web/db accel) and is forced by
+`bin/simple build bootstrap`, so the expensive lanes are proven when a compiler is
+deployed rather than left permanently unrun.
+
+**Tombstone (gate removal)** — The `# removed: <id> <reason> <doc/...>` line that must
+accompany deleting a gate from `rules.sdl`. `check-rules-sdl-integrity.shs` treats an
+untombstoned removal as a failure, and counts a tombstoned one against the allowed
+floor. Reduction is permitted; silent reduction is not.
+
+**SKIPPED verdict** — Exit 0 with `SKIPPED — <LANE> NOT VERIFIED`, used when a lane's
+hardware is absent (the FPGA board) or the lane is `status: planned`. It does not block
+unrelated work and it makes **no claim** — a skipped lane is never counted as a passing
+one, and the group summary surfaces the count. Contrast `ERROR — nothing was checked`
+(exit 2), which is what a gate run that evaluated zero gates reports, because failing
+open by checking nothing is this repo's most common guard defect.
