@@ -585,6 +585,85 @@ Prevents the false green of a capture nobody actually checked. See
 `src/lib/common/spec/evidence/model.spl`,
 `src/lib/common/spec/evidence/evidence_comparator.spl`.
 
+## Simple Counterparts Compare Test
+The program name for the differential/oracle framework that runs the Simple
+implementation and an independent open-source counterpart over the SAME input
+at a frozen boundary, then compares their outputs under a declared relation,
+refusing to report a pass when nothing meaningful was compared. There is
+exactly one such program — see `doc/00_llm_process/feature_expert/
+counterpart_conformance/skill.md` before starting a second one. Model +
+evidence projection: `src/lib/common/spec/evidence/counterpart/`; matrix
+compare, relation engine, provider registry, converter graph, artifact store,
+and native/process/worker providers: `src/lib/nogc_sync_mut/spec/evidence/
+counterpart/`; native ABI: `src/runtime/counterpart_abi_runtime.c`. Design:
+`doc/05_design/infra/counterpart/counterpart_conformance_infrastructure_design_2026-08-09.md`;
+ADR: `doc/04_architecture/infra/adr/adr_counterpart_conformance_contract_freeze_2026-08-09.md`.
+
+## Counterpart
+An independent implementation used as an oracle for the Simple Counterparts
+Compare Test — e.g. a real upstream engine, library, or reference binary run
+out-of-process, never a hand-authored expected value and never the candidate's
+own output relabeled as expected. See `src/lib/common/spec/evidence/
+counterpart/model.spl`.
+
+## Boundary (Counterpart)
+The frozen comparison point for a Counterpart run, named
+`<domain>.<mdsoc-layer>.<stage>@<schema-version>` — e.g.
+`vulkan.shader.spirv_binary@1`. The schema version pins the shape being
+compared so a later format change is a new boundary, not a silent
+reinterpretation of an old one. See `src/lib/common/spec/evidence/
+counterpart/model.spl`.
+
+## Independence Group
+The unit that actually counts as "one reference" in a Counterpart comparison:
+two wrappers over the same upstream engine are ONE independent reference, not
+two, regardless of package or binary name. Verified from the host (e.g. all
+six Mesa Vulkan ICDs resolve to the single `mesa-vulkan-drivers` package via
+`dpkg -S`), not hand-declared — independence groups were unverified
+hand-authored labels until this was fixed. See
+`doc/00_llm_process/feature_expert/board_vulkan/skill.md` fact 4.
+
+## Relation (Counterpart)
+The declared comparison rule a Counterpart run's outputs are judged under —
+`byte_exact`, `canonical_exact`, `structural_equal`, `image_exact`,
+`cross_decode`, `round_trip`, among others. The relation, not the comparator,
+decides how strict the check is; see Conversion Loss for the rule governing
+which relations a lossy converter may sit in front of.
+
+## Execution Receipt
+The record that a Counterpart's actual reference tool was executed for a given
+run — as opposed to its output being fabricated, cached from an unrelated run,
+or silently substituted. Kept on a separate plane from the logical artifact
+and the provenance receipt; collapsing the three planes is how a GPU-claimed
+lane can actually run on CPU. See `doc/00_llm_process/feature_expert/
+counterpart_conformance/skill.md`.
+
+## GPU Gate
+The check that a Counterpart run claiming GPU execution actually dispatched to
+a GPU rather than a CPU fallback path, verified via the Execution Receipt
+rather than trusted from a config flag or provider label.
+
+## Vacuity (Counterpart)
+A Counterpart run with zero comparisons made, zero counterpart sources
+actually executed, or an empty artifact is a **failure**, never a pass — the
+same fail-closed discipline as Vacuous Oracle below, applied to the
+counterpart-comparison plane. A verdict with `executed=0` is a parse error and
+one with `timeout=1` is a harness-budget kill; neither is evidence in either
+direction. See `doc/00_llm_process/feature_expert/board_vulkan/skill.md`
+fact 7.
+
+## Conversion Loss
+No **exact** relation (`byte_exact`, `canonical_exact`, …) may traverse a
+lossy converter in the Counterpart converter graph — the rule lives in exactly
+one place, `relation_requires_exactness` + `relation_max_permitted_loss_rank`
+in `src/lib/nogc_sync_mut/spec/evidence/counterpart/`, and must not be
+re-derived elsewhere. Canonicalization for a boundary must be stated as an
+explicit, named rule (never a heuristic like reachability filtering or address
+masking) — a reachability filter that deleted `OpLabel`/`OpExtInstImport`
+let a candidate emitting no basic-block label pass a `byte_exact` SPIR-V
+comparison; the same class of bug recurred independently as an address mask
+wide enough to erase the operand under test.
+
 ## Vacuous Oracle
 An `OracleSpec` whose checks assert nothing about the system under test even though it
 reports PASS — e.g. every check is `check_ignore`, or every check is pattern-only

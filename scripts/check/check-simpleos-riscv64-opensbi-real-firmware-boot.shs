@@ -1,0 +1,89 @@
+#!/bin/sh
+# check-simpleos-riscv64-opensbi-real-firmware-boot.shs
+#
+# Board-runnable gate (lane R3) for the riscv64 half of
+# doc/08_tracking/bug/board_vulkan_cross_arch_boundary_only_x86_64_proven_2026-08-11.md.
+#
+# Proves OpenSBI runs as the REAL-FIRMWARE PROXY for riscv64 under QEMU, per
+# .claude/rules/board-runnable.md: boot via `-bios <opensbi>` ONLY — never
+# `-kernel` pass semantics, never `isa-debug-exit`. This gate boots OpenSBI
+# alone (no guest kernel payload) and checks for the OpenSBI banner on
+# serial. It does NOT prove a SimpleOS or Vulkan-relevant guest boots under
+# this firmware — see the "NOT proven" note at the end of this file and the
+# bug record above. A missing/failed boot FAILS this script; there is no
+# `-kernel` fallback path.
+#
+# Usage: sh scripts/check/check-simpleos-riscv64-opensbi-real-firmware-boot.shs
+# Env:   OPENSBI_FW_DYNAMIC   override firmware path
+#        RV64_OPENSBI_TIMEOUT override boot timeout (seconds, default 12)
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+QEMU_BIN="${QEMU_SYSTEM_RISCV64:-qemu-system-riscv64}"
+TIMEOUT_S="${RV64_OPENSBI_TIMEOUT:-12}"
+OUT_DIR="$ROOT_DIR/build/os/rv64_opensbi_realfw_probe"
+LOG="$OUT_DIR/serial.log"
+BANNER_MARKER="OpenSBI v"
+
+# Firmware discovery: prefer the repo-pinned OpenSBI v1.4 build
+# (scripts/os/build_opensbi_rv64_soc.shs), fall back to the distro qemu
+# package's fw_dynamic image. Either is a real -bios firmware image, never a
+# guest kernel.
+FW="${OPENSBI_FW_DYNAMIC:-}"
+if [ -z "$FW" ]; then
+    for candidate in \
+        "$ROOT_DIR/build/os/rv64_soc/opensbi-src/build/platform/generic/firmware/fw_dynamic.bin" \
+        /usr/share/qemu/opensbi-riscv64-generic-fw_dynamic.bin \
+        /usr/share/opensbi/lp64/generic/firmware/fw_dynamic.bin; do
+        if [ -f "$candidate" ]; then
+            FW="$candidate"
+            break
+        fi
+    done
+fi
+
+command -v "$QEMU_BIN" >/dev/null 2>&1 || {
+    echo "ERROR — nothing was checked: missing $QEMU_BIN" >&2
+    exit 2
+}
+[ -n "$FW" ] && [ -f "$FW" ] || {
+    echo "ERROR — nothing was checked: no OpenSBI fw_dynamic image found (set OPENSBI_FW_DYNAMIC)" >&2
+    exit 2
+}
+
+mkdir -p "$OUT_DIR"
+: > "$LOG"
+
+FW_SHA=$(sha256sum "$FW" | awk '{print $1}')
+QEMU_ARGS="-machine virt -cpu rv64 -m 256M -display none -no-reboot -bios $FW -serial file:$LOG"
+echo "RV64_OPENSBI_REALFW firmware=$FW sha256=$FW_SHA" | tee -a "$OUT_DIR/qemu_argv.log"
+echo "RV64_OPENSBI_REALFW argv: $QEMU_BIN $QEMU_ARGS" | tee -a "$OUT_DIR/qemu_argv.log"
+
+# Fail-closed guard: this gate must never launch with -kernel or
+# isa-debug-exit — both are QEMU boot-protocol cheats that do not exist on
+# real hardware (see .claude/rules/board-runnable.md).
+case "$QEMU_ARGS" in
+    *-kernel*|*isa-debug-exit*)
+        echo "FAIL — forbidden flag in qemu argv (this is a script bug, not an environment gap)" >&2
+        exit 1
+        ;;
+esac
+
+setsid timeout "$TIMEOUT_S" "$QEMU_BIN" -machine virt -cpu rv64 -m 256M \
+    -display none -no-reboot -bios "$FW" -serial file:"$LOG" \
+    >"$OUT_DIR/qemu_stdout.log" 2>&1 </dev/null &
+QEMU_PID=$!
+wait "$QEMU_PID" 2>/dev/null || true
+
+if grep -q "$BANNER_MARKER" "$LOG" 2>/dev/null; then
+    n_lines=$(wc -l < "$LOG")
+    echo "PASS — OpenSBI real-firmware boot verified, $n_lines serial line(s) captured (log: $LOG)"
+    echo "NOTE: this proves the OpenSBI real-firmware proxy boots on this host." \
+         "It does NOT prove a SimpleOS or Vulkan-relevant riscv64 guest boots" \
+         "under this firmware without falling back to -kernel — that remains open," \
+         "see doc/08_tracking/bug/board_vulkan_cross_arch_boundary_only_x86_64_proven_2026-08-11.md."
+    exit 0
+else
+    echo "FAIL — no OpenSBI banner found on serial within ${TIMEOUT_S}s (log: $LOG)" >&2
+    exit 1
+fi
