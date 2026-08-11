@@ -134,6 +134,14 @@ pub fn pkt4_decode_regaddr(header: i64) -> i64:
 pub fn pkt4_decode_count(header: i64) -> i64:
     header & PKT4_COUNT_MASK
 
+# Zero/empty decision: a PKT4 with `values == []` (count == 0) is LEGAL. The
+# 7-bit count field can represent 0, the format places no minimum, and a
+# zero-count register write is a harmless no-op the same way CP_NOP is a
+# harmless zero-payload PKT7 below — rejecting it would be an arbitrary
+# policy this encoder does not own. Overflow (count > PKT4_COUNT_MASK) is
+# what actually corrupts the stream, and is rejected in
+# `pkt4_header_checked` above.
+#
 # Encode a register-range write: header dword followed by `values` in
 # ascending-register order, one dword per register.
 pub fn encode_pkt4(regaddr: i64, values: [i64]) -> Result<[i64], EncodeError>:
@@ -141,6 +149,8 @@ pub fn encode_pkt4(regaddr: i64, values: [i64]) -> Result<[i64], EncodeError>:
     var out: [i64] = [header]
     for v in values:
         out.push(v)
+    if pkt4_decode_count(header) != values.len():
+        return Err(encode_error("count", "PKT4 header count (" + pkt4_decode_count(header).to_text() + ") disagrees with emitted payload length (" + values.len().to_text() + ")"))
     Ok(out)
 
 # --- PKT7 (CP command) ---
@@ -170,6 +180,8 @@ pub fn encode_pkt7(opcode: i64, payload: [i64]) -> Result<[i64], EncodeError>:
     var out: [i64] = [header]
     for v in payload:
         out.push(v)
+    if pkt7_decode_count(header) != payload.len():
+        return Err(encode_error("count", "PKT7 header count (" + pkt7_decode_count(header).to_text() + ") disagrees with emitted payload length (" + payload.len().to_text() + ")"))
     Ok(out)
 
 # --- Minimal real submission ---

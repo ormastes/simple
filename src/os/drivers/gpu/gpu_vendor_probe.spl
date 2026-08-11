@@ -5,6 +5,22 @@
 # Qualcomm/ARM, RISC-V software). Each probe returns an "unavailable"
 # descriptor by default; hardware-specific layers fill real values when
 # the device is detected.  GpuVendorRegistry aggregates all five probes.
+#
+# Honesty hardening (see doc/08_tracking/bug/
+# vulkan_icd_virtio_and_gpu_probe_report_no_real_device_enumeration_2026-08-11.md):
+# `.probe()` on every vendor here is a STUB — it never queries real hardware.
+# Availability used to be derived from `device_id > 0`, which conflates two
+# distinct facts: "no probe was ever run" and "a probe ran and found nothing".
+# It also treats device id 0 as ipso facto absent, which is not true on every
+# enumeration (0 can be a legal id). `GpuProbeState` makes the three cases
+# explicit in the type so a caller cannot read a stub as a negative answer,
+# and so a future author cannot flip five drivers "available" by editing one
+# integer field — they would have to explicitly construct `DevicePresent`.
+
+enum GpuProbeState:
+    NotProbed             # .probe() stub never queried real hardware
+    NoDevice              # a real probe ran and found nothing
+    DevicePresent(id: i64) # a real probe ran and found a device with this id
 
 # ============================================================================
 # CudaGpuProbe — NVIDIA CUDA
@@ -13,6 +29,7 @@
 class CudaGpuProbe:
     """NVIDIA CUDA GPU probe result."""
     device_id: i64
+    state: GpuProbeState
     compute_capability_major: i64
     compute_capability_minor: i64
     vram_mb: i64
@@ -22,9 +39,10 @@ class CudaGpuProbe:
 
 impl CudaGpuProbe:
     static fn probe() -> CudaGpuProbe:
-        """Return default unavailable probe."""
+        """Return the stub result: no real hardware query was performed."""
         CudaGpuProbe(
             device_id: 0,
+            state: GpuProbeState.NotProbed,
             compute_capability_major: 0,
             compute_capability_minor: 0,
             vram_mb: 0,
@@ -34,7 +52,9 @@ impl CudaGpuProbe:
         )
 
     me is_available() -> bool:
-        self.device_id > 0
+        match self.state:
+            GpuProbeState.DevicePresent(_) -> true
+            _ -> false
 
     me summary() -> text:
         if self.is_available():
@@ -54,6 +74,7 @@ impl CudaGpuProbe:
 class AmdGpuProbe:
     """AMD GPU probe result."""
     device_id: i64
+    state: GpuProbeState
     gcn_arch: text
     vram_mb: i64
     compute_units: i64
@@ -62,9 +83,10 @@ class AmdGpuProbe:
 
 impl AmdGpuProbe:
     static fn probe() -> AmdGpuProbe:
-        """Return default unavailable probe."""
+        """Return the stub result: no real hardware query was performed."""
         AmdGpuProbe(
             device_id: 0,
+            state: GpuProbeState.NotProbed,
             gcn_arch: "",
             vram_mb: 0,
             compute_units: 0,
@@ -73,7 +95,9 @@ impl AmdGpuProbe:
         )
 
     me is_available() -> bool:
-        self.device_id > 0
+        match self.state:
+            GpuProbeState.DevicePresent(_) -> true
+            _ -> false
 
     me summary() -> text:
         if self.is_available():
@@ -93,6 +117,7 @@ impl AmdGpuProbe:
 class IntelGpuProbe:
     """Intel GPU probe result."""
     device_id: i64
+    state: GpuProbeState
     gen: i64
     eu_count: i64
     vram_mb: i64
@@ -101,9 +126,10 @@ class IntelGpuProbe:
 
 impl IntelGpuProbe:
     static fn probe() -> IntelGpuProbe:
-        """Return default unavailable probe."""
+        """Return the stub result: no real hardware query was performed."""
         IntelGpuProbe(
             device_id: 0,
+            state: GpuProbeState.NotProbed,
             gen: 0,
             eu_count: 0,
             vram_mb: 0,
@@ -112,7 +138,9 @@ impl IntelGpuProbe:
         )
 
     me is_available() -> bool:
-        self.device_id > 0
+        match self.state:
+            GpuProbeState.DevicePresent(_) -> true
+            _ -> false
 
     me summary() -> text:
         if self.is_available():
@@ -132,6 +160,7 @@ impl IntelGpuProbe:
 class QualcommArmGpuProbe:
     """Qualcomm Adreno / ARM Mali GPU probe result."""
     device_id: i64
+    state: GpuProbeState
     adreno_gen: i64
     mali_gen: i64
     vram_mb: i64
@@ -141,9 +170,10 @@ class QualcommArmGpuProbe:
 
 impl QualcommArmGpuProbe:
     static fn probe() -> QualcommArmGpuProbe:
-        """Return default unavailable probe."""
+        """Return the stub result: no real hardware query was performed."""
         QualcommArmGpuProbe(
             device_id: 0,
+            state: GpuProbeState.NotProbed,
             adreno_gen: 0,
             mali_gen: 0,
             vram_mb: 0,
@@ -153,7 +183,9 @@ impl QualcommArmGpuProbe:
         )
 
     me is_available() -> bool:
-        self.device_id > 0
+        match self.state:
+            GpuProbeState.DevicePresent(_) -> true
+            _ -> false
 
     me summary() -> text:
         if self.is_available():
@@ -174,6 +206,7 @@ impl QualcommArmGpuProbe:
 class RiscvSoftGpuProbe:
     """RISC-V software GPU probe result."""
     device_id: i64
+    state: GpuProbeState
     has_rvv: bool
     vector_bits: i64
     software_vulkan_version: text
@@ -181,9 +214,10 @@ class RiscvSoftGpuProbe:
 
 impl RiscvSoftGpuProbe:
     static fn probe() -> RiscvSoftGpuProbe:
-        """Return default unavailable probe."""
+        """Return the stub result: no real hardware query was performed."""
         RiscvSoftGpuProbe(
             device_id: 0,
+            state: GpuProbeState.NotProbed,
             has_rvv: false,
             vector_bits: 0,
             software_vulkan_version: "",
@@ -191,7 +225,9 @@ impl RiscvSoftGpuProbe:
         )
 
     me is_available() -> bool:
-        self.device_id > 0
+        match self.state:
+            GpuProbeState.DevicePresent(_) -> true
+            _ -> false
 
     me summary() -> text:
         if self.is_available():

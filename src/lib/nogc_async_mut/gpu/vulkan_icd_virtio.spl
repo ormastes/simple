@@ -1,11 +1,26 @@
 """Virtio-gpu Venus ICD transport layer.
 
 Serializes Vulkan API calls into virtio-gpu Venus protocol messages and
-deserializes responses.  The dispatch structure is real; the transport layer
-uses modeled responses pending virtio-gpu kernel driver integration.
+deserializes responses.  The dispatch structure is real; there is NO real
+virtio-gpu transport wired up yet — no ring buffer, no device, no host
+renderer.
 
-When virtio transport is available, replace _venus_transport_send/recv
-with real virtio-gpu ring buffer I/O.
+FAIL-CLOSED BY DESIGN (2026-08-11): `_venus_transport_send` used to always
+fabricate `VenusCallResult(is_ok: true, handle: <local counter>,
+payload_size: 0)` regardless of whether any device existed. That reported
+success for work that never happened. It now always reports
+`VenusTransportError.unavailable` — the only honest answer, since
+`_venus_device_available` has nothing real to check yet — and issues no
+handle. See
+doc/08_tracking/bug/vulkan_icd_virtio_and_gpu_probe_report_no_real_device_enumeration_2026-08-11.md.
+
+When virtio transport is available, replace `_venus_device_available` with a
+real device probe and `_venus_transport_send`'s success path with real
+virtio-gpu ring buffer I/O. Keep the two failure shapes distinct:
+  - `unavailable`: no virtio-gpu venus device/capset present (the normal
+    case on this host and on any board today).
+  - `failed`: a device was present and the operation genuinely errored.
+Conflating them is how a real regression later reads as merely "not present".
 """
 
 # ============================================================================
@@ -17,11 +32,21 @@ class VenusTransportConfig:
     ring_size: i64
     protocol_version: i64
 
+enum VenusCallStatus:
+    Ok
+    Unavailable
+    Failed
+
 class VenusCallResult:
     is_ok: bool
     error: text
     handle: i64
     payload_size: i64
+    status: VenusCallStatus
+
+enum VenusTransportError:
+    Unavailable(text)
+    Failed(text)
 
 class VenusMessage:
     opcode: i64
@@ -46,17 +71,50 @@ var VENUS_OP_CREATE_BUFFER: i64 = 4
 var VENUS_OP_DESTROY_INSTANCE: i64 = 5
 
 # ============================================================================
-# Transport (modeled)
+# Transport
 # ============================================================================
 
-fn _venus_transport_send(msg: VenusMessage) -> VenusCallResult:
+# Real device availability check. There is no virtio-gpu venus transport
+# implementation behind this yet (no ring buffer, no VIRTIO_GPU_CMD_*
+# encode/decode, no host renderer handshake), so this is honestly always
+# false today — matching the `qemu_only`/all-stages-false posture recorded
+# for this backend in soc_profile.spl. This is the single place a future
+# real transport wires in a genuine probe.
+fn _venus_device_available() -> bool:
+    false
+
+fn _venus_transport_send(msg: VenusMessage) -> Result<VenusCallResult, VenusTransportError>:
     """Send a Venus protocol message over virtio-gpu.
 
-    Modeled: in a real implementation this writes to the virtio-gpu ring
-    buffer and waits for the host renderer response.
+    Fails closed: with no real transport wired up, this always reports
+    `VenusTransportError.Unavailable` and issues no handle. When a real
+    transport lands, this is where it writes to the virtio-gpu ring buffer
+    and waits for the host renderer response, returning `Failed` for a
+    genuine device-side error.
     """
+    if not _venus_device_available():
+        return Err(VenusTransportError.Unavailable("no-virtio-gpu-venus-device"))
     _venus_handle_ctr = _venus_handle_ctr + 1
-    VenusCallResult(is_ok: true, error: "", handle: _venus_handle_ctr, payload_size: 0)
+    Ok(VenusCallResult(
+        is_ok: true,
+        error: "",
+        handle: _venus_handle_ctr,
+        payload_size: 0,
+        status: VenusCallStatus.Ok
+    ))
+
+# Adapts a transport Result into the caller-facing VenusCallResult shape,
+# preserving the unavailable/failed distinction in both `.error` (text, for
+# existing callers) and `.status` (typed, so a caller cannot mistake
+# unavailable for success by only checking a boolean).
+fn _venus_result_from_transport(sent: Result<VenusCallResult, VenusTransportError>) -> VenusCallResult:
+    match sent:
+        Err(VenusTransportError.Unavailable(reason)):
+            VenusCallResult(is_ok: false, error: "unavailable:{reason}", handle: 0, payload_size: 0, status: VenusCallStatus.Unavailable)
+        Err(VenusTransportError.Failed(reason)):
+            VenusCallResult(is_ok: false, error: "failed:{reason}", handle: 0, payload_size: 0, status: VenusCallStatus.Failed)
+        Ok(result):
+            result
 
 # ============================================================================
 # Public API
@@ -99,12 +157,13 @@ pub fn venus_icd_create_instance() -> VenusCallResult:
     """Create a Vulkan instance via Venus protocol.
 
     Returns:
-        VenusCallResult with a new instance handle or an error.
+        VenusCallResult with a new instance handle on success, or a typed
+        unavailable/failed status — never a fabricated success.
     """
     if not _venus_connected:
-        return VenusCallResult(is_ok: false, error: "not-connected", handle: 0, payload_size: 0)
+        return VenusCallResult(is_ok: false, error: "not-connected", handle: 0, payload_size: 0, status: VenusCallStatus.Unavailable)
     val msg = VenusMessage(opcode: VENUS_OP_CREATE_INSTANCE, handle_in: 0, size_in: 0)
-    _venus_transport_send(msg)
+    _venus_result_from_transport(_venus_transport_send(msg))
 
 pub fn venus_icd_create_device(instance_handle: i64) -> VenusCallResult:
     """Create a Vulkan device on a given instance.
@@ -113,14 +172,15 @@ pub fn venus_icd_create_device(instance_handle: i64) -> VenusCallResult:
         instance_handle: handle from venus_icd_create_instance
 
     Returns:
-        VenusCallResult with a new device handle or an error.
+        VenusCallResult with a new device handle on success, or a typed
+        unavailable/failed status — never a fabricated success.
     """
     if not _venus_connected:
-        return VenusCallResult(is_ok: false, error: "not-connected", handle: 0, payload_size: 0)
+        return VenusCallResult(is_ok: false, error: "not-connected", handle: 0, payload_size: 0, status: VenusCallStatus.Unavailable)
     if instance_handle <= 0:
-        return VenusCallResult(is_ok: false, error: "invalid-instance", handle: 0, payload_size: 0)
+        return VenusCallResult(is_ok: false, error: "invalid-instance", handle: 0, payload_size: 0, status: VenusCallStatus.Failed)
     val msg = VenusMessage(opcode: VENUS_OP_CREATE_DEVICE, handle_in: instance_handle, size_in: 0)
-    _venus_transport_send(msg)
+    _venus_result_from_transport(_venus_transport_send(msg))
 
 # @tag(device_handle=device_handle, size=step_count)
 pub fn venus_icd_allocate_memory(device_handle: i64, size: i64) -> VenusCallResult:
@@ -131,14 +191,15 @@ pub fn venus_icd_allocate_memory(device_handle: i64, size: i64) -> VenusCallResu
         size:          allocation size in bytes
 
     Returns:
-        VenusCallResult with a memory handle or an error.
+        VenusCallResult with a memory handle on success, or a typed
+        unavailable/failed status — never a fabricated success.
     """
     if not _venus_connected:
-        return VenusCallResult(is_ok: false, error: "not-connected", handle: 0, payload_size: 0)
+        return VenusCallResult(is_ok: false, error: "not-connected", handle: 0, payload_size: 0, status: VenusCallStatus.Unavailable)
     if device_handle <= 0:
-        return VenusCallResult(is_ok: false, error: "invalid-device", handle: 0, payload_size: 0)
+        return VenusCallResult(is_ok: false, error: "invalid-device", handle: 0, payload_size: 0, status: VenusCallStatus.Failed)
     val msg = VenusMessage(opcode: VENUS_OP_ALLOCATE_MEMORY, handle_in: device_handle, size_in: size)
-    _venus_transport_send(msg)
+    _venus_result_from_transport(_venus_transport_send(msg))
 
 # @tag(device_handle=device_handle, size=step_count)
 pub fn venus_icd_create_buffer(device_handle: i64, size: i64) -> VenusCallResult:
@@ -149,14 +210,15 @@ pub fn venus_icd_create_buffer(device_handle: i64, size: i64) -> VenusCallResult
         size:          buffer size in bytes
 
     Returns:
-        VenusCallResult with a buffer handle or an error.
+        VenusCallResult with a buffer handle on success, or a typed
+        unavailable/failed status — never a fabricated success.
     """
     if not _venus_connected:
-        return VenusCallResult(is_ok: false, error: "not-connected", handle: 0, payload_size: 0)
+        return VenusCallResult(is_ok: false, error: "not-connected", handle: 0, payload_size: 0, status: VenusCallStatus.Unavailable)
     if device_handle <= 0:
-        return VenusCallResult(is_ok: false, error: "invalid-device", handle: 0, payload_size: 0)
+        return VenusCallResult(is_ok: false, error: "invalid-device", handle: 0, payload_size: 0, status: VenusCallStatus.Failed)
     val msg = VenusMessage(opcode: VENUS_OP_CREATE_BUFFER, handle_in: device_handle, size_in: size)
-    _venus_transport_send(msg)
+    _venus_result_from_transport(_venus_transport_send(msg))
 
 pub fn venus_icd_destroy_instance(instance_handle: i64):
     """Destroy a Vulkan instance via Venus protocol.
