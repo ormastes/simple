@@ -211,6 +211,7 @@ Current focused executable specs:
 | Executable spec | Generated manual | Required proof |
 |---|---|---|
 | `test/03_system/app/llm_caret/feature/llm_caret_cli_hardening_spec.spl` | `doc/06_spec/03_system/app/llm_caret/feature/llm_caret_cli_hardening_spec.md` | Three scenarios: four source-process cases plus cached-wrapper selection and invalid-override rejection; current runner execution remains blocked |
+| `test/03_system/app/llm_caret/feature/llm_caret_native_closure_spec.spl` | `doc/06_spec/03_system/app/llm_caret/feature/llm_caret_native_closure_spec.md` | Release-gate contract: a self-hosted runtime plus supplied simple-core archive must build Caret `main.spl` with entry closure and no stub fallback, retaining build/provenance/ABI evidence |
 | `test/03_system/app/llm_caret/feature/llm_caret_cli_cached_spec.spl` | `doc/06_spec/03_system/app/llm_caret/feature/llm_caret_cli_cached_spec.md` | Three fail-closed cached-artifact scenarios: provenance prerequisite, offline Claude response, and redacted provider-error/unknown-option evidence, retaining command, stdout, stderr, exit, and provenance artifacts |
 | `test/03_system/app/llm_caret/feature/llm_caret_cli_hidden_cached_spec.spl` | `doc/06_spec/03_system/app/llm_caret/feature/llm_caret_cli_hidden_cached_spec.md` | Five fail-closed cached plain-CLI scenarios: provenance prerequisite; canonical/alias hidden commands under default, enabled, and explicit-false states; plus canonical/alias disabled-command rejection. Each retains scrubbed command, stdout, stderr, exit, and provenance artifacts. |
 | `test/03_system/app/llm_caret/feature/llm_caret_claude_cli_advanced_spec.spl` | `doc/06_spec/03_system/app/llm_caret/feature/llm_caret_claude_cli_advanced_spec.md` | Direct production `claude_cli_send` proof for resume, maximum turns, JSON schema, ordered `Read`/`Write` allowed tools, fixture extra argument, and deterministic structured response; no cached-wrapper claim |
@@ -236,6 +237,13 @@ externs. The TUI fixture must use the repository UI access protocol when the
 surface exposes it; screenshot-only evidence is insufficient.
 
 ## Scenario and Evidence Policy
+
+Native Caret closure qualification is mandatory before cached CLI or PTY
+execution claims. Run `sh scripts/check/check-llm-caret-native-closure.shs
+--check` with a self-hosted runtime and supplied simple-core archive; missing
+inputs and failed closure builds are `failure_class=release_gate`, never
+zero-execution evidence. The retained build, provenance, and `nm -u` artifacts
+are under `build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_native_closure/`.
 
 - CLI manuals display the three frozen CLI steps and a compact `exec`/`text`
   capture; setup and parsing details are folded.
