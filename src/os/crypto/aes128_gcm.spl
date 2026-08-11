@@ -8,6 +8,7 @@
 # Reference: NIST SP 800-38D (GCM)
 
 use os.crypto.aes128_tables.*
+use os.crypto.gcm_gf128.{gcm_gf128_mul, gcm_ghash_block, gcm_pad_to_16, gcm_ghash}
 
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 extern fn rt_array_new_with_cap(cap: i64) -> [u8]
@@ -209,61 +210,14 @@ fn aes128_encrypt_block(plaintext: [u8], round_keys: [u8]) -> [u8]:
 
 # ============================================================================
 # GF(2^128) Multiplication for GHASH
+#
+# Shared with aes256_gcm.spl — see gcm_gf128.spl (the bodies here were
+# byte-for-byte duplicated between the two files).
 # ============================================================================
 
 fn gf128_mul(x: [u8], y: [u8]) -> [u8]:
-    """Multiply two 128-bit elements in GF(2^128).
-
-    Uses the polynomial x^128 + x^7 + x^2 + x + 1 (R = 0xE1000000...).
-    Bit-by-bit multiplication with reduction.
-
-    Args:
-        x: 16-byte element.
-        y: 16-byte element.
-
-    Returns: 16-byte product.
-    """
-    var z: [u8] = rt_array_new_with_cap(16)
-    var i: u64 = 0
-    while i < 16:
-        z.push(0x00)
-        i = i + 1
-
-    var v: [u8] = rt_array_new_with_cap(16)
-    i = 0
-    while i < 16:
-        v.push(_u8_at(y, i))
-        i = i + 1
-
-    i = 0
-    while i < 128:
-        val byte_idx = i / 8
-        val bit_idx = 7 - (i % 8)
-
-        if ((_u8_at(x, byte_idx) >> bit_idx) & 0x01) != 0:
-            var z_next: [u8] = rt_array_new_with_cap(16)
-            var j: u64 = 0
-            while j < 16:
-                z_next.push(_u8_at(z, j) ^ _u8_at(v, j))
-                j = j + 1
-            z = z_next
-
-        val lsb = _u8_at(v, 15) & 0x01
-        var v_next: [u8] = rt_array_new_with_cap(16)
-        var first = (_u8_at(v, 0).to_u32() >> 1).to_u8()
-        if lsb != 0:
-            first = first ^ 0xE1
-        v_next.push(first)
-        var j: u64 = 1
-        while j < 16:
-            val cur = _u8_at(v, j).to_u32()
-            val prev = _u8_at(v, j - 1).to_u32()
-            v_next.push((((cur >> 1) | ((prev & 0x01) << 7)) & 0xFF).to_u8())
-            j = j + 1
-        v = v_next
-        i = i + 1
-
-    z
+    """Multiply two 128-bit elements in GF(2^128). See gcm_gf128.gcm_gf128_mul."""
+    gcm_gf128_mul(x, y)
 
 # ============================================================================
 # GHASH
@@ -271,27 +225,11 @@ fn gf128_mul(x: [u8], y: [u8]) -> [u8]:
 
 fn _aes128_gcm_ghash_block(h: [u8], y: [u8], x_block: [u8]) -> [u8]:
     """Process one 16-byte block for GHASH: Y_i = (Y_{i-1} XOR X_i) * H."""
-    var xored: [u8] = rt_array_new_with_cap(16)
-    var i: u64 = 0
-    while i < 16:
-        xored.push(_u8_at(y, i) ^ _u8_at(x_block, i))
-        i = i + 1
-    gf128_mul(xored, h)
+    gcm_ghash_block(h, y, x_block)
 
 fn _aes128_gcm_pad_to_16(data: [u8]) -> [u8]:
     """Pad data to a multiple of 16 bytes with zeros."""
-    val padded_len = if (data.len() % 16) == 0:
-        data.len()
-    else:
-        ((data.len() / 16) + 1) * 16
-    var result: [u8] = rt_array_new_with_cap(padded_len.to_i64())
-    var i: u64 = 0
-    while i < data.len():
-        result.push(_u8_at(data, i))
-        i = i + 1
-    while (result.len() % 16) != 0:
-        result.push(0x00)
-    result
+    gcm_pad_to_16(data)
 
 fn _a128gcm_append_bytes(a: [u8], b: [u8]) -> [u8]:
     """Append two byte arrays without relying on array concatenation."""
@@ -307,72 +245,8 @@ fn _a128gcm_append_bytes(a: [u8], b: [u8]) -> [u8]:
     out
 
 fn ghash(h: [u8], aad: [u8], ciphertext: [u8]) -> [u8]:
-    """Compute GHASH for GCM.
-
-    GHASH_H(A, C) processes: pad(A) || pad(C) || len(A) || len(C)
-
-    Args:
-        h: 16-byte hash subkey (AES_K(0^128)).
-        aad: Additional authenticated data.
-        ciphertext: Ciphertext bytes.
-
-    Returns: 16-byte GHASH tag.
-    """
-    # Initialize Y = 0
-    var y: [u8] = rt_array_new_with_cap(16)
-    var i: u64 = 0
-    while i < 16:
-        y.push(0x00)
-        i = i + 1
-
-    # Process padded AAD blocks
-    val padded_aad = _aes128_gcm_pad_to_16(aad)
-    i = 0
-    while i < padded_aad.len():
-        var block: [u8] = rt_array_new_with_cap(16)
-        var j: u64 = 0
-        while j < 16:
-            block.push(_u8_at(padded_aad, i + j))
-            j = j + 1
-        y = _aes128_gcm_ghash_block(h, y, block)
-        i = i + 16
-
-    # Process padded ciphertext blocks
-    val padded_ct = _aes128_gcm_pad_to_16(ciphertext)
-    i = 0
-    while i < padded_ct.len():
-        var block: [u8] = rt_array_new_with_cap(16)
-        var j: u64 = 0
-        while j < 16:
-            block.push(_u8_at(padded_ct, i + j))
-            j = j + 1
-        y = _aes128_gcm_ghash_block(h, y, block)
-        i = i + 16
-
-    # Final block: len(A) || len(C) in bits, each as 64-bit big-endian
-    val aad_bits: u64 = aad.len() * 8
-    val ct_bits: u64 = ciphertext.len() * 8
-
-    var len_block: [u8] = rt_array_new_with_cap(16)
-    len_block.push(((aad_bits >> 56) & 0xFF).to_u8())
-    len_block.push(((aad_bits >> 48) & 0xFF).to_u8())
-    len_block.push(((aad_bits >> 40) & 0xFF).to_u8())
-    len_block.push(((aad_bits >> 32) & 0xFF).to_u8())
-    len_block.push(((aad_bits >> 24) & 0xFF).to_u8())
-    len_block.push(((aad_bits >> 16) & 0xFF).to_u8())
-    len_block.push(((aad_bits >> 8) & 0xFF).to_u8())
-    len_block.push((aad_bits & 0xFF).to_u8())
-    len_block.push(((ct_bits >> 56) & 0xFF).to_u8())
-    len_block.push(((ct_bits >> 48) & 0xFF).to_u8())
-    len_block.push(((ct_bits >> 40) & 0xFF).to_u8())
-    len_block.push(((ct_bits >> 32) & 0xFF).to_u8())
-    len_block.push(((ct_bits >> 24) & 0xFF).to_u8())
-    len_block.push(((ct_bits >> 16) & 0xFF).to_u8())
-    len_block.push(((ct_bits >> 8) & 0xFF).to_u8())
-    len_block.push((ct_bits & 0xFF).to_u8())
-
-    y = _aes128_gcm_ghash_block(h, y, len_block)
-    y
+    """Compute GHASH for GCM. See gcm_gf128.gcm_ghash."""
+    gcm_ghash(h, aad, ciphertext)
 
 # ============================================================================
 # GCTR — AES-CTR with Incrementing Counter
