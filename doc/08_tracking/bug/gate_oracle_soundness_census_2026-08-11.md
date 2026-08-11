@@ -1,3 +1,13 @@
+**2026-08-11 (2nd session) addendum:** also landed the working-copy-conflict
+tripwire filed in
+`doc/08_tracking/bug/conflict_markers_reported_at_origin_were_working_copy_only_2026-08-11.md`
+— `scripts/check/check-no-conflict-markers-push.shs` now prints
+`CHERRY_PICK_HEAD`/`MERGE_HEAD` presence and the `git ls-files -u` unmerged
+count on its FAIL path, so a human cannot misattribute a working-copy-only
+stalled cherry-pick's conflict-marker text to the committed SHA the guard
+names. Unrelated to the exit-code-only oracle work below but requested in
+the same pass.
+
 # Gate Oracle Soundness Census — 2026-08-11
 
 Status: FIRST-PASS TRIAGE (static analysis only, not re-verified line-by-line
@@ -298,6 +308,41 @@ this as a wording fix, not evidence that the leaf gates need a new oracle.
      `check-no-jit-module-drop.shs`, `check-simpleos-usb-xhci-qemu.shs` were
      read in full and are EXECUTING, not exit-code-only); the rest were not
      re-read this session and remain open work.
+
+   **2026-08-11 follow-up (2nd session) — 3 more of the 12 read in full,
+   all ALREADY SOUND, no fix owed:**
+   - `check-rocm-engine2d-font-readback.shs` — the census's own note flagged
+     line 80 (the `native-build` exit check) as "leaning EXIT-CODE-ONLY", but
+     that line is only the build step. Lines 180-203 parse the harness's own
+     stdout (`value_of` against `HARNESS_OUT`) and hard-assert on
+     `status=pass`, `backend_name=rocm`, `readback_source=device_readback`,
+     `pixel_count=3840`, `mismatch_count=0`, a device/CPU checksum match, and
+     (mock vs real-amd) the exact `device_name` — this is STDOUT-ORACLE, not
+     exit-code-only. The census's "leaning" hedge on line 80 alone was
+     misleading without reading past it.
+   - `check-rv32-nvme-nand-recovery.shs` — `check_markers()` (lines 17-38)
+     greps a GHDL/JTAG simulation log for 10 named markers, requires each to
+     appear EXACTLY once and IN ORDER, and the built-in `--self-test` mode
+     (lines 40-72) proves the check rejects both an incomplete transcript
+     (missing `NAND RECOVERY PASS`) and a duplicated one — already EXECUTING
+     with its own red/green self-proof, not exit-code-only.
+   - `check-simpleos-virtio-snd-qemu.shs` — after QEMU boot, the script greps
+     the guest serial log for 8+ distinct receipts (driver_ok, keyboard/
+     pointer input events with a `order=monotonic` ordering constraint,
+     non-silent audio playback frame count, an audio-capture record whose
+     session/generation/frame-count/sample-count/hash fields are all
+     range-checked, a `bounded=1` flag, and a clean-shutdown receipt) before
+     ever looking at the QEMU process exit code — already EXECUTING, not
+     exit-code-only.
+
+   These 3 gates are removed from "open work" in the paragraph above;
+   9 of the original 14 gates in this Tier-2 list are now confirmed read
+   (2 fixed, 7 confirmed already-sound), 5 remain unread
+   (`check-nvme-rv32-minimal-live.shs`,
+   `build-simpleos-arm64-desktop-engine2d-attested.shs`,
+   `build-macos-gpu-2d-live-native.shs`,
+   `build-macos-full-cli-gui-provenance.shs`,
+   `check-simpleos-arm64-unified-live.shs`).
 3. **UNCERTAIN gates** — the 9 named ones are now resolved (see "UNCERTAIN —
    RESOLVED" above; none were EXIT-CODE-ONLY). The "~17" figure was never
    fully enumerated; re-run the full methodology if the remainder need
