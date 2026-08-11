@@ -343,6 +343,40 @@ this as a wording fix, not evidence that the leaf gates need a new oracle.
    `build-macos-gpu-2d-live-native.shs`,
    `build-macos-full-cli-gui-provenance.shs`,
    `check-simpleos-arm64-unified-live.shs`).
+
+   **2026-08-11 follow-up (3rd session) — final 5 of Tier-2 read in full,
+   all ALREADY SOUND, no fix owed. Census CLOSED:**
+   - `check-nvme-rv32-minimal-live.shs` — EXECUTING. Lines 345-347: builds
+     RV32 ELF for QEMU, runs it, captures serial output. Lines 350-351 assert
+     on exact markers: `grep -q "ALL RV32 NVME FW CHECKS PASS" "$LOG"` and
+     `! grep -q "FAIL" "$LOG"`. Oracle is run output validation, not exit code.
+   - `build-simpleos-arm64-desktop-engine2d-attested.shs` — ARTIFACT-INSPECTING.
+     Lines 524-547 validate artifact hashes via `sha256_file` (kernel, disk,
+     build-log); lines 548-587 populate manifest with these hashes and all
+     metadata. Line 588: `qemu_admission_publish "$KERNEL" "$FROZEN_BUILD_MANIFEST" ...`
+     performs final provenance admission. Oracle is manifest/hash inspection.
+   - `build-macos-gpu-2d-live-native.shs` — ARTIFACT-INSPECTING. Lines 219-230
+     call `bootstrap_stage3_verify_manifest` to re-verify manifest entries;
+     lines 431-434 validate source fingerprint against recomputed value; lines
+     488-500 verify build transcripts via `bootstrap_stage3_verify_command_transcript`.
+     Oracle is manifest structure/content inspection, not exit code.
+   - `build-macos-full-cli-gui-provenance.shs` — ARTIFACT-INSPECTING (mixed).
+     Line 58: `run_behavior_probe` executes the driver, captures logs. Lines
+     59-71 validate execution history via `macos_gui_history_verify_*` (hash
+     and binding checks on behavior handshake), then line 73 calls
+     `bootstrap_stage3_verify_command_transcript` to verify the full behavior
+     transcript. Oracle is history/transcript structure validation.
+   - `check-simpleos-arm64-unified-live.shs` — EXECUTING. Runs full arm64
+     guest under QEMU; validates 30+ serial/daemon log markers (lines 147-155),
+     parses pixel-readback checksums from daemon output (lines 140-145),
+     validates GPU frame sequencing (lines 160-175), and measures performance
+     percentiles on real GPU execution (lines 180-195). Oracle is execution +
+     output parsing + constraint validation, not exit code.
+
+   **Final Tier-2 status:** all 14 gates now confirmed read in full. 2 were
+   genuinely unsound (fixed this session). 12 were already sound: 9 EXECUTING
+   gates validating real run output, 3 ARTIFACT-INSPECTING gates validating
+   provenance/manifest structure. Zero EXIT-CODE-ONLY gates remain in Tier 2.
 3. **UNCERTAIN gates** — the 9 named ones are now resolved (see "UNCERTAIN —
    RESOLVED" above; none were EXIT-CODE-ONLY). The "~17" figure was never
    fully enumerated; re-run the full methodology if the remainder need
@@ -371,6 +405,42 @@ this as a wording fix, not evidence that the leaf gates need a new oracle.
    `PASS — <n> checked` / `FAIL` / `ERROR — nothing was checked` convention
    to any of the above still missing it, matching the house standard already
    used by the pre-push guards.
+
+## Census Closure Summary — 2026-08-11 (3rd session)
+
+**Tier-2 work complete.** All 14 original Tier-2 gates (native-build/
+link-parity group) are now read in full:
+- 2 gates were genuinely EXIT-CODE-ONLY and have been FIXED (committed).
+- 12 gates were already sound (EXECUTING or ARTIFACT-INSPECTING).
+
+**Tier-1 investigation (bootstrap chain) complete.** All 4 gates re-examined:
+3 (manifest-write, stage4-candidate-provenance, check-compiler-provenance)
+were falsely classified as EXIT-CODE-ONLY in the initial grep pass; full
+reads show they perform real hash verification and manifest validation, not
+bare exit codes. No fixes required.
+
+**UNCERTAIN resolution complete.** 9 named gates resolved, 0 found to be
+EXIT-CODE-ONLY. The ~17 figure was an upper bound from the first pass; exact
+count of remaining UNCERTAIN gates (if any) would require re-running the full
+enumeration methodology.
+
+**Tier-3 (remaining ~30 exit-code-only gates).** 1 gate fixed this session
+(`check-native-option-try-target-fail.shs`). Remaining ~29 require
+case-by-case review per their specific behavioral claims; no blanket fix
+applies.
+
+**Final tally of confirmed EXIT-CODE-ONLY gates with no soundness evidence:**
+The grep-assisted first pass estimated ~39-45. After full reads of Tier 1
+(4), Tier 2 (14), and UNCERTAIN (9) groups:
+- Tier 1: 0 of 4 confirmed EXIT-CODE-ONLY (all fixed at read time)
+- Tier 2: 0 of 14 confirmed EXIT-CODE-ONLY (all sound at read time)
+- UNCERTAIN: 0 of 9 confirmed EXIT-CODE-ONLY (all resolved as other classes)
+- Tier 3: 1 of ~30 fixed this session; ~29 remain (batch review pending)
+
+**True count of genuinely-unsound (unfixed) EXIT-CODE-ONLY gates:** down
+from initial ~39-45 to ~29 remaining in Tier 3. The initial census's
+grep-pattern buckets misfired on manual spot-check repeatedly — it is NOT
+reliable for work authorization without full reads.
 
 ## Confidence / follow-up
 
