@@ -1,0 +1,150 @@
+# Blink render lane — HTML text straight through to a pixel buffer.
+#
+# This is blink's PRODUCTION-SHAPED entry point. Its signature is deliberately
+# byte-for-byte the same as the live lane's
+# `gc_async_mut.gpu.browser_engine.browser_renderer.render_html_to_pixel_array`:
+#
+#     (html: text, width: i32, height: i32) -> [u32]
+#
+# so a consumer can swap one for the other behind a flag without reshaping any
+# call site. The flag itself lives in `app/browser/render_lane.spl`; this module
+# holds no policy and reads no configuration — it is one lane, not a chooser.
+#
+# The pipeline it composes already existed and was individually proven; what did
+# not exist was a single call that runs it from a raw HTML string:
+#
+#   html text
+#     -> tokenize_html                     (blink.html_parser.tokenizer)
+#     -> build_html_tree      -> DomTree   (blink.html_parser.tree_builder)
+#     -> <style> text harvested from that DomTree
+#     -> tokenize_css -> parse_css -> CssStyleSheet   (blink.css_parser)
+#     -> build_styled_layout  -> StyledLayout         (blink.layout.style_bridge)
+#     -> paint_chunks_from_styled_layout -> PaintChunkRects (blink.paint.style_paint)
+#     -> paint_rect per rect  -> [u32]     (common.ui.render_opt.paint_chunk_rasterizer)
+#
+# Two deliberate composition choices, both stated rather than silently assumed:
+#
+#   1. `paint_rect` is called directly instead of `paint_chunk_rasterizer_run`.
+#      That function's extra machinery (PropertyTrees, PaintChunks, RenderRevisions)
+#      exists to SKIP chunks that are unchanged since the previous frame. This
+#      entry point renders one isolated frame from a string and has no previous
+#      frame, so every chunk is dirty by definition and the skip accounting would
+#      compute nothing. `render_lane_pixels_spec.spl` already covers the
+#      damage-tracked path; nothing here weakens it.
+#
+#   2. The buffer starts as opaque white, not transparent black.
+#      `ChunkRasterBuffer.create` zero-fills, which is ARGB 0x00000000. The live
+#      lane hands back a white page and its consumers count "painted" pixels as
+#      those differing from 0xFFFFFFFF (see
+#      `app/browser/render_adapter.spl:browser_engine_painted_pixel_count`). A
+#      transparent-black start would make every untouched pixel read as painted,
+#      inverting that count. So the page is primed white first, exactly as a
+#      browser primes its canvas to the canvas background.
+#
+# KNOWN DIVERGENCES from the live lane, deliberately NOT hidden. These are the
+# exit criteria for making blink the default, and are asserted rather than
+# papered over in
+# `test/01_unit/app/browser/browser_render_lane_spec.spl`:
+#
+#   - COLOUR: NO LONGER A DIVERGENCE. The wiring plan recorded blink as having
+#     ~9 named colours and no `rgb()`/`hsl()`/`#RRGGBBAA`. That gap was closed
+#     by a sibling lane delegating `blink/style/cascade.spl` to
+#     `common.color.css.parse_css_color` (the CSS Level 4 named table, all hex
+#     forms, `rgb()`/`rgba()`, `hsl()`/`hsla()`). Measured through this entry
+#     point: `red`, `rgb(255, 0, 0)`, `hsl(0, 100%, 50%)` and `#ff0000ff` all
+#     paint the identical pixels, and `tomato` resolves rather than falling
+#     back. Asserted, not assumed, so a regression is caught.
+#   - NO TEXT RENDERING. `paint_chunks_from_styled_layout` emits one background
+#     rect per box and no glyphs at all. Any consumer that needs readable text
+#     pixels is blocked on this.
+#   - NO BORDERS, no box-shadow, no transforms, no gradients.
+#   - INLINE `style=` ATTRIBUTES ARE NOT APPLIED. `blink.css_parser` can parse
+#     them (`parse_inline_style`), but `blink.style.cascade.resolve_style`
+#     consults only the stylesheet, so nothing feeds them in.
+#   - ONLY `<style>` ELEMENT CSS IS SEEN. No `<link rel=stylesheet>`, no author
+#     stylesheet beyond the document, and no user-agent default stylesheet — so
+#     an unstyled document lays out as zero-sized boxes and renders blank white.
+
+use std.blink.dom.node.{DomTree, DomNode, NodeType}
+use std.blink.html_parser.tokenizer.{tokenize_html}
+use std.blink.html_parser.tree_builder.{build_html_tree}
+use std.blink.css_parser.tokenizer.{tokenize_css}
+use std.blink.css_parser.parser.{parse_css, CssStyleSheet}
+use std.blink.layout.style_bridge.{build_styled_layout}
+use std.blink.paint.style_paint.{paint_chunks_from_styled_layout}
+use std.common.ui.render_opt.paint_chunk_rasterizer.{ChunkRasterBuffer, paint_rect}
+use std.skia.entity.color.{sk_color_argb}
+
+# Opaque white — the primed page background. Matches the live lane's
+# 0xFFFFFFFF "nothing painted here" convention that
+# `browser_engine_painted_pixel_count` tests against.
+pub fn blink_lane_page_background() -> i64:
+    """ARGB value the blink lane primes its canvas to: opaque white."""
+    sk_color_argb(255, 255, 255, 255)
+
+# Concatenate the text content of every `<style>` element in the document, in
+# document order. A linear scan over the arena is enough: `DomTree.nodes` is a
+# flat array and document order IS arena order for a tree the tree builder
+# produced. Returns "" when the document has no <style>, which yields an empty
+# stylesheet and therefore an all-background render — stated in the header as a
+# known divergence, not a silent blank.
+pub fn blink_lane_document_css(tree: DomTree) -> text:
+    """Harvest the CSS source of every `<style>` element, in document order."""
+    var css = ""
+    var i = 0
+    while i < tree.nodes.len():
+        val node = tree.nodes[i as i32]
+        if node.node_type == NodeType.Element and node.tag_name == "style":
+            var cid = node.first_child
+            while cid >= 0:
+                match tree.get_node(cid):
+                    Some(child):
+                        if child.node_type == NodeType.Text:
+                            css = css + child.text_content
+                        cid = child.next_sibling
+                    None:
+                        cid = -1
+        i = i + 1
+    css
+
+pub fn blink_lane_stylesheet(tree: DomTree) -> CssStyleSheet:
+    """Parse the document's own `<style>` CSS into a blink stylesheet."""
+    parse_css(tokenize_css(blink_lane_document_css(tree)))
+
+# The lane entry point. Signature-identical to the live lane's
+# `render_html_to_pixel_array` so the two are interchangeable behind a flag.
+pub fn blink_render_html_to_pixel_array(html: text, width: i32, height: i32) -> [u32]:
+    """Render `html` through blink's parse -> cascade -> layout -> paint lane
+    into a `width` x `height` ARGB pixel buffer."""
+    val w = width.to_i64()
+    val h = height.to_i64()
+    var buf = ChunkRasterBuffer.create(w, h)
+
+    # Prime the whole canvas to the page background before any box paints, so
+    # an untouched pixel reads as "unpainted white" and not as transparent black.
+    paint_rect(buf, 0, 0, w, h, blink_lane_page_background())
+
+    val tree = build_html_tree(tokenize_html(html))
+    val sheet = blink_lane_stylesheet(tree)
+    val layout = build_styled_layout(tree, sheet, w.to_f64(), h.to_f64())
+    val rects = paint_chunks_from_styled_layout(layout)
+
+    # Document order == paint order for this flat block-flow list, so a later
+    # rect legitimately overpaints an earlier one. Fully transparent rects
+    # (alpha 0, blink's `background-color: transparent` and its default) are
+    # skipped: `paint_rect` is a STORE, not a blend, so painting one would
+    # erase the page background underneath it with transparent black rather
+    # than leaving it showing through.
+    var k: i64 = 0
+    while k < rects.rect_count:
+        val argb = rects.colour[k]
+        val alpha = (argb >> 24) & 0xFF
+        if alpha != 0:
+            paint_rect(buf, rects.rect_x[k], rects.rect_y[k],
+                       rects.rect_w[k], rects.rect_h[k], argb)
+        k = k + 1
+
+    buf.pixels
+
+export blink_render_html_to_pixel_array
+export blink_lane_page_background, blink_lane_document_css, blink_lane_stylesheet

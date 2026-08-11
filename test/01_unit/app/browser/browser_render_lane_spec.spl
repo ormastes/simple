@@ -1,0 +1,200 @@
+# @cover src/app/browser/render_lane.spl 90%
+# @cover src/lib/blink/lane/html_pixels.spl 85%
+# @req REQ-BROWSER-RENDER-LANE-001
+# @req REQ-BROWSER-RENDER-LANE-002
+# @req REQ-BROWSER-RENDER-LANE-003
+"""
+# Browser Render Lane: Choosing An Engine By Flag
+
+**Category:** Browser / Blink
+**Status:** Active
+
+## Overview
+
+I maintain the Simple Browser. Two rendering engines exist in this repo: the
+live one that ships today, and the blink stack, which is better factored but
+still a functional subset. I need to be able to try blink in a real production
+call path without betting the product on it — and I need to be able to change
+my mind in one line if it goes wrong.
+
+So the browser now renders through an adapter,
+`app.browser.render_lane`, that picks a lane by flag. Both lanes expose the
+same `(html, width, height) -> [u32]` signature, so choosing between them is a
+dispatch, not a fork in the calling code.
+
+**The flag defaults to the live lane, and these examples hold it there.**
+blink is not ready to be the default, and I would rather prove exactly where it
+falls short than discover it in a screenshot. So this file does three things:
+
+1. pins the default to the live lane, so wiring blink in changes nothing yet;
+2. proves BOTH lanes really produce pixels through the adapter;
+3. asserts blink's remaining gaps *as behaviour*, so the day one closes, the
+   example that documents it goes red and someone updates the exit criteria in
+   `render_lane.spl` instead of quietly shipping a regression.
+
+@manual_section Browser Rendering
+"""
+
+use std.spipe.*
+use app.browser.render_lane.{
+    BROWSER_RENDER_LANE_LIVE, BROWSER_RENDER_LANE_BLINK,
+    BROWSER_RENDER_LANE_DEFAULT, BROWSER_RENDER_LANE_ENV,
+    browser_render_lane_is_known, browser_render_lane_selected,
+    render_html_to_pixel_array_via
+}
+
+# Opaque white, ARGB 0xFFFFFFFF as an unsigned 32-bit value (4294967295). This
+# is the colour the blink lane primes its canvas to, and the same "nothing was
+# painted here" sentinel `render_adapter.browser_engine_painted_pixel_count`
+# already tests the live lane's output against.
+val WHITE: u32 = 4294967295u32
+
+# Opaque red, ARGB 0xFFFF0000 as an unsigned 32-bit value (4294901760).
+val RED: u32 = 4294901760u32
+
+# blink's probe viewport: 20 wide x 10 tall = 200 pixels total. Small on
+# purpose — these examples run under the tree-walk interpreter, which has a
+# per-file operation budget, and 200 pixels is ample to distinguish a painted
+# box from an unpainted page.
+val VIEW_W: i32 = 20
+val VIEW_H: i32 = 10
+val VIEW_PIXELS: i64 = 200
+
+# The live lane's probe viewport: 4 wide x 2 tall = 8 pixels. Far smaller than
+# blink's, and deliberately so. The live engine is expensive enough that
+# `browser_render_adapter_spec.spl` records a single 64x36 render exhausting
+# this runner's 10,000,000-operation budget on its own. 8 pixels is the
+# smallest render that still proves the lane ran and returned a correctly
+# sized buffer, which is all this file asks of it.
+val LIVE_W: i32 = 4
+val LIVE_H: i32 = 2
+val LIVE_PIXELS: i64 = 8
+
+fn _count(pixels: [u32], want: u32) -> i64:
+    var n: i64 = 0
+    for p in pixels:
+        if p == want:
+            n = n + 1
+    n
+
+# A 20x10 white page holding one 10x5 = 50-pixel div, coloured by `colour`.
+fn _page(colour: text) -> text:
+    "<html><body><style>" +
+        "body { background-color: white; width: 20px; height: 10px; } " +
+        "div { width: 10px; height: 5px; background-color: " + colour + "; }" +
+        "</style><div></div></body></html>"
+
+fn _blink(html: text) -> [u32]:
+    render_html_to_pixel_array_via(BROWSER_RENDER_LANE_BLINK, html, VIEW_W, VIEW_H)
+
+describe "the render lane the browser actually uses":
+
+    it "defaults to the live lane, so wiring blink in changes no rendering":
+        step("read the compiled-in default")
+        expect(BROWSER_RENDER_LANE_DEFAULT).to_equal(BROWSER_RENDER_LANE_LIVE)
+
+        step("read the lane this process will really render through")
+        # No SIMPLE_BROWSER_RENDER_LANE is set for the test runner, so the
+        # selection must fall through to the default. If this ever reports
+        # "blink", the seam has flipped the product without anyone deciding to.
+        expect(browser_render_lane_selected()).to_equal(BROWSER_RENDER_LANE_LIVE)
+
+    it "names both lanes as dispatchable and rejects anything else":
+        step("check the two real lane names")
+        expect(browser_render_lane_is_known(BROWSER_RENDER_LANE_LIVE)).to_equal(true)
+        expect(browser_render_lane_is_known(BROWSER_RENDER_LANE_BLINK)).to_equal(true)
+
+        step("check a typo and an empty value")
+        # A mistyped env var must not be dispatchable, so selection falls back
+        # to the default rather than rendering through nothing.
+        expect(browser_render_lane_is_known("blinkk")).to_equal(false)
+        expect(browser_render_lane_is_known("")).to_equal(false)
+
+    it "exposes the override under a single documented env var name":
+        step("read the env var name the adapter honours")
+        expect(BROWSER_RENDER_LANE_ENV).to_equal("SIMPLE_BROWSER_RENDER_LANE")
+
+describe "both lanes produce real pixels through the adapter":
+
+    it "renders a page through the live lane and returns a full buffer":
+        step("render 4x2 pixels through the live lane")
+        val pixels = render_html_to_pixel_array_via(
+            BROWSER_RENDER_LANE_LIVE, "<html><body><p>Hi</p></body></html>",
+            LIVE_W, LIVE_H)
+
+        step("the buffer holds one entry per pixel: 4 x 2 = 8")
+        expect(pixels.len()).to_equal(LIVE_PIXELS)
+
+    it "renders a page through the blink lane and paints the styled box":
+        step("render a white 20x10 page holding one red 10x5 div")
+        val pixels = _blink(_page("red"))
+
+        step("the buffer holds one entry per pixel: 20 x 10 = 200")
+        expect(pixels.len()).to_equal(VIEW_PIXELS)
+
+        step("the div covers exactly its own 10 x 5 = 50 pixels in red")
+        expect(_count(pixels, RED)).to_equal(50)
+
+        step("the remaining 200 - 50 = 150 pixels are the white page behind it")
+        expect(_count(pixels, WHITE)).to_equal(150)
+
+    it "primes the page white so an unpainted pixel is not transparent black":
+        step("render a page whose only styling is a white body")
+        val pixels = _blink(
+            "<html><body><style>body { background-color: white; " +
+            "width: 20px; height: 10px; }</style></body></html>")
+
+        step("all 200 pixels are opaque white, none left at the buffer's zero fill")
+        # ChunkRasterBuffer.create zero-fills, which is transparent black. If
+        # the lane forgot to prime the canvas, this count would be 0 and every
+        # pixel would read as "painted" to the live lane's pixel counter.
+        expect(_count(pixels, WHITE)).to_equal(VIEW_PIXELS)
+
+describe "where blink still differs from the live lane today":
+
+    it "paints no text glyphs at all, which is the biggest blocker to the flip":
+        step("render a page whose only content is a paragraph of text")
+        val pixels = _blink(
+            "<html><body><style>body { background-color: white; " +
+            "width: 20px; height: 10px; }</style><p>Hello</p></body></html>")
+
+        step("every one of the 200 pixels is still blank page — no glyph was drawn")
+        # blink's paint step (`paint_chunks_from_styled_layout`) emits one
+        # background rect per box and nothing else. The live lane draws the
+        # text. Until this example goes red, no consumer that needs readable
+        # page text can move to blink.
+        expect(_count(pixels, WHITE)).to_equal(VIEW_PIXELS)
+
+    it "ignores an inline style= attribute that the live lane would honour":
+        step("render a div styled only by its own style= attribute")
+        val pixels = _blink(
+            "<html><body><style>body { background-color: white; " +
+            "width: 20px; height: 10px; }</style>" +
+            "<div style=\"background-color: red; width: 10px; height: 5px\">" +
+            "</div></body></html>")
+
+        step("not one of the 200 pixels is red: the attribute never reached the cascade")
+        # blink's CSS parser CAN read this (`parse_inline_style`), but
+        # `blink.style.cascade.resolve_style` consults only the stylesheet, so
+        # nothing feeds it in. Stated as behaviour rather than left to a
+        # comment, because the failure mode is a silently unstyled box.
+        expect(_count(pixels, RED)).to_equal(0)
+        expect(_count(pixels, WHITE)).to_equal(VIEW_PIXELS)
+
+    it "does resolve the full CSS colour set, so colour is no longer a blocker":
+        step("render the same 10 x 5 = 50 pixel box four different ways")
+        # The wiring plan recorded blink as having ~9 named colours and no
+        # rgb()/hsl()/#RRGGBBAA. That gap has since been closed by delegating
+        # to `common.color.css.parse_css_color`, so all four spellings of
+        # opaque red must now paint the identical 50 pixels.
+        expect(_count(_blink(_page("red")), RED)).to_equal(50)
+        expect(_count(_blink(_page("rgb(255, 0, 0)")), RED)).to_equal(50)
+        expect(_count(_blink(_page("hsl(0, 100%, 50%)")), RED)).to_equal(50)
+        expect(_count(_blink(_page("#ff0000ff")), RED)).to_equal(50)
+
+        step("a CSS Level 4 name outside the old 9-name subset also resolves")
+        # `tomato` was not in blink's old table. It must now paint its own 50
+        # pixels — neither red, nor left as unpainted white page.
+        val tomato = _blink(_page("tomato"))
+        expect(_count(tomato, RED)).to_equal(0)
+        expect(_count(tomato, WHITE)).to_equal(150)

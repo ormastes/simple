@@ -1,6 +1,8 @@
 # Blink Render Stack Wiring Plan
 
-Status: PLAN ONLY — no wiring stage landed. See "Why no code landed" below.
+Status: STAGE 5 LANDED (seam only — the default is still the live lane).
+Stages 1-4 landed earlier (see the CLOSED notes in §2). See "Why no code
+landed" below for the history of why nothing moved before that.
 Date: 2026-08-11
 Scope: `src/lib/blink/**` vs the live lane
 (`src/lib/gc_async_mut/gpu/browser_engine/**`, `src/lib/common/ui/**`,
@@ -38,7 +40,15 @@ then wire"** — and the gap-closure is the large half.
 
 ## 1. Facts
 
-### 1.1 blink is test-only
+### 1.1 blink is test-only — NO LONGER TRUE as of Stage 5 (2026-08-11)
+`src/app/browser/render_adapter.spl` now reaches blink through
+`src/app/browser/render_lane.spl` -> `src/lib/blink/lane/html_pixels.spl`,
+selectable by flag. The flag still defaults to the live lane, so blink is a
+reachable production path rather than the active one — but the "zero production
+callers" pathology this plan was written to prevent no longer applies. The
+measurement below is the pre-Stage-5 state, kept for context.
+
+
 `/usr/bin/grep -rn` over `src/` and `examples/` finds exactly ONE production
 import of blink:
 
@@ -287,16 +297,68 @@ need them — but that must be stated, not assumed.
 Acceptance: per-gap SSpec; a parity harness runs the `wm_compare` site corpus
 (`src/app/wm_compare/site_corpus_compat.spl:17-19`) through both lanes.
 
-### Stage 5 — re-point ONE consumer (first production risk)
-Pick the narrowest, most-instrumented consumer:
-`src/app/browser/render_adapter.spl:21` `render_html_to_pixel_array`. Route it
-through blink behind a flag defaulting to the OLD lane.
+### Stage 5 — re-point ONE consumer (first production risk) — LANDED 2026-08-11
+Done as planned, against the narrowest consumer
+(`src/app/browser/render_adapter.spl`), **with the default left on the live
+lane**. blink now has a production caller; it is no longer test-only.
 
-Acceptance: `check-electron-simple-web-layout-bitmap-evidence.shs` passes with
-the flag ON; bitmap diff vs the old lane is within the corpus tolerance already
-used by `production_gui_web_renderer_parity.spl:15`.
-Rollback: flip the flag off. The flag is the rollback story for Stages 5-7 and
-must land BEFORE any call site moves.
+What landed:
+
+- **`src/lib/blink/lane/html_pixels.spl`** — blink's production-shaped entry
+  `blink_render_html_to_pixel_array(html: text, width: i32, height: i32) -> [u32]`,
+  signature-identical to the live lane's `render_html_to_pixel_array`. It
+  composes the already-proven pieces from a raw HTML string:
+  `tokenize_html -> build_html_tree -> <style> harvest -> tokenize_css ->
+  parse_css -> build_styled_layout -> paint_chunks_from_styled_layout ->
+  paint_rect`. It calls `paint_rect` directly rather than
+  `paint_chunk_rasterizer_run`, because that function's PropertyTrees /
+  PaintChunks / RenderRevisions machinery exists to skip chunks unchanged since
+  a previous frame, and a one-shot render from a string has no previous frame.
+  The canvas is primed opaque white first, matching the live lane's
+  `0xFFFFFFFF` "unpainted" sentinel that
+  `browser_engine_painted_pixel_count` already tests against; fully transparent
+  rects are skipped because `paint_rect` is a STORE, not a blend.
+- **`src/app/browser/render_lane.spl`** — the adapter. Holds the policy and no
+  pixels. `browser_render_html_to_pixel_array(html, w, h)` is a drop-in for the
+  live entry point and dispatches on `browser_render_lane_selected()`.
+  `render_html_to_pixel_array_via(lane, ...)` lets a spec or gate address either
+  lane explicitly. `SIMPLE_BROWSER_RENDER_LANE=blink|live` overrides per
+  process; an unset, empty or misspelled value falls back to the default rather
+  than failing, because the default is the full-fidelity lane and a typo in an
+  env var must not take rendering down.
+- **The consumer seam** — `render_adapter.spl` changed one `use` line and one
+  call. Nothing else in the app moved.
+
+**THE FLAG / THE ROLLBACK.** `BROWSER_RENDER_LANE_DEFAULT` in
+`render_lane.spl` is one line. Setting it back to `BROWSER_RENDER_LANE_LIVE`
+restores previous behaviour completely — both lanes stay compiled and reachable
+either way, no consumer changes, no residue, nothing to un-delete.
+
+**Proof both paths work:**
+`test/01_unit/app/browser/browser_render_lane_spec.spl` (mirrored
+byte-identically into `test/unit/`), **9 examples, 9 passed, 0 failed** via
+`bin/simple test <file>`. It pins the default to `live`, renders through the
+live lane (4x2 — the live engine is expensive enough that
+`browser_render_adapter_spec.spl` records a single 64x36 render exhausting the
+runner's 10,000,000-op budget), renders through the blink lane (20x10, with a
+10x5 = 50-pixel box landing 50 red pixels and 150 white), and asserts the
+divergences rather than hiding them.
+
+**Divergences as measured through the adapter today** — colour is NO LONGER
+one. §2 item 2's colour gap was closed by the sibling lane that delegated
+`blink/style/cascade.spl` to `common.color.css.parse_css_color`: `red`,
+`rgb(255, 0, 0)`, `hsl(0, 100%, 50%)` and `#ff0000ff` now paint identical
+pixels, and `tomato` resolves. What remains, asserted as behaviour:
+**blink paints no text glyphs at all** (`paint_chunks_from_styled_layout` emits
+background rects only), and **inline `style=` attributes are ignored**
+(`blink.css_parser.parse_inline_style` exists, but
+`blink.style.cascade.resolve_style` never consults it).
+
+NOT done in this stage, and still required before Stage 6:
+`check-electron-simple-web-layout-bitmap-evidence.shs` green with the flag ON,
+within the tolerance `production_gui_web_renderer_parity.spl:15` already uses.
+The full exit-criteria list lives at the bottom of `render_lane.spl`, next to
+the flag it gates.
 
 ### Stage 6 — flip the default, keep the flag
 Default to blink for the Stage-5 consumer only. Keep the old lane compiled and

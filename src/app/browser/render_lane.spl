@@ -1,0 +1,121 @@
+# Browser render-lane adapter — Stage 5 of doc/03_plan/ui/rendering/blink_wiring_plan.md
+#
+# WHAT THIS IS
+# ------------
+# The seam that lets a production consumer render through EITHER the live
+# browser engine or the blink stack, chosen by one flag, with no duplicated
+# call sites and no `#if`-style branching sprinkled through the consumer.
+#
+# Both lanes expose the identical signature `(html, width, height) -> [u32]`,
+# so this module is a pure chooser: it holds the policy and holds no pixels.
+#
+#     live  : gc_async_mut.gpu.browser_engine.browser_renderer.render_html_to_pixel_array
+#     blink : blink.lane.html_pixels.blink_render_html_to_pixel_array
+#
+# THE DEFAULT IS `live`, AND MUST STAY `live` FOR NOW.
+# ----------------------------------------------------
+# blink is a functional SUBSET of the live lane today, not a replacement. Most
+# visibly, it paints NO TEXT GLYPHS at all, and it ignores inline `style=`
+# attributes. Defaulting to blink would REGRESS real rendering, so this stage
+# lands the seam and the proof — not the switchover. The exit criteria are
+# listed at the bottom of this file.
+#
+# ROLLBACK STORY
+# --------------
+# `BROWSER_RENDER_LANE_DEFAULT` below is the single line. Changing it back to
+# `BROWSER_RENDER_LANE_LIVE` restores the previous behaviour completely: both
+# lanes stay compiled and reachable either way, no consumer changes, no
+# residue, and the env override keeps working in both directions. There is no
+# second place to edit and nothing to un-delete.
+
+use std.io_runtime.{env_get}
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{render_html_to_pixel_array}
+use std.blink.lane.html_pixels.{blink_render_html_to_pixel_array}
+
+# The existing, shipping engine. Everything renders through this today.
+pub val BROWSER_RENDER_LANE_LIVE: text = "live"
+
+# The blink stack. Selectable, not default — see the header.
+pub val BROWSER_RENDER_LANE_BLINK: text = "blink"
+
+# >>> THE FLAG <<< — the one-line flip, and the one-line rollback.
+pub val BROWSER_RENDER_LANE_DEFAULT: text = BROWSER_RENDER_LANE_LIVE
+
+# Per-process override, for gates and for a bisect that needs the other lane
+# without a rebuild.
+pub val BROWSER_RENDER_LANE_ENV: text = "SIMPLE_BROWSER_RENDER_LANE"
+
+pub fn browser_render_lane_is_known(lane: text) -> bool:
+    """True when `lane` names a lane this adapter can actually dispatch to."""
+    lane == BROWSER_RENDER_LANE_LIVE or lane == BROWSER_RENDER_LANE_BLINK
+
+pub fn browser_render_lane_selected() -> text:
+    """The lane this process renders through.
+
+    `SIMPLE_BROWSER_RENDER_LANE` wins when it names a known lane. An unset,
+    empty, or unrecognised value falls back to the compiled-in default rather
+    than failing: a typo in an env var must not take rendering down, and
+    silently landing on the DEFAULT lane is the safe direction because the
+    default is the live, full-fidelity lane."""
+    val requested = env_get(BROWSER_RENDER_LANE_ENV)
+    if browser_render_lane_is_known(requested):
+        requested
+    else:
+        BROWSER_RENDER_LANE_DEFAULT
+
+pub fn render_html_to_pixel_array_via(lane: text, html: text,
+                                      width: i32, height: i32) -> [u32]:
+    """Render `html` at `width` x `height` through the named lane.
+
+    An unknown lane name renders through the default lane, matching
+    `browser_render_lane_selected`'s fallback so the two cannot disagree about
+    what an unrecognised name means."""
+    if lane == BROWSER_RENDER_LANE_BLINK:
+        blink_render_html_to_pixel_array(html, width, height)
+    else:
+        render_html_to_pixel_array(html, width, height)
+
+pub fn browser_render_html_to_pixel_array(html: text, width: i32,
+                                          height: i32) -> [u32]:
+    """Drop-in replacement for the live lane's `render_html_to_pixel_array`,
+    dispatched through whichever lane this process selected."""
+    render_html_to_pixel_array_via(browser_render_lane_selected(), html, width, height)
+
+# =========================================================================
+# EXIT CRITERIA — what still blocks flipping BROWSER_RENDER_LANE_DEFAULT
+# to BROWSER_RENDER_LANE_BLINK (Stage 6 of the wiring plan)
+# =========================================================================
+#
+# Each item is a behaviour the live lane HAS and blink DOES NOT. Flipping the
+# default before one is closed is a rendering regression, not a migration.
+#
+#  1. COLOUR PARITY — CLOSED. The plan recorded blink at ~9 named colours with
+#     no `rgb()`/`hsl()`/`#RRGGBBAA` against the live lane's ~140. A sibling
+#     lane closed it by delegating `blink/style/cascade.spl` to
+#     `common.color.css.parse_css_color`. Verified through this adapter, not
+#     assumed: `browser_render_lane_spec.spl` renders the same box as `red`,
+#     `rgb(255, 0, 0)`, `hsl(0, 100%, 50%)` and `#ff0000ff` and gets identical
+#     pixels, and resolves `tomato` — a name outside the old subset.
+#     Listed here rather than deleted so nobody re-derives it as still open.
+#  2. TEXT GLYPH PAINT. `paint_chunks_from_styled_layout` emits background
+#     rects only. Blocks every consumer that needs readable page text —
+#     which is all of the pixel-output consumers listed in the plan's §1.2.
+#  3. INLINE `style=` APPLICATION. blink can PARSE it (`parse_inline_style`,
+#     landed Stage 4) but `resolve_style` never consults it.
+#  4. BORDERS, box-shadow, transforms, gradients — plan §2 items 6 and 9.
+#  5. STYLESHEET SOURCES beyond the document's own `<style>`: no
+#     `<link rel=stylesheet>`, and no user-agent default stylesheet, so an
+#     unstyled document renders blank white where the live lane renders
+#     default-styled content.
+#  6. BITMAP PARITY GATE. `check-electron-simple-web-layout-bitmap-evidence.shs`
+#     green with the flag ON, within the tolerance
+#     `production_gui_web_renderer_parity.spl` already uses. Not run by this
+#     stage — this stage lands the seam only.
+#
+# When 1-6 are closed: change BROWSER_RENDER_LANE_DEFAULT to
+# BROWSER_RENDER_LANE_BLINK. That is the whole flip.
+
+export BROWSER_RENDER_LANE_LIVE, BROWSER_RENDER_LANE_BLINK
+export BROWSER_RENDER_LANE_DEFAULT, BROWSER_RENDER_LANE_ENV
+export browser_render_lane_is_known, browser_render_lane_selected
+export render_html_to_pixel_array_via, browser_render_html_to_pixel_array
