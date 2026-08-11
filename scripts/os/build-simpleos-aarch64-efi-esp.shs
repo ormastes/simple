@@ -62,6 +62,13 @@
 #                  rather than inventing a kernel if none is present.
 #     AAVMF_CODE / AAVMF_VARS   firmware blobs; auto-detected under /usr/share.
 #     OUT_DIR      default build/os/aarch64_limine
+#     BOOT_PROTOCOL  limine (default) | linux -- which protocol limine.conf
+#                  selects. `linux` exists for the UNIFIED arm64 desktop/WM
+#                  kernel, whose crt0.S carries an arm64 Linux `Image` header:
+#                  that protocol hands over MMU-off in physical space, which is
+#                  the same contract QEMU `-kernel` gave it, so it can move to
+#                  real firmware without rewriting its early boot. Payload is
+#                  staged at /boot/kernel.elf either way.
 #
 # Exit status: 0 = image built and structurally verified; non-zero = nothing
 # usable was produced. There is no partial success.
@@ -72,6 +79,16 @@ REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 OUT_DIR=${OUT_DIR:-$REPO_ROOT/build/os/aarch64_limine}
 KERNEL_ELF=${KERNEL_ELF:-$OUT_DIR/kernel.elf}
 ESP_MB=${ESP_MB:-64}
+# Which Limine boot protocol the generated limine.conf selects.
+#   limine — the src/os/kernel Limine-protocol aarch64 kernel (default; the
+#            kernel is entered with the MMU on, higher-half, via request markers)
+#   linux  — the arm64 Linux `Image` protocol, used by the UNIFIED arm64
+#            desktop/WM kernel, whose crt0.S carries a Linux Image header. It is
+#            entered MMU-off in physical space with the boot arg in x0 — the same
+#            contract QEMU `-kernel` provides, which is why the unified kernel
+#            can move to real firmware without rewriting its early boot.
+# In both cases the payload is staged at /boot/kernel.elf.
+BOOT_PROTOCOL=${BOOT_PROTOCOL:-limine}
 VENV=${VENV:-$REPO_ROOT/build/tmp/pyfatvenv}
 
 die() { printf 'build-aarch64-efi-esp: ERROR — %s\n' "$1" >&2; exit 1; }
@@ -130,7 +147,15 @@ dd if=/dev/zero of="$ESP" bs=1M count="$ESP_MB" status=none 2>/dev/null \
 
 # --- populate ---------------------------------------------------------------
 LIMINE_CONF=$(mktemp)
-printf 'timeout: 0\nserial: yes\ngraphics: no\n\n/SimpleOS aarch64 Limine milestone\n    protocol: limine\n    path: boot():/boot/kernel.elf\n' > "$LIMINE_CONF"
+case "$BOOT_PROTOCOL" in
+    limine)
+        printf 'timeout: 0\nserial: yes\ngraphics: no\n\n/SimpleOS aarch64 Limine milestone\n    protocol: limine\n    path: boot():/boot/kernel.elf\n' > "$LIMINE_CONF"
+        ;;
+    linux)
+        printf 'timeout: 0\nserial: yes\ngraphics: no\n\n/SimpleOS aarch64 unified kernel\n    protocol: linux\n    path: boot():/boot/kernel.elf\n    cmdline: console=ttyAMA0\n' > "$LIMINE_CONF"
+        ;;
+    *) die "unknown BOOT_PROTOCOL '$BOOT_PROTOCOL' (expected: limine, linux)" ;;
+esac
 STARTUP_NSH=$(mktemp)
 printf 'FS0:\\EFI\\BOOT\\BOOTAA64.EFI\r\n' > "$STARTUP_NSH"
 

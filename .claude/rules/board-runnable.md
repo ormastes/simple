@@ -23,7 +23,13 @@ not a completion.
   is a different one and is still filed:**
   `scripts/check/check-simpleos-arm64-unified-live.shs`, the main arm64 desktop
   lane, still boots with QEMU `-kernel` and must be migrated onto the
-  real-firmware chain above.
+  real-firmware chain above. The **kernel-side** half of that migration is now
+  done: the unified kernel's `crt0.S` carries an arm64 Linux `Image` header plus
+  a self-relocation stub, so `BOOTAA64.EFI` can load it with `protocol: linux`
+  (MMU-off physical handover — the same contract `-kernel` gave it), gated by
+  `scripts/check/check-simpleos-arm64-unified-boot-contract.shs`. The lane edit
+  itself waits on a self-hosted `bin/simple` that can build the unified kernel.
+  See `doc/08_tracking/bug/arm64_efi_real_firmware_lane_unreproducible_and_unified_lane_uses_kernel_2026-08-11.md`.
 - **Board bring-up path kept alive:** every QEMU-developed feature (kernel, LLVM
   toolchain, in-guest binaries, drivers) keeps a documented physical-board build
   + boot + run path. See `doc/03_plan/os/simpleos/hw_qemu/` and

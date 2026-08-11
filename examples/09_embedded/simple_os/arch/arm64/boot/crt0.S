@@ -6,13 +6,126 @@
  * PL011 UART and calls spl_start (Simple entry point).
  *
  * Runs at EL1 (or EL2 if QEMU drops us there — we don't switch).
+ *
+ * ---------------------------------------------------------------------------
+ * REAL-FIRMWARE BOOT (.claude/rules/board-runnable.md)
+ * ---------------------------------------------------------------------------
+ * The image carries a standard 64-byte arm64 Linux `Image` boot header so a
+ * real bootloader (Limine BOOTAA64.EFI chained from EDK2/AAVMF pflash, or any
+ * UEFI/U-Boot loader on a physical board) can load it WITHOUT QEMU `-kernel`
+ * pass semantics.
+ *
+ * Why the Linux boot protocol and not the Limine protocol: the Linux arm64
+ * protocol's handover contract is bit-for-bit what this kernel already assumes
+ * and what QEMU `-kernel` already provides — entered at EL1/EL2 with the MMU
+ * and caches OFF, in the physical address space, with the boot arg in x0 (which
+ * this kernel ignores; all its MMIO addresses are fixed for QEMU virt). The
+ * Limine protocol instead hands over with the MMU ON in a higher-half virtual
+ * mapping, which would require rewriting this kernel's early boot, its whole
+ * physical-MMIO layer, and `arm64_enter_user_virtual` (which toggles SCTLR_EL1.M
+ * and would unmap itself). So this header + the relocation stub below is the
+ * smallest sound change that preserves existing behaviour exactly.
+ *
+ * The one thing the Linux protocol does NOT guarantee is the load address, so
+ * `.Lreloc_check` self-relocates to the link address when a loader placed the
+ * image elsewhere. Under QEMU `-kernel` the image already lands at its link
+ * address and the check is a no-op branch — the existing lane is unaffected.
  */
 
     .section .text.entry, "ax", %progbits
     .globl _start
     .type _start, @function
 
+/* --- arm64 Linux `Image` header (Documentation/arm64/booting.rst) --- */
 _start:
+    nop                             /* code0: reserved (MZ slot for EFI stubs) */
+    b       .Lreloc_check           /* code1: branch past the header          */
+    .quad   0                       /* text_offset (0 = 2 MiB-aligned base)   */
+    .quad   _image_size             /* image_size                             */
+    .quad   0xa                     /* flags: LE, 4 KiB pages, load anywhere  */
+    .quad   0                       /* res2 */
+    .quad   0                       /* res3 */
+    .quad   0                       /* res4 */
+    .ascii  "ARM\x64"               /* magic, offset 56 */
+    .long   0                       /* res5 (PE header offset; unused) */
+
+/* ---------------------------------------------------------------------------
+ * Self-relocation to the link address.
+ *
+ * On entry the MMU and caches are off (both under QEMU `-kernel` and under the
+ * arm64 Linux boot protocol), so this runs on raw physical memory. Everything
+ * here is PC-relative until the jump to the link address.
+ *
+ * The destination (`_start` link address) is the base of RAM, i.e. LOWER than
+ * any address a loader can place us at, so the bulk copy is ascending and
+ * overlap-safe for the DATA — but the copy loop itself lives inside the source
+ * image and would be overwritten mid-flight when the ranges overlap. So the
+ * loop is first copied to a scratch page above BOTH ranges
+ * (`load_base + load_size + 4096`; since load_base > link_base this is strictly
+ * above `link_base + load_size`) and executed from there.
+ * --------------------------------------------------------------------------- */
+.Lreloc_check:
+    adr     x9, _start              /* x9 = actual load base (PC-relative)     */
+    ldr     x10, =_start            /* x10 = link base (absolute relocation)   */
+    cmp     x9, x10
+    b.eq    .Lcrt0_at_link_addr     /* already in place: QEMU -kernel path     */
+
+    adr     x0, .Lcrt0_reloc
+    bl      .Lserial_puts_early
+    adr     x9, _start
+    ldr     x10, =_start
+    ldr     x11, =_kernel_load_end
+    sub     x11, x11, x10           /* x11 = bytes of loaded image to move     */
+    add     x11, x11, #7
+    bic     x11, x11, #7            /* round up to a whole 8-byte word         */
+
+    /* Scratch page for the trampoline, above both source and destination. */
+    add     x12, x9, x11
+    add     x12, x12, #4096
+    bic     x12, x12, #15
+
+    /* Copy the trampoline to scratch. */
+    adr     x13, .Lreloc_tramp
+    adr     x14, .Lreloc_tramp_end
+    mov     x15, x12
+.Lreloc_tramp_copy:
+    ldr     x16, [x13], #8
+    str     x16, [x15], #8
+    cmp     x13, x14
+    b.lo    .Lreloc_tramp_copy
+
+    dsb     sy
+    ic      iallu
+    dsb     sy
+    isb
+
+    /* x9=src x10=dst x11=len; x17 = link address to resume at. */
+    ldr     x17, =.Lboot_entry
+    br      x12
+
+    .balign 8
+.Lreloc_tramp:
+    mov     x2, x9
+    mov     x3, x10
+    mov     x4, x11
+.Lreloc_copy:
+    ldr     x5, [x2], #8
+    str     x5, [x3], #8
+    subs    x4, x4, #8
+    b.hi    .Lreloc_copy
+    dsb     sy
+    ic      iallu
+    dsb     sy
+    isb
+    br      x17
+    .balign 8
+.Lreloc_tramp_end:
+
+.Lboot_entry:
+    adr     x0, .Lcrt0_relocated
+    bl      .Lserial_puts_early
+
+.Lcrt0_at_link_addr:
     /* Early UART marker before stack/BSS setup. This keeps ARM64 QEMU smoke
      * failures diagnosable even if the C runtime handoff faults.
      */
@@ -114,6 +227,10 @@ _start:
 .Lserial_puts_early_done:
     ret
 
+.Lcrt0_reloc:
+    .asciz  "[BOOT] ARM64 relocating to link address\r\n"
+.Lcrt0_relocated:
+    .asciz  "[BOOT] ARM64 relocated\r\n"
 .Lcrt0_banner:
     .asciz  "[BOOT] ARM64 crt0 entered\r\n"
 .Lcrt0_sctlr:

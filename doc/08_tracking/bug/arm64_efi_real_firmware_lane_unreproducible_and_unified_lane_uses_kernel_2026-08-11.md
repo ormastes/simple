@@ -227,3 +227,196 @@ No script was modified in this follow-up: forcing the migration onto a kernel
 that cannot be Limine-chainloaded would either not boot (relegating the lane
 to permanently red) or require silently weakening/deleting the very assertions
 this lane exists to enforce, both of which this doc explicitly rules out.
+
+## 2026-08-11 follow-up 2: the kernel-side gap is CLOSED — unified arm64 early boot now runs under real firmware
+
+The re-scoped item 1 above ("give the unified arm64 kernel Limine
+request/response support ... OR a PE/COFF EFI-stub header") is **implemented and
+booted**, but by a **third option that neither of those two considered**, and
+which is far smaller than both.
+
+### Approach chosen: the arm64 Linux `Image` boot protocol
+
+Neither of the two options previously on the table was necessary.
+`vendor/limine/BOOTAA64.EFI` (Limine **10.8.5**, aarch64/UEFI — verified by
+`strings`) implements the **`linux` boot protocol** as well as its own, complete
+with device-tree handoff (`linux: device tree blob at %p`). The arm64 Linux
+protocol's handover contract is **bit-for-bit what QEMU `-kernel` already
+provides and what this kernel already assumes**:
+
+| | QEMU `-kernel` (today) | Limine `protocol: linux` | Limine `protocol: limine` |
+|---|---|---|---|
+| exception level | EL1 or EL2 | EL1 or EL2 | EL1 |
+| MMU / caches | **off** | **off** | **ON**, higher-half |
+| address space | physical | physical | virtual + HHDM |
+| boot arg | x0 = DTB | x0 = DTB | request/response markers |
+| load address | link address | loader's choice | link address (mapped) |
+
+So the Limine-protocol option (the one this doc previously assumed was the
+path) is in fact the **expensive** one: it hands over with the MMU on in a
+higher-half mapping, which would require rewriting the unified kernel's early
+boot, every fixed physical MMIO address it uses (PL011 at `0x09000000`, the
+virtio-mmio window, the ivshmem BAR), and `arm64_enter_user_virtual` in
+`crt0.S`, which toggles `SCTLR_EL1.M` directly and would unmap itself the
+instant it ran. The PE/COFF stub option remains rejected for the reason already
+recorded — the Simple backend emits no PE.
+
+The Linux-protocol option needs **no change to any of that**. The whole diff is
+in the two files that define the boot contract.
+
+### The early-boot adaptation that was actually needed
+
+Only one property of the old contract is not guaranteed by the new one: the
+**load address**. QEMU `-kernel` places the image at its link address
+(`0x40000000`, the base of RAM on QEMU virt); a real bootloader places it
+wherever it found free memory. Everything else — MMU off, physical addressing,
+DTB in x0 (which this kernel ignores outright; `crt0.S` clobbers x0 on its first
+instruction) — already matched.
+
+`examples/09_embedded/simple_os/arch/arm64/boot/crt0.S` therefore gains exactly
+two things:
+
+1. **A 64-byte arm64 Linux `Image` header** at `_start` (`nop` / `b` over the
+   header, `text_offset=0`, `image_size=_image_size`, `flags=0xa` = LE + 4 KiB
+   pages + load-anywhere, `"ARM\x64"` magic at offset 56). It is inert under
+   `-kernel`, which enters at the ELF entry point and simply executes the `nop`
+   and the branch.
+2. **A self-relocation stub.** It compares the PC-relative address of `_start`
+   with the absolute (link-time) one. **Equal → it branches straight into the
+   existing boot path, so the `-kernel` lane is byte-identically unaffected.**
+   Unequal → it copies `[_start, _kernel_load_end)` down to the link address and
+   jumps there.
+
+   The one subtlety: the destination is the base of RAM, i.e. below any address a
+   loader can pick, so the bulk copy is ascending and safe for the *data* — but
+   the copy loop itself lives inside the source image and would be overwritten
+   mid-flight whenever the ranges overlap. So the loop is first copied to a
+   scratch page at `load_base + load_size + 4096`, which (since
+   `load_base > link_base`) is strictly above `link_base + load_size` and thus
+   outside both ranges, and is executed from there. `ic iallu` + `dsb`/`isb`
+   follow the copy, since it is a code move with caches off.
+
+`linker.ld` gains the two symbols the header and the stub need:
+`_kernel_load_end` (end of the LOADED image, before the NOLOAD .bss/.stack/.heap)
+and `_image_size = _kernel_end - _start` (the full in-memory footprint a loader
+must reserve).
+
+`scripts/os/build-simpleos-aarch64-efi-esp.shs` gains `BOOT_PROTOCOL=linux|limine`
+(default `limine`, so the existing aarch64 lane is untouched). The ESP builder is
+**not forked** — same script, same layout, same verification pass.
+
+### Serial evidence — verbatim
+
+Both boots use **one unmodified `crt0.S`**, and the probe payload's
+`[probe] rodata-ok` line is printed through an **absolute** rodata pointer, so it
+can only appear if the image genuinely ended up at its link address.
+
+**Real firmware. EDK2/AAVMF pflash -> `BOOTAA64.EFI` -> `protocol: linux`. No
+`-kernel`. No `isa-debug-exit`.**
+
+```
+UEFI firmware (version 2024.02-2ubuntu0.8 built at 10:08:54 on Dec 10 2025)
+BdsDxe: starting Boot0001 "UEFI Non-Block Boot Device" from VenHw(837DCA9E-...)
+linux: Loading kernel `boot():/boot/kernel.elf`...
+[BOOT] ARM64 relocating to link address
+[BOOT] ARM64 relocated
+[BOOT] ARM64 crt0 entered
+[BOOT] ARM64 sctlr ok
+[BOOT] ARM64 stack ok
+[BOOT] ARM64 bss ok
+[BOOT] ARM64 vectors ok
+[probe] c-start
+[probe] bss-zeroed
+[probe] data-ok
+[probe] rodata-ok
+[probe] SIMPLEOS-ARM64-REALFW-BOOT-OK
+```
+
+The relocation path **did** fire — the loader did not place the image at
+`0x40000000` — so the stub is exercised, not merely present.
+
+**Legacy `-kernel` ELF, same crt0.S — unchanged, and correctly does NOT relocate:**
+
+```
+[BOOT] ARM64 crt0 entered
+[BOOT] ARM64 sctlr ok
+[BOOT] ARM64 stack ok
+[BOOT] ARM64 bss ok
+[BOOT] ARM64 vectors ok
+[probe] c-start
+[probe] bss-zeroed
+[probe] data-ok
+[probe] rodata-ok
+[probe] SIMPLEOS-ARM64-REALFW-BOOT-OK
+```
+
+### Scope of the evidence — stated honestly
+
+The payload above is a **C probe linked against the real `crt0.S` and the real
+`linker.ld`**, not the unified desktop/WM kernel itself. It proves the layer that
+was blocking: the Image header, the MMU-off physical handover, and the
+relocation (via .bss zeroing, .data, and an absolute rodata pointer). It does
+**not** prove the unified kernel's own markers (`desktop-ready`, `wm-key-poll`,
+`wm-frame host-gpu-device-evidence`, `virtio_snd`) fire under firmware, because
+**no unified kernel ELF can be built in this session**: `bin/simple` is still the
+Rust bootstrap seed (`WARNING: this Rust-built Simple binary is a bootstrap seed
+only`), the unified lane refuses a seed by design, and the seed's aarch64 codegen
+still fails on that kernel's virtio modules as recorded in follow-up 1. That is
+blocker item 3 below, and it is not something this change can or should route
+around.
+
+### Gate
+
+`scripts/check/check-simpleos-arm64-unified-boot-contract.shs` runs both boots
+above on every invocation and is fail-closed: an empty serial log is `ERROR`, a
+run that checks 0 markers is `ERROR`, a real-firmware boot that did **not**
+relocate is `FAIL` (it would not have proven the stub), a legacy `-kernel` boot
+that **did** relocate is `FAIL`, and the forbidden-flag check runs against the
+**assembled argv** rather than against the script's prose. Fixture:
+`scripts/check/fixtures/arm64_boot_contract_probe.c`.
+
+Sabotage-verified, so the PASS is not tautological. Neutering ONE instruction —
+turning the relocation stub's `b.eq .Lcrt0_at_link_addr` into an unconditional
+`b`, i.e. never copying the image — flips it:
+
+| variant | verdict | exit |
+|---|---|---|
+| unmodified crt0.S | `PASS — 10 marker(s) checked in each of 2 boot paths ...` | 0 |
+| relocation stub neutered | `FAIL — real-firmware boot did not print every boot marker` (`missing marker in real-firmware boot: [probe] c-start`) | 1 |
+
+The sabotaged serial log is itself the clearest statement of what the stub buys:
+
+```
+[BOOT] ARM64 crt0 entered
+[BOOT] ARM64 sctlr ok
+[BOOT] ARM64 stack ok
+[BOOT] ARM64 bss ok
+[BOOT] ARM64 vectors ok
+<nothing further — never reaches _c_start>
+```
+
+crt0's own markers still print because that code is PC-relative and runs fine
+wherever it lands; the boot dies the moment anything depends on a link-time
+absolute address (the stack from `_stack_top`, the `_sbss`/`_ebss` window, the
+jump into C). So the relocation is load-bearing, and a partial boot cannot be
+mistaken for a passing one.
+
+### Remaining work — renumbered
+
+1. ~~Give the unified kernel a real-firmware-loadable boot protocol.~~ **DONE**
+   (this entry).
+2. Deploy a pure-Simple self-hosted `bin/simple`, build the unified kernel ELF,
+   and confirm its own markers under firmware. **This is now the only thing
+   between here and migrating the lane** — the boot contract is no longer the
+   blocker.
+3. Then migrate `check-simpleos-arm64-unified-live.shs` off `-kernel` onto
+   `BOOT_PROTOCOL=linux` + the ESP builder, keeping every existing assertion.
+   **NOT done here, deliberately**: with no buildable unified kernel there is no
+   way to show its markers still fire, and this doc's own standing rule is that
+   a migration must not be landed on unverified assertions.
+4. Physical board bring-up for aarch64 remains filed as before. Note the change
+   above moves *toward* it: an arm64 Linux `Image` is directly loadable by U-Boot
+   and by any UEFI loader on real hardware, which QEMU `-kernel` never was.
+
+**Status: kernel-side boot-protocol gap CLOSED. Lane migration STILL OPEN,
+now blocked only on the self-hosted compiler (item 2).**

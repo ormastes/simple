@@ -1,0 +1,144 @@
+#!/bin/sh
+# check-simpleos-arm64-unified-boot-contract.shs
+#
+# Gate the REAL-FIRMWARE boot contract of the UNIFIED arm64 kernel's early-boot
+# code (`examples/09_embedded/simple_os/arch/arm64/boot/crt0.S` +
+# `.../arch/arm64/linker.ld`), per `.claude/rules/board-runnable.md`.
+#
+# WHY A PROBE PAYLOAD AND NOT THE UNIFIED KERNEL ITSELF
+# -----------------------------------------------------
+# What this gate is about is the BOOT PROTOCOL layer — the arm64 Linux `Image`
+# header, the self-relocation stub, and the MMU-off physical handover — all of
+# which live entirely in crt0.S/linker.ld and are shared byte-for-byte with the
+# unified kernel. Building the unified kernel itself additionally needs the
+# pure-Simple self-hosted compiler (the unified live lane refuses a Rust
+# bootstrap seed, and the seed's aarch64 codegen is known-broken for that
+# kernel's virtio modules), which would make this gate un-runnable for a reason
+# that has nothing to do with boot. So the payload here is a small C probe
+# linked against the REAL crt0.S and the REAL linker.ld. It exercises .bss
+# zeroing, .data, and an ABSOLUTE rodata pointer — the last of which can only
+# print if the image really ended up at its link address, which is exactly what
+# the relocation stub has to guarantee.
+#
+# What is checked, both directions, from ONE unmodified crt0.S:
+#   1. real firmware: EDK2/AAVMF pflash -> Limine BOOTAA64.EFI -> `protocol:
+#      linux` -> kernel. NO `-kernel`, NO `isa-debug-exit`. The relocation stub
+#      must fire (the loader does not place us at the link address) and all
+#      markers must still print.
+#   2. legacy QEMU `-kernel` ELF: must behave EXACTLY as before, and must NOT
+#      relocate (it is already at the link address). This is what keeps the
+#      existing `check-simpleos-arm64-unified-live.shs` lane valid while the
+#      migration is staged.
+#
+# Verdict is the LAST line of stdout:
+#   PASS  — <n> marker(s) checked, ...            exit 0
+#   FAIL  — ...                                   exit 1
+#   ERROR — nothing was checked: ...              exit 2
+# A run that checks 0 markers is an ERROR, never a PASS.
+
+set -eu
+
+REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$REPO_ROOT"
+
+ARCH_DIR=examples/09_embedded/simple_os/arch/arm64
+CRT0=$ARCH_DIR/boot/crt0.S
+LD=$ARCH_DIR/linker.ld
+PROBE=scripts/check/fixtures/arm64_boot_contract_probe.c
+OUT=${OUT_DIR:-build/verify/simpleos-arm64-boot-contract}
+TIMEOUT=${BOOT_TIMEOUT:-120}
+
+verdict_error() { printf 'ERROR — nothing was checked: %s\n' "$1"; exit 2; }
+verdict_fail()  { printf 'FAIL — %s\n' "$1"; exit 1; }
+
+for f in "$CRT0" "$LD" "$PROBE"; do
+    [ -s "$f" ] || verdict_error "missing input $f"
+done
+for t in aarch64-linux-gnu-gcc aarch64-linux-gnu-ld llvm-objcopy qemu-system-aarch64; do
+    command -v "$t" >/dev/null 2>&1 || verdict_error "missing tool $t"
+done
+
+rm -rf "$OUT"
+mkdir -p "$OUT"
+
+# --- the boot header is a source-level invariant, check it before booting ----
+grep -Fq 'ARM\x64' "$CRT0" || verdict_error "crt0.S carries no arm64 Linux Image magic"
+grep -Fq '_kernel_load_end' "$LD" || verdict_error "linker.ld defines no _kernel_load_end"
+
+# --- build the probe kernel against the REAL early-boot sources -------------
+aarch64-linux-gnu-gcc -ffreestanding -nostdlib -O1 -c "$CRT0" -o "$OUT/crt0.o" \
+    >"$OUT/build.log" 2>&1 || { cat "$OUT/build.log" >&2; verdict_error "crt0.S did not assemble"; }
+aarch64-linux-gnu-gcc -ffreestanding -nostdlib -O1 -fno-pic -mcmodel=large \
+    -c "$PROBE" -o "$OUT/probe.o" >>"$OUT/build.log" 2>&1 \
+    || { cat "$OUT/build.log" >&2; verdict_error "probe payload did not compile"; }
+aarch64-linux-gnu-ld -T "$LD" "$OUT/crt0.o" "$OUT/probe.o" -o "$OUT/probe.elf" \
+    >>"$OUT/build.log" 2>&1 || { cat "$OUT/build.log" >&2; verdict_error "probe kernel did not link"; }
+llvm-objcopy -O binary "$OUT/probe.elf" "$OUT/probe.Image" \
+    || verdict_error "flat Image extraction failed"
+[ -s "$OUT/probe.Image" ] || verdict_error "flat Image is empty"
+
+# --- the 64-byte header must be structurally valid in the FLAT image --------
+magic=$(od -An -tx1 -j56 -N4 "$OUT/probe.Image" | tr -d ' \n')
+[ "$magic" = "41524d64" ] || verdict_fail "flat Image has no \"ARM\\x64\" magic at offset 56 (got $magic)"
+imgsz=$(od -An -tu8 -j16 -N8 "$OUT/probe.Image" | tr -d ' \n')
+[ "$imgsz" -gt 0 ] 2>/dev/null || verdict_fail "flat Image declares image_size=$imgsz"
+
+MARKERS='[BOOT] ARM64 crt0 entered
+[BOOT] ARM64 sctlr ok
+[BOOT] ARM64 stack ok
+[BOOT] ARM64 bss ok
+[BOOT] ARM64 vectors ok
+[probe] c-start
+[probe] bss-zeroed
+[probe] data-ok
+[probe] rodata-ok
+[probe] SIMPLEOS-ARM64-REALFW-BOOT-OK'
+marker_count=$(printf '%s\n' "$MARKERS" | wc -l | tr -d ' ')
+
+assert_markers() {
+    _log=$1; _what=$2
+    [ -s "$_log" ] || verdict_fail "$_what produced an empty serial log"
+    printf '%s\n' "$MARKERS" | while IFS= read -r m; do
+        grep -Faq "$m" "$_log" || { printf 'missing marker in %s: %s\n' "$_what" "$m" >&2; exit 7; }
+    done || verdict_fail "$_what did not print every boot marker (see $_log)"
+}
+
+# --- 1. REAL FIRMWARE: AAVMF pflash -> BOOTAA64.EFI -> protocol: linux ------
+BOOT_PROTOCOL=linux OUT_DIR=$REPO_ROOT/$OUT/esp \
+    KERNEL_ELF=$REPO_ROOT/$OUT/probe.Image \
+    sh scripts/os/build-simpleos-aarch64-efi-esp.shs >"$OUT/esp.log" 2>&1 \
+    || { tail -20 "$OUT/esp.log" >&2; verdict_error "ESP build failed"; }
+
+set -- -no-user-config -machine virt -accel tcg -cpu cortex-a72 -m 512M \
+    -drive "if=pflash,format=raw,unit=0,file=$OUT/esp/AAVMF_CODE.fd,readonly=on" \
+    -drive "if=pflash,format=raw,unit=1,file=$OUT/esp/AAVMF_VARS.fd" \
+    -drive "file=$OUT/esp/esp.img,if=none,id=espdisk,format=raw" \
+    -device virtio-blk-device,drive=espdisk \
+    -serial "file:$OUT/firmware-serial.log" \
+    -display none -monitor none -net none -no-reboot
+
+# Forbidden-flag self-check against the ASSEMBLED argv we are about to run,
+# not against this file's prose.
+for a in "$@"; do
+    case "$a" in
+        -kernel|isa-debug-exit|*isa-debug-exit*)
+            verdict_fail "real-firmware argv contains a forbidden flag: $a" ;;
+    esac
+done
+
+timeout "$TIMEOUT" qemu-system-aarch64 "$@" >"$OUT/firmware-qemu.log" 2>&1 || true
+assert_markers "$OUT/firmware-serial.log" "real-firmware boot"
+grep -Faq '[BOOT] ARM64 relocated' "$OUT/firmware-serial.log" \
+    || verdict_fail "real-firmware boot never took the self-relocation path — the image was not moved to its link address, so this run does not prove the stub works"
+
+# --- 2. LEGACY -kernel ELF: unchanged behaviour, and NO relocation ----------
+timeout "$TIMEOUT" qemu-system-aarch64 -no-user-config -machine virt -accel tcg \
+    -cpu cortex-a72 -m 512M -serial "file:$OUT/legacy-serial.log" \
+    -display none -monitor none -net none -no-reboot \
+    -kernel "$OUT/probe.elf" >"$OUT/legacy-qemu.log" 2>&1 || true
+assert_markers "$OUT/legacy-serial.log" "legacy -kernel boot"
+if grep -Faq '[BOOT] ARM64 relocated' "$OUT/legacy-serial.log"; then
+    verdict_fail "legacy -kernel boot relocated; it is already at its link address and must not copy itself"
+fi
+
+printf 'PASS — %s marker(s) checked in each of 2 boot paths, unified arm64 early-boot verified under EDK2/AAVMF pflash real firmware via Limine BOOTAA64.EFI `protocol: linux` (no -kernel, no isa-debug-exit, self-relocation exercised) and unchanged under legacy -kernel\n' "$marker_count"
