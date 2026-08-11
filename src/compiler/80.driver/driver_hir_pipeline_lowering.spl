@@ -390,6 +390,23 @@ impl CompilerDriver:
         while source_idx < self.ctx.sources.len():
             val src = self.ctx.sources[source_idx]
             val name = src.module_name
+            # Resolve the stable scalar owner before the large nested lowering
+            # call. Entry-closure Phase 2 republishes its physically deduped
+            # source plan and the surface array is aligned with that discovery
+            # order, so source_idx is its native-safe owner index. Other modes
+            # may retain logical aliases and must resolve their shared surface.
+            val native_entry_closure_hir = (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
+            var retained_surface_index: i64 = -1
+            if native_entry_closure_hir:
+                retained_surface_index = source_idx
+            elif retained_module_surfaces.index_by_name.contains_key(name):
+                retained_surface_index = retained_module_surfaces.index_by_name[name]
+            if retained_surface_index < 0:
+                self.ctx.add_error("Missing module surface alias before HIR lowering for {name}")
+                return (self.ctx, false)
+            if retained_surface_index >= retained_module_surfaces.surfaces.len():
+                self.ctx.add_error("Missing aligned module surface before HIR lowering at source index {source_idx}")
+                return (self.ctx, false)
             # Baseline for the per-module poison check below. Errors already in
             # the list belong to EARLIER modules and must not poison this one.
             val module_errors_before: i64 = self.ctx.error_count()
@@ -504,7 +521,8 @@ impl CompilerDriver:
             var module_error_idx = 0
             var module_fatal_error_count = 0
             while module_error_idx < module_error_count:
-                val module_error_message: text = lowering.lowering_error_message_at(module_error_idx, name)
+                val error_module_name: text = hir_module.name
+                val module_error_message: text = lowering.lowering_error_message_at(module_error_idx, error_module_name)
                 val module_error_recovered: bool = lowering.lowering_error_is_recovered_at(module_error_idx)
                 if bootstrap_diag and source_idx < 20 and module_error_idx < 20:
                     eprint("[bootstrap-hir-module-error] source_idx={source_idx} error_idx={module_error_idx} len={module_error_message.len()} recovered={module_error_recovered} text={module_error_message}")
@@ -544,7 +562,7 @@ impl CompilerDriver:
             # every module after the first failure as poisoned too.
             if self.ctx.error_count() > module_errors_before:
                 val poison_ctx: CompileContext = self.ctx
-                poison_ctx.mark_module_poisoned(name)
+                poison_ctx.mark_module_poisoned(hir_module.name)
                 if poison_ctx.poison_budget_exhausted():
                     return (self.ctx, false)
                 # Skip the shared-trait fold and the phase_hir_modules store
@@ -561,10 +579,14 @@ impl CompilerDriver:
             # instance) can still resolve cross-module trait default methods.
             shared_lowered_traits = lowering.lowered_traits
 
-            phase_hir_modules[name] = hir_module
+            # Re-read text identity through the retained surface owner after
+            # nested lowering; the pre-call `name` local is not stable on the
+            # staged native ABI.
+            val stable_module_name: text = retained_module_surfaces.surfaces[retained_surface_index].module_name
+            phase_hir_modules[stable_module_name] = hir_module
             if source_idx < 3:
                 eprint("[bootstrap-error-count] source_idx={source_idx} point=post-store count={self.ctx.error_count()}")
-            val validation_surface_index = _driver_module_surface_index_for_source(retained_module_surfaces, src, source_idx)
+            val validation_surface_index = retained_surface_index
             if validation_surface_index < 0:
                 self.ctx.add_error("Missing module surface alias for {name}")
             else:
@@ -581,7 +603,7 @@ impl CompilerDriver:
                 # back through Dict<text, HirModule> is unsafe under staged
                 # full-closure pressure and can lose the bootstrap entry.
                 phase_entry_hir = Some(hir_module)
-            log_phase("phase3:hir:file:done {src.path} module={name} funcs={hir_function_count}")
+            log_phase("phase3:hir:file:done {src.path} module={stable_module_name} funcs={hir_function_count}")
             log_trace("stored HIR module")
             source_idx = source_idx + 1
 

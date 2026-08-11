@@ -10,9 +10,11 @@ use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock, MirTypeDef,
 use compiler.backend.backend_types.{CodegenTarget, OptimizationLevel}
 use compiler.backend.codegen.{CodegenPipeline, CompiledModule}
 use compiler.backend.llvm_backend.{MirToLlvm, LlvmTargetConfig}
+use compiler.backend.backend.llvm_target.{LlvmTargetTriple}
 use compiler.backend.llvm_backend_tools.{llvm_bootstrap_last_object_path, compile_ir_to_object}
-use compiler.backend.backend._MirToLlvm.asm_constraints_helpers.{llvm_bootstrap_string_globals_text}
-use compiler.backend.llvm_ir_builder.{llvm_ir_builder_handle}
+use compiler.backend.backend._MirToLlvm.asm_constraints_helpers.{llvm_bootstrap_string_globals_reset, llvm_bootstrap_string_globals_text}
+use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, llvm_ir_builder_handle}
+use compiler.backend.llvm_type_mapper.{llvm_type_mapper_create_for_target}
 use compiler.backend.backend.llvm_native_link.{link_llvm_native, NativeLinkOptions}
 use compiler.backend.backend.backend_helpers.{compile_bootstrap_module_with_backend}
 use compiler.hir.hir_types.{SymbolTable, SymbolId}
@@ -26,6 +28,8 @@ use compiler.driver.driver_log_helpers.{log_phase, log_error}
 use compiler.driver.driver_source_loading.{_driver_module_name_from_path, _driver_physical_source_key}
 use compiler.driver.driver_mir_target.{driver_mir_target_context}
 use compiler.driver.driver_build.incremental.{native_build_compiler_identity}
+use std.platform.{get_host_os}
+use std.io_runtime.{host_arch}
 
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_write_text_at(path: text, offset: i64, content: text) -> bool
@@ -156,7 +160,7 @@ pub fn bootstrap_entry_source_index(ctx: CompileContext) -> i64:
         default_index = default_index + 1
     if ctx.sources.len() > 0: 0 else: -1
 
-pub fn bootstrap_lower_to_mir_context(ctx: CompileContext) -> (CompileContext, bool):
+pub fn bootstrap_lower_to_mir_context(ctx: CompileContext) -> CompileContext:
     """Bootstrap MIR lowering as a free function to avoid Stage1 method dispatch instability."""
     if bootstrap_trace_enabled():
         print "[driver-mir] bootstrap free:start"
@@ -173,7 +177,7 @@ pub fn bootstrap_lower_to_mir_context(ctx: CompileContext) -> (CompileContext, b
         val flat_bootstrap_mir = bootstrap_lower_flat_hir_modules_to_mir_for_target(entry_module_name, target_context)
         next_ctx.mir_modules[entry_module_name] = flat_bootstrap_mir
         next_ctx.set_bootstrap_entry_mir(entry_module_name, flat_bootstrap_mir)
-        return (next_ctx, next_ctx.error_count_value == 0)
+        return next_ctx
     bootstrap_clear_entry_hir_module()
     bootstrap_function_value_names_reset()
     for hir_module in ctx.hir_modules.values():
@@ -217,7 +221,7 @@ pub fn bootstrap_lower_to_mir_context(ctx: CompileContext) -> (CompileContext, b
     next_ctx.set_bootstrap_entry_mir(entry_module_name, bootstrap_mir)
     if bootstrap_trace_enabled():
         print "[driver-mir] bootstrap free:done"
-    (next_ctx, next_ctx.error_count_value == 0)
+    next_ctx
 
 pub fn bootstrap_empty_hir_module() -> HirModule:
     HirModule(
@@ -357,26 +361,70 @@ fn bootstrap_emit_llvm_trailer(translator: MirToLlvm):
 pub fn bootstrap_emit_real_llvm_object(output: text, opt_level_i64: i64) -> CompileResult:
     """Emit LLVM for bootstrap MIR functions from the local driver module instance."""
     log_phase("aot:bootstrap_real_llvm:start")
-    val config = LlvmTargetConfig.for_target_portable_numeric(CodegenTarget.Host, nil)
     val temp_obj = llvm_bootstrap_last_object_path()
     val temp_ir = bootstrap_llvm_ir_path_from_object_path(temp_obj)
-    var translator: MirToLlvm = MirToLlvm.create("app.cli.bootstrap_main", CodegenTarget.Host, nil)
-    val bootstrap_ir_handle = llvm_ir_builder_handle(translator.builder)
-    translator.builder.emit_module_header()
-    translator.emit_runtime_declarations()
     val count = bootstrap_mir_function_count()
     print "[bootstrap-real-llvm] count {count}"
     log_phase("aot:bootstrap_real_llvm:functions")
-    translator.register_bootstrap_signatures()
-    translator.emit_bootstrap_statics(bootstrap_ir_handle)
-    var idx = 0
-    while idx < count:
-        translator.translate_bootstrap_function_at(idx, bootstrap_ir_handle)
-        idx = idx + 1
+    # Construct the staged receiver only after diagnostics. A free print/log
+    # call made while this local is live can overwrite its flat stack slot.
+    val bootstrap_module_name = "app.cli.bootstrap_main"
+    llvm_bootstrap_string_globals_reset()
+    val detected_arch = host_arch()
+    val detected_os = get_host_os()
+    val llvm_arch = if detected_arch == "arm64" or detected_arch == "aarch64": "aarch64" elif detected_arch == "i386": "i686" else: detected_arch
+    val llvm_os = if detected_os == "macos": "darwin" else: detected_os
+    val llvm_vendor = if detected_os == "macos": "apple" elif detected_os == "windows": "pc" else: "unknown"
+    var llvm_env: text? = nil
+    if detected_os == "windows":
+        llvm_env = Some("msvc")
+    elif detected_os != "macos" and detected_os != "freebsd":
+        llvm_env = Some("gnu")
+    val host_triple = LlvmTargetTriple(arch: llvm_arch, vendor: llvm_vendor, os: llvm_os, env: llvm_env)
+    val host_cpu = if llvm_arch == "aarch64": "generic" elif llvm_arch == "x86_64": "x86-64" else: "generic"
+    val host_features: [text] = if llvm_arch == "aarch64": ["+neon", "+fp-armv8"] else: []
+    val config = LlvmTargetConfig(triple: host_triple, cpu: host_cpu, features: host_features, abi: nil)
+    var translator: MirToLlvm = MirToLlvm(
+        builder: LlvmIRBuilder.create(bootstrap_module_name, config.triple),
+        local_map: {},
+        config: config,
+        type_mapper: llvm_type_mapper_create_for_target(CodegenTarget.Host),
+        string_globals: [], string_global_text: "", string_counter: 0,
+        local_types: {}, value_types: {}, defined_locals: {}, return_locals: {},
+        bool_locals: {}, ptr_locals: {}, alloca_elem_types: {},
+        alloca_elem_types_by_name: {}, alloca_elem_unsigned: {}, unsigned_locals: {},
+        function_return_types: {}, function_return_unsigned: {}, function_param_types: {},
+        unknown_func_decls: {}, defined_func_names: {}, native_int_type: "i64",
+        current_return_type: "void", bootstrap_return_abi_text: "",
+        bootstrap_return_abi_unsigned: false, bootstrap_return_abi_active: false,
+        current_function_name: "", current_bootstrap_module: -1,
+        entry_main_symbol: true,
+        no_mangle: (rt_env_get("SIMPLE_NATIVE_BUILD_NO_MANGLE") ?? "") == "1",
+        global_static_names: {}, global_static_types: {}, owned_name_has_local: {},
+        debug_info: false
+    )
+    val bootstrap_ir_handle = llvm_ir_builder_handle(translator.builder)
+    translator.builder.emit_module_header()
+    translator.emit_runtime_declarations()
+    translator.emit_bootstrap_signatures_statics_and_functions(bootstrap_ir_handle)
     bootstrap_emit_llvm_trailer(translator)
     val llvm_ir = translator.builder.build()
     log_phase("aot:bootstrap_real_llvm:compile")
-    val result = compile_ir_to_object(llvm_ir, config, bootstrap_llvm_opt_level(opt_level_i64))
+    val compile_arch_detected = host_arch()
+    val compile_os_detected = get_host_os()
+    val compile_arch = if compile_arch_detected == "arm64" or compile_arch_detected == "aarch64": "aarch64" elif compile_arch_detected == "i386": "i686" else: compile_arch_detected
+    val compile_os = if compile_os_detected == "macos": "darwin" else: compile_os_detected
+    val compile_vendor = if compile_os_detected == "macos": "apple" elif compile_os_detected == "windows": "pc" else: "unknown"
+    var compile_env: text? = nil
+    if compile_os_detected == "windows":
+        compile_env = Some("msvc")
+    elif compile_os_detected != "macos" and compile_os_detected != "freebsd":
+        compile_env = Some("gnu")
+    val compile_triple = LlvmTargetTriple(arch: compile_arch, vendor: compile_vendor, os: compile_os, env: compile_env)
+    val compile_cpu = if compile_arch == "aarch64": "generic" elif compile_arch == "x86_64": "x86-64" else: "generic"
+    val compile_features: [text] = if compile_arch == "aarch64": ["+neon", "+fp-armv8"] else: []
+    val compile_config = LlvmTargetConfig(triple: compile_triple, cpu: compile_cpu, features: compile_features, abi: nil)
+    val result = compile_ir_to_object(llvm_ir, compile_config, bootstrap_llvm_opt_level(opt_level_i64))
     if result.is_err():
         val err = result.unwrap_err()
         return CompileResult.CodegenError(bootstrap_llvm_phase_message("llc", "ir={temp_ir} obj={temp_obj}", err))

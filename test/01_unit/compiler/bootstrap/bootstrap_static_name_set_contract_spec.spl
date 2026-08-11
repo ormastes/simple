@@ -1,0 +1,57 @@
+use std.spec
+use std.io_runtime.{file_read}
+
+describe "bootstrap LLVM static name ownership":
+    it "deduplicates the bounded static set without a native Dict receiver":
+        val source = file_read("src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl")
+
+        expect(source.contains("while emitted_index < index:")).to_equal(true)
+        expect(source.contains("bootstrap_mir_static_name_at(emitted_index)")).to_equal(true)
+        expect(source.contains("var emitted_names: [text] = []")).to_equal(false)
+        expect(source.contains("var emitted_names: Dict<text, bool> = {}")).to_equal(false)
+
+    it "keeps bootstrap string declarations in their dedicated owner":
+        val source = file_read("src/compiler/70.backend/backend/_MirToLlvm/asm_constraints_helpers.spl")
+
+        expect(source.contains("llvm_bootstrap_string_globals_add(decl)\n            # The bootstrap emitter consumes")).to_equal(true)
+        expect(source.contains("return global_name\n        self.string_globals = self.string_globals.push(decl)")).to_equal(true)
+
+    it "keeps static and function emission on one receiver":
+        val core = file_read("src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl")
+        val driver = file_read("src/compiler/80.driver/driver_bootstrap.spl")
+
+        expect(core.contains("me emit_bootstrap_signatures_statics_and_functions(ir_handle: i64):")).to_equal(true)
+        expect(core.contains("var translator_owner: MirToLlvm = self")).to_equal(false)
+        expect(core.contains("val bootstrap_native_int_type = self.native_int_type")).to_equal(true)
+        expect(core.contains("print \"[bootstrap-real-llvm] statics")).to_equal(false)
+        expect(core.contains("fn bootstrap_llvm_function_index_for_name(func_name: text) -> i64:")).to_equal(true)
+        expect(core.contains("if not lookup_name.contains(\".\"):")).to_equal(true)
+        expect(core.contains("if candidate.ends_with(suffix):")).to_equal(true)
+        expect(core.contains("if unique_index >= 0:\n                    return -1")).to_equal(true)
+        expect(core.contains("bootstrap_mir_function_param_type_tag_at(bootstrap_index, index)")).to_equal(true)
+        expect(core.contains("var signature_index = 0")).to_equal(false)
+        expect(core.contains("self.register_bootstrap_signatures()\n        val static_count")).to_equal(false)
+        expect(core.contains("self.translate_bootstrap_function_at(function_index, ir_handle)")).to_equal(true)
+        expect(driver.contains("translator.emit_bootstrap_signatures_statics_and_functions(bootstrap_ir_handle)")).to_equal(true)
+        expect(driver.contains("log_phase(\"aot:bootstrap_real_llvm:functions\")\n    # Construct the staged receiver only after diagnostics.")).to_equal(true)
+        expect(driver.contains("val host_triple = LlvmTargetTriple(arch: llvm_arch")).to_equal(true)
+        expect(driver.contains("val bootstrap_module_name = \"app.cli.bootstrap_main\"\n    llvm_bootstrap_string_globals_reset()")).to_equal(true)
+        expect(driver.contains("val compile_config = LlvmTargetConfig(triple: compile_triple")).to_equal(true)
+        expect(driver.contains("LlvmTargetConfig.for_target_portable_numeric(CodegenTarget.Host, nil)")).to_equal(false)
+        expect(driver.contains("var translator: MirToLlvm = MirToLlvm(\n        builder:")).to_equal(true)
+        expect(driver.contains("MirToLlvm.create(\"app.cli.bootstrap_main\"")).to_equal(false)
+        expect(driver.contains("translator.register_bootstrap_signatures()")).to_equal(false)
+        expect(driver.contains("translator.emit_bootstrap_statics(bootstrap_ir_handle)")).to_equal(false)
+
+    it "builds C fallback text before returning from the export owner":
+        val core = file_read("src/compiler/70.backend/backend/_CBackendTranslate/class_core.spl")
+        val exports = file_read("src/compiler/70.backend/backend/_CBackendTranslate/instruction_lowering.spl")
+
+        expect(core.contains("self.emit_export_wrappers_and_build(module)")).to_equal(true)
+        expect(exports.contains("me emit_export_wrappers_and_build(module: MirModule) -> text:")).to_equal(true)
+        expect(exports.contains("if not has_exports:\n            return self.builder.build()")).to_equal(true)
+
+    it "attributes rejected LLVM conversions to their function owner":
+        val core = file_read("src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl")
+
+        expect(core.contains("unsupported LLVM value conversion from {src_ty} to {dst_ty} function={self.current_function_name} value={value}")).to_equal(true)
