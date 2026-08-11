@@ -346,7 +346,7 @@ pub(crate) fn compile_struct_init<M: Module>(
     vtable_data_id: Option<cranelift_module::DataId>,
 ) {
     let size_val = builder.ins().iconst(types::I64, struct_size as i64);
-    let ptr = call_runtime_1(ctx, builder, "rt_struct_alloc", size_val);
+    let ptr = call_runtime_1(ctx, builder, "rt_alloc", size_val);
 
     // Write vtable pointer at offset 0 if this struct implements a trait
     if let Some(data_id) = vtable_data_id {
@@ -1746,7 +1746,36 @@ fn try_compile_builtin_method_call<M: Module>(
         // the enum's payload for a genuine boxed `Enum`, and otherwise
         // returns the receiver value unchanged (already the right answer for
         // a flat-nullable's raw/tagged payload).
-        "unwrap" | "unwrap_or" => "rt_unwrap_or_self",
+        // `.unwrap()` must return the Ok/Some payload for ANY enum receiver
+        // (Result, Option, ...) and TRAP on Err/None — real method-call
+        // semantics, distinct from `rt_unwrap_or_self` below `unwrap_or`
+        // uses, which backs the never-trapping `??` operator and only
+        // special-cases the reserved Option enum id (returning every other
+        // enum, including Result, unchanged). Routing `.unwrap()` through
+        // that operator helper silently returned the boxed `Result` enum
+        // itself for `Result.Ok(v).unwrap()` instead of `v` — see
+        // doc/08_tracking/bug/native_unwrap_returns_enum_wrapper_instead_of_payload_2026-08-11.md.
+        "unwrap" => "rt_unwrap_or_trap",
+        "unwrap_or" => "rt_unwrap_or_self",
+        // `.expect(msg)` — same Ok/Some-payload-or-trap semantics as
+        // `.unwrap()` (see the comment above). The custom message argument is
+        // not threaded through to the trap text yet (`rt_unwrap_or_trap`
+        // takes only the receiver); that is a real limitation, not silently
+        // dropped functionality — .expect() traps with the same fixed
+        // "called unwrap on Err/None" text .unwrap() does rather than the
+        // caller's message. Without this arm, `.expect()` fell through to
+        // "Function 'expect' not found" (no runtime symbol of that name
+        // exists) because this table is the only builtin-method dispatch
+        // reached for a bare/dynamically-typed Option/Result receiver.
+        // See doc/08_tracking/bug/native_unwrap_returns_enum_wrapper_instead_of_payload_2026-08-11.md.
+        "expect" => {
+            let Some(&func_id) = ctx.runtime_funcs.get("rt_unwrap_or_trap") else {
+                return Ok(None);
+            };
+            let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
+            let call = adapted_call(builder, func_ref, &[receiver_val]);
+            return Ok(Some(builder.inst_results(call)[0]));
+        }
         "is_none" => {
             let Some(&func_id) = ctx.runtime_funcs.get("rt_is_none") else {
                 return Ok(None);

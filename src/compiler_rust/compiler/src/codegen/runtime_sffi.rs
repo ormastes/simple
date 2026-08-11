@@ -639,6 +639,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_enum_discriminant", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_enum_payload", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_unwrap_or_self", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_unwrap_or_trap", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_is_none", &[I64], &[I8]),
     RuntimeFuncSpec::new("rt_is_some", &[I64], &[I8]),
     RuntimeFuncSpec::new("rt_option_map", &[I64, I64], &[I64]),
@@ -679,8 +680,6 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // Raw memory allocation (zero-cost struct support)
     // =========================================================================
     RuntimeFuncSpec::new("rt_alloc", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_struct_alloc", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_struct_receiver_valid", &[I64, I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_free", &[I64], &[]),
     RuntimeFuncSpec::new("rt_ptr_to_value", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_value_to_ptr", &[I64], &[I64]),

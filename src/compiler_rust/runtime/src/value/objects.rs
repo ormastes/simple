@@ -322,8 +322,63 @@ pub extern "C" fn rt_unwrap_or_self(value: RuntimeValue) -> RuntimeValue {
         }
     } else {
         // Not an enum — return the value itself (could be a raw string, int, etc.)
+        // (see below for the sibling `rt_unwrap_or_trap` used by `.unwrap()`)
         value
     }
+}
+
+/// Unwrap the payload of a present `Result.Ok`/`Option.Some` value; abort
+/// (matching the native-lane error-raise idiom used elsewhere in this crate,
+/// e.g. `rt_slice`'s negative-step check) if the receiver is a genuine
+/// `Result.Err`/`Option.None`. This is the real `.unwrap()` METHOD-CALL
+/// semantics and is intentionally a separate function from
+/// `rt_unwrap_or_self`: that helper backs the `??` nil-coalesce OPERATOR,
+/// which must never trap and must leave non-Option enums (including
+/// `Result` and arbitrary user enums) untouched to avoid corrupting a later
+/// `match`. Routing `.unwrap()` through `rt_unwrap_or_self` (as the codegen
+/// used to) silently returned the boxed `Result` enum itself for
+/// `Result.Ok(v).unwrap()` instead of `v`, because `rt_unwrap_or_self` only
+/// special-cases the reserved `OPTION_ENUM_ID` and returns every other enum
+/// receiver unchanged — see
+/// doc/08_tracking/bug/native_unwrap_returns_enum_wrapper_instead_of_payload_2026-08-11.md.
+///
+/// `Result` has no reserved enum_id (it is registered like any other
+/// stdlib/user enum), so `Ok`/`Err` are identified the same way
+/// `is_ok`/`is_err` already do in codegen: by discriminant-hash comparison
+/// against the canonical variant names, not by enum_id. A receiver that is
+/// neither Option nor Result (an arbitrary user enum) falls back to the old
+/// "return self" behavior, unchanged from `rt_unwrap_or_self` — widening
+/// unwrap-trap semantics to arbitrary user enums is out of scope here.
+#[no_mangle]
+pub extern "C" fn rt_unwrap_or_trap(value: RuntimeValue) -> RuntimeValue {
+    let Some(p) = get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum) else {
+        // Not a boxed enum — bare/flat-nullable payload convention: return
+        // the raw value unchanged (matches `rt_unwrap_or_self`).
+        return value;
+    };
+    let (enum_id, discriminant, payload) = unsafe { ((*p).enum_id, (*p).discriminant, (*p).payload) };
+
+    if enum_id == OPTION_ENUM_ID {
+        if discriminant == hash_variant_discriminant("Some") {
+            return payload;
+        }
+        if discriminant == hash_variant_discriminant("None") {
+            eprintln!("error: called unwrap on None");
+            std::process::abort();
+        }
+        return value;
+    }
+
+    if discriminant == hash_variant_discriminant("Ok") {
+        return payload;
+    }
+    if discriminant == hash_variant_discriminant("Err") {
+        eprintln!("error: called unwrap on Err");
+        std::process::abort();
+    }
+
+    // Arbitrary user enum: preserve the pre-existing "return self" fallback.
+    value
 }
 
 /// Get the payload of an enum value
