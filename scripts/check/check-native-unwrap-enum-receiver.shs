@@ -18,15 +18,6 @@
 # it never traps on Err/None. See
 # doc/08_tracking/bug/native_unwrap_returns_enum_wrapper_instead_of_payload_2026-08-11.md.
 #
-# `.unwrap_or(default)` had the SAME `rt_unwrap_or_self` routing and was left
-# unfixed by the first pass of this bug (documented there as a known
-# limitation): since Result has no reserved enum_id the way Option does,
-# `Result.Ok(v).unwrap_or(d)` AND `Result.Err(e).unwrap_or(d)` both hit the
-# "return self" fallback and printed the boxed Result enum instead of `v` /
-# `d`. Fixed by routing `unwrap_or` to a new `rt_unwrap_or_value(receiver,
-# default)` helper (discriminant-hash technique, same as `rt_unwrap_or_trap`)
-# instead. `??`'s `rt_unwrap_or_self` itself is UNCHANGED.
-#
 # WHY A SCRIPT AND NOT ONLY A SPEC
 # `bin/simple test` (the deployed pure-Simple tool) defaults to the
 # tree-walk interpreter, which does not reproduce this — only the Rust seed's
@@ -62,10 +53,8 @@ REPO_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT" || { echo "ERROR — nothing was checked (cannot cd to repo root)"; exit 2; }
 
 # Fix-landing timestamp: any candidate binary built strictly before this is
-# stale and cannot possibly carry the fix. 2026-08-11 05:45:17 UTC — the
-# unwrap_or(default) follow-up fix (rt_unwrap_or_value), later than the
-# original unwrap()/expect() fix at 04:08:03 UTC.
-FIX_EPOCH=1786427117
+# stale and cannot possibly carry the fix. 2026-08-11 04:08:03 UTC.
+FIX_EPOCH=1786421283
 
 FIXTURE_DIR="test/fixtures/native_unwrap_enum_receiver"
 SEED_BIN="${1:-${SIMPLE_BIN:-}}"
@@ -97,7 +86,7 @@ echo "check-native-unwrap-enum-receiver — binary: $SEED_BIN"
 ls -l "$SEED_BIN" 2>/dev/null | awk '{print "  size/mtime: " $5 " " $6 " " $7 " " $8}'
 
 for f in ok_unwrap.spl some_unwrap.spl err_unwrap.spl none_unwrap.spl \
-         ok_unwrap_or.spl some_unwrap_or.spl err_unwrap_or.spl none_unwrap_or.spl; do
+         ok_expect.spl some_expect.spl err_expect.spl none_expect.spl; do
     [ -f "$FIXTURE_DIR/$f" ] || { echo "ERROR — nothing was checked (missing fixture $f)"; exit 2; }
 done
 
@@ -131,17 +120,36 @@ check_trap() {
     esac
 }
 
+check_trap_with_message() {
+    name="$1"; fixture="$2"; want_substring="$3"
+    out="$("$SEED_BIN" run "$FIXTURE_DIR/$fixture" 2>&1 | grep -v '^WARNING' | grep -v 'pure-Simple bin/simple')"
+    checked=$((checked + 1))
+    case "$out" in
+        *"$want_substring"*)
+            echo "PASS  $name traps with custom message: '$out'"
+            ;;
+        *)
+            echo "FAIL  $name did not trap with custom message '$want_substring', got: '$out'"
+            failures="$failures $name"
+            ;;
+    esac
+}
+
 check_payload "Ok(42).unwrap()==42"     "ok_unwrap.spl"   "42"
 check_payload "Some(42).unwrap()==42"   "some_unwrap.spl" "42"
 check_trap    "Err(x).unwrap() traps"   "err_unwrap.spl"
 check_trap    "None.unwrap() traps"     "none_unwrap.spl"
 
-# unwrap_or(default): never traps. Ok/Some yield the payload; Err/None yield
-# the DEFAULT, not the boxed enum wrapper and not a trap.
-check_payload "Ok(1).unwrap_or(9)==1"     "ok_unwrap_or.spl"   "1"
-check_payload "Some(1).unwrap_or(9)==1"   "some_unwrap_or.spl" "1"
-check_payload "Err(x).unwrap_or(9)==9"    "err_unwrap_or.spl"  "9"
-check_payload "None.unwrap_or(9)==9"      "none_unwrap_or.spl" "9"
+# `.expect(msg)` — same Ok/Some-payload-or-trap semantics as `.unwrap()`,
+# reached via a distinct (previously fail-closed) dispatch path for the
+# fully-unannotated dynamic receiver case, and must trap with the CALLER'S
+# message (not `.unwrap()`'s fixed text) via rt_expect_or_trap in
+# runtime/src/value/objects.rs. See
+# doc/08_tracking/bug/native_unwrap_returns_enum_wrapper_instead_of_payload_2026-08-11.md.
+check_payload "Ok(42).expect()==42"     "ok_expect.spl"   "42"
+check_payload "Some(42).expect()==42"   "some_expect.spl" "42"
+check_trap_with_message "Err(x).expect(msg) traps with msg"  "err_expect.spl"  "custom-err-message"
+check_trap_with_message "None.expect(msg) traps with msg"    "none_expect.spl" "custom-none-message"
 
 if [ -n "$failures" ]; then
     echo "FAIL —$failures"

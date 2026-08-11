@@ -1324,36 +1324,6 @@ impl<'a> MirLowerer<'a> {
         }
     }
 
-    /// Box a full-width unsigned integer before it crosses an erased
-    /// `RuntimeValue` boundary. `BoxInt` only preserves signed 61-bit values;
-    /// using it for u64 also lets low payload bits masquerade as value tags.
-    pub(super) fn box_u64_runtime_value(&mut self, value: VReg) -> MirLowerResult<VReg> {
-        self.with_func(|func, current_block| {
-            let boxed = func.new_vreg();
-            func.block_mut(current_block).unwrap().instructions.push(MirInst::Call {
-                dest: Some(boxed),
-                target: CallTarget::from_name("rt_value_u64"),
-                args: vec![value],
-            });
-            boxed
-        })
-    }
-
-    /// Recover a full-width unsigned integer after an erased `RuntimeValue`
-    /// boundary. `UnboxInt` only understands the inline signed-integer tag;
-    /// u64 values use the lossless `HeapUInt` representation instead.
-    pub(super) fn unbox_u64_runtime_value(&mut self, value: VReg) -> MirLowerResult<VReg> {
-        self.with_func(|func, current_block| {
-            let unboxed = func.new_vreg();
-            func.block_mut(current_block).unwrap().instructions.push(MirInst::Call {
-                dest: Some(unboxed),
-                target: CallTarget::from_name("rt_value_as_u64"),
-                args: vec![value],
-            });
-            unboxed
-        })
-    }
-
     /// Set current block - explicit state mutation
     pub(super) fn set_current_block(&mut self, block: BlockId) -> MirLowerResult<()> {
         self.state.try_set_current_block(block)

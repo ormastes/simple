@@ -21,16 +21,6 @@ awk '
 ' scripts/setup/setup.shs > "$BIN/simple_lsp_mcp_server"
 chmod +x "$BIN/simple_lsp_mcp_server"
 
-for t32 in t32_mcp_server t32_lsp_mcp_server; do
-  awk -v marker="cat > $t32 <<'EOF'" '
-    $0 == marker { copying = 1; next }
-    copying && /^EOF$/ { exit }
-    copying { print }
-  ' scripts/setup/setup.shs > "$BIN/$t32"
-  [ -s "$BIN/$t32" ] || { echo "missing $t32 wrapper in setup.shs" >&2; exit 1; }
-  chmod +x "$BIN/$t32"
-done
-
 # The fast shell core must preserve top-level JSON-RPC ids without needing a
 # native artifact.
 cat > "$TMPDIR/input" <<'EOF'
@@ -253,82 +243,5 @@ if SIMPLE_PLATFORM_TRIPLE=missing "$BIN/simple_lsp_mcp_server" >/dev/null 2>&1; 
   exit 1
 fi
 
-# --- TRACE32 wrappers: cached-artifact-only, same contract as the two above ---
-t32_env_var_t32_mcp_server=T32_MCP_NATIVE
-t32_env_var_t32_lsp_mcp_server=T32_LSP_MCP_NATIVE
-for t32 in t32_mcp_server t32_lsp_mcp_server; do
-  eval "env_var=\$t32_env_var_$t32"
-  grep -q "release/aarch64-apple-darwin/$t32" "$BIN/$t32"
-  grep -q "release/x86_64-apple-darwin/$t32" "$BIN/$t32"
-  grep -q 'native_hash_is_valid "${candidate}"' "$BIN/$t32"
-  grep -q 'mkdir -p "${log_dir}"' "$BIN/$t32"
-  grep -q "$env_var" "$BIN/$t32"
-  if grep -q 'src/compiler_rust/target\|build/bootstrap/\|smf_runtime=\|mode=source\|exec .*src/app/' "$BIN/$t32"; then
-    echo "raw-source launch in $t32" >&2
-    exit 1
-  fi
-
-  # No admitted artifact -> refuse, never fall back to source.
-  if "$BIN/$t32" >/dev/null 2>&1; then exit 1; fi
-
-  cp "$TMPDIR/native" "$BIN/release/x86_64-unknown-linux-gnu/$t32"
-  if command -v sha256sum >/dev/null 2>&1; then
-    t32_hash="$(sha256sum "$TMPDIR/native" | awk '{print $1}')"
-  else
-    t32_hash="$(shasum -a 256 "$TMPDIR/native" | awk '{print $1}')"
-  fi
-  printf '%s\n' "$t32_hash" > "$BIN/release/x86_64-unknown-linux-gnu/$t32.sha256"
-  "$BIN/$t32" alpha beta > "$TMPDIR/$t32.out"
-  grep -q "release/x86_64-unknown-linux-gnu/$t32" "$TMPDIR/$t32.out"
-  grep -q 'args=alpha beta' "$TMPDIR/$t32.out"
-  grep -q "cwd=$ROOT" "$TMPDIR/$t32.out"
-
-  # Tampered artifact must be rejected.
-  printf '%s\n' invalid > "$BIN/release/x86_64-unknown-linux-gnu/$t32.sha256"
-  if "$BIN/$t32" >/dev/null 2>&1; then exit 1; fi
-  if eval "$env_var=\"\$TMPDIR/missing\" \"\$BIN/$t32\"" >/dev/null 2>&1; then exit 1; fi
-  rm -f "$BIN/release/x86_64-unknown-linux-gnu/$t32" \
-    "$BIN/release/x86_64-unknown-linux-gnu/$t32.sha256"
-done
-
-# --- Shipped MCP client configs must launch cached artifacts, not raw source ---
-#
-# The wrapper checks above only prove bin/simple_mcp_server and
-# bin/simple_lsp_mcp_server are native-only. Until 2026-08-11 nothing checked the
-# CONFIGS that clients actually launch, and four of them bypassed the wrappers to
-# run raw .spl: .mcp.json's simple-lsp-mcp (node bridge + `bin/simple run
-# src/app/simple_lsp_mcp/main.spl`) and three plugin configs running
-# `bin/simple src/app/mcp/main.spl`. Measured cost of the bypass on 2026-08-11:
-# simple-lsp-mcp startup 0.20s / 82.9MB RSS vs 0.03s / 4.1MB through the wrapper;
-# simple-mcp startup 0.50s / 171.6MB RSS vs 0.02s / 4.1MB.
-config_violations=0
-for cfg in .mcp.json \
-  tools/claude-plugin/simple-mcp/.mcp.json \
-  tools/claude-plugin/marketplace/plugins/simple-mcp/.mcp.json \
-  tools/claude-plugin/simple-codex/.mcp.json
-do
-  [ -f "$cfg" ] || { echo "missing MCP config: $cfg" >&2; config_violations=$((config_violations+1)); continue; }
-  # A "command"/"args" launch of a .spl path is a raw-source launch. Prose in
-  # "_info" / "_comment" keys is allowed to name the source file.
-  if grep -v '^[[:space:]]*"_' "$cfg" | grep -q '\.spl'; then
-    echo "raw-source MCP launch in $cfg" >&2
-    config_violations=$((config_violations+1))
-  fi
-done
-if [ "$config_violations" -ne 0 ]; then
-  echo "mcp_config_cached_artifact_contract=fail violations=$config_violations" >&2
-  exit 1
-fi
-
-# A shipped config must not point at a binary this repo cannot produce.
-for cfg in tools/claude-plugin/obsidian-search/.mcp.json tools/claude-plugin/obsidian-search/.lsp.json; do
-  if [ -f "$cfg" ]; then
-    echo "dead MCP config present (no implementation in this repo): $cfg" >&2
-    exit 1
-  fi
-done
-
 echo "mcp_wrapper_source_contract=pass"
 echo "mcp_wrapper_native_contract=pass"
-echo "mcp_config_cached_artifact_contract=pass configs=4"
-echo "t32_wrapper_native_contract=pass wrappers=2"

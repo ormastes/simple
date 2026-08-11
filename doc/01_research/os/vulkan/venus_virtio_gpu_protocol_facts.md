@@ -180,47 +180,6 @@ reference. No other owned file in the repo defines any virtio-gpu 3D constant.
   load the module at all: `hw-display-virtio-gpu-gl.so: undefined symbol:
   qemu_egl_display`.** E1.4's QEMU line is therefore unverified *and* the local
   QEMU cannot currently run this lane — resolve before E1, not E2.
-
-## 10. RESOLVED 2026-08-11 — venus is definitively unavailable on this host (not "reportedly")
-
-`doc/03_plan/os/vulkan/board_vulkan_parallel_soc_lanes_2026-08-10.md:68` says
-"`virtio-gpu-gl` **reportedly** fails to load on the host" — that hedge is now
-settled by direct measurement, HIGH confidence, on
-`qemu-system-x86_64 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.17)`:
-
-- `qemu-system-x86_64 -device virtio-gpu-gl,help` → `failed to open module:
-  .../hw-display-virtio-gpu-gl.so: undefined symbol: qemu_egl_display`, even
-  with `qemu-system-modules-opengl` **installed** (all six of its `.so` files
-  checked with `nm -D`; none defines `qemu_egl_display` — it is meant to live in
-  the main `qemu-system-x86_64` binary itself when built `--enable-opengl`, and
-  on this Ubuntu package it is absent: `nm -D /usr/bin/qemu-system-x86_64 | grep
-  egl_display` returns nothing).
-- Passing `-display egl-headless` first (to force the EGL/opengl UI module to
-  load before the device module) does not help — same undefined-symbol error at
-  `-device ...,help` time.
-- Attempting to actually attach the device confirms the same root cause with a
-  clean, non-cryptic message: `qemu-system-x86_64 -M q35 -display egl-headless
-  -device virtio-gpu-gl -nographic → -device virtio-gpu-gl: opengl is not
-  available`. This is QEMU's own runtime check, not a module-loading artifact.
-- `-device virtio-gpu-gl,venus=on,help` fails with the identical undefined-symbol
-  error — venus is not a distinct blocker here, it never gets far enough to be
-  evaluated.
-- `libvirglrenderer1` **is** installed (1.0.0-1ubuntu2), so the earlier
-  "no libvirglrenderer on this host" note in this doc's history no longer holds
-  — but it is moot: the failure is in the QEMU binary's own OpenGL/EGL glue, one
-  layer below where virglrenderer or venus support would even be consulted.
-
-**Verdict: this is a genuine host/package defect in the Ubuntu 24.04
-`qemu-system-x86_64` 8.2.2 build — its main binary was not built with
-`--enable-opengl` (or a required symbol export was dropped), so `virtio-gpu-gl`
-cannot attach to ANY machine on this host, OVMF-pflash or otherwise, venus or
-plain virgl.** It is not specific to venus, not specific to `context_init`, and
-not fixable by any QEMU command-line flag or device property — it requires a
-QEMU package rebuilt with working OpenGL support (or a different QEMU build)
-before B0 can be attempted at all. Filed as
-`doc/08_tracking/bug/host_qemu_virtio_gpu_gl_missing_egl_symbol_2026-08-11.md`.
-`doc/03_plan/os/vulkan/board_vulkan_parallel_soc_lanes_2026-08-10.md:68` should
-be updated by its owning lane to drop "reportedly" per this evidence.
 - `RESP_OK_MAP_INFO.map_info` cache value actually returned for the ring blob.
 - The exact `vkCreateRingMESA` wire encoding, from Mesa's
   `venus-protocol/vn_protocol_driver_transport.h` — fetch the real header; do

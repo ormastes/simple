@@ -1,44 +1,10 @@
 # Most math methods do not exist on numeric receivers (`f64.sin`, `i64.abs`, ...)
 
 - **Date:** 2026-08-10
-- **Status:** FIXED 2026-08-11
+- **Status:** OPEN
 - **Lanes:** interpreter and JIT (`SIMPLE_JIT_STRICT=1`) — both, identically.
 - **Class:** missing dispatch. Loud, not silent — the runtime refuses rather
   than substituting a placeholder, which is the correct behaviour.
-
-## Fix (2026-08-11)
-
-Two independent points, both required (fixing only the first changes nothing
-observable):
-
-1. **`hir/lower/expr/mod.rs::builtin_numeric_method_result_type`** — extended
-   the result-type whitelist (previously `sqrt`/`abs`/`floor`/`ceil`/`round`
-   only) to also stamp `trunc`/`sin`/`cos`/`tan`/`asin`/`acos`/`atan`/`sinh`/
-   `cosh`/`tanh`/`exp`/`ln`/`log2`/`log10`/`cbrt`/`pow`/`powf`/`max`/`min` on a
-   float receiver, and `abs` on all integer receiver widths.
-2. **`codegen/instr/closures_structs.rs::try_compile_builtin_method_call`** —
-   this, not `codegen/instr/methods.rs::compile_builtin_method`, is the actual
-   dispatch site for method calls lowered as `MirInst::MethodCallStatic` (both
-   `DispatchMode::Dynamic` and `DispatchMode::Static` funnel into
-   `MethodCallStatic`; `MirInst::BuiltinMethod` — what `methods.rs` handles —
-   is never emitted for a real method-call HIR node). Added: `trunc` and
-   integer `abs` as native Cranelift instructions (`trunc`, `iabs`), and the
-   remaining methods routed to the pre-existing `rt_math_*` runtime symbols
-   (already used by the free-function forms via
-   `lower_libm_math`) through `call_runtime_1`/`call_runtime_2`.
-   `codegen/common_backend.rs::referenced_call_names` also needed a
-   `MirInst::MethodCallStatic` arm to pre-declare the `rt_math_*` family
-   (mirroring the pre-existing `BuiltinMethod` arm) — without it codegen
-   panicked with `missing runtime fn 'rt_math_sin'` the first time an uncommon
-   method was hit, because the runtime-import pre-pass never saw the name (it
-   is chosen inside codegen, not named in the MIR).
-
-Verified red-then-green on a from-source seed build
-(`/mnt/data/cargo-target/release/simple`, `simple-driver` package) — all ten
-symptom rows plus the five already-working controls, both the default
-(JIT-first) and `SIMPLE_JIT_STRICT=1` lanes. Fenced by
-`scripts/check/check-numeric-method-family-dispatch.shs` (28 assertions, both
-lanes green).
 
 ## Symptom
 

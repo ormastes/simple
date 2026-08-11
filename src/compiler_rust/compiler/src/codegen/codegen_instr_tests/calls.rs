@@ -262,19 +262,10 @@ fn codegen_bare_unwrap_calls_rt_unwrap_or_self_not_rt_enum_payload() {
         dest
     });
 
-    // 2026-08-11: `.unwrap()` was re-routed from `rt_unwrap_or_self` to the
-    // dedicated `rt_unwrap_or_trap` -- `rt_unwrap_or_self` backs the
-    // never-trapping `??` operator and only special-cases the reserved
-    // Option enum id, silently returning a boxed `Result` (or any other
-    // non-Option enum) receiver UNCHANGED instead of unwrapping it. See
-    // doc/08_tracking/bug/native_unwrap_returns_enum_wrapper_instead_of_payload_2026-08-11.md.
-    // `unwrap_or` keeps the old mapping (out of scope for that fix); see the
-    // sibling test below.
     assert!(
-        object_relocates_to_symbol(&object, "rt_unwrap_or_trap"),
-        "bare .unwrap() must compile to a call to rt_unwrap_or_trap (correct fallback: \
-         returns the receiver unchanged for a non-enum/flat-nullable value, unwraps \
-         Ok/Some for Result/Option, and traps on Err/None)"
+        object_relocates_to_symbol(&object, "rt_unwrap_or_self"),
+        "bare .unwrap() must compile to a call to rt_unwrap_or_self (correct fallback: \
+         returns the receiver unchanged for a non-enum/flat-nullable value)"
     );
     assert!(
         !object_relocates_to_symbol(&object, "rt_enum_payload"),
@@ -344,10 +335,8 @@ fn codegen_chained_unwrap_calls_use_rt_unwrap_or_self_at_every_step() {
     });
 
     assert!(
-        object_relocates_to_symbol(&object, "rt_unwrap_or_trap"),
-        "every .unwrap() call in a chain must compile to rt_unwrap_or_trap (2026-08-11: \
-         re-routed from rt_unwrap_or_self, see \
-         doc/08_tracking/bug/native_unwrap_returns_enum_wrapper_instead_of_payload_2026-08-11.md)"
+        object_relocates_to_symbol(&object, "rt_unwrap_or_self"),
+        "every .unwrap() call in a chain must compile to rt_unwrap_or_self"
     );
     assert!(
         !object_relocates_to_symbol(&object, "rt_enum_payload"),

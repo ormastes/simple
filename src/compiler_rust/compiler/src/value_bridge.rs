@@ -51,10 +51,6 @@ pub mod bridge_tags {
     pub const HANDLE: u8 = 20;
     pub const BORROW: u8 = 21;
     pub const BORROW_MUT: u8 = 22;
-    pub const UINT8: u8 = 23;
-    pub const UINT16: u8 = 24;
-    pub const UINT32: u8 = 25;
-    pub const UINT64: u8 = 26;
     pub const ERROR: u8 = 255;
 }
 
@@ -69,9 +65,6 @@ impl std::fmt::Debug for BridgeValue {
         match self.tag {
             bridge_tags::NIL => write!(f, "BridgeValue::Nil"),
             bridge_tags::INT => write!(f, "BridgeValue::Int({})", self.payload as i64),
-            bridge_tags::UINT8 | bridge_tags::UINT16 | bridge_tags::UINT32 | bridge_tags::UINT64 => {
-                write!(f, "BridgeValue::UInt({})", self.payload)
-            }
             bridge_tags::FLOAT => write!(f, "BridgeValue::Float({})", f64::from_bits(self.payload)),
             bridge_tags::BOOL => write!(f, "BridgeValue::Bool({})", self.payload != 0),
             bridge_tags::STRING => write!(f, "BridgeValue::String(...)"),
@@ -129,22 +122,6 @@ impl BridgeValue {
         Self {
             tag: bridge_tags::INT,
             payload: i as u64,
-            extended: std::ptr::null_mut(),
-        }
-    }
-
-    /// Create an unsigned BridgeValue while preserving its declared width.
-    #[inline]
-    pub const fn uint(value: u64, width: u8) -> Self {
-        let tag = match width {
-            8 => bridge_tags::UINT8,
-            16 => bridge_tags::UINT16,
-            32 => bridge_tags::UINT32,
-            _ => bridge_tags::UINT64,
-        };
-        Self {
-            tag,
-            payload: value,
             extended: std::ptr::null_mut(),
         }
     }
@@ -308,7 +285,7 @@ impl From<&Value> for BridgeValue {
         match v {
             Value::Nil => BridgeValue::nil(),
             Value::Int(i) => BridgeValue::int(*i),
-            Value::UInt { value, width } => BridgeValue::uint(*value, *width),
+            Value::UInt { value, .. } => BridgeValue::int(*value as i64),
             Value::Float(f) => BridgeValue::float(*f),
             // Float32 widens to f64 at the SFFI boundary; bridge tag set has no f32 slot.
             Value::Float32(f) => BridgeValue::float(*f as f64),
@@ -524,10 +501,6 @@ impl BridgeValue {
         match self.tag {
             bridge_tags::NIL => Value::Nil,
             bridge_tags::INT => Value::Int(self.payload as i64),
-            bridge_tags::UINT8 => Value::UInt { value: self.payload, width: 8 },
-            bridge_tags::UINT16 => Value::UInt { value: self.payload, width: 16 },
-            bridge_tags::UINT32 => Value::UInt { value: self.payload, width: 32 },
-            bridge_tags::UINT64 => Value::UInt { value: self.payload, width: 64 },
             bridge_tags::FLOAT => Value::Float(f64::from_bits(self.payload)),
             bridge_tags::BOOL => Value::Bool(self.payload != 0),
             bridge_tags::STRING => {
@@ -767,28 +740,6 @@ mod tests {
         let bv = BridgeValue::int(42);
         let v = unsafe { bv.to_value() };
         assert_eq!(v, Value::Int(42));
-    }
-
-    #[test]
-    fn unsigned_bridge_roundtrip_preserves_high_bits_and_width() {
-        for (value, width) in [(255, 8), (65_535, 16), (u32::MAX as u64, 32), (u64::MAX, 64)] {
-            let source = Value::UInt { value, width };
-            let bridge = BridgeValue::from(&source);
-            assert_ne!(bridge.tag, bridge_tags::INT);
-            assert_eq!(bridge.payload, value);
-            assert_eq!(unsafe { bridge.to_value() }, source);
-        }
-    }
-
-    #[test]
-    fn unsigned_numeric_equality_is_transitive_across_widths_and_signed_values() {
-        let narrow = Value::UInt { value: 7, width: 8 };
-        let wide = Value::UInt { value: 7, width: 64 };
-        let signed = Value::Int(7);
-        assert_eq!(narrow, wide);
-        assert_eq!(narrow, signed);
-        assert_eq!(wide, signed);
-        assert_ne!(Value::UInt { value: u64::MAX, width: 64 }, Value::Int(-1));
     }
 
     #[test]

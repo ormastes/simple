@@ -2,11 +2,11 @@
 
 > Source-synchronized unit manual. The current self-hosted SSpec runner is
 > blocked before trustworthy scenario execution, so this document records
-> 64 active scenarios and 0 executed scenarios.
+> 63 active scenarios and 0 executed scenarios.
 
 | Tests | Active | Skipped | Pending | Executed |
 |------:|-------:|--------:|--------:|---------:|
-| 64 | 64 | 0 | 0 | 0 |
+| 63 | 63 | 0 | 0 | 0 |
 
 **Executable source:** `test/01_unit/app/llm_caret/main_spec.spl`
 
@@ -222,17 +222,6 @@ expect(provider_session_id).to_equal("keep-provider-session")
 ```
 
 </details>
-
-## should keep Metal GUI out of the core Caret entry
-
-**Group:** production entry orchestration
-
-1. Request the GPU-only flag through the regular Caret entry.
-2. Require the explicit GPU companion boundary.
-
-**Expected:** The core CLI returns exit code 2 rather than importing the
-GPU/Winit implementation. `gui_metal.spl` remains the separate companion entry
-for a GPU-capable runtime lane.
 
 ## should reject an unknown option before mutating configured owner state
 
@@ -1373,8 +1362,8 @@ rate_limit_reset()
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 64 |
-| Active scenarios | 64 |
+| Total scenarios | 63 |
+| Active scenarios | 63 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 | Executed scenarios | 0 |

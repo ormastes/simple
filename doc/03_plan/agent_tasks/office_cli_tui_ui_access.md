@@ -36,15 +36,10 @@ B1==A1*A2 -> 48
 C1==AVG(A1:A2) -> 7
 ```
 
-SSpec helper names (implemented and shared by every scenario):
+SSpec helper names:
 
 - `setup_office_cli_tui_ui_access`
 - `check_office_gate`
-
-`setup_office_cli_tui_ui_access` invokes the unique-run `all` gate at most once
-per SSpec process. The inline `has one fresh deployed Office evidence run`
-scenario exposes it to docgen, and the visible primary plus folded error/NFR
-scenarios expand it through `@prev(...)` and consume only that returned root.
 
 Manual step names are frozen in
 `doc/03_plan/sys_test/office_cli_tui_ui_access.md`.
@@ -64,16 +59,10 @@ Manual step names are frozen in
 
 ## Sidecar Lanes
 
-- `office_spipe_docs_audit`: manual-first SSpec, plans, guide, skill, and stale
-  generated-manual audit/correction.
-- `office_spipe_gate_audit`: deployed PTY/protocol/provenance/N1 gate audit and
-  fail-closed evidence hardening.
-- `office_spipe_impl_audit`: production CLI/Calc/session closure audit and
-  opt-in access-transport ownership split.
-
-All sidecars worked against frozen command, canonical-ID, helper, and manual
-step names. `/root` remains merge owner and performs the final
-highest-capability requirement-by-requirement review.
+Lower-model sidecars: N/A. The feature is bounded and the shared command,
+identity, helper, manual-step, and evidence contracts are already frozen by the
+highest-capability design pass. Additional speculative parallel generation
+would increase collision risk in the dirty Office/CLI workspace.
 
 ## Merge and Review
 

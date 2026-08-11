@@ -88,37 +88,6 @@ static void* transient_scope_worker(void* unused) {
 }
 
 int main(void) {
-    const uint64_t u64_boundaries[] = {0, 1, 2, 3, 4, 5, 6, 7,
-        UINT64_C(0x1fffffffffffffff), UINT64_C(0x2000000000000000),
-        UINT64_C(0x8000000000000000), UINT64_MAX};
-    for (size_t i = 0; i < sizeof(u64_boundaries) / sizeof(u64_boundaries[0]); i++) {
-        int64_t boxed = rt_value_u64((int64_t)u64_boundaries[i]);
-        int64_t equal_box = rt_value_u64((int64_t)u64_boundaries[i]);
-        int64_t wrapped = rt_enum_new(77, 1, boxed);
-        assert((uint64_t)rt_value_as_u64(rt_enum_payload(wrapped)) == u64_boundaries[i]);
-        assert(rt_native_eq(boxed, equal_box) == 1);
-    }
-    assert(rt_native_eq(rt_value_u64(-1), rt_value_int(-1)) == 0);
-    assert(rt_native_eq(rt_value_u64(7), rt_value_int(7)) == 1);
-    assert(rt_value_as_int(rt_value_int(-1)) == -1);
-
-    int64_t uint_dict = rt_dict_new(8);
-    assert(rt_dict_set(uint_dict, rt_value_u64(0), rt_value_int(10)) == 1);
-    assert(rt_dict_set(uint_dict, rt_value_u64(INT64_C(1) << 61), rt_value_int(20)) == 1);
-    assert(rt_dict_len(uint_dict) == 2);
-    assert(rt_value_as_int(rt_dict_get(uint_dict, rt_value_u64(0))) == 10);
-    assert(rt_value_as_int(rt_dict_get(uint_dict, rt_value_u64(INT64_C(1) << 61))) == 20);
-
-    int stdout_pipe[2];
-    assert(pipe(stdout_pipe) == 0);
-    int saved_stdout = dup(STDOUT_FILENO);
-    assert(saved_stdout >= 0);
-    assert(dup2(stdout_pipe[1], STDOUT_FILENO) == STDOUT_FILENO);
-    close(stdout_pipe[1]);
-    assert(!rt_terminal_is_tty_handle(STDOUT_FILENO));
-    assert(dup2(saved_stdout, STDOUT_FILENO) == STDOUT_FILENO);
-    close(saved_stdout);
-    close(stdout_pipe[0]);
     assert(!rt_is_interpreter_runtime());
 
     const uint8_t bounded_env_key[] = {

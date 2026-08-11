@@ -20,23 +20,18 @@ impl<'a> MirLowerer<'a> {
             let needs_boxing = field_ty == TypeId::I64
                 || field_ty == TypeId::I32
                 || field_ty == TypeId::I8
-                || field_ty == TypeId::U64
                 || field_ty == TypeId::BOOL;
             if needs_boxing {
                 let reg = field_regs[0];
-                let boxed = if field_ty == TypeId::U64 {
-                    self.box_u64_runtime_value(reg)?
-                } else {
-                    self.with_func(|func, current_block| {
-                        let boxed = func.new_vreg();
-                        let block = func.block_mut(current_block).unwrap();
-                        block.instructions.push(MirInst::BoxInt {
-                            dest: boxed,
-                            value: reg,
-                        });
-                        boxed
-                    })?
-                };
+                let boxed = self.with_func(|func, current_block| {
+                    let boxed = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::BoxInt {
+                        dest: boxed,
+                        value: reg,
+                    });
+                    boxed
+                })?;
                 field_regs[0] = boxed;
             }
         }
@@ -553,9 +548,7 @@ impl<'a> MirLowerer<'a> {
                             | TypeId::U64
                     );
                 let needs_bool_boxing = index_ty == TypeId::BOOL;
-                if index_ty == TypeId::U64 {
-                    self.box_u64_runtime_value(index_reg)?
-                } else if needs_int_boxing {
+                if needs_int_boxing {
                     self.with_func(|func, current_block| {
                         let boxed = func.new_vreg();
                         let block = func.block_mut(current_block).unwrap();
@@ -610,9 +603,7 @@ impl<'a> MirLowerer<'a> {
         );
         let needs_float_unbox = matches!(element_expr_ty, TypeId::F32 | TypeId::F64);
 
-        if element_expr_ty == TypeId::U64 {
-            self.unbox_u64_runtime_value(raw_result)
-        } else if needs_int_unbox {
+        if needs_int_unbox {
             if std::env::var("FR_DRIVER_0002B_TRACE").is_ok() {
                 eprintln!("[narrow-hit-1] expr_ty={:?}", element_expr_ty);
             }
@@ -707,9 +698,7 @@ impl<'a> MirLowerer<'a> {
         );
         let needs_float_unbox = matches!(element_expr_ty, TypeId::F32 | TypeId::F64);
 
-        if element_expr_ty == TypeId::U64 {
-            self.unbox_u64_runtime_value(raw_result)
-        } else if needs_int_unbox {
+        if needs_int_unbox {
             let (to_bits, signed_opt): (u8, Option<bool>) = match element_expr_ty {
                 TypeId::U8 => (8, Some(false)),
                 TypeId::U16 => (16, Some(false)),

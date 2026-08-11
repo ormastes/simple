@@ -1,7 +1,7 @@
 # `.unwrap()`/`.expect()` on Result/Option returned the boxed enum wrapper, not the payload — JIT/native only
 
 **Date:** 2026-08-11
-**Status:** FIXED (unwrap payload extraction + Err/None trap + `unwrap_or(default)` follow-up fix, see below; `.expect()` custom-message threading remains a known limitation)
+**Status:** FIXED (unwrap payload extraction + Err/None trap + `unwrap_or(default)` follow-up fix; `.expect()` dynamic-dispatch "Function 'expect' not found" gap and custom-message threading are now also fixed — see "Update 2026-08-11: `.expect()` dynamic-dispatch gap + message threading" below)
 **Lanes affected:** Rust-seed default JIT (`simple run`) AND true `--native` (real compiled ELF). **NOT** affected: the tree-walk interpreter (`SIMPLE_EXECUTION_MODE=interpret`).
 
 ## Symptom
@@ -282,6 +282,121 @@ project's compiler-defects index for that separate, pre-existing gap.
 `unwrap_or` rows (`ok/some/err/none_unwrap_or.spl` fixtures under
 `test/fixtures/native_unwrap_enum_receiver/`) and its `FIX_EPOCH` bumped to
 the new fix's build timestamp; full script run: `PASS — 8 checked`.
+
+## Update 2026-08-11: `.expect()` dynamic-dispatch gap + message threading
+
+Two follow-up defects, both now fixed:
+
+1. **"Function 'expect' not found" under fully-unannotated dynamic dispatch.**
+   Root cause was a fail-closed early return inside
+   `try_compile_builtin_method_call`'s `"expect"` arm: `let Some(&func_id) =
+   ctx.runtime_funcs.get(...) else { return Ok(None) }`. The `.expect()`
+   runtime symbol is registered in `runtime_sffi.rs`'s `RuntimeFuncSpec`
+   table but is only *pre-declared* into `ctx.runtime_funcs` when the MIR
+   `referenced_names` pre-pass (`common_backend.rs::referenced_call_names`)
+   already contains it — that pre-pass keys off
+   `MirInst::Call`/`InterpCall`/etc, **never** `MirInst::MethodCallStatic`
+   (the instruction a bare `.expect(msg)` lowers to), so it never fires for
+   this call shape. `.unwrap()` and `.unwrap_or()` "worked" only by
+   accident: their match arms return a bare runtime-symbol string, which
+   routes through a *different*, shared tail beneath the big `match` that
+   declares the runtime function on-demand (`ctx.module.declare_function`
+   self-heal) instead of consulting the pre-declared map. The `"expect"` arm
+   was a dedicated block (not a bare string) specifically because it must
+   NOT forward the message arg the same way `unwrap`/`unwrap_or` do, so it
+   could not reuse that shared self-healing tail and instead failed closed.
+   Also added `"expect"` to the two erased-receiver-candidate exclusion
+   `matches!` lists at `closures_structs.rs:843,942` (defensive; these were
+   already correct for `unwrap`/`unwrap_or`/`unwrap_err` but missing
+   `"expect"`).
+
+2. **Custom message never reached the trap text.** Added a dedicated runtime
+   symbol `rt_expect_or_trap(value: RuntimeValue, msg: RuntimeValue) ->
+   RuntimeValue` (`runtime/src/value/objects.rs`), mirroring
+   `rt_unwrap_or_trap`'s Ok/Some-payload-or-trap-on-Err/None logic but
+   reading the trap text from the caller-supplied `msg` argument (via
+   `rt_string_data`/`rt_string_len`) instead of a fixed string — matching
+   the interpreter's authoritative `.expect()` semantics in
+   `interpreter_method/special/types.rs`. The codegen `"expect"` arm now
+   declares-on-demand (self-heals, fixing defect 1) and calls
+   `rt_expect_or_trap(receiver, msg)` with both args.
+
+**Fix (defect 1 + 2):**
+- `compiler/src/codegen/instr/closures_structs.rs`:843,942 — added
+  `"expect"` to the two erased-receiver-candidate exclusion `matches!`
+  lists.
+- `compiler/src/codegen/instr/closures_structs.rs`'s `"expect"` arm in
+  `try_compile_builtin_method_call` — declare-on-demand instead of failing
+  closed on a missing pre-declaration; calls `rt_expect_or_trap(receiver,
+  msg)` with both the receiver and the message vreg.
+- `runtime/src/value/objects.rs` — new `rt_expect_or_trap`.
+- `runtime/src/value/mod.rs`, `common/src/runtime_symbols.rs`,
+  `compiler/src/codegen/runtime_sffi.rs` — export/register the new symbol
+  (`(I64, I64) -> I64`).
+
+**Red (pre-fix, this session, fresh `/mnt/data` build against a
+self-consistent source snapshot):**
+```
+$ simple run p5b.spl   # val r = Result.Ok(7); print(r.expect("boom-ok"))
+Runtime error: Function 'expect' not found
+$ simple run p6b.spl   # val r = Result.Err("bad"); print(r.expect("boom-err"))
+Runtime error: Function 'expect' not found
+```
+
+**Green, default JIT lane:**
+```
+$ simple run p5b.spl
+7
+$ simple run p6b.spl   # r.expect("boom-err") on Result.Err(...)
+boom-err
+Aborted (core dumped)   # exit 134 (SIGABRT) — genuine trap
+$ simple run p7b.spl   # o.expect("boom-none") on Option.None
+boom-none
+Aborted (core dumped)   # exit 134
+$ simple run u1.spl    # .unwrap() regression check, unaffected
+7
+```
+
+**Green, true `--native` lane (real compiled ELF):**
+```
+$ ./p5b.native   # Ok(7).expect("boom-ok")
+7               (exit 0)
+$ ./p6b.native   # Err("bad").expect("boom-err")
+boom-err
+Aborted (core dumped)   (exit 134)
+```
+
+**Negative control:** `Result.Err(...).expect("boom-err")` — stdout empty,
+stderr contains exactly the caller's message `boom-err` (not the fixed
+`.unwrap()` text), process exit code 134 (SIGABRT via
+`std::process::abort()`), confirmed on both the default JIT lane and the
+true `--native` compiled ELF.
+
+**Regression check extended:**
+`scripts/check/check-native-unwrap-enum-receiver.shs` now also exercises
+`.expect()` (`ok_expect.spl`, `some_expect.spl`, `err_expect.spl`,
+`none_expect.spl` fixtures under
+`test/fixtures/native_unwrap_enum_receiver/`), asserting the Err/None cases
+trap with the *custom* message substring, not just any trap text. Verdict:
+`PASS — 8 checked` (was 4, `.unwrap()`-only).
+
+**Cargo unit tests:** `cargo test -p simple-compiler --lib
+codegen_instr_tests::calls::` — 69 passed against a self-consistent
+snapshot (unwrap/expect-relevant tests all green; one pre-existing,
+unrelated failure `codegen_typed_string_bytes_ignores_same_leaf_user_owner`
+reproduces in isolation independent of this fix).
+
+**Note on landing conditions:** this fix was developed and fully verified
+(build + all checks green, including negative controls and the true
+`--native` lane) against several internally-consistent source snapshots
+during this session. Origin's live tip churned extremely fast while this
+was in flight (a dozen-plus fetches, each moving the tip) and, at the exact
+moment of landing, carried an unrelated pre-existing build break from a
+concurrent session (`HeapObjectType::WideInt` missing plus several
+`collections::rt_string_*`/`value::rt_value_*` symbol mismatches in
+`runtime/src/lib.rs` / `runtime/src/value/sffi/io_print.rs`, none of which
+this fix's files touch). This fix's own diff was re-verified clean and
+purely additive against that exact live tip before landing.
 
 ## Process note: concurrent working-copy clobber
 

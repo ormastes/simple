@@ -1997,6 +1997,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_unix_socket_send",
     "rt_unwrap_or_self",
     "rt_unwrap_or_trap",
+    "rt_expect_or_trap",
     "rt_unwrap_or_value",
     // 2026-08-11: these three are EMITTED by codegen (instr/mod.rs UnboxInt,
     // the native struct-receiver guard, and dict insert) and DEFINED in the

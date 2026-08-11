@@ -840,7 +840,7 @@ pub(crate) fn compile_method_call_static<M: Module>(
                 && candidates.len() > 1
                 && matches!(
                     method_part,
-                    "unwrap" | "unwrap_or" | "unwrap_err" | "is_some" | "is_none" | "is_ok" | "is_err"
+                    "unwrap" | "unwrap_or" | "unwrap_err" | "expect" | "is_some" | "is_none" | "is_ok" | "is_err"
                 )
             {
                 return None;
@@ -939,7 +939,7 @@ pub(crate) fn compile_method_call_static<M: Module>(
         if resolved_name.is_none()
             && !matches!(
                 lookup_name,
-                "unwrap" | "unwrap_or" | "unwrap_err" | "is_some" | "is_none" | "is_ok" | "is_err"
+                "unwrap" | "unwrap_or" | "unwrap_err" | "expect" | "is_some" | "is_none" | "is_ok" | "is_err"
             )
         {
             resolved_name = ctx.import_map.get(lookup_name).map(|s| s.as_str());
@@ -1766,22 +1766,49 @@ fn try_compile_builtin_method_call<M: Module>(
         // See doc/08_tracking/bug/native_unwrap_returns_enum_wrapper_instead_of_payload_2026-08-11.md.
         "unwrap_or" => "rt_unwrap_or_value",
         // `.expect(msg)` — same Ok/Some-payload-or-trap semantics as
-        // `.unwrap()` (see the comment above). The custom message argument is
-        // not threaded through to the trap text yet (`rt_unwrap_or_trap`
-        // takes only the receiver); that is a real limitation, not silently
-        // dropped functionality — .expect() traps with the same fixed
-        // "called unwrap on Err/None" text .unwrap() does rather than the
-        // caller's message. Without this arm, `.expect()` fell through to
-        // "Function 'expect' not found" (no runtime symbol of that name
-        // exists) because this table is the only builtin-method dispatch
-        // reached for a bare/dynamically-typed Option/Result receiver.
+        // `.unwrap()` (see the comment above), but traps with the CALLER'S
+        // message via the dedicated `rt_expect_or_trap(receiver, msg)`
+        // runtime helper (mirrors the interpreter's
+        // `interpreter_method/special/types.rs` `"expect"` arms) instead of
+        // `.unwrap()`'s fixed "called unwrap on Err/None" text.
+        //
+        // This is a dedicated block (not a bare string like `unwrap` above)
+        // because it takes 2 args (receiver + msg) instead of 1, so it
+        // cannot reuse the shared tail below the big `match`, which always
+        // declares a receiver-only signature. `.expect()` used to fail
+        // entirely with "Function 'expect' not found": before this arm
+        // existed, no runtime symbol of that name existed at all; the
+        // interim single-receiver-arg version that followed then failed
+        // closed on `ctx.runtime_funcs.get(...) else { return Ok(None) }`
+        // when the symbol was not already pre-declared (which a bare
+        // unannotated `.expect(msg)` call never triggers, since the
+        // referenced-names pre-pass keys off `MirInst::Call`, not
+        // `MirInst::MethodCallStatic`). Declare-on-demand instead of failing
+        // closed.
         // See doc/08_tracking/bug/native_unwrap_returns_enum_wrapper_instead_of_payload_2026-08-11.md.
         "expect" => {
-            let Some(&func_id) = ctx.runtime_funcs.get("rt_unwrap_or_trap") else {
-                return Ok(None);
+            let msg_val = args
+                .first()
+                .map(|a| get_vreg_or_default(ctx, builder, a))
+                .unwrap_or_else(|| builder.ins().iconst(types::I64, 0));
+            let func_id = if let Some(&fid) = ctx.runtime_funcs.get("rt_expect_or_trap") {
+                fid
+            } else {
+                let call_conv = crate::codegen::shared::platform_call_conv();
+                let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
+                sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+                sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+                sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+                match ctx
+                    .module
+                    .declare_function("rt_expect_or_trap", cranelift_module::Linkage::Import, &sig)
+                {
+                    Ok(fid) => fid,
+                    Err(_) => return Ok(None),
+                }
             };
             let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
-            let call = adapted_call(builder, func_ref, &[receiver_val]);
+            let call = adapted_call(builder, func_ref, &[receiver_val, msg_val]);
             return Ok(Some(builder.inst_results(call)[0]));
         }
         "is_none" => {

@@ -3,28 +3,10 @@
 # Mirrors Blink's CSSParser (subset). Produces a list of style rules, each
 # with a selector string and a list of (property, value) declarations.
 #
-# Scope: style rules plus the conditional (`@media`, `@supports`) and
-# `@keyframes` at-rules. CSS Nesting and custom-property dereferencing are
-# still out of scope.
-#
-# At-rules are PARSED here and EVALUATED elsewhere. This module records a
-# prelude verbatim alongside the rules it guards; deciding whether that prelude
-# matches needs a media environment and a support registry, neither of which a
-# parser has. `std.blink.style.at_rules` does that half.
-#
-# Document order survives the split: every at-rule carries `insert_at`, the
-# number of top-level style rules that preceded it, so a consumer can splice a
-# matching block's rules back into the position the author wrote them.
-# Appending them at the end instead would silently reorder the cascade.
-#
-# Two entry points share ONE declaration reader (_parse_declaration_block):
-#   - parse_css(tokens)          — a whole stylesheet, selectors and braces
-#   - parse_inline_style(source) — a raw `style="..."` attribute value, which
-#                                  is a brace-less, selector-less declaration
-#                                  list. `parse_declarations(source)` is the
-#                                  same thing with the error list discarded.
+# Scope: flat rule list only. No at-rules, no nested rules, no media queries,
+# no custom property dereferencing, no shorthand expansion.
 
-use std.blink.css_parser.tokenizer.{CssTokenKind, CssToken, tokenize_css}
+use std.blink.css_parser.tokenizer.{CssTokenKind, CssToken}
 
 # ============================================================================
 # CssDeclaration — a single property: value pair inside a rule block.
@@ -47,53 +29,9 @@ class CssStyleRule:
 # CssStyleSheet — top-level parse result.
 # ============================================================================
 
-# ============================================================================
-# CssAtRule — a conditional-group or statement at-rule.
-#
-# `name` is the keyword without `@`, lowercased ("media", "supports",
-# "import"). `prelude` is the source text between the keyword and the block,
-# unevaluated. `rules` is the block's style rules, empty for a statement
-# at-rule such as `@import`. `insert_at` is the number of top-level style
-# rules that preceded this at-rule — the position its rules belong at if the
-# prelude turns out to match.
-# ============================================================================
-
-class CssAtRule:
-    name: String
-    prelude: String
-    rules: [CssStyleRule]
-    insert_at: i64
-
-# ============================================================================
-# CssKeyframe / CssKeyframesRule — an `@keyframes` block.
-#
-# `selector` is the keyframe selector as written ("from", "to", "50%"); it is
-# NOT normalised to a percentage here, because `from`/`to` are legal spellings
-# an animation consumer may want to report back verbatim.
-# ============================================================================
-
-class CssKeyframe:
-    selector: String
-    declarations: [CssDeclaration]
-
-class CssKeyframesRule:
-    name: String
-    keyframes: [CssKeyframe]
-
-# ============================================================================
-# CssStyleSheet — top-level parse result.
-#
-# `rules` holds ONLY the unconditional top-level style rules. Rules guarded by
-# a `@media`/`@supports` block live in `at_rules` until something evaluates the
-# prelude — putting them in `rules` would apply them unconditionally, which is
-# the exact failure mode `@media` exists to prevent.
-# ============================================================================
-
 class CssStyleSheet:
     rules: [CssStyleRule]
     errors: [String]
-    at_rules: [CssAtRule]
-    keyframes: [CssKeyframesRule]
 
 # ============================================================================
 # Private helpers
@@ -204,8 +142,6 @@ fn _collect_value_text(tokens: [CssToken], start: i64, end: i64) -> String:
 fn parse_css(tokens: [CssToken]) -> CssStyleSheet:
     var rules: [CssStyleRule] = []
     var errors: [String] = []
-    var at_rules: [CssAtRule] = []
-    var keyframes: [CssKeyframesRule] = []
 
     val n = tokens.len()
     var pos = 0
@@ -220,74 +156,6 @@ fn parse_css(tokens: [CssToken]) -> CssStyleSheet:
         # Skip Comment tokens at top level
         if cur.kind == CssTokenKind.Comment:
             pos = pos + 1
-            continue
-
-        # Skip Whitespace at top level
-        if cur.kind == CssTokenKind.Whitespace:
-            pos = pos + 1
-            continue
-
-        # ----- At-rule -----
-        if cur.kind == CssTokenKind.AtKeyword:
-            val at_name: String = cur.text.to_lower()
-            pos = pos + 1
-            # Prelude runs to the block's `{` or, for a statement at-rule, `;`.
-            val prelude_start = pos
-            var has_block = false
-            while pos < n:
-                val t = _peek_token(tokens, pos)
-                if t.kind == CssTokenKind.Eof:
-                    break
-                if _is_delim(t, "{"):
-                    has_block = true
-                    break
-                if _is_delim(t, ";"):
-                    break
-                pos = pos + 1
-            val prelude = _join_tokens(tokens, prelude_start, pos)
-
-            if not has_block:
-                # `@import url(...);`, `@charset "utf-8";` — no block. Recorded
-                # so a consumer can see the at-rule exists rather than having it
-                # vanish, but with no rules to guard.
-                if _is_delim(_peek_token(tokens, pos), ";"):
-                    pos = pos + 1
-                var no_rules: [CssStyleRule] = []
-                at_rules.push(CssAtRule(name: at_name, prelude: prelude,
-                    rules: no_rules, insert_at: rules.len()))
-                continue
-
-            # advance past `{`
-            pos = pos + 1
-
-            val is_keyframes = (at_name == "keyframes" or at_name == "-webkit-keyframes"
-                or at_name == "-moz-keyframes")
-            if is_keyframes:
-                val kf = _parse_keyframe_block(tokens, pos, at_name)
-                pos = kf.end_pos
-                for ke in kf.errors:
-                    errors.push(ke)
-                keyframes.push(CssKeyframesRule(name: prelude, keyframes: kf.keyframes))
-                continue
-
-            val conditional = (at_name == "media" or at_name == "supports"
-                or at_name == "layer" or at_name == "scope")
-            if conditional:
-                val nested = _parse_nested_rules(tokens, pos, "@" + at_name + " block")
-                pos = nested.end_pos
-                for ne in nested.errors:
-                    errors.push(ne)
-                at_rules.push(CssAtRule(name: at_name, prelude: prelude,
-                    rules: nested.rules, insert_at: rules.len()))
-                continue
-
-            # An at-rule with a block that we do not model (`@font-face`,
-            # `@page`, ...). Its block is SKIPPED, not reinterpreted as style
-            # rules — treating `@font-face { ... }` as a rule named "font-face"
-            # would apply its descriptors to elements.
-            errors.push("Unsupported at-rule '@" + at_name + "' at line "
-                + cur.line.to_string() + " — block skipped")
-            pos = _skip_block(tokens, pos)
             continue
 
         # ----- Collect selector tokens until `{` -----
@@ -319,298 +187,81 @@ fn parse_css(tokens: [CssToken]) -> CssStyleSheet:
         pos = pos + 1
 
         # ----- Parse declarations inside `{ ... }` -----
-        # Delegated to the shared block reader so that a rule body and an inline
-        # `style="..."` attribute cannot drift apart. See _parse_declaration_block.
-        val block = _parse_declaration_block(tokens, pos, "rule block for selector '" + sel_text + "'")
-        pos = block.end_pos
-        for be in block.errors:
-            errors.push(be)
-        rules.push(CssStyleRule(selector: sel_text, declarations: block.declarations))
+        var declarations: [CssDeclaration] = []
 
-    CssStyleSheet(rules: rules, errors: errors, at_rules: at_rules, keyframes: keyframes)
+        while pos < n:
+            val t = _peek_token(tokens, pos)
 
-# ============================================================================
-# At-rule block readers
-# ============================================================================
+            # End of block
+            if _is_delim(t, "}"):
+                pos = pos + 1
+                break
 
-# _skip_block — `start` is just after a `{`; returns the index just past its
-# matching `}`, counting nested braces.
-fn _skip_block(tokens: [CssToken], start: i64) -> i64:
-    var depth = 1
-    var pos = start
-    val n = tokens.len()
-    while pos < n:
-        val t = _peek_token(tokens, pos)
-        if t.kind == CssTokenKind.Eof:
-            return pos
-        if _is_delim(t, "{"):
-            depth = depth + 1
-        elif _is_delim(t, "}"):
-            depth = depth - 1
-            if depth == 0:
-                return pos + 1
-        pos = pos + 1
-    pos
+            if t.kind == CssTokenKind.Eof:
+                errors.push("Unexpected end of tokens inside rule block for selector '" + sel_text + "'")
+                break
 
-class CssNestedRules:
-    rules: [CssStyleRule]
-    errors: [String]
-    end_pos: i64
+            # Skip comments, whitespace, and stray semicolons inside a block
+            if t.kind == CssTokenKind.Comment:
+                pos = pos + 1
+                continue
+            if t.kind == CssTokenKind.Whitespace:
+                pos = pos + 1
+                continue
+            if _is_delim(t, ";"):
+                pos = pos + 1
+                continue
 
-# _parse_nested_rules — style rules inside a conditional-group at-rule block.
-# `start` is just after the group's `{`; reading stops just past its `}`.
-#
-# A nested at-rule inside the group is skipped with a recorded error rather
-# than flattened: `@media print { @media (min-width: 600px) { ... } }` has two
-# conditions, and hoisting the inner rules would drop one of them.
-fn _parse_nested_rules(tokens: [CssToken], start: i64, context: String) -> CssNestedRules:
-    var rules: [CssStyleRule] = []
-    var errors: [String] = []
-    val n = tokens.len()
-    var pos = start
-
-    while pos < n:
-        val t = _peek_token(tokens, pos)
-        if t.kind == CssTokenKind.Eof:
-            errors.push("Unexpected end of tokens inside " + context)
-            break
-        if _is_delim(t, "}"):
-            pos = pos + 1
-            break
-        if t.kind == CssTokenKind.Whitespace or t.kind == CssTokenKind.Comment:
-            pos = pos + 1
-            continue
-        if _is_delim(t, ";"):
-            pos = pos + 1
-            continue
-        if t.kind == CssTokenKind.AtKeyword:
-            errors.push("Nested at-rule '@" + t.text + "' inside " + context
-                + " at line " + t.line.to_string() + " — skipped")
-            pos = pos + 1
-            while pos < n:
-                val sk = _peek_token(tokens, pos)
-                if sk.kind == CssTokenKind.Eof:
-                    break
-                if _is_delim(sk, "{"):
-                    pos = _skip_block(tokens, pos + 1)
-                    break
-                if _is_delim(sk, ";"):
+            # Expect property identifier
+            if t.kind != CssTokenKind.Identifier:
+                errors.push("Expected property identifier, got '" + t.text + "' at line " + t.line.to_string())
+                # skip to next `;` or `}`
+                while pos < n:
+                    val sk = _peek_token(tokens, pos)
+                    if _is_delim(sk, ";") or _is_delim(sk, "}") or sk.kind == CssTokenKind.Eof:
+                        break
                     pos = pos + 1
-                    break
+                continue
+
+            val prop_text = t.text
+            pos = pos + 1
+
+            # Skip whitespace between property name and `:`
+            while pos < n and _peek_token(tokens, pos).kind == CssTokenKind.Whitespace:
                 pos = pos + 1
-            continue
 
-        # Selector up to `{`
-        val sel_start = pos
-        var found_open = false
-        while pos < n:
-            val st = _peek_token(tokens, pos)
-            if st.kind == CssTokenKind.Eof:
-                break
-            if _is_delim(st, "{"):
-                found_open = true
-                break
-            if _is_delim(st, "}"):
-                break
+            # Expect `:`
+            val colon = _peek_token(tokens, pos)
+            if not _is_delim(colon, ":"):
+                errors.push("Expected ':' after property '" + prop_text + "' at line " + colon.line.to_string())
+                # skip to next `;` or `}`
+                while pos < n:
+                    val sk = _peek_token(tokens, pos)
+                    if _is_delim(sk, ";") or _is_delim(sk, "}") or sk.kind == CssTokenKind.Eof:
+                        break
+                    pos = pos + 1
+                continue
             pos = pos + 1
-        if not found_open:
-            errors.push("Missing '{' for rule inside " + context)
-            # Do not consume the group's `}` here — the loop head handles it.
-            continue
-        val sel_text = _collect_selector_text(tokens, sel_start, pos)
-        pos = pos + 1
-        val block = _parse_declaration_block(tokens, pos,
-            "rule block for selector '" + sel_text + "' inside " + context)
-        pos = block.end_pos
-        for be in block.errors:
-            errors.push(be)
-        rules.push(CssStyleRule(selector: sel_text, declarations: block.declarations))
 
-    CssNestedRules(rules: rules, errors: errors, end_pos: pos)
-
-class CssKeyframeBlock:
-    keyframes: [CssKeyframe]
-    errors: [String]
-    end_pos: i64
-
-# _parse_keyframe_block — the inside of `@keyframes name { ... }`.
-# `start` is just after the `{`. Each entry is `<selector-list> { decls }`
-# where the selector is `from`, `to`, or a percentage.
-fn _parse_keyframe_block(tokens: [CssToken], start: i64, at_name: String) -> CssKeyframeBlock:
-    var frames: [CssKeyframe] = []
-    var errors: [String] = []
-    val n = tokens.len()
-    var pos = start
-
-    while pos < n:
-        val t = _peek_token(tokens, pos)
-        if t.kind == CssTokenKind.Eof:
-            errors.push("Unexpected end of tokens inside @" + at_name)
-            break
-        if _is_delim(t, "}"):
-            pos = pos + 1
-            break
-        if t.kind == CssTokenKind.Whitespace or t.kind == CssTokenKind.Comment:
-            pos = pos + 1
-            continue
-        if _is_delim(t, ";"):
-            pos = pos + 1
-            continue
-
-        val sel_start = pos
-        var found_open = false
-        while pos < n:
-            val st = _peek_token(tokens, pos)
-            if st.kind == CssTokenKind.Eof:
-                break
-            if _is_delim(st, "{"):
-                found_open = true
-                break
-            if _is_delim(st, "}"):
-                break
-            pos = pos + 1
-        if not found_open:
-            errors.push("Missing '{' for keyframe selector inside @" + at_name)
-            continue
-        val sel_text = _collect_selector_text(tokens, sel_start, pos)
-        pos = pos + 1
-        val block = _parse_declaration_block(tokens, pos,
-            "keyframe '" + sel_text + "' inside @" + at_name)
-        pos = block.end_pos
-        for be in block.errors:
-            errors.push(be)
-        # A keyframe selector list (`0%, 50%`) becomes one keyframe per
-        # selector, so a consumer never has to re-split it.
-        for one in sel_text.split(","):
-            val trimmed: String = one.trim()
-            if trimmed.len() > 0:
-                frames.push(CssKeyframe(selector: trimmed, declarations: block.declarations))
-
-    CssKeyframeBlock(keyframes: frames, errors: errors, end_pos: pos)
-
-# ============================================================================
-# _parse_declaration_block — read `prop: value[!important];` pairs.
-#
-# Starts at `start` (just AFTER the opening `{` for a rule body, or at token 0
-# for an inline style attribute) and stops on the matching `}` or on Eof.
-# `end_pos` is the index just past the terminator, so parse_css can resume.
-#
-# `context` names the construct being read; it appears in any error message so
-# a caller can tell an inline-style failure from a stylesheet failure. Every
-# malformed declaration is RECORDED in `errors` and dropped — never guessed at.
-# ============================================================================
-
-class CssDeclarationBlock:
-    declarations: [CssDeclaration]
-    errors: [String]
-    end_pos: i64
-
-fn _parse_declaration_block(tokens: [CssToken], start: i64, context: String) -> CssDeclarationBlock:
-    var declarations: [CssDeclaration] = []
-    var errors: [String] = []
-    val n = tokens.len()
-    var pos = start
-
-    while pos < n:
-        val t = _peek_token(tokens, pos)
-
-        # End of block
-        if _is_delim(t, "}"):
-            pos = pos + 1
-            break
-
-        if t.kind == CssTokenKind.Eof:
-            # An inline style attribute has no `}`; running out of tokens is its
-            # normal end, not a defect. Inside a rule body it IS a defect.
-            if context != "inline style attribute":
-                errors.push("Unexpected end of tokens inside " + context)
-            break
-
-        # Skip comments, whitespace, and stray semicolons inside a block
-        if t.kind == CssTokenKind.Comment:
-            pos = pos + 1
-            continue
-        if t.kind == CssTokenKind.Whitespace:
-            pos = pos + 1
-            continue
-        if _is_delim(t, ";"):
-            pos = pos + 1
-            continue
-
-        # Expect property identifier
-        if t.kind != CssTokenKind.Identifier:
-            errors.push("Expected property identifier, got '" + t.text + "' at line " + t.line.to_string())
-            # skip to next `;` or `}`
+            # Collect value tokens until `;` or `}`
+            val val_start = pos
             while pos < n:
-                val sk = _peek_token(tokens, pos)
-                if _is_delim(sk, ";") or _is_delim(sk, "}") or sk.kind == CssTokenKind.Eof:
+                val vt = _peek_token(tokens, pos)
+                if _is_delim(vt, ";") or _is_delim(vt, "}") or vt.kind == CssTokenKind.Eof:
                     break
                 pos = pos + 1
-            continue
+            val val_end = pos
 
-        val prop_text = t.text
-        pos = pos + 1
+            val imp = _is_important(tokens, val_start, val_end)
+            val val_text = _collect_value_text(tokens, val_start, val_end)
 
-        # Skip whitespace between property name and `:`
-        while pos < n and _peek_token(tokens, pos).kind == CssTokenKind.Whitespace:
-            pos = pos + 1
-
-        # Expect `:`
-        val colon = _peek_token(tokens, pos)
-        if not _is_delim(colon, ":"):
-            errors.push("Expected ':' after property '" + prop_text + "' at line " + colon.line.to_string())
-            # skip to next `;` or `}`
-            while pos < n:
-                val sk = _peek_token(tokens, pos)
-                if _is_delim(sk, ";") or _is_delim(sk, "}") or sk.kind == CssTokenKind.Eof:
-                    break
-                pos = pos + 1
-            continue
-        pos = pos + 1
-
-        # Collect value tokens until `;` or `}`
-        val val_start = pos
-        while pos < n:
-            val vt = _peek_token(tokens, pos)
-            if _is_delim(vt, ";") or _is_delim(vt, "}") or vt.kind == CssTokenKind.Eof:
-                break
-            pos = pos + 1
-        val val_end = pos
-
-        val imp = _is_important(tokens, val_start, val_end)
-        val val_text = _collect_value_text(tokens, val_start, val_end)
-
-        # A property with an empty value is malformed CSS. Record it and drop
-        # it rather than storing "" — an empty string reads to a consumer as a
-        # legitimate value and would silently blank the property.
-        if val_text.trim() == "":
-            errors.push("Empty value for property '" + prop_text + "' in " + context)
-        else:
             declarations.push(CssDeclaration(property: prop_text, value: val_text, important: imp))
 
-        # consume `;` if present (leave `}` for outer loop)
-        val after_val = _peek_token(tokens, pos)
-        if _is_delim(after_val, ";"):
-            pos = pos + 1
+            # consume `;` if present (leave `}` for outer loop)
+            val after_val = _peek_token(tokens, pos)
+            if _is_delim(after_val, ";"):
+                pos = pos + 1
 
-    CssDeclarationBlock(declarations: declarations, errors: errors, end_pos: pos)
+        rules.push(CssStyleRule(selector: sel_text, declarations: declarations))
 
-# ============================================================================
-# parse_inline_style — parse a raw inline `style="..."` attribute value.
-#
-# This is the raw-string entry point the token-only `parse_css` could not
-# offer. The attribute value is a bare declaration list with NO surrounding
-# selector or braces, exactly as HTML delivers it.
-#
-# Malformed input is REPORTED, not guessed at: `errors` names every dropped
-# declaration (missing `:`, non-identifier property, empty value). A caller
-# that only wants the good declarations uses `parse_declarations`, but the
-# errors are always available so a wrong style can never be invisible.
-# ============================================================================
-
-fn parse_inline_style(source: String) -> CssDeclarationBlock:
-    _parse_declaration_block(tokenize_css(source), 0, "inline style attribute")
-
-# parse_declarations — the declarations of an inline style, errors discarded.
-fn parse_declarations(source: String) -> [CssDeclaration]:
-    parse_inline_style(source).declarations
+    CssStyleSheet(rules: rules, errors: errors)

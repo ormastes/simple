@@ -10,10 +10,10 @@ use crate::hir::TypeId;
 use crate::mir::VReg;
 
 use super::super::types_util::type_id_to_cranelift;
-use super::helpers::{call_runtime_2_void, call_runtime_3, create_string_constant, get_vreg_or_default};
+use super::helpers::{call_runtime_2_void, create_string_constant, get_vreg_or_default};
 use super::{InstrContext, InstrResult};
 
-/// Guard a struct receiver before a field load/store without dereferencing it.
+/// Guard a (possibly nil) struct receiver before a field load/store.
 ///
 /// A `nil` receiver (e.g. `b: T? = nil; b.n`) masks to a null pointer;
 /// dereferencing it is a wild segfault. A bare `trapz` lowers to `ud2`, which
@@ -23,20 +23,16 @@ use super::{InstrContext, InstrResult};
 fn guard_nonnull_receiver<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
-    receiver: cranelift_codegen::ir::Value,
-    byte_offset: usize,
-    access_width: usize,
+    obj_ptr: cranelift_codegen::ir::Value,
 ) -> InstrResult<()> {
     let err_block = builder.create_block();
     let ok_block = builder.create_block();
-    let offset = builder.ins().iconst(types::I64, byte_offset as i64);
-    let width = builder.ins().iconst(types::I64, access_width as i64);
-    let valid = call_runtime_3(ctx, builder, "rt_struct_receiver_valid", receiver, offset, width);
-    builder.ins().brif(valid, ok_block, &[], err_block, &[]);
+    // obj_ptr != 0 -> ok_block; nil (== 0) -> err_block.
+    builder.ins().brif(obj_ptr, ok_block, &[], err_block, &[]);
 
     builder.switch_to_block(err_block);
     builder.seal_block(err_block);
-    let (msg_ptr, msg_len) = create_string_constant(ctx, builder, "runtime error: invalid field receiver")?;
+    let (msg_ptr, msg_len) = create_string_constant(ctx, builder, "runtime error: field access on nil receiver")?;
     call_runtime_2_void(ctx, builder, "rt_eprintln_str", msg_ptr, msg_len);
     builder.ins().trap(TrapCode::unwrap_user(12));
 
@@ -61,8 +57,7 @@ pub fn compile_field_get<M: Module>(
     // Field access on a `nil` receiver (e.g. `b: T? = nil; b.n`) masks to a null
     // pointer; loading from it is a wild segfault. Print a clean diagnostic and
     // trap instead of either a silent SIGSEGV or a message-less SIGILL.
-    let load_ty = type_id_to_cranelift(field_type);
-    guard_nonnull_receiver(ctx, builder, obj_value, byte_offset, load_ty.bytes() as usize)?;
+    guard_nonnull_receiver(ctx, builder, obj_ptr)?;
 
     // Diagnostic: log FieldGet at non-zero offsets when tracing is enabled.
     // This helps diagnose cross-module FieldGet bugs where byte_offset is
@@ -77,6 +72,7 @@ pub fn compile_field_get<M: Module>(
     // Field slots are 8-byte aligned, but each slot stores the field's native
     // representation. Loading with a fixed I64 type corrupts native f32/f64
     // fields and mis-types smaller integer fields for downstream dispatch.
+    let load_ty = type_id_to_cranelift(field_type);
     let val = builder
         .ins()
         .load(load_ty, MemFlags::new(), obj_ptr, byte_offset as i32);
@@ -90,15 +86,14 @@ pub fn compile_field_set<M: Module>(
     builder: &mut FunctionBuilder,
     object: VReg,
     byte_offset: usize,
-    field_type: TypeId,
+    _field_type: TypeId,
     value: VReg,
 ) -> InstrResult<()> {
     let obj_value = get_vreg_or_default(ctx, builder, &object);
     let tag_mask = builder.ins().iconst(types::I64, !0x7i64);
     let obj_ptr = builder.ins().band(obj_value, tag_mask);
     // Same null guard as FieldGet: storing into a `nil` receiver is a wild segfault.
-    let store_width = type_id_to_cranelift(field_type).bytes() as usize;
-    guard_nonnull_receiver(ctx, builder, obj_value, byte_offset, store_width)?;
+    guard_nonnull_receiver(ctx, builder, obj_ptr)?;
     let val = get_vreg_or_default(ctx, builder, &value);
     builder.ins().store(MemFlags::new(), val, obj_ptr, byte_offset as i32);
     Ok(())

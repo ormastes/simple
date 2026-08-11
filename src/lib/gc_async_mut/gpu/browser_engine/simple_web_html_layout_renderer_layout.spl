@@ -5,15 +5,6 @@ use std.gc_async_mut.gpu.browser_engine.layout_table.{
 }
 use std.gc_async_mut.gpu.browser_engine.containment.{contain_value_contains_layout}
 use std.gc_async_mut.gpu.browser_engine.layout_m14_types.{collapse_margins_signed}
-# Text is measured by CODEPOINT, never by UTF-8 byte length. `text.len()` is a
-# BYTE count while `char_code_at(i)` is CODEPOINT indexed, so the old
-# `while i < raw.len(): raw.char_code_at(i)` shape charged "漢" three advances
-# and then measured two phantom zero-codepoints on top. The codepoint decode
-# and the wide/zero-width column policy live in one shared leaf; this lane
-# consumes it rather than keeping a private copy.
-# See doc/08_tracking/bug/live_lane_inline_text_measure_counts_utf8_bytes_2026-08-11.md
-use std.common.layout.text_metrics.{codepoint_cells, text_cell_width}
-use std.common.encoding.utf8.{text_codepoints}
 
 val SIMPLE_WEB_SUMMARY_MARKER_INLINE_WIDTH: i32 = 16
 
@@ -484,10 +475,7 @@ fn intrinsic_text_width(nodes: [HNode], styles: [Style], child_index: HtmlChildI
                 else:
                     val glyph_w = style_char_w(styles[c])
                     val ink_w = if glyph_w > 1: glyph_w - 1 else: glyph_w
-                    # CELL width, not byte length: a CJK glyph is drawn double
-                    # width and is charged exactly two cells, and a combining
-                    # mark is charged none.
-                    width = width + (text_cell_width(txt) as i32) * ink_w
+                    width = width + txt.len() * ink_w
         elif (
             styles[c].display == "inline" or
             styles[c].display == "inline-block"
@@ -505,12 +493,7 @@ fn inline_text_advance_width(node: HNode, st: Style) -> i32:
     if node.tag != "#text":
         return 0
     val raw = node.text_data
-    val cps = text_codepoints(raw)
-    # `resolved_font_advances` carries ONE advance per codepoint (see
-    # font_renderer.measure_text_advances), so the arity check is against the
-    # codepoint count. Comparing it against `raw.len()` matched only by
-    # accident on ASCII and matched a byte-per-byte advance array on non-ASCII.
-    if st.resolved_font_width > 0 and st.resolved_font_advances.len() == cps.len():
+    if st.resolved_font_width > 0 and st.resolved_font_advances.len() == raw.len():
         return st.resolved_font_width
     if raw == " " and node.text_trimmed == "":
         var whitespace_advance = style_space_advance(st) / 3
@@ -519,18 +502,18 @@ fn inline_text_advance_width(node: HNode, st: Style) -> i32:
         return whitespace_advance
     var width = 0
     var i = 0
-    val n = cps.len()
+    val n = raw.len()
     val advance = style_text_advance(st)
     val space_advance = style_space_advance(st)
     while i < n:
-        val ch = cps[i]
+        val ch = raw.char_code_at(i)
         if ch == 32:
             width = width + space_advance
         elif ch == 9 or ch == 10 or ch == 13:
             if node.text_trimmed != "":
                 width = width + space_advance
         else:
-            width = width + (codepoint_cells(ch) as i32) * advance
+            width = width + advance
         i = i + 1
     width
 

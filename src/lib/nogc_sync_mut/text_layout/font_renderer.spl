@@ -85,12 +85,6 @@ use std.nogc_sync_mut.text_layout.font_vector_data.{vf_glyph_commands, vf_glyph_
 use std.nogc_sync_mut.text_layout.font_advance_layout.{font_batch_apply_advances}
 use std.nogc_sync_mut.io.font_sffi.{font_face_ascent, free_font, font_face_identity, font_face_is_live, load_font}
 use std.nogc_sync_mut.sffi.io.{file_read_bytes}
-# Glyph iteration is by CODEPOINT. `text.len()` is a UTF-8 BYTE count while
-# `char_code_at(i)` is CODEPOINT indexed, so `while ci < content.len()` walked
-# a 3-character string 6 times and read phantom zero codepoints past the end —
-# inflating every non-ASCII advance array, width, and rendered run.
-# See doc/08_tracking/bug/live_lane_inline_text_measure_counts_utf8_bytes_2026-08-11.md
-use std.common.encoding.utf8.{text_codepoints}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
 use std.common.encoding.sfnt_glyf.{SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYPH_SELECTOR_INDEX, sfnt_measure_glyph_into, sfnt_render_glyph_into}
 use std.common.encoding.font_registry.{FontAssetCandidate, selected_font_asset_candidates, selected_font_asset_candidate_for_path, selected_font_asset_candidate_for_identity, selected_font_asset_for_language_category, selected_font_asset_identity, selected_font_asset_identity_for_path, selected_font_asset_local_path_for_identity, selected_font_asset_physical_path, selected_font_language_ranks, selected_font_simple_tuple_accepted, validate_selected_font_asset}
@@ -573,23 +567,10 @@ var _font_atlas_dependency_generation_counter: i64 = 0
 var _font_atlas_dependency_generation_lock: Mutex? = nil
 
 fn _font_render_config_default_selection(config: FontRenderConfig) -> bool:
-    # Sequential explicit gates, not one parenthesized mixed `and` chain: the
-    # freestanding entry-closure codegen drops left operands of mixed boolean
-    # chains (fourth confirmed site 2026-08-11 — this predicate, reached only
-    # through font_render_config_selection_supported's own mixed and/or chain,
-    # rejected the healthy default config while font_render_config_valid on
-    # the SAME config object passed in the immediately preceding statement:
-    # `[e2d-batch] selection-unsupported text_len=11` with no
-    # `[font-plan] config-invalid`). Semantics identical on healthy compilers.
-    if font_render_config_normalize(config.family) != "auto":
-        return false
-    if font_render_category_name(config.category) != "auto":
-        return false
-    if font_render_config_normalize(config.language) != "und":
-        return false
-    if font_render_config_normalize(config.script) != "auto":
-        return false
-    true
+    (font_render_config_normalize(config.family) == "auto" and
+        font_render_category_name(config.category) == "auto" and
+        font_render_config_normalize(config.language) == "und" and
+        font_render_config_normalize(config.script) == "auto")
 
 fn _font_render_config_candidate(config: FontRenderConfig) -> FontAssetCandidate?:
     if _font_render_config_default_selection(config):
@@ -619,27 +600,7 @@ fn _font_render_config_candidate(config: FontRenderConfig) -> FontAssetCandidate
     candidate
 
 fn font_render_config_selection_supported(config: FontRenderConfig) -> bool:
-    # Sequential explicit gates with per-gate receipts, not one mixed and/or
-    # chain. ROOT CAUSE (2026-08-11, rung-(d) blocker): on the freestanding
-    # entry-closure lane this single expression returned false for a config
-    # that `font_render_config_valid` — its own first conjunct — had just
-    # accepted inside font_execution_plan_into two statements earlier
-    # (plan_count>0, no `[font-plan] config-invalid` receipt). That is the
-    # documented mixed-boolean-chain codegen defect, same family as the three
-    # sites already decomposed in font_types.spl. Every text Draw IR command
-    # was skipped as `text-font-batch` because of it (skipped=8 rendered=12).
-    # Semantics are identical on a healthy compiler; the receipts stay silent
-    # on healthy configs and attribute WHICH gate rejected otherwise.
-    if not font_render_config_valid(config):
-        print("[font-select] config-invalid size={config.size} target={config.execution_target}")
-        return false
-    if _font_render_config_default_selection(config):
-        return true
-    val candidate = _font_render_config_candidate(config)
-    if candidate == nil:
-        print("[font-select] no-candidate family='{config.family}' category='{config.category}' language='{config.language}' script='{config.script}'")
-        return false
-    true
+    font_render_config_valid(config) and (_font_render_config_default_selection(config) or _font_render_config_candidate(config) != nil)
 
 fn _font_atlas_dependency_generation_after(current: i64) -> i64:
     if current < 0 or current >= 9223372036854775807:
@@ -1601,10 +1562,9 @@ class FontRenderer:
         var prev_cp = -1
         # indexed loop: for-in over text yields corrupted bindings (doc/08_tracking/bug/for_loop_over_text_char_code_at_zero_len_crash_2026-07-19.md)
         var ci = 0
-        val content_cps = text_codepoints(content)
-        val content_len = content_cps.len()
+        val content_len = content.len()
         while ci < content_len:
-            val cp = content_cps[ci] as i32
+            val cp = content.char_code_at(ci)
             if prev_cp >= 0:
                 total_w = total_w + self.horizontal_kern(prev_cp, cp, font_size)
             val glyph_advance = self.get_glyph_advance(cp, font_size)
@@ -1622,10 +1582,9 @@ class FontRenderer:
         var prev_cp = -1
         # indexed loop: for-in over text yields corrupted bindings (doc/08_tracking/bug/for_loop_over_text_char_code_at_zero_len_crash_2026-07-19.md)
         var ci = 0
-        val content_cps = text_codepoints(content)
-        val content_len = content_cps.len()
+        val content_len = content.len()
         while ci < content_len:
-            val cp = content_cps[ci] as i32
+            val cp = content.char_code_at(ci)
             if prev_cp >= 0:
                 val previous = advances.len() - 1
                 advances[previous] = advances[previous] + self.horizontal_kern(prev_cp, cp, font_size)
@@ -1648,10 +1607,9 @@ class FontRenderer:
         var prev_cp = -1
         # indexed loop: for-in over text yields corrupted bindings (doc/08_tracking/bug/for_loop_over_text_char_code_at_zero_len_crash_2026-07-19.md)
         var ci = 0
-        val content_cps = text_codepoints(content)
-        val content_len = content_cps.len()
+        val content_len = content.len()
         while ci < content_len:
-            val cp = content_cps[ci] as i32
+            val cp = content.char_code_at(ci)
             if prev_cp >= 0:
                 cx = cx + self.horizontal_kern(prev_cp, cp, font_size)
             val glyph = self.get_glyph(cp, font_size)
@@ -1673,10 +1631,9 @@ class FontRenderer:
             var fallback_byte_offset: i64 = 0
             # indexed loop: for-in over text yields corrupted bindings (doc/08_tracking/bug/for_loop_over_text_char_code_at_zero_len_crash_2026-07-19.md)
             var ci = 0
-            val content_cps = text_codepoints(content)
-            val content_len = content_cps.len()
+            val content_len = content.len()
             while ci < content_len:
-                val codepoint = content_cps[ci] as i32
+                val codepoint = content.char_code_at(ci)
                 val glyph = self.get_glyph(codepoint, font_size)
                 layout = layout.push(LayoutGlyph(
                     codepoint: codepoint.to_i64(), x: fallback_x, y: 0,
@@ -1742,7 +1699,23 @@ class FontRenderer:
         FontTextPayload(valid: true, width: width, height: height, offset_x: min_x, offset_y: min_y, pixels: pixels)
 
     me _reset_font_atlas(face_generation: i64, font_identity: text):
-        self.atlas_pixels = [0u32; FONT_ATLAS_WIDTH * FONT_ATLAS_HEIGHT]
+        # Reuse the existing 8 MiB atlas buffer in place instead of
+        # `[0u32; FONT_ATLAS_WIDTH * FONT_ATLAS_HEIGHT]`. On the freestanding
+        # x86_64 lane the bump allocator never frees, so every reset used to
+        # burn a fresh 8 MiB (`[array-repeat] big count=0x100000`) buffer that
+        # was permanently lost. `_reset_font_atlas` is called on every atlas
+        # eviction/overflow during a single frame's glyph-run measure/cache
+        # cycle -- repeated resets exhausted the 1 GiB baremetal heap on the
+        # first 4K frame (`[PANIC] heap exhausted`). Zeroing in place keeps
+        # allocation count bounded to one per FontRenderer instance.
+        val expected_len = FONT_ATLAS_WIDTH * FONT_ATLAS_HEIGHT
+        if self.atlas_pixels.len() == expected_len:
+            var i = 0
+            while i < expected_len:
+                self.atlas_pixels[i] = 0u32
+                i = i + 1
+        else:
+            self.atlas_pixels = [0u32; expected_len]
         self.atlas_codepoints = []
         self.atlas_face_ids = []
         self.atlas_face_generations = []
@@ -1926,10 +1899,9 @@ class FontRenderer:
             # way) and is timeboxed via the probes immediately below instead.
             # indexed loop: for-in over text yields corrupted bindings (doc/08_tracking/bug/for_loop_over_text_char_code_at_zero_len_crash_2026-07-19.md)
             var ci = 0
-            val content_cps = text_codepoints(content)
-            val content_len = content_cps.len()
+            val content_len = content.len()
             while ci < content_len:
-                val codepoint = content_cps[ci] as i32
+                val codepoint = content.char_code_at(ci)
                 if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
                     _vec_glyph_probe_count = _vec_glyph_probe_count + 1
                     print("[vec-glyph-probe] active-before-get_glyph cp={codepoint} font_size={font_size}")
@@ -2507,11 +2479,7 @@ fn _resolve_font_metrics_with_language_config(family: text, content: text, font_
     if not renderer_from_cache:
         renderer.clear_ttf()
     # indexed loop: for-in over text yields corrupted bindings (doc/08_tracking/bug/for_loop_over_text_char_code_at_zero_len_crash_2026-07-19.md)
-    # CODEPOINT count, not byte length: `advances` carries one entry per
-    # codepoint, so a byte-length comparison declared every non-ASCII run
-    # invalid (or, when the advances were themselves byte-per-byte, agreed
-    # with an inflated width).
-    val character_count = text_codepoints(content).len()
+    val character_count = content.len()
     val valid = identity != "" and advances.len() == character_count
     val resolved = ResolvedFontMetrics(
         valid: valid,

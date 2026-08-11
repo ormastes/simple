@@ -17,7 +17,7 @@ FAILURES=0
 CASE_TIMEOUT_SECONDS=20
 
 usage() {
-    printf '%s\n' "usage: sh scripts/check/check-llm-caret-tui-pty.shs --case <prerequisites|routing|lifecycle|editing|invalid-utf8-recovery|hidden|promptless|offline-claude|provider-error|raw-failure|all>"
+    printf '%s\n' "usage: sh scripts/check/check-llm-caret-tui-pty.shs --case <prerequisites|routing|lifecycle|editing|hidden|promptless|offline-claude|raw-failure|all>"
 }
 
 fail_prerequisite() {
@@ -343,11 +343,6 @@ write_input() {
             # "ac", left, U+754C, end, "!" => submitted text "a界c!".
             printf 'ac\033[D界\033[F!\r/exit\r' >"${input_path}"
             ;;
-        invalid-utf8-recovery)
-            # Submit malformed UTF-8 first, then prove the next valid line is
-            # accepted and the TUI can still restore the terminal on /exit.
-            printf '\300\257\rutf8-recovery-ok\r/exit\r' >"${input_path}"
-            ;;
         hidden-default|hidden-enabled|hidden-false)
             printf '/debug-tool-call {"type":"tool_use","id":"call-1","name":"Read","input":{"file_path":"fixture.txt"}}\r/exit\r' \
                 >"${input_path}"
@@ -355,7 +350,7 @@ write_input() {
         hidden-disabled)
             printf '/remote-setup\r/exit\r' >"${input_path}"
             ;;
-        hidden-alias-default|hidden-alias-enabled|hidden-alias-false)
+        hidden-alias-default|hidden-alias-enabled)
             printf '/debug_tool_call {"type":"tool_use","id":"call-1","name":"Read","input":{"file_path":"fixture.txt"}}\r/exit\r' \
                 >"${input_path}"
             ;;
@@ -376,9 +371,6 @@ write_input() {
             ;;
         fixture-success)
             printf 'fixture-success\r/exit\r' >"${input_path}"
-            ;;
-        fixture-error)
-            printf 'fixture-error\r/exit\r' >"${input_path}"
             ;;
         *)
             return 1
@@ -717,7 +709,7 @@ run_pty_case() {
             LLM_CARET_ENABLE_HIDDEN_COMMANDS=1
             export LLM_CARET_ENABLE_HIDDEN_COMMANDS
             ;;
-        hidden-false|hidden-alias-false)
+        hidden-false)
             LLM_CARET_ENABLE_HIDDEN_COMMANDS=false
             export LLM_CARET_ENABLE_HIDDEN_COMMANDS
             ;;
@@ -788,30 +780,12 @@ run_pty_case() {
     elif [ "${input_kind}" = "utf8-edit" ] &&
          ! grep -a -F "You: a界c!" "${capture}" >/dev/null 2>&1; then
         record_failure "${label}" "utf8_edited_submission_missing" "${case_dir}"
-    elif [ "${input_kind}" = "invalid-utf8-recovery" ] &&
-         LC_ALL=C grep -a -F "$(printf '\300\257')" \
-             "${capture}" >/dev/null 2>&1; then
-        record_failure "${label}" "invalid_utf8_leaked_to_transcript" "${case_dir}"
-    elif [ "${input_kind}" = "invalid-utf8-recovery" ] &&
-         ! grep -a -F "You: utf8-recovery-ok" \
-             "${capture}" >/dev/null 2>&1; then
-        record_failure "${label}" "utf8_recovery_submission_missing" "${case_dir}"
     elif [ "${provider_mode}" = "fixture-claude" ] &&
-         [ "${input_kind}" = "fixture-success" ] &&
          ! grep -a -F "You: fixture-success" "${capture}" >/dev/null 2>&1; then
         record_failure "${label}" "offline_claude_user_transcript_missing" "${case_dir}"
     elif [ "${provider_mode}" = "fixture-claude" ] &&
-         [ "${input_kind}" = "fixture-success" ] &&
          ! grep -a -F "Assistant: fixture-ok" "${capture}" >/dev/null 2>&1; then
         record_failure "${label}" "offline_claude_assistant_transcript_missing" "${case_dir}"
-    elif [ "${provider_mode}" = "fixture-claude" ] &&
-         [ "${input_kind}" = "fixture-error" ] &&
-         ! grep -a -F "You: fixture-error" "${capture}" >/dev/null 2>&1; then
-        record_failure "${label}" "offline_claude_error_user_transcript_missing" "${case_dir}"
-    elif [ "${provider_mode}" = "fixture-claude" ] &&
-         [ "${input_kind}" = "fixture-error" ] &&
-         ! grep -a -F "[REDACTED:" "${capture}" >/dev/null 2>&1; then
-        record_failure "${label}" "offline_claude_redacted_error_missing" "${case_dir}"
     elif [ "${provider_mode}" = "fixture-claude" ] &&
          grep -a -F "sk-ant-fixture-secret" \
              "${capture}" "${driver_stdout}" "${driver_stderr}" >/dev/null 2>&1; then
@@ -829,14 +803,6 @@ run_pty_case() {
          ! grep -a -F "system: Unknown command: /debug_tool_call (try /help)" \
              "${capture}" >/dev/null 2>&1; then
         record_failure "${label}" "hidden_alias_default_rejection_missing" "${case_dir}"
-    elif [ "${input_kind}" = "hidden-alias-false" ] &&
-         ! grep -a -F "system: Unknown command: /debug_tool_call (try /help)" \
-             "${capture}" >/dev/null 2>&1; then
-        record_failure "${label}" "hidden_alias_false_rejection_missing" "${case_dir}"
-    elif [ "${input_kind}" = "hidden-alias-false" ] &&
-         grep -a -F "system: tool call id=call-1 name=Read input_bytes=27" \
-             "${capture}" >/dev/null 2>&1; then
-        record_failure "${label}" "hidden_alias_false_hook_executed" "${case_dir}"
     elif { [ "${input_kind}" = "hidden-enabled" ] ||
            [ "${input_kind}" = "hidden-alias-enabled" ]; } &&
          ! grep -a -F "system: tool call id=call-1 name=Read input_bytes=27" \
@@ -999,11 +965,6 @@ run_editing() {
     run_pty_case "small-terminal-geometry" "forced" "exit" "12x50" "dummy"
 }
 
-run_invalid_utf8_recovery() {
-    run_pty_case \
-        "invalid-utf8-recovery" "forced" "invalid-utf8-recovery" "12x80" "dummy"
-}
-
 run_hidden() {
     run_pty_case "hidden-default-rejected" "forced" "hidden-default" "12x80" "dummy"
     run_pty_case "hidden-false-rejected" "forced" "hidden-false" "12x80" "dummy"
@@ -1011,8 +972,6 @@ run_hidden() {
     run_pty_case "hidden-disabled-rejected" "forced" "hidden-disabled" "12x80" "dummy"
     run_pty_case \
         "hidden-alias-default-rejected" "forced" "hidden-alias-default" "12x80" "dummy"
-    run_pty_case \
-        "hidden-alias-false-rejected" "forced" "hidden-alias-false" "12x80" "dummy"
     run_pty_case \
         "hidden-alias-enabled-executed" "forced" "hidden-alias-enabled" "12x80" "dummy"
     run_pty_case \
@@ -1037,11 +996,6 @@ run_promptless() {
 
 run_offline_claude() {
     run_pty_case "offline-claude" "forced" "fixture-success" "12x80" \
-        "fixture-claude"
-}
-
-run_provider_error() {
-    run_pty_case "offline-claude-provider-error" "forced" "fixture-error" "12x80" \
         "fixture-claude"
 }
 
@@ -1087,9 +1041,6 @@ case "${CASE_NAME}" in
     editing)
         run_editing
         ;;
-    invalid-utf8-recovery)
-        run_invalid_utf8_recovery
-        ;;
     hidden)
         run_hidden
         ;;
@@ -1099,9 +1050,6 @@ case "${CASE_NAME}" in
     offline-claude)
         run_offline_claude
         ;;
-    provider-error)
-        run_provider_error
-        ;;
     raw-failure)
         run_raw_failure_case
         ;;
@@ -1109,11 +1057,9 @@ case "${CASE_NAME}" in
         run_routing
         run_lifecycle
         run_editing
-        run_invalid_utf8_recovery
         run_hidden
         run_promptless
         run_offline_claude
-        run_provider_error
         run_raw_failure_case
         ;;
     *)

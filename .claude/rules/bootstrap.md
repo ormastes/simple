@@ -21,20 +21,6 @@ tooling/script gap. Full trace, root cause, and an in-progress fix:
 `doc/08_tracking/bug/t3_full_bootstrap_stage3_unresolved_type_byteorder_cache_validator_2026-08-06.md`
 (see also `doc/08_tracking/bug/deployed_bin_simple_still_seed_2026-08-05.md`).
 
-**Stage numbering (this doc undercounts it — see the authoritative 4-stage
-definition in `doc/07_guide/compiler/build.md` § "Bootstrap Stages"):** Stage 3
-("self-hosted") only proves the Stage-2 binary can recompile the *minimal
-bootstrap entry* (`bootstrap_main.spl`) — it is NOT the full-featured CLI.
-Stage 4 ("Full CLI") is the separate step where the verified Stage-3 binary
-compiles `main.spl`, producing the actual deployable `bin/simple` with every
-subcommand (`test`, `lint`, `duplicate-check`, etc.). A binary at
-`build/bootstrap/stage3/<triple>/simple` correctly answers only `compile`/
-`native-build` — it has no `run`/`test`/`duplicate-check`, and that is
-expected, not a defect in that binary. Do not assume "Stage 3 passed" means
-tooling is usable; it means only the recompile-itself milestone was hit. The
-current KNOWN BLOCKER above is at Stage 3, so Stage 4 is unreachable until
-it's fixed.
-
 **Do not paper over this by hand-rolling `cargo build --release` and manually
 copying the result to `bin/release/<triple>/simple`.** That produces a fresh
 Rust **seed**, not a self-hosted binary — the seed banner is the tell. Worse,

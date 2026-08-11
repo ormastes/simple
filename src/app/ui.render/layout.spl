@@ -1,13 +1,8 @@
 # Shared TUI Layout Primitives
 #
-# Reusable layout types and functions for gridding and measuring rectangular
-# regions.  Used by llm_dashboard, office apps, and any TUI that needs
-# structured panel placement.
-#
-# Proportional and fixed panel splitting lives in std.tui.layout
-# (src/lib/nogc_sync_mut/tui/layout.spl): split_vertical, split_horizontal,
-# split_vertical_fixed, split_horizontal_fixed, center_rect.  Do not
-# re-implement those here.
+# Reusable layout types and functions for splitting, gridding, and measuring
+# rectangular regions.  Used by llm_dashboard, office apps, and any TUI that
+# needs structured panel placement.
 
 use common.string_builder.{StringBuilder}
 
@@ -85,6 +80,134 @@ fn grid_layout(area: LayoutRect, rows: i32, cols: i32, gap: i32) -> [[LayoutRect
     return result
 
 # =========================================================================
+# Proportional Splits
+# =========================================================================
+
+fn split_horizontal(area: LayoutRect, ratios: [i32]) -> [LayoutRect]:
+    """Split `area` horizontally into columns proportional to `ratios`.
+
+    Example: split_horizontal(area, [1, 2, 1]) gives 25%/50%/25%.
+    """
+    if ratios.len() == 0:
+        return []
+
+    var total = 0
+    for r in ratios:
+        total = total + r
+
+    if total <= 0:
+        return []
+
+    var result: [LayoutRect] = []
+    var used = 0
+    var i = 0
+    while i < ratios.len():
+        val w = if i == ratios.len() - 1:
+            area.width - used
+        else:
+            (area.width * ratios[i]) / total
+        result.push(LayoutRect(x: area.x + used, y: area.y, width: w, height: area.height))
+        used = used + w
+        i = i + 1
+    return result
+
+fn split_vertical(area: LayoutRect, ratios: [i32]) -> [LayoutRect]:
+    """Split `area` vertically into rows proportional to `ratios`.
+
+    Example: split_vertical(area, [1, 3]) gives 25%/75%.
+    """
+    if ratios.len() == 0:
+        return []
+
+    var total = 0
+    for r in ratios:
+        total = total + r
+
+    if total <= 0:
+        return []
+
+    var result: [LayoutRect] = []
+    var used = 0
+    var i = 0
+    while i < ratios.len():
+        val h = if i == ratios.len() - 1:
+            area.height - used
+        else:
+            (area.height * ratios[i]) / total
+        result.push(LayoutRect(x: area.x, y: area.y + used, width: area.width, height: h))
+        used = used + h
+        i = i + 1
+    return result
+
+# =========================================================================
+# Fixed-Size Splits
+# =========================================================================
+
+fn split_left(area: LayoutRect, width: i32) -> (LayoutRect, LayoutRect):
+    """Split off a fixed-width left panel. Returns (left, rest)."""
+    val w = if width > area.width: area.width else: width
+    val left = LayoutRect(x: area.x, y: area.y, width: w, height: area.height)
+    val rest = LayoutRect(x: area.x + w, y: area.y, width: area.width - w, height: area.height)
+    return (left, rest)
+
+fn split_right(area: LayoutRect, width: i32) -> (LayoutRect, LayoutRect):
+    """Split off a fixed-width right panel. Returns (rest, right)."""
+    val w = if width > area.width: area.width else: width
+    val rest = LayoutRect(x: area.x, y: area.y, width: area.width - w, height: area.height)
+    val right = LayoutRect(x: area.x + area.width - w, y: area.y, width: w, height: area.height)
+    return (rest, right)
+
+fn split_top(area: LayoutRect, height: i32) -> (LayoutRect, LayoutRect):
+    """Split off a fixed-height top panel. Returns (top, rest)."""
+    val h = if height > area.height: area.height else: height
+    val top = LayoutRect(x: area.x, y: area.y, width: area.width, height: h)
+    val rest = LayoutRect(x: area.x, y: area.y + h, width: area.width, height: area.height - h)
+    return (top, rest)
+
+fn split_bottom(area: LayoutRect, height: i32) -> (LayoutRect, LayoutRect):
+    """Split off a fixed-height bottom panel. Returns (rest, bottom)."""
+    val h = if height > area.height: area.height else: height
+    val rest = LayoutRect(x: area.x, y: area.y, width: area.width, height: area.height - h)
+    val bot = LayoutRect(x: area.x, y: area.y + area.height - h, width: area.width, height: h)
+    return (rest, bot)
+
+# =========================================================================
+# Centering
+# =========================================================================
+
+fn center_in(area: LayoutRect, width: i32, height: i32) -> LayoutRect:
+    """Return a rect centered inside `area` with the given size.
+
+    Clamps to the area bounds.
+    """
+    val w = if width > area.width: area.width else: width
+    val h = if height > area.height: area.height else: height
+    val cx = area.x + (area.width - w) / 2
+    val cy = area.y + (area.height - h) / 2
+    return LayoutRect(x: cx, y: cy, width: w, height: h)
+
+# =========================================================================
+# Stack Layout
+# =========================================================================
+
+fn stack_layout(area: LayoutRect, heights: [i32]) -> [LayoutRect]:
+    """Lay out items vertically with explicit heights.
+
+    Items that would extend past the area are clipped.
+    """
+    var result: [LayoutRect] = []
+    var used = 0
+    for h in heights:
+        if used + h > area.height:
+            val remaining = area.height - used
+            if remaining > 0:
+                result.push(LayoutRect(x: area.x, y: area.y + used, width: area.width, height: remaining))
+            break
+        result.push(LayoutRect(x: area.x, y: area.y + used, width: area.width, height: h))
+        used = used + h
+    return result
+
+# =========================================================================
 # Text Measurement Helpers
 # =========================================================================
 
@@ -153,3 +276,22 @@ fn pad_to_width(s: text, width: i32) -> text:
         padded = "{padded} "
         i = i + 1
     return padded
+
+fn center_text(s: text, width: i32) -> text:
+    """Center `s` in a field of `width` visible characters."""
+    val vis = text_width(s)
+    if vis >= width:
+        return s
+    val left_pad = (width - vis) / 2
+    val right_pad = width - vis - left_pad
+    var result = ""
+    var i = 0
+    while i < left_pad:
+        result = "{result} "
+        i = i + 1
+    result = "{result}{s}"
+    i = 0
+    while i < right_pad:
+        result = "{result} "
+        i = i + 1
+    return result

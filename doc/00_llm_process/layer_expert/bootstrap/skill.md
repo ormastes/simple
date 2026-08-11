@@ -2,21 +2,13 @@
 
 ## Role
 
-Own layer-specific process knowledge for the 4-stage bootstrap pipeline (see
-`doc/07_guide/compiler/build.md` § "Bootstrap Stages" for the authoritative
-definition — this doc used to undercount it as "3-stage"):
+Own layer-specific process knowledge for the 3-stage bootstrap pipeline:
 `src/compiler/80.driver/driver_bootstrap.spl` orchestrates seed (Rust) → stage2
-(Simple on Rust, `bootstrap_main.spl` entry) → stage3 (self-hosted Simple
-binary — Stage-2's output recompiles itself, still the minimal
-`bootstrap_main.spl` entry, NOT the full CLI) → stage4 (the verified Stage-3
-binary compiles `main.spl`, producing the actual deployable full-CLI
-`bin/simple` with every subcommand). "Self-hosted" (Stage 3) and "full CLI
-usable" (Stage 4) are distinct milestones — a Stage-3-only binary answers
-`compile`/`native-build` but has no `run`/`test`/`duplicate-check`, by design.
-This layer also owns the JIT Cranelift backend stability track (stage2 uses
-LLVM llc by default; JIT is opt-in via `SIMPLE_BOOTSTRAP_REAL_LLVM` env var).
-Tracks redeploy gate (`scripts/bootstrap/redeploy_gate.sh`), smoke-matrix
-verification, and all bootstrap-blocking regressions.
+(Simple on Rust) → stage3 (self-hosted Simple binary). This layer also owns
+the JIT Cranelift backend stability track (stage2 uses LLVM llc by default; JIT
+is opt-in via `SIMPLE_BOOTSTRAP_REAL_LLVM` env var). Tracks redeploy gate
+(`scripts/bootstrap/redeploy_gate.sh`), smoke-matrix verification, and all
+bootstrap-blocking regressions.
 
 ## Pipeline Links
 

@@ -144,16 +144,26 @@ History stores at most 64 events. Every accepted action records:
 
 ## Evidence Gate Interface
 
-The system spec calls exactly once per SSpec process:
+The system spec calls:
 
 ```text
-scripts/check/check-office-cli-tui-ui-access.spl --scenario all --run-id <unique-id>
+scripts/check/check-office-cli-tui-ui-access.spl --scenario <name>
 ```
 
-through the self-hosted `SIMPLE_BINARY`. No other scenario selector is a public
-gate contract. The gate runs deployed CLI, PTY, UI protocol, formula,
-rejection, history, performance, provenance, and cleanup checks as one atomic
-evidence campaign.
+through the self-hosted `SIMPLE_BINARY`. Frozen scenario names:
+
+- `cli-help`
+- `cli-ide`
+- `cli-invalid`
+- `ui-discovery`
+- `ui-action-history`
+- `ui-rejection`
+- `formula-multiply`
+- `formula-avg`
+- `formula-invalid`
+- `evidence`
+- `performance`
+- `isolation`
 
 The `all` scenario executes a deployed self-hosted gate once, fails nonzero on
 any missing requirement, and writes a unique run-ID receipt to `suite.txt`.
@@ -164,38 +174,25 @@ The SSpec helper names are:
 - `setup_office_cli_tui_ui_access`
 - `check_office_gate`
 
-The helper is represented in the manual-first source by the inline scenario
-`has one fresh deployed Office evidence run`. Each visible/folded scenario uses
-`@prev(...)` to expand that setup into its manual flow without executing a
-second gate.
-
 There are no silent placeholder helpers. A missing runtime, gate, command,
 surface, artifact, or marker is an immediate test failure.
 
 ## Evidence Layout
 
 ```text
-build/test-artifacts/03_system/app/office/feature/office_cli_tui_ui_access/runs/<run-id>/
+build/test-artifacts/03_system/app/office/feature/office_cli_tui_ui_access/
+  tui/calc-before.ansi
+  tui/calc-before.txt
   tui/calc-after.ansi
   tui/calc-after.txt
-  tui/calc-exit.txt
   protocol/windows.json
   protocol/snapshot-before.json
   protocol/surface-main.json
-  protocol/find-b1.json
-  protocol/find-c1.json
-  protocol/malformed-before.json
-  protocol/malformed-after.json
-  protocol/malformed-rejection.txt
+  protocol/find.json
   protocol/snapshot-after.json
   protocol/history.json
-  protocol/rejections.txt
-  protocol/service-closed.txt
   exec/commands.txt
-  exec/runtime-artifact.txt
-  exec/runtime-provenance.txt
-  perf/startup.txt
-  perf/warm-protocol.txt
+  perf/metrics.txt
   suite.txt
 ```
 

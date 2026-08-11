@@ -6,7 +6,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|-------:|--------:|--------:|
-| 9 | 9 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 This manual records zero executed scenarios and does not claim PASS because
 cached process execution is blocked until a qualified Caret artifact exists.
@@ -45,15 +45,13 @@ provider requires no provider credential or network.
 The checker rejects missing cache, `script(1)`, `stty`, `cmp`, markers, ANSI TUI
 rendering, plain-output purity, edited UTF-8 text, geometry, or restoration.
 It also drives the real TUI root-command path with no hidden-feature
-environment, with `LLM_CARET_ENABLE_HIDDEN_COMMANDS=false`, with
-`LLM_CARET_ENABLE_HIDDEN_COMMANDS=1`, and with a disabled registry command.
-The retained transcripts must show canonical and alias unknown-command
-concealment for both unset and explicit-false admission, sanitized
-debug-command execution only when enabled, and disabled-command rejection.
-The explicit-false alias transcript must not contain the hidden tool-call hook.
-Those cases use a fixed 12x80 PTY so inherited geometry cannot truncate the
-exact semantic lines. Every PTY case must also retain an explicit `caret_exit=0`
-child marker; `script -e` is only supplemental exit propagation.
+environment, with `LLM_CARET_ENABLE_HIDDEN_COMMANDS=1`, and with a disabled
+registry command. The three retained transcripts must respectively show
+unknown-command rejection, sanitized debug-command execution, and
+disabled-command rejection. Those cases use a fixed 12x80 PTY so inherited
+geometry cannot truncate the exact semantic lines. Every PTY case must also
+retain an explicit `caret_exit=0` child marker; `script -e` is only supplemental
+exit propagation.
 The promptless case is narrower: it proves that the shipped root metadata
 admits `/compact`, `/summarize`, `/init`, and `/bootstrap`, including the two
 canonical/alias pairs. Each command runs once through the real TUI and once
@@ -66,18 +64,11 @@ feature implementations are shipped.
 Forced TUI on non-TTY stdin must fail before emitting escape bytes with
 `terminal raw mode unavailable`. Each child is guarded by one fixed 20-second
 watchdog; timeout evidence is retained and fails the case without retry. The
-outer SSpec process bound is 240 seconds for the eight-case hidden group and
+outer SSpec process bound is 240 seconds for the seven-case hidden group and
 eight-case promptless group, and 120 seconds for every other scenario.
 
 **TUI Captures:**
 `build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_tui_pty/`
-
-For each executed case, `typescript.txt` is the canonical raw ANSI terminal
-screen capture. The same case directory retains `input.bin`, `pty-runner.sh`,
-`script-stdout.txt`, `script-stderr.txt`, and `timeout.txt` when applicable.
-These are terminal transcripts, not raster screenshots; a visual PASS requires
-the actual captured ANSI frame plus the checker’s alternate-screen, cursor,
-geometry, and transcript assertions.
 
 The hard-panic/signal path remains outside this lane until the runtime exposes a
 qualified atexit/signal restoration owner. EOF here means the PTY driver's
@@ -166,37 +157,6 @@ expect(result.exit_code).to_equal(0)
 
 </details>
 
-#### should recover from malformed UTF-8 without leaking invalid bytes
-
-- Open the caret TUI at the fixed 12x80 PTY geometry.
-- Send the malformed two-byte UTF-8 sequence `C0 AF`, submit it, then submit
-  the valid line `utf8-recovery-ok` and `/exit`.
-  - Expected: the raw malformed bytes never appear in `typescript.txt`; the
-    subsequent valid transcript line is `You: utf8-recovery-ok`.
-- Check transcript and terminal restoration.
-  - Expected: the child records `caret_exit=0`, alternate screen and cursor
-    state are restored, geometry and raw-mode baseline match, and the checker
-    reports zero failures. This is a bounded recovery outcome, not replacement
-    of malformed input with a displayed surrogate.
-
-<details>
-<summary>Executable SSpec</summary>
-
-```simple
-step("Open the caret TUI")
-val result = run_caret_pty_case("invalid-utf8-recovery")
-step("Send malformed bytes then a valid prompt through the visible input")
-expect(result.stdout).to_contain(
-    "case=invalid-utf8-recovery status=PASS"
-)
-step("Check transcript and terminal restoration")
-expect(result.stdout).to_contain("evidence_status=PASS")
-expect(result.stdout).to_contain("failed_cases=0")
-expect(result.exit_code).to_equal(0)
-```
-
-</details>
-
 #### should reject forced TUI before terminal mutation when raw mode is unavailable
 
 - Open the caret TUI without a PTY.
@@ -220,38 +180,6 @@ expect(result.exit_code).to_equal(0)
 
 </details>
 
-#### should show a redacted offline Claude provider error while restoring the terminal
-
-- Load the cached Caret artifact.
-  - Expected: the wrapper is pinned to a provenance-qualified pure-Simple
-    artifact before the PTY child starts.
-- Invoke the offline Caret CLI provider.
-  - Expected: the fixture submits `fixture-error`; its Claude CLI process exits
-    with the deterministic authorization error, Caret renders a `[REDACTED:`
-    error marker, and no `sk-ant-fixture-secret` appears in the ANSI capture or
-    script streams.
-- Check captured output and status.
-  - Expected: the terminal mode and requested 12x80 geometry are restored,
-    the child records `caret_exit=0`, and the checker reports zero failures.
-
-<details>
-<summary>Executable SSpec</summary>
-
-```simple
-step("Load the cached Caret artifact")
-val result = run_caret_pty_case("provider-error")
-step("Invoke the offline Caret CLI provider")
-expect(result.stdout).to_contain(
-    "case=offline-claude-provider-error status=PASS"
-)
-step("Check captured output and status")
-expect(result.stdout).to_contain("evidence_status=PASS")
-expect(result.stdout).to_contain("failed_cases=0")
-expect(result.exit_code).to_equal(0)
-```
-
-</details>
-
 ### REQ-LLM-CARET-HIDDEN-008: hidden command admission reaches the real TUI
 
 #### should enforce hidden canonical alias and explicit false admission through the real TUI
@@ -259,15 +187,13 @@ expect(result.exit_code).to_equal(0)
 - Enable the hidden-feature fixture.
   - Expected: canonical and alias default state renders the matching
     unknown-command response.
-  - Expected: explicit `false` renders matching canonical and alias
-    `system: Unknown command: /debug-tool-call (try /help)` and
-    `system: Unknown command: /debug_tool_call (try /help)` concealment, with
-    no hidden tool-call hook.
+  - Expected: explicit `false` renders
+    `system: Unknown command: /debug-tool-call (try /help)`.
   - Expected: canonical and alias enabled fixtures render
     `system: tool call id=call-1 name=Read input_bytes=27`.
   - Expected: canonical and alias disabled commands remain rejected.
 - Check the hidden-feature gate.
-  - Expected: all eight PTY cases pass with zero failures.
+  - Expected: all seven PTY cases pass with zero failures.
 
 <details>
 <summary>Executable SSpec</summary>
@@ -289,9 +215,6 @@ expect(result.stdout).to_contain(
 )
 expect(result.stdout).to_contain(
     "case=hidden-alias-default-rejected status=PASS"
-)
-expect(result.stdout).to_contain(
-    "case=hidden-alias-false-rejected status=PASS"
 )
 expect(result.stdout).to_contain(
     "case=hidden-alias-enabled-executed status=PASS"

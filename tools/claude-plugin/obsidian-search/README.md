@@ -1,28 +1,25 @@
 # obsidian-search Claude Plugin
 
-**Status: not shipped from this repository.**
+Claude Code plugin bundle for the Obsidian vault MCP and bridge servers.
 
-Verified 2026-08-11: this repo contains **no** implementation for the Obsidian
-MCP/LSP servers. There is no `bin/obsidian_lsp_mcp_server` (and none in git
-history), no `src/app/obsidian*`, and no `examples/obsidian-search/`. The
-`.mcp.json` that used to live here pointed at `bin/obsidian_lsp_mcp_server`,
-a repo-relative path that could never resolve, so every launch failed. It has
-been removed rather than left as a stale reference.
+## Install
 
-`obsidian-lsp-mcp` is a **separate package on its own version track** — see the
-MCP server table in `.claude/rules/code-style.md`. Install it from
-`@simple-lang/obsidian-lsp-mcp-server` and configure it in your own client
-config with an absolute command path plus a valid `OBSIDIAN_VAULT_PATH`.
+This plugin is intended for use from a Simple repository checkout. It needs a
+valid `OBSIDIAN_VAULT_PATH` and launches the checked-in wrapper/example
+servers:
 
-`scripts/check/mcp_cmdline_probe_debug.spl` still probes
-`bin/obsidian_lsp_mcp_server`; it is a debug probe and will correctly report the
-binary as absent.
+```bash
+bin/obsidian_lsp_mcp_server mcp
+bin/obsidian_lsp_mcp_server
+```
 
-If the servers are ever brought into this repo, they must ship the same way the
-other MCP servers do: a `bin/<name>` POSIX wrapper that hash-admits and probes a
-cached native artifact under `bin/release/<triple>/`, never a raw `.spl` launch
-(see `scripts/check/check-mcp-wrapper-contract.shs`).
+Legacy/debug hosted LSP entry:
 
-Its `.lsp.json` was removed for the same reason: it launched
-`bin/simple run examples/obsidian-search/src/main_lsp.spl`, a raw-source command
-whose target directory does not exist in this repo.
+```bash
+SIMPLE_ALLOW_HOSTED_FALLBACK=1 bin/simple run examples/obsidian-search/src/main_lsp.spl
+```
+
+## Included Servers
+
+- `obsidian-search`: vault search and note tooling
+- `obsidian-lsp-mcp`: LSP-oriented MCP bridge for diagnostics and completions

@@ -123,7 +123,7 @@ and must not be resolved, reverted, or included by this lane.
 | Gate | Current result | Authority/limit |
 |---|---|---|
 | Direct Caret trace | PASS (independent final reconciliation): 25/25 files, 7,198/7,198 LOC, 506/506 file-qualified declarations after the bounded-draw helper landed | The checker passed before the final security refactor and was not rerun, per the one-green-run session guard |
-| Unit manual parity | PASS: 62/62 TUI, 22/22 raw-input, 22/22 runtime, 64/64 main, 16/16 config, 36/36 provider, 15/15 OpenCode, 9/9 local-Torch, 37/37 tools, 24/24 chat, and 14/14 types bodies match source | Zero executed scenarios |
+| Unit manual parity | PASS: 62/62 TUI, 22/22 raw-input, 22/22 runtime, 63/63 main, 16/16 config, 36/36 provider, 15/15 OpenCode, 9/9 local-Torch, 37/37 tools, 24/24 chat, and 14/14 types bodies match source | Zero executed scenarios |
 | Component manual parity | PASS: 10/10 TUI/hidden scenario bodies match source, including default-hidden, admitted-hidden, and disabled alias submission with zero responder/persistence | Zero executed scenarios |
 | PTY manual parity | PASS: 7/7 live-terminal scenario bodies match source | Static synchronization; checker/SSpec not executed on a qualified artifact |
 | Installed-Claude offline probe | PASS: 6/6 cases against Claude Code `2.1.218` (`71abaff5…`): provenance, version, help, missing input, help-hidden `--max-turns`, and removed `--max-tokens` | Real installed-binary checker executed with isolated HOME/config, closed stdin, no prompt, and no inherited provider credentials; SSpec/docgen still blocked |

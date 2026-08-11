@@ -49,8 +49,8 @@ impl std::fmt::Debug for RuntimeValue {
         if self.is_float() {
             return write!(f, "RuntimeValue::Float({})", self.as_float());
         }
-        if let Some(value) = self.as_heap_u64() {
-            return write!(f, "RuntimeValue::UInt({value})");
+        if self.is_wide_int() {
+            return write!(f, "RuntimeValue::Int({})", self.as_int());
         }
         match self.tag() {
             tags::TAG_INT => write!(f, "RuntimeValue::Int({})", self.as_int()),
@@ -79,15 +79,6 @@ impl PartialEq for RuntimeValue {
         if self.is_float() || other.is_float() {
             return self.is_float() && other.is_float() && self.as_float() == other.as_float();
         }
-        if let Some(left) = self.as_heap_u64() {
-            return other.as_heap_u64().map_or_else(
-                || other.is_int() && other.as_int() >= 0 && left == other.as_int() as u64,
-                |right| left == right,
-            );
-        }
-        if let Some(right) = other.as_heap_u64() {
-            return self.is_int() && self.as_int() >= 0 && self.as_int() as u64 == right;
-        }
         self.0 == other.0
     }
 }
@@ -107,13 +98,6 @@ impl std::hash::Hash for RuntimeValue {
                 d = 0.0;
             }
             d.to_bits().hash(state);
-        } else if let Some(value) = self.as_heap_u64() {
-            if value <= ((1u64 << 60) - 1) {
-                RuntimeValue::from_int(value as i64).to_raw().hash(state);
-            } else {
-                0x5549_4e54_5f55_3634u64.hash(state);
-                value.hash(state);
-            }
         } else {
             self.0.hash(state);
         }
@@ -133,14 +117,6 @@ impl Ord for RuntimeValue {
         // tag-then-payload ordering below.
         if self.is_float() && other.is_float() {
             return self.as_float().total_cmp(&other.as_float());
-        }
-        match (self.as_heap_u64(), other.as_heap_u64()) {
-            (Some(left), Some(right)) => return left.cmp(&right),
-            (Some(_), None) if other.is_int() && other.as_int() < 0 => return std::cmp::Ordering::Greater,
-            (Some(left), None) if other.is_int() => return left.cmp(&(other.as_int() as u64)),
-            (None, Some(_)) if self.is_int() && self.as_int() < 0 => return std::cmp::Ordering::Less,
-            (None, Some(right)) if self.is_int() => return (self.as_int() as u64).cmp(&right),
-            _ => {}
         }
         // Order by tag first, then by payload
         // This provides a total ordering for BTreeMap/BTreeSet
@@ -219,15 +195,70 @@ impl RuntimeValue {
     // Integer operations
     // =========================================================================
 
-    /// Create an integer value
+    /// Does `i` survive the 61-bit tagged-immediate payload (`v << 3` / `v >> 3`)?
+    #[inline]
+    pub const fn int_fits_tagged(i: i64) -> bool {
+        // 61-bit signed range: [-2^60, 2^60 - 1].
+        i >= -(1i64 << 60) && i < (1i64 << 60)
+    }
+
+    /// Create an integer value.
     ///
-    /// Note: Only 61-bit signed integers can be stored directly.
-    /// Larger integers would need heap allocation.
+    /// Integers inside the 61-bit tagged payload keep the classic `i << 3`
+    /// immediate — bit-identical to before, so no existing consumer changes
+    /// behaviour. Integers OUTSIDE it are heap-boxed losslessly instead of being
+    /// silently truncated (ABI contract §1.1: "the encoder traps or heap-boxes;
+    /// silently truncating is a violation"). Before this, 2^60 flipped sign,
+    /// i64::MAX read back as -1 and 2^62 read back as 0 on every compiled lane.
+    /// Rust twin of the C runtime's `rt_value_int_wide` (runtime_native.c).
     #[inline]
     pub fn from_int(i: i64) -> Self {
-        // Sign-extend to fit in 61 bits
-        // The tag is 0, so we just shift
-        Self((i as u64) << 3)
+        if Self::int_fits_tagged(i) {
+            return Self((i as u64) << 3);
+        }
+        Self::from_int_wide_boxed(i)
+    }
+
+    /// Heap-box an integer too wide for the tagged immediate. Mirrors
+    /// `from_float`'s allocation + registration exactly.
+    #[inline(never)]
+    fn from_int_wide_boxed(i: i64) -> Self {
+        let size = std::mem::size_of::<super::heap::HeapWideInt>();
+        let layout = match std::alloc::Layout::from_size_align(size, 8) {
+            Ok(l) => l,
+            // OOM/layout failure: the truncating form is still wrong, but
+            // crashing here would be worse.
+            Err(_) => return Self((i as u64) << 3),
+        };
+        unsafe {
+            let ptr = std::alloc::alloc(layout) as *mut super::heap::HeapWideInt;
+            if ptr.is_null() {
+                return Self((i as u64) << 3);
+            }
+            (*ptr).header = super::heap::HeapHeader::new(HeapObjectType::WideInt, size as u32);
+            (*ptr).value = i;
+            super::collections::track_transient_heap(Self::from_heap_ptr(ptr as *mut HeapHeader))
+        }
+    }
+
+    /// Pointer to the boxed `HeapWideInt` if this value is one, else `None`.
+    /// The registry membership check (inside `heap_type`) happens BEFORE any
+    /// dereference, so a stray i64 aliasing TAG_HEAP is never dereferenced.
+    #[inline]
+    pub fn as_heap_wide_int_ptr(self) -> Option<*const super::heap::HeapWideInt> {
+        if matches!(self.heap_type(), Some(HeapObjectType::WideInt)) {
+            Some(self.as_heap_ptr() as *const super::heap::HeapWideInt)
+        } else {
+            None
+        }
+    }
+
+    /// Is this a heap-boxed wide integer? (Deliberately NOT folded into
+    /// `is_int()`: 172 call sites use `is_int()` as a tag-shape test, several as
+    /// an opaque-handle check, so widening it would change unrelated behaviour.)
+    #[inline]
+    pub fn is_wide_int(self) -> bool {
+        self.as_heap_wide_int_ptr().is_some()
     }
 
     /// Check if this is an integer
@@ -236,9 +267,18 @@ impl RuntimeValue {
         self.tag() == tags::TAG_INT
     }
 
-    /// Get the integer value (undefined behavior if not an int)
+    /// Get the integer value (undefined behavior if not an int).
+    ///
+    /// A heap-boxed wide integer (see `from_int`) returns its full 64-bit value;
+    /// everything else keeps the historical sign-extending `>> 3`, so a raw or
+    /// tagged input behaves exactly as before.
     #[inline]
     pub fn as_int(self) -> i64 {
+        if self.tag() == tags::TAG_HEAP {
+            if let Some(ptr) = self.as_heap_wide_int_ptr() {
+                return unsafe { (*ptr).value };
+            }
+        }
         // Sign-extend from 61 bits
         (self.0 as i64) >> 3
     }
@@ -309,34 +349,6 @@ impl RuntimeValue {
         }
         // Defensive: not a float. Preserve the old inline interpretation.
         f64::from_bits(self.payload() << 3)
-    }
-
-    /// Box a u64 losslessly for an erased RuntimeValue slot. All u64 values,
-    /// including 0..=7, use the heap form so payload bits cannot alias tags.
-    #[inline]
-    pub fn from_u64(value: u64) -> Self {
-        let size = std::mem::size_of::<super::heap::HeapUInt>();
-        let Ok(layout) = std::alloc::Layout::from_size_align(size, 8) else {
-            return Self::NIL;
-        };
-        unsafe {
-            let ptr = std::alloc::alloc(layout) as *mut super::heap::HeapUInt;
-            if ptr.is_null() {
-                return Self::NIL;
-            }
-            (*ptr).header = HeapHeader::new(HeapObjectType::UInt, size as u32);
-            (*ptr).value = value;
-            super::collections::track_transient_heap(Self::from_heap_ptr(ptr as *mut HeapHeader))
-        }
-    }
-
-    #[inline]
-    pub fn as_heap_u64(self) -> Option<u64> {
-        if matches!(self.heap_type(), Some(HeapObjectType::UInt)) {
-            Some(unsafe { (*(self.as_heap_ptr() as *const super::heap::HeapUInt)).value })
-        } else {
-            None
-        }
     }
 
     // =========================================================================
@@ -455,9 +467,6 @@ impl RuntimeValue {
         if self.is_float() {
             return self.as_float() != 0.0;
         }
-        if let Some(value) = self.as_heap_u64() {
-            return value != 0;
-        }
         match self.tag() {
             tags::TAG_INT => self.as_int() != 0,
             tags::TAG_FLOAT => self.as_float() != 0.0,
@@ -558,7 +567,9 @@ impl RuntimeValue {
                 // Unreachable in practice: the early `is_float()` guard above
                 // handles heap-boxed floats before this match.
                 Some(HeapObjectType::Float) => "float",
-                Some(HeapObjectType::UInt) => "int",
+                // Heap-boxed wide integer: an int by every observable contract,
+                // only its REPRESENTATION is a heap pointer.
+                Some(HeapObjectType::WideInt) => "int",
                 None => "null",
             },
             _ => "unknown",
@@ -615,7 +626,7 @@ impl RuntimeValue {
                 // Unreachable in practice: the early `is_float()` guard above
                 // handles heap-boxed floats before this match.
                 Some(HeapObjectType::Float) => ValueKind::Float,
-                Some(HeapObjectType::UInt) => ValueKind::Int,
+                Some(HeapObjectType::WideInt) => ValueKind::Int,
                 None => ValueKind::Nil,
             },
             _ => ValueKind::Nil,

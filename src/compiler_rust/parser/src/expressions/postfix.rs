@@ -166,23 +166,6 @@ impl<'a> Parser<'a> {
         loop {
             match &self.current.kind {
                 TokenKind::LParen => {
-                    // Only treat `(` as parenthesized call arguments if it's
-                    // adjacent to the previous token (no whitespace between),
-                    // mirroring the LBracket adjacency check below. With a
-                    // space before it — `print (16.0).sqrt()` — the `(...)`
-                    // is a parenthesized sub-expression that the no-paren
-                    // call machinery (parse_with_no_paren_calls) should parse
-                    // as the first ARGUMENT, postfix chain and all, not as
-                    // this callee's own call parens. Without this check,
-                    // `print (16.0).sqrt()` parsed as
-                    // `(print(16.0)).sqrt()` — print fired with the
-                    // un-sqrt'd 16.0 and the sqrt() applied (and discarded)
-                    // to print's return value, so callers only ever saw the
-                    // un-rooted "16.0". See
-                    // doc/08_tracking/bug/float_literal_receiver_method_call_returns_receiver_2026-08-10.md
-                    if self.previous.span.end != self.current.span.start {
-                        break;
-                    }
                     expr = self.parse_call(expr)?;
                 }
                 TokenKind::TripleLt => {

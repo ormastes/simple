@@ -1,13 +1,3 @@
-**2026-08-11 (2nd session) addendum:** also landed the working-copy-conflict
-tripwire filed in
-`doc/08_tracking/bug/conflict_markers_reported_at_origin_were_working_copy_only_2026-08-11.md`
-— `scripts/check/check-no-conflict-markers-push.shs` now prints
-`CHERRY_PICK_HEAD`/`MERGE_HEAD` presence and the `git ls-files -u` unmerged
-count on its FAIL path, so a human cannot misattribute a working-copy-only
-stalled cherry-pick's conflict-marker text to the committed SHA the guard
-names. Unrelated to the exit-code-only oracle work below but requested in
-the same pass.
-
 # Gate Oracle Soundness Census — 2026-08-11
 
 Status: FIRST-PASS TRIAGE (static analysis only, not re-verified line-by-line
@@ -260,123 +250,9 @@ this as a wording fix, not evidence that the leaf gates need a new oracle.
    `manifest-write.shs`, `lib/stage4-candidate-provenance.shs`,
    `check-compiler-provenance.shs`) — false green here silently poisons every
    downstream stage build. Retrofit: per-stage symbol/hash inspection.
-
-   **2026-08-11 follow-up read (this session):** all three Tier-1 scripts
-   named besides `manifest-verify.shs` (already excluded — see the header
-   correction above) were read in full and are **not** exit-code-only:
-   `manifest-write.shs` builds its `pass`/field manifest almost entirely from
-   real `sha256sum`-backed `bootstrap_stage3_hash_file` calls (dozens of
-   `_sha256=` fields) plus `cmp -s` byte comparisons of before/after
-   snapshots; `lib/stage4-candidate-provenance.shs`'s
-   `stage4_verify_candidate_provenance` re-derives and compares
-   `bootstrap_stage3_hash_file` digests for the binary, producer script,
-   helper script, parent compiler and Stage-3 manifest, and separately
-   re-runs `stage4_validate_candidate_lane` (exact `grep -Fxc` line matches
-   against build/smoke logs); `check-compiler-provenance.shs` already derives
-   its PASS/FAIL verdict from `nm`-based Simple-vs-Rust symbol-namespace
-   classification plus `strings`-based commit-marker presence checks, not a
-   bare exit code. No fix was owed to any of the three; effort was redirected
-   to genuinely-unsound Tier 2/3 gates below.
 2. **Native-build/link-parity Tier 2 list above (14 gates)** — retrofit with
    the existing `check-native-build-artifact-has-functions.shs` FUNC-symbol
    helper rather than bespoke checks.
-
-   **2026-08-11 follow-up (this session) — 2 of 14 FIXED:**
-   - `check-predicate-parser-native-build.shs`: previously trusted
-     `native-build`'s exit code plus a single regression-string grep, never
-     inspecting or running the produced artifact. Now additionally (a) runs
-     `check-native-build-artifact-has-functions.shs` against the built
-     artifact to require at least one defined FUNC symbol, and (b) actually
-     **executes** the artifact and asserts its stdout is exactly `hi`, closing
-     the exact "native-build reports success for a functionless/wrong
-     artifact" trap this census exists to catch. Verified red (fake
-     `native-build` wrapper that reports rc=0 but writes a non-`hi`-printing
-     stub) → FAIL, then green against the real `bin/release/x86_64-unknown-linux-gnu/simple`
-     → PASS.
-   - `build-x25519mlkem768-gpu-evidence-runner.shs`: previously trusted
-     `native-build`'s exit code plus regular-file/symlink checks on the
-     output path, never inspecting the artifact's own symbol table before
-     promoting it (`mv`) to its final, provenance-sidecar-backed path. Now
-     runs `check-native-build-artifact-has-functions.shs` against the
-     temporary artifact before promotion and refuses to promote (and cleans
-     up the temp artifact) on a zero-FUNC result.
-   - The remaining 12 gates in this Tier-2 list were read or spot-checked and
-     found to already assert on real content (serial-log markers, pixel
-     diffs, or `readelf`/`nm` symbol inspection) rather than bare exit codes
-     — see the inline per-gate notes added where read this session
-     (`check-cranelift-aot-aggregates.shs`, `check-jit-unresolved-symbol-guard.shs`,
-     `check-no-jit-module-drop.shs`, `check-simpleos-usb-xhci-qemu.shs` were
-     read in full and are EXECUTING, not exit-code-only); the rest were not
-     re-read this session and remain open work.
-
-   **2026-08-11 follow-up (2nd session) — 3 more of the 12 read in full,
-   all ALREADY SOUND, no fix owed:**
-   - `check-rocm-engine2d-font-readback.shs` — the census's own note flagged
-     line 80 (the `native-build` exit check) as "leaning EXIT-CODE-ONLY", but
-     that line is only the build step. Lines 180-203 parse the harness's own
-     stdout (`value_of` against `HARNESS_OUT`) and hard-assert on
-     `status=pass`, `backend_name=rocm`, `readback_source=device_readback`,
-     `pixel_count=3840`, `mismatch_count=0`, a device/CPU checksum match, and
-     (mock vs real-amd) the exact `device_name` — this is STDOUT-ORACLE, not
-     exit-code-only. The census's "leaning" hedge on line 80 alone was
-     misleading without reading past it.
-   - `check-rv32-nvme-nand-recovery.shs` — `check_markers()` (lines 17-38)
-     greps a GHDL/JTAG simulation log for 10 named markers, requires each to
-     appear EXACTLY once and IN ORDER, and the built-in `--self-test` mode
-     (lines 40-72) proves the check rejects both an incomplete transcript
-     (missing `NAND RECOVERY PASS`) and a duplicated one — already EXECUTING
-     with its own red/green self-proof, not exit-code-only.
-   - `check-simpleos-virtio-snd-qemu.shs` — after QEMU boot, the script greps
-     the guest serial log for 8+ distinct receipts (driver_ok, keyboard/
-     pointer input events with a `order=monotonic` ordering constraint,
-     non-silent audio playback frame count, an audio-capture record whose
-     session/generation/frame-count/sample-count/hash fields are all
-     range-checked, a `bounded=1` flag, and a clean-shutdown receipt) before
-     ever looking at the QEMU process exit code — already EXECUTING, not
-     exit-code-only.
-
-   These 3 gates are removed from "open work" in the paragraph above;
-   9 of the original 14 gates in this Tier-2 list are now confirmed read
-   (2 fixed, 7 confirmed already-sound), 5 remain unread
-   (`check-nvme-rv32-minimal-live.shs`,
-   `build-simpleos-arm64-desktop-engine2d-attested.shs`,
-   `build-macos-gpu-2d-live-native.shs`,
-   `build-macos-full-cli-gui-provenance.shs`,
-   `check-simpleos-arm64-unified-live.shs`).
-
-   **2026-08-11 follow-up (3rd session) — final 5 of Tier-2 read in full,
-   all ALREADY SOUND, no fix owed. Census CLOSED:**
-   - `check-nvme-rv32-minimal-live.shs` — EXECUTING. Lines 345-347: builds
-     RV32 ELF for QEMU, runs it, captures serial output. Lines 350-351 assert
-     on exact markers: `grep -q "ALL RV32 NVME FW CHECKS PASS" "$LOG"` and
-     `! grep -q "FAIL" "$LOG"`. Oracle is run output validation, not exit code.
-   - `build-simpleos-arm64-desktop-engine2d-attested.shs` — ARTIFACT-INSPECTING.
-     Lines 524-547 validate artifact hashes via `sha256_file` (kernel, disk,
-     build-log); lines 548-587 populate manifest with these hashes and all
-     metadata. Line 588: `qemu_admission_publish "$KERNEL" "$FROZEN_BUILD_MANIFEST" ...`
-     performs final provenance admission. Oracle is manifest/hash inspection.
-   - `build-macos-gpu-2d-live-native.shs` — ARTIFACT-INSPECTING. Lines 219-230
-     call `bootstrap_stage3_verify_manifest` to re-verify manifest entries;
-     lines 431-434 validate source fingerprint against recomputed value; lines
-     488-500 verify build transcripts via `bootstrap_stage3_verify_command_transcript`.
-     Oracle is manifest structure/content inspection, not exit code.
-   - `build-macos-full-cli-gui-provenance.shs` — ARTIFACT-INSPECTING (mixed).
-     Line 58: `run_behavior_probe` executes the driver, captures logs. Lines
-     59-71 validate execution history via `macos_gui_history_verify_*` (hash
-     and binding checks on behavior handshake), then line 73 calls
-     `bootstrap_stage3_verify_command_transcript` to verify the full behavior
-     transcript. Oracle is history/transcript structure validation.
-   - `check-simpleos-arm64-unified-live.shs` — EXECUTING. Runs full arm64
-     guest under QEMU; validates 30+ serial/daemon log markers (lines 147-155),
-     parses pixel-readback checksums from daemon output (lines 140-145),
-     validates GPU frame sequencing (lines 160-175), and measures performance
-     percentiles on real GPU execution (lines 180-195). Oracle is execution +
-     output parsing + constraint validation, not exit code.
-
-   **Final Tier-2 status:** all 14 gates now confirmed read in full. 2 were
-   genuinely unsound (fixed this session). 12 were already sound: 9 EXECUTING
-   gates validating real run output, 3 ARTIFACT-INSPECTING gates validating
-   provenance/manifest structure. Zero EXIT-CODE-ONLY gates remain in Tier 2.
 3. **UNCERTAIN gates** — the 9 named ones are now resolved (see "UNCERTAIN —
    RESOLVED" above; none were EXIT-CODE-ONLY). The "~17" figure was never
    fully enumerated; re-run the full methodology if the remainder need
@@ -384,63 +260,10 @@ this as a wording fix, not evidence that the leaf gates need a new oracle.
 4. **Remaining Tier 3 exit-code-only gates (~30)** — batch review, apply
    EXECUTING or ARTIFACT-INSPECTING oracle per the specific claim each gate
    makes; do not blanket-apply one instrument to all of them.
-
-   **2026-08-11 follow-up (this session) — 1 of ~30 FIXED:**
-   `check-native-option-try-target-fail.shs` compiled 5 Option-`?`/try-operator
-   fixtures with `native-build --emit-object` and trusted rc=0 plus
-   non-empty-object plus absence of a retired diagnostic string as proof the
-   tagged Option ABI actually lowered working code — it never inspected the
-   `.o` itself. Now each fixture's object is additionally run through
-   `check-native-build-artifact-has-functions.shs` and the fixture is only
-   counted toward the (now-mandatory, non-vacuous) `checked` total if it
-   carries at least one defined FUNC symbol; a 0-FUNC object now FAILs with
-   the specific fixture named, and the script now also emits `ERROR —
-   nothing was checked` on an empty fixture set instead of silently PASSing.
-   `.o` relocatable objects cannot be executed standalone (no linked `_start`),
-   so FUNC-symbol inspection — not execution — is the correct instrument
-   here, matching the census's own guidance to use ARTIFACT-INSPECTING for
-   presence/identity claims and reuse the existing helper rather than write a
-   bespoke check.
 5. **Verdict-line retrofit** — once oracle soundness is fixed, add the
    `PASS — <n> checked` / `FAIL` / `ERROR — nothing was checked` convention
    to any of the above still missing it, matching the house standard already
    used by the pre-push guards.
-
-## Census Closure Summary — 2026-08-11 (3rd session)
-
-**Tier-2 work complete.** All 14 original Tier-2 gates (native-build/
-link-parity group) are now read in full:
-- 2 gates were genuinely EXIT-CODE-ONLY and have been FIXED (committed).
-- 12 gates were already sound (EXECUTING or ARTIFACT-INSPECTING).
-
-**Tier-1 investigation (bootstrap chain) complete.** All 4 gates re-examined:
-3 (manifest-write, stage4-candidate-provenance, check-compiler-provenance)
-were falsely classified as EXIT-CODE-ONLY in the initial grep pass; full
-reads show they perform real hash verification and manifest validation, not
-bare exit codes. No fixes required.
-
-**UNCERTAIN resolution complete.** 9 named gates resolved, 0 found to be
-EXIT-CODE-ONLY. The ~17 figure was an upper bound from the first pass; exact
-count of remaining UNCERTAIN gates (if any) would require re-running the full
-enumeration methodology.
-
-**Tier-3 (remaining ~30 exit-code-only gates).** 1 gate fixed this session
-(`check-native-option-try-target-fail.shs`). Remaining ~29 require
-case-by-case review per their specific behavioral claims; no blanket fix
-applies.
-
-**Final tally of confirmed EXIT-CODE-ONLY gates with no soundness evidence:**
-The grep-assisted first pass estimated ~39-45. After full reads of Tier 1
-(4), Tier 2 (14), and UNCERTAIN (9) groups:
-- Tier 1: 0 of 4 confirmed EXIT-CODE-ONLY (all fixed at read time)
-- Tier 2: 0 of 14 confirmed EXIT-CODE-ONLY (all sound at read time)
-- UNCERTAIN: 0 of 9 confirmed EXIT-CODE-ONLY (all resolved as other classes)
-- Tier 3: 1 of ~30 fixed this session; ~29 remain (batch review pending)
-
-**True count of genuinely-unsound (unfixed) EXIT-CODE-ONLY gates:** down
-from initial ~39-45 to ~29 remaining in Tier 3. The initial census's
-grep-pattern buckets misfired on manual spot-check repeatedly — it is NOT
-reliable for work authorization without full reads.
 
 ## Confidence / follow-up
 

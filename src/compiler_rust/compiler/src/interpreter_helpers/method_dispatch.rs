@@ -426,12 +426,8 @@ pub(crate) fn call_method_on_value(
                 sorted.sort_by(|a, b| match (a, b) {
                     (Value::Int(x), Value::Int(y)) => x.cmp(y),
                     (Value::UInt { value: x, .. }, Value::UInt { value: y, .. }) => x.cmp(y),
-                    (Value::Int(x), Value::UInt { value: y, .. }) => {
-                        if *x < 0 { std::cmp::Ordering::Less } else { (*x as u64).cmp(y) }
-                    }
-                    (Value::UInt { value: x, .. }, Value::Int(y)) => {
-                        if *y < 0 { std::cmp::Ordering::Greater } else { x.cmp(&(*y as u64)) }
-                    }
+                    (Value::Int(x), Value::UInt { value: y, .. }) => x.cmp(&(*y as i64)),
+                    (Value::UInt { value: x, .. }, Value::Int(y)) => (*x as i64).cmp(y),
                     (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                     (Value::Str(x), Value::Str(y)) => x.cmp(y),
                     _ => std::cmp::Ordering::Equal,

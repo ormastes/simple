@@ -1,7 +1,6 @@
 # Phase Files - Consolidation Complete
 
-**Status:** Consolidated (2026-02-21); orphans removed (2026-08-05); final 7 orphans
-removed (2026-08-11) — all 26 phase files are now gone from `src/compiler/`.
+**Status:** Consolidated (2026-02-21); orphans removed (2026-08-05)
 
 ---
 
@@ -17,22 +16,19 @@ They have been **consolidated** into single files per feature, removing ~8K line
 | Feature | Old Phase Files | New File | Location |
 |---------|----------------|----------|----------|
 | Bidirectional Type Checking | `bidir_phase1a-d.spl` (4 files, removed) | `bidirectional_checking.spl` | `30.types/` |
-| Higher-Rank Polymorphism | `higher_rank_poly_phase5a-d.spl` (4 files, removed) | `higher_rank_poly.spl` | `30.types/` |
-| Variance Checking | `variance_phase6a-d.spl` (4 files, removed) | `variance.spl` / `variance_types.spl` | `30.types/` |
-| Const Generics | `const_keys_phase8a-c.spl` (3 files, removed) | `const_keys.spl` | `30.types/` |
-| SIMD Intrinsics | `simd_phase9a-c.spl` (3 files, removed) | `simd.spl` | `30.types/` |
-| Effects | `effects_phase3a.spl` (1 file, removed) | `effects.spl` (already existed) | `00.common/` |
+| Higher-Rank Polymorphism | `higher_rank_poly_phase5b.spl` (1 file remains; 5a/5c/5d removed 2026-08-05) | `higher_rank_poly.spl` | `30.types/` |
+| Variance Checking | `variance_phase6a.spl` (1 file remains; 6b/6c/6d removed 2026-08-05) | `variance.spl` / `variance_types.spl` | `30.types/` |
+| Const Generics | `const_keys_phase8a.spl` (1 file remains; 8b/8c removed 2026-08-05) | `const_keys.spl` | `30.types/` |
+| SIMD Intrinsics | `simd_phase9a-c.spl` (3 files) | `simd.spl` | `30.types/` |
+| Effects | `effects_phase3a.spl` (1 file) | `effects.spl` (already existed) | `00.common/` |
 
 `associated_types_phase4a-d.spl` (4 files) and `macro_checker_phase7a-c.spl` (3 files) have
 been fully removed — all superseded by `associated_types.spl` and `macro_checker.spl`
 respectively, with zero remaining importers.
 
-**Total:** 26 phase files → all 26 removed. The final 7 (1 higher_rank_poly + 1 variance +
-1 const_keys + 3 simd + 1 effects) were removed 2026-08-11 after verifying each had **zero**
-importers anywhere in `src/`, `test/`, or `examples/` (exhaustive `/usr/bin/grep -rn`, the only
-remaining mentions being this file and one comment in
-`test/01_unit/compiler/frontend/parser_spec.spl`), and that each was **byte-identical**
-(`git hash-object`) to its copy under `doc/05_design/compiler/phases/`.
+**Total:** 26 phase files → 19 removed (4 bidir + 4 associated_types + 3 macro_checker +
+3 higher_rank_poly + 3 variance + 2 const_keys), 7 remain (1 higher_rank_poly + 1 variance +
+1 const_keys + 3 simd + 1 effects) pending further cleanup.
 
 ---
 

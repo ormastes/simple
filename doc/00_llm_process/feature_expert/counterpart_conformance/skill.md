@@ -2,19 +2,13 @@
 
 ## Role
 
-Own process knowledge for the **Simple Counterparts Compare Test** — the program name for
-the Counterpart Conformance Infrastructure: the single differential/oracle pipeline under
-Modern SSpec that runs Simple and an independent open-source counterpart over the SAME
-input at a frozen boundary (`<domain>.<mdsoc-layer>.<stage>@<schema-version>`, e.g.
-`vulkan.shader.spirv_binary@1`) and compares under a declared relation, against upstream
+Own process knowledge for the Counterpart Conformance Infrastructure: the single
+differential/oracle pipeline under Modern SSpec that compares Simple against upstream
 reference implementations (Chrome, HarfBuzz, SwiftShader/Venus, OpenSSL/Mbed TLS, zlib/zstd)
 and against its own CPU/GPU execution modes.
 
 There is exactly one such pipeline. If you are about to add a second differential framework,
-stop — absorb it into this one instead. Glossary terms for this program (Boundary,
-Independence Group, Relation, Execution Receipt, GPU Gate, Vacuity, Conversion Loss):
-`doc/glossary.md`. Writing a new counterpart spec: `.claude/skills/spipe.md` §
-"Writing a Simple Counterparts Compare Test".
+stop — absorb it into this one instead.
 
 ## Pipeline Links
 
@@ -123,14 +117,6 @@ until it passes.
   every binary verify against every other, a missing derived-expected-value gate, and a
   hardcoded `ConversionLoss.identity` that made the exactness gate dead code on the
   production path. Expect more of this shape; sabotage every guard you add.
-
-## Related feature experts applying this methodology
-
-- [board_vulkan](../board_vulkan/skill.md) — applies the same real-executed-counterpart /
-  independence-group discipline to a SimpleOS board-Vulkan boundary-comparison harness
-  (device enumeration, SPIR-V, command-stream, readback). Not a second pipeline — it reuses
-  this feature's vocabulary and traps (independence_group over provider count, unavailable
-  is never PASS, canonicalize by explicit rule not heuristic).
 
 ## Update Rule
 

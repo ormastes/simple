@@ -315,8 +315,6 @@ fn command_is_pure_simple_tool(name: &str) -> bool {
             | "spec-to-sspec"
             | "security"
             | "verify"
-            | "doc-coverage"
-            | "stats"
     )
 }
 
@@ -815,29 +813,6 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         rust_handler: Handler::ArgsGc(handle_dashboard),
         env_override: "SIMPLE_DASHBOARD_RUST",
         needs_rust_flags: &["agents"],
-    },
-    // Doc coverage / stats (pure-Simple only; the Rust seed has no native
-    // implementation, so an unroutable failure here is a real error, not a
-    // fallback path).
-    CommandEntry {
-        name: "doc-coverage",
-        app_path: "src/app/cli/doc_coverage_command.spl",
-        rust_handler: Handler::Custom(|_| {
-            eprintln!("error: pure Simple doc-coverage app not found or failed to launch");
-            1
-        }),
-        env_override: "",
-        needs_rust_flags: &[],
-    },
-    CommandEntry {
-        name: "stats",
-        app_path: "src/app/cli/stats_entry.spl",
-        rust_handler: Handler::Custom(|_| {
-            eprintln!("error: pure Simple stats app not found or failed to launch");
-            1
-        }),
-        env_override: "",
-        needs_rust_flags: &[],
     },
     // Office suite
     CommandEntry {

@@ -11,17 +11,8 @@
 # AttributeValueUnquoted, SelfClosingStartTag, MarkupDeclarationOpen
 # (comment/doctype dispatch), CommentStart/Comment/CommentEnd, Doctype.
 #
-# Character references ARE decoded, in the two places WHATWG recognises them:
-# text data (flushed Character tokens) and attribute values. Named
-# (`&amp;`), decimal (`&#233;`) and hex (`&#x2014;`) forms all resolve, via
-# the one shared implementation in `std.common.html.character_references` —
-# blink does not keep a private table. A reference that module cannot decode
-# (unterminated, unknown name, malformed or out-of-range number) is passed
-# through VERBATIM rather than replaced by a guess, so `&bogus;` reaches the
-# DOM as the literal text `&bogus;`. Comment and doctype data are NOT decoded,
-# also per spec.
-#
 # Deliberately out of scope (see html_tokenizer_spec.spl and callers):
+#   - Character entity/reference decoding (&amp; etc. pass through raw).
 #   - RAWTEXT / RCDATA / script-data special modes — <script>/<style>
 #     content is tokenized as ordinary Data (Character) text, not raw text.
 #   - CDATA sections.
@@ -29,7 +20,6 @@
 #     a tag/comment/doctype flushes what was scanned so far).
 
 use std.blink.html_parser.token.{HtmlTokenKind, HtmlAttribute, HtmlToken}
-use std.common.html.character_references.{decode_character_references}
 
 fn _is_space(ch: i64) -> bool:
     """ASCII whitespace per WHATWG tokenizer (space, tab, LF, CR, FF)."""
@@ -50,7 +40,7 @@ fn _flush_text(tokens: [HtmlToken], html: text, text_start: i64, i: i64) -> [Htm
         out.push(HtmlToken(
             kind: HtmlTokenKind.Character,
             name: "",
-            data: decode_character_references(html.slice(text_start, i)),
+            data: html.slice(text_start, i),
             attributes: [],
             self_closing: false
         ))
@@ -217,11 +207,7 @@ fn tokenize_html(html: text) -> [HtmlToken]:
                                         i = i + 1
                                     attr_value = html.slice(v_start, i)
                             if attr_name.len() > 0:
-                                # Attribute values are one of the two places
-                                # character references are recognised (the
-                                # other is text data). `href="?a=1&amp;b=2"`
-                                # must reach the DOM as `?a=1&b=2`.
-                                attrs.push(HtmlAttribute(name: attr_name, value: decode_character_references(attr_value)))
+                                attrs.push(HtmlAttribute(name: attr_name, value: attr_value))
                 tokens.push(HtmlToken(
                     kind: HtmlTokenKind.StartTag,
                     name: tag_name,

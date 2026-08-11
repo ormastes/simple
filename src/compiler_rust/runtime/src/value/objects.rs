@@ -426,6 +426,56 @@ pub extern "C" fn rt_unwrap_or_value(value: RuntimeValue, default: RuntimeValue)
     value
 }
 
+/// Same Ok/Some-payload-or-trap semantics as `rt_unwrap_or_trap`, but for
+/// `.expect(msg)`: on the absent variant, the trap prints the CALLER'S
+/// message (`msg`, a tagged runtime text value) instead of the fixed
+/// "called unwrap on Err/None" text. This is `.expect()`'s real
+/// method-call semantics (matches the interpreter's
+/// `interpreter_method/special/types.rs` `"expect"` arms) — see
+/// doc/08_tracking/bug/native_unwrap_returns_enum_wrapper_instead_of_payload_2026-08-11.md.
+#[no_mangle]
+pub extern "C" fn rt_expect_or_trap(value: RuntimeValue, msg: RuntimeValue) -> RuntimeValue {
+    let Some(p) = get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum) else {
+        // Not a boxed enum — bare/flat-nullable payload convention: return
+        // the raw value unchanged (matches `rt_unwrap_or_trap`).
+        return value;
+    };
+    let (enum_id, discriminant, payload) = unsafe { ((*p).enum_id, (*p).discriminant, (*p).payload) };
+
+    let trap = || -> ! {
+        let text = super::collections::rt_string_data(msg);
+        let len = super::collections::rt_string_len(msg);
+        let message = if text.is_null() || len < 0 {
+            "expect() called on Err/None".to_string()
+        } else {
+            let bytes = unsafe { std::slice::from_raw_parts(text, len as usize) };
+            String::from_utf8_lossy(bytes).into_owned()
+        };
+        eprintln!("{message}");
+        std::process::abort();
+    };
+
+    if enum_id == OPTION_ENUM_ID {
+        if discriminant == hash_variant_discriminant("Some") {
+            return payload;
+        }
+        if discriminant == hash_variant_discriminant("None") {
+            trap();
+        }
+        return value;
+    }
+
+    if discriminant == hash_variant_discriminant("Ok") {
+        return payload;
+    }
+    if discriminant == hash_variant_discriminant("Err") {
+        trap();
+    }
+
+    // Arbitrary user enum: preserve the pre-existing "return self" fallback.
+    value
+}
+
 /// Get the payload of an enum value
 #[no_mangle]
 pub extern "C" fn rt_enum_payload(value: RuntimeValue) -> RuntimeValue {
