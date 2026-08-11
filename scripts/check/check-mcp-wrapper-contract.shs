@@ -243,5 +243,43 @@ if SIMPLE_PLATFORM_TRIPLE=missing "$BIN/simple_lsp_mcp_server" >/dev/null 2>&1; 
   exit 1
 fi
 
+# --- Shipped MCP client configs must launch cached artifacts, not raw source ---
+#
+# The wrapper checks above only prove bin/simple_mcp_server and
+# bin/simple_lsp_mcp_server are native-only. Until 2026-08-11 nothing checked the
+# CONFIGS that clients actually launch, and four of them bypassed the wrappers to
+# run raw .spl: .mcp.json's simple-lsp-mcp (node bridge + `bin/simple run
+# src/app/simple_lsp_mcp/main.spl`) and three plugin configs running
+# `bin/simple src/app/mcp/main.spl`. Measured cost of the bypass on 2026-08-11:
+# simple-lsp-mcp startup 0.20s / 82.9MB RSS vs 0.03s / 4.1MB through the wrapper;
+# simple-mcp startup 0.50s / 171.6MB RSS vs 0.02s / 4.1MB.
+config_violations=0
+for cfg in .mcp.json \
+  tools/claude-plugin/simple-mcp/.mcp.json \
+  tools/claude-plugin/marketplace/plugins/simple-mcp/.mcp.json \
+  tools/claude-plugin/simple-codex/.mcp.json
+do
+  [ -f "$cfg" ] || { echo "missing MCP config: $cfg" >&2; config_violations=$((config_violations+1)); continue; }
+  # A "command"/"args" launch of a .spl path is a raw-source launch. Prose in
+  # "_info" / "_comment" keys is allowed to name the source file.
+  if grep -v '^[[:space:]]*"_' "$cfg" | grep -q '\.spl'; then
+    echo "raw-source MCP launch in $cfg" >&2
+    config_violations=$((config_violations+1))
+  fi
+done
+if [ "$config_violations" -ne 0 ]; then
+  echo "mcp_config_cached_artifact_contract=fail violations=$config_violations" >&2
+  exit 1
+fi
+
+# A shipped config must not point at a binary this repo cannot produce.
+for cfg in tools/claude-plugin/obsidian-search/.mcp.json; do
+  if [ -f "$cfg" ]; then
+    echo "dead MCP config present (no implementation in this repo): $cfg" >&2
+    exit 1
+  fi
+done
+
 echo "mcp_wrapper_source_contract=pass"
 echo "mcp_wrapper_native_contract=pass"
+echo "mcp_config_cached_artifact_contract=pass configs=4"
