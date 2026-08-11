@@ -1,0 +1,56 @@
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_definitions.*
+
+fn lower_float_alias_fixture() -> HirModule:
+    val source =
+        "fn numeric_alias() -> f64:\n" +
+        "    float(7)\n" +
+        "fn wrong_arity() -> f64:\n" +
+        "    float(7, 8)\n" +
+        "fn unknown_callee() -> f64:\n" +
+        "    mystery_numeric(7)\n"
+    val parsed = parse_full_frontend(source, "primitive_float_alias_cast.spl", "primitive_float_alias_cast", Logger(level: 0))
+    var lowering = HirLowering.with_filename("primitive_float_alias_cast.spl")
+    lowering.lower_module(parsed)
+
+fn function_tail(hir: HirModule, name: text) -> HirExpr?:
+    for function in hir.functions.values():
+        if function.name == name and function.body.has:
+            return function.body.value
+    nil
+
+fn float_cast_bits(hir: HirModule, name: text) -> i64:
+    if val tail = function_tail(hir, name):
+        match tail.kind:
+            case HirExprKind.Cast(_, target):
+                match target.kind:
+                    case HirTypeKind.Float(bits): bits
+                    case _: -1
+            case _: -1
+    else:
+        -1
+
+fn call_arity(hir: HirModule, name: text) -> i64:
+    if val tail = function_tail(hir, name):
+        match tail.kind:
+            case HirExprKind.Call(_, args, _): args.len()
+            case _: -1
+    else:
+        -1
+
+describe "primitive float alias HIR lowering":
+    it "lowers one numeric argument through float alias to an f64 cast":
+        val hir = lower_float_alias_fixture()
+        expect(float_cast_bits(hir, "numeric_alias")).to_equal(64)
+
+    it "does not reinterpret a two-argument float call as a cast":
+        val hir = lower_float_alias_fixture()
+        expect(call_arity(hir, "wrong_arity")).to_equal(2)
+
+    it "does not reinterpret an unknown one-argument callee as a cast":
+        val hir = lower_float_alias_fixture()
+        expect(call_arity(hir, "unknown_callee")).to_equal(1)
