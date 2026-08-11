@@ -137,3 +137,93 @@ argv it is about to execute**, not against its own prose.
 - `scripts/os/build-simpleos-aarch64-efi-esp.shs` (new) — reproducible ESP builder.
 - `scripts/check/check-simpleos-arm64-efi-real-firmware-boot.shs` (new) — the gate.
 - `.claude/rules/board-runnable.md` — stale claim corrected, real gap restated.
+
+## 2026-08-11 follow-up: item (1) of "remaining work" is a kernel-arch gap, not a script migration — STILL OPEN, re-scoped
+
+Attempted the literal migration ("point `check-simpleos-arm64-unified-live.shs`
+at the AAVMF + `BOOTAA64.EFI` + ESP chain"). It cannot be done as a script-only
+change: the unified arm64 kernel and the aarch64 Limine kernel are **two
+different kernels with incompatible boot contracts**, not two build outputs of
+the same code.
+
+**The unified kernel has no Limine protocol support.**
+`examples/09_embedded/simple_os/arch/arm64/boot/crt0.S` is the entire boot
+contract: it checks `CurrentEL`, drops EL2->EL1 if needed, sets up the stack
+from a linker symbol, zeroes `.bss`, and jumps into C — it never reads a
+bootloader-supplied argument, never parses a request/response table, and
+`examples/09_embedded/simple_os/arch/arm64/linker.ld` says explicitly in its
+header comment: *"Target: QEMU virt machine (aarch64), RAM starts at
+0x40000000, kernel loaded by QEMU -kernel flag."* Contrast with
+`src/os/kernel/boot/limine_boot_aarch64.spl`, which the **aarch64** (not
+arm64) Limine kernel actually uses: ~20 named Limine request/response IDs
+(`LIMINE_MEMMAP_ID_*`, `LIMINE_FRAMEBUFFER_ID_*`, `LIMINE_HHDM_ID_*`,
+`LIMINE_KERNEL_ADDR_ID_*`, ...) with magic markers that the Limine bootloader
+scans the kernel ELF for at load time. The unified kernel's ELF has none of
+these markers. Limine's own protocol requires them to even recognize a binary
+as a Limine-bootable kernel — without them Limine cannot chainload it, not "may
+boot it wrong." Building an ESP that points `/boot/kernel.elf` at the unified
+kernel and letting Limine try to load it is not expected to reach the unified
+kernel's own boot markers at all; Limine's own request-scan is the layer that
+fails first, so the SAME assertions the lane checks today (`desktop-ready`,
+`wm-key-poll`, `wm-frame host-gpu-device-evidence`, `virtio_snd`, etc.) would
+regress across the board, not selectively — this is a Limine-recognition
+failure, not a partial-boot marker gap. (Not booted to first-hand serial
+evidence in this session — see "what's still missing" below for why — but the
+absence of the request markers is verified directly by reading the linked ELF
+inputs, and the mechanism is inherent to how Limine's loader works: it will
+not treat an ELF as Limine-bootable in the first place.)
+
+**Second, independent blocker hit while trying to get a real kernel ELF for an
+empirical boot attempt:** this repo's `bin/simple` / `bin/release/*/simple` is
+currently the **Rust bootstrap seed**, not the pure-Simple self-hosted
+compiler the unified lane itself requires (it checks
+`case "$version" in *'Rust-built'*) fail compiler-is-bootstrap-seed`). Building
+the self-hosted compiler from scratch was out of scope for this session
+(multi-minute+ full bootstrap, and several other concurrent native-build
+processes were already running on this shared machine). Building the unified
+kernel with the seed directly (bypassing that guard, for evidence purposes
+only) failed with **seed codegen defects**, not anything related to boot
+protocol:
+
+```
+.../virtio_common.spl: codegen: Module error: codegen: 7 function body/bodies
+failed to compile: [Virtqueue.init_free_list, Virtqueue.alloc_desc,
+Virtqueue.free_desc, Virtqueue.push_avail, VirtioDevice.read_reg,
+VirtioDevice.write_reg, VirtioDevice.init]
+.../virtio_gpu.spl: codegen: Module error: codegen: 51 function body/bodies
+failed to compile: [...]
+```
+
+This is the known seed-vs-self-host divergence class in
+`.claude/memory/ref_*` (seed codegen is not trustworthy for aarch64 native
+targets), unrelated to the EFI migration itself, but it means no fresh unified
+kernel ELF could be produced in this session to attempt an empirical AAVMF
+boot and capture real serial evidence either way.
+
+**Re-scoped remaining work (supersedes item 1 above):**
+1. Give the unified arm64 kernel Limine request/response support
+   (`LIMINE_MEMMAP_ID_*`, `LIMINE_FRAMEBUFFER_ID_*`, `LIMINE_HHDM_ID_*`,
+   `LIMINE_KERNEL_ADDR_ID_*` at minimum) in its own `crt0.S`/entry path, mirroring
+   `src/os/kernel/boot/limine_boot_aarch64.spl`, OR give it a PE/COFF EFI-stub
+   header so firmware can load it directly without going through a second-stage
+   loader (rejected earlier in this doc for the aarch64 Limine kernel as "not
+   worth inventing," but that call was made when the ESP-chain option existed
+   and was cheap; here it does not exist without kernel changes either way, so
+   the two options are back to being compared on their own merits).
+2. Once the kernel speaks a real-firmware-loadable protocol, migrate
+   `check-simpleos-arm64-unified-live.shs` off `-kernel` per the original
+   item 1, reusing `scripts/os/build-simpleos-aarch64-efi-esp.shs` via its
+   `KERNEL_ELF=`/`OUT_DIR=` overrides so the ESP builder is not forked.
+3. Separately: get a pure-Simple self-hosted `bin/simple` deployed so the
+   unified lane's own bootstrap-seed guard stops firing, and so a fresh kernel
+   ELF can be built for evidence without hitting the seed's aarch64 codegen
+   gaps.
+4. Physical board bring-up for aarch64 remains filed as before.
+
+**Status of this item: STILL OPEN**, and the "migrate the script" framing in
+this doc's earlier "remaining work" section is retracted — the small-diff
+script edit is blocked on the kernel-side boot-protocol gap in point 1 above.
+No script was modified in this follow-up: forcing the migration onto a kernel
+that cannot be Limine-chainloaded would either not boot (relegating the lane
+to permanently red) or require silently weakening/deleting the very assertions
+this lane exists to enforce, both of which this doc explicitly rules out.
