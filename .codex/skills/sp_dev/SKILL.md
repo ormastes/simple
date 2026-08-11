@@ -98,6 +98,14 @@ If a direct lexer probe and parser-facing token stream disagree, capture both
 streams plus continuation state in one compiled probe. After three distinct
 fix/probe cycles, update the tracked bug and lane state and stop; do not rewrite
 valid source merely to bypass the parser defect.
+
+For standalone target products such as Office, separate target construction from
+compiler bootstrap. Use only an explicitly supplied, provenance-admitted Phase
+3 compiler; put output/cache under `build/standalone`, preserve strict no-stub
+and fabricated-stub guards, and record its digest. Missing admission is a
+blocker, not authorization to start Stage 1 or use the Rust seed. A Phase 3
+artifact may build a target but never substitutes for a Stage 4 CLI in SPipe,
+deploy, test, or release evidence.
 Authenticated interpreter `--assert-ran` requires canonical `simple-bdd-v1`
 evidence; stdout summaries or colored pass markers are never execution proof.
 

@@ -124,6 +124,17 @@ Pick the cheapest tier that actually exercises what changed. Escalating to a ful
 bootstrap for a one-line lib edit wastes ~2 minutes+ per iteration; skipping the
 right gate ships a stale binary. **A small change is NOT a full bootstrap.**
 
+### Standalone product targets are not compiler bootstrap
+
+Office and other independently shipped target products must not rebuild the
+compiler merely because their source changed. When a target can be compiled by
+an existing admitted Phase 3 compiler, use a target-only wrapper with a stable
+cache and output under `build/standalone/`, never `build/bootstrap/`. The
+wrapper verifies Phase 3 provenance, records its digest, sets
+`SIMPLE_NO_STUB_FALLBACK=1` and `SIMPLE_STRICT_FABRICATED_STUB_RATCHET=1`, and
+fails closed when no admitted compiler is available. It must not silently
+substitute the Rust seed or start Stage 1/2/3.
+
 > **Prove the tier you think you're on — a cold cache is indistinguishable from
 > a slow compiler.** Whenever you build incrementally, set
 > `SIMPLE_NATIVE_INCREMENTAL=1`, pass a **stable** `--cache-dir`, and READ BACK

@@ -37,6 +37,12 @@ type metadata. `LLVM001` must stay clean in LLVM emitter files.
 
 ## Rules
 
+- Standalone target products such as Office are not compiler bootstrap: consume
+  an explicitly admitted Phase 3 compiler, write cache/output outside
+  `build/bootstrap`, and fail closed if its receipt is absent. Never use the
+  Rust seed as a product-build fallback; Phase 3 remains unsuitable for deploy,
+  SPipe execution, or release evidence.
+
 - All code in `.spl` — no Python, no Bash
 - Stub Prevention: no `pass_todo` in final code, STUB001 = hard fail
 - Shared-font work follows `.codex/skills/sp_dev/SKILL.md` “Shared multilingual

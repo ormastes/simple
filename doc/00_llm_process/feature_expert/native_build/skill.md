@@ -29,6 +29,16 @@ Specs: `test/01_unit/compiler/80.driver/driver_native_build_spec.spl`.
 - **Zero-hash never accepted:** compile-options mismatch triggers plain cache miss →
   rebuild (not a silent fallback)
 
+## Standalone target-product boundary (2026-08-11)
+
+Office and similar products are independent native targets, not requests to
+rebuild the compiler. Use an explicitly supplied, provenance-admitted Phase 3
+compiler through `scripts/check/build-office-standalone-target.shs`; its cache
+and output live under `build/standalone/`. The wrapper rejects missing, stale,
+symlinked, seed, and unreceipted inputs, preserves strict no-stub guards, and
+does not initiate any bootstrap stage. The product receipt is target evidence
+only, never a Stage 4 deploy, SPipe runner, or release substitute.
+
 ## Known open defects (2026-07-26)
 | Bug | Scope | Link |
 |---|---|---|

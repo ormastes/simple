@@ -222,6 +222,34 @@ is unavailable, the wrapper reports incomplete pure-Simple evidence and exits
 before producing a Stage 4 full CLI; it does not publish a seed fallback as a
 self-hosted result.
 
+### Standalone target builds (Office and similar products)
+
+A target product is not a compiler rebuild. Reuse the last **admitted Phase 3
+compiler** when it is suitable, and keep product outputs and incremental cache
+outside `build/bootstrap/`. The target wrapper verifies the compiler's Phase 3
+provenance before it invokes `native-build`; a stale, symlinked, seed, or
+unreceipted binary fails closed. It never starts Stage 1, Stage 2, or Stage 3.
+
+For Office, set the explicit compiler path and run the target-only wrapper:
+
+```bash
+SIMPLE_TARGET_PHASE3="$PWD/build/bootstrap/stage3/<triple>/simple" \
+  sh scripts/check/build-office-standalone-target.shs
+```
+
+The default product output is
+`build/standalone/office/<triple>/simple-office`, with a stable cache under
+`build/standalone/cache/office/<triple>`. This produces a native product
+artifact, not a Stage 4 deploy, SPipe runner, or release admission. When no
+admitted Phase 3 receipt exists, record the compiler-admission blocker; do not
+fall back to the Rust seed or launch a fresh bootstrap automatically.
+
+| Surface | Classification | Current target-only status |
+|---|---|---|
+| `src/app/office` | Standalone product | Wired through `build-office-standalone-target.shs` |
+| `src/app/devhub`, `src/app/play` | Separate applications | Need their own explicit target wrappers; do not use bootstrap by default |
+| `src/app/cli`, `src/compiler`, `src/app/mcp`, `src/app/simple_lsp_mcp` | Compiler/toolchain-owned | Remain compiler/deploy lanes, not standalone-product wrappers |
+
 ### Quick Bootstrap
 
 The canonical entrypoint is the host bootstrap wrapper. Normal runs do not

@@ -258,6 +258,12 @@ helper names, and fail-fast placeholders that sidecars must target.
 ### Critical Rules
 
 - All code in `.spl` -- no Python, no Bash (except 3 bootstrap scripts)
+- A standalone target product (for example Office) is not a compiler rebuild:
+  plan compiler admission separately, consume an admitted Phase 3 compiler for
+  target-only native construction, keep its cache/output outside
+  `build/bootstrap`, and fail closed rather than starting Stage 1 or using the
+  Rust seed. A Phase 3 compiler cannot replace Stage 4 for tests, SPipe,
+  deploy, or release.
 - Generics: `<>` not `[]`
 - No inheritance -- use composition, traits, mixins
 - Stub Prevention: no `pass_todo` in final code (STUB001 = hard fail)

@@ -111,6 +111,15 @@ stale PASS artifact.
 > it cannot execute a spec. Do not plan a verification path around it: a redeploy
 > means a real stage4 build.
 
+> **Standalone product build rule.** A product such as Office is not a compiler
+> bootstrap. For native target construction, reuse an explicitly supplied,
+> provenance-admitted Phase 3 compiler through its target-only wrapper; keep
+> cache/output under `build/standalone`, bind the compiler digest in the receipt,
+> and require `SIMPLE_NO_STUB_FALLBACK=1` plus the fabricated-stub ratchet.
+> Never turn missing target admission into an implicit Stage 1/2/3 bootstrap or
+> a Rust-seed fallback. Phase 3 remains ineligible for `run`, SPipe docgen,
+> tests, deploy, and release.
+
 The SPipe dev entrypoint lives at:
 
 **[.claude/agents/spipe/dev.md](../agents/spipe/dev.md)**

@@ -62,6 +62,13 @@ This agent CREATES the initial state file. All subsequent agents read and append
    owner; otherwise write `N/A` with one concrete reason.
 7. Create `.spipe/<feature>/state.md` with the output below
 
+For a standalone target-product request (Office, an external tool, or a demo),
+separate compiler admission from product construction in the acceptance
+criteria. Target construction must name the admitted Phase 3 input, stable
+non-bootstrap output/cache, strict no-stub flags, and fail-closed behavior when
+the receipt is unavailable. It must not turn a missing compiler into an implicit
+Stage 1/2/3 bootstrap.
+
 ## Entry Criteria
 
 - User has provided a raw request (text, issue link, or conversation excerpt)
