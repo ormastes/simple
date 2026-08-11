@@ -234,6 +234,7 @@ stage4_provenance_helper_sha256_before=$(
 # each other's linked binary to 0 KB, and target/bootstrap/simple was clobbered
 # to 0 bytes by the same class of race). Directory-based lock, stale-safe.
 bootstrap_lock="${output_dir}.lock"
+stage3_retry_preflight_dir=""
 mkdir -p "$(dirname -- "${bootstrap_lock}")"
 if ! mkdir "${bootstrap_lock}" 2>/dev/null; then
   holder_pid=$(cat "${bootstrap_lock}/pid" 2>/dev/null || echo "")
@@ -250,7 +251,13 @@ if ! mkdir "${bootstrap_lock}" 2>/dev/null; then
   fi
 fi
 echo "$$" > "${bootstrap_lock}/pid"
-trap 'rm -rf "${bootstrap_lock}"' EXIT INT TERM
+bootstrap_from_scratch_cleanup() {
+  if [ -n "${stage3_retry_preflight_dir}" ]; then
+    rm -rf "${stage3_retry_preflight_dir}"
+  fi
+  rm -rf "${bootstrap_lock}"
+}
+trap bootstrap_from_scratch_cleanup EXIT INT TERM
 
 normalize_target() {
   case "${1-}" in
@@ -440,6 +447,24 @@ IFS=$bootstrap_path_old_ifs
 }
 PATH=${bootstrap_canonical_path}
 export PATH
+
+# Bind the retry inputs before any private Rust/Stage 2/Stage 3 cache or prior
+# provenance is removed.  These frozen files are promoted later; they are not
+# recomputed after cleanup.
+stage3_retry_parent="$(absolute_path "${output_dir}/stage3")"
+mkdir -p "${stage3_retry_parent}"
+[ ! -L "${stage3_retry_parent}" ] || {
+  echo "error: symlinked Stage 3 retry parent" >&2
+  exit 1
+}
+stage3_retry_stage="${stage3_retry_parent}/${PLATFORM}"
+stage3_retry_preflight_dir=$(
+  bootstrap_stage3_retry_preflight "${stage3_retry_stage}" "${PATH}" \
+    "${repo_root}"
+) || {
+  echo "error: could not preflight bootstrap tool/git/source authority" >&2
+  exit 1
+}
 
 log_dir="${output_dir}/logs/${PLATFORM}"
 mkdir -p "${log_dir}"
@@ -1115,6 +1140,12 @@ else
     "${stage2_admitted_dir}" "${stage2_runtime_authority}"
   mkdir -p "${stage2_provenance_home}" "${stage2_provenance_tmp}" \
     "${stage3_provenance_home}" "${stage3_provenance_tmp}"
+  bootstrap_stage3_promote_retry_preflight \
+    "${stage3_retry_preflight_dir}" "$(absolute_path "${stage3_provenance_dir}")" || {
+    echo "error: could not promote bootstrap authority preflight" >&2
+    exit 1
+  }
+  stage3_retry_preflight_dir=""
   runtime_origin_absolute="$(absolute_path \
     src/compiler_rust/target/bootstrap)"
   runtime_bootstrap_self_link="${runtime_origin_absolute}/bootstrap"
@@ -1181,21 +1212,6 @@ else
     echo "error: Rust runtime authority changed during private admission" >&2
     exit 1
   }
-  bootstrap_stage3_tool_authority_snapshot \
-    "$(absolute_path "${tool_authority_before}")" "${PATH}" \
-    "${repo_root}" || {
-    echo "error: could not bind bootstrap tool authority" >&2
-    exit 1
-  }
-  bootstrap_stage3_git_state "${repo_root}" "${stage3_git_before}" || {
-    echo "error: could not bind Stage 3 git HEAD/dirty state" >&2
-    exit 1
-  }
-  bootstrap_stage3_source_snapshot "${stage3_source_before}" "${repo_root}" || {
-    echo "error: could not snapshot Stage 3 source authority" >&2
-    exit 1
-  }
-
   # Stage 2: seed compiles bootstrap_main.spl
   # Stage 2 uses the configured backend; LLVM is the default and Cranelift is
   # an explicit supported alternative.
