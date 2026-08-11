@@ -1,0 +1,132 @@
+# Blink length resolution — the bridge from an authored CSS length to the CSS
+# pixel number layout and paint actually consume.
+#
+# Provides: ViewportInfo, viewport_info, basis_for_property, context_for,
+# resolve_authored_length, resolve_length.
+#
+# The arithmetic itself lives in `common.css.length`, which every lane can
+# import; this module holds only the part that is specific to blink — how a
+# blink `ComputedStyle`/`Length` and a containing block turn into a
+# `LengthContext`. Keeping the algebra shared is deliberate: the live browser
+# lane has its own `calc()` reader, and a second private copy here would be the
+# duplication-drift pathology this stack already suffers from in five other
+# families.
+#
+# Failure is propagated, never absorbed. `CssLengthResult.ok` false means the
+# author wrote something this engine does not implement or that CSS forbids,
+# and the caller must drop the declaration (which is what CSS mandates) rather
+# than substitute a number that will silently lay out wrong.
+#
+# `blink.entity.computed_style.Length` keeps the authored unit verbatim and
+# cannot represent a `calc()` at all, so `resolve_authored_length` takes the
+# RAW declaration text. `resolve_length` is the narrower path for a `Length`
+# that has already been split.
+
+use std.blink.entity.computed_style.{Length}
+use std.common.css.length.{
+    LengthContext, length_context,
+    CssLengthResult, css_length_ok, css_length_err,
+    parse_length_px
+}
+
+# The viewport, for `vw`/`vh`/`vmin`/`vmax`. Separate from the containing block:
+# a percentage never resolves against the viewport, and a viewport unit never
+# resolves against the containing block.
+pub struct ViewportInfo:
+    width_px: f64
+    height_px: f64
+
+pub fn viewport_info(width_px: f64, height_px: f64) -> ViewportInfo:
+    """Return a ViewportInfo for a viewport of the given CSS pixel size."""
+    ViewportInfo(width_px: width_px, height_px: height_px)
+
+# Which basis a percentage resolves against, per property. This is the part of
+# length resolution that is genuinely property-dependent, and getting it wrong
+# is invisible in a square containing block, so it is a named function with its
+# own spec rather than an inline conditional at each call site.
+#
+#   - `width`, `min-width`, `max-width`, `left`, `right`, `text-indent`, and
+#     ALL FOUR of `margin-*`/`padding-*` resolve against the containing block's
+#     INLINE size. The margin/padding case is the counter-intuitive one:
+#     `margin-top: 10%` of a 400x100 block is 40px, not 10px.
+#   - `height`, `min-height`, `max-height`, `top`, `bottom` resolve against the
+#     containing block's BLOCK size.
+#   - `font-size` and `line-height` resolve against the element's own inherited
+#     font size.
+#
+# Returns a negative sentinel for a property whose percentages this engine does
+# not resolve, so the caller produces a failure rather than a guess.
+pub fn basis_for_property(
+    property: text,
+    containing_inline_px: f64,
+    containing_block_px: f64,
+    font_size_px: f64
+) -> f64:
+    """Return the percentage basis for property, or -1.0 when there is none."""
+    val p = property.to_lower()
+    if p == "width" or p == "min-width" or p == "max-width":
+        return containing_inline_px
+    if p == "left" or p == "right" or p == "text-indent":
+        return containing_inline_px
+    if p == "margin-left" or p == "margin-right":
+        return containing_inline_px
+    if p == "margin-top" or p == "margin-bottom":
+        return containing_inline_px
+    if p == "padding-left" or p == "padding-right":
+        return containing_inline_px
+    if p == "padding-top" or p == "padding-bottom":
+        return containing_inline_px
+    if p == "height" or p == "min-height" or p == "max-height":
+        return containing_block_px
+    if p == "top" or p == "bottom":
+        return containing_block_px
+    if p == "font-size" or p == "line-height":
+        return font_size_px
+    -1.0
+
+# Build the resolution context for one property on one element.
+pub fn context_for(
+    property: text,
+    font_size_px: f64,
+    root_font_size_px: f64,
+    viewport: ViewportInfo,
+    containing_inline_px: f64,
+    containing_block_px: f64
+) -> LengthContext:
+    """Return the LengthContext for property, with the right percentage basis."""
+    val basis = basis_for_property(
+        property, containing_inline_px, containing_block_px, font_size_px)
+    if basis < 0.0:
+        # No basis for this property: a percentage in it must fail, but the
+        # absolute and font-relative units still resolve normally.
+        return LengthContext(
+            font_size_px: font_size_px,
+            root_font_size_px: root_font_size_px,
+            viewport_width_px: viewport.width_px,
+            viewport_height_px: viewport.height_px,
+            percent_basis_px: 0.0,
+            percent_resolvable: false
+        )
+    length_context(
+        font_size_px, root_font_size_px,
+        viewport.width_px, viewport.height_px, basis)
+
+# Resolve the raw right-hand side of a declaration. This is the entry point
+# that understands `calc()`, because a `calc()` never survives the split into a
+# magnitude and a unit.
+pub fn resolve_authored_length(raw: text, ctx: LengthContext) -> CssLengthResult:
+    """Return the pixel value of the authored length raw, or an explained failure."""
+    parse_length_px(raw, ctx)
+
+# Resolve an already-split `Length`. Re-joining the magnitude and unit and
+# handing them to the shared reader keeps ONE unit table in the codebase; the
+# alternative is a second `if unit == "em"` ladder that drifts.
+pub fn resolve_length(value: Length, ctx: LengthContext) -> CssLengthResult:
+    """Return the pixel value of a split Length, or an explained failure."""
+    val unit = value.unit
+    if unit.len() == 0:
+        if value.value == 0.0:
+            return css_length_ok(0.0)
+        return css_length_err("a non-zero number needs a unit to be a length")
+    val magnitude = value.value
+    parse_length_px("{magnitude}{unit}", ctx)
