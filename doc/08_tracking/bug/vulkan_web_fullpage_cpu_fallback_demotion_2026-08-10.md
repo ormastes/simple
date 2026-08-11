@@ -70,8 +70,25 @@ RAM host that OOM-killed an interpreted 4K run earlier the same day), not a
 hardcoded pool cap (descriptor pools are max_sets=1-per-set; the command
 buffer Vec is unbounded).
 
-Unverified whether the same trip exists on a real-hardware / larger-RAM
-host. If it reproduces there, the suspect list is
-`vulkan_sffi_begin_compute`/descriptor-create error handling in
-`backend_vulkan_helpers.spl` and the `rt_vulkan_*` wrappers in
-`src/compiler_rust/compiler/src/interpreter_extern/gpu.rs`.
+## 2026-08-11 update — retry hardening landed; residual boundary is command-buffer creation
+
+`_dispatch_framebuffer_checked` (backend_vulkan_helpers.spl) now retries a
+failed batched dispatch ONCE on a fresh command buffer before latching the
+CPU fallback. Traced tall-page run with the hardening armed:
+
+- 43 dispatches that previously demoted the lane were recovered by the retry
+  (`dispatch-retry pipe=24 after flush rc=1`).
+- The eventual latch happens later and deeper: after ~31 successful command
+  buffers, `vulkan_sffi_begin_compute` itself fails (the retry line shows
+  `pending_cmd=0 pending_n=0` — no new command buffer could be started).
+  The per-buffer lifecycle (one-shot free after fenced submit, quarantine
+  drain on wait_idle) is intact by inspection, so this points at
+  llvmpipe/host resource pressure on this 7.5 GB host (which OOM-killed an
+  interpreted 4K render the same day), not an obvious leak. Needs a
+  real-hardware or bigger-RAM host to confirm.
+- The gate then failed with `reason=wrong-pixel-count expected=2080000
+  actual=0` — after the fallback latched, the readback returned EMPTY
+  instead of the host_cache/cpu_fallback pixels. Fail-closed either way, but
+  the empty readback means the CPU fallback surface never got the frame;
+  that secondary gap (fallback surface not populated on the demotion path)
+  is the next thing to fix if this lane matters on this host class.

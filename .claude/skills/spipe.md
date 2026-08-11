@@ -414,6 +414,51 @@ Guide: [`doc/07_guide/infra/sspec_typed_evidence.md`](../../doc/07_guide/infra/s
 design: [`doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md`](../../doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md);
 plan: [`doc/03_plan/infra/sspec/modern_sspec_parallel_agents_plan.md`](../../doc/03_plan/infra/sspec/modern_sspec_parallel_agents_plan.md).
 
+## Writing a Simple Counterparts Compare Test
+
+The **Simple Counterparts Compare Test** program runs the Simple implementation
+and an independent open-source counterpart over the same input at a frozen
+boundary (`<domain>.<mdsoc-layer>.<stage>@<schema-version>`), then compares
+under a declared relation. Before writing a new differential spec, check
+`doc/00_llm_process/feature_expert/counterpart_conformance/skill.md` — there
+is exactly one such pipeline, do not start a second.
+
+Import surface:
+
+```simple
+use std.spec.evidence.counterpart.model            # frozen contracts (common)
+use std.spec.evidence.counterpart.evidence_projection
+# registries / converter graph / relation engine / matrix / artifact store:
+# src/lib/nogc_sync_mut/spec/evidence/counterpart/
+```
+
+**A provider that cannot run reports `ProviderStatus.unavailable` and the run
+is REJECTED — never reported as a pass.** Do not fabricate the expected
+counterpart output from the candidate's own output, and do not substitute a
+hand-typed literal for what the counterpart tool actually printed.
+
+Two harness facts that cost lanes hours:
+
+- **`executed=0` in a verdict is a parse error; `timeout=1` is a harness
+  budget kill.** Neither is evidence for or against the thing under test —
+  don't record either as a result.
+- **Use `--no-session-daemon` for real counterpart-tool invocations.**
+  Measured ~38x faster on a minimal spec (0.68s vs 26.08s default) because the
+  session daemon runs a full-tree lint pass twice per run; it also caps a
+  worker at 120s, which a real subprocess call (e.g. `vulkaninfo`, `glslang`)
+  can exceed. Pair with `--timeout <secs>` when a real tool call needs more
+  room:
+
+```bash
+bin/simple test test/01_unit/infra/counterpart/<spec>.spl --no-session-daemon --timeout 60
+```
+
+Every lane must ship a sabotage spec that turns green to red — "the adapter
+ran" is not an acceptance criterion. Add a new provider or plan as a
+**descriptor**, not by editing central registry files. See also Boundary,
+Counterpart, Independence Group, Relation, Execution Receipt, GPU Gate,
+Vacuity, and Conversion Loss in `doc/glossary.md`.
+
 ## Declare the entry layer
 
 A compiler-layer spec (parser, HIR, MIR, borrow-check, codegen, …) sometimes
@@ -2272,3 +2317,28 @@ identity, hashes, logs, sanity, and markers are returned.
 Cap each live failure lane at three distinct fix/verify cycles. Do not repeat an
 identical failed command or promote executable existence, static checks, or
 frontier review to a false PASS.
+
+## Host storage precondition (added 2026-08-11)
+
+**Before starting any gate, bootstrap, or evidence run, check host storage.**
+On a btrfs root, `df` is not sufficient — it reports hundreds of GB free while
+the volume is unwritable:
+
+```bash
+btrfs filesystem usage / | grep -iE 'unallocated|Metadata,DUP'
+```
+
+If `Device unallocated` is under ~5 GiB, **stop and reclaim space first**. A run
+started on a metadata-starved volume produces failures that are
+indistinguishable from real product defects: guards that never emit a verdict
+line, `git write-tree` timeouts, and native builds that blow their ceiling
+(`wm-simple-web-build-timeout` on the SimpleOS WM gate came from exactly this,
+not from a compiler regression).
+
+Do not attempt `btrfs balance` as the first remedy — on a volume this full it
+fails with ENOSPC itself. Delete or migrate real data first, then balance.
+
+Worktrees, `TMPDIR`, QEMU images, and Docker `data-root` belong on `/mnt/data`
+(4 TB ext4), never on `/`. Full detail, including the migration method and the
+rule against deleting another session's live scratch:
+`doc/07_guide/infra/host_storage_layout.md`.

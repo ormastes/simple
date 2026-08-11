@@ -113,3 +113,57 @@ corrective-implementation-and-evidence
   the recalculated workbook/session synchronized, and replaces the semantic
   grid only when scrolling changes its visible identities. Malformed formula
   commits fail before mutating the cell.
+- manual-first correction (2026-08-11): The executable SSpec now invokes the
+  unique-run deployed gate through one cached setup helper, presents the live
+  discovery/formula/capture flow as the visible operator scenario, and folds
+  fail-closed command/action plus N1 evidence scenarios. Plans, detail design,
+  guide, and Office skill now describe the single `all --run-id` contract.
+  The generated manual remains intentionally stale until a current self-hosted
+  runtime executes the spec and regenerates it with zero stubs.
+- parallel corrective lanes (2026-08-11): `office_spipe_docs_audit`,
+  `office_spipe_gate_audit`, and `office_spipe_impl_audit` independently
+  reviewed and corrected manual structure, deployed evidence, and production
+  transport ownership. The gate now binds runtime hash/mtime, validates every
+  protocol envelope, proves malformed-formula no-mutation, terminal restore,
+  child exit, port closure, exact frame geometry, and live 48/7 results.
+- focused verification (2026-08-11): access-controller 11/11, standalone Calc
+  CLI 5/5, file-formats 10/10, and session-host isolation 2/2 passed. The old
+  deployed runner could not parse the current shared-grid spec; its tautology
+  failure branches were replaced with explicit `fail(...)` and remain pending
+  the current Stage 4 runner.
+- Stage 4 build blocker (2026-08-11): Three bounded build/fix cycles used
+  `/tmp/simple-stage3-aarch64-apple-darwin/simple` (SHA-256
+  `f34f81f6bf1fc81cc5bcb10f8d3d037615113b97e3145198641e6ea991a6f5e6`).
+  The first exposed a missing `MdBlockResult` declaration, now fixed. The
+  retained third log `/tmp/office-stage4/build.log` fails closed on ambiguous
+  `RiscvTargetAbi.to_text` resolution in the two `LlvmTargetConfig` builders;
+  explicit `RiscvTargetContract` annotations are now applied but, per the
+  three-cycle guard, are not rebuilt in this turn. Resume with the same
+  Stage 3 binary, stable `/tmp/office-stage4/cache`, and output
+  `/tmp/office-stage4/out/simple`; only a fresh artifact may run the gate and
+  regenerate the manual. Owner and final reviewer remain `/root`.
+- post-sync static correction (2026-08-11): The normal Calc host now loads
+  sheets through the narrow `sheet_io` owner rather than importing the broad
+  interactive/GUI closure, and every explicit invalid access-port value is
+  rejected instead of silently falling back to terminal-only mode. The SPipe
+  setup is a real inline scenario expanded by `@prev`, so the generated manual
+  can show one shared fresh evidence campaign without rerunning the gate.
+- typed rejection propagation (2026-08-11): The common UI test protocol keeps
+  its void-injector compatibility entrypoint and adds a typed action-result
+  seam. Calc maps `CalcAccessActionResult` through that seam, preserves
+  `malformed_formula` in the public CLI error, records the correlated rejection,
+  and leaves the live session unchanged. The checker now consumes JSON errors
+  from stdout or stderr and requires a schema-qualified `source_unavailable`
+  response after shutdown. These source changes are diff-clean but remain
+  pending validation by the fresh Stage 4 artifact and deployed system gate.
+- artifact re-audit (2026-08-11): No qualifying Stage 4/full self-hosted CLI
+  exists under `/tmp`. `/tmp/office-stage4/out/simple` is absent; both pure
+  Stage 3 compiler artifacts reject `test`, `run`, `office`, and `ui`, while
+  the remaining candidate identifies as the Rust bootstrap seed. The focused
+  typed-result and controller tests therefore could not start (`unknown
+  command 'test'`) and are not counted as execution evidence.
+- manual verification registration (2026-08-11): Added the Office CLI/Calc
+  SSpec/manual pair to the shared UI SSpec evidence audit. It intentionally
+  remains red while the generated manual carries its stale banner; after the
+  one green deployed SSpec run, docgen must replace that manual, report zero
+  stubs, and make the shared pair audit pass without rerunning the Office gate.

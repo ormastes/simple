@@ -69,10 +69,10 @@ scenario counts as coverage.
 | REQ-LLM-CARET-CLAUDE-TRACE-003 | `check-llm-caret-claude-cli-trace.shs` | Traceability system spec | CLI / PASS: 100% files, 100% LOC, exact file-qualified symbols | Keep the current filesystem inventory synchronized |
 | REQ-LLM-CARET-CLAUDE-TRACE-004 | Checker emits named counters and status | Traceability system spec | CLI / BLOCKED at runner mismatch in parent run | Modernize with frozen steps and assert exit code plus report fields |
 | REQ-LLM-CARET-CLAUDE-TRACE-005 | File-qualified Simple symbol inventory | Checker proves 506/506 current declarations | CLI / PASS | Regenerate symbol rows and require zero missing/stale symbols |
-| REQ-LLM-CARET-CLI-HARDEN-006 | Production CLI/provider/session/tool declarations plus the installed Claude executable's offline argument surface | Direct production unit specs and CLI process/contract specs; `llm_caret_installed_claude_cli_spec.spl` is supplemental environmental compatibility evidence | CLI / installed checker PASS; Caret execution blocked | Retain the installed probe evidence, then execute Caret on the qualified self-hosted runtime and cached wrapper |
+| REQ-LLM-CARET-CLI-HARDEN-006 | Production CLI/provider/session/tool declarations plus the installed Claude executable's offline argument surface | Direct production unit specs plus `llm_caret_claude_cli_advanced_spec.spl` and `llm_caret_claude_cli_stream_spec.spl` for deterministic advanced/stream behavior; `llm_caret_installed_claude_cli_spec.spl` is supplemental environmental compatibility evidence | CLI / installed checker PASS; direct and cached Caret execution blocked | Retain the installed probe evidence, then execute direct and cached Caret contracts on the qualified self-hosted runtime |
 | REQ-LLM-CARET-TUI-HARDEN-007 | `CaretIo`, `caret_chat`, and TUI/plain loops | Runtime component spec plus `llm_caret_tui_pty_spec.spl` routing/lifecycle/raw-rejection scenarios | TUI / designed fail-closed; live execution blocked | Require PTY PASS and pre/post mode plus cursor/screen restoration artifacts |
 | REQ-LLM-CARET-HIDDEN-008 | Shipped hidden-command admission; supporting `claude_full` parts-bin hidden-disabled, distributed-gate, and focused owner evidence | `llm_caret_tui_hidden_feature_spec.spl`, the shipped root matrix, hidden-stub and feature-gate registries, narrowly scoped focused owner scenarios including bridge availability/admission, and the real-process `hidden` PTY case | Hidden / component, registry, source-completeness, distributed cross-map, focused parts-bin owner, and PTY process coverage designed; execution blocked | Execute the three registry specs and focused owner specs plus default/enabled/disabled PTY cases without credentials; shipped fulfillment remains exclusively the root/component/PTY lane |
-| REQ-LLM-CARET-TUI-HARDEN-009 | Injected `CaretIo` frame/read/loop boundary | Runtime component spec plus PTY UTF-8/edit/navigation/geometry and modeled EOF scenarios | TUI / component designed; live execution blocked | Execute component scenarios and retained live capture on a cached artifact |
+| REQ-LLM-CARET-TUI-HARDEN-009 | Injected `CaretIo` frame/read/loop boundary | Runtime component spec plus PTY UTF-8/edit/navigation/geometry, redacted offline Claude provider failure, and modeled EOF scenarios | TUI / component designed; live execution blocked | Execute component scenarios and retained live capture on a cached artifact |
 | REQ-LLM-CARET-FULL-001..003 | Feature/file/symbol TSV matrices | Full-parity inventory/plan gate | CLI/TUI / STALE | Re-extract only from restored pinned upstream |
 | REQ-LLM-CARET-FULL-004 | 745/1,902 target files exist | Implementation gate plus row specs | All / FAIL | Zero missing implementation and test rows |
 | REQ-LLM-CARET-FULL-005 | File matrix LOC thresholds | Implementation checker | All / FAIL: 599/1,902 at 80% | Prefer behavioral proof when an approved architecture replaces LOC parity |
@@ -80,6 +80,18 @@ scenario counts as coverage.
 | REQ-LLM-CARET-FULL-007 | Historical progress counters | Implementation checker | All / FAIL: current count is 599/1,902, not the old 551/1,884 baseline | Report fresh counters on every completion claim |
 | NFR-LLM-CARET-TRACE-001..004 | Offline shell checker and MDSOC boundary | Traceability spec | CLI / partly covered | Keep deterministic; remove hardcoded report assumptions |
 | NFR-LLM-CARET-TUI-005..007 | Simple-only capability boundary, cached real PTY, one-size-snapshot bounded teardown | Runtime component spec and `check-llm-caret-tui-pty.shs` | TUI / static-complete, execution blocked | No leaf externs, source fallback, paid provider, retry, polling, or prerequisite skip |
+
+## Claude CLI Public API Test Map
+
+The production public surface is deliberately mapped by behavior rather than
+duplicating implementation in tests. All entries below have deterministic
+offline coverage; installed/authenticated provider execution remains outside
+the credential-free acceptance boundary.
+
+| Public surface | Primary modern coverage | Evidence state |
+|---|---|---|
+| `CliResponse`, `build_claude_args`, `parse_claude_json_response`, `claude_cli_send` | `test/01_unit/app/llm_caret/claude_cli_spec.spl`; `test/03_system/app/llm_caret/feature/llm_caret_claude_cli_advanced_spec.spl` | Offline sender, response parsing, resume, turns, schema, ordered tools, and redaction designed; runtime execution blocked |
+| `CliStreamEvent`, `build_claude_stream_args`, `parse_claude_stream_line`, `claude_cli_stream` | `test/01_unit/app/llm_caret/claude_cli_spec.spl`; `test/03_system/app/llm_caret/feature/llm_caret_claude_cli_stream_spec.spl` | Ordered envelopes, structured provider-error redaction, malformed NDJSON, and duplicate terminal rejection designed; runtime execution blocked |
 | NFR-LLM-CARET-FULL-001..005 | `claude_full` capsule and matrices | Distributed Claude-full specs | All / incomplete | Add facade, performance, observability, invalidation, and row-test evidence |
 
 ## Caret Feature-to-Test Map
@@ -199,6 +211,10 @@ Current focused executable specs:
 | Executable spec | Generated manual | Required proof |
 |---|---|---|
 | `test/03_system/app/llm_caret/feature/llm_caret_cli_hardening_spec.spl` | `doc/06_spec/03_system/app/llm_caret/feature/llm_caret_cli_hardening_spec.md` | Three scenarios: four source-process cases plus cached-wrapper selection and invalid-override rejection; current runner execution remains blocked |
+| `test/03_system/app/llm_caret/feature/llm_caret_cli_cached_spec.spl` | `doc/06_spec/03_system/app/llm_caret/feature/llm_caret_cli_cached_spec.md` | Three fail-closed cached-artifact scenarios: provenance prerequisite, offline Claude response, and redacted provider-error/unknown-option evidence, retaining command, stdout, stderr, exit, and provenance artifacts |
+| `test/03_system/app/llm_caret/feature/llm_caret_cli_hidden_cached_spec.spl` | `doc/06_spec/03_system/app/llm_caret/feature/llm_caret_cli_hidden_cached_spec.md` | Five fail-closed cached plain-CLI scenarios: provenance prerequisite; canonical/alias hidden commands under default, enabled, and explicit-false states; plus canonical/alias disabled-command rejection. Each retains scrubbed command, stdout, stderr, exit, and provenance artifacts. |
+| `test/03_system/app/llm_caret/feature/llm_caret_claude_cli_advanced_spec.spl` | `doc/06_spec/03_system/app/llm_caret/feature/llm_caret_claude_cli_advanced_spec.md` | Direct production `claude_cli_send` proof for resume, maximum turns, JSON schema, ordered `Read`/`Write` allowed tools, fixture extra argument, and deterministic structured response; no cached-wrapper claim |
+| `test/03_system/app/llm_caret/feature/llm_caret_claude_cli_stream_spec.spl` | `doc/06_spec/03_system/app/llm_caret/feature/llm_caret_claude_cli_stream_spec.md` | Direct production `claude_cli_stream` proof for ordered system/assistant/result envelopes, structured provider-error redaction, and malformed or duplicate-terminal fail-closed behavior; no cached-wrapper claim |
 | `test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl` | `doc/06_spec/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.md` | Six bounded offline compatibility scenarios record installed path/version/hash and validate help, missing-input rejection, help-hidden accepted `--max-turns`, and removed `--max-tokens` rejection with no submitted prompt or inherited provider credentials |
 | `test/03_system/tools/llm/llm_caret_claude_cli_feature_contract_spec.spl` | `doc/06_spec/03_system/tools/llm/llm_caret_claude_cli_feature_contract_spec.md` | Eight deterministic CLI/parser/provider/state scenarios with complete folded source; current runner execution remains blocked |
 | `test/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature_spec.spl` | `doc/06_spec/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature_spec.md` | Ten TUI/hidden component scenarios, including Unicode raw-line reduction and hidden/disabled alias submission with zero responder/persistence; expected live capture remains unexecuted |
@@ -223,12 +239,22 @@ surface exposes it; screenshot-only evidence is insufficient.
 
 - CLI manuals display the three frozen CLI steps and a compact `exec`/`text`
   capture; setup and parsing details are folded.
+- The cached-Caret CLI manual owns production-wrapper evidence rather than
+  source-entrypoint evidence. It retains `command.txt`, scrubbed `stdout.txt`,
+  scrubbed `stderr.txt`, `exit.txt`, `provenance.txt`, and `combined.txt` per
+  case under `build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_cli_cached/`.
+- The cached plain-CLI hidden-command manual owns non-TTY admission evidence
+  under `build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_cli_hidden_cached/`.
+  It invokes `bin/caret --provider dummy --plain` through a pipe with
+  `TERM=dumb`, removes provider credentials, pins source fallback to zero, and
+  preserves the canonical/alias default, enabled, explicit-false, and disabled
+  outcomes. These are linked CLI artifacts, never PTY or raster-screen proof.
 - The installed-Claude manual uses the three frozen installed-CLI steps, links
   raw stdout/stderr/exit/provenance artifacts, and explicitly excludes provider,
   authentication, resume, network, billing, and model-quality claims.
 - TUI manuals display the three frozen TUI steps and embed a compact TUI
   capture under
-  `build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_tui_hardening/`.
+  `build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_tui_pty/`.
 - Live-terminal manuals link the complete `script(1)` typescripts, driver logs,
   input bytes, pre/post `stty` modes, and geometry under
   `build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_tui_pty/`.
@@ -243,6 +269,9 @@ surface exposes it; screenshot-only evidence is insufficient.
   evidence, not a general process-tree proof. The outer SSpec deadline is
   240 seconds for `hidden` and `promptless`, whose sequential per-child budgets
   can exceed 120 seconds, and 120 seconds for all other scenario groups.
+  `typescript.txt` is the canonical ANSI terminal screen capture, not a raster
+  screenshot; its frame is interpreted together with terminal-mode, geometry,
+  alternate-screen, cursor, and transcript assertions.
 - Piped automatic routing submits `/exit` and accepts only stdout exactly `> `,
   empty stderr, zero exit, and no ANSI bytes. A prompt substring is not
   completion evidence.
@@ -419,6 +448,7 @@ bin/simple test test/01_unit/app/llm_caret/tools_spec.spl --mode=interpreter
 bin/simple test test/01_unit/app/llm_caret/types_spec.spl --mode=interpreter
 
 bin/simple test test/03_system/app/llm_caret/feature/llm_caret_cli_hardening_spec.spl --mode=interpreter
+bin/simple test test/03_system/app/llm_caret/feature/llm_caret_cli_hidden_cached_spec.spl --mode=interpreter
 bin/simple test test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl --mode=interpreter
 bin/simple test test/03_system/tools/llm/llm_caret_claude_cli_feature_contract_spec.spl --mode=interpreter
 bin/simple test test/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature_spec.spl --mode=interpreter
@@ -429,6 +459,7 @@ bin/simple test test/03_system/tools/llm/claude_full/utils/managed_env_constants
 SIMPLE_NO_STUB_FALLBACK=1 bin/simple test test/03_system/app/llm_caret/feature/llm_caret_cli_hardening_spec.spl --mode=native
 
 bin/simple spipe-docgen test/03_system/app/llm_caret/feature/llm_caret_cli_hardening_spec.spl --output doc/06_spec --no-index
+bin/simple spipe-docgen test/03_system/app/llm_caret/feature/llm_caret_cli_hidden_cached_spec.spl --output doc/06_spec --no-index
 bin/simple spipe-docgen test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl --output doc/06_spec --no-index
 bin/simple spipe-docgen test/03_system/tools/llm/llm_caret_claude_cli_feature_contract_spec.spl --output doc/06_spec --no-index
 bin/simple spipe-docgen test/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature_spec.spl --output doc/06_spec --no-index
@@ -498,6 +529,14 @@ The focused hardening lane now includes:
 - `llm_caret_cli_hardening_spec.spl`, launching the actual Caret entrypoint for
   help, offline success, provider failure, and unknown-option cases, plus
   cached production-wrapper selection and invalid-override rejection;
+- `llm_caret_cli_cached_spec.spl` plus its checker, requiring a provenance-
+  qualified cached Caret artifact and retaining scrubbed command/stdout/stderr/
+  exit/provenance evidence for help, offline Claude response, provider failure,
+  and unknown-option rejection;
+- `llm_caret_cli_hidden_cached_spec.spl` plus its separate non-PTY checker,
+  requiring the same provenance-qualified cached artifact before it proves
+  canonical and alias hidden-command default/enabled/explicit-false admission
+  and canonical/alias disabled-command rejection through plain CLI;
 - `llm_caret_installed_claude_cli_spec.spl`, covering six bounded offline
   probes of the currently installed Claude executable with isolated HOME,
   config, working directory, and provider credentials removed;
@@ -540,7 +579,7 @@ and overwriting the prior persisted conversation.
 Focused system manuals are mirrored under `doc/06_spec/03_system/...`.
 Source-synchronized unit manuals now mirror 84 Claude CLI, 36 provider, 15
 OpenCode CLI, nine local-Torch, 24 production-chat, 62 TUI, 22 raw-input, 22
-injected-runtime, 63 main-entry, 16 production-config, 13 Claude API, 14 OpenAI
+injected-runtime, 64 main-entry, 16 production-config, 13 Claude API, 14 OpenAI
 API, 37 production-tools, and 14 production-types scenarios.
 Because docgen cannot execute in the current runtime, all refreshed manuals
 explicitly report zero executed scenarios and do not claim a PASS.

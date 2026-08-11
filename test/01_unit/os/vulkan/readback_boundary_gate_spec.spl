@@ -1,0 +1,250 @@
+# @cover src/os/drivers/gpu/board_vulkan/boundary_readback_gate.spl 85%
+# @cover src/os/drivers/gpu/board_vulkan/boundary_readback_lavapipe_provider.spl 85%
+# @req REQ-BOARD-VULKAN-READBACK-001
+"""
+# Board Vulkan Readback Boundary Gate
+
+**Category:** OS / GPU driver
+**Status:** In Progress
+**Architecture:** doc/04_architecture/os/vulkan/simpleos_board_vulkan_driver_architecture_2026-08-10.md
+**Plan:** doc/03_plan/os/vulkan/board_vulkan_parallel_soc_lanes_2026-08-10.md
+**Lane:** L3 — boundary `vulkan.present.readback_image@1`
+
+## Purpose and Audience
+
+Lane L3 owns one boundary: the pixels a board Vulkan render actually produced.
+The reader is an engineer asking *would this gate actually catch a faked
+readback*, not just *does the code compile*. This file answers that by
+constructing bad `ExecutionReceipt` values directly and asserting the gate
+names the exact field that failed, plus one pixel-level image mismatch.
+
+## Scope and Preconditions
+
+No GPU or board is needed to run this file — it exercises the gate predicate
+over hand-built receipts and image byte strings, and it exercises the
+lavapipe/anv provider descriptors as data. lavapipe (`/usr/share/vulkan/icd.d/lvp_icd.json`,
+`libvulkan_lvp.so`) is installed on this host as the deterministic
+software counterpart; nothing here requires it to actually be invoked.
+
+## Primary Workflow
+
+Build a fully valid receipt and a byte-identical image pair, confirm the gate
+accepts it. Then, one clause at a time, break exactly one field and confirm
+the gate rejects it while naming that field. Finally confirm that honestly
+attempting this boundary against today's SimpleOS compositor status yields
+`unavailable`, never a pass.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| ExecutionReceipt | Frozen model type recording how a frame was produced |
+| GPU gate | `execution_receipt_gpu_gate_failures` — reused, not re-implemented |
+| image_exact | No-tolerance byte comparison against the lavapipe reference |
+| unavailable | The honest verdict when SimpleOS has no board render path |
+
+## Related Specifications
+
+- [Board Vulkan counterpart plans](board_vulkan_counterpart_plan_spec.spl) — the plan descriptors this gate backs
+
+## Evidence and Provenance
+
+Executable against `src/os/drivers/gpu/board_vulkan/boundary_readback_gate.spl`
+and `boundary_readback_lavapipe_provider.spl`. The four sabotage scenarios are
+the reason this file exists: each constructs a receipt or image pair that a
+weaker gate would accept, and asserts this one does not.
+
+## Recovery and Troubleshooting
+
+A failure naming a receipt field means that field's check was removed or
+weakened in `readback_boundary_rejections`. Restore the check — do not relax
+the gate to make a run pass.
+
+## Compatibility and Limitations
+
+`src/os/compositor/vulkan_compositor_backend.spl` reports
+`vulkan_venus_session_not_implemented:qemu_only:board_gap_open` today, so
+SimpleOS cannot honestly produce a device-origin readback yet. The gate does
+not fabricate one; `board_vulkan_readback_attempt_status` reports
+`unavailable` for exactly this reason, which is the filed board gap restated
+as a measurement.
+"""
+
+use std.spec.*
+use std.common.spec.evidence.counterpart.model.{
+    ExecutionMode,
+    ExecutionReceipt,
+    relation_name
+}
+use os.drivers.gpu.board_vulkan.boundary_readback_gate.{
+    BOARD_VULKAN_READBACK_NOT_IMPLEMENTED_MARKER,
+    ReadbackAttemptStatus,
+    board_vulkan_readback_attempt_status,
+    board_vulkan_readback_boundary_id,
+    board_vulkan_readback_relation,
+    readback_attempt_status_name,
+    readback_boundary_accepted,
+    readback_boundary_rejections,
+    readback_candidate
+}
+use os.drivers.gpu.board_vulkan.boundary_readback_lavapipe_provider.{
+    anv_provider_manifest,
+    lavapipe_independence_group,
+    lavapipe_provider_manifest
+}
+
+# A receipt with every field set to the value the gate requires. Every
+# sabotage scenario below flips exactly one field off this baseline.
+fn valid_receipt() -> ExecutionReceipt:
+    ExecutionReceipt(
+        provider_id: "simple_board_driver",
+        execution_mode: ExecutionMode.vulkan,
+        device_identity: "board-gpu-0",
+        queue_identity: "graphics-0",
+        submission_count: 1,
+        fence_completed: true,
+        device_origin_readback: true,
+        fallback_used: false,
+        dropped_events: 0,
+        completed: true
+    )
+
+fn matching_image() -> text:
+    "pixel-hash:8f3a9c2b-64x64-rgba8"
+
+describe("board vulkan readback boundary — baseline"):
+    it("accepts a fully valid receipt with an exact image match"):
+        step("build a valid receipt against a byte-identical reference image")
+        val candidate = readback_candidate(valid_receipt(), matching_image(), matching_image())
+        step("run the gate")
+        assert_equal(readback_boundary_rejections(candidate).len(), 0)
+        assert_true(readback_boundary_accepted(candidate))
+
+    it("compares this boundary image_exact with no tolerance"):
+        step("read the relation this boundary uses")
+        assert_equal(relation_name(board_vulkan_readback_relation()), "image_exact")
+
+    it("names the frozen boundary id"):
+        step("read the boundary id")
+        assert_equal(board_vulkan_readback_boundary_id(), "vulkan.present.readback_image@1")
+
+describe("board vulkan readback boundary — sabotage proofs"):
+    it("rejects a receipt whose fallback_used is true, naming fallback_used"):
+        step("flip fallback_used on an otherwise-valid receipt")
+        val bad = ExecutionReceipt(
+            provider_id: "simple_board_driver",
+            execution_mode: ExecutionMode.vulkan,
+            device_identity: "board-gpu-0",
+            queue_identity: "graphics-0",
+            submission_count: 1,
+            fence_completed: true,
+            device_origin_readback: true,
+            fallback_used: true,
+            dropped_events: 0,
+            completed: true
+        )
+        val candidate = readback_candidate(bad, matching_image(), matching_image())
+        step("run the gate")
+        val reasons = readback_boundary_rejections(candidate)
+        assert_false(readback_boundary_accepted(candidate))
+        assert_true(reasons.len() > 0)
+        var named_fallback = false
+        for reason in reasons:
+            if reason.contains("fallback_used"):
+                named_fallback = true
+        assert_true(named_fallback)
+
+    it("rejects a receipt whose fence_completed is false, naming fence_completed"):
+        step("flip fence_completed on an otherwise-valid receipt")
+        val bad = ExecutionReceipt(
+            provider_id: "simple_board_driver",
+            execution_mode: ExecutionMode.vulkan,
+            device_identity: "board-gpu-0",
+            queue_identity: "graphics-0",
+            submission_count: 1,
+            fence_completed: false,
+            device_origin_readback: true,
+            fallback_used: false,
+            dropped_events: 0,
+            completed: true
+        )
+        val candidate = readback_candidate(bad, matching_image(), matching_image())
+        step("run the gate")
+        val reasons = readback_boundary_rejections(candidate)
+        assert_false(readback_boundary_accepted(candidate))
+        var named_fence = false
+        for reason in reasons:
+            if reason.contains("fence_completed"):
+                named_fence = true
+        assert_true(named_fence)
+
+    it("rejects a CPU-faked frame whose device_origin_readback is false, naming device_origin_readback"):
+        step("flip device_origin_readback on an otherwise-valid receipt")
+        val bad = ExecutionReceipt(
+            provider_id: "simple_board_driver",
+            execution_mode: ExecutionMode.vulkan,
+            device_identity: "board-gpu-0",
+            queue_identity: "graphics-0",
+            submission_count: 1,
+            fence_completed: true,
+            device_origin_readback: false,
+            fallback_used: false,
+            dropped_events: 0,
+            completed: true
+        )
+        val candidate = readback_candidate(bad, matching_image(), matching_image())
+        step("run the gate")
+        val reasons = readback_boundary_rejections(candidate)
+        assert_false(readback_boundary_accepted(candidate))
+        var named_device_origin = false
+        for reason in reasons:
+            if reason.contains("device_origin_readback"):
+                named_device_origin = true
+        assert_true(named_device_origin)
+
+    it("rejects a one-pixel image difference by image_exact comparison"):
+        step("build a valid receipt but diverge the candidate image by one pixel")
+        val candidate = readback_candidate(
+            valid_receipt(),
+            "pixel-hash:8f3a9c2c-64x64-rgba8",
+            matching_image()
+        )
+        step("run the gate")
+        val reasons = readback_boundary_rejections(candidate)
+        assert_false(readback_boundary_accepted(candidate))
+        var named_image = false
+        for reason in reasons:
+            if reason.contains("image_exact"):
+                named_image = true
+        assert_true(named_image)
+
+describe("board vulkan readback boundary — candidate viability"):
+    it("reports unavailable, not a pass, when SimpleOS has no board render path today"):
+        step("read the compositor's current status string")
+        assert_equal(BOARD_VULKAN_READBACK_NOT_IMPLEMENTED_MARKER, "vulkan_venus_session_not_implemented:qemu_only:board_gap_open")
+        step("evaluate the honest attempt status for this boundary")
+        val status = board_vulkan_readback_attempt_status(BOARD_VULKAN_READBACK_NOT_IMPLEMENTED_MARKER)
+        assert_equal(readback_attempt_status_name(status), "unavailable")
+
+    it("also reports unavailable for an empty compositor status rather than defaulting to a pass"):
+        step("evaluate the honest attempt status for an empty status string")
+        val status = board_vulkan_readback_attempt_status("")
+        assert_equal(readback_attempt_status_name(status), "unavailable")
+
+describe("board vulkan readback boundary — lavapipe counterpart descriptor"):
+    it("registers lavapipe as a deterministic, always-available software reference"):
+        step("read the lavapipe provider manifest")
+        val manifest = lavapipe_provider_manifest()
+        assert_equal(manifest.provider_id, "lavapipe")
+        assert_equal(manifest.independence_group, "mesa")
+        assert_equal(manifest.components.len(), 1)
+        assert_equal(manifest.components[0].counterpart_boundary_id, "vulkan.present.readback_image@1")
+        var has_image_exact = false
+        for relation in manifest.components[0].supported_relations:
+            if relation == "image_exact":
+                has_image_exact = true
+        assert_true(has_image_exact)
+
+    it("keeps anv in the same independence group as lavapipe, so the pair is one reference not two"):
+        step("compare independence groups")
+        assert_equal(anv_provider_manifest().independence_group, lavapipe_independence_group())

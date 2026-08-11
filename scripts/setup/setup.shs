@@ -37,7 +37,7 @@ else
   rm -f simple_seed
 fi
 
-for b in simple_ui_backend t32_mcp_server t32_lsp_mcp_server; do
+for b in simple_ui_backend; do
   if [ -x "release/${PLATFORM_TRIPLE}/${b}" ]; then
     ln -sf "release/${PLATFORM_TRIPLE}/${b}" "${b}"
   fi
@@ -524,6 +524,185 @@ printf 'startup wrapper=simple_lsp_mcp_server mode=native native=%s cwd=%s\n' "$
 exec "${native}" "$@" 2>>"${log_dir}/simple_lsp_mcp_stderr.log"
 EOF
 chmod +x simple_lsp_mcp_server
+
+# TRACE32 MCP wrappers. Same contract as the two above: production launches an
+# admitted cached native artifact only -- never raw .spl source. Until
+# 2026-08-11 no POSIX wrapper existed at all (only .cmd for Windows), so
+# `bin/t32_mcp_server` documented in .claude/rules/code-style.md was a missing
+# artifact on every non-Windows host.
+rm -f t32_mcp_server
+cat > t32_mcp_server <<'EOF'
+#!/bin/sh
+set -eu
+
+if [ "$#" -eq 1 ]; then
+  case "$1" in
+    --version|-v)
+      printf '%s\n' 't32-mcp-server 1.0.0'
+      exit 0
+      ;;
+    --help|-h)
+      printf '%s\n' 't32-mcp-server 1.0.0'
+      printf '%s\n' 'Usage: t32_mcp_server'
+      printf '%s\n' '       t32_mcp_server --version'
+      exit 0
+      ;;
+    --json)
+      printf '%s\n' '{"command":"t32-mcp","status":"ready","version":"1.0.0"}'
+      exit 0
+      ;;
+  esac
+fi
+
+script_dir="${0%/*}"
+if [ "${script_dir}" = "$0" ]; then
+  script_dir="."
+fi
+script_dir="$(CDPATH= cd "${script_dir}" && pwd)"
+platform_dir="${SIMPLE_PLATFORM_TRIPLE:-x86_64-unknown-linux-gnu}"
+repo_root="$(CDPATH= cd "${script_dir}/.." && pwd)"
+log_dir="${repo_root}/.simple/logs"
+mkdir -p "${log_dir}"
+
+native_hash_is_valid() {
+  _native=$1
+  _sidecar="${_native}.sha256"
+  [ -f "${_sidecar}" ] || return 1
+  _expected="$(awk 'NR == 1 { print $1 }' "${_sidecar}")"
+  if command -v sha256sum >/dev/null 2>&1; then
+    _actual="$(sha256sum "${_native}" | awk '{print $1}')"
+  elif command -v shasum >/dev/null 2>&1; then
+    _actual="$(shasum -a 256 "${_native}" | awk '{print $1}')"
+  else
+    return 1
+  fi
+  [ -n "${_expected}" ] && [ "${_expected}" = "${_actual}" ]
+}
+
+cd "${repo_root}"
+native=""
+if [ -n "${T32_MCP_NATIVE:-}" ]; then
+  if [ -x "${T32_MCP_NATIVE}" ] && native_hash_is_valid "${T32_MCP_NATIVE}"; then
+    native="${T32_MCP_NATIVE}"
+  else
+    printf '%s\n' "error: T32_MCP_NATIVE is missing or failed hash admission: ${T32_MCP_NATIVE}" >&2
+    exit 127
+  fi
+else
+  for candidate in \
+    "${script_dir}/release/aarch64-apple-darwin/t32_mcp_server" \
+    "${script_dir}/release/x86_64-apple-darwin/t32_mcp_server" \
+    "${script_dir}/release/${platform_dir}/t32_mcp_server" \
+    "${script_dir}/release/linux-x86_64/t32_mcp_server"
+  do
+    if [ -x "${candidate}" ] && native_hash_is_valid "${candidate}"; then
+      native="${candidate}"
+      break
+    fi
+  done
+fi
+
+if [ -z "${native}" ] || [ ! -x "${native}" ]; then
+  {
+    printf '%s\n' "error: native t32_mcp_server not found"
+    printf '%s\n' "checked release directory: ${script_dir}/release"
+    printf '%s\n' "platform: ${platform_dir}"
+    printf '%s\n' "hint: rebuild with native-build for src/app/t32_mcp_server/main.spl"
+  } >&2
+  exit 127
+fi
+
+printf 'startup wrapper=t32_mcp_server mode=native native=%s cwd=%s\n' "${native}" "$(pwd)" >>"${log_dir}/t32_mcp_startup.log"
+exec "${native}" "$@" 2>>"${log_dir}/t32_mcp_stderr.log"
+EOF
+chmod +x t32_mcp_server
+
+rm -f t32_lsp_mcp_server
+cat > t32_lsp_mcp_server <<'EOF'
+#!/bin/sh
+set -eu
+
+if [ "$#" -eq 1 ]; then
+  case "$1" in
+    --version|-v)
+      printf '%s\n' 't32-lsp-mcp-server 1.0.0'
+      exit 0
+      ;;
+    --help|-h)
+      printf '%s\n' 't32-lsp-mcp-server 1.0.0'
+      printf '%s\n' 'Usage: t32_lsp_mcp_server'
+      printf '%s\n' '       t32_lsp_mcp_server --version'
+      exit 0
+      ;;
+    --json)
+      printf '%s\n' '{"command":"t32-lsp-mcp","status":"ready","version":"1.0.0"}'
+      exit 0
+      ;;
+  esac
+fi
+
+script_dir="${0%/*}"
+if [ "${script_dir}" = "$0" ]; then
+  script_dir="."
+fi
+script_dir="$(CDPATH= cd "${script_dir}" && pwd)"
+platform_dir="${SIMPLE_PLATFORM_TRIPLE:-x86_64-unknown-linux-gnu}"
+repo_root="$(CDPATH= cd "${script_dir}/.." && pwd)"
+log_dir="${repo_root}/.simple/logs"
+mkdir -p "${log_dir}"
+
+native_hash_is_valid() {
+  _native=$1
+  _sidecar="${_native}.sha256"
+  [ -f "${_sidecar}" ] || return 1
+  _expected="$(awk 'NR == 1 { print $1 }' "${_sidecar}")"
+  if command -v sha256sum >/dev/null 2>&1; then
+    _actual="$(sha256sum "${_native}" | awk '{print $1}')"
+  elif command -v shasum >/dev/null 2>&1; then
+    _actual="$(shasum -a 256 "${_native}" | awk '{print $1}')"
+  else
+    return 1
+  fi
+  [ -n "${_expected}" ] && [ "${_expected}" = "${_actual}" ]
+}
+
+cd "${repo_root}"
+native=""
+if [ -n "${T32_LSP_MCP_NATIVE:-}" ]; then
+  if [ -x "${T32_LSP_MCP_NATIVE}" ] && native_hash_is_valid "${T32_LSP_MCP_NATIVE}"; then
+    native="${T32_LSP_MCP_NATIVE}"
+  else
+    printf '%s\n' "error: T32_LSP_MCP_NATIVE is missing or failed hash admission: ${T32_LSP_MCP_NATIVE}" >&2
+    exit 127
+  fi
+else
+  for candidate in \
+    "${script_dir}/release/aarch64-apple-darwin/t32_lsp_mcp_server" \
+    "${script_dir}/release/x86_64-apple-darwin/t32_lsp_mcp_server" \
+    "${script_dir}/release/${platform_dir}/t32_lsp_mcp_server" \
+    "${script_dir}/release/linux-x86_64/t32_lsp_mcp_server"
+  do
+    if [ -x "${candidate}" ] && native_hash_is_valid "${candidate}"; then
+      native="${candidate}"
+      break
+    fi
+  done
+fi
+
+if [ -z "${native}" ] || [ ! -x "${native}" ]; then
+  {
+    printf '%s\n' "error: native t32_lsp_mcp_server not found"
+    printf '%s\n' "checked release directory: ${script_dir}/release"
+    printf '%s\n' "platform: ${platform_dir}"
+    printf '%s\n' "hint: rebuild with native-build for src/app/t32_lsp_mcp/main.spl"
+  } >&2
+  exit 127
+fi
+
+printf 'startup wrapper=t32_lsp_mcp_server mode=native native=%s cwd=%s\n' "${native}" "$(pwd)" >>"${log_dir}/t32_lsp_mcp_startup.log"
+exec "${native}" "$@" 2>>"${log_dir}/t32_lsp_mcp_stderr.log"
+EOF
+chmod +x t32_lsp_mcp_server
 
 echo "setup: bin/simple -> release/${PLATFORM_TRIPLE}/simple"
 

@@ -9,6 +9,7 @@ use std.nogc_sync_mut.io_runtime.{
     dir_exists,
     env_get,
     file_exists,
+    file_hash_sha256,
     file_read,
     file_write,
     get_args,
@@ -19,6 +20,7 @@ use std.nogc_sync_mut.io_runtime.{
     time_now_unix_micros
 }
 use nogc_sync_mut.process_monitor.{sample_process}
+use std.nogc_sync_mut.io.file_ops.{file_modified_time}
 
 val EVIDENCE_BASE: text = "build/test-artifacts/03_system/app/office/feature/office_cli_tui_ui_access"
 val WARM_SAMPLE_COUNT: i32 = 20
@@ -115,6 +117,27 @@ fn _json_text(body: text, key: text) -> text:
     if end < 0: return ""
     rest.slice(0, end)
 
+fn _protocol_json_ok(body: text) -> bool:
+    body.contains("\"schema\":\"simple.access/v1\"")
+
+fn _runtime_artifact_provenance(runtime: text, root: text) -> (bool, text, i64):
+    """Bind this run to the configured executable's observed file identity.
+
+    `file_hash_sha256` and `file_modified_time` are the canonical runtime/file
+    facades.  They follow the configured executable path without a shell
+    command, so a stale or swapped deployed tool cannot borrow another run's
+    receipt.
+    """
+    val digest = file_hash_sha256(runtime)
+    val mtime = file_modified_time(runtime)
+    val valid = digest.len() == 64 and mtime > 0
+    val receipt = "runtime_path=" + runtime +
+        "\nruntime_sha256=" + digest +
+        "\nruntime_mtime_epoch=" + mtime.to_text() + "\n"
+    if not file_write(root + "/exec/runtime-artifact.txt", receipt):
+        return (false, digest, mtime)
+    (valid, digest, mtime)
+
 fn _count_text(body: text, needle: text) -> i32:
     if needle == "": return 0
     var count = 0
@@ -129,7 +152,8 @@ fn _count_text(body: text, needle: text) -> i32:
 fn _start_real_tui(runtime: text, root: text, port: i32) -> i64:
     """Start the *one* deployed Calc process under a real 124x37 PTY.
 
-    The Python parent is capture plumbing only.  Its child is the configured
+    The Python parent is PTY capture plumbing only.  It contains no product,
+    formula, protocol, or assertion logic. Its child is the configured
     deployed runtime, launched once with both `--tui` and `--ui-access-port`.
     The child must accept public UI actions while continuing to render its
     terminal surface, and must exit cleanly after the stop sentinel is made.
@@ -140,12 +164,12 @@ fn _start_real_tui(runtime: text, root: text, port: i32) -> i64:
     val code = "import fcntl,os,pty,re,select,signal,struct,sys,termios,time;" +
         "raw_path,text_path,status_path,stop_path,pid_path,exe,fixture,port=sys.argv[1:9];" +
         "pid,fd=pty.fork();" +
-        "(fcntl.ioctl(0,termios.TIOCSWINSZ,struct.pack('HHHH',37,124,0,0)) or os.execvp(exe,[exe,'office','calc',fixture,'--tui','--ui-access-port',port])) if pid==0 else None;" +
-        "open(pid_path,'w').write(str(pid)+'\\n');" +
+        "(time.sleep(0.05) or fcntl.ioctl(0,termios.TIOCSWINSZ,struct.pack('HHHH',37,124,0,0)) or os.execvp(exe,[exe,'office','calc',fixture,'--tui','--ui-access-port',port])) if pid==0 else None;" +
+        "open(pid_path,'w').write(str(pid)+'\\n');before=termios.tcgetattr(fd);" +
         "fcntl.ioctl(fd,termios.TIOCSWINSZ,struct.pack('HHHH',37,124,0,0));" +
         "raw=b'';sent=False;exit_code=-999;deadline=time.time()+20;" +
         "\nwhile time.time()<deadline:\n r,_,_=select.select([fd],[],[],0.1);\n if r:\n  try: chunk=os.read(fd,65536)\n  except OSError: chunk=b''\n  raw+=chunk\n if os.path.exists(stop_path) and not sent: os.write(fd,b'q');sent=True\n if sent:\n  done,status=os.waitpid(pid,os.WNOHANG)\n  if done: exit_code=os.waitstatus_to_exitcode(status);break\n" +
-        "\nif exit_code == -999:\n os.kill(pid,signal.SIGTERM);_,status=os.waitpid(pid,0);exit_code=os.waitstatus_to_exitcode(status)\nopen(raw_path,'wb').write(raw);open(status_path,'w').write('exit='+str(exit_code)+'\\n');" +
+        "\nif exit_code == -999:\n os.kill(pid,signal.SIGTERM);_,status=os.waitpid(pid,0);exit_code=os.waitstatus_to_exitcode(status)\nafter=termios.tcgetattr(fd);restored=after==before;open(raw_path,'wb').write(raw);open(status_path,'w').write('exit='+str(exit_code)+'\\nterminal_restored='+str(restored).lower()+'\\n');" +
         "plain=re.sub(rb'\\x1b\\[[0-?]*[ -/]*[@-~]',b'',raw).replace(b'\\r',b'');" +
         "lines=[x.decode('utf-8','replace') for x in plain.split(b'\\n') if x!=b''];frame=lines[-37:];" +
         "ok=exit_code==0 and b'\\x1b[' in raw and len(frame)==37 and all(len(x)==124 for x in frame) and any('Simple Calc' in x for x in frame);" +
@@ -164,7 +188,10 @@ fn _finish_real_tui(root: text) -> bool:
     var attempt = 0
     while attempt < 80:
         if file_exists(root + "/tui/calc-exit.txt"):
-            return file_exists(root + "/tui/calc-after.ansi") and
+            val status = file_read(root + "/tui/calc-exit.txt")
+            return status.contains("exit=0") and
+                status.contains("terminal_restored=true") and
+                file_exists(root + "/tui/calc-after.ansi") and
                 file_exists(root + "/tui/calc-after.txt")
         thread_sleep(100)
         attempt = attempt + 1
@@ -327,40 +354,86 @@ fn _live_workflow(runtime: text, root: text) -> (bool, text):
     val early_request_id = _json_text(select_a1, "request_id")
     val (evict_action, evict_err, evict_code) = _act(runtime, port, "main#cell_A1", "select", "", warm_revision)
     val revision13 = _revision(evict_action)
+    val (select_d1, select_d1_err, select_d1_code) = _act(runtime, port, "main#cell_D1", "select", "", revision13)
+    val revision14 = _revision(select_d1)
+    val (invalid_before, invalid_before_err, invalid_before_code) = _ui(runtime, port, ["find", "--canonical", "main#cell_D1"])
+    val invalid_before_value = _json_text(invalid_before, "text")
+    val (type_invalid, type_invalid_err, type_invalid_code) = _act(
+        runtime, port, "main#formula_input", "type_text", "=NOT_A_REAL_CALC_FUNCTION(1)", revision14
+    )
+    val revision15 = _revision(type_invalid)
+    val (commit_invalid, commit_invalid_err, commit_invalid_code) = _act(
+        runtime, port, "main#confirm_edit", "invoke", "", revision15
+    )
+    val commit_invalid_response = commit_invalid + commit_invalid_err
+    val (invalid_after, invalid_after_err, invalid_after_code) = _ui(runtime, port, ["find", "--canonical", "main#cell_D1"])
+    val invalid_after_value = _json_text(invalid_after, "text")
     val (after, after_err, after_code) = _ui(runtime, port, ["snapshot"])
     val (b1, b1_err, b1_code) = _ui(runtime, port, ["find", "--canonical", "main#cell_B1"])
     val (c1, c1_err, c1_code) = _ui(runtime, port, ["find", "--canonical", "main#cell_C1"])
     val (history, history_err, history_code) = _ui(runtime, port, ["history", "--surface", "main", "--count", "64"])
-    val (_stale, stale_err, stale_code) = _act(runtime, port, "main#cell_A1", "select", "", revision0)
-    val (_missing, missing_err, missing_code) = _act(runtime, port, "main#cell_Z999", "select", "", _revision(after))
-    val (_unsupported, unsupported_err, unsupported_code) = _act(runtime, port, "main#cell_A1", "delete_everything", "", _revision(after))
+    val (stale_out, stale_err, stale_code) = _act(runtime, port, "main#cell_A1", "select", "", revision0)
+    val (missing_out, missing_err, missing_code) = _act(runtime, port, "main#cell_Z999", "select", "", _revision(after))
+    val (unsupported_out, unsupported_err, unsupported_code) = _act(runtime, port, "main#cell_A1", "delete_everything", "", _revision(after))
+    val stale_response = stale_out + stale_err
+    val missing_response = missing_out + missing_err
+    val unsupported_response = unsupported_out + unsupported_err
     val evidence_ok = file_write(root + "/protocol/snapshot-before.json", before) and
         file_write(root + "/protocol/snapshot-after.json", after) and
         file_write(root + "/protocol/find-b1.json", b1) and
         file_write(root + "/protocol/find-c1.json", c1) and
+        file_write(root + "/protocol/malformed-before.json", invalid_before) and
+        file_write(root + "/protocol/malformed-after.json", invalid_after) and
+        file_write(root + "/protocol/malformed-rejection.txt", commit_invalid_response) and
         file_write(root + "/protocol/history.json", history) and
         file_write(root + "/protocol/windows.json", windows) and
         file_write(root + "/protocol/surface-main.json", surface) and
-        file_write(root + "/protocol/rejections.txt", stale_err + "\n" + missing_err + "\n" + unsupported_err)
+        file_write(root + "/protocol/rejections.txt", stale_response + "\n" + missing_response + "\n" + unsupported_response)
     val tui_ok = _finish_real_tui(root)
+    val (closed_out, closed_err, closed_code) = _ui(runtime, port, ["snapshot"])
+    val closed_response = closed_out + closed_err
+    val port_closed = (closed_code != 0 and
+        _protocol_json_ok(closed_response) and
+        closed_response.contains("source_unavailable"))
+    file_write(
+        root + "/protocol/service-closed.txt",
+        "port=" + port.to_text() + "\nclosed=" + port_closed.to_text() +
+        "\nstdout=" + closed_out + "\nstderr=" + closed_err + "\n"
+    )
     val screen = if tui_ok: file_read(root + "/tui/calc-after.txt") else: ""
     val live_ok = evidence_ok and select_a1_code == 0 and type_a1_code == 0 and commit_a1_code == 0 and
         select_a2_code == 0 and type_a2_code == 0 and commit_a2_code == 0 and
         select_b1_code == 0 and type_b1_code == 0 and commit_b1_code == 0 and
         select_c1_code == 0 and type_c1_code == 0 and commit_c1_code == 0 and
         windows_code == 0 and surface_code == 0 and evict_code == 0 and revision13 >= 0 and
+        select_d1_code == 0 and invalid_before_code == 0 and type_invalid_code == 0 and
+        commit_invalid_code != 0 and commit_invalid_response.contains("malformed_formula") and
+        invalid_after_code == 0 and invalid_before_value == invalid_after_value and
         after_code == 0 and b1_code == 0 and c1_code == 0 and history_code == 0 and
-        windows.contains("simple.access/v1") and windows.contains("main") and
+        _protocol_json_ok(windows) and _protocol_json_ok(before) and
+        _protocol_json_ok(surface) and _protocol_json_ok(select_a1) and
+        _protocol_json_ok(type_a1) and _protocol_json_ok(commit_a1) and
+        _protocol_json_ok(select_a2) and _protocol_json_ok(type_a2) and
+        _protocol_json_ok(commit_a2) and _protocol_json_ok(select_b1) and
+        _protocol_json_ok(type_b1) and _protocol_json_ok(commit_b1) and
+        _protocol_json_ok(select_c1) and _protocol_json_ok(type_c1) and
+        _protocol_json_ok(commit_c1) and _protocol_json_ok(evict_action) and
+        _protocol_json_ok(select_d1) and _protocol_json_ok(invalid_before) and
+        _protocol_json_ok(type_invalid) and _protocol_json_ok(commit_invalid_response) and
+        _protocol_json_ok(invalid_after) and _protocol_json_ok(after) and
+        _protocol_json_ok(b1) and _protocol_json_ok(c1) and _protocol_json_ok(history) and
+        windows.contains("main") and
         surface.contains("main#cell_A1") and surface.contains("main#formula_input") and
         b1.contains("main#cell_B1") and b1.contains("48") and
         c1.contains("main#cell_C1") and c1.contains("7") and
         history.contains("access_request") and history.contains("access_result") and
         _count_text(history, "\"event_kind\"") == 64 and early_request_id != "" and not history.contains(early_request_id) and
-        stale_code != 0 and stale_err.contains("stale_target") and
-        missing_code != 0 and missing_err.contains("target_not_found") and
-        unsupported_code != 0 and unsupported_err.contains("unsupported_action") and tui_ok
+        stale_code != 0 and stale_response.contains("stale_target") and
+        missing_code != 0 and missing_response.contains("target_not_found") and
+        unsupported_code != 0 and unsupported_response.contains("unsupported_action") and tui_ok and port_closed
         and screen.contains("48") and screen.contains("7") and
-        screen.contains("T") and screen.contains("30")
+        screen.contains("T") and screen.contains("30") and
+        screen.split("\n").len() == 38
     (live_ok, if live_ok: "" else: "deployed_ui_protocol_or_cleanup_assertion_failed")
 
 fn _all(run_id: text) -> i32:
@@ -371,11 +444,13 @@ fn _all(run_id: text) -> i32:
     if run_id == "" or run_id.contains("/") or dir_exists(root): return _fail("--run-id must be unique and path-safe")
     if not (dir_create_all(root + "/tui") and dir_create_all(root + "/protocol") and dir_create_all(root + "/exec") and dir_create_all(root + "/perf")):
         return _fail("could not create unique evidence directory")
+    val (artifact_ok, runtime_sha256, runtime_mtime) = _runtime_artifact_provenance(runtime, root)
+    if not artifact_ok: return _fail("runtime artifact provenance failed")
     if not _runtime_provenance(runtime, root): return _fail("runtime provenance failed; a self-hosted Office command is required")
     if not _deployed_cli_checks(runtime, root): return _fail("deployed IDE/Office CLI checks failed")
     val (live_ok, live_detail) = _live_workflow(runtime, root)
     if not live_ok: return _fail(live_detail)
-    if not file_write(root + "/suite.txt", "suite=office-cli-tui-ui-access\nsuite_status=pass\nrun_id=" + run_id + "\nruntime=pure-simple-self-hosted\ncapture_size=124x37\nB1_display=48\nC1_display=7\n"):
+    if not file_write(root + "/suite.txt", "suite=office-cli-tui-ui-access\nsuite_status=pass\nrun_id=" + run_id + "\nruntime=pure-simple-self-hosted\nruntime_path=" + runtime + "\nruntime_sha256=" + runtime_sha256 + "\nruntime_mtime_epoch=" + runtime_mtime.to_text() + "\ncapture_size=124x37\nB1_display=48\nC1_display=7\nterminal_restored=true\nservice_port_closed=true\nmalformed_formula_no_mutation=true\n"):
         return _fail("could not retain suite receipt")
     print "suite=office-cli-tui-ui-access"
     print "suite_status=pass"

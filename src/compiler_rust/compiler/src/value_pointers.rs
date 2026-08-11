@@ -335,11 +335,11 @@ impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Value::Int(a), Value::Int(b)) => a == b,
-            (Value::UInt { value: a, width: wa }, Value::UInt { value: b, width: wb }) => a == b && wa == wb,
-            // Cross-variant: UInt vs Int compares by numeric value (same bit-pattern semantics).
-            // Allows `0u32 - 1u32 == 4294967295` (RHS is Int) to succeed.
+            (Value::UInt { value: a, .. }, Value::UInt { value: b, .. }) => a == b,
+            // Cross-variant: UInt vs Int compares by mathematical magnitude.
+            // Negative signed values never equal an unsigned value.
             (Value::UInt { value, .. }, Value::Int(b)) | (Value::Int(b), Value::UInt { value, .. }) => {
-                *value as i64 == *b
+                *b >= 0 && *value == *b as u64
             }
             (Value::Float(a), Value::Float(b)) => a == b,
             (Value::Float32(a), Value::Float32(b)) => a == b,

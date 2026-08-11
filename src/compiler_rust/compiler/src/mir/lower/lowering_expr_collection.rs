@@ -18,7 +18,9 @@ impl<'a> MirLowerer<'a> {
             let needs_float_boxing = matches!(elem.ty, TypeId::F32 | TypeId::F64);
             let needs_bool_boxing = elem.ty == TypeId::BOOL || elem.ty == TypeId::I8;
             if needs_int_boxing || needs_float_boxing || needs_bool_boxing {
-                let boxed = if needs_bool_boxing {
+                let boxed = if elem.ty == TypeId::U64 {
+                    self.box_u64_runtime_value(reg)?
+                } else if needs_bool_boxing {
                     self.with_func(|func, current_block| {
                         let boxed = func.new_vreg();
                         let block = func.block_mut(current_block).unwrap();
@@ -258,6 +260,8 @@ impl<'a> MirLowerer<'a> {
                         });
                         boxed
                     })?
+                } else if elem.ty == TypeId::U64 {
+                    self.box_u64_runtime_value(reg)?
                 } else if needs_int_boxing {
                     self.with_func(|func, current_block| {
                         let boxed = func.new_vreg();
@@ -296,7 +300,9 @@ impl<'a> MirLowerer<'a> {
             let needs_float_boxing = matches!(elem.ty, TypeId::F32 | TypeId::F64);
             let needs_bool_boxing = elem.ty == TypeId::BOOL || elem.ty == TypeId::I8;
             if needs_int_boxing || needs_float_boxing || needs_bool_boxing {
-                let boxed = if needs_bool_boxing {
+                let boxed = if elem.ty == TypeId::U64 {
+                    self.box_u64_runtime_value(reg)?
+                } else if needs_bool_boxing {
                     self.with_func(|func, current_block| {
                         let boxed = func.new_vreg();
                         let block = func.block_mut(current_block).unwrap();
@@ -365,6 +371,9 @@ impl<'a> MirLowerer<'a> {
     /// type, mirroring the array-literal element boxing above. Non-integer
     /// operands (strings, heap handles, floats, bools) pass through unchanged.
     fn box_int_operand(&mut self, reg: VReg, ty: TypeId) -> MirLowerResult<VReg> {
+        if ty == TypeId::U64 {
+            return self.box_u64_runtime_value(reg);
+        }
         let needs_int_boxing = matches!(
             ty,
             TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
@@ -375,7 +384,10 @@ impl<'a> MirLowerer<'a> {
         self.with_func(|func, current_block| {
             let boxed = func.new_vreg();
             let block = func.block_mut(current_block).unwrap();
-            block.instructions.push(MirInst::BoxInt { dest: boxed, value: reg });
+            block.instructions.push(MirInst::BoxInt {
+                dest: boxed,
+                value: reg,
+            });
             boxed
         })
     }
@@ -460,7 +472,9 @@ impl<'a> MirLowerer<'a> {
         // Array repeat: [value; count] - creates array with count copies of value
         let raw_value_reg = self.lower_expr(value)?;
         let count_reg = self.lower_expr(count)?;
-        let value_reg = if value.ty == TypeId::U32 {
+        let value_reg = if value.ty == TypeId::U64 {
+            self.box_u64_runtime_value(raw_value_reg)?
+        } else if value.ty == TypeId::U32 {
             self.with_func(|func, current_block| {
                 let boxed = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();

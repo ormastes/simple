@@ -1,0 +1,140 @@
+# @cover src/os/drivers/gpu/board_vulkan/boundary_spirv_canonicalize.spl 85%
+# @req REQ-BOARD-VULKAN-001
+"""
+# SPIR-V Boundary Canonicalizer — Pure Scenarios
+
+**Category:** OS / GPU driver / counterpart conformance
+**Status:** In Progress
+**Plan:** doc/03_plan/os/vulkan/board_vulkan_parallel_soc_lanes_2026-08-10.md
+**Boundary:** `vulkan.shader.spirv_binary@1`
+
+## Purpose and Audience
+
+Split out of `spirv_boundary_glslang_spec.spl` so the canonicalizer's own
+correctness can be checked with NO subprocess and NO fixture file — these
+scenarios cost nothing and must never be allowed to regress just because the
+exec-backed comparison in the sibling spec is slow or unavailable.
+
+## Scope and Preconditions
+
+Pure text manipulation only. No GPU, no installed toolchain, no filesystem
+fixture required.
+
+## Primary Workflow
+
+Feed hand-built instruction-line lists straight to
+`boundary_spirv_canonicalize`'s functions and check the four named
+dimensions (assembly comments, debug opcodes, id renumbering) each do
+exactly what they claim and nothing more.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| Debug opcode allowlist | Stripped by OPCODE IDENTITY only — never by "is this id referenced" |
+| The closed hole | A prior version stripped by unreferenced-result-id, which deleted a live `OpLabel` and a live `OpExtInstImport` |
+| Positive rejection | Proves the closed hole stays closed: a module missing either instruction must NOT canonicalize equal to one that has it |
+
+## Related Specifications
+
+- [SPIR-V boundary comparison](spirv_boundary_glslang_spec.spl) — the exec/fixture-backed comparison this canonicalizer serves
+
+## Evidence and Provenance
+
+Self-contained; every scenario constructs its own input.
+
+## Recovery and Troubleshooting
+
+A failure here means the canonicalizer itself regressed — fix
+`boundary_spirv_canonicalize.spl`, never delete or weaken one of these
+scenarios to make it pass.
+
+## Compatibility and Limitations
+
+None — this file has no external dependency by design.
+"""
+
+use std.spec.*
+use os.drivers.gpu.board_vulkan.boundary_spirv_canonicalize.{
+    spirv_canonical_text,
+    spirv_drop_debug,
+    spirv_is_comment_line,
+    spirv_is_debug_opcode,
+    spirv_line_opcode,
+    spirv_line_result_id,
+    spirv_line_tokens,
+    spirv_renumber
+}
+
+describe("spirv boundary canonicalizer — debug opcode allowlist"):
+    it("strips debug opcodes by an explicit allowlist, not by reachability"):
+        step("filter a line list carrying OpSource and OpName plus a live, unreferenced OpLabel")
+        val lines = [
+            "OpCapability Shader",
+            "OpSource GLSL 450",
+            "%1 = OpTypeVoid",
+            "OpName %1 \"void\"",
+            "%2 = OpLabel"
+        ]
+        val kept = spirv_drop_debug(lines)
+        assert_equal(kept.len(), 3)
+        assert_equal(kept[0], "OpCapability Shader")
+        assert_equal(kept[1], "%1 = OpTypeVoid")
+        assert_equal(kept[2], "%2 = OpLabel")
+
+    it("never treats OpLabel or OpExtInstImport as a debug opcode"):
+        step("check the allowlist directly against the two opcodes the old filter destroyed")
+        assert_false(spirv_is_debug_opcode("OpLabel"))
+        assert_false(spirv_is_debug_opcode("OpExtInstImport"))
+
+    it("strips the full Debug Instruction set named in the module docstring"):
+        step("check every allowlisted opcode individually")
+        assert_true(spirv_is_debug_opcode("OpSource"))
+        assert_true(spirv_is_debug_opcode("OpSourceContinued"))
+        assert_true(spirv_is_debug_opcode("OpSourceExtension"))
+        assert_true(spirv_is_debug_opcode("OpString"))
+        assert_true(spirv_is_debug_opcode("OpName"))
+        assert_true(spirv_is_debug_opcode("OpMemberName"))
+        assert_true(spirv_is_debug_opcode("OpModuleProcessed"))
+        assert_true(spirv_is_debug_opcode("OpLine"))
+        assert_true(spirv_is_debug_opcode("OpNoLine"))
+
+describe("spirv boundary canonicalizer — assembly comments"):
+    it("recognizes a `;`-prefixed line as a comment, never as an instruction"):
+        step("check the comment predicate directly")
+        assert_true(spirv_is_comment_line("; SPIR-V"))
+        assert_true(spirv_is_comment_line("   ; Bound: 7"))
+        assert_false(spirv_is_comment_line("%1 = OpTypeVoid"))
+
+    it("drops spirv_builder's own header comments before comparing"):
+        step("canonicalize text shaped like SpirvBuilder.build()'s output")
+        val raw = "; SPIR-V\n; Version: 1.0\n; Bound: 3\nOpCapability Shader\n%1 = OpTypeVoid"
+        val canon = spirv_canonical_text(raw)
+        assert_false(canon.contains(";"))
+        assert_contains(canon, "OpCapability Shader")
+
+describe("spirv boundary canonicalizer — id renumbering"):
+    it("renumbers ids by first appearance regardless of source numbering"):
+        step("renumber two structurally identical lines with different raw ids")
+        val a = spirv_renumber(["%7 = OpTypeVoid", "%9 = OpTypeFunction %7"])
+        val b = spirv_renumber(["%1 = OpTypeVoid", "%2 = OpTypeFunction %1"])
+        assert_equal(a.join("\n"), b.join("\n"))
+
+    it("renumbers glslang's friendly names the same way as numeric ids"):
+        step("renumber a line list using spirv-dis's %void / %main style names")
+        val friendly = spirv_renumber(["%void = OpTypeVoid", "%main = OpFunction %void None %void"])
+        val numeric = spirv_renumber(["%1 = OpTypeVoid", "%2 = OpFunction %1 None %1"])
+        assert_equal(friendly.join("\n"), numeric.join("\n"))
+
+describe("spirv boundary canonicalizer — closed hole: positive rejections"):
+    it("does NOT canonicalize a module missing OpLabel equal to one that has it"):
+        step("build two disassembly-shaped line sets differing only by OpLabel")
+        val with_label = "OpCapability Shader\n%1 = OpFunction %2 None %3\n%4 = OpLabel\nOpReturn\nOpFunctionEnd"
+        val without_label = "OpCapability Shader\n%1 = OpFunction %2 None %3\nOpReturn\nOpFunctionEnd"
+        assert_not_equal(spirv_canonical_text(with_label), spirv_canonical_text(without_label))
+
+    it("does NOT canonicalize a module missing OpExtInstImport equal to one that has it"):
+        step("build two disassembly-shaped line sets differing only by OpExtInstImport")
+        val with_extinst = "OpCapability Shader\n%1 = OpExtInstImport \"GLSL.std.450\"\nOpMemoryModel Logical GLSL450"
+        val without_extinst = "OpCapability Shader\nOpMemoryModel Logical GLSL450"
+        assert_not_equal(spirv_canonical_text(with_extinst), spirv_canonical_text(without_extinst))

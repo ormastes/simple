@@ -248,12 +248,12 @@ impl CalcAccessController:
         children.push(spreadsheet_grid_widget("sheet_grid", cells, metrics))
         build_tree_with_title(column("root", children), "Simple Calc", "glass_dark")
 
-    me apply_ui_event(event: UIEvent):
+    me apply_ui_event(event: UIEvent) -> CalcAccessActionResult:
         """Apply one shared UISession event to the real Calc model."""
         match event:
             UIEvent.FocusEvent(target_id, kind):
                 if kind == "focus" and target_id.starts_with("cell_"):
-                    self.act(
+                    return self.act(
                         ui_access_canonical_id(CALC_ACCESS_SURFACE_ID, target_id),
                         "select",
                         "",
@@ -261,14 +261,21 @@ impl CalcAccessController:
                     )
             UIEvent.InputChange(target_id, value):
                 if target_id == CALC_ACCESS_FORMULA_INPUT_ID:
-                    self.act(calc_access_formula_input_id(), "type_text", value, "")
+                    return self.act(calc_access_formula_input_id(), "type_text", value, "")
             UIEvent.Action(name):
                 if name == "invoke":
-                    self.act(calc_access_confirm_edit_id(), "invoke", "", "")
+                    return self.act(calc_access_confirm_edit_id(), "invoke", "", "")
             _:
                 pass_dn
+        CalcAccessActionResult(
+            ok: true,
+            code: "ok",
+            request_id: "",
+            canonical_id: "",
+            snapshot_revision: self.sequence
+        )
 
-    me apply_ui_event_to_session(mut session: UISession, event: UIEvent):
+    me apply_ui_event_to_session(mut session: UISession, event: UIEvent) -> CalcAccessActionResult:
         """Apply an access event and patch only its affected live widgets.
 
         The Calc tree is deliberately constructed once at server startup: it
@@ -280,7 +287,9 @@ impl CalcAccessController:
         val previous_active = cell_ref_to_string(self.app.active_cell)
         val previous_scroll_row = self.app.scroll_row
         val previous_scroll_col = self.app.scroll_col
-        self.apply_ui_event(event)
+        val action_result = self.apply_ui_event(event)
+        if not action_result.ok:
+            return action_result
         session.dispatch(event)
         val active_ref = cell_ref_to_string(self.app.active_cell)
 
@@ -289,7 +298,7 @@ impl CalcAccessController:
         # Ordinary edits remain incremental.
         if previous_scroll_row != self.app.scroll_row or previous_scroll_col != self.app.scroll_col:
             session.update_tree(self.ui_tree())
-            return
+            return action_result
 
         # A changed selection has exactly two affected cell widgets.
         if previous_active != active_ref:
@@ -329,6 +338,7 @@ impl CalcAccessController:
                     )
             _:
                 pass_dn
+        action_result
 
     me apply_terminal_byte(mut session: UISession, byte: i64, pending_escape: i32) -> i32:
         """Apply one terminal byte through the same model as UI access.
@@ -467,5 +477,5 @@ fn _calc_access_frame(content: text, width: i32, height: i32) -> text:
         row = row + 1
     lines.join("\n")
 
-export CALC_ACCESS_SURFACE_ID, CALC_ACCESS_APP_ID
+export CALC_ACCESS_SURFACE_ID, CALC_ACCESS_APP_ID, CalcAccessActionResult
 export CALC_ACCESS_FORMULA_INPUT_ID, CALC_ACCESS_CONFIRM_EDIT_ID

@@ -840,11 +840,54 @@ spl_i64 common__config_env__ConfigEnv_dot_len(spl_i64 value) {
     return 0;
 }
 
+/* Bug (2026-08-11): freestanding `text == ""` / `!= ""` against a RAW literal.
+ *
+ * A `.trim()` / `.lower()` result on this lane is a tagged heap string, but a
+ * bare `""` literal is emitted as a RAW, untagged char* global
+ * (emit_bootstrap_str_const), for which rt_as_string() returns NULL. The
+ * `!a || !b` guard below therefore answered NOT EQUAL unconditionally for
+ * every heap-vs-literal text comparison, so `x != ""` was TRUE even when x was
+ * genuinely empty -- while `{x}` interpolated as empty and `.len() == 0` still
+ * worked. Observed live on an x86_64 OVMF SimpleOS boot as
+ *   [backend-resolve] override  rejected: Unknown backend:
+ * (note the double space). Same defect as the baremetal_stubs.c lanes; this is
+ * hosted bug #148 (fixed there by rt_text_eq_any's tagged-or-raw normalization
+ * in runtime_native.c) never having been ported to the freestanding lanes.
+ *
+ * rt_string_char_code_at just below already uses exactly this raw-buffer
+ * fallback idiom, so the shape is the established one for this file.
+ *
+ * Conservative by construction: the raw side is only ever interpreted as a
+ * char* when the OTHER side is a proven RtString, so a non-text word is never
+ * dereferenced in a non-text comparison (cf.
+ * doc/08_tracking/bug/native_text_eq_any_untagged_smallint_deref_2026-07-23.md),
+ * and a plausibility floor rejects small words. The scan is bounded by the
+ * decoded string's length and demands a NUL exactly at that offset.
+ *
+ * Selfcheck: src/runtime/test/rt_native_eq_heap_vs_raw_empty_literal_selfcheck.c
+ */
+static spl_i64 rt_text_eq_str_vs_raw(RtString *s, spl_i64 raw) {
+    const spl_u8 *p;
+    spl_u64 i;
+    if ((spl_u64)raw < 0x10000u) return 0;   /* nil / bool / small int */
+    p = (const spl_u8 *)(spl_u64)raw;
+    for (i = 0; i < s->len; i = i + 1) {
+        if (p[i] == 0 || p[i] != (spl_u8)s->data[i]) return 0;
+    }
+    return p[s->len] == 0 ? 1 : 0;
+}
+
 spl_i64 rt_native_eq(spl_i64 lhs, spl_i64 rhs) {
     RtString *a = rt_as_string(lhs);
     RtString *b = rt_as_string(rhs);
     if (a || b) {
-        if (!a || !b || a->len != b->len) {
+        if (!a && b) {
+            return rt_text_eq_str_vs_raw(b, lhs);
+        }
+        if (a && !b) {
+            return rt_text_eq_str_vs_raw(a, rhs);
+        }
+        if (a->len != b->len) {
             return 0;
         }
         for (spl_u64 i = 0; i < a->len; i = i + 1) {
@@ -1571,30 +1614,72 @@ spl_i64 rt_enum_discriminant(spl_i64 value) {
     return e ? rt_int((spl_i64)e->discriminant) : rt_int(0);
 }
 
+/* Bug (2026-08-11): freestanding text ORDERING (`<`/`>`/sort) against a RAW
+ * literal -- the sibling of rt_text_eq_str_vs_raw above for `<`/`>` instead
+ * of `==`/`!=`. Before this fix, rt_text_cmp_any treated a non-heap operand
+ * (rt_as_string() == NULL, e.g. a raw `""` literal from
+ * emit_bootstrap_str_const) as a zero-length string rather than reading its
+ * actual bytes, so a heap string compared against ANY raw literal always
+ * came out "greater than" the literal regardless of content -- `x < "foo"`
+ * for a genuinely lesser `x` returned false, and `x == "foo"` routed through
+ * rt_native_cmp returned nonzero even for equal content. Same
+ * heap-vs-raw class of defect as rt_text_eq_str_vs_raw; same safety rules:
+ * the raw side is interpreted as a char* ONLY when the other side is a
+ * proven RtString, a plausibility floor rejects small words (nil/bool/small
+ * int), and the scan is bounded by the decoded string's own length.
+ *
+ * Selfcheck: src/runtime/test/rt_text_cmp_any_heap_vs_raw_selfcheck.c
+ */
+static spl_i64 rt_text_cmp_str_vs_raw(RtString *s, spl_i64 raw) {
+    const spl_u8 *p;
+    spl_u64 i;
+    if ((spl_u64)raw < 0x10000u) return 2;   /* sentinel: unsafe, caller falls back */
+    p = (const spl_u8 *)(spl_u64)raw;
+    for (i = 0; i < s->len; i = i + 1) {
+        spl_u8 sc = (spl_u8)s->data[i];
+        spl_u8 pc = p[i];
+        if (pc == 0) return 1;               /* raw ends first -> s is greater */
+        if (sc != pc) return sc < pc ? -1 : 1;
+    }
+    return p[s->len] == 0 ? 0 : -1;          /* equal length, or raw has more */
+}
+
 /* rt_text_cmp_any / rt_native_cmp: dynamic ordering fallback for codegen
  * sites that cannot statically prove operand types (mirrors
  * src/runtime/runtime_native.c's rt_text_cmp_any / rt_native_cmp). Byte-wise
- * lexical order for tagged heap strings, signed value order otherwise —
- * this file's integer tagging is an order-preserving left shift (see the
+ * lexical order for tagged heap strings (including a heap-vs-raw mix via
+ * rt_text_cmp_str_vs_raw), signed value order otherwise — this file's
+ * integer tagging is an order-preserving left shift (see the
  * u8/u16/u32/u64 rt_volatile_* comment above), so a raw signed compare is
  * correct for tagged ints too. */
 spl_i64 rt_text_cmp_any(spl_i64 left, spl_i64 right) {
     RtString *a = rt_as_string(left);
     RtString *b = rt_as_string(right);
-    spl_u64 alen = a ? a->len : 0;
-    spl_u64 blen = b ? b->len : 0;
-    spl_u64 count = alen < blen ? alen : blen;
-    for (spl_u64 i = 0; i < count; i = i + 1) {
-        unsigned char ac = a ? (unsigned char)a->data[i] : 0;
-        unsigned char bc = b ? (unsigned char)b->data[i] : 0;
-        if (ac != bc) {
-            return rt_int(ac < bc ? -1 : 1);
+    if (a && b) {
+        spl_u64 alen = a->len;
+        spl_u64 blen = b->len;
+        spl_u64 count = alen < blen ? alen : blen;
+        for (spl_u64 i = 0; i < count; i = i + 1) {
+            unsigned char ac = (unsigned char)a->data[i];
+            unsigned char bc = (unsigned char)b->data[i];
+            if (ac != bc) {
+                return rt_int(ac < bc ? -1 : 1);
+            }
         }
+        if (alen == blen) {
+            return rt_int(0);
+        }
+        return rt_int(alen < blen ? -1 : 1);
     }
-    if (alen == blen) {
-        return rt_int(0);
+    if (a && !b) {
+        spl_i64 r = rt_text_cmp_str_vs_raw(a, right);
+        if (r != 2) return rt_int(r);
     }
-    return rt_int(alen < blen ? -1 : 1);
+    if (b && !a) {
+        spl_i64 r = rt_text_cmp_str_vs_raw(b, left);
+        if (r != 2) return rt_int(-r);
+    }
+    return rt_int(left == right ? 0 : (left < right ? -1 : 1));
 }
 
 spl_i64 rt_native_cmp(spl_i64 left, spl_i64 right) {

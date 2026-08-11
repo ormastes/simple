@@ -182,7 +182,10 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                                     | TypeId::U64
                             )
                         {
-                            names.insert("rt_value_as_int".to_string());
+                            names.insert(
+                                if *to_ty == TypeId::U64 { "rt_value_as_u64" } else { "rt_value_as_int" }
+                                    .to_string(),
+                            );
                         }
                     }
                     MirInst::Yield { .. } => {
@@ -393,6 +396,47 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                             names.insert(n.to_string());
                         }
                     }
+                    // `try_compile_builtin_method_call`
+                    // (codegen/instr/closures_structs.rs) is the dispatch site
+                    // for method calls lowered as `MethodCallStatic` (e.g.
+                    // `f.sin()`, `f.pow(x)`, `f.max(x)`) — it picks the
+                    // concrete `rt_math_*` symbol from the method name at
+                    // codegen time, same pre-declaration problem as
+                    // `BuiltinMethod` above. Gate on the func_name's method
+                    // suffix so this family is only pulled in for programs
+                    // that actually use one of these methods.
+                    MirInst::MethodCallStatic { func_name, .. } => {
+                        let method_suffix = func_name.rsplit('.').next().unwrap_or(func_name.as_str());
+                        const MATH_METHODS: &[&str] = &[
+                            "sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh", "exp", "ln", "log2",
+                            "log10", "cbrt", "pow", "powf", "max", "min", "atan2", "hypot",
+                        ];
+                        if MATH_METHODS.contains(&method_suffix) {
+                            for n in [
+                                "rt_math_sin",
+                                "rt_math_cos",
+                                "rt_math_tan",
+                                "rt_math_asin",
+                                "rt_math_acos",
+                                "rt_math_atan",
+                                "rt_math_sinh",
+                                "rt_math_cosh",
+                                "rt_math_tanh",
+                                "rt_math_exp",
+                                "rt_math_log",
+                                "rt_math_log2",
+                                "rt_math_log10",
+                                "rt_math_cbrt",
+                                "rt_math_pow",
+                                "rt_math_max",
+                                "rt_math_min",
+                                "rt_math_atan2",
+                                "rt_math_hypot",
+                            ] {
+                                names.insert(n.to_string());
+                            }
+                        }
+                    }
                     MirInst::FStringFormat { .. } => {
                         for n in [
                             "rt_string_new",
@@ -538,6 +582,8 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_len"
             | "rt_slice"
             | "rt_alloc"
+            | "rt_struct_alloc"
+            | "rt_struct_receiver_valid"
             | "rt_array_new"
             | "rt_byte_array_new"
             | "rt_array_len"
@@ -558,6 +604,7 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_enum_discriminant"
             | "rt_enum_id"
             | "rt_enum_payload"
+            | "rt_value_as_u64"
             | "rt_string_eq"
             // P0 fix (2026-07-22): rt_text_cmp_any backs the codegen/instr/core.rs
             // vreg_is_text fast path for BinOp::Lt/Gt/LtEq/GtEq (mirrors rt_string_eq
@@ -2352,7 +2399,7 @@ impl<M: Module> CodegenBackend<M> {
         } else {
             None
         };
-        let alloc_id = if init_functions.is_empty() && init_structs.is_empty() {
+        let alloc_id = if init_functions.is_empty() {
             None
         } else {
             Some(
@@ -2360,6 +2407,16 @@ impl<M: Module> CodegenBackend<M> {
                     .runtime_funcs
                     .get("rt_alloc")
                     .ok_or_else(|| BackendError::ModuleError("rt_alloc not declared".into()))?,
+            )
+        };
+        let struct_alloc_id = if init_structs.is_empty() {
+            None
+        } else {
+            Some(
+                *self
+                    .runtime_funcs
+                    .get("rt_struct_alloc")
+                    .ok_or_else(|| BackendError::ModuleError("rt_struct_alloc not declared".into()))?,
             )
         };
 
@@ -2599,14 +2656,14 @@ impl<M: Module> CodegenBackend<M> {
             }
         }
 
-        // Struct-literal globals: rt_alloc(n*8) + sequential field stores.
+        // Struct-literal globals: rt_struct_alloc(n*8) + sequential field stores.
         // Field representation matches compile_struct_init: ints/bools raw,
         // nil tagged 3, strings rt_string_new handles, arrays rt_array_new
-        // handles; the struct value itself is the raw rt_alloc pointer.
+        // handles; the struct value itself is the registered raw allocation pointer.
         let mut sorted_structs: Vec<_> = init_structs.iter().collect();
         sorted_structs.sort_by_key(|(name, _)| (*name).clone());
         for (global_name, init) in &sorted_structs {
-            let alloc_ref = self.module.declare_func_in_func(alloc_id.unwrap(), builder.func);
+            let alloc_ref = self.module.declare_func_in_func(struct_alloc_id.unwrap(), builder.func);
             let size = (init.fields.len().max(1) * 8) as i64;
             let size_val = builder.ins().iconst(types::I64, size);
             let call_inst = builder.ins().call(alloc_ref, &[size_val]);

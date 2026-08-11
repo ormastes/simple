@@ -1,0 +1,123 @@
+# Board Vulkan counterpart plan descriptors.
+#
+# One plan per (SoC backend, boundary). The plan says: run the Simple board
+# driver and the open-source Mesa counterpart over the same input, compare their
+# output at a frozen boundary, and reject unless they agree.
+#
+# This file only builds plan DATA — it loads no provider and imports no upstream
+# code, so it stays usable from kernel-side builds. Execution is the counterpart
+# framework's job (src/lib/nogc_sync_mut/spec/evidence/counterpart/matrix_compare.spl).
+#
+# Plan: doc/03_plan/os/vulkan/board_vulkan_parallel_soc_lanes_2026-08-10.md
+
+use std.common.spec.evidence.counterpart.model.{
+    CounterpartPlan,
+    CounterpartRelation,
+    OracleAuthority,
+    PlanComparison,
+    PlanSource,
+    plan_comparison,
+    plan_source
+}
+use os.drivers.gpu.board_vulkan.soc_profile.{
+    BoardGpuProfile,
+    board_profile_false_claim,
+    board_vulkan_boundary_cmdstream,
+    board_vulkan_boundary_readback,
+    board_vulkan_boundary_spirv
+}
+use os.drivers.gpu.board_vulkan.backend_adreno.{adreno_board_profile}
+use os.drivers.gpu.board_vulkan.backend_img_bxe.{img_bxe_board_profile}
+use os.drivers.gpu.board_vulkan.backend_intel_gen12.{intel_gen12_board_profile}
+use os.drivers.gpu.board_vulkan.backend_virtio_venus.{virtio_venus_board_profile}
+
+# Every backend, in bring-up order. Lanes append here; nothing else is central.
+fn board_vulkan_backends() -> [BoardGpuProfile]:
+    [
+        virtio_venus_board_profile(),
+        intel_gen12_board_profile(),
+        adreno_board_profile(),
+        img_bxe_board_profile()
+    ]
+
+# A backend table that over-claims anywhere is rejected wholesale. This is the
+# cheap guard that keeps a future lane from flipping a flag it did not earn.
+fn board_vulkan_backend_table_failures() -> [text]:
+    var failures: [text] = []
+    for profile in board_vulkan_backends():
+        if board_profile_false_claim(profile):
+            failures.push("backend " + profile.soc + " declares a capability it does not have")
+    failures
+
+fn board_vulkan_source_id_simple() -> text:
+    "simple_board_driver"
+
+fn board_vulkan_source_id_counterpart() -> text:
+    "open_source_counterpart"
+
+# The Simple driver is never its own oracle: `self_execution_mode` is
+# non-binding, so a plan whose only source is Simple is rejected by
+# counterpart_plan_rejections before a provider is even loaded.
+fn board_vulkan_plan_sources(profile: BoardGpuProfile) -> [PlanSource]:
+    [
+        plan_source(
+            board_vulkan_source_id_simple(),
+            "simple." + profile.soc,
+            profile.gpu,
+            OracleAuthority.self_execution_mode,
+            true
+        ),
+        plan_source(
+            board_vulkan_source_id_counterpart(),
+            profile.mesa_counterpart,
+            profile.gpu,
+            OracleAuthority.independent_reference,
+            true
+        )
+    ]
+
+# Relation per boundary. SPIR-V and the command stream are byte-exact: both
+# sides emit a defined binary encoding, so any tolerance there would be hiding
+# a real encoder divergence. Readback is image_exact — a device-origin frame
+# either matches the reference render or the driver is wrong.
+fn board_vulkan_relation_for(boundary: text) -> CounterpartRelation:
+    if boundary == board_vulkan_boundary_readback():
+        CounterpartRelation.image_exact
+    else:
+        CounterpartRelation.byte_exact
+
+# Only the readback boundary is required to prove device-origin execution: it is
+# the one stage that cannot be honestly produced on the CPU. Gating the SPIR-V
+# boundary on a GPU receipt would just make the portable correctness lane
+# depend on hardware, which the counterpart CI matrix explicitly forbids.
+fn board_vulkan_gpu_receipt_sources(boundary: text) -> [text]:
+    if boundary == board_vulkan_boundary_readback():
+        [board_vulkan_source_id_simple()]
+    else:
+        []
+
+fn board_vulkan_plan(profile: BoardGpuProfile, boundary: text, input_ref: text) -> CounterpartPlan:
+    val comparisons: [PlanComparison] = [
+        plan_comparison(
+            board_vulkan_source_id_simple(),
+            board_vulkan_source_id_counterpart(),
+            board_vulkan_relation_for(boundary)
+        )
+    ]
+    CounterpartPlan(
+        plan_id: "board_vulkan." + profile.soc + "." + boundary,
+        boundary_id: boundary,
+        environment_profile: profile.board + "/" + profile.kernel_iface,
+        input_ref: input_ref,
+        sources: board_vulkan_plan_sources(profile),
+        comparisons: comparisons,
+        require_gpu_receipt_source_ids: board_vulkan_gpu_receipt_sources(boundary)
+    )
+
+# The three plans one SoC lane owns, host-testable first.
+fn board_vulkan_plans_for(profile: BoardGpuProfile, input_ref: text) -> [CounterpartPlan]:
+    [
+        board_vulkan_plan(profile, board_vulkan_boundary_spirv(), input_ref),
+        board_vulkan_plan(profile, board_vulkan_boundary_cmdstream(), input_ref),
+        board_vulkan_plan(profile, board_vulkan_boundary_readback(), input_ref)
+    ]

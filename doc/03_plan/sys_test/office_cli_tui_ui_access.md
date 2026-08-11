@@ -52,43 +52,39 @@ Excluded:
 
 ## Manual Flow and Capture Policy
 
-Primary visible scenarios:
+The inline SSpec setup scenario `has one fresh deployed Office evidence run`
+invokes `--scenario all` once for one unique run ID. Every displayed or folded
+scenario expands that setup with `@prev(...)` and consumes the same fresh run
+directory through `setup_office_cli_tui_ui_access` and `check_office_gate`; none
+launches a second gate or reads the shared legacy evidence root.
 
-1. CLI contract and IDE feature checks — `exec`.
-2. Full Calc discovery/action/history flow — `tui` plus `protocol`.
-3. Multiplication and AVG live results — `tui` and `protocol`.
+Primary visible scenario:
+
+1. Full deployed Calc discovery/action/history/formula flow — `exec`, `tui`,
+   `protocol`, and `artifact`.
 
 Folded scenarios:
 
-- legacy/invalid CLI behavior;
-- semantic action/history details;
-- stale/missing/unsupported rejection;
-- invalid formula;
-- evidence freshness;
-- performance/provenance/SGTTI isolation.
+- seed and stale-evidence rejection, legacy/invalid CLI behavior, and
+  stale/missing/unsupported semantic actions;
+- startup/query/action/RSS/history bounds, deterministic capture, provenance,
+  restoration, architecture hygiene, and manual-quality gates.
 
 Evidence display is `embed_tui`. Protocol, gate, and performance receipts
 remain links. Executable SSpec stays folded beneath manual steps.
 
 ## Scenario Matrix
 
-| Gate scenario | Visibility | Requirement | Happy/edge/error | Evidence |
+| Executable scenario (one shared gate run) | Visibility | Requirement | Happy/edge/error | Evidence |
 |---|---|---|---|---|
-| `cli-help` | show | REQ-001,003 | happy | exec |
-| `cli-ide` | folded | REQ-002 | happy/compat | exec |
-| `cli-invalid` | folded | REQ-012 | error | exec |
-| `ui-discovery` | show | REQ-004,005 | happy | protocol+tui |
-| `ui-action-history` | folded | REQ-006 | state | protocol |
-| `ui-rejection` | folded | REQ-012,NFR-007 | error | protocol |
-| `formula-multiply` | show | REQ-007 | happy | tui+protocol |
-| `formula-avg` | show | REQ-008 | compatibility | tui+protocol |
-| `formula-invalid` | folded | REQ-012,NFR-007 | error | protocol+tui |
-| `evidence-manual` | folded | REQ-009,010,NFR-006,009,010 | artifact/freshness | all |
-| `performance` | folded | NFR-002..005 | N1 targets | perf+log |
-| `isolation` | folded | REQ-011,NFR-001,007,008 | provenance/cleanup | exec+log |
+| live semantic formula workflow | show | REQ-001..010 | happy/compatibility | exec+tui+protocol+artifact |
+| fail-closed commands and actions | folded | REQ-011..012; NFR-001,007,008 | edge/error/isolation | exec+protocol |
+| bounded deterministic N1 evidence | folded | NFR-002..006,009,010 | NFR/artifact | exec+protocol+artifact |
 
-REQ-001, REQ-002, and REQ-003 each have happy, edge, and error coverage.
-NFRs use aggregate evidence gates rather than synthetic placeholder scenarios.
+The deployed gate internally exercises CLI compatibility, discovery, formulas,
+rejections, history eviction, performance, provenance, and PTY cleanup. The
+SSpec scenarios organize that one run for the operator manual; they are not
+separate gate selectors.
 
 ## Frozen Manual Steps
 
@@ -158,11 +154,10 @@ or gate cannot run.
 
 | Requirement | Executable spec | Scenarios | Generated manual |
 |---|---|---|---|
-| REQ-001 | `test/03_system/app/office/feature/office_cli_tui_ui_access_spec.spl` | cli-help, cli-ide, cli-invalid | `doc/06_spec/03_system/app/office/feature/office_cli_tui_ui_access_spec.md` |
-| REQ-002 | same | ui-discovery, ui-action-history, ui-rejection | same |
-| REQ-003 | same | formula-multiply, formula-avg, formula-invalid | same |
-| NFR-001 | same | evidence | same |
-| NFR-002 | same | performance, isolation | same |
+| REQ-001..010 | `test/03_system/app/office/feature/office_cli_tui_ui_access_spec.spl` | live semantic formula workflow | `doc/06_spec/03_system/app/office/feature/office_cli_tui_ui_access_spec.md` after fresh docgen |
+| REQ-011..012 | same | fail-closed commands and actions | same |
+| NFR-001,007,008 | same | fail-closed commands and actions | same |
+| NFR-002..006,009,010 | same | bounded deterministic N1 evidence | same |
 
 ## Failure Triage
 

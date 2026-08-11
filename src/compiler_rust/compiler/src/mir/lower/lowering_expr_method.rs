@@ -354,7 +354,9 @@ impl<'a> MirLowerer<'a> {
             let receiver_reg = self.lower_expr(receiver)?;
 
             let raw_key_reg = self.lower_expr(&args[0])?;
-            let key_reg = if needs_int_boxing(args[0].ty) {
+            let key_reg = if args[0].ty == TypeId::U64 {
+                self.box_u64_runtime_value(raw_key_reg)?
+            } else if needs_int_boxing(args[0].ty) {
                 self.with_func(|func, current_block| {
                     let boxed = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
@@ -369,7 +371,9 @@ impl<'a> MirLowerer<'a> {
             };
 
             let raw_value_reg = self.lower_expr(&args[1])?;
-            let value_reg = if !value_is_heap && needs_int_boxing(args[1].ty) {
+            let value_reg = if !value_is_heap && args[1].ty == TypeId::U64 {
+                self.box_u64_runtime_value(raw_value_reg)?
+            } else if !value_is_heap && needs_int_boxing(args[1].ty) {
                 self.with_func(|func, current_block| {
                     let boxed = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
@@ -456,7 +460,9 @@ impl<'a> MirLowerer<'a> {
             let receiver_reg = self.lower_expr(receiver)?;
 
             let raw_key_reg = self.lower_expr(&args[0])?;
-            let key_reg = if needs_int_boxing(args[0].ty) {
+            let key_reg = if args[0].ty == TypeId::U64 {
+                self.box_u64_runtime_value(raw_key_reg)?
+            } else if needs_int_boxing(args[0].ty) {
                 self.with_func(|func, current_block| {
                     let boxed = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
@@ -838,7 +844,9 @@ impl<'a> MirLowerer<'a> {
                     | TypeId::BOOL
             );
             let needs_item_float_boxing = matches!(item_ty, TypeId::F32 | TypeId::F64);
-            let item_reg = if needs_item_int_boxing || needs_item_float_boxing {
+            let item_reg = if item_ty == TypeId::U64 {
+                self.box_u64_runtime_value(item_reg_raw)?
+            } else if needs_item_int_boxing || needs_item_float_boxing {
                 let use_float = needs_item_float_boxing;
                 self.with_func(|func, current_block| {
                     let boxed = func.new_vreg();
@@ -1211,7 +1219,9 @@ impl<'a> MirLowerer<'a> {
                     | TypeId::BOOL
             );
             let needs_needle_float_boxing = matches!(needle_ty, TypeId::F32 | TypeId::F64);
-            let needle_reg = if needs_needle_int_boxing || needs_needle_float_boxing {
+            let needle_reg = if needle_ty == TypeId::U64 {
+                self.box_u64_runtime_value(needle_reg_raw)?
+            } else if needs_needle_int_boxing || needs_needle_float_boxing {
                 let use_float = needs_needle_float_boxing;
                 self.with_func(|func, current_block| {
                     let boxed = func.new_vreg();
@@ -1614,7 +1624,9 @@ impl<'a> MirLowerer<'a> {
             // See doc/08_tracking/bug/seed_f64_array_element_precision_mask_2026-07-19.md.
             let needs_push_float_boxing = matches!(push_arg_ty, TypeId::F32 | TypeId::F64)
                 && !receiver_element_is_function;
-            if needs_push_boxing || needs_push_float_boxing {
+            if push_arg_ty == TypeId::U64 {
+                arg_regs[0] = self.box_u64_runtime_value(arg_regs[0])?;
+            } else if needs_push_boxing || needs_push_float_boxing {
                 let raw_arg = arg_regs[0];
                 let use_float = needs_push_float_boxing;
                 let boxed_arg = self.with_func(|func, current_block| {
@@ -1664,7 +1676,9 @@ impl<'a> MirLowerer<'a> {
             // the push path (an untagged double's low mantissa bits read as a
             // runtime tag).
             let needs_needle_float_boxing = matches!(needle_ty, TypeId::F32 | TypeId::F64);
-            if needs_needle_int_boxing || needs_needle_float_boxing {
+            if needle_ty == TypeId::U64 {
+                arg_regs[0] = self.box_u64_runtime_value(arg_regs[0])?;
+            } else if needs_needle_int_boxing || needs_needle_float_boxing {
                 let raw_arg = arg_regs[0];
                 let use_float = needs_needle_float_boxing;
                 let boxed_arg = self.with_func(|func, current_block| {
@@ -1815,6 +1829,8 @@ impl<'a> MirLowerer<'a> {
                     });
                     boxed
                 })?;
+            } else if receiver.ty == TypeId::U64 {
+                receiver_reg = self.box_u64_runtime_value(receiver_reg)?;
             } else if needs_int_boxing {
                 receiver_reg = self.with_func(|func, current_block| {
                     let boxed = func.new_vreg();

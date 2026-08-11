@@ -1,0 +1,90 @@
+# codex-system-test
+# @evidence-display: links
+# @capture exec
+# @capture text
+"""
+# LLM Caret Claude CLI Stream Contract
+
+**Requirement IDs:** REQ-LLM-CARET-CLI-HARDEN-006
+**Plan:** doc/03_plan/sys_test/llm_caret_cli_tui_hardening.md
+
+## Scope
+
+This deterministic offline contract invokes the production
+`claude_cli_stream` function through the maintained Claude CLI fixture. It
+proves ordered stream-envelope handling, redaction of a structured provider
+error, and fail-closed rejection of malformed or duplicate-terminal NDJSON.
+
+It does not invoke `bin/caret`, a cached Caret artifact, an installed Claude
+binary, authentication, or a network provider. The cached CLI and PTY specs
+own those process and terminal acceptance boundaries.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_exists}
+use app.llm_caret.claude_cli.{claude_cli_stream}
+
+val MOCK_CLAUDE = "test/fixtures/llm_caret/mock_claude_cli.shs"
+
+describe "LLM Caret Claude CLI stream contract":
+    describe "REQ-LLM-CARET-CLI-HARDEN-006: production Claude stream handling":
+        it "should preserve a complete ordered provider stream":
+            step("Prepare offline Claude CLI fixture")
+            expect(file_exists(MOCK_CLAUDE)).to_be(true)
+
+            step("Stream the provider response")
+            val events = claude_cli_stream(
+                MOCK_CLAUDE, "fixture-stream", "sonnet", "Be concise", "", 1
+            )
+
+            step("Check ordered events and redaction")
+            expect(events.len()).to_equal(3)
+            expect(events[0].event_type).to_equal("system")
+            expect(events[0].session_id).to_equal("stream-session")
+            expect(events[1].event_type).to_equal("assistant")
+            expect(events[1].content).to_equal("streamed fixture")
+            expect(events[2].event_type).to_equal("result")
+            expect(events[2].content).to_equal("stream complete")
+            expect(events[2].output_tokens).to_equal(3)
+
+        it "should redact a structured provider error from the stream":
+            step("Prepare offline Claude CLI fixture")
+            expect(file_exists(MOCK_CLAUDE)).to_be(true)
+
+            step("Stream the provider response")
+            val events = claude_cli_stream(
+                MOCK_CLAUDE, "fixture-stream-provider-error",
+                "sonnet", "", "", 1
+            )
+
+            step("Check ordered events and redaction")
+            expect(events.len()).to_equal(1)
+            expect(events[0].event_type).to_equal("error")
+            expect(events[0].stop_reason).to_equal("error")
+            expect(events[0].content).to_contain("provider overloaded")
+            expect(events[0].content).to_contain("[REDACTED:")
+            expect(events[0].content.contains("sk-ant-fixture-secret")).to_be(false)
+
+        it "should reject malformed and duplicate-terminal provider streams":
+            step("Prepare offline Claude CLI fixture")
+            expect(file_exists(MOCK_CLAUDE)).to_be(true)
+
+            step("Stream the provider response")
+            val malformed = claude_cli_stream(
+                MOCK_CLAUDE, "fixture-stream-malformed-then-result",
+                "sonnet", "", "", 1
+            )
+            val duplicate_terminal = claude_cli_stream(
+                MOCK_CLAUDE, "fixture-stream-duplicate-terminal",
+                "sonnet", "", "", 1
+            )
+
+            step("Check ordered events and redaction")
+            expect(malformed.len()).to_equal(1)
+            expect(malformed[0].event_type).to_equal("error")
+            expect(malformed[0].stop_reason).to_equal("invalid")
+            expect(malformed[0].content).to_contain("invalid JSON")
+            expect(duplicate_terminal.len()).to_equal(1)
+            expect(duplicate_terminal[0].event_type).to_equal("error")
+            expect(duplicate_terminal[0].stop_reason).to_equal("invalid")
+            expect(duplicate_terminal[0].content).to_contain("after a terminal")

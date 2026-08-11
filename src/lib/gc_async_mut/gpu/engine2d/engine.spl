@@ -163,11 +163,27 @@ fn engine2d_default_font_config_for(font_size: i32, force_cpu_target: bool) -> F
     val base = FontRenderConfig.default_for_size(font_size)
     if not force_cpu_target:
         return base
+    # ROOT CAUSE (2026-08-11, rung-(d) text-skip blocker): this branch used to
+    # rebuild the config by reading all eleven fields off `base`
+    # (`language: base.language`, ...). On the freestanding entry-closure lane
+    # -- the ONLY lane that takes this branch, since `force_cpu_target` is
+    # `self.baremetal_backend != nil` -- that cross-struct field-read copy
+    # delivered `language="normal"` (the value of the `weight`/`style` slots)
+    # while `family`/`category`/`script` copied correctly. Serial evidence:
+    # `[font-select] no-candidate family='auto' category='auto'
+    # language='normal' script='auto'` eight times, one per text Draw IR
+    # command, all of them then skipped as `text-font-batch`
+    # (skipped=8 rendered=12). Every production construction site in the repo
+    # spells `language: "und"`, so no CSS/BCP-47 sentinel ever leaked here --
+    # the value was manufactured by the copy itself. Literal-initializing the
+    # config (identical to `font_render_config_default_for_size` plus the
+    # pinned "cpu" target) removes the field reads entirely. Semantics are
+    # unchanged on a healthy compiler.
     FontRenderConfig(
-        family: base.family, category: base.category, language: base.language,
-        script: base.script, size: base.size, weight: base.weight, style: base.style,
-        hinting: base.hinting, antialiasing: base.antialiasing, atlas_policy: base.atlas_policy,
-        execution_target: "cpu", execution_policy: base.execution_policy
+        family: "auto", category: "auto", language: "und", script: "auto",
+        size: font_size, weight: "normal", style: "normal", hinting: "none",
+        antialiasing: "grayscale", atlas_policy: "shared-alpha-1024",
+        execution_target: "cpu", execution_policy: FontExecutionPolicy.Suggested
     )
 
 # GLYPH-FIX-3 (2026-07-19): gated consumer-side probes. Mirrors the
@@ -1033,13 +1049,25 @@ class Engine2D with DrawIrRenderTarget:
         if _viable_auto_backend_cache != "":
             return _viable_auto_backend_cache
         val override_name = engine2d_env_backend_override()
-        if override_name != "":
+        # Guard against a non-empty raw override that canonicalizes to "".
+        # Measured live on baremetal (2026-08-11): engine2d_env_backend_override()
+        # can return a non-empty override_name even though the underlying
+        # env lookup is unset there (an rt_env_get `text` vs `text?` extern
+        # ABI mismatch across modules garbles the raw value), and
+        # backend_canonical_name() then collapses that garbage to "". Probing
+        # backend "" always fails with "Unknown backend: " and previously hid
+        # the real priority-order auto-resolution below it entirely. Treat an
+        # empty canonical name identically to "no override".
+        if override_name.len() > 0:
             val override_canon = backend_canonical_name(override_name)
-            val override_probe = Engine2D.probe_backend(1, 1, override_canon)
-            if override_probe.status == BackendStatus.Initialized:
-                _viable_auto_backend_cache = override_canon
-                return override_canon
-            print("[backend-resolve] override {override_canon} rejected: {override_probe.reason}")
+            if override_canon.len() > 0:
+                val override_probe = Engine2D.probe_backend(1, 1, override_canon)
+                if override_probe.status == BackendStatus.Initialized:
+                    _viable_auto_backend_cache = override_canon
+                    return override_canon
+                print("[backend-resolve] override {override_canon} rejected: {override_probe.reason}")
+            else:
+                print("[backend-resolve] override ignored: raw override_name.len()={override_name.len()} but canonicalized len=0 (see engine2d_env_backend_override ABI note)")
         val order = backend_default_priority_order()
         var idx = 0
         val order_len = order.len()

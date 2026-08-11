@@ -1,0 +1,89 @@
+"""
+# `.unwrap()`/`.expect()` on unannotated Result/Option receivers Specification
+
+**Feature IDs:** #NATIVE-UNWRAP-ENUM-001
+**Category:** Runtime
+**Difficulty:** 3/5
+**Status:** In Progress
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** doc/08_tracking/bug/native_unwrap_returns_enum_wrapper_instead_of_payload_2026-08-11.md
+
+## Overview
+
+`.unwrap()` on an unannotated `Result.Ok(v)` / `Option.Some(v)` receiver,
+compiled through the Rust seed's JIT/native (Cranelift) codegen lane,
+returned the boxed ENUM WRAPPER itself (printed `<enum@0x...>`) instead of
+the payload `v` — and `.unwrap()` on `Result.Err(e)` / `Option.None`
+silently returned garbage instead of trapping. Root cause and fix:
+`compiler/src/codegen/instr/closures_structs.rs::try_compile_builtin_method_call`
+mapped `unwrap` to `rt_unwrap_or_self`, a helper deliberately scoped to the
+reserved Option enum id for the never-trapping `??` operator (it returns
+every OTHER enum, including Result, UNCHANGED — the exact `<enum@...>`
+symptom). Fixed by routing `unwrap`/`expect` through a new
+`rt_unwrap_or_trap` runtime helper that checks the Ok/Some vs Err/None
+discriminant directly (not a reserved enum id) and traps on the absent
+variant. See the bug doc for full red/green evidence in both the JIT and
+`--native` (real compiled ELF) lanes.
+
+**This spec runs under `bin/simple test`, which forces
+`SIMPLE_EXECUTION_MODE=interpret` — the tree-walk interpreter was NEVER
+affected by this defect** (verified: it already unwraps/traps correctly).
+This spec therefore pins the CORRECT/expected semantics as an interpreter
+regression fence; it cannot observe the JIT/native-only defect itself. The
+JIT/native lane is exercised by
+`scripts/check/check-native-unwrap-enum-receiver.shs`, which drives the
+Rust seed binary directly (same reasoning as
+`test/01_unit/bugs/result_interpret_lane_spec.spl` and
+`check-native-option-unwrap-receiver.shs`).
+"""
+
+use std.spec
+
+
+fn mk_ok() -> Result<i64, text>:
+    Result.Ok(42)
+
+fn mk_err() -> Result<i64, text>:
+    Result.Err("boom")
+
+fn mk_some() -> Option<i64>:
+    Option.Some(42)
+
+fn mk_none() -> Option<i64>:
+    Option.None
+
+
+describe "unwrap()/expect() on Result/Option receivers":
+
+    context "Ok/Some — payload extraction":
+        it "Result.Ok(v).unwrap() returns v, not the enum wrapper":
+            expect(mk_ok().unwrap()).to_equal(42)
+
+        it "Option.Some(v).unwrap() returns v":
+            expect(mk_some().unwrap()).to_equal(42)
+
+        it "Result.Ok(v).expect(msg) returns v":
+            expect(mk_ok().expect("should be ok")).to_equal(42)
+
+        it "chained Result.Ok(v).unwrap() (no intermediate binding) returns v":
+            expect(Result.Ok(7).unwrap()).to_equal(7)
+
+        it "chained Option.Some(v).unwrap() returns v":
+            expect(Option.Some(7).unwrap()).to_equal(7)
+
+    context "Err/None — discriminant must say so":
+        # `unwrap()` itself traps the whole PROCESS on Err/None (an abort,
+        # not a catchable in-process exception), so that trap is verified by
+        # scripts/check/check-native-unwrap-enum-receiver.shs against the
+        # JIT/native lane instead, where the abort is observable as a
+        # process exit code. Here we pin the discriminant reads that the
+        # unwrap fix depends on.
+        it "Result.Err(e) is_err()/is_ok() report Err, not Ok":
+            expect(mk_err().is_err()).to_equal(true)
+            expect(mk_err().is_ok()).to_equal(false)
+
+        it "Option.None is_none()/is_some() report None, not Some":
+            expect(mk_none().is_none()).to_equal(true)
+            expect(mk_none().is_some()).to_equal(false)

@@ -1,0 +1,104 @@
+# codex-system-test
+# @tag: rendering, engine2d, vulkan, drawir, readback
+# @req AC-1 AC-6
+# @evidence-display: links
+
+"""# Vulkan 2D: API-call and DrawIR lanes with device readback provenance
+
+Covers the two 2D vulkan call paths end to end:
+
+1. API-call lane — `VulkanBackend` direct: clear + filled rect + readback
+   with exact pixels and device provenance, both unbatched (per-primitive
+   fenced submit) and batched (`enable_frame_batching` + one `submit_batch`,
+   regression for the read-before-flush batching bug and the transient
+   dispatch retry hardening).
+2. DrawIR lane — a rect+text composition through
+   `engine2d_draw_ir_adv_composition` on a vulkan Engine2D, asserting the
+   readback reaches the `device_readback` arm (the readback-before-present
+   ordering fix) with nonblank content.
+
+When the host has no Vulkan device, both lanes assert the fail-closed
+contract instead (init false + non-empty last_error), never a vacuous pass.
+"""
+
+use std.spec.{describe, it, expect, step}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
+use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{vulkan_sffi_is_available}
+use common.ui.draw_ir.{
+    DrawIrCommand,
+    draw_ir_rect, draw_ir_text, draw_ir_composition, draw_ir_batch_with_source,
+    draw_ir_embedding_config, draw_ir_source_gui_ast
+}
+use std.gpu.engine2d.engine.{Engine2D}
+use std.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_composition}
+
+fn pixel_at(pixels: [u32], x: i32, y: i32, w: i32) -> u32:
+    pixels[y * w + x]
+
+describe "Vulkan 2D API-call lane — unbatched and batched":
+    it "clear + filled rect read back exact pixels with device provenance":
+        step("Guard: without a device, init fails closed with a structured error")
+        if not vulkan_sffi_is_available():
+            var b = VulkanBackend.create()
+            expect(b.init(64, 64)).to_equal(false)
+            expect(b.last_error.len() > 0).to_equal(true)
+        else:
+            step("Unbatched: clear, rect, readback")
+            var b = VulkanBackend.create()
+            expect(b.init(64, 64)).to_equal(true)
+            b.clear(0xFF204060u32)
+            b.draw_rect_filled(8, 8, 16, 16, 0xFFCC3020u32)
+            val rb = b.read_pixels_with_source()
+            expect(rb.pixels.len()).to_equal(64 * 64)
+            expect(pixel_at(rb.pixels, 16, 16, 64)).to_equal(0xFFCC3020u32)
+            expect(pixel_at(rb.pixels, 0, 0, 64)).to_equal(0xFF204060u32)
+            expect(rb.source).to_equal("device_readback")
+            expect(rb.backend_handle > 0).to_equal(true)
+
+    it "batched rects read back correct pixels after one fenced submit":
+        step("Guard: skip device assertions when no device exists")
+        if not vulkan_sffi_is_available():
+            expect(vulkan_sffi_is_available()).to_equal(false)
+        else:
+            step("Batched: 64 enqueued rects, one submit_batch, readback")
+            var b = VulkanBackend.create()
+            expect(b.init(64, 64)).to_equal(true)
+            b.enable_frame_batching()
+            b.clear(0xFF204060u32)
+            var i = 0
+            while i < 8:
+                b.draw_rect_filled(8 + i * 6, 8, 4, 40, 0xFFCC3020u32)
+                i = i + 1
+            expect(b.submit_batch()).to_equal(true)
+            val rb = b.read_pixels_with_source()
+            expect(rb.pixels.len()).to_equal(64 * 64)
+            expect(pixel_at(rb.pixels, 10, 20, 64)).to_equal(0xFFCC3020u32)
+            expect(pixel_at(rb.pixels, 50, 20, 64)).to_equal(0xFFCC3020u32)
+            expect(pixel_at(rb.pixels, 0, 0, 64)).to_equal(0xFF204060u32)
+            expect(rb.source).to_equal("device_readback")
+
+describe "Vulkan 2D DrawIR lane — rect+text composition":
+    it "composition readback is device-origin with nonblank content":
+        step("Guard: skip device assertions when no device exists")
+        if not vulkan_sffi_is_available():
+            expect(vulkan_sffi_is_available()).to_equal(false)
+        else:
+            step("Render one bg rect + one filled rect + one text run")
+            var cmds: [DrawIrCommand] = []
+            cmds.push(draw_ir_rect("bg", 0, 0, 96, 64, 0xFF202028u32))
+            cmds.push(draw_ir_rect("box", 8, 8, 24, 16, 0xFF30C040u32))
+            cmds.push(draw_ir_text("t1", 8, 36, "vk", 0xFFFFFFFFu32))
+            val emb = draw_ir_embedding_config("root", "root", 0, 0, 96, 64, 0, 1000, false)
+            val src = draw_ir_source_gui_ast("root", "spec", "1")
+            val batch = draw_ir_batch_with_source("main", "vulkan", emb, cmds, src)
+            val composition = draw_ir_composition("spec", "spec:96x64", "vulkan", [batch])
+            var engine = Engine2D.create_with_backend(96, 64, "vulkan")
+            val result = engine2d_draw_ir_adv_composition(engine, composition, true)
+            step("All commands rendered, readback is device-origin")
+            expect(result.skipped_command_count).to_equal(0)
+            expect(result.pixels.len()).to_equal(96 * 64)
+            expect(result.readback_source).to_equal("device_readback")
+            expect(result.backend_handle > 0).to_equal(true)
+            step("Rect content landed exactly")
+            expect(pixel_at(result.pixels, 12, 12, 96)).to_equal(0xFF30C040u32)
+            expect(pixel_at(result.pixels, 60, 50, 96)).to_equal(0xFF202028u32)

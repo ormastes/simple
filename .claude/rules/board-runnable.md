@@ -12,8 +12,18 @@ not a completion.
 - **Real-firmware proxy, always:** boot via OVMF pflash (x86_64), OpenSBI
   (riscv), or EDK2/AAVMF (aarch64) — **never** QEMU `-kernel` pass semantics and
   **never** `isa-debug-exit`. The proxy exists so the same artifact runs on
-  hardware. (aarch64 currently lacks an EFI-stub — that gap is filed and is
-  exactly the kind of thing this rule forbids leaving implicit.)
+  hardware. **aarch64 now has a real-firmware lane** — EDK2/AAVMF pflash ->
+  `vendor/limine/BOOTAA64.EFI` (a real EFI application on a FAT ESP) ->
+  `kernel.elf`, gated by
+  `scripts/check/check-simpleos-arm64-efi-real-firmware-boot.shs`, with its ESP
+  built reproducibly by `scripts/os/build-simpleos-aarch64-efi-esp.shs`. (The
+  earlier "aarch64 lacks an EFI-stub" wording here was stale: the chosen design
+  is an EFI *application* chain, mirroring x86_64's, not a PE/COFF stub on the
+  kernel — see that build script's header for why.) **The remaining aarch64 gap
+  is a different one and is still filed:**
+  `scripts/check/check-simpleos-arm64-unified-live.shs`, the main arm64 desktop
+  lane, still boots with QEMU `-kernel` and must be migrated onto the
+  real-firmware chain above.
 - **Board bring-up path kept alive:** every QEMU-developed feature (kernel, LLVM
   toolchain, in-guest binaries, drivers) keeps a documented physical-board build
   + boot + run path. See `doc/03_plan/os/simpleos/hw_qemu/` and

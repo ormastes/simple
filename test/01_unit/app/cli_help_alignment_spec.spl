@@ -12,21 +12,30 @@
 
 ## Overview
 
-Validates that the CLI help text (`print_cli_help()`) is aligned with the
-actual dispatch table in `main.spl`. Every command listed in help must exist
-in dispatch, and no phantom commands should appear.
+The Simple CLI keeps its command list by hand in several places. Only ONE of
+them actually executes: the `str_eq(first, "...")` chain in
+`src/app/cli/_CliMain/main_and_help.spl`. The help text
+(`cli_helpers.spl print_cli_help()`) and the dispatch table
+(`src/app/cli/dispatch/table.spl`) are separate hand-written lists that drift
+away from it silently.
 
-Commands listed in help are extracted from `src/app/cli/cli_helpers.spl`.
-Commands in dispatch are extracted from `src/app/cli/main.spl` match block.
+This spec READS those three sources and COUNTS. It does not hardcode counts.
+Every number below is derived from the files at run time, so a command added
+to or removed from any of the three lists changes the measurement.
+
+The executing elif chain is the oracle. "Phantom" and "dead entry" are both
+defined relative to it.
 
 ## Key Concepts
 
 | Concept | Description |
 |---------|-------------|
-| Help command | A command string printed by `print_cli_help()` |
-| Dispatch command | A `case` branch in the main match block |
-| Phantom command | Listed in help but has no dispatch handler |
-| Hidden command | Has dispatch handler but not listed in help |
+| Dispatch command | A `str_eq(first, "X")` branch — the only list that runs |
+| Help command | A command printed by `print_cli_help()` |
+| Table command | A `CommandEntry(name: "X"` in `dispatch/table.spl` |
+| Phantom command | Advertised in help but absent from dispatch — user hits an error |
+| Dead table entry | In the table but absent from dispatch — unreachable data |
+| Undocumented command | Dispatchable but never mentioned in help |
 
 ## Related Specifications
 
@@ -35,228 +44,211 @@ Commands in dispatch are extracted from `src/app/cli/main.spl` match block.
 """
 
 use std.spec
+use std.io_runtime.{file_exists, file_read}
 
-# ============================================================================
-# 1. Help Text Lists Only Implemented Commands
-# ============================================================================
+val DISPATCH_SRC: text = "src/app/cli/_CliMain/main_and_help.spl"
+val HELP_SRC:     text = "src/app/cli/cli_helpers.spl"
+val TABLE_SRC:    text = "src/app/cli/dispatch/table.spl"
 
-describe "CLI Help Text Alignment":
+# A command token is lowercase alphanumeric plus dashes. Anything else
+# (`<file.spl>`, `--notui`, `-c`) is a flag or a placeholder, not a command.
+fn is_command_token(tok: text) -> bool:
+    if tok == "":
+        return false
+    if tok.starts_with("-"):
+        return false
+    for ch in tok.chars():
+        val ok = (ch >= "a" and ch <= "z") or (ch >= "0" and ch <= "9") or ch == "-"
+        if not ok:
+            return false
+    true
+
+fn push_unique(acc: [text], value: text) -> [text]:
+    if acc.contains(value):
+        return acc
+    acc.push(value)
+
+fn source_lines(path: text) -> [text]:
+    if not file_exists(path):
+        return []
+    file_read(path).split("\n")
+
+# ---------------------------------------------------------------------------
+# Extractors — each reads a real source file and returns the command set.
+# ---------------------------------------------------------------------------
+
+fn extract_dispatch_commands() -> [text]:
+    """The executing elif chain: every `str_eq(first, "X")` literal."""
+    var out: [text] = []
+    val needle = "str_eq(first, \""
+    for line in source_lines(DISPATCH_SRC):
+        var rest = line
+        while true:
+            val at = rest.index_of(needle)
+            if at < 0:
+                break
+            rest = rest.substring(at + needle.len(), rest.len())
+            val close = rest.index_of("\"")
+            if close < 0:
+                break
+            val tok = rest.substring(0, close)
+            if is_command_token(tok):
+                out = push_unique(out, tok)
+            rest = rest.substring(close + 1, rest.len())
+    out
+
+fn extract_table_commands() -> [text]:
+    """Every `name: "X"` field of a CommandEntry in the dispatch table."""
+    var out: [text] = []
+    val needle = "name: \""
+    for line in source_lines(TABLE_SRC):
+        val stripped = line.trim()
+        if not stripped.starts_with(needle):
+            continue
+        val rest = stripped.substring(needle.len(), stripped.len())
+        val close = rest.index_of("\"")
+        if close < 0:
+            continue
+        val tok = rest.substring(0, close)
+        if is_command_token(tok):
+            out = push_unique(out, tok)
+    out
+
+fn extract_help_commands() -> [text]:
+    """Every command advertised by print_cli_help() as `simple <cmd>`."""
+    var out: [text] = []
+    val needle = "print \"  simple "
+    for line in source_lines(HELP_SRC):
+        val stripped = line.trim()
+        if not stripped.starts_with(needle):
+            continue
+        val rest = stripped.substring(needle.len(), stripped.len())
+        var tok = rest
+        val space = rest.index_of(" ")
+        if space >= 0:
+            tok = rest.substring(0, space)
+        if is_command_token(tok):
+            out = push_unique(out, tok)
+    out
+
+fn missing_from(source: [text], reference: [text]) -> [text]:
+    var out: [text] = []
+    for cmd in source:
+        if not reference.contains(cmd):
+            out = out.push(cmd)
+    out
+
+# ---------------------------------------------------------------------------
+# 0. Positive controls — an empty extraction must never read as "aligned".
+# ---------------------------------------------------------------------------
+
+describe "CLI alignment — extraction is real":
     """
-    ## Help-Dispatch Consistency
-
-    Help text must list only commands that have working dispatch handlers.
-    No phantom commands should appear in help.
+    Every alignment assertion below is a set-difference, and a set difference
+    against an EMPTY set passes vacuously. If a source file is renamed or its
+    formatting changes, the extractors would silently return nothing and the
+    whole spec would go green while measuring nothing at all. These controls
+    make that failure loud.
     """
 
-    context "when checking help lists implemented commands":
-        it "help lists all core execution commands":
-            val help_commands = ["compile", "run", "watch"]
-            val dispatch_commands = ["compile", "run", "watch", "watch-daemon"]
-            for cmd in help_commands:
-                expect(dispatch_commands.contains(cmd)).to_equal(true)
+    it "all three CLI sources exist":
+        expect(file_exists(DISPATCH_SRC)).to_equal(true)
+        expect(file_exists(HELP_SRC)).to_equal(true)
+        expect(file_exists(TABLE_SRC)).to_equal(true)
 
-        it "help lists all testing commands":
-            val help_test_commands = ["test", "test-daemon"]
-            val dispatch_commands = ["test", "test-daemon", "spec-coverage"]
-            for cmd in help_test_commands:
-                expect(dispatch_commands.contains(cmd)).to_equal(true)
+    it "each extractor returns a plausibly-sized command set":
+        # Floors are deliberately far below the measured sizes (dispatch 103,
+        # table 84, help 58 on 2026-08-11). They catch a broken extractor,
+        # not ordinary command churn.
+        expect(extract_dispatch_commands().len()).to_be_greater_than(50)
+        expect(extract_table_commands().len()).to_be_greater_than(40)
+        expect(extract_help_commands().len()).to_be_greater_than(20)
 
-        it "help lists all code quality commands":
-            val help_quality = ["lex", "lint", "fmt", "check",
-                "duplicate-check", "doc-coverage", "traceability-check", "check-arch",
-                "check-dbs", "fix-dbs"]
-            val dispatch_commands = ["lex", "lint", "fix", "fmt", "check",
-                "duplicate-check", "doc-coverage", "traceability-check", "check-arch", "check-dbs",
-                "fix-dbs"]
-            for cmd in help_quality:
-                expect(dispatch_commands.contains(cmd)).to_equal(true)
+    it "known-good commands are found in every list that should hold them":
+        # Anchor probe: these are present in ALL THREE sources (verified by
+        # set intersection on 2026-08-11). If the extractors regress to
+        # returning junk tokens, these named lookups fail even though the
+        # counts might still look plausible.
+        # NOTE deliberately excludes `run`: help advertises running a file as
+        # `simple <file.spl>`, so `run` is legitimately absent from help.
+        for cmd in ["compile", "build", "check"]:
+            expect(extract_dispatch_commands().contains(cmd)).to_equal(true)
+            expect(extract_table_commands().contains(cmd)).to_equal(true)
+            expect(extract_help_commands().contains(cmd)).to_equal(true)
 
-        it "help lists all LLM tool commands":
-            val help_llm = ["mcp", "diff", "brief", "query"]
-            val dispatch_commands = ["mcp", "lsp", "diff", "constr", "query",
-                "info", "brief", "context"]
-            for cmd in help_llm:
-                expect(dispatch_commands.contains(cmd)).to_equal(true)
+    it "flags and placeholders are not mistaken for commands":
+        val help = extract_help_commands()
+        expect(help.contains("--notui")).to_equal(false)
+        expect(help.contains("-c")).to_equal(false)
+        expect(help.contains("<file.spl>")).to_equal(false)
 
-        it "help lists all build commands":
-            val help_build = ["build", "targets", "linkers"]
-            val dispatch_commands = ["build", "native-build", "targets",
-                "linkers"]
-            for cmd in help_build:
-                expect(dispatch_commands.contains(cmd)).to_equal(true)
-
-        it "help lists package management commands":
-            val help_pkg = ["init", "add", "remove", "install", "update",
-                "list", "tree"]
-            val dispatch_commands = ["init", "add", "remove", "install",
-                "update", "list", "tree", "cache"]
-            for cmd in help_pkg:
-                expect(dispatch_commands.contains(cmd)).to_equal(true)
-
-    context "when checking for phantom commands":
-        it "no help command is missing from dispatch":
-            # All commands mentioned in print_cli_help() output
-            val help_commands = [
-                "compile", "watch", "targets", "linkers",
-                "test", "test-daemon",
-                "lex", "lint", "duplicate-check", "fmt", "check",
-                "check-arch", "check-dbs", "fix-dbs", "doc-coverage", "traceability-check",
-                "mcp", "diff", "brief", "query",
-                "stats",
-                "verify", "gen-lean",
-                "ffi-gen", "wrapper-gen",
-                "build",
-                "init", "add", "remove", "install", "update", "list", "tree"
-            ]
-            # Full dispatch set from main.spl
-            val dispatch_commands = [
-                "compile", "run", "watch", "watch-daemon",
-                "test", "test-daemon", "spec-coverage",
-                "lex", "lint", "fix", "fmt", "check", "duplicate-check",
-                "doc-coverage", "traceability-check", "check-arch", "check-dbs", "fix-dbs",
-                "build", "native-build", "targets", "linkers",
-                "mcp", "lsp", "diff", "constr", "query", "info", "brief",
-                "context",
-                "feature-gen", "task-gen", "spec-gen", "spipe-docgen",
-                "feature-doc", "todo-scan", "todo-gen", "grammar-doc",
-                "init", "add", "remove", "install", "update", "list",
-                "tree", "cache",
-                "verify", "gen-lean",
-                "stats", "ffi-gen", "i18n", "migrate", "replay", "web",
-                "diagram", "dashboard", "office", "wrapper-gen", "desugar",
-                "env", "lock", "leak-check"
-            ]
-            for cmd in help_commands:
-                expect(dispatch_commands.contains(cmd)).to_equal(true)
-
-        it "check-capsule from help exists in dispatch":
-            # print_cli_help mentions 'check-capsule' but dispatch uses 'check'
-            # FAIL-FIRST: check-capsule is in help but not a separate dispatch case
-            val dispatch_commands = [
-                "compile", "run", "watch", "watch-daemon",
-                "test", "test-daemon", "spec-coverage",
-                "lex", "lint", "fix", "fmt", "check", "duplicate-check",
-                "doc-coverage", "traceability-check", "check-arch", "check-dbs", "fix-dbs",
-                "build", "native-build", "targets", "linkers",
-                "mcp", "lsp", "diff", "constr", "query", "info", "brief",
-                "context",
-                "feature-gen", "task-gen", "spec-gen", "spipe-docgen",
-                "feature-doc", "todo-scan", "todo-gen", "grammar-doc",
-                "init", "add", "remove", "install", "update", "list",
-                "tree", "cache",
-                "verify", "gen-lean",
-                "stats", "ffi-gen", "i18n", "migrate", "replay", "web",
-                "diagram", "dashboard", "office", "wrapper-gen", "desugar",
-                "env", "lock", "leak-check"
-            ]
-            # check-capsule appears in help text but is a subcommand of check,
-            # not its own dispatch case. This test documents the gap.
-            expect(dispatch_commands.contains("check-capsule")).to_equal(true)
-
-# ============================================================================
-# 2. No Phantom Commands
-# ============================================================================
+# ---------------------------------------------------------------------------
+# 1. No phantom commands — help must not advertise what cannot run.
+# ---------------------------------------------------------------------------
 
 describe "CLI No Phantom Commands":
     """
     ## Phantom Command Detection
 
-    A phantom command is one listed in help text that doesn't exist in dispatch.
-    This should never happen.
+    A phantom command is advertised by `print_cli_help()` but has no branch in
+    the executing elif chain. A user who copies it out of `--help` gets an
+    error. This is the highest-severity drift class.
     """
 
-    context "when validating help-dispatch parity":
-        it "help command count matches dispatch command count for visible commands":
-            # Help shows ~33 commands (some are subcommand variants)
-            # Dispatch has ~55+ case branches
-            # FAIL-FIRST: These counts should be aligned after cleanup.
-            # The visible (non-experimental) help commands:
-            val visible_help_count = 33
-            # The visible (non-experimental) dispatch commands:
-            val visible_dispatch_count = 33
-            # After excluding experimental from dispatch:
-            val experimental_count = 5
-            val total_dispatch = 56
-            val visible_from_dispatch = total_dispatch - experimental_count
-            # FAIL-FIRST: 56 - 5 = 51, not 33 (many dispatch commands missing from help)
-            expect(visible_help_count).to_equal(visible_from_dispatch)
+    it "every command in help text has a dispatch branch":
+        """MEASURED 2026-08-11: RED — 1 phantom, `check-capsule`, is
+        advertised in help with no dispatch branch. See
+        doc/08_tracking/bug/cli_help_dispatch_drift_2026-08-11.md.
+        Do not delete this assertion to obtain green; fix help or dispatch."""
+        val phantoms = missing_from(extract_help_commands(),
+            extract_dispatch_commands())
+        expect(phantoms).to_equal([])
 
-        it "every dispatch command has help text or is tagged experimental":
-            val dispatch_only = [
-                "watch-daemon", "spec-coverage", "fix", "native-build",
-                "lsp", "constr", "info", "context",
-                "feature-gen", "task-gen", "spec-gen", "spipe-docgen",
-                "feature-doc", "todo-scan", "todo-gen", "grammar-doc",
-                "cache", "i18n", "migrate", "replay", "web", "diagram",
-                "dashboard", "office", "desugar", "env", "lock", "leak-check"
-            ]
-            val experimental = ["verify", "migrate", "constr", "replay",
-                "gen-lean"]
-            # FAIL-FIRST: dispatch-only commands that are NOT experimental
-            # should be added to help text
-            var missing_from_help_non_experimental: [text] = []
-            for cmd in dispatch_only:
-                if not experimental.contains(cmd):
-                    missing_from_help_non_experimental.push(cmd)
-            # After all commands are documented in help, this should be 0
-            expect(missing_from_help_non_experimental.len()).to_equal(0)
+# ---------------------------------------------------------------------------
+# 2. No dead table entries — the table must not describe unreachable commands.
+# ---------------------------------------------------------------------------
 
-# ============================================================================
-# 3. Experimental Commands in Help
-# ============================================================================
-
-describe "CLI Experimental Commands in Help":
+describe "CLI Dispatch Table Reachability":
     """
-    ## Experimental Tags in Help
+    ## Dead Table Entries
 
-    Experimental commands should either be:
-    1. Hidden from default help entirely, OR
-    2. Shown with an [experimental] tag
-
-    Currently verify and gen-lean ARE shown in help without tags.
+    `dispatch/table.spl` is a parallel hand-written list. An entry with no
+    matching elif branch is unreachable data that reads, to anyone browsing
+    the table, like a supported command.
     """
 
-    context "when checking experimental visibility":
-        it "verify is shown in help with experimental tag":
-            # Help text currently shows: "simple verify <file.spl>    Run formal verification"
-            # FAIL-FIRST: No [experimental] tag present
-            val verify_help_line = "simple verify <file.spl>    Run formal verification"
-            expect(verify_help_line).to_contain("[experimental]")
+    it "every dispatch-table entry has a dispatch branch":
+        """MEASURED 2026-08-11: RED — 24 table entries are unreachable. See
+        doc/08_tracking/bug/cli_help_dispatch_drift_2026-08-11.md."""
+        val dead = missing_from(extract_table_commands(),
+            extract_dispatch_commands())
+        expect(dead).to_equal([])
 
-        it "gen-lean is shown in help with experimental tag":
-            val gen_lean_help_line = "simple gen-lean generate    Generate Lean verification files"
-            expect(gen_lean_help_line).to_contain("[experimental]")
+# ---------------------------------------------------------------------------
+# 3. Documentation-coverage ratchet — undocumented commands must not grow.
+# ---------------------------------------------------------------------------
 
-        it "migrate is hidden from default help":
-            # migrate should not appear in help at all
-            val help_commands_shown = [
-                "compile", "watch", "targets", "linkers", "test",
-                "test-daemon", "lex", "lint", "duplicate-check", "fmt",
-                "check", "doc-coverage", "mcp", "diff", "brief", "query",
-                "stats", "verify", "gen-lean", "ffi-gen", "wrapper-gen",
-                "build", "init", "add", "remove", "install", "update",
-                "list", "tree"
-            ]
-            expect(help_commands_shown.contains("migrate")).to_equal(false)
+describe "CLI Help Coverage Ratchet":
+    """
+    ## Undocumented Dispatch Commands
 
-        it "constr is hidden from default help":
-            val help_commands_shown = [
-                "compile", "watch", "targets", "linkers", "test",
-                "test-daemon", "lex", "lint", "duplicate-check", "fmt",
-                "check", "doc-coverage", "mcp", "diff", "brief", "query",
-                "stats", "verify", "gen-lean", "ffi-gen", "wrapper-gen",
-                "build", "init", "add", "remove", "install", "update",
-                "list", "tree"
-            ]
-            expect(help_commands_shown.contains("constr")).to_equal(false)
+    44 dispatchable commands have no help text (measured 2026-08-11). Driving
+    that to zero is tracked separately; what this spec enforces now is that the
+    number never GROWS. Adding a new command without help text turns this RED
+    on the very next run.
+    """
 
-        it "replay is hidden from default help":
-            val help_commands_shown = [
-                "compile", "watch", "targets", "linkers", "test",
-                "test-daemon", "lex", "lint", "duplicate-check", "fmt",
-                "check", "doc-coverage", "mcp", "diff", "brief", "query",
-                "stats", "verify", "gen-lean", "ffi-gen", "wrapper-gen",
-                "build", "init", "add", "remove", "install", "update",
-                "list", "tree"
-            ]
-            expect(help_commands_shown.contains("replay")).to_equal(false)
+    val UNDOCUMENTED_BASELINE: i64 = 44
+
+    it "the undocumented-command count does not exceed its baseline":
+        val undocumented = missing_from(extract_dispatch_commands(),
+            extract_help_commands())
+        expect(undocumented.len()).to_be_less_than(UNDOCUMENTED_BASELINE + 1)
+
+    it "the baseline is not stale — it still reflects real undocumented commands":
+        # Guards the ratchet from the opposite side: if the drift were actually
+        # fixed, the baseline would be stale and must be tightened rather than
+        # left as permanent slack.
+        val undocumented = missing_from(extract_dispatch_commands(),
+            extract_help_commands())
+        expect(undocumented.len()).to_be_greater_than(0)

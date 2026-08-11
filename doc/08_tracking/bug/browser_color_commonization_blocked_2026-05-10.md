@@ -67,6 +67,34 @@ Confirmed all three blockers resolved:
 - `dom.spl` reduced to 124 lines; manual parsers (`pcc_parse_int`, `hex_byte`, etc.) absent
 - `css.spl` calls `.trim().to_lower()` before `css_named_color()` — case normalization confirmed
 
+## Correction (2026-08-11) — the 2026-05-19 "resolution" was never wired
+
+The 2026-05-19 resolution added `parse_css_color` to `css.spl` and a 148-name
+`css_named_colors.spl`, and left a "Next step: delegate to `parse_css_color`".
+That next step never happened. Measured 2026-08-11:
+
+- `parse_css_color`, `parse_css_length`, `css_length_to_px`, `css_color_r/g/b/a`,
+  `CssLength`, and the `css_px_*` arithmetic helpers in `css.spl` had **zero
+  references anywhere** in `src/`, `test/`, `examples/`, `doc/` outside their own
+  file. None were in `css.spl`'s `export` list either.
+- The LIVE color path is `browser_engine/dom_color.spl`
+  (`parse_color_value` / `parse_hex_color` / `named_color_to_u32`), reached from
+  `dom_color_named.spl`, `dom_visual_effects.spl`, `render_fixtures.spl`. It is a
+  strict superset: hsl/hsla, modern space-separated syntax, `currentColor`,
+  comment stripping, and a **149-name** table that contains every one of
+  `css_named_colors.spl`'s 148 names plus `transparent`.
+
+So the commonization did not merge two implementations — it added a third, dead
+one. Removed the dead side instead: the `parse_css_color`/`CssLength`/`css_px_*`
+block in `css.spl` (270 → 87 lines) and `src/lib/gc_async_mut/web/css_named_colors.spl`
+(144 lines, sole caller was the dead parser). `CssPx` and all exported symbols
+are untouched. Importer specs byte-identical before/after (`css_ext_routing` 3/9,
+`float_layout` 13/10, `ui.chromium/css_spec` 9/3 — all pre-existing reds;
+`layout_coverage_closure` 13/13 green).
+
+Status corrected to: **Resolved by deletion of the redundant lane**, not by
+delegation.
+
 ## Related
 - Timing commonization: completed (commit 6c07c3d)
 - Layout commonization: blocked by i32/i64 + DOM-coupling architectural mismatch

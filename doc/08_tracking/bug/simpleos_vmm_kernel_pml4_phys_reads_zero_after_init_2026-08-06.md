@@ -333,3 +333,84 @@ to diagnose — but the root cause named there is wrong, and it is this defect.
 The gate's failure-message chain now tests for the spawn/VMM failure FIRST and
 prints "this is NOT a timeout, do not raise CLANG_WAIT", so the next reader is
 not sent down the same path.
+
+## 2026-08-11 — LIVE re-verification from a FRESH worktree build (still FIXED)
+
+The 2026-08-08 entry re-confirmed this by RE-READING four 2026-08-06 logs, not
+by running anything. This entry is the missing live run: the kernel was rebuilt
+from the current worktree (`rm build/os/simpleos_ssh_ring3_uefi128.elf` first,
+cold cache, 329 modules compiled) and booted under REAL OVMF pflash via
+`sh scripts/os/scp_retrieve_over_ssh_uefi.shs` — no `-kernel`, no
+`isa-debug-exit`.
+
+Kernel under test: `build/os/simpleos_ssh_ring3_uefi128.elf`,
+md5 `3fa573ef8fcba330d9393a74ab6b5112`, 1,070,088 bytes.
+Serial: `build/os/scp_retrieve_over_ssh_uefi.serial.log` (36,572 bytes).
+
+GREEN — the publish marker names its own writer, and the spawn gets a real root:
+
+```
+[VMM] Initializing virtual memory manager...
+[VMM] portable VMM published kernel PML4 0x402718720
+[VMM] PML4 at physical 0x402718720
+[VMM] Identity-mapping first 4GB...
+[VMM] Identity-mapped 4GB with 2MB pages (2048 entries)
+[VMM] VMM initialization complete
+...
+[spawn] parsed entry=0x1073741824
+[spawn] user AS ready (private low) root=402755584
+[spawn] phoff=64 phentsize=56 phnum=7 use_stream=1
+[spawn] image span lo=0x1073741824 hi=0x1171922944
+[spawn] PT_LOAD segments mapped
+```
+
+Failure markers, counted on this serial: `VMM not initialized` **0**,
+`FAIL user-AS` **0**, `rc=-1` **0**, `legacy AS=1` **0**. Positive acceptance
+(never an absence condition) is the full ladder:
+
+```
+  [ok]   L1 OVMF -> GRUB-EFI app ran
+  [ok]   L2 multiboot handoff -> kernel _start
+  [ok]   L3 sshd ring-3 accept loop (payload overlap fault cleared)
+  [ok]   L4 in-guest clang compiled /hello.o under OVMF
+[uefi-scp] retrieved.o host exit code = 7 (want 7)
+PASS: clang-over-SSH-under-OVMF VERIFIED (compile in-guest + getfile + exit 7)
+```
+
+Status unchanged: **FIXED**. Ring-3 spawn is not the blocker on this ladder.
+
+## The REAL blocker found on the way here (2026-08-11) — and fixed
+
+Reproducing this bug was blocked for one full build cycle by a DIFFERENT,
+newer defect: the kernel would not link at all.
+
+```
+  FABRICATED-NEW simpleos_ssh_ring3_uefi128.elf rt_collection_remove
+  FABRICATED-NEW simpleos_ssh_ring3_uefi128.elf rt_value_unbox_int
+Build failed: freestanding link would FABRICATE 2 symbol(s) not in the baseline
+```
+
+Both backends had been changed to emit CALLS to two runtime helpers that the
+x86_64 freestanding runtime never provided:
+
+- `rt_value_unbox_int` — `codegen/instr/mod.rs:1495` and
+  `codegen/cranelift_emitter.rs:788` replaced the inlined `UnboxInt`
+  shift/select with a call to it;
+- `rt_collection_remove` — `codegen/llvm/functions.rs:2531` and
+  `codegen/instr/closures_structs.rs:1883` retargeted the `remove` method name
+  to it (it replaced `rt_dict_remove`, whose name-keyed table silently
+  no-opped every array `.remove(i)`).
+
+The hosted Rust runtime has both; the freestanding C runtime
+(`examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c`, which is
+what supplies `rt_index_get`/`rt_dict_remove` to this ELF) had neither, so the
+fabricated-stub gate correctly refused the link. Had that gate not existed, both
+would have received weak `return 0` bodies — every unboxed integer in the kernel
+zeroed, and every `.remove()` returning nil.
+
+Fix: real bodies for both in `baremetal_stubs.c` (+~47 lines), dispatching to
+the `rt_array_remove` / `rt_map_remove` already in that file, with
+`rt_value_unbox_int` an arithmetic `>> 3` on TAG_INT and a verbatim
+pass-through on everything else (booleans need no case here — `TRUE_VALUE` /
+`FALSE_VALUE` are `ENCODE_INT(1)` / `ENCODE_INT(0)`). The baseline was NOT
+widened. With that in place the link succeeds and the ladder above is GREEN.

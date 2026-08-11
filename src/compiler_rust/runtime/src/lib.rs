@@ -684,10 +684,12 @@ pub use value::{
     rt_value_as_bool,
     rt_value_as_float,
     rt_value_as_int,
+    rt_value_as_u64,
     // Value creation
     rt_value_bool,
     rt_value_float,
     rt_value_int,
+    rt_value_u64,
     // Value type checking
     rt_value_is_bool,
     rt_value_is_float,

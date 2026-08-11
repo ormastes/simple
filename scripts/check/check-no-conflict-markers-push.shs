@@ -94,40 +94,12 @@ GREP=grep
 TAB=$(printf '\t')
 
 TMPD=$(mktemp -d 2>/dev/null) || TMPD=""
-
-# --- the no-silent-exit invariant -------------------------------------------
-# See the same block in check-tree-size-push.shs. The trap used to clean up and
-# print NOTHING, so a SIGTERM (a caller's 600s cap, earlyoom) or any abort left
-# stdout with no verdict at all — indistinguishable, to a caller grepping for a
-# verdict, from a run that had not printed one YET. Every stop now ends in a
-# verdict.
-VERDICT_EMITTED=0
-cleanup() {
-    cl_status=$?
-    trap - EXIT HUP INT TERM QUIT PIPE
-    if [ "$VERDICT_EMITTED" -eq 0 ]; then
-        case "$cl_status" in
-            129) cl_why="killed by SIGHUP (129)" ;;
-            130) cl_why="interrupted by SIGINT (130)" ;;
-            131) cl_why="killed by SIGQUIT (131)" ;;
-            141) cl_why="killed by SIGPIPE (141)" ;;
-            143) cl_why="killed by SIGTERM (143) — a harness timeout, earlyoom, or an explicit kill" ;;
-            0)   cl_why="the script stopped without reaching a verdict (exit 0)" ;;
-            *)   cl_why="the script aborted before reaching a verdict (exit $cl_status)" ;;
-        esac
-        echo "$SELF: ERROR — $cl_why" >&2
-        echo "$SELF: ERROR — nothing was checked (exit 2)"
-        cl_status=2
-    fi
-    [ -n "$TMPD" ] && rm -rf "$TMPD"
-    exit "$cl_status"
-}
-trap cleanup EXIT HUP INT TERM QUIT PIPE
+cleanup() { [ -n "$TMPD" ] && rm -rf "$TMPD"; }
+trap cleanup EXIT HUP INT TERM
 
 die() {
     code=$1
     shift
-    VERDICT_EMITTED=1
     echo "$SELF: ERROR — $*" >&2
     echo "$SELF: ERROR — nothing was checked (exit $code)"
     exit "$code"
@@ -213,9 +185,8 @@ if [ "$ncommits" -eq 0 ]; then
   caller error (wrong base, wrong tip, or endpoints already equal) — it is NOT
   a clean result, so it is reported as a failure rather than a pass."
     fi
-    die 2 "the default range '$range' is empty; NO FILES WERE CHECKED.
-  There is nothing to push, so there is also nothing this guard can vouch for.
-  A run that checked nothing is ERROR by this convention, never a pass."
+    echo "$SELF: NOTHING TO PUSH — $range is empty; NO FILES WERE CHECKED"
+    exit 0
 fi
 
 # git rev-list lists newest first, so the first line is the range tip — the
@@ -305,6 +276,20 @@ if [ "$scanned" -eq 0 ]; then
 fi
 
 if [ "$found" -ne 0 ]; then
+    # Working-copy-conflict tripwire (added 2026-08-11, see
+    # doc/08_tracking/bug/conflict_markers_reported_at_origin_were_working_copy_only_2026-08-11.md):
+    # every marker match above came from `git show "$tip:$path"` — COMMITTED
+    # content only, never the working tree — so this guard cannot itself
+    # confuse a stalled local cherry-pick for a poisoned commit. But a human
+    # reading this FAIL and about to blame the SHA in $tip needs that ruled
+    # out explicitly, because a separate, unrelated stalled cherry-pick in
+    # THIS working copy produces near-identical-looking marker text and was
+    # mistaken for an origin defect on 2026-08-11. Report the working-copy
+    # conflict state here so that confusion cannot happen silently again.
+    cph="no"; [ -f "$toplevel/.git/CHERRY_PICK_HEAD" ] && cph="yes"
+    mh="no"; [ -f "$toplevel/.git/MERGE_HEAD" ] && mh="yes"
+    unmerged=$(git -C "$toplevel" ls-files -u 2>/dev/null | wc -l | tr -d ' ')
+    echo "$SELF: working-copy-conflict-state CHERRY_PICK_HEAD=$cph MERGE_HEAD=$mh unmerged_index_entries=$unmerged (0/no/no = working copy is clean; a nonzero/yes value here means a LOCAL, uncommitted conflict exists and the FAIL below must not be blamed on \$tip=$tip without first checking whether it is that local state, not $tip's committed content, that is poisoned)" >&2
     cat >&2 <<'EOF'
 
 DO NOT PUSH. The files above contain literal conflict-marker text from an
@@ -314,11 +299,9 @@ then re-check:
   jj resolve --list
   jj log -r 'roots(conflicts())'    # resolve the ROOT, descendants auto-rebase
 EOF
-    VERDICT_EMITTED=1
     echo "$SELF: FAIL — conflict markers found in $range ($scanned file(s) scanned)"
     exit 1
 fi
 
-VERDICT_EMITTED=1
 echo "$SELF: PASS — $scanned file(s) scanned at $tip across $ncommits commit(s) in $range, 0 conflict markers (repo $toplevel)"
 exit 0

@@ -610,7 +610,9 @@ impl<'a> MirLowerer<'a> {
                                         | TypeId::U64
                                 );
                                 let needs_bool_boxing = index.ty == TypeId::BOOL || index.ty == TypeId::I8;
-                                if needs_int_boxing {
+                                if index.ty == TypeId::U64 {
+                                    self.box_u64_runtime_value(index_reg)?
+                                } else if needs_int_boxing {
                                     self.with_func(|func, current_block| {
                                         let boxed = func.new_vreg();
                                         let block = func.block_mut(current_block).unwrap();
@@ -688,7 +690,9 @@ impl<'a> MirLowerer<'a> {
                                 let needs_float_boxing = !elem_is_heap && matches!(value.ty, TypeId::F32 | TypeId::F64);
                                 let needs_bool_boxing =
                                     !elem_is_heap && (value.ty == TypeId::BOOL || value.ty == TypeId::I8);
-                                if needs_int_boxing {
+                                if value.ty == TypeId::U64 && !elem_is_heap {
+                                    self.box_u64_runtime_value(val_reg)?
+                                } else if needs_int_boxing {
                                     self.with_func(|func, current_block| {
                                         let boxed = func.new_vreg();
                                         let block = func.block_mut(current_block).unwrap();
@@ -842,6 +846,8 @@ impl<'a> MirLowerer<'a> {
                                 });
                                 boxed
                             })?
+                        } else if ty == TypeId::U64 && target_is_any {
+                            self.box_u64_runtime_value(val_reg)?
                         } else if needs_int_boxing {
                             self.with_func(|func, current_block| {
                                 let boxed = func.new_vreg();
@@ -901,7 +907,9 @@ impl<'a> MirLowerer<'a> {
                         );
                         let target_is_float = matches!(target.ty, TypeId::F32 | TypeId::F64);
 
-                        let store_val = if is_tagged_val && target_is_int {
+                        let store_val = if is_tagged_val && target.ty == TypeId::U64 {
+                            self.unbox_u64_runtime_value(val_reg)?
+                        } else if is_tagged_val && target_is_int {
                             // Unbox tagged RuntimeValue to raw integer before storing
                             self.with_func(|func, current_block| {
                                 let unboxed = func.new_vreg();

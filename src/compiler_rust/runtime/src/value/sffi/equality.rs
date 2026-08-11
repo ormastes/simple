@@ -42,43 +42,6 @@ pub extern "C" fn rt_native_neq(a: i64, b: i64) -> i64 {
     }
 }
 
-/// P0 follow-up (2026-08-01): ordering counterpart of `rt_native_eq`, backing
-/// the codegen `<`/`<=`/`>`/`>=` arm when NEITHER operand is statically typed.
-///
-/// `Eq`/`NotEq` have had this tag-aware dynamic fallback for a long time; the
-/// ordering operators never did, so codegen fell through to a raw `icmp` on
-/// the two operands as opaque integers. For a tagged heap string that compares
-/// its HANDLE ADDRESS rather than its content -- the exact defect
-/// `rt_text_cmp_any` was introduced to fix for the *statically typed* case,
-/// left live for the untyped case. Observed under the JIT: a `.substring()`
-/// result compared against `"0"`/`"9"` literals produced address ordering, so
-/// an ASCII digit-range check (`ch >= "0" and ch <= "9"`) returned false for
-/// most digits, which surfaced as MODINIT001 lint false positives.
-///
-/// Dispatch mirrors `rt_native_eq`: both sides tagged-heap -> semantic value
-/// compare (content, via `value_compare`, which handles strings); otherwise a
-/// raw signed integer compare, which is what the inline `icmp` arm would have
-/// emitted.
-///
-/// Returns a strcmp-style signed result (<0, 0, >0); the caller applies the
-/// requested predicate against 0. See
-/// doc/08_tracking/bug/jit_text_ordering_pointer_compare_2026-08-01.md.
-#[no_mangle]
-pub extern "C" fn rt_native_cmp(a: i64, b: i64) -> i64 {
-    let au = a as u64;
-    let bu = b as u64;
-    if (au & tags::TAG_MASK) == tags::TAG_HEAP && (bu & tags::TAG_MASK) == tags::TAG_HEAP {
-        return rt_value_compare(RuntimeValue::from_raw(au), RuntimeValue::from_raw(bu));
-    }
-    if a < b {
-        -1
-    } else if a > b {
-        1
-    } else {
-        0
-    }
-}
-
 fn value_eq(a: RuntimeValue, b: RuntimeValue) -> bool {
     value_eq_inner(a, b, &mut Vec::new())
 }
@@ -125,6 +88,13 @@ fn value_hash_inner(v: RuntimeValue, depth: u32) -> u64 {
             d = 0.0;
         }
         return fnv1a_bits(d.to_bits());
+    }
+    if let Some(value) = v.as_heap_u64() {
+        return if value <= ((1u64 << 60) - 1) {
+            fnv1a_bits(RuntimeValue::from_int(value as i64).to_raw())
+        } else {
+            fnv1a_bits(value ^ 0x5549_4e54_5f55_3634)
+        };
     }
     if v.tag() != tags::TAG_HEAP {
         return fnv1a_bits(v.to_raw());
@@ -216,14 +186,14 @@ fn value_eq_inner(a: RuntimeValue, b: RuntimeValue, visited: &mut Vec<(usize, us
     if a.is_float() || b.is_float() {
         return a.is_float() && b.is_float() && a.as_float() == b.as_float();
     }
-
-    // Heap-boxed WIDE integers (|v| >= 2^60, see RuntimeValue::from_int) compare
-    // by VALUE for exactly the same reason floats do: two boxes holding the same
-    // i64 are distinct pointers.
-    if a.is_wide_int() || b.is_wide_int() {
-        let a_num = a.is_wide_int() || a.is_int();
-        let b_num = b.is_wide_int() || b.is_int();
-        return a_num && b_num && a.as_int() == b.as_int();
+    if let Some(left) = a.as_heap_u64() {
+        return b.as_heap_u64().map_or_else(
+            || b.is_int() && b.as_int() >= 0 && left == b.as_int() as u64,
+            |right| left == right,
+        );
+    }
+    if let Some(right) = b.as_heap_u64() {
+        return a.is_int() && a.as_int() >= 0 && a.as_int() as u64 == right;
     }
 
     match (a.tag(), b.tag()) {
@@ -246,6 +216,7 @@ fn heap_value_eq(a: RuntimeValue, b: RuntimeValue, visited: &mut Vec<(usize, usi
             };
             unsafe { (*sa).as_bytes() == (*sb).as_bytes() }
         }
+        (Some(HeapObjectType::UInt), Some(HeapObjectType::UInt)) => a.as_heap_u64() == b.as_heap_u64(),
         (Some(HeapObjectType::Enum), Some(HeapObjectType::Enum)) => {
             let Some(ea) = get_typed_ptr::<RuntimeEnum>(a, HeapObjectType::Enum) else {
                 return false;
@@ -433,7 +404,8 @@ unsafe fn array_eq_contents(
 }
 
 fn generic_int_eq(value: RuntimeValue, expected: i64) -> bool {
-    value.is_int() && value.as_int() == expected
+    (value.is_int() && expected >= 0 && value.as_int() >= 0 && value.as_int() == expected)
+        || value.as_heap_u64().is_some_and(|actual| actual == expected as u64)
 }
 
 fn value_compare(a: RuntimeValue, b: RuntimeValue) -> i64 {
@@ -458,18 +430,13 @@ fn value_compare(a: RuntimeValue, b: RuntimeValue) -> i64 {
         // Float vs non-numeric heap/special: fall through to tag ordering.
     }
 
-    // Heap-boxed wide integers order by VALUE, not by pointer (mirror of the
-    // float-by-value block above).
-    if a.is_wide_int() || b.is_wide_int() {
-        if (a.is_wide_int() || a.is_int()) && (b.is_wide_int() || b.is_int()) {
-            return compare_i64(a.as_int(), b.as_int());
-        }
-        if a.is_wide_int() && b.is_float() {
-            return compare_f64(a.as_int() as f64, b.as_float());
-        }
-        if a.is_float() && b.is_wide_int() {
-            return compare_f64(a.as_float(), b.as_int() as f64);
-        }
+    match (a.as_heap_u64(), b.as_heap_u64()) {
+        (Some(left), Some(right)) => return compare_u64(left, right),
+        (Some(_), None) if b.is_int() && b.as_int() < 0 => return 1,
+        (Some(left), None) if b.is_int() => return compare_u64(left, b.as_int() as u64),
+        (None, Some(_)) if a.is_int() && a.as_int() < 0 => return -1,
+        (None, Some(right)) if a.is_int() => return compare_u64(a.as_int() as u64, right),
+        _ => {}
     }
 
     match (a.tag(), b.tag()) {
