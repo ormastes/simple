@@ -78,6 +78,27 @@ if [ ! -x "$BIN" ]; then
     exit 2
 fi
 
+# PROVENANCE GUARD. Same rationale as check-numeric-builtin-result-type.shs:
+# a binary built before the fix source landed fails these assertions for a
+# reason unrelated to correctness. Compare $BIN's mtime against the last
+# commit time of the fix's source file; if the binary predates it, ERROR out
+# instead of reporting a misleading FAIL.
+_prov_files="src/compiler_rust/compiler/src/hir/lower/expr/mod.rs"
+_bin_epoch=$(stat -c '%Y' "$BIN" 2>/dev/null || stat -f '%m' "$BIN" 2>/dev/null)
+if [ -n "$_bin_epoch" ]; then
+    for _f in $_prov_files; do
+        [ -f "$_f" ] || continue
+        _src_iso=$(git log -1 --format='%cI' -- "$_f" 2>/dev/null)
+        [ -n "$_src_iso" ] || continue
+        _src_epoch=$(date -d "$_src_iso" +%s 2>/dev/null || date -j -f '%Y-%m-%dT%H:%M:%S%z' "$_src_iso" +%s 2>/dev/null)
+        [ -n "$_src_epoch" ] || continue
+        if [ "$_src_epoch" -gt "$_bin_epoch" ]; then
+            echo "ERROR — nothing was checked ($BIN predates fix commit for $_f: binary mtime $_bin_epoch < source commit $_src_epoch — rebuild/redeploy the binary before trusting this gate's verdict)"
+            exit 2
+        fi
+    done
+fi
+
 WORK="${TMPDIR:-/tmp}/floatmethodarg.$$"
 mkdir -p "$WORK" || { echo "ERROR — nothing was checked (cannot create $WORK)"; exit 2; }
 trap 'rm -rf "$WORK"' EXIT INT TERM

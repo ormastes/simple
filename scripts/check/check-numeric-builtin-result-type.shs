@@ -60,6 +60,29 @@ if [ ! -x "$BIN" ]; then
     exit 2
 fi
 
+# PROVENANCE GUARD. This gate exercises $BIN, not the working tree. A binary
+# built before the fix source landed will fail these assertions for a reason
+# unrelated to correctness -- indistinguishable from a real regression unless
+# checked. Compare $BIN's mtime against the last commit time of every source
+# file this defect's fix touches (from the bug doc / this script's header).
+# If the binary predates any of them, the run cannot conclude anything: ERROR,
+# not FAIL.
+_prov_files="src/compiler_rust/compiler/src/hir/lower/expr/calls.rs src/compiler_rust/compiler/src/interpreter_extern/math.rs"
+_bin_epoch=$(stat -c '%Y' "$BIN" 2>/dev/null || stat -f '%m' "$BIN" 2>/dev/null)
+if [ -n "$_bin_epoch" ]; then
+    for _f in $_prov_files; do
+        [ -f "$_f" ] || continue
+        _src_iso=$(git log -1 --format='%cI' -- "$_f" 2>/dev/null)
+        [ -n "$_src_iso" ] || continue
+        _src_epoch=$(date -d "$_src_iso" +%s 2>/dev/null || date -j -f '%Y-%m-%dT%H:%M:%S%z' "$_src_iso" +%s 2>/dev/null)
+        [ -n "$_src_epoch" ] || continue
+        if [ "$_src_epoch" -gt "$_bin_epoch" ]; then
+            echo "ERROR — nothing was checked ($BIN predates fix commit for $_f: binary mtime $_bin_epoch < source commit $_src_epoch — rebuild/redeploy the binary before trusting this gate's verdict)"
+            exit 2
+        fi
+    done
+fi
+
 WORK="${TMPDIR:-/tmp}/numbuiltin.$$"
 mkdir -p "$WORK" || { echo "ERROR — nothing was checked (cannot create $WORK)"; exit 2; }
 trap 'rm -rf "$WORK"' EXIT INT TERM
