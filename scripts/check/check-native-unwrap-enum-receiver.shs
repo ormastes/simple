@@ -21,44 +21,69 @@
 # WHY A SCRIPT AND NOT ONLY A SPEC
 # `bin/simple test` (the deployed pure-Simple tool) defaults to the
 # tree-walk interpreter, which does not reproduce this — only the Rust seed's
-# JIT/native lane does. This script exercises the Rust seed binary directly
-# (`src/compiler_rust/target/{release,bootstrap}/simple`) so the JIT lane is
-# actually measured. The system spec at
+# JIT/native lane does. This script exercises a Rust-seed-produced binary
+# directly so the JIT lane is actually measured. The system spec at
 # test/01_unit/bugs/native_unwrap_enum_receiver_spec.spl documents the same
 # fixtures/expectations for the interpreter lane, which is unaffected.
+#
+# DEFAULT BINARY / PROVENANCE. The default target is `readlink -f bin/simple`
+# — the currently DEPLOYED binary — not a `src/compiler_rust/target/**`
+# build. Those target/ dirs go stale silently (measured 2026-08-11: both
+# release and bootstrap sat at their Aug 10 build, a day behind the deployed
+# binary that carries the actual fix), and a run against a stale binary reads
+# as a real FAIL instead of the provenance gap it is. Override with $1 or
+# $SIMPLE_BIN when you deliberately want to test a different binary (e.g. a
+# fresh seed build). Any binary older than the fix landing (rebuilt
+# 2026-08-11 04:08:03 UTC per
+# doc/08_tracking/bug/native_unwrap_returns_enum_wrapper_instead_of_payload_2026-08-11.md)
+# is refused as ERROR, never silently scored as FAIL — same mtime-provenance
+# pattern as scripts/check/check-numeric-builtin-result-type.shs.
 #
 # EXIT CODES (repo pre-push guard convention)
 #   0  PASS   — <n> checked, n > 0
 #   1  FAIL   — a real regression
-#   2  ERROR  — nothing was actually measured
+#   2  ERROR  — nothing was actually measured (missing/stale binary, etc.)
 #
-# Usage: sh scripts/check/check-native-unwrap-enum-receiver.shs [path-to-seed-binary]
+# Usage: sh scripts/check/check-native-unwrap-enum-receiver.shs [path-to-binary]
+#        SIMPLE_BIN=/path/to/simple sh scripts/check/check-native-unwrap-enum-receiver.shs
 set -u
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 REPO_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT" || { echo "ERROR — nothing was checked (cannot cd to repo root)"; exit 2; }
 
+# Fix-landing timestamp: any candidate binary built strictly before this is
+# stale and cannot possibly carry the fix. 2026-08-11 04:08:03 UTC.
+FIX_EPOCH=1786421283
+
 FIXTURE_DIR="test/fixtures/native_unwrap_enum_receiver"
-SEED_BIN="${1:-}"
+SEED_BIN="${1:-${SIMPLE_BIN:-}}"
 if [ -z "$SEED_BIN" ]; then
-    for candidate in \
-        "$REPO_ROOT/src/compiler_rust/target/release/simple" \
-        "$REPO_ROOT/src/compiler_rust/target/bootstrap/simple" \
-        "${CARGO_TARGET_DIR:-}/release/simple"; do
-        if [ -n "$candidate" ] && [ -x "$candidate" ]; then
-            SEED_BIN="$candidate"
-            break
-        fi
-    done
+    if [ -e "$REPO_ROOT/bin/simple" ]; then
+        SEED_BIN="$(readlink -f "$REPO_ROOT/bin/simple" 2>/dev/null)"
+    fi
 fi
 
 [ -n "$SEED_BIN" ] && [ -x "$SEED_BIN" ] || {
-    echo "ERROR — nothing was checked (no Rust seed binary found; build one with"
-    echo "  cd src/compiler_rust && cargo build --release -p simple-driver --bin simple"
-    echo "  and pass its path as \$1, or set CARGO_TARGET_DIR)"
+    echo "ERROR — nothing was checked (no runnable binary found; pass a path as"
+    echo "  \$1, set \$SIMPLE_BIN, or ensure bin/simple resolves to an executable)"
     exit 2
 }
+
+BIN_EPOCH="$(stat -c '%Y' "$SEED_BIN" 2>/dev/null || stat -f '%m' "$SEED_BIN" 2>/dev/null)"
+if [ -z "$BIN_EPOCH" ]; then
+    echo "ERROR — nothing was checked (could not stat mtime of $SEED_BIN)"
+    exit 2
+fi
+if [ "$BIN_EPOCH" -lt "$FIX_EPOCH" ]; then
+    echo "ERROR — nothing was checked ($SEED_BIN is stale: built before the fix"
+    echo "  landed at 2026-08-11 04:08:03 UTC (epoch $FIX_EPOCH), got epoch"
+    echo "  $BIN_EPOCH — rebuild or point at the currently deployed binary)"
+    exit 2
+fi
+
+echo "check-native-unwrap-enum-receiver — binary: $SEED_BIN"
+ls -l "$SEED_BIN" 2>/dev/null | awk '{print "  size/mtime: " $5 " " $6 " " $7 " " $8}'
 
 for f in ok_unwrap.spl some_unwrap.spl err_unwrap.spl none_unwrap.spl; do
     [ -f "$FIXTURE_DIR/$f" ] || { echo "ERROR — nothing was checked (missing fixture $f)"; exit 2; }
