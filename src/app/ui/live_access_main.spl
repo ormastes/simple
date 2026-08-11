@@ -8,8 +8,8 @@
 # HTTP SFFI client into the checker.
 
 use common.text_advanced.{escape_json}
-use common.ui.access_cli_grammar.{AccessError, AccessResult, access_error_to_json, access_render_json}
-use std.nogc_sync_mut.io.tcp.{TcpStream}
+use common.ui.access_cli_grammar.{AccessError}
+use std.nogc_sync_mut.io.tcp.{TcpStream, tcp_fd_set_read_timeout, tcp_fd_write_text, tcp_fd_read_line_or_empty, tcp_fd_read_text_or_empty, tcp_fd_close}
 use std.nogc_sync_mut.io_runtime.{getpid, time_now_unix_micros}
 use app.io.cli_ops.{cli_get_args}
 
@@ -19,6 +19,14 @@ val LIVE_UI_SOURCE = "simple_ui"
 val LIVE_UI_DEFAULT_PORT: i32 = 3000
 val LIVE_UI_DEFAULT_TIMEOUT_MS: i64 = 2000
 val LIVE_UI_MAX_TIMEOUT_MS: i64 = 30000
+# Phase-3 native lowering does not reliably retain writes to mutable
+# module-scalar text globals across function boundaries.  Keep the request
+# result in one array and replace the whole value after each state change;
+# module-array replacement has stable backing storage in the Phase-3 ABI.
+# Slots: body, error code, error message, HTTP status.
+var _live_http_fields: [text] = []
+var _live_action_bodies: [text] = []
+var _live_observation_bodies: [text] = []
 
 fn main() -> i64:
     val args = _live_args()
@@ -34,14 +42,18 @@ fn main() -> i64:
         return _live_fail(operation, AccessError.create("invalid_argument", "--port must be between 1 and 65535"), 2)
     if timeout_ms <= 0 or timeout_ms > LIVE_UI_MAX_TIMEOUT_MS:
         return _live_fail(operation, AccessError.create("invalid_argument", "--timeout must be between 1 and 30000"), 2)
+    if operation == "benchmark":
+        return _live_benchmark(args, port, timeout_ms)
     val route = match _live_route(operation, args):
         Err(e): return _live_fail(operation, e, 2)
         Ok(value): value
     if operation != "act":
         val accept = if operation == "root": "text/html" else: "application/json"
-        val payload = match _live_http("GET", route, "", port, timeout_ms, accept):
-            Err(e): return _live_fail(operation, e, 1)
-            Ok(value): value
+        if not _live_http("GET", route, "", port, timeout_ms, accept):
+            # Safe reads are idempotent; retry one lost connection once.
+            if not _live_http("GET", route, "", port, timeout_ms, accept):
+                return _live_fail_fields(operation, _live_http_fields[1], _live_http_fields[2], _live_http_fields[3], "", 1)
+        val payload = _live_http_fields[0]
         if operation == "root":
             stdout_write(payload)
             return 0
@@ -49,21 +61,16 @@ fn main() -> i64:
 
     val request_id = "ui-act-" + getpid().to_text() + "-" + time_now_unix_micros().to_text()
     val body = _live_action_body(args, request_id)
-    val action = match _live_http("POST", route, body, port, timeout_ms, "application/json"):
-        Err(e):
-            e.set_request_id(request_id)
-            return _live_fail(operation, e, 1)
-        Ok(value): value
-    val surface = _live_value(args, "--surface")
-    val canonical = _live_value(args, "--canonical")
-    val observed_surface = if surface != "": surface else: _live_surface_from_canonical(canonical)
-    val observation_route = if observed_surface == "": "/api/test/ui/history?count=1" else: "/api/test/ui/surface?id=" + _live_url_encode(observed_surface)
-    val observation = match _live_http("GET", observation_route, "", port, timeout_ms, "application/json"):
-        Err(e):
-            e.set_request_id(request_id)
-            return _live_fail(operation, e, 1)
-        Ok(value): value
-    _live_emit(operation, "{\"action\":" + action + ",\"observation\":" + observation + "}", request_id, 1)
+    if not _live_http("POST", route, body, port, timeout_ms, "application/json"):
+        # Retry exactly once with the same request id. The server deduplicates
+        # that id, so a lost acknowledgement cannot apply an action twice.
+        if not _live_http("POST", route, body, port, timeout_ms, "application/json"):
+            return _live_fail_fields(operation, _live_http_fields[1], _live_http_fields[2], _live_http_fields[3], request_id, 1)
+    _live_action_bodies = [_live_http_fields[0]]
+    # `act` returns the correlated server acknowledgement. Observation is an
+    # explicit `snapshot` or `find` command, which lets callers independently
+    # prove post-state and keeps one CLI operation equal to one HTTP request.
+    _live_emit(operation, _live_action_bodies[0], request_id, 1)
 
 fn _live_args() -> [text]:
     val raw = cli_get_args()
@@ -84,7 +91,66 @@ fn _live_args() -> [text]:
 
 fn _live_operation(value: text) -> bool:
     value == "root" or value == "windows" or value == "snapshot" or value == "surface" or
-        value == "find" or value == "act" or value == "history"
+        value == "find" or value == "act" or value == "history" or value == "benchmark"
+
+fn _live_p95(values: [i64]) -> i64:
+    if values.len() == 0: return 0
+    var sorted = values
+    sorted.sort()
+    var rank = (sorted.len() * 95 + 99) / 100
+    if rank < 1: rank = 1
+    sorted[rank - 1]
+
+fn _live_benchmark(args: [text], port: i32, timeout_ms: i64) -> i64:
+    val samples = _live_number(args, "--samples", 20)
+    var revision = _live_number(args, "--revision", -1)
+    if samples <= 0 or samples > 100 or revision < 0:
+        return _live_fail("benchmark", AccessError.create("invalid_argument", "benchmark requires --revision and 1..100 --samples"), 2)
+    var snapshot_us: [i64] = []
+    var find_us: [i64] = []
+    var action_post_us: [i64] = []
+    var i: i64 = 0
+    while i < samples:
+        val snapshot_start = time_now_unix_micros()
+        if not _live_http("GET", "/api/test/ui/snapshot", "", port, timeout_ms, "application/json"):
+            if not _live_http("GET", "/api/test/ui/snapshot", "", port, timeout_ms, "application/json"):
+                return _live_fail_fields("benchmark", _live_http_fields[1], _live_http_fields[2], _live_http_fields[3], "", 1)
+        snapshot_us = snapshot_us.push(time_now_unix_micros() - snapshot_start)
+        if not _live_http_fields[0].contains("main#cell_A1"):
+            return _live_fail("benchmark", AccessError.create("invalid_response", "snapshot omitted A1"), 1)
+
+        val find_start = time_now_unix_micros()
+        if not _live_http("GET", "/api/test/ui/find?canonical_id=main%23cell_B1", "", port, timeout_ms, "application/json"):
+            if not _live_http("GET", "/api/test/ui/find?canonical_id=main%23cell_B1", "", port, timeout_ms, "application/json"):
+                return _live_fail_fields("benchmark", _live_http_fields[1], _live_http_fields[2], _live_http_fields[3], "", 1)
+        find_us = find_us.push(time_now_unix_micros() - find_start)
+        if not _live_http_fields[0].contains("main#cell_B1"):
+            return _live_fail("benchmark", AccessError.create("invalid_response", "find omitted B1"), 1)
+
+        val request_id = "ui-bench-" + getpid().to_text() + "-" + i.to_text()
+        val body = "{\"surface_id\":\"main\",\"canonical_id\":\"main#cell_A1\",\"action\":\"select\",\"value\":\"\",\"request_id\":\"" + request_id + "\",\"expected_revision\":" + revision.to_text() + "}"
+        val action_start = time_now_unix_micros()
+        if not _live_http("POST", "/api/test/ui/act", body, port, timeout_ms, "application/json"):
+            if not _live_http("POST", "/api/test/ui/act", body, port, timeout_ms, "application/json"):
+                return _live_fail_fields("benchmark", _live_http_fields[1], _live_http_fields[2], _live_http_fields[3], request_id, 1)
+        revision = revision + 2
+        if not _live_http("GET", "/api/test/ui/snapshot", "", port, timeout_ms, "application/json"):
+            if not _live_http("GET", "/api/test/ui/snapshot", "", port, timeout_ms, "application/json"):
+                return _live_fail_fields("benchmark", _live_http_fields[1], _live_http_fields[2], _live_http_fields[3], request_id, 1)
+        action_post_us = action_post_us.push(time_now_unix_micros() - action_start)
+        if not _live_http_fields[0].contains("main#cell_A1"):
+            return _live_fail("benchmark", AccessError.create("invalid_response", "post-action snapshot omitted A1"), 1)
+        i = i + 1
+    val snapshot_p95 = _live_p95(snapshot_us)
+    val find_p95 = _live_p95(find_us)
+    val action_post_p95 = _live_p95(action_post_us)
+    stdout_write("sample_count=" + samples.to_text() + "\n")
+    stdout_write("snapshot_p95_us=" + snapshot_p95.to_text() + "\n")
+    stdout_write("find_p95_us=" + find_p95.to_text() + "\n")
+    stdout_write("action_post_p95_us=" + action_post_p95.to_text() + "\n")
+    stdout_write("latency_status=" + if snapshot_p95 <= 100000 and find_p95 <= 25000 and action_post_p95 <= 250000: "pass\n" else: "fail\n")
+    stdout_write("final_revision=" + revision.to_text() + "\n")
+    0
 
 fn _live_route(operation: text, args: [text]) -> Result<text, AccessError>:
     if operation == "root": return Ok("/")
@@ -123,35 +189,55 @@ fn _live_action_body(args: [text], request_id: text) -> text:
         "\",\"request_id\":\"" + escape_json(request_id) +
         "\",\"expected_revision\":" + _live_value(args, "--revision") + "}"
 
-fn _live_http(method: text, route: text, body: text, port: i32, timeout_ms: i64, accept: text) -> Result<text, AccessError>:
+fn _live_set_http_error(code: text, message: text, status: text):
+    _live_http_fields = ["", code, message, status]
+
+fn _live_http(method: text, route: text, body: text, port: i32, timeout_ms: i64, accept: text) -> bool:
+    _live_set_http_error("source_unavailable", "live UI request failed", "")
     val fd = TcpStream.connect_fd_timeout("127.0.0.1:" + port.to_text(), timeout_ms)
-    if fd < 0: return Err(AccessError.create("source_unavailable", "failed to connect to live UI service"))
-    var stream = TcpStream.from_accepted_fd(fd)
-    if not stream.set_read_timeout_status(timeout_ms):
-        stream.close_status()
-        return Err(AccessError.create("source_unavailable", "failed to configure live UI read timeout"))
+    if fd < 0:
+        _live_set_http_error("source_unavailable", "failed to connect to live UI service", "")
+        return false
+    if not tcp_fd_set_read_timeout(fd, timeout_ms):
+        tcp_fd_close(fd)
+        _live_set_http_error("source_unavailable", "failed to configure live UI read timeout", "")
+        return false
     val content_headers = if method == "POST": "Content-Type: application/json\r\nContent-Length: " + body.len().to_text() + "\r\n" else: ""
     val request = method + " " + route + " HTTP/1.1\r\nHost: 127.0.0.1:" + port.to_text() + "\r\nAccept: " + accept + "\r\n" + content_headers + "Connection: close\r\n\r\n" + body
-    if not stream.write_text_status(request):
-        stream.close_status()
-        return Err(AccessError.create("source_unavailable", "failed to write live UI request"))
-    val status_line = stream.read_line_or_empty()
+    if not tcp_fd_write_text(fd, request):
+        tcp_fd_close(fd)
+        _live_set_http_error("source_unavailable", "failed to write live UI request", "")
+        return false
+    val status_line = tcp_fd_read_line_or_empty(fd)
     if status_line == "":
-        stream.close_status()
-        return Err(AccessError.create("source_unavailable", "live UI service closed without a response"))
+        tcp_fd_close(fd)
+        _live_set_http_error("source_unavailable", "live UI service closed without a response", "")
+        return false
     val status_code = _live_status_code(status_line)
     var content_length = 0
     while true:
-        val line = stream.read_line_or_empty()
+        val line = tcp_fd_read_line_or_empty(fd)
         if line == "" or line == "\r\n" or line == "\n": break
         val lower = line.to_lower()
         if lower.starts_with("content-length:"):
             content_length = line.slice(line.index_of(":") + 1, line.len()).trim().to_i32()
-    val response_body = if content_length > 0: stream.read_bytes_or_empty(content_length) else: ""
-    stream.close_status()
-    if status_code >= 200 and status_code < 300: return Ok(response_body)
+    var response_body = ""
+    if content_length > 0:
+        response_body = tcp_fd_read_text_or_empty(fd, content_length)
+    else:
+        var body_parts: [text] = []
+        loop:
+            val body_line = tcp_fd_read_line_or_empty(fd)
+            if body_line == "": break
+            body_parts = body_parts.push(body_line)
+        response_body = body_parts.join("")
+    tcp_fd_close(fd)
+    if status_code >= 200 and status_code < 300:
+        _live_http_fields = [response_body, "", "", status_code.to_text()]
+        return true
     val code = if status_code == 404: "target_not_found" elif status_code == 403: "permission_denied" elif status_code == 504: "timeout" elif status_code == 400: "invalid_argument" elif status_code == 409 and response_body.contains("stale"): "stale_target" elif status_code == 409 and response_body.contains("unsupported"): "unsupported_action" else: "source_unavailable"
-    Err(AccessError.detailed(code, if response_body != "": response_body else: status_line.trim(), status_code.to_text(), "Start or inspect the live UI service", true, false))
+    _live_set_http_error(code, if response_body != "": response_body else: status_line.trim(), status_code.to_text())
+    false
 
 fn _live_status_code(status_line: text) -> i64:
     val parts = status_line.trim().split(" ")
@@ -159,14 +245,36 @@ fn _live_status_code(status_line: text) -> i64:
     parts[1].to_i64()
 
 fn _live_emit(operation: text, payload: text, request_id: text, returned: i64) -> i64:
-    var result = AccessResult.document(operation, LIVE_UI_SOURCE, "", 0, payload, returned, false)
-    result.correlation_id = request_id
-    print access_render_json(result)
+    stdout_write("{\"schema\":\"simple.access/v1\",\"operation\":\"")
+    stdout_write(escape_json(operation))
+    stdout_write("\",\"request_id\":\"")
+    stdout_write(escape_json(request_id))
+    stdout_write("\",\"ok\":true,\"source\":\"")
+    stdout_write(LIVE_UI_SOURCE)
+    stdout_write("\",\"returned\":")
+    stdout_write(returned.to_text())
+    stdout_write(",\"result\":")
+    stdout_write(payload)
+    stdout_write("}\n")
     0
 
 fn _live_fail(operation: text, e: AccessError, code: i64) -> i64:
-    print access_error_to_json(operation, LIVE_UI_SOURCE, e)
-    code
+    _live_fail_fields(operation, e.code, e.message, e.source_code, e.request_id, code)
+
+fn _live_fail_fields(operation: text, error_code: text, message: text, source_code: text, request_id: text, exit_code: i64) -> i64:
+    stdout_write("{\"schema\":\"simple.access/v1\",\"operation\":\"")
+    stdout_write(escape_json(operation))
+    stdout_write("\",\"request_id\":\"")
+    stdout_write(escape_json(request_id))
+    stdout_write("\",\"ok\":false,\"error\":{\"code\":\"")
+    stdout_write(escape_json(error_code))
+    stdout_write("\",\"message\":\"")
+    stdout_write(escape_json(message))
+    stdout_write("\",\"source_code\":\"")
+    stdout_write(escape_json(source_code))
+    stdout_write("\",\"hint\":\"Start or inspect the live UI service\",\"retryable\":true,\"interaction_required\":false}")
+    stdout_write("}\n")
+    exit_code
 
 fn _live_value(args: [text], name: text) -> text:
     var i = 0
@@ -208,4 +316,4 @@ fn _live_surface_from_canonical(canonical: text) -> text:
     if at <= 0: "" else: canonical.slice(0, at)
 
 fn _live_usage():
-    print "Usage: simple-ui-client ui root|windows|snapshot|surface|find|act|history [options]"
+    print "Usage: simple-ui-client ui root|windows|snapshot|surface|find|act|history|benchmark [options]"

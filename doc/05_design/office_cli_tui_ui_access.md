@@ -13,6 +13,7 @@ create final requirement documents.
 |---|---|---|
 | IDE startup-light entry | `src/app/ide/main.spl` | Parse `ide --feature-check --tui|--gui` before global filtering |
 | Standalone Office entry | `src/app/office_cli/main.spl` | Parse `office calc [FILE] --tui`, compatibility aliases, help/errors without importing the full CLI |
+| Standalone Calc GUI host | `src/app/office/sheets/calc_gui_host.spl` | Serve the common Calc semantic/layout tree at `/` and the same session through `/api/test/*`; the deployed Office process never invokes a compiler or bootstrap |
 | Calc controller | `src/app/office/sheets/access_controller.spl` | Own loaded sheet, active cell, pending edit, revision, snapshot, and frame rendering |
 | Calc session host | `src/app/office/sheets/calc_session_host.spl` | Sole owner of controller/session; interleaves terminal bytes and loopback access requests |
 | Calc access adapter | `src/app/office/sheets/access_server.spl` | Route optional access port to the same terminal/session host |
@@ -111,6 +112,7 @@ Preferred forms:
 ```text
 office calc --tui
 office calc FILE --tui
+office calc FILE --gui [--ui-access-port PORT]
 simple ide --feature-check --tui
 simple ide --feature-check --gui
 ```
@@ -168,7 +170,7 @@ The SSpec helper names are:
 - `check_office_gate`
 
 The helper is represented in the manual-first source by the inline scenario
-`has one fresh deployed Office evidence run`. Each visible/folded scenario uses
+`should create one fresh deployed Office evidence run`. Each visible/folded scenario uses
 `@prev(...)` to expand that setup into its manual flow without executing a
 second gate.
 
@@ -195,13 +197,31 @@ build/test-artifacts/03_system/app/office/feature/office_cli_tui_ui_access/runs/
   protocol/history.json
   protocol/rejections.txt
   protocol/service-closed.txt
+  gui/root.html
+  gui/snapshot.json
+  gui/action-result.json
+  gui/post-snapshot.json
+  gui/session-parity.txt
   exec/commands.txt
+  exec/gui-exit.txt
   exec/runtime-artifact.txt
   exec/runtime-provenance.txt
   perf/startup.txt
   perf/warm-protocol.txt
   suite.txt
 ```
+
+The GUI evidence launches `office calc --gui` as a second product process
+inside the same unique campaign, never as a substitute for the PTY process.
+The gate launches the standalone UI client subprocess for both the narrow
+`ui root` HTML-body operation and public `simple.access/v1` queries. The client
+owns scalar loopback TCP and emits the exact root response body on successful
+stdout; the checker has no HTTP SFFI dependency. It then enters A1=6, A2=8,
+and B1=`=A1*A2` against that GUI process. The shared process/port lifetime,
+HTML grid identities, semantic snapshot identities, independent B1=48
+post-state, clean reap, and closed port form the same-session receipt. HTML IDs
+and canonical protocol IDs are compared after applying the established `main#`
+surface prefix; matching text from unrelated processes is not parity evidence.
 
 ## Error and Cleanup
 

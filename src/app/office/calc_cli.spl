@@ -3,16 +3,19 @@
 use app.office.sheets.calc_tui.{run_calc_frame_once}
 use app.office.sheets.calc_tui_host.{run_calc_tui}
 use app.office.sheets.calc_access_session_host.{run_calc_access_session_host}
+use app.office.sheets.calc_gui_host.{run_calc_gui_host}
 
 struct CalcCliOptions:
     path: text
     tui: bool
+    gui: bool
     frame_once: bool
     access_port: i32
 
 fn parse_calc_cli(args: [text]) -> Result<CalcCliOptions, text>:
     var path = "untitled.csv"
     var tui = false
+    var gui = false
     var frame_once = false
     var access_port = 0
     var index = 0
@@ -20,6 +23,8 @@ fn parse_calc_cli(args: [text]) -> Result<CalcCliOptions, text>:
         val arg = args[index]
         if arg == "--tui":
             tui = true
+        elif arg == "--gui":
+            gui = true
         elif arg == "--frame-once":
             frame_once = true
         elif arg == "--ui-access-port":
@@ -36,16 +41,22 @@ fn parse_calc_cli(args: [text]) -> Result<CalcCliOptions, text>:
         else:
             path = arg
         index = index + 1
-    if not tui and not frame_once:
-        return Err("one of --tui or --frame-once is required")
-    if tui and frame_once:
-        return Err("--tui and --frame-once are mutually exclusive")
-    if access_port > 0 and not tui:
-        return Err("--ui-access-port requires --tui")
-    Ok(CalcCliOptions(path: path, tui: tui, frame_once: frame_once, access_port: access_port))
+    if not tui and not gui and not frame_once:
+        return Err("one of --tui, --gui, or --frame-once is required")
+    var mode_count = 0
+    if tui: mode_count = mode_count + 1
+    if gui: mode_count = mode_count + 1
+    if frame_once: mode_count = mode_count + 1
+    if mode_count > 1:
+        return Err("--tui, --gui, and --frame-once are mutually exclusive")
+    if gui and access_port == 0:
+        access_port = 3000
+    if access_port > 0 and not tui and not gui:
+        return Err("--ui-access-port requires --tui or --gui")
+    Ok(CalcCliOptions(path: path, tui: tui, gui: gui, frame_once: frame_once, access_port: access_port))
 
 fn calc_cli_usage():
-    print "Usage: office calc [FILE.csv|.ods|.xlsx] (--tui [--ui-access-port N]|--frame-once)"
+    print "Usage: office calc [FILE.csv|.ods|.xlsx] (--tui [--ui-access-port N]|--gui [--ui-access-port N]|--frame-once)"
 
 fn run_calc_cli(args: [text]) -> i32:
     val parsed = parse_calc_cli(args)
@@ -57,6 +68,8 @@ fn run_calc_cli(args: [text]) -> i32:
         case Ok(options):
             if options.frame_once:
                 return run_calc_frame_once(options.path)
+            if options.gui:
+                return run_calc_gui_host(options.access_port, options.path)
             if options.access_port > 0:
                 return run_calc_access_session_host(options.access_port, options.path)
             run_calc_tui(options.path)

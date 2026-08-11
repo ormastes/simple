@@ -640,24 +640,160 @@ pub fn prevent_file(mockfn, reason: text):
 # Expectations
 # ================================================================
 
-pub fn expect(value: bool) -> ExpectHelper:
+var _expect_helper_slots: [ExpectHelper] = []
+
+fn _stable_expect_helper(value, negated: bool, implicit_error: bool) -> i64:
+    if _expect_helper_slots.len() == 0:
+        _expect_helper_slots = [ExpectHelper(value: value, negated: negated, implicit_error: implicit_error)]
+    var helper = _expect_helper_slots[0]
+    helper.value = value
+    helper.negated = negated
+    helper.implicit_error = implicit_error
+    _expect_helper_slots = [helper]
+    1
+
+pub fn expect(value: bool) -> i64:
     if not value:
         fail_assertion("Expected true, got false")
-    ExpectHelper(value: value, negated: false, implicit_error: not value)
+    _stable_expect_helper(value, false, not value)
 
-pub fn expect(value) -> ExpectHelper:
+pub fn expect(value) -> i64:
     # A non-bool subject with no matcher asserts NOTHING: truthiness on a
     # text/number/list/object is trivially true, and a tail method that exists
     # on the subject's own type (`expect(s).len()`) reads like a matcher while
     # being none. Record the failure up front; the first real matcher pops it
     # via _begin_matcher(), exactly like the bool overload does.
     fail_assertion("vacuous expect: expect(...) was never consumed by a matcher — chain .to_equal(...)/.to_contain(...) or use assert_true(...)")
-    ExpectHelper(value: value, negated: false, implicit_error: true)
+    _stable_expect_helper(value, false, true)
 
-pub fn expect_not(value: bool) -> ExpectHelper:
+pub fn expect_not(value: bool) -> i64:
     if value:
         fail_assertion("Expected false, got true")
-    ExpectHelper(value: value, negated: true, implicit_error: value)
+    _stable_expect_helper(value, true, value)
+
+fn _expect_begin_matcher(implicit_error: bool):
+    # Keep this outside ExpectHelper. Older Phase-3 native lowering can lose
+    # a class receiver on an internal matcher-to-helper method call.
+    if implicit_error and current_test_errors.len() > 0:
+        val _ = current_test_errors.pop()
+
+pub trait ExpectScalarMatcher:
+    fn not_() -> i64
+    fn to_equal(expected)
+    fn to_be(expected)
+    fn to_be_true()
+    fn to_be_false()
+    fn to_be_nil()
+    fn to_be_truthy()
+    fn to_be_falsy()
+    fn to_be_greater_than(expected)
+    fn to_be_less_than(expected)
+    fn to_be_at_least(expected)
+    fn to_be_at_most(expected)
+    fn to_contain(item)
+    fn to_start_with(prefix: text)
+    fn to_end_with(suffix: text)
+    fn to_be_empty()
+    fn to_have_length(expected: i64)
+    fn to_be_close_to(expected, tolerance)
+    fn to_match(pattern: text)
+
+impl ExpectScalarMatcher for i64:
+    fn not_() -> i64:
+        var helper = _expect_helper_slots[0]
+        helper.negated = not helper.negated
+        _expect_helper_slots = [helper]
+        self
+
+    fn to_equal(expected):
+        var helper = _expect_helper_slots[0]
+        helper.to_equal(expected)
+        _expect_helper_slots = [helper]
+
+    fn to_be(expected):
+        var helper = _expect_helper_slots[0]
+        helper.to_be(expected)
+        _expect_helper_slots = [helper]
+
+    fn to_be_true():
+        var helper = _expect_helper_slots[0]
+        helper.to_be_true()
+        _expect_helper_slots = [helper]
+
+    fn to_be_false():
+        var helper = _expect_helper_slots[0]
+        helper.to_be_false()
+        _expect_helper_slots = [helper]
+
+    fn to_be_nil():
+        var helper = _expect_helper_slots[0]
+        helper.to_be_nil()
+        _expect_helper_slots = [helper]
+
+    fn to_be_truthy():
+        var helper = _expect_helper_slots[0]
+        helper.to_be_truthy()
+        _expect_helper_slots = [helper]
+
+    fn to_be_falsy():
+        var helper = _expect_helper_slots[0]
+        helper.to_be_falsy()
+        _expect_helper_slots = [helper]
+
+    fn to_be_greater_than(expected):
+        var helper = _expect_helper_slots[0]
+        helper.to_be_greater_than(expected)
+        _expect_helper_slots = [helper]
+
+    fn to_be_less_than(expected):
+        var helper = _expect_helper_slots[0]
+        helper.to_be_less_than(expected)
+        _expect_helper_slots = [helper]
+
+    fn to_be_at_least(expected):
+        var helper = _expect_helper_slots[0]
+        helper.to_be_at_least(expected)
+        _expect_helper_slots = [helper]
+
+    fn to_be_at_most(expected):
+        var helper = _expect_helper_slots[0]
+        helper.to_be_at_most(expected)
+        _expect_helper_slots = [helper]
+
+    fn to_contain(item):
+        var helper = _expect_helper_slots[0]
+        helper.to_contain(item)
+        _expect_helper_slots = [helper]
+
+    fn to_start_with(prefix: text):
+        var helper = _expect_helper_slots[0]
+        helper.to_start_with(prefix)
+        _expect_helper_slots = [helper]
+
+    fn to_end_with(suffix: text):
+        var helper = _expect_helper_slots[0]
+        helper.to_end_with(suffix)
+        _expect_helper_slots = [helper]
+
+    fn to_be_empty():
+        var helper = _expect_helper_slots[0]
+        helper.to_be_empty()
+        _expect_helper_slots = [helper]
+
+    fn to_have_length(expected: i64):
+        var helper = _expect_helper_slots[0]
+        helper.to_have_length(expected)
+        _expect_helper_slots = [helper]
+
+    fn to_be_close_to(expected, tolerance):
+        var helper = _expect_helper_slots[0]
+        helper.to_be_close_to(expected, tolerance)
+        _expect_helper_slots = [helper]
+
+    fn to_match(pattern: text):
+        var helper = _expect_helper_slots[0]
+        helper.to_match(pattern)
+        _expect_helper_slots = [helper]
 
 pub class ExpectHelper:
     value: any
@@ -670,14 +806,8 @@ pub class ExpectHelper:
             implicit_error: self.implicit_error
         )
 
-    fn _begin_matcher():
-        # A bare boolean expect is itself an assertion. A chained matcher
-        # replaces that provisional result with its own comparison.
-        if self.implicit_error and current_test_errors.len() > 0:
-            val _ = current_test_errors.pop()
-
     fn to_equal(expected):
-        self._begin_matcher()
+        _expect_begin_matcher(self.implicit_error)
         val matches = self.value == expected
         if self.negated:
             if matches:
@@ -687,10 +817,17 @@ pub class ExpectHelper:
                 fail_assertion("Expected {expected}, got {self.value}")
 
     fn to_be(expected):
-        self.to_equal(expected)
+        _expect_begin_matcher(self.implicit_error)
+        val matches = self.value == expected
+        if self.negated:
+            if matches:
+                fail_assertion("Expected {self.value} to NOT equal {expected}")
+        else:
+            if not matches:
+                fail_assertion("Expected {expected}, got {self.value}")
 
     fn to_be_true():
-        self._begin_matcher()
+        _expect_begin_matcher(self.implicit_error)
         if self.negated:
             if self.value == true:
                 fail_assertion("Expected value to NOT be true")
@@ -699,7 +836,7 @@ pub class ExpectHelper:
                 fail_assertion("Expected true, got {self.value}")
 
     fn to_be_false():
-        self._begin_matcher()
+        _expect_begin_matcher(self.implicit_error)
         if self.negated:
             if self.value == false:
                 fail_assertion("Expected value to NOT be false")
@@ -708,7 +845,7 @@ pub class ExpectHelper:
                 fail_assertion("Expected false, got {self.value}")
 
     fn to_be_nil():
-        self._begin_matcher()
+        _expect_begin_matcher(self.implicit_error)
         if self.negated:
             if self.value == nil:
                 fail_assertion("Expected value to NOT be nil")
@@ -717,7 +854,7 @@ pub class ExpectHelper:
                 fail_assertion("Expected nil, got {self.value}")
 
     fn to_be_truthy():
-        self._begin_matcher()
+        _expect_begin_matcher(self.implicit_error)
         if self.negated:
             if self.value:
                 fail_assertion("Expected value to NOT be truthy")
@@ -726,7 +863,7 @@ pub class ExpectHelper:
                 fail_assertion("Expected truthy value, got {self.value}")
 
     fn to_be_falsy():
-        self._begin_matcher()
+        _expect_begin_matcher(self.implicit_error)
         if self.negated:
             if not self.value:
                 fail_assertion("Expected value to NOT be falsy")
@@ -735,7 +872,7 @@ pub class ExpectHelper:
                 fail_assertion("Expected falsy value, got {self.value}")
 
     fn to_be_greater_than(expected):
-        self._begin_matcher()
+        _expect_begin_matcher(self.implicit_error)
         if self.negated:
             if self.value > expected:
                 fail_assertion("Expected {self.value} to NOT be greater than {expected}")
@@ -744,7 +881,7 @@ pub class ExpectHelper:
                 fail_assertion("Expected {self.value} to be greater than {expected}")
 
     fn to_be_less_than(expected):
-        self._begin_matcher()
+        _expect_begin_matcher(self.implicit_error)
         if self.negated:
             if self.value < expected:
                 fail_assertion("Expected {self.value} to NOT be less than {expected}")
@@ -753,7 +890,7 @@ pub class ExpectHelper:
                 fail_assertion("Expected {self.value} to be less than {expected}")
 
     fn to_be_at_least(expected):
-        self._begin_matcher()
+        _expect_begin_matcher(self.implicit_error)
         if self.negated:
             if self.value >= expected:
                 fail_assertion("Expected {self.value} to NOT be at least {expected}")
@@ -762,7 +899,7 @@ pub class ExpectHelper:
                 fail_assertion("Expected {self.value} to be at least {expected}")
 
     fn to_be_at_most(expected):
-        self._begin_matcher()
+        _expect_begin_matcher(self.implicit_error)
         if self.negated:
             if self.value <= expected:
                 fail_assertion("Expected {self.value} to NOT be at most {expected}")
@@ -771,7 +908,7 @@ pub class ExpectHelper:
                 fail_assertion("Expected {self.value} to be at most {expected}")
 
     fn to_contain(item):
-        self._begin_matcher()
+        _expect_begin_matcher(self.implicit_error)
         val contains = self.value.contains(item)
         if self.negated:
             if contains:
@@ -781,7 +918,7 @@ pub class ExpectHelper:
                 fail_assertion("Expected {self.value} to contain {item}")
 
     fn to_start_with(prefix: text):
-        self._begin_matcher()
+        _expect_begin_matcher(self.implicit_error)
         val starts = self.value.starts_with(prefix)
         if self.negated:
             if starts:
@@ -791,7 +928,7 @@ pub class ExpectHelper:
                 fail_assertion("Expected '{self.value}' to start with '{prefix}'")
 
     fn to_end_with(suffix: text):
-        self._begin_matcher()
+        _expect_begin_matcher(self.implicit_error)
         val ends = self.value.ends_with(suffix)
         if self.negated:
             if ends:
@@ -801,7 +938,7 @@ pub class ExpectHelper:
                 fail_assertion("Expected '{self.value}' to end with '{suffix}'")
 
     fn to_be_empty():
-        self._begin_matcher()
+        _expect_begin_matcher(self.implicit_error)
         val is_empty = self.value.len() == 0
         if self.negated:
             if is_empty:
@@ -811,7 +948,7 @@ pub class ExpectHelper:
                 fail_assertion("Expected empty, got length {self.value.len()}")
 
     fn to_have_length(expected: i64):
-        self._begin_matcher()
+        _expect_begin_matcher(self.implicit_error)
         val actual_len = self.value.len()
         if self.negated:
             if actual_len == expected:
@@ -821,7 +958,7 @@ pub class ExpectHelper:
                 fail_assertion("Expected length {expected}, got {actual_len}")
 
     fn to_be_close_to(expected, tolerance):
-        self._begin_matcher()
+        _expect_begin_matcher(self.implicit_error)
         val diff = self.value - expected
         var abs_diff = diff
         if diff < 0:
@@ -834,7 +971,7 @@ pub class ExpectHelper:
                 fail_assertion("Expected {self.value} to be close to {expected} (tolerance: {tolerance}), diff: {abs_diff}")
 
     fn to_match(pattern: text):
-        self._begin_matcher()
+        _expect_begin_matcher(self.implicit_error)
         val matches = self.value.contains(pattern)
         if self.negated:
             if matches:

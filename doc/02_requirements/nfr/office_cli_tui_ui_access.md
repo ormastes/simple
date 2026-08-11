@@ -44,7 +44,9 @@ full Simple CLI.
 The retained TUI text capture shall preserve Calc's established 20-column by
 30-row sheet viewport in a fixed 124-column by 37-row terminal frame.
 Protocol artifacts shall use deterministic `simple.access/v1` envelopes and
-stable canonical IDs.
+stable canonical IDs. GUI evidence shall retain the served HTML document and
+prove that its grid identities agree with an independent snapshot from the
+same live access session; a screenshot or static mock alone is insufficient.
 
 ## NFR-OFFICE-CLI-UI-007 — Safety and restoration
 
@@ -57,7 +59,9 @@ malformed formulas shall fail closed.
 
 The production Calc closure shall contain no compiler, unified CLI,
 SGTTI/test-only import, or new dependency cycle. New imports shall use narrow
-owner modules rather than broad re-export hubs.
+owner modules rather than broad re-export hubs. TUI, HTML, and access producers
+shall consume the shared Calc semantic/layout owners; the GUI host may add HTML
+and CSS presentation but shall not own a second spreadsheet grid model.
 
 ## NFR-OFFICE-CLI-UI-009 — Verification quality
 

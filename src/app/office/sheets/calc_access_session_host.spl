@@ -2,55 +2,285 @@
 #
 # Only this module imports the shared test/access HTTP transport.  It composes
 # CalcSessionHost, so terminal keys and semantic actions still mutate one
-# controller, UISession, workbook, history, and rendered frame.
+# controller, workbook, history, and rendered frame. The direct protocol
+# snapshot is the semantic projection for this lightweight access path.
 
-use app.office.sheets.calc_session_host.{CalcSessionHost}
-use app.ui.test_api.handler.{UiTestActionResult}
-use app.ui.standalone.bootstrap.{StandaloneOptions, standalone_handle_stream_with_action_result}
-use std.nogc_sync_mut.io.tcp.{TcpListener}
+use app.office.sheets.calc_session_host.{CalcSessionHost, calc_terminal_reader_start}
+use app.ui.test_api.json.{extract_json_field}
+use common.convert.{i64_to_text}
+use common.text_advanced.{escape_json}
+use std.nogc_sync_mut.io.tcp.{tcp_listener_bind_fd, tcp_listener_accept_fd_timeout, tcp_fd_close, tcp_fd_set_read_timeout, tcp_fd_read_line_or_empty, tcp_fd_read_text_or_empty, tcp_fd_write_text}
+use std.nogc_sync_mut.concurrent.channel.{channel_new_id, channel_close_by_id, channel_try_recv_by_id}
+use std.nogc_sync_mut.concurrent.thread.{thread_join_by_id}
 
 extern fn rt_terminal_enable_raw_mode() -> bool
 extern fn rt_terminal_disable_raw_mode() -> bool
 
+# An empty array has no dynamic Calc construction at module initialization.
+# Whole-array replacement preserves the class value after each mutation under
+# Phase-3 ownership lowering; named callbacks never capture a local host.
+var _calc_access_hosts: [CalcSessionHost] = []
+var _calc_access_input_channel_ids: [i64] = []
+var _calc_access_reader_handles: [i64] = []
+var _calc_access_stop_flags: [i64] = []
+var _calc_access_redraw_delays: [i64] = []
+var _calc_access_snapshot_rows: [text] = []
+
+fn _calc_access_install_host(in_path: text):
+    _calc_access_hosts = [CalcSessionHost.open(in_path)]
+    _calc_access_snapshot_rows = []
+
+fn _calc_access_build_snapshot_rows():
+    var host = _calc_access_hosts[0]
+    var rows: [text] = []
+    var row = 0
+    while row < 30:
+        rows = rows.push(host.controller.snapshot_json_stream_row(row))
+        row = row + 1
+    _calc_access_hosts = [host]
+    _calc_access_snapshot_rows = rows
+
+fn _calc_access_running() -> bool:
+    _calc_access_hosts[0].running
+
+fn _calc_access_snapshot_prefix() -> text:
+    var host = _calc_access_hosts[0]
+    val chunk = host.controller.snapshot_json_stream_prefix()
+    _calc_access_hosts = [host]
+    chunk
+
+fn _calc_access_snapshot_row(row: i32) -> text:
+    var host = _calc_access_hosts[0]
+    val chunk = host.controller.snapshot_json_stream_row(row)
+    _calc_access_hosts = [host]
+    chunk
+
+fn _calc_access_snapshot_cell(row: i32, col: i32) -> text:
+    var host = _calc_access_hosts[0]
+    val chunk = host.controller.snapshot_json_stream_cell(row, col)
+    _calc_access_hosts = [host]
+    chunk
+
+fn _calc_access_snapshot_suffix() -> text:
+    var host = _calc_access_hosts[0]
+    val chunk = host.controller.snapshot_json_stream_suffix()
+    _calc_access_hosts = [host]
+    chunk
+
+fn _calc_access_serve_fd(fd: i64):
+    # Keep parsing, semantic dispatch, and socket output in one Calc-owned
+    # frame. Phase-3 corrupts function-valued callback arguments on this lane;
+    # no request or response crosses a callback ABI boundary here.
+    val request_line = tcp_fd_read_line_or_empty(fd)
+    if request_line == "": return
+    val parts = request_line.split(" ")
+    if parts.len() < 2: return
+    val method = parts[0]
+    val path = parts[1]
+    var content_length = 0
+    loop:
+        val header_line = tcp_fd_read_line_or_empty(fd)
+        if header_line == "" or header_line.trim() == "": break
+        if header_line.starts_with("Content-Length:"):
+            val len_str = header_line.slice(15, header_line.len())
+            content_length = len_str.trim().to_int() ?? 0
+    var body = ""
+    if method == "POST" and content_length > 0:
+        body = tcp_fd_read_text_or_empty(fd, content_length)
+
+    if path == "/" and method == "GET":
+        _calc_access_write_response(fd, 200, "text/html", "<!doctype html><html><body><h1>Simple Calc TUI</h1></body></html>")
+        return
+    if method == "GET" and path.starts_with("/api/test/ready"):
+        _calc_access_write_response(fd, 200, "application/json", "{\"ready\":true,\"protocol_version\":1}")
+        return
+    if method == "GET" and path.starts_with("/api/test/ui/"):
+        if path.starts_with("/api/test/ui/find"):
+            val marker = "canonical_id="
+            val marker_at = path.index_of(marker)
+            val encoded = if marker_at < 0: "" else: path.slice(marker_at + marker.len(), path.len()).split("&")[0]
+            val canonical = encoded.replace("%23", "#")
+            _calc_access_write_response(fd, 200, "application/json", _calc_access_hosts[0].controller.find_json(canonical))
+            return
+        if path.starts_with("/api/test/ui/history"):
+            _calc_access_write_response(fd, 200, "application/json", _calc_access_hosts[0].controller.history_json(64))
+            return
+        # Calc's authoritative controller already exposes the complete
+        # simple.access/v1 snapshot. Returning it for semantic read selectors
+        # preserves canonical discovery while avoiding the generic callback
+        # handler used by multi-host embeddings.
+        var snapshot_host = _calc_access_hosts[0]
+        if _calc_access_snapshot_rows.len() != 30:
+            _calc_access_hosts = [snapshot_host]
+            _calc_access_build_snapshot_rows()
+            snapshot_host = _calc_access_hosts[0]
+        tcp_fd_write_text(fd, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-UI-Protocol-Version: 1\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n")
+        tcp_fd_write_text(fd, snapshot_host.controller.snapshot_json_stream_prefix())
+        tcp_fd_write_text(fd, "\n")
+        var row = 0
+        while row < 30:
+            tcp_fd_write_text(fd, _calc_access_snapshot_rows[row])
+            tcp_fd_write_text(fd, "\n")
+            row = row + 1
+        tcp_fd_write_text(fd, snapshot_host.controller.snapshot_json_stream_suffix())
+        tcp_fd_write_text(fd, "\n")
+        _calc_access_hosts = [snapshot_host]
+        return
+    if method == "POST" and path.starts_with("/api/test/ui/act"):
+        _calc_access_handle_action(fd, body)
+        return
+    _calc_access_write_response(fd, 404, "application/json", "{\"error\":\"not_found\",\"message\":\"Route not found\"}")
+
+fn _calc_access_handle_action(fd: i64, body: text):
+    val canonical_id = extract_json_field(body, "canonical_id")
+    val action = extract_json_field(body, "action")
+    val value = extract_json_field(body, "value")
+    var request_id = extract_json_field(body, "request_id")
+    val expected_text = extract_json_field(body, "expected_revision")
+    val before_revision = _calc_access_hosts[0].controller.snapshot_revision()
+    if request_id == "":
+        request_id = "calc-act-" + i64_to_text(before_revision + 1)
+    if canonical_id == "" or action == "":
+        _calc_access_write_response(fd, 400, "application/json", "{\"error\":\"missing_field\",\"message\":\"canonical_id and action are required\"}")
+        return
+    if not _calc_access_hosts[0].controller.has_canonical_id(canonical_id):
+        val missing = "{\"error\":\"target_not_found\",\"message\":\"Canonical node was not present in the observed snapshot\",\"request_id\":\"" + escape_json(request_id) + "\"}"
+        _calc_access_write_response(fd, 404, "application/json", missing)
+        return
+    if _calc_access_hosts[0].controller.has_request_id(request_id):
+        val replay_revision = _calc_access_hosts[0].controller.snapshot_revision()
+        val replay_code = _calc_access_hosts[0].controller.request_result_code(request_id)
+        if replay_code == "ok":
+            val replayed = "{\"ok\":true,\"surface_id\":\"main\",\"canonical_id\":\"" + escape_json(canonical_id) + "\",\"request_id\":\"" + escape_json(request_id) + "\",\"snapshot_revision\":" + i64_to_text(replay_revision) + ",\"replayed\":true}"
+            _calc_access_write_response(fd, 200, "application/json", replayed)
+        else:
+            val status = if replay_code == "target_not_found" or replay_code == "surface_not_found": 404 else: 400
+            val rejected = "{\"error\":\"" + escape_json(replay_code) + "\",\"message\":\"UI application rejected the action\",\"request_id\":\"" + escape_json(request_id) + "\",\"snapshot_revision\":" + i64_to_text(replay_revision) + ",\"replayed\":true}"
+            _calc_access_write_response(fd, status, "application/json", rejected)
+        return
+    val expected = expected_text.to_int()
+    if expected_text != "" and (expected == nil or expected < 0):
+        _calc_access_write_response(fd, 400, "application/json", "{\"error\":\"invalid_field\",\"message\":\"expected_revision must be a non-negative integer\"}")
+        return
+    if expected_text != "" and expected_text != i64_to_text(before_revision):
+        val stale = "{\"error\":\"stale_target\",\"expected_revision\":" + expected_text + ",\"actual_revision\":" + i64_to_text(before_revision) + ",\"request_id\":\"" + escape_json(request_id) + "\"}"
+        _calc_access_write_response(fd, 409, "application/json", stale)
+        return
+    var host = _calc_access_hosts[0]
+    # The projection is response scratch, not model state. Drop the large
+    # retained text before mutating the Phase-3 owner.
+    host.controller.snapshot_json_buffer = ""
+    val active_before = host.controller.active_ref()
+    host.controller.pending_action_value = value
+    host.controller.act_in_place(canonical_id, action, value, request_id)
+    if not host.controller.last_action_ok:
+        val result_code = host.controller.last_action_code
+        val status = if result_code == "target_not_found" or result_code == "surface_not_found": 404 else: 400
+        val rejected = "{\"error\":\"" + escape_json(result_code) + "\",\"message\":\"UI application rejected the action\",\"request_id\":\"" + escape_json(request_id) + "\",\"snapshot_revision\":" + i64_to_text(host.controller.last_action_revision) + "}"
+        val status_text = if status == 404: "Not Found" else: "Bad Request"
+        val response = "HTTP/1.1 " + status.to_text() + " " + status_text + "\r\nContent-Type: application/json\r\nX-UI-Protocol-Version: 1\r\nContent-Length: " + rejected.len().to_text() + "\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n" + rejected
+        tcp_fd_write_text(fd, response)
+        _calc_access_hosts = [host]
+        return
+    val accepted = "{\"ok\":true,\"surface_id\":\"main\",\"canonical_id\":\"" + escape_json(canonical_id) + "\",\"request_id\":\"" + escape_json(request_id) + "\",\"snapshot_revision\":" + i64_to_text(host.controller.last_action_revision) + "}"
+    # Complete the small acknowledgement before publishing the mutated host.
+    # This avoids mutable module-array response staging on Phase-3 while the
+    # state is still installed before the next accepted request.
+    val response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-UI-Protocol-Version: 1\r\nContent-Length: " + accepted.len().to_text() + "\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n" + accepted
+    tcp_fd_write_text(fd, response)
+    val active_after = host.controller.active_ref()
+    _calc_access_hosts = [host]
+    val selection_unchanged = action == "select" and active_before == active_after
+    if not selection_unchanged:
+        _calc_access_snapshot_rows = []
+        # The public client performs an immediate correlated observation.
+        # Defer terminal emission through one following accept cycle so a
+        # full 124x37 redraw cannot delay that response.
+        # Coalesce bursts of remote edits. Eight 25 ms owner-loop quanta keep
+        # redraw work out of a correlated command sequence while still
+        # updating an idle terminal promptly.
+        _calc_access_redraw_delays = [8]
+
+fn _calc_access_write_response(fd: i64, status: i32, content_type: text, body: text):
+    val status_text = if status == 200: "OK" elif status == 400: "Bad Request" elif status == 404: "Not Found" elif status == 409: "Conflict" else: "OK"
+    var response = "HTTP/1.1 " + status.to_text() + " " + status_text + "\r\n"
+    response = response + "Content-Type: " + content_type + "\r\n"
+    response = response + "X-UI-Protocol-Version: 1\r\n"
+    response = response + "Content-Length: " + body.len().to_text() + "\r\n"
+    response = response + "Access-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n"
+    response = response + body
+    tcp_fd_write_text(fd, response)
+
+fn _calc_access_drain_terminal():
+    var host = _calc_access_hosts[0]
+    var queued = channel_try_recv_by_id(_calc_access_input_channel_ids[0])
+    while queued != nil:
+        val byte: i64 = queued
+        if byte < 0 or byte == 113:
+            if _calc_access_redraw_delays.len() > 0 and _calc_access_redraw_delays[0] > 0:
+                host.redraw()
+                _calc_access_redraw_delays = [0]
+            _calc_access_stop_flags = [1]
+            _calc_access_hosts = [host]
+            return
+        host.pending_escape = host.controller.apply_terminal_byte_direct(byte, host.pending_escape)
+        _calc_access_snapshot_rows = []
+        host.redraw()
+        queued = channel_try_recv_by_id(_calc_access_input_channel_ids[0])
+    _calc_access_hosts = [host]
+
+fn _calc_access_close_input():
+    if _calc_access_reader_handles.len() > 0 and _calc_access_reader_handles[0] >= 0:
+        thread_join_by_id(_calc_access_reader_handles[0])
+    if _calc_access_input_channel_ids.len() > 0:
+        channel_close_by_id(_calc_access_input_channel_ids[0])
+    _calc_access_reader_handles = []
+    _calc_access_input_channel_ids = []
+    _calc_access_stop_flags = []
+    _calc_access_redraw_delays = []
+
 fn run_calc_access_session_host(port: i32, in_path: text) -> i32:
     val address = "127.0.0.1:" + port.to_text()
-    match TcpListener.bind(address):
-        Err(e):
-            print "Error: Calc UI access bind failed: {e}"
-            return 1
-        Ok(listener):
-            var host = CalcSessionHost.open(in_path)
-            print "[calc] UI access ready on http://{address}/api/test/ready"
-            if not rt_terminal_enable_raw_mode():
-                print "Error: Calc TUI requires a terminal with raw-mode support"
-                return 1
-            host.start_terminal_input()
-            host.redraw()
-            val opts = StandaloneOptions.new_with_title(address, "Simple Calc TUI")
-            val inject = \event:
-                host.controller.apply_ui_event_to_session(host.session, event)
-                host.redraw()
-            val inject_action = \event:
-                val result = host.controller.apply_ui_event_to_session(host.session, event)
-                host.redraw()
-                UiTestActionResult(ok: result.ok, code: result.code)
-            while host.running:
-                match listener.accept_timeout(25):
-                    Ok(stream):
-                        # Bound partial clients so terminal input remains live.
-                        stream.set_read_timeout(1000)
-                        stream.set_write_timeout(1000)
-                        standalone_handle_stream_with_action_result(
-                            stream, host.session, inject, inject_action, opts
-                        )
-                    Err(_):
-                        pass_dn
-                host.drain_terminal_bytes()
-            host.input_bytes.close()
-            if not rt_terminal_disable_raw_mode():
-                print "Error: Calc terminal restoration failed"
-                return 1
-            print "bye"
-            0
+    val listener_fd = tcp_listener_bind_fd(address)
+    if listener_fd < 0:
+        print "Error: Calc UI access bind failed: {address}"
+        return 1
+    _calc_access_install_host(in_path)
+    print "[calc] UI access ready on http://{address}/api/test/ready"
+    if not rt_terminal_enable_raw_mode():
+        print "Error: Calc TUI requires a terminal with raw-mode support"
+        return 1
+    var started_host = _calc_access_hosts[0]
+    val input_channel_id = channel_new_id()
+    val reader_handle = calc_terminal_reader_start(input_channel_id)
+    _calc_access_reader_handles = [reader_handle]
+    _calc_access_input_channel_ids = [input_channel_id]
+    _calc_access_stop_flags = [0]
+    _calc_access_redraw_delays = [0]
+    started_host.redraw()
+    _calc_access_hosts = [started_host]
+    var access_running = true
+    while access_running:
+        val client_fd = tcp_listener_accept_fd_timeout(listener_fd, 25)
+        if client_fd >= 0:
+            tcp_fd_set_read_timeout(client_fd, 1000)
+            _calc_access_serve_fd(client_fd)
+            tcp_fd_close(client_fd)
+        _calc_access_drain_terminal()
+        if _calc_access_redraw_delays[0] > 0:
+            _calc_access_redraw_delays = [_calc_access_redraw_delays[0] - 1]
+            if _calc_access_redraw_delays[0] == 0:
+                var redraw_host = _calc_access_hosts[0]
+                redraw_host.redraw()
+                _calc_access_hosts = [redraw_host]
+        access_running = _calc_access_stop_flags[0] == 0
+    _calc_access_close_input()
+    if not rt_terminal_disable_raw_mode():
+        print "Error: Calc terminal restoration failed"
+        return 1
+    _calc_access_hosts = []
+    tcp_fd_close(listener_fd)
+    print "bye"
+    0
 
 export run_calc_access_session_host

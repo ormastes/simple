@@ -1,29 +1,161 @@
+# @cover src/app/office_cli/main.spl 80%
+# @cover src/app/office/calc_cli.spl 70%
+# @cover src/app/office/sheets/calc_session_host.spl 50%
+# @cover src/app/office/sheets/calc_access_session_host.spl 60%
+# @cover src/app/office/sheets/calc_gui_host.spl 50%
 # codex-system-test
 # @evidence-display: embed_tui
 """# Standalone Office Calc TUI and Semantic UI Access
 
+## Overview
+
 As an Office operator, I run one unique evidence campaign against
 `OFFICE_BINARY`, the standalone artifact produced by a Phase-3 compiler, and
 inspect the same Calc session through its terminal and semantic UI surfaces.
-`SIMPLE_TEST_DRIVER` executes orchestration and `SIMPLE_UI_CLIENT` drives the
+`OFFICE_GATE_BINARY` executes orchestration and `SIMPLE_UI_CLIENT` drives the
 versioned access protocol; neither tool is the Office product or an application
 launch dependency.
 The scenarios never read a shared or prior evidence directory: one inline
 setup creates the run id and invokes the gate, then every scenario validates
 only that run's command, PTY, and protocol receipts.
 
-**Requirements:** REQ-OFFICE-CLI-UI-001 through REQ-OFFICE-CLI-UI-012;
-NFR-OFFICE-CLI-UI-001 through NFR-OFFICE-CLI-UI-010.
+The standalone Office executable is the product under test. The evidence gate,
+UI protocol client, IDE diagnostic client, and modern SSpec runner are separate
+cached tools. None is compiled or bootstrapped when Office launches.
+
+The terminal and semantic protocol attach to one Calc controller and workbook.
+Actions observed through the protocol must therefore appear in the final PTY
+frame, and actions entered through the terminal must remain visible through
+the same semantic snapshot owner.
+
+**Requirements:** doc/02_requirements/feature/office_cli_tui_ui_access.md
+**Plan:** doc/03_plan/sys_test/office_cli_tui_ui_access.md
+**Design:** doc/05_design/office_cli_tui_ui_access.md
+**Research:** doc/01_research/local/office_cli_tui_ui_access.md
+
+## Syntax
+
+Build the narrow standalone product once with an existing Phase-3 compiler:
+
+```text
+simple native-build --entry src/app/office_cli/main.spl --entry-closure ...
+```
+
+Launch terminal Calc directly:
+
+```text
+office calc [FILE] --tui
+```
+
+Launch the same terminal session with semantic UI access:
+
+```text
+office calc [FILE] --tui --ui-access-port PORT
+```
+
+Launch the real HTML Calc grid:
+
+```text
+office calc [FILE] --gui --ui-access-port PORT
+```
+
+Run this compiled modern SSpec with separately configured artifacts:
+
+```text
+OFFICE_GATE_BINARY=... OFFICE_BINARY=... SIMPLE_UI_CLIENT=... \
+SIMPLE_IDE_CLIENT=... office-sspec
+```
+
+## Examples
+
+The primary formula workflow performs these semantic operations:
+
+1. Select `A1`, type `6`, and commit.
+2. Select `A2`, type `8`, and commit.
+3. Select `B1`, type `=A1*A2`, and commit.
+4. Select `C1`, type `=AVG(A1:A2)`, and commit.
+5. Observe `B1 = 48` and `C1 = 7` independently.
+6. Read bounded correlated history.
+7. Capture the final 124x37 terminal frame.
+
+The GUI workflow launches a second product process, opens its rendered HTML,
+discovers `formula_input`, `sheet_grid`, `cell_A1`, and `cell_T30`, then proves
+that a formula action and an independent post-snapshot belong to that same GUI
+session.
+
+## Evidence contract
+
+Every campaign owns a fresh `runs/sspec_<pid>_<micros>` directory. The setup
+rejects a pre-existing directory and the scenarios consume only this run.
+
+The `exec` evidence identifies every deployed artifact by absolute path,
+SHA-256 digest, and modification time. Product provenance and tool provenance
+are recorded separately.
+
+The `tui` evidence contains the raw ANSI transcript, a normalized 124x37 frame,
+the child PID, clean exit status, and terminal restoration result.
+
+The `protocol` evidence contains versioned `simple.access/v1` responses for
+windows, snapshots, surface discovery, finds, actions, history, malformed
+formula rejection, stale targets, missing targets, and closed-service probes.
+
+The `gui` evidence contains the exact HTML body, initial semantic snapshot,
+formula action acknowledgement, independent post-snapshot, same-session parity
+receipt, process reap result, and closed-port proof.
+
+The `perf` evidence contains startup latency, a complete warm-up sequence,
+twenty warm request samples, nearest-rank p95 values, and measured Office RSS.
+
+## Acceptance boundaries
+
+The campaign fails when an artifact is missing, stale, seed-built, or cannot be
+identified. Source scans and in-process controller calls cannot substitute for
+deployed subprocess evidence.
+
+The campaign fails when the terminal is not a real PTY, its viewport differs
+from 124x37, the final frame is empty, or A1 through T30 are not represented.
+
+The campaign fails when multiplication or the `AVG` alias is accepted without
+independent observation of `48` and `7` in both semantic and terminal evidence.
+
+Rejected actions must remain rejected after an idempotent retry. In particular,
+`malformed_formula`, `stale_target`, `target_not_found`, and
+`unsupported_action` cannot be replayed as successful acknowledgements.
+
+The warm limits are startup at most two seconds, snapshot p95 at most 100 ms,
+find p95 at most 25 ms, action plus independent observation p95 at most 250 ms,
+and access-layer RSS delta at most 20 MiB.
+
+History is bounded to 64 events. The earliest request must be evicted after the
+campaign exceeds that bound, while the newest request/result correlations stay
+available.
+
+## Troubleshooting
+
+If readiness fails, inspect the unique run's PTY transcript and child PID before
+retrying. Never reuse an older run directory.
+
+If an action fails, compare its expected revision with the immediately previous
+snapshot or acknowledgement. Do not guess or reuse a stale revision.
+
+If formula observation fails, inspect the action acknowledgement, independent
+find receipt, post-snapshot, and final terminal frame as separate witnesses.
+
+If cleanup fails, confirm the child was reaped, the terminal attributes were
+restored, and both root and snapshot requests report `source_unavailable`.
 
 ## Operator steps
 
 1. Set `OFFICE_BINARY` to the Phase-3-built standalone Office artifact.
-2. Set `SIMPLE_TEST_DRIVER` and `SIMPLE_UI_CLIENT` to existing orchestration and
-   protocol-client artifacts; do not bootstrap the full CLI for Office launch.
+2. Set `OFFICE_GATE_BINARY` and `SIMPLE_UI_CLIENT` to existing orchestration and
+   protocol-client artifacts; the modern SSpec runner is independent and does
+   not bootstrap the full CLI for Office launch.
 3. Launch `office calc` directly under a 124x37 PTY with UI access enabled.
 4. Discover `main`, edit A1, A2, B1, C1 through `simple ui` structured
    actions, then capture that same process's final terminal frame.
 5. Inspect independent snapshots, history, rejection diagnostics, and captures.
+6. Launch `office calc --gui`, retain the real HTML grid, and prove its action
+   and snapshot use that GUI process's shared semantic session.
 
 When `OFFICE_BINARY` is unset, the legacy unified `SIMPLE_UI_CLIENT office calc`
 launch remains available for compatibility. Missing configured artifacts, a
@@ -34,14 +166,7 @@ that does not answer the public protocol, or stale evidence is a failure.
 use std.spec.*
 use std.io_runtime.{env_get, file_exists, file_read, getpid, process_run, time_now_unix_micros}
 
-val OFFICE_UI_GATE: text = "scripts/check/check-office-cli-tui-ui-access.spl"
 val OFFICE_UI_BASE: text = "build/test-artifacts/03_system/app/office/feature/office_cli_tui_ui_access/runs/"
-
-fn _runtime() -> text:
-    val driver = env_get("SIMPLE_TEST_DRIVER")
-    if driver != nil and driver != "": return driver
-    val runtime = env_get("SIMPLE_BINARY")
-    if runtime == nil: "" else: runtime
 
 fn _configured_binary(name: text, fallback: text) -> text:
     val configured = env_get(name)
@@ -60,42 +185,53 @@ class OfficeUiGateState:
     me count() -> i32:
         self.run_count
 
-val office_ui_gate_state = OfficeUiGateState.new()
+var office_ui_gate_states: [OfficeUiGateState] = []
+
+fn _gate_state_count() -> i32:
+    if office_ui_gate_states.len() == 0: return 0
+    office_ui_gate_states[0].count()
 
 fn setup_office_cli_tui_ui_access() -> text:
-    if office_ui_gate_state.run_root != "":
-        return office_ui_gate_state.run_root
-    val runtime = _runtime()
-    if runtime == "":
-        fail("SIMPLE_TEST_DRIVER or SIMPLE_BINARY must name a deployed pure-Simple test runner")
-    if runtime.contains("compiler_rust"):
+    if office_ui_gate_states.len() == 0:
+        office_ui_gate_states = [OfficeUiGateState.new()]
+    var gate_state = office_ui_gate_states[0]
+    if gate_state.run_root != "":
+        return gate_state.run_root
+    val gate_binary = _configured_binary("OFFICE_GATE_BINARY", "")
+    if gate_binary == "":
+        fail("OFFICE_GATE_BINARY must name the compiled Office evidence gate")
+    if gate_binary.contains("compiler_rust"):
         fail("the Rust bootstrap seed cannot provide Office acceptance evidence")
-    if not file_exists(runtime):
-        fail("Simple test driver does not exist: " + runtime)
-    val ui_client = _configured_binary("SIMPLE_UI_CLIENT", _configured_binary("SIMPLE_BINARY", runtime))
+    if not file_exists(gate_binary):
+        fail("Office evidence gate does not exist: " + gate_binary)
+    val ui_client = _configured_binary("SIMPLE_UI_CLIENT", _configured_binary("SIMPLE_BINARY", ""))
+    val ide_client = _configured_binary("SIMPLE_IDE_CLIENT", ui_client)
     val office_binary = _configured_binary("OFFICE_BINARY", ui_client)
     if not file_exists(ui_client):
         fail("SIMPLE_UI_CLIENT does not exist: " + ui_client)
     if not file_exists(office_binary):
         fail("OFFICE_BINARY does not exist: " + office_binary)
-    if ui_client.contains("compiler_rust") or office_binary.contains("compiler_rust"):
+    if not file_exists(ide_client):
+        fail("SIMPLE_IDE_CLIENT does not exist: " + ide_client)
+    if ui_client.contains("compiler_rust") or ide_client.contains("compiler_rust") or office_binary.contains("compiler_rust"):
         fail("Rust bootstrap seeds cannot provide UI-client or Office evidence")
     val run_id = _run_id()
     val root = OFFICE_UI_BASE + run_id
     if file_exists(root + "/suite.txt"):
         fail("fresh run id already contains evidence: " + run_id)
-    val (stdout, stderr, code) = process_run(runtime, ["run", OFFICE_UI_GATE, "--scenario", "all", "--run-id", run_id])
+    val (stdout, stderr, code) = process_run(gate_binary, ["--scenario", "all", "--run-id", run_id])
     if code != 0:
         fail("deployed Office gate failed:\nstdout:\n" + stdout + "\nstderr:\n" + stderr)
     if not stdout.contains("suite_status=pass") or not stdout.contains("run_id=" + run_id):
         fail("deployed Office gate omitted its fresh-run PASS receipt")
-    office_ui_gate_state.run_count = office_ui_gate_state.run_count + 1
-    office_ui_gate_state.run_root = root
+    gate_state.run_count = gate_state.run_count + 1
+    gate_state.run_root = root
+    office_ui_gate_states = [gate_state]
     root
 
 fn check_office_gate() -> text:
     val root = setup_office_cli_tui_ui_access()
-    expect(office_ui_gate_state.count()).to_equal(1)
+    expect(_gate_state_count()).to_equal(1)
     expect(file_exists(root + "/suite.txt")).to_be(true)
     root
 
@@ -105,7 +241,7 @@ describe "Standalone Office Calc TUI, formulas, and semantic UI access":
         step("Create one unique deployed Office evidence run")
         val root = setup_office_cli_tui_ui_access()
         expect(file_exists(root + "/suite.txt")).to_be(true)
-        expect(office_ui_gate_state.count()).to_equal(1)
+        expect(_gate_state_count()).to_equal(1)
 
     # @prev("should create one fresh deployed Office evidence run")
     # @manual: show
@@ -194,6 +330,7 @@ describe "Standalone Office Calc TUI, formulas, and semantic UI access":
         val provenance = file_read(root + "/exec/runtime-provenance.txt")
         val artifact = file_read(root + "/exec/runtime-artifact.txt")
         val office_artifact = file_read(root + "/exec/office-artifact.txt")
+        val ide_artifact = file_read(root + "/exec/ide-artifact.txt")
         val office_provenance = file_read(root + "/exec/office-product-provenance.txt")
         val commands = file_read(root + "/exec/commands.txt")
         expect(provenance.lower().contains("bootstrap seed only")).to_be(false)
@@ -201,6 +338,8 @@ describe "Standalone Office Calc TUI, formulas, and semantic UI access":
         expect(artifact).to_contain("runtime_mtime_epoch=")
         expect(office_artifact).to_contain("office_sha256=")
         expect(office_artifact).to_contain("office_mtime_epoch=")
+        expect(ide_artifact).to_contain("ide_sha256=")
+        expect(ide_artifact).to_contain("ide_mtime_epoch=")
         expect(office_provenance.lower().contains("bootstrap seed only")).to_be(false)
         val configured_office = env_get("OFFICE_BINARY")
         val expected_office_mode = if configured_office != nil and configured_office != "": "standalone" else: "unified"
@@ -226,7 +365,7 @@ describe "Standalone Office Calc TUI, formulas, and semantic UI access":
         expect(file_read(root + "/tui/calc-exit.txt")).to_contain("terminal_restored=true")
         expect(file_read(root + "/protocol/service-closed.txt")).to_contain("closed=true")
         step("Confirm one fresh run supplied every assertion")
-        expect(office_ui_gate_state.count()).to_equal(1)
+        expect(_gate_state_count()).to_equal(1)
 
     # @prev("should create one fresh deployed Office evidence run")
     # @manual: folded
@@ -263,4 +402,45 @@ describe "Standalone Office Calc TUI, formulas, and semantic UI access":
         expect(screen.split("\n").len()).to_equal(38)
         expect(file_read(root + "/suite.txt")).to_contain("capture_size=124x37")
         expect(file_read(root + "/suite.txt")).to_contain("service_port_closed=true")
-        expect(office_ui_gate_state.count()).to_equal(1)
+        expect(_gate_state_count()).to_equal(1)
+
+    # @prev("should create one fresh deployed Office evidence run")
+    # @manual: folded
+    # @capture(exec)
+    # @capture(html)
+    # @capture(protocol)
+    # @req REQ-OFFICE-CLI-UI-013
+    # @req NFR-OFFICE-CLI-UI-006
+    # @req NFR-OFFICE-CLI-UI-008
+    # @troubleshooting(symptom: "the Calc GUI is empty, static, or disconnected from UI access", fix: "inspect gui/root.html, gui/snapshot.json, gui/session-parity.txt, and exec/gui-exit.txt from the same unique run")
+    it "should launch the real Calc HTML grid on the shared UI access session":
+        step("Launch GUI")
+        val root = check_office_gate()
+        step("Open rendered Calc HTML")
+        val html = file_read(root + "/gui/root.html")
+        expect(html.lower()).to_contain("<!doctype html>")
+        expect(html).to_contain("<title>Simple Calc</title>")
+        expect(html).to_contain("formula_input")
+        expect(html).to_contain("sheet_grid")
+        expect(html).to_contain("cell_A1")
+        expect(html).to_contain("cell_T30")
+        step("Discover the shared semantic surface")
+        val gui_snapshot = file_read(root + "/gui/snapshot.json")
+        expect(gui_snapshot).to_contain("simple.access/v1")
+        expect(gui_snapshot).to_contain("main#cell_A1")
+        expect(gui_snapshot).to_contain("main#cell_T30")
+        expect(gui_snapshot).to_contain("main#formula_input")
+        val gui_action = file_read(root + "/gui/action-result.json")
+        val gui_post = file_read(root + "/gui/post-snapshot.json")
+        val gui_parity = file_read(root + "/gui/session-parity.txt")
+        expect(gui_action).to_contain("simple.access/v1")
+        expect(gui_post).to_contain("simple.access/v1")
+        expect(gui_post).to_contain("main#cell_B1")
+        expect(gui_post).to_contain("48")
+        expect(gui_parity).to_contain("same_session=true")
+        expect(gui_parity).to_contain("result=48")
+        step("Stop GUI")
+        val gui_exit = file_read(root + "/exec/gui-exit.txt")
+        expect(gui_exit).to_contain("reaped=true")
+        expect(gui_exit).to_contain("port_closed=true")
+        expect(_gate_state_count()).to_equal(1)

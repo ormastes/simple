@@ -1,15 +1,15 @@
-# Calc's transport-free terminal/session host.
+# Calc's transport-free terminal host.
 #
-# The host is the sole owner of CalcAccessController and UISession.  A small
+# The host is the sole owner of CalcAccessController. A small
 # stdin reader thread transfers bytes only.  This normal production owner has
 # no TCP or test-API dependency; the opt-in access adapter composes this same
-# controller/session host when --ui-access-port is requested.
+# controller host when --ui-access-port is requested. Semantic snapshots are
+# projected directly by the controller; only the GUI constructs a UISession.
 
 use app.office.sheets.access_controller.{CalcAccessController, calc_access_controller_with_sheet}
 use app.office.sheets.sheet_io.{sheet_load}
-use nogc_sync_mut.ui.session.{UISession}
-use std.nogc_sync_mut.concurrent.channel.{Channel, channel_new, channel_from_id}
-use std.nogc_sync_mut.concurrent.thread.{thread_spawn_with_args}
+use std.nogc_sync_mut.concurrent.channel.{Channel, channel_new, channel_send_i64_by_id, channel_try_recv_by_id, channel_close_by_id}
+use std.nogc_sync_mut.concurrent.thread.{thread_spawn_with_i64_args_id, thread_join_by_id}
 use std.common.string_core.{char_from_code}
 use std.nogc_sync_mut.io_runtime.{thread_sleep}
 
@@ -17,26 +17,50 @@ extern fn rt_stdin_read_byte() -> i64
 extern fn rt_terminal_enable_raw_mode() -> bool
 extern fn rt_terminal_disable_raw_mode() -> bool
 
+fn _calc_terminal_reader(channel_arg: Any, ignored_arg: Any) -> i64:
+    val channel_id: i64 = channel_arg
+    var reading = true
+    while reading:
+        val byte = rt_stdin_read_byte()
+        channel_send_i64_by_id(channel_id, byte)
+        reading = byte != 113 and byte >= 0
+    0
+
+fn calc_terminal_reader_start(input_channel_id: i64) -> i64:
+    thread_spawn_with_i64_args_id(input_channel_id, 0, _calc_terminal_reader)
+
 class CalcSessionHost:
     controller: CalcAccessController
-    session: UISession
     input_bytes: Channel
     running: bool
     pending_escape: i32
+    reader_handle: i64
 
     static fn open(in_path: text) -> CalcSessionHost:
         var controller = calc_access_controller_with_sheet(sheet_load(in_path))
-        val session = UISession.new(controller.ui_tree())
         CalcSessionHost(
             controller: controller,
-            session: session,
             input_bytes: channel_new(),
             running: true,
-            pending_escape: 0
+            pending_escape: 0,
+            reader_handle: -1
         )
 
+    me reset(in_path: text):
+        """Replace session state without replacing this host object's identity.
+
+        The standalone access adapter keeps one module-lifetime host so Phase 3
+        callbacks never capture, move, or unwrap the owner reference.
+        """
+        var controller = calc_access_controller_with_sheet(sheet_load(in_path))
+        self.controller = controller
+        self.input_bytes = channel_new()
+        self.running = true
+        self.pending_escape = 0
+        self.reader_handle = -1
+
     me run_terminal_only() -> i32:
-        """Run the normal Calc TUI through the same controller/session host.
+        """Run the normal Calc TUI through the same controller host.
 
         No listener is bound for the normal command, but there is still no
         second workbook or legacy terminal state machine.
@@ -44,39 +68,44 @@ class CalcSessionHost:
         if not rt_terminal_enable_raw_mode():
             print "Error: Calc TUI requires a terminal with raw-mode support"
             return 1
-        self.start_terminal_input()
+        val input_channel_id = self.input_bytes.id()
+        self.start_terminal_input(input_channel_id)
         self.redraw()
         while self.running:
-            self.drain_terminal_bytes()
+            self.drain_terminal_bytes(input_channel_id)
             # The keyboard reader blocks; yield while its channel is empty
             # instead of busy-spinning the normal no-server TUI.
             thread_sleep(10)
-        self.input_bytes.close()
+        self.join_terminal_input()
+        channel_close_by_id(self.input_bytes.id())
         if not rt_terminal_disable_raw_mode():
             print "Error: Calc terminal restoration failed"
             return 1
         print "bye"
         0
 
-    me start_terminal_input():
-        val input_channel_id = self.input_bytes.id()
-        val reader = thread_spawn_with_args(input_channel_id, 0, \channel_id, _:
-            val channel = channel_from_id(channel_id)
-            loop:
-                channel.send(rt_stdin_read_byte())
+    me start_terminal_input(input_channel_id: i64) -> i64:
+        self.reader_handle = thread_spawn_with_i64_args_id(
+            input_channel_id, 0, _calc_terminal_reader
         )
-        reader.free()
+        self.reader_handle
 
-    me drain_terminal_bytes():
-        var queued = self.input_bytes.try_recv()
+    me join_terminal_input():
+        if self.reader_handle >= 0:
+            thread_join_by_id(self.reader_handle)
+            self.reader_handle = -1
+
+    me drain_terminal_bytes(input_channel_id: i64) -> i64:
+        var queued = channel_try_recv_by_id(input_channel_id)
         while queued != nil and self.running:
             val byte: i64 = queued
-            self.pending_escape = self.controller.apply_terminal_byte(self.session, byte, self.pending_escape)
-            if self.pending_escape < 0:
+            self.pending_escape = self.controller.apply_terminal_byte_direct(byte, self.pending_escape)
+            if self.pending_escape == 3:
                 self.running = false
             else:
                 self.redraw()
-            queued = self.input_bytes.try_recv()
+            queued = channel_try_recv_by_id(input_channel_id)
+        if self.running: 0 else: 1
 
     me redraw():
         # The controller returns normalized 124x37 text for protocol and
@@ -90,3 +119,4 @@ fn run_calc_session_host(in_path: text) -> i32:
     host.run_terminal_only()
 
 export CalcSessionHost, run_calc_session_host
+export calc_terminal_reader_start

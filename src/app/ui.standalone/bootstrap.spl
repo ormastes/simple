@@ -12,6 +12,7 @@
 # one test_api handler, one route helper, three embeddings.
 
 use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
+use std.nogc_sync_mut.io.tcp.{tcp_fd_read_line_or_empty, tcp_fd_read_text_or_empty, tcp_fd_write_text}
 use nogc_sync_mut.ui.session.{UISession}
 use common.ui.widget.{UIEvent}
 use app.ui.test_api.handler.{UiTestActionResult}
@@ -20,12 +21,29 @@ use app.ui.test_api.mount.{test_api_matches, dispatch_and_format_with_action_res
 class StandaloneOptions:
     bind_addr: text
     title: text
+    root_html: text
 
     static fn new(bind_addr: text) -> StandaloneOptions:
-        return StandaloneOptions(bind_addr: bind_addr, title: "Simple standalone app")
+        return StandaloneOptions(bind_addr: bind_addr, title: "Simple standalone app", root_html: "")
 
     static fn new_with_title(bind_addr: text, title: text) -> StandaloneOptions:
-        return StandaloneOptions(bind_addr: bind_addr, title: title)
+        return StandaloneOptions(bind_addr: bind_addr, title: title, root_html: "")
+
+    static fn new_with_html(bind_addr: text, title: text, root_html: text) -> StandaloneOptions:
+        return StandaloneOptions(bind_addr: bind_addr, title: title, root_html: root_html)
+
+# The Phase-3 function-value ABI is reliable for named no-argument callbacks,
+# but corrupts text arguments on this hosted lane. The scalar server is serial,
+# so one request slot safely carries parsed values to Calc-owned callbacks.
+var _standalone_request_path: text = ""
+var _standalone_request_method: text = ""
+var _standalone_request_body: text = ""
+
+fn standalone_request_path() -> text: _standalone_request_path
+fn standalone_request_method() -> text: _standalone_request_method
+fn standalone_request_body() -> text: _standalone_request_body
+
+export standalone_request_path, standalone_request_method, standalone_request_body
 
 fn run_test_api_server(session: UISession, opts: StandaloneOptions):
     """Serve /api/test/* against the given session; dispatch events
@@ -48,58 +66,79 @@ fn run_test_api_server_with_inject(session: UISession, opts: StandaloneOptions, 
             print "[standalone] LLM control: GET http://{opts.bind_addr}/api/test/ready"
             _accept_loop(listener, session, inject_event, opts)
 
+fn run_test_api_server_with_action_result(session: UISession, opts: StandaloneOptions, inject_event: fn(UIEvent), inject_action: fn(UIEvent) -> UiTestActionResult):
+    """Result-aware server for hosts with named, capture-free callbacks."""
+    print "[standalone] binding {opts.bind_addr}"
+    match TcpListener.bind(opts.bind_addr):
+        Err(e):
+            print "[standalone] bind failed: {e}"
+            return
+        Ok(listener):
+            print "[standalone] {opts.title} — ready on http://{opts.bind_addr}"
+            print "[standalone] LLM control: GET http://{opts.bind_addr}/api/test/ready"
+            # Keep the listener in the bind-result scope. Phase-3 class
+            # lowering can consume a listener passed into another function.
+            loop:
+                val client_fd = listener.accept_fd()
+                if client_fd < 0:
+                    print "[standalone] accept error"
+                else:
+                    val stream = TcpStream.from_accepted_fd(client_fd)
+                    standalone_handle_stream_with_action_result(
+                        stream, session, inject_event, inject_action, opts
+                    )
+
+export run_test_api_server_with_action_result
+
 fn _accept_loop(listener: TcpListener, session: UISession, inject_event: fn(UIEvent), opts: StandaloneOptions):
     loop:
-        match listener.accept():
-            Err(e):
-                print "[standalone] accept error: {e}"
-            Ok(stream):
-                _handle_one(stream, session, inject_event, opts)
+        val client_fd = listener.accept_fd()
+        if client_fd < 0:
+            print "[standalone] accept error"
+        else:
+            val stream = TcpStream.from_accepted_fd(client_fd)
+            _handle_one(stream, session, inject_event, opts)
 
 fn _handle_one(stream: TcpStream, session: UISession, inject_event: fn(UIEvent), opts: StandaloneOptions):
     val inject_action = \event:
         inject_event(event)
         UiTestActionResult.accepted()
-    _handle_one_with_action_result(stream, session, inject_event, inject_action, opts)
+    standalone_handle_stream_with_action_result(stream, session, inject_event, inject_action, opts)
 
-fn _handle_one_with_action_result(stream: TcpStream, session: UISession, inject_event: fn(UIEvent), inject_action: fn(UIEvent) -> UiTestActionResult, opts: StandaloneOptions):
-    match stream.read_line():
-        Err(_):
-            return
-        Ok(request_line):
-            val parts = request_line.split(" ")
-            if parts.len() < 2:
-                return
-            val method = parts[0]
-            val path = parts[1]
+fn standalone_handle_stream_with_action_result(stream: TcpStream, session: UISession, inject_event: fn(UIEvent), inject_action: fn(UIEvent) -> UiTestActionResult, opts: StandaloneOptions):
+    val first_line = stream.read_line_or_empty()
+    if first_line == "":
+        return
+    val request_line = first_line
+    val parts = request_line.split(" ")
+    if parts.len() < 2:
+        return
+    val method = parts[0]
+    val path = parts[1]
 
-            var content_length = 0
-            loop:
-                match stream.read_line():
-                    Err(_):
-                        break
-                    Ok(header_line):
-                        if header_line.trim() == "":
-                            break
-                        if header_line.starts_with("Content-Length:"):
-                            val len_str = header_line.slice(15, header_line.len())
-                            content_length = len_str.trim().to_int() ?? 0
+    var content_length = 0
+    loop:
+        val next_line = stream.read_line_or_empty()
+        if next_line == "":
+            break
+        val header_line = next_line
+        if header_line.trim() == "":
+            break
+        if header_line.starts_with("Content-Length:"):
+            val len_str = header_line.slice(15, header_line.len())
+            content_length = len_str.trim().to_int() ?? 0
 
-            var body = ""
-            if method == "POST" and content_length > 0:
-                match stream.read_bytes(content_length):
-                    Ok(data):
-                        body = data
-                    Err(_):
-                        pass_dn
+    var body = ""
+    if method == "POST" and content_length > 0:
+        body = stream.read_bytes_or_empty(content_length)
 
-            if test_api_matches(path):
-                stream.write_all(dispatch_and_format_with_action_result(path, method, body, session, inject_event, inject_action))
-                return
-            if path == "/" and method == "GET":
-                stream.write_all(format_http_response(200, "text/html", _index_html(opts)))
-                return
-            stream.write_all(format_http_response(404, "text/plain", "Not Found"))
+    if test_api_matches(path):
+        stream.write_text_status(dispatch_and_format_with_action_result(path, method, body, session, inject_event, inject_action))
+        return
+    if path == "/" and method == "GET":
+        stream.write_text_status(format_http_response(200, "text/html", _index_html(opts)))
+        return
+    stream.write_text_status(format_http_response(404, "text/plain", "Not Found"))
 
 fn standalone_handle_stream(stream: TcpStream, session: UISession, inject_event: fn(UIEvent), opts: StandaloneOptions):
     """Serve exactly one accepted connection.
@@ -110,21 +149,53 @@ fn standalone_handle_stream(stream: TcpStream, session: UISession, inject_event:
     """
     _handle_one(stream, session, inject_event, opts)
 
-fn standalone_handle_stream_with_action_result(stream: TcpStream, session: UISession, inject_event: fn(UIEvent), inject_action: fn(UIEvent) -> UiTestActionResult, opts: StandaloneOptions):
-    """Serve one stream and propagate application-domain action rejection."""
-    _handle_one_with_action_result(stream, session, inject_event, inject_action, opts)
-
 export standalone_handle_stream_with_action_result
 
+fn standalone_handle_fd_with_dispatch(fd: i64, dispatch_request: fn() -> text, root_provider: fn() -> text):
+    """Serve one accepted scalar descriptor without constructing TcpStream."""
+    val request_line = tcp_fd_read_line_or_empty(fd)
+    if request_line == "": return
+    val parts = request_line.split(" ")
+    if parts.len() < 2: return
+    val method = parts[0]
+    val path = parts[1]
+    var content_length = 0
+    loop:
+        val header_line = tcp_fd_read_line_or_empty(fd)
+        if header_line == "" or header_line.trim() == "": break
+        if header_line.starts_with("Content-Length:"):
+            val len_str = header_line.slice(15, header_line.len())
+            content_length = len_str.trim().to_int() ?? 0
+    var body = ""
+    if method == "POST" and content_length > 0:
+        body = tcp_fd_read_text_or_empty(fd, content_length)
+    if test_api_matches(path):
+        _standalone_request_path = path
+        _standalone_request_method = method
+        _standalone_request_body = body
+        tcp_fd_write_text(fd, dispatch_request())
+        return
+    if path == "/" and method == "GET":
+        tcp_fd_write_text(fd, format_http_response(200, "text/html", root_provider()))
+        return
+    tcp_fd_write_text(fd, format_http_response(404, "text/plain", "Not Found"))
+
+export standalone_handle_fd_with_dispatch
+
 fn _index_html(opts: StandaloneOptions) -> text:
-    return "<!doctype html><html><head><meta charset=\"utf-8\"><title>{opts.title}</title>" +
-           "<style>body{font-family:monospace;padding:24px;background:#0b0f1a;color:#e4eefc;}" +
-           "code{background:#1a2030;padding:2px 6px;border-radius:3px;}</style>" +
-           "</head><body><h1>{opts.title}</h1>" +
-           "<p>LLM-friendly test API mounted at <code>/api/test/*</code>.</p>" +
-           "<ul>" +
-           "<li><code>GET  /api/test/ready</code></li>" +
-           "<li><code>GET  /api/test/ui/snapshot</code></li>" +
-           "<li><code>GET  /api/test/ui/query?kind=button</code></li>" +
-           "<li><code>POST /api/test/ui/act {\"canonical_id\":\"&hellip;\",\"action\":\"invoke\"}</code></li>" +
-           "</ul></body></html>"
+    _index_html_fields(opts.title, opts.root_html)
+
+fn _index_html_fields(title: text, root_html: text) -> text:
+    if root_html != "":
+        return root_html
+    var html = "<!doctype html><html><head><meta charset=\"utf-8\"><title>"
+    html = html + title + "</title>"
+    html = html + "<style>body{font-family:monospace;padding:24px;background:#0b0f1a;color:#e4eefc;}"
+    html = html + "code{background:#1a2030;padding:2px 6px;border-radius:3px;}</style>"
+    html = html + "</head><body><h1>" + title + "</h1>"
+    html = html + "<p>LLM-friendly test API mounted at <code>/api/test/*</code>.</p><ul>"
+    html = html + "<li><code>GET /api/test/ready</code></li>"
+    html = html + "<li><code>GET /api/test/ui/snapshot</code></li>"
+    html = html + "<li><code>GET /api/test/ui/query?kind=button</code></li>"
+    html = html + "<li><code>POST /api/test/ui/act</code></li></ul></body></html>"
+    html

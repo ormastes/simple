@@ -74,6 +74,23 @@ class TcpListener with Close:
             return Err(IoError(kind: IoErrorKind.TimedOut, message: "accept timed out", source: nil))
         Ok(TcpStream(fd: client_fd, open: true))
 
+    fn accept_fd() -> i64:
+        """Accept and return the scalar native descriptor.
+
+        Native Phase-3 consumers use this boundary when an aggregate
+        ``Result<TcpStream, IoError>`` return is not ABI-safe.  Negative values
+        retain the runtime accept failure convention.
+        """
+        if not self.open:
+            return -1
+        rt_io_tcp_accept(self.fd)
+
+    fn accept_fd_timeout(ms: i64) -> i64:
+        """Accept with timeout and return only the scalar descriptor."""
+        if not self.open:
+            return -1
+        rt_io_tcp_accept_timeout(self.fd, ms)
+
     fn local_addr() -> Result<text, IoError>:
         """Get local bound address.
 
@@ -118,6 +135,17 @@ class TcpStream with Read, Write, Close:
     """
     fd: i64
     open: bool
+
+    static fn from_accepted_fd(fd: i64) -> TcpStream:
+        TcpStream(fd: fd, open: fd >= 0)
+
+    static fn connect_fd_timeout(addr: text, ms: i64) -> i64:
+        """Connect and return only the scalar native descriptor.
+
+        Phase-3 native leaf clients use this boundary instead of returning an
+        aggregate ``Result<TcpStream, IoError>`` across the runtime call.
+        """
+        rt_io_tcp_connect_timeout(addr, ms)
 
     static fn connect(addr: text) -> Result<TcpStream, IoError>:
         """Connect to remote address.
@@ -246,6 +274,39 @@ class TcpStream with Read, Write, Close:
             return Err(IoError(kind: IoErrorKind.UnexpectedEof, message: "end of stream", source: nil))
         Ok(line)
 
+    fn read_line_nullable() -> text?:
+        """Read one line without an aggregate ``Result`` return.
+
+        This is the Phase-3 ABI-safe server boundary. ``nil`` represents a
+        closed stream or read failure.
+        """
+        if not self.open:
+            return nil
+        rt_io_tcp_read_line(self.fd)
+
+    fn read_line_or_empty() -> text:
+        """Read one line through a non-optional Phase-3 ABI boundary."""
+        if not self.open:
+            return ""
+        val line = rt_io_tcp_read_line(self.fd)
+        if line == nil:
+            return ""
+        line
+
+    fn read_bytes_or_empty(count: i32) -> text:
+        """Read an exact HTTP body without returning an aggregate result."""
+        if not self.open or count <= 0:
+            return ""
+        var buf: [u8] = []
+        var remaining = count.to_i64()
+        while remaining > 0:
+            val chunk = rt_io_tcp_read(self.fd, remaining)
+            if chunk.len() == 0:
+                return ""
+            buf = buf + chunk
+            remaining = remaining - chunk.len()
+        rt_bytes_to_text(buf)
+
     # --- Write trait ---
 
     fn write(data: [u8]) -> Result<i64, IoError>:
@@ -300,6 +361,12 @@ class TcpStream with Read, Write, Close:
             return Err(IoError(kind: IoErrorKind.BrokenPipe, message: "write_text failed", source: nil))
         Ok(())
 
+    fn write_text_status(s: text) -> bool:
+        """Write text and return a scalar success flag."""
+        if not self.open:
+            return false
+        rt_io_tcp_write_text(self.fd, s) > 0
+
     fn flush() -> Result<(), IoError>:
         """Flush write buffer.
 
@@ -324,6 +391,14 @@ class TcpStream with Read, Write, Close:
         if not ok:
             return Err(IoError(kind: IoErrorKind.Other, message: "close failed", source: nil))
         Ok(())
+
+    me close_status() -> bool:
+        """Close the stream and return a scalar success flag."""
+        if not self.open:
+            return true
+        val ok = rt_io_tcp_close(self.fd)
+        self.open = false
+        ok
 
     fn is_open() -> bool:
         """Check if stream is open."""
@@ -380,6 +455,12 @@ class TcpStream with Read, Write, Close:
         if not ok:
             return Err(IoError(kind: IoErrorKind.Other, message: "set_read_timeout failed", source: nil))
         Ok(())
+
+    fn set_read_timeout_status(ms: i64) -> bool:
+        """Set a finite read timeout with a scalar native result."""
+        if not self.open:
+            return false
+        rt_io_tcp_set_read_timeout(self.fd, ms)
 
     fn set_write_timeout(ms: i64?) -> Result<(), IoError>:
         """Set write timeout.
@@ -593,6 +674,72 @@ fn tcp_socket_create_resource(family: i64) -> TcpSocket?:
     if fd < 0:
         return nil
     TcpSocket(fd: fd)
+
+# Scalar descriptor helpers for Phase-3 consumers.  They deliberately avoid
+# constructing/returning TcpStream class values across a native call boundary.
+fn tcp_fd_set_read_timeout(fd: i64, ms: i64) -> bool:
+    fd >= 0 and rt_io_tcp_set_read_timeout(fd, ms)
+
+fn tcp_fd_write_text(fd: i64, data: text) -> bool:
+    fd >= 0 and rt_io_tcp_write_text(fd, data) > 0
+
+fn tcp_fd_read_line_or_empty(fd: i64) -> text:
+    if fd < 0:
+        return ""
+    val line = rt_io_tcp_read_line(fd)
+    if line == nil:
+        return ""
+    line
+
+fn tcp_fd_read_bytes_or_empty(fd: i64, count: i32) -> text:
+    if fd < 0 or count <= 0:
+        return ""
+    var buf: [u8] = []
+    var remaining = count.to_i64()
+    while remaining > 0:
+        val chunk = rt_io_tcp_read(fd, remaining)
+        if chunk.len() == 0:
+            return ""
+        buf = buf + chunk
+        remaining = remaining - chunk.len()
+    rt_bytes_to_text(buf)
+
+fn tcp_fd_read_text_or_empty(fd: i64, count: i32) -> text:
+    """Read a bounded HTTP text body without the Phase-3 array-return ABI.
+
+    `rt_io_tcp_read` returns `[u8]`, which is not stable in the current
+    staged native lane. `rt_io_tcp_read_line` returns runtime-owned text, so
+    accumulate complete lines until Content-Length bytes are present or the
+    peer closes. This supports both one-line protocol JSON and multiline HTML.
+    """
+    if fd < 0 or count <= 0:
+        return ""
+    var out = ""
+    while out.len() < count:
+        val chunk = tcp_fd_read_line_or_empty(fd)
+        if chunk == "":
+            break
+        out = out + chunk
+    out
+
+fn tcp_fd_close(fd: i64) -> bool:
+    fd < 0 or rt_io_tcp_close(fd)
+
+fn tcp_listener_bind_fd(addr: text) -> i64:
+    rt_io_tcp_bind(addr)
+
+fn tcp_listener_accept_fd(fd: i64) -> i64:
+    if fd < 0: return -1
+    rt_io_tcp_accept(fd)
+
+fn tcp_listener_accept_fd_timeout(fd: i64, ms: i64) -> i64:
+    if fd < 0: return -1
+    rt_io_tcp_accept_timeout(fd, ms)
+
+export tcp_fd_set_read_timeout, tcp_fd_write_text, tcp_fd_read_line_or_empty
+export tcp_fd_read_bytes_or_empty, tcp_fd_close
+export tcp_fd_read_text_or_empty
+export tcp_listener_bind_fd, tcp_listener_accept_fd, tcp_listener_accept_fd_timeout
 
 # NOTE: the raw fd-based helpers above (tcp_backend_socket_create,
 # tcp_backend_close, ...) are DEPRECATED for new code: use

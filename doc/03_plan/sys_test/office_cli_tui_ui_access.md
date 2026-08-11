@@ -15,6 +15,7 @@ that selected contract and the frozen user interface.
 | REQ-OFFICE-CLI-UI-004..006 | Calc exposes `main` through windows/snapshot/surface/find/act/history with stable IDs, revisions, value actions, post-state, and correlated history |
 | REQ-OFFICE-CLI-UI-007..008 | Real Calc entry produces A1=6, A2=8, B1=`=A1*A2`=>48, and C1=`=AVG(A1:A2)`=>7 |
 | REQ-OFFICE-CLI-UI-009..011 | Retained TUI/protocol evidence, generated operator manual, and production isolation are verified by the evidence, isolation, and manual gates |
+| REQ-OFFICE-CLI-UI-013 | `office calc [FILE] --gui` serves the shared-layout HTML grid and the same live controller/session through `simple.access/v1` |
 | NFR-OFFICE-CLI-UI-001 | `OFFICE_BINARY` is a Phase-3-built native product distinct from `SIMPLE_TEST_DRIVER`/UI client, with no full-CLI, raw-source, or seed launch fallback |
 | NFR-OFFICE-CLI-UI-002..005 | Deployed startup/query/action/RSS/history limits hold on the measurement fixture |
 | NFR-OFFICE-CLI-UI-006..010 | Deterministic evidence, restoration, hygiene, verification, and manual quality hold |
@@ -25,6 +26,7 @@ Included:
 
 - standalone Office artifact launch plus separate IDE diagnostic routing;
 - real Calc TUI/controller and canonical UI access service;
+- real browser-hosted Calc GUI produced from the shared semantic/layout tree;
 - stable semantic IDs and value-bearing actions;
 - multiplication and `AVG` through the live sheet;
 - independent post-action snapshot and history;
@@ -35,7 +37,7 @@ Excluded:
 
 - redesigning other Office app surfaces;
 - cross-platform PTY qualification beyond the primary N1 host;
-- GUI pixel parity;
+- native GUI pixel parity beyond the required browser-hosted HTML grid;
 - general Excel compatibility beyond the selected witness;
 - SGTTI in the production closure.
 
@@ -45,7 +47,9 @@ Excluded:
 - `SIMPLE_TEST_DRIVER` names the existing tool that executes SSpec/check
   orchestration; it is not the Office product or an application dependency.
 - `SIMPLE_UI_CLIENT` names a cached `simple.access/v1` client artifact when the
-  test driver does not provide that client directly.
+  test driver does not provide that client directly. Its narrow evidence-only
+  `ui root` operation returns the exact hosted HTML response body over the
+  same scalar TCP transport; the gate does not import an HTTP SFFI client.
 - `SIMPLE_LIB=src` is allowed for test module resolution, not production
   source-entry fallback.
 - Loopback UI access service and an available primary-host PTY are required.
@@ -72,6 +76,7 @@ Folded scenarios:
   stale/missing/unsupported semantic actions;
 - startup/query/action/RSS/history bounds, deterministic capture, provenance,
   restoration, architecture hygiene, and manual-quality gates.
+- standalone GUI launch, retained HTML grid, and same-session semantic parity.
 
 Evidence display is `embed_tui`. Protocol, gate, and performance receipts
 remain links. Executable SSpec stays folded beneath manual steps.
@@ -83,6 +88,7 @@ remain links. Executable SSpec stays folded beneath manual steps.
 | live semantic formula workflow | show | REQ-001..010 | happy/compatibility | exec+tui+protocol+artifact |
 | fail-closed commands and actions | folded | REQ-011..012; NFR-001,007,008 | edge/error/isolation | exec+protocol |
 | bounded deterministic N1 evidence | folded | NFR-002..006,009,010 | NFR/artifact | exec+protocol+artifact |
+| real Calc HTML grid on shared access session | folded | REQ-013; NFR-006,008 | happy/edge/error GUI parity | exec+html+protocol |
 
 The deployed gate internally exercises CLI compatibility, discovery, formulas,
 rejections, history eviction, performance, provenance, and PTY cleanup. The
@@ -91,9 +97,9 @@ separate gate selectors.
 
 ### Modern SSpec campaign-coverage rationale
 
-This is a single deployed campaign because launching three independent Calc
-processes would weaken run correlation and triple the N1 measurement load. The
-three modern SSpec scenarios expose real assertions over happy, edge, and error
+This is a single evidence campaign because splitting each assertion into an
+independent process would weaken run correlation and multiply the N1 load. The
+modern SSpec scenarios expose real assertions over happy, edge, and error
 subflows retained by that one campaign. A cell below names the independently
 observable subflow; no requirement is credited from source inspection alone.
 
@@ -111,14 +117,15 @@ observable subflow; no requirement is credited from source inspection alone.
 | REQ-010 | visible imperative flow and typed captures generate | edge/NFR scenarios remain folded with troubleshooting | docgen stubs or misplaced `.spl` files fail the post-run manual gate |
 | REQ-011 | standalone Office owns the production session | access transport remains opt-in | isolation audit rejects forbidden production imports |
 | REQ-012 | supported Office and IDE routes preserve semantics | optional unified alias records its mode | invalid office/IDE/action routes return deterministic failures |
+| REQ-013 | standalone `--gui` serves the real Calc HTML grid | HTML IDs agree with the live semantic snapshot | static/disconnected GUI or failed launch cannot produce the parity receipt |
 | NFR-001 | three configured artifacts have retained hashes | compatibility mode is explicit | seed-shaped product/client/driver is rejected |
 | NFR-002 | ready-surface startup is measured | exact 2-second limit is retained | limit excess fails the gate |
 | NFR-003 | 20 warm snapshot/find samples are retained | p95 is computed over the campaign | either query threshold excess fails the gate |
 | NFR-004 | edit plus observed post-state p95 is retained | 20 correlated action samples are used | 250 ms excess fails the gate |
 | NFR-005 | RSS delta and 64-event history are measured | the earliest event pair is evicted | missing RSS or bound excess fails the gate |
-| NFR-006 | stable IDs and 124x37 capture are retained | ANSI plus normalized text are retained | wrong dimensions/version fail the gate |
+| NFR-006 | stable IDs, 124x37 TUI, and Calc HTML are retained | HTML and protocol identities agree | wrong dimensions/version or disconnected HTML fails the gate |
 | NFR-007 | terminal restoration and clean exit are retained | stale/missing/unsupported/malformed cases are exercised | service remains closed after exit or the gate fails |
-| NFR-008 | narrow standalone/access owners pass isolation checks | access transport is absent from the terminal owner | forbidden import/dependency audit fails |
+| NFR-008 | narrow standalone/access owners pass isolation checks | TUI and HTML consume the shared grid owner | forbidden import/dependency or parallel grid ownership fails |
 | NFR-009 | focused suites and campaign use real assertions | campaign executes once through cached inline setup | placeholder/audit/layout failures block verification |
 | NFR-010 | mirrored manual is generated from the executable spec | primary is visible and diagnostic flows folded | nonzero stubs or executable specs under `doc/06_spec` fail |
 
@@ -135,6 +142,10 @@ observable subflow; no requirement is credited from source inspection alone.
 - Review the independent post-action snapshot
 - Review correlated access history
 - Capture the rendered Calc TUI
+- Launch GUI
+- Open rendered Calc HTML
+- Discover the shared semantic surface
+- Stop GUI
 
 ## Assertions
 
@@ -146,6 +157,8 @@ The system gate must prove:
 - `main`, `main#cell_A1`, `main#formula_input`, and
   `main#confirm_edit` are present and the retained frame is 124x37;
 - the found target, acted target, and history target are identical;
+- GUI HTML contains the shared grid/cell identities and its access action is
+  observed through the same live controller/session;
 - stale revision and missing/unsupported actions fail without state mutation;
 - B1 visibly and semantically equals `48`;
 - C1 visibly and semantically equals `7`, while its raw formula is
@@ -192,6 +205,7 @@ or gate cannot run.
 |---|---|---|---|
 | REQ-001..010 | `test/03_system/app/office/feature/office_cli_tui_ui_access_spec.spl` | live semantic formula workflow | `doc/06_spec/03_system/app/office/feature/office_cli_tui_ui_access_spec.md` after fresh docgen |
 | REQ-011..012 | same | fail-closed commands and actions | same |
+| REQ-013 | same | real Calc HTML grid on shared access session | same |
 | NFR-001,007,008 | same | fail-closed commands and actions | same |
 | NFR-002..006,009,010 | same | bounded deterministic N1 evidence | same |
 
@@ -206,5 +220,12 @@ or gate cannot run.
 - Missing target: inspect `protocol/snapshot-before.json` and stable IDs.
 - Formula mismatch: inspect actions, post-snapshot, and raw formula.
 - Capture mismatch: reject stale run IDs before changing assertions.
+- GUI parity mismatch: compare `gui/root.html`, `gui/snapshot.json`,
+  `gui/action-result.json`, `gui/post-snapshot.json`,
+  `gui/session-parity.txt`, and `exec/gui-exit.txt`; never
+  accept a static HTML fixture or a snapshot from the TUI process.
+- GUI root transport mismatch: run `SIMPLE_UI_CLIENT ui root --port PORT`
+  against the launched GUI process and inspect its exit status; success stdout
+  is raw HTML, while connection/HTTP failures remain `simple.access/v1` JSON.
 - Performance miss: retain measurements and record/fix a concrete regression;
   do not increase thresholds silently.

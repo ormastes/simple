@@ -95,10 +95,19 @@ Unknown app/mode/action combinations shall return deterministic diagnostics and
 non-zero status. When packaged, optional Office aliases shall preserve argument
 and exit semantics while delegating to the cached standalone artifact.
 
+### REQ-OFFICE-CLI-UI-013 — Standalone Calc GUI
+
+The same standalone product shall launch a real browser GUI with
+`office calc [FILE] --gui`. The served HTML shall render the Calc grid from the
+shared Calc semantic/layout tree rather than a parallel hard-coded page. The
+HTML surface and `simple.access/v1` endpoint shall belong to the same live Calc
+controller/session, so an access action and its independently observed result
+refer to the same workbook and stable canonical IDs shown by the GUI.
+
 ## Exclusions
 
 - Full semantic editing for every Office application in this feature.
 - Microsoft Excel automation or proprietary rendering parity.
-- GUI pixel-parity work beyond the requested Calc TUI evidence.
+- Native GUI pixel parity beyond the required browser-hosted Calc HTML grid.
 - A new Office-only UI automation protocol.
 - Release, version bump, commit, tag, or push.
