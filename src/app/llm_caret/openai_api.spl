@@ -304,6 +304,13 @@ fn complete_openai_exchange(raw: text, transport_error: text) -> OpenAIResponse:
         )
     parse_openai_response(raw)
 
+# `with_retry` receives a trailing-colon function literal.  Keep that callback
+# expression-only so the self-hosted production parser accepts this provider
+# entry closure; the transport's local result belongs in this named helper.
+fn openai_retry_transport(request: OpenAIApiRequest, attempt: i64) -> (i64, text, text, i64):
+    val result = http_request_raw(request.method, request.url, request.headers, request.body)
+    (result.0, result.1 ?? "", result.2 ?? "", 0)
+
 # ============================================================================
 # Impure Function: send request
 # ============================================================================
@@ -324,7 +331,6 @@ fn openai_send(api_key: text, base_url: text, model: text, messages_json: text, 
     val request = build_openai_request(api_key, base_url, model, messages_json, max_tokens, temperature)
     val policy = retry_policy_from_env()
     val outcome = with_retry(policy, fn(attempt: i64) -> (i64, text, text, i64):
-        val result = http_request_raw(request.method, request.url, request.headers, request.body)
-        (result.0, result.1 ?? "", result.2 ?? "", 0)
+        openai_retry_transport(request, attempt)
     )
     complete_openai_exchange(outcome.body, outcome.error)
