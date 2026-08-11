@@ -25,6 +25,53 @@ fn archive_is_fresh_for_runtime_inputs(archive: &Path, runtime_root: &Path, inpu
     })
 }
 
+pub(crate) struct StaleRuntimeArchive {
+    pub(crate) archive_modified: std::time::SystemTime,
+    pub(crate) newest_source: PathBuf,
+    pub(crate) newest_source_modified: std::time::SystemTime,
+}
+
+/// Compare `archive`'s mtime against the newest mtime among every
+/// `src/runtime/*.c` and `*.h` file. Returns `Some` (naming the offending
+/// source) when the archive predates a runtime source file it should have
+/// been rebuilt from -- i.e. the archive is stale. Returns `None` when the
+/// archive is at least as new as every source file, or when either mtime is
+/// unreadable (fail-open only on I/O errors, not on staleness itself).
+fn stale_runtime_source(archive: &Path) -> Option<StaleRuntimeArchive> {
+    let archive_modified = archive.metadata().and_then(|meta| meta.modified()).ok()?;
+    let runtime_root = find_core_c_runtime_source_root()?;
+    let entries = std::fs::read_dir(&runtime_root).ok()?;
+
+    let mut newest: Option<(PathBuf, std::time::SystemTime)> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_source = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext == "c" || ext == "h");
+        if !is_source {
+            continue;
+        }
+        let Ok(modified) = path.metadata().and_then(|meta| meta.modified()) else {
+            continue;
+        };
+        if newest.as_ref().is_none_or(|(_, best)| modified > *best) {
+            newest = Some((path, modified));
+        }
+    }
+
+    let (newest_source, newest_source_modified) = newest?;
+    if newest_source_modified > archive_modified {
+        Some(StaleRuntimeArchive {
+            archive_modified,
+            newest_source,
+            newest_source_modified,
+        })
+    } else {
+        None
+    }
+}
+
 pub(crate) fn runtime_inputs_fingerprint(runtime_root: &Path, inputs: &[&str]) -> Option<String> {
     // Stable FNV-1a is sufficient for cache invalidation and avoids a hashing dependency.
     let mut hash = 0xcbf29ce484222325_u64;
@@ -522,6 +569,22 @@ pub(crate) fn find_simple_core_runtime_library() -> Option<PathBuf> {
     for candidate in candidates {
         let path = PathBuf::from(candidate);
         if has_nonempty_archive_payload(&path) {
+            // This candidate is resolved CWD-relative and was never staleness-checked
+            // against src/runtime/*.c|*.h (unlike build_c_runtime_library's
+            // archive_is_fresh_for_runtime_inputs path). A stale local archive next to
+            // newer runtime sources silently made real C-runtime fixes measure inert.
+            // Fail loudly instead of silently linking (or silently substituting) it.
+            if let Some(stale) = stale_runtime_source(&path) {
+                eprintln!(
+                    "error: runtime archive is STALE: {} (mtime {:?}) is older than {} (mtime {:?}). \
+                     Rebuild the simple-core runtime archive before linking -- refusing to link a stale archive.",
+                    path.display(),
+                    stale.archive_modified,
+                    stale.newest_source.display(),
+                    stale.newest_source_modified,
+                );
+                continue;
+            }
             return Some(path);
         }
     }
