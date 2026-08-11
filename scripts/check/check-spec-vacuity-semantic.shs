@@ -1,0 +1,482 @@
+#!/bin/sh
+# check-spec-vacuity-semantic.shs -- BASELINE-RATCHETED GATE for the two SEMANTIC
+# spec-vacuity families that only ever surfaced by hand review.
+#
+#   Family 3 -- VALUE-TYPE HELPER MUTATES A COPY   (codes VTM001, VTM002)
+#     `struct`/array/`text` are VALUE types in Simple; `class` is a reference.
+#     A spec helper `fn delete_key(tree: BTree, k: text)` that mutates `tree`
+#     mutates a COPY -- the caller's binding is untouched, so a following
+#     assertion on the caller's variable can only pass vacuously or fail for the
+#     wrong reason. `mut` parameters write back and are CORRECT (never flagged);
+#     `class` receivers are references and are NOT affected, so the kind must be
+#     RESOLVED from a declaration index, never guessed from the name.
+#
+#   Family 4 -- SPEC RE-IMPLEMENTS THE CODE UNDER TEST   (code SHADOW)
+#     A spec that re-declares a type that also exists in `src/` and reimplements
+#     the logic inside the spec never exercises `src/` at all. It computes its
+#     expectation with the same algorithm it claims to test, so it stays green
+#     against any wrong implementation.
+#
+# DETECTION IS NOT REIMPLEMENTED HERE. The scorer for these families lives in
+# `scripts/check/census-spec-vacuity.spl`, which is deliberately a CENSUS at
+# WARNING severity ("exits 0 whenever it actually scanned something, however
+# many findings it reports"). This script is the missing GATE layer: it runs
+# that census in `--list` mode, extracts the family-3 and family-4 findings,
+# ratchets them against a baseline, and FAILS on anything NEW.
+#
+# EXCLUDED ON PURPOSE (precision over recall, non-negotiable):
+#   * NOSRC -- the census itself labels it "LOW PRECISION -- triage signal
+#     only" (a spec importing nothing from src/). It is never gated here.
+#   * HOLLOW (family 5, comment-cheat) -- a different family with its own
+#     calibration history; gating it is not this script's mandate.
+#
+# DEPENDENCY (read this before wiring the gate into CI):
+#   `scripts/check/census-spec-vacuity.spl` was UNTRACKED in the shared working
+#   copy when this gate landed -- it is another session's in-flight work and was
+#   deliberately not committed here, to avoid clobbering it. Until that scorer
+#   lands, this gate fails CLOSED on a fresh clone:
+#       ERROR -- nothing was checked (census scorer missing: ...)   exit 2
+#   That is the intended behaviour: a missing scorer must never read as a pass.
+#
+# Baseline: scripts/check/spec_vacuity_semantic_baseline.txt
+#   One finding key per line. Keys are LINE-NUMBER-FREE on purpose, so editing
+#   unrelated code above a known finding does not churn the baseline:
+#     VTM001 <specfile> fn <name>(<param>: <type>)
+#     SHADOW <specfile>
+#
+# Verdict convention -- ALWAYS the last line of stdout, on EVERY exit path:
+#   PASS  -- <n> spec(s) checked, ...            exit 0   (n is always > 0)
+#   FAIL  -- ...                                 exit 1
+#   ERROR -- nothing was checked                 exit 2
+# 0 specs scanned is an ERROR, never a pass: a scan that finds nothing may have
+# scanned nothing.
+#
+# --selftest runs BEFORE every scan and is FATAL. See selftest_run() for the
+# fixture set: a true-positive per family (must FAIL), a sound fixture (must
+# PASS), and the documented false-positive shapes (must NOT flag).
+#
+# Usage:
+#   sh scripts/check/check-spec-vacuity-semantic.shs [roots...]
+#   sh scripts/check/check-spec-vacuity-semantic.shs --selftest
+#   sh scripts/check/check-spec-vacuity-semantic.shs --generate-baseline [roots...]
+#
+# NOTE: the census walks the whole spec corpus and takes many minutes. A
+# repo-local watchdog SIGTERMs foreground runs at 60s CPU, so run this DETACHED
+# (`setsid`) with no timeout and wait for the verdict line. A guard that has not
+# finished looks exactly like a guard that found nothing.
+
+set -u
+
+REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+CENSUS="$REPO_ROOT/scripts/check/census-spec-vacuity.spl"
+BASELINE="$REPO_ROOT/scripts/check/spec_vacuity_semantic_baseline.txt"
+SIMPLE="$REPO_ROOT/bin/simple"
+# CPU-seconds allowed for one census invocation; see run_census(). 0 disables
+# the repo CPU guard entirely.
+CENSUS_CPU_LIMIT=${CENSUS_CPU_LIMIT:-7200}
+
+WORK=${TMPDIR:-/tmp}/spec-vacuity-semantic.$$
+trap 'rm -rf "$WORK"' EXIT INT TERM
+mkdir -p "$WORK" || { echo "ERROR -- nothing was checked (cannot create $WORK)"; exit 2; }
+
+# Any stop the shell can observe must still produce a verdict rather than a
+# silent exit. This is hardening, not a cure: SIGKILL remains untrappable.
+on_signal() {
+    echo "ERROR -- nothing was checked (interrupted)"
+    exit 2
+}
+trap on_signal INT TERM
+
+die_error() {
+    echo "ERROR -- nothing was checked ($1)"
+    exit 2
+}
+
+# ---------------------------------------------------------------- extraction
+#
+# Turns raw `--list` census output into stable, line-number-free finding keys
+# for the two gated families. Reads stdin, writes keys to stdout.
+#
+# Census emits, under `--- family 3 findings ---`:
+#     "  VTM001 test/x_spec.spl:42 fn f(t: BTree)"           [optionally "  [dup-tree]"]
+# and under `--- family 4 SHADOW files (deduped) ---`:
+#     "  SHADOW test/x_spec.spl"
+# The `[dup-tree]` tag is a dedup annotation, not part of the identity, so it is
+# stripped -- otherwise a file moving between the duplicate test trees would
+# read as a brand-new finding.
+extract_keys() {
+    sed -e 's/[[:space:]]*\[dup-tree\][[:space:]]*$//' \
+        -e 's/^[[:space:]]*//' \
+        -e 's/[[:space:]]*$//' |
+    awk '
+        # The census prints SUMMARY COUNTER lines that begin with the very same
+        # codes, e.g.
+        #   "VTM001 field/index assign via struct param : 2 / 2"
+        #   "SHADOW spec files declaring a src/ type name : 402 / 565"
+        # Matching on the code alone swallows those as findings and inflates the
+        # baseline. A finding is recognised only by its SHAPE: field 2 must be a
+        # real spec path, and for VTM it must carry a ":<line>" suffix.
+        /^VTM00[12] / && $2 ~ /\.spl:[0-9]+$/ {
+            sub(/:[0-9]+ /, " ", $0)
+            print
+            next
+        }
+        /^SHADOW / && NF == 2 && $2 ~ /\.spl$/ { print; next }
+    ' |
+    LC_ALL=C sort -u
+}
+
+# --------------------------------------------------------------- census call
+# Runs the census over the given roots, returns its stdout path via $CENSUS_OUT.
+# Fails closed: a census that did not reach its own REPORT/ERROR line is treated
+# as "nothing was checked", never as a clean zero.
+run_census() {
+    _out="$1"; shift
+    [ -f "$CENSUS" ] || die_error "census scorer missing: $CENSUS"
+    [ -x "$SIMPLE" ] || die_error "compiler missing: $SIMPLE"
+    # The census legitimately runs for many minutes (whole-corpus walk plus a
+    # src/ declaration index). `scripts/resource/kill_simple_monitor.shs`
+    # SIGTERMs any `simple` process at 60s CPU, which killed even a 1-spec root
+    # here (the src/ index alone costs ~60s). Raise the guard for this call
+    # only; an operator can still override or restore it from the environment.
+    ( cd "$REPO_ROOT" && SIMPLE_TIMEOUT_SECONDS="$CENSUS_CPU_LIMIT" \
+        "$SIMPLE" run "$CENSUS" --list "$@" ) >"$_out" 2>"$_out.err"
+    _rc=$?
+    if ! grep -q '^REPORT -- ' "$_out" 2>/dev/null; then
+        if grep -q '^ERROR -- nothing was scanned' "$_out" 2>/dev/null; then
+            return 2
+        fi
+        # No verdict line at all: killed, crashed, or a fatal semantic error.
+        # `bin/simple run` can exit 0 after a fatal error, so rc is not trusted.
+        echo "census produced no verdict line (rc=$_rc); see $_out.err" >&2
+        return 3
+    fi
+    return 0
+}
+
+# Extracts the spec-file count the census actually scanned, for the non-vacuity
+# check and the verdict text.
+scanned_count() {
+    sed -n 's/^REPORT -- \([0-9][0-9]*\) file(s) scanned.*/\1/p' "$1" | head -1
+}
+
+# ------------------------------------------------------------------ selftest
+#
+# Layered on purpose, because the two layers can fail independently:
+#
+#  (A) DETECTOR layer -- delegated to the census's own fatal positive control,
+#      which plants 5 family-3 violations against 11 correct forms (including
+#      `mut` params and `class` receivers, which must stay silent), a SHADOW
+#      collision against a spec-only name that must stay silent, and the
+#      false-positive shapes recorded in
+#      doc/08_tracking/bug/census_spec_vacuity_comment_detection_false_positives_2026-08-10.md
+#      -- shell `case` arm, C preprocessor directive, C `#define`, mispaired
+#      path, markdown heading, negative assertion, non-source receiver,
+#      commented-out spec line. If that control does not reproduce, this gate
+#      refuses to scan.
+#
+#  (B) GATE layer -- fixtures below drive extraction + ratchet + verdict
+#      directly, so a broken parser or a baseline that swallows everything is
+#      caught even when the detector is healthy.
+selftest_run() {
+    _fail=0
+    _n=0
+
+    # --- (A) detector control, fatal -------------------------------------
+    _ctl="$WORK/control.txt"
+    ( cd "$REPO_ROOT" && "$SIMPLE" run "$CENSUS" --selftest ) >"$_ctl" 2>&1
+    _n=$((_n + 1))
+    if grep -q '^REPORT -- positive control reproduced' "$_ctl"; then
+        echo "  selftest A/detector-control            : OK (census control reproduced)"
+    else
+        echo "  selftest A/detector-control            : MISMATCH -- census positive control did not reproduce"
+        sed 's/^/      /' "$_ctl" | head -20
+        _fail=$((_fail + 1))
+    fi
+
+    # --- (B1) true positive, family 3: must produce a key ----------------
+    cat >"$WORK/tp3.txt" <<'EOF'
+
+--- family 3 findings ---
+  VTM001 test/01_unit/btree_spec.spl:42 fn delete_key(tree: BTree)
+  VTM002 test/01_unit/btree_spec.spl:57 fn push_all(xs: [text])  [dup-tree]
+
+--- family 4 SHADOW files (deduped) ---
+
+--- family 5 HOLLOW findings (deduped) ---
+  some/hollow/needle.spl "foo"
+REPORT -- 3 file(s) scanned, 2 deduped VTM finding(s), 2 raw; 0 deduped SHADOW file(s); 1 deduped HOLLOW needle(s)
+EOF
+    _got=$(extract_keys <"$WORK/tp3.txt")
+    _want='VTM001 test/01_unit/btree_spec.spl fn delete_key(tree: BTree)
+VTM002 test/01_unit/btree_spec.spl fn push_all(xs: [text])'
+    _n=$((_n + 1))
+    if [ "$_got" = "$_want" ]; then
+        echo "  selftest B1/family3-true-positive       : OK (2 keys, line numbers and dup-tree tag stripped)"
+    else
+        echo "  selftest B1/family3-true-positive       : MISMATCH"
+        echo "      want: $_want"
+        echo "      got : $_got"
+        _fail=$((_fail + 1))
+    fi
+
+    # --- (B2) true positive, family 4: must produce a key ----------------
+    cat >"$WORK/tp4.txt" <<'EOF'
+
+--- family 3 findings ---
+
+--- family 4 SHADOW files (deduped) ---
+  SHADOW test/01_unit/lease_manager_spec.spl
+
+--- shadowed type names ---
+  LeaseManager
+REPORT -- 5 file(s) scanned, 0 deduped VTM finding(s), 0 raw; 1 deduped SHADOW file(s); 0 deduped HOLLOW needle(s)
+EOF
+    _got=$(extract_keys <"$WORK/tp4.txt")
+    _n=$((_n + 1))
+    if [ "$_got" = "SHADOW test/01_unit/lease_manager_spec.spl" ]; then
+        echo "  selftest B2/family4-true-positive       : OK (1 SHADOW key)"
+    else
+        echo "  selftest B2/family4-true-positive       : MISMATCH -- got '$_got'"
+        _fail=$((_fail + 1))
+    fi
+
+    # --- (B3) sound corpus: no findings, must PASS -----------------------
+    cat >"$WORK/sound.txt" <<'EOF'
+
+--- family 3 findings ---
+
+--- family 4 SHADOW files (deduped) ---
+
+--- shadowed type names ---
+REPORT -- 7 file(s) scanned, 0 deduped VTM finding(s), 0 raw; 0 deduped SHADOW file(s); 0 deduped HOLLOW needle(s)
+EOF
+    _got=$(extract_keys <"$WORK/sound.txt")
+    _n=$((_n + 1))
+    if [ -z "$_got" ]; then
+        echo "  selftest B3/sound-fixture               : OK (no keys)"
+    else
+        echo "  selftest B3/sound-fixture               : MISMATCH -- flagged '$_got'"
+        _fail=$((_fail + 1))
+    fi
+
+    # --- (B4) FALSE-POSITIVE SHAPE: NOSRC must never be gated ------------
+    # The census labels NOSRC "LOW PRECISION -- triage signal only". A gate that
+    # picked it up would flag most of the corpus.
+    cat >"$WORK/fp_nosrc.txt" <<'EOF'
+
+--- family 3 findings ---
+
+--- family 4 SHADOW files (deduped) ---
+
+NOSRC  spec files importing nothing at all   : 412 / 903   [LOW PRECISION -- triage signal only]
+  NOSRC test/01_unit/pure_math_spec.spl
+REPORT -- 9 file(s) scanned, 0 deduped VTM finding(s), 0 raw; 0 deduped SHADOW file(s); 0 deduped HOLLOW needle(s)
+EOF
+    _got=$(extract_keys <"$WORK/fp_nosrc.txt")
+    _n=$((_n + 1))
+    if [ -z "$_got" ]; then
+        echo "  selftest B4/fp-shape-NOSRC-excluded     : OK (low-precision family not gated)"
+    else
+        echo "  selftest B4/fp-shape-NOSRC-excluded     : MISMATCH -- flagged '$_got'"
+        _fail=$((_fail + 1))
+    fi
+
+    # --- (B5) FALSE-POSITIVE SHAPE: HOLLOW/family-5 must never be gated --
+    # Family 5 is a separate family with its own calibration set; the
+    # false-positive census (D-S1/D-S2/D-S3) is entirely about it. Gating it
+    # here would re-import that noise.
+    cat >"$WORK/fp_hollow.txt" <<'EOF'
+
+--- family 3 findings ---
+
+--- family 4 SHADOW files (deduped) ---
+
+--- family 5 HOLLOW findings (deduped) ---
+  scripts/check/check-simpleos-wm-fullscreen-evidence.shs:802 "rust-built"
+  src/runtime/runtime_fork.c:50 "runtime_memtrack.h"
+REPORT -- 4 file(s) scanned, 0 deduped VTM finding(s), 0 raw; 0 deduped SHADOW file(s); 2 deduped HOLLOW needle(s)
+EOF
+    _got=$(extract_keys <"$WORK/fp_hollow.txt")
+    _n=$((_n + 1))
+    if [ -z "$_got" ]; then
+        echo "  selftest B5/fp-shape-HOLLOW-excluded    : OK (family 5 not gated here)"
+    else
+        echo "  selftest B5/fp-shape-HOLLOW-excluded    : MISMATCH -- flagged '$_got'"
+        _fail=$((_fail + 1))
+    fi
+
+    # --- (B5b) FALSE-POSITIVE SHAPE: summary counter lines are not findings --
+    # REGRESSION PIN. The census prints per-code summary counters that start
+    # with the same codes as the findings. An earlier revision of extract_keys
+    # matched on the code alone and baselined 2 of these as if they were real
+    # findings. Shape, not prefix, is what identifies a finding.
+    cat >"$WORK/fp_summary.txt" <<'EOF'
+--- family 3: value-type helper mutates a copy (deduped / raw) ---
+VTM001 field/index assign via struct param : 2 / 2
+VTM002 in-place mutator via struct param   : 0 / 0
+--- family 4: spec re-implements the code under test ---
+SHADOW spec files declaring a src/ type name : 402 / 565
+REPORT -- 19761 file(s) scanned, 2 deduped VTM finding(s), 2 raw; 402 deduped SHADOW file(s); 0 deduped HOLLOW needle(s)
+EOF
+    _got=$(extract_keys <"$WORK/fp_summary.txt")
+    _n=$((_n + 1))
+    if [ -z "$_got" ]; then
+        echo "  selftest B5b/fp-shape-summary-counters  : OK (counter lines are not findings)"
+    else
+        echo "  selftest B5b/fp-shape-summary-counters  : MISMATCH -- flagged '$_got'"
+        _fail=$((_fail + 1))
+    fi
+
+    # --- (B6) RATCHET: baselined finding is silent, NEW one FAILs --------
+    # Both sides must be LC_ALL=C sorted, exactly as the live path produces them
+    # via extract_keys' trailing `sort -u`; an unsorted input makes `comm` emit a
+    # warning and silently compare garbage.
+    printf '%s\n' 'VTM001 test/01_unit/btree_spec.spl fn delete_key(tree: BTree)' |
+        LC_ALL=C sort -u >"$WORK/base.txt"
+    printf '%s\n' \
+        'VTM001 test/01_unit/btree_spec.spl fn delete_key(tree: BTree)' \
+        'SHADOW test/01_unit/brand_new_spec.spl' |
+        LC_ALL=C sort -u >"$WORK/cur.txt"
+    _new=$(LC_ALL=C comm -13 "$WORK/base.txt" "$WORK/cur.txt")
+    _n=$((_n + 1))
+    if [ "$_new" = "SHADOW test/01_unit/brand_new_spec.spl" ]; then
+        echo "  selftest B6/ratchet-new-only            : OK (baselined silent, new one reported)"
+    else
+        echo "  selftest B6/ratchet-new-only            : MISMATCH -- got '$_new'"
+        _fail=$((_fail + 1))
+    fi
+
+    # --- (B7) non-vacuity: a zero-spec census must be ERROR, not PASS ----
+    _n=$((_n + 1))
+    _c=$(printf 'ERROR -- nothing was scanned\n' >"$WORK/empty.txt"; scanned_count "$WORK/empty.txt")
+    if [ -z "$_c" ]; then
+        echo "  selftest B7/zero-specs-is-ERROR         : OK (no scanned count -> ERROR path)"
+    else
+        echo "  selftest B7/zero-specs-is-ERROR         : MISMATCH -- parsed count '$_c'"
+        _fail=$((_fail + 1))
+    fi
+
+    if [ "$_fail" -ne 0 ]; then
+        echo "FAIL -- selftest: $_fail of $_n fixture(s) mismatched; scan not attempted"
+        exit 1
+    fi
+    echo "  selftest: $_n/$_n fixtures correct"
+    return 0
+}
+
+# ---------------------------------------------------------------------- main
+GENERATE=0
+ROOTS=""
+SELFTEST_ONLY=0
+SAVE_CENSUS=""
+CENSUS_INPUT=""
+_expect=""
+for arg in "$@"; do
+    if [ -n "$_expect" ]; then
+        case "$_expect" in
+            save)  SAVE_CENSUS="$arg" ;;
+            input) CENSUS_INPUT="$arg" ;;
+        esac
+        _expect=""
+        continue
+    fi
+    case "$arg" in
+        --selftest)          SELFTEST_ONLY=1 ;;
+        --generate-baseline) GENERATE=1 ;;
+        # A whole-corpus census costs ~28 minutes. --save-census keeps its raw
+        # output so a later ratchet can be re-derived with --census-input
+        # instead of paying for a second identical scan.
+        --save-census)       _expect=save ;;
+        --census-input)      _expect=input ;;
+        --*)                 die_error "unknown option: $arg" ;;
+        *)                   ROOTS="$ROOTS $arg" ;;
+    esac
+done
+[ -z "$_expect" ] || die_error "--$_expect requires a file argument"
+
+selftest_run || exit 1
+
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    echo "PASS -- selftest only, no corpus scanned"
+    exit 0
+fi
+
+[ -n "$ROOTS" ] || ROOTS=" test"
+
+OUT="$WORK/census.txt"
+if [ -n "$CENSUS_INPUT" ]; then
+    # Reuse a previously saved census transcript. Still fail-closed: a
+    # transcript without a REPORT line is a killed or crashed run, not a zero.
+    [ -f "$CENSUS_INPUT" ] || die_error "census input not found: $CENSUS_INPUT"
+    cp "$CENSUS_INPUT" "$OUT" || die_error "cannot read census input"
+    grep -q '^REPORT -- ' "$OUT" || die_error "census input has no verdict line"
+else
+    # shellcheck disable=SC2086
+    run_census "$OUT" $ROOTS
+    rc=$?
+    [ "$rc" -eq 2 ] && die_error "census scanned no spec files"
+    [ "$rc" -eq 3 ] && die_error "census did not reach a verdict line"
+fi
+
+if [ -n "$SAVE_CENSUS" ]; then
+    cp "$OUT" "$SAVE_CENSUS" || die_error "cannot write --save-census file"
+fi
+
+NSPEC=$(scanned_count "$OUT")
+case "$NSPEC" in
+    ''|*[!0-9]*) die_error "could not parse the census scanned-file count" ;;
+esac
+[ "$NSPEC" -gt 0 ] || die_error "census reported 0 spec files scanned"
+
+extract_keys <"$OUT" >"$WORK/current.txt"
+NCUR=$(grep -c . "$WORK/current.txt" 2>/dev/null || echo 0)
+
+if [ "$GENERATE" -eq 1 ]; then
+    {
+        echo "# Baseline for scripts/check/check-spec-vacuity-semantic.shs"
+        echo "# Families 3 (VTM001/VTM002, value-type helper mutates a copy) and"
+        echo "# 4 (SHADOW, spec re-implements the code under test)."
+        echo "# Keys are line-number-free so unrelated edits do not churn this file."
+        echo "# Regenerate ONLY as a deliberate, reviewed update -- read the diff."
+        cat "$WORK/current.txt"
+    } >"$BASELINE"
+    echo "PASS -- $NSPEC spec(s) checked, baseline regenerated with $NCUR finding(s)"
+    exit 0
+fi
+
+if [ -f "$BASELINE" ]; then
+    grep -v '^[[:space:]]*#' "$BASELINE" | grep . | LC_ALL=C sort -u >"$WORK/baseline.txt"
+else
+    : >"$WORK/baseline.txt"
+fi
+NBASE=$(grep -c . "$WORK/baseline.txt" 2>/dev/null || echo 0)
+
+NEW=$(LC_ALL=C comm -13 "$WORK/baseline.txt" "$WORK/current.txt")
+FIXED=$(LC_ALL=C comm -23 "$WORK/baseline.txt" "$WORK/current.txt")
+
+if [ -n "$NEW" ]; then
+    echo "New semantic spec-vacuity finding(s) -- not in the baseline:"
+    echo "$NEW" | sed 's/^/  /'
+    echo ""
+    echo "  VTM001/VTM002: a value-typed (struct/array/text) parameter is mutated"
+    echo "                 inside the helper, so the caller's copy never changes."
+    echo "                 Fix: take the parameter as \`mut\`, return the new value,"
+    echo "                 or make the type a \`class\`. Do NOT weaken the assertion."
+    echo "  SHADOW       : the spec re-declares a type that exists in src/ and"
+    echo "                 tests its own copy. Import the src/ type instead."
+    NNEW=$(echo "$NEW" | grep -c .)
+    echo "FAIL -- $NSPEC spec(s) checked, $NNEW new finding(s) beyond the $NBASE baselined"
+    exit 1
+fi
+
+if [ -n "$FIXED" ]; then
+    echo "Baselined finding(s) no longer present (baseline is stale -- shrink it):"
+    echo "$FIXED" | sed 's/^/  /'
+    NFIX=$(echo "$FIXED" | grep -c .)
+    echo "FAIL -- $NSPEC spec(s) checked, $NFIX baselined finding(s) gone; rerun with --generate-baseline"
+    exit 1
+fi
+
+echo "PASS -- $NSPEC spec(s) checked, $NCUR finding(s), all $NBASE baselined, 0 new"
+exit 0
