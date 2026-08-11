@@ -17,10 +17,11 @@
 
 #### REQ-002 and REQ-006 submit test to the dummy provider
 
-- var state = caret native state
-- state = caret native key
-   - Expected: submitted.submit_prompt equals `test`
-   - Expected: final_state.assistant equals `hello`
+- Prepare the native Caret GUI state
+- Submit the visible prompt through the dummy provider
+- Check the rendered conversation state
+  - Expected: submitted prompt equals `test`
+  - Expected: assistant response equals `hello`
 
 
 <details>
@@ -44,6 +45,10 @@ expect(final_state.assistant).to_equal("hello")
 
 #### REQ-004 lowers semantic Caret HTML through Draw IR
 
+- Prepare semantic Caret HTML
+- Lower the GUI surface through Draw IR
+- Check the retained Draw IR evidence
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -64,6 +69,9 @@ expect(composition.batches[0].commands.len()).to_be_greater_than(0)
 </details>
 
 #### REQ-005 exposes explicit Metal and accessibility semantics
+
+- Prepare the Metal GUI semantic surface
+- Inspect backend and accessibility attributes
 
 <details>
 <summary>Executable SSpec</summary>
@@ -90,9 +98,12 @@ expect(html).to_contain("Message LLM Caret: test")
 | Updated | 2026-07-19 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-**Screenshots:**
-`doc/06_spec/image/03_system/app/llm_caret/feature/llm_caret_gui_backends/electron_test_hello.png`
-records the live Electron `test` → `hello` interaction.
+**Live-launch boundary:** This manual does not claim a screenshot or a live
+Metal window. A live GUI result is valid only after the GPU companion entry
+`src/app/llm_caret/gui_metal.spl` is built with its GPU-capable runtime and
+its retained capture identifies the launched artifact. The core Caret entry
+deliberately rejects `--metal-gui` so CLI/TUI native closure checks cannot
+silently stand in for GUI evidence.
 
 ## Overview
 
