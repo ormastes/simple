@@ -1,14 +1,33 @@
 # Interpreter: 10 drifted duplicate function definitions — the STALE copies WIN
 
-**Status:** OPEN — DIVERGENCE CONFIRMED but NOT USER-FACING. Severity downgraded
-to LOW/latent: the whole package is excluded from the build, so both copies are
-unreachable. All five implied user-facing defects were probed and DISPROVED.
-DO NOT DEDUPE; DO NOT write behavioural specs against this package until it is
-reconnected.
+**Status:** OPEN — DIVERGENCE CONFIRMED. **DO NOT DEDUPE. DO NOT DELETE.**
+All five implied user-facing defects were probed and DISPROVED.
 **Filed:** 2026-08-11
 **Updated:** 2026-08-11 (resolution winner measured; original premise falsified)
 **Updated:** 2026-08-11 (second pass: all five implied defects disproved by
-measurement; root cause is a build exclusion in `_driver_collect_sources`)
+measurement; root cause thought to be a build exclusion in `_driver_collect_sources`)
+**Updated:** 2026-08-11 (third pass — **RETRACTION**, see below)
+
+## RETRACTION: "the whole package is excluded from the build" is FALSE
+
+The earlier claim in this file that the package is "excluded from the build, so
+both copies are unreachable" is **withdrawn**. It generalised from one direct
+call to `_driver_collect_sources` to all build lanes, and that does not hold:
+
+- Specs `enum_bare_name_collision_dual_key_spec.spl` and
+  `compiled_module_adapter_spec.spl` **execute** functions defined ONLY inside
+  this package (`enum_table_register`, `cmr_register` — single definitions, no
+  shadows) and pass 9/9 each with implementation-specific semantics.
+- `80.driver/driver_source_loading.spl:15` and
+  `50.mir/_MirLowering/module_lowering.spl:65` import `hm_hash_text` from it.
+- `_driver_collect_sources` is itself **duplicated** — the copy at
+  `80.driver/driver_helpers.spl:84` carries **no** `/core/interpreter/`
+  exclusion — so the probe measured an ambiguous winner, not the build.
+
+The divergence table below remains valid and the delete remains forbidden; only
+the unreachability conclusion is retracted. Severity is latent-but-live, not
+dead. Full evidence and the retire/reconnect decision:
+`doc/08_tracking/bug/driver_collect_sources_path_exclusions_are_not_dead_code_2026-08-11.md`
 **Layer:** `10.frontend` — core interpreter
 
 ## Summary
