@@ -52,10 +52,11 @@ Excluded:
 
 ## Manual Flow and Capture Policy
 
-The executable spec invokes `--scenario all` once for one unique run ID. Every
-displayed or folded scenario consumes that same fresh run directory through
-`setup_office_cli_tui_ui_access` and `check_office_gate`; none launches a second
-gate or reads the shared legacy evidence root.
+The inline SSpec setup scenario `has one fresh deployed Office evidence run`
+invokes `--scenario all` once for one unique run ID. Every displayed or folded
+scenario expands that setup with `@prev(...)` and consumes the same fresh run
+directory through `setup_office_cli_tui_ui_access` and `check_office_gate`; none
+launches a second gate or reads the shared legacy evidence root.
 
 Primary visible scenario:
 

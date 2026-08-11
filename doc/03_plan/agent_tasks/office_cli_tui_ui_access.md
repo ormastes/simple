@@ -42,8 +42,9 @@ SSpec helper names (implemented and shared by every scenario):
 - `check_office_gate`
 
 `setup_office_cli_tui_ui_access` invokes the unique-run `all` gate at most once
-per SSpec process. The visible primary scenario and folded error/NFR scenarios
-consume only that returned run root.
+per SSpec process. The inline `has one fresh deployed Office evidence run`
+scenario exposes it to docgen, and the visible primary plus folded error/NFR
+scenarios expand it through `@prev(...)` and consume only that returned root.
 
 Manual step names are frozen in
 `doc/03_plan/sys_test/office_cli_tui_ui_access.md`.

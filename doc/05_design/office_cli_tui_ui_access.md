@@ -164,6 +164,11 @@ The SSpec helper names are:
 - `setup_office_cli_tui_ui_access`
 - `check_office_gate`
 
+The helper is represented in the manual-first source by the inline scenario
+`has one fresh deployed Office evidence run`. Each visible/folded scenario uses
+`@prev(...)` to expand that setup into its manual flow without executing a
+second gate.
+
 There are no silent placeholder helpers. A missing runtime, gate, command,
 surface, artifact, or marker is an immediate test failure.
 
