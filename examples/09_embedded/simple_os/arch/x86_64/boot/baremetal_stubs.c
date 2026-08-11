@@ -396,6 +396,34 @@ RuntimeValue rt_bytes_alloc_packed(RuntimeValue len_val)
     return _rt_bytes_new(NULL, (uint32_t)len);
 }
 
+/* Empty (len 0) packed [u8] that RESERVES `cap` bytes up front.
+ *
+ * HEAP EXHAUSTION FIX: rt_extras.c's rt_byte_array_new(cap) used to throw its
+ * capacity argument away (`(void)capacity;`) and hand back a zero-capacity
+ * packed array. Every caller that had already sized its buffer exactly -- most
+ * importantly _vfs_boot_read_file_chain_raw, which knows the FAT32 file size
+ * before it reads a byte -- was therefore forced through the doubling growth
+ * path in rt_array_push_handle: 128, 256, ... 1M, 2M, 4M, 8M, 16M, 32M. On this
+ * BUMP-ONLY heap free() is a no-op, so every intermediate buffer is leaked
+ * permanently -- a 24 MiB boot asset burns ~63 MiB. That is what drove
+ * heap_off to 0xbf12660 during vfs-init, before any render code ran.
+ * Honouring the reservation makes that one exact allocation instead.
+ *
+ * len stays 0 (this is a reservation, not a fill) -- unlike rt_bytes_alloc_packed,
+ * whose contract is a zero-FILLED array of that length. Same 64 MiB sanity
+ * bound as rt_bytes_alloc_packed. */
+RuntimeValue rt_bytes_alloc_packed_cap(RuntimeValue cap_val)
+{
+    uint64_t raw = (uint64_t)cap_val;
+    uint64_t cap = ((raw & TAG_MASK) == TAG_INT) ? (raw >> 3) : raw;
+    if (cap > 0x4000000ULL) return NIL_VALUE;
+    RuntimeValue rv = _rt_bytes_new(NULL, (uint32_t)cap);
+    if (rv == NIL_VALUE) return rv;
+    RuntimeArray *a = (RuntimeArray *)(uintptr_t)((uint64_t)rv & ~7ULL);
+    a->len = 0;          /* cap stays at the reserved size */
+    return rv;
+}
+
 /* Defensive single-element write into an existing byte array (honors the
  * representation the array was allocated with). */
 static inline void _rt_bytes_set(RuntimeArray *a, uint32_t i, uint8_t b)
@@ -10812,11 +10840,29 @@ static RuntimeValue rt_array_push_handle(RuntimeValue arr, RuntimeValue val)
         uint8_t byte = _rv_byte(val);
         uint8_t *data = (uint8_t *)runtime_array_items(a);
         if (a->len >= a->cap) {
-            uint32_t new_cap = a->cap * 2;
+            uint32_t old_cap = a->cap;
+            uint32_t new_cap = old_cap * 2;
             if (new_cap < 128) new_cap = 128;
-            uint8_t *new_data = (uint8_t *)malloc((size_t)new_cap);
-            if (!new_data) return ENCODE_PTR(a);
-            for (uint32_t i = 0; i < a->len; i++) new_data[i] = data[i];
+            uint8_t *new_data;
+            if (data == (uint8_t *)runtime_array_inline_items(a)) {
+                /* Storage is inline in the RuntimeArray allocation and cannot be
+                 * grown in place, so copy out. */
+                new_data = (uint8_t *)malloc((size_t)new_cap);
+                if (!new_data) return ENCODE_PTR(a);
+                for (uint32_t i = 0; i < a->len; i++) new_data[i] = data[i];
+            } else {
+                /* REUSE rather than reallocate: free() is a no-op on the bump
+                 * heap, so an unconditional fresh malloc+copy leaks the entire
+                 * old buffer on every doubling. simpleos_heap_realloc_last
+                 * extends in place when this is the most recent allocation (the
+                 * common append-loop case) and copies only when it is not. The
+                 * value-array branch below has always done this; the packed byte
+                 * branch did not. Same realloc-instead-of-reuse defect fixed in
+                 * _reset_font_atlas (font_renderer.spl). */
+                new_data = (uint8_t *)simpleos_heap_realloc_last(
+                    data, (size_t)old_cap, (size_t)new_cap);
+                if (!new_data) return ENCODE_PTR(a);
+            }
             a->items = (RuntimeValue *)new_data;
             a->cap = new_cap;
             data = new_data;

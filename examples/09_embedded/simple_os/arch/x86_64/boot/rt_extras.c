@@ -4099,7 +4099,18 @@ RuntimeValue rt_arm_smf_elf_stub_size(void) { return ENCODE_INT(0); }
  * 1 byte/element). Builders live in baremetal_stubs.c next to the layout. */
 extern RuntimeValue rt_bytes_alloc_packed_empty(void);
 extern RuntimeValue rt_bytes_alloc_packed(RuntimeValue len_val);
-RuntimeValue rt_byte_array_new(RuntimeValue capacity) { (void)capacity; return rt_bytes_alloc_packed_empty(); }
+extern RuntimeValue rt_bytes_alloc_packed_cap(RuntimeValue cap_val);
+/* HONOUR the capacity. This used to be `(void)capacity;` -- see the comment on
+ * rt_bytes_alloc_packed_cap in baremetal_stubs.c: discarding it forced every
+ * exactly-pre-sized caller through rt_array_push_handle's doubling growth, and
+ * because free() is a no-op on the bump heap each doubling leaked its old
+ * buffer. Falls back to the previous empty-array behaviour for a non-positive
+ * or out-of-range request. */
+RuntimeValue rt_byte_array_new(RuntimeValue capacity) {
+    RuntimeValue rv = rt_bytes_alloc_packed_cap(capacity);
+    if (rv == (RuntimeValue)3 /* NIL */) return rt_bytes_alloc_packed_empty();
+    return rv;
+}
 RuntimeValue rt_bytes_alloc(RuntimeValue size) { return rt_bytes_alloc_packed(size); }
 RuntimeValue rt_bytes_u32_le_at(void) { return ENCODE_INT(0); }
 RuntimeValue rt_bytes_u64_le_at(void) { return ENCODE_INT(0); }
