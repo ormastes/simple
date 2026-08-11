@@ -958,3 +958,11 @@ receipt path, and arithmetic smoke output.
 A live failure permits at most three distinct fix/verify cycles. Stop after the
 third cycle and do not rerun an identical failed command. Cross-builds, stale
 artifacts, static review, and unavailable hosts cannot produce a false PASS.
+
+## Post-bootstrap Stage 4 SSpec
+
+Run the exact candidate once against
+`test/03_system/check/post_bootstrap_stage4_acceptance_spec.spl`, setting
+absolute `STAGE4_POST_BOOTSTRAP_BINARY` and adjacent
+`STAGE4_POST_BOOTSTRAP_PROVENANCE`. It verifies unchanged retained smoke and
+does not replace deployment, rollback, QEMU, or native-host gates.

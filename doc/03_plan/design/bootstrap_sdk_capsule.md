@@ -76,3 +76,9 @@ are present. It is not evidence that a binary is reproducible, that x86
 Stage 4 has passed, or that Linux AArch64, macOS, FreeBSD, SimpleOS, or any
 other platform has been accepted. Those claims require their own source-bound
 build, runtime, and retained-evidence gates after Stage-4 admission.
+
+## Post-bootstrap acceptance interface
+
+`scripts/check/check-post-bootstrap-stage4-sspec.shs BINARY PROVENANCE` is the
+read-only acceptance bridge. It verifies adjacent v1 provenance, rejects
+noncanonical or symlinked inputs, and proves retained smoke stayed unchanged.

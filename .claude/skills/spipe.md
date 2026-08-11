@@ -2351,3 +2351,10 @@ Worktrees, `TMPDIR`, QEMU images, and Docker `data-root` belong on `/mnt/data`
 (4 TB ext4), never on `/`. Full detail, including the migration method and the
 rule against deleting another session's live scratch:
 `doc/07_guide/infra/host_storage_layout.md`.
+
+## Post-bootstrap Stage 4 acceptance
+
+The exact candidate runs
+`test/03_system/check/post_bootstrap_stage4_acceptance_spec.spl` once with its
+absolute path and adjacent provenance. Missing or symlinked inputs fail closed.
+Retained smoke is hash-verified without rerun; platform gates remain downstream.

@@ -545,3 +545,10 @@ When per-file startup cost makes the manifest impractical, use bounded compiled
 checker batches first. Preserve resume state and measured ETA if an even coarser
 module/root manifest is required. Do not fall back to repeatedly fixing only the
 first reported error.
+
+## Post-bootstrap acceptance
+
+After full Stage 4, the exact candidate runs
+`test/03_system/check/post_bootstrap_stage4_acceptance_spec.spl` with its
+absolute candidate and adjacent provenance paths. The checker is read-only and
+confirms retained smoke before/after; never repeat an unchanged green smoke run.

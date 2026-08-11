@@ -53,3 +53,11 @@ The executable spec owns observable assertions. The manual owns the reader-
 facing flow and claim boundary. The architecture document owns the four
 interface definitions. Any change to a scenario label must update all three
 artifacts in the same patch.
+
+## Post-bootstrap executable acceptance
+
+After full bootstrap, run `test/03_system/check/post_bootstrap_stage4_acceptance_spec.spl`
+once with the exact candidate and adjacent provenance. `PST4-001` through
+`PST4-005` cover missing input rejection, canonical identity, source/producer/
+Stage 3 lineage, retained hashes, essential-tool receipts, and unchanged smoke.
+This proves content identity, not a unique wall-clock build event.

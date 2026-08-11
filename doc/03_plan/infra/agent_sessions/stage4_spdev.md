@@ -352,3 +352,10 @@ After the current exact x86 Stage 4 binary is admitted, continue with
 frozen SDK -> candidate compiler -> rebuilt SDK/compiler -> reproducibility ->
 atomic promotion flow. This future lane must complete the typed SHB authority
 first; it must not narrow or replace the current full-source Stage 4 proof.
+
+## Post-bootstrap SSpec gate
+
+Once the exact x86 Stage 4 candidate exists, it runs
+`test/03_system/check/post_bootstrap_stage4_acceptance_spec.spl` with adjacent
+provenance. The gate rejects missing/symlinked inputs and verifies unchanged
+retained smoke before deployment/rollback and platform acceptance.

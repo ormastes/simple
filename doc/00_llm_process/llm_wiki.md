@@ -462,3 +462,10 @@ Core maintenance is offline: it must not call an LLM or transmit source.
 improve preview/conflict/reparse/write diagnostics to stderr; machine report
 stdout stays serialization-only. Do not infer documentation-quality acceptance
 from timing output or a zero-stub count alone.
+
+## Post-bootstrap Stage 4 SSpec acceptance
+
+- Canonical spec: `test/03_system/check/post_bootstrap_stage4_acceptance_spec.spl`.
+- Runner/input: exact full candidate plus adjacent absolute provenance.
+- Meaning: current content/lineage and unchanged retained tool-smoke evidence.
+- Never substitute a seed, wrapper, stale path, repeated smoke, or platform evidence.

@@ -525,3 +525,10 @@ is fresh. Update `doc/07_guide`, generated/manual SPipe docs under
 `doc/06_spec`, `.codex/skills`, `.agents/skills`, `.claude/skills`,
 `.claude/agents/spipe`, and `.gemini/commands` where applicable before marking
 an agent goal, SPipe phase, verify report, or ship lane complete.
+
+### Post-bootstrap full-CLI acceptance
+
+The exact produced CLI runs
+`test/03_system/check/post_bootstrap_stage4_acceptance_spec.spl` with adjacent
+provenance. A seed, wrapper, stale path, or static source check is not
+equivalent; retained smoke is hash-verified rather than rerun.

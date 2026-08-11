@@ -1142,3 +1142,10 @@ Almost never a std.spec regression. Check, in order:
 Known seed-JIT false-fail for specs with 10–99 examples. `simple run
 <spec>` is authoritative — if it prints `N examples, 0 failures`, the spec
 is green. Verify per-file with `run` before debugging the spec.
+
+## Post-bootstrap Stage 4 SSpec
+
+The exact candidate runs `test/03_system/check/post_bootstrap_stage4_acceptance_spec.spl`
+with absolute `STAGE4_POST_BOOTSTRAP_BINARY` and adjacent
+`STAGE4_POST_BOOTSTRAP_PROVENANCE`. Use interpreter, no daemon/database/cache,
+`--assert-ran`, and `--fail-fast`. Retained smoke is hash-verified, not rerun.
