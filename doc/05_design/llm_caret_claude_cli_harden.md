@@ -200,6 +200,16 @@ This contract is intentionally limited to the terminal boundary. Signal/panic
 recovery still needs a runtime-owned atexit/signal facility and must not be
 simulated by a second Caret terminal adapter.
 
+### Core CLI / Metal GUI entry split (2026-08-11)
+
+The regular `src/app/llm_caret/main.spl` is the cacheable CLI/TUI entry and
+must not import `gui_metal.spl`: that optional GUI imports Winit, Engine2D, and
+GPU backends which are outside the `core-c-bootstrap` runtime ABI. `--metal-gui`
+therefore fails with an explicit companion-entry diagnostic in the core binary.
+`src/app/llm_caret/gui_metal.spl` remains the GPU companion entry and is built
+only in a GPU-capable runtime lane. This keeps terminal and plain Caret builds
+linkable without silently dropping the Metal implementation.
+
 ## Distributed Feature-Gate Cross-Map (2026-07-24)
 
 The bounded `claude_full` gate map contains 33 accepted gate dimensions. Each
