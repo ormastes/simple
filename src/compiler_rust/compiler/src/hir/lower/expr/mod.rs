@@ -983,8 +983,56 @@ impl Lowerer {
         // double-box it. Restricted to float receivers so integer `abs` keeps
         // returning an integer.
         // doc/08_tracking/bug/float_returning_method_in_argument_position_prints_tagged_bits_2026-08-10.md
-        if matches!(method, "sqrt" | "abs" | "floor" | "ceil" | "round")
-            && matches!(recv_ty, TypeId::F32 | TypeId::F64)
+        //
+        // Extended 2026-08-11 to the remaining float math methods now given a
+        // real lowering in `codegen/instr/methods.rs`
+        // (`sin`/`cos`/`tan`/`asin`/`acos`/`atan`/`sinh`/`cosh`/`tanh`/`exp`/
+        // `ln`/`log2`/`log10`/`cbrt`/`trunc` via the `rt_math_*` runtime ABI,
+        // `pow`/`max`/`min` likewise). Without a real return-type stamp here
+        // these stayed `ANY`, which routes the call through fully dynamic
+        // by-name dispatch instead of the static codegen path — the dynamic
+        // resolver has no entry named e.g. `f64.sin`, so it failed with
+        // `Function 'f64.sin' not found` even though the codegen lowering now
+        // exists. See
+        // doc/08_tracking/bug/float_and_int_math_methods_missing_on_numeric_receivers_2026-08-10.md.
+        if matches!(
+            method,
+            "sqrt"
+                | "abs"
+                | "floor"
+                | "ceil"
+                | "round"
+                | "trunc"
+                | "sin"
+                | "cos"
+                | "tan"
+                | "asin"
+                | "acos"
+                | "atan"
+                | "sinh"
+                | "cosh"
+                | "tanh"
+                | "exp"
+                | "ln"
+                | "log2"
+                | "log10"
+                | "cbrt"
+                | "pow"
+                | "powf"
+                | "max"
+                | "min"
+        ) && matches!(recv_ty, TypeId::F32 | TypeId::F64)
+        {
+            return recv_ty;
+        }
+        // Integer `.abs()` now has a real codegen lowering too (native
+        // Cranelift `iabs`); stamp it I64/I32/etc so it takes the static path
+        // instead of dynamic by-name dispatch (`Function 'i64.abs' not found`).
+        if method == "abs"
+            && matches!(
+                recv_ty,
+                TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
+            )
         {
             return recv_ty;
         }

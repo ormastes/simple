@@ -1,9 +1,35 @@
 # A method call on a parenthesised float literal returns the receiver, not the result
 
 - **Date:** 2026-08-10
-- **Status:** OPEN
+- **Status:** OPEN — rediagnosed 2026-08-11, scope corrected (see below)
 - **Lanes:** interpreter and JIT (`SIMPLE_JIT_STRICT=1`) — both, identically.
 - **Class:** silent wrong-value. The method is not applied at all.
+
+## Rediagnosis (2026-08-11)
+
+This is **not** specific to float literals or to `sqrt`. It reproduces for any
+receiver wrapped in explicit parens on the RHS of a space-call, with any
+method:
+
+```
+fn main():
+    val b: f64 = 16.0
+    print b.sqrt()          # 4.0   correct — no parens around receiver
+    print (b).sqrt()        # 16.0  WRONG — same receiver, parens added
+```
+
+and it is not print-specific either — `identity (b).sqrt()` (a plain
+user-defined single-arg function used the same way) does not even return the
+unchanged receiver; it prints a garbage value (`2150627075.368833` measured),
+indicating memory corruption in this call shape rather than a simple "chain
+dropped" no-op. This looks like a parser/codegen precedence bug in how a
+space-call's parenthesized argument interacts with a postfix method-chain
+immediately following the closing paren, not a defect in float method dispatch.
+**Not fixed in this pass** — out of scope for the sibling fix in
+`float_and_int_math_methods_missing_on_numeric_receivers_2026-08-10.md`, which
+addressed only genuinely-unresolved math methods, not this parsing/codegen
+precedence issue. Workaround: wrap the whole expression in parens —
+`print((b).sqrt())` — which is unaffected and returns the correct value.
 
 ## Symptom
 

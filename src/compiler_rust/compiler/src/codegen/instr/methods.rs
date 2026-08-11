@@ -221,8 +221,105 @@ pub(crate) fn compile_builtin_method<M: Module>(
                 ctx.vreg_types.insert(*d, TypeId::F64);
             }
             return Ok(());
+        } else if method == "abs" {
+            // Integer abs: native Cranelift `iabs` — no runtime call needed.
+            let result_val = builder.ins().iabs(receiver_val);
+            if let Some(d) = dest {
+                ctx.vreg_values.insert(*d, result_val);
+            }
+            return Ok(());
         }
-        // Non-sqrt integer methods fall through to normal dispatch
+        // Non-sqrt/abs integer methods (floor/ceil/round have no integer
+        // meaning) fall through to normal dispatch.
+    }
+    // `trunc` is also a first-class Cranelift float instruction (round toward
+    // zero), same treatment as sqrt/floor/ceil/round above.
+    if method == "trunc" {
+        let src_ty = builder.func.dfg.value_type(receiver_val);
+        if src_ty == types::F32 || src_ty == types::F64 {
+            let result_val = builder.ins().trunc(receiver_val);
+            if let Some(d) = dest {
+                ctx.vreg_values.insert(*d, result_val);
+            }
+            return Ok(());
+        }
+    }
+    // The remaining float math methods (`sin`/`cos`/`tan`/.../`pow`/`max`/
+    // `min`) have no native Cranelift instruction; route them to the same
+    // `rt_math_*` runtime symbols the free-function forms already use
+    // (`mir/lower/lowering_expr_builtin.rs::lower_libm_math`), which are
+    // declared with the real `f64 -> f64` ABI in `codegen/runtime_sffi.rs`.
+    // See doc/08_tracking/bug/float_and_int_math_methods_missing_on_numeric_receivers_2026-08-10.md.
+    {
+        let unary_rt_name = match method {
+            "sin" => Some("rt_math_sin"),
+            "cos" => Some("rt_math_cos"),
+            "tan" => Some("rt_math_tan"),
+            "asin" => Some("rt_math_asin"),
+            "acos" => Some("rt_math_acos"),
+            "atan" => Some("rt_math_atan"),
+            "sinh" => Some("rt_math_sinh"),
+            "cosh" => Some("rt_math_cosh"),
+            "tanh" => Some("rt_math_tanh"),
+            "exp" => Some("rt_math_exp"),
+            "ln" => Some("rt_math_log"),
+            "log2" => Some("rt_math_log2"),
+            "log10" => Some("rt_math_log10"),
+            "cbrt" => Some("rt_math_cbrt"),
+            _ => None,
+        };
+        let binary_rt_name = match method {
+            "pow" | "powf" => Some("rt_math_pow"),
+            "max" => Some("rt_math_max"),
+            "min" => Some("rt_math_min"),
+            "atan2" => Some("rt_math_atan2"),
+            "hypot" => Some("rt_math_hypot"),
+            _ => None,
+        };
+        let src_ty = builder.func.dfg.value_type(receiver_val);
+        let is_float = src_ty == types::F32 || src_ty == types::F64;
+        if is_float {
+            if let Some(rt_name) = unary_rt_name {
+                let recv_f64 = if src_ty == types::F32 {
+                    builder.ins().fpromote(types::F64, receiver_val)
+                } else {
+                    receiver_val
+                };
+                let mut result_val = call_runtime_1(ctx, builder, rt_name, recv_f64);
+                if src_ty == types::F32 {
+                    result_val = builder.ins().fdemote(types::F32, result_val);
+                }
+                if let Some(d) = dest {
+                    ctx.vreg_values.insert(*d, result_val);
+                }
+                return Ok(());
+            }
+            if let Some(rt_name) = binary_rt_name {
+                let arg_val = ctx.get_vreg(&args[0])?;
+                let arg_ty = builder.func.dfg.value_type(arg_val);
+                let recv_f64 = if src_ty == types::F32 {
+                    builder.ins().fpromote(types::F64, receiver_val)
+                } else {
+                    receiver_val
+                };
+                let arg_f64 = if arg_ty == types::F32 {
+                    builder.ins().fpromote(types::F64, arg_val)
+                } else if arg_ty != types::F64 {
+                    // Integer arg (e.g. `f.max(5)`): convert to float.
+                    builder.ins().fcvt_from_sint(types::F64, arg_val)
+                } else {
+                    arg_val
+                };
+                let mut result_val = call_runtime_2(ctx, builder, rt_name, recv_f64, arg_f64);
+                if src_ty == types::F32 {
+                    result_val = builder.ins().fdemote(types::F32, result_val);
+                }
+                if let Some(d) = dest {
+                    ctx.vreg_values.insert(*d, result_val);
+                }
+                return Ok(());
+            }
+        }
     }
     let result = match (receiver_type, method) {
         ("Array", "push") | ("array", "push") => {

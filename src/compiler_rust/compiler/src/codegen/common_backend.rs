@@ -393,6 +393,47 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                             names.insert(n.to_string());
                         }
                     }
+                    // `try_compile_builtin_method_call`
+                    // (codegen/instr/closures_structs.rs) is the dispatch site
+                    // for method calls lowered as `MethodCallStatic` (e.g.
+                    // `f.sin()`, `f.pow(x)`, `f.max(x)`) — it picks the
+                    // concrete `rt_math_*` symbol from the method name at
+                    // codegen time, same pre-declaration problem as
+                    // `BuiltinMethod` above. Gate on the func_name's method
+                    // suffix so this family is only pulled in for programs
+                    // that actually use one of these methods.
+                    MirInst::MethodCallStatic { func_name, .. } => {
+                        let method_suffix = func_name.rsplit('.').next().unwrap_or(func_name.as_str());
+                        const MATH_METHODS: &[&str] = &[
+                            "sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh", "exp", "ln", "log2",
+                            "log10", "cbrt", "pow", "powf", "max", "min", "atan2", "hypot",
+                        ];
+                        if MATH_METHODS.contains(&method_suffix) {
+                            for n in [
+                                "rt_math_sin",
+                                "rt_math_cos",
+                                "rt_math_tan",
+                                "rt_math_asin",
+                                "rt_math_acos",
+                                "rt_math_atan",
+                                "rt_math_sinh",
+                                "rt_math_cosh",
+                                "rt_math_tanh",
+                                "rt_math_exp",
+                                "rt_math_log",
+                                "rt_math_log2",
+                                "rt_math_log10",
+                                "rt_math_cbrt",
+                                "rt_math_pow",
+                                "rt_math_max",
+                                "rt_math_min",
+                                "rt_math_atan2",
+                                "rt_math_hypot",
+                            ] {
+                                names.insert(n.to_string());
+                            }
+                        }
+                    }
                     MirInst::FStringFormat { .. } => {
                         for n in [
                             "rt_string_new",
