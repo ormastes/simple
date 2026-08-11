@@ -1,0 +1,127 @@
+# @cover src/lib/nogc_sync_mut/spec/evidence/counterpart/dynlib_provider.spl 80%
+# @req REQ-COUNTERPART-DYNLIB-001
+"""
+# In-process dynlib counterpart transport — load, call, compare
+
+**Category:** Infrastructure
+**Design:** doc/05_design/infra/counterpart/counterpart_conformance_infrastructure_design_2026-08-09.md
+
+## Purpose and Audience
+
+Three lanes independently concluded that a counterpart spec could not execute
+an in-process shared library and substituted a hand-authored literal for its
+output. That conclusion was wrong for the SUBPROCESS transport — this
+scenario is for the OTHER transport nobody had exercised: loading a plain
+system shared library (not a purpose-built `scf_get_api` adapter) and calling
+a real exported C function directly, in-process.
+
+The subject under test is `dynlib_digest_compare`
+(`src/lib/nogc_sync_mut/spec/evidence/counterpart/dynlib_provider.spl`), which
+dlopens a library, dlsyms a symbol, calls it against real memory, and compares
+the result against a published NIST known-answer value. A red result here is a
+real defect in the load/call/compare path, never a stand-in for one.
+
+## Scope and Preconditions
+
+Requires `/usr/lib/x86_64-linux-gnu/libcrypto.so.3` (OpenSSL) to be installed
+and loadable on the host. When it is not present, the missing-library scenario
+below is exactly the case this spec also proves: `unavailable`, not a silent
+skip.
+
+## Primary Workflow
+
+Load `libcrypto.so.3`, call `SHA256(ptr, len, out[32])` against a known input,
+hex-encode the 32-byte digest, and compare it to the published NIST vector.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| KAT | Known-Answer Test — an externally published expected value, never self-produced |
+| `ProviderStatus.unavailable` | Fail-closed result for a missing library or symbol |
+| `artifact_hash` | Real measured digest of the loaded library's own file bytes |
+
+## Related Specifications
+
+- [Frozen counterpart contracts](../../../../src/lib/common/spec/evidence/counterpart/model.spl)
+- [Generic dlopen/dlsym SFFI](../../../../src/lib/nogc_sync_mut/sffi/dynamic.spl)
+
+## Evidence and Provenance
+
+Every digest in this scenario is computed by a real dlopen'd `libcrypto.so.3`
+at run time. The expected values are the published NIST SHA-256 test vectors
+for the empty string and for `"abc"` — never values this spec produced itself.
+
+## Recovery and Troubleshooting
+
+`unavailable` with detail `library not loadable` means libcrypto.so.3 is
+missing from this host — install `libssl3` / `openssl`. `unavailable` with
+detail `symbol not callable` means the installed libcrypto does not export
+`SHA256` under that name (unlikely on any OpenSSL 1.x/3.x build).
+"""
+
+use std.spec.*
+use std.common.spec.evidence.counterpart.model.{ProviderStatus}
+use std.nogc_sync_mut.spec.evidence.counterpart.dynlib_provider.{
+    dynlib_digest_compare
+}
+
+val LIBCRYPTO: text = "/usr/lib/x86_64-linux-gnu/libcrypto.so.3"
+val MISSING_LIB: text = "/usr/lib/x86_64-linux-gnu/libcrypto_does_not_exist.so.999"
+
+# Published NIST SHA-256 test vectors — externally sourced, not self-produced.
+val SHA256_EMPTY: text = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+val SHA256_ABC: text = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+
+# ============================================================================
+# Primary scenarios
+# ============================================================================
+# @manual_section: Real known-answer digest through a dlopen'd system library
+
+describe "In-process dynlib counterpart transport":
+    it "computes the published SHA-256 of the empty string via a real dlopen'd libcrypto":
+        step("Load libcrypto.so.3, call SHA256 on the empty string, compare to the NIST vector")
+        val outcome = dynlib_digest_compare(LIBCRYPTO, "SHA256", "", 32, SHA256_EMPTY)
+        step("Confirm the run executed and the digest matches the published vector")
+        assert_equal(outcome.status, ProviderStatus.executed)
+        assert_true(outcome.matched)
+        assert_equal(outcome.digest_hex, SHA256_EMPTY)
+        step("Confirm artifact_hash is a real measured digest, never an empty placeholder")
+        assert_true(outcome.provenance.package_manifest_hash.len() == 64)
+        assert_true(outcome.artifact.canonical_hash != "")
+
+    it "computes the published SHA-256 of \"abc\" via a real dlopen'd libcrypto":
+        step("Load libcrypto.so.3, call SHA256 on \"abc\", compare to the NIST vector")
+        val outcome = dynlib_digest_compare(LIBCRYPTO, "SHA256", "abc", 32, SHA256_ABC)
+        step("Confirm the run executed and the digest matches the published vector")
+        assert_equal(outcome.status, ProviderStatus.executed)
+        assert_true(outcome.matched)
+        assert_equal(outcome.digest_hex, SHA256_ABC)
+
+    it "reports unavailable and rejects the run when the library does not exist":
+        step("Load a library path that is not present on this host")
+        val outcome = dynlib_digest_compare(MISSING_LIB, "SHA256", "abc", 32, SHA256_ABC)
+        step("Confirm the run is rejected as unavailable, never faked with a literal digest")
+        assert_equal(outcome.status, ProviderStatus.unavailable)
+        assert_false(outcome.matched)
+        assert_equal(outcome.digest_hex, "")
+        assert_true(outcome.detail.starts_with("library not loadable"))
+
+    it "reports unavailable and rejects the run when the symbol does not exist":
+        step("Load the real libcrypto.so.3 but ask for a symbol it does not export")
+        val outcome = dynlib_digest_compare(LIBCRYPTO, "SCF_NO_SUCH_SYMBOL_EVER", "abc", 32, SHA256_ABC)
+        step("Confirm the run is rejected as unavailable, never faked with a literal digest")
+        assert_equal(outcome.status, ProviderStatus.unavailable)
+        assert_false(outcome.matched)
+        assert_equal(outcome.digest_hex, "")
+
+    it "goes RED when the expected vector is sabotaged, naming the mismatch":
+        step("Corrupt one byte of the expected digest — the classic sabotage-must-fail check")
+        val corrupted_vector = "ffffffff98fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        val outcome = dynlib_digest_compare(LIBCRYPTO, "SHA256", "", 32, corrupted_vector)
+        step("Confirm the comparator itself reports the mismatch rather than passing vacuously")
+        assert_equal(outcome.status, ProviderStatus.executed)
+        assert_false(outcome.matched)
+        assert_true(outcome.detail.starts_with("digest MISMATCH"))
+        step("Restore: the corrupted vector above is a local literal, never written back to SHA256_EMPTY")
+        assert_equal(SHA256_EMPTY, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
