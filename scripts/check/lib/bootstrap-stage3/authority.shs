@@ -654,6 +654,78 @@ bootstrap_stage3_tool_authority_snapshot() (
     mv "$bootstrap_stage3_tool_tmp" "$bootstrap_stage3_tool_output"
 )
 
+# Capture retry inputs before the caller removes any prior provenance/cache.
+# Keep the snapshots beside the eventual provenance directory so promotion is
+# a same-filesystem rename and the exact preflight bytes become the receipts.
+bootstrap_stage3_retry_preflight() {
+    bootstrap_stage3_retry_stage=$1
+    bootstrap_stage3_retry_path=$2
+    bootstrap_stage3_retry_root=$3
+    case "$bootstrap_stage3_retry_stage:$bootstrap_stage3_retry_root" in
+        /*:/*) ;;
+        *) return 1 ;;
+    esac
+    [ "$(bootstrap_stage3_canonical_path \
+        "$bootstrap_stage3_retry_root")" = \
+        "$bootstrap_stage3_retry_root" ] || return 1
+    bootstrap_stage3_retry_parent=$(
+        CDPATH= cd -- "$(dirname -- "$bootstrap_stage3_retry_stage")" &&
+            pwd -P
+    ) || return 1
+    [ ! -L "$(dirname -- "$bootstrap_stage3_retry_stage")" ] || return 1
+    [ "$bootstrap_stage3_retry_stage" = \
+        "$bootstrap_stage3_retry_parent/$(basename -- "$bootstrap_stage3_retry_stage")" ] ||
+        return 1
+    case "$bootstrap_stage3_retry_stage" in
+        "$bootstrap_stage3_retry_root"|"$bootstrap_stage3_retry_root/src"|\
+        "$bootstrap_stage3_retry_root/src/"*) return 1 ;;
+    esac
+    [ ! -L "$bootstrap_stage3_retry_stage" ] || return 1
+    bootstrap_stage3_retry_dir="${bootstrap_stage3_retry_stage}.preflight.$$"
+    [ ! -e "$bootstrap_stage3_retry_dir" ] &&
+        [ ! -L "$bootstrap_stage3_retry_dir" ] || return 1
+    (umask 077 && mkdir "$bootstrap_stage3_retry_dir") || return 1
+    bootstrap_stage3_retry_tool="$bootstrap_stage3_retry_dir/tool-authority-before.txt"
+    bootstrap_stage3_retry_git="$bootstrap_stage3_retry_dir/git-state-before.env"
+    bootstrap_stage3_retry_source="$bootstrap_stage3_retry_dir/source-inputs-before.txt"
+    bootstrap_stage3_tool_authority_snapshot \
+        "$bootstrap_stage3_retry_tool" "$bootstrap_stage3_retry_path" \
+        "$bootstrap_stage3_retry_root" &&
+        bootstrap_stage3_git_state "$bootstrap_stage3_retry_root" \
+            "$bootstrap_stage3_retry_git" &&
+        bootstrap_stage3_source_snapshot "$bootstrap_stage3_retry_source" \
+            "$bootstrap_stage3_retry_root" &&
+        chmod 0400 "$bootstrap_stage3_retry_tool" \
+            "$bootstrap_stage3_retry_git" "$bootstrap_stage3_retry_source" || {
+        rm -rf "$bootstrap_stage3_retry_dir"
+        return 1
+    }
+    printf '%s\n' "$bootstrap_stage3_retry_dir"
+}
+
+bootstrap_stage3_promote_retry_preflight() {
+    bootstrap_stage3_retry_dir=$1
+    bootstrap_stage3_retry_stage=$2
+    [ -d "$bootstrap_stage3_retry_dir" ] &&
+        [ ! -L "$bootstrap_stage3_retry_dir" ] &&
+        [ -d "$bootstrap_stage3_retry_stage" ] &&
+        [ ! -L "$bootstrap_stage3_retry_stage" ] || return 1
+    for bootstrap_stage3_retry_name in \
+        tool-authority-before.txt git-state-before.env source-inputs-before.txt; do
+        bootstrap_stage3_retry_file=\
+"$bootstrap_stage3_retry_dir/$bootstrap_stage3_retry_name"
+        [ -f "$bootstrap_stage3_retry_file" ] &&
+            [ ! -L "$bootstrap_stage3_retry_file" ] &&
+            [ "$(bootstrap_stage3_canonical_file \
+                "$bootstrap_stage3_retry_file")" = \
+                "$bootstrap_stage3_retry_file" ] || return 1
+        mv "$bootstrap_stage3_retry_file" \
+            "$bootstrap_stage3_retry_stage/$bootstrap_stage3_retry_name" ||
+            return 1
+    done
+    rmdir "$bootstrap_stage3_retry_dir"
+}
+
 bootstrap_stage3_directory_snapshot() {
     bootstrap_stage3_directory_snapshot_output=$1
     bootstrap_stage3_directory_snapshot_root=$2
