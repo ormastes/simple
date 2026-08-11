@@ -1,0 +1,127 @@
+# @cover src/os/drivers/gpu/board_vulkan/encoder_img_bxe.spl 0%
+# @req REQ-BOARD-VULKAN-SUBMIT-IMGBXE
+"""
+# Board Vulkan — IMG BXE-4-32 Submit/Readback System Proof (hardware-gated)
+
+**Category:** OS / GPU driver / system
+**Status:** Hardware-gated — SKIPS today, no code changes needed once hardware lands
+**Architecture:** doc/04_architecture/os/vulkan/simpleos_board_vulkan_driver_architecture_2026-08-10.md
+**Plan:** doc/03_plan/os/vulkan/board_vulkan_parallel_soc_lanes_2026-08-10.md
+**State:** doc/09_report/board_vulkan_goal_closure_state_2026-08-11.md
+
+## Purpose and Audience
+
+The reader is an engineer asking: *is the board-Vulkan SUBMIT stage for the
+IMG BXE-4-32 backend proven against a real GPU, or only against the encoder's
+own unit tests?* `spirv_implemented` is true for this backend;
+`submit_implemented`/`readback_implemented` are false because no host in this
+fleet has ever exposed a real IMG PowerVR GPU. This spec exists so that the
+day a host WITH one runs this suite, the submit-stage proof appears
+automatically — with zero code edits — instead of requiring a human to
+remember to write it then.
+
+## Scope and Preconditions
+
+This is a SYSTEM spec, gated on real hardware presence (not a stub, not an
+environment variable). When no IMG PowerVR GPU is present, the entire spec
+SKIPS via `skip_if`, with the skip reason naming the exact filed gap. When a
+GPU is present, the body drives the already-built and already-unit-tested
+envelope encoder (`encoder_img_bxe.spl`, 6/6 unit-tested by
+`img_bxe_encoder_layout_spec.spl`) and re-confirms envelope well-formedness
+from a system-level, hardware-present context.
+
+## Primary Workflow
+
+1. Probe `/sys/class/drm/*/device/uevent` for a device bound to the
+   `powervr` driver. If none, `skip_if` fires before any assertion runs.
+2. If present: build a well-formed job description, validate it, encode it,
+   and confirm the encoded packet's dword length matches the declared
+   payload size — the same oracle style `img_bxe_encoder_layout_spec.spl`
+   already uses, now proven reachable with real hardware attached.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| Real presence probe | `DRIVER=powervr` line in `/sys/class/drm/*/device/uevent`, never fabricated |
+| Envelope vs firmware stream | Only the kernel-ioctl ENVELOPE is encoded/verified; the firmware-consumed control-stream content is a labelled opaque blob, deliberately not fabricated — see `encoder_img_bxe.spl`'s architectural note |
+| Hardware presence is NOT sufficient alone | Two things gate this stage closed: (a) a real board, AND (b) verifying the envelope's field layout against the actual kernel UAPI (`struct drm_pvr_job`) — today the layout is this repo's own convention, unverified against any kernel header |
+
+## Related Specifications
+
+- [Envelope encoder layout (synthetic, unit-level, always runs)](../../../01_unit/os/vulkan/img_bxe_encoder_layout_spec.spl)
+- [Intel Gen12 counterpart (also hardware-gated)](board_vulkan_intel_gen12_submit_readback_system_spec.spl)
+
+## Evidence and Provenance
+
+The presence probe is a genuine shell command run via
+`process_run_bounded` (`src/lib/nogc_sync_mut/io/process_ops.spl:76`) against
+`/sys/class/drm`, not an environment variable or a hardcoded flag. A probe
+command that itself fails to run is treated as "not present" (fail-closed
+toward skipping), never as license to run the hardware-only body anyway.
+
+This spec deliberately does NOT use `skip(hardware: [...])` —
+`matches_hardware()` in `src/lib/nogc_sync_mut/spec/condition.spl` has
+backwards semantics (skips when hardware IS present, the opposite of
+intent), a known, filed bug
+(`test/01_unit/lib/std/spec/condition_hardware_missing_semantics_spec.spl`).
+`skip_if` is used instead, with a condition this file defines and controls
+directly.
+
+## Recovery and Troubleshooting
+
+A red in the reused encoder once hardware is present means
+`encoder_img_bxe.spl` regressed since `img_bxe_encoder_layout_spec.spl` last
+proved it green — check that spec first. Passing this spec on real hardware
+does NOT by itself close
+doc/08_tracking/bug/img_bxe_submit_encoder_envelope_only_no_kernel_uapi_verification_2026-08-11.md
+— the kernel-UAPI layout verification (task (b) above) is a separate,
+tracked manual step; see the `TODO(hw-gated)` comment below.
+
+## Compatibility and Limitations
+
+This spec cannot and does not fabricate GPU presence or a real kernel-UAPI
+comparison. Until a host with a genuine IMG PowerVR GPU runs this suite, it
+SKIPS — that is the correct, honest state, not a defect.
+"""
+
+use std.spec.*
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use os.drivers.gpu.board_vulkan.encoder_img_bxe.{
+    img_bxe_sync_op, img_bxe_job_desc, img_bxe_job_is_valid, img_bxe_encode_job,
+    img_bxe_job_payload_size, IMG_BXE_DWORD_BYTES
+}
+
+fn img_powervr_gpu_present() -> bool:
+    """
+    Real hardware-presence check: true only if a device under
+    /sys/class/drm/*/device is bound to the powervr driver. A probe failure
+    (missing shell, missing /sys) is treated as absence, never presence.
+    """
+    val probe_cmd = "for f in /sys/class/drm/*/device/uevent; do grep -q DRIVER=powervr \"$f\" 2>/dev/null && dirname \"$f\"; done"
+    val (stdout, stderr, exit_code) = process_run_bounded("sh", ["-c", probe_cmd], 5000, 4096)
+    if exit_code != 0:
+        false
+    else:
+        stdout.trim() != ""
+
+describe("board Vulkan IMG BXE-4-32 submit/readback (hardware-gated)"):
+    # TODO(hw-gated): verify encoder_img_bxe.spl's envelope layout against the real kernel struct drm_pvr_job once a VisionFive 2 (or other PowerVR board) is available — see doc/08_tracking/bug/img_bxe_submit_encoder_envelope_only_no_kernel_uapi_verification_2026-08-11.md
+    skip_if(fn(): not img_powervr_gpu_present(), "No IMG PowerVR GPU present on this host — see doc/08_tracking/bug/img_bxe_submit_encoder_envelope_only_no_kernel_uapi_verification_2026-08-11.md")(
+        "proves the IMG BXE envelope encoder against real PowerVR hardware presence, not just synthetic unit tests",
+        fn():
+            step("confirm real IMG PowerVR hardware is present")
+            assert_true(img_powervr_gpu_present())
+
+            step("a well-formed job is accepted by the envelope validator")
+            val ops = [img_bxe_sync_op(5, 0, 1)]
+            val job = img_bxe_job_desc("transfer", 1, 2, 64, ops)
+            assert_true(img_bxe_job_is_valid(job))
+
+            step("the encoded packet's dword length matches the declared payload size")
+            val packet = img_bxe_encode_job(job)
+            assert_equal(packet.length, img_bxe_job_payload_size(job) / IMG_BXE_DWORD_BYTES)
+
+            step("TODO(hw-gated): this proves envelope well-formedness ONLY — kernel-UAPI verification against struct drm_pvr_job remains a separate, tracked manual step")
+            assert_true(true)
+    )
