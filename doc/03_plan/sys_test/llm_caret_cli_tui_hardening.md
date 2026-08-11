@@ -396,7 +396,7 @@ else
 fi
 mkdir -p "$(dirname "${artifact}")"
 "${runtime}" native-build \
-  --source src/compiler --source src/app --source src/lib \
+  --source src/app --source src/lib \
   --entry-closure --entry src/app/llm_caret/main.spl --strip \
   --output "${artifact}"
 test -x "${artifact}"
