@@ -1,0 +1,68 @@
+# Canonical JSON-RPC Content-Length framing primitives.
+#
+# These are the PURE parts of the LSP/MCP/DAP stdio framing that were
+# reimplemented verbatim in several servers. The stdin-reading loops stay in
+# each server (they differ in their read primitive and in their JSON-lines
+# auto-detect policy -- see
+# doc/08_tracking/bug/jsonrpc_framing_divergence_2026-08-11.md), but the header
+# parsing and the frame encoder are shared here.
+#
+# Behaviour is fixed by test/01_unit/app/protocol/jsonrpc_framing_spec.spl.
+
+# Strip a single trailing line terminator (CRLF, LF, or bare CR).
+# Only one terminator is removed; interior newlines are preserved.
+fn frame_strip_line_end(line: text) -> text:
+    val n = line.len()
+    if n >= 2 and line.substring(n - 2, n) == "\r\n":
+        return line.substring(0, n - 2)
+    if n >= 1 and line.substring(n - 1, n) == "\n":
+        return line.substring(0, n - 1)
+    if n >= 1 and line.substring(n - 1, n) == "\r":
+        return line.substring(0, n - 1)
+    line
+
+# Parse a leading run of ASCII decimal digits. Stops at the first non-digit and
+# returns what was accumulated so far; a string with no leading digit yields 0.
+# Deliberately total: framing must never abort the server on a bad header.
+fn frame_parse_decimal(s: text) -> i64:
+    var result: i64 = 0
+    var i = 0
+    while i < s.len():
+        val ch = s.substring(i, i + 1)
+        if ch == "0":
+            result = result * 10
+        elif ch == "1":
+            result = result * 10 + 1
+        elif ch == "2":
+            result = result * 10 + 2
+        elif ch == "3":
+            result = result * 10 + 3
+        elif ch == "4":
+            result = result * 10 + 4
+        elif ch == "5":
+            result = result * 10 + 5
+        elif ch == "6":
+            result = result * 10 + 6
+        elif ch == "7":
+            result = result * 10 + 7
+        elif ch == "8":
+            result = result * 10 + 8
+        elif ch == "9":
+            result = result * 10 + 9
+        else:
+            return result
+        i = i + 1
+    result
+
+# Return the declared body length for a header line, or -1 when the line is not
+# a Content-Length header. Callers ignore -1 so that unrelated headers
+# (Content-Type, vendor extensions) are tolerated rather than fatal.
+fn frame_content_length_of(line: text) -> i64:
+    val stripped = frame_strip_line_end(line)
+    if not stripped.starts_with("Content-Length:"):
+        return -1
+    frame_parse_decimal(stripped.replace("Content-Length:", "").trim())
+
+# Encode a body as a complete Content-Length framed message.
+fn frame_encode(body: text) -> text:
+    "Content-Length: " + str(body.len()) + "\r\n\r\n" + body

@@ -1,0 +1,163 @@
+# @cover src/app/protocol/framing.spl 90%
+# @req REQ-JSONRPC-FRAMING-001
+"""
+# JSON-RPC Content-Length Framing
+
+**Category:** Infrastructure
+**Status:** In Progress
+
+## Purpose and Audience
+
+Every Simple language server that speaks over stdio -- the MCP server, the LSP
+bridges, the TRACE32 bridges, the DAP adapter -- wraps each JSON-RPC message in
+an LSP-style `Content-Length:` header block. This specification fixes the
+framing behaviour those servers share, so that an editor or agent host talking
+to any of them sees the same wire behaviour.
+
+The audience is anyone adding a new stdio server, or changing how an existing
+one reads its input.
+
+## Scope and Preconditions
+
+This covers the pure framing primitives in `src/app/protocol/framing.spl`: the
+header-line terminator strip, the decimal length parser, the Content-Length
+header recogniser, and the outbound frame encoder. It does not cover the
+per-server stdin read loops, which differ deliberately in their read primitive
+and in whether they auto-detect bare JSON-lines input.
+
+## Primary Workflow
+
+A host writes `Content-Length: <n>`, a blank line, then `<n>` characters of JSON
+body. The server reads header lines until the blank line, takes the declared
+length from whichever line is the Content-Length header, and then reads exactly
+that many characters. Replies are encoded the same way.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| Header block | Lines before the first blank line |
+| Declared length | The number in the Content-Length header |
+| Tolerant parse | A malformed header must never abort the server |
+
+## Related Specifications
+
+- `test/01_unit/app/mcp_unit/transport_tcp_spec.spl` -- the TCP transport variant
+
+## Evidence and Provenance
+
+Behaviour was read off the pre-merge implementations in `src/app/mcp/main.spl`
+and `src/app/simple_lsp_mcp/json_helpers.spl`, which a byte-level diff showed to
+be identical apart from function names. Divergent siblings are recorded in
+`doc/08_tracking/bug/jsonrpc_framing_divergence_2026-08-11.md`.
+
+## Recovery and Troubleshooting
+
+A header the server cannot understand yields a zero or absent declared length;
+the read loop then reports no message rather than reading a wrong number of
+bytes off the stream. This is the deliberate failure mode: refuse the frame,
+keep the stream position sane.
+
+## Compatibility and Limitations
+
+The declared length is counted in `text` characters, not UTF-8 bytes. For ASCII
+JSON -- which is what these servers emit -- the two coincide. Non-ASCII bodies
+are a known open gap and are not claimed here.
+"""
+
+use std.spec.*
+use app.protocol.framing.*
+
+
+describe "JSON-RPC Content-Length framing":
+
+    it "reads the declared length from a well-formed header":
+        step("a host sends a standard Content-Length header line")
+        expect(frame_content_length_of("Content-Length: 42\r\n")).to_equal(42)
+
+    it "accepts a header line that arrived without its terminator":
+        step("the reader hands over a line whose CRLF was already consumed")
+        expect(frame_content_length_of("Content-Length: 7")).to_equal(7)
+
+    it "reports no length for a line that is not a Content-Length header":
+        step("an unrelated header such as Content-Type arrives first")
+        expect(frame_content_length_of("Content-Type: application/json\r\n")).to_equal(-1)
+
+    it "tolerates an extra vendor header without mistaking it for a length":
+        step("a vendor extension header appears in the block")
+        expect(frame_content_length_of("X-Simple-Trace: on\r\n")).to_equal(-1)
+
+    it "treats a non-numeric length as zero rather than aborting":
+        step("a malformed header declares a word instead of a number")
+        expect(frame_content_length_of("Content-Length: abc\r\n")).to_equal(0)
+
+    it "stops at the first non-digit in a partly numeric length":
+        step("a length is corrupted mid-value")
+        expect(frame_content_length_of("Content-Length: 12x34\r\n")).to_equal(12)
+
+    it "reads an empty length as zero":
+        step("the header names no value at all")
+        expect(frame_content_length_of("Content-Length:\r\n")).to_equal(0)
+
+    it "accepts a length declared with no space after the colon":
+        step("a terse host omits the conventional space")
+        expect(frame_content_length_of("Content-Length:15\r\n")).to_equal(15)
+
+    it "removes a CRLF terminator without touching the rest of the line":
+        step("a line ends in the protocol-standard CRLF")
+        expect(frame_strip_line_end("Content-Length: 3\r\n")).to_equal("Content-Length: 3")
+
+    it "removes a lone LF terminator":
+        step("a Unix-style reader delivers only a newline")
+        expect(frame_strip_line_end("abc\n")).to_equal("abc")
+
+    it "removes a lone CR terminator":
+        step("a split read delivers the CR without its LF")
+        expect(frame_strip_line_end("abc\r")).to_equal("abc")
+
+    it "leaves an unterminated line unchanged":
+        step("the final line of a stream arrives with no terminator")
+        expect(frame_strip_line_end("abc")).to_equal("abc")
+
+    it "removes only one terminator so a split read is not over-trimmed":
+        step("a buffer boundary leaves two terminators stuck together")
+        expect(frame_strip_line_end("abc\n\n")).to_equal("abc\n")
+
+    it "leaves an empty line empty":
+        step("the blank line that closes the header block is stripped")
+        expect(frame_strip_line_end("")).to_equal("")
+
+    it "parses a bare decimal run":
+        step("a length value is handed to the parser directly")
+        expect(frame_parse_decimal("2048")).to_equal(2048)
+
+    it "reads a leading zero without changing the value":
+        step("a host zero-pads the declared length")
+        expect(frame_parse_decimal("007")).to_equal(7)
+
+    it "yields zero for text with no leading digit":
+        step("the length field is entirely non-numeric")
+        expect(frame_parse_decimal("nope")).to_equal(0)
+
+    it "yields zero for an empty length field":
+        step("the length field is empty")
+        expect(frame_parse_decimal("")).to_equal(0)
+
+    it "encodes a reply with a header, a blank line, and the body":
+        step("the server frames a JSON-RPC reply for the host")
+        expect(frame_encode("{}")).to_equal("Content-Length: 2\r\n\r\n{}")
+
+    it "declares a length that matches the body it encodes":
+        step("the server frames a larger reply")
+        val body = "{\"jsonrpc\":\"2.0\",\"id\":1}"
+        expect(frame_encode(body)).to_equal("Content-Length: " + str(body.len()) + "\r\n\r\n" + body)
+
+    it "encodes an empty body as a zero-length frame":
+        step("the server has nothing to say but must still frame it")
+        expect(frame_encode("")).to_equal("Content-Length: 0\r\n\r\n")
+
+    it "round-trips its own encoded header back to the declared length":
+        step("a frame the server emitted is parsed by the same primitives")
+        val body = "{\"ok\":true}"
+        val header = frame_encode(body).split("\r\n")[0]
+        expect(frame_content_length_of(header)).to_equal(body.len())
