@@ -425,6 +425,39 @@ pub fn stage4_process_provider_object_format(target_os_name: text, msvc_objects:
     """Return the portable-nm contract for the process provider."""
     stage4_hosted_provider_object_format(target_os_name, msvc_objects)
 
+pub fn stage4_contracts_provider_archive_file(target_os_name: text, msvc_linker: bool) -> Result<text, text>:
+    """Return the dedicated contract ABI provider archive name."""
+    if target_os_name == "windows":
+        return Ok(if msvc_linker: "simple_stage4_contracts.lib" else: "libsimple_stage4_contracts.a")
+    if msvc_linker:
+        return Err("MSVC Stage4 contract provider requires a Windows target")
+    Ok("libsimple_stage4_contracts.a")
+
+pub fn stage4_contracts_provider_object_format(target_os_name: text, msvc_objects: bool) -> Result<text, text>:
+    """Return the portable-nm format for the dedicated contract ABI owner."""
+    stage4_hosted_provider_object_format(target_os_name, msvc_objects)
+
+pub fn stage4_validate_contracts_provider_symbol_contract(nm_output: text, object_format: text) -> Result<(), text>:
+    """Require the two contract entry points exactly once from runtime_contracts."""
+    if object_format != "elf" and object_format != "macho" and object_format != "coff-msvc" and object_format != "coff-mingw":
+        return Err("Unsupported Stage4 contract provider object format '" + object_format + "'")
+    val expected = ["simple_contract_check", "simple_contract_check_msg"]
+    var expected_set: Dict<text, bool> = {}
+    for symbol in expected:
+        expected_set[symbol] = true
+    var counts: Dict<text, i64> = {}
+    for raw_symbol in stage4_exact_nm_global_symbols(nm_output).definitions:
+        if (object_format == "coff-msvc" or object_format == "coff-mingw") and raw_symbol == "@feat.00":
+            continue
+        val symbol = stage4_provider_symbol(raw_symbol, object_format)
+        if not expected_set.has(symbol):
+            return Err("Stage4 contract provider retained forbidden global definition '" + symbol + "'")
+        counts[symbol] = (counts[symbol] ?? 0) + 1
+    for symbol in expected:
+        if (counts[symbol] ?? 0) != 1:
+            return Err("Stage4 contract provider definition '" + symbol + "' must exist exactly once")
+    Ok(())
+
 pub fn stage4_runtime_native_localization_symbols(nm_output: text, object_format: text) -> Result<[text], text>:
     """Return the raw legacy dynload definitions to localize in runtime_native."""
     if object_format != "elf" and object_format != "macho" and object_format != "coff-msvc" and object_format != "coff-mingw":

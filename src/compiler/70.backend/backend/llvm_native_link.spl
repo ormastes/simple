@@ -18,7 +18,7 @@ use compiler.backend.backend.llvm_capability.{find_archive_portable, find_nm_por
 use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
 use compiler.backend.backend.runtime_compiler.{compile_runtime_objects, cleanup_runtime_objects, find_c_compiler, hosted_c_compiler_plan, _get_temp_dir, _obj_ext, _is_windows, _is_mingw, _is_msvc_cc}
 use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig, hosted_native_link_arch_supported, hosted_native_link_unsupported_arch_error}
-use compiler.backend.backend.stage4_symbol_closure.{stage4_compiler_backfill_archive_file, stage4_compiler_backfill_object_format, stage4_derive_compiler_backfill_manifest, stage4_compiler_backfill_localization_symbols, stage4_validate_compiler_backfill_symbol_envelope, stage4_compiler_backfill_symbol_table_fingerprint, stage4_validate_compiler_backfill_provider_disjoint, stage4_projection_localization_symbols, stage4_validate_projection_symbol_contract, stage4_runtime_native_archive_file, stage4_runtime_native_object_format, stage4_runtime_native_localization_symbols, stage4_validate_runtime_native_core_symbol_contract, stage4_runtime_legacy_compat_archive_file, stage4_runtime_legacy_compat_object_format, stage4_runtime_legacy_compat_localization_symbols, stage4_validate_runtime_legacy_compat_symbol_contract, stage4_process_provider_archive_file, stage4_process_provider_object_format, stage4_validate_process_provider_symbol_contract, stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_fork_provider_archive_file, stage4_fork_provider_object_format, stage4_windows_c_object_uses_msvc_abi, stage4_runtime_provider_object_matches, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs_for_platform, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_validate_fork_provider_symbol_contract}
+use compiler.backend.backend.stage4_symbol_closure.{stage4_compiler_backfill_archive_file, stage4_compiler_backfill_object_format, stage4_derive_compiler_backfill_manifest, stage4_compiler_backfill_localization_symbols, stage4_validate_compiler_backfill_symbol_envelope, stage4_compiler_backfill_symbol_table_fingerprint, stage4_validate_compiler_backfill_provider_disjoint, stage4_projection_localization_symbols, stage4_validate_projection_symbol_contract, stage4_runtime_native_archive_file, stage4_runtime_native_object_format, stage4_runtime_native_localization_symbols, stage4_validate_runtime_native_core_symbol_contract, stage4_runtime_legacy_compat_archive_file, stage4_runtime_legacy_compat_object_format, stage4_runtime_legacy_compat_localization_symbols, stage4_validate_runtime_legacy_compat_symbol_contract, stage4_contracts_provider_archive_file, stage4_contracts_provider_object_format, stage4_validate_contracts_provider_symbol_contract, stage4_process_provider_archive_file, stage4_process_provider_object_format, stage4_validate_process_provider_symbol_contract, stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_fork_provider_archive_file, stage4_fork_provider_object_format, stage4_windows_c_object_uses_msvc_abi, stage4_runtime_provider_object_matches, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs_for_platform, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_validate_fork_provider_symbol_contract}
 use std.platform.{host_arch, host_os, is_macos}
 use std.common.crypto.sha256.{sha256_u8_hex}
 use compiler.common.assurance.policy.{strictness_for_profile_name}
@@ -758,6 +758,34 @@ fn llvm_stage4_build_runtime_legacy_compat_archive(runtime_objects: [text], targ
             file_delete(archive_path)
             Err(err)
 
+fn llvm_stage4_build_contracts_provider_archive(runtime_objects: [text], target_os_name: text, msvc_objects: bool, msvc_linker: bool, pid: i64) -> Result<text, text>:
+    """Stage the sole runtime_contracts object as an independently selectable owner."""
+    val object_ext = if msvc_objects: ".obj" else: ".o"
+    val archive_file = match stage4_contracts_provider_archive_file(target_os_name, msvc_linker):
+        case Ok(name): name
+        case Err(err): return Err(err)
+    val archive_path = match llvm_stage4_build_single_object_provider_archive(runtime_objects, "runtime_contracts", "contracts", archive_file, object_ext, target_os_name == "windows", pid):
+        case Ok(path): path
+        case Err(err): return Err(err)
+    val object_format = match stage4_contracts_provider_object_format(target_os_name, msvc_objects):
+        case Ok(format): format
+        case Err(err):
+            file_delete(archive_path)
+            return Err(err)
+    val scans = match llvm_stage4_candidate_archive_inventory(["runtime_contracts"], [archive_path]):
+        case Ok(outputs): outputs
+        case Err(err):
+            file_delete(archive_path)
+            return Err(err)
+    if scans.len() != 1:
+        file_delete(archive_path)
+        return Err("Stage4 contract provider inventory count differs from one")
+    match stage4_validate_contracts_provider_symbol_contract(scans[0], object_format):
+        case Ok(()): Ok(archive_path)
+        case Err(err):
+            file_delete(archive_path)
+            Err(err)
+
 fn llvm_stage4_build_process_provider_archive(runtime_objects: [text], target_os_name: text, msvc_objects: bool, msvc_linker: bool, pid: i64) -> Result<text, text>:
     val object_ext = if msvc_objects: ".obj" else: ".o"
     val archive_file = match stage4_process_provider_archive_file(target_os_name, msvc_linker):
@@ -1334,8 +1362,20 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
                 if bootstrap_support_obj != "":
                     file_delete(bootstrap_support_obj)
                 return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule, "Stage4 runtime legacy compatibility failed: " + err)
-        var candidate_labels = ["compiler_backfill", "runtime_native", "runtime_legacy_compat", "runtime_process", "runtime_dynload", "runtime_font", "runtime_memtrack", "runtime_timestamp"]
-        var candidate_paths = [compiler_backfill_capsule, runtime_native_archive, runtime_legacy_compat_archive, process_provider_archive, dynload_provider_archive, font_provider_archive, memtrack_provider_archive, time_provider_archive]
+        val contracts_provider_archive = match llvm_stage4_build_contracts_provider_archive(runtime_objects, hosted_os, stage4_msvc_objects, stage4_msvc_linker, pid):
+            case Ok(path): path
+            case Err(err):
+                cleanup_runtime_objects(runtime_objects)
+                file_delete(entry_obj_path)
+                for path in [runtime_native_archive, runtime_legacy_compat_archive, process_provider_archive, dynload_provider_archive, font_provider_archive, memtrack_provider_archive, time_provider_archive]:
+                    file_delete(path)
+                if fork_provider_archive != "":
+                    file_delete(fork_provider_archive)
+                if bootstrap_support_obj != "":
+                    file_delete(bootstrap_support_obj)
+                return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule, "Stage4 contract provider failed: " + err)
+        var candidate_labels = ["compiler_backfill", "runtime_native", "runtime_contracts", "runtime_legacy_compat", "runtime_process", "runtime_dynload", "runtime_font", "runtime_memtrack", "runtime_timestamp"]
+        var candidate_paths = [compiler_backfill_capsule, runtime_native_archive, contracts_provider_archive, runtime_legacy_compat_archive, process_provider_archive, dynload_provider_archive, font_provider_archive, memtrack_provider_archive, time_provider_archive]
         if fork_provider_archive != "":
             candidate_labels = candidate_labels.push("runtime_fork")
             candidate_paths = candidate_paths.push(fork_provider_archive)
@@ -1345,6 +1385,7 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
                 cleanup_runtime_objects(runtime_objects)
                 file_delete(entry_obj_path)
                 file_delete(runtime_native_archive)
+                file_delete(contracts_provider_archive)
                 file_delete(runtime_legacy_compat_archive)
                 file_delete(process_provider_archive)
                 file_delete(dynload_provider_archive)
@@ -1362,6 +1403,7 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
                 cleanup_runtime_objects(runtime_objects)
                 file_delete(entry_obj_path)
                 file_delete(runtime_native_archive)
+                file_delete(contracts_provider_archive)
                 file_delete(runtime_legacy_compat_archive)
                 file_delete(process_provider_archive)
                 file_delete(dynload_provider_archive)
@@ -1379,6 +1421,7 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
                 cleanup_runtime_objects(runtime_objects)
                 file_delete(entry_obj_path)
                 file_delete(runtime_native_archive)
+                file_delete(contracts_provider_archive)
                 file_delete(runtime_legacy_compat_archive)
                 file_delete(process_provider_archive)
                 file_delete(dynload_provider_archive)
@@ -1396,6 +1439,7 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
                 cleanup_runtime_objects(runtime_objects)
                 file_delete(entry_obj_path)
                 file_delete(runtime_native_archive)
+                file_delete(contracts_provider_archive)
                 file_delete(runtime_legacy_compat_archive)
                 file_delete(process_provider_archive)
                 file_delete(dynload_provider_archive)
@@ -1432,6 +1476,7 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
                 cleanup_runtime_objects(runtime_objects)
                 file_delete(entry_obj_path)
                 file_delete(runtime_native_archive)
+                file_delete(contracts_provider_archive)
                 file_delete(runtime_legacy_compat_archive)
                 file_delete(process_provider_archive)
                 file_delete(dynload_provider_archive)
