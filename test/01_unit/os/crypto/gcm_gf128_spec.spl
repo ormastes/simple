@@ -65,3 +65,66 @@ describe "gcm_gf128_mul / gcm_ghash — shared GCM helper":
         while i < 16:
             expect(tag[i]).to_equal(0x00)
             i = i + 1
+
+    # --- Non-vacuous KATs -------------------------------------------------
+    # The all-zero assertions above hold for ANY implementation that returns
+    # zeros, so they cannot detect a wrong bit order or a wrong reduction
+    # polynomial. The three below pin both.
+
+    it "H * 1 = H (GCM's field identity is 0x80 00..00 — pins MSB-first bit order)":
+        var one: [u8] = []
+        one.push(0x80)
+        var i: u64 = 1
+        while i < 16:
+            one.push(0x00)
+            i = i + 1
+        val product = gcm_gf128_mul(_h_tc1(), one)
+        val h = _h_tc1()
+        i = 0
+        while i < 16:
+            expect(product[i]).to_equal(h[i])
+            i = i + 1
+
+    it "H * x = H>>1 (pins the x^128+x^7+x^2+x+1 reduction, R = 0xE1)":
+        # x is 0x40 00..00 in GCM's bit-reflected representation. H's least
+        # significant bit is 0 (last byte 0x2e), so no reduction fires and the
+        # product is exactly H shifted right one bit across all 128 bits.
+        var xe: [u8] = []
+        xe.push(0x40)
+        var i: u64 = 1
+        while i < 16:
+            xe.push(0x00)
+            i = i + 1
+        var expected: [u8] = []
+        expected.push(0x33); expected.push(0x74); expected.push(0xa5); expected.push(0xea)
+        expected.push(0x77); expected.push(0xc5); expected.push(0x16); expected.push(0x1d)
+        expected.push(0xc4); expected.push(0x26); expected.push(0x7d); expected.push(0x2c)
+        expected.push(0xe5); expected.push(0x1a); expected.push(0x15); expected.push(0x97)
+        val product = gcm_gf128_mul(_h_tc1(), xe)
+        i = 0
+        while i < 16:
+            expect(product[i]).to_equal(expected[i])
+            i = i + 1
+
+    it "GHASH(H, empty AAD, TC2 ciphertext) = f38cbb1ad69223dcc3457ae5b6b0f885":
+        # NIST SP 800-38D Test Case 2: key = 0^128, IV = 0^96, P = 0^128,
+        # C = 0388dace60b6a392f328c2b971b2fe78, published Tag =
+        # ab6e47d42cec13bdf53a67b21257bddf. Since Tag = GHASH XOR E_K(J0) and
+        # E_K(J0) is the published TC1 tag 58e2fccefa7e3061367f1d57a4e7455a,
+        # GHASH must equal their XOR, f38cbb1ad69223dcc3457ae5b6b0f885.
+        var ct: [u8] = []
+        ct.push(0x03); ct.push(0x88); ct.push(0xda); ct.push(0xce)
+        ct.push(0x60); ct.push(0xb6); ct.push(0xa3); ct.push(0x92)
+        ct.push(0xf3); ct.push(0x28); ct.push(0xc2); ct.push(0xb9)
+        ct.push(0x71); ct.push(0xb2); ct.push(0xfe); ct.push(0x78)
+        var expected: [u8] = []
+        expected.push(0xf3); expected.push(0x8c); expected.push(0xbb); expected.push(0x1a)
+        expected.push(0xd6); expected.push(0x92); expected.push(0x23); expected.push(0xdc)
+        expected.push(0xc3); expected.push(0x45); expected.push(0x7a); expected.push(0xe5)
+        expected.push(0xb6); expected.push(0xb0); expected.push(0xf8); expected.push(0x85)
+        var empty: [u8] = []
+        val tag = gcm_ghash(_h_tc1(), empty, ct)
+        var i: u64 = 0
+        while i < 16:
+            expect(tag[i]).to_equal(expected[i])
+            i = i + 1
