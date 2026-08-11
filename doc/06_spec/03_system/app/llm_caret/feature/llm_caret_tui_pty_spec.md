@@ -70,6 +70,13 @@ eight-case promptless group, and 120 seconds for every other scenario.
 **TUI Captures:**
 `build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_tui_pty/`
 
+For each executed case, `typescript.txt` is the canonical raw ANSI terminal
+screen capture. The same case directory retains `input.bin`, `pty-runner.sh`,
+`script-stdout.txt`, `script-stderr.txt`, and `timeout.txt` when applicable.
+These are terminal transcripts, not raster screenshots; a visual PASS requires
+the actual captured ANSI frame plus the checker’s alternate-screen, cursor,
+geometry, and transcript assertions.
+
 The hard-panic/signal path remains outside this lane until the runtime exposes a
 qualified atexit/signal restoration owner. EOF here means the PTY driver's
 stdin closes normally; it is not evidence for an uncatchable runtime abort.

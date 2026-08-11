@@ -199,6 +199,7 @@ Current focused executable specs:
 | Executable spec | Generated manual | Required proof |
 |---|---|---|
 | `test/03_system/app/llm_caret/feature/llm_caret_cli_hardening_spec.spl` | `doc/06_spec/03_system/app/llm_caret/feature/llm_caret_cli_hardening_spec.md` | Three scenarios: four source-process cases plus cached-wrapper selection and invalid-override rejection; current runner execution remains blocked |
+| `test/03_system/app/llm_caret/feature/llm_caret_cli_cached_spec.spl` | `doc/06_spec/03_system/app/llm_caret/feature/llm_caret_cli_cached_spec.md` | Three fail-closed cached-artifact scenarios: provenance prerequisite, offline Claude response, and redacted provider-error/unknown-option evidence, retaining command, stdout, stderr, exit, and provenance artifacts |
 | `test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl` | `doc/06_spec/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.md` | Six bounded offline compatibility scenarios record installed path/version/hash and validate help, missing-input rejection, help-hidden accepted `--max-turns`, and removed `--max-tokens` rejection with no submitted prompt or inherited provider credentials |
 | `test/03_system/tools/llm/llm_caret_claude_cli_feature_contract_spec.spl` | `doc/06_spec/03_system/tools/llm/llm_caret_claude_cli_feature_contract_spec.md` | Eight deterministic CLI/parser/provider/state scenarios with complete folded source; current runner execution remains blocked |
 | `test/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature_spec.spl` | `doc/06_spec/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature_spec.md` | Ten TUI/hidden component scenarios, including Unicode raw-line reduction and hidden/disabled alias submission with zero responder/persistence; expected live capture remains unexecuted |
@@ -223,12 +224,16 @@ surface exposes it; screenshot-only evidence is insufficient.
 
 - CLI manuals display the three frozen CLI steps and a compact `exec`/`text`
   capture; setup and parsing details are folded.
+- The cached-Caret CLI manual owns production-wrapper evidence rather than
+  source-entrypoint evidence. It retains `command.txt`, scrubbed `stdout.txt`,
+  scrubbed `stderr.txt`, `exit.txt`, `provenance.txt`, and `combined.txt` per
+  case under `build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_cli_cached/`.
 - The installed-Claude manual uses the three frozen installed-CLI steps, links
   raw stdout/stderr/exit/provenance artifacts, and explicitly excludes provider,
   authentication, resume, network, billing, and model-quality claims.
 - TUI manuals display the three frozen TUI steps and embed a compact TUI
   capture under
-  `build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_tui_hardening/`.
+  `build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_tui_pty/`.
 - Live-terminal manuals link the complete `script(1)` typescripts, driver logs,
   input bytes, pre/post `stty` modes, and geometry under
   `build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_tui_pty/`.
@@ -243,6 +248,9 @@ surface exposes it; screenshot-only evidence is insufficient.
   evidence, not a general process-tree proof. The outer SSpec deadline is
   240 seconds for `hidden` and `promptless`, whose sequential per-child budgets
   can exceed 120 seconds, and 120 seconds for all other scenario groups.
+  `typescript.txt` is the canonical ANSI terminal screen capture, not a raster
+  screenshot; its frame is interpreted together with terminal-mode, geometry,
+  alternate-screen, cursor, and transcript assertions.
 - Piped automatic routing submits `/exit` and accepts only stdout exactly `> `,
   empty stderr, zero exit, and no ANSI bytes. A prompt substring is not
   completion evidence.
@@ -498,6 +506,10 @@ The focused hardening lane now includes:
 - `llm_caret_cli_hardening_spec.spl`, launching the actual Caret entrypoint for
   help, offline success, provider failure, and unknown-option cases, plus
   cached production-wrapper selection and invalid-override rejection;
+- `llm_caret_cli_cached_spec.spl` plus its checker, requiring a provenance-
+  qualified cached Caret artifact and retaining scrubbed command/stdout/stderr/
+  exit/provenance evidence for help, offline Claude response, provider failure,
+  and unknown-option rejection;
 - `llm_caret_installed_claude_cli_spec.spl`, covering six bounded offline
   probes of the currently installed Claude executable with isolated HOME,
   config, working directory, and provider credentials removed;
