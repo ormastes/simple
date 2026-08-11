@@ -1,6 +1,53 @@
 # `expect` Vacuity Gate — Full Corpus RED Census
 _Generated 2026-08-10 04:49Z (stream N1). Gate commit `47ba20fda2b`._
 
+## Infra failure investigation (2026-08-11)
+
+**Coverage at time of this investigation: still 2,372 / 9,872 unique (24%),
+unchanged.** No further execution was attempted — see rationale below.
+
+- **Root cause: genuine shared-host contention, not a daemon defect.** At
+  investigation time `uptime` reported **load average 29.47 / 23.63 / 17.38**
+  on this box (2 days uptime, 3 users), with 25 concurrent
+  `simple test|simple run|cargo|rustc` processes already running from other
+  sessions. This is ~3x the `<10` threshold below which a further-execution
+  attempt would have been reasonable per task instructions, so none was made.
+- **The per-spec `c_infra` timeouts are a symptom, not a bug.** Every
+  `daemon-worker-timeout` row in the original census shows
+  `budget_ms=899827`/`899839` (~900s, i.e. `--timeout 900` requested by the
+  census driver), well under the daemon's hard ceiling
+  `LIGHT_REQUEST_MAX_TIMEOUT_MS = 2400000` (40 min,
+  `src/app/test_daemon/light_protocol.spl:9`). A 15-minute-plus stall on a
+  single spec is consistent with CPU starvation from a load-29 host, not with
+  an undersized timeout constant — raising the constant would not have helped
+  and was not changed.
+  `light_daemon.spl:132` shells out per spec to
+  `test_runner_single.spl --no-session-daemon --sequential --timeout <n>`, so
+  each timeout is one dedicated subprocess kill, not a shared-daemon crash
+  taking out unrelated specs; the `NO_VERDICT` rows (subprocess produced no
+  parseable output at all — killed harder, e.g. OOM or a signal the wrapper
+  doesn't decode) are the more severe variant of the same contention, not a
+  separate defect.
+  - The `unresolved-module` / `zero-examples` / `parse-error` reasons inside
+    `c_infra` are a **different, non-infra** class worth separating out in any
+    future re-run: those are static failures of the isolated single-spec
+    invocation (e.g. a spec that only resolves when run as part of a larger
+    suite/session), not timeouts, and would recur even on an idle host.
+- **No fixable infra bug was found and none was landed this session.** The
+  known standing trap "test daemon freezes env selectors stale/not-empty"
+  (`.claude/memory` — `reference_test_daemon_freezes_env_selectors_stale_not_empty`)
+  is about a different symptom (stale env on back-to-back runs) and does not
+  explain the 76% non-completion; resetting `.build/test_daemon_light` was not
+  attempted here because the directory is **live** (responses as recent as the
+  hour of this investigation from other concurrent sessions) — clearing it
+  would have destroyed in-flight work belonging to those sessions, which this
+  investigation avoided per the shared-working-copy rules.
+- **Recommendation:** re-run (or extend) this census only during a quiet
+  window (`uptime` load average comfortably under ~10), using the same
+  `--timeout 900`-per-spec driver. No code or constant change is recommended
+  based on this evidence; the fix, if any is warranted, is scheduling the
+  census off-peak rather than modifying the daemon.
+
 ## Binary identity
 - Gate binary: `src/compiler_rust/target/bootstrap/simple` 33,653,056 bytes, mtime Aug 9 23:10
 - Gate confirmed by POSITIVE probe: a spec with `expect(text)` and no matcher FAILS (`vacuous expect: ... 1 non-bool expect(s), 0 matcher(s) ran`), sibling `to_equal` example PASSES. `bin/simple` (stale seed) was NOT used.
