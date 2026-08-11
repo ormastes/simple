@@ -335,7 +335,7 @@ impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Value::Int(a), Value::Int(b)) => a == b,
-            (Value::UInt { value: a, width: wa }, Value::UInt { value: b, width: wb }) => a == b && wa == wb,
+            (Value::UInt { value: a, .. }, Value::UInt { value: b, .. }) => a == b,
             // Cross-variant: UInt vs Int compares by mathematical magnitude.
             // Negative signed values never equal an unsigned value.
             (Value::UInt { value, .. }, Value::Int(b)) | (Value::Int(b), Value::UInt { value, .. }) => {
