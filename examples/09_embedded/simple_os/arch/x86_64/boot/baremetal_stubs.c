@@ -546,6 +546,7 @@ typedef struct {
     RuntimeValue *values;
 } RuntimeMap;
 
+RuntimeValue rt_array_remove(RuntimeValue arr, RuntimeValue idx);
 RuntimeValue rt_map_clone(RuntimeValue map);
 RuntimeValue rt_map_new(void);
 RuntimeValue rt_map_set(RuntimeValue map, RuntimeValue key, RuntimeValue value);
@@ -1275,6 +1276,50 @@ RuntimeValue rt_index_set(RuntimeValue v, RuntimeValue idx, RuntimeValue val)
         return 1;
     }
     return 0;
+}
+
+/* rt_value_unbox_int — total, tag-aware `UnboxInt` decode.
+ *
+ * Both backends now emit a CALL to this instead of inlining the old
+ * shift/select (see codegen/instr/mod.rs and cranelift_emitter.rs). Without a
+ * real body here the freestanding link fabricates a weak `return 0` stub, which
+ * silently zeroes every unboxed integer in the kernel.
+ *
+ *   - tagged native scalar (TAG_INT)          -> ARITHMETIC `>> 3`;
+ *   - anything else (heap ptr, float, special)-> passed through VERBATIM, so
+ *     `.unwrap()` / dict-get on a heap enum is not `>> 3` mangled.
+ *
+ * Booleans need no special case in this runtime: TRUE_VALUE / FALSE_VALUE are
+ * ENCODE_INT(1) / ENCODE_INT(0), so they already decode to 1 / 0 via TAG_INT.
+ * Safe on ANY input, including a raw untagged i64. */
+RuntimeValue rt_value_unbox_int(RuntimeValue v)
+{
+    if (IS_INT(v)) return (RuntimeValue)DECODE_INT(v);
+    return v;
+}
+
+/* rt_collection_remove — receiver-dispatched `.remove(k)`.
+ *
+ * It replaced `rt_dict_remove` as the target both backends emit for the
+ * `remove` method name (the name-keyed table applied the dict version to arrays
+ * too and silently no-opped `arr.remove(i)`). The key arrives TAGGED, so an int
+ * index is `(i << 3) | TAG_INT`.
+ *   - array -> removes at that index, shifts the tail down, returns the REMOVED
+ *     ELEMENT (not the mutated array);
+ *   - map   -> deletes the key, returns the removed VALUE, or nil on miss. */
+RuntimeValue rt_collection_remove(RuntimeValue collection, RuntimeValue key)
+{
+    if (!IS_HEAP(collection)) return NIL_VALUE;
+    HeapHeader *h = (HeapHeader *)DECODE_PTR(collection);
+    if (!h) return NIL_VALUE;
+    if (h->type == HEAP_ARRAY) {
+        if (!IS_INT(key)) return NIL_VALUE;
+        return rt_array_remove(collection, key);
+    }
+    if (h->type == HEAP_MAP) {
+        return rt_map_remove(collection, key);
+    }
+    return NIL_VALUE;
 }
 
 void rt_print_str(RuntimeValue str)
