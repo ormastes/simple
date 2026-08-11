@@ -1997,6 +1997,16 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_unix_socket_send",
     "rt_unwrap_or_self",
     "rt_unwrap_or_trap",
+    // 2026-08-11: these three are EMITTED by codegen (instr/mod.rs UnboxInt,
+    // the native struct-receiver guard, and dict insert) and DEFINED in the
+    // runtime, but were never listed here. `runtime/build.rs` generates
+    // RUNTIME_SYMBOL_ENTRIES purely from this list, so an unlisted symbol is
+    // never registered with the JIT -> "unresolved external symbol" at run
+    // time and a silent fallback to the interpreter. Listing is the whole
+    // registration mechanism; do not emit a call to a symbol absent here.
+    "rt_dict_insert",
+    "rt_struct_receiver_valid",
+    "rt_value_unbox_int",
     "rt_value_format_string",
     "rt_vec_abs",
     "rt_vec_all",
