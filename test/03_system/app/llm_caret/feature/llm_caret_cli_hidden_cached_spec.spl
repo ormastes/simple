@@ -1,0 +1,88 @@
+# codex-system-test
+# @evidence-display: links
+# @capture exec
+# @capture artifact
+"""
+# LLM Caret Cached Plain-CLI Hidden Command Qualification
+
+**Requirements:** REQ-LLM-CARET-HIDDEN-008, REQ-LLM-CARET-FULL-003
+
+## Scope
+
+Qualify canonical and alias hidden commands through the actual cached `bin/caret`
+wrapper in plain non-TTY mode. The checker requires a provenance-qualified
+self-hosted artifact, removes provider credentials, disables source fallback,
+and retains scrubbed command/output/exit/provenance evidence.
+"""
+
+use std.spec.{describe, it, expect, step}
+use app.io.mod.{process_run_timeout}
+
+struct CaretCliHiddenCachedEvidence:
+    stdout: text
+    stderr: text
+    exit_code: i32
+
+fn run_caret_cli_hidden_cached_case(case_name: text) -> CaretCliHiddenCachedEvidence:
+    val (stdout, stderr, exit_code) = process_run_timeout(
+        "sh",
+        [
+            "scripts/check/check-llm-caret-cli-hidden-cached.shs",
+            "--case",
+            case_name
+        ],
+        120000
+    )
+    CaretCliHiddenCachedEvidence(stdout: stdout, stderr: stderr, exit_code: exit_code)
+
+describe "LLM Caret Cached Plain-CLI Hidden Command Qualification":
+    describe "REQ-LLM-CARET-FULL-003: cached artifact is qualified before plain CLI execution":
+        it "should require the pinned cached artifact before hidden-command qualification":
+            step("Load the cached Caret artifact")
+            val result = run_caret_cli_hidden_cached_case("prerequisites")
+            step("Invoke the hidden command through plain CLI")
+            expect(result.stdout).to_contain("case=prerequisites status=PASS")
+            step("Check captured output and status")
+            expect(result.stdout).to_contain("evidence_status=PASS")
+            expect(result.exit_code).to_equal(0)
+
+    describe "REQ-LLM-CARET-HIDDEN-008: hidden and disabled command admission is preserved in plain CLI":
+        it "should reject canonical and alias hidden commands by default":
+            step("Load the cached Caret artifact")
+            val result = run_caret_cli_hidden_cached_case("default")
+            step("Invoke the hidden command through plain CLI")
+            expect(result.stdout).to_contain("case=hidden-canonical-default status=PASS")
+            expect(result.stdout).to_contain("case=hidden-alias-default status=PASS")
+            step("Check captured output and status")
+            expect(result.stdout).to_contain("evidence_status=PASS")
+            expect(result.exit_code).to_equal(0)
+
+        it "should admit canonical and alias hidden commands only when explicitly enabled":
+            step("Load the cached Caret artifact")
+            val result = run_caret_cli_hidden_cached_case("enabled")
+            step("Invoke the hidden command through plain CLI")
+            expect(result.stdout).to_contain("case=hidden-canonical-enabled status=PASS")
+            expect(result.stdout).to_contain("case=hidden-alias-enabled status=PASS")
+            step("Check captured output and status")
+            expect(result.stdout).to_contain("evidence_status=PASS")
+            expect(result.exit_code).to_equal(0)
+
+        it "should reject canonical and alias hidden commands when the flag is explicitly false":
+            step("Load the cached Caret artifact")
+            val result = run_caret_cli_hidden_cached_case("explicit-false")
+            step("Invoke the hidden command through plain CLI")
+            expect(result.stdout).to_contain("case=hidden-canonical-false status=PASS")
+            expect(result.stdout).to_contain("case=hidden-alias-false status=PASS")
+            step("Check captured output and status")
+            expect(result.stdout).to_contain("evidence_status=PASS")
+            expect(result.exit_code).to_equal(0)
+
+        it "should reject canonical and alias disabled commands in plain non-TTY mode":
+            step("Load the cached Caret artifact")
+            val result = run_caret_cli_hidden_cached_case("disabled")
+            step("Invoke the hidden command through plain CLI")
+            expect(result.stdout).to_contain("case=disabled-canonical status=PASS")
+            expect(result.stdout).to_contain("case=disabled-alias status=PASS")
+            step("Check captured output and status")
+            expect(result.stdout).to_contain("evidence_status=PASS")
+            expect(result.exit_code).to_equal(0)

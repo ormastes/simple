@@ -45,13 +45,15 @@ provider requires no provider credential or network.
 The checker rejects missing cache, `script(1)`, `stty`, `cmp`, markers, ANSI TUI
 rendering, plain-output purity, edited UTF-8 text, geometry, or restoration.
 It also drives the real TUI root-command path with no hidden-feature
-environment, with `LLM_CARET_ENABLE_HIDDEN_COMMANDS=1`, and with a disabled
-registry command. The three retained transcripts must respectively show
-unknown-command rejection, sanitized debug-command execution, and
-disabled-command rejection. Those cases use a fixed 12x80 PTY so inherited
-geometry cannot truncate the exact semantic lines. Every PTY case must also
-retain an explicit `caret_exit=0` child marker; `script -e` is only supplemental
-exit propagation.
+environment, with `LLM_CARET_ENABLE_HIDDEN_COMMANDS=false`, with
+`LLM_CARET_ENABLE_HIDDEN_COMMANDS=1`, and with a disabled registry command.
+The retained transcripts must show canonical and alias unknown-command
+concealment for both unset and explicit-false admission, sanitized
+debug-command execution only when enabled, and disabled-command rejection.
+The explicit-false alias transcript must not contain the hidden tool-call hook.
+Those cases use a fixed 12x80 PTY so inherited geometry cannot truncate the
+exact semantic lines. Every PTY case must also retain an explicit `caret_exit=0`
+child marker; `script -e` is only supplemental exit propagation.
 The promptless case is narrower: it proves that the shipped root metadata
 admits `/compact`, `/summarize`, `/init`, and `/bootstrap`, including the two
 canonical/alias pairs. Each command runs once through the real TUI and once
@@ -64,7 +66,7 @@ feature implementations are shipped.
 Forced TUI on non-TTY stdin must fail before emitting escape bytes with
 `terminal raw mode unavailable`. Each child is guarded by one fixed 20-second
 watchdog; timeout evidence is retained and fails the case without retry. The
-outer SSpec process bound is 240 seconds for the seven-case hidden group and
+outer SSpec process bound is 240 seconds for the eight-case hidden group and
 eight-case promptless group, and 120 seconds for every other scenario.
 
 **TUI Captures:**
@@ -257,13 +259,15 @@ expect(result.exit_code).to_equal(0)
 - Enable the hidden-feature fixture.
   - Expected: canonical and alias default state renders the matching
     unknown-command response.
-  - Expected: explicit `false` renders
-    `system: Unknown command: /debug-tool-call (try /help)`.
+  - Expected: explicit `false` renders matching canonical and alias
+    `system: Unknown command: /debug-tool-call (try /help)` and
+    `system: Unknown command: /debug_tool_call (try /help)` concealment, with
+    no hidden tool-call hook.
   - Expected: canonical and alias enabled fixtures render
     `system: tool call id=call-1 name=Read input_bytes=27`.
   - Expected: canonical and alias disabled commands remain rejected.
 - Check the hidden-feature gate.
-  - Expected: all seven PTY cases pass with zero failures.
+  - Expected: all eight PTY cases pass with zero failures.
 
 <details>
 <summary>Executable SSpec</summary>
@@ -285,6 +289,9 @@ expect(result.stdout).to_contain(
 )
 expect(result.stdout).to_contain(
     "case=hidden-alias-default-rejected status=PASS"
+)
+expect(result.stdout).to_contain(
+    "case=hidden-alias-false-rejected status=PASS"
 )
 expect(result.stdout).to_contain(
     "case=hidden-alias-enabled-executed status=PASS"
