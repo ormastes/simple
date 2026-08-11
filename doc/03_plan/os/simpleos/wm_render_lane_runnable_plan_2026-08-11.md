@@ -61,20 +61,25 @@ are independent; do not sequence one behind the other.
    this is a source-content regression guard, not a runtime execution spec — no
    self-hosted binary was available this session to exercise native/JIT codegen
    directly, so the fix's effect at runtime is still unproven by execution.
-6. **sha256_core value-boxing — STILL OPEN, and harder than first framed.**
-   Further investigation found the corruption is not consistently ×8 (sometimes
-   ÷8, depending on call shape) — the original "shift-left-3" framing was too
-   narrow. Traced to somewhere among ~10 nested calls inside
-   `sha256_process_block`, spanning a third module
-   (`std.common.crypto.types`), not isolated to one call boundary. FIPS vectors
-   (empty string, "abc") still fail on the live seed JIT lane. No fix landed —
-   correctly, no regression specs were added either (specs-last discipline
-   held). `sha256_simd_parity_spec.spl` does assert real FIPS vectors (not
-   vacuous) but why it isn't catching this live corruption is still unexplained
-   — both `bin/simple <file>` and `bin/simple test <file>` timed out at 60s
-   when checked. **Next step for a future session:** bisect the ~10 nested
-   calls individually rather than assume the boxing family from other modules
-   applies unchanged here.
+6. **sha256_core value-boxing — FIXED (`abf967a7516d`).** Root cause isolated
+   by minimal repro: `list.get()` on an untyped `list` (not `[i64]`) returns a
+   boxed/tagged value — `print` has a special-cased decode path that shows the
+   right number, but any further arithmetic (`+`, `<<`) or passing it to
+   another function operates on the raw tag bits, producing the ×8/÷8-shaped
+   corruption that flips direction with call depth. Matches the documented
+   container-boxing family exactly. Fix: retyped every `list` annotation in
+   `sha256_core.spl` to `[i64]` — return types, params, AND internal locals
+   (the earlier investigation's miss). Verified against real FIPS 180-4
+   vectors: empty string and "abc" now match exactly;
+   `sha256_simd_parity_spec.spl` 10/10 (multi-block, 1024/2048-byte payloads,
+   native-byte path, no collision warning). **Second independent bug found and
+   fixed en route:** a dead `compress_block` helper in `sha256.spl` name-
+   collided with the compiler's crypto-intrinsic pattern matcher for
+   `sha256_core_compress_block`, causing non-deterministic wrong dispatch —
+   deleted. The earlier "60s timeout" was never a hang: the spec completes and
+   prints all verdict lines in seconds, the process just doesn't exit
+   afterward (teardown/GC hang, unmeasured, orthogonal to this bug) — read the
+   printed verdict, not the exit code.
 
 **Guard duplication found and resolved (2026-08-11):** two agents independently
 built overlapping C-runtime-compiles pre-push guards
