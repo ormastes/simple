@@ -33,7 +33,7 @@
 #include <stdint.h>
 #include <math.h>
 
-extern int64_t rt_value_float(int64_t raw_bits);
+extern int64_t rt_value_float(double value_f64);
 extern int64_t rt_string_new(const uint8_t* bytes, uint64_t len);
 extern int64_t rt_dict_new(int64_t cap_hint);
 extern int8_t  rt_dict_set(int64_t dict, int64_t key, int64_t value);
@@ -49,9 +49,7 @@ static int failures = 0;
 /* Box a double, going through the ordinary rt_value_float entry point so this
  * probe exercises the SAME representation compiled Simple code produces. */
 static int64_t mkf(double d) {
-    int64_t bits;
-    memcpy(&bits, &d, sizeof bits);
-    return rt_value_float(bits);
+    return rt_value_float(d);
 }
 
 /* Tagged small int (RT_VALUE_TAG_INT == 0), so values are self-describing and

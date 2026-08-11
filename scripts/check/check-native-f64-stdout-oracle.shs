@@ -1,0 +1,225 @@
+#!/bin/sh
+# check-native-f64-stdout-oracle.shs
+#
+# ORACLE = ACTUAL STDOUT BYTES compared against the interpreter, never build
+# success. Modelled on check-native-print-stdout-oracle.shs, which fences a
+# different native-lane defect the same way.
+#
+# This gate exists because the native lane could not render ANY f64. Two
+# independent defects in the C runtime stacked:
+#
+#   1. ABI mismatch. Every compiler backend calls rt_value_float with an f64
+#      (RuntimeFuncSpec::new("rt_value_float", &[F64], &[I64]) in
+#      codegen/runtime_sffi.rs; the LLVM backend builds
+#      `call @rt_value_float(double ...)`), and the Rust runtime's
+#      `extern "C" fn rt_value_float(f: f64)` agrees. src/runtime/runtime_native.c
+#      declared the parameter `int64_t`, so under SysV x86-64 it read %rdi while
+#      the caller passed %xmm0 -- every boxed f64 picked up an unrelated integer
+#      register.
+#   2. Heap-box decode. rt_to_string's float branch decoded only the LEGACY
+#      inline TAG_FLOAT form (`value & ~7`). For the lossless heap box that
+#      rt_value_float actually produces, that expression is the malloc POINTER,
+#      bit-cast to a double -- a ~1e-313 denormal that drifted upward with the
+#      heap across successive calls.
+#
+# Fixing only one of the two still prints garbage, so a fixture set that stops
+# at "not the old value" would have passed on a half-fix. The oracle here is
+# equality with the interpreter, which is immune to that.
+#
+# See doc/08_tracking/bug/native_lane_prints_every_f64_as_denormal_garbage_2026-08-10.md
+#
+# Fixture roles:
+#   pc_int        POSITIVE CONTROL, no float at all. If this fails the native
+#                 lane is broken generally and the float rows say nothing.
+#   f_local       plain typed local initialised from a literal  <- the reported
+#                 shape; no method call, no arithmetic.
+#   f_literal     float literal printed directly.
+#   f_arith       float through arithmetic.
+#   f_interp      float inside string interpolation (a different runtime entry
+#                 point: rt_value_to_string, not rt_println_value).
+#   f_return      float returned from a function.
+#   f_precision   a value whose low 3 mantissa bits are NON-ZERO. The legacy
+#                 inline float box zeroed them; only the lossless heap box
+#                 round-trips it. This row fails if the heap box regresses to
+#                 the inline form.
+#   nc_mismatch   NEGATIVE CONTROL. Its expectation is deliberately wrong, so
+#                 this row MUST report a mismatch. If it does not, the
+#                 comparison itself is not running and every PASS above it is
+#                 vacuous.
+#
+# Note on trailing newlines: native `print` omits the final newline (filed and
+# deliberately deferred). Command substitution strips trailing newlines from
+# BOTH sides, so that known difference cannot make this check flap -- and it is
+# not "fixed" here.
+#
+# Verdict line is the last line of stdout:
+#   PASS -- <n> fixture(s) checked, stdout compared against interpreter oracle
+#   FAIL -- ...
+#   ERROR -- nothing was checked   (exit 2; a run comparing 0 fixtures is never a pass)
+
+set -u
+
+REPO=$(cd "$(dirname "$0")/../.." && pwd)
+SIMPLE="${SIMPLE_BINARY:-$REPO/bin/simple}"
+WORK="${TMPDIR:-/tmp}/native-f64-stdout-oracle.$$"
+RUN_TIMEOUT="${NATIVE_RUN_TIMEOUT:-600}"
+
+# The pure-Simple native-build refuses to run from a bare seed; the Rust
+# native_project pipeline is the lane under test here.
+SIMPLE_NATIVE_BUILD_RUST="${SIMPLE_NATIVE_BUILD_RUST:-1}"
+export SIMPLE_NATIVE_BUILD_RUST
+
+if [ ! -x "$SIMPLE" ]; then
+    echo "ERROR -- nothing was checked (no simple binary at $SIMPLE)"
+    exit 2
+fi
+
+mkdir -p "$WORK" || { echo "ERROR -- nothing was checked (cannot create $WORK)"; exit 2; }
+trap 'rm -rf "$WORK"' EXIT
+
+emit() {
+    # $1 = fixture name, $2 = source body
+    printf '%s\n' "$2" > "$WORK/$1.spl"
+}
+
+emit pc_int 'fn main():
+    val n: i64 = 42
+    print n'
+
+emit f_local 'fn main():
+    val b: f64 = 16.0
+    print b'
+
+emit f_literal 'fn main():
+    print 3.5'
+
+emit f_arith 'fn main():
+    val b: f64 = 16.0
+    val s: f64 = b + 1.5
+    print s'
+
+emit f_interp 'fn main():
+    val b: f64 = 16.0
+    print "V={b}"'
+
+emit f_return 'fn getf() -> f64:
+    return 2.5
+
+fn main():
+    print getf()'
+
+emit f_precision 'fn main():
+    val b: f64 = 0.1
+    print b'
+
+emit nc_mismatch 'fn main():
+    val b: f64 = 16.0
+    print b'
+
+# The negative control asserts a value the program provably does not print.
+NC_EXPECT="THIS-IS-NOT-WHAT-THE-PROGRAM-PRINTS"
+
+FIXTURES="pc_int f_local f_literal f_arith f_interp f_return f_precision nc_mismatch"
+
+checked=0
+failed=0
+nc_saw_mismatch=0
+
+strip_seed_banner() {
+    grep -v '^WARNING: this Rust-built Simple binary is a bootstrap seed only' \
+        | grep -v '^Build and use the pure-Simple bin/simple instead\.'
+}
+
+for fx in $FIXTURES; do
+    src="$WORK/$fx.spl"
+    bin="$WORK/bin_$fx"
+
+    if [ "$fx" = "nc_mismatch" ]; then
+        oracle="$NC_EXPECT"
+    else
+        oracle=$(SIMPLE_EXECUTION_MODE=interpret "$SIMPLE" run "$src" 2>/dev/null | strip_seed_banner)
+        if [ -z "$oracle" ]; then
+            echo "FAIL -- $fx: interpreter oracle produced no output; cannot compare"
+            failed=$((failed + 1))
+            checked=$((checked + 1))
+            continue
+        fi
+    fi
+
+    # Build from $WORK, NOT from the repo root. native-build resolves its
+    # runtime provider through a CWD-RELATIVE path ("build/simple-core/
+    # libsimple_runtime.a" -- see SIMPLE_TRACE_RUNTIME_ROOTS=1), so run from the
+    # repo it links whatever prebuilt archive happens to be sitting in build/,
+    # with no staleness check against src/runtime/*.c. A local archive six days
+    # older than the sources made this very fix look inert. From a neutral cwd
+    # the C runtime is compiled from source, so this check measures
+    # src/runtime as written rather than a stale artifact.
+    ( cd "$WORK" && "$SIMPLE" native-build --source "$WORK" --entry "$src" -o "$bin" ) \
+        > "$WORK/$fx.build.log" 2>&1
+    build_rc=$?
+
+    # native-build exit status is NOT the oracle: it can report success while
+    # emitting an artifact with no FUNC symbols. Require a runnable binary and
+    # then require its OUTPUT to be right.
+    if [ ! -x "$bin" ]; then
+        echo "FAIL -- $fx: native-build produced no binary (rc=$build_rc); see $WORK/$fx.build.log"
+        failed=$((failed + 1))
+        checked=$((checked + 1))
+        continue
+    fi
+
+    actual=$(timeout "$RUN_TIMEOUT" "$bin" 2>/dev/null)
+    run_rc=$?
+
+    checked=$((checked + 1))
+
+    if [ "$actual" = "$oracle" ]; then
+        if [ "$fx" = "nc_mismatch" ]; then
+            echo "FAIL -- nc_mismatch: negative control MATCHED its deliberately wrong"
+            echo "        expectation. The stdout comparison is not actually running,"
+            echo "        so every other row in this check is vacuous."
+            failed=$((failed + 1))
+        else
+            echo "ok -- $fx: stdout matches interpreter oracle [$actual]"
+        fi
+    else
+        if [ "$fx" = "nc_mismatch" ]; then
+            nc_saw_mismatch=1
+            echo "ok -- nc_mismatch: negative control correctly reported a mismatch"
+            echo "      (expected [$oracle], got [$actual]) -- the comparison is live"
+        else
+            echo "FAIL -- $fx: native stdout DIVERGES from the interpreter oracle"
+            echo "        expected [$oracle]"
+            echo "        actual   [$actual]   (binary exit=$run_rc, build rc=$build_rc)"
+            case "$actual" in
+                0.0000000000*)
+                    echo "        actual is a near-zero denormal: the f64 reached the"
+                    echo "        formatter as a raw integer/pointer word and was"
+                    echo "        bit-cast rather than converted. Check both"
+                    echo "        rt_value_float's parameter type (must be double) and"
+                    echo "        rt_to_string's heap-float decode in"
+                    echo "        src/runtime/runtime_native.c."
+                    ;;
+            esac
+            failed=$((failed + 1))
+        fi
+    fi
+done
+
+if [ "$checked" -eq 0 ]; then
+    echo "ERROR -- nothing was checked"
+    exit 2
+fi
+
+if [ "$nc_saw_mismatch" -ne 1 ]; then
+    echo "ERROR -- nothing was checked (negative control never ran to a verdict)"
+    exit 2
+fi
+
+if [ "$failed" -ne 0 ]; then
+    echo "FAIL -- $failed of $checked fixture(s) diverged from the interpreter stdout oracle"
+    exit 1
+fi
+
+echo "PASS -- $checked fixture(s) checked, stdout compared against interpreter oracle"
+exit 0

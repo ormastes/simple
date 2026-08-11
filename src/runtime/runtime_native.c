@@ -2228,13 +2228,27 @@ int64_t rt_value_as_int(int64_t value) {
     return rt_value_as_int_wide(value);
 }
 
-/* Box an f64 (passed as its raw i64 bit pattern) into the tagged RuntimeValue
- * representation. Floats are HEAP-BOXED (lossless): the old inline TAG_FLOAT
- * form kept only (bits & ~7), zeroing the low 3 mantissa bits, so a container/Any
- * float lost precision. We allocate an RtCoreFloat leaf holding the full double
- * and return a TAG_HEAP pointer. Scalar/arithmetic f64 held in native registers
- * never reaches here -- only values that enter the tagged representation box. */
-int64_t rt_value_float(int64_t raw_bits) {
+/* Box an f64 into the tagged RuntimeValue representation. Floats are
+ * HEAP-BOXED (lossless): the old inline TAG_FLOAT form kept only (bits & ~7),
+ * zeroing the low 3 mantissa bits, so a container/Any float lost precision. We
+ * allocate an RtCoreFloat leaf holding the full double and return a TAG_HEAP
+ * pointer. Scalar/arithmetic f64 held in native registers never reaches here --
+ * only values that enter the tagged representation box.
+ *
+ * ABI: the parameter is a `double`, NOT the raw i64 bit pattern. Every compiler
+ * backend emits the call that way -- `RuntimeFuncSpec::new("rt_value_float",
+ * &[F64], &[I64])` in codegen/runtime_sffi.rs, and the LLVM backend builds
+ * `call @rt_value_float(double ...)` -- and the Rust runtime's
+ * `pub extern "C" fn rt_value_float(f: f64)` already agrees. This C runtime was
+ * the sole outlier: declaring the parameter as `int64_t` made it read %rdi
+ * under SysV x86-64 while the caller passed the value in %xmm0, so EVERY f64
+ * boxed in the native lane picked up an unrelated integer register and printed
+ * as denormal garbage. Keep this a `double`; the bit pattern is recovered by
+ * memcpy below. See doc/08_tracking/bug/
+ * native_lane_prints_every_f64_as_denormal_garbage_2026-08-10.md. */
+int64_t rt_value_float(double value_f64) {
+    int64_t raw_bits = 0;
+    memcpy(&raw_bits, &value_f64, sizeof(raw_bits));
     RtCoreFloat* f = (RtCoreFloat*)malloc(sizeof(RtCoreFloat));
     if (!f) {
         /* OOM: fall back to the legacy lossy inline form rather than crash. */
@@ -2777,7 +2791,18 @@ int64_t rt_to_string(int64_t value) {
         int len = snprintf(buf, sizeof(buf), "%lld", (long long)n);
         return rt_string_new((const uint8_t*)buf, len > 0 ? (uint64_t)len : 0);
     }
+    {   /* Heap-boxed float (the LOSSLESS form rt_value_float produces): read the
+         * stored double. Must precede the legacy inline decode below -- that one
+         * masks the tag off the WORD, which for a heap box is the malloc pointer,
+         * so a heap float rendered as the pointer bit-cast to a double (a ~1e-313
+         * denormal that drifted upward with the heap). See doc/08_tracking/bug/
+         * native_lane_prints_every_f64_as_denormal_garbage_2026-08-10.md. */
+        RtCoreFloat* boxed = rt_core_as_heap_float(value);
+        if (boxed) return rt_raw_f64_to_string(boxed->value);
+    }
     if (rt_core_is_float(value)) {
+        /* Legacy inline TAG_FLOAT only: payload IS the bit pattern, low 3
+         * mantissa bits already zeroed at box time. */
         uint64_t bits = ((uint64_t)value) & ~RT_VALUE_TAG_MASK;
         double f;
         memcpy(&f, &bits, sizeof(f));
@@ -3669,9 +3694,9 @@ int64_t rt_string_to_float(int64_t value) {
     }
     if (end != finish) return rt_core_nil();
 
-    int64_t bits = 0;
-    memcpy(&bits, &parsed, sizeof(bits));
-    return rt_value_float(bits);
+    /* rt_value_float takes a double (see its definition above); pass the parsed
+     * value directly rather than re-bit-casting it to an i64. */
+    return rt_value_float(parsed);
 }
 
 int64_t rt_string_split(int64_t value, int64_t delimiter) {

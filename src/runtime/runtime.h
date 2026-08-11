@@ -288,7 +288,9 @@ int64_t  rt_value_as_int_wide(int64_t value);
 /* Total tag-aware UnboxInt decode emitted by Cranelift codegen (wide box ->
  * value, TAG_INT -> >>3, tagged bool -> 1/0, anything else verbatim). */
 int64_t  rt_value_unbox_int(int64_t value);
-int64_t  rt_value_float(int64_t raw_bits);
+/* Takes a double, not the raw bit pattern -- every compiler backend passes an
+ * f64 (xmm0 under SysV), matching the Rust runtime's extern "C" fn. */
+int64_t  rt_value_float(double value_f64);
 double   rt_value_as_float(int64_t value);
 int8_t   rt_value_is_float(int64_t value);
 int64_t  rt_value_bool(int64_t value);

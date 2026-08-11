@@ -24,12 +24,6 @@ static void check(int condition, const char* message) {
     }
 }
 
-static int64_t float_bits(double value) {
-    int64_t bits;
-    memcpy(&bits, &value, sizeof(bits));
-    return bits;
-}
-
 static clock_t time_empty_scopes(int count) {
     clock_t start = clock();
     if (start == (clock_t)-1) return (clock_t)-1;
@@ -56,7 +50,7 @@ static Graph make_graph(int32_t enum_id) {
     graph.outer = rt_array_new(2);
     graph.inner = rt_array_new(2);
     graph.dict = rt_dict_new(0);
-    graph.float_value = rt_value_float(float_bits(0.125));
+    graph.float_value = rt_value_float(0.125);
     graph.enum_value = rt_enum_new(enum_id, 1, graph.float_value);
     graph.closure = rt_closure_new(1, 1);
     rt_array_push(graph.outer, graph.dict);
