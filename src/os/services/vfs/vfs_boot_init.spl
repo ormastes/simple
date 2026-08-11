@@ -8,6 +8,7 @@
 use os.services.vfs.vfs.{VfsManager, Filesystem}
 use os.kernel.loader.container_namespace.{ContainerNamespaceView}
 use os.services.vfs.vfs_service.{VfsService}
+use os.services.vfs.q35_pure_nvme_perf_boot.{_elapsed_us, _iops}
 use common.string_core.{char_from_code}
 use os.services.vfs.nvme_filesystem_mounts.{vfs_nvme_driver_instance_for_lease, vfs_nvme_buffered_driver_instance_for_lease, vfs_nvme_driver_instance_for_adapter_lease}
 use os.services.vfs.vfs_block_adapters.{
@@ -1583,19 +1584,6 @@ fn vfs_boot_nvme_submit_filesystem_direct_4k_batch(driver: DriverInstance, lease
         return Err(storage_req.unwrap_err())
     vfs_boot_nvme_submit_active_lease_direct_4k_batch(lease, storage_req.unwrap())
 
-fn _vfs_boot_q35_elapsed_us(start_us: i64, end_us: i64) -> u64:
-    if end_us <= start_us:
-        return 1u64
-    (end_us - start_us).to_u64()
-
-fn _vfs_boot_q35_iops(ops: u64, elapsed_us: u64) -> u64:
-    if elapsed_us == 0u64:
-        return 1u64
-    val iops = (ops * 1000000u64) / elapsed_us
-    if iops == 0u64:
-        return 1u64
-    iops
-
 fn _vfs_boot_q35_relative_4k_offset(lease: NvmeFilesystemLease, run: u32, op: u32) -> i64:
     val sectors_per_4k = 4096u64 / lease.namespace_identity.lba_size.to_u64()
     var slot_count = lease.lba_count / sectors_per_4k
@@ -1756,7 +1744,7 @@ fn vfs_boot_nvme_q35_pure_simple_perf_probe_serial_lines() -> [text]:
                 lease,
                 direct_io_read_batch_request(1u64, offsets, shared, 100000u32)
             )
-            val read_elapsed = _vfs_boot_q35_elapsed_us(read_start, rt_time_now_unix_micros())
+            val read_elapsed = _elapsed_us(read_start, rt_time_now_unix_micros())
             if read_result.is_err():
                 dma_free(dma)
                 return ["[q35-pure-nvme-perf] skipped reason=direct-read-failed"]
@@ -1770,7 +1758,7 @@ fn vfs_boot_nvme_q35_pure_simple_perf_probe_serial_lines() -> [text]:
                 lease,
                 direct_io_write_batch_request(1u64, offsets, shared, 100000u32)
             )
-            val write_elapsed = _vfs_boot_q35_elapsed_us(write_start, rt_time_now_unix_micros())
+            val write_elapsed = _elapsed_us(write_start, rt_time_now_unix_micros())
             if write_result.is_err():
                 dma_free(dma)
                 return ["[q35-pure-nvme-perf] skipped reason=direct-write-failed"]
@@ -1782,8 +1770,8 @@ fn vfs_boot_nvme_q35_pure_simple_perf_probe_serial_lines() -> [text]:
         run = run + 1u32
 
     dma_free(dma)
-    val simple_read_iops = _vfs_boot_q35_iops(read_ops, read_total_us)
-    val simple_write_iops = _vfs_boot_q35_iops(write_ops, write_total_us)
+    val simple_read_iops = _iops(read_ops, read_total_us)
+    val simple_write_iops = _iops(write_ops, write_total_us)
     val access = real_device_q35_pure_simple_access_marker(lease.grant_kind, "resource-grant-set:tok=net0")
     val perf = _vfs_boot_q35_perf_marker_with_cfat_baseline(
         simple_read_iops,
