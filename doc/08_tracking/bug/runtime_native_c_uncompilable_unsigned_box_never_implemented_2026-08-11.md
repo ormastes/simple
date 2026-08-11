@@ -1,6 +1,8 @@
 # `src/runtime/runtime_native.c` does not compile at origin/main — unsigned heap box referenced but never implemented
 
-- **Status:** OPEN — root-caused, not fixed (fix is feature work on a tagged-value ABI; see Why not fixed here)
+- **Status:** **RESOLVED 2026-08-11** — unsigned heap box implemented; `clang` 33 errors → **0**;
+  `native-build` exit 1 → **0** and the produced binary prints `hello`. See "Resolution" at the bottom.
+  A sixth pre-push guard (`scripts/check/check-c-runtime-compiles.shs`) now closes the guard gap.
 - **Date:** 2026-08-11
 - **Severity:** BLOCKER — this is the reason there is **no working native compile path on this host at all**.
 - **Signal:** exit **1**, `clang` diagnostics. Not a segfault. Distinct from, and **upstream of**, the stage3 SIGSEGV filed in `stage3_native_build_segv_two_distinct_faults_tagged_value_seam_2026-08-11.md`.
@@ -157,3 +159,97 @@ Then bootstrap an **unstripped** stage3 and re-measure the sibling SIGSEGV filin
 
 Add a pre-push / CI check that runs `clang -fsyntax-only` over `src/runtime/*.c`.
 The existing five guards are all git-tree-shaped and cannot catch a non-compiling runtime.
+
+---
+
+## Resolution (2026-08-11)
+
+### The ABI was never a guess — it was already pinned by the pure-Simple twin
+
+The prior triage declined to implement because items 1-5 looked like a free ABI choice on
+the same seam the stage3 SIGSEGV implicates. That reading was wrong in one decisive way:
+**`src/runtime/simple_core/core_values.spl` is the pure-Simple twin of these exact symbols
+and already implements the box.** Per `THREE implementations not two` (seed / pure-Simple /
+runtime C), the C side had to be made to agree with it, not to invent a shape.
+
+`core_values.spl:29-41`:
+
+```
+pub fn rt_value_u64(bits: i64) -> i64:
+    val ptr = calloc(1, 16)
+    spl_store_i64(ptr, 0, 0x55494E54)
+    spl_store_i64(ptr, 8, bits)
+    return ptr | 1
+```
+
+Every field of the C box is therefore **derived, not chosen**:
+
+| item | derivation | source |
+|------|-----------|--------|
+| magic `RT_VALUE_HEAP_UINT = 0x55494E54U` (`"UINT"`) | stored at offset 0 by the twin and read back masked to 32 bits at **7** further sites (`core_values.spl:25,40`, `core_bdd.spl:39`, `core_array_query.spl:38`, `core_string.spl:507,518,519`) | twin |
+| 16-byte size, kind@0 (32-bit), scope@4, payload@8 | `calloc(1, 16)`, `store_i64(ptr,0)` read as `& 0xFFFFFFFF`, `store_i64(ptr,8)` | twin |
+| zeroed `transient_scope_id` | `calloc` zeroing; matches `rt_value_int_wide`'s explicit `n->transient_scope_id = 0` | twin + `RtCoreWideInt` |
+| tag `\| RT_VALUE_TAG_HEAP` | `ptr \| 1` | twin |
+| `uint64_t` payload | consumers compare `u->value == (uint64_t)expected`, `u->value <= (uint64_t)(INT64_MAX >> 3)` | call sites 3202/3287-3328/7662 |
+| allocator, registry, OOM fallback | copied structurally from `rt_value_int_wide` | same file |
+| accessor guard order | copied from `rt_core_as_heap_int`: tag test → null test → **registry membership** → `->kind`, so a stray TAG_HEAP-aliasing i64 is never dereferenced | same file |
+
+Note the magic deliberately **breaks** the `STR1`/`FLT1`/`INT1` "…1" suffix pattern. Guessing
+`"UNT1"` from the C file alone would have compiled, passed every existing guard, and silently
+disagreed with the twin — precisely the silent corruption the prior triage feared. The layout
+was verified byte-for-byte against the twin's expectations (size 16, kind@0 little-endian low
+half of the 8-byte load == `0x55494E54`, payload@8 round-trips `0xFFFF...FF`).
+
+`rt_value_as_u64` was **also** missing (used at `runtime_native.c:6858`, hidden behind clang's
+error limit — the true count is 33, not 20/63, measured with `-ferror-limit=0`).
+
+### Changes
+
+- `src/runtime/runtime_native.c` — `RT_VALUE_HEAP_UINT`, `RtCoreUInt`, `rt_core_as_heap_uint`,
+  `rt_value_u64`, `rt_value_as_u64`, plus `RT_VALUE_HEAP_UINT` arms in the leaf-kind switches
+  at `rt_core_registered_object_kind`, `rt_core_reclaim_transient_immortal` and
+  `rt_core_transient_classify`. The fourth switch needed no change: classify already folds all
+  leaf kinds to `RT_CORE_TRANSIENT_FLOAT`, which is correct by layout identity.
+- `src/runtime/runtime.h` — public declarations for `rt_value_u64` / `rt_value_as_u64`.
+
+### Verification
+
+| check | before | after |
+|-------|--------|-------|
+| `clang -fsyntax-only -ferror-limit=0 -std=gnu11` on `runtime_native.c` | **33 errors** | **0** |
+| all 43 standalone-compilable `src/runtime/*.c` | 1 failing | **0 failing** |
+| real `-c -fPIC -O2 -std=gnu11` object build of the 14 lane sources | — | **14/14 objects, 0 failures** |
+| `bin/simple native-build hello.spl` | exit **1** | exit **0** |
+| `./build/native/hello` | — | prints `hello`, exit **0** |
+
+`nm` confirms both symbols exported from `runtime_native.o` (`T rt_value_u64`, `T rt_value_as_u64`).
+
+### Guard gap closed
+
+`scripts/check/check-c-runtime-compiles.shs` — sixth mandatory pre-push guard. Syntax-checks
+every `src/runtime/*.c` with the real lane's flags (`-std=gnu11 -I src/runtime -I
+src/runtime/platform`, from `runtime_compiler.spl`). Same verdict convention as the other five
+(`PASS -- <n> file(s) checked` / `FAIL` exit 1 / `ERROR -- nothing was checked` exit 2; a run
+that checks 0 files is an ERROR), fail-closed on cwd, with a fatal 5-fixture `--selftest`.
+
+Two files are rostered as skipped — `counterpart_worker_runtime` (needs vendored
+`simple_counterpart_abi.h`) and `scv_wasm_shim` (needs `wasmtime.h`). The skip cannot fail
+open: it applies **only** when the failure is a single missing-external-header fatal, so a
+genuine syntax error in those same files still FAILs (selftest fixture 4 locks this).
+
+Proven fail-closed on the real defect: renaming the `RtCoreUInt` typedef made the guard report
+`FAIL -- 1 of 43 file(s) failed to compile: runtime_native` (exit 1); reverting restored
+`PASS -- 43 file(s) checked, 0 errors` (exit 0) with the blob hash byte-identical before and
+after (`7e7035be10ffdb23eca0ec25038aaad3ebde3434`), i.e. zero residue.
+
+One guard bug was found and fixed during that proof: the first cut keyed on stderr emptiness
+rather than compiler exit status and so reported FAIL on `src/runtime/runtime.c`, which only
+warns. Selftest fixture 2b now locks the regression.
+
+### Still open (unchanged by this fix)
+
+`bootstrap/stage3/simple native-build` still exits **139** — the separate tagged-value
+field-index collision in
+`stage3_native_build_segv_two_distinct_faults_tagged_value_seam_2026-08-11.md`. What changes is
+that the seed lane now works, so an unstripped stage3 can be produced and that SIGSEGV can
+finally be diagnosed.

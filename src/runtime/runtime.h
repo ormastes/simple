@@ -288,6 +288,14 @@ int64_t  rt_value_as_int_wide(int64_t value);
 /* Total tag-aware UnboxInt decode emitted by Cranelift codegen (wide box ->
  * value, TAG_INT -> >>3, tagged bool -> 1/0, anything else verbatim). */
 int64_t  rt_value_unbox_int(int64_t value);
+/* Unsigned wide box/unbox. `bits` is the raw u64 pattern in an int64_t carrier;
+ * rt_value_u64 ALWAYS heap-boxes (the small-value fast path is the caller's).
+ * Emitted by MIR lowering -- see box_u64_runtime_value in
+ * src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl. The box
+ * layout and its "UINT" magic are shared with the pure-Simple twin
+ * src/runtime/simple_core/core_values.spl. */
+int64_t  rt_value_u64(int64_t bits);
+int64_t  rt_value_as_u64(int64_t value);
 /* Takes a double, not the raw bit pattern -- every compiler backend passes an
  * f64 (xmm0 under SysV), matching the Rust runtime's extern "C" fn. */
 int64_t  rt_value_float(double value_f64);

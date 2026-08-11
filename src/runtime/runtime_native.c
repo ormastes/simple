@@ -123,6 +123,25 @@ bool rt_dir_create_cpath(const char* path, bool recursive) {
  * RtCoreFloat, so every lifecycle switch treats it as the same leaf shape.
  * Magic "INT1". */
 #define RT_VALUE_HEAP_INT 0x494E5431U
+/* Heap-boxed UNSIGNED 64-bit integer (see rt_value_u64). A u64 whose top bits
+ * are set fits neither the 61-bit tagged immediate nor the SIGNED wide box
+ * (2^63 would read back negative), so unsigned values that exceed the signed
+ * fast path get their own leaf box carrying the raw u64 verbatim.
+ *
+ * The magic is NOT free to choose and deliberately breaks the "…1" suffix
+ * pattern of STR1/FLT1/INT1: it is fixed by the pure-Simple twin of this ABI,
+ * src/runtime/simple_core/core_values.spl:33, which stores 0x55494E54 ("UINT")
+ * at offset 0 and is read back with a 32-bit mask at six further call sites
+ * (core_values.spl:25,40, core_bdd.spl:39, core_array_query.spl:38,
+ * core_string.spl:507,518,519). Both implementations must agree byte-for-byte,
+ * so this constant is copied from there rather than invented. It collides with
+ * neither "STR1"/"FLT1"/"INT1" nor the small single-byte kinds (0x02..0x09).
+ *
+ * Layout is deliberately identical to RtCoreFloat/RtCoreWideInt (32-bit kind,
+ * 32-bit transient scope id, 8-byte payload = the 16 bytes the twin's
+ * `calloc(1, 16)` allocates), so every lifecycle switch treats it as the same
+ * leaf shape. */
+#define RT_VALUE_HEAP_UINT 0x55494E54U
 #define RT_CORE_ARRAY_FLAG_BYTES 0x08U
 #define RT_CORE_ARRAY_FLAG_U64_PACKED 0x10U
 /* Internal-only marker distinguishing a tuple from a plain array. Both share
@@ -904,6 +923,17 @@ typedef struct RtCoreWideInt {
     int64_t value;
 } RtCoreWideInt;
 
+/* Heap-boxed unsigned wide integer (see RT_VALUE_HEAP_UINT). Same layout as
+ * RtCoreFloat/RtCoreWideInt (kind, transient_scope_id, 8-byte payload) so it
+ * shares every lifecycle path; the payload is UNSIGNED because every consumer
+ * compares it as such (`u->value == (uint64_t)expected`,
+ * `u->value <= (uint64_t)(INT64_MAX >> 3)`). */
+typedef struct RtCoreUInt {
+    uint32_t kind;      /* RT_VALUE_HEAP_UINT */
+    uint32_t transient_scope_id;
+    uint64_t value;
+} RtCoreUInt;
+
 static RtCoreDict* rt_core_as_dict(int64_t value);
 static int64_t rt_core_dict_lookup(RtCoreDict* d, int64_t key);
 static int rt_core_dict_put(RtCoreDict* d, int64_t key, int64_t value);
@@ -952,7 +982,7 @@ static void rt_core_heap_lifecycle_release(void) {
 static uint32_t rt_core_registered_object_kind(void* ptr) {
     uint32_t wide_kind = *(uint32_t*)ptr;
     if (wide_kind == RT_VALUE_HEAP_STRING || wide_kind == RT_VALUE_HEAP_FLOAT ||
-        wide_kind == RT_VALUE_HEAP_INT) {
+        wide_kind == RT_VALUE_HEAP_INT || wide_kind == RT_VALUE_HEAP_UINT) {
         return wide_kind;
     }
     return *(uint8_t*)ptr;
@@ -1524,6 +1554,7 @@ static void rt_core_reclaim_transient_immortal(uint32_t scope_id) {
                 break;
             case RT_VALUE_HEAP_FLOAT:
             case RT_VALUE_HEAP_INT:   /* identical leaf layout */
+            case RT_VALUE_HEAP_UINT:  /* identical leaf layout */
                 object_scope = &((RtCoreFloat*)ptr)->transient_scope_id;
                 break;
             default:
@@ -1592,6 +1623,19 @@ static inline RtCoreWideInt* rt_core_as_heap_int(int64_t value) {
     if (!rt_core_is_registered_immortal_ptr(n)) return NULL;
     if (n->kind != RT_VALUE_HEAP_INT) return NULL;
     return n;
+}
+
+/* Return the boxed unsigned wide integer if `value` is a registered heap-uint,
+ * else NULL. Registry membership is checked BEFORE any dereference (same
+ * tag-collision guard as rt_core_as_heap_float / rt_core_as_heap_int), so a
+ * stray i64 that merely aliases TAG_HEAP is never dereferenced. */
+static inline RtCoreUInt* rt_core_as_heap_uint(int64_t value) {
+    if ((((uint64_t)value) & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) return NULL;
+    RtCoreUInt* u = (RtCoreUInt*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK);
+    if (!u) return NULL;
+    if (!rt_core_is_registered_immortal_ptr(u)) return NULL;
+    if (u->kind != RT_VALUE_HEAP_UINT) return NULL;
+    return u;
 }
 
 /* True when `v` survives the 61-bit tagged-immediate payload intact, i.e.
@@ -1853,6 +1897,7 @@ static int rt_core_transient_classify(int64_t value, RtCoreTransientNode* node) 
                 return 1;
             case RT_VALUE_HEAP_FLOAT:
             case RT_VALUE_HEAP_INT:   /* identical leaf layout */
+            case RT_VALUE_HEAP_UINT:  /* identical leaf layout */
                 *node = (RtCoreTransientNode){ptr, RT_CORE_TRANSIENT_FLOAT, 0};
                 return 1;
             case RT_VALUE_HEAP_CLOSURE:
@@ -2159,6 +2204,50 @@ int64_t rt_value_int_wide(int64_t value) {
 /* Mirror unbox for rt_value_int_wide: heap-boxed wide int, else the plain
  * arithmetic `>> 3` the tagged immediate has always used. */
 int64_t rt_value_as_int_wide(int64_t value) {
+    RtCoreWideInt* n = rt_core_as_heap_int(value);
+    if (n) return n->value;
+    return value >> 3;
+}
+
+/* Box a raw u64 bit pattern losslessly (ABI contract §1.1, unsigned arm).
+ *
+ * ALWAYS boxes -- the small-value fast path lives in the CALLER
+ * (rt_core_value_u64_compact returns rt_value_int for anything that fits the
+ * signed tagged immediate), exactly as the pure-Simple twin
+ * src/runtime/simple_core/core_values.spl:29 does. Allocation, magic write,
+ * zeroed scope id, immortal-registry registration and the OOM fallback all
+ * mirror rt_value_int_wide above; the twin's `calloc(1, 16)` is reproduced by
+ * malloc + explicit field initialisation of the same 16-byte layout.
+ *
+ * On registration failure the value is returned as the truncating tagged
+ * immediate. That is lossy for a wide u64, but it is the same
+ * degrade-don't-crash choice rt_value_int_wide and rt_value_float already make,
+ * and it is only reachable on OOM. */
+int64_t rt_value_u64(int64_t bits) {
+    RtCoreUInt* u = (RtCoreUInt*)malloc(sizeof(RtCoreUInt));
+    if (!u) return (int64_t)(((uint64_t)bits << 3) | RT_VALUE_TAG_INT);
+    u->kind = RT_VALUE_HEAP_UINT;
+    u->transient_scope_id = 0;
+    u->value = (uint64_t)bits;
+    if (!rt_core_register_scoped_immortal(u, &u->transient_scope_id)) {
+        free(u);
+        return (int64_t)(((uint64_t)bits << 3) | RT_VALUE_TAG_INT);
+    }
+    return (int64_t)(((uint64_t)(uintptr_t)u) | RT_VALUE_TAG_HEAP);
+}
+
+/* Mirror unbox for rt_value_u64: the raw u64 bit pattern, returned in an
+ * int64_t carrier (the ABI has no unsigned return type -- callers reinterpret).
+ *
+ * The heap-uint arm and the trailing `value >> 3` are the twin's
+ * (core_values.spl:37). The middle arm is additional: this C runtime also has a
+ * SIGNED wide box, which the simple-core twin does not, and an element read
+ * through rt_value_as_u64 (rt_array_get's non-U64_PACKED path) can legitimately
+ * hold one. Without this arm such a box would be `>> 3`-mangled into a pointer
+ * fragment. It cannot misfire: rt_core_as_heap_int is registry-guarded. */
+int64_t rt_value_as_u64(int64_t value) {
+    RtCoreUInt* u = rt_core_as_heap_uint(value);
+    if (u) return (int64_t)u->value;
     RtCoreWideInt* n = rt_core_as_heap_int(value);
     if (n) return n->value;
     return value >> 3;
