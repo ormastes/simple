@@ -118,6 +118,14 @@ until it passes.
   hardcoded `ConversionLoss.identity` that made the exactness gate dead code on the
   production path. Expect more of this shape; sabotage every guard you add.
 
+## Related feature experts applying this methodology
+
+- [board_vulkan](../board_vulkan/skill.md) — applies the same real-executed-counterpart /
+  independence-group discipline to a SimpleOS board-Vulkan boundary-comparison harness
+  (device enumeration, SPIR-V, command-stream, readback). Not a second pipeline — it reuses
+  this feature's vocabulary and traps (independence_group over provider count, unavailable
+  is never PASS, canonicalize by explicit rule not heuristic).
+
 ## Update Rule
 
 Update this file in the same change as any counterpart work: new links, new constraints
