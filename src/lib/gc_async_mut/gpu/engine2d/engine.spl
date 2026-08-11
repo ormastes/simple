@@ -163,11 +163,27 @@ fn engine2d_default_font_config_for(font_size: i32, force_cpu_target: bool) -> F
     val base = FontRenderConfig.default_for_size(font_size)
     if not force_cpu_target:
         return base
+    # ROOT CAUSE (2026-08-11, rung-(d) text-skip blocker): this branch used to
+    # rebuild the config by reading all eleven fields off `base`
+    # (`language: base.language`, ...). On the freestanding entry-closure lane
+    # -- the ONLY lane that takes this branch, since `force_cpu_target` is
+    # `self.baremetal_backend != nil` -- that cross-struct field-read copy
+    # delivered `language="normal"` (the value of the `weight`/`style` slots)
+    # while `family`/`category`/`script` copied correctly. Serial evidence:
+    # `[font-select] no-candidate family='auto' category='auto'
+    # language='normal' script='auto'` eight times, one per text Draw IR
+    # command, all of them then skipped as `text-font-batch`
+    # (skipped=8 rendered=12). Every production construction site in the repo
+    # spells `language: "und"`, so no CSS/BCP-47 sentinel ever leaked here --
+    # the value was manufactured by the copy itself. Literal-initializing the
+    # config (identical to `font_render_config_default_for_size` plus the
+    # pinned "cpu" target) removes the field reads entirely. Semantics are
+    # unchanged on a healthy compiler.
     FontRenderConfig(
-        family: base.family, category: base.category, language: base.language,
-        script: base.script, size: base.size, weight: base.weight, style: base.style,
-        hinting: base.hinting, antialiasing: base.antialiasing, atlas_policy: base.atlas_policy,
-        execution_target: "cpu", execution_policy: base.execution_policy
+        family: "auto", category: "auto", language: "und", script: "auto",
+        size: font_size, weight: "normal", style: "normal", hinting: "none",
+        antialiasing: "grayscale", atlas_policy: "shared-alpha-1024",
+        execution_target: "cpu", execution_policy: FontExecutionPolicy.Suggested
     )
 
 # GLYPH-FIX-3 (2026-07-19): gated consumer-side probes. Mirrors the
