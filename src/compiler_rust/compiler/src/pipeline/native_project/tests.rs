@@ -6208,6 +6208,8 @@ fn test_simple_core_source_tree_emits_partial_runtime_archive() {
         "__simple_runtime_shutdown",
         "rt_value_int",
         "rt_value_as_int",
+        "rt_value_u64",
+        "rt_value_as_u64",
         "rt_pool_safepoint",
         "rt_value_float",
         "rt_value_bool",
@@ -6297,6 +6299,10 @@ int main(void) {
     extern int64_t rt_string_builder_len(int64_t);
     if (rt_value_int(7) != 56) return 10;
     if (rt_value_as_int(rt_value_int(-7)) != -7) return 15;
+    int64_t boxed_u64_max = rt_value_u64(-1);
+    if ((uint64_t)rt_value_as_u64(boxed_u64_max) != UINT64_MAX) return 106;
+    if (rt_native_eq(boxed_u64_max, rt_value_int(-1))) return 107;
+    if (!rt_native_eq(rt_value_u64(7), rt_value_int(7))) return 108;
     if (rt_pool_safepoint() != 0) return 16;
     if (rt_for_iterable(rt_value_int(9)) != rt_value_int(9)) return 17;
     if (rt_value_as_int(rt_any_add(rt_value_int(4), rt_value_int(5))) != 9) return 18;
@@ -6338,6 +6344,9 @@ int main(void) {
     if (rt_array_pop(a) != rt_value_int(30)) return 48;
     if (rt_array_len(a) != 1) return 49;
     if (rt_array_get(a, 99) != 3) return 50;
+    SplArray* boxed_words = rt_array_new(1);
+    if (!boxed_words || !rt_array_push(boxed_words, boxed_u64_max)) return 114;
+    if ((uint64_t)rt_value_as_u64(rt_array_get(boxed_words, 0)) != UINT64_MAX) return 115;
     SplArray* indexed = rt_array_new(10);
     if (!indexed) return 51;
     for (int64_t i = 0; i < 10; i++) {
@@ -6387,6 +6396,12 @@ int main(void) {
     if (rt_array_len((SplArray*)rt_array_get((SplArray*)entries, 0)) != 2) return 91;
     if (!rt_dict_contains(dict, key3) || !rt_dict_remove(dict, key3)) return 92;
     if (rt_dict_contains(dict, key3) || rt_dict_get(dict, key3) != 3) return 93;
+    int64_t uint_dict = rt_dict_new(2);
+    if (!rt_dict_set(uint_dict, rt_value_u64(0), rt_value_int(10))) return 109;
+    if (!rt_dict_set(uint_dict, rt_value_u64(INT64_C(1) << 61), rt_value_int(20))) return 110;
+    if (rt_dict_len(uint_dict) != 2) return 111;
+    if (rt_value_as_int(rt_dict_get(uint_dict, rt_value_u64(0))) != 10) return 112;
+    if (rt_value_as_int(rt_dict_get(uint_dict, rt_value_u64(INT64_C(1) << 61))) != 20) return 113;
 
     int64_t none = rt_enum_new(1, (int32_t)2371748697u, 3);
     int64_t some = rt_enum_new(1, (int32_t)4053299545u, rt_value_int(9));
@@ -6396,6 +6411,9 @@ int main(void) {
     if ((uint32_t)rt_enum_discriminant(some) != 4053299545u) return 96;
     if (!rt_enum_check_discriminant(some, 4053299545u)) return 97;
     if (rt_enum_payload(some) != rt_value_int(9)) return 98;
+    int64_t uint_inner = rt_enum_new(77, 1, boxed_u64_max);
+    int64_t uint_outer = rt_enum_new(78, 1, uint_inner);
+    if ((uint64_t)rt_value_as_u64(rt_enum_payload(rt_enum_payload(uint_outer))) != UINT64_MAX) return 116;
     if (rt_unwrap_or_self(some) != rt_value_int(9)) return 99;
     if (rt_unwrap_or_self(rt_value_int(9)) != rt_value_int(9)) return 100;
     int64_t builder = rt_string_builder_new();

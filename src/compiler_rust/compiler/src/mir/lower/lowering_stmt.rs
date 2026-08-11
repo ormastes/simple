@@ -907,7 +907,9 @@ impl<'a> MirLowerer<'a> {
                         );
                         let target_is_float = matches!(target.ty, TypeId::F32 | TypeId::F64);
 
-                        let store_val = if is_tagged_val && target_is_int {
+                        let store_val = if is_tagged_val && target.ty == TypeId::U64 {
+                            self.unbox_u64_runtime_value(val_reg)?
+                        } else if is_tagged_val && target_is_int {
                             // Unbox tagged RuntimeValue to raw integer before storing
                             self.with_func(|func, current_block| {
                                 let unboxed = func.new_vreg();

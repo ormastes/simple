@@ -36,6 +36,26 @@ fn unwrap_signed(value: SignedCarrier) -> i64:
     match value:
         case SignedCarrier.Value(payload): payload
 
+fn roundtrip_any(value: Any) -> u64:
+    return value as u64
+
+fn roundtrip_any_array(value: Any) -> u64:
+    val values: [Any] = [value]
+    return values[0] as u64
+
+fn assign_high_bit() -> u64:
+    var output: u64 = 0u64
+    output = unwrap(Carrier.Value(18446744073709551615u64))
+    return output
+
+fn distinct_dict_keys() -> i64:
+    val values = {0u64: 10, 2305843009213693952u64: 20}
+    if values[0u64] != 10:
+        return 0
+    if values[2305843009213693952u64] != 20:
+        return 0
+    return 1
+
 fn main() -> i64:
     if unwrap(Carrier.Value(0u64)) != 0u64: return 10
     if unwrap(Carrier.Value(1u64)) != 1u64: return 11
@@ -51,6 +71,10 @@ fn main() -> i64:
     if unwrap_nested(Outer.Nested(Carrier.Value(18446744073709551615u64))) != 18446744073709551615u64: return 23
     if adjacent_ok(Adjacent.Both(18446744073709551615u64, -8)) != 1: return 24
     if (unwrap_signed(SignedCarrier.Value(-8)) >> 2) != -2: return 25
+    if assign_high_bit() != 18446744073709551615u64: return 26
+    if roundtrip_any(18446744073709551615u64) != 18446744073709551615u64: return 27
+    if roundtrip_any_array(9223372036854775808u64) != 9223372036854775808u64: return 28
+    if distinct_dict_keys() != 1: return 29
     return 0
 "#;
 
