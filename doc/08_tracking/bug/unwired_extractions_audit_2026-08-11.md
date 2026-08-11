@@ -188,16 +188,70 @@ returns **nothing** — neither the documented display reader nor the driver
 traverses the key. Real target edges exist on paper; no build path consumes them.
 This is why there is no partial build. Status matches the rules doc.
 
-### 8. `src/lib/common/crypto/sha256_core.spl` — structurally un-importable
+### 8. `src/lib/common/crypto/sha256_core.spl` — RETRACTED (false positive), one real defect found and fixed
 
-Every function is declared `fn`, **not `pub fn`** (`sha256_k_constants:12`,
-`compress_block:85`, `sha256_ch:45`, …). It cannot be imported by any module even
-in principle, while `sha256.spl` and `sha256_simd.spl` sit beside it. No spec.
-This is the cleanest proof of the pathology: an extraction that was never wired
-*and could not have been*, sitting silently in the crypto directory.
-Wiring step: make the core `pub`, then route `sha256.spl`/`sha256_simd.spl`
-through it. **High risk** — `common/crypto/sha256` is a documented bootstrap
-dependency (75 prefixes); needs a bootstrap, not available this session.
+**The "structurally un-importable" finding was wrong, and the visibility premise
+behind it is wrong repo-wide.** In Simple a bare `fn` **is** module-exported;
+`pub` is not required for cross-module import. Evidence:
+
+- `src/lib/common/crypto/sha256.spl:5` already does
+  `use std.common.crypto.sha256_core.{sha256_initial_hash, sha256_pad_message,
+  sha256_process_block}`, and `sha256_simd.spl:11` imports from it too. The core
+  was **already routed** — the "wiring step" this entry proposed was a no-op.
+- `sha256.spl` itself has **0 `pub fn` / 9 bare `fn`**, yet ~20 compiler modules
+  import it (`stable_id`, `compile_interface`, `module_identity`, `cas_store`,
+  `action_key`, `block_key`, …) and the compiler builds. Under the retracted
+  premise every one of those imports would be impossible.
+- Repo-wide the ratio is 4,353 `pub fn` to 38,459 bare `fn` in `src/lib`; 24 of
+  26 files in `common/crypto/` have zero `pub fn`. Bare `fn` is the norm, not a
+  defect marker.
+- Executed proof: importing `sha256_initial_hash` / `sha256_pad_message` /
+  `sha256_process_block` across the module boundary runs and returns correct
+  values. No visibility change and **no bootstrap** was needed.
+
+Methodology note: `grep -c '^pub fn'` is **not** an importability oracle in this
+language. Counting it as one is what produced this entry.
+
+**The real defect this file did have** — surfaced by *running* it, not grepping
+it — was a cross-module symbol collision the compiler reports as
+`[compiler_cross_module_private_symbol_collision]`:
+
+> `compress_block` has 2 co-compiled definitions with 2 differing signatures
+> (`(i64,…,i64)->Tuple([i64,i64])` vs `(list,list)->list`); … a fallback hit may
+> still dispatch to the wrong one.
+
+`sha256_core.spl:85 compress_block(h, block)` collided with
+`sha256.spl:406 compress_block(a,…,w)`. The core-side function is a
+pattern-matchable wrapper with zero callers, and the MIR rule in
+`mir_opt/pattern/rules_crypto.spl:43` targets the *`sha256.spl`* symbol, so the
+core one was never the pattern target either. Fixed by renaming it
+`sha256_core_compress_block`, matching its already-uniquely-named siblings
+`sha256_core_msg_schedule1`/`2` — evidently the original author's intent, applied
+to two of three wrappers. The warning is gone and digests are unchanged.
+
+**How much of `sha256.spl` actually reaches the core — measured, not assumed.**
+The `use` on line 5 is real but narrow, and the first version of this retraction
+overstated it. Sabotage (IV `0x6a09e667`→`0x6a09e668`) is what settled it:
+
+- `sha256_text()` / `sha256_bytes()` were **unaffected**. `sha256_text`
+  (sha256.spl:197) hashes via the native runtime `rt_tls13_sha256`, so it never
+  touches the pure-Simple core at all.
+- Only `sha256_bytes_scalar()` (sha256.spl:381-392) calls
+  `sha256_pad_message` / `sha256_initial_hash` / `sha256_process_block`.
+
+So the core is genuinely live, but on exactly one path. That path was **already**
+spec-covered too — `sha256_simd_parity_spec.spl:60` asserts the `"abc"` vector
+against `sha256_bytes_scalar` and lines 64-85 assert SIMD/scalar parity — so the
+entry's "No spec" claim was also wrong, though coverage was thin (one vector).
+
+Standing oracle added: `test/01_unit/lib/common/crypto/sha256_core_vectors_spec.spl`
+(mirrored to `test/unit/...`), 13 examples — three direct `sha256_core` primitive
+checks, the five FIPS 180-4 vectors through `sha256_text`, and the same five
+re-asserted through the core-routed `sha256_bytes_scalar`. All five digests were
+cross-checked against `sha256sum` before use. The `sha256_bytes_scalar` block is
+the one that gates the core: it goes red under the IV sabotage above, while the
+`sha256_text` block does not — which is precisely why both are present, and why a
+`sha256_text`-only spec would have been a vacuous guard on this file.
 
 ---
 
