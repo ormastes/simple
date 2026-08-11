@@ -104,16 +104,28 @@ Only ONE family (tag tokenizing) is a clean blink win today.
 These are the real gate on wiring. Each must be closed in blink, or explicitly
 scoped out, before the corresponding live-lane call site can be re-pointed.
 
-1. **Inline text measurement — entirely absent.** No text-measure API anywhere
-   in `src/lib/blink/**`. Live: `simple_web_html_layout_renderer_layout.spl:290`
+1. **Inline text measurement. — CLOSED 2026-08-11.** `src/lib/blink/layout/
+   inline_text.spl` provides the API this entry says is missing: `inline_font:44`,
+   `inline_metrics:53`, `inline_text_advance_width:57`,
+   `inline_text_cell_width:65`, `inline_text_baseline:69`,
+   `inline_text_line_height:73`, `layout_inline_text:83`. Blocker 7 below already
+   depends on it (`blink/layout/table_flow.spl` measures cells through it), so the
+   "entirely absent" wording was self-contradictory within this file; corrected
+   here. Live-lane counterparts kept for reference below.
+   ~~entirely absent — no text-measure API anywhere
+   in `src/lib/blink/**`.~~ Live: `simple_web_html_layout_renderer_layout.spl:290`
    `text_advance`, `:301` `style_text_advance`, `:462` `intrinsic_text_width`,
    `:492` `inline_text_advance_width`, `:552` `text_line_advance_width`;
    `html_fallback_renderer.spl:137` `br_char_advance_px`.
-   **This alone blocks every pixel-output consumer.**
-2. **`rgb()` / `rgba()` / `hsl()` / `hsla()` / `#RRGGBBAA` / ~140 named colours.**
-   `cascade.spl:122-158` vs `dom_color.spl:8,95,129,475,632`. blink silently
-   resolves all of these to **opaque black** (`cascade.spl:158`) — a wrong
-   value, not a failure, so it is invisible to any smoke test.
+2. **`rgb()` / `rgba()` / `hsl()` / `hsla()` / `#RRGGBBAA` / ~140 named colours.
+   — STILL OPEN (re-verified 2026-08-11 at tip `f17811ab90a1`).**
+   `cascade.spl:124` `parse_color_value` is still the private hex-only reader
+   (`_hex_digit:104`, `_hex_pair:113`); everything else still falls through to
+   **opaque black** — a wrong value, not a failure, so it is invisible to any
+   smoke test. Now that Stage 5 has landed a production seam (§1.1), this is the
+   highest-value remaining blocker: it is the one gap that would silently corrupt
+   output rather than fail, if the flag is ever flipped.
+   `dom_color.spl:8,95,129,475,632` remains the reference implementation.
 3. **HTML character-reference decoding. — CLOSED 2026-08-11.**
    `src/lib/common/html/character_references.spl` is the shared decoder;
    `blink/html_parser/tokenizer.spl` calls it for Character-token data and for

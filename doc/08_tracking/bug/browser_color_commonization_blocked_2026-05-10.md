@@ -1,11 +1,17 @@
 # Browser Color Parsing Commonization Blocked
 
-Status: Resolved (2026-05-19)
+Status: **Resolved by deletion (2026-08-11)** — the 2026-05-19 "Resolved" and the
+2026-05-29 "re-verification" were both FALSE. See "Correction (2026-08-11)".
 
 **Date:** 2026-05-10
 **Component:** browser_engine/dom.spl, common/color/
-**Severity:** Low (tech debt)
-**Status:** Resolved (2026-05-19)
+**Severity:** Low (tech debt) — but the false "Resolved" was Medium
+**Status:** **Resolved by deletion (2026-08-11)**, not by the 2026-05-19
+delegation this header used to claim. The two status lines below in the body
+("Resolution (2026-05-19)", "Re-verification (2026-05-29)") are retained as the
+historical record and **do not hold**: the code they describe was never wired to
+any caller. Header corrected 2026-08-11 so the top of the file no longer
+contradicts §"Correction (2026-08-11)" at the bottom.
 
 ## Problem
 
