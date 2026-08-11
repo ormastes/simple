@@ -260,10 +260,24 @@ fn is_native_payload_free_enum_match(arms: &[MatchArm]) -> bool {
         }
         match &arm.pattern {
             Pattern::Enum { payload, .. } => {
-                // `Color.Red` (None) and `Color.Red()` (empty) are both
-                // payload-free; anything that binds is out of scope.
-                if payload.as_ref().is_some_and(|p| !p.is_empty()) {
-                    return false;
+                // `Color.Red` (None) and `Color.Red()` (empty) are payload-free.
+                // A payload of plain `Identifier`/`MutIdentifier`/`Wildcard`
+                // sub-patterns (the common `Ok(v)` / `Err(msg)` shape) is also
+                // native-compilable: HIR lowering already emits `EnumPayload`
+                // extraction for these (`build_pattern_binding_stmts` in
+                // `hir/lower/stmt_lowering.rs`), and native codegen already
+                // implements `MirInst::EnumPayload` (`codegen/instr/mod.rs`,
+                // `codegen/instr/enum_union.rs`). Anything nested (tuple/array/
+                // struct sub-patterns, literal payload tests) stays out of
+                // scope for this pass — see
+                // doc/08_tracking/bug/native_match_enum_payload_binding_2026-08-11.md.
+                if let Some(payload_patterns) = payload {
+                    for p in payload_patterns {
+                        match p {
+                            Pattern::Identifier(_) | Pattern::MutIdentifier(_) | Pattern::Wildcard => {}
+                            _ => return false,
+                        }
+                    }
                 }
                 saw_variant = true;
             }

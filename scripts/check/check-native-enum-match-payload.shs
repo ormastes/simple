@@ -8,15 +8,19 @@
 # script that actually drives `simple compile --native` can fence it.
 #
 # Bug: doc/08_tracking/bug/match_on_enum_native_lowering_status_2026-08-07.md
+# Fix:  doc/08_tracking/bug/native_match_enum_payload_binding_2026-08-11.md
 #
-# Current known state (2026-08-07): payload-FREE enum match compiles and runs
-# correctly under `--native`. Payload-BEARING enum match (tuple/struct-payload
-# variant patterns) is refused fail-closed with a "requires the interpreter"
-# diagnostic naming the `[PatternMatch]` construct. This script asserts BOTH
-# halves so a regression in either direction is caught:
-#   - payload-free case regressing from PASS to FAIL would be a new defect.
-#   - payload-bearing case flipping from FAIL to PASS would be the gap closing
-#     (reported loudly as a NOTE so this gate gets promoted to a hard assert).
+# Updated 2026-08-11: payload-FREE enum match compiles and runs correctly
+# under `--native` (unchanged). Payload-BEARING enum match with simple
+# identifier/wildcard payload bindings (`Shape.Circle(r)`, the common
+# `Ok(v)`/`Err(msg)` shape) now ALSO compiles and runs correctly under
+# `--native` — `compilability.rs`'s `is_native_payload_free_enum_match` gate
+# was relaxed to admit these since native codegen (`MirInst::EnumPayload`,
+# `codegen/instr/enum_union.rs`) already implements the extraction; only the
+# AOT compilability gate was blocking it. Nested payload sub-patterns (tuple/
+# array/struct/literal destructuring inside the payload, or guards) remain
+# refused fail-closed — that residual scope is filed as a concrete follow-up,
+# not silently narrowed. This script asserts both halves.
 set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
@@ -58,28 +62,23 @@ payload_rc=0
 env -u SIMPLE_BOOTSTRAP "$SIMPLE_BINARY" compile "$PAYLOAD_FIXTURE" --native -o "$payload_bin" >"$payload_log" 2>&1 || payload_rc=$?
 
 if [ "$payload_rc" -eq 0 ]; then
-    echo "NOTE — payload-bearing enum match now COMPILES under --native; the"
-    echo "       open gap in"
-    echo "       doc/08_tracking/bug/match_on_enum_native_lowering_status_2026-08-07.md"
-    echo "       has closed. Promote this branch to a hard assertion on the"
-    echo "       runtime output (circle:2.5 / rect:3.0x4.0 / point) instead of"
-    echo "       accepting either outcome."
     payload_out="$(timeout 20 "$payload_bin" 2>>"$payload_log" || true)"
-    echo "  observed output: $payload_out"
-else
-    if grep -q 'cannot compile to standalone native binary' "$payload_log" \
-        && grep -q 'describe_shape' "$payload_log" \
-        && grep -q 'PatternMatch' "$payload_log"; then
-        echo "KNOWN-OPEN — payload-bearing enum match still fail-closed under --native (expected diagnostic present)"
-    else
-        echo "FAIL — payload-bearing enum match --native compile failed for an UNEXPECTED reason (not the known PatternMatch refusal)"
-        sed -n '1,20p' "$payload_log"
+    expected_payload="$(printf 'kind-A\nkind-B\nkind-C\ncircle:2.5\nrect:3.0x4.0\npoint')"
+    if [ "$payload_out" != "$expected_payload" ]; then
+        echo "FAIL — payload-bearing enum match --native now compiles but output is wrong"
+        echo "  expected: $expected_payload"
+        echo "  actual:   $payload_out"
         fail=1
     fi
+else
+    echo "FAIL — payload-bearing enum match no longer compiles under --native (was fixed 2026-08-11)"
+    sed -n '1,20p' "$payload_log"
+    fail=1
 fi
 
 if [ "$fail" -ne 0 ]; then
     exit 1
 fi
 
-echo "PASS — native-build enum match: payload-free correct, payload-bearing gap unchanged"
+checked=2
+echo "PASS — $checked checked: native-build enum match payload-free and payload-bearing both correct"
