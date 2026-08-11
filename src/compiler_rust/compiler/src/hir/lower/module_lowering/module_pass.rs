@@ -1550,6 +1550,15 @@ impl Lowerer {
         // is the bounded case this pass covers, not general dependency
         // analysis.
         {
+            // Native entry-closure compilation injects a module-qualified
+            // initializer before HIR lowering. Do not append the legacy
+            // unqualified initializer as well: every source module would
+            // otherwise emit the same `__module_init_dynamic` link symbol.
+            let has_preinjected_dynamic_initializer = ast_module.items.iter().any(|item| {
+                matches!(item, Node::Function(function)
+                    if function.name.starts_with("__module_init_")
+                        && function.name.ends_with("_dynamic"))
+            });
             let mut dyn_ctx = FunctionContext::new(TypeId::VOID);
             let mut dyn_body: Vec<HirStmt> = Vec::new();
             for item in &ast_module.items {
@@ -1590,7 +1599,7 @@ impl Lowerer {
             if std::env::var("SIMPLE_WRITEFIX_DEBUG").is_ok() {
                 eprintln!("[writefix] dyn_body.len()={}", dyn_body.len());
             }
-            if !dyn_body.is_empty() {
+            if !dyn_body.is_empty() && !has_preinjected_dynamic_initializer {
                 dyn_body.push(HirStmt::Return(None));
                 self.module.functions.push(HirFunction {
                     name: "__module_init_dynamic".to_string(),
@@ -1882,6 +1891,13 @@ impl Lowerer {
         // is the bounded case this pass covers, not general dependency
         // analysis.
         {
+            // See lower_module: native entry-closure compilation already
+            // supplied a module-qualified dynamic initializer.
+            let has_preinjected_dynamic_initializer = ast_module.items.iter().any(|item| {
+                matches!(item, Node::Function(function)
+                    if function.name.starts_with("__module_init_")
+                        && function.name.ends_with("_dynamic"))
+            });
             let mut dyn_ctx = FunctionContext::new(TypeId::VOID);
             let mut dyn_body: Vec<HirStmt> = Vec::new();
             for item in &ast_module.items {
@@ -1922,7 +1938,7 @@ impl Lowerer {
             if std::env::var("SIMPLE_WRITEFIX_DEBUG").is_ok() {
                 eprintln!("[writefix] dyn_body.len()={}", dyn_body.len());
             }
-            if !dyn_body.is_empty() {
+            if !dyn_body.is_empty() && !has_preinjected_dynamic_initializer {
                 dyn_body.push(HirStmt::Return(None));
                 self.module.functions.push(HirFunction {
                     name: "__module_init_dynamic".to_string(),
