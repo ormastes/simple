@@ -113,3 +113,71 @@ Three lanes burned hours on `eval_access.spl`/`eval_calls.spl` in one night.
 piece of work is the `_driver_collect_sources` duplicate in
 `driver_helpers.spl` vs `driver_source_loading.spl` — resolve that before any
 further claim about what the driver does or does not compile.
+
+---
+
+## RESOLVED 2026-08-11 — the duplicate is collapsed; `driver_source_loading.spl` wins
+
+Prerequisite 1 above ("resolve the `_driver_collect_sources` duplicate first")
+is now done. Determined by **sabotage with an inverse control**, not by
+inspection — `pub` vs bare `fn` was only a hypothesis, since resolution in this
+repo has been shown to be filename-order sensitive.
+
+Probe: a spec importing `_driver_collect_sources` from
+`compiler.driver.driver_source_loading` and calling it on
+`src/compiler/10.frontend/core/interpreter/hashmap.spl`, printing the returned
+count and the first result's `path`.
+
+| run | edit | result |
+|---|---|---|
+| baseline | none | `PROBE_RESULT=0 TAG=NONE` |
+| sabotage A | `driver_helpers.spl` copy returns a `SABOTAGE_HELPERS` marker for that path | `PROBE_RESULT=0 TAG=NONE` — **no movement** |
+| sabotage B (inverse control) | identical marker in the `driver_source_loading.spl` copy | `PROBE_RESULT=1 TAG=SABOTAGE_LOADING` — **moves** |
+
+Sabotage B is the control proving the probe tracks the file rather than a
+constant. **The `driver_source_loading.spl` definition wins; the
+`driver_helpers.spl` pair was unreachable.**
+
+### Is the exclusion load-bearing?
+
+It is a **bulk-collect lane filter**, not a build-wide retirement, and that is
+the whole reason the package is live:
+
+- Both exclusion sites (`driver_source_loading.spl:858` file branch, `:893`
+  find branch) are **inside `_driver_collect_sources` only**. A repo-wide
+  `/usr/bin/grep -rn "core/interpreter" src/` returns exactly those two lines.
+  `_driver_collect_entry_import_source` — the path that resolves `use` targets —
+  does not apply them, so imported interpreter modules still load.
+- It sits directly beside the `/10.frontend/core/` allow-list
+  (`lexer`/`parser`/`ast`/`tokens`/`types`/`backend_types`/`error`/`frontend`/
+  `__init__`), which is unambiguously a deliberate lane split, not residue.
+- It is not a build-time optimisation of consequence: the four excluded
+  fragments cover 45 of 14,485 `.spl` files (0.31%), ~17.8k lines
+  (interpreter 27/12,113, parser 6/1,588, treesitter 10/3,443, async 2/711).
+- `git log -S` on the exclusion string returns only `chore(sync)`-class commits,
+  so history does not name an author intent beyond the code itself.
+
+**The exclusion is therefore KEPT.** Removing it remains blocked behind
+prerequisite 2 (the 10 drifted evaluator pairs), exactly as this record said.
+
+### Collapse
+
+`driver_helpers.spl` lost its `_driver_collect_sources`,
+`_driver_collect_sources_via_find`, and the now-dead `_skip_dirs`,
+`_driver_should_skip_dir`, `_default_read_source`, `_active_read_source` that
+only that copy consumed. No rename was needed: the two behaviours are not both
+required, because only one was ever reachable. A pointer comment replaces them.
+
+### Regression pin
+
+`test/01_unit/compiler/driver/driver_collect_sources_single_definition_spec.spl`
+(mirrored byte-identically to `test/unit/...`), 4/4 green. **Oracle proven
+non-tautological:** restoring the deleted duplicate into `driver_helpers.spl`
+turns it **3/4 RED**; with the collapse in place it is 4/4 GREEN.
+
+Pre-existing reds, unchanged by this work and verified at HEAD with the change
+reverted: `entry_closure_physical_source_dedup_spec.spl` (daemon-worker-timeout
+at HEAD too) and `processing_cuda_backend_spec.spl` (1/4; it reads only
+`driver_source_loading.spl`, which this change leaves byte-identical).
+
+**Any claim about what the driver compiles is now meaningful.**

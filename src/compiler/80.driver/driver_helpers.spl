@@ -38,12 +38,6 @@ fn log_warn(msg: text):
 fn log_error(msg: text):
     print "[ERROR] {msg}"
 
-# Phase 2: Module-level source reader — defaults to rt_file_read_text,
-# overridden by CompilerDriver.load_sources_impl() to use module_storage port.
-fn _default_read_source(path: text) -> text:
-    rt_file_read_text(path) ?? ""
-var _active_read_source: fn(text) -> text = _default_read_source
-
 # Phase 4: Track modules with fresh cached SMF (module_name -> source_path)
 var _smf_cached_modules: {text: text} = {}
 
@@ -70,63 +64,23 @@ class CheckBackendImpl(Backend):
 # Source loading helpers
 # ------------------------------------------------------------------------------
 
-# Directories to skip during source collection
-val _skip_dirs = ["test", "tests", "doc", "docs", "examples", "verification", "resources", "scripts", "build"]
-
-fn _driver_should_skip_dir(name: text) -> bool:
-    var i = 0
-    while i < _skip_dirs.len():
-        if name == _skip_dirs[i]:
-            return true
-        i = i + 1
-    false
-
-fn _driver_collect_sources(p: text) -> [SourceFile]:
-    """Collect source files from a path (file or directory). Returns list of SourceFile."""
-    var result: [SourceFile] = []
-    if p.ends_with(".spl"):
-        # It's a source file
-        if p.ends_with("/check.spl") or p.ends_with("\\check.spl"):
-            return result
-        if p.contains("/test/") or p.contains("/tests/") or p.contains("/doc/") or p.contains("/examples/") or p.contains("/verification/"):
-            return result
-        # Phase 2: Use module_storage port (via module-level reader)
-        val content = _active_read_source(p)
-        if content != "":
-            var mod_path = p
-            if mod_path.starts_with("src/"):
-                mod_path = mod_path.substring(4)
-            mod_path = mod_path.replace(".spl", "")
-            mod_path = mod_path.replace(".sdn", "")
-            val module_name = mod_path.replace("/", ".")
-            result = result.push(SourceFile(
-                path: p,
-                content: content,
-                module_name: module_name
-            ))
-    else:
-        # Treat as directory — depth-first traversal with pruning
-        val entries = rt_dir_list(p) ?? []
-        var idx = 0
-        while idx < entries.len():
-            val child = entries[idx]
-            val child_path = "{p}/{child}"
-            if _driver_should_skip_dir(child):
-                idx = idx + 1
-                continue
-            val child_sources = _driver_collect_sources(child_path)
-            for s in child_sources:
-                result = result.push(s)
-            idx = idx + 1
-    result
-
-fn _driver_collect_sources_via_find(paths: [text]) -> [SourceFile]:
-    var result: [SourceFile] = []
-    for path in paths:
-        val loaded = _driver_collect_sources(path)
-        for s in loaded:
-            result = result.push(s)
-    result
+# SOURCE COLLECTION LIVES IN `driver_source_loading.spl` — NOT HERE.
+#
+# This file used to carry a second, co-compiled `_driver_collect_sources` /
+# `_driver_collect_sources_via_find` pair (plus its own `_skip_dirs` /
+# `_driver_should_skip_dir`) whose filter list omitted the four lane exclusions
+# the real collector applies. Two same-name co-compiled definitions make every
+# measurement of "what the driver collects" ambiguous — exactly the failure
+# mode the `public function 'shell' has 3 co-compiled definitions` warning
+# describes.
+#
+# Resolved 2026-08-11 by SABOTAGE, not inspection: marking this copy produced
+# NO movement in a probe calling `_driver_collect_sources`, while the identical
+# marker in `driver_source_loading.spl` moved it (inverse control). The
+# `driver_source_loading.spl` definition is the one that wins; this one was
+# unreachable. Pinned by
+# `test/01_unit/compiler/driver/driver_collect_sources_single_definition_spec.spl`.
+# See doc/08_tracking/bug/driver_collect_sources_path_exclusions_are_not_dead_code_2026-08-11.md
 
 # ------------------------------------------------------------------------------
 # Structured Error Formatting Helpers

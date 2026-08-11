@@ -1,0 +1,67 @@
+use std.spec.*
+use compiler.driver.driver_source_loading.{_driver_collect_sources, _driver_collect_sources_via_find}
+
+extern fn rt_file_read_text(path: text) -> text
+
+val LOADING = "src/compiler/80.driver/driver_source_loading.spl"
+val HELPERS = "src/compiler/80.driver/driver_helpers.spl"
+
+describe "driver source collection has exactly one definition":
+    """As a compiler engineer measuring what a build actually compiles, I need
+    `_driver_collect_sources` to have exactly ONE co-compiled definition, so
+    that when I call it to ask "is this directory in the build?" the answer
+    comes from the collector the driver really runs — not from whichever of two
+    same-named copies name resolution happened to pick.
+
+    Until 2026-08-11 there were two: `driver_source_loading.spl` (with four lane
+    exclusions — `/core/interpreter/`, `/10.frontend/parser/`,
+    `/10.frontend/treesitter`, `/hir_lowering/async`) and `driver_helpers.spl`
+    (with none of them). A sabotage probe established that the
+    `driver_source_loading.spl` copy wins and the `driver_helpers.spl` copy was
+    unreachable; it was deleted. This spec pins that resolution so a
+    reintroduced copy cannot silently make the measurement ambiguous again.
+
+    The exclusions are a BULK-COLLECT lane filter, not a build-wide retirement:
+    entry-import resolution does not apply them, which is why `core/interpreter`
+    remains live in-tree with real production importers and green specs."""
+
+    it "collapses driver_helpers.spl so only one collector definition remains":
+        step("Read both driver source-collection modules")
+        val loading = rt_file_read_text(LOADING) ?? ""
+        val helpers = rt_file_read_text(HELPERS) ?? ""
+        expect(loading).to_not_equal("")
+        expect(helpers).to_not_equal("")
+
+        step("The canonical collector lives in driver_source_loading.spl")
+        expect(loading).to_contain("pub fn _driver_collect_sources(p: text) -> [SourceFile]:")
+        expect(loading).to_contain("pub fn _driver_collect_sources_via_find(paths: [text]) -> [SourceFile]:")
+
+        step("driver_helpers.spl declares no competing definition")
+        expect(helpers).to_not_contain("fn _driver_collect_sources(p: text) -> [SourceFile]:")
+        expect(helpers).to_not_contain("fn _driver_collect_sources_via_find(paths: [text]) -> [SourceFile]:")
+
+    it "applies the four lane exclusions that only the winning copy carries":
+        step("Interpreter, parser, treesitter and async-lowering paths are dropped")
+        expect(_driver_collect_sources("src/compiler/10.frontend/core/interpreter/hashmap.spl").len()).to_equal(0)
+
+        step("A positive control from the same layer is still collected")
+        val control = _driver_collect_sources("src/compiler/10.frontend/core/lexer.spl")
+        expect(control.len()).to_be_greater_than(0)
+
+    it "keeps the exclusion list intact in the definition that actually answers":
+        step("Both collector branches carry all four excluded path fragments")
+        val loading = rt_file_read_text(LOADING) ?? ""
+        expect(loading).to_contain("/core/interpreter/")
+        expect(loading).to_contain("/10.frontend/parser/")
+        expect(loading).to_contain("/10.frontend/treesitter")
+        expect(loading).to_contain("/hir_lowering/async")
+
+    it "routes the bulk find collector through the same single definition":
+        step("via_find delegates rather than re-implementing the filter")
+        val loading = rt_file_read_text(LOADING) ?? ""
+        expect(loading).to_contain("for path in paths:\n        val loaded = _driver_collect_sources(path)")
+
+        step("Delegation is observable: an excluded path yields nothing")
+        expect(_driver_collect_sources_via_find(["src/compiler/10.frontend/core/interpreter"]).len()).to_equal(0)
+
+# @req REQ-DRIVER-COLLECT-SOURCES-SINGLE-DEFINITION
