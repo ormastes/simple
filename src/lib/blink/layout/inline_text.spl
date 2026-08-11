@@ -1,0 +1,103 @@
+# Blink inline text measurement — blink.layout.inline_text
+#
+# This closes the gap recorded as blocker 1 in
+# doc/03_plan/ui/rendering/blink_wiring_plan.md: inline text measurement was
+# absent from `src/lib/blink/**` entirely, so blink could not lay text out and
+# no pixel consumer could be pointed at it.
+#
+# The measurement ITSELF is not here. It lives in
+# `common/layout/text_metrics.spl`, which both blink and the live browser lane
+# may import — blink is a leaf that imports only `blink`, `skia` and `common`,
+# so it cannot reach the live implementation, and copying it would have grown
+# the duplicate family the wiring plan is trying to shrink. This module is the
+# thin blink-shaped face over that shared measurement: it turns a text run plus
+# a font description into pixel widths, line boxes and a baseline.
+#
+# WHY FONT SIZE IS A PARAMETER AND NOT READ FROM ComputedStyle
+#
+# `blink.entity.computed_style.ComputedStyle` carries no font properties at
+# all — no font-size, no letter-spacing, no line-height. Until the cascade
+# grows them, the caller supplies them. That is stated rather than papered over
+# with a hardcoded default, because a wrong default would measure silently.
+#
+# Scope (deliberate non-goals):
+#   - Monospace only. There is no font table and no per-glyph advance array, so
+#     proportional fonts are not modelled.
+#   - No bidi, no shaping, no ligatures, no tab stops.
+#   - No ANSI escape handling: that is a terminal contract, not a pixel one.
+#     See the contract table in common/layout/text_metrics.spl.
+
+use std.common.layout.text_metrics.{
+    TextMetrics, monospace_metrics, measure_text, baseline_offset_px,
+    wrap_text_lines, text_cell_width
+}
+
+struct InlineFont:
+    """The font description an inline run is measured under.
+
+    `line_height_px` of 0 means "the font's natural line height"."""
+    size_px: i64
+    letter_spacing_px: i64
+    word_spacing_px: i64
+    line_height_px: i64
+
+pub fn inline_font(size_px: i64) -> InlineFont:
+    """Return a default inline font of `size_px` with no extra spacing."""
+    InlineFont(
+        size_px: size_px,
+        letter_spacing_px: 0,
+        word_spacing_px: 0,
+        line_height_px: 0
+    )
+
+pub fn inline_metrics(f: InlineFont) -> TextMetrics:
+    """Return the resolved pixel metrics for `f`."""
+    monospace_metrics(f.size_px, f.letter_spacing_px, f.word_spacing_px, f.line_height_px)
+
+pub fn inline_text_advance_width(run: text, f: InlineFont) -> i64:
+    """Return the advance width in pixels of `run` set in `f`.
+
+    Measured by Unicode codepoint, so a multi-byte character costs one glyph
+    rather than one per UTF-8 byte, a wide CJK glyph costs two cells, and a
+    combining mark costs nothing."""
+    measure_text(run, inline_metrics(f))
+
+pub fn inline_text_cell_width(run: text) -> i64:
+    """Return the monospace CELL width of `run`, independent of font size."""
+    text_cell_width(run)
+
+pub fn inline_text_baseline(f: InlineFont) -> i64:
+    """Return the baseline's y offset from the top of a line box set in `f`."""
+    baseline_offset_px(inline_metrics(f))
+
+pub fn inline_text_line_height(f: InlineFont) -> i64:
+    """Return the height in pixels of one line box set in `f`."""
+    inline_metrics(f).line_height_px
+
+struct InlineTextBlock:
+    """A wrapped run: its lines, the width of the widest one, and its height."""
+    lines: [text]
+    width_px: i64
+    height_px: i64
+
+pub fn layout_inline_text(run: text, max_width_px: i64, f: InlineFont) -> InlineTextBlock:
+    """Wrap `run` to `max_width_px` and return its lines and used box.
+
+    Breaks at spaces where possible so words stay whole. `width_px` is the
+    widest line actually produced, which is what an intrinsic-width caller
+    needs; it is never wider than `max_width_px` unless a single unbreakable
+    glyph exceeds it."""
+    val m = inline_metrics(f)
+    val lines = wrap_text_lines(run, max_width_px, m)
+    var widest: i64 = 0
+    var i: i64 = 0
+    while i < lines.len():
+        val w = measure_text(lines[i], m)
+        if w > widest:
+            widest = w
+        i = i + 1
+    InlineTextBlock(
+        lines: lines,
+        width_px: widest,
+        height_px: lines.len() * m.line_height_px
+    )

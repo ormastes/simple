@@ -149,7 +149,25 @@ that both lanes can import. blink imports only `blink`/`skia`/`common` today
 and must stay that way — it must never import `gc_async_mut.gpu.**`, which
 would drag GPU deps into a leaf stack (and into baremetal).
 
-- `common/css/color.spl` <- `dom_color.spl` (+ named table) — pure, no GPU dep
+- **DONE (colour):** `src/lib/common/color/css.spl` — the shared CSS colour
+  parser. It landed in the existing `common/color/**` package rather than a new
+  `common/css/` one, so it sits beside `types.spl`/`convert.spl` (whose
+  `hsl_to_rgb` it reuses) instead of starting an eighth colour package. blink's
+  `style/cascade.spl` now imports it and its private nine-colour table is gone.
+  Parity with the live lane: 148 CSS Level 4 named colours, `#RGB`/`#RGBA`/
+  `#RRGGBB`/`#RRGGBBAA`, `rgb()`/`rgba()`, `hsl()`/`hsla()`, both the legacy
+  comma form and the modern space-plus-slash form, percentage channels.
+  **Every entry point returns `Color?`.** blink's `parse_color_value` no longer
+  answers opaque black for an unsupported colour — the silent wrong pixel that
+  hid this whole gap — it answers `nil`, and `apply_declaration` drops the
+  invalid declaration as CSS requires. Specs:
+  `test/01_unit/lib/common/color/css_color_spec.spl` (25 cases, unsupported
+  colours covered explicitly) and the rewritten `parse_color_value` /
+  "applying an unsupported colour declaration" blocks of
+  `test/01_unit/lib/blink/style_cascade_spec.spl`, both mirrored into
+  `test/unit/`. The live lane's `dom_color.spl` is NOT yet re-pointed — that
+  half still needs the bitmap-equality proof below.
+- `common/css/length.spl` <- `css_length_px` + `br_parse_calc_px_i32`
 - `common/css/length.spl` <- `css_length_px` + `br_parse_calc_px_i32`
 - `common/css/declarations.spl` <- `style_block_parse.spl:455` `parse_declarations`
 - `common/css/entities.spl` <- `html_named_character_references.spl` + decoder
@@ -182,9 +200,30 @@ Port `intrinsic_text_width` / `inline_text_advance_width` /
 font-metric source the live lane uses. This is the single largest blocker and
 the one that gates all pixel output.
 
-Acceptance: a new spec measures the same strings through both lanes and asserts
-equal advance widths within 1px; `test/01_unit/lib/blink/inline_flow_spec.spl`
-stays green.
+**LANDED 2026-08-11**, but NOT by porting the live implementation, and the
+acceptance criterion below had to change. The measurement landed as a shared
+leaf, `src/lib/common/layout/text_metrics.spl`, with blink consuming it through
+`src/lib/blink/layout/inline_text.spl`. blink can now measure advance width,
+cell width, baseline, line height, and wrap a run into a box.
+Proof: `test/01_unit/lib/blink/inline_text_spec.spl` 41/41 PASS (mirrored into
+`test/unit/lib/blink/`). `common/spec/evidence/format/terminal_grid.spl` now
+delegates its width policy to the same leaf instead of keeping a second copy;
+its spec stays 21/21.
+
+Acceptance (AMENDED): the original criterion — "measure the same strings
+through both lanes and assert equal advance widths within 1px" — is
+UNACHIEVABLE for non-ASCII text and must not be forced. The live lane measures
+by UTF-8 BYTE count (`text.len()` is bytes while `char_code_at` is codepoint
+indexed), so it over-charges every multi-byte character; see
+`doc/08_tracking/bug/live_lane_inline_text_measure_counts_utf8_bytes_2026-08-11.md`.
+Cross-lane parity holds for ASCII only until that live defect is fixed, which
+is bitmap-gated Stage 1 work. Reintroducing the byte count into blink to force
+parity would be a regression.
+
+The three width contracts in the repo (pixel advance, ANSI-stripped visible
+columns, terminal cells) are documented at the top of `text_metrics.spl` and are
+deliberately NOT unified — the `pad_to_width`/`text_width` ANSI family answers a
+different question and merging it in either direction is a behaviour change.
 Rollback: additive module; delete it.
 
 ### Stage 4 — remaining blink gaps (blockers 3, 5, 6, 7, 9, 10)
