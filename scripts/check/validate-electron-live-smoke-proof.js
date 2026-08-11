@@ -334,13 +334,26 @@ const expectedWidthText = decimalIntegerText(widthText);
 const expectedHeightText = decimalIntegerText(heightText);
 const expectedWidth = expectedWidthText === null ? NaN : Number(expectedWidthText);
 const expectedHeight = expectedHeightText === null ? NaN : Number(expectedHeightText);
+// HiDPI/Retina captures are physical pixels: a 1280x720 logical window yields a
+// 2560x1440 bitmap at scale factor 2. The proof self-reports the scale factor
+// measured from the capture; the independently parsed PNG IHDR must still match
+// the scaled expectation, so a misreported factor cannot launder a bad capture.
+// Absent/invalid factor defaults to 1 (Linux/xvfb behavior unchanged).
+const screenshotScaleFactor =
+  typeof proof.screenshot_scale_factor === 'number' &&
+  Number.isFinite(proof.screenshot_scale_factor) &&
+  proof.screenshot_scale_factor >= 1
+    ? proof.screenshot_scale_factor
+    : 1;
+const expectedScreenshotWidth = Math.round(expectedWidth * screenshotScaleFactor);
+const expectedScreenshotHeight = Math.round(expectedHeight * screenshotScaleFactor);
 const expectedProofSource = 'src/app/ui.electron/bridge.js:electronLiveSmokeProofScript';
 const proofSource = proofSourceArtifact(expectedProofSource);
 const screenshotArtifact = pngArtifact(
   proof.screenshot_path,
   proof.screenshot_png_size_bytes,
-  expectedWidth,
-  expectedHeight
+  expectedScreenshotWidth,
+  expectedScreenshotHeight
 );
 const proofSourceArtifactStatus = artifactStatus(proofSource);
 const screenshotArtifactStatus = artifactStatus(screenshotArtifact);
@@ -410,11 +423,11 @@ if (proof.target !== 'electron') {
   reason = 'screenshot-capture-error';
 } else if (screenshotArtifact.status !== 'pass') {
   reason = `screenshot-artifact-${screenshotArtifact.status}`;
-} else if (proof.screenshot_width !== expectedWidth || proof.screenshot_height !== expectedHeight) {
+} else if (proof.screenshot_width !== expectedScreenshotWidth || proof.screenshot_height !== expectedScreenshotHeight) {
   reason = 'screenshot-dimensions-mismatch';
 } else if (!integerNumberAtLeast(proof.screenshot_png_size_bytes, 9)) {
   reason = 'screenshot-png-size-missing';
-} else if (proof.screenshot_bitmap_byte_count !== expectedWidth * expectedHeight * 4) {
+} else if (proof.screenshot_bitmap_byte_count !== expectedScreenshotWidth * expectedScreenshotHeight * 4) {
   reason = 'screenshot-bitmap-size-mismatch';
 } else if (!integerNumberAtLeast(proof.screenshot_pixel_checksum, 1)) {
   reason = 'screenshot-pixel-checksum-missing';
@@ -472,6 +485,7 @@ emit('electron_live_smoke_screenshot_file_reason', screenshotArtifact.status);
 emit('electron_live_smoke_screenshot_artifact_status', screenshotArtifactStatus);
 emit('electron_live_smoke_screenshot_width', jsonIntegerTextOrBlank(proof.screenshot_width));
 emit('electron_live_smoke_screenshot_height', jsonIntegerTextOrBlank(proof.screenshot_height));
+emit('electron_live_smoke_screenshot_scale_factor', jsonNumberTextOrBlank(proof.screenshot_scale_factor));
 emit('electron_live_smoke_screenshot_bitmap_byte_count', jsonIntegerTextOrBlank(proof.screenshot_bitmap_byte_count));
 emit('electron_live_smoke_screenshot_pixel_checksum', jsonIntegerTextOrBlank(proof.screenshot_pixel_checksum));
 emit('electron_live_smoke_screenshot_nontransparent_pixel_count', jsonIntegerTextOrBlank(proof.screenshot_nontransparent_pixel_count));

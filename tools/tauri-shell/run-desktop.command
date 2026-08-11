@@ -10,12 +10,13 @@ cp index.html dist/index.html
 
 if [ "${1:-}" != "" ]; then
   SIMPLE_BIN_PATH="$1"
-elif [ "$(uname -s)" = "Darwin" ] && [ -x "../../src/compiler_rust/target/release/simple" ]; then
-  SIMPLE_BIN_PATH="../../src/compiler_rust/target/release/simple"
 else
-  SIMPLE_BIN_PATH="../../bin/simple"
+  # Emergency stopgap: the deployed self-hosted CLI at bin/simple currently
+  # lacks `run` (doc/08_tracking/bug/deployed_macos_cli_bootstrap_only_run_lost_2026-08-11.md).
+  # Use the Rust seed until the full CLI is re-deployed; restore ../../bin/simple then.
+  SIMPLE_BIN_PATH="../../src/compiler_rust/target/bootstrap/simple"
 fi
-ENTRY_PATH="${2:-../../examples/ui/hello_tauri.ui.sdn}"
+ENTRY_PATH="${2:-../../examples/06_io/ui/hello_tauri.ui.sdn}"
 shift $(( $# > 1 ? 2 : $# ))
 
 echo "Standalone shell:"

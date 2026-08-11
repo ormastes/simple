@@ -23,7 +23,25 @@ use app.ui.render.session.{create_session}
 use app.ui.render.core.{execute_render}
 use app.ui.render.export.{export_text, export_html, export_to_file}
 use app.ui.backend_entry_args.{parse_ui_port_or_default}
-use app.io.cli_ops.{cli_get_args}
+
+# Direct argv externs. `app.io.cli_ops.cli_get_args` / `std.sffi.cli.cli_get_args`
+# share a name+signature with the `io/mod_stub` `cli_get_args`; in co-compiled
+# JIT graphs the ambiguous call can fall back to the stub definition, which
+# returns [] and silently drops every UI argument (tauri launch then prints
+# usage and exits 1). Call the runtime primitives directly here — the same
+# pattern ui.electron/app.spl already uses.
+# See doc/08_tracking/bug/compiler_cross_module_private_symbol_collision_2026-06-16.md
+extern fn rt_cli_get_args() -> [text]
+extern fn sys_get_args() -> [text]
+
+fn _ui_raw_cli_args() -> [text]:
+    val raw = rt_cli_get_args()
+    if raw != nil and raw.len() > 0:
+        return raw
+    val sys_args = sys_get_args()
+    if sys_args != nil and sys_args.len() > 0:
+        return sys_args
+    []
 use std.nogc_sync_mut.io.file_ops.{file_exists}
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use std.log.{error}
@@ -298,7 +316,7 @@ fn get_args() -> [text]:
     - `simple ui ...` command dispatch, where `ui` appears in argv
     - direct script execution, where argv looks like `<runtime> <script> ...`
     """
-    val raw_args = cli_get_args()
+    val raw_args = _ui_raw_cli_args()
 
     # Command dispatch path: return everything after the `ui` subcommand
     var ui_args: [text] = []
