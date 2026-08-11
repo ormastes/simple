@@ -1,6 +1,7 @@
 # Pure CSS border-radius and box-shadow parsing for the Simple web renderer.
 
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.*
+use std.common.color.css.{parse_hex_color}
 
 const CSS_INTEGER_PX_INVALID: i32 = -1000001
 const CSS_INTEGER_PX_ABS_MAX: i32 = 1000000
@@ -272,43 +273,18 @@ fn _box_shadow_value_is_balanced_and_bounded(value: text) -> bool:
         index = index + 1
     depth == 0
 
-fn _box_shadow_is_hex_digit(ch: text) -> bool:
-    (
-        (ch >= "0" and ch <= "9") or
-        (ch >= "a" and ch <= "f") or
-        (ch >= "A" and ch <= "F")
-    )
-
+# Hex colour parsing delegates to the one shared implementation,
+# `std.common.color.css.parse_hex_color`. That returns `Color?`, where `nil`
+# means "not a hex colour I understand"; this lane's contract is the same
+# information in a different shape — `(false, 0u32)` — so the failure case
+# survives the adaptation instead of collapsing to a substituted colour.
+# The packing is `to_argb_u32` (0xAARRGGBB), which is what this file and the
+# rest of the `simple_web_*` renderer use; `dom_color.spl` uses the other
+# order, which is why the adapter names the layout rather than guessing.
 fn _box_shadow_hex_color(token: text) -> (bool, u32):
-    val length = token.len()
-    if length != 4 and length != 5 and length != 7 and length != 9:
-        return (false, 0u32)
-    var index = 1
-    while index < length:
-        if not _box_shadow_is_hex_digit(token.char_at(index)):
-            return (false, 0u32)
-        index = index + 1
-    var red = 0
-    var green = 0
-    var blue = 0
-    var alpha = 255
-    if length == 4 or length == 5:
-        red = hex_val(token.char_at(1)) * 17
-        green = hex_val(token.char_at(2)) * 17
-        blue = hex_val(token.char_at(3)) * 17
-        if length == 5:
-            alpha = hex_val(token.char_at(4)) * 17
-    else:
-        red = hex_val(token.char_at(1)) * 16 + hex_val(token.char_at(2))
-        green = hex_val(token.char_at(3)) * 16 + hex_val(token.char_at(4))
-        blue = hex_val(token.char_at(5)) * 16 + hex_val(token.char_at(6))
-        if length == 9:
-            alpha = hex_val(token.char_at(7)) * 16 + hex_val(token.char_at(8))
-    val color = (
-        (alpha.to_u32() << 24) | (red.to_u32() << 16) |
-        (green.to_u32() << 8) | blue.to_u32()
-    )
-    (true, color)
+    if val parsed = parse_hex_color(token):
+        return (true, parsed.to_argb_u32())
+    (false, 0u32)
 
 fn _box_shadow_decimal_component(
     token: text, maximum: i32

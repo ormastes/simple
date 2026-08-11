@@ -1,0 +1,136 @@
+# @cover src/lib/gc_async_mut/gpu/browser_engine/dom_color.spl 40%
+# @req REQ-CSSCOLOR-002
+"""
+# `dom_color` Hex Parsing Delegated to the Shared Parser
+
+**Category:** Browser Engine
+**Status:** Implemented
+
+## Purpose and Audience
+
+`dom_color.spl` is one of eight browser-lane colour parsers that carry colour
+as a packed `u32`. Its hex branch now delegates to the single shared
+implementation in `std.common.color.css`. This spec is the before/after
+evidence for that swap: it pins the value of every supported form so a
+regression is a failing assertion rather than a slightly wrong pixel.
+
+## Scope and Preconditions
+
+`parse_color_value_checked(text) -> u32?` is the delegating entry point.
+`parse_color_value(text) -> u32` wraps it with `?? 0x000000FF`. Both are
+exercised, because they differ precisely in what they can say about failure.
+
+## Primary Workflow
+
+For a supported colour the two functions agree and produce the historical
+`0xRRGGBBAA` value. For an unsupported colour the checked form answers `nil`
+and the unchecked form answers opaque black — unchanged from before the swap,
+so no existing caller moves.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| `u32` is lossy | `#gg` and `#000000` are both `0x000000FF`. |
+| `Color?` is not | `nil` distinguishes "unsupported" from "black". |
+| Byte order | `dom_color` packs `0xRRGGBBAA` (`to_rgba_u32`). |
+
+## Related Specifications
+
+- [Shared CSS Colour Parsing](../../../common/color/css_color_spec.md)
+- [Packed-u32 colour adapters](../../../common/color/color_pack_u32_spec.md)
+"""
+
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.dom_color.{
+    parse_color_value, parse_color_value_checked}
+
+describe "dom_color hex parsing via the shared parser":
+
+    context "parity on supported forms":
+        """
+        Each expectation is the `0xRRGGBBAA` value the hand-written local
+        `parse_hex_color` produced before delegation, recomputed from its own
+        arithmetic (`(r << 24) + (g << 16) + (b << 8) + a`, nibbles doubled by
+        17, alpha defaulting to 255). Measured identical for 23 forms.
+        """
+
+        it "parses #RRGGBB with implied opaque alpha":
+            expect(parse_color_value("#1d4ed8")).to_equal(0x1D4ED8FFu32)
+
+        it "parses #RRGGBBAA preserving the explicit alpha byte":
+            expect(parse_color_value("#11223344")).to_equal(0x11223344u32)
+
+        it "parses #RGB by doubling each nibble":
+            expect(parse_color_value("#abc")).to_equal(0xAABBCCFFu32)
+
+        it "parses #RGBA by doubling the alpha nibble too":
+            expect(parse_color_value("#f00f")).to_equal(0xFF0000FFu32)
+
+        it "treats uppercase and lowercase hex identically":
+            expect(parse_color_value("#ABCDEF")).to_equal(
+                parse_color_value("#abcdef"))
+
+        it "parses pure black and pure white at the range ends":
+            expect(parse_color_value("#000000")).to_equal(0x000000FFu32)
+            expect(parse_color_value("#ffffff")).to_equal(0xFFFFFFFFu32)
+
+        it "parses fully transparent #00000000 without collapsing to black":
+            expect(parse_color_value("#00000000")).to_equal(0x00000000u32)
+
+        it "agrees between the checked and unchecked entry points":
+            expect(parse_color_value_checked("#1d4ed8")).to_equal(
+                0x1D4ED8FFu32)
+
+    context "unsupported input fails explicitly":
+        """
+        The reason the delegation is worth making. The local parser answered
+        `0x000000FF` for every one of these — bit-for-bit a real `#000000`.
+        """
+
+        it "returns nil for a non-hex digit":
+            expect(parse_color_value_checked("#gg")).to_be_nil()
+
+        it "returns nil for a six-wide non-hex string":
+            expect(parse_color_value_checked("#gggggg")).to_be_nil()
+
+        it "returns nil for a three-wide non-hex string":
+            expect(parse_color_value_checked("#zzz")).to_be_nil()
+
+        it "returns nil for a length CSS does not define":
+            expect(parse_color_value_checked("#12345")).to_be_nil()
+
+        it "returns nil for a bare hash":
+            expect(parse_color_value_checked("#")).to_be_nil()
+
+    context "the u32 channel cannot carry the failure":
+        """
+        This is the information-loss finding stated as an executable claim: it
+        is why the adapter must not offer a `Color? -> u32` helper that
+        substitutes a colour for nil.
+        """
+
+        it "gives an invalid colour the same u32 as a genuine black":
+            expect(parse_color_value("#gg")).to_equal(
+                parse_color_value("#000000"))
+
+        it "distinguishes them only through the checked entry point":
+            expect(parse_color_value_checked("#gg")).to_be_nil()
+            expect(parse_color_value_checked("#000000")).to_equal(
+                0x000000FFu32)
+
+    context "non-hex branches are untouched by the delegation":
+        """The swap is scoped to the `#` branch; these must not move."""
+
+        it "still resolves a named colour":
+            expect(parse_color_value("red")).to_equal(0xFF0000FFu32)
+
+        it "still resolves an rgb() function":
+            expect(parse_color_value("rgb(29, 78, 216)")).to_equal(
+                0x1D4ED8FFu32)
+
+        it "still returns transparent for var()":
+            expect(parse_color_value("var(--x)")).to_equal(0x00000000u32)
+
+        it "still returns nil for an empty string":
+            expect(parse_color_value_checked("")).to_be_nil()

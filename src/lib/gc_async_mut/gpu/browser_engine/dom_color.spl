@@ -4,6 +4,7 @@
 # No dependencies on BeDomNode or other browser-engine types.
 
 use common.string_builder.{StringBuilder}
+use common.color.css.{parse_hex_color as common_parse_hex_color}
 
 pub fn parse_color_value(s: text) -> u32:
     """Parse a color string to a u32 RGBA value.
@@ -30,7 +31,22 @@ pub fn parse_color_value_checked(s: text) -> u32?:
         return 0x000000FF
 
     if cleaned.starts_with("#"):
-        return parse_hex_color(cleaned)
+        # Delegated to the shared parser in `common/color/css.spl`.
+        #
+        # This is the ONLY hex path here that can report failure, so it is the
+        # one place the delegation buys something. The local `parse_hex_color`
+        # below returns a bare `u32` and answers `0x000000FF` — opaque black —
+        # for `#gg`, `#zzz`, `#12345` and `#` alike, which is bit-for-bit the
+        # same u32 as a genuine `#000000`. A caller cannot tell "black" from
+        # "I did not understand that". The shared parser returns `Color?`, so
+        # nil propagates out of here as a real failure signal.
+        #
+        # Measured parity over 23 valid forms (#RGB/#RGBA/#RRGGBB/#RRGGBBAA,
+        # both letter cases): identical u32 for every one. See
+        # test/01_unit/lib/common/color/dom_color_shared_hex_parity_spec.spl.
+        if val shared = common_parse_hex_color(cleaned):
+            return shared.to_rgba_u32()
+        return nil
 
     # hsl/hsla before rgb so they're matched first
     if lower.starts_with("hsla(") and cleaned.ends_with(")"):

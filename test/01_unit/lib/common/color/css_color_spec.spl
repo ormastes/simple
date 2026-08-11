@@ -1,0 +1,193 @@
+# @cover src/lib/common/color/css.spl 85%
+# @req REQ-CSSCOLOR-001
+"""
+# Shared CSS Colour Parsing
+
+**Category:** Stdlib
+**Status:** Implemented
+
+## Purpose and Audience
+
+A CSS author writes a colour in whatever notation the property allows —
+`rebeccapurple`, `#1a2b3c`, `rgba(255, 128, 0, 0.5)`, `hsl(240deg 100% 50% /
+25%)` — and expects every renderer in this repo to read it the same way. This
+module is the single place that reading happens, so a lane that renders CSS
+imports it instead of growing its own table.
+
+## Scope and Preconditions
+
+`parse_css_color` accepts one CSS colour token. The CSS Level 4 named table
+(148 names, including the `grey`, `aqua` and `fuchsia` aliases and
+`transparent`), `#RGB`/`#RGBA`/`#RRGGBB`/`#RRGGBBAA`, and `rgb()`/`rgba()`/
+`hsl()`/`hsla()` in both the legacy comma form and the modern space-plus-slash
+form, with percentage channels.
+
+## Primary Workflow
+
+A supported colour comes back as a `Color` with 0..255 channels. **An
+unsupported colour comes back as `nil`** — the reason this spec exists. Before
+this module the callers answered opaque black for anything they did not
+recognise, which paints a wrong pixel that no smoke test can see, and is
+exactly why the gap between a nine-colour table and real CSS went unnoticed.
+Every unsupported form below is covered on purpose.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| `nil` result | The colour is unsupported. Never a substituted colour. |
+| Legacy form | `rgb(a, b, c)` — comma separated, optional fourth alpha. |
+| Modern form | `rgb(a b c / alpha)` — space separated, slash before alpha. |
+
+## Related Specifications
+
+- [Style Cascade](../../blink/style_cascade_spec.md) — blink's consumer.
+"""
+
+use std.spipe.*
+use std.common.color.css.{parse_css_color, named_color, parse_hex_color}
+
+# Render a parse result as text so a nil and a colour are both directly
+# comparable: `expect(...).to_equal("nil")` states the failure path as an
+# outcome rather than probing a field on something that may not be there.
+fn _read(raw: text) -> text:
+    if val c = parse_css_color(raw):
+        return "{c.r},{c.g},{c.b},{c.a}"
+    "nil"
+
+describe "reading a CSS colour by name":
+    it "reads a name from the full CSS Level 4 table, not a nine-colour subset":
+        step("read `rebeccapurple`, a name outside any short built-in list")
+        expect(_read("rebeccapurple")).to_equal("102,51,153,255")
+        step("read `cornflowerblue` and `mediumspringgreen` from the same table")
+        expect(_read("cornflowerblue")).to_equal("100,149,237,255")
+        expect(_read("mediumspringgreen")).to_equal("0,250,154,255")
+
+    it "reads a name case-insensitively":
+        step("read `Grey` with a capital, as an author may have typed it")
+        expect(_read("Grey")).to_equal("128,128,128,255")
+
+    it "reads the spelling aliases as the same colour":
+        step("read the `gray`/`grey` and `cyan`/`aqua` alias pairs")
+        expect(_read("gray")).to_equal(_read("grey"))
+        expect(_read("cyan")).to_equal(_read("aqua"))
+        expect(_read("magenta")).to_equal(_read("fuchsia"))
+
+    it "reads `transparent` as fully transparent, not as black":
+        step("read `transparent`")
+        expect(_read("transparent")).to_equal("0,0,0,0")
+
+    it "reports an unknown name as unsupported instead of guessing a colour":
+        step("read `notacolour`, which is not in the CSS table")
+        expect(_read("notacolour")).to_equal("nil")
+        step("read `burntsienna`, a plausible but non-CSS name")
+        expect(_read("burntsienna")).to_equal("nil")
+
+describe "reading a CSS colour in hex notation":
+    it "reads all four hex lengths":
+        step("read #RGB, #RGBA, #RRGGBB and #RRGGBBAA")
+        expect(_read("#f00")).to_equal("255,0,0,255")
+        expect(_read("#f008")).to_equal("255,0,0,136")
+        expect(_read("#FF8000")).to_equal("255,128,0,255")
+        expect(_read("#11223344")).to_equal("17,34,51,68")
+
+    it "reports a non-hex digit as unsupported instead of reading it as zero":
+        step("read `#gg0000`, where the red channel is not hex at all")
+        expect(_read("#gg0000")).to_equal("nil")
+
+    it "reports a hex string of the wrong length as unsupported":
+        step("read `#ff00`-style lengths CSS does not define")
+        expect(_read("#ff")).to_equal("nil")
+        expect(_read("#fffff")).to_equal("nil")
+        expect(_read("#1234567")).to_equal("nil")
+
+describe "reading a CSS colour in rgb() notation":
+    it "reads the legacy comma form with and without alpha":
+        step("read `rgb(255, 128, 0)` and `rgba(255, 128, 0, 0.5)`")
+        expect(_read("rgb(255, 128, 0)")).to_equal("255,128,0,255")
+        expect(_read("rgba(255, 128, 0, 0.5)")).to_equal("255,128,0,128")
+
+    it "reads the modern space form with a slash alpha":
+        step("read `rgb(255 128 0 / 50%)`")
+        expect(_read("rgb(255 128 0 / 50%)")).to_equal("255,128,0,128")
+
+    it "reads percentage channels":
+        step("read `rgb(100%, 50%, 0%)`")
+        expect(_read("rgb(100%, 50%, 0%)")).to_equal("255,128,0,255")
+
+    it "clamps a channel outside 0..255 rather than wrapping it":
+        step("read `rgb(300, -20, 0)`")
+        expect(_read("rgb(300, -20, 0)")).to_equal("255,0,0,255")
+
+    it "reports a non-numeric channel as unsupported instead of reading it as zero":
+        step("read `rgb(red, 0, 0)`, whose first channel is a name")
+        expect(_read("rgb(red, 0, 0)")).to_equal("nil")
+
+    it "reports a wrong argument count as unsupported":
+        step("read `rgb(1, 2)` and `rgb(1, 2, 3, 4, 5)`")
+        expect(_read("rgb(1, 2)")).to_equal("nil")
+        expect(_read("rgb(1, 2, 3, 4, 5)")).to_equal("nil")
+
+    it "reports a mixed comma-and-slash argument list as unsupported":
+        step("read `rgb(1, 2, 3 / 0.5)`, which is neither CSS form")
+        expect(_read("rgb(1, 2, 3 / 0.5)")).to_equal("nil")
+
+    it "reports an unclosed function as unsupported":
+        step("read `rgb(255, 0, 0` with no closing parenthesis")
+        expect(_read("rgb(255, 0, 0")).to_equal("nil")
+
+describe "reading a CSS colour in hsl() notation":
+    it "reads the legacy comma form with and without alpha":
+        step("read `hsl(120, 100%, 50%)` and `hsla(0, 100%, 50%, 0.5)`")
+        expect(_read("hsl(120, 100%, 50%)")).to_equal("0,255,0,255")
+        expect(_read("hsla(0, 100%, 50%, 0.5)")).to_equal("255,0,0,128")
+
+    it "reads the modern space form with a deg hue and a slash alpha":
+        step("read `hsl(240deg 100% 50% / 25%)`")
+        expect(_read("hsl(240deg 100% 50% / 25%)")).to_equal("0,0,255,64")
+
+    it "normalises a hue outside 0..360 rather than rejecting it":
+        step("read `hsl(480, 100%, 50%)`, which is 120 degrees round the wheel")
+        expect(_read("hsl(480, 100%, 50%)")).to_equal(_read("hsl(120, 100%, 50%)"))
+
+    it "reports a saturation or lightness without a percent sign as unsupported":
+        step("read `hsl(120, 100, 50)`, which CSS does not allow unitless")
+        expect(_read("hsl(120, 100, 50)")).to_equal("nil")
+
+describe "reading a colour syntax this module does not support":
+    it "reports every unsupported colour function as unsupported, never as black":
+        step("read the colour functions outside this module's scope")
+        expect(_read("color-mix(in srgb, red, blue)")).to_equal("nil")
+        expect(_read("lab(50% 40 59.5)")).to_equal("nil")
+        expect(_read("oklch(0.7 0.1 200)")).to_equal("nil")
+        expect(_read("hwb(120 30% 20%)")).to_equal("nil")
+        expect(_read("color(display-p3 1 0 0)")).to_equal("nil")
+
+    it "reports the context-dependent keywords as unsupported":
+        step("read `currentColor` and `var(--brand)`, which need context this module has none of")
+        expect(_read("currentColor")).to_equal("nil")
+        expect(_read("var(--brand)")).to_equal("nil")
+
+    it "reports an empty value as unsupported":
+        step("read an empty and a whitespace-only value")
+        expect(_read("")).to_equal("nil")
+        expect(_read("   ")).to_equal("nil")
+
+describe "the narrower entry points":
+    it "named_color answers only names":
+        step("ask named_color for a name and then for a hex string")
+        if val c = named_color("tomato"):
+            expect(c.r).to_equal(255)
+            expect(c.g).to_equal(99)
+            expect(c.b).to_equal(71)
+        else:
+            expect("tomato resolved").to_equal("tomato did not resolve")
+        expect(named_color("#ff0000") == nil).to_equal(true)
+
+    it "parse_hex_color answers only hex strings":
+        step("ask parse_hex_color for a hex string and then for a name")
+        if val c = parse_hex_color("#00ff00"):
+            expect(c.g).to_equal(255)
+        else:
+            expect("#00ff00 resolved").to_equal("#00ff00 did not resolve")
+        expect(parse_hex_color("red") == nil).to_equal(true)

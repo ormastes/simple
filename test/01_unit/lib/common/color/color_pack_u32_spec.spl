@@ -1,0 +1,183 @@
+# @covers src/lib/common/color/types.spl 90%
+# @req REQ-CSSCOLOR-002
+"""
+# Packed-u32 Colour Adapters
+
+**Feature IDs:** #COLOR-CVG
+**Category:** Stdlib
+**Status:** Implemented
+
+## Purpose and Audience
+
+`std.common.color.css` is the one shared CSS colour parser, and it answers a
+`Color` struct. The browser renderer lanes carry colour as a packed `u32`.
+That difference — not any missing feature — is why the 2026-05-19
+"commonization" could never be adopted: the extraction was authored against a
+type no call site used. These adapters are the missing piece.
+
+## Scope and Preconditions
+
+The two adapters are `Color.to_argb_u32()` and `Color.to_rgba_u32()`.
+
+**The two names are the point.** The lanes do not agree on byte order:
+`gpu/browser_engine/dom_color.spl` packs `0xRRGGBBAA`, while
+`simple_web_css_box_effects.spl`, `simple_web_engine2d_renderer.spl` and
+`simple_web_html_layout_renderer_foundation.spl` (`argb()`) pack `0xAARRGGBB`.
+A single unnamed `to_u32()` would silently channel-swap half of them, which is
+a wrong pixel rather than a crash. So the layout is named and the caller picks.
+
+## Primary Workflow
+
+A supported colour packs losslessly: `u32` carries all four 0..255 channels,
+so alpha survives the adaptation in both orders.
+
+What `u32` cannot carry is **failure**. `parse_hex_color` answers `nil` for
+input it does not understand; there is deliberately no adapter that turns
+`nil` into a colour. A helper that substituted opaque black would paint a
+wrong pixel invisible to any smoke test — the exact defect blink's colour path
+has today. Callers unwrap explicitly, and the wired call site below is wired
+precisely because its contract already had somewhere to put a failure.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| `to_argb_u32` | `0xAARRGGBB` — `argb()`/box-effects/engine2d convention. |
+| `to_rgba_u32` | `0xRRGGBBAA` — `dom_color.spl` convention. |
+| No `nil` adapter | Failure is never turned into a substituted colour. |
+
+## Related Specifications
+
+- [Shared CSS Colour Parsing](css_color_spec.md) — the parser being adapted.
+"""
+
+use std.spec.*
+use std.common.color.types.{Color, from_rgb, from_rgba}
+use std.common.color.css.{parse_hex_color, parse_css_color}
+
+describe "Packed-u32 colour adapters":
+
+    context "byte order":
+        """The two layouts are distinct and both are exercised."""
+
+        it "packs ARGB with alpha in the high byte":
+            expect(from_rgba(0x11, 0x22, 0x33, 0x44).to_argb_u32()).to_equal(
+                0x44112233u32)
+
+        it "packs RGBA with alpha in the low byte":
+            expect(from_rgba(0x11, 0x22, 0x33, 0x44).to_rgba_u32()).to_equal(
+                0x11223344u32)
+
+        it "keeps the two orders distinct for an asymmetric colour":
+            val c = from_rgba(1, 2, 3, 4)
+            expect(c.to_argb_u32() == c.to_rgba_u32()).to_be(false)
+
+        it "defaults an opaque colour to full alpha in both orders":
+            expect(from_rgb(0, 0, 0).to_argb_u32()).to_equal(0xFF000000u32)
+            expect(from_rgb(0, 0, 0).to_rgba_u32()).to_equal(0x000000FFu32)
+
+        it "packs full white without overflowing into a signed value":
+            expect(from_rgba(255, 255, 255, 255).to_argb_u32()).to_equal(
+                0xFFFFFFFFu32)
+
+    context "parity with the hand-written parser it replaces":
+        """
+        Every expectation here is the value the hand-written
+        `_box_shadow_hex_color` in `simple_web_css_box_effects.spl` computed
+        before it was replaced by a delegation, recomputed from its own
+        arithmetic (`nibble * 17`, `hi * 16 + lo`, alpha defaulting to 255,
+        packed `(a << 24) | (r << 16) | (g << 8) | b`). This is the
+        before/after proof, not a restatement of the new code.
+        """
+
+        it "matches on #RRGGBBAA":
+            if val c = parse_hex_color("#11223344"):
+                expect(c.to_argb_u32()).to_equal(0x44112233u32)
+            else:
+                fail("#11223344 must parse")
+
+        it "matches on #RRGGBB with implied opaque alpha":
+            if val c = parse_hex_color("#1d4ed8"):
+                expect(c.to_argb_u32()).to_equal(0xFF1D4ED8u32)
+            else:
+                fail("#1d4ed8 must parse")
+
+        it "matches on #RGB nibble doubling":
+            if val c = parse_hex_color("#abc"):
+                expect(c.to_argb_u32()).to_equal(0xFFAABBCCu32)
+            else:
+                fail("#abc must parse")
+
+        it "matches on #RGBA nibble doubling including alpha":
+            if val c = parse_hex_color("#0000"):
+                expect(c.to_argb_u32()).to_equal(0x00000000u32)
+            else:
+                fail("#0000 must parse")
+
+        it "accepts uppercase hex identically to lowercase":
+            val upper = parse_hex_color("#1D4ED8")
+            val lower = parse_hex_color("#1d4ed8")
+            if val u = upper:
+                if val l = lower:
+                    expect(u.to_argb_u32()).to_equal(l.to_argb_u32())
+                else:
+                    fail("lowercase must parse")
+            else:
+                fail("uppercase must parse")
+
+    context "unsupported input is a failure, never a colour":
+        """
+        The load-bearing case. Each of these returned `(false, 0)` from the
+        hand-written parser and must return `nil` here — NOT opaque black,
+        and not transparent-black masquerading as a parsed colour.
+        """
+
+        it "rejects a non-hex digit":
+            expect(parse_hex_color("#12gg00") == nil).to_be(true)
+
+        it "rejects an over-long hex run":
+            expect(parse_hex_color("#000000000") == nil).to_be(true)
+
+        it "rejects a hex run of an unsupported length":
+            expect(parse_hex_color("#12345") == nil).to_be(true)
+
+        it "rejects a token with no leading hash":
+            expect(parse_hex_color("112233") == nil).to_be(true)
+
+        it "rejects the empty token":
+            expect(parse_hex_color("") == nil).to_be(true)
+
+        it "does not answer black for an unsupported colour function":
+            """
+            `color-mix()` is real CSS this module does not implement. The
+            wrong behaviour to guard against is answering `0xFF000000`.
+            """
+            expect(parse_css_color("color-mix(in srgb, red, blue)") == nil
+                ).to_be(true)
+
+        it "does not answer black for currentColor":
+            """
+            `currentColor` is resolvable only against the cascade, so the
+            shared parser must decline it rather than guess black.
+            """
+            expect(parse_css_color("currentcolor") == nil).to_be(true)
+
+    context "transparent is a colour, not a failure":
+        """
+        The distinction `u32` alone cannot express: a fully transparent
+        colour and an unparsable token both look like `0` once packed ARGB,
+        which is why the optional must survive up to the call site.
+        """
+
+        it "parses transparent to a real zero-alpha colour":
+            if val c = parse_css_color("transparent"):
+                expect(c.a).to_equal(0)
+                expect(c.to_argb_u32()).to_equal(0x00000000u32)
+            else:
+                fail("transparent must parse")
+
+        it "distinguishes transparent from an unparsable token":
+            val ok = parse_css_color("transparent")
+            val bad = parse_css_color("not-a-colour")
+            expect(ok == nil).to_be(false)
+            expect(bad == nil).to_be(true)
