@@ -8,6 +8,21 @@ use inkwell::module::Module;
 #[cfg(feature = "llvm")]
 use inkwell::types::BasicTypeEnum;
 
+fn runtime_integer_cast_requires_decode(from_type: crate::hir::TypeId, to_type: crate::hir::TypeId) -> bool {
+    matches!(from_type, crate::hir::TypeId::ANY | crate::hir::TypeId::STRING)
+        && matches!(
+            to_type,
+            crate::hir::TypeId::I8
+                | crate::hir::TypeId::I16
+                | crate::hir::TypeId::I32
+                | crate::hir::TypeId::I64
+                | crate::hir::TypeId::U8
+                | crate::hir::TypeId::U16
+                | crate::hir::TypeId::U32
+                | crate::hir::TypeId::U64
+        )
+}
+
 impl LlvmBackend {
     // ============================================================================
     // Cast Instructions
@@ -22,7 +37,7 @@ impl LlvmBackend {
         builder: &Builder<'static>,
         module: &Module<'static>,
     ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
-        if *from_type == crate::hir::TypeId::ANY {
+        if runtime_integer_cast_requires_decode(*from_type, *to_type) {
             match *to_type {
                 crate::hir::TypeId::I8
                 | crate::hir::TypeId::I16
@@ -37,7 +52,9 @@ impl LlvmBackend {
                         .coerce_value_to_type(source_val, Some(rv_type.into()), builder)?
                         .into_int_value();
                     let fn_type = rv_type.fn_type(&[rv_type.into()], false);
-                    let unwrap_name = if *to_type == crate::hir::TypeId::U64 {
+                    let unwrap_name = if *to_type == crate::hir::TypeId::U64
+                        && *from_type == crate::hir::TypeId::ANY
+                    {
                         "rt_value_as_u64"
                     } else {
                         "rt_value_as_int"
@@ -80,5 +97,20 @@ impl LlvmBackend {
         // would need bitcast, but at the MIR level the runtime handles this.
         // Simply pass through the value unchanged.
         Ok(source_val)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::runtime_integer_cast_requires_decode;
+    use crate::hir::TypeId;
+
+    #[test]
+    fn tagged_any_and_text_integer_casts_require_runtime_decode() {
+        assert!(runtime_integer_cast_requires_decode(TypeId::ANY, TypeId::I64));
+        assert!(runtime_integer_cast_requires_decode(TypeId::STRING, TypeId::I64));
+        assert!(runtime_integer_cast_requires_decode(TypeId::STRING, TypeId::U8));
+        assert!(!runtime_integer_cast_requires_decode(TypeId::I64, TypeId::I64));
+        assert!(!runtime_integer_cast_requires_decode(TypeId::STRING, TypeId::F64));
     }
 }

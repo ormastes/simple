@@ -166,6 +166,23 @@ pub fn runtime_funcs_for_target(_target: &simple_common::target::Target) -> Vec<
     RUNTIME_FUNCS.iter().collect()
 }
 
+
+/// Look up the declared spec for a runtime symbol by exact name.
+///
+/// This exists so a backend can declare a runtime import with the signature the
+/// runtime actually has instead of assuming every slot is a `RuntimeValue`-wide
+/// integer. `codegen/llvm/emitter.rs::call_runtime_void` assumed exactly that
+/// and declared `void(i64, ...)` for symbols such as
+/// `rt_decision_probe(u64, bool)` and `rt_condition_probe(u64, u32, bool)`.
+///
+/// Returns `None` for symbols with no spec, which is a real answer and not an
+/// error: several emitted names (`rt_contract_check`, `rt_unit_bound_check`,
+/// `rt_generator_yield`) have no entry here and no definition in either
+/// runtime, and must keep failing loudly rather than acquire a fabricated one.
+pub fn spec_for(name: &str) -> Option<&'static RuntimeFuncSpec> {
+    RUNTIME_FUNCS.iter().find(|spec| spec.name == name)
+}
+
 /// Specification for a runtime SFFI function signature.
 #[derive(Debug, Clone)]
 pub struct RuntimeFuncSpec {
@@ -1834,6 +1851,68 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("spl_dlclose", &[I64], &[I64]),
     RuntimeFuncSpec::new("spl_wffi_call_i64", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("spl_wffi_call_f64", &[I64, I64, I64], &[F64]),
+    // Restored 2026-08-11: entries dropped by the stale-snapshot half of 6e2f613d302.
+    RuntimeFuncSpec::new("rt_array_each", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_array_free_deep", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_array_map", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_array_reduce", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_array_remove", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_array_reversed", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_clear", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_collection_remove", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cuda_memset_d32", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_drop", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_file_is_char_device", &[I64, I64], &[I8]), // path_ptr, path_len -> bool
+    RuntimeFuncSpec::new("rt_find", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_map", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_native_cmp", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_package_chmod", &[I64, I64, I32], &[I32]), // path_ptr, path_len, mode -> i32
+    RuntimeFuncSpec::new("rt_package_copy_file", &[I64, I64, I64, I64], &[I32]), // src(ptr,len), dst(ptr,len) -> i32
+    RuntimeFuncSpec::new("rt_package_create_symlink", &[I64, I64, I64, I64], &[I32]), // target(ptr,len), link(ptr,len) -> i32
+    RuntimeFuncSpec::new("rt_package_create_tarball", &[I64, I64, I64, I64], &[I32]), // src(ptr,len), out(ptr,len) -> i32
+    RuntimeFuncSpec::new("rt_package_exists", &[I64, I64], &[I32]), // path_ptr, path_len -> i32
+    RuntimeFuncSpec::new("rt_package_extract_tarball", &[I64, I64, I64, I64], &[I32]), // tar(ptr,len), dest(ptr,len) -> i32
+    RuntimeFuncSpec::new("rt_package_file_size", &[I64, I64], &[I64]), // path_ptr, path_len -> i64
+    RuntimeFuncSpec::new("rt_package_is_dir", &[I64, I64], &[I32]), // path_ptr, path_len -> i32
+    RuntimeFuncSpec::new("rt_package_mkdir_all", &[I64, I64], &[I32]), // path_ptr, path_len -> i32
+    RuntimeFuncSpec::new("rt_package_remove_dir_all", &[I64, I64], &[I32]), // path_ptr, path_len -> i32
+    RuntimeFuncSpec::new("rt_package_sha256", &[I64, I64], &[I64]), // path_ptr, path_len -> RuntimeValue(text)
+    RuntimeFuncSpec::new("rt_pop", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_push", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_reverse", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_reverse_mut", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_sort", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_capitalize", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_center", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_char_count", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_chomp", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_find_all", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_is_alnum", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_is_alpha", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_is_digit", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_is_whitespace", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_pad_left", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_pad_right", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_partition", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_remove_prefix", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_remove_suffix", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_repeat", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_replace_first", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_rpartition", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_sorted", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_split_limit", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_squeeze", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_substr", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_substr_from", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_swapcase", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_title", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_trim_end_matches", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_trim_start_matches", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_zfill", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_take", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_terminal_stdout_is_tty", &[], &[I64]), // () -> RuntimeValue (bool)
+    RuntimeFuncSpec::new("rt_tls13_sha256", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_value_unbox_int", &[I64], &[I64]),
 ];
 
 #[cfg(test)]
