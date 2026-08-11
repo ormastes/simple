@@ -1,7 +1,7 @@
 # Stage-3/stage2 self-hosted `native-build` SIGSEGV root cause: `call 0x0` baked into the binary (unpatched relocation)
 
-- **Date:** 2026-08-11
-- **Status:** OPEN — root cause diagnosed, no fix landed
+- **Date:** 2026-08-11 (updated 2026-08-11: candidate emitting defect identified in `src/compiler/70.backend/backend/native/native_elf.spl`)
+- **Status:** OPEN — emitting defect pattern identified at the source level; exact call-site symbol name (which .spl routine's *call* triggered it) still not proven, and no fix landed
 - **Scope:** `bootstrap/stage3/x86_64-unknown-linux-gnu/simple`,
   `bootstrap/stage2/simple` (and by the same mechanism, every self-hosted
   candidate `simple_compiler_select` currently rejects on the second probe
@@ -120,3 +120,85 @@ Rebuild stage2/stage3 with debug symbols retained (or add
 re-run this exact repro under gdb with symbols, to identify which relocation
 record was never patched. Prime suspects: the self-hosted backend's own
 symbol-resolution/link-fixup pass under `src/compiler/70.backend/`.
+
+## Update 2026-08-11: candidate emitting-defect pattern found (source-level)
+
+`bootstrap/stage3/x86_64-unknown-linux-gnu/simple` and `bootstrap/stage2/simple`
+are both stripped (`nm` reports 1 symbol; `.symtab` absent), so the crash
+address `0x404659` could not be matched back to a `.spl` source function by
+symbol lookup — no debug/symbol-preserving build of the same commit was
+available in this tree, so that specific correlation step (which exact
+routine's `call` this is) is still **not** established. Static disassembly
+context around the crash site (`objdump -d --start-address=0x4045c0
+--stop-address=0x404700`, three sibling calls at `0x69cea0`, `0x69a380`,
+`0x69e94c`, all taking `(rdi, rsi)`-shaped stack-loaded arguments, guarded by
+an `rax == 0x13` (19) comparison) is consistent with inlined error/Result
+formatting glue, but this is circumstantial, not proof.
+
+Instead, the source-level *mechanism* by which a `call` can end up encoding a
+literal `0x0` target was found directly in
+`src/compiler/70.backend/backend/native/native_elf.spl`, and it matches the
+observed byte pattern exactly:
+
+- `src/compiler/70.backend/backend/native/encode_x86_64.spl:493-504`
+  (`X86_OP_CALL` / `case Sym(name)`) emits `0xe8` (`CALL rel32`) followed by a
+  **zero placeholder** (`emit_i32(code, 0)` at line 504) plus an `EncodedReloc`
+  record carrying `symbol_name: name`. This placeholder-then-patch design is
+  correct in principle — the 0 is meant to be overwritten once the target
+  address is known.
+- The patch step lives in `native_elf.spl`, duplicated once per target arch
+  (x86_64 at lines 118-128, AArch64 at lines 268-283, and a third RISC-V copy
+  around lines 420-430 — same shape all three times):
+
+  ```
+  var sym_idx = 0
+  if sym_name_to_idx.contains(reloc.symbol_name):
+      sym_idx = sym_name_to_idx[reloc.symbol_name]
+  val elf_reloc = ElfReloc(
+      offset: code_start + reloc.offset,
+      reloc_type: reloc_type,
+      symbol_index: sym_base + sym_idx,
+      addend: reloc.addend
+  )
+  ```
+
+  When `reloc.symbol_name` is **not** found in `sym_name_to_idx`, `sym_idx`
+  silently defaults to `0` instead of raising an error or panicking the
+  build. The `ElfReloc` is still emitted and still pushed into `all_relocs` —
+  it just now points at symbol-table index `sym_base + 0`, i.e. effectively
+  the null/first symbol, rather than failing loudly. This is exactly the
+  "unresolved symbol falls back to 0 instead of erroring" pattern already
+  seen elsewhere in this codebase (missing-registration class of bug), and it
+  is structurally sufficient to explain a `call rel32` whose relocation never
+  gets a real target and ends up encoding `0x0` in the final linked `.text`.
+
+**Still open / not proven:**
+1. Which specific `.spl` function name failed the `sym_name_to_idx.contains`
+   check for this particular crash (i.e., what got compiled that produced a
+   `Sym(name)` call operand whose `name` was never registered into
+   `sym_names`/`sym_name_to_idx` — a missing function, a renamed/mangled
+   symbol mismatch, or a lowering bug that emits a call to a name that was
+   never added as a function/extern symbol in the first place).
+2. Whether `write_elf64`/the final native-build link path treats
+   `symbol_index: sym_base + 0` as "leave the placeholder untouched" (which
+   would explain the literal `0x0` bytes surviving straight through to the
+   final executable) or performs some other silent no-op — this requires
+   tracing `elf_writer.spl`'s relocation-application code, which was not done
+   in this pass due to time budget.
+3. No fix was landed: the silent-fallback-to-0 pattern is a strong, precise
+   root-cause **candidate** appearing identically in all three
+   (x86_64/AArch64/RISC-V) emitters in `native_elf.spl`, but turning the
+   fallback into a hard error (so a missing symbol registration fails the
+   build immediately instead of producing a `call 0x0` time bomb) is a
+   backend/codegen-correctness change and was intentionally not attempted
+   without first identifying which upstream pass fails to register the
+   symbol — fixing only the symptom (erroring instead of defaulting to 0)
+   would turn today's SIGSEGV into a clean compile-time error, which is
+   itself a reasonable minimal fix, but doesn't address why the symbol
+   registration was missing in the first place.
+
+**Suggested follow-up:** add a hard error/panic at the `sym_idx = 0` fallback
+in all three `native_elf.spl` sites (fail the build with the missing symbol
+name) so this defect class becomes a loud compile-time diagnostic instead of
+a silent `call 0x0` SIGSEGV, then use that diagnostic's error message on the
+real `native-build --entry p.spl` repro to name the exact missing symbol.
