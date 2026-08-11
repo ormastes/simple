@@ -147,7 +147,13 @@ fn md_render_inline(line: text) -> text:
     result
 
 
-fn md_render_blocks_for_tui(model: BlockModel, viewport_start: i64, viewport_height: i64) -> [text]:
+# Shared viewport-slicing walk used by both the plain and wiki-aware TUI
+# renderers below. `render_block` is the only behavior that differs between
+# the two callers (plain md_render_block vs the wiki-transclusion-aware
+# variant); everything else — the empty-viewport guards, the active-block
+# raw-line fast path, and the cursor/window slicing arithmetic — was
+# byte-for-byte identical in both functions and is now written once.
+fn _mdr_render_for_tui(model: BlockModel, viewport_start: i64, viewport_height: i64, render_block: fn(RenderBlock) -> [text]) -> [text]:
     if viewport_height <= 0:
         return []
     if viewport_start < 0:
@@ -169,7 +175,7 @@ fn md_render_blocks_for_tui(model: BlockModel, viewport_start: i64, viewport_hei
             continue
         if cursor >= end:
             break
-        val rendered = if model.is_active(i) then _mdr_split_lines(block.content) else md_render_block(block)
+        val rendered = if model.is_active(i) then _mdr_split_lines(block.content) else render_block(block)
         val rendered_len = rendered.len()
         val start = if viewport_start > cursor then viewport_start - cursor else 0
         val finish = if end - cursor < rendered_len then end - cursor else rendered_len
@@ -180,40 +186,12 @@ fn md_render_blocks_for_tui(model: BlockModel, viewport_start: i64, viewport_hei
         cursor = cursor + rendered_len
         i = i + 1
     result
+
+fn md_render_blocks_for_tui(model: BlockModel, viewport_start: i64, viewport_height: i64) -> [text]:
+    _mdr_render_for_tui(model, viewport_start, viewport_height, md_render_block)
 
 fn md_render_blocks_for_tui_with_wiki(model: BlockModel, index: MdWikiIndex, viewport_start: i64, viewport_height: i64) -> [text]:
-    if viewport_height <= 0:
-        return []
-    if viewport_start < 0:
-        return []
-    val end = viewport_start + viewport_height
-    if end <= viewport_start:
-        return []
-
-    var result: [text] = []
-    val block_count = model.block_count()
-    var cursor = 0
-    var i = 0
-    while i < block_count:
-        val block = model.block_at(i)
-        val estimated = if model.is_active(i) then _mdr_split_lines(block.content).len() else block.rendered_lines.len()
-        if cursor + estimated <= viewport_start:
-            cursor = cursor + estimated
-            i = i + 1
-            continue
-        if cursor >= end:
-            break
-        val rendered = if model.is_active(i) then _mdr_split_lines(block.content) else _mdr_render_block_with_wiki_depth_visited(block, index, 0, [])
-        val rendered_len = rendered.len()
-        val start = if viewport_start > cursor then viewport_start - cursor else 0
-        val finish = if end - cursor < rendered_len then end - cursor else rendered_len
-        var j = start
-        while j < finish:
-            result.push(rendered[j])
-            j = j + 1
-        cursor = cursor + rendered_len
-        i = i + 1
-    result
+    _mdr_render_for_tui(model, viewport_start, viewport_height, fn(block: RenderBlock) -> [text]: _mdr_render_block_with_wiki_depth_visited(block, index, 0, []))
 
 
 fn _mdr_render_heading(block: RenderBlock) -> [text]:
