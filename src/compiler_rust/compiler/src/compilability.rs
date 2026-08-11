@@ -235,12 +235,18 @@ pub fn analyze_function(f: &FunctionDef, mode: CompilabilityMode) -> Compilabili
     }
 }
 
-/// Stage 1 of native `match` support: is every arm a payload-free enum variant
-/// test (or a wildcard), with no guard?
+/// Stage 1 of native `match` support: is every arm a payload-free-or-simply-
+/// bound enum variant test (or a wildcard)?
 ///
 /// Such a match is lowered by HIR into a `rt_enum_discriminant` call plus an
 /// `Eq` / `Terminator::If` chain — every one of which native isel already
 /// emits — so flagging it as interpreter-only is a stale over-approximation.
+/// A `case ... if cond:` guard adds nothing but a plain boolean `And` onto
+/// that same condition (`lower_match_guard` in
+/// `hir/lower/stmt_lowering.rs`), so it does not change this analysis; the
+/// guard expression itself is still walked by `analyze_expr` at both match
+/// call sites so a guard containing an unsupported construct (a closure, GC
+/// allocation, etc.) is still caught on its own merits.
 ///
 /// Deliberately NOT accepted here (see
 /// `doc/03_plan/compiler/native_pattern_match_staging.md`):
@@ -248,34 +254,35 @@ pub fn analyze_function(f: &FunctionDef, mode: CompilabilityMode) -> Compilabili
 /// * `Pattern::Identifier` / `MutIdentifier` / `MoveIdentifier` — a bare
 ///   identifier in `case` position is an **irrefutable binding**, not a variant
 ///   test. Accepting it would make the native lane inherit that defect.
-/// * Any payload at all (`Some(x)`, `Const(Str(x), _)`) — nested payload
-///   sub-patterns currently always-match and never-bind on the compiled lanes.
-/// * `Struct` / `Tuple` / `Array` / `Or` / `Range` / `Typed` / `Rest` /
-///   `Literal` — no verified native lowering yet.
+/// * `Or` / `Range` / `Typed` / `Rest` / `Literal` sub-patterns anywhere in a
+///   payload, and `Struct`/`Tuple`/`Array` at the top level (not inside an
+///   enum payload) — no verified native lowering yet.
 fn is_native_payload_free_enum_match(arms: &[MatchArm]) -> bool {
     let mut saw_variant = false;
     for arm in arms {
-        if arm.guard.is_some() {
-            return false;
-        }
         match &arm.pattern {
             Pattern::Enum { payload, .. } => {
                 // `Color.Red` (None) and `Color.Red()` (empty) are payload-free.
                 // A payload of plain `Identifier`/`MutIdentifier`/`Wildcard`
-                // sub-patterns (the common `Ok(v)` / `Err(msg)` shape) is also
-                // native-compilable: HIR lowering already emits `EnumPayload`
-                // extraction for these (`build_pattern_binding_stmts` in
-                // `hir/lower/stmt_lowering.rs`), and native codegen already
-                // implements `MirInst::EnumPayload` (`codegen/instr/mod.rs`,
-                // `codegen/instr/enum_union.rs`). Anything nested (tuple/array/
-                // struct sub-patterns, literal payload tests) stays out of
+                // sub-patterns (the common `Ok(v)` / `Err(msg)` shape), or of
+                // `Tuple`/`Array`/`Struct` sub-patterns that themselves bottom
+                // out in only those same leaves (`Circle((r, g))`,
+                // `Dot(Point { x: a, y: b })`), is also native-compilable: HIR
+                // lowering already emits `EnumPayload` extraction plus nested
+                // `bind_sequence`/`bind_struct_fields` binder emission for
+                // these (`hir/lower/stmt_lowering.rs`), and native codegen
+                // already implements the underlying MIR ops end-to-end
+                // (`MirInst::EnumPayload` in `codegen/instr/enum_union.rs`,
+                // tuple/array element loads and struct field loads in
+                // `codegen/instr/closures_structs.rs`). Anything that bottoms
+                // out in something other than a plain binding (a literal
+                // payload test, an `Or`/`Range` sub-pattern, ...) stays out of
                 // scope for this pass — see
                 // doc/08_tracking/bug/native_match_enum_payload_binding_2026-08-11.md.
                 if let Some(payload_patterns) = payload {
                     for p in payload_patterns {
-                        match p {
-                            Pattern::Identifier(_) | Pattern::MutIdentifier(_) | Pattern::Wildcard => {}
-                            _ => return false,
+                        if !is_native_safe_binding_pattern(p) {
+                            return false;
                         }
                     }
                 }
@@ -286,6 +293,23 @@ fn is_native_payload_free_enum_match(arms: &[MatchArm]) -> bool {
         }
     }
     saw_variant
+}
+
+/// Is `pattern` a pure-binding pattern (never a refutable test) whose native
+/// lowering is verified end-to-end? Bare `Identifier`/`MutIdentifier`/
+/// `Wildcard` always qualify; `Tuple`/`Array`/`Struct` qualify only when every
+/// element/field they contain also qualifies, recursively — this is exactly
+/// the shape exercised by
+/// `test/fixtures/native_match_enum_payload/{nested_repro,nested_struct_repro}.spl`.
+fn is_native_safe_binding_pattern(pattern: &Pattern) -> bool {
+    match pattern {
+        Pattern::Identifier(_) | Pattern::MutIdentifier(_) | Pattern::Wildcard => true,
+        Pattern::Tuple(elements) | Pattern::Array(elements) => {
+            elements.iter().all(is_native_safe_binding_pattern)
+        }
+        Pattern::Struct { fields, .. } => fields.iter().all(|(_, p)| is_native_safe_binding_pattern(p)),
+        _ => false,
+    }
 }
 
 /// Analyze a block of statements (Block contains Vec<Node>)
@@ -347,6 +371,9 @@ fn analyze_node(node: &Node, reasons: &mut Vec<FallbackReason>, mode: Compilabil
             // `PatternMatch` reason made it moot. Now that a match can be
             // accepted natively, their contents must be analyzed too.
             for arm in &match_stmt.arms {
+                if let Some(guard) = &arm.guard {
+                    analyze_expr(guard, reasons, mode);
+                }
                 analyze_block(&arm.body, reasons, mode);
             }
             if !(mode == CompilabilityMode::AotNative
@@ -584,6 +611,9 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>, mode: Compilabil
         Expr::Match { subject, arms } => {
             analyze_expr(subject, reasons, mode);
             for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    analyze_expr(guard, reasons, mode);
+                }
                 analyze_block(&arm.body, reasons, mode);
             }
             if !(mode == CompilabilityMode::AotNative

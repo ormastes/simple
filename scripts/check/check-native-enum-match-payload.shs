@@ -8,19 +8,16 @@
 # script that actually drives `simple compile --native` can fence it.
 #
 # Bug: doc/08_tracking/bug/match_on_enum_native_lowering_status_2026-08-07.md
-# Fix:  doc/08_tracking/bug/native_match_enum_payload_binding_2026-08-11.md
+# Fix (identifier payload bindings): doc/08_tracking/bug/native_match_enum_payload_binding_2026-08-11.md
+# Fix (guards + nested destructuring): same doc, updated 2026-08-11.
 #
-# Updated 2026-08-11: payload-FREE enum match compiles and runs correctly
-# under `--native` (unchanged). Payload-BEARING enum match with simple
-# identifier/wildcard payload bindings (`Shape.Circle(r)`, the common
-# `Ok(v)`/`Err(msg)` shape) now ALSO compiles and runs correctly under
-# `--native` — `compilability.rs`'s `is_native_payload_free_enum_match` gate
-# was relaxed to admit these since native codegen (`MirInst::EnumPayload`,
-# `codegen/instr/enum_union.rs`) already implements the extraction; only the
-# AOT compilability gate was blocking it. Nested payload sub-patterns (tuple/
-# array/struct/literal destructuring inside the payload, or guards) remain
-# refused fail-closed — that residual scope is filed as a concrete follow-up,
-# not silently narrowed. This script asserts both halves.
+# Payload-FREE enum match, and payload-BEARING enum match with plain
+# identifier/wildcard bindings, `case ... if guard:` arms, and nested
+# tuple/array/struct destructuring INSIDE the payload (as long as every leaf
+# of that nesting is itself a plain identifier/wildcard) all compile and run
+# correctly under `--native`. Each case below asserts real per-variant /
+# per-guard dispatch (not "always take the first arm") via a negative control
+# baked into the fixture's own PASS/FAIL check.
 set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
@@ -28,57 +25,82 @@ cd "$ROOT_DIR"
 
 SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"
 WORK_DIR="${WORK_DIR:-/tmp/check-native-enum-match-payload.$$}"
-PAYLOAD_FIXTURE="test/fixtures/native_enum_match_payload/main.spl"
-FREE_FIXTURE="test/fixtures/native_enum_match_payload/payload_free.spl"
 
 test -x "$SIMPLE_BINARY"
 mkdir -p "$WORK_DIR"
 trap 'rm -rf "$WORK_DIR"' EXIT HUP INT TERM
 
 fail=0
+checked=0
+
+# Compile+run one fixture under --native, compare its stdout to $2.
+# $1 = fixture path, $2 = expected stdout, $3 = human label for messages.
+check_native_fixture() {
+    fixture="$1"
+    expected="$2"
+    label="$3"
+    bin="$WORK_DIR/$label"
+    log="$WORK_DIR/$label.log"
+    if ! env -u SIMPLE_BOOTSTRAP "$SIMPLE_BINARY" compile "$fixture" --native -o "$bin" >"$log" 2>&1; then
+        echo "FAIL — $label: no longer compiles under --native"
+        sed -n '1,20p' "$log"
+        fail=1
+        return
+    fi
+    actual="$(timeout 20 "$bin" 2>>"$log" || true)"
+    if [ "$actual" != "$expected" ]; then
+        echo "FAIL — $label: --native output wrong"
+        echo "  expected: $expected"
+        echo "  actual:   $actual"
+        fail=1
+        return
+    fi
+    checked=$((checked + 1))
+}
 
 # --- Control: payload-free enum match must still compile and run correctly.
-free_bin="$WORK_DIR/payload-free"
-free_log="$WORK_DIR/payload-free.log"
-if ! env -u SIMPLE_BOOTSTRAP "$SIMPLE_BINARY" compile "$FREE_FIXTURE" --native -o "$free_bin" >"$free_log" 2>&1; then
-    echo "FAIL — payload-free enum match no longer compiles under --native (was working)"
-    sed -n '1,20p' "$free_log"
-    fail=1
-else
-    free_out="$(timeout 20 "$free_bin" 2>>"$free_log" || true)"
-    expected_free="$(printf 'kind-A\nkind-B\nkind-C')"
-    if [ "$free_out" != "$expected_free" ]; then
-        echo "FAIL — payload-free enum match --native output regressed"
-        echo "  expected: $expected_free"
-        echo "  actual:   $free_out"
-        fail=1
-    fi
-fi
+check_native_fixture \
+    "test/fixtures/native_enum_match_payload/payload_free.spl" \
+    "$(printf 'kind-A\nkind-B\nkind-C')" \
+    "payload-free"
 
-# --- Known-open gap: payload-bearing enum match is refused under --native.
-payload_bin="$WORK_DIR/payload-bearing"
-payload_log="$WORK_DIR/payload-bearing.log"
-payload_rc=0
-env -u SIMPLE_BOOTSTRAP "$SIMPLE_BINARY" compile "$PAYLOAD_FIXTURE" --native -o "$payload_bin" >"$payload_log" 2>&1 || payload_rc=$?
+# --- Payload-bearing, plain identifier bindings (fixed 2026-08-11).
+check_native_fixture \
+    "test/fixtures/native_enum_match_payload/main.spl" \
+    "$(printf 'kind-A\nkind-B\nkind-C\ncircle:2.5\nrect:3.0x4.0\npoint')" \
+    "payload-bearing-identifier"
 
-if [ "$payload_rc" -eq 0 ]; then
-    payload_out="$(timeout 20 "$payload_bin" 2>>"$payload_log" || true)"
-    expected_payload="$(printf 'kind-A\nkind-B\nkind-C\ncircle:2.5\nrect:3.0x4.0\npoint')"
-    if [ "$payload_out" != "$expected_payload" ]; then
-        echo "FAIL — payload-bearing enum match --native now compiles but output is wrong"
-        echo "  expected: $expected_payload"
-        echo "  actual:   $payload_out"
-        fail=1
-    fi
-else
-    echo "FAIL — payload-bearing enum match no longer compiles under --native (was fixed 2026-08-11)"
-    sed -n '1,20p' "$payload_log"
-    fail=1
-fi
+check_native_fixture \
+    "test/fixtures/native_match_enum_payload/repro.spl" \
+    "$(printf 'ok:42\nerr:boom\nPASS')" \
+    "payload-bearing-result"
+
+# --- Guarded arms (`case ... if cond:`). Fixture asserts per-value dispatch:
+# a big Ok(v) takes the guarded arm, a small Ok(v) falls through to the next
+# arm, and Err never matches either Ok arm — a guard that "always fires" or
+# "never fires" would flip one of these three outcomes.
+check_native_fixture \
+    "test/fixtures/native_match_enum_payload/guard_repro.spl" \
+    "$(printf 'big-ok:42\nsmall-ok:3\nerr:boom\nPASS')" \
+    "guarded-arm"
+
+# --- Nested tuple destructuring inside the payload (`Two((a, b))`). Fixture
+# checks both fields land in the right slot and the no-payload variant is
+# still reachable (negative control: a binder bug that always reads slot 0
+# would print "two:3,3" instead of "two:3,40").
+check_native_fixture \
+    "test/fixtures/native_match_enum_payload/nested_repro.spl" \
+    "$(printf 'two:3,40\nnone\nPASS')" \
+    "nested-tuple-payload"
+
+# --- Nested struct destructuring inside the payload (`Dot(Point { x: a, y: b })`).
+check_native_fixture \
+    "test/fixtures/native_match_enum_payload/nested_struct_repro.spl" \
+    "$(printf 'dot:7,9\nnowhere\nPASS')" \
+    "nested-struct-payload"
 
 if [ "$fail" -ne 0 ]; then
     exit 1
 fi
 
-checked=2
-echo "PASS — $checked checked: native-build enum match payload-free and payload-bearing both correct"
+echo "PASS — $checked checked: native-build enum match payload-free, identifier-bound, guarded, and nested-destructured payloads all correct"
