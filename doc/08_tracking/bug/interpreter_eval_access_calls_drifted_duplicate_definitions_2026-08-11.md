@@ -1,8 +1,14 @@
 # Interpreter: 10 drifted duplicate function definitions — the STALE copies WIN
 
-**Status:** OPEN — DIVERGENCE CONFIRMED, DO NOT DEDUPE
+**Status:** OPEN — DIVERGENCE CONFIRMED but NOT USER-FACING. Severity downgraded
+to LOW/latent: the whole package is excluded from the build, so both copies are
+unreachable. All five implied user-facing defects were probed and DISPROVED.
+DO NOT DEDUPE; DO NOT write behavioural specs against this package until it is
+reconnected.
 **Filed:** 2026-08-11
 **Updated:** 2026-08-11 (resolution winner measured; original premise falsified)
+**Updated:** 2026-08-11 (second pass: all five implied defects disproved by
+measurement; root cause is a build exclusion in `_driver_collect_sources`)
 **Layer:** `10.frontend` — core interpreter
 
 ## Summary
@@ -101,33 +107,104 @@ Divergence runs in **both** directions on 8 of 10 pairs. There is no pair where
 one side is a strict superset, so there is no safe blind merge and no pair was
 merged.
 
-## Real defects this implies (each needs its own verification)
+## Real defects this implies — ALL FIVE DISPROVED (2026-08-11, second pass)
 
-1. **String interpolation drops literal segments.** The live
-   `eval_interpolated_string` returns only the joined interpolated values.
-2. **`defer` / `errdefer` never run at function scope** in this interpreter —
-   the implementation exists only in the dead copy.
-3. **`host` / `gpu` lane calls and implicit zero-arg constructors are dead.**
-4. **Dict bracket-write (`d[k] = v`) via `val_struct_upsert_field` is dead** —
-   and `dict_literal_dispatch_spec.spl` green-lights it by grepping for the
-   source text of a function that never executes.
-5. **Coverage owner attribution for lambdas is dead.**
+The five hypothesised user-facing defects below were each probed empirically.
+**None reproduces.** The premise they all rest on — that the winning copy is on
+a user-facing execution path — is false.
 
-## Corrected fix plan
+### Root cause of the disproof: the ENTIRE package is excluded from the build
 
-1. **Do not delete either copy as a dedupe.** Any delete is a semantic change.
-2. Treat each of the 10 as a genuine merge with a behavioural test written
-   first. There is currently **zero behavioural coverage** for any of them —
-   the four existing specs are source greps.
-3. Replace the four grep-specs with specs that actually evaluate code, or mark
-   them explicitly as structural-invariant pins so they are not mistaken for
-   dispatch evidence again.
-4. Only once each pair has a real oracle, fold the loser's unique behaviour into
-   the winner (`eval_access.spl` / `eval_calls.spl`), and only then collapse the
-   duplication — the winner is the file to keep, which is the opposite of the
-   original plan.
-5. Independently, fix the ordering hazard itself: the winner is decided by
-   filename order within the package, which is not a stable contract.
+`_driver_collect_sources` (`src/compiler/80.driver/driver_source_loading.spl`,
+lines 858 and 893) unconditionally drops every path containing
+`/core/interpreter/`, in **both** the single-file branch and the directory-walk
+branch:
+
+    if p.contains("/core/interpreter/") or ... : return result
+
+Measured directly by calling the function, with a positive control:
+
+| path | files collected |
+|---|---|
+| `.../core/interpreter/eval_access.spl` (the "winner") | **0** |
+| `.../core/interpreter/_EvalOps/access_literal_assign_eval.spl` (the "loser") | **0** |
+| `.../10.frontend/core/lexer.spl` (CONTROL) | **2** |
+
+So *neither* copy is compiled into any built `simple` binary. The winner/loser
+distinction established on 2026-08-11 is real as source drift, but it decides
+which of two **equally unreachable** functions a hypothetical build would pick.
+Corroborating: `grep -rn 'core_interpret\b' src/` returns hits only inside the
+package itself — the package's own entrypoint has **zero external callers**, and
+the only cross-package import of it anywhere is
+`compiler.core.interpreter.hashmap.{hm_hash_text}`.
+
+A `strings`-based symbol probe on `bootstrap/stage3/simple` was also run and
+returned 0 for every interpreter symbol — **that probe is vacuous and is not
+cited as evidence**: its positive controls (`_driver_collect_sources`,
+`parse_expr`) also returned 0 because the binary is stripped.
+
+### Per-defect verdicts (engine stated for each)
+
+1. **String interpolation drops literal segments — NOT REPRODUCED.**
+   `print("a{x}b")` with `x = 42` prints `a42b` under both `bin/simple run`
+   (Cranelift JIT) and `SIMPLE_NO_JIT=1 bin/simple run` (tree-walk). The live
+   `parts.join("")` reads wrong against `expr_interpolated_string`'s contract
+   (args = only the `{...}` part exprs; the verbatim template lives in the str
+   slot), so the *code* is genuinely wrong — but it never executes.
+2. **`defer` / `errdefer` never run — NOT REPRODUCED.** A function-scope
+   `defer print("DEFER-RAN")` runs, printing `BODY` then `DEFER-RAN`, on both
+   engines.
+3. **`host` / `gpu` lane calls and implicit zero-arg constructors dead — NOT
+   REPRODUCED as a user-facing defect.** Same build exclusion; the shipped
+   engines implement these on their own paths.
+4. **Dict bracket-write dead — NOT REPRODUCED.** `d["b"] = 2` on a dict literal
+   reads back `2` on both engines. The criticism of
+   `dict_literal_dispatch_spec.spl` still stands on its own terms: it is a
+   source grep and proves nothing either way.
+5. **Coverage owner attribution for lambdas dead — NOT REPRODUCED** as a
+   user-facing defect, for the same build-exclusion reason.
+
+### What the actual defect is
+
+Not any of the five. It is that **~100 KB of drifted, self-contradictory
+evaluator source is retained in-tree while being hard-excluded from the build by
+a path substring in the driver**, with four source-grep specs giving it the
+appearance of live coverage. The decision to make is retire-or-reconnect, and
+until it is made no merge work on the 10 pairs buys any user-visible behaviour.
+
+### Engines that DO serve users
+
+`bin/simple` is the **Rust seed** (it says so on startup). `bin/simple run` is
+Cranelift JIT, `SIMPLE_NO_JIT=1` is the seed's tree-walk interpreter, and
+`bootstrap/stage3/simple` offers only `compile` / `native-build` — it has no
+interpreter subcommand at all (`run`, `interp`, `eval`, `exec` are all
+`unknown command`). None of them routes through this package.
+
+## Corrected fix plan (revised again after the disproof)
+
+**Severity is now LOW-and-latent, not user-facing.** The merge work described
+below buys zero user-visible behaviour while the build exclusion stands, so the
+exclusion decision comes first.
+
+1. **Decide retire-or-reconnect for the whole package.** Either delete
+   `src/compiler/10.frontend/core/interpreter/` (keeping `hashmap.spl`, its one
+   externally-imported module) and drop the `/core/interpreter/` clause from
+   `_driver_collect_sources`, or reconnect it and give it an entrypoint. Do not
+   do merge work before this is decided.
+2. **Do not delete just one copy as a dedupe.** If the package is reconnected,
+   any single-copy delete is a semantic change (the 10-pair table above).
+3. **No new behavioural specs against this package** until it is reconnected —
+   a spec that cannot execute the code under test is another fake oracle, which
+   is the failure mode this filing exists to document.
+4. The four grep-specs should be explicitly relabelled as structural-invariant
+   pins, or deleted with the package. They must not be cited as dispatch
+   evidence again.
+5. Independently, the ordering hazard (winner decided by filename order within a
+   package) is a real language/resolution defect and is worth its own filing —
+   it is not specific to this package and would bite any reconnected one.
+6. **Do not "fix" `parts.join("")` in isolation.** It is genuinely wrong against
+   `expr_interpolated_string`'s contract, but patching unreachable code produces
+   an unverifiable change; fix it as part of step 1 if the package is kept.
 
 ## Prior work that remains valid
 
