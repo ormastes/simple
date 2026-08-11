@@ -1,0 +1,142 @@
+# Multi-arch dedupe, wave 3 — the SBI shim. Extension IDs and error codes are
+# SBI-SPECIFICATION facts, identical on rv32 and rv64; only the register width
+# used to carry them is XLEN. arch/common/sbi_shim.spl now holds them, rv64
+# aliases them with no cast, and rv32 keeps its own u32 declarations whose
+# NUMERIC agreement this spec pins.
+#
+# Run:
+#   bin/simple test test/01_unit/os/multiarch/arch_common_wave3_sbi_dedupe_spec.spl
+#
+# @cover src/os/kernel/arch/common/sbi_shim.spl
+
+use std.spec
+use std.io_runtime.{file_read}
+use os.kernel.arch.common.sbi_shim.{
+    SBI_EXT_BASE, SBI_EXT_TIMER, SBI_EXT_IPI, SBI_EXT_HSM, SBI_EXT_SRST,
+    SBI_EXT_RFENCE, SBI_EXT_DBCN,
+    SBI_EXT_LEGACY_CONSOLE_PUTCHAR, SBI_EXT_LEGACY_CONSOLE_GETCHAR,
+    SBI_EXT_LEGACY_SEND_IPI, SBI_EXT_LEGACY_SHUTDOWN,
+    SBI_OK, SBI_ERR_FAILED, SBI_ERR_NOT_SUPPORTED, SBI_ERR_INVALID_PARAM,
+    SBI_ERR_DENIED, SBI_ERR_INVALID_ADDRESS, SBI_ERR_ALREADY_AVAILABLE,
+    SBI_BASE_PROBE_EXTENSION, SbiResult, sbi_ok, sbi_probe_request_args,
+}
+
+val RV64_SBI: text = "src/os/kernel/arch/riscv64/sbi.spl"
+val RV32_SBI: text = "src/os/kernel/arch/riscv32/sbi.spl"
+val COMMON_SBI: text = "src/os/kernel/arch/common/sbi_shim.spl"
+
+# Names rv64 must no longer declare locally — they now come from the shim.
+val RV64_FORWARDED: [text] = [
+    "SBI_ERR_FAILED", "SBI_ERR_NOT_SUPPORTED", "SBI_ERR_INVALID_PARAM",
+    "SBI_ERR_DENIED", "SBI_ERR_INVALID_ADDRESS", "SBI_ERR_ALREADY_AVAILABLE",
+    "SBI_EXT_BASE", "SBI_EXT_TIMER", "SBI_EXT_HSM",
+    "SBI_EXT_LEGACY_CONSOLE_PUTCHAR", "SBI_EXT_LEGACY_CONSOLE_GETCHAR",
+]
+
+describe "sbi_shim — SBI extension IDs come from the specification, not per-arch copies":
+    """As a kernel engineer bringing up RISC-V, I want one place that states
+    what an SBI extension ID is, so that rv32 and rv64 cannot silently drift
+    apart on a number that OpenSBI defines once for both."""
+
+    # @req REQ-OS-ARCH-COMMON-SBI-001
+    it "states the SBI extension IDs at their specified values":
+        step("read the extension IDs from the shared shim")
+        expect(SBI_EXT_BASE).to_equal(0x10)
+        expect(SBI_EXT_TIMER).to_equal(0x54494D45)
+        expect(SBI_EXT_IPI).to_equal(0x735049)
+        expect(SBI_EXT_HSM).to_equal(0x48534D)
+        expect(SBI_EXT_SRST).to_equal(0x53525354)
+        expect(SBI_EXT_RFENCE).to_equal(0x52464E43)
+        expect(SBI_EXT_DBCN).to_equal(0x4442434E)
+
+    # @req REQ-OS-ARCH-COMMON-SBI-001
+    it "states the legacy extension IDs the boot console and shutdown paths use":
+        step("read the four legacy extension IDs")
+        expect(SBI_EXT_LEGACY_CONSOLE_PUTCHAR).to_equal(0x01)
+        expect(SBI_EXT_LEGACY_CONSOLE_GETCHAR).to_equal(0x02)
+        expect(SBI_EXT_LEGACY_SEND_IPI).to_equal(0x04)
+        expect(SBI_EXT_LEGACY_SHUTDOWN).to_equal(0x08)
+
+    # @req REQ-OS-ARCH-COMMON-SBI-002
+    it "states the standard SBI error codes as signed values":
+        step("read the error envelope from the shared shim")
+        expect(SBI_OK).to_equal(0)
+        expect(SBI_ERR_FAILED).to_equal(-1)
+        expect(SBI_ERR_NOT_SUPPORTED).to_equal(-2)
+        expect(SBI_ERR_INVALID_PARAM).to_equal(-3)
+        expect(SBI_ERR_DENIED).to_equal(-4)
+        expect(SBI_ERR_INVALID_ADDRESS).to_equal(-5)
+        expect(SBI_ERR_ALREADY_AVAILABLE).to_equal(-6)
+
+    # @req REQ-OS-ARCH-COMMON-SBI-002
+    it "treats only error code zero as success":
+        step("ask the shim whether each error code means success")
+        expect(sbi_ok(SbiResult(err: SBI_OK, value: 0))).to_be_true()
+        expect(sbi_ok(SbiResult(err: SBI_ERR_NOT_SUPPORTED, value: 0))).to_be_false()
+
+    # @req REQ-OS-ARCH-COMMON-SBI-003
+    it "packages a probe request as the base extension plus the queried ID":
+        step("build the probe argument pair for the timer extension")
+        val args = sbi_probe_request_args(SBI_EXT_TIMER)
+        expect(args[0]).to_equal(SBI_EXT_BASE)
+        expect(args[1]).to_equal(SBI_EXT_TIMER)
+        expect(SBI_BASE_PROBE_EXTENSION).to_equal(3)
+
+describe "riscv64 forwards to the shim instead of redeclaring":
+    """As a reviewer, I want the rv64 SBI file to contain only the ecall
+    trampoline and its own spellings, so that a change to an SBI constant
+    cannot land in one arch and miss the other."""
+
+    # @req REQ-OS-ARCH-COMMON-SBI-004
+    it "imports the shared shim":
+        step("read the rv64 SBI source")
+        val body = file_read(RV64_SBI)
+        expect(body).to_contain("use os.kernel.arch.common.sbi_shim.{")
+
+    # @req REQ-OS-ARCH-COMMON-SBI-004
+    it "leaves no local redeclaration of any forwarded constant":
+        step("scan rv64 for `val <NAME>:` redeclarations")
+        val body = file_read(RV64_SBI)
+        var copies = 0
+        for n in RV64_FORWARDED:
+            if body.contains("val " + n + ":"):
+                copies = copies + 1
+        expect(copies).to_equal(0)
+
+    # @req REQ-OS-ARCH-COMMON-SBI-005
+    it "keeps the ecall trampoline in the arch file, not the shim":
+        step("confirm the register-level trampoline stayed per-arch")
+        val body = file_read(RV64_SBI)
+        expect(body).to_contain("fn sbi_call(")
+        val shim = file_read(COMMON_SBI)
+        expect(shim.contains("fn sbi_call(")).to_be_false()
+        expect(shim.contains("extern fn")).to_be_false()
+
+    # @req REQ-OS-ARCH-COMMON-SBI-005
+    it "keeps its own historical spelling of the reset extension as an alias":
+        step("confirm SBI_EXT_SYSTEM_RESET is derived, not a fresh literal")
+        val body = file_read(RV64_SBI)
+        expect(body).to_contain("val SBI_EXT_SYSTEM_RESET: u64 = SBI_EXT_SRST")
+        expect(body).to_contain("val SBI_SUCCESS: i64 = SBI_OK")
+
+describe "riscv32 stays u32-typed but must not drift in value":
+    """As a kernel engineer, I accept that rv32 carries SBI IDs in 32-bit
+    registers, but I want a test to fail the moment its numbers stop matching
+    the shared specification values."""
+
+    # @req REQ-OS-ARCH-COMMON-SBI-006
+    it "declares the same extension ID numbers the shim states":
+        step("read the rv32 SBI source and compare each shared ID")
+        val body = file_read(RV32_SBI)
+        expect(body).to_contain("val SBI_EXT_TIMER: u32 = 0x54494D45")
+        expect(body).to_contain("val SBI_EXT_HSM: u32 = 0x48534D")
+        expect(body).to_contain("val SBI_EXT_SRST: u32 = 0x53525354")
+        expect(body).to_contain("val SBI_EXT_PUTCHAR: u32 = 0x01")
+        expect(body).to_contain("val SBI_EXT_GETCHAR: u32 = 0x02")
+        expect(body).to_contain("val SBI_EXT_SHUTDOWN: u32 = 0x08")
+
+    # @req REQ-OS-ARCH-COMMON-SBI-006
+    it "records why rv32 was not converted to aliases":
+        step("read the disposition record for the deferral")
+        val doc = file_read("doc/08_tracking/todo/arch_common_wiring_wave2_2026-08-11.md")
+        expect(doc).to_contain("riscv32")
