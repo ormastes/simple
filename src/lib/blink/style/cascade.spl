@@ -35,8 +35,11 @@
 #     exactly as `Length` documents. `em`/`rem`/`%` are stored, never converted.
 #   - No user-agent or user origin, no transitions/animations, no author-order
 #     across multiple sheets — one author sheet at a time.
-#   - Colors are limited to the named subset below plus `#rgb`/`#rrggbb`; no
-#     `rgb()`/`rgba()`/`hsl()`.
+#   - Colors are delegated to `common.color.css`: the CSS Level 4 named table,
+#     `#rgb`/`#rgba`/`#rrggbb`/`#rrggbbaa`, `rgb()`/`rgba()` and `hsl()`/
+#     `hsla()`. A colour outside that set (`currentColor`, `lab()`, `var()`,
+#     `color-mix()`) makes `parse_color_value` answer `nil` and the declaration
+#     is dropped — it is never silently substituted with another colour.
 #
 # Known duplication (not merged here on purpose): the `gc_async_mut/gpu/
 # browser_engine` lane has its own `parse_color_value` returning a packed `u32`
@@ -55,7 +58,8 @@ use std.blink.css_parser.parser.{CssStyleSheet, CssStyleRule, CssDeclaration}
 use std.blink.css_parser.selector.{
     SimpleSelectorKind, ComplexSelector, parse_selector, matches_complex_with_state
 }
-use std.skia.entity.color.{SkColor4f, sk_color4f}
+use std.skia.entity.color.{SkColor4f, sk_color4f_from_color}
+use std.common.color.css.{parse_css_color}
 
 # ============================================================================
 # Value parsing
@@ -100,63 +104,33 @@ fn parse_length_value(raw: text) -> Length:
     val unit_lower: text = unit.to_lower()
     Length(value: magnitude, unit: unit_lower)
 
-# One hex digit's value, or -1 when `c` is not a hex digit.
-fn _hex_digit(c: text) -> i64:
-    val table = "0123456789abcdef"
-    val lowered = c.to_lower()
-    var i = 0
-    while i < 16:
-        if table.slice(i, i + 1) == lowered:
-            return i
-        i = i + 1
-    -1
+# Parse a CSS color into a Skia float colour, or `nil` when the syntax is one
+# we do not support.
+#
+# The `nil` is the point. This used to answer opaque black for anything it did
+# not recognise, which is a WRONG PIXEL rather than an error: nothing downstream
+# could tell `color: black` from `color: color-mix(...)`, so the gap between
+# this module's nine-colour table and a real CSS colour parser was invisible to
+# every test. Failing explicitly is what makes an unsupported colour findable.
+#
+# The parsing itself lives in `common.color.css`, shared with every other lane
+# that reads CSS colours, so the table is extended in one place instead of
+# copied into a ninth private version.
+fn parse_color_value(raw: text) -> SkColor4f?:
+    """Return the SkColor4f `raw` denotes, or nil when the colour is unsupported."""
+    if val c = parse_css_color(raw):
+        return sk_color4f_from_color(c)
+    nil
 
-# Parse a two-character hex pair into a 0.0..1.0 channel.
-fn _hex_pair(s: text, at: i64) -> f64:
-    val hi = _hex_digit(s.slice(at, at + 1))
-    val lo = _hex_digit(s.slice(at + 1, at + 2))
-    if hi < 0 or lo < 0:
-        return 0.0
-    ((hi * 16 + lo) as f64) / 255.0
-
-# Parse a CSS color into a Skia float colour. Unrecognised values resolve to
-# opaque black — the CSS initial `color` — rather than failing the cascade.
-fn parse_color_value(raw: text) -> SkColor4f:
-    """Return the SkColor4f `raw` denotes; unknown colours are opaque black."""
-    val trimmed: text = raw.trim()
-    val s: text = trimmed.to_lower()
-    if s == "transparent":
-        return sk_color4f(0.0, 0.0, 0.0, 0.0)
-    if s == "black":
-        return sk_color4f(0.0, 0.0, 0.0, 1.0)
-    if s == "white":
-        return sk_color4f(1.0, 1.0, 1.0, 1.0)
-    if s == "red":
-        return sk_color4f(1.0, 0.0, 0.0, 1.0)
-    if s == "green":
-        return sk_color4f(0.0, 0.5019607843137255, 0.0, 1.0)
-    if s == "blue":
-        return sk_color4f(0.0, 0.0, 1.0, 1.0)
-    if s == "yellow":
-        return sk_color4f(1.0, 1.0, 0.0, 1.0)
-    if s == "gray" or s == "grey":
-        return sk_color4f(0.5019607843137255, 0.5019607843137255, 0.5019607843137255, 1.0)
-    if s.starts_with("#"):
-        if s.len() == 7:
-            return sk_color4f(_hex_pair(s, 1), _hex_pair(s, 3), _hex_pair(s, 5), 1.0)
-        if s.len() == 4:
-            # `#rgb` — each digit is doubled, so `#f00` is `#ff0000`.
-            val r = _hex_digit(s.slice(1, 2))
-            val g = _hex_digit(s.slice(2, 3))
-            val b = _hex_digit(s.slice(3, 4))
-            if r >= 0 and g >= 0 and b >= 0:
-                return sk_color4f(
-                    ((r * 17) as f64) / 255.0,
-                    ((g * 17) as f64) / 255.0,
-                    ((b * 17) as f64) / 255.0,
-                    1.0
-                )
-    sk_color4f(0.0, 0.0, 0.0, 1.0)
+# Resolve a colour declaration against the value the property already holds.
+# An unsupported colour leaves the property alone — CSS says an invalid
+# declaration is dropped, so the element keeps its inherited or initial colour
+# rather than being repainted with a guess.
+fn _apply_color(current: SkColor4f, raw: text) -> SkColor4f:
+    """Return the colour `raw` denotes, or `current` when `raw` is unsupported."""
+    if val c = parse_color_value(raw):
+        return c
+    current
 
 # Split `s` on runs of ASCII whitespace, dropping empty tokens. Used only to
 # tokenize box-shorthand values (`margin`/`padding`); manual scan rather than
@@ -304,9 +278,9 @@ fn apply_declaration(style: ComputedStyle, decl: CssDeclaration) -> ComputedStyl
     elif prop == "opacity":
         opacity = parse_f64_value(raw)
     elif prop == "color":
-        color = parse_color_value(raw)
+        color = _apply_color(style.color, raw)
     elif prop == "background-color":
-        background_color = parse_color_value(raw)
+        background_color = _apply_color(style.background_color, raw)
     elif prop == "margin-left":
         margin_left = parse_length_value(raw)
     elif prop == "margin-right":

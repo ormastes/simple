@@ -46,28 +46,125 @@ describe "parse_length_value":
         expect(value_ok).to_equal(true)
         expect(unit_ok).to_equal(true)
 
-describe "parse_color_value":
-    it "red returns opaque red":
-        val c = parse_color_value("red")
-        val r_ok = c.r > 0.99
-        val g_ok = c.g < 0.01
-        val b_ok = c.b < 0.01
-        val a_ok = c.a > 0.99
-        expect(r_ok).to_equal(true)
-        expect(g_ok).to_equal(true)
-        expect(b_ok).to_equal(true)
-        expect(a_ok).to_equal(true)
+# Render a colour parse as text so a supported and an unsupported colour are
+# both directly comparable. The channels are quantised back to 0..255 because
+# that is the precision the author wrote them at.
+fn _color_read(raw: text) -> text:
+    if val c = parse_color_value(raw):
+        val r = ((c.r * 255.0) + 0.5) as i64
+        val g = ((c.g * 255.0) + 0.5) as i64
+        val b = ((c.b * 255.0) + 0.5) as i64
+        val a = ((c.a * 255.0) + 0.5) as i64
+        return "{r},{g},{b},{a}"
+    "unsupported"
 
-    it "#ff0000 returns opaque red":
-        val c = parse_color_value("#ff0000")
-        val r_ok = c.r > 0.99
-        val g_ok = c.g < 0.01
-        val b_ok = c.b < 0.01
-        val a_ok = c.a > 0.99
-        expect(r_ok).to_equal(true)
-        expect(g_ok).to_equal(true)
-        expect(b_ok).to_equal(true)
-        expect(a_ok).to_equal(true)
+# @manual_section: Colour values
+describe "parse_color_value":
+    """
+    As a browser engine, I want every CSS colour notation an author can write
+    read as the colour they meant, and I want a notation I do not support
+    reported as unsupported rather than quietly painted black, so that a gap in
+    colour coverage shows up as a failure instead of as a wrong pixel.
+    """
+
+    # @req REQ-BLINK-CASCADE-COLOR-NAMED
+    it "reads a plain named colour":
+        step("read `red`")
+        expect(_color_read("red")).to_equal("255,0,0,255")
+
+    # @req REQ-BLINK-CASCADE-COLOR-NAMED
+    it "reads a name from the full CSS table, not a nine-colour subset":
+        step("read `rebeccapurple` and `cornflowerblue`, outside the old built-in list")
+        expect(_color_read("rebeccapurple")).to_equal("102,51,153,255")
+        expect(_color_read("cornflowerblue")).to_equal("100,149,237,255")
+
+    # @req REQ-BLINK-CASCADE-COLOR-HEX
+    it "reads all four hex lengths including the alpha forms":
+        step("read #RGB, #RGBA, #RRGGBB and #RRGGBBAA")
+        expect(_color_read("#f00")).to_equal("255,0,0,255")
+        expect(_color_read("#f008")).to_equal("255,0,0,136")
+        expect(_color_read("#ff0000")).to_equal("255,0,0,255")
+        expect(_color_read("#11223344")).to_equal("17,34,51,68")
+
+    # @req REQ-BLINK-CASCADE-COLOR-RGB
+    it "reads rgb() and rgba() in both CSS forms":
+        step("read the legacy comma form and the modern slash-alpha form")
+        expect(_color_read("rgb(255, 128, 0)")).to_equal("255,128,0,255")
+        expect(_color_read("rgba(255, 128, 0, 0.5)")).to_equal("255,128,0,128")
+        expect(_color_read("rgb(255 128 0 / 50%)")).to_equal("255,128,0,128")
+
+    # @req REQ-BLINK-CASCADE-COLOR-HSL
+    it "reads hsl() and hsla() in both CSS forms":
+        step("read the legacy comma form and the modern slash-alpha form")
+        expect(_color_read("hsl(120, 100%, 50%)")).to_equal("0,255,0,255")
+        expect(_color_read("hsla(0, 100%, 50%, 0.5)")).to_equal("255,0,0,128")
+        expect(_color_read("hsl(240deg 100% 50% / 25%)")).to_equal("0,0,255,64")
+
+    # @req REQ-BLINK-CASCADE-COLOR-UNSUPPORTED
+    it "reports an unsupported colour as unsupported instead of painting black":
+        step("read the colour syntaxes this cascade does not implement")
+        # This is the regression that made the whole gap invisible: each of
+        # these used to come back as opaque black, indistinguishable from an
+        # author writing `color: black`.
+        expect(_color_read("color-mix(in srgb, red, blue)")).to_equal("unsupported")
+        expect(_color_read("lab(50% 40 59.5)")).to_equal("unsupported")
+        expect(_color_read("currentColor")).to_equal("unsupported")
+        expect(_color_read("var(--brand)")).to_equal("unsupported")
+        step("read a malformed colour and a name that is not a CSS colour")
+        expect(_color_read("#gg0000")).to_equal("unsupported")
+        expect(_color_read("rgb(red, 0, 0)")).to_equal("unsupported")
+        expect(_color_read("notacolour")).to_equal("unsupported")
+        expect(_color_read("")).to_equal("unsupported")
+
+# @manual_section: Colour values
+describe "applying an unsupported colour declaration":
+    """
+    As a page author, when I write a colour this engine cannot read, I want the
+    declaration dropped the way CSS says invalid declarations are dropped, so
+    the element keeps the colour it inherited instead of being repainted black.
+    """
+
+    # @req REQ-BLINK-CASCADE-COLOR-UNSUPPORTED
+    it "leaves the property at its previous value instead of repainting it":
+        step("start from a style whose colour is red")
+        val base = apply_declaration(computed_style_default(), CssDeclaration(
+            property: "color", value: "red", important: false
+        ))
+        expect(base.color.r > 0.99).to_equal(true)
+        step("apply `color: color-mix(in srgb, red, blue)`, which is unsupported")
+        val after = apply_declaration(base, CssDeclaration(
+            property: "color", value: "color-mix(in srgb, red, blue)", important: false
+        ))
+        step("the invalid declaration is dropped — the colour is still red, not black")
+        expect(after.color.r > 0.99).to_equal(true)
+        expect(after.color.g < 0.01).to_equal(true)
+        expect(after.color.b < 0.01).to_equal(true)
+
+    # @req REQ-BLINK-CASCADE-COLOR-UNSUPPORTED
+    it "leaves background-color at its previous value too":
+        step("start from a style whose background is white")
+        val base = apply_declaration(computed_style_default(), CssDeclaration(
+            property: "background-color", value: "white", important: false
+        ))
+        expect(base.background_color.r > 0.99).to_equal(true)
+        expect(base.background_color.b > 0.99).to_equal(true)
+        step("apply `background-color: var(--brand)`, which is unsupported")
+        val after = apply_declaration(base, CssDeclaration(
+            property: "background-color", value: "var(--brand)", important: false
+        ))
+        step("the background is still white, not black")
+        expect(after.background_color.r > 0.99).to_equal(true)
+        expect(after.background_color.g > 0.99).to_equal(true)
+        expect(after.background_color.b > 0.99).to_equal(true)
+
+    # @req REQ-BLINK-CASCADE-COLOR-HSL
+    it "still applies a supported colour written in a modern notation":
+        step("apply `color: hsl(240deg 100% 50%)` to a default style")
+        val after = apply_declaration(computed_style_default(), CssDeclaration(
+            property: "color", value: "hsl(240deg 100% 50%)", important: false
+        ))
+        expect(after.color.b > 0.99).to_equal(true)
+        expect(after.color.r < 0.01).to_equal(true)
 
 describe "parse_f64_value":
     it "0.5 returns 0.5":
