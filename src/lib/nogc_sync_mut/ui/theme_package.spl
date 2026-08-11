@@ -10,7 +10,7 @@ use common.ui.color.{UIColor}
 use common.ui.theme_render_snapshot.{ThemeShadowLayer, ThemeMaterialSemantics, ThemeSemanticColors, ThemeRenderSnapshot, theme_material_sha256}
 use common.ui.native_scalar_text.{ui_native_i64_text}
 use std.common.crypto.sha256.{sha256_text}
-use std.io_runtime.{file_exists, read_file}
+use std.io_runtime.{env_get, file_exists, read_file}
 
 val THEME_REGISTRY_PATH = "config/themes/theme.sdn"
 
@@ -208,12 +208,15 @@ fn load_theme_package(theme_id: text) -> ResolvedThemePackage:
         val local_path = "{local_widget_dir}/{widget}.css"
         val family_path_for_widget = "{family_widget_dir}/{widget}.css"
         val family_default = "{family_widget_dir}/defaults.css"
-        if file_exists(local_path):
-            paths = paths.push(local_path)
-        if file_exists(family_path_for_widget):
-            paths = paths.push(family_path_for_widget)
-        if file_exists(family_default):
-            paths = paths.push(family_default)
+        val resolved_local = _theme_asset_path(local_path)
+        val resolved_family_widget = _theme_asset_path(family_path_for_widget)
+        val resolved_family_default = _theme_asset_path(family_default)
+        if file_exists(resolved_local):
+            paths = paths.push(resolved_local)
+        if file_exists(resolved_family_widget):
+            paths = paths.push(resolved_family_widget)
+        if file_exists(resolved_family_default):
+            paths = paths.push(resolved_family_default)
     paths = _sorted_unique_paths(paths)
 
     val source_manifest_sha256 = _source_manifest_sha256(paths)
@@ -391,12 +394,29 @@ fn validate_theme_package(registry_path: text) -> [ThemeValidationIssue]:
     issues = issues + _validate_var_refs(base_path, base_css, shape_path, shape_css, icons_path, icon_sdn, local_widget_dir, family_widget_dir, widgets)
     issues
 
+fn _theme_asset_path(path: text) -> text:
+    # Bundle launches (macOS .app, installed runtimes) do not run with the
+    # repo root as CWD. Resolve theme assets against SIMPLE_ASSET_ROOT when
+    # the CWD-relative path is absent.
+    if path == "":
+        return path
+    if file_exists(path):
+        return path
+    val root = env_get("SIMPLE_ASSET_ROOT") ?? ""
+    if root == "":
+        return path
+    val joined = root + "/" + path
+    if file_exists(joined):
+        return joined
+    path
+
 fn _read_if_exists(path: text) -> text:
     if path == "":
         return ""
-    if not file_exists(path):
+    val resolved = _theme_asset_path(path)
+    if not file_exists(resolved):
         return ""
-    read_file(path)
+    read_file(resolved)
 
 fn _push_issue(issues: [ThemeValidationIssue], path: text, key: text, message: text) -> [ThemeValidationIssue]:
     var out = issues
@@ -669,7 +689,7 @@ fn _material_from_css(base_css: text, shape_css: text, composed_css: text) -> Th
     val surface_alpha = (((window >> 24) & 0xFF).to_i64() * 1000 + 127) / 255
     val solid_fallback = 0xFF000000 | (window & 0x00FFFFFF)
     val window_gradient = _wm_window_gradient_from_css(composed_css, solid_fallback)
-    val font_weight: i64 = _css_var(base_css, "--font-weight-normal", "400").to_i64() ?? 400
+    val font_weight: i64 = _parse_decimal_i64(_css_var(base_css, "--font-weight-normal", "400"), 400)
     ThemeMaterialSemantics(
         desktop_fill_rgba: desktop,
         window_fill_rgba: window,
@@ -874,7 +894,60 @@ fn _decimal_milli(value: text, fallback: i32) -> i32:
     val trimmed = value.trim()
     if trimmed == "":
         return fallback
-    ((trimmed.to_f64() * 1000.0) + 0.5).to_i32()
+    var whole: i64 = 0
+    var fraction: i64 = 0
+    var fraction_digits = 0
+    var after_dot = false
+    var saw_digit = false
+    var negative = false
+    var index = 0
+    while index < trimmed.len():
+        val code = trimmed.char_code_at(index)
+        if index == 0 and code == 45:
+            negative = true
+        elif code == 46 and not after_dot:
+            after_dot = true
+        elif code >= 48 and code <= 57:
+            saw_digit = true
+            val digit = code - 48
+            if after_dot:
+                if fraction_digits < 3:
+                    fraction = fraction * 10 + digit
+                    fraction_digits = fraction_digits + 1
+            else:
+                whole = whole * 10 + digit
+        else:
+            return fallback
+        index = index + 1
+    if not saw_digit:
+        return fallback
+    while fraction_digits < 3:
+        fraction = fraction * 10
+        fraction_digits = fraction_digits + 1
+    val milli = whole * 1000 + fraction
+    (if negative: -milli else: milli) as i32
+
+fn _parse_decimal_i64(value: text, fallback: i64) -> i64:
+    val trimmed = value.trim()
+    if trimmed == "":
+        return fallback
+    var result: i64 = 0
+    var negative = false
+    var saw_digit = false
+    var index = 0
+    while index < trimmed.len():
+        val code = trimmed.char_code_at(index)
+        if index == 0 and code == 45:
+            negative = true
+        elif code >= 48 and code <= 57:
+            saw_digit = true
+            result = result * 10 + code - 48
+        else:
+            return fallback
+        index = index + 1
+    if not saw_digit:
+        return fallback
+    if negative: -result else: result
 
 fn _split_top_level_commas(value: text) -> [text]:
     var out: [text] = []
@@ -950,7 +1023,7 @@ fn _shadow_layers(value: text) -> [ThemeShadowLayer]:
 fn _px_int(value: text, fallback: i32) -> i32:
     val trimmed = value.trim()
     val v = trimmed.replace("px", "")
-    val parsed = v.to_i64() ?? fallback.to_i64()
+    val parsed = _parse_decimal_i64(v, fallback as i64)
     parsed as i32
 
 fn _argb_from_css(value: text, fallback: u32) -> u32:
@@ -964,7 +1037,11 @@ fn _argb_from_css(value: text, fallback: u32) -> u32:
             val alpha_text = parts[3].trim()
             if alpha_text == "":
                 return fallback
-            val alpha = _clamp_css_alpha(alpha_text.to_f64())
+            val alpha_milli = _decimal_milli(alpha_text, -1)
+            if alpha_milli < 0:
+                return fallback
+            val clamped_milli = if alpha_milli > 1000: 1000 else: alpha_milli
+            val alpha = ((clamped_milli.to_i64() * 255 + 500) / 1000).to_u32()
             return (alpha << 24) | (r << 16) | (g << 8) | b
         return fallback
     if v.starts_with("rgb(") and v.ends_with(")"):

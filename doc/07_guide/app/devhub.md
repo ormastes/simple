@@ -26,6 +26,14 @@ Run it as `bin/devhub <command> [flags]`. `bin/itf` is a permanent compat
 alias — both wrapper scripts run the exact same CLI, so any example below
 also works with `itf` substituted for `devhub`.
 
+Launch the desktop dashboard with `bin/devhub --gui`. It binds only to
+`127.0.0.1` (port `8765` by default) and opens the repo-managed Electron shell.
+Use `--browser` to open the system browser instead, or `--port N` to choose a
+different unprivileged port. The GUI is a read-only command dashboard;
+credentialed backend operations remain explicit terminal commands.
+It uses the registered Simple OS `fluid_light` default: the light, macOS-like
+liquid-glass package compiled from `config/themes/raw/fluid_os/DESIGN.md`.
+
 Two separate config files, because the email facade predates and outgrew the
 original `itf` config format:
 

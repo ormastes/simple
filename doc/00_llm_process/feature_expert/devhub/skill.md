@@ -28,6 +28,8 @@ Invoke as slash-commands (`/research`, `/design`, …); sources live in `.claude
   [storage](../../../05_design/app/devhub/facade_storage.md) /
   [email](../../../05_design/app/devhub/facade_email.md) (Gmail-operator translation tables)
 - [User guide](../../../07_guide/app/devhub.md)
+- [Terminal + GUI system spec](../../../../test/03_system/app/devhub/feature/devhub_terminal_ui_spec.spl)
+  and [generated manual](../../../06_spec/03_system/app/devhub/feature/devhub_terminal_ui_spec.md)
 - [Unit specs](../../../../test/01_unit/app/devhub/) — 23 spec files; run one at a time
   (`bin/simple test --no-session-daemon <spec>`), verify by `Failed: 0`, never a bare `PASS` line
 
@@ -38,6 +40,12 @@ Invoke as slash-commands (`/research`, `/design`, …); sources live in `.claude
   the known seed-JIT 10–99-example landmine — and are ALL green under the
   authoritative `simple run <spec>`). Verify per-file with `run` when `test`
   reports a summary-less FAIL.
+- **Terminal and desktop launch are covered by 9 modern SSpec scenarios.**
+  `bin/devhub --gui` hosts a loopback page and opens the repo-managed Electron
+  shell by default (`--browser` is the explicit fallback). The page consumes the
+  generated `fluid_light` SimpleOS snapshot: the registered Fluid OS package
+  sourced from `config/themes/raw/fluid_os/DESIGN.md`. Visual evidence is stored
+  beside the generated system manual.
 - **Tree landmine (cost a full day): stale untracked `*.smf` stubs shadow real
   modules.** ~9k Feb-dated 179-byte `.smf` stubs under `src/`+`test/` made
   `std.spec` resolve to an empty stub → every spec failed

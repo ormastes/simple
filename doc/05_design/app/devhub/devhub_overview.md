@@ -18,6 +18,15 @@ identically — no deprecation warning planned). This document is the
 top-level index for the devhub facade design; per-facade detail lives in the
 sibling files listed under §7.
 
+The optional `--gui` launch surface is a loopback-only, read-only command
+dashboard hosted by `gui_server.spl` and rendered by the repo-managed Electron
+shell (or the system browser with `--browser`). Pure document/status helpers
+live in `gui.spl`; credentialed backend execution remains owned by the CLI
+command capsules rather than being duplicated into the GUI adapter.
+The document consumes `fluid_light_theme_render_snapshot().composed_css`, so
+Fluid OS remains the single theme owner across hosted DevHub and SimpleOS boot.
+No DevHub-local palette duplicates the package tokens.
+
 **Design posture: devhub is a unification/rename layer over the former
 `itf`'s existing adapters and shared helpers (`flags.spl`, `output.spl`),
 not a rewrite.** Every adapter function referenced across these docs lives
