@@ -1,7 +1,7 @@
 # `.unwrap()`/`.expect()` on Result/Option returned the boxed enum wrapper, not the payload — JIT/native only
 
 **Date:** 2026-08-11
-**Status:** FIXED (unwrap payload extraction + Err/None trap; `.expect()` custom-message threading remains a known limitation)
+**Status:** FIXED (unwrap payload extraction + Err/None trap + `unwrap_or(default)` follow-up fix, see below; `.expect()` custom-message threading remains a known limitation)
 **Lanes affected:** Rust-seed default JIT (`simple run`) AND true `--native` (real compiled ELF). **NOT** affected: the tree-walk interpreter (`SIMPLE_EXECUTION_MODE=interpret`).
 
 ## Symptom
@@ -90,7 +90,7 @@ Registered it as a linkable runtime symbol
 
 ```rust
 "unwrap" => "rt_unwrap_or_trap",
-"unwrap_or" => "rt_unwrap_or_self",   // unchanged — `??`'s never-trapping semantics are correct as-is
+"unwrap_or" => "rt_unwrap_or_self",   // was intentionally left here — see the follow-up fix below, this was WRONG
 "expect" => { /* same rt_unwrap_or_trap call, ignoring the message arg */ }
 ```
 
@@ -182,6 +182,106 @@ value for the Ok/Some case.
 - `scripts/check/check-native-unwrap-enum-receiver.shs` — new JIT/native regression fence
 - `test/fixtures/native_unwrap_enum_receiver/{ok,some,err,none}_unwrap.spl` — fixtures for the check script
 - `test/01_unit/bugs/native_unwrap_enum_receiver_spec.spl` — interpreter-lane regression spec (pins correct semantics; cannot observe the JIT-only defect itself, see spec docstring)
+
+Follow-up fix (`unwrap_or(default)`, see section below):
+- `src/compiler_rust/runtime/src/value/objects.rs` — new `rt_unwrap_or_value`
+- `src/compiler_rust/runtime/src/value/mod.rs` — export it
+- `src/compiler_rust/common/src/runtime_symbols.rs` — register the symbol name
+- `src/compiler_rust/compiler/src/codegen/runtime_sffi.rs` — register its `(I64, I64) -> I64` signature
+- `src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs` — wire `unwrap_or` to it, and add it to the int-arg-boxing allowlist
+- `src/runtime/runtime_native.c` — C-runtime `rt_unwrap_or_value` (precomputed discriminant-hash constants)
+- `src/runtime/runtime.h` — declare it
+- `scripts/check/check-native-unwrap-enum-receiver.shs` — 4 new `unwrap_or` rows, `FIX_EPOCH` bumped
+- `test/fixtures/native_unwrap_enum_receiver/{ok,some,err,none}_unwrap_or.spl` — new fixtures
+
+## Follow-up fix: `unwrap_or(default)` had the SAME bug (2026-08-11, later same day)
+
+The first pass of this fix deliberately left `"unwrap_or" => "rt_unwrap_or_self"`
+untouched, reasoning that `rt_unwrap_or_self` (the `??`-operator helper) was
+merely a never-trapping variant — correct enough for `.unwrap_or(default)`.
+That reasoning was **wrong**: `rt_unwrap_or_self` special-cases ONLY the
+reserved `OPTION_ENUM_ID` and returns every other enum, including `Result`,
+**unchanged** — and takes no `default` argument at all, so it could not have
+implemented `.unwrap_or(default)` correctly even for the cases it touched.
+
+Verified on a fresh build: `Result.Ok(1).unwrap_or(9)` printed the boxed
+`<enum@0x...>` wrapper (want `1`); `Result.Err("x").unwrap_or(9)` printed the
+boxed wrapper too (want `9`) — both defective under JIT and `--native`.
+`Option.Some(1).unwrap_or(9)` and `Option.None.unwrap_or(9)` happened to
+already work correctly (`1`, `9`) because Option alone has the reserved
+`OPTION_ENUM_ID` fast path. This exactly mirrors the original `.unwrap()`
+asymmetry (Option worked, Result didn't) that was the first clue in the
+original writeup above.
+
+### Fix
+
+Added `rt_unwrap_or_value(receiver, default)` beside `rt_unwrap_or_trap` in
+`src/compiler_rust/runtime/src/value/objects.rs`, using the same
+discriminant-hash technique (Result has no reserved enum_id, so Ok/Err are
+identified by hashing the variant name, same as `is_ok`/`is_err` in codegen)
+— but returning `default` instead of trapping on Err/None:
+
+```rust
+"unwrap_or" => "rt_unwrap_or_value",   // was "rt_unwrap_or_self" — see follow-up above
+```
+
+Implemented in **both** runtimes per the three-implementations rule (the
+interpreter already had correct semantics and was untouched):
+- Rust: `runtime/src/value/objects.rs::rt_unwrap_or_value`, exported from
+  `runtime/src/value/mod.rs`, registered in
+  `common/src/runtime_symbols.rs::RUNTIME_SYMBOL_NAMES` and
+  `compiler/src/codegen/runtime_sffi.rs` with signature `(I64, I64) -> I64`.
+- C: `src/runtime/runtime_native.c::rt_unwrap_or_value`, declared in
+  `src/runtime/runtime.h`. Since the discriminant hash
+  (`std::collections::hash_map::DefaultHasher`) is computed at Rust-codegen
+  time, not runtime, the four needed constants (`Ok`/`Err`/`Some`/`None`
+  hashes) were precomputed once via a standalone `rustc` snippet and hardcoded
+  as `RT_DISC_*` macros rather than reimplementing SipHash in C.
+- `try_compile_builtin_method_call`
+  (`compiler/src/codegen/instr/closures_structs.rs`) rewired `"unwrap_or"` to
+  the new symbol. `"unwrap"`/`??`'s `rt_unwrap_or_self` are UNCHANGED.
+
+A second, independent bug surfaced during verification: the generic call-arg
+builder in `try_compile_builtin_method_call` passes non-receiver args as
+UNBOXED raw native ints (the same convention documented above for dict
+keys/`rt_index_get` etc.), but `rt_unwrap_or_value`'s `default` argument is a
+full `RuntimeValue` return slot, not a raw int — so `Err(x).unwrap_or(9)`
+initially printed `<invalid-heap:0x9>` (the untagged `9` misread as a
+heap-pointer tag) instead of `9`. Fixed by adding `"rt_unwrap_or_value"` to
+the existing `box_dict_key` int-tagging allowlist (same `(v << 3) | INT(0)`
+tagging already used for dict-key ints), same file.
+
+### Red/green evidence (fresh seed build, `/mnt/data/cargo-target-unwrapor/release/simple`)
+
+RED (pre-follow-up-fix):
+```
+Ok(1).unwrap_or(9)    -> <enum@0x...>   (want 1)
+Err("x").unwrap_or(9) -> <enum@0x...>   (want 9)
+Some(1).unwrap_or(9)  -> 1              (already correct)
+None.unwrap_or(9)     -> 9              (already correct)
+```
+
+GREEN (post-fix, JIT default lane):
+```
+Ok(1).unwrap_or(9)    -> 1
+Err("x").unwrap_or(9) -> 9
+Some(1).unwrap_or(9)  -> 1
+None.unwrap_or(9)     -> 9
+```
+
+GREEN, true `--native` lane (real compiled ELF via `simple compile ... --native`):
+same four values, `1 9 1 9`, exit 0 in all four cases.
+
+Negative control: `.unwrap()` (Err/None trap) and the `??` operator
+(`nil ?? 5` -> `5`, `3 ?? 5` -> `3`... second case pre-existing/unrelated AOT
+`if val` defect, not this change) both re-verified unchanged after the fix —
+see `reference_aot_if_val_always_some_and_eq_nil_always_false` in the
+project's compiler-defects index for that separate, pre-existing gap.
+
+`scripts/check/check-native-unwrap-enum-receiver.shs` extended with 4 new
+`unwrap_or` rows (`ok/some/err/none_unwrap_or.spl` fixtures under
+`test/fixtures/native_unwrap_enum_receiver/`) and its `FIX_EPOCH` bumped to
+the new fix's build timestamp; full script run: `PASS — 8 checked`.
 
 ## Process note: concurrent working-copy clobber
 

@@ -381,6 +381,51 @@ pub extern "C" fn rt_unwrap_or_trap(value: RuntimeValue) -> RuntimeValue {
     value
 }
 
+/// Unwrap the payload of a present `Result.Ok`/`Option.Some` value; return
+/// `default` (never trap) if the receiver is a genuine `Result.Err`/
+/// `Option.None`. This is `.unwrap_or(default)` METHOD-CALL semantics —
+/// distinct from BOTH sibling helpers: `rt_unwrap_or_self` backs the `??`
+/// nil-coalesce OPERATOR (single-arg, no default, only special-cases the
+/// reserved `OPTION_ENUM_ID`), and `rt_unwrap_or_trap` backs `.unwrap()`/
+/// `.expect()` (aborts on Err/None instead of returning a fallback).
+/// `.unwrap_or(default)` was routed through `rt_unwrap_or_self` (ignoring
+/// `default` entirely), which only correctly special-cases Option: a
+/// `Result` receiver (no reserved enum_id, unlike Option) hit the "return
+/// self" branch and returned the boxed `Result` enum unchanged for BOTH
+/// `Ok` and `Err` receivers instead of the payload / the default — see
+/// doc/08_tracking/bug/native_unwrap_returns_enum_wrapper_instead_of_payload_2026-08-11.md.
+/// Uses the same discriminant-hash technique as `rt_unwrap_or_trap` to
+/// identify Ok/Err since Result has no reserved enum_id.
+#[no_mangle]
+pub extern "C" fn rt_unwrap_or_value(value: RuntimeValue, default: RuntimeValue) -> RuntimeValue {
+    let Some(p) = get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum) else {
+        // Not a boxed enum — bare/flat-nullable payload convention: return
+        // the raw value unchanged (matches `rt_unwrap_or_self`/`rt_unwrap_or_trap`).
+        return value;
+    };
+    let (enum_id, discriminant, payload) = unsafe { ((*p).enum_id, (*p).discriminant, (*p).payload) };
+
+    if enum_id == OPTION_ENUM_ID {
+        if discriminant == hash_variant_discriminant("Some") {
+            return payload;
+        }
+        if discriminant == hash_variant_discriminant("None") {
+            return default;
+        }
+        return value;
+    }
+
+    if discriminant == hash_variant_discriminant("Ok") {
+        return payload;
+    }
+    if discriminant == hash_variant_discriminant("Err") {
+        return default;
+    }
+
+    // Arbitrary user enum: preserve the pre-existing "return self" fallback.
+    value
+}
+
 /// Get the payload of an enum value
 #[no_mangle]
 pub extern "C" fn rt_enum_payload(value: RuntimeValue) -> RuntimeValue {

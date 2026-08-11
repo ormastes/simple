@@ -1756,7 +1756,15 @@ fn try_compile_builtin_method_call<M: Module>(
         // itself for `Result.Ok(v).unwrap()` instead of `v` — see
         // doc/08_tracking/bug/native_unwrap_returns_enum_wrapper_instead_of_payload_2026-08-11.md.
         "unwrap" => "rt_unwrap_or_trap",
-        "unwrap_or" => "rt_unwrap_or_self",
+        // `.unwrap_or(default)` — real method-call semantics: return the
+        // Ok/Some payload, or `default` on Err/None, for ANY enum receiver
+        // (Result, Option, ...), never trapping. Distinct from
+        // `rt_unwrap_or_self`, which the `??` operator alone must keep using
+        // (see the `??` note above `.unwrap()`) — this call site now takes
+        // TWO args (receiver, default), which the generic call-arg builder
+        // below already threads through unmodified.
+        // See doc/08_tracking/bug/native_unwrap_returns_enum_wrapper_instead_of_payload_2026-08-11.md.
+        "unwrap_or" => "rt_unwrap_or_value",
         // `.expect(msg)` — same Ok/Some-payload-or-trap semantics as
         // `.unwrap()` (see the comment above). The custom message argument is
         // not threaded through to the trap text yet (`rt_unwrap_or_trap`
@@ -2078,9 +2086,16 @@ fn try_compile_builtin_method_call<M: Module>(
     // worked, because the INT tag is 0 and so a raw 0 is indistinguishable from a
     // tagged 0. That "index 0 works, every other index silently fails" signature
     // is the tell for a missing tag on this path.
+    // `rt_unwrap_or_value`'s second arg (`default`) is a RuntimeValue return
+    // slot exactly like a dict value, and hits the same bare-arg-arrives-
+    // UNBOXED-int problem as the dict-key case above: `Result.Err(e).unwrap_or
+    // (9)` passed the raw untagged `9` straight through, which the runtime
+    // then read back as a heap-pointer tag and printed `<invalid-heap:0x9>`
+    // instead of `9`. See
+    // doc/08_tracking/bug/native_unwrap_returns_enum_wrapper_instead_of_payload_2026-08-11.md.
     let box_dict_key = matches!(
         runtime_func,
-        "rt_index_get" | "rt_dict_remove" | "rt_collection_remove" | "rt_contains"
+        "rt_index_get" | "rt_dict_remove" | "rt_collection_remove" | "rt_contains" | "rt_unwrap_or_value"
     );
     let key_is_int = matches!(
         ctx.vreg_types.get(args.first().unwrap_or(&receiver)).copied(),
