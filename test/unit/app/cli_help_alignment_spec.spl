@@ -77,10 +77,8 @@ fn source_lines(path: text) -> [text]:
 # Extractors — each reads a real source file and returns the command set.
 # ---------------------------------------------------------------------------
 
-fn extract_dispatch_commands() -> [text]:
-    """The executing elif chain: every `str_eq(first, "X")` literal."""
-    var out: [text] = []
-    val needle = "str_eq(first, \""
+fn scan_dispatch_needle(acc: [text], needle: text) -> [text]:
+    var out = acc
     for line in source_lines(DISPATCH_SRC):
         var rest = line
         while true:
@@ -95,6 +93,22 @@ fn extract_dispatch_commands() -> [text]:
             if is_command_token(tok):
                 out = push_unique(out, tok)
             rest = rest.substring(close + 1, rest.len())
+    out
+
+fn extract_dispatch_commands() -> [text]:
+    """Every executing command branch in the CLI entry point.
+
+    Two forms execute, and BOTH must be counted or a real command reads as
+    drift: the main `str_eq(first, "X")` elif chain, and the handful of
+    branches that run BEFORE the chain against the unfiltered argv with
+    `str_eq(args[0], "X")` (`native-build` bypasses `filter_internal_flags`
+    so its backend flags survive). Counting only the first form reported
+    `native-build` as both a phantom and a dead table entry on 2026-08-11
+    when it is in fact reachable.
+    """
+    var out: [text] = []
+    out = scan_dispatch_needle(out, "str_eq(first, \"")
+    out = scan_dispatch_needle(out, "str_eq(args[0], \"")
     out
 
 fn extract_table_commands() -> [text]:
@@ -196,8 +210,9 @@ describe "CLI No Phantom Commands":
     """
 
     it "every command in help text has a dispatch branch":
-        """MEASURED 2026-08-11: RED — 1 phantom, `check-capsule`, is
-        advertised in help with no dispatch branch. See
+        """MEASURED 2026-08-11: was RED with 1 phantom, `check-capsule`. Fixed
+        by wiring the existing `handle_check_capsule` implementation into the
+        dispatch chain. See
         doc/08_tracking/bug/cli_help_dispatch_drift_2026-08-11.md.
         Do not delete this assertion to obtain green; fix help or dispatch."""
         val phantoms = missing_from(extract_help_commands(),
@@ -218,7 +233,11 @@ describe "CLI Dispatch Table Reachability":
     """
 
     it "every dispatch-table entry has a dispatch branch":
-        """MEASURED 2026-08-11: RED — 24 table entries are unreachable. See
+        """MEASURED 2026-08-11: was RED with 24 unreachable table entries.
+        Fixed: 22 were wired into the dispatch chain (every implementation was
+        verified present), `bench` was deleted from the table (its app no
+        longer exists), and `native-build` was never really dead — it is
+        dispatched before the chain and the extractor now sees it. See
         doc/08_tracking/bug/cli_help_dispatch_drift_2026-08-11.md."""
         val dead = missing_from(extract_table_commands(),
             extract_dispatch_commands())
@@ -232,23 +251,27 @@ describe "CLI Help Coverage Ratchet":
     """
     ## Undocumented Dispatch Commands
 
-    44 dispatchable commands have no help text (measured 2026-08-11). Driving
-    that to zero is tracked separately; what this spec enforces now is that the
-    number never GROWS. Adding a new command without help text turns this RED
+    44 dispatchable commands had no help text when this spec was written
+    (measured 2026-08-11). Help text was added for all of them, so the ratchet
+    is now at its floor: ZERO. Every dispatchable command must be advertised by
+    `print_cli_help()`. Adding a new command without help text turns this RED
     on the very next run.
+
+    The baseline may only ever DECREASE. It is now 0 and cannot be lowered
+    further, so the companion staleness guard that used to require
+    `undocumented > 0` has been replaced by the exact-equality assertion below
+    — a strictly stronger check, not a relaxed one.
     """
 
-    val UNDOCUMENTED_BASELINE: i64 = 44
+    val UNDOCUMENTED_BASELINE: i64 = 0
 
     it "the undocumented-command count does not exceed its baseline":
         val undocumented = missing_from(extract_dispatch_commands(),
             extract_help_commands())
         expect(undocumented.len()).to_be_less_than(UNDOCUMENTED_BASELINE + 1)
 
-    it "the baseline is not stale — it still reflects real undocumented commands":
-        # Guards the ratchet from the opposite side: if the drift were actually
-        # fixed, the baseline would be stale and must be tightened rather than
-        # left as permanent slack.
+    it "every dispatchable command is advertised in help text":
+        # Exact equality, not a bound: names the offenders when it fails.
         val undocumented = missing_from(extract_dispatch_commands(),
             extract_help_commands())
-        expect(undocumented.len()).to_be_greater_than(0)
+        expect(undocumented).to_equal([])
