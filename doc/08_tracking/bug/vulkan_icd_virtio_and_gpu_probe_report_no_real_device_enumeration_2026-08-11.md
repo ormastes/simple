@@ -61,3 +61,46 @@ side honestly reports `ProviderStatus.unavailable` rather than a fabricated
 passing record — the spec proves the framework correctly refuses to treat
 `unavailable` as a pass, per `.claude/rules/board-runnable.md` and the
 counterpart plan's "unavailable is never a pass" rule.
+
+## Status update (lane H1, 2026-08-11): `vulkan_icd_virtio.spl` half FIXED (fail-closed)
+
+`_venus_transport_send` no longer fabricates success. It now returns
+`Result<VenusCallResult, VenusTransportError>`, where `VenusTransportError`
+is `Unavailable(text)` or `Failed(text)` — a real, honest device-availability
+check (`_venus_device_available`, currently and correctly always `false`,
+since no real virtio-gpu transport is wired up) gates the only path that used
+to hand out an incrementing counter as a "handle". `VenusCallResult` gained a
+typed `status: VenusCallStatus` field (`Ok`/`Unavailable`/`Failed`) so a
+caller cannot mistake "unavailable" for "success" by checking only the
+`is_ok` boolean, and so a genuine future device-side error (`Failed`) will
+not be misread as "device not present" (`Unavailable`) or vice versa.
+
+Every public `venus_icd_*` entry point (`create_instance`, `create_device`,
+`allocate_memory`, `create_buffer`, `destroy_instance`) now reports the typed
+unavailable/failed status instead of `is_ok: true`, and issues no handle when
+unavailable. `soc_profile.spl` was not touched — this does not make venus
+work, it makes it stop lying about working.
+
+Caller impact: `boundary_enumeration_provider.spl`'s
+`_venus_transport_reports_device_payload()` already only trusted
+`device.is_ok and device.payload_size > 0`, which was always false anyway
+(payload_size was always 0), so `candidate_enumeration_is_available()`'s
+verdict is unchanged — this fix closes a fail-open hole in the ICD itself
+without altering that caller's already-correct conclusion.
+
+Proof: `test/01_unit/os/vulkan/venus_icd_fail_closed_spec.spl` (5 examples,
+all pass against the fixed code; sabotage-reintroducing the always-true
+`_venus_device_available` body turned 3 of 5 RED, naming the fabricated
+success — `assert_equal failed: expected 0, got 4` on the handle-issuance
+check — before the fix was restored). The two pre-existing specs
+(`test/01_unit/` and `test/unit/` duplicate trees,
+`lib/nogc_async_mut/gpu/vulkan_icd_virtio_spec.spl`) were updated to assert
+the new honest behaviour instead of the old fabricated-success behaviour
+(12 examples each, all pass); `device_enumeration_boundary_spec.spl` needed
+no changes (17 examples, all still pass).
+
+**Still open:** `gpu_vendor_probe.spl`'s five vendor probes (owned by a
+different lane, H3/probe-adapter) were not touched here — see that lane's
+scope. A real virtio-gpu transport (ring buffer I/O, Venus
+`VK_STRUCTURE_TYPE_*` decode) still does not exist; `_venus_device_available`
+is the single wire-in point for when it does.
