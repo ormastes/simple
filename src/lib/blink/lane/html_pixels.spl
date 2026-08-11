@@ -86,15 +86,38 @@
 #   - INLINE `style=` ATTRIBUTES ARE NOT APPLIED. `blink.css_parser` can parse
 #     them (`parse_inline_style`), but `blink.style.cascade.resolve_style`
 #     consults only the stylesheet, so nothing feeds them in.
-#   - ONLY `<style>` ELEMENT CSS IS SEEN. No `<link rel=stylesheet>`, no author
-#     stylesheet beyond the document, and no user-agent default stylesheet — so
-#     an unstyled document lays out as zero-sized boxes and renders blank white.
+#   - STYLESHEET SOURCES: PARTIALLY CLOSED. `blink_lane_stylesheet` now merges
+#     a real user-agent default stylesheet
+#     (`blink.style.user_agent_stylesheet.user_agent_stylesheet`, itself a
+#     `CssStyleSheet` produced by the same `parse_css`/`tokenize_css` the
+#     document's own `<style>` text goes through — no parallel default-value
+#     representation) IN FRONT OF the document's own `<style>` rules, so a
+#     `<div>` now defaults to `display: block`, a `<span>` to `display:
+#     inline`, `<p>`/`<h1>`-`<h6>` get default sizes/margins, and `<a>`
+#     defaults to blue — all overridable by any author rule, per that
+#     module's header. `<link rel=stylesheet>` remains OPEN and not merely
+#     deferred by oversight: this lane's entry point takes a bare `html: text`
+#     with no stylesheet-fetch or external-stylesheet-source parameter
+#     anywhere in its signature or `app.browser.render_lane`'s adapter
+#     signature, so honouring `<link>` needs either a real fetch capability
+#     (out of scope for an in-memory HTML-string lane) or a new parameter
+#     threaded through both this function and the adapter — a signature
+#     change, not a stylesheet-resolution change, and therefore a decision for
+#     whoever owns that interface next, not something to invent unasked here.
+#     Separately, STILL TRUE even with the UA sheet: an element with no
+#     explicit `width`/`height` still lays out at 0x0, because
+#     `blink.layout.style_bridge.geometry_from_style` reads `style.width`/
+#     `style.height` directly with no "auto" box-sizing algorithm — a layout
+#     limitation, not a missing default declaration (no UA stylesheet on the
+#     web declares `div { width: <n> }` either). See
+#     `blink.style.user_agent_stylesheet`'s header for the full statement.
 
 use std.blink.dom.node.{DomTree, DomNode, NodeType}
 use std.blink.html_parser.tokenizer.{tokenize_html}
 use std.blink.html_parser.tree_builder.{build_html_tree}
 use std.blink.css_parser.tokenizer.{tokenize_css}
 use std.blink.css_parser.parser.{parse_css, CssStyleSheet}
+use std.blink.style.user_agent_stylesheet.{user_agent_stylesheet, merge_stylesheets}
 use std.blink.layout.style_bridge.{build_styled_layout}
 use std.blink.paint.style_paint.{paint_chunks_from_styled_layout}
 use std.blink.paint.text_paint.{text_paint_chunks_from_styled_layout}
@@ -137,8 +160,13 @@ pub fn blink_lane_document_css(tree: DomTree) -> text:
     css
 
 pub fn blink_lane_stylesheet(tree: DomTree) -> CssStyleSheet:
-    """Parse the document's own `<style>` CSS into a blink stylesheet."""
-    parse_css(tokenize_css(blink_lane_document_css(tree)))
+    """The document's own `<style>` CSS parsed into a blink stylesheet, with
+    the user-agent default stylesheet merged in ahead of it so an unstyled
+    element still gets a real `display`/size default rather than the CSS
+    zero-initial-value floor. See `blink.style.user_agent_stylesheet`'s
+    header and this file's header for what is and is not covered."""
+    val document_sheet = parse_css(tokenize_css(blink_lane_document_css(tree)))
+    merge_stylesheets(user_agent_stylesheet(), document_sheet)
 
 # The lane entry point. Signature-identical to the live lane's
 # `render_html_to_pixel_array` so the two are interchangeable behind a flag.

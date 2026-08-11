@@ -1,0 +1,193 @@
+# @cover src/lib/blink/style/user_agent_stylesheet.spl 85%
+# @req REQ-BLINK-UA-STYLESHEET-001
+# @req REQ-BLINK-UA-STYLESHEET-002
+# @req REQ-BLINK-UA-STYLESHEET-003
+"""
+# Blink User-Agent Default Stylesheet
+
+**Category:** Browser / Blink
+**Status:** Active
+
+## Overview
+
+Without ANY author CSS, a real browser still lays out `<div>` as a block box
+and `<span>` as inline, gives `<p>`/`<h1>`-`<h6>` real sizes and margins, and
+colours `<a>` blue. Before this module, blink's cascade had no such concept:
+`computed_style_default()` is the CSS *initial* value set, which is
+`display: inline` and `width`/`height: 0px` for every element regardless of
+tag — so an unstyled document rendered blank.
+
+`user_agent_stylesheet()` supplies a real `CssStyleSheet`, built through the
+SAME `tokenize_css`/`parse_css` the document's own `<style>` text goes
+through, and `merge_stylesheets` puts it in front of the document's rules so
+any author rule — even one of equal selector specificity — wins.
+
+@manual_section Browser Rendering
+"""
+
+use std.spipe.*
+use std.blink.dom.node.{DomTree, dom_tree_new}
+use std.blink.entity.computed_style.{Display, computed_style_default}
+use std.blink.css_parser.parser.{CssStyleSheet, CssStyleRule, CssDeclaration}
+use std.blink.style.cascade.{resolve_style}
+use std.blink.style.user_agent_stylesheet.{
+    USER_AGENT_CSS, user_agent_stylesheet, merge_stylesheets
+}
+
+fn _empty_sheet() -> CssStyleSheet:
+    var rules: [CssStyleRule] = []
+    CssStyleSheet(rules: rules, errors: [])
+
+fn _one_rule_sheet(sel: text, prop: text, value: text) -> CssStyleSheet:
+    var ds: [CssDeclaration] = []
+    ds.push(CssDeclaration(property: prop, value: value, important: false))
+    var rules: [CssStyleRule] = []
+    rules.push(CssStyleRule(selector: sel, declarations: ds))
+    CssStyleSheet(rules: rules, errors: [])
+
+# A single element of `tag`, appended straight under the document root.
+fn _one_element_tree(tag: text) -> (DomTree, i64):
+    var tree = dom_tree_new()
+    val el = tree.create_element(tag)
+    tree.append_child(tree.root_id, el)
+    (tree, el)
+
+describe "user_agent_stylesheet: non-vacuous parse":
+    """
+    As a maintainer, I want a broken UA_CSS string (a stray brace, an
+    unrecognised token run) to show up as zero rules parsed rather than as a
+    stylesheet that silently matches nothing, so a typo here is caught by this
+    spec instead of by every consumer going quiet at once.
+    """
+
+    # @req REQ-BLINK-UA-STYLESHEET-001
+    it "parses to a non-empty rule list":
+        step("parse USER_AGENT_CSS the same way the document's own <style> is parsed")
+        val sheet = user_agent_stylesheet()
+        step("expect more than a handful of rules — the source declares 20+ selectors")
+        expect(sheet.rules.len() > 20).to_equal(true)
+
+    # @req REQ-BLINK-UA-STYLESHEET-001
+    it "carries no comma-grouped selector, which this engine's matcher cannot match":
+        step("scan every parsed rule's selector text for a literal comma")
+        # css_parser.selector.parse_selector has no selector-list support; a
+        # rule written as "div, span { ... }" would parse as ONE rule whose
+        # selector is the whole group and then never match anything. If this
+        # ever regresses, every UA default for the tags after the first comma
+        # silently stops applying — catch it here, not by staring at pixels.
+        val sheet = user_agent_stylesheet()
+        var i = 0
+        var found_comma = false
+        while i < sheet.rules.len():
+            val sel = sheet.rules[i as i32].selector
+            if sel.contains(","):
+                found_comma = true
+            i = i + 1
+        expect(found_comma).to_equal(false)
+
+describe "user_agent_stylesheet: display defaults reach a real element":
+    """
+    As a browser engine, I want an unstyled `<div>` to resolve to
+    `display: block` and an unstyled `<span>` to `display: inline` through the
+    SAME cascade every author rule goes through, not a special-cased default,
+    so the UA sheet composes with author CSS instead of living beside it.
+    """
+
+    # @req REQ-BLINK-UA-STYLESHEET-002
+    it "a bare <div> resolves to display: block":
+        step("build a lone <div> and resolve it against the UA sheet with no author CSS")
+        val (tree, el) = _one_element_tree("div")
+        val merged = merge_stylesheets(user_agent_stylesheet(), _empty_sheet())
+        val result = resolve_style(tree, el, computed_style_default(), merged)
+        expect(result.display == Display.Block).to_equal(true)
+
+    # @req REQ-BLINK-UA-STYLESHEET-002
+    it "a bare <span> resolves to display: inline":
+        step("build a lone <span> and resolve it against the UA sheet with no author CSS")
+        val (tree, el) = _one_element_tree("span")
+        val merged = merge_stylesheets(user_agent_stylesheet(), _empty_sheet())
+        val result = resolve_style(tree, el, computed_style_default(), merged)
+        expect(result.display == Display.Inline).to_equal(true)
+
+    # @req REQ-BLINK-UA-STYLESHEET-002
+    it "sabotage check: a tag the UA sheet has no rule for stays at the CSS initial value":
+        step("resolve an <svg>, which USER_AGENT_CSS does not mention, against the UA sheet")
+        val (tree, el) = _one_element_tree("svg")
+        val merged = merge_stylesheets(user_agent_stylesheet(), _empty_sheet())
+        val result = resolve_style(tree, el, computed_style_default(), merged)
+        step("expect the CSS initial value (inline), proving the div/span result above is a real match, not every element defaulting to block")
+        expect(result.display == Display.Inline).to_equal(true)
+
+    # @req REQ-BLINK-UA-STYLESHEET-002
+    it "an h1 gets a default font-size and vertical margins":
+        step("resolve a lone <h1> against the UA sheet")
+        val (tree, el) = _one_element_tree("h1")
+        val merged = merge_stylesheets(user_agent_stylesheet(), _empty_sheet())
+        val result = resolve_style(tree, el, computed_style_default(), merged)
+        expect(result.display == Display.Block).to_equal(true)
+        expect(result.font_size.value > 31.9 and result.font_size.value < 32.1).to_equal(true)
+        expect(result.font_size.unit).to_equal("px")
+        expect(result.margin_top.value > 20.9 and result.margin_top.value < 21.1).to_equal(true)
+        expect(result.margin_bottom.value > 20.9 and result.margin_bottom.value < 21.1).to_equal(true)
+
+    # @req REQ-BLINK-UA-STYLESHEET-002
+    it "an <a> gets the default blue link colour":
+        step("resolve a lone <a> against the UA sheet")
+        val (tree, el) = _one_element_tree("a")
+        val merged = merge_stylesheets(user_agent_stylesheet(), _empty_sheet())
+        val result = resolve_style(tree, el, computed_style_default(), merged)
+        expect(result.color.b > 0.99).to_equal(true)
+        expect(result.color.r < 0.01).to_equal(true)
+        expect(result.color.g < 0.01).to_equal(true)
+
+describe "merge_stylesheets: the UA sheet is strictly lowest priority":
+    """
+    As a page author, I want my `<style>` rule to win over the UA default even
+    when both rules are equally-specific bare type selectors (the common
+    case), because the alternative — a browser that ignores my CSS — is not a
+    browser anyone would use.
+    """
+
+    # @req REQ-BLINK-UA-STYLESHEET-003
+    it "an author type-selector rule of equal specificity overrides the UA default":
+        step("author `div { display: inline }`, contradicting the UA default of block")
+        val (tree, el) = _one_element_tree("div")
+        val author = _one_rule_sheet("div", "display", "inline")
+        val merged = merge_stylesheets(user_agent_stylesheet(), author)
+        val result = resolve_style(tree, el, computed_style_default(), merged)
+        step("expect the author's inline to win, not the UA sheet's block")
+        expect(result.display == Display.Inline).to_equal(true)
+
+    # @req REQ-BLINK-UA-STYLESHEET-003
+    it "an author id-selector rule overrides the UA default on specificity alone":
+        step("give the element id=go and author `#go { display: inline }`")
+        var tree = dom_tree_new()
+        val el = tree.create_element("div")
+        tree.append_child(tree.root_id, el)
+        tree.set_attribute(el, "id", "go")
+        val author = _one_rule_sheet("#go", "display", "inline")
+        val merged = merge_stylesheets(user_agent_stylesheet(), author)
+        val result = resolve_style(tree, el, computed_style_default(), merged)
+        expect(result.display == Display.Inline).to_equal(true)
+
+    # @req REQ-BLINK-UA-STYLESHEET-003
+    it "sabotage check: with no author rule the UA default alone still applies":
+        step("resolve the same <div> against the UA sheet merged with an empty author sheet")
+        val (tree, el) = _one_element_tree("div")
+        val merged = merge_stylesheets(user_agent_stylesheet(), _empty_sheet())
+        val result = resolve_style(tree, el, computed_style_default(), merged)
+        step("expect block: proves the override above is really the author rule winning, not display defaulting to inline regardless")
+        expect(result.display == Display.Block).to_equal(true)
+
+    # @req REQ-BLINK-UA-STYLESHEET-003
+    it "merges rule counts additively: UA rules then document rules, nothing dropped":
+        step("merge the UA sheet with a two-rule author sheet")
+        var ds: [CssDeclaration] = []
+        ds.push(CssDeclaration(property: "color", value: "red", important: false))
+        var rules: [CssStyleRule] = []
+        rules.push(CssStyleRule(selector: "div", declarations: ds))
+        rules.push(CssStyleRule(selector: "span", declarations: ds))
+        val author = CssStyleSheet(rules: rules, errors: [])
+        val ua = user_agent_stylesheet()
+        val merged = merge_stylesheets(ua, author)
+        expect(merged.rules.len()).to_equal(ua.rules.len() + 2)

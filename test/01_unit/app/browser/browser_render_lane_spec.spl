@@ -198,3 +198,65 @@ describe "where blink still differs from the live lane today":
         val tomato = _blink(_page("tomato"))
         expect(_count(tomato, RED)).to_equal(0)
         expect(_count(tomato, WHITE)).to_equal(150)
+
+describe "the user-agent default stylesheet — exit criterion 5, partially closed":
+    """
+    As a browser user, when a page carries no author CSS at all for one
+    element, I still want that element to look like SOMETHING a real browser
+    would show — not the CSS zero-initial-value floor of "invisible and
+    black" — while any author rule for that same element still wins. This is
+    the observable, through-the-adapter half of `blink.style
+    .user_agent_stylesheet`: the UA sheet reaching a real render, and losing
+    cleanly to author CSS the moment there is any.
+    """
+
+    # Opaque blue, ARGB 0xFF0000FF as an unsigned 32-bit value (4278190335) —
+    # the UA sheet's `a { color: blue }` default.
+    val BLUE: u32 = 4278190335u32
+
+    # An `<a>` with no colour declared anywhere, sized via a plain `a { ... }`
+    # type-selector author rule rather than an inline `style=` attribute —
+    # deliberately, not for style: `blink.style.cascade`'s inline-style path
+    # (`tree.get_attribute(node_id, "style")` -> `parse_declarations`) hits a
+    # pre-existing, unrelated cross-module symbol collision the moment this
+    # spec's transitive imports pull in BOTH blink's
+    # `css_parser.parser.parse_declarations` (returns `[CssDeclaration]`) and
+    # the live engine's own same-named `parse_declarations` (returns
+    # `[CssDecl]`) — the interpreter resolves a class by NAME across modules,
+    # so calling through the wrong one raises "class `CssDecl` has no field
+    # named `important`". Reproduced independently of every change in this
+    # file: the pre-existing "ignores an inline style=" example below hits
+    # the identical error on `main`. A plain type-selector rule never reaches
+    # that code path, so it is what this file's own sizing uses.
+    # No `display` is set either: this lane's layout stacks every box the
+    # same way regardless of `display` (a separate, layout-side gap stated in
+    # `html_pixels.spl`'s header), so `display` itself has no pixel signature
+    # through this adapter today — colour is the one UA default this lane can
+    # observe end to end.
+    fn _link_page(extra_style: text) -> text:
+        "<html><body><style>" +
+            "body { background-color: white; width: 20px; height: 10px; } " +
+            "a { width: 10px; height: 5px; } " +
+            extra_style +
+            "</style><a>Hi</a></body></html>"
+
+    # @req REQ-BLINK-UA-STYLESHEET-002
+    it "an <a> with no author colour rule paints its glyphs the UA default blue":
+        step("render a page whose only <a> styling is its own inline size")
+        val pixels = _blink(_link_page(""))
+
+        step("some pixels are the UA sheet's default link blue, not the page's black initial colour")
+        # `blink.style.cascade`'s CSS initial `color` is black — if the UA
+        # sheet were not reaching the cascade, these glyph pixels would come
+        # out black instead, and this count would be 0.
+        expect(_count(pixels, BLUE) > 0).to_equal(true)
+
+    # @req REQ-BLINK-UA-STYLESHEET-003
+    it "sabotage check: an author `a { color: ... }` rule still overrides the UA default":
+        step("render the same page, this time with an author rule for <a>'s colour")
+        val pixels = _blink(_link_page("a { color: red; }"))
+
+        step("no blue glyph pixels: the author rule beat the UA default, not the reverse")
+        expect(_count(pixels, BLUE)).to_equal(0)
+        step("red glyph pixels appear instead, proving text painted at all")
+        expect(_count(pixels, RED) > 0).to_equal(true)
