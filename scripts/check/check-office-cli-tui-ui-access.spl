@@ -44,10 +44,21 @@ fn _fail(message: text) -> i32:
     print "failure=" + message
     1
 
-fn _runtime() -> text:
+fn _simple_binary() -> text:
+    val client = env_get("SIMPLE_UI_CLIENT")
+    if client != nil and client != "": return client
     val configured = env_get("SIMPLE_BINARY")
     if configured == nil: return ""
     configured
+
+fn _office_binary(simple_binary: text) -> text:
+    val configured = env_get("OFFICE_BINARY")
+    if configured == nil or configured == "": return simple_binary
+    configured
+
+fn _uses_standalone_office() -> bool:
+    val configured = env_get("OFFICE_BINARY")
+    configured != nil and configured != ""
 
 fn _run_root(run_id: text) -> text:
     EVIDENCE_BASE + "/runs/" + run_id
@@ -120,7 +131,7 @@ fn _json_text(body: text, key: text) -> text:
 fn _protocol_json_ok(body: text) -> bool:
     body.contains("\"schema\":\"simple.access/v1\"")
 
-fn _runtime_artifact_provenance(runtime: text, root: text) -> (bool, text, i64):
+fn _artifact_provenance(binary: text, root: text, name: text) -> (bool, text, i64):
     """Bind this run to the configured executable's observed file identity.
 
     `file_hash_sha256` and `file_modified_time` are the canonical runtime/file
@@ -128,13 +139,13 @@ fn _runtime_artifact_provenance(runtime: text, root: text) -> (bool, text, i64):
     command, so a stale or swapped deployed tool cannot borrow another run's
     receipt.
     """
-    val digest = file_hash_sha256(runtime)
-    val mtime = file_modified_time(runtime)
+    val digest = file_hash_sha256(binary)
+    val mtime = file_modified_time(binary)
     val valid = digest.len() == 64 and mtime > 0
-    val receipt = "runtime_path=" + runtime +
-        "\nruntime_sha256=" + digest +
-        "\nruntime_mtime_epoch=" + mtime.to_text() + "\n"
-    if not file_write(root + "/exec/runtime-artifact.txt", receipt):
+    val receipt = name + "_path=" + binary +
+        "\n" + name + "_sha256=" + digest +
+        "\n" + name + "_mtime_epoch=" + mtime.to_text() + "\n"
+    if not file_write(root + "/exec/" + name + "-artifact.txt", receipt):
         return (false, digest, mtime)
     (valid, digest, mtime)
 
@@ -149,7 +160,7 @@ fn _count_text(body: text, needle: text) -> i32:
         from = from + relative + needle.len()
     count
 
-fn _start_real_tui(runtime: text, root: text, port: i32) -> i64:
+fn _start_real_tui(office_binary: text, standalone: bool, root: text, port: i32) -> i64:
     """Start the *one* deployed Calc process under a real 124x37 PTY.
 
     The Python parent is PTY capture plumbing only.  It contains no product,
@@ -162,9 +173,10 @@ fn _start_real_tui(runtime: text, root: text, port: i32) -> i64:
     if not file_write(fixture, ""):
         return -1
     val code = "import fcntl,os,pty,re,select,signal,struct,sys,termios,time;" +
-        "raw_path,text_path,status_path,stop_path,pid_path,exe,fixture,port=sys.argv[1:9];" +
+        "raw_path,text_path,status_path,stop_path,pid_path,exe,fixture,port,mode=sys.argv[1:10];" +
         "pid,fd=pty.fork();" +
-        "(time.sleep(0.05) or fcntl.ioctl(0,termios.TIOCSWINSZ,struct.pack('HHHH',37,124,0,0)) or os.execvp(exe,[exe,'office','calc',fixture,'--tui','--ui-access-port',port])) if pid==0 else None;" +
+        "argv=[exe,'calc',fixture,'--tui','--ui-access-port',port] if mode=='standalone' else [exe,'office','calc',fixture,'--tui','--ui-access-port',port];" +
+        "(time.sleep(0.05) or fcntl.ioctl(0,termios.TIOCSWINSZ,struct.pack('HHHH',37,124,0,0)) or os.execvp(exe,argv)) if pid==0 else None;" +
         "open(pid_path,'w').write(str(pid)+'\\n');before=termios.tcgetattr(fd);" +
         "fcntl.ioctl(fd,termios.TIOCSWINSZ,struct.pack('HHHH',37,124,0,0));" +
         "raw=b'';sent=False;exit_code=-999;deadline=time.time()+20;" +
@@ -175,11 +187,12 @@ fn _start_real_tui(runtime: text, root: text, port: i32) -> i64:
         "ok=exit_code==0 and b'\\x1b[' in raw and len(frame)==37 and all(len(x)==124 for x in frame) and any('Simple Calc' in x for x in frame);" +
         "open(text_path,'w').write('\\n'.join(frame)+'\\n') if ok else None;" +
         "sys.exit(0 if ok else 4)"
+    val office_mode = if standalone: "standalone" else: "unified"
     process_spawn_async("python3", [
         "-c", code,
         root + "/tui/calc-after.ansi", root + "/tui/calc-after.txt",
-        root + "/tui/calc-exit.txt", root + "/tui/stop", root + "/tui/calc-pid.txt", runtime, fixture,
-        port.to_text()
+        root + "/tui/calc-exit.txt", root + "/tui/stop", root + "/tui/calc-pid.txt", office_binary, fixture,
+        port.to_text(), office_mode
     ])
 
 fn _finish_real_tui(root: text) -> bool:
@@ -264,17 +277,20 @@ fn _measure_warm_protocol(runtime: text, port: i32, root: text, revision0: i64, 
         return (false, revision, "rss_delta_exceeds_20MiB")
     (true, revision, last_request_id)
 
-fn _deployed_cli_checks(runtime: text, root: text) -> bool:
-    val (ide_tui, ide_tui_err, ide_tui_code) = _run(runtime, ["ide", "--feature-check", "--tui"])
-    val (ide_gui, ide_gui_err, ide_gui_code) = _run(runtime, ["ide", "--feature-check", "--gui"])
-    val (_bad_office, bad_office_err, bad_office_code) = _run(runtime, ["office", "calc", "--not-a-calc-option"])
-    val (_bad_ide, bad_ide_err, bad_ide_code) = _run(runtime, ["ide", "--not-an-ide-option"])
+fn _office_args(standalone: bool, args: [text]) -> [text]:
+    if standalone: args else: ["office"] + args
+
+fn _deployed_cli_checks(simple_binary: text, office_binary: text, standalone: bool, root: text) -> bool:
+    val (ide_tui, ide_tui_err, ide_tui_code) = _run(simple_binary, ["ide", "--feature-check", "--tui"])
+    val (ide_gui, ide_gui_err, ide_gui_code) = _run(simple_binary, ["ide", "--feature-check", "--gui"])
+    val (_bad_office, bad_office_err, bad_office_code) = _run(office_binary, _office_args(standalone, ["calc", "--not-a-calc-option"]))
+    val (_bad_ide, bad_ide_err, bad_ide_code) = _run(simple_binary, ["ide", "--not-an-ide-option"])
     val log = "ide_tui:\n" + ide_tui + ide_tui_err + "\nide_gui:\n" + ide_gui + ide_gui_err +
         "\ninvalid_office:\n" + bad_office_err + "\ninvalid_ide:\n" + bad_ide_err + "\n"
     if not file_write(root + "/exec/commands.txt", log): return false
     ide_tui_code == 0 and ide_gui_code == 0 and bad_office_code != 0 and bad_ide_code != 0
 
-fn _runtime_provenance(runtime: text, root: text) -> bool:
+fn _binary_provenance(simple_binary: text, office_binary: text, standalone: bool, root: text) -> bool:
     """Reject seed binaries by observed behavior, not their misleading path.
 
     A release-looking pathname and `--version` are insufficient: stale macOS
@@ -282,22 +298,33 @@ fn _runtime_provenance(runtime: text, root: text) -> bool:
     receiving an actual Office command.  Preserve that transcript with the
     fresh evidence and fail before any product assertion could look green.
     """
-    val (out, err, code) = _run(runtime, ["office", "calc", "--not-a-calc-option"])
-    val transcript = out + err
-    val lowered = transcript.lower()
-    if not file_write(root + "/exec/runtime-provenance.txt", transcript): return false
-    code != 0 and transcript.contains("Usage: simple office calc") and
-        not lowered.contains("rust-built simple binary") and
-        not lowered.contains("bootstrap seed only") and
-        not lowered.contains("seed sibling") and
-        not lowered.contains("debug build")
+    val (simple_out, simple_err, simple_code) = _run(simple_binary, ["ide", "--not-an-ide-option"])
+    val simple_transcript = simple_out + simple_err
+    val simple_lowered = simple_transcript.lower()
+    val (office_out, office_err, office_code) = _run(
+        office_binary, _office_args(standalone, ["calc", "--not-a-calc-option"])
+    )
+    val office_transcript = office_out + office_err
+    val office_lowered = office_transcript.lower()
+    val office_usage = if standalone: "Usage: office calc" else: "Usage: simple office calc"
+    if not file_write(root + "/exec/runtime-provenance.txt", simple_transcript): return false
+    if not file_write(root + "/exec/office-product-provenance.txt", office_transcript): return false
+    simple_code != 0 and office_code != 0 and office_transcript.contains(office_usage) and
+        not simple_lowered.contains("rust-built simple binary") and
+        not simple_lowered.contains("bootstrap seed only") and
+        not simple_lowered.contains("seed sibling") and
+        not simple_lowered.contains("debug build") and
+        not office_lowered.contains("rust-built simple binary") and
+        not office_lowered.contains("bootstrap seed only") and
+        not office_lowered.contains("seed sibling") and
+        not office_lowered.contains("debug build")
 
-fn _live_workflow(runtime: text, root: text) -> (bool, text):
+fn _live_workflow(simple_binary: text, office_binary: text, standalone: bool, root: text) -> (bool, text):
     val port = 38000 + (getpid() % 2000).to_i32()
     val startup_started_us = time_now_unix_micros()
-    val capture_pid = _start_real_tui(runtime, root, port)
+    val capture_pid = _start_real_tui(office_binary, standalone, root, port)
     if capture_pid <= 1: return (false, "could_not_start_deployed_calc_pty")
-    val (before, ready) = _await_snapshot(runtime, port)
+    val (before, ready) = _await_snapshot(simple_binary, port)
     if not ready:
         # Ask the PTY owner to close its child before returning failure.  Do
         # not kill only the capture parent: that would orphan the deployed
@@ -317,34 +344,34 @@ fn _live_workflow(runtime: text, root: text) -> (bool, text):
         file_write(root + "/perf/rss-measurement.txt", "rss_status=missing\nreason=rss_measurement_unavailable_at_ready\npid=" + child_pid.to_text() + "\n")
         _finish_real_tui(root)
         return (false, "rss_measurement_unavailable_at_ready")
-    val (windows, windows_err, windows_code) = _ui(runtime, port, ["windows"])
-    val (surface, surface_err, surface_code) = _ui(runtime, port, ["surface", "main"])
+    val (windows, windows_err, windows_code) = _ui(simple_binary, port, ["windows"])
+    val (surface, surface_err, surface_code) = _ui(simple_binary, port, ["surface", "main"])
     val revision0 = _revision(before)
-    val (select_a1, select_a1_err, select_a1_code) = _act(runtime, port, "main#cell_A1", "select", "", revision0)
+    val (select_a1, select_a1_err, select_a1_code) = _act(simple_binary, port, "main#cell_A1", "select", "", revision0)
     val revision1 = _revision(select_a1)
-    val (type_a1, type_a1_err, type_a1_code) = _act(runtime, port, "main#formula_input", "type_text", "6", revision1)
+    val (type_a1, type_a1_err, type_a1_code) = _act(simple_binary, port, "main#formula_input", "type_text", "6", revision1)
     val revision2 = _revision(type_a1)
-    val (commit_a1, commit_a1_err, commit_a1_code) = _act(runtime, port, "main#confirm_edit", "invoke", "", revision2)
+    val (commit_a1, commit_a1_err, commit_a1_code) = _act(simple_binary, port, "main#confirm_edit", "invoke", "", revision2)
     val revision3 = _revision(commit_a1)
-    val (select_a2, select_a2_err, select_a2_code) = _act(runtime, port, "main#cell_A2", "select", "", revision3)
+    val (select_a2, select_a2_err, select_a2_code) = _act(simple_binary, port, "main#cell_A2", "select", "", revision3)
     val revision4 = _revision(select_a2)
-    val (type_a2, type_a2_err, type_a2_code) = _act(runtime, port, "main#formula_input", "type_text", "8", revision4)
+    val (type_a2, type_a2_err, type_a2_code) = _act(simple_binary, port, "main#formula_input", "type_text", "8", revision4)
     val revision5 = _revision(type_a2)
-    val (commit_a2, commit_a2_err, commit_a2_code) = _act(runtime, port, "main#confirm_edit", "invoke", "", revision5)
+    val (commit_a2, commit_a2_err, commit_a2_code) = _act(simple_binary, port, "main#confirm_edit", "invoke", "", revision5)
     val revision6 = _revision(commit_a2)
-    val (select_b1, select_b1_err, select_b1_code) = _act(runtime, port, "main#cell_B1", "select", "", revision6)
+    val (select_b1, select_b1_err, select_b1_code) = _act(simple_binary, port, "main#cell_B1", "select", "", revision6)
     val revision7 = _revision(select_b1)
-    val (type_b1, type_b1_err, type_b1_code) = _act(runtime, port, "main#formula_input", "type_text", "=A1*A2", revision7)
+    val (type_b1, type_b1_err, type_b1_code) = _act(simple_binary, port, "main#formula_input", "type_text", "=A1*A2", revision7)
     val revision8 = _revision(type_b1)
-    val (commit_b1, commit_b1_err, commit_b1_code) = _act(runtime, port, "main#confirm_edit", "invoke", "", revision8)
+    val (commit_b1, commit_b1_err, commit_b1_code) = _act(simple_binary, port, "main#confirm_edit", "invoke", "", revision8)
     val revision9 = _revision(commit_b1)
-    val (select_c1, select_c1_err, select_c1_code) = _act(runtime, port, "main#cell_C1", "select", "", revision9)
+    val (select_c1, select_c1_err, select_c1_code) = _act(simple_binary, port, "main#cell_C1", "select", "", revision9)
     val revision10 = _revision(select_c1)
-    val (type_c1, type_c1_err, type_c1_code) = _act(runtime, port, "main#formula_input", "type_text", "=AVG(A1:A2)", revision10)
+    val (type_c1, type_c1_err, type_c1_code) = _act(simple_binary, port, "main#formula_input", "type_text", "=AVG(A1:A2)", revision10)
     val revision11 = _revision(type_c1)
-    val (commit_c1, commit_c1_err, commit_c1_code) = _act(runtime, port, "main#confirm_edit", "invoke", "", revision11)
+    val (commit_c1, commit_c1_err, commit_c1_code) = _act(simple_binary, port, "main#confirm_edit", "invoke", "", revision11)
     val revision12 = _revision(commit_c1)
-    val (nfr_ok, warm_revision, nfr_detail) = _measure_warm_protocol(runtime, port, root, revision12, child_pid, rss_baseline_kib)
+    val (nfr_ok, warm_revision, nfr_detail) = _measure_warm_protocol(simple_binary, port, root, revision12, child_pid, rss_baseline_kib)
     if not nfr_ok:
         file_write(root + "/perf/nfr-failure.txt", "nfr_status=fail\nreason=" + nfr_detail + "\n")
         _finish_real_tui(root)
@@ -352,29 +379,29 @@ fn _live_workflow(runtime: text, root: text) -> (bool, text):
     # The initial action's request/result pair must be evicted once the public
     # protocol has recorded more than the 64-event session ceiling.
     val early_request_id = _json_text(select_a1, "request_id")
-    val (evict_action, evict_err, evict_code) = _act(runtime, port, "main#cell_A1", "select", "", warm_revision)
+    val (evict_action, evict_err, evict_code) = _act(simple_binary, port, "main#cell_A1", "select", "", warm_revision)
     val revision13 = _revision(evict_action)
-    val (select_d1, select_d1_err, select_d1_code) = _act(runtime, port, "main#cell_D1", "select", "", revision13)
+    val (select_d1, select_d1_err, select_d1_code) = _act(simple_binary, port, "main#cell_D1", "select", "", revision13)
     val revision14 = _revision(select_d1)
-    val (invalid_before, invalid_before_err, invalid_before_code) = _ui(runtime, port, ["find", "--canonical", "main#cell_D1"])
+    val (invalid_before, invalid_before_err, invalid_before_code) = _ui(simple_binary, port, ["find", "--canonical", "main#cell_D1"])
     val invalid_before_value = _json_text(invalid_before, "text")
     val (type_invalid, type_invalid_err, type_invalid_code) = _act(
-        runtime, port, "main#formula_input", "type_text", "=NOT_A_REAL_CALC_FUNCTION(1)", revision14
+        simple_binary, port, "main#formula_input", "type_text", "=NOT_A_REAL_CALC_FUNCTION(1)", revision14
     )
     val revision15 = _revision(type_invalid)
     val (commit_invalid, commit_invalid_err, commit_invalid_code) = _act(
-        runtime, port, "main#confirm_edit", "invoke", "", revision15
+        simple_binary, port, "main#confirm_edit", "invoke", "", revision15
     )
     val commit_invalid_response = commit_invalid + commit_invalid_err
-    val (invalid_after, invalid_after_err, invalid_after_code) = _ui(runtime, port, ["find", "--canonical", "main#cell_D1"])
+    val (invalid_after, invalid_after_err, invalid_after_code) = _ui(simple_binary, port, ["find", "--canonical", "main#cell_D1"])
     val invalid_after_value = _json_text(invalid_after, "text")
-    val (after, after_err, after_code) = _ui(runtime, port, ["snapshot"])
-    val (b1, b1_err, b1_code) = _ui(runtime, port, ["find", "--canonical", "main#cell_B1"])
-    val (c1, c1_err, c1_code) = _ui(runtime, port, ["find", "--canonical", "main#cell_C1"])
-    val (history, history_err, history_code) = _ui(runtime, port, ["history", "--surface", "main", "--count", "64"])
-    val (stale_out, stale_err, stale_code) = _act(runtime, port, "main#cell_A1", "select", "", revision0)
-    val (missing_out, missing_err, missing_code) = _act(runtime, port, "main#cell_Z999", "select", "", _revision(after))
-    val (unsupported_out, unsupported_err, unsupported_code) = _act(runtime, port, "main#cell_A1", "delete_everything", "", _revision(after))
+    val (after, after_err, after_code) = _ui(simple_binary, port, ["snapshot"])
+    val (b1, b1_err, b1_code) = _ui(simple_binary, port, ["find", "--canonical", "main#cell_B1"])
+    val (c1, c1_err, c1_code) = _ui(simple_binary, port, ["find", "--canonical", "main#cell_C1"])
+    val (history, history_err, history_code) = _ui(simple_binary, port, ["history", "--surface", "main", "--count", "64"])
+    val (stale_out, stale_err, stale_code) = _act(simple_binary, port, "main#cell_A1", "select", "", revision0)
+    val (missing_out, missing_err, missing_code) = _act(simple_binary, port, "main#cell_Z999", "select", "", _revision(after))
+    val (unsupported_out, unsupported_err, unsupported_code) = _act(simple_binary, port, "main#cell_A1", "delete_everything", "", _revision(after))
     val stale_response = stale_out + stale_err
     val missing_response = missing_out + missing_err
     val unsupported_response = unsupported_out + unsupported_err
@@ -390,7 +417,7 @@ fn _live_workflow(runtime: text, root: text) -> (bool, text):
         file_write(root + "/protocol/surface-main.json", surface) and
         file_write(root + "/protocol/rejections.txt", stale_response + "\n" + missing_response + "\n" + unsupported_response)
     val tui_ok = _finish_real_tui(root)
-    val (closed_out, closed_err, closed_code) = _ui(runtime, port, ["snapshot"])
+    val (closed_out, closed_err, closed_code) = _ui(simple_binary, port, ["snapshot"])
     val closed_response = closed_out + closed_err
     val port_closed = (closed_code != 0 and
         _protocol_json_ok(closed_response) and
@@ -437,20 +464,27 @@ fn _live_workflow(runtime: text, root: text) -> (bool, text):
     (live_ok, if live_ok: "" else: "deployed_ui_protocol_or_cleanup_assertion_failed")
 
 fn _all(run_id: text) -> i32:
-    val runtime = _runtime()
-    if runtime == "" or not file_exists(runtime): return _fail("SIMPLE_BINARY must name an executable deployed runtime")
-    if runtime.contains("compiler_rust"): return _fail("Rust seed runtime is forbidden")
+    val simple_binary = _simple_binary()
+    val office_binary = _office_binary(simple_binary)
+    val standalone = _uses_standalone_office()
+    if simple_binary == "" or not file_exists(simple_binary): return _fail("SIMPLE_UI_CLIENT or SIMPLE_BINARY must name the deployed UI/IDE client")
+    if office_binary == "" or not file_exists(office_binary): return _fail("OFFICE_BINARY must name the deployed Office product")
+    if simple_binary.contains("compiler_rust") or office_binary.contains("compiler_rust"):
+        return _fail("Rust seed binaries are forbidden")
     val root = _run_root(run_id)
     if run_id == "" or run_id.contains("/") or dir_exists(root): return _fail("--run-id must be unique and path-safe")
     if not (dir_create_all(root + "/tui") and dir_create_all(root + "/protocol") and dir_create_all(root + "/exec") and dir_create_all(root + "/perf")):
         return _fail("could not create unique evidence directory")
-    val (artifact_ok, runtime_sha256, runtime_mtime) = _runtime_artifact_provenance(runtime, root)
-    if not artifact_ok: return _fail("runtime artifact provenance failed")
-    if not _runtime_provenance(runtime, root): return _fail("runtime provenance failed; a self-hosted Office command is required")
-    if not _deployed_cli_checks(runtime, root): return _fail("deployed IDE/Office CLI checks failed")
-    val (live_ok, live_detail) = _live_workflow(runtime, root)
+    val (simple_artifact_ok, simple_sha256, simple_mtime) = _artifact_provenance(simple_binary, root, "runtime")
+    val (office_artifact_ok, office_sha256, office_mtime) = _artifact_provenance(office_binary, root, "office")
+    if not simple_artifact_ok or not office_artifact_ok: return _fail("binary artifact provenance failed")
+    if not _binary_provenance(simple_binary, office_binary, standalone, root):
+        return _fail("binary provenance failed; self-hosted UI/IDE and Office commands are required")
+    if not _deployed_cli_checks(simple_binary, office_binary, standalone, root): return _fail("deployed IDE/Office CLI checks failed")
+    val (live_ok, live_detail) = _live_workflow(simple_binary, office_binary, standalone, root)
     if not live_ok: return _fail(live_detail)
-    if not file_write(root + "/suite.txt", "suite=office-cli-tui-ui-access\nsuite_status=pass\nrun_id=" + run_id + "\nruntime=pure-simple-self-hosted\nruntime_path=" + runtime + "\nruntime_sha256=" + runtime_sha256 + "\nruntime_mtime_epoch=" + runtime_mtime.to_text() + "\ncapture_size=124x37\nB1_display=48\nC1_display=7\nterminal_restored=true\nservice_port_closed=true\nmalformed_formula_no_mutation=true\n"):
+    val office_mode = if standalone: "standalone" else: "unified"
+    if not file_write(root + "/suite.txt", "suite=office-cli-tui-ui-access\nsuite_status=pass\nrun_id=" + run_id + "\nruntime=pure-simple-self-hosted\nruntime_path=" + simple_binary + "\nruntime_sha256=" + simple_sha256 + "\nruntime_mtime_epoch=" + simple_mtime.to_text() + "\noffice_mode=" + office_mode + "\noffice_path=" + office_binary + "\noffice_sha256=" + office_sha256 + "\noffice_mtime_epoch=" + office_mtime.to_text() + "\ncapture_size=124x37\nB1_display=48\nC1_display=7\nterminal_restored=true\nservice_port_closed=true\nmalformed_formula_no_mutation=true\n"):
         return _fail("could not retain suite receipt")
     print "suite=office-cli-tui-ui-access"
     print "suite_status=pass"
