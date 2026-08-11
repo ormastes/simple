@@ -26,11 +26,26 @@
 #   - No bidi, no shaping, no ligatures, no tab stops.
 #   - No ANSI escape handling: that is a terminal contract, not a pixel one.
 #     See the contract table in common/layout/text_metrics.spl.
+#
+# FLOATS (added 2026-08-11)
+#
+# `layout_inline_text` wraps to a single rectangular width and knows nothing
+# about floats, so text set beside a float used to OVERLAP it — recorded as the
+# most user-visible gap in `layout/block_flow.spl`. `layout_inline_text_around`
+# closes it: it asks a `FloatArea` for the band available at each line box's own
+# y and wraps that line to THAT width, at THAT x. Every line therefore carries
+# its own left edge and width rather than sharing the block's, which is what
+# CSS 2.1 §9.5 line-box shortening means.
+#
+# `layout_inline_text` is kept, unchanged, as the no-float fast path: an empty
+# `FloatArea` makes the two agree line for line, and callers with no floats
+# should not pay a band query per line.
 
 use std.common.layout.text_metrics.{
     TextMetrics, monospace_metrics, measure_text, baseline_offset_px,
-    wrap_text_lines, text_cell_width
+    wrap_text_lines, wrap_line_end, measure_range, text_cell_width
 }
+use std.common.layout.float_bands.{FloatArea}
 
 struct InlineFont:
     """The font description an inline run is measured under.
@@ -101,3 +116,118 @@ pub fn layout_inline_text(run: text, max_width_px: i64, f: InlineFont) -> Inline
         width_px: widest,
         height_px: lines.len() * m.line_height_px
     )
+
+# --------------------------------------------------------------------------
+# Float-aware line boxes
+# --------------------------------------------------------------------------
+
+struct InlineLineBox:
+    """One line box: its text and the rect it actually occupies, in the
+    containing block's coordinates.
+
+    `left_px` is the line's own left edge, which is the container's left edge
+    pushed right past any LEFT float overlapping this line's height band, and
+    `width_px` is the band that was available to it — NOT the widest line and
+    not the container width. `height_px` is one line height."""
+    content: text
+    left_px: f64
+    top_px: f64
+    width_px: f64
+    height_px: f64
+
+struct InlineFloatBlock:
+    """A run wrapped around floats: its line boxes and the y it ended at.
+
+    `bottom_px` is the bottom of the LAST line box, so a caller can carry on
+    stacking from it. `widest_px` is the widest line actually produced, for an
+    intrinsic-width caller."""
+    lines: [InlineLineBox]
+    bottom_px: f64
+    widest_px: f64
+
+pub fn layout_inline_text_around(
+    run: text,
+    f: InlineFont,
+    area: FloatArea,
+    start_y: f64,
+    container_left: f64,
+    container_right: f64
+) -> InlineFloatBlock:
+    """Wrap `run` into line boxes that are SHORTENED and SHIFTED by the floats
+    in `area`, starting at `start_y`.
+
+    Each line box is laid at its own y, and the band available over that line's
+    full height — `[y, y + line_height)`, a range query rather than a single
+    scanline — decides both where it starts and how wide it may be. A line whose
+    band is entirely closed by floats (`available_width_at` returns 0) is not
+    emitted at all: the cursor drops one line height and tries again, so text
+    resumes below the float instead of overlapping it. That descent is bounded,
+    both by a step count and by the lowest float bottom, so a permanently closed
+    band cannot hang layout — the remaining text is then set at the container's
+    full width below every float.
+
+    Widths cross an f64/i64 boundary here: bands are f64 CSS pixels and
+    `wrap_line_end` takes i64 pixels, so the band is TRUNCATED toward zero. That
+    direction is deliberate — a truncated limit can only make a line narrower,
+    never let it overrun the float."""
+    val m = inline_metrics(f)
+    val lh = m.line_height_px as f64
+    val cps = text_codepoints(run)
+    var out: [InlineLineBox] = []
+    var widest: f64 = 0.0
+    var y = start_y
+    var start: i64 = 0
+    val floats_bottom = area.lowest_bottom()
+
+    # An empty run still occupies exactly one line box, matching
+    # `wrap_text_lines`, so an empty paragraph keeps its height.
+    if cps.len() == 0:
+        val el = area.left_edge_at(y, lh, container_left)
+        val ew = area.available_width_at(y, lh, container_left, container_right)
+        out.push(InlineLineBox(
+            content: "", left_px: el, top_px: y, width_px: ew, height_px: lh
+        ))
+        return InlineFloatBlock(lines: out, bottom_px: y + lh, widest_px: 0.0)
+
+    var guard: i64 = 0
+    while start < cps.len() and guard < 4096:
+        guard = guard + 1
+        var line_left = area.left_edge_at(y, lh, container_left)
+        var avail = area.available_width_at(y, lh, container_left, container_right)
+        if avail <= 0.0:
+            # No room on this line at all. Drop a line and retry, but only while
+            # a float can still be the cause; past the lowest float bottom the
+            # band is the full container and must not be re-probed forever.
+            if y < floats_bottom:
+                y = y + lh
+                continue
+            line_left = container_left
+            avail = container_right - container_left
+            if avail <= 0.0:
+                break
+        val endv = wrap_line_end(cps, start, avail as i64, m)
+        if endv <= start:
+            break
+        var line = ""
+        var i = start
+        while i < endv:
+            line = line + char_from_codepoint(cps[i])
+            i = i + 1
+        val used = measure_range(cps, start, endv, m) as f64
+        if used > widest:
+            widest = used
+        out.push(InlineLineBox(
+            content: line,
+            left_px: line_left,
+            top_px: y,
+            width_px: avail,
+            height_px: lh
+        ))
+        y = y + lh
+        var next = endv
+        # Skip the space the break consumed so it does not open the next line.
+        while next < cps.len() and cps[next] == 32:
+            next = next + 1
+        start = next
+
+    InlineFloatBlock(lines: out, bottom_px: y, widest_px: widest)
