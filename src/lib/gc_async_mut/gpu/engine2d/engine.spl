@@ -1033,13 +1033,25 @@ class Engine2D with DrawIrRenderTarget:
         if _viable_auto_backend_cache != "":
             return _viable_auto_backend_cache
         val override_name = engine2d_env_backend_override()
-        if override_name != "":
+        # Guard against a non-empty raw override that canonicalizes to "".
+        # Measured live on baremetal (2026-08-11): engine2d_env_backend_override()
+        # can return a non-empty override_name even though the underlying
+        # env lookup is unset there (an rt_env_get `text` vs `text?` extern
+        # ABI mismatch across modules garbles the raw value), and
+        # backend_canonical_name() then collapses that garbage to "". Probing
+        # backend "" always fails with "Unknown backend: " and previously hid
+        # the real priority-order auto-resolution below it entirely. Treat an
+        # empty canonical name identically to "no override".
+        if override_name.len() > 0:
             val override_canon = backend_canonical_name(override_name)
-            val override_probe = Engine2D.probe_backend(1, 1, override_canon)
-            if override_probe.status == BackendStatus.Initialized:
-                _viable_auto_backend_cache = override_canon
-                return override_canon
-            print("[backend-resolve] override {override_canon} rejected: {override_probe.reason}")
+            if override_canon.len() > 0:
+                val override_probe = Engine2D.probe_backend(1, 1, override_canon)
+                if override_probe.status == BackendStatus.Initialized:
+                    _viable_auto_backend_cache = override_canon
+                    return override_canon
+                print("[backend-resolve] override {override_canon} rejected: {override_probe.reason}")
+            else:
+                print("[backend-resolve] override ignored: raw override_name.len()={override_name.len()} but canonicalized len=0 (see engine2d_env_backend_override ABI note)")
         val order = backend_default_priority_order()
         var idx = 0
         val order_len = order.len()
