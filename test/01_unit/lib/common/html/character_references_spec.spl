@@ -1,0 +1,232 @@
+# @cover src/lib/common/html/character_references.spl 85%
+# @req REQ-HTMLENT-001
+"""
+# HTML Character References
+
+**Category:** Stdlib
+**Status:** Implemented
+
+## Purpose and Audience
+
+An HTML author writes `AT&amp;T`, `caf&#233;` or `&#x2014;` and expects every
+renderer in this repo to show `AT&T`, `café` and an em dash. This module is the
+single place that translation happens, so a render lane imports it instead of
+growing its own entity table. `blink.html_parser.tokenizer` is its first
+consumer; `common.html.entities` is the older, weaker decoder it supersedes.
+
+## Scope and Preconditions
+
+`decode_character_references(input)` scans a whole string. `named_entity(name)`
+and `numeric_entity(body)` read one reference each, and `match_entity(chars, i)`
+reads one out of a codepoint array at a position.
+
+Supported: the HTML 4 named set plus the common typographic, currency, maths,
+arrow and Greek names; decimal `&#NNN;`; hexadecimal `&#xHH;` and `&#XHH;`.
+Names are case-sensitive, as HTML defines them, and the terminating `;` is
+required.
+
+## Primary Workflow
+
+A reference this module understands becomes the character it denotes. **A
+reference it does not understand is reported and left exactly as the author
+wrote it** — that is what this spec is really about. There are four distinct
+ways to fail and each one is covered here on purpose:
+
+| Failure | Example | Result |
+|---------|---------|--------|
+| Unterminated | `&amp` (no `;`) | text stays `&amp`, error recorded |
+| Unknown name | `&bogus;` | text stays `&bogus;`, error recorded |
+| Malformed numeric | `&#12z4;` | text stays verbatim, error recorded |
+| Out-of-range numeric | `&#0;`, `&#xD800;` | text stays verbatim, error recorded |
+
+None of them ever produces a substitute character. A decoder that guesses emits
+a wrong glyph that reads as content and survives every smoke test; a decoder
+that reports leaves the evidence in `errors` and the source text on screen.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| `EntityMatch.ok` | false means the reference was NOT decoded; `consumed` is 0. |
+| Verbatim recovery | Undecodable input is copied through byte-for-byte. |
+| Windows-1252 remap | `&#128;`..`&#159;` map per WHATWG, the one specified translation. |
+
+## Compatibility and Limitations
+
+The semicolon-less legacy forms (`&ampX`) are treated as unterminated rather
+than decoded. The named table is the common set, not the full 2231-entry WHATWG
+table; a name outside it is an explicit unknown-name failure.
+
+## Related Specifications
+
+- [Blink HTML tokenizer entities](../../blink/html_tokenizer_entities_spec.md)
+"""
+
+use std.spipe.*
+use std.common.html.character_references.{decode_character_references, decode_character_references_checked, named_entity, numeric_entity, match_entity}
+
+# Render a lookup result as text so "decoded to X" and "refused" are directly
+# comparable outcomes rather than a field probe on something that may be nil.
+fn _named(name: text) -> text:
+    if val c = named_entity(name):
+        return c
+    "refused"
+
+fn _numeric(body: text) -> text:
+    if val c = numeric_entity(body):
+        return c
+    "refused"
+
+fn _error_count(input: text) -> i64:
+    decode_character_references_checked(input).errors.len()
+
+describe "decoding a named character reference":
+    it "reads the five references every document depends on":
+        step("decode the ampersand, angle brackets and both quote marks")
+        expect(decode_character_references("AT&amp;T")).to_equal("AT&T")
+        expect(decode_character_references("&lt;p&gt;")).to_equal("<p>")
+        expect(decode_character_references("&quot;x&quot;")).to_equal("\"x\"")
+        expect(decode_character_references("&apos;y&apos;")).to_equal("'y'")
+
+    it "reads a name from the wider table, not just the core five":
+        step("decode accented Latin, currency, typographic and Greek names")
+        expect(_named("eacute")).to_equal("é")
+        expect(_named("euro")).to_equal("€")
+        expect(_named("mdash")).to_equal("—")
+        expect(_named("hellip")).to_equal("…")
+        expect(_named("nbsp")).to_equal(" ")
+        expect(_named("omega")).to_equal("ω")
+        expect(_named("rarr")).to_equal("→")
+
+    it "reads only the capitalisations HTML actually defines":
+        step("decode `&AMP;`, which HTML defines alongside `&amp;`")
+        expect(_named("AMP")).to_equal("&")
+        step("refuse `&Amp;`, which HTML does not define — names are case-sensitive")
+        expect(_named("Amp")).to_equal("refused")
+
+    it "refuses an unknown name instead of inventing a character":
+        step("look up a name that is not in the table")
+        expect(_named("bogus")).to_equal("refused")
+        step("confirm the source spelling survives in the decoded text")
+        expect(decode_character_references("a &bogus; b")).to_equal("a &bogus; b")
+        step("confirm the refusal was reported, not swallowed")
+        expect(_error_count("a &bogus; b")).to_equal(1)
+
+describe "decoding a numeric character reference":
+    it "reads a decimal reference":
+        step("decode `&#233;` and `&#8212;`")
+        expect(decode_character_references("caf&#233;")).to_equal("café")
+        expect(_numeric("8212")).to_equal("—")
+
+    it "reads a hexadecimal reference in either letter case":
+        step("decode `&#x2014;`, `&#X2014;` and a lowercase-digit form")
+        expect(_numeric("x2014")).to_equal("—")
+        expect(_numeric("X2014")).to_equal("—")
+        expect(_numeric("xe9")).to_equal("é")
+        expect(_numeric("xE9")).to_equal("é")
+
+    it "reads a decimal and a hexadecimal spelling of one character identically":
+        step("decode the em dash both ways and compare")
+        expect(_numeric("8212")).to_equal(_numeric("x2014"))
+
+    it "remaps a C1 reference to the character the author meant":
+        step("decode `&#151;`, which authors type meaning an em dash")
+        expect(_numeric("151")).to_equal("—")
+        step("decode `&#128;`, the windows-1252 euro sign")
+        expect(_numeric("128")).to_equal("€")
+
+    it "refuses a malformed number instead of decoding part of it":
+        step("offer a body with a non-digit in it")
+        expect(_numeric("12z4")).to_equal("refused")
+        step("offer a hexadecimal digit in a decimal reference")
+        expect(_numeric("1f")).to_equal("refused")
+        step("offer a reference with no digits at all")
+        expect(_numeric("")).to_equal("refused")
+        expect(_numeric("x")).to_equal("refused")
+
+    it "refuses a number that is not a character":
+        step("offer NUL, which HTML forbids")
+        expect(_numeric("0")).to_equal("refused")
+        step("offer a lone surrogate, which is not a scalar value")
+        expect(_numeric("xD800")).to_equal("refused")
+        step("offer a value above the last codepoint")
+        expect(_numeric("x110000")).to_equal("refused")
+        expect(_numeric("99999999")).to_equal("refused")
+
+    it "leaves a refused numeric reference in the text exactly as written":
+        step("decode a string containing an out-of-range reference")
+        expect(decode_character_references("a &#0; b")).to_equal("a &#0; b")
+        step("confirm the refusal was reported")
+        expect(_error_count("a &#0; b")).to_equal(1)
+
+describe "decoding an unterminated reference":
+    it "leaves a reference with no semicolon untouched":
+        step("decode text where the author omitted the closing semicolon")
+        expect(decode_character_references("a &amp b")).to_equal("a &amp b")
+        expect(decode_character_references("50 &#37 off")).to_equal("50 &#37 off")
+        step("confirm each omission was reported")
+        expect(_error_count("a &amp b")).to_equal(1)
+
+    it "stops at the next ampersand rather than swallowing the rest of a sentence":
+        step("decode prose with a bare ampersand followed by a real reference")
+        expect(decode_character_references("Tom & Jerry &amp; Co")).to_equal("Tom & Jerry & Co")
+        step("confirm exactly one refusal — the bare ampersand, not the good one")
+        expect(_error_count("Tom & Jerry &amp; Co")).to_equal(1)
+
+    it "leaves a lone trailing ampersand alone":
+        step("decode a string ending in a bare ampersand")
+        expect(decode_character_references("a &")).to_equal("a &")
+
+    it "refuses an empty reference":
+        step("decode `&;`, which names nothing")
+        expect(decode_character_references("a &; b")).to_equal("a &; b")
+        expect(_error_count("a &; b")).to_equal(1)
+
+describe "decoding a whole string":
+    it "leaves text with no references byte-for-byte unchanged":
+        step("decode ordinary prose")
+        expect(decode_character_references("plain text, no refs")).to_equal("plain text, no refs")
+        step("confirm nothing was reported")
+        expect(_error_count("plain text, no refs")).to_equal(0)
+
+    it "decodes several references in one pass":
+        step("decode a string mixing named, decimal and hex forms")
+        expect(decode_character_references("&lt;b&gt;caf&#233;&#x2014;ok&lt;/b&gt;")).to_equal("<b>café—ok</b>")
+
+    it "decodes the good references and reports only the bad ones":
+        step("decode a string with two good and two bad references")
+        val out = decode_character_references_checked("&amp; &bogus; &#233; &#0;")
+        expect(out.value).to_equal("& &bogus; é &#0;")
+        step("confirm both failures are named individually")
+        expect(out.errors.len()).to_equal(2)
+
+    it "does not decode an already-decoded ampersand a second time":
+        step("decode `&amp;amp;`, which must yield the literal text `&amp;`")
+        expect(decode_character_references("&amp;amp;")).to_equal("&amp;")
+
+    it "counts positions in codepoints, so a multi-byte character does not shift a reference":
+        step("decode a reference that sits after non-ASCII text")
+        expect(decode_character_references("é&amp;é")).to_equal("é&é")
+        expect(decode_character_references("日本語 &#x2014; ok")).to_equal("日本語 — ok")
+
+describe "reading one reference out of a character array":
+    it "reports how many characters a decoded reference consumed":
+        step("match `&amp;` at the start of a character array")
+        val m = match_entity("&amp;x".chars(), 0)
+        expect(m.ok).to_equal(true)
+        expect(m.value).to_equal("&")
+        expect(m.consumed).to_equal(5)
+
+    it "consumes nothing and says why when it cannot decode":
+        step("match an unknown name")
+        val m = match_entity("&bogus;".chars(), 0)
+        expect(m.ok).to_equal(false)
+        expect(m.consumed).to_equal(0)
+        step("confirm the reason names the reference, so a log is actionable")
+        expect(m.error.contains("bogus")).to_equal(true)
+
+    it "refuses a position that is not an ampersand at all":
+        step("match at a position holding an ordinary letter")
+        val m = match_entity("abc".chars(), 0)
+        expect(m.ok).to_equal(false)
+        expect(m.consumed).to_equal(0)

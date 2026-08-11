@@ -104,13 +104,38 @@ scoped out, before the corresponding live-lane call site can be re-pointed.
    `cascade.spl:122-158` vs `dom_color.spl:8,95,129,475,632`. blink silently
    resolves all of these to **opaque black** (`cascade.spl:158`) — a wrong
    value, not a failure, so it is invisible to any smoke test.
-3. **HTML named-entity decoding.** Live: `html_tokenizer.spl:588` `_parse_entity`,
-   `:657` `_decode_character_references`, table
-   `html_named_character_references.spl`. blink: none.
-4. **Inline `style="..."` parsing.** blink has no
-   `parse_declarations(text) -> [CssDecl]`; `css_parser/parser.spl:131` only
-   accepts a token stream. Live: `style_block_parse.spl:455`,
-   `src/app/ui.browser/dom_bridge.spl:233`.
+3. **HTML character-reference decoding. — CLOSED 2026-08-11.**
+   `src/lib/common/html/character_references.spl` is the shared decoder;
+   `blink/html_parser/tokenizer.spl` calls it for Character-token data and for
+   attribute values (the two places WHATWG recognises references), and keeps no
+   private table. Named (HTML 4 set plus common typographic/currency/maths/
+   arrow/Greek names, case-sensitive), decimal `&#NNN;`, hex `&#xHH;`/`&#XHH;`,
+   and the WHATWG-mandated windows-1252 remap of `&#128;`..`&#159;`.
+   **Nothing is ever guessed:** unterminated, unknown-name, malformed-numeric
+   and out-of-range-numeric each return an explicit `EntityMatch` failure and
+   the source text passes through verbatim (`&bogus;` stays `&bogus;`), with
+   the reason available via `decode_character_references_checked`. Specs:
+   `test/01_unit/lib/common/html/character_references_spec.spl` (23) and
+   `test/01_unit/lib/blink/html_tokenizer_entities_spec.spl` (12), both
+   mirrored into `test/unit/`.
+   The old `common/html/entities.spl` decoder is marked SUPERSEDED in its own
+   header (it drops every hex reference and every codepoint >= U+0080, and
+   returns an unknown name as bare text) and was left functionally untouched
+   for its existing callers; re-pointing them is follow-up work. The live
+   lane's `html_tokenizer.spl:588/657` + `html_named_character_references.spl`
+   is likewise not yet re-pointed — that is the Stage 1 dedupe half.
+4. **Inline `style="..."` parsing. — CLOSED 2026-08-11.**
+   `blink/css_parser/parser.spl` now has the raw-string entry points
+   `parse_inline_style(source) -> CssDeclarationBlock` and
+   `parse_declarations(source) -> [CssDeclaration]`. They do NOT add a second
+   reader: the declaration loop was factored out of `parse_css` into
+   `_parse_declaration_block`, which both entry points share, so an inline
+   style and a rule body cannot disagree about `!important` or about spacing
+   inside `calc()`. A malformed declaration (missing `:`, non-identifier
+   property, empty value) is dropped AND reported in `errors` rather than
+   stored blank. Spec: `test/01_unit/lib/blink/css_inline_style_spec.spl`
+   (16), mirrored into `test/unit/`. Live's `style_block_parse.spl:455` is not
+   yet re-pointed.
 5. **At-rules.** `@media` (`html_string_parser.spl:74-127`,
    `..._core.spl:521-657`, `browser_renderer_utils.spl:279-287`),
    `@supports` (`style/supports.spl:427,444`),
@@ -167,7 +192,6 @@ would drag GPU deps into a leaf stack (and into baremetal).
   `test/01_unit/lib/blink/style_cascade_spec.spl`, both mirrored into
   `test/unit/`. The live lane's `dom_color.spl` is NOT yet re-pointed — that
   half still needs the bitmap-equality proof below.
-- `common/css/length.spl` <- `css_length_px` + `br_parse_calc_px_i32`
 - `common/css/length.spl` <- `css_length_px` + `br_parse_calc_px_i32`
 - `common/css/declarations.spl` <- `style_block_parse.spl:455` `parse_declarations`
 - `common/css/entities.spl` <- `html_named_character_references.spl` + decoder
