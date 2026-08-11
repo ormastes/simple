@@ -1,0 +1,152 @@
+# At-rule evaluation for the blink lane.
+#
+# `css_parser` parses `@media` / `@supports` / `@keyframes` but deliberately
+# does not decide anything: a prelude is only meaningful against a viewport and
+# against a claim about what this engine implements. This module supplies both
+# and flattens a stylesheet into the unconditional rule list the cascade takes.
+#
+# THE FAILURE CONTRACT IS THE POINT.
+#
+# A conditional block whose prelude cannot be evaluated is NOT applied and IS
+# reported. The shared evaluators return `bool?` for exactly this reason —
+# `nil` means "not evaluated", never "false in disguise" and certainly never
+# "assume it matches". Defaulting an unknown `@media` to match is how an
+# unimplemented feature turns into a page that looks subtly wrong everywhere
+# instead of into one findable error line.
+#
+# `@supports` is answered from `blink_supports_registry()`, which lists what
+# blink's cascade ACTUALLY applies. That list is deliberately short. Reporting
+# support for `display: grid` when `resolve_style` has no grid would disable
+# the author's own fallback branch — strictly worse than not implementing
+# `@supports` at all.
+
+use std.blink.css_parser.parser.{
+    CssStyleSheet, CssStyleRule, CssAtRule, CssKeyframesRule
+}
+use std.common.css.media_query.{
+    MediaEnvironment, media_environment_screen, evaluate_media_query_list
+}
+use std.common.css.supports.{
+    SupportsRegistry, SupportsFeature, evaluate_supports_condition
+}
+
+# ============================================================================
+# What blink declares it supports
+# ============================================================================
+
+# The property/value set blink's cascade genuinely applies. Properties with an
+# explicit value list have PARTIAL support and say so — `display` is the clear
+# case: block/inline/flex/none are implemented, grid is not, and an author's
+# `@supports (display: grid)` must take the fallback here.
+fn blink_supports_registry() -> SupportsRegistry:
+    """Return the registry of what blink's cascade actually implements."""
+    var none: [text] = []
+    SupportsRegistry(features: [
+        SupportsFeature(property: "display",
+            values: ["block", "inline", "inline-block", "flex", "inline-flex", "none"]),
+        SupportsFeature(property: "position",
+            values: ["static", "relative", "absolute", "fixed", "sticky"]),
+        SupportsFeature(property: "overflow",
+            values: ["visible", "hidden", "scroll", "auto"]),
+        SupportsFeature(property: "visibility",
+            values: ["visible", "hidden", "collapse"]),
+        SupportsFeature(property: "text-align",
+            values: ["left", "right", "center", "justify"]),
+        SupportsFeature(property: "color", values: none),
+        SupportsFeature(property: "background-color", values: none),
+        SupportsFeature(property: "width", values: none),
+        SupportsFeature(property: "height", values: none),
+        SupportsFeature(property: "margin", values: none),
+        SupportsFeature(property: "margin-top", values: none),
+        SupportsFeature(property: "margin-right", values: none),
+        SupportsFeature(property: "margin-bottom", values: none),
+        SupportsFeature(property: "margin-left", values: none),
+        SupportsFeature(property: "padding", values: none),
+        SupportsFeature(property: "padding-top", values: none),
+        SupportsFeature(property: "padding-right", values: none),
+        SupportsFeature(property: "padding-bottom", values: none),
+        SupportsFeature(property: "padding-left", values: none),
+        SupportsFeature(property: "font-size", values: none),
+        SupportsFeature(property: "font-weight", values: none),
+        SupportsFeature(property: "line-height", values: none),
+    ])
+
+# ============================================================================
+# Flattening
+# ============================================================================
+
+# The result of resolving every at-rule in a sheet against one environment.
+#
+# `unevaluated` names each block that was NOT applied because its prelude could
+# not be evaluated. An empty `unevaluated` is the only proof that a flattened
+# sheet is complete; a caller that ignores it is back to silent wrongness.
+class FlattenedSheet:
+    rules: [CssStyleRule]
+    errors: [text]
+    unevaluated: [text]
+    keyframes: [CssKeyframesRule]
+
+# Evaluate one at-rule's prelude.
+#   Some(true)  — apply the block
+#   Some(false) — do not apply it; this is a decided answer
+#   nil         — not evaluated; do not apply, and report it
+fn evaluate_at_rule(rule: CssAtRule, env: MediaEnvironment, registry: SupportsRegistry) -> bool?:
+    """Return whether at-rule `rule` applies, or nil when it was not evaluated."""
+    if rule.name == "media":
+        return evaluate_media_query_list(rule.prelude, env)
+    if rule.name == "supports":
+        return evaluate_supports_condition(rule.prelude, registry)
+    if rule.name == "layer":
+        # A `@layer` block always applies; only its cascade PRIORITY differs,
+        # and blink has no layer ordering. Applying it unlayered is the correct
+        # subset behaviour — the rules are real, their precedence is not modelled.
+        return true
+    # `@import`, `@scope`, `@font-face`, ... — a prelude we do not evaluate.
+    nil
+
+# Flatten a stylesheet into the rule list the cascade should see, splicing each
+# matching conditional block's rules back at the position the author wrote them
+# (`insert_at`) rather than appending them at the end. Appending would put a
+# `@media` block ahead of nothing and behind everything, silently changing which
+# rule wins a same-specificity tie — the tie CSS breaks by document order.
+fn flatten_stylesheet(sheet: CssStyleSheet, env: MediaEnvironment, registry: SupportsRegistry) -> FlattenedSheet:
+    """Return `sheet` with every matching at-rule block spliced into document order."""
+    var errors: [text] = []
+    var unevaluated: [text] = []
+    for e in sheet.errors:
+        errors.push(e)
+
+    # Bucket the applicable at-rule rules by their insertion point.
+    var out: [CssStyleRule] = []
+    var index = 0
+    val total = sheet.rules.len()
+    while index <= total:
+        # Every at-rule recorded at this insertion point, in source order.
+        var a = 0
+        while a < sheet.at_rules.len():
+            val at = sheet.at_rules[a as i32]
+            if at.insert_at == index:
+                if val verdict = evaluate_at_rule(at, env, registry):
+                    if verdict:
+                        var r = 0
+                        while r < at.rules.len():
+                            out.push(at.rules[r as i32])
+                            r = r + 1
+                else:
+                    unevaluated.push("@" + at.name + " " + at.prelude)
+                    errors.push("Unevaluated at-rule prelude '@" + at.name + " "
+                        + at.prelude + "' — block not applied")
+            a = a + 1
+        if index < total:
+            out.push(sheet.rules[index as i32])
+        index = index + 1
+
+    FlattenedSheet(rules: out, errors: errors, unevaluated: unevaluated,
+        keyframes: sheet.keyframes)
+
+# Convenience for the common case: a plain screen of the given size, and
+# blink's own support registry.
+fn flatten_for_screen(sheet: CssStyleSheet, width_px: f64, height_px: f64) -> FlattenedSheet:
+    """Flatten `sheet` for a screen viewport using blink's support registry."""
+    flatten_stylesheet(sheet, media_environment_screen(width_px, height_px),
+        blink_supports_registry())

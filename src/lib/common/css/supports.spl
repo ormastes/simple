@@ -1,0 +1,237 @@
+# CSS `@supports` condition evaluation — shared leaf.
+#
+# `@supports` asks the engine about ITSELF. That makes a dishonest answer here
+# uniquely damaging: an author writes `@supports (display: grid)` precisely so
+# that an engine WITHOUT grid takes the fallback branch. An engine that answers
+# "supported" for everything takes the grid branch and then cannot lay it out —
+# strictly worse than having no `@supports` at all, because the author's own
+# fallback has been disabled.
+#
+# So support is never inferred. It is declared, by the engine, as an explicit
+# registry of what its cascade actually implements. A property absent from the
+# registry is NOT supported, and that is a real answer (`Some(false)`), not a
+# guess. `nil` is reserved for conditions this module cannot PARSE or whose
+# syntax it does not implement (`selector()`, `font-format()`, ...), where the
+# only honest answer is "I did not evaluate this".
+#
+#   Some(true)  — the engine declares support
+#   Some(false) — the engine declares no support, or the declaration is invalid
+#   nil         — the condition was not evaluated at all
+#
+# CSS says an unparsable `@supports` prelude makes the rule not apply, so a
+# caller that treats `nil` as "do not apply" is spec-correct — but it must also
+# be able to REPORT it, which it can only do if the two are distinguishable.
+
+# ============================================================================
+# Registry
+# ============================================================================
+
+# One property the engine implements. `values` empty means every syntactically
+# non-empty value is accepted; a non-empty `values` means ONLY those values are
+# supported, which is how an engine declares partial support for a property
+# (e.g. `display` without `grid`).
+class SupportsFeature:
+    property: text
+    values: [text]
+
+class SupportsRegistry:
+    features: [SupportsFeature]
+
+fn supports_registry_empty() -> SupportsRegistry:
+    """Return a registry that declares support for nothing."""
+    var none: [SupportsFeature] = []
+    SupportsRegistry(features: none)
+
+# Look up whether `property: value` is declared supported.
+fn registry_supports(registry: SupportsRegistry, property: text, value: text) -> bool:
+    """Return whether the registry declares `property: value` supported."""
+    val p_raw: text = property.trim()
+    val p: text = p_raw.to_lower()
+    val v_raw: text = value.trim()
+    val v: text = v_raw.to_lower()
+    if p.len() == 0 or v.len() == 0:
+        return false
+    # A custom property is supported whenever the engine supports any custom
+    # property at all; that is declared as the literal `--` feature name.
+    var i = 0
+    while i < registry.features.len():
+        val f = registry.features[i as i32]
+        val fp: text = f.property.to_lower()
+        val matches_name = fp == p or (fp == "--" and p.starts_with("--"))
+        if matches_name:
+            if f.values.len() == 0:
+                return true
+            var j = 0
+            while j < f.values.len():
+                val allowed: text = f.values[j as i32].to_lower()
+                if allowed == v:
+                    return true
+                j = j + 1
+            return false
+        i = i + 1
+    false
+
+# ============================================================================
+# Lexical helpers
+# ============================================================================
+
+fn _is_ws(c: text) -> bool:
+    """Return true when `c` is an ASCII whitespace character."""
+    c == " " or c == "\t" or c == "\n" or c == "\r"
+
+# Split on a top-level keyword (`and` / `or`), respecting parentheses.
+fn _split_top_level(source: text, keyword: text) -> [text]:
+    """Split `source` on the top-level `keyword`, keeping parenthesised runs."""
+    var out: [text] = []
+    var depth = 0
+    var start = 0
+    var i = 0
+    val klen = keyword.len()
+    while i < source.len():
+        val c = source.slice(i, i + 1)
+        if c == "(":
+            depth = depth + 1
+        elif c == ")":
+            if depth > 0:
+                depth = depth - 1
+        val fits = i + klen <= source.len()
+        if depth == 0 and fits:
+            val candidate: text = source.slice(i, i + klen).to_lower()
+            if candidate == keyword:
+                val before_ok = i == 0 or _is_ws(source.slice(i - 1, i))
+                val after_at = i + klen
+                val after_ok = after_at >= source.len() or _is_ws(source.slice(after_at, after_at + 1))
+                if before_ok and after_ok:
+                    val part: text = source.slice(start, i)
+                    out.push(part.trim())
+                    i = i + klen
+                    start = i
+                    continue
+        i = i + 1
+    val tail: text = source.slice(start, source.len())
+    out.push(tail.trim())
+    out
+
+# Return the index just past the `(`-matched closing paren starting at `start`,
+# or -1 when the parens are unbalanced.
+fn _match_paren(source: text, start: i64) -> i64:
+    """Return the index after the paren group starting at `start`, or -1."""
+    if start >= source.len() or source.slice(start, start + 1) != "(":
+        return -1
+    var depth = 0
+    var i = start
+    while i < source.len():
+        val c = source.slice(i, i + 1)
+        if c == "(":
+            depth = depth + 1
+        elif c == ")":
+            depth = depth - 1
+            if depth == 0:
+                return i + 1
+        i = i + 1
+    -1
+
+# ============================================================================
+# Evaluation
+# ============================================================================
+
+# The `@supports` function-condition syntaxes that exist but that this module
+# does NOT implement. They are named explicitly so that hitting one produces a
+# nil the caller can report, rather than falling through to a bare parse error.
+fn unevaluated_supports_functions() -> [text]:
+    """Return the supports-function syntaxes this module does not evaluate."""
+    ["selector", "font-format", "font-tech", "at-rule"]
+
+fn _is_unevaluated_function(inner: text) -> bool:
+    """Return true when `inner` opens one of the unimplemented functions."""
+    val lowered: text = inner.trim().to_lower()
+    val names = unevaluated_supports_functions()
+    var i = 0
+    while i < names.len():
+        if lowered.starts_with(names[i as i32] + "("):
+            return true
+        i = i + 1
+    false
+
+# Evaluate a supports condition. Grammar handled:
+#   condition   := not condition | group (and group)* | group (or group)*
+#   group       := "(" condition ")" | "(" declaration ")"
+#   declaration := property ":" value
+fn evaluate_supports_condition(condition: text, registry: SupportsRegistry) -> bool?:
+    """Return whether `condition` is supported, or nil when not evaluated."""
+    val s: text = condition.trim()
+    if s.len() == 0:
+        return nil
+
+    if _is_unevaluated_function(s):
+        return nil
+
+    val or_parts = _split_top_level(s, "or")
+    if or_parts.len() > 1:
+        var any_unknown = false
+        var i = 0
+        while i < or_parts.len():
+            if val part = evaluate_supports_condition(or_parts[i as i32], registry):
+                if part:
+                    return true
+            else:
+                any_unknown = true
+            i = i + 1
+        if any_unknown:
+            return nil
+        return false
+
+    val and_parts = _split_top_level(s, "and")
+    if and_parts.len() > 1:
+        var any_unknown = false
+        var i = 0
+        while i < and_parts.len():
+            if val part = evaluate_supports_condition(and_parts[i as i32], registry):
+                if not part:
+                    return false
+            else:
+                any_unknown = true
+            i = i + 1
+        if any_unknown:
+            return nil
+        return true
+
+    val lowered: text = s.to_lower()
+    if lowered.starts_with("not "):
+        val rest: text = s.slice(4, s.len())
+        if val inner = evaluate_supports_condition(rest, registry):
+            return not inner
+        return nil
+
+    if not s.starts_with("("):
+        return nil
+    val close = _match_paren(s, 0)
+    if close != s.len():
+        # Trailing junk after the group, or unbalanced parens.
+        return nil
+    val body_raw: text = s.slice(1, s.len() - 1)
+    val body: text = body_raw.trim()
+    if body.len() == 0:
+        return nil
+
+    if _is_unevaluated_function(body):
+        return nil
+
+    # A nested condition rather than a declaration.
+    val body_lower: text = body.to_lower()
+    val nested = (body.starts_with("(") or body_lower.starts_with("not ")
+        or _split_top_level(body, "and").len() > 1
+        or _split_top_level(body, "or").len() > 1)
+    if nested:
+        return evaluate_supports_condition(body, registry)
+
+    val colon = body.index_of(":")
+    if colon < 0:
+        return nil
+    val property: text = body.slice(0, colon)
+    val value: text = body.slice(colon + 1, body.len())
+    if property.trim().len() == 0 or value.trim().len() == 0:
+        # A malformed declaration is a decided "not supported", per CSS: the
+        # declaration is invalid, so nothing supports it.
+        return false
+    registry_supports(registry, property, value)

@@ -1,0 +1,900 @@
+# CSS shorthand expansion — shared leaf.
+#
+# A CSS shorthand is not a property. It is a WRITE to every longhand it covers,
+# including the ones the author did not mention, which are written back to their
+# INITIAL value. `margin: 0 auto` does not mean "set the horizontal margins" —
+# it means "set all four, with top/bottom 0 and left/right auto". Anything that
+# treats a shorthand as a single property silently keeps stale longhands alive
+# and produces the wrong cascade.
+#
+# This module answers one question: given a shorthand `property: value`, WHICH
+# longhands does it write, and with WHAT values, in order. It deliberately does
+# not know about any engine's style struct — it maps text to text, so both the
+# blink lane and the live lane can share it without either dragging the other's
+# types in.
+#
+# Two rules the callers depend on:
+#
+#   1. FULL RESET. Every expansion returns the COMPLETE longhand set of the
+#      shorthand. An omitted component is emitted with its CSS initial value,
+#      never omitted from the result.
+#   2. HONEST FAILURE. A shorthand whose value we cannot decompose returns
+#      `nil`, not a partial set. A partial expansion would reset some longhands
+#      and leave others stale, which is worse than dropping the declaration —
+#      and CSS already says an invalid declaration is dropped.
+#
+# Ordering is the caller's job and is trivial if this contract is respected:
+# expand each declaration IN PLACE, in source order, then apply left to right.
+# A longhand written after a shorthand then naturally wins, and a shorthand
+# written after a longhand naturally clobbers it.
+
+use std.common.color.css.{parse_css_color}
+
+# ============================================================================
+# CssLonghand — one resolved longhand write.
+# ============================================================================
+
+class CssLonghand:
+    property: text
+    value: text
+
+# ============================================================================
+# Component-value splitting
+# ============================================================================
+
+# Split a CSS value into top-level component values on whitespace, without
+# breaking inside a function's parentheses or inside a quoted string.
+# `1px solid rgb(1, 2, 3)` is three components, not five.
+fn split_css_components(value: text) -> [text]:
+    """Return the top-level whitespace-separated components of `value`."""
+    var out: [text] = []
+    var depth = 0
+    var quote: text = ""
+    var start = 0
+    var i = 0
+    var in_token = false
+    while i < value.len():
+        val c = value.slice(i, i + 1)
+        if quote.len() > 0:
+            if c == quote:
+                quote = ""
+        elif c == "\"" or c == "'":
+            quote = c
+        elif c == "(":
+            depth = depth + 1
+        elif c == ")":
+            if depth > 0:
+                depth = depth - 1
+        val breaks = (depth == 0 and quote.len() == 0
+            and (c == " " or c == "\t" or c == "\n" or c == "\r"))
+        if breaks:
+            if in_token:
+                out.push(value.slice(start, i))
+                in_token = false
+        else:
+            if not in_token:
+                start = i
+                in_token = true
+        i = i + 1
+    if in_token:
+        out.push(value.slice(start, i))
+    out
+
+# Split a CSS value on top-level commas (used by `background`, `font-family`).
+fn split_css_comma_list(value: text) -> [text]:
+    """Return the top-level comma-separated parts of `value`, trimmed."""
+    var out: [text] = []
+    var depth = 0
+    var quote: text = ""
+    var start = 0
+    var i = 0
+    while i < value.len():
+        val c = value.slice(i, i + 1)
+        if quote.len() > 0:
+            if c == quote:
+                quote = ""
+        elif c == "\"" or c == "'":
+            quote = c
+        elif c == "(":
+            depth = depth + 1
+        elif c == ")":
+            if depth > 0:
+                depth = depth - 1
+        if c == "," and depth == 0 and quote.len() == 0:
+            val part: text = value.slice(start, i)
+            out.push(part.trim())
+            start = i + 1
+        i = i + 1
+    val tail: text = value.slice(start, value.len())
+    out.push(tail.trim())
+    out
+
+# ============================================================================
+# Component classification
+# ============================================================================
+
+fn _in(list: [text], needle: text) -> bool:
+    """Return true when `needle` is one of `list`."""
+    var i = 0
+    while i < list.len():
+        if list[i as i32] == needle:
+            return true
+        i = i + 1
+    false
+
+fn _is_line_style(c: text) -> bool:
+    """Return true when `c` is a CSS <line-style> keyword."""
+    _in(["none", "hidden", "dotted", "dashed", "solid", "double",
+         "groove", "ridge", "inset", "outset"], c)
+
+fn _is_line_width(c: text) -> bool:
+    """Return true when `c` is a CSS <line-width>: a length or a width keyword."""
+    if _in(["thin", "medium", "thick"], c):
+        return true
+    _is_length(c)
+
+# A length is a number with an optional unit; `0` alone is legal. Percentages
+# count as lengths for the shorthands here (margin/padding accept them).
+fn _is_length(c: text) -> bool:
+    """Return true when `c` parses as a CSS length or percentage."""
+    if c.len() == 0:
+        return false
+    var i = 0
+    var digits = 0
+    var seen_dot = false
+    if c.slice(0, 1) == "-" or c.slice(0, 1) == "+":
+        i = 1
+    while i < c.len():
+        val ch = c.slice(i, i + 1)
+        val numeric = (ch == "0" or ch == "1" or ch == "2" or ch == "3" or ch == "4"
+            or ch == "5" or ch == "6" or ch == "7" or ch == "8" or ch == "9")
+        if numeric:
+            digits = digits + 1
+            i = i + 1
+        elif ch == "." and not seen_dot:
+            seen_dot = true
+            i = i + 1
+        else:
+            break
+    if digits == 0:
+        return false
+    val unit_raw: text = c.slice(i, c.len())
+    val unit: text = unit_raw.to_lower()
+    if unit.len() == 0:
+        return true
+    _in(["px", "em", "rem", "ex", "ch", "vw", "vh", "vmin", "vmax",
+         "cm", "mm", "in", "pt", "pc", "q", "%"], unit)
+
+fn _is_number(c: text) -> bool:
+    """Return true when `c` is a bare number (no unit)."""
+    if not _is_length(c):
+        return false
+    var i = 0
+    if c.slice(0, 1) == "-" or c.slice(0, 1) == "+":
+        i = 1
+    while i < c.len():
+        val ch = c.slice(i, i + 1)
+        val numeric = (ch == "0" or ch == "1" or ch == "2" or ch == "3" or ch == "4"
+            or ch == "5" or ch == "6" or ch == "7" or ch == "8" or ch == "9" or ch == ".")
+        if not numeric:
+            return false
+        i = i + 1
+    true
+
+fn _is_color(c: text) -> bool:
+    """Return true when `c` is a colour we can actually resolve."""
+    if val _resolved = parse_css_color(c):
+        return true
+    false
+
+fn _is_url(c: text) -> bool:
+    """Return true when `c` is a `url(...)` function."""
+    val lower: text = c.to_lower()
+    lower.starts_with("url(")
+
+# ============================================================================
+# Box shorthands (the 1/2/3/4-value form)
+# ============================================================================
+
+# Expand the 1/2/3/4-value box form into (top, right, bottom, left):
+#   1 -> all four; 2 -> vertical, horizontal; 3 -> top, horizontal, bottom;
+#   4 -> top, right, bottom, left.
+# Any other count is invalid, and this returns nil rather than guessing.
+fn expand_box_values(value: text) -> [text]?:
+    """Return the four side values of box shorthand `value`, or nil if invalid."""
+    val parts = split_css_components(value)
+    val n = parts.len()
+    if n == 1:
+        val a = parts[0 as i32]
+        return [a, a, a, a]
+    if n == 2:
+        val v = parts[0 as i32]
+        val h = parts[1 as i32]
+        return [v, h, v, h]
+    if n == 3:
+        val t = parts[0 as i32]
+        val h = parts[1 as i32]
+        val b = parts[2 as i32]
+        return [t, h, b, h]
+    if n == 4:
+        return [parts[0 as i32], parts[1 as i32], parts[2 as i32], parts[3 as i32]]
+    nil
+
+fn _box(prefix: text, suffix: text, value: text) -> [CssLonghand]?:
+    """Expand a box shorthand into `<prefix>-<side><suffix>` longhands."""
+    if val sides = expand_box_values(value):
+        return [
+            CssLonghand(property: prefix + "-top" + suffix, value: sides[0 as i32]),
+            CssLonghand(property: prefix + "-right" + suffix, value: sides[1 as i32]),
+            CssLonghand(property: prefix + "-bottom" + suffix, value: sides[2 as i32]),
+            CssLonghand(property: prefix + "-left" + suffix, value: sides[3 as i32]),
+        ]
+    nil
+
+# `inset` writes top/right/bottom/left directly — no prefix, no suffix.
+fn _inset(value: text) -> [CssLonghand]?:
+    """Expand the `inset` shorthand into the four offset longhands."""
+    if val sides = expand_box_values(value):
+        return [
+            CssLonghand(property: "top", value: sides[0 as i32]),
+            CssLonghand(property: "right", value: sides[1 as i32]),
+            CssLonghand(property: "bottom", value: sides[2 as i32]),
+            CssLonghand(property: "left", value: sides[3 as i32]),
+        ]
+    nil
+
+# ============================================================================
+# border / border-<side> / outline
+# ============================================================================
+
+# The `border-<side>` triple: width, style, colour, in any order, any subset.
+# Unmentioned components take their initial value (medium / none / currentcolor)
+# — that is the reset half of the shorthand contract.
+fn _border_triple(value: text) -> [text]?:
+    """Return (width, style, color) for a border-like value, or nil if invalid."""
+    val parts = split_css_components(value)
+    val lowered: text = value.trim().to_lower()
+    if lowered == "none":
+        return ["medium", "none", "currentcolor"]
+    if parts.len() == 0 or parts.len() > 3:
+        return nil
+    var width: text = "medium"
+    var style: text = "none"
+    var color: text = "currentcolor"
+    var saw_width = false
+    var saw_style = false
+    var saw_color = false
+    var i = 0
+    while i < parts.len():
+        val raw = parts[i as i32]
+        val c: text = raw.to_lower()
+        if _is_line_style(c) and not saw_style:
+            style = c
+            saw_style = true
+        elif _is_line_width(c) and not saw_width:
+            width = c
+            saw_width = true
+        elif _is_color(raw) and not saw_color:
+            color = raw
+            saw_color = true
+        else:
+            # An unclassifiable or duplicated component makes the whole
+            # declaration invalid. Guessing here would reset the other two
+            # longhands off a value we did not understand.
+            return nil
+        i = i + 1
+    [width, style, color]
+
+fn _border_side(side: text, value: text) -> [CssLonghand]?:
+    """Expand `border-<side>` into its width/style/color longhands."""
+    if val t = _border_triple(value):
+        return [
+            CssLonghand(property: "border-" + side + "-width", value: t[0 as i32]),
+            CssLonghand(property: "border-" + side + "-style", value: t[1 as i32]),
+            CssLonghand(property: "border-" + side + "-color", value: t[2 as i32]),
+        ]
+    nil
+
+fn _border_all(value: text) -> [CssLonghand]?:
+    """Expand `border` into all twelve side longhands."""
+    if val t = _border_triple(value):
+        var out: [CssLonghand] = []
+        val sides = ["top", "right", "bottom", "left"]
+        var i = 0
+        while i < sides.len():
+            val s = sides[i as i32]
+            out.push(CssLonghand(property: "border-" + s + "-width", value: t[0 as i32]))
+            out.push(CssLonghand(property: "border-" + s + "-style", value: t[1 as i32]))
+            out.push(CssLonghand(property: "border-" + s + "-color", value: t[2 as i32]))
+            i = i + 1
+        return out
+    nil
+
+fn _outline(value: text) -> [CssLonghand]?:
+    """Expand `outline` into outline-width/style/color."""
+    if val t = _border_triple(value):
+        return [
+            CssLonghand(property: "outline-width", value: t[0 as i32]),
+            CssLonghand(property: "outline-style", value: t[1 as i32]),
+            CssLonghand(property: "outline-color", value: t[2 as i32]),
+        ]
+    nil
+
+# ============================================================================
+# background
+# ============================================================================
+
+fn _is_bg_repeat(c: text) -> bool:
+    """Return true when `c` is a background-repeat keyword."""
+    _in(["repeat", "repeat-x", "repeat-y", "no-repeat", "space", "round"], c)
+
+fn _is_bg_attachment(c: text) -> bool:
+    """Return true when `c` is a background-attachment keyword."""
+    _in(["scroll", "fixed", "local"], c)
+
+fn _is_bg_box(c: text) -> bool:
+    """Return true when `c` is a background-origin/clip box keyword."""
+    _in(["border-box", "padding-box", "content-box"], c)
+
+fn _is_bg_position(c: text) -> bool:
+    """Return true when `c` is a background-position component."""
+    if _in(["left", "right", "top", "bottom", "center"], c):
+        return true
+    _is_length(c)
+
+# `background` is a single-layer expansion only. A comma-separated multi-layer
+# value returns nil: expanding only the first layer would silently discard the
+# rest, and this module never returns a partial answer.
+fn _background(value: text) -> [CssLonghand]?:
+    """Expand a single-layer `background` shorthand, or nil when invalid."""
+    if split_css_comma_list(value).len() > 1:
+        return nil
+    val parts = split_css_components(value)
+    if parts.len() == 0:
+        return nil
+    var color: text = "transparent"
+    var image: text = "none"
+    var repeat: text = "repeat"
+    var attachment: text = "scroll"
+    var position: text = "0% 0%"
+    var size: text = "auto"
+    var origin: text = "padding-box"
+    var clip: text = "border-box"
+    var saw_color = false
+    var saw_image = false
+    var saw_repeat = false
+    var saw_attachment = false
+    var saw_box = false
+    var position_parts: [text] = []
+    var i = 0
+    while i < parts.len():
+        val raw = parts[i as i32]
+        val c: text = raw.to_lower()
+        if c == "none" and not saw_image:
+            saw_image = true
+        elif _is_url(raw) and not saw_image:
+            image = raw
+            saw_image = true
+        elif _is_bg_repeat(c) and not saw_repeat:
+            repeat = c
+            saw_repeat = true
+        elif _is_bg_attachment(c) and not saw_attachment:
+            attachment = c
+            saw_attachment = true
+        elif _is_bg_box(c) and not saw_box:
+            origin = c
+            clip = c
+            saw_box = true
+        elif _is_bg_position(c) and position_parts.len() < 2:
+            position_parts.push(c)
+        elif _is_color(raw) and not saw_color:
+            color = raw
+            saw_color = true
+        else:
+            return nil
+        i = i + 1
+    if position_parts.len() == 1:
+        position = position_parts[0 as i32] + " center"
+    elif position_parts.len() == 2:
+        position = position_parts[0 as i32] + " " + position_parts[1 as i32]
+    [
+        CssLonghand(property: "background-color", value: color),
+        CssLonghand(property: "background-image", value: image),
+        CssLonghand(property: "background-repeat", value: repeat),
+        CssLonghand(property: "background-attachment", value: attachment),
+        CssLonghand(property: "background-position", value: position),
+        CssLonghand(property: "background-size", value: size),
+        CssLonghand(property: "background-origin", value: origin),
+        CssLonghand(property: "background-clip", value: clip),
+    ]
+
+# ============================================================================
+# font
+# ============================================================================
+
+fn _is_font_style(c: text) -> bool:
+    """Return true when `c` is a font-style keyword."""
+    _in(["normal", "italic", "oblique"], c)
+
+fn _is_font_weight(c: text) -> bool:
+    """Return true when `c` is a font-weight keyword or numeric weight."""
+    if _in(["normal", "bold", "bolder", "lighter"], c):
+        return true
+    _in(["100", "200", "300", "400", "500", "600", "700", "800", "900"], c)
+
+fn _is_font_variant(c: text) -> bool:
+    """Return true when `c` is the font shorthand's font-variant subset."""
+    _in(["normal", "small-caps"], c)
+
+fn _is_font_size(c: text) -> bool:
+    """Return true when `c` is a font-size keyword or a length."""
+    if _in(["xx-small", "x-small", "small", "medium", "large", "x-large",
+            "xx-large", "larger", "smaller"], c):
+        return true
+    _is_length(c)
+
+# The `font` shorthand requires BOTH a size and a family; everything before the
+# size is an optional style/variant/weight prefix, and `size/line-height` may
+# carry a line height. A value missing size or family is invalid, and the
+# system-font keywords (`caption`, `menu`, ...) are NOT expanded — we have no
+# system font metrics to expand them from, so they return nil rather than a
+# fabricated set of longhands.
+fn _font(value: text) -> [CssLonghand]?:
+    """Expand the `font` shorthand, or nil when it cannot be decomposed."""
+    val parts = split_css_components(value)
+    if parts.len() < 2:
+        return nil
+    var style: text = "normal"
+    var variant: text = "normal"
+    var weight: text = "normal"
+    var stretch: text = "normal"
+    var size: text = ""
+    var line_height: text = "normal"
+    var family: text = ""
+    var i = 0
+    var saw_style = false
+    var saw_variant = false
+    var saw_weight = false
+    # Prefix: at most three of style / variant / weight, in any order.
+    while i < parts.len():
+        val raw = parts[i as i32]
+        val c: text = raw.to_lower()
+        if c == "normal":
+            i = i + 1
+            continue
+        if _is_font_style(c) and not saw_style:
+            style = c
+            saw_style = true
+            i = i + 1
+            continue
+        if _is_font_variant(c) and not saw_variant:
+            variant = c
+            saw_variant = true
+            i = i + 1
+            continue
+        if _is_font_weight(c) and not saw_weight:
+            weight = c
+            saw_weight = true
+            i = i + 1
+            continue
+        break
+    if i >= parts.len():
+        return nil
+    # Size, optionally `size/line-height`.
+    val size_part = parts[i as i32]
+    val slash = size_part.index_of("/")
+    if slash >= 0:
+        val s: text = size_part.slice(0, slash)
+        size = s.to_lower()
+        val lh: text = size_part.slice(slash + 1, size_part.len())
+        line_height = lh
+        if line_height.len() == 0:
+            return nil
+    else:
+        size = size_part.to_lower()
+    if not _is_font_size(size):
+        return nil
+    i = i + 1
+    if i >= parts.len():
+        return nil
+    # Everything left is the family list.
+    while i < parts.len():
+        if family.len() > 0:
+            family = family + " "
+        family = family + parts[i as i32]
+        i = i + 1
+    if family.len() == 0:
+        return nil
+    [
+        CssLonghand(property: "font-style", value: style),
+        CssLonghand(property: "font-variant", value: variant),
+        CssLonghand(property: "font-weight", value: weight),
+        CssLonghand(property: "font-stretch", value: stretch),
+        CssLonghand(property: "font-size", value: size),
+        CssLonghand(property: "line-height", value: line_height),
+        CssLonghand(property: "font-family", value: family),
+    ]
+
+# ============================================================================
+# flex and friends
+# ============================================================================
+
+fn _flex(value: text) -> [CssLonghand]?:
+    """Expand the `flex` shorthand into grow/shrink/basis."""
+    val lowered: text = value.trim().to_lower()
+    if lowered == "none":
+        return [
+            CssLonghand(property: "flex-grow", value: "0"),
+            CssLonghand(property: "flex-shrink", value: "0"),
+            CssLonghand(property: "flex-basis", value: "auto"),
+        ]
+    if lowered == "auto":
+        return [
+            CssLonghand(property: "flex-grow", value: "1"),
+            CssLonghand(property: "flex-shrink", value: "1"),
+            CssLonghand(property: "flex-basis", value: "auto"),
+        ]
+    if lowered == "initial":
+        return [
+            CssLonghand(property: "flex-grow", value: "0"),
+            CssLonghand(property: "flex-shrink", value: "1"),
+            CssLonghand(property: "flex-basis", value: "auto"),
+        ]
+    val parts = split_css_components(lowered)
+    val n = parts.len()
+    if n == 0 or n > 3:
+        return nil
+    var grow: text = "1"
+    var shrink: text = "1"
+    # The one-value numeric form sets basis to 0, NOT auto — the single most
+    # commonly mis-expanded corner of this shorthand.
+    var basis: text = "0"
+    if n == 1:
+        val a = parts[0 as i32]
+        if _is_number(a):
+            grow = a
+        elif _is_length(a) or a == "auto" or a == "content":
+            grow = "1"
+            basis = a
+        else:
+            return nil
+        return [
+            CssLonghand(property: "flex-grow", value: grow),
+            CssLonghand(property: "flex-shrink", value: shrink),
+            CssLonghand(property: "flex-basis", value: basis),
+        ]
+    val first = parts[0 as i32]
+    if not _is_number(first):
+        return nil
+    grow = first
+    val second = parts[1 as i32]
+    if n == 2:
+        if _is_number(second):
+            shrink = second
+            basis = "0"
+        elif _is_length(second) or second == "auto" or second == "content":
+            basis = second
+        else:
+            return nil
+        return [
+            CssLonghand(property: "flex-grow", value: grow),
+            CssLonghand(property: "flex-shrink", value: shrink),
+            CssLonghand(property: "flex-basis", value: basis),
+        ]
+    if not _is_number(second):
+        return nil
+    shrink = second
+    val third = parts[2 as i32]
+    val basis_ok = _is_length(third) or third == "auto" or third == "content"
+    if not basis_ok:
+        return nil
+    basis = third
+    [
+        CssLonghand(property: "flex-grow", value: grow),
+        CssLonghand(property: "flex-shrink", value: shrink),
+        CssLonghand(property: "flex-basis", value: basis),
+    ]
+
+fn _flex_flow(value: text) -> [CssLonghand]?:
+    """Expand `flex-flow` into flex-direction and flex-wrap."""
+    val parts = split_css_components(value.to_lower())
+    if parts.len() == 0 or parts.len() > 2:
+        return nil
+    var direction: text = "row"
+    var wrap: text = "nowrap"
+    var saw_dir = false
+    var saw_wrap = false
+    var i = 0
+    while i < parts.len():
+        val c = parts[i as i32]
+        if _in(["row", "row-reverse", "column", "column-reverse"], c) and not saw_dir:
+            direction = c
+            saw_dir = true
+        elif _in(["nowrap", "wrap", "wrap-reverse"], c) and not saw_wrap:
+            wrap = c
+            saw_wrap = true
+        else:
+            return nil
+        i = i + 1
+    [
+        CssLonghand(property: "flex-direction", value: direction),
+        CssLonghand(property: "flex-wrap", value: wrap),
+    ]
+
+# ============================================================================
+# Two-value axis shorthands (gap, overflow, place-*)
+# ============================================================================
+
+fn _pair(first_prop: text, second_prop: text, value: text) -> [CssLonghand]?:
+    """Expand a one-or-two value shorthand into its two longhands."""
+    val parts = split_css_components(value)
+    if parts.len() == 1:
+        val a = parts[0 as i32]
+        return [
+            CssLonghand(property: first_prop, value: a),
+            CssLonghand(property: second_prop, value: a),
+        ]
+    if parts.len() == 2:
+        return [
+            CssLonghand(property: first_prop, value: parts[0 as i32]),
+            CssLonghand(property: second_prop, value: parts[1 as i32]),
+        ]
+    nil
+
+fn _list_style(value: text) -> [CssLonghand]?:
+    """Expand `list-style` into type/position/image."""
+    val parts = split_css_components(value)
+    if parts.len() == 0 or parts.len() > 3:
+        return nil
+    var kind: text = "disc"
+    var position: text = "outside"
+    var image: text = "none"
+    var saw_kind = false
+    var saw_position = false
+    var saw_image = false
+    var i = 0
+    while i < parts.len():
+        val raw = parts[i as i32]
+        val c: text = raw.to_lower()
+        if _in(["inside", "outside"], c) and not saw_position:
+            position = c
+            saw_position = true
+        elif _is_url(raw) and not saw_image:
+            image = raw
+            saw_image = true
+        elif c == "none":
+            # `none` is ambiguous between type and image; CSS says the first
+            # `none` sets whichever of the two has not been seen.
+            if not saw_kind:
+                kind = "none"
+                saw_kind = true
+            elif not saw_image:
+                saw_image = true
+            else:
+                return nil
+        elif not saw_kind:
+            kind = c
+            saw_kind = true
+        else:
+            return nil
+        i = i + 1
+    [
+        CssLonghand(property: "list-style-type", value: kind),
+        CssLonghand(property: "list-style-position", value: position),
+        CssLonghand(property: "list-style-image", value: image),
+    ]
+
+fn _text_decoration(value: text) -> [CssLonghand]?:
+    """Expand `text-decoration` into line/style/color."""
+    val parts = split_css_components(value)
+    if parts.len() == 0 or parts.len() > 4:
+        return nil
+    var line: text = ""
+    var style: text = "solid"
+    var color: text = "currentcolor"
+    var saw_style = false
+    var saw_color = false
+    var i = 0
+    while i < parts.len():
+        val raw = parts[i as i32]
+        val c: text = raw.to_lower()
+        if _in(["none", "underline", "overline", "line-through", "blink"], c):
+            if line.len() > 0:
+                line = line + " "
+            line = line + c
+        elif _in(["solid", "double", "dotted", "dashed", "wavy"], c) and not saw_style:
+            style = c
+            saw_style = true
+        elif _is_color(raw) and not saw_color:
+            color = raw
+            saw_color = true
+        else:
+            return nil
+        i = i + 1
+    if line.len() == 0:
+        line = "none"
+    [
+        CssLonghand(property: "text-decoration-line", value: line),
+        CssLonghand(property: "text-decoration-style", value: style),
+        CssLonghand(property: "text-decoration-color", value: color),
+    ]
+
+# ============================================================================
+# Public entry points
+# ============================================================================
+
+# Every shorthand this module knows. `is_shorthand` is what a caller uses to
+# decide whether a declaration needs expanding at all.
+fn shorthand_names() -> [text]:
+    """Return every shorthand property this module can expand."""
+    [
+        "margin", "padding", "inset",
+        "scroll-margin", "scroll-padding",
+        "border-width", "border-style", "border-color", "border-radius",
+        "border", "border-top", "border-right", "border-bottom", "border-left",
+        "outline", "background", "font", "flex", "flex-flow",
+        "gap", "grid-gap", "overflow", "overscroll-behavior",
+        "place-items", "place-content", "place-self",
+        "list-style", "text-decoration",
+    ]
+
+fn is_shorthand(property: text) -> bool:
+    """Return true when `property` is a shorthand this module expands."""
+    _in(shorthand_names(), property.trim().to_lower())
+
+# Expand `property: value` into its complete longhand set.
+#
+# Returns nil in exactly two cases, and the caller must treat them differently
+# only if it wants to: `property` is not a shorthand (ask `is_shorthand` first),
+# or the value is invalid for it. Either way the correct handling of a nil is
+# to leave the longhands alone — never to apply a partial set.
+fn expand_shorthand(property: text, value: text) -> [CssLonghand]?:
+    """Return the full longhand set for shorthand `property: value`, or nil."""
+    val p: text = property.trim().to_lower()
+    val v: text = value.trim()
+    if v.len() == 0:
+        return nil
+    # CSS-wide keywords propagate verbatim to every longhand.
+    val vl: text = v.to_lower()
+    val wide = (vl == "inherit" or vl == "initial" or vl == "unset" or vl == "revert")
+    if wide:
+        return _wide_keyword(p, vl)
+    if p == "margin":
+        return _box("margin", "", v)
+    if p == "padding":
+        return _box("padding", "", v)
+    if p == "scroll-margin":
+        return _box("scroll-margin", "", v)
+    if p == "scroll-padding":
+        return _box("scroll-padding", "", v)
+    if p == "inset":
+        return _inset(v)
+    if p == "border-width":
+        return _box("border", "-width", v)
+    if p == "border-style":
+        return _box("border", "-style", v)
+    if p == "border-color":
+        return _box("border", "-color", v)
+    if p == "border-radius":
+        return _border_radius(v)
+    if p == "border":
+        return _border_all(v)
+    if p == "border-top":
+        return _border_side("top", v)
+    if p == "border-right":
+        return _border_side("right", v)
+    if p == "border-bottom":
+        return _border_side("bottom", v)
+    if p == "border-left":
+        return _border_side("left", v)
+    if p == "outline":
+        return _outline(v)
+    if p == "background":
+        return _background(v)
+    if p == "font":
+        return _font(v)
+    if p == "flex":
+        return _flex(v)
+    if p == "flex-flow":
+        return _flex_flow(v)
+    if p == "gap" or p == "grid-gap":
+        return _pair("row-gap", "column-gap", v)
+    if p == "overflow":
+        return _pair("overflow-x", "overflow-y", v)
+    if p == "overscroll-behavior":
+        return _pair("overscroll-behavior-x", "overscroll-behavior-y", v)
+    if p == "place-items":
+        return _pair("align-items", "justify-items", v)
+    if p == "place-content":
+        return _pair("align-content", "justify-content", v)
+    if p == "place-self":
+        return _pair("align-self", "justify-self", v)
+    if p == "list-style":
+        return _list_style(v)
+    if p == "text-decoration":
+        return _text_decoration(v)
+    nil
+
+# `border-radius` takes an optional `/` second set for the vertical radii. The
+# slash form is NOT expanded — the elliptical longhand value is a pair, and
+# emitting only the horizontal half would be a wrong value, not a missing one.
+fn _border_radius(value: text) -> [CssLonghand]?:
+    """Expand the non-elliptical `border-radius` form, or nil for the `/` form."""
+    if value.index_of("/") >= 0:
+        return nil
+    if val sides = expand_box_values(value):
+        return [
+            CssLonghand(property: "border-top-left-radius", value: sides[0 as i32]),
+            CssLonghand(property: "border-top-right-radius", value: sides[1 as i32]),
+            CssLonghand(property: "border-bottom-right-radius", value: sides[2 as i32]),
+            CssLonghand(property: "border-bottom-left-radius", value: sides[3 as i32]),
+        ]
+    nil
+
+# Every longhand of the shorthand receives the CSS-wide keyword verbatim.
+fn _wide_keyword(property: text, keyword: text) -> [CssLonghand]?:
+    """Return the shorthand's longhands, each set to a CSS-wide keyword."""
+    val names = longhands_of(property)
+    if names.len() == 0:
+        return nil
+    var out: [CssLonghand] = []
+    var i = 0
+    while i < names.len():
+        out.push(CssLonghand(property: names[i as i32], value: keyword))
+        i = i + 1
+    out
+
+# The longhand NAMES a shorthand covers, independent of any value. This is the
+# reset set: whatever a caller does with a shorthand, it touches exactly these.
+fn longhands_of(property: text) -> [text]:
+    """Return the longhand property names shorthand `property` writes."""
+    val p: text = property.trim().to_lower()
+    if p == "margin" or p == "padding" or p == "scroll-margin" or p == "scroll-padding":
+        return [p + "-top", p + "-right", p + "-bottom", p + "-left"]
+    if p == "inset":
+        return ["top", "right", "bottom", "left"]
+    if p == "border-width" or p == "border-style" or p == "border-color":
+        val suffix: text = p.slice(6, p.len())
+        return ["border-top" + suffix, "border-right" + suffix,
+                "border-bottom" + suffix, "border-left" + suffix]
+    if p == "border-radius":
+        return ["border-top-left-radius", "border-top-right-radius",
+                "border-bottom-right-radius", "border-bottom-left-radius"]
+    if p == "border":
+        return ["border-top-width", "border-top-style", "border-top-color",
+                "border-right-width", "border-right-style", "border-right-color",
+                "border-bottom-width", "border-bottom-style", "border-bottom-color",
+                "border-left-width", "border-left-style", "border-left-color"]
+    if p == "border-top" or p == "border-right" or p == "border-bottom" or p == "border-left":
+        return [p + "-width", p + "-style", p + "-color"]
+    if p == "outline":
+        return ["outline-width", "outline-style", "outline-color"]
+    if p == "background":
+        return ["background-color", "background-image", "background-repeat",
+                "background-attachment", "background-position", "background-size",
+                "background-origin", "background-clip"]
+    if p == "font":
+        return ["font-style", "font-variant", "font-weight", "font-stretch",
+                "font-size", "line-height", "font-family"]
+    if p == "flex":
+        return ["flex-grow", "flex-shrink", "flex-basis"]
+    if p == "flex-flow":
+        return ["flex-direction", "flex-wrap"]
+    if p == "gap" or p == "grid-gap":
+        return ["row-gap", "column-gap"]
+    if p == "overflow":
+        return ["overflow-x", "overflow-y"]
+    if p == "overscroll-behavior":
+        return ["overscroll-behavior-x", "overscroll-behavior-y"]
+    if p == "place-items":
+        return ["align-items", "justify-items"]
+    if p == "place-content":
+        return ["align-content", "justify-content"]
+    if p == "place-self":
+        return ["align-self", "justify-self"]
+    if p == "list-style":
+        return ["list-style-type", "list-style-position", "list-style-image"]
+    if p == "text-decoration":
+        return ["text-decoration-line", "text-decoration-style", "text-decoration-color"]
+    var empty: [text] = []
+    empty

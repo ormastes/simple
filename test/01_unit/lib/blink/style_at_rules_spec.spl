@@ -1,0 +1,223 @@
+# @cover src/lib/blink/style/at_rules.spl 80%
+"""
+# Blink At-Rule Specification
+
+**Category:** Browser / Blink
+**Status:** Active
+
+## Overview
+
+`@media`, `@supports` and `@keyframes` parse in `css_parser` and are decided
+here, against a media environment and against a registry of what blink's
+cascade actually implements. Two behaviours matter more than the happy path:
+a non-matching block contributes nothing, and a block whose prelude cannot be
+evaluated contributes nothing AND is reported — never silently applied.
+
+Document order is also pinned: a matching block's rules are spliced back where
+the author wrote them, because same-specificity ties are broken by order and
+appending them at the end would change which rule wins.
+"""
+
+use std.spipe.*
+use std.blink.css_parser.tokenizer.{tokenize_css}
+use std.blink.css_parser.parser.{parse_css, CssStyleSheet}
+use std.blink.style.at_rules.{
+    blink_supports_registry, evaluate_at_rule, flatten_stylesheet, flatten_for_screen
+}
+use std.common.css.media_query.{MediaEnvironment, media_environment_screen}
+
+fn _sheet(source: text) -> CssStyleSheet:
+    parse_css(tokenize_css(source))
+
+# Render the flattened rule list as `selector{prop=value,...}` joined by `|`,
+# so both WHICH rules survived and in WHAT ORDER are one assertion.
+fn _flat(source: text, width: f64, height: f64) -> text:
+    val flat = flatten_for_screen(_sheet(source), width, height)
+    var out: text = ""
+    var i = 0
+    while i < flat.rules.len():
+        val r = flat.rules[i as i32]
+        if out.len() > 0:
+            out = out + "|"
+        out = out + r.selector + "{"
+        var j = 0
+        while j < r.declarations.len():
+            val d = r.declarations[j as i32]
+            if j > 0:
+                out = out + ","
+            out = out + d.property + "=" + d.value
+            j = j + 1
+        out = out + "}"
+        i = i + 1
+    out
+
+fn _unevaluated_count(source: text) -> i64:
+    flatten_for_screen(_sheet(source), 1200.0, 800.0).unevaluated.len()
+
+# @manual_section: Parsing at-rules
+describe "at-rule parsing":
+    """
+    As a browser engine, I want a conditional block's rules kept OUT of the
+    unconditional rule list until its prelude is evaluated, so that a `@media
+    print` block cannot style the screen simply because it parsed.
+    """
+
+    # @req REQ-BLINK-ATRULE-PARSE
+    it "keeps a media block's rules out of the top-level rule list":
+        step("parse a sheet with one plain rule and one inside @media")
+        val sheet = _sheet("p { color: red; } @media print { p { color: blue; } }")
+        expect(sheet.rules.len()).to_equal(1)
+        expect(sheet.at_rules.len()).to_equal(1)
+
+    # @req REQ-BLINK-ATRULE-PARSE
+    it "records the prelude verbatim for later evaluation":
+        step("parse `@media screen and (min-width: 600px)`")
+        val sheet = _sheet("@media screen and (min-width: 600px) { p { color: red; } }")
+        val prelude = sheet.at_rules[0 as i32].prelude
+        expect(prelude).to_equal("screen and (min-width: 600px)")
+
+    # @req REQ-BLINK-ATRULE-PARSE
+    it "records a statement at-rule that has no block":
+        step("parse `@import url(a.css);`")
+        val sheet = _sheet("@import url(a.css); p { color: red; }")
+        expect(sheet.at_rules.len()).to_equal(1)
+        expect(sheet.at_rules[0 as i32].name).to_equal("import")
+
+    # @req REQ-BLINK-ATRULE-PARSE
+    it "skips an at-rule block it does not model instead of reading it as a style rule":
+        step("parse `@font-face { font-family: X; }` followed by a real rule")
+        val sheet = _sheet("@font-face { font-family: X; } p { color: red; }")
+        expect(sheet.rules.len()).to_equal(1)
+        expect(sheet.rules[0 as i32].selector).to_equal("p")
+        expect(sheet.errors.len() > 0).to_equal(true)
+
+    # @req REQ-BLINK-ATRULE-KEYFRAMES
+    it "parses a keyframes block into one keyframe per selector":
+        step("parse `@keyframes fade` with from, 50% and to")
+        val sheet = _sheet(
+            "@keyframes fade { from { opacity: 0; } 50% { opacity: 0.5; } to { opacity: 1; } }")
+        expect(sheet.keyframes.len()).to_equal(1)
+        expect(sheet.keyframes[0 as i32].name).to_equal("fade")
+        expect(sheet.keyframes[0 as i32].keyframes.len()).to_equal(3)
+
+    # @req REQ-BLINK-ATRULE-KEYFRAMES
+    it "splits a keyframe selector list into one keyframe each":
+        step("parse `0%, 100% { opacity: 1; }` as a single entry with two selectors")
+        val sheet = _sheet("@keyframes blink { 0%, 100% { opacity: 1; } }")
+        expect(sheet.keyframes[0 as i32].keyframes.len()).to_equal(2)
+
+# @manual_section: Media evaluation
+describe "flattening a media block":
+    """
+    As a browser engine, I want a `@media` block's rules applied exactly when
+    its query matches the viewport being rendered, so that a responsive sheet
+    produces the layout the author designed for that size.
+    """
+
+    # @req REQ-BLINK-ATRULE-MEDIA
+    it "applies a media block whose query matches the viewport":
+        step("flatten `@media (min-width: 600px)` at 1200px wide")
+        expect(_flat("@media (min-width: 600px) { p { color: red; } }", 1200.0, 800.0)).to_equal(
+            "p{color=red}")
+
+    # @req REQ-BLINK-ATRULE-MEDIA
+    it "drops a media block whose query does not match":
+        step("flatten the same sheet at 320px wide")
+        expect(_flat("@media (min-width: 600px) { p { color: red; } }", 320.0, 640.0)).to_equal("")
+
+    # @req REQ-BLINK-ATRULE-MEDIA
+    it "drops a print block when rendering to a screen":
+        step("flatten `@media print`")
+        expect(_flat("@media print { p { color: blue; } }", 1200.0, 800.0)).to_equal("")
+
+    # @req REQ-BLINK-ATRULE-ORDER
+    it "splices a matching block back into the position the author wrote it":
+        step("flatten a sheet where the media block sits BETWEEN two plain rules")
+        val source = "a { color: red; } @media (min-width: 600px) { b { color: green; } } c { color: blue; }"
+        expect(_flat(source, 1200.0, 800.0)).to_equal(
+            "a{color=red}|b{color=green}|c{color=blue}")
+
+    # @req REQ-BLINK-ATRULE-ORDER
+    it "leaves the surrounding rules adjacent when the block does not match":
+        step("flatten the same sheet at a width the query rejects")
+        val source = "a { color: red; } @media (min-width: 600px) { b { color: green; } } c { color: blue; }"
+        expect(_flat(source, 320.0, 640.0)).to_equal("a{color=red}|c{color=blue}")
+
+# @manual_section: Supports evaluation
+describe "flattening a supports block":
+    """
+    As a browser engine, I want `@supports` answered from what my own cascade
+    implements, so that an author's fallback branch runs for the features I am
+    genuinely missing instead of being disabled by a flattering claim.
+    """
+
+    # @req REQ-BLINK-ATRULE-SUPPORTS
+    it "applies a supports block for a property and value blink implements":
+        step("flatten `@supports (display: flex)`")
+        expect(_flat("@supports (display: flex) { p { color: red; } }", 1200.0, 800.0)).to_equal(
+            "p{color=red}")
+
+    # @req REQ-BLINK-ATRULE-SUPPORTS
+    it "drops a supports block for a value blink does not implement":
+        step("flatten `@supports (display: grid)` — blink's cascade has no grid")
+        expect(_flat("@supports (display: grid) { p { color: red; } }", 1200.0, 800.0)).to_equal("")
+
+    # @req REQ-BLINK-ATRULE-SUPPORTS
+    it "applies the author's fallback branch guarded by not":
+        step("flatten `@supports not (display: grid)`")
+        expect(_flat("@supports not (display: grid) { p { color: red; } }", 1200.0, 800.0)).to_equal(
+            "p{color=red}")
+
+    # @req REQ-BLINK-ATRULE-SUPPORTS
+    it "declares support for a real subset, not for everything":
+        step("check the registry is populated but finite")
+        val features = blink_supports_registry().features
+        val bounded = features.len() > 0 and features.len() < 200
+        expect(bounded).to_equal(true)
+
+# @manual_section: The failure contract
+describe "unevaluatable preludes":
+    """
+    As a browser engine, I want a conditional block whose prelude I cannot
+    evaluate left unapplied AND listed, so that an unimplemented query surfaces
+    as a reportable gap rather than as a page styled by a guess.
+    """
+
+    # @req REQ-BLINK-ATRULE-UNEVALUATED
+    it "does not apply a block whose media feature it cannot evaluate":
+        step("flatten `@media (hover: hover)`")
+        expect(_flat("@media (hover: hover) { p { color: red; } }", 1200.0, 800.0)).to_equal("")
+
+    # @req REQ-BLINK-ATRULE-UNEVALUATED
+    it "lists the unevaluated prelude instead of dropping it silently":
+        step("count the unevaluated preludes of the same sheet")
+        expect(_unevaluated_count("@media (hover: hover) { p { color: red; } }")).to_equal(1)
+
+    # @req REQ-BLINK-ATRULE-UNEVALUATED
+    it "lists an unevaluated supports prelude":
+        step("flatten `@supports selector(a > b)`")
+        expect(_unevaluated_count("@supports selector(a > b) { p { color: red; } }")).to_equal(1)
+
+    # @req REQ-BLINK-ATRULE-UNEVALUATED
+    it "reports nothing unevaluated for a sheet it fully understands":
+        step("flatten a sheet of plain rules and an evaluable media block")
+        expect(_unevaluated_count("p { color: red; } @media print { p { color: blue; } }")).to_equal(0)
+
+    # @req REQ-BLINK-ATRULE-UNEVALUATED
+    it "answers an at-rule it does not model as unevaluated rather than as applicable":
+        step("evaluate an @import at-rule directly")
+        val sheet = _sheet("@import url(a.css);")
+        var verdict: text = "unevaluated"
+        if val v = evaluate_at_rule(sheet.at_rules[0 as i32],
+                media_environment_screen(1200.0, 800.0), blink_supports_registry()):
+            if v:
+                verdict = "apply"
+            else:
+                verdict = "skip"
+        expect(verdict).to_equal("unevaluated")
+
+    # @req REQ-BLINK-ATRULE-UNEVALUATED
+    it "does not hoist a nested at-rule out of its outer condition":
+        step("flatten a `@media print` containing a nested `@media (min-width: 1px)`")
+        val source = "@media print { @media (min-width: 1px) { p { color: red; } } }"
+        expect(_flat(source, 1200.0, 800.0)).to_equal("")
