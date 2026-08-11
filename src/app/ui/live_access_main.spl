@@ -1,0 +1,202 @@
+# Standalone live UI protocol client.
+#
+# This entry intentionally excludes persisted SQLite access and UI renderer
+# backends.  It is suitable for phase-3 native deployment beside standalone
+# products while retaining the public `ui windows|snapshot|surface|find|act|
+# history` command shape.
+
+use common.text_advanced.{escape_json}
+use common.ui.access_cli_grammar.{AccessError, AccessResult, access_error_to_json, access_render_json}
+use std.nogc_sync_mut.io.tcp.{TcpStream}
+use std.nogc_sync_mut.io_runtime.{getpid, time_now_unix_micros}
+use app.io.cli_ops.{cli_get_args}
+
+val LIVE_UI_SOURCE = "simple_ui"
+val LIVE_UI_DEFAULT_PORT: i32 = 3000
+val LIVE_UI_DEFAULT_TIMEOUT_MS: i64 = 2000
+val LIVE_UI_MAX_TIMEOUT_MS: i64 = 30000
+
+fn main() -> i64:
+    val args = _live_args()
+    if args.len() == 0 or args[0] == "-h" or args[0] == "--help":
+        _live_usage()
+        return if args.len() == 0: 2 else: 0
+    val operation = args[0]
+    if not _live_operation(operation):
+        return _live_fail(operation, AccessError.create("invalid_argument", "unknown UI access command '" + operation + "'"), 2)
+    val port = _live_number(args, "--port", LIVE_UI_DEFAULT_PORT.to_i64()).to_i32()
+    val timeout_ms = _live_number(args, "--timeout", LIVE_UI_DEFAULT_TIMEOUT_MS)
+    if port <= 0 or port > 65535:
+        return _live_fail(operation, AccessError.create("invalid_argument", "--port must be between 1 and 65535"), 2)
+    if timeout_ms <= 0 or timeout_ms > LIVE_UI_MAX_TIMEOUT_MS:
+        return _live_fail(operation, AccessError.create("invalid_argument", "--timeout must be between 1 and 30000"), 2)
+    val route = match _live_route(operation, args):
+        Err(e): return _live_fail(operation, e, 2)
+        Ok(value): value
+    if operation != "act":
+        val payload = match _live_http("GET", route, "", port, timeout_ms):
+            Err(e): return _live_fail(operation, e, 1)
+            Ok(value): value
+        return _live_emit(operation, payload, "", 0)
+
+    val request_id = "ui-act-" + getpid().to_text() + "-" + time_now_unix_micros().to_text()
+    val body = _live_action_body(args, request_id)
+    val action = match _live_http("POST", route, body, port, timeout_ms):
+        Err(e):
+            e.set_request_id(request_id)
+            return _live_fail(operation, e, 1)
+        Ok(value): value
+    val surface = _live_value(args, "--surface")
+    val canonical = _live_value(args, "--canonical")
+    val observed_surface = if surface != "": surface else: _live_surface_from_canonical(canonical)
+    val observation_route = if observed_surface == "": "/api/test/ui/history?count=1" else: "/api/test/ui/surface?id=" + _live_url_encode(observed_surface)
+    val observation = match _live_http("GET", observation_route, "", port, timeout_ms):
+        Err(e):
+            e.set_request_id(request_id)
+            return _live_fail(operation, e, 1)
+        Ok(value): value
+    _live_emit(operation, "{\"action\":" + action + ",\"observation\":" + observation + "}", request_id, 1)
+
+fn _live_args() -> [text]:
+    val raw = cli_get_args()
+    var result: [text] = []
+    var started = false
+    for arg in raw:
+        if started:
+            result = result.push(arg)
+        elif arg == "ui":
+            started = true
+    if started: return result
+    # A narrow binary also accepts `ui-client snapshot ...` directly.
+    var skipped_program = false
+    for arg in raw:
+        if skipped_program: result = result.push(arg)
+        else: skipped_program = true
+    result
+
+fn _live_operation(value: text) -> bool:
+    value == "windows" or value == "snapshot" or value == "surface" or
+        value == "find" or value == "act" or value == "history"
+
+fn _live_route(operation: text, args: [text]) -> Result<text, AccessError>:
+    if operation == "windows" or operation == "snapshot": return Ok("/api/test/ui/snapshot")
+    if operation == "surface":
+        val id = _live_positional(args)
+        if id == "": return Err(AccessError.create("invalid_argument", "surface requires an id"))
+        return Ok("/api/test/ui/surface?id=" + _live_url_encode(id))
+    if operation == "find":
+        var parts: [text] = []
+        parts = _live_query(parts, "surface_id", _live_value(args, "--surface"))
+        parts = _live_query(parts, "canonical_id", _live_value(args, "--canonical"))
+        parts = _live_query(parts, "kind", _live_value(args, "--kind"))
+        parts = _live_query(parts, "text", _live_value(args, "--text"))
+        parts = _live_query(parts, "limit", _live_value(args, "--limit"))
+        return Ok("/api/test/ui/find" + if parts.len() == 0: "" else: "?" + parts.join("&"))
+    if operation == "history":
+        var parts: [text] = []
+        parts = _live_query(parts, "surface_id", _live_value(args, "--surface"))
+        parts = _live_query(parts, "count", _live_value(args, "--count"))
+        return Ok("/api/test/ui/history" + if parts.len() == 0: "" else: "?" + parts.join("&"))
+    val canonical = _live_value(args, "--canonical")
+    val action = _live_value(args, "--action")
+    val revision = _live_value(args, "--revision")
+    if canonical == "" or not canonical.contains("#"):
+        return Err(AccessError.create("invalid_argument", "act requires --canonical surface#widget"))
+    if action == "" or revision == "":
+        return Err(AccessError.create("invalid_argument", "act requires --action and --revision"))
+    Ok("/api/test/ui/act")
+
+fn _live_action_body(args: [text], request_id: text) -> text:
+    "{\"surface_id\":\"" + escape_json(_live_value(args, "--surface")) +
+        "\",\"canonical_id\":\"" + escape_json(_live_value(args, "--canonical")) +
+        "\",\"action\":\"" + escape_json(_live_value(args, "--action")) +
+        "\",\"value\":\"" + escape_json(_live_value(args, "--value")) +
+        "\",\"request_id\":\"" + escape_json(request_id) +
+        "\",\"expected_revision\":" + _live_value(args, "--revision") + "}"
+
+fn _live_http(method: text, route: text, body: text, port: i32, timeout_ms: i64) -> Result<text, AccessError>:
+    val fd = TcpStream.connect_fd_timeout("127.0.0.1:" + port.to_text(), timeout_ms)
+    if fd < 0: return Err(AccessError.create("source_unavailable", "failed to connect to live UI service"))
+    var stream = TcpStream.from_accepted_fd(fd)
+    if not stream.set_read_timeout_status(timeout_ms):
+        stream.close_status()
+        return Err(AccessError.create("source_unavailable", "failed to configure live UI read timeout"))
+    val content_headers = if method == "POST": "Content-Type: application/json\r\nContent-Length: " + body.len().to_text() + "\r\n" else: ""
+    val request = method + " " + route + " HTTP/1.1\r\nHost: 127.0.0.1:" + port.to_text() + "\r\nAccept: application/json\r\n" + content_headers + "Connection: close\r\n\r\n" + body
+    if not stream.write_text_status(request):
+        stream.close_status()
+        return Err(AccessError.create("source_unavailable", "failed to write live UI request"))
+    val status_line = stream.read_line_nullable() ?? ""
+    if status_line == "":
+        stream.close_status()
+        return Err(AccessError.create("source_unavailable", "live UI service closed without a response"))
+    val status_code = _live_status_code(status_line)
+    var content_length = 0
+    while true:
+        val line = stream.read_line_nullable() ?? ""
+        if line == "" or line == "\r\n" or line == "\n": break
+        val lower = line.to_lower()
+        if lower.starts_with("content-length:"):
+            content_length = line.slice(line.index_of(":") + 1, line.len()).trim().to_i32()
+    val response_body = if content_length > 0: stream.read_bytes_or_empty(content_length) else: ""
+    stream.close_status()
+    if status_code >= 200 and status_code < 300: return Ok(response_body)
+    val code = if status_code == 404: "target_not_found" elif status_code == 403: "permission_denied" elif status_code == 504: "timeout" elif status_code == 400: "invalid_argument" elif status_code == 409 and response_body.contains("stale"): "stale_target" elif status_code == 409 and response_body.contains("unsupported"): "unsupported_action" else: "source_unavailable"
+    Err(AccessError.detailed(code, if response_body != "": response_body else: status_line.trim(), status_code.to_text(), "Start or inspect the live UI service", true, false))
+
+fn _live_status_code(status_line: text) -> i64:
+    val parts = status_line.trim().split(" ")
+    if parts.len() < 2: return 0
+    parts[1].to_i64()
+
+fn _live_emit(operation: text, payload: text, request_id: text, returned: i64) -> i64:
+    var result = AccessResult.document(operation, LIVE_UI_SOURCE, "", 0, payload, returned, false)
+    result.correlation_id = request_id
+    print access_render_json(result)
+    0
+
+fn _live_fail(operation: text, e: AccessError, code: i64) -> i64:
+    print access_error_to_json(operation, LIVE_UI_SOURCE, e)
+    code
+
+fn _live_value(args: [text], name: text) -> text:
+    var i = 0
+    while i < args.len():
+        if args[i] == name and i + 1 < args.len(): return args[i + 1]
+        if args[i].starts_with(name + "="): return args[i][name.len() + 1:]
+        i = i + 1
+    ""
+
+fn _live_number(args: [text], name: text, default_value: i64) -> i64:
+    val value = _live_value(args, name)
+    if value == "": default_value else: value.to_i64()
+
+fn _live_positional(args: [text]) -> text:
+    var i = 1
+    while i < args.len():
+        val arg = args[i]
+        if arg.starts_with("--"):
+            if not arg.contains("=") and arg != "--json": i = i + 1
+        else: return arg
+        i = i + 1
+    ""
+
+fn _live_query(parts: [text], key: text, value: text) -> [text]:
+    if value == "": return parts
+    parts + [key + "=" + _live_url_encode(value)]
+
+fn _live_url_encode(value: text) -> text:
+    var out = value.replace("%", "%25")
+    out = out.replace(" ", "%20")
+    out = out.replace("#", "%23")
+    out = out.replace("?", "%3F")
+    out = out.replace("&", "%26")
+    out = out.replace("=", "%3D")
+    out.replace("+", "%2B")
+
+fn _live_surface_from_canonical(canonical: text) -> text:
+    val at = canonical.index_of("#")
+    if at <= 0: "" else: canonical.slice(0, at)
+
+fn _live_usage():
+    print "Usage: simple-ui-client ui windows|snapshot|surface|find|act|history [options]"
