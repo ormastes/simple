@@ -234,6 +234,25 @@ pub fn rt_file_fsync_cached(args: &[Value]) -> Result<Value, CompileError> {
     rt_file_fsync(args)
 }
 
+/// Persist directory-entry updates. Unsupported hosts fail closed.
+pub fn rt_dir_sync(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    #[cfg(unix)]
+    {
+        match OpenOptions::new().read(true).open(&path) {
+            Ok(directory) if directory.metadata().map(|m| m.is_dir()).unwrap_or(false) => {
+                Ok(Value::Bool(directory.sync_all().is_ok()))
+            }
+            _ => Ok(Value::Bool(false)),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(Value::Bool(false))
+    }
+}
+
 /// CRC32 checksum of a text string. Returns the checksum as i64.
 pub fn rt_crc32_text(args: &[Value]) -> Result<Value, CompileError> {
     let text = extract_content(args, 0)?;
@@ -2094,5 +2113,25 @@ fn errno_from_io_error(e: &std::io::Error) -> i64 {
         std::io::ErrorKind::PermissionDenied => 13,
         std::io::ErrorKind::AlreadyExists => 17,
         _ => 5, // EIO
+    }
+}
+
+#[cfg(all(test, unix))]
+mod dir_sync_tests {
+    use super::{rt_dir_sync, Value};
+
+    #[test]
+    fn syncs_only_existing_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = Value::text(temp.path().to_string_lossy().into_owned());
+        assert_eq!(rt_dir_sync(&[directory]).unwrap(), Value::Bool(true));
+
+        let file_path = temp.path().join("ordinary-file");
+        std::fs::write(&file_path, b"data").unwrap();
+        let file = Value::text(file_path.to_string_lossy().into_owned());
+        assert_eq!(rt_dir_sync(&[file]).unwrap(), Value::Bool(false));
+
+        let missing = Value::text(temp.path().join("missing").to_string_lossy().into_owned());
+        assert_eq!(rt_dir_sync(&[missing]).unwrap(), Value::Bool(false));
     }
 }

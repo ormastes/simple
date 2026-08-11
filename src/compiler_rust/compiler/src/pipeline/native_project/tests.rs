@@ -1913,6 +1913,7 @@ fn test_core_lane_runtime_archives_expose_required_abi_symbols() {
     assert!(core_c_symbols.contains("rt_crc32_text"));
     assert!(core_c_symbols.contains("rt_file_create_excl"));
     assert!(core_c_symbols.contains("rt_file_sync"));
+    assert!(core_c_symbols.contains("rt_dir_sync"));
     assert!(core_c_symbols.contains("rt_bytes_alloc"));
     for symbol in [
         "rt_getpid",

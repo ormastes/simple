@@ -707,6 +707,9 @@ int64_t     rt_file_size(const char* path);
 int         rt_file_fsync(const char* path);
 int         rt_file_fsync_cached(const char* path);
 int         rt_file_sync(const char* path, int64_t path_len);
+/* Persist directory-entry updates. Hosted POSIX only; unsupported targets
+ * fail closed rather than claiming durability. */
+int         rt_dir_sync(const char* path, int64_t path_len);
 int64_t     rt_crc32_text(const char* text, int64_t text_len);
 int         rt_file_create_excl(const char* path, int64_t path_len,
                                 const char* content, int64_t content_len);

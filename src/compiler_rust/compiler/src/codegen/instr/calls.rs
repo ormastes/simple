@@ -2415,6 +2415,7 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         | "rt_file_fsync"
         | "rt_file_fsync_cached"
         | "rt_file_sync"
+        | "rt_dir_sync"
         | "rt_file_delete"
         | "rt_file_remove"
         | "rt_file_read_lines"

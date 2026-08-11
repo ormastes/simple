@@ -1585,6 +1585,43 @@ int         rt_file_sync(const char* path, int64_t path_len) {
     (void)path_len;
     return rt_file_fsync(path);
 }
+int         rt_dir_sync(const char* path, int64_t path_len) {
+#if defined(_WIN32)
+    (void)path;
+    (void)path_len;
+    return 0;
+#else
+    if (!path || path_len <= 0 || (uint64_t)path_len >= SIZE_MAX ||
+        memchr(path, '\0', (size_t)path_len) != NULL) return 0;
+    char* path_copy = (char*)malloc((size_t)path_len + 1);
+    if (!path_copy) return 0;
+    memcpy(path_copy, path, (size_t)path_len);
+    path_copy[path_len] = '\0';
+    int flags = O_RDONLY;
+#ifdef O_DIRECTORY
+    flags |= O_DIRECTORY;
+#endif
+    int fd;
+    do {
+        fd = open(path_copy, flags);
+    } while (fd < 0 && errno == EINTR);
+    free(path_copy);
+    if (fd < 0) return 0;
+    struct stat status;
+    if (fstat(fd, &status) != 0 || !S_ISDIR(status.st_mode)) {
+        close(fd);
+        return 0;
+    }
+    int rc;
+    do {
+        rc = fsync(fd);
+    } while (rc < 0 && errno == EINTR);
+    int saved_errno = errno;
+    close(fd);
+    errno = saved_errno;
+    return rc == 0 ? 1 : 0;
+#endif
+}
 int64_t     rt_crc32_text(const char* text, int64_t text_len) {
     if (!text || text_len <= 0) return 0;
     uint32_t crc = 0xFFFFFFFF;

@@ -1730,6 +1730,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_file_fsync_cached", &[I64, I64], &[I8]),         // path -> bool, prefer write-at cache
     RuntimeFuncSpec::new("rt_crc32_text", &[I64, I64], &[I64]),               // text -> i64 (CRC32 checksum)
     RuntimeFuncSpec::new("rt_file_sync", &[I64, I64], &[I8]),                 // path -> bool (alias for fsync)
+    RuntimeFuncSpec::new("rt_dir_sync", &[I64, I64], &[I8]),                  // directory path -> durable-entry bool
     RuntimeFuncSpec::new("rt_file_create_excl", &[I64, I64, I64, I64], &[I8]), // path, content -> bool (O_EXCL)
     RuntimeFuncSpec::new("rt_file_write_text_at", &[I64, I64, I64], &[I64]), // path RuntimeValue, offset, data RuntimeValue -> bytes written
     RuntimeFuncSpec::new("rt_file_write_text_at_cached", &[I64, I64], &[I64]), // offset, data RuntimeValue -> bytes written on prepared cache
