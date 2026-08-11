@@ -2272,3 +2272,28 @@ identity, hashes, logs, sanity, and markers are returned.
 Cap each live failure lane at three distinct fix/verify cycles. Do not repeat an
 identical failed command or promote executable existence, static checks, or
 frontier review to a false PASS.
+
+## Host storage precondition (added 2026-08-11)
+
+**Before starting any gate, bootstrap, or evidence run, check host storage.**
+On a btrfs root, `df` is not sufficient — it reports hundreds of GB free while
+the volume is unwritable:
+
+```bash
+btrfs filesystem usage / | grep -iE 'unallocated|Metadata,DUP'
+```
+
+If `Device unallocated` is under ~5 GiB, **stop and reclaim space first**. A run
+started on a metadata-starved volume produces failures that are
+indistinguishable from real product defects: guards that never emit a verdict
+line, `git write-tree` timeouts, and native builds that blow their ceiling
+(`wm-simple-web-build-timeout` on the SimpleOS WM gate came from exactly this,
+not from a compiler regression).
+
+Do not attempt `btrfs balance` as the first remedy — on a volume this full it
+fails with ENOSPC itself. Delete or migrate real data first, then balance.
+
+Worktrees, `TMPDIR`, QEMU images, and Docker `data-root` belong on `/mnt/data`
+(4 TB ext4), never on `/`. Full detail, including the migration method and the
+rule against deleting another session's live scratch:
+`doc/07_guide/infra/host_storage_layout.md`.
