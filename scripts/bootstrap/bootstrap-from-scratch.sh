@@ -645,6 +645,13 @@ bootstrap_path_old_ifs=$IFS
 IFS=:
 for bootstrap_path_entry in ${PATH}; do
   IFS=$bootstrap_path_old_ifs
+  # Codex launchers prepend per-invocation arg0 shims that can disappear while
+  # a long Rust authority build is running. They are not compiler/tool
+  # authorities, and admitting them here makes the later before/after tool
+  # snapshot fail solely because the launcher cleaned its temporary session.
+  case "${bootstrap_path_entry}" in
+    */.codex/tmp/arg0/*) IFS=:; continue ;;
+  esac
   [ -d "${bootstrap_path_entry}" ] || {
     IFS=:
     continue
