@@ -3,13 +3,17 @@
 # This entry intentionally excludes persisted SQLite access and UI renderer
 # backends.  It is suitable for phase-3 native deployment beside standalone
 # products while retaining the public `ui windows|snapshot|surface|find|act|
-# history` command shape.
+# history` command shape.  The narrow `root` operation returns the hosted
+# product's exact HTML response body for system evidence without pulling an
+# HTTP SFFI client into the checker.
 
 use common.text_advanced.{escape_json}
 use common.ui.access_cli_grammar.{AccessError, AccessResult, access_error_to_json, access_render_json}
 use std.nogc_sync_mut.io.tcp.{TcpStream}
 use std.nogc_sync_mut.io_runtime.{getpid, time_now_unix_micros}
 use app.io.cli_ops.{cli_get_args}
+
+extern fn stdout_write(data: text)
 
 val LIVE_UI_SOURCE = "simple_ui"
 val LIVE_UI_DEFAULT_PORT: i32 = 3000
@@ -34,14 +38,18 @@ fn main() -> i64:
         Err(e): return _live_fail(operation, e, 2)
         Ok(value): value
     if operation != "act":
-        val payload = match _live_http("GET", route, "", port, timeout_ms):
+        val accept = if operation == "root": "text/html" else: "application/json"
+        val payload = match _live_http("GET", route, "", port, timeout_ms, accept):
             Err(e): return _live_fail(operation, e, 1)
             Ok(value): value
+        if operation == "root":
+            stdout_write(payload)
+            return 0
         return _live_emit(operation, payload, "", 0)
 
     val request_id = "ui-act-" + getpid().to_text() + "-" + time_now_unix_micros().to_text()
     val body = _live_action_body(args, request_id)
-    val action = match _live_http("POST", route, body, port, timeout_ms):
+    val action = match _live_http("POST", route, body, port, timeout_ms, "application/json"):
         Err(e):
             e.set_request_id(request_id)
             return _live_fail(operation, e, 1)
@@ -50,7 +58,7 @@ fn main() -> i64:
     val canonical = _live_value(args, "--canonical")
     val observed_surface = if surface != "": surface else: _live_surface_from_canonical(canonical)
     val observation_route = if observed_surface == "": "/api/test/ui/history?count=1" else: "/api/test/ui/surface?id=" + _live_url_encode(observed_surface)
-    val observation = match _live_http("GET", observation_route, "", port, timeout_ms):
+    val observation = match _live_http("GET", observation_route, "", port, timeout_ms, "application/json"):
         Err(e):
             e.set_request_id(request_id)
             return _live_fail(operation, e, 1)
@@ -75,10 +83,11 @@ fn _live_args() -> [text]:
     result
 
 fn _live_operation(value: text) -> bool:
-    value == "windows" or value == "snapshot" or value == "surface" or
+    value == "root" or value == "windows" or value == "snapshot" or value == "surface" or
         value == "find" or value == "act" or value == "history"
 
 fn _live_route(operation: text, args: [text]) -> Result<text, AccessError>:
+    if operation == "root": return Ok("/")
     if operation == "windows" or operation == "snapshot": return Ok("/api/test/ui/snapshot")
     if operation == "surface":
         val id = _live_positional(args)
@@ -114,7 +123,7 @@ fn _live_action_body(args: [text], request_id: text) -> text:
         "\",\"request_id\":\"" + escape_json(request_id) +
         "\",\"expected_revision\":" + _live_value(args, "--revision") + "}"
 
-fn _live_http(method: text, route: text, body: text, port: i32, timeout_ms: i64) -> Result<text, AccessError>:
+fn _live_http(method: text, route: text, body: text, port: i32, timeout_ms: i64, accept: text) -> Result<text, AccessError>:
     val fd = TcpStream.connect_fd_timeout("127.0.0.1:" + port.to_text(), timeout_ms)
     if fd < 0: return Err(AccessError.create("source_unavailable", "failed to connect to live UI service"))
     var stream = TcpStream.from_accepted_fd(fd)
@@ -122,18 +131,18 @@ fn _live_http(method: text, route: text, body: text, port: i32, timeout_ms: i64)
         stream.close_status()
         return Err(AccessError.create("source_unavailable", "failed to configure live UI read timeout"))
     val content_headers = if method == "POST": "Content-Type: application/json\r\nContent-Length: " + body.len().to_text() + "\r\n" else: ""
-    val request = method + " " + route + " HTTP/1.1\r\nHost: 127.0.0.1:" + port.to_text() + "\r\nAccept: application/json\r\n" + content_headers + "Connection: close\r\n\r\n" + body
+    val request = method + " " + route + " HTTP/1.1\r\nHost: 127.0.0.1:" + port.to_text() + "\r\nAccept: " + accept + "\r\n" + content_headers + "Connection: close\r\n\r\n" + body
     if not stream.write_text_status(request):
         stream.close_status()
         return Err(AccessError.create("source_unavailable", "failed to write live UI request"))
-    val status_line = stream.read_line_nullable() ?? ""
+    val status_line = stream.read_line_or_empty()
     if status_line == "":
         stream.close_status()
         return Err(AccessError.create("source_unavailable", "live UI service closed without a response"))
     val status_code = _live_status_code(status_line)
     var content_length = 0
     while true:
-        val line = stream.read_line_nullable() ?? ""
+        val line = stream.read_line_or_empty()
         if line == "" or line == "\r\n" or line == "\n": break
         val lower = line.to_lower()
         if lower.starts_with("content-length:"):
@@ -199,4 +208,4 @@ fn _live_surface_from_canonical(canonical: text) -> text:
     if at <= 0: "" else: canonical.slice(0, at)
 
 fn _live_usage():
-    print "Usage: simple-ui-client ui windows|snapshot|surface|find|act|history [options]"
+    print "Usage: simple-ui-client ui root|windows|snapshot|surface|find|act|history [options]"
