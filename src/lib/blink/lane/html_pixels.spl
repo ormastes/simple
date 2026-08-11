@@ -72,6 +72,7 @@ use std.blink.css_parser.tokenizer.{tokenize_css}
 use std.blink.css_parser.parser.{parse_css, CssStyleSheet}
 use std.blink.layout.style_bridge.{build_styled_layout}
 use std.blink.paint.style_paint.{paint_chunks_from_styled_layout}
+use std.blink.paint.text_paint.{text_paint_chunks_from_styled_layout}
 use std.common.ui.render_opt.paint_chunk_rasterizer.{ChunkRasterBuffer, paint_rect}
 use std.skia.entity.color.{sk_color_argb}
 
@@ -128,6 +129,7 @@ pub fn blink_render_html_to_pixel_array(html: text, width: i32, height: i32) -> 
     val sheet = blink_lane_stylesheet(tree)
     val layout = build_styled_layout(tree, sheet, w.to_f64(), h.to_f64())
     val rects = paint_chunks_from_styled_layout(layout)
+    val glyph_rects = text_paint_chunks_from_styled_layout(tree, layout, w.to_f64(), h.to_f64())
 
     # Document order == paint order for this flat block-flow list, so a later
     # rect legitimately overpaints an earlier one. Fully transparent rects
@@ -143,6 +145,16 @@ pub fn blink_render_html_to_pixel_array(html: text, width: i32, height: i32) -> 
             paint_rect(buf, rects.rect_x[k], rects.rect_y[k],
                        rects.rect_w[k], rects.rect_h[k], argb)
         k = k + 1
+
+    # Glyph pixels paint on top of the background rects above, document order
+    # again being paint order. Each glyph rect is already 1x1 and opaque (see
+    # `text_paint.spl`); no alpha-0 skip needed since glyph pixels are only
+    # ever emitted for "on" bits of the bitmap font.
+    var gk: i64 = 0
+    while gk < glyph_rects.rect_count:
+        paint_rect(buf, glyph_rects.rect_x[gk], glyph_rects.rect_y[gk],
+                   glyph_rects.rect_w[gk], glyph_rects.rect_h[gk], glyph_rects.colour[gk])
+        gk = gk + 1
 
     buf.pixels
 

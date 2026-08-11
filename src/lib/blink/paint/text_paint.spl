@@ -1,0 +1,133 @@
+# Blink text glyph paint — blink.paint.text_paint
+#
+# Closes exit criterion 2 (text glyph rendering) for the blink render lane:
+# `paint_chunks_from_styled_layout` (style_paint.spl) emits one BACKGROUND
+# rect per box and, by its own module doc, "no text/glyph rendering". This
+# module is the sibling that fills that gap, kept separate rather than folded
+# into style_paint.spl because it has a genuinely different shape: one rect
+# per PIXEL turned on in a bitmap glyph, not one rect per box.
+#
+# Font: `common.ui.glyph_bitmap_8x16`, the same pure-data 8x16 VGA bitmap font
+# already used by the SimpleOS framebuffer driver and host WM chrome text
+# (`window_scene_draw_ir.spl:_px_draw_text`, the proven byte-accessor pattern
+# this module follows: `text.bytes()` indexed by `u8`, NOT `char_code_at`,
+# which tag-shifts — see that file's comment and the linked bug docs). This
+# keeps the glyph source dependency-free: no stb_truetype (vendored, and out
+# of scope to touch per CLAUDE.md Owned-Code Scope), no font file, no shaping.
+#
+# Deliberate, STATED limitations (this is a bitmap font, not a text engine):
+#   - Fixed 8x16 glyph cell, one-to-one pixel scale. `font-size` is NOT
+#     consulted to scale the glyph — every character paints at native 8x16
+#     regardless of the CSS font-size that sized its containing text box.
+#   - No anti-aliasing: every "on" bit paints one fully-opaque 1x1 rect of
+#     the resolved `color`; there is no partial coverage.
+#   - No line wrapping: characters are laid out left-to-right in one row
+#     starting at the text box's (left, top), clipped to that box's
+#     (right, bottom) — a character (or part of one) that would fall outside
+#     the box is simply not painted, not wrapped to a second line.
+#   - Degenerate box width falls back to the VIEWPORT edge, not silently to
+#     zero. `style_bridge._text_box_geometry` sizes a text box's width from
+#     its container's OWN declared `width` (auto-width elements, e.g. a
+#     `<p>` with no CSS width, resolve to 0 pre-layout — a pre-existing gap,
+#     not something this module invents around). Clipping literally to that
+#     zero-width rect would silently paint nothing for the overwhelmingly
+#     common case of unsized text containers, which is exactly the kind of
+#     silent blank this lane's discipline forbids. So when a box's own
+#     right/bottom is not strictly past its left/top, this module clips to
+#     the render viewport edge instead — a real, stated boundary (never
+#     write off-canvas), not a fabricated font metric.
+#   - Text nodes whose PARENT is a `<style>` or `<script>` element are
+#     skipped: their `text_content` is source code/CSS, never rendered
+#     content, in every real browser. `style_bridge.build_styled_layout`
+#     gives them a layout box like any other text node (it has no
+#     raw-text-element special case — stated in that module's own header as
+#     scope it does not cover), so without this check blink would paint the
+#     document's own `<style>` CSS text onto the page as if it were content.
+#   - Only ASCII 0x20-0x7E is a real glyph. Anything else (including all of
+#     Unicode above ASCII) falls to `get_glyph_8x16`'s own documented
+#     default: a solid 8x16 block. That is a deliberate VISIBLE fallback
+#     marker, not a silent blank or an invented shape that "looks right by
+#     accident" — the module doc on `glyph_bitmap_8x16.spl` states the same
+#     default is shared by every caller of that font.
+#
+# These are the same category of divergence `html_pixels.spl` already states
+# for colour/borders/etc: real, asserted by spec, not hidden.
+
+use std.blink.dom.node.{DomTree, DomNode, NodeType}
+use std.blink.layout.style_bridge.{StyledLayout}
+use std.common.ui.render_opt.paint_chunk_rasterizer.{PaintChunkRects}
+use std.common.ui.glyph_bitmap_8x16.{get_glyph_8x16}
+
+val GLYPH_W: i64 = 8
+val GLYPH_H: i64 = 16
+
+# Emit one 1x1 rect per "on" glyph pixel for a single text run, clipped to
+# the box rect (left, top, right, bottom). `color` is the resolved `color`
+# (foreground, not background) ARGB of the run's inherited style.
+fn _paint_text_run(rects: PaintChunkRects, text_value: text,
+                   left: i64, top: i64, right: i64, bottom: i64, argb: i64):
+    val bytes = text_value.bytes()
+    val n = text_value.len()
+    var ti: i64 = 0
+    while ti < n:
+        val origin_x = left + ti * GLYPH_W
+        if origin_x >= right:
+            # Ran out of box width: stop rather than paint off-box pixels.
+            return
+        val glyph = get_glyph_8x16(bytes[ti as i32])
+        var row: i64 = 0
+        while row < GLYPH_H:
+            val py = top + row
+            if py < bottom:
+                val bits = glyph[row as i32] as i64
+                var col: i64 = 0
+                while col < GLYPH_W:
+                    val px = origin_x + col
+                    if px < right:
+                        val mask = 0x80 >> col
+                        if (bits & mask) != 0:
+                            rects.add_rect(px, py, 1, 1, argb)
+                    col = col + 1
+            row = row + 1
+        ti = ti + 1
+
+# Walk `layout.node_ids` looking for Text nodes (identified against `tree`,
+# since `StyledLayout` itself carries no node-type information), and emit
+# glyph-pixel rects for each one's `text_content`, in the inherited style's
+# `color`. Element (non-text) node ids are skipped — their background is
+# `paint_chunks_from_styled_layout`'s job, not this module's.
+pub fn text_paint_chunks_from_styled_layout(tree: DomTree, layout: StyledLayout,
+                                            viewport_width: f64, viewport_height: f64) -> PaintChunkRects:
+    """Flatten text-node runs into glyph-pixel paint rects.
+
+    `viewport_width`/`viewport_height` are the fallback clip edges used when a
+    text box's own rect is degenerate (see module header)."""
+    var rects = PaintChunkRects.create()
+    var i = 0
+    while i < layout.node_ids.len():
+        val node_id = layout.node_ids[i as i32]
+        match tree.get_node(node_id):
+            Some(node):
+                val is_raw_text_content = match tree.get_node(node.parent):
+                    Some(p):
+                        p.tag_name == "style" or p.tag_name == "script"
+                    None:
+                        false
+                if node.node_type == NodeType.Text and node.text_content.len() > 0 and not is_raw_text_content:
+                    val style = layout.styles[i as i32]
+                    match layout.rect_for(node_id):
+                        Some(r):
+                            val argb = style.color.to_sk_color()
+                            val right = if r.2 > r.0: r.2 else: viewport_width
+                            val bottom = if r.3 > r.1: r.3 else: viewport_height
+                            _paint_text_run(rects, node.text_content,
+                                           r.0.to_i64(), r.1.to_i64(),
+                                           right.to_i64(), bottom.to_i64(), argb)
+                        None:
+                            pass_do_nothing()
+            None:
+                pass_do_nothing()
+        i = i + 1
+    rects
+
+export text_paint_chunks_from_styled_layout

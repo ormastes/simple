@@ -1,0 +1,108 @@
+# @cover src/lib/blink/paint/text_paint.spl 85%
+# @req REQ-BLINK-TEXT-PAINT-001
+"""
+# Text Glyph Paint Specification
+
+**Category:** Browser / Blink
+**Status:** Active
+
+## Overview
+
+`paint_chunks_from_styled_layout` paints one flat background rect per box and
+nothing else — text nodes contribute no glyph pixels at all. That was blink's
+exit-criterion-2 blocker: `browser_render_lane_spec.spl` had an example
+proving a `<p>Hello</p>` page painted zero non-white pixels.
+
+`blink.paint.text_paint` closes it with a real, if low-fidelity, glyph
+rasterizer: the shared 8x16 VGA bitmap font
+(`common.ui.glyph_bitmap_8x16`, the same font SimpleOS's framebuffer driver
+and host WM chrome text already use), one opaque 1x1 rect per "on" bit,
+painted through `blink_render_html_to_pixel_array` end to end.
+
+These examples render real pixels and assert directly on the buffer — not on
+`PaintChunkRects` counts — so a regression that reaches all the way to the
+adapter's return value is caught, matching the sabotage-resistant style of
+`browser_render_lane_spec.spl`.
+
+@manual_section Browser Rendering
+"""
+
+use std.spipe.*
+use std.blink.lane.html_pixels.{blink_render_html_to_pixel_array}
+
+val WHITE: u32 = 4294967295u32
+
+# 40 wide x 20 tall = 800 pixels: enough room for an 8x16 "H" glyph cell plus
+# margin, small enough to stay inside the interpreter's per-file operation
+# budget (`browser_render_lane_spec.spl` documents the same constraint).
+val VIEW_W: i32 = 40
+val VIEW_H: i32 = 20
+val VIEW_PIXELS: i64 = 800
+
+fn _count(pixels: [u32], want: u32) -> i64:
+    var n: i64 = 0
+    for p in pixels:
+        if p == want:
+            n = n + 1
+    n
+
+fn _non_white_count(pixels: [u32]) -> i64:
+    VIEW_PIXELS - _count(pixels, WHITE)
+
+fn _page(body: text) -> text:
+    "<html><body><style>body { background-color: white; width: 40px; height: 20px; color: black; }" +
+        "</style>" + body + "</body></html>"
+
+describe "blink paints real glyph pixels for text nodes":
+
+    it "paints zero non-white pixels for a page with no text content at all":
+        step("render a page whose only content is an empty, unstyled body")
+        val pixels = blink_render_html_to_pixel_array(_page(""), VIEW_W, VIEW_H)
+
+        step("the whole 40 x 20 = 800 pixel buffer is untouched white page")
+        expect(pixels.len()).to_equal(VIEW_PIXELS)
+        expect(_count(pixels, WHITE)).to_equal(VIEW_PIXELS)
+
+    it "paints a real, non-uniform glyph pattern for a single letter — sabotage oracle":
+        step("render a page whose only content is the single letter H")
+        val pixels = blink_render_html_to_pixel_array(_page("<p>H</p>"), VIEW_W, VIEW_H)
+
+        step("more than one pixel differs from the white background")
+        # A no-op / silently-skipped glyph paint step would leave EVERY pixel
+        # white (as the empty-body example above proves is the actual
+        # baseline). The 8x16 'H' bitmap
+        # (0xC6,0xC6,0xC6,0xC6,0xC6,0xFE,0xC6,0xC6,0xC6,0xC6,...) sets a
+        # specific, uneven set of bits — not a solid block — so a fill-the-
+        # whole-cell-black shortcut would ALSO fail this: it would paint 128
+        # pixels (8x16), while the real 'H' glyph sets far fewer bits than
+        # that per row. This is the sabotage-resistant assertion: it fails
+        # both on "nothing painted" and on "something painted but not really
+        # glyph-shaped".
+        val painted = _non_white_count(pixels)
+        expect(painted > 10).to_equal(true)
+        expect(painted < 128).to_equal(true)
+
+    it "paints strictly more non-white pixels for a longer text run":
+        step("render one page with a single character and one with a whole word")
+        val one_char = blink_render_html_to_pixel_array(_page("<p>H</p>"), VIEW_W, VIEW_H)
+        val one_word = blink_render_html_to_pixel_array(_page("<p>Hi</p>"), VIEW_W, VIEW_H)
+
+        step("two glyphs paint strictly more coverage than one — proves per-character work, not a fixed stamp")
+        expect(_non_white_count(one_word) > _non_white_count(one_char)).to_equal(true)
+
+    it "paints glyphs in the element's resolved text color, not an arbitrary fixed color":
+        step("render the same letter styled red and styled blue")
+        val red_page = "<html><body><style>body { background-color: white; width: 40px; height: 20px; }" +
+            "p { color: red; }</style><p>H</p></body></html>"
+        val blue_page = "<html><body><style>body { background-color: white; width: 40px; height: 20px; }" +
+            "p { color: blue; }</style><p>H</p></body></html>"
+        val red_pixels = blink_render_html_to_pixel_array(red_page, VIEW_W, VIEW_H)
+        val blue_pixels = blink_render_html_to_pixel_array(blue_page, VIEW_W, VIEW_H)
+
+        step("the red render has red pixels the blue render does not, and vice versa")
+        val red_argb: u32 = 4294901760u32   # opaque red
+        val blue_argb: u32 = 4278190335u32  # opaque blue
+        expect(_count(red_pixels, red_argb) > 0).to_equal(true)
+        expect(_count(blue_pixels, blue_argb) > 0).to_equal(true)
+        expect(_count(red_pixels, blue_argb)).to_equal(0)
+        expect(_count(blue_pixels, red_argb)).to_equal(0)
