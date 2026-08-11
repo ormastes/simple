@@ -1,7 +1,7 @@
 # compile_c_entry flat-AST bridge lowers EVERY binary op to Add and EVERY unary to Neg
 
 - **ID:** compile_c_entry_flat_ast_all_binaries_lower_to_add_2026-08-11
-- **Status:** OPEN
+- **Status:** FIXED IN SOURCE 2026-08-11 — regression test BLOCKED (see "Verification status" below)
 - **Severity:** HIGH (silent miscompile — wrong answers, no diagnostic)
 - **Found:** 2026-08-11, while root-causing the SimpleOS WM rung-(d) text-render blocker
 - **Lane:** `src/app/cli/compile_c_entry.spl` (C-entry / flat-AST bridge). **NOT** the
@@ -78,6 +78,53 @@ A regression test must **discriminate the operator**, not merely execute the pat
 test whose only assertion is on `a + b` passes vacuously against this bug. Assert at
 minimum: `2 - 1 == 1` (not 3), `1 != 1` is false (not 2), `not true` is false, and one
 comparison in a branch condition. Sabotage the decoder and confirm the test goes RED.
+
+## Verification status (2026-08-11)
+
+The source fix is applied exactly as prescribed above: `compile_c_entry.spl` now
+imports `op_kind_to_binop` / `op_kind_to_unaryop` from
+`compiler.frontend.flat_ast_bridge` (they are already re-exported there via
+`export use compiler.frontend._FlatAstBridge.convert_nodes.*`) — no third copy of the
+mapping was written. The module loads clean under `bin/simple run` with no
+`[use-warning]` for either symbol, so both names resolve.
+
+**The mandated discriminating regression test could not be made to run.** Two
+independent blockers, both pre-existing and both measured, not assumed:
+
+1. **Name collision defeats an out-of-module unit probe.** There are two functions
+   named `convert_flat_expr` (`compile_c_entry.spl:79` and
+   `_FlatAstBridge/convert_nodes.spl:729`). The tree-walk interpreter resolves the
+   import by NAME and binds the *frontend* copy. Proven by sabotage: setting
+   `BinOp.Add` -> `BinOp.Sub` at `compile_c_entry.spl:114` left a probe importing
+   `convert_flat_expr` fully GREEN — i.e. a probe written that way is a **false
+   green** against this exact bug. Temporarily renaming the local function made the
+   sabotage visible, which confirms the collision.
+2. **Backend module's flat-AST globals are a separate, empty instance.** With the
+   rename in place the probe reaches the right function and immediately dies with
+   `array index out of bounds: index is 2 but length is 0` on `expr_tag[idx]` —
+   `compile_c_entry` reads the raw `expr_tag` / `expr_left` globals, and driving
+   `parser_init` + `parse_module_body` from another module does not populate the
+   view that module sees. (The frontend copy avoids this by using the
+   `expr_get_tag` accessors.) The converter is therefore only exercisable when
+   `compile_c_entry.spl` is itself the entry module.
+3. **That entry lane is independently RED.** `bin/simple run
+   src/compiler/70.backend/backend/compile_c_entry.spl <probe.spl> <out.cpp>`
+   (Cranelift JIT, which falls back to the interpreter here) reports
+   `Step 2: Done (HIR functions: 0)`, `Step 3: Done (MIR functions: 0, types: 0)`
+   and then fails with `error: semantic: class 'MirToC' has no field named
+   'str_locals'`, emitting no `.cpp`. This failure predates and is independent of
+   the operator fix.
+
+No vacuous test was committed in place of the real one. Re-attempt the
+discriminating test once the C-entry lane compiles a hello-world end to end; the
+assertions to use are the ones in the "Verification bar" section above.
+
+## Sweep
+
+`/usr/bin/grep -rn --include=*.spl "ExprKind.Binary(BinOp.Add" src/` returns exactly
+one hit — this file. The sibling `src/app/cli/compile_c_entry.spl` is a thin argv
+wrapper around `aot_c_file` and contains no flat-AST conversion, so it does **not**
+carry the defect. The family has one member.
 
 ## Discovery note
 
