@@ -111,15 +111,6 @@ stale PASS artifact.
 > it cannot execute a spec. Do not plan a verification path around it: a redeploy
 > means a real stage4 build.
 
-> **Standalone product build rule.** A product such as Office is not a compiler
-> bootstrap. For native target construction, reuse an explicitly supplied,
-> provenance-admitted Phase 3 compiler through its target-only wrapper; keep
-> cache/output under `build/standalone`, bind the compiler digest in the receipt,
-> and require `SIMPLE_NO_STUB_FALLBACK=1` plus the fabricated-stub ratchet.
-> Never turn missing target admission into an implicit Stage 1/2/3 bootstrap or
-> a Rust-seed fallback. Phase 3 remains ineligible for `run`, SPipe docgen,
-> tests, deploy, and release.
-
 The SPipe dev entrypoint lives at:
 
 **[.claude/agents/spipe/dev.md](../agents/spipe/dev.md)**
@@ -2351,10 +2342,3 @@ Worktrees, `TMPDIR`, QEMU images, and Docker `data-root` belong on `/mnt/data`
 (4 TB ext4), never on `/`. Full detail, including the migration method and the
 rule against deleting another session's live scratch:
 `doc/07_guide/infra/host_storage_layout.md`.
-
-## Post-bootstrap Stage 4 acceptance
-
-The exact candidate runs
-`test/03_system/check/post_bootstrap_stage4_acceptance_spec.spl` once with its
-absolute path and adjacent provenance. Missing or symlinked inputs fail closed.
-Retained smoke is hash-verified without rerun; platform gates remain downstream.
