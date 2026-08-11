@@ -2185,6 +2185,12 @@ int64_t rt_value_unbox_int(int64_t value) {
     return value;
 }
 
+static int64_t rt_core_value_u64_compact(int64_t bits) {
+    uint64_t value = (uint64_t)bits;
+    if (value <= (uint64_t)(INT64_MAX >> 3)) return rt_value_int((int64_t)value);
+    return rt_value_u64(bits);
+}
+
 int64_t rt_value_as_int(int64_t value) {
     /* TEXT reaching an integer cast must be DECODED, not bit-shifted.
      *
@@ -3193,7 +3199,10 @@ static int rt_core_value_eq_inner(
     size_t visited_len);
 
 static int rt_core_generic_int_eq(int64_t value, int64_t expected) {
-    return rt_core_is_int(value) && rt_core_as_int(value) == expected;
+    RtCoreUInt* u = rt_core_as_heap_uint(value);
+    int64_t signed_value = rt_core_is_int(value) ? rt_core_as_int(value) : -1;
+    return (rt_core_is_int(value) && expected >= 0 && signed_value >= 0 && signed_value == expected) ||
+        (u && expected >= 0 && u->value == (uint64_t)expected);
 }
 
 static int rt_core_array_eq(
@@ -3275,6 +3284,20 @@ static int rt_core_value_eq_inner(
         return rt_core_is_float(left) && rt_core_is_float(right) &&
             rt_core_as_float(left) == rt_core_as_float(right);
     }
+    RtCoreUInt* left_uint = rt_core_as_heap_uint(left);
+    RtCoreUInt* right_uint = rt_core_as_heap_uint(right);
+    if (left_uint || right_uint) {
+        if (left_uint && right_uint) return left_uint->value == right_uint->value;
+        if (left_uint && rt_core_is_int(right)) {
+            int64_t signed_right = rt_core_as_int(right);
+            return signed_right >= 0 && left_uint->value == (uint64_t)signed_right;
+        }
+        if (right_uint && rt_core_is_int(left)) {
+            int64_t signed_left = rt_core_as_int(left);
+            return signed_left >= 0 && (uint64_t)signed_left == right_uint->value;
+        }
+        return 0;
+    }
     if (rt_core_is_special(left) || rt_core_is_special(right)) return 0;
     RtCoreString* a = rt_core_as_string(left);
     RtCoreString* b = rt_core_as_string(right);
@@ -3300,6 +3323,20 @@ int64_t rt_native_eq(int64_t left, int64_t right) {
     if (rt_core_is_float(left) || rt_core_is_float(right)) {
         return rt_core_is_float(left) && rt_core_is_float(right) &&
             rt_core_as_float(left) == rt_core_as_float(right);
+    }
+    RtCoreUInt* left_uint = rt_core_as_heap_uint(left);
+    RtCoreUInt* right_uint = rt_core_as_heap_uint(right);
+    if (left_uint || right_uint) {
+        if (left_uint && right_uint) return left_uint->value == right_uint->value;
+        if (left_uint && rt_core_is_int(right)) {
+            int64_t signed_right = rt_core_as_int(right);
+            return signed_right >= 0 && left_uint->value == (uint64_t)signed_right;
+        }
+        if (right_uint && rt_core_is_int(left)) {
+            int64_t signed_left = rt_core_as_int(left);
+            return signed_left >= 0 && (uint64_t)signed_left == right_uint->value;
+        }
+        return 0;
     }
     if (rt_core_is_special(left) || rt_core_is_special(right)) return 0;
     RtCoreString* left_string = rt_core_as_string(left);
@@ -6818,7 +6855,7 @@ int64_t rt_typed_words_u64_at(SplArray* a, int64_t idx) {
     if (idx < 0) idx = array->len + idx;
     if (idx < 0 || idx >= array->len) return 0;
     int64_t value = ((int64_t*)array->data)[idx];
-    return (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? value : rt_core_as_int(value);
+    return (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? value : rt_value_as_u64(value);
 }
 
 int8_t rt_typed_words_u64_push(SplArray* a, int64_t val) {
@@ -6826,7 +6863,7 @@ int8_t rt_typed_words_u64_push(SplArray* a, int64_t val) {
     if (!array) return 0;
     if (!rt_core_array_reserve(a, array->len + 1)) return 0;
     ((int64_t*)array->data)[array->len++] =
-        (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? val : rt_value_int(val);
+        (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? val : rt_core_value_u64_compact(val);
     return 1;
 }
 
@@ -6836,7 +6873,7 @@ int8_t rt_typed_words_u64_set(SplArray* a, int64_t idx, int64_t val) {
     if (idx < 0) idx = array->len + idx;
     if (idx < 0 || idx >= array->len) return 0;
     ((int64_t*)array->data)[idx] =
-        (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? val : rt_value_int(val);
+        (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? val : rt_core_value_u64_compact(val);
     return 1;
 }
 
@@ -6853,7 +6890,7 @@ int8_t rt_typed_words_u64_store_known_data_at(
     RtCoreArray* array = rt_core_as_array(header_ptr);
     if (!array || data_ptr == 0 || idx < 0 || idx >= array->cap) return 0;
     ((int64_t*)(uintptr_t)data_ptr)[idx] =
-        (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? val : rt_value_int(val);
+        (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? val : rt_core_value_u64_compact(val);
     return 1;
 }
 
@@ -7622,6 +7659,11 @@ static int64_t rt_core_dict_canon_key(int64_t k) {
      * round-trip exactly"). See
      * src/runtime/test/rt_dict_float_key_exactness_selfcheck.c. */
     if (rt_core_is_float(k)) return k;
+    RtCoreUInt* u = rt_core_as_heap_uint(k);
+    if (u) {
+        if (u->value <= (uint64_t)(INT64_MAX >> 3)) return rt_value_int((int64_t)u->value);
+        return k;
+    }
     if (rt_core_is_heap(k)) return k;
     return rt_value_int(rt_core_numeric_arg(k));
 }
@@ -7638,7 +7680,10 @@ static uint64_t rt_core_dict_hash(int64_t k) {
     }
     /* Float keys hash by VALUE, so two independent boxes of the same double --
      * and the legacy inline form of that same double -- share a bucket. */
-    uint64_t x = rt_core_is_float(k) ? rt_core_dict_float_bits(k) : (uint64_t)k;
+    RtCoreUInt* u = rt_core_as_heap_uint(k);
+    uint64_t x = u
+        ? (u->value ^ UINT64_C(0x55494e545f553634))
+        : (rt_core_is_float(k) ? rt_core_dict_float_bits(k) : (uint64_t)k);
     x ^= x >> 33;
     x *= 0xff51afd7ed558ccdULL;
     x ^= x >> 33;
