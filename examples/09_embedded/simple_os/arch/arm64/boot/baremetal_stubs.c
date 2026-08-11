@@ -1028,6 +1028,37 @@ RuntimeValue rt_native_neq(RuntimeValue a, RuntimeValue b)
     return rt_native_eq(a, b) ? 0 : 1;
 }
 
+/* Bug (2026-08-11): freestanding text ORDERING (`<`/`>`/sort) against a RAW
+ * literal. rt_native_cmp below required BOTH operands IS_HEAP before doing a
+ * content compare of text; a heap string vs a raw untagged char* literal
+ * (e.g. `""` from emit_bootstrap_str_const) fell through to the raw signed
+ * word compare at the bottom, so ordering against a literal reflected
+ * malloc address, not content -- same class of defect this lane's
+ * rt_native_eq already got fixed for (see the comment above it), just never
+ * ported to ordering. Same conservative safety rules as that fix: raw is
+ * only dereferenced when the OTHER side is a proven HEAP_STRING, guarded by
+ * the 0x10000 floor, scan bounded by the heap string's own length.
+ *
+ * Selfcheck: src/runtime/test/rt_text_cmp_any_heap_vs_raw_selfcheck.c
+ */
+static int rt_text_cmp_heap_vs_raw(RuntimeString *s, RuntimeValue raw, int *ok)
+{
+    const char *p;
+    uint32_t i;
+    *ok = 0;
+    if ((uint64_t)raw < 0x10000ULL) return 0;               /* nil / bool / small int */
+    if (((uint64_t)raw & TAG_MASK) == TAG_HEAP) return 0;   /* not a raw pointer */
+    p = (const char *)(uintptr_t)raw;
+    for (i = 0; i < s->len; i++) {
+        unsigned char sc = (unsigned char)s->data[i];
+        unsigned char pc = (unsigned char)p[i];
+        if (pc == '\0') { *ok = 1; return 1; }               /* raw ends first -> s greater */
+        if (sc != pc) { *ok = 1; return sc < pc ? -1 : 1; }
+    }
+    *ok = 1;
+    return p[s->len] == '\0' ? 0 : -1;                       /* equal length, or raw has more */
+}
+
 /* Three-way ordering for erased operands emitted by the pure-Simple
  * Cranelift lane. Integer tagging is an order-preserving left shift, so a
  * signed word comparison is correct for raw and tagged integers. Heap strings
@@ -1052,6 +1083,22 @@ RuntimeValue rt_native_cmp(RuntimeValue left, RuntimeValue right)
             }
             if (left_string->len == right_string->len) return (RuntimeValue)0;
             return (RuntimeValue)(left_string->len < right_string->len ? -1 : 1);
+        }
+    }
+    if (IS_HEAP(left)) {
+        HeapHeader *hl = (HeapHeader *)DECODE_PTR(left);
+        if (hl && hl->type == HEAP_STRING) {
+            int ok;
+            int r = rt_text_cmp_heap_vs_raw((RuntimeString *)hl, right, &ok);
+            if (ok) return (RuntimeValue)r;
+        }
+    }
+    if (IS_HEAP(right)) {
+        HeapHeader *hr = (HeapHeader *)DECODE_PTR(right);
+        if (hr && hr->type == HEAP_STRING) {
+            int ok;
+            int r = rt_text_cmp_heap_vs_raw((RuntimeString *)hr, left, &ok);
+            if (ok) return (RuntimeValue)(-r);
         }
     }
     return (RuntimeValue)((int64_t)left < (int64_t)right ? -1 : 1);

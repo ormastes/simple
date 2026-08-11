@@ -1614,30 +1614,72 @@ spl_i64 rt_enum_discriminant(spl_i64 value) {
     return e ? rt_int((spl_i64)e->discriminant) : rt_int(0);
 }
 
+/* Bug (2026-08-11): freestanding text ORDERING (`<`/`>`/sort) against a RAW
+ * literal -- the sibling of rt_text_eq_str_vs_raw above for `<`/`>` instead
+ * of `==`/`!=`. Before this fix, rt_text_cmp_any treated a non-heap operand
+ * (rt_as_string() == NULL, e.g. a raw `""` literal from
+ * emit_bootstrap_str_const) as a zero-length string rather than reading its
+ * actual bytes, so a heap string compared against ANY raw literal always
+ * came out "greater than" the literal regardless of content -- `x < "foo"`
+ * for a genuinely lesser `x` returned false, and `x == "foo"` routed through
+ * rt_native_cmp returned nonzero even for equal content. Same
+ * heap-vs-raw class of defect as rt_text_eq_str_vs_raw; same safety rules:
+ * the raw side is interpreted as a char* ONLY when the other side is a
+ * proven RtString, a plausibility floor rejects small words (nil/bool/small
+ * int), and the scan is bounded by the decoded string's own length.
+ *
+ * Selfcheck: src/runtime/test/rt_text_cmp_any_heap_vs_raw_selfcheck.c
+ */
+static spl_i64 rt_text_cmp_str_vs_raw(RtString *s, spl_i64 raw) {
+    const spl_u8 *p;
+    spl_u64 i;
+    if ((spl_u64)raw < 0x10000u) return 2;   /* sentinel: unsafe, caller falls back */
+    p = (const spl_u8 *)(spl_u64)raw;
+    for (i = 0; i < s->len; i = i + 1) {
+        spl_u8 sc = (spl_u8)s->data[i];
+        spl_u8 pc = p[i];
+        if (pc == 0) return 1;               /* raw ends first -> s is greater */
+        if (sc != pc) return sc < pc ? -1 : 1;
+    }
+    return p[s->len] == 0 ? 0 : -1;          /* equal length, or raw has more */
+}
+
 /* rt_text_cmp_any / rt_native_cmp: dynamic ordering fallback for codegen
  * sites that cannot statically prove operand types (mirrors
  * src/runtime/runtime_native.c's rt_text_cmp_any / rt_native_cmp). Byte-wise
- * lexical order for tagged heap strings, signed value order otherwise —
- * this file's integer tagging is an order-preserving left shift (see the
+ * lexical order for tagged heap strings (including a heap-vs-raw mix via
+ * rt_text_cmp_str_vs_raw), signed value order otherwise — this file's
+ * integer tagging is an order-preserving left shift (see the
  * u8/u16/u32/u64 rt_volatile_* comment above), so a raw signed compare is
  * correct for tagged ints too. */
 spl_i64 rt_text_cmp_any(spl_i64 left, spl_i64 right) {
     RtString *a = rt_as_string(left);
     RtString *b = rt_as_string(right);
-    spl_u64 alen = a ? a->len : 0;
-    spl_u64 blen = b ? b->len : 0;
-    spl_u64 count = alen < blen ? alen : blen;
-    for (spl_u64 i = 0; i < count; i = i + 1) {
-        unsigned char ac = a ? (unsigned char)a->data[i] : 0;
-        unsigned char bc = b ? (unsigned char)b->data[i] : 0;
-        if (ac != bc) {
-            return rt_int(ac < bc ? -1 : 1);
+    if (a && b) {
+        spl_u64 alen = a->len;
+        spl_u64 blen = b->len;
+        spl_u64 count = alen < blen ? alen : blen;
+        for (spl_u64 i = 0; i < count; i = i + 1) {
+            unsigned char ac = (unsigned char)a->data[i];
+            unsigned char bc = (unsigned char)b->data[i];
+            if (ac != bc) {
+                return rt_int(ac < bc ? -1 : 1);
+            }
         }
+        if (alen == blen) {
+            return rt_int(0);
+        }
+        return rt_int(alen < blen ? -1 : 1);
     }
-    if (alen == blen) {
-        return rt_int(0);
+    if (a && !b) {
+        spl_i64 r = rt_text_cmp_str_vs_raw(a, right);
+        if (r != 2) return rt_int(r);
     }
-    return rt_int(alen < blen ? -1 : 1);
+    if (b && !a) {
+        spl_i64 r = rt_text_cmp_str_vs_raw(b, left);
+        if (r != 2) return rt_int(-r);
+    }
+    return rt_int(left == right ? 0 : (left < right ? -1 : 1));
 }
 
 spl_i64 rt_native_cmp(spl_i64 left, spl_i64 right) {

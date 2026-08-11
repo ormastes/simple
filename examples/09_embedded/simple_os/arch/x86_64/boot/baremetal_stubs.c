@@ -14624,24 +14624,73 @@ RuntimeValue rt_enum_id(RuntimeValue value)
     return (RuntimeValue)(int64_t)e->enum_id;
 }
 
+/* Bug (2026-08-11): freestanding text ORDERING (`<`/`>`/sort) against a RAW
+ * literal, the sibling of rt_text_eq_heap_vs_raw above for `<`/`>` instead of
+ * `==`/`!=`. rt_text_cmp_any below required BOTH operands IS_HEAP before
+ * doing a content compare; a heap string vs a raw untagged char* literal
+ * (e.g. `""` from emit_bootstrap_str_const) fell through to a raw pointer
+ * compare, so ordering against a literal reflected malloc address, not
+ * content -- same class of defect as rt_native_eq's heap-vs-raw gap, just
+ * never ported to this ordering counterpart. Same conservative safety
+ * rules: raw is only dereferenced when the OTHER side is a proven
+ * HEAP_STRING, guarded by the 0x10000 floor, scan bounded by the heap
+ * string's own length.
+ *
+ * Selfcheck: src/runtime/test/rt_text_cmp_any_heap_vs_raw_selfcheck.c
+ */
+static int rt_text_cmp_heap_vs_raw(RuntimeString *s, RuntimeValue raw, int *ok)
+{
+    const char *p;
+    uint32_t i;
+    *ok = 0;
+    if ((uint64_t)raw < 0x10000ULL) return 0;               /* nil / bool / small int */
+    if (((uint64_t)raw & TAG_MASK) == TAG_HEAP) return 0;   /* not a raw pointer */
+    p = (const char *)(uintptr_t)raw;
+    for (i = 0; i < s->len; i++) {
+        unsigned char sc = (unsigned char)s->data[i];
+        unsigned char pc = (unsigned char)p[i];
+        if (pc == '\0') { *ok = 1; return 1; }               /* raw ends first -> s greater */
+        if (sc != pc) { *ok = 1; return sc < pc ? -1 : 1; }
+    }
+    *ok = 1;
+    return p[s->len] == '\0' ? 0 : -1;                       /* equal length, or raw has more */
+}
+
 /* rt_text_cmp_any: strcmp-style ordering over text (hosted:
  * runtime_native.c:2396). The weak stub returned 0 -- "equal" -- for every
  * pair, so every ordering/dedup comparison silently collapsed. */
 RuntimeValue rt_text_cmp_any(RuntimeValue left, RuntimeValue right)
 {
-    if (!IS_HEAP(left) || !IS_HEAP(right))
-        return (RuntimeValue)(left == right ? 0 : (left < right ? -1 : 1));
-    RuntimeString *a = (RuntimeString *)DECODE_PTR(left);
-    RuntimeString *b = (RuntimeString *)DECODE_PTR(right);
-    if (!a || !b) return (RuntimeValue)(a == b ? 0 : (a ? 1 : -1));
-    uint32_t n = a->len < b->len ? a->len : b->len;
-    for (uint32_t i = 0; i < n; i++) {
-        unsigned char ca = (unsigned char)a->data[i];
-        unsigned char cb = (unsigned char)b->data[i];
-        if (ca != cb) return (RuntimeValue)(ca < cb ? -1 : 1);
+    if (IS_HEAP(left) && IS_HEAP(right)) {
+        RuntimeString *a = (RuntimeString *)DECODE_PTR(left);
+        RuntimeString *b = (RuntimeString *)DECODE_PTR(right);
+        if (!a || !b) return (RuntimeValue)(a == b ? 0 : (a ? 1 : -1));
+        uint32_t n = a->len < b->len ? a->len : b->len;
+        for (uint32_t i = 0; i < n; i++) {
+            unsigned char ca = (unsigned char)a->data[i];
+            unsigned char cb = (unsigned char)b->data[i];
+            if (ca != cb) return (RuntimeValue)(ca < cb ? -1 : 1);
+        }
+        if (a->len == b->len) return (RuntimeValue)0;
+        return (RuntimeValue)(a->len < b->len ? -1 : 1);
     }
-    if (a->len == b->len) return (RuntimeValue)0;
-    return (RuntimeValue)(a->len < b->len ? -1 : 1);
+    if (IS_HEAP(left)) {
+        HeapHeader *hl = (HeapHeader *)DECODE_PTR(left);
+        if (hl && hl->type == HEAP_STRING) {
+            int ok;
+            int r = rt_text_cmp_heap_vs_raw((RuntimeString *)hl, right, &ok);
+            if (ok) return (RuntimeValue)r;
+        }
+    }
+    if (IS_HEAP(right)) {
+        HeapHeader *hr = (HeapHeader *)DECODE_PTR(right);
+        if (hr && hr->type == HEAP_STRING) {
+            int ok;
+            int r = rt_text_cmp_heap_vs_raw((RuntimeString *)hr, left, &ok);
+            if (ok) return (RuntimeValue)(-r);
+        }
+    }
+    return (RuntimeValue)(left == right ? 0 : (left < right ? -1 : 1));
 }
 
 /* rt_native_cmp: three-way ordering (-1 / 0 / 1) over erased operands, the

@@ -3648,9 +3648,18 @@ int64_t rt_string_contains(int64_t value, int64_t needle) {
     return rt_string_find(value, needle) >= 0 ? 1 : 0;
 }
 
+/* Forward decl: defined near rt_string_trim below (bug 2026-08-11, hosted
+ * raw-receiver degradation fix); shared by rt_string_ascii_case here since
+ * it appears earlier in this file. */
+static int rt_string_promote_raw_receiver(int64_t value, int64_t* out);
+
 static int64_t rt_string_ascii_case(int64_t value, int to_lower) {
     RtCoreString* s = rt_core_as_string(value);
-    if (!s) return rt_core_nil();
+    if (!s) {
+        int64_t promoted;
+        if (rt_string_promote_raw_receiver(value, &promoted)) return rt_string_ascii_case(promoted, to_lower);
+        return rt_core_nil();
+    }
     RtCoreString* out = (RtCoreString*)malloc(sizeof(RtCoreString) + (size_t)s->len + 1);
     if (!out) return rt_core_nil();
     out->kind = RT_VALUE_HEAP_STRING;
@@ -4767,9 +4776,38 @@ int64_t rt_string_replace(int64_t value, int64_t old_value, int64_t new_value) {
     return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
 }
 
+/* Bug (2026-08-11): hosted rt_string_trim / rt_string_ascii_case family
+ * DEGRADES on a raw, untagged char* receiver -- trim/trim_start/trim_end
+ * silently passed the raw pointer straight through (returning it unchanged
+ * rather than trimming), and rt_string_to_lower/to_upper silently returned
+ * nil. Reachable wherever MIR's ensure_tagged_str normalization is skipped
+ * (gated on `resolution_is_unresolved` in
+ * src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl around the
+ * "trim"/"strip"/"lower"/"to_lower"/"to_upper" dispatch) -- a statically
+ * resolved call can hand these functions a raw string-literal pointer
+ * instead of a tagged heap string. Sibling of the freestanding-lane
+ * heap-vs-raw gaps fixed the same day (rt_native_eq / rt_text_cmp_any); the
+ * fix here is the hosted-lane analogue: promote the raw receiver to a real
+ * heap string using the same rt_interp_cstr-style plausibility floor
+ * (>= 0x10000, i.e. not nil/bool/small-int), then process it normally.
+ * A word that fails the floor is left as "not text" (unchanged behavior).
+ *
+ * Selfcheck: src/runtime/test/rt_string_trim_case_raw_receiver_selfcheck.c
+ */
+static int rt_string_promote_raw_receiver(int64_t value, int64_t* out) {
+    if (value < 0x10000) return 0;
+    const char* p = (const char*)(uintptr_t)value;
+    *out = rt_string_new((const uint8_t*)p, (uint64_t)strlen(p));
+    return 1;
+}
+
 int64_t rt_string_trim(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);
-    if (!s) return value;
+    if (!s) {
+        int64_t promoted;
+        if (rt_string_promote_raw_receiver(value, &promoted)) return rt_string_trim(promoted);
+        return value;
+    }
     uint64_t begin = 0;
     uint64_t end = s->len;
     while (begin < end && (s->data[begin] == ' ' || s->data[begin] == '\t' || s->data[begin] == '\n' || s->data[begin] == '\r')) {
@@ -4783,7 +4821,11 @@ int64_t rt_string_trim(int64_t value) {
 
 int64_t rt_string_trim_start(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);
-    if (!s) return value;
+    if (!s) {
+        int64_t promoted;
+        if (rt_string_promote_raw_receiver(value, &promoted)) return rt_string_trim_start(promoted);
+        return value;
+    }
     uint64_t begin = 0;
     while (begin < s->len && (s->data[begin] == ' ' || s->data[begin] == '\t' ||
                               s->data[begin] == '\n' || s->data[begin] == '\v' ||
@@ -4795,7 +4837,11 @@ int64_t rt_string_trim_start(int64_t value) {
 
 int64_t rt_string_trim_end(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);
-    if (!s) return value;
+    if (!s) {
+        int64_t promoted;
+        if (rt_string_promote_raw_receiver(value, &promoted)) return rt_string_trim_end(promoted);
+        return value;
+    }
     uint64_t end = s->len;
     while (end > 0 && (s->data[end - 1] == ' ' || s->data[end - 1] == '\t' ||
                        s->data[end - 1] == '\n' || s->data[end - 1] == '\r')) {
