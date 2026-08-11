@@ -29,6 +29,23 @@ fn _lower(s: text) -> text:
     """ASCII-lowercase a string (tag/attribute names are case-insensitive)."""
     s.to_lower()
 
+fn _flush_text(tokens: [HtmlToken], html: text, text_start: i64, i: i64) -> [HtmlToken]:
+    """Push a coalesced Character token for html[text_start:i], if non-empty.
+
+    Shared by every tag/comment/doctype/EOF boundary in tokenize_html so a
+    pending run of plain text is flushed exactly once per boundary.
+    """
+    var out = tokens
+    if text_start >= 0 and i > text_start:
+        out.push(HtmlToken(
+            kind: HtmlTokenKind.Character,
+            name: "",
+            data: html.slice(text_start, i),
+            attributes: [],
+            self_closing: false
+        ))
+    out
+
 fn tokenize_html(html: text) -> [HtmlToken]:
     """Tokenize `html` into a flat [HtmlToken] stream, ending in Eof.
 
@@ -49,14 +66,7 @@ fn tokenize_html(html: text) -> [HtmlToken]:
             # falls through to plain text handling below.
             val next = html.char_code_at(i + 1)
             if next == 47:   # '</'
-                if text_start >= 0 and i > text_start:
-                    tokens.push(HtmlToken(
-                        kind: HtmlTokenKind.Character,
-                        name: "",
-                        data: html.slice(text_start, i),
-                        attributes: [],
-                        self_closing: false
-                    ))
+                tokens = _flush_text(tokens, html, text_start, i)
                 text_start = -1
                 i = i + 2
                 val name_start = i
@@ -74,14 +84,7 @@ fn tokenize_html(html: text) -> [HtmlToken]:
                 ))
                 text_start = i
             else if next == 33:   # '<!' — comment or doctype
-                if text_start >= 0 and i > text_start:
-                    tokens.push(HtmlToken(
-                        kind: HtmlTokenKind.Character,
-                        name: "",
-                        data: html.slice(text_start, i),
-                        attributes: [],
-                        self_closing: false
-                    ))
+                tokens = _flush_text(tokens, html, text_start, i)
                 text_start = -1
                 if (i + 3 < length and html.char_code_at(i + 2) == 45 and
                         html.char_code_at(i + 3) == 45):
@@ -138,14 +141,7 @@ fn tokenize_html(html: text) -> [HtmlToken]:
                     ))
                 text_start = i
             else if _is_tag_name_start(next):
-                if text_start >= 0 and i > text_start:
-                    tokens.push(HtmlToken(
-                        kind: HtmlTokenKind.Character,
-                        name: "",
-                        data: html.slice(text_start, i),
-                        attributes: [],
-                        self_closing: false
-                    ))
+                tokens = _flush_text(tokens, html, text_start, i)
                 text_start = -1
                 i = i + 1
                 val name_start = i
@@ -230,14 +226,7 @@ fn tokenize_html(html: text) -> [HtmlToken]:
             if text_start == -1:
                 text_start = i
             i = i + 1
-    if text_start >= 0 and i > text_start:
-        tokens.push(HtmlToken(
-            kind: HtmlTokenKind.Character,
-            name: "",
-            data: html.slice(text_start, i),
-            attributes: [],
-            self_closing: false
-        ))
+    tokens = _flush_text(tokens, html, text_start, i)
     text_start = -1
     tokens.push(HtmlToken(
         kind: HtmlTokenKind.Eof,
