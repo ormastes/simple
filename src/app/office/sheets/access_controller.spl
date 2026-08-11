@@ -23,7 +23,8 @@ use app.office.sheets.cell.{CellRef, CellValue, cell_ref_to_string, cell_display
 use app.office.file_formats.{recalculate_formula_cells}
 use app.office.sheets.formula.{evaluate_formula}
 use common.ui.builder.{column, button, text_field, build_tree_with_title}
-use common.ui.spreadsheet_grid.{spreadsheet_grid_default_metrics, spreadsheet_grid_width, spreadsheet_grid_column_label, spreadsheet_grid_widget}
+use common.ui.spreadsheet_grid.{spreadsheet_grid_default_metrics, spreadsheet_grid_width, spreadsheet_grid_widget}
+use app.office.sheets.grid_render.{office_grid_body}
 use common.ui.widget.{UITree, UIEvent, WidgetNode, WidgetKind}
 use nogc_sync_mut.ui.session.{UISession}
 use std.common.encoding.utf8.{text_truncate_bytes}
@@ -183,28 +184,20 @@ impl CalcAccessController:
 
     fn tui_text() -> text:
         val active_ref = cell_ref_to_string(self.app.active_cell)
-        var out = "Simple Calc\nCell: " + active_ref + "  Formula: " + self.app.formula_text + "\n\n    "
+        var out = "Simple Calc\nCell: " + active_ref + "  Formula: " + self.app.formula_text + "\n\n"
         # Shared web/TUI grid contract: terminal paint is local, but viewport
-        # dimensions and row-major labels are not.
+        # dimensions and row-major labels are not.  The grid body itself is
+        # shared with the Calc TUI via app.office.sheets.grid_render; this
+        # surface differs from it only by rendering at the live scroll origin.
         val metrics = spreadsheet_grid_default_metrics()
-        val cols = self.app.visible_cols
-        val rows = self.app.visible_rows
-        var col = 0
-        while col < cols:
-            out = out + _calc_access_pad(spreadsheet_grid_column_label(self.app.scroll_col + col), metrics.cell_width)
-            col = col + 1
-        var row = 0
-        while row < rows:
-            out = out + "\n" + _calc_access_pad((self.app.scroll_row + row + 1).to_text(), metrics.row_header_width)
-            col = 0
-            while col < cols:
-                val ref = cell_ref_to_string(CellRef(col: self.app.scroll_col + col, row: self.app.scroll_row + row))
-                var display = cell_display_text(self.sheet.get_cell(ref))
-                if display.len() > 5:
-                    display = display.substring(0, 5)
-                out = out + _calc_access_pad(display, metrics.cell_width)
-                col = col + 1
-            row = row + 1
+        out = out + office_grid_body(
+            self.sheet,
+            self.app.scroll_col,
+            self.app.scroll_row,
+            self.app.visible_cols,
+            self.app.visible_rows,
+            metrics
+        )
         val content = out + "\n\n" + (if self.app.editing: "Editing" else: "Ready")
         _calc_access_frame(content, spreadsheet_grid_width(metrics), 37)
 
