@@ -61,6 +61,20 @@
 # edit to the file, done in the same commit as the directory split/cleanup
 # that earns it.
 #
+# EXEMPTIONS. A baseline line may record the literal token EXEMPT in place of a
+# count, followed by a TAB and a mandatory free-text reason:
+#
+#   doc/09_report<TAB>EXEMPT<TAB>append-only generated tree; see structure.md
+#
+# An exempt directory is never reported, at any size. This exists for the
+# APPEND-ONLY AUTO-GENERATED trees that .claude/rules/structure.md marks
+# "DO NOT REFACTOR" (doc/08_tracking/**, doc/09_report/**): they grow by
+# design on every test/bug/report run, so a numeric baseline for them is red
+# again within a day, and a guard that is red every day is a guard that gets
+# ignored. Exemption is NOT for hand-authored code — those directories get a
+# reviewed numeric baseline (which still fails on further growth) or a split.
+# A line with EXEMPT and no reason is rejected as a malformed baseline.
+#
 # ---------------------------------------------------------------------------
 # FAIL-CLOSED CONTRACT (see .claude/rules/vcs.md verdict-line convention)
 # ---------------------------------------------------------------------------
@@ -128,13 +142,32 @@ awk '
 total_checked=$(wc -l < "$work/current.txt" | tr -d ' ')
 [ "$total_checked" -gt 0 ] || { echo "$SELF: ERROR — nothing was checked (0 directories enumerated)" >&2; exit 2; }
 
+# Fail-closed baseline validation: every line must be
+#   path<TAB><integer>            or   path<TAB>EXEMPT<TAB><non-empty reason>
+# A malformed line would otherwise read as "no baseline entry" or as an
+# unusable count and silently change the verdict.
+awk -F'\t' '
+    NF >= 2 && $2 == "EXEMPT" { if (NF < 3 || $3 == "") { print NR": "$0; bad=1 } ; next }
+    NF == 2 && $2 ~ /^[0-9]+$/ { next }
+    { print NR": "$0; bad=1 }
+    END { exit 0 }
+' "$BASELINE" > "$work/badlines.txt"
+if [ -s "$work/badlines.txt" ]; then
+    echo "$SELF: ERROR — malformed baseline line(s) in $BASELINE:" >&2
+    sed 's/^/  ? /' "$work/badlines.txt" >&2
+    echo "ERROR — nothing was checked (malformed baseline)"
+    exit 2
+fi
+
 : > "$work/new_over.txt"
 : > "$work/grown_over.txt"
 
 while IFS='	' read -r dir cnt; do
     [ "$cnt" -gt "$LIMIT" ] || continue
     baseline_cnt=$(awk -F'\t' -v d="$dir" '$1==d{print $2; found=1} END{if(!found) print ""}' "$BASELINE")
-    if [ -z "$baseline_cnt" ]; then
+    if [ "$baseline_cnt" = "EXEMPT" ]; then
+        continue
+    elif [ -z "$baseline_cnt" ]; then
         printf '%s\t%s\n' "$dir" "$cnt" >> "$work/new_over.txt"
     elif [ "$cnt" -gt "$baseline_cnt" ]; then
         printf '%s\t%s (baseline %s)\n' "$dir" "$cnt" "$baseline_cnt" >> "$work/grown_over.txt"
