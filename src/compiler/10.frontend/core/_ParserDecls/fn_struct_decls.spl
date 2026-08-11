@@ -162,6 +162,28 @@ fn is_ident_start_char(ch: text) -> bool:
 fn is_ident_char(ch: text) -> bool:
     is_ident_start_char(ch) or (ch >= "0" and ch <= "9")
 
+# Shared soft-keyword lookahead primitive: from the end of the current token,
+# skip inline whitespace (space/tab only, no newlines) and return the offset
+# of the first non-whitespace char found. Returns -1 if no whitespace was
+# skipped (i.e. the current token is immediately followed by something else)
+# or if skipping whitespace runs off the end of the source. Used by every
+# `current_ident_is_*_decl` soft-keyword check (layer/resource/cli/...) to
+# decide whether the current identifier is immediately followed by " NAME".
+fn lex_skip_inline_ws_after_token() -> i64:
+    var pos = lex_token_end_get()
+    val source_len = lex_source_len()
+    var saw_space = false
+    while pos < source_len:
+        val ch = lex_source_char_at(pos)
+        if ch == " " or ch == "\t":
+            saw_space = true
+            pos = pos + 1
+            continue
+        break
+    if not saw_space or pos >= source_len:
+        return -1
+    pos
+
 # Soft-keyword lookahead for the `cli Name:` declarative arg-parsing block.
 # "cli" is NOT a reserved word at the lexer level (it must still work as a
 # plain identifier, e.g. `fn cli(): ...`), so the module-body dispatcher
@@ -176,19 +198,10 @@ fn current_ident_is_cli_decl() -> bool:
     # lex_token_end_get() is the array-backed slot lex_next() actually
     # updates on every call, and gives the true offset right after the
     # current ("cli") token — use that instead.
-    var pos = lex_token_end_get()
-    val source_len = lex_source_len()
-    # Require at least one space/tab before the block name.
-    var saw_space = false
-    while pos < source_len:
-        val ch = lex_source_char_at(pos)
-        if ch == " " or ch == "\t":
-            saw_space = true
-            pos = pos + 1
-            continue
-        break
-    if not saw_space or pos >= source_len:
+    var pos = lex_skip_inline_ws_after_token()
+    if pos < 0:
         return false
+    val source_len = lex_source_len()
     if not is_ident_start_char(lex_source_char_at(pos)):
         return false
     while pos < source_len and is_ident_char(lex_source_char_at(pos)):
