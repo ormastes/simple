@@ -30,6 +30,21 @@ fn mir_stmt_local_id_value(local: LocalId) -> i64:
 fn mir_hir_stmt_kind_disc(k: HirStmtKind) -> i64:
     rt_enum_discriminant(k)
 
+fn mir_hir_let_symbol(k: HirStmtKind) -> SymbolId:
+    match k:
+        case HirStmtKind.Let(symbol, _, _): symbol
+        case _: SymbolId(id: -1)
+
+fn mir_hir_let_type(k: HirStmtKind) -> HirType?:
+    match k:
+        case HirStmtKind.Let(_, type_, _): type_
+        case _: nil
+
+fn mir_hir_let_init(k: HirStmtKind, fallback: HirExpr) -> HirExpr:
+    match k:
+        case HirStmtKind.Let(_, _, init): init
+        case _: fallback
+
 # Rank-4 caller-of-lower_expr probe (stage3 self-host blocker, 2026-08-05:
 # doc/08_tracking/bug/stage3_selfhost_nil_receiver_sigill_in_lower_expr_caller_2026-08-05.md).
 # lower_expr itself was proven to complete cleanly on every crashing run to
@@ -605,24 +620,17 @@ impl MirLowering:
                 val fallback_expr = HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: fallback_type, span: span)
                 val let_disc = mir_hir_stmt_kind_disc(HirStmtKind.Let(SymbolId(id: -1), fallback_type, fallback_expr))
                 if mir_hir_stmt_kind_disc(stmt_kind_value) == let_disc:
-                    val let_symbol = match stmt_kind_value:
-                        case HirStmtKind.Let(symbol, _, _):
-                            if symbol != nil:
-                                Some(symbol)
-                            else:
-                                nil
-                        case _:
-                            nil
-                    val let_type = match stmt_kind_value:
-                        case HirStmtKind.Let(_, type_, _):
-                            type_
-                        case _:
-                            nil
-                    val let_init = match stmt_kind_value:
-                        case HirStmtKind.Let(_, _, init):
-                            init
-                        case _:
-                            fallback_expr
+                    # Keep each payload extraction in an independent compiled
+                    # helper. Repeating three matches in this SSA scope caused
+                    # the third (HirExpr) payload copy to dereference nil in
+                    # the admitted Stage3 compiler.
+                    val let_symbol_value = mir_hir_let_symbol(stmt_kind_value)
+                    val let_symbol: SymbolId? = if let_symbol_value.id >= 0:
+                        Some(let_symbol_value)
+                    else:
+                        nil
+                    val let_type = mir_hir_let_type(stmt_kind_value)
+                    val let_init = mir_hir_let_init(stmt_kind_value, fallback_expr)
 
                     if let_symbol.?:
                         val symbol_value = let_symbol ?? SymbolId(id: -1)
