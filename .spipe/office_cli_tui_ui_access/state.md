@@ -156,3 +156,14 @@ corrective-implementation-and-evidence
   from stdout or stderr and requires a schema-qualified `source_unavailable`
   response after shutdown. These source changes are diff-clean but remain
   pending validation by the fresh Stage 4 artifact and deployed system gate.
+- artifact re-audit (2026-08-11): No qualifying Stage 4/full self-hosted CLI
+  exists under `/tmp`. `/tmp/office-stage4/out/simple` is absent; both pure
+  Stage 3 compiler artifacts reject `test`, `run`, `office`, and `ui`, while
+  the remaining candidate identifies as the Rust bootstrap seed. The focused
+  typed-result and controller tests therefore could not start (`unknown
+  command 'test'`) and are not counted as execution evidence.
+- manual verification registration (2026-08-11): Added the Office CLI/Calc
+  SSpec/manual pair to the shared UI SSpec evidence audit. It intentionally
+  remains red while the generated manual carries its stale banner; after the
+  one green deployed SSpec run, docgen must replace that manual, report zero
+  stubs, and make the shared pair audit pass without rerunning the Office gate.
