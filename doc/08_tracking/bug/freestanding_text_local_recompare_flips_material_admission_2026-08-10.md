@@ -466,3 +466,210 @@ on freestanding lane"). This document's Layer 4 correctly identified it as
 already-fixed and did not claim to have newly fixed it — no correction needed
 on that point, restated here only for cross-reference with the other docs in
 this campaign.
+
+## 2026-08-11 — rung-(d) verification: fix IS landed on origin/main; NO post-fix gate run exists
+
+**Correction to an earlier draft of this addendum (self-corrected before
+push):** a first pass here wrongly concluded `4e1d05ba67a4` was not on
+`main`, because it was checked against a **stale local `main`/HEAD**
+(`a4b037eff19`) that had never been fetched from origin — exactly the
+documented repo trap "FETCH before asserting a commit is at origin; a stale
+tracking ref fakes 'missing'". Re-verified against a fresh fetch:
+
+```
+git fetch https://github.com/ormastes/simple.git main:refs/tmp/origin_main_check
+git rev-parse refs/tmp/origin_main_check
+  -> 301aa18ee138fb190041292d2b559fe50919ee6f
+git merge-base --is-ancestor 4e1d05ba67a4 refs/tmp/origin_main_check
+  -> IS ANCESTOR of origin/main
+git rev-parse refs/tmp/origin_main_check:src/lib/nogc_sync_mut/text_layout/font_renderer.spl
+  -> bba48aa8a09e1033d325db1c42700720d2041dd0
+git rev-parse 4e1d05ba67a4:src/lib/nogc_sync_mut/text_layout/font_renderer.spl
+  -> bba48aa8a09e1033d325db1c42700720d2041dd0   (identical blob)
+```
+
+So the font-atlas fix **is landed on `origin/main`** at `301aa18ee138`, and
+the local checkout used for this verification session was simply behind
+origin at the time — not a real gap in the fix's landing. The earlier
+"NOT YET COMMITTED to main" conclusion in this section is retracted.
+
+**No archived run postdates the fix.** Checked every `runs/<timestamp>/`
+directory under all four evidence roots
+(`build/simpleos_wm_fullscreen_evidence{,2,3}/`,
+`.../simpleos_wm_fullscreen_evidence_provlane/`); only the first and
+`_provlane` have any archived runs, and the newest overall is
+`build/simpleos_wm_fullscreen_evidence/runs/20260810T140559Z-fail`
+(archived 14:05:59Z, 2 minutes after the fix commit's 14:03:44Z timestamp —
+too soon for a real rebuild+boot+render cycle, which this campaign has
+independently measured at 15-40 min; its kernel almost certainly predates
+the fix).
+
+**That newest run's actual outcome** (read `serial.log` — 313 lines — to its
+true end, per the constraint):
+- `evidence.env`: `simpleos_wm_fullscreen_status=fail`,
+  `simpleos_wm_fullscreen_reason=guest-render-fault`. This stored reason
+  does **not** match the log content — see below.
+- `[PANIC] heap exhausted` — **absent**. No PANIC of any kind appears in
+  this run's serial log.
+- `[engine2d-glass]` — **absent** (grep for `heap exhausted|engine2d-glass|
+  PANIC|render_baremetal_first_frame` over the full log returns zero
+  matches).
+- The log instead runs cleanly through composite and shutdown: `[wm-frame]
+  frame-degraded ... rendered=12`, `[wm-render-step] at=done`,
+  `[desktop-gui] first-frame-rendered scene_revision=1479773126`,
+  `[production-readiness] wm=live simple_gui=object-tree
+  simple_web=content-frame renderer=engine2d process_owned_surfaces=3
+  scanout_generation=1`, `[desktop-gui] desktop-ready`, then `[INFO]
+  [desktop] [shell] entering baremetal event loop...` and
+  `[wm-loop] polling-active` as the final line. `qemu.out`'s only content is
+  `qemu-system-x86_64: terminating on signal 15 from pid ... (sh)` — a
+  SIGTERM from the harness's own CPU-time monitor, not a guest fault.
+- `scanout_capture_size=0`; all four PPM artifacts
+  (`browser_event/baseline/fullscreen/restored.ppm`) show
+  `*_file_status=missing`, `*_bytes=0` — none exist, so non-uniformity
+  cannot be evaluated.
+- Net: this run reached first-frame render and the guest event loop with
+  **no heap exhaustion and no panic**, but the harness's post-boot input/
+  capture sequence (baseline → maximize → restore → screenshot) never ran
+  before the CPU-time monitor killed QEMU, so `reason=guest-render-fault` in
+  `evidence.env` is a misclassification of "no capture happened" carried
+  over from the pre-fix template, not evidence of a fault in this
+  particular run.
+
+### What runs between `[wm-loop] polling-active` and the capture step, and what actually killed this run
+
+Read from `scripts/check/check-simpleos-wm-fullscreen-evidence.shs` (the gate
+script itself, not inference): the readiness wait loop
+(`SIMPLEOS_WM_READINESS_TIMEOUT_MS`, default 300000 ms) breaks out **as soon
+as** `[scanout-evidence]`, `[production-readiness]`, and a font-evidence
+marker are all present in the serial log — all three were present in this
+run, so the 300 s readiness ceiling was not what ended it; the script moved
+past readiness normally. After that it computes/validates scanout metadata,
+then invokes a single unbounded `python3` heredoc (line ~1388) that runs the
+whole capture sequence over the QMP socket: `wait_remote_browser_ready()`
+(own 120 s deadline) → capture `baseline.ppm` → send F11 → `
+wait_press_correlation` for maximize (own 300 s deadline) → capture
+`fullscreen.ppm` → send F11 → `wait_press_correlation` for restore (300 s) →
+capture `restored.ppm` → pointer click → `wait_pointer_correlation` →
+`wait_browser_content_presented` (120 s) → capture `browser-event.ppm`. None
+of these internal waits are wrapped by the script's own `timeout`/`gtimeout`
+(`TIMEOUT_BIN` is only used for the kernel-build step) — worst case they sum
+to ~14 minutes of legitimate internal polling before the script itself would
+raise `capture-input-or-guest-correlation-failed`.
+
+This run's serial log contains **zero** markers from that capture phase
+(no `[remote-browser-ready]`, no `simpleos_wm_input_submitted`, nothing in
+`capture.out` for this run) — the log simply stops at `[wm-loop]
+polling-active`. Combined with `qemu.out`'s `terminating on signal 15`, the
+kill happened **before or during the very start of the python3 capture
+step**, and came from **outside the gate script's own logic** (no internal
+timeout in the reachable code path fires that fast from a standing start).
+The most likely source, per this repo's own documented trap ("`kill_monitor`
+SIGTERMs any run ≥60s CPU"), is the invoking session's external CPU/wall-time
+watchdog on the background process running the gate — not a guest fault, not
+the 300 s readiness ceiling, and not one of the capture phase's own 120s/300s
+deadlines. The archived files alone cannot pin down which external watchdog
+or its exact duration; that requires the invoking session's own process
+history, which is not part of this evidence set.
+
+**If confirmed as a harness-level kill, this is a materially cheaper problem**
+than a rendering defect: the fix path would be running the gate under a
+wrapper (or `run_in_background`) exempt from the short external CPU-time
+guard, giving the internal ~14-minute worst-case capture budget room to run,
+rather than any change to guest or gate code.
+
+## 2026-08-11 (second pass) — detached run attempted; blocked on native-build timeout, not capture
+
+Ran `scripts/check/check-simpleos-wm-fullscreen-evidence.shs` fully detached
+(`setsid nohup ... sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs
+> logfile 2>&1 < /dev/null &`, then `disown`), with `SIMPLE_TIMEOUT_SECONDS=3600`,
+polled via file reads (not `tail -f`, per this doc's own prior trap) plus a
+`Monitor` task tailing the log for new lines. Binary/kernel identity at start:
+`bin/simple` → `release/x86_64-unknown-linux-gnu/simple` (symlink present and
+intact throughout — checked at start and end, not deleted by a parallel
+session this time). Local working-tree blob for
+`src/lib/nogc_sync_mut/text_layout/font_renderer.spl` verified identical
+(`bba48aa8a09e1033d325db1c42700720d2041dd0`) to the fixed blob at
+`4e1d05ba67a4` / `origin/main`, so no rebase was needed — the fix was already
+present in the tree the gate built from.
+
+**Mid-run, a false "two concurrent racing gate runs" alarm was raised and
+resolved.** `PID 816856` (mine, started 00:30:44) had a short-lived child
+`PID 834897` (ppid 816856, exited before the concern was raised) that looked
+like a second top-level invocation but was not — `ps` confirms only one
+`check-simpleos-wm-fullscreen-evidence.shs` process alive at any checked
+instant. The archived directory `runs/20260811T003044Z-fail` that seeded the
+alarm carries file mtimes of **2026-08-10 14:10** — the gate's own
+`retained_previous_run=...` startup line explains this: it relabels/copies a
+prior failed run under a fresh timestamp for reference, it did not represent
+a new result. **Correcting the addendum above:** the "external watchdog"
+hypothesis was independently re-examined and the actual kill mechanism was
+found by reading the script, confirming the coordinator's correction — QEMU
+is launched directly (`qemu-system-x86_64 ... &`, `QEMU_PID=$!`,
+`scripts/check/check-simpleos-wm-fullscreen-evidence.shs:1209`), not under
+`timeout`; the SIGTERM logged as `"from pid ... (sh)"` in `qemu.out` comes
+from the script's own `cleanup()` trap (lines 174–179:
+`kill "$QEMU_PID"` + `pkill -f "qemu-system.*$QMP_SOCKET"`), which fires
+whenever the script's own exit path runs. So `setsid`/`nohup` detachment does
+not by itself prevent this class of self-inflicted kill; it only removes an
+*external* watchdog as the killer, which the earlier addendum had assumed
+without reading the script.
+
+**This run's actual outcome, read from `evidence.env` after the script
+exited on its own** (not killed by us or by any watchdog):
+
+```
+simpleos_wm_fullscreen_status=fail
+simpleos_wm_fullscreen_reason=wm-simple-web-build-timeout
+simpleos_wm_fullscreen_kernel_build_status=timeout-cache-preserved
+simpleos_wm_fullscreen_kernel_build_attempts=1
+simpleos_wm_fullscreen_native_build_timeout_seconds=900
+simpleos_wm_fullscreen_serial_log_bytes=0
+simpleos_wm_fullscreen_disk_image_status=not-staged
+simpleos_wm_fullscreen_browser_demo_build_status=not-built
+```
+
+The run never reached QEMU boot at all this time — the kernel's own native
+build (from a full `1512`-file source closure, `kernel_source_input_set=
+closure+linked-symbol-repair`) exceeded the gate's internal **900 s**
+(`SIMPLEOS_WM_NATIVE_BUILD_TIMEOUT`-class) native-build ceiling on this
+attempt, despite the same source tree compiling+linking in ~116 s earlier in
+the same session when most objects were warm-cached (`Build complete: 5
+compiled, 752 cached, 0 failed`). This run's build evidently missed that
+cache (new `native-objects-PnAZS3` directory vs. the earlier
+`native-objects-tcPW8M`) and had to recompile a much larger fraction of the
+1512-file closure from cold, on a host that had other concurrent build/search
+activity from parallel sessions during the same window. `serial_log_bytes=0`
+and `disk_image_status=not-staged` confirm this is a pure build-timeout
+short-circuit, not a boot or capture-phase failure — a different, earlier
+failure mode than the truncated-at-`polling-active` one this document's prior
+addendum diagnosed, and unrelated to the capture-phase watchdog question.
+
+**Rung (d) remains UNVERIFIED after this pass.** No HARD CONSTRAINT was
+touched (read-only + one gate invocation; no stubbing, no relaxation of
+`wm_content_frame_web_provenance_valid`, OVMF pflash only, no `-kernel`/
+`isa-debug-exit`). Given the task's 60-minute wall-clock ceiling was consumed
+by this single native-build-timeout attempt, no further run was started.
+**Next required step:** re-run the gate with either (a) a warm/populated
+native-object cache guaranteed before starting (so the 900 s native-build
+ceiling isn't spent on a cold rebuild), or (b) `SIMPLEOS_WM_NATIVE_BUILD_TIMEOUT`
+raised for one diagnostic run, on a host with no concurrent competing
+build/search load, budgeting the full ~15–40 min build plus the ~14-minute
+worst-case capture sequence documented above — i.e. budget close to an hour
+for this step alone, not sharing that hour with kernel-currency verification
+or alarm triage as this pass did.
+
+This result was pinned (not pushed — `check-tree-size-push.shs` was reported
+too costly/incomplete to run in this window) at
+`refs/pending/wm_rung_d_verification_20260811b`.
+
+**Rung (d) is UNVERIFIED, not reached, but the fix is confirmed on
+`origin/main`.** No HARD CONSTRAINT was touched by this verification pass
+(read-only). Per the task's 40-minute ceiling and the "prefer reading over
+generating" budget directive, **no new gate run was started**. Next required
+step: re-run `scripts/check/check-simpleos-wm-fullscreen-evidence.shs`
+end-to-end from a background invocation that will not be killed by a short
+external CPU/wall-time watchdog before the ~14-minute worst-case capture
+sequence can finish, then confirm `[engine2d-glass]` appears, capture
+succeeds (`scanout_capture_size>0`, all four PPMs present and non-uniform),
+and the verdict string itself (not just absence of PANIC) says pass.
