@@ -55,7 +55,7 @@ Excluded:
 
 ## Manual Flow and Capture Policy
 
-The inline SSpec setup scenario `has one fresh deployed Office evidence run`
+The inline SSpec setup scenario `should create one fresh deployed Office evidence run`
 invokes `--scenario all` once for one unique run ID. Every displayed or folded
 scenario expands that setup with `@prev(...)` and consumes the same fresh run
 directory through `setup_office_cli_tui_ui_access` and `check_office_gate`; none
@@ -88,6 +88,39 @@ The deployed gate internally exercises CLI compatibility, discovery, formulas,
 rejections, history eviction, performance, provenance, and PTY cleanup. The
 SSpec scenarios organize that one run for the operator manual; they are not
 separate gate selectors.
+
+### Modern SSpec campaign-coverage rationale
+
+This is a single deployed campaign because launching three independent Calc
+processes would weaken run correlation and triple the N1 measurement load. The
+three modern SSpec scenarios expose real assertions over happy, edge, and error
+subflows retained by that one campaign. A cell below names the independently
+observable subflow; no requirement is credited from source inspection alone.
+
+| Requirement | Happy subflow | Edge subflow | Error subflow |
+|---|---|---|---|
+| REQ-001 | standalone artifact launches Calc | unified alias is recorded only when `OFFICE_BINARY` is absent | seed/raw-source provenance fails closed |
+| REQ-002 | TUI feature check reports `mode: tui` | GUI feature check reports `mode: gui` | unknown IDE option exits nonzero |
+| REQ-003 | omitted FILE opens an editable workbook | compatibility launch preserves argv | unknown Calc option exits nonzero |
+| REQ-004 | windows/snapshot/surface/find/act/history share `main` | independent post-action snapshot is retained | unavailable service returns a protocol error after exit |
+| REQ-005 | A1/formula/confirm stable IDs are discovered | D1 is independently observed before and after rejection | missing canonical target is rejected |
+| REQ-006 | value-bearing actions mutate the real sheet | correlated request/result history is bounded | stale and unsupported actions are rejected |
+| REQ-007 | multiplication evaluates and displays 48 | result is observed in protocol and TUI | malformed formula does not mutate D1 |
+| REQ-008 | `AVG(A1:A2)` evaluates and displays 7 | raw alias formula remains observable | unknown function is rejected as `malformed_formula` |
+| REQ-009 | real 124x37 PTY capture is retained | ANSI and normalized text captures agree on the run | non-PTY/stale evidence cannot satisfy the fresh-run receipt |
+| REQ-010 | visible imperative flow and typed captures generate | edge/NFR scenarios remain folded with troubleshooting | docgen stubs or misplaced `.spl` files fail the post-run manual gate |
+| REQ-011 | standalone Office owns the production session | access transport remains opt-in | isolation audit rejects forbidden production imports |
+| REQ-012 | supported Office and IDE routes preserve semantics | optional unified alias records its mode | invalid office/IDE/action routes return deterministic failures |
+| NFR-001 | three configured artifacts have retained hashes | compatibility mode is explicit | seed-shaped product/client/driver is rejected |
+| NFR-002 | ready-surface startup is measured | exact 2-second limit is retained | limit excess fails the gate |
+| NFR-003 | 20 warm snapshot/find samples are retained | p95 is computed over the campaign | either query threshold excess fails the gate |
+| NFR-004 | edit plus observed post-state p95 is retained | 20 correlated action samples are used | 250 ms excess fails the gate |
+| NFR-005 | RSS delta and 64-event history are measured | the earliest event pair is evicted | missing RSS or bound excess fails the gate |
+| NFR-006 | stable IDs and 124x37 capture are retained | ANSI plus normalized text are retained | wrong dimensions/version fail the gate |
+| NFR-007 | terminal restoration and clean exit are retained | stale/missing/unsupported/malformed cases are exercised | service remains closed after exit or the gate fails |
+| NFR-008 | narrow standalone/access owners pass isolation checks | access transport is absent from the terminal owner | forbidden import/dependency audit fails |
+| NFR-009 | focused suites and campaign use real assertions | campaign executes once through cached inline setup | placeholder/audit/layout failures block verification |
+| NFR-010 | mirrored manual is generated from the executable spec | primary is visible and diagnostic flows folded | nonzero stubs or executable specs under `doc/06_spec` fail |
 
 ## Frozen Manual Steps
 
