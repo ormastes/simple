@@ -1,0 +1,188 @@
+# rules.sdl — LLM fraud-prevention registry
+#
+# Counts and lists that represent coverage may GROW freely and may NEVER SHRINK
+# without a reviewed, recorded decision. Enforced by:
+#   scripts/check/check-rules-sdl.shs            (evaluates the gates below)
+#   scripts/check/check-rules-sdl-integrity.shs  (this file may not shrink either)
+#
+# Guide: doc/07_guide/infra/llm_fraud_prevention.md
+#
+# Gate fields:
+#   id     unique, stable. Removing one requires a `# removed:` tombstone line.
+#   group  quick (default, runs pre-push) | full (adds heavy lanes, runs on bootstrap)
+#   cmd    shell snippet printing ONE integer to stdout. "$REF" = the commit under
+#          test; every cmd MUST read committed content via git, never the working
+#          copy — a shared working tree disagrees with what is actually pushed.
+#   min    floor measured at baseline time. Actual < min => FAIL.
+#   status planned => the lane is declared but not yet built; reports SKIPPED, and
+#          may never report PASS until the script exists.
+#
+# Corpus rule honored by every cmd below: test/unit/ and test/integration/ are
+# FROZEN LEGACY MIRRORS excluded from discovery (874 pairs differ, ~33% with
+# different example counts). Never census both them and test/01_unit,02_integration.
+
+rules:
+  version: 1
+  mission_critical_config: config/critical_mode.sdn
+
+  groups:
+    quick: count_gates file_gates base_files critical_gates
+    full: quick list_gates scenarios capture_gates
+
+  count_gates:
+
+    - id: spec_files
+      group: quick
+      # measured 2026-08-11: git ls-files 'test/**/*_spec.spl' 'test/**/*_test.spl' | grep -vE '^test/(unit|integration)/' | wc -l
+      cmd: git ls-tree -r --name-only "$REF" -- test | grep -E '_(spec|test)\.spl$' | grep -vE '^test/(unit|integration)/' | wc -l
+      min: 14056
+
+    - id: spec_it_cases
+      group: full
+      # measured 2026-08-11 = 157511 `it "` declarations outside the legacy mirrors
+      cmd: git grep -hoE '^[[:space:]]*it +"' "$REF" -- 'test/*_spec.spl' 'test/*_test.spl' | wc -l
+      min: 150000
+
+    - id: md_doctest_files
+      group: quick
+      # closed non-empty simple/spl/sdoctest markdown fences.
+      # Baseline 9970 derived by running THIS cmd at HEAD, not by `git ls-files`:
+      # a working-copy census counts uncommitted files the gate will never see, and
+      # the resulting 4-file gap reads as a shrink on the very first run.
+      cmd: git grep -lE '^```(simple|spl|sdoctest)$' "$REF" -- '*.md' | wc -l
+      min: 9970
+
+    - id: comment_doctest_files
+      group: quick
+      # `sdoctest:` source examples in src/ — measured 66
+      cmd: git grep -lE 'sdoctest:' "$REF" -- 'src/*.spl' | wc -l
+      min: 66
+
+    - id: check_scripts
+      group: quick
+      # the guard corpus itself — deleting a guard is the cheapest way to go green
+      cmd: git ls-tree -r --name-only "$REF" -- scripts/check | grep -cE '\.shs$'
+      min: 531
+
+    - id: rules_sdl_gates
+      group: quick
+      # self-integrity: shrinking this registry to escape this registry
+      cmd: git cat-file -p "$REF:rules.sdl" | grep -cE '^[[:space:]]*- id: '
+      min: 12
+
+  file_gates:
+    # A rebase/merge/stale-snapshot can silently truncate a guard. Byte floors catch it.
+
+    - id: pre_push_aggregator
+      group: quick
+      cmd: git cat-file -s "$REF:scripts/check/pre-push-conflict-tree-guard.shs"
+      min: 1000
+
+    - id: tree_size_guard
+      group: quick
+      cmd: git cat-file -s "$REF:scripts/check/check-tree-size-push.shs"
+      min: 1000
+
+    - id: divergence_guard
+      group: quick
+      cmd: git cat-file -s "$REF:scripts/check/check-test-tree-divergence.shs"
+      min: 1000
+
+    - id: root_workspace_guard
+      group: quick
+      cmd: git cat-file -s "$REF:scripts/check-workspace-root-guard.shs"
+      min: 1000
+
+  critical_gates:
+    # Mission-critical mode (config/critical_mode.sdn) raises the bar: when
+    # `enabled: true`, the registry must carry at least the full gate roster.
+    # Encoding: emits the gate count when the config demands it be checked, or a
+    # sentinel 999 when critical mode is off (off = the floor does not apply).
+    # Flipping `enabled` to true with a shrunken registry therefore goes red, and
+    # deleting critical_mode.sdn goes red too (missing file emits nothing -> FAILGATE).
+
+    - id: mission_critical_gate_floor
+      group: quick
+      cmd: en=$(git cat-file -p "$REF:config/critical_mode.sdn" | sed -n 's/^[[:space:]]*enabled:[[:space:]]*//p' | head -1); n=$(git cat-file -p "$REF:rules.sdl" | grep -cE '^[[:space:]]*- id: '); if [ "$en" = "true" ]; then echo "$n"; else echo 999; fi
+      min: 21
+
+  base_files:
+    # Root-directory file creation + load-bearing files. The root guard owns the
+    # allowlist (parsed from FILE.md); this gate only proves it is still wired.
+
+    - id: root_file_allowlist
+      group: quick
+      cmd: git cat-file -s "$REF:FILE.md"
+      min: 500
+
+  list_gates:
+    # Lists that must not shrink: "fixing" lint by growing an allowlist, or hiding
+    # clang/seed errors by shortening the list walked, are both reductions.
+    # Same verdict encoding as the scenario lanes: 2=PASS, 1=SKIPPED, 0=anything else.
+
+    - id: lint_census_classifier
+      group: full
+      # SCOPE, stated plainly: this gates the census CLASSIFIER via its own self-test,
+      # not a whole-tree lint census. A real census is not gate-shaped here -- `simple
+      # lint` costs ~11.7s startup plus ~3.3-4.0s PER FUNCTION DECL, superlinear, so a
+      # 120-line file takes ~119s and the tree takes hours. What this does buy: if the
+      # classifier that decides "finding vs clean" breaks, every census built on it is
+      # silently wrong, and that failure is caught here in seconds. The full census
+      # stays a deliberate manual run.
+      cmd: v=$(sh scripts/check/check-lint-census.shs --self-test 2>&1 | tail -1); case "$v" in PASS*|OK*) echo 2;; SKIP*) echo 1;; *) echo 0;; esac
+      min: 2
+
+    - id: clang_error_free
+      group: full
+      # Needs an explicit range -- it refuses to guess one, and a bare invocation is an
+      # `ERROR — nothing was checked`, not a pass. `$REF~1..$REF` is the commit under test.
+      cmd: v=$(sh scripts/check/check-seed-builds-push.shs "$REF~1..$REF" 2>&1 | tail -1); case "$v" in *PASS*|*OK*) echo 2;; *SKIP*) echo 1;; *) echo 0;; esac
+      min: 1
+
+  capture_gates:
+    # SSpec capture/compare infra: TUI grid, CLI/exec, binary protocol, and GUI image
+    # with IGNORE sections. The ignore-section case is the one that can silently become
+    # a hole -- a fully masked comparison asserts nothing -- so it is gated explicitly.
+
+    - id: sspec_pixel_region_ignore
+      group: full
+      cmd: v=$(sh scripts/check/check-spec-lane.shs test/01_unit/lib/spec/evidence/pixel_region_ignore_spec.spl 2>&1 | tail -1); case "$v" in PASS*) echo 2;; SKIPPED*) echo 1;; *) echo 0;; esac
+      min: 2
+
+    - id: sspec_tui_binary_capture
+      group: full
+      cmd: v=$(sh scripts/check/check-spec-lane.shs test/01_unit/lib/spec/evidence/tui_binary_capture_infra_spec.spl 2>&1 | tail -1); case "$v" in PASS*) echo 2;; SKIPPED*) echo 1;; *) echo 0;; esac
+      min: 2
+
+  scenarios:
+    # Heavy lanes. Skipping the lane and reporting green is the fraud these block.
+    #
+    # Scenario lanes report a verdict LINE, not a count, so each cmd encodes that
+    # verdict as a number for the same numeric mechanism the other gates use:
+    #   2 = PASS      1 = SKIPPED (hardware absent -- makes NO claim)      0 = anything else
+    # With `min: 1`, a FAIL or a missing/garbled verdict goes red, while a genuine
+    # hardware-absent skip does not block unrelated work. The lane still prints its own
+    # loud `SKIPPED — ... NOT VERIFIED` line, which is what a reader sees; the encoding
+    # exists so a lane can never be silently absent from the run.
+
+    - id: qemu_boot_hello
+      group: full
+      cmd: v=$(sh scripts/check/check-simpleos-shell-hello-e2e.shs 2>&1 | tail -1); case "$v" in PASS*) echo 2;; SKIPPED*) echo 1;; *) echo 0;; esac
+      min: 1
+
+    - id: fpga_rv_linux
+      group: full
+      cmd: v=$(sh scripts/check/check-fpga-rv-linux-ls.shs 2>&1 | tail -1); case "$v" in PASS*) echo 2;; SKIPPED*) echo 1;; *) echo 0;; esac
+      min: 1
+
+    - id: webdb_accel
+      group: full
+      cmd: v=$(sh scripts/check/check-spec-lane.shs test/03_system/lib/db/webdb_simd_accel_system_spec.spl 2>&1 | tail -1); case "$v" in PASS*) echo 2;; SKIPPED*) echo 1;; *) echo 0;; esac
+      min: 2
+
+    - id: startup_declared_args
+      group: full
+      # Pre-main arg parser accepts ONLY manifest-declared names. Needs no hardware,
+      # so min is 2 -- a skip here would be a defect, not an absent board.
+      cmd: v=$(sh scripts/check/check-spec-lane.shs test/02_integration/app/startup_declared_argument_parser_spec.spl 2>&1 | tail -1); case "$v" in PASS*) echo 2;; SKIPPED*) echo 1;; *) echo 0;; esac
+      min: 2
