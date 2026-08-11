@@ -85,6 +85,12 @@ use std.nogc_sync_mut.text_layout.font_vector_data.{vf_glyph_commands, vf_glyph_
 use std.nogc_sync_mut.text_layout.font_advance_layout.{font_batch_apply_advances}
 use std.nogc_sync_mut.io.font_sffi.{font_face_ascent, free_font, font_face_identity, font_face_is_live, load_font}
 use std.nogc_sync_mut.sffi.io.{file_read_bytes}
+# Glyph iteration is by CODEPOINT. `text.len()` is a UTF-8 BYTE count while
+# `char_code_at(i)` is CODEPOINT indexed, so `while ci < content.len()` walked
+# a 3-character string 6 times and read phantom zero codepoints past the end —
+# inflating every non-ASCII advance array, width, and rendered run.
+# See doc/08_tracking/bug/live_lane_inline_text_measure_counts_utf8_bytes_2026-08-11.md
+use std.common.encoding.utf8.{text_codepoints}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
 use std.common.encoding.sfnt_glyf.{SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYPH_SELECTOR_INDEX, sfnt_measure_glyph_into, sfnt_render_glyph_into}
 use std.common.encoding.font_registry.{FontAssetCandidate, selected_font_asset_candidates, selected_font_asset_candidate_for_path, selected_font_asset_candidate_for_identity, selected_font_asset_for_language_category, selected_font_asset_identity, selected_font_asset_identity_for_path, selected_font_asset_local_path_for_identity, selected_font_asset_physical_path, selected_font_language_ranks, selected_font_simple_tuple_accepted, validate_selected_font_asset}
@@ -1595,9 +1601,10 @@ class FontRenderer:
         var prev_cp = -1
         # indexed loop: for-in over text yields corrupted bindings (doc/08_tracking/bug/for_loop_over_text_char_code_at_zero_len_crash_2026-07-19.md)
         var ci = 0
-        val content_len = content.len()
+        val content_cps = text_codepoints(content)
+        val content_len = content_cps.len()
         while ci < content_len:
-            val cp = content.char_code_at(ci)
+            val cp = content_cps[ci] as i32
             if prev_cp >= 0:
                 total_w = total_w + self.horizontal_kern(prev_cp, cp, font_size)
             val glyph_advance = self.get_glyph_advance(cp, font_size)
@@ -1615,9 +1622,10 @@ class FontRenderer:
         var prev_cp = -1
         # indexed loop: for-in over text yields corrupted bindings (doc/08_tracking/bug/for_loop_over_text_char_code_at_zero_len_crash_2026-07-19.md)
         var ci = 0
-        val content_len = content.len()
+        val content_cps = text_codepoints(content)
+        val content_len = content_cps.len()
         while ci < content_len:
-            val cp = content.char_code_at(ci)
+            val cp = content_cps[ci] as i32
             if prev_cp >= 0:
                 val previous = advances.len() - 1
                 advances[previous] = advances[previous] + self.horizontal_kern(prev_cp, cp, font_size)
@@ -1640,9 +1648,10 @@ class FontRenderer:
         var prev_cp = -1
         # indexed loop: for-in over text yields corrupted bindings (doc/08_tracking/bug/for_loop_over_text_char_code_at_zero_len_crash_2026-07-19.md)
         var ci = 0
-        val content_len = content.len()
+        val content_cps = text_codepoints(content)
+        val content_len = content_cps.len()
         while ci < content_len:
-            val cp = content.char_code_at(ci)
+            val cp = content_cps[ci] as i32
             if prev_cp >= 0:
                 cx = cx + self.horizontal_kern(prev_cp, cp, font_size)
             val glyph = self.get_glyph(cp, font_size)
@@ -1664,9 +1673,10 @@ class FontRenderer:
             var fallback_byte_offset: i64 = 0
             # indexed loop: for-in over text yields corrupted bindings (doc/08_tracking/bug/for_loop_over_text_char_code_at_zero_len_crash_2026-07-19.md)
             var ci = 0
-            val content_len = content.len()
+            val content_cps = text_codepoints(content)
+            val content_len = content_cps.len()
             while ci < content_len:
-                val codepoint = content.char_code_at(ci)
+                val codepoint = content_cps[ci] as i32
                 val glyph = self.get_glyph(codepoint, font_size)
                 layout = layout.push(LayoutGlyph(
                     codepoint: codepoint.to_i64(), x: fallback_x, y: 0,
@@ -1916,9 +1926,10 @@ class FontRenderer:
             # way) and is timeboxed via the probes immediately below instead.
             # indexed loop: for-in over text yields corrupted bindings (doc/08_tracking/bug/for_loop_over_text_char_code_at_zero_len_crash_2026-07-19.md)
             var ci = 0
-            val content_len = content.len()
+            val content_cps = text_codepoints(content)
+            val content_len = content_cps.len()
             while ci < content_len:
-                val codepoint = content.char_code_at(ci)
+                val codepoint = content_cps[ci] as i32
                 if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
                     _vec_glyph_probe_count = _vec_glyph_probe_count + 1
                     print("[vec-glyph-probe] active-before-get_glyph cp={codepoint} font_size={font_size}")
@@ -2496,7 +2507,11 @@ fn _resolve_font_metrics_with_language_config(family: text, content: text, font_
     if not renderer_from_cache:
         renderer.clear_ttf()
     # indexed loop: for-in over text yields corrupted bindings (doc/08_tracking/bug/for_loop_over_text_char_code_at_zero_len_crash_2026-07-19.md)
-    val character_count = content.len()
+    # CODEPOINT count, not byte length: `advances` carries one entry per
+    # codepoint, so a byte-length comparison declared every non-ASCII run
+    # invalid (or, when the advances were themselves byte-per-byte, agreed
+    # with an inflated width).
+    val character_count = text_codepoints(content).len()
     val valid = identity != "" and advances.len() == character_count
     val resolved = ResolvedFontMetrics(
         valid: valid,
