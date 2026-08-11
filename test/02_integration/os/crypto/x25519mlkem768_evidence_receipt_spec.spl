@@ -1,0 +1,222 @@
+# codex-impl
+"""Typed receipt integration for X25519MLKEM768 scalar and GPU evidence.
+
+This spec exercises the production scalar hybrid facade and the shared receipt
+codec directly. It does not launch another compiler. Its synthetic CUDA row
+models pinned absolute correctness but never claims promotion.
+"""
+
+use std.spipe.*
+use std.common.crypto.sha256.{sha256_text}
+use lib.common.crypto.x25519_mlkem768.contract.{
+    X25519MlKem768Backend, X25519MlKem768SelectionMode,
+    X25519_MLKEM768_IMPLEMENTATION_VERSION,
+    X25519_MLKEM768_PROFILE_VERSION,
+    x25519_mlkem768_default_config}
+use lib.common.crypto.x25519_mlkem768.evidence_contract.{
+    X25519MlKem768EvidenceBackend, X25519MlKem768EvidenceMode,
+    X25519MlKem768EvidenceScope, X25519MlKem768EvidenceStatus,
+    X25519MlKem768RunReceipt,
+    x25519_mlkem768_parse_evidence_cli,
+    x25519_mlkem768_render_evidence_receipt,
+    x25519_mlkem768_constant_time_list_equal,
+    x25519_mlkem768_evidence_fixture_list32,
+    x25519_mlkem768_evidence_fixture_bytes32}
+use os.crypto.x25519_mlkem768.hybrid.{
+    x25519_mlkem768_keygen, x25519_mlkem768_encapsulate,
+    x25519_mlkem768_decapsulate}
+use app.test.x25519mlkem768_pinned_workload.{
+    X25519_MLKEM768_PINNED_FIXTURE_ID}
+use app.test.x25519mlkem768_evidence.{
+    x25519_mlkem768_scalar_observation_reason}
+
+fn _receipt(status: X25519MlKem768EvidenceStatus,
+        requested: X25519MlKem768EvidenceBackend,
+        selected: X25519MlKem768EvidenceBackend?, reason: text,
+        keygen_digest: text = "", encapsulate_digest: text = "",
+        decapsulate_digest: text = "",
+        scalar_roundtrip_match: bool = false,
+        gpu_lifecycle: bool = false,
+        absolute_oracle_match: bool = false,
+        fixture_id: text = "x25519mlkem768-v1") -> X25519MlKem768RunReceipt:
+    X25519MlKem768RunReceipt(
+        schema: "x25519mlkem768-evidence-v1",
+        status: status,
+        reason: reason,
+        scope: X25519MlKem768EvidenceScope.Correctness,
+        requested_backend: requested,
+        selected_backend: selected,
+        mode: X25519MlKem768EvidenceMode.Native,
+        emulated: false,
+        promotion_eligible: false,
+        implementation_version: X25519_MLKEM768_IMPLEMENTATION_VERSION,
+        profile_version: X25519_MLKEM768_PROFILE_VERSION,
+        fixture_id: fixture_id,
+        fixture_manifest_sha256: "a" * 64,
+        fixture_source_sha256: "b" * 64,
+        pinned_workload_sha256: "",
+        runner_source_sha256: "c" * 64,
+        batch_size: 1,
+        client_share_bytes: if scalar_roundtrip_match: 1216 else: 0,
+        server_share_bytes: if scalar_roundtrip_match: 1120 else: 0,
+        shared_secret_bytes: if scalar_roundtrip_match: 64 else: 0,
+        keygen_output_digest: keygen_digest,
+        encapsulate_output_digest: encapsulate_digest,
+        decapsulate_output_digest: decapsulate_digest,
+        scalar_roundtrip_match: scalar_roundtrip_match,
+        fallback_used: false,
+        absolute_oracle_match: absolute_oracle_match,
+        simd_chunk_hits: 0,
+        observed_rvv_vlen_bits: 0,
+        kernel_invocations: if gpu_lifecycle: 9 else: 0,
+        compiled: gpu_lifecycle,
+        submitted: gpu_lifecycle,
+        fence_completed: gpu_lifecycle,
+        device_readback: gpu_lifecycle,
+        artifact_sha256: if gpu_lifecycle: "d" * 64 else: "",
+        device_identity: if gpu_lifecycle: "cuda-device:1" else: "")
+
+fn _metal_cli() -> [text]:
+    [
+        "--fixture-manifest", "manifest.sdn",
+        "--fixture-source", "fixture.spl",
+        "--runner-source", "runner.spl",
+        "--backend", "metal",
+        "--mode", "native",
+        "--scope", "correctness",
+        "--batch", "1"
+    ]
+
+describe "X25519MLKEM768 typed evidence receipt integration":
+    it "should serialize only public scalar outputs after a matching exchange":
+        step("Run the deterministic scalar client and server exchange")
+        val client_private = x25519_mlkem768_evidence_fixture_bytes32(1)
+        val d = x25519_mlkem768_evidence_fixture_list32(33)
+        val z = x25519_mlkem768_evidence_fixture_list32(65)
+        val server_private = x25519_mlkem768_evidence_fixture_bytes32(97)
+        val message = x25519_mlkem768_evidence_fixture_list32(129)
+        var config = x25519_mlkem768_default_config()
+        config.requested_backend = X25519MlKem768Backend.ScalarCpu
+        config.selection_mode = X25519MlKem768SelectionMode.Require
+        val key_pair = match x25519_mlkem768_keygen(
+                config, client_private, d, z):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+        val encapsulation = match x25519_mlkem768_encapsulate(
+                config, key_pair.client_key_share, server_private, message):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+        val decapsulation = match x25519_mlkem768_decapsulate(
+                config, encapsulation.server_key_share,
+                key_pair.x25519_private_key, key_pair.decapsulation_key):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+        expect(x25519_mlkem768_constant_time_list_equal(
+            encapsulation.shared_secret,
+            decapsulation.shared_secret)).to_be(true)
+
+        step("Bind the scalar label to all three observed operation receipts")
+        expect(x25519_mlkem768_scalar_observation_reason(
+            config, key_pair.evidence, encapsulation.evidence,
+            decapsulation.evidence)).to_equal("")
+
+        step("Reject adjacent backend, operation, proof, fallback, and lifecycle claims")
+        var wrong_backend = key_pair.evidence
+        wrong_backend.selected_backend = X25519MlKem768Backend.Avx2
+        expect(x25519_mlkem768_scalar_observation_reason(
+            config, wrong_backend, encapsulation.evidence,
+            decapsulation.evidence)).to_equal("scalar-observed-backend-mismatch")
+        var wrong_operation = encapsulation.evidence
+        wrong_operation.operation = "keygen"
+        expect(x25519_mlkem768_scalar_observation_reason(
+            config, key_pair.evidence, wrong_operation,
+            decapsulation.evidence)).to_equal(
+                "scalar-observed-operation-mismatch-encapsulate")
+        var wrong_proof = decapsulation.evidence
+        wrong_proof.execution_proof_digest = "0" * 64
+        expect(x25519_mlkem768_scalar_observation_reason(
+            config, key_pair.evidence, encapsulation.evidence,
+            wrong_proof)).to_equal(
+                "scalar-observed-operation-proof-mismatch-decapsulate")
+        var fallback = key_pair.evidence
+        fallback.fallback_used = true
+        expect(x25519_mlkem768_scalar_observation_reason(
+            config, fallback, encapsulation.evidence,
+            decapsulation.evidence)).to_equal("scalar-observed-fallback-forbidden")
+        var lifecycle = key_pair.evidence
+        lifecycle.simd_chunk_hits = 1
+        expect(x25519_mlkem768_scalar_observation_reason(
+            config, lifecycle, encapsulation.evidence,
+            decapsulation.evidence)).to_equal(
+                "scalar-observed-accelerator-lifecycle-forbidden")
+        expect(x25519_mlkem768_scalar_observation_reason(
+            x25519_mlkem768_default_config(), key_pair.evidence,
+            encapsulation.evidence, decapsulation.evidence)).to_equal(
+                "scalar-observation-requires-scalar-cpu")
+
+        step("Render the public-output-only scalar receipt")
+        val rendered = x25519_mlkem768_render_evidence_receipt(_receipt(
+            X25519MlKem768EvidenceStatus.Pass,
+            X25519MlKem768EvidenceBackend.ScalarCpu,
+            Some(X25519MlKem768EvidenceBackend.ScalarCpu),
+            "scalar-roundtrip-only",
+            sha256_text(key_pair.evidence.output_digest),
+            sha256_text(encapsulation.evidence.output_digest),
+            sha256_text(decapsulation.evidence.output_digest), true))
+        expect(rendered).to_contain("status=pass\n")
+        expect(rendered).to_contain(
+            "requested_backend=scalar-cpu\nselected_backend=scalar-cpu\n")
+        expect(rendered).to_contain("client_share_bytes=1216\n")
+        expect(rendered).to_contain("server_share_bytes=1120\n")
+        expect(rendered).to_contain("shared_secret_bytes=64\n")
+        expect(rendered).to_contain("scalar_roundtrip_match=true\n")
+        expect(rendered).to_contain("fallback_used=false\n")
+        expect(rendered).to_contain("absolute_oracle_match=false\n")
+        expect(rendered).to_contain("promotion_eligible=false\n")
+        expect(rendered.contains("\nx25519_private_key=")).to_be(false)
+        expect(rendered.contains("\ndecapsulation_key=")).to_be(false)
+        expect(rendered.contains("\nshared_secret=")).to_be(false)
+        expect(rendered.contains("\nshared_secret_digest=")).to_be(false)
+        expect(rendered.contains(client_private.to_text())).to_be(false)
+        expect(rendered.contains(encapsulation.shared_secret.to_text())).to_be(false)
+
+    it "should render unavailable Metal as blocked with no selected backend":
+        step("Parse an explicit native Metal evidence request")
+        val cli = match x25519_mlkem768_parse_evidence_cli(_metal_cli()):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+        expect(cli.backend).to_equal(X25519MlKem768EvidenceBackend.Metal)
+
+        step("Render a fail-closed blocked receipt without fallback")
+        val rendered = x25519_mlkem768_render_evidence_receipt(_receipt(
+            X25519MlKem768EvidenceStatus.Blocked,
+            cli.backend, nil, "gpu-executor-snapshot-not-admitted"))
+        expect(rendered).to_contain("status=blocked\n")
+        expect(rendered).to_contain(
+            "requested_backend=metal\nselected_backend=none\n")
+        expect(rendered).to_contain("fallback_used=false\n")
+        expect(rendered).to_contain("promotion_eligible=false\n")
+        expect(rendered.contains("selected_backend=scalar-cpu")).to_be(false)
+
+    it "should serialize CUDA lifecycle evidence without a promotion claim":
+        step("Render a fully observed exact-binary CUDA correctness row")
+        val rendered = x25519_mlkem768_render_evidence_receipt(_receipt(
+            X25519MlKem768EvidenceStatus.Pass,
+            X25519MlKem768EvidenceBackend.Cuda,
+            Some(X25519MlKem768EvidenceBackend.Cuda),
+            "native-cuda-pinned-absolute-correctness-admitted",
+            "1" * 64, "2" * 64, "2" * 64, true, true, true,
+            X25519_MLKEM768_PINNED_FIXTURE_ID))
+        expect(rendered).to_contain("requested_backend=cuda\nselected_backend=cuda\n")
+        expect(rendered).to_contain("kernel_invocations=9\n")
+        expect(rendered).to_contain("compiled=true\n")
+        expect(rendered).to_contain("submitted=true\n")
+        expect(rendered).to_contain("fence_completed=true\n")
+        expect(rendered).to_contain("device_readback=true\n")
+        expect(rendered).to_contain("artifact_sha256=" + "d" * 64 + "\n")
+        expect(rendered).to_contain(
+            "decapsulate_output_digest=" + "2" * 64 + "\n")
+        expect(rendered).to_contain(
+            "fixture_id=" + X25519_MLKEM768_PINNED_FIXTURE_ID + "\n")
+        expect(rendered).to_contain("absolute_oracle_match=true\n")
+        expect(rendered).to_contain("promotion_eligible=false\n")

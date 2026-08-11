@@ -1,0 +1,142 @@
+# ============================================================================
+# Base-encoding utilities — byte / text conversion
+# ============================================================================
+#
+# Exported functions:
+#   bytes_to_text(data: [u8]) -> text   — interpret raw bytes as UTF-8
+#   text_to_bytes(data: text) -> [u8]   — encode text to UTF-8 bytes
+
+extern fn rt_bytes_to_text(data: [u8]) -> text
+
+pub fn bytes_to_text(data: [u8]) -> text:
+    """Interpret a raw byte slice as UTF-8 text.
+    Non-UTF-8 bytes are replaced with '?'.
+    """
+    var result = ""
+    var i = 0
+    val n = data.len()
+    while i < n:
+        val b = data[i] as i64
+        if b < 0x80:
+            result = result + rt_bytes_to_text([b as u8])
+            i = i + 1
+        else if b < 0xC0:
+            result = result + "?"
+            i = i + 1
+        else if b < 0xE0:
+            if i + 1 < n:
+                val b2 = data[i + 1] as i64
+                val cp = ((b & 0x1F) << 6) | (b2 & 0x3F)
+                if (b2 & 0xC0) == 0x80 and cp >= 0x80:
+                    result = result + rt_bytes_to_text([b as u8, b2 as u8])
+                    i = i + 2
+                else:
+                    result = result + "?"
+                    i = i + 1
+            else:
+                result = result + "?"
+                i = i + 1
+        else if b < 0xF0:
+            if i + 2 < n:
+                val b2 = data[i + 1] as i64
+                val b3 = data[i + 2] as i64
+                val cp = ((b & 0x0F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F)
+                if (b2 & 0xC0) == 0x80 and (b3 & 0xC0) == 0x80 and cp >= 0x800 and not (cp >= 0xD800 and cp <= 0xDFFF):
+                    result = result + rt_bytes_to_text([b as u8, b2 as u8, b3 as u8])
+                    i = i + 3
+                else:
+                    result = result + "?"
+                    i = i + 1
+            else:
+                result = result + "?"
+                i = i + 1
+        else:
+            if i + 3 < n:
+                val b2 = data[i + 1] as i64
+                val b3 = data[i + 2] as i64
+                val b4 = data[i + 3] as i64
+                val cp = ((b & 0x07) << 18) | ((b2 & 0x3F) << 12) | ((b3 & 0x3F) << 6) | (b4 & 0x3F)
+                if b < 0xF8 and (b2 & 0xC0) == 0x80 and (b3 & 0xC0) == 0x80 and (b4 & 0xC0) == 0x80 and cp >= 0x10000 and cp <= 0x10FFFF:
+                    result = result + rt_bytes_to_text([b as u8, b2 as u8, b3 as u8, b4 as u8])
+                    i = i + 4
+                else:
+                    result = result + "?"
+                    i = i + 1
+            else:
+                result = result + "?"
+                i = i + 1
+    result
+
+pub fn text_to_bytes(data: text) -> [u8]:
+    """Encode text as UTF-8 bytes."""
+    var result: [u8] = []
+    val raw = data.bytes()
+    val n = raw.len()
+    var i = 0
+    while i < n:
+        result = result.push(raw[i] as u8)
+        i = i + 1
+    result
+
+fn _utf8_is_continuation(byte: i64) -> bool:
+    byte >= 0x80 and byte <= 0xBF
+
+pub fn validated_utf8_bytes_to_text_linear(data: [u8]) -> Result<text, text>:
+    """Strictly validate UTF-8, then convert the complete byte buffer once.
+
+    Unlike `bytes_to_text`, this owner-level path is lossless and linear: it
+    neither substitutes malformed input nor appends one code point at a time.
+    """
+    var i = 0
+    while i < data.len():
+        val first = data[i].to_i64()
+        if first <= 0x7F:
+            i = i + 1
+        elif first >= 0xC2 and first <= 0xDF:
+            if i + 1 >= data.len():
+                return Err("utf8: truncated two-byte sequence")
+            if not _utf8_is_continuation(data[i + 1].to_i64()):
+                return Err("utf8: malformed two-byte sequence")
+            i = i + 2
+        elif first >= 0xE0 and first <= 0xEF:
+            if i + 2 >= data.len():
+                return Err("utf8: truncated three-byte sequence")
+            val second = data[i + 1].to_i64()
+            val third = data[i + 2].to_i64()
+            if not _utf8_is_continuation(second) or not _utf8_is_continuation(third):
+                return Err("utf8: malformed three-byte sequence")
+            if first == 0xE0:
+                if second < 0xA0:
+                    return Err("utf8: overlong three-byte sequence")
+            elif first == 0xED:
+                if second > 0x9F:
+                    return Err("utf8: surrogate code point")
+            i = i + 3
+        elif first >= 0xF0 and first <= 0xF4:
+            if i + 3 >= data.len():
+                return Err("utf8: truncated four-byte sequence")
+            val second = data[i + 1].to_i64()
+            val third = data[i + 2].to_i64()
+            val fourth = data[i + 3].to_i64()
+            if not _utf8_is_continuation(second) or not _utf8_is_continuation(third) or not _utf8_is_continuation(fourth):
+                return Err("utf8: malformed four-byte sequence")
+            if first == 0xF0:
+                if second < 0x90:
+                    return Err("utf8: overlong four-byte sequence")
+            elif first == 0xF4:
+                if second > 0x8F:
+                    return Err("utf8: code point exceeds U+10FFFF")
+            i = i + 4
+        else:
+            return Err("utf8: invalid leading byte")
+    Ok(rt_bytes_to_text(data))
+
+pub fn text_to_bytes_linear(data: text) -> [u8]:
+    """Copy UTF-8 bytes into one pre-sized buffer."""
+    val raw = data.bytes()
+    var result: [u8] = [0u8; raw.len()]
+    var i = 0
+    while i < raw.len():
+        result[i] = raw[i].to_u8()
+        i = i + 1
+    result

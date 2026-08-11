@@ -1,0 +1,246 @@
+# Generic Markdown renderer for ManualBlock evidence (E5 lane, docgen projection).
+#
+# This module is the sole Markdown renderer for the typed-evidence manual
+# vocabulary defined in model.spl. Providers emit generic ManualBlock records;
+# nothing outside this module turns a block into Markdown, so a custom
+# provider never needs to ship rendering code of its own.
+#
+# It is intentionally pure: text in, text lines out. No file I/O, no process
+# boundary crossing — spipe_docgen calls this module from within its own
+# process rather than shelling out, so a rendering bug is visible in the same
+# test run that exercises the model and comparator.
+#
+# Design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# Guide: doc/07_guide/infra/sspec_typed_evidence.md
+
+use std.common.spec.evidence.model.{
+    ManualBlock, ManualBlockKind, manual_block_kind_name,
+    EvidenceAudience, EvidenceManifest, evidence_manifest_lines
+}
+
+# ---------------------------------------------------------------------------
+# Escaping
+# ---------------------------------------------------------------------------
+
+# A raw `|` inside a table cell would otherwise be read as a new column
+# boundary by any Markdown renderer, letting a captured value forge extra
+# columns or corrupt the row it sits in. Escaping it is the only thing that
+# keeps a pipe table trustworthy when its cell content is untrusted evidence.
+pub fn escape_cell(value: text) -> text:
+    value.replace("|", "\\|")
+
+fn escape_row(cells: [text]) -> text:
+    var out = "|"
+    for cell in cells:
+        out = out + " " + escape_cell(cell) + " |"
+    out
+
+fn header_separator(column_count: i64) -> text:
+    var out = "|"
+    var i = 0
+    while i < column_count:
+        out = out + " --- |"
+        i = i + 1
+    out
+
+# `lines` here are already-assembled rows using " | " as the cell join (the
+# convention `comparison_to_manual_blocks` and other providers use). Splitting
+# on it recovers the individual cells so each one can be escaped on its own —
+# a raw pipe embedded in a captured value must not survive re-assembly as a
+# fresh column.
+fn split_row(line: text) -> [text]:
+    var cells: [text] = []
+    var current = ""
+    var i = 0
+    val n = line.len()
+    while i < n:
+        if i + 3 <= n and line.slice(i, i + 3) == " | ":
+            cells.push(current)
+            current = ""
+            i = i + 3
+        else:
+            current = current + line.slice(i, i + 1)
+            i = i + 1
+    cells.push(current)
+    cells
+
+# Renders `lines` (header row first, data rows after) as a Markdown pipe
+# table. The header separator row is ALWAYS emitted — a pipe table missing it
+# is not valid Markdown and most renderers fall back to printing the raw
+# source lines, which is how evidence silently stops being a table.
+fn render_pipe_table(lines: [text]) -> [text]:
+    if lines.len() == 0:
+        return ["_(no evidence recorded)_"]
+    var out: [text] = []
+    val header_cells = split_row(lines[0])
+    out.push(escape_row(header_cells))
+    out.push(header_separator(header_cells.len()))
+    var i = 1
+    while i < lines.len():
+        out.push(escape_row(split_row(lines[i])))
+        i = i + 1
+    out
+
+# ---------------------------------------------------------------------------
+# Block kinds
+# ---------------------------------------------------------------------------
+
+fn render_paragraph(block: ManualBlock) -> [text]:
+    if block.lines.len() == 0:
+        return ["_(no evidence recorded)_"]
+    block.lines
+
+fn render_action_list(block: ManualBlock) -> [text]:
+    if block.lines.len() == 0:
+        return ["_(no evidence recorded)_"]
+    var out: [text] = []
+    var i = 0
+    while i < block.lines.len():
+        out.push("{i + 1}. " + block.lines[i])
+        i = i + 1
+    out
+
+fn render_code_block(block: ManualBlock, language: text) -> [text]:
+    var out: [text] = []
+    out.push("```" + language)
+    if block.lines.len() == 0:
+        out.push("(no evidence recorded)")
+    else:
+        for line in block.lines:
+            out.push(line)
+    out.push("```")
+    out
+
+fn render_image(block: ManualBlock) -> [text]:
+    if block.lines.len() == 0:
+        return ["_(no evidence recorded)_"]
+    var out: [text] = []
+    for line in block.lines:
+        out.push("![" + block.title + "](" + line + ")")
+    out
+
+fn render_field_tree(block: ManualBlock) -> [text]:
+    if block.lines.len() == 0:
+        return ["_(no evidence recorded)_"]
+    var out: [text] = []
+    for line in block.lines:
+        out.push("- " + line)
+    out
+
+fn render_warning(block: ManualBlock) -> [text]:
+    if block.lines.len() == 0:
+        return ["> _(no evidence recorded)_"]
+    var out: [text] = []
+    for line in block.lines:
+        out.push("> " + line)
+    out
+
+fn render_troubleshooting(block: ManualBlock) -> [text]:
+    render_pipe_table(block.lines)
+
+fn render_artifact_link(block: ManualBlock) -> [text]:
+    if block.lines.len() == 0:
+        return ["_(no evidence recorded)_"]
+    var out: [text] = []
+    for line in block.lines:
+        out.push("[" + block.title + "](" + line + ")")
+    out
+
+# An unhandled or future block kind must never silently disappear from a
+# manual — that is exactly how evidence goes missing without anyone noticing.
+# It renders as a labeled fenced block carrying its raw lines instead.
+fn render_unknown(block: ManualBlock) -> [text]:
+    var out: [text] = []
+    out.push("```" + "unknown-block:" + manual_block_kind_name(block.kind))
+    if block.lines.len() == 0:
+        out.push("(no evidence recorded)")
+    else:
+        for line in block.lines:
+            out.push(line)
+    out.push("```")
+    out
+
+# Renders one block's body lines. Titles are emitted by the caller
+# (`render_blocks`) as a heading, so this only owns the block's content shape.
+pub fn render_block(block: ManualBlock) -> [text]:
+    match block.kind:
+        case ManualBlockKind.paragraph: render_paragraph(block)
+        case ManualBlockKind.action_list: render_action_list(block)
+        case ManualBlockKind.code_block: render_code_block(block, "")
+        case ManualBlockKind.terminal_grid: render_code_block(block, "text")
+        case ManualBlockKind.image: render_image(block)
+        case ManualBlockKind.table: render_pipe_table(block.lines)
+        case ManualBlockKind.field_tree: render_field_tree(block)
+        case ManualBlockKind.byte_table: render_pipe_table(block.lines)
+        case ManualBlockKind.expected_actual: render_pipe_table(block.lines)
+        case ManualBlockKind.warning: render_warning(block)
+        case ManualBlockKind.troubleshooting: render_troubleshooting(block)
+        case ManualBlockKind.artifact_link: render_artifact_link(block)
+        case _: render_unknown(block)
+
+# ---------------------------------------------------------------------------
+# Block list / audience filtering
+# ---------------------------------------------------------------------------
+
+# A user manual must never leak QA-only evidence (raw protocol dumps, byte
+# tables, troubleshooting matrices). Filtering happens here, once, so no
+# individual renderer has to remember the rule.
+fn blocks_for_audience(blocks: [ManualBlock], audience: EvidenceAudience) -> [ManualBlock]:
+    var out: [ManualBlock] = []
+    for block in blocks:
+        if block.audience == audience:
+            out.push(block)
+    out
+
+pub fn render_blocks(blocks: [ManualBlock], audience: EvidenceAudience) -> [text]:
+    val selected = blocks_for_audience(blocks, audience)
+    if selected.len() == 0:
+        return ["_(no evidence recorded)_"]
+    var out: [text] = []
+    var i = 0
+    while i < selected.len():
+        val block = selected[i]
+        if block.title != "":
+            out.push("### " + block.title)
+            out.push("")
+        for line in render_block(block):
+            out.push(line)
+        if i + 1 < selected.len():
+            out.push("")
+        i = i + 1
+    out
+
+# ---------------------------------------------------------------------------
+# Whole-manual rendering
+# ---------------------------------------------------------------------------
+
+# QA gets a provenance appendix built from the evidence manifest so a
+# generated manual is falsifiable: the hashes let a reader tell a current
+# manual from a stale one. The user manual omits it — a customer-facing
+# document should not surface internal run/provider identifiers.
+fn provenance_appendix(manifest: EvidenceManifest) -> [text]:
+    var out: [text] = []
+    out.push("## Provenance")
+    out.push("")
+    for line in evidence_manifest_lines(manifest):
+        out.push("- " + line)
+    out
+
+pub fn render_manual(
+    title: text,
+    blocks: [ManualBlock],
+    audience: EvidenceAudience,
+    manifest: EvidenceManifest
+) -> [text]:
+    var out: [text] = []
+    out.push("# " + title)
+    out.push("")
+    for line in render_blocks(blocks, audience):
+        out.push(line)
+
+    if audience == EvidenceAudience.qa:
+        out.push("")
+        for line in provenance_appendix(manifest):
+            out.push(line)
+
+    out

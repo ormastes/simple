@@ -1,0 +1,47 @@
+# Block manifest — BlockKey digest → CAS blob digest (C5 first slice).
+#
+# Publish is closure-gated like cas_store's result_manifest_put: a mapping is
+# recorded ONLY after the referenced blob already exists in CAS. Lookup is
+# exact-key only; anything else is a miss (false miss OK, false hit forbidden).
+
+use compiler.driver.cache.cas_store.{cas_has}
+
+struct BlockManifestEntry:
+    block_key_digest: text
+    cas_digest: text
+
+struct BlockManifest:
+    entries: [BlockManifestEntry]
+
+fn block_manifest_empty() -> BlockManifest:
+    BlockManifest(entries: [])
+
+# Exact-key lookup. Returns nil on any miss.
+fn block_manifest_get(m: BlockManifest, block_key_digest: text) -> text?:
+    for e in m.entries:
+        if e.block_key_digest == block_key_digest:
+            return e.cas_digest
+    nil
+
+# Publish a mapping only if the blob is already present in CAS at `root`.
+# Returns the updated manifest, or nil when the closure gate refuses.
+fn block_manifest_publish(m: BlockManifest, root: text, block_key_digest: text, cas_digest: text) -> BlockManifest?:
+    if not cas_has(root, cas_digest):
+        return nil
+    var entries: [BlockManifestEntry] = []
+    for e in m.entries:
+        if e.block_key_digest != block_key_digest:
+            entries.push(e)
+    entries.push(BlockManifestEntry(block_key_digest: block_key_digest, cas_digest: cas_digest))
+    BlockManifest(entries: entries)
+
+# Drop a dead key (e.g. after a rename the old key is retired).
+fn block_manifest_retire(m: BlockManifest, block_key_digest: text) -> BlockManifest:
+    var entries: [BlockManifestEntry] = []
+    for e in m.entries:
+        if e.block_key_digest != block_key_digest:
+            entries.push(e)
+    BlockManifest(entries: entries)
+
+export BlockManifestEntry, BlockManifest
+export block_manifest_empty, block_manifest_get, block_manifest_publish, block_manifest_retire

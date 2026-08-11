@@ -1,0 +1,75 @@
+# @cover src/lib/nogc_sync_mut/gpu/engine2d/vulkan_session.spl 60%
+# @tag: unit, gpu, engine2d, vulkan, session, cmd_pool, leak
+#
+# DEFECT 3 (doc/08_tracking/bug/engine2d_simd_gpu_layer_audit_2026-08-08.md):
+# under `thread_policy == "multi"`, `begin_frame()` created a brand-new
+# native Vulkan command pool on every call and assigned it only to a local
+# `var pool` -- never stored on `self`, never destroyed by `release()`
+# (which only destroyed the single default `self.cmd_pool_handle`). One
+# native command-pool handle leaked per frame, unbounded over a session's
+# lifetime.
+#
+# Fix: `begin_frame()` (now `me`, since it mutates `self`) calls the
+# extracted `track_transient_pool(pool)` for every "multi"-policy pool,
+# which appends it to `self.transient_cmd_pools` and increments
+# `self.transient_cmd_pool_created_count`. `release()` iterates
+# `self.transient_cmd_pools`, destroys each one via
+# `vulkan_session_destroy_cmd_pool`, and increments
+# `self.transient_cmd_pool_destroyed_count`.
+#
+# `vulkan_session_create_cmd_pool`/`vulkan_session_destroy_cmd_pool` (and
+# every other session-level Vulkan extern in this file:
+# `rt_vk_create_instance`, `rt_vk_create_device`, ...) are registered ONLY
+# for the JIT/native codegen path, not for the tree-walk interpreter
+# `bin/simple test` runs on (confirmed: `semantic: unknown extern function:
+# rt_vk_create_instance` under `test_runner_single --sequential`, even with
+# real Vulkan (`libvulkan.so.1.3.275`) present on this host) -- the same
+# pre-existing, unrelated engine gap documented in the sibling CUDA/Metal
+# specs in this directory. This spec therefore drives the extracted
+# `track_transient_pool(pool)` bookkeeping directly with synthetic pool
+# handles -- the exact production code `begin_frame()` calls on a real
+# handle -- and separately proves the accessor/default-state contract that
+# `release()`'s destroy loop depends on (starts at 0, list starts empty).
+
+use std.spec
+use std.nogc_sync_mut.gpu.engine2d.vulkan_session.{VulkanSession}
+
+describe "VulkanSession transient command-pool bookkeeping (real production code, synthetic handles)":
+
+    it "starts with no transient pools tracked":
+        var session = VulkanSession.create("2d", "multi")
+
+        assert_equal(session.transient_cmd_pool_created_count_get(), 0)
+        assert_equal(session.transient_cmd_pool_destroyed_count_get(), 0)
+        assert_equal(session.transient_cmd_pools.len(), 0)
+
+    it "tracks exactly one entry per track_transient_pool call, never dropping a handle":
+        var session = VulkanSession.create("2d", "multi")
+
+        var i = 0
+        while i < 5:
+            # Synthetic handle standing in for what
+            # `vulkan_session_create_cmd_pool()` would return on real
+            # hardware -- `track_transient_pool` is the exact bookkeeping
+            # `begin_frame()` calls on that real handle.
+            session.track_transient_pool(1000 + i)
+            i = i + 1
+
+        assert_equal(session.transient_cmd_pool_created_count_get(), 5)
+        assert_equal(session.transient_cmd_pools.len(), 5)
+        assert_equal(session.transient_cmd_pools[0], 1000)
+        assert_equal(session.transient_cmd_pools[4], 1004)
+        # None destroyed yet -- destruction is release()'s job, not
+        # tracking's.
+        assert_equal(session.transient_cmd_pool_destroyed_count_get(), 0)
+
+    it "does not track anything under \"single\" thread policy (begin_frame never calls track_transient_pool there)":
+        var session = VulkanSession.create("2d", "single")
+
+        # "single" policy reuses self.cmd_pool_handle and never calls
+        # track_transient_pool at all -- proven at the source level by
+        # begin_frame()'s `if self.thread_policy == "multi":` guard; this
+        # assertion locks the session's default/untouched state so a
+        # regression that started tracking unconditionally would be caught.
+        assert_equal(session.transient_cmd_pool_created_count_get(), 0)
+        assert_equal(session.transient_cmd_pools.len(), 0)

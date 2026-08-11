@@ -1,0 +1,72 @@
+use std.io_runtime.{file_delete, getpid, time_now_unix_micros}
+use std.spec.{describe, it, expect}
+use nogc_sync_mut.database.pure_sql.database.{PureDatabase}
+
+# Regression coverage for the value-type write-back audit
+# (doc/08_tracking/bug/value_type_writeback_family_audit_2026-08-09.md).
+# `_do_update` copies the MvccTable out of `self._tbl_data[ti]`, mutates it, and
+# relies on a write-back. If that write-back is lost, the UPDATE is silently
+# dropped and a read-back still returns the OLD value. Every oracle below picks
+# new values that differ from the old ones, so a lost write is visibly distinct
+# from a kept one.
+
+fn _tmp_path(tag: text) -> text:
+    "/tmp/simple_puresql_upd_" + tag + "_" + getpid().to_text() + "_" + time_now_unix_micros().to_text() + ".sdb"
+
+describe "PureDatabase UPDATE then read-back":
+    it "reflects an UPDATE through the primary-key fast path":
+        val path = _tmp_path("pk")
+        file_delete(path)
+        var db = PureDatabase.open(path).unwrap()
+        db.exec_sql("CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER)").unwrap()
+        db.exec_sql("INSERT INTO t (id, n) VALUES (1, 10)").unwrap()
+        db.exec_sql("INSERT INTO t (id, n) VALUES (2, 20)").unwrap()
+        db.exec_sql("UPDATE t SET n = 777 WHERE id = 1").unwrap()
+        val rows = db.query("SELECT n FROM t WHERE id = 1", []).unwrap()
+        expect(rows.len()).to_equal(1)
+        expect(rows[0].values[0].to_text()).to_equal("777")
+        # the untouched row must keep its own value
+        val other = db.query("SELECT n FROM t WHERE id = 2", []).unwrap()
+        expect(other.len()).to_equal(1)
+        expect(other[0].values[0].to_text()).to_equal("20")
+        # the old value must be gone entirely, not merely shadowed
+        val stale = db.query("SELECT n FROM t WHERE n = 10", []).unwrap()
+        expect(stale.len()).to_equal(0)
+        # row count is unchanged by an UPDATE
+        val all = db.query("SELECT n FROM t", []).unwrap()
+        expect(all.len()).to_equal(2)
+        db.close().unwrap()
+        file_delete(path)
+
+    it "reflects an UPDATE through the general non-primary-key path":
+        val path = _tmp_path("gen")
+        file_delete(path)
+        var db = PureDatabase.open(path).unwrap()
+        db.exec_sql("CREATE TABLE t (id INTEGER, n INTEGER)").unwrap()
+        db.exec_sql("INSERT INTO t (id, n) VALUES (1, 10)").unwrap()
+        db.exec_sql("INSERT INTO t (id, n) VALUES (2, 20)").unwrap()
+        db.exec_sql("UPDATE t SET n = 555 WHERE n = 10").unwrap()
+        val rows = db.query("SELECT n FROM t WHERE id = 1", []).unwrap()
+        expect(rows.len()).to_equal(1)
+        expect(rows[0].values[0].to_text()).to_equal("555")
+        val stale = db.query("SELECT n FROM t WHERE n = 10", []).unwrap()
+        expect(stale.len()).to_equal(0)
+        val all = db.query("SELECT n FROM t", []).unwrap()
+        expect(all.len()).to_equal(2)
+        db.close().unwrap()
+        file_delete(path)
+
+    it "keeps an UPDATE visible after reopening the database":
+        val path = _tmp_path("persist")
+        file_delete(path)
+        var db = PureDatabase.open(path).unwrap()
+        db.exec_sql("CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER)").unwrap()
+        db.exec_sql("INSERT INTO t (id, n) VALUES (1, 10)").unwrap()
+        db.exec_sql("UPDATE t SET n = 999 WHERE id = 1").unwrap()
+        db.close().unwrap()
+        var db2 = PureDatabase.open(path).unwrap()
+        val rows = db2.query("SELECT n FROM t WHERE id = 1", []).unwrap()
+        expect(rows.len()).to_equal(1)
+        expect(rows[0].values[0].to_text()).to_equal("999")
+        db2.close().unwrap()
+        file_delete(path)

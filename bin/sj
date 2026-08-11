@@ -1,0 +1,47 @@
+#!/bin/sh
+set -eu
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_ROOT=$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)
+runtime=""
+runtime_usable() {
+  candidate="$1"
+  [ -n "${candidate}" ] || return 1
+  [ -x "${candidate}" ] || return 1
+  "${candidate}" --version >/dev/null 2>&1 || return 1
+  # TODO(sj-runtime): temp fix — revert the run-probe below and the dated
+  # backup candidate at the end of the list once bin/simple is redeployed
+  # with a working `run` subcommand (broken deploy of 2026-07-31).
+  # sj needs the `run` subcommand; a broken deploy can answer --version yet
+  # lack `run` AND exit 0 on the error, so probe by output, not exit code.
+  probe=$(timeout 30 "${candidate}" run 2>&1) || true
+  case "${probe}" in
+    *"unknown command"*) return 1 ;;
+  esac
+}
+
+for candidate in \
+  "${SIMPLE_BINARY:-}" \
+  "${REPO_ROOT}/bin/simple" \
+  "${REPO_ROOT}/bin/release/simple" \
+  "${REPO_ROOT}/bin/release/x86_64-unknown-linux-gnu/simple" \
+  "${REPO_ROOT}/bin/release/linux-x86_64/simple" \
+  "${REPO_ROOT}/bin/release/x86_64-unknown-linux-gnu/simple.pre-segv-fix-20260731"
+do
+  if runtime_usable "${candidate}"; then
+    runtime="${candidate}"
+    break
+  fi
+done
+if [ -z "${runtime}" ]; then
+  {
+    printf '%s\n' "error: no Simple runtime found for sj"
+    printf '%s\n' "checked:"
+    printf '%s\n' "  SIMPLE_BINARY"
+    printf '%s\n' "  ${REPO_ROOT}/bin/simple"
+    printf '%s\n' "  ${REPO_ROOT}/bin/release/simple"
+    printf '%s\n' "  ${REPO_ROOT}/bin/release/x86_64-unknown-linux-gnu/simple"
+    printf '%s\n' "  ${REPO_ROOT}/bin/release/linux-x86_64/simple"
+  } >&2
+  exit 127
+fi
+exec "${runtime}" run "${REPO_ROOT}/src/app/sj/main.spl" "$@"

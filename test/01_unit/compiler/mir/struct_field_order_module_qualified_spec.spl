@@ -1,0 +1,140 @@
+"""
+# struct_field_order Module-Qualified Keys Specification
+
+**Category:** Compiler / MIR
+**Status:** Implemented
+
+## Overview
+
+Regression spec for the stage3 borrow-checker field-index-collision SIGSEGV
+(2026-08-07): `resolve_field_index` read `NLLChecker.errors` at
+`MirLowering.errors`' offset because (1) `field_map` is keyed by per-module
+numeric SymbolIds that collide across modules of an entry-closure build, and
+(2) `struct_field_order` bare names are duplicated ~1,500x across
+src/{compiler,lib,app} with silent overwrite on re-registration.
+
+Verifies the durable fix:
+- module-qualified '<defining_module>::<Name>' keys (composite_layout_key)
+  keep each same-named class's own field order;
+- `resolve_field_index` consults the qualified tier BEFORE the id-keyed
+  `field_map` tier, so a collided field_map hit can no longer win;
+- a bare-name re-registration with a DIFFERENT field list fires a one-shot
+  diagnostic (identical re-registration stays silent).
+"""
+
+use std.spec.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_types.{LocalId}
+use compiler.hir.hir_definitions.{HirField, HirExpr, HirExprKind}
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, HirSymbol, SymbolId, SymbolKind, SymbolTable, ScopeId}
+use compiler.core.lexer_types.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+
+fn empty_span() -> Span:
+    Span(start: 0, end_pos: 0, line: 1, col: 1)
+
+fn make_hir_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: empty_span())
+
+fn dummy_expr() -> HirExpr:
+    HirExpr(
+        kind: HirExprKind.UnitLit,
+        has_type_: false,
+        type_: make_hir_type(HirTypeKind.Unit),
+        span: empty_span()
+    )
+
+fn make_field(name: text) -> HirField:
+    HirField(
+        symbol: SymbolId(id: 0),
+        name: name,
+        type_: make_hir_type(HirTypeKind.Int(64, true)),
+        has_default: false,
+        default: dummy_expr(),
+        is_public: true,
+        is_volatile: false,
+        has_bits_attr: false,
+        bits_width: 0,
+        has_fixed_address: false,
+        fixed_address: 0,
+        span: empty_span()
+    )
+
+# mod_a's Config: `errors` lives at index 2.
+fn fields_mod_a() -> [HirField]:
+    [make_field("alpha"), make_field("beta"), make_field("errors")]
+
+# mod_b's Config: `errors` lives at index 0 — the collision shape.
+fn fields_mod_b() -> [HirField]:
+    [make_field("errors"), make_field("gamma")]
+
+describe "struct_field_order module-qualified keys (stage3 field-index collision)":
+    it "keeps each same-named class's own field order under qualified keys":
+        val symbols = SymbolTable.new()
+        var lowering = MirLowering.new(symbols)
+        # Simulate the cross-module prescan: mod_a registers first (bare name
+        # first-wins), mod_b's bare registration is dropped, but BOTH land
+        # under their qualified keys.
+        lowering.register_composite_field_metadata("Config", fields_mod_a(), symbols, false)
+        lowering.register_composite_field_metadata("mod_a::Config", fields_mod_a(), symbols, false)
+        lowering.register_composite_field_metadata("Config", fields_mod_b(), symbols, false)
+        lowering.register_composite_field_metadata("mod_b::Config", fields_mod_b(), symbols, false)
+        val a_fields = lowering.struct_field_order["mod_a::Config"]
+        val b_fields = lowering.struct_field_order["mod_b::Config"]
+        expect(a_fields.len()).to_equal(3)
+        expect(b_fields.len()).to_equal(2)
+        expect(a_fields[2]).to_equal("errors")
+        expect(b_fields[0]).to_equal("errors")
+
+    it "fires the conflict diagnostic once on a differing bare-name re-registration":
+        val symbols = SymbolTable.new()
+        var lowering = MirLowering.new(symbols)
+        lowering.register_composite_field_metadata("Config", fields_mod_a(), symbols, false)
+        expect(lowering.struct_field_order_conflict_warned.contains("Config")).to_equal(false)
+        # Identical re-registration stays silent.
+        lowering.register_composite_field_metadata("Config", fields_mod_a(), symbols, true)
+        expect(lowering.struct_field_order_conflict_warned.contains("Config")).to_equal(false)
+        # Differing field list: diagnostic fires (warn-once bookkeeping set).
+        lowering.register_composite_field_metadata("Config", fields_mod_b(), symbols, true)
+        expect(lowering.struct_field_order_conflict_warned.contains("Config")).to_equal(true)
+        # Qualified keys are exempt from the diagnostic.
+        lowering.register_composite_field_metadata("mod_c::Config", fields_mod_a(), symbols, false)
+        lowering.register_composite_field_metadata("mod_c::Config", fields_mod_b(), symbols, true)
+        expect(lowering.struct_field_order_conflict_warned.contains("mod_c::Config")).to_equal(false)
+
+    it "qualifies composite_layout_key by defining module":
+        val symbols = SymbolTable.new()
+        var lowering = MirLowering.new(symbols)
+        val qualified_sym = HirSymbol(
+            id: SymbolId(id: 7), name: "Config", kind: SymbolKind.Class,
+            type_: nil, scope: ScopeId(id: 0), span: empty_span(),
+            visibility: Visibility.Public, is_public: true, is_mutable: false,
+            defining_module: Some("mod_a"))
+        expect(lowering.composite_layout_key(qualified_sym)).to_equal("mod_a::Config")
+        val bare_sym = HirSymbol(
+            id: SymbolId(id: 8), name: "Config", kind: SymbolKind.Class,
+            type_: nil, scope: ScopeId(id: 0), span: empty_span(),
+            visibility: Visibility.Public, is_public: true, is_mutable: false,
+            defining_module: nil)
+        expect(lowering.composite_layout_key(bare_sym)).to_equal("Config")
+
+    it "resolve_field_index prefers the qualified tier over a collided field_map hit":
+        var symbols = SymbolTable.new()
+        val sym_a = symbols.define("Config", SymbolKind.Class, nil, empty_span(), Visibility.Public, false, Some("mod_a"))
+        var lowering = MirLowering.new(symbols)
+        lowering.register_composite_field_metadata("Config", fields_mod_a(), symbols, false)
+        lowering.register_composite_field_metadata("mod_a::Config", fields_mod_a(), symbols, false)
+        # Poison field_map at mod_a's SymbolId with ANOTHER module's class
+        # layout (the entry-closure SymbolId collision): `errors` at index 0
+        # there, but at index 2 in the real mod_a Config. Before the fix,
+        # this collided id-keyed hit was consulted first and returned 0.
+        var fm = lowering.field_map
+        fm[sym_a.id] = ["errors", "gamma"]
+        lowering.field_map = fm
+        val base = HirExpr(
+            kind: HirExprKind.UnitLit,
+            has_type_: true,
+            type_: make_hir_type(HirTypeKind.Named(sym_a, [])),
+            span: empty_span())
+        val idx = lowering.resolve_field_index(base, LocalId(id: 999), "errors", nil)
+        expect(idx).to_equal(2)

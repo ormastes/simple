@@ -1,0 +1,264 @@
+# @tag: unit, crypto, x25519mlkem768, gpu, qualification
+# @req REQ-007 REQ-010 REQ-011 REQ-012 NFR-010 NFR-011
+
+use std.spec.{describe, it, expect, step}
+use std.common.crypto.sha256.{sha256_text}
+use test.helpers.x25519mlkem768_performance_fixture.{
+    x25519_mlkem768_synthetic_measurement_qualification}
+use lib.common.crypto.x25519_mlkem768.contract.{
+    X25519MlKem768Backend, X25519MlKem768SelectionMode,
+    X25519MlKem768VerificationPolicy, X25519MlKem768Evidence,
+    x25519_mlkem768_default_config}
+use lib.common.crypto.x25519_mlkem768.evidence_contract.{
+    X25519MlKem768EvidenceBackend}
+use lib.common.crypto.x25519_mlkem768.measurement_qualification.{
+    X25519MlKem768MeasurementQualification,
+    x25519_mlkem768_measurement_qualification_sha256}
+use os.crypto.x25519_mlkem768.gpu_measurement_qualification.{
+    x25519_mlkem768_qualified_gpu_measurement_reason}
+use os.crypto.x25519_mlkem768.gpu_lifecycle_snapshot.{
+    X25519MlKem768GpuLifecycleDelta}
+use os.crypto.x25519_mlkem768.gpu_build_admission.{
+    X25519MlKem768GpuBuildAdmission,
+    x25519_mlkem768_gpu_build_admission_sha256}
+
+fn _gpu_backend(backend: X25519MlKem768EvidenceBackend
+        ) -> X25519MlKem768Backend:
+    if backend == X25519MlKem768EvidenceBackend.Cuda:
+        return X25519MlKem768Backend.Cuda
+    if backend == X25519MlKem768EvidenceBackend.Vulkan:
+        return X25519MlKem768Backend.Vulkan
+    X25519MlKem768Backend.Metal
+
+fn _gpu_admission(backend: X25519MlKem768EvidenceBackend
+        ) -> X25519MlKem768GpuBuildAdmission:
+    val cuda_binary =
+        "562bfee3e9cd630425a69a5b27a0cc6661f0a00609a85078ef376565fb5b7711"
+    val vulkan_forward =
+        "0865f588f0825a3ff66a1d5e2cd2a9d0c356bb75b4fceaaf5c2196ffa05f6379"
+    val vulkan_inverse =
+        "07a11b541ef204a4fb6c907338dafc99bdf870d2046edcfad02a3d42dcca2687"
+    val vulkan = backend == X25519MlKem768EvidenceBackend.Vulkan
+    val metal = backend == X25519MlKem768EvidenceBackend.Metal
+    X25519MlKem768GpuBuildAdmission(
+        backend: backend, runner_artifact_sha256: "1" * 64,
+        backend_artifact_sha256: if vulkan:
+            sha256_text("forward=" + vulkan_forward +
+                ";inverse=" + vulkan_inverse)
+        elif metal: "4" * 64
+        else: cuda_binary,
+        accelerator_source_sha256: if vulkan:
+            "f29443943a381012f34e26a7ab2ac44bee51338d78662109c47e0182aa1fc668"
+        elif metal:
+            "e49162b2ab056ef12ca2c4f15c942fa99b4f231b45cf251f4a78dadcd22172b5"
+        else:
+            "e3201ae10f48e284d703cff81d42a02d9ba7f96e4bcc9b03872094b25a5a26aa",
+        accelerator_binary_sha256: if vulkan: vulkan_forward
+            elif metal: "4" * 64 else: cuda_binary,
+        accelerator_source_aux_sha256: if vulkan:
+            "b1e5a9ed87e4331abb5ac7ab906418aa9e4c927d2e284174990110318382e09c"
+            else: "",
+        accelerator_binary_aux_sha256: if vulkan: vulkan_inverse else: "",
+        build_toolchain: if vulkan:
+            "glslangValidator-sha256:96ea85d4228d7065507cd58454628e0d3c9ec8bbd29a0cd20ee0f3cefaf6d026" +
+            "+spirv-val-sha256:20c5998a46f02310f56bf11be238c34d374bb50104b7ccf85bb909f9da883ff9"
+        elif metal: "Apple Metal compiler"
+        else: "CUDA ptxas 13.0 V13.0.88",
+        device_capability: if vulkan: "vulkan1.1"
+            elif metal: "metal3" else: "8.6",
+        device_name: if vulkan: "NVIDIA TITAN RTX"
+            elif metal: "Apple GPU" else: "NVIDIA RTX A6000",
+        live_device_identity: if vulkan:
+            "NVIDIA TITAN RTX|vendor=000010de|device=00001d74|" +
+                "driver=03753fc8|api=00403000"
+        elif metal: "metal-device:Apple GPU"
+        else: "cuda-device-identity:42",
+        live_device_identity_tag: 42,
+        executor_cache_identity_sha256: "9" * 64)
+
+fn _gpu_identity(admission: X25519MlKem768GpuBuildAdmission) -> text:
+    if admission.backend == X25519MlKem768EvidenceBackend.Cuda:
+        return "cuda-device:" + admission.live_device_identity_tag.to_text() +
+            ":cubin:" + admission.backend_artifact_sha256 + ":cache:" +
+            admission.executor_cache_identity_sha256
+    if admission.backend == X25519MlKem768EvidenceBackend.Vulkan:
+        return "vulkan-device:" + admission.live_device_identity_tag.to_text() +
+            ":spirv-set:" + admission.backend_artifact_sha256 + ":cache:" +
+            admission.executor_cache_identity_sha256
+    "metal-device:Apple GPU:metallib:" + admission.backend_artifact_sha256
+
+fn _gpu_qualification(backend: X25519MlKem768EvidenceBackend
+        ) -> X25519MlKem768MeasurementQualification:
+    var qualification =
+        x25519_mlkem768_synthetic_measurement_qualification(backend)
+    var admission = _gpu_admission(backend)
+    var target = qualification.target
+    admission.runner_artifact_sha256 = target.runner_artifact_sha256
+    target.backend_artifact_sha256 = admission.backend_artifact_sha256
+    target.executor_identity = _gpu_identity(admission)
+    target.accelerator_build_binding_sha256 =
+        x25519_mlkem768_gpu_build_admission_sha256(admission)
+    qualification.target = target
+    qualification.qualification_sha256 =
+        x25519_mlkem768_measurement_qualification_sha256(qualification)
+    qualification
+
+fn _gpu_admission_for(
+        qualification: X25519MlKem768MeasurementQualification
+        ) -> X25519MlKem768GpuBuildAdmission:
+    var admission = _gpu_admission(qualification.target.backend)
+    admission.runner_artifact_sha256 =
+        qualification.target.runner_artifact_sha256
+    admission
+
+fn _gpu_reason(qualification: X25519MlKem768MeasurementQualification,
+        config, evidence: X25519MlKem768Evidence,
+        delta: X25519MlKem768GpuLifecycleDelta) -> text:
+    x25519_mlkem768_qualified_gpu_measurement_reason(
+        qualification, config, _gpu_admission_for(qualification),
+        evidence, delta)
+
+fn _gpu_config(qualification: X25519MlKem768MeasurementQualification):
+    var config = x25519_mlkem768_default_config()
+    config.requested_backend = _gpu_backend(qualification.target.backend)
+    config.selection_mode = X25519MlKem768SelectionMode.Require
+    config.verification_policy =
+        X25519MlKem768VerificationPolicy.AbsoluteAndScalar
+    config.implementation_version = qualification.implementation_version
+    config.profile_version = qualification.profile_version
+    config.minimum_batch = 1
+    config.batch_size = qualification.batch_size
+    config
+
+fn _gpu_evidence(qualification: X25519MlKem768MeasurementQualification
+        ) -> X25519MlKem768Evidence:
+    val selected = _gpu_backend(qualification.target.backend)
+    X25519MlKem768Evidence(
+        requested_backend: selected, selected_backend: selected,
+        attempts: [], fallback_used: false, fallback_reason: "",
+        implementation_version: qualification.implementation_version,
+        profile_version: qualification.profile_version,
+        configuration_digest:
+            qualification.target.candidate_configuration_sha256,
+        input_fixture_digest: qualification.target.fixture_source_sha256,
+        source_digest: "3" * 64,
+        artifact_digest: qualification.target.backend_artifact_sha256,
+        execution_proof_digest: qualification.target.backend_artifact_sha256,
+        kernel_invocations: 3, simd_chunk_hits: 0,
+        observed_rvv_vlen_bits: 0, operation: "batch-round-trip",
+        batch_size: qualification.batch_size, output_digest: "7" * 64,
+        executor_identity: qualification.target.executor_identity,
+        compiled: true, submitted: true, fence_completed: true,
+        device_readback: true, oracle_match: true)
+
+fn _gpu_delta() -> X25519MlKem768GpuLifecycleDelta:
+    X25519MlKem768GpuLifecycleDelta(
+        transfer_count: 3, launch_count: 3,
+        synchronization_count: 3, readback_count: 3, kernel_count: 3)
+
+describe "X25519MLKEM768 fail-closed GPU measurement qualification":
+    it "admits exact CUDA and Vulkan rows and keeps Metal blocked":
+        step("Bind qualification execution lifecycle and canonical build tuple")
+        for backend in [X25519MlKem768EvidenceBackend.Cuda,
+                X25519MlKem768EvidenceBackend.Vulkan]:
+            val qualification = _gpu_qualification(backend)
+            expect(_gpu_reason(
+                qualification, _gpu_config(qualification),
+                _gpu_evidence(qualification), _gpu_delta())).to_equal("")
+        val metal = _gpu_qualification(X25519MlKem768EvidenceBackend.Metal)
+        expect(_gpu_reason(metal, _gpu_config(metal),
+            _gpu_evidence(metal), _gpu_delta())).to_equal(
+            "gpu-build-metal-metallib-and-live-identity-not-pinned")
+
+    it "rejects invalid qualification policy version and batch first":
+        val qualification = _gpu_qualification(
+            X25519MlKem768EvidenceBackend.Cuda)
+        val evidence = _gpu_evidence(qualification)
+        var invalid = qualification
+        invalid.qualification_sha256 = "0" * 64
+        expect(_gpu_reason(
+            invalid, _gpu_config(qualification), evidence,
+            _gpu_delta())).to_equal("gpu-measurement-qualification-invalid")
+
+        var suggest = _gpu_config(qualification)
+        suggest.selection_mode = X25519MlKem768SelectionMode.Suggest
+        expect(_gpu_reason(
+            qualification, suggest, evidence, _gpu_delta())).to_equal(
+            "gpu-measurement-config-policy-mismatch")
+
+        var wrong_version = _gpu_config(qualification)
+        wrong_version.profile_version = "wrong"
+        expect(_gpu_reason(
+            qualification, wrong_version, evidence, _gpu_delta())).to_equal(
+            "gpu-measurement-config-version-mismatch")
+
+        var bad_batch = _gpu_config(qualification)
+        bad_batch.minimum_batch = bad_batch.batch_size + 1
+        expect(_gpu_reason(
+            qualification, bad_batch, evidence, _gpu_delta())).to_equal(
+            "gpu-measurement-config-batch-mismatch")
+
+    it "rejects execution substitution fallback and lifecycle gaps":
+        val qualification = _gpu_qualification(
+            X25519MlKem768EvidenceBackend.Cuda)
+        val config = _gpu_config(qualification)
+        val evidence = _gpu_evidence(qualification)
+
+        var wrong_backend = evidence
+        wrong_backend.selected_backend = X25519MlKem768Backend.Vulkan
+        expect(_gpu_reason(
+            qualification, config, wrong_backend, _gpu_delta())).to_equal(
+            "gpu-measurement-executed-backend-mismatch")
+
+        var wrong_artifact = evidence
+        wrong_artifact.artifact_digest = "8" * 64
+        expect(_gpu_reason(
+            qualification, config, wrong_artifact, _gpu_delta())).to_equal(
+            "gpu-measurement-execution-binding-mismatch")
+
+        var wrong_device = evidence
+        wrong_device.executor_identity = "cuda-device:99"
+        expect(_gpu_reason(
+            qualification, config, wrong_device, _gpu_delta())).to_equal(
+            "gpu-measurement-device-identity-mismatch")
+
+        var fallback = evidence
+        fallback.fallback_used = true
+        expect(_gpu_reason(
+            qualification, config, fallback, _gpu_delta())).to_equal(
+            "gpu-measurement-fallback-or-oracle-mismatch")
+
+        var incomplete = evidence
+        incomplete.device_readback = false
+        expect(_gpu_reason(
+            qualification, config, incomplete, _gpu_delta())).to_equal(
+            "gpu-measurement-device-lifecycle-incomplete")
+
+        var invalid_delta = _gpu_delta()
+        invalid_delta.readback_count = 2
+        expect(_gpu_reason(
+            qualification, config, evidence, invalid_delta)).to_equal(
+            "gpu-measurement-lifecycle-delta-invalid")
+
+        var wrong_count = evidence
+        wrong_count.kernel_invocations = 4
+        expect(_gpu_reason(
+            qualification, config, wrong_count, _gpu_delta())).to_equal(
+            "gpu-measurement-kernel-count-mismatch")
+
+    it "rejects forged cross-runner and cross-device build admissions":
+        val qualification = _gpu_qualification(
+            X25519MlKem768EvidenceBackend.Cuda)
+        val config = _gpu_config(qualification)
+        val evidence = _gpu_evidence(qualification)
+        var runner = _gpu_admission_for(qualification)
+        runner.runner_artifact_sha256 = "2" * 64
+        expect(x25519_mlkem768_qualified_gpu_measurement_reason(
+            qualification, config, runner, evidence, _gpu_delta())).to_equal(
+            "gpu-build-qualification-runner-artifact-mismatch")
+        var device = _gpu_admission_for(qualification)
+        device.live_device_identity_tag = 99
+        device.live_device_identity = "cuda-device-identity:99"
+        expect(x25519_mlkem768_qualified_gpu_measurement_reason(
+            qualification, config, device, evidence, _gpu_delta())).to_equal(
+            "gpu-build-qualification-stable-executor-identity-mismatch")

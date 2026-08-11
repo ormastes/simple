@@ -1,0 +1,270 @@
+# ARM32 + RV32 Lowering Hooks — Fallback Tests
+#
+# Feature ID: #COMPILER-BACKEND-ARM32-RV32-LOWERING
+# Category:   Compiler | Backend | ARM32 + RV32 Lowering
+# Status:     Active
+#
+# Tests Task 5: conservative feature tables for ARM32/RV32 and their lowering
+# decision predicates. Verifies fallback paths for unsupported features.
+#
+# Interpreter-mode note: assertions not executed in interpreter mode.
+
+use compiler.backend.feature_caps.{ArmCaps, Rv32Caps, TargetIdiom}
+use compiler.backend.feature_caps.{arm_caps_from_target, rv32_caps_from_target}
+use compiler.backend.lowering.intrinsic_lowering_arm32.{
+    arm32_can_lower_natively,
+    arm32_needs_software_fallback,
+    arm32_permanently_unavailable,
+    arm32_needs_neon,
+    arm32_needs_aes,
+    arm32_needs_sha2,
+    Arm32LoweringDecision,
+    arm32_lowering_decision,
+    arm32_clz_available,
+    arm32_rbit_available,
+    arm32_rev_available,
+    arm32_rotate_left_via_ror,
+    rv32_popcount_native,
+    rv32_ctz_native,
+    rv32_clz_native,
+    rv32_bswap_native,
+    rv32_bitrev_native,
+    rv32_rotate_native,
+    rv32_aes_enc_native,
+    rv32_aes_dec_native,
+    rv32_sha256_native,
+    Rv32LoweringDecision,
+    rv32_lowering_decision
+}
+
+# ============================================================================
+# arm32_permanently_unavailable — architecture-level limits
+# ============================================================================
+
+describe "ARM32 lowering — permanently unavailable idioms":
+    it "Sha512Rounds2 is permanently unavailable on ARM32":
+        expect(arm32_permanently_unavailable(TargetIdiom.Sha512Rounds2)).to_equal(true)
+
+    it "Sha512Msg1 is permanently unavailable on ARM32":
+        expect(arm32_permanently_unavailable(TargetIdiom.Sha512Msg1)).to_equal(true)
+
+    it "Sha512Msg2 is permanently unavailable on ARM32":
+        expect(arm32_permanently_unavailable(TargetIdiom.Sha512Msg2)).to_equal(true)
+
+    it "SimdI32x8 is permanently unavailable on ARM32":
+        expect(arm32_permanently_unavailable(TargetIdiom.SimdI32x8)).to_equal(true)
+
+    it "SimdF32x8 is permanently unavailable on ARM32":
+        expect(arm32_permanently_unavailable(TargetIdiom.SimdF32x8)).to_equal(true)
+
+    it "Crc32U64 is permanently unavailable on ARM32":
+        expect(arm32_permanently_unavailable(TargetIdiom.Crc32U64)).to_equal(true)
+
+    it "ClmulLo is permanently unavailable on ARM32":
+        expect(arm32_permanently_unavailable(TargetIdiom.ClmulLo)).to_equal(true)
+
+    it "ClmulHi is permanently unavailable on ARM32":
+        expect(arm32_permanently_unavailable(TargetIdiom.ClmulHi)).to_equal(true)
+
+    it "RotateLeft is NOT permanently unavailable":
+        expect(arm32_permanently_unavailable(TargetIdiom.RotateLeft)).to_equal(false)
+
+    it "AesEnc is NOT permanently unavailable (optional extension exists)":
+        expect(arm32_permanently_unavailable(TargetIdiom.AesEnc)).to_equal(false)
+
+    it "SimdI32x4 is NOT permanently unavailable (NEON provides it)":
+        expect(arm32_permanently_unavailable(TargetIdiom.SimdI32x4)).to_equal(false)
+
+# ============================================================================
+# arm32_lowering_decision — Cortex-M0 (baseline, no NEON, no crypto)
+# ============================================================================
+
+describe "ARM32 lowering — Cortex-M0 baseline decisions":
+    it "RotateLeft is lowered natively on Cortex-M0":
+        val caps = arm_caps_from_target("thumbv6m-none-eabi")
+        val d = arm32_lowering_decision(caps, TargetIdiom.RotateLeft)
+        expect(d.lowered).to_equal(true)
+        expect(d.fallback).to_equal(false)
+
+    it "ByteSwap is lowered natively on Cortex-M0 (REV instruction)":
+        val caps = arm_caps_from_target("thumbv6m-none-eabi")
+        val d = arm32_lowering_decision(caps, TargetIdiom.ByteSwap)
+        expect(d.lowered).to_equal(true)
+
+    it "AesEnc falls back on Cortex-M0 (no AES extension)":
+        val caps = arm_caps_from_target("thumbv6m-none-eabi")
+        val d = arm32_lowering_decision(caps, TargetIdiom.AesEnc)
+        expect(d.lowered).to_equal(false)
+        expect(d.fallback).to_equal(true)
+        expect(d.reason.len()).to_be_greater_than(0)
+
+    it "SimdI32x4 falls back on Cortex-M0 (no NEON)":
+        val caps = arm_caps_from_target("thumbv6m-none-eabi")
+        val d = arm32_lowering_decision(caps, TargetIdiom.SimdI32x4)
+        expect(d.lowered).to_equal(false)
+        expect(d.fallback).to_equal(true)
+
+    it "Sha512Rounds2 falls back with permanent unavailability reason":
+        val caps = arm_caps_from_target("thumbv6m-none-eabi")
+        val d = arm32_lowering_decision(caps, TargetIdiom.Sha512Rounds2)
+        expect(d.lowered).to_equal(false)
+        expect(d.fallback).to_equal(true)
+
+# ============================================================================
+# arm32_lowering_decision — neon+crypto triple
+# ============================================================================
+
+describe "ARM32 lowering — neon+crypto triple decisions":
+    it "AesEnc is lowered natively with AES extension":
+        val caps = arm_caps_from_target("armv8-neon-crypto")
+        val d = arm32_lowering_decision(caps, TargetIdiom.AesEnc)
+        expect(d.lowered).to_equal(true)
+        expect(d.fallback).to_equal(false)
+
+    it "Sha256Rounds2 is lowered natively with SHA2 extension":
+        val caps = arm_caps_from_target("armv8-neon-crypto")
+        val d = arm32_lowering_decision(caps, TargetIdiom.Sha256Rounds2)
+        expect(d.lowered).to_equal(true)
+
+    it "SimdI32x4 is lowered natively with NEON":
+        val caps = arm_caps_from_target("armv8-neon-crypto")
+        val d = arm32_lowering_decision(caps, TargetIdiom.SimdI32x4)
+        expect(d.lowered).to_equal(true)
+
+    it "Sha512Rounds2 still falls back even with full crypto (permanent limit)":
+        val caps = arm_caps_from_target("armv8-neon-crypto")
+        val d = arm32_lowering_decision(caps, TargetIdiom.Sha512Rounds2)
+        expect(d.lowered).to_equal(false)
+        expect(d.fallback).to_equal(true)
+
+    it "SimdI32x8 still falls back (no 256-bit NEON on ARM32)":
+        val caps = arm_caps_from_target("armv8-neon-crypto")
+        val d = arm32_lowering_decision(caps, TargetIdiom.SimdI32x8)
+        expect(d.lowered).to_equal(false)
+        expect(d.fallback).to_equal(true)
+
+# ============================================================================
+# ARM32 scalar narrow-form helpers
+# ============================================================================
+
+describe "ARM32 lowering — scalar narrow-form helpers":
+    it "CLZ is always available":
+        expect(arm32_clz_available()).to_equal(true)
+
+    it "RBIT is always available (ARMv6T2+)":
+        expect(arm32_rbit_available()).to_equal(true)
+
+    it "REV is always available (ARMv6+)":
+        expect(arm32_rev_available()).to_equal(true)
+
+    it "ROL 1 via ROR is 31 (32 - 1)":
+        expect(arm32_rotate_left_via_ror(1)).to_equal(31)
+
+    it "ROL 8 via ROR is 24 (32 - 8)":
+        expect(arm32_rotate_left_via_ror(8)).to_equal(24)
+
+    it "ROL 32 via ROR is 0 (identity)":
+        expect(arm32_rotate_left_via_ror(32)).to_equal(0)
+
+# ============================================================================
+# RV32 scalar narrow-form hooks
+# ============================================================================
+
+describe "RV32 lowering — scalar narrow-form hooks":
+    it "rv32 without Zbb has no native popcount":
+        val caps = rv32_caps_from_target("riscv32imac")
+        expect(rv32_popcount_native(caps)).to_equal(false)
+
+    it "rv32 with Zbb has native popcount":
+        val caps = rv32_caps_from_target("riscv32imac_zbb")
+        expect(rv32_popcount_native(caps)).to_equal(true)
+
+    it "rv32 with Zbb has native CLZ":
+        val caps = rv32_caps_from_target("riscv32imac_zbb")
+        expect(rv32_clz_native(caps)).to_equal(true)
+
+    it "rv32 with Zbb has native CTZ":
+        val caps = rv32_caps_from_target("riscv32imac_zbb")
+        expect(rv32_ctz_native(caps)).to_equal(true)
+
+    it "rv32 with Zbb has native byte-swap":
+        val caps = rv32_caps_from_target("riscv32imac_zbb")
+        expect(rv32_bswap_native(caps)).to_equal(true)
+
+    it "rv32 with Zbb but not Zbkb does not have native bit-reverse":
+        val caps = rv32_caps_from_target("riscv32imac_zbb")
+        expect(rv32_bitrev_native(caps)).to_equal(false)
+
+    it "rv32 with Zbb+Zbkb has native bit-reverse":
+        val caps = rv32_caps_from_target("riscv32imac_zbb_zbkb")
+        expect(rv32_bitrev_native(caps)).to_equal(true)
+
+    it "rv32 with Zbb has native rotate":
+        val caps = rv32_caps_from_target("riscv32imac_zbb")
+        expect(rv32_rotate_native(caps)).to_equal(true)
+
+    it "rv32 with Zkne has native AES encrypt":
+        val caps = rv32_caps_from_target("riscv32imac_zkne")
+        expect(rv32_aes_enc_native(caps)).to_equal(true)
+
+    it "rv32 with Zknd has native AES decrypt":
+        val caps = rv32_caps_from_target("riscv32imac_zknd")
+        expect(rv32_aes_dec_native(caps)).to_equal(true)
+
+    it "rv32 with Zknh has native SHA-256":
+        val caps = rv32_caps_from_target("riscv32imac_zknh")
+        expect(rv32_sha256_native(caps)).to_equal(true)
+
+    it "rv32 baseline has no native AES":
+        val caps = rv32_caps_from_target("riscv32imac")
+        expect(rv32_aes_enc_native(caps)).to_equal(false)
+        expect(rv32_aes_dec_native(caps)).to_equal(false)
+
+# ============================================================================
+# RV32 lowering decisions
+# ============================================================================
+
+describe "RV32 lowering — decision predicates":
+    it "SHA-512 is always a fallback on RV32":
+        val caps = rv32_caps_from_target("riscv32imac_zknd_zkne_zknh")
+        val d = rv32_lowering_decision(caps, TargetIdiom.Sha512Rounds2)
+        expect(d.lowered).to_equal(false)
+        expect(d.fallback).to_equal(true)
+        expect(d.reason.len()).to_be_greater_than(0)
+
+    it "CRC32 is always a fallback on RV32 (no hardware CRC in RISC-V)":
+        val caps = rv32_caps_from_target("riscv32imac")
+        val d = rv32_lowering_decision(caps, TargetIdiom.Crc32U32)
+        expect(d.lowered).to_equal(false)
+        expect(d.fallback).to_equal(true)
+
+    it "ClmulLo is a fallback on RV32 (Zbc not guaranteed)":
+        val caps = rv32_caps_from_target("riscv32imac")
+        val d = rv32_lowering_decision(caps, TargetIdiom.ClmulLo)
+        expect(d.lowered).to_equal(false)
+        expect(d.fallback).to_equal(true)
+
+    it "SimdI32x8 is always a fallback on RV32":
+        val caps = rv32_caps_from_target("riscv32imac_zbb")
+        val d = rv32_lowering_decision(caps, TargetIdiom.SimdI32x8)
+        expect(d.lowered).to_equal(false)
+        expect(d.fallback).to_equal(true)
+
+    it "RotateLeft is natively lowered with Zbb":
+        val caps = rv32_caps_from_target("riscv32imac_zbb")
+        val d = rv32_lowering_decision(caps, TargetIdiom.RotateLeft)
+        expect(d.lowered).to_equal(true)
+        expect(d.fallback).to_equal(false)
+
+    it "AesEnc is natively lowered with Zkne":
+        val caps = rv32_caps_from_target("riscv32imac_zkne")
+        val d = rv32_lowering_decision(caps, TargetIdiom.AesEnc)
+        expect(d.lowered).to_equal(true)
+        expect(d.fallback).to_equal(false)
+
+    it "AesEnc falls back without Zkne":
+        val caps = rv32_caps_from_target("riscv32imac")
+        val d = rv32_lowering_decision(caps, TargetIdiom.AesEnc)
+        expect(d.lowered).to_equal(false)
+        expect(d.fallback).to_equal(true)
+        expect(d.reason.len()).to_be_greater_than(0)

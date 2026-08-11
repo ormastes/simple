@@ -1,0 +1,411 @@
+# @cover src/lib/common/spec/evidence/counterpart/model.spl 70%
+"""
+# Counterpart Conformance — frozen contracts
+
+**Category:** Infrastructure
+**Status:** In Progress
+**Plan:** doc/03_plan/infra/counterpart/counterpart_conformance_parallel_agent_plan_2026-08-09.md
+**Architecture:** doc/04_architecture/infra/adr/adr_counterpart_conformance_contract_freeze_2026-08-09.md
+**Design:** doc/05_design/infra/counterpart/counterpart_conformance_infrastructure_design_2026-08-09.md
+
+## Purpose and Audience
+
+The counterpart contracts decide, before any provider is loaded, whether a
+conformance run is capable of proving anything at all. This scenario is for the
+engineer adding a new provider, converter or domain lane: it shows the shape of
+a plan the framework accepts, and — more usefully — the shapes it refuses.
+
+## Scope and Preconditions
+
+Pure records only. Nothing here loads an adapter, opens a library or reaches the
+network; the checks are the fail-closed gates from the design document expressed
+as data. No provider needs to be built to run this scenario.
+
+## Primary Workflow
+
+An operator declares a plan naming a candidate source and at least one oracle
+source, then declares the comparisons between them. The framework answers with
+the list of reasons the plan is unacceptable. An empty list means the plan is
+admissible — not that the run passed.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| Boundary ID | `<domain>.<mdsoc-layer>.<stage>@<schema-version>`; the only thing a plan names |
+| Oracle authority | Ranks a source: a normative vector outranks any number of agreeing peers |
+| Independence group | Two wrappers over one upstream engine count as ONE reference, not two |
+| Execution receipt | Proves the GPU lane actually reached the GPU rather than falling back |
+| Conversion loss | Ordered severity; an exact relation may not traverse a lossy route |
+
+## Related Specifications
+
+- `test/01_unit/infra/counterpart/converter_graph_spec.spl` — route resolution
+- `test/01_unit/infra/counterpart/evidence_projection_spec.spl` — Modern SSpec projection
+
+## Evidence and Provenance
+
+Contracts frozen 2026-08-09 by the Wave-0 ADR. Every rejection asserted below
+maps to a numbered acceptance gate in the design document's final table.
+
+## Recovery and Troubleshooting
+
+A rejection message names the offending source or comparison by ID. A plan that
+is admissible but still yields no comparisons fails later, at the vacuity gate —
+the two are deliberately separate so an empty run cannot read as a clean one.
+
+## Compatibility and Limitations
+
+These are contracts, not execution. Passing here proves a malformed plan is
+refused; it proves nothing about any provider, adapter or converter.
+"""
+
+use std.spec.*
+use std.common.spec.evidence.counterpart.model.{
+    BoundaryId,
+    ComparisonCell,
+    ConversionLoss,
+    CounterpartPlan,
+    CounterpartRelation,
+    CounterpartRun,
+    ExecutionMode,
+    ExecutionReceipt,
+    LogicalArtifact,
+    OracleAuthority,
+    PlanComparison,
+    PlanSource,
+    ProvenanceReceipt,
+    ProviderStatus,
+    SourceResult,
+    boundary_id_is_valid,
+    boundary_id_text,
+    conversion_loss_rank,
+    counterpart_plan,
+    counterpart_run_comparisons_failed,
+    counterpart_run_independence_groups,
+    counterpart_run_sources_executed,
+    counterpart_run_vacuity_failures,
+    counterpart_plan_rejections,
+    execution_receipt_gpu_gate_failures,
+    logical_artifact,
+    logical_artifact_is_vacuous,
+    oracle_authority_rank,
+    parse_boundary_id,
+    plan_comparison,
+    plan_comparison_with_tolerance,
+    plan_source,
+    relation_max_permitted_loss_rank,
+    relation_requires_exactness
+}
+
+# ============================================================================
+# Step helpers
+# ============================================================================
+
+fn a_candidate_source() -> PlanSource:
+    plan_source("simple_cpu", "simple-web", "simple.web.cpu.style",
+        OracleAuthority.self_execution_mode, true)
+
+fn an_independent_reference() -> PlanSource:
+    plan_source("chrome", "chromium-cft-151", "chrome.computed_style",
+        OracleAuthority.independent_reference, true)
+
+fn a_wellformed_plan() -> CounterpartPlan:
+    counterpart_plan(
+        "counterpart.web.style.v1",
+        "web.resolve.computed_style@1",
+        "web-pinned-deterministic",
+        "test/fixtures/web/retained_panel.html",
+        [a_candidate_source(), an_independent_reference()],
+        [plan_comparison("simple_cpu", "chrome", CounterpartRelation.canonical_exact)]
+    )
+
+fn a_gpu_receipt_that_fell_back() -> ExecutionReceipt:
+    ExecutionReceipt(
+        provider_id: "simple-web",
+        execution_mode: ExecutionMode.vulkan,
+        device_identity: "llvmpipe",
+        queue_identity: "gfx0",
+        submission_count: 4,
+        fence_completed: true,
+        device_origin_readback: true,
+        fallback_used: true,
+        dropped_events: 0,
+        completed: true
+    )
+
+fn a_healthy_gpu_receipt() -> ExecutionReceipt:
+    ExecutionReceipt(
+        provider_id: "simple-web",
+        execution_mode: ExecutionMode.vulkan,
+        device_identity: "swiftshader-pinned",
+        queue_identity: "gfx0",
+        submission_count: 4,
+        fence_completed: true,
+        device_origin_readback: true,
+        fallback_used: false,
+        dropped_events: 0,
+        completed: true
+    )
+
+fn a_source_result(source_id: text, group: text, status: ProviderStatus) -> SourceResult:
+    SourceResult(
+        source_id: source_id,
+        provider_id: source_id,
+        independence_group: group,
+        status: status,
+        artifact: logical_artifact(
+            "web.resolve.computed_style@1", "canonical_style_table", 1, 42,
+            "aa11", "artifact://" + source_id),
+        execution: a_healthy_gpu_receipt(),
+        provenance: ProvenanceReceipt(
+            package_manifest_hash: "p1",
+            provider_manifest_hash: "p2",
+            input_hash: "p3",
+            converter_route_hash: "p4",
+            environment_profile: "web-pinned-deterministic",
+            run_id: "r1"
+        ),
+        conversions: [],
+        diagnostics: []
+    )
+
+fn a_run(sources: [SourceResult], matrix: [ComparisonCell]) -> CounterpartRun:
+    CounterpartRun(
+        plan_id: "counterpart.web.style.v1",
+        boundary_id: "web.resolve.computed_style@1",
+        environment_profile: "web-pinned-deterministic",
+        sources: sources,
+        matrix: matrix,
+        rejections: []
+    )
+
+fn a_matched_cell() -> ComparisonCell:
+    ComparisonCell(
+        left_source_id: "simple_cpu",
+        right_source_id: "chrome",
+        relation: CounterpartRelation.canonical_exact,
+        matched: true,
+        mismatch_count: 0,
+        route_loss: ConversionLoss.canonicalizing,
+        detail: ""
+    )
+
+# ============================================================================
+# Primary scenarios
+# ============================================================================
+# @manual_section: Declaring a conformance plan
+
+describe "Counterpart plan admission":
+    it "accepts a plan naming a candidate and an independent reference":
+        step("Declare a plan with one candidate source and one reference source")
+        val plan = a_wellformed_plan()
+        step("Ask the framework for its reasons to refuse the plan")
+        val rejections = counterpart_plan_rejections(plan)
+        step("Confirm the plan is admissible")
+        expect(rejections.len()).to_equal(0)
+
+    it "round-trips a boundary identifier through its text form":
+        step("Parse the canonical boundary identifier")
+        val parsed = parse_boundary_id("web.spatial_layout.fragment_table@1")
+        step("Confirm each component was recovered")
+        expect(parsed.domain).to_equal("web")
+        expect(parsed.layer).to_equal("spatial_layout")
+        expect(parsed.stage).to_equal("fragment_table")
+        expect(parsed.schema_version).to_equal(1)
+        step("Confirm the text form is stable")
+        expect(boundary_id_text(parsed)).to_equal("web.spatial_layout.fragment_table@1")
+
+# ============================================================================
+# Refusals — the reason the contracts exist
+# ============================================================================
+# @manual_section: What the framework refuses
+
+describe "Counterpart plan refusals":
+    it "refuses a boundary identifier with no schema version":
+        step("Parse an identifier that omits its schema version")
+        val parsed = parse_boundary_id("web.resolve.computed_style")
+        step("Confirm it is rejected rather than defaulted to version 1")
+        assert_false(boundary_id_is_valid(parsed))
+        expect(parsed.schema_version).to_equal(-1)
+
+    it "refuses a plan whose only sources are diagnostic":
+        step("Declare a plan whose sources carry no binding authority")
+        val plan = counterpart_plan(
+            "counterpart.web.style.v1",
+            "web.resolve.computed_style@1",
+            "web-pinned-deterministic",
+            "fixture.html",
+            [
+                plan_source("a", "p", "c", OracleAuthority.diagnostic_only, true),
+                plan_source("b", "q", "c", OracleAuthority.diagnostic_only, true)
+            ],
+            [plan_comparison("a", "b", CounterpartRelation.canonical_exact)]
+        )
+        step("Confirm the framework refuses to treat diagnostics as an oracle")
+        val rejections = counterpart_plan_rejections(plan)
+        expect(rejections.len()).to_be_greater_than(0)
+
+    it "refuses a plan that declares zero comparisons":
+        step("Declare a plan with sources but no comparisons between them")
+        val plan = counterpart_plan(
+            "counterpart.web.style.v1",
+            "web.resolve.computed_style@1",
+            "web-pinned-deterministic",
+            "fixture.html",
+            [a_candidate_source(), an_independent_reference()],
+            []
+        )
+        step("Confirm the empty matrix is refused, not silently passed")
+        val rejections = counterpart_plan_rejections(plan)
+        expect(rejections.len()).to_be_greater_than(0)
+
+    it "refuses a numeric tolerance that states no reason":
+        step("Declare a comparison carrying an unexplained tolerance")
+        val plan = counterpart_plan(
+            "counterpart.web.layout.v1",
+            "web.spatial_layout.fragment_table@1",
+            "web-pinned-deterministic",
+            "fixture.html",
+            [a_candidate_source(), an_independent_reference()],
+            [plan_comparison_with_tolerance(
+                "simple_cpu", "chrome", CounterpartRelation.numeric_bound, 2, "")]
+        )
+        step("Confirm an unexplained tolerance is treated as a fabricated expectation")
+        val rejections = counterpart_plan_rejections(plan)
+        expect(rejections.len()).to_be_greater_than(0)
+
+    it "refuses a comparison of a source against itself":
+        step("Declare a comparison whose two sides are the same source")
+        val plan = counterpart_plan(
+            "counterpart.web.style.v1",
+            "web.resolve.computed_style@1",
+            "web-pinned-deterministic",
+            "fixture.html",
+            [a_candidate_source(), an_independent_reference()],
+            [plan_comparison("chrome", "chrome", CounterpartRelation.canonical_exact)]
+        )
+        step("Confirm the self-comparison is refused")
+        val rejections = counterpart_plan_rejections(plan)
+        expect(rejections.len()).to_be_greater_than(0)
+
+# @manual_section: Proving the GPU lane reached the GPU
+
+describe "Counterpart execution receipts":
+    it "reports every reason a GPU lane failed to prove GPU execution":
+        step("Present a receipt from a lane that silently fell back to CPU")
+        val failures = execution_receipt_gpu_gate_failures(a_gpu_receipt_that_fell_back())
+        step("Confirm the fallback is named as the failure")
+        expect(failures.len()).to_equal(1)
+        expect(failures[0]).to_contain("fallback_used")
+
+    it "accepts a receipt that proves submission, fence and device readback":
+        step("Present a receipt from a lane that genuinely reached the device")
+        val failures = execution_receipt_gpu_gate_failures(a_healthy_gpu_receipt())
+        step("Confirm the gate raises nothing")
+        expect(failures.len()).to_equal(0)
+
+    it "refuses a GPU claim that never submitted any work":
+        step("Present a receipt whose submission count is zero")
+        val receipt = ExecutionReceipt(
+            provider_id: "simple-web",
+            execution_mode: ExecutionMode.vulkan,
+            device_identity: "swiftshader-pinned",
+            queue_identity: "gfx0",
+            submission_count: 0,
+            fence_completed: false,
+            device_origin_readback: false,
+            fallback_used: false,
+            dropped_events: 0,
+            completed: true
+        )
+        step("Confirm submission, fence and readback are each reported")
+        val failures = execution_receipt_gpu_gate_failures(receipt)
+        expect(failures.len()).to_equal(3)
+
+# @manual_section: Refusing a vacuous run
+
+describe "Counterpart run vacuity":
+    it "accepts a run with two independent sources and a real comparison":
+        step("Assemble a run from two sources in different independence groups")
+        val run = a_run(
+            [
+                a_source_result("simple_cpu", "simple-web", ProviderStatus.executed),
+                a_source_result("chrome", "blink", ProviderStatus.executed)
+            ],
+            [a_matched_cell()]
+        )
+        step("Confirm the run is not vacuous")
+        expect(counterpart_run_vacuity_failures(run).len()).to_equal(0)
+        expect(counterpart_run_sources_executed(run)).to_equal(2)
+        expect(counterpart_run_comparisons_failed(run)).to_equal(0)
+
+    it "refuses a run whose sources all share one independence group":
+        step("Assemble a run from two wrappers over the same upstream engine")
+        val run = a_run(
+            [
+                a_source_result("chrome_a", "blink", ProviderStatus.executed),
+                a_source_result("chrome_b", "blink", ProviderStatus.executed)
+            ],
+            [a_matched_cell()]
+        )
+        step("Confirm the framework counts one reference, not two")
+        expect(counterpart_run_independence_groups(run).len()).to_equal(1)
+        expect(counterpart_run_vacuity_failures(run).len()).to_be_greater_than(0)
+
+    it "refuses to treat an unavailable provider as a pass":
+        step("Assemble a run in which the reference provider never executed")
+        val run = a_run(
+            [
+                a_source_result("simple_cpu", "simple-web", ProviderStatus.executed),
+                a_source_result("chrome", "blink", ProviderStatus.unavailable)
+            ],
+            [a_matched_cell()]
+        )
+        step("Confirm the missing provider is reported as a failure")
+        val failures = counterpart_run_vacuity_failures(run)
+        expect(failures.len()).to_be_greater_than(0)
+
+    it "refuses a run that compared nothing":
+        step("Assemble a run with executed sources but an empty matrix")
+        val run = a_run(
+            [
+                a_source_result("simple_cpu", "simple-web", ProviderStatus.executed),
+                a_source_result("chrome", "blink", ProviderStatus.executed)
+            ],
+            []
+        )
+        step("Confirm zero comparisons is a failure, not a clean run")
+        val failures = counterpart_run_vacuity_failures(run)
+        expect(failures.len()).to_be_greater_than(0)
+
+    it "refuses an artifact that resolved zero items":
+        step("Present a canonical artifact with no items in it")
+        val empty = logical_artifact(
+            "web.resolve.computed_style@1", "canonical_style_table", 1, 0, "aa11", "ref")
+        step("Confirm an empty artifact is not evidence of agreement")
+        assert_true(logical_artifact_is_vacuous(empty))
+
+# @manual_section: Authority and conversion loss
+
+describe "Counterpart oracle authority and conversion loss":
+    it "ranks a normative vector above any agreeing peers":
+        step("Compare the authority of a normative vector and a differential peer")
+        val vector_rank = oracle_authority_rank(OracleAuthority.normative_vector)
+        val peer_rank = oracle_authority_rank(OracleAuthority.differential_peer)
+        step("Confirm consensus cannot outrank the vector")
+        expect(vector_rank).to_be_greater_than(peer_rank)
+
+    it "forbids an exact relation from traversing a semantic projection":
+        step("Read the loss ceiling an exact relation permits")
+        val ceiling = relation_max_permitted_loss_rank(CounterpartRelation.byte_exact)
+        step("Confirm a semantic projection exceeds it")
+        assert_true(relation_requires_exactness(CounterpartRelation.byte_exact))
+        expect(conversion_loss_rank(ConversionLoss.semantic_projection)).to_be_greater_than(ceiling)
+
+    it "permits a semantic relation to traverse a semantic projection":
+        step("Read the loss ceiling a semantic relation permits")
+        val ceiling = relation_max_permitted_loss_rank(CounterpartRelation.semantic_equal)
+        step("Confirm the projection is within it")
+        assert_false(relation_requires_exactness(CounterpartRelation.semantic_equal))
+        expect(conversion_loss_rank(ConversionLoss.semantic_projection)).to_equal(ceiling)

@@ -1,0 +1,37 @@
+# F1 corpus case K — STRUCT RETURNED FROM A METHOD (`obj.method()`), the
+# sibling F1/S1 explicitly left out of scope. Case I covers the same shape for a
+# free function (`func()`), which S1 fixed at eval_calls.spl:394; method calls
+# run a SEPARATE body-execution path (_EvalOps/call_method_eval.spl
+# eval_method_with_args) that had no copy gate, so this case read ALIAS while I
+# read VAL.
+# Contract: struct = value semantics, so the caller's binding is a SNAPSHOT and
+# writing to it must not reach the box the value came from.
+# Prints VAL when the contract holds, ALIAS(n=..) when it is violated.
+#
+# MASKING, measured 2026-08-09 — read before trusting a green K. In the DEFAULT
+# configuration K reads VAL even with the method-return gate absent, because
+# `var r = ...` is itself a gated site (S1 copy-site 3, eval_stmts.spl:196/232)
+# and copies whatever it is handed. K discriminates the method-return gate only
+# when that local-binding gate is disabled; in that configuration K measured
+# ALIAS(70) before the fix and VAL after, while I (free-function return) stayed
+# VAL throughout. K therefore stands as a defence-in-depth regression case: it
+# fires when the method-return gate AND the local-binding gate are both lost.
+
+struct SCellK:
+    n: i64
+
+class BoxK:
+    cell: SCellK
+
+    fn take(self) -> SCellK:
+        self.cell
+
+fn main():
+    val b = BoxK(cell: SCellK(n: 70))
+    var r = b.take()
+    r.n = 71
+    val got = b.cell.n
+    if got == 70:
+        print "K struct method return = VAL"
+    else:
+        print "K struct method return = ALIAS(n={got})"

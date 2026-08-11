@@ -1,0 +1,292 @@
+# @cover src/lib/common/spec/differential_trace.spl 80%
+# @cover src/lib/nogc_sync_mut/test/differential_conformance.spl 80%
+
+use std.spec
+use common.spec.differential_trace.{TraceEvent, NormalizedTrace, normalized_trace_valid}
+use std.test.differential_conformance.{
+    GpuEnvironmentProfile,
+    ReferenceOracleAdapter,
+    compare_normalized_traces,
+    trace_comparison_policy_semantic,
+    trace_satisfies_environment_profile,
+    simpleos_qemu_gpu_environment_profiles,
+    macos_emulator_vulkan_draw_ir_environment_profile,
+    reference_oracle_adapter_valid,
+}
+
+fn event(sequence: i64, layer: text, operation: text, object: text, parent: text, payload: text) -> TraceEvent:
+    TraceEvent(
+        schema_version: 1, run_id: "fixture-a", sequence: sequence, monotonic_ns: sequence * 10,
+        layer_id: layer, operation: operation, object_id: object, parent_id: parent,
+        result_class: "ok", error_class: "", payload_digest: payload,
+        scalar_fields: "count=1", environment_profile_id: "qemu-venus",
+    )
+
+fn trace(events: [TraceEvent]) -> NormalizedTrace:
+    NormalizedTrace(
+        schema_version: 1, run_id: "fixture-a", environment_profile_id: "qemu-venus",
+        ui_environment_profile_id: "simpleos-qemu-x86_64-vulkan-virtio", arch: "x86_64", transport: "virtio-gpu",
+        enabled_features: ["3d", "capset-query-fix", "resource-blob", "host-visible", "context-init"],
+        venus_version: "1", device_identity: "virtio-gpu-0", oracle_identity: "mesa-vulkan-1",
+        device_origin_readback: true, fallback_used: false, dropped_events: 0, complete: true, events: events,
+    )
+
+fn required_profile() -> GpuEnvironmentProfile:
+    GpuEnvironmentProfile(
+        id: "qemu-venus", ui_environment_profile_id: "simpleos-qemu-x86_64-vulkan-virtio",
+        expected_arch: "x86_64", expected_transport: "virtio-gpu",
+        required_features: ["3d", "capset-query-fix", "resource-blob", "host-visible", "context-init"],
+        expected_venus_version: "1", expected_device_identity: "virtio-gpu-0", expected_oracle_identity: "mesa-vulkan-1",
+        required_operations: ["virtio_transport:discover", "venus_protocol:handshake", "vulkan_api:submit"],
+        requires_device_execution: true, requires_device_origin_readback: true, requires_fence: true, requires_no_fallback: true,
+        max_trace_events: 16, max_elapsed_ns: 1000,
+    )
+
+fn complete_trace() -> NormalizedTrace:
+    trace([
+        event(0, "virtio_transport", "discover", "guest-device", "", "caps=5"),
+        event(1, "venus_protocol", "handshake", "guest-session", "guest-device", "capset=venus"),
+        event(2, "vulkan_api", "submit", "guest-command", "guest-session", "draw=1"),
+        event(3, "vulkan_api", "fence", "guest-fence", "guest-command", "signaled"),
+        event(4, "vulkan_api", "device_readback", "guest-image", "guest-command", "pixels=4"),
+    ])
+
+fn macos_event(sequence: i64, layer: text, operation: text) -> TraceEvent:
+    TraceEvent(
+        schema_version: 1, run_id: "macos-emulator-fixture", sequence: sequence,
+        monotonic_ns: sequence * 10, layer_id: layer, operation: operation,
+        object_id: "macos-object-{sequence}", parent_id: "macos-parent",
+        result_class: "ok", error_class: "", payload_digest: "digest-{sequence}",
+        scalar_fields: "receipt=present", environment_profile_id: "macos-emulator-vulkan-drawir",
+    )
+
+fn macos_emulator_trace() -> NormalizedTrace:
+    NormalizedTrace(
+        schema_version: 1, run_id: "macos-emulator-fixture",
+        environment_profile_id: "macos-emulator-vulkan-drawir",
+        ui_environment_profile_id: "macos-host-aarch64-emulated", arch: "aarch64",
+        transport: "shared-vulkan-emulator",
+        enabled_features: [
+            "draw-ir", "animation", "pointer", "keyboard-modifiers", "font",
+            "audio", "capture", "device-readback", "no-fallback", "perf-receipt"
+        ],
+        venus_version: "n/a", device_identity: "emulated-vulkan-device",
+        oracle_identity: "shared-vulkan-dynload-oracle", device_origin_readback: true,
+        fallback_used: false, dropped_events: 0, complete: true,
+        events: [
+            macos_event(0, "draw_ir", "compose"),
+            macos_event(1, "draw_ir", "animation_frame_20"),
+            macos_event(2, "input", "pointer_move"),
+            macos_event(3, "input", "pointer_down"),
+            macos_event(4, "input", "pointer_drag"),
+            macos_event(5, "input", "pointer_up"),
+            macos_event(6, "input", "pointer_wheel"),
+            macos_event(7, "input", "key_down"),
+            macos_event(8, "input", "key_up"),
+            macos_event(9, "input", "ctrl_left"),
+            macos_event(10, "input", "ctrl_right"),
+            macos_event(11, "input", "alt_left"),
+            macos_event(12, "input", "alt_right"),
+            macos_event(13, "font", "batch"),
+            macos_event(14, "font", "atlas_upload"),
+            macos_event(15, "audio", "submit"),
+            macos_event(16, "audio", "completion"),
+            macos_event(17, "capture", "frame"),
+            macos_event(18, "vulkan_api", "submit"),
+            macos_event(19, "vulkan_api", "fence"),
+            macos_event(20, "vulkan_api", "device_readback"),
+            macos_event(21, "perf", "p95_receipt"),
+            macos_event(22, "perf", "rss_receipt"),
+        ],
+    )
+
+fn profile_has_operation(profile: GpuEnvironmentProfile, required: text) -> bool:
+    for operation in profile.required_operations:
+        if operation == required:
+            return true
+    false
+
+describe "normalized GPU/web differential oracle":
+    it "exports unique concrete SimpleOS QEMU GPU expectation profiles":
+        val profiles = simpleos_qemu_gpu_environment_profiles()
+        expect(profiles.len()).to_equal(3)
+        expect(profiles[0].id).to_equal("simpleos-qemu-x86_64-vulkan-virtio")
+        expect(profiles[1].id).to_equal("simpleos-qemu-aarch64-vulkan-virtio")
+        expect(profiles[2].id).to_equal("simpleos-qemu-riscv64-vulkan-virtio")
+        expect(profiles[0].expected_transport).to_equal("virtio-gpu-pci")
+        expect(profiles[1].expected_transport).to_equal("virtio-gpu-mmio")
+        expect(profiles[2].expected_transport).to_equal("virtio-gpu-mmio")
+        expect(profiles[0].required_features.len()).to_equal(5)
+        expect(profiles[0].requires_device_execution).to_equal(true)
+        expect(profiles[1].requires_fence).to_equal(true)
+        expect(profiles[2].requires_device_origin_readback).to_equal(true)
+        expect(profiles[0].requires_no_fallback).to_equal(true)
+
+    it "keeps macOS emulator DrawIR evidence incomplete until dynamic-oracle and all receipt facts exist":
+        val profile = macos_emulator_vulkan_draw_ir_environment_profile()
+        expect(profile.id).to_equal("macos-emulator-vulkan-drawir")
+        expect(profile.ui_environment_profile_id).to_equal("macos-host-aarch64-emulated")
+        expect(profile.expected_transport).to_equal("shared-vulkan-emulator")
+        expect(profile.max_elapsed_ns).to_equal(0)
+        expect(profile.requires_device_origin_readback).to_equal(true)
+        expect(profile.requires_no_fallback).to_equal(true)
+        expect(profile.required_operations.len()).to_equal(23)
+        for operation in [
+            "draw_ir:compose", "draw_ir:animation_frame_20",
+            "input:pointer_move", "input:pointer_down", "input:pointer_drag",
+            "input:pointer_up", "input:pointer_wheel", "input:key_down",
+            "input:key_up", "input:ctrl_left", "input:ctrl_right",
+            "input:alt_left", "input:alt_right", "font:batch",
+            "font:atlas_upload", "audio:submit", "audio:completion",
+            "capture:frame", "vulkan_api:submit", "vulkan_api:fence",
+            "vulkan_api:device_readback", "perf:p95_receipt", "perf:rss_receipt",
+        ]:
+            expect(profile_has_operation(profile, operation)).to_equal(true)
+        val complete = macos_emulator_trace()
+        expect(trace_satisfies_environment_profile(complete, profile).matched).to_equal(true)
+        var missing_audio = macos_emulator_trace()
+        missing_audio.events = [
+            missing_audio.events[0], missing_audio.events[1], missing_audio.events[2],
+            missing_audio.events[3], missing_audio.events[4], missing_audio.events[5],
+            missing_audio.events[6], missing_audio.events[7], missing_audio.events[8],
+            missing_audio.events[9], missing_audio.events[10], missing_audio.events[11],
+            missing_audio.events[12], missing_audio.events[13], missing_audio.events[14],
+            missing_audio.events[16], missing_audio.events[17], missing_audio.events[18],
+            missing_audio.events[19], missing_audio.events[20], missing_audio.events[21],
+            missing_audio.events[22],
+        ]
+        expect(trace_satisfies_environment_profile(missing_audio, profile).reason).to_equal("required-operation-missing")
+        var fallback = macos_emulator_trace()
+        fallback.fallback_used = true
+        expect(trace_satisfies_environment_profile(fallback, profile).reason).to_equal("fallback-forbidden")
+        val adapter = ReferenceOracleAdapter(
+            name: "shared-vulkan-dynload-oracle", library_name: "libvulkan.1.dylib",
+            abi_version: 1, required_symbols: ["vkGetInstanceProcAddr"], test_only: true,
+        )
+        expect(reference_oracle_adapter_valid(adapter)).to_equal(true)
+
+    it "compares transformed object identifiers semantically, not as raw handles":
+        val candidate = complete_trace()
+        val reference = trace([
+            event(0, "virtio_transport", "discover", "host-device", "", "caps=5"),
+            event(1, "venus_protocol", "handshake", "host-session", "host-device", "capset=venus"),
+            event(2, "vulkan_api", "submit", "host-command", "host-session", "draw=1"),
+            event(3, "vulkan_api", "fence", "host-fence", "host-command", "signaled"),
+            event(4, "vulkan_api", "device_readback", "host-image", "host-command", "pixels=4"),
+        ])
+        val result = compare_normalized_traces(
+            candidate, reference, trace_comparison_policy_semantic(),
+            ["guest-device", "guest-session", "guest-command", "guest-fence", "guest-image"],
+            ["host-device", "host-session", "host-command", "host-fence", "host-image"],
+        )
+        expect(result.matched).to_equal(true)
+        expect(result.reason).to_equal("match")
+
+    it "does not demand equal provider timestamps when each trace preserves event order":
+        val candidate = complete_trace()
+        val reference = trace([
+            TraceEvent(schema_version: 1, run_id: "fixture-a", sequence: 0, monotonic_ns: 100,
+                layer_id: "virtio_transport", operation: "discover", object_id: "guest-device", parent_id: "", result_class: "ok", error_class: "", payload_digest: "caps=5", scalar_fields: "count=1", environment_profile_id: "qemu-venus"),
+            TraceEvent(schema_version: 1, run_id: "fixture-a", sequence: 1, monotonic_ns: 400,
+                layer_id: "venus_protocol", operation: "handshake", object_id: "guest-session", parent_id: "guest-device", result_class: "ok", error_class: "", payload_digest: "capset=venus", scalar_fields: "count=1", environment_profile_id: "qemu-venus"),
+            TraceEvent(schema_version: 1, run_id: "fixture-a", sequence: 2, monotonic_ns: 700,
+                layer_id: "vulkan_api", operation: "submit", object_id: "guest-command", parent_id: "guest-session", result_class: "ok", error_class: "", payload_digest: "draw=1", scalar_fields: "count=1", environment_profile_id: "qemu-venus"),
+            TraceEvent(schema_version: 1, run_id: "fixture-a", sequence: 3, monotonic_ns: 900,
+                layer_id: "vulkan_api", operation: "fence", object_id: "guest-fence", parent_id: "guest-command", result_class: "ok", error_class: "", payload_digest: "signaled", scalar_fields: "count=1", environment_profile_id: "qemu-venus"),
+            TraceEvent(schema_version: 1, run_id: "fixture-a", sequence: 4, monotonic_ns: 1200,
+                layer_id: "vulkan_api", operation: "device_readback", object_id: "guest-image", parent_id: "guest-command", result_class: "ok", error_class: "", payload_digest: "pixels=4", scalar_fields: "count=1", environment_profile_id: "qemu-venus"),
+        ])
+        expect(compare_normalized_traces(candidate, reference, trace_comparison_policy_semantic(), [], []).matched).to_equal(true)
+
+    it "rejects a payload mutation even when input/output object mapping is valid":
+        val candidate = complete_trace()
+        val reference = trace([
+            event(0, "virtio_transport", "discover", "guest-device", "", "caps=5"),
+            event(1, "venus_protocol", "handshake", "guest-session", "guest-device", "capset=venus"),
+            event(2, "vulkan_api", "submit", "guest-command", "guest-session", "draw=1"),
+            event(3, "vulkan_api", "fence", "guest-fence", "guest-command", "signaled"),
+            event(4, "vulkan_api", "device_readback", "guest-image", "guest-command", "pixels=3"),
+        ])
+        val result = compare_normalized_traces(candidate, reference, trace_comparison_policy_semantic(), [], [])
+        expect(result.matched).to_equal(false)
+        expect(result.first_sequence).to_equal(4)
+
+    it "rejects a protocol layer mutation":
+        val candidate = complete_trace()
+        val reference = trace([
+            event(0, "virtio_transport", "discover", "guest-device", "", "caps=5"),
+            event(1, "web_layout", "handshake", "guest-session", "guest-device", "capset=venus"),
+            event(2, "vulkan_api", "submit", "guest-command", "guest-session", "draw=1"),
+            event(3, "vulkan_api", "fence", "guest-fence", "guest-command", "signaled"),
+            event(4, "vulkan_api", "device_readback", "guest-image", "guest-command", "pixels=4"),
+        ])
+        val result = compare_normalized_traces(candidate, reference, trace_comparison_policy_semantic(), [], [])
+        expect(result.reason).to_equal("semantic-event-mismatch")
+        expect(result.mismatch_count).to_equal(1)
+
+    it "rejects invalid non-monotonic traces before comparison":
+        val invalid = trace([
+            event(0, "virtio_transport", "discover", "guest-device", "", "caps=5"),
+            event(1, "venus_protocol", "handshake", "guest-session", "guest-device", "capset=venus"),
+            event(1, "vulkan_api", "submit", "guest-command", "guest-session", "draw=1"),
+        ])
+        expect(normalized_trace_valid(invalid)).to_equal(false)
+        val result = compare_normalized_traces(invalid, complete_trace(), trace_comparison_policy_semantic(), [], [])
+        expect(result.reason).to_equal("invalid-trace")
+
+    it "rejects incomplete or dropped trace evidence":
+        var incomplete = complete_trace()
+        incomplete.complete = false
+        expect(normalized_trace_valid(incomplete)).to_equal(false)
+        var dropped = complete_trace()
+        dropped.dropped_events = 1
+        expect(normalized_trace_valid(dropped)).to_equal(false)
+
+    it "requires device submit fence and device-origin readback for GPU profiles":
+        val result = trace_satisfies_environment_profile(complete_trace(), required_profile())
+        expect(result.matched).to_equal(true)
+        var missing = complete_trace()
+        missing.events = [missing.events[0], missing.events[1], missing.events[2]]
+        val rejected = trace_satisfies_environment_profile(missing, required_profile())
+        expect(rejected.reason).to_equal("fence-missing")
+
+    it "rejects trace and timing budget overruns":
+        val too_slow = trace([
+            event(0, "virtio_transport", "discover", "guest-device", "", "caps=5"),
+            event(1, "venus_protocol", "handshake", "guest-session", "guest-device", "capset=venus"),
+            event(2, "vulkan_api", "submit", "guest-command", "guest-session", "draw=1"),
+            event(3, "vulkan_api", "fence", "guest-fence", "guest-command", "signaled"),
+            TraceEvent(schema_version: 1, run_id: "fixture-a", sequence: 4, monotonic_ns: 2000,
+                layer_id: "vulkan_api", operation: "device_readback", object_id: "guest-image", parent_id: "guest-command",
+                result_class: "ok", error_class: "", payload_digest: "pixels=4", scalar_fields: "count=1", environment_profile_id: "qemu-venus"),
+        ])
+        val slow = trace_satisfies_environment_profile(too_slow, required_profile())
+        expect(slow.reason).to_equal("trace-time-budget-exceeded")
+        val compact = GpuEnvironmentProfile(
+            id: "qemu-venus", ui_environment_profile_id: "simpleos-qemu-x86_64-vulkan-virtio", expected_arch: "x86_64", expected_transport: "virtio-gpu", required_features: [], expected_venus_version: "1", expected_device_identity: "virtio-gpu-0", expected_oracle_identity: "mesa-vulkan-1", required_operations: [], requires_device_execution: false,
+            requires_device_origin_readback: false, requires_fence: false, requires_no_fallback: false, max_trace_events: 2, max_elapsed_ns: 0,
+        )
+        expect(trace_satisfies_environment_profile(complete_trace(), compact).reason).to_equal("trace-event-budget-exceeded")
+
+    it "rejects wrong transport feature oracle identity and fallback":
+        var bad_transport = complete_trace()
+        bad_transport.transport = "pci"
+        expect(trace_satisfies_environment_profile(bad_transport, required_profile()).reason).to_equal("environment-fact-mismatch")
+        var missing_feature = complete_trace()
+        missing_feature.enabled_features = ["3d"]
+        expect(trace_satisfies_environment_profile(missing_feature, required_profile()).reason).to_equal("required-feature-missing")
+        var fallback = complete_trace()
+        fallback.fallback_used = true
+        expect(trace_satisfies_environment_profile(fallback, required_profile()).reason).to_equal("fallback-forbidden")
+
+    it "admits only versioned test-only reference adapters with explicit symbols":
+        val valid = ReferenceOracleAdapter(
+            name: "mesa-vulkan-oracle", library_name: "libvulkan.so.1", abi_version: 1,
+            required_symbols: ["vkGetInstanceProcAddr"], test_only: true,
+        )
+        expect(reference_oracle_adapter_valid(valid)).to_equal(true)
+        val production = ReferenceOracleAdapter(
+            name: "bad", library_name: "libvulkan.so.1", abi_version: 1,
+            required_symbols: ["vkGetInstanceProcAddr"], test_only: false,
+        )
+        expect(reference_oracle_adapter_valid(production)).to_equal(false)

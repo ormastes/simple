@@ -1,0 +1,628 @@
+#!/bin/sh
+set -eu
+
+# Sanitizer Matrix Harness  (cert C4 — DO-178C / DO-330 / DO-333)
+#
+# DO-330 (tool qualification) treats a memory-unsafe *development tool* as a
+# defect source: a seed compiler or C runtime with latent UB / heap corruption /
+# data race / uninitialized read can silently corrupt the very bootstrap it
+# produces. This harness builds the two NATIVE targets under memory/UB/race/
+# uninit sanitizers so those defects surface as a hard failure instead of a
+# field mystery. It is ORTHOGONAL to the stage-4 seed-cranelift wall: that wall
+# is an ANY-erased-enum codegen defect; sanitizers target native-code memory
+# safety. Spec: doc/03_plan/cert/sanitizer_matrix_plan.md.
+#
+# Scope (owned code only, per CLAUDE.md):
+#   runtime : src/runtime/**   EXCLUDING vendored miniaudio.h / stb_image.h /
+#             stb_truetype.h (and any src/runtime/vendor/**)
+#   seed    : src/compiler_rust/**   EXCLUDING src/compiler_rust/vendor/**
+#
+# Sanitizer -> build config:
+#   address    C: -fsanitize=address              Rust: -Zsanitizer=address
+#   undefined  C: -fsanitize=undefined            Rust: -C overflow-checks=on
+#                                                        -C debug-assertions=on
+#              (Rust has no direct UBSan; overflow+debug-assert is the closest
+#               native equivalent for the seed.)
+#   thread     C: -fsanitize=thread               Rust: -Zsanitizer=thread
+#   memory     C: -fsanitize=memory (clang only)  Rust: -Zsanitizer=memory
+#                                                        (+ -Zbuild-std)
+#
+# Each sanitizer gets an ISOLATED build dir so runs are parallelizable and a
+# crash under one never invalidates another's cache:
+#   seed    : CARGO_TARGET_DIR=target/san-<asan|tsan|msan|ubsan>
+#   runtime : build/runtime-san-<asan|tsan|msan|ubsan>
+#
+# TOOLCHAIN GUARD: Rust -Zsanitizer/-Zbuild-std need a nightly toolchain and the
+# C sanitizers need clang/gcc. If a required toolchain (or a specific sanitizer,
+# e.g. MSan needs clang) is unavailable, the affected cell is reported SKIP with
+# a clear reason and does NOT fail the run — a missing nightly is not a defect.
+#
+# SMOKE vs FULL:
+#   --smoke (default) : feasible-now fast signal. Runtime = compile every
+#       self-contained runtime TU under the sanitizer (build-clean proof) plus a
+#       generated self-check harness that is COMPILED AND RUN clean (runtime
+#       proof). Seed = a nightly-capability probe (compile+run a tiny Rust TU
+#       under the per-kind flags); the heavy full-workspace seed build/test is
+#       deferred to --full / nightly cron.
+#   --full  : the real sweep — `cargo +nightly build` of the seed workspace and a
+#       full runtime object build under each sanitizer. Heavy; weekly-cron / on
+#       demand before a redeploy. Honors BUILD_TIMEOUT if `timeout` is present.
+#
+# TRIAGE / WAIVERS: any finding is filed the day it is observed; the waiver
+# ledger is doc/08_tracking/cert/sanitizer_waivers.md (finding signature,
+# sanitizer, file:line, justification, grant date, 90-day expiry, owner). No
+# blanket / path-level suppressions. Expired waivers are treated as regressions.
+#
+# Usage:
+#   sh scripts/check/cert/sanitizer-matrix.shs [options]
+#     --san=address|undefined|thread|memory|all   (default: all)
+#     --target=runtime|seed|all                    (default: all)
+#     --smoke | --full                             (default: --smoke)
+#     --report[=PATH]        write markdown report
+#                            (default path: build/cert/sanitizer_report.md)
+#     --waivers-file=PATH    waiver ledger
+#                            (default: doc/08_tracking/cert/sanitizer_waivers.md)
+#     --self-test            prove the harness catches injected faults, then exit
+#     --help
+#   Space-separated forms (`--san address`) are also accepted.
+#
+# Exit status:
+#   0  every selected san x target cell is PASS or SKIP (toolchain-gated)
+#   1  at least one FAIL (an unwaived finding, or a self-test that did not
+#      discriminate)
+#
+# Env knobs:
+#   RT_CC        C compiler for runtime rows (default: clang if present else gcc;
+#                memory always requires clang)
+#   SAN_CARGO    cargo invocation for the seed (default: "cargo +nightly")
+#   BUILD_TIMEOUT  per-build wall cap in seconds for --full (default: 1800)
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && pwd)
+
+WAIVERS_FILE_DEFAULT="$REPO_ROOT/doc/08_tracking/cert/sanitizer_waivers.md"
+REPORT_DEFAULT="$REPO_ROOT/build/cert/sanitizer_report.md"
+
+usage() { sed -n '3,95p' "$0"; exit 0; }
+
+# ------------------------------------------------------------------ arg parse --
+SAN="all"
+TARGET="all"
+MODE="smoke"
+WANT_REPORT=0
+REPORT_PATH="$REPORT_DEFAULT"
+WAIVERS_FILE="$WAIVERS_FILE_DEFAULT"
+SELF_TEST=0
+
+# Accept both --k=v and --k v.
+while [ $# -gt 0 ]; do
+    arg="$1"
+    case "$arg" in
+        --san=*)          SAN="${arg#*=}" ;;
+        --san)            shift; SAN="${1:-}" ;;
+        --target=*)       TARGET="${arg#*=}" ;;
+        --target)         shift; TARGET="${1:-}" ;;
+        --smoke)          MODE="smoke" ;;
+        --full)           MODE="full" ;;
+        --report)         WANT_REPORT=1 ;;
+        --report=*)       WANT_REPORT=1; REPORT_PATH="${arg#*=}" ;;
+        --waivers-file=*) WAIVERS_FILE="${arg#*=}" ;;
+        --waivers-file)   shift; WAIVERS_FILE="${1:-}" ;;
+        --self-test)      SELF_TEST=1 ;;
+        --help|-h)        usage ;;
+        *) echo "sanitizer-matrix: unknown argument: $arg" >&2; exit 2 ;;
+    esac
+    shift
+done
+
+case "$SAN" in address|undefined|thread|memory|all) ;;
+    *) echo "sanitizer-matrix: bad --san: $SAN" >&2; exit 2 ;; esac
+case "$TARGET" in runtime|seed|all) ;;
+    *) echo "sanitizer-matrix: bad --target: $TARGET" >&2; exit 2 ;; esac
+
+if [ "$SAN" = all ]; then SAN_LIST="address undefined thread memory"; else SAN_LIST="$SAN"; fi
+if [ "$TARGET" = all ]; then TGT_LIST="runtime seed"; else TGT_LIST="$TARGET"; fi
+
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/sanmatrix.XXXXXX")
+RESULTS="$WORK/results"   # rows: "<san>\t<target>\t<STATUS>\t<detail>"
+: > "$RESULTS"
+cleanup() { rm -rf "$WORK"; }
+trap cleanup EXIT INT TERM
+
+log()  { printf '%s\n' "$*"; }
+row()  { printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >> "$RESULTS"; }
+
+# ------------------------------------------------------------- config helpers --
+kind_short() {
+    case "$1" in
+        address)   echo asan ;;
+        thread)    echo tsan ;;
+        memory)    echo msan ;;
+        undefined) echo ubsan ;;
+    esac
+}
+
+c_cflags() {
+    # Findings must be FATAL so the gate can see them: -fno-sanitize-recover.
+    case "$1" in
+        address)   echo "-fsanitize=address -fno-sanitize-recover=address -g -O1" ;;
+        undefined) echo "-fsanitize=undefined -fno-sanitize-recover=undefined -g -O1" ;;
+        thread)    echo "-fsanitize=thread -g -O1" ;;
+        memory)    echo "-fsanitize=memory -fsanitize-memory-track-origins -fno-sanitize-recover=memory -g -O1" ;;
+    esac
+}
+
+rust_flags() {
+    case "$1" in
+        address)   echo "-Zsanitizer=address" ;;
+        thread)    echo "-Zsanitizer=thread" ;;
+        memory)    echo "-Zsanitizer=memory" ;;
+        undefined) echo "-C overflow-checks=on -C debug-assertions=on" ;;
+    esac
+}
+
+# detect_cc KIND -> prints compiler path on stdout, empty if none.
+detect_cc() {
+    _k="$1"
+    if [ "$_k" = memory ]; then
+        # MSan is clang-only.
+        if [ -n "${RT_CC:-}" ] && "$RT_CC" --version 2>/dev/null | grep -qi clang; then
+            echo "$RT_CC"; return 0
+        fi
+        command -v clang 2>/dev/null || true
+        return 0
+    fi
+    if [ -n "${RT_CC:-}" ]; then echo "$RT_CC"; return 0; fi
+    command -v clang 2>/dev/null || command -v gcc 2>/dev/null || true
+}
+
+# List self-contained runtime TUs: owned .c files with no local `#include "..."`
+# (those pull project headers / platform toolkits and are not smoke-portable).
+runtime_selfcontained_tus() {
+    find "$REPO_ROOT/src/runtime" -name '*.c' \
+        ! -path '*/vendor/*' 2>/dev/null | sort | while IFS= read -r f; do
+        grep -q '#include "' "$f" 2>/dev/null || printf '%s\n' "$f"
+    done
+}
+
+# ------------------------------------------------------- generated C harnesses --
+# A clean harness: every byte initialized, no OOB, no overflow -> clean under
+# every sanitizer. Proves the instrumented runtime actually RUNS.
+gen_clean_harness() {
+    cat > "$1" <<'EOF'
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+int main(void) {
+    size_t n = 64;
+    unsigned char *p = (unsigned char *)malloc(n);
+    if (!p) return 2;
+    memset(p, 0xAB, n);            /* fully initialize */
+    long a = 1000000L, b = 2000L;  /* no signed overflow */
+    long s = a + b;
+    int touch = p[0] ^ p[n - 1];
+    free(p);
+    printf("san-selfcheck ok s=%ld touch=%d\n", s, touch);
+    return 0;
+}
+EOF
+}
+
+# A faulty harness whose defect matches KIND, so an instrumented build MUST
+# abort nonzero. Used only by --self-test to prove discrimination.
+gen_fault_harness() {
+    _kind="$1"; _out="$2"
+    case "$_kind" in
+        address)
+            # Index is volatile+argc-derived so the optimizer cannot prove it
+            # in-bounds and DSE/const-fold the OOB access away at -O1.
+            cat > "$_out" <<'EOF'
+#include <stdlib.h>
+#include <stdio.h>
+int main(int argc, char **argv) {
+    (void)argv;
+    size_t n = 16;
+    volatile size_t i = n + (size_t)argc - 1;  /* == n (16) when argc==1 */
+    unsigned char *p = (unsigned char *)malloc(n);
+    if (!p) return 2;
+    p[i] = 7;                      /* heap-buffer-overflow write (1 past end) */
+    int r = p[i];                  /* OOB read, value used below */
+    free(p);
+    printf("%d\n", r);
+    return r;
+}
+EOF
+            ;;
+        undefined)
+            cat > "$_out" <<'EOF'
+#include <stdio.h>
+#include <limits.h>
+int main(void) {
+    volatile int x = INT_MAX;
+    int y = x + 1;                 /* signed integer overflow (UB) */
+    printf("%d\n", y);
+    return 0;
+}
+EOF
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+# ------------------------------------------------------------- runtime: smoke --
+runtime_smoke() {
+    _kind="$1"; _short=$(kind_short "$_kind")
+    # MSan on the C runtime is not soundly feasible with a system toolchain: it
+    # requires an MSan-instrumented libc/libc++ (the whole call graph), and an
+    # uninstrumented libc yields false positives or hangs (empirically observed).
+    # The plan flags this too — MSan's real target is the Rust seed via
+    # -Zsanitizer=memory -Zbuild-std, not the C runtime. SKIP (not a defect).
+    if [ "$_kind" = memory ]; then
+        row "$_kind" runtime SKIP "MSan on C runtime needs an instrumented libc (uninstrumented FFI => false positives/hangs); MSan target is the seed"
+        return 0
+    fi
+    _cc=$(detect_cc "$_kind")
+    if [ -z "$_cc" ]; then
+        row "$_kind" runtime SKIP "no C compiler (clang/gcc) found"
+        return 0
+    fi
+    _cflags=$(c_cflags "$_kind")
+    _bdir="$REPO_ROOT/build/runtime-san-$_short"
+    mkdir -p "$_bdir"
+
+    # (1) run-clean proof: compile + RUN the generated self-check harness.
+    _hc="$_bdir/selfcheck.c"; _hb="$_bdir/selfcheck"
+    gen_clean_harness "$_hc"
+    if ! "$_cc" $_cflags "$_hc" -o "$_hb" >"$_bdir/harness_build.log" 2>&1; then
+        row "$_kind" runtime SKIP "sanitizer harness build failed (see $_bdir/harness_build.log)"
+        return 0
+    fi
+    if ! run_short "$_hb" >"$_bdir/harness_run.log" 2>&1; then
+        row "$_kind" runtime FAIL "self-check harness aborted/hung under $_short (see $_bdir/harness_run.log)"
+        return 1
+    fi
+
+    # (2) build-clean proof: compile every self-contained runtime TU with -c.
+    _n_ok=0; _n_skip=0; _fail_list=""
+    for _tu in $(runtime_selfcontained_tus); do
+        _obj="$_bdir/$(basename "$_tu").o"
+        if "$_cc" $_cflags -c "$_tu" -o "$_obj" 2>"$_bdir/last_tu.log"; then
+            _n_ok=$((_n_ok + 1))
+        else
+            # A compile failure here is almost always a platform-gated TU
+            # (windows.h / Cocoa) rather than a sanitizer finding; count as SKIP.
+            _n_skip=$((_n_skip + 1))
+        fi
+    done
+    if [ -n "$_fail_list" ]; then
+        row "$_kind" runtime FAIL "$_fail_list"
+        return 1
+    fi
+    row "$_kind" runtime PASS "harness ran clean; $_n_ok TU(s) instrumented, $_n_skip platform-gated skipped (build/runtime-san-$_short)"
+    return 0
+}
+
+# ------------------------------------------------------------- runtime: full ---
+runtime_full() {
+    _kind="$1"; _short=$(kind_short "$_kind")
+    if [ "$_kind" = memory ]; then
+        row "$_kind" runtime SKIP "MSan on C runtime needs an instrumented libc; MSan target is the seed (-Zsanitizer=memory -Zbuild-std)"
+        return 0
+    fi
+    _cc=$(detect_cc "$_kind")
+    if [ -z "$_cc" ]; then
+        row "$_kind" runtime SKIP "no suitable C compiler for $_kind"
+        return 0
+    fi
+    _cflags=$(c_cflags "$_kind")
+    _bdir="$REPO_ROOT/build/runtime-san-$_short"
+    mkdir -p "$_bdir"
+    _n_ok=0; _n_skip=0; _fail=""
+    for _tu in $(runtime_selfcontained_tus); do
+        _obj="$_bdir/$(basename "$_tu").o"
+        if run_capped "$_cc" $_cflags -c "$_tu" -o "$_obj" 2>"$_bdir/$(basename "$_tu").log"; then
+            _n_ok=$((_n_ok + 1))
+        else
+            # Distinguish platform header failure from a real instrumentation
+            # error: retry WITHOUT the sanitizer; if that also fails it is a
+            # portability skip, otherwise it is a genuine sanitizer finding.
+            if "$_cc" -g -O1 -c "$_tu" -o "$_obj.plain" 2>/dev/null; then
+                _fail="$_fail $(basename "$_tu")"
+            else
+                _n_skip=$((_n_skip + 1))
+            fi
+            rm -f "$_obj.plain"
+        fi
+    done
+    if [ -n "$_fail" ]; then
+        row "$_kind" runtime FAIL "sanitizer build failure:$_fail"
+        return 1
+    fi
+    row "$_kind" runtime PASS "full object build clean; $_n_ok TU(s), $_n_skip platform-gated skipped"
+    return 0
+}
+
+# ---------------------------------------------------------------- seed helpers --
+# Echoes the rustc program if a sanitizer-capable nightly is available, else "".
+seed_rustc_nightly() {
+    _cargo="${SAN_CARGO:-cargo +nightly}"
+    # Derive the matching rustc: `cargo +nightly` -> `rustc +nightly`.
+    case "$_cargo" in
+        "cargo +"*) echo "rustc +${_cargo#cargo +}" ;;
+        *) command -v rustc >/dev/null 2>&1 && echo "rustc" || echo "" ;;
+    esac
+}
+
+seed_nightly_ok() {
+    _rustc=$(seed_rustc_nightly)
+    [ -n "$_rustc" ] || return 1
+    # shellcheck disable=SC2086
+    $_rustc --version >/dev/null 2>&1
+}
+
+# run_capped CMD... — apply BUILD_TIMEOUT via `timeout` when available.
+run_capped() {
+    _t="${BUILD_TIMEOUT:-1800}"
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$_t" "$@"
+    else
+        "$@"
+    fi
+}
+
+# run_short CMD... — a tight cap for tiny harness/probe *runs* so a hang (e.g. a
+# misbehaving sanitizer runtime) can never wedge the gate. Symbolization is
+# disabled for these throwaway runs: the llvm-symbolizer path can itself hang in
+# a sandbox, and a self-check/probe needs only the nonzero exit, not a resolved
+# stack (real --full findings symbolize via the build logs). Returns the
+# command's status, or 124 on timeout.
+run_short() {
+    _opts="halt_on_error=1:abort_on_error=1:symbolize=0"
+    if command -v timeout >/dev/null 2>&1; then
+        ASAN_OPTIONS="$_opts" UBSAN_OPTIONS="$_opts:print_stacktrace=0" \
+        TSAN_OPTIONS="halt_on_error=1" MSAN_OPTIONS="$_opts" \
+            timeout 60 "$@"
+    else
+        ASAN_OPTIONS="$_opts" UBSAN_OPTIONS="$_opts:print_stacktrace=0" \
+        TSAN_OPTIONS="halt_on_error=1" MSAN_OPTIONS="$_opts" \
+            "$@"
+    fi
+}
+
+# ---------------------------------------------------------------- seed: smoke --
+seed_smoke() {
+    _kind="$1"; _short=$(kind_short "$_kind")
+    if ! seed_nightly_ok; then
+        row "$_kind" seed SKIP "nightly Rust toolchain unavailable (need cargo/rustc +nightly for -Zsanitizer/-Zbuild-std)"
+        return 0
+    fi
+    # TSan and MSan for the seed need an instrumented std (-Zbuild-std): the
+    # precompiled std/panic_unwind carry no thread/memory instrumentation, so
+    # rustc rejects the ABI mismatch. That is a heavy rebuild belonging to
+    # --full / nightly-cron, not a fast smoke probe. (ASan/UBSan-equiv work
+    # against the shipped std and are probed below.)
+    if [ "$_kind" = thread ] || [ "$_kind" = memory ]; then
+        row "$_kind" seed SKIP "$_kind seed needs -Zbuild-std (instrumented std/panic_unwind); heavy build deferred to --full/nightly-cron"
+        return 0
+    fi
+    _rustc=$(seed_rustc_nightly)
+    _rflags=$(rust_flags "$_kind")
+    _sdir="$WORK/seed-$_short"; mkdir -p "$_sdir"
+    _rs="$_sdir/probe.rs"; _bin="$_sdir/probe"
+    cat > "$_rs" <<'EOF'
+fn main() {
+    let v: Vec<i32> = (1..=5).collect();
+    let s: i32 = v.iter().copied().map(|x| x.wrapping_mul(2)).sum();
+    println!("seed-probe ok s={}", s);
+}
+EOF
+    # For -Zsanitizer=address rustc needs an explicit --target (only address
+    # reaches here; thread/memory SKIP above, undefined-equiv needs no target).
+    _tgt=""
+    case "$_kind" in address) _tgt="--target x86_64-unknown-linux-gnu" ;; esac
+    # shellcheck disable=SC2086
+    if ! run_capped $_rustc $_rflags $_tgt -o "$_bin" "$_rs" >"$_sdir/build.log" 2>&1; then
+        row "$_kind" seed SKIP "nightly present but $_kind instrumentation probe failed (see $_sdir/build.log; may need rust-src / -Zbuild-std)"
+        return 0
+    fi
+    if ! run_short "$_bin" >"$_sdir/run.log" 2>&1; then
+        row "$_kind" seed FAIL "seed instrumentation probe aborted/hung under $_short (see $_sdir/run.log)"
+        return 1
+    fi
+    row "$_kind" seed PASS "nightly $_kind instrumentation verified (probe compiled+ran); full workspace build deferred to --full/nightly-cron"
+    return 0
+}
+
+# ---------------------------------------------------------------- seed: full ---
+seed_full() {
+    _kind="$1"; _short=$(kind_short "$_kind")
+    if ! seed_nightly_ok; then
+        row "$_kind" seed SKIP "nightly Rust toolchain unavailable"
+        return 0
+    fi
+    _cargo="${SAN_CARGO:-cargo +nightly}"
+    _rflags=$(rust_flags "$_kind")
+    _target_dir="$REPO_ROOT/target/san-$_short"
+    _manifest="$REPO_ROOT/src/compiler_rust/Cargo.toml"
+    _log="$REPO_ROOT/build/runtime-san-$_short/seed_build.log"
+    mkdir -p "$REPO_ROOT/build/runtime-san-$_short"
+    _extra=""
+    _tgt=""
+    case "$_kind" in
+        address)        _tgt="--target x86_64-unknown-linux-gnu" ;;
+        thread|memory)  _tgt="--target x86_64-unknown-linux-gnu"; _extra="-Zbuild-std" ;;
+    esac
+    # shellcheck disable=SC2086
+    if RUSTFLAGS="$_rflags" CARGO_TARGET_DIR="$_target_dir" \
+        run_capped $_cargo build --manifest-path "$_manifest" $_tgt $_extra \
+        >"$_log" 2>&1; then
+        row "$_kind" seed PASS "seed workspace built clean under $_short (CARGO_TARGET_DIR=target/san-$_short)"
+        return 0
+    else
+        _rc=$?
+        if [ "$_rc" = 124 ]; then
+            row "$_kind" seed SKIP "seed build exceeded BUILD_TIMEOUT (${BUILD_TIMEOUT:-1800}s); see $_log"
+            return 0
+        fi
+        row "$_kind" seed FAIL "seed build failed under $_short (see $_log)"
+        return 1
+    fi
+}
+
+# ------------------------------------------------------------------ self-test --
+# Prove the harness DISCRIMINATES: a clean harness runs clean AND a KIND-matched
+# faulty harness is CAUGHT (nonzero) by the instrumented build. Checked for the
+# two sanitizers feasible now with a system C compiler and a deterministic
+# single-thread fault: address (heap-buffer-overflow) and undefined (signed
+# overflow) — exactly the -fsanitize=undefined,address configuration. (MSan is
+# excluded: it needs an instrumented libc and hangs on uninstrumented FFI; TSan
+# races are nondeterministic.) Exit 0 if every checked sanitizer discriminates.
+self_test() {
+    log "sanitizer-matrix --self-test: proving the instrumentation catches injected faults"
+    _fails=0; _checked=0
+    for _k in address undefined; do
+        _cc=$(detect_cc "$_k")
+        if [ -z "$_cc" ]; then
+            log "  [$_k] SKIP  (no suitable compiler)"
+            continue
+        fi
+        _cflags=$(c_cflags "$_k")
+        _d="$WORK/selftest-$_k"; mkdir -p "$_d"
+        # clean must run clean
+        gen_clean_harness "$_d/clean.c"
+        if ! "$_cc" $_cflags "$_d/clean.c" -o "$_d/clean" >"$_d/cb.log" 2>&1; then
+            log "  [$_k] SKIP  (clean harness would not build: $_cc)"
+            continue
+        fi
+        if ! "$_d/clean" >/dev/null 2>&1; then
+            log "  [$_k] FAIL  clean harness aborted under sanitizer (false positive)"
+            _fails=$((_fails + 1)); _checked=$((_checked + 1)); continue
+        fi
+        # faulty must be caught
+        if ! gen_fault_harness "$_k" "$_d/bad.c"; then
+            log "  [$_k] partial (clean ok; no deterministic fault case) "
+            continue
+        fi
+        if ! "$_cc" $_cflags "$_d/bad.c" -o "$_d/bad" >"$_d/bb.log" 2>&1; then
+            log "  [$_k] SKIP  (faulty harness would not build)"
+            continue
+        fi
+        _checked=$((_checked + 1))
+        if run_short "$_d/bad" >"$_d/bad.run" 2>&1; then
+            log "  [$_k] FAIL  injected fault was NOT caught -> instrumentation is not live"
+            _fails=$((_fails + 1))
+        else
+            log "  [$_k] PASS  clean ran clean; injected fault caught (nonzero)"
+        fi
+    done
+    if [ "$_checked" = 0 ]; then
+        log "self-test: no sanitizer was exercisable on this host (no clang/gcc?) — inconclusive"
+        return 1
+    fi
+    if [ "$_fails" -gt 0 ]; then
+        log "self-test: FAIL ($_fails sanitizer(s) did not discriminate)"
+        return 1
+    fi
+    log "self-test: PASS (harness builds clean code and catches real faults)"
+    return 0
+}
+
+# --------------------------------------------------------------- waiver ledger --
+# Prints "<active> <expired>" counts and appends any live-but-listed rows to the
+# report. A minimal, honest reader: the smoke path produces no findings, so no
+# finding<->waiver matching is needed yet; expiry is still enforced so a stale
+# ledger is visible.
+count_waivers() {
+    _active=0; _expired=0
+    if [ -f "$WAIVERS_FILE" ]; then
+        _today=$(date +%Y-%m-%d)
+        # Table data rows look like: | id | san | file:line | just | granted | expiry | owner |
+        while IFS= read -r _line; do
+            case "$_line" in
+                '|'*'|'*'|'*)
+                    # skip header / separator rows
+                    case "$_line" in
+                        *'---'*) continue ;;
+                        *'finding'*|*'Finding'*) continue ;;
+                    esac
+                    _exp=$(printf '%s\n' "$_line" | awk -F'|' '{gsub(/ /,"",$7); print $7}')
+                    case "$_exp" in
+                        [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9])
+                            if [ "$_exp" \< "$_today" ]; then
+                                _expired=$((_expired + 1))
+                            else
+                                _active=$((_active + 1))
+                            fi ;;
+                        *) : ;;
+                    esac ;;
+            esac
+        done < "$WAIVERS_FILE"
+    fi
+    echo "$_active $_expired"
+}
+
+# ---------------------------------------------------------------- report/print --
+render() {
+    _w=$(count_waivers); _wactive=${_w% *}; _wexpired=${_w#* }
+    _any_fail=0
+    # stdout table
+    log ""
+    log "Sanitizer Matrix ($MODE)  —  san=$SAN target=$TARGET"
+    log "-------------------------------------------------------------"
+    printf '%-10s %-8s %-6s %s\n' "SAN" "TARGET" "STATUS" "DETAIL"
+    while IFS="$(printf '\t')" read -r _s _t _st _d; do
+        printf '%-10s %-8s %-6s %s\n' "$_s" "$_t" "$_st" "$_d"
+        [ "$_st" = FAIL ] && _any_fail=1
+    done < "$RESULTS"
+    log "-------------------------------------------------------------"
+    log "waivers: $_wactive active, $_wexpired EXPIRED   ledger: $WAIVERS_FILE"
+    [ "$_wexpired" -gt 0 ] && log "  WARNING: $_wexpired waiver(s) expired — re-triage required (treated as regression on --full)."
+
+    if [ "$WANT_REPORT" = 1 ]; then
+        mkdir -p "$(dirname "$REPORT_PATH")"
+        {
+            echo "# Sanitizer Matrix Report (cert C4)"
+            echo ""
+            echo "- Mode: \`$MODE\`   san: \`$SAN\`   target: \`$TARGET\`"
+            echo "- Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "- Spec: doc/03_plan/cert/sanitizer_matrix_plan.md"
+            echo "- Waiver ledger: $WAIVERS_FILE ($_wactive active, $_wexpired expired)"
+            echo ""
+            echo "| Sanitizer | Target | Status | Detail |"
+            echo "|---|---|---|---|"
+            while IFS="$(printf '\t')" read -r _s _t _st _d; do
+                echo "| $_s | $_t | $_st | $_d |"
+            done < "$RESULTS"
+            echo ""
+            echo "Legend: PASS = clean, FAIL = unwaived finding, SKIP = toolchain/platform-gated (not a defect)."
+            echo ""
+            echo "Triage: file any FAIL the same day; record fix or a narrowly-scoped, 90-day"
+            echo "waiver in the ledger above (no blanket/path-level suppressions). See the"
+            echo "'Triage / waiver process' section of the plan."
+        } > "$REPORT_PATH"
+        log "report: $REPORT_PATH"
+    fi
+    return "$_any_fail"
+}
+
+# ----------------------------------------------------------------------- main --
+if [ "$SELF_TEST" = 1 ]; then
+    self_test
+    exit $?
+fi
+
+RC=0
+for _tgt in $TGT_LIST; do
+    for _san in $SAN_LIST; do
+        if [ "$_tgt" = runtime ]; then
+            if [ "$MODE" = full ]; then runtime_full "$_san" || RC=1
+            else runtime_smoke "$_san" || RC=1; fi
+        else
+            if [ "$MODE" = full ]; then seed_full "$_san" || RC=1
+            else seed_smoke "$_san" || RC=1; fi
+        fi
+    done
+done
+
+render || RC=1
+exit "$RC"

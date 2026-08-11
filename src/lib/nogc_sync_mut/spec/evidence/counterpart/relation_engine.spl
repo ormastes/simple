@@ -1,0 +1,375 @@
+@allow(primitive_api)
+# Counterpart Conformance — N-way relation engine, single-cell evaluation
+# (Wave 1, lane F6).
+#
+# primitive_api is allowed here deliberately: match/mismatch counts, tolerances
+# and metrics are the frozen Wave-0 wire types.
+#
+# Evaluates ONE CounterpartRelation between two LogicalArtifacts and yields one
+# ComparisonCell. The complex relations (cross_decode, round_trip, metamorphic)
+# stay HERE and are projected into CanonicalEvidence as counted facts
+# (`counterpart.cross_decode.executed=16`, `counterpart.round_trip.failed=0`)
+# rather than expanding the stable Modern SSpec `OracleMode` enum — design §7.
+#
+# Fail-closed throughout:
+#   * either artifact vacuous                     -> mismatch
+#   * schema id / schema version disagreement     -> mismatch
+#   * exact relation over a lossy route           -> mismatch
+#   * numeric_bound with a tolerance and no reason-> mismatch
+#   * a complex relation that executed zero cases -> mismatch
+#
+# Design: doc/05_design/infra/counterpart/counterpart_conformance_infrastructure_design_2026-08-09.md §7
+
+use std.common.spec.evidence.counterpart.model.{
+    LogicalArtifact,
+    ComparisonCell,
+    ConversionLoss,
+    CounterpartRelation,
+    conversion_loss_rank,
+    conversion_loss_name,
+    relation_name,
+    relation_requires_exactness,
+    relation_max_permitted_loss_rank,
+    logical_artifact_is_vacuous
+}
+
+# ---------------------------------------------------------------------------
+# Inputs
+# ---------------------------------------------------------------------------
+
+# Counted outcomes for the complex relations. `executed` is the number of
+# corresponding cases actually run; a relation that executed nothing is vacuous
+# and fails, it does not "pass with no failures".
+pub struct RelationFacts:
+    executed: i64
+    failed: i64
+
+pub fn relation_facts(executed: i64, failed: i64) -> RelationFacts:
+    RelationFacts(executed: executed, failed: failed)
+
+pub struct RelationInput:
+    left_source_id: text
+    right_source_id: text
+    relation: CounterpartRelation
+    tolerance: i64
+    tolerance_reason: text
+    route_loss: ConversionLoss
+    left: LogicalArtifact
+    right: LogicalArtifact
+    left_elements: [text]
+    right_elements: [text]
+    left_metric: i64
+    right_metric: i64
+    facts: RelationFacts
+
+pub fn relation_input(
+    left_source_id: text,
+    right_source_id: text,
+    relation: CounterpartRelation,
+    route_loss: ConversionLoss,
+    left: LogicalArtifact,
+    right: LogicalArtifact
+) -> RelationInput:
+    RelationInput(
+        left_source_id: left_source_id,
+        right_source_id: right_source_id,
+        relation: relation,
+        tolerance: 0,
+        tolerance_reason: "",
+        route_loss: route_loss,
+        left: left,
+        right: right,
+        left_elements: [],
+        right_elements: [],
+        left_metric: left.item_count,
+        right_metric: right.item_count,
+        facts: RelationFacts(executed: 0, failed: 0)
+    )
+
+pub fn relation_input_with_elements(
+    base: RelationInput,
+    left_elements: [text],
+    right_elements: [text]
+) -> RelationInput:
+    RelationInput(
+        left_source_id: base.left_source_id,
+        right_source_id: base.right_source_id,
+        relation: base.relation,
+        tolerance: base.tolerance,
+        tolerance_reason: base.tolerance_reason,
+        route_loss: base.route_loss,
+        left: base.left,
+        right: base.right,
+        left_elements: left_elements,
+        right_elements: right_elements,
+        left_metric: base.left_metric,
+        right_metric: base.right_metric,
+        facts: base.facts
+    )
+
+pub fn relation_input_with_tolerance(
+    base: RelationInput,
+    tolerance: i64,
+    tolerance_reason: text
+) -> RelationInput:
+    RelationInput(
+        left_source_id: base.left_source_id,
+        right_source_id: base.right_source_id,
+        relation: base.relation,
+        tolerance: tolerance,
+        tolerance_reason: tolerance_reason,
+        route_loss: base.route_loss,
+        left: base.left,
+        right: base.right,
+        left_elements: base.left_elements,
+        right_elements: base.right_elements,
+        left_metric: base.left_metric,
+        right_metric: base.right_metric,
+        facts: base.facts
+    )
+
+pub fn relation_input_with_metrics(
+    base: RelationInput,
+    left_metric: i64,
+    right_metric: i64
+) -> RelationInput:
+    RelationInput(
+        left_source_id: base.left_source_id,
+        right_source_id: base.right_source_id,
+        relation: base.relation,
+        tolerance: base.tolerance,
+        tolerance_reason: base.tolerance_reason,
+        route_loss: base.route_loss,
+        left: base.left,
+        right: base.right,
+        left_elements: base.left_elements,
+        right_elements: base.right_elements,
+        left_metric: left_metric,
+        right_metric: right_metric,
+        facts: base.facts
+    )
+
+pub fn relation_input_with_facts(base: RelationInput, facts: RelationFacts) -> RelationInput:
+    RelationInput(
+        left_source_id: base.left_source_id,
+        right_source_id: base.right_source_id,
+        relation: base.relation,
+        tolerance: base.tolerance,
+        tolerance_reason: base.tolerance_reason,
+        route_loss: base.route_loss,
+        left: base.left,
+        right: base.right,
+        left_elements: base.left_elements,
+        right_elements: base.right_elements,
+        left_metric: base.left_metric,
+        right_metric: base.right_metric,
+        facts: facts
+    )
+
+# ---------------------------------------------------------------------------
+# Small pure helpers
+# ---------------------------------------------------------------------------
+
+fn cell(input: RelationInput, matched: bool, mismatch_count: i64, detail: text) -> ComparisonCell:
+    ComparisonCell(
+        left_source_id: input.left_source_id,
+        right_source_id: input.right_source_id,
+        relation: input.relation,
+        matched: matched,
+        mismatch_count: mismatch_count,
+        route_loss: input.route_loss,
+        detail: detail
+    )
+
+fn abs_i64(value: i64) -> i64:
+    if value < 0:
+        return 0 - value
+    value
+
+# Bytewise text ordering. Deliberately NOT the `<` operator: native codegen
+# compares text by raw pointer, which would make the multiset canonical order
+# nondeterministic (same reasoning as src/lib/common/sdn/encode.spl).
+fn text_lt(a: text, b: text) -> bool:
+    val ab = a.bytes()
+    val bb = b.bytes()
+    var i = 0
+    while i < ab.len() and i < bb.len():
+        val ca = ab[i].to_i64()
+        val cb = bb[i].to_i64()
+        if ca < cb:
+            return true
+        if ca > cb:
+            return false
+        i = i + 1
+    ab.len() < bb.len()
+
+# Insertion sort over a copy; `text` is a value type so the caller's list is
+# untouched. Used only for multiset_equal, where order must not matter.
+fn sorted_texts(items: [text]) -> [text]:
+    var out: [text] = []
+    for item in items:
+        var inserted = false
+        var next: [text] = []
+        for existing in out:
+            if not inserted and text_lt(item, existing):
+                next.push(item)
+                inserted = true
+            next.push(existing)
+        if not inserted:
+            next.push(item)
+        out = next
+    out
+
+fn ordered_mismatch_count(left: [text], right: [text]) -> i64:
+    var mismatches: i64 = 0
+    var index: i64 = 0
+    var shorter = left.len()
+    if right.len() < shorter:
+        shorter = right.len()
+    while index < shorter:
+        if left[index] != right[index]:
+            mismatches = mismatches + 1
+        index = index + 1
+    mismatches + abs_i64(left.len() - right.len())
+
+# ---------------------------------------------------------------------------
+# Preconditions shared by every relation
+# ---------------------------------------------------------------------------
+
+# Reasons the pair cannot be compared at all, independent of the relation.
+pub fn relation_precondition_failures(input: RelationInput) -> [text]:
+    var failures: [text] = []
+    if logical_artifact_is_vacuous(input.left):
+        failures.push("left artifact " + input.left_source_id + " is vacuous")
+    if logical_artifact_is_vacuous(input.right):
+        failures.push("right artifact " + input.right_source_id + " is vacuous")
+    if input.left.schema_id != input.right.schema_id:
+        failures.push("schema id mismatch: '" + input.left.schema_id
+            + "' vs '" + input.right.schema_id + "'")
+    if input.left.schema_version != input.right.schema_version:
+        failures.push("schema version mismatch: " + input.left.schema_version.to_text()
+            + " vs " + input.right.schema_version.to_text())
+    if relation_requires_exactness(input.relation):
+        val rank = conversion_loss_rank(input.route_loss)
+        if rank > relation_max_permitted_loss_rank(input.relation):
+            failures.push("exact relation " + relation_name(input.relation)
+                + " reached through a " + conversion_loss_name(input.route_loss) + " route")
+    if input.tolerance != 0 and input.tolerance_reason == "":
+        failures.push("tolerance " + input.tolerance.to_text() + " declared with no reason")
+    failures
+
+# ---------------------------------------------------------------------------
+# Per-relation evaluation
+# ---------------------------------------------------------------------------
+
+fn eval_hash_equal(input: RelationInput, label: text) -> ComparisonCell:
+    if input.left.canonical_hash == input.right.canonical_hash:
+        return cell(input, true, 0, label + " canonical hashes agree")
+    cell(input, false, 1, label + " canonical hash mismatch: '"
+        + input.left.canonical_hash + "' vs '" + input.right.canonical_hash + "'")
+
+fn eval_ordered(input: RelationInput) -> ComparisonCell:
+    if input.left_elements.len() == 0 and input.right_elements.len() == 0:
+        # No projected element sequence: fall back to the order-sensitive
+        # canonical hash, which encodes sequence by construction.
+        return eval_hash_equal(input, "ordered_equal (hash projection)")
+    val mismatches = ordered_mismatch_count(input.left_elements, input.right_elements)
+    if mismatches == 0:
+        return cell(input, true, 0, "ordered_equal: "
+            + input.left_elements.len().to_text() + " elements agree in order")
+    cell(input, false, mismatches, "ordered_equal: " + mismatches.to_text()
+        + " positional mismatch(es)")
+
+fn eval_multiset(input: RelationInput) -> ComparisonCell:
+    if input.left_elements.len() == 0 and input.right_elements.len() == 0:
+        if input.left.item_count != input.right.item_count:
+            return cell(input, false, abs_i64(input.left.item_count - input.right.item_count),
+                "multiset_equal: item counts differ")
+        return eval_hash_equal(input, "multiset_equal (hash projection)")
+    val mismatches = ordered_mismatch_count(
+        sorted_texts(input.left_elements),
+        sorted_texts(input.right_elements)
+    )
+    if mismatches == 0:
+        return cell(input, true, 0, "multiset_equal: "
+            + input.left_elements.len().to_text() + " elements agree as a multiset")
+    cell(input, false, mismatches, "multiset_equal: " + mismatches.to_text()
+        + " element multiplicity mismatch(es)")
+
+fn eval_numeric_bound(input: RelationInput) -> ComparisonCell:
+    if input.tolerance_reason == "":
+        return cell(input, false, 1,
+            "numeric_bound requires a stated tolerance reason; none was given")
+    val delta = abs_i64(input.left_metric - input.right_metric)
+    if delta <= input.tolerance:
+        return cell(input, true, 0, "numeric_bound: |delta|=" + delta.to_text()
+            + " within tolerance " + input.tolerance.to_text()
+            + " (" + input.tolerance_reason + ")")
+    cell(input, false, 1, "numeric_bound: |delta|=" + delta.to_text()
+        + " exceeds tolerance " + input.tolerance.to_text()
+        + " (" + input.tolerance_reason + ")")
+
+fn eval_counted(input: RelationInput, label: text) -> ComparisonCell:
+    if input.facts.executed <= 0:
+        return cell(input, false, 1, label + ": executed=0, nothing was exercised")
+    if input.facts.failed < 0:
+        return cell(input, false, 1, label + ": negative failure count")
+    if input.facts.failed == 0:
+        return cell(input, true, 0, label + ": executed="
+            + input.facts.executed.to_text() + ", failed=0")
+    cell(input, false, input.facts.failed, label + ": executed="
+        + input.facts.executed.to_text() + ", failed=" + input.facts.failed.to_text())
+
+# Evaluate one relation. Never returns a bare bool; the ComparisonCell carries
+# the mismatch count, the route loss it was reached through, and a detail line
+# that goes into the generated manual.
+pub fn evaluate_relation(input: RelationInput) -> ComparisonCell:
+    val preconditions = relation_precondition_failures(input)
+    if preconditions.len() != 0:
+        var detail = relation_name(input.relation) + " refused: " + preconditions[0]
+        var index: i64 = 1
+        while index < preconditions.len():
+            detail = detail + "; " + preconditions[index]
+            index = index + 1
+        return cell(input, false, preconditions.len(), detail)
+
+    match input.relation:
+        CounterpartRelation.byte_exact => eval_hash_equal(input, "byte_exact")
+        CounterpartRelation.canonical_exact => eval_hash_equal(input, "canonical_exact")
+        CounterpartRelation.structural_equal => eval_hash_equal(input, "structural_equal")
+        CounterpartRelation.semantic_equal => eval_hash_equal(input, "semantic_equal")
+        CounterpartRelation.image_exact => eval_hash_equal(input, "image_exact")
+        CounterpartRelation.image_masked_exact => eval_hash_equal(input, "image_masked_exact")
+        CounterpartRelation.ordered_equal => eval_ordered(input)
+        CounterpartRelation.multiset_equal => eval_multiset(input)
+        CounterpartRelation.numeric_bound => eval_numeric_bound(input)
+        CounterpartRelation.image_threshold => eval_numeric_bound(input)
+        CounterpartRelation.cross_decode => eval_counted(input, "cross_decode")
+        CounterpartRelation.round_trip => eval_counted(input, "round_trip")
+        CounterpartRelation.metamorphic => eval_counted(input, "metamorphic")
+        CounterpartRelation.trace_refinement => eval_counted(input, "trace_refinement")
+
+# ---------------------------------------------------------------------------
+# Projection into CanonicalEvidence facts
+# ---------------------------------------------------------------------------
+
+pub fn relation_is_counted(relation: CounterpartRelation) -> bool:
+    match relation:
+        CounterpartRelation.cross_decode => true
+        CounterpartRelation.round_trip => true
+        CounterpartRelation.metamorphic => true
+        CounterpartRelation.trace_refinement => true
+        _ => false
+
+# `counterpart.<relation>.executed=N`, `counterpart.<relation>.failed=N`, and
+# for every relation `counterpart.<relation>.mismatches=N`. These are the facts
+# the Modern SSpec comparator consumes; the OracleMode enum stays untouched.
+pub fn relation_projected_facts(input: RelationInput, result: ComparisonCell) -> [text]:
+    val prefix = "counterpart." + relation_name(input.relation) + "."
+    var facts: [text] = []
+    if relation_is_counted(input.relation):
+        facts.push(prefix + "executed=" + input.facts.executed.to_text())
+        facts.push(prefix + "failed=" + input.facts.failed.to_text())
+    facts.push(prefix + "mismatches=" + result.mismatch_count.to_text())
+    facts.push(prefix + "route_loss=" + conversion_loss_name(result.route_loss))
+    facts

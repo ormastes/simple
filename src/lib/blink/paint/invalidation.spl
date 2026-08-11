@@ -1,0 +1,219 @@
+# Blink paint invalidation — blink.paint.invalidation
+#
+# Closes blocker 10 of `doc/03_plan/ui/rendering/blink_wiring_plan.md`
+# ("style invalidation / rule indexing — blink recascades wholesale").
+#
+# ## What this IS, stated precisely
+#
+# This module computes, for two consecutive frames of the same document, WHICH
+# boxes need repainting: it diffs the previous `StyledLayout` against the next
+# one and reports the changed node ids plus the damage rects that cover them.
+#
+# ## What this is NOT — read before claiming a speed-up
+#
+# The cascade is still TOTAL. `build_styled_layout` re-resolves every element
+# against the whole stylesheet on every frame; nothing here makes that
+# incremental, and no rule index exists yet. The incrementality this module
+# delivers is entirely on the PAINT side: a repaint scoped to the damage rects
+# instead of the whole viewport.
+#
+# **No performance claim is made or measured here.** The specs assert the
+# CORRECTNESS property — that the reported damage covers exactly the boxes
+# whose paint-visible style or geometry changed, and that an unchanged frame
+# reports no damage. A "recompute everything" invalidation would satisfy the
+# safety half of that but not the exactness half, which is why the specs assert
+# exact node-id sets rather than mere coverage.
+#
+# The remaining half of blocker 10 — a selector/rule index so the CASCADE can
+# skip untouched elements — is deliberately out of scope. That belongs in
+# `blink/style/**`, which this module does not own.
+#
+# ## Structural change is a full invalidation, honestly reported
+#
+# When the two frames do not describe the same set of boxes (a node appeared or
+# disappeared, or the box order changed), a per-node diff is meaningless. The
+# result then carries `structural: true` and the caller must repaint
+# everything. That is reported as a flag, not disguised as a long list of
+# changed nodes.
+
+use std.blink.entity.computed_style.{ComputedStyle, Length}
+use std.blink.layout.style_bridge.{StyledLayout}
+
+# One axis-aligned damage region, as (left, top, right, bottom) in CSS pixels.
+pub struct DamageRect:
+    left: f64
+    top: f64
+    right: f64
+    bottom: f64
+
+impl DamageRect:
+    fn width() -> f64:
+        self.right - self.left
+
+    fn height() -> f64:
+        self.bottom - self.top
+
+    # The smallest rect containing both. Used to merge a node's OLD and NEW
+    # box: a box that moved damages both the place it left and the place it
+    # arrived, and one rect spanning them covers both.
+    fn union(other: DamageRect) -> DamageRect:
+        var l = self.left
+        if other.left < l:
+            l = other.left
+        var t = self.top
+        if other.top < t:
+            t = other.top
+        var r = self.right
+        if other.right > r:
+            r = other.right
+        var b = self.bottom
+        if other.bottom > b:
+            b = other.bottom
+        DamageRect(left: l, top: t, right: r, bottom: b)
+
+# The result of diffing two frames.
+pub class PaintInvalidation:
+    """Which boxes changed between two frames, and the area they cover."""
+    changed_node_ids: [i64]
+    damage: [DamageRect]
+    # True when the two frames do not describe the same boxes at all, so the
+    # per-node diff could not be computed and everything must repaint.
+    structural: bool
+
+impl PaintInvalidation:
+    # True when nothing at all needs repainting.
+    fn is_empty() -> bool:
+        (not self.structural) and self.changed_node_ids.len() == 0
+
+    # A single rect covering every damage region, or nil when there is none.
+    # Callers that cannot handle a rect list (a whole-surface blit) use this.
+    fn bounding_damage() -> DamageRect?:
+        if self.damage.len() == 0:
+            return nil
+        var acc = self.damage[0 as i32]
+        var i = 1
+        while i < self.damage.len():
+            acc = acc.union(self.damage[i as i32])
+            i = i + 1
+        Some(acc)
+
+fn _length_equal(a: Length, b: Length) -> bool:
+    a.value == b.value and a.unit == b.unit
+
+# Two styles are equal for INVALIDATION purposes when every property that can
+# change the pixels of this box is equal. This is the whole modelled property
+# set of `ComputedStyle` — each of display/position/overflow/visibility/
+# text-align/opacity/colours/box metrics/font-size either paints directly or
+# moves the box that paints — so the comparison is exhaustive rather than a
+# hand-picked subset that would silently miss a change.
+pub fn styles_equal(a: ComputedStyle, b: ComputedStyle) -> bool:
+    """True when `a` and `b` agree on every paint-visible property."""
+    if a.display != b.display:
+        return false
+    if a.position != b.position:
+        return false
+    if a.overflow != b.overflow:
+        return false
+    if a.visibility != b.visibility:
+        return false
+    if a.text_align != b.text_align:
+        return false
+    if a.opacity != b.opacity:
+        return false
+    if a.color.to_sk_color() != b.color.to_sk_color():
+        return false
+    if a.background_color.to_sk_color() != b.background_color.to_sk_color():
+        return false
+    if not _length_equal(a.margin_left, b.margin_left):
+        return false
+    if not _length_equal(a.margin_right, b.margin_right):
+        return false
+    if not _length_equal(a.margin_top, b.margin_top):
+        return false
+    if not _length_equal(a.margin_bottom, b.margin_bottom):
+        return false
+    if not _length_equal(a.padding_left, b.padding_left):
+        return false
+    if not _length_equal(a.padding_top, b.padding_top):
+        return false
+    if not _length_equal(a.padding_right, b.padding_right):
+        return false
+    if not _length_equal(a.padding_bottom, b.padding_bottom):
+        return false
+    if not _length_equal(a.width, b.width):
+        return false
+    if not _length_equal(a.height, b.height):
+        return false
+    _length_equal(a.font_size, b.font_size)
+
+# True when the two frames describe the same boxes in the same order, which is
+# the precondition for a per-node diff. Position `i` must carry the same node
+# id in both, because `styles[i]` is index-parallel to `node_ids[i]`.
+fn _same_box_set(prev: StyledLayout, next: StyledLayout) -> bool:
+    if prev.node_ids.len() != next.node_ids.len():
+        return false
+    var i = 0
+    while i < prev.node_ids.len():
+        if prev.node_ids[i as i32] != next.node_ids[i as i32]:
+            return false
+        i = i + 1
+    true
+
+fn _rect_of(layout: StyledLayout, node_id: i64) -> DamageRect?:
+    match layout.rect_for(node_id):
+        Some(r):
+            Some(DamageRect(left: r.0, top: r.1, right: r.2, bottom: r.3))
+        None:
+            nil
+
+# The damage a single changed node contributes: the union of where it WAS and
+# where it now IS. A node that only recoloured contributes one rect twice over,
+# whose union is itself; a node that moved or resized contributes both boxes.
+fn _node_damage(prev: StyledLayout, next: StyledLayout, node_id: i64) -> DamageRect?:
+    val old_rect = _rect_of(prev, node_id)
+    val new_rect = _rect_of(next, node_id)
+    if val o = old_rect:
+        if val n = new_rect:
+            return Some(o.union(n))
+        return Some(o)
+    new_rect
+
+pub fn diff_styled_layouts(prev: StyledLayout, next: StyledLayout) -> PaintInvalidation:
+    """Report which boxes changed between `prev` and `next`, and their damage."""
+    var changed: [i64] = []
+    var damage: [DamageRect] = []
+    if not _same_box_set(prev, next):
+        # Structural change: every box repaints. `changed_node_ids` is left
+        # empty on purpose — filling it with every id would read like a
+        # precise diff, and it is not one. The flag is the answer.
+        return PaintInvalidation(changed_node_ids: changed, damage: damage, structural: true)
+
+    var i = 0
+    while i < next.node_ids.len():
+        val node_id = next.node_ids[i as i32]
+        val old_style = prev.styles[i as i32]
+        val new_style = next.styles[i as i32]
+        var dirty = not styles_equal(old_style, new_style)
+        if not dirty:
+            # Geometry can move under an unchanged style — a sibling above this
+            # box grew, so this one shifted down. Comparing rects catches that;
+            # a style-only diff would miss it entirely and leave a stale box.
+            val o = _rect_of(prev, node_id)
+            val n = _rect_of(next, node_id)
+            if val ov = o:
+                if val nv = n:
+                    dirty = not (ov.left == nv.left and ov.top == nv.top and
+                                 ov.right == nv.right and ov.bottom == nv.bottom)
+                else:
+                    dirty = true
+            elif n != nil:
+                dirty = true
+        if dirty:
+            changed.push(node_id)
+            if val d = _node_damage(prev, next, node_id):
+                damage.push(d)
+        i = i + 1
+    PaintInvalidation(changed_node_ids: changed, damage: damage, structural: false)
+
+export DamageRect, PaintInvalidation
+export styles_equal, diff_styled_layouts

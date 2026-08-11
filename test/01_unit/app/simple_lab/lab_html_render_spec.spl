@@ -1,0 +1,283 @@
+"""
+Simple Lab rendered-HTML scenario spec (Stream L, task L2/L4 consumer).
+
+Drives `app.simple_lab.main.SimpleLabApp` in-process (same widget tree the
+HTTP layer serves — see `src/app/simple_lab/lab_server.spl`'s
+`LAB_UI_APP`/`LAB_UI_SESSION`) and renders its widget tree through the shared
+tree-to-DOM renderer, `app.ui.render.html_widgets.render_html_tree` — the SAME
+function `app.ui.web.html.generate_html_page` calls to build the `<div
+id="app">` body for a real GET / response (`app.ui.web.server` /
+`async_server` / `tls_serve_loop` all call `generate_html_page`, which is
+`<!DOCTYPE html>` + head/css/js wrapped around exactly this call). Importing
+the full `app.ui.web` module chain here pulls transitive HTTP/server/daemon
+plumbing that blows the interpreter's 800-module load budget for a plain unit
+spec, so this spec calls the shared tree-renderer directly and wraps it in the
+same minimal doctype/head/body shell `generate_html_page` produces, rather
+than duplicating any widget-to-HTML logic. This proves the actual rendered
+HTML document, not a mock or a screenshot: every assertion below reads real
+element tags, ids, and DOM-visible text out of the HTML string the renderer
+produced.
+
+Scope note: `SimpleLabApp`'s cell output today is plain captured stdout text
+(`LabCellState.output_text`, `main.spl:46`) — there is no markdown or `m{}`
+math-block rendering wired into the widget tree yet, so this spec does not
+assert a markdown/LaTeX rendering scenario; forcing one would test behavior
+that does not exist. See `doc/05_design/app/tools/notebook_lanes_architecture.md`
+§7.1 for the current cell-output contract.
+
+**Requirements:** N/A
+**Plan:** doc/03_plan/agent_tasks/notebook_lanes_parallel_plan_2026-08-07.md (Stream L)
+**Design:** doc/05_design/app/tools/notebook_lanes_architecture.md §7.1, §7.4
+**Research:** N/A
+"""
+
+use std.spec.*
+use common.ui.widget.{UIEvent}
+use common.ui.state.{init_state}
+use app.simple_lab.main.{SimpleLabApp}
+use app.ui.render.html_widgets.{render_html_tree}
+use std.common.spec.scenario_helpers.{
+    check_html_has_tag,
+    check_html_has_element_text,
+    check_html_contains_visible_text,
+    check_html_contains_visible_text_evidence,
+    capture_html,
+    capture_html_text
+}
+use std.common.spec.evidence.legacy_facade.{legacy_evidence_to_canonical}
+use std.common.spec.evidence.model.{oracle_spec_open, check_exact, EvidenceStatus}
+use std.common.spec.evidence.evidence_comparator.{compare_evidence}
+
+# ============================================================================
+# Step helpers — build the real widget tree, render it through the shared
+# web HTML renderer, and drive the app the same way the HTTP layer's
+# `/api/test/*` shared UI contract does (see `lab_server.spl`'s
+# `lab_test_api_inject_event`): dispatch a `UIEvent` straight into
+# `SimpleLabApp.handle_event`, then rebuild.
+# ============================================================================
+
+fn open_notebook_page() -> SimpleLabApp:
+    SimpleLabApp.create()
+
+fn render_page(app: SimpleLabApp) -> text:
+    """Render the notebook widget tree to a full HTML document the same way
+    `app.ui.web.html.generate_html_page` shapes a real GET / response
+    (doctype + html/head/body around the tree-to-DOM body), using the same
+    shared `render_html_tree` call, without importing that module's heavy
+    HTTP-server transitive closure into a unit spec."""
+    val state = init_state(app.build_ui())
+    val body_html = render_html_tree(state.tree.root_node(), state)
+    "<!DOCTYPE html>\n<html lang=\"en\">\n<head><meta charset=\"UTF-8\"><title>Simple Lab</title></head>\n<body>\n<div id=\"app\">" + body_html + "</div>\n</body>\n</html>"
+
+fn type_into_cell(app: SimpleLabApp, cell_editor_id: text, source: text):
+    app.handle_event(UIEvent.InputChange(cell_editor_id, source))
+
+fn run_cell_action(app: SimpleLabApp, run_action_name: text):
+    app.handle_event(UIEvent.Action(run_action_name))
+
+fn add_cell_action(app: SimpleLabApp):
+    app.handle_event(UIEvent.Action("lab_add_cell"))
+
+# ============================================================================
+# @manual_section: Loading the notebook page
+# ============================================================================
+
+describe "Simple Lab notebook page (rendered HTML)":
+    """
+    Verifies that loading the Simple Lab notebook renders a real HTML page
+    containing the structural surface a notebook operator needs: a cell
+    source editor, a run control, and a lane/kernel status indicator — as
+    actual DOM elements with the app's own stable ids (`main.spl`'s
+    documented `cell_<n>_editor` / `cell_<n>_run` / `cell_<n>_lane_badge`
+    convention), not as substrings of arbitrary text.
+    """
+
+    it "shows a cell editor, a run control, and a lane status indicator on load":
+        step("Open a fresh Simple Lab notebook")
+        val app = open_notebook_page()
+
+        step("Render the notebook's widget tree to HTML the same way the HTTP layer does")
+        val html = render_page(app)
+        val evidence = capture_html(
+            "Simple Lab fresh notebook page",
+            html,
+            "cell editor, Run button, lane status",
+            ""
+        )
+        expect(evidence.mime).to_equal("text/html")
+
+        # Typed-evidence migration (E8): convert the already-captured HTML
+        # artifact into CanonicalEvidence and assert against it with a real
+        # closed-oracle-style comparison, alongside (not instead of) the
+        # assertion above.
+        val canonical = legacy_evidence_to_canonical(evidence)
+        val oracle = oracle_spec_open("lab_fresh_notebook_page_evidence", [
+            check_exact("kind", "html"),
+            check_exact("title", "Simple Lab fresh notebook page"),
+            check_exact("mime", "text/html")
+        ])
+        val comparison = compare_evidence(canonical, oracle)
+        expect(comparison.status).to_equal(EvidenceStatus.passed)
+
+        step("Confirm the cell source editor is a real <textarea> element")
+        expect(check_html_has_tag(html, "textarea")).to_equal(true)
+        expect(html.contains("id=\"cell_0_editor\"")).to_equal(true)
+
+        step("Confirm a Run control is a real <button> element for that cell")
+        expect(check_html_has_tag(html, "button")).to_equal(true)
+        expect(html.contains("id=\"cell_0_run\"")).to_equal(true)
+        expect(check_html_has_element_text(html, "button", "Run")).to_equal(true)
+
+        step("Confirm the lane/kernel status indicator reads 'not run' before any execution")
+        expect(html.contains("id=\"cell_0_lane_badge\"")).to_equal(true)
+        expect(check_html_contains_visible_text(html, "not run")).to_equal(true)
+
+
+# ============================================================================
+# @manual_section: Running a cell
+# ============================================================================
+
+describe "Simple Lab notebook page after running a cell":
+    """
+    Verifies that executing a cell through `SimpleLabApp.handle_event` (the
+    same dispatch the HTTP `/api/test/click` and `/api/lab/.../execute`
+    routes both drive — see `lab_server.spl`'s `lab_test_api_inject_event`
+    and `lab_route_execute`) is reflected back in the rendered HTML on the
+    next render: the operator sees the cell's own captured output, not stale
+    or placeholder text.
+    """
+
+    it "shows the executed cell's output in the rendered page":
+        step("Open a fresh notebook and type a print statement into the first cell")
+        val app = open_notebook_page()
+        type_into_cell(app, "cell_0_editor", "print(\"42 from Simple Lab\")")
+
+        step("Render the page before running — the output element is present but empty")
+        val before_html = render_page(app)
+        val before_evidence = capture_html_text("Simple Lab cell before run", before_html, "")
+        # `cell_0_output` is an always-present `<div id="cell_0_output">` (see
+        # main.spl's unconditional `text_widget("cell_{index}_output", ...)`),
+        # so its PRESENCE doesn't distinguish before/after run. And the typed
+        # source itself contains the literal string "42 from Simple Lab" (the
+        # print() argument), so whole-page visible text isn't a reliable
+        # signal either. The real pre-run signal is that this element's own
+        # content is still empty.
+        expect(cell_output_element_text(before_html, 0)).to_equal("")
+
+        step("Run the first cell through the same action the Run button dispatches")
+        run_cell_action(app, "cell_run_0")
+
+        step("Render the page again and read the cell output back from the DOM")
+        val after_html = render_page(app)
+        val output_check = check_html_contains_visible_text_evidence(
+            "Simple Lab cell after run",
+            after_html,
+            "42 from Simple Lab"
+        )
+        expect(output_check.passed).to_equal(true)
+        expect(cell_output_element_text(after_html, 0).contains("42 from Simple Lab")).to_equal(true)
+
+        step("Confirm the lane status indicator moved from 'not run' to 'available'")
+        expect(check_html_contains_visible_text(after_html, "available")).to_equal(true)
+
+fn cell_output_element_text(html: text, cell_index: i64) -> text:
+    """Extract the inner text of `<div id="cell_{cell_index}_output">...</div>`
+    (render_html_text's flat, non-nested output shape) — a whole-page
+    visible-text search can't distinguish this element's own content from
+    unrelated text elsewhere on the page (e.g. the editor's source code)."""
+    val marker = "id=\"cell_{cell_index}_output\">"
+    val after_marker = html.split(marker)
+    if after_marker.len() < 2:
+        return ""
+    val tail = after_marker[1]
+    val before_close = tail.split("</div>")
+    if before_close.len() < 1:
+        return ""
+    before_close[0]
+
+
+# ============================================================================
+# @manual_section: Adding a cell
+# ============================================================================
+
+describe "Simple Lab notebook page after adding a cell":
+    """
+    Verifies that adding a cell (the `+ Cell` toolbar action,
+    `main.spl`'s `lab_add_cell` handler) produces a second, independently
+    addressable editor and run control in the rendered HTML rather than
+    replacing or merging with the first cell's markup.
+    """
+
+    it "renders a second cell's editor and run control alongside the first":
+        step("Open a fresh notebook with its single starting cell")
+        val app = open_notebook_page()
+        val one_cell_html = render_page(app)
+        expect(one_cell_html.contains("id=\"cell_1_editor\"")).to_equal(false)
+
+        step("Add a cell through the '+ Cell' toolbar action")
+        add_cell_action(app)
+
+        step("Render the page and capture it as evidence for the two-cell layout")
+        val two_cell_html = render_page(app)
+        val _evidence = capture_html(
+            "Simple Lab notebook after add-cell",
+            two_cell_html,
+            "cell_0_editor and cell_1_editor both present",
+            ""
+        )
+
+        step("Confirm the first cell's editor and run control are still present")
+        expect(two_cell_html.contains("id=\"cell_0_editor\"")).to_equal(true)
+        expect(two_cell_html.contains("id=\"cell_0_run\"")).to_equal(true)
+
+        step("Confirm the second cell's editor and run control now exist as distinct elements")
+        expect(two_cell_html.contains("id=\"cell_1_editor\"")).to_equal(true)
+        expect(two_cell_html.contains("id=\"cell_1_run\"")).to_equal(true)
+
+
+# ============================================================================
+# @manual_section: Page shell
+# ============================================================================
+
+describe "Simple Lab notebook page document shell":
+    """
+    Verifies the notebook page the shared web renderer produces is a
+    complete, well-formed HTML document (doctype, `<html>`, `<head>`,
+    `<body>`) and not a bare widget-tree fragment — the shape a browser or
+    an HTML validator actually needs to load it as a page.
+    """
+
+    it "renders a full HTML document with head and body around the widget tree":
+        step("Open a fresh notebook and render its page")
+        val app = open_notebook_page()
+        val html = render_page(app)
+
+        step("Capture the full page as evidence")
+        val page_evidence = capture_html(
+            "Simple Lab full page shell",
+            html,
+            "doctype, html, head, body wrapping the cell editor",
+            ""
+        )
+
+        # Typed-evidence migration (E8): same additive pattern as the first
+        # describe block above.
+        val shell_canonical = legacy_evidence_to_canonical(page_evidence)
+        val shell_oracle = oracle_spec_open("lab_full_page_shell_evidence", [
+            check_exact("kind", "html"),
+            check_exact("title", "Simple Lab full page shell"),
+            check_exact("mime", "text/html")
+        ])
+        val shell_comparison = compare_evidence(shell_canonical, shell_oracle)
+        expect(shell_comparison.status).to_equal(EvidenceStatus.passed)
+
+        step("Confirm the document starts with a real HTML5 doctype")
+        expect(html).to_start_with("<!DOCTYPE html>")
+
+        step("Confirm the document has real <html>, <head>, and <body> elements")
+        expect(check_html_has_tag(html, "html")).to_equal(true)
+        expect(check_html_has_tag(html, "head")).to_equal(true)
+        expect(check_html_has_tag(html, "body")).to_equal(true)
+
+        step("Confirm the cell editor from the widget tree is nested inside that document")
+        expect(html.contains("id=\"cell_0_editor\"")).to_equal(true)

@@ -1,0 +1,42 @@
+# REPRO for: native-build MIR lowering cannot resolve a method call whose
+# receiver came out of `Option<T>.unwrap()`.
+#
+#   error: MIR lowering error: unresolved method call: stat
+#
+# This is the minimal form of the shape that blocks the SimpleOS hosted FAT32
+# mount: `g_root_fat32.unwrap().stat(path)` in
+# `src/os/services/vfs/vfs_init.spl`, where `g_root_fat32: Option<Fat32Core>`.
+#
+# The sole difference from `control.spl` (which builds and runs) is that the
+# receiver makes one hop through an `Option`. Note that the explicit
+# `val d: Drv2 = ...` annotation does NOT rescue it — by the time MIR lowering
+# reaches the call, the Option's type ARGUMENT has already been erased in HIR,
+# so no concrete owner name is recoverable for static devirtualization.
+#
+# Cross-module imports are NOT required to reproduce; everything here is in
+# one file on purpose, so module resolution cannot be blamed.
+#
+# Expected once fixed: rc=0, prints exactly `OPTUNWRAP=9`.
+# See doc/08_tracking/bug/native_option_unwrap_receiver_unresolved_2026-08-09.md
+
+class Drv2:
+    n: i64
+
+impl Drv2:
+    static fn new(n: i64) -> Drv2:
+        Drv2(n: n)
+
+    me fn stat(path: text) -> i64:
+        self.n + path.len()
+
+fn main():
+    val o: Option<Drv2> = Drv2.new(7)
+    # Annotated intermediate local — the documented workaround for erased
+    # receivers (.claude/rules/language.md "Chained methods on erased
+    # receivers") — and it is NOT sufficient here.
+    val d: Drv2 = o.unwrap()
+    val got = d.stat("ab")
+    if got != 9:
+        println("OPTUNWRAP=BAD got={got}")
+        return
+    println("OPTUNWRAP=9")

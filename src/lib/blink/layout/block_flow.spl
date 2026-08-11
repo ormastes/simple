@@ -1,0 +1,526 @@
+# Blink block-flow layout — blink.layout.block_flow
+#
+# A minimal Block Formatting Context (BFC): boxes stack vertically inside their
+# parent's content box, offset by the parent's border + padding and by each
+# child's own margins.
+#
+# FLOATS, CLEAR AND MARGIN COLLAPSING (added 2026-08-11)
+#
+# These were blocker 7 of doc/03_plan/ui/rendering/blink_wiring_plan.md. The
+# RULES are not implemented here — they live in `common/layout/float_bands.spl`
+# and `common/layout/margin_collapse.spl`, which both blink and the live
+# browser lane may import. blink is a LEAF (it imports only `blink`, `skia`,
+# `common`) so it cannot reach the live lane's `layout_float.spl`, and copying
+# that file in would have grown the very duplicate family the wiring plan
+# exists to shrink. This module is only the blink-shaped DRIVER: it walks the
+# arena, asks those modules where things go, and writes `SkRect`s.
+#
+# Participation is declared per box, on `BlockFlowBox` rather than on
+# `BoxGeometry`: `float_side`, `clear`, and `establishes_bfc` are flow
+# behaviour, not dimensions, and keeping `BoxGeometry` at three fields means
+# every existing caller of it still compiles.
+#
+# THE INTERACTIONS, AND WHICH ARE HANDLED
+#
+# Handled:
+#   - Adjacent in-flow siblings collapse their facing margins.
+#   - A first in-flow child's margin-top collapses INTO its parent's own
+#     margin-top (so the parent moves, not just the child), and a last in-flow
+#     child's margin-bottom likewise, each only when no border, no padding, and
+#     no BFC root separates them. This is computed by `effective_margin_top` /
+#     `effective_margin_bottom`, which recurse down the first/last in-flow
+#     child chain, so a collapse through several empty-edged wrappers is
+#     modelled.
+#   - Floats do NOT collapse margins with anything (CSS 2.1 §8.3.1) and are
+#     skipped by the collapsing pass entirely.
+#   - A float BETWEEN two in-flow siblings suppresses their collapse, because
+#     their margins are no longer adjoining.
+#   - `clear` moves a box down past the relevant floats, and a box that
+#     actually gained clearance does NOT collapse its top margin with anything.
+#   - In-flow boxes are narrowed and shifted by the floats beside them, over
+#     the box's whole height band rather than at a single scanline.
+#   - A box's auto height grows to contain its own floats.
+#
+# NOT handled — stated so the geometry is never silently wrong:
+#   - Floats do not escape their parent. Each box gets its OWN float area, i.e.
+#     every box behaves as a block formatting context root for float
+#     containment. That is correct when the parent really is a BFC root and
+#     wrong when it is not (a float should then overflow into the grandparent's
+#     band). `establishes_bfc` therefore affects MARGIN collapsing only.
+#   - Self-collapsing boxes: an empty box with no border/padding/height does
+#     not collapse its own top and bottom margins together.
+#   - Floats need a declared container width. blink has no auto/percentage
+#     width, so a container with `width == 0.0` gives a zero-wide float band
+#     and every float lands at the left edge.
+#   - No float shrink-to-fit: a float uses its declared width.
+#   - Line boxes are not shortened by floats — that is inline layout's job and
+#     `layout/inline_text.spl` does not take a float area yet.
+#
+# Scope (other deliberate non-goals — see doc/08_tracking/bug/
+# render_lane_specs_import_nonexistent_modules_2026-08-08.md):
+#   - NO percentage sizing, NO shrink-to-fit; width is always as given
+#   - NO absolute/fixed positioning, NO writing-mode/RTL
+#   - Auto-height is minimal (added 2026-08-10, see `compute_layout`): a box
+#     with a 0.0 (undeclared/`auto`) height grows to fit the content height it
+#     just stacked. This is the narrow case needed so a text box's height
+#     shows up in its parent's own rect; it is not real CSS shrink-to-fit
+#     (no min/max-height, no interaction with floats or intrinsic width).
+# Consumers: blink/paint/paint_tree_walker.spl, blink/input/hit_test.spl
+#
+# NAMING — this type was called `LayoutBox` until 2026-08-10, which collided
+# with three unrelated box records: `common.layout.box_model.LayoutBox`
+# (recursive value tree, scalar x/y/w/h), `common.render_scene.box_types.
+# LayoutBox` (class, EdgeSizes-grouped BoxModel) and `browser_engine/
+# layout_box.spl.BeLayoutBox` (class, DOM-attached). They are genuinely
+# different structures — this one is arena/id-based (`children_ids: [i64]`,
+# `computed_rect: SkRect`) because the blink render-lane contract needs id
+# lookup and skia rects, which `common/` (a no-skia-dependency tier) must not
+# acquire. Renamed to `BlockFlowBox` so the four cannot be conflated.
+#
+# SPACING IS SHARED (merged 2026-08-10): `BoxGeometry` no longer declares its
+# own twelve spacing edges. It nests `common.layout.box_model.BoxModel`, which
+# was field-for-field identical, as `spacing`. Reach edges through it
+# (`geo.spacing.margin_top`). Do not reintroduce a parallel edge record — the
+# whole point is that a change to BoxModel is now felt by this lane too. See
+# doc/08_tracking/bug/three_layoutbox_variants_2026-08-10.md.
+#
+# `width`/`height` stay on BoxGeometry: BoxModel deliberately carries no
+# dimensions (its own consumer, `common.layout.LayoutBox`, holds w/h alongside
+# it), so nesting adds the edges without importing a sizing policy.
+
+use std.skia.entity.geometry.{SkRect}
+use std.common.layout.box_model.{BoxModel}
+use std.common.layout.float_bands.{
+    FloatArea, FloatRect, FloatSide, ClearKind, float_area_new
+}
+use std.common.layout.margin_collapse.{
+    collapse_margins, collapsed_gap, siblings_margins_collapse,
+    top_margin_collapses_with_parent, bottom_margin_collapses_with_parent
+}
+
+struct BoxGeometry:
+    """Box dimensions plus the shared CSS edge record, in device-independent pixels."""
+    width: f64
+    height: f64
+    spacing: BoxModel
+
+fn box_geometry_zero() -> BoxGeometry:
+    """Return a geometry with every edge and dimension at zero."""
+    BoxGeometry(width: 0.0, height: 0.0, spacing: BoxModel.zero())
+
+fn box_geometry_new(width: f64, height: f64, margin: f64, padding: f64, border: f64) -> BoxGeometry:
+    """Return a geometry with uniform margin, padding and border on all four sides."""
+    BoxGeometry(
+        width: width,
+        height: height,
+        spacing: BoxModel(
+            margin_top: margin, margin_right: margin,
+            margin_bottom: margin, margin_left: margin,
+            padding_top: padding, padding_right: padding,
+            padding_bottom: padding, padding_left: padding,
+            border_top: border, border_right: border,
+            border_bottom: border, border_left: border
+        )
+    )
+
+class BlockFlowBox:
+    """One participant in the block flow: its geometry, flow role, children,
+    and laid-out rect.
+
+    `float_side` of `NoFloat` means the box is in normal flow. `clear` says
+    which floats it must clear before being placed. `establishes_bfc` fences
+    margin collapsing at this box's boundary (see the header for what it does
+    NOT do)."""
+    id: i64
+    geometry: BoxGeometry
+    float_side: FloatSide
+    clear: ClearKind
+    establishes_bfc: bool
+    children_ids: [i64]
+    computed_rect: SkRect
+
+fn block_flow_box_new(id: i64, geometry: BoxGeometry) -> BlockFlowBox:
+    """Create an unlaid-out in-flow box with no children and an empty rect."""
+    BlockFlowBox(
+        id: id,
+        geometry: geometry,
+        float_side: FloatSide.NoFloat,
+        clear: ClearKind.NoClear,
+        establishes_bfc: false,
+        children_ids: [],
+        computed_rect: SkRect(left: 0.0, top: 0.0, right: 0.0, bottom: 0.0)
+    )
+
+fn block_flow_box_floated(id: i64, geometry: BoxGeometry, side: FloatSide) -> BlockFlowBox:
+    """Create an unlaid-out FLOATED box.
+
+    A float is always a block formatting context root (CSS 2.1 §9.4.1), so
+    `establishes_bfc` is set here rather than left to the caller to remember."""
+    BlockFlowBox(
+        id: id,
+        geometry: geometry,
+        float_side: side,
+        clear: ClearKind.NoClear,
+        establishes_bfc: true,
+        children_ids: [],
+        computed_rect: SkRect(left: 0.0, top: 0.0, right: 0.0, bottom: 0.0)
+    )
+
+fn block_flow_box_clearing(id: i64, geometry: BoxGeometry, clear: ClearKind) -> BlockFlowBox:
+    """Create an unlaid-out in-flow box that clears floats on the given sides."""
+    BlockFlowBox(
+        id: id,
+        geometry: geometry,
+        float_side: FloatSide.NoFloat,
+        clear: clear,
+        establishes_bfc: false,
+        children_ids: [],
+        computed_rect: SkRect(left: 0.0, top: 0.0, right: 0.0, bottom: 0.0)
+    )
+
+fn block_flow_box_bfc_root(id: i64, geometry: BoxGeometry) -> BlockFlowBox:
+    """Create an unlaid-out in-flow box that establishes a new BFC, so its
+    margins never collapse with its children's."""
+    BlockFlowBox(
+        id: id,
+        geometry: geometry,
+        float_side: FloatSide.NoFloat,
+        clear: ClearKind.NoClear,
+        establishes_bfc: true,
+        children_ids: [],
+        computed_rect: SkRect(left: 0.0, top: 0.0, right: 0.0, bottom: 0.0)
+    )
+
+class LayoutContext:
+    """An arena of layout boxes plus the viewport they are laid out in."""
+    viewport_width: f64
+    viewport_height: f64
+    boxes: [BlockFlowBox]
+    root_id: i64
+
+fn layout_context_new(viewport_width: f64, viewport_height: f64) -> LayoutContext:
+    """Create an empty layout context for the given viewport size."""
+    LayoutContext(
+        viewport_width: viewport_width,
+        viewport_height: viewport_height,
+        boxes: [],
+        root_id: -1
+    )
+
+impl LayoutContext:
+    fn add_box(box: BlockFlowBox):
+        """Add a box to the arena. Ids are not checked for uniqueness."""
+        self.boxes.push(box)
+
+    fn set_root(id: i64):
+        """Designate which box id compute_layout starts from."""
+        self.root_id = id
+
+    fn index_of(id: i64) -> i64:
+        """Return the arena index of a box id, or -1 when absent."""
+        var i = 0
+        while i < self.boxes.len():
+            if self.boxes[i as i32].id == id:
+                return i
+            i = i + 1
+        -1
+
+    fn get_box(id: i64) -> BlockFlowBox?:
+        """Look up a box by id. Returns nil when no such box was added."""
+        val idx = self.index_of(id)
+        if idx < 0:
+            return nil
+        Some(self.boxes[idx as i32])
+
+    fn first_in_flow_child(idx: i64) -> i64:
+        """Arena index of the first non-floated child of `idx`, or -1.
+
+        Floats are skipped because their margins never collapse with anything,
+        so the first in-flow child is the one whose top margin can reach the
+        parent's."""
+        val kids = self.boxes[idx as i32].children_ids
+        var i: i64 = 0
+        while i < kids.len():
+            val cidx = self.index_of(kids[i as i32])
+            if cidx >= 0 and self.boxes[cidx as i32].float_side == FloatSide.NoFloat:
+                return cidx
+            i = i + 1
+        -1
+
+    fn last_in_flow_child(idx: i64) -> i64:
+        """Arena index of the last non-floated child of `idx`, or -1."""
+        val kids = self.boxes[idx as i32].children_ids
+        var i: i64 = kids.len() - 1
+        while i >= 0:
+            val cidx = self.index_of(kids[i as i32])
+            if cidx >= 0 and self.boxes[cidx as i32].float_side == FloatSide.NoFloat:
+                return cidx
+            i = i - 1
+        -1
+
+    fn effective_margin_top(idx: i64, depth: i64) -> f64:
+        """The margin-top this box presents to its SIBLINGS and parent.
+
+        When the box's own top edge does not separate it from its first in-flow
+        child — no top border, no top padding, not a BFC root — that child's
+        margin-top collapses INTO this one, and the pair present a single
+        margin outward. The recursion walks the first-in-flow chain, so a
+        margin can collapse up through several edgeless wrappers, which is what
+        CSS 2.1 §8.3.1 describes. `depth` bounds the walk at 64 levels so a
+        cyclic `children_ids` graph cannot hang layout."""
+        val b = self.boxes[idx as i32]
+        val own = b.geometry.spacing.margin_top
+        if depth >= 64:
+            return own
+        if not top_margin_collapses_with_parent(
+            b.geometry.spacing.border_top,
+            b.geometry.spacing.padding_top,
+            b.establishes_bfc,
+            false
+        ):
+            return own
+        val child = self.first_in_flow_child(idx)
+        if child < 0:
+            return own
+        collapse_margins(own, self.effective_margin_top(child, depth + 1))
+
+    fn effective_margin_bottom(idx: i64, depth: i64) -> f64:
+        """The margin-bottom this box presents to its siblings and parent.
+
+        Mirror of `effective_margin_top`. A DECLARED height (`height != 0.0` —
+        this lane has no separate `auto` sentinel on `f64`) pins the parent's
+        bottom content edge, so the last child's margin cannot reach out
+        through it."""
+        val b = self.boxes[idx as i32]
+        val own = b.geometry.spacing.margin_bottom
+        if depth >= 64:
+            return own
+        if not bottom_margin_collapses_with_parent(
+            b.geometry.spacing.border_bottom,
+            b.geometry.spacing.padding_bottom,
+            b.geometry.height == 0.0,
+            0.0,
+            b.establishes_bfc
+        ):
+            return own
+        val child = self.last_in_flow_child(idx)
+        if child < 0:
+            return own
+        collapse_margins(own, self.effective_margin_bottom(child, depth + 1))
+
+    fn compute_layout():
+        """Lay out the tree from the root, stacking children vertically.
+
+        No-op when no root was set or the root id is absent.
+        """
+        if self.root_id < 0:
+            return
+        val root_idx = self.index_of(self.root_id)
+        if root_idx < 0:
+            return
+
+        # Recorded results, parallel arrays: laid_idx[k] gets rect laid_rect[k].
+        var laid_idx: [i64] = []
+        var laid_rect: [SkRect] = []
+        # Work stack of (arena index, border-box left, border-box top).
+        var stack: [(i64, f64, f64)] = []
+
+        val root_geo = self.boxes[root_idx as i32].geometry
+        val root_left = root_geo.spacing.margin_left
+        # The root's own margin-top may have absorbed its first in-flow child's
+        # (parent/child collapsing), so the outward margin is asked for rather
+        # than read off the spacing record.
+        val root_top = self.effective_margin_top(root_idx, 0)
+        laid_idx.push(root_idx)
+        laid_rect.push(SkRect(
+            left: root_left,
+            top: root_top,
+            right: root_left + root_geo.width,
+            bottom: root_top + root_geo.height
+        ))
+        stack.push((root_idx, root_left, root_top))
+
+        while stack.len() > 0:
+            val frame = stack.pop()
+            val idx = frame.0
+            val left = frame.1
+            val top = frame.2
+            val parent = self.boxes[idx as i32]
+            val pg = parent.geometry
+            val content_left = left + pg.spacing.border_left + pg.spacing.padding_left
+            val content_top = top + pg.spacing.border_top + pg.spacing.padding_top
+            # Right edge of the content box. `width` is the BORDER-box width
+            # (the root rect is `left .. left + width`), so the far border and
+            # padding come back off it. A zero width — this lane's `auto` —
+            # leaves a zero-wide float band; that gap is stated in the header.
+            val content_right = left + pg.width - pg.spacing.border_right - pg.spacing.padding_right
+
+            # Floats placed by THIS box's children. One area per box: see the
+            # header — floats do not escape their parent in this lane.
+            val area = float_area_new()
+
+            var cursor = content_top
+            # Sibling-collapse state. `prev_margin_bottom` is the outward
+            # margin of the previous in-flow sibling; `seen_in_flow` says
+            # whether there was one; `float_since_last` records a float placed
+            # between two in-flow siblings, which stops their margins adjoining.
+            var prev_margin_bottom: f64 = 0.0
+            var seen_in_flow = false
+            var float_since_last = false
+
+            for cid in parent.children_ids:
+                val cidx = self.index_of(cid)
+                if cidx >= 0:
+                    val cbox = self.boxes[cidx as i32]
+                    val cg = cbox.geometry
+                    val ms = cg.spacing
+
+                    if cbox.float_side != FloatSide.NoFloat:
+                        # FLOATED CHILD. Its margins never collapse, so the
+                        # margin box is simply the border box grown by them,
+                        # and the cursor does NOT advance: a float is out of
+                        # flow and the next in-flow sibling starts where this
+                        # one would have.
+                        val margin_w = cg.width + ms.margin_left + ms.margin_right
+                        val margin_h = cg.height + ms.margin_top + ms.margin_bottom
+                        val placed = area.place_and_add(
+                            margin_w, margin_h, cbox.float_side,
+                            cursor, content_left, content_right
+                        )
+                        val fleft = placed.left + ms.margin_left
+                        val ftop = placed.top + ms.margin_top
+                        laid_idx.push(cidx)
+                        laid_rect.push(SkRect(
+                            left: fleft,
+                            top: ftop,
+                            right: fleft + cg.width,
+                            bottom: ftop + cg.height
+                        ))
+                        stack.push((cidx, fleft, ftop))
+                        float_since_last = true
+                    else:
+                        # IN-FLOW CHILD. `clear` first: it decides where the
+                        # box may start, and a box that actually moved has
+                        # clearance, which suppresses its margin collapsing.
+                        val cleared = area.clearance_for(cbox.clear, cursor)
+                        val has_clearance = cleared > cursor
+                        if has_clearance:
+                            cursor = cleared
+
+                        val child_mt = self.effective_margin_top(cidx, 0)
+                        var gap: f64 = 0.0
+                        if seen_in_flow:
+                            if siblings_margins_collapse(false, cbox.establishes_bfc, has_clearance, float_since_last):
+                                gap = collapsed_gap(prev_margin_bottom, child_mt)
+                            else:
+                                gap = prev_margin_bottom + child_mt
+                        else:
+                            # First in-flow child. When its margin collapsed
+                            # OUT to the parent (already folded into the
+                            # parent's own effective margin-top by
+                            # `effective_margin_top`), adding it again here
+                            # would double-count it, so the gap is zero.
+                            if top_margin_collapses_with_parent(
+                                pg.spacing.border_top, pg.spacing.padding_top,
+                                parent.establishes_bfc, has_clearance
+                            ):
+                                gap = 0.0
+                            else:
+                                gap = child_mt
+
+                        val ctop = cursor + gap
+                        # Floats beside this box narrow AND shift it: its left
+                        # edge is pushed past any left float overlapping the
+                        # band it occupies.
+                        var band_left = content_left
+                        if not area.is_empty():
+                            band_left = area.left_edge_at(ctop, cg.height, content_left)
+                        val cleft = band_left + ms.margin_left
+                        laid_idx.push(cidx)
+                        laid_rect.push(SkRect(
+                            left: cleft,
+                            top: ctop,
+                            right: cleft + cg.width,
+                            bottom: ctop + cg.height
+                        ))
+                        stack.push((cidx, cleft, ctop))
+                        cursor = ctop + cg.height
+                        prev_margin_bottom = self.effective_margin_bottom(cidx, 0)
+                        seen_in_flow = true
+                        float_since_last = false
+
+            # Close the last in-flow child's bottom margin. When it collapsed
+            # OUT to the parent it is already in the parent's own effective
+            # margin-bottom and must not also push the content box down.
+            if seen_in_flow:
+                if not bottom_margin_collapses_with_parent(
+                    pg.spacing.border_bottom, pg.spacing.padding_bottom,
+                    pg.height == 0.0, 0.0, parent.establishes_bfc
+                ):
+                    cursor = cursor + prev_margin_bottom
+
+            # A box contains its own floats (CSS 2.1 §10.6.7): a float that
+            # hangs below the last in-flow child still counts toward the
+            # content height. This lane gives every box its own float area, so
+            # this applies to every box, not only BFC roots.
+            val floats_bottom = area.lowest_bottom()
+            if floats_bottom > cursor:
+                cursor = floats_bottom
+
+            # Minimal auto-height (2026-08-10): a box with NO declared height
+            # (`pg.height == 0.0`, CSS `auto`'s effective value in this lane,
+            # since there is no separate "unset" sentinel on `f64`) grows to
+            # fit the content it just stacked, rather than staying pinned to
+            # 0. This is intentionally narrow — declared-nonzero heights are
+            # left exactly as authored (still no shrink-to-fit, no
+            # min/max-height) — but it is the minimum needed for a text box's
+            # height to ever be visible in its parent's own rect, which is
+            # the concrete gap this change closes. `cursor` has already
+            # advanced past every child's margin-bottom, so
+            # `cursor - content_top` is the stacked content height; add back
+            # the padding/border the box still owes below that content.
+            if pg.height == 0.0 and parent.children_ids.len() > 0:
+                # `cursor - top` (NOT `cursor - content_top`) is the span from
+                # the border-box top down to the end of the content, so it
+                # already carries the top border and top padding. Measuring
+                # from `content_top` dropped both — a box with 5px padding came
+                # out 5px too short — fixed 2026-08-11 alongside floats.
+                val auto_height = (cursor - top) + pg.spacing.padding_bottom + pg.spacing.border_bottom
+                var k = 0
+                while k < laid_idx.len():
+                    if laid_idx[k as i32] == idx:
+                        var r = laid_rect[k as i32]
+                        r.bottom = r.top + auto_height
+                        laid_rect[k as i32] = r
+                    k = k + 1
+
+        # Rebuild the arena with the computed rects (element write-back by value).
+        var updated: [BlockFlowBox] = []
+        var i = 0
+        while i < self.boxes.len():
+            val b = self.boxes[i as i32]
+            var rect = b.computed_rect
+            var k = 0
+            while k < laid_idx.len():
+                if laid_idx[k as i32] == i:
+                    rect = laid_rect[k as i32]
+                k = k + 1
+            updated.push(BlockFlowBox(
+                id: b.id,
+                geometry: b.geometry,
+                float_side: b.float_side,
+                clear: b.clear,
+                establishes_bfc: b.establishes_bfc,
+                children_ids: b.children_ids,
+                computed_rect: rect
+            ))
+            i = i + 1
+        self.boxes = updated
+
+    fn total_height_for(id: i64) -> f64:
+        """Border-box height of a laid-out box; 0.0 when the id is absent."""
+        val idx = self.index_of(id)
+        if idx < 0:
+            return 0.0
+        val r = self.boxes[idx as i32].computed_rect
+        r.bottom - r.top

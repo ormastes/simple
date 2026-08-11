@@ -1,0 +1,173 @@
+use std.spec
+use std.nogc_async_mut.web_framework.tracing.{TraceContext, TraceId, SpanId, TraceSpan, TraceExporter, ObserveContext, observe_context_new, observe_context_with_task, observe_context_with_actor, trace_id_to_hex, span_id_to_hex, observe_context_activate, observe_context_deactivate}
+use std.log.{SyslogRecord, LOG_INFO, log_context_clear, log_context_active}
+
+"""
+# Tracing OTLP Export Specification
+
+**Feature IDs:** #WEB-FRAMEWORK-TRACING-OTLP-001
+**Category:** Web Framework / Observability
+**Difficulty:** 2/5
+**Status:** In Progress
+**Requirements:** N/A
+**Plan:** doc/03_plan/agent_tasks/mission_critical_robustness_parallel_agents_2026-07-27.md (DS8 otlp-bridge)
+**Design:** N/A
+**Research:** N/A
+
+## Overview
+
+Verifies the OTLP/JSON span exporter added alongside the existing JSON-array
+exporter in `web_framework/tracing.spl`, and the shared `ObserveContext`
+correlation-id wrapper. Covers: W3C parent/child span linkage carried through
+into `parentSpanId`, 32/16-character hex id lengths, nanosecond timestamp
+fields, the `resourceSpans -> scopeSpans -> spans` OTLP shape, and that the
+legacy `export_json()` JSON-array exporter still works unmodified.
+
+## Examples
+
+A child span's `to_otlp_span_json()` must report `parentSpanId` equal to the
+parent span's hex-encoded span id, and the exporter's `export_otlp_json()`
+must wrap all buffered spans in a single `resourceSpans` document carrying
+the configured `service.name`.
+"""
+
+describe "web_framework tracing OTLP export":
+
+    it "produces 32/16-char hex ids and round-trips the W3C traceparent header":
+        val ctx = TraceContext.new()
+        expect(trace_id_to_hex(ctx.trace_id).len()).to_equal(32)
+        expect(span_id_to_hex(ctx.span_id).len()).to_equal(16)
+
+        val header = ctx.to_traceparent()
+        match TraceContext.from_traceparent(header):
+            Some(parsed):
+                expect(trace_id_to_hex(parsed.trace_id)).to_equal(trace_id_to_hex(ctx.trace_id))
+            nil:
+                fail("from_traceparent failed to round-trip a freshly generated traceparent header")
+
+    it "carries parent/child linkage into OTLP parentSpanId":
+        val parent_ctx = TraceContext.new()
+        val child_ctx = parent_ctx.child_span()
+        expect(trace_id_to_hex(child_ctx.trace_id)).to_equal(trace_id_to_hex(parent_ctx.trace_id))
+
+        var parent_span = TraceSpan.new(parent_ctx, "parent_op")
+        parent_span.set_attribute("http.method", "GET")
+        parent_span.end()
+
+        var child_span = TraceSpan.new(child_ctx, "child_op")
+        child_span.set_kind("client")
+        child_span.set_status("ok")
+        child_span.end()
+
+        val parent_otlp = parent_span.to_otlp_span_json()
+        val child_otlp = child_span.to_otlp_span_json()
+
+        val parent_sid_hex = span_id_to_hex(parent_ctx.span_id)
+        expect(child_otlp.contains("\"parentSpanId\":\"{parent_sid_hex}\"")).to_equal(true)
+        expect(parent_otlp.contains("\"parentSpanId\"")).to_equal(false)
+
+        # start/end timestamps must be present as quoted nanosecond strings.
+        expect(child_otlp.contains("\"startTimeUnixNano\":\"")).to_equal(true)
+        expect(child_otlp.contains("\"endTimeUnixNano\":\"")).to_equal(true)
+        # kind: client -> OTLP SpanKind 3; status ok -> Status.code 1.
+        expect(child_otlp.contains("\"kind\":3")).to_equal(true)
+        expect(child_otlp.contains("\"code\":1")).to_equal(true)
+
+    it "wraps buffered spans in a resourceSpans/scopeSpans/spans OTLP document":
+        val ctx = TraceContext.new()
+        var span = TraceSpan.new(ctx, "handle_request")
+        span.set_attribute("http.route", "/users")
+        span.end()
+
+        var exporter = TraceExporter.new(10)
+        exporter.set_service_name("otlp-bridge-spec")
+        exporter.add_span(span)
+
+        val doc = exporter.export_otlp_json()
+        expect(doc.contains("\"resourceSpans\":[")).to_equal(true)
+        expect(doc.contains("\"scopeSpans\":[")).to_equal(true)
+        expect(doc.contains("\"spans\":[")).to_equal(true)
+        expect(doc.contains("\"service.name\"")).to_equal(true)
+        expect(doc.contains("otlp-bridge-spec")).to_equal(true)
+        expect(doc.contains("handle_request")).to_equal(true)
+
+        # Legacy JSON-array exporter must still work unmodified alongside OTLP.
+        val legacy = exporter.export_json()
+        expect(legacy.contains("\"traceId\"")).to_equal(true)
+        expect(legacy.contains("\"resourceSpans\"")).to_equal(false)
+
+    it "shares trace/span correlation ids via ObserveContext":
+        val ctx = TraceContext.new()
+        val oc = observe_context_new(ctx)
+        match oc.task_id:
+            Some(_): fail("fresh ObserveContext must not carry a task_id")
+            nil: pass_do_nothing
+
+        val oc_task = observe_context_with_task(oc, 42)
+        match oc_task.task_id:
+            Some(tid): expect(tid).to_equal(42)
+            nil: fail("observe_context_with_task did not attach task_id")
+
+        val oc_actor = observe_context_with_actor(oc_task, 7)
+        match oc_actor.actor_id:
+            Some(aid): expect(aid).to_equal(7)
+            nil: fail("observe_context_with_actor did not attach actor_id")
+        match oc_actor.task_id:
+            Some(tid): expect(tid).to_equal(42)
+            nil: fail("observe_context_with_actor dropped the previously attached task_id")
+
+        expect(trace_id_to_hex(oc_actor.trace_ctx.trace_id)).to_equal(trace_id_to_hex(ctx.trace_id))
+
+    # ------------------------------------------------------------------
+    # Lane OBS1 — ObserveContext wired into std.log (follow-up to the
+    # ObserveContext type added above). observe_context_activate() stamps
+    # an ObserveContext's ids onto std.log's current-context so the next
+    # SyslogRecord.new() carries the same trace/task/actor correlation ids.
+    # ------------------------------------------------------------------
+
+    it "activating an ObserveContext stamps its ids onto the next std.log record":
+        log_context_clear()
+        val ctx = TraceContext.new()
+        val oc = observe_context_with_actor(observe_context_with_task(observe_context_new(ctx), 42), 7)
+
+        val snap = observe_context_activate(oc)
+        val rec = SyslogRecord.new(LOG_INFO, 0, 1, 0, "correlated")
+        expect(rec.trace_id_high).to_equal(ctx.trace_id.high)
+        expect(rec.trace_id_low).to_equal(ctx.trace_id.low)
+        expect(rec.task_id).to_equal(42)
+        expect(rec.actor_id).to_equal(7)
+        observe_context_deactivate(snap)
+
+    it "clearing the context leaves the next std.log record with absent/zero ids":
+        log_context_clear()
+        val rec = SyslogRecord.new(LOG_INFO, 0, 1, 0, "no context active")
+        expect(rec.trace_id_high).to_equal(0)
+        expect(rec.trace_id_low).to_equal(0)
+        expect(rec.task_id).to_equal(0)
+        expect(rec.actor_id).to_equal(0)
+        expect(log_context_active()).to_equal(false)
+
+    it "nested activate/deactivate restores the outer context (not cleared)":
+        log_context_clear()
+        val outer_ctx = TraceContext.new()
+        val outer_oc = observe_context_with_task(observe_context_new(outer_ctx), 100)
+        val outer_snap = observe_context_activate(outer_oc)
+
+        val inner_ctx = TraceContext.new()
+        val inner_oc = observe_context_with_actor(observe_context_new(inner_ctx), 9)
+        val inner_snap = observe_context_activate(inner_oc)
+
+        val inner_rec = SyslogRecord.new(LOG_INFO, 0, 1, 0, "inner scope")
+        expect(inner_rec.trace_id_high).to_equal(inner_ctx.trace_id.high)
+        expect(inner_rec.actor_id).to_equal(9)
+        expect(inner_rec.task_id).to_equal(0)
+
+        observe_context_deactivate(inner_snap)
+
+        val outer_rec = SyslogRecord.new(LOG_INFO, 0, 1, 0, "outer restored")
+        expect(outer_rec.trace_id_high).to_equal(outer_ctx.trace_id.high)
+        expect(outer_rec.task_id).to_equal(100)
+        expect(outer_rec.actor_id).to_equal(0)
+
+        observe_context_deactivate(outer_snap)
+        expect(log_context_active()).to_equal(false)

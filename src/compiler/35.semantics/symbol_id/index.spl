@@ -1,0 +1,78 @@
+# In-memory short-fingerprint index over stable symbol ids.
+#
+# Maps short fingerprint -> (full 128-bit id, module path) with collision
+# detection at build time: a build whose short forms are ambiguous fails with
+# Err instead of guessing. No persistence — consumers (LSP/lint/doc lanes)
+# layer that on later.
+#
+# Native-codegen note: Dict.len() and Dict.get() are unreliable under native
+# codegen (see CLAUDE.md "Native-Codegen Dict Pitfalls"), so this index keeps
+# a maintained count and uses contains_key + index reads only.
+
+use compiler.semantics.symbol_id.stable_id.{
+    SymbolComponents, stable_symbol_id, short_fingerprint_n,
+    clamp_short_len, default_short_len
+}
+
+class SymbolIndex:
+    short_len: i64
+    count: i64
+    shorts: [text]                    # insertion-ordered short forms
+    short_to_full: Dict<text, text>   # short -> full 32-hex id
+    short_to_module: Dict<text, text> # short -> module path
+
+    me size() -> i64:
+        self.count
+
+    me contains(short: text) -> bool:
+        self.short_to_full.contains_key(short)
+
+    me full_id_of(short: text) -> text:
+        """Full 32-hex id for a short form, "" when unknown."""
+        if self.short_to_full.contains_key(short):
+            self.short_to_full[short]
+        else:
+            ""
+
+    me module_of(short: text) -> text:
+        """Module path for a short form, "" when unknown."""
+        if self.short_to_module.contains_key(short):
+            self.short_to_module[short]
+        else:
+            ""
+
+fn build_symbol_index(items: [SymbolComponents]) -> Result<SymbolIndex, text>:
+    build_symbol_index_with_short_len(items, default_short_len())
+
+fn build_symbol_index_with_short_len(items: [SymbolComponents], short_len: i64) -> Result<SymbolIndex, text>:
+    """Build an index from symbol components.
+
+    short_len is the test seam for collision behaviour: shrinking it (e.g. to 1)
+    forces distinct ids onto the same short form, which must yield Err.
+    Re-listing the exact same symbol is idempotent, not a collision."""
+    val n = clamp_short_len(short_len)
+    val idx = SymbolIndex(
+        short_len: n,
+        count: 0,
+        shorts: [],
+        short_to_full: {},
+        short_to_module: {}
+    )
+    var collisions: [text] = []
+    for c in items:
+        val full = stable_symbol_id(c)
+        val short = short_fingerprint_n(full, n)
+        if idx.short_to_full.contains_key(short):
+            val existing = idx.short_to_full[short]
+            if existing != full and not collisions.contains(short):
+                collisions = collisions.push(short)
+        else:
+            idx.short_to_full[short] = full
+            idx.short_to_module[short] = c.module_path
+            idx.shorts = idx.shorts.push(short)
+            idx.count = 1 + idx.count
+    if collisions.is_empty():
+        Ok(idx)
+    else:
+        val joined = collisions.join(", ")
+        Err("short fingerprint collision at length {n}: {joined}")

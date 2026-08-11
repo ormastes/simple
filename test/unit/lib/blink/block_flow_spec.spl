@@ -1,0 +1,218 @@
+# @cover src/lib/blink/layout/block_flow.spl 80%
+"""
+# Blink BlockFlow Layout Specification
+
+**Category:** Browser / Blink / Layout
+**Status:** Active
+
+## Overview
+
+Tests for the BFC (Block Formatting Context) vertical stacking layout engine.
+Covers BoxGeometry construction, single-box layout, vertical child stacking,
+nested padding offsets, empty-context safety, and total_height_for.
+"""
+
+use std.spipe.*
+use std.common.layout.box_model.{BoxModel}
+use std.blink.layout.block_flow.{
+    BoxGeometry, BlockFlowBox, LayoutContext,
+    box_geometry_zero, box_geometry_new,
+    block_flow_box_new, layout_context_new
+}
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn approx_eq(a: f64, b: f64) -> bool:
+    val diff = a - b
+    val abs_diff = if diff < 0.0: diff * -1.0 else: diff
+    abs_diff < 0.0001
+
+# ============================================================================
+# BoxGeometry construction
+# ============================================================================
+
+describe "box_geometry_zero":
+    it "all fields zero":
+        val geo = box_geometry_zero()
+        expect(geo.width).to_equal(0.0)
+        expect(geo.height).to_equal(0.0)
+        expect(geo.spacing.margin_top).to_equal(0.0)
+        expect(geo.spacing.margin_right).to_equal(0.0)
+        expect(geo.spacing.margin_bottom).to_equal(0.0)
+        expect(geo.spacing.margin_left).to_equal(0.0)
+        expect(geo.spacing.padding_top).to_equal(0.0)
+        expect(geo.spacing.padding_right).to_equal(0.0)
+        expect(geo.spacing.padding_bottom).to_equal(0.0)
+        expect(geo.spacing.padding_left).to_equal(0.0)
+        expect(geo.spacing.border_top).to_equal(0.0)
+        expect(geo.spacing.border_right).to_equal(0.0)
+        expect(geo.spacing.border_bottom).to_equal(0.0)
+        expect(geo.spacing.border_left).to_equal(0.0)
+
+describe "box_geometry_new":
+    it "box_geometry_new(100, 50, 10, 20, 3): correct margin/padding/border splits":
+        val geo = box_geometry_new(100.0, 50.0, 10.0, 20.0, 3.0)
+        expect(approx_eq(geo.width, 100.0)).to_equal(true)
+        expect(approx_eq(geo.height, 50.0)).to_equal(true)
+        expect(approx_eq(geo.spacing.margin_top, 10.0)).to_equal(true)
+        expect(approx_eq(geo.spacing.margin_right, 10.0)).to_equal(true)
+        expect(approx_eq(geo.spacing.margin_bottom, 10.0)).to_equal(true)
+        expect(approx_eq(geo.spacing.margin_left, 10.0)).to_equal(true)
+        expect(approx_eq(geo.spacing.padding_top, 20.0)).to_equal(true)
+        expect(approx_eq(geo.spacing.padding_right, 20.0)).to_equal(true)
+        expect(approx_eq(geo.spacing.padding_bottom, 20.0)).to_equal(true)
+        expect(approx_eq(geo.spacing.padding_left, 20.0)).to_equal(true)
+        expect(approx_eq(geo.spacing.border_top, 3.0)).to_equal(true)
+        expect(approx_eq(geo.spacing.border_right, 3.0)).to_equal(true)
+        expect(approx_eq(geo.spacing.border_bottom, 3.0)).to_equal(true)
+        expect(approx_eq(geo.spacing.border_left, 3.0)).to_equal(true)
+
+# ============================================================================
+# compute_layout: single root box
+# ============================================================================
+
+describe "compute_layout single root":
+    it "single root box has computed_rect with box width/height":
+        val geo = box_geometry_new(200.0, 100.0, 0.0, 0.0, 0.0)
+        val root = block_flow_box_new(0, geo)
+        val ctx = layout_context_new(800.0, 600.0)
+        ctx.add_box(root)
+        ctx.set_root(0)
+        ctx.compute_layout()
+        val opt = ctx.get_box(0)
+        expect(opt is None).to_equal(false)
+        val b = opt.unwrap()
+        expect(approx_eq(b.computed_rect.right - b.computed_rect.left, 200.0)).to_equal(true)
+        expect(approx_eq(b.computed_rect.bottom - b.computed_rect.top, 100.0)).to_equal(true)
+
+# ============================================================================
+# compute_layout: two children stack vertically
+# ============================================================================
+
+describe "compute_layout two children":
+    it "two child boxes stack vertically with their facing margins collapsed":
+        val parent_geo = box_geometry_new(300.0, 0.0, 0.0, 0.0, 0.0)
+        val parent = block_flow_box_new(1, parent_geo)
+        parent.children_ids.push(2)
+        parent.children_ids.push(3)
+
+        val child1_geo = box_geometry_new(300.0, 40.0, 5.0, 0.0, 0.0)
+        val child1 = block_flow_box_new(2, child1_geo)
+
+        val child2_geo = box_geometry_new(300.0, 60.0, 8.0, 0.0, 0.0)
+        val child2 = block_flow_box_new(3, child2_geo)
+
+        val ctx = layout_context_new(800.0, 600.0)
+        ctx.add_box(parent)
+        ctx.add_box(child1)
+        ctx.add_box(child2)
+        ctx.set_root(1)
+        ctx.compute_layout()
+
+        val opt1 = ctx.get_box(2)
+        val opt2 = ctx.get_box(3)
+        expect(opt1 is None).to_equal(false)
+        expect(opt2 is None).to_equal(false)
+
+        val b1 = opt1.unwrap()
+        val b2 = opt2.unwrap()
+
+        # The parent has no border and no padding, so child1's margin-top of 5
+        # collapses OUT into the parent's own margin-top of 0 (CSS 2.1
+        # §8.3.1). The pair present one margin of max(0, 5) = 5, which places
+        # the parent's border box — and therefore its content box, there being
+        # no border or padding — at y = 5. child1 then sits flush at the top of
+        # that content box: 5 + 0 = 5. Note this is the SAME number the older,
+        # non-collapsing version of this engine produced, by a different route:
+        # it put the parent at 0 and pushed the child down 5. The collapse is
+        # visible in the parent's position, not the child's.
+        expect(approx_eq(b1.computed_rect.top, 5.0)).to_equal(true)
+
+        # child2's top is where the collapsing rule shows up directly. child1's
+        # margin-bottom of 5 and child2's margin-top of 8 are adjoining, so
+        # they collapse to a single gap of max(5, 8) = 8 rather than summing to
+        # 13. child2 top = child1 bottom (5 + 40 = 45) + 8 = 53, and its bottom
+        # is 53 + 60 = 113. Before floats/margin-collapsing landed this spec
+        # asserted 58/118, i.e. the additive 5 + 8; those numbers were the
+        # documented non-goal, not the CSS answer.
+        expect(b2.computed_rect.top).to_be_greater_than(b1.computed_rect.bottom)
+        expect(approx_eq(b2.computed_rect.top, 53.0)).to_equal(true)
+        expect(approx_eq(b2.computed_rect.bottom, 113.0)).to_equal(true)
+
+# ============================================================================
+# compute_layout: nested padding shifts child
+# ============================================================================
+
+describe "compute_layout nested padding":
+    it "nested box padding shifts child position":
+        val parent_geo = BoxGeometry(
+            width: 300.0,
+            height: 200.0,
+            spacing: BoxModel(
+                margin_top: 0.0,
+                margin_right: 0.0,
+                margin_bottom: 0.0,
+                margin_left: 0.0,
+                padding_top: 15.0,
+                padding_right: 10.0,
+                padding_bottom: 15.0,
+                padding_left: 10.0,
+                border_top: 2.0,
+                border_right: 2.0,
+                border_bottom: 2.0,
+                border_left: 2.0
+            )
+        )
+        val parent = block_flow_box_new(10, parent_geo)
+        parent.children_ids.push(11)
+
+        val child_geo = box_geometry_new(100.0, 50.0, 0.0, 0.0, 0.0)
+        val child = block_flow_box_new(11, child_geo)
+
+        val ctx = layout_context_new(800.0, 600.0)
+        ctx.add_box(parent)
+        ctx.add_box(child)
+        ctx.set_root(10)
+        ctx.compute_layout()
+
+        val opt_child = ctx.get_box(11)
+        expect(opt_child is None).to_equal(false)
+        val bc = opt_child.unwrap()
+
+        # child left = parent.margin_left + parent.border_left + parent.padding_left + child.margin_left
+        #            = 0 + 2 + 10 + 0 = 12
+        expect(approx_eq(bc.computed_rect.left, 12.0)).to_equal(true)
+
+        # child top = parent.margin_top + parent.border_top + parent.padding_top + child.margin_top
+        #           = 0 + 2 + 15 + 0 = 17
+        expect(approx_eq(bc.computed_rect.top, 17.0)).to_equal(true)
+
+# ============================================================================
+# compute_layout: empty context does not crash
+# ============================================================================
+
+describe "compute_layout empty context":
+    it "empty context does not crash":
+        val ctx = layout_context_new(800.0, 600.0)
+        ctx.compute_layout()
+        val opt = ctx.get_box(0)
+        expect(opt is None).to_equal(true)
+
+# ============================================================================
+# total_height_for
+# ============================================================================
+
+describe "total_height_for":
+    it "returns correct height of laid-out box":
+        val geo = box_geometry_new(400.0, 120.0, 10.0, 5.0, 1.0)
+        val root = block_flow_box_new(20, geo)
+        val ctx = layout_context_new(800.0, 600.0)
+        ctx.add_box(root)
+        ctx.set_root(20)
+        ctx.compute_layout()
+        val h = ctx.total_height_for(20)
+        # height is the border-box height = geo.height = 120
+        expect(approx_eq(h, 120.0)).to_equal(true)
+        expect(h).to_be_greater_than(0.0)

@@ -1,0 +1,180 @@
+# @req REQ-SSPEC-BINARY-LAYOUT
+#
+# As a kernel/driver reviewer reading a generated evidence manual, I want a
+# binary/bitfield layout format so the byte-and-bit table in the manual is
+# generated from the same field declarations the comparator checks against —
+# never a hand-transcribed table that can silently drift from what actually
+# ran.
+#
+# Ground truth for the example layout is the real x86_64 PTE bitfield
+# accessors in src/os/kernel/types/bitfield.spl.
+
+use std.spec.{describe, it, step, assert_equal, assert_true, assert_false}
+use std.common.spec.evidence.model.{
+    OracleSpec, OracleCheck, oracle_spec,
+    check_exact, EvidenceStatus
+}
+use std.common.spec.evidence.evidence_comparator.{compare_evidence}
+use std.common.spec.evidence.format.binary_layout.{
+    ByteOrder, BitOrder, BinaryFieldSpec, BinaryLayout,
+    binary_field, reserved_field,
+    layout_errors, layout_is_valid, reserved_violations,
+    field_extract, field_insert,
+    u64_to_le_bytes, bytes_hex, u64_binary_grouped,
+    binary_field_table, decode_u64, pte_layout
+}
+
+fn pte_oracle() -> OracleSpec:
+    oracle_spec("x86_64_pte", [
+        check_exact("byte_order", "little"),
+        check_exact("bit_order", "lsb0"),
+        check_exact("present", "1"),
+        check_exact("writable", "1"),
+        check_exact("user", "0"),
+        check_exact("reserved_low", "0"),
+        check_exact("phys_addr", "74565"),
+        check_exact("reserved_high", "0"),
+        check_exact("no_execute", "1")
+    ])
+
+describe "Binary layout evidence format":
+
+    it "decodes a real x86_64 PTE value against the kernel's own field set":
+        step("build a PTE the way src/os/kernel/types/bitfield.spl's pte_make does")
+        # pte_make(phys: 0x0000_0000_1234_5000, present: true, writable: true,
+        #          user: false, no_execute: true)
+        val phys: i64 = 0x0000000012345000
+        var pte: i64 = field_insert(0, 12, 40, phys >> 12)
+        pte = field_insert(pte, 0, 1, 1)   # present
+        pte = field_insert(pte, 1, 1, 1)   # writable
+        pte = field_insert(pte, 63, 1, 1)  # no_execute
+
+        step("the assembled value matches the documented ground-truth PTE")
+        assert_equal(pte, 0x8000000012345003)
+
+        step("its little-endian byte string matches the documented bytes")
+        assert_equal(bytes_hex(u64_to_le_bytes(pte)), "03 50 34 12 00 00 00 80")
+
+        step("decoding through the layout produces evidence the comparator can check")
+        val evidence = decode_u64(pte, pte_layout())
+        val result = compare_evidence(evidence, pte_oracle())
+        assert_true(result.status == EvidenceStatus.passed)
+
+    it "renders a manual table generated from the same layout, not hand-written":
+        val pte: i64 = 0x8000000012345003
+        val rows = binary_field_table(pte, pte_layout())
+        assert_true(rows.len() > 1)
+        assert_true(rows[0].contains("Field"))
+
+    it "flips exactly one decoded field on a single bit toggle (one-hot isolation)":
+        step("start from the ground-truth PTE and flip only the user bit (bit 2)")
+        val base: i64 = 0x8000000012345003
+        val flipped = base | (1 << 2)
+        val before = decode_u64(base, pte_layout())
+        val after = decode_u64(flipped, pte_layout())
+
+        var changed = 0
+        var i = 0
+        while i < before.nodes.len():
+            if before.nodes[i].value != after.nodes[i].value:
+                changed = changed + 1
+            i = i + 1
+        assert_equal(changed, 1)
+        assert_equal(after.nodes[4].path, "user")
+        assert_equal(after.nodes[4].value, "1")
+
+    it "reports a layout as invalid when a field truncates past total_bits":
+        val bad = BinaryLayout(
+            layout_id: "bad_truncated",
+            total_bits: 64,
+            byte_order: ByteOrder.little,
+            bit_order: BitOrder.lsb0,
+            fields: [binary_field("overrun", 60, 10, "runs off the end")],
+            source_ref: "test"
+        )
+        assert_false(layout_is_valid(bad))
+        assert_true(layout_errors(bad).len() > 0)
+
+        step("a decode against an invalid layout fails closed, never a silent empty pass")
+        val evidence = decode_u64(1, bad)
+        assert_false(evidence.parse_ok)
+
+    it "rejects a layout with unspecified byte order or bit order":
+        val unspecified = BinaryLayout(
+            layout_id: "no_order",
+            total_bits: 32,
+            byte_order: ByteOrder.unspecified,
+            bit_order: BitOrder.unspecified,
+            fields: [binary_field("f", 0, 8, "")],
+            source_ref: "test"
+        )
+        assert_false(layout_is_valid(unspecified))
+
+    it "rejects overlapping fields":
+        val overlapping = BinaryLayout(
+            layout_id: "overlap",
+            total_bits: 16,
+            byte_order: ByteOrder.little,
+            bit_order: BitOrder.lsb0,
+            fields: [
+                binary_field("a", 0, 8, ""),
+                binary_field("b", 4, 8, "")
+            ],
+            source_ref: "test"
+        )
+        assert_false(layout_is_valid(overlapping))
+
+    it "flags a reserved field that is nonzero under a must-be-zero policy":
+        val layout = pte_layout()
+        val dirty_reserved: i64 = 1 << 4  # inside reserved_low[3:11]
+        val violations = reserved_violations(dirty_reserved, layout)
+        assert_true(violations.len() == 1)
+        assert_equal(violations[0], "reserved_low")
+
+        step("a clean reserved region reports no violations")
+        assert_equal(reserved_violations(0, layout).len(), 0)
+
+    it "round-trips field_insert then field_extract":
+        val v0: i64 = 0
+        val v1 = field_insert(v0, 12, 40, 74565)
+        assert_equal(field_extract(v1, 12, 40), 74565)
+        val v2 = field_insert(v1, 0, 1, 1)
+        assert_equal(field_extract(v2, 0, 1), 1)
+        assert_equal(field_extract(v2, 12, 40), 74565)
+
+    it "renders a grouped binary string for the ground-truth PTE":
+        val pte: i64 = 0x8000000012345003
+        val grouped = u64_binary_grouped(pte)
+        assert_true(grouped.starts_with("0b10000000_00000000"))
+        assert_true(grouped.ends_with("00000011"))
+
+describe "Red-team hardening: wide-field table hex":
+    """
+    A field wider than one byte must not be truncated to its low byte in the
+    generated table, because the table is supposed to be derived from the
+    same decode the comparator uses — a masked table disagrees with the
+    evidence it claims to describe.
+    """
+
+    fn wide_field_layout() -> BinaryLayout:
+        BinaryLayout(
+            layout_id: "wide-field/1",
+            total_bits: 64,
+            byte_order: ByteOrder.little,
+            bit_order: BitOrder.lsb0,
+            fields: [BinaryFieldSpec(name: "phys_addr", lsb: 12, width: 40, reserved: false, description: "")],
+            source_ref: "test fixture"
+        )
+
+    it "renders the full field width in the table, not just its low byte":
+        val layout = wide_field_layout()
+        val value = 0x0000_0000_1234_5000
+        val rows = binary_field_table(value, layout)
+        val decoded = field_extract(value, 12, 40)
+        expect(decoded).to_equal(0x1234_5)
+        var found = false
+        for row in rows:
+            if row.starts_with("1 | "):
+                found = true
+                expect(row).to_contain("0000012345")
+        assert_true(found)

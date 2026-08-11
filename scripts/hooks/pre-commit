@@ -1,0 +1,105 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+if [ -n "${SIMPLE_BIN:-}" ]; then
+    SIMPLE="$SIMPLE_BIN"
+elif [ -x src/compiler_rust/target/debug/simple ]; then
+    SIMPLE="src/compiler_rust/target/debug/simple"
+else
+    SIMPLE="./bin/simple"
+fi
+
+# Chain any pre-existing local hook that setup.shs displaced. The shared
+# checkout carried an untracked secrets scanner at .git/hooks/pre-commit; before
+# 2026-08-01 nothing installed THIS file, so the guards listed below never ran
+# at commit time at all (`git grep -E '(cp|ln|install)[^|;&]*scripts/hooks'`
+# returned zero hits). setup.shs now symlinks this file into place and preserves
+# whatever was there as pre-commit.local, which runs first so local secret
+# scanning is not silently lost.
+if [ -x "$ROOT_DIR/.git/hooks/pre-commit.local" ]; then
+    "$ROOT_DIR/.git/hooks/pre-commit.local" "$@"
+fi
+
+sh scripts/check-workspace-root-guard.shs audit --staged
+
+# Normalize any staged file's line endings to LF (except .bat/.cmd, which
+# cmd.exe requires CRLF for). .gitattributes eol=lf only takes effect on
+# git's own add/checkout path; jj's working-copy writer does not consult it,
+# so a jj-authored commit can otherwise carry CRLF straight through. This is
+# a fix-and-restage step, not a check — see
+# scripts/check/normalize-line-endings.shs for the rationale and the
+# --check-only mode used by CI.
+sh scripts/check/normalize-line-endings.shs
+
+# UI backend-isolation gate (baseline-ratcheted; new violations only — see
+# scripts/check/ui_backend_isolation_baseline.txt to shrink existing debt).
+sh scripts/check/check-ui-backend-isolation.shs
+
+# CPU-lane per-element-loop hot-path gate (baseline-ratcheted; new violations
+# only — see scripts/check/cpu_lane_hotloop_baseline.txt to shrink existing
+# debt). doc/05_design/ui/rendering/cpu_gpu_dual_algorithm_design.md §6.
+sh scripts/check/check-cpu-hotloop-idiom.shs
+
+# Seed/self-hosted grammar-divergence gate. The self-hosted frontend accepts
+# leading-operator line continuations the Rust bootstrap seed rejects, and the
+# seed is what compiles the compiler — so such syntax on the bootstrap path
+# breaks stage 2 with a parse error in a file nobody touched. Staged files only;
+# the check's own selftest proves it is not vacuous.
+# See scripts/check/check-seed-parse-superset.shs for the measured table.
+seed_superset_staged="$(mktemp)"
+git diff --cached --name-only --diff-filter=ACMR \
+    | grep -E '^src/(compiler|app|lib|runtime)/.*\.spl$' \
+    > "$seed_superset_staged" || true
+SEED_SUPERSET_FILE_LIST="$seed_superset_staged" \
+    sh scripts/check/check-seed-parse-superset.shs
+rm -f "$seed_superset_staged"
+
+# SimpleOS native-surface policy: only when boot/runtime/manifest files change,
+# fail-closed if a stray/undeclared native boot source slipped into a covered
+# arch (the boot-dir auto-glob footgun). Skipped for unrelated commits.
+if git diff --cached --name-only \
+    | grep -qE '(examples/09_embedded/simple_os/arch/[^/]+/boot/|src/os/kernel/arch/[^/]+/boot/|src/os/libc/|src/os/port/simpleos_multiplatform_build)'; then
+    sh scripts/check-simpleos-native-surface.shs
+fi
+
+run_tracking_generation() {
+    if [ ! -x "$SIMPLE" ]; then
+        echo "tracking hook: $SIMPLE is not executable" >&2
+        exit 1
+    fi
+
+    "$SIMPLE" todo-scan --log-mode=json --progress=summary >/dev/null
+    "$SIMPLE" todo-gen --log-mode=json --progress=summary >/dev/null
+    "$SIMPLE" feature-gen --db doc/08_tracking/feature/feature_db.sdn -o doc/08_tracking/feature >/dev/null
+    "$SIMPLE" task-gen --db doc/08_tracking/task/task_db.sdn -o doc/08_tracking/task >/dev/null
+    "$SIMPLE" bug-gen --db doc/08_tracking/bug/bug_db.sdn -o doc/08_tracking/bug >/dev/null
+}
+
+run_tracking_checks() {
+    "$SIMPLE" check-dbs --strict
+    "$SIMPLE" tracking check --kind=feature
+    "$SIMPLE" traceability-check --scope=all
+}
+
+require_generated_tracking_staged() {
+    changed="$(git diff --name-only -- \
+        doc/TODO.md \
+        doc/08_tracking/bug/bug_db.sdn \
+        doc/08_tracking/bug/recent_bugs.md \
+        doc/08_tracking/bug/bug_report.md \
+        doc/08_tracking/feature \
+        doc/08_tracking/task \
+        doc/08_tracking/todo/todo_db.sdn || true)"
+    if [ -n "$changed" ]; then
+        echo "tracking hook: generated tracking files changed; review and stage them:" >&2
+        echo "$changed" >&2
+        exit 1
+    fi
+}
+
+run_tracking_generation
+require_generated_tracking_staged
+run_tracking_checks

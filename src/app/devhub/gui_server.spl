@@ -1,0 +1,130 @@
+# DevHub loopback GUI host and Electron/browser launcher.
+
+use app.devhub.gui.{devhub_gui_html, devhub_gui_status_json}
+use app.io.mod.{file_exists, process_spawn_async, process_spawn_async_env}
+use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
+
+fn _devhub_gui_electron_binary() -> text:
+    val app_binary = "tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
+    if file_exists(app_binary):
+        return app_binary
+    val shim = "tools/electron-shell/node_modules/.bin/electron"
+    if file_exists(shim):
+        return shim
+    ""
+
+fn _devhub_gui_open(host: text, port: i64, shell: text) -> bool:
+    val url = "http://{host}:{port}/"
+    if shell == "electron":
+        val electron = _devhub_gui_electron_binary()
+        if electron == "":
+            print "Error: Electron is not installed under tools/electron-shell/node_modules"
+            return false
+        var electron_env: {text: text} = {}
+        electron_env["SIMPLE_ELECTRON_TITLE"] = "DevHub"
+        electron_env["SIMPLE_ELECTRON_WIDTH"] = "1100"
+        electron_env["SIMPLE_ELECTRON_HEIGHT"] = "760"
+        val pid = process_spawn_async_env(electron, ["--no-sandbox", "tools/electron-shell", "--url", url], electron_env)
+        if pid <= 0:
+            print "Error: failed to launch DevHub Electron window"
+            return false
+        print "DevHub GUI launched pid={pid} url={url} shell=electron"
+        return true
+    var opener = ""
+    if file_exists("/usr/bin/open"):
+        opener = "/usr/bin/open"
+    elif file_exists("/usr/bin/xdg-open"):
+        opener = "/usr/bin/xdg-open"
+    if opener == "":
+        print "Error: no browser opener is available; open {url} manually"
+        return false
+    val pid = process_spawn_async(opener, [url])
+    if pid <= 0:
+        print "Error: failed to open {url}"
+        return false
+    print "DevHub GUI launched pid={pid} url={url} shell=browser"
+    true
+
+fn _devhub_gui_status_text(status: i64) -> text:
+    if status == 200: return "OK"
+    if status == 404: return "Not Found"
+    "Bad Request"
+
+fn _devhub_gui_write(stream: TcpStream, status: i64, content_type: text, body: text) -> bool:
+    val response = "HTTP/1.1 {status} {_devhub_gui_status_text(status)}\r\n" +
+        "Content-Type: {content_type}\r\n" +
+        "Content-Length: {body.len()}\r\n" +
+        "Connection: close\r\n\r\n" + body
+    match stream.write_text(response):
+        Ok(_):
+            match stream.flush():
+                Ok(_): true
+                Err(_): false
+        Err(_): false
+
+fn _devhub_gui_handle(stream: TcpStream):
+    stream.set_read_timeout(1000)
+    var path = ""
+    match stream.read_line():
+        Err(_): pass_dn
+        Ok(line):
+            val parts = line.trim().split(" ")
+            if parts.len() >= 2 and parts[0] == "GET":
+                path = parts[1]
+    var header_count = 0
+    if path != "":
+        loop:
+            match stream.read_line():
+                Err(_): break
+                Ok(line):
+                    if line.trim() == "": break
+                    header_count = header_count + 1
+                    if header_count >= 64: break
+    if path == "/" or path == "/index.html":
+        val _written = _devhub_gui_write(stream, 200, "text/html; charset=utf-8", devhub_gui_html())
+    elif path == "/api/status":
+        val _written = _devhub_gui_write(stream, 200, "application/json; charset=utf-8", devhub_gui_status_json())
+    else:
+        val _written = _devhub_gui_write(stream, 404, "application/json; charset=utf-8", "{\"error\":\"not found\"}")
+    val _closed = stream.close()
+
+fn devhub_gui_options(args: [text]) -> (i64, text):
+    var port: i64 = 8765
+    var shell = "electron"
+    var i = 0
+    while i < args.len():
+        if args[i] == "--browser":
+            shell = "browser"
+        elif (args[i] == "--port" or args[i] == "-p") and i + 1 < args.len():
+            port = args[i + 1].to_i64() ?? 0
+            i = i + 1
+        elif args[i].starts_with("--port="):
+            port = args[i].substring(7).to_i64() ?? 0
+        i = i + 1
+    (port, shell)
+
+fn run_devhub_gui(args: [text]) -> i64:
+    val options = devhub_gui_options(args)
+    val port = options.0
+    val shell = options.1
+    if port < 1024 or port > 65535:
+        print "Error: --port must be between 1024 and 65535"
+        return 2
+    val host = "127.0.0.1"
+    val addr = "{host}:{port}"
+    match TcpListener.bind(addr):
+        Err(e):
+            print "Error: failed to bind DevHub GUI to {addr}: {e}"
+            return 1
+        Ok(listener):
+            if not _devhub_gui_open(host, port, shell):
+                val _closed = listener.close()
+                return 1
+            loop:
+                match listener.accept():
+                    Err(e):
+                        print "DevHub GUI accept error: {e}"
+                        val _closed = listener.close()
+                        return 1
+                    Ok(stream): _devhub_gui_handle(stream)
+    0

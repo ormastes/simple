@@ -1,0 +1,118 @@
+# @tag: compiler, class-identity, struct-value, lane-f1
+#
+# CONTRACT (render_perf_redesign_plan_2026-08-06.md sec. 2, lane F1):
+#   `struct` = value semantics; `class` = identity/reference semantics.
+#   Assigning a class to a field / array slot / optional / trait-typed field
+#   copies the REFERENCE; `clone()` is required to duplicate. `struct` copies
+#   the value.
+#
+# This spec completes the F1 corpus that
+# `test/01_unit/compiler/class_reference_semantics_spec.spl` leaves open:
+# trait-typed fields, optional class fields, multi-element arrays, a parameter
+# stored into a field by a callee, a class returned from a function, and the
+# NEGATIVE control (struct must copy).
+#
+# MEASURED 2026-08-08 (Rust seed binary, bin/release/x86_64-unknown-linux-gnu):
+#   case            interpreter (`bin/simple test`)   JIT (`bin/simple run`)
+#   A trait field   COPY  (contract VIOLATED)         REF   (contract held)
+#   B optional      COPY  (contract VIOLATED)         CRASH "field access on nil receiver"
+#   C array[1]      COPY  (contract VIOLATED)         REF   (contract held)
+#   D param->field  COPY  (contract VIOLATED)         REF   (contract held)
+#   E returned cls  COPY  (contract VIOLATED)         REF   (contract held)
+#   F struct field  VAL   (contract held)             ALIAS (contract VIOLATED)
+# Neither engine satisfies the whole contract, and they fail in OPPOSITE
+# directions. Repro: test/fixtures/repro/compiler/class_identity/class_identity_corpus_probe.spl
+# Bugs: doc/08_tracking/bug/class_field_reference_semantics_diverge_2026-08-06.md
+#       doc/08_tracking/bug/struct_field_aliases_under_jit_2026-08-08.md
+#
+# Examples marked TODO(class-identity-contract) PIN the WRONG (value-copy)
+# result on purpose so the divergence is executable and loud. When reference
+# semantics land they flip red — invert each to the contract value stated in
+# its name and delete the marker. DO NOT re-pin a red example to a new copy
+# value, and never convert these TODOs to NOTEs.
+
+use std.spec.{describe, it, expect, assert_true}
+
+class CicCell:
+    n: i64
+
+struct CicStructCell:
+    n: i64
+
+trait CicBumpable:
+    fn value() -> i64
+
+class CicTraitCell:
+    n: i64
+
+impl CicBumpable for CicTraitCell:
+    fn value() -> i64:
+        self.n
+
+class CicTraitHolder:
+    item: CicBumpable
+
+class CicOptHolder:
+    maybe: CicCell?
+
+class CicHolder:
+    cell: CicCell
+
+class CicStructHolder:
+    cell: CicStructCell
+
+fn _cic_stash(h: CicHolder, c: CicCell):
+    h.cell = c
+
+fn _cic_make() -> CicCell:
+    CicCell(n: 90)
+
+describe "class identity corpus — trait/optional/array/param/return + struct control":
+    it "TODO(class-identity-contract): trait-typed field snapshots — contract wants 101":
+        val tc = CicTraitCell(n: 100)
+        val th = CicTraitHolder(item: tc)
+        tc.n = 101
+        expect(th.item.value()).to_equal(100)
+
+    it "TODO(class-identity-contract): optional class field snapshots — contract wants 111":
+        val c = CicCell(n: 110)
+        val oh = CicOptHolder(maybe: c)
+        c.n = 111
+        val m = oh.maybe
+        assert_true(m.?)
+        expect(m!.n).to_equal(110)
+
+    it "TODO(class-identity-contract): array element 1 of 2 snapshots — contract wants 131":
+        val a = CicCell(n: 120)
+        val b = CicCell(n: 130)
+        val arr = [a, b]
+        arr[1].n = 131
+        expect(b.n).to_equal(130)
+
+    it "TODO(class-identity-contract): callee-stored parameter snapshots — contract wants 141":
+        val h = CicHolder(cell: CicCell(n: 0))
+        val c = CicCell(n: 140)
+        _cic_stash(h, c)
+        c.n = 141
+        expect(h.cell.n).to_equal(140)
+
+    it "TODO(class-identity-contract): returned class instance snapshots — contract wants 91":
+        val c = _cic_make()
+        val h = CicHolder(cell: c)
+        c.n = 91
+        expect(h.cell.n).to_equal(90)
+
+    it "a struct stored in a class field is a VALUE COPY (contract HOLDS on this engine)":
+        # NEGATIVE CONTROL. This asserts the CONTRACT, not a pinned defect: the
+        # struct half must never alias. It is GREEN on the interpreter and RED
+        # on the JIT, which aliases the struct (measured 151). Do not weaken it.
+        var s = CicStructCell(n: 150)
+        val sh = CicStructHolder(cell: s)
+        s.n = 151
+        expect(sh.cell.n).to_equal(150)
+
+    it "mutation through a struct field does not escape to the original":
+        var s = CicStructCell(n: 160)
+        val sh = CicStructHolder(cell: s)
+        sh.cell.n = 161
+        expect(s.n).to_equal(160)

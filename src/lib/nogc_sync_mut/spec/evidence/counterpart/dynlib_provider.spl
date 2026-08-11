@@ -1,0 +1,225 @@
+@allow(primitive_api)
+# Dynlib Provider — in-process shared-library counterpart transport (Wave 1, lane C2).
+#
+# Closes an observed gap: scf_api_v1 (src/runtime/counterpart_abi_runtime.c,
+# src/lib/nogc_sync_mut/sffi/counterpart_abi.spl) only bootstraps a library
+# that exports the single symbol `scf_get_api` — i.e. a purpose-built adapter.
+# A plain system library such as libcrypto.so.3 exports no such symbol, so
+# that path cannot load it, and lanes have been avoiding the in-process
+# dynlib transport entirely as a result.
+#
+# This module does NOT touch src/runtime/counterpart_abi_runtime.c. It rides
+# the already-existing generic dlopen/dlsym SFFI
+# (src/lib/nogc_sync_mut/sffi/dynamic.spl, `DynLib`) plus the raw-memory
+# helpers already exported for the LLVM and font FFI surfaces
+# (rt_alloc/rt_free/rt_text_to_bytes/rt_array_data_ptr_u8/rt_bytes_from_raw)
+# to call an arbitrary plain C function by symbol name — exactly the shape a
+# fixed-arity C function like `unsigned char *SHA256(const unsigned char *d,
+# size_t n, unsigned char *md)` has. No SFFI binding or C adapter needed to be
+# added: every primitive this module calls already existed for other lanes.
+#
+# Fail-closed, always:
+#   * a library that will not dlopen -> ProviderStatus.unavailable
+#   * a symbol dlsym cannot find     -> ProviderStatus.unavailable
+#   * a call that does not produce a full-length digest -> unavailable
+#   * NEVER a placeholder digest and NEVER a literal fallback
+#
+# `artifact_hash` on the outcome is always a REAL measured digest of the
+# loaded library's own file bytes — computed through the very same loaded
+# library (it hashes its own on-disk bytes) — so it is never empty. An empty
+# artifact_hash is what `provider_manifest_rejections`
+# (src/lib/common/spec/evidence/counterpart/model.spl) rejects a manifest for.
+#
+# Design: doc/05_design/infra/counterpart/counterpart_conformance_infrastructure_design_2026-08-09.md §3
+
+use std.sffi.dynamic.{DynLib}
+use std.common.spec.evidence.counterpart.model.{
+    ProviderStatus,
+    LogicalArtifact,
+    ExecutionReceipt,
+    ExecutionMode,
+    ProvenanceReceipt
+}
+
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_free(ptr: i64)
+extern fn rt_text_to_bytes(s: text) -> [u8]
+extern fn rt_array_data_ptr_u8(bytes: [u8]) -> i64
+extern fn rt_bytes_from_raw(ptr: i64, len: i64) -> [u8]
+extern fn rt_file_read_bytes(path: text) -> [u8]
+
+pub val DYNLIB_SHA256_LEN: i64 = 32
+
+# ============================================================================
+# Hex encoding
+# ============================================================================
+
+fn hex_nibble(v: i64) -> text:
+    val digits = "0123456789abcdef"
+    digits.slice(v, v + 1)
+
+pub fn bytes_to_hex_u8(bytes: [u8]) -> text:
+    var out = ""
+    for b in bytes:
+        val v = b.to_i64()
+        out = out + hex_nibble(v / 16) + hex_nibble(v % 16)
+    out
+
+# ============================================================================
+# Generic (ptr, len, out_ptr) -> ptr call, by symbol name, on an open library
+# ============================================================================
+
+# Calls `symbol(in_ptr, in_len, out_ptr)` on `lib` and returns the hex digest
+# written into `out_len` bytes at `out_ptr`. Returns empty text on ANY
+# failure: missing symbol, allocation failure, or a return value of 0 (which
+# `DynLib.call_n` reports when dlsym itself fails inside the call).
+pub fn dynlib_call_digest3(lib: DynLib, symbol: text, input_bytes: [u8], out_len: i64) -> text:
+    val out_ptr = rt_alloc(out_len)
+    if out_ptr == 0:
+        return ""
+    val in_ptr = rt_array_data_ptr_u8(input_bytes)
+    var args: [i64] = []
+    args.push(in_ptr)
+    args.push(input_bytes.len())
+    args.push(out_ptr)
+    val ret = lib.call_n(symbol, args)
+    if ret == 0:
+        rt_free(out_ptr)
+        return ""
+    val out_bytes = rt_bytes_from_raw(out_ptr, out_len)
+    rt_free(out_ptr)
+    if out_bytes.len() != out_len:
+        return ""
+    bytes_to_hex_u8(out_bytes)
+
+# ============================================================================
+# Outcome — the model contracts a real caller needs, never a placeholder
+# ============================================================================
+
+pub struct DynlibDigestOutcome:
+    provider_id: text
+    status: ProviderStatus
+    detail: text
+    digest_hex: text
+    matched: bool
+    artifact: LogicalArtifact
+    execution: ExecutionReceipt
+    provenance: ProvenanceReceipt
+
+fn dynlib_provider_id(lib_path: text, symbol: text) -> text:
+    "dynlib:" + lib_path + "#" + symbol
+
+fn dynlib_outcome_unavailable(provider_id: text, detail: text) -> DynlibDigestOutcome:
+    DynlibDigestOutcome(
+        provider_id: provider_id,
+        status: ProviderStatus.unavailable,
+        detail: detail,
+        digest_hex: "",
+        matched: false,
+        artifact: LogicalArtifact(
+            boundary_id: "",
+            schema_id: "",
+            schema_version: -1,
+            item_count: 0,
+            canonical_hash: "",
+            artifact_ref: ""
+        ),
+        execution: ExecutionReceipt(
+            provider_id: provider_id,
+            execution_mode: ExecutionMode.cpu_reference,
+            device_identity: "",
+            queue_identity: "",
+            submission_count: 0,
+            fence_completed: false,
+            device_origin_readback: false,
+            fallback_used: false,
+            dropped_events: 0,
+            completed: false
+        ),
+        provenance: ProvenanceReceipt(
+            package_manifest_hash: "",
+            provider_manifest_hash: "",
+            input_hash: "",
+            converter_route_hash: "",
+            environment_profile: "",
+            run_id: ""
+        )
+    )
+
+# Measure a REAL digest of the loaded library's own on-disk bytes, using the
+# same loaded symbol. This is what backs `artifact_hash` / `provenance` —
+# never a placeholder, and never computed from anything but the actual file
+# that was actually dlopen'd for this call.
+fn dynlib_library_digest(lib: DynLib, symbol: text, lib_path: text) -> text:
+    val file_bytes = rt_file_read_bytes(lib_path)
+    if file_bytes.len() == 0:
+        return ""
+    dynlib_call_digest3(lib, symbol, file_bytes, DYNLIB_SHA256_LEN)
+
+# Load `lib_path`, call `symbol(input, len(input), out[out_len])`, and compare
+# the resulting hex digest against `expected_hex`. Fails closed at every
+# stage: a missing library or symbol never falls through to a literal digest.
+pub fn dynlib_digest_compare(
+    lib_path: text,
+    symbol: text,
+    input: text,
+    out_len: i64,
+    expected_hex: text
+) -> DynlibDigestOutcome:
+    val provider_id = dynlib_provider_id(lib_path, symbol)
+    val maybe_lib = DynLib.load(lib_path)
+    if not maybe_lib.?:
+        return dynlib_outcome_unavailable(provider_id, "library not loadable: " + lib_path)
+    var lib = maybe_lib.unwrap()
+
+    val input_bytes = rt_text_to_bytes(input)
+    val digest_hex = dynlib_call_digest3(lib, symbol, input_bytes, out_len)
+    if digest_hex == "":
+        lib.close()
+        return dynlib_outcome_unavailable(provider_id, "symbol not callable or produced no digest: " + symbol)
+
+    val library_hash = dynlib_library_digest(lib, symbol, lib_path)
+    lib.close()
+    if library_hash == "":
+        return dynlib_outcome_unavailable(provider_id, "could not measure artifact_hash of " + lib_path)
+
+    val matched = digest_hex == expected_hex
+
+    DynlibDigestOutcome(
+        provider_id: provider_id,
+        status: ProviderStatus.executed,
+        detail: if matched: "digest matched expected value" else: "digest MISMATCH: got " + digest_hex + " expected " + expected_hex,
+        digest_hex: digest_hex,
+        matched: matched,
+        artifact: LogicalArtifact(
+            boundary_id: "infra.counterpart.dynlib@1",
+            schema_id: "dynlib_digest_v1",
+            schema_version: 1,
+            item_count: 1,
+            canonical_hash: digest_hex,
+            artifact_ref: provider_id
+        ),
+        execution: ExecutionReceipt(
+            provider_id: provider_id,
+            execution_mode: ExecutionMode.cpu_reference,
+            device_identity: lib_path,
+            queue_identity: "",
+            submission_count: 1,
+            fence_completed: true,
+            device_origin_readback: false,
+            fallback_used: false,
+            dropped_events: 0,
+            completed: true
+        ),
+        provenance: ProvenanceReceipt(
+            package_manifest_hash: library_hash,
+            provider_manifest_hash: library_hash,
+            input_hash: digest_hex,
+            converter_route_hash: symbol,
+            environment_profile: "linux-x86_64-dynlib",
+            run_id: provider_id
+        )
+    )
+
+export DynlibDigestOutcome
+export dynlib_digest_compare, dynlib_call_digest3, bytes_to_hex_u8

@@ -1,0 +1,239 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_emu_adv.spl 25%
+# @req REQ-ENGINE2D-BLUR-001
+# @req REQ-ENGINE2D-BLUR-002
+# @tag: rendering, engine2d, blur, perf, regression
+"""
+# Engine2D Box Blur — Separable Sliding-Window Rewrite
+
+**Category:** Stdlib
+**Status:** Implemented
+
+## Purpose and Audience
+
+Anyone who blurs a framebuffer region — window-manager glass panels, drop
+shadows, GUI backdrops — goes through `emu_draw_blur_rect`. This scenario is
+written for the renderer maintainer who needs to know two things: that the fast
+blur paints *exactly* the same pixels as the textbook square-window blur it
+replaced, and that its cost no longer explodes with the blur radius.
+
+The function used to re-sum a full `(2*radius+1)^2` tap square for every output
+pixel. On a SimpleOS window-manager boot that made a single backdrop blur run
+for tens of minutes, and nothing in the test suite could see it: the only lane
+that exercised the blur at all was the QEMU boot. This scenario closes that gap
+on the host lane.
+
+## Scope and Preconditions
+
+Runs entirely on the host against `SoftwareBackend`, an in-memory framebuffer.
+No GPU, no QEMU. The framebuffer is seeded through `draw_image`, which is a raw
+copy, so the input pixels — including their alpha — are exact.
+
+## Primary Workflow
+
+1. Seed a small framebuffer with a deterministic, non-uniform RGBA pattern.
+2. Blur a region through the production path (`SoftwareBackend.draw_blur_rect`).
+3. Recompute the same region with the naive square-window blur written inside
+   this spec, from the pre-blur snapshot.
+4. Every pixel must match, for regions in the interior and hard against each of
+   the four framebuffer edges, at more than one radius.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| Separable box blur | A horizontal pass followed by a vertical pass; equivalent here because in-bounds-ness factorises into x-in-bounds AND y-in-bounds |
+| Tap count `cnt` | Only in-bounds taps are summed, and the divisor is their count — so the count must be carried through both passes, not just the colour sums |
+| Radius independence | A sliding window makes the work O(w*h) regardless of radius |
+
+## Related Specifications
+
+- `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_software_rounded_rect_spec.spl` — same backend, filled-shape raster reference
+
+## Evidence and Provenance
+
+Oracle is differential: the naive reference algorithm below is a transcription
+of the implementation that shipped before the rewrite, kept in the spec so the
+comparison stays honest if the production code changes again.
+
+## Recovery and Troubleshooting
+
+A mismatch reports the first offending region, pixel and both colour values.
+The usual cause is an off-by-one in a sliding-window step or a dropped tap
+count at a clamped edge.
+
+## Compatibility and Limitations
+
+Host lane only. Integer division semantics are those of `i32` `/`, matching the
+production code exactly.
+"""
+
+use std.spec.*
+use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
+use std.gc_async_mut.gpu.engine2d.color.{rgba}
+
+# ============================================================================
+# Naive reference — the exact O(w*h*(2r+1)^2) square-window blur that
+# emu_draw_blur_rect used to be. Sums only in-bounds taps, divides by the
+# in-bounds tap count.
+# ============================================================================
+
+fn naive_blur_region(fb: [u32], fb_w: i32, fb_h: i32, x: i32, y: i32, w: i32, h: i32, radius: i32) -> [u32]:
+    var out: [u32] = [0u32; w * h]
+    var py: i32 = 0
+    while py < h:
+        var px: i32 = 0
+        while px < w:
+            var sr: i32 = 0
+            var sg: i32 = 0
+            var sb: i32 = 0
+            var sa: i32 = 0
+            var cnt: i32 = 0
+            var ky = -radius
+            while ky <= radius:
+                var kx = -radius
+                while kx <= radius:
+                    val fx = x + px + kx
+                    val fy = y + py + ky
+                    if fx >= 0 and fx < fb_w and fy >= 0 and fy < fb_h:
+                        val p = fb[fy * fb_w + fx]
+                        sr = sr + (((p >> 16) & 0xFFu32) as i32)
+                        sg = sg + (((p >> 8) & 0xFFu32) as i32)
+                        sb = sb + ((p & 0xFFu32) as i32)
+                        sa = sa + (((p >> 24) & 0xFFu32) as i32)
+                        cnt = cnt + 1
+                    kx = kx + 1
+                ky = ky + 1
+            if cnt > 0:
+                out[py * w + px] = rgba(sr / cnt, sg / cnt, sb / cnt, sa / cnt)
+            px = px + 1
+        py = py + 1
+    out
+
+fn seed_pattern(fb_w: i32, fb_h: i32) -> [u32]:
+    """A deterministic, non-uniform RGBA pattern: every channel varies, and
+    alpha varies too, so a blur that ignores a channel cannot pass."""
+    var pat: [u32] = [0u32; fb_w * fb_h]
+    var i: i32 = 0
+    while i < fb_w * fb_h:
+        val r = (i * 17 + 3) % 256
+        val g = (i * 5 + 41) % 256
+        val b = (i * 29 + 7) % 256
+        val a = 200 + (i % 56)
+        pat[i] = rgba(r, g, b, a)
+        i = i + 1
+    pat
+
+describe "Engine2D box blur is separable, radius-independent, and pixel-identical":
+    """As a renderer maintainer, I want the fast blur to paint exactly the
+    pixels the textbook blur painted, so that speeding it up cannot silently
+    change what users see."""
+
+    it "paints pixels identical to the naive square-window blur in the interior and at every clamped edge":
+        # @req REQ-ENGINE2D-BLUR-001
+        val fb_w = 12
+        val fb_h = 10
+        # Interior, then hard against the top, top-right, bottom-left and
+        # bottom-right corners — each case forces the tap window off the
+        # framebuffer on a different side, exercising the tap-count clamping.
+        val case_x = [4, 0, 8, 0, 7, 3]
+        val case_y = [3, 0, 0, 7, 6, 2]
+        val case_w = [4, 5, 4, 5, 5, 6]
+        val case_h = [4, 4, 4, 3, 4, 6]
+        val case_r = [1, 2, 2, 2, 3, 3]
+        var compared: i32 = 0
+        var mismatches: i32 = 0
+        # Diagnostics are kept as plain i32s: an earlier `text` accumulator for
+        # the same purpose read back empty here even though mismatches were
+        # counted in the very same branch (see spec footnote in the report).
+        var first_bad_case: i32 = -1
+        var first_bad_index: i32 = -1
+        var ci: i32 = 0
+        while ci < case_x.len():
+            val bx = case_x[ci]
+            val by = case_y[ci]
+            val bw = case_w[ci]
+            val bh = case_h[ci]
+            val br = case_r[ci]
+
+            step("seed a deterministic RGBA framebuffer")
+            var backend = SoftwareBackend.create()
+            assert_true(backend.init(fb_w, fb_h))
+            val pattern = seed_pattern(fb_w, fb_h)
+            backend.draw_image(0, 0, fb_w, fb_h, pattern)
+            val before = backend.read_pixels()
+
+            step("blur the region through the production path")
+            backend.draw_blur_rect(bx, by, bw, bh, br)
+            val after = backend.read_pixels()
+
+            step("recompute the same region with the naive square-window blur")
+            val reference = naive_blur_region(before, fb_w, fb_h, bx, by, bw, bh, br)
+
+            step("compare every pixel of the region")
+            var py: i32 = 0
+            while py < bh:
+                var px: i32 = 0
+                while px < bw:
+                    val got = after[(by + py) * fb_w + (bx + px)]
+                    val want = reference[py * bw + px]
+                    compared = compared + 1
+                    if got != want:
+                        mismatches = mismatches + 1
+                        if first_bad_case < 0:
+                            first_bad_case = ci
+                            first_bad_index = py * bw + px
+                    px = px + 1
+                py = py + 1
+            backend.shutdown()
+            ci = ci + 1
+
+        # A vacuous comparison would be no evidence at all.
+        assert_true(compared > 100)
+        assert_equal(mismatches, 0)
+        assert_equal(first_bad_case, -1)
+        assert_equal(first_bad_index, -1)
+
+    it "still finishes when the radius dwarfs the framebuffer, and every output pixel is the whole-framebuffer average":
+        # @req REQ-ENGINE2D-BLUR-002
+        # Deterministic radius-independence receipt, preferred over wall-clock:
+        # once the radius exceeds the framebuffer, every output pixel's tap
+        # window covers the ENTIRE framebuffer, so all outputs must be the same
+        # single global average. The old O(r^2) blur would need ~10^7 taps to
+        # reach this answer; the sliding-window blur reaches it in O(w*h).
+        val fb_w = 12
+        val fb_h = 10
+        val radius = 64
+
+        step("seed the framebuffer and blur it with an oversized radius")
+        var backend = SoftwareBackend.create()
+        assert_true(backend.init(fb_w, fb_h))
+        val pattern = seed_pattern(fb_w, fb_h)
+        backend.draw_image(0, 0, fb_w, fb_h, pattern)
+        backend.draw_blur_rect(0, 0, fb_w, fb_h, radius)
+        val after = backend.read_pixels()
+
+        step("compute the whole-framebuffer average independently")
+        var sr: i32 = 0
+        var sg: i32 = 0
+        var sb: i32 = 0
+        var sa: i32 = 0
+        var i: i32 = 0
+        while i < fb_w * fb_h:
+            val p = pattern[i]
+            sr = sr + (((p >> 16) & 0xFFu32) as i32)
+            sg = sg + (((p >> 8) & 0xFFu32) as i32)
+            sb = sb + ((p & 0xFFu32) as i32)
+            sa = sa + (((p >> 24) & 0xFFu32) as i32)
+            i = i + 1
+        val n = fb_w * fb_h
+        val expected = rgba(sr / n, sg / n, sb / n, sa / n)
+
+        step("assert every output pixel is that average")
+        var bad: i32 = 0
+        var j: i32 = 0
+        while j < fb_w * fb_h:
+            if after[j] != expected:
+                bad = bad + 1
+            j = j + 1
+        assert_equal(bad, 0)
+        backend.shutdown()

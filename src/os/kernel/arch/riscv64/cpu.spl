@@ -1,0 +1,252 @@
+# RISC-V 64 CPU Primitives — S-Mode CSR Access and Control
+#
+# Provides low-level CPU operations for RISC-V 64-bit in S-mode:
+# CSR read/write, interrupt control, TLB management, WFI.
+#
+# S-mode CSRs (supervisor level):
+#   sstatus  (0x100) — Supervisor status (SIE, SPIE, SPP, etc.)
+#   stvec    (0x105) — Supervisor trap vector base
+#   sip      (0x144) — Supervisor interrupt pending
+#   sie      (0x104) — Supervisor interrupt enable
+#   sscratch (0x140) — Supervisor scratch register
+#   sepc     (0x141) — Supervisor exception program counter
+#   scause   (0x142) — Supervisor cause register
+#   stval    (0x143) — Supervisor trap value
+#   satp     (0x180) — Supervisor address translation and protection
+#
+# sstatus bits:
+#   Bit 1: SIE  — Supervisor Interrupt Enable
+#   Bit 5: SPIE — Supervisor Previous Interrupt Enable
+#   Bit 8: SPP  — Supervisor Previous Privilege (0=U, 1=S)
+
+# ============================================================================
+# S-Mode CSR Constants
+# ============================================================================
+
+val SSTATUS_SIE: u64 = 1 << 1      # Supervisor Interrupt Enable
+val SSTATUS_SPIE: u64 = 1 << 5     # Supervisor Previous Interrupt Enable
+val SSTATUS_SPP: u64 = 1 << 8      # Supervisor Previous Privilege
+
+# SIE register bits (supervisor interrupt enable)
+val SIE_SSIE: u64 = 1 << 1         # Supervisor Software Interrupt Enable
+val SIE_STIE: u64 = 1 << 5         # Supervisor Timer Interrupt Enable
+val SIE_SEIE: u64 = 1 << 9         # Supervisor External Interrupt Enable
+
+# SIP register bits (supervisor interrupt pending)
+val SIP_SSIP: u64 = 1 << 1         # Supervisor Software Interrupt Pending
+val SIP_STIP: u64 = 1 << 5         # Supervisor Timer Interrupt Pending
+val SIP_SEIP: u64 = 1 << 9         # Supervisor External Interrupt Pending
+
+extern fn rt_riscv64_csr_read(csr: u32) -> u64
+extern fn rt_riscv64_csr_write(csr: u32, value: u64)
+extern fn rt_riscv64_csr_set(csr: u32, bits: u64)
+extern fn rt_riscv64_csr_clear(csr: u32, bits: u64)
+extern fn rt_riscv64_sfence_vma_addr(vaddr: u64)
+extern fn rt_riscv64_sfence_vma_asid(asid: u64)
+extern fn rt_riscv64_read_tp() -> u64
+extern fn rt_riscv64_write_tp(value: u64)
+extern fn rt_riscv64_read_sp() -> u64
+extern fn rt_riscv64_read_gp() -> u64
+
+# ============================================================================
+# CSR Read Functions
+# ============================================================================
+
+fn csrr_sstatus() -> u64:
+    """Read the sstatus CSR (supervisor status)."""
+    rt_riscv64_csr_read(0x100u32)
+
+fn csrr_stvec() -> u64:
+    """Read the stvec CSR (supervisor trap vector base)."""
+    rt_riscv64_csr_read(0x105u32)
+
+fn csrr_sepc() -> u64:
+    """Read the sepc CSR (supervisor exception program counter)."""
+    rt_riscv64_csr_read(0x141u32)
+
+fn csrr_scause() -> u64:
+    """Read the scause CSR (supervisor cause register)."""
+    rt_riscv64_csr_read(0x142u32)
+
+fn csrr_stval() -> u64:
+    """Read the stval CSR (supervisor trap value)."""
+    rt_riscv64_csr_read(0x143u32)
+
+fn csrr_satp() -> u64:
+    """Read the satp CSR (supervisor address translation and protection)."""
+    rt_riscv64_csr_read(0x180u32)
+
+fn csrr_sie() -> u64:
+    """Read the sie CSR (supervisor interrupt enable)."""
+    rt_riscv64_csr_read(0x104u32)
+
+fn csrr_sip() -> u64:
+    """Read the sip CSR (supervisor interrupt pending)."""
+    rt_riscv64_csr_read(0x144u32)
+
+fn csrr_sscratch() -> u64:
+    """Read the sscratch CSR (supervisor scratch register)."""
+    rt_riscv64_csr_read(0x140u32)
+
+fn csrr_time() -> u64:
+    """Read the time CSR (real-time counter, read-only in S-mode)."""
+    rt_riscv64_csr_read(0xC01u32)
+
+fn csrr_cycle() -> u64:
+    """Read the cycle CSR."""
+    rt_riscv64_csr_read(0xC00u32)
+
+fn csrr_instret() -> u64:
+    """Read the instret CSR."""
+    rt_riscv64_csr_read(0xC02u32)
+
+# ============================================================================
+# CSR Write Functions
+# ============================================================================
+
+fn csrw_sstatus(value: u64):
+    """Write the sstatus CSR."""
+    rt_riscv64_csr_write(0x100u32, value)
+
+fn csrw_stvec(value: u64):
+    """Write the stvec CSR (set trap vector base address)."""
+    rt_riscv64_csr_write(0x105u32, value)
+
+fn csrw_sepc(value: u64):
+    """Write the sepc CSR."""
+    rt_riscv64_csr_write(0x141u32, value)
+
+fn csrw_satp(value: u64):
+    """Write the satp CSR (switch page tables).
+
+    Requires sfence.vma after writing to ensure TLB coherency.
+    """
+    rt_riscv64_csr_write(0x180u32, value)
+
+fn csrw_sie(value: u64):
+    """Write the sie CSR (supervisor interrupt enable)."""
+    rt_riscv64_csr_write(0x104u32, value)
+
+fn csrw_sscratch(value: u64):
+    """Write the sscratch CSR."""
+    rt_riscv64_csr_write(0x140u32, value)
+
+# ============================================================================
+# CSR Set/Clear Bit Functions
+# ============================================================================
+
+fn csrs_sstatus(bits: u64):
+    """Set bits in sstatus (atomic read-modify-write)."""
+    rt_riscv64_csr_set(0x100u32, bits)
+
+fn csrc_sstatus(bits: u64):
+    """Clear bits in sstatus (atomic read-modify-write)."""
+    rt_riscv64_csr_clear(0x100u32, bits)
+
+fn csrs_sie(bits: u64):
+    """Set bits in sie (atomic read-modify-write)."""
+    rt_riscv64_csr_set(0x104u32, bits)
+
+fn csrc_sie(bits: u64):
+    """Clear bits in sie (atomic read-modify-write)."""
+    rt_riscv64_csr_clear(0x104u32, bits)
+
+# ============================================================================
+# CPU Control Instructions
+# ============================================================================
+
+fn wfi():
+    """Wait for interrupt — halt CPU until next interrupt."""
+    unsafe:
+        asm volatile:
+            "wfi"
+
+fn sfence_vma():
+    """Flush entire TLB (sfence.vma zero, zero)."""
+    unsafe:
+        asm volatile:
+            "sfence.vma zero, zero"
+
+fn sfence_vma_addr(vaddr: u64):
+    """Flush TLB entry for a single virtual address."""
+    rt_riscv64_sfence_vma_addr(vaddr)
+
+fn sfence_vma_asid(asid: u64):
+    """Flush all TLB entries for a given ASID."""
+    rt_riscv64_sfence_vma_asid(asid)
+
+fn read_tp() -> u64:
+    """Read the tp (thread pointer) register — used as hart ID in S-mode."""
+    rt_riscv64_read_tp()
+
+fn write_tp(value: u64):
+    """Write the tp (thread pointer) register."""
+    rt_riscv64_write_tp(value)
+
+fn read_sp() -> u64:
+    """Read the current stack pointer."""
+    rt_riscv64_read_sp()
+
+fn read_gp() -> u64:
+    """Read the global pointer register."""
+    rt_riscv64_read_gp()
+
+# ============================================================================
+# Rv64Cpu — HAL-Compatible CPU Interface
+# ============================================================================
+
+struct Rv64Cpu:
+    """RISC-V 64-bit CPU primitives.
+
+    Provides architecture-specific CPU operations: CSR access,
+    interrupt control, TLB management, hart identification.
+    All operations are S-mode (supervisor) level.
+    """
+    pass_dn
+
+impl Rv64Cpu:
+    fn cpu_id() -> u64:
+        """Return current hart ID from tp register.
+
+        OpenSBI sets tp = hart ID before jumping to S-mode payload.
+        """
+        read_tp()
+
+    fn cpu_address_width() -> u32:
+        """Return virtual address width in bits (39 for Sv39)."""
+        64
+
+    fn cpu_enable_interrupts():
+        """Enable S-mode interrupts by setting SIE bit in sstatus."""
+        csrs_sstatus(SSTATUS_SIE)
+
+    fn cpu_disable_interrupts():
+        """Disable S-mode interrupts by clearing SIE bit in sstatus."""
+        csrc_sstatus(SSTATUS_SIE)
+
+    fn cpu_halt():
+        """Halt until next interrupt (WFI)."""
+        wfi()
+
+    fn cpu_halt_loop():
+        """Disable interrupts and halt forever."""
+        csrc_sstatus(SSTATUS_SIE)
+        while true:
+            wfi()
+
+    fn cpu_flush_tlb(vaddr: u64):
+        """Flush TLB entry for a single virtual address."""
+        sfence_vma_addr(vaddr)
+
+    fn cpu_flush_tlb_all():
+        """Flush entire TLB (sfence.vma zero, zero)."""
+        sfence_vma()
+
+    fn cpu_read_page_table_base() -> u64:
+        """Read current page table base from satp CSR."""
+        csrr_satp()
+
+    fn cpu_write_page_table_base(satp_value: u64):
+        """Write satp CSR and flush TLB."""
+        csrw_satp(satp_value)
+        sfence_vma()

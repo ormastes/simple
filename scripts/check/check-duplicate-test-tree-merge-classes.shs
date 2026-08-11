@@ -1,0 +1,260 @@
+#!/bin/sh
+# check-duplicate-test-tree-merge-classes.shs — classify duplicate test-tree pairs
+# by CODE-LINE SET DIFFERENCE, not by line count.
+#
+# WHY THIS EXISTS
+# ---------------
+# doc/08_tracking/test/duplicate_test_tree_merge_worklist_2026-08-09.md has been
+# derived twice and been wrong twice:
+#   v1 (44200dec485) ranked by RAW line count            -> 44% of entries wrong.
+#   v2 (ed2f77a9c65) ranked by CODE line COUNT           -> still wrong: a count
+#       comparison cannot tell "legacy has 3 lines the twin lacks" from "legacy
+#       has 3 MORE lines, all of which the twin already has".
+# The only question that matters for a merge is a SET question:
+#     uniq_a = codelines(a) \ codelines(b)
+#     uniq_b = codelines(b) \ codelines(a)
+# A pair is a GENUINE MERGE only when BOTH uniq_a > 0 AND uniq_b > 0 — i.e. each
+# leg carries code the other does not. If exactly one side is non-empty the other
+# leg is a strict SUBSET and the correct action is ADOPT-SUPERSET (delete the
+# subset), never a merge.
+#
+# Comment stripping is a real scanner, not a `^#` prefix test. v2's stripper
+# missed `//` line comments entirely, and both prior passes ignored `/* */`
+# blocks and could not tell a `#` inside a string literal from a comment.
+# Handled here: `#`, `//`, `/* ... */`, `"`/`'` strings with backslash escapes,
+# and `"""` triple-quoted multi-line strings.
+#
+# USAGE
+#   sh scripts/check/check-duplicate-test-tree-merge-classes.shs [REF]
+# REF defaults to origin/main. Content is read from the COMMITTED tree via
+# `git cat-file`, never from the shared working copy (which carries foreign
+# staged changes from parallel sessions).
+#
+# OUTPUT: a class histogram plus a per-pair TSV on stdout. Verdict line last.
+
+set -eu
+
+# Byte-order collation is mandatory: `join`/`comm` require their inputs sorted in
+# the SAME order they compare in, and a locale-aware sort silently produces an
+# order `join` then rejects ("input is not in sorted order").
+LC_ALL=C
+export LC_ALL
+
+REF="${1:-origin/main}"
+ROOT=$(git rev-parse --show-toplevel)
+cd "$ROOT"
+
+RESOLVED=$(git rev-parse --verify "$REF^{commit}") || {
+    echo "ERROR — nothing was checked: cannot resolve REF '$REF'"
+    exit 2
+}
+
+# Pair roots: legacy (unnumbered) <-> numbered.
+# Order is "A=numbered  B=legacy" throughout.
+PAIRS='test/01_unit:test/unit test/03_system:test/system'
+
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT INT TERM
+
+# ---------------------------------------------------------------------------
+# 1. Enumerate committed .spl paths under every root.
+# ---------------------------------------------------------------------------
+: > "$WORK/roots.txt"
+for p in $PAIRS; do
+    printf '%s\n%s\n' "${p%%:*}" "${p##*:}" >> "$WORK/roots.txt"
+done
+
+# shellcheck disable=SC2046
+git ls-tree -r --name-only "$RESOLVED" -- $(cat "$WORK/roots.txt") \
+    | grep '\.spl$' > "$WORK/all_paths.txt" || true
+
+TOTAL_PATHS=$(wc -l < "$WORK/all_paths.txt" | tr -d ' ')
+if [ "$TOTAL_PATHS" -eq 0 ]; then
+    echo "ERROR — nothing was checked: no .spl paths under the duplicate roots at $RESOLVED"
+    exit 2
+fi
+
+# ---------------------------------------------------------------------------
+# 2. Strip comments from every file in ONE `git cat-file --batch` pass.
+#    Each file's code lines land in $WORK/lines/<n> (n = stable index).
+# ---------------------------------------------------------------------------
+mkdir -p "$WORK/lines"
+nl -ba -w1 -s'	' "$WORK/all_paths.txt" > "$WORK/indexed.txt"
+
+awk -F'\t' -v R="$RESOLVED" '{ print R ":" $2 }' "$WORK/indexed.txt" > "$WORK/batchreq.txt"
+
+# `git cat-file --batch` emits "<sha> <type> <size>\n<content>\n" per request.
+# The awk below consumes that stream positionally, in request order, so file N
+# of the stream is line N of indexed.txt.
+git cat-file --batch < "$WORK/batchreq.txt" \
+  | awk -v OUT="$WORK/lines" '
+    function flush_line(s,   t) {
+        t = s
+        gsub(/^[ \t\r]+/, "", t); gsub(/[ \t\r]+$/, "", t)
+        if (t != "") print t > outfile
+    }
+    BEGIN { need_header = 1; idx = 0 }
+    {
+        if (need_header) {
+            # "<sha> <type> <size>" or "<obj> missing"
+            n = split($0, h, " ")
+            if (n < 3) { next }             # missing object: skip, no body
+            remaining = h[3] + 0
+            idx++
+            outfile = OUT "/" idx
+            printf "" > outfile
+            need_header = 0
+            consumed = 0
+            in_block = 0; in_triple = 0
+            if (remaining == 0) { close(outfile); need_header = 1 }
+            next
+        }
+        # body line (the +1 accounts for the newline awk stripped)
+        consumed += length($0) + 1
+
+        line = $0
+        out = ""
+        i = 1
+        L = length(line)
+        while (i <= L) {
+            c = substr(line, i, 1)
+            two = substr(line, i, 2)
+            three = substr(line, i, 3)
+
+            if (in_block) {
+                if (two == "*/") { in_block = 0; i += 2 } else { i++ }
+                continue
+            }
+            if (in_triple) {
+                if (three == "\"\"\"") { in_triple = 0; out = out "\"\"\""; i += 3 }
+                else { out = out c; i++ }
+                continue
+            }
+            if (three == "\"\"\"") { in_triple = 1; out = out "\"\"\""; i += 3; continue }
+            if (c == "#") { break }                       # line comment
+            if (two == "//") { break }                    # line comment
+            if (two == "/*") { in_block = 1; i += 2; continue }
+            if (c == "\"" || c == "'"'"'") {
+                q = c; out = out c; i++
+                while (i <= L) {
+                    d = substr(line, i, 1)
+                    out = out d
+                    if (d == "\\") { i++; if (i <= L) out = out substr(line, i, 1); i++; continue }
+                    i++
+                    if (d == q) break
+                }
+                continue
+            }
+            out = out c
+            i++
+        }
+        flush_line(out)
+
+        if (consumed >= remaining) { close(outfile); need_header = 1 }
+    }
+'
+
+# ---------------------------------------------------------------------------
+# 3. Build relpath -> index maps and classify each common pair.
+# ---------------------------------------------------------------------------
+: > "$WORK/pairs.tsv"
+: > "$WORK/onlyA.txt"
+: > "$WORK/onlyB.txt"
+
+for p in $PAIRS; do
+    A="${p%%:*}"; B="${p##*:}"
+    awk -F'\t' -v pre="$A/" '
+        index($2, pre) == 1 { print substr($2, length(pre)+1) "\t" $1 }
+    ' "$WORK/indexed.txt" | sort > "$WORK/a.map"
+    awk -F'\t' -v pre="$B/" '
+        index($2, pre) == 1 { print substr($2, length(pre)+1) "\t" $1 }
+    ' "$WORK/indexed.txt" | sort > "$WORK/b.map"
+
+    join -t'	' -j1 "$WORK/a.map" "$WORK/b.map" > "$WORK/common.tsv"
+    join -t'	' -v1 -j1 "$WORK/a.map" "$WORK/b.map" | cut -f1 \
+        | sed "s|^|$A/|" >> "$WORK/onlyA.txt"
+    join -t'	' -v2 -j1 "$WORK/a.map" "$WORK/b.map" | cut -f1 \
+        | sed "s|^|$B/|" >> "$WORK/onlyB.txt"
+
+    while IFS='	' read -r rel ia ib; do
+        [ -n "$rel" ] || continue
+        fa="$WORK/lines/$ia"; fb="$WORK/lines/$ib"
+        [ -f "$fa" ] || : > "$fa"
+        [ -f "$fb" ] || : > "$fb"
+        sort -u "$fa" > "$WORK/sa"; sort -u "$fb" > "$WORK/sb"
+        ca=$(wc -l < "$WORK/sa" | tr -d ' ')
+        cb=$(wc -l < "$WORK/sb" | tr -d ' ')
+        ua=$(comm -23 "$WORK/sa" "$WORK/sb" | wc -l | tr -d ' ')
+        ub=$(comm -13 "$WORK/sa" "$WORK/sb" | wc -l | tr -d ' ')
+
+        if [ "$ua" -eq 0 ] && [ "$ub" -eq 0 ]; then
+            cls=identical
+        elif [ "$ua" -gt 0 ] && [ "$ub" -gt 0 ]; then
+            cls=genuine-merge
+        elif [ "$ub" -gt 0 ]; then
+            cls=adopt-superset-legacy    # legacy (B) is the superset
+        else
+            cls=adopt-superset-numbered  # numbered (A) is the superset
+        fi
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$cls" "$A" "$B" "$rel" "$ca" "$cb" "$ua" "$ub" "$ia:$ib" \
+            >> "$WORK/pairs.tsv"
+    done < "$WORK/common.tsv"
+done
+
+# ---------------------------------------------------------------------------
+# 4. Report.
+# ---------------------------------------------------------------------------
+NPAIRS=$(wc -l < "$WORK/pairs.tsv" | tr -d ' ')
+NONLYA=$(wc -l < "$WORK/onlyA.txt" | tr -d ' ')
+NONLYB=$(wc -l < "$WORK/onlyB.txt" | tr -d ' ')
+
+echo "ref: $RESOLVED"
+echo "spl files under duplicate roots: $TOTAL_PATHS"
+echo "common (both-legs) pairs: $NPAIRS"
+echo "only in numbered tree: $NONLYA"
+echo "only in legacy tree:   $NONLYB"
+echo
+echo "== CLASS HISTOGRAM =="
+cut -f1 "$WORK/pairs.tsv" | sort | uniq -c | sort -rn
+echo
+echo "== PER-ROOT HISTOGRAM =="
+awk -F'\t' '{ print $2 " <-> " $3 "\t" $1 }' "$WORK/pairs.tsv" \
+    | sort | uniq -c | sort -rn
+echo
+echo "== GENUINE-MERGE PAIRS (both legs carry unique code) =="
+GM=$(awk -F'\t' '$1=="genuine-merge"' "$WORK/pairs.tsv" | wc -l | tr -d ' ')
+if [ "$GM" -eq 0 ]; then
+    echo "(none)"
+else
+    printf 'uniq_num\tuniq_leg\tcode_num\tcode_leg\tpath\n'
+    awk -F'\t' '$1=="genuine-merge" { print $7 "\t" $8 "\t" $5 "\t" $6 "\t" $2 "/" $4 }' \
+        "$WORK/pairs.tsv" | sort -rn -k1,1 -k2,2
+    echo
+    echo "== TOP 3 GENUINE-MERGE PAIRS, DIVERGING CODE LINES QUOTED =="
+    awk -F'\t' '$1=="genuine-merge" { print ($7+$8) "\t" $2 "\t" $3 "\t" $4 "\t" $9 }' \
+        "$WORK/pairs.tsv" | sort -rn | head -3 \
+    | while IFS='	' read -r _tot A B rel idx; do
+        ia="${idx%%:*}"; ib="${idx##*:}"
+        sort -u "$WORK/lines/$ia" > "$WORK/sa"; sort -u "$WORK/lines/$ib" > "$WORK/sb"
+        echo "--- $rel"
+        echo "  ONLY IN $A/$rel:"
+        comm -23 "$WORK/sa" "$WORK/sb" | head -12 | sed 's/^/    | /'
+        echo "  ONLY IN $B/$rel:"
+        comm -13 "$WORK/sa" "$WORK/sb" | head -12 | sed 's/^/    | /'
+    done
+fi
+
+echo
+echo "== FULL PAIR TABLE (class root_num root_leg relpath code_num code_leg uniq_num uniq_leg) =="
+cut -f1-8 "$WORK/pairs.tsv" | sort
+
+echo
+if [ "$GM" -eq 0 ]; then
+    echo "VERDICT: PASS — $NPAIRS pairs checked, genuine-merge class is EMPTY."
+    echo "         No pair requires a merge: every divergent pair has one leg that is"
+    echo "         a strict code-line subset of the other. Deletion + adopt-superset"
+    echo "         is sufficient to collapse both duplicate trees."
+else
+    echo "VERDICT: PASS — $NPAIRS pairs checked, $GM genuine-merge pair(s) need hand review."
+fi

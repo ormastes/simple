@@ -1,0 +1,969 @@
+# SPipe Test Framework
+#
+# BDD-style test framework for Simple language.
+# Provides describe/context/it blocks, before_each/after_each hooks,
+# expect() assertions with matchers, pending/skip support.
+#
+# Error tracking uses Option pattern (nil = pass, text = error message).
+# No exceptions - assertions set error state via module-level Option var.
+#
+# Usage:
+#   use std.spec
+#
+#   describe "MyFeature":
+#       it "should work":
+#           expect(state.value).to_equal(42)
+#
+# NOTE: No static fn, no try/catch/throw - runs on bootstrap runtime.
+
+use std.nogc_sync_mut.src.testing.mock.prevention.{ForbiddenCallGuard, check_guards}
+use std.spec.skip_governance.{
+    skip_ref, validate_skip_it, validate_bare_pending,
+    validate_free_text_skip, validate_skip_ref_record
+}
+
+# ================================================================
+# Global Test State
+# ================================================================
+
+var current_suite = ""
+var current_context = ""
+var suite_stack = []
+var test_passed = 0
+var test_failed = 0
+var test_pending = 0
+var test_skipped = 0
+var test_errors = []
+var indent_level = 0
+
+# Hook storage
+var before_hooks = []
+var after_hooks = []
+
+# Assertion failures are accumulated in-place so a later passing matcher cannot
+# overwrite an earlier failure through nested-call global writeback.
+var current_test_errors = []
+
+# NOTE: passed_test_names for pending_on dependency tracking is defined
+# inline in test files. Module vars can't be accessed from imported functions.
+
+fn _test_filter() -> text:
+    val filter = rt_env_get("SIMPLE_TEST_FILTER")
+    if filter == nil:
+        return ""
+    filter
+
+fn _run_test(kind: text) -> bool:
+    val filter = _test_filter()
+    if filter == "slow":
+        return kind == "slow"
+    if filter == "skipped":
+        return kind == "skipped"
+    kind != "skipped"
+
+fn _write_test_result_evidence(passed: i64, failed: i64):
+    """Persist the running tally.
+
+    Counts are passed in rather than read from test_passed/test_failed: a global
+    write is not visible to callees until the writing function returns, so
+    reading them here recorded the totals from BEFORE the test that just ran —
+    which meant a failing final test could leave false-green evidence behind."""
+    val path = rt_env_get("SIMPLE_TEST_RESULT_FILE") ?? ""
+    if path != "":
+        val _ = rt_file_write_text(path, "simple-bdd-v1\n{passed}\n{failed}\n")
+
+# ================================================================
+# Test Suite Structure
+# ================================================================
+
+pub fn describe(name: text, block: fn()):
+    suite_stack.push(current_suite)
+    current_suite = name
+    val indent = "  ".repeat(indent_level)
+    print "{indent}{name}"
+    indent_level = indent_level + 1
+    block()
+    indent_level = indent_level - 1
+    val prev = suite_stack.pop()
+    current_suite = prev ?? ""
+
+pub fn context(name: text, block: fn()):
+    val saved_context = current_context
+    current_context = name
+    val indent = "  ".repeat(indent_level)
+    print "{indent}context: {name}"
+    indent_level = indent_level + 1
+    block()
+    indent_level = indent_level - 1
+    current_context = saved_context
+
+fn _execute_it(name: text, block: fn()):
+    val indent = "  ".repeat(indent_level)
+    var full_name = "{current_suite} > {name}"
+    if current_context != "":
+        full_name = "{current_suite} > {current_context} > {name}"
+
+    # Preserve the shared array identity across nested calls; rebinding here
+    # can leave matchers mutating a stale value under global writeback.
+    current_test_errors.clear()
+    val pending_before = test_pending
+
+    # Run before_each hooks
+    for hook in before_hooks:
+        hook()
+
+    # Run test block - assertions append to current_test_errors on failure
+    block()
+
+    # Run after_each hooks
+    for hook in after_hooks:
+        hook()
+
+    # Check result via Option pattern
+    var passed = test_passed
+    var failed = test_failed
+    if (
+        current_test_errors.len() == 0 and
+        test_pending > pending_before
+    ):
+        # pending(reason); return marks this example without inflating passes.
+        pass
+    elif current_test_errors.len() == 0:
+        passed = passed + 1
+        test_passed = passed
+        print "{indent}  it {name} ... ok"
+    else:
+        # A failing example has one outcome: failure wins over an earlier
+        # pending() call in the same block.
+        if test_pending > pending_before:
+            test_pending = pending_before
+        failed = failed + 1
+        test_failed = failed
+        print "{indent}  it {name} ... FAILED"
+        val current_test_error = current_test_errors.join("; ")
+        print "{indent}    Error: {current_test_error}"
+        test_errors.push("{full_name}: {current_test_error}")
+    # global write is not visible to callees until return — pass the tallies
+    _write_test_result_evidence(passed, failed)
+
+pub fn it(name: text, block: fn()):
+    if not _run_test("normal"):
+        return
+    _execute_it(name, block)
+
+pub fn test(name: text, block: fn()):
+    it(name, block)
+
+pub fn example(name: text, block: fn()):
+    it(name, block)
+
+pub fn specify(name: text, block: fn()):
+    it(name, block)
+
+pub fn step(description: text):
+    # Manual-only scenario marker consumed by spipe-docgen.
+    if description == "":
+        return
+
+pub fn slow_it(name: text, block: fn()):
+    if not _run_test("slow"):
+        return
+    _execute_it(name, block)
+
+fn _is_interpreter_mode() -> bool:
+    """Check if running in interpreter mode via SIMPLE_RUNTIME_MODE env var."""
+    val mode = rt_env_get("SIMPLE_RUNTIME_MODE")
+    if mode == nil:
+        return true
+    if mode == "":
+        return true
+    if mode == "interpreter":
+        return true
+    false
+
+fn _is_baremetal_mode() -> bool:
+    val mode = rt_env_get("SIMPLE_RUNTIME_MODE")
+    if mode == nil: return false
+    if mode == "": return false
+    mode.contains("baremetal")
+
+fn _is_remote_mode() -> bool:
+    val mode = rt_env_get("SIMPLE_RUNTIME_MODE")
+    if mode == nil: return false
+    if mode == "": return false
+    mode.contains("remote")
+
+fn _target_arch() -> text:
+    val mode = rt_env_get("SIMPLE_RUNTIME_MODE")
+    if mode == nil: return "host"
+    if mode == "": return "host"
+    if mode.contains("riscv32"): return "riscv32"
+    if mode.contains("arm32"): return "arm32"
+    if mode.contains("aarch64"): return "aarch64"
+    if mode.contains("x86_64"): return "x86_64"
+    if mode.contains("x86"): return "x86"
+    "host"
+
+# Assurance profile the skip governor validates against. WP-3's canonical
+# resolver serializes an already-resolved policy across the process boundary
+# via SIMPLE_SAFETY_PROFILE (`compiler.common.assurance.policy.policy_env_value`)
+# — this reads it back, same as `driver_safety_severity.spl`'s subprocess path.
+fn _active_assurance_profile() -> text:
+    rt_env_get("SIMPLE_SAFETY_PROFILE") ?? ""
+
+# Reject means a REAL diagnostic: count as a failed example (not a warning
+# that gets silently ignored), same accounting `_execute_it` uses on assertion
+# failure. Used by skip_it/skip/skip_via_ref, which stand alone (like
+# `it(name, block)`) with no enclosing `_execute_it` to fold into.
+fn _reject_skip(name: text, message: text):
+    test_failed = test_failed + 1
+    print "    it {name} ... FAILED (skip rejected under critical: {message})"
+    test_errors.push("{current_suite} > {name}: {message}")
+    _write_test_result_evidence(test_passed, test_failed)
+
+pub fn skip_it(name: text, block: fn()):
+    if not _run_test("skipped"):
+        return
+    val validation = validate_skip_it(_active_assurance_profile())
+    if not validation.ok:
+        _reject_skip(name, validation.message)
+        return
+    # Skip in interpreter mode, run in compiled/smf/native modes
+    if _is_interpreter_mode():
+        test_skipped = test_skipped + 1
+        print "    it {name} ... skipped (compiled-only)"
+    else:
+        _execute_it(name, block)
+
+pub fn pending(name: text):
+    val validation = validate_bare_pending(_active_assurance_profile())
+    if not validation.ok:
+        # pending() runs INSIDE an enclosing it() block (`it "x": pending(...)`),
+        # so push into the block-local error list instead of bumping
+        # test_failed directly — the surrounding _execute_it's existing
+        # pass/fail accounting then handles this exactly like a real
+        # assertion failure, with no double count. NOTE (WP-9, filed
+        # doc/08_tracking/bug/): under the Rust seed's interpreter, `pending`
+        # is intercepted by a hardcoded BDD dispatch shortcut
+        # (interpreter_call/bdd.rs) BEFORE this function body ever runs, so
+        # this rejection path is unreachable via `bin/simple test` on the
+        # seed; it is live for the self-hosted binary and for any direct
+        # caller (`bin/simple run`, or calling `pending()` outside the
+        # intercepted dispatch).
+        current_test_errors.push("pending rejected under critical: {validation.message}")
+        return
+    test_pending = test_pending + 1
+    print "    it {name} ... pending"
+
+# @tag(name=file_name, reason=reason)
+pub fn skip(name: text, reason: text):
+    if not _run_test("skipped"):
+        return
+    val validation = validate_free_text_skip(reason, _active_assurance_profile())
+    if not validation.ok:
+        _reject_skip(name, validation.message)
+        return
+    test_skipped = test_skipped + 1
+    print "    it {name} ... skipped ({reason})"
+
+# skip_ref(id) — resolve a real SDN-tracked record
+# (doc/08_tracking/skip/<id>.sdn: category/reason/owner/requirement/
+# alternative_evidence/venue/expiry/issue) and validate it. Under `critical`
+# an unregistered id, an ownerless record, a weak/expired reason, or a
+# missing category/issue is REJECTED — see skip_governance.spl.
+# @tag(name=file_name, id=skip_id)
+pub fn skip_via_ref(name: text, id: text, block: fn()):
+    if not _run_test("skipped"):
+        return
+    val record = skip_ref(id)
+    val validation = validate_skip_ref_record(record, _active_assurance_profile())
+    if not validation.ok:
+        _reject_skip(name, validation.message)
+        return
+    test_skipped = test_skipped + 1
+    print "    it {name} ... skipped ({record.reason})"
+
+# ================================================================
+# pending_on / pending_skip (inline-only due to runtime limitation)
+# ================================================================
+#
+# pending_on(name, deps_csv, block): Run test only if deps are met.
+#   - deps_csv: comma-separated test names (e.g. "test A, test B")
+#   - Within a file, deps are met by ordering convention (declare deps first)
+#   - Delegates to built-in `it(name, block)` for test execution
+#   - Example:
+#       fn pending_on(name: text, deps: text, block: fn()):
+#           it(name, block)
+#
+# pending_skip(name, deps): Mark test as pending without running.
+#   - Prints: "    it {name} ... pending (waiting on: {deps})"
+#   - Example:
+#       fn pending_skip(name: text, deps: text):
+#           print "    it {name} ... pending (waiting on: {deps})"
+#
+# NOTE: These functions CANNOT be exported because the runtime can't
+# access module vars from imported functions (closure limitation).
+# Users must define them inline in test files.
+# See: test/01_unit/lib/std/spec/pending_on_spec.spl for working examples.
+
+pub fn before_context(block: fn()):
+    # Run setup block once for the current context
+    block()
+
+pub fn skip_context(reason: text):
+    val validation = validate_free_text_skip(reason, _active_assurance_profile())
+    if not validation.ok:
+        test_failed = test_failed + 1
+        print "  context skipped: FAILED (skip rejected under critical: {validation.message})"
+        test_errors.push("{current_suite}: {validation.message}")
+        _write_test_result_evidence(test_passed, test_failed)
+        return
+    test_skipped = test_skipped + 1
+    print "  context skipped: {reason}"
+
+# ================================================================
+# Platform-Based Skip Functions
+# ================================================================
+#
+# These functions ACTUALLY skip tests based on platform detection.
+# Inline platform detection to avoid circular dependencies.
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn _shell_output_trim(command: text) -> text:
+    val result = rt_process_run("/bin/sh", ["-c", command])
+    val stdout = result[0]
+    val code = result[2]
+    if code == 0:
+        stdout.trim()
+    else:
+        ""
+
+fn _is_windows_env() -> bool:
+    val os_env = rt_env_get("OS")
+    if os_env == nil:
+        false
+    else:
+        os_env.lower().contains("windows")
+
+fn _get_host_os() -> text:
+    if _is_windows_env():
+        "windows"
+    else:
+        val os = _shell_output_trim("uname -s")
+        if os.len() == 0:
+            "linux"
+        else:
+            match os:
+                case "Linux": "linux"
+                case "Darwin": "macos"
+                case "FreeBSD": "freebsd"
+                case "OpenBSD": "openbsd"
+                case "NetBSD": "netbsd"
+                case _: os.lower()
+
+pub fn is_windows() -> bool:
+    _get_host_os() == "windows"
+
+pub fn is_unix() -> bool:
+    val os = _get_host_os()
+    os == "linux" or os == "macos" or os == "freebsd" or os == "openbsd" or os == "netbsd"
+
+pub fn is_macos() -> bool:
+    _get_host_os() == "macos"
+
+pub fn is_linux() -> bool:
+    _get_host_os() == "linux"
+
+pub fn skip_on_windows(name: text, block: fn()):
+    """Skip test if running on Windows."""
+    if is_windows():
+        test_skipped = test_skipped + 1
+        print "    it {name} ... skipped (Windows-only skip)"
+    else:
+        it(name, block)
+
+pub fn skip_on_linux(name: text, block: fn()):
+    """Skip test if running on Linux."""
+    if is_linux():
+        test_skipped = test_skipped + 1
+        print "    it {name} ... skipped (Linux-only skip)"
+    else:
+        it(name, block)
+
+pub fn skip_on_macos(name: text, block: fn()):
+    """Skip test if running on macOS."""
+    if is_macos():
+        test_skipped = test_skipped + 1
+        print "    it {name} ... skipped (macOS-only skip)"
+    else:
+        it(name, block)
+
+pub fn skip_on_unix(name: text, block: fn()):
+    """Skip test if running on Unix-like systems."""
+    if is_unix():
+        test_skipped = test_skipped + 1
+        print "    it {name} ... skipped (Unix-only skip)"
+    else:
+        it(name, block)
+
+pub fn only_on_windows(name: text, block: fn()):
+    """Run test ONLY on Windows, skip on other platforms."""
+    if is_windows():
+        it(name, block)
+    else:
+        test_skipped = test_skipped + 1
+        print "    it {name} ... skipped (Windows-only)"
+
+pub fn only_on_linux(name: text, block: fn()):
+    """Run test ONLY on Linux, skip on other platforms."""
+    if is_linux():
+        it(name, block)
+    else:
+        test_skipped = test_skipped + 1
+        print "    it {name} ... skipped (Linux-only)"
+
+pub fn only_on_macos(name: text, block: fn()):
+    """Run test ONLY on macOS, skip on other platforms."""
+    if is_macos():
+        it(name, block)
+    else:
+        test_skipped = test_skipped + 1
+        print "    it {name} ... skipped (macOS-only)"
+
+pub fn only_on_unix(name: text, block: fn()):
+    """Run test ONLY on Unix-like systems, skip on Windows."""
+    if is_unix():
+        it(name, block)
+    else:
+        test_skipped = test_skipped + 1
+        print "    it {name} ... skipped (Unix-only)"
+
+# ================================================================
+# Target Environment Skip Functions
+# ================================================================
+
+pub fn skip_on_baremetal(name: text, block: fn()):
+    """Skip test when running on bare-metal target."""
+    if _is_baremetal_mode():
+        test_skipped = test_skipped + 1
+        print "    it {name} ... skipped (not on baremetal)"
+    else:
+        it(name, block)
+
+pub fn only_on_baremetal(name: text, block: fn()):
+    """Run test ONLY on bare-metal targets."""
+    if _is_baremetal_mode():
+        it(name, block)
+    else:
+        test_skipped = test_skipped + 1
+        print "    it {name} ... skipped (baremetal-only)"
+
+pub fn skip_on_remote(name: text, block: fn()):
+    """Skip test when running on remote target."""
+    if _is_remote_mode():
+        test_skipped = test_skipped + 1
+        print "    it {name} ... skipped (not on remote)"
+    else:
+        it(name, block)
+
+pub fn only_on_remote(name: text, block: fn()):
+    """Run test ONLY on remote targets."""
+    if _is_remote_mode():
+        it(name, block)
+    else:
+        test_skipped = test_skipped + 1
+        print "    it {name} ... skipped (remote-only)"
+
+# @tag(arch=arch, name=file_name)
+pub fn only_on_arch(arch: text, name: text, block: fn()):
+    """Run test ONLY on specific architecture."""
+    if _target_arch() == arch:
+        it(name, block)
+    else:
+        test_skipped = test_skipped + 1
+        print "    it {name} ... skipped ({arch}-only)"
+
+# @tag(arch=arch, name=file_name)
+pub fn skip_on_arch(arch: text, name: text, block: fn()):
+    """Skip test on specific architecture."""
+    if _target_arch() == arch:
+        test_skipped = test_skipped + 1
+        print "    it {name} ... skipped (skip on {arch})"
+    else:
+        it(name, block)
+
+# ================================================================
+# Runtime-Based Skip Functions
+# ================================================================
+#
+# These functions skip tests based on runtime environment
+# (interpreter vs compiler, module availability, etc.)
+
+pub fn skip_on_interpreter(name: text, block: fn()):
+    """Skip test if running in interpreter mode (compiled-only test)."""
+    if _is_interpreter_mode():
+        test_skipped = test_skipped + 1
+        print "    it {name} ... skipped (compiled-only)"
+    else:
+        it(name, block)
+
+pub fn only_on_interpreter(name: text, block: fn()):
+    """Run test ONLY in interpreter mode."""
+    if _is_interpreter_mode():
+        it(name, block)
+    else:
+        test_skipped = test_skipped + 1
+        print "    it {name} ... skipped (interpreter-only)"
+
+# @tag(name=file_name, module_name=module_name)
+pub fn skip_if_missing_module(name: text, module_name: text, block: fn()):
+    """Skip test if module is not available (Phase 2.3 - TODO #211 ✅).
+
+    Args:
+        name: Test name
+        module_name: Module path (e.g., "std.json", "compiler.parser")
+        block: Test function
+
+    Module detection strategy:
+    1. Check for SIMPLE_MODULES environment variable (comma-separated list)
+    2. Check if module file exists on disk
+    3. Fall back to running test (optimistic approach)
+
+    Environment variable format:
+        export SIMPLE_MODULES="std.json,std.sdn,compiler.parser"
+    """
+    # Strategy 1: Check environment variable
+    val modules_env = rt_env_get("SIMPLE_MODULES")
+    if modules_env.len() > 0:
+        val available_modules = modules_env.split(",")
+        var found = false
+        for module_entry in available_modules:
+            if module_entry.trim() == module_name:
+                found = true
+        if found:
+            it(name, block)
+            return
+        else:
+            test_skipped = test_skipped + 1
+            print "    it {name} ... skipped (module {module_name} not available)"
+            return
+
+    # Strategy 2: Check file existence
+    extern fn rt_file_exists(path: text) -> bool
+    val module_path = module_name_to_path(module_name)
+    if rt_file_exists(module_path):
+        it(name, block)
+    else:
+        test_skipped = test_skipped + 1
+        print "    it {name} ... skipped (module file not found: {module_path})"
+
+fn module_name_to_path(module_name: text) -> text:
+    """Convert module name to file path.
+
+    Examples:
+        "std.json" → "src/lib/common/json.spl"
+        "compiler.parser" → "src/compiler/parser.spl"
+        "app.io.mod" → "src/app/io/mod.spl"
+    """
+    if module_name.contains("/"):
+        val slash_parts = module_name.split("/")
+        if slash_parts.len() >= 2 and slash_parts[0].contains("-"):
+            return "type/" + slash_parts[0].replace("-", "_") + "/" + slash_parts[1..].join("/") + ".spl"
+
+    if not module_name.contains("."):
+        return "src/type/simple_lang/" + module_name + ".spl"
+
+    val path = module_name.replace(".", "/")
+    "src/{path}.spl"
+
+# ================================================================
+# Hooks
+# ================================================================
+
+pub fn before_each(hook: fn()):
+    before_hooks.push(hook)
+
+pub fn after_each(hook: fn()):
+    after_hooks.push(hook)
+
+# ================================================================
+# Prevention mocks
+# ================================================================
+#
+# IMPORTANT ordering contract: call prevent()/prevent_at_most()/prevent_file()
+# AFTER the code under test has run, not at the top of the `it` body. The
+# interpreter copies a class instance (like a MockFunction) by value on every
+# form of storage (array push, class-field construction, closure capture) —
+# only continued access through the ORIGINAL variable observes later
+# mutations. An "arm early, auto-check at the end of _execute_it" design was
+# attempted and found to silently report zero calls (always green) for any
+# guard armed before the forbidden call happened — a fail-open DSL. See
+# doc/08_tracking/bug/prevention_mock_deferred_arming_impossible_2026-08-07.md
+# for the repro. These three functions therefore check IMMEDIATELY, against
+# mockfn's current state, and record a failure right where they are called
+# (same mechanism as a failed `expect`: std.nogc_sync_mut.spec.fail_assertion).
+#
+# IMPORT NOTE: `use std.spec.*` does NOT reliably expose every pub fn in this
+# module (a pre-existing, unrelated limitation — even the long-standing
+# get_test_count() is unreachable through it; see the same bug doc). Import
+# these three explicitly and fully-qualified instead:
+#   use std.nogc_sync_mut.spec.{prevent, prevent_at_most, prevent_file}
+
+pub fn prevent(mockfn, reason: text):
+    """Prevention mock: fails THIS example right now if mockfn has been
+    called. Call AFTER the code under test has run — see the ordering
+    contract above."""
+    for msg in check_guards([ForbiddenCallGuard.new(mockfn, reason)]):
+        fail_assertion(msg)
+
+pub fn prevent_at_most(mockfn, n: i32, reason: text):
+    """Budget variant of prevent(): fails if mockfn has been called more
+    than n times. Call AFTER the code under test has run."""
+    for msg in check_guards([ForbiddenCallGuard.at_most(mockfn, n, reason)]):
+        fail_assertion(msg)
+
+pub fn prevent_file(mockfn, reason: text):
+    """NOTE: true file scope (checked automatically after every example in
+    the spec file) is NOT achievable — module-level spec state does not
+    persist from one `it` example to the next under this runner (verified;
+    see the bug doc above). prevent_file() therefore behaves exactly like
+    prevent(): an immediate check of mockfn's current state in the example
+    it is called from. Call it explicitly in every example (or from
+    before_each/after_each with a mock built fresh each time) to approximate
+    file-wide coverage."""
+    prevent(mockfn, reason)
+
+# ================================================================
+# Expectations
+# ================================================================
+
+pub fn expect(value: bool) -> ExpectHelper:
+    if not value:
+        fail_assertion("Expected true, got false")
+    ExpectHelper(value: value, negated: false, implicit_error: not value)
+
+pub fn expect(value) -> ExpectHelper:
+    # A non-bool subject with no matcher asserts NOTHING: truthiness on a
+    # text/number/list/object is trivially true, and a tail method that exists
+    # on the subject's own type (`expect(s).len()`) reads like a matcher while
+    # being none. Record the failure up front; the first real matcher pops it
+    # via _begin_matcher(), exactly like the bool overload does.
+    fail_assertion("vacuous expect: expect(...) was never consumed by a matcher — chain .to_equal(...)/.to_contain(...) or use assert_true(...)")
+    ExpectHelper(value: value, negated: false, implicit_error: true)
+
+pub fn expect_not(value: bool) -> ExpectHelper:
+    if value:
+        fail_assertion("Expected false, got true")
+    ExpectHelper(value: value, negated: true, implicit_error: value)
+
+pub class ExpectHelper:
+    value: any
+    negated: bool
+    implicit_error: bool
+
+    fn not_() -> ExpectHelper:
+        ExpectHelper(
+            value: self.value, negated: true,
+            implicit_error: self.implicit_error
+        )
+
+    fn _begin_matcher():
+        # A bare boolean expect is itself an assertion. A chained matcher
+        # replaces that provisional result with its own comparison.
+        if self.implicit_error and current_test_errors.len() > 0:
+            val _ = current_test_errors.pop()
+
+    fn to_equal(expected):
+        self._begin_matcher()
+        val matches = self.value == expected
+        if self.negated:
+            if matches:
+                fail_assertion("Expected {self.value} to NOT equal {expected}")
+        else:
+            if not matches:
+                fail_assertion("Expected {expected}, got {self.value}")
+
+    fn to_be(expected):
+        self.to_equal(expected)
+
+    fn to_be_true():
+        self._begin_matcher()
+        if self.negated:
+            if self.value == true:
+                fail_assertion("Expected value to NOT be true")
+        else:
+            if self.value != true:
+                fail_assertion("Expected true, got {self.value}")
+
+    fn to_be_false():
+        self._begin_matcher()
+        if self.negated:
+            if self.value == false:
+                fail_assertion("Expected value to NOT be false")
+        else:
+            if self.value != false:
+                fail_assertion("Expected false, got {self.value}")
+
+    fn to_be_nil():
+        self._begin_matcher()
+        if self.negated:
+            if self.value == nil:
+                fail_assertion("Expected value to NOT be nil")
+        else:
+            if self.value != nil:
+                fail_assertion("Expected nil, got {self.value}")
+
+    fn to_be_truthy():
+        self._begin_matcher()
+        if self.negated:
+            if self.value:
+                fail_assertion("Expected value to NOT be truthy")
+        else:
+            if not self.value:
+                fail_assertion("Expected truthy value, got {self.value}")
+
+    fn to_be_falsy():
+        self._begin_matcher()
+        if self.negated:
+            if not self.value:
+                fail_assertion("Expected value to NOT be falsy")
+        else:
+            if self.value:
+                fail_assertion("Expected falsy value, got {self.value}")
+
+    fn to_be_greater_than(expected):
+        self._begin_matcher()
+        if self.negated:
+            if self.value > expected:
+                fail_assertion("Expected {self.value} to NOT be greater than {expected}")
+        else:
+            if self.value <= expected:
+                fail_assertion("Expected {self.value} to be greater than {expected}")
+
+    fn to_be_less_than(expected):
+        self._begin_matcher()
+        if self.negated:
+            if self.value < expected:
+                fail_assertion("Expected {self.value} to NOT be less than {expected}")
+        else:
+            if self.value >= expected:
+                fail_assertion("Expected {self.value} to be less than {expected}")
+
+    fn to_be_at_least(expected):
+        self._begin_matcher()
+        if self.negated:
+            if self.value >= expected:
+                fail_assertion("Expected {self.value} to NOT be at least {expected}")
+        else:
+            if self.value < expected:
+                fail_assertion("Expected {self.value} to be at least {expected}")
+
+    fn to_be_at_most(expected):
+        self._begin_matcher()
+        if self.negated:
+            if self.value <= expected:
+                fail_assertion("Expected {self.value} to NOT be at most {expected}")
+        else:
+            if self.value > expected:
+                fail_assertion("Expected {self.value} to be at most {expected}")
+
+    fn to_contain(item):
+        self._begin_matcher()
+        val contains = self.value.contains(item)
+        if self.negated:
+            if contains:
+                fail_assertion("Expected {self.value} to NOT contain {item}")
+        else:
+            if not contains:
+                fail_assertion("Expected {self.value} to contain {item}")
+
+    fn to_start_with(prefix: text):
+        self._begin_matcher()
+        val starts = self.value.starts_with(prefix)
+        if self.negated:
+            if starts:
+                fail_assertion("Expected '{self.value}' to NOT start with '{prefix}'")
+        else:
+            if not starts:
+                fail_assertion("Expected '{self.value}' to start with '{prefix}'")
+
+    fn to_end_with(suffix: text):
+        self._begin_matcher()
+        val ends = self.value.ends_with(suffix)
+        if self.negated:
+            if ends:
+                fail_assertion("Expected '{self.value}' to NOT end with '{suffix}'")
+        else:
+            if not ends:
+                fail_assertion("Expected '{self.value}' to end with '{suffix}'")
+
+    fn to_be_empty():
+        self._begin_matcher()
+        val is_empty = self.value.len() == 0
+        if self.negated:
+            if is_empty:
+                fail_assertion("Expected value to NOT be empty")
+        else:
+            if not is_empty:
+                fail_assertion("Expected empty, got length {self.value.len()}")
+
+    fn to_have_length(expected: i64):
+        self._begin_matcher()
+        val actual_len = self.value.len()
+        if self.negated:
+            if actual_len == expected:
+                fail_assertion("Expected length to NOT be {expected}")
+        else:
+            if actual_len != expected:
+                fail_assertion("Expected length {expected}, got {actual_len}")
+
+    fn to_be_close_to(expected, tolerance):
+        self._begin_matcher()
+        val diff = self.value - expected
+        var abs_diff = diff
+        if diff < 0:
+            abs_diff = -diff
+        if self.negated:
+            if abs_diff <= tolerance:
+                fail_assertion("Expected {self.value} to NOT be close to {expected} (tolerance: {tolerance})")
+        else:
+            if abs_diff > tolerance:
+                fail_assertion("Expected {self.value} to be close to {expected} (tolerance: {tolerance}), diff: {abs_diff}")
+
+    fn to_match(pattern: text):
+        self._begin_matcher()
+        val matches = self.value.contains(pattern)
+        if self.negated:
+            if matches:
+                fail_assertion("Expected '{self.value}' to NOT match '{pattern}'")
+        else:
+            if not matches:
+                fail_assertion("Expected '{self.value}' to match '{pattern}'")
+
+# ================================================================
+# Assertion Helpers
+# ================================================================
+
+# Assertion Helpers
+pub fn fail_assertion(message: text):
+    current_test_errors.push(message)
+
+pub fn fail_test(message: text):
+    fail_assertion(message)
+
+# Explicit failure for spec authors: `fail("reason")` registers a failing
+# assertion on the current example (same reporting path as expect matchers).
+pub fn fail(message: text):
+    fail_assertion(message)
+
+pub fn check(condition: bool):
+    if not condition:
+        fail_assertion("expected true to equal true")
+
+pub fn check_msg(condition: bool, message: text):
+    if not condition:
+        fail_assertion(message)
+
+pub fn assert_eq(a, b):
+    if a != b:
+        fail_assertion("Expected values to be equal")
+
+pub fn assert_ne(a, b):
+    if a == b:
+        fail_assertion("Expected values to differ")
+
+pub fn assert_true(value):
+    if not value:
+        fail_assertion("Expected true")
+
+pub fn assert_false(value):
+    if value:
+        fail_assertion("Expected false")
+
+pub fn assert_nil(value):
+    if value != nil:
+        fail_assertion("Expected nil")
+
+pub fn assert_not_nil(value):
+    if value == nil:
+        fail_assertion("Expected non-nil value")
+
+pub fn assert_equal(actual, expected):
+    if actual != expected:
+        fail_assertion("Assertion failed: expected {expected}, got {actual}")
+
+pub fn assert_not_equal(actual, expected):
+    if actual == expected:
+        fail_assertion("Assertion failed: expected value to differ from {expected}")
+
+pub fn assert_contains(text_value: text, substring: text):
+    if not text_value.contains(substring):
+        fail_assertion("Assertion failed: expected '{text_value}' to contain '{substring}'")
+
+# ================================================================
+# Test Summary
+# ================================================================
+
+pub fn print_summary():
+    val total = test_passed + test_failed + test_pending + test_skipped
+    print ""
+    print "Test Summary:"
+    print "  Total:   {total}"
+    print "  Passed:  {test_passed}"
+    print "  Failed:  {test_failed}"
+    if test_pending > 0:
+        print "  Pending: {test_pending}"
+    if test_skipped > 0:
+        print "  Skipped: {test_skipped}"
+
+    if test_failed > 0:
+        print ""
+        print "Failures:"
+        var idx = 1
+        for err in test_errors:
+            print "  {idx}) {err}"
+            idx = idx + 1
+
+pub fn get_exit_code() -> i64:
+    if test_failed > 0:
+        return 1
+    return 0
+
+pub fn get_test_count() -> i64:
+    test_passed + test_failed + test_pending + test_skipped
+
+pub fn get_executed_test_count() -> i64:
+    test_passed + test_failed
+
+# ================================================================
+# Import New Skip/Ignore System
+# ================================================================
+# NOTE: Decorator imports with 'as' aliasing removed - runtime parser
+# doesn't support 'as' keyword in use/export statements.
+# Users can import decorators directly: use std.spec.decorators.{skip, ignore}
+# Users can import env_detect directly: use std.spec.env_detect.{is_interpreter, ...}
+
+# ================================================================
+# Exports
+# ================================================================
+
+# NOTE: pending_on and pending_skip are NOT exported because the runtime
+# can't access module vars from imported functions. Users must define them
+# inline in test files. See test/01_unit/lib/std/spec/pending_on_spec.spl.
+
+# Platform-based skip (MUST actually skip, not just comments)
+
+# Runtime-based skip (MUST actually skip, not just comments)
+
+# Target environment skip
+
+
+# New Comprehensive Skip/Ignore System
+# NOTE: 'export ... as ...' not supported by runtime parser.
+# Users should import decorators directly: use std.spec.decorators.{skip, ignore, only_on, skip_if}
+# Users should import env_detect directly: use std.spec.env_detect.{get_runtime_mode, is_interpreter, ...}
+
+# Internal helper export (used by skip_it, skip_on_interpreter, only_on_interpreter)

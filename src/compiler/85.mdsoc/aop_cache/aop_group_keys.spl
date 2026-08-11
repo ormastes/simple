@@ -1,0 +1,234 @@
+# AOP cache group keys (Semantic Incremental Build v2, design §16.2).
+#
+# Built over what the tree ACTUALLY has today (plan §2b reality gaps):
+#   - There are NO pointcuts. Matching is `WeavingRule.predicate_text`, an
+#     opaque string. We hash it (normalized) as the selector identity.
+#     SPEC-FORWARD prerequisite: a normalized pointcut query IR + typed
+#     matcher replacing `predicate_text`. Until then `normalized_query_digest`
+#     is a *textual* normalization (trim + collapse internal whitespace), NOT
+#     a semantic one — two semantically equal predicates spelled differently
+#     get different digests (safe: over-invalidates, never under-invalidates).
+#   - A join-point descriptor can only read JoinPointContext's real fields:
+#     function_name, module_path, signature, attributes, effects.
+#   - Weaving mutates MIR in place (50.mir/mir_aop_injection.spl); there is
+#     no per-target weave artifact. `AopWeaveKey` is typed here but its
+#     `target_preweave_mir` input has no producer yet. SPEC-FORWARD
+#     prerequisite: weaving must emit a per-target artifact.
+#
+# Canonical encoding: reuses action_key.spl's encoder helpers verbatim
+# (canon_str/canon_nat/canon_field/canon_seq, action_key_sort_texts).
+# NO second hash scheme. All set-typed digest lists are sorted before
+# encoding; ordered lists (advice order) are NOT sorted — order is semantic.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.cache.action_key.{canon_str, canon_nat, canon_field, canon_seq, action_key_sort_texts}
+use compiler.mdsoc.weaving.join_point.{JoinPointContext}
+use compiler.mdsoc.weaving.weaving_rule.{WeavingRule}
+use compiler.mdsoc.weaving.advice_form.{AdviceForm}
+
+# Version of the matcher/selector schema. Bump when the meaning of
+# predicate_text matching changes (e.g. when the typed query IR lands).
+val AOP_MATCHER_SCHEMA_VERSION: i64 = 1
+# Version of the join-point descriptor schema (the field set below).
+val AOP_DESCRIPTOR_SCHEMA_VERSION: i64 = 1
+
+# Sentinel digest of the empty canonical seq — used for every SPEC-FORWARD
+# input that has no producer in the tree yet (c0 freeze sentinel rule).
+fn aop_empty_seq_sentinel() -> text:
+    sha256_text(canon_seq([]))
+
+# ============================================================================
+# Selector identity (stands in for "normalized pointcut query", plan §2b)
+# ============================================================================
+
+# Textual normalization of predicate_text: trim + collapse internal
+# whitespace runs to a single space. Prerequisite for anything stronger:
+# a real normalized query IR.
+fn aop_normalize_predicate(p: text) -> text:
+    var out = ""
+    var pending_space = false
+    var started = false
+    for ch in p.chars():
+        if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
+            if started:
+                pending_space = true
+        else:
+            if pending_space:
+                out = out + " "
+                pending_space = false
+            out = out + ch
+            started = true
+    out
+
+fn aop_selector_digest(predicate_text: text) -> text:
+    var inner: [text] = []
+    inner.push(canon_field("normalizedPredicate", canon_str(aop_normalize_predicate(predicate_text))))
+    inner.push(canon_field("matcherSchemaVersion", canon_nat(AOP_MATCHER_SCHEMA_VERSION)))
+    sha256_text(canon_field("simple/aop-selector/v1", canon_seq(inner)))
+
+# ============================================================================
+# Join-point descriptor digest (candidate leaf identity)
+# ============================================================================
+
+# Digest over ALL real JoinPointContext fields. attributes/effects are sets
+# (sorted); the scalar fields are position-tagged.
+fn aop_descriptor_digest(ctx: JoinPointContext) -> text:
+    var attr_items: [text] = []
+    for a in action_key_sort_texts(ctx.attributes):
+        attr_items.push(canon_str(a))
+    var eff_items: [text] = []
+    for e in action_key_sort_texts(ctx.effects):
+        eff_items.push(canon_str(e))
+    var inner: [text] = []
+    inner.push(canon_field("functionName", canon_str(ctx.function_name)))
+    inner.push(canon_field("modulePath", canon_str(ctx.module_path)))
+    inner.push(canon_field("signature", canon_str(ctx.signature)))
+    inner.push(canon_field("attributes", canon_seq(attr_items)))
+    inner.push(canon_field("effects", canon_seq(eff_items)))
+    inner.push(canon_field("descriptorSchemaVersion", canon_nat(AOP_DESCRIPTOR_SCHEMA_VERSION)))
+    sha256_text(canon_field("simple/aop-descriptor/v1", canon_seq(inner)))
+
+# ============================================================================
+# Advice interface vs implementation split (the load-bearing invariant)
+# ============================================================================
+
+fn adviceform_tag(form: AdviceForm) -> text:
+    match form:
+        case Before: "before"
+        case AfterSuccess: "after_success"
+        case AfterError: "after_error"
+        case Around: "around"
+
+# The advice INTERFACE: everything selection/ordering can observe.
+# SPEC-FORWARD: the advice function's own signature and effects are not
+# modeled by WeavingRule today; prerequisite is a typed advice declaration.
+# Until then, name + form + priority IS the complete observable interface,
+# so this digest is exact (not conservative) for the current tree.
+fn aop_advice_interface_digest(rule: WeavingRule) -> text:
+    var inner: [text] = []
+    inner.push(canon_field("adviceFunction", canon_str(rule.advice_function)))
+    inner.push(canon_field("form", canon_str(adviceform_tag(rule.form))))
+    inner.push(canon_field("priority", canon_nat(rule.priority)))
+    sha256_text(canon_field("simple/aop-advice-interface/v1", canon_seq(inner)))
+
+# The advice IMPLEMENTATION: body digest only. Deliberately NOT an input to
+# any selection or weave key (symbolic-call weaving); consumed by link/load.
+fn aop_advice_implementation_digest(body_source_sha: text) -> text:
+    sha256_text(canon_field("simple/aop-advice-impl/v1", canon_str(body_source_sha)))
+
+# Root over a SET of advice interface digests.
+fn aop_advice_interface_root(interface_digests: [text]) -> text:
+    var items: [text] = []
+    for d in action_key_sort_texts(interface_digests):
+        items.push(canon_str(d))
+    sha256_text(canon_field("simple/aop-advice-interface-root/v1", canon_seq(items)))
+
+# ============================================================================
+# Group keys (§16.2)
+# ============================================================================
+
+# SPEC-FORWARD (plan §2b row 1): no pointcut publicization/visibility exists;
+# all join points are global. Fields are typed per §16.2 but callers today can
+# only supply owner_scope="global", visibility="global", and the empty-seq
+# sentinel for exposed_context_schema. Prerequisite: `pub pointcut` surface.
+struct AopSurfaceKey:
+    public_entity: text
+    owner_scope: text
+    visibility: text
+    exposed_context_schema: text
+    assurance: text
+
+fn aop_surface_key_digest(k: AopSurfaceKey) -> text:
+    var inner: [text] = []
+    inner.push(canon_field("publicEntity", canon_str(k.public_entity)))
+    inner.push(canon_field("ownerScope", canon_str(k.owner_scope)))
+    inner.push(canon_field("visibility", canon_str(k.visibility)))
+    inner.push(canon_field("exposedContextSchema", canon_str(k.exposed_context_schema)))
+    inner.push(canon_field("assurance", canon_str(k.assurance)))
+    sha256_text(canon_field("simple/aop-surface-key/v1", canon_seq(inner)))
+
+# Candidate partition identity: (component/module_path, join-point kind tag).
+# scope is "global" today (no MDSOC scope on join points — plan §2b).
+struct AopCandidatePartitionKey:
+    component: text            # module_path of the candidates
+    scope: text                # "global" until join points carry scope
+    join_point_kind: text      # tag: execution|decision|condition|error|security_gate
+    target_profile: text       # digest; empty-seq sentinel until profiles exist
+    descriptor_schema: i64
+
+fn aop_candidate_partition_key_digest(k: AopCandidatePartitionKey) -> text:
+    var inner: [text] = []
+    inner.push(canon_field("component", canon_str(k.component)))
+    inner.push(canon_field("scope", canon_str(k.scope)))
+    inner.push(canon_field("joinPointKind", canon_str(k.join_point_kind)))
+    inner.push(canon_field("targetProfile", canon_str(k.target_profile)))
+    inner.push(canon_field("descriptorSchema", canon_nat(k.descriptor_schema)))
+    sha256_text(canon_field("simple/aop-candidate-partition-key/v1", canon_seq(inner)))
+
+# Selection key (§16.2). INVARIANT: contains advice_interface_root, NEVER any
+# advice implementation digest — advice-body-only changes must not move it.
+struct AopSelectionKey:
+    pointcut_surface_digest: text        # sentinel until pointcuts exist
+    normalized_query_digest: text        # aop_selector_digest(predicate_text)
+    matcher_schema_digest: text
+    visible_aspect_catalog_digest: text  # sentinel until aspect catalogs exist
+    candidate_partition_roots: [text]    # set; sorted at encode time
+    advice_interface_root: text
+    ordering_policy_digest: text
+
+fn aop_matcher_schema_digest() -> text:
+    sha256_text(canon_field("simple/aop-matcher-schema", canon_nat(AOP_MATCHER_SCHEMA_VERSION)))
+
+# Ordering policy today: (priority desc, then specificity) as implemented in
+# weaving_config.spl. Encoded as a named constant policy id.
+fn aop_ordering_policy_digest() -> text:
+    sha256_text(canon_field("simple/aop-ordering-policy", canon_str("priority_then_specificity/v1")))
+
+fn aop_selection_key_digest(k: AopSelectionKey) -> text:
+    var root_items: [text] = []
+    for r in action_key_sort_texts(k.candidate_partition_roots):
+        root_items.push(canon_str(r))
+    var inner: [text] = []
+    inner.push(canon_field("pointcutSurfaceDigest", canon_str(k.pointcut_surface_digest)))
+    inner.push(canon_field("normalizedQueryDigest", canon_str(k.normalized_query_digest)))
+    inner.push(canon_field("matcherSchemaDigest", canon_str(k.matcher_schema_digest)))
+    inner.push(canon_field("visibleAspectCatalogDigest", canon_str(k.visible_aspect_catalog_digest)))
+    inner.push(canon_field("candidatePartitionRoots", canon_seq(root_items)))
+    inner.push(canon_field("adviceInterfaceRoot", canon_str(k.advice_interface_root)))
+    inner.push(canon_field("orderingPolicyDigest", canon_str(k.ordering_policy_digest)))
+    sha256_text(canon_field("simple/aop-selection-key/v1", canon_seq(inner)))
+
+# Convenience: selection key over today's real inputs (one rule set, one
+# partition-root set). Sentinels fill the SPEC-FORWARD slots.
+fn aop_selection_key_today(predicate_text: text, partition_roots: [text], advice_interface_digests: [text]) -> AopSelectionKey:
+    AopSelectionKey(
+        pointcut_surface_digest: aop_empty_seq_sentinel(),
+        normalized_query_digest: aop_selector_digest(predicate_text),
+        matcher_schema_digest: aop_matcher_schema_digest(),
+        visible_aspect_catalog_digest: aop_empty_seq_sentinel(),
+        candidate_partition_roots: partition_roots,
+        advice_interface_root: aop_advice_interface_root(advice_interface_digests),
+        ordering_policy_digest: aop_ordering_policy_digest())
+
+# SPEC-FORWARD (plan §2b row 2): weaving mutates MIR in place, so
+# target_preweave_mir has NO producer. Until weaving emits a per-target
+# artifact, callers pass the empty-seq sentinel and every weave decision must
+# go through the conservative path in invalidation.spl. INVARIANT: for
+# symbolic advice calls no advice implementation digest enters this key.
+struct AopWeaveKey:
+    target_preweave_mir: text            # sentinel today — no producer
+    target_join_point_descriptor: text   # aop_descriptor_digest
+    selection_digest: text               # aop_selection_key_digest
+    weave_mode: text                     # "symbolic_call" is the only mode today
+    weaver_schema: i64
+    backend_policy: text
+
+fn aop_weave_key_digest(k: AopWeaveKey) -> text:
+    var inner: [text] = []
+    inner.push(canon_field("targetPreweaveMir", canon_str(k.target_preweave_mir)))
+    inner.push(canon_field("targetJoinPointDescriptor", canon_str(k.target_join_point_descriptor)))
+    inner.push(canon_field("selectionDigest", canon_str(k.selection_digest)))
+    inner.push(canon_field("weaveMode", canon_str(k.weave_mode)))
+    inner.push(canon_field("weaverSchema", canon_nat(k.weaver_schema)))
+    inner.push(canon_field("backendPolicy", canon_str(k.backend_policy)))
+    sha256_text(canon_field("simple/aop-weave-key/v1", canon_seq(inner)))

@@ -1,0 +1,281 @@
+# Binary/bitfield format adapter for Modern SSpec typed evidence (E4 lane).
+#
+# This module decodes a fixed-width integer (register, PTE, capability token,
+# wire header word) into `CanonicalEvidence` nodes using a declared
+# `BinaryLayout`, so the same layout that drives the comparator also drives
+# the manual's byte/bit table — a hand-written table can silently drift from
+# the field set the oracle actually checks, and this makes that impossible.
+#
+# It is deliberately pure: no I/O, no rendering. Ground truth for the example
+# layout is the real kernel PTE bitfield accessors in
+# `src/os/kernel/types/bitfield.spl` — this module mirrors that field set, it
+# does not invent one.
+#
+# Guide: doc/07_guide/infra/sspec_typed_evidence.md
+# Research: doc/01_research/infra/sspec/modern_sspec_typed_evidence_research_2026-08-08.md
+
+use std.common.spec.evidence.model.{
+    EvidenceNode, evidence_node_at,
+    CanonicalEvidence, canonical_evidence, canonical_evidence_parse_error
+}
+
+# ---------------------------------------------------------------------------
+# Layout model
+# ---------------------------------------------------------------------------
+
+# `unspecified` is a distinct member, not a default some caller forgot to
+# set: a layout that never states its byte/bit order describes ambiguous
+# bytes, and ambiguous bytes cannot be decoded reproducibly.
+pub enum ByteOrder:
+    little
+    big
+    unspecified
+
+pub fn byte_order_name(order: ByteOrder) -> text:
+    match order:
+        case ByteOrder.little: "little"
+        case ByteOrder.big: "big"
+        case ByteOrder.unspecified: "unspecified"
+
+pub enum BitOrder:
+    lsb0
+    msb0
+    unspecified
+
+pub fn bit_order_name(order: BitOrder) -> text:
+    match order:
+        case BitOrder.lsb0: "lsb0"
+        case BitOrder.msb0: "msb0"
+        case BitOrder.unspecified: "unspecified"
+
+# `reserved` fields are still decoded (so a nonzero reserved bit is visible
+# evidence, not silently dropped) but are checked against a must-be-zero
+# policy separately from ordinary field decoding.
+pub struct BinaryFieldSpec:
+    name: text
+    lsb: i64
+    width: i64
+    reserved: bool
+    description: text
+
+pub fn binary_field(name: text, lsb: i64, width: i64, description: text) -> BinaryFieldSpec:
+    BinaryFieldSpec(name: name, lsb: lsb, width: width, reserved: false, description: description)
+
+pub fn reserved_field(name: text, lsb: i64, width: i64) -> BinaryFieldSpec:
+    BinaryFieldSpec(name: name, lsb: lsb, width: width, reserved: true, description: "reserved")
+
+# `source_ref` names the production file this layout mirrors, so a reviewer
+# can diff the manual against ground truth instead of trusting the spec.
+pub struct BinaryLayout:
+    layout_id: text
+    total_bits: i64
+    byte_order: ByteOrder
+    bit_order: BitOrder
+    fields: [BinaryFieldSpec]
+    source_ref: text
+
+# ---------------------------------------------------------------------------
+# Layout validity
+# ---------------------------------------------------------------------------
+
+fn fields_overlap(a: BinaryFieldSpec, b: BinaryFieldSpec) -> bool:
+    not (a.lsb + a.width <= b.lsb or b.lsb + b.width <= a.lsb)
+
+# Every rule here corresponds to a way a "decoded" table can describe bytes
+# that were never actually checked: an unspecified order is ambiguous, a
+# field hanging off the end of the value reads garbage, and overlapping
+# fields let two rows disagree about the same bit.
+pub fn layout_errors(layout: BinaryLayout) -> [text]:
+    var errs: [text] = []
+    if layout.byte_order == ByteOrder.unspecified:
+        errs.push("byte_order is unspecified")
+    if layout.bit_order == BitOrder.unspecified:
+        errs.push("bit_order is unspecified")
+    for field in layout.fields:
+        if field.width <= 0:
+            errs.push("field " + field.name + " has non-positive width")
+        elif field.lsb < 0 or field.lsb + field.width > layout.total_bits:
+            errs.push("field " + field.name + " exceeds total_bits")
+    var i = 0
+    while i < layout.fields.len():
+        var j = i + 1
+        while j < layout.fields.len():
+            if fields_overlap(layout.fields[i], layout.fields[j]):
+                errs.push("field " + layout.fields[i].name + " overlaps " + layout.fields[j].name)
+            j = j + 1
+        i = i + 1
+    errs
+
+pub fn layout_is_valid(layout: BinaryLayout) -> bool:
+    layout_errors(layout).len() == 0
+
+fn join_semicolons(items: [text]) -> text:
+    var out = ""
+    var i = 0
+    while i < items.len():
+        if i > 0:
+            out = out + "; "
+        out = out + items[i]
+        i = i + 1
+    out
+
+# A reserved field that is nonzero under a must-be-zero policy is a real
+# defect signal (an undocumented flag the hardware/wire actually sets), so it
+# is reported by name rather than folded into a generic mismatch.
+pub fn reserved_violations(value: i64, layout: BinaryLayout) -> [text]:
+    var errs: [text] = []
+    for field in layout.fields:
+        if field.reserved:
+            if field_extract(value, field.lsb, field.width) != 0:
+                errs.push(field.name)
+    errs
+
+# ---------------------------------------------------------------------------
+# Bit-field read/write
+# ---------------------------------------------------------------------------
+
+pub fn field_extract(value: i64, lsb: i64, width: i64) -> i64:
+    val mask = (1 << width) - 1
+    (value >> lsb) & mask
+
+pub fn field_insert(value: i64, lsb: i64, width: i64, field_value: i64) -> i64:
+    val mask = (1 << width) - 1
+    (value & ~(mask << lsb)) | ((field_value & mask) << lsb)
+
+# ---------------------------------------------------------------------------
+# Byte / hex / binary rendering
+# ---------------------------------------------------------------------------
+
+fn hex_digit(nibble: i64) -> text:
+    val digits = "0123456789abcdef"
+    digits.slice(nibble, nibble + 1)
+
+fn byte_to_hex(b: i64) -> text:
+    hex_digit((b >> 4) & 0xF) + hex_digit(b & 0xF)
+
+fn byte_to_binary(b: i64) -> text:
+    var out = ""
+    var bit = 7
+    while bit >= 0:
+        if (b >> bit) & 1 != 0:
+            out = out + "1"
+        else:
+            out = out + "0"
+        bit = bit - 1
+    out
+
+pub fn u64_to_le_bytes(value: i64) -> [i64]:
+    var out: [i64] = []
+    var i = 0
+    while i < 8:
+        out.push((value >> (8 * i)) & 0xFF)
+        i = i + 1
+    out
+
+pub fn bytes_hex(bytes: [i64]) -> text:
+    var out = ""
+    var i = 0
+    while i < bytes.len():
+        if i > 0:
+            out = out + " "
+        out = out + byte_to_hex(bytes[i])
+        i = i + 1
+    out
+
+# Grouped by byte, most-significant byte first, so the string reads in the
+# same order a human writes a hex literal.
+pub fn u64_binary_grouped(value: i64) -> text:
+    var out = "0b"
+    var i = 7
+    while i >= 0:
+        if i < 7:
+            out = out + "_"
+        out = out + byte_to_binary((value >> (8 * i)) & 0xFF)
+        i = i - 1
+    out
+
+# ---------------------------------------------------------------------------
+# Decode to CanonicalEvidence
+# ---------------------------------------------------------------------------
+
+# The comparator target: one node per field plus two order/endianness nodes,
+# all derived from `field_extract`, so a decoded value and the manual table
+# below can never disagree about how a field was read.
+pub fn decode_u64(value: i64, layout: BinaryLayout) -> CanonicalEvidence:
+    val errs = layout_errors(layout)
+    if errs.len() > 0:
+        return canonical_evidence_parse_error("binary_layout", layout.layout_id, join_semicolons(errs))
+    var nodes: [EvidenceNode] = []
+    var order = 0
+    nodes.push(evidence_node_at("byte_order", byte_order_name(layout.byte_order), order))
+    order = order + 1
+    nodes.push(evidence_node_at("bit_order", bit_order_name(layout.bit_order), order))
+    order = order + 1
+    for field in layout.fields:
+        val fv = field_extract(value, field.lsb, field.width)
+        nodes.push(evidence_node_at(field.name, "{fv}", order))
+        order = order + 1
+    canonical_evidence("binary_layout", layout.layout_id, nodes)
+
+# ---------------------------------------------------------------------------
+# Manual table
+# ---------------------------------------------------------------------------
+
+# Rows generated FROM the same layout the comparator decodes against, never
+# hand-written: offset | bytes | bits | field | raw hex | decoded.
+# Renders `fv` as exactly ceil(width/8) bytes of hex, most-significant byte
+# first. `byte_to_hex(fv & 0xFF)` truncates any field wider than one byte to
+# its low byte — a 40-bit physical-address field would table as its last two
+# hex digits while decoding correctly, so the generated table would disagree
+# with the very evidence it was generated from.
+fn field_value_hex(fv: i64, width: i64) -> text:
+    var nbytes = (width + 7) / 8
+    if nbytes < 1:
+        nbytes = 1
+    var out = ""
+    var i = nbytes - 1
+    while i >= 0:
+        out = out + byte_to_hex((fv >> (8 * i)) & 0xFF)
+        i = i - 1
+    out
+
+pub fn binary_field_table(value: i64, layout: BinaryLayout) -> [text]:
+    var rows: [text] = []
+    rows.push("Offset | Bytes | Bits | Field | Raw (hex) | Decoded")
+    for field in layout.fields:
+        val fv = field_extract(value, field.lsb, field.width)
+        val hi = field.lsb + field.width - 1
+        val offset_byte = field.lsb / 8
+        val hex_value = field_value_hex(fv, field.width)
+        val decoded = if field.width == 1: (if fv != 0: "true" else: "false") else: "{fv}"
+        rows.push(
+            "{offset_byte}" + " | " + hex_value + " | "
+            + "{hi}" + ":" + "{field.lsb}" + " | " + field.name + " | "
+            + hex_value + " | " + decoded
+        )
+    rows
+
+# ---------------------------------------------------------------------------
+# Example layout: x86_64 PTE (ground truth: src/os/kernel/types/bitfield.spl)
+# ---------------------------------------------------------------------------
+
+# Mirrors the real kernel PTE field set (present/writable/user/phys_addr/
+# no_execute) plus the two reserved bit ranges the kernel accessors leave
+# untouched, so the layout covers all 64 bits without inventing new fields.
+pub fn pte_layout() -> BinaryLayout:
+    BinaryLayout(
+        layout_id: "x86_64_pte",
+        total_bits: 64,
+        byte_order: ByteOrder.little,
+        bit_order: BitOrder.lsb0,
+        fields: [
+            binary_field("present", 0, 1, "Present (P)"),
+            binary_field("writable", 1, 1, "Read/Write (RW)"),
+            binary_field("user", 2, 1, "User/Supervisor (US)"),
+            reserved_field("reserved_low", 3, 9),
+            binary_field("phys_addr", 12, 40, "Physical address (4K-aligned)"),
+            reserved_field("reserved_high", 52, 11),
+            binary_field("no_execute", 63, 1, "No Execute (NX)")
+        ],
+        source_ref: "src/os/kernel/types/bitfield.spl"
+    )

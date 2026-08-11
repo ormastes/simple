@@ -1,0 +1,164 @@
+# codex-system-test
+# @req REQ-WEB-BROWSER-012
+# @manual: show
+# @capture(html)
+# @evidence-display: embed_tui
+"""# Browser Sandbox Form Navigation Authorization
+
+Proves with local typed HTTPS fixtures that `allow-forms` does not grant
+top-level navigation. A denied submission cannot queue or leak its POST body
+and cannot replace the authorized document's Draw IR or final pixels. The
+positive control retains the canonical form request path when both sandbox
+capabilities are present.
+"""
+use std.spec.*
+use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserResponse}
+use std.gc_async_mut.web.browser_session_runtime.*
+use std.gc_async_mut.gpu.browser_engine.web_render_backend.{WebRenderBackend}
+use std.gc_async_mut.gpu.browser_engine.net.tls.{verify_certificate}
+use std.gc_async_mut.gpu.browser_engine.net.entity.tls_types.{CertChain}
+use common.ui.draw_ir.{DrawIrCommand, DrawIrComposition}
+use common.ui.draw_ir_sdn.{draw_ir_to_sdn}
+
+fn _sandbox_navigation_command(
+    composition: DrawIrComposition, component_id: text
+) -> DrawIrCommand:
+    for batch in composition.batches:
+        for command in batch.commands:
+            if command.component_id == component_id:
+                return command
+    fail("missing sandbox navigation Draw IR command: {component_id}")
+    composition.batches[0].commands[0]
+
+fn _sandbox_navigation_pixels() -> [u32]:
+    [
+        0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32,
+        0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32,
+        0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32,
+        0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32,
+        0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32,
+        0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32,
+        0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32,
+        0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32
+    ]
+
+describe "REQ-WEB-BROWSER-012: sandboxed form navigation authorization":
+
+    it "should render only the document authorized for top navigation":
+        step("Resolve the HTTPS destination")
+        var denied = BrowserSession.new()
+        expect(denied.begin_network_navigation(
+            "https://account.test/profile", "GET", "", "", ""
+        ).unwrap()).to_be(true)
+        val document_request = denied.take_pending_request().unwrap()
+        expect(document_request.url).to_equal(
+            "https://account.test/profile"
+        )
+
+        step("Validate the authenticated peer")
+        verify_certificate(CertChain(
+            certs: ["account.test"], ca_certs: ["ISRG Root X1"]
+        ), "account.test").unwrap()
+        expect(denied.commit_network_response(BrowserResponse.create(
+            document_request.id, "document", document_request.url, 200,
+            "Content-Security-Policy: sandbox allow-forms",
+            "<html><head><style>html,body{margin:0;padding:0;width:8px;" +
+            "height:4px}#authorized{display:block;width:8px;height:4px;" +
+            "background-color:#2563eb;color:#2563eb}form{{display:none}}" +
+            "</style></head><body id='surface'><main id='authorized'>" +
+            "Authorized profile</main><form id='profile' " +
+            "action='https://collector.test/capture' method='post'>" +
+            "<input id='secret' name='secret' value='token-123'>" +
+            "<button id='send' type='submit'>Send</button></form>" +
+            "</body></html>", ""
+        )).unwrap()).to_be(true)
+        val url_before = denied.current_url
+        val body_before = denied.current_body_html
+        val composition_before = WebRenderBackend.create(
+            "pure_simple", 8, 4
+        ).render_html_to_draw_ir(denied.render_html_document())
+        val draw_ir_before = draw_ir_to_sdn(composition_before)
+        val authorized_before = _sandbox_navigation_command(
+            composition_before, "authorized"
+        )
+        expect([
+            authorized_before.kind, authorized_before.component_id,
+            authorized_before.parent_id
+        ]).to_equal(["rect", "authorized", "surface"])
+        expect([
+            authorized_before.x, authorized_before.y,
+            authorized_before.width, authorized_before.height
+        ]).to_equal([0, 0, 8, 4])
+        expect(authorized_before.clip_rect.present).to_be(true)
+        expect([
+            authorized_before.clip_rect.x, authorized_before.clip_rect.y,
+            authorized_before.clip_rect.width,
+            authorized_before.clip_rect.height
+        ]).to_equal([0, 0, 8, 4])
+        expect(authorized_before.color).to_equal(0xFF2563EBu32)
+        val pixels_before = denied.render_to_pixels(8, 4).pixel_data
+        expect(pixels_before).to_equal(_sandbox_navigation_pixels())
+
+        step("Apply redirect and sandbox policy")
+        expect(denied.csp_sandbox_policy.allow_forms).to_be(true)
+        expect(denied.csp_sandbox_policy.allow_top_navigation).to_be(false)
+        val denied_dispatch = denied.dispatch_dom_event(
+            "send", "click", true, true
+        )
+        expect(denied_dispatch.default_action).to_equal("button-activate")
+        expect(denied.pending_request_count()).to_equal(0)
+        expect(denied.take_pending_request()).to_be_nil()
+        expect(denied.warnings).to_equal([
+            "CSP sandbox blocked top navigation"
+        ])
+
+        var allowed = BrowserSession.new()
+        expect(allowed.begin_network_navigation(
+            "https://account.test/edit", "GET", "", "", ""
+        ).unwrap()).to_be(true)
+        val allowed_document = allowed.take_pending_request().unwrap()
+        expect(allowed.commit_network_response(BrowserResponse.create(
+            allowed_document.id, "document", allowed_document.url, 200,
+            "Content-Security-Policy: sandbox allow-forms " +
+            "allow-top-navigation",
+            "<html><body><form id='edit' action='/save' method='post'>" +
+            "<input name='name' value='Ada'><button id='save' " +
+            "type='submit'>Save</button></form></body></html>", ""
+        )).unwrap()).to_be(true)
+        val allowed_dispatch = allowed.dispatch_dom_event(
+            "save", "click", true, true
+        )
+        expect(allowed_dispatch.default_action).to_equal("button-activate")
+        val allowed_request = allowed.take_pending_request().unwrap()
+        expect(allowed_request.url).to_equal("https://account.test/save")
+        expect(allowed_request.method).to_equal("POST")
+        expect(allowed_request.body).to_equal("name=Ada")
+
+        step("Render only the authorized response")
+        expect(denied.current_url).to_equal(url_before)
+        expect(denied.current_body_html).to_equal(body_before)
+        val composition_after = WebRenderBackend.create(
+            "pure_simple", 8, 4
+        ).render_html_to_draw_ir(denied.render_html_document())
+        expect(draw_ir_to_sdn(composition_after)).to_equal(draw_ir_before)
+        val authorized_after = _sandbox_navigation_command(
+            composition_after, "authorized"
+        )
+        expect([
+            authorized_after.kind, authorized_after.component_id,
+            authorized_after.parent_id
+        ]).to_equal(["rect", "authorized", "surface"])
+        expect([
+            authorized_after.x, authorized_after.y,
+            authorized_after.width, authorized_after.height
+        ]).to_equal([0, 0, 8, 4])
+        expect(authorized_after.clip_rect.present).to_be(true)
+        expect([
+            authorized_after.clip_rect.x, authorized_after.clip_rect.y,
+            authorized_after.clip_rect.width,
+            authorized_after.clip_rect.height
+        ]).to_equal([0, 0, 8, 4])
+        expect(authorized_after.color).to_equal(0xFF2563EBu32)
+        expect(denied.render_to_pixels(8, 4).pixel_data).to_equal(
+            _sandbox_navigation_pixels()
+        )

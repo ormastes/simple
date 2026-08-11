@@ -1,0 +1,269 @@
+#!/bin/sh
+# Refuse to push a commit range that INTRODUCES a new git symlink (mode 120000)
+# — i.e. a path that was not a symlink at the base and becomes one at the tip,
+# or a path that is newly created as a symlink.
+#
+# Why: a git symlink can only be materialized as a real filesystem reparse
+# point on Windows if the checking-out process holds SeCreateSymbolicLink­
+# Privilege. That privilege is granted automatically once "Developer Mode" is
+# turned on in Windows Settings — but ONLY to token/logon sessions created
+# AFTER the setting was enabled. A shell whose logon predates the toggle keeps
+# running with the privilege absent even though the machine-wide registry flag
+# (HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock\
+# AllowDevelopmentWithoutDevLicense) already reads 1. PROVED 2026-08-08: a jj
+# workspace on such a session failed to check out
+# `test/01_unit/app/desugar/app` (a relative symlink to `../../../../src/app`)
+# with `Failed to validate path ... The filename, directory name, or volume
+# label syntax is incorrect. (os error 123)` even with `core.symlinks=false`
+# set in both --local and --global git config — jj's own working-copy writer
+# does not consult that git setting and always attempts a real symlink.
+# `whoami /priv` confirmed SeCreateSymbolicLinkPrivilege was absent from the
+# live token despite Developer Mode reading enabled at the registry.
+#
+# git itself degrades gracefully (`core.symlinks=false` makes a plain checkout
+# write the symlink target as literal text into a regular file instead), but
+# jj does not, so a jj-managed Windows workspace is permanently unable to
+# check out ANY commit range that adds a new symlink until Developer Mode was
+# enabled BEFORE that session's logon (or the process runs elevated). Existing
+# symlinks already materialized on disk before jj's checkout is invoked are
+# unaffected — this only blocks CREATING new ones.
+#
+# The repo's existing symlinks (93 at time of writing, mostly
+# .claude/commands/*.md aliases plus this one test fixture) are grandfathered
+# and untouched by this guard — flagging them retroactively would be noise for
+# a class of file the repo already relies on. This guard only stops the
+# outgoing range from making the problem WORSE by adding another one.
+#
+# Usage: check-no-new-symlinks-push.shs [rev-range]
+#   default range: main@origin..@-   (what a `jj git push --bookmark main` sends)
+#   An explicit range MUST contain ".." — a bare rev is rejected.
+# Exit 0 = safe to push, 1 = new symlink(s) found, 2 = could not determine.
+#
+# --selftest runs a handful of synthetic-tree fixtures before the real scan
+# and is fatal on any mismatch — a guard that doesn't prove itself first is
+# not trustworthy at the size this repo operates at.
+
+set -u
+
+SELF=check-no-new-symlinks-push
+
+GREP=grep
+[ -x /usr/bin/grep ] && GREP=/usr/bin/grep
+
+die() {
+    code=$1
+    shift
+    echo "$SELF: ERROR — $*" >&2
+    echo "$SELF: ERROR — nothing was checked (exit $code)"
+    exit "$code"
+}
+
+# --- new-symlink detection between two tree-ish objects ---------------------
+# Prints one "path" per line for every path that is a symlink (mode 120000) at
+# $2 but was NOT already a symlink at $1 (either absent, or present with a
+# different mode). Exits nonzero on a git failure (caller must check $?).
+new_symlinks_between() {
+    base_rev=$1
+    tip_rev=$2
+    raw=$(git diff --raw --no-renames --no-color "$base_rev" "$tip_rev" -- 2>/dev/null)
+    rc=$?
+    [ "$rc" -eq 0 ] || return "$rc"
+    printf '%s\n' "$raw" | while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        # format: :<old_mode> <new_mode> <old_sha> <new_sha> <status>[score]\t<path>
+        meta=${line%%$(printf '\t')*}
+        path=${line#*"$(printf '\t')"}
+        old_mode=$(printf '%s' "$meta" | awk '{print $1}' | sed 's/^://')
+        new_mode=$(printf '%s' "$meta" | awk '{print $2}')
+        [ "$new_mode" = "120000" ] || continue
+        [ "$old_mode" = "120000" ] && continue
+        printf '%s\n' "$path"
+    done
+}
+
+# --- selftest -----------------------------------------------------------------
+run_selftest() {
+    tmp_git_dir=$(mktemp -d) || { echo "$SELF: SELFTEST ERROR — mktemp failed" >&2; return 2; }
+    trap 'rm -rf "$tmp_git_dir"' EXIT INT TERM
+
+    export GIT_DIR="$tmp_git_dir/.git"
+    export GIT_WORK_TREE="$tmp_git_dir"
+    mkdir -p "$GIT_DIR" || return 2
+    git init -q "$tmp_git_dir" >/dev/null 2>&1 || return 2
+    git -C "$tmp_git_dir" config user.email selftest@example.com
+    git -C "$tmp_git_dir" config user.name selftest
+
+    blob_regular=$(printf 'hello\n' | git -C "$tmp_git_dir" hash-object -w --stdin) || return 2
+    blob_symlink_target=$(printf '../elsewhere' | git -C "$tmp_git_dir" hash-object -w --stdin) || return 2
+
+    mk_tree() {
+        # $1 = mktree input (mode SP type SP sha TAB path per line)
+        printf '%s' "$1" | git -C "$tmp_git_dir" mktree
+    }
+    mk_commit() {
+        # $1 = tree, $2 = parent (or "" for root), $3 = message
+        if [ -n "$2" ]; then
+            git -C "$tmp_git_dir" commit-tree "$1" -p "$2" -m "$3"
+        else
+            git -C "$tmp_git_dir" commit-tree "$1" -m "$3"
+        fi
+    }
+
+    fails=0
+    total=0
+
+    check_case() {
+        # $1 = label, $2 = base commit, $3 = tip commit, $4 = expected exit code
+        label=$1; base=$2; tip=$3; expected=$4
+        total=$((total + 1))
+        out=$(new_symlinks_between "$base" "$tip")
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            actual=2
+        elif [ -n "$out" ]; then
+            actual=1
+        else
+            actual=0
+        fi
+        if [ "$actual" != "$expected" ]; then
+            echo "$SELF: SELFTEST FAIL — $label: expected exit $expected, got $actual (output: $out)" >&2
+            fails=$((fails + 1))
+        fi
+    }
+
+    # Fixture 1: base has a regular file, tip adds a NEW symlink at a new path
+    # -> must be detected (exit 1)
+    t1=$(mk_tree "100644 blob $blob_regular	keep.txt
+")
+    c1=$(mk_commit "$t1" "" "base")
+    t2=$(mk_tree "100644 blob $blob_regular	keep.txt
+120000 blob $blob_symlink_target	new_link
+")
+    c2=$(mk_commit "$t2" "$c1" "adds new symlink")
+    check_case "new-symlink-added" "$c1" "$c2" 1
+
+    # Fixture 2: base and tip both plain files, no symlinks anywhere
+    # -> must pass (exit 0)
+    t3=$(mk_tree "100644 blob $blob_regular	keep.txt
+100644 blob $blob_regular	other.txt
+")
+    c3=$(mk_commit "$t3" "$c1" "no symlinks")
+    check_case "no-symlinks-touched" "$c1" "$c3" 0
+
+    # Fixture 3: a path that was ALREADY a symlink at base has its target
+    # content changed but stays mode 120000 at tip -> must pass (exit 0),
+    # this is the grandfathered-symlink case, not a NEW one.
+    blob_symlink_target2=$(printf '../somewhere-else' | git -C "$tmp_git_dir" hash-object -w --stdin) || return 2
+    t4=$(mk_tree "100644 blob $blob_regular	keep.txt
+120000 blob $blob_symlink_target	existing_link
+")
+    c4=$(mk_commit "$t4" "$c1" "pre-existing symlink baseline")
+    t5=$(mk_tree "100644 blob $blob_regular	keep.txt
+120000 blob $blob_symlink_target2	existing_link
+")
+    c5=$(mk_commit "$t5" "$c4" "retarget existing symlink")
+    check_case "existing-symlink-retargeted" "$c4" "$c5" 0
+
+    # Fixture 4: a regular file at base is REPLACED by a symlink at the same
+    # path at tip (mode 100644 -> 120000) -> must be detected (exit 1)
+    t6=$(mk_tree "100644 blob $blob_regular	converts.txt
+")
+    c6=$(mk_commit "$t6" "$c1" "regular file baseline")
+    t7=$(mk_tree "120000 blob $blob_symlink_target	converts.txt
+")
+    c7=$(mk_commit "$t7" "$c6" "converts file to symlink")
+    check_case "file-converted-to-symlink" "$c6" "$c7" 1
+
+    unset GIT_DIR GIT_WORK_TREE
+    trap - EXIT INT TERM
+    rm -rf "$tmp_git_dir"
+
+    if [ "$fails" -ne 0 ]; then
+        echo "$SELF: selftest FAILED ($fails/$total fixtures wrong)" >&2
+        return 1
+    fi
+    echo "$SELF: selftest $total/$total fixtures correct"
+    return 0
+}
+
+if [ "${1:-}" = "--selftest" ]; then
+    run_selftest
+    exit $?
+fi
+
+run_selftest || die 2 "selftest failed; refusing to trust the real scan"
+
+range="${1:-}"
+explicit=0
+[ -n "$range" ] && explicit=1
+
+case "$range" in
+    --*)
+        die 2 "unknown option '$range'"
+        ;;
+esac
+
+# --- 1. cwd must be inside a git repository ---------------------------------
+toplevel=$(git rev-parse --show-toplevel 2>/dev/null) || toplevel=""
+if [ -z "$toplevel" ]; then
+    die 2 "cwd '$(pwd)' is not inside a git repository.
+  This guard must run from the repo root of the clone you are about to push."
+fi
+toplevel=$(CDPATH= cd -- "$toplevel" && pwd -P) || die 2 "cannot canonicalise toplevel"
+
+# --- 2. resolve the range, fail closed --------------------------------------
+if [ "$explicit" -eq 0 ]; then
+    base=$(jj --ignore-working-copy log -r 'main@origin' --no-graph -T 'commit_id' 2>/dev/null) || base=""
+    tip=$(jj --ignore-working-copy log -r '@-' --no-graph -T 'commit_id' 2>/dev/null) || tip=""
+    if [ -z "$base" ] || [ -z "$tip" ]; then
+        die 2 "cannot resolve main@origin..@- via jj (is jj available and is this a jj workspace?).
+  Pass an explicit range instead, e.g. $SELF '<base-sha>..<tip-sha>'."
+    fi
+    range="$base..$tip"
+else
+    case "$range" in
+        *..*) : ;;
+        *) die 2 "explicit range '$range' does not contain '..'.
+  A bare revision means 'all history reachable from it' to git. Pass '<base>..<tip>'." ;;
+    esac
+fi
+
+left=${range%%..*}
+right=${range#*..}
+right=${right#.}
+[ -n "$left" ]  || die 2 "range '$range' has an empty left endpoint"
+[ -n "$right" ] || die 2 "range '$range' has an empty right endpoint"
+for ep in "$left" "$right"; do
+    git rev-parse --verify --quiet "$ep^{commit}" >/dev/null 2>&1 \
+        || die 2 "revision '$ep' (from range '$range') does not exist in the repository at $toplevel."
+done
+
+# --- 3. the actual check -----------------------------------------------------
+new_paths=$(new_symlinks_between "$left" "$right")
+rc=$?
+[ "$rc" -eq 0 ] || die 2 "git diff --raw '$left' '$right' failed with status $rc"
+
+if [ -n "$new_paths" ]; then
+    echo "NEW SYMLINK(S) INTRODUCED — will not check out on a Windows session" >&2
+    echo "that lacks a fresh-logon SeCreateSymbolicLinkPrivilege token:" >&2
+    printf '%s\n' "$new_paths" | while IFS= read -r p; do
+        [ -n "$p" ] && echo "  $p" >&2
+    done
+    cat >&2 <<'EOF'
+
+DO NOT PUSH (or accept knowingly). Options:
+  * Avoid a real symlink: use a regular file with a documented redirect
+    convention the test/tooling code resolves explicitly, instead of relying
+    on the filesystem to do it.
+  * If a symlink is genuinely required, land it anyway with an explicit note
+    in the commit message that Windows jj workspaces predating Developer Mode
+    activation cannot check out this range without a fresh logon or admin
+    elevation — this guard exists to make that a conscious choice, not a
+    silent trap.
+EOF
+    echo "$SELF: FAIL — new symlink(s) found in $range"
+    exit 1
+fi
+
+echo "$SELF: PASS — $range introduces no new symlinks (repo $toplevel)"
+exit 0

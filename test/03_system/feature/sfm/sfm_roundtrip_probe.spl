@@ -1,0 +1,137 @@
+# SFM AC-1 byte round-trip probe — GROUND-TRUTH GATE.
+#
+# Run with:   bin/simple run test/03_system/feature/sfm/sfm_roundtrip_probe.spl
+#
+# The test runner only catches CRASHES, not `expect` mismatches or byte-wrong
+# output, so AC-1 ("round-trip preserves manifest fields and embedded SMF bytes")
+# is verified HERE by comparing bytes and printing PASS / FAIL.
+#
+# This probe imports the REAL codec (std.sfm.codec). It does NOT reimplement
+# encode/decode — that would be a tautology. Until a correct impl lands it is
+# EXPECTED to fail with module-not-found; it flips to "SFM-ROUNDTRIP: PASS" only
+# when a correct encode_sfm/decode_sfm exists. Filename does not end in
+# `_spec.spl` so the runner never auto-collects this main().
+
+use std.sfm.manifest.{
+    FeatureManifest,
+    LayerDescriptor,
+    LayerKind,
+    SfmSecurityLevel
+}
+use std.sfm.codec.{encode_sfm, decode_sfm}
+
+fn make_manifest() -> FeatureManifest:
+    val cli = LayerDescriptor(
+        role: "cli",
+        kind: LayerKind.FrontArgParser,
+        entry_symbol: "arg_parse_main",
+        privileged: false
+    )
+    val hw = LayerDescriptor(
+        role: "device",
+        kind: LayerKind.BackHw,
+        entry_symbol: "hw_open",
+        privileged: true
+    )
+    return FeatureManifest(
+        name: "probe-sfm",
+        version: "9.8.7",
+        security_level: SfmSecurityLevel.Trusted,
+        layers: [cli, hw]
+    )
+
+fn make_smf_bytes() -> [u8]:
+    # Pre-size then poke literal-derived bytes (avoid push(expr as u8)).
+    var buf: [u8] = []
+    var i: i32 = 0
+    while i < 12:
+        buf.append(0 as u8)
+        i = i + 1
+    buf[0] = 83 as u8     # 'S'
+    buf[1] = 77 as u8     # 'M'
+    buf[2] = 70 as u8     # 'F'
+    buf[3] = 0 as u8      # '\0'
+    buf[4] = 1 as u8
+    buf[5] = 2 as u8
+    buf[6] = 3 as u8
+    buf[7] = 255 as u8
+    buf[8] = 222 as u8
+    buf[9] = 173 as u8
+    buf[10] = 190 as u8
+    buf[11] = 239 as u8
+    return buf
+
+fn bytes_equal(a: [u8], b: [u8]) -> bool:
+    if (a.len() as i32) != (b.len() as i32):
+        return false
+    var i: i32 = 0
+    while i < (a.len() as i32):
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    return true
+
+fn fail(detail: text):
+    print("SFM-ROUNDTRIP: FAIL " + detail)
+
+fn main():
+    val m = make_manifest()
+    val smf = make_smf_bytes()
+
+    val encoded: [u8] = encode_sfm(m, smf)
+
+    match decode_sfm(encoded):
+        Err(e):
+            fail("decode error: " + e)
+            return
+        Ok((dm, dsmf)):
+            if dm.name != "probe-sfm":
+                fail("name mismatch: " + dm.name)
+                return
+            if dm.version != "9.8.7":
+                fail("version mismatch: " + dm.version)
+                return
+
+            var level_ok: bool = false
+            match dm.security_level:
+                Trusted:  level_ok = true
+                Ordinary: level_ok = false
+            if not level_ok:
+                fail("security level mismatch (expected Trusted)")
+                return
+
+            if dm.layers.len() != 2:
+                fail("layer count mismatch: " + dm.layers.len().to_text())
+                return
+
+            val l0 = dm.layers[0]
+            if l0.role != "cli" or l0.entry_symbol != "arg_parse_main":
+                fail("layer0 fields mismatch")
+                return
+            var l0_kind_ok: bool = false
+            match l0.kind:
+                FrontArgParser: l0_kind_ok = true
+                _:              l0_kind_ok = false
+            if not l0_kind_ok:
+                fail("layer0 kind mismatch")
+                return
+
+            val l1 = dm.layers[1]
+            if l1.role != "device" or l1.entry_symbol != "hw_open":
+                fail("layer1 fields mismatch")
+                return
+            if not l1.privileged:
+                fail("layer1 privileged flag lost")
+                return
+
+            if not bytes_equal(dsmf, smf):
+                fail("embedded SMF bytes differ")
+                return
+
+            # Re-encode idempotence — catches symmetric encoder/decoder bugs.
+            val re: [u8] = encode_sfm(dm, dsmf)
+            if not bytes_equal(re, encoded):
+                fail("re-encode not idempotent")
+                return
+
+            print("SFM-ROUNDTRIP: PASS")

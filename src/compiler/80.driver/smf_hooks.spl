@@ -1,0 +1,65 @@
+# SMF loading hooks — implementations for interpreter extern fn declarations
+#
+# These functions are called by the interpreter's module_loader through
+# extern fn declarations, bridging the layer boundary between 10.frontend
+# and 70.backend/80.driver.
+#
+# The interpreter declares:
+#   extern fn smf_check_freshness(source_path: text, smf_path: text) -> i64
+#   extern fn smf_source_to_cache_path(source_path: text) -> text
+#   extern fn smf_resolve_library(module_name: text) -> text
+#   extern fn smf_get_or_generate(source_path: text, smf_path: text) -> i64
+
+use compiler.backend.linker.smf_getter.{SmfGetter}
+use compiler.driver.watcher.watcher_client.{check_smf_freshness as _watcher_check_smf_freshness, get_or_generate_smf as _watcher_get_or_generate_smf}
+use compiler.driver.watcher.watcher_types.{watcher_config_default}
+use compiler.driver.cache.cache_validator.{source_to_cache_path as _cache_source_to_cache_path}
+use compiler.driver.cache.cache_types.{CACHE_FRESH}
+use compiler.driver.cache.compile_options_hash.{compile_options_hash_zero}
+
+# Module-level SMF getter for library resolution
+var _driver_smf_getter: SmfGetter = SmfGetter.new()
+var _driver_smf_initialized: bool = false
+
+fn smf_hooks_init(lib_paths: [text]):
+    """Initialize SMF hooks with library search paths."""
+    _driver_smf_getter = SmfGetter.new()
+    for path in lib_paths:
+        _driver_smf_getter.add_search_path(path)
+    # Add default paths
+    _driver_smf_getter.add_search_path("/usr/lib/simple")
+    _driver_smf_getter.add_search_path("/usr/local/lib/simple")
+    _driver_smf_initialized = true
+
+# These implement the extern fn declarations from interpreter/module_loader.spl
+
+fn smf_check_freshness(source_path: text, smf_path: text) -> i64:
+    """Check if an SMF file is fresher than its source. Returns 1 if fresh, 0 if stale."""
+    val config = watcher_config_default()
+    val options_hash = compile_options_hash_zero()
+    val result = _watcher_check_smf_freshness(source_path, config.smf_dir, options_hash)
+    if result.status == CACHE_FRESH:
+        return 1
+    0
+
+fn smf_source_to_cache_path(source_path: text) -> text:
+    """Derive expected SMF cache path for a source file."""
+    val config = watcher_config_default()
+    _cache_source_to_cache_path(source_path, config.smf_dir, ".smf")
+
+fn smf_resolve_library(module_name: text) -> text:
+    """Resolve a module name in configured SMF libraries. Returns lib_path or empty string."""
+    if not _driver_smf_initialized:
+        return ""
+    val dotted = module_name.replace("/", ".")
+    val location = _driver_smf_getter.get_location(dotted)
+    if location.is_ok():
+        return location.unwrap().file_path
+    ""
+
+fn smf_get_or_generate(source_path: text, smf_path: text) -> i64:
+    """Regenerate a stale SMF file. Returns 1 on success, 0 on failure."""
+    val result = _watcher_get_or_generate_smf(source_path, smf_path, "c", 0, false, false, false)
+    if result.is_ok():
+        return 1
+    0

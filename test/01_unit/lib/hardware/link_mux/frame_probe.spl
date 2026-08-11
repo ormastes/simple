@@ -1,0 +1,211 @@
+# Intensive probe for hardware/link_mux/frame.spl (COBS + CRC16 + channel).
+# Run-path probe (NOT SSpec): `bin/simple run` this file; expects "FRAME PROBE:
+# ALL PASS". Covers: CRC/COBS known-answers, property encode->decode identity
+# over a deterministic fuzz (incl. 0x00-heavy + >254 payloads), resync-from-
+# garbage, CRC single-bit-flip rejection, and multi-channel interleave.
+use std.hardware.link_mux.frame.{
+    DecodedFrame, crc16_ccitt, cobs_encode, cobs_decode,
+    frame_encode, frame_decode_body, frame_decode_stream
+}
+
+fn check(name: text, ok: bool) -> i64:
+    if ok:
+        return 0
+    print("FAIL {name}")
+    1
+
+fn bytes_eq(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if (a[i].to_i64() & 0xFF) != (b[i].to_i64() & 0xFF):
+            return false
+        i = i + 1
+    true
+
+fn lcg(s: i64) -> i64:
+    (s * 1103515245 + 12345) & 0x7FFFFFFF
+
+fn ascii_123456789() -> [u8]:
+    var v: [u8] = []
+    var c = 0x31
+    while c <= 0x39:
+        v.push(c.to_u8())
+        c = c + 1
+    v
+
+# One fuzz trial: encode (chan,payload), stream-decode, require exactly one ok
+# frame that round-trips. Returns 1 on failure.
+fn trial(chan: i64, payload: [u8]) -> i64:
+    val wire = frame_encode(chan, payload)
+    val got = frame_decode_stream(wire)
+    if got.len() != 1:
+        print("FAIL roundtrip: frame count {got.len()} chan {chan} plen {payload.len()}")
+        return 1
+    val f = got[0]
+    if not f.ok or f.chan != chan or not bytes_eq(f.payload, payload):
+        print("FAIL roundtrip: ok={f.ok} chan={f.chan}/{chan} plen={payload.len()}")
+        return 1
+    0
+
+fn main() -> i64:
+    var fails: i64 = 0
+
+    # --- 1. CRC-16/CCITT-FALSE known answer ---
+    fails = fails + check("crc16 123456789 == 0x29B1", crc16_ccitt(ascii_123456789()) == 0x29B1)
+
+    # --- 2. COBS known-answer vectors ---
+    # [0x00] -> [0x01 0x01]
+    var z: [u8] = []
+    z.push(0.to_u8())
+    val ez = cobs_encode(z)
+    fails = fails + check("cobs [00] -> [01 01]",
+        ez.len() == 2 and ez[0].to_i64() == 1 and ez[1].to_i64() == 1)
+    fails = fails + check("cobs decode([01 01]) -> [00]", bytes_eq(cobs_decode(ez), z))
+    # [11 22 00 33] -> [03 11 22 02 33]
+    var v: [u8] = []
+    v.push(0x11.to_u8())
+    v.push(0x22.to_u8())
+    v.push(0.to_u8())
+    v.push(0x33.to_u8())
+    val ev = cobs_encode(v)
+    var expv: [u8] = []
+    expv.push(0x03.to_u8())
+    expv.push(0x11.to_u8())
+    expv.push(0x22.to_u8())
+    expv.push(0x02.to_u8())
+    expv.push(0x33.to_u8())
+    fails = fails + check("cobs [11 22 00 33]", bytes_eq(ev, expv))
+    fails = fails + check("cobs decode roundtrip [11 22 00 33]", bytes_eq(cobs_decode(ev), v))
+
+    # --- 3. Property fuzz: encode -> decode identity ---
+    var seed = 0x2BADF00D
+    var t = 0
+    while t < 600:
+        seed = lcg(seed)
+        val plen = seed % 40
+        seed = lcg(seed)
+        val chan = seed % 4
+        var payload: [u8] = []
+        var p = 0
+        while p < plen:
+            seed = lcg(seed)
+            var bv = seed % 256
+            # force ~1/3 of bytes to 0x00 to stress COBS zero handling
+            if (seed % 3) == 0:
+                bv = 0
+            payload.push(bv.to_u8())
+            p = p + 1
+        fails = fails + trial(chan, payload)
+        t = t + 1
+
+    # --- 4. Edge payloads: empty, all-zero >254, all-0xAA >254 (COBS 0xFF path) ---
+    var empty: [u8] = []
+    fails = fails + check("empty payload roundtrip", trial(0, empty) == 0)
+    var zeros: [u8] = []
+    var i = 0
+    while i < 300:
+        zeros.push(0.to_u8())
+        i = i + 1
+    fails = fails + check("300x 0x00 payload roundtrip", trial(1, zeros) == 0)
+    var run: [u8] = []
+    i = 0
+    while i < 300:
+        run.push(0xAA.to_u8())
+        i = i + 1
+    fails = fails + check("300x 0xAA payload roundtrip (COBS 0xFF path)", trial(2, run) == 0)
+
+    # --- 5. Resync from garbage: junk + valid + junk -> exactly one ok frame ---
+    var pl: [u8] = []
+    pl.push(0x53.to_u8())
+    pl.push(0x69.to_u8())
+    pl.push(0x6D.to_u8())
+    val real = frame_encode(2, pl)
+    var stream: [u8] = []
+    # leading junk body then a delimiter
+    stream.push(0xDE.to_u8())
+    stream.push(0xAD.to_u8())
+    stream.push(0xBE.to_u8())
+    stream.push(0.to_u8())
+    i = 0
+    while i < real.len():
+        stream.push(real[i])
+        i = i + 1
+    # trailing junk then delimiter
+    stream.push(0x99.to_u8())
+    stream.push(0.to_u8())
+    val rs = frame_decode_stream(stream)
+    var ok_count = 0
+    var matched = false
+    i = 0
+    while i < rs.len():
+        if rs[i].ok:
+            ok_count = ok_count + 1
+            if rs[i].chan == 2 and bytes_eq(rs[i].payload, pl):
+                matched = true
+        i = i + 1
+    fails = fails + check("resync: exactly one ok frame", ok_count == 1)
+    fails = fails + check("resync: recovered frame matches", matched)
+
+    # --- 6. CRC single-bit-flip is rejected ---
+    val f = frame_encode(1, pl)
+    var g: [u8] = []
+    i = 0
+    while i < f.len():
+        g.push(f[i])
+        i = i + 1
+    # flip a bit in the last COBS body byte (index len-2; len-1 is the 0x00
+    # delimiter). Choose an XOR mask that keeps the byte non-zero so it stays a
+    # single body.
+    val bi = g.len() - 2
+    val orig = g[bi].to_i64() & 0xFF
+    var mask = 0x01
+    if (orig ^ mask) == 0:
+        mask = 0x02
+    g[bi] = ((orig ^ mask) & 0xFF).to_u8()
+    val gd = frame_decode_stream(g)
+    var rejected = false
+    if gd.len() >= 1 and not gd[0].ok:
+        rejected = true
+    fails = fails + check("crc bit-flip rejected", rejected)
+
+    # --- 7. Multi-channel interleave: concat frames -> all recovered in order ---
+    var multi: [u8] = []
+    var pA: [u8] = []
+    pA.push(0x41.to_u8())
+    var pB: [u8] = []
+    pB.push(0x42.to_u8())
+    pB.push(0x42.to_u8())
+    var pC: [u8] = []
+    pC.push(0x43.to_u8())
+    pC.push(0x43.to_u8())
+    pC.push(0x43.to_u8())
+    val fA = frame_encode(0, pA)
+    val fB = frame_encode(1, pB)
+    val fC = frame_encode(2, pC)
+    i = 0
+    while i < fA.len():
+        multi.push(fA[i])
+        i = i + 1
+    i = 0
+    while i < fB.len():
+        multi.push(fB[i])
+        i = i + 1
+    i = 0
+    while i < fC.len():
+        multi.push(fC[i])
+        i = i + 1
+    val md = frame_decode_stream(multi)
+    var inter_ok = md.len() == 3
+    if inter_ok:
+        inter_ok = (md[0].ok and md[0].chan == 0 and bytes_eq(md[0].payload, pA)
+            and md[1].ok and md[1].chan == 1 and bytes_eq(md[1].payload, pB)
+            and md[2].ok and md[2].chan == 2 and bytes_eq(md[2].payload, pC))
+    fails = fails + check("interleave: 3 channels recovered in order", inter_ok)
+
+    if fails == 0:
+        print("FRAME PROBE: ALL PASS")
+        return 0
+    print("FRAME PROBE: {fails} FAIL")
+    1

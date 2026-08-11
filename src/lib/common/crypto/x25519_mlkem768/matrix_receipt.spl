@@ -1,0 +1,932 @@
+# Canonical fail-closed receipt for all seven X25519MLKEM768 backends.
+#
+# Version 2 retains every row, including simultaneous blockers. Requested or
+# unavailable rows cannot carry output or lifecycle evidence. Executed rows
+# bind typed public Set A/B/C receipts; secret-derived digests are never part of
+# this contract or its human-readable renderer.
+
+mod lib.common.crypto.x25519_mlkem768.matrix_receipt
+
+use std.common.crypto.sha256.{sha256_text}
+use lib.common.crypto.x25519_mlkem768.evidence_contract.{
+    X25519MlKem768EvidenceBackend, X25519MlKem768EvidenceMode,
+    X25519MlKem768EvidenceScope, X25519MlKem768EvidenceStatus,
+    X25519MlKem768RunReceipt,
+    x25519_mlkem768_evidence_backend_name}
+use lib.common.crypto.x25519_mlkem768.pinned_public_receipt.{
+    X25519MlKem768PinnedSet, X25519MlKem768PinnedSetReceipt,
+    X25519_MLKEM768_PINNED_MLKEM_EK_SHA256,
+    X25519_MLKEM768_PINNED_MLKEM_CT_SHA256,
+    X25519_MLKEM768_PINNED_CLIENT_X25519_SHA256,
+    X25519_MLKEM768_PINNED_SERVER_X25519_SHA256,
+    X25519_MLKEM768_PINNED_CLIENT_SHARE_SHA256,
+    X25519_MLKEM768_PINNED_SERVER_SHARE_SHA256}
+use lib.common.crypto.x25519_mlkem768.contract.{
+    X25519_MLKEM768_IMPLEMENTATION_VERSION,
+    X25519_MLKEM768_PROFILE_VERSION}
+
+val X25519_MLKEM768_MATRIX_SCHEMA = "x25519mlkem768-backend-matrix-v2"
+# Source matrices are deliberately a separate, non-promotable evidence class.
+# They bind complete public outputs and lifecycle provenance for qualification
+# input, but can never be mistaken for the final promotion matrix.
+val X25519_MLKEM768_SOURCE_MATRIX_SCHEMA =
+    "x25519mlkem768-source-backend-matrix-v1"
+val _MATRIX_PINNED_SCHEMA = "x25519mlkem768-pinned-workload-v3"
+val _MATRIX_PINNED_ORACLE = "mlkem-native-fd58+rfc7748"
+val _MATRIX_PINNED_FIXTURE = "mlkem-native-fd58+rfc7748-abc-v1"
+
+enum X25519MlKem768MatrixAdmissionPhase:
+    Requested
+    FixtureAdmitted
+    ArtifactAdmitted
+    Executed
+
+enum X25519MlKem768MatrixRowOutcome:
+    Admitted
+    Blocked
+    Failed
+    Rejected
+
+enum X25519MlKem768MatrixOutputComparison:
+    Match
+    Mismatch
+    NotAvailable
+
+struct X25519MlKem768MatrixRow:
+    execution: X25519MlKem768RunReceipt
+    admission_phase: X25519MlKem768MatrixAdmissionPhase
+    runner_artifact_sha256: text
+    admitted_artifact_sha256: text
+    host_os: text
+    host_arch: text
+    pinned_workload_schema: text
+    pinned_oracle_id: text
+    set_a: X25519MlKem768PinnedSetReceipt?
+    set_b: X25519MlKem768PinnedSetReceipt?
+    set_c: X25519MlKem768PinnedSetReceipt?
+    public_wire_bytes: i64
+    client_share_sha256: text
+    server_share_sha256: text
+
+struct X25519MlKem768MatrixRowReceipt:
+    ordinal: i64
+    backend: X25519MlKem768EvidenceBackend
+    outcome: X25519MlKem768MatrixRowOutcome
+    source_reason: text
+    admission_reason: text
+    input_contract_matches: bool
+    output_comparison: X25519MlKem768MatrixOutputComparison
+    source_receipt_sha256: text
+    source: X25519MlKem768MatrixRow
+
+struct X25519MlKem768MatrixReceipt:
+    schema: text
+    status: X25519MlKem768EvidenceStatus
+    reason: text
+    fixture_id: text
+    fixture_manifest_sha256: text
+    fixture_source_sha256: text
+    pinned_workload_sha256: text
+    runner_source_sha256: text
+    implementation_version: text
+    profile_version: text
+    batch_size: i64
+    public_wire_bytes: i64
+    row_set_sha256: text
+    admitted_rows: i64
+    blocked_rows: i64
+    failed_rows: i64
+    rejected_rows: i64
+    matching_output_rows: i64
+    fixture_admitted_rows: i64
+    artifact_admitted_rows: i64
+    executed_rows: i64
+    native_rows: i64
+    full_operation_rows: i64
+    rows: [X25519MlKem768MatrixRowReceipt]
+
+struct X25519MlKem768SourceMatrixReceipt:
+    schema: text
+    status: X25519MlKem768EvidenceStatus
+    reason: text
+    row_set_sha256: text
+    admitted_rows: i64
+    rejected_rows: i64
+    rows: [X25519MlKem768MatrixRowReceipt]
+
+fn _matrix_hex64(value: text) -> bool:
+    if value.len() != 64: return false
+    var index: i64 = 0
+    while index < value.len():
+        val code = value.char_code_at(index)
+        val decimal = code >= 48 and code <= 57
+        val lower_hex = code >= 97 and code <= 102
+        if not decimal and not lower_hex: return false
+        index = index + 1
+    true
+
+fn _matrix_field_valid(value: text) -> bool:
+    value != "" and value == value.trim() and
+        not value.contains("\n") and not value.contains("\r")
+
+fn _matrix_optional_field_valid(value: text) -> bool:
+    value == "" or _matrix_field_valid(value)
+
+fn _matrix_optional_hex64(value: text) -> bool:
+    value == "" or _matrix_hex64(value)
+
+fn _matrix_frame(key: text, value: text) -> text:
+    key.len().to_text() + ":" + key + "=" + value.len().to_text() +
+        ":" + value + ";"
+
+fn _matrix_status_name(status: X25519MlKem768EvidenceStatus) -> text:
+    if status == X25519MlKem768EvidenceStatus.Pass: return "pass"
+    if status == X25519MlKem768EvidenceStatus.Fail: return "fail"
+    "blocked"
+
+fn _matrix_mode_name(mode: X25519MlKem768EvidenceMode) -> text:
+    if mode == X25519MlKem768EvidenceMode.Native: "native" else: "qemu"
+
+fn _matrix_scope_name(scope: X25519MlKem768EvidenceScope) -> text:
+    if scope == X25519MlKem768EvidenceScope.FullOperation:
+        "full-operation"
+    else:
+        "correctness"
+
+fn _matrix_phase_name(phase: X25519MlKem768MatrixAdmissionPhase) -> text:
+    if phase == X25519MlKem768MatrixAdmissionPhase.Requested:
+        return "requested"
+    if phase == X25519MlKem768MatrixAdmissionPhase.FixtureAdmitted:
+        return "fixture-admitted"
+    if phase == X25519MlKem768MatrixAdmissionPhase.ArtifactAdmitted:
+        return "artifact-admitted"
+    "executed"
+
+fn _matrix_outcome_name(outcome: X25519MlKem768MatrixRowOutcome) -> text:
+    if outcome == X25519MlKem768MatrixRowOutcome.Admitted: return "admitted"
+    if outcome == X25519MlKem768MatrixRowOutcome.Blocked: return "blocked"
+    if outcome == X25519MlKem768MatrixRowOutcome.Failed: return "failed"
+    "rejected"
+
+fn _matrix_comparison_name(
+        comparison: X25519MlKem768MatrixOutputComparison) -> text:
+    if comparison == X25519MlKem768MatrixOutputComparison.Match:
+        return "match"
+    if comparison == X25519MlKem768MatrixOutputComparison.Mismatch:
+        return "mismatch"
+    "not-available"
+
+fn _matrix_receipt_material(receipt: X25519MlKem768RunReceipt) -> text:
+    val selected = match receipt.selected_backend:
+        case Some(value): x25519_mlkem768_evidence_backend_name(value)
+        case nil: "none"
+    _matrix_frame("schema", receipt.schema) +
+    _matrix_frame("status", _matrix_status_name(receipt.status)) +
+    _matrix_frame("reason", receipt.reason) +
+    _matrix_frame("scope", _matrix_scope_name(receipt.scope)) +
+    _matrix_frame("requested_backend",
+        x25519_mlkem768_evidence_backend_name(receipt.requested_backend)) +
+    _matrix_frame("selected_backend", selected) +
+    _matrix_frame("mode", _matrix_mode_name(receipt.mode)) +
+    _matrix_frame("emulated", receipt.emulated.to_text()) +
+    _matrix_frame("promotion_eligible", receipt.promotion_eligible.to_text()) +
+    _matrix_frame("implementation_version", receipt.implementation_version) +
+    _matrix_frame("profile_version", receipt.profile_version) +
+    _matrix_frame("fixture_id", receipt.fixture_id) +
+    _matrix_frame("fixture_manifest_sha256", receipt.fixture_manifest_sha256) +
+    _matrix_frame("fixture_source_sha256", receipt.fixture_source_sha256) +
+    _matrix_frame("pinned_workload_sha256", receipt.pinned_workload_sha256) +
+    _matrix_frame("runner_source_sha256", receipt.runner_source_sha256) +
+    _matrix_frame("batch_size", receipt.batch_size.to_text()) +
+    _matrix_frame("client_share_bytes", receipt.client_share_bytes.to_text()) +
+    _matrix_frame("server_share_bytes", receipt.server_share_bytes.to_text()) +
+    _matrix_frame("shared_secret_bytes", receipt.shared_secret_bytes.to_text()) +
+    _matrix_frame("keygen_output_digest", receipt.keygen_output_digest) +
+    _matrix_frame("encapsulate_output_digest", receipt.encapsulate_output_digest) +
+    _matrix_frame("decapsulate_output_digest", receipt.decapsulate_output_digest) +
+    _matrix_frame("scalar_roundtrip_match", receipt.scalar_roundtrip_match.to_text()) +
+    _matrix_frame("fallback_used", receipt.fallback_used.to_text()) +
+    _matrix_frame("absolute_oracle_match", receipt.absolute_oracle_match.to_text()) +
+    _matrix_frame("simd_chunk_hits", receipt.simd_chunk_hits.to_text()) +
+    _matrix_frame("observed_rvv_vlen_bits", receipt.observed_rvv_vlen_bits.to_text()) +
+    _matrix_frame("kernel_invocations", receipt.kernel_invocations.to_text()) +
+    _matrix_frame("compiled", receipt.compiled.to_text()) +
+    _matrix_frame("submitted", receipt.submitted.to_text()) +
+    _matrix_frame("fence_completed", receipt.fence_completed.to_text()) +
+    _matrix_frame("device_readback", receipt.device_readback.to_text()) +
+    _matrix_frame("artifact_sha256", receipt.artifact_sha256) +
+    _matrix_frame("device_identity", receipt.device_identity)
+
+fn _matrix_set_material(
+        receipt: X25519MlKem768PinnedSetReceipt?) -> text:
+    match receipt:
+        case nil: _matrix_frame("present", "false")
+        case Some(value):
+            _matrix_frame("present", "true") +
+            _matrix_frame("set_id", _matrix_pinned_set_name(value.set_id)) +
+            _matrix_frame("first_output_label", value.first_output_label) +
+            _matrix_frame("second_output_label", value.second_output_label) +
+            _matrix_frame("first_output_bytes", value.first_output_bytes.to_text()) +
+            _matrix_frame("second_output_bytes", value.second_output_bytes.to_text()) +
+            _matrix_frame("shared_secret_bytes", value.shared_secret_bytes.to_text()) +
+            _matrix_frame("recovered_secret_bytes", value.recovered_secret_bytes.to_text()) +
+            _matrix_frame("first_output_sha256", value.first_output_sha256) +
+            _matrix_frame("second_output_sha256", value.second_output_sha256)
+
+fn _matrix_pinned_set_name(value: X25519MlKem768PinnedSet) -> text:
+    if value == X25519MlKem768PinnedSet.MlKem: return "mlkem"
+    if value == X25519MlKem768PinnedSet.X25519: return "x25519"
+    "hybrid"
+
+fn _matrix_row_material(row: X25519MlKem768MatrixRow) -> text:
+    _matrix_frame("admission_phase",
+        _matrix_phase_name(row.admission_phase)) +
+    _matrix_frame("runner_artifact_sha256", row.runner_artifact_sha256) +
+    _matrix_frame("admitted_artifact_sha256", row.admitted_artifact_sha256) +
+    _matrix_frame("host_os", row.host_os) +
+    _matrix_frame("host_arch", row.host_arch) +
+    _matrix_frame("pinned_workload_schema", row.pinned_workload_schema) +
+    _matrix_frame("pinned_oracle_id", row.pinned_oracle_id) +
+    _matrix_frame("public_wire_bytes", row.public_wire_bytes.to_text()) +
+    _matrix_frame("client_share_sha256", row.client_share_sha256) +
+    _matrix_frame("server_share_sha256", row.server_share_sha256) +
+    _matrix_frame("set_a", _matrix_set_material(row.set_a)) +
+    _matrix_frame("set_b", _matrix_set_material(row.set_b)) +
+    _matrix_frame("set_c", _matrix_set_material(row.set_c)) +
+    _matrix_frame("execution", _matrix_receipt_material(row.execution))
+
+fn _matrix_backend_index(backend: X25519MlKem768EvidenceBackend) -> i64:
+    if backend == X25519MlKem768EvidenceBackend.ScalarCpu: return 0
+    if backend == X25519MlKem768EvidenceBackend.Avx2: return 1
+    if backend == X25519MlKem768EvidenceBackend.Neon: return 2
+    if backend == X25519MlKem768EvidenceBackend.Rvv: return 3
+    if backend == X25519MlKem768EvidenceBackend.Cuda: return 4
+    if backend == X25519MlKem768EvidenceBackend.Vulkan: return 5
+    6
+
+fn _matrix_backend_for_index(index: i64) -> X25519MlKem768EvidenceBackend:
+    if index == 0: return X25519MlKem768EvidenceBackend.ScalarCpu
+    if index == 1: return X25519MlKem768EvidenceBackend.Avx2
+    if index == 2: return X25519MlKem768EvidenceBackend.Neon
+    if index == 3: return X25519MlKem768EvidenceBackend.Rvv
+    if index == 4: return X25519MlKem768EvidenceBackend.Cuda
+    if index == 5: return X25519MlKem768EvidenceBackend.Vulkan
+    X25519MlKem768EvidenceBackend.Metal
+
+fn _matrix_is_gpu(backend: X25519MlKem768EvidenceBackend) -> bool:
+    backend == X25519MlKem768EvidenceBackend.Cuda or
+    backend == X25519MlKem768EvidenceBackend.Vulkan or
+    backend == X25519MlKem768EvidenceBackend.Metal
+
+fn _matrix_is_simd(backend: X25519MlKem768EvidenceBackend) -> bool:
+    backend == X25519MlKem768EvidenceBackend.Avx2 or
+    backend == X25519MlKem768EvidenceBackend.Neon or
+    backend == X25519MlKem768EvidenceBackend.Rvv
+
+fn _matrix_phase_has_fixture(
+        phase: X25519MlKem768MatrixAdmissionPhase) -> bool:
+    phase != X25519MlKem768MatrixAdmissionPhase.Requested
+
+fn _matrix_phase_has_artifact(
+        phase: X25519MlKem768MatrixAdmissionPhase) -> bool:
+    phase == X25519MlKem768MatrixAdmissionPhase.ArtifactAdmitted or
+    phase == X25519MlKem768MatrixAdmissionPhase.Executed
+
+fn _matrix_phase_executed(
+        phase: X25519MlKem768MatrixAdmissionPhase) -> bool:
+    phase == X25519MlKem768MatrixAdmissionPhase.Executed
+
+fn _matrix_selected_matches(receipt: X25519MlKem768RunReceipt) -> bool:
+    match receipt.selected_backend:
+        case Some(selected): selected == receipt.requested_backend
+        case nil: false
+
+fn _matrix_same_input(left: X25519MlKem768RunReceipt,
+        right: X25519MlKem768RunReceipt) -> bool:
+    left.schema == right.schema and
+    left.fixture_id == right.fixture_id and
+    left.fixture_manifest_sha256 == right.fixture_manifest_sha256 and
+    left.fixture_source_sha256 == right.fixture_source_sha256 and
+    left.pinned_workload_sha256 == right.pinned_workload_sha256 and
+    left.runner_source_sha256 == right.runner_source_sha256 and
+    left.implementation_version == right.implementation_version and
+    left.profile_version == right.profile_version and
+    left.batch_size == right.batch_size
+
+fn _matrix_execution_empty(receipt: X25519MlKem768RunReceipt) -> bool:
+    receipt.selected_backend == nil and
+    receipt.pinned_workload_sha256 == "" and
+    not receipt.promotion_eligible and receipt.client_share_bytes == 0 and
+    receipt.server_share_bytes == 0 and receipt.shared_secret_bytes == 0 and
+    receipt.keygen_output_digest == "" and
+    receipt.encapsulate_output_digest == "" and
+    receipt.decapsulate_output_digest == "" and
+    not receipt.scalar_roundtrip_match and not receipt.fallback_used and
+    not receipt.absolute_oracle_match and receipt.simd_chunk_hits == 0 and
+    receipt.observed_rvv_vlen_bits == 0 and
+    receipt.kernel_invocations == 0 and not receipt.compiled and
+    not receipt.submitted and not receipt.fence_completed and
+    not receipt.device_readback and receipt.artifact_sha256 == "" and
+    receipt.device_identity == ""
+
+fn _matrix_public_claims_empty(row: X25519MlKem768MatrixRow) -> bool:
+    row.pinned_workload_schema == "" and row.pinned_oracle_id == "" and
+    row.set_a == nil and row.set_b == nil and row.set_c == nil and
+    row.public_wire_bytes == 0 and row.client_share_sha256 == "" and
+    row.server_share_sha256 == ""
+
+fn _matrix_text_reason(row: X25519MlKem768MatrixRow) -> text:
+    val receipt = row.execution
+    if not _matrix_field_valid(row.host_os) or
+            not _matrix_field_valid(row.host_arch):
+        return "host-identity-invalid"
+    if not _matrix_field_valid(receipt.schema) or
+            not _matrix_field_valid(receipt.reason) or
+            not _matrix_field_valid(receipt.implementation_version) or
+            not _matrix_field_valid(receipt.profile_version) or
+            not _matrix_field_valid(receipt.fixture_id) or
+            not _matrix_optional_field_valid(receipt.device_identity):
+        return "receipt-text-field-invalid"
+    if not _matrix_optional_hex64(receipt.keygen_output_digest) or
+            not _matrix_optional_hex64(receipt.encapsulate_output_digest) or
+            not _matrix_optional_hex64(receipt.decapsulate_output_digest):
+        return "receipt-public-output-digest-invalid"
+    val host_reason = _matrix_host_reason(row)
+    if host_reason != "": return host_reason
+    ""
+
+fn _matrix_host_reason(row: X25519MlKem768MatrixRow) -> text:
+    val backend = row.execution.requested_backend
+    val arch_known = row.host_arch == "x86_64" or
+        row.host_arch == "aarch64" or row.host_arch == "riscv64"
+    val os_known = row.host_os == "linux" or row.host_os == "macos" or
+        row.host_os == "windows" or row.host_os == "freebsd"
+    if not arch_known or not os_known: return "unsupported-host-identity"
+    if backend == X25519MlKem768EvidenceBackend.Avx2 and
+            row.host_arch != "x86_64":
+        return "avx2-host-architecture-mismatch"
+    if backend == X25519MlKem768EvidenceBackend.Neon and
+            row.host_arch != "aarch64":
+        return "neon-host-architecture-mismatch"
+    if backend == X25519MlKem768EvidenceBackend.Rvv and
+            row.host_arch != "riscv64":
+        return "rvv-host-architecture-mismatch"
+    if backend == X25519MlKem768EvidenceBackend.Metal and
+            row.host_os != "macos":
+        return "metal-host-os-mismatch"
+    ""
+
+fn _matrix_fixture_stage_reason(row: X25519MlKem768MatrixRow,
+        reference: X25519MlKem768MatrixRow) -> text:
+    val receipt = row.execution
+    if not _matrix_hex64(receipt.fixture_manifest_sha256) or
+            not _matrix_hex64(receipt.fixture_source_sha256) or
+            not _matrix_hex64(receipt.pinned_workload_sha256) or
+            not _matrix_hex64(receipt.runner_source_sha256):
+        return "pinned-workload-or-fixture-provenance-sha256-invalid"
+    if not _matrix_same_input(reference.execution, receipt):
+        return "fixture-or-configuration-mismatch"
+    ""
+
+fn _matrix_artifact_stage_reason(row: X25519MlKem768MatrixRow) -> text:
+    if not _matrix_hex64(row.runner_artifact_sha256) or
+            not _matrix_hex64(row.admitted_artifact_sha256):
+        return "artifact-provenance-sha256-invalid"
+    ""
+
+fn _matrix_execution_started_reason(row: X25519MlKem768MatrixRow) -> text:
+    val receipt = row.execution
+    if receipt.schema != "x25519mlkem768-evidence-v1" or
+            receipt.implementation_version !=
+                X25519_MLKEM768_IMPLEMENTATION_VERSION or
+            receipt.profile_version != X25519_MLKEM768_PROFILE_VERSION:
+        return "execution-contract-version-mismatch"
+    if receipt.fixture_id != _MATRIX_PINNED_FIXTURE or
+            receipt.batch_size != 1:
+        return "pinned-fixture-or-batch-mismatch"
+    if receipt.scope != X25519MlKem768EvidenceScope.FullOperation:
+        return "kernel-only-row"
+    if receipt.mode != X25519MlKem768EvidenceMode.Native or receipt.emulated:
+        return "native-execution-missing"
+    if not _matrix_selected_matches(receipt) or receipt.fallback_used:
+        return "fallback-or-selection-mismatch"
+    if receipt.artifact_sha256 != row.admitted_artifact_sha256 and
+            receipt.requested_backend !=
+                X25519MlKem768EvidenceBackend.ScalarCpu:
+        return "executed-artifact-binding-mismatch"
+    val host_reason = _matrix_host_reason(row)
+    if host_reason != "": return host_reason
+    if receipt.requested_backend == X25519MlKem768EvidenceBackend.Rvv:
+        if receipt.observed_rvv_vlen_bits < 1:
+            return "rvv-vector-length-proof-incomplete"
+    elif receipt.observed_rvv_vlen_bits != 0:
+        return "non-rvv-row-carries-rvv-proof"
+    if _matrix_is_gpu(receipt.requested_backend):
+        if not receipt.compiled or not receipt.submitted or
+                receipt.kernel_invocations < 1 or
+                not _matrix_hex64(receipt.artifact_sha256) or
+                receipt.device_identity == "":
+            return "gpu-execution-start-proof-incomplete"
+    elif _matrix_is_simd(receipt.requested_backend):
+        if receipt.simd_chunk_hits < 1:
+            return "simd-execution-proof-incomplete"
+    ""
+
+fn _matrix_set_reason(receipt: X25519MlKem768PinnedSetReceipt,
+        expected: X25519MlKem768PinnedSet, first_bytes: i64,
+        second_bytes: i64, secret_bytes: i64, first_label: text,
+        second_label: text, first_sha256: text,
+        second_sha256: text, require_canonical_oracle: bool) -> text:
+    if receipt.set_id != expected: return "set-identity-mismatch"
+    if receipt.first_output_label != first_label or
+            receipt.second_output_label != second_label:
+        return "set-public-output-label-mismatch"
+    if receipt.first_output_bytes != first_bytes or
+            receipt.second_output_bytes != second_bytes:
+        return "set-public-output-length-mismatch"
+    if receipt.shared_secret_bytes != secret_bytes or
+            receipt.recovered_secret_bytes != secret_bytes:
+        return "set-secret-length-mismatch"
+    if not _matrix_hex64(receipt.first_output_sha256) or
+            not _matrix_hex64(receipt.second_output_sha256):
+        return "set-public-output-sha256-invalid"
+    if require_canonical_oracle and
+            (receipt.first_output_sha256 != first_sha256 or
+            receipt.second_output_sha256 != second_sha256):
+        return "set-public-output-oracle-mismatch"
+    ""
+
+fn _matrix_pinned_reason(row: X25519MlKem768MatrixRow) -> text:
+    val require_canonical_oracle =
+        row.execution.requested_backend ==
+            X25519MlKem768EvidenceBackend.ScalarCpu
+    if row.pinned_workload_schema != _MATRIX_PINNED_SCHEMA:
+        return "pinned-workload-schema-mismatch"
+    if row.pinned_oracle_id != _MATRIX_PINNED_ORACLE:
+        return "pinned-oracle-identity-mismatch"
+    if row.public_wire_bytes != 2336 or
+            row.execution.client_share_bytes +
+                row.execution.server_share_bytes != 2336:
+        return "public-wire-length-mismatch"
+    if not _matrix_hex64(row.client_share_sha256) or
+            not _matrix_hex64(row.server_share_sha256):
+        return "public-wire-sha256-invalid"
+    val set_a = match row.set_a:
+        case Some(value): value
+        case nil: return "missing-set-a-receipt"
+    val set_b = match row.set_b:
+        case Some(value): value
+        case nil: return "missing-set-b-receipt"
+    val set_c = match row.set_c:
+        case Some(value): value
+        case nil: return "missing-set-c-receipt"
+    val a_reason = _matrix_set_reason(
+        set_a, X25519MlKem768PinnedSet.MlKem, 1184, 1088, 32,
+        "mlkem768-encapsulation-key", "mlkem768-ciphertext",
+        X25519_MLKEM768_PINNED_MLKEM_EK_SHA256,
+        X25519_MLKEM768_PINNED_MLKEM_CT_SHA256,
+        require_canonical_oracle)
+    if a_reason != "": return "set-a-" + a_reason
+    val b_reason = _matrix_set_reason(
+        set_b, X25519MlKem768PinnedSet.X25519, 32, 32, 32,
+        "x25519-client-public", "x25519-server-public",
+        X25519_MLKEM768_PINNED_CLIENT_X25519_SHA256,
+        X25519_MLKEM768_PINNED_SERVER_X25519_SHA256,
+        require_canonical_oracle)
+    if b_reason != "": return "set-b-" + b_reason
+    val c_reason = _matrix_set_reason(
+        set_c, X25519MlKem768PinnedSet.Hybrid, 1216, 1120, 64,
+        "x25519mlkem768-client-share", "x25519mlkem768-server-share",
+        X25519_MLKEM768_PINNED_CLIENT_SHARE_SHA256,
+        X25519_MLKEM768_PINNED_SERVER_SHARE_SHA256,
+        require_canonical_oracle)
+    if c_reason != "": return "set-c-" + c_reason
+    if set_c.first_output_sha256 != row.client_share_sha256 or
+            set_c.second_output_sha256 != row.server_share_sha256:
+        return "set-c-public-wire-sha256-mismatch"
+    ""
+
+fn _matrix_row_reason(row: X25519MlKem768MatrixRow,
+        reference: X25519MlKem768MatrixRow) -> text:
+    val receipt = row.execution
+    val text_reason = _matrix_text_reason(row)
+    if text_reason != "": return text_reason
+    if row.admission_phase == X25519MlKem768MatrixAdmissionPhase.Requested:
+        if receipt.status != X25519MlKem768EvidenceStatus.Blocked or
+                not _matrix_execution_empty(receipt):
+            return "requested-row-state-invalid"
+        if (receipt.fixture_manifest_sha256 != "" or
+                receipt.fixture_source_sha256 != "" or
+                receipt.runner_source_sha256 != "" or
+                row.runner_artifact_sha256 != "" or
+                row.admitted_artifact_sha256 != "" or
+                not _matrix_public_claims_empty(row)):
+            return "requested-row-carries-unadmitted-claims"
+        return ""
+    val fixture_reason = _matrix_fixture_stage_reason(row, reference)
+    if fixture_reason != "": return fixture_reason
+    if row.admission_phase == X25519MlKem768MatrixAdmissionPhase.FixtureAdmitted:
+        if receipt.status != X25519MlKem768EvidenceStatus.Blocked or
+                not _matrix_execution_empty(receipt) or
+                row.runner_artifact_sha256 != "" or
+                row.admitted_artifact_sha256 != "" or
+                not _matrix_public_claims_empty(row):
+            return "fixture-admitted-row-state-invalid"
+        return ""
+    val artifact_reason = _matrix_artifact_stage_reason(row)
+    if artifact_reason != "": return artifact_reason
+    if row.admission_phase == X25519MlKem768MatrixAdmissionPhase.ArtifactAdmitted:
+        if receipt.status != X25519MlKem768EvidenceStatus.Blocked or
+                not _matrix_execution_empty(receipt) or
+                not _matrix_public_claims_empty(row):
+            return "artifact-admitted-row-state-invalid"
+        return ""
+    if receipt.status == X25519MlKem768EvidenceStatus.Blocked:
+        return "executed-row-cannot-be-blocked"
+    val execution_reason = _matrix_execution_started_reason(row)
+    if execution_reason != "": return execution_reason
+    if receipt.status == X25519MlKem768EvidenceStatus.Fail:
+        if receipt.promotion_eligible or not _matrix_public_claims_empty(row):
+            return "failed-row-state-invalid"
+        return ""
+    if not receipt.promotion_eligible:
+        return "row-not-promotion-eligible"
+    if not receipt.scalar_roundtrip_match or not receipt.absolute_oracle_match:
+        return "full-output-oracle-missing"
+    if receipt.client_share_bytes != 1216 or
+            receipt.server_share_bytes != 1120 or
+            receipt.shared_secret_bytes != 64:
+        return "hybrid-output-shape-mismatch"
+    if _matrix_is_gpu(receipt.requested_backend):
+        if not receipt.fence_completed or not receipt.device_readback or
+                receipt.kernel_invocations < 3:
+            return "gpu-device-proof-incomplete"
+    val pinned_reason = _matrix_pinned_reason(row)
+    if pinned_reason != "": return pinned_reason
+    ""
+
+fn _matrix_same_set(left: X25519MlKem768PinnedSetReceipt?,
+        right: X25519MlKem768PinnedSetReceipt?) -> bool:
+    match left:
+        case nil: right == nil
+        case Some(left_value):
+            match right:
+                case nil: false
+                case Some(right_value):
+                    (left_value.set_id == right_value.set_id and
+                    left_value.first_output_label == right_value.first_output_label and
+                    left_value.second_output_label == right_value.second_output_label and
+                    left_value.first_output_bytes == right_value.first_output_bytes and
+                    left_value.second_output_bytes == right_value.second_output_bytes and
+                    left_value.shared_secret_bytes == right_value.shared_secret_bytes and
+                    left_value.recovered_secret_bytes == right_value.recovered_secret_bytes and
+                    left_value.first_output_sha256 == right_value.first_output_sha256 and
+                    left_value.second_output_sha256 == right_value.second_output_sha256)
+
+fn _matrix_same_public_outputs(left: X25519MlKem768MatrixRow,
+        right: X25519MlKem768MatrixRow) -> bool:
+    left.pinned_workload_schema == right.pinned_workload_schema and
+    left.pinned_oracle_id == right.pinned_oracle_id and
+    left.public_wire_bytes == right.public_wire_bytes and
+    left.client_share_sha256 == right.client_share_sha256 and
+    left.server_share_sha256 == right.server_share_sha256 and
+    _matrix_same_set(left.set_a, right.set_a) and
+    _matrix_same_set(left.set_b, right.set_b) and
+    _matrix_same_set(left.set_c, right.set_c)
+
+fn _matrix_fixture_stage_valid(row: X25519MlKem768MatrixRow,
+        reference: X25519MlKem768MatrixRow) -> bool:
+    _matrix_phase_has_fixture(row.admission_phase) and
+    _matrix_text_reason(row) == "" and
+    _matrix_fixture_stage_reason(row, reference) == ""
+
+fn _matrix_artifact_stage_valid(row: X25519MlKem768MatrixRow,
+        reference: X25519MlKem768MatrixRow) -> bool:
+    _matrix_phase_has_artifact(row.admission_phase) and
+    _matrix_fixture_stage_valid(row, reference) and
+    _matrix_artifact_stage_reason(row) == ""
+
+fn _matrix_execution_stage_valid(row: X25519MlKem768MatrixRow,
+        reference: X25519MlKem768MatrixRow) -> bool:
+    _matrix_phase_executed(row.admission_phase) and
+    row.execution.status != X25519MlKem768EvidenceStatus.Blocked and
+    _matrix_artifact_stage_valid(row, reference) and
+    _matrix_execution_started_reason(row) == ""
+
+fn _matrix_canonical_rows(rows: [X25519MlKem768MatrixRow]
+        ) -> ([X25519MlKem768MatrixRow], text):
+    if rows.len() != 7:
+        return (rows, "expected-exactly-seven-backend-rows")
+    var ordered: [X25519MlKem768MatrixRow] = []
+    var desired: i64 = 0
+    while desired < 7:
+        var matches: i64 = 0
+        for row in rows:
+            if _matrix_backend_index(row.execution.requested_backend) == desired:
+                ordered.push(row)
+                matches = matches + 1
+        if matches == 0:
+            return (rows, "missing-backend-" +
+                x25519_mlkem768_evidence_backend_name(
+                    _matrix_backend_for_index(desired)))
+        if matches > 1:
+            return (rows, "duplicate-backend-" +
+                x25519_mlkem768_evidence_backend_name(
+                    _matrix_backend_for_index(desired)))
+        desired = desired + 1
+    (ordered, "")
+
+# Qualification consumes this source-only admission product.  Its invariant is
+# intentionally the inverse of promotion eligibility: an executor may provide
+# complete, integrity-bound public evidence for a future promotion cycle, but
+# that evidence is not itself a promotion decision.
+fn _matrix_source_row_reason(row: X25519MlKem768MatrixRow,
+        reference: X25519MlKem768MatrixRow) -> text:
+    if row.admission_phase != X25519MlKem768MatrixAdmissionPhase.Executed:
+        return "source-row-not-executed"
+    if row.execution.status != X25519MlKem768EvidenceStatus.Pass:
+        return "source-row-pass-required"
+    if row.execution.promotion_eligible:
+        return "source-row-must-be-non-promotable"
+    val fixture_reason = _matrix_fixture_stage_reason(row, reference)
+    if fixture_reason != "": return fixture_reason
+    val artifact_reason = _matrix_artifact_stage_reason(row)
+    if artifact_reason != "": return artifact_reason
+    val execution_reason = _matrix_execution_started_reason(row)
+    if execution_reason != "": return execution_reason
+    if not row.execution.scalar_roundtrip_match or
+            not row.execution.absolute_oracle_match:
+        return "source-row-full-output-oracle-missing"
+    val pinned_reason = _matrix_pinned_reason(row)
+    if pinned_reason != "": return pinned_reason
+    # Unlike the final matrix's scalar-only external oracle check, source
+    # qualification binds every row to the fixed public workload oracle.
+    if row.client_share_sha256 !=
+            X25519_MLKEM768_PINNED_CLIENT_SHARE_SHA256 or
+            row.server_share_sha256 !=
+                X25519_MLKEM768_PINNED_SERVER_SHARE_SHA256:
+        return "source-row-public-output-oracle-mismatch"
+    ""
+
+fn _matrix_source_empty(reason: text) -> X25519MlKem768SourceMatrixReceipt:
+    X25519MlKem768SourceMatrixReceipt(
+        schema: X25519_MLKEM768_SOURCE_MATRIX_SCHEMA,
+        status: X25519MlKem768EvidenceStatus.Blocked,
+        reason: reason, row_set_sha256: sha256_text(""),
+        admitted_rows: 0, rejected_rows: 0, rows: [])
+
+fn x25519_mlkem768_admit_source_backend_matrix(
+        input_rows: [X25519MlKem768MatrixRow]
+        ) -> X25519MlKem768SourceMatrixReceipt:
+    if input_rows.len() == 0:
+        return _matrix_source_empty("missing-all-backend-rows")
+    val (rows, structural_reason) = _matrix_canonical_rows(input_rows)
+    if structural_reason != "": return _matrix_source_empty(structural_reason)
+    val reference = rows[0]
+    var receipts: [X25519MlKem768MatrixRowReceipt] = []
+    var material = _matrix_frame("schema", X25519_MLKEM768_SOURCE_MATRIX_SCHEMA)
+    var admitted: i64 = 0
+    var rejected: i64 = 0
+    var first_reason = ""
+    var ordinal: i64 = 0
+    while ordinal < rows.len():
+        val row = rows[ordinal]
+        val reason = _matrix_source_row_reason(row, reference)
+        val admitted_row = reason == "" and
+            _matrix_same_public_outputs(reference, row)
+        val admission_reason = if admitted_row: "" elif reason != "":
+            reason else: "source-row-public-output-mismatch"
+        val outcome = if admitted_row:
+            X25519MlKem768MatrixRowOutcome.Admitted
+        else:
+            X25519MlKem768MatrixRowOutcome.Rejected
+        val comparison = if admitted_row:
+            X25519MlKem768MatrixOutputComparison.Match
+        else:
+            X25519MlKem768MatrixOutputComparison.Mismatch
+        if admitted_row:
+            admitted = admitted + 1
+        else:
+            rejected = rejected + 1
+            if first_reason == "":
+                first_reason = admission_reason + "-" +
+                    x25519_mlkem768_evidence_backend_name(
+                        row.execution.requested_backend)
+        val source_sha256 = sha256_text(_matrix_receipt_material(row.execution))
+        receipts.push(X25519MlKem768MatrixRowReceipt(
+            ordinal: ordinal, backend: row.execution.requested_backend,
+            outcome: outcome, source_reason: row.execution.reason,
+            admission_reason: admission_reason,
+            input_contract_matches: _matrix_same_input(
+                reference.execution, row.execution),
+            output_comparison: comparison,
+            source_receipt_sha256: source_sha256, source: row))
+        material = material + _matrix_frame("row", _matrix_row_material(row) +
+            _matrix_frame("outcome", _matrix_outcome_name(outcome)) +
+            _matrix_frame("admission_reason", admission_reason) +
+            _matrix_frame("source_receipt_sha256", source_sha256))
+        ordinal = ordinal + 1
+    val status = if admitted == 7:
+        X25519MlKem768EvidenceStatus.Pass
+    else:
+        X25519MlKem768EvidenceStatus.Blocked
+    X25519MlKem768SourceMatrixReceipt(
+        schema: X25519_MLKEM768_SOURCE_MATRIX_SCHEMA, status: status,
+        reason: if status == X25519MlKem768EvidenceStatus.Pass:
+            "all-seven-non-promotable-source-rows-match"
+        else: first_reason,
+        row_set_sha256: sha256_text(material), admitted_rows: admitted,
+        rejected_rows: rejected, rows: receipts)
+
+fn _matrix_empty(reason: text) -> X25519MlKem768MatrixReceipt:
+    X25519MlKem768MatrixReceipt(
+        schema: X25519_MLKEM768_MATRIX_SCHEMA,
+        status: X25519MlKem768EvidenceStatus.Blocked,
+        reason: reason, fixture_id: "", fixture_manifest_sha256: "",
+        fixture_source_sha256: "", pinned_workload_sha256: "",
+        runner_source_sha256: "",
+        implementation_version: "", profile_version: "", batch_size: 0,
+        public_wire_bytes: 0, row_set_sha256: sha256_text(""),
+        admitted_rows: 0, blocked_rows: 0, failed_rows: 0,
+        rejected_rows: 0, matching_output_rows: 0,
+        fixture_admitted_rows: 0, artifact_admitted_rows: 0,
+        executed_rows: 0, native_rows: 0, full_operation_rows: 0,
+        rows: [])
+
+fn x25519_mlkem768_admit_full_backend_matrix(
+        input_rows: [X25519MlKem768MatrixRow]) -> X25519MlKem768MatrixReceipt:
+    if input_rows.len() == 0: return _matrix_empty("missing-all-backend-rows")
+    val (rows, structural_reason) = _matrix_canonical_rows(input_rows)
+    if structural_reason != "": return _matrix_empty(structural_reason)
+    val reference = rows[0]
+    val scalar_reason = _matrix_row_reason(reference, reference)
+    val scalar_admitted = (scalar_reason == "" and
+        reference.execution.status == X25519MlKem768EvidenceStatus.Pass)
+    var row_receipts: [X25519MlKem768MatrixRowReceipt] = []
+    var row_set_material = ""
+    var first_reason = ""
+    var admitted: i64 = 0
+    var blocked: i64 = 0
+    var failed: i64 = 0
+    var rejected: i64 = 0
+    var matching: i64 = 0
+    var fixture_admitted: i64 = 0
+    var artifact_admitted: i64 = 0
+    var executed: i64 = 0
+    var native_rows: i64 = 0
+    var full_rows: i64 = 0
+    var ordinal: i64 = 0
+    while ordinal < rows.len():
+        val row = rows[ordinal]
+        var admission_reason = _matrix_row_reason(row, reference)
+        val input_matches = (_matrix_phase_has_fixture(row.admission_phase) and
+            _matrix_same_input(reference.execution, row.execution))
+        var comparison = X25519MlKem768MatrixOutputComparison.NotAvailable
+        var outcome = X25519MlKem768MatrixRowOutcome.Rejected
+        if admission_reason == "":
+            if row.execution.status == X25519MlKem768EvidenceStatus.Blocked:
+                outcome = X25519MlKem768MatrixRowOutcome.Blocked
+                admission_reason = row.execution.reason
+            elif row.execution.status == X25519MlKem768EvidenceStatus.Fail:
+                outcome = X25519MlKem768MatrixRowOutcome.Failed
+                admission_reason = row.execution.reason
+            elif not scalar_admitted:
+                admission_reason = "scalar-reference-not-admitted"
+            elif _matrix_same_public_outputs(reference, row):
+                comparison = X25519MlKem768MatrixOutputComparison.Match
+                outcome = X25519MlKem768MatrixRowOutcome.Admitted
+            else:
+                comparison = X25519MlKem768MatrixOutputComparison.Mismatch
+                admission_reason = "public-output-digest-mismatch"
+        val fixture_stage_valid = _matrix_fixture_stage_valid(row, reference)
+        val artifact_stage_valid = _matrix_artifact_stage_valid(row, reference)
+        val execution_stage_valid = _matrix_execution_stage_valid(row, reference)
+        if fixture_stage_valid:
+            fixture_admitted = fixture_admitted + 1
+        if artifact_stage_valid:
+            artifact_admitted = artifact_admitted + 1
+        if execution_stage_valid:
+            executed = executed + 1
+            if row.execution.mode == X25519MlKem768EvidenceMode.Native and
+                    not row.execution.emulated:
+                native_rows = native_rows + 1
+            if row.execution.scope == X25519MlKem768EvidenceScope.FullOperation:
+                full_rows = full_rows + 1
+        if outcome == X25519MlKem768MatrixRowOutcome.Admitted:
+            admitted = admitted + 1
+            matching = matching + 1
+        elif outcome == X25519MlKem768MatrixRowOutcome.Blocked:
+            blocked = blocked + 1
+        elif outcome == X25519MlKem768MatrixRowOutcome.Failed:
+            failed = failed + 1
+        else:
+            rejected = rejected + 1
+        if first_reason == "" and outcome != X25519MlKem768MatrixRowOutcome.Admitted:
+            first_reason = admission_reason + "-" +
+                x25519_mlkem768_evidence_backend_name(
+                    row.execution.requested_backend)
+        val source_sha256 = sha256_text(_matrix_receipt_material(row.execution))
+        val row_receipt = X25519MlKem768MatrixRowReceipt(
+            ordinal: ordinal, backend: row.execution.requested_backend,
+            outcome: outcome, source_reason: row.execution.reason,
+            admission_reason: admission_reason,
+            input_contract_matches: input_matches,
+            output_comparison: comparison,
+            source_receipt_sha256: source_sha256, source: row)
+        row_receipts.push(row_receipt)
+        row_set_material = row_set_material + _matrix_frame(
+            "row", _matrix_row_material(row) +
+            _matrix_frame("outcome", _matrix_outcome_name(outcome)) +
+            _matrix_frame("admission_reason", admission_reason) +
+            _matrix_frame("output_comparison",
+                _matrix_comparison_name(comparison)) +
+            _matrix_frame("source_receipt_sha256", source_sha256))
+        ordinal = ordinal + 1
+    val status = if failed > 0:
+        X25519MlKem768EvidenceStatus.Fail
+    elif admitted == 7 and matching == 7:
+        X25519MlKem768EvidenceStatus.Pass
+    else:
+        X25519MlKem768EvidenceStatus.Blocked
+    val reason = if status == X25519MlKem768EvidenceStatus.Pass:
+        "all-seven-native-full-operation-rows-match"
+    elif first_reason != "":
+        first_reason
+    else:
+        "matrix-incomplete"
+    X25519MlKem768MatrixReceipt(
+        schema: X25519_MLKEM768_MATRIX_SCHEMA, status: status,
+        reason: reason, fixture_id: reference.execution.fixture_id,
+        fixture_manifest_sha256:
+            reference.execution.fixture_manifest_sha256,
+        fixture_source_sha256: reference.execution.fixture_source_sha256,
+        pinned_workload_sha256: reference.execution.pinned_workload_sha256,
+        runner_source_sha256: reference.execution.runner_source_sha256,
+        implementation_version: reference.execution.implementation_version,
+        profile_version: reference.execution.profile_version,
+        batch_size: reference.execution.batch_size,
+        public_wire_bytes: if scalar_admitted:
+            reference.public_wire_bytes else: 0,
+        row_set_sha256: sha256_text(row_set_material),
+        admitted_rows: admitted, blocked_rows: blocked,
+        failed_rows: failed, rejected_rows: rejected,
+        matching_output_rows: matching,
+        fixture_admitted_rows: fixture_admitted,
+        artifact_admitted_rows: artifact_admitted,
+        executed_rows: executed, native_rows: native_rows,
+        full_operation_rows: full_rows, rows: row_receipts)
+
+fn x25519_mlkem768_render_matrix_receipt(
+        receipt: X25519MlKem768MatrixReceipt) -> text:
+    var out =
+        "schema=" + receipt.schema + "\n" +
+        "status=" + _matrix_status_name(receipt.status) + "\n" +
+        "reason=" + receipt.reason + "\n" +
+        "fixture_id=" + receipt.fixture_id + "\n" +
+        "fixture_manifest_sha256=" + receipt.fixture_manifest_sha256 + "\n" +
+        "fixture_source_sha256=" + receipt.fixture_source_sha256 + "\n" +
+        "pinned_workload_sha256=" + receipt.pinned_workload_sha256 + "\n" +
+        "runner_source_sha256=" + receipt.runner_source_sha256 + "\n" +
+        "implementation_version=" + receipt.implementation_version + "\n" +
+        "profile_version=" + receipt.profile_version + "\n" +
+        "batch_size=" + receipt.batch_size.to_text() + "\n" +
+        "public_wire_bytes=" + receipt.public_wire_bytes.to_text() + "\n" +
+        "row_set_sha256=" + receipt.row_set_sha256 + "\n" +
+        "admitted_rows=" + receipt.admitted_rows.to_text() + "\n" +
+        "blocked_rows=" + receipt.blocked_rows.to_text() + "\n" +
+        "failed_rows=" + receipt.failed_rows.to_text() + "\n" +
+        "rejected_rows=" + receipt.rejected_rows.to_text() + "\n" +
+        "matching_output_rows=" + receipt.matching_output_rows.to_text() + "\n" +
+        "fixture_admitted_rows=" + receipt.fixture_admitted_rows.to_text() + "\n" +
+        "artifact_admitted_rows=" + receipt.artifact_admitted_rows.to_text() + "\n" +
+        "executed_rows=" + receipt.executed_rows.to_text() + "\n" +
+        "native_rows=" + receipt.native_rows.to_text() + "\n" +
+        "full_operation_rows=" + receipt.full_operation_rows.to_text() + "\n"
+    for row in receipt.rows:
+        val prefix = "row." +
+            x25519_mlkem768_evidence_backend_name(row.backend) + "."
+        out = out + prefix + "outcome=" +
+            _matrix_outcome_name(row.outcome) + "\n" +
+            prefix + "source_reason=" + row.source_reason + "\n" +
+            prefix + "admission_reason=" + row.admission_reason + "\n" +
+            prefix + "phase=" +
+                _matrix_phase_name(row.source.admission_phase) + "\n" +
+            prefix + "output_comparison=" +
+                _matrix_comparison_name(row.output_comparison) + "\n" +
+            prefix + "source_receipt_sha256=" +
+                row.source_receipt_sha256 + "\n" +
+            prefix + "client_share_sha256=" +
+                row.source.client_share_sha256 + "\n" +
+            prefix + "server_share_sha256=" +
+                row.source.server_share_sha256 + "\n"
+    out
+
+export X25519_MLKEM768_MATRIX_SCHEMA, X25519_MLKEM768_SOURCE_MATRIX_SCHEMA
+export X25519MlKem768MatrixAdmissionPhase, X25519MlKem768MatrixRowOutcome
+export X25519MlKem768MatrixOutputComparison
+export X25519MlKem768MatrixRow, X25519MlKem768MatrixRowReceipt
+export X25519MlKem768MatrixReceipt
+export X25519MlKem768SourceMatrixReceipt
+export x25519_mlkem768_admit_full_backend_matrix
+export x25519_mlkem768_admit_source_backend_matrix
+export x25519_mlkem768_render_matrix_receipt

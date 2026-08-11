@@ -1,0 +1,67 @@
+# @cover src/compiler/10.frontend/core/enum_discriminant_eval.spl
+# @tag: unit, compiler, bootstrap, only-compiled
+"""
+# Enum Discriminant Shift-by-63 Specification
+
+**Category:** Compiler | Frontend | Enum discriminants
+**Difficulty:** 2/5
+**Status:** Draft
+
+## Overview
+
+`eval_enum_discriminant_expr` (src/compiler/10.frontend/core/enum_discriminant_eval.spl)
+evaluates constant enum-discriminant expressions, including shift operators.
+Shift amounts are bounds-checked against the 64-bit width of `i64`. The
+largest valid shift amount for a 64-bit value is 63 (shifting by 64 or more
+is undefined), so `x >> 63` must be ACCEPTED as a valid constant expression,
+not rejected as an "invalid shift".
+
+This spec parses a real enum declaration through the self-hosted parser
+(`parse_and_build_module`) and calls `eval_enum_discriminant_expr` directly
+on the resulting discriminant expression id, so it exercises the real
+arena-backed AST rather than a hand-rolled fixture.
+"""
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.core.ast.{module_decl_at, module_decl_count_get, decl_get_name, decl_get_field_defaults}
+use compiler.core.enum_discriminant_eval.{eval_enum_discriminant_expr}
+
+fn find_decl_by_name(name: text) -> i64:
+    for i in 0..module_decl_count_get():
+        val d = module_decl_at(i)
+        if decl_get_name(d) == name:
+            return d
+    -1
+
+describe "eval_enum_discriminant_expr — shift amount of exactly 63":
+    """
+    A right-shift by 63 on a 64-bit value is well-defined (it isolates the
+    sign bit / clears everything else) and must be accepted as a constant
+    enum discriminant expression.
+    """
+
+    it "accepts `9223372036854775807 >> 63` and evaluates it to 0":
+        val source = "enum ShiftBy63:\n    Zero = 9223372036854775807 >> 63\n"
+        val module = parse_and_build_module(source, "shift63.spl")
+        val decl = find_decl_by_name("ShiftBy63")
+        expect(decl >= 0).to_equal(true)
+
+        val defaults = decl_get_field_defaults(decl)
+        expect(defaults.len()).to_equal(1)
+
+        val result = eval_enum_discriminant_expr(defaults[0], "ShiftBy63", [], [])
+        expect(result.valid).to_equal(true)
+        expect(result.value).to_equal(0)
+
+    it "still rejects an out-of-range shift amount of 64":
+        val source = "enum ShiftBy64:\n    Zero = 1 >> 64\n"
+        val module = parse_and_build_module(source, "shift64.spl")
+        val decl = find_decl_by_name("ShiftBy64")
+        expect(decl >= 0).to_equal(true)
+
+        val defaults = decl_get_field_defaults(decl)
+        expect(defaults.len()).to_equal(1)
+
+        val result = eval_enum_discriminant_expr(defaults[0], "ShiftBy64", [], [])
+        expect(result.valid).to_equal(false)

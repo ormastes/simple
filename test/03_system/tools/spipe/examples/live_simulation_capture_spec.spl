@@ -1,0 +1,89 @@
+"""
+T2f: Live simulation capture via a real deterministic scheduler (not a
+hand-built TimelineEvent literal). `ChaosScheduler` (RoundRobin strategy) is
+run for real — each `pick_next` call is a real scheduling decision — and its
+picks are converted into `simulation_profile`'s `TimelineEvent` stream, then
+verified through typed-evidence fail-closed comparators with a closed oracle.
+
+Real scheduler run → TimelineEvent stream → simulation_to_evidence →
+oracle_spec (closed) → compare_evidence.
+
+The RoundRobin strategy is `idx = rr_index % len(tids); rr_index += 1` — a
+pure counter with no PRNG — so the expected pick sequence for 3 runnable
+tids [10, 20, 30] over 5 calls is derivable by hand from the algorithm
+(0,1,2,0,1 -> 10,20,30,10,20) without ever reading the run's own output back
+as its own oracle.
+
+References: doc/03_plan/infra/sspec/modern_sspec_completion_plan_2026-08-09.md
+Harness run: src/lib/nogc_sync_mut/replay/process/chaos_scheduler.spl (ChaosScheduler.pick_next)
+"""
+
+use std.spec.*
+
+use std.common.spec.evidence.model.{
+    check_exact, check_ordered, oracle_spec, EvidenceStatus
+}
+use std.common.spec.evidence.evidence_comparator.{compare_evidence}
+use std.common.spec.evidence.format.simulation_profile.{
+    SimulationRun, TimelineEvent, simulation_to_evidence
+}
+use std.nogc_sync_mut.replay.process.chaos_scheduler.{ChaosScheduler, ChaosStrategy}
+
+describe "Simulation evidence: live ChaosScheduler capture":
+    it "runs a real RoundRobin scheduler and verifies its pick timeline via closed oracle":
+        step("Run a real deterministic RoundRobin scheduler over 3 runnable tids, 5 decisions")
+        var scheduler = ChaosScheduler.create(ChaosStrategy.RoundRobin, 42)
+        val runnable_tids: [i64] = [10, 20, 30]
+
+        var events: [TimelineEvent] = []
+        var i: i64 = 0
+        while i < 5:
+            val picked = scheduler.pick_next(runnable_tids)
+            events.push(TimelineEvent(t_us: i * 1000, signal: "scheduled_tid", value: picked))
+            i = i + 1
+
+        step("Verify the real schedule log length matches the number of decisions made")
+        expect(scheduler.schedule_count()).to_equal(5)
+
+        step("Convert the real scheduling run into canonical simulation evidence")
+        val run = SimulationRun(
+            model_id: "chaos-round-robin",
+            model_version: "1.0",
+            seed: "42",
+            solver: "round_robin_counter",
+            time_step_us: 1000,
+            termination: "fixed_decision_count",
+            environment: "spipe-live-capture"
+        )
+        val evidence = simulation_to_evidence(run, events, "sim/chaos-round-robin")
+        expect(evidence.parse_ok).to_equal(true)
+
+        step("Declare a closed oracle whose expected picks are reasoned from the RoundRobin algorithm alone, not read back from the run")
+        # idx = rr_index % 3, rr_index increments each call, starting at 0:
+        #   call0: idx=0 -> tids[0]=10
+        #   call1: idx=1 -> tids[1]=20
+        #   call2: idx=2 -> tids[2]=30
+        #   call3: idx=0 -> tids[0]=10
+        #   call4: idx=1 -> tids[1]=20
+        val spec = oracle_spec(
+            "sim/chaos-round-robin",
+            [
+                check_exact("simulation.model_id", "chaos-round-robin"),
+                check_exact("simulation.model_version", "1.0"),
+                check_exact("simulation.seed", "42"),
+                check_exact("simulation.solver", "round_robin_counter"),
+                check_exact("simulation.time_step_us", "1000"),
+                check_exact("simulation.termination", "fixed_decision_count"),
+                check_exact("simulation.environment", "spipe-live-capture"),
+                # All 5 timeline nodes share this path; check_ordered asserts the
+                # full emission-order sequence, derived by hand above.
+                check_ordered("simulation.timeline.scheduled_tid", [
+                    "10@0us", "20@1000us", "30@2000us", "10@3000us", "20@4000us"
+                ])
+            ]
+        )
+
+        step("Compare the real run's evidence against the hand-derived closed oracle")
+        val result = compare_evidence(evidence, spec)
+        expect(result.status).to_equal(EvidenceStatus.passed)
+        expect(result.summary).to_equal("8 check(s) passed")

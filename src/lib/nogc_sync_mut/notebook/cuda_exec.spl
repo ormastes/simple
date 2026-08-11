@@ -1,0 +1,270 @@
+# CudaExec — NotebookExecutor backing the CUDA lanes
+# (`interpreter(remote(cuda(smNN[(resident)])))`, `jit(remote(cuda(...)))`).
+#
+# Design:  doc/05_design/app/tools/notebook_lanes_architecture.md §4.4
+# Plan:    doc/03_plan/agent_tasks/notebook_lanes_parallel_plan_2026-08-07.md (Stream K, K5)
+#
+# Wraps the EXISTING GPU-lane executors (no CUDA driver call is reimplemented
+# here — every device operation goes through `CudaLaneSession`
+# (src/lib/gc_async_mut/gpu_lane/cuda_lane_session.spl), reached via a single
+# `CudaVmExecutor` kept open for the whole notebook session, matching
+# `RemoteExec`'s "one live session per (session, mode_spec)" shape (K4):
+#   - probing:  `CudaLaneSession.probe()` reused verbatim (design §4.1
+#     `probe()` contract), mapped onto `LaneStatus`'s skip:/blocked: wording.
+#   - resident-vs-per-launch submode: `extract_gpu_submode` (GPU-A1, already
+#     landed) reads `(resident)` out of the mode spec; the resident watchdog
+#     refusal gate is `cuda_resident_session.resident_refusal_gate` (B4),
+#     called exactly as `ResidentSession.start` calls it. On refusal, per
+#     design §4.4 ("Per-launch (default when resident is refused/watchdog
+#     device)"), this executor falls back to per-launch for the rest of the
+#     session rather than failing the session outright.
+#   - cell dispatch: `CudaVmExecutor.run_source_persisting_data` (B3, added to
+#     fix the arena-persistence bug documented below) — this file no longer
+#     reimplements the upload/launch/sync/drain sequence itself.
+#
+# ARENA-PERSISTENCE (fixed at the root — was a gap, not routed around):
+# `CudaVmExecutor.run_source_persisting_data` (added to
+# `cuda_vm_executor.spl` to fix
+# doc/08_tracking/bug/cuda_resident_session_run_program_discards_arena_data_region_state_2026-08-08.md)
+# now owns the host-side splice `run_program_with_persistence` below used to
+# implement itself: it carries the PREVIOUS cell's output arena's DATA-region
+# bytes (at the same LOGICAL address, `SGP_HEADER_SIZE + code.len()`, which
+# shifts release to release as code length changes) and LOG/RECORD ring
+# region forward into each new call, so a naive per-cell call no longer loses
+# state — satisfying design §4.4's "state persists via the arena" / "VM
+# globals in the DATA region carry state between cells". This file now only
+# tracks `last_arena`/`last_data_off` across cells and forwards them to the
+# executor; it no longer reimplements the upload/launch/sync/drain sequence.
+#
+# `jit(remote(cuda(...)))` (design §4.4 "each cell body must be a complete
+# kernel program") needs a per-cell arbitrary-source Simple->PTX compile
+# path; the only landed JIT-lane executor (`cuda_jit_lane_executor.spl`,
+# Task B2) hardcodes a single fixed vector_add kernel, not the cell's actual
+# source, so it cannot back live notebook cells today. `probe()`/
+# `execute_cell()` report this honestly as `blocked:` rather than silently
+# no-op'ing. See
+# doc/08_tracking/bug/notebook_cuda_exec_jit_lane_not_implemented_2026-08-08.md.
+
+use std.notebook.types.{LaneStatus, CellResult, DisplayItem, SessionOpts, cell_result_ok, cell_result_error}
+use std.notebook.executor.{NotebookExecutor, NotebookExecutorFactory}
+use std.test_runner.test_executor_composite_parse.{extract_base_runtime, extract_gpu_submode}
+use std.common.svmg.mailbox_const.{ARENA_TOTAL_SIZE, SENTINEL_EXIT_MASK, SENTINEL_TIMEOUT}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+use std.sffi.io.{file_read_bytes}
+use std.gc_async_mut.gpu_lane.cuda_vm_executor.{CudaVmExecutor, SvmgRunOutcome, step_budget_from_env}
+use std.gc_async_mut.gpu_lane.cuda_resident_session.{resident_refusal_gate, unknown_watchdog_attr}
+
+# Checked-in device kernel artifact (B3's `svmg_interpret` PTX, the same one
+# `CudaVmExecutor.init` expects).
+val KERNEL_PTX_PATH: text = "src/lib/gc_async_mut/gpu_lane/svmg_cuda_kernel.ptx"
+
+# ============================================================================
+# Probe status mapping — CudaLaneSession.probe()'s "skip:<reason>" contract
+# onto LaneStatus (design §4.1), same shape as remote_exec.capability_to_lane_status.
+# ============================================================================
+
+fn cuda_probe_to_lane_status(probe_text: text) -> LaneStatus:
+    if probe_text == "":
+        return LaneStatus.Available
+    if probe_text.starts_with("skip:"):
+        return LaneStatus.Skip(probe_text[5:])
+    LaneStatus.Blocked(probe_text)
+
+# Decode the GMB-1 sentinel into (trapped, timed_out, exit_code) — mirrors
+# `cuda_vm_executor._decode_sentinel` exactly (kept private there; this is a
+# small, pure host-bytes decode, not GPU-driver logic, so duplicating the six
+# lines here is cheaper than exporting a private helper across modules).
+fn cuda_exec_decode_sentinel(sentinel: i64) -> (bool, bool, i64):
+    if sentinel == SENTINEL_TIMEOUT:
+        return (false, true, 0)
+    val high16 = sentinel & 0xFFFF0000
+    if high16 == SENTINEL_EXIT_MASK:
+        val code_val = sentinel & 0xFFFF
+        return (code_val == 0x7F, false, code_val)
+    (false, false, 0)
+
+# ============================================================================
+# CudaExec — one live CudaVmExecutor per (session, mode_spec) cache entry.
+# ============================================================================
+
+class CudaExec:
+    spec: text
+    base_runtime: text          # "interpreter" | "jit"
+    submode: text                # "resident" | "launch" (design §2.2 GPU submode)
+    executor: CudaVmExecutor
+    started: bool
+    resident_active: bool        # true only when submode=="resident" AND the
+                                  # watchdog refusal gate did not fire
+    blocked_reason: text
+    last_arena: [u8]             # previous cell's full output arena, or []
+    last_data_off: i64           # data_off the DATA-region bytes in last_arena were laid out at
+
+    static fn make(mode_spec: text) -> CudaExec:
+        CudaExec(
+            spec: mode_spec,
+            base_runtime: extract_base_runtime(mode_spec),
+            submode: extract_gpu_submode(mode_spec),
+            executor: CudaVmExecutor.create(),
+            started: false,
+            resident_active: false,
+            blocked_reason: "",
+            last_arena: [],
+            last_data_off: 0)
+
+    # ------------------------------------------------------------------
+    # Cell dispatch — splice-aware wrapper over CudaVmExecutor.session
+    # (see module docstring "ARENA-PERSISTENCE GAP").
+    # ------------------------------------------------------------------
+
+    me run_program_with_persistence(source: text, entry_pc: i64) -> SvmgRunOutcome:
+        val outcome = self.executor.run_source_persisting_data(
+            source, step_budget_from_env(), entry_pc, self.last_arena, self.last_data_off)
+        if outcome.out_arena.len() == ARENA_TOTAL_SIZE:
+            self.last_arena = outcome.out_arena
+            self.last_data_off = outcome.data_off
+        outcome
+
+impl NotebookExecutor for CudaExec:
+    fn mode_spec() -> text:
+        self.spec
+
+    fn probe() -> LaneStatus:
+        if self.base_runtime == "jit":
+            return LaneStatus.Blocked("jit(remote(cuda(...))) cells are not yet implemented for the notebook lane (cuda_jit_lane_executor.spl only runs a fixed vector_add kernel, not the cell's source) — see doc/08_tracking/bug/notebook_cuda_exec_jit_lane_not_implemented_2026-08-08.md")
+        cuda_probe_to_lane_status(self.executor.session.probe())
+
+    me start(opts: SessionOpts):
+        val _ = opts
+        if self.base_runtime == "jit":
+            self.blocked_reason = "jit(remote(cuda(...))) cells are not yet implemented for the notebook lane"
+            return
+        val probe_text = self.executor.session.probe()
+        if probe_text != "":
+            self.blocked_reason = probe_text
+            return
+        val kernel_bytes = file_read_bytes(KERNEL_PTX_PATH)
+        if kernel_bytes.len() == 0:
+            self.blocked_reason = "cuda-kernel-artifact-missing: {KERNEL_PTX_PATH}"
+            return
+        val init_err = self.executor.init(kernel_bytes)
+        if init_err != "":
+            self.blocked_reason = init_err
+            return
+        self.started = true
+        self.blocked_reason = ""
+        self.last_arena = []
+        self.last_data_off = 0
+
+        if self.submode == "resident":
+            val gate = resident_refusal_gate(unknown_watchdog_attr(), env_get("CUDA_RESIDENT_FORCE"))
+            if gate == "":
+                self.resident_active = true
+            else:
+                # Design §4.4: "Per-launch (default when resident is
+                # refused/watchdog device)" -- fall back, do not fail the
+                # session; the already-initialized executor/session is
+                # reused as-is for per-launch dispatch.
+                self.resident_active = false
+        else:
+            self.resident_active = false
+
+    me execute_cell(code: text, cell_id: text) -> CellResult:
+        val _ = cell_id
+        if self.base_runtime == "jit":
+            return cell_result_error("jit(remote(cuda(...))) cell execution is not yet implemented for the notebook lane; see doc/08_tracking/bug/notebook_cuda_exec_jit_lane_not_implemented_2026-08-08.md", 0)
+        # blocked_reason is checked FIRST: it covers both "start() failed"
+        # (started stays false) and "interrupt()ed" (started stays true) —
+        # either way the caller needs the specific `blocked:` diagnostic,
+        # not a generic "not started" message that would shadow it.
+        if self.blocked_reason != "":
+            return cell_result_error("blocked: {self.blocked_reason}", 0)
+        if not self.started:
+            return cell_result_error("cuda session is not started", 0)
+
+        val start_us = time_now_unix_micros()
+        val outcome = self.run_program_with_persistence(code, 0)
+        val end_us = time_now_unix_micros()
+        val duration_ms = (end_us - start_us) / 1000
+
+        if outcome.timed_out:
+            # design §5.3 force path: a failed/timed-out sync cannot prove
+            # the device stopped using the arena/module, so the underlying
+            # CudaLaneSession is now unreleasable (completion_unknown/
+            # release_pending) until a fresh one replaces it -- mark the
+            # lane blocked until %reset, same convention Vulkan's fence
+            # timeout uses (design §4.5).
+            self.blocked_reason = "cuda device timeout — session forced into an unreleasable state (design §5.3); use %reset"
+
+        if not outcome.ok:
+            return cell_result_error(outcome.error, duration_ms)
+        if outcome.trapped:
+            return cell_result_error("cuda-vm-trap exit_code={outcome.exit_code}", duration_ms)
+
+        var records: [text] = []
+        for r in outcome.records:
+            val seq = r.seq
+            val passed = r.passed
+            val value = r.value
+            records.push("seq={seq} passed={passed} value={value}")
+
+        if self.resident_active:
+            # Design §4.4: "Live PUTC streams to the client as `stream`
+            # messages" -- reuses the repo's existing "stream" output_type
+            # wording (ipynb.spl/snb_sdn.spl NbOutput), carried as a
+            # display_data item rather than stdout_delta so callers can
+            # distinguish live device output from ordinary local-lane stdout.
+            cell_result_ok("", [DisplayItem(mime: "stream", data: outcome.log_text)], records, duration_ms)
+        else:
+            # Per-launch (design §4.4): "output is buffered and delivered
+            # at cell end" -- plain stdout_delta, same shape LocalExec uses.
+            cell_result_ok(outcome.log_text, [], records, duration_ms)
+
+    me interrupt():
+        """§5.3 interrupt contract: this pipeline is synchronous
+        (launch_once blocks on cuLaunchKernel + cuCtxSynchronize), so there
+        is no cooperative mid-kernel cancel channel — exactly the gap design
+        §5.3 itself calls out for a failed sync ("cannot prove the device
+        stopped using the arena/module"). interrupt() therefore escalates
+        straight to the force path: mark the session blocked, leaving actual
+        device-side teardown to %reset/shutdown — same escalation
+        RemoteExec.interrupt() (K4) uses for its own synchronous pipeline."""
+        self.blocked_reason = "session interrupted — use %reset to reconnect (design §5.3 force-timeout path)"
+        self.started = false
+
+    me reset():
+        """%reset (design §3/§4.4): tear down the current session and start
+        fresh — CudaLaneSession.shutdown() itself refuses to free device
+        memory when completion_unknown/release_pending is set (the §5.3
+        force path), so a refused shutdown here is expected after a timeout,
+        not treated as fatal; either way a brand-new CudaVmExecutor/session
+        replaces it, so the old one's arena state (and therefore any cell's
+        globals) is genuinely gone."""
+        val _ = self.executor.shutdown()
+        self.executor = CudaVmExecutor.create()
+        self.started = false
+        self.resident_active = false
+        self.blocked_reason = ""
+        self.last_arena = []
+        self.last_data_off = 0
+        self.start(SessionOpts(session_id: "", mode_spec: self.spec, step_budget: 0, timeout_ms: 0, onfault_reset: false))
+
+    me shutdown():
+        val _ = self.executor.shutdown()
+        self.started = false
+        self.resident_active = false
+
+# ============================================================================
+# CudaExecFactory — one CudaExec per (session, mode_spec) cache entry.
+# ============================================================================
+
+class CudaExecFactory:
+    """Stateless factory — every session's CudaExec is fresh from
+    CudaExec.make(mode_spec), matching RemoteExecFactory's shape."""
+
+impl NotebookExecutorFactory for CudaExecFactory:
+    me create(mode_spec: text) -> NotebookExecutor:
+        CudaExec.make(mode_spec)
+
+export CudaExec, CudaExecFactory
+export cuda_probe_to_lane_status, cuda_exec_decode_sentinel

@@ -1,0 +1,178 @@
+# Blink ComputedStyle — the resolved CSS property bag for one DOM element.
+#
+# This is the value the style cascade produces per element and the paint tree
+# walker consumes: every property already resolved to a concrete value, with no
+# reference back to the stylesheet that produced it.
+#
+# Provides: Display, Position, Overflow, Visibility, TextAlign, Length,
+# ComputedStyle, computed_style_default.
+#
+# Deliberate non-goals (this module is the property bag, nothing else):
+#   - No cascade, specificity, or `!important` resolution — that is
+#     `std.blink.style.cascade`, which consumes this type.
+#   - No inheritance walk. `computed_style_default()` returns the CSS *initial*
+#     values; propagating a parent's inherited properties is the cascade's job.
+#   - No unit resolution: a `Length` keeps its authored unit verbatim, so
+#     `em`/`%`/`rem` are stored but never converted to `px` here. Only `px`
+#     lengths are meaningful to the arithmetic below.
+#   - Only the properties the style→paint chain currently reads are modelled;
+#     this is not a complete CSS property set.
+#
+# Note on a near-duplicate: `gpu/browser_engine/style/computed.spl` also defines
+# a `ComputedStyle`, but it is a *declaration list* (property/value pairs kept
+# for animation diffing), not a resolved typed property bag, and
+# `common/ui/render_opt/web_style.spl`'s `ComputedStyleHot` is an
+# interned-id struct-of-arrays for a perf lane. Neither can represent this
+# module's typed surface; see
+# doc/08_tracking/bug/three_computedstyle_concepts_2026-08-10.md.
+
+use std.skia.entity.color.{SkColor4f, sk_color4f}
+
+# `display` — the box type an element generates.
+pub enum Display:
+    """CSS `display` values the layout engine distinguishes."""
+    Inline
+    Block
+    InlineBlock
+    Flex
+    None
+
+# `position` — which containing block a box is laid out against.
+pub enum Position:
+    """CSS `position` values."""
+    Static
+    Relative
+    Absolute
+    Fixed
+    Sticky
+
+# `overflow` — what happens to content larger than its box.
+pub enum Overflow:
+    """CSS `overflow` values."""
+    Visible
+    Hidden
+    Scroll
+    Auto
+
+# `visibility` — whether a box paints, independent of whether it lays out.
+pub enum Visibility:
+    """CSS `visibility` values."""
+    Visible
+    Hidden
+    Collapse
+
+# `text-align` — inline-level alignment within a line box.
+pub enum TextAlign:
+    """CSS `text-align` values."""
+    Left
+    Right
+    Center
+    Justify
+
+# A CSS length: a magnitude plus the unit it was authored in. The unit is kept
+# verbatim so the cascade can round-trip it; see the non-goals above.
+pub struct Length:
+    value: f64
+    unit: text
+
+impl Length:
+    # The CSS initial value for every length property here: `0px`.
+    static fn zero() -> Length:
+        Length(value: 0.0, unit: "px")
+
+    # Magnitude in CSS pixels. Only meaningful for `px`; any other unit needs
+    # the font/viewport context this module deliberately does not carry, so it
+    # contributes 0 rather than a silently wrong number.
+    fn to_px() -> f64:
+        if self.unit == "px":
+            self.value
+        else:
+            0.0
+
+# The resolved property set for one element.
+pub class ComputedStyle:
+    display: Display
+    position: Position
+    overflow: Overflow
+    visibility: Visibility
+    text_align: TextAlign
+    opacity: f64
+    color: SkColor4f
+    background_color: SkColor4f
+    margin_left: Length
+    margin_right: Length
+    margin_top: Length
+    margin_bottom: Length
+    padding_left: Length
+    padding_top: Length
+    padding_right: Length
+    padding_bottom: Length
+    width: Length
+    height: Length
+    # `font-size`: inherited (real CSS behaviour, mirrored in
+    # cascade._inherited_from). Added for minimal inline/text-layout support
+    # (doc/08_tracking gap noted at c28e1b008b02) — a text node has no
+    # ComputedStyle of its own, so style_bridge derives its box height from
+    # the *parent element's* resolved font_size. Only font-size is modelled,
+    # not the rest of the font shorthand (family/weight/style): those are
+    # unused until real glyph metrics land.
+    font_size: Length
+
+impl ComputedStyle:
+    # True when this box contributes pixels: it must not be `display: none`,
+    # must not be `visibility: hidden`/`collapse`, and must not be fully
+    # transparent.
+    fn is_visible() -> bool:
+        if self.display == Display.None:
+            false
+        else:
+            if self.visibility != Visibility.Visible:
+                false
+            else:
+                self.opacity > 0.0
+
+    # True when this box participates in block layout — i.e. it generates a
+    # block-level box rather than an inline one.
+    fn is_block_level() -> bool:
+        self.display == Display.Block or self.display == Display.Flex
+
+    # True when the box is taken out of, or offset from, normal flow — anything
+    # other than `position: static`.
+    fn is_positioned() -> bool:
+        self.position != Position.Static
+
+    # Horizontal margin contribution, in CSS pixels.
+    fn total_margin_horizontal() -> f64:
+        self.margin_left.to_px() + self.margin_right.to_px()
+
+    # Vertical margin contribution, in CSS pixels.
+    fn total_margin_vertical() -> f64:
+        self.margin_top.to_px() + self.margin_bottom.to_px()
+
+# A style holding the CSS initial value of every property above: an inline,
+# statically-positioned, fully-opaque box with black text, a transparent
+# background and no margins.
+pub fn computed_style_default() -> ComputedStyle:
+    ComputedStyle(
+        display: Display.Inline,
+        position: Position.Static,
+        overflow: Overflow.Visible,
+        visibility: Visibility.Visible,
+        text_align: TextAlign.Left,
+        opacity: 1.0,
+        color: sk_color4f(0.0, 0.0, 0.0, 1.0),
+        background_color: sk_color4f(0.0, 0.0, 0.0, 0.0),
+        margin_left: Length.zero(),
+        margin_right: Length.zero(),
+        margin_top: Length.zero(),
+        margin_bottom: Length.zero(),
+        padding_left: Length.zero(),
+        padding_top: Length.zero(),
+        padding_right: Length.zero(),
+        padding_bottom: Length.zero(),
+        width: Length.zero(),
+        height: Length.zero(),
+        # CSS initial `font-size` is the UA-dependent keyword `medium`; browsers
+        # resolve that to 16px, so that is the concrete initial value here too.
+        font_size: Length(value: 16.0, unit: "px")
+    )

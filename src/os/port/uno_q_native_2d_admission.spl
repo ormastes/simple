@@ -1,0 +1,94 @@
+# Fail-closed admission for the UNO Q QRB2210 SimpleOS native 2D lane.
+# This is a pure validation boundary: board runners supply observations, while
+# DrawIR and Engine2D remain the rendering owners.
+
+use os.port.uno_q_desktop_contract.{
+    UNO_Q_QRB2210_BOARD_ID,
+    UNO_Q_DESKTOP_CAP_DISPLAY,
+    uno_q_desktop_can_claim_wm,
+    uno_q_desktop_backend_reason
+}
+
+val UNO_Q_NATIVE_STATUS_PASS: text = "pass"
+val UNO_Q_NATIVE_STATUS_READY: text = "ready"
+val UNO_Q_NATIVE_STATUS_BLOCKED: text = "blocked"
+val UNO_Q_NATIVE_STATUS_FAIL: text = "fail"
+
+class UnoQNative2dEvidence:
+    board_id: text
+    platform: text
+    arch: text
+    gpu_vendor_id: i64
+    gpu_name: text
+    backend: text
+    draw_ir: bool
+    draw_ir_op_count: i64
+    animation_frame_count: i64
+    font_glyph_count: i64
+    device_executed: bool
+    physical_device: bool
+    fallback_used: bool
+    submit_count: i64
+    fence_count: i64
+    readback_bytes: i64
+    expected_checksum: i64
+    actual_checksum: i64
+    boot_id: text
+    frame_id: text
+    capture_frame_id: text
+    ctrl_left: bool
+    ctrl_right: bool
+    alt_left: bool
+    alt_right: bool
+    key_down: bool
+    key_up: bool
+    pointer_move: bool
+    pointer_down: bool
+    pointer_drag: bool
+    pointer_up: bool
+    pointer_wheel: bool
+    audio_submitted: i64
+    audio_completed: i64
+    audio_non_silent: bool
+
+class UnoQNative2dAdmission:
+    status: text
+    reason: text
+
+fn uno_q_native_2d_admission(e: UnoQNative2dEvidence) -> UnoQNative2dAdmission:
+    if e.board_id != UNO_Q_QRB2210_BOARD_ID:
+        return UnoQNative2dAdmission(status: UNO_Q_NATIVE_STATUS_FAIL, reason: "wrong-board-or-stm32-coprocessor")
+    if e.platform == "debian" or e.platform == "android":
+        return UnoQNative2dAdmission(status: UNO_Q_NATIVE_STATUS_READY, reason: "vendor-os-readiness-is-not-simpleos-evidence")
+    if e.platform != "simpleos" or e.arch != "aarch64":
+        return UnoQNative2dAdmission(status: UNO_Q_NATIVE_STATUS_FAIL, reason: "wrong-platform-or-architecture")
+    if e.gpu_vendor_id != 0x5143 or not e.gpu_name.lower().contains("adreno"):
+        return UnoQNative2dAdmission(status: UNO_Q_NATIVE_STATUS_FAIL, reason: "physical-adreno-device-not-proven")
+    if (e.backend != "qualcomm-vulkan" or not e.draw_ir or
+        e.draw_ir_op_count < 1 or e.animation_frame_count < 2 or e.font_glyph_count < 1):
+        return UnoQNative2dAdmission(status: UNO_Q_NATIVE_STATUS_FAIL, reason: "drawir-vulkan-route-not-proven")
+    if not e.device_executed or not e.physical_device or e.fallback_used:
+        return UnoQNative2dAdmission(status: UNO_Q_NATIVE_STATUS_FAIL, reason: "device-execution-or-no-fallback-not-proven")
+    if e.submit_count < 1 or e.fence_count < 1 or e.readback_bytes < 4:
+        return UnoQNative2dAdmission(status: UNO_Q_NATIVE_STATUS_FAIL, reason: "submit-fence-readback-incomplete")
+    if e.expected_checksum <= 0 or e.actual_checksum != e.expected_checksum:
+        return UnoQNative2dAdmission(status: UNO_Q_NATIVE_STATUS_FAIL, reason: "readback-checksum-mismatch")
+    if e.boot_id == "" or e.frame_id == "" or e.capture_frame_id != e.frame_id:
+        return UnoQNative2dAdmission(status: UNO_Q_NATIVE_STATUS_FAIL, reason: "boot-frame-capture-correlation-missing")
+    if (not e.ctrl_left or not e.ctrl_right or not e.alt_left or not e.alt_right or
+        not e.key_down or not e.key_up or
+        not e.pointer_move or not e.pointer_down or not e.pointer_drag or
+        not e.pointer_up or not e.pointer_wheel):
+        return UnoQNative2dAdmission(status: UNO_Q_NATIVE_STATUS_FAIL, reason: "input-receipts-incomplete")
+    if e.audio_submitted < 1 or e.audio_completed != e.audio_submitted or not e.audio_non_silent:
+        return UnoQNative2dAdmission(status: UNO_Q_NATIVE_STATUS_FAIL, reason: "audio-completion-incomplete")
+    if not uno_q_desktop_can_claim_wm(e.board_id):
+        return UnoQNative2dAdmission(
+            status: UNO_Q_NATIVE_STATUS_BLOCKED,
+            reason: uno_q_desktop_backend_reason(e.board_id, UNO_Q_DESKTOP_CAP_DISPLAY))
+    UnoQNative2dAdmission(status: UNO_Q_NATIVE_STATUS_PASS, reason: "")
+
+export UnoQNative2dEvidence, UnoQNative2dAdmission
+export UNO_Q_NATIVE_STATUS_PASS, UNO_Q_NATIVE_STATUS_READY
+export UNO_Q_NATIVE_STATUS_BLOCKED, UNO_Q_NATIVE_STATUS_FAIL
+export uno_q_native_2d_admission

@@ -1,0 +1,405 @@
+# Tests for std.math.financial — financial kernels extracted from the office
+# formula engine. Every expected value is hand-recomputed from the formula
+# definition or taken from an Excel-documented example that the office spec
+# suite already asserts (formula_securities_spec.spl / formula_financial_spec.spl).
+#
+# Error convention under test: solvers return NaN on domain error /
+# non-convergence (checked via x != x); closed-form functions return 0.0.
+
+use std.math.financial.{annuity_pmt, annuity_fv, annuity_pv, nper_calc, rate_solve}
+use std.math.financial.{npv_at, xnpv_at, irr_solve, xirr_solve, mirr_calc}
+use std.math.financial.{cum_interest, cum_principal}
+use std.math.financial.{sln, syd, db_period, ddb_period, vdb_range}
+use std.math.financial.{depreciation_coeff, amorlinc_period, amordegrc_period}
+use std.math.financial.{effect_rate, nominal_rate, rri, pduration, fv_schedule}
+use std.math.financial.{tbill_price, tbill_yield, tbill_eq}
+use std.math.financial.{daycount_frac, serial_from_civil, civil_from_serial}
+use std.math.financial.{coup_prev, coup_next}
+
+fn is_close(a: f64, b: f64, tol: f64) -> bool:
+    """Approximate float equality within absolute tolerance."""
+    var diff = a - b
+    if diff < 0.0:
+        diff = 0.0 - diff
+    diff <= tol
+
+describe "std.math.financial":
+    describe "annuity TVM":
+        it "annuity_pmt matches Excel PMT(0.08/12, 120, 10000) = -121.3276":
+            val result = annuity_pmt(0.08 / 12.0, 120.0, 10000.0)
+            expect(is_close(result, -121.3276, 0.001)).to_equal(true)
+
+        it "annuity_pmt zero-rate degenerates to -pv/nper":
+            val result = annuity_pmt(0.0, 20.0, 1000.0)
+            expect(is_close(result, -50.0, 0.0000001)).to_equal(true)
+
+        it "annuity_pmt returns 0 for zero periods":
+            val result = annuity_pmt(0.05, 0.0, 1000.0)
+            expect(is_close(result, 0.0, 0.0000001)).to_equal(true)
+
+        it "annuity_fv accumulates FV(0.005, 12, -100) = 1233.56":
+            val result = annuity_fv(0.005, 12.0, -100.0)
+            expect(is_close(result, 1233.56, 0.01)).to_equal(true)
+
+        it "annuity_fv zero-rate degenerates to -pmt*nper":
+            val result = annuity_fv(0.0, 60.0, -100.0)
+            expect(is_close(result, 6000.0, 0.0000001)).to_equal(true)
+
+        it "annuity_pv matches Excel PV(0.08/12, 240, 500) = -59777.15":
+            val result = annuity_pv(0.08 / 12.0, 240.0, 500.0)
+            expect(is_close(result, -59777.15, 0.01)).to_equal(true)
+
+        it "annuity_pv zero-rate degenerates to -pmt*nper":
+            val result = annuity_pv(0.0, 24.0, -50.0)
+            expect(is_close(result, 1200.0, 0.0000001)).to_equal(true)
+
+        it "PMT round-trips through PV at the same rate":
+            val pmt = annuity_pmt(0.08 / 12.0, 120.0, 10000.0)
+            val pv = annuity_pv(0.08 / 12.0, 120.0, pmt)
+            expect(is_close(pv, 10000.0, 0.01)).to_equal(true)
+
+        it "nper_calc matches Excel NPER(0.01, -100, 1000) = 10.5885":
+            val result = nper_calc(0.01, -100.0, 1000.0)
+            expect(is_close(result, 10.5885, 0.001)).to_equal(true)
+
+        it "nper_calc returns NaN for zero rate":
+            val result = nper_calc(0.0, -100.0, 1000.0)
+            expect(result != result).to_equal(true)
+
+        it "nper_calc returns NaN when the payment cannot cover interest":
+            val result = nper_calc(0.05, -40.0, 1000.0)
+            expect(result != result).to_equal(true)
+
+        it "rate_solve recovers 0.08/12 from the PMT ground truth":
+            val result = rate_solve(120.0, -121.3276, 10000.0, 0.0)
+            expect(is_close(result, 0.08 / 12.0, 0.00001)).to_equal(true)
+
+        it "rate_solve zero-payment flat equation returns NaN":
+            val result = rate_solve(10.0, 0.0, 0.0, 0.0)
+            expect(result != result).to_equal(true)
+
+    describe "cash-flow analysis":
+        it "npv_at(0.1, [-10000,4000,4000,4000]) = -52.592 (period-0 convention)":
+            val flows = [-10000.0, 4000.0, 4000.0, 4000.0]
+            val result = npv_at(0.1, flows)
+            expect(is_close(result, -52.592, 0.01)).to_equal(true)
+
+        it "npv_at zero rate sums the flows":
+            val flows = [-10000.0, 4000.0, 4000.0, 4000.0]
+            val result = npv_at(0.0, flows)
+            expect(is_close(result, 2000.0, 0.0000001)).to_equal(true)
+
+        it "xnpv_at matches Excel XNPV doc example 2086.6476":
+            val flows = [-10000.0, 2750.0, 4250.0, 3250.0, 2750.0]
+            val offsets = [0.0, 60.0, 303.0, 411.0, 456.0]
+            val result = xnpv_at(0.09, flows, offsets)
+            expect(is_close(result, 2086.6476, 0.01)).to_equal(true)
+
+        it "xnpv_at with a single dated flow is the flow itself":
+            val flows = [5000.0]
+            val offsets = [100.0]
+            val result = xnpv_at(0.05, flows, offsets)
+            expect(is_close(result, 5000.0, 0.0000001)).to_equal(true)
+
+        it "irr_solve([-100, 110]) = 0.10 exactly":
+            val flows = [-100.0, 110.0]
+            val result = irr_solve(flows)
+            expect(is_close(result, 0.10, 0.0000001)).to_equal(true)
+
+        it "irr_solve([-10000,4000,4000,4000]) = 0.0970":
+            val flows = [-10000.0, 4000.0, 4000.0, 4000.0]
+            val result = irr_solve(flows)
+            expect(is_close(result, 0.0970, 0.001)).to_equal(true)
+
+        it "irr_solve returns NaN for fewer than 2 flows":
+            val flows = [-1000.0]
+            val result = irr_solve(flows)
+            expect(result != result).to_equal(true)
+
+        it "irr_solve returns NaN when all flows are negative":
+            val flows = [-100.0, -100.0, -100.0]
+            val result = irr_solve(flows)
+            expect(result != result).to_equal(true)
+
+        it "xirr_solve matches Excel XIRR doc example 0.3733625":
+            val flows = [-10000.0, 2750.0, 4250.0, 3250.0, 2750.0]
+            val offsets = [0.0, 60.0, 303.0, 411.0, 456.0]
+            val result = xirr_solve(flows, offsets)
+            expect(is_close(result, 0.3733625, 0.0001)).to_equal(true)
+
+        it "xirr_solve returns NaN for incongruent arrays":
+            val flows = [-1000.0, 500.0, 500.0]
+            val offsets = [0.0, 100.0]
+            val result = xirr_solve(flows, offsets)
+            expect(result != result).to_equal(true)
+
+        it "mirr_calc matches Excel MIRR doc example 0.126094":
+            val flows = [-120000.0, 39000.0, 30000.0, 21000.0, 37000.0, 46000.0]
+            val result = mirr_calc(flows, 0.10, 0.12)
+            expect(is_close(result, 0.126094, 0.0001)).to_equal(true)
+
+        it "mirr_calc returns NaN without any negative flow":
+            val flows = [1000.0, 2000.0, 3000.0]
+            val result = mirr_calc(flows, 0.1, 0.1)
+            expect(result != result).to_equal(true)
+
+    describe "cumulative loan accumulation":
+        it "cum_interest matches Excel CUMIPMT(0.09/12, 360, 125000, 13, 24, 0) = -11135.23":
+            val result = cum_interest(0.09 / 12.0, 360.0, 125000.0, 13.0, 24.0, 0.0)
+            expect(is_close(result, -11135.23, 0.05)).to_equal(true)
+
+        it "cum_principal matches Excel CUMPRINC(0.09/12, 360, 125000, 13, 24, 0) = -934.1071":
+            val result = cum_principal(0.09 / 12.0, 360.0, 125000.0, 13.0, 24.0, 0.0)
+            expect(is_close(result, -934.1071, 0.01)).to_equal(true)
+
+        it "cum_principal over the full term repays exactly -pv":
+            val result = cum_principal(0.01, 24.0, 5000.0, 1.0, 24.0, 0.0)
+            expect(is_close(result, -5000.0, 0.000001)).to_equal(true)
+
+        it "cum_interest + cum_principal over the full term equals pmt * nper":
+            val ci = cum_interest(0.01, 24.0, 5000.0, 1.0, 24.0, 0.0)
+            val cp = cum_principal(0.01, 24.0, 5000.0, 1.0, 24.0, 0.0)
+            val pmt = annuity_pmt(0.01, 24.0, 5000.0)
+            expect(is_close(ci + cp, pmt * 24.0, 0.000001)).to_equal(true)
+
+        it "cum_interest returns 0 for an out-of-range period window":
+            val result = cum_interest(0.01, 24.0, 5000.0, 13.0, 25.0, 0.0)
+            expect(is_close(result, 0.0, 0.0000001)).to_equal(true)
+
+    describe "depreciation":
+        it "sln(10000, 1000, 10) = 900":
+            val result = sln(10000.0, 1000.0, 10.0)
+            expect(is_close(result, 900.0, 0.0000001)).to_equal(true)
+
+        it "sln returns 0 for zero life":
+            val result = sln(10000.0, 1000.0, 0.0)
+            expect(is_close(result, 0.0, 0.0000001)).to_equal(true)
+
+        it "syd(10000, 1000, 10, 1) = 1636.3636":
+            val result = syd(10000.0, 1000.0, 10.0, 1.0)
+            expect(is_close(result, 1636.3636, 0.001)).to_equal(true)
+
+        it "syd final period (10) = 163.6364":
+            val result = syd(10000.0, 1000.0, 10.0, 10.0)
+            expect(is_close(result, 163.6364, 0.001)).to_equal(true)
+
+        it "syd returns 0 for period beyond life":
+            val result = syd(10000.0, 1000.0, 10.0, 11.0)
+            expect(is_close(result, 0.0, 0.0000001)).to_equal(true)
+
+        it "db_period DB(1000000, 100000, 6, 1) = 319000 (rate (1-0.1^(1/6)) rounds to 0.319)":
+            val result = db_period(1000000.0, 100000.0, 6.0, 1.0)
+            expect(is_close(result, 319000.0, 0.5)).to_equal(true)
+
+        it "db_period year 2 depreciates the remaining book: 681000*0.319 = 217239":
+            val result = db_period(1000000.0, 100000.0, 6.0, 2.0)
+            expect(is_close(result, 217239.0, 0.5)).to_equal(true)
+
+        it "db_period returns 0 for non-positive cost":
+            val result = db_period(-2400.0, 300.0, 10.0, 1.0)
+            expect(is_close(result, 0.0, 0.0000001)).to_equal(true)
+
+        it "ddb_period(2400, 300, 10, 1) = 480 (rate 2/10 on full cost)":
+            val result = ddb_period(2400.0, 300.0, 10.0, 1.0)
+            expect(is_close(result, 480.0, 0.001)).to_equal(true)
+
+        it "ddb_period(2400, 300, 10, 2) = 384 (20% of remaining 1920)":
+            val result = ddb_period(2400.0, 300.0, 10.0, 2.0)
+            expect(is_close(result, 384.0, 0.001)).to_equal(true)
+
+        it "ddb_period clamps at salvage in late periods":
+            val result = ddb_period(2400.0, 2300.0, 10.0, 2.0)
+            expect(is_close(result, 0.0, 0.001)).to_equal(true)
+
+        it "vdb_range matches Excel VDB(2400, 300, 120, 6, 18, 2, FALSE) = 396.306":
+            val result = vdb_range(2400.0, 300.0, 120.0, 6.0, 18.0, 2.0, false)
+            expect(is_close(result, 396.306, 0.01)).to_equal(true)
+
+        it "vdb_range full-life depreciation equals cost when salvage is 0":
+            val result = vdb_range(10000.0, 0.0, 5.0, 0.0, 5.0, 2.0, false)
+            expect(is_close(result, 10000.0, 0.01)).to_equal(true)
+
+        it "vdb_range returns 0 on domain error":
+            val result = vdb_range(2400.0, 300.0, -1.0, 1.0, 2.0, 2.0, false)
+            expect(is_close(result, 0.0, 0.0000001)).to_equal(true)
+
+    describe "French amortization":
+        it "depreciation_coeff tiers: 1 / 1.5 / 2 / 2.5":
+            expect(is_close(depreciation_coeff(2.0), 1.0, 0.0000001)).to_equal(true)
+            expect(is_close(depreciation_coeff(4.0), 1.5, 0.0000001)).to_equal(true)
+            expect(is_close(depreciation_coeff(6.0), 2.0, 0.0000001)).to_equal(true)
+            expect(is_close(depreciation_coeff(7.0), 2.5, 0.0000001)).to_equal(true)
+
+        it "amorlinc_period period 0 prorates: 2400*0.15*134/366 = 131.8033":
+            val purch = serial_from_civil(2008, 8, 19)
+            val first = serial_from_civil(2008, 12, 31)
+            val result = amorlinc_period(2400.0, purch, first, 300.0, 0, 0.15, 1)
+            expect(is_close(result, 131.8033, 0.001)).to_equal(true)
+
+        it "amorlinc_period period 1 is the full charge 360":
+            val purch = serial_from_civil(2008, 8, 19)
+            val first = serial_from_civil(2008, 12, 31)
+            val result = amorlinc_period(2400.0, purch, first, 300.0, 1, 0.15, 1)
+            expect(is_close(result, 360.0, 0.001)).to_equal(true)
+
+        it "amorlinc_period returns 0 on domain error":
+            val result = amorlinc_period(-2400.0, 0.0, 100.0, 300.0, 0, 0.15, 0)
+            expect(is_close(result, 0.0, 0.0000001)).to_equal(true)
+
+        it "amordegrc_period period 0 = 330 (Excel doc example)":
+            val purch = serial_from_civil(2008, 8, 19)
+            val first = serial_from_civil(2008, 12, 31)
+            val result = amordegrc_period(2400.0, purch, first, 300.0, 0, 0.15, 1)
+            expect(is_close(result, 330.0, 0.0000001)).to_equal(true)
+
+        it "amordegrc_period period 1 = 776 (Excel doc example)":
+            val purch = serial_from_civil(2008, 8, 19)
+            val first = serial_from_civil(2008, 12, 31)
+            val result = amordegrc_period(2400.0, purch, first, 300.0, 1, 0.15, 1)
+            expect(is_close(result, 776.0, 0.0000001)).to_equal(true)
+
+        it "amordegrc_period returns 0 when salvage >= cost":
+            val result = amordegrc_period(2400.0, 100.0, 200.0, 2400.0, 1, 0.15, 1)
+            expect(is_close(result, 0.0, 0.0000001)).to_equal(true)
+
+    describe "rate conversion":
+        it "effect_rate(0.0525, 4) = 0.0535427":
+            val result = effect_rate(0.0525, 4.0)
+            expect(is_close(result, 0.0535427, 0.0000005)).to_equal(true)
+
+        it "effect_rate annual compounding is identity":
+            val result = effect_rate(0.08, 1.0)
+            expect(is_close(result, 0.08, 0.0000001)).to_equal(true)
+
+        it "effect_rate returns 0 for npery < 1":
+            val result = effect_rate(0.05, 0.5)
+            expect(is_close(result, 0.0, 0.0000001)).to_equal(true)
+
+        it "nominal_rate inverts effect_rate: NOMINAL(0.0535427, 4) = 0.0525":
+            val result = nominal_rate(0.0535427, 4.0)
+            expect(is_close(result, 0.0525, 0.000001)).to_equal(true)
+
+        it "nominal_rate returns 0 for effect <= -1":
+            val result = nominal_rate(-1.5, 4.0)
+            expect(is_close(result, 0.0, 0.0000001)).to_equal(true)
+
+        it "rri matches Excel RRI(96, 10000, 11000) = 0.0009933":
+            val result = rri(96.0, 10000.0, 11000.0)
+            expect(is_close(result, 0.0009933, 0.0000005)).to_equal(true)
+
+        it "rri returns 0 for non-positive pv":
+            val result = rri(10.0, -5000.0, 10000.0)
+            expect(is_close(result, 0.0, 0.0000001)).to_equal(true)
+
+        it "pduration matches Excel PDURATION(0.025, 2000, 2200) = 3.86":
+            val result = pduration(0.025, 2000.0, 2200.0)
+            expect(is_close(result, 3.86, 0.005)).to_equal(true)
+
+        it "pduration returns 0 for zero rate":
+            val result = pduration(0.0, 1000.0, 1500.0)
+            expect(is_close(result, 0.0, 0.0000001)).to_equal(true)
+
+        it "fv_schedule matches Excel FVSCHEDULE(1, {0.09,0.11,0.1}) = 1.3309":
+            val rates = [0.09, 0.11, 0.1]
+            val result = fv_schedule(1.0, rates)
+            expect(is_close(result, 1.33089, 0.00001)).to_equal(true)
+
+        it "fv_schedule with no rates returns the principal":
+            var rates: [f64] = []
+            val result = fv_schedule(5000.0, rates)
+            expect(is_close(result, 5000.0, 0.0000001)).to_equal(true)
+
+    describe "treasury bills":
+        it "tbill_price matches securities spec: TBILLPRICE(2008-03-31, 2008-06-01, 0.09) = 98.45":
+            val settle = serial_from_civil(2008, 3, 31)
+            val mat = serial_from_civil(2008, 6, 1)
+            val result = tbill_price(settle, mat, 0.09)
+            expect(is_close(result, 98.45, 0.0001)).to_equal(true)
+
+        it "tbill_yield matches securities spec: TBILLYIELD(..., 98.45) = 0.09141":
+            val settle = serial_from_civil(2008, 3, 31)
+            val mat = serial_from_civil(2008, 6, 1)
+            val result = tbill_yield(settle, mat, 98.45)
+            expect(is_close(result, 0.09141, 0.00001)).to_equal(true)
+
+        it "tbill_eq matches securities spec: TBILLEQ(..., 0.0914) = 0.09415":
+            val settle = serial_from_civil(2008, 3, 31)
+            val mat = serial_from_civil(2008, 6, 1)
+            val result = tbill_eq(settle, mat, 0.0914)
+            expect(is_close(result, 0.09415, 0.00001)).to_equal(true)
+
+        it "tbill_eq long-bill branch (dsm > 182) stays finite and positive":
+            val settle = serial_from_civil(2008, 1, 1)
+            val mat = serial_from_civil(2008, 9, 1)
+            val result = tbill_eq(settle, mat, 0.09)
+            expect(result > 0.09).to_equal(true)
+            expect(result < 0.11).to_equal(true)
+
+        it "tbill functions return 0 when settle >= maturity":
+            expect(is_close(tbill_price(100.0, 100.0, 0.05), 0.0, 0.0000001)).to_equal(true)
+            expect(is_close(tbill_yield(100.0, 100.0, 98.75), 0.0, 0.0000001)).to_equal(true)
+            expect(is_close(tbill_eq(100.0, 100.0, 0.05), 0.0, 0.0000001)).to_equal(true)
+
+    describe "day count and dates":
+        it "daycount_frac basis 1: 2008-08-19 to 2008-12-31 = 134/366 = 0.36612":
+            val s1 = serial_from_civil(2008, 8, 19)
+            val s2 = serial_from_civil(2008, 12, 31)
+            val result = daycount_frac(s1, s2, 1)
+            expect(is_close(result, 134.0 / 366.0, 0.0000001)).to_equal(true)
+
+        it "daycount_frac basis 0 (US 30/360): 2008-08-19 to 2008-12-31 = 132/360":
+            val s1 = serial_from_civil(2008, 8, 19)
+            val s2 = serial_from_civil(2008, 12, 31)
+            val result = daycount_frac(s1, s2, 0)
+            expect(is_close(result, 132.0 / 360.0, 0.0000001)).to_equal(true)
+
+        it "daycount_frac basis 2 (actual/360) and 3 (actual/365)":
+            val s1 = serial_from_civil(2008, 8, 19)
+            val s2 = serial_from_civil(2008, 12, 31)
+            val r2 = daycount_frac(s1, s2, 2)
+            val r3 = daycount_frac(s1, s2, 3)
+            expect(is_close(r2, 134.0 / 360.0, 0.0000001)).to_equal(true)
+            expect(is_close(r3, 134.0 / 365.0, 0.0000001)).to_equal(true)
+
+        it "daycount_frac basis 4 (European 30/360) clamps both day-31s":
+            val s1 = serial_from_civil(2008, 8, 31)
+            val s2 = serial_from_civil(2008, 12, 31)
+            val result = daycount_frac(s1, s2, 4)
+            expect(is_close(result, 120.0 / 360.0, 0.0000001)).to_equal(true)
+
+        it "daycount_frac of a zero-length interval is 0":
+            val s1 = serial_from_civil(2010, 6, 15)
+            val result = daycount_frac(s1, s1, 1)
+            expect(is_close(result, 0.0, 0.0000001)).to_equal(true)
+
+        it "serial/civil round-trip for a leap date 2008-02-29":
+            val serial = serial_from_civil(2008, 2, 29)
+            val civil = civil_from_serial(serial)
+            val y = civil[0]
+            val m = civil[1]
+            val d = civil[2]
+            expect(y).to_equal(2008)
+            expect(m).to_equal(2)
+            expect(d).to_equal(29)
+
+    describe "coupon date walking":
+        it "coup_prev matches Excel COUPPCD(2007-01-25, 2008-11-15, 2) = 2006-11-15":
+            val settle = serial_from_civil(2007, 1, 25)
+            val mat = serial_from_civil(2008, 11, 15)
+            val expected = serial_from_civil(2006, 11, 15)
+            val result = coup_prev(settle, mat, 2)
+            expect(is_close(result, expected, 0.0000001)).to_equal(true)
+
+        it "coup_next matches Excel COUPNCD(2007-01-25, 2008-11-15, 2) = 2007-05-15":
+            val settle = serial_from_civil(2007, 1, 25)
+            val mat = serial_from_civil(2008, 11, 15)
+            val expected = serial_from_civil(2007, 5, 15)
+            val result = coup_next(settle, mat, 2)
+            expect(is_close(result, expected, 0.0000001)).to_equal(true)
+
+        it "coup_prev on a coupon date returns that date (annual freq)":
+            val settle = serial_from_civil(2007, 11, 15)
+            val mat = serial_from_civil(2008, 11, 15)
+            val expected = serial_from_civil(2007, 11, 15)
+            val result = coup_prev(settle, mat, 1)
+            expect(is_close(result, expected, 0.0000001)).to_equal(true)

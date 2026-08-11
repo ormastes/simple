@@ -1,0 +1,262 @@
+# CUDA DBG-1 / PROF-1 conformance: the D3 debug vector table, run on a LIVE
+# CUDA device through the real svmg_cuda_kernel.ptx, diffed FIELD FOR FIELD
+# against the host reference VM (ref_vm.spl) for the same vector.
+#
+# WHY THE DIFF IS AGAINST ref_vm AND NOT ONLY THE TABLE
+# -----------------------------------------------------
+# The vector table already carries expected values, and the ref-VM spec
+# (test/01_unit/lib/svmg/ref_vm_debug_spec.spl) asserts them host-side. What
+# THIS spec adds is the cross-engine equivalence that neither of those can
+# see: the device kernel is a completely separate implementation of the same
+# semantics, so every field is checked twice -- once against the declared
+# expectation, and once against what ref_vm actually produced. A shared
+# misreading of the table cannot pass both.
+#
+# FRESH SESSION PER VECTOR -- DELIBERATE
+# --------------------------------------
+# `CudaLaneSession.launch_once` latches `completion_unknown` after ANY device
+# timeout, BY DESIGN. A vector that exercises budget expiry would therefore
+# poison a session shared with later vectors and produce cascading phantom
+# failures. Each vector gets its own session so that latch can never be
+# mistaken for a kernel defect (and so the latch is never "fixed" away).
+
+use std.spipe.*
+use std.common.debug.session_core.{AttachOpts}
+use std.common.svmg.assembler.{svmg_asm}
+use std.common.svmg.mailbox_const.{
+    DEFAULT_LOG_CAP, DBG_FLAG_ENABLED, DBG_FLAG_RESUME, DBG_FLAG_SINGLE_STEP,
+}
+use std.common.svmg.ref_vm.{
+    build_arena, run_arena, dbg_set_flags, dbg_set_breakpoints,
+    dbg_read_saved_pc, dbg_read_saved_sp, dbg_read_saved_csp,
+    dbg_read_step_count, dbg_read_saved_stack_slot, dbg_read_saved_call_slot,
+    read_log, read_records,
+}
+use std.gc_async_mut.gpu_lane.cuda_debug_session.{CudaDebugSession, CudaDebugOutcome}
+use std.gc_async_mut.gpu_lane.cuda_lane_session.{CudaLaneSession}
+use std.sffi.io.{file_read_bytes}
+use std.common.test_env_gate.{test_env_available}
+use test.fixtures.svmg.debug_conformance_vectors.{DebugVector, DebugLaunch, all_debug_vectors}
+
+val _KERNEL_PTX: text = "src/lib/gc_async_mut/gpu_lane/svmg_cuda_kernel.ptx"
+
+# The one vector whose stop reason the CUDA lane layer cannot surface; see
+# the long note at its use site.
+val _BUDGET_EXPIRY_VECTOR: text = "budget_expiry_while_debugging"
+
+fn _probe() -> text:
+    var session = CudaLaneSession.create()
+    session.probe()
+
+# Opt-in strictness switch. Default (unset/"0") keeps this spec host-aware
+# skip-clean so it stays green on machines with no GPU. Setting
+# SIMPLE_REQUIRE_GPU=1 turns a skip into a FAILURE, so CI or a human can
+# DEMAND real device evidence rather than accepting an ambiguous green.
+fn _require_gpu() -> bool:
+    test_env_available("SIMPLE_REQUIRE_GPU")
+
+# Positive device proof: on a skipping host the device launch count is 0, so
+# this floor CANNOT be satisfied by the skip branch. Asserting a floor (rather
+# than merely `> 0`) makes the count itself load-bearing evidence.
+val _MIN_DEVICE_LAUNCHES: i64 = 20
+
+# --- host reference: replay one launch through ref_vm on `arena_in` -------
+struct RefLaunchResult:
+    arena: [u8]
+    debug_break: bool
+    trapped: bool
+    timed_out: bool
+    sentinel: i64
+    saved_pc: i64
+    saved_sp: i64
+    saved_csp: i64
+    stack: [i64]
+    calls: [i64]
+    step_count: i64
+    log_text: text
+
+fn _ref_launch(code: [u8], arena_in: [u8], lch: DebugLaunch) -> RefLaunchResult:
+    var arena = arena_in
+    if lch.set_breakpoints:
+        arena = dbg_set_breakpoints(arena, lch.breakpoints)
+    var flags = DBG_FLAG_ENABLED
+    if lch.resume:
+        flags = flags | DBG_FLAG_RESUME
+    if lch.single_step:
+        flags = flags | DBG_FLAG_SINGLE_STEP
+    arena = dbg_set_flags(arena, flags)
+
+    val r = run_arena(code, arena)
+    val out = r.arena
+    val sp = dbg_read_saved_sp(out)
+    val csp = dbg_read_saved_csp(out)
+    var stack: [i64] = []
+    var i = 0
+    while i < sp:
+        stack.push(dbg_read_saved_stack_slot(out, i))
+        i = i + 1
+    var calls: [i64] = []
+    i = 0
+    while i < csp:
+        calls.push(dbg_read_saved_call_slot(out, i))
+        i = i + 1
+    RefLaunchResult(
+        arena: out, debug_break: r.debug_break, trapped: r.trapped,
+        timed_out: r.timed_out, sentinel: r.sentinel,
+        saved_pc: dbg_read_saved_pc(out), saved_sp: sp, saved_csp: csp,
+        stack: stack, calls: calls, step_count: dbg_read_step_count(out),
+        log_text: read_log(out),
+    )
+
+# --- the field-for-field diff -------------------------------------------
+fn _diff_device_vs_ref(vname: text, li: i64, dev: CudaDebugOutcome, ref_r: RefLaunchResult, lch: DebugLaunch):
+    val tag = "{vname}/launch{li}"
+
+    # 1. device vs the DECLARED expectation
+    assert_equal(dev.debug_break, lch.expect_debug_break)
+    assert_equal(dev.trapped, lch.expect_trapped)
+    assert_equal(dev.timed_out, lch.expect_timed_out)
+    assert_equal(dev.sentinel, lch.expect_sentinel)
+    assert_equal(dev.saved_pc, lch.expect_saved_pc)
+    assert_equal(dev.saved_sp, lch.expect_saved_sp)
+    assert_equal(dev.saved_csp, lch.expect_saved_csp)
+    assert_equal(dev.step_count, lch.expect_step_count)
+    assert_equal(dev.log_text, lch.expect_log)
+
+    # 2. device vs the REFERENCE VM, field for field
+    assert_equal(dev.debug_break, ref_r.debug_break)
+    assert_equal(dev.trapped, ref_r.trapped)
+    assert_equal(dev.timed_out, ref_r.timed_out)
+    assert_equal(dev.sentinel, ref_r.sentinel)
+    assert_equal(dev.saved_pc, ref_r.saved_pc)
+    assert_equal(dev.saved_sp, ref_r.saved_sp)
+    assert_equal(dev.saved_csp, ref_r.saved_csp)
+    assert_equal(dev.step_count, ref_r.step_count)
+    assert_equal(dev.log_text, ref_r.log_text)
+
+    # 3. saved operand stack and call stack, slot by slot
+    assert_equal(dev.stack.len(), lch.expect_stack.len())
+    assert_equal(dev.stack.len(), ref_r.stack.len())
+    var i = 0
+    while i < lch.expect_stack.len() and i < dev.stack.len():
+        assert_equal(dev.stack[i], lch.expect_stack[i])
+        i = i + 1
+    i = 0
+    while i < ref_r.stack.len() and i < dev.stack.len():
+        assert_equal(dev.stack[i], ref_r.stack[i])
+        i = i + 1
+
+    assert_equal(dev.calls.len(), lch.expect_calls.len())
+    assert_equal(dev.calls.len(), ref_r.calls.len())
+    i = 0
+    while i < lch.expect_calls.len() and i < dev.calls.len():
+        assert_equal(dev.calls[i], lch.expect_calls[i])
+        i = i + 1
+    i = 0
+    while i < ref_r.calls.len() and i < dev.calls.len():
+        assert_equal(dev.calls[i], ref_r.calls[i])
+        i = i + 1
+
+    # 4. RECORD ring -- the thing a rewound record_count would corrupt
+    assert_equal(dev.records.len(), lch.expect_records.len())
+    i = 0
+    while i < lch.expect_records.len() and i < dev.records.len():
+        assert_equal(dev.records[i].passed, lch.expect_records[i].passed)
+        assert_equal(dev.records[i].value, lch.expect_records[i].value)
+        i = i + 1
+    step("diffed {tag}: device == declared == ref_vm on every field")
+
+describe "CudaDebugSession -- DBG-1/PROF-1 debug vectors on a live device":
+    """
+    Runs every D3 debug conformance vector's full launch SEQUENCE (break,
+    inspect, resume, single-step) through the real svmg_cuda_kernel.ptx on a
+    live CUDA device, and diffs each launch field-for-field against both the
+    declared expectation and the host reference VM.
+    """
+    it "should skip cleanly, or match ref_vm on every debug vector field":
+        step("Probe for a Cuda-capable device")
+        val probe_result = _probe()
+        # SELF-DESCRIBING EVIDENCE -- see `_REQUIRE_GPU_ENV` note above.
+        # A green on this spec used to be ambiguous: it proved either that a
+        # device ran clean OR that no device existed. Both branches now EMIT
+        # which one they took, so the verdict names its own evidence.
+        if probe_result.starts_with("skip:"):
+            step("SKIPPED: no usable Cuda device/ICD on this host: " + probe_result)
+            # Opt-in strictness: a CI lane or a human demanding real device
+            # evidence sets SIMPLE_REQUIRE_GPU=1 and a skip becomes a FAILURE.
+            # Default stays host-aware skip-clean.
+            if _require_gpu():
+                step("SIMPLE_REQUIRE_GPU=1 -- a skip is a FAILURE in this lane")
+                assert_equal("SKIPPED: " + probe_result, "DEVICE-RAN: cuda")
+            assert_true(probe_result.starts_with("skip:"))
+        else:
+            step("DEVICE-RAN: cuda -- probe() returned no skip reason; the live-device branch is executing")
+            step("Load the checked-in svmg_cuda_kernel.ptx artifact")
+            val kernel_bytes = file_read_bytes(_KERNEL_PTX)
+            expect(kernel_bytes.len()).to_be_greater_than(0)
+
+            val vectors = all_debug_vectors()
+            expect(vectors.len()).to_be_greater_than(0)
+            var checked = 0
+
+            for v in vectors:
+                step("Vector: " + v.name)
+                # Fresh session per vector -- see the header note on the
+                # completion_unknown latch.
+                var sess = CudaDebugSession.create()
+                val opts = AttachOpts(
+                    step_budget: v.step_budget, entry_pc: v.entry_pc,
+                    log_cap: DEFAULT_LOG_CAP, profile: true)
+                val err = sess.attach_kernel(kernel_bytes, v.source, opts)
+                assert_equal(err, "")
+
+                val code = svmg_asm(v.source)
+                var ref_arena = build_arena(code, [], v.step_budget, v.entry_pc, DEFAULT_LOG_CAP)
+
+                if v.name == _BUDGET_EXPIRY_VECTOR:
+                    # NOT a skip, and NOT a kernel defect: an explicit,
+                    # asserted statement of a known LANE-LAYER limitation.
+                    #
+                    # The kernel correctly writes SENTINEL_TIMEOUT (0xDEAD0000)
+                    # on budget exhaustion -- that is a normal, expected SVM-G
+                    # outcome. But `CudaLaneSession.launch_once` decodes that
+                    # same sentinel as a DEVICE timeout, returns an error, and
+                    # latches `completion_unknown`/`release_pending`, so the
+                    # arena is never read back and the saved DBG-1 state for
+                    # this vector is unobservable through the CUDA lane.
+                    #
+                    # Asserting the exact failure mode (rather than skipping)
+                    # means this test goes RED the moment the conflation is
+                    # fixed, which is when the real diff below should start
+                    # running. Filed as
+                    # doc/08_tracking/bug/cuda_lane_conflates_svmg_budget_sentinel_with_device_timeout_2026-08-09.md
+                    # Do NOT "fix" the latch to make this pass -- it is
+                    # deliberate, and the existing D3 conformance spec skips
+                    # its own budget vector for the same reason.
+                    step("Known lane-layer limitation: SVM-G budget sentinel is read as a device timeout")
+                    val lone = v.launches[0]
+                    val devt = sess.launch(lone.resume, lone.single_step, lone.set_breakpoints, lone.breakpoints)
+                    assert_false(devt.ok)
+                    assert_equal(devt.error, "cuda-lane-device-timeout-sentinel")
+                    val shut_t = sess.shutdown()
+                    assert_equal(shut_t, "cuda-lane-session-cleanup-pending")
+                    continue
+
+                var li = 0
+                for lch in v.launches:
+                    val dev = sess.launch(lch.resume, lch.single_step, lch.set_breakpoints, lch.breakpoints)
+                    assert_equal(dev.error, "")
+                    assert_true(dev.ok)
+                    val ref_r = _ref_launch(code, ref_arena, lch)
+                    ref_arena = ref_r.arena
+                    _diff_device_vs_ref(v.name, li, dev, ref_r, lch)
+                    li = li + 1
+                    checked = checked + 1
+
+                val shut = sess.shutdown()
+                assert_equal(shut, "")
+
+            step("DEVICE-RAN: cuda -- total launches diffed device-vs-ref: {checked}")
+            expect(checked).to_be_greater_than(0)
+            # Launch-count floor -- unreachable from the skip branch (count 0).
+            expect(checked).to_be_greater_than(_MIN_DEVICE_LAUNCHES - 1)

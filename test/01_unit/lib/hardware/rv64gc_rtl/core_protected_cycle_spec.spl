@@ -1,0 +1,327 @@
+# Focused protected RV64 core check: staged fetch, enforced PMP CSRs, and MPRV.
+use std.hardware.rv64gc_rtl.core_types.{CORE64_FETCH_LOW, CORE64_WFI}
+use std.hardware.rv64gc_rtl.core.{core64_init, core64_set_fpu}
+use std.hardware.rv64gc_rtl.core_helpers.core64_csr_access
+use std.hardware.rv64gc_rtl.protected_core.{core64_init_single_master, core64_cycle}
+use std.hardware.rv64gc_rtl.protected_core.{core64_data_privilege, core64_sum_enabled, core64_mxr_enabled}
+use std.hardware.rv64gc_rtl.regfile.{regfile64_read, regfile64_write}
+use std.hardware.rv64gc_rtl.csr.{MSTATUS_MIE_MASK, MIP_MTIP_MASK, csr64_fs_state, csr64_tick, csr64_retire}
+use std.hardware.rv64gc_rtl.mmu_sv39.{mmu64_set_satp, mmu64_tlb_insert}
+use std.hardware.rv64gc_rtl.pmp_csr.{pmp64_entries_reset, pmp64_csr_write}
+use std.hardware.rv64gc_rtl.fpu.{fcsr_read_csr, fpu_config_disabled, fpu_config_single_only, fregfile64_read}
+use std.hardware.rv64gc_rtl.protected_entry.core64_protected_clocked_entry
+
+fn check(name: text, ok: bool) -> i64:
+    if ok:
+        return 0
+    print("FAIL {name}")
+    1
+
+fn main() -> i64:
+    var fails: i64 = 0
+    val reset_pc: i64 = 0x8000_0000
+
+    # ADDI x1,x0,5 commits only after both protected fetch parcels return.
+    val low = core64_cycle(core64_init(reset_pc), true, true, false, 0x0093)
+    val high = core64_cycle(low.state, true, true, false, 0x0050)
+    fails = fails + check("protected low fetch", low.bus_valid and low.bus_addr == reset_pc)
+    fails = fails + check("two-parcel ADDI commit", high.state.pc == reset_pc + 4 and
+        regfile64_read(high.state.rf, 1, 0).rs1_data == 5)
+    fails = fails + check("protected ADDI emits one ordered RVFI retire",
+        not low.rvfi.rvfi_valid and high.rvfi.rvfi_valid and
+        not high.rvfi.rvfi_trap and high.rvfi.rvfi_order == 0 and
+        high.rvfi.rvfi_pc_rdata == reset_pc and
+        high.rvfi.rvfi_pc_wdata == reset_pc + 4 and
+        high.rvfi.rvfi_rd_addr == 1 and high.rvfi.rvfi_rd_wdata == 5)
+
+    # JALR clears target bit zero while preserving the ordinary link value.
+    var jalr = core64_init(reset_pc)
+    jalr.rf = regfile64_write(jalr.rf, 1, reset_pc + 0x11, true)
+    val jalr_low = core64_cycle(jalr, true, true, false, 0x8167)
+    val jalr_high = core64_cycle(jalr_low.state, true, true, false, 0)
+    fails = fails + check("JALR clears target bit zero",
+        jalr_high.state.pc == reset_pc + 0x10 and
+        regfile64_read(jalr_high.state.rf, 2, 0).rs1_data == reset_pc + 4 and
+        jalr_high.rvfi.rvfi_pc_wdata == reset_pc + 0x10)
+    val entry_low = core64_protected_clocked_entry(true, true,
+        core64_init(reset_pc), true, true, false, 0x0093)
+    fails = fails + check("clocked source entry calls protected core",
+        entry_low.bus_valid and entry_low.bus_addr == reset_pc)
+
+    # MISA follows the configured FPU: D implies F, single-only omits D, and
+    # disabling execution clears both advertised extensions.
+    val fp_enabled = core64_init(reset_pc)
+    val fp_single = core64_set_fpu(fp_enabled, fpu_config_single_only())
+    val fp_disabled = core64_set_fpu(fp_enabled, fpu_config_disabled())
+    fails = fails + check("configured FPU controls MISA F/D",
+        (fp_enabled.csr_m.misa & ((1 << 5) | (1 << 3))) == ((1 << 5) | (1 << 3)) and
+        (fp_single.csr_m.misa & ((1 << 5) | (1 << 3))) == (1 << 5) and
+        (fp_disabled.csr_m.misa & ((1 << 5) | (1 << 3))) == 0)
+
+    var single_move = fp_single
+    single_move.rf = regfile64_write(single_move.rf, 1, 0x123, true)
+    val single_d_low = core64_cycle(single_move, true, true, false, 0x80D3)
+    val single_d_high = core64_cycle(single_d_low.state, true, true, false, 0xF200)
+    val single_f_low = core64_cycle(single_move, true, true, false, 0x80D3)
+    val single_f_high = core64_cycle(single_f_low.state, true, true, false, 0xF000)
+    fails = fails + check("F-only rejects FMV.D.X but preserves FMV.W.X",
+        single_d_high.state.csr_m.mcause == 2 and single_d_high.state.csr_m.minstret == 0 and
+        single_f_high.state.csr_m.mcause == 0 and single_f_high.state.csr_m.minstret == 1)
+
+    var single_load = fp_single
+    single_load.rf = regfile64_write(single_load.rf, 1, 0x2000, true)
+    val fld_low = core64_cycle(single_load, true, true, false, 0xB087)
+    val fld_high = core64_cycle(fld_low.state, true, true, false, 0)
+    val fsd_low = core64_cycle(single_load, true, true, false, 0xB027)
+    val fsd_high = core64_cycle(fsd_low.state, true, true, false, 0x0010)
+    fails = fails + check("F-only rejects FLD before a data transaction",
+        fld_high.state.csr_m.mcause == 2 and fld_high.state.csr_m.minstret == 0 and
+        fld_high.state.pipeline_phase == 0)
+    fails = fails + check("F-only rejects FSD before a data transaction",
+        fsd_high.state.csr_m.mcause == 2 and fsd_high.state.csr_m.minstret == 0 and
+        fsd_high.state.pipeline_phase == 0)
+
+    val ticked = csr64_tick(core64_init(reset_pc).csr_m)
+    val retired = csr64_retire(ticked)
+    fails = fails + check("cycle and retirement counters are independent",
+        ticked.mcycle == 1 and ticked.minstret == 0 and
+        retired.mcycle == 1 and retired.minstret == 1)
+
+    # Sv48 is unsupported: SATP and active MMU state retain the prior Sv39 value.
+    val sv39_satp: i64 = ((8 as i64) << 60) | 0x100
+    val satp_sv39 = core64_csr_access(core64_init(reset_pc), 0x180, sv39_satp, 1)
+    var satp_state = core64_init(reset_pc)
+    satp_state.csr_s = satp_sv39.csr_s
+    satp_state.mmu = satp_sv39.mmu
+    val satp_sv48 = core64_csr_access(satp_state, 0x180,
+        ((9 as i64) << 60) | 0x200, 1)
+    fails = fails + check("unsupported Sv48 SATP retains Sv39 CSR and MMU",
+        satp_sv48.csr_s.satp == sv39_satp and satp_sv48.mmu.satp_mode == 8 and
+        satp_sv48.mmu.satp_ppn == 0x100)
+
+    # RV64-reserved pmpcfg1 must not fall through to legacy CsrExt storage.
+    val reserved = core64_csr_access(core64_init(reset_pc), 0x3A1, 0, 2)
+    fails = fails + check("reserved pmpcfg1 traps", not reserved.valid)
+
+    # A core CSR write retains MPRV and MPP for staged data accesses.
+    val mstatus = core64_csr_access(core64_init(reset_pc), 0x300,
+        (1 << 17) | (1 << 11), 1)
+    var mprv = core64_init(reset_pc)
+    mprv.csr_m = mstatus.csr_m
+    fails = fails + check("MPRV selects MPP=S", core64_data_privilege(mprv) == 1)
+
+    # The S-status alias updates the mstatus view used by MPRV data accesses.
+    val sstatus = core64_csr_access(core64_init(reset_pc), 0x100,
+        (1 << 18) | (1 << 19), 1)
+    var supervisor = core64_init(reset_pc)
+    supervisor.csr_m = sstatus.csr_m
+    supervisor.csr_s = sstatus.csr_s
+    fails = fails + check("sstatus SUM/MXR mirrors to protected data view",
+        core64_sum_enabled(supervisor) and core64_mxr_enabled(supervisor))
+
+    # sstatus.FS is a writable alias of mstatus.FS; SD ignores software writes
+    # and is derived from the resulting FS state (Clean here, so SD is clear).
+    val sstatus_fp = core64_csr_access(core64_init(reset_pc), 0x100,
+        (2 << 13) | (1 << 63), 1)
+    fails = fails + check("sstatus FS aliases mstatus and SD stays derived",
+        csr64_fs_state(sstatus_fp.csr_m) == 2 and
+        ((sstatus_fp.csr_s.sstatus >> 13) & 3) == 2 and
+        (sstatus_fp.csr_s.sstatus & (1 << 63)) == 0)
+
+    # ECALL is synchronous: it must not retire or be replaced by a pending IRQ.
+    var ecall = core64_init(reset_pc)
+    ecall.csr_m.mtvec = 0x100
+    ecall.csr_m.mstatus = MSTATUS_MIE_MASK
+    ecall.csr_m.mie = MIP_MTIP_MASK
+    ecall.csr_m.mip = MIP_MTIP_MASK
+    val ecall_low = core64_cycle(ecall, true, true, false, 0x0073)
+    val ecall_high = core64_cycle(ecall_low.state, true, true, false, 0)
+    fails = fails + check("ECALL traps before retire or IRQ", ecall_high.state.pc == 0x100 and
+        ecall_high.state.csr_m.mcause == 11 and ecall_high.state.csr_m.minstret == 0)
+    fails = fails + check("synchronous ECALL emits one ordered RVFI trap",
+        ecall_high.rvfi.rvfi_valid and ecall_high.rvfi.rvfi_trap and
+        ecall_high.rvfi.rvfi_order == 0 and ecall_high.rvfi.rvfi_insn == 0x00000073 and
+        ecall_high.state.rvfi_order == 1)
+
+    # Only phase-1 semihost EBREAK bypasses the ordinary breakpoint trap.
+    var semi = core64_init(reset_pc)
+    semi.rf = regfile64_write(semi.rf, 10, 0x11, true)
+    semi.rf = regfile64_write(semi.rf, 11, 0x22, true)
+    val semi_entry_low = core64_cycle(semi, true, true, false, 0x1013)
+    val semi_entry = core64_cycle(semi_entry_low.state, true, true, false, 0x01F0)
+    val semi_break_low = core64_cycle(semi_entry.state, true, true, false, 0x0073)
+    val semi_break = core64_cycle(semi_break_low.state, true, true, false, 0x0010)
+    fails = fails + check("protected semihost EBREAK latches operation and parameter",
+        semi_break.state.semi_phase == 2 and semi_break.state.semi_suppress and
+        semi_break.state.semi_op == 0x11 and semi_break.state.semi_param == 0x22 and
+        semi_break.state.csr_m.mcause == 0)
+
+    # WFI retires once, then holds without refetching or inflating minstret.
+    var wfi = core64_init(reset_pc)
+    wfi.csr_m.mstatus = MSTATUS_MIE_MASK
+    val wfi_low = core64_cycle(wfi, true, true, false, 0x0073)
+    val wfi_high = core64_cycle(wfi_low.state, true, true, false, 0x1050)
+    val wfi_hold = core64_cycle(wfi_high.state, false, false, false, 0)
+    fails = fails + check("WFI retires once then holds", wfi_high.state.pipeline_phase == CORE64_WFI and
+        wfi_high.state.pc == reset_pc + 4 and wfi_hold.bus_valid == false and
+        wfi_hold.state.csr_m.minstret == 1)
+
+    var wfi_raw_pending = wfi_hold.state
+    wfi_raw_pending.csr_m.mstatus = wfi_raw_pending.csr_m.mstatus & (MSTATUS_MIE_MASK ^ -1)
+    wfi_raw_pending.csr_m.mie = MIP_MTIP_MASK
+    wfi_raw_pending.csr_m.mip = MIP_MTIP_MASK
+    val wfi_wake = core64_cycle(wfi_raw_pending, false, false, false, 0)
+    fails = fails + check("WFI wakes on raw local pending state without taking a gated trap",
+        wfi_wake.state.pipeline_phase == CORE64_FETCH_LOW and
+        not wfi_wake.state.wfi_wait and wfi_wake.state.pc == reset_pc + 4 and
+        wfi_wake.state.csr_m.mcause == 0 and wfi_wake.state.csr_m.minstret == 1 and
+        not wfi_wake.rvfi.rvfi_valid)
+
+    # SRET executed from M and lowered to U must not leave MPRV armed.
+    var sret = core64_init(reset_pc)
+    sret.csr_m.mstatus = 1 << 17
+    val sret_low = core64_cycle(sret, true, true, false, 0x0073)
+    val sret_high = core64_cycle(sret_low.state, true, true, false, 0x1020)
+    fails = fails + check("SRET clears MPRV on privilege drop",
+        (sret_high.state.csr_m.mstatus & (1 << 17)) == 0)
+
+    var sret_s = core64_init(reset_pc)
+    sret_s.priv_mode = 1
+    sret_s.csr_m.mstatus = 1 << 17
+    val sret_s_low = core64_cycle(sret_s, true, true, false, 0x0073)
+    val sret_s_high = core64_cycle(sret_s_low.state, true, true, false, 0x1020)
+    fails = fails + check("S-mode SRET clears MPRV when returning to U",
+        sret_s_high.state.priv_mode == 0 and
+        (sret_s_high.state.csr_m.mstatus & (1 << 17)) == 0)
+
+    # MPRV=S makes a machine-fetched LD use S-mode PMP. Empty PMP denies the
+    # data access before any physical data request and reports the precise VA.
+    var denied = core64_init(reset_pc)
+    denied.rf = regfile64_write(denied.rf, 1, 0x2000, true)
+    denied.csr_m.mtvec = 0x100
+    denied.csr_m.mstatus = (1 << 17) | (1 << 11)
+    val denied_low = core64_cycle(denied, true, true, false, 0xB103)
+    val denied_high = core64_cycle(denied_low.state, true, true, false, 0)
+    val denied_data = core64_cycle(denied_high.state, false, false, false, 0)
+    fails = fails + check("PMP-denied LD suppresses data bus and traps",
+        not denied_data.bus_valid and denied_data.state.pc == 0x100 and
+        denied_data.state.csr_m.mcause == 5 and denied_data.state.csr_m.mtval == 0x2000 and
+        denied_data.state.csr_m.minstret == 0)
+
+    # With PMP open, an invalid Sv39 root PTE reaches the walker and raises a
+    # load page fault through the core instead of becoming a PMP access fault.
+    val vaddr: i64 = 0x0000_0000_4000_1000
+    var paged = core64_init(reset_pc)
+    paged.rf = regfile64_write(paged.rf, 1, vaddr, true)
+    paged.csr_m.mtvec = 0x180
+    paged.csr_m.mstatus = (1 << 17) | (1 << 11)
+    paged.mmu = mmu64_set_satp(paged.mmu, ((8 as i64) << 60) | 0x100)
+    var open_pmp = pmp64_entries_reset()
+    open_pmp = pmp64_csr_write(open_pmp, 0x3B0, 0x003F_FFFF_FFFF_FFFF).entries
+    paged.pmp = pmp64_csr_write(open_pmp, 0x3A0, 0x1F).entries
+    val paged_low = core64_cycle(paged, true, true, false, 0xB103)
+    val paged_high = core64_cycle(paged_low.state, true, true, false, 0)
+    val bad_pte = core64_cycle(paged_high.state, true, true, false, 0)
+    fails = fails + check("Sv39 invalid PTE raises load page fault",
+        bad_pte.bus_valid and bad_pte.bus_is_pte and not bad_pte.bus_write and
+        bad_pte.state.pc == 0x180 and bad_pte.state.csr_m.mcause == 13 and
+        bad_pte.state.csr_m.mtval == vaddr and bad_pte.state.csr_m.minstret == 0)
+
+    # RVFI subword byte enables and payloads occupy the physical address lane.
+    var sb = core64_init(reset_pc)
+    sb.rf = regfile64_write(sb.rf, 1, 0x2000, true)
+    sb.rf = regfile64_write(sb.rf, 2, 0x5A, true)
+    val sb_low = core64_cycle(sb, true, true, false, 0x81A3)
+    val sb_high = core64_cycle(sb_low.state, true, true, false, 0x0020)
+    val sb_done = core64_cycle(sb_high.state, true, true, false, 0)
+    fails = fails + check("RVFI byte store shifts mask and data to physical lane",
+        sb_done.state.pc == reset_pc + 4 and sb_done.rvfi.rvfi_valid and
+        sb_done.rvfi.rvfi_mem_addr == 0x2003 and
+        sb_done.rvfi.rvfi_mem_wmask == 0x08 and
+        sb_done.rvfi.rvfi_mem_wdata == (0x5A << 24))
+
+    var lb = core64_init(reset_pc)
+    lb.rf = regfile64_write(lb.rf, 1, 0x2000, true)
+    val lb_low = core64_cycle(lb, true, true, false, 0x8183)
+    val lb_high = core64_cycle(lb_low.state, true, true, false, 0x0050)
+    val lb_done = core64_cycle(lb_high.state, true, true, false, 0x7A)
+    fails = fails + check("RVFI byte load shifts mask and data to physical lane",
+        regfile64_read(lb_done.state.rf, 3, 0).rs1_data == 0x7A and
+        lb_done.rvfi.rvfi_valid and lb_done.rvfi.rvfi_mem_addr == 0x2005 and
+        lb_done.rvfi.rvfi_mem_rmask == 0x20 and
+        lb_done.rvfi.rvfi_mem_rdata == ((0x7A as i64) << 40))
+
+    # The protected single-master path carries both halves of a successful
+    # LR.D/SC.D pair as atomic physical transactions.
+    var atomic = core64_init_single_master(reset_pc)
+    atomic.rf = regfile64_write(atomic.rf, 1, 0x2000, true)
+    atomic.rf = regfile64_write(atomic.rf, 4, 0x66, true)
+    val lr_low = core64_cycle(atomic, true, true, false, 0xB12F)
+    val lr_high = core64_cycle(lr_low.state, true, true, false, 0x1000)
+    val lr_done = core64_cycle(lr_high.state, true, true, false, 0x55)
+    val sc_low = core64_cycle(lr_done.state, true, true, false, 0xB1AF)
+    val sc_high = core64_cycle(sc_low.state, true, true, false, 0x1840)
+    val sc_done = core64_cycle(sc_high.state, true, true, false, 0)
+    fails = fails + check("LR.D reserves through an atomic read",
+        lr_done.bus_valid and lr_done.bus_atomic and not lr_done.bus_write and
+        lr_done.bus_addr == 0x2000 and lr_done.state.atomics.reservation_valid and
+        regfile64_read(lr_done.state.rf, 2, 0).rs1_data == 0x55 and
+        lr_done.rvfi.rvfi_valid and lr_done.rvfi.rvfi_mem_addr == 0x2000 and
+        lr_done.rvfi.rvfi_mem_rmask == 0xFF and lr_done.rvfi.rvfi_mem_wmask == 0)
+    fails = fails + check("SC.D consumes reservation through an atomic write",
+        sc_done.bus_valid and sc_done.bus_atomic and sc_done.bus_write and
+        sc_done.bus_addr == 0x2000 and sc_done.bus_wdata == 0x66 and
+        not sc_done.state.atomics.reservation_valid and
+        regfile64_read(sc_done.state.rf, 3, 0).rs1_data == 0 and
+        sc_done.rvfi.rvfi_valid and sc_done.rvfi.rvfi_mem_addr == 0x2000 and
+        sc_done.rvfi.rvfi_mem_rmask == 0 and sc_done.rvfi.rvfi_mem_wmask == 0xFF)
+
+    # Translated LR/SC reserves the physical granule even when VA != PA.
+    val atomic_va: i64 = 0x0000_0000_4000_1000
+    val atomic_pa: i64 = 0x2000
+    var translated = core64_init_single_master(reset_pc)
+    translated.csr_m.mstatus = (1 << 17) | (1 << 11)
+    translated.rf = regfile64_write(translated.rf, 1, atomic_va, true)
+    translated.rf = regfile64_write(translated.rf, 4, 0x77, true)
+    translated.mmu = mmu64_set_satp(translated.mmu, (8 as i64) << 60)
+    translated.mmu = mmu64_tlb_insert(translated.mmu, atomic_va >> 12,
+        atomic_pa >> 12, 0xC7)
+    var translated_pmp = pmp64_entries_reset()
+    translated_pmp = pmp64_csr_write(translated_pmp, 0x3B0,
+        0x003F_FFFF_FFFF_FFFF).entries
+    translated.pmp = pmp64_csr_write(translated_pmp, 0x3A0, 0x1F).entries
+    val tlr_low = core64_cycle(translated, true, true, false, 0xB12F)
+    val tlr_high = core64_cycle(tlr_low.state, true, true, false, 0x1000)
+    val tlr_done = core64_cycle(tlr_high.state, true, true, false, 0x44)
+    val tsc_low = core64_cycle(tlr_done.state, true, true, false, 0xB1AF)
+    val tsc_high = core64_cycle(tsc_low.state, true, true, false, 0x1840)
+    val tsc_done = core64_cycle(tsc_high.state, true, true, false, 0)
+    fails = fails + check("translated LR keeps physical reservation for SC",
+        atomic_va != atomic_pa and tlr_done.bus_addr == atomic_pa and
+        tlr_done.state.atomics.reservation_addr == atomic_pa and
+        tsc_done.bus_addr == atomic_pa and tsc_done.bus_write and
+        regfile64_read(tsc_done.state.rf, 3, 0).rs1_data == 0)
+
+    # FP execution and its CSR view still retire through protected fetch:
+    # FMV.D.X writes f1 and dirties FS; CSRRW updates the architectural fcsr.
+    var fp = core64_init(reset_pc)
+    fp.rf = regfile64_write(fp.rf, 1, 0x123, true)
+    fp.rf = regfile64_write(fp.rf, 5, 0x51, true)
+    val fmv_low = core64_cycle(fp, true, true, false, 0x80D3)
+    val fmv_high = core64_cycle(fmv_low.state, true, true, false, 0xF200)
+    val fcsr_low = core64_cycle(fmv_high.state, true, true, false, 0x9073)
+    val fcsr_high = core64_cycle(fcsr_low.state, true, true, false, 0x0032)
+    fails = fails + check("protected FMV.D.X preserves FP state and FS",
+        fregfile64_read(fmv_high.state.frf, 1) == 0x123 and
+        csr64_fs_state(fmv_high.state.csr_m) == 3 and
+        ((fmv_high.state.csr_s.sstatus >> 13) & 3) == 3 and
+        (fmv_high.state.csr_s.sstatus & (1 << 63)) != 0)
+    fails = fails + check("protected CSRRW preserves fcsr routing",
+        fcsr_read_csr(fcsr_high.state.fcsr, 3) == 0x51 and
+        csr64_fs_state(fcsr_high.state.csr_m) == 3 and
+        fcsr_high.state.csr_m.minstret == 2)
+
+    if fails == 0:
+        print("CORE PROTECTED CYCLE: ALL PASS")
+        return 0
+    1

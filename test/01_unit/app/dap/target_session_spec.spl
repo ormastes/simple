@@ -1,0 +1,310 @@
+# @cover src/app/dap/target_session.spl 90%
+#
+# Target-neutral DAP session (P9, design §8).
+#
+# Two halves, both driven against REAL machinery, never a mock of the thing
+# under test:
+#
+#  * Full DAP JSON round-trips (request JSON in, response JSON asserted) on a
+#    real host target over the same fixture P3's adapter spec uses
+#    (`test/fixtures/dap/host_debug_target_program.spl`, 3 comment lines then
+#    `val alpha`..`val delta` on lines 4-7), so every assertion is a claim
+#    about the real `SimpleDapSession` machinery underneath `HostDebugTarget`.
+#  * The launch-config routing matrix, driven through the REAL P11 resolver
+#    with a fake PROBE (the seam the resolver itself defines), so the GPU rows
+#    are exercised with no hardware present and without faking the resolver.
+#
+# ALIASING GUARD (see the module header): a capability handle stops aliasing
+# its target unless the acquisition is a function's TAIL expression, which
+# would silently discard `set_breakpoint` / `profile_begin` while `step` and
+# `resume` kept working. The session holds CLASS-TYPED `HostDebugTarget` /
+# `HostProfileTarget` fields directly -- the shape P3 proved safe -- and the
+# `describe "aliasing guard"` block below asserts exactly the two mutations
+# that would silently vanish under the broken shape.
+#
+# Design: doc/05_design/app/tools/unified_debug_profile_capability_architecture_2026-08-09.md §8
+
+use std.spec
+use app.dap.target_session.{
+    TargetDapSession, target_dap_session_launch, target_dap_session_host,
+    profile_report_json,
+}
+use std.common.debug.profile_target.{profile_report_unavailable}
+use std.notebook.gpu_config.{GpuConfig, default_gpu_config}
+use std.notebook.gpu_mode_resolver.{GpuBackendProbe}
+
+val FIXTURE = "test/fixtures/dap/host_debug_target_program.spl"
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+fn has(haystack: text, needle: text) -> bool:
+    if needle.len() == 0:
+        return false
+    var i = 0
+    while i + needle.len() <= haystack.len():
+        if haystack.slice(i, i + needle.len()) == needle:
+            return true
+        i = i + 1
+    false
+
+fn req(seq: i64, command: text) -> text:
+    "{\"seq\":{seq},\"type\":\"request\",\"command\":\"{command}\"}"
+
+fn launch_json_host(program: text) -> text:
+    "{\"type\":\"simple\",\"program\":\"{program}\"}"
+
+# Fake probe over the resolver's own seam. Availability is a fixed list; every
+# absent backend answers with a distinct, stated reason so the "no backend"
+# diagnostic can be asserted to carry EACH backend's reason, not a generic one.
+class FakeGpuProbe:
+    available: [text]
+
+impl FakeGpuProbe:
+    static fn with_available(available: [text]) -> FakeGpuProbe:
+        FakeGpuProbe(available: available)
+
+    static fn none_available() -> FakeGpuProbe:
+        FakeGpuProbe(available: [])
+
+impl GpuBackendProbe for FakeGpuProbe:
+    me probe_backend(backend: text) -> text:
+        for name in self.available:
+            if name == backend:
+                return ""
+        "skip:{backend}-absent-in-fake-probe"
+
+fn config_of(backend: text, submode: text, arch: text) -> GpuConfig:
+    GpuConfig(backend: backend, submode: submode, arch: arch)
+
+# ===========================================================================
+# Launch-config routing (design §8 table)
+# ===========================================================================
+
+describe "TargetDapSession routing":
+    it "defaults to the host lane with an empty mode spec":
+        val s = target_dap_session_host(FIXTURE)
+        assert_equal(s.target_kind, "host")
+        assert_equal(s.mode_spec, "")
+        assert_equal(s.error, "")
+        assert_true(s.is_usable())
+
+    it "keeps the host lane when the launch config says gpu:false":
+        val s = target_dap_session_launch(
+            "{\"program\":\"{FIXTURE}\",\"gpu\":false}",
+            default_gpu_config(), FakeGpuProbe.with_available(["cuda"]))
+        assert_equal(s.target_kind, "host")
+        assert_equal(s.mode_spec, "")
+        assert_true(s.is_usable())
+
+    it "routes gpu:true through the resolver to the configured backend":
+        val s = target_dap_session_launch(
+            "{\"program\":\"{FIXTURE}\",\"gpu\":true}",
+            config_of("cuda", "interpreter", "auto"), FakeGpuProbe.none_available())
+        assert_equal(s.target_kind, "cuda")
+        assert_equal(s.mode_spec, "interpreter(remote(cuda(sm80)))")
+
+    it "auto-probes cuda -> vulkan -> metal and takes the first available":
+        val s = target_dap_session_launch(
+            "{\"program\":\"{FIXTURE}\",\"gpu\":true}",
+            default_gpu_config(), FakeGpuProbe.with_available(["vulkan"]))
+        assert_equal(s.target_kind, "vulkan")
+        assert_true(has(s.mode_spec, "remote(vulkan("))
+
+    it "passes an explicit gpuModeSpec through verbatim":
+        val s = target_dap_session_launch(
+            "{\"program\":\"{FIXTURE}\",\"gpuModeSpec\":\"jit(remote(cuda(sm90)))\"}",
+            default_gpu_config(), FakeGpuProbe.none_available())
+        assert_equal(s.mode_spec, "jit(remote(cuda(sm90)))")
+        assert_equal(s.target_kind, "cuda")
+
+    it "prefers an explicit gpuModeSpec over a bare gpu:true tag":
+        val s = target_dap_session_launch(
+            "{\"program\":\"{FIXTURE}\",\"gpu\":true,\"gpuModeSpec\":\"jit(remote(vulkan(spv15)))\"}",
+            config_of("cuda", "interpreter", "auto"), FakeGpuProbe.with_available(["cuda"]))
+        assert_equal(s.mode_spec, "jit(remote(vulkan(spv15)))")
+        assert_equal(s.target_kind, "vulkan")
+
+    it "reports every backend's own reason when no GPU is available":
+        val s = target_dap_session_launch(
+            "{\"program\":\"{FIXTURE}\",\"gpu\":true}",
+            default_gpu_config(), FakeGpuProbe.none_available())
+        assert_true(s.error != "")
+        assert_true(has(s.error, "cuda-absent-in-fake-probe"))
+        assert_true(has(s.error, "vulkan-absent-in-fake-probe"))
+        assert_true(has(s.error, "metal-absent-in-fake-probe"))
+        assert_true(not s.launched)
+
+    it "refuses to silently fall back to the host when a GPU lane resolves":
+        # Routing succeeded; there is no .spl -> SVM-G attach path, and the
+        # session says so instead of debugging the WRONG program on the host.
+        val s = target_dap_session_launch(
+            "{\"program\":\"{FIXTURE}\",\"gpu\":true}",
+            default_gpu_config(), FakeGpuProbe.with_available(["cuda"]))
+        assert_equal(s.target_kind, "cuda")
+        assert_true(not s.launched)
+        assert_true(has(s.error, "no DAP attach path"))
+
+    it "rejects a launch configuration with no program":
+        val s = target_dap_session_launch(
+            "{\"type\":\"simple\"}", default_gpu_config(), FakeGpuProbe.none_available())
+        assert_true(not s.launched)
+        assert_true(has(s.error, "no 'program'"))
+
+# ===========================================================================
+# DAP JSON round-trips against the real host target
+# ===========================================================================
+
+describe "TargetDapSession DAP round-trips":
+    it "answers initialize by naming both custom profile requests":
+        var s = target_dap_session_host(FIXTURE)
+        val out = s.handle(req(1, "initialize"))
+        assert_true(has(out, "\"success\":true"))
+        assert_true(has(out, "\"request_seq\":1"))
+        assert_true(has(out, "simple/profileBegin"))
+        assert_true(has(out, "simple/profileEnd"))
+
+    it "reports the stop point with its pc_kind unit":
+        var s = target_dap_session_host(FIXTURE)
+        val out = s.handle(req(2, "stackTrace"))
+        assert_true(has(out, "\"pc\":4"))
+        assert_true(has(out, "\"pcKind\":\"line\""))
+        assert_true(has(out, "\"target\":\"host\""))
+
+    it "verifies breakpoints the target accepted and rejects the rest":
+        var s = target_dap_session_host(FIXTURE)
+        val out = s.handle(
+            "{\"seq\":3,\"command\":\"setBreakpoints\",\"arguments\":{\"breakpoints\":[{\"line\":6},{\"line\":900}]}}")
+        assert_true(has(out, "{\"verified\":true,\"line\":6}"))
+        assert_true(has(out, "{\"verified\":false,\"line\":900}"))
+
+    it "replaces the breakpoint set on each setBreakpoints, DAP semantics":
+        var s = target_dap_session_host(FIXTURE)
+        s.handle("{\"seq\":4,\"command\":\"setBreakpoints\",\"arguments\":{\"breakpoints\":[{\"line\":5}]}}")
+        s.handle("{\"seq\":5,\"command\":\"setBreakpoints\",\"arguments\":{\"breakpoints\":[{\"line\":7}]}}")
+        val bps = s.target.breakpoints()
+        assert_equal(bps.len(), 1)
+        assert_equal(bps[0], 7)
+
+    it "steps exactly one source line per next request":
+        var s = target_dap_session_host(FIXTURE)
+        val out = s.handle(req(6, "next"))
+        assert_true(has(out, "\"pc\":5"))
+        assert_true(has(out, "\"stopReason\":\"step\""))
+
+    it "continues to the next breakpoint":
+        var s = target_dap_session_host(FIXTURE)
+        s.handle("{\"seq\":7,\"command\":\"setBreakpoints\",\"arguments\":{\"breakpoints\":[{\"line\":7}]}}")
+        val out = s.handle(req(8, "continue"))
+        assert_true(has(out, "\"pc\":7"))
+        assert_true(has(out, "\"stopReason\":\"breakpoint\""))
+
+    it "answers threads with the single host thread":
+        var s = target_dap_session_host(FIXTURE)
+        assert_true(has(s.handle(req(9, "threads")), "\"name\":\"main\""))
+
+    it "returns a DAP error, not a silent success, for an unknown command":
+        var s = target_dap_session_host(FIXTURE)
+        val out = s.handle(req(10, "wibble"))
+        assert_true(has(out, "\"success\":false"))
+        assert_true(has(out, "unsupported request 'wibble'"))
+
+    it "returns a DAP error for a request with no command":
+        var s = target_dap_session_host(FIXTURE)
+        val out = s.handle("{\"seq\":11}")
+        assert_true(has(out, "\"success\":false"))
+        assert_true(has(out, "no 'command'"))
+
+    it "refuses debug requests on a session whose routing failed, stating why":
+        var s = target_dap_session_launch(
+            "{\"program\":\"{FIXTURE}\",\"gpu\":true}",
+            default_gpu_config(), FakeGpuProbe.none_available())
+        val out = s.handle(req(12, "stackTrace"))
+        assert_true(has(out, "\"success\":false"))
+        assert_true(has(out, "cuda-absent-in-fake-probe"))
+
+    it "detaches cleanly and is safe to disconnect twice":
+        var s = target_dap_session_host(FIXTURE)
+        assert_true(has(s.handle(req(13, "disconnect")), "\"detached\":\"\""))
+        assert_true(has(s.handle(req(14, "disconnect")), "\"detached\":\"\""))
+
+# ===========================================================================
+# simple/profileBegin | simple/profileEnd
+# ===========================================================================
+
+describe "TargetDapSession profile requests":
+    it "arms profiling at the Native tier on the host":
+        var s = target_dap_session_host(FIXTURE)
+        val out = s.handle(req(20, "simple/profileBegin"))
+        assert_true(has(out, "\"armed\":true"))
+        assert_true(has(out, "\"level\":\"native\""))
+
+    it "returns a measured wall time and ABSENT device/steps, never zero":
+        var s = target_dap_session_host(FIXTURE)
+        s.handle(req(21, "simple/profileBegin"))
+        s.handle(req(22, "next"))
+        val out = s.handle(req(23, "simple/profileEnd"))
+        assert_true(has(out, "\"level\":\"native\""))
+        assert_true(has(out, "\"deviceNs\":-1"))
+        assert_true(has(out, "\"steps\":-1"))
+        assert_true(not has(out, "\"wallNs\":-1"))
+
+    it "reports Unavailable for profileEnd with no matching begin":
+        var s = target_dap_session_host(FIXTURE)
+        val out = s.handle(req(24, "simple/profileEnd"))
+        assert_true(has(out, "\"level\":\"unavailable\""))
+        assert_true(has(out, "\"wallNs\":-1"))
+        assert_true(has(out, "no matching profile_begin"))
+
+    it "reports Unavailable, not zero, on a session that never launched":
+        var s = target_dap_session_launch(
+            "{\"program\":\"{FIXTURE}\",\"gpu\":true}",
+            default_gpu_config(), FakeGpuProbe.none_available())
+        val out = s.handle(req(25, "simple/profileEnd"))
+        assert_true(has(out, "\"level\":\"unavailable\""))
+        assert_true(has(out, "\"wallNs\":-1"))
+        assert_true(has(out, "\"deviceNs\":-1"))
+
+    it "re-arms on a second begin (last-begin-wins), no error":
+        var s = target_dap_session_host(FIXTURE)
+        s.handle(req(26, "simple/profileBegin"))
+        s.handle(req(27, "simple/profileBegin"))
+        val out = s.handle(req(28, "simple/profileEnd"))
+        assert_true(has(out, "\"level\":\"native\""))
+
+    it "renders an absent report with -1 fields, not nulls":
+        val json = profile_report_json(profile_report_unavailable("no target"))
+        assert_true(has(json, "\"wallNs\":-1"))
+        assert_true(has(json, "\"deviceNs\":-1"))
+        assert_true(has(json, "\"steps\":-1"))
+        assert_true(has(json, "\"detail\":\"no target\""))
+
+# ===========================================================================
+# Aliasing guard -- the two mutations that vanish under the broken handle shape
+# ===========================================================================
+
+describe "TargetDapSession capability aliasing":
+    it "keeps a breakpoint set through the session visible on the target":
+        # Under the non-tail-expression handle shape this passes `set_breakpoint`
+        # to a COPY and the target's list stays empty while step/resume work.
+        var s = target_dap_session_host(FIXTURE)
+        s.handle("{\"seq\":30,\"command\":\"setBreakpoints\",\"arguments\":{\"breakpoints\":[{\"line\":6}]}}")
+        val bps = s.target.breakpoints()
+        assert_equal(bps.len(), 1)
+        assert_equal(bps[0], 6)
+
+    it "keeps a profile window armed through the session":
+        # Under the broken shape `profile_begin` is discarded, so `profile_end`
+        # reports "no matching profile_begin" instead of a measurement.
+        var s = target_dap_session_host(FIXTURE)
+        s.handle(req(31, "simple/profileBegin"))
+        val out = s.handle(req(32, "simple/profileEnd"))
+        assert_true(not has(out, "no matching profile_begin"))
+        assert_true(has(out, "\"level\":\"native\""))
+
+    it "keeps the stepped position visible across separate requests":
+        var s = target_dap_session_host(FIXTURE)
+        s.handle(req(33, "next"))
+        s.handle(req(34, "next"))
+        assert_true(has(s.handle(req(35, "stackTrace")), "\"pc\":6"))

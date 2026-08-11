@@ -1,0 +1,152 @@
+#!/bin/sh
+# check-env-get-dead-fallback-guard.shs
+#
+# Positive control for the DEAD-FALLBACK half of the env_get `??` bug family
+# (the sibling of check-env-get-nil-abort-guard.shs, which covers the
+# UNGUARDED-passthrough half).
+#
+# THE DEFECT
+#   std.io_runtime.env_get (shape A) is GUARDED: it returns "" for an unset
+#   var, never nil. So `env_get(K) ?? "default"` can NEVER take the fallback --
+#   `??` sees non-nil "" and yields "". The stated default is silently dead.
+#
+# SITES FIXED (doc/08_tracking/bug/env_get_nil_coalesce_dead_fallback_2026-07-25.md
+# 2026-08-08 addendum, 10 sites across 4 files):
+#   src/app/mcp/startup_log.spl            (memory_limit, timeout_s, log_level)
+#   src/app/simple_lsp_mcp/startup_log.spl (memory_limit, timeout_s, log_level)
+#   src/app/ui.web/server.spl              (port_str, mode_name)
+#   src/app/game.rollball/game.spl         (perf_mode, mode)
+#
+# WHY THIS CHECK IS SHAPED THIS WAY
+#   The failure is silent (code runs fine, default is just wrong), so it is
+#   not enough to assert "no error". Part A proves the FALLBACK VALUE IS
+#   ACTUALLY USED when the var is unset, via a REACHED_ marker printed only
+#   after evaluating the fixed expression. It also proves the OLD `??` form
+#   still reproduces the dead fallback (goes RED / does not fire), so the
+#   control cannot be vacuous. Part B is a structural regression check on the
+#   4 landed files.
+#
+# Verdict line is the LAST line of stdout: PASS / FAIL / ERROR.
+set -u
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$ROOT" || { echo "ERROR — nothing was checked (cannot cd to repo root)"; exit 2; }
+[ -d "src/lib" ] || { echo "ERROR — nothing was checked (no src/lib; bundled-stdlib trap)"; exit 2; }
+
+SIMPLE="bin/simple"
+[ -x "$SIMPLE" ] || { echo "ERROR — nothing was checked (no executable $SIMPLE)"; exit 2; }
+
+F1="src/app/mcp/startup_log.spl"
+F2="src/app/simple_lsp_mcp/startup_log.spl"
+F3="src/app/ui.web/server.spl"
+F4="src/app/game.rollball/game.spl"
+for f in "$F1" "$F2" "$F3" "$F4"; do
+    [ -f "$f" ] || { echo "ERROR — nothing was checked (missing $f)"; exit 2; }
+done
+
+PROBE="$ROOT/probe_env_get_dead_fallback_guard_$$.spl"
+trap 'rm -f "$PROBE"' EXIT
+
+CHECKED=0
+FAILED=0
+
+# ---------------------------------------------------------------------------
+# Part A -- mechanism control against the REAL guarded wrapper (std.io_runtime).
+#   p_old_broken   is the exact `env_get(K) ?? "default"` pattern the sites had
+#                  -> MUST NOT yield "default" (proves the dead fallback
+#                     reproduces; if this ever prints default, the defect no
+#                     longer exists and this whole guard is vacuous)
+#   p_new_fixed    is the exact `if x == "": default else: x` pattern the
+#                  fix applies -> MUST yield "default"
+# The probe lives at repo root so src/lib/ resolves.
+# ---------------------------------------------------------------------------
+cat > "$PROBE" <<'PROBE_EOF'
+use std.io_runtime.{env_get}
+
+val UNSET_KEY = "SIMPLE_ENV_GET_DEAD_FALLBACK_GUARD_DEFINITELY_UNSET_KEY"
+
+fn p_old_broken() -> text:
+    val v = env_get(UNSET_KEY) ?? "unset"
+    "OLD_RESULT=[{v}]"
+
+fn p_new_fixed() -> text:
+    val raw = env_get(UNSET_KEY)
+    val v = if raw == "": "unset" else: raw
+    "NEW_RESULT=[{v}]"
+
+fn main():
+    print p_old_broken()
+    print p_new_fixed()
+    print "PROBE_END"
+PROBE_EOF
+
+OUT=$(env -u SIMPLE_ENV_GET_DEAD_FALLBACK_GUARD_DEFINITELY_UNSET_KEY \
+      "$SIMPLE" run "$PROBE" 2>&1)
+
+CHECKED=$((CHECKED + 1))
+if printf '%s\n' "$OUT" | grep -q 'OLD_RESULT=\[unset\]'; then
+    echo "  A1 FAIL: the old '?? default' pattern yielded the default -- the"
+    echo "       dead-fallback defect no longer reproduces against the guarded"
+    echo "       wrapper. This control is vacuous; re-verify before trusting"
+    echo "       any PASS below."
+    FAILED=$((FAILED + 1))
+fi
+
+CHECKED=$((CHECKED + 1))
+if printf '%s\n' "$OUT" | grep -q 'NEW_RESULT=\[unset\]'; then
+    :
+else
+    echo "  A2 FAIL: the fixed 'if x == \"\": default else: x' pattern did NOT"
+    echo "       yield the default with the var unset."
+    printf '%s\n' "$OUT" | sed 's/^/       | /' | head -10
+    FAILED=$((FAILED + 1))
+fi
+
+# ---------------------------------------------------------------------------
+# Part B -- structural regression control on the 4 landed files: the dead
+# `env_get(...) ?? "<non-empty>"` pattern for the specific fixed keys must be
+# GONE, and each must have been replaced by the explicit empty-check form.
+# ---------------------------------------------------------------------------
+check_site() {
+    file="$1"; raw_var="$2"; key="$3"; default="$4"
+    CHECKED=$((CHECKED + 1))
+    if grep -Eq "env_get\(\"$key\"\) \?\? \"$default\"" "$file"; then
+        echo "  B FAIL: $file still has the dead 'env_get(\"$key\") ?? \"$default\"' pattern"
+        FAILED=$((FAILED + 1))
+    fi
+    CHECKED=$((CHECKED + 1))
+    if grep -q "$raw_var = env_get(\"$key\")" "$file" && \
+       grep -q "if $raw_var == \"\": \"$default\"" "$file"; then
+        :
+    else
+        echo "  B FAIL: $file is missing the fixed explicit-check form for $key"
+        FAILED=$((FAILED + 1))
+    fi
+}
+
+check_site "$F1" "memory_limit_raw" "SIMPLE_MEMORY_LIMIT_MB" "unset"
+check_site "$F1" "timeout_s_raw" "SIMPLE_TIMEOUT_SECONDS" "unset"
+check_site "$F1" "log_level_raw" "SIMPLE_LOG" "unset"
+
+check_site "$F2" "memory_limit_raw" "SIMPLE_MEMORY_LIMIT_MB" "unset"
+check_site "$F2" "timeout_s_raw" "SIMPLE_TIMEOUT_SECONDS" "unset"
+check_site "$F2" "log_level_raw" "SIMPLE_LOG" "unset"
+
+check_site "$F3" "port_str_raw" "SIMPLE_UI_WEB_PORT" "8080"
+check_site "$F3" "mode_name_raw" "SIMPLE_UI_WEB_SHELL_MODE" "embedded"
+
+check_site "$F4" "perf_mode_raw" "SIMPLE_ROLLBALL_PERF_MODE" "measure"
+check_site "$F4" "mode_raw" "SIMPLE_ROLLBALL_MODE" "all"
+
+if [ "$CHECKED" -eq 0 ]; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+if [ "$FAILED" -ne 0 ]; then
+    echo "FAIL — $FAILED of $CHECKED assertion(s) failed"
+    exit 1
+fi
+
+echo "PASS — $CHECKED assertion(s) checked (dead-fallback reproduces on old pattern; fixed pattern applies stated default; all 10 sites landed)"
+exit 0

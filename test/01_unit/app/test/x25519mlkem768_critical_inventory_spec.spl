@@ -1,0 +1,123 @@
+use std.spec.*
+use app.test.x25519mlkem768_critical_inventory.{
+    x25519_mlkem768_calibrate_critical_inventory_from_text}
+use app.test.x25519mlkem768_coverage_contract.{
+    x25519_mlkem768_coverage_owner_ids,
+    x25519_mlkem768_coverage_owner_paths}
+
+val HASH_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+fn owner_ids() -> [text]:
+    x25519_mlkem768_coverage_owner_ids()
+
+fn owner_paths() -> [text]:
+    x25519_mlkem768_coverage_owner_paths()
+
+fn source_hashes() -> Dict<text, text>:
+    var hashes: Dict<text, text> = {}
+    for path in owner_paths(): hashes[path] = HASH_A
+    hashes
+
+fn source_texts() -> Dict<text, text>:
+    var sources: Dict<text, text> = {}
+    for path in owner_paths(): sources[path] = "if critical:\n    return\n"
+    sources
+
+fn symbolic() -> text:
+    var lines = ["schema|x25519mlkem768-critical-symbolic-v1"]
+    val ids = owner_ids()
+    val paths = owner_paths()
+    var index: i64 = 0
+    while index < ids.len():
+        lines.push("owner|" + ids[index] + "|" + paths[index] + "|" + HASH_A)
+        index = index + 1
+    index = 0
+    while index < ids.len():
+        lines.push("critical|" + ids[index] + "|1|if critical:|0|true")
+        lines.push("critical|" + ids[index] + "|1|if critical:|0|false")
+        index = index + 1
+    lines.join("\n") + "\n"
+
+fn measured_raw() -> text:
+    var decisions = "# Coverage Report\nversion: 1.0\n" +
+        "coverage_extension: decision-condition-v1\n\n" +
+        "decisions |id, file, line, column, true_count, false_count|\n"
+    var conditions = "\nconditions |decision_id, condition_id, file, line, column, true_count, false_count|\n"
+    val paths = owner_paths()
+    var index: i64 = 0
+    while index < paths.len():
+        val decision_id = 100 + index
+        decisions = decisions + "    {decision_id}, {paths[index]}, 1, 1, 1, 1\n"
+        conditions = conditions + "    {decision_id}, 0, {paths[index]}, 1, 1, 1, 1\n"
+        index = index + 1
+    decisions + conditions + "\nsummary:\n    total_decisions: 30\n"
+
+describe "X25519MLKEM768 critical branch inventory calibrator":
+    it "should derive concrete compiler identities for the exact thirty-owner snapshot":
+        val result = x25519_mlkem768_calibrate_critical_inventory_from_text(
+            symbolic(), measured_raw(), source_hashes(), source_hashes(), source_texts())
+        expect(result.is_ok()).to_be(true)
+        val inventory = result.unwrap()
+        expect(inventory).to_start_with(
+            "owner|source_path|line|decision_id|condition_id|outcome\n")
+        expect(inventory).to_contain(
+            "cache_identity|src/os/crypto/x25519_mlkem768/cache_identity.spl|1|100|0|true")
+        val ids = owner_ids()
+        val paths = owner_paths()
+        var index: i64 = 0
+        while index < ids.len():
+            val decision_id = (100 + index).to_text()
+            val prefix = ids[index] + "|" + paths[index] + "|1|" + decision_id + "|0|"
+            expect(inventory).to_contain(prefix + "true")
+            expect(inventory).to_contain(prefix + "false")
+            index = index + 1
+
+    it "should reject stale owner hashes and exact source anchors":
+        var stale_hashes = source_hashes()
+        stale_hashes[owner_paths()[0]] =
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        val stale_hash = x25519_mlkem768_calibrate_critical_inventory_from_text(
+            symbolic(), measured_raw(), stale_hashes, source_hashes(), source_texts())
+        expect(stale_hash.is_err()).to_be(true)
+        expect(stale_hash.unwrap_err()).to_equal("symbolic-owner-source-sha256-stale")
+        val stale_anchor = x25519_mlkem768_calibrate_critical_inventory_from_text(
+            symbolic().replace("|1|if critical:|0|true", "|2|if critical:|0|true"),
+            measured_raw(), source_hashes(), source_hashes(), source_texts())
+        expect(stale_anchor.is_err()).to_be(true)
+        expect(stale_anchor.unwrap_err()).to_equal("symbolic-source-anchor-stale")
+
+    it "should reject stale decision linkage, condition identity, and uncovered outcomes":
+        val stale_decision = x25519_mlkem768_calibrate_critical_inventory_from_text(
+            symbolic(), measured_raw().replace(
+                "100, 0, src/os/crypto/x25519_mlkem768/cache_identity.spl",
+                "999, 0, src/os/crypto/x25519_mlkem768/cache_identity.spl"),
+            source_hashes(), source_hashes(), source_texts())
+        expect(stale_decision.is_err()).to_be(true)
+        expect(stale_decision.unwrap_err()).to_equal("raw-condition-decision-stale")
+        val stale_condition = x25519_mlkem768_calibrate_critical_inventory_from_text(
+            symbolic(), measured_raw().replace(
+                "100, 0, src/os/crypto/x25519_mlkem768/cache_identity.spl",
+                "100, 7, src/os/crypto/x25519_mlkem768/cache_identity.spl"),
+            source_hashes(), source_hashes(), source_texts())
+        expect(stale_condition.is_err()).to_be(true)
+        expect(stale_condition.unwrap_err()).to_equal("symbolic-condition-stale")
+        val uncovered = x25519_mlkem768_calibrate_critical_inventory_from_text(
+            symbolic(), measured_raw().replace(
+                "100, 0, src/os/crypto/x25519_mlkem768/cache_identity.spl, 1, 1, 1, 1",
+                "100, 0, src/os/crypto/x25519_mlkem768/cache_identity.spl, 1, 1, 1, 0"),
+            source_hashes(), source_hashes(), source_texts())
+        expect(uncovered.is_err()).to_be(true)
+        expect(uncovered.unwrap_err()).to_equal("symbolic-outcome-uncovered")
+
+    it "should reject incomplete owner and true-false requirement sets":
+        val missing_owner = x25519_mlkem768_calibrate_critical_inventory_from_text(
+            symbolic().replace(
+                "owner|mlkem_ntt|src/os/crypto/ml_kem_ntt.spl|" + HASH_A + "\n", ""),
+            measured_raw(), source_hashes(), source_hashes(), source_texts())
+        expect(missing_owner.is_err()).to_be(true)
+        expect(missing_owner.unwrap_err()).to_equal("symbolic-owner-set-incomplete")
+        val missing_outcome = x25519_mlkem768_calibrate_critical_inventory_from_text(
+            symbolic().replace("critical|cache_identity|1|if critical:|0|false\n", ""),
+            measured_raw(), source_hashes(), source_hashes(), source_texts())
+        expect(missing_outcome.is_err()).to_be(true)
+        expect(missing_outcome.unwrap_err()).to_equal("symbolic-outcome-pair-incomplete")

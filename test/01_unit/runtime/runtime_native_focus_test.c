@@ -1,0 +1,615 @@
+#include "runtime.h"
+
+#include <assert.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <pthread.h>
+#include <stdlib.h>
+#include <sys/stat.h>
+#include <sys/socket.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+SplArray* rt_bytes_from_raw(int64_t ptr, int64_t len);
+SplArray* rt_strsplit(const char* string, const char* delimiter);
+int64_t spl_wffi_call_i64(int64_t fptr, int64_t args_value, int64_t nargs);
+
+static int64_t add_i64_args(int64_t left, int64_t right) {
+    return left + right;
+}
+
+static int start_server(unsigned short* port, const char* body, int delay_ms) {
+    int server = socket(AF_INET, SOCK_STREAM, 0);
+    assert(server >= 0);
+    struct sockaddr_in address = {0};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = 0;
+    assert(bind(server, (struct sockaddr*)&address, sizeof(address)) == 0);
+    socklen_t address_len = sizeof(address);
+    assert(getsockname(server, (struct sockaddr*)&address, &address_len) == 0);
+    assert(listen(server, 1) == 0);
+    *port = ntohs(address.sin_port);
+    pid_t child = fork();
+    assert(child >= 0);
+    if (child == 0) {
+        int client = accept(server, NULL, NULL);
+        if (client >= 0) {
+            char request[2048];
+            (void)read(client, request, sizeof(request));
+            if (delay_ms > 0) usleep((useconds_t)delay_ms * 1000);
+            char response[256];
+            int response_len = snprintf(response, sizeof(response),
+                "HTTP/1.1 200 OK\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n%s",
+                strlen(body), body);
+            (void)write(client, response, (size_t)response_len);
+            close(client);
+        }
+        close(server);
+        _exit(0);
+    }
+    close(server);
+    return child;
+}
+
+static int64_t text(const char* value) {
+    return rt_string_new((const uint8_t*)value, strlen(value));
+}
+
+static int64_t text_bytes(const uint8_t* value, size_t len) {
+    return rt_string_new(value, len);
+}
+
+static int walk_contains(SplArray* paths, const char* expected) {
+    for (int64_t i = 0; i < spl_array_len(paths); i++) {
+        const char* actual = spl_as_str(spl_array_get(paths, i));
+        if (actual && strcmp(actual, expected) == 0) return 1;
+    }
+    return 0;
+}
+
+static void* transient_scope_worker(void* unused) {
+    (void)unused;
+    for (int i = 0; i < 64; i++) {
+        assert(rt_transient_array_scope_begin() == 1);
+        SplArray* transient = rt_array_new(0);
+        assert(rt_array_push(transient, i));
+        assert(rt_transient_array_scope_pause() == 1);
+        SplArray* permanent = rt_array_new(0);
+        assert(rt_transient_array_scope_end() == 1);
+        assert(rt_array_push(permanent, i));
+        rt_array_free(permanent);
+    }
+    return NULL;
+}
+
+int main(void) {
+    const uint64_t u64_boundaries[] = {0, 1, 2, 3, 4, 5, 6, 7,
+        UINT64_C(0x1fffffffffffffff), UINT64_C(0x2000000000000000),
+        UINT64_C(0x8000000000000000), UINT64_MAX};
+    for (size_t i = 0; i < sizeof(u64_boundaries) / sizeof(u64_boundaries[0]); i++) {
+        int64_t boxed = rt_value_u64((int64_t)u64_boundaries[i]);
+        int64_t equal_box = rt_value_u64((int64_t)u64_boundaries[i]);
+        int64_t wrapped = rt_enum_new(77, 1, boxed);
+        assert((uint64_t)rt_value_as_u64(rt_enum_payload(wrapped)) == u64_boundaries[i]);
+        assert(rt_native_eq(boxed, equal_box) == 1);
+    }
+    assert(rt_native_eq(rt_value_u64(-1), rt_value_int(-1)) == 0);
+    assert(rt_native_eq(rt_value_u64(7), rt_value_int(7)) == 1);
+    assert(rt_value_as_int(rt_value_int(-1)) == -1);
+
+    int64_t uint_dict = rt_dict_new(8);
+    assert(rt_dict_set(uint_dict, rt_value_u64(0), rt_value_int(10)) == 1);
+    assert(rt_dict_set(uint_dict, rt_value_u64(INT64_C(1) << 61), rt_value_int(20)) == 1);
+    assert(rt_dict_len(uint_dict) == 2);
+    assert(rt_value_as_int(rt_dict_get(uint_dict, rt_value_u64(0))) == 10);
+    assert(rt_value_as_int(rt_dict_get(uint_dict, rt_value_u64(INT64_C(1) << 61))) == 20);
+
+    int stdout_pipe[2];
+    assert(pipe(stdout_pipe) == 0);
+    int saved_stdout = dup(STDOUT_FILENO);
+    assert(saved_stdout >= 0);
+    assert(dup2(stdout_pipe[1], STDOUT_FILENO) == STDOUT_FILENO);
+    close(stdout_pipe[1]);
+    assert(!rt_terminal_is_tty_handle(STDOUT_FILENO));
+    assert(dup2(saved_stdout, STDOUT_FILENO) == STDOUT_FILENO);
+    close(saved_stdout);
+    close(stdout_pipe[0]);
+    assert(!rt_is_interpreter_runtime());
+
+    const uint8_t bounded_env_key[] = {
+        'S', 'I', 'M', 'P', 'L', 'E', '_', 'E', 'N', 'V', '_', 'A', 'B', 'I'
+    };
+    assert(setenv("SIMPLE_ENV_ABI", "bounded", 1) == 0);
+    int64_t bounded_env = rt_env_get(bounded_env_key, sizeof(bounded_env_key));
+    int64_t raw_env = rt_env_get_value((int64_t)(uintptr_t)"SIMPLE_ENV_ABI");
+    int64_t tagged_env_key = rt_string_new(bounded_env_key, sizeof(bounded_env_key));
+    int64_t tagged_env = rt_env_get_value(tagged_env_key);
+    assert(strcmp((const char*)rt_string_data(bounded_env), "bounded") == 0);
+    assert(strcmp((const char*)rt_string_data(raw_env), "bounded") == 0);
+    assert(strcmp((const char*)rt_string_data(tagged_env), "bounded") == 0);
+    assert(unsetenv("SIMPLE_ENV_ABI") == 0);
+
+    int64_t empty_a = rt_string_new(NULL, 0);
+    int64_t empty_b = rt_string_new((const uint8_t*)"", 0);
+    int64_t one_a = rt_string_new((const uint8_t*)"a", 1);
+    int64_t one_a_repeat = rt_string_new((const uint8_t*)"a", 1);
+    int64_t one_b = rt_string_new((const uint8_t*)"b", 1);
+    int64_t short_source = rt_string_new((const uint8_t*)"za", 2);
+    assert(empty_a == empty_b);
+    assert(one_a == one_a_repeat);
+    assert(one_a != one_b);
+    assert(rt_interp_cstr(rt_value_int(41)) == NULL);
+    assert(rt_text_eq_any(rt_value_int(41), one_a) == 0);
+    assert(rt_text_eq_any(one_a, rt_value_int(41)) == 0);
+    assert(rt_string_char_at(short_source, 1) == one_a);
+    assert(rt_slice(short_source, 1, 2, 1) == one_a);
+    const uint8_t unicode_text[] = {'A', 0xe2, 0x80, 0x94, 'B', 0};
+    int64_t tagged_unicode = text_bytes(unicode_text, 5);
+    assert(__simple_rt_string_char_code_at((int64_t)(uintptr_t)unicode_text, 1) == 8212);
+    assert(__simple_rt_string_char_code_at(tagged_unicode, 1) == 8212);
+    assert(__simple_rt_string_char_code_at(tagged_unicode, -1) == 0);
+    assert(__simple_rt_string_char_code_at(tagged_unicode, 99) == 0);
+
+    SplArray* wffi_args = rt_array_new(2);
+    assert(rt_array_push(wffi_args, rt_value_int(0x24c7468)));
+    assert(rt_array_push(wffi_args, rt_value_int(7)));
+    assert(spl_wffi_call_i64(
+        (int64_t)(uintptr_t)add_i64_args, (int64_t)wffi_args, 2) == 0x24c746f);
+
+    const uint8_t raw_bytes[] = {0, 127, 255};
+    SplArray* canonical_bytes = rt_bytes_from_raw((int64_t)(uintptr_t)raw_bytes, 3);
+    assert(rt_array_len(canonical_bytes) == 3);
+    assert(rt_array_get(canonical_bytes, 0) == 0);
+    assert(rt_array_get(canonical_bytes, 1) == 127);
+    assert(rt_array_get(canonical_bytes, 2) == 255);
+    assert(rt_array_last(canonical_bytes) == 255);
+    assert(rt_array_last(rt_array_new(0)) == 3);
+    assert(rt_array_len(rt_bytes_from_raw(0, 3)) == 0);
+
+    SplArray* split = rt_strsplit("a,,b", ",");
+    assert(rt_array_len(split) == 3);
+    assert(strcmp((const char*)rt_string_data(rt_array_get(split, 0)), "a") == 0);
+    assert(strcmp((const char*)rt_string_data(rt_array_get(split, 1)), "") == 0);
+    assert(strcmp((const char*)rt_string_data(rt_array_get(split, 2)), "b") == 0);
+    split = rt_strsplit("plain", ",");
+    assert(rt_array_len(split) == 1);
+    assert(strcmp((const char*)rt_string_data(rt_array_get(split, 0)), "plain") == 0);
+    split = rt_strsplit("plain", "");
+    assert(rt_array_len(split) == 1);
+    assert(strcmp((const char*)rt_string_data(rt_array_get(split, 0)), "plain") == 0);
+
+    char walk_root[] = "/tmp/simple-dir-walk-XXXXXX";
+    assert(mkdtemp(walk_root) != NULL);
+    char walk_nested[256], walk_suffix_dir[256], walk_regular[256];
+    char walk_child[256], walk_file_link[256], walk_cycle[256];
+    snprintf(walk_nested, sizeof(walk_nested), "%s/nested", walk_root);
+    snprintf(walk_suffix_dir, sizeof(walk_suffix_dir), "%s/x.spl", walk_root);
+    snprintf(walk_regular, sizeof(walk_regular), "%s/regular.spl", walk_root);
+    snprintf(walk_child, sizeof(walk_child), "%s/child.spl", walk_nested);
+    snprintf(walk_file_link, sizeof(walk_file_link), "%s/file-link.spl", walk_root);
+    snprintf(walk_cycle, sizeof(walk_cycle), "%s/back", walk_nested);
+    assert(mkdir(walk_nested, 0700) == 0);
+    assert(mkdir(walk_suffix_dir, 0700) == 0);
+    FILE* walk_file = fopen(walk_regular, "w");
+    assert(walk_file != NULL && fclose(walk_file) == 0);
+    walk_file = fopen(walk_child, "w");
+    assert(walk_file != NULL && fclose(walk_file) == 0);
+    assert(symlink(walk_regular, walk_file_link) == 0);
+    assert(symlink(walk_root, walk_cycle) == 0);
+    SplArray* walked = rt_dir_walk(walk_root);
+    assert(spl_array_len(walked) == 4);
+    assert(walk_contains(walked, walk_regular));
+    assert(walk_contains(walked, walk_child));
+    assert(walk_contains(walked, walk_file_link));
+    assert(walk_contains(walked, walk_cycle));
+    assert(!walk_contains(walked, walk_nested));
+    assert(!walk_contains(walked, walk_suffix_dir));
+    assert(rt_dir_remove_all(walk_root));
+    assert(access(walk_root, F_OK) != 0);
+
+    char atomic_root[] = "/tmp/simple-atomic-write-XXXXXX";
+    assert(mkdtemp(atomic_root) != NULL);
+    char atomic_path[256], atomic_temp[320], missing_path[320], occupied_path[320], exhausted_path[320];
+    snprintf(atomic_path, sizeof(atomic_path), "%s/value.txt", atomic_root);
+    FILE* atomic_file = fopen(atomic_path, "wb");
+    assert(atomic_file && fwrite("original-is-longer", 1, 18, atomic_file) == 18 && fclose(atomic_file) == 0);
+    assert(chmod(atomic_path, 04740) == 0);
+    snprintf(atomic_temp, sizeof(atomic_temp), "%s.tmp.%ld.0", atomic_path, (long)getpid());
+    atomic_file = fopen(atomic_temp, "wb");
+    assert(atomic_file && fclose(atomic_file) == 0);
+    const uint8_t replacement_bytes[] = {'n', 'e', 'w', 0, 'x'};
+    assert(rt_file_atomic_write(text(atomic_path), text_bytes(replacement_bytes, sizeof(replacement_bytes))) == 1);
+    atomic_file = fopen(atomic_path, "rb");
+    char atomic_content[16] = {0};
+    assert(atomic_file && fread(atomic_content, 1, sizeof(replacement_bytes), atomic_file) == sizeof(replacement_bytes));
+    assert(fgetc(atomic_file) == EOF && fclose(atomic_file) == 0);
+    assert(memcmp(atomic_content, replacement_bytes, sizeof(replacement_bytes)) == 0);
+    struct stat atomic_stat;
+    assert(stat(atomic_path, &atomic_stat) == 0 && (atomic_stat.st_mode & 07777) == 04740);
+    assert(access(atomic_temp, F_OK) == 0);
+    snprintf(atomic_temp, sizeof(atomic_temp), "%s.tmp.%ld.1", atomic_path, (long)getpid());
+    assert(access(atomic_temp, F_OK) != 0);
+    snprintf(missing_path, sizeof(missing_path), "%s/missing/value.txt", atomic_root);
+    assert(rt_file_atomic_write(text(missing_path), text("created")) == 1);
+    snprintf(occupied_path, sizeof(occupied_path), "%s/occupied", atomic_root);
+    assert(mkdir(occupied_path, 0700) == 0);
+    assert(rt_file_atomic_write(text(occupied_path), text("never")) == 0);
+    snprintf(atomic_temp, sizeof(atomic_temp), "%s.tmp.%ld.3", occupied_path, (long)getpid());
+    assert(access(atomic_temp, F_OK) != 0);
+    snprintf(exhausted_path, sizeof(exhausted_path), "%s/exhausted.txt", atomic_root);
+    for (int i = 4; i < 20; i++) {
+        snprintf(atomic_temp, sizeof(atomic_temp), "%s.tmp.%ld.%d", exhausted_path, (long)getpid(), i);
+        atomic_file = fopen(atomic_temp, "wb");
+        assert(atomic_file && fclose(atomic_file) == 0);
+    }
+    assert(rt_file_atomic_write(text(exhausted_path), text("never")) == 0);
+    for (int i = 4; i < 20; i++) {
+        snprintf(atomic_temp, sizeof(atomic_temp), "%s.tmp.%ld.%d", exhausted_path, (long)getpid(), i);
+        assert(unlink(atomic_temp) == 0);
+    }
+    snprintf(atomic_temp, sizeof(atomic_temp), "%s/value.txt.tmp.%ld.0", atomic_root, (long)getpid());
+    assert(unlink(atomic_temp) == 0 && unlink(atomic_path) == 0 && unlink(missing_path) == 0);
+    snprintf(missing_path, sizeof(missing_path), "%s/missing", atomic_root);
+    assert(rmdir(missing_path) == 0 && rmdir(occupied_path) == 0 && rmdir(atomic_root) == 0);
+
+    int64_t builder = rt_string_builder_new();
+    assert(builder != 0);
+    assert(rt_string_builder_push(builder, text("hello")) == 1);
+    assert(rt_string_builder_push(builder, text("")) == 1);
+    assert(rt_string_builder_push(builder, text(" world")) == 1);
+    assert(rt_string_builder_len(builder) == 11);
+    int64_t built = rt_string_builder_finish(builder);
+    assert(rt_string_len(built) == 11);
+    assert(memcmp(rt_string_data(built), "hello world", 11) == 0);
+    int64_t trim_end = rt_string_trim_end(text("  value \t\r\n"));
+    assert(rt_string_len(trim_end) == 7);
+    assert(memcmp(rt_string_data(trim_end), "  value", 7) == 0);
+    int64_t trim_start = rt_string_trim_start(text(" \t\v\f\r\nvalue  "));
+    assert(rt_string_len(trim_start) == 7);
+    assert(memcmp(rt_string_data(trim_start), "value  ", 7) == 0);
+    assert(rt_cli_run_file(0, 0, 0, 0) != 0);
+    assert(rt_string_builder_len(0) == -1);
+    assert(rt_string_builder_push(0, built) == 0);
+    rt_string_builder_free(0);
+    builder = rt_string_builder_new();
+    assert(builder != 0);
+    rt_string_builder_free(builder);
+
+    int64_t registry_before = rt_heap_registry_count();
+    int64_t registered_text = text("heap registry probe");
+    SplArray* registered_array = rt_array_new(0);
+    assert(registered_text != 0 && registered_array != NULL);
+    assert(rt_heap_registry_count() >= registry_before + 2);
+    int64_t before_shallow_free = rt_heap_registry_count();
+    assert(rt_array_push(registered_array, registered_text));
+    rt_array_free(registered_array);
+    assert(rt_heap_registry_count() == before_shallow_free - 1);
+    assert(rt_string_len(registered_text) == 19);
+    rt_array_free(registered_array);
+    assert(rt_heap_registry_count() == before_shallow_free - 1);
+
+    int64_t before_transient_scope = rt_heap_registry_count();
+    SplArray* permanent_before_scope = rt_array_new(0);
+    assert(rt_transient_array_scope_begin() == 1);
+    assert(rt_transient_array_scope_begin() == 0);
+    SplArray* transient_a = rt_array_new(0);
+    SplArray* transient_b = rt_array_new(0);
+    assert(rt_array_push(transient_a, 11));
+    assert(rt_array_push(transient_b, 22));
+    assert(rt_transient_array_scope_pause() == 1);
+    SplArray* permanent_while_paused = rt_array_new(0);
+    assert(rt_heap_registry_count() == before_transient_scope + 4);
+    assert(rt_transient_array_scope_end() == 1);
+    assert(rt_transient_array_scope_end() == 0);
+    assert(rt_heap_registry_count() == before_transient_scope + 2);
+    assert(rt_array_push(permanent_before_scope, 33));
+    assert(rt_array_push(permanent_while_paused, 44));
+    rt_array_free(permanent_before_scope);
+    rt_array_free(permanent_while_paused);
+    assert(rt_heap_registry_count() == before_transient_scope);
+
+    pthread_t scope_threads[4];
+    for (int i = 0; i < 4; i++) {
+        assert(pthread_create(&scope_threads[i], NULL, transient_scope_worker, NULL) == 0);
+    }
+    for (int i = 0; i < 4; i++) {
+        assert(pthread_join(scope_threads[i], NULL) == 0);
+    }
+    assert(rt_heap_registry_count() == before_transient_scope);
+
+    SplArray* allocated = rt_bytes_alloc(4);
+    assert(allocated != NULL);
+    assert(unsafe_addr_of((int64_t)(uintptr_t)allocated) == (uint64_t)(uintptr_t)allocated);
+    assert(rt_array_len(allocated) == 4);
+    for (int64_t i = 0; i < 4; i++) assert(rt_bytes_u8_at(allocated, i) == 0);
+    SplArray* left = rt_array_new(1);
+    SplArray* right = rt_array_new(1);
+    assert(rt_array_push(left, 11));
+    assert(rt_array_push(right, 22));
+    SplArray* joined = rt_array_concat(left, right);
+    assert(rt_array_len(joined) == 2);
+    assert(rt_array_get(joined, 0) == 11);
+    assert(rt_array_get(joined, 1) == 22);
+    assert(rt_array_last(joined) == 22);
+    SplArray* generic_bytes = rt_array_new(1);
+    for (int64_t i = 0; i < 12; i++) {
+        assert(rt_typed_bytes_u8_push(generic_bytes, i + 20));
+    }
+    assert(rt_bytes_u8_at(generic_bytes, 8) == 28);
+    assert(rt_typed_bytes_u8_unchecked(generic_bytes, 8) == 28);
+    assert(rt_bytes_u8_set(generic_bytes, 8, 8));
+    assert(rt_bytes_u8_at(generic_bytes, 8) == 8);
+    assert(rt_typed_bytes_u32_le_set(generic_bytes, 8, 0x11223344));
+    assert(rt_bytes_u32_le_at(generic_bytes, 8) == 0x11223344);
+    assert(rt_typed_bytes_u64_le_set(generic_bytes, 4, 0x0102030405060708LL));
+    assert(rt_bytes_u64_le_at(generic_bytes, 4) == 0x0102030405060708LL);
+    assert(rt_typed_bytes_u64_le_unchecked(generic_bytes, 4) == 0x0102030405060708LL);
+    const uint8_t* generic_bytes_ptr =
+        (const uint8_t*)(uintptr_t)rt_array_data_ptr_u8(generic_bytes);
+    const uint8_t generic_bytes_expected[] = {
+        20, 21, 22, 23, 8, 7, 6, 5, 4, 3, 2, 1
+    };
+    assert(generic_bytes_ptr != NULL);
+    assert(memcmp(generic_bytes_ptr, generic_bytes_expected,
+                  sizeof(generic_bytes_expected)) == 0);
+    const uint8_t* allocated_ptr =
+        (const uint8_t*)(uintptr_t)rt_array_data_ptr_u8(allocated);
+    assert(allocated_ptr != NULL);
+    assert(allocated_ptr == (const uint8_t*)(uintptr_t)rt_array_data_ptr(allocated));
+    assert(rt_bytes_u8_at(allocated, 0) == 0);
+    SplArray* packed_bytes_equal = rt_byte_array_new(1);
+    SplArray* generic_bytes_equal = rt_array_new(1);
+    for (int64_t i = 0; i < 5; i++) {
+        assert(rt_typed_bytes_u8_push(packed_bytes_equal, i * 2 + 2));
+        assert(rt_typed_bytes_u8_push(generic_bytes_equal, i * 2 + 2));
+    }
+    assert(rt_native_eq((int64_t)(uintptr_t)packed_bytes_equal,
+                        (int64_t)(uintptr_t)generic_bytes_equal));
+    rt_bdd_clear_state();
+    rt_bdd_expect_eq_rv((int64_t)(uintptr_t)packed_bytes_equal,
+                        (int64_t)(uintptr_t)generic_bytes_equal);
+    assert(rt_bdd_has_failure() == 0);
+    rt_bdd_clear_state();
+    assert(!rt_native_eq(0x1001, 0x2001));
+    assert(rt_typed_bytes_u8_push(generic_bytes_equal, 12));
+    assert(!rt_native_eq((int64_t)(uintptr_t)packed_bytes_equal,
+                         (int64_t)(uintptr_t)generic_bytes_equal));
+    SplArray* cycle_left = rt_array_new(1);
+    SplArray* cycle_right = rt_array_new(1);
+    assert(rt_array_push(cycle_left, (int64_t)(uintptr_t)cycle_left));
+    assert(rt_array_push(cycle_right, (int64_t)(uintptr_t)cycle_right));
+    assert(rt_native_eq((int64_t)(uintptr_t)cycle_left,
+                        (int64_t)(uintptr_t)cycle_right));
+    SplArray* wide_left = rt_array_new(300);
+    SplArray* wide_right = rt_array_new(300);
+    for (int64_t i = 0; i < 300; i++) {
+        SplArray* child_left = rt_array_new(1);
+        SplArray* child_right = rt_array_new(1);
+        assert(rt_array_push(child_left, rt_value_int(i)));
+        assert(rt_array_push(child_right, rt_value_int(i)));
+        assert(rt_array_push(wide_left, (int64_t)(uintptr_t)child_left));
+        assert(rt_array_push(wide_right, (int64_t)(uintptr_t)child_right));
+    }
+    assert(rt_native_eq((int64_t)(uintptr_t)wide_left,
+                        (int64_t)(uintptr_t)wide_right));
+    SplArray* float_left = rt_array_new(1);
+    SplArray* float_right = rt_array_new(1);
+    assert(rt_array_push(float_left, rt_value_float(0)));
+    assert(rt_array_push(float_right, rt_value_float(INT64_MIN)));
+    assert(rt_native_eq((int64_t)(uintptr_t)float_left,
+                        (int64_t)(uintptr_t)float_right));
+    int64_t enum_left = rt_enum_new(7, 3, rt_value_int(42));
+    int64_t enum_right = rt_enum_new(9, 3, rt_value_int(42));
+    int64_t enum_same = rt_enum_new(7, 3, rt_value_int(42));
+    assert(!rt_native_eq(enum_left, enum_right));
+    assert(rt_native_eq(enum_left, enum_same));
+    SplArray* generic_words = rt_array_new(1);
+    for (int64_t i = 0; i < 12; i++) {
+        assert(rt_typed_words_u64_push(generic_words, 0x200000 + i * 8));
+    }
+    assert(rt_typed_words_u64_at(generic_words, 0) == 0x200000);
+    assert(rt_typed_words_u64_at(generic_words, 8) == 0x200040);
+    assert(rt_typed_words_u64_at(generic_words, 11) == 0x200058);
+    assert(rt_array_get(generic_words, 11) == rt_value_int(0x200058));
+    assert(rt_typed_words_u32_at(generic_words, 8) == 0x200040);
+    assert(rt_typed_words_u32_set(generic_words, 8, 0x300040));
+    assert(rt_typed_words_u32_at(generic_words, 8) == 0x300040);
+    assert(rt_typed_words_u64_set(generic_words, 8, 0x400040));
+    assert(rt_typed_words_u64_at(generic_words, 8) == 0x400040);
+    assert(rt_typed_words_u64_store_known_data_at(
+        rt_array_header_ptr(generic_words), rt_array_data_ptr(generic_words), 8, 0x500040));
+    assert(rt_typed_words_u64_at(generic_words, 8) == 0x500040);
+    assert(rt_array_get(generic_words, 8) == rt_value_int(0x500040));
+    assert(rt_typed_words_u64_push(generic_words, -1));
+    assert(rt_typed_words_u64_at(generic_words, 12) == -1);
+    assert(rt_typed_words_u64_set(generic_words, 0, 0x300000));
+    assert(rt_typed_words_u64_at(generic_words, 0) == 0x300000);
+    SplArray* packed_words = rt_array_new_with_cap_u64(1);
+    assert(rt_typed_words_u64_push(packed_words, 0x123456789abcdef0LL));
+    assert((uint64_t)rt_typed_words_u64_at(packed_words, 0) == 0x123456789abcdef0ULL);
+    assert(rt_typed_words_u64_store_known_data_at(
+        rt_array_header_ptr(packed_words), rt_array_data_ptr(packed_words), 0, 0x0fedcba987654321LL));
+    assert((uint64_t)rt_typed_words_u64_at(packed_words, 0) == 0x0fedcba987654321ULL);
+    SplArray* packed_words_equal = rt_array_new_with_cap_u64(3);
+    SplArray* generic_words_equal = rt_array_new(3);
+    for (int64_t i = -1; i < 2; i++) {
+        assert(rt_typed_words_u64_push(packed_words_equal, i));
+        assert(rt_typed_words_u64_push(generic_words_equal, i));
+    }
+    assert(rt_native_eq((int64_t)(uintptr_t)packed_words_equal,
+                        (int64_t)(uintptr_t)generic_words_equal));
+    int64_t tuple = rt_tuple_new(9);
+    assert(rt_tuple_set(tuple, 8, rt_value_int(88)));
+    assert(rt_tuple_get(tuple, 8) == rt_value_int(88));
+    assert(rt_is_none(rt_value_nil()));
+    assert(!rt_is_none(0));
+    assert(rt_is_some(0));
+    int64_t option_none = rt_enum_new(1, 1, rt_value_nil());
+    int64_t option_some_zero = rt_enum_new(1, 0, 0);
+    int64_t other_none_ordinal = rt_enum_new(7, 1, rt_value_nil());
+    assert(rt_is_none(option_none));
+    assert(!rt_is_some(option_none));
+    assert(!rt_is_none(option_some_zero));
+    assert(rt_is_some(option_some_zero));
+    assert(!rt_is_none(other_none_ordinal));
+    assert(rt_enum_check_discriminant(option_none, 1) == 1);
+    assert(rt_enum_check_discriminant(option_none, 0) == 0);
+    assert(!rt_is_some(rt_value_nil()));
+    assert(rt_math_pow(2.0, 3.0) == 8.0);
+    uint64_t mmio = 0;
+    rt_volatile_write_u8((int64_t)(uintptr_t)&mmio, 0x12);
+    assert(rt_volatile_read_u8((int64_t)(uintptr_t)&mmio) == 0x12);
+    rt_volatile_write_u64((int64_t)(uintptr_t)&mmio, 0x123456789abcdef0ULL);
+    assert((uint64_t)rt_volatile_read_u64((int64_t)(uintptr_t)&mmio) == 0x123456789abcdef0ULL);
+    rt_memory_barrier();
+    rt_write_cr3(0x12345000);
+    assert(rt_read_cr3() == 0x12345000);
+    rt_write_cr3_raw(0x6789a000);
+    assert(rt_read_cr3_raw() == 0x6789a000);
+    rt_invlpg(0);
+    serial_println(text(""));
+
+    int64_t parent = rt_path_parent((const uint8_t*)"a/b/file.spl", 10);
+    assert(strcmp((const char*)rt_string_data(parent), "a/b") == 0);
+    char cwd[4096];
+    assert(getcwd(cwd, sizeof(cwd)) != NULL);
+    int64_t absolute = rt_path_absolute((const uint8_t*)".", 1);
+    assert(strcmp((const char*)rt_string_data(absolute), cwd) == 0);
+    int64_t path = text("a/b/file.spl");
+    assert(strcmp((const char*)rt_string_data(rt_path_filename(path)), "file.spl") == 0);
+    assert(strcmp((const char*)rt_string_data(rt_path_extension(path)), "spl") == 0);
+
+    int64_t glyph = rt_gui_get_glyph_8x16('A');
+    assert(rt_array_len((SplArray*)(uintptr_t)glyph) == 16);
+    assert(rt_array_get((SplArray*)(uintptr_t)glyph, 0) == 0);
+    assert(rt_array_get((SplArray*)(uintptr_t)glyph, 1) != 0);
+    rt_sleep_secs(0);
+    rt_thread_sleep(0);
+    int64_t atomic = rt_atomic_int_new(7);
+    assert(atomic != 0);
+    assert(rt_atomic_int_load(atomic) == 7);
+    assert(rt_atomic_int_compare_exchange(atomic, 7, 9));
+    assert(!rt_atomic_int_compare_exchange(atomic, 7, 11));
+    assert(rt_atomic_int_load(atomic) == 9);
+    assert(rt_signal_install(SIGUSR1) == 1);
+    assert(raise(SIGUSR1) == 0);
+    assert(rt_signal_check(SIGUSR1) == 1);
+    assert(rt_signal_check(SIGUSR1) == 0);
+    assert(rt_atexit_install() == 1);
+    assert(rt_atexit_check() == 0);
+    int64_t monotonic_before = rt_time_now_monotonic_ms();
+    assert(monotonic_before > 0);
+    assert(rt_time_now_monotonic_ms() >= monotonic_before);
+    int64_t epoch_ms = rt_time_ms();
+    assert(epoch_ms >= (int64_t)time(NULL) * 1000 - 1000);
+    assert(epoch_ms <= (int64_t)time(NULL) * 1000 + 1000);
+    int64_t pointer_text = text("pointer");
+    assert(strcmp((const char*)(uintptr_t)spl_str_ptr((const char*)(uintptr_t)pointer_text),
+                  "pointer") == 0);
+    const char* raw_pointer = "raw-pointer";
+    assert((const char*)(uintptr_t)spl_str_ptr(raw_pointer) == raw_pointer);
+
+    pid_t panic_child = fork();
+    assert(panic_child >= 0);
+    if (panic_child == 0) {
+        (void)freopen("/dev/null", "w", stderr);
+        panic(text("focused panic"));
+        _exit(1);
+    }
+    int panic_status = 0;
+    assert(waitpid(panic_child, &panic_status, 0) == panic_child);
+    assert(WIFEXITED(panic_status) && WEXITSTATUS(panic_status) == 1);
+
+    char crlf_url[] = "http://127.0.0.1\r\n:1/";
+    int64_t invalid = rt_http_request(text("GET"), text(crlf_url),
+                                      (int64_t)rt_array_new(0), text(""));
+    assert(rt_value_as_int(rt_tuple_get(invalid, 0)) == -1);
+    char control_url[] = "http://127.0.0.1:1/\x01";
+    invalid = rt_http_request(text("GET"), text(control_url),
+                              (int64_t)rt_array_new(0), text(""));
+    assert(rt_value_as_int(rt_tuple_get(invalid, 0)) == -1);
+    invalid = rt_http_request(text("GE T"), text("http://127.0.0.1:1/"),
+                              (int64_t)rt_array_new(0), text(""));
+    assert(rt_value_as_int(rt_tuple_get(invalid, 0)) == -1);
+    invalid = rt_http_request(text("GET"), text("http://127.0.0.1:1/bad path"),
+                              (int64_t)rt_array_new(0), text(""));
+    assert(rt_value_as_int(rt_tuple_get(invalid, 0)) == -1);
+
+    char nul_path[128];
+    int nul_prefix_len = snprintf(nul_path, sizeof(nul_path),
+                                  "/tmp/simple-runtime-create-%ld", (long)getpid());
+    assert(nul_prefix_len > 0 && (size_t)nul_prefix_len + 7 < sizeof(nul_path));
+    memcpy(nul_path + nul_prefix_len + 1, "suffix", 6);
+    unlink(nul_path);
+    assert(rt_file_create_excl(nul_path, nul_prefix_len + 7, "x", 1) == 0);
+    assert(access(nul_path, F_OK) != 0);
+
+    unsigned short port;
+    pid_t child = start_server(&port, "hello", 0);
+    char url[64];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%u/", port);
+    int64_t response = rt_http_get(text(url));
+    assert(rt_value_as_int(rt_tuple_get(response, 0)) == 200);
+    assert(strcmp((const char*)rt_string_data(rt_tuple_get(response, 1)), "hello") == 0);
+    assert(strcmp((const char*)rt_string_data(rt_tuple_get(response, 2)), "") == 0);
+    assert(waitpid(child, NULL, 0) == child);
+
+    child = start_server(&port, "request", 0);
+    snprintf(url, sizeof(url), "http://127.0.0.1:%u/", port);
+    response = rt_http_request(text("GET"), text(url), (int64_t)rt_array_new(0), text(""));
+    assert(rt_value_as_int(rt_tuple_get(response, 0)) == 200);
+    assert(strcmp((const char*)rt_string_data(rt_tuple_get(response, 1)), "request") == 0);
+    assert(waitpid(child, NULL, 0) == child);
+
+    int64_t client = rt_http_client_create();
+    assert(client > 0);
+    assert(!rt_http_client_set_timeout(client, -1));
+    assert(rt_http_client_set_timeout(client, 50));
+    unsigned short delayed_port;
+    child = start_server(&delayed_port, "too late", 200);
+    snprintf(url, sizeof(url), "http://127.0.0.1:%u/", delayed_port);
+    int64_t started = rt_time_now_monotonic_ms();
+    int64_t timed_out = rt_http_client_request(
+        client, text("GET"), text(url), (int64_t)rt_array_new(0), text(""));
+    int64_t elapsed = rt_time_now_monotonic_ms() - started;
+    assert(rt_value_as_int(rt_tuple_get(timed_out, 0)) == -1);
+    assert(strstr((const char*)rt_string_data(rt_tuple_get(timed_out, 2)), "timed out") != NULL);
+    assert(elapsed >= 0 && elapsed < 1000);
+    assert(waitpid(child, NULL, 0) == child);
+    rt_http_client_destroy(client);
+    int64_t destroyed = rt_http_client_request(
+        client, text("GET"), text(url), (int64_t)rt_array_new(0), text(""));
+    assert(rt_value_as_int(rt_tuple_get(destroyed, 0)) == -1);
+    assert(strstr((const char*)rt_string_data(rt_tuple_get(destroyed, 2)), "invalid HTTP client") != NULL);
+    int64_t replacement = rt_http_client_create();
+    assert(replacement > 0 && replacement != client);
+    assert(!rt_http_client_set_timeout(client, 1));
+    rt_http_client_destroy(replacement);
+
+    int64_t clients[80];
+    int client_count = 0;
+    while (client_count < 80 && (clients[client_count] = rt_http_client_create()) > 0) client_count++;
+    assert(client_count == 64);
+    assert(rt_http_client_create() == 0);
+    for (int i = 0; i < client_count; i++) rt_http_client_destroy(clients[i]);
+
+    unsigned short download_port;
+    child = start_server(&download_port, "abc", 0);
+    snprintf(url, sizeof(url), "http://127.0.0.1:%u/", download_port);
+    const char* output = "/tmp/simple-runtime-native-download-test";
+    int64_t downloaded = rt_http_download(text(url), text(output));
+    assert(rt_value_as_int(rt_tuple_get(downloaded, 0)) == 200);
+    assert(rt_value_as_int(rt_tuple_get(downloaded, 1)) == 3);
+    FILE* file = fopen(output, "rb");
+    char bytes[4] = {0};
+    assert(file && fread(bytes, 1, 3, file) == 3 && memcmp(bytes, "abc", 3) == 0);
+    fclose(file);
+    unlink(output);
+    assert(waitpid(child, NULL, 0) == child);
+    return 0;
+}

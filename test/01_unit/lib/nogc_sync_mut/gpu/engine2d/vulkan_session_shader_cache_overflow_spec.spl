@@ -1,0 +1,81 @@
+# @cover src/lib/nogc_sync_mut/gpu/engine2d/vulkan_session.spl 40%
+# @tag: unit, gpu, engine2d, vulkan, session, cache, leak
+#
+# SIBLING-BACKEND DRIFT (doc/08_tracking/bug/chrome_vs_simple_gpu_offload_comparison_2026-08-08.md):
+# CudaSession and MetalSession each grew a bounded 4-slot resource cache with
+# counted rejection (`cache_reject_count` / `last_cache_rejection`) to close a
+# real unbounded-native-handle leak. VulkanSession had NO shader cache at all:
+# `load_shader(name)` re-invoked `rt_vk_load_spirv` on every call, even for a
+# name it had already loaded, leaking one native VkShaderModule per call.
+#
+# Fix: `VulkanShaderCache` (same 4 slots, same "cache_full" sentinel, same
+# fail-closed `find_shader`) plus `VulkanSession.record_shader(name, handle)`,
+# which captures the cache return and, on "cache_full", increments
+# `cache_reject_count` and records `last_cache_rejection` -- an OBSERVED,
+# counted overflow rather than a silently-discarded one.
+#
+# This spec drives `record_shader()` / the cache directly with synthetic
+# handles because every session-level Vulkan extern in that file
+# (`rt_vk_create_instance`, `rt_vk_load_spirv`, ...) is registered ONLY for
+# the JIT/native codegen path, not the tree-walk interpreter `bin/simple test`
+# runs on -- a pre-existing engine gap shared by the CUDA and Metal specs
+# beside this one. `record_shader()` is the exact production bookkeeping
+# `load_shader()` calls, so this is a real (not reimplemented) proof.
+
+use std.spec
+use std.nogc_sync_mut.gpu.engine2d.vulkan_session.{VulkanSession, VulkanShaderCache}
+
+describe "VulkanShaderCache overflow contract (pure, no hardware)":
+
+    it "rejects a 5th distinct shader name and leaves the first 4 slots intact":
+        var cache = VulkanShaderCache.create()
+
+        assert_equal(cache.cache_shader("s0", 200), "ok")
+        assert_equal(cache.cache_shader("s1", 201), "ok")
+        assert_equal(cache.cache_shader("s2", 202), "ok")
+        assert_equal(cache.cache_shader("s3", 203), "ok")
+        assert_equal(cache.cache_shader("s4", 204), "cache_full")
+
+        assert_equal(cache.count, 4)
+        assert_equal(cache.find_shader("s0"), 200)
+        assert_equal(cache.find_shader("s1"), 201)
+        assert_equal(cache.find_shader("s2"), 202)
+        assert_equal(cache.find_shader("s3"), 203)
+        # s4 was never stored -- a lookup must fail closed (0), never pretend
+        # it was cached.
+        assert_equal(cache.find_shader("s4"), 0)
+
+describe "VulkanSession.record_shader overflow is an observed, counted event":
+
+    it "counts the 5th distinct shader name as a rejection instead of discarding it":
+        var session = VulkanSession.create("2d", "single")
+
+        assert_equal(session.cache_reject_count_get(), 0)
+
+        val h0 = session.record_shader("sh0", 700)
+        val h1 = session.record_shader("sh1", 701)
+        val h2 = session.record_shader("sh2", 702)
+        val h3 = session.record_shader("sh3", 703)
+        assert_equal(h0, 700)
+        assert_equal(h1, 701)
+        assert_equal(h2, 702)
+        assert_equal(h3, 703)
+        assert_equal(session.cache_reject_count_get(), 0)
+
+        # 5th distinct name: bookkeeping must observe and count the overflow.
+        val h4 = session.record_shader("sh4", 704)
+        assert_equal(h4, 704)
+        assert_equal(session.cache_reject_count_get(), 1)
+        assert_equal(session.last_cache_rejection_get(), "shader:sh4")
+
+        # A 6th distinct name must keep counting, not saturate at 1.
+        val h5 = session.record_shader("sh5", 705)
+        assert_equal(h5, 705)
+        assert_equal(session.cache_reject_count_get(), 2)
+        assert_equal(session.last_cache_rejection_get(), "shader:sh5")
+
+        # The first 4 names remain real cache hits -- the bound does not
+        # disturb the happy path that makes the cache worth having.
+        assert_equal(session.shader_cache.find_shader("sh0"), 700)
+        assert_equal(session.shader_cache.find_shader("sh3"), 703)
+        assert_equal(session.shader_cache.find_shader("sh4"), 0)

@@ -1,0 +1,67 @@
+# Repro: trait-typed receiver resolution under `native-build` (MIR lowering).
+#
+# Measured 2026-08-09 with `bin/simple native-build` (bin/simple is the Rust
+# bootstrap SEED, but native-build drives the pure-Simple `src/compiler/**`
+# lowering -- the `[mir-method-call]` traces in the build log come from
+# `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`, so .spl
+# edits are live on this lane).
+#
+#   Shape A  trait-typed LOCAL var       -> PASSES  ("local A")
+#   Shape B  trait-typed struct FIELD    -> PASSES  ("field B")
+#   Shape D  trait-typed OPTIONAL field  -> builds, but SILENTLY WRONG:
+#                                           prints " D", losing self.prefix
+#   Shape C  trait-typed RETURN value    -> HARD FAILS
+#              error: MIR lowering error: unresolved method call: greet
+#
+# Bug: doc/08_tracking/bug/native_trait_typed_return_receiver_unresolved_2026-08-09.md
+#
+# Shape C is commented out so the rest of the file still builds; uncomment it
+# to reproduce the hard failure.
+
+trait Greeter:
+    me greet(name: text) -> i64
+
+class FriendlyGreeter:
+    prefix: text
+
+impl Greeter for FriendlyGreeter:
+    me greet(name: text) -> i64:
+        print("{self.prefix} {name}\n")
+        0
+
+class Host:
+    g: Greeter
+
+class OptHost:
+    g: Greeter?
+
+fn make_greeter() -> Greeter:
+    FriendlyGreeter(prefix: "ret")
+
+fn main() -> i64:
+    # Shape A: trait-typed LOCAL variable receiver. Works: the struct-literal
+    # construction site records "FriendlyGreeter" in `struct_value_syms`, so
+    # the Unresolved arm's owner recovery devirtualizes it.
+    var a: Greeter = FriendlyGreeter(prefix: "local")
+    a.greet("A")
+
+    # Shape B: trait-typed FIELD receiver. Works via
+    # `remember_field_projection_provenance`.
+    var h = Host(g: FriendlyGreeter(prefix: "field"))
+    h.g.greet("B")
+
+    # Shape D: trait-typed OPTIONAL field receiver. Builds and dispatches,
+    # but `self.prefix` reads EMPTY -- prints " D", not "optfield D".
+    var oh = OptHost(g: FriendlyGreeter(prefix: "optfield"))
+    if val og = oh.g:
+        og.greet("D")
+
+    # Shape C: trait-typed function RETURN value receiver. The call result's
+    # `struct_value_syms` entry is the TRAIT's layout key ("Greeter", from
+    # module_lowering.spl's `bootstrap_fn_ret_shape_register` prescan), and
+    # `struct_method_syms` is keyed by the IMPL TARGET type
+    # ("FriendlyGreeter::greet"), so "Greeter::greet" misses and lowering
+    # loud-fails. Uncomment to reproduce:
+    # make_greeter().greet("C")
+
+    0

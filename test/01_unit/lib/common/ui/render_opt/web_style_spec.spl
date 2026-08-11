@@ -1,0 +1,218 @@
+# @cover src/lib/common/ui/render_opt/web_style.spl 80%
+# @tag: unit, ui, render_perf, render_opt, w0
+#
+# Unit coverage for lane W0 (O(k) web-style declarations), per
+# `doc/03_plan/ui/perf/render_perf_redesign_plan_2026-08-06.md` §6/§9/§11.
+# Distinct assertions this spec makes, in order: `PropertyNames`/
+# `ValueInterner` parse-once idempotence, `apply_declarations` writes exactly
+# the declared properties and nothing else (the O(k), not O(PROPERTY_COUNT),
+# proof via `touched_count`), `StyleInterner` dedup of equal computed styles
+# and non-dedup of distinct ones, and `StyleInvalidation` set accounting.
+
+use std.spec
+use common.ui.render_opt.web_style.{
+    PropertyNames,
+    ValueInterner,
+    DeclarationList,
+    ComputedStyleHot,
+    StyleInterner,
+    StyleInvalidation,
+    apply_declarations,
+    PROP_DISPLAY,
+    PROP_POSITION,
+    PROP_VISIBILITY,
+    PROP_OPACITY,
+    PROP_COLOR,
+    PROP_BACKGROUND,
+    PROP_WIDTH,
+    PROP_HEIGHT,
+    PROPERTY_COUNT,
+    WS_LAYOUT_FLAG,
+    WS_PAINT_FLAG,
+    WS_OK
+}
+
+describe "PropertyNames.create pre-registers the built-in property table":
+    it "the eight built-in names resolve to the fixed PropertyIds and nothing else grows the table":
+        val names = PropertyNames.create()
+        assert_true(names.id_for("display") == PROP_DISPLAY)
+        assert_true(names.id_for("position") == PROP_POSITION)
+        assert_true(names.id_for("width") == PROP_WIDTH)
+        assert_true(names.id_for("height") == PROP_HEIGHT)
+        assert_true(names.count() == PROPERTY_COUNT)
+
+    it "registering an already-known name is idempotent (parse names -> id ONCE)":
+        val names = PropertyNames.create()
+        val before = names.count()
+        val id1 = names.register("color")
+        val id2 = names.register("color")
+        assert_true(id1 == id2)
+        assert_true(id1 == PROP_COLOR)
+        assert_true(names.count() == before)
+
+    it "an unknown name grows the table exactly once no matter how many times it's registered":
+        val names = PropertyNames.create()
+        val before = names.count()
+        val a = names.register("--custom-prop")
+        val b = names.register("--custom-prop")
+        val c = names.register("--custom-prop")
+        assert_true(a == b)
+        assert_true(b == c)
+        assert_true(names.count() == before + 1)
+
+    it "an unregistered name reports -1, not a stale/garbage id":
+        val names = PropertyNames.create()
+        assert_true(names.id_for("--never-seen") == -1)
+
+describe "ValueInterner parses values -> typed ids ONCE":
+    it "interning the same text twice returns the same id and does not grow the table":
+        val v = ValueInterner.create()
+        val id1 = v.intern("16px")
+        val id2 = v.intern("16px")
+        assert_true(id1 == id2)
+        assert_true(v.count() == 1)
+
+    it "distinct values get distinct ids, and text_for round-trips":
+        val v = ValueInterner.create()
+        val a = v.intern("red")
+        val b = v.intern("blue")
+        assert_true(a != b)
+        assert_true(v.text_for(a) == "red")
+        assert_true(v.text_for(b) == "blue")
+
+    it "text_for on an out-of-range id returns empty rather than garbage":
+        val v = ValueInterner.create()
+        assert_true(v.text_for(999) == "")
+        assert_true(v.text_for(-1) == "")
+
+describe "apply_declarations is O(k): it touches exactly the declared properties, never PROPERTY_COUNT":
+    it "a two-declaration list only writes those two fields; every other field stays at its -1/0 default":
+        val decls = DeclarationList.create()
+        val v = ValueInterner.create()
+        assert_true(decls.add(PROP_WIDTH, v.intern("200px"), 0) == WS_OK)
+        assert_true(decls.add(PROP_COLOR, v.intern("red"), 0) == WS_OK)
+        val style = ComputedStyleHot.create()
+        val applied = apply_declarations(style, decls)
+        assert_true(applied == 2)
+        # declared fields are set
+        assert_true(style.width_id == v.intern("200px"))
+        assert_true(style.color_id == v.intern("red"))
+        # everything else is untouched (still the create() default)
+        assert_true(style.display == -1)
+        assert_true(style.position == -1)
+        assert_true(style.visibility == -1)
+        assert_true(style.opacity == -1)
+        assert_true(style.background_id == -1)
+        assert_true(style.height_id == -1)
+        # the sabotage-detection counter: touched exactly 2 times, never
+        # PROPERTY_COUNT (8) times -- a "wide property probing" regression
+        # that loops 0..PROPERTY_COUNT checking presence would make this 8.
+        assert_true(style.touched_count == 2)
+        assert_true(style.touched_count != PROPERTY_COUNT)
+
+    it "layout-bucket and paint-bucket properties set only their own flag bit":
+        val decls = DeclarationList.create()
+        assert_true(decls.add(PROP_WIDTH, 0, 0) == WS_OK)
+        val style = ComputedStyleHot.create()
+        apply_declarations(style, decls)
+        assert_true((style.layout_flags & WS_LAYOUT_FLAG) == WS_LAYOUT_FLAG)
+        assert_true((style.paint_flags & WS_PAINT_FLAG) == 0)
+
+        val decls2 = DeclarationList.create()
+        assert_true(decls2.add(PROP_OPACITY, 0, 0) == WS_OK)
+        val style2 = ComputedStyleHot.create()
+        apply_declarations(style2, decls2)
+        assert_true((style2.paint_flags & WS_PAINT_FLAG) == WS_PAINT_FLAG)
+        assert_true((style2.layout_flags & WS_LAYOUT_FLAG) == 0)
+
+    it "an empty declaration list touches nothing and returns zero":
+        val decls = DeclarationList.create()
+        val style = ComputedStyleHot.create()
+        val applied = apply_declarations(style, decls)
+        assert_true(applied == 0)
+        assert_true(style.touched_count == 0)
+        assert_true(style.display == -1)
+
+    it "touched_count accumulates across repeated applications rather than resetting":
+        val decls = DeclarationList.create()
+        assert_true(decls.add(PROP_DISPLAY, 1, 0) == WS_OK)
+        val style = ComputedStyleHot.create()
+        apply_declarations(style, decls)
+        apply_declarations(style, decls)
+        assert_true(style.touched_count == 2)
+
+describe "DeclarationList.clear resets to empty":
+    it "count returns to zero and a fresh add starts at index 0 again":
+        val decls = DeclarationList.create()
+        decls.add(PROP_COLOR, 5, 0)
+        decls.add(PROP_OPACITY, 6, 0)
+        assert_true(decls.count == 2)
+        decls.clear()
+        assert_true(decls.count == 0)
+
+describe "StyleInterner intern immutable computed styles: dedup equal, distinguish different":
+    it "two independently-built styles with identical hot fields collapse to the same id":
+        val interner = StyleInterner.create()
+        val a = ComputedStyleHot.create()
+        a.display = 1
+        a.color_id = 7
+        val b = ComputedStyleHot.create()
+        b.display = 1
+        b.color_id = 7
+        val id_a = interner.intern(a)
+        val id_b = interner.intern(b)
+        assert_true(id_a == id_b)
+        assert_true(interner.count() == 1)
+        assert_true(interner.reuse_count == 1)
+
+    it "a style differing in exactly one hot field gets a distinct id":
+        val interner = StyleInterner.create()
+        val a = ComputedStyleHot.create()
+        a.display = 1
+        val b = ComputedStyleHot.create()
+        b.display = 2
+        val id_a = interner.intern(a)
+        val id_b = interner.intern(b)
+        assert_true(id_a != id_b)
+        assert_true(interner.count() == 2)
+        assert_true(interner.reuse_count == 0)
+
+    it "interned field values round-trip through the column store":
+        val interner = StyleInterner.create()
+        val a = ComputedStyleHot.create()
+        a.width_id = 42
+        a.height_id = 99
+        val id = interner.intern(a)
+        assert_true(interner.width_id[id] == 42)
+        assert_true(interner.height_id[id] == 99)
+
+describe "StyleInvalidation records per-node per-property pending changes":
+    it "mark accumulates entries and count_for_property counts only that property":
+        val inv = StyleInvalidation.create()
+        assert_true(inv.mark(1, PROP_COLOR) == WS_OK)
+        assert_true(inv.mark(2, PROP_COLOR) == WS_OK)
+        assert_true(inv.mark(1, PROP_WIDTH) == WS_OK)
+        assert_true(inv.len == 3)
+        assert_true(inv.count_for_property(PROP_COLOR) == 2)
+        assert_true(inv.count_for_property(PROP_WIDTH) == 1)
+        assert_true(inv.count_for_property(PROP_HEIGHT) == 0)
+
+    it "has_layout_change is true only when a layout-bucket property is pending":
+        val paint_only = StyleInvalidation.create()
+        paint_only.mark(1, PROP_COLOR)
+        paint_only.mark(2, PROP_OPACITY)
+        assert_true(paint_only.has_layout_change() == false)
+
+        val mixed = StyleInvalidation.create()
+        mixed.mark(1, PROP_COLOR)
+        mixed.mark(2, PROP_WIDTH)
+        assert_true(mixed.has_layout_change() == true)
+
+    it "clear resets len and forgets all prior entries":
+        val inv = StyleInvalidation.create()
+        inv.mark(1, PROP_DISPLAY)
+        inv.mark(2, PROP_POSITION)
+        assert_true(inv.len == 2)
+        inv.clear()
+        assert_true(inv.len == 0)
+        assert_true(inv.count_for_property(PROP_DISPLAY) == 0)

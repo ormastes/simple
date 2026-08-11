@@ -1,0 +1,206 @@
+# Interactive GUI/TUI action-trace evidence behaviour.
+#
+# @manual_section Interactive action traces
+# @req REQ-SSPEC-EVD-001
+
+use std.spec.*
+use std.common.spec.evidence.model.{
+    OracleSpec, EvidenceStatus,
+    check_exact, oracle_spec
+}
+use std.common.spec.evidence.evidence_comparator.{compare_evidence}
+use std.common.spec.evidence.action_trace.{
+    UiActionKind, UiTargetResolution, SettleCondition, UiActionStep, ActionTrace,
+    target_resolution, settle_condition, ui_action_step, action_trace,
+    target_resolution_is_valid, settle_condition_is_valid,
+    ui_action_step_is_valid, ui_action_step_advances_revision, action_trace_is_valid,
+    action_trace_to_evidence, action_trace_manual_lines, ui_action_step_manual_line,
+    should_capture_gui_image
+}
+
+fn settled(kind: text) -> SettleCondition:
+    settle_condition(kind, "detail", 1, false)
+
+fn click_step(sequence: i64, target: UiTargetResolution, after_state: text, revision: i64) -> UiActionStep:
+    ui_action_step(
+        sequence, UiActionKind.click, target, "",
+        "before", "acting", after_state, settled("state_appeared"), revision
+    )
+
+fn add_task_trace() -> ActionTrace:
+    val add_button = target_resolution("Add task", "main#add_task", "role_and_name", "")
+    val task_field = target_resolution("Task name", "main#task_name", "role_and_name", "")
+    action_trace(
+        "gui",
+        [
+            click_step(1, add_button, "dialog open", 1),
+            ui_action_step(
+                2, UiActionKind.type_text, task_field, "Ship release",
+                "dialog open", "typing", "task named", settled("revision_stable"), 2
+            )
+        ]
+    )
+
+describe "Interactive action traces":
+    """
+    A GUI or TUI interaction is recorded as a sequence of resolved actions,
+    not a single screenshot. The reader sees a plain numbered action list;
+    the comparator sees per-step evidence naming the resolved target, the
+    resulting state, how it was confirmed stable, and whether it actually
+    changed anything.
+    """
+
+    it "accepts a coordinate-resolved target that recorded the node it hit":
+        step("Resolve a click target by coordinates with a recorded hit node")
+        val target = target_resolution("Add task", "12,34", "coordinates", "main#add_task")
+
+        step("Verify the resolution is valid because the hit node is recorded")
+        assert_true(target_resolution_is_valid(target))
+
+    it "rejects a coordinate-resolved target with no recorded hit node":
+        step("Resolve a click target by coordinates but omit the hit node")
+        val target = target_resolution("Add task", "12,34", "coordinates", "")
+
+        step("Verify the resolution is invalid: nobody can say what was actually clicked")
+        assert_false(target_resolution_is_valid(target))
+
+    it "accepts a settle condition that stabilized before timing out":
+        step("Wait for revision_stable and reach it within the iteration budget")
+        val settle = settle_condition("revision_stable", "rev 2", 3, false)
+
+        step("Verify the settle condition is valid")
+        assert_true(settle_condition_is_valid(settle))
+
+    it "rejects a settle condition that timed out":
+        step("Wait for state_appeared but exhaust the iteration budget")
+        val settle = settle_condition("state_appeared", "dialog", 40, true)
+
+        step("Verify the settle condition is invalid: the after-state was never observed stable")
+        assert_false(settle_condition_is_valid(settle))
+
+    it "rejects a step whose after_state rests on a timed-out settle":
+        step("Build a click step whose settle condition timed out")
+        val target = target_resolution("Add task", "main#add_task", "role_and_name", "")
+        val bad_settle = settle_condition("state_appeared", "dialog", 40, true)
+        val bad_step = ui_action_step(
+            1, UiActionKind.click, target, "", "before", "acting", "dialog open", bad_settle, 1
+        )
+
+        step("Verify the step is invalid even though its target resolution is fine")
+        assert_false(ui_action_step_is_valid(bad_step))
+
+    it "accepts a mutating step whose revision advances past the previous one":
+        step("Build a click step at revision 2 following a trace at revision 1")
+        val target = target_resolution("Add task", "main#add_task", "role_and_name", "")
+        val advancing = click_step(2, target, "dialog open", 2)
+
+        step("Verify the revision-advance check passes")
+        assert_true(ui_action_step_advances_revision(advancing, 1))
+
+    it "rejects a mutating step whose revision does not advance":
+        step("Build a click step whose revision repeats the previous one")
+        val target = target_resolution("Add task", "main#add_task", "role_and_name", "")
+        val stuck = click_step(2, target, "dialog open", 1)
+
+        step("Verify the revision-advance check fails: the action recorded no observable change")
+        assert_false(ui_action_step_advances_revision(stuck, 1))
+
+    it "exempts non-mutating focus and select steps from the revision-advance check":
+        step("Build a focus step whose revision repeats the previous one")
+        val target = target_resolution("Task name", "main#task_name", "role_and_name", "")
+        val focus_step = ui_action_step(
+            2, UiActionKind.focus, target, "", "before", "focusing", "focused", settled("state_appeared"), 1
+        )
+
+        step("Verify the revision-advance check passes: focus is not expected to mutate state")
+        assert_true(ui_action_step_advances_revision(focus_step, 1))
+
+    it "accepts a whole trace whose steps are individually valid and advance revision":
+        step("Build the add-task trace: click Add task, then type the task name")
+        val trace = add_task_trace()
+
+        step("Verify the whole trace validates")
+        assert_true(action_trace_is_valid(trace))
+
+    it "rejects a whole trace when one step's revision does not advance":
+        step("Build a trace whose second step repeats the first step's revision")
+        val add_button = target_resolution("Add task", "main#add_task", "role_and_name", "")
+        val task_field = target_resolution("Task name", "main#task_name", "role_and_name", "")
+        val trace = action_trace(
+            "gui",
+            [
+                click_step(1, add_button, "dialog open", 1),
+                ui_action_step(
+                    2, UiActionKind.type_text, task_field, "Ship release",
+                    "dialog open", "typing", "task named", settled("revision_stable"), 1
+                )
+            ]
+        )
+
+        step("Verify the trace is invalid")
+        assert_false(action_trace_is_valid(trace))
+
+    it "captures GUI image only when the surface is GUI-only, visual is the requirement, or configured":
+        step("Check a TUI surface with a GUI backend merely present but nothing else true")
+        assert_false(should_capture_gui_image("tui", false, false, false))
+
+        step("Check a GUI-only surface")
+        assert_true(should_capture_gui_image("gui", true, false, false))
+
+        step("Check a surface where visual correctness is the requirement under test")
+        assert_true(should_capture_gui_image("web", false, true, false))
+
+        step("Check a surface where capture was explicitly configured")
+        assert_true(should_capture_gui_image("web", false, false, true))
+
+    it "renders the manual action list from visible target names, not canonical ids or coordinates":
+        step("Build the add-task trace and render its manual lines")
+        val trace = add_task_trace()
+        val lines = action_trace_manual_lines(trace)
+
+        step("Verify each line names the visible target and never leaks canonical ids or coordinates")
+        expect(lines.len()).to_equal(2)
+        expect(lines[0]).to_contain("Add task")
+        expect(lines[1]).to_contain("Task name")
+        expect(lines[1]).to_contain("Ship release")
+        for line in lines:
+            expect(line).to_not_contain("main#")
+            expect(line).to_not_contain("12,34")
+
+    it "renders a single step's manual line using the requested (visible) target name":
+        step("Build a click step whose requested and resolved names differ")
+        val target = target_resolution("Add task", "main#add_task", "role_and_name", "")
+        val add_step = click_step(1, target, "dialog open", 1)
+
+        step("Verify the manual line quotes the requested visible name, not the resolved id")
+        val line = ui_action_step_manual_line(add_step)
+        expect(line).to_contain("Add task")
+        expect(line).to_not_contain("main#add_task")
+
+    it "projects the trace into per-step evidence a closed oracle can check end to end":
+        step("Build the add-task trace and project it into canonical evidence")
+        val trace = add_task_trace()
+        val evidence = action_trace_to_evidence(trace, "gui-add-task/1")
+
+        step("Declare a closed oracle over every emitted node")
+        val spec: OracleSpec = oracle_spec(
+            "gui-add-task/1",
+            [
+                check_exact("step.1.kind", "click"),
+                check_exact("step.1.target.resolved", "main#add_task"),
+                check_exact("step.1.after_state", "dialog open"),
+                check_exact("step.1.settle.kind", "state_appeared"),
+                check_exact("step.1.revision", "1"),
+                check_exact("step.2.kind", "type_text"),
+                check_exact("step.2.target.resolved", "main#task_name"),
+                check_exact("step.2.after_state", "task named"),
+                check_exact("step.2.settle.kind", "revision_stable"),
+                check_exact("step.2.revision", "2")
+            ]
+        )
+
+        step("Compare the projected evidence against the oracle")
+        val result = compare_evidence(evidence, spec)
+
+        step("Verify the whole action trace verified end to end")
+        expect(result.status).to_equal(EvidenceStatus.passed)

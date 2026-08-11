@@ -1,0 +1,145 @@
+# @cover src/lib/gc_async_mut/gpu/browser_engine/html_tree_builder.spl 5%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/style_block.spl 5%
+"""
+# Chrome vs Simple Component-Level Rendering Differential (Stages 1-2)
+
+**Category:** Testing
+**Status:** In Progress
+**Design:** doc/05_design/ui/web_diff/chrome_simple_stage_io_contract.md
+
+## Purpose and Audience
+
+Feeds the SAME HTML fixture to Google Chrome for Testing and to Simple's web
+renderer, extracts the SAME two intermediate artifacts from each, normalizes
+them, and diffs them per node and per property. Audience: anyone changing
+`html_tree_builder.spl` (stage 1) or `style_block.spl` (stage 2).
+
+This is NOT a screenshot comparison. Stage 1 compares the parsed DOM tree.
+Stage 2 compares the cascaded computed style of each element.
+
+## Scope and Preconditions
+
+Requires `WEB_DIFF_CHROME` to point at an executable Chrome/Chromium binary and
+`node` with the Playwright package under `tools/pixel_compare/node_modules`.
+The repo's other Chrome-discovery helpers probe only `/usr/bin/google-chrome`
+style paths and `$HOME/.cache/ms-playwright`, so the path MUST be passed
+explicitly here.
+
+## Primary Workflow
+
+`tools/web_diff/run_web_diff.shs` runs, per fixture:
+Chrome `DOMSnapshot.captureSnapshot` -> JSON, Simple
+`html_tree_builder_build` + `process_style_blocks` -> JSON, then
+`tools/web_diff/normalize_diff.js` -> per-node/per-property diff report, then
+`tools/web_diff/summarize.js` -> aggregate.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| Stage 1 | HTML source -> DOM tree (tag, text, attributes, parent) |
+| Stage 2 | DOM + stylesheets -> computed style per element |
+| Vacuous run | A run reporting 0 mismatches having compared 0 items. Always a FAILURE here. |
+| Structural path | `#document/html[1]/body[1]/p[2]` — the alignment key across engines |
+
+## Related Specifications
+
+- [I/O contract](../../doc/05_design/ui/web_diff/chrome_simple_stage_io_contract.md) — normalization rules and their justification
+
+## Evidence and Provenance
+
+Evidence is the on-disk report set under `tools/web_diff/out/`: per fixture a
+`*.chrome.json`, `*.simple.json` and `*.diff.json`, plus `SUMMARY.md`. Every
+report records `domComparedNodes` and `styleComparedProps`, so a reader can
+always tell a real pass from an empty one.
+
+## Recovery and Troubleshooting
+
+`WEB_DIFF_UNAVAILABLE` on stderr with exit 3 means the harness could not run
+(no chrome path, chrome not executable, no fixtures). That is reported as an
+explicit FAILURE by this spec, never as a pass.
+
+## Compatibility and Limitations
+
+Simple's `StyleProps` has a single `border-width`/`border-color`/`border-style`
+rather than per-side, so this differential compares them against Chrome's
+`border-top-*` only and CANNOT observe per-side border divergence.
+"""
+
+use std.spec.*
+use std.env.variables.{env_get_or}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+val REPO = "/home/ormastes/dev/pub/simple"
+
+fn sh(command: text) -> (text, text, i64):
+    rt_process_run("/bin/sh", ["-c", command])
+
+fn chrome_path() -> text:
+    env_get_or("WEB_DIFF_CHROME", "")
+
+fn last_line_with(haystack: text, marker: text) -> text:
+    var found = ""
+    for line in haystack.split("\n"):
+        if line.contains(marker):
+            found = line
+    found
+
+fn field_i64(line: text, key: text) -> i64:
+    # Parses `key=<int>` out of a `SUMMARY ...`/`DIFF_OK ...` verdict line.
+    for tok in line.split(" "):
+        if tok.starts_with(key + "="):
+            return tok.slice(key.len() + 1, tok.len()).to_i64()
+    -1
+
+# The whole harness runs once; every scenario reads this result.
+val CHROME = chrome_path()
+val RUN = if CHROME == "":
+    ("", "WEB_DIFF_UNAVAILABLE reason=no-chrome-path", 3)
+else:
+    sh("WEB_DIFF_CHROME='" + CHROME + "' sh " + REPO +
+       "/tools/web_diff/run_web_diff.shs 2>&1")
+val RUN_OUT = RUN.0 + RUN.1
+val SUMMARY_LINE = last_line_with(RUN_OUT, "SUMMARY fixtures=")
+
+
+describe "Chrome vs Simple component differential":
+
+    it "refuses to run without an explicit chrome binary":
+        step("Read WEB_DIFF_CHROME from the environment")
+        step("Assert the harness was given a real, executable chrome path")
+        # oracle: an unset/invalid path must surface here, not silently pass.
+        expect(CHROME == "").to_equal(false)
+
+    # @prev("refuses to run without an explicit chrome binary")
+    it "runs the harness to completion over the fixture corpus":
+        step("Invoke tools/web_diff/run_web_diff.shs with the chrome path")
+        step("Assert the harness emitted a SUMMARY verdict line")
+        # oracle: WEB_DIFF_UNAVAILABLE or a crash leaves no SUMMARY line.
+        expect(SUMMARY_LINE == "").to_equal(false)
+
+    # @prev("runs the harness to completion over the fixture corpus")
+    it "compares a nonzero number of DOM nodes":
+        step("Read domNodesCompared from the SUMMARY verdict")
+        step("Assert at least one DOM node was actually compared")
+        # oracle: a 0-node run is a vacuous pass and is rejected outright.
+        val compared = field_i64(SUMMARY_LINE, "domNodesCompared")
+        expect(compared > 0).to_equal(true)
+
+    # @prev("runs the harness to completion over the fixture corpus")
+    it "compares a nonzero number of computed style properties":
+        step("Read stylePropsCompared from the SUMMARY verdict")
+        step("Assert at least one computed property was actually compared")
+        # oracle: stage 2 silently comparing nothing is indistinguishable
+        # from stage 2 passing, so the count itself is the assertion.
+        val compared = field_i64(SUMMARY_LINE, "stylePropsCompared")
+        expect(compared > 0).to_equal(true)
+
+    # @prev("runs the harness to completion over the fixture corpus")
+    it "covers the whole curated fixture corpus without extractor failures":
+        step("Read the WEB_DIFF_RUN verdict line")
+        step("Assert every fixture produced a diff report")
+        val run_line = last_line_with(RUN_OUT, "WEB_DIFF_RUN fixtures=")
+        expect(field_i64(run_line, "failed")).to_equal(0)
+        expect(field_i64(run_line, "fixtures") > 0).to_equal(true)

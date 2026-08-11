@@ -1,0 +1,979 @@
+# Flat AST Bridge: module assembly (flat_ast_to_module, parse_and_build_module).
+use compiler.frontend.flat_ast_bridge.*
+# Flat AST Bridge
+#
+# Converts the core parser's flat, index-based AST into the richer frontend
+# ParserModule shape expected by HIR lowering. This is used as the bootstrap-safe
+# frontend path when the newer parser surface is unavailable.
+
+use compiler.core.parser.{parser_has_errors, parser_get_errors, parser_init_with_path, parser_error}
+use compiler.frontend.core.string_interpolation_expand.{expand_string_interpolations}
+use compiler.frontend.desugar.placeholder_lambda.{transform_placeholder_call_args_after_interpolation}
+use compiler.semantics.layer_dag_checker.{LayerDagRegistry, check_layer_dag}
+use compiler.core.parser_decls.{parse_module_body}
+use compiler.core.ast.*
+use compiler.core.ast.{decl_get_body, decl_get_field_bits, decl_get_field_defaults, decl_get_field_types, decl_get_fields}
+use compiler.core.ast.{decl_get_imports, decl_get_is_comptime, decl_get_is_lazy, decl_get_name, decl_get_param_names}
+use compiler.core.ast.{decl_get_param_types, decl_get_ret_type, decl_get_visibility_text, module_decl_at, module_decl_count_get}
+use compiler.core.ast.{decl_is_packed, decl_get_is_value_type}
+use compiler.core.ast_expr.*
+use compiler.core.ast_stmt.*
+use compiler.core.ast_stmt.{STMT_GPU_LAUNCH, stmt_get_gpu_grid, stmt_get_gpu_block}
+use compiler.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_ARRAY_I64, TYPE_ARRAY_TEXT, TYPE_ARRAY_BOOL, TYPE_ARRAY_ANY, TYPE_ANY, TYPE_NIL}
+use compiler.core.types.{TYPE_DICT, TYPE_FN, TYPE_OPTION, TYPE_OPTION_I64, TYPE_OPTION_F64, TYPE_OPTION_TEXT, TYPE_OPTION_BOOL}
+use compiler.core.types.{TYPE_RESULT, TYPE_FUTURE, TYPE_POLL, TYPE_TASK, TYPE_GENERIC_ERASED}
+use compiler.core.types.{TYPE_UNION, TYPE_INTERSECTION, TYPE_REFINEMENT, TYPE_NAMED_BASE, TYPE_UNION_BASE, type_tag_name, int_to_str, reset_all_pools}
+use compiler.core.types.{span_start, span_end, span_line, span_col, span_is_valid}
+use compiler.frontend.parser_types.*
+use compiler.frontend.parser_types_expr.*
+use compiler.frontend.parser_types_expr.{ComprehensionClause, ComprehensionKind, GpuLaunchConfig}
+use compiler.frontend.desugar.collection_desugar.{desugar_collections}
+use compiler.frontend.core.string_interpolation_expand.{expand_interpolated_placeholder_call_args}
+use compiler.frontend.lexer_types.{Span}
+use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
+use compiler.frontend.resource_registry.{resource_registry_declare}
+use compiler.frontend.layer_eq_registry.{layer_eq_registry_declare}
+use compiler.frontend.effect_registry.{effect_registry_declare}
+use compiler.frontend.aspect_registry.{aspect_registry_declare}
+use compiler.common.dependency.visibility.{Visibility}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text)
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_array_scope_end() -> bool
+extern fn rt_transient_heap_promote(value: Any) -> bool
+
+fn flat_module_env_get(key: text) -> text:
+    rt_env_get(key) ?? ""
+
+fn flat_decl_tag_text(idx: i64) -> text:
+    val tag = decl_get_tag(idx)
+    if tag > 0:
+        return int_to_str(tag)
+    ""
+
+fn flat_decl_field_text(idx: i64, field: text) -> text:
+    flat_module_env_get("SIMPLE_BOOTSTRAP_DECL_" + int_to_str(idx) + "_" + field)
+
+fn flat_bootstrap_enabled() -> bool:
+    flat_module_env_get("SIMPLE_BOOTSTRAP") == "1"
+
+fn flat_bridge_trace_enabled() -> bool:
+    (flat_module_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+
+fn flat_module_trace_function(stage: text, fn_: ParserFunction):
+    if flat_module_env_get("SIMPLEOS_FOCUSED_HIR_DIAG") == "1":
+        val return_name = parser_type_kind_named_name(fn_.return_type.kind)
+        eprint("[flat-function-roundtrip] phase={stage} name={fn_.name} return={return_name}")
+
+fn flat_text_list_count(raw: text) -> i64:
+    if raw == "":
+        return 0
+    var count: i64 = 1
+    var i: i64 = 0
+    while i < raw.len():
+        if raw[i:i + 1] == "\n":
+            count = count + 1
+        i = i + 1
+    count
+
+fn flat_text_list_at(raw: text, target: i64) -> text:
+    var start: i64 = 0
+    var index: i64 = 0
+    var i: i64 = 0
+    while i <= raw.len():
+        if i == raw.len() or raw[i:i + 1] == "\n":
+            if index == target:
+                return raw[start:i]
+            index = index + 1
+            start = i + 1
+        i = i + 1
+    ""
+
+fn flat_i64_list_count(raw: text) -> i64:
+    if raw == "":
+        return 0
+    var count: i64 = 1
+    var i: i64 = 0
+    while i < raw.len():
+        if raw[i:i + 1] == ",":
+            count = count + 1
+        i = i + 1
+    count
+
+fn flat_i64_list_at(raw: text, target: i64) -> i64:
+    var start: i64 = 0
+    var index: i64 = 0
+    var i: i64 = 0
+    while i <= raw.len():
+        if i == raw.len() or raw[i:i + 1] == ",":
+            if index == target:
+                return text_parse_int_simple(raw[start:i])
+            index = index + 1
+            start = i + 1
+        i = i + 1
+    0
+
+fn flat_ast_to_module(path: text) -> ParserModule:
+    if flat_bridge_trace_enabled():
+        print "[flat-bridge] path={path}"
+    if flat_bootstrap_enabled() and not flat_is_bootstrap_entry_path(path):
+        return flat_empty_module(path)
+    if flat_bootstrap_enabled() and flat_bridge_trace_enabled():
+        eprint("[flat-bridge] bootstrap real entry:start")
+    val raw_decl_count = module_decl_count_get()
+    val decl_count = raw_decl_count
+    # A leaked debugging guard here used to CAP decl_count at 64 under
+    # SIMPLE_BOOTSTRAP (arrived via an hourly-sync WC snapshot, never a
+    # reviewed change): every module with >64 top-level decls silently lost
+    # its tail — functions, trailing `export` lines, everything past #64
+    # (std.io_runtime lost fns after mkdir_p; app.mcp.assistant lost
+    # session-store helpers; symptom "unresolved name" storms with a clean
+    # parse). The flat arena itself handles arbitrary counts (the same file
+    # parses all 88 decls); never truncate here.
+    if flat_bootstrap_enabled() and flat_bridge_trace_enabled():
+        eprint("[flat-bridge] decl_count {decl_count}")
+    var functions: Dict<text, ParserFunction> = {}
+    var function_order: [text] = []
+    var structs: Dict<text, ParserStruct> = {}
+    # bug s19_class_free_fn_mutation_dropped_native_2026-07-17: `class` decls
+    # used to always land in `structs` below (this dict was the only sink),
+    # so HIR/MIR never saw a distinct `class` (module.classes stayed
+    # permanently empty -- see the old hardcoded `classes: {}` at this
+    # function's `parser_module_new(...)` call). That erased the one signal
+    # (`decl_get_is_value_type(idx) == 0` for `class`, `1` for `struct`,
+    # already set correctly by the parser's `parse_struct_decl` /
+    # `decl_set_is_value_type`, and already consulted by the interpreter's
+    # `interp_struct_is_value_type`) that downstream MIR param-binding needs
+    # to give a `class` instance reference semantics instead of silently
+    # copying it like a `struct` (native-build only: a class instance passed
+    # to a free function and mutated inside had the mutation dropped for the
+    # caller; the tree-walking interpreter path already got this right via
+    # `interp_struct_is_value_type`).
+    var classes: Dict<text, ParserClass> = {}
+    var enums: Dict<text, ParserEnum> = {}
+    var traits: Dict<text, ParserTrait> = {}
+    var constants: Dict<text, ParserConst> = {}
+    var imports: [ParserImport] = []
+    var exports: [Export] = []
+    var domain_blocks: [DomainBlock] = []
+    var impls: [Impl] = []
+    var aop_advices: [AopAdvice] = []
+    var di_bindings: [DiBinding] = []
+    var arch_rules: [ArchRule] = []
+    var bitfields: Dict<text, Bitfield> = {}
+    # TAL1 (bug type_alias_declarations_discarded_at_parse_2026-07-29): the
+    # arena now captures `type X = Y` (decl_type_alias, tag 17). Thread it
+    # through into module.type_aliases instead of the old hardcoded `{}` --
+    # pure plumbing, no semantic alias registry consumes this yet.
+    var type_aliases: Dict<text, ParserTypeAlias> = {}
+    # Bare top-level statements (parsed as `_expr_N` val bindings). Collected in
+    # source order so they can be wrapped into a synthetic `fn main` when the
+    # module defines none (e.g. `-c "print(1+1)"` snippets / script-style files).
+    var top_level_stmt_names: [text] = []
+    var top_level_stmt_consts: [ParserConst] = []
+    var top_level_stmts: [Stmt] = []
+    # M0 wiring (doc/03_plan/compiler/forwarding/
+    # zero_cost_layers_c0_c5_staged_implementation_plan_2026-08-07.md): the
+    # `__layer_decl` marker below feeds this registry as decls are walked;
+    # check_layer_dag(layer_registry) is run once, after the loop, and any
+    # violation is surfaced as a real parser diagnostic. Local to this call
+    # (one registry per parsed module), same lifetime as `functions`/`structs`
+    # above.
+    var layer_registry = LayerDagRegistry.new()
+    # M1 wiring (same plan doc): `@layer(NAME)` module tag captured by the
+    # `__module_layer_tag` marker below. Empty text means "untagged" -- the
+    # M1 milestone scope is parsing + recording + validating the tag exists;
+    # the same-layer/downward call-direction check that CONSUMES this fact is
+    # a separate, not-yet-landed effort (call-edge tracking).
+    var module_tagged_layer = ""
+    val span = make_span()
+
+    var di = 0
+    while di < decl_count:
+        val idx = module_decl_at(di)
+        val tag_text = flat_decl_tag_text(idx)
+        if flat_bootstrap_enabled() and flat_bridge_trace_enabled():
+            eprint("[flat-bridge] decl:start {di} tag {tag_text}")
+        if tag_text == "1":
+            val fn_: ParserFunction = convert_decl_fn(idx)
+            flat_module_trace_function("before", fn_)
+            functions[fn_.name] = fn_
+            function_order.push(fn_.name)
+            val stored_fn: ParserFunction = functions[fn_.name]
+            flat_module_trace_function("after", stored_fn)
+        elif tag_text == "2":
+            val fn_: ParserFunction = convert_decl_extern_fn(idx)
+            flat_module_trace_function("before", fn_)
+            functions[fn_.name] = fn_
+            function_order.push(fn_.name)
+            val stored_fn: ParserFunction = functions[fn_.name]
+            flat_module_trace_function("after", stored_fn)
+        elif tag_text == "3":
+            val s_name = decl_get_name(idx)
+            # #157: a `trait` decl arrives here (parsed via the struct-body path)
+            # marked by decl_set_trait. Rebuild it into module.traits with its
+            # method list (abstract + default bodies) so lower_impl can inject
+            # un-overridden defaults; skip struct/class emission to avoid a
+            # phantom zero-field `s_name` struct shadowing the trait.
+            if decl_get_is_trait(idx) != 0:
+                var t_methods: [ParserFunction] = []
+                for t_method_id in decl_get_body(idx):
+                    t_methods.push(convert_decl_method_fn(t_method_id, s_name))
+                traits[s_name] = ParserTrait(
+                    name: s_name,
+                    type_params: [],
+                    super_traits: [],
+                    where_clause: [],
+                    methods: t_methods,
+                    assoc_types: [],
+                    visibility: convert_decl_visibility(idx),
+                    is_public: decl_get_visibility_text(idx) == "public",
+                    has_doc_comment: false,
+                    doc_comment: "",
+                    span: span
+                )
+                di = di + 1
+                continue
+            val f_names = decl_get_fields(idx)
+            val f_types = decl_get_field_types(idx)
+            val f_bits = decl_get_field_bits(idx)
+            val f_defaults = decl_get_field_defaults(idx)
+            val s_visibility = convert_decl_visibility(idx)
+            var is_packed = false
+            if idx < decl_is_packed.len():
+                if decl_is_packed[idx] == 1:
+                    is_packed = true
+            if is_packed:
+                var bf_fields: [BitfieldField] = []
+                # Index 0 is the parser's synthetic `__raw` backing-storage
+                # field (see parse_bitfield_decl) -- not a bitfield member.
+                var fi = 1
+                while fi < f_names.len():
+                    var fb: i64 = -1
+                    if fi < f_bits.len():
+                        fb = f_bits[fi]
+                    var bf_bits: i64 = 0
+                    if fb > 0:
+                        bf_bits = fb
+                    bf_fields.push(BitfieldField(
+                        name: f_names[fi],
+                        has_type_: true,
+                        type_: Type(kind: TypeKind.Infer, span: span),
+                        has_bits: fb > 0,
+                        bits: bf_bits,
+                        is_reserved: f_names[fi].starts_with("_reserved_"),
+                        span: span
+                    ))
+                    fi = fi + 1
+                bitfields[s_name] = Bitfield(
+                    name: s_name,
+                    backing_type: Type(kind: TypeKind.Infer, span: span),
+                    fields: bf_fields,
+                    visibility: s_visibility,
+                    is_public: decl_get_visibility_text(idx) == "public",
+                    has_doc_comment: false,
+                    doc_comment: "",
+                    # Bitfield members are laid out in declaration order
+                    # (hardware register layout contract); suppress HIR's
+                    # width-descending field sort.
+                    attributes: [Attribute(name: "preserve_order", args: [], span: span)],
+                    span: span
+                )
+            else:
+                var fields: [ParserField] = []
+                var fi = 0
+                while fi < f_names.len():
+                    # floatstruct fix: `f_types` (decl_get_field_types) was
+                    # fetched above but never consulted here -- every field's
+                    # `type_` was unconditionally Infer regardless of its real
+                    # declared type (e.g. `x: f64`), so downstream HIR/MIR
+                    # lowering silently treated a float field as i64
+                    # (native_float_struct_field_fptosi_corruption bug: `p.x`
+                    # printed as a truncated integer, `Point(x:1.5,y:3.5)`
+                    # print(p.x) -> "1" instead of "1.5"). Convert the real
+                    # flat type-node index through the same convert_flat_type
+                    # used for function params/returns; falls back to Infer
+                    # (unchanged behavior) when a field has no recorded type
+                    # node.
+                    var ft = Type(kind: TypeKind.Infer, span: span)
+                    if fi < f_types.len():
+                        ft = convert_flat_type(f_types[fi])
+                    # Field default: the flat AST records a default expr id per
+                    # field (-1 = none; ast_types.spl `field_defaults`). This
+                    # was `val fd = nil` — hardcoded ABSENT — so `has_default`
+                    # was false for every struct/class field and omitted-field
+                    # construction could never apply declared defaults
+                    # (jit-0x890 defaulted-field bug chain).
+                    var fd_id: i64 = -1
+                    if fi < f_defaults.len():
+                        fd_id = f_defaults[fi]
+                    val field_has_default = fd_id >= 0
+                    var fb: i64 = -1
+                    if fi < f_bits.len():
+                        fb = f_bits[fi]
+                    var field_default = Expr(kind: ExprKind.NilLit, span: span)
+                    if field_has_default:
+                        field_default = convert_flat_expr(fd_id)
+                    var field_bits: i64 = 0
+                    if fb > 0:
+                        field_bits = fb
+                    # NAMED construction (NOT positional): on stage4 the
+                    # positional ParserField(...) form misaligns the 12-field desugared
+                    # ParserField struct, so `type_` receives a non-Type value ->
+                    # lower_type reads a garbage TypeKind -> SIGSEGV in
+                    # lower_type_list when lowering a struct/class field type
+                    # (bug doc iteration 20 #86; gdb: lower_type_list <- lower_type
+                    # <- lower_field <- lower_struct). Explicit field names pin
+                    # every slot.
+                    fields.push(ParserField(
+                        name: f_names[fi],
+                        type_: ft,
+                        has_default: field_has_default,
+                        default: field_default,
+                        visibility: Visibility.Private,
+                        is_public: false,
+                        is_volatile: false,
+                        has_bits: fb > 0,
+                        bits: field_bits,
+                        has_fixed_address: false,
+                        fixed_address: 0,
+                        span: span
+                    ))
+                    fi = fi + 1
+                # decl_get_type_params returns the struct/class's own `<T, U,
+                # ...>` names (threaded through by parse_struct_decl via
+                # decl_set_type_params -- previously dropped entirely, always
+                # `[]` here regardless of a declared `<T>`, see fn_struct_decls.spl).
+                # Build real [ParserTypeParam] so HIR lowering can register `T` as a
+                # genuine SymbolKind.TypeParam symbol instead of it falling
+                # through to the unrelated bareword-forward-declared-type path.
+                val s_tp_names = decl_get_type_params(idx)
+                var s_type_params: [ParserTypeParam] = []
+                var s_tpi = 0
+                while s_tpi < s_tp_names.len():
+                    s_type_params.push(ParserTypeParam(
+                        name: s_tp_names[s_tpi],
+                        bounds: [],
+                        has_default: false,
+                        default: Type(kind: TypeKind.Infer, span: span),
+                        span: span
+                    ))
+                    s_tpi = s_tpi + 1
+                if decl_get_is_value_type(idx) == 0:
+                    # `class` decl (parse_struct_decl(is_class: true) ->
+                    # decl_set_is_value_type(struct_d, 0)) -- route into the
+                    # dedicated `classes` dict instead of `structs` so HIR/MIR
+                    # can finally tell classes apart from structs (see the
+                    # bug note above `var classes` at the top of this fn).
+                    # `methods` stays empty: class methods are carried via the
+                    # synthesized `impl` block (tag_text == "9" below), the
+                    # same mechanism plain structs already use.
+                    classes[s_name] = ParserClass(
+                        name: s_name,
+                        type_params: s_type_params,
+                        fields: fields,
+                        methods: {},
+                        visibility: s_visibility,
+                        is_public: decl_get_visibility_text(idx) == "public",
+                        has_doc_comment: false,
+                        doc_comment: "",
+                        attributes: [],
+                        span: span
+                    )
+                else:
+                    structs[s_name] = ParserStruct(
+                        name: s_name,
+                        type_params: s_type_params,
+                        fields: fields,
+                        visibility: s_visibility,
+                        is_public: decl_get_visibility_text(idx) == "public",
+                        attributes: [],
+                        has_doc_comment: false,
+                        doc_comment: "",
+                        span: span
+                    )
+        elif tag_text == "8":
+            val e_name = decl_get_name(idx)
+            # Recover variant NAMES from the flat AST (stored in the FIELD_NAMES
+            # slot by decl_enum_def), optional discriminant expression ids from
+            # FIELD_DEFAULTS, and (EPA1, bug enum_payload_multi_arity, extends
+            # EPC1) each variant's FULL payload type list: FIELD_TYPES holds
+            # the flat, in-order concatenation of every variant's payload
+            # field types across the whole enum, and FIELD_BITS (reused --
+            # unused by enum decls otherwise; structs use it for bitfield
+            # widths) holds the per-variant field COUNT. Walk a running
+            # offset into the flat list, slicing out each variant's own
+            # `count` entries. A count of 0 means `kind: Tuple([])`.
+            var e_variants: [Variant] = []
+            val e_names = decl_get_fields(idx)
+            val e_discriminants = decl_get_field_defaults(idx)
+            val e_payload_types_flat = decl_get_field_types(idx)
+            val e_payload_counts = decl_get_field_bits(idx)
+            var e_vi = 0
+            var e_type_offset = 0
+            while e_vi < e_names.len():
+                var e_discriminant_id: i64 = -1
+                if e_vi < e_discriminants.len():
+                    e_discriminant_id = e_discriminants[e_vi]
+                val e_has_discriminant = e_discriminant_id >= 0
+                var e_discriminant = Expr(kind: ExprKind.NilLit, span: span)
+                if e_has_discriminant:
+                    e_discriminant = convert_flat_expr(e_discriminant_id)
+                var e_payload_count: i64 = 0
+                if e_vi < e_payload_counts.len():
+                    e_payload_count = e_payload_counts[e_vi]
+                var e_variant_types: [Type] = []
+                var e_ti = 0
+                while e_ti < e_payload_count and e_type_offset < e_payload_types_flat.len():
+                    e_variant_types.push(convert_flat_type(e_payload_types_flat[e_type_offset]))
+                    e_type_offset = e_type_offset + 1
+                    e_ti = e_ti + 1
+                val e_kind = VariantKind.Tuple(e_variant_types)
+                e_variants.push(Variant(
+                    name: e_names[e_vi],
+                    kind: e_kind,
+                    has_discriminant: e_has_discriminant,
+                    discriminant: e_discriminant,
+                    span: span
+                ))
+                e_vi = e_vi + 1
+            enums[e_name] = ParserEnum(
+                name: e_name,
+                type_params: [],
+                variants: e_variants,
+                visibility: convert_decl_visibility(idx),
+                is_public: decl_get_visibility_text(idx) == "public",
+                has_doc_comment: false,
+                doc_comment: "",
+                span: span
+            )
+        elif tag_text == "9":
+            val target_name = decl_get_name(idx)
+            val method_ids = decl_get_body(idx)
+            var methods: Dict<text, ParserFunction> = {}
+            var mi = 0
+            while mi < method_ids.len():
+                val method_id = method_ids[mi]
+                val fn_: ParserFunction = convert_decl_method_fn(method_id, target_name)
+                methods[fn_.name] = fn_
+                mi = mi + 1
+            # decl_get_type_params(idx) here reads the type params threaded by
+            # parse_struct_decl (decl_set_type_params(impl_d, type_params)) for
+            # the synthesized impl block of a generic struct/class's nested
+            # methods (see fn_struct_decls.spl). Previously hardcoded `[]`.
+            val i_tp_names = decl_get_type_params(idx)
+            var i_type_params: [ParserTypeParam] = []
+            var i_tpi = 0
+            while i_tpi < i_tp_names.len():
+                i_type_params.push(ParserTypeParam(
+                    name: i_tp_names[i_tpi],
+                    bounds: [],
+                    has_default: false,
+                    default: Type(kind: TypeKind.Infer, span: span),
+                    span: span
+                ))
+                i_tpi = i_tpi + 1
+            # #157: restore the trait link that parse_impl_decl records via
+            # decl_set_impl_trait. Empty => inherent `impl Type:` (trait_ Infer);
+            # non-empty => `impl ParserTrait for Type:`, needed so lower_impl injects
+            # un-overridden trait default methods for the concrete type.
+            val impl_trait_name = decl_get_impl_trait(idx)
+            val impl_has_trait = impl_trait_name != ""
+            val impl_trait_type = if impl_has_trait:
+                Type(kind: TypeKind.Named(impl_trait_name, []), span: span)
+            else:
+                Type(kind: TypeKind.Infer, span: span)
+            impls.push(Impl(
+                type_: Type(kind: TypeKind.Named(target_name, []), span: span),
+                has_trait_: impl_has_trait,
+                trait_: impl_trait_type,
+                type_params: i_type_params,
+                where_clause: [],
+                methods: methods,
+                assoc_types: [],
+                span: span
+            ))
+        elif tag_text == "4" or tag_text == "5":
+            val c_name = decl_get_name(idx)
+            val flat_span = decl_get_span(idx)
+            var span = make_span()
+            if span_is_valid(flat_span):
+                val start_pos = span_start(flat_span)
+                val end_pos = span_end(flat_span)
+                span = Span(
+                    start: start_pos,
+                    end: end_pos,
+                    line: span_line(flat_span),
+                    col: span_col(flat_span),
+                    file: path,
+                    length: end_pos - start_pos
+                )
+            val body = decl_get_body(idx)
+            var init = Expr(kind: ExprKind.NilLit, span: span)
+            if body.len() > 0:
+                init = convert_flat_expr(body[0])
+            if c_name.starts_with("_expr_"):
+                match init.kind:
+                    case ExprKind.Call(callee, args):
+                        match callee.kind:
+                            case ExprKind.Ident(helper_name):
+                                if helper_name == "__domain_block" and args.len() >= 2:
+                                    match args[0].value.kind:
+                                        case ExprKind.StringLit(kind, _):
+                                            match args[1].value.kind:
+                                                case ExprKind.StringLit(payload, _):
+                                                    domain_blocks.push(DomainBlock(kind, payload, "module", span))
+                                                    di = di + 1
+                                                    continue
+                                                case _:
+                                                    pass
+                                        case _:
+                                            pass
+                                elif helper_name == "__layer_decl" and args.len() >= 2:
+                                    # M0 `layer NAME` / `layer NAME uses A, B`
+                                    # (doc/03_plan/compiler/forwarding/
+                                    # zero_cost_layers_c0_c5_staged_implementation_plan_2026-08-07.md).
+                                    # Feed the parsed (name, uses_csv) facts
+                                    # into layer_registry, then drop the
+                                    # marker entirely -- zero HIR/MIR/codegen
+                                    # output per the plan's M0 scope, same as
+                                    # __domain_block above. The registry is
+                                    # validated once via check_layer_dag()
+                                    # after the whole decl loop below.
+                                    match args[0].value.kind:
+                                        case ExprKind.StringLit(layer_name, _):
+                                            layer_registry.declare(layer_name)
+                                            match args[1].value.kind:
+                                                case ExprKind.StringLit(uses_csv, _):
+                                                    if uses_csv != "":
+                                                        for target in uses_csv.split(","):
+                                                            if target != "":
+                                                                layer_registry.uses(layer_name, target)
+                                                case _:
+                                                    pass
+                                        case _:
+                                            pass
+                                    di = di + 1
+                                    continue
+                                elif helper_name == "__layer_eq_decl" and args.len() >= 3:
+                                    # C1 `@layer_eq(Target) struct View:`
+                                    # (doc/03_plan/compiler/forwarding/
+                                    # zero_cost_layers_c0_c5_staged_implementation_plan_2026-08-07.md).
+                                    # Same marker trick as __layer_decl /
+                                    # __module_layer_tag above: record the
+                                    # (view, target, rename-slots) claim in the
+                                    # side registry and DROP the marker (zero
+                                    # HIR/MIR/codegen output). The claim itself
+                                    # cannot be checked here -- proving it needs
+                                    # the compiler's real struct layout, which
+                                    # is computed over HIR, and 10.frontend must
+                                    # not depend on 20.hir. It is drained after
+                                    # HIR lowering by
+                                    # compiler.semantics.layer_eq_validation.
+                                    match args[0].value.kind:
+                                        case ExprKind.StringLit(leq_view, _):
+                                            match args[1].value.kind:
+                                                case ExprKind.StringLit(leq_target, _):
+                                                    match args[2].value.kind:
+                                                        case ExprKind.StringLit(leq_renames, _):
+                                                            layer_eq_registry_declare(path, leq_view, leq_target, leq_renames)
+                                                        case _:
+                                                            pass
+                                                case _:
+                                                    pass
+                                        case _:
+                                            pass
+                                    di = di + 1
+                                    continue
+                                elif helper_name == "__effect_decl" and args.len() >= 3:
+                                    # C4 `@copy_budget(N)` / `@bounded_loop`
+                                    # (doc/03_plan/compiler/forwarding/
+                                    # zero_cost_layers_c0_c5_staged_implementation_plan_2026-08-07.md).
+                                    # Same marker trick as __layer_eq_decl
+                                    # directly above: record the (fn, budget,
+                                    # bounded) contract in the side registry
+                                    # and DROP the marker (zero HIR/MIR/codegen
+                                    # output). The contract cannot be checked
+                                    # here -- proving it needs real loop and
+                                    # copy facts from lowered function BODIES,
+                                    # and 10.frontend must not depend on
+                                    # 20.hir. It is drained after HIR lowering
+                                    # by compiler.semantics.effect_validation.
+                                    match args[0].value.kind:
+                                        case ExprKind.StringLit(eff_fn, _):
+                                            match args[1].value.kind:
+                                                case ExprKind.StringLit(eff_budget, _):
+                                                    match args[2].value.kind:
+                                                        case ExprKind.StringLit(eff_bounded, _):
+                                                            effect_registry_declare(path, eff_fn, eff_budget, eff_bounded == "1")
+                                                        case _:
+                                                            pass
+                                                case _:
+                                                    pass
+                                        case _:
+                                            pass
+                                    di = di + 1
+                                    continue
+                                elif helper_name == "__advice_decl" and args.len() >= 5:
+                                    # C3 `@advice(KIND, SELECTOR[, MODE])` plus
+                                    # the `@readonly` / `@noalloc` /
+                                    # `@bounded_time` obligation flags
+                                    # (doc/03_plan/ui/perf/
+                                    # render_perf_redesign_plan_2026-08-06.md §3).
+                                    # Same marker trick as __effect_decl
+                                    # directly above: record the advice in the
+                                    # side registry and DROP the marker (zero
+                                    # HIR/MIR/codegen output). It cannot be
+                                    # checked here -- proving a pointcut needs
+                                    # the logical join-point universe, which is
+                                    # enumerated over lowered HIR bodies, and
+                                    # 10.frontend must not depend on 20.hir. It
+                                    # is drained after HIR lowering by
+                                    # compiler.semantics.aspect_validation.
+                                    match args[0].value.kind:
+                                        case ExprKind.StringLit(adv_fn, _):
+                                            match args[1].value.kind:
+                                                case ExprKind.StringLit(adv_kind, _):
+                                                    match args[2].value.kind:
+                                                        case ExprKind.StringLit(adv_sel, _):
+                                                            match args[3].value.kind:
+                                                                case ExprKind.StringLit(adv_mode, _):
+                                                                    match args[4].value.kind:
+                                                                        case ExprKind.StringLit(adv_flags, _):
+                                                                            val adv_ro: bool = adv_flags.len() > 0 and adv_flags[0] == "1"
+                                                                            val adv_na: bool = adv_flags.len() > 1 and adv_flags[1] == "1"
+                                                                            val adv_bt: bool = adv_flags.len() > 2 and adv_flags[2] == "1"
+                                                                            aspect_registry_declare(path, adv_fn, adv_kind, adv_sel, adv_mode, adv_ro, adv_na, adv_bt)
+                                                                        case _:
+                                                                            pass
+                                                                case _:
+                                                                    pass
+                                                        case _:
+                                                            pass
+                                                case _:
+                                                    pass
+                                        case _:
+                                            pass
+                                    di = di + 1
+                                    continue
+                                elif helper_name == "__resource_decl" and args.len() >= 2:
+                                    # WP-A `@sffi(...) resource Name`
+                                    # (doc/03_plan/language/resource/
+                                    # resource_parallel_agent_plan_2026-08-06.md).
+                                    # Parse + validation + type pre-registration
+                                    # all happen in the parser. WP-C: feed the
+                                    # parsed (name, meta_csv) facts into
+                                    # resource_registry (compiler.frontend.
+                                    # resource_registry), the same trick
+                                    # layer_registry uses above, so later
+                                    # layers (WP-E drop edges, WP-G borrow
+                                    # enforcement) can query the metadata by
+                                    # name without a HirModule/ParserModule
+                                    # field. The marker itself is still
+                                    # dropped -- WP-C is metadata propagation
+                                    # only, not codegen (still zero
+                                    # HIR/MIR/codegen output for the decl
+                                    # itself, exactly like __layer_decl).
+                                    match args[0].value.kind:
+                                        case ExprKind.StringLit(resource_name, _):
+                                            match args[1].value.kind:
+                                                case ExprKind.StringLit(meta_csv, _):
+                                                    resource_registry_declare(resource_name, meta_csv)
+                                                case _:
+                                                    pass
+                                        case _:
+                                            pass
+                                    di = di + 1
+                                    continue
+                                elif helper_name == "__module_layer_tag" and args.len() >= 1:
+                                    # M1 `@layer(NAME)` module tag (doc/03_plan/
+                                    # compiler/forwarding/
+                                    # zero_cost_layers_c0_c5_staged_implementation_plan_2026-08-07.md).
+                                    # Record the tagged name; the "must refer
+                                    # to a layer declared somewhere in this
+                                    # module" check runs once after the whole
+                                    # decl loop below, once layer_registry has
+                                    # seen every `layer NAME` decl regardless
+                                    # of its source position relative to this
+                                    # tag. Marker dropped either way (zero
+                                    # HIR/MIR/codegen output).
+                                    match args[0].value.kind:
+                                        case ExprKind.StringLit(tag_name, _):
+                                            module_tagged_layer = tag_name
+                                        case _:
+                                            pass
+                                    di = di + 1
+                                    continue
+                            case _:
+                                pass
+                    case _:
+                        pass
+            val decl_const = ParserConst(
+                name: c_name,
+                has_type_: false,
+                type_: Type(kind: TypeKind.Infer, span: span),
+                value: init,
+                is_mutable: tag_text == "5",
+                visibility: convert_decl_visibility(idx),
+                is_public: decl_get_visibility_text(idx) == "public",
+                is_volatile: false,
+                has_fixed_address: false,
+                fixed_address: 0,
+                span: span
+            )
+            if c_name.starts_with("_expr_"):
+                # Bare top-level statement: defer. If the module has no `fn main`
+                # these become a synthetic main body; otherwise they are restored
+                # as constants (previous behavior).
+                top_level_stmt_names.push(c_name)
+                top_level_stmt_consts.push(decl_const)
+                top_level_stmts.push(Stmt(kind: StmtKind.Expr(init), span: span))
+            else:
+                constants[c_name] = decl_const
+                # If this file is later recognized as a script (it has bare
+                # expressions and no explicit main), replay its bindings in
+                # the synthetic main too. That preserves source order and
+                # gives compound values normal local runtime metadata instead
+                # of forcing arrays/structs through scalar global constants.
+                val script_binding_type = Type(kind: TypeKind.Infer, span: span)
+                if tag_text == "5":
+                    top_level_stmts.push(Stmt(kind: StmtKind.Var(c_name, script_binding_type, init), span: span))
+                else:
+                    top_level_stmts.push(Stmt(kind: StmtKind.Val(c_name, script_binding_type, init), span: span))
+        elif tag_text == "6":
+            val module_path = decl_get_name(idx)
+            val items_list = decl_get_imports(idx)
+            var import_items: [ImportItem] = []
+            var ii = 0
+            while ii < items_list.len():
+                val raw_import_item = items_list[ii]
+                val alias_parts = raw_import_item.split(":")
+                val import_name = if alias_parts.len() == 2: alias_parts[0] else: raw_import_item
+                val import_alias = if alias_parts.len() == 2: alias_parts[1] else: ""
+                import_items.push(ImportItem(
+                    name: import_name,
+                    has_alias: alias_parts.len() == 2,
+                    alias: import_alias
+                ))
+                ii = ii + 1
+            imports.push(ParserImport(
+                module: module_path,
+                items: import_items,
+                is_lazy: decl_get_is_lazy(idx) != 0,
+                span: span
+            ))
+        elif tag_text == "7":
+            val export_items = decl_get_imports(idx)
+            exports.push(Export(items: flat_copy_text_list(export_items), span: span))
+        elif tag_text == "14":
+            val aop_data = decl_get_imports(idx)
+            var aop_pointcut = ""
+            if aop_data.len() > 0:
+                aop_pointcut = aop_data[0]
+            var aop_form = "before"
+            if aop_data.len() > 1:
+                aop_form = aop_data[1]
+            var aop_priority_text = "0"
+            if aop_data.len() > 2:
+                aop_priority_text = aop_data[2]
+            aop_advices.push(AopAdvice(
+                pointcut: aop_pointcut,
+                form: aop_form,
+                handler: decl_get_name(idx),
+                priority: text_parse_int_simple(aop_priority_text),
+                span: span
+            ))
+        elif tag_text == "15":
+            val di_data = decl_get_imports(idx)
+            var di_pointcut = ""
+            if di_data.len() > 0:
+                di_pointcut = di_data[0]
+            di_bindings.push(DiBinding(
+                pointcut: di_pointcut,
+                implementation: decl_get_name(idx),
+                span: span
+            ))
+        elif tag_text == "16":
+            val ar_data = decl_get_imports(idx)
+            var ar_pointcut = ""
+            if ar_data.len() > 0:
+                ar_pointcut = ar_data[0]
+            var ar_message = ""
+            if ar_data.len() > 1:
+                ar_message = ar_data[1]
+            arch_rules.push(ArchRule(
+                kind: decl_get_name(idx),
+                pointcut: ar_pointcut,
+                message: ar_message,
+                span: span
+            ))
+        elif tag_text == "17":
+            # type X = Y (decl_type_alias). Pure capture: name + aliased type
+            # only -- no type_params/visibility recorded by the parser yet,
+            # so those are left at their defaults.
+            val ta_name = decl_get_name(idx)
+            val ta_type = convert_flat_type(decl_get_ret_type(idx))
+            type_aliases[ta_name] = ParserTypeAlias(
+                name: ta_name,
+                type_params: [],
+                type_: ta_type,
+                visibility: convert_decl_visibility(idx),
+                is_public: decl_get_visibility_text(idx) == "public",
+                span: span
+            )
+        di = di + 1
+        if flat_bootstrap_enabled() and flat_bridge_trace_enabled():
+            eprint("[flat-bridge] decl:done {di}")
+
+    # M0 layer-DAG validation: run once, after every `layer` decl in this
+    # module has been fed into layer_registry above. A violation (a cycle, a
+    # declared-upward `uses` edge, or a `uses` edge to an undeclared layer)
+    # is surfaced as a real compile diagnostic through the same parser error
+    # channel parser_has_errors()/parser_get_errors() already expose.
+    val layer_dag_verdict = check_layer_dag(layer_registry)
+    if not layer_dag_verdict.ok:
+        parser_error(layer_dag_verdict.diagnostic)
+
+    # M1b wiring: serialize this module's own declared layers/edges (flat
+    # "D:name" / "E:from>to" lines, declaration order) into
+    # ParserModule.layer_dag_edges so a whole-program driver pass can merge
+    # every module's facts into one project-wide LayerDagRegistry after all
+    # modules are parsed. layer_registry itself is local to this call and
+    # would otherwise be discarded once check_layer_dag() above returns.
+    var layer_dag_edges_lines: [text] = []
+    for layer_name in layer_registry.names:
+        layer_dag_edges_lines.push("D:" + layer_name)
+    for layer_edge in layer_registry.use_edges:
+        layer_dag_edges_lines.push("E:" + layer_edge.from_name + ">" + layer_edge.to_name)
+    val layer_dag_edges_text = layer_dag_edges_lines.join("\n")
+
+    # M1: `@layer(NAME)` module tag must refer to a layer actually declared
+    # (via M0's `layer NAME` decl) somewhere in scope. Checked after the DAG
+    # validation above and after layer_registry has seen every `layer` decl
+    # in this module, so declaration order relative to the `@layer(...)` tag
+    # does not matter. The same-layer/downward CALL check that consumes this
+    # fact is out of scope for M1 (separate call-edge-tracking effort).
+    if module_tagged_layer != "" and not layer_registry.has_layer(module_tagged_layer):
+        parser_error("error[layer_dag]: module tagged with unknown layer '"
+            + module_tagged_layer + "'")
+
+    # Synthetic main: wrap bare top-level statements so script-style sources
+    # (`-c` snippets, single files without `fn main`) actually execute instead
+    # of the interpreter backend returning Unit (no `main` found).
+    if top_level_stmt_names.len() > 0:
+        if not functions.contains("main"):
+            val main_span = make_span()
+            functions["main"] = parser_function_new(
+                "main",
+                [],
+                [],
+                false,
+                Type(kind: TypeKind.Infer, span: main_span),
+                Block(stmts: top_level_stmts, span: main_span),
+                Visibility.Private,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                [],
+                false,
+                "",
+                main_span
+            )
+            function_order.push("main")
+        else:
+            # ParserModule already defines main: keep previous behavior (store as
+            # `_expr_N` constants) to avoid any semantic change.
+            var tsi = 0
+            while tsi < top_level_stmt_names.len():
+                constants[top_level_stmt_names[tsi]] = top_level_stmt_consts[tsi]
+                tsi = tsi + 1
+
+    if flat_bridge_trace_enabled():
+        print "[flat-bridge] building frontend module path={path}"
+    val built_module = parser_module_new(
+        name: path,
+        imports: imports,
+        exports: exports,
+        domain_blocks: domain_blocks,
+        functions: functions,
+        function_order: function_order,
+        classes: classes,
+        actors: {},
+        actor_order: [],
+        structs: structs,
+        enums: enums,
+        bitfields: bitfields,
+        traits: traits,
+        impls: impls,
+        type_aliases: type_aliases,
+        constants: constants,
+        static_asserts: [],
+        aop_advices: aop_advices,
+        di_bindings: di_bindings,
+        arch_rules: arch_rules,
+        mock_decls: [],
+        tagged_layer: module_tagged_layer,
+        layer_dag_edges: layer_dag_edges_text
+    )
+    if flat_bridge_trace_enabled():
+        print "[flat-bridge] built frontend module path={path}"
+    built_module
+
+pub fn parse_and_build_module_scoped(source: text, path: text, streaming_scope: bool) -> ParserModule:
+    val saved_lex_source = rt_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE") ?? ""
+    val saved_lex_path = rt_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? ""
+    reset_all_pools()
+    parser_init_with_path(source, path)
+    # The caller has already admitted this only for the experimental Stage4
+    # AOT low-memory path. Keep the scope alive while the rich ParserModule is
+    # copied out of the flat AST, then promote that retained graph before the
+    # arena is cleared.
+    val transient_scope = if streaming_scope: rt_transient_array_scope_begin() else: false
+    parse_module_body()
+    # String interpolation fragments are parsed only after the enclosing module
+    # body. Reapply placeholder shorthand at that point so `{_}` / `{_1}` in a
+    # call argument produces its enclosing callback lambda before the bridge
+    # converts flat nodes into ParserModule expressions.
+    expand_string_interpolations(0)
+    transform_placeholder_call_args_after_interpolation()
+    # Driver/native-build path only: promote + desugar placeholder lambdas that
+    # were written as interpolated string call arguments. The interpreter path
+    # gets this from core_frontend_parse(); this path does not go through it.
+    # doc/08_tracking/bug/placeholder_lambda_fix_missed_driver_native_build_parse_path_2026-08-09.md
+    expand_interpolated_placeholder_call_args(0)
+    desugar_collections(0, 0)
+    if parser_has_errors():
+        val errors = parser_get_errors()
+        var ei = 0
+        while ei < errors.len():
+            print "  {errors[ei]}"
+            ei = ei + 1
+    if transient_scope:
+        val _paused = rt_transient_array_scope_pause()
+    val built_module = flat_ast_to_module(path)
+    if transient_scope:
+        val _promoted = rt_transient_heap_promote(built_module)
+        lexer_release_parse_source_globals()
+        # ORDER IS LOAD-BEARING: end the scope BEFORE ast_reset(). Arrays that
+        # ast_reset() allocates while the scope is still active are stamped with
+        # the scope id and are free()d + unregistered by scope end, leaving the
+        # process-lifetime arena globals pointing at dead objects (len 0/-1,
+        # pushes silently dropped). Same defect and same fix as
+        # driver_end_transient_parse_scope(). See
+        # doc/08_tracking/bug/ast_arena_reset_inside_transient_scope_2026-08-01.md
+        val _ended = rt_transient_array_scope_end()
+        ast_reset()
+    else:
+        rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", saved_lex_source)
+        rt_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", saved_lex_path)
+    built_module
+
+fn parse_and_build_module(source: text, path: text) -> ParserModule:
+    parse_and_build_module_scoped(source, path, false)

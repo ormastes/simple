@@ -1,0 +1,203 @@
+# @cover src/lib/blink/paint/invalidation.spl 90%
+# @req REQ-BLINK-PAINT-INVALIDATION-001
+"""
+# Blink Paint Invalidation Specification
+
+**Category:** Browser / Blink
+**Status:** Active
+
+## Overview
+
+When a page restyles, I do not want to be told "everything changed". I want to
+know which boxes actually changed and what area they cover, so a repaint can be
+scoped to that area.
+
+These examples build the same document twice with two stylesheets, diff the two
+resulting styled layouts, and assert on the exact set of changed node ids and
+the damage rects that cover them.
+
+**What is NOT claimed here.** The cascade is still total: every element is
+re-resolved against the whole stylesheet on both frames, and nothing in this
+module makes that incremental. The property under test is CORRECTNESS of the
+reported damage — an identical frame reports nothing, a recoloured box reports
+itself alone, a box that moved reports the union of where it was and where it
+now is, and a document whose box set changed reports an honest full
+invalidation rather than a diff it cannot compute. No timing is measured and no
+speed-up is asserted.
+
+That exactness matters: a "recompute everything" invalidation would satisfy
+safety but fail every example below that pins a one-element changed set.
+
+@manual_section Browser Rendering
+"""
+
+use std.spipe.*
+use std.blink.dom.node.{DomTree}
+use std.blink.html_parser.token.{HtmlToken, HtmlTokenKind, HtmlAttribute}
+use std.blink.html_parser.tree_builder.{build_html_tree}
+use std.blink.css_parser.tokenizer.{tokenize_css}
+use std.blink.css_parser.parser.{parse_css, CssStyleSheet}
+use std.blink.layout.style_bridge.{build_styled_layout, StyledLayout}
+use std.blink.paint.invalidation.{diff_styled_layouts, styles_equal, DamageRect}
+
+fn _start(name: text) -> HtmlToken:
+    var attrs: [HtmlAttribute] = []
+    HtmlToken(kind: HtmlTokenKind.StartTag, name: name, data: "",
+              attributes: attrs, self_closing: false)
+
+fn _start_class(name: text, cls: text) -> HtmlToken:
+    var attrs: [HtmlAttribute] = [HtmlAttribute(name: "class", value: cls)]
+    HtmlToken(kind: HtmlTokenKind.StartTag, name: name, data: "",
+              attributes: attrs, self_closing: false)
+
+fn _end(name: text) -> HtmlToken:
+    var attrs: [HtmlAttribute] = []
+    HtmlToken(kind: HtmlTokenKind.EndTag, name: name, data: "",
+              attributes: attrs, self_closing: false)
+
+# <body><div class="a"></div><div class="b"></div></body>
+fn _page_tree() -> DomTree:
+    var tokens: [HtmlToken] = [
+        _start("body"),
+        _start_class("div", "a"), _end("div"),
+        _start_class("div", "b"), _end("div"),
+        _end("body")
+    ]
+    build_html_tree(tokens)
+
+fn _layout(css: text) -> StyledLayout:
+    build_styled_layout(_page_tree(), parse_css(tokenize_css(css)), 800.0, 600.0)
+
+# Both divs are 100x50 blocks stacked by block flow; `.a` is red, `.b` is blue.
+val BASE_CSS: text = "div { display: block; width: 100px; height: 50px; } .a { background-color: red; } .b { background-color: blue; }"
+
+describe "diff_styled_layouts":
+    it "reports no damage at all when the two frames are identical":
+        step("build the same document twice from the same stylesheet")
+        val a = _layout(BASE_CSS)
+        val b = _layout(BASE_CSS)
+
+        step("diff them")
+        val inv = diff_styled_layouts(a, b)
+
+        step("nothing changed, so nothing repaints and no area is damaged")
+        expect(inv.structural).to_equal(false)
+        expect(inv.changed_node_ids.len()).to_equal(0)
+        expect(inv.damage.len()).to_equal(0)
+        expect(inv.is_empty()).to_equal(true)
+
+    it "reports only the recoloured box when one rule changes colour":
+        step("change `.b`'s background from blue to green, touching nothing else")
+        val before = _layout(BASE_CSS)
+        val after = _layout("div { display: block; width: 100px; height: 50px; } .a { background-color: red; } .b { background-color: green; }")
+
+        step("diff the two frames")
+        val inv = diff_styled_layouts(before, after)
+
+        step("exactly ONE box changed — a total invalidation would report three")
+        expect(inv.structural).to_equal(false)
+        expect(inv.changed_node_ids.len()).to_equal(1)
+
+        step("and it is the second div, node id 3 (body=1, first div=2, second div=3)")
+        expect(inv.changed_node_ids[0 as i32]).to_equal(3)
+
+        step("its damage is its own box: 100 wide and 50 tall, as the stylesheet says")
+        expect(inv.damage.len()).to_equal(1)
+        expect(inv.damage[0 as i32].width()).to_equal(100.0)
+        expect(inv.damage[0 as i32].height()).to_equal(50.0)
+
+        step("and it sits below the first div, whose 50px height pushes it to y=50")
+        expect(inv.damage[0 as i32].top).to_equal(50.0)
+
+    it "reports a box that only MOVED, even though its own style is unchanged":
+        step("grow the first div from 50 to 80 tall, which pushes the second one down")
+        val before = _layout(BASE_CSS)
+        val after = _layout("div { display: block; width: 100px; height: 50px; } .a { background-color: red; height: 80px; } .b { background-color: blue; }")
+
+        step("diff the two frames")
+        val inv = diff_styled_layouts(before, after)
+
+        step("three boxes are dirty: the restyled div, the div it shifted, and the body they grew")
+        # body=1 (its content box grew from 100 to 130 tall), div .a=2 (restyled),
+        # div .b=3 (unchanged style, shifted down).
+        expect(inv.changed_node_ids.len()).to_equal(3)
+        expect(inv.changed_node_ids[0 as i32]).to_equal(1)
+        expect(inv.changed_node_ids[1 as i32]).to_equal(2)
+        expect(inv.changed_node_ids[2 as i32]).to_equal(3)
+
+        step("the second div's ComputedStyle is byte-for-byte identical across the frames")
+        match before.style_for(3):
+            Some(s_before):
+                match after.style_for(3):
+                    Some(s_after):
+                        expect(styles_equal(s_before, s_after)).to_equal(true)
+                    None:
+                        expect(1).to_equal(0)
+            None:
+                expect(1).to_equal(0)
+
+        step("so a style-only diff would have MISSED it and left a stale box on screen")
+        step("its damage spans both positions: from its old top 50 to its new bottom 80+50 = 130")
+        val moved = inv.damage[2 as i32]
+        expect(moved.top).to_equal(50.0)
+        expect(moved.bottom).to_equal(130.0)
+
+    it "declares a full invalidation when the document's box set changes":
+        step("compare a two-div document against a three-div one")
+        val before = _layout(BASE_CSS)
+        var tokens: [HtmlToken] = [
+            _start("body"),
+            _start_class("div", "a"), _end("div"),
+            _start_class("div", "b"), _end("div"),
+            _start_class("div", "b"), _end("div"),
+            _end("body")
+        ]
+        val after = build_styled_layout(build_html_tree(tokens),
+                                        parse_css(tokenize_css(BASE_CSS)), 800.0, 600.0)
+
+        step("diff the two frames")
+        val inv = diff_styled_layouts(before, after)
+
+        step("the per-node diff is meaningless across different box sets, so it says so")
+        expect(inv.structural).to_equal(true)
+
+        step("and it does NOT dress that up as a precise list of changed nodes")
+        expect(inv.changed_node_ids.len()).to_equal(0)
+        expect(inv.is_empty()).to_equal(false)
+
+describe "PaintInvalidation.bounding_damage":
+    it "merges every damage rect into the one rect a whole-surface blit needs":
+        step("a change that dirties both divs, stacked at y 0..80 and 80..130")
+        val before = _layout(BASE_CSS)
+        val after = _layout("div { display: block; width: 100px; height: 50px; } .a { background-color: red; height: 80px; } .b { background-color: blue; }")
+        val inv = diff_styled_layouts(before, after)
+
+        step("the bounding damage spans from the topmost top to the bottommost bottom")
+        match inv.bounding_damage():
+            Some(b):
+                expect(b.top).to_equal(0.0)
+                expect(b.bottom).to_equal(130.0)
+                expect(b.left).to_equal(0.0)
+                expect(b.width()).to_equal(100.0)
+            None:
+                expect(1).to_equal(0)
+
+    it "has no bounding damage when nothing changed":
+        step("diff two identical frames")
+        val inv = diff_styled_layouts(_layout(BASE_CSS), _layout(BASE_CSS))
+
+        step("no rects to merge means nil, not a zero-sized rect at the origin")
+        expect(inv.bounding_damage()).to_be_nil()
+
+describe "DamageRect.union":
+    it "returns the smallest rect containing both inputs":
+        step("union two disjoint rects")
+        val a = DamageRect(left: 0.0, top: 0.0, right: 10.0, bottom: 10.0)
+        val b = DamageRect(left: 20.0, top: 5.0, right: 30.0, bottom: 40.0)
+        val u = a.union(b)
+
+        step("each edge takes the outermost of the two: left 0, top 0, right 30, bottom 40")
+        expect(u.left).to_equal(0.0)
+        expect(u.top).to_equal(0.0)
+        expect(u.right).to_equal(30.0)
+        expect(u.bottom).to_equal(40.0)

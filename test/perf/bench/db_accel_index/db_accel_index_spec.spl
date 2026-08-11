@@ -1,0 +1,203 @@
+# DB Accel Phase 2 Index Structures — Regression Tests
+#
+# Exercises the PRODUCT implementations in src/lib/nogc_sync_mut/db/.
+# There are deliberately NO inline re-implementations here: a spec that
+# defines the code it claims to test can never observe a product change.
+
+use std.db.prefix_index.{
+    prefix_index_new,
+    prefix_index_insert,
+    prefix_index_lookup_prefix,
+    prefix_index_lookup_exact,
+    prefix_index_size
+}
+use std.db.text_index.{
+    text_index_new,
+    text_index_insert,
+    text_index_size,
+    text_index_search_exact,
+    text_index_count_prefix,
+    text_index_count_contains
+}
+use std.db.page_summary.{
+    page_summary_new,
+    page_summary_hash,
+    page_summary_index_new,
+    page_summary_index_add,
+    page_summary_scan_range,
+    page_summary_scan_by_hash,
+    page_summary_total_rows
+}
+use std.db.filter_in.{
+    FilterInResult,
+    filter_in_text,
+    filter_in_int,
+    filter_in_text_count,
+    filter_in_int_count,
+    filter_in_result_ids,
+    filter_in_result_count
+}
+
+# ============================================================================
+# PrefixIndex Tests
+# ============================================================================
+
+describe "PrefixIndex":
+    it "starts empty":
+        val idx = prefix_index_new()
+        expect(prefix_index_size(idx)).to_equal(0)
+
+    it "insert increases size":
+        val idx = prefix_index_new()
+        val idx2 = prefix_index_insert(idx, "ns/foo", 1)
+        expect(prefix_index_size(idx2)).to_equal(1)
+
+    it "lookup prefix finds matching entry":
+        val idx = prefix_index_new()
+        val idx2 = prefix_index_insert(idx, "ns/foo", 10)
+        val idx3 = prefix_index_insert(idx2, "ns/bar", 20)
+        val hits = prefix_index_lookup_prefix(idx3, "ns/")
+        expect(hits.len()).to_equal(2)
+
+    it "lookup prefix excludes non-matching entry":
+        val idx = prefix_index_new()
+        val idx2 = prefix_index_insert(idx, "ns/foo", 10)
+        val idx3 = prefix_index_insert(idx2, "other/baz", 30)
+        val hits = prefix_index_lookup_prefix(idx3, "ns/")
+        expect(hits.len()).to_equal(1)
+
+    it "lookup exact returns only exact match":
+        val idx = prefix_index_new()
+        val idx2 = prefix_index_insert(idx, "ns/foo", 10)
+        val idx3 = prefix_index_insert(idx2, "ns/foobar", 20)
+        val hits = prefix_index_lookup_exact(idx3, "ns/foo")
+        expect(hits.len()).to_equal(1)
+
+# ============================================================================
+# TextIndex Tests
+# ============================================================================
+
+describe "TextIndex":
+    it "starts empty":
+        val tidx = text_index_new()
+        expect(text_index_size(tidx)).to_equal(0)
+
+    it "insert grows size":
+        val tidx = text_index_new()
+        val tidx2 = text_index_insert(tidx, "hello world", 0)
+        expect(text_index_size(tidx2)).to_equal(1)
+
+    it "search_prefix finds entries":
+        val tidx = text_index_new()
+        val tidx2 = text_index_insert(tidx, "user/alice", 0)
+        val tidx3 = text_index_insert(tidx2, "user/bob", 1)
+        val tidx4 = text_index_insert(tidx3, "admin/carol", 2)
+        expect(text_index_count_prefix(tidx4, "user/")).to_equal(2)
+
+    it "search_contains finds substring":
+        val tidx = text_index_new()
+        val tidx2 = text_index_insert(tidx, "hello world", 0)
+        val tidx3 = text_index_insert(tidx2, "goodbye world", 1)
+        val tidx4 = text_index_insert(tidx3, "nothing here", 2)
+        expect(text_index_count_contains(tidx4, "world")).to_equal(2)
+
+    it "search_exact returns only exact match":
+        val tidx = text_index_new()
+        val tidx2 = text_index_insert(tidx, "foo", 0)
+        val tidx3 = text_index_insert(tidx2, "foobar", 1)
+        val hits = text_index_search_exact(tidx3, "foo")
+        expect(hits.len()).to_equal(1)
+
+    it "search_contains empty token matches all":
+        val tidx = text_index_new()
+        val tidx2 = text_index_insert(tidx, "alpha", 0)
+        val tidx3 = text_index_insert(tidx2, "beta", 1)
+        expect(text_index_count_contains(tidx3, "")).to_equal(2)
+
+# ============================================================================
+# PageSummary Tests
+# ============================================================================
+
+describe "PageSummary":
+    it "scan_range returns pages overlapping range":
+        val idx = page_summary_index_new()
+        val p0 = page_summary_new(0, 1, 100, 50)
+        val p1 = page_summary_new(1, 101, 200, 50)
+        val idx2 = page_summary_index_add(idx, p0)
+        val idx3 = page_summary_index_add(idx2, p1)
+        val hits = page_summary_scan_range(idx3, 50, 150)
+        expect(hits.len()).to_equal(2)
+
+    it "scan_range excludes non-overlapping pages":
+        val idx = page_summary_index_new()
+        val p0 = page_summary_new(0, 1, 100, 50)
+        val p1 = page_summary_new(1, 101, 200, 50)
+        val idx2 = page_summary_index_add(idx, p0)
+        val idx3 = page_summary_index_add(idx2, p1)
+        val hits = page_summary_scan_range(idx3, 150, 200)
+        expect(hits.len()).to_equal(1)
+
+    it "total_rows sums all pages":
+        val idx = page_summary_index_new()
+        val p0 = page_summary_new(0, 1, 100, 30)
+        val p1 = page_summary_new(1, 101, 200, 20)
+        val idx2 = page_summary_index_add(idx, p0)
+        val idx3 = page_summary_index_add(idx2, p1)
+        expect(page_summary_total_rows(idx3)).to_equal(50)
+
+    it "hash is deterministic":
+        val h1 = page_summary_hash(1, 100, 50)
+        val h2 = page_summary_hash(1, 100, 50)
+        expect(h1).to_equal(h2)
+
+    it "hash differs for different inputs":
+        val h1 = page_summary_hash(1, 100, 50)
+        val h2 = page_summary_hash(1, 200, 50)
+        expect(h1).to_not_equal(h2)
+
+    it "scan_by_hash selects only the page carrying that summary hash":
+        val idx = page_summary_index_new()
+        val p0 = page_summary_new(0, 1, 100, 30)
+        val p1 = page_summary_new(1, 101, 200, 20)
+        val idx2 = page_summary_index_add(idx, p0)
+        val idx3 = page_summary_index_add(idx2, p1)
+        val hits = page_summary_scan_by_hash(idx3, page_summary_hash(101, 200, 20))
+        expect(hits.len()).to_equal(1)
+
+# ============================================================================
+# FilterIn Tests
+# ============================================================================
+
+describe "FilterIn":
+    it "filter_in_text matches all needles present":
+        val values = ["a", "b", "c", "d"]
+        val needles = ["b", "d"]
+        val result = filter_in_text(values, needles)
+        expect(result.matched_count).to_equal(2)
+
+    it "filter_in_text empty needles matches nothing":
+        val values = ["a", "b", "c"]
+        val needles: [text] = []
+        val result = filter_in_text(values, needles)
+        expect(result.matched_count).to_equal(0)
+
+    it "filter_in_int OR semantics returns correct row ids":
+        val values = [10, 20, 30, 40, 50]
+        val needles = [20, 40]
+        val result = filter_in_int(values, needles)
+        expect(result.row_ids.len()).to_equal(2)
+
+    it "filter_in_int_count helper is consistent":
+        val values = [1, 2, 3, 4, 5]
+        val needles = [1, 3, 5]
+        expect(filter_in_int_count(values, needles)).to_equal(3)
+
+    it "filter_in_text_count helper is consistent":
+        val values = ["x", "y", "z"]
+        val needles = ["x", "z"]
+        expect(filter_in_text_count(values, needles)).to_equal(2)
+
+    it "result accessors agree with the record fields":
+        val result = filter_in_int([10, 20, 30], [30])
+        expect(filter_in_result_count(result)).to_equal(1)
+        expect(filter_in_result_ids(result).len()).to_equal(1)

@@ -1,0 +1,138 @@
+# @req REQ-LLM-MSG-002 REQ-LLM-MSG-003 REQ-LLM-MSG-008 REQ-LLM-MSG-012 REQ-LLM-MSG-016
+"""Pure-Simple SQL persistence preserves canonical messaging state and truth."""
+
+use std.spec.*
+use std.io_runtime.{file_delete, getpid}
+use app.llm_caret.messaging.domain.model.*
+use app.llm_caret.messaging.adapter.store.pure_sql_store.*
+
+fn room(id: text, kind: RoomKind) -> Room:
+    Room(room_id: messaging_id("room", id), workspace_id: messaging_id("workspace", "w1"),
+        kind: kind, name: id, topic: "persistence", visibility: "private", mode: "mention",
+        update_policy: "milestones", context_policy: "previous:2",
+        created_by: messaging_id("identity", "owner"), created_at: 10)
+
+fn message(id: text, room_id: text, body: text) -> RoomMessage:
+    RoomMessage(message_id: messaging_id("message", id), workspace_id: messaging_id("workspace", "w1"),
+        room_id: messaging_id("room", room_id), room_seq: 0, thread_root_id: "", reply_to_id: "",
+        sender_identity_id: messaging_id("identity", "human-1"), sender_agent_id: "",
+        origin: MessageOrigin.Human, body: body, mentions: ["reviewer"], command: "",
+        audience: ["reviewer"], external_ref: "", correlation_id: "corr-1", causation_id: "",
+        hop_count: 0, created_at: 20, edited_at: 0)
+
+describe "LLM Caret pure-Simple SQL store":
+    it "allocates monotonic room sequences and deduplicates canonical writes":
+        step("Open the embedded database and create the complete primitive schema")
+        val path = "/tmp/llm_caret_store_sequence_" + getpid().to_text() + ".db"
+        file_delete(path)
+        val store = PureSqlMessagingStore.open(path)
+        expect(store.ready()).to_equal(true)
+        expect(store.table_ready("context_manifests")).to_equal(true)
+        expect(store.table_ready("dead_letters")).to_equal(true)
+        expect(store.table_ready("artifacts")).to_equal(true)
+        expect(store.table_ready("mcp_idempotency")).to_equal(true)
+        expect(store.table_ready("transport_bindings")).to_equal(true)
+        expect(store.table_ready("external_refs")).to_equal(true)
+        expect(store.table_ready("canonical_events")).to_equal(true)
+        expect(store.table_ready("workspaces")).to_equal(true)
+        expect(store.table_ready("identities")).to_equal(true)
+        expect(store.table_ready("task_events")).to_equal(true)
+        expect(store.create_room(room("r1", RoomKind.Channel)).ok).to_equal(true)
+
+        step("Append messages with server-owned monotonic room sequence")
+        val first = store.append_message(message("m1", "r1", "first 'quoted' message"), "request-1")
+        val second = store.append_message(message("m2", "r1", "second"), "request-2")
+        expect(first.room_seq).to_equal(1)
+        expect(second.room_seq).to_equal(2)
+
+        step("Replay the same idempotency key without creating another message")
+        val replay = store.append_message(message("m-replay", "r1", "ignored"), "request-1")
+        expect(replay.duplicate).to_equal(true)
+        expect(replay.message_id).to_equal("m1")
+        expect(store.message_count()).to_equal(2)
+        expect(store.canonical_event_count()).to_equal(3)
+
+        step("Read ordered history and advance a monotonic local cursor")
+        val history = store.message_history("r1", 0, 10)
+        expect(history.len()).to_equal(2)
+        expect(history[0].body).to_equal("first 'quoted' message")
+        expect(history[1].room_seq).to_equal(2)
+        expect(store.advance_cursor("r1", "human-1", 2, 30).ok).to_equal(true)
+        expect(store.advance_cursor("r1", "human-1", 1, 31).ok).to_equal(true)
+        expect(store.cursor("r1", "human-1")).to_equal(2)
+        expect(store.close()).to_equal(true)
+        file_delete(path)
+
+    it "persists artifacts, context manifests, and MCP idempotency evidence":
+        val path = "/tmp/llm_caret_store_artifact_" + getpid().to_text() + ".db"
+        file_delete(path)
+        val store = PureSqlMessagingStore.open(path)
+        val artifact = StoredArtifact(artifact_id: "artifact-1", task_id: "task-1", room_id: "room-1",
+            media_type: "text/plain", value: "report", published_by: "agent-1", created_at: 10)
+        expect(store.put_artifact(artifact).ok).to_equal(true)
+        expect(store.artifacts().len()).to_equal(1)
+        expect(store.artifacts()[0].value).to_equal("report")
+        expect(store.put_context_manifest("context-1", "task-1", ["message-1"], ["agent-1"],
+            "source-hash", "summary-v1", "redaction-v1", 12, 11).ok).to_equal(true)
+        expect(store.context_manifest_count()).to_equal(1)
+        expect(store.put_mcp_idempotency("stable-key-1", "artifact-1", "artifact_published", 12).ok).to_equal(true)
+        expect(store.mcp_idempotency("stable-key-1").resource_id).to_equal("artifact-1")
+        expect(store.close()).to_equal(true)
+        file_delete(path)
+
+    it "recovers rooms, history, cursors, deduplication, and delivery state after reopen":
+        step("Create durable canonical state and close the first process connection")
+        val path = "/tmp/llm_caret_store_restart_" + getpid().to_text() + ".db"
+        file_delete(path)
+        val first_store = PureSqlMessagingStore.open(path)
+        expect(first_store.create_room(room("direct-1", RoomKind.Direct)).ok).to_equal(true)
+        expect(first_store.append_message(message("dm-1", "direct-1", "private"), "dm-request-1").room_seq).to_equal(1)
+        expect(first_store.advance_cursor("direct-1", "human-1", 1, 40).ok).to_equal(true)
+        expect(first_store.accept_inbound("slack-1", "event-1", 41)).to_equal(true)
+        expect(first_store.accept_inbound("slack-1", "event-1", 42)).to_equal(false)
+        expect(first_store.enqueue_outbox("delivery-1", "dm-1", "slack-1", "payload", 43).ok).to_equal(true)
+        expect(first_store.put_transport_binding(StoredTransportBinding(binding_id: "slack-1",
+            canonical_room_id: "direct-1", transport: "slack", external_room_id: "D123",
+            mirror_policy: "full", capabilities_version: "slack-v1",
+            last_inbound_cursor: "event-1", last_outbound_cursor: "ts-1")).ok).to_equal(true)
+        expect(first_store.put_external_ref(StoredExternalRef(ref_id: "slack-1:dm-1",
+            binding_id: "slack-1", canonical_message_id: "dm-1", external_message_id: "171.1",
+            external_thread_id: "170.1", created_at: 44)).ok).to_equal(true)
+        expect(first_store.mark_outbox_attempt("delivery-1", "rate_limited", 50, 2, 44).ok).to_equal(true)
+        expect(first_store.outbox_state("delivery-1")).to_equal("queued")
+        expect(first_store.enqueue_outbox("delivery-2", "dm-1", "slack-1", "payload-2", 45).ok).to_equal(true)
+        expect(first_store.mark_outbox_delivered("delivery-2", 46).ok).to_equal(true)
+        expect(first_store.outbox_state("delivery-2")).to_equal("delivered")
+        val transport_request = StoredTransportRequest(delivery_id: "delivery-3", message_id: "dm-1",
+            binding_id: "slack-1", method: "POST", url_template: "https://slack.com/api/chat.postMessage",
+            headers: ["Content-Type: application/json"], body: "{}",
+            credential_ref: "secret://slack/development", credential_mode: "bearer",
+            idempotency_key: "stable-delivery-3")
+        expect(first_store.enqueue_transport_request(transport_request, 47).ok).to_equal(true)
+        expect(first_store.close()).to_equal(true)
+
+        step("Reopen the same embedded database and recover projections and retry state")
+        val recovered = PureSqlMessagingStore.open(path)
+        expect(recovered.schema_version()).to_equal(1)
+        expect(recovered.room("direct-1").kind).to_equal(RoomKind.Direct)
+        expect(recovered.message_history("direct-1", 0, 10)[0].body).to_equal("private")
+        expect(recovered.cursor("direct-1", "human-1")).to_equal(1)
+        expect(recovered.accept_inbound("slack-1", "event-1", 60)).to_equal(false)
+        expect(recovered.outbox_state("delivery-2")).to_equal("delivered")
+        val queued_requests = recovered.queued_transport_requests(100, 10)
+        expect(queued_requests.len()).to_equal(1)
+        expect(queued_requests[0].credential_ref).to_equal("secret://slack/development")
+        expect(queued_requests[0].headers.join(" | ").contains("Authorization:")).to_equal(false)
+        expect(recovered.canonical_event_count()).to_equal(3)
+        expect(recovered.canonical_events()[0].event_kind).to_equal("room_created")
+        expect(recovered.transport_binding("slack-1").external_room_id).to_equal("D123")
+        expect(recovered.transport_binding("slack-1").last_outbound_cursor).to_equal("ts-1")
+        expect(recovered.external_ref("slack-1", "dm-1").external_message_id).to_equal("171.1")
+        expect(recovered.external_ref("slack-1", "dm-1").external_thread_id).to_equal("170.1")
+        expect(recovered.mark_outbox_attempt("delivery-1", "permanent", 0, 2, 61).ok).to_equal(true)
+        expect(recovered.outbox_state("delivery-1")).to_equal("dead_letter")
+        expect(recovered.dead_letter_count()).to_equal(1)
+        expect(recovered.append_audit("delivery_failed", "system", "delivery-1", "permanent", 61).ok).to_equal(true)
+        expect(recovered.audit_count()).to_equal(1)
+        expect(recovered.close()).to_equal(true)
+        file_delete(path)

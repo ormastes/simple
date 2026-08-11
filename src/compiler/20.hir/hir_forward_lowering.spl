@@ -1,0 +1,364 @@
+# HirForwardDecl population — C2 typed forwarding, first REAL slice (2026-08-09).
+#
+# doc/03_plan/compiler/forwarding/zero_cost_layers_c0_c5_staged_implementation_plan_2026-08-07.md (M4 = C2)
+# doc/03_plan/ui/perf/render_perf_redesign_plan_2026-08-06.md §3 (lines 171-189)
+#
+# WHAT THIS IS
+# ------------
+# `hir_forward_decl.spl` landed the C2 struct as "data shape only" with zero
+# writers. This module is the plan's own next step — "existing aliases can be
+# represented as typed forwarding nodes internally before the new syntax lands"
+# — i.e. it POPULATES `HirForwardDecl` from real source instead of leaving the
+# shape empty.
+#
+# WHAT THIS IS NOT
+# ----------------
+# It does NOT replace `src/app/desugar/forwarding.spl`. That 504-line text
+# generator stays authoritative; deleting a reimplementation reroutes rather
+# than dedupes. This module is a typed representation ALONGSIDE it, plus a
+# reconstruction oracle (`forwarder_text`) that lets a spec PROVE the two agree
+# line-for-line. It introduces no runtime wrapper and no new IR — both are
+# explicitly listed as AVOIDED in the plan's §11.
+#
+# SCOPE: Phase 2 only, and why
+# ----------------------------
+# `forwarding.spl` has four phases. Only Phase 2 is self-contained:
+#
+#   Phase 1  `fn name = target`      (module level, DEPRECATED)
+#   Phase 2  `alias fn/me NAME[(args)] = FIELD.METHOD`
+#   Phase 3  `alias TraitName = field`   (expands to every abstract method)
+#   Phase 4  `alias field_name`          (expands to every method of the type)
+#
+# Phases 1, 3 and 4 carry no signature on the declaration line: their parameter
+# lists come from `app.desugar.fn_scanner` / `trait_scanner` / `type_scanner`,
+# which scan the whole source for a definition elsewhere. A module under
+# `src/compiler/20.hir/**` importing `app.desugar.**` would invert the layering
+# (the compiler would depend on an offline CLI tool), so those three phases are
+# deliberately NOT lowered here. They are not silently dropped either:
+# `unrepresented_forward_forms` reports every one it saw, so a caller can never
+# mistake "not representable yet" for "not present".
+#
+# DESIGN-DOC GAP (recorded, deliberate)
+# -------------------------------------
+# The six-field sketch in
+# doc/05_design/language/forwarding/layer_forwarding_and_layer_eq_types.md §4
+# is NOT sufficient to represent the forwarders that exist today: it carries no
+# receiver mode (`fn` vs `me`) and no parameter list, so a node built from it
+# cannot reproduce `me push(item): self.inner.push(item)` — the signature is
+# lost. `is_me` and `params` were therefore added to `HirForwardDecl`. Without
+# them the equivalence proof below is impossible to even state.
+
+use compiler.hir.hir_forward_decl.{HirForwardDecl}
+
+export lower_forward_decls
+export unrepresented_forward_forms
+export forwarder_text
+
+# ================================================================
+# Lowering
+# ================================================================
+
+fn lower_forward_decls(source: text) -> [HirForwardDecl]:
+    """Typed `HirForwardDecl` nodes for every Phase 2 alias in `source`.
+
+    Class-body tracking mirrors `desugar_forwarding` exactly (same header
+    test, same indentation-based body exit) so the two agree on WHICH lines
+    are forwarding declarations, not merely on how one line parses.
+
+    `logical_join_point_id` is the 1-based emission index: stable for a given
+    source, and distinct per declaration so M5 advice can target one site.
+    `layer_view_map` and `effect_summary` stay 0 — the layer-eq view table and
+    the effect verifier are M6 work and no table exists to index into yet.
+    """
+    var decls: [HirForwardDecl] = []
+    val lines = source.split("\n")
+    var i = 0
+    var in_class = false
+    var class_indent = 0
+    var class_name = ""
+    var next_join_point = 1
+
+    while i < lines.len():
+        val line = lines[i]
+        val trimmed = line.trim()
+
+        if _is_class_header(trimmed):
+            in_class = true
+            class_indent = _indent_width(line)
+            class_name = _extract_type_name(trimmed)
+            i = i + 1
+            continue
+
+        if in_class:
+            if trimmed != "" and _indent_width(line) <= class_indent:
+                in_class = false
+
+        if in_class and trimmed != "":
+            if trimmed.starts_with("alias fn ") or trimmed.starts_with("alias me "):
+                val parsed = _parse_alias_line(trimmed)
+                if parsed.is_valid:
+                    var logical = parsed.name
+                    if class_name != "":
+                        logical = "{class_name}.{parsed.name}"
+                    decls.push(HirForwardDecl(
+                        logical_symbol: logical,
+                        receiver_projection: parsed.field_path,
+                        target_symbol: parsed.method_name,
+                        layer_view_map: 0,
+                        effect_summary: 0,
+                        logical_join_point_id: next_join_point,
+                        is_me: parsed.is_me,
+                        params: parsed.args))
+                    next_join_point = next_join_point + 1
+        i = i + 1
+
+    decls
+
+fn unrepresented_forward_forms(source: text) -> [text]:
+    """Every forwarding form present in `source` that this slice does NOT lower.
+
+    Absence of a typed node must never be readable as absence of forwarding.
+    Each entry is the trimmed source line, so a caller can name the specific
+    alias it is missing rather than reporting a bare count.
+    """
+    var found: [text] = []
+    val lines = source.split("\n")
+    var i = 0
+    var in_class = false
+    var class_indent = 0
+
+    while i < lines.len():
+        val line = lines[i]
+        val trimmed = line.trim()
+
+        if _is_class_header(trimmed):
+            in_class = true
+            class_indent = _indent_width(line)
+            i = i + 1
+            continue
+
+        if in_class:
+            if trimmed != "" and _indent_width(line) <= class_indent:
+                in_class = false
+
+        # Phase 1: module-level `fn name = target` (needs fn_scanner).
+        if not in_class and trimmed.starts_with("fn "):
+            if _is_plain_fn_alias(trimmed):
+                found.push(trimmed)
+
+        # Phases 3 and 4: any class-body `alias ` that is not `alias fn`/
+        # `alias me` (needs trait_scanner / type_scanner to enumerate).
+        if in_class and trimmed.starts_with("alias "):
+            if not trimmed.starts_with("alias fn "):
+                if not trimmed.starts_with("alias me "):
+                    found.push(trimmed)
+        i = i + 1
+
+    found
+
+# ================================================================
+# Reconstruction oracle
+# ================================================================
+
+fn forwarder_text(decl: HirForwardDecl, indent: text) -> text:
+    """The exact two lines `desugar_forwarding` emits for `decl`.
+
+    This is the equivalence oracle. If the typed node carries the same facts
+    the text generator keys on, rendering it must reproduce the generator's
+    output byte-for-byte; any difference is a real representational gap rather
+    than a formatting detail, because both sides are compared as raw text.
+    """
+    var keyword = "fn"
+    if decl.is_me:
+        keyword = "me"
+    val args_str = _join_texts(decl.params, ", ")
+    val sig_line = "{indent}{keyword} {_local_name(decl.logical_symbol)}({args_str}):"
+    val body_line = "{indent}    self.{decl.receiver_projection}.{decl.target_symbol}({args_str})"
+    "{sig_line}\n{body_line}"
+
+fn _local_name(logical_symbol: text) -> text:
+    """`C.push` -> `push`; an unqualified name is returned unchanged."""
+    val dot = _find_last_char(logical_symbol, ".")
+    if dot < 0:
+        return logical_symbol
+    logical_symbol[dot + 1:logical_symbol.len()]
+
+# ================================================================
+# Phase 2 line parsing
+#
+# Semantics are pinned to `desugar/forwarding.spl:381` — the receiver
+# projection is everything before the LAST dot and the target method is the
+# final segment, so `inner.items.push` projects through `inner.items` and
+# calls `push`. Splitting on the FIRST dot instead yields a different (wrong)
+# target for any multi-segment path; see the spec for that discrimination.
+# ================================================================
+
+struct _AliasParse:
+    is_valid: bool
+    is_me: bool
+    name: text
+    args: [text]
+    field_path: text
+    method_name: text
+
+fn _parse_alias_line(trimmed: text) -> _AliasParse:
+    val empty = _AliasParse(is_valid: false, is_me: false, name: "", args: [],
+        field_path: "", method_name: "")
+
+    var rest = trimmed[6:trimmed.len()]
+    var is_me = false
+    if rest.starts_with("fn "):
+        rest = rest[3:rest.len()]
+    elif rest.starts_with("me "):
+        is_me = true
+        rest = rest[3:rest.len()]
+    else:
+        return empty
+
+    val eq_idx = _find_char(rest, "=")
+    if eq_idx < 0:
+        return empty
+
+    val left = rest[0:eq_idx].trim()
+    val right = rest[eq_idx + 1:rest.len()].trim()
+
+    var name = ""
+    var args: [text] = []
+    val paren_idx = _find_char(left, "(")
+    if paren_idx >= 0:
+        name = left[0:paren_idx].trim()
+        var close_idx = _find_char(left, ")")
+        if close_idx < 0:
+            close_idx = left.len()
+        val args_part = left[paren_idx + 1:close_idx].trim()
+        if args_part != "":
+            args = _split_args(args_part)
+    else:
+        name = left
+
+    if name == "":
+        return empty
+    if right == "":
+        return empty
+
+    val last_dot = _find_last_char(right, ".")
+    if last_dot < 0:
+        return empty
+    val field_path = right[0:last_dot]
+    val method_name = right[last_dot + 1:right.len()]
+    if field_path == "" or method_name == "":
+        return empty
+
+    _AliasParse(is_valid: true, is_me: is_me, name: name, args: args,
+        field_path: field_path, method_name: method_name)
+
+fn _is_plain_fn_alias(trimmed: text) -> bool:
+    """`fn NAME = TARGET` with no `(` or `:` before the `=` (Phase 1 shape)."""
+    if not trimmed.starts_with("fn "):
+        return false
+    val rest = trimmed[3:trimmed.len()]
+    val eq_idx = _find_char(rest, "=")
+    if eq_idx < 0:
+        return false
+    val paren_idx = _find_char(rest, "(")
+    if paren_idx >= 0 and paren_idx < eq_idx:
+        return false
+    val colon_idx = _find_char(rest, ":")
+    if colon_idx >= 0 and colon_idx < eq_idx:
+        return false
+    if rest[0:eq_idx].trim() == "":
+        return false
+    rest[eq_idx + 1:rest.len()].trim() != ""
+
+# ================================================================
+# Helpers (private copies — see the layering note in the header; importing
+# app.desugar from the compiler would invert the dependency)
+# ================================================================
+
+fn _is_class_header(trimmed: text) -> bool:
+    if trimmed.starts_with("class ") and trimmed.ends_with(":"):
+        return true
+    if trimmed.starts_with("struct ") and trimmed.ends_with(":"):
+        return true
+    if trimmed.starts_with("impl ") and trimmed.ends_with(":"):
+        return true
+    false
+
+fn _extract_type_name(trimmed: text) -> text:
+    var rest = ""
+    if trimmed.starts_with("class "):
+        rest = trimmed[6:trimmed.len()]
+    elif trimmed.starts_with("struct "):
+        rest = trimmed[7:trimmed.len()]
+    elif trimmed.starts_with("impl "):
+        rest = trimmed[5:trimmed.len()]
+    else:
+        return ""
+    if rest.ends_with(":"):
+        rest = rest[0:rest.len() - 1]
+    rest = rest.trim()
+    var name = ""
+    var ci = 0
+    while ci < rest.len():
+        val ch = rest[ci:ci + 1]
+        if ch == "<" or ch == "(" or ch == " ":
+            break
+        name = name + ch
+        ci = ci + 1
+    name
+
+fn _indent_width(line: text) -> i64:
+    var count = 0
+    while count < line.len():
+        val ch = line[count:count + 1]
+        if ch == " ":
+            count = count + 1
+        elif ch == "\t":
+            count = count + 4
+        else:
+            break
+    count
+
+fn _find_char(s: text, ch: text) -> i64:
+    var idx = 0
+    while idx < s.len():
+        if s[idx:idx + 1] == ch:
+            return idx
+        idx = idx + 1
+    0 - 1
+
+fn _find_last_char(s: text, ch: text) -> i64:
+    var result = 0 - 1
+    var idx = 0
+    while idx < s.len():
+        if s[idx:idx + 1] == ch:
+            result = idx
+        idx = idx + 1
+    result
+
+fn _split_args(s: text) -> [text]:
+    var parts: [text] = []
+    var current = ""
+    var idx = 0
+    while idx < s.len():
+        val ch = s[idx:idx + 1]
+        if ch == ",":
+            if current.trim() != "":
+                parts.push(current.trim())
+            current = ""
+        else:
+            current = current + ch
+        idx = idx + 1
+    if current.trim() != "":
+        parts.push(current.trim())
+    parts
+
+fn _join_texts(items: [text], sep: text) -> text:
+    var result = ""
+    var idx = 0
+    while idx < items.len():
+        if idx > 0:
+            result = result + sep
+        result = result + items[idx]
+        idx = idx + 1
+    result

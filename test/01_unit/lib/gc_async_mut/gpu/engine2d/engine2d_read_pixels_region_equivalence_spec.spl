@@ -1,0 +1,96 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl 100%
+# @tag: unit, ui, draw_ir, engine2d, perf
+"""
+# Engine2D region-limited readback equivalence
+
+## Overview
+
+D9 (`doc/03_plan/ui/unified_2d_engine/unified_2d_event_panel_offload_2026-07-30.md`)
+calls out the per-glass-rect FULL-FRAME `read_pixels_with_source()` in
+`_engine2d_draw_ir_render_batch_embedded` (the `samples_parent and
+embedding_opacity < 1000` branch): with N translucent/backdrop-sampling
+batches per frame that is N whole-framebuffer reads, when only one small rect
+is ever needed. The fix routes that call site through a new seam,
+`_engine2d_read_pixels_region`, which today is the DEFAULT implementation
+(read the whole frame once, crop on the host) but establishes the API a
+future backend-specific device-side region read can drop in behind without
+touching call sites again.
+
+This spec is the correctness argument for making that swap: it proves
+`_engine2d_read_pixels_region(engine, x, y, w, h)` returns pixels IDENTICAL
+to reading the whole frame with `engine.read_pixels_with_source()` and
+cropping it by hand -- both for an in-bounds rect and for a rect that
+partially runs off the framebuffer edge (the half-open, zero-fill-at-edge
+convention `_engine2d_draw_ir_parent_region_pixels` already implements).
+
+**Requirements:** N/A -- implementation evidence for D9 of the unified 2D
+engine plan, not a numbered product requirement.
+
+**Plan:** doc/03_plan/ui/unified_2d_engine/unified_2d_event_panel_offload_2026-07-30.md
+"""
+
+use std.spec
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{_engine2d_read_pixels_region, _engine2d_draw_ir_parent_region_pixels}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+
+val BG: u32 = 0xff000000u32
+val RED: u32 = 0xffff0000u32
+val GREEN: u32 = 0xff00ff00u32
+val BLUE: u32 = 0xff0000ffu32
+val YELLOW: u32 = 0xffffff00u32
+
+describe "Engine2D region-limited readback (_engine2d_read_pixels_region)":
+
+    it "returns the same pixels as a full-frame read cropped by hand, for an in-bounds rect":
+        var engine = Engine2D.create_with_backend(4, 4, "cpu")
+        engine.clear(BG)
+        engine.draw_rect_filled(0, 0, 2, 2, RED)
+        engine.draw_rect_filled(2, 0, 2, 2, GREEN)
+        engine.draw_rect_filled(0, 2, 2, 2, BLUE)
+        engine.draw_rect_filled(2, 2, 2, 2, YELLOW)
+
+        # Independent ground truth: read the WHOLE frame once and index the
+        # 2x3 rect at (1,1) by hand, row-major -- no shared helper with the
+        # function under test.
+        val full = engine.read_pixels_with_source()
+        val expected = [
+            full.pixels[1 * 4 + 1], full.pixels[1 * 4 + 2],
+            full.pixels[2 * 4 + 1], full.pixels[2 * 4 + 2],
+            full.pixels[3 * 4 + 1], full.pixels[3 * 4 + 2]
+        ]
+
+        val region = _engine2d_read_pixels_region(engine, 1, 1, 2, 3)
+
+        expect(region.pixels).to_equal(expected)
+        expect(region.pixel_count).to_equal(6)
+        engine.shutdown()
+
+    it "fills out-of-bounds columns/rows with 0, matching the full-frame crop edge rule":
+        var engine = Engine2D.create_with_backend(3, 3, "cpu")
+        engine.clear(RED)
+
+        # x=-1 column is out of range on every row -> 0. y=3 row is entirely
+        # out of range (engine is only 3 tall) -> 0,0,0. This is the same
+        # half-open, zero-fill edge behavior read_pixels_with_source() plus a
+        # hand crop would produce.
+        val region = _engine2d_read_pixels_region(engine, -1, 2, 3, 2)
+
+        expect(region.pixels).to_equal([
+            0u32, RED, RED,
+            0u32, 0u32, 0u32
+        ])
+        engine.shutdown()
+
+    it "matches _engine2d_draw_ir_parent_region_pixels exactly for the full-frame rect":
+        var engine = Engine2D.create_with_backend(6, 5, "cpu")
+        engine.clear(BG)
+        engine.draw_rect_filled(1, 1, 3, 2, GREEN)
+
+        val full = engine.read_pixels_with_source()
+        val cropped_by_hand = _engine2d_draw_ir_parent_region_pixels(
+            full, 6, 5, 0, 0, 6, 5)
+        val region = _engine2d_read_pixels_region(engine, 0, 0, 6, 5)
+
+        expect(region.pixels).to_equal(cropped_by_hand)
+        expect(region.pixels).to_equal(full.pixels)
+        engine.shutdown()

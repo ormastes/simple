@@ -1,0 +1,83 @@
+# Runnable probe for the single-lane testbench generator — generates the four
+# tb_*.vhd files, byte-compares each against its golden, and proves determinism
+# by generating each a second time. Prints PASS/FAIL per file plus a final
+# ALL PASS marker.
+# Run: bin/simple run test/01_unit/lib/hardware/vhdl_gen/probe_tb_single_lane_gen.spl
+
+use std.hardware.vhdl_gen.tb_single_lane_gen.{generate_tb_rv32_nvme_bram_soc, generate_tb_rv32_nvme_fw_smoke, generate_tb_rv32_simpleos_boot_tiny, generate_tb_rv32_tiny_bram_soc, generate_tb_rv64_soak}
+
+extern fn rt_file_read_text(path: text) -> text
+
+val RTL_DIR: text = "examples/09_embedded/fpga_riscv/rtl/"
+
+fn first_diff(a: text, b: text) -> i64:
+    var n = a.len()
+    if b.len() < n:
+        n = b.len()
+    var i = 0
+    while i < n:
+        if a[i] != b[i]:
+            return i
+        i = i + 1
+    if a.len() == b.len():
+        return -1
+    n
+
+fn window(s: text, at: i64) -> text:
+    var lo = at - 100
+    if lo < 0:
+        lo = 0
+    var hi = at + 60
+    if hi > s.len():
+        hi = s.len()
+    s.substring(lo, hi)
+
+fn check_golden(file_name: text, generated: text) -> i64:
+    val golden = rt_file_read_text(RTL_DIR + file_name)
+    if generated == golden:
+        print("PASS " + file_name + " byte-identical (" + generated.len().to_text() + " bytes)")
+        return 0
+    print("FAIL " + file_name + " (gen " + generated.len().to_text() + " bytes vs golden " + golden.len().to_text() + " bytes)")
+    val d = first_diff(generated, golden)
+    print("  first difference at byte " + d.to_text())
+    print("  GEN    |" + window(generated, d) + "|")
+    print("  GOLDEN |" + window(golden, d) + "|")
+    1
+
+fn check(name: text, ok: bool) -> i64:
+    if ok:
+        print("PASS " + name)
+        return 0
+    print("FAIL " + name)
+    1
+
+fn main():
+    val nvme = generate_tb_rv32_nvme_fw_smoke()
+    val tiny = generate_tb_rv32_simpleos_boot_tiny()
+    val bram = generate_tb_rv32_tiny_bram_soc()
+    val soak = generate_tb_rv64_soak()
+    val nvbram = generate_tb_rv32_nvme_bram_soc()
+
+    var fails = 0
+    fails = fails + check_golden("tb_rv32_nvme_fw_smoke.vhd", nvme)
+    fails = fails + check_golden("tb_rv32_simpleos_boot_tiny.vhd", tiny)
+    fails = fails + check_golden("tb_rv32_tiny_bram_soc.vhd", bram)
+    fails = fails + check_golden("tb_rv64_soak.vhd", soak)
+    fails = fails + check_golden("tb_rv32_nvme_bram_soc.vhd", nvbram)
+
+    # Determinism: a second generation pass must be byte-identical.
+    val nvme2 = generate_tb_rv32_nvme_fw_smoke()
+    val tiny2 = generate_tb_rv32_simpleos_boot_tiny()
+    val bram2 = generate_tb_rv32_tiny_bram_soc()
+    val soak2 = generate_tb_rv64_soak()
+    val nvbram2 = generate_tb_rv32_nvme_bram_soc()
+    fails = fails + check("determinism tb_rv32_nvme_fw_smoke", nvme == nvme2)
+    fails = fails + check("determinism tb_rv32_simpleos_boot_tiny", tiny == tiny2)
+    fails = fails + check("determinism tb_rv32_tiny_bram_soc", bram == bram2)
+    fails = fails + check("determinism tb_rv64_soak", soak == soak2)
+    fails = fails + check("determinism tb_rv32_nvme_bram_soc", nvbram == nvbram2)
+
+    if fails == 0:
+        print("TB_SINGLE_LANE PROBE: ALL PASS")
+    else:
+        print("TB_SINGLE_LANE PROBE: " + fails.to_text() + " FAILURES")

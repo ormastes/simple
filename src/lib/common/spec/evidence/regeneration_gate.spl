@@ -1,0 +1,115 @@
+# Byte-identical regeneration gate for typed-evidence manuals (E0 lane).
+#
+# The research doc's acceptance criterion (§10) is that user and QA manuals
+# "must regenerate byte-identically under a pinned environment." Nothing
+# short of re-rendering twice and hashing the result can demonstrate that: a
+# manual that merely "looks the same" on eyeball comparison can still differ
+# in whitespace, row order, or a nondeterministic map iteration. This module
+# makes that claim falsifiable rather than asserted.
+#
+# It also separates two different kinds of manifest drift: a manifest's
+# `run_id`/`environment` fields are EXPECTED to differ between two runs of
+# the same evidence (different CI job, different day) — the manual is still
+# a faithful regeneration. A `spec_sha256`/`artifact_sha256` difference means
+# the underlying source or capture changed, so any claim that two manuals
+# are "the same" is stale rather than confirmed.
+#
+# Design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# Research: doc/01_research/infra/sspec/modern_sspec_typed_evidence_research_2026-08-08.md
+
+use std.common.crypto.sha256.{sha256_text}
+use std.common.spec.evidence.model.{
+    ManualBlock, EvidenceAudience, EvidenceManifest,
+    CanonicalEvidence, OracleSpec
+}
+use std.common.spec.evidence.evidence_comparator.{
+    compare_evidence, comparison_to_manual_blocks
+}
+use std.common.spec.evidence.manual_render.{render_manual}
+
+fn joined_lines(lines: [text]) -> text:
+    var out = ""
+    var i = 0
+    while i < lines.len():
+        if i > 0:
+            out = out + "\n"
+        out = out + lines[i]
+        i = i + 1
+    out
+
+# Renders the manual and returns the sha256 hex digest of its joined lines.
+# Two calls with byte-identical inputs must return the same digest; that is
+# the whole of the "byte-identical regeneration" contract reduced to one
+# comparable value.
+pub fn render_manual_digest(
+    title: text,
+    blocks: [ManualBlock],
+    audience: EvidenceAudience,
+    manifest: EvidenceManifest
+) -> text:
+    val lines = render_manual(title, blocks, audience, manifest)
+    sha256_text(joined_lines(lines))
+
+# Runs the full evidence -> comparison -> manual -> digest pipeline TWICE
+# from the same inputs and reports whether the two digests agree. A `true`
+# result with the empty text is the only passing shape; a `false` result
+# carries both digests so a caller can see the mismatch without re-running
+# the pipeline itself.
+pub fn assert_regeneration_stable(
+    evidence: CanonicalEvidence,
+    spec: OracleSpec,
+    title: text,
+    audience: EvidenceAudience,
+    manifest: EvidenceManifest
+) -> (bool, text):
+    val result_a = compare_evidence(evidence, spec)
+    val blocks_a = comparison_to_manual_blocks(title, result_a)
+    val digest_a = render_manual_digest(title, blocks_a, audience, manifest)
+
+    val result_b = compare_evidence(evidence, spec)
+    val blocks_b = comparison_to_manual_blocks(title, result_b)
+    val digest_b = render_manual_digest(title, blocks_b, audience, manifest)
+
+    if digest_a == digest_b:
+        return (true, "")
+    (false, "regeneration digest mismatch: " + digest_a + " != " + digest_b)
+
+# Compares two manifests captured for the same underlying evidence/spec (for
+# example two CI runs) and classifies every difference. `run_id` and
+# `environment` are expected to vary and are reported as OK-EXPECTED.
+# `spec_sha256` and `artifact_sha256` must NOT vary: a mismatch there means
+# the source changed between the two runs, so any "byte-identical manual"
+# claim built from manifest_a and manifest_b is comparing two different
+# underlying facts, not confirming regeneration stability. Such a mismatch
+# is reported as STALE-SOURCE.
+pub fn manifest_regeneration_report(
+    evidence: CanonicalEvidence,
+    spec: OracleSpec,
+    title: text,
+    audience: EvidenceAudience,
+    manifest_a: EvidenceManifest,
+    manifest_b: EvidenceManifest
+) -> [text]:
+    var out: [text] = []
+
+    if manifest_a.spec_sha256 != manifest_b.spec_sha256:
+        out.push("STALE-SOURCE: spec_sha256 differs (" + manifest_a.spec_sha256 + " != " + manifest_b.spec_sha256 + ")")
+    else:
+        out.push("OK-EXPECTED: spec_sha256 matches")
+
+    if manifest_a.artifact_sha256 != manifest_b.artifact_sha256:
+        out.push("STALE-SOURCE: artifact_sha256 differs (" + manifest_a.artifact_sha256 + " != " + manifest_b.artifact_sha256 + ")")
+    else:
+        out.push("OK-EXPECTED: artifact_sha256 matches")
+
+    if manifest_a.run_id != manifest_b.run_id:
+        out.push("OK-EXPECTED: run_id differs (" + manifest_a.run_id + " != " + manifest_b.run_id + ")")
+    else:
+        out.push("OK-EXPECTED: run_id matches")
+
+    if manifest_a.environment != manifest_b.environment:
+        out.push("OK-EXPECTED: environment differs (" + manifest_a.environment + " != " + manifest_b.environment + ")")
+    else:
+        out.push("OK-EXPECTED: environment matches")
+
+    out

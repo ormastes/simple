@@ -1,0 +1,174 @@
+# Fast-path GC — cheap sweeps that run without a full mark-and-sweep.
+#
+# Schema: cache_protocol.sdn `gc.transitions` (expire_branch, gc_move_to_trash,
+# gc_delete_trash, quarantine), `gc.limits` (tmp_hours, quarantine_days,
+# high_watermark/low_watermark), `gc.crash_safety.gc_delete_order`
+# (rename_to_trash, grace_period, delete).
+#
+# Invariant honored here: nothing under trash/ or quarantine/ is ever served
+# (cas_get/action_get never read those paths), so moving an entry there is
+# safe to do speculatively — a false-positive move only costs a recompute,
+# never a dangling hit.
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_size(path: text) -> usize?
+extern fn rt_file_modified_time(path: text) -> i64
+extern fn rt_file_move(old_path: text, new_path: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_dir_exists(path: text) -> bool
+extern fn rt_dir_list(path: text) -> [text]
+extern fn rt_dir_walk(root: text) -> [text]
+extern fn rt_dir_remove_all(path: text) -> bool
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_getpid() -> i64
+
+use compiler.driver.cache.metadata.cache_limits.{CacheLimits, cache_limits_low_watermark_bytes}
+use compiler.driver.cache.lease.lease.{lease_list_active, CacheLease}
+use compiler.driver.cache.cas_store.{cas_action_path}
+
+fn now_secs() -> i64:
+    rt_time_now_unix_micros() / 1000000
+
+fn trash_dir(root: text) -> text:
+    "{root}/trash"
+
+fn move_to_trash(root: text, path: text) -> bool:
+    rt_dir_create_all(trash_dir(root))
+    val stamp = "{rt_getpid()}-{rt_time_now_unix_micros()}"
+    val name = path.replace("/", "_")
+    rt_file_move(path, "{trash_dir(root)}/{name}-{stamp}")
+
+# Sum bytes of every regular file under root (excluding nothing — caller
+# passes a specific subtree). Uses rt_dir_walk which enumerates recursively.
+fn dir_total_bytes(root: text) -> i64:
+    if not rt_file_exists(root):
+        return 0
+    var total: i64 = 0
+    for path in rt_dir_walk(root):
+        if not rt_dir_exists(path):
+            match rt_file_size(path):
+                case Some(sz):
+                    total = total + sz.to_i64()
+                case nil:
+                    pass_do_nothing
+    total
+
+fn cache_total_bytes(root: text) -> i64:
+    dir_total_bytes("{root}/cas") + dir_total_bytes("{root}/actions")
+
+# Expire tmp/ entries older than tmp_hours. Temp files are private write
+# staging (see cas_store.spl write protocol) — never served, safe to delete
+# outright rather than trash (crash_safety.gc_delete_order applies to
+# published objects, not staging).
+fn gc_expire_tmp(root: text, tmp_hours: i64) -> i64:
+    val dir = "{root}/tmp"
+    if not rt_file_exists(dir):
+        return 0
+    val cutoff = now_secs() - (tmp_hours * 3600)
+    var count = 0
+    for name in rt_dir_list(dir):
+        val path = "{dir}/{name}"
+        if not rt_dir_exists(path):
+            if rt_file_modified_time(path) < cutoff:
+                rt_file_delete(path)
+                count = count + 1
+    count
+
+# Expire quarantine/ entries older than quarantine_days. Quarantined bytes
+# already failed digest verification (cas_quarantine); never served, safe to
+# delete outright after the grace window.
+fn gc_expire_quarantine(root: text, quarantine_days: i64) -> i64:
+    val dir = "{root}/quarantine"
+    if not rt_file_exists(dir):
+        return 0
+    val cutoff = now_secs() - (quarantine_days * 86400)
+    var count = 0
+    for name in rt_dir_list(dir):
+        val path = "{dir}/{name}"
+        if not rt_dir_exists(path):
+            if rt_file_modified_time(path) < cutoff:
+                rt_file_delete(path)
+                count = count + 1
+    count
+
+# Delete everything already sitting in trash/ (the grace period has already
+# elapsed by the time this runs — gc_delete_order: rename_to_trash ->
+# grace_period -> delete).
+fn gc_delete_trash(root: text) -> i64:
+    val dir = trash_dir(root)
+    if not rt_file_exists(dir):
+        return 0
+    val names = rt_dir_list(dir)
+    rt_dir_remove_all(dir)
+    names.len().to_i64()
+
+# Fast-path sweep: expire tmp + quarantine, delete existing trash, then evict
+# unpinned action mappings oldest-first (by mtime) until at or below the low
+# watermark. `referenced_artifacts` (from active leases) are never evicted —
+# lease_safe. Returns bytes freed (best-effort estimate).
+fn gc_fast_sweep(root: text, limits: CacheLimits) -> i64:
+    gc_expire_tmp(root, limits.tmp_hours)
+    gc_expire_quarantine(root, limits.quarantine_days)
+    gc_delete_trash(root)
+
+    val low_bytes = cache_limits_low_watermark_bytes(limits)
+    var total = cache_total_bytes(root)
+    if total <= low_bytes:
+        return 0
+
+    val active_leases = lease_list_active(root)
+    var protected: [text] = []
+    for lease in active_leases:
+        for d in lease.referenced_artifacts:
+            protected = protected.push(d)
+        for d in lease.referenced_manifests:
+            protected = protected.push(d)
+
+    val actions_dir = "{root}/actions"
+    if not rt_file_exists(actions_dir):
+        return 0
+
+    var candidates: [text] = []
+    for path in rt_dir_walk(actions_dir):
+        if not rt_dir_exists(path):
+            var is_protected = false
+            for d in protected:
+                if path == cas_action_path(root, d):
+                    is_protected = true
+            if not is_protected:
+                candidates = candidates.push(path)
+
+    # Oldest-first: simple selection sort by mtime (candidate lists here are
+    # small relative to the whole CAS — full sort avoided per ponytail: no
+    # need for a comparator-based sort library for this milestone).
+    var freed: i64 = 0
+    var remaining = candidates
+    while total > low_bytes and remaining.len() > 0:
+        var oldest_idx = 0
+        var oldest_time = rt_file_modified_time(remaining[0])
+        var i = 1
+        while i < remaining.len():
+            val t = rt_file_modified_time(remaining[i])
+            if t < oldest_time:
+                oldest_time = t
+                oldest_idx = i
+            i = i + 1
+        val victim = remaining[oldest_idx]
+        val sz = match rt_file_size(victim):
+            case Some(v): v.to_i64()
+            case nil: 0
+        if move_to_trash(root, victim):
+            total = total - sz
+            freed = freed + sz
+        var next: [text] = []
+        var j = 0
+        while j < remaining.len():
+            if j != oldest_idx:
+                next = next.push(remaining[j])
+            j = j + 1
+        remaining = next
+
+    gc_delete_trash(root)
+    freed

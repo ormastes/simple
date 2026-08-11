@@ -1,0 +1,140 @@
+# @cover src/lib/blink/paint/style_paint.spl 90%
+# @req REQ-BLINK-RENDER-LANE-PIXELS-001
+"""
+# Render Lane: HTML+CSS To Actual Pixels
+
+**Category:** Browser / Blink
+**Status:** Active
+
+## Overview
+
+`render_lane_pipeline_spec.spl` proves HTML+CSS become correctly-positioned,
+correctly-coloured layout boxes. `style_paint_spec.spl` proves those boxes
+flatten into `PaintChunkRects`. Neither goes all the way to a framebuffer.
+
+These examples run the FULL lane: HTML token stream -> DOM -> CSS tokenize ->
+parse -> cascade -> `StyledLayout` -> `paint_chunks_from_styled_layout` ->
+`paint_chunk_rasterizer_run` -> real pixels in a `ChunkRasterBuffer`, and
+assert on the pixel values themselves, not on intermediate rects.
+
+Scope: background-color + geometry only, matching what the cascade actually
+resolves for this lane. No text, no borders, no gradients — those are not
+part of `paint_chunks_from_styled_layout`'s output and are out of scope here.
+
+@manual_section Browser Rendering
+"""
+
+use std.spipe.*
+use std.blink.dom.node.{DomTree}
+use std.blink.html_parser.token.{HtmlToken, HtmlTokenKind, HtmlAttribute}
+use std.blink.html_parser.tree_builder.{build_html_tree}
+use std.blink.css_parser.tokenizer.{tokenize_css}
+use std.blink.css_parser.parser.{parse_css, CssStyleSheet}
+use std.blink.layout.style_bridge.{build_styled_layout, StyledLayout}
+use std.blink.paint.style_paint.{paint_chunks_from_styled_layout}
+use std.common.ui.render_opt.property_trees.{
+    PropertyTrees, PaintChunks, PT_TRANSFORM, PT_CLIP, PT_EFFECT
+}
+use std.common.ui.render_opt.revisions.{RenderRevisions}
+use std.common.ui.render_opt.paint_chunk_rasterizer.{
+    PaintChunkRects, ChunkRasterBuffer, paint_chunk_rasterizer_run
+}
+use std.skia.entity.color.{sk_color_argb}
+
+fn _start(name: text) -> HtmlToken:
+    var attrs: [HtmlAttribute] = []
+    HtmlToken(kind: HtmlTokenKind.StartTag, name: name, data: "",
+              attributes: attrs, self_closing: false)
+
+fn _start_class(name: text, cls: text) -> HtmlToken:
+    var attrs: [HtmlAttribute] = [HtmlAttribute(name: "class", value: cls)]
+    HtmlToken(kind: HtmlTokenKind.StartTag, name: name, data: "",
+              attributes: attrs, self_closing: false)
+
+fn _end(name: text) -> HtmlToken:
+    var attrs: [HtmlAttribute] = []
+    HtmlToken(kind: HtmlTokenKind.EndTag, name: name, data: "",
+              attributes: attrs, self_closing: false)
+
+# <body><div class="a"></div></body>
+fn _page_tree() -> DomTree:
+    var tokens: [HtmlToken] = [
+        _start("body"),
+        _start_class("div", "a"), _end("div"),
+        _end("body")
+    ]
+    build_html_tree(tokens)
+
+fn _sheet(source: text) -> CssStyleSheet:
+    parse_css(tokenize_css(source))
+
+# 200x100 viewport, 1 property-tree node group covering it.
+fn make_scene() -> PropertyTrees:
+    val t = PropertyTrees.create()
+    t.add_node(PT_TRANSFORM, -1, 0, 0, 200, 100)
+    t.add_node(PT_CLIP, -1, 0, 0, 200, 100)
+    t.add_node(PT_EFFECT, -1, 255, 0, 0, 0)
+    t
+
+# Run rects (body + 1 div) through the standalone rasterizer, forcing every
+# chunk dirty on this (first) frame by passing a generation value ("1") that
+# differs from a freshly-created chunk's zeroed key.
+fn rasterize(rects: PaintChunkRects) -> ChunkRasterBuffer:
+    val trees = make_scene()
+    val chunks = PaintChunks.create()
+    var i: i64 = 0
+    while i < rects.rect_count:
+        chunks.add_chunk_sized(i.to_i32().to_u32(), 0, 1, 2, 0, 7,
+                               i.to_i32().to_u32(), 0)
+        i = i + 1
+    val revs = RenderRevisions.create(rects.rect_count)
+    val buf = ChunkRasterBuffer.create(200, 100)
+    val _stats = paint_chunk_rasterizer_run(chunks, rects, trees, revs, buf,
+                                            1, 1, 1, 1, 1)
+    buf
+
+# Build the full lane once for the whole file: body is blue and fills the
+# 200x100 viewport; the div is red, 100x50, with a 10px margin applied on
+# all sides. Measured (not assumed) via a direct probe of
+# `paint_chunks_from_styled_layout`'s output for this exact HTML+CSS: the
+# div lands at (10,10), occupying [10,110) x [10,60) inside the 200x100 body.
+fn _css() -> text:
+    "body { background-color: blue; width: 200px; height: 100px; } " +
+    "div { background-color: red; width: 100px; height: 50px; margin: 10px; }"
+
+describe "HTML+CSS through to real pixels":
+    it "paints the div's rect red at its laid-out position":
+        step("run the full lane through to a rasterized buffer")
+        val layout = build_styled_layout(_page_tree(), _sheet(_css()), 200.0, 100.0)
+        val rects = paint_chunks_from_styled_layout(layout)
+        val buf = rasterize(rects)
+
+        step("the div occupies [10,110)x[10,60): its origin, an interior point, and the last in-bounds pixel")
+        val red = sk_color_argb(255, 255, 0, 0)
+        expect(buf.get(10, 10)).to_equal(red)
+        expect(buf.get(60, 35)).to_equal(red)
+        expect(buf.get(109, 59)).to_equal(red)
+
+    it "paints the body's background blue on pixels the div does not cover":
+        step("run the full lane through to a rasterized buffer")
+        val layout = build_styled_layout(_page_tree(), _sheet(_css()), 200.0, 100.0)
+        val rects = paint_chunks_from_styled_layout(layout)
+        val buf = rasterize(rects)
+
+        step("a point well outside the div's box is body-blue, not div-red")
+        val blue = sk_color_argb(255, 0, 0, 255)
+        expect(buf.get(150, 80)).to_equal(blue)
+        expect(buf.get(199, 99)).to_equal(blue)
+
+    it "the boundary just outside the div's right/bottom edge is blue, not red":
+        step("run the full lane through to a rasterized buffer")
+        val layout = build_styled_layout(_page_tree(), _sheet(_css()), 200.0, 100.0)
+        val rects = paint_chunks_from_styled_layout(layout)
+        val buf = rasterize(rects)
+
+        step("row/column just outside the div's [10,110)x[10,60) box is body-blue")
+        val blue = sk_color_argb(255, 0, 0, 255)
+        expect(buf.get(9, 30)).to_equal(blue)
+        expect(buf.get(30, 9)).to_equal(blue)
+        expect(buf.get(110, 30)).to_equal(blue)
+        expect(buf.get(60, 60)).to_equal(blue)

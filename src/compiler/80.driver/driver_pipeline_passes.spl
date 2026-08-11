@@ -1,0 +1,53 @@
+# CompilerDriver borrow, async, and MIR optimization methods.
+
+use compiler.borrow.borrow_check.*
+use compiler.tools.async_integration.{AsyncStateMachine, process_async_mir}
+use compiler.mir_opt.mod.{OptLevel, optimize_module_for_backend}
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_log_helpers.{log_debug, log_warn}
+use compiler.driver.driver_source_loading.{_format_nll_error}
+
+impl CompilerDriver:
+    me borrow_check() -> bool:
+        if self.ctx.options.no_borrow_check:
+            log_warn("borrow check skipped (--no-borrow-check)")
+            return true
+        log_debug("running borrow check")
+        for name in self.ctx.mir_modules.keys():
+            val errors = check_mir_module(self.ctx.mir_modules[name])
+            for err in errors:
+                self.ctx.add_error(_format_nll_error(err))
+        not self.ctx.has_errors()
+
+    fn format_borrow_error(err: NLLError) -> text:
+        _format_nll_error(err)
+
+    me process_async() -> Dict<text, AsyncStateMachine>:
+        log_debug("processing async functions")
+        val state_machines = process_async_mir(self.ctx.mir_modules)
+        log_debug("generated async state machines")
+        state_machines
+
+    me optimize_mir_level(level: i64):
+        if level <= 0:
+            return
+
+        log_debug("optimizing MIR modules")
+        val backend_name = self.ctx.options.backend
+        # ponytail: stage4 whole-MirModule returns erase late MirFunction
+        # metadata; remove this bypass when that ABI copy bug is fixed.
+        if backend_name == "vhdl":
+            return
+
+        for name in self.ctx.mir_modules.keys():
+            val mir_module = self.ctx.mir_modules[name]
+            val optimized = if level == 1:
+                optimize_module_for_backend(
+                    mir_module, OptLevel.Size, backend_name)
+            elif level == 2:
+                optimize_module_for_backend(
+                    mir_module, OptLevel.Speed, backend_name)
+            else:
+                optimize_module_for_backend(
+                    mir_module, OptLevel.Aggressive, backend_name)
+            self.ctx.mir_modules[name] = optimized

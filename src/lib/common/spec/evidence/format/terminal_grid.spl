@@ -1,0 +1,365 @@
+# Terminal-cell snapshot model and comparison for the TUI evidence lane (E2).
+#
+# This module is intentionally pure: it owns a cell-accurate model of a
+# rendered terminal frame and the pure functions that turn it into
+# `CanonicalEvidence` for `compare_evidence`. It holds NO capture,
+# acquisition, or Markdown-rendering code — that stays in the provider and in
+# spipe_docgen, matching the split documented in
+# doc/07_guide/infra/sspec_typed_evidence.md.
+#
+# Why a cell model instead of a plain string diff: a terminal renders
+# graphemes into a fixed grid, and grid position is itself part of the
+# claim under test (alignment, wrapping, wide-character layout). A string
+# diff cannot report "column 12 lost its second cell to clipping"; a cell
+# diff can. Two rules exist because a naive cell-string round trip silently
+# discards real defects:
+#
+#   - a region that resolves to no cells is an ERROR, not empty text, because
+#     empty text is indistinguishable from "the region correctly rendered
+#     nothing"
+#   - a continuation cell (the second half of a wide grapheme) never
+#     contributes its own grapheme to region text, because re-emitting it
+#     would duplicate the wide character on every read
+#
+# Design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# Guide: doc/07_guide/infra/sspec_typed_evidence.md
+
+use std.common.spec.evidence.model.{
+    CanonicalEvidence, EvidenceNode, evidence_node_at, canonical_evidence,
+    canonical_evidence_parse_error
+}
+use std.common.encoding.utf8.{text_codepoints, char_from_codepoint}
+use std.common.layout.text_metrics.{codepoint_cells}
+
+# ---------------------------------------------------------------------------
+# Cell model
+# ---------------------------------------------------------------------------
+
+# One rendered cell. `continuation` marks the trailing cell of a double-width
+# grapheme placed in the cell before it; the continuation cell carries no
+# grapheme of its own so a region walk never double-counts a wide character.
+pub struct TerminalCell:
+    grapheme: text
+    display_width: i64
+    continuation: bool
+    foreground: text
+    background: text
+    attributes: text
+    semantic_id: text
+
+pub struct TerminalCursor:
+    row: i64
+    col: i64
+    visible: bool
+
+# A named rectangular sub-area of the grid, tied to the semantic node that
+# rendered it. `node_id` is the join key back to the widget tree, so a region
+# diff can be attributed to the component that produced it, not just a
+# row/col range.
+pub struct TerminalRegion:
+    node_id: text
+    row: i64
+    col: i64
+    width: i64
+    height: i64
+
+# `width_profile` names the East-Asian-width table the snapshot was measured
+# with. It has no default: a snapshot claiming cell positions without stating
+# which width rule produced them cannot be replayed or re-checked later, so
+# an empty profile is treated as an invalid snapshot rather than "use the
+# obvious default".
+pub struct TerminalSnapshot:
+    columns: i64
+    rows: i64
+    cells: [TerminalCell]
+    cursor: TerminalCursor
+    width_profile: text
+    semantic_regions: [TerminalRegion]
+
+pub fn terminal_cell_default() -> TerminalCell:
+    TerminalCell(
+        grapheme: " ",
+        display_width: 1,
+        continuation: false,
+        foreground: "",
+        background: "",
+        attributes: "",
+        semantic_id: ""
+    )
+
+pub fn terminal_snapshot_is_valid(snapshot: TerminalSnapshot) -> bool:
+    if snapshot.width_profile == "":
+        return false
+    if snapshot.columns <= 0 or snapshot.rows <= 0:
+        return false
+    true
+
+# ---------------------------------------------------------------------------
+# Width policy
+# ---------------------------------------------------------------------------
+
+# A small explicit table, not a UAX#11 implementation: the ranges below cover
+# the common East-Asian-wide blocks, common emoji blocks, and the combining
+# marks that must contribute zero columns. Anything outside these ranges is
+# ordinary width-1 text. This is a deliberate scope limit, not a pretended
+# completeness claim.
+fn code_point_of(grapheme: text) -> i64:
+    if grapheme.len() == 0:
+        return 0
+    val cps = text_codepoints(grapheme)
+    if cps.len() == 0:
+        return 0
+    cps[0]
+
+# The zero-width / wide classification is NOT kept here. It is shared with the
+# blink and browser pixel-layout lanes, which need exactly the same Unicode
+# column policy, and lives in `common/layout/text_metrics.spl`. Note that this
+# module's contract is TERMINAL CELLS and carries no ANSI handling — see the
+# contract table in that file before reusing either side.
+pub fn display_width_of(grapheme: text) -> i64:
+    if grapheme.len() == 0:
+        return 0
+    codepoint_cells(code_point_of(grapheme))
+
+# ---------------------------------------------------------------------------
+# Construction from plain rows
+# ---------------------------------------------------------------------------
+
+# Builds a snapshot from plain per-row text, applying `display_width_of` to
+# each grapheme. A double-width grapheme lays down its own cell plus one
+# `continuation` cell; a combining mark's zero width means it never advances
+# the column, matching how a real terminal folds a combining mark onto the
+# preceding cell rather than starting a new one.
+pub fn terminal_snapshot_from_rows(rows: [text], columns: i64) -> TerminalSnapshot:
+    var cells: [TerminalCell] = []
+    var r = 0
+    while r < rows.len():
+        val row_text = rows[r]
+        # Iterate by Unicode codepoint, not by byte: a byte-wise slice
+        # splits every multi-byte UTF-8 grapheme (CJK, emoji, combining
+        # marks) into invalid fragments.
+        val codepoints = text_codepoints(row_text)
+        var col = 0
+        var i = 0
+        while i < codepoints.len():
+            val grapheme = char_from_codepoint(codepoints[i])
+            val width = display_width_of(grapheme)
+            if width == 0:
+                # Combining mark: attach to the previous cell, contribute no
+                # new cell of its own.
+                if cells.len() > 0:
+                    var prev = cells[cells.len() - 1]
+                    prev.grapheme = prev.grapheme + grapheme
+                    cells[cells.len() - 1] = prev
+                i = i + 1
+            elif col >= columns:
+                # Past the declared grid width: stop emitting cells for this
+                # row rather than silently growing the grid.
+                i = codepoints.len()
+            else:
+                var cell = terminal_cell_default()
+                cell.grapheme = grapheme
+                cell.display_width = width
+                cells.push(cell)
+                col = col + 1
+                if width == 2 and col < columns:
+                    var cont = terminal_cell_default()
+                    cont.grapheme = ""
+                    cont.display_width = 0
+                    cont.continuation = true
+                    cells.push(cont)
+                    col = col + 1
+                i = i + 1
+        # Pad the remainder of the row to `columns` so every row occupies a
+        # uniform stride and row/col arithmetic stays exact.
+        while col < columns:
+            cells.push(terminal_cell_default())
+            col = col + 1
+        r = r + 1
+
+    TerminalSnapshot(
+        columns: columns,
+        rows: rows.len(),
+        cells: cells,
+        cursor: TerminalCursor(row: 0, col: 0, visible: false),
+        width_profile: "explicit-table-v1",
+        semantic_regions: []
+    )
+
+# ---------------------------------------------------------------------------
+# Region resolution
+# ---------------------------------------------------------------------------
+
+fn find_region(snapshot: TerminalSnapshot, node_id: text) -> TerminalRegion:
+    for region in snapshot.semantic_regions:
+        if region.node_id == node_id:
+            return region
+    TerminalRegion(node_id: "", row: 0, col: 0, width: 0, height: 0)
+
+fn region_exists(snapshot: TerminalSnapshot, node_id: text) -> bool:
+    for region in snapshot.semantic_regions:
+        if region.node_id == node_id:
+            return true
+    false
+
+fn cell_at(snapshot: TerminalSnapshot, row: i64, col: i64) -> TerminalCell:
+    val index = row * snapshot.columns + col
+    if index < 0 or index >= snapshot.cells.len():
+        return terminal_cell_default()
+    snapshot.cells[index]
+
+# Renders one row-slice of a region into text. A continuation cell never
+# contributes a grapheme (see module header); a double-width cell clipped by
+# the region's right edge is reported via `clipped`, never silently dropped.
+fn region_row_text(snapshot: TerminalSnapshot, region: TerminalRegion, row: i64) -> (text, bool):
+    var out = ""
+    var clipped = false
+    var c = 0
+    while c < region.width:
+        val col = region.col + c
+        val cell = cell_at(snapshot, row, col)
+        if not cell.continuation:
+            if cell.display_width == 2 and c == region.width - 1:
+                # The wide grapheme's continuation cell falls outside the
+                # region: it was clipped, not cleanly rendered.
+                clipped = true
+            else:
+                out = out + cell.grapheme
+        c = c + 1
+    (out, clipped)
+
+# Renders a region to text across all of its rows. Returns `parse_ok = false`
+# in the third slot when the region resolves to zero cells, so a caller can
+# distinguish "correctly empty" from "region unresolved" instead of treating
+# both as the same blank string.
+pub fn scoped_region_text(snapshot: TerminalSnapshot, node_id: text) -> text:
+    val (text_value, _clipped, _ok) = scoped_region_text_detailed(snapshot, node_id)
+    text_value
+
+pub fn scoped_region_text_detailed(snapshot: TerminalSnapshot, node_id: text) -> (text, bool, bool):
+    if not region_exists(snapshot, node_id):
+        return ("", false, false)
+    val region = find_region(snapshot, node_id)
+    if region.width <= 0 or region.height <= 0:
+        return ("", false, false)
+    # A region wider or taller than the grid, or placed off-grid, must not
+    # resolve: `cell_at` silently returns a blank default cell for an
+    # out-of-range index, so without this check a region declared past the
+    # grid edge would render as fabricated blank columns/rows instead of
+    # failing as unresolved.
+    if region.row < 0 or region.col < 0:
+        return ("", false, false)
+    if region.col + region.width > snapshot.columns:
+        return ("", false, false)
+    if region.row + region.height > snapshot.rows:
+        return ("", false, false)
+    var lines: [text] = []
+    var any_clipped = false
+    var row = 0
+    while row < region.height:
+        val (line, clipped) = region_row_text(snapshot, region, region.row + row)
+        lines.push(line)
+        if clipped:
+            any_clipped = true
+        row = row + 1
+    var out = ""
+    var i = 0
+    while i < lines.len():
+        if i > 0:
+            out = out + "\n"
+        out = out + lines[i]
+        i = i + 1
+    (out, any_clipped, true)
+
+# ---------------------------------------------------------------------------
+# Projections
+# ---------------------------------------------------------------------------
+
+# Human-readable manual form: one text line per row, continuation cells
+# folded away exactly as in a region render.
+pub fn terminal_text_projection(snapshot: TerminalSnapshot) -> [text]:
+    var lines: [text] = []
+    var row = 0
+    while row < snapshot.rows:
+        var line = ""
+        var col = 0
+        while col < snapshot.columns:
+            val cell = cell_at(snapshot, row, col)
+            if not cell.continuation:
+                line = line + cell.grapheme
+            col = col + 1
+        lines.push(line)
+        row = row + 1
+    lines
+
+# ---------------------------------------------------------------------------
+# Evidence projection
+# ---------------------------------------------------------------------------
+
+# Emits one node per declared semantic region (path = region node_id, value =
+# the region's rendered text) plus grid metadata nodes. A snapshot with no
+# width profile is rejected up front: it describes cell positions measured
+# under an unnamed rule, which cannot be replayed later, so it is a parse
+# error rather than evidence with a value.
+#
+# A region that resolves to no cells fails the whole projection rather than
+# emitting an empty-value node, because an empty text value is
+# indistinguishable from "correctly rendered nothing".
+pub fn terminal_snapshot_to_evidence(snapshot: TerminalSnapshot, profile_id: text) -> CanonicalEvidence:
+    if not terminal_snapshot_is_valid(snapshot):
+        return canonical_evidence_parse_error(
+            "terminal_grid",
+            profile_id,
+            "snapshot has no width_profile or non-positive dimensions"
+        )
+
+    var nodes: [EvidenceNode] = []
+    var order = 0
+    nodes.push(evidence_node_at("terminal.columns", "{snapshot.columns}", order))
+    order = order + 1
+    nodes.push(evidence_node_at("terminal.rows", "{snapshot.rows}", order))
+    order = order + 1
+    nodes.push(evidence_node_at("terminal.width_profile", snapshot.width_profile, order))
+    order = order + 1
+
+    for region in snapshot.semantic_regions:
+        val (text_value, _clipped, ok) = scoped_region_text_detailed(snapshot, region.node_id)
+        if not ok:
+            return canonical_evidence_parse_error(
+                "terminal_grid",
+                profile_id,
+                "region '" + region.node_id + "' resolved no cells"
+            )
+        nodes.push(evidence_node_at(region.node_id, text_value, order))
+        order = order + 1
+
+    canonical_evidence("terminal_grid", profile_id, nodes)
+
+# ---------------------------------------------------------------------------
+# Cell-level diff
+# ---------------------------------------------------------------------------
+
+# Reports every differing cell as "row R col C: 'expected' vs 'actual'".
+# Compares the smaller of the two grids' extents; a size mismatch is reported
+# as its own line rather than silently truncating the comparison.
+pub fn terminal_cell_diff(expected: TerminalSnapshot, actual: TerminalSnapshot) -> [text]:
+    var out: [text] = []
+    if expected.columns != actual.columns or expected.rows != actual.rows:
+        out.push(
+            "grid size mismatch: expected {expected.columns}x{expected.rows}, actual {actual.columns}x{actual.rows}"
+        )
+    val rows = if expected.rows < actual.rows: expected.rows else: actual.rows
+    val cols = if expected.columns < actual.columns: expected.columns else: actual.columns
+    var row = 0
+    while row < rows:
+        var col = 0
+        while col < cols:
+            val e = cell_at(expected, row, col)
+            val a = cell_at(actual, row, col)
+            if e.grapheme != a.grapheme or e.continuation != a.continuation:
+                out.push(
+                    "row {row} col {col}: '" + e.grapheme + "' vs '" + a.grapheme + "'"
+                )
+            col = col + 1
+        row = row + 1
+    out

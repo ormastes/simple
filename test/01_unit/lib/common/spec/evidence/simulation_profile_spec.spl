@@ -1,0 +1,224 @@
+# Simulation + performance/statistics evidence profiles (E7b).
+#
+# @manual_section Simulation and statistics evidence profiles
+# @req REQ-SSPEC-EVD-007B
+
+use std.spec.*
+use std.common.spec.evidence.model.{
+    OracleSpec, EvidenceStatus,
+    check_numeric_tolerance, check_exact, oracle_spec
+}
+use std.common.spec.evidence.evidence_comparator.{compare_evidence}
+use std.common.spec.evidence.format.simulation_profile.{
+    SimulationRun, TimelineEvent, InvariantSpec, KpiSpec, SampleSet,
+    simulation_run_is_valid, simulation_to_evidence,
+    check_invariants, evaluate_kpis,
+    sample_count, sample_min, sample_max, sample_mean_scaled, sample_percentile,
+    sample_set_is_valid, samples_to_evidence, distribution_within
+}
+
+fn seeded_run() -> SimulationRun:
+    SimulationRun(
+        model_id: "thermal-plant",
+        model_version: "3.1",
+        seed: "20260808-1",
+        solver: "rk4",
+        time_step_us: 1000,
+        termination: "steady_state",
+        environment: "ci-sim-01"
+    )
+
+fn temperature_timeline() -> [TimelineEvent]:
+    [
+        TimelineEvent(t_us: 0, signal: "temp_c_milli", value: 20000),
+        TimelineEvent(t_us: 1000, signal: "temp_c_milli", value: 45000),
+        TimelineEvent(t_us: 2000, signal: "temp_c_milli", value: 60000),
+        TimelineEvent(t_us: 3000, signal: "temp_c_milli", value: 58000)
+    ]
+
+fn latency_samples() -> SampleSet:
+    SampleSet(
+        metric: "request_latency",
+        unit: "us",
+        samples: [1200, 1300, 1250, 5000, 1280, 1310, 1290, 1260, 1305, 1270],
+        scale: 1
+    )
+
+describe "Simulation evidence profile":
+    """
+    A recorded simulation run becomes evidence only when it is reproducible.
+    Invariants are checked at every timeline point, not just the end state,
+    and KPI tolerances always carry a stated reason.
+    """
+
+    it "rejects a run with no recorded seed as not reproducible":
+        step("Build a run whose seed was never recorded")
+        val run = SimulationRun(
+            model_id: "thermal-plant",
+            model_version: "3.1",
+            seed: "",
+            solver: "rk4",
+            time_step_us: 1000,
+            termination: "steady_state",
+            environment: "ci-sim-01"
+        )
+
+        step("Verify the run is rejected as invalid")
+        expect(simulation_run_is_valid(run)).to_equal(false)
+
+        step("Verify converting it to evidence fails to parse instead of emitting nodes")
+        val evidence = simulation_to_evidence(run, temperature_timeline(), "sim/thermal-plant")
+        expect(evidence.parse_ok).to_equal(false)
+        expect(evidence.nodes.len()).to_equal(0)
+
+    it "accepts a seeded run and records its timeline as evidence nodes":
+        step("Convert a seeded run and its timeline to canonical evidence")
+        val evidence = simulation_to_evidence(seeded_run(), temperature_timeline(), "sim/thermal-plant")
+
+        step("Verify the run parses and carries a timeline node per sample")
+        expect(evidence.parse_ok).to_equal(true)
+        var timeline_nodes = 0
+        for node in evidence.nodes:
+            if node.path == "simulation.timeline.temp_c_milli":
+                timeline_nodes = timeline_nodes + 1
+        expect(timeline_nodes).to_equal(4)
+
+    it "flags an invariant breach at any timeline point, even when the run ends clean":
+        step("Declare an invariant that the temperature never exceeds 55000 milli-C")
+        val invariants = [
+            InvariantSpec(name: "temp-ceiling", signal: "temp_c_milli", min_value: 0, max_value: 55000)
+        ]
+
+        step("Check the invariant against a timeline that spikes mid-run then settles")
+        val findings = check_invariants(temperature_timeline(), invariants)
+
+        step("Verify both breaches (t=2000us and the still-hot t=3000us) are reported, not just the worst one")
+        expect(findings.len()).to_equal(2)
+        expect(findings[0]).to_contain("temp-ceiling")
+        expect(findings[0]).to_contain("t=2000us")
+
+    it "passes an invariant that holds at every timeline point":
+        step("Declare a wider invariant that covers the whole run")
+        val invariants = [
+            InvariantSpec(name: "temp-ceiling", signal: "temp_c_milli", min_value: 0, max_value: 70000)
+        ]
+
+        step("Check it against the same timeline")
+        val findings = check_invariants(temperature_timeline(), invariants)
+
+        step("Verify no findings are reported")
+        expect(findings.len()).to_equal(0)
+
+    it "evaluates a KPI against the settled end-of-run value":
+        step("Declare a KPI expecting the settled temperature near 58000 milli-C")
+        val kpis = [
+            KpiSpec(name: "settled-temp", signal: "temp_c_milli", expected: 58500, tolerance: 1000, reason: "steady-state target with sensor noise margin")
+        ]
+
+        step("Evaluate the KPI against the timeline")
+        val findings = evaluate_kpis(temperature_timeline(), kpis)
+
+        step("Verify it passes because the last sample is within tolerance")
+        expect(findings.len()).to_equal(0)
+
+    it "requires every KPI tolerance to carry a reason":
+        step("Declare a KPI whose tolerance has no recorded reason")
+        val kpi = KpiSpec(name: "settled-temp", signal: "temp_c_milli", expected: 58500, tolerance: 1000, reason: "")
+
+        step("Verify the reason field is empty, which downstream policy must reject before trusting the KPI")
+        expect(kpi.reason).to_equal("")
+
+    it "feeds simulation evidence into compare_evidence against a closed oracle":
+        step("Convert the seeded run to canonical evidence")
+        val evidence = simulation_to_evidence(seeded_run(), temperature_timeline(), "sim/thermal-plant")
+
+        step("Declare a closed oracle covering every field the run emits, ignoring nothing")
+        val oracle: OracleSpec = oracle_spec(
+            "sim/thermal-plant",
+            [
+                check_numeric_tolerance("simulation.time_step_us", "1000", 0, "fixed solver step"),
+                check_numeric_tolerance("simulation.timeline.temp_c_milli", "20000", 0, "first sample checked exactly")
+            ]
+        )
+
+        step("Compare — the closed oracle must fail because it does not declare every emitted field")
+        val result = compare_evidence(evidence, oracle)
+        expect(result.status).to_equal(EvidenceStatus.failed)
+
+describe "Performance / statistics evidence profile":
+    """
+    A performance sample set is reduced to fixed-point statistics: count,
+    min, max, mean, and nearest-rank percentiles. Every reduction is refused
+    outright on empty or under-sized input rather than silently reporting a
+    number that looks real.
+    """
+
+    it "rejects an empty sample set instead of reporting a passing zero":
+        step("Build a sample set with no recorded samples")
+        val empty = SampleSet(metric: "request_latency", unit: "us", samples: [], scale: 1)
+
+        step("Verify it is rejected as invalid")
+        expect(sample_set_is_valid(empty)).to_equal(false)
+
+        step("Verify converting it to evidence fails to parse instead of emitting a zeroed node set")
+        val evidence = samples_to_evidence(empty, "perf/request_latency")
+        expect(evidence.parse_ok).to_equal(false)
+        expect(evidence.nodes.len()).to_equal(0)
+
+    it "computes count, min, max, and mean over a sample set":
+        step("Build a sample set of recorded latencies")
+        val set = latency_samples()
+
+        step("Compute the basic statistics")
+        expect(sample_count(set)).to_equal(10)
+        expect(sample_min(set)).to_equal(1200)
+        expect(sample_max(set)).to_equal(5000)
+
+        step("Verify the mean falls between the min and max")
+        val mean = sample_mean_scaled(set)
+        expect(mean > sample_min(set)).to_equal(true)
+        expect(mean < sample_max(set)).to_equal(true)
+
+    it "computes a nearest-rank percentile once enough samples are declared":
+        step("Compute the p50 of the latency samples with a floor of 5 samples")
+        val p50 = sample_percentile(latency_samples().samples, 50, 5)
+
+        step("Verify the median lands near the typical ~1270-1300us cluster, not the outlier")
+        expect(p50 >= 1250).to_equal(true)
+        expect(p50 <= 1310).to_equal(true)
+
+    it "refuses a percentile computed from fewer samples than the declared minimum":
+        step("Request a p99 but require at least 100 samples, more than were recorded")
+        val p99 = sample_percentile(latency_samples().samples, 99, 100)
+
+        step("Verify the percentile is refused, not reported as an under-supported estimate")
+        expect(p99).to_equal(-1)
+
+    it "reports a distribution as within tolerance when the mean is close enough to expected":
+        step("Check the latency distribution against an expected mean of 1646us +/- 50us (mean including the one outlier)")
+        val within = distribution_within(latency_samples(), 1646, 50)
+
+        step("Verify it is accepted")
+        expect(within).to_equal(true)
+
+    it "feeds a sample-set summary into compare_evidence with a numeric-tolerance KPI check":
+        step("Convert the latency sample set to canonical evidence")
+        val evidence = samples_to_evidence(latency_samples(), "perf/request_latency")
+
+        step("Declare an oracle checking the mean is within tolerance of an expected latency, with a stated reason")
+        val oracle: OracleSpec = oracle_spec(
+            "perf/request_latency",
+            [
+                check_numeric_tolerance("sample_set.mean_scaled", "1646", 50, "warm-cache latency budget with jitter margin, mean includes one outlier"),
+                check_numeric_tolerance("sample_set.count", "10", 0, "fixed sample batch size"),
+                check_numeric_tolerance("sample_set.min", "1200", 0, "fastest recorded request"),
+                check_numeric_tolerance("sample_set.max", "5000", 0, "slowest recorded request, includes one outlier"),
+                check_exact("sample_set.metric", "request_latency"),
+                check_exact("sample_set.unit", "us"),
+                check_numeric_tolerance("sample_set.scale", "1", 0, "raw microseconds, unscaled")
+            ]
+        )
+
+        step("Compare and verify the closed oracle passes because every emitted field is declared")
+        val result = compare_evidence(evidence, oracle)
+        expect(result.status).to_equal(EvidenceStatus.passed)

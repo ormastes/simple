@@ -1,0 +1,140 @@
+use common.ui.draw_ir.{DRAW_IR_COMMAND_TEXT}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use os.hosted.hosted_browser_renderer_process.{
+    HostedBrowserRendererProcess, HostedBrowserRendererResult
+}
+
+extern fn rt_sleep_ms(milliseconds: i64)
+
+val HOSTED_BROWSER_ANIMATION_EVIDENCE_HTML = (
+    "<style>@keyframes Pulse{from{background-color:#ef4444}" +
+    "to{background-color:#2563eb}}#css-stage,#js-stage,#timer-stage{" +
+    "width:16px;height:16px;background-color:#ef4444}" +
+    "#css-stage{animation:Pulse 16ms linear forwards}</style>" +
+    "<script type='text/simple'>title \"SimpleReady\"\n" +
+    "body_html '<div id=\"css-stage\"></div><div id=\"js-stage\"></div>" +
+    "<div id=\"timer-stage\"></div>'</script>" +
+    "<script>setTimeout(function(){document.getElementById('timer-stage')." +
+    "style.backgroundColor='#eab308';},8);</script>" +
+    "<script>requestAnimationFrame(function(){" +
+    "var stage=document.getElementById('js-stage');" +
+    "stage.style.backgroundColor='#22c55e';" +
+    "document.title='Animated';});</script>"
+)
+
+fn _evidence_count_color(pixels: [u32], color: u32) -> i64:
+    var count: i64 = 0
+    for pixel in pixels:
+        if pixel == color:
+            count = count + 1
+    count
+
+fn _evidence_pixels_equal(left: [u32], right: [u32]) -> bool:
+    if left.len() != right.len():
+        return false
+    var index: i64 = 0
+    while index < left.len():
+        if left[index] != right[index]:
+            return false
+        index = index + 1
+    true
+
+fn _await_evidence_frame(renderer: HostedBrowserRendererProcess) -> HostedBrowserRendererResult?:
+    var attempts: i64 = 0
+    while attempts < 250:
+        match renderer.poll():
+            Some(frame):
+                return Some(frame)
+            nil:
+                rt_sleep_ms(1)
+        attempts = attempts + 1
+    nil
+
+fn _close_evidence(renderer: HostedBrowserRendererProcess, raster: Engine2dCompositorBackend) -> bool:
+    val closed = renderer.close()
+    raster.shutdown()
+    closed
+
+fn _close_evidence_failure(renderer: HostedBrowserRendererProcess, raster: Engine2dCompositorBackend, reason: text) -> text:
+    if not _close_evidence(renderer, raster):
+        return "{reason}; renderer cleanup failed"
+    reason
+
+pub fn hosted_browser_html_css_evidence(executable: text) -> text:
+    var renderer = HostedBrowserRendererProcess.create(2, 64, 48)
+    val raster = Engine2dCompositorBackend.create_named(64, 48, "software")
+    val started = renderer.start(executable, 2000)
+    if not started.ok:
+        raster.shutdown()
+        return "renderer launch failed: {started.reason}"
+    val frame = renderer.render(
+        "init",
+        "<style>.card{position:absolute;left:4px;top:6px;width:48px;height:30px;background-color:#ef4444;color:#ffffff;font-size:8px}#stage{background-color:#2563eb}</style><section><div id='stage' class='card'>Cascade text</div></section>",
+        2000
+    )
+    if not frame.ok:
+        return _close_evidence_failure(renderer, raster, "static frame failed: {frame.reason}")
+    val rendered = raster.render_draw_ir_composition(frame.composition, [])
+    var text_commands: i64 = 0
+    for batch in frame.composition.batches:
+        for command in batch.commands:
+            if command.kind == DRAW_IR_COMMAND_TEXT and command.text_value == "Cascade text":
+                text_commands = text_commands + 1
+    val blue_pixels = _evidence_count_color(rendered.pixels, 0xFF2563EBu32)
+    val red_pixels = _evidence_count_color(rendered.pixels, 0xFFEF4444u32)
+    val closed = _close_evidence(renderer, raster)
+    if not closed: return "renderer cleanup failed"
+    if frame.composition.batches.len() <= 0: return "Draw IR has no batches"
+    if frame.composition.batches[0].commands.len() <= 0: return "Draw IR has no commands"
+    if text_commands <= 0: return "Draw IR text command missing"
+    if rendered.fallback_required: return "software raster requested fallback"
+    if rendered.rendered_command_count <= 0: return "software raster rendered no commands"
+    if rendered.pixels.len() != 64 * 48: return "software raster size mismatch"
+    if blue_pixels <= 1000: return "CSS id cascade did not produce blue pixels"
+    if red_pixels != 0: return "lower-specificity CSS class remained visible"
+    if frame.next_animation_ms != -1: return "static frame unexpectedly scheduled animation"
+    ""
+
+pub fn hosted_browser_animation_evidence(executable: text) -> text:
+    var renderer = HostedBrowserRendererProcess.create(1, 64, 48)
+    val raster = Engine2dCompositorBackend.create_named(64, 48, "software")
+    val started = renderer.start(executable, 2000)
+    if not started.ok:
+        raster.shutdown()
+        return "renderer launch failed: {started.reason}"
+    val initial = renderer.render("init", HOSTED_BROWSER_ANIMATION_EVIDENCE_HTML, 2000)
+    if not initial.ok:
+        return _close_evidence_failure(renderer, raster, "initial frame failed: {initial.reason}")
+    val first = raster.render_draw_ir_composition(initial.composition, [])
+    match renderer.begin_advance(16, 2000):
+        Err(reason):
+            return _close_evidence_failure(renderer, raster, "animation start failed: {reason}")
+        Ok(started_advance):
+            if not started_advance:
+                return _close_evidence_failure(renderer, raster, "animation did not start")
+    val advanced = match _await_evidence_frame(renderer):
+        Some(frame): frame
+        nil:
+            return _close_evidence_failure(renderer, raster, "animation poll exhausted")
+    if not advanced.ok:
+        return _close_evidence_failure(renderer, raster, "animation frame failed: {advanced.reason}")
+    val second = raster.render_draw_ir_composition(advanced.composition, [])
+    val initial_red = _evidence_count_color(first.pixels, 0xFFEF4444u32)
+    val advanced_blue = _evidence_count_color(second.pixels, 0xFF2563EBu32)
+    val advanced_green = _evidence_count_color(second.pixels, 0xFF22C55Eu32)
+    val advanced_yellow = _evidence_count_color(second.pixels, 0xFFEAB308u32)
+    val changed = not _evidence_pixels_equal(first.pixels, second.pixels)
+    val closed = _close_evidence(renderer, raster)
+    if not closed: return "renderer cleanup failed"
+    if initial.next_animation_ms != 16: return "initial animation deadline mismatch"
+    if initial.composition.batches.len() <= 0 or initial.composition.batches[0].commands.len() <= 0: return "initial animation Draw IR is empty"
+    if first.rendered_command_count <= 0 or second.rendered_command_count <= 0: return "animation raster rendered no commands"
+    if first.fallback_required or second.fallback_required: return "animation raster requested fallback"
+    if first.pixels.len() != 64 * 48 or second.pixels.len() != 64 * 48: return "animation raster size mismatch"
+    if initial_red <= 0: return "initial CSS keyframe pixels missing"
+    if advanced_blue <= 0: return "CSS animation pixels missing"
+    if advanced_green <= 0: return "requestAnimationFrame pixels missing"
+    if advanced_yellow <= 0: return "JavaScript timer pixels missing"
+    if not changed: return "animation pixels did not change"
+    if advanced.next_animation_ms != -1: return "animation did not settle"
+    ""

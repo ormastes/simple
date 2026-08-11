@@ -1,0 +1,450 @@
+# @cover src/lib/common/spec/environment_profile.spl 90%
+# @req REQ-003 REQ-008 REQ-011 REQ-019 REQ-020 NFR-009 NFR-013
+
+use std.spec.*
+use common.spec.environment_profile.{
+    UiArm64QemuPrimitiveConfig,
+    UiEnvironmentAdmission,
+    UiEnvironmentAdmissionStatus,
+    UiEnvironmentEvidence,
+    UiEnvironmentEvidenceClass,
+    UiEnvironmentExecution,
+    UiEnvironmentInput,
+    UiEnvironmentAudio,
+    UiEnvironmentProfile,
+    arm64_simpleos_qemu_primitive_config,
+    arm64_simpleos_qemu_primitive_config_valid,
+    arm64_simpleos_qemu_primitive_evidence,
+    linux_host_2d_environment_profile,
+    macos_emulated_2d_environment_profile,
+    simpleos_qemu_2d_environment_profiles,
+    ui_2d_environment_profiles,
+    ui_environment_admission_status_name,
+    ui_environment_evidence,
+    ui_environment_evidence_class_name,
+    ui_environment_profile_by_id,
+    ui_environment_profile_valid,
+    validate_arm64_simpleos_qemu_primitives,
+    validate_ui_environment_evidence
+}
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn readiness(profile: UiEnvironmentProfile) -> UiEnvironmentEvidence:
+    ui_environment_evidence(
+        profile.id,
+        UiEnvironmentEvidenceClass.HostReadiness,
+        configured: true,
+        runtime_available: true,
+        qemu_arguments_bound: true
+    )
+
+fn complete_live(
+    profile: UiEnvironmentProfile,
+    kind: UiEnvironmentEvidenceClass
+) -> UiEnvironmentEvidence:
+    ui_environment_evidence(
+        profile.id,
+        kind,
+        configured: true,
+        runtime_available: true,
+        qemu_arguments_bound: true,
+        guest_booted: kind == UiEnvironmentEvidenceClass.LiveGuest,
+        draw_ir_executed: true,
+        vulkan_device_executed: true,
+        device_readback: true,
+        input_delivered: true,
+        audio_completed: true,
+        device_identity: "device-41",
+        frame_identity: "frame-7"
+    )
+
+fn arm64_primitive_readiness(
+    profile: UiEnvironmentProfile,
+    config: UiArm64QemuPrimitiveConfig
+) -> UiEnvironmentAdmission:
+    validate_arm64_simpleos_qemu_primitives(
+        profile,
+        config,
+        arm64_simpleos_qemu_primitive_evidence(
+            profile.id,
+            UiEnvironmentEvidenceClass.HostReadiness
+        )
+    )
+
+describe "Reusable UI environment profiles":
+    it "selects canonical host and SimpleOS QEMU profiles from one catalog":
+        val all = ui_2d_environment_profiles()
+        val qemu = simpleos_qemu_2d_environment_profiles()
+        expect(all.len()).to_equal(5)
+        expect(qemu.len()).to_equal(3)
+        for profile in all:
+            expect(ui_environment_profile_valid(profile)).to_be(true)
+        expect(qemu[0].id).to_equal("simpleos-qemu-x86_64-vulkan-virtio")
+        expect(qemu[1].id).to_equal("simpleos-qemu-aarch64-vulkan-virtio")
+        expect(qemu[2].id).to_equal("simpleos-qemu-riscv64-vulkan-virtio")
+        match ui_environment_profile_by_id(qemu[1].id):
+            case Some(selected): expect(selected.id).to_equal(qemu[1].id)
+            case None: fail("canonical profile was not selectable by id")
+        expect(ui_environment_profile_by_id("unknown-profile")).to_be_nil()
+
+    it "keeps configured host readiness distinct from live execution":
+        val linux = linux_host_2d_environment_profile()
+        val admission = validate_ui_environment_evidence(linux, readiness(linux))
+        expect(admission.status).to_equal(UiEnvironmentAdmissionStatus.Ready)
+        expect(admission.reason).to_equal("live-host-proof-required")
+        expect(admission.promotion_eligible).to_be(false)
+        expect(ui_environment_admission_status_name(admission.status)).to_equal("ready")
+
+    it "keeps configured QEMU readiness distinct from live guest proof":
+        val profile = simpleos_qemu_2d_environment_profiles()[0]
+        val admission = validate_ui_environment_evidence(profile, readiness(profile))
+        expect(admission.status).to_equal(UiEnvironmentAdmissionStatus.Ready)
+        expect(admission.reason).to_equal("live-guest-proof-required")
+        expect(admission.promotion_eligible).to_be(false)
+        expect(ui_environment_evidence_class_name(profile.required_evidence)).to_equal("live-guest")
+
+    it "admits the canonical ARM64 QEMU primitive configuration only as ready":
+        val profile = simpleos_qemu_2d_environment_profiles()[1]
+        val config = arm64_simpleos_qemu_primitive_config()
+        val admission = arm64_primitive_readiness(profile, config)
+        expect(arm64_simpleos_qemu_primitive_config_valid(config)).to_be(true)
+        expect(config.machine).to_equal("virt")
+        expect(config.pci_transport).to_equal("pcie")
+        expect(config.mmio_transport).to_equal("virtio-mmio")
+        expect(config.ivshmem_device).to_equal("ivshmem-plain,memdev=hostgpu")
+        expect(config.keyboard_device).to_equal("virtio-keyboard-device")
+        expect(config.pointer_device).to_equal("virtio-mouse-device")
+        expect(config.sound_device).to_equal("virtio-sound-device")
+        expect(admission.status).to_equal(UiEnvironmentAdmissionStatus.Ready)
+        expect(admission.reason).to_equal("arm64-qemu-primitives-ready-live-guest-proof-required")
+        expect(admission.promotion_eligible).to_be(false)
+
+    it "keeps ARM64 configuration facts aligned with the canonical wrappers":
+        val host_gpu = rt_file_read_text(
+            "scripts/check/check-simpleos-qemu-host-gpu-2d.shs") ?? ""
+        val input = rt_file_read_text(
+            "scripts/check/check-simpleos-arm64-qmp-input-evidence.shs") ?? ""
+        val audio = rt_file_read_text(
+            "scripts/check/check-simpleos-virtio-snd-qemu.shs") ?? ""
+        expect(host_gpu).to_contain("-machine virt")
+        expect(host_gpu).to_contain("-device virtio-net-pci")
+        expect(host_gpu).to_contain("-device ivshmem-plain,memdev=hostgpu")
+        expect(input).to_contain("-device virtio-keyboard-device")
+        expect(input).to_contain("-device virtio-mouse-device")
+        expect(audio).to_contain("-device virtio-sound-device,audiodev=audio0")
+
+    it "blocks missing ARM64 machine PCI MMIO and shared-memory bindings":
+        val profile = simpleos_qemu_2d_environment_profiles()[1]
+        val machine = arm64_primitive_readiness(
+            profile,
+            arm64_simpleos_qemu_primitive_config(machine: "q35")
+        )
+        val pci = arm64_primitive_readiness(
+            profile,
+            arm64_simpleos_qemu_primitive_config(pci_transport: "")
+        )
+        val mmio = arm64_primitive_readiness(
+            profile,
+            arm64_simpleos_qemu_primitive_config(mmio_transport: "pci-only")
+        )
+        val ivshmem = arm64_primitive_readiness(
+            profile,
+            arm64_simpleos_qemu_primitive_config(
+                ivshmem_device: "ivshmem-plain,memdev=other"
+            )
+        )
+        expect(machine.status).to_equal(UiEnvironmentAdmissionStatus.Blocked)
+        expect(machine.reason).to_equal("arm64-qemu-machine-unbound")
+        expect(pci.reason).to_equal("arm64-qemu-pci-unbound")
+        expect(mmio.reason).to_equal("arm64-qemu-mmio-unbound")
+        expect(ivshmem.reason).to_equal("arm64-qemu-ivshmem-unbound")
+
+    it "blocks missing ARM64 VirtIO input and sound devices":
+        val profile = simpleos_qemu_2d_environment_profiles()[1]
+        val keyboard = arm64_primitive_readiness(
+            profile,
+            arm64_simpleos_qemu_primitive_config(keyboard_device: "")
+        )
+        val pointer = arm64_primitive_readiness(
+            profile,
+            arm64_simpleos_qemu_primitive_config(pointer_device: "")
+        )
+        val sound = arm64_primitive_readiness(
+            profile,
+            arm64_simpleos_qemu_primitive_config(sound_device: "")
+        )
+        expect(keyboard.reason).to_equal("arm64-qemu-keyboard-unbound")
+        expect(pointer.reason).to_equal("arm64-qemu-pointer-unbound")
+        expect(sound.reason).to_equal("arm64-qemu-sound-unbound")
+
+    it "rejects incomplete or fallback ARM64 live guest primitive evidence":
+        val profile = simpleos_qemu_2d_environment_profiles()[1]
+        val config = arm64_simpleos_qemu_primitive_config()
+        val no_boot = validate_arm64_simpleos_qemu_primitives(
+            profile,
+            config,
+            arm64_simpleos_qemu_primitive_evidence(
+                profile.id,
+                UiEnvironmentEvidenceClass.LiveGuest
+            )
+        )
+        val no_driver = validate_arm64_simpleos_qemu_primitives(
+            profile,
+            config,
+            arm64_simpleos_qemu_primitive_evidence(
+                profile.id,
+                UiEnvironmentEvidenceClass.LiveGuest,
+                guest_booted: true
+            )
+        )
+        val no_draw_ir = validate_arm64_simpleos_qemu_primitives(
+            profile,
+            config,
+            arm64_simpleos_qemu_primitive_evidence(
+                profile.id,
+                UiEnvironmentEvidenceClass.LiveGuest,
+                guest_booted: true,
+                guest_driver_ready: true
+            )
+        )
+        val no_physical_device = validate_arm64_simpleos_qemu_primitives(
+            profile,
+            config,
+            arm64_simpleos_qemu_primitive_evidence(
+                profile.id,
+                UiEnvironmentEvidenceClass.LiveGuest,
+                guest_booted: true,
+                guest_driver_ready: true,
+                draw_ir_executed: true
+            )
+        )
+        val no_device_execution = validate_arm64_simpleos_qemu_primitives(
+            profile,
+            config,
+            arm64_simpleos_qemu_primitive_evidence(
+                profile.id,
+                UiEnvironmentEvidenceClass.LiveGuest,
+                guest_booted: true,
+                guest_driver_ready: true,
+                draw_ir_executed: true,
+                vulkan_physical_device: "hostgpu-physical-0"
+            )
+        )
+        val no_readback = validate_arm64_simpleos_qemu_primitives(
+            profile,
+            config,
+            arm64_simpleos_qemu_primitive_evidence(
+                profile.id,
+                UiEnvironmentEvidenceClass.LiveGuest,
+                guest_booted: true,
+                guest_driver_ready: true,
+                draw_ir_executed: true,
+                vulkan_physical_device: "hostgpu-physical-0",
+                vulkan_device_executed: true
+            )
+        )
+        val fallback = validate_arm64_simpleos_qemu_primitives(
+            profile,
+            config,
+            arm64_simpleos_qemu_primitive_evidence(
+                profile.id,
+                UiEnvironmentEvidenceClass.LiveGuest,
+                guest_booted: true,
+                guest_driver_ready: true,
+                draw_ir_executed: true,
+                vulkan_physical_device: "hostgpu-physical-0",
+                vulkan_device_executed: true,
+                device_readback: true,
+                fallback_used: true
+            )
+        )
+        val no_keyboard_queue = validate_arm64_simpleos_qemu_primitives(
+            profile,
+            config,
+            arm64_simpleos_qemu_primitive_evidence(
+                profile.id,
+                UiEnvironmentEvidenceClass.LiveGuest,
+                guest_booted: true,
+                guest_driver_ready: true,
+                draw_ir_executed: true,
+                vulkan_physical_device: "hostgpu-physical-0",
+                vulkan_device_executed: true,
+                device_readback: true
+            )
+        )
+        val no_pointer_queue = validate_arm64_simpleos_qemu_primitives(
+            profile,
+            config,
+            arm64_simpleos_qemu_primitive_evidence(
+                profile.id,
+                UiEnvironmentEvidenceClass.LiveGuest,
+                guest_booted: true,
+                guest_driver_ready: true,
+                draw_ir_executed: true,
+                vulkan_physical_device: "hostgpu-physical-0",
+                vulkan_device_executed: true,
+                device_readback: true,
+                keyboard_queue_ready: true
+            )
+        )
+        expect(no_boot.reason).to_equal("guest-boot-proof-missing")
+        expect(no_driver.reason).to_equal("guest-driver-ready-proof-missing")
+        expect(no_draw_ir.reason).to_equal("draw-ir-execution-proof-missing")
+        expect(no_physical_device.reason).to_equal("vulkan-physical-device-proof-missing")
+        expect(no_device_execution.reason).to_equal("vulkan-device-execution-proof-missing")
+        expect(no_readback.reason).to_equal("device-readback-proof-missing")
+        expect(fallback.reason).to_equal("fallback-used")
+        expect(no_keyboard_queue.reason).to_equal("keyboard-queue-proof-missing")
+        expect(no_pointer_queue.reason).to_equal("pointer-queue-proof-missing")
+
+    it "rejects missing ARM64 guest audio queue and completion evidence":
+        val profile = simpleos_qemu_2d_environment_profiles()[1]
+        val config = arm64_simpleos_qemu_primitive_config()
+        val no_audio_queue = validate_arm64_simpleos_qemu_primitives(
+            profile,
+            config,
+            arm64_simpleos_qemu_primitive_evidence(
+                profile.id, UiEnvironmentEvidenceClass.LiveGuest,
+                guest_booted: true, guest_driver_ready: true,
+                draw_ir_executed: true,
+                vulkan_physical_device: "hostgpu-physical-0",
+                vulkan_device_executed: true, device_readback: true,
+                keyboard_queue_ready: true, pointer_queue_ready: true
+            )
+        )
+        val no_audio_completion = validate_arm64_simpleos_qemu_primitives(
+            profile,
+            config,
+            arm64_simpleos_qemu_primitive_evidence(
+                profile.id, UiEnvironmentEvidenceClass.LiveGuest,
+                guest_booted: true, guest_driver_ready: true,
+                draw_ir_executed: true,
+                vulkan_physical_device: "hostgpu-physical-0",
+                vulkan_device_executed: true, device_readback: true,
+                keyboard_queue_ready: true, pointer_queue_ready: true,
+                audio_queue_ready: true
+            )
+        )
+        expect(no_audio_queue.reason).to_equal("audio-queue-proof-missing")
+        expect(no_audio_completion.reason).to_equal("audio-completion-proof-missing")
+
+    it "passes complete ARM64 guest boot driver Vulkan readback input and audio evidence":
+        val profile = simpleos_qemu_2d_environment_profiles()[1]
+        val admission = validate_arm64_simpleos_qemu_primitives(
+            profile,
+            arm64_simpleos_qemu_primitive_config(),
+            arm64_simpleos_qemu_primitive_evidence(
+                profile.id,
+                UiEnvironmentEvidenceClass.LiveGuest,
+                guest_booted: true,
+                guest_driver_ready: true,
+                draw_ir_executed: true,
+                vulkan_physical_device: "hostgpu-physical-0",
+                vulkan_device_executed: true,
+                device_readback: true,
+                keyboard_queue_ready: true,
+                pointer_queue_ready: true,
+                audio_queue_ready: true,
+                audio_completed: true
+            )
+        )
+        expect(admission.status).to_equal(UiEnvironmentAdmissionStatus.Pass)
+        expect(admission.reason).to_equal("pass")
+        expect(admission.promotion_eligible).to_be(true)
+
+    it "keeps the postponed macOS profile readiness-only":
+        val profile = macos_emulated_2d_environment_profile()
+        expect(profile.execution).to_equal(UiEnvironmentExecution.EmulatedContract)
+        expect(profile.input).to_equal(UiEnvironmentInput.EmulatedEvents)
+        expect(profile.audio).to_equal(UiEnvironmentAudio.EmulatedAudio)
+        val admission = validate_ui_environment_evidence(profile, readiness(profile))
+        expect(admission.status).to_equal(UiEnvironmentAdmissionStatus.Ready)
+        expect(admission.reason).to_equal("readiness-only-profile")
+        expect(admission.promotion_eligible).to_be(false)
+
+    it "admits complete correlated live host and guest evidence":
+        val host = linux_host_2d_environment_profile()
+        val guest = simpleos_qemu_2d_environment_profiles()[1]
+        val host_admission = validate_ui_environment_evidence(
+            host,
+            complete_live(host, UiEnvironmentEvidenceClass.LiveHost)
+        )
+        val guest_admission = validate_ui_environment_evidence(
+            guest,
+            complete_live(guest, UiEnvironmentEvidenceClass.LiveGuest)
+        )
+        expect(host_admission.status).to_equal(UiEnvironmentAdmissionStatus.Pass)
+        expect(host_admission.promotion_eligible).to_be(true)
+        expect(guest_admission.status).to_equal(UiEnvironmentAdmissionStatus.Pass)
+        expect(guest_admission.promotion_eligible).to_be(true)
+
+    it "fails claimed live guest evidence without boot and device proof":
+        val profile = simpleos_qemu_2d_environment_profiles()[2]
+        val no_boot = ui_environment_evidence(
+            profile.id,
+            UiEnvironmentEvidenceClass.LiveGuest,
+            configured: true,
+            runtime_available: true,
+            qemu_arguments_bound: true
+        )
+        val admission = validate_ui_environment_evidence(profile, no_boot)
+        expect(admission.status).to_equal(UiEnvironmentAdmissionStatus.Fail)
+        expect(admission.reason).to_equal("guest-boot-proof-missing")
+        expect(admission.promotion_eligible).to_be(false)
+
+    it "fails live proof that used fallback":
+        val profile = simpleos_qemu_2d_environment_profiles()[0]
+        val evidence = ui_environment_evidence(
+            profile.id,
+            UiEnvironmentEvidenceClass.LiveGuest,
+            configured: true,
+            runtime_available: true,
+            qemu_arguments_bound: true,
+            guest_booted: true,
+            draw_ir_executed: true,
+            vulkan_device_executed: true,
+            device_readback: true,
+            input_delivered: true,
+            audio_completed: true,
+            fallback_used: true,
+            device_identity: "device-41",
+            frame_identity: "frame-7"
+        )
+        val admission = validate_ui_environment_evidence(profile, evidence)
+        expect(admission.status).to_equal(UiEnvironmentAdmissionStatus.Fail)
+        expect(admission.reason).to_equal("fallback-used")
+
+    it "blocks incomplete configuration before interpreting execution fields":
+        val profile = simpleos_qemu_2d_environment_profiles()[0]
+        val missing_config = ui_environment_evidence(
+            profile.id,
+            UiEnvironmentEvidenceClass.HostReadiness
+        )
+        val missing_runtime = ui_environment_evidence(
+            profile.id,
+            UiEnvironmentEvidenceClass.HostReadiness,
+            configured: true
+        )
+        val missing_qemu_args = ui_environment_evidence(
+            profile.id,
+            UiEnvironmentEvidenceClass.HostReadiness,
+            configured: true,
+            runtime_available: true
+        )
+        expect(validate_ui_environment_evidence(profile, missing_config).reason).to_equal("environment-not-configured")
+        expect(validate_ui_environment_evidence(profile, missing_runtime).reason).to_equal("runtime-unavailable")
+        expect(validate_ui_environment_evidence(profile, missing_qemu_args).reason).to_equal("qemu-arguments-unbound")
+
+    it "rejects evidence bound to a different profile":
+        val profile = simpleos_qemu_2d_environment_profiles()[0]
+        val evidence = ui_environment_evidence(
+            "simpleos-qemu-aarch64-vulkan-virtio",
+            UiEnvironmentEvidenceClass.HostReadiness,
+            configured: true,
+            runtime_available: true,
+            qemu_arguments_bound: true
+        )
+        val admission = validate_ui_environment_evidence(profile, evidence)
+        expect(admission.status).to_equal(UiEnvironmentAdmissionStatus.Fail)
+        expect(admission.reason).to_equal("profile-identity-mismatch")

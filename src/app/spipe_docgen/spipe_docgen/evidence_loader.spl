@@ -1,0 +1,183 @@
+# E5 lane — wires the typed-evidence Markdown renderer (manual_render.spl)
+# into spipe_docgen so it is no longer a library nobody calls.
+#
+# No live capture provider exists yet (future work). This module defines the
+# SIDECAR CONVENTION a future provider will write to, and loads+renders it
+# when present:
+#
+#   Sidecar path: "{spec_path}.evidence.sdn" (next to the .spl spec file).
+#
+# Format (line-based, deliberately simple — not full SDN):
+#   One manifest header block (`key=value` lines, one per EvidenceManifest
+#   field), then zero or more `[ManualBlock]` records separated by a line
+#   containing only `---`. Each block record is `key=value` lines: `kind`,
+#   `title`, `audience` (user|qa), and repeated `line=` entries for the
+#   block's body lines (in order).
+#
+# Example:
+#   schema=simple.sspec.evidence.v1
+#   evidence_id=demo-1
+#   profile_id=demo
+#   spec_path=test/foo_spec.spl
+#   spec_sha256=<64 hex chars>
+#   provider_id=demo-provider
+#   provider_version=1.0.0
+#   run_id=run-1
+#   environment=ci
+#   artifact_sha256=<64 hex chars>
+#   status=passed
+#   ---
+#   kind=paragraph
+#   title=Observed Output
+#   audience=qa
+#   line=hello world
+#
+# When the sidecar is absent, `load_evidence_fragment` returns `[]` so specs
+# with no typed evidence are completely unaffected by this wiring.
+
+use std.common.spec.evidence.model.{
+    ManualBlock, ManualBlockKind, EvidenceAudience, EvidenceManifest,
+    EvidenceStatus, evidence_manifest
+}
+use std.common.spec.evidence.manual_render.{render_blocks}
+use app.spipe_docgen.common.{native_fs_read_string, native_fs_exists}
+
+pub fn evidence_sidecar_path(spec_path: text) -> text:
+    spec_path + ".evidence.sdn"
+
+fn parse_manual_block_kind(name: text) -> ManualBlockKind:
+    match name:
+        case "paragraph": ManualBlockKind.paragraph
+        case "action_list": ManualBlockKind.action_list
+        case "code_block": ManualBlockKind.code_block
+        case "terminal_grid": ManualBlockKind.terminal_grid
+        case "image": ManualBlockKind.image
+        case "table": ManualBlockKind.table
+        case "field_tree": ManualBlockKind.field_tree
+        case "byte_table": ManualBlockKind.byte_table
+        case "expected_actual": ManualBlockKind.expected_actual
+        case "warning": ManualBlockKind.warning
+        case "troubleshooting": ManualBlockKind.troubleshooting
+        case "artifact_link": ManualBlockKind.artifact_link
+        case _: ManualBlockKind.paragraph
+
+fn parse_evidence_audience(name: text) -> EvidenceAudience:
+    if name == "user":
+        EvidenceAudience.user
+    else:
+        EvidenceAudience.qa
+
+fn parse_evidence_status(name: text) -> EvidenceStatus:
+    match name:
+        case "passed": EvidenceStatus.passed
+        case "failed": EvidenceStatus.failed
+        case "ignored": EvidenceStatus.ignored
+        case "pending_review": EvidenceStatus.pending_review
+        case _: EvidenceStatus.pending_review
+
+fn kv_value(line: text) -> text:
+    val idx = line.index_of("=")
+    if idx < 0:
+        return ""
+    line[idx + 1:]
+
+fn kv_key(line: text) -> text:
+    val idx = line.index_of("=")
+    if idx < 0:
+        return line
+    line[:idx]
+
+# Parses the sidecar's manifest header (lines before the first `---`).
+fn parse_manifest(header_lines: [text]) -> EvidenceManifest:
+    var evidence_id = ""
+    var profile_id = ""
+    var spec_path = ""
+    var spec_sha256 = ""
+    var provider_id = ""
+    var provider_version = ""
+    var run_id = ""
+    var environment = ""
+    var artifact_sha256 = ""
+    var status = EvidenceStatus.pending_review
+    for line in header_lines:
+        val trimmed = line.trim()
+        if trimmed == "" or not trimmed.contains("="):
+            continue
+        val key = kv_key(trimmed)
+        val value = kv_value(trimmed)
+        match key:
+            case "evidence_id": evidence_id = value
+            case "profile_id": profile_id = value
+            case "spec_path": spec_path = value
+            case "spec_sha256": spec_sha256 = value
+            case "provider_id": provider_id = value
+            case "provider_version": provider_version = value
+            case "run_id": run_id = value
+            case "environment": environment = value
+            case "artifact_sha256": artifact_sha256 = value
+            case "status": status = parse_evidence_status(value)
+            case _: pass_do_nothing
+    evidence_manifest(
+        evidence_id, profile_id, spec_path, spec_sha256,
+        provider_id, provider_version, run_id, environment,
+        artifact_sha256, status
+    )
+
+# Parses one `---`-delimited block record into a ManualBlock.
+fn parse_block_record(record_lines: [text]) -> ManualBlock:
+    var kind = ManualBlockKind.paragraph
+    var title = ""
+    var audience = EvidenceAudience.qa
+    var lines: [text] = []
+    for line in record_lines:
+        val trimmed = line.trim()
+        if trimmed == "" or not trimmed.contains("="):
+            continue
+        val key = kv_key(trimmed)
+        val value = kv_value(trimmed)
+        match key:
+            case "kind": kind = parse_manual_block_kind(value)
+            case "title": title = value
+            case "audience": audience = parse_evidence_audience(value)
+            case "line": lines.push(value)
+            case _: pass_do_nothing
+    ManualBlock(kind: kind, title: title, audience: audience, lines: lines)
+
+pub struct EvidenceSidecar:
+    manifest: EvidenceManifest
+    blocks: [ManualBlock]
+
+# Parses raw sidecar file content (see module docstring for the format).
+pub fn parse_evidence_sidecar(content: text) -> EvidenceSidecar:
+    val lines = content.split("\n")
+    var sections: [[text]] = [[]]
+    for line in lines:
+        if line.trim() == "---":
+            sections.push([])
+        else:
+            sections[sections.len() - 1].push(line)
+
+    val manifest = parse_manifest(sections[0])
+    var blocks: [ManualBlock] = []
+    var i = 1
+    while i < sections.len():
+        if sections[i].len() > 0:
+            blocks.push(parse_block_record(sections[i]))
+        i = i + 1
+    EvidenceSidecar(manifest: manifest, blocks: blocks)
+
+# Returns the rendered Markdown fragment (as lines, no top-level heading —
+# the caller supplies its own section heading) for `spec_path`'s typed
+# evidence sidecar, or `[]` when no sidecar exists. `audience` selects which
+# blocks are visible.
+pub fn load_evidence_fragment(spec_path: text, audience: EvidenceAudience) -> [text]:
+    val sidecar_path = evidence_sidecar_path(spec_path)
+    if not native_fs_exists(sidecar_path):
+        return []
+    val content = native_fs_read_string(sidecar_path)
+    if content.trim() == "":
+        return []
+    val sidecar = parse_evidence_sidecar(content)
+    if sidecar.blocks.len() == 0:
+        return []
+    render_blocks(sidecar.blocks, audience)

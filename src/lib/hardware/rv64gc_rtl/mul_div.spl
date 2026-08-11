@@ -1,0 +1,375 @@
+# ============================================================================
+# RV64GC RTL M Extension — Multi-Cycle Multiply/Divide Unit
+# ============================================================================
+#
+# Implements the RISC-V M extension for RV64GC.  Multi-cycle functional
+# unit with busy/ready handshake.
+#
+# Operations: MUL, MULH, MULHSU, MULHU, DIV, DIVU, REM, REMU
+# W-suffix:   MULW, DIVW, DIVUW, REMW, REMUW
+#
+# All operands and results are i64.  Pure functions returning new state.
+#
+# VHDL synthesizable subset: i64, u32, bool, structs only.
+# ============================================================================
+
+use std.hardware.rv64gc_rtl.pkg.{MULDIV_MUL, MULDIV_MULH, MULDIV_MULHSU, MULDIV_MULHU}
+use std.hardware.rv64gc_rtl.pkg.{MULDIV_DIV, MULDIV_DIVU, MULDIV_REM, MULDIV_REMU}
+use std.hardware.rv64gc_rtl.pkg.{MULDIV_MULW, MULDIV_DIVW, MULDIV_DIVUW, MULDIV_REMW, MULDIV_REMUW}
+
+# ============================================================================
+# Mul/Div State
+# ============================================================================
+
+struct MulDivState:
+    """Multi-cycle multiply/divide unit state."""
+    busy: bool       # Unit is executing an operation
+    op: i64          # Operation code (MULDIV_*)
+    a: i64           # Operand A
+    b: i64           # Operand B
+    result: i64      # Computed result (valid when busy=false after start)
+    cycles_left: u32 # Remaining cycles until done
+
+# ============================================================================
+# Helper — sign-extend 32-bit to 64-bit
+# ============================================================================
+
+fn muldiv_sign_extend_32(value: i64) -> i64:
+    """Sign-extend bit 31 into bits [63:32]."""
+    val low32 = value & 0xFFFFFFFF
+    val sign_bit = low32 & 0x80000000
+    if sign_bit != 0:
+        low32 | 0xFFFFFFFF00000000
+    else:
+        low32
+
+# ============================================================================
+# Create — initial idle state
+# ============================================================================
+
+fn mul_div_create() -> MulDivState:
+    """Create an idle mul/div unit."""
+    MulDivState(busy: false, op: 0, a: 0, b: 0, result: 0, cycles_left: 0)
+
+# ============================================================================
+# Start — begin a multiply or divide operation
+# ============================================================================
+
+fn mul_div_start(op: i64, a: i64, b: i64) -> MulDivState:
+    """Start a mul/div operation. Sets busy and latches operands.
+    Multiply takes 4 cycles, divide takes 8 cycles (simplified model)."""
+    var cycles: u32 = 4
+    if (op == MULDIV_DIV or op == MULDIV_DIVU or op == MULDIV_REM or
+        op == MULDIV_REMU or op == MULDIV_DIVW or op == MULDIV_DIVUW or
+        op == MULDIV_REMW or op == MULDIV_REMUW):
+        cycles = 8
+
+    MulDivState(busy: true, op: op, a: a, b: b, result: 0, cycles_left: cycles)
+
+# ============================================================================
+# Tick — advance one cycle
+# ============================================================================
+
+fn mul_div_tick(state: MulDivState) -> MulDivState:
+    """Advance the mul/div unit by one clock cycle.
+    When cycles_left reaches 0, compute the result and clear busy."""
+    if state.busy == false:
+        return state
+
+    if state.cycles_left > 1:
+        var out = state
+        out.cycles_left = state.cycles_left - 1
+        return out
+
+    # Last cycle — compute result
+    val op = state.op
+    val a = state.a
+    val b = state.b
+    var res: i64 = 0
+
+    if op == MULDIV_MUL:
+        # Low 64 bits of a * b
+        res = a * b
+
+    else if op == MULDIV_MULH:
+        # Upper 64 bits of signed * signed (simplified: use low product)
+        # In real RTL this would use a 128-bit multiplier
+        res = a * b
+
+    else if op == MULDIV_MULHSU:
+        # Upper 64 bits of signed * unsigned (simplified)
+        res = a * b
+
+    else if op == MULDIV_MULHU:
+        # Upper 64 bits of unsigned * unsigned (simplified)
+        res = a * b
+
+    else if op == MULDIV_DIV:
+        # Signed division
+        if b == 0:
+            res = -1   # Division by zero returns -1
+        else if a == (1 << 63) and b == -1:
+            res = a    # signed overflow (INT64_MIN / -1): RISC-V returns dividend, no trap
+        else:
+            res = a / b
+
+    else if op == MULDIV_DIVU:
+        res = unsigned_div64(a, b)
+
+    else if op == MULDIV_REM:
+        # Signed remainder
+        if b == 0:
+            res = a   # Remainder of x/0 = x
+        else if a == (1 << 63) and b == -1:
+            res = 0   # signed overflow (INT64_MIN / -1): RISC-V remainder is 0, no trap
+        else:
+            res = a - (a / b) * b
+
+    else if op == MULDIV_REMU:
+        res = unsigned_rem64(a, b)
+
+    else if op == MULDIV_MULW:
+        # Low 32 bits of (a[31:0] * b[31:0]), sign-extended
+        val a32 = muldiv_sign_extend_32(a)
+        val b32 = muldiv_sign_extend_32(b)
+        res = muldiv_sign_extend_32(a32 * b32)
+
+    else if op == MULDIV_DIVW:
+        # Signed 32-bit division, sign-extended
+        val a32 = muldiv_sign_extend_32(a)
+        val b32 = muldiv_sign_extend_32(b)
+        if b32 == 0:
+            res = -1
+        else:
+            res = muldiv_sign_extend_32(a32 / b32)
+
+    else if op == MULDIV_DIVUW:
+        # Unsigned 32-bit division, sign-extended
+        val a32 = a & 0xFFFFFFFF
+        val b32 = b & 0xFFFFFFFF
+        if b32 == 0:
+            res = -1
+        else:
+            res = muldiv_sign_extend_32(a32 / b32)
+
+    else if op == MULDIV_REMW:
+        # Signed 32-bit remainder, sign-extended
+        val a32 = muldiv_sign_extend_32(a)
+        val b32 = muldiv_sign_extend_32(b)
+        if b32 == 0:
+            res = muldiv_sign_extend_32(a32)
+        else:
+            res = muldiv_sign_extend_32(a32 - (a32 / b32) * b32)
+
+    else if op == MULDIV_REMUW:
+        # Unsigned 32-bit remainder, sign-extended
+        val a32 = a & 0xFFFFFFFF
+        val b32 = b & 0xFFFFFFFF
+        if b32 == 0:
+            res = muldiv_sign_extend_32(a32)
+        else:
+            res = muldiv_sign_extend_32(a32 - (a32 / b32) * b32)
+
+    MulDivState(busy: false, op: op, a: a, b: b, result: res, cycles_left: 0)
+
+# ============================================================================
+# Ready — check if unit has completed
+# ============================================================================
+
+fn mul_div_ready(state: MulDivState) -> bool:
+    """Returns true when the mul/div unit is idle (not busy)."""
+    state.busy == false
+
+# ============================================================================
+# Spec-facing wrappers with correct unsigned division
+# ============================================================================
+
+struct MulDivResult64:
+    rd_val: i64
+
+fn mul_div64_init() -> MulDivState:
+    mul_div_create()
+
+fn unsigned_div64(a: i64, b: i64) -> i64:
+    if b == 0:
+        return -1
+    val a_neg = (a >> 63) & 1
+    val b_neg = (b >> 63) & 1
+    if a_neg == 0 and b_neg == 0:
+        return a / b
+    if a_neg == 0 and b_neg == 1:
+        return 0
+    if a_neg == 1 and b_neg == 0:
+        val half_a = (a >> 1) & 0x7FFFFFFFFFFFFFFF
+        val q = (half_a / b) * 2
+        val r = a - q * b
+        if r < 0:
+            return q - 1
+        if r >= b:
+            return q + 1
+        return q
+    val half_a = (a >> 1) & 0x7FFFFFFFFFFFFFFF
+    val half_b = (b >> 1) & 0x7FFFFFFFFFFFFFFF
+    if a == b:
+        return 1
+    val a_gt = (half_a > half_b) or (half_a == half_b and (a & 1) >= (b & 1))
+    if a_gt:
+        return 1
+    return 0
+
+fn unsigned_rem64(a: i64, b: i64) -> i64:
+    if b == 0:
+        return a
+    val q = unsigned_div64(a, b)
+    a - q * b
+
+fn mul_div64_step(state: MulDivState, op: i64, rs1: i64, rs2: i64) -> MulDivResult64:
+    if op == MULDIV_DIVU:
+        return MulDivResult64(rd_val: unsigned_div64(rs1, rs2))
+    if op == MULDIV_REMU:
+        return MulDivResult64(rd_val: unsigned_rem64(rs1, rs2))
+    var s = mul_div_start(op, rs1, rs2)
+    while s.busy:
+        s = mul_div_tick(s)
+    MulDivResult64(rd_val: s.result)
+
+# ============================================================================
+# Single-cycle combinational M-extension result (core64 rd_data path)
+# ============================================================================
+# The synthesizable subset has no i128, so the high-64 products of MULH*
+# are formed from 32-bit unsigned limbs.  These are the pure combinational
+# functions the core datapath consumes for OP_REG/OP_OP_32 funct7==1.
+
+fn muldiv_lshr32(x: i64) -> i64:
+    """Logical shift-right by 32: high 32 bits of x as a non-negative i64."""
+    (x >> 32) & 0xFFFFFFFF
+
+fn muldiv_umulh(a: i64, b: i64) -> i64:
+    """High 64 bits of the UNSIGNED 128-bit product a*b (32-bit limbs)."""
+    val al = a & 0xFFFFFFFF
+    val ah = muldiv_lshr32(a)
+    val bl = b & 0xFFFFFFFF
+    val bh = muldiv_lshr32(b)
+    val ll = al * bl
+    val lh = al * bh
+    val hl = ah * bl
+    val hh = ah * bh
+    val mid = muldiv_lshr32(ll) + (lh & 0xFFFFFFFF) + (hl & 0xFFFFFFFF)
+    hh + muldiv_lshr32(lh) + muldiv_lshr32(hl) + muldiv_lshr32(mid)
+
+fn muldiv_smulh(a: i64, b: i64) -> i64:
+    """High 64 bits of the SIGNED*SIGNED 128-bit product.
+    Correction: signed_high = unsigned_high - (a<0 ? b : 0) - (b<0 ? a : 0)."""
+    var h = muldiv_umulh(a, b)
+    if a < 0:
+        h = h - b
+    if b < 0:
+        h = h - a
+    h
+
+fn muldiv_smulhsu(a: i64, b: i64) -> i64:
+    """High 64 bits of SIGNED a * UNSIGNED b: unsigned_high - (a<0 ? b : 0)."""
+    var h = muldiv_umulh(a, b)
+    if a < 0:
+        h = h - b
+    h
+
+fn muldiv_sdiv(a: i64, b: i64) -> i64:
+    """Signed 64-bit division. /0 -> -1; INT64_MIN/-1 overflow -> INT64_MIN."""
+    val min64: i64 = 1 << 63
+    if b == 0:
+        return -1
+    if a == min64 and b == -1:
+        return min64
+    a / b
+
+fn muldiv_srem(a: i64, b: i64) -> i64:
+    """Signed 64-bit remainder. /0 -> a; INT64_MIN%-1 overflow -> 0."""
+    val min64: i64 = 1 << 63
+    if b == 0:
+        return a
+    if a == min64 and b == -1:
+        return 0
+    a - (a / b) * b
+
+fn muldiv_compute(op: i64, a: i64, b: i64) -> i64:
+    """Combinational rd result for one M-extension op code (MULDIV_*).
+    div-by-zero: quotient all-ones (-1), remainder = dividend.
+    Signed overflow (MIN/-1): quotient MIN, remainder 0.
+    W-variants operate on low 32 bits and sign-extend to 64."""
+    if op == MULDIV_MUL:
+        return a * b
+    if op == MULDIV_MULH:
+        return muldiv_smulh(a, b)
+    if op == MULDIV_MULHSU:
+        return muldiv_smulhsu(a, b)
+    if op == MULDIV_MULHU:
+        return muldiv_umulh(a, b)
+    if op == MULDIV_DIV:
+        return muldiv_sdiv(a, b)
+    if op == MULDIV_DIVU:
+        return unsigned_div64(a, b)
+    if op == MULDIV_REM:
+        return muldiv_srem(a, b)
+    if op == MULDIV_REMU:
+        return unsigned_rem64(a, b)
+
+    # ── W-variants: low 32 bits, sign-extended result. ──
+    if op == MULDIV_MULW:
+        return muldiv_sign_extend_32((a & 0xFFFFFFFF) * (b & 0xFFFFFFFF))
+
+    val a32 = muldiv_sign_extend_32(a)
+    val b32 = muldiv_sign_extend_32(b)
+    if op == MULDIV_DIVW:
+        if b32 == 0:
+            return -1
+        # INT32_MIN/-1 needs no guard: sext32(a32/b32) folds the overflow.
+        return muldiv_sign_extend_32(a32 / b32)
+    if op == MULDIV_REMW:
+        if b32 == 0:
+            return muldiv_sign_extend_32(a32)
+        return muldiv_sign_extend_32(a32 - (a32 / b32) * b32)
+
+    val au = a & 0xFFFFFFFF
+    val bu = b & 0xFFFFFFFF
+    if op == MULDIV_DIVUW:
+        if bu == 0:
+            return -1
+        return muldiv_sign_extend_32(au / bu)
+    if op == MULDIV_REMUW:
+        if bu == 0:
+            return muldiv_sign_extend_32(au)
+        return muldiv_sign_extend_32(au - (au / bu) * bu)
+    0
+
+fn muldiv_select_op(is_word: bool, funct3: u32) -> i64:
+    """Map (OP_OP_32?, funct3) to a MULDIV_* op code (funct7==1 assumed)."""
+    if is_word:
+        if funct3 == 0:
+            return MULDIV_MULW
+        if funct3 == 4:
+            return MULDIV_DIVW
+        if funct3 == 5:
+            return MULDIV_DIVUW
+        if funct3 == 6:
+            return MULDIV_REMW
+        return MULDIV_REMUW
+    if funct3 == 0:
+        return MULDIV_MUL
+    if funct3 == 1:
+        return MULDIV_MULH
+    if funct3 == 2:
+        return MULDIV_MULHSU
+    if funct3 == 3:
+        return MULDIV_MULHU
+    if funct3 == 4:
+        return MULDIV_DIV
+    if funct3 == 5:
+        return MULDIV_DIVU
+    if funct3 == 6:
+        return MULDIV_REM
+    MULDIV_REMU
+
+fn muldiv_execute(is_word: bool, funct3: u32, rs1: i64, rs2: i64) -> i64:
+    """Combinational rd value for one M-extension instruction."""
+    muldiv_compute(muldiv_select_op(is_word, funct3), rs1, rs2)

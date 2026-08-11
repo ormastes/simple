@@ -1,0 +1,90 @@
+# Multi-arch dedupe — the shared arch/common helpers that replaced
+# copy-pasted per-arch bodies must behave, and the copies must stay gone.
+#
+# Run:
+#   bin/simple test test/01_unit/os/multiarch/arch_common_dedupe_spec.spl
+#
+# @cover src/os/kernel/arch/common/entropy_mix.spl
+# @cover src/os/kernel/arch/common/canary_state.spl
+# @cover src/os/kernel/arch/common/cstart_bridge.spl
+
+use std.spec
+use std.io_runtime.{file_exists, file_read}
+use os.kernel.arch.common.entropy_mix.{mix64}
+use os.kernel.arch.common.canary_state.{canary_set, canary_raw, canary_fail_common}
+
+val ARCHES: [text] = ["x86_64", "x86_32", "arm32", "arm64", "riscv32", "riscv64"]
+
+describe "entropy_mix.mix64 — shared splitmix64 finalizer":
+    """Seven byte-identical private `_mix64` copies collapsed into one
+    public helper; the avalanche must be unchanged."""
+
+    it "avalanches zero to the splitmix64 constant":
+        # splitmix64 finalizer of 0 is 0 only for the identity input 0;
+        # the multiply chain leaves 0 fixed, which is why callers always
+        # mix in a non-zero arch tag.
+        expect(mix64(0)).to_equal(0)
+
+    it "is deterministic for a fixed input":
+        expect(mix64(0x123456789ABCDEF)).to_equal(mix64(0x123456789ABCDEF))
+
+    it "separates two adjacent inputs":
+        expect(mix64(1) == mix64(2)).to_equal(false)
+
+    it "leaves no private _mix64 copy in any arch entropy module":
+        var copies = 0
+        for a in ARCHES:
+            val body = file_read("src/os/kernel/arch/" + a + "/entropy.spl")
+            if body.contains("fn _mix64"):
+                copies = copies + 1
+        expect(copies).to_equal(0)
+
+    it "every arch entropy module imports the shared mixer":
+        var wired = 0
+        for a in ARCHES:
+            val body = file_read("src/os/kernel/arch/" + a + "/entropy.spl")
+            if body.contains("os.kernel.arch.common.entropy_mix"):
+                wired = wired + 1
+        expect(wired).to_equal(6)
+
+describe "canary_state — shared HalCanary state machine":
+    """Seed selection, entropy fallback and the never-zero guard used to
+    be duplicated in three per-arch canary.spl files."""
+
+    it "installs an explicit seed":
+        canary_set(0x1122334455667788, 0xDEADBEEF)
+        expect(canary_raw()).to_equal(0x1122334455667788)
+
+    it "falls back to arch entropy when no seed is supplied":
+        canary_set(0, 0xCAFEBABEF00D)
+        expect(canary_raw()).to_equal(0xCAFEBABEF00D)
+
+    it "never installs a zero canary":
+        canary_set(0, 0)
+        expect(canary_raw() == 0).to_equal(false)
+
+    it "reports failure as -1":
+        expect(canary_fail_common()).to_equal(-1)
+
+describe "cstart_bridge — shared HalCstart body":
+    """Per-arch cstart.spl files stay (the HAL trait surface requires
+    them) but must forward instead of re-implementing."""
+
+    it "the shared bridge exists":
+        expect(file_exists("src/os/kernel/arch/common/cstart_bridge.spl")).to_equal(true)
+
+    it "every arch cstart.spl forwards to the shared bridge":
+        var wired = 0
+        for a in ARCHES:
+            val body = file_read("src/os/kernel/arch/" + a + "/cstart.spl")
+            if body.contains("os.kernel.arch.common.cstart_bridge"):
+                wired = wired + 1
+        expect(wired).to_equal(6)
+
+    it "no arch cstart.spl calls the baremetal runtime directly any more":
+        var direct = 0
+        for a in ARCHES:
+            val body = file_read("src/os/kernel/arch/" + a + "/cstart.spl")
+            if body.contains("runtime_minimal"):
+                direct = direct + 1
+        expect(direct).to_equal(0)

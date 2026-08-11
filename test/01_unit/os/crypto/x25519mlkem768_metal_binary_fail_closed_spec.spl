@@ -1,0 +1,41 @@
+# @tag: unit, crypto, x25519mlkem768, metal, provenance
+
+use std.spec.{describe, it, expect, fail, step}
+use os.crypto.x25519_mlkem768.metal_ntt_provider.{
+    X25519MlKem768MetalNttExecutor,
+    x25519_mlkem768_metal_ntt_execute}
+
+val _NEGATIVE_METALLIB =
+    "test/fixtures/crypto/x25519mlkem768/not_a_library.metallib"
+
+fn _metal_negative_fixture() -> list:
+    var out: list = []
+    var coefficient: i64 = 0
+    while coefficient < 256:
+        out.push((coefficient * 29 + 17) % 3329)
+        coefficient = coefficient + 1
+    out
+
+describe "X25519MLKEM768 Metal binary fail-closed admission":
+    it "should reject a nonempty metallib image when its digest is unpinned":
+        step("Submit a nonempty fake metallib without a digest pin")
+        var executor = X25519MlKem768MetalNttExecutor.create_binary(
+            _NEGATIVE_METALLIB, "")
+        match x25519_mlkem768_metal_ntt_execute(
+                executor, _metal_negative_fixture()):
+            case Ok(_): fail("Metal accepted an unpinned metallib")
+            case Err(reason): expect(reason).to_equal(
+                "metal-ntt-binary-digest-mismatch")
+        executor.shutdown()
+
+    it "should reject a nonempty metallib image when its digest differs":
+        step("Submit a nonempty fake metallib with a mismatched digest")
+        var executor = X25519MlKem768MetalNttExecutor.create_binary(
+            _NEGATIVE_METALLIB,
+            "0000000000000000000000000000000000000000000000000000000000000000")
+        match x25519_mlkem768_metal_ntt_execute(
+                executor, _metal_negative_fixture()):
+            case Ok(_): fail("Metal accepted a digest-mismatched metallib")
+            case Err(reason): expect(reason).to_equal(
+                "metal-ntt-binary-digest-mismatch")
+        executor.shutdown()

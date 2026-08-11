@@ -1,0 +1,302 @@
+# GPU Vendor Probe Adapters
+# MDSOC: feature dimension, drivers layer
+#
+# Provides zero-cost probe stubs for 5 GPU vendors (NVIDIA, AMD, Intel,
+# Qualcomm/ARM, RISC-V software). Each probe returns an "unavailable"
+# descriptor by default; hardware-specific layers fill real values when
+# the device is detected.  GpuVendorRegistry aggregates all five probes.
+#
+# Honesty hardening (see doc/08_tracking/bug/
+# vulkan_icd_virtio_and_gpu_probe_report_no_real_device_enumeration_2026-08-11.md):
+# `.probe()` on every vendor here is a STUB — it never queries real hardware.
+# Availability used to be derived from `device_id > 0`, which conflates two
+# distinct facts: "no probe was ever run" and "a probe ran and found nothing".
+# It also treats device id 0 as ipso facto absent, which is not true on every
+# enumeration (0 can be a legal id). `GpuProbeState` makes the three cases
+# explicit in the type so a caller cannot read a stub as a negative answer,
+# and so a future author cannot flip five drivers "available" by editing one
+# integer field — they would have to explicitly construct `DevicePresent`.
+
+enum GpuProbeState:
+    NotProbed             # .probe() stub never queried real hardware
+    NoDevice              # a real probe ran and found nothing
+    DevicePresent(id: i64) # a real probe ran and found a device with this id
+
+# ============================================================================
+# CudaGpuProbe — NVIDIA CUDA
+# ============================================================================
+
+class CudaGpuProbe:
+    """NVIDIA CUDA GPU probe result."""
+    device_id: i64
+    state: GpuProbeState
+    compute_capability_major: i64
+    compute_capability_minor: i64
+    vram_mb: i64
+    cuda_cores: i64
+    driver_version: text
+    has_unified_memory: bool
+
+impl CudaGpuProbe:
+    static fn probe() -> CudaGpuProbe:
+        """Return the stub result: no real hardware query was performed."""
+        CudaGpuProbe(
+            device_id: 0,
+            state: GpuProbeState.NotProbed,
+            compute_capability_major: 0,
+            compute_capability_minor: 0,
+            vram_mb: 0,
+            cuda_cores: 0,
+            driver_version: "",
+            has_unified_memory: false
+        )
+
+    me is_available() -> bool:
+        match self.state:
+            GpuProbeState.DevicePresent(_) -> true
+            _ -> false
+
+    me summary() -> text:
+        if self.is_available():
+            "cuda device=" + self.device_id.to_text() +
+                " cc=" + self.compute_capability_major.to_text() +
+                "." + self.compute_capability_minor.to_text() +
+                " vram=" + self.vram_mb.to_text() + "MB" +
+                " cores=" + self.cuda_cores.to_text() +
+                " unified=" + self.has_unified_memory.to_text()
+        else:
+            "cuda: unavailable"
+
+# ============================================================================
+# AmdGpuProbe — AMD
+# ============================================================================
+
+class AmdGpuProbe:
+    """AMD GPU probe result."""
+    device_id: i64
+    state: GpuProbeState
+    gcn_arch: text
+    vram_mb: i64
+    compute_units: i64
+    vulkan_version: text
+    has_raytracing: bool
+
+impl AmdGpuProbe:
+    static fn probe() -> AmdGpuProbe:
+        """Return the stub result: no real hardware query was performed."""
+        AmdGpuProbe(
+            device_id: 0,
+            state: GpuProbeState.NotProbed,
+            gcn_arch: "",
+            vram_mb: 0,
+            compute_units: 0,
+            vulkan_version: "",
+            has_raytracing: false
+        )
+
+    me is_available() -> bool:
+        match self.state:
+            GpuProbeState.DevicePresent(_) -> true
+            _ -> false
+
+    me summary() -> text:
+        if self.is_available():
+            "amd device=" + self.device_id.to_text() +
+                " arch=" + self.gcn_arch +
+                " vram=" + self.vram_mb.to_text() + "MB" +
+                " cu=" + self.compute_units.to_text() +
+                " vulkan=" + self.vulkan_version +
+                " rt=" + self.has_raytracing.to_text()
+        else:
+            "amd: unavailable"
+
+# ============================================================================
+# IntelGpuProbe — Intel
+# ============================================================================
+
+class IntelGpuProbe:
+    """Intel GPU probe result."""
+    device_id: i64
+    state: GpuProbeState
+    gen: i64
+    eu_count: i64
+    vram_mb: i64
+    vulkan_version: text
+    has_xe_hpc: bool
+
+impl IntelGpuProbe:
+    static fn probe() -> IntelGpuProbe:
+        """Return the stub result: no real hardware query was performed."""
+        IntelGpuProbe(
+            device_id: 0,
+            state: GpuProbeState.NotProbed,
+            gen: 0,
+            eu_count: 0,
+            vram_mb: 0,
+            vulkan_version: "",
+            has_xe_hpc: false
+        )
+
+    me is_available() -> bool:
+        match self.state:
+            GpuProbeState.DevicePresent(_) -> true
+            _ -> false
+
+    me summary() -> text:
+        if self.is_available():
+            "intel device=" + self.device_id.to_text() +
+                " gen=" + self.gen.to_text() +
+                " eu=" + self.eu_count.to_text() +
+                " vram=" + self.vram_mb.to_text() + "MB" +
+                " vulkan=" + self.vulkan_version +
+                " xe_hpc=" + self.has_xe_hpc.to_text()
+        else:
+            "intel: unavailable"
+
+# ============================================================================
+# QualcommArmGpuProbe — Qualcomm / ARM
+# ============================================================================
+
+class QualcommArmGpuProbe:
+    """Qualcomm Adreno / ARM Mali GPU probe result."""
+    device_id: i64
+    state: GpuProbeState
+    adreno_gen: i64
+    mali_gen: i64
+    vram_mb: i64
+    vulkan_version: text
+    has_opencl: bool
+    is_mobile: bool
+
+impl QualcommArmGpuProbe:
+    static fn probe() -> QualcommArmGpuProbe:
+        """Return the stub result: no real hardware query was performed."""
+        QualcommArmGpuProbe(
+            device_id: 0,
+            state: GpuProbeState.NotProbed,
+            adreno_gen: 0,
+            mali_gen: 0,
+            vram_mb: 0,
+            vulkan_version: "",
+            has_opencl: false,
+            is_mobile: false
+        )
+
+    me is_available() -> bool:
+        match self.state:
+            GpuProbeState.DevicePresent(_) -> true
+            _ -> false
+
+    me summary() -> text:
+        if self.is_available():
+            "qualcomm device=" + self.device_id.to_text() +
+                " adreno_gen=" + self.adreno_gen.to_text() +
+                " mali_gen=" + self.mali_gen.to_text() +
+                " vram=" + self.vram_mb.to_text() + "MB" +
+                " vulkan=" + self.vulkan_version +
+                " opencl=" + self.has_opencl.to_text() +
+                " mobile=" + self.is_mobile.to_text()
+        else:
+            "qualcomm: unavailable"
+
+# ============================================================================
+# RiscvSoftGpuProbe — RISC-V software renderer
+# ============================================================================
+
+class RiscvSoftGpuProbe:
+    """RISC-V software GPU probe result."""
+    device_id: i64
+    state: GpuProbeState
+    has_rvv: bool
+    vector_bits: i64
+    software_vulkan_version: text
+    is_emulated: bool
+
+impl RiscvSoftGpuProbe:
+    static fn probe() -> RiscvSoftGpuProbe:
+        """Return the stub result: no real hardware query was performed."""
+        RiscvSoftGpuProbe(
+            device_id: 0,
+            state: GpuProbeState.NotProbed,
+            has_rvv: false,
+            vector_bits: 0,
+            software_vulkan_version: "",
+            is_emulated: false
+        )
+
+    me is_available() -> bool:
+        match self.state:
+            GpuProbeState.DevicePresent(_) -> true
+            _ -> false
+
+    me summary() -> text:
+        if self.is_available():
+            "riscv device=" + self.device_id.to_text() +
+                " rvv=" + self.has_rvv.to_text() +
+                " vec_bits=" + self.vector_bits.to_text() +
+                " sw_vulkan=" + self.software_vulkan_version +
+                " emulated=" + self.is_emulated.to_text()
+        else:
+            "riscv: unavailable"
+
+# ============================================================================
+# GpuVendorRegistry
+# ============================================================================
+
+class GpuVendorRegistry:
+    """Aggregates probe results for all five GPU vendors."""
+    cuda_: CudaGpuProbe
+    amd_: AmdGpuProbe
+    intel_: IntelGpuProbe
+    qualcomm_: QualcommArmGpuProbe
+    riscv_: RiscvSoftGpuProbe
+
+impl GpuVendorRegistry:
+    static fn create() -> GpuVendorRegistry:
+        GpuVendorRegistry(
+            cuda_: CudaGpuProbe.probe(),
+            amd_: AmdGpuProbe.probe(),
+            intel_: IntelGpuProbe.probe(),
+            qualcomm_: QualcommArmGpuProbe.probe(),
+            riscv_: RiscvSoftGpuProbe.probe()
+        )
+
+    me probe_all() -> i64:
+        """Run all five probes. Returns count of available vendors."""
+        var count: i64 = 0
+        if self.cuda_.is_available():
+            count = count + 1
+        if self.amd_.is_available():
+            count = count + 1
+        if self.intel_.is_available():
+            count = count + 1
+        if self.qualcomm_.is_available():
+            count = count + 1
+        if self.riscv_.is_available():
+            count = count + 1
+        count
+
+    me best_available() -> text:
+        """Return name of the highest-priority available GPU vendor."""
+        if self.cuda_.is_available():
+            "cuda"
+        else if self.amd_.is_available():
+            "amd"
+        else if self.intel_.is_available():
+            "intel"
+        else if self.qualcomm_.is_available():
+            "qualcomm"
+        else if self.riscv_.is_available():
+            "riscv"
+        else:
+            "none"
+
+    me report() -> text:
+        """Multi-line status of all vendor probes."""
+        "=== GPU Vendor Registry ===\n" +
+            self.cuda_.summary() + "\n" +
+            self.amd_.summary() + "\n" +
+            self.intel_.summary() + "\n" +
+            self.qualcomm_.summary() + "\n" +
+            self.riscv_.summary() + "\n" +
+            "best=" + self.best_available()

@@ -1,0 +1,354 @@
+# @cover src/app/ui_showcase/showcase_core.spl 80%
+# @cover src/app/ui_showcase/hosts/host_gui.spl 70%
+# @cover src/app/ui_showcase/hosts/host_web.spl 70%
+# @cover src/app/ui_showcase/hosts/host_wm.spl 70%
+# @tag: system, ui, primitives, host, headless
+"""
+# Cross-host primitive contract — headless evidence only
+
+This scenario uses the canonical `HostInputEvent` ingress and
+`showcase_apply` reducer for the four host surfaces. It covers the first
+primitive slice needed by every surface: button activation, pointer drag,
+scroll linking, modifier-bearing keys, layout geometry, and font-bearing
+DrawIR.
+
+The assertions below are host/container contract evidence. They do not claim
+that a GUI window, browser, or WM is live. A live SimpleOS/QEMU run must use
+the dedicated QEMU runner and retain its framebuffer/input/audio receipt;
+absence of that receipt is not converted into a pass here.
+"""
+
+use std.spec.*
+use std.io_runtime.{mkdir_p, write_file}
+use common.ui.host_input_event.{
+    HostInputEvent, HOST_BTN_LEFT, HOST_BTN_NONE,
+    HOST_MOD_CTRL, HOST_MOD_ALT,
+    host_pointer_down, host_pointer_move, host_pointer_up,
+    host_pointer_wheel, host_key_down
+}
+use common.ui.layout.{compute_layout, find_rect}
+use common.ui.draw_ir.{
+    DrawIrCommand, DRAW_IR_COMMAND_RECT, DRAW_IR_COMMAND_TEXT
+}
+use common.ui.widget_draw_ir.{widget_tree_to_draw_ir_cpu}
+use common.ui.wm_app_process_contract.{
+    wm_fs_app_event, wm_fs_app_event_encode, wm_fs_app_event_seq_path
+}
+use app.ui_showcase.showcase_core.{
+    SC_LINK_DST, SC_LINK_SRC, SC_FREE, SC_PROBE,
+    SC_PROBE_INPUT,
+    showcase_apply, showcase_build, showcase_click_count,
+    showcase_drag_count, showcase_scroll_offset, showcase_typed_text
+}
+use app.ui_showcase.hosts.host_2d.{Screen2dHost}
+use app.ui_showcase.hosts.host_gui.{gui_event_to_host, gui_button_to_host}
+use app.ui_showcase.hosts.host_web.{
+    ScreenWebHost, web_read_event_at, web_scene_to_html
+}
+use app.ui_showcase.hosts.host_wm.{wm_read_event_at}
+use nogc_sync_mut.ui.gui_renderer.{
+    GuiEvent, GUI_EVT_KEYBOARD, GUI_EVT_MOUSE_BUTTON, GUI_EVT_MOUSE_MOVED,
+    GUI_EVT_MOUSE_WHEEL
+}
+
+val PRIM_W: i32 = 480
+val PRIM_H: i32 = 480
+
+fn _gui_event(kind: i64, keycode: i64, btn: i64, pressed: bool, x: f64, y: f64) -> GuiEvent:
+    GuiEvent(
+        native_id: 0, kind: kind, scancode: 0, keycode: keycode,
+        btn: btn, pressed: pressed, x: x, y: y
+    )
+
+fn _style_value(command: DrawIrCommand, key: text) -> text:
+    for prop in command.computed_style:
+        if prop.key == key:
+            return prop.value
+    ""
+
+fn _first_text(composition: common.ui.draw_ir.DrawIrComposition) -> DrawIrCommand?:
+    for batch in composition.batches:
+        for command in batch.commands:
+            if command.kind == DRAW_IR_COMMAND_TEXT:
+                return Some(command)
+    nil
+
+fn _command_count(composition: common.ui.draw_ir.DrawIrComposition, kind: text) -> i64:
+    var count: i64 = 0
+    for batch in composition.batches:
+        for command in batch.commands:
+            if command.kind == kind:
+                count = count + 1
+    count
+
+fn _scroll_point(st: common.ui.widget.UIState, prefix: text, suffix: text) -> (i32, i32):
+    val rects = compute_layout(st.tree.root_node(), 0, 0, PRIM_W, PRIM_H)
+    if val target = find_rect(rects, "{prefix}{suffix}"):
+        return (target.x + 2, target.y + 2)
+    fail("missing scroll rect: {prefix}{suffix}")
+    (0, 0)
+
+fn _action_point(st: common.ui.widget.UIState, prefix: text) -> (i32, i32):
+    val rects = compute_layout(st.tree.root_node(), 0, 0, PRIM_W, PRIM_H)
+    if val target = find_rect(rects, "{prefix}{SC_PROBE_INPUT}"):
+        return (target.x + 2, target.y + 2)
+    fail("missing actionable input rect: {prefix}{SC_PROBE_INPUT}")
+    (0, 0)
+
+describe "headless primitive reducer — button, drag, scroll, modifiers":
+
+    it "should reduce one canonical left-button click into an observable click state":
+        step("Build a shared tree and apply a down/up click sequence")
+        val prefix = "primitive_click_contract"
+        var st = showcase_build(prefix)
+        val (x, y) = _action_point(st, prefix)
+        st = showcase_apply(st, host_pointer_down(x, y, HOST_BTN_LEFT), PRIM_W, PRIM_H)
+        st = showcase_apply(st, host_pointer_up(x, y, HOST_BTN_LEFT), PRIM_W, PRIM_H)
+
+        expect(showcase_click_count(prefix)).to_equal(1)
+        expect(st.tree.root_node().id).to_contain(prefix)
+        expect(st.tree.root_node().get_prop("title")).to_equal("Simple Showcase")
+
+    it "should retain an active drag and record its move before release":
+        step("Apply pointer down, move, and release through the shared reducer")
+        val prefix = "primitive_drag_contract"
+        var st = showcase_build(prefix)
+        st = showcase_apply(st, host_pointer_down(14, 14, HOST_BTN_LEFT), PRIM_W, PRIM_H)
+        st = showcase_apply(st, host_pointer_move(38, 29), PRIM_W, PRIM_H)
+        st = showcase_apply(st, host_pointer_up(38, 29, HOST_BTN_LEFT), PRIM_W, PRIM_H)
+
+        expect(showcase_drag_count(prefix) > 0).to_equal(true)
+        expect(st.tree.root_node().id).to_contain(prefix)
+        expect(st.tree.root_node().get_prop("visible")).to_equal("true")
+
+    it "should link scroll offsets while leaving the independent panel unchanged":
+        step("Scroll the linked panel at its computed layout point")
+        val prefix = "primitive_scroll_contract"
+        var st = showcase_build(prefix)
+        val (x, y) = _scroll_point(st, prefix, SC_LINK_SRC)
+        st = showcase_apply(st, host_pointer_wheel(x, y, 1), PRIM_W, PRIM_H)
+
+        expect(showcase_scroll_offset(prefix, SC_LINK_SRC) > 0).to_equal(true)
+        expect(showcase_scroll_offset(prefix, SC_LINK_DST)).to_equal(
+            showcase_scroll_offset(prefix, SC_LINK_SRC)
+        )
+        expect(showcase_scroll_offset(prefix, SC_FREE)).to_equal(0)
+
+    it "should preserve Ctrl+Alt on a key event in the visible probe state":
+        step("Apply a printable key carrying both modifier bits")
+        val prefix = "primitive_modifier_contract"
+        var st = showcase_build(prefix)
+        st = showcase_apply(
+            st, host_key_down(65, "A", HOST_MOD_CTRL | HOST_MOD_ALT), PRIM_W, PRIM_H
+        )
+
+        expect(showcase_typed_text(prefix)).to_equal("A")
+        val probe = st.tree.root_node().get_prop("id")
+        expect(probe).to_contain(prefix)
+        expect(common.ui.widget_store_ops.get_internal_prop(
+            "{prefix}{SC_PROBE}", "typed_text"
+        )).to_equal("A")
+
+describe "host/container primitive ingress — no display claim":
+
+    it "should translate GUI button and drag primitives into canonical ingress":
+        step("Translate GUI press, move, release, and known button codes")
+        val down = gui_event_to_host(_gui_event(
+            GUI_EVT_MOUSE_BUTTON, 0, 0, true, 12.9, 7.1
+        ))
+        val move = gui_event_to_host(_gui_event(
+            GUI_EVT_MOUSE_MOVED, 0, 0, false, 30.8, 18.2
+        ))
+        val up = gui_event_to_host(_gui_event(
+            GUI_EVT_MOUSE_BUTTON, 0, 0, false, 30.8, 18.2
+        ))
+
+        expect(gui_button_to_host(0)).to_equal(HOST_BTN_LEFT)
+        expect(gui_button_to_host(99)).to_equal(HOST_BTN_NONE)
+        match down:
+            case Some(HostInputEvent.Pointer(x, y, button, pressed, wheel)):
+                expect([x, y, button, wheel]).to_equal([12, 7, HOST_BTN_LEFT, 0])
+                expect(pressed).to_equal(true)
+            case Some(_):
+                fail("GUI press returned a non-pointer event")
+            case None:
+                fail("GUI press was dropped")
+        match move:
+            case Some(HostInputEvent.Pointer(x, y, button, pressed, wheel)):
+                expect([x, y, button, wheel]).to_equal([30, 18, HOST_BTN_NONE, 0])
+                expect(pressed).to_equal(true)
+            case Some(_):
+                fail("GUI move returned a non-pointer event")
+            case None:
+                fail("GUI move was dropped")
+        match up:
+            case Some(HostInputEvent.Pointer(x, y, button, pressed, wheel)):
+                expect([x, y, button, wheel]).to_equal([30, 18, HOST_BTN_LEFT, 0])
+                expect(pressed).to_equal(false)
+            case Some(_):
+                fail("GUI release returned a non-pointer event")
+            case None:
+                fail("GUI release was dropped")
+
+    it "should preserve web wheel and modifier-bearing key bridge events":
+        step("Write encoded events and read them through the web file bridge")
+        val dir = "/tmp/primitive_hosts_web_events"
+        mkdir_p(dir)
+        write_file(
+            wm_fs_app_event_seq_path(dir + "/event", 1),
+            wm_fs_app_event_encode(wm_fs_app_event(
+                1, "key", 0, 0, 65, true, 65, "A", HOST_MOD_CTRL | HOST_MOD_ALT, 0
+            ))
+        )
+        write_file(
+            wm_fs_app_event_seq_path(dir + "/event", 2),
+            wm_fs_app_event_encode(wm_fs_app_event(
+                2, "wheel", 24, 32, HOST_BTN_NONE, false, 0, "", 0, 1
+            ))
+        )
+        val key = web_read_event_at(dir + "/event", 1)
+        val wheel = web_read_event_at(dir + "/event", 2)
+
+        match key:
+            case Some(HostInputEvent.Key(code, ch, down, mods)):
+                expect(code).to_equal(65)
+                expect(ch).to_equal("A")
+                expect(down).to_equal(true)
+                expect(mods).to_equal(HOST_MOD_CTRL | HOST_MOD_ALT)
+            case Some(_):
+                fail("web key bridge returned a non-key event")
+            case None:
+                fail("web key bridge returned nil")
+        match wheel:
+            case Some(HostInputEvent.Pointer(x, y, button, pressed, wheel_delta)):
+                expect([x, y]).to_equal([24, 32])
+                expect(wheel_delta).to_equal(1)
+                expect(button).to_equal(HOST_BTN_NONE)
+                expect(pressed).to_equal(false)
+            case Some(_):
+                fail("web wheel bridge returned a non-pointer event")
+            case None:
+                fail("web wheel bridge returned nil")
+
+    it "should decode the same pointer and modifier wire contract for the WM bridge":
+        step("Read an encoded drag and key sequence through the WM bridge")
+        val dir = "/tmp/primitive_hosts_wm_events"
+        mkdir_p(dir)
+        write_file(
+            wm_fs_app_event_seq_path(dir + "/event", 1),
+            wm_fs_app_event_encode(wm_fs_app_event(
+                1, "mouse_down", 9, 10, HOST_BTN_LEFT, true, 0, "", 0, 0
+            ))
+        )
+        write_file(
+            wm_fs_app_event_seq_path(dir + "/event", 2),
+            wm_fs_app_event_encode(wm_fs_app_event(
+                2, "key", 0, 0, 17, true, 17, "", HOST_MOD_CTRL, 0
+            ))
+        )
+        val down = wm_read_event_at(dir + "/event", 1)
+        val key = wm_read_event_at(dir + "/event", 2)
+
+        match down:
+            case Some(HostInputEvent.Pointer(x, y, button, pressed, wheel)):
+                expect([x, y, button, wheel]).to_equal([9, 10, HOST_BTN_LEFT, 0])
+                expect(pressed).to_equal(true)
+            case Some(_):
+                fail("WM pointer bridge returned a non-pointer event")
+            case None:
+                fail("WM pointer bridge returned nil")
+        match key:
+            case Some(HostInputEvent.Key(code, ch, pressed, mods)):
+                expect(code).to_equal(17)
+                expect(ch).to_equal("")
+                expect(pressed).to_equal(true)
+                expect(mods).to_equal(HOST_MOD_CTRL)
+            case Some(_):
+                fail("WM key bridge returned a non-key event")
+            case None:
+                fail("WM key bridge returned nil")
+
+    it "should keep the 2d host queue finite and report the headless host identity":
+        step("Drain a scripted 2d host without requiring a display")
+        val host = Screen2dHost.open(64, 48, "click 5,5;wheel 2,2,1")
+        var count = 0
+        var ev = host.poll_input()
+        while count < 4:
+            match ev:
+                case None:
+                    break
+                case Some(value):
+                    count = count + 1
+                    ev = host.poll_input()
+
+        expect(host.host_name()).to_equal("2d")
+        expect(count).to_equal(3)
+        expect(host.poll_input()).to_be_nil()
+
+describe "semantic layout and font DrawIR — host evidence":
+
+    it "should expose positive layout boxes for the linked panel and probe":
+        step("Compute the shared widget layout at a fixed host extent")
+        val prefix = "primitive_layout_contract"
+        val st = showcase_build(prefix)
+        val rects = compute_layout(st.tree.root_node(), 0, 0, PRIM_W, PRIM_H)
+        val panel = find_rect(rects, "{prefix}{SC_LINK_SRC}")
+        val probe = find_rect(rects, "{prefix}{SC_PROBE}")
+
+        match panel:
+            case None:
+                fail("linked panel has no layout box")
+            case Some(panel_box):
+                expect(panel_box.w > 0).to_equal(true)
+                expect(panel_box.h > 0).to_equal(true)
+                match probe:
+                    case None:
+                        fail("probe has no layout box")
+                    case Some(probe_box):
+                        expect(probe_box.y >= panel_box.y).to_equal(true)
+
+    it "should emit rect and text commands from the same semantic tree":
+        step("Lower the shared tree to CPU-targeted DrawIR for observation")
+        val prefix = "primitive_drawir_contract"
+        val st = showcase_build(prefix)
+        val composition = widget_tree_to_draw_ir_cpu(st.tree.root_node(), PRIM_W, PRIM_H)
+
+        expect(_command_count(composition, DRAW_IR_COMMAND_RECT) > 0).to_equal(true)
+        expect(_command_count(composition, DRAW_IR_COMMAND_TEXT) > 0).to_equal(true)
+        expect(composition.backend_target).to_equal("cpu")
+        expect(composition.batches.len() > 0).to_equal(true)
+
+    it "should retain an observable font identity and glyph payload for text":
+        step("Inspect the first semantic text command before any backend runs")
+        val prefix = "primitive_font_contract"
+        val st = showcase_build(prefix)
+        val composition = widget_tree_to_draw_ir_cpu(st.tree.root_node(), PRIM_W, PRIM_H)
+        val text_command = _first_text(composition)
+
+        match text_command:
+            case None:
+                fail("semantic tree emitted no text command")
+            case Some(command):
+                expect(command.text_value.len() > 0).to_equal(true)
+                # Resolved-font commands carry the identity/style; the glyph
+                # payload is the fallback-proof representation consumed by
+                # every renderer.
+                expect(command.computed_style.len() > 0).to_equal(true)
+                expect(_style_value(command, "font-identity").len() > 0).to_equal(true)
+                expect(command.advance_widths.len() > 0).to_equal(true)
+
+describe "live evidence boundary":
+
+    it "should leave live GUI, web, WM, and QEMU claims to their real runners":
+        step("Record the boundary between this headless contract and live evidence")
+        val web = ScreenWebHost.open(40, 30, "/tmp/primitive_hosts_boundary.html", "")
+        # An absent browser/server is not inferred from this spec. The web host
+        # only proves its projection contract; QEMU must provide its own receipt.
+        match web:
+            case None:
+                fail("web host projection did not open")
+            case Some(host):
+                expect(host.host_name()).to_equal("web")
+                expect(web_scene_to_html(
+                    common.ui.draw_ir_v3.draw_ir_v3_empty_scene(1u32, 1u32), 40, 30
+                ).contains("showcase-root")).to_equal(true)

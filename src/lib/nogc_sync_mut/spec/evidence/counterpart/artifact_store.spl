@@ -1,0 +1,237 @@
+@allow(primitive_api)
+# Content-addressed counterpart artifact store (Lane F7).
+#
+# primitive_api is allowed here: byte lengths and existence predicates are the
+# filesystem's own types.
+#
+# Large binaries — rendered frames, protocol captures, raw provider responses —
+# live HERE, under build/counterparts/artifacts/, keyed by the sha256 of their
+# content. The evidence sidecar and the generated manual carry only the hash
+# and an `artifact_link` block; embedding megabytes in a sidecar would make it
+# undiffable and would defeat content addressing entirely.
+#
+# Fail-closed rule: every put and every get re-hashes the bytes ON DISK and
+# compares against the ref. A store that returns whatever is at the path
+# without checking is not content-addressed, it is a directory with
+# hash-shaped filenames, and a corrupted or swapped artifact would be served
+# as if it were the evidence.
+#
+# Outcome structs rather than Result<T, E>: cross-module Result construction
+# does not resolve reliably from an imported method body (same landmine noted
+# in src/lib/nogc_sync_mut/spec/evidence_receipt.spl).
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_hash_sha256(path: text) -> text
+extern fn rt_file_size(path: text) -> i64
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+
+pub val COUNTERPART_ARTIFACT_ROOT: text = "build/counterparts/artifacts"
+
+# ---------------------------------------------------------------------------
+# Refs and records
+# ---------------------------------------------------------------------------
+
+pub struct ArtifactRef:
+    sha256: text
+    path: text
+    byte_len: i64
+
+# One row of the store manifest. `retention_class` is what lets a sweep delete
+# a scratch artifact while keeping the one a published manual links to; without
+# it a retention pass has to guess, and guessing deletes evidence.
+pub struct ArtifactRecord:
+    sha256: text
+    path: text
+    byte_len: i64
+    run_id: text
+    boundary_id: text
+    retention_class: text
+
+pub struct ArtifactPutOutcome:
+    ok: bool
+    artifact: ArtifactRef
+    error: text
+
+pub struct ArtifactGetOutcome:
+    ok: bool
+    content: text
+    error: text
+
+fn empty_ref() -> ArtifactRef:
+    ArtifactRef(sha256: "", path: "", byte_len: 0)
+
+fn put_failed(reason: text) -> ArtifactPutOutcome:
+    ArtifactPutOutcome(ok: false, artifact: empty_ref(), error: reason)
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+
+# Two-character shard prefix: a flat directory of a hundred thousand artifacts
+# degrades badly on every filesystem this runs on.
+pub fn artifact_shard(sha256: text) -> text:
+    if sha256.len() < 2:
+        return "__"
+    sha256.slice(0, 2)
+
+pub fn artifact_path(sha256: text) -> text:
+    COUNTERPART_ARTIFACT_ROOT + "/" + artifact_shard(sha256) + "/" + sha256
+
+pub fn artifact_manifest_path() -> text:
+    COUNTERPART_ARTIFACT_ROOT + "/manifest.sdn"
+
+# A ref must actually be a digest. An emptiness-only check accepts "not-a-hash"
+# and would let a fabricated ref sit in a manifest looking like provenance.
+#[allow(primitive_api)]
+pub fn is_sha256_ref(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    var i = 0
+    while i < value.len():
+        if not "0123456789abcdef".contains(value.slice(i, i + 1)):
+            return false
+        i = i + 1
+    true
+
+# ---------------------------------------------------------------------------
+# Put
+# ---------------------------------------------------------------------------
+
+# Content is staged to a temp file first because the sha256 is computed by the
+# runtime over a FILE, so the name of the final path is not known until the
+# bytes are already on disk.
+pub fn artifact_put(content: text, run_id: text) -> ArtifactPutOutcome:
+    if not rt_dir_create(COUNTERPART_ARTIFACT_ROOT, true):
+        if not rt_file_exists(COUNTERPART_ARTIFACT_ROOT):
+            return put_failed("cannot create artifact root " + COUNTERPART_ARTIFACT_ROOT)
+
+    val staging = COUNTERPART_ARTIFACT_ROOT + "/.staging-" + run_id
+    if not rt_file_write_text(staging, content):
+        return put_failed("cannot stage artifact at " + staging)
+
+    val digest = rt_file_hash_sha256(staging)
+    if not is_sha256_ref(digest):
+        rt_file_delete(staging)
+        return put_failed("runtime returned a non-sha256 digest: '" + digest + "'")
+
+    val final_dir = COUNTERPART_ARTIFACT_ROOT + "/" + artifact_shard(digest)
+    rt_dir_create(final_dir, true)
+    val final_path = artifact_path(digest)
+
+    # Already stored: content addressing makes a re-put a no-op, but only after
+    # the existing blob is confirmed to still hash to its own name.
+    if rt_file_exists(final_path):
+        rt_file_delete(staging)
+        val existing = rt_file_hash_sha256(final_path)
+        if existing != digest:
+            return put_failed("stored artifact " + digest + " hashes to " + existing + ": store is corrupt")
+        return ArtifactPutOutcome(
+            ok: true,
+            artifact: ArtifactRef(sha256: digest, path: final_path, byte_len: rt_file_size(final_path)),
+            error: ""
+        )
+
+    if not rt_file_write_text(final_path, content):
+        rt_file_delete(staging)
+        return put_failed("cannot write artifact to " + final_path)
+    rt_file_delete(staging)
+
+    # Read-back verification. Writing and then trusting the write is how a
+    # truncated artifact becomes a green run.
+    val verified = rt_file_hash_sha256(final_path)
+    if verified != digest:
+        return put_failed("read-back hash " + verified + " != ref " + digest)
+
+    ArtifactPutOutcome(
+        ok: true,
+        artifact: ArtifactRef(sha256: digest, path: final_path, byte_len: rt_file_size(final_path)),
+        error: ""
+    )
+
+# ---------------------------------------------------------------------------
+# Get
+# ---------------------------------------------------------------------------
+
+pub fn artifact_get(reference: text) -> ArtifactGetOutcome:
+    if not is_sha256_ref(reference):
+        return ArtifactGetOutcome(ok: false, content: "", error: "not a sha256 ref: '" + reference + "'")
+    val path = artifact_path(reference)
+    if not rt_file_exists(path):
+        return ArtifactGetOutcome(ok: false, content: "", error: "artifact " + reference + " is not in the store")
+    val actual = rt_file_hash_sha256(path)
+    if actual != reference:
+        return ArtifactGetOutcome(
+            ok: false,
+            content: "",
+            error: "artifact at " + path + " hashes to " + actual + ", not " + reference
+        )
+    ArtifactGetOutcome(ok: true, content: rt_file_read_text(path), error: "")
+
+#[allow(primitive_api)]
+pub fn artifact_exists(reference: text) -> bool:
+    if not is_sha256_ref(reference):
+        return false
+    rt_file_exists(artifact_path(reference))
+
+# ---------------------------------------------------------------------------
+# Manifest / retention
+# ---------------------------------------------------------------------------
+
+pub fn artifact_record(
+    artifact: ArtifactRef,
+    run_id: text,
+    boundary_id: text,
+    retention_class: text
+) -> ArtifactRecord:
+    ArtifactRecord(
+        sha256: artifact.sha256,
+        path: artifact.path,
+        byte_len: artifact.byte_len,
+        run_id: run_id,
+        boundary_id: boundary_id,
+        retention_class: retention_class
+    )
+
+# SDN, fixed field order, records in caller order: two runs over an unchanged
+# store must emit byte-identical manifests so a diff means a real change.
+pub fn artifact_manifest_lines(records: [ArtifactRecord]) -> [text]:
+    var lines: [text] = [
+        "schema: simple.counterpart.artifact_store.v1",
+        "root: " + COUNTERPART_ARTIFACT_ROOT,
+        "record_count: " + "{records.len()}"
+    ]
+    for record in records:
+        lines.push("record:")
+        lines.push("  sha256: " + record.sha256)
+        lines.push("  path: " + record.path)
+        lines.push("  byte_len: " + "{record.byte_len}")
+        lines.push("  run_id: " + record.run_id)
+        lines.push("  boundary_id: " + record.boundary_id)
+        lines.push("  retention_class: " + record.retention_class)
+    lines
+
+#[allow(primitive_api)]
+pub fn artifact_manifest_write(records: [ArtifactRecord]) -> bool:
+    rt_dir_create(COUNTERPART_ARTIFACT_ROOT, true)
+    var body = ""
+    for line in artifact_manifest_lines(records):
+        body = body + line + "\n"
+    rt_file_write_text(artifact_manifest_path(), body)
+
+# A retention sweep that cannot re-verify a blob must not silently drop it;
+# it reports the offenders and lets the caller fail closed.
+pub fn artifact_manifest_unverifiable(records: [ArtifactRecord]) -> [text]:
+    var bad: [text] = []
+    for record in records:
+        if not is_sha256_ref(record.sha256):
+            bad.push("record with non-sha256 ref '" + record.sha256 + "'")
+        elif not rt_file_exists(record.path):
+            bad.push("missing blob for " + record.sha256)
+        elif rt_file_hash_sha256(record.path) != record.sha256:
+            bad.push("content mismatch for " + record.sha256)
+        if record.retention_class == "":
+            bad.push("record " + record.sha256 + " has no retention class")
+    bad

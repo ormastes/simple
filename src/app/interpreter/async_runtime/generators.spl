@@ -1,0 +1,175 @@
+# Generators
+#
+# Yield-based generators and iteration.
+
+from ..core import {Interpreter, Value, InterpreterError, Environment}
+
+export eval_yield, eval_generator_next, Generator, GeneratorState
+
+# Generator states
+enum GeneratorState:
+    Created
+    Suspended { next_value: Value, env: Environment }
+    Running
+    Completed
+
+# A generator instance
+struct Generator:
+    state: GeneratorState
+    body: Box<Block>
+    params: Array<String>
+    captured_env: Environment
+
+impl Generator:
+    fn new(body: &Block, params: &Array<String>, env: &Environment) -> Generator:
+        return Generator {
+            state: GeneratorState.Created,
+            body: Box.new(body.clone()),
+            params: params.clone(),
+            captured_env: env.clone()
+        }
+
+    fn is_done() -> bool:
+        match self.state:
+            case GeneratorState.Completed: return true
+            case _: return false
+
+# Create a new generator
+fn create_generator(interp: &Interpreter, params: &Array<String>, body: &Block) -> Result<Value, InterpreterError>:
+    val g = Generator.new(body, params, &interp.env)
+    return Ok(Value.generator(g))
+
+# Evaluate a yield expression
+fn eval_yield(interp: &Interpreter, value: &Expr) -> Result<Value, InterpreterError>:
+    # Evaluate the yielded value
+    val value = interp.evaluate(value)?
+
+    # Signal yield to the generator runtime
+    # This will be caught by the generator driver
+    return Err(InterpreterError.Yield(value))
+
+# Get next value from generator
+fn eval_generator_next(interp: &Interpreter, gen_expr: &Expr) -> Result<Value, InterpreterError>:
+    val gen_val = interp.evaluate(gen_expr)?
+
+    match gen_val.as_generator_mut():
+        case Some(g):
+            return generator_next(interp, g)
+        case nil:
+            return Err(InterpreterError.TypeError("not a generator".to_string()))
+
+# Actually advance the generator
+fn generator_next(interp: &Interpreter, g: &mut Generator) -> Result<Value, InterpreterError>:
+    match g.state.clone():
+        case GeneratorState.Completed:
+            return Ok(Value.null())  # Or StopIteration
+
+        case GeneratorState.Created:
+            # First call - start executing
+            g.state = GeneratorState.Running
+
+            # Set up environment
+            val saved_env = interp.env.clone()
+            interp.env = g.captured_env.clone()
+
+            # Execute body until yield or completion
+            match run_generator_body(interp, &*g.body):
+                case Ok(value):
+                    # Generator completed without yield
+                    g.state = GeneratorState.Completed
+                    interp.env = saved_env
+                    return Ok(value)
+
+                case Err(InterpreterError.Yield(value)):
+                    # Generator yielded
+                    g.state = GeneratorState.Suspended {
+                        next_value: value.clone(),
+                        env: interp.env.clone()
+                    }
+                    interp.env = saved_env
+                    return Ok(value)
+
+                case Err(e):
+                    interp.env = saved_env
+                    return Err(e)
+
+        case GeneratorState.Suspended (next_value, env ):
+            # Resume from yield
+            g.state = GeneratorState.Running
+
+            val saved_env = interp.env.clone()
+            interp.env = env
+
+            # Continue execution (simplified - real impl needs continuation)
+            match run_generator_body(interp, &*g.body):
+                case Ok(value):
+                    g.state = GeneratorState.Completed
+                    interp.env = saved_env
+                    return Ok(value)
+
+                case Err(InterpreterError.Yield(value)):
+                    g.state = GeneratorState.Suspended {
+                        next_value: value.clone(),
+                        env: interp.env.clone()
+                    }
+                    interp.env = saved_env
+                    return Ok(value)
+
+                case Err(e):
+                    interp.env = saved_env
+                    return Err(e)
+
+        case GeneratorState.Running:
+            return Err(InterpreterError.RuntimeError("generator already running".to_string()))
+
+# Run generator body
+fn run_generator_body(interp: &Interpreter, body: &Block) -> Result<Value, InterpreterError>:
+    interp.eval_block(body)
+
+# Iterate over generator
+fn for_each_generator(interp: &Interpreter, g: &mut Generator, callback: (Value) -> Result<(), InterpreterError>) -> Result<(), InterpreterError>:
+    loop:
+        match generator_next(interp, g):
+            case Ok(value):
+                if g.is_done():
+                    break
+                callback(value)?
+
+            case Err(e):
+                return Err(e)
+
+    return Ok(())
+
+# Collect generator into array
+fn collect_generator(interp: &Interpreter, g: &mut Generator) -> Result<Array<Value>, InterpreterError>:
+    val results: Array<Value> = []
+
+    loop:
+        match generator_next(interp, g):
+            case Ok(value):
+                if g.is_done():
+                    break
+                results.push(value)
+
+            case Err(e):
+                return Err(e)
+
+    return Ok(results)
+
+# Take n items from generator
+fn take_generator(interp: &Interpreter, g: &mut Generator, n: usize) -> Result<Array<Value>, InterpreterError>:
+    val results: Array<Value> = []
+    val count = 0
+
+    while count < n:
+        match generator_next(interp, g):
+            case Ok(value):
+                if g.is_done():
+                    break
+                results.push(value)
+                count += 1
+
+            case Err(e):
+                return Err(e)
+
+    return Ok(results)

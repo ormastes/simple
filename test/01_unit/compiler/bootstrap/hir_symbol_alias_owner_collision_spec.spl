@@ -1,0 +1,50 @@
+use std.spec
+use std.io_runtime.{file_read}
+
+describe "HIR symbol owner remains unambiguous in the Stage3 closure":
+    it "exports only the canonical HirSymbol declaration":
+        val types = file_read("src/compiler/20.hir/hir_types.spl")
+        val facade = file_read("src/compiler/20.hir/__init__.spl")
+
+        expect(types).to_contain("struct HirSymbol:")
+        expect(types).to_contain("symbols: Dict<i64, HirSymbol>")
+        expect(types).to_contain("export SymbolId, HirSymbol, SymbolKind, MethodResolution")
+        expect(types.contains("type Symbol = HirSymbol")).to_equal(false)
+        expect(types.contains("HirSymbol, Symbol, SymbolKind")).to_equal(false)
+        expect(facade).to_contain("SymbolId, HirSymbol, SymbolKind")
+        expect(facade.contains("SymbolId, Symbol, SymbolKind")).to_equal(false)
+
+    it "keeps unrelated module-local Symbol aliases intact":
+        val associated_types = file_read("src/compiler/30.types/associated_types_defs.spl")
+        expect(associated_types).to_contain("type Symbol = text")
+        expect(associated_types).to_contain("export Symbol")
+
+    it "uses the canonical type at explicit HIR consumer boundaries":
+        val visibility = file_read("src/compiler/35.semantics/visibility_checker.spl")
+        val interpreter = file_read("src/compiler/70.backend/backend/interpreter.spl")
+
+        expect(visibility).to_contain("symbol: HirSymbol")
+        expect(visibility.contains("symbol: Symbol")).to_equal(false)
+        expect(interpreter).to_contain("val sym: HirSymbol = sym_")
+        expect(interpreter.contains("val sym: Symbol = sym_")).to_equal(false)
+
+    it "does not register a struct Symbol that collides with the module-local type_alias Symbol":
+        # Regression for doc/08_tracking/bug/stage3_selfhost_symbol_alias_conflict_2026-08-04.md
+        # part A: driver_source_loading.spl's Stage-3 closure pulls in both
+        # `struct Symbol` (query_types.spl / compiler_query.spl, under
+        # 90.tools) and `type Symbol = text` (00.common/effects.spl,
+        # 30.types/*.spl). Same-named global type registry entries of
+        # different kinds (struct vs type_alias) fail HIR lowering with
+        # "enum payload dependency `Symbol` conflicts: ...struct vs
+        # ...type_alias". Fix: rename the query-tool structs to
+        # QuerySymbol/QuerySymbolV2 so no `struct Symbol` remains anywhere.
+        val query_types = file_read("src/compiler/90.tools/query_types.spl")
+        val compiler_query = file_read("src/compiler/90.tools/sffi_gen/specs/compiler_query.spl")
+        val tools_init = file_read("src/compiler/90.tools/__init__.spl")
+
+        expect(query_types).to_contain("struct QuerySymbol:")
+        expect(query_types.contains("struct Symbol:")).to_equal(false)
+        expect(compiler_query).to_contain("struct QuerySymbol:")
+        expect(compiler_query.contains("struct Symbol:")).to_equal(false)
+        expect(tools_init).to_contain("QuerySymbol, QuerySymbolV2")
+        expect(tools_init.contains(", Symbol, SymbolV2")).to_equal(false)

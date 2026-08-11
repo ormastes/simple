@@ -1,0 +1,48 @@
+"""
+T2c: Live JSON capture via real subprocess stdout (not fixture literal).
+The json_document adapter parses real process output into canonical evidence
+addressed by RFC 6901 JSON Pointers, verified through typed-evidence fail-closed
+comparators with a closed oracle covering all emitted nodes.
+
+Real subprocess JSON → json_to_evidence → oracle_spec (closed) → compare_evidence.
+References: doc/03_plan/infra/sspec/modern_sspec_completion_plan_2026-08-09.md
+"""
+
+use std.spec.*
+
+use std.common.spec.evidence.model.{
+    check_exact_selector, selector_json_pointer, oracle_spec, EvidenceStatus
+}
+use std.common.spec.evidence.evidence_comparator.{compare_evidence}
+use std.common.spec.evidence.format.json_document.{json_to_evidence}
+use std.process.{process_run}
+
+describe "JSON document live subprocess capture":
+    it "captures real subprocess JSON and verifies all nodes via closed oracle":
+        step("Launch a real process that outputs known JSON structure")
+        # printf emits a deterministic JSON doc with app name and count
+        val (stdout, stderr, code) = process_run("printf", ["{\"app\":\"todo\",\"count\":3}"])
+        expect(code).to_equal(0)
+
+        step("Convert subprocess stdout into canonical evidence")
+        val evidence = json_to_evidence(stdout, "live/subprocess/1")
+        expect(evidence.parse_ok).to_equal(true)
+
+        step("Verify all emitted nodes via a closed oracle (rejects undeclared paths)")
+        # Closed oracle: must declare every node json_to_evidence emitted.
+        # Non-empty objects do NOT emit a root node at "", only their leaf fields.
+        # json_to_evidence yields: /app leaf, /count leaf
+        val spec = oracle_spec(
+            "live/subprocess/1",
+            [
+                # Leaf: app field
+                check_exact_selector(selector_json_pointer("/app"), "todo"),
+                # Leaf: count field (JSON numbers are text)
+                check_exact_selector(selector_json_pointer("/count"), "3")
+            ]
+        )
+
+        step("Compare evidence against closed oracle, expecting all checks to pass")
+        val result = compare_evidence(evidence, spec)
+        expect(result.summary).to_equal("2 check(s) passed")
+        expect(result.status).to_equal(EvidenceStatus.passed)

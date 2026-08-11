@@ -1,0 +1,1218 @@
+# `expect` Vacuity Gate — Full Corpus RED Census
+_Generated 2026-08-10 04:49Z (stream N1). Gate commit `47ba20fda2b`._
+
+## Binary identity
+- Gate binary: `src/compiler_rust/target/bootstrap/simple` 33,653,056 bytes, mtime Aug 9 23:10
+- Gate confirmed by POSITIVE probe: a spec with `expect(text)` and no matcher FAILS (`vacuous expect: ... 1 non-bool expect(s), 0 matcher(s) ran`), sibling `to_equal` example PASSES. `bin/simple` (stale seed) was NOT used.
+- Pre-gate baseline binary: built from `47ba20fda2b^` sources of the 3 changed Rust files.
+
+## Corpus
+- Raw `*_spec.spl` files under `test/`: 19,521
+- Unique by content sha256: 9,872 (mirror trees `test/unit`~`test/01_unit`, `test/system`~`test/03_system` etc.)
+- Executed (this census): 2372 unique
+
+## Results (deduped / raw)
+
+| bucket | unique | raw files |
+|---|---|---|
+| GREEN | 1783 | 3003 |
+| a_vacuous | 10 | 12 |
+| b_preexisting | 26 | 36 |
+| c_infra | 200 | 291 |
+| c_infra_baseline_noverdict | 116 | 146 |
+| unclassified_no_baseline | 237 | 281 |
+
+**Classification key** — (a) `a_vacuous` = log contains the gate's `vacuous expect:` diagnostic, i.e. a hidden defect the gate exposed. (b) `b_preexisting` = also RED under the pre-gate baseline binary. (c) `c_infra` = timeout / daemon / no verdict line / executed=0.
+
+## a_vacuous (10 unique)
+
+- `test/01_unit/app/.spipe_wrapped_entry_simpleos_nvme_serial_check_spec.spl` rc=0 vacuous_hits=32
+  - `SPEC FILE VERDICT: test/01_unit/app/.spipe_wrapped_entry_simpleos_nvme_serial_check_spec.spl declared>=0 executed=32 passed=0 failed=32 dropped=0`
+- `test/01_unit/app/fix/.spipe_wrapped_entry_short_grammar_fix_spec.spl` rc=0 vacuous_hits=2
+  - `SPEC FILE VERDICT: test/01_unit/app/fix/.spipe_wrapped_entry_short_grammar_fix_spec.spl declared>=0 executed=35 passed=30 failed=5 dropped=0`
+- `test/01_unit/app/tooling/.spipe_wrapped_entry_spipe_docgen_scenario_body_spec.spl` rc=0 vacuous_hits=8
+  - `SPEC FILE VERDICT: test/01_unit/app/tooling/.spipe_wrapped_entry_spipe_docgen_scenario_body_spec.spl declared>=0 executed=24 passed=1 failed=23 dropped=0`
+- `test/01_unit/compiler/backend/.spipe_wrapped_entry_vhdl_rv64gc_regression_spec.spl` rc=0 vacuous_hits=16
+  - `SPEC FILE VERDICT: test/01_unit/compiler/backend/.spipe_wrapped_entry_vhdl_rv64gc_regression_spec.spl declared>=0 executed=23 passed=7 failed=16 dropped=0`
+- `test/01_unit/compiler/bdd_truthy_runtime_spec.spl` rc=0 vacuous_hits=2
+  - `SPEC FILE VERDICT: test/01_unit/compiler/bdd_truthy_runtime_spec.spl declared>=4 executed=4 passed=2 failed=2 dropped=0`
+- `test/01_unit/compiler/parser/treesitter_lexer_real_spec.spl` rc=0 vacuous_hits=1
+  - `SPEC FILE VERDICT: test/01_unit/compiler/parser/treesitter_lexer_real_spec.spl declared>=39 executed=39 passed=38 failed=1 dropped=0`
+- `test/01_unit/lib/editor/.spipe_wrapped_entry_host_simpleos_surface_contract_spec.spl` rc=0 vacuous_hits=1
+  - `SPEC FILE VERDICT: test/01_unit/lib/editor/.spipe_wrapped_entry_host_simpleos_surface_contract_spec.spl declared>=0 executed=8 passed=3 failed=5 dropped=0`
+- `test/unit/lib/common/mock_phase5_spec.spl` rc=0 vacuous_hits=1
+  - `SPEC FILE VERDICT: test/unit/lib/common/mock_phase5_spec.spl declared>=28 executed=28 passed=26 failed=2 dropped=0`
+- `test/unit/os/kernel/scheduler/scheduler_spec.spl` rc=0 vacuous_hits=3
+  - `SPEC FILE VERDICT: test/unit/os/kernel/scheduler/scheduler_spec.spl declared>=65 executed=65 passed=52 failed=13 dropped=0`
+- `test/unit/std/mock_phase5_spec.spl` rc=0 vacuous_hits=1
+  - `SPEC FILE VERDICT: test/unit/std/mock_phase5_spec.spl declared>=28 executed=28 passed=26 failed=2 dropped=0`
+
+## b_preexisting (26 unique)
+
+- `test/00_formal_verification/compiler/cache_correctness_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/00_formal_verification/compiler/cache_correctness_spec.spl declared>=22 executed=22 passed=21 failed=1 dropped=0`
+- `test/00_formal_verification/compiler/lean_block_integration_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/00_formal_verification/compiler/lean_block_integration_spec.spl declared>=10 executed=10 passed=5 failed=5 dropped=0`
+- `test/00_formal_verification/compiler/toolchain_detection_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/00_formal_verification/compiler/toolchain_detection_spec.spl declared>=9 executed=9 passed=5 failed=4 dropped=0`
+- `test/01_unit/app/bug_add/bug_add_cli_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/bug_add/bug_add_cli_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/01_unit/app/cli/test_entry_numeric_guard_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/cli/test_entry_numeric_guard_spec.spl declared>=2 executed=2 passed=0 failed=2 dropped=0`
+- `test/01_unit/app/debug/remote/trace32_runtime_config_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/debug/remote/trace32_runtime_config_spec.spl declared>=6 executed=6 passed=3 failed=3 dropped=0`
+- `test/01_unit/app/desugar/context_params_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/desugar/context_params_spec.spl declared>=15 executed=15 passed=14 failed=1 dropped=0`
+- `test/01_unit/app/desugar/interface_desugar_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/desugar/interface_desugar_spec.spl declared>=9 executed=9 passed=7 failed=2 dropped=0`
+- `test/01_unit/app/desugar/static_constants_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/desugar/static_constants_spec.spl declared>=29 executed=29 passed=28 failed=1 dropped=0`
+- `test/01_unit/app/devhub/adapter_minio_mc_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/devhub/adapter_minio_mc_spec.spl declared>=31 executed=31 passed=29 failed=2 dropped=0`
+- `test/01_unit/app/doc_coverage/compiler_integration_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/doc_coverage/compiler_integration_spec.spl declared>=8 executed=8 passed=1 failed=7 dropped=0`
+- `test/01_unit/app/doc_coverage/tag_validator_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/doc_coverage/tag_validator_spec.spl declared>=58 executed=58 passed=57 failed=1 dropped=0`
+- `test/01_unit/app/doc_coverage/threshold_system_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/doc_coverage/threshold_system_spec.spl declared>=17 executed=17 passed=15 failed=2 dropped=0`
+- `test/01_unit/app/interpreter/collections/persistent_vec_intensive_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/interpreter/collections/persistent_vec_intensive_spec.spl declared>=36 executed=36 passed=19 failed=17 dropped=0`
+- `test/01_unit/app/interpreter/symbol_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/interpreter/symbol_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/01_unit/app/llm_caret/chat_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/llm_caret/chat_spec.spl declared>=24 executed=24 passed=22 failed=2 dropped=0`
+- `test/01_unit/app/llm_caret/chat_tui_input_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/llm_caret/chat_tui_input_spec.spl declared>=22 executed=22 passed=18 failed=4 dropped=0`
+- `test/01_unit/app/llm_caret/chat_tui_runtime_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/llm_caret/chat_tui_runtime_spec.spl declared>=20 executed=20 passed=8 failed=12 dropped=0`
+- `test/01_unit/app/llm_caret/claude_cli_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/llm_caret/claude_cli_spec.spl declared>=84 executed=84 passed=67 failed=17 dropped=0`
+- `test/01_unit/app/llm_caret/json_helpers_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/llm_caret/json_helpers_spec.spl declared>=41 executed=41 passed=40 failed=1 dropped=0`
+- `test/01_unit/app/llm_dashboard/assistant_import_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/llm_dashboard/assistant_import_spec.spl declared>=4 executed=4 passed=3 failed=1 dropped=0`
+- `test/01_unit/app/llm_dashboard/jsonl_watcher_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/llm_dashboard/jsonl_watcher_spec.spl declared>=4 executed=4 passed=1 failed=3 dropped=0`
+- `test/01_unit/app/llm_runtime/vllm_serve_readiness_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/llm_runtime/vllm_serve_readiness_spec.spl declared>=13 executed=13 passed=12 failed=1 dropped=0`
+- `test/01_unit/app/mcp/mcp_dynload_upgrade_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/mcp/mcp_dynload_upgrade_spec.spl declared>=14 executed=14 passed=9 failed=5 dropped=0`
+- `test/01_unit/app/mcp/mcp_static_tools_perf_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/mcp/mcp_static_tools_perf_spec.spl declared>=27 executed=27 passed=13 failed=14 dropped=0`
+- `test/01_unit/app/mcp/mcp_tool_set_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/mcp/mcp_tool_set_spec.spl declared>=16 executed=16 passed=12 failed=4 dropped=0`
+
+## c_infra (200 unique)
+
+- `test/01_unit/app/browser/browser_render_adapter_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/browser/browser_render_adapter_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/build/feature_flags_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/build/feature_flags_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/app/build/opt_remarks_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/build/opt_remarks_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/app/cli/cli_os_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/cli/cli_os_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/cli/cli_unknown_subcommand_exit_code_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/cli/cli_unknown_subcommand_exit_code_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/compile/cli_compile_surface_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/compile/cli_compile_surface_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0 timeout=1 reason=daemon-worker-timeout budget_ms=899827`
+- `test/01_unit/app/doc_coverage/csv_export_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/doc_coverage/csv_export_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/app/doc_coverage/export_parser_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/doc_coverage/export_parser_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/app/doc_coverage/init_parser_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/doc_coverage/init_parser_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/app/doc_coverage/json_export_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/doc_coverage/json_export_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/app/doc_coverage/tag_generator_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/doc_coverage/tag_generator_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/app/doc_coverage/threshold_parser_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/doc_coverage/threshold_parser_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/app/interpreter/static_method_complete_registration_spec.spl` rc=-1 vacuous_hits=0
+  - `NO_VERDICT`
+- `test/01_unit/app/lifecycle_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/lifecycle_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/app/llm_caret/chat_tui_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/llm_caret/chat_tui_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=parse-error`
+- `test/01_unit/app/llm_caret/main_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/llm_caret/main_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/llm_caret/messaging/caret_command_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/llm_caret/messaging/caret_command_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/app/mcp/fileio_main_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/mcp/fileio_main_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/app/mcp/fileio_simple_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/mcp/fileio_simple_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/app/office/chart_gui_view_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/chart_gui_view_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/office/counter_route_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/counter_route_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/office/erp_bridge_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/erp_bridge_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/office/interactive_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/interactive_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/office/md_wysiwyg_render_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/md_wysiwyg_render_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/office/office_gui_event_render_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/office_gui_event_render_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/office/office_gui_launcher_mail_planner_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/office_gui_launcher_mail_planner_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/office/office_gui_launcher_sheets_slides_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/office_gui_launcher_sheets_slides_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/office/office_gui_live_loop_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/office_gui_live_loop_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/office/office_gui_pillars_pixel_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/office_gui_pillars_pixel_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/office/office_gui_pixel_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/office_gui_pixel_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/office/office_suite_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/office_suite_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/office/pivot_gui_view_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/pivot_gui_view_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/office/sheet_gui_cf_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/sheet_gui_cf_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/office/sheet_gui_fmt_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/sheet_gui_fmt_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/office/sheet_gui_session_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/sheet_gui_session_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/office/sheet_gui_undo_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/sheet_gui_undo_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/office/sheet_gui_view_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/sheet_gui_view_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/office/sheets/access_controller_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/sheets/access_controller_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0 timeout=1 reason=daemon-worker-timeout budget_ms=899839`
+- `test/01_unit/app/office/slide_gui_view_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/slide_gui_view_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/platform_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/platform_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/app/svim/core_spec.spl` rc=-1 vacuous_hits=0
+  - `NO_VERDICT`
+- `test/01_unit/app/svim/count_numeric_guard_spec.spl` rc=-1 vacuous_hits=0
+  - `NO_VERDICT`
+- `test/01_unit/app/svim/language_port_spec.spl` rc=-1 vacuous_hits=0
+  - `NO_VERDICT`
+- `test/01_unit/app/svim/simpleos_adapter_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/svim/simpleos_adapter_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=parse-error`
+- `test/01_unit/app/svim/tui_shell_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/svim/tui_shell_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=parse-error`
+- `test/01_unit/app/test/chrome_component_renderer_parity/cache_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/test/chrome_component_renderer_parity/cache_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/test/chrome_component_renderer_parity/diagnostics_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/test/chrome_component_renderer_parity/diagnostics_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/app/test/chrome_component_renderer_parity/manifest_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/test/chrome_component_renderer_parity/manifest_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/test/chrome_component_renderer_parity/orchestration_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/test/chrome_component_renderer_parity/orchestration_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/test/chrome_component_renderer_parity/performance_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/test/chrome_component_renderer_parity/performance_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/app/test/chrome_component_renderer_parity/production_rows_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/test/chrome_component_renderer_parity/production_rows_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/test/chrome_component_renderer_parity/report_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/test/chrome_component_renderer_parity/report_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/test/chrome_component_renderer_parity/runner_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/test/chrome_component_renderer_parity/runner_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/test/chrome_component_renderer_parity/sharding_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/test/chrome_component_renderer_parity/sharding_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/test_daemon/test_daemon_cache_module_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/test_daemon/test_daemon_cache_module_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/01_unit/app/test_daemon/test_daemon_qemu_sharing_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/test_daemon/test_daemon_qemu_sharing_spec.spl declared>=19 executed=19 passed=8 failed=11 dropped=0`
+- `test/01_unit/app/test_daemon/test_daemon_session_config_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/test_daemon/test_daemon_session_config_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/app/test_daemon/test_daemon_session_lifecycle_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/test_daemon/test_daemon_session_lifecycle_spec.spl declared>=34 executed=34 passed=33 failed=1 dropped=0`
+- `test/01_unit/app/test_daemon/test_daemon_trace32_adapter_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/test_daemon/test_daemon_trace32_adapter_spec.spl declared>=38 executed=38 passed=36 failed=2 dropped=0`
+- `test/01_unit/app/test_daemon/test_dep_graph_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/test_daemon/test_dep_graph_spec.spl declared>=2 executed=2 passed=0 failed=2 dropped=0`
+- `test/01_unit/app/test_runner/client_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/test_runner/client_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/test_runner/core_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/test_runner/core_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/test_runner/driver_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/test_runner/driver_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/test_runner/host_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/test_runner/host_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/test_runner_new/container_backend_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/test_runner_new/container_backend_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/app/test_runner_new/integration_test_config_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/test_runner_new/integration_test_config_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/test_runner_new/system_monitor_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/test_runner_new/system_monitor_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/tooling/_mini_db_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/tooling/_mini_db_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/tooling/ds_utils_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/tooling/ds_utils_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/app/tooling/probability_utils_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/tooling/probability_utils_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/app/tooling/regex_utils_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/tooling/regex_utils_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/app/tooling/test_config_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/tooling/test_config_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/tooling/test_db_core_helpers_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/tooling/test_db_core_helpers_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/tooling/test_db_performance_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/tooling/test_db_performance_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/tooling/test_db_validation_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/tooling/test_db_validation_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/app/tooling/todo_parser_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/tooling/todo_parser_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/ui.chromium/interactivity_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/ui.chromium/interactivity_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/ui.chromium/text_metrics_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/ui.chromium/text_metrics_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/ui.electron/main_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/ui.electron/main_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/ui/.spipe_wrapped_entry_tauri_surface_registry_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/ui/.spipe_wrapped_entry_tauri_surface_registry_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/ui/async_effect_spec.spl` rc=-1 vacuous_hits=0
+  - `NO_VERDICT`
+- `test/01_unit/app/ui/async_ui_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/ui/async_ui_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/app/ui/async_web_spec.spl` rc=-1 vacuous_hits=0
+  - `NO_VERDICT`
+- `test/01_unit/app/ui/backend_alias_browser_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/ui/backend_alias_browser_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/ui/backend_matrix_browser_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/ui/backend_matrix_browser_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/ui/browser_app_idle_poll_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/ui/browser_app_idle_poll_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/ui/browser_backend_css_pixel_route_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/ui/browser_backend_css_pixel_route_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/ui/browser_backend_pixel_paths_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/ui/browser_backend_pixel_paths_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/ui/browser_host_event_roundtrip_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/ui/browser_host_event_roundtrip_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/ui/browser_shared_wm_and_stage_log_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/ui/browser_shared_wm_and_stage_log_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/ui/browser_static_shell_cache_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/ui/browser_static_shell_cache_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/ui/browser_theme_cache_identity_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/ui/browser_theme_cache_identity_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/app/ui/builder_spec.spl` rc=-1 vacuous_hits=0
+  - `NO_VERDICT`
+- `test/01_unit/app/ui/changelog_spec.spl` rc=-1 vacuous_hits=0
+  - `NO_VERDICT`
+- `test/01_unit/app/ui/cli_observer_spec.spl` rc=-1 vacuous_hits=0
+  - `NO_VERDICT`
+- `test/01_unit/app/ui/cli_socket_spec.spl` rc=-1 vacuous_hits=0
+  - `NO_VERDICT`
+- `test/01_unit/app/ui/diff_patch_spec.spl` rc=-1 vacuous_hits=0
+  - `NO_VERDICT`
+- `test/01_unit/app/ui/display_detect_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/ui/display_detect_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/app/ui/html_render_spec.spl` rc=-1 vacuous_hits=0
+  - `NO_VERDICT`
+- `test/01_unit/browser_engine/html5lib_tokenizer_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/browser_engine/html5lib_tokenizer_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=parse-error`
+- `test/01_unit/browser_engine/html_tokenizer_abrupt_comment_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/browser_engine/html_tokenizer_abrupt_comment_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/browser_engine/net/net_delegate_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/browser_engine/net/net_delegate_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/browser_engine/script/browser_script_execute_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/browser_engine/script/browser_script_execute_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/compiler/all_regions_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/all_regions_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/compiler/backend/layout_scanner_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/backend/layout_scanner_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/compiler/bootstrap/parser_self_parse_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/bootstrap/parser_self_parse_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0 timeout=1 reason=daemon-no-response budget_ms=900000`
+- `test/01_unit/compiler/bootstrap/seed_jit_temp_project_hint_source_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/bootstrap/seed_jit_temp_project_hint_source_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0 timeout=1 reason=daemon-no-response budget_ms=900000`
+- `test/01_unit/compiler/diagnostic_formatter_contract_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/diagnostic_formatter_contract_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/compiler/executable_size_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/executable_size_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/compiler/ffi_gen/backend_gating_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/ffi_gen/backend_gating_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/compiler/ffi_gen/math_intern_codegen_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/ffi_gen/math_intern_codegen_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/compiler/frontend/flat_ast_address_of_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/frontend/flat_ast_address_of_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/compiler/native/build_native_min_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/native/build_native_min_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/compiler/parser/.spipe_wrapped_entry_flat_ast_pub_decl_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/parser/.spipe_wrapped_entry_flat_ast_pub_decl_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/compiler/parser/flat_ast_pub_decl_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/parser/flat_ast_pub_decl_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/compiler/parser/treesitter_error_recovery_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/parser/treesitter_error_recovery_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/compiler/parser/treesitter_highlights_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/parser/treesitter_highlights_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/compiler/parser/treesitter_incremental_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/parser/treesitter_incremental_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/hardware/rv64gc/rv64_alu_imm_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/hardware/rv64gc/rv64_alu_imm_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/hardware/rv64gc/rv64_alu_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/hardware/rv64gc/rv64_alu_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/hardware/rv64gc/rv64_alu_word_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/hardware/rv64gc/rv64_alu_word_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/hardware/rv64gc/rv64_atomics_ordering_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/hardware/rv64gc/rv64_atomics_ordering_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/hardware/rv64gc/rv64_atomics_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/hardware/rv64gc/rv64_atomics_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/hardware/rv64gc/rv64_compressed_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/hardware/rv64gc/rv64_compressed_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/hardware/rv64gc/rv64_decode_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/hardware/rv64gc/rv64_decode_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/hardware/rv64gc/rv64_fp_arith_d_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/hardware/rv64gc/rv64_fp_arith_d_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/hardware/rv64gc/rv64_fp_arith_s_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/hardware/rv64gc/rv64_fp_arith_s_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/hardware/rv64gc/rv64_fp_compare_d_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/hardware/rv64gc/rv64_fp_compare_d_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/hardware/rv64gc/rv64_fp_compare_s_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/hardware/rv64gc/rv64_fp_compare_s_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/hardware/rv64gc/rv64_fp_convert_d_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/hardware/rv64gc/rv64_fp_convert_d_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/hardware/rv64gc/rv64_fp_convert_s_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/hardware/rv64gc/rv64_fp_convert_s_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/hardware/rv64gc/rv64_fp_fused_d_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/hardware/rv64gc/rv64_fp_fused_d_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/hardware/rv64gc/rv64_fp_fused_s_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/hardware/rv64gc/rv64_fp_fused_s_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/hardware/rv64gc/rv64_fp_regfile_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/hardware/rv64gc/rv64_fp_regfile_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/hardware/rv64gc/rv64_fp_sign_s_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/hardware/rv64gc/rv64_fp_sign_s_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/hardware/rv64gc/rv64_memory_ops_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/hardware/rv64gc/rv64_memory_ops_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/hardware/rv64gc/rv64_muldiv_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/hardware/rv64gc/rv64_muldiv_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/hardware/rv64gc/rv64_muldiv_word_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/hardware/rv64gc/rv64_muldiv_word_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/hardware/rv64gc/rv64_pipeline_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/hardware/rv64gc/rv64_pipeline_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/hardware/rv64gc/rv64_regfile_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/hardware/rv64gc/rv64_regfile_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/lib/blink/document_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/blink/document_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/lib/blink/flex_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/blink/flex_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/lib/blink/form_paint_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/blink/form_paint_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/lib/blink/hit_test_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/blink/hit_test_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/lib/blink/html_tokenizer_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/blink/html_tokenizer_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/lib/blink/html_tree_builder_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/blink/html_tree_builder_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/lib/blink/image_paint_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/blink/image_paint_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/lib/blink/inline_flow_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/blink/inline_flow_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/lib/blink/input_event_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/blink/input_event_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/lib/blink/navigation_controller_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/blink/navigation_controller_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/lib/blink/navigation_fetch_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/blink/navigation_fetch_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/lib/blink/paint_controller_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/blink/paint_controller_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/lib/blink/paint_tree_walker_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/blink/paint_tree_walker_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/lib/blink/scroll_manager_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/blink/scroll_manager_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/lib/cc/layer_base_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/cc/layer_base_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/lib/cc/picture_layer_impl_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/cc/picture_layer_impl_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/lib/cc/tile_manager_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/cc/tile_manager_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/lib/debug/remote/t32_ffi/t32_version_detect_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/debug/remote/t32_ffi/t32_version_detect_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/01_unit/lib/gc_async_mut/ui/gui_content_renderer_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/gc_async_mut/ui/gui_content_renderer_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/lib/gc_async_mut/ui/web_render_engine2d_surface_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/gc_async_mut/ui/web_render_engine2d_surface_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/lib/gc_async_mut/ui/web_render_pixel_backend_queue_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/gc_async_mut/ui/web_render_pixel_backend_queue_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/01_unit/lib/gc_async_mut/web_ui/web_ui_facade_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/gc_async_mut/web_ui/web_ui_facade_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/unit/app/doc_coverage/group_comment_detection_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/app/doc_coverage/group_comment_detection_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/unit/app/doc_coverage/tag_validator_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/app/doc_coverage/tag_validator_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/unit/app/doc_coverage/threshold_calculator_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/app/doc_coverage/threshold_calculator_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/unit/app/fix/lint_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/app/fix/lint_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/unit/compiler/mono/monomorphize_integration_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/compiler/mono/monomorphize_integration_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/unit/compiler/native/build_native_min_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/compiler/native/build_native_min_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/unit/compiler/parser/match_empty_array_bug_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/compiler/parser/match_empty_array_bug_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/unit/compiler/parser/treesitter_highlights_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/compiler/parser/treesitter_highlights_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/unit/compiler/parser/treesitter_visibility_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/compiler/parser/treesitter_visibility_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/unit/compiler/semantics/lint/lint_cache_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/compiler/semantics/lint/lint_cache_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/unit/compiler/types/platform_layout_attribute_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/compiler/types/platform_layout_attribute_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/unit/compiler/types/runtime_layout_verification_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/compiler/types/runtime_layout_verification_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/unit/lib/cc/picture_layer_impl_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/cc/picture_layer_impl_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/unit/lib/common/let_memoization_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/common/let_memoization_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/unit/lib/common/llm/output_gate_spec.spl` rc=-1 vacuous_hits=0
+  - `NO_VERDICT`
+- `test/unit/lib/common/regex_char_utils_coverage_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/common/regex_char_utils_coverage_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/unit/lib/engine/font_ffi_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/engine/font_ffi_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/unit/lib/gc_async_mut/database/vector/database_vector_facade_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/gc_async_mut/database/vector/database_vector_facade_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/unit/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/unit/lib/gc_async_mut/gpu/browser_engine/web_renderer_backend_parity_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/gc_async_mut/gpu/browser_engine/web_renderer_backend_parity_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/unit/lib/gc_async_mut/gpu/engine2d/baremetal_constructor_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/gc_async_mut/gpu/engine2d/baremetal_constructor_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/unit/lib/gc_async_mut/gpu/engine2d/draw_text_bg_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/gc_async_mut/gpu/engine2d/draw_text_bg_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/unit/lib/gc_async_mut/web_ui/web_ui_facade_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/gc_async_mut/web_ui/web_ui_facade_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/unit/lib/gpu/engine2d/engine_platform_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/gpu/engine2d/engine_platform_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/unit/lib/nogc_async_mut/game3d/game_loop_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/nogc_async_mut/game3d/game_loop_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/unit/lib/nogc_async_mut/mcp/dispatch_spec.spl` rc=-1 vacuous_hits=0
+  - `NO_VERDICT`
+- `test/unit/lib/nogc_async_mut/web_ui/web_ui_facade_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/nogc_async_mut/web_ui/web_ui_facade_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/unit/os/kernel/ipc/syscall_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/os/kernel/ipc/syscall_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/unit/os/process_isolation_as_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/os/process_isolation_as_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=parse-error`
+- `test/unit/os/qemu_runner_desktop_extended_spec.spl` rc=-1 vacuous_hits=0
+  - `NO_VERDICT`
+- `test/unit/os/qemu_runner_desktop_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/os/qemu_runner_desktop_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/unit/os/qemu_runner_extended_spec.spl` rc=-1 vacuous_hits=0
+  - `NO_VERDICT`
+- `test/unit/os/qemu_runner_raw_image_validator_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/os/qemu_runner_raw_image_validator_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+- `test/unit/os/qemu_runner_spec.spl` rc=-1 vacuous_hits=0
+  - `NO_VERDICT`
+- `test/unit/os/services/llm/ui_access_dispatch_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/os/services/llm/ui_access_dispatch_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module`
+- `test/unit/os/tls13/server_accept_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/os/tls13/server_accept_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`
+
+## c_infra_baseline_noverdict (116 unique)
+
+- `test/01_unit/app/check/check_multifile_transient_scope_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/check/check_multifile_transient_scope_spec.spl declared>=4 executed=4 passed=2 failed=2 dropped=0`
+- `test/01_unit/app/cli/bootstrap_main_source_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/cli/bootstrap_main_source_spec.spl declared>=16 executed=16 passed=7 failed=9 dropped=0`
+- `test/01_unit/app/cli/focused_native_build_env_owner_contract_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/cli/focused_native_build_env_owner_contract_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/01_unit/app/cli/main_part2_depth_guard_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/cli/main_part2_depth_guard_spec.spl declared>=6 executed=6 passed=2 failed=4 dropped=0`
+- `test/01_unit/app/cli/os_build_dispatch_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/cli/os_build_dispatch_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/01_unit/app/cli/query_engine_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/cli/query_engine_spec.spl declared>=53 executed=53 passed=52 failed=1 dropped=0`
+- `test/01_unit/app/cli_command_inventory_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/cli_command_inventory_spec.spl declared>=23 executed=23 passed=14 failed=9 dropped=0`
+- `test/01_unit/app/cli_help_alignment_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/cli_help_alignment_spec.spl declared>=15 executed=15 passed=10 failed=5 dropped=0`
+- `test/01_unit/app/cli_native_build_main_contract_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/cli_native_build_main_contract_spec.spl declared>=13 executed=13 passed=11 failed=2 dropped=0`
+- `test/01_unit/app/dap/breakpoints_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/dap/breakpoints_spec.spl declared>=9 executed=9 passed=7 failed=2 dropped=0`
+- `test/01_unit/app/dap/dap_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/dap/dap_spec.spl declared>=2 executed=2 passed=1 failed=1 dropped=0`
+- `test/01_unit/app/dap/interpreter_hooks_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/dap/interpreter_hooks_spec.spl declared>=2 executed=2 passed=0 failed=2 dropped=0`
+- `test/01_unit/app/dap/protocol_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/dap/protocol_spec.spl declared>=13 executed=13 passed=11 failed=2 dropped=0`
+- `test/01_unit/app/dap/server_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/dap/server_spec.spl declared>=15 executed=15 passed=14 failed=1 dropped=0`
+- `test/01_unit/app/dashboard/dashboard_serve_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/dashboard/dashboard_serve_spec.spl declared>=6 executed=6 passed=0 failed=6 dropped=0`
+- `test/01_unit/app/devhub/cmd_github_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/devhub/cmd_github_spec.spl declared>=21 executed=21 passed=20 failed=1 dropped=0`
+- `test/01_unit/app/devhub/cmd_tasks_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/devhub/cmd_tasks_spec.spl declared>=54 executed=54 passed=53 failed=1 dropped=0`
+- `test/01_unit/app/devhub/convert_storage_multibyte_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/devhub/convert_storage_multibyte_spec.spl declared>=6 executed=6 passed=5 failed=1 dropped=0`
+- `test/01_unit/app/editor/editor_undo_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/editor/editor_undo_spec.spl declared>=4 executed=4 passed=0 failed=4 dropped=0`
+- `test/01_unit/app/fix/short_grammar_fix_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/fix/short_grammar_fix_spec.spl declared>=66 executed=66 passed=65 failed=1 dropped=0`
+- `test/01_unit/app/formatter/formatter_basic_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/formatter/formatter_basic_spec.spl declared>=2 executed=2 passed=1 failed=1 dropped=0`
+- `test/01_unit/app/formatter/formatter_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/formatter/formatter_spec.spl declared>=2 executed=2 passed=0 failed=2 dropped=0`
+- `test/01_unit/app/formatter_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/formatter_spec.spl declared>=5 executed=5 passed=3 failed=2 dropped=0`
+- `test/01_unit/app/grammar_doc/tier_keywords_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/grammar_doc/tier_keywords_spec.spl declared>=15 executed=15 passed=0 failed=15 dropped=0`
+- `test/01_unit/app/io/process_ops_ext_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/io/process_ops_ext_spec.spl declared>=20 executed=20 passed=18 failed=2 dropped=0`
+- `test/01_unit/app/io/timeout_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/io/timeout_spec.spl declared>=7 executed=7 passed=6 failed=1 dropped=0`
+- `test/01_unit/app/llm_caret/messaging/compiled_carrier_provenance_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/llm_caret/messaging/compiled_carrier_provenance_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/01_unit/app/llm_caret/messaging/composition_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/llm_caret/messaging/composition_spec.spl declared>=5 executed=5 passed=3 failed=2 dropped=0`
+- `test/01_unit/app/llm_caret/messaging/primitive_transport_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/llm_caret/messaging/primitive_transport_spec.spl declared>=2 executed=2 passed=1 failed=1 dropped=0`
+- `test/01_unit/app/llm_caret/messaging/pure_sql_store_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/llm_caret/messaging/pure_sql_store_spec.spl declared>=3 executed=3 passed=0 failed=3 dropped=0`
+- `test/01_unit/app/llm_caret/opencode_cli_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/llm_caret/opencode_cli_spec.spl declared>=15 executed=15 passed=14 failed=1 dropped=0`
+- `test/01_unit/app/mcp/.spipe_wrapped_entry_mcp_static_tools_perf_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/mcp/.spipe_wrapped_entry_mcp_static_tools_perf_spec.spl declared>=0 executed=22 passed=12 failed=10 dropped=0`
+- `test/01_unit/app/mcp/assistant/session_store_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/mcp/assistant/session_store_spec.spl declared>=6 executed=6 passed=5 failed=1 dropped=0`
+- `test/01_unit/app/mcp/cli_passthrough_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/mcp/cli_passthrough_spec.spl declared>=10 executed=10 passed=3 failed=7 dropped=0`
+- `test/01_unit/app/mcp/tool_dispatch_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/mcp/tool_dispatch_spec.spl declared>=3 executed=3 passed=2 failed=1 dropped=0`
+- `test/01_unit/app/mcp/tool_table_generators_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/mcp/tool_table_generators_spec.spl declared>=8 executed=8 passed=0 failed=8 dropped=0`
+- `test/01_unit/app/mcp_shell_injection_migration_guard_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/mcp_shell_injection_migration_guard_spec.spl declared>=2 executed=2 passed=1 failed=1 dropped=0`
+- `test/01_unit/app/mcp_unit/assistant_dashboard_e2e_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/mcp_unit/assistant_dashboard_e2e_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/01_unit/app/mcp_unit/fileio_protection_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/mcp_unit/fileio_protection_spec.spl declared>=27 executed=27 passed=24 failed=3 dropped=0`
+- `test/01_unit/app/mcp_unit/mcp_analysis_tools_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/mcp_unit/mcp_analysis_tools_spec.spl declared>=34 executed=34 passed=33 failed=1 dropped=0`
+- `test/01_unit/app/mcp_unit/mcp_cancellation_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/mcp_unit/mcp_cancellation_spec.spl declared>=3 executed=3 passed=1 failed=2 dropped=0`
+- `test/01_unit/app/mcp_unit/session_extended_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/mcp_unit/session_extended_spec.spl declared>=2 executed=2 passed=1 failed=1 dropped=0`
+- `test/01_unit/app/mcp_unit/simple_mcp_malformed_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/mcp_unit/simple_mcp_malformed_spec.spl declared>=2 executed=2 passed=1 failed=1 dropped=0`
+- `test/01_unit/app/nvme_firmware/nvme_units_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/nvme_firmware/nvme_units_spec.spl declared>=2 executed=2 passed=1 failed=1 dropped=0`
+- `test/01_unit/app/office/file_formats_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/file_formats_spec.spl declared>=10 executed=10 passed=5 failed=5 dropped=0`
+- `test/01_unit/app/office/fods_styles_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/fods_styles_spec.spl declared>=11 executed=11 passed=10 failed=1 dropped=0`
+- `test/01_unit/app/office/mail_merge_ui_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/mail_merge_ui_spec.spl declared>=6 executed=6 passed=0 failed=6 dropped=0`
+- `test/01_unit/app/office/notes_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/notes_spec.spl declared>=20 executed=20 passed=3 failed=17 dropped=0`
+- `test/01_unit/app/office/odf_export_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/odf_export_spec.spl declared>=3 executed=3 passed=0 failed=3 dropped=0`
+- `test/01_unit/app/office/odf_ooxml_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/odf_ooxml_spec.spl declared>=10 executed=10 passed=8 failed=2 dropped=0`
+- `test/01_unit/app/office/office_api_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/office_api_spec.spl declared>=18 executed=18 passed=9 failed=9 dropped=0`
+- `test/01_unit/app/office/pptx_images_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/pptx_images_spec.spl declared>=5 executed=5 passed=4 failed=1 dropped=0`
+- `test/01_unit/app/office/pptx_layout_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/pptx_layout_spec.spl declared>=2 executed=2 passed=1 failed=1 dropped=0`
+- `test/01_unit/app/office/pptx_tables_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/pptx_tables_spec.spl declared>=6 executed=6 passed=4 failed=2 dropped=0`
+- `test/01_unit/app/office/sheets/formula_eng_date_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/sheets/formula_eng_date_spec.spl declared>=20 executed=20 passed=17 failed=3 dropped=0`
+- `test/01_unit/app/office/sheets/formula_locale_text_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/sheets/formula_locale_text_spec.spl declared>=36 executed=36 passed=31 failed=5 dropped=0`
+- `test/01_unit/app/office/sheets/math_bridge_comprehensive_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/sheets/math_bridge_comprehensive_spec.spl declared>=30 executed=30 passed=18 failed=12 dropped=0`
+- `test/01_unit/app/office/sheets/math_bridge_extended_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/sheets/math_bridge_extended_spec.spl declared>=23 executed=23 passed=19 failed=4 dropped=0`
+- `test/01_unit/app/office/sheets/validation_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/sheets/validation_spec.spl declared>=19 executed=19 passed=3 failed=16 dropped=0`
+- `test/01_unit/app/office/word_docx_features_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/word_docx_features_spec.spl declared>=39 executed=39 passed=2 failed=37 dropped=0`
+- `test/01_unit/app/office/word_docx_revisions_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/word_docx_revisions_spec.spl declared>=7 executed=7 passed=5 failed=2 dropped=0`
+- `test/01_unit/app/office/word_edit_ops_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/word_edit_ops_spec.spl declared>=26 executed=26 passed=3 failed=23 dropped=0`
+- `test/01_unit/app/office/word_mail_merge_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/word_mail_merge_spec.spl declared>=10 executed=10 passed=0 failed=10 dropped=0`
+- `test/01_unit/app/office/word_table_ops_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/word_table_ops_spec.spl declared>=25 executed=25 passed=21 failed=4 dropped=0`
+- `test/01_unit/app/office/word_toc_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/word_toc_spec.spl declared>=17 executed=17 passed=0 failed=17 dropped=0`
+- `test/01_unit/app/office/xlsx_styles_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/office/xlsx_styles_spec.spl declared>=5 executed=5 passed=4 failed=1 dropped=0`
+- `test/01_unit/app/package/package_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/package/package_spec.spl declared>=4 executed=4 passed=3 failed=1 dropped=0`
+- `test/01_unit/app/portable_compute_emit_contract_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/portable_compute_emit_contract_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/01_unit/app/release/install_font_assets_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/release/install_font_assets_spec.spl declared>=2 executed=2 passed=1 failed=1 dropped=0`
+- `test/01_unit/app/release/whole_release_gate_source_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/release/whole_release_gate_source_spec.spl declared>=2 executed=2 passed=1 failed=1 dropped=0`
+- `test/01_unit/app/serial_mcp/serial_mcp_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/serial_mcp/serial_mcp_spec.spl declared>=13 executed=13 passed=11 failed=2 dropped=0`
+- `test/01_unit/app/simple_lab/export_sdoctest_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/simple_lab/export_sdoctest_spec.spl declared>=9 executed=9 passed=8 failed=1 dropped=0`
+- `test/01_unit/app/simpleos_nvme_serial_check_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/simpleos_nvme_serial_check_spec.spl declared>=32 executed=32 passed=31 failed=1 dropped=0`
+- `test/01_unit/app/simpleos_tool_contract_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/simpleos_tool_contract_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/01_unit/app/sj/busy_contract_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/sj/busy_contract_spec.spl declared>=6 executed=6 passed=3 failed=3 dropped=0`
+- `test/01_unit/app/spec_to_spipe/census_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/spec_to_spipe/census_spec.spl declared>=10 executed=10 passed=9 failed=1 dropped=0`
+- `test/01_unit/app/sspec_maintain/rule_coverage_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/sspec_maintain/rule_coverage_spec.spl declared>=5 executed=5 passed=4 failed=1 dropped=0`
+- `test/01_unit/app/sspec_maintain/scoring_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/sspec_maintain/scoring_spec.spl declared>=17 executed=17 passed=16 failed=1 dropped=0`
+- `test/01_unit/app/stats/doc_integration_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/stats/doc_integration_spec.spl declared>=13 executed=13 passed=1 failed=12 dropped=0`
+- `test/01_unit/app/t32_cli/access_cli_grammar_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/t32_cli/access_cli_grammar_spec.spl declared>=16 executed=16 passed=11 failed=5 dropped=0`
+- `test/01_unit/app/test/x25519mlkem768_candidate_batch_measurement_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/test/x25519mlkem768_candidate_batch_measurement_spec.spl declared>=11 executed=11 passed=5 failed=6 dropped=0`
+- `test/01_unit/app/test/x25519mlkem768_coverage_contract_reconciliation_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/test/x25519mlkem768_coverage_contract_reconciliation_spec.spl declared>=2 executed=2 passed=0 failed=2 dropped=0`
+- `test/01_unit/app/test/x25519mlkem768_coverage_receipt_composer_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/test/x25519mlkem768_coverage_receipt_composer_spec.spl declared>=4 executed=4 passed=1 failed=3 dropped=0`
+- `test/01_unit/app/test/x25519mlkem768_critical_inventory_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/test/x25519mlkem768_critical_inventory_spec.spl declared>=4 executed=4 passed=2 failed=2 dropped=0`
+- `test/01_unit/app/test/x25519mlkem768_gpu_paired_measurement_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/test/x25519mlkem768_gpu_paired_measurement_spec.spl declared>=5 executed=5 passed=1 failed=4 dropped=0`
+- `test/01_unit/app/test_host_env_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/test_host_env_spec.spl declared>=4 executed=4 passed=3 failed=1 dropped=0`
+- `test/01_unit/app/test_incremental_state_shared_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/test_incremental_state_shared_spec.spl declared>=4 executed=4 passed=0 failed=4 dropped=0`
+- `test/01_unit/app/test_runner_new/checkpoint_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/test_runner_new/checkpoint_spec.spl declared>=8 executed=8 passed=5 failed=3 dropped=0`
+- `test/01_unit/app/test_runner_new/test_dep_graph_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/test_runner_new/test_dep_graph_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/01_unit/app/test_runner_new/test_result_cache_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/test_runner_new/test_result_cache_spec.spl declared>=3 executed=3 passed=2 failed=1 dropped=0`
+- `test/01_unit/app/test_runner_new/test_runner_main_hir_contract_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/test_runner_new/test_runner_main_hir_contract_spec.spl declared>=3 executed=3 passed=1 failed=2 dropped=0`
+- `test/01_unit/app/tooling/algorithm_utils_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/tooling/algorithm_utils_spec.spl declared>=33 executed=33 passed=28 failed=5 dropped=0`
+- `test/01_unit/app/tooling/compile_commands_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/tooling/compile_commands_spec.spl declared>=40 executed=40 passed=37 failed=3 dropped=0`
+- `test/01_unit/app/tooling/coverage_ffi_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/tooling/coverage_ffi_spec.spl declared>=2 executed=2 passed=0 failed=2 dropped=0`
+- `test/01_unit/app/tooling/coverage_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/tooling/coverage_spec.spl declared>=26 executed=26 passed=25 failed=1 dropped=0`
+- `test/01_unit/app/tooling/env_commands_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/tooling/env_commands_spec.spl declared>=27 executed=27 passed=24 failed=3 dropped=0`
+- `test/01_unit/app/tooling/i18n_commands_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/tooling/i18n_commands_spec.spl declared>=44 executed=44 passed=42 failed=2 dropped=0`
+- `test/01_unit/app/tooling/json_utils_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/tooling/json_utils_spec.spl declared>=31 executed=31 passed=29 failed=2 dropped=0`
+- `test/01_unit/app/tooling/path_utils_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/tooling/path_utils_spec.spl declared>=28 executed=28 passed=21 failed=7 dropped=0`
+- `test/01_unit/app/tooling/pkg_commands_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/tooling/pkg_commands_spec.spl declared>=32 executed=32 passed=31 failed=1 dropped=0`
+- `test/01_unit/app/tooling/spipe_docgen_scenario_body_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/tooling/spipe_docgen_scenario_body_spec.spl declared>=61 executed=61 passed=45 failed=16 dropped=0`
+- `test/01_unit/app/tooling/test_db_edge_cases_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/tooling/test_db_edge_cases_spec.spl declared>=3 executed=3 passed=0 failed=3 dropped=0`
+- `test/01_unit/app/tooling/test_db_integrity_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/tooling/test_db_integrity_spec.spl declared>=19 executed=19 passed=16 failed=3 dropped=0`
+- `test/01_unit/app/tooling/test_result_wrapper_authored_count_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/tooling/test_result_wrapper_authored_count_spec.spl declared>=2 executed=2 passed=0 failed=2 dropped=0`
+- `test/01_unit/app/tooling/test_runner_failure_precedence_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/tooling/test_runner_failure_precedence_spec.spl declared>=4 executed=4 passed=2 failed=2 dropped=0`
+- `test/01_unit/app/tooling/test_runner_simple_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/tooling/test_runner_simple_spec.spl declared>=62 executed=62 passed=61 failed=1 dropped=0`
+- `test/01_unit/app/tooling/test_stats_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/tooling/test_stats_spec.spl declared>=2 executed=2 passed=0 failed=2 dropped=0`
+- `test/01_unit/app/tooling/traceability_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/tooling/traceability_spec.spl declared>=13 executed=13 passed=6 failed=7 dropped=0`
+- `test/01_unit/app/tooling/url_utils_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/tooling/url_utils_spec.spl declared>=60 executed=60 passed=37 failed=23 dropped=0`
+- `test/01_unit/app/tooling/web_commands_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/tooling/web_commands_spec.spl declared>=37 executed=37 passed=33 failed=4 dropped=0`
+- `test/01_unit/app/tracking/tracking_runtime_probe_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/tracking/tracking_runtime_probe_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/01_unit/app/ui.chromium.acid2/reftest_runner_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/ui.chromium.acid2/reftest_runner_spec.spl declared>=25 executed=25 passed=24 failed=1 dropped=0`
+- `test/01_unit/app/ui.chromium.devtools/attach_session_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/ui.chromium.devtools/attach_session_spec.spl declared>=26 executed=26 passed=20 failed=6 dropped=0`
+- `test/01_unit/app/ui.chromium/css_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/ui.chromium/css_spec.spl declared>=12 executed=12 passed=9 failed=3 dropped=0`
+- `test/01_unit/app/ui.chromium/input_translation_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/ui.chromium/input_translation_spec.spl declared>=8 executed=8 passed=1 failed=7 dropped=0`
+- `test/01_unit/app/ui.chromium/js_audit_extended_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/ui.chromium/js_audit_extended_spec.spl declared>=13 executed=13 passed=5 failed=8 dropped=0`
+
+## unclassified_no_baseline (237 unique)
+
+- `test/01_unit/app/ui.chromium/js_audit_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/ui.chromium/js_audit_spec.spl declared>=29 executed=29 passed=20 failed=9 dropped=0`
+- `test/01_unit/app/ui.chromium/tab_render_loop_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/ui.chromium/tab_render_loop_spec.spl declared>=8 executed=8 passed=7 failed=1 dropped=0`
+- `test/01_unit/app/ui/access_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/ui/access_spec.spl declared>=13 executed=13 passed=1 failed=12 dropped=0`
+- `test/01_unit/app/ui/async_ipc_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/ui/async_ipc_spec.spl declared>=21 executed=21 passed=18 failed=3 dropped=0`
+- `test/01_unit/app/ui/backend_matrix_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/ui/backend_matrix_spec.spl declared>=3 executed=3 passed=2 failed=1 dropped=0`
+- `test/01_unit/app/ui/browser_backend_runtime_queue_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/ui/browser_backend_runtime_queue_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/01_unit/app/ui/capability_policy_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/ui/capability_policy_spec.spl declared>=11 executed=11 passed=0 failed=11 dropped=0`
+- `test/01_unit/app/ui/capability_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/ui/capability_spec.spl declared>=5 executed=5 passed=1 failed=4 dropped=0`
+- `test/01_unit/app/ui/color_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/ui/color_spec.spl declared>=50 executed=50 passed=0 failed=50 dropped=0`
+- `test/01_unit/app/ui/dependency_closure_gate_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/ui/dependency_closure_gate_spec.spl declared>=9 executed=9 passed=7 failed=2 dropped=0`
+- `test/01_unit/app/ui/event_queue_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/ui/event_queue_spec.spl declared>=4 executed=4 passed=3 failed=1 dropped=0`
+- `test/01_unit/app/ui/gui_event_pipeline_contract_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/ui/gui_event_pipeline_contract_spec.spl declared>=3 executed=3 passed=2 failed=1 dropped=0`
+- `test/01_unit/app/ui/host_wm_runtime_loop_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/app/ui/host_wm_runtime_loop_spec.spl declared>=3 executed=3 passed=2 failed=1 dropped=0`
+- `test/01_unit/browser_engine/ifc_linebox_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/browser_engine/ifc_linebox_spec.spl declared>=10 executed=10 passed=0 failed=10 dropped=0`
+- `test/01_unit/browser_engine/js_integration_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/browser_engine/js_integration_spec.spl declared>=11 executed=11 passed=1 failed=10 dropped=0`
+- `test/01_unit/browser_engine/layout_text_node_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/browser_engine/layout_text_node_spec.spl declared>=4 executed=4 passed=0 failed=4 dropped=0`
+- `test/01_unit/browser_engine/margin_collapse_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/browser_engine/margin_collapse_spec.spl declared>=8 executed=8 passed=0 failed=8 dropped=0`
+- `test/01_unit/browser_engine/net/cors_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/browser_engine/net/cors_spec.spl declared>=40 executed=40 passed=37 failed=3 dropped=0`
+- `test/01_unit/browser_engine/net/ws_handshake_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/browser_engine/net/ws_handshake_spec.spl declared>=3 executed=3 passed=2 failed=1 dropped=0`
+- `test/01_unit/browser_engine/script/dom_query_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/browser_engine/script/dom_query_spec.spl declared>=16 executed=16 passed=5 failed=11 dropped=0`
+- `test/01_unit/browser_engine/script/js_compat_json_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/browser_engine/script/js_compat_json_spec.spl declared>=4 executed=4 passed=0 failed=4 dropped=0`
+- `test/01_unit/browser_engine/script/location_api_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/browser_engine/script/location_api_spec.spl declared>=4 executed=4 passed=2 failed=2 dropped=0`
+- `test/01_unit/browser_engine/script/script_host_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/browser_engine/script/script_host_spec.spl declared>=22 executed=22 passed=10 failed=12 dropped=0`
+- `test/01_unit/browser_engine/script/simple_script_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/browser_engine/script/simple_script_spec.spl declared>=7 executed=7 passed=4 failed=3 dropped=0`
+- `test/01_unit/browser_engine/simple_web_html_layout_renderer_declarations_coverage_closure_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/browser_engine/simple_web_html_layout_renderer_declarations_coverage_closure_spec.spl declared>=18 executed=18 passed=16 failed=2 dropped=0`
+- `test/01_unit/browser_engine/table_layout_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/browser_engine/table_layout_spec.spl declared>=7 executed=7 passed=0 failed=7 dropped=0`
+- `test/01_unit/check/vulkan_direct_compute_ownership_contract_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/check/vulkan_direct_compute_ownership_contract_spec.spl declared>=2 executed=2 passed=1 failed=1 dropped=0`
+- `test/01_unit/check/vulkan_engine2d_frame_batch_contract_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/check/vulkan_engine2d_frame_batch_contract_spec.spl declared>=3 executed=3 passed=2 failed=1 dropped=0`
+- `test/01_unit/check/vulkan_engine2d_readback_mode_contract_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/check/vulkan_engine2d_readback_mode_contract_spec.spl declared>=6 executed=6 passed=4 failed=2 dropped=0`
+- `test/01_unit/check/vulkan_transfer_completion_ownership_contract_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/check/vulkan_transfer_completion_ownership_contract_spec.spl declared>=4 executed=4 passed=2 failed=2 dropped=0`
+- `test/01_unit/common/ui/spreadsheet_grid_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/common/ui/spreadsheet_grid_spec.spl declared>=2 executed=2 passed=1 failed=1 dropped=0`
+- `test/01_unit/compiler/60.mir_opt/.spipe_wrapped_entry_general_patterns_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/60.mir_opt/.spipe_wrapped_entry_general_patterns_spec.spl declared>=0 executed=27 passed=22 failed=5 dropped=0`
+- `test/01_unit/compiler/backend/bootstrap_llvm_entry_symbol_source_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/backend/bootstrap_llvm_entry_symbol_source_spec.spl declared>=4 executed=4 passed=0 failed=4 dropped=0`
+- `test/01_unit/compiler/backend/cranelift_aggregate_runtime_abi_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/backend/cranelift_aggregate_runtime_abi_spec.spl declared>=13 executed=13 passed=6 failed=7 dropped=0`
+- `test/01_unit/compiler/backend/intrinsic_lowering_aarch64_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/backend/intrinsic_lowering_aarch64_spec.spl declared>=52 executed=52 passed=51 failed=1 dropped=0`
+- `test/01_unit/compiler/backend/introspection/elf_symbols_byte_text_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/backend/introspection/elf_symbols_byte_text_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/01_unit/compiler/backend/llvm_bitcast_pointer_bool_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/backend/llvm_bitcast_pointer_bool_spec.spl declared>=4 executed=4 passed=0 failed=4 dropped=0`
+- `test/01_unit/compiler/backend/llvm_copy_move_alloc_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/backend/llvm_copy_move_alloc_spec.spl declared>=6 executed=6 passed=5 failed=1 dropped=0`
+- `test/01_unit/compiler/backend/llvm_ir_builder_target_header_lifetime_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/backend/llvm_ir_builder_target_header_lifetime_spec.spl declared>=4 executed=4 passed=3 failed=1 dropped=0`
+- `test/01_unit/compiler/backend/llvm_lib_backend_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/backend/llvm_lib_backend_spec.spl declared>=5 executed=5 passed=3 failed=2 dropped=0`
+- `test/01_unit/compiler/backend/llvm_mutable_global_static_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/backend/llvm_mutable_global_static_spec.spl declared>=5 executed=5 passed=2 failed=3 dropped=0`
+- `test/01_unit/compiler/backend/llvm_opt_pipeline_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/backend/llvm_opt_pipeline_spec.spl declared>=8 executed=8 passed=6 failed=2 dropped=0`
+- `test/01_unit/compiler/backend/llvm_pointer_return_null_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/backend/llvm_pointer_return_null_spec.spl declared>=6 executed=6 passed=2 failed=4 dropped=0`
+- `test/01_unit/compiler/backend/llvm_simd_array_abi_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/backend/llvm_simd_array_abi_spec.spl declared>=4 executed=4 passed=2 failed=2 dropped=0`
+- `test/01_unit/compiler/backend/logger_native_probe_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/backend/logger_native_probe_spec.spl declared>=2 executed=2 passed=1 failed=1 dropped=0`
+- `test/01_unit/compiler/backend/native/isel_riscv32_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/backend/native/isel_riscv32_spec.spl declared>=37 executed=37 passed=36 failed=1 dropped=0`
+- `test/01_unit/compiler/backend/native/isel_riscv64_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/backend/native/isel_riscv64_spec.spl declared>=42 executed=42 passed=41 failed=1 dropped=0`
+- `test/01_unit/compiler/backend/native_layout_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/backend/native_layout_spec.spl declared>=4 executed=4 passed=3 failed=1 dropped=0`
+- `test/01_unit/compiler/bdd_eq_chained_matcher_provisional_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/bdd_eq_chained_matcher_provisional_spec.spl declared>=6 executed=6 passed=5 failed=1 dropped=0`
+- `test/01_unit/compiler/bdd_text_eq_runtime_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/bdd_text_eq_runtime_spec.spl declared>=3 executed=3 passed=2 failed=1 dropped=0`
+- `test/01_unit/compiler/blocks/unified_registry_bootstrap_source_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/blocks/unified_registry_bootstrap_source_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/01_unit/compiler/bootstrap/ast_native_arena_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/bootstrap/ast_native_arena_spec.spl declared>=5 executed=5 passed=1 failed=4 dropped=0`
+- `test/01_unit/compiler/bootstrap/driver_phase_entry_shared_binding_contract_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/bootstrap/driver_phase_entry_shared_binding_contract_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/01_unit/compiler/bootstrap/entry_closure_bucket_count_contract_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/bootstrap/entry_closure_bucket_count_contract_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/01_unit/compiler/bootstrap/entry_closure_module_map_update_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/bootstrap/entry_closure_module_map_update_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/01_unit/compiler/bootstrap/entry_closure_physical_source_dedup_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/bootstrap/entry_closure_physical_source_dedup_spec.spl declared>=15 executed=15 passed=11 failed=4 dropped=0`
+- `test/01_unit/compiler/bootstrap/hir_expression_shared_binding_contract_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/bootstrap/hir_expression_shared_binding_contract_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/01_unit/compiler/bootstrap/hir_import_resolution_shared_binding_contract_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/bootstrap/hir_import_resolution_shared_binding_contract_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/01_unit/compiler/bootstrap/hir_module_lowering_shared_binding_contract_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/bootstrap/hir_module_lowering_shared_binding_contract_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/01_unit/compiler/bootstrap/hir_statement_shared_binding_contract_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/bootstrap/hir_statement_shared_binding_contract_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/01_unit/compiler/bootstrap/native_entry_closure_mode_contract_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/bootstrap/native_entry_closure_mode_contract_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/01_unit/compiler/driver/bootstrap_context_mir_source_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/driver/bootstrap_context_mir_source_spec.spl declared>=16 executed=16 passed=6 failed=10 dropped=0`
+- `test/01_unit/compiler/driver/bootstrap_flat_nonentry_globals_source_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/driver/bootstrap_flat_nonentry_globals_source_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/01_unit/compiler/driver/bootstrap_indexed_global_dispatch_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/driver/bootstrap_indexed_global_dispatch_spec.spl declared>=4 executed=4 passed=3 failed=1 dropped=0`
+- `test/01_unit/compiler/driver/bootstrap_mir_to_llvm_owner_mutation_source_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/driver/bootstrap_mir_to_llvm_owner_mutation_source_spec.spl declared>=20 executed=20 passed=14 failed=6 dropped=0`
+- `test/01_unit/compiler/driver/check_mode_short_circuit_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/driver/check_mode_short_circuit_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/01_unit/compiler/driver/cli_args_mutability_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/driver/cli_args_mutability_spec.spl declared>=2 executed=2 passed=1 failed=1 dropped=0`
+- `test/01_unit/compiler/driver/compile_delegation_guard_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/driver/compile_delegation_guard_spec.spl declared>=6 executed=6 passed=5 failed=1 dropped=0`
+- `test/01_unit/compiler/driver/compiler_driver_type_owner_contract_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/driver/compiler_driver_type_owner_contract_spec.spl declared>=7 executed=7 passed=6 failed=1 dropped=0`
+- `test/01_unit/compiler/driver/flat_optional_fixed_tag_guard_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/driver/flat_optional_fixed_tag_guard_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/01_unit/compiler/driver/focused_aot_lazy_interpreter_contract_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/driver/focused_aot_lazy_interpreter_contract_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/01_unit/compiler/driver/leak_check_owner_imports_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/driver/leak_check_owner_imports_spec.spl declared>=2 executed=2 passed=0 failed=2 dropped=0`
+- `test/01_unit/compiler/driver/low_memory_source_fingerprint_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/driver/low_memory_source_fingerprint_spec.spl declared>=6 executed=6 passed=2 failed=4 dropped=0`
+- `test/01_unit/compiler/driver/main_opt_level_cli_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/driver/main_opt_level_cli_spec.spl declared>=4 executed=4 passed=2 failed=2 dropped=0`
+- `test/01_unit/compiler/driver/native_build_cache_plumbing_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/driver/native_build_cache_plumbing_spec.spl declared>=28 executed=28 passed=20 failed=8 dropped=0`
+- `test/01_unit/compiler/driver/native_build_jit_ambiguity_source_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/driver/native_build_jit_ambiguity_source_spec.spl declared>=13 executed=13 passed=9 failed=4 dropped=0`
+- `test/01_unit/compiler/driver/native_cache_granularity_contract_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/driver/native_cache_granularity_contract_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/01_unit/compiler/driver/native_entry_closure_gate_source_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/driver/native_entry_closure_gate_source_spec.spl declared>=5 executed=5 passed=4 failed=1 dropped=0`
+- `test/01_unit/compiler/driver/smf_cache_loading_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/driver/smf_cache_loading_spec.spl declared>=9 executed=9 passed=8 failed=1 dropped=0`
+- `test/01_unit/compiler/driver/streaming_module_surface_lifecycle_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/driver/streaming_module_surface_lifecycle_spec.spl declared>=2 executed=2 passed=0 failed=2 dropped=0`
+- `test/01_unit/compiler/extern/rt_file_read_bytes_single_extern_signature_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/extern/rt_file_read_bytes_single_extern_signature_spec.spl declared>=7 executed=7 passed=6 failed=1 dropped=0`
+- `test/01_unit/compiler/frontend/bootstrap_decl_count_slot_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/frontend/bootstrap_decl_count_slot_spec.spl declared>=10 executed=10 passed=6 failed=4 dropped=0`
+- `test/01_unit/compiler/frontend/bootstrap_expr_stmt_arena_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/frontend/bootstrap_expr_stmt_arena_spec.spl declared>=9 executed=9 passed=6 failed=3 dropped=0`
+- `test/01_unit/compiler/frontend/desugar_dict_keys_source_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/frontend/desugar_dict_keys_source_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/01_unit/compiler/frontend/flat_ast_inline_asm_bridge_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/frontend/flat_ast_inline_asm_bridge_spec.spl declared>=5 executed=5 passed=3 failed=2 dropped=0`
+- `test/01_unit/compiler/module_resolver/type_domain_resolver_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/module_resolver/type_domain_resolver_spec.spl declared>=4 executed=4 passed=0 failed=4 dropped=0`
+- `test/01_unit/compiler/mono/monomorphization_native_build_regression_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/mono/monomorphization_native_build_regression_spec.spl declared>=2 executed=2 passed=1 failed=1 dropped=0`
+- `test/01_unit/compiler/native/inline_asm_core_parser_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/native/inline_asm_core_parser_spec.spl declared>=10 executed=10 passed=9 failed=1 dropped=0`
+- `test/01_unit/compiler/native/inline_asm_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/native/inline_asm_spec.spl declared>=41 executed=41 passed=37 failed=4 dropped=0`
+- `test/01_unit/compiler/native/simd_capabilities_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/native/simd_capabilities_spec.spl declared>=14 executed=14 passed=2 failed=12 dropped=0`
+- `test/01_unit/compiler/native/x86_64_simd_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/native/x86_64_simd_spec.spl declared>=38 executed=38 passed=24 failed=14 dropped=0`
+- `test/01_unit/compiler/parser/dedent_continuation_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/parser/dedent_continuation_spec.spl declared>=12 executed=12 passed=11 failed=1 dropped=0`
+- `test/01_unit/compiler/parser/print_log_policy_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/compiler/parser/print_log_policy_spec.spl declared>=2 executed=2 passed=1 failed=1 dropped=0`
+- `test/01_unit/hardware/rv64/pipeline/rv64_pipeline_integration_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/hardware/rv64/pipeline/rv64_pipeline_integration_spec.spl declared>=8 executed=8 passed=1 failed=7 dropped=0`
+- `test/01_unit/hardware/rv64gc/rv64_clint_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/hardware/rv64gc/rv64_clint_spec.spl declared>=10 executed=10 passed=8 failed=2 dropped=0`
+- `test/01_unit/hardware/rv64gc/rv64_csr_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/hardware/rv64gc/rv64_csr_spec.spl declared>=24 executed=24 passed=11 failed=13 dropped=0`
+- `test/01_unit/hardware/rv64gc/rv64_fp_csr_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/hardware/rv64gc/rv64_fp_csr_spec.spl declared>=16 executed=16 passed=3 failed=13 dropped=0`
+- `test/01_unit/hardware/rv64gc/rv64_plic_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/hardware/rv64gc/rv64_plic_spec.spl declared>=11 executed=11 passed=3 failed=8 dropped=0`
+- `test/01_unit/hardware/rv64gc/rv64_privilege_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/hardware/rv64gc/rv64_privilege_spec.spl declared>=17 executed=17 passed=10 failed=7 dropped=0`
+- `test/01_unit/hardware/rv64gc/rv64_sv39_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/hardware/rv64gc/rv64_sv39_spec.spl declared>=25 executed=25 passed=11 failed=14 dropped=0`
+- `test/01_unit/language/nil_presence_idioms_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/language/nil_presence_idioms_spec.spl declared>=15 executed=15 passed=8 failed=7 dropped=0`
+- `test/01_unit/language/primitive_receiver_trait_impl_dispatch_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/language/primitive_receiver_trait_impl_dispatch_spec.spl declared>=7 executed=7 passed=6 failed=1 dropped=0`
+- `test/01_unit/language/text_array_index_readback_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/language/text_array_index_readback_spec.spl declared>=3 executed=3 passed=1 failed=2 dropped=0`
+- `test/01_unit/lib/alloc/mimalloc_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/alloc/mimalloc_spec.spl declared>=39 executed=39 passed=38 failed=1 dropped=0`
+- `test/01_unit/lib/audit_log_hash_chain_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/audit_log_hash_chain_spec.spl declared>=7 executed=7 passed=2 failed=5 dropped=0`
+- `test/01_unit/lib/blink/dom_node_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/blink/dom_node_spec.spl declared>=7 executed=7 passed=0 failed=7 dropped=0`
+- `test/01_unit/lib/blink/style_cascade_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/blink/style_cascade_spec.spl declared>=16 executed=16 passed=9 failed=7 dropped=0`
+- `test/01_unit/lib/cc/property_tree_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/cc/property_tree_spec.spl declared>=8 executed=8 passed=0 failed=8 dropped=0`
+- `test/01_unit/lib/common/pure/training_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/common/pure/training_spec.spl declared>=3 executed=3 passed=2 failed=1 dropped=0`
+- `test/01_unit/lib/common/sdn/sdn_block_sequence_probe_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/common/sdn/sdn_block_sequence_probe_spec.spl declared>=4 executed=4 passed=1 failed=3 dropped=0`
+- `test/01_unit/lib/common/sdn_coverage_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/common/sdn_coverage_spec.spl declared>=71 executed=71 passed=70 failed=1 dropped=0`
+- `test/01_unit/lib/common/search/inverted_index_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/common/search/inverted_index_spec.spl declared>=17 executed=17 passed=11 failed=6 dropped=0`
+- `test/01_unit/lib/database/row_numeric_guard_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/database/row_numeric_guard_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/01_unit/lib/database/sdn_reader_utf8_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/database/sdn_reader_utf8_spec.spl declared>=6 executed=6 passed=2 failed=4 dropped=0`
+- `test/01_unit/lib/database/sql/sql_connection_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/database/sql/sql_connection_spec.spl declared>=19 executed=19 passed=16 failed=3 dropped=0`
+- `test/01_unit/lib/database/sql/sql_interceptor_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/database/sql/sql_interceptor_spec.spl declared>=23 executed=23 passed=16 failed=7 dropped=0`
+- `test/01_unit/lib/database/sql/sql_migration_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/database/sql/sql_migration_spec.spl declared>=16 executed=16 passed=11 failed=5 dropped=0`
+- `test/01_unit/lib/database/sql/sql_repository_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/database/sql/sql_repository_spec.spl declared>=16 executed=16 passed=6 failed=10 dropped=0`
+- `test/01_unit/lib/database/sql/sql_statement_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/database/sql/sql_statement_spec.spl declared>=10 executed=10 passed=1 failed=9 dropped=0`
+- `test/01_unit/lib/database/sql/sql_stmt_cache_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/database/sql/sql_stmt_cache_spec.spl declared>=13 executed=13 passed=3 failed=10 dropped=0`
+- `test/01_unit/lib/database/sql/sql_transaction_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/database/sql/sql_transaction_spec.spl declared>=14 executed=14 passed=6 failed=8 dropped=0`
+- `test/01_unit/lib/debug/remote/t32_ffi/t32_types_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/debug/remote/t32_ffi/t32_types_spec.spl declared>=12 executed=12 passed=1 failed=11 dropped=0`
+- `test/01_unit/lib/dependency_boundary_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/dependency_boundary_spec.spl declared>=18 executed=18 passed=10 failed=8 dropped=0`
+- `test/01_unit/lib/driver/fat32_file_io_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/driver/fat32_file_io_spec.spl declared>=14 executed=14 passed=12 failed=2 dropped=0`
+- `test/01_unit/lib/editor/block_model_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/editor/block_model_spec.spl declared>=3 executed=3 passed=2 failed=1 dropped=0`
+- `test/01_unit/lib/gc_async_mut/security/enforcement/security_enforcement_facade_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/gc_async_mut/security/enforcement/security_enforcement_facade_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/01_unit/lib/gc_async_mut/src/collections/src_collections_facade_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/gc_async_mut/src/collections/src_collections_facade_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/01_unit/lib/gc_async_mut/src/tooling/tooling_facade_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/gc_async_mut/src/tooling/tooling_facade_spec.spl declared>=2 executed=2 passed=1 failed=1 dropped=0`
+- `test/01_unit/lib/gc_async_mut/svllm/nvfs_client/.spipe_wrapped_entry_std_fs_transport_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/gc_async_mut/svllm/nvfs_client/.spipe_wrapped_entry_std_fs_transport_spec.spl declared>=0 executed=9 passed=0 failed=9 dropped=0`
+- `test/01_unit/lib/nogc_async_mut/mcp_sdk/core/core_facade_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/nogc_async_mut/mcp_sdk/core/core_facade_spec.spl declared>=2 executed=2 passed=1 failed=1 dropped=0`
+- `test/01_unit/lib/nogc_async_mut/monitor_link_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/nogc_async_mut/monitor_link_spec.spl declared>=20 executed=20 passed=14 failed=6 dropped=0`
+- `test/01_unit/lib/nogc_async_mut/play/cdp/play_cdp_facade_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/nogc_async_mut/play/cdp/play_cdp_facade_spec.spl declared>=2 executed=2 passed=1 failed=1 dropped=0`
+- `test/01_unit/lib/nogc_async_mut/security/enforcement/security_enforcement_facade_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/nogc_async_mut/security/enforcement/security_enforcement_facade_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/01_unit/lib/nogc_async_mut/src/collections/src_collections_facade_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/nogc_async_mut/src/collections/src_collections_facade_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/01_unit/lib/nogc_async_mut/src/map_insert_if_absent_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/nogc_async_mut/src/map_insert_if_absent_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/01_unit/lib/nogc_async_mut/src/tooling/tooling_facade_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/01_unit/lib/nogc_async_mut/src/tooling/tooling_facade_spec.spl declared>=2 executed=2 passed=1 failed=1 dropped=0`
+- `test/unit/app/doc_coverage/compiler_integration_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/app/doc_coverage/compiler_integration_spec.spl declared>=8 executed=8 passed=1 failed=7 dropped=0`
+- `test/unit/app/doc_coverage/inline_comment_coverage_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/app/doc_coverage/inline_comment_coverage_spec.spl declared>=14 executed=14 passed=12 failed=2 dropped=0`
+- `test/unit/app/fix/short_grammar_fix_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/app/fix/short_grammar_fix_spec.spl declared>=64 executed=64 passed=63 failed=1 dropped=0`
+- `test/unit/app/io/process_ops_ext_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/app/io/process_ops_ext_spec.spl declared>=19 executed=19 passed=17 failed=2 dropped=0`
+- `test/unit/app/mcp/cli_passthrough_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/app/mcp/cli_passthrough_spec.spl declared>=5 executed=5 passed=0 failed=5 dropped=0`
+- `test/unit/app/mcp_unit/fileio_protection_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/app/mcp_unit/fileio_protection_spec.spl declared>=27 executed=27 passed=24 failed=3 dropped=0`
+- `test/unit/compiler/mir_opt/collection_opt_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/compiler/mir_opt/collection_opt_spec.spl declared>=30 executed=30 passed=6 failed=24 dropped=0`
+- `test/unit/compiler/mir_opt/var_reassign_analysis_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/compiler/mir_opt/var_reassign_analysis_spec.spl declared>=17 executed=17 passed=16 failed=1 dropped=0`
+- `test/unit/compiler/module_resolver/type_domain_resolver_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/compiler/module_resolver/type_domain_resolver_spec.spl declared>=4 executed=4 passed=0 failed=4 dropped=0`
+- `test/unit/compiler/parser/bitfield_pure_simple_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/compiler/parser/bitfield_pure_simple_spec.spl declared>=4 executed=4 passed=3 failed=1 dropped=0`
+- `test/unit/compiler/r2_lang_probe_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/compiler/r2_lang_probe_spec.spl declared>=2 executed=2 passed=1 failed=1 dropped=0`
+- `test/unit/compiler/vhdl/hardware_spawn_lower_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/compiler/vhdl/hardware_spawn_lower_spec.spl declared>=50 executed=50 passed=49 failed=1 dropped=0`
+- `test/unit/doc/feature_requests_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/doc/feature_requests_spec.spl declared>=4 executed=4 passed=0 failed=4 dropped=0`
+- `test/unit/doctest/parser_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/doctest/parser_spec.spl declared>=18 executed=18 passed=2 failed=16 dropped=0`
+- `test/unit/hal/hal_traits_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/hal/hal_traits_spec.spl declared>=30 executed=30 passed=26 failed=4 dropped=0`
+- `test/unit/hardware/fpga_linux/check_riscv_rtl_linux_smoke_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/hardware/fpga_linux/check_riscv_rtl_linux_smoke_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/unit/hardware/rv32i_rtl/rvfi_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/hardware/rv32i_rtl/rvfi_spec.spl declared>=9 executed=9 passed=8 failed=1 dropped=0`
+- `test/unit/lib/cc/property_tree_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/cc/property_tree_spec.spl declared>=8 executed=8 passed=0 failed=8 dropped=0`
+- `test/unit/lib/common/compress_facade_harness_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/common/compress_facade_harness_spec.spl declared>=4 executed=4 passed=3 failed=1 dropped=0`
+- `test/unit/lib/common/compress_utilities_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/common/compress_utilities_spec.spl declared>=11 executed=11 passed=10 failed=1 dropped=0`
+- `test/unit/lib/common/crypto/hkdf_sha1_quick_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/common/crypto/hkdf_sha1_quick_spec.spl declared>=2 executed=2 passed=1 failed=1 dropped=0`
+- `test/unit/lib/common/crypto/lshr2_debug_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/common/crypto/lshr2_debug_spec.spl declared>=5 executed=5 passed=4 failed=1 dropped=0`
+- `test/unit/lib/common/crypto/lshr3_debug_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/common/crypto/lshr3_debug_spec.spl declared>=2 executed=2 passed=0 failed=2 dropped=0`
+- `test/unit/lib/common/fault_detection_enhanced_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/common/fault_detection_enhanced_spec.spl declared>=19 executed=19 passed=13 failed=6 dropped=0`
+- `test/unit/lib/common/js_async_fetch_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/common/js_async_fetch_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/unit/lib/common/js_jit_optimizer_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/common/js_jit_optimizer_spec.spl declared>=5 executed=5 passed=3 failed=2 dropped=0`
+- `test/unit/lib/common/js_runtime_node_fast_path_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/common/js_runtime_node_fast_path_spec.spl declared>=8 executed=8 passed=0 failed=8 dropped=0`
+- `test/unit/lib/common/json_logic_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/common/json_logic_spec.spl declared>=12 executed=12 passed=11 failed=1 dropped=0`
+- `test/unit/lib/common/jwt_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/common/jwt_spec.spl declared>=12 executed=12 passed=9 failed=3 dropped=0`
+- `test/unit/lib/common/log_export_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/common/log_export_spec.spl declared>=9 executed=9 passed=3 failed=6 dropped=0`
+- `test/unit/lib/common/lz4_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/common/lz4_spec.spl declared>=20 executed=20 passed=18 failed=2 dropped=0`
+- `test/unit/lib/common/math_repr_plain_coverage_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/common/math_repr_plain_coverage_spec.spl declared>=139 executed=139 passed=138 failed=1 dropped=0`
+- `test/unit/lib/common/mock_phase3_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/common/mock_phase3_spec.spl declared>=31 executed=31 passed=30 failed=1 dropped=0`
+- `test/unit/lib/common/mock_phase4_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/common/mock_phase4_spec.spl declared>=24 executed=24 passed=21 failed=3 dropped=0`
+- `test/unit/lib/common/mock_phase6_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/common/mock_phase6_spec.spl declared>=59 executed=59 passed=55 failed=4 dropped=0`
+- `test/unit/lib/common/mock_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/common/mock_spec.spl declared>=41 executed=41 passed=39 failed=2 dropped=0`
+- `test/unit/lib/common/parsers_sdn_coverage_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/common/parsers_sdn_coverage_spec.spl declared>=79 executed=79 passed=72 failed=7 dropped=0`
+- `test/unit/lib/common/perf_optimization_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/common/perf_optimization_spec.spl declared>=51 executed=51 passed=37 failed=14 dropped=0`
+- `test/unit/lib/common/sdn_coverage_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/common/sdn_coverage_spec.spl declared>=71 executed=71 passed=64 failed=7 dropped=0`
+- `test/unit/lib/common/text_layout/font_renderer_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/common/text_layout/font_renderer_spec.spl declared>=13 executed=13 passed=9 failed=4 dropped=0`
+- `test/unit/lib/engine/object_pool_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/engine/object_pool_spec.spl declared>=10 executed=10 passed=9 failed=1 dropped=0`
+- `test/unit/lib/fs_driver/fat32_core_lfn_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/fs_driver/fat32_core_lfn_spec.spl declared>=17 executed=17 passed=4 failed=13 dropped=0`
+- `test/unit/lib/gc_async_mut/db/dbfs_engine/dbfs_checkpoint_attr_facade_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/gc_async_mut/db/dbfs_engine/dbfs_checkpoint_attr_facade_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_dom_events_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_dom_events_spec.spl declared>=23 executed=23 passed=9 failed=14 dropped=0`
+- `test/unit/lib/gc_async_mut/mcp_sdk/core/core_facade_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/gc_async_mut/mcp_sdk/core/core_facade_spec.spl declared>=2 executed=2 passed=0 failed=2 dropped=0`
+- `test/unit/lib/gc_async_mut/src/tooling/tooling_facade_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/gc_async_mut/src/tooling/tooling_facade_spec.spl declared>=2 executed=2 passed=1 failed=1 dropped=0`
+- `test/unit/lib/gc_async_mut/svllm/model_executor/model_loader/manifest_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/gc_async_mut/svllm/model_executor/model_loader/manifest_spec.spl declared>=9 executed=9 passed=8 failed=1 dropped=0`
+- `test/unit/lib/gc_async_mut/svllm/model_executor/model_loader/safetensors_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/gc_async_mut/svllm/model_executor/model_loader/safetensors_spec.spl declared>=10 executed=10 passed=4 failed=6 dropped=0`
+- `test/unit/lib/gc_async_mut/text_layout/text_layout_facade_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/gc_async_mut/text_layout/text_layout_facade_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/unit/lib/gpu/engine2d/backend_software_simd_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/gpu/engine2d/backend_software_simd_spec.spl declared>=6 executed=6 passed=3 failed=3 dropped=0`
+- `test/unit/lib/gpu/engine2d/generated_kernel_dispatch_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/gpu/engine2d/generated_kernel_dispatch_spec.spl declared>=18 executed=18 passed=12 failed=6 dropped=0`
+- `test/unit/lib/hal/hal_types_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/hal/hal_types_spec.spl declared>=16 executed=16 passed=15 failed=1 dropped=0`
+- `test/unit/lib/hardware/fpga_linux/soc_vhdl_gen_rv64_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/hardware/fpga_linux/soc_vhdl_gen_rv64_spec.spl declared>=14 executed=14 passed=13 failed=1 dropped=0`
+- `test/unit/lib/hardware/rv64gc_rtl/core64_integration_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/hardware/rv64gc_rtl/core64_integration_spec.spl declared>=30 executed=30 passed=27 failed=3 dropped=0`
+- `test/unit/lib/http_server/csrf_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/http_server/csrf_spec.spl declared>=10 executed=10 passed=0 failed=10 dropped=0`
+- `test/unit/lib/nogc_async_mut/concurrent_providers_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/nogc_async_mut/concurrent_providers_spec.spl declared>=90 executed=90 passed=85 failed=5 dropped=0`
+- `test/unit/lib/nogc_async_mut/concurrent_wrappers_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/nogc_async_mut/concurrent_wrappers_spec.spl declared>=40 executed=40 passed=38 failed=2 dropped=0`
+- `test/unit/lib/nogc_async_mut/db/dbfs_engine/dbfs_checkpoint_attr_facade_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/nogc_async_mut/db/dbfs_engine/dbfs_checkpoint_attr_facade_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/unit/lib/nogc_async_mut/http_server/static_compression_cache_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/nogc_async_mut/http_server/static_compression_cache_spec.spl declared>=8 executed=8 passed=7 failed=1 dropped=0`
+- `test/unit/lib/nogc_async_mut/http_server/static_file_compression_cache_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/nogc_async_mut/http_server/static_file_compression_cache_spec.spl declared>=7 executed=7 passed=6 failed=1 dropped=0`
+- `test/unit/lib/nogc_async_mut/http_server/static_file_handler_compression_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/nogc_async_mut/http_server/static_file_handler_compression_spec.spl declared>=9 executed=9 passed=6 failed=3 dropped=0`
+- `test/unit/lib/nogc_async_mut/mcp_sdk/core/core_facade_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/nogc_async_mut/mcp_sdk/core/core_facade_spec.spl declared>=2 executed=2 passed=0 failed=2 dropped=0`
+- `test/unit/lib/nogc_async_mut/src/tooling/tooling_facade_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/nogc_async_mut/src/tooling/tooling_facade_spec.spl declared>=2 executed=2 passed=1 failed=1 dropped=0`
+- `test/unit/lib/nogc_async_mut/text_layout/text_layout_facade_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/nogc_async_mut/text_layout/text_layout_facade_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/unit/lib/nogc_async_mut/wm/compositor_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/nogc_async_mut/wm/compositor_spec.spl declared>=9 executed=9 passed=7 failed=2 dropped=0`
+- `test/unit/lib/nogc_async_mut/wm/input_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/nogc_async_mut/wm/input_spec.spl declared>=8 executed=8 passed=3 failed=5 dropped=0`
+- `test/unit/lib/nogc_sync_mut/engine/render/backend3d_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/nogc_sync_mut/engine/render/backend3d_spec.spl declared>=29 executed=29 passed=28 failed=1 dropped=0`
+- `test/unit/lib/nogc_sync_mut/engine/render/gpu_lighting3d_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/nogc_sync_mut/engine/render/gpu_lighting3d_spec.spl declared>=18 executed=18 passed=11 failed=7 dropped=0`
+- `test/unit/lib/nogc_sync_mut/engine/render/gpu_mesh3d_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/nogc_sync_mut/engine/render/gpu_mesh3d_spec.spl declared>=12 executed=12 passed=3 failed=9 dropped=0`
+- `test/unit/lib/nogc_sync_mut/engine/render/texture3d_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/nogc_sync_mut/engine/render/texture3d_spec.spl declared>=18 executed=18 passed=7 failed=11 dropped=0`
+- `test/unit/lib/nogc_sync_mut/http/auth/digest_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/lib/nogc_sync_mut/http/auth/digest_spec.spl declared>=14 executed=14 passed=13 failed=1 dropped=0`
+- `test/unit/os/kernel/ipc/ipc_port_create_hosted_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/os/kernel/ipc/ipc_port_create_hosted_spec.spl declared>=6 executed=6 passed=4 failed=2 dropped=0`
+- `test/unit/os/kernel/ipc/ipc_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/os/kernel/ipc/ipc_spec.spl declared>=19 executed=19 passed=18 failed=1 dropped=0`
+- `test/unit/os/kernel/loader/app_registry_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/os/kernel/loader/app_registry_spec.spl declared>=24 executed=24 passed=23 failed=1 dropped=0`
+- `test/unit/os/kernel/loader/process_image_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/os/kernel/loader/process_image_spec.spl declared>=5 executed=5 passed=2 failed=3 dropped=0`
+- `test/unit/os/kernel/loader/x86_64_fs_exec_spawn_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/os/kernel/loader/x86_64_fs_exec_spawn_spec.spl declared>=3 executed=3 passed=1 failed=2 dropped=0`
+- `test/unit/os/kernel/loader/zstd_decompress_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/os/kernel/loader/zstd_decompress_spec.spl declared>=2 executed=2 passed=1 failed=1 dropped=0`
+- `test/unit/os/kernel/memory/pmm_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/os/kernel/memory/pmm_spec.spl declared>=22 executed=22 passed=16 failed=6 dropped=0`
+- `test/unit/os/kernel/memory/vmm_vma_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/os/kernel/memory/vmm_vma_spec.spl declared>=18 executed=18 passed=7 failed=11 dropped=0`
+- `test/unit/os/memory/mold_linker_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/os/memory/mold_linker_spec.spl declared>=11 executed=11 passed=9 failed=2 dropped=0`
+- `test/unit/os/multiarch/hardening_gates_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/os/multiarch/hardening_gates_spec.spl declared>=36 executed=36 passed=16 failed=20 dropped=0`
+- `test/unit/os/port/simpleos_multiplatform_build_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/os/port/simpleos_multiplatform_build_spec.spl declared>=19 executed=19 passed=7 failed=12 dropped=0`
+- `test/unit/os/services/clock_service_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/os/services/clock_service_spec.spl declared>=12 executed=12 passed=11 failed=1 dropped=0`
+- `test/unit/os/services/devfs_service_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/os/services/devfs_service_spec.spl declared>=12 executed=12 passed=11 failed=1 dropped=0`
+- `test/unit/os/services/ds_service_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/os/services/ds_service_spec.spl declared>=15 executed=15 passed=13 failed=2 dropped=0`
+- `test/unit/os/services/llm/widget_eval_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/os/services/llm/widget_eval_spec.spl declared>=42 executed=42 passed=0 failed=42 dropped=0`
+- `test/unit/os/services/pipefs_service_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/os/services/pipefs_service_spec.spl declared>=16 executed=16 passed=15 failed=1 dropped=0`
+- `test/unit/os/services/pm_service/pm_service_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/os/services/pm_service/pm_service_spec.spl declared>=17 executed=17 passed=13 failed=4 dropped=0`
+- `test/unit/os/services/procfs_service_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/os/services/procfs_service_spec.spl declared>=11 executed=11 passed=10 failed=1 dropped=0`
+- `test/unit/os/services/vfs/nvme_filesystem_mounts_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/os/services/vfs/nvme_filesystem_mounts_spec.spl declared>=18 executed=18 passed=17 failed=1 dropped=0`
+- `test/unit/os/services/vfs/vfs_boot_nvme_lease_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/os/services/vfs/vfs_boot_nvme_lease_spec.spl declared>=27 executed=27 passed=22 failed=5 dropped=0`
+- `test/unit/os/services/vfs/vfs_pure_fat_production_guard_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/os/services/vfs/vfs_pure_fat_production_guard_spec.spl declared>=3 executed=3 passed=2 failed=1 dropped=0`
+- `test/unit/os/services/wm/wm_service_metadata_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/os/services/wm/wm_service_metadata_spec.spl declared>=5 executed=5 passed=0 failed=5 dropped=0`
+- `test/unit/os/simpleos_board_hardening_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/os/simpleos_board_hardening_spec.spl declared>=4 executed=4 passed=2 failed=2 dropped=0`
+- `test/unit/os/tls13/cert_verify_ecdsa_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/os/tls13/cert_verify_ecdsa_spec.spl declared>=8 executed=8 passed=4 failed=4 dropped=0`
+- `test/unit/rtl/encode_riscv_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/rtl/encode_riscv_spec.spl declared>=26 executed=26 passed=25 failed=1 dropped=0`
+- `test/unit/sffi/sffi_public_api_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/sffi/sffi_public_api_spec.spl declared>=12 executed=12 passed=7 failed=5 dropped=0`
+- `test/unit/std/mock_phase4_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/std/mock_phase4_spec.spl declared>=24 executed=24 passed=21 failed=3 dropped=0`
+- `test/unit/std/mock_simple_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/std/mock_simple_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- `test/unit/std/perf_optimization_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/std/perf_optimization_spec.spl declared>=51 executed=51 passed=33 failed=18 dropped=0`
+- `test/unit/test_runner/mode_filter_spec.spl` rc=0 vacuous_hits=0
+  - `SPEC FILE VERDICT: test/unit/test_runner/mode_filter_spec.spl declared>=14 executed=14 passed=11 failed=3 dropped=0`

@@ -1,0 +1,166 @@
+"""
+# LLM Profile -> Spawn Rights Adapter Specification (Production Harden, lane INT-3)
+
+**Feature IDs:** #OS-HARDEN-INT3-LLM-SPAWN-ADAPTER
+**Category:** Runtime / Security
+**Difficulty:** 3/5
+**Status:** Implemented
+**Plan:** doc/03_plan/agent_tasks/simpleos_production_harden_parallel.md (lane INT-3)
+**Design:** doc/01_research/domain/simpleos_production_host_master_plan.md (§5.4, §17)
+
+## Overview
+
+Master plan §5.4 + §17: an LLM process's spawn-time capabilities must be its
+PROFILE's effective rights INTERSECTED with the parent's delegable rights and
+the executable ceiling — deny always wins, never amplified. This spec proves
+`src/os/security/llm_profiles/profile_spawn_adapter.spl` (the pure adapter
+bridging `profile_registry.spl`'s LLM_RIGHT_* policy rights and
+`spawn_authority.spl`'s CAP_RIGHT_* spawn rights) honors that law with
+concrete bit-value oracles:
+
+  - the final spawn rights are a subset of the parent's delegable rights, of
+    the executable ceiling, AND of the profile's own mapped rights at once
+    (triple attenuation);
+  - a right the profile lacks never appears in the result even when both the
+    parent and the executable hold it;
+  - an LLM_RIGHT_* bit with no kernel-capability analogue (e.g. NET,
+    PROCESS_SPAWN) contributes NO spawn right — fail-closed on unmapped bits;
+  - the built-in `offline` profile produces the most restrictive spawn rights
+    and `system-administration` the broadest, and both remain clamped by a
+    narrow `parent_delegable`.
+"""
+
+use std.spec.{describe, it, expect, step, assert_true, assert_equal}
+use os.security.llm_profiles.profile_registry.{
+    LlmProfile, LLM_RIGHT_FS_READ, LLM_RIGHT_FS_WRITE, LLM_RIGHT_FS_EXEC,
+    LLM_RIGHT_NET, LLM_RIGHT_PROCESS_SPAWN, LLM_RIGHT_DEVICE,
+    LLM_RIGHT_NONE, LLM_RIGHT_ALL,
+    profile_offline, profile_system_administration
+}
+use os.kernel.types.capability_types.{
+    CAP_RIGHT_READ, CAP_RIGHT_WRITE, CAP_RIGHT_EXEC, CAP_RIGHT_MAP
+}
+use os.kernel.loader.spawn_authority.{spawn_rights_is_subset}
+use os.security.llm_profiles.profile_spawn_adapter.{
+    llm_profile_to_spawn_rights, llm_spawn_effective_rights, llm_spawn_rights_triple_attenuated
+}
+
+# ============================================================================
+# Fixtures
+# ============================================================================
+
+fn _profile(rights: i64) -> LlmProfile:
+    """A profile fixture where only `rights` varies — every other field is a
+    fixed, minimal default (the adapter under test never reads the list/
+    resource fields)."""
+    LlmProfile(
+        name: "fixture", version: 1, rights: rights,
+        fs_read_roots: [], fs_write_roots: [], fs_exec_roots: [],
+        net_hosts: [], secrets_labels: [],
+        max_cpu_pct: 100, max_mem_mb: 1024, max_wallclock_sec: 600, max_cost_cents: 100, max_tokens: 100000
+    )
+
+# ============================================================================
+# Group 1 — triple attenuation (subset of profile AND parent AND executable)
+# ============================================================================
+
+describe "llm_spawn_effective_rights: triple attenuation":
+    """The final spawn rights never exceed the profile's own mapped rights,
+    the parent's delegable rights, or the executable ceiling — all three at
+    once."""
+
+    it "effective rights are a subset of the profile's mapped rights, parent_delegable, and executable_ceiling":
+        step("Profile grants FS_READ+FS_WRITE+FS_EXEC+DEVICE -> mapped spawn rights READ|WRITE|EXEC|MAP = 71")
+        val profile = _profile(LLM_RIGHT_FS_READ | LLM_RIGHT_FS_WRITE | LLM_RIGHT_FS_EXEC | LLM_RIGHT_DEVICE)
+        val mapped = llm_profile_to_spawn_rights(profile)
+        expect(mapped).to_equal(71u32)
+        step("Parent only delegates READ|WRITE (3); executable ceiling only allows READ|MAP (65)")
+        val parent_delegable = CAP_RIGHT_READ | CAP_RIGHT_WRITE
+        val executable_ceiling = CAP_RIGHT_READ | CAP_RIGHT_MAP
+        expect(parent_delegable).to_equal(3u32)
+        expect(executable_ceiling).to_equal(65u32)
+        val eff = llm_spawn_effective_rights(profile, parent_delegable, executable_ceiling)
+        step("Only READ (1) survives all three intersections")
+        expect(eff).to_equal(1u32)
+        expect(spawn_rights_is_subset(eff, mapped)).to_equal(true)
+        expect(spawn_rights_is_subset(eff, parent_delegable)).to_equal(true)
+        expect(spawn_rights_is_subset(eff, executable_ceiling)).to_equal(true)
+
+    it "the triple-attenuation oracle holds for the same fixture":
+        val profile = _profile(LLM_RIGHT_FS_READ | LLM_RIGHT_FS_WRITE | LLM_RIGHT_FS_EXEC | LLM_RIGHT_DEVICE)
+        val parent_delegable = CAP_RIGHT_READ | CAP_RIGHT_WRITE
+        val executable_ceiling = CAP_RIGHT_READ | CAP_RIGHT_MAP
+        assert_true(llm_spawn_rights_triple_attenuated(profile, parent_delegable, executable_ceiling))
+
+# ============================================================================
+# Group 2 — a right the profile lacks never appears, even if parent+exec hold it
+# ============================================================================
+
+describe "llm_spawn_effective_rights: profile is the ceiling too":
+    """Even a fully-open parent and executable cannot hand the child a right
+    its own profile never granted."""
+
+    it "WRITE never appears when the profile only holds FS_READ, despite wide-open parent and executable":
+        val profile = _profile(LLM_RIGHT_FS_READ)
+        val wide_open = CAP_RIGHT_READ | CAP_RIGHT_WRITE | CAP_RIGHT_EXEC | CAP_RIGHT_MAP
+        val eff = llm_spawn_effective_rights(profile, wide_open, wide_open)
+        step("Effective rights equal exactly READ (1), never READ|WRITE|EXEC|MAP")
+        expect(eff).to_equal(1u32)
+        expect(eff & CAP_RIGHT_WRITE).to_equal(0u32)
+        expect(eff & CAP_RIGHT_EXEC).to_equal(0u32)
+        expect(eff & CAP_RIGHT_MAP).to_equal(0u32)
+        assert_true(llm_spawn_rights_triple_attenuated(profile, wide_open, wide_open))
+
+# ============================================================================
+# Group 3 — unmapped LLM rights fail closed
+# ============================================================================
+
+describe "llm_profile_to_spawn_rights: unmapped rights fail closed":
+    """LLM_RIGHT_NET and LLM_RIGHT_PROCESS_SPAWN have no CAP_RIGHT_* analogue
+    in the mapping table — they must contribute zero spawn rights, even though
+    they are real, non-zero bits in the LLM policy space."""
+
+    it "a NET-only profile maps to zero spawn rights":
+        val profile = _profile(LLM_RIGHT_NET)
+        expect(llm_profile_to_spawn_rights(profile)).to_equal(0u32)
+
+    it "a PROCESS_SPAWN-only profile maps to zero spawn rights":
+        val profile = _profile(LLM_RIGHT_PROCESS_SPAWN)
+        expect(llm_profile_to_spawn_rights(profile)).to_equal(0u32)
+
+    it "NET and PROCESS_SPAWN stay zero even through wide-open parent and executable ceilings":
+        val profile = _profile(LLM_RIGHT_NET | LLM_RIGHT_PROCESS_SPAWN)
+        val wide_open = CAP_RIGHT_READ | CAP_RIGHT_WRITE | CAP_RIGHT_EXEC | CAP_RIGHT_MAP
+        val eff = llm_spawn_effective_rights(profile, wide_open, wide_open)
+        expect(eff).to_equal(0u32)
+
+# ============================================================================
+# Group 4 — offline vs system-administration, both clamped by a narrow parent
+# ============================================================================
+
+describe "built-in profiles: offline is narrowest, system-administration is broadest, both clamped":
+    """The two extremes of the §17 built-in profile list produce the expected
+    ordering in spawn-rights space, and neither escapes a narrow
+    parent_delegable."""
+
+    it "offline maps to zero spawn rights (LLM_RIGHT_NONE grants nothing)":
+        expect(profile_offline().rights).to_equal(LLM_RIGHT_NONE)
+        expect(llm_profile_to_spawn_rights(profile_offline())).to_equal(0u32)
+
+    it "system-administration maps to the broadest defined spawn rights (READ|WRITE|EXEC|MAP = 71)":
+        expect(profile_system_administration().rights).to_equal(LLM_RIGHT_ALL)
+        expect(llm_profile_to_spawn_rights(profile_system_administration())).to_equal(71u32)
+
+    it "a narrow parent_delegable clamps system-administration down to the parent's own rights, while offline stays at zero":
+        step("Narrow parent only delegates READ|WRITE (3); executable ceiling matches the profile's full mapped rights (71)")
+        val parent_delegable = CAP_RIGHT_READ | CAP_RIGHT_WRITE
+        val executable_ceiling = 71u32
+        val eff_offline = llm_spawn_effective_rights(profile_offline(), parent_delegable, executable_ceiling)
+        val eff_sysadmin = llm_spawn_effective_rights(profile_system_administration(), parent_delegable, executable_ceiling)
+        step("offline stays at zero; system-administration is clamped down to exactly the narrow parent (3), not its own 71")
+        expect(eff_offline).to_equal(0u32)
+        expect(eff_sysadmin).to_equal(3u32)
+        expect(eff_sysadmin).to_be_greater_than(eff_offline)
+        expect(spawn_rights_is_subset(eff_sysadmin, parent_delegable)).to_equal(true)
+        assert_true(llm_spawn_rights_triple_attenuated(profile_offline(), parent_delegable, executable_ceiling))
+        assert_true(llm_spawn_rights_triple_attenuated(profile_system_administration(), parent_delegable, executable_ceiling))

@@ -1,0 +1,73 @@
+# @tag: unit, compiler, hir, native-safe
+
+use std.spec.{describe, it, expect}
+use compiler.hir.hir_lowering.module_surface.{
+    ModuleSurface,
+    ModuleSurfaceBuilder,
+    ModuleSurfaceExportOriginIndex,
+    module_surface_export_origin_index_empty,
+    module_surface_export_origin_index_lookup,
+    module_surface_export_origin_index_put,
+    module_surface_index_by_name,
+    module_surfaces_by_name_from_parts
+}
+
+extern fn rt_heap_array_capacity_bytes() -> i64
+
+describe "module surface aligned scalar index":
+    it "preserves discovery order and deduplicates a same-target alias":
+        var builder = ModuleSurfaceBuilder.new()
+        expect(builder.add_indexed_name("first", 0).is_ok()).to_equal(true)
+        expect(builder.add_indexed_name("second", 1).is_ok()).to_equal(true)
+        expect(builder.add_indexed_name("second_alias", 1).is_ok()).to_equal(true)
+        expect(builder.add_indexed_name("second_alias", 1).is_ok()).to_equal(true)
+        builder.surfaces = [ModuleSurface.empty("first"), ModuleSurface.empty("second")]
+        val result = builder.finish()
+        expect(result.is_ok()).to_equal(true)
+        if result.is_ok():
+            val surfaces = result.unwrap()
+            expect(surfaces.ordered_names).to_equal(["first", "second", "second_alias"])
+            expect(surfaces.ordered_indices).to_equal([0, 1, 1])
+
+    it "rejects an alias that changes its existing target":
+        var builder = ModuleSurfaceBuilder.new()
+        expect(builder.add_indexed_name("alias", 0).is_ok()).to_equal(true)
+        expect(builder.add_indexed_name("alias", 1).is_err()).to_equal(true)
+
+    it "fails closed for misaligned constructor data and preserves misses":
+        val mismatch = module_surfaces_by_name_from_parts(
+            [ModuleSurface.empty("owner")], {"owner": 0}, ["owner"], [])
+        expect(mismatch.is_err()).to_equal(true)
+        val negative = module_surfaces_by_name_from_parts(
+            [ModuleSurface.empty("owner")], {"owner": 0}, ["owner"], [-1])
+        expect(negative.is_err()).to_equal(true)
+        val out_of_range = module_surfaces_by_name_from_parts(
+            [ModuleSurface.empty("owner")], {"owner": 1}, ["owner"], [1])
+        expect(out_of_range.is_err()).to_equal(true)
+        val conflicting = module_surfaces_by_name_from_parts(
+            [ModuleSurface.empty("owner")], {"owner": 1}, ["owner"], [0])
+        expect(conflicting.is_err()).to_equal(true)
+        expect(module_surface_index_by_name(["owner"], [0], "missing")).to_equal(-1)
+
+    it "uses an explicit index receiver for native-safe origin writes and reads":
+        val index = module_surface_export_origin_index_empty()
+        val write = module_surface_export_origin_index_put(
+            index, "answer", "provider", "answer", "explicit")
+        expect(write.is_ok()).to_equal(true)
+        val hit = module_surface_export_origin_index_lookup(index, "answer")
+        expect(hit.found).to_equal(true)
+        expect(hit.owner_module).to_equal("provider")
+        expect(hit.source_name).to_equal("answer")
+        val miss = module_surface_export_origin_index_lookup(index, "missing")
+        expect(miss.found).to_equal(false)
+
+    it "does not allocate array capacity during repeated scalar lookup":
+        val names = ["owner"]
+        val indices = [0]
+        val before = rt_heap_array_capacity_bytes()
+        var iteration = 0
+        while iteration < 1000:
+            expect(module_surface_index_by_name(names, indices, "owner")).to_equal(0)
+            iteration = iteration + 1
+        val after = rt_heap_array_capacity_bytes()
+        expect(after).to_equal(before)

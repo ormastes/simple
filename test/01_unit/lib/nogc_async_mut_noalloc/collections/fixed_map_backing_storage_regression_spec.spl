@@ -1,0 +1,66 @@
+# Regression spec for
+# doc/08_tracking/bug/noalloc_collections_backed_by_growable_heap_array_2026-08-07.md
+#
+# FixedMap previously stored `entries: [FixedMapEntry]` and constructed a
+# brand-new `FixedMapEntry(...)` object on every put() insert, every put()
+# update, and (up to 3x) every remove() — real per-operation heap
+# allocation, the same class of defect fixed_array.spl/fixed_stack.spl had,
+# just expressed as object churn instead of array growth.
+#
+# Fix: refactored to parallel primitive arrays (keys: [i64], values: [i64],
+# occupied: [bool]) — the pattern FixedSet already used successfully. No
+# entry object is ever constructed after new(); put()/remove() write by
+# plain index assignment.
+#
+# NOTE: mutating a struct field through an array index in place
+# (`self.entries[idx].key = k`) was tried first and rejected by the
+# interpreter with "invalid assignment: complex indexed field receiver is
+# not supported" — reproduced directly and via the real, shipped
+# PoolLinkedList.push_back (linked_list.spl), which fails identically when
+# actually exercised despite its own spec being text-scan-only. That path
+# is not viable without an interpreter change; the parallel-array
+# refactor sidesteps it entirely using plain (non-field) index assignment,
+# which fixed_array.spl/fixed_stack.spl already prove works.
+
+use std.nogc_async_mut_noalloc.collections.fixed_map.{FixedMap}
+
+describe "FixedMap backing storage and behavior after the parallel-array refactor":
+    """Proves put()/remove() no longer allocate a new entry object per
+    operation, and that map behavior (put/get/contains/remove) is
+    unchanged."""
+
+    it "reserves backing arrays once at construction and never grows or shrinks them":
+        val map = FixedMap.new(8)
+        expect(map.keys.len()).to_equal(8)
+        expect(map.values.len()).to_equal(8)
+        expect(map.occupied.len()).to_equal(8)
+
+        map.put(1, 100)
+        map.put(2, 200)
+        map.remove(1)
+        expect(map.keys.len()).to_equal(8)
+        expect(map.values.len()).to_equal(8)
+        expect(map.occupied.len()).to_equal(8)
+
+    it "still stores, retrieves, updates, and removes correctly":
+        val map = FixedMap.new(16)
+        map.put(42, 100)
+        map.put(7, 200)
+        expect(map.get(42)).to_equal(100)
+        expect(map.get(7)).to_equal(200)
+
+        map.put(42, 999)
+        expect(map.get(42)).to_equal(999)
+        expect(map.size()).to_equal(2)
+
+        assert_true(map.contains(42))
+        assert_true(map.remove(42))
+        expect(map.contains(42)).to_equal(false)
+        expect(map.get(7)).to_equal(200)
+        expect(map.size()).to_equal(1)
+
+    it "still rejects put past capacity (unaffected by this fix, checked for completeness)":
+        val map = FixedMap.new(2)
+        assert_true(map.put(1, 10))
+        assert_true(map.put(2, 20))
+        expect(map.put(3, 30)).to_equal(false)

@@ -1,0 +1,147 @@
+# Tier Router Specification
+#
+# Exercises the C1 exact-key tiered cache lookup (L1 workspace -> L2 machine),
+# read-through backfill, conflict detection, closure rejection, and
+# corrupt-blob handling.
+#
+# **Feature IDs:** #CACHEV2-001 to #CACHEV2-006
+
+use compiler.driver.cache.cas_store.{
+    ResultManifest, cas_open, cas_put, cas_get, cas_has,
+    result_manifest_put
+}
+use compiler.driver.cache.action_index.action_index.{CacheNamespace, action_index_put}
+use compiler.driver.cache.tier_router.tier_router.{result_manifest_digest}
+use compiler.driver.cache.tier_router.tier_router.{
+    TierRouter, TierLookupResult, TierPublishResult,
+    tier_router_open, tier_router_l1_root, tier_router_l2_root,
+    tier_router_lookup, tier_router_publish, tier_lookup_result_manifest
+}
+
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+
+fn fresh_workspace(tag: text) -> text:
+    val root = "/tmp/tier_router_spec_{tag}_{rt_getpid()}_{rt_time_now_unix_micros()}"
+    rt_dir_create_all(root)
+    root
+
+fn make_manifest(action_digest: text, artifact_digests: [text]) -> ResultManifest:
+    ResultManifest(
+        action_digest: action_digest,
+        result_kind: "interpreter_module",
+        artifact_digests: artifact_digests,
+        output_fingerprint: "fp-{action_digest}",
+        dependency_manifest: "dep-{action_digest}",
+        producer_schema: 2
+    )
+
+describe "TierRouter":
+    it "misses on an unknown action digest":
+        val ws = fresh_workspace("miss")
+        val tr = tier_router_open(ws)
+        val result = tier_router_lookup(tr, CacheNamespace.WorkspaceLocal, "no-such-digest")
+        match result:
+            case TierLookupResult.Miss:
+                assert_true(true)
+            case _:
+                assert_true(false)
+
+    it "hits L1 after a publish, with the same content":
+        val ws = fresh_workspace("l1hit")
+        val tr = tier_router_open(ws)
+        val artifact = cas_put(tr.l1_root, "artifact-body-l1")
+        val m = make_manifest("action-l1", [artifact])
+        val published = tier_router_publish(tr, CacheNamespace.WorkspaceLocal, "action-l1", m)
+        match published:
+            case TierPublishResult.Published:
+                assert_true(true)
+            case _:
+                assert_true(false)
+        val result = tier_router_lookup(tr, CacheNamespace.WorkspaceLocal, "action-l1")
+        match result:
+            case TierLookupResult.HitL1(hit):
+                expect(hit.action_digest).to_equal("action-l1")
+                expect(hit.artifact_digests.len()).to_equal(1)
+            case _:
+                assert_true(false)
+
+    it "hits L2 and backfills into L1":
+        val ws = fresh_workspace("l2hit")
+        val tr = tier_router_open(ws)
+        # Publish directly into L2 (simulating a prior machine-tier build)
+        # by constructing a second router pointed at the same L2 root but a
+        # DIFFERENT L1, so the L1 side starts genuinely empty.
+        val artifact = cas_put(tr.l2_root, "artifact-body-l2")
+        val m = make_manifest("action-l2", [artifact])
+        # Manually publish into L2's action index + manifest store the same
+        # way tier_router_publish does for L1: reuse cas_store directly.
+        val put_ok = result_manifest_put(tr.l2_root, "action-l2", m)
+        expect(put_ok).to_equal(true)
+        action_index_put(tr.l2_root, CacheNamespace.WorkspaceLocal, "action-l2", result_manifest_digest(m))
+        expect(cas_has(tr.l1_root, artifact)).to_equal(false)
+        val result = tier_router_lookup(tr, CacheNamespace.WorkspaceLocal, "action-l2")
+        match result:
+            case TierLookupResult.HitL2Backfilled(hit):
+                expect(hit.action_digest).to_equal("action-l2")
+            case _:
+                assert_true(false)
+        expect(cas_has(tr.l1_root, artifact)).to_equal(true)
+        # Second lookup is now an L1 hit.
+        val result2 = tier_router_lookup(tr, CacheNamespace.WorkspaceLocal, "action-l2")
+        match result2:
+            case TierLookupResult.HitL1(hit2):
+                expect(hit2.action_digest).to_equal("action-l2")
+            case _:
+                assert_true(false)
+
+    it "rejects publish when the artifact closure is incomplete":
+        val ws = fresh_workspace("closure")
+        val tr = tier_router_open(ws)
+        # "missing-artifact" was never cas_put into L1.
+        val m = make_manifest("action-closure", ["missing-artifact"])
+        val result = tier_router_publish(tr, CacheNamespace.WorkspaceLocal, "action-closure", m)
+        match result:
+            case TierPublishResult.ClosureIncomplete:
+                assert_true(true)
+            case _:
+                assert_true(false)
+
+    it "detects a conflicting publish under the same action digest":
+        val ws = fresh_workspace("conflict")
+        val tr = tier_router_open(ws)
+        val a1 = cas_put(tr.l1_root, "artifact-one")
+        val a2 = cas_put(tr.l1_root, "artifact-two")
+        val m1 = make_manifest("action-conflict", [a1])
+        val first = tier_router_publish(tr, CacheNamespace.WorkspaceLocal, "action-conflict", m1)
+        match first:
+            case TierPublishResult.Published:
+                assert_true(true)
+            case _:
+                assert_true(false)
+        val m2 = make_manifest("action-conflict", [a2])
+        val second = tier_router_publish(tr, CacheNamespace.WorkspaceLocal, "action-conflict", m2)
+        match second:
+            case TierPublishResult.Conflict(existing, attempted):
+                assert_true(existing != attempted)
+            case _:
+                assert_true(false)
+
+    it "treats a corrupted L1 blob as a miss, never serving unverified bytes":
+        val ws = fresh_workspace("corrupt")
+        val tr = tier_router_open(ws)
+        val artifact = cas_put(tr.l1_root, "artifact-corruptible")
+        val m = make_manifest("action-corrupt", [artifact])
+        tier_router_publish(tr, CacheNamespace.WorkspaceLocal, "action-corrupt", m)
+        # Corrupt the underlying blob in place so its bytes no longer hash
+        # to the requested digest.
+        val blob_path = "{tr.l1_root}/cas/sha256/{artifact.substring(0, 2)}/{artifact.substring(2, artifact.len())}"
+        rt_file_write_text(blob_path, "TAMPERED")
+        val fetched = cas_get(tr.l1_root, artifact)
+        match fetched:
+            case Some(_):
+                assert_true(false)
+            case nil:
+                assert_true(true)

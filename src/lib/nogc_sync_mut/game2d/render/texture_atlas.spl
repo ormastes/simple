@@ -1,0 +1,167 @@
+# std.game2d.render.texture_atlas — 2D texture atlas (shelf-pack)
+#
+# Packs multiple sub-textures into a single logical atlas using a shelf/row
+# algorithm.  Coordinates are stored in pixel space; normalized UVs [0,1]
+# are computed on every `lookup` call so the atlas width/height can be
+# set once at construction and remain stable.
+#
+# This is the game2d-layer atlas (game2d Image/TextureId space).  It is
+# intentionally separate from `engine/render/texture_atlas3d.spl` which
+# lives in the 3D render pipeline and carries GPU upload machinery.
+#
+# Usage:
+#   var atlas = TextureAtlas2D.create(1024, 1024)
+#   val region = atlas.pack(my_texture_id, 64, 64)
+#   val uv = atlas.lookup(my_texture_id)
+#
+# ============================================================================
+# AtlasRegion — pixel AABB + normalised UV rect for one packed sub-texture
+# ============================================================================
+
+use std.common.engine.ids.{TextureId}
+use std.common.engine.rect.{Rect2}
+
+class AtlasRegion:
+    """Pixel-space bounding box and normalised UV coordinates for a packed
+    sub-texture region."""
+    texture_id: TextureId
+    # Pixel-space origin + extent inside the atlas bitmap
+    px_x: i64
+    px_y: i64
+    px_w: i64
+    px_h: i64
+    # Normalised UV [0, 1] — derived from atlas dimensions at pack time
+    uv_x: f64
+    uv_y: f64
+    uv_w: f64
+    uv_h: f64
+
+    static fn create(tid: TextureId, px_x: i64, px_y: i64, px_w: i64, px_h: i64, atlas_w: i64, atlas_h: i64) -> AtlasRegion:
+        val aw = atlas_w * 1.0
+        val ah = atlas_h * 1.0
+        AtlasRegion(
+            texture_id: tid,
+            px_x: px_x,
+            px_y: px_y,
+            px_w: px_w,
+            px_h: px_h,
+            uv_x: px_x * 1.0 / aw,
+            uv_y: px_y * 1.0 / ah,
+            uv_w: px_w * 1.0 / aw,
+            uv_h: px_h * 1.0 / ah
+        )
+
+    fn src_rect(self) -> Rect2:
+        """Pixel-space Rect2 suitable for DrawSprite src_rect."""
+        Rect2(
+            x: self.px_x * 1.0,
+            y: self.px_y * 1.0,
+            width: self.px_w * 1.0,
+            height: self.px_h * 1.0
+        )
+
+    fn uv_rect(self) -> Rect2:
+        """Normalised UV Rect2 (x,y = bottom-left origin, w/h = extent)."""
+        Rect2(
+            x: self.uv_x,
+            y: self.uv_y,
+            width: self.uv_w,
+            height: self.uv_h
+        )
+
+# ============================================================================
+# TextureAtlas2D — shelf-pack container
+# ============================================================================
+
+class TextureAtlas2D:
+    """Shelf-pack 2D texture atlas.
+
+    Regions are allocated left-to-right along a shelf row.  When the current
+    shelf is full a new shelf starts at `cursor_y + current shelf height`.
+    Regions are looked up by TextureId via a linear scan (suitable for
+    typical game2d atlas sizes of < 512 entries).
+    """
+    atlas_width: i64
+    atlas_height: i64
+    # Cursor pointing to the top-left of the next free slot in the current shelf
+    cursor_x: i64
+    cursor_y: i64
+    # Height of the tallest region placed on the current shelf
+    shelf_h: i64
+    regions: [AtlasRegion]
+    # 1-pixel border between packed regions to avoid UV bleeding
+    padding: i64
+
+    static fn create(width: i64, height: i64) -> TextureAtlas2D:
+        TextureAtlas2D(
+            atlas_width: width,
+            atlas_height: height,
+            cursor_x: 0,
+            cursor_y: 0,
+            shelf_h: 0,
+            regions: [],
+            padding: 1
+        )
+
+    fn pack(self, tid: TextureId, w: i64, h: i64) -> Result<AtlasRegion, text>:
+        """Reserve a `w × h` slot for `tid`.  Returns Err if no space remains
+        or if `tid` was already packed."""
+        # Reject duplicates
+        var i = 0
+        while i < self.regions.len():
+            val r = self.regions[i]
+            if r.texture_id.raw == tid.raw:
+                return Err("texture_atlas: duplicate texture_id " + text(tid.raw))
+            i = i + 1
+
+        val pw = w + self.padding
+        val ph = h + self.padding
+
+        # Advance to a new shelf if the slot does not fit horizontally
+        var x = self.cursor_x
+        var y = self.cursor_y
+        var sh = self.shelf_h
+        if x + pw > self.atlas_width:
+            y = y + sh + self.padding
+            x = 0
+            sh = 0
+
+        # Vertical overflow check
+        if y + ph > self.atlas_height:
+            return Err("texture_atlas: atlas full (no room for " + text(w) + "x" + text(h) + ")")
+
+        val region = AtlasRegion.create(tid, x, y, w, h, self.atlas_width, self.atlas_height)
+
+        # Advance cursor and update shelf height
+        self.cursor_x = x + pw
+        self.cursor_y = y
+        if ph > sh:
+            self.shelf_h = ph
+        else:
+            self.shelf_h = sh
+
+        self.regions = self.regions.push(region)
+        Ok(region)
+
+    fn lookup(self, tid: TextureId) -> Option<AtlasRegion>:
+        """Return the AtlasRegion for `tid`, or None if not packed."""
+        var i = 0
+        while i < self.regions.len():
+            val r = self.regions[i]
+            if r.texture_id.raw == tid.raw:
+                return Some(r)
+            i = i + 1
+        None
+
+    fn region_count(self) -> i64:
+        self.regions.len()
+
+    fn used_area_px(self) -> i64:
+        """Sum of packed pixel areas — useful for packing efficiency metrics."""
+        var total: i64 = 0
+        var i = 0
+        while i < self.regions.len():
+            val r = self.regions[i]
+            total = total + r.px_w * r.px_h
+            i = i + 1
+        total

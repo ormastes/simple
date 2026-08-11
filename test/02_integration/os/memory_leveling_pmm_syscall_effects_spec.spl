@@ -1,0 +1,61 @@
+use std.spec.*
+use os.kernel.boot.mmio.{mmio_reset_for_test}
+use os.kernel.types.memory_types.{PhysAddr, VirtAddr, VmFlags, VM_PRESENT, VM_WRITABLE, VM_USER, VM_NO_EXECUTE}
+use os.kernel.memory.pmm.{pmm_init_identity_range, pmm_get_manager, pmm_alloc_page_raw, pmm_free_page_raw, pmm_alloc_pages, pmm_free_page_range, pmm_free_pages}
+use os.kernel.memory.vmm.{vmm_init_sparse_for_test, vmm_map_page, vmm_unmap_page, vmm_translate, vmm_set_map_failure_after_for_test, vmm_clear_map_failure_for_test}
+use os.kernel.memory.memory_owned_pages.{memory_map_owned_pages, memory_release_owned_pages}
+use os.kernel.memory.memory_dma_pages.{memory_dma_free_partial_pages}
+
+describe "memory-leveling PMM and syscall ownership effects":
+
+    it "allocates and releases a proven contiguous physical range":
+        mmio_reset_for_test()
+        expect(pmm_init_identity_range(64 * 1024 * 1024, 1024 * 1024, 2 * 1024 * 1024)).to_equal(true)
+        val before = pmm_free_pages()
+        val base = pmm_alloc_pages(4).unwrap()
+        expect((base.addr % 4096)).to_equal(0)
+        expect(pmm_free_pages()).to_equal(before - 4)
+        pmm_free_page_range(base, 4)
+        expect(pmm_free_pages()).to_equal(before)
+
+    it "rolls back partial mmap and releases every unmapped frame":
+        mmio_reset_for_test()
+        expect(pmm_init_identity_range(64 * 1024 * 1024, 1024 * 1024, 2 * 1024 * 1024)).to_equal(true)
+        expect(vmm_init_sparse_for_test(pmm_get_manager(), 0)).to_equal(true)
+        val flags = VmFlags(bits: VM_PRESENT | VM_WRITABLE | VM_USER | VM_NO_EXECUTE)
+        val base_addr: u64 = 0x60000000
+
+        # Warm the page-table path so the free-page oracle measures leaf frames.
+        val warm_phys = pmm_alloc_page_raw()
+        expect(vmm_map_page(VirtAddr(addr: base_addr), PhysAddr(addr: warm_phys), flags)).to_equal(true)
+        expect(vmm_unmap_page(VirtAddr(addr: base_addr))).to_equal(true)
+        pmm_free_page_raw(warm_phys)
+        val before = pmm_free_pages()
+
+        vmm_set_map_failure_after_for_test(1)
+        expect(memory_map_owned_pages(base_addr, 2, flags)).to_equal(false)
+        vmm_clear_map_failure_for_test()
+        expect(pmm_free_pages()).to_equal(before)
+
+        expect(memory_map_owned_pages(base_addr, 2, flags)).to_equal(true)
+        expect(pmm_free_pages()).to_equal(before - 2)
+        memory_release_owned_pages(base_addr, 2)
+        expect(pmm_free_pages()).to_equal(before)
+
+    it "preserves a colliding mapping while cleaning a partial DMA map":
+        mmio_reset_for_test()
+        expect(pmm_init_identity_range(64 * 1024 * 1024, 1024 * 1024, 2 * 1024 * 1024)).to_equal(true)
+        expect(vmm_init_sparse_for_test(pmm_get_manager(), 0)).to_equal(true)
+        val flags = VmFlags(bits: VM_PRESENT | VM_WRITABLE | VM_USER | VM_NO_EXECUTE)
+        val base_addr: u64 = 0x61000000
+        val dma_pages = pmm_alloc_pages(2).unwrap()
+        val unrelated = pmm_alloc_page_raw()
+        expect(vmm_map_page(VirtAddr(addr: base_addr), dma_pages, flags)).to_equal(true)
+        expect(vmm_map_page(VirtAddr(addr: base_addr + 4096), PhysAddr(addr: unrelated), flags)).to_equal(true)
+
+        memory_dma_free_partial_pages(base_addr, dma_pages.addr, 1, 2, 4096)
+
+        expect(vmm_translate(VirtAddr(addr: base_addr))).to_be_nil()
+        expect(vmm_translate(VirtAddr(addr: base_addr + 4096)).unwrap().addr).to_equal(unrelated)
+        expect(vmm_unmap_page(VirtAddr(addr: base_addr + 4096))).to_equal(true)
+        pmm_free_page_raw(unrelated)

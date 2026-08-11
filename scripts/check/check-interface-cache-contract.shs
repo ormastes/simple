@@ -1,0 +1,75 @@
+#!/bin/sh
+set -eu
+
+SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"
+
+if [ ! -x "$SIMPLE_BINARY" ]; then
+    echo "simple_binary_exists=false"
+    echo "error=missing_simple_binary:$SIMPLE_BINARY"
+    exit 1
+fi
+
+TMPDIR="$(mktemp -d)"
+trap 'rm -rf "$TMPDIR"' EXIT INT TERM
+
+source_file="$TMPDIR/module.spl"
+valid_cache="$TMPDIR/module.interface.valid.sdn"
+stale_cache="$TMPDIR/module.interface.stale.sdn"
+body_cache="$TMPDIR/module.interface.body.sdn"
+
+cat > "$source_file" <<'EOF'
+pub fn exported_value() -> i64:
+    42
+
+fn private_body() -> text:
+    "FULL_BODY_SENTINEL"
+EOF
+
+file_mtime() {
+    if stat -f %m "$1" >/dev/null 2>&1; then
+        stat -f %m "$1"
+    else
+        stat -c %Y "$1"
+    fi
+}
+
+mtime="$(file_mtime "$source_file")"
+stale_mtime=$((mtime - 1))
+
+cat > "$valid_cache" <<EOF
+interface_cache {
+  version: 1
+  source_path: "$source_file"
+  source_mtime: "$mtime"
+  interface_only: true
+  exports: ["exported_value:fn()->i64"]
+}
+EOF
+
+cat > "$stale_cache" <<EOF
+interface_cache {
+  version: 1
+  source_path: "$source_file"
+  source_mtime: "$stale_mtime"
+  interface_only: true
+  exports: ["exported_value:fn()->i64"]
+}
+EOF
+
+cat > "$body_cache" <<EOF
+interface_cache {
+  version: 1
+  source_path: "$source_file"
+  source_mtime: "$mtime"
+  interface_only: false
+  exports: ["exported_value:fn()->i64"]
+  body_text: "FULL_BODY_SENTINEL"
+}
+EOF
+
+SIMPLE_INTERFACE_CACHE_SOURCE="$source_file" \
+SIMPLE_INTERFACE_CACHE_MTIME="$mtime" \
+SIMPLE_INTERFACE_CACHE_VALID="$valid_cache" \
+SIMPLE_INTERFACE_CACHE_STALE="$stale_cache" \
+SIMPLE_INTERFACE_CACHE_BODY="$body_cache" \
+    "$SIMPLE_BINARY" run scripts/check/validate_interface_cache_contract.spl --mode=interpreter

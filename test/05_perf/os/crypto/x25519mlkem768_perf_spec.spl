@@ -1,0 +1,294 @@
+# Native performance evidence for the hardened scalar oracle. Specialized
+# thresholds are activated only when the corresponding backend is promoted.
+# @cover src/os/crypto/x25519_mlkem768/hybrid.spl 98%
+
+use std.spipe.*
+use lib.common.crypto.x25519_mlkem768.contract.{
+    X25519MlKem768Backend, X25519MlKem768SelectionMode,
+    X25519MlKem768Config, X25519MlKem768Evidence,
+    x25519_mlkem768_default_config}
+use os.crypto.x25519_mlkem768.hybrid.{
+    x25519_mlkem768_combine, x25519_mlkem768_keygen,
+    x25519_mlkem768_encapsulate, x25519_mlkem768_decapsulate}
+use app.test.x25519mlkem768_candidate_batch_measurement.{
+    x25519_mlkem768_paired_elapsed_ns}
+use test.fixtures.crypto.x25519mlkem768.canonical_fixture.{
+    x25519_mlkem768_fixture_list32, x25519_mlkem768_fixture_bytes32}
+
+# Performance evidence must use the monotonic runtime source: wall time can
+# step backwards or forwards while a long hybrid operation is in flight.
+extern fn rt_time_now_micros() -> i64
+
+fn _scalar_config() -> X25519MlKem768Config:
+    var config = x25519_mlkem768_default_config()
+    config.requested_backend = X25519MlKem768Backend.ScalarCpu
+    config.selection_mode = X25519MlKem768SelectionMode.Require
+    config
+
+fn _scalar_evidence_valid(evidence: X25519MlKem768Evidence) -> bool:
+    (evidence.requested_backend == X25519MlKem768Backend.ScalarCpu and
+        evidence.selected_backend == X25519MlKem768Backend.ScalarCpu and
+        not evidence.fallback_used and
+        evidence.executor_identity == "pure-simple-scalar")
+
+fn _perf_lists_equal(a: list, b: list) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: i64 = 0
+    while i < a.len():
+        if a.get(i) != b.get(i):
+            return false
+        i = i + 1
+    true
+
+fn _scalar_exchange_once() -> bool:
+    val config = _scalar_config()
+    val client = match x25519_mlkem768_keygen(
+            config, x25519_mlkem768_fixture_bytes32(1),
+            x25519_mlkem768_fixture_list32(33),
+            x25519_mlkem768_fixture_list32(65)):
+        case Ok(value): value
+        case Err(_): return false
+    if not _scalar_evidence_valid(client.evidence):
+        return false
+    val server = match x25519_mlkem768_encapsulate(
+            config, client.client_key_share,
+            x25519_mlkem768_fixture_bytes32(97),
+            x25519_mlkem768_fixture_list32(129)):
+        case Ok(value): value
+        case Err(_): return false
+    if not _scalar_evidence_valid(server.evidence):
+        return false
+    val recovered = match x25519_mlkem768_decapsulate(
+            config, server.server_key_share, client.x25519_private_key,
+            client.decapsulation_key):
+        case Ok(value): value
+        case Err(_): return false
+    (_scalar_evidence_valid(recovered.evidence) and
+        _perf_lists_equal(server.shared_secret, recovered.shared_secret))
+
+fn _sorted(values: list) -> list:
+    var out: list = []
+    var i: i64 = 0
+    while i < values.len():
+        out.push(values.get(i))
+        i = i + 1
+    i = 0
+    while i < out.len():
+        var least = i
+        var j = i + 1
+        while j < out.len():
+            if out.get(j) < out.get(least):
+                least = j
+            j = j + 1
+        val tmp = out.get(i)
+        out[i] = out.get(least)
+        out[least] = tmp
+        i = i + 1
+    out
+
+fn _percentile(values: list, percentile: i64) -> i64:
+    val ordered = _sorted(values)
+    ordered.get((ordered.len() * percentile + 99) / 100 - 1)
+
+fn _p95(values: list) -> i64:
+    _percentile(values, 95)
+
+fn _valid_samples(samples: list) -> bool:
+    if samples.len() < 30:
+        return false
+    var i: i64 = 0
+    while i < samples.len():
+        if samples.get(i) <= 0:
+            return false
+        i = i + 1
+    true
+
+fn check_x25519_mlkem768_perf_budget(samples: list) -> bool:
+    _valid_samples(samples)
+
+fn _scalar_regression_within_five_percent(baseline_us: i64, current_us: i64) -> bool:
+    baseline_us > 0 and current_us > 0 and current_us * 100 <= baseline_us * 105
+
+fn _simd_speedup_at_least_one_point_five(scalar_us: i64, simd_us: i64) -> bool:
+    scalar_us > 0 and simd_us > 0 and simd_us * 3 <= scalar_us * 2
+
+fn _gpu_speedup_at_least_one_point_two_five(scalar_us: i64, gpu_us: i64) -> bool:
+    scalar_us > 0 and gpu_us > 0 and gpu_us * 5 <= scalar_us * 4
+
+describe "X25519MLKEM768 hardened scalar performance baseline":
+    it "should NFR-008 force fail-closed scalar measurement selection":
+        step("Pin the baseline to ScalarCpu Require before timing")
+        val config = _scalar_config()
+        expect(config.requested_backend).to_equal(
+            X25519MlKem768Backend.ScalarCpu)
+        expect(config.selection_mode).to_equal(
+            X25519MlKem768SelectionMode.Require)
+
+    it "should NFR-002 calibrates sample-count zero-timing and percentile gates":
+        step("Calibrate the minimum sample and percentile admission rules")
+        var samples: list = []
+        var i: i64 = 0
+        while i < 30:
+            samples.push(i + 1)
+            i = i + 1
+        expect(check_x25519_mlkem768_perf_budget(samples)).to_be(true)
+        expect(_percentile(samples, 50)).to_equal(15)
+        expect(_percentile(samples, 95)).to_equal(29)
+        expect(_percentile(samples, 99)).to_equal(30)
+        expect(check_x25519_mlkem768_perf_budget([1])).to_equal(false)
+        samples[29] = 0
+        expect(check_x25519_mlkem768_perf_budget(samples)).to_equal(false)
+
+    it "should NFR-008 NFR-009 NFR-010 enforce exact promotion boundaries":
+        step("Check scalar SIMD and GPU promotion thresholds at their boundaries")
+        expect(_scalar_regression_within_five_percent(100, 105)).to_be(true)
+        expect(_scalar_regression_within_five_percent(100, 106)).to_equal(false)
+        expect(_scalar_regression_within_five_percent(0, 1)).to_equal(false)
+        expect(_simd_speedup_at_least_one_point_five(150, 100)).to_be(true)
+        expect(_simd_speedup_at_least_one_point_five(149, 100)).to_equal(false)
+        expect(_simd_speedup_at_least_one_point_five(150, 0)).to_equal(false)
+        expect(_gpu_speedup_at_least_one_point_two_five(125, 100)).to_be(true)
+        expect(_gpu_speedup_at_least_one_point_two_five(124, 100)).to_equal(false)
+        expect(_gpu_speedup_at_least_one_point_two_five(125, 0)).to_equal(false)
+
+    it "should NFR-008 account only positive candidate monotonic intervals":
+        step("Check the paired full-exchange timing boundary")
+        val elapsed = match x25519_mlkem768_paired_elapsed_ns(100, 175):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+        expect(elapsed).to_equal(75)
+        expect(x25519_mlkem768_paired_elapsed_ns(100, 100).is_err()).to_be(true)
+        expect(x25519_mlkem768_paired_elapsed_ns(101, 100).is_err()).to_be(true)
+
+    slow_it "should NFR-008 NFR-011 records cold scalar first-use exchange":
+        step("Measure cold full-hybrid first use before any warm crypto sample")
+        val started = rt_time_now_micros()
+        expect(_scalar_exchange_once()).to_be(true)
+        val elapsed = rt_time_now_micros() - started
+        expect(elapsed).to_be_greater_than(0)
+        print "x25519mlkem768 scalar cold_exchange_first_use_us value={elapsed}"
+
+    slow_it "should NFR-008 NFR-011 records full-hybrid keygen encapsulate and decapsulate":
+        step("Measure complete hybrid facade operations")
+        val config = _scalar_config()
+        val x25519_client_private = x25519_mlkem768_fixture_bytes32(1)
+        val d = x25519_mlkem768_fixture_list32(1)
+        val z = x25519_mlkem768_fixture_list32(33)
+        val m = x25519_mlkem768_fixture_list32(65)
+        val x25519_server_private = x25519_mlkem768_fixture_bytes32(97)
+        var warm: i64 = 0
+        while warm < 2:
+            match x25519_mlkem768_keygen(
+                    config, x25519_client_private, d, z):
+                case Ok(_): ()
+                case Err(reason): fail(reason)
+            warm = warm + 1
+        var keygen_samples: list = []
+        var i: i64 = 0
+        while i < 30:
+            val started = rt_time_now_micros()
+            match x25519_mlkem768_keygen(
+                    config, x25519_client_private, d, z):
+                case Ok(_): ()
+                case Err(reason): fail(reason)
+            keygen_samples.push(rt_time_now_micros() - started)
+            i = i + 1
+        val client = match x25519_mlkem768_keygen(
+                config, x25519_client_private, d, z):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+        warm = 0
+        while warm < 2:
+            match x25519_mlkem768_encapsulate(
+                    config, client.client_key_share,
+                    x25519_server_private, m):
+                case Ok(_): ()
+                case Err(reason): fail(reason)
+            warm = warm + 1
+        var encaps_samples: list = []
+        i = 0
+        while i < 30:
+            val started = rt_time_now_micros()
+            match x25519_mlkem768_encapsulate(
+                    config, client.client_key_share,
+                    x25519_server_private, m):
+                case Ok(_): ()
+                case Err(reason): fail(reason)
+            encaps_samples.push(rt_time_now_micros() - started)
+            i = i + 1
+        val server = match x25519_mlkem768_encapsulate(
+                config, client.client_key_share,
+                x25519_server_private, m):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+        warm = 0
+        while warm < 2:
+            match x25519_mlkem768_decapsulate(
+                    config, server.server_key_share,
+                    client.x25519_private_key, client.decapsulation_key):
+                case Ok(_): ()
+                case Err(reason): fail(reason)
+            warm = warm + 1
+        var decaps_samples: list = []
+        i = 0
+        while i < 30:
+            val started = rt_time_now_micros()
+            match x25519_mlkem768_decapsulate(
+                    config, server.server_key_share,
+                    client.x25519_private_key, client.decapsulation_key):
+                case Ok(_): ()
+                case Err(reason): fail(reason)
+            decaps_samples.push(rt_time_now_micros() - started)
+            i = i + 1
+        expect(check_x25519_mlkem768_perf_budget(keygen_samples)).to_be(true)
+        expect(check_x25519_mlkem768_perf_budget(encaps_samples)).to_be(true)
+        expect(check_x25519_mlkem768_perf_budget(decaps_samples)).to_be(true)
+        print "x25519mlkem768 scalar keygen_us p50={_percentile(keygen_samples, 50)} p95={_p95(keygen_samples)} p99={_percentile(keygen_samples, 99)} ops_per_s={1000000 / _percentile(keygen_samples, 50)}"
+        print "x25519mlkem768 scalar encaps_us p50={_percentile(encaps_samples, 50)} p95={_p95(encaps_samples)} p99={_percentile(encaps_samples, 99)} ops_per_s={1000000 / _percentile(encaps_samples, 50)}"
+        print "x25519mlkem768 scalar decaps_us p50={_percentile(decaps_samples, 50)} p95={_p95(decaps_samples)} p99={_percentile(decaps_samples, 99)} ops_per_s={1000000 / _percentile(decaps_samples, 50)}"
+
+    slow_it "should NFR-011 records batched hybrid-combine percentiles and throughput":
+        step("Measure the backend performance budget")
+        var warm: i64 = 0
+        while warm < 2:
+            match x25519_mlkem768_combine(
+                    x25519_mlkem768_fixture_list32(97),
+                    x25519_mlkem768_fixture_bytes32(129)):
+                case Ok(_): ()
+                case Err(reason): fail(reason)
+            warm = warm + 1
+        var samples: list = []
+        var sample: i64 = 0
+        while sample < 30:
+            val started = rt_time_now_micros()
+            var i: i64 = 0
+            while i < 1024:
+                match x25519_mlkem768_combine(
+                        x25519_mlkem768_fixture_list32(97),
+                        x25519_mlkem768_fixture_bytes32(129)):
+                    case Ok(_): ()
+                    case Err(reason): fail(reason)
+                i = i + 1
+            samples.push(rt_time_now_micros() - started)
+            sample = sample + 1
+        expect(check_x25519_mlkem768_perf_budget(samples)).to_be(true)
+        print "x25519mlkem768 scalar combine_batch1024_us p50={_percentile(samples, 50)} p95={_p95(samples)} p99={_percentile(samples, 99)} ops_per_s={1024000000 / _percentile(samples, 50)}"
+
+    slow_it "should NFR-008 NFR-011 records complete scalar hybrid exchange latency":
+        step("Measure the backend performance budget")
+        var warm: i64 = 0
+        while warm < 2:
+            expect(_scalar_exchange_once()).to_be(true)
+            warm = warm + 1
+        var samples: list = []
+        var i: i64 = 0
+        while i < 30:
+            val started = rt_time_now_micros()
+            val completed = _scalar_exchange_once()
+            val elapsed = rt_time_now_micros() - started
+            expect(completed).to_be(true)
+            samples.push(elapsed)
+            i = i + 1
+        expect(check_x25519_mlkem768_perf_budget(samples)).to_be(true)
+        print "x25519mlkem768 scalar exchange_us p50={_percentile(samples, 50)} p95={_p95(samples)} p99={_percentile(samples, 99)} ops_per_s={1000000 / _percentile(samples, 50)}"

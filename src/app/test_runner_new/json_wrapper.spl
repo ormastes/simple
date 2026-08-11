@@ -1,0 +1,103 @@
+# JSON-mode subprocess boundary for the pure-Simple test runner.
+
+use app.io.process_ops.{process_run_bounded}
+use app.io.cli_ops.{cli_current_exe_path}
+use app.io.env_ops.{env_get, env_set}
+use std.nogc_sync_mut.io.stderr_ops.{stderr_write, stderr_flush}
+use std.sffi.cli.{cli_get_args}
+use common.text.{escape_json}
+use std.common.json.parser.{json_parse}
+
+val TEST_JSON_WORKER_ARG = "--test-json-worker"
+val TEST_JSON_TIMEOUT_MS = 28800000
+val TEST_JSON_OUTPUT_BYTES = 4194304
+
+fn test_json_worker_requested(args: [text]) -> bool:
+    args.contains(TEST_JSON_WORKER_ARG)
+
+fn test_json_requested(args: [text]) -> bool:
+    var i = 0
+    while i < args.len():
+        if args[i] == "--format" and i + 1 < args.len() and args[i + 1] == "json":
+            return true
+        i = i + 1
+    false
+
+fn _test_json_cli_entry_script(arg: text) -> bool:
+    arg == "src/app/cli/main.spl" or arg.ends_with("/app/cli/main.spl") or
+    arg == "src/app/cli/_CliMain/main_and_help.spl" or
+        arg == "app/cli/_CliMain/main_and_help.spl" or
+        arg.ends_with("/app/cli/_CliMain/main_and_help.spl")
+
+fn _test_json_worker_args(test_args: [text]) -> [text]:
+    val raw_args = cli_get_args()
+    if raw_args != nil:
+        for arg in raw_args:
+            if _test_json_cli_entry_script(arg):
+                return ["run", "src/app/test_runner_new/main.spl", TEST_JSON_WORKER_ARG] + test_args
+    ["test", TEST_JSON_WORKER_ARG] + test_args
+
+fn _test_json_last_nonempty_line(output: text) -> (text, i64):
+    val lines = output.split("\n")
+    var i = lines.len() - 1
+    while i >= 0:
+        val line = lines[i].trim()
+        if line != "":
+            return (line, i)
+        i = i - 1
+    ("", -1)
+
+fn _test_json_route_diagnostics(output: text, json_line_index: i64, stderr: text):
+    val lines = output.split("\n")
+    var i = 0
+    while i < lines.len():
+        if i != json_line_index and lines[i] != "":
+            stderr_write(lines[i] + "\n")
+        i = i + 1
+    if stderr != "":
+        stderr_write(stderr)
+        if not stderr.ends_with("\n"):
+            stderr_write("\n")
+    stderr_flush()
+
+fn _test_json_failure(message: text, worker_code: i64) -> text:
+    "{\"success\":false,\"worker_exit_code\":" + "{worker_code}," +
+        "\"error\":\"" + escape_json(message) + "\"}"
+
+fn run_test_json_wrapper(test_args: [text]) -> i64:
+    val depth_text = env_get("SIMPLE_TEST_DEPTH") ?? ""
+    val depth = if depth_text == "": 0 else: depth_text.to_int() ?? 0
+    if depth >= 1:
+        print _test_json_failure("test recursion guard triggered", 1)
+        return 1
+    env_set("SIMPLE_TEST_DEPTH", "1")
+    val executable = cli_current_exe_path()
+    if executable == "":
+        print _test_json_failure("cannot resolve current executable", 1)
+        return 1
+    val worker_args = _test_json_worker_args(test_args)
+    env_set("SIMPLE_TEST_JSON_WORKER_AUTH", "1")
+    val (stdout, stderr, worker_code) = process_run_bounded(
+        executable,
+        worker_args,
+        TEST_JSON_TIMEOUT_MS,
+        TEST_JSON_OUTPUT_BYTES
+    )
+    env_set("SIMPLE_TEST_JSON_WORKER_AUTH", "")
+    val wrapper_code = if worker_code < 0: 1 else: worker_code
+    val (json_line, json_line_index) = _test_json_last_nonempty_line(stdout)
+    if (json_line == "" or json_parse(json_line) == nil or
+        not json_line.starts_with("{") or not json_line.ends_with("}") or
+        (not json_line.starts_with("{\"success\":true,") and
+         not json_line.starts_with("{\"success\":false,")) or
+        not json_line.contains("\"spec\":") or
+        not json_line.contains("\"spl_doctest\":") or
+        not json_line.contains("\"sdoctest\":")):
+        _test_json_route_diagnostics(stdout, -1, stderr)
+        print _test_json_failure("test JSON worker did not emit a valid final object", worker_code)
+        if wrapper_code != 0:
+            return wrapper_code
+        return 1
+    _test_json_route_diagnostics(stdout, json_line_index, stderr)
+    print json_line
+    wrapper_code

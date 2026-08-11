@@ -1,0 +1,504 @@
+# Blink style cascade — resolves a stylesheet plus a parent style into one
+# `ComputedStyle` for one DOM element.
+#
+# This is the resolver that closes the style→paint chain: `blink.css_parser`
+# produces `CssStyleSheet`, this module turns it into the typed property bag
+# `blink.entity.computed_style.ComputedStyle`, and the paint tree walker
+# consumes that.
+#
+# Provides: parse_length_value, parse_color_value, parse_f64_value,
+# apply_declaration, resolve_style, resolve_style_with_state.
+#
+# What it does, in CSS cascade terms:
+#   - Inheritance: the inherited properties of our bag (`color`, `visibility`,
+#     `text-align`) start from the parent's resolved value; every other
+#     property starts at its CSS initial value.
+#   - Matching: a rule applies when `blink.css_parser.selector` matches it
+#     against the element (`resolve_style_with_state` also feeds the selector
+#     engine the `:hover`/`:focus` interaction state).
+#   - Ordering: matched declarations are applied weakest-first, ordered by
+#     `!important` then selector specificity (a=id, b=class/attr/pseudo-class,
+#     c=type), with source order breaking ties. The last write wins, so the
+#     strongest declaration is applied last.
+#
+# Deliberate non-goals (kept out on purpose; add only with a spec that needs it):
+#   - No `@media`/`@supports`/`@import` — `CssStyleSheet` carries only style
+#     rules today.
+#   - Shorthand expansion: `margin` and `padding` (the CSS 1/2/3/4-value box
+#     shorthands) are split into their four longhands. `background`, `font`,
+#     `border`, `flex` and other multi-axis shorthands are NOT expanded — only
+#     the longhands backing `ComputedStyle`'s fields are understood; every
+#     other property is ignored, not errored.
+#   - No `inherit`/`initial`/`unset`/`revert` keywords, no custom properties or
+#     `var()`, no `calc()`.
+#   - No unit resolution: `parse_length_value` keeps the authored unit verbatim,
+#     exactly as `Length` documents. `em`/`rem`/`%` are stored, never converted.
+#   - No user-agent or user origin, no transitions/animations, no author-order
+#     across multiple sheets — one author sheet at a time.
+#   - Colors are limited to the named subset below plus `#rgb`/`#rrggbb`; no
+#     `rgb()`/`rgba()`/`hsl()`.
+#
+# Known duplication (not merged here on purpose): the `gc_async_mut/gpu/
+# browser_engine` lane has its own `parse_color_value` returning a packed `u32`
+# for a different pixel pipeline, and its own `ComputedStyle` that is a
+# declaration list for animation diffing. Merging is tracked in
+# doc/08_tracking/bug/three_computedstyle_concepts_2026-08-10.md — that lane is
+# owned elsewhere, so this module does not reach into it.
+
+use std.blink.dom.node.{DomTree}
+use std.blink.dom.interaction_state.{InteractionState, interaction_state_empty}
+use std.blink.entity.computed_style.{
+    ComputedStyle, Display, Position, Overflow, Visibility, TextAlign, Length,
+    computed_style_default
+}
+use std.blink.css_parser.parser.{CssStyleSheet, CssStyleRule, CssDeclaration}
+use std.blink.css_parser.selector.{
+    SimpleSelectorKind, ComplexSelector, parse_selector, matches_complex_with_state
+}
+use std.skia.entity.color.{SkColor4f, sk_color4f}
+
+# ============================================================================
+# Value parsing
+# ============================================================================
+
+# Parse a CSS numeric value. Anything that is not a number reads as `0.0`,
+# which is what the CSS error-handling rule amounts to for our properties: an
+# unparsable declaration contributes nothing rather than a wrong number.
+fn parse_f64_value(raw: text) -> f64:
+    """Return the number `raw` denotes, or 0.0 when it is not a number."""
+    # The intermediate `val` is load-bearing: `raw.trim().to_f64()` as one chain
+    # fails to resolve `to_f64` on the erased receiver of the nested call.
+    val s: text = raw.trim()
+    s.to_f64()
+
+# Split a length into its magnitude and its unit. The unit is kept verbatim —
+# converting it needs font/viewport context this module does not carry.
+fn parse_length_value(raw: text) -> Length:
+    """Return the Length `raw` denotes; an empty or unparsable value is 0px."""
+    val s = raw.trim()
+    if s.len() == 0:
+        return Length.zero()
+    var digits = 0
+    while digits < s.len():
+        val c = s.slice(digits, digits + 1)
+        val numeric = (c == "0" or c == "1" or c == "2" or c == "3" or c == "4"
+            or c == "5" or c == "6" or c == "7" or c == "8" or c == "9"
+            or c == "." or c == "-" or c == "+")
+        if not numeric:
+            break
+        digits = digits + 1
+    if digits == 0:
+        return Length.zero()
+    val unit_raw: text = s.slice(digits, s.len())
+    val unit: text = unit_raw.trim()
+    val magnitude_raw: text = s.slice(0, digits)
+    val magnitude = magnitude_raw.to_f64()
+    if unit.len() == 0:
+        # A unitless length is only legal for `0`; treat it as px either way so
+        # `margin-left: 0` resolves to the same value as `0px`.
+        return Length(value: magnitude, unit: "px")
+    val unit_lower: text = unit.to_lower()
+    Length(value: magnitude, unit: unit_lower)
+
+# One hex digit's value, or -1 when `c` is not a hex digit.
+fn _hex_digit(c: text) -> i64:
+    val table = "0123456789abcdef"
+    val lowered = c.to_lower()
+    var i = 0
+    while i < 16:
+        if table.slice(i, i + 1) == lowered:
+            return i
+        i = i + 1
+    -1
+
+# Parse a two-character hex pair into a 0.0..1.0 channel.
+fn _hex_pair(s: text, at: i64) -> f64:
+    val hi = _hex_digit(s.slice(at, at + 1))
+    val lo = _hex_digit(s.slice(at + 1, at + 2))
+    if hi < 0 or lo < 0:
+        return 0.0
+    ((hi * 16 + lo) as f64) / 255.0
+
+# Parse a CSS color into a Skia float colour. Unrecognised values resolve to
+# opaque black — the CSS initial `color` — rather than failing the cascade.
+fn parse_color_value(raw: text) -> SkColor4f:
+    """Return the SkColor4f `raw` denotes; unknown colours are opaque black."""
+    val trimmed: text = raw.trim()
+    val s: text = trimmed.to_lower()
+    if s == "transparent":
+        return sk_color4f(0.0, 0.0, 0.0, 0.0)
+    if s == "black":
+        return sk_color4f(0.0, 0.0, 0.0, 1.0)
+    if s == "white":
+        return sk_color4f(1.0, 1.0, 1.0, 1.0)
+    if s == "red":
+        return sk_color4f(1.0, 0.0, 0.0, 1.0)
+    if s == "green":
+        return sk_color4f(0.0, 0.5019607843137255, 0.0, 1.0)
+    if s == "blue":
+        return sk_color4f(0.0, 0.0, 1.0, 1.0)
+    if s == "yellow":
+        return sk_color4f(1.0, 1.0, 0.0, 1.0)
+    if s == "gray" or s == "grey":
+        return sk_color4f(0.5019607843137255, 0.5019607843137255, 0.5019607843137255, 1.0)
+    if s.starts_with("#"):
+        if s.len() == 7:
+            return sk_color4f(_hex_pair(s, 1), _hex_pair(s, 3), _hex_pair(s, 5), 1.0)
+        if s.len() == 4:
+            # `#rgb` — each digit is doubled, so `#f00` is `#ff0000`.
+            val r = _hex_digit(s.slice(1, 2))
+            val g = _hex_digit(s.slice(2, 3))
+            val b = _hex_digit(s.slice(3, 4))
+            if r >= 0 and g >= 0 and b >= 0:
+                return sk_color4f(
+                    ((r * 17) as f64) / 255.0,
+                    ((g * 17) as f64) / 255.0,
+                    ((b * 17) as f64) / 255.0,
+                    1.0
+                )
+    sk_color4f(0.0, 0.0, 0.0, 1.0)
+
+# Split `s` on runs of ASCII whitespace, dropping empty tokens. Used only to
+# tokenize box-shorthand values (`margin`/`padding`); manual scan rather than
+# `.split(" ")` so repeated spaces between values don't yield empty tokens.
+fn _split_ws(s: text) -> [text]:
+    """Return the whitespace-separated tokens of `s`, skipping empty runs."""
+    var out: [text] = []
+    var i = 0
+    var start = 0
+    var in_token = false
+    while i < s.len():
+        val c = s.slice(i, i + 1)
+        val ws = (c == " " or c == "\t" or c == "\n")
+        if ws:
+            if in_token:
+                out.push(s.slice(start, i))
+                in_token = false
+        else:
+            if not in_token:
+                start = i
+                in_token = true
+        i = i + 1
+    if in_token:
+        out.push(s.slice(start, i))
+    out
+
+# Expand a CSS box-model shorthand value (`margin`/`padding`) into its four
+# longhands, following the standard 1/2/3/4-value forms:
+#   1 value  -> all four sides
+#   2 values -> vertical(top/bottom), horizontal(left/right)
+#   3 values -> top, horizontal(left/right), bottom
+#   4 values -> top, right, bottom, left (clockwise, starting at top)
+# Any other token count leaves all four at the CSS-zero length — an
+# unparsable shorthand contributes nothing, matching this module's existing
+# error-handling rule for single-value properties.
+fn _expand_box_shorthand(raw: text) -> (Length, Length, Length, Length):
+    """Return (top, right, bottom, left) Lengths for box shorthand `raw`."""
+    val tokens = _split_ws(raw)
+    val n = tokens.len()
+    if n == 1:
+        val all = parse_length_value(tokens[0 as i32])
+        return (all, all, all, all)
+    if n == 2:
+        val v = parse_length_value(tokens[0 as i32])
+        val h = parse_length_value(tokens[1 as i32])
+        return (v, h, v, h)
+    if n == 3:
+        val top = parse_length_value(tokens[0 as i32])
+        val h = parse_length_value(tokens[1 as i32])
+        val bottom = parse_length_value(tokens[2 as i32])
+        return (top, h, bottom, h)
+    if n == 4:
+        val top = parse_length_value(tokens[0 as i32])
+        val right = parse_length_value(tokens[1 as i32])
+        val bottom = parse_length_value(tokens[2 as i32])
+        val left = parse_length_value(tokens[3 as i32])
+        return (top, right, bottom, left)
+    (Length.zero(), Length.zero(), Length.zero(), Length.zero())
+
+# ============================================================================
+# Declaration application
+# ============================================================================
+
+# Apply one declaration to a style, returning the updated style. Properties
+# outside `ComputedStyle`'s ten fields, and values outside each property's
+# keyword set, leave the style untouched.
+#
+# The result is built wholesale from locals rather than by mutating a copy of
+# `style`: `ComputedStyle` is a value type here, so mutate-a-copy would either
+# lose the write or alias the caller's style depending on the engine.
+fn apply_declaration(style: ComputedStyle, decl: CssDeclaration) -> ComputedStyle:
+    """Return `style` with `decl` applied; unknown properties change nothing."""
+    val prop_raw: text = decl.property.trim()
+    val prop: text = prop_raw.to_lower()
+    val raw: text = decl.value.trim()
+    val value: text = raw.to_lower()
+
+    var display = style.display
+    var position = style.position
+    var overflow = style.overflow
+    var visibility = style.visibility
+    var text_align = style.text_align
+    var opacity = style.opacity
+    var color = style.color
+    var background_color = style.background_color
+    var margin_left = style.margin_left
+    var margin_right = style.margin_right
+    var margin_top = style.margin_top
+    var margin_bottom = style.margin_bottom
+    var padding_left = style.padding_left
+    var padding_top = style.padding_top
+    var padding_right = style.padding_right
+    var padding_bottom = style.padding_bottom
+    var width = style.width
+    var height = style.height
+    var font_size = style.font_size
+
+    if prop == "display":
+        if value == "inline":
+            display = Display.Inline
+        elif value == "block":
+            display = Display.Block
+        elif value == "inline-block":
+            display = Display.InlineBlock
+        elif value == "flex":
+            display = Display.Flex
+        elif value == "none":
+            display = Display.None
+    elif prop == "position":
+        if value == "static":
+            position = Position.Static
+        elif value == "relative":
+            position = Position.Relative
+        elif value == "absolute":
+            position = Position.Absolute
+        elif value == "fixed":
+            position = Position.Fixed
+        elif value == "sticky":
+            position = Position.Sticky
+    elif prop == "overflow":
+        if value == "visible":
+            overflow = Overflow.Visible
+        elif value == "hidden":
+            overflow = Overflow.Hidden
+        elif value == "scroll":
+            overflow = Overflow.Scroll
+        elif value == "auto":
+            overflow = Overflow.Auto
+    elif prop == "visibility":
+        if value == "visible":
+            visibility = Visibility.Visible
+        elif value == "hidden":
+            visibility = Visibility.Hidden
+        elif value == "collapse":
+            visibility = Visibility.Collapse
+    elif prop == "text-align":
+        if value == "left":
+            text_align = TextAlign.Left
+        elif value == "right":
+            text_align = TextAlign.Right
+        elif value == "center":
+            text_align = TextAlign.Center
+        elif value == "justify":
+            text_align = TextAlign.Justify
+    elif prop == "opacity":
+        opacity = parse_f64_value(raw)
+    elif prop == "color":
+        color = parse_color_value(raw)
+    elif prop == "background-color":
+        background_color = parse_color_value(raw)
+    elif prop == "margin-left":
+        margin_left = parse_length_value(raw)
+    elif prop == "margin-right":
+        margin_right = parse_length_value(raw)
+    elif prop == "margin-top":
+        margin_top = parse_length_value(raw)
+    elif prop == "margin-bottom":
+        margin_bottom = parse_length_value(raw)
+    elif prop == "margin":
+        val expanded = _expand_box_shorthand(raw)
+        margin_top = expanded.0
+        margin_right = expanded.1
+        margin_bottom = expanded.2
+        margin_left = expanded.3
+    elif prop == "padding-left":
+        padding_left = parse_length_value(raw)
+    elif prop == "padding-top":
+        padding_top = parse_length_value(raw)
+    elif prop == "padding-right":
+        padding_right = parse_length_value(raw)
+    elif prop == "padding-bottom":
+        padding_bottom = parse_length_value(raw)
+    elif prop == "padding":
+        val expanded = _expand_box_shorthand(raw)
+        padding_top = expanded.0
+        padding_right = expanded.1
+        padding_bottom = expanded.2
+        padding_left = expanded.3
+    elif prop == "width":
+        width = parse_length_value(raw)
+    elif prop == "height":
+        height = parse_length_value(raw)
+    elif prop == "font-size":
+        font_size = parse_length_value(raw)
+
+    ComputedStyle(
+        display: display,
+        position: position,
+        overflow: overflow,
+        visibility: visibility,
+        text_align: text_align,
+        opacity: opacity,
+        color: color,
+        background_color: background_color,
+        margin_left: margin_left,
+        margin_right: margin_right,
+        margin_top: margin_top,
+        margin_bottom: margin_bottom,
+        padding_left: padding_left,
+        padding_top: padding_top,
+        padding_right: padding_right,
+        padding_bottom: padding_bottom,
+        width: width,
+        height: height,
+        font_size: font_size
+    )
+
+# ============================================================================
+# Cascade
+# ============================================================================
+
+# Specificity of a parsed selector as one sortable integer: id count, then
+# class/attribute/pseudo-class count, then type count, each weighted so a
+# higher category always outranks any number of the one below it (CSS caps
+# each category well below 1000 in practice).
+fn _specificity(sel: ComplexSelector) -> i64:
+    var ids = 0
+    var classes = 0
+    var types = 0
+    var ci = 0
+    while ci < sel.compounds.len():
+        val compound = sel.compounds[ci as i32]
+        var si = 0
+        while si < compound.simples.len():
+            val kind = compound.simples[si as i32].kind
+            if kind == SimpleSelectorKind.Id:
+                ids = ids + 1
+            elif kind == SimpleSelectorKind.Class:
+                classes = classes + 1
+            elif kind == SimpleSelectorKind.AttributePresence:
+                classes = classes + 1
+            elif kind == SimpleSelectorKind.PseudoClass:
+                classes = classes + 1
+            elif kind == SimpleSelectorKind.Type:
+                types = types + 1
+            si = si + 1
+        ci = ci + 1
+    ids * 1000000 + classes * 1000 + types
+
+# The cascade weight of a declaration: `!important` outranks every normal
+# declaration regardless of how specific the normal one is.
+fn _weight(specificity: i64, important: bool) -> i64:
+    if important:
+        specificity + 1000000000
+    else:
+        specificity
+
+# Start the cascade from the parent: the inherited properties of our bag carry
+# the parent's resolved value, everything else starts at its initial value.
+fn _inherited_from(parent: ComputedStyle) -> ComputedStyle:
+    val initial = computed_style_default()
+    ComputedStyle(
+        display: initial.display,
+        position: initial.position,
+        overflow: initial.overflow,
+        visibility: parent.visibility,
+        text_align: parent.text_align,
+        opacity: initial.opacity,
+        color: parent.color,
+        background_color: initial.background_color,
+        margin_left: initial.margin_left,
+        margin_right: initial.margin_right,
+        margin_top: initial.margin_top,
+        margin_bottom: initial.margin_bottom,
+        padding_left: initial.padding_left,
+        padding_top: initial.padding_top,
+        padding_right: initial.padding_right,
+        padding_bottom: initial.padding_bottom,
+        width: initial.width,
+        height: initial.height,
+        font_size: parent.font_size
+    )
+
+# Resolve one element's style against `sheet`, taking `:hover`/`:focus` from
+# `state`. Declarations are gathered into parallel arrays and only then applied
+# in weight order, so nothing is mutated in place mid-cascade.
+fn resolve_style_with_state(
+    tree: DomTree,
+    node_id: i64,
+    parent_style: ComputedStyle,
+    sheet: CssStyleSheet,
+    state: InteractionState
+) -> ComputedStyle:
+    """Return the ComputedStyle for `node_id` under `sheet` and interaction `state`."""
+    var props: [text] = []
+    var values: [text] = []
+    var importants: [bool] = []
+    var weights: [i64] = []
+
+    var ri = 0
+    while ri < sheet.rules.len():
+        val rule = sheet.rules[ri as i32]
+        val parsed = parse_selector(rule.selector)
+        if val sel = parsed:
+            if matches_complex_with_state(tree, node_id, sel, state):
+                val spec = _specificity(sel)
+                var di = 0
+                while di < rule.declarations.len():
+                    val decl = rule.declarations[di as i32]
+                    props.push(decl.property)
+                    values.push(decl.value)
+                    importants.push(decl.important)
+                    weights.push(_weight(spec, decl.important))
+                    di = di + 1
+        ri = ri + 1
+
+    # Stable ascending order by weight: each index is inserted after every
+    # index already placed whose weight is no greater, so equal weights keep
+    # source order and the strongest declaration ends up applied last.
+    var order: [i64] = []
+    var i = 0
+    while i < weights.len():
+        val w = weights[i as i32]
+        var at = order.len()
+        var j = 0
+        while j < order.len():
+            if weights[order[j as i32] as i32] > w:
+                at = j
+                break
+            j = j + 1
+        order.insert(at as i32, i)
+        i = i + 1
+
+    var style = _inherited_from(parent_style)
+    var k = 0
+    while k < order.len():
+        val idx = order[k as i32]
+        style = apply_declaration(style, CssDeclaration(
+            property: props[idx as i32],
+            value: values[idx as i32],
+            important: importants[idx as i32]
+        ))
+        k = k + 1
+    style
+
+# Resolve one element's style with no interaction state — no `:hover`/`:focus`
+# rule matches.
+fn resolve_style(
+    tree: DomTree,
+    node_id: i64,
+    parent_style: ComputedStyle,
+    sheet: CssStyleSheet
+) -> ComputedStyle:
+    """Return the ComputedStyle for `node_id` under `sheet`, in the idle state."""
+    resolve_style_with_state(tree, node_id, parent_style, sheet, interaction_state_empty())

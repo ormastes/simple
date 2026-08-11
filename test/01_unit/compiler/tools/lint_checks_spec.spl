@@ -1,0 +1,66 @@
+# # Lint Check Functions Unit Tests
+#
+# Directly exercises individual pure-Simple lint check functions (no CLI, no
+# Linter class) by feeding them source strings and asserting on the findings
+# they return. Companion to test/03_system/app/lint_cli_contract_spec.spl,
+# which drives the same checks end-to-end through the `simple lint` CLI path.
+
+use compiler.semantics.lint.raw_rt_access.{check_raw_rt_access}
+use compiler.semantics.lint.param_tag.{check_param_tag}
+use compiler.semantics.lint.module_init_literal.{check_module_init_literal}
+
+describe "check_raw_rt_access":
+    """RAW-RT-001: application code (outside src/lib/, src/runtime/) must not
+    declare a raw `extern fn rt_*` intrinsic directly."""
+
+    it "flags an extern rt_* declaration in non-privileged app code":
+        val source = "fn helper():\n    extern fn rt_frobnicate(x: i64) -> i64\n    0\n"
+        val findings = check_raw_rt_access(source, "src/app/cli/example.spl")
+        expect(findings.len() > 0).to_equal(true)
+        assert_equal(findings[0].code, "RAW-RT-001")
+
+    it "does not flag privileged src/lib/ modules":
+        val source = "extern fn rt_frobnicate(x: i64) -> i64\n"
+        val findings = check_raw_rt_access(source, "src/lib/nogc_sync_mut/ffi/example.spl")
+        assert_equal(findings.len(), 0)
+
+    it "does not flag ordinary code with no extern declarations":
+        val source = "fn add(a: i64, b: i64) -> i64:\n    a + b\n"
+        val findings = check_raw_rt_access(source, "src/app/cli/example.spl")
+        assert_equal(findings.len(), 0)
+
+describe "check_param_tag":
+    """PTAG001: a `pub fn` with >=2 same-type primitive params needs a
+    `# @tag(...)` annotation to disambiguate parameter roles."""
+
+    it "flags a pub fn with two untagged same-type params":
+        val lines = ["pub fn hash_combine_pair(h1: i64, h2: i64) -> i64:", "    h1 + h2"]
+        val findings = check_param_tag(lines, "src/lib/nogc_sync_mut/example.spl")
+        expect(findings.len() > 0).to_equal(true)
+        assert_equal(findings[0].code, "PTAG001")
+
+    it "does not flag a pub fn whose params carry a matching @tag annotation":
+        """A @tag comment with identical roles for both same-type params
+        suppresses both PTAG001 (missing tag) and PTAG002 (differing roles)."""
+        val lines = [
+            "# @tag(h1=operand, h2=operand)",
+            "pub fn hash_combine_pair(h1: i64, h2: i64) -> i64:",
+            "    h1 + h2"
+        ]
+        val findings = check_param_tag(lines, "src/lib/nogc_sync_mut/example.spl")
+        assert_equal(findings.len(), 0)
+
+describe "check_module_init_literal":
+    """MODINIT001: a module-level val/var initializer that is not a bare
+    literal gets no runtime init code on the native-build --entry path."""
+
+    it "flags a module-level val initialized from a function call":
+        val source = "val config = load_config()\n"
+        val findings = check_module_init_literal(source, "src/app/example.spl")
+        expect(findings.len() > 0).to_equal(true)
+        assert_equal(findings[0].code, "MODINIT001")
+
+    it "does not flag a module-level val initialized from a literal":
+        val source = "val max_retries = 3\n"
+        val findings = check_module_init_literal(source, "src/app/example.spl")
+        assert_equal(findings.len(), 0)

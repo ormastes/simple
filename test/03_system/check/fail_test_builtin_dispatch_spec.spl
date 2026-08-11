@@ -1,0 +1,62 @@
+"""
+# `fail_test` BDD builtin dispatch
+
+## Overview
+
+`std.spec.fail_test(message)` (`src/lib/nogc_sync_mut/spec.spl:854`) is a plain
+exported wrapper around `fail_assertion`. The interpreter's BDD builtin
+dispatch (`src/compiler_rust/compiler/src/interpreter_call/bdd.rs`) whitelists
+spec-author-facing failure aliases by name; `fail_test` was missing from the
+`"fail" | "fail_assertion"` match arm even though it is a `pub fn` explicitly
+imported by callers. Calling it therefore fell through to normal function
+resolution and failed with `function \`fail_test\` not found` instead of ever
+running the wrapper body and reporting the caller's own failure message.
+
+Fixed 2026-08-09 (commit 48f49e11883) by adding `"fail_test"` to the same
+match arm as `"fail" | "fail_assertion"`.
+
+## Acceptance
+
+- Calling `fail_test("<msg>")` inside an `it` block fails that example with
+  the caller-supplied message (not `function \`fail_test\` not found`).
+- A sibling example that does not call `fail_test` still passes, proving the
+  fix does not turn every example red.
+
+## Binary note
+
+Runs a fixture through a child compiler. Uses `$SIMPLE_SPEC_BIN` when set,
+else `bin/simple`.
+"""
+
+# @tag: unit, spec-dsl, fail_test, bdd-builtin
+
+use std.spec.*
+use std.io_runtime.process_run
+
+describe "fail_test BDD builtin dispatch":
+
+    it "reports the caller's message, not a missing-function error":
+        step("Run a fixture whose only assertion is fail_test(<msg>)")
+        val root = "build/fail-test-dispatch-gate"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            "printf 'use std.spec.fail_test\\ndescribe \"f\":\\n    it \"boom\":\\n        fail_test(\"deliberate boom\")\\n' > " + root + "/fail_test_spec.spl && " +
+            "${SIMPLE_SPEC_BIN:-bin/simple} test " + root + "/fail_test_spec.spl"
+        val (stdout, stderr, code) = process_run("/bin/sh", ["-c", command])
+        val output = stdout + stderr
+
+        expect(output).to_contain("deliberate boom")
+        expect(output).to_not_contain("function `fail_test` not found")
+        expect(output).to_contain("1 total, 0 passed, 1 failed")
+        expect(code).to_equal(1)
+
+    it "does not fail sibling examples that never call fail_test":
+        step("Run a fixture with one passing example and one fail_test example")
+        val root = "build/fail-test-dispatch-gate-sibling"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            "printf 'use std.spec.fail_test\\ndescribe \"f\":\\n    it \"ok\":\\n        expect(1).to_equal(1)\\n    it \"boom\":\\n        fail_test(\"deliberate boom\")\\n' > " + root + "/fail_test_sibling_spec.spl && " +
+            "${SIMPLE_SPEC_BIN:-bin/simple} test " + root + "/fail_test_sibling_spec.spl"
+        val (stdout, stderr, code) = process_run("/bin/sh", ["-c", command])
+        val output = stdout + stderr
+
+        expect(output).to_contain("2 total, 1 passed, 1 failed")
+        expect(code).to_equal(1)

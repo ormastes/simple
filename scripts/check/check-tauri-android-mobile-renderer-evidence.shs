@@ -1,0 +1,511 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
+TAURI_DIR="$ROOT_DIR/tools/tauri-shell"
+BUILD_DIR="${BUILD_DIR:-$ROOT_DIR/build/tauri_android_mobile_renderer}"
+case "$BUILD_DIR" in
+    /*) ;;
+    *) BUILD_DIR="$ROOT_DIR/$BUILD_DIR" ;;
+esac
+MDI_PROOF_VALIDATOR="$ROOT_DIR/scripts/check/validate-tauri-mobile-mdi-proof.js"
+RENDER_LOG_VALIDATOR="$ROOT_DIR/scripts/check/validate-tauri-android-render-log-proof.js"
+SMOKE_SOURCE="$ROOT_DIR/examples/06_io/ui/tauri_mobile_mdi_smoke.spl"
+APK="${ANDROID_APK:-$ROOT_DIR/tools/tauri-shell/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk}"
+SCREENSHOT="${ANDROID_RENDERER_SCREENSHOT:-$BUILD_DIR/android_renderer.png}"
+LOGCAT="$BUILD_DIR/android_renderer_logcat.txt"
+RENDER_LOG_VALIDATION_ENV="$BUILD_DIR/android_render_log.validation.env"
+MDI_PROOF_JSON="$BUILD_DIR/android_mdi_proof.json"
+MDI_PROOF_VALIDATION_ENV="$BUILD_DIR/android_mdi_proof.validation.env"
+TIMEOUT_SECS="${ANDROID_RENDERER_TIMEOUT_SECS:-120}"
+ADB="${ADB:-adb}"
+EMULATOR="${EMULATOR:-emulator}"
+PACKAGE_NAME="${ANDROID_PACKAGE_NAME:-com.simple.ui}"
+HWUI_RENDERER="${ANDROID_RENDERER_HWUI_RENDERER-}"
+EMULATOR_GPU_MODE="${ANDROID_EMULATOR_GPU_MODE:-host}"
+GPU_LOG_EXTRA="${ANDROID_RENDERER_GPU_LOG:-$BUILD_DIR/emulator.out}"
+BUILD_APK="${TAURI_ANDROID_RENDERER_BUILD_APK:-1}"
+
+fail() {
+    echo "status=fail"
+    echo "reason=$1"
+    exit 1
+}
+
+cleanup() {
+    if [ -n "${LOGCAT_PID:-}" ]; then
+        kill "$LOGCAT_PID" 2>/dev/null || true
+    fi
+    rm -f "$TAURI_DIR/src-tauri/mobile_probe_entry.txt" "$TAURI_DIR/src-tauri/mobile_entry_source.spl" "$TAURI_DIR/src-tauri/mobile_mdi_proof_url.txt"
+}
+trap cleanup EXIT INT TERM
+
+value_of() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
+}
+
+file_size_bytes() {
+    path="$1"
+    if [ -f "$path" ]; then
+        wc -c <"$path" | tr -d '[:space:]'
+    else
+        echo ""
+    fi
+}
+
+file_link_count() {
+    path="$1"
+    if command -v stat >/dev/null 2>&1; then
+        count="$(stat -c '%h' "$path" 2>/dev/null || stat -f '%l' "$path" 2>/dev/null || true)"
+        case "$count" in
+            ''|*[!0-9]*) echo "" ;;
+            *) echo "$count" ;;
+        esac
+    else
+        echo ""
+    fi
+}
+
+artifact_file_reason() {
+    path="$1"
+    expected_size="$2"
+    if [ -n "$path" ] && [ -L "$path" ]; then
+        echo symlink
+        return
+    fi
+    if [ -z "$path" ] || [ ! -s "$path" ]; then
+        echo missing
+        return
+    fi
+    link_count="$(file_link_count "$path")"
+    if [ -n "$link_count" ] && [ "$link_count" -gt 1 ]; then
+        echo hardlink
+        return
+    fi
+    actual_size="$(file_size_bytes "$path")"
+    if [ -n "$expected_size" ] && [ "$actual_size" != "$expected_size" ]; then
+        echo size-mismatch
+        return
+    fi
+    echo pass
+}
+
+artifact_file_status() {
+    reason="$1"
+    if [ "$reason" = "pass" ]; then
+        echo pass
+    else
+        echo fail
+    fi
+}
+
+validate_screenshot_png() {
+    path="$1"
+    label="$2"
+    validation_log="$BUILD_DIR/android_screenshot_validation.log"
+
+    if command -v python3 >/dev/null 2>&1; then
+        SCREENSHOT_PATH="$path" SCREENSHOT_LABEL="$label" python3 - <<'PY' > "$validation_log" 2>&1
+import os
+import sys
+
+path = os.environ["SCREENSHOT_PATH"]
+label = os.environ["SCREENSHOT_LABEL"]
+try:
+    from PIL import Image
+except Exception as exc:
+    print(f"pillow unavailable: {exc}", file=sys.stderr)
+    sys.exit(2)
+
+try:
+    image = Image.open(path).convert("RGBA")
+except Exception as exc:
+    print(f"failed to open screenshot: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+width, height = image.size
+if width < 300 or height < 300:
+    print(f"screenshot dimensions invalid: {width}x{height}", file=sys.stderr)
+    sys.exit(1)
+
+colors = image.getcolors(maxcolors=1000000)
+unique = 1000001 if colors is None else len(colors)
+if unique < 16:
+    print(f"screenshot appears blank: unique_colors={unique}", file=sys.stderr)
+    sys.exit(1)
+
+print(f"{label}=pass width={width} height={height} unique_colors={unique}")
+PY
+        code=$?
+        cat "$validation_log"
+        return "$code"
+    fi
+
+    echo "python3 unavailable for screenshot validation" > "$validation_log"
+    cat "$validation_log"
+    return 1
+}
+
+mkdir -p "$BUILD_DIR"
+
+command -v "$ADB" >/dev/null 2>&1 || fail "adb not found"
+command -v "$EMULATOR" >/dev/null 2>&1 || true
+command -v node >/dev/null 2>&1 || fail "node not found"
+command -v npm >/dev/null 2>&1 || fail "npm not found"
+command -v cargo >/dev/null 2>&1 || fail "cargo not found"
+test -f "$MDI_PROOF_VALIDATOR" || fail "MDI proof validator missing: $MDI_PROOF_VALIDATOR"
+test -f "$RENDER_LOG_VALIDATOR" || fail "Android render log validator missing: $RENDER_LOG_VALIDATOR"
+test -f "$SMOKE_SOURCE" || fail "Android MDI smoke source missing: $SMOKE_SOURCE"
+
+cd "$TAURI_DIR"
+printf 'mdi-smoke\n' > "$TAURI_DIR/src-tauri/mobile_probe_entry.txt"
+cp "$SMOKE_SOURCE" "$TAURI_DIR/src-tauri/mobile_entry_source.spl"
+rm -f "$TAURI_DIR/src-tauri/mobile_mdi_proof_url.txt"
+sh "$ROOT_DIR/tools/tauri-shell/scripts/build-ui-bundle.shs" > "$BUILD_DIR/android_build_ui_bundle.log" 2>&1 \
+    || fail "UI bundle generation failed; see $BUILD_DIR/android_build_ui_bundle.log"
+npm run prepare:dist > "$BUILD_DIR/android_prepare_dist.log" 2>&1 \
+    || fail "npm prepare:dist failed; see $BUILD_DIR/android_prepare_dist.log"
+if [ "$BUILD_APK" = "1" ] || [ ! -f "$APK" ]; then
+    SIMPLE_TAURI_MOBILE_PROBE_ENTRY=mdi-smoke \
+        cargo tauri android build --target aarch64 --debug > "$BUILD_DIR/android_tauri_build.log" 2>&1 \
+        || fail "Android APK build failed; see $BUILD_DIR/android_tauri_build.log"
+fi
+cd "$ROOT_DIR"
+
+test -f "$APK" || fail "Android APK missing: $APK"
+unzip -l "$APK" | grep -q 'lib/arm64-v8a/libsimple_mobile_runtime_exec\.so' \
+    || fail "Android APK missing arm64-v8a packaged Simple runtime"
+
+DEVICE_SERIAL="${ANDROID_SERIAL:-}"
+if [ -z "$DEVICE_SERIAL" ]; then
+    DEVICE_SERIAL="$("$ADB" devices | awk 'NR > 1 && $2 == "device" { print $1; exit }')"
+fi
+
+STARTED_EMULATOR_PID=""
+if [ -z "$DEVICE_SERIAL" ]; then
+    AVD_NAME="${ANDROID_AVD:-$("$EMULATOR" -list-avds | head -1)}"
+    test -n "$AVD_NAME" || fail "no running Android device and no AVD available"
+    emulator_args="-avd $AVD_NAME -no-audio -no-window"
+    if [ -n "$EMULATOR_GPU_MODE" ]; then
+        emulator_args="$emulator_args -gpu $EMULATOR_GPU_MODE"
+    fi
+    # shellcheck disable=SC2086
+    "$EMULATOR" $emulator_args > "$BUILD_DIR/emulator.out" 2> "$BUILD_DIR/emulator.err" &
+    STARTED_EMULATOR_PID=$!
+    "$ADB" wait-for-device
+    DEVICE_SERIAL="$("$ADB" devices | awk 'NR > 1 && $2 == "device" { print $1; exit }')"
+fi
+test -n "$DEVICE_SERIAL" || fail "no Android device available"
+
+boot_end=$(( $(date +%s) + TIMEOUT_SECS ))
+while [ "$(date +%s)" -lt "$boot_end" ]; do
+    booted="$("$ADB" -s "$DEVICE_SERIAL" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)"
+    if [ "$booted" = "1" ]; then
+        break
+    fi
+    sleep 2
+done
+
+if [ -n "$HWUI_RENDERER" ]; then
+    "$ADB" -s "$DEVICE_SERIAL" shell setprop debug.hwui.renderer "$HWUI_RENDERER" >/dev/null 2>&1 || true
+fi
+"$ADB" -s "$DEVICE_SERIAL" logcat -c >/dev/null 2>&1 || true
+"$ADB" -s "$DEVICE_SERIAL" install -r -d "$APK" > "$BUILD_DIR/adb_install.log" 2>&1 \
+    || fail "adb install failed; see $BUILD_DIR/adb_install.log"
+
+: > "$LOGCAT"
+"$ADB" -s "$DEVICE_SERIAL" logcat -v time > "$LOGCAT" 2>&1 &
+LOGCAT_PID=$!
+
+"$ADB" -s "$DEVICE_SERIAL" shell am force-stop "$PACKAGE_NAME" >/dev/null 2>&1 || true
+"$ADB" -s "$DEVICE_SERIAL" shell am start -n "$PACKAGE_NAME/.MainActivity" \
+    > "$BUILD_DIR/adb_launch.log" 2>&1 \
+    || fail "adb launch failed; see $BUILD_DIR/adb_launch.log"
+
+end=$(( $(date +%s) + TIMEOUT_SECS ))
+while [ "$(date +%s)" -lt "$end" ]; do
+    if grep -Eq 'F/DEBUG|Fatal signal|F/libc|F/VulkanManager|Simple subprocess stdout closed before a valid render arrived|Headless UI completed|parse error: expected value' "$LOGCAT" 2>/dev/null; then
+        fail "Android renderer failure observed; see $LOGCAT"
+    fi
+    if grep -Eq '\[tauri-shell\][[:space:]]+render,[[:space:]]+html_len=[1-9][0-9]*([[:space:]]|$)' "$LOGCAT" 2>/dev/null; then
+        break
+    fi
+    sleep 2
+done
+
+grep -Eq '\[tauri-shell\][[:space:]]+render,[[:space:]]+html_len=[1-9][0-9]*([[:space:]]|$)' "$LOGCAT" 2>/dev/null \
+    || fail "Android Tauri renderer log not observed within ${TIMEOUT_SECS}s"
+grep -Eq 'F/DEBUG|Fatal signal|F/libc|F/VulkanManager|Simple subprocess stdout closed before a valid render arrived|Headless UI completed|parse error: expected value' "$LOGCAT" 2>/dev/null \
+    && fail "Android renderer failure observed; see $LOGCAT"
+
+pid="$("$ADB" -s "$DEVICE_SERIAL" shell pidof "$PACKAGE_NAME" 2>/dev/null | tr -d '\r' || true)"
+test -n "$pid" || fail "Android package is not running after renderer marker: $PACKAGE_NAME"
+"$ADB" -s "$DEVICE_SERIAL" shell dumpsys activity top > "$BUILD_DIR/android_activity_top.txt" 2>/dev/null || true
+grep -q "$PACKAGE_NAME" "$BUILD_DIR/android_activity_top.txt" \
+    || fail "Android package is not the foreground activity after renderer marker: $PACKAGE_NAME"
+{
+    echo
+    echo "=== adb foreground activity proof ==="
+    cat "$BUILD_DIR/android_activity_top.txt"
+    echo "foreground=$PACKAGE_NAME"
+} >> "$LOGCAT"
+
+sleep 3
+"$ADB" -s "$DEVICE_SERIAL" exec-out screencap -p > "$SCREENSHOT" \
+    || fail "failed to capture Android screenshot"
+test -s "$SCREENSHOT" || fail "Android screenshot is empty: $SCREENSHOT"
+validate_screenshot_png "$SCREENSHOT" android_mobile_renderer_screenshot \
+    || fail "Android mobile renderer screenshot PNG validation failed"
+android_screenshot_actual_size_bytes="$(file_size_bytes "$SCREENSHOT")"
+android_screenshot_file_reason="$(artifact_file_reason "$SCREENSHOT" "$android_screenshot_actual_size_bytes")"
+android_screenshot_file_status="$(artifact_file_status "$android_screenshot_file_reason")"
+android_screenshot_artifact_status="$android_screenshot_file_status"
+if [ "$android_screenshot_file_status" != "pass" ] || [ "$android_screenshot_artifact_status" != "pass" ]; then
+    echo "android_screenshot_actual_size_bytes=$android_screenshot_actual_size_bytes"
+    echo "android_screenshot_file_status=$android_screenshot_file_status"
+    echo "android_screenshot_file_reason=$android_screenshot_file_reason"
+    echo "android_screenshot_artifact_status=$android_screenshot_artifact_status"
+    fail "android-screenshot-artifact-$android_screenshot_file_reason"
+fi
+
+{
+    echo
+    echo "=== adb renderer properties ==="
+    echo "debug.hwui.renderer=$("$ADB" -s "$DEVICE_SERIAL" shell getprop debug.hwui.renderer 2>/dev/null | tr -d '\r')"
+    echo "ro.hardware.vulkan=$("$ADB" -s "$DEVICE_SERIAL" shell getprop ro.hardware.vulkan 2>/dev/null | tr -d '\r')"
+    echo "ro.boot.hardware.vulkan=$("$ADB" -s "$DEVICE_SERIAL" shell getprop ro.boot.hardware.vulkan 2>/dev/null | tr -d '\r')"
+    "$ADB" -s "$DEVICE_SERIAL" shell dumpsys gfxinfo "$PACKAGE_NAME" 2>/dev/null | head -80 || true
+} >> "$LOGCAT"
+
+if [ -n "${LOGCAT_PID:-}" ]; then
+    kill "$LOGCAT_PID" 2>/dev/null || true
+    wait "$LOGCAT_PID" 2>/dev/null || true
+    LOGCAT_PID=""
+fi
+
+grep -Eiq 'Vulkan|vulkan|VK_|ANGLE.*Vulkan|Renderer.*Vulkan|HWUI.*Vulkan|skiavk' "$LOGCAT" "$GPU_LOG_EXTRA" \
+    || fail "Android renderer log missing Vulkan/skiavk marker"
+
+android_render_validation_code=0
+set -- "$LOGCAT"
+if [ -s "$GPU_LOG_EXTRA" ]; then
+    set -- "$@" "$GPU_LOG_EXTRA"
+fi
+node "$RENDER_LOG_VALIDATOR" "$@" >"$RENDER_LOG_VALIDATION_ENV" \
+    || android_render_validation_code=$?
+cat "$RENDER_LOG_VALIDATION_ENV"
+android_render_log_validation_status="$(value_of android_render_log_validation_status "$RENDER_LOG_VALIDATION_ENV")"
+android_render_log_validation_reason="$(value_of android_render_log_validation_reason "$RENDER_LOG_VALIDATION_ENV")"
+android_render_log_requested_source_count="$(value_of android_render_log_requested_source_count "$RENDER_LOG_VALIDATION_ENV")"
+android_render_log_source_count="$(value_of android_render_log_source_count "$RENDER_LOG_VALIDATION_ENV")"
+android_render_log_missing_source_count="$(value_of android_render_log_missing_source_count "$RENDER_LOG_VALIDATION_ENV")"
+android_render_log_empty_source_count="$(value_of android_render_log_empty_source_count "$RENDER_LOG_VALIDATION_ENV")"
+android_render_log_symlink_source_count="$(value_of android_render_log_symlink_source_count "$RENDER_LOG_VALIDATION_ENV")"
+android_render_log_hardlink_source_count="$(value_of android_render_log_hardlink_source_count "$RENDER_LOG_VALIDATION_ENV")"
+if [ -z "$android_render_log_hardlink_source_count" ]; then android_render_log_hardlink_source_count=0; fi
+android_render_log_duplicate_source_count="$(value_of android_render_log_duplicate_source_count "$RENDER_LOG_VALIDATION_ENV")"
+if [ -z "$android_render_log_duplicate_source_count" ]; then android_render_log_duplicate_source_count=0; fi
+android_render_log_nonregular_source_count="$(value_of android_render_log_nonregular_source_count "$RENDER_LOG_VALIDATION_ENV")"
+if [ -z "$android_render_log_nonregular_source_count" ]; then android_render_log_nonregular_source_count=0; fi
+android_render_log_html_len="$(value_of android_render_log_html_len "$RENDER_LOG_VALIDATION_ENV")"
+android_render_log_source_coherence_status="$(value_of android_render_log_source_coherence_status "$RENDER_LOG_VALIDATION_ENV")"
+android_render_log_coherent_source_path="$(value_of android_render_log_coherent_source_path "$RENDER_LOG_VALIDATION_ENV")"
+android_render_log_coherent_source_size_bytes="$(value_of android_render_log_coherent_source_size_bytes "$RENDER_LOG_VALIDATION_ENV")"
+android_render_log_coherent_source_actual_size_bytes="$(file_size_bytes "$android_render_log_coherent_source_path")"
+android_render_log_coherent_source_file_reason="$(artifact_file_reason "$android_render_log_coherent_source_path" "$android_render_log_coherent_source_size_bytes")"
+android_render_log_coherent_source_file_status="$(artifact_file_status "$android_render_log_coherent_source_file_reason")"
+android_render_log_coherent_source_artifact_status="$android_render_log_coherent_source_file_status"
+android_render_log_marker_status="$(value_of android_render_log_marker_status "$RENDER_LOG_VALIDATION_ENV")"
+android_render_log_vulkan_marker_status="$(value_of android_render_log_vulkan_marker_status "$RENDER_LOG_VALIDATION_ENV")"
+android_render_log_foreground_marker_status="$(value_of android_render_log_foreground_marker_status "$RENDER_LOG_VALIDATION_ENV")"
+android_render_log_failure_marker_status="$(value_of android_render_log_failure_marker_status "$RENDER_LOG_VALIDATION_ENV")"
+if [ "$android_render_validation_code" -ne 0 ] || [ "$android_render_log_validation_status" != "pass" ]; then
+    fail "Android render log validation failed: ${android_render_log_validation_reason:-unknown}"
+fi
+if [ "$android_render_log_coherent_source_file_status" != "pass" ] || [ "$android_render_log_coherent_source_artifact_status" != "pass" ]; then
+    echo "android_render_log_coherent_source_actual_size_bytes=$android_render_log_coherent_source_actual_size_bytes"
+    echo "android_render_log_coherent_source_file_status=$android_render_log_coherent_source_file_status"
+    echo "android_render_log_coherent_source_file_reason=$android_render_log_coherent_source_file_reason"
+    echo "android_render_log_coherent_source_artifact_status=$android_render_log_coherent_source_artifact_status"
+    if [ "$android_render_log_coherent_source_file_reason" = "symlink" ]; then
+        fail "android-render-log-coherent-source-symlink"
+    elif [ "$android_render_log_coherent_source_file_reason" = "hardlink" ]; then
+        fail "android-render-log-coherent-source-hardlink"
+    elif [ "$android_render_log_coherent_source_file_reason" = "size-mismatch" ]; then
+        fail "android-render-log-coherent-source-size-mismatch"
+    else
+        fail "android-render-log-coherent-source-artifact-missing"
+    fi
+fi
+
+android_mdi_validation_code=0
+node "$MDI_PROOF_VALIDATOR" android "$MDI_PROOF_JSON" "$LOGCAT" >"$MDI_PROOF_VALIDATION_ENV" \
+    || android_mdi_validation_code=$?
+cat "$MDI_PROOF_VALIDATION_ENV"
+if [ "$android_mdi_validation_code" -ne 0 ]; then
+    fail "Android MDI event/capture/performance/animation proof failed"
+fi
+
+android_mdi_proof_status="$(value_of android_mdi_proof_status "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_failure_marker_status="$(value_of android_mdi_failure_marker_status "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_proof_requested_source_count="$(value_of android_mdi_proof_requested_source_count "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_proof_source_count="$(value_of android_mdi_proof_source_count "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_proof_marker_source_count="$(value_of android_mdi_proof_marker_source_count "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_proof_missing_source_count="$(value_of android_mdi_proof_missing_source_count "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_proof_symlink_source_count="$(value_of android_mdi_proof_symlink_source_count "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_proof_hardlink_source_count="$(value_of android_mdi_proof_hardlink_source_count "$MDI_PROOF_VALIDATION_ENV")"
+if [ -z "$android_mdi_proof_hardlink_source_count" ]; then android_mdi_proof_hardlink_source_count=0; fi
+android_mdi_proof_duplicate_source_count="$(value_of android_mdi_proof_duplicate_source_count "$MDI_PROOF_VALIDATION_ENV")"
+if [ -z "$android_mdi_proof_duplicate_source_count" ]; then android_mdi_proof_duplicate_source_count=0; fi
+android_mdi_proof_empty_source_count="$(value_of android_mdi_proof_empty_source_count "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_proof_nonregular_source_count="$(value_of android_mdi_proof_nonregular_source_count "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_proof_marker_source_path="$(value_of android_mdi_proof_marker_source_path "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_proof_marker_source_size_bytes="$(value_of android_mdi_proof_marker_source_size_bytes "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_proof_marker_source_actual_size_bytes="$(file_size_bytes "$android_mdi_proof_marker_source_path")"
+android_mdi_proof_marker_source_file_reason="$(artifact_file_reason "$android_mdi_proof_marker_source_path" "$android_mdi_proof_marker_source_size_bytes")"
+android_mdi_proof_marker_source_file_status="$(artifact_file_status "$android_mdi_proof_marker_source_file_reason")"
+android_mdi_proof_marker_source_artifact_status="$android_mdi_proof_marker_source_file_status"
+if [ "$android_mdi_proof_marker_source_file_status" != "pass" ] || [ "$android_mdi_proof_marker_source_artifact_status" != "pass" ]; then
+    echo "android_mdi_proof_marker_source_actual_size_bytes=$android_mdi_proof_marker_source_actual_size_bytes"
+    echo "android_mdi_proof_marker_source_file_status=$android_mdi_proof_marker_source_file_status"
+    echo "android_mdi_proof_marker_source_file_reason=$android_mdi_proof_marker_source_file_reason"
+    echo "android_mdi_proof_marker_source_artifact_status=$android_mdi_proof_marker_source_artifact_status"
+    if [ "$android_mdi_proof_marker_source_file_reason" = "symlink" ]; then
+        fail "android-mdi-proof-marker-source-symlink"
+    elif [ "$android_mdi_proof_marker_source_file_reason" = "hardlink" ]; then
+        fail "android-mdi-proof-marker-source-hardlink"
+    elif [ "$android_mdi_proof_marker_source_file_reason" = "size-mismatch" ]; then
+        fail "android-mdi-proof-marker-source-size-mismatch"
+    else
+        fail "android-mdi-proof-marker-source-artifact-missing"
+    fi
+fi
+android_mdi_proof_window_count="$(value_of android_mdi_proof_window_count "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_render_status="$(value_of android_mdi_render_status "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_render_image_count="$(value_of android_mdi_render_image_count "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_render_html_renderable="$(value_of android_mdi_render_html_renderable "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_event_status="$(value_of android_mdi_event_status "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_event_taskbar_item_count="$(value_of android_mdi_event_taskbar_item_count "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_event_taskbar_icon_count="$(value_of android_mdi_event_taskbar_icon_count "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_event_has_desktop="$(value_of android_mdi_event_has_desktop "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_event_drag_runtime_available="$(value_of android_mdi_event_drag_runtime_available "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_event_drag_events_available="$(value_of android_mdi_event_drag_events_available "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_event_drag_moved="$(value_of android_mdi_event_drag_moved "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_event_window_event_runtime_available="$(value_of android_mdi_event_window_event_runtime_available "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_event_app_action_control_found="$(value_of android_mdi_event_app_action_control_found "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_event_app_input_control_found="$(value_of android_mdi_event_app_input_control_found "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_event_body_click_routed="$(value_of android_mdi_event_body_click_routed "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_event_body_input_routed="$(value_of android_mdi_event_body_input_routed "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_event_body_key_routed="$(value_of android_mdi_event_body_key_routed "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_event_sequence="$(value_of android_mdi_event_sequence "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_event_taskbar_icons_visible="$(value_of android_mdi_event_taskbar_icons_visible "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_event_taskbar_labels_visible="$(value_of android_mdi_event_taskbar_labels_visible "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_capture_status="$(value_of android_mdi_capture_status "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_capture_viewport_width="$(value_of android_mdi_capture_viewport_width "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_capture_viewport_height="$(value_of android_mdi_capture_viewport_height "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_capture_device_pixel_ratio="$(value_of android_mdi_capture_device_pixel_ratio "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_capture_screen_orientation="$(value_of android_mdi_capture_screen_orientation "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_performance_status="$(value_of android_mdi_performance_status "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_performance_now_available="$(value_of android_mdi_performance_now_available "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_performance_now_delta_ms="$(value_of android_mdi_performance_now_delta_ms "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_interaction_latency_status="$(value_of android_mdi_interaction_latency_status "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_input_to_paint_ms="$(value_of android_mdi_input_to_paint_ms "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_animation_status="$(value_of android_mdi_animation_status "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_animation_frame_available="$(value_of android_mdi_animation_frame_available "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_animation_frame_count="$(value_of android_mdi_animation_frame_count "$MDI_PROOF_VALIDATION_ENV")"
+android_mdi_css_animation_probe="$(value_of android_mdi_css_animation_probe "$MDI_PROOF_VALIDATION_ENV")"
+
+echo "android_tooling=available"
+echo "android_device=$DEVICE_SERIAL"
+echo "android_screenshot=$SCREENSHOT"
+echo "android_screenshot_file_status=$android_screenshot_file_status"
+echo "android_screenshot_file_reason=$android_screenshot_file_reason"
+echo "android_screenshot_artifact_status=$android_screenshot_artifact_status"
+echo "android_screenshot_actual_size_bytes=$android_screenshot_actual_size_bytes"
+echo "android_logcat=$LOGCAT"
+echo "android_gpu_log=$GPU_LOG_EXTRA"
+echo "android_mdi_proof_json=$MDI_PROOF_JSON"
+echo "android_mdi_proof_validation_env=$MDI_PROOF_VALIDATION_ENV"
+echo "android_render_log_status=pass"
+echo "android_render_log_validation_status=$android_render_log_validation_status"
+echo "android_render_log_validation_reason=$android_render_log_validation_reason"
+echo "android_render_log_requested_source_count=$android_render_log_requested_source_count"
+echo "android_render_log_source_count=$android_render_log_source_count"
+echo "android_render_log_missing_source_count=$android_render_log_missing_source_count"
+echo "android_render_log_empty_source_count=$android_render_log_empty_source_count"
+echo "android_render_log_symlink_source_count=$android_render_log_symlink_source_count"
+echo "android_render_log_hardlink_source_count=$android_render_log_hardlink_source_count"
+echo "android_render_log_duplicate_source_count=$android_render_log_duplicate_source_count"
+echo "android_render_log_nonregular_source_count=$android_render_log_nonregular_source_count"
+echo "android_render_log_html_len=$android_render_log_html_len"
+echo "android_render_log_source_coherence_status=$android_render_log_source_coherence_status"
+echo "android_render_log_coherent_source_path=$android_render_log_coherent_source_path"
+echo "android_render_log_coherent_source_size_bytes=$android_render_log_coherent_source_size_bytes"
+echo "android_render_log_coherent_source_actual_size_bytes=$android_render_log_coherent_source_actual_size_bytes"
+echo "android_render_log_coherent_source_file_status=$android_render_log_coherent_source_file_status"
+echo "android_render_log_coherent_source_file_reason=$android_render_log_coherent_source_file_reason"
+echo "android_render_log_coherent_source_artifact_status=$android_render_log_coherent_source_artifact_status"
+echo "android_render_log_marker_status=$android_render_log_marker_status"
+echo "android_render_log_vulkan_marker_status=$android_render_log_vulkan_marker_status"
+echo "android_render_log_foreground_marker_status=$android_render_log_foreground_marker_status"
+echo "android_render_log_failure_marker_status=$android_render_log_failure_marker_status"
+echo "android_layout_status=pass"
+echo "android_vulkan_log_status=pass"
+echo "android_mdi_proof_status=$android_mdi_proof_status"
+echo "android_mdi_failure_marker_status=$android_mdi_failure_marker_status"
+echo "android_mdi_proof_requested_source_count=$android_mdi_proof_requested_source_count"
+echo "android_mdi_proof_source_count=$android_mdi_proof_source_count"
+echo "android_mdi_proof_marker_source_count=$android_mdi_proof_marker_source_count"
+echo "android_mdi_proof_missing_source_count=$android_mdi_proof_missing_source_count"
+echo "android_mdi_proof_symlink_source_count=$android_mdi_proof_symlink_source_count"
+echo "android_mdi_proof_hardlink_source_count=$android_mdi_proof_hardlink_source_count"
+echo "android_mdi_proof_duplicate_source_count=$android_mdi_proof_duplicate_source_count"
+echo "android_mdi_proof_empty_source_count=$android_mdi_proof_empty_source_count"
+echo "android_mdi_proof_nonregular_source_count=$android_mdi_proof_nonregular_source_count"
+echo "android_mdi_proof_marker_source_path=$android_mdi_proof_marker_source_path"
+echo "android_mdi_proof_marker_source_size_bytes=$android_mdi_proof_marker_source_size_bytes"
+echo "android_mdi_proof_marker_source_actual_size_bytes=$android_mdi_proof_marker_source_actual_size_bytes"
+echo "android_mdi_proof_marker_source_file_status=$android_mdi_proof_marker_source_file_status"
+echo "android_mdi_proof_marker_source_file_reason=$android_mdi_proof_marker_source_file_reason"
+echo "android_mdi_proof_marker_source_artifact_status=$android_mdi_proof_marker_source_artifact_status"
+echo "android_mdi_proof_window_count=$android_mdi_proof_window_count"
+echo "android_mdi_render_status=$android_mdi_render_status"
+echo "android_mdi_render_image_count=$android_mdi_render_image_count"
+echo "android_mdi_render_html_renderable=$android_mdi_render_html_renderable"
+echo "android_mdi_event_status=$android_mdi_event_status"
+echo "android_mdi_event_taskbar_item_count=$android_mdi_event_taskbar_item_count"
+echo "android_mdi_event_taskbar_icon_count=$android_mdi_event_taskbar_icon_count"
+echo "android_mdi_event_has_desktop=$android_mdi_event_has_desktop"
+echo "android_mdi_event_drag_runtime_available=$android_mdi_event_drag_runtime_available"
+echo "android_mdi_event_drag_events_available=$android_mdi_event_drag_events_available"
+echo "android_mdi_event_drag_moved=$android_mdi_event_drag_moved"
+echo "android_mdi_event_window_event_runtime_available=$android_mdi_event_window_event_runtime_available"
+echo "android_mdi_event_app_action_control_found=$android_mdi_event_app_action_control_found"
+echo "android_mdi_event_app_input_control_found=$android_mdi_event_app_input_control_found"
+echo "android_mdi_event_body_click_routed=$android_mdi_event_body_click_routed"
+echo "android_mdi_event_body_input_routed=$android_mdi_event_body_input_routed"
+echo "android_mdi_event_body_key_routed=$android_mdi_event_body_key_routed"
+echo "android_mdi_event_sequence=$android_mdi_event_sequence"
+echo "android_mdi_event_taskbar_icons_visible=$android_mdi_event_taskbar_icons_visible"
+echo "android_mdi_event_taskbar_labels_visible=$android_mdi_event_taskbar_labels_visible"
+echo "android_mdi_capture_status=$android_mdi_capture_status"
+echo "android_mdi_capture_viewport_width=$android_mdi_capture_viewport_width"
+echo "android_mdi_capture_viewport_height=$android_mdi_capture_viewport_height"
+echo "android_mdi_capture_device_pixel_ratio=$android_mdi_capture_device_pixel_ratio"
+echo "android_mdi_capture_screen_orientation=$android_mdi_capture_screen_orientation"
+echo "android_mdi_performance_status=$android_mdi_performance_status"
+echo "android_mdi_performance_now_available=$android_mdi_performance_now_available"
+echo "android_mdi_performance_now_delta_ms=$android_mdi_performance_now_delta_ms"
+echo "android_mdi_interaction_latency_status=$android_mdi_interaction_latency_status"
+echo "android_mdi_input_to_paint_ms=$android_mdi_input_to_paint_ms"
+echo "android_mdi_animation_status=$android_mdi_animation_status"
+echo "android_mdi_animation_frame_available=$android_mdi_animation_frame_available"
+echo "android_mdi_animation_frame_count=$android_mdi_animation_frame_count"
+echo "android_mdi_css_animation_probe=$android_mdi_css_animation_probe"
+echo "status=pass"
+
+if [ -n "$STARTED_EMULATOR_PID" ]; then
+    true
+fi

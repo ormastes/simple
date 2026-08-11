@@ -1,0 +1,39 @@
+# @tag: spec, app, startup_perf
+#
+# Minimal launch dispatcher gate (perf program 2026-08-10 §5.2 / §11.3):
+# the no-op and --help paths of the app root must reach their handler WITHOUT
+# initializing dynSMF. Observable: the level-gated trace line
+# "dynsmf-trace: startup_session_init" (emitted only when SIMPLE_DYNSMF_TRACE=1)
+# must be ABSENT on no-op/--help output and PRESENT on --dynsmf-status output
+# (the control run proving the trace mechanism itself works).
+
+use std.spec.{describe, it, expect}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_get(name: text) -> text?
+
+fn simple_bin() -> text:
+    rt_env_get("SIMPLE_BIN") ?? "bin/simple"
+
+fn run_app_root_traced(args: text) -> (text, text, i64):
+    rt_process_run("/bin/sh", [
+        "-c",
+        "REPO=$(pwd); SIMPLE_BIN=\"" + simple_bin() + "\"; SIMPLE_DYNSMF_TRACE=1 SIMPLE_LIB=\"$REPO/src\" \"$SIMPLE_BIN\" run \"$REPO/src/app/main.spl\" " + args
+    ])
+
+describe "app root minimal launch dispatcher":
+    it "control: --dynsmf-status DOES initialize dynSMF (trace line present)":
+        val (out, err, code) = run_app_root_traced("--dynsmf-status")
+        expect(code).to_equal(0)
+        expect(out).to_contain("dynsmf-trace: startup_session_init")
+
+    it "no-op startup does not initialize dynSMF":
+        val (out, err, code) = run_app_root_traced("")
+        expect(code).to_equal(0)
+        expect(out).to_equal("")
+
+    it "--help does not initialize dynSMF":
+        val (out, err, code) = run_app_root_traced("--help")
+        expect(code).to_equal(0)
+        expect(out).to_contain("USAGE:")
+        expect(out.contains("dynsmf-trace: startup_session_init")).to_equal(false)

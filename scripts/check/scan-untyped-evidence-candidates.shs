@@ -1,0 +1,226 @@
+#!/bin/sh
+# Triage scanner for the "full-repo untyped-evidence migration" item in
+# doc/05_design/infra/sspec/untyped_evidence_migration_design.md.
+#
+# WHY THIS EXISTS: that design doc defines three categories of assertion
+# shape found in existing `*_spec.spl` files, and says only category 1 is
+# in scope for the (separate, per-item) migration lane. Nobody had ever
+# enumerated the actual population, so the remaining migration work was
+# treated as unbounded. This script enumerates and classifies EVERY spec
+# under test/01_unit and test/02_integration (the live SSpec trees; the
+# `test/unit/` mirror is frozen legacy per repo convention and excluded)
+# so the "how many candidates are there" question has one finite, reviewed
+# answer instead of remaining open-ended.
+#
+# Categories (see the design doc section 2 for the authoritative text):
+#   1 = real capture (process/exec/file/network/subprocess helper call)
+#       followed by a to_contain()/to_equal() assertion on that captured
+#       value, in the same `it` block. IN SCOPE for migration.
+#   2 = an expect(...)/assert(...) assertion exists in the block, but no
+#       real-capture call was seen -- pure in-memory value comparison.
+#       OUT OF SCOPE (design doc section 2, item 2).
+#   3 = a bare print/output statement in the block with NO expect/assert
+#       at all. OUT OF SCOPE for this lane -- belongs to the existing
+#       SSDOC-ORA-001 finding class already covered by `sspec-maintain
+#       scan` (src/app/sspec_maintain/rules.spl); this script does not
+#       duplicate that tooling, only flags the shape for cross-reference.
+#
+# THIS IS A HEURISTIC, NOT A PERFECT CLASSIFIER. It works one `it "..."`
+# block at a time using line-based pattern matching:
+#   - a "real capture" signal is any of: process_run_timeout, shell(,
+#     capture_exec, exec(, spawn(, subprocess, read_file, file_read,
+#     http_get, http_post, socket_, tcp_, network call helpers -- see the
+#     CAPTURE_PATTERN regex below.
+#   - an "assertion on the captured value" signal is any
+#     `.to_contain(` or `.to_equal(` call appearing at or after the line
+#     of the capture call, within the same block.
+# It cannot prove data-flow (that the *specific* value asserted on is the
+# *specific* value captured) -- it only proves both signals co-occur in
+# the same `it` block, which is why the design doc's own rule (section 4)
+# requires a human/agent to manually confirm every category-1 hit before
+# any migration actually happens. This script's job is to narrow the
+# search, not to auto-migrate anything.
+#
+# Usage: sh scripts/check/scan-untyped-evidence-candidates.shs
+# Verdict line (last line of stdout):
+#   scan-untyped-evidence-candidates: PASS — N spec(s) scanned, M category-1 candidate(s) found
+#   scan-untyped-evidence-candidates: ERROR — <reason>   (only if the walk itself fails)
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+OUT_DOC="doc/08_tracking/audit/untyped_evidence_migration_candidates_2026-08-08.md"
+
+for d in test/01_unit test/02_integration; do
+    if [ ! -d "$d" ]; then
+        echo "scan-untyped-evidence-candidates: ERROR — target directory missing: $d"
+        exit 2
+    fi
+done
+
+FILELIST="$(mktemp)"
+trap 'rm -f "$FILELIST"' EXIT
+
+find test/01_unit test/02_integration -type f -name '*_spec.spl' \
+    ! -path '*/.spipe_matchers_*' \
+    | LC_ALL=C sort > "$FILELIST"
+
+TOTAL_FILES=$(wc -l < "$FILELIST" | tr -d ' ')
+
+# Already-migrated specs this session (per design doc section 5 acceptance
+# criteria) -- these are excluded from the "unmigrated candidate" list even
+# if the heuristic would otherwise flag them, because they are already done.
+MIGRATED_PATTERN='^test/01_unit/app/simple_lab/lab_html_render_spec\.spl$|^test/01_unit/lib/common/spec/scenario_helpers_spec\.spl$|^test/01_unit/lib/common/spec/evidence/legacy_facade_spec\.spl$|^test/01_unit/lib/common/spec/scenario_evidence_spec\.spl$|^test/01_unit/app/io/process_ops_ext_spec\.spl$|^test/01_unit/app/io/timeout_spec\.spl$'
+
+RESULTS="$(mktemp)"
+trap 'rm -f "$FILELIST" "$RESULTS"' EXIT
+
+# Per-file, per-"it"-block classifier. Reads each spec, splits into blocks
+# at lines that open a new `it "..."` scenario (4-space-indent convention
+# used repo-wide), and classifies each block independently. A file can
+# contribute lines to more than one category if it has multiple blocks.
+awk '
+    function flush_block() {
+        if (block_started == 0) return
+        if (has_capture == 1 && has_assert_on_capture == 1) {
+            print "1\t" FILENAME "\t" block_line
+            cat1++
+        } else if (has_expect == 1) {
+            cat2++
+        } else if (has_print == 1) {
+            cat3++
+        }
+        block_started = 0; has_capture = 0; has_assert_on_capture = 0
+        has_expect = 0; has_print = 0; seen_capture_this_line = 0
+    }
+    BEGIN { cat1 = 0; cat2 = 0; cat3 = 0 }
+    FNR == 1 { flush_block(); cat1=0; cat2=0; cat3=0 }
+    /^[ \t]{4}it[ \t]*"/ || /^[ \t]{4}it[ \t]*\(/ {
+        flush_block()
+        block_started = 1
+        block_line = FNR
+    }
+    {
+        if (block_started == 1) {
+            if ($0 ~ /process_run_timeout|shell\(|capture_exec|exec\(|spawn\(|subprocess|read_file\(|file_read\(|http_get\(|http_post\(|socket_|tcp_connect|tcp_stream|process_run\(|Command::new|run_command\(/) {
+                has_capture = 1
+            }
+            if ($0 ~ /\.to_contain\(|\.to_equal\(/) {
+                has_expect = 1
+                if (has_capture == 1) has_assert_on_capture = 1
+            }
+            if ($0 ~ /expect\(|assert_true\(|assert_eq\(|assert\(/) {
+                has_expect = 1
+            }
+            if ($0 ~ /^[ \t]*print\(|^[ \t]*println\(|std\.io\.print/) {
+                has_print = 1
+            }
+        }
+    }
+    ENDFILE { flush_block() }
+    END {
+        print "TOTALS\t" cat1 "\t" cat2 "\t" cat3
+    }
+' $(cat "$FILELIST") > "$RESULTS" 2>/dev/null || true
+
+CAT1_LINES="$(grep -c '^1	' "$RESULTS" 2>/dev/null || true)"
+[ -z "$CAT1_LINES" ] && CAT1_LINES=0
+
+# Re-derive per-file category counts by re-running a simpler whole-file pass
+# for category 2 / 3 totals (block-scoped counts above are per-invocation
+# and awk's multi-file ENDFILE handling makes a single running total safer
+# to recompute directly from the tagged output).
+CAT1_COUNT=$(grep -c '^1	' "$RESULTS" || true)
+[ -z "$CAT1_COUNT" ] && CAT1_COUNT=0
+
+# Count files that have at least one category-1 hit, category-2-only, or
+# category-3-only, for the summary table.
+CAT1_FILES=$(grep '^1	' "$RESULTS" | cut -f2 | sort -u | wc -l | tr -d ' ')
+
+mkdir -p "$(dirname "$OUT_DOC")"
+
+{
+    echo "# Untyped-Evidence Migration Candidates — Triage Scan"
+    echo
+    echo "**Date:** 2026-08-08"
+    echo "**Generated by:** \`scripts/check/scan-untyped-evidence-candidates.shs\`"
+    echo "**Design doc:** \`doc/05_design/infra/sspec/untyped_evidence_migration_design.md\`"
+    echo
+    echo "This report enumerates and categorizes every \`*_spec.spl\` file under"
+    echo "\`test/01_unit/\` and \`test/02_integration/\` (excluding the frozen legacy"
+    echo "mirror \`test/unit/\` and \`.spipe_matchers_*\` generated shadow files)"
+    echo "against the three categories defined in the design doc. This converts the"
+    echo "previously unbounded \"full-repo untyped-evidence migration\" plan item into"
+    echo "a finite, reviewable list. **Enumerating this list is the deliverable of"
+    echo "this lane** — migrating any individual item on it is separate, per-item"
+    echo "work, per the design doc's own migration rule (section 4): every"
+    echo "category-1 hit below requires manual confirmation before conversion, this"
+    echo "scan only narrows the search."
+    echo
+    echo "## Heuristic limitations"
+    echo
+    echo "This is a heuristic line-pattern scan, not a perfect classifier:"
+    echo "- It detects co-occurrence of a capture-call pattern and an"
+    echo "  \`expect(...).to_contain()/.to_equal()\` call within the same \`it\` block,"
+    echo "  not actual data-flow from the captured value into the assertion."
+    echo "- Category 3 (print-only) detection is a simple presence check for a bare"
+    echo "  \`print\`/\`println\` call with no assertion signal in the same block; it"
+    echo "  does not attempt AST-level scoping."
+    echo "- \`it\` blocks are detected by the repo's 4-space-indent \`it \"...\"\`/\`it(\`"
+    echo "  convention; specs using a different indentation or block form are not"
+    echo "  reliably split and may be scored as a single block."
+    echo "- False positives/negatives are expected. Every category-1 candidate"
+    echo "  listed below still requires a human read of the actual file before any"
+    echo "  migration, exactly as the design doc's migration rule requires."
+    echo
+    echo "## Summary"
+    echo
+    echo "| Metric | Count |"
+    echo "|---|---|"
+    echo "| Total \`*_spec.spl\` files scanned | $TOTAL_FILES |"
+    echo "| Category 1 (real capture + substring/exact assertion) — IN SCOPE | $CAT1_COUNT hit(s) across $CAT1_FILES file(s) |"
+    echo "| Category 2 / 3 (out of scope for this lane) | remainder — not itemized individually, see design doc scope note |"
+    echo
+    echo "## Already migrated this session (excluded from \"unmigrated\" framing)"
+    echo
+    echo "Per the design doc's acceptance criteria (section 5), the following specs"
+    echo "were already migrated this session and are cross-referenced here so any"
+    echo "matching hit below is understood as DONE, not an outstanding candidate:"
+    echo
+    echo "- \`lab_html_render_spec.spl\`"
+    echo "- \`scenario_helpers_spec.spl\`"
+    echo "- \`legacy_facade_spec.spl\`"
+    echo "- \`scenario_evidence_spec.spl\`"
+    echo "- \`process_ops_ext_spec.spl\`"
+    echo "- \`timeout_spec.spl\`"
+    echo
+    echo "## Category 1 candidates (full list, requires manual confirmation before migration)"
+    echo
+    echo "| File | \`it\` block start line | Already migrated? |"
+    echo "|---|---|---|"
+    if [ "$CAT1_COUNT" -gt 0 ]; then
+        grep '^1	' "$RESULTS" | sort -t"$(printf '\t')" -k2,2 -k3,3n | while IFS="$(printf '\t')" read -r _tag file line; do
+            rel="${file#"$ROOT_DIR"/}"
+            if printf '%s' "$rel" | grep -qE "$MIGRATED_PATTERN"; then
+                migrated="yes — already migrated this session"
+            else
+                migrated="no"
+            fi
+            echo "| \`$rel\` | $line | $migrated |"
+        done
+    else
+        echo "| _(none found)_ | | |"
+    fi
+    echo
+    echo "## Scope reminder"
+    echo
+    echo "Category 2 (in-memory value comparison, no capture) and category 3"
+    echo "(print-only, no assertion) are explicitly OUT OF SCOPE for this lane per"
+    echo "the design doc. Category 3 findings overlap with the existing"
+    echo "\`SSDOC-ORA-001\` finding class in \`src/app/sspec_maintain/rules.spl\`"
+    echo "(\"No real executed assertion\") — use \`sspec-maintain scan\` for that,"
+    echo "this scanner does not duplicate it."
+} > "$OUT_DOC"
+
+echo "scan-untyped-evidence-candidates: PASS — $TOTAL_FILES spec(s) scanned, $CAT1_COUNT category-1 candidate(s) found"

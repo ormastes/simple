@@ -1,0 +1,80 @@
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir_result
+}
+use common.ui.draw_ir.{DrawIrCommand}
+
+# A `background:` shorthand that lists one typed image layer over a final base
+# colour ("gradient over surface") is the shape every glass panel in the WM
+# theme uses. Before this projection existed it fell into the untyped raw
+# branch: `background-layers-raw` kept the whole declaration, the typed
+# gradient stops were zeroed, and `bg` collapsed to whatever colour token
+# `parse_color_alpha` happened to find first. That made the node
+# unrepresentable to the CPU-composited material admission gate, so every WM
+# window degraded with `unresolved-or-duplicate-content`.
+#
+# The gate itself is NOT loosened by this spec: it still demands an empty
+# `background-layers-raw`. What changed is that this one shape is now typed
+# instead of raw. Everything the projection cannot type stays raw and still
+# fails closed — the sabotage cases below prove that.
+
+fn _style_value(command: DrawIrCommand, key: text) -> text:
+    for prop in command.computed_style:
+        if prop.key == key:
+            return prop.value
+    ""
+
+fn _probe_command(style_decl: text) -> DrawIrCommand:
+    val html = (
+        "<html><body><div id='probe' style=\"" + style_decl +
+        "\">x</div></body></html>")
+    val layout = simple_web_layout_render_html_draw_ir_result(html, 64, 32)
+    val commands = layout.composition.batches[0].commands
+    for command in commands:
+        if command.component_id == "probe":
+            return command
+    commands[0]
+
+val _panel_background = (
+    "background: linear-gradient(180deg, rgba(255,255,255,0.09), " +
+    "rgba(255,255,255,0.02)), rgba(20,22,32,0.72);")
+
+describe "background shorthand: typed image layer over a base colour":
+
+    it "types a gradient-over-colour panel background instead of keeping it raw":
+        val probe = _probe_command(_panel_background)
+        expect(_style_value(probe, "background-layers-raw")).to_equal("")
+        expect(_style_value(probe, "background-color")).to_equal(
+            "{(184u32 << 24) | (20u32 << 16) | (22u32 << 8) | 32u32}")
+        expect(
+            _style_value(probe, "background-image")
+        ).to_contain("linear-gradient(")
+
+    # ── Sabotage: the gate must still be able to go red ──
+
+    it "still refuses two stacked gradients (no base colour layer)":
+        val probe = _probe_command(
+            "background: linear-gradient(180deg, rgba(255,255,255,0.09), " +
+            "rgba(255,255,255,0.02)), linear-gradient(90deg, red, blue);")
+        expect(_style_value(probe, "background-layers-raw")).to_not_equal("")
+        expect(_style_value(probe, "background-image")).to_equal("none")
+
+    it "still refuses an untyped image function over a colour":
+        val probe = _probe_command(
+            "background: conic-gradient(red, blue), rgba(20,22,32,0.72);")
+        expect(_style_value(probe, "background-layers-raw")).to_not_equal("")
+        expect(_style_value(probe, "background-image")).to_equal("none")
+
+    it "still refuses an unresolved var() as the base layer":
+        val probe = _probe_command(
+            "background: linear-gradient(180deg, rgba(255,255,255,0.09), " +
+            "rgba(255,255,255,0.02)), var(--nope);")
+        expect(_style_value(probe, "background-layers-raw")).to_not_equal("")
+        expect(_style_value(probe, "background-image")).to_equal("none")
+
+    it "still refuses three layers":
+        val probe = _probe_command(
+            "background: linear-gradient(180deg, red, blue), " +
+            "linear-gradient(90deg, red, blue), rgba(20,22,32,0.72);")
+        expect(_style_value(probe, "background-layers-raw")).to_not_equal("")
+        expect(_style_value(probe, "background-image")).to_equal("none")

@@ -1,0 +1,137 @@
+# Spec for forward_hop_scan.spl — C5 hop-axis fact extractor (M7 of
+# doc/03_plan/compiler/forwarding/
+# zero_cost_layers_c0_c5_staged_implementation_plan_2026-08-07.md).
+#
+# WHY THIS SPEC ASSERTS STRUCTURED FIELDS AND NEVER ROUND-TRIPS
+# ------------------------------------------------------------
+# The bug this file pins (doc/08_tracking/bug/
+# c5_forward_hop_scan_splits_target_on_first_dot_2026-08-09.md) was invisible to
+# every pre-existing check because the obvious oracle is a TAUTOLOGY here:
+# `receiver_field + "." + target_method` re-joins to the identical string no
+# matter WHERE the target was split. `inner` + "." + `items.push` and
+# `inner.items` + "." + `push` both reconstruct `inner.items.push`, so a
+# text-reconstruction comparison passes under the wrong parser and the right
+# one alike. Only asserting `receiver_field` and `target_method` SEPARATELY,
+# against a target with more than one dot, can discriminate the split point.
+# Every assertion below therefore reads the two fields independently. Do not
+# "simplify" any of them into a re-joined string compare — that deletes the
+# only thing this spec measures.
+#
+# THE AUTHORITY: src/app/desugar/forwarding.spl is the generator that actually
+# emits the forwarding body, and it splits the target on the LAST dot
+# (`find_last_char(right, ".")`, :381). This scan must agree with it, because
+# the hop count C5 reports is only meaningful if it describes the call the
+# generator really produced. The generator is authoritative; the scanner
+# follows it, never the reverse.
+#
+# WHAT EACH GROUP CATCHES (a group that passes under both parsers is worthless):
+#
+#  1 "splits the target on the last dot" — the core discriminator.
+#      * single-segment `inner.len`: the CONTROL. Both parsers agree here,
+#        which is exactly why every previous fixture passed and the bug
+#        survived; it is kept to prove the fix did not regress the case that
+#        already worked.
+#      * two-segment `inner.items.push`: catches the first-dot split. Wrong
+#        parser yields field=`inner`, method=`items` — an intermediate FIELD
+#        reported as the method, with the real call target `push` dropped.
+#      * three-segment `a.b.c.d`: catches both the first-dot split AND a
+#        receiver half that is truncated at a dot by a single-identifier
+#        prefix scan. Wrong parser yields field=`a`, method=`b`; a
+#        half-migrated parser that splits last but still runs `_ident_prefix`
+#        over the receiver yields field=`a` instead of `a.b.c`.
+#      * bare `push` with no dot: catches a parser that invents a projection
+#        for a target that has none. The generator returns its `empty_result`
+#        for a dotless target, so the scan must report NO declaration rather
+#        than a fabricated field/method pair.
+#
+#  2 "hop count follows the real target method" — catches the CONSEQUENCE, not
+#    just the parse. `_walk_chain` continues a chain by looking `target_method`
+#    up as the next declaration's name. Under the first-dot split it searches
+#    for an intermediate field name, so a genuine two-hop chain terminates
+#    after one edge and ZFP_AXIS_HOPS under-reports. This group asserts the
+#    edge COUNT and each edge's `to_symbol`, so it fails on the wrong number
+#    even though the parse-level groups are green.
+
+use std.spec.{describe, it, expect}
+use compiler.tools.verify.forward_hop_scan.{parse_forward_decl, scan_source_forward_hops}
+
+fn spec():
+    describe("forward_hop_scan splits a forwarding target on the last dot", fn():
+
+        it("keeps a single-segment target intact (control: both parsers agree)", fn():
+            val d = parse_forward_decl("    alias fn len = inner.len")
+            expect(d.len()).to_equal(1)
+            expect(d[0].logical_name).to_equal("len")
+            expect(d[0].receiver_field).to_equal("inner")
+            expect(d[0].target_method).to_equal("len")
+        )
+
+        it("reads a two-segment target as projection inner.items and method push", fn():
+            # First-dot split reports field=inner, method=items — an
+            # intermediate field mistaken for the method, real target dropped.
+            val d = parse_forward_decl("    alias fn push = inner.items.push")
+            expect(d.len()).to_equal(1)
+            expect(d[0].logical_name).to_equal("push")
+            expect(d[0].receiver_field).to_equal("inner.items")
+            expect(d[0].target_method).to_equal("push")
+        )
+
+        it("reads a three-segment target as projection a.b.c and method d", fn():
+            # First-dot split reports field=a, method=b. A last-dot split that
+            # still runs a single-identifier prefix over the receiver half
+            # reports field=a, method=d — also red here.
+            val d = parse_forward_decl("    alias me deep = a.b.c.d")
+            expect(d.len()).to_equal(1)
+            expect(d[0].logical_name).to_equal("deep")
+            expect(d[0].receiver_field).to_equal("a.b.c")
+            expect(d[0].target_method).to_equal("d")
+        )
+
+        it("reports no declaration for a dotless target, matching the generator", fn():
+            # forwarding.spl returns empty_result when find_last_char finds no
+            # dot; a scan that fabricated field/method here would invent a hop.
+            val d = parse_forward_decl("    alias fn bare = push")
+            expect(d.len()).to_equal(0)
+        )
+    )
+
+    describe("forward_hop_scan hop count follows the real target method", fn():
+
+        it("walks a two-hop chain whose first link has a multi-segment target", fn():
+            # `draw` forwards through inner.gfx to `render`, and `render`
+            # forwards again to backend.flush — two physical hops.
+            # Under the first-dot split the walk continues from `gfx` (an
+            # intermediate field), finds no declaration by that name, and stops
+            # after ONE edge: hops = 1 instead of 2, and the first edge reads
+            # `draw -> inner.gfx` instead of `draw -> inner.gfx.render`.
+            val src = "class C:\n"
+                + "    @zero_forward_path\n"
+                + "    alias fn draw = inner.gfx.render\n"
+                + "    alias fn render = backend.flush\n"
+            val entries = scan_source_forward_hops("probe.spl", src)
+            expect(entries.len()).to_equal(1)
+            expect(entries[0].entrypoint).to_equal("probe.spl:draw")
+            expect(entries[0].edges.len()).to_equal(2)
+            expect(entries[0].edges[0].from_symbol).to_equal("draw")
+            expect(entries[0].edges[0].to_symbol).to_equal("inner.gfx.render")
+            expect(entries[0].edges[1].from_symbol).to_equal("render")
+            expect(entries[0].edges[1].to_symbol).to_equal("backend.flush")
+        )
+
+        it("does not follow a declaration named after an intermediate field", fn():
+            # `items` here is a sibling forwarder, NOT the target of `push`.
+            # The first-dot split reports push's method as `items` and so walks
+            # into it, inventing a second hop that the generated code does not
+            # contain: hops = 2 instead of the correct 1.
+            val src = "class C:\n"
+                + "    @zero_forward_path\n"
+                + "    alias fn push = inner.items.push\n"
+                + "    alias fn items = store.items\n"
+            val entries = scan_source_forward_hops("probe.spl", src)
+            expect(entries.len()).to_equal(1)
+            expect(entries[0].edges.len()).to_equal(1)
+            expect(entries[0].edges[0].to_symbol).to_equal("inner.items.push")
+        )
+    )
+
+spec()

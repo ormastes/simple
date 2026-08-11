@@ -1,0 +1,79 @@
+# codex-system-test
+# @evidence-display: links
+# @capture exec
+# @capture artifact
+"""
+# LLM Caret Cached CLI Qualification
+
+**Requirements:** REQ-LLM-CARET-FULL-003, NFR-LLM-CARET-TUI-006
+
+## Scope
+
+Exercise the shipped cached Caret CLI through the fail-closed qualification
+checker. The checker validates artifact-root and provenance markers before it
+accepts any cached-provider result, then saves command and artifact evidence
+under `build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_cli_cached/`.
+All provider traffic is supplied by the offline Claude fixture.
+"""
+
+use std.spec.{describe, it, expect, step}
+use app.io.mod.{process_run_timeout}
+
+struct CaretCliCachedEvidence:
+    stdout: text
+    stderr: text
+    exit_code: i32
+
+fn run_caret_cli_cached_case(case_name: text) -> CaretCliCachedEvidence:
+    val (stdout, stderr, exit_code) = process_run_timeout(
+        "sh",
+        [
+            "scripts/check/check-llm-caret-cli-cached.shs",
+            "--case",
+            case_name
+        ],
+        120000
+    )
+    CaretCliCachedEvidence(
+        stdout: stdout,
+        stderr: stderr,
+        exit_code: exit_code
+    )
+
+describe "LLM Caret Cached CLI Qualification":
+    describe "REQ-LLM-CARET-FULL-003: cached Caret CLI accepts the offline Claude provider":
+        it "should verify the cached artifact and its provenance before qualification":
+            step("Load the cached Caret artifact")
+            val result = run_caret_cli_cached_case("prerequisites")
+            step("Invoke the offline Caret CLI provider")
+            expect(result.stdout).to_contain("case=prerequisites status=PASS")
+            expect(result.stdout).to_contain("cached_artifact=")
+            expect(result.stdout).to_contain("provenance_file=")
+            expect(result.stdout).to_contain("source_commit_check=matched")
+            expect(result.stdout).to_contain("verified_binary_sha256=")
+            expect(result.stdout).to_contain("verified_runtime_path=")
+            expect(result.stdout).to_contain("verified_runtime_sha256=")
+            expect(result.stdout).to_contain("runtime=pure-simple-self-hosted")
+            step("Check captured output and status")
+            expect(result.stdout).to_contain("evidence_status=PASS")
+            expect(result.exit_code).to_equal(0)
+
+        it "should return the offline Claude response from the cached executable":
+            step("Load the cached Caret artifact")
+            val result = run_caret_cli_cached_case("offline-claude")
+            step("Invoke the offline Caret CLI provider")
+            expect(result.stdout).to_contain("case=offline-claude status=PASS")
+            step("Check captured output and status")
+            expect(result.stdout).to_contain("evidence_status=PASS")
+            expect(result.exit_code).to_equal(0)
+
+    describe "NFR-LLM-CARET-TUI-006: cached qualification is fail closed and captured":
+        it "should preserve cached provider failure and usage evidence":
+            step("Load the cached Caret artifact")
+            val result = run_caret_cli_cached_case("failure-usage")
+            step("Invoke the offline Caret CLI provider")
+            expect(result.stdout).to_contain("case=provider-error status=PASS")
+            expect(result.stdout).to_contain("case=unknown-option status=PASS")
+            step("Check captured output and status")
+            expect(result.stdout).to_contain("evidence_status=PASS")
+            expect(result.exit_code).to_equal(0)

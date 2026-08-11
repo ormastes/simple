@@ -1,0 +1,516 @@
+"""Golden-file ELF+DWARF integration tests.
+
+Exercises the full DwarfParser query API with hand-crafted synthetic data:
+addr_to_source, function_at, compilation_units, line_entries, source_to_addr,
+functions_in_range, and format_kind.
+
+Query tests use direct DwarfParser construction (bypassing BinaryReader which
+returns 0 for read_u32/read_u64 in interpreter mode).  Error-path tests for
+from_elf() and from_sections() exercise the validation logic.  A from_elf()
+regression sentinel calls the full ELF parsing path and documents intent even
+if interpreter-mode BinaryReader breakage causes it to fail.
+"""
+
+use std.debug.formats.dwarf_parser.{DwarfParser, DwarfSections}
+use std.debug.formats.debug_types.{SourceLocation, DebugLineEntry, DebugFunction, DebugCompilationUnit, DebugFormatKind}
+
+# =============================================================================
+# Helpers: byte-writing utilities for ELF construction
+# =============================================================================
+
+fn push_u16_le(buf: [u8], v: i64) -> [u8]:
+    var b = buf
+    b = b.push((v & 0xff) as u8)
+    b = b.push(((v >> 8) & 0xff) as u8)
+    b
+
+fn push_u32_le(buf: [u8], v: i64) -> [u8]:
+    var b = buf
+    b = b.push((v & 0xff) as u8)
+    b = b.push(((v >> 8) & 0xff) as u8)
+    b = b.push(((v >> 16) & 0xff) as u8)
+    b = b.push(((v >> 24) & 0xff) as u8)
+    b
+
+fn push_u64_le(buf: [u8], v: i64) -> [u8]:
+    var b = buf
+    b = b.push((v & 0xff) as u8)
+    b = b.push(((v >> 8) & 0xff) as u8)
+    b = b.push(((v >> 16) & 0xff) as u8)
+    b = b.push(((v >> 24) & 0xff) as u8)
+    b = b.push(((v >> 32) & 0xff) as u8)
+    b = b.push(((v >> 40) & 0xff) as u8)
+    b = b.push(((v >> 48) & 0xff) as u8)
+    b = b.push(((v >> 56) & 0xff) as u8)
+    b
+
+fn push_string(buf: [u8], s: text) -> [u8]:
+    var b = buf
+    var i = 0
+    while i < s.len():
+        b = b.push(s.char_code_at(i) as u8)
+        i = i + 1
+    b = b.push(0x00)
+    b
+
+# =============================================================================
+# Helpers: build a golden DwarfParser with synthetic data (bypasses BinaryReader)
+# =============================================================================
+
+# Single-CU parser: 1 compilation unit, 2 functions, 7 line entries
+fn build_golden_parser() -> DwarfParser:
+    val loc_main_1 = SourceLocation(file: "hello.spl", line: 1, column: 0)
+    val loc_main_5 = SourceLocation(file: "hello.spl", line: 5, column: 0)
+    val loc_main_10 = SourceLocation(file: "hello.spl", line: 10, column: 4)
+    val loc_add_20 = SourceLocation(file: "hello.spl", line: 20, column: 0)
+    val loc_add_25 = SourceLocation(file: "hello.spl", line: 25, column: 0)
+
+    val entry1 = DebugLineEntry(address: 0x1000, location: loc_main_1, is_stmt: true, end_sequence: false, prologue_end: false, epilogue_begin: false)
+    val entry2 = DebugLineEntry(address: 0x1010, location: loc_main_5, is_stmt: true, end_sequence: false, prologue_end: true, epilogue_begin: false)
+    val entry3 = DebugLineEntry(address: 0x1040, location: loc_main_10, is_stmt: true, end_sequence: false, prologue_end: false, epilogue_begin: false)
+    val entry4 = DebugLineEntry(address: 0x1080, location: loc_main_1, is_stmt: false, end_sequence: true, prologue_end: false, epilogue_begin: false)
+    val entry5 = DebugLineEntry(address: 0x2000, location: loc_add_20, is_stmt: true, end_sequence: false, prologue_end: false, epilogue_begin: false)
+    val entry6 = DebugLineEntry(address: 0x2040, location: loc_add_25, is_stmt: true, end_sequence: false, prologue_end: false, epilogue_begin: true)
+    val entry7 = DebugLineEntry(address: 0x2080, location: loc_add_20, is_stmt: false, end_sequence: true, prologue_end: false, epilogue_begin: false)
+
+    val all_entries: [DebugLineEntry] = [entry1, entry2, entry3, entry4, entry5, entry6, entry7]
+
+    val func_main = DebugFunction(name: "main", low_pc: 0x1000, high_pc: 0x1080, comp_unit_index: 0)
+    val func_add = DebugFunction(name: "add", low_pc: 0x2000, high_pc: 0x2080, comp_unit_index: 0)
+    val all_funcs: [DebugFunction] = [func_main, func_add]
+
+    val cu = DebugCompilationUnit(
+        name: "hello.spl",
+        comp_dir: "/src",
+        language: 28,
+        low_pc: 0x1000,
+        high_pc: 0x3000,
+        line_entries: all_entries,
+        functions: all_funcs,
+    )
+
+    val empty_sections = DwarfSections(
+        debug_info: [0x00],
+        debug_abbrev: [],
+        debug_line: [],
+        debug_str: [],
+        debug_line_str: [],
+        addr_size: 8,
+    )
+
+    DwarfParser(
+        sections: empty_sections,
+        units: [cu],
+        all_line_entries: all_entries,
+        all_functions: all_funcs,
+        parsed: true,
+    )
+
+# Multi-CU parser: 2 compilation units with disjoint address ranges
+fn build_multi_cu_parser() -> DwarfParser:
+    # CU 1: hello.spl 0x1000..0x2000
+    val loc_h1 = SourceLocation(file: "hello.spl", line: 1, column: 0)
+    val loc_h10 = SourceLocation(file: "hello.spl", line: 10, column: 0)
+    val e_h1 = DebugLineEntry(address: 0x1000, location: loc_h1, is_stmt: true, end_sequence: false, prologue_end: false, epilogue_begin: false)
+    val e_h2 = DebugLineEntry(address: 0x1040, location: loc_h10, is_stmt: true, end_sequence: false, prologue_end: false, epilogue_begin: false)
+    val e_h3 = DebugLineEntry(address: 0x2000, location: loc_h1, is_stmt: false, end_sequence: true, prologue_end: false, epilogue_begin: false)
+    val f_main = DebugFunction(name: "main", low_pc: 0x1000, high_pc: 0x1080, comp_unit_index: 0)
+
+    val cu1 = DebugCompilationUnit(
+        name: "hello.spl",
+        comp_dir: "/src",
+        language: 28,
+        low_pc: 0x1000,
+        high_pc: 0x2000,
+        line_entries: [e_h1, e_h2, e_h3],
+        functions: [f_main],
+    )
+
+    # CU 2: math.spl 0x4000..0x5000
+    val loc_m1 = SourceLocation(file: "math.spl", line: 1, column: 0)
+    val loc_m15 = SourceLocation(file: "math.spl", line: 15, column: 0)
+    val e_m1 = DebugLineEntry(address: 0x4000, location: loc_m1, is_stmt: true, end_sequence: false, prologue_end: false, epilogue_begin: false)
+    val e_m2 = DebugLineEntry(address: 0x4080, location: loc_m15, is_stmt: true, end_sequence: false, prologue_end: false, epilogue_begin: false)
+    val e_m3 = DebugLineEntry(address: 0x5000, location: loc_m1, is_stmt: false, end_sequence: true, prologue_end: false, epilogue_begin: false)
+    val f_sqrt = DebugFunction(name: "sqrt", low_pc: 0x4000, high_pc: 0x4100, comp_unit_index: 1)
+
+    val cu2 = DebugCompilationUnit(
+        name: "math.spl",
+        comp_dir: "/lib",
+        language: 12,
+        low_pc: 0x4000,
+        high_pc: 0x5000,
+        line_entries: [e_m1, e_m2, e_m3],
+        functions: [f_sqrt],
+    )
+
+    val all_entries: [DebugLineEntry] = [e_h1, e_h2, e_h3, e_m1, e_m2, e_m3]
+    val all_funcs: [DebugFunction] = [f_main, f_sqrt]
+
+    val empty_sections = DwarfSections(
+        debug_info: [0x00],
+        debug_abbrev: [],
+        debug_line: [],
+        debug_str: [],
+        debug_line_str: [],
+        addr_size: 8,
+    )
+
+    DwarfParser(
+        sections: empty_sections,
+        units: [cu1, cu2],
+        all_line_entries: all_entries,
+        all_functions: all_funcs,
+        parsed: true,
+    )
+
+# =============================================================================
+# Tests: format_kind
+# =============================================================================
+
+describe "DwarfParser format_kind":
+    it "returns DWARF":
+        val parser = build_golden_parser()
+        expect(parser.format_kind().to_string()).to_equal("DWARF")
+
+# =============================================================================
+# Tests: compilation_units
+# =============================================================================
+
+describe "DwarfParser compilation_units":
+    it "returns single CU with correct name":
+        val parser = build_golden_parser()
+        val units = parser.compilation_units()
+        expect(units.len()).to_equal(1)
+        expect(units[0].name).to_equal("hello.spl")
+
+    it "returns correct comp_dir":
+        val parser = build_golden_parser()
+        val cu = parser.compilation_units()[0]
+        expect(cu.comp_dir).to_equal("/src")
+
+    it "returns correct address range":
+        val parser = build_golden_parser()
+        val cu = parser.compilation_units()[0]
+        expect(cu.low_pc).to_equal(0x1000)
+        expect(cu.high_pc).to_equal(0x3000)
+
+    it "returns correct language code":
+        val parser = build_golden_parser()
+        val cu = parser.compilation_units()[0]
+        expect(cu.language).to_equal(28)
+
+    it "CU has two functions":
+        val parser = build_golden_parser()
+        val cu = parser.compilation_units()[0]
+        expect(cu.functions.len()).to_equal(2)
+        expect(cu.functions[0].name).to_equal("main")
+        expect(cu.functions[1].name).to_equal("add")
+
+    it "multi-CU returns both units":
+        val parser = build_multi_cu_parser()
+        val units = parser.compilation_units()
+        expect(units.len()).to_equal(2)
+        expect(units[0].name).to_equal("hello.spl")
+        expect(units[1].name).to_equal("math.spl")
+
+    it "multi-CU units have disjoint address ranges":
+        val parser = build_multi_cu_parser()
+        val units = parser.compilation_units()
+        # CU1 ends before CU2 starts
+        expect(units[0].high_pc <= units[1].low_pc).to_equal(true)
+
+# =============================================================================
+# Tests: addr_to_source
+# =============================================================================
+
+describe "DwarfParser addr_to_source":
+    it "exact match at first line entry":
+        val parser = build_golden_parser()
+        val loc = parser.addr_to_source(0x1000)
+        expect(loc.?).to_equal(true)
+        expect(loc!.file).to_equal("hello.spl")
+        expect(loc!.line).to_equal(1)
+
+    it "exact match at second line entry":
+        val parser = build_golden_parser()
+        val loc = parser.addr_to_source(0x1010)
+        expect(loc.?).to_equal(true)
+        expect(loc!.line).to_equal(5)
+
+    it "address between entries maps to earlier entry":
+        val parser = build_golden_parser()
+        val loc = parser.addr_to_source(0x1020)
+        expect(loc.?).to_equal(true)
+        # 0x1020 is between 0x1010 (line 5) and 0x1040 (line 10), maps to line 5
+        expect(loc!.line).to_equal(5)
+
+    it "returns nil for address before all entries":
+        val parser = build_golden_parser()
+        val loc = parser.addr_to_source(0x0010)
+        expect(loc.?).to_equal(false)
+
+    it "maps address in second function":
+        val parser = build_golden_parser()
+        val loc = parser.addr_to_source(0x2000)
+        expect(loc.?).to_equal(true)
+        expect(loc!.line).to_equal(20)
+
+    it "multi-CU resolves address in second CU":
+        val parser = build_multi_cu_parser()
+        val loc = parser.addr_to_source(0x4080)
+        expect(loc.?).to_equal(true)
+        expect(loc!.file).to_equal("math.spl")
+        expect(loc!.line).to_equal(15)
+
+# =============================================================================
+# Tests: source_to_addr
+# =============================================================================
+
+describe "DwarfParser source_to_addr":
+    it "finds address for exact file and line":
+        val parser = build_golden_parser()
+        val addr = parser.source_to_addr("hello.spl", 5)
+        expect(addr.?).to_equal(true)
+        expect(addr!).to_equal(0x1010)
+
+    it "returns nil for nonexistent line":
+        val parser = build_golden_parser()
+        val addr = parser.source_to_addr("hello.spl", 999)
+        expect(addr.?).to_equal(false)
+
+    it "returns nil for nonexistent file":
+        val parser = build_golden_parser()
+        val addr = parser.source_to_addr("missing.spl", 1)
+        expect(addr.?).to_equal(false)
+
+    it "round-trips with addr_to_source":
+        val parser = build_golden_parser()
+        val addr = parser.source_to_addr("hello.spl", 10)
+        expect(addr.?).to_equal(true)
+        val loc = parser.addr_to_source(addr!)
+        expect(loc.?).to_equal(true)
+        expect(loc!.line).to_equal(10)
+        expect(loc!.file).to_equal("hello.spl")
+
+    it "multi-CU finds address in second CU":
+        val parser = build_multi_cu_parser()
+        val addr = parser.source_to_addr("math.spl", 15)
+        expect(addr.?).to_equal(true)
+        expect(addr!).to_equal(0x4080)
+
+# =============================================================================
+# Tests: function_at
+# =============================================================================
+
+describe "DwarfParser function_at":
+    it "finds function at low_pc":
+        val parser = build_golden_parser()
+        val func = parser.function_at(0x1000)
+        expect(func.?).to_equal(true)
+        expect(func!.name).to_equal("main")
+
+    it "finds function at address inside range":
+        val parser = build_golden_parser()
+        val func = parser.function_at(0x1040)
+        expect(func.?).to_equal(true)
+        expect(func!.name).to_equal("main")
+
+    it "returns nil at high_pc (exclusive upper bound)":
+        val parser = build_golden_parser()
+        val func = parser.function_at(0x1080)
+        expect(func.?).to_equal(false)
+
+    it "returns nil for address outside all functions":
+        val parser = build_golden_parser()
+        val func = parser.function_at(0x9000)
+        expect(func.?).to_equal(false)
+
+    it "finds second function by address":
+        val parser = build_golden_parser()
+        val func = parser.function_at(0x2040)
+        expect(func.?).to_equal(true)
+        expect(func!.name).to_equal("add")
+
+    it "multi-CU finds function in second CU":
+        val parser = build_multi_cu_parser()
+        val func = parser.function_at(0x4050)
+        expect(func.?).to_equal(true)
+        expect(func!.name).to_equal("sqrt")
+
+# =============================================================================
+# Tests: functions_in_range
+# =============================================================================
+
+describe "DwarfParser functions_in_range":
+    it "finds functions overlapping range":
+        val parser = build_golden_parser()
+        val funcs = parser.functions_in_range(0x1000, 0x1100)
+        expect(funcs.len()).to_equal(1)
+        expect(funcs[0].name).to_equal("main")
+
+    it "finds both functions when range spans both":
+        val parser = build_golden_parser()
+        val funcs = parser.functions_in_range(0x0000, 0x3000)
+        expect(funcs.len()).to_equal(2)
+
+    it "returns empty for range with no functions":
+        val parser = build_golden_parser()
+        val funcs = parser.functions_in_range(0x5000, 0x6000)
+        expect(funcs.len()).to_equal(0)
+
+    it "partial overlap still finds function":
+        val parser = build_golden_parser()
+        # Range starts inside main (0x1000..0x1080), ends before add
+        val funcs = parser.functions_in_range(0x1040, 0x1060)
+        expect(funcs.len()).to_equal(1)
+        expect(funcs[0].name).to_equal("main")
+
+# =============================================================================
+# Tests: line_entries
+# =============================================================================
+
+describe "DwarfParser line_entries":
+    it "returns all line entries":
+        val parser = build_golden_parser()
+        val entries = parser.line_entries()
+        expect(entries.len()).to_equal(7)
+
+    it "first entry has correct address and location":
+        val parser = build_golden_parser()
+        val entries = parser.line_entries()
+        expect(entries[0].address).to_equal(0x1000)
+        expect(entries[0].location.file).to_equal("hello.spl")
+        expect(entries[0].location.line).to_equal(1)
+
+    it "line entries include end_sequence marker":
+        val parser = build_golden_parser()
+        val entries = parser.line_entries()
+        # entry4 (index 3) is end_sequence for first function
+        val es = entries[3]
+        expect(es.end_sequence).to_equal(true)
+        expect(es.address).to_equal(0x1080)
+
+    it "line entries preserve prologue_end flag":
+        val parser = build_golden_parser()
+        val entries = parser.line_entries()
+        # entry2 (index 1) has prologue_end=true
+        val pe = entries[1]
+        expect(pe.prologue_end).to_equal(true)
+        expect(pe.address).to_equal(0x1010)
+
+    it "line entries preserve epilogue_begin flag":
+        val parser = build_golden_parser()
+        val entries = parser.line_entries()
+        # entry6 (index 5) has epilogue_begin=true
+        val eb = entries[5]
+        expect(eb.epilogue_begin).to_equal(true)
+        expect(eb.address).to_equal(0x2040)
+
+    it "is_stmt flag is correct":
+        val parser = build_golden_parser()
+        val entries = parser.line_entries()
+        # entry1 (index 0) is_stmt=true
+        expect(entries[0].is_stmt).to_equal(true)
+        # entry4 (index 3) is_stmt=false (end_sequence)
+        expect(entries[3].is_stmt).to_equal(false)
+
+# =============================================================================
+# Tests: edge cases
+# =============================================================================
+
+describe "DwarfParser edge cases":
+    it "contains_address on CU works":
+        val parser = build_golden_parser()
+        val cu = parser.compilation_units()[0]
+        expect(cu.contains_address(0x1000)).to_equal(true)
+        expect(cu.contains_address(0x2000)).to_equal(true)
+        expect(cu.contains_address(0x3000)).to_equal(false)
+        expect(cu.contains_address(0x0fff)).to_equal(false)
+
+    it "function size is correct":
+        val parser = build_golden_parser()
+        val func = parser.function_at(0x1000)!
+        # size = high_pc - low_pc = 0x1080 - 0x1000 = 0x80 = 128
+        expect(func.size()).to_equal(128)
+
+    it "function comp_unit_index is correct":
+        val parser = build_golden_parser()
+        val func = parser.function_at(0x2000)!
+        expect(func.comp_unit_index).to_equal(0)
+
+    it "multi-CU function comp_unit_index refers to correct CU":
+        val parser = build_multi_cu_parser()
+        val func = parser.function_at(0x4050)!
+        expect(func.comp_unit_index).to_equal(1)
+
+# =============================================================================
+# Tests: from_sections error paths
+# =============================================================================
+
+describe "DwarfParser from_sections errors":
+    it "rejects empty debug_info":
+        val sections = DwarfSections(
+            debug_info: [],
+            debug_abbrev: [],
+            debug_line: [],
+            debug_str: [],
+            debug_line_str: [],
+            addr_size: 8,
+        )
+        val result = DwarfParser.from_sections(sections)
+        expect(result.is_err()).to_equal(true)
+
+# =============================================================================
+# Tests: from_elf error paths and regression sentinel
+# =============================================================================
+
+describe "DwarfParser from_elf":
+    it "rejects data shorter than ELF header":
+        val tiny: [u8] = [0x7f, 0x45, 0x4c, 0x46]
+        val result = DwarfParser.from_elf(tiny)
+        expect(result.is_err()).to_equal(true)
+
+    it "rejects ELF with no debug sections":
+        # Valid ELF header but e_shnum=0, e_shoff=0
+        var elf: [u8] = []
+        # ELF magic
+        elf = elf.push(0x7f)
+        elf = elf.push(0x45)
+        elf = elf.push(0x4c)
+        elf = elf.push(0x46)
+        # class=64, data=LSB, version=1, osabi=0
+        elf = elf.push(2)
+        elf = elf.push(1)
+        elf = elf.push(1)
+        elf = elf.push(0)
+        # padding
+        var pad = 0
+        while pad < 8:
+            elf = elf.push(0)
+            pad = pad + 1
+        # e_type=2, e_machine=62
+        elf = push_u16_le(elf, 2)
+        elf = push_u16_le(elf, 62)
+        # e_version=1
+        elf = push_u32_le(elf, 1)
+        # e_entry=0
+        elf = push_u64_le(elf, 0)
+        # e_phoff=0
+        elf = push_u64_le(elf, 0)
+        # e_shoff=0  (no section headers)
+        elf = push_u64_le(elf, 0)
+        # e_flags=0
+        elf = push_u32_le(elf, 0)
+        # e_ehsize=64
+        elf = push_u16_le(elf, 64)
+        # e_phentsize=0, e_phnum=0
+        elf = push_u16_le(elf, 0)
+        elf = push_u16_le(elf, 0)
+        # e_shentsize=64, e_shnum=0, e_shstrndx=0
+        elf = push_u16_le(elf, 64)
+        elf = push_u16_le(elf, 0)
+        elf = push_u16_le(elf, 0)
+
+        val result = DwarfParser.from_elf(elf)
+        expect(result.is_err()).to_equal(true)

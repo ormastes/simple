@@ -1,0 +1,268 @@
+# Simple Browser Render Adapter
+#
+# Bridges the browser app to the shared ui.render contract (the same
+# contract src/app/terminal/render_adapter.spl and ~20 sibling apps use —
+# see app.ui.render.types.RenderConfig/RenderResult). Produces text (a
+# plain-text page summary) and HTML (real browser chrome: address bar, tab
+# strip, page content) via RenderResult.
+#
+# This is the first Simple Browser app built on the app.ui.render contract —
+# `src/os/apps/simple_browser` is a separate, baremetal/freestanding-only
+# app (spl_start() entry, VFS externs, boots as a QEMU kernel directly) that
+# cannot run in a hosted hosted/desktop session; `src/app/ui.browser` is a
+# standalone winit-windowed GUI-widget-tree app with its own event loop, not
+# a render_adapter-contract app. Neither fits the pattern every other hosted
+# app in this ecosystem follows, so this one exists to fill that gap.
+
+use app.ui.render.types.{RenderConfig, RenderResult}
+use app.ui.render.html.{html_page, html_escape, css_dark_theme, css_light_theme, css_reset}
+use app.ui.render.ansi.{colorize, BOLD, DIM, CYAN, GREEN}
+use app.ui.render.css.{css_for_components}
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{render_html_to_pixel_array}
+
+val SIMPLE_BROWSER_HOME_URL: text = "simple://home"
+val SIMPLE_BROWSER_TITLE: text = "Simple Browser"
+# Pixel viewport the loaded page is actually rendered at through the Simple
+# Browser engine (parse -> cascade -> layout -> paint, the same pipeline
+# verified in doc/08_tracking/bug/browser_text_node_blanks_frame_2026-08-05.md).
+# Kept small: this runs under the tree-walk interpreter in some callers, and
+# this proof render only needs to demonstrate the engine ran, not be a full
+# page-sized canvas.
+val SIMPLE_BROWSER_ENGINE_VIEWPORT_W: i32 = 64
+val SIMPLE_BROWSER_ENGINE_VIEWPORT_H: i32 = 36
+
+# =========================================================================
+# Render Adapter Entry Point
+# =========================================================================
+
+fn render_browser(config: RenderConfig) -> RenderResult:
+    """Render the browser view via the shared render contract.
+
+    Dispatches to text or HTML rendering based on config.format.
+    """
+    match config.format:
+        "html":
+            return render_browser_html(config)
+        "both":
+            return RenderResult.both(
+                render_browser_text(config).text_output,
+                render_browser_html(config).html_output
+            )
+        _:
+            return render_browser_text(config)
+
+# =========================================================================
+# Text Rendering
+# =========================================================================
+
+fn render_browser_text(config: RenderConfig) -> RenderResult:
+    """Render the browser as a plain-text chrome + page summary."""
+    var lines: [text] = []
+    val url = browser_url(config)
+
+    lines.push(colorize(SIMPLE_BROWSER_TITLE, BOLD))
+    lines.push(colorize("Address: {url}", DIM))
+    lines.push("")
+    lines.push(colorize("--------------------------------", DIM))
+    for line in browser_page_text_lines(url):
+        lines.push(line)
+    lines.push(colorize("--------------------------------", DIM))
+    lines.push("")
+    lines.push(colorize("Status:", BOLD) + " " + colorize("loaded", GREEN))
+    lines.push(colorize(browser_render_proof(url), DIM))
+
+    var result = RenderResult.text(lines.join("\n"))
+    result.metadata = browser_metadata(url: url)
+    return result
+
+# =========================================================================
+# HTML Rendering
+# =========================================================================
+
+fn render_browser_html(config: RenderConfig) -> RenderResult:
+    """Render the browser as a full HTML page: chrome (address bar) around
+    the loaded page's own content. The loaded page is real HTML —
+    `browser_page_body_html` — routed through the same cascade + layout +
+    paint path as any other browser window; nothing here is a pixel shortcut."""
+    val theme_css = if config.theme == "light": css_light_theme() else: css_dark_theme()
+    val css = css_reset() + theme_css + css_for_components(["card"]) + browser_css()
+    val url = browser_url(config)
+    val body = browser_chrome_html(url)
+    val page = html_page(SIMPLE_BROWSER_TITLE, css, body)
+
+    var result = RenderResult.html(page)
+    result.metadata = browser_metadata(url: url)
+    return result
+
+fn browser_url(config: RenderConfig) -> text:
+    if config.asset_path != "": config.asset_path else: SIMPLE_BROWSER_HOME_URL
+
+# =========================================================================
+# Loaded page — "Hello, World!" home page, real markup, no placeholder text
+# =========================================================================
+
+fn browser_page_text_lines(url: text) -> [text]:
+    if url == SIMPLE_BROWSER_HOME_URL:
+        ["Hello, World!", "Welcome to Simple Browser."]
+    else:
+        ["(no page loaded for {url})"]
+
+# =========================================================================
+# Real engine render — proof the page actually goes through the Simple
+# Browser engine, not just hand-assembled chrome markup.
+# =========================================================================
+
+fn browser_page_document_html(url: text) -> text:
+    """Full HTML document for the loaded page, wrapping the same body markup
+    shown in the chrome viewport below -- one source of truth fed to both
+    the display and the real engine."""
+    "<html><body>" + browser_page_body_html(url) + "</body></html>"
+
+pub fn browser_engine_pixels_at(url: text, width: i32, height: i32) -> [u32]:
+    """Actually invoke the Simple Browser engine's parse -> cascade ->
+    layout -> paint pipeline (`render_html_to_pixel_array`, the same public
+    entry point verified in
+    doc/08_tracking/bug/browser_text_node_blanks_frame_2026-08-05.md) on the
+    page's real markup, at a caller-chosen viewport size. Not a shortcut:
+    this returns the engine's genuine computed pixel buffer, not a
+    placeholder. Used both by the small fixed-size render-proof receipt
+    below and by the real GUI window (gui_window.spl)."""
+    render_html_to_pixel_array(browser_page_document_html(url), width, height)
+
+fn browser_engine_pixels(url: text) -> [u32]:
+    browser_engine_pixels_at(url, SIMPLE_BROWSER_ENGINE_VIEWPORT_W, SIMPLE_BROWSER_ENGINE_VIEWPORT_H)
+
+fn browser_engine_painted_pixel_count(pixels: [u32]) -> i64:
+    var count: i64 = 0
+    for px in pixels:
+        if px != 0xFFFFFFFFu32:
+            count = count + 1
+    count
+
+fn browser_render_proof(url: text) -> text:
+    """Human-readable receipt that the engine actually ran for this page,
+    with a real (non-zero for real content) painted-pixel count."""
+    val pixels = browser_engine_pixels(url)
+    val painted = browser_engine_painted_pixel_count(pixels)
+    "Rendered by Simple Browser engine: {SIMPLE_BROWSER_ENGINE_VIEWPORT_W}x{SIMPLE_BROWSER_ENGINE_VIEWPORT_H}px, {painted} pixels painted"
+
+fn browser_page_body_html(url: text) -> text:
+    """The page content area's real markup. Every window that opens this
+    adapter at the default URL gets the same genuine Hello World page —
+    real headings/paragraphs, cascaded through the shared HTML renderer,
+    not a pre-rendered bitmap."""
+    if url == SIMPLE_BROWSER_HOME_URL:
+        "<div class=\"browser-page\">" +
+            "<h1 class=\"browser-page-title\">Hello, World!</h1>" +
+            "<p class=\"browser-page-lede\">Welcome to Simple Browser.</p>" +
+            "</div>"
+    else:
+        "<div class=\"browser-page\">" +
+            "<p class=\"browser-page-lede\">No page loaded for " +
+            html_escape(url) + "</p></div>"
+
+# =========================================================================
+# Chrome — address bar + tab strip around the page content
+# =========================================================================
+
+fn browser_css() -> text:
+    """Browser-specific CSS: chrome (address bar, tab strip) plus the loaded
+    page's own styles, all real cascaded rules — no inline pixel fills."""
+    var s = ""
+    s = "{s}.browser-container {\n"
+    s = "{s}  max-width: 900px;\n"
+    s = "{s}  margin: 0 auto;\n"
+    s = "{s}}\n"
+    s = "{s}.browser-tabstrip {\n"
+    s = "{s}  display: flex;\n"
+    s = "{s}  gap: 4px;\n"
+    s = "{s}  padding: 6px 6px 0 6px;\n"
+    s = "{s}}\n"
+    s = "{s}.browser-tab {\n"
+    s = "{s}  padding: 6px 14px;\n"
+    s = "{s}  background: var(--bg-card, #161b22);\n"
+    s = "{s}  border: 1px solid var(--border, #30363d);\n"
+    s = "{s}  border-bottom: none;\n"
+    s = "{s}  border-radius: 6px 6px 0 0;\n"
+    s = "{s}  font-size: 12px;\n"
+    s = "{s}}\n"
+    s = "{s}.browser-tab.active {\n"
+    s = "{s}  color: var(--blue, #58a6ff);\n"
+    s = "{s}}\n"
+    s = "{s}.browser-chrome {\n"
+    s = "{s}  display: flex;\n"
+    s = "{s}  align-items: center;\n"
+    s = "{s}  gap: 8px;\n"
+    s = "{s}  background: var(--bg-card, #161b22);\n"
+    s = "{s}  border: 1px solid var(--border, #30363d);\n"
+    s = "{s}  border-radius: 0 8px 8px 8px;\n"
+    s = "{s}  padding: 8px 12px;\n"
+    s = "{s}  margin-bottom: 12px;\n"
+    s = "{s}}\n"
+    s = "{s}.browser-nav-btn {\n"
+    s = "{s}  color: var(--text-dim, #8b949e);\n"
+    s = "{s}  font-family: monospace;\n"
+    s = "{s}}\n"
+    s = "{s}.browser-address {\n"
+    s = "{s}  flex: 1;\n"
+    s = "{s}  background: var(--bg, #0d1117);\n"
+    s = "{s}  border: 1px solid var(--border, #30363d);\n"
+    s = "{s}  border-radius: 14px;\n"
+    s = "{s}  padding: 4px 12px;\n"
+    s = "{s}  font-family: monospace;\n"
+    s = "{s}  font-size: 12px;\n"
+    s = "{s}  color: var(--text-dim, #8b949e);\n"
+    s = "{s}}\n"
+    s = "{s}.browser-viewport {\n"
+    s = "{s}  background: #ffffff;\n"
+    s = "{s}  border: 2px solid var(--border, #30363d);\n"
+    s = "{s}  border-radius: 8px;\n"
+    s = "{s}  padding: 24px;\n"
+    s = "{s}  min-height: 120px;\n"
+    s = "{s}}\n"
+    s = "{s}.browser-page-title {\n"
+    s = "{s}  font-size: 20px;\n"
+    s = "{s}  color: #0b1f33;\n"
+    s = "{s}  margin: 0 0 8px 0;\n"
+    s = "{s}}\n"
+    s = "{s}.browser-page-lede {\n"
+    s = "{s}  font-size: 13px;\n"
+    s = "{s}  color: #33475b;\n"
+    s = "{s}}\n"
+    s = "{s}.browser-render-proof {\n"
+    s = "{s}  font-size: 11px;\n"
+    s = "{s}  color: var(--text-dim, #8b949e);\n"
+    s = "{s}  padding: 4px 12px;\n"
+    s = "{s}}\n"
+    return s
+
+fn browser_chrome_html(url: text) -> text:
+    """Tab strip + address bar wrapping the loaded page's real content."""
+    var h = ""
+    h = "{h}<div class=\"browser-container\">\n"
+    h = "{h}  <div class=\"browser-tabstrip\">\n"
+    h = "{h}    <div class=\"browser-tab active\">Simple Browser</div>\n"
+    h = "{h}  </div>\n"
+    h = "{h}  <div class=\"browser-chrome\">\n"
+    h = "{h}    <span class=\"browser-nav-btn\">&larr;</span>\n"
+    h = "{h}    <span class=\"browser-nav-btn\">&rarr;</span>\n"
+    h = "{h}    <span class=\"browser-nav-btn\">&#8635;</span>\n"
+    h = "{h}    <div class=\"browser-address\">" + html_escape(url) + "</div>\n"
+    h = "{h}  </div>\n"
+    h = "{h}  <div class=\"browser-viewport\">\n"
+    h = "{h}    " + browser_page_body_html(url) + "\n"
+    h = "{h}  </div>\n"
+    h = "{h}  <div class=\"browser-render-proof\">" + html_escape(browser_render_proof(url)) + "</div>\n"
+    h = "{h}</div>\n"
+    return h
+
+# =========================================================================
+# Helpers
+# =========================================================================
+
+fn browser_metadata(url: text) -> Dict<text, text>:
+    var meta: Dict<text, text> = {}
+    meta["adapter"] = "browser"
+    meta["url"] = url
+    meta["title"] = SIMPLE_BROWSER_TITLE
+    return meta

@@ -1,0 +1,235 @@
+#!/bin/sh
+# Fail-closed sanity gate for a Windows Rust-seed / MSVC build, run BEFORE
+# cargo/cc ever starts. Every check here exists because it silently broke a
+# real build this session (2026-08-09) with little or no diagnostic text —
+# each failure mode below cost real debugging time because the underlying
+# tool (cc1.exe, cl.exe, gcc) failed SILENTLY rather than with a clear error.
+#
+# 1. Low disk space: the C: drive hit 100% full (6.9 GB free out of 2.3 TB)
+#    from accumulated build-cache growth across several same-day rebuild
+#    attempts. Every C compiler on the host (MSVC cl.exe via cc-rs AND MSYS2
+#    mingw64 gcc) then failed with exit 1 and ZERO stdout/stderr — no "disk
+#    full" message anywhere. `cargo build`'s own error surfaced three build
+#    stages downstream as an unrelated-looking Rust panic
+#    ("C compiler failed to build native term library"), which is why this
+#    check runs standalone, first, with its own clear message.
+# 2. A Linux-toolchain (MSYS2/MinGW) `llvm-config`/`gcc`/`cc1` shadowing the
+#    Windows-native (MSVC) tool earlier on PATH: `llvm-sys`'s build script
+#    shells out to whatever `llvm-config` resolves to, and if that's a
+#    MinGW build (common on a dev box with MSYS2 installed for git-bash),
+#    it injects `-IC:/.../mingw64/include` into an MSVC `cl.exe`
+#    invocation, producing hundreds of `stdlib.h`/`malloc.h` syntax errors
+#    that look like a compiler bug, not a PATH-order problem.
+# 3. A raw `Command::new("gcc")` fallback (as opposed to going through
+#    `cc::Build`, which does its own MSVC/toolchain discovery) can silently
+#    invoke a BROKEN local gcc install with no useful diagnostic at all:
+#    this host's MSYS2 mingw64 `cc1.exe` returned exit 127 ("command not
+#    found") from a direct invocation despite the 37 MB executable existing
+#    on disk at a plausible size — `gcc -c trivial.c` failed with empty
+#    stdout AND stderr, not even a "compiler driver failed" message.
+#
+# Usage: check-windows-build-env-sanity.shs [--check]
+#   (default / --check)  run all checks, print PASS/FAIL per check, exit
+#                         nonzero if any failed.
+# Exit 0 = safe to proceed with a build, 1 = a real problem found (message
+# names which), 2 = could not determine (fail closed).
+#
+# --selftest exercises the disk-space threshold logic against synthetic
+# inputs (the other two checks call real host tools directly and are not
+# meaningfully fakeable without mocking cargo/rustc's own env probing, so
+# selftest covers the one check with pure arithmetic logic).
+
+set -u
+
+SELF=check-windows-build-env-sanity
+
+die() {
+    code=$1
+    shift
+    echo "$SELF: ERROR — $*" >&2
+    exit "$code"
+}
+
+# --- pure logic under test: extracted so --selftest can drive it directly ---
+# $1 = free bytes, $2 = threshold bytes. Prints "ok" or "low", never fails.
+disk_space_verdict() {
+    free_bytes=$1
+    threshold_bytes=$2
+    if [ "$free_bytes" -lt "$threshold_bytes" ]; then
+        echo "low"
+    else
+        echo "ok"
+    fi
+}
+
+# Extracted so --selftest can drive it directly. Two real path shapes have
+# been observed for `git rev-parse --show-toplevel` output across tooling in
+# this repo: Windows-drive-letter (`C:/Users/...`, what this host's git
+# actually emits — PROVED 2026-08-09, the original `^/[A-Za-z]/` -only regex
+# silently matched nothing against it and fell through to the "could not
+# determine" skip branch on every run) and MSYS-style (`/c/Users/...`).
+extract_drive_letter() {
+    printf '%s' "$1" | sed -E -e 's#^([A-Za-z]):/.*#\1#' -e 's#^/([A-Za-z])/.*#\1#'
+}
+
+run_selftest() {
+    fails=0
+    total=0
+    check_case() {
+        label=$1; free=$2; threshold=$3; expected=$4
+        total=$((total + 1))
+        actual=$(disk_space_verdict "$free" "$threshold")
+        if [ "$actual" != "$expected" ]; then
+            echo "$SELF: SELFTEST FAIL — $label: expected '$expected', got '$actual'" >&2
+            fails=$((fails + 1))
+        fi
+    }
+    check_case "well above threshold" 100000000000 20000000000 "ok"
+    check_case "exactly at threshold" 20000000000 20000000000 "ok"
+    check_case "just below threshold" 19999999999 20000000000 "low"
+    check_case "far below threshold (the real 2026-08-09 case: ~6.9GB free)" 7000000000 20000000000 "low"
+    check_case "zero free" 0 20000000000 "low"
+
+    check_drive_case() {
+        label=$1; input=$2; expected=$3
+        total=$((total + 1))
+        actual=$(extract_drive_letter "$input")
+        if [ "$actual" != "$expected" ]; then
+            echo "$SELF: SELFTEST FAIL — $label: expected '$expected', got '$actual'" >&2
+            fails=$((fails + 1))
+        fi
+    }
+    check_drive_case "Windows drive-letter form (this host's real output)" "C:/Users/ormas/dev/simple" "C"
+    check_drive_case "MSYS form" "/c/Users/ormas/dev/simple" "c"
+    check_drive_case "Windows drive-letter form, D drive" "D:/repos/other" "D"
+
+    if [ "$fails" -ne 0 ]; then
+        echo "$SELF: selftest FAILED ($fails/$total cases wrong)" >&2
+        return 1
+    fi
+    echo "$SELF: selftest $total/$total cases correct"
+    return 0
+}
+
+if [ "${1:-}" = "--selftest" ]; then
+    run_selftest
+    exit $?
+fi
+
+run_selftest >/dev/null 2>&1 || die 2 "selftest failed; refusing to trust this script's own logic"
+
+case "$(uname -s 2>/dev/null || echo unknown)" in
+    MINGW*|MSYS*|CYGWIN*) : ;;
+    *)
+        echo "$SELF: PASS — non-Windows host, MSVC-specific checks not applicable ($(uname -s 2>/dev/null))"
+        exit 0
+        ;;
+esac
+
+toplevel=$(git rev-parse --show-toplevel 2>/dev/null) || toplevel=""
+[ -n "$toplevel" ] || die 2 "cwd '$(pwd)' is not inside a git repository"
+
+fail_count=0
+
+# --- Check 1: disk space on the drive backing the repo and TEMP -----------
+# A Rust bootstrap build plus its intermediate object/artifact churn across
+# a same-day retry loop can consume tens of GB; 20 GB free is a conservative
+# floor, not a tight one — the incident that motivated this check happened
+# at 6.9 GB free, an order of magnitude below it.
+THRESHOLD_GB=20
+THRESHOLD_BYTES=$((THRESHOLD_GB * 1000 * 1000 * 1000))
+# `git rev-parse --show-toplevel` on this host prints a Windows-drive-letter
+# path (`C:/Users/...`), NOT the MSYS `/c/Users/...` form some other tooling
+# in this repo assumes — extract the letter accordingly. Accept BOTH forms
+# defensively since which one a given git build emits is not guaranteed
+# across environments.
+drive_letter=$(extract_drive_letter "$toplevel")
+free_bytes=""
+if [ ${#drive_letter} -eq 1 ] && command -v powershell.exe >/dev/null 2>&1; then
+    free_bytes=$(powershell.exe -NoProfile -Command \
+        "(Get-PSDrive -Name '$drive_letter' -ErrorAction SilentlyContinue).Free" 2>/dev/null | tr -d '\r\n ')
+fi
+if [ -z "$free_bytes" ] || ! [ "$free_bytes" -ge 0 ] 2>/dev/null; then
+    echo "$SELF: WARNING — could not determine free disk space (powershell.exe unavailable or query failed); skipping check 1" >&2
+else
+    verdict=$(disk_space_verdict "$free_bytes" "$THRESHOLD_BYTES")
+    free_gb=$((free_bytes / 1000 / 1000 / 1000))
+    if [ "$verdict" = "low" ]; then
+        echo "$SELF: FAIL — only ${free_gb}GB free (threshold ${THRESHOLD_GB}GB) on the drive backing $toplevel." >&2
+        echo "  A C compiler failing with exit 1 and NO output (not even a linker error) is the" >&2
+        echo "  signature of this exact problem. Free space first — check src/compiler_rust/target/{debug,x86_64-pc-windows-gnu,...}" >&2
+        echo "  for stale/abandoned build-profile caches before assuming a real compiler defect." >&2
+        fail_count=$((fail_count + 1))
+    else
+        echo "$SELF: check 1 (disk space) PASS — ${free_gb}GB free"
+    fi
+fi
+
+# --- Check 2: llvm-config PATH-order contamination -------------------------
+# Only meaningful when llvm-config is actually on PATH at all; a host that
+# builds with an explicit LLVM_SYS_*_PREFIX set and no llvm-config on PATH
+# is not exposed to this failure mode regardless.
+llvm_config_path=$(command -v llvm-config 2>/dev/null || command -v llvm-config.exe 2>/dev/null || true)
+if [ -z "$llvm_config_path" ]; then
+    echo "$SELF: check 2 (llvm-config PATH order) PASS — no llvm-config on PATH (contamination not possible via PATH search)"
+else
+    case "$llvm_config_path" in
+        *mingw64*|*msys2*|*/msys/*|*\\msys2\\*|*\\mingw64\\*)
+            echo "$SELF: FAIL — llvm-config on PATH resolves to a Linux-toolchain (MSYS2/MinGW) build: $llvm_config_path" >&2
+            echo "  llvm-sys's build script shells out to THIS llvm-config; a MinGW one injects" >&2
+            echo "  '-I.../mingw64/include' into an MSVC cl.exe call, producing hundreds of" >&2
+            echo "  stdlib.h/malloc.h syntax errors that look like a compiler bug, not a PATH issue." >&2
+            echo "  Fix: set LLVM_SYS_180_PREFIX explicitly to the MSVC-built LLVM install, or" >&2
+            echo "  reorder PATH so it is found before the MSYS2/MinGW one." >&2
+            fail_count=$((fail_count + 1))
+            ;;
+        *)
+            echo "$SELF: check 2 (llvm-config PATH order) PASS — resolves to $llvm_config_path"
+            ;;
+    esac
+fi
+
+# --- Check 3: a real, working C compiler is reachable -----------------------
+# Compile a trivial file and confirm BOTH a nonzero exit is impossible AND
+# the object file actually exists — catches the exact silent-failure shape
+# from 2026-08-09 (gcc exit 1, zero stdout/stderr, no .o produced).
+probe_dir=$(mktemp -d) || die 2 "mktemp failed for compiler probe"
+trap 'rm -rf "$probe_dir"' EXIT INT TERM
+printf 'int rt_compiler_probe(void) { return 0; }\n' > "$probe_dir/probe.c"
+compiler_ok=0
+compiler_used=""
+for candidate in cl.exe gcc.exe gcc cc; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+        case "$candidate" in
+            cl.exe)
+                ( cd "$probe_dir" && cl.exe /nologo /c probe.c >probe_cl.log 2>&1 )
+                [ -f "$probe_dir/probe.obj" ] && { compiler_ok=1; compiler_used="cl.exe"; break; }
+                ;;
+            *)
+                "$candidate" -c "$probe_dir/probe.c" -o "$probe_dir/probe.o" >"$probe_dir/probe_cc.log" 2>&1
+                [ -f "$probe_dir/probe.o" ] && { compiler_ok=1; compiler_used="$candidate"; break; }
+                ;;
+        esac
+    fi
+done
+if [ "$compiler_ok" -eq 1 ]; then
+    echo "$SELF: check 3 (working C compiler) PASS — $compiler_used produced a real object file"
+else
+    echo "$SELF: FAIL — no C compiler on PATH could compile a trivial one-line file." >&2
+    echo "  This is the exact silent-failure shape seen 2026-08-09: this host's MSYS2 mingw64" >&2
+    echo "  cc1.exe returned exit 127 ('command not found') on direct invocation despite the" >&2
+    echo "  37MB executable existing on disk, and cl.exe was not on PATH in a plain shell (no" >&2
+    echo "  vcvars64.bat sourced). Either run from a Developer Command Prompt, or ensure the" >&2
+    echo "  build routes through cc::Build (which does its own MSVC discovery independent of" >&2
+    echo "  PATH) rather than a raw Command::new(\"cl.exe\")/Command::new(\"gcc\")." >&2
+    fail_count=$((fail_count + 1))
+fi
+rm -rf "$probe_dir"
+trap - EXIT INT TERM
+
+if [ "$fail_count" -ne 0 ]; then
+    echo "$SELF: FAIL — $fail_count check(s) failed; see above"
+    exit 1
+fi
+echo "$SELF: PASS — all checks passed, safe to proceed with a Windows build"
+exit 0

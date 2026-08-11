@@ -1,0 +1,75 @@
+"""Native cross-module class field-layout regression."""
+
+use std.spec.*
+use std.io_runtime.{dir_create_all, file_write, remove_file_if_exists, shell}
+
+val BUILD_DIR = "build/native_cross_module_class_field_layout"
+val PROVIDER_PATH = BUILD_DIR + "/payload_provider.spl"
+val ENTRY_PATH = BUILD_DIR + "/main.spl"
+val BINARY_PATH = BUILD_DIR + "/main"
+val CACHE_DIR = BUILD_DIR + "/cache"
+
+fn provider_source() -> text:
+    r"""class LayoutPayload:
+    pad: i64
+    wanted: i64
+
+class LayoutMaker:
+    seed: i64
+
+impl LayoutMaker:
+    me make() -> LayoutPayload:
+        LayoutPayload(pad: me.seed, wanted: self.seed + 35)
+
+    static fn create(seed: i64) -> LayoutPayload:
+        LayoutPayload(pad: seed, wanted: 42)
+
+export LayoutPayload, LayoutMaker
+"""
+
+fn entry_source() -> text:
+    r"""use .payload_provider.{LayoutPayload, LayoutMaker}
+
+class DecoyLayout:
+    f0: i64
+    f1: i64
+    f2: i64
+    f3: i64
+    f4: i64
+    f5: i64
+    f6: i64
+    f7: i64
+    f8: i64
+    f9: i64
+    wanted: i64
+
+fn main():
+    val maker: LayoutMaker = LayoutMaker(seed: 7)
+    val payload: LayoutPayload = maker.make()
+    val static_payload: LayoutPayload = LayoutMaker.create(9)
+    print(payload.wanted + static_payload.wanted)
+"""
+
+describe "native cross-module class field layout":
+    it "writes the provider and entry modules":
+        expect(dir_create_all(BUILD_DIR)).to_equal(true)
+        expect(file_write(PROVIDER_PATH, provider_source())).to_equal(true)
+        expect(file_write(ENTRY_PATH, entry_source())).to_equal(true)
+        expect(remove_file_if_exists(BINARY_PATH)).to_equal(true)
+
+    it "matches the interpreter oracle":
+        val result = shell("env -u SIMPLE_BOOTSTRAP bin/simple run " + ENTRY_PATH)
+        expect(result.exit_code).to_equal(0)
+        expect(result.stdout).to_equal("84")
+
+    it "reads the provider field through the incremental native closure":
+        val compiled = shell(
+            "env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH SIMPLE_NO_STUB_FALLBACK=1 " +
+            "bin/simple native-build --entry " + ENTRY_PATH +
+            " --entry-closure --cache-dir " + CACHE_DIR + " -o " + BINARY_PATH
+        )
+        expect(compiled.exit_code).to_equal(0)
+
+        val result = shell(BINARY_PATH)
+        expect(result.exit_code).to_equal(0)
+        expect(result.stdout).to_equal("84")

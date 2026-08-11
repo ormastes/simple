@@ -1,0 +1,67 @@
+"""
+As a Simple developer whose test lane co-loads many modules at once,
+I want a loud diagnostic when two co-loaded modules each define a class
+with the same name, so that the resulting cross-module member
+mis-dispatch does not masquerade as "method not found" or
+"no field named ..." on a class that plainly has the member.
+
+Background: the interpreter keys its struct/class table on the BARE
+name, so a second module's same-named class clobbers the first and
+method bodies from one definition execute against instances of the
+other. Three co-loaded `StringInterner` and `FileLock` definitions broke
+test-DB persistence this exact way. See
+doc/08_tracking/bug/interp_class_name_collision_breaks_test_db_persistence_2026-08-10.md
+"""
+# @req REQ-COMPILER-CLASS-NAME-COLLISION-WARN
+
+use std.spec.*
+use compiler.core.ast.{module_set_path, module_get_path}
+use compiler.core.interpreter.eval_tables.{
+    struct_table_reset, struct_table_register, struct_table_lookup,
+    struct_table_collisions, struct_table_get_module
+}
+
+# @manual_section "Class-name collision diagnostic"
+describe "interpreter class/struct-name collision warning":
+    it "flags a class registered from two different modules as a collision":
+        step("register the same class name from two distinct module paths")
+        val saved = module_get_path()
+        struct_table_reset()
+        module_set_path("spec/fixture/mod_a.spl")
+        struct_table_register("SpecSabotageCollider", 101)
+        module_set_path("spec/fixture/mod_b.spl")
+        struct_table_register("SpecSabotageCollider", 202)
+        module_set_path(saved)
+
+        step("the collision list names the colliding class")
+        val hits = struct_table_collisions()
+        var found = false
+        var i = 0
+        while i < hits.len():
+            if hits[i] == "SpecSabotageCollider":
+                found = true
+            i = i + 1
+        assert_true(found)
+
+        step("last-write-wins is still the lookup behaviour being warned about")
+        expect(struct_table_lookup("SpecSabotageCollider")).to_equal(202)
+        expect(struct_table_get_module("SpecSabotageCollider")).to_equal("spec/fixture/mod_b.spl")
+
+    it "stays quiet for re-registration of the same class from the same module":
+        step("register one class twice from one module path")
+        val saved = module_get_path()
+        struct_table_reset()
+        module_set_path("spec/fixture/mod_solo.spl")
+        struct_table_register("SpecUniqueSolo", 7)
+        struct_table_register("SpecUniqueSolo", 8)
+        module_set_path(saved)
+
+        step("no collision is recorded for the unique name")
+        val hits = struct_table_collisions()
+        var found = false
+        var i = 0
+        while i < hits.len():
+            if hits[i] == "SpecUniqueSolo":
+                found = true
+            i = i + 1
+        assert_false(found)

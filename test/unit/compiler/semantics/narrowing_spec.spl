@@ -1,0 +1,366 @@
+# Flow-Sensitive Type Narrowing Tests
+#
+# Exercises the REAL narrowing implementation in
+# src/compiler/35.semantics/narrowing.spl against real HIR fixtures.
+#
+# History: this spec previously declared plain-text mirrors of NarrowingFact /
+# NarrowingScope / NarrowingContext and a text-based re-implementation of the
+# condition analysis, so the actual algorithm (analyze_condition, negate_facts,
+# _combine_facts, definitely_terminates) was never executed. See
+# doc/08_tracking/bug/narrowing_spec_shadows_real_narrowing_algorithm_untested_2026-08-10.md
+
+use compiler.semantics.narrowing.*
+use compiler.hir.hir.*
+use compiler.frontend.core.lexer.*
+
+# ============================================================================
+# HIR fixtures
+# ============================================================================
+
+fn sp() -> Span:
+    """Zero span -- narrowing never inspects span contents, only propagates it."""
+    lex_span_empty()
+
+fn ty_i64() -> HirType:
+    HirType(kind: HirTypeKind.Int(bits: 64, signed: true), span: sp())
+
+fn ty_text() -> HirType:
+    HirType(kind: HirTypeKind.Str, span: sp())
+
+fn ty_bool() -> HirType:
+    HirType(kind: HirTypeKind.Bool, span: sp())
+
+fn ty_opt(inner: HirType) -> HirType:
+    HirType(kind: HirTypeKind.Optional(inner: inner), span: sp())
+
+fn expr_of(kind: HirExprKind) -> HirExpr:
+    HirExpr(kind: kind, has_type_: false, type_: ty_i64(), span: sp())
+
+fn typed_expr_of(kind: HirExprKind, ty: HirType) -> HirExpr:
+    """An expression carrying a type annotation -- required for `is` RHS extraction."""
+    HirExpr(kind: kind, has_type_: true, type_: ty, span: sp())
+
+fn var_expr(sym_id: i64) -> HirExpr:
+    expr_of(HirExprKind.Var(symbol: SymbolId.new(sym_id)))
+
+fn nil_expr() -> HirExpr:
+    expr_of(HirExprKind.NilLit)
+
+fn binary_expr(op: HirBinOp, left: HirExpr, right: HirExpr) -> HirExpr:
+    expr_of(HirExprKind.Binary(op: op, left: left, right: right))
+
+fn not_expr(inner: HirExpr) -> HirExpr:
+    expr_of(HirExprKind.Unary(op: HirUnaryOp.Not, operand: inner))
+
+fn exists_expr(base: HirExpr) -> HirExpr:
+    expr_of(HirExprKind.ExistsCheck(base: base))
+
+# ============================================================================
+# Symbol type environment used by analyze_condition's type_lookup callback
+# ============================================================================
+
+fn env_lookup(sym_id: i64) -> HirType?:
+    """Symbol-id -> declared type. Ids are chosen per test group below."""
+    if sym_id == 10: return Some(ty_opt(ty_i64()))     # i64?
+    if sym_id == 12: return Some(ty_opt(ty_i64()))     # i64?
+    if sym_id == 13: return Some(ty_i64())             # i64 (non-optional)
+    if sym_id == 20: return Some(ty_opt(ty_text()))    # text?
+    if sym_id == 21: return Some(ty_i64())             # i64 (non-optional)
+    if sym_id == 30: return Some(ty_opt(ty_text()))    # text?
+    if sym_id == 31: return Some(ty_bool())            # bool (non-optional)
+    if sym_id == 50: return Some(ty_opt(ty_i64()))     # i64?
+    if sym_id == 60: return Some(ty_opt(ty_text()))    # text?
+    if sym_id == 70: return Some(ty_i64())             # i64 (for is / is-not)
+    nil
+
+# ============================================================================
+# Observation helpers (test-side only -- they read the real types, they do not
+# re-implement any narrowing logic)
+# ============================================================================
+
+fn type_tag(ty: HirType) -> text:
+    """Render a HirType as a short readable tag for assertions."""
+    match ty.kind:
+        case Int(bits, signed): "i64"
+        case Str: "text"
+        case Bool: "bool"
+        case Optional(inner): type_tag(inner) + "?"
+        case _: "other"
+
+fn cond_tag(c: NarrowingCondition) -> text:
+    """Render a NarrowingCondition variant as a tag for assertions."""
+    match c:
+        case NilCheck(negated):
+            if negated: "NilCheckNeg" else: "NilCheckPos"
+        case ExistsCheck: "ExistsCheck"
+        case IsCheck(target_type): "IsCheck"
+        case IsNotCheck(target_type): "IsNotCheck"
+        case Truthiness: "Truthiness"
+
+fn fact_of(sym_id: i64, original: HirType, narrowed: HirType, c: NarrowingCondition) -> NarrowingFact:
+    NarrowingFact(
+        symbol_id: sym_id,
+        original_type: original,
+        narrowed_type: narrowed,
+        condition: c,
+        span: sp()
+    )
+
+fn stmt_expr(e: HirExpr) -> HirStmt:
+    HirStmt(kind: HirStmtKind.Expr(expr: e), span: sp())
+
+fn block_of(stmts: [HirStmt]) -> HirBlock:
+    HirBlock(stmts: stmts, has: false, value: nil_expr(), span: sp())
+
+# ============================================================================
+# Test Group 1: NarrowingContext basic operations (real class, HirType facts)
+# ============================================================================
+
+describe "NarrowingContext basic operations":
+    it "pushes scope, adds fact, and looks it up":
+        var ctx = NarrowingContext.new()
+        ctx.push_scope()
+        ctx.add_fact(fact_of(1, ty_opt(ty_i64()), ty_i64(), NarrowingCondition.NilCheck(negated: false)))
+        val result = ctx.lookup(1)
+        expect(result != nil).to_equal(true)
+        expect(type_tag(result.unwrap())).to_equal("i64")
+
+    it "facts do not leak across scope boundaries":
+        var ctx = NarrowingContext.new()
+        ctx.push_scope()
+        ctx.add_fact(fact_of(2, ty_opt(ty_text()), ty_text(), NarrowingCondition.ExistsCheck))
+        expect(ctx.lookup(2) != nil).to_equal(true)
+        ctx.pop_scope()
+        expect(ctx.lookup(2) != nil).to_equal(false)
+
+    it "innermost scope takes priority":
+        var ctx = NarrowingContext.new()
+        ctx.add_fact(fact_of(3, ty_opt(ty_i64()), ty_i64(), NarrowingCondition.Truthiness))
+        ctx.push_scope()
+        ctx.add_fact(fact_of(3, ty_opt(ty_i64()), ty_text(), NarrowingCondition.NilCheck(negated: false)))
+        val result = ctx.lookup(3)
+        expect(result != nil).to_equal(true)
+        expect(type_tag(result.unwrap())).to_equal("text")
+
+    it "add_facts adds multiple facts at once":
+        var ctx = NarrowingContext.new()
+        val facts = [
+            fact_of(10, ty_opt(ty_i64()), ty_i64(), NarrowingCondition.NilCheck(negated: false)),
+            fact_of(11, ty_opt(ty_text()), ty_text(), NarrowingCondition.ExistsCheck)
+        ]
+        ctx.add_facts(facts)
+        expect(ctx.lookup(10) != nil).to_equal(true)
+        expect(ctx.lookup(11) != nil).to_equal(true)
+        expect(ctx.lookup(99) != nil).to_equal(false)
+
+# ============================================================================
+# Test Group 2: analyze_condition -- nil checks
+# ============================================================================
+
+describe "Condition analysis - nil checks":
+    it "x != nil narrows Optional(i64) to i64":
+        val facts = analyze_condition(binary_expr(HirBinOp.NotEq, var_expr(10), nil_expr()), env_lookup)
+        expect(facts.len()).to_equal(1)
+        expect(facts[0].symbol_id).to_equal(10)
+        expect(type_tag(facts[0].narrowed_type)).to_equal("i64")
+        expect(cond_tag(facts[0].condition)).to_equal("NilCheckPos")
+
+    it "nil != x narrows the same way (operand order independent)":
+        val facts = analyze_condition(binary_expr(HirBinOp.NotEq, nil_expr(), var_expr(10)), env_lookup)
+        expect(facts.len()).to_equal(1)
+        expect(facts[0].symbol_id).to_equal(10)
+        expect(type_tag(facts[0].narrowed_type)).to_equal("i64")
+
+    it "x == nil produces a negated nil-check fact that keeps the optional type":
+        val facts = analyze_condition(binary_expr(HirBinOp.Eq, var_expr(12), nil_expr()), env_lookup)
+        expect(facts.len()).to_equal(1)
+        expect(facts[0].symbol_id).to_equal(12)
+        expect(type_tag(facts[0].narrowed_type)).to_equal("i64?")
+        expect(cond_tag(facts[0].condition)).to_equal("NilCheckNeg")
+
+    it "non-optional type produces no facts":
+        val facts = analyze_condition(binary_expr(HirBinOp.NotEq, var_expr(13), nil_expr()), env_lookup)
+        expect(facts.is_empty()).to_equal(true)
+
+    it "unknown symbol produces no facts":
+        val facts = analyze_condition(binary_expr(HirBinOp.NotEq, var_expr(9999), nil_expr()), env_lookup)
+        expect(facts.is_empty()).to_equal(true)
+
+# ============================================================================
+# Test Group 3: analyze_condition -- exists checks
+# ============================================================================
+
+describe "Condition analysis - exists checks":
+    it "x.? where x has Optional(text) narrows to text":
+        val facts = analyze_condition(exists_expr(var_expr(20)), env_lookup)
+        expect(facts.len()).to_equal(1)
+        expect(facts[0].symbol_id).to_equal(20)
+        expect(type_tag(facts[0].narrowed_type)).to_equal("text")
+        expect(cond_tag(facts[0].condition)).to_equal("ExistsCheck")
+
+    it "x.? where x has non-optional type returns empty":
+        val facts = analyze_condition(exists_expr(var_expr(21)), env_lookup)
+        expect(facts.is_empty()).to_equal(true)
+
+# ============================================================================
+# Test Group 4: analyze_condition -- truthiness
+# ============================================================================
+
+describe "Condition analysis - truthiness":
+    it "bare Var with Optional type narrows to inner":
+        val facts = analyze_condition(var_expr(30), env_lookup)
+        expect(facts.len()).to_equal(1)
+        expect(facts[0].symbol_id).to_equal(30)
+        expect(type_tag(facts[0].narrowed_type)).to_equal("text")
+        expect(cond_tag(facts[0].condition)).to_equal("Truthiness")
+
+    it "bare Var with non-optional produces no narrowing":
+        val facts = analyze_condition(var_expr(31), env_lookup)
+        expect(facts.is_empty()).to_equal(true)
+
+# ============================================================================
+# Test Group 5: analyze_condition -- is / is-not / and / not
+# ============================================================================
+
+describe "Condition analysis - is, is-not, and, not":
+    it "x is Type narrows to the annotated target type":
+        val target = typed_expr_of(HirExprKind.NilLit, ty_text())
+        val facts = analyze_condition(binary_expr(HirBinOp.Is, var_expr(70), target), env_lookup)
+        expect(facts.len()).to_equal(1)
+        expect(facts[0].symbol_id).to_equal(70)
+        expect(type_tag(facts[0].narrowed_type)).to_equal("text")
+        expect(cond_tag(facts[0].condition)).to_equal("IsCheck")
+
+    it "x is not Type keeps the original type and records IsNotCheck":
+        val target = typed_expr_of(HirExprKind.NilLit, ty_text())
+        val facts = analyze_condition(binary_expr(HirBinOp.IsNot, var_expr(70), target), env_lookup)
+        expect(facts.len()).to_equal(1)
+        expect(type_tag(facts[0].narrowed_type)).to_equal("i64")
+        expect(cond_tag(facts[0].condition)).to_equal("IsNotCheck")
+
+    it "x is Type with an untyped RHS yields no fact":
+        val facts = analyze_condition(binary_expr(HirBinOp.Is, var_expr(70), nil_expr()), env_lookup)
+        expect(facts.is_empty()).to_equal(true)
+
+    it "a and b combines the facts from both operands":
+        val left = binary_expr(HirBinOp.NotEq, var_expr(10), nil_expr())
+        val right = exists_expr(var_expr(20))
+        val facts = analyze_condition(binary_expr(HirBinOp.And, left, right), env_lookup)
+        expect(facts.len()).to_equal(2)
+        expect(facts[0].symbol_id).to_equal(10)
+        expect(facts[1].symbol_id).to_equal(20)
+
+    it "not (x == nil) negates the inner facts to a positive nil check":
+        val inner = binary_expr(HirBinOp.Eq, var_expr(12), nil_expr())
+        val facts = analyze_condition(not_expr(inner), env_lookup)
+        expect(facts.len()).to_equal(1)
+        expect(facts[0].symbol_id).to_equal(12)
+        expect(type_tag(facts[0].narrowed_type)).to_equal("i64")
+        expect(cond_tag(facts[0].condition)).to_equal("NilCheckPos")
+
+# ============================================================================
+# Test Group 6: negate_facts (real implementation)
+# ============================================================================
+
+describe "Fact negation":
+    it "NilCheck(negated: false) negated returns empty":
+        val fact = fact_of(40, ty_opt(ty_i64()), ty_i64(), NarrowingCondition.NilCheck(negated: false))
+        expect(negate_facts([fact]).is_empty()).to_equal(true)
+
+    it "NilCheck(negated: true) negated returns fact with inner type":
+        val fact = fact_of(41, ty_opt(ty_i64()), ty_opt(ty_i64()), NarrowingCondition.NilCheck(negated: true))
+        val negated = negate_facts([fact])
+        expect(negated.len()).to_equal(1)
+        expect(negated[0].symbol_id).to_equal(41)
+        expect(type_tag(negated[0].narrowed_type)).to_equal("i64")
+        expect(cond_tag(negated[0].condition)).to_equal("NilCheckPos")
+
+    it "IsNotCheck negated returns an IsCheck fact narrowed to the target type":
+        val fact = fact_of(42, ty_i64(), ty_i64(), NarrowingCondition.IsNotCheck(target_type: ty_text()))
+        val negated = negate_facts([fact])
+        expect(negated.len()).to_equal(1)
+        expect(negated[0].symbol_id).to_equal(42)
+        expect(type_tag(negated[0].narrowed_type)).to_equal("text")
+        expect(cond_tag(negated[0].condition)).to_equal("IsCheck")
+
+    it "IsCheck negated returns an IsNotCheck fact retaining the original type":
+        val fact = fact_of(45, ty_i64(), ty_text(), NarrowingCondition.IsCheck(target_type: ty_text()))
+        val negated = negate_facts([fact])
+        expect(negated.len()).to_equal(1)
+        expect(negated[0].symbol_id).to_equal(45)
+        expect(type_tag(negated[0].narrowed_type)).to_equal("i64")
+        expect(cond_tag(negated[0].condition)).to_equal("IsNotCheck")
+
+    it "ExistsCheck negated returns empty":
+        val fact = fact_of(43, ty_opt(ty_i64()), ty_i64(), NarrowingCondition.ExistsCheck)
+        expect(negate_facts([fact]).is_empty()).to_equal(true)
+
+    it "Truthiness negated returns empty":
+        val fact = fact_of(44, ty_opt(ty_text()), ty_text(), NarrowingCondition.Truthiness)
+        expect(negate_facts([fact]).is_empty()).to_equal(true)
+
+# ============================================================================
+# Test Group 7: definitely_terminates (real HirBlock / HirStmt)
+# ============================================================================
+
+describe "Definite termination":
+    it "block ending in Return definitely terminates":
+        val b = block_of([
+            stmt_expr(expr_of(HirExprKind.UnitLit)),
+            stmt_expr(expr_of(HirExprKind.Return(value: nil)))
+        ])
+        expect(definitely_terminates(b)).to_equal(true)
+
+    it "empty block does not definitely terminate":
+        expect(definitely_terminates(block_of([]))).to_equal(false)
+
+    it "block ending in regular expression does not terminate":
+        expect(definitely_terminates(block_of([stmt_expr(expr_of(HirExprKind.UnitLit))]))).to_equal(false)
+
+    it "block ending in Break definitely terminates":
+        val b = block_of([stmt_expr(expr_of(HirExprKind.Break(label: "", value: nil)))])
+        expect(definitely_terminates(b)).to_equal(true)
+
+    it "block ending in Continue definitely terminates":
+        val b = block_of([stmt_expr(expr_of(HirExprKind.Continue(label: nil)))])
+        expect(definitely_terminates(b)).to_equal(true)
+
+# ============================================================================
+# Test Group 8: Integration - narrowing + negation + scope
+# ============================================================================
+
+describe "Narrowing integration":
+    it "simulates if-else narrowing flow":
+        # if x != nil: <then> else: <else>
+        var ctx = NarrowingContext.new()
+        val then_facts = analyze_condition(binary_expr(HirBinOp.NotEq, var_expr(50), nil_expr()), env_lookup)
+
+        ctx.push_scope()
+        ctx.add_facts(then_facts)
+        expect(type_tag(ctx.lookup(50).unwrap())).to_equal("i64")
+        ctx.pop_scope()
+
+        val else_facts = negate_facts(then_facts)
+        ctx.push_scope()
+        ctx.add_facts(else_facts)
+        # NilCheck(negated: false) negated -> no fact in the else branch
+        expect(ctx.lookup(50) != nil).to_equal(false)
+        ctx.pop_scope()
+
+    it "simulates early-return narrowing promotion":
+        # if x == nil: return   -- after the guard, x is narrowed in the remainder
+        var ctx = NarrowingContext.new()
+        val guard_facts = analyze_condition(binary_expr(HirBinOp.Eq, var_expr(60), nil_expr()), env_lookup)
+
+        val guard_body = block_of([stmt_expr(expr_of(HirExprKind.Return(value: nil)))])
+        expect(definitely_terminates(guard_body)).to_equal(true)
+
+        ctx.push_scope()
+        ctx.add_facts(guard_facts)
+        ctx.pop_scope()
+
+        val promoted = negate_facts(guard_facts)
+        ctx.add_facts(promoted)
+
+        expect(ctx.lookup(60) != nil).to_equal(true)
+        expect(type_tag(ctx.lookup(60).unwrap())).to_equal("text")

@@ -1,0 +1,180 @@
+#!/bin/sh
+# check-jit-nested-extern-arg-marshal.shs
+#
+# Fences doc/08_tracking/bug/jit_rt_string_data_returns_nil_breaking_extern_calls_2026-08-10.md.
+#
+# DEFECT: in the jit lane, the result of a nested extern call used as an
+# ARGUMENT to another extern call was stored into the rt_interp_call argv array
+# RAW instead of boxed, so `interp_call_handler` decoded the plain integer as
+# whatever NaN-box pattern its bits happened to match:
+#
+#   rt_simpleos_log_emit(lvl, rt_string_data(line), rt_string_len(line))
+#     -> "rt_simpleos_log_emit: argument 2 must be an int, got Nil"
+#
+# That is the exact call in src/lib/nogc_async_mut_noalloc/log/logger.spl. It was
+# invisible because the failed call returns false, which is INDISTINGUISHABLE
+# from the hosted stub's by-design false, so the Simple side took its
+# fallthrough and the log line still appeared. On a jit baremetal build, where
+# rt_simpleos_log_emit is the real UART emitter and is supposed to SUCCEED, the
+# same defect silently diverts every log line off the device.
+#
+# Root cause: src/compiler_rust/compiler/src/codegen/instr/core.rs
+# `compile_interp_call` -- the argv boxing loop switches on `ctx.vreg_types`, and
+# call destinations carried no entry there, so they took the `_ => {}` raw-store
+# arm. Fixed by recording the unboxed type on the dest.
+#
+# It asserts the PAYLOAD at the C boundary, not a line count. A count assertion
+# would pass on the broken code, because the Simple-side fallthrough already
+# prints an unlabelled line from another layer -- which is precisely how this
+# defect hid. Sides:
+#
+#   payload positive -- with SIMPLE_LOG_HOSTED_PROBE=1 the hosted C stub echoes
+#                       what it ACTUALLY RECEIVED, labelled
+#                       "[HOSTED-LOG-PROBE] emit level=<L> len=<N> payload=<S>".
+#                       Asserting the payload TEXT proves the (ptr,len) pair
+#                       survived the marshal and points at the real bytes. This
+#                       is the assertion that bites.
+#   discriminator    -- a fixture that deliberately passes a NULL pointer must
+#                       make the probe print "<UNREADABLE>". Without this, the
+#                       "<UNREADABLE> is absent" assertion below proves nothing,
+#                       and neither does the payload one -- the probe has to be
+#                       shown capable of telling a good pointer from a bad one.
+#                       If it does not fire, this script reports ERROR, not PASS.
+#   negative control -- "<UNREADABLE>" must NOT appear in the real probe.
+#   signature control-- the defect's own stderr signature
+#                       ("must be an int, got") must be absent.
+#   lane control     -- the interpreter lane must agree with jit on every value;
+#                       engines diverge here routinely.
+#   probe-off control-- without SIMPLE_LOG_HOSTED_PROBE the probe is silent,
+#                       proving it is default-off and costs a stopped build
+#                       nothing.
+#
+# SCOPE OF CLAIM: hosted x86_64 Linux, interpreter + jit engines. This script is
+# NOT board evidence and does not exercise the baremetal UART emitter in
+# src/runtime/startup/baremetal/runtime_log.c, which is a different translation
+# unit. See the "Board" section of the bug doc.
+#
+# Verdict line is the last line of stdout:
+#   PASS -- <n> assertion(s) checked ...   exit 0
+#   FAIL -- ...                            exit 1
+#   ERROR -- nothing was checked           exit 2
+#
+# Usage: sh scripts/check/check-jit-nested-extern-arg-marshal.shs [path-to-simple]
+
+set -u
+
+REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$REPO_ROOT" || { echo "ERROR -- nothing was checked (cannot cd to repo root)"; exit 2; }
+
+SIMPLE_BIN=${1:-./bin/simple}
+if [ ! -e "$SIMPLE_BIN" ]; then
+    echo "ERROR -- nothing was checked (no $SIMPLE_BIN in $REPO_ROOT)"
+    exit 2
+fi
+
+WORK=$(mktemp -d) || { echo "ERROR -- nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "$WORK"' EXIT INT TERM
+
+PAYLOAD=Q23B_MARSHAL_PAYLOAD
+PAYLOAD_LEN=20
+
+# The nested-extern-in-argument shape, exactly as logger.spl writes it.
+cat > "$WORK/marshal.spl" <<'SPL'
+# Fixture for check-jit-nested-extern-arg-marshal.shs.
+extern fn rt_env_get(key: text) -> text
+extern fn rt_string_data(value: text) -> i64
+extern fn rt_string_len(value: text) -> i64
+extern fn rt_simpleos_log_emit(level: i64, ptr: i64, len: i64) -> bool
+
+fn main():
+    val line = rt_env_get("Q23B_VAL")
+    # nested extern results consumed as extern ARGUMENTS -- the broken shape
+    val emitted = rt_simpleos_log_emit(7, rt_string_data(line), rt_string_len(line))
+    print "emit={emitted}"
+    print "nested_len={rt_string_len(line)}"
+SPL
+
+# Discriminator: a deliberately NULL pointer. The probe must notice.
+cat > "$WORK/nullptr.spl" <<'SPL'
+# Fixture for check-jit-nested-extern-arg-marshal.shs (discriminator).
+extern fn rt_simpleos_log_emit(level: i64, ptr: i64, len: i64) -> bool
+
+fn main():
+    print "NULLPTR_START"
+    val bad = rt_simpleos_log_emit(9, 0, 0)
+    print "nullptr={bad}"
+SPL
+
+PASS_N=0
+FAIL_N=0
+RAN=0
+note_pass() { PASS_N=$((PASS_N + 1)); }
+note_fail() { FAIL_N=$((FAIL_N + 1)); echo "  FAIL: $1"; }
+assert_present() { if grep -q -- "$2" "$1"; then note_pass; else note_fail "$3 (expected '$2', absent)"; fi; }
+assert_absent()  { if grep -q -- "$2" "$1"; then note_fail "$3 (unexpected '$2', present)"; else note_pass; fi; }
+
+# ---- discriminator FIRST: refuse to report PASS if the probe cannot fail.
+for MODE in interpreter jit; do
+    NERR="$WORK/nullptr.$MODE.err"
+    SIMPLE_LOG_HOSTED_PROBE=1 SIMPLE_EXECUTION_MODE="$MODE" timeout 300 "$SIMPLE_BIN" \
+        run "$WORK/nullptr.spl" >"$WORK/nullptr.$MODE.out" 2>"$NERR"
+    if ! grep -q '<UNREADABLE>' "$NERR"; then
+        echo "ERROR -- nothing was checked (discriminator silent in $MODE lane: a"
+        echo "         NULL (ptr,len) did not make the hosted probe report"
+        echo "         <UNREADABLE>, so asserting a good payload proves nothing)"
+        exit 2
+    fi
+    note_pass; RAN=$((RAN + 1))
+done
+
+# ---- main probes
+for MODE in interpreter jit; do
+    OUT="$WORK/$MODE.out"; ERR="$WORK/$MODE.err"
+    SIMPLE_LOG_HOSTED_PROBE=1 Q23B_VAL="$PAYLOAD" SIMPLE_EXECUTION_MODE="$MODE" \
+        timeout 300 "$SIMPLE_BIN" run "$WORK/marshal.spl" >"$OUT" 2>"$ERR"
+    RC=$?
+    if [ ! -s "$OUT" ]; then
+        echo "ERROR -- nothing was checked ($MODE probe produced no stdout, rc=$RC)"
+        exit 2
+    fi
+    RAN=$((RAN + 1))
+
+    # payload positive: the C stub echoes what it RECEIVED, labelled
+    assert_present "$ERR" "\[HOSTED-LOG-PROBE\] emit level=7 len=$PAYLOAD_LEN payload=$PAYLOAD" \
+        "$MODE: hosted stub did not receive the marshalled (ptr,len) payload"
+    # negative control: the pointer it got must have been readable
+    assert_absent  "$ERR" '<UNREADABLE>' \
+        "$MODE: hosted stub received an unreadable ptr/len pair"
+    # signature controls: the defect's own errors must be gone
+    assert_absent  "$ERR" 'must be an int, got' \
+        "$MODE: rt_interp_call argument-marshal error is back"
+    assert_absent  "$ERR" 'rt_interp_call error' \
+        "$MODE: rt_interp_call reported an error"
+    # value oracle + unchanged hosted contract
+    assert_present "$OUT" "nested_len=$PAYLOAD_LEN" \
+        "$MODE: nested-extern value oracle wrong"
+    assert_present "$OUT" "emit=false" \
+        "$MODE: hosted stub return contract changed (must stay false)"
+done
+
+# ---- probe-off control: default off, nothing on stderr
+OFFERR="$WORK/off.err"
+Q23B_VAL="$PAYLOAD" SIMPLE_EXECUTION_MODE=jit timeout 300 "$SIMPLE_BIN" \
+    run "$WORK/marshal.spl" >"$WORK/off.out" 2>"$OFFERR"
+RAN=$((RAN + 1))
+assert_absent "$OFFERR" 'HOSTED-LOG-PROBE' \
+    "probe is not default-off: it emitted without SIMPLE_LOG_HOSTED_PROBE=1"
+assert_present "$WORK/off.out" "nested_len=$PAYLOAD_LEN" \
+    "probe-off run lost its value oracle"
+
+TOTAL=$((PASS_N + FAIL_N))
+if [ "$RAN" -eq 0 ] || [ "$TOTAL" -eq 0 ]; then
+    echo "ERROR -- nothing was checked"
+    exit 2
+fi
+if [ "$FAIL_N" -ne 0 ]; then
+    echo "FAIL -- $FAIL_N of $TOTAL assertion(s) failed across $RAN probe(s) (interpreter+jit)"
+    exit 1
+fi
+echo "PASS -- $TOTAL assertion(s) checked across $RAN probe(s): a nested extern result reaches the hosted log hook as a real, readable (ptr,len) pair in both lanes, payload asserted at the C boundary; NULL-pointer discriminator fired; probe default-off. Hosted x86_64 only -- NOT board evidence."
+exit 0

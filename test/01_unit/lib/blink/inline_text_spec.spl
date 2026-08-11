@@ -1,0 +1,304 @@
+# @cover src/lib/blink/layout/inline_text.spl 80%
+# @cover src/lib/common/layout/text_metrics.spl 80%
+"""
+# Inline Text Measurement Specification
+
+**Category:** Browser / Blink
+**Status:** Active
+
+## Overview
+
+I am laying out a web page in the blink render lane. Before blink can place a
+single word on screen it has to answer one question: how wide is this run of
+text? Until now blink could not answer it at all — inline text measurement was
+absent from the whole stack, which is why no pixel consumer could be pointed at
+it.
+
+What I need is a measurement that is right about real text, not just about
+ASCII. When my page contains an accented French word, a line of Japanese, or an
+emoji, the layout must not silently mis-measure it. Concretely:
+
+- An accented character such as `é` is ONE character on screen even though it
+  is two bytes in memory. It must be charged one character's width, not two.
+- A CJK glyph such as `漢` is drawn twice as wide as a Latin letter, so it must
+  be charged double.
+- A combining accent attaches to the letter before it and draws no new column,
+  so it must be charged nothing.
+
+A naive implementation that measures `text.len()` gets all three of these
+wrong, because in this language `len()` counts BYTES while `char_code_at()`
+indexes CODEPOINTS. That mismatch is exactly the defect the live browser lane
+carries today (recorded in
+`doc/08_tracking/bug/live_lane_inline_text_measure_counts_utf8_bytes_2026-08-11.md`),
+and these tests are what stop blink inheriting it.
+
+I also need text to wrap into a box without losing characters or looping
+forever, and I need a baseline to draw the glyphs on.
+"""
+
+use std.spipe.*
+use std.common.layout.text_metrics.{
+    TextMetrics, monospace_metrics, glyph_scale, measure_text, measure_range,
+    measure_codepoints, baseline_offset_px, wrap_line_end, wrap_text_lines,
+    text_cell_width, codepoint_cells, is_wide_codepoint, is_zero_width_codepoint
+}
+use std.common.encoding.utf8.{text_codepoints}
+use std.blink.layout.inline_text.{
+    InlineFont, InlineTextBlock, inline_font, inline_metrics,
+    inline_text_advance_width, inline_text_cell_width,
+    inline_text_baseline, inline_text_line_height, layout_inline_text
+}
+
+# ---------------------------------------------------------------------------
+# Codepoint classification
+# ---------------------------------------------------------------------------
+
+describe "codepoint column classification":
+    it "an ASCII letter occupies one column":
+        step("classify the codepoint for 'A'")
+        expect(codepoint_cells(65)).to_equal(1)
+
+    it "a CJK ideograph occupies two columns":
+        step("classify U+6F22 (漢), an East-Asian wide glyph")
+        expect(is_wide_codepoint(0x6F22)).to_equal(true)
+        step("confirm it is charged two columns, not one")
+        expect(codepoint_cells(0x6F22)).to_equal(2)
+
+    it "an emoji occupies two columns":
+        step("classify U+1F600, in the emoji plane")
+        expect(codepoint_cells(0x1F600)).to_equal(2)
+
+    it "a combining accent occupies no column of its own":
+        step("classify U+0301 COMBINING ACUTE ACCENT")
+        expect(is_zero_width_codepoint(0x0301)).to_equal(true)
+        step("confirm it adds nothing to the advance")
+        expect(codepoint_cells(0x0301)).to_equal(0)
+
+    it "a zero-width joiner occupies no column":
+        expect(codepoint_cells(0x200D)).to_equal(0)
+
+# ---------------------------------------------------------------------------
+# Cell width — the case a byte count gets wrong
+# ---------------------------------------------------------------------------
+
+describe "text_cell_width counts characters, not bytes":
+    it "pure ASCII measures one column per letter":
+        step("measure \"abc\"")
+        expect(text_cell_width("abc")).to_equal(3)
+
+    it "a two-byte accented character still measures one column":
+        step("measure \"aé\", which is three BYTES but two characters")
+        # @req A multi-byte UTF-8 character must be charged once, not once per byte.
+        expect(text_cell_width("aé")).to_equal(2)
+
+    it "a three-byte CJK glyph measures two columns, not three":
+        step("measure \"漢\", which is three BYTES and one double-width glyph")
+        # @req A wide glyph is charged by its drawn width, never by its byte length.
+        expect(text_cell_width("漢")).to_equal(2)
+
+    it "a mixed ASCII, accented and CJK run measures by drawn width":
+        step("measure \"aé漢\" — 6 bytes, 3 characters, 4 drawn columns")
+        expect(text_cell_width("aé漢")).to_equal(4)
+
+    it "a combining accent adds no column to the letter it attaches to":
+        step("measure \"e\" followed by U+0301")
+        expect(text_cell_width("e\u{0301}")).to_equal(1)
+
+    it "the empty string measures zero":
+        expect(text_cell_width("")).to_equal(0)
+
+# ---------------------------------------------------------------------------
+# Pixel metrics
+# ---------------------------------------------------------------------------
+
+describe "monospace_metrics":
+    it "a 16px font advances 10px per character":
+        step("resolve metrics for a 16px font with no extra spacing")
+        val m = monospace_metrics(16, 0, 0, 0)
+        step("16px is scale 2, so the advance is 5 * 2")
+        expect(glyph_scale(16)).to_equal(2)
+        expect(m.cell_advance_px).to_equal(10)
+
+    it "a tiny font falls back to the minimum 4px advance":
+        val m = monospace_metrics(8, 0, 0, 0)
+        expect(m.cell_advance_px).to_equal(4)
+
+    it "letter-spacing widens every character":
+        step("resolve a 16px font with 3px letter-spacing")
+        val m = monospace_metrics(16, 3, 0, 0)
+        expect(m.cell_advance_px).to_equal(13)
+
+    it "a negative letter-spacing can never collapse the advance to zero":
+        step("ask for a letter-spacing far more negative than the glyph is wide")
+        # @req A text run must always measure at least one pixel per character
+        #      so a line box can never collapse to nothing.
+        val m = monospace_metrics(16, -99, 0, 0)
+        expect(m.cell_advance_px).to_equal(1)
+
+    it "an explicit line-height overrides the font's natural one":
+        val natural = monospace_metrics(16, 0, 0, 0)
+        expect(natural.line_height_px).to_equal(18)
+        val forced = monospace_metrics(16, 0, 0, 40)
+        expect(forced.line_height_px).to_equal(40)
+
+describe "measure_text advance width":
+    it "three ASCII letters at 16px measure 30px":
+        val m = monospace_metrics(16, 0, 0, 0)
+        expect(measure_text("abc", m)).to_equal(30)
+
+    it "a space is narrower than a letter":
+        step("measure a single space against a single letter at 16px")
+        val m = monospace_metrics(16, 0, 0, 0)
+        expect(measure_text(" ", m)).to_equal(5)
+        expect(measure_text("a", m)).to_equal(10)
+
+    it "an accented character measures the same as a plain one":
+        step("compare \"é\" against \"e\" — same drawn width, different byte length")
+        # @req Measurement must not vary with a character's UTF-8 encoding length.
+        val m = monospace_metrics(16, 0, 0, 0)
+        expect(measure_text("é", m)).to_equal(measure_text("e", m))
+
+    it "a CJK glyph measures exactly twice a Latin letter":
+        step("compare \"漢\" against \"a\" at 16px")
+        val m = monospace_metrics(16, 0, 0, 0)
+        expect(measure_text("漢", m)).to_equal(2 * measure_text("a", m))
+
+    it "a combining accent adds nothing to the run's width":
+        val m = monospace_metrics(16, 0, 0, 0)
+        expect(measure_text("e\u{0301}", m)).to_equal(measure_text("e", m))
+
+    it "the empty string measures zero pixels":
+        val m = monospace_metrics(16, 0, 0, 0)
+        expect(measure_text("", m)).to_equal(0)
+
+describe "measure_range":
+    it "measures only the requested character span":
+        step("measure characters 1 through 3 of \"abcd\" at 16px")
+        val m = monospace_metrics(16, 0, 0, 0)
+        val cps = text_codepoints("abcd")
+        expect(measure_range(cps, 1, 3, m)).to_equal(20)
+
+    it "a span reaching past the end measures the clamped overlap":
+        step("ask for characters 2..99 of a 4-character run")
+        # @req An out-of-range span must not read past the text.
+        val m = monospace_metrics(16, 0, 0, 0)
+        val cps = text_codepoints("abcd")
+        expect(measure_range(cps, 2, 99, m)).to_equal(20)
+
+    it "an inverted span measures zero":
+        val m = monospace_metrics(16, 0, 0, 0)
+        val cps = text_codepoints("abcd")
+        expect(measure_range(cps, 3, 1, m)).to_equal(0)
+
+describe "baseline_offset_px":
+    it "the baseline sits inside the line box, below its top":
+        val m = monospace_metrics(16, 0, 0, 0)
+        val b = baseline_offset_px(m)
+        expect(b > 0).to_equal(true)
+        expect(b < m.line_height_px).to_equal(true)
+
+    it "a one-pixel line box still has a baseline on its first row":
+        # @req The baseline must never be above the line box.
+        val m = monospace_metrics(16, 0, 0, 1)
+        expect(baseline_offset_px(m)).to_equal(1)
+
+# ---------------------------------------------------------------------------
+# Wrapping
+# ---------------------------------------------------------------------------
+
+describe "wrap_line_end":
+    it "text that fits entirely reports the end of the text":
+        val m = monospace_metrics(16, 0, 0, 0)
+        val cps = text_codepoints("abc")
+        expect(wrap_line_end(cps, 0, 1000, m)).to_equal(3)
+
+    it "a break falls on the last space before the overflow":
+        step("wrap \"aa bb cc\" at 16px into a 60px box")
+        val m = monospace_metrics(16, 0, 0, 0)
+        val cps = text_codepoints("aa bb cc")
+        expect(wrap_line_end(cps, 0, 60, m)).to_equal(5)
+
+    it "a single word wider than the box is broken mid-word":
+        step("wrap the unbreakable \"aaaaaa\" into a 25px box")
+        # @req A word too long for the line must still make progress, or
+        #      wrapping would loop forever.
+        val m = monospace_metrics(16, 0, 0, 0)
+        val cps = text_codepoints("aaaaaa")
+        val e = wrap_line_end(cps, 0, 25, m)
+        expect(e > 0).to_equal(true)
+        expect(e < 6).to_equal(true)
+
+    it "a zero-width box still consumes one character per line":
+        val m = monospace_metrics(16, 0, 0, 0)
+        val cps = text_codepoints("abc")
+        expect(wrap_line_end(cps, 0, 0, m)).to_equal(1)
+
+describe "wrap_text_lines":
+    it "text that fits stays on one line":
+        val m = monospace_metrics(16, 0, 0, 0)
+        val lines = wrap_text_lines("hello", 1000, m)
+        expect(lines.len()).to_equal(1)
+        expect(lines[0]).to_equal("hello")
+
+    it "a long sentence breaks into whole words":
+        step("wrap \"aa bb cc\" at 16px into a 60px box")
+        val m = monospace_metrics(16, 0, 0, 0)
+        val lines = wrap_text_lines("aa bb cc", 60, m)
+        expect(lines.len()).to_equal(2)
+        expect(lines[0]).to_equal("aa bb")
+        expect(lines[1]).to_equal("cc")
+
+    it "wrapping a CJK run keeps every glyph intact":
+        step("wrap four CJK glyphs into a box two glyphs wide")
+        # @req Wrapping must split between characters, never inside a
+        #      multi-byte character.
+        val m = monospace_metrics(16, 0, 0, 0)
+        val lines = wrap_text_lines("漢字漢字", 40, m)
+        expect(lines.len()).to_equal(2)
+        expect(lines[0]).to_equal("漢字")
+        expect(lines[1]).to_equal("漢字")
+
+    it "an empty paragraph still occupies one line":
+        val m = monospace_metrics(16, 0, 0, 0)
+        val lines = wrap_text_lines("", 100, m)
+        expect(lines.len()).to_equal(1)
+        expect(lines[0]).to_equal("")
+
+# ---------------------------------------------------------------------------
+# The blink-facing API
+# ---------------------------------------------------------------------------
+
+describe "blink inline text API":
+    it "a run's advance width matches the shared measurement":
+        step("measure \"abc\" through the blink face at 16px")
+        val f = inline_font(16)
+        expect(inline_text_advance_width("abc", f)).to_equal(30)
+
+    it "blink charges a CJK glyph double, as the shared layer does":
+        val f = inline_font(16)
+        expect(inline_text_advance_width("漢", f)).to_equal(20)
+
+    it "blink reports a cell width independent of font size":
+        expect(inline_text_cell_width("aé漢")).to_equal(4)
+
+    it "a line box at 16px is 18px tall with a baseline inside it":
+        val f = inline_font(16)
+        expect(inline_text_line_height(f)).to_equal(18)
+        expect(inline_text_baseline(f) < 18).to_equal(true)
+
+    it "laying out a paragraph reports its lines and used box":
+        step("lay out \"aa bb cc\" into a 60px-wide box at 16px")
+        val f = inline_font(16)
+        val block = layout_inline_text("aa bb cc", 60, f)
+        expect(block.lines.len()).to_equal(2)
+        step("the used width is the widest line, not the box width")
+        # "aa bb" is 4 letters at 10px plus one 5px space; the space the break
+        # consumed is not carried onto either line, so it is not charged.
+        expect(block.width_px).to_equal(45)
+        step("the used height is one line box per line")
+        expect(block.height_px).to_equal(36)
+
+    it "a paragraph never reports a width wider than its box":
+        val f = inline_font(16)
+        val block = layout_inline_text("aa bb cc dd ee", 60, f)
+        expect(block.width_px <= 60).to_equal(true)

@@ -1,0 +1,186 @@
+# @cover src/compiler_rust 0%
+"""
+# Cross-Engine Value-Semantics Differential Harness
+
+**Category:** Language | Testing
+**Status:** p2 deep-copy FIXED 2026-08-10 (recursive `AggregateCopy.deep_fields`) — p8 remains KNOWN-RED by design
+**Guide:** doc/07_guide/language/value_semantics_by_engine.md
+**Bug:** doc/08_tracking/bug/jit_struct_assignment_aliases_not_copies_2026-08-10.md
+**Bug:** doc/08_tracking/bug/aot_llvm_void_type_struct_probe_2026-08-10.md
+**Tracking:** doc/08_tracking/bug/cross_engine_value_semantics_harness_known_red_2026-08-10.md
+
+## Purpose and Audience
+
+As a compiler engineer, I need one spec that runs the SAME probe program on the
+interpreter lane (`SIMPLE_EXECUTION_MODE=interpreter bin/simple run`) and the
+JIT lane (bare `bin/simple <probe>.spl`) and FAILS on any divergence, because
+every in-process spec runs on exactly one lane and can never see the other.
+The 2026-08-10 stale-binary episode is the motivating incident: a real,
+reproducible "JIT aliases structs" divergence turned out to be a pre-F1
+deployed binary, and nothing in the spec corpus could have caught either the
+divergence or the confusion.
+
+## Scope and Preconditions
+
+Runs from the repo root via subprocesses with RELATIVE paths only (an absolute
+path silently runs nothing at exit 0). Each probe is its own minimal file —
+a single unsupported operation demotes a whole program to the interpreter,
+which would fake agreement. Every probe prints `PROBE|CONTROL=42`; a lane
+whose output lacks that control line is reported as a LANE FAILURE by name,
+never as agreement (AGREE=lane-failed). Binary identity (readlink -f, size,
+mtime, --version banner) is printed into every verdict, because a divergence
+report is meaningless without knowing which artifact produced it.
+
+## Known-RED enumeration (expected failures — do NOT weaken the probes)
+
+Against a PRE-F1 deployed `bin/simple` (built before `735bbd4b606` /
+`cf992112a2d` / `9106761fe76` landed AggregateCopy):
+  p1 (S1 plain assignment), p2 (S2b nested field), p3 (S3 argument),
+  p4 (S4 return), p5 (S5 list element), p6 (S6 dict value) — AGREE=no
+  (JIT aliases, interpreter copies); p8 (A2b `m[1][0]=9`) — AGREE=no: the
+  interpreter prints the control line then rejects the syntax with a semantic
+  error, so its lane output lacks the A2b line the JIT prints (measured
+  2026-08-10 on the pre-F1 deployed binary).
+Against a FRESH post-F1 seed with the shallow-AggregateCopy residual fixed
+(recursive `deep_fields` deep-copy, 2026-08-10), p2 is GREEN. Only p8 remains
+RED — the interpreter rejects `m[1][0] = 9` syntax; that is a syntax-support
+gap, not a struct value-semantics gap, and is unrelated to this fix. p7
+(arrays) and p9 (text) are expected-AGREE anchors proving the harness reports
+agreement where the lanes agree — struct-typed fields deep-copy, but arrays
+and text are deliberately NOT deep-copied through this path (they already
+measure as copy-on-write-correct on every engine; changing them would add a
+perf cliff for no correctness gain). The AOT lane is expected
+`blocked_known_llc20` ("void type only allowed for function results") or
+unreachable under host saturation — an UNKNOWN AOT failure is a spec failure.
+
+## Recovery and Troubleshooting
+
+exit 143 = killed by the CPU monitor, 124 = timeout; both are reported as lane
+failures naming the lane. A green run requires a deployed binary at or after
+the F1 campaign PLUS fixes for the shallow-AggregateCopy residual, the
+interpreter nested-index-assignment rejection, and the llc-20 void-type AOT
+defect.
+"""
+
+use std.spec.*
+use app.io.mod (process_run)
+
+fn _sh(script: text) -> text:
+    val (out, err, code) = process_run("/bin/sh", ["-c", script])
+    "{out}{err}\nexit={code}\n"
+
+fn _identity_script() -> text:
+    "B=$(readlink -f bin/simple)\nprintf 'BIN=%s\\n' \"$B\"\nstat -c 'SIZE=%s MTIME=%y' \"$B\"\nV=$(bin/simple --version 2>&1 | head -2 | tr '\\n' ' ')\nprintf 'VER=%s\\n' \"$V\"\n"
+
+# Run one probe on both lanes, filter to PROBE| lines, and emit a verdict line.
+# Fail-closed: a lane missing the CONTROL line is AGREE=lane-failed, never yes.
+# The JIT lane MUST pin SIMPLE_EXECUTION_MODE=jit (any value != interpreter
+# selects the JIT): the test daemon exports SIMPLE_EXECUTION_MODE=interpreter,
+# and a bare `bin/simple $P` child inherits it — during bring-up on 2026-08-10
+# that made BOTH lanes run the interpreter and the harness reported a false
+# 11/11 green against a binary manually measured as divergent on 7 probes.
+fn _lane_compare(probe: text) -> text:
+    val script = _identity_script() + "P={probe}\nI=$(SIMPLE_EXECUTION_MODE=interpreter timeout 45 bin/simple run \"$P\" 2>&1)\nIC=$?\nJ=$(SIMPLE_EXECUTION_MODE=jit timeout 45 bin/simple \"$P\" 2>&1)\nJC=$?\nFI=$(printf '%s\\n' \"$I\" | grep 'PROBE|')\nFJ=$(printf '%s\\n' \"$J\" | grep 'PROBE|')\ncase \"$FI\" in *CONTROL=42*) IOK=yes;; *) IOK=no;; esac\ncase \"$FJ\" in *CONTROL=42*) JOK=yes;; *) JOK=no;; esac\nAGREE=lane-failed\nif [ \"$IOK\" = yes ] && [ \"$JOK\" = yes ]; then\n  if [ \"$FI\" = \"$FJ\" ]; then AGREE=yes; else AGREE=no; fi\nfi\nprintf 'PROBE=%s INTERP_OK=%s ic=%s JIT_OK=%s jc=%s AGREE=%s\\n' \"$P\" \"$IOK\" \"$IC\" \"$JOK\" \"$JC\" \"$AGREE\"\nprintf 'INTERP_LANE<<<\\n%s\\n>>>\\n' \"$FI\"\nprintf 'JIT_LANE<<<\\n%s\\n>>>\\n' \"$FJ\"\nif [ \"$IOK\" = no ]; then printf 'INTERP_RAW_TAIL<<<\\n'; printf '%s\\n' \"$I\" | tail -8; printf '>>>\\n'; fi\nif [ \"$JOK\" = no ]; then printf 'JIT_RAW_TAIL<<<\\n'; printf '%s\\n' \"$J\" | tail -8; printf '>>>\\n'; fi\n"
+    _sh(script)
+
+fn _probe(name: text) -> text:
+    "test/03_system/language/value_semantics/probe/" + name
+
+fn _expect_lanes_agree(out: text):
+    expect(out).to_contain("BIN=/")
+    expect(out).to_contain("INTERP_OK=yes")
+    expect(out).to_contain("JIT_OK=yes")
+    expect(out).to_contain("AGREE=yes")
+
+describe "cross-engine harness provenance":
+    # @manual_section "Binary identity"
+    it "records which artifact produced every verdict":
+        # @req REQ-XENGDIFF-001
+        step("resolve bin/simple identity: path, size, mtime, version banner")
+        val out = _sh(_identity_script())
+        expect(out).to_contain("BIN=/")
+        expect(out).to_contain("SIZE=")
+        expect(out).to_contain("MTIME=")
+        expect(out).to_contain("VER=")
+
+describe "struct value semantics agree across interpreter and JIT lanes":
+    # @manual_section "Struct positions (interp copy vs JIT alias family)"
+    it "copies a struct on plain assignment identically in both lanes":
+        # @req REQ-XENGDIFF-002
+        step("run p1_plain_assignment.spl on both lanes and diff PROBE| lines")
+        _expect_lanes_agree(_lane_compare(_probe("p1_plain_assignment.spl")))
+
+    it "copies the nested inner struct when the outer struct is copied":
+        # @req REQ-XENGDIFF-002
+        step("run p2_nested_struct_field.spl on both lanes and diff PROBE| lines")
+        # FIXED 2026-08-10: AggregateCopy now recursively deep-copies nested
+        # struct-typed fields (MirInst::AggregateCopy.deep_fields). GREEN.
+        _expect_lanes_agree(_lane_compare(_probe("p2_nested_struct_field.spl")))
+
+    it "copies a struct passed as an argument identically in both lanes":
+        # @req REQ-XENGDIFF-002
+        step("run p3_argument_passing.spl on both lanes and diff PROBE| lines")
+        _expect_lanes_agree(_lane_compare(_probe("p3_argument_passing.spl")))
+
+    it "copies a struct returned from a function identically in both lanes":
+        # @req REQ-XENGDIFF-002
+        step("run p4_return_value.spl on both lanes and diff PROBE| lines")
+        _expect_lanes_agree(_lane_compare(_probe("p4_return_value.spl")))
+
+    it "copies a struct extracted from a list element identically in both lanes":
+        # @req REQ-XENGDIFF-002
+        step("run p5_list_element.spl on both lanes and diff PROBE| lines")
+        _expect_lanes_agree(_lane_compare(_probe("p5_list_element.spl")))
+
+    it "copies a struct extracted from a dict value identically in both lanes":
+        # @req REQ-XENGDIFF-002
+        step("run p6_dict_value.spl on both lanes and diff PROBE| lines")
+        _expect_lanes_agree(_lane_compare(_probe("p6_dict_value.spl")))
+
+    it "transfers a fresh constructor result through a call identically":
+        # @req REQ-XENGDIFF-002
+        step("run p10_fresh_constructor_call_result.spl on both lanes and diff PROBE| lines")
+        val out = _lane_compare(_probe("p10_fresh_constructor_call_result.spl"))
+        _expect_lanes_agree(out)
+        expect(out).to_contain("PROBE|S10_VALUES=ok")
+        expect(out).to_not_contain("PROBE|S10_VALUES=bad")
+
+    it "transfers a fresh function result through another call identically":
+        # @req REQ-XENGDIFF-002
+        step("run p11_call_result_transfer.spl on both lanes and diff PROBE| lines")
+        val out = _lane_compare(_probe("p11_call_result_transfer.spl"))
+        _expect_lanes_agree(out)
+        expect(out).to_contain("PROBE|S11_VALUES=ok")
+        expect(out).to_not_contain("PROBE|S11_VALUES=bad")
+
+describe "positions the lanes are known to agree on stay in agreement":
+    # @manual_section "Agreement anchors (arrays, text)"
+    it "copies arrays on assignment and row extraction in both lanes":
+        # @req REQ-XENGDIFF-003
+        step("run p7_array_assignment.spl on both lanes and diff PROBE| lines")
+        _expect_lanes_agree(_lane_compare(_probe("p7_array_assignment.spl")))
+
+    it "treats text as a value type in both lanes":
+        # @req REQ-XENGDIFF-003
+        step("run p9_text_value.spl on both lanes and diff PROBE| lines")
+        _expect_lanes_agree(_lane_compare(_probe("p9_text_value.spl")))
+
+describe "both lanes accept and execute nested index assignment":
+    # @manual_section "Accepted-syntax divergence"
+    it "executes m[1][0] = 9 on the interpreter lane as well as the JIT lane":
+        # @req REQ-XENGDIFF-002
+        step("run p8_nested_index_assign.spl on both lanes and diff PROBE| lines")
+        # KNOWN-RED: the interpreter rejects this syntax; the harness must
+        # report the lane failure by name, not fake agreement.
+        _expect_lanes_agree(_lane_compare(_probe("p8_nested_index_assign.spl")))
+
+describe "the AOT lane is either measured or blocked by a FILED defect":
+    # @manual_section "AOT lane reachability"
+    it "reaches native-build or reports the known llc-20 void-type blocker":
+        # @req REQ-XENGDIFF-004
+        step("native-build the minimal struct probe and classify the outcome")
+        val p = _probe("p1_plain_assignment.spl")
+        val script = "P={p}\nA=$(timeout 60 bin/simple native-build \"$P\" 2>&1)\nAC=$?\nS=unknown_failure\ncase \"$A\" in *\"void type only allowed for function results\"*) S=blocked_known_llc20;; esac\nif [ \"$AC\" = 124 ] || [ \"$AC\" = 143 ]; then S=unreachable_timeout_or_killed; fi\nif [ \"$AC\" = 0 ] && [ \"$S\" = unknown_failure ]; then S=build_ok_unmeasured; fi\nprintf 'AOT=%s ac=%s\\n' \"$S\" \"$AC\"\nprintf '%s\\n' \"$A\" | tail -6\n"
+        val out = _sh(script)
+        expect(out).to_contain("AOT=")
+        assert_false(out.contains("AOT=unknown_failure"))

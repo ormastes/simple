@@ -1,0 +1,51 @@
+# Fail-closed production entropy boundary for cryptographic protocols.
+
+mod os.crypto.entropy
+
+use std.crypto.entropy_platform.{entropy_platform_bytes,
+    ENTROPY_PLATFORM_MAX_REQUEST}
+
+val CRYPTO_ENTROPY_MAX_REQUEST: u64 = ENTROPY_PLATFORM_MAX_REQUEST
+
+fn _entropy_wipe(data: [u8]):
+    var i: u64 = 0u64
+    while i < data.len():
+        data[i] = 0u8
+        i = i + 1u64
+
+fn _entropy_request_error(count: u64, platform_ready: bool) -> text:
+    if count == 0u64:
+        return "cryptographic entropy request must be nonzero"
+    if count > CRYPTO_ENTROPY_MAX_REQUEST:
+        return "cryptographic entropy request exceeds the owner limit"
+    if not platform_ready:
+        return "production cryptographic entropy is unavailable"
+    ""
+
+fn _entropy_validate_candidate(count: u64, platform_ready: bool,
+        bytes: [u8]) -> Result<[u8], text>:
+    val request_error = _entropy_request_error(count, platform_ready)
+    if request_error != "":
+        _entropy_wipe(bytes)
+        return Err(request_error)
+    if bytes.len() != count:
+        _entropy_wipe(bytes)
+        return Err("cryptographic entropy provider returned the wrong length")
+    Ok(bytes)
+
+fn crypto_entropy_bytes(count: u64) -> Result<[u8], text>:
+    """Return production cryptographic entropy or fail before protocol output."""
+    val request_error = _entropy_request_error(count, true)
+    if request_error != "":
+        return Err(request_error)
+    match entropy_platform_bytes(count):
+        case Ok(bytes): _entropy_validate_candidate(count, true, bytes)
+        case Err(reason): Err(reason)
+
+fn crypto_entropy_validate_candidate_for_test(count: u64,
+        platform_ready: bool, candidate: [u8]) -> Result<[u8], text>:
+    """Exercise production validation without drawing entropy."""
+    _entropy_validate_candidate(count, platform_ready, candidate)
+
+export crypto_entropy_bytes, crypto_entropy_validate_candidate_for_test
+export CRYPTO_ENTROPY_MAX_REQUEST

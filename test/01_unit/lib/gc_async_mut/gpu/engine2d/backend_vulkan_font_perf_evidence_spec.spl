@@ -1,0 +1,126 @@
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_font.{VULKAN_FONT_FRAME_GLYPH_CAP, vulkan_font_elapsed_ns, vulkan_font_gpu_resource_bytes, vulkan_font_gpu_resource_bytes_for_params, vulkan_font_timed_ns, vulkan_font_frame_batch_contract}
+use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad}
+
+fn _perf_batch() -> FontRenderBatch:
+    FontRenderBatch(program_version: 1, font_identity: "perf-font", face_generation: 1,
+        valid: true, atlas_width: 1, atlas_height: 1, atlas_pixels: [0xffffffffu32],
+        quads: [FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 0, dst_y: 0,
+            width: 1, height: 1, atlas_x: 0, atlas_y: 0, color: 0xffffffffu32)],
+        atlas_generation: 1, dirty_rects: [])
+
+describe "Vulkan font performance evidence counters":
+    it "admits exactly one command submission and fence for any nonempty text frame":
+        expect(vulkan_font_frame_batch_contract(1, 1, 1, 1)).to_be(true)
+        expect(vulkan_font_frame_batch_contract(64, 1, 1, 1)).to_be(true)
+        expect(vulkan_font_frame_batch_contract(64, 64, 64, 64)).to_be(false)
+        expect(vulkan_font_frame_batch_contract(0, 1, 1, 1)).to_be(false)
+
+    it "bounds and accounts retained per-glyph parameter buffers":
+        expect(VULKAN_FONT_FRAME_GLYPH_CAP).to_equal(4096)
+        expect(vulkan_font_gpu_resource_bytes_for_params(1024, 2048, 4)).to_equal(3280)
+        expect(vulkan_font_gpu_resource_bytes_for_params(1024, 2048, -1)).to_equal(0)
+
+    it "queues glyphs into the shared frame command without hot-path evidence work":
+        val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font.spl")
+        val helpers = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_helpers.spl")
+        val engine = file_read("src/lib/gc_async_mut/gpu/engine2d/engine.spl")
+        expect(source).to_contain("if self.frame_batching_enabled and self.pending_compute_command > 0")
+        expect(source).to_contain("self.pending_compute_command = command")
+        expect(source).to_contain("self.pending_font_descriptors.push(descriptor)")
+        expect(source).to_contain("self.pending_font_params.push(params)")
+        expect(source).to_contain("font-frame-glyph-cap-exceeded")
+        expect(source).to_contain("if self.pending_font_descriptors.len() == 0")
+        expect(source).to_contain("if self.frame_batching_enabled and not self.font_oracle_mode")
+        expect(source).to_contain("recorded.command_buffer_count = 1")
+        expect(source).to_contain("recorded.submission_count = 0")
+        expect(source).to_contain("recorded.fence_count = 0")
+        expect(source).to_contain("me set_font_oracle_mode(enabled: bool)")
+        expect(source.contains("val pending_status = self._flush_pending_compute()\n        if pending_status <= 0")).to_equal(false)
+        expect(helpers).to_contain("val has_font_work = self.pending_font_descriptors.len() > 0")
+        expect(helpers).to_contain("self.font_frame_submission_count = self.font_frame_submission_count + 1")
+        expect(helpers).to_contain("self.font_frame_fence_count = self.font_frame_fence_count + 1")
+        expect(engine).to_contain("evidence.status == \"recorded\"")
+
+    it "keeps readback and the SoftwareBackend oracle in explicit evidence mode":
+        val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font.spl")
+        val backend = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl")
+        expect(source).to_contain("if self.font_oracle_mode:\n            val initial_evidence_started")
+        expect(source).to_contain("if self.font_oracle_mode:\n            val present_readback_started")
+        expect(backend).to_contain("font_oracle_mode: false")
+        expect(source).to_contain("oracle_mode = self.font_oracle_mode")
+        expect(source.contains("font_atlas_subrect_pixels(batch.atlas_pixels, batch.atlas_width, batch.atlas_height,\n                    q.atlas_x, q.atlas_y, q.width, q.height, q.color).len() != total")).to_equal(false)
+
+    it "initializes through retained ownership with the canonical shader set":
+        val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl")
+        val session = file_read("src/lib/gc_async_mut/gpu/engine2d/vulkan_session.spl")
+        val sffi = file_read("src/lib/nogc_sync_mut/gpu/engine2d/sffi_vulkan.spl")
+        val dispatch = file_read("src/lib/nogc_sync_mut/gpu/engine2d/sffi_dispatch.spl")
+        val font_spirv = file_read(
+            "src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font_spirv.spl")
+        expect(source).to_contain("var session = VulkanSession.create()")
+        expect(source).to_contain("val session_status = session.init()")
+        expect(source).to_contain("if not session.is_valid()")
+        expect(source.contains("if session_status != 0:")).to_equal(false)
+        expect(source).to_contain("session.init_error")
+        expect(session).to_contain("self.init_error = \"shader-clear\"")
+        expect(session).to_contain("self.init_error = \"pipeline-clear\"")
+        expect(source).to_contain("if not self.init_with_session(width, height, session)")
+        expect(source).to_contain("session.release()\n        true")
+        expect(session).to_contain("self.shader_clear         = vulkan_sffi_compile_spirv(spirv_clear())")
+        expect(session).to_contain("self.shader_rect_filled   = vulkan_sffi_compile_spirv(spirv_rect_filled())")
+        expect(session).to_contain("self.shader_rect_outline  = vulkan_sffi_compile_spirv(spirv_rect_outline())")
+        expect(session).to_contain("self.shader_circle_filled = vulkan_sffi_compile_spirv(spirv_circle_filled())")
+        expect(session).to_contain("self.shader_triangle      = vulkan_sffi_compile_spirv(spirv_triangle_filled())")
+        expect(session).to_contain("self.shader_gradient      = vulkan_sffi_compile_spirv(spirv_gradient_rect())")
+        expect(session).to_contain("self.shader_blit          = vulkan_sffi_compile_spirv(spirv_blit())")
+        expect(session).to_contain("self.shader_circle_outline = vulkan_sffi_compile_spirv(noop_spirv)")
+        expect(session).to_contain("self.shader_line          = vulkan_sffi_compile_spirv(noop_spirv)")
+        expect(session).to_contain("self.shader_rounded_rect  = vulkan_sffi_compile_spirv(noop_spirv)")
+        expect(sffi).to_contain("extern fn rt_vulkan_compile_spirv_raw(data_ptr: i64, byte_count: i64)")
+        expect(dispatch).to_contain(
+            "rt_is_interpreter_runtime()")
+        expect(sffi).to_contain("return rt_vulkan_compile_spirv(spirv_bytes)")
+        expect(sffi).to_contain("return rt_vulkan_copy_to_buffer(handle, data, offset)")
+        expect(sffi).to_contain("return rt_vulkan_push_constants(cmd, pipe, data)")
+        expect(sffi).to_contain(
+            "return rt_vulkan_read_buffer_bytes(handle, byte_count, offset)")
+        expect(sffi).to_contain(
+            "extern fn rt_vulkan_copy_to_buffer_raw(handle: i64, data_ptr: i64, byte_count: i64, offset: i64)")
+        expect(sffi).to_contain(
+            "extern fn rt_vulkan_copy_from_buffer_raw(data_ptr: i64, byte_count: i64, handle: i64, offset: i64)")
+        expect(sffi).to_contain(
+            "extern fn rt_vulkan_push_constants_raw(cmd: i64, pipe: i64, data_ptr: i64, byte_count: i64)")
+        expect(sffi).to_contain("fn _vulkan_read_buffer_bytes_abi(")
+        expect(sffi).to_contain("rt_vulkan_copy_from_buffer_raw(")
+        expect(sffi).to_contain("rt_vulkan_copy_to_buffer_raw(")
+        expect(sffi).to_contain("rt_vulkan_push_constants_raw(")
+        expect(sffi).to_contain(
+            "if gpu_sffi_uses_interpreter_array_abi():\n        return false")
+        expect(font_spirv).to_contain(
+            "extern fn rt_array_concat(a: [u8], b: [u8]) -> [u8]")
+        expect(font_spirv).to_contain(
+            "rt_array_concat(\n        _spirv_font_atlas_composite_head(),")
+        expect(font_spirv.contains("artifact.push(byte)")).to_equal(false)
+
+    it "calculates bounded elapsed and live buffer bytes":
+        expect(vulkan_font_elapsed_ns(10, 25)).to_equal(15)
+        expect(vulkan_font_elapsed_ns(25, 10)).to_equal(0)
+        expect(vulkan_font_timed_ns(25, 10)).to_equal(15)
+        expect(vulkan_font_timed_ns(10, 25)).to_equal(0)
+        expect(vulkan_font_gpu_resource_bytes(64, 128, true)).to_equal(244)
+        expect(vulkan_font_gpu_resource_bytes(-1, 128, true)).to_equal(0)
+
+    it "publishes cumulative counters on unavailable returns":
+        var backend = VulkanBackend.create()
+        backend.font_atlas_upload_count = 2
+        backend.font_atlas_upload_bytes = 128
+        backend.font_gpu_resource_high_water_bytes = 4096
+        val evidence = backend.composite_font_batch(0, 0, _perf_batch())
+        expect(evidence.status).to_equal("unavailable")
+        expect(evidence.elapsed_ns >= 0).to_be(true)
+        expect(evidence.atlas_upload_count).to_equal(2)
+        expect(evidence.atlas_upload_bytes).to_equal(128)
+        expect(evidence.gpu_resource_high_water_bytes).to_equal(4096)

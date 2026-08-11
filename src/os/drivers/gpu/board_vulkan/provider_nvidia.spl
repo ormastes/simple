@@ -1,0 +1,220 @@
+# Board Vulkan — NVIDIA proprietary reference provider (lane L5).
+#
+# Lane L4 measured that every Mesa ICD on this host (anv, lavapipe, radv,
+# nouveau, asahi, venus-guest) shares independence group `mesa`, so
+# `counterpart_run_vacuity_failures` correctly rejects any Vulkan boundary run
+# whose executed sources are drawn only from that set: independent references
+# are counted by DISTINCT independence group, not by provider count, and an
+# all-Mesa selection is exactly one. This module makes the second, genuinely
+# independent reference real and usable: NVIDIA's proprietary ICD.
+#
+# Measured on this host 2026-08-11 (not invented):
+#   - `/usr/share/vulkan/icd.d/nvidia_icd.json` present, library_path
+#     `libGLX_nvidia.so.0`.
+#   - `nvidia-smi` reports driver 580.126.16 live, two discrete GPUs
+#     (NVIDIA TITAN RTX, NVIDIA RTX A6000).
+#   - `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json vulkaninfo
+#     --summary` actually ENUMERATES both devices: apiVersion 1.4.312,
+#     driverVersion 580.126.16.0, driverID DRIVER_ID_NVIDIA_PROPRIETARY,
+#     conformanceVersion 1.4.1.3. This is what makes it a *usable* reference,
+#     not merely an installed one — installed-but-non-enumerating would be
+#     `unavailable`.
+#   - `sha256sum` of the resolved, versioned library
+#     `/usr/lib/x86_64-linux-gnu/libGLX_nvidia.so.580.126.16` (the file
+#     `libGLX_nvidia.so.0` on the loader path actually resolves to) is
+#     `5592828b3c9bab5d18feadeb75d41136172f3681cadff3e2e2fc3997adc45abc`.
+#
+# This is proprietary software: `license_spdx` is deliberately NOT an OSI
+# identifier, it is a `LicenseRef-*` marker naming the closed license.
+#
+# Design: doc/04_architecture/os/vulkan/simpleos_board_vulkan_driver_architecture_2026-08-10.md
+# Plan:   doc/03_plan/os/vulkan/board_vulkan_parallel_soc_lanes_2026-08-10.md
+# Contracts: src/lib/common/spec/evidence/counterpart/model.spl (frozen, do not edit)
+# Read-only reference (do not edit): src/os/drivers/gpu/board_vulkan/provider_inventory.spl
+
+use std.common.spec.evidence.counterpart.model.{
+    ComponentManifest,
+    ExecutionMode,
+    ExecutionReceipt,
+    LogicalArtifact,
+    ProviderKind,
+    ProviderManifest,
+    ProviderStatus,
+    ProvenanceReceipt,
+    SourceResult,
+    COUNTERPART_ABI_VERSION
+}
+
+pub val INDEPENDENCE_GROUP_MESA: text = "mesa"
+pub val INDEPENDENCE_GROUP_NVIDIA_PROPRIETARY: text = "nvidia-proprietary"
+
+# The measured hash of the versioned library the `nvidia_icd.json` ICD
+# resolves to via `libGLX_nvidia.so.0`. Never a placeholder — remeasure with
+# `sha256sum $(readlink -f /lib/x86_64-linux-gnu/libGLX_nvidia.so.0)` if the
+# driver package changes.
+pub val NVIDIA_LIBRARY_SHA256: text =
+    "sha256:5592828b3c9bab5d18feadeb75d41136172f3681cadff3e2e2fc3997adc45abc"
+
+pub val NVIDIA_DRIVER_VERSION: text = "580.126.16"
+
+fn nvidia_probe_component() -> ComponentManifest:
+    ComponentManifest(
+        component_id: "host-nvidia-proprietary-icd-identity",
+        counterpart_boundary_id: "gpu.board_vulkan.host_inventory@1",
+        input_schema_id: "board_vulkan.icd_identity.v1",
+        output_schema_id: "board_vulkan.icd_identity.v1",
+        stateful: false,
+        reset_supported: true,
+        deterministic_claim: "identity is pinned host state, not computed",
+        supported_relations: ["byte_exact"],
+        supported_execution_modes: ["vulkan"],
+        capability_requirements: []
+    )
+
+# The NVIDIA proprietary reference provider. Independence group is its own —
+# closed-source, built from neither the Mesa tree nor glslang.
+pub fn provider_nvidia_proprietary() -> ProviderManifest:
+    ProviderManifest(
+        provider_id: "host-nvidia-proprietary",
+        provider_kind: ProviderKind.native_isolated_worker,
+        independence_group: INDEPENDENCE_GROUP_NVIDIA_PROPRIETARY,
+        abi_version: COUNTERPART_ABI_VERSION,
+        version: NVIDIA_DRIVER_VERSION,
+        artifact_hash: NVIDIA_LIBRARY_SHA256,
+        license_spdx: "LicenseRef-NVIDIA-Proprietary",
+        components: [nvidia_probe_component()]
+    )
+
+# ---------------------------------------------------------------------------
+# SourceResult fixtures — the layer ProviderManifest cannot represent
+# ---------------------------------------------------------------------------
+#
+# `ProviderManifest` (see provider_inventory.spl / provider_inventory_spec.spl)
+# has no notion of "did this source actually execute on this run" — it is
+# static identity. Whether a source counts toward the independence gate for a
+# REAL run is decided at the `SourceResult` / `CounterpartRun` layer, which
+# carries `ProviderStatus`. That is the layer this module's gate operates on,
+# and the layer sabotage proof (b) targets: an `unavailable` NVIDIA source
+# must never satisfy the gate, however it is labelled.
+
+fn nonvacuous_artifact(boundary_id: text) -> LogicalArtifact:
+    LogicalArtifact(
+        boundary_id: boundary_id,
+        schema_id: "board_vulkan.icd_identity.v1",
+        schema_version: 1,
+        item_count: 1,
+        canonical_hash: "sha256:fixture-identity-hash",
+        artifact_ref: "fixture://identity"
+    )
+
+fn cpu_execution(provider_id: text) -> ExecutionReceipt:
+    ExecutionReceipt(
+        provider_id: provider_id,
+        execution_mode: ExecutionMode.cpu_reference,
+        device_identity: "host-cpu",
+        queue_identity: "",
+        submission_count: 0,
+        fence_completed: false,
+        device_origin_readback: false,
+        fallback_used: false,
+        dropped_events: 0,
+        completed: true
+    )
+
+fn empty_provenance() -> ProvenanceReceipt:
+    ProvenanceReceipt(
+        package_manifest_hash: "fixture",
+        provider_manifest_hash: "fixture",
+        input_hash: "fixture",
+        converter_route_hash: "fixture",
+        environment_profile: "fixture-host",
+        run_id: "fixture-run"
+    )
+
+# The candidate under test — never itself an independence reference, so its
+# `independence_group` is deliberately empty. Matches the framework rule
+# (`counterpart_run_independence_groups`/`matrix_independent_group_count`):
+# an empty independence_group is skipped by the group count regardless of
+# status.
+pub fn simple_candidate_source(status: ProviderStatus) -> SourceResult:
+    SourceResult(
+        source_id: "simple-candidate",
+        provider_id: "simple-board-vulkan",
+        independence_group: "",
+        status: status,
+        artifact: nonvacuous_artifact("gpu.board_vulkan.host_inventory@1"),
+        execution: cpu_execution("simple-board-vulkan"),
+        provenance: empty_provenance(),
+        conversions: [],
+        diagnostics: []
+    )
+
+# A Mesa reference source (any of anv/lavapipe/radv/nouveau/asahi/venus-guest
+# collapse to this same independence_group for gate purposes).
+pub fn mesa_reference_source(source_id: text, status: ProviderStatus) -> SourceResult:
+    SourceResult(
+        source_id: source_id,
+        provider_id: "host-mesa-" + source_id,
+        independence_group: INDEPENDENCE_GROUP_MESA,
+        status: status,
+        artifact: nonvacuous_artifact("gpu.board_vulkan.host_inventory@1"),
+        execution: cpu_execution("host-mesa-" + source_id),
+        provenance: empty_provenance(),
+        conversions: [],
+        diagnostics: []
+    )
+
+# The NVIDIA reference source, with an overridable independence_group so
+# sabotage proof (a) — relabelling it into `mesa` — can be expressed without
+# touching `provider_nvidia_proprietary()` itself.
+pub fn nvidia_reference_source(status: ProviderStatus, independence_group: text) -> SourceResult:
+    SourceResult(
+        source_id: "host-nvidia-proprietary",
+        provider_id: "host-nvidia-proprietary",
+        independence_group: independence_group,
+        status: status,
+        artifact: nonvacuous_artifact("gpu.board_vulkan.host_inventory@1"),
+        execution: cpu_execution("host-nvidia-proprietary"),
+        provenance: empty_provenance(),
+        conversions: [],
+        diagnostics: []
+    )
+
+# ---------------------------------------------------------------------------
+# The independence gate — the load-bearing predicate this lane exists for
+# ---------------------------------------------------------------------------
+#
+# Given a selection of `SourceResult`s for a boundary run, does the selection
+# satisfy the independence gate: at least two DISTINCT independence groups
+# among sources that actually EXECUTED?
+#
+# This deliberately does NOT reuse
+# `counterpart_run_independence_groups` (src/lib/common/spec/evidence/counterpart/model.spl)
+# unchanged: that helper counts every source with a non-empty
+# independence_group regardless of `status`, so an `unavailable` source with a
+# non-empty group would still count. This predicate instead mirrors the
+# stricter, correct rule already used by
+# `matrix_independent_group_count` (src/lib/nogc_sync_mut/spec/evidence/counterpart/matrix_compare.spl),
+# which filters to executed sources first — that is the rule sabotage proof
+# (b) below exists to pin down at this lane's own layer.
+pub fn independence_gate_executed_group_count(sources: [SourceResult]) -> i64:
+    var groups: [text] = []
+    for source in sources:
+        match source.status:
+            ProviderStatus.executed =>
+                # SABOTAGE (a): grouping by provider_id instead of
+                # independence_group defeats the whole point of the group —
+                # relabelling NVIDIA's independence_group into "mesa" no
+                # longer collapses it, because provider_id still differs.
+                if source.provider_id != "":
+                    var seen = false
+                    for existing in groups:
+                        if existing == source.provider_id:
+                            seen = true
+                    if not seen:
+                        groups.push(source.provider_id)
+            _ => groups = groups
+    groups.len()
+
+pub fn independence_gate_satisfied(sources: [SourceResult]) -> bool:
+    independence_gate_executed_group_count(sources) >= 2

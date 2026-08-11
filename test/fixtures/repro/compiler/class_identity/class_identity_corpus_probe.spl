@@ -1,0 +1,102 @@
+# Repro (lane F1, corpus completion): the class/struct identity contract cases
+# that `class_field_reference_semantics_repro.spl` does NOT cover — trait-typed
+# fields, optional fields, multi-element arrays of class refs, a parameter
+# stored into a field, a class returned from a function, and the NEGATIVE
+# control: `struct` must value-copy.
+#
+# Contract (doc/03_plan/ui/perf/render_perf_redesign_plan_2026-08-06.md sec. 2 F1):
+#   struct = value semantics; class = identity/reference semantics.
+#
+# Each line prints REF (alias honored) or COPY(n=..) (value-copy divergence).
+# The struct line is inverted: it prints VAL when the contract holds.
+#
+# Run:
+#   bin/simple run test/fixtures/repro/compiler/class_identity/class_identity_corpus_probe.spl
+#   SIMPLE_EXECUTION_MODE=interpret bin/simple run <same>
+#
+# See doc/08_tracking/bug/class_field_reference_semantics_diverge_2026-08-06.md
+
+class PCell:
+    n: i64
+
+struct SCell:
+    n: i64
+
+trait Bumpable:
+    fn value() -> i64
+
+class TraitCell:
+    n: i64
+
+impl Bumpable for TraitCell:
+    fn value() -> i64:
+        self.n
+
+class TraitHolder:
+    item: Bumpable
+
+class OptHolder2:
+    maybe: PCell?
+
+class ParamHolder:
+    cell: PCell
+
+class StructHolder:
+    cell: SCell
+
+fn stash(h: ParamHolder, c: PCell):
+    h.cell = c
+
+fn make_cell() -> PCell:
+    PCell(n: 90)
+
+fn verdict(got: i64, want_ref: i64) -> text:
+    if got == want_ref:
+        return "REF"
+    "COPY(n={got})"
+
+fn main():
+    # A. trait-typed field holding a class instance
+    val tc = TraitCell(n: 100)
+    val th = TraitHolder(item: tc)
+    tc.n = 101
+    print "A trait field          = " + verdict(th.item.value(), 101)
+
+    # C. multi-element array of class refs — mutate the SECOND element
+    val c3a = PCell(n: 120)
+    val c3b = PCell(n: 130)
+    val arr = [c3a, c3b]
+    arr[1].n = 131
+    print "C array elem[1]        = " + verdict(c3b.n, 131)
+
+    # D. parameter stored into a field by the callee, then mutated by caller
+    val h4 = ParamHolder(cell: PCell(n: 0))
+    val c4 = PCell(n: 140)
+    stash(h4, c4)
+    c4.n = 141
+    print "D param->field         = " + verdict(h4.cell.n, 141)
+
+    # E. class returned from a function, then mutated — the returned handle and
+    #    the local must be the same object
+    val c5 = make_cell()
+    val h5 = ParamHolder(cell: c5)
+    c5.n = 91
+    print "E returned class       = " + verdict(h5.cell.n, 91)
+
+    # F. NEGATIVE CONTROL: struct in a class field MUST value-copy.
+    #    Prints VAL when the contract holds, ALIAS when struct wrongly aliases.
+    var s = SCell(n: 150)
+    val sh = StructHolder(cell: s)
+    s.n = 151
+    val label = if sh.cell.n == 150 : "VAL" else: "ALIAS(n={sh.cell.n})"
+    print "F struct field         = " + label
+
+    # B. optional class field, mutate through the ORIGINAL. RUNS LAST: under the
+    #    JIT this dies with "field access on nil receiver" (the Option class
+    #    field reads back nil), so any case after it would never print.
+    val c2 = PCell(n: 110)
+    val oh = OptHolder2(maybe: c2)
+    c2.n = 111
+    val m = oh.maybe
+    val gotb = if m.? : m!.n else: -1
+    print "B optional field       = " + verdict(gotb, 111)

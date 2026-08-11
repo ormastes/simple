@@ -1,0 +1,136 @@
+#!/bin/sh
+# Content-addressed fast path for `bin/simple lint`.
+#
+# WHY: measured on this host (2026-08-09), `bin/simple lint` costs ~11.7s of
+# fixed startup PLUS ~3-4s per function declaration, so a single 120-line
+# library file takes ~119s. Agents re-lint unchanged files constantly and pay
+# that every time. This wrapper skips only files whose exact content was
+# already proven clean by the exact same binary + config + options.
+#
+# IT DOES NOT WEAKEN ANY CHECK:
+#   - Only a CLEAN (exit 0, no diagnostics) result is ever cached.
+#   - A failing or dirty file is NEVER cached, so it is re-linted every run
+#     and always re-reported.
+#   - The key includes the linter binary identity, the resolved simple.sdn
+#     config, and the normalized option set. Change any of them and every
+#     entry misses.
+#   - On any doubt (unreadable file, missing hasher) it falls through to a
+#     real lint run.
+#
+# Usage: sh scripts/check/lint-cached.shs [lint-options] <file.spl> [more...]
+#        SIMPLE_LINT_CACHE_DIR=... to relocate the cache
+#        SIMPLE_LINT_CACHE=0       to bypass the cache entirely
+#
+# Verdict line (always last on stdout):
+#   PASS — n file(s) checked (h cached, m linted)
+#   FAIL — n file(s) checked, f with findings
+#   ERROR — nothing was checked
+set -eu
+
+repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
+bin="$repo_root/bin/simple"
+cache_dir="${SIMPLE_LINT_CACHE_DIR:-$repo_root/build/lint-cache}"
+use_cache="${SIMPLE_LINT_CACHE:-1}"
+
+if [ ! -x "$bin" ]; then
+    echo "ERROR — nothing was checked (no linter at $bin)"
+    exit 2
+fi
+
+hasher=""
+if command -v sha256sum >/dev/null 2>&1; then
+    hasher="sha256sum"
+elif command -v shasum >/dev/null 2>&1; then
+    hasher="shasum -a 256"
+fi
+
+hash_of() { $hasher "$1" 2>/dev/null | cut -d' ' -f1; }
+
+# --- Identity of everything that can change a lint verdict -------------------
+# Binary identity: size+mtime is enough and is O(1); hashing 29MB per run would
+# cost more than it saves. Any rebuild changes both.
+bin_real="$(readlink -f "$bin")"
+bin_id="$(ls -la "$bin_real" 2>/dev/null | awk '{print $5, $6, $7, $8}')"
+sdn_id=""
+if [ -f "$repo_root/simple.sdn" ] && [ -n "$hasher" ]; then
+    sdn_id="$(hash_of "$repo_root/simple.sdn")"
+fi
+
+# Split options from file targets, preserving option order-independence.
+opts=""
+files=""
+for a in "$@"; do
+    case "$a" in
+        -*) opts="$opts $a" ;;
+        *)  files="$files $a" ;;
+    esac
+done
+# Normalize option set so `--json --simd` and `--simd --json` share a key.
+opts_norm="$(printf '%s\n' $opts | sort | tr '\n' ' ')"
+
+# Options whose output is per-file and not a simple clean/dirty verdict are not
+# safe to replay from a clean-only cache. Bypass for those.
+case "$opts_norm" in
+    *--fix*|*--all*|*--mcp-perf*) use_cache=0 ;;
+esac
+
+if [ -z "$hasher" ]; then
+    use_cache=0
+fi
+
+if [ -z "$files" ]; then
+    echo "ERROR — nothing was checked (no input files)"
+    exit 2
+fi
+
+[ "$use_cache" = "1" ] && mkdir -p "$cache_dir"
+
+key_prefix="$(printf '%s|%s|%s' "$bin_id" "$sdn_id" "$opts_norm" | $hasher 2>/dev/null | cut -d' ' -f1 || true)"
+
+checked=0
+cached=0
+linted=0
+failed=0
+
+for f in $files; do
+    if [ ! -f "$f" ]; then
+        echo "$f: error: file not found"
+        failed=$((failed + 1))
+        checked=$((checked + 1))
+        continue
+    fi
+    checked=$((checked + 1))
+
+    key=""
+    if [ "$use_cache" = "1" ]; then
+        content_hash="$(hash_of "$f")"
+        if [ -n "$content_hash" ] && [ -n "$key_prefix" ]; then
+            key="$cache_dir/$key_prefix-$content_hash"
+            if [ -f "$key" ]; then
+                cached=$((cached + 1))
+                continue
+            fi
+        fi
+    fi
+
+    # Cache miss (or cache disabled): run the REAL linter, unmodified.
+    if "$bin" lint $opts "$f"; then
+        linted=$((linted + 1))
+        # Record clean only. Dirty/failing files are deliberately never cached.
+        [ -n "$key" ] && : > "$key"
+    else
+        linted=$((linted + 1))
+        failed=$((failed + 1))
+    fi
+done
+
+if [ "$checked" -eq 0 ]; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+if [ "$failed" -gt 0 ]; then
+    echo "FAIL — $checked file(s) checked, $failed with findings"
+    exit 1
+fi
+echo "PASS — $checked file(s) checked ($cached cached, $linted linted)"
+exit 0

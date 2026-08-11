@@ -1,0 +1,279 @@
+# codex-system-test
+# @req REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-021
+"""# Browser Chrome Pointer Cancellation
+
+Proves navigation chrome and page-to-page ownership replacement release the
+previous renderer-owned page press exactly once, using the prior press receipt.
+The retained page remains unchanged through canonical Draw IR and Engine2D.
+"""
+use std.spec.*
+use std.env.variables.{env_get}
+use std.io_runtime.{file_hash_sha256}
+use app.io.mod.{thread_sleep_ms}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use os.hosted.hosted_browser_renderer_registry.{
+    HostedBrowserRendererRegistry
+}
+use os.hosted.hosted_browser_renderer_policy.{
+    HostedBrowserNavigationPermit
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir_with_images
+}
+
+val CHROME_CANCEL_WINDOW = 141
+val CHROME_CANCEL_SECOND_WINDOW = 142
+val CHROME_CANCEL_HTML = (
+    "<html><body style='margin:0;background-color:#ffffff'>" +
+    "<div id='press' style='width:16px;height:16px;" +
+    "background-color:#00ff00' " +
+    "onclick=\"this.style.backgroundColor='#ff0000'\"></div>" +
+    "</body></html>"
+)
+
+fn _count_chrome_cancel_color(pixels: [u32], color: u32) -> i64:
+    var count: i64 = 0
+    for pixel in pixels:
+        if pixel == color:
+            count = count + 1
+    count
+
+fn _await_chrome_cancel_window(
+    registry: HostedBrowserRendererRegistry,
+    window_id: i64
+):
+    var attempt: i64 = 0
+    while attempt < 500:
+        val state = registry.advance_window(
+            window_id, "", CHROME_CANCEL_HTML, 32, 24,
+            attempt * 1000, 100000, true
+        )
+        if state == "failed":
+            fail("browser renderer failed while awaiting pointer evidence")
+        if state == "frame":
+            return
+        thread_sleep_ms(1)
+        attempt = attempt + 1
+    fail("browser renderer did not produce pointer evidence")
+
+fn setup_chrome_cancel_fixture() -> HostedBrowserRendererRegistry:
+    val artifact = env_get("HOSTED_WM_ARTIFACT")
+    val expected_sha = env_get("HOSTED_WM_ARTIFACT_SHA256")
+    if artifact == "":
+        fail("HOSTED_WM_ARTIFACT must name the hosted_entry native binary")
+    if (expected_sha.len() != 64 or
+        file_hash_sha256(artifact) != expected_sha):
+        fail("HOSTED_WM_ARTIFACT does not match its admitted SHA-256")
+    var registry = HostedBrowserRendererRegistry.create(
+        artifact, "about:blank"
+    )
+    expect(registry.ensure(
+        CHROME_CANCEL_WINDOW, CHROME_CANCEL_HTML,
+        32, 24, 0, 100000
+    )).to_equal("none")
+    expect(registry.ensure(
+        CHROME_CANCEL_SECOND_WINDOW, CHROME_CANCEL_HTML,
+        32, 24, 0, 100000
+    )).to_equal("none")
+    _await_chrome_cancel_window(registry, CHROME_CANCEL_WINDOW)
+    _await_chrome_cancel_window(registry, CHROME_CANCEL_SECOND_WINDOW)
+    val _ = registry.take_frame(CHROME_CANCEL_WINDOW)
+    val _ = registry.take_frame(CHROME_CANCEL_SECOND_WINDOW)
+    registry
+
+fn check_page_press_owned(
+    registry: HostedBrowserRendererRegistry,
+    window_id: i64,
+    event_id: i64
+):
+    val pressed = registry.dispatch_pointer(
+        event_id, window_id, 4, 4, true
+    )
+    expect(pressed.callback_count).to_equal(1)
+    expect(pressed.reason).to_equal("")
+    expect(registry.pressed_window_id).to_equal(window_id)
+    expect(registry.pressed_event_id).to_equal(event_id)
+
+fn check_renderer_release_sent(
+    registry: HostedBrowserRendererRegistry,
+    prior_window_id: i64,
+    prior_event_id: i64
+):
+    expect(registry.pending_cancel_window_id).to_equal(prior_window_id)
+    expect(registry.pending_cancel_event_id).to_equal(prior_event_id)
+    var attempt: i64 = 0
+    while attempt < 500:
+        val state = registry.advance_window(
+            prior_window_id, "", CHROME_CANCEL_HTML, 32, 24,
+            1000000 + attempt * 1000, 100000, true
+        )
+        if state == "failed":
+            fail("browser renderer failed while releasing page press")
+        val index = registry._index(prior_window_id)
+        if (registry.pending_cancel_window_id == 0 and
+            registry.pending_cancel_event_id == 0 and
+            index >= 0 and
+            registry.entries[index].renderer.command_deadline_ms <= 0 and
+            not registry.entries[index].renderer.pointer_pressed):
+            expect(
+                registry.pointer_cancel_receipt_count
+            ).to_equal(1)
+            return
+        thread_sleep_ms(1)
+        attempt = attempt + 1
+    fail("browser renderer did not complete the canonical pointer release")
+
+fn check_pressed_state_cleared(registry: HostedBrowserRendererRegistry):
+    val index = registry._index(CHROME_CANCEL_WINDOW)
+    expect(index).to_be_greater_than(-1)
+    expect(registry.entries[index].renderer.pointer_pressed).to_be(false)
+    val frame = registry.take_frame(CHROME_CANCEL_WINDOW)
+    expect(frame.pixels.len()).to_equal(32 * 24)
+    expect(_count_chrome_cancel_color(
+        frame.pixels, 0xFF00FF00u32
+    )).to_equal(16 * 16)
+    expect(_count_chrome_cancel_color(
+        frame.pixels, 0xFFFF0000u32
+    )).to_equal(0)
+
+    val composition = simple_web_layout_render_html_draw_ir_with_images(
+        CHROME_CANCEL_HTML, 32, 24, []
+    )
+    var press_index: i32 = -1
+    var command_index: i32 = 0
+    while command_index < composition.batches[0].commands.len():
+        if (
+            composition.batches[0].commands[command_index].component_id ==
+                "press"
+        ):
+            press_index = command_index
+        command_index = command_index + 1
+    expect(press_index).to_be_greater_than(-1)
+    val press = composition.batches[0].commands[press_index]
+    expect(press.kind).to_equal("rect")
+    expect(press.x).to_equal(0)
+    expect(press.y).to_equal(0)
+    expect(press.width).to_equal(16)
+    expect(press.height).to_equal(16)
+    expect(press.color).to_equal(0xFF00FF00u32)
+    val raster = Engine2dCompositorBackend.create_named(
+        32, 24, "software"
+    )
+    val rendered = raster.render_draw_ir_composition(composition, [])
+    raster.shutdown()
+    expect(_count_chrome_cancel_color(
+        rendered.pixels, 0xFF00FF00u32
+    )).to_equal(16 * 16)
+    expect(_count_chrome_cancel_color(
+        rendered.pixels, 0xFFFF0000u32
+    )).to_equal(0)
+
+describe "Browser chrome pointer cancellation":
+    # @manual: show
+    # @capture(protocol)
+    # @capture(gui)
+    # @req REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-021
+    it "should cancel a page press before navigation chrome owns input":
+        var registry = setup_chrome_cancel_fixture()
+
+        step("Press a renderer-owned page target")
+        check_page_press_owned(
+            registry, CHROME_CANCEL_WINDOW, 401
+        )
+
+        step("Cancel through navigation chrome state")
+        val chrome = registry.dispatch_chrome_pointer(
+            402, CHROME_CANCEL_WINDOW, "address", true
+        )
+        expect(chrome.reason).to_equal("chrome-pressed")
+        expect(registry.pressed_event_id).to_equal(402)
+
+        step("Observe one canonical pointer release")
+        check_renderer_release_sent(
+            registry, CHROME_CANCEL_WINDOW, 401
+        )
+
+        step("Render without stale pressed state")
+        check_pressed_state_cleared(registry)
+        expect(registry.dispatch_chrome_pointer(
+            403, CHROME_CANCEL_WINDOW, "address", false
+        ).reason).to_equal("address-focused")
+        expect(registry.pressed_window_id).to_equal(0)
+        expect(registry.pressed_event_id).to_equal(0)
+        expect(registry.close()).to_be(true)
+
+    # @manual: folded
+    # @req REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-021
+    it "should release the prior renderer before a second page owns input":
+        var registry = setup_chrome_cancel_fixture()
+        step("Press the first renderer-owned page target")
+        check_page_press_owned(
+            registry, CHROME_CANCEL_WINDOW, 501
+        )
+
+        step("Replace ownership with a second page renderer")
+        val replacement = registry.dispatch_pointer(
+            502, CHROME_CANCEL_SECOND_WINDOW, 4, 4, true
+        )
+        expect(replacement.callback_count).to_equal(1)
+        expect(registry.pressed_window_id).to_equal(
+            CHROME_CANCEL_SECOND_WINDOW
+        )
+        expect(registry.pressed_event_id).to_equal(502)
+        check_renderer_release_sent(
+            registry, CHROME_CANCEL_WINDOW, 501
+        )
+        _await_chrome_cancel_window(
+            registry, CHROME_CANCEL_SECOND_WINDOW
+        )
+        expect(registry.dispatch_pointer(
+            503, CHROME_CANCEL_SECOND_WINDOW, 4, 4, false
+        ).callback_count).to_equal(1)
+        expect(registry.close()).to_be(true)
+
+    # @manual: folded
+    # @req REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-021
+    it "should drop an old generation release before same-window replacement":
+        step("Arm page and pending-release ownership on the old generation")
+        var registry = setup_chrome_cancel_fixture()
+        val index = registry._index(CHROME_CANCEL_WINDOW)
+        expect(index).to_be_greater_than(-1)
+        var entry = registry.entries[index]
+        val old_generation = entry.renderer.generation
+        entry.renderer.navigation_permit = HostedBrowserNavigationPermit(
+            active: true,
+            url: "https://replacement.test/page",
+            method: "GET",
+            headers: "",
+            body: "",
+            content_type: "",
+            redirect_count: 0
+        )
+        entry.renderer.site_lock = "https://old.test"
+        entry.renderer.site_swap_pending = true
+        entry.renderer.site_swap_site = "https://replacement.test"
+        entry.renderer.pointer_pressed = true
+        registry.entries[index] = entry
+        registry.pressed_window_id = CHROME_CANCEL_WINDOW
+        registry.pressed_event_id = 601
+        registry.pending_cancel_window_id = CHROME_CANCEL_WINDOW
+        registry.pending_cancel_event_id = 601
+
+        step("Replace the renderer generation at the teardown boundary")
+        expect(registry._begin_site_swap(index, 100000)).to_equal("none")
+        expect(
+            registry.entries[index].renderer.generation
+        ).to_be_greater_than(old_generation)
+        expect(registry.pressed_window_id).to_equal(0)
+        expect(registry.pressed_event_id).to_equal(0)
+        expect(registry.pending_cancel_window_id).to_equal(0)
+        expect(registry.pending_cancel_event_id).to_equal(0)
+
+        step("Reject the stale release for the replacement generation")
+        registry.cancel_pointer_state(999)
+        expect(registry.pointer_cancel_receipt_count).to_equal(0)
+        expect(registry.entries[index].renderer.pointer_pressed).to_be(false)
+        expect(
+            registry.entries[index].renderer.pending_pointer_cancel_event_id
+        ).to_equal(0)
+        expect(registry.close()).to_be(true)

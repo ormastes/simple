@@ -1,0 +1,105 @@
+# @req REQ-LLM-MSG-007 REQ-LLM-MSG-013 REQ-LLM-MSG-016
+"""Composite plugin routes every agent through compiled messaging workers."""
+
+use std.spec.*
+use std.io_runtime.{file_exists, file_read}
+use app.llm_caret.messaging.database_execution.{DatabaseArtifactKind,
+    default_messaging_mcp_execution_plan, default_messaging_hook_execution_plan,
+    default_messaging_bridge_execution_plan}
+
+describe "LLM Caret messaging composite plugin runtime":
+    it "selects compiled MCP and hook carriers for interpreter-hosted agents":
+        step("Resolve the production workers independently of caller mode")
+        val mcp = default_messaging_mcp_execution_plan(true)
+        val hook = default_messaging_hook_execution_plan(true)
+        val bridge = default_messaging_bridge_execution_plan(true)
+        expect(mcp.kind).to_equal(DatabaseArtifactKind.NativeExecutable)
+        expect(mcp.source_path).to_equal("src/app/llm_caret/messaging/mcp_worker.spl")
+        expect(hook.kind).to_equal(DatabaseArtifactKind.NativeExecutable)
+        expect(hook.source_path).to_equal("src/app/llm_caret/messaging/hook_worker.spl")
+        expect(bridge.kind).to_equal(DatabaseArtifactKind.NativeExecutable)
+        expect(bridge.source_path).to_equal("src/app/llm_caret/messaging/bridge_worker.spl")
+
+    it "packages Claude Codex and Gemini chat lifecycle commands":
+        step("Inspect the installed-source fragments used by all three agents")
+        val root = "plugins/llm_caret_messaging/"
+        val claude = file_read(root + "hooks/claude/hooks.json")
+        val codex = file_read(root + "hooks/codex/hooks.json")
+        val gemini = file_read(root + "hooks/gemini/settings.fragment.json")
+        expect(claude).to_contain("caret messaging hook claude")
+        expect(claude).to_contain("UserPromptSubmit")
+        expect(codex).to_contain("app_server")
+        expect(codex).to_contain("messaging\", \"hook\", \"codex")
+        expect(gemini).to_contain("caret messaging hook gemini")
+        expect(gemini).to_contain("BeforeAgent")
+        val gemini_extension_hooks = file_read(root + "gemini/hooks/hooks.json")
+        expect(gemini_extension_hooks).to_contain("\"matcher\": \"*\"")
+        expect(gemini_extension_hooks).to_contain("caret messaging hook gemini BeforeAgent")
+        expect(gemini_extension_hooks.contains("hook claude")).to_equal(false)
+        expect(file_exists(root + "gemini/gemini-extension.json")).to_equal(true)
+        expect(file_read(root + "gemini/gemini-extension.json")).to_contain("llm-caret-messaging")
+        expect(file_exists(root + "gemini/skills/llm-caret-messaging/SKILL.md")).to_equal(true)
+        expect(file_exists(root + "skills/llm-caret-messaging/SKILL.md")).to_equal(true)
+
+    it "packages durable MCP configuration without transport credentials":
+        val config = file_read("plugins/llm_caret_messaging/.mcp.json")
+        expect(config).to_contain("\"command\": \"caret\"")
+        expect(config).to_contain("\"args\": [\"messaging\", \"mcp\"]")
+        expect(config).to_contain("LLM_CARET_MESSAGING_DB")
+        expect(config.contains("SLACK_TOKEN")).to_equal(false)
+        expect(config.contains("TEAMS_SECRET")).to_equal(false)
+
+    it "does not report plugin health from hashes alone":
+        val source = file_read("src/app/llm_caret/messaging/cli.spl")
+        expect(source).to_contain("mcp_ready")
+        expect(source).to_contain("hook_ready")
+        expect(source).to_contain("bridge_ready")
+        expect(source).to_contain("messaging_artifact_fresh(mcp_plan")
+
+    it "uses real artifact freshness for status and probes":
+        val source = file_read("src/app/llm_caret/messaging/cli.spl")
+        expect(source).to_contain("fn messaging_artifact_fresh(")
+        expect(source).to_contain("llm-caret-messaging: \" + (if ready: \"ready\" else: \"not-ready\")")
+        expect(source).to_contain("artifact_ready")
+        expect(source).to_contain("if ready: 0 else: 1")
+
+    it "binds inherited subprocess execution to the runtime-backed owner":
+        step("Inspect the messaging CLI process import")
+        val source = file_read("src/app/llm_caret/messaging/cli.spl")
+        step("Resolve inherited subprocess execution through its production owner")
+        expect(source).to_contain("use app.io.process_ops.{process_run_inherit}")
+        expect(source.contains("app.io.mod.{env_get, process_run, process_run_inherit")).to_equal(false)
+        step("Protect the native Caret closure from a bare unresolved symbol")
+        expect(file_read("src/app/io/process_ops.spl")).to_contain(
+            "rt_process_run_inherit(cmd, args)"
+        )
+
+    it "publishes the Claude plugin through the repository marketplace":
+        val marketplace = file_read(".claude-plugin/marketplace.json")
+        expect(marketplace).to_contain("\"name\": \"simple-plugins\"")
+        expect(marketplace).to_contain("\"name\": \"llm-caret-messaging\"")
+        expect(marketplace).to_contain("\"source\": \"./plugins/llm_caret_messaging\"")
+
+    it "plans native activation for Claude Codex and Gemini without secrets":
+        step("Inspect the guarded activation plan before any native CLI mutation")
+        val source = file_read("src/app/llm_caret/messaging/cli.spl")
+        expect(source).to_contain("fn messaging_plugin_activate(args: [text], apply: bool) -> i64:")
+        expect(source).to_contain("plugin must be installed before activation")
+        expect(source).to_contain("val apply = args.contains(\"--apply\")")
+        expect(source).to_contain("claude plugin install llm-caret-messaging@simple-plugins")
+        expect(source).to_contain("codex mcp add")
+        expect(source).to_contain("/gemini --consent")
+        expect(source).to_contain("simple.llm-caret-messaging.native-activation/v1")
+        expect(source.contains("SLACK_TOKEN=")).to_equal(false)
+        expect(source.contains("TEAMS_SECRET=")).to_equal(false)
+
+    it "plans ownership-guarded native deactivation without removing the shared marketplace":
+        step("Inspect reversible native cleanup for all three agent integrations")
+        val source = file_read("src/app/llm_caret/messaging/cli.spl")
+        expect(source).to_contain("fn messaging_plugin_deactivate(args: [text], apply: bool) -> i64:")
+        expect(source).to_contain("native activation ownership record missing")
+        expect(source).to_contain("claude plugin uninstall llm-caret-messaging@simple-plugins")
+        expect(source).to_contain("codex mcp remove llm-caret-messaging")
+        expect(source).to_contain("gemini extensions uninstall llm-caret-messaging")
+        expect(source).to_contain("deactivate native agent registrations before uninstall")
+        expect(source.contains("claude plugin marketplace remove simple-plugins")).to_equal(false)

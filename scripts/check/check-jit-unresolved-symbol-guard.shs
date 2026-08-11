@@ -1,0 +1,130 @@
+#!/bin/sh
+# check-jit-unresolved-symbol-guard.shs
+#
+# JIT-lane fence for: bad input containing an unresolved symbol must produce a
+# DIAGNOSTIC on the default JIT lane, exactly as the interpreter does. Today
+# (2026-08-10, seed at f74a76ae240) it does not:
+#
+#   var x = [i64]()        # list literal calling undefined var `i64`
+#     interpreter: error: semantic: variable `i64` not found   (rc=1, correct)
+#     JIT lane:    SIGSEGV rc=139  <- crash in
+#                  simple_compiler::codegen::jit::JitCompiler::call_i64_void
+#   var y = undefined_var_xyz
+#     interpreter: error: semantic: variable `undefined_var_xyz` not found
+#     JIT lane:    prints OK, rc=0  <- FAILS OPEN, silent wrong answer
+#
+# Both defects live in the RUST SEED's JIT (src/compiler_rust), which lacks the
+# semantic unresolved-variable check its own interpreter lane has. The
+# pure-Simple compiler (native-build lane) diagnoses correctly
+# ("HIR lowering error ...: unresolved name: i64"). Analysis:
+#   doc/08_tracking/bug/seed_jit_unresolved_symbol_segfault_and_silent_pass_2026-08-10.md
+#
+# WHY A SCRIPT AND NOT A SPEC
+# `bin/simple test` hard-defaults to the tree-walk interpreter, so NO
+# `*_spec.spl` can observe the JIT execution lane. Only a script that runs
+# `bin/simple <file.spl>` (bare = JIT) can. Same reasoning as the AOT roster
+# header in scripts/check/check-aot-lane-fences.shs.
+#
+# WHAT IS ASSERTED (fail closed in every direction)
+#   1. CONTROL (`var x: [i64] = []`) must run on BOTH lanes and print
+#      CONTROL=OK. If the control breaks, the harness is measuring nothing.
+#   2. For each bad-input fixture, on BOTH lanes:
+#        - rc must be nonzero and NOT a signal death (rc < 128), and
+#        - output must NOT contain SHOULD_NOT_PRINT (silent pass), and
+#        - stderr must mention the undefined symbol or an unresolved/not-found
+#          diagnostic.
+#      A crash (rc>=128, e.g. 139=SIGSEGV) is a FAIL. A silent green is a FAIL.
+#
+# KNOWN-RED: this fence is EXPECTED TO FAIL until the seed JIT is fixed. It is
+# on the roster so the gap stays visible instead of advertised-but-unrun.
+#
+# EXIT CODES (repo pre-push guard convention)
+#   0 PASS / 1 FAIL / 2 ERROR (nothing measured — NOT a pass)
+#
+# Usage: sh scripts/check/check-jit-unresolved-symbol-guard.shs
+# Env:   JIT_GUARD_BIN=<path> override the binary under test (used by the
+#        sabotage self-check; defaults to bin/simple).
+set -u
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+REPO_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)"
+cd "$REPO_ROOT" || { echo "ERROR — nothing was checked (cannot cd to repo root)"; exit 2; }
+
+FIXTURE_DIR="test/fixtures/jit_unresolved_symbol_guard"
+SIMPLE_BIN="${JIT_GUARD_BIN:-$REPO_ROOT/bin/simple}"
+export SIMPLE_TIMEOUT_SECONDS="${SIMPLE_TIMEOUT_SECONDS:-3600}"
+
+[ -x "$SIMPLE_BIN" ] || { echo "ERROR — nothing was checked (binary '$SIMPLE_BIN' missing or not executable)"; exit 2; }
+for f in control typed_ctor undef_var; do
+    [ -f "$FIXTURE_DIR/$f.spl" ] || { echo "ERROR — nothing was checked (fixture $f.spl missing)"; exit 2; }
+done
+
+WORK="$(mktemp -d)" || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+# No unconditional cleanup trap: a reference fence's trap once ate its own
+# diagnostics. Logs are removed only on the explicit success path.
+keep_logs() { echo "logs preserved: $WORK"; }
+
+checked=0
+failed=0
+verdicts=""
+
+# run_case <fixture> <lane:jit|interp> ; sets RC, OUT
+run_case() {
+    _fx="$1"; _lane="$2"
+    _log="$WORK/$_fx.$_lane.log"
+    if [ "$_lane" = "interp" ]; then
+        SIMPLE_EXECUTION_MODE=interpreter timeout 120 "$SIMPLE_BIN" "$FIXTURE_DIR/$_fx.spl" >"$_log" 2>&1
+    else
+        timeout 120 "$SIMPLE_BIN" "$FIXTURE_DIR/$_fx.spl" >"$_log" 2>&1
+    fi
+    RC=$?
+    OUT="$(cat "$_log")"
+}
+
+# ------------------------------------------------------------------ CONTROL
+for lane in interp jit; do
+    run_case control "$lane"
+    checked=$((checked + 1))
+    case "$OUT" in
+        *CONTROL=OK*) : ;;
+        *)
+            echo "control/$lane rc=$RC did not print CONTROL=OK"
+            keep_logs
+            echo "FAIL — control fixture broke on lane '$lane'; harness measures nothing"
+            exit 1 ;;
+    esac
+done
+
+# ---------------------------------------------------------------- BAD INPUT
+for fx in typed_ctor undef_var; do
+    for lane in interp jit; do
+        run_case "$fx" "$lane"
+        checked=$((checked + 1))
+        bad=""
+        if [ "$RC" -ge 128 ]; then
+            bad="CRASH (rc=$RC, signal death — expected a semantic diagnostic)"
+        elif [ "$RC" -eq 0 ]; then
+            bad="SILENT PASS (rc=0 on bad input)"
+        else
+            case "$OUT" in
+                *SHOULD_NOT_PRINT*) bad="FAIL-OPEN (diagnostic rc but the program body executed)" ;;
+                *not\ found*|*unresolved*|*not\ callable*) : ;;
+                *) bad="rc=$RC but no unresolved-symbol diagnostic in output" ;;
+            esac
+        fi
+        if [ -n "$bad" ]; then
+            failed=$((failed + 1))
+            verdicts="$verdicts [$fx/$lane: $bad]"
+        fi
+    done
+done
+
+if [ "$failed" -gt 0 ]; then
+    keep_logs
+    echo "FAIL — $failed of $checked lane-cases regressed:$verdicts (unresolved symbols must diagnose, never crash or fail open; see doc/08_tracking/bug/seed_jit_unresolved_symbol_segfault_and_silent_pass_2026-08-10.md)"
+    exit 1
+fi
+
+rm -rf "$WORK"
+echo "PASS — $checked lane-cases checked: unresolved symbols diagnose on both interpreter and JIT lanes"
+exit 0

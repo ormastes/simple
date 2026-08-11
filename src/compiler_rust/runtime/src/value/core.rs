@@ -1,0 +1,624 @@
+//! Core RuntimeValue type and operations.
+
+use crate::hir_core::ValueKind;
+
+use super::heap::{HeapHeader, HeapObjectType};
+use super::tags;
+
+/// A 64-bit tagged runtime value.
+///
+/// This is the primary value type used in compiled code. It can represent
+/// all Simple Language values in a single 64-bit word, with heap-allocated
+/// objects stored as tagged pointers.
+///
+/// # Architecture Support
+///
+/// RuntimeValue always uses 64 bits regardless of the target architecture.
+/// This design choice ensures:
+/// - Consistent semantics across 32-bit and 64-bit platforms
+/// - Full 61-bit integer range on all architectures
+/// - Simpler codegen (no architecture-specific value representations)
+///
+/// On 32-bit platforms, this means:
+/// - Values are 8 bytes (two 32-bit words)
+/// - Heap pointers only use the lower 32 bits (upper 32 bits are zero)
+/// - Slightly higher memory usage, but consistent behavior
+///
+/// # Value Layout
+///
+/// ```text
+/// 64-bit word:
+/// ┌─────────────────────────────────────────────────────────────┬─────┐
+/// │                       Payload (61 bits)                     │ Tag │
+/// │                                                             │(3b) │
+/// └─────────────────────────────────────────────────────────────┴─────┘
+///
+/// Tags:
+/// - 0b000 (TAG_INT):     Integer (payload is signed 61-bit value)
+/// - 0b001 (TAG_HEAP):    Heap pointer (payload is 61-bit aligned pointer)
+/// - 0b010 (TAG_FLOAT):   Float (payload is upper 61 bits of f64)
+/// - 0b011 (TAG_SPECIAL): Special values (nil, bool, symbols)
+/// ```
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct RuntimeValue(pub(crate) u64);
+
+impl std::fmt::Debug for RuntimeValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Heap-boxed floats carry TAG_HEAP; surface them as floats, not pointers.
+        if self.is_float() {
+            return write!(f, "RuntimeValue::Float({})", self.as_float());
+        }
+        if let Some(value) = self.as_heap_u64() {
+            return write!(f, "RuntimeValue::UInt({value})");
+        }
+        match self.tag() {
+            tags::TAG_INT => write!(f, "RuntimeValue::Int({})", self.as_int()),
+            tags::TAG_FLOAT => write!(f, "RuntimeValue::Float({})", self.as_float()),
+            tags::TAG_SPECIAL => {
+                let payload = self.payload();
+                match payload {
+                    tags::SPECIAL_NIL => write!(f, "RuntimeValue::Nil"),
+                    tags::SPECIAL_TRUE => write!(f, "RuntimeValue::Bool(true)"),
+                    tags::SPECIAL_FALSE => write!(f, "RuntimeValue::Bool(false)"),
+                    _ => write!(f, "RuntimeValue::Symbol({})", payload),
+                }
+            }
+            tags::TAG_HEAP => write!(f, "RuntimeValue::Heap({:p})", self.as_heap_ptr()),
+            _ => write!(f, "RuntimeValue(0x{:016x})", self.0),
+        }
+    }
+}
+
+impl PartialEq for RuntimeValue {
+    fn eq(&self, other: &Self) -> bool {
+        // Floats (inline TAG_FLOAT or heap-boxed) compare by VALUE, not by raw
+        // bits: two heap-boxed floats holding the same double are distinct
+        // pointers, so a raw-bits compare would wrongly report them unequal.
+        // (IEEE semantics: NaN != NaN, -0.0 == 0.0.)
+        if self.is_float() || other.is_float() {
+            return self.is_float() && other.is_float() && self.as_float() == other.as_float();
+        }
+        if let Some(left) = self.as_heap_u64() {
+            return other.as_heap_u64().map_or_else(
+                || other.is_int() && other.as_int() >= 0 && left == other.as_int() as u64,
+                |right| left == right,
+            );
+        }
+        if let Some(right) = other.as_heap_u64() {
+            return self.is_int() && self.as_int() >= 0 && self.as_int() as u64 == right;
+        }
+        self.0 == other.0
+    }
+}
+
+impl Eq for RuntimeValue {}
+
+impl std::hash::Hash for RuntimeValue {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // Floats must hash by VALUE to stay consistent with the value-based Eq
+        // above: two heap-boxed floats of the same double are distinct pointers,
+        // so hashing raw bits would break the `a == b => hash(a) == hash(b)`
+        // invariant (dict/HashMap float-key misses). Normalize -0.0 to 0.0 so
+        // the two IEEE-equal zeros hash identically.
+        if self.is_float() {
+            let mut d = self.as_float();
+            if d == 0.0 {
+                d = 0.0;
+            }
+            d.to_bits().hash(state);
+        } else if let Some(value) = self.as_heap_u64() {
+            if value <= ((1u64 << 60) - 1) {
+                RuntimeValue::from_int(value as i64).to_raw().hash(state);
+            } else {
+                0x5549_4e54_5f55_3634u64.hash(state);
+                value.hash(state);
+            }
+        } else {
+            self.0.hash(state);
+        }
+    }
+}
+
+impl PartialOrd for RuntimeValue {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for RuntimeValue {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Floats (inline or heap-boxed) order by VALUE using IEEE total order,
+        // regardless of pointer identity or tag form. Non-float values keep the
+        // tag-then-payload ordering below.
+        if self.is_float() && other.is_float() {
+            return self.as_float().total_cmp(&other.as_float());
+        }
+        match (self.as_heap_u64(), other.as_heap_u64()) {
+            (Some(left), Some(right)) => return left.cmp(&right),
+            (Some(_), None) if other.is_int() && other.as_int() < 0 => return std::cmp::Ordering::Greater,
+            (Some(left), None) if other.is_int() => return left.cmp(&(other.as_int() as u64)),
+            (None, Some(_)) if self.is_int() && self.as_int() < 0 => return std::cmp::Ordering::Less,
+            (None, Some(right)) if self.is_int() => return (self.as_int() as u64).cmp(&right),
+            _ => {}
+        }
+        // Order by tag first, then by payload
+        // This provides a total ordering for BTreeMap/BTreeSet
+        match self.tag().cmp(&other.tag()) {
+            std::cmp::Ordering::Equal => {
+                // Same tag, compare payloads
+                match self.tag() {
+                    tags::TAG_FLOAT => {
+                        // For floats, use total ordering (NaN sorts last)
+                        let self_f = self.as_float();
+                        let other_f = other.as_float();
+                        self_f.total_cmp(&other_f)
+                    }
+                    _ => {
+                        // For everything else, compare raw bits
+                        self.0.cmp(&other.0)
+                    }
+                }
+            }
+            other_ord => other_ord,
+        }
+    }
+}
+
+impl Default for RuntimeValue {
+    fn default() -> Self {
+        Self::NIL
+    }
+}
+
+impl RuntimeValue {
+    /// The NIL value constant
+    pub const NIL: RuntimeValue = RuntimeValue::from_special(tags::SPECIAL_NIL);
+    /// The TRUE value constant
+    pub const TRUE: RuntimeValue = RuntimeValue::from_special(tags::SPECIAL_TRUE);
+    /// The FALSE value constant
+    pub const FALSE: RuntimeValue = RuntimeValue::from_special(tags::SPECIAL_FALSE);
+
+    /// Create a RuntimeValue from raw bits
+    #[inline]
+    pub const fn from_raw(bits: u64) -> Self {
+        Self(bits)
+    }
+
+    /// Get the raw bits of this value
+    #[inline]
+    pub const fn to_raw(self) -> u64 {
+        self.0
+    }
+
+    /// Get the tag bits (lowest 3 bits)
+    #[inline]
+    pub const fn tag(self) -> u64 {
+        self.0 & tags::TAG_MASK
+    }
+
+    /// Get the payload (upper 61 bits)
+    #[inline]
+    pub const fn payload(self) -> u64 {
+        self.0 >> 3
+    }
+
+    /// Create a value from tag and payload
+    #[inline]
+    pub(crate) const fn from_tag_payload(tag: u64, payload: u64) -> Self {
+        Self((payload << 3) | tag)
+    }
+
+    /// Create a special value (nil, bool, symbol)
+    #[inline]
+    pub(crate) const fn from_special(payload: u64) -> Self {
+        Self::from_tag_payload(tags::TAG_SPECIAL, payload)
+    }
+
+    // =========================================================================
+    // Integer operations
+    // =========================================================================
+
+    /// Create an integer value
+    ///
+    /// Note: Only 61-bit signed integers can be stored directly.
+    /// Larger integers would need heap allocation.
+    #[inline]
+    pub fn from_int(i: i64) -> Self {
+        // Sign-extend to fit in 61 bits
+        // The tag is 0, so we just shift
+        Self((i as u64) << 3)
+    }
+
+    /// Check if this is an integer
+    #[inline]
+    pub const fn is_int(self) -> bool {
+        self.tag() == tags::TAG_INT
+    }
+
+    /// Get the integer value (undefined behavior if not an int)
+    #[inline]
+    pub fn as_int(self) -> i64 {
+        // Sign-extend from 61 bits
+        (self.0 as i64) >> 3
+    }
+
+    // =========================================================================
+    // Float operations
+    // =========================================================================
+
+    /// Create a float value.
+    ///
+    /// Floats are HEAP-BOXED (lossless): the old inline `TAG_FLOAT` form stored
+    /// only `bits >> 3`, silently zeroing the low 3 mantissa bits, so a
+    /// container/Any float lost precision ([0.1][0] != 0.1). We now allocate a
+    /// `HeapFloat` leaf object that stores the full double and return a tagged
+    /// heap pointer. Scalar f64 held in native registers is unaffected — only
+    /// values that enter the tagged RuntimeValue representation box here.
+    #[inline]
+    pub fn from_float(f: f64) -> Self {
+        let size = std::mem::size_of::<super::heap::HeapFloat>();
+        let layout = match std::alloc::Layout::from_size_align(size, 8) {
+            Ok(l) => l,
+            Err(_) => {
+                let bits = f.to_bits();
+                return Self::from_tag_payload(tags::TAG_FLOAT, bits >> 3);
+            }
+        };
+        unsafe {
+            let ptr = std::alloc::alloc(layout) as *mut super::heap::HeapFloat;
+            if ptr.is_null() {
+                // OOM: fall back to the legacy lossy inline form rather than crash.
+                let bits = f.to_bits();
+                return Self::from_tag_payload(tags::TAG_FLOAT, bits >> 3);
+            }
+            (*ptr).header = super::heap::HeapHeader::new(HeapObjectType::Float, size as u32);
+            (*ptr).value = f;
+            super::collections::track_transient_heap(Self::from_heap_ptr(ptr as *mut HeapHeader))
+        }
+    }
+
+    /// Pointer to the boxed `HeapFloat` if this value is a heap-boxed float,
+    /// else `None`. The registry membership check (inside `heap_type`) is a pure
+    /// O(1) HashSet lookup performed BEFORE any dereference, so a stray i64 that
+    /// aliases TAG_HEAP is never dereferenced.
+    #[inline]
+    pub fn as_heap_float_ptr(self) -> Option<*const super::heap::HeapFloat> {
+        if matches!(self.heap_type(), Some(HeapObjectType::Float)) {
+            Some(self.as_heap_ptr() as *const super::heap::HeapFloat)
+        } else {
+            None
+        }
+    }
+
+    /// Check if this is a float (heap-boxed, or a legacy inline `TAG_FLOAT`).
+    #[inline]
+    pub fn is_float(self) -> bool {
+        self.tag() == tags::TAG_FLOAT || self.as_heap_float_ptr().is_some()
+    }
+
+    /// Get the float value (undefined behavior if not a float).
+    #[inline]
+    pub fn as_float(self) -> f64 {
+        if self.tag() == tags::TAG_FLOAT {
+            // Legacy inline form (low 3 mantissa bits already lost at box time).
+            return f64::from_bits(self.payload() << 3);
+        }
+        if let Some(ptr) = self.as_heap_float_ptr() {
+            return unsafe { (*ptr).value };
+        }
+        // Defensive: not a float. Preserve the old inline interpretation.
+        f64::from_bits(self.payload() << 3)
+    }
+
+    /// Box a u64 losslessly for an erased RuntimeValue slot. All u64 values,
+    /// including 0..=7, use the heap form so payload bits cannot alias tags.
+    #[inline]
+    pub fn from_u64(value: u64) -> Self {
+        let size = std::mem::size_of::<super::heap::HeapUInt>();
+        let Ok(layout) = std::alloc::Layout::from_size_align(size, 8) else {
+            return Self::NIL;
+        };
+        unsafe {
+            let ptr = std::alloc::alloc(layout) as *mut super::heap::HeapUInt;
+            if ptr.is_null() {
+                return Self::NIL;
+            }
+            (*ptr).header = HeapHeader::new(HeapObjectType::UInt, size as u32);
+            (*ptr).value = value;
+            super::collections::track_transient_heap(Self::from_heap_ptr(ptr as *mut HeapHeader))
+        }
+    }
+
+    #[inline]
+    pub fn as_heap_u64(self) -> Option<u64> {
+        if matches!(self.heap_type(), Some(HeapObjectType::UInt)) {
+            Some(unsafe { (*(self.as_heap_ptr() as *const super::heap::HeapUInt)).value })
+        } else {
+            None
+        }
+    }
+
+    // =========================================================================
+    // Boolean operations
+    // =========================================================================
+
+    /// Create a boolean value
+    #[inline]
+    pub const fn from_bool(b: bool) -> Self {
+        if b {
+            Self::TRUE
+        } else {
+            Self::FALSE
+        }
+    }
+
+    /// Check if this is a boolean
+    #[inline]
+    pub const fn is_bool(self) -> bool {
+        self.tag() == tags::TAG_SPECIAL
+            && (self.payload() == tags::SPECIAL_TRUE || self.payload() == tags::SPECIAL_FALSE)
+    }
+
+    /// Get the boolean value (returns false if not a bool)
+    #[inline]
+    pub const fn as_bool(self) -> bool {
+        self.tag() == tags::TAG_SPECIAL && self.payload() == tags::SPECIAL_TRUE
+    }
+
+    // =========================================================================
+    // Nil operations
+    // =========================================================================
+
+    /// Check if this is nil
+    #[inline]
+    pub const fn is_nil(self) -> bool {
+        self.0 == Self::NIL.0
+    }
+
+    // =========================================================================
+    // Heap pointer operations
+    // =========================================================================
+
+    /// Convert a pointer to u64 (works on both 32-bit and 64-bit platforms).
+    #[inline]
+    fn ptr_to_u64<T>(ptr: *const T) -> u64 {
+        // On 32-bit: usize is 4 bytes, so this zero-extends to 64 bits
+        // On 64-bit: usize is 8 bytes, direct conversion
+        ptr as usize as u64
+    }
+
+    /// Convert u64 to pointer (works on both 32-bit and 64-bit platforms).
+    #[inline]
+    fn u64_to_ptr<T>(value: u64) -> *mut T {
+        // On 32-bit: truncates to lower 32 bits (which is correct since
+        //            upper 32 bits should be zero for valid 32-bit pointers)
+        // On 64-bit: direct conversion
+        value as usize as *mut T
+    }
+
+    /// Create a heap pointer value
+    ///
+    /// # Safety
+    /// The pointer must be valid and properly aligned (8-byte alignment).
+    /// On 32-bit systems, only the lower 32 bits of the pointer are used.
+    #[inline]
+    pub unsafe fn from_heap_ptr(ptr: *mut HeapHeader) -> Self {
+        debug_assert!(!ptr.is_null());
+        super::heap::register_heap_ptr(ptr);
+        let ptr_bits = Self::ptr_to_u64(ptr);
+        debug_assert!(ptr_bits & tags::TAG_MASK == 0, "pointer not aligned");
+        Self(ptr_bits | tags::TAG_HEAP)
+    }
+
+    /// Check if this is a heap pointer
+    #[inline]
+    pub const fn is_heap(self) -> bool {
+        self.tag() == tags::TAG_HEAP
+    }
+
+    /// Get the heap pointer (null if not a heap value)
+    #[inline]
+    pub fn as_heap_ptr(self) -> *mut HeapHeader {
+        if self.is_heap() {
+            Self::u64_to_ptr(self.0 & !tags::TAG_MASK)
+        } else {
+            std::ptr::null_mut()
+        }
+    }
+
+    /// Get the heap object type (returns None if not a heap value)
+    #[inline]
+    pub fn heap_type(self) -> Option<HeapObjectType> {
+        if self.is_heap() {
+            let ptr = self.as_heap_ptr();
+            let addr = ptr as usize;
+            if !ptr.is_null() && addr >= 4096 && addr & 0x7 == 0 && super::heap::is_registered_heap_ptr(ptr) {
+                Some(unsafe { (*ptr).object_type })
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    // =========================================================================
+    // Truthiness
+    // =========================================================================
+
+    /// Check if this value is "truthy" (non-zero, non-nil, non-empty)
+    #[inline]
+    pub fn truthy(self) -> bool {
+        // Heap-boxed floats carry TAG_HEAP; a boxed 0.0 must be falsy, not
+        // "truthy because the pointer exists".
+        if self.is_float() {
+            return self.as_float() != 0.0;
+        }
+        if let Some(value) = self.as_heap_u64() {
+            return value != 0;
+        }
+        match self.tag() {
+            tags::TAG_INT => self.as_int() != 0,
+            tags::TAG_FLOAT => self.as_float() != 0.0,
+            tags::TAG_SPECIAL => self.payload() == tags::SPECIAL_TRUE,
+            tags::TAG_HEAP => {
+                // Heap objects are truthy if they exist
+                // For arrays/strings, should check if empty
+                !self.as_heap_ptr().is_null()
+            }
+            _ => false,
+        }
+    }
+
+    // =========================================================================
+    // Type checking
+    // =========================================================================
+
+    /// Create a deep copy of this value.
+    ///
+    /// For primitive values (int, float, bool, nil), returns self.
+    /// For heap objects, creates a deep copy of the underlying data.
+    ///
+    /// This is used for isolated threads to ensure no shared mutable state.
+    pub fn deep_copy(self) -> Self {
+        match self.tag() {
+            // Primitives are Copy, just return self
+            tags::TAG_INT | tags::TAG_FLOAT | tags::TAG_SPECIAL => self,
+            tags::TAG_HEAP => {
+                let ptr = self.as_heap_ptr();
+                if ptr.is_null() {
+                    return Self::NIL;
+                }
+                let Some(object_type) = self.heap_type() else {
+                    return Self::NIL;
+                };
+
+                // For now, heap objects that are thread-safe (channels) are shared
+                // Other heap objects need deep copy - this is a placeholder that
+                // returns the original for thread-safe types, NIL for others
+                match object_type {
+                    // Channels are thread-safe, can be shared
+                    HeapObjectType::Channel => self,
+                    // For other types, we'd need to implement deep copy
+                    // For now, return self (shallow copy) and rely on
+                    // the language's type system to enforce copy semantics
+                    _ => self,
+                }
+            }
+            _ => self,
+        }
+    }
+
+    /// Get a string representation of this value's type
+    pub fn type_name(self) -> &'static str {
+        // Heap-boxed floats carry TAG_HEAP; report them as floats.
+        if self.is_float() {
+            return "float";
+        }
+        match self.tag() {
+            tags::TAG_INT => "int",
+            tags::TAG_FLOAT => "float",
+            tags::TAG_SPECIAL => {
+                let payload = self.payload();
+                match payload {
+                    tags::SPECIAL_NIL => "nil",
+                    tags::SPECIAL_TRUE | tags::SPECIAL_FALSE => "bool",
+                    _ => "symbol",
+                }
+            }
+            tags::TAG_HEAP => match self.heap_type() {
+                Some(HeapObjectType::String) => "string",
+                Some(HeapObjectType::Array) => "array",
+                Some(HeapObjectType::Dict) => "dict",
+                Some(HeapObjectType::Tuple) => "tuple",
+                Some(HeapObjectType::Object) => "object",
+                Some(HeapObjectType::Closure) => "closure",
+                Some(HeapObjectType::Enum) => "enum",
+                Some(HeapObjectType::Future) => "future",
+                Some(HeapObjectType::Generator) => "generator",
+                Some(HeapObjectType::Actor) => "actor",
+                Some(HeapObjectType::Unique) => "unique",
+                Some(HeapObjectType::Shared) => "shared",
+                Some(HeapObjectType::Borrow) => "borrow",
+                Some(HeapObjectType::Channel) => "channel",
+                Some(HeapObjectType::Weak) => "weak",
+                Some(HeapObjectType::ContractViolation) => "contract_violation",
+                Some(HeapObjectType::Mutex) => "mutex",
+                Some(HeapObjectType::RwLock) => "rwlock",
+                Some(HeapObjectType::Semaphore) => "semaphore",
+                Some(HeapObjectType::Barrier) => "barrier",
+                Some(HeapObjectType::Atomic) => "atomic",
+                Some(HeapObjectType::MonoioFuture) => "monoio_future",
+                Some(HeapObjectType::HashMap) => "hashmap",
+                Some(HeapObjectType::BTreeMap) => "btreemap",
+                Some(HeapObjectType::HashSet) => "hashset",
+                Some(HeapObjectType::BTreeSet) => "btreeset",
+                Some(HeapObjectType::FfiObject) => "sffi_object",
+                // Unreachable in practice: the early `is_float()` guard above
+                // handles heap-boxed floats before this match.
+                Some(HeapObjectType::Float) => "float",
+                Some(HeapObjectType::UInt) => "int",
+                None => "null",
+            },
+            _ => "unknown",
+        }
+    }
+
+    /// Get the abstract value kind from hir-core.
+    ///
+    /// This provides a unified type abstraction shared with the interpreter.
+    pub fn value_kind(self) -> ValueKind {
+        // Heap-boxed floats carry TAG_HEAP; report them as floats.
+        if self.is_float() {
+            return ValueKind::Float;
+        }
+        match self.tag() {
+            tags::TAG_INT => ValueKind::Int,
+            tags::TAG_FLOAT => ValueKind::Float,
+            tags::TAG_SPECIAL => {
+                let payload = self.payload();
+                match payload {
+                    tags::SPECIAL_NIL => ValueKind::Nil,
+                    tags::SPECIAL_TRUE | tags::SPECIAL_FALSE => ValueKind::Bool,
+                    _ => ValueKind::Symbol,
+                }
+            }
+            tags::TAG_HEAP => match self.heap_type() {
+                Some(HeapObjectType::String) => ValueKind::String,
+                Some(HeapObjectType::Array) => ValueKind::Array,
+                Some(HeapObjectType::Dict) => ValueKind::Dict,
+                Some(HeapObjectType::Tuple) => ValueKind::Tuple,
+                Some(HeapObjectType::Object) => ValueKind::Object,
+                Some(HeapObjectType::Closure) => ValueKind::Closure,
+                Some(HeapObjectType::Enum) => ValueKind::Enum,
+                Some(HeapObjectType::Future) => ValueKind::Future,
+                Some(HeapObjectType::Generator) => ValueKind::Generator,
+                Some(HeapObjectType::Actor) => ValueKind::Actor,
+                Some(HeapObjectType::Unique) => ValueKind::Unique,
+                Some(HeapObjectType::Shared) => ValueKind::Shared,
+                Some(HeapObjectType::Borrow) => ValueKind::Borrow,
+                Some(HeapObjectType::Channel) => ValueKind::Channel,
+                Some(HeapObjectType::Weak) => ValueKind::Weak,
+                Some(HeapObjectType::ContractViolation) => ValueKind::ContractViolation,
+                Some(HeapObjectType::Mutex) => ValueKind::Mutex,
+                Some(HeapObjectType::RwLock) => ValueKind::RwLock,
+                Some(HeapObjectType::Semaphore) => ValueKind::Semaphore,
+                Some(HeapObjectType::Barrier) => ValueKind::Barrier,
+                Some(HeapObjectType::Atomic) => ValueKind::Atomic,
+                Some(HeapObjectType::MonoioFuture) => ValueKind::MonoioFuture,
+                Some(HeapObjectType::HashMap) => ValueKind::HashMap,
+                Some(HeapObjectType::BTreeMap) => ValueKind::BTreeMap,
+                Some(HeapObjectType::HashSet) => ValueKind::HashSet,
+                Some(HeapObjectType::BTreeSet) => ValueKind::BTreeSet,
+                Some(HeapObjectType::FfiObject) => ValueKind::FfiObject,
+                // Unreachable in practice: the early `is_float()` guard above
+                // handles heap-boxed floats before this match.
+                Some(HeapObjectType::Float) => ValueKind::Float,
+                Some(HeapObjectType::UInt) => ValueKind::Int,
+                None => ValueKind::Nil,
+            },
+            _ => ValueKind::Nil,
+        }
+    }
+}

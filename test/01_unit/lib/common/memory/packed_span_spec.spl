@@ -1,0 +1,230 @@
+# @cover src/lib/common/memory/packed_span.spl 80%
+# @tag: unit, memory, packed_span, render_perf
+
+use std.spec
+use common.memory.packed_span.{
+    PackedSpanRegistry,
+    BufferSpanRef,
+    packed_span_make,
+    PACKED_SPAN_OK,
+    PACKED_SPAN_STALE_GENERATION,
+    PACKED_SPAN_BAD_SLOT,
+    PACKED_SPAN_OUT_OF_BOUNDS,
+    PACKED_SPAN_BAD_STRIDE,
+    PACKED_SPAN_EMPTY,
+    packed_span_backend_name,
+    packed_span_resolve_base,
+    packed_span_probe_bytes,
+    packed_span_probe_verdict,
+    packed_span_last_verdict,
+    packed_span_rejected_count,
+    packed_span_abi_struct_size,
+    PACKED_SPAN_C_OUT_OF_BOUNDS,
+    PACKED_SPAN_C_BAD_STRIDE,
+    PACKED_SPAN_C_EMPTY,
+    PACKED_SPAN_C_WRONG_BASIS,
+    PACKED_SPAN_C_NO_BASE
+}
+
+describe "packed span registry (F2)":
+    it "resolves a valid in-bounds span":
+        val reg = PackedSpanRegistry.create(4)
+        val slot = reg.register(4096)
+        assert_true(slot >= 0)
+        val gen = reg.generation_of(slot)
+        val r = packed_span_make(slot, gen, 0, 1024, 4)
+        assert_true(reg.resolve(r) == PACKED_SPAN_OK)
+
+    it "resolves an offset window inside the buffer":
+        val reg = PackedSpanRegistry.create(4)
+        val slot = reg.register(4096)
+        val r = packed_span_make(slot, reg.generation_of(slot), 2048, 512, 4)
+        assert_true(reg.resolve(r) == PACKED_SPAN_OK)
+
+    it "refuses a stale generation after invalidate":
+        val reg = PackedSpanRegistry.create(4)
+        val slot = reg.register(4096)
+        val r = packed_span_make(slot, reg.generation_of(slot), 0, 8, 4)
+        assert_true(reg.invalidate(slot))
+        assert_true(reg.resolve(r) == PACKED_SPAN_STALE_GENERATION)
+
+    it "refuses a wrong generation even on a live slot":
+        val reg = PackedSpanRegistry.create(4)
+        val slot = reg.register(64)
+        val r = packed_span_make(slot, reg.generation_of(slot) + 1, 0, 4, 4)
+        assert_true(reg.resolve(r) == PACKED_SPAN_STALE_GENERATION)
+
+    it "refuses an unknown slot":
+        val reg = PackedSpanRegistry.create(2)
+        val r = packed_span_make(7, 1, 0, 4, 4)
+        assert_true(reg.resolve(r) == PACKED_SPAN_BAD_SLOT)
+
+    it "refuses a window past the end of the buffer":
+        val reg = PackedSpanRegistry.create(2)
+        val slot = reg.register(100)
+        val r = packed_span_make(slot, reg.generation_of(slot), 96, 2, 4)
+        assert_true(reg.resolve(r) == PACKED_SPAN_OUT_OF_BOUNDS)
+
+    it "refuses a zero stride":
+        val reg = PackedSpanRegistry.create(2)
+        val slot = reg.register(64)
+        val bad = BufferSpanRef(object_slot: slot as u32, object_generation: reg.generation_of(slot), byte_offset: 0, byte_length: 16, element_count: 16, element_stride: 0)
+        assert_true(reg.resolve(bad) == PACKED_SPAN_BAD_STRIDE)
+
+    it "refuses a count*stride / byte_length mismatch":
+        val reg = PackedSpanRegistry.create(2)
+        val slot = reg.register(64)
+        val bad = BufferSpanRef(object_slot: slot as u32, object_generation: reg.generation_of(slot), byte_offset: 0, byte_length: 15, element_count: 4, element_stride: 4)
+        assert_true(reg.resolve(bad) == PACKED_SPAN_BAD_STRIDE)
+
+    it "reports an empty span as empty, not ok":
+        val reg = PackedSpanRegistry.create(2)
+        val slot = reg.register(64)
+        val r = packed_span_make(slot, reg.generation_of(slot), 0, 0, 4)
+        assert_true(reg.resolve(r) == PACKED_SPAN_EMPTY)
+
+    it "fails closed when the registry is full":
+        val reg = PackedSpanRegistry.create(1)
+        assert_true(reg.register(16) == 0)
+        assert_true(reg.register(16) == -1)
+
+describe "packed span counted refusal gate (F2)":
+    it "counts a refusal instead of returning a silent zero":
+        val reg = PackedSpanRegistry.create(2)
+        val slot = reg.register(4096)
+        val r = packed_span_make(slot, reg.generation_of(slot), 0, 8, 4)
+        assert_true(reg.invalidate(slot))
+        val verdict = reg.resolve(r)
+        # A silent-zero failure would report OK (0) here.
+        assert_true(verdict == PACKED_SPAN_STALE_GENERATION)
+        assert_equal(reg.rejected_op_count, 1)
+        assert_equal(reg.last_rejection, PACKED_SPAN_STALE_GENERATION)
+        # A refused batch must admit ZERO elements.
+        assert_equal(reg.admitted_element_count, 0)
+
+    it "does not count a successful resolve as a rejection":
+        val reg = PackedSpanRegistry.create(2)
+        val slot = reg.register(4096)
+        val r = packed_span_make(slot, reg.generation_of(slot), 0, 64, 4)
+        assert_true(reg.resolve(r) == PACKED_SPAN_OK)
+        assert_equal(reg.rejected_op_count, 0)
+        assert_equal(reg.last_rejection, PACKED_SPAN_OK)
+        assert_equal(reg.admitted_element_count, 64)
+
+    it "accumulates each distinct refusal kind and keeps the latest":
+        val reg = PackedSpanRegistry.create(2)
+        val slot = reg.register(64)
+        assert_true(reg.resolve(packed_span_make(9, 1, 0, 4, 4)) == PACKED_SPAN_BAD_SLOT)
+        assert_equal(reg.last_rejection, PACKED_SPAN_BAD_SLOT)
+        assert_true(reg.resolve(packed_span_make(slot, reg.generation_of(slot), 60, 2, 4)) == PACKED_SPAN_OUT_OF_BOUNDS)
+        assert_equal(reg.last_rejection, PACKED_SPAN_OUT_OF_BOUNDS)
+        assert_equal(reg.rejected_op_count, 2)
+        assert_equal(reg.resolve_call_count, 2)
+
+    it "performs exactly ONE check for a whole submitted batch":
+        val reg = PackedSpanRegistry.create(2)
+        val slot = reg.register(65536)
+        val r = packed_span_make(slot, reg.generation_of(slot), 0, 16384, 4)
+        assert_true(reg.resolve(r) == PACKED_SPAN_OK)
+        # 16384 elements admitted against 1 gate call — a per-element gate
+        # would make these two numbers equal.
+        assert_equal(reg.resolve_call_count, 1)
+        assert_equal(reg.admitted_element_count, 16384)
+
+    it "leaves the counters untouched when probing with check":
+        val reg = PackedSpanRegistry.create(2)
+        val slot = reg.register(64)
+        val bad = packed_span_make(slot, reg.generation_of(slot) + 5, 0, 4, 4)
+        assert_true(reg.check(bad) == PACKED_SPAN_STALE_GENERATION)
+        assert_equal(reg.resolve_call_count, 0)
+        assert_equal(reg.rejected_op_count, 0)
+
+    it "reports a backend it can actually deliver, never a bare capability bit":
+        # MEASURED, not asserted: packed_span_backend_name() probes the C
+        # resolve live and only claims "native-packed-v1" when the engine
+        # actually hands back a non-zero base. The tree-walk interpreter boxes
+        # [u8] elements and has no contiguous buffer, so it stays on the
+        # scalar oracle -- and says so.
+        val name = packed_span_backend_name()
+        assert_true(name == "scalar-oracle" or name == "native-packed-v1")
+        val reg = PackedSpanRegistry.create(2)
+        val slot = reg.register(64)
+        val r = packed_span_make(slot, reg.generation_of(slot), 0, 16, 4)
+        assert_true(reg.resolve(r) == PACKED_SPAN_OK)
+        val probe_base = packed_span_resolve_base(packed_span_probe_bytes(64), r)
+        if name == "native-packed-v1":
+            assert_true(probe_base != 0)
+        else:
+            assert_equal(probe_base, 0)
+            # A refusal is TYPED, never a silent zero.
+            assert_equal(packed_span_last_verdict(), PACKED_SPAN_C_NO_BASE)
+
+describe "packed span native resolve ABI (F2, SimplePackedSpanV1)":
+    # Design of record:
+    # doc/05_design/ui/perf/packed_span_v1_c_resolve_abi_2026-08-08.md
+    # Impl: src/runtime/runtime_packed_span.{c,h}
+
+    it "pins the SimplePackedSpanV1 ABI width at 40 bytes":
+        # magic-first, LP64, no padding holes. A silent layout change here
+        # would silently change what every caller reads.
+        assert_equal(packed_span_abi_struct_size(), 40)
+
+    it "refuses a backing that is not a bytes basis, and counts it":
+        # [u32] / rt_typed_words_u32_* are 8-byte-stride, value-tagged storage
+        # and are NOT a packed pixel basis. Never a silent cast.
+        val before = packed_span_rejected_count()
+        # basis_len < 0 == "not a bytes basis".
+        assert_equal(packed_span_probe_verdict(-1, 0, 16, 4, 4), PACKED_SPAN_C_WRONG_BASIS)
+        assert_equal(packed_span_last_verdict(), PACKED_SPAN_C_WRONG_BASIS)
+        assert_equal(packed_span_rejected_count() - before, 1)
+
+    it "refuses a window one byte past the end, and counts it":
+        val before = packed_span_rejected_count()
+        assert_equal(packed_span_probe_verdict(4096, 1, 4096, 1024, 4), PACKED_SPAN_C_OUT_OF_BOUNDS)
+        assert_equal(packed_span_last_verdict(), PACKED_SPAN_C_OUT_OF_BOUNDS)
+        assert_equal(packed_span_rejected_count() - before, 1)
+
+    it "refuses count * stride != byte_length, and counts it":
+        val before = packed_span_rejected_count()
+        assert_equal(packed_span_probe_verdict(4096, 0, 4096, 1000, 4), PACKED_SPAN_C_BAD_STRIDE)
+        assert_equal(packed_span_last_verdict(), PACKED_SPAN_C_BAD_STRIDE)
+        assert_equal(packed_span_rejected_count() - before, 1)
+
+    it "refuses a zero stride rather than dividing by it":
+        val before = packed_span_rejected_count()
+        assert_equal(packed_span_probe_verdict(4096, 0, 4096, 1024, 0), PACKED_SPAN_C_BAD_STRIDE)
+        assert_equal(packed_span_rejected_count() - before, 1)
+
+    it "refuses an empty window rather than returning a zero-length OK span":
+        val before = packed_span_rejected_count()
+        assert_equal(packed_span_probe_verdict(64, 0, 0, 0, 4), PACKED_SPAN_C_EMPTY)
+        assert_equal(packed_span_last_verdict(), PACKED_SPAN_C_EMPTY)
+        assert_equal(packed_span_rejected_count() - before, 1)
+
+    it "never returns OK without a base -- the no-base path is typed":
+        # A structurally perfect window with no backing pointer is still a
+        # refusal (-7), never a zero-address success.
+        assert_equal(packed_span_probe_verdict(4096, 0, 4096, 1024, 4), PACKED_SPAN_C_NO_BASE)
+
+    it "never reaches C for a stale generation -- the registry refuses first":
+        # Clause 5: generation lifetime is a language-level ownership fact,
+        # so C never sees object_slot / object_generation. The proof is that
+        # the C refusal counter does not move.
+        val reg = PackedSpanRegistry.create(2)
+        val slot = reg.register(4096)
+        val r = packed_span_make(slot, reg.generation_of(slot), 0, 1024, 4)
+        assert_true(reg.invalidate(slot))
+        val c_before = packed_span_rejected_count()
+        assert_true(reg.resolve(r) == PACKED_SPAN_STALE_GENERATION)
+        assert_equal(packed_span_rejected_count() - c_before, 0)
+
+    it "keeps the two halves of the one batch check on their own sides":
+        # The registry adjudicates ownership; C adjudicates memory. Together
+        # they are ONE check for the whole batch -- 16384 elements admitted
+        # against a single registry gate call.
+        val reg = PackedSpanRegistry.create(2)
+        val slot = reg.register(65536)
+        val r = packed_span_make(slot, reg.generation_of(slot), 0, 16384, 4)
+        assert_true(reg.resolve(r) == PACKED_SPAN_OK)
+        assert_equal(reg.resolve_call_count, 1)
+        assert_equal(reg.admitted_element_count, 16384)

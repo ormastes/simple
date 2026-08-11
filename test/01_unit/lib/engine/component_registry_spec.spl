@@ -1,0 +1,100 @@
+# Engine Component Registry Tests
+# Tests attaching, retrieving, and detaching components on nodes.
+
+use std.spec.{describe, it, expect}
+use std.common.engine.ids.{NodeId, RawHandle, TextureId, Generation}
+use std.common.engine.math2d.{Vec2}
+use std.common.engine.color.{EngineColor}
+use std.common.engine.rect.{Rect2}
+use std.nogc_sync_mut.engine.component.registry.{ComponentRegistry, Component2D, SpriteData, CameraData}
+
+describe "ComponentRegistry":
+    it "attaches and retrieves a sprite component":
+        var reg = ComponentRegistry(entries: {})
+        val nid = NodeId(raw: RawHandle(index: 0, generation: Generation(value: 1)))
+        val tex_id = TextureId(raw: RawHandle(index: 0, generation: Generation(value: 1)))
+        val src = Rect2(x: 0.0, y: 0.0, width: 32.0, height: 32.0)
+        val sprite_data = SpriteData(texture_id: tex_id, src_rect: src, pivot: Vec2(x: 0.5, y: 0.5), flip_x: false, flip_y: false, tint: EngineColor(r: 1.0, g: 1.0, b: 1.0, a: 1.0))
+        val comp = Component2D.Sprite(data: sprite_data)
+        reg.attach(nid, comp)
+        val components = reg.get_components(nid)
+        expect(components.len()).to_equal(1)
+
+    it "gets sprite data back from component":
+        var reg = ComponentRegistry(entries: {})
+        val nid = NodeId(raw: RawHandle(index: 0, generation: Generation(value: 1)))
+        val tex_id = TextureId(raw: RawHandle(index: 0, generation: Generation(value: 1)))
+        val src = Rect2(x: 0.0, y: 0.0, width: 64.0, height: 64.0)
+        val sprite_data = SpriteData(texture_id: tex_id, src_rect: src, pivot: Vec2(x: 0.5, y: 0.5), flip_x: false, flip_y: false, tint: EngineColor(r: 1.0, g: 1.0, b: 1.0, a: 1.0))
+        reg.attach(nid, Component2D.Sprite(data: sprite_data))
+        val maybe_sprite = reg.get_sprite(nid)
+        if val Some(sd) = maybe_sprite:
+            expect(sd.src_rect.width).to_equal(64.0)
+
+    it "attaches a camera component":
+        var reg = ComponentRegistry(entries: {})
+        val nid = NodeId(raw: RawHandle(index: 1, generation: Generation(value: 1)))
+        val cam = CameraData(
+            zoom: 1.0,
+            viewport_width: 800.0,
+            viewport_height: 600.0,
+            is_active: true
+        )
+        reg.attach(nid, Component2D.Camera(data: cam))
+        val maybe_cam = reg.get_camera(nid)
+        if val Some(cd) = maybe_cam:
+            expect(cd.viewport_width).to_equal(800.0)
+
+    it "detaches all components from a node":
+        var reg = ComponentRegistry(entries: {})
+        val nid = NodeId(raw: RawHandle(index: 0, generation: Generation(value: 1)))
+        val tex_id = TextureId(raw: RawHandle(index: 0, generation: Generation(value: 1)))
+        val src = Rect2(x: 0.0, y: 0.0, width: 16.0, height: 16.0)
+        val sprite_data = SpriteData(texture_id: tex_id, src_rect: src, pivot: Vec2(x: 0.5, y: 0.5), flip_x: false, flip_y: false, tint: EngineColor(r: 1.0, g: 1.0, b: 1.0, a: 1.0))
+        reg.attach(nid, Component2D.Sprite(data: sprite_data))
+        reg.detach_all(nid)
+        val components = reg.get_components(nid)
+        expect(components.len()).to_equal(0)
+
+    it "returns empty list for node with no components":
+        var reg = ComponentRegistry(entries: {})
+        val nid = NodeId(raw: RawHandle(index: 99, generation: Generation(value: 1)))
+        val components = reg.get_components(nid)
+        expect(components.len()).to_equal(0)
+
+    it "supports multiple components on one node":
+        var reg = ComponentRegistry(entries: {})
+        val nid = NodeId(raw: RawHandle(index: 0, generation: Generation(value: 1)))
+        val tex_id = TextureId(raw: RawHandle(index: 0, generation: Generation(value: 1)))
+        val src = Rect2(x: 0.0, y: 0.0, width: 32.0, height: 32.0)
+        val sprite_data = SpriteData(texture_id: tex_id, src_rect: src, pivot: Vec2(x: 0.5, y: 0.5), flip_x: false, flip_y: false, tint: EngineColor(r: 1.0, g: 1.0, b: 1.0, a: 1.0))
+        reg.attach(nid, Component2D.Sprite(data: sprite_data))
+        val cam = CameraData(
+            zoom: 2.0,
+            viewport_width: 1920.0,
+            viewport_height: 1080.0,
+            is_active: false
+        )
+        reg.attach(nid, Component2D.Camera(data: cam))
+        val components = reg.get_components(nid)
+        expect(components.len()).to_equal(2)
+
+    it "identifies component types":
+        val tex_id = TextureId(raw: RawHandle(index: 0, generation: Generation(value: 1)))
+        val src = Rect2(x: 0.0, y: 0.0, width: 32.0, height: 32.0)
+        val sprite_data = SpriteData(texture_id: tex_id, src_rect: src, pivot: Vec2(x: 0.5, y: 0.5), flip_x: false, flip_y: false, tint: EngineColor(r: 1.0, g: 1.0, b: 1.0, a: 1.0))
+        val sprite_comp = Component2D.Sprite(data: sprite_data)
+        expect(sprite_comp.is_sprite()).to_equal(true)
+        expect(sprite_comp.is_camera()).to_equal(false)
+        expect(sprite_comp.type_name()).to_equal("Sprite")
+
+    it "does not leak components across node generations":
+        var reg = ComponentRegistry(entries: {})
+        val old_node = NodeId(raw: RawHandle(index: 7, generation: Generation(value: 1)))
+        val new_node = NodeId(raw: RawHandle(index: 7, generation: Generation(value: 2)))
+        val tex_id = TextureId(raw: RawHandle(index: 0, generation: Generation(value: 1)))
+        val src = Rect2(x: 0.0, y: 0.0, width: 8.0, height: 8.0)
+        val sprite_data = SpriteData(texture_id: tex_id, src_rect: src, pivot: Vec2(x: 0.5, y: 0.5), flip_x: false, flip_y: false, tint: EngineColor(r: 1.0, g: 1.0, b: 1.0, a: 1.0))
+        reg.attach(old_node, Component2D.Sprite(data: sprite_data))
+        expect(reg.get_components(old_node).len()).to_equal(1)
+        expect(reg.get_components(new_node).len()).to_equal(0)

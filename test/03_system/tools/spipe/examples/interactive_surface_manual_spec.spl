@@ -1,0 +1,207 @@
+# Reference example (Lane E8a): a Todo "add a task" workflow on a TUI
+# surface, written manual-first against the typed-evidence contract in
+# src/lib/common/spec/evidence/{model,evidence_comparator,action_trace,
+# format/terminal_grid,manual_render}.spl.
+#
+# HONESTY NOTE: there is no live Todo app wired to a driver yet. The
+# ActionTrace and TerminalSnapshot below are hand-built FIXTURES that
+# demonstrate the shape of the evidence contract end to end (interaction ->
+# canonical evidence -> closed oracle -> QA/user manual projection). They are
+# NOT a captured recording of a real running application. A future capture
+# provider would populate the same two structures from a live driver without
+# changing anything downstream of them.
+#
+# @manual_section Adding a task
+# @user_facing
+# @req REQ-TODO-ADD-001
+
+use std.spec.*
+use std.common.spec.evidence.model.{
+    OracleSpec, EvidenceStatus,
+    ManualBlock, ManualBlockKind, EvidenceAudience,
+    manual_block_for,
+    check_exact, oracle_spec
+}
+use std.common.spec.evidence.evidence_comparator.{
+    compare_evidence, comparison_to_manual_blocks
+}
+use std.common.spec.evidence.action_trace.{
+    UiActionKind, UiTargetResolution, SettleCondition, UiActionStep, ActionTrace,
+    target_resolution, settle_condition, ui_action_step, action_trace,
+    action_trace_is_valid, action_trace_to_evidence, action_trace_manual_lines
+}
+use std.common.spec.evidence.format.terminal_grid.{
+    TerminalSnapshot, TerminalRegion,
+    terminal_snapshot_from_rows, terminal_snapshot_to_evidence
+}
+use std.common.spec.evidence.manual_render.{render_blocks}
+
+# ============================================================================
+# Fixture builders
+# ============================================================================
+
+fn settled(kind: text) -> SettleCondition:
+    settle_condition(kind, "polled until stable", 1, false)
+
+# The three interactions an operator performs to add a task: click the "Add
+# task" control, type the task name, press Enter to commit it. Each target is
+# resolved by role+name (the strongest of the three resolution strategies),
+# never by raw coordinates.
+fn add_task_trace() -> ActionTrace:
+    val add_button = target_resolution("Add task", "main#add_task", "role_and_name", "")
+    val task_field = target_resolution("Task name", "main#task_name", "role_and_name", "")
+
+    val click_add = ui_action_step(
+        1, UiActionKind.click, add_button, "",
+        "list empty", "acting", "dialog open", settled("state_appeared"), 1
+    )
+    val type_name = ui_action_step(
+        2, UiActionKind.type_text, task_field, "Ship release",
+        "dialog open", "typing", "task named", settled("revision_stable"), 2
+    )
+    val press_enter = ui_action_step(
+        3, UiActionKind.press_key, task_field, "Enter",
+        "task named", "committing", "task list updated", settled("revision_stable"), 3
+    )
+
+    action_trace("tui", [click_add, type_name, press_enter])
+
+# The resulting screen after the trace above: a 40x4 terminal grid whose
+# third row is the task list with "Ship release" now present. The
+# `main#task_list` semantic region ties the rendered text back to the widget
+# that produced it, matching how a real capture provider would attribute a
+# region to a node id.
+fn resulting_screen() -> TerminalSnapshot:
+    val rows = ["Todo App", "", "[ ] Ship release", ""]
+    var snapshot = terminal_snapshot_from_rows(rows, 40)
+    snapshot.semantic_regions = [
+        TerminalRegion(node_id: "main#task_list", row: 2, col: 0, width: 16, height: 1)
+    ]
+    snapshot
+
+# Closed oracle over the action trace: every emitted node (kind, resolved
+# target, resulting state, settle strategy, revision) for all three steps
+# must be declared, or the comparator fails the capture as under-specified.
+fn action_trace_oracle() -> OracleSpec:
+    oracle_spec(
+        "todo/add-task/action-trace/1",
+        [
+            check_exact("step.1.kind", "click"),
+            check_exact("step.1.target.resolved", "main#add_task"),
+            check_exact("step.1.after_state", "dialog open"),
+            check_exact("step.1.settle.kind", "state_appeared"),
+            check_exact("step.1.revision", "1"),
+            check_exact("step.2.kind", "type_text"),
+            check_exact("step.2.target.resolved", "main#task_name"),
+            check_exact("step.2.after_state", "task named"),
+            check_exact("step.2.settle.kind", "revision_stable"),
+            check_exact("step.2.revision", "2"),
+            check_exact("step.3.kind", "press_key"),
+            check_exact("step.3.target.resolved", "main#task_name"),
+            check_exact("step.3.after_state", "task list updated"),
+            check_exact("step.3.settle.kind", "revision_stable"),
+            check_exact("step.3.revision", "3")
+        ]
+    )
+
+# Closed oracle over the resulting screen: grid metadata plus the one
+# semantic region under test.
+fn screen_oracle() -> OracleSpec:
+    oracle_spec(
+        "todo/add-task/screen/1",
+        [
+            check_exact("terminal.columns", "40"),
+            check_exact("terminal.rows", "4"),
+            check_exact("terminal.width_profile", "explicit-table-v1"),
+            check_exact("main#task_list", "[ ] Ship release")
+        ]
+    )
+
+fn contains_text(haystack: text, needle: text) -> bool:
+    haystack.index_of(needle) >= 0
+
+# ============================================================================
+# Scenario
+# ============================================================================
+
+describe "Adding a task":
+    """
+    An operator adds a task on the Todo TUI surface by clicking "Add task",
+    typing the task name, and pressing Enter. This example is fixture-driven:
+    the interaction trace and the resulting screen are constructed evidence
+    objects, not a live capture, built to demonstrate the typed-evidence
+    contract end to end.
+    """
+
+    it "records an add-task trace that resolves cleanly against a closed oracle":
+        step("Click \"Add task\"")
+        step("Type \"Ship release\" in \"Task name\"")
+        step("Press Enter")
+        val trace = add_task_trace()
+
+        step("Verify the trace is internally valid (settled, revision advances)")
+        assert_true(action_trace_is_valid(trace))
+
+        step("Verify every recorded step matches the closed action-trace oracle")
+        val evidence = action_trace_to_evidence(trace, "todo/add-task/action-trace/1")
+        val result = compare_evidence(evidence, action_trace_oracle())
+        expect(result.status).to_equal(EvidenceStatus.passed)
+
+    it "verifies \"Ship release\" appears in the task list on the resulting screen":
+        step("Verify \"Ship release\" appears in the task list")
+        val screen = resulting_screen()
+        val evidence = terminal_snapshot_to_evidence(screen, "todo/add-task/screen/1")
+        val result = compare_evidence(evidence, screen_oracle())
+        expect(result.status).to_equal(EvidenceStatus.passed)
+
+    it "keeps the user-facing action list free of canonical ids and coordinates":
+        val trace = add_task_trace()
+        val lines = action_trace_manual_lines(trace)
+
+        step("Verify the manual reads as plain operator prose")
+        expect(lines[0]).to_equal("1. Click \"Add task\"")
+        expect(lines[1]).to_equal("2. Type \"Ship release\" in \"Task name\"")
+        expect(lines[2]).to_equal("3. Press \"Enter\"")
+
+        step("Verify no line leaks a canonical id or coordinate pair")
+        for line in lines:
+            assert_false(contains_text(line, "main#"))
+            assert_false(contains_text(line, ","))
+
+    it "excludes QA-only evidence tables from the rendered user manual":
+        val trace = add_task_trace()
+        val trace_evidence = action_trace_to_evidence(trace, "todo/add-task/action-trace/1")
+        val trace_result = compare_evidence(trace_evidence, action_trace_oracle())
+
+        step("Build the QA manual block (selector/expected/actual table) and the user block (plain action list)")
+        val qa_blocks = comparison_to_manual_blocks("Add-task evidence", trace_result)
+        val user_block = manual_block_for(
+            ManualBlockKind.action_list,
+            "Adding a task",
+            EvidenceAudience.user,
+            action_trace_manual_lines(trace)
+        )
+
+        # manual_render.render_blocks does not itself filter by audience (it
+        # renders exactly the blocks it is given), so the caller is
+        # responsible for selecting which blocks go into which manual. This
+        # is a real characteristic of the current render_blocks API, not an
+        # assumption — see src/lib/common/spec/evidence/manual_render.spl.
+        val user_manual = render_blocks([user_block], EvidenceAudience.user)
+        val qa_manual = render_blocks(qa_blocks, EvidenceAudience.qa)
+
+        var joined_user = ""
+        for line in user_manual:
+            joined_user = joined_user + line + "\n"
+        var joined_qa = ""
+        for line in qa_manual:
+            joined_qa = joined_qa + line + "\n"
+
+        step("Verify the user manual shows the plain steps and nothing selector/table-shaped")
+        assert_true(contains_text(joined_user, "Click \"Add task\""))
+        assert_false(contains_text(joined_user, "Selector | Mode"))
+        assert_false(contains_text(joined_user, "main#add_task"))
+
+        step("Verify the QA manual retains the selector/expected/actual evidence table")
+        assert_true(contains_text(joined_qa, "Selector | Mode"))
+        assert_true(contains_text(joined_qa, "main#add_task"))

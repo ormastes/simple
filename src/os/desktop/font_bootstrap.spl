@@ -1,0 +1,104 @@
+# Shared SimpleOS desktop font registration.
+
+use std.common.encoding.font_registry.{selected_font_asset_candidates, simpleos_default_font_asset_candidate, simpleos_font_asset_guest_path, simpleos_font_asset_short_guest_path}
+use std.nogc_sync_mut.text_layout.font_renderer.{font_renderer_register_selected_bytes, font_renderer_use_registered_selected_bytes_only, font_renderer_last_selected_registration_reason}
+use os.services.vfs.vfs_init.{g_vfs_read_file_bytes}
+
+# Receipts from the last registration sweep. Scalars/text only: the baremetal
+# lane loses returned aggregates (see the FLATTENED notes in font_renderer),
+# so the sweep publishes its outcome through module globals and the kernel
+# entry reads them back one scalar at a time.
+var _simpleos_desktop_font_registered_count: i64 = 0
+var _simpleos_desktop_font_total_count: i64 = 0
+var _simpleos_desktop_font_failures: text = ""
+var _simpleos_desktop_default_font_registered: bool = false
+# Refusal reason for the face the helper below last REJECTED. Second scalar
+# channel alongside the returned byte count, for the same reason the counts
+# are globals: a returned pair would not survive the baremetal lane.
+var _simpleos_desktop_last_reject_reason: text = ""
+
+fn _simpleos_desktop_register_candidate_bytes(local_path: text, long_path: text, short_path: text) -> i64:
+    """Register one face from its staged VFS bytes.
+
+    Returns the byte count that was offered to the registry, negated when the
+    registry refused it: >0 = accepted, 0 = nothing staged/readable, <0 =
+    bytes present but rejected by selected-asset validation. A scalar keeps
+    this off the returned-aggregate channel. On a rejection the refusing gate
+    is published in `_simpleos_desktop_last_reject_reason` — diagnostics only,
+    nothing branches on it."""
+    _simpleos_desktop_last_reject_reason = ""
+    val canonical_blob = g_vfs_read_file_bytes(long_path)
+    var canonical_reason: text = ""
+    if canonical_blob.len() > 0:
+        if font_renderer_register_selected_bytes(local_path, canonical_blob):
+            return canonical_blob.len()
+        canonical_reason = font_renderer_last_selected_registration_reason()
+    val short_blob = g_vfs_read_file_bytes(short_path)
+    if short_blob.len() > 0:
+        if font_renderer_register_selected_bytes(local_path, short_blob):
+            return short_blob.len()
+        _simpleos_desktop_last_reject_reason = font_renderer_last_selected_registration_reason()
+        return 0 - short_blob.len()
+    if canonical_blob.len() > 0:
+        _simpleos_desktop_last_reject_reason = canonical_reason
+        return 0 - canonical_blob.len()
+    0
+
+fn simpleos_desktop_register_selected_fonts_from_vfs() -> bool:
+    """Register every pinned desktop face from its staged VFS bytes.
+
+    The bool answer stays "the whole pinned catalog registered". It is a
+    corpus-completeness receipt, NOT a text-rendering readiness signal — the
+    desktop draws with the default monospace face alone, so readiness must be
+    read from `simpleos_desktop_default_font_registered()`. Wiring the bitmap
+    fallback to this aggregate made one missing corpus face disable vector
+    text for a boot whose default face had loaded correctly."""
+    font_renderer_use_registered_selected_bytes_only()
+    val candidates = selected_font_asset_candidates()
+    val default_candidate = simpleos_default_font_asset_candidate()
+    val default_local_path: text = default_candidate.local_path
+    var registered = 0
+    var failures: text = ""
+    var default_registered = false
+    for candidate in candidates:
+        val local_path: text = candidate.local_path
+        val outcome = _simpleos_desktop_register_candidate_bytes(
+            local_path,
+            simpleos_font_asset_guest_path(candidate),
+            simpleos_font_asset_short_guest_path(candidate))
+        if outcome > 0:
+            registered = registered + 1
+            if local_path == default_local_path:
+                default_registered = true
+        else:
+            val family: text = candidate.family
+            val reason: text = _simpleos_desktop_last_reject_reason
+            val reason_suffix = if reason == "": "" else: ":" + reason
+            val detail = if outcome == 0: "missing" else: "rejected:" + (0 - outcome).to_text() + "B" + reason_suffix
+            val separator = if failures == "": "" else: ","
+            failures = failures + separator + family + "=" + detail
+    _simpleos_desktop_font_registered_count = registered
+    _simpleos_desktop_font_total_count = candidates.len()
+    _simpleos_desktop_font_failures = failures
+    _simpleos_desktop_default_font_registered = default_registered
+    registered == candidates.len()
+
+fn simpleos_desktop_registered_font_count() -> i64:
+    """Faces accepted by the last sweep."""
+    _simpleos_desktop_font_registered_count
+
+fn simpleos_desktop_selected_font_count() -> i64:
+    """Faces the last sweep attempted."""
+    _simpleos_desktop_font_total_count
+
+fn simpleos_desktop_font_failure_summary() -> text:
+    """`family=missing|rejected:<n>B:<reason>` for every face the last sweep
+    refused. `<reason>` names the gate that said no (`default-axes`, `names`,
+    `tables`, `sha256`, `byte-length`, `format`, `identity`, `runtime`,
+    `unmanaged`) and is omitted when the lane could not produce one."""
+    _simpleos_desktop_font_failures
+
+fn simpleos_desktop_default_font_registered() -> bool:
+    """True when the default monospace face registered — the signal that
+    decides vector text vs the bitmap fallback."""
+    _simpleos_desktop_default_font_registered

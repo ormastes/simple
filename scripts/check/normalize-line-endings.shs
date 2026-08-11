@@ -1,0 +1,141 @@
+#!/bin/sh
+# Normalize staged text files to LF line endings, except Windows-only script
+# formats (`.bat`/`.cmd`) which cmd.exe misparses as LF-only.
+#
+# Why a hook and not just .gitattributes: `.gitattributes` `eol=lf` only
+# normalizes on `git add`/checkout for git itself — it does nothing for a
+# file that already has CRLF content sitting in the working tree from an
+# editor, a Windows-native tool, or (PROVED 2026-08-08 this session) jj's own
+# working-copy writer, which does not consult git's eol attributes at all.
+# This hook is the fail-safe: it actively rewrites and re-stages any staged
+# file that still has CRLF despite `.gitattributes`, so a commit can never
+# introduce CRLF into a non-`.bat`/`.cmd` file regardless of which tool
+# (git add, jj commit, an editor's own line-ending setting) put it there.
+#
+# Usage: normalize-line-endings.shs [--check]
+#   (no args)  fix mode: rewrite offending staged files to LF and `git add`
+#              them back into the index (default; what the pre-commit hook
+#              calls)
+#   --check    report-only: list offending files, exit 1 if any found, fix
+#              nothing (for CI / manual auditing without side effects)
+# Exit 0 = nothing to do (or fixed), 1 = (--check only) violations found,
+# 2 = could not determine (fail closed, matching the other guards in this
+# directory).
+
+set -u
+
+SELF=normalize-line-endings
+
+# Detecting CR bytes via `grep -c "$(printf '\r')"` is unreliable on this
+# host: this build of grep (bundled with Git for Windows) silently strips a
+# trailing `\r` from each line before pattern matching — a CRLF-friendliness
+# convenience that means a straightforward "does this file contain a CR"
+# grep NEVER matches, regardless of real content. PROVED 2026-08-09 with
+# `xxd` confirming real `0d 0a` bytes on disk while both
+# `grep -c $'\r' file` (also independently wrong — that's a bashism under
+# this script's dash-compatible `sh`, see below) and the portable
+# `grep -c "$(printf '\r')" file` returned 0. Comparing byte counts before
+# and after `tr -d '\r'` is reliable regardless of grep's line-ending
+# handling and needs no shell-quoting gymnastics.
+has_crlf() {
+    orig=$(wc -c < "$1" 2>/dev/null) || return 1
+    stripped=$(tr -d '\r' < "$1" 2>/dev/null | wc -c) || return 1
+    [ "$orig" -ne "$stripped" ]
+}
+
+die() {
+    code=$1
+    shift
+    echo "$SELF: ERROR — $*" >&2
+    exit "$code"
+}
+
+mode="fix"
+case "${1:-}" in
+    "") ;;
+    --check) mode="check" ;;
+    *) die 2 "unknown option '$1' (expected --check or no argument)" ;;
+esac
+
+toplevel=$(git rev-parse --show-toplevel 2>/dev/null) || toplevel=""
+[ -n "$toplevel" ] || die 2 "cwd '$(pwd)' is not inside a git repository"
+cd "$toplevel" || die 2 "cannot cd to repo root $toplevel"
+
+# Windows-only script formats that legitimately need CRLF (cmd.exe parses an
+# LF-only .bat/.cmd incorrectly — this is the one documented exception).
+is_crlf_required() {
+    case "$1" in
+        *.bat|*.cmd) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Files git itself already tracks as binary/LFS never need line-ending work,
+# and attempting to rewrite them would corrupt binary content.
+is_binary_tracked() {
+    attr=$(git check-attr text -- "$1" 2>/dev/null)
+    case "$attr" in
+        *"text: unset"*|*"text: -text"*) return 0 ;;
+    esac
+    filter=$(git check-attr filter -- "$1" 2>/dev/null)
+    case "$filter" in
+        *"filter: lfs"*) return 0 ;;
+    esac
+    return 1
+}
+
+staged=$(git diff --cached --name-only --diff-filter=ACMR 2>/dev/null)
+rc=$?
+[ "$rc" -eq 0 ] || die 2 "git diff --cached failed with status $rc"
+
+[ -n "$staged" ] || { echo "$SELF: no staged files to check"; exit 0; }
+
+offenders=""
+printf '%s\n' "$staged" | while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    [ -f "$path" ] || continue
+    is_crlf_required "$path" && continue
+    is_binary_tracked "$path" && continue
+    if has_crlf "$path"; then
+        echo "$path"
+    fi
+done > /tmp/normalize-line-endings.$$.offenders 2>/dev/null
+offenders=$(cat /tmp/normalize-line-endings.$$.offenders 2>/dev/null)
+rm -f /tmp/normalize-line-endings.$$.offenders
+
+if [ -z "$offenders" ]; then
+    echo "$SELF: PASS — no CRLF found in staged non-.bat/.cmd files"
+    exit 0
+fi
+
+if [ "$mode" = "check" ]; then
+    echo "$SELF: FAIL — CRLF found in staged file(s):" >&2
+    printf '%s\n' "$offenders" | while IFS= read -r p; do
+        [ -n "$p" ] && echo "  $p" >&2
+    done
+    exit 1
+fi
+
+echo "$SELF: normalizing CRLF -> LF and re-staging:"
+printf '%s\n' "$offenders" | while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    echo "  $path"
+    tmp="${path}.normalize-line-endings.tmp"
+    if command -v dos2unix >/dev/null 2>&1; then
+        cp "$path" "$tmp" && dos2unix -q "$tmp" 2>/dev/null
+    else
+        # Portable fallback: strip CR bytes via sed (works with both GNU and
+        # BSD sed since we only ever delete a literal \r, no BRE/ERE quirks).
+        sed 's/\r$//' "$path" > "$tmp"
+    fi
+    if [ -s "$tmp" ] || [ ! -s "$path" ]; then
+        mv "$tmp" "$path"
+        git add -- "$path"
+    else
+        rm -f "$tmp"
+        echo "$SELF: WARNING — normalization produced an empty result for $path; left unchanged" >&2
+    fi
+done
+
+echo "$SELF: PASS — normalized and re-staged"
+exit 0

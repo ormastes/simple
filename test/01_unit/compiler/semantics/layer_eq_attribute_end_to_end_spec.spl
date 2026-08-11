@@ -1,0 +1,124 @@
+# C1 end-to-end: `@layer_eq` / `@layer_field` parsed from REAL SOURCE reach the
+# real checker and produce real diagnostics.
+#
+# doc/03_plan/compiler/forwarding/
+#   zero_cost_layers_c0_c5_staged_implementation_plan_2026-08-07.md (C1)
+# doc/03_plan/ui/perf/render_perf_redesign_plan_2026-08-06.md §3
+#
+# WHY THIS SPEC EXISTS / WHAT IT WOULD CATCH:
+# `layer_eq_checker_spec.spl` and `layer_eq_checker_real_layout_spec.spl` both
+# build `LayerEqType` values BY HAND. They pass identically whether or not the
+# `@layer_eq` attribute parses at all -- which is precisely how C1 sat "done on
+# fixtures, unenforced on the tree". Every example below starts from SOURCE
+# TEXT containing the attribute and goes through the real
+# parser -> flat-AST bridge -> HIR lowering -> validate_layer_eq_types path.
+#
+# Concretely, each example fails (not passes) under these wrong behaviors:
+#   * "@layer_eq parses but records nothing"      -> ex.1 gets 0 claims, fails.
+#   * "@layer_eq is silently ignored by the lexer/parser" -> ex.1 & ex.2 both
+#     see 0 claims AND a parse error, fails.
+#   * "the checker is never called on real source" -> ex.2 expects a REJECTION;
+#     an unwired checker returns no diagnostic and the example fails.
+#   * "@layer_field is dropped / binds to the wrong field" -> ex.3's renamed
+#     view would fail obligation 2 with "maps to 'x', not a field of ..." and
+#     the example fails.
+#   * "the attribute changes the struct's representation" -> ex.4 would see a
+#     different field count/layout for the decorated struct, and fails.
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.layer_eq_registry.{layer_eq_registry_claim_keys, layer_eq_claim_view}
+use compiler.frontend.layer_eq_registry.{layer_eq_registry_target_of_key}
+use compiler.frontend.layer_eq_registry.{layer_eq_registry_renames_of_key}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.semantics.layer_eq_validation.{validate_layer_eq_types}
+use compiler.common.config.{Logger}
+
+fn leq_logger() -> Logger:
+    Logger(level: 0)
+
+# Parse + lower one source string, then run the production C1 validation over
+# the resulting HIR. Returns the diagnostics list (empty = every claim proven).
+fn leq_diagnostics(src: text, path: text) -> [text]:
+    val module = parse_full_frontend(src, path, "leq_probe", leq_logger())
+    var lowering = HirLowering.with_filename(path)
+    val hir = lowering.lower_module(module)
+    validate_layer_eq_types({"leq_probe": hir})
+
+# The registry is process-wide and accumulates across examples (that is the
+# production behavior: a multi-module compile must not lose earlier modules'
+# claims). Address a claim by its OWN "<path>|<View>" key rather than by
+# position, so examples stay independent of run order.
+fn leq_key(path: text, view: text) -> text:
+    path + "|" + view
+
+fn leq_has_claim(path: text, view: text) -> bool:
+    layer_eq_registry_claim_keys().contains(leq_key(path, view))
+
+# --- sources -----------------------------------------------------------------
+# EQUIVALENT: same field names, same types, same order -> identical layout.
+val SRC_OK = "@layer_eq(DevicePoint)\nstruct ViewPoint:\n    x: i64\n    y: i64\n\nstruct DevicePoint:\n    x: i64\n    y: i64\n"
+
+# VIOLATION: the view has one more field than its target (obligation 1).
+val SRC_FIELD_COUNT = "@layer_eq(DevicePoint)\nstruct ViewPoint:\n    x: i64\n    y: i64\n    z: i64\n\nstruct DevicePoint:\n    x: i64\n    y: i64\n"
+
+# VIOLATION: same field count, mismatched per-field type/layout (obligations 3-4).
+val SRC_TYPE_MISMATCH = "@layer_eq(DevicePoint)\nstruct ViewPoint:\n    x: i64\n    y: bool\n\nstruct DevicePoint:\n    x: i64\n    y: i64\n"
+
+# RENAMES: view field names differ from the target's; `@layer_field` maps them.
+val SRC_RENAMED = "@layer_eq(DeviceSize)\nstruct ViewSize:\n    @layer_field(w)\n    width: i64\n    @layer_field(h)\n    height: i64\n\nstruct DeviceSize:\n    w: i64\n    h: i64\n"
+
+# RENAMES, WRONG TARGET NAME: `@layer_field` names a field the target lacks.
+val SRC_RENAME_BAD = "@layer_eq(DeviceSize)\nstruct ViewSize:\n    @layer_field(w)\n    width: i64\n    @layer_field(depth)\n    height: i64\n\nstruct DeviceSize:\n    w: i64\n    h: i64\n"
+
+# UNKNOWN TARGET: the named target type does not exist in this compilation.
+val SRC_UNKNOWN_TARGET = "@layer_eq(NoSuchType)\nstruct ViewPoint:\n    x: i64\n"
+
+describe "C1 @layer_eq attribute reaches the real checker":
+
+    it "records a claim from real source and proves an equivalent view":
+        val diags = leq_diagnostics(SRC_OK, "leq_ok.spl")
+        # The attribute actually parsed and recorded a claim: this is the
+        # assertion that is FALSE today-without-the-attribute-path.
+        expect(leq_has_claim("leq_ok.spl", "ViewPoint")).to_equal(true)
+        expect(layer_eq_claim_view(leq_key("leq_ok.spl", "ViewPoint"))).to_equal("ViewPoint")
+        expect(layer_eq_registry_target_of_key(leq_key("leq_ok.spl", "ViewPoint"))).to_equal("DevicePoint")
+        # ...and the real checker ran on it and proved it.
+        expect(diags.len()).to_equal(0)
+
+    it "rejects a view with a different field count (obligation 1)":
+        val diags = leq_diagnostics(SRC_FIELD_COUNT, "leq_count.spl")
+        expect(diags.len()).to_equal(1)
+        expect(diags[0].contains("error[layer_eq]")).to_equal(true)
+        expect(diags[0].contains("has 3 fields")).to_equal(true)
+
+    it "rejects a view whose field type does not match (obligations 3-4)":
+        val diags = leq_diagnostics(SRC_TYPE_MISMATCH, "leq_type.spl")
+        expect(diags.len()).to_equal(1)
+        expect(diags[0].contains("error[layer_eq]")).to_equal(true)
+        expect(diags[0].contains("ViewPoint.y")).to_equal(true)
+
+    it "honours @layer_field renames when proving the mapping (obligation 2)":
+        val diags = leq_diagnostics(SRC_RENAMED, "leq_rename.spl")
+        # Without @layer_field parsing, `width` would be looked up as `width`
+        # in DeviceSize (which only has `w`/`h`) and this would be 1 error.
+        expect(diags.len()).to_equal(0)
+        expect(layer_eq_registry_renames_of_key(leq_key("leq_rename.spl", "ViewSize"))).to_equal(["w", "h"])
+
+    it "rejects a @layer_field naming a field the target does not have":
+        val diags = leq_diagnostics(SRC_RENAME_BAD, "leq_rename_bad.spl")
+        expect(diags.len()).to_equal(1)
+        expect(diags[0].contains("maps to 'depth'")).to_equal(true)
+
+    it "rejects an @layer_eq whose target type is not visible":
+        val diags = leq_diagnostics(SRC_UNKNOWN_TARGET, "leq_unknown.spl")
+        expect(diags.len()).to_equal(1)
+        expect(diags[0].contains("NoSuchType")).to_equal(true)
+
+    it "leaves the decorated struct itself an ordinary two-field struct":
+        # @layer_eq adds a proof obligation, never a representation change.
+        val module = parse_full_frontend(SRC_OK, "leq_shape.spl", "leq_probe", leq_logger())
+        expect(module.structs.contains("ViewPoint")).to_equal(true)
+        expect(module.structs["ViewPoint"].fields.len()).to_equal(2)
+        expect(module.structs["DevicePoint"].fields.len()).to_equal(2)

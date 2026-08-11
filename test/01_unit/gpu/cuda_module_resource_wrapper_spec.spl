@@ -1,0 +1,53 @@
+"""
+Resource wrapper for CudaModule — WP-J pilot migration
+
+Tests the CudaModule wrapper class with resource ownership pattern:
+- Sentinel-based validity checks (handle > 0 valid; 0 = closed sentinel;
+  negative = load-failure error code, never a live handle)
+- Consuming close() method
+- Double-close guard (one-shot safety)
+- Borrow methods refuse to touch an invalid handle
+
+NOTE: close()/get_function on a VALID-looking fabricated handle are
+deliberately NOT tested — they call real C externs (rt_cuda_module_unload
+etc.) on a bogus pointer, which is undefined behavior and previously
+crashed the test runner in the Image wrapper spec. All guard proofs below
+use only invalid sentinels (0 and negative), which short-circuit before
+any extern call.
+"""
+
+use std.spec
+use std.nogc_sync_mut.cuda.sffi.{CudaModule, cuda_module_load_resource}
+
+describe "CudaModule resource wrapper":
+    it "is_valid accepts a positive handle":
+        val m = CudaModule(handle: 42)
+        assert_true(m.is_valid())
+
+    it "is_valid detects the closed sentinel (0)":
+        val m = CudaModule(handle: 0)
+        assert_false(m.is_valid())
+
+    it "is_valid rejects negative error-code values":
+        val m = CudaModule(handle: -3)
+        assert_false(m.is_valid())
+
+    it "close on closed sentinel is safe and idempotent":
+        val m = CudaModule(handle: 0)
+        m.close()
+        assert_equal(m.handle, 0)
+        m.close()
+        assert_equal(m.handle, 0)
+
+    it "close on negative error-code handle never calls unload":
+        val m = CudaModule(handle: -1)
+        m.close()
+        assert_equal(m.handle, -1)
+
+    it "get_function refuses an invalid handle":
+        val m = CudaModule(handle: 0)
+        assert_equal(m.get_function("kernel_main"), 0)
+
+    it "load from nonexistent path returns nil":
+        val result = cuda_module_load_resource("/nonexistent/module.ptx")
+        assert_nil(result)

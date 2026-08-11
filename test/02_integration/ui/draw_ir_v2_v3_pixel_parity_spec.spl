@@ -1,0 +1,281 @@
+# @cover src/lib/common/ui/draw_ir_v2_to_v3.spl 60%
+# @tag: integration, ui, draw_ir, draw_ir_v3, unified_packed_ui_scene, l3
+
+"""
+# DrawIR v2 -> v3 pixel parity (design section 9, plan lane L3)
+
+Proves the typed v2->v3 adapter (`draw_ir_v2_to_v3.spl`) preserves paint
+semantics across three real production scene sources (WM, GUI widget tree,
+Web layout) by rendering each composition two ways and comparing full pixel
+buffers byte-for-byte:
+
+  (a) directly over the v2 `DrawIrComposition` (batches + embedding offsets)
+  (b) through `draw_ir_v2_to_v3` into a `DrawIrV3Scene`, resolved with L2's
+      `draw_ir_v3_group_resolve` (GROUP transform/clip/visibility) and walked
+      by command/geometry/paint tables
+
+Both walks share ONE minimal rectangle-paint primitive
+(`_parity_plot_rect`) parameterized only by the resolved absolute
+geometry/color/clip each side computes -- so this gate is a direct proof of
+adapter fidelity (geometry, paint, clip, GROUP transform), not a
+reimplementation of `Engine2D`'s independent shadow/gradient/border/font
+subsystems, which are orthogonal to what the adapter is chartered to
+preserve (design section 9's "v2 CPU pixels == v3 CPU pixels" gate). Both
+walks apply the SAME primitive to values sourced from each schema, so a
+translation bug anywhere in the adapter (a dropped GROUP transform, a wrong
+clip, a swapped color) changes one side's absolute geometry/color and is
+guaranteed to produce a full-buffer mismatch.
+
+**Sabotage** (design plan, lane L3): temporarily editing
+`_v2v3_adapt_batch` in `draw_ir_v2_to_v3.spl` to force `transform_id` to
+`DRAW_IR_V3_NO_ID` regardless of `embedding.x`/`embedding.y` must turn the
+WM scenario red, because the WM corpus's window batches sit at real nonzero
+embedding offsets (see `_wm_corpus_composition`, `open_window(...,10,40,...)`
+/ `(...,80,120,...)`) -- verified manually per the plan's gate discipline
+(apply, confirm red, revert, confirm green), not encoded as a second
+permanent code path.
+"""
+
+use std.spec
+use common.ui.draw_ir.{
+    DRAW_IR_COMMAND_IMAGE,
+    DRAW_IR_COMMAND_RECT,
+    DRAW_IR_COMMAND_TEXT,
+    DRAW_IR_BACKEND_CPU,
+    DrawIrComposition
+}
+use common.ui.draw_ir_v3.{
+    DRAW_IR_V3_KIND_IMAGE,
+    DRAW_IR_V3_KIND_RECT,
+    DRAW_IR_V3_KIND_TEXT,
+    DrawIrV3Scene,
+    draw_ir_v3_geometry_at,
+    draw_ir_v3_paint_at
+}
+use common.ui.draw_ir_v3_group_resolve.{draw_ir_v3_group_resolve, draw_ir_v3_port_surface_state_empty}
+use common.ui.draw_ir_v2_to_v3.{draw_ir_v2_to_v3}
+
+use common.ui.window.{WindowManager}
+use common.ui.window_surface_registry.{UiWindowSurfaceRegistry, UI_SURFACE_KIND_SIMPLE_WEB}
+use common.ui.window_scene.{shared_wm_scene_from_window_manager}
+use common.ui.window_scene_draw_ir.{shared_wm_scene_draw_ir_composition}
+use common.ui.taskbar_model.{TaskbarModel, AppRef, WindowRef, TrayItem}
+use common.ui.builder.{column, label, build_tree_with_title, with_background, with_height, with_width}
+use common.ui.widget_draw_ir.{widget_tree_to_draw_ir_cpu}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_draw_ir}
+
+# ---------------------------------------------------------------------------
+# Shared minimal rectangle-paint primitive (see module doc for why this is
+# not a reimplementation of Engine2D).
+# ---------------------------------------------------------------------------
+
+fn _parity_plot_rect(buf: [u32], canvas_w: i32, canvas_h: i32, x: i32, y: i32, w: i32, h: i32, color: u32, clip_present: bool, clip_x: i32, clip_y: i32, clip_w: i32, clip_h: i32) -> [u32]:
+    var out = buf
+    var x0 = x
+    var y0 = y
+    var x1 = x + w
+    var y1 = y + h
+    if clip_present:
+        if clip_x > x0:
+            x0 = clip_x
+        if clip_y > y0:
+            y0 = clip_y
+        if clip_x + clip_w < x1:
+            x1 = clip_x + clip_w
+        if clip_y + clip_h < y1:
+            y1 = clip_y + clip_h
+    if x0 < 0:
+        x0 = 0
+    if y0 < 0:
+        y0 = 0
+    if x1 > canvas_w:
+        x1 = canvas_w
+    if y1 > canvas_h:
+        y1 = canvas_h
+    var py = y0
+    while py < y1:
+        var px = x0
+        while px < x1:
+            out[py * canvas_w + px] = color
+            px = px + 1
+        py = py + 1
+    out
+
+fn _parity_apply_x(m11: i32, m12: i32, dx: i32, x: i32, y: i32) -> i32:
+    ((m11.to_i64() * x.to_i64() + m12.to_i64() * y.to_i64()) / 1000 + dx.to_i64()).to_i32()
+
+fn _parity_apply_y(m21: i32, m22: i32, dy: i32, x: i32, y: i32) -> i32:
+    ((m21.to_i64() * x.to_i64() + m22.to_i64() * y.to_i64()) / 1000 + dy.to_i64()).to_i32()
+
+fn _parity_is_paintable_v2(kind: text) -> bool:
+    kind == DRAW_IR_COMMAND_RECT or kind == DRAW_IR_COMMAND_TEXT or kind == DRAW_IR_COMMAND_IMAGE
+
+fn _parity_is_paintable_v3(kind: u16) -> bool:
+    kind == DRAW_IR_V3_KIND_RECT or kind == DRAW_IR_V3_KIND_TEXT or kind == DRAW_IR_V3_KIND_IMAGE
+
+# --- (a) v2 walk: batch embedding is the ONLY source of translate/clip. -----
+
+fn _v2_walk_pixels(composition: DrawIrComposition, width: i32, height: i32) -> [u32]:
+    var buf: [u32] = [0u32; (width * height)]
+    for batch in composition.batches:
+        val ox = batch.embedding.x
+        val oy = batch.embedding.y
+        val has_clip = batch.embedding.clip
+        for cmd in batch.commands:
+            if _parity_is_paintable_v2(cmd.kind):
+                buf = _parity_plot_rect(
+                    buf, width, height, cmd.x + ox, cmd.y + oy, cmd.width, cmd.height, cmd.color,
+                    has_clip, ox, oy, batch.embedding.width, batch.embedding.height
+                )
+    buf
+
+# --- (b) v3 walk: L2's group resolver supplies the resolved world transform
+# and effective clip per command; the adapter is the only thing under test.
+
+fn _v3_walk_pixels(scene: DrawIrV3Scene, width: i32, height: i32) -> [u32]:
+    var buf: [u32] = [0u32; (width * height)]
+    val ports = draw_ir_v3_port_surface_state_empty()
+    val resolved = draw_ir_v3_group_resolve(scene, ports)
+    if not resolved.ok:
+        return buf
+    var i: i64 = 0
+    val n = scene.commands.len().to_i64()
+    while i < n:
+        val idx = i.to_i32()
+        val cmd = scene.commands[idx]
+        val st = resolved.states[idx]
+        if st.effective_visible and _parity_is_paintable_v3(cmd.kind):
+            val geom = draw_ir_v3_geometry_at(scene.geometry, cmd.geometry_id)
+            if geom.present:
+                val paint = draw_ir_v3_paint_at(scene.paint, cmd.paint_id)
+                var color = 0u32
+                if paint.present:
+                    color = paint.fill_color
+                val wx = _parity_apply_x(st.world_m11, st.world_m12, st.world_dx, geom.x, geom.y)
+                val wy = _parity_apply_y(st.world_m21, st.world_m22, st.world_dy, geom.x, geom.y)
+                buf = _parity_plot_rect(
+                    buf, width, height, wx, wy, geom.width, geom.height, color,
+                    st.clip_present, st.clip_x, st.clip_y, st.clip_width, st.clip_height
+                )
+        i = i + 1
+    buf
+
+fn _nonzero_pixel_count(buf: [u32]) -> i64:
+    var count: i64 = 0
+    for px in buf:
+        if px != 0u32:
+            count = count + 1
+    count
+
+fn _buffers_equal(a: [u32], b: [u32]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    val n = a.len()
+    while i < n:
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+# ---------------------------------------------------------------------------
+# Corpus builders (real production composition sources).
+# ---------------------------------------------------------------------------
+
+# WM corpus: a real `WindowManager` scene with two overlapping windows at
+# distinct nonzero screen offsets (the batch embedding GROUP transform this
+# lane's sabotage target removes) plus desktop/chrome/taskbar, rendered
+# through `shared_wm_scene_draw_ir_composition` -- the actual production WM
+# compositor entry point (`window_scene_draw_ir.spl`).
+fn _wm_tree(title: text):
+    build_tree_with_title(column("{title}_root", [label("{title}_label", title)]), title, "glass_dark")
+
+fn _wm_taskbar() -> TaskbarModel:
+    TaskbarModel(
+        pinned: [AppRef(app_id: "terminal", display_name: "Terminal", icon: "term")],
+        running: [
+            WindowRef(window_id: "win1", app_id: "demo.app", title: "Window One", minimized: false),
+            WindowRef(window_id: "win2", app_id: "demo.two", title: "Window Two", minimized: false)
+        ],
+        tray: [TrayItem(item_id: "clock", label: "09:41", icon: "clock")]
+    )
+
+fn _wm_corpus_composition() -> DrawIrComposition:
+    var manager = WindowManager.new()
+    val _one = manager.open_window("surf1", "One", 10, 40, 200, 140, _wm_tree("one"))
+    val _two = manager.open_window("surf2", "Two", 80, 120, 180, 120, _wm_tree("two"))
+    var registry = UiWindowSurfaceRegistry.new()
+    registry.bind_with_kind("win1", "surf1", 42u64, "demo.app", "Window One", UI_SURFACE_KIND_SIMPLE_WEB)
+    registry.bind_with_kind("win2", "surf2", 43u64, "demo.two", "Window Two", UI_SURFACE_KIND_SIMPLE_WEB)
+    val scene = shared_wm_scene_from_window_manager(manager, registry, 400, 300)
+    shared_wm_scene_draw_ir_composition(scene, _wm_taskbar(), DRAW_IR_BACKEND_CPU, 1000, "09:41", 2)
+
+# GUI corpus: a real widget tree (`common.ui.builder` + `widget_draw_ir.spl`,
+# the production widget-to-DrawIR projector) with two colored panels stacked
+# inside a background container.
+fn _gui_corpus_composition() -> DrawIrComposition:
+    val panel_a = with_background(with_height(with_width(column("gui-panel-a", []), 60), 24), "#3366CC")
+    val panel_b = with_background(with_height(with_width(column("gui-panel-b", []), 50), 24), "#CC3333")
+    val root = with_background(column("gui-root", [panel_a, panel_b]), "#202020")
+    widget_tree_to_draw_ir_cpu(root, 200, 150)
+
+# Web corpus: real HTML -> DrawIR layout (`simple_web_html_layout_renderer.spl`,
+# the production HTML/CSS layout renderer), two absolutely-positioned colored
+# boxes.
+fn _web_corpus_composition() -> DrawIrComposition:
+    val html = "<html><head><style>html,body{margin:0;padding:0}#a{position:absolute;left:5px;top:5px;width:40px;height:20px;background:#1D4ED8}#b{position:absolute;left:20px;top:30px;width:30px;height:15px;background:#EF4444}</style></head><body><div id='a'></div><div id='b'></div></body></html>"
+    simple_web_layout_render_html_draw_ir(html, 100, 60)
+
+describe "DrawIR v2 -> v3 pixel parity (design section 9, lane L3)":
+
+    it "WM: the corpus genuinely places windows at nonzero screen offsets (sabotage precondition)":
+        val composition = _wm_corpus_composition()
+        var saw_nonzero_offset = false
+        for batch in composition.batches:
+            if batch.embedding.x != 0 or batch.embedding.y != 0:
+                saw_nonzero_offset = true
+        expect(saw_nonzero_offset).to_equal(true)
+
+    it "WM: v2 direct render and adapter+v3 render produce byte-identical full buffers":
+        val composition = _wm_corpus_composition()
+        val v2_pixels = _v2_walk_pixels(composition, 400, 300)
+        val v3_scene = draw_ir_v2_to_v3(composition)
+        val v3_pixels = _v3_walk_pixels(v3_scene, 400, 300)
+        expect(_buffers_equal(v2_pixels, v3_pixels)).to_equal(true)
+
+    it "WM: the parity buffer is non-trivial (not an all-zero==all-zero vacuous pass)":
+        val composition = _wm_corpus_composition()
+        val v2_pixels = _v2_walk_pixels(composition, 400, 300)
+        expect(_nonzero_pixel_count(v2_pixels)).to_be_greater_than(0)
+
+    it "GUI: v2 direct render and adapter+v3 render produce byte-identical full buffers":
+        val composition = _gui_corpus_composition()
+        val v2_pixels = _v2_walk_pixels(composition, 200, 150)
+        val v3_scene = draw_ir_v2_to_v3(composition)
+        val v3_pixels = _v3_walk_pixels(v3_scene, 200, 150)
+        expect(_buffers_equal(v2_pixels, v3_pixels)).to_equal(true)
+
+    it "GUI: the parity buffer is non-trivial":
+        val composition = _gui_corpus_composition()
+        val v2_pixels = _v2_walk_pixels(composition, 200, 150)
+        expect(_nonzero_pixel_count(v2_pixels)).to_be_greater_than(0)
+
+    it "Web: v2 direct render and adapter+v3 render produce byte-identical full buffers":
+        val composition = _web_corpus_composition()
+        val v2_pixels = _v2_walk_pixels(composition, 100, 60)
+        val v3_scene = draw_ir_v2_to_v3(composition)
+        val v3_pixels = _v3_walk_pixels(v3_scene, 100, 60)
+        expect(_buffers_equal(v2_pixels, v3_pixels)).to_equal(true)
+
+    it "Web: the parity buffer is non-trivial":
+        val composition = _web_corpus_composition()
+        val v2_pixels = _v2_walk_pixels(composition, 100, 60)
+        expect(_nonzero_pixel_count(v2_pixels)).to_be_greater_than(0)
+
+    it "adapter output is deterministic across repeated runs on the same composition":
+        val composition = _wm_corpus_composition()
+        val scene_a = draw_ir_v2_to_v3(composition)
+        val scene_b = draw_ir_v2_to_v3(composition)
+        val pixels_a = _v3_walk_pixels(scene_a, 400, 300)
+        val pixels_b = _v3_walk_pixels(scene_b, 400, 300)
+        expect(_buffers_equal(pixels_a, pixels_b)).to_equal(true)

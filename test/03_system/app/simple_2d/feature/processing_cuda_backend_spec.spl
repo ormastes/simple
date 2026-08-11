@@ -1,0 +1,109 @@
+# @tag: system, gpu, processing-ir, cuda, vulkan, directx
+# @req REQ-001 REQ-003 REQ-006 REQ-007 REQ-008 REQ-010 REQ-011 REQ-012
+
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{file_read}
+
+val CUDA_EXECUTOR = "src/lib/gc_async_mut/processing/cuda_fill_u32.spl"
+val DRAW_TRANSLATOR = "src/lib/gc_async_mut/processing/cuda_drawing_translation.spl"
+val CUDA_WRAPPER = "scripts/check/check-processing-cuda-fill-native.shs"
+val TODO_DB = "doc/08_tracking/todo/todo_db.sdn"
+val LOADER = "src/compiler/80.driver/driver_source_loading.spl"
+val ARCHITECTURE = "doc/04_architecture/compiler/backend/processing_backend.md"
+val OPERATOR_GUIDE = "doc/07_guide/compiler/backends/processing_backend.md"
+val CUDA_MANUAL = "doc/06_spec/03_system/app/simple_2d/feature/processing_cuda_backend_spec.md"
+
+describe "CUDA ProcessingIR backend operator flow":
+    """Inspect the shared CUDA artifact and drawing translations, then run only
+    the canonical source-matched native wrapper for device evidence."""
+
+    it "should document generation validation readback and unavailable-host evidence":
+        step("Select representative renderer processing kernels")
+        val executor = file_read(CUDA_EXECUTOR)
+        expect(executor).to_contain("PROCESSING_IR_OP_FILL_U32")
+
+        step("Lower shared ProcessingIR for the selected backend")
+        expect(executor).to_contain("fn processing_cuda_artifact(ir: ProcessingIr)")
+        expect(executor).to_contain("ProcessingBackendTarget.CudaPtx")
+        expect(executor).to_contain(".visible .entry processing_fill_u32")
+
+        step("Translate drawing access for the destination backend")
+        val drawing = file_read(DRAW_TRANSLATOR)
+        expect(drawing).to_contain("ProcessingBackendTarget.VulkanSpirv")
+        expect(drawing).to_contain("ProcessingBackendTarget.DirectXHlsl")
+        expect(drawing).to_contain("RWStructuredBuffer<uint> output : register(u0)")
+        expect(drawing).to_contain("output[py * stride + px]")
+
+        step("Compile and validate the backend artifact")
+        expect(executor).to_contain("fn processing_cuda_compile_evidence(")
+        expect(executor).to_contain("cuda-compiler-identity-missing")
+
+        step("Submit native work and capture device readback")
+        val wrapper = file_read(CUDA_WRAPPER)
+        expect(wrapper).to_contain("readback_source=device_readback")
+        expect(wrapper).to_contain("cpu_fallback=false")
+
+        step("Compare device readback with the CPU oracle")
+        expect(executor).to_contain("processing_ir_output_matches(ir, result.values)")
+        expect(executor).to_contain("cuda-oracle-mismatch")
+
+        step("Record unavailable native host evidence")
+        val todos = file_read(TODO_DB)
+        expect(todos).to_contain("653, TODO, gpu, P1")
+        expect(todos).to_contain("processing_cuda_directx_native_spec.spl --mode=interpreter")
+
+    it "should fail closed before GPU submission when the source-matched probe is absent":
+        step("Select representative renderer processing kernels")
+        val wrapper = file_read(CUDA_WRAPPER)
+        expect(wrapper).to_contain("if [ ! -x \"$PROBE_BIN\" ]; then")
+        expect(wrapper).to_contain("processing_cuda_fill_native_status=blocked")
+        expect(wrapper).to_contain("processing_cuda_fill_native_reason=probe-binary-missing")
+        expect(wrapper).to_contain("exit 1")
+
+        step("Compile and validate the backend artifact")
+        expect(wrapper).to_contain("receipt_count=")
+        expect(wrapper).to_contain("if [ \"$receipt_count\" -ne 1 ] || [ \"$valid\" -ne 1 ]; then")
+        expect(wrapper).to_contain("processing_cuda_fill_native_reason=invalid-receipt")
+
+        step("Submit native work and capture device readback")
+        expect(wrapper).to_contain("handle=[1-9][0-9]* identity=[1-9][0-9]*")
+        expect(wrapper).to_contain("cpu_fallback=false")
+
+        step("Record unavailable native host evidence")
+        val todos = file_read(TODO_DB)
+        expect(todos).to_contain("650, TODO, gpu, P1")
+        expect(todos).to_contain("no new device PASS is claimed")
+
+    it "should bound bootstrap resume to the exact requested test entry":
+        step("Select representative renderer processing kernels")
+        val loader = file_read(LOADER)
+        expect(loader).to_contain("fn _driver_is_bootstrap_entry_source(path: text, module_name: text) -> bool:")
+        expect(loader).to_contain("return path == native_entry or path.ends_with(\"/\" + native_entry)")
+        # Was `to_contain("A caller-supplied --entry is authoritative")`, the
+        # rationale comment. Anchored to the guard that actually enforces it.
+        expect(loader).to_contain("    if native_entry != \"\":")
+        expect(loader).to_contain("val _skip_dirs = [\"test\", \"tests\", \"doc\"")
+
+        step("Lower shared ProcessingIR for the selected backend")
+        val todos = file_read(TODO_DB)
+        expect(todos).to_contain("SIMPLE_NATIVE_BUILD_TRACE_CLOSURE=1")
+        expect(todos).to_contain("SIMPLE_NATIVE_BUILD_TRACE_CLOSURE_TIMING=1")
+        expect(todos).to_contain("Require the first closure-entry marker")
+        expect(todos).to_contain("redeploy the compiled CLI rather than increasing the timeout")
+
+        step("Record unavailable native host evidence")
+        expect(todos).to_contain("Do not run a fourth cycle in the same session")
+
+    it "should keep architecture and operator guidance traceable to CUDA native evidence":
+        step("Select representative renderer processing kernels")
+        val architecture = file_read(ARCHITECTURE)
+        val guide = file_read(OPERATOR_GUIDE)
+        val manual = file_read(CUDA_MANUAL)
+        expect(architecture).to_contain("Processing IR Contract")
+        expect(architecture).to_contain("CUDA")
+        expect(guide).to_contain("CUDA")
+        expect(manual).to_contain("check-processing-cuda-fill-native.shs")
+
+        step("Compare device readback with the CPU oracle")
+        expect(guide).to_contain("device")
+        expect(guide).to_contain("CPU oracle")

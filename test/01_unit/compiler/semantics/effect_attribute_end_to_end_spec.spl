@@ -1,0 +1,170 @@
+# C4 end-to-end: `@copy_budget(N)` / `@bounded_loop` parsed from REAL SOURCE
+# reach the real effect verifier and produce real diagnostics.
+#
+# doc/03_plan/compiler/forwarding/
+#   zero_cost_layers_c0_c5_staged_implementation_plan_2026-08-07.md (C4)
+# doc/03_plan/ui/perf/render_perf_redesign_plan_2026-08-06.md §3 (line 203)
+#
+# WHY THIS SPEC EXISTS / WHAT IT WOULD CATCH:
+# `effect_verifier_spec.spl` builds `CopySite` / `LoopSite` values BY HAND. It
+# passes identically whether or not `@copy_budget` / `@bounded_loop` parse at
+# all, whether or not anything walks a real body, and whether or not the
+# verifier is ever called by the compiler -- which is precisely how C4 sat
+# "16/16 green, unenforced on the tree", and is the same shape that left C1
+# unenforced for months. Every example below starts from SOURCE TEXT containing
+# the attribute and goes through the real
+# parser -> flat-AST bridge -> HIR lowering -> validate_effect_contracts path.
+#
+# Concretely, each example fails (not passes) under these wrong behaviors:
+#   * "@bounded_loop / @copy_budget parse but record nothing"
+#       -> ex.1 sees 0 contracts in the registry, fails.
+#   * "the attribute is silently swallowed as an unknown decorator" (the
+#     PRE-C4 behaviour: `enum_module_body.spl`'s trailing `else: pass_dn`)
+#       -> ex.1 sees 0 contracts, fails.
+#   * "the verifier is never called on real source"
+#       -> ex.2/3/5/6 expect REJECTIONS; an unwired verifier returns no
+#          diagnostic and every one of them fails.
+#   * "loops are counted but never classified from the real body" (e.g. every
+#     loop hard-coded to LOOP_BOUND_CAPACITY, or the walker returning [])
+#       -> ex.2 (`while true`) stops being rejected and fails.
+#   * "the walker classifies an unprovable bound as CONST" (fail-OPEN)
+#       -> ex.2 fails for the same reason.
+#   * "growth-in-loop is not detected in the real body"
+#       -> ex.3 (`.push` inside a bounded `for`) stops being rejected, fails.
+#   * "an unannotated function is checked anyway" (opt-in violated)
+#       -> ex.4 sees diagnostics where it expects none, fails.
+#   * "copy sites are not extracted, or sizes do not come from the real layout
+#     engine"
+#       -> ex.5 (whole-struct copy under @copy_budget(0)) stops being
+#          rejected, fails; ex.6 checks the byte count is the REAL layout size
+#          (24 for three i64 fields), so a hard-coded or zero size fails too.
+#   * "the transitive closure is not fed the real call graph"
+#       -> ex.7's caller pays only its own 0 bytes and passes, failing the
+#          expectation that it is rejected for its CALLEE's copy.
+#   * "the attribute changes the decorated function's representation"
+#       -> ex.8 would see the fn missing or renamed, and fails.
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.effect_registry.{effect_registry_claim_keys, effect_claim_key}
+use compiler.frontend.effect_registry.{effect_registry_budget_of_key, effect_registry_bounded_of_key}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.semantics.effect_validation.{validate_effect_contracts}
+use compiler.common.config.{Logger}
+
+fn eff_logger() -> Logger:
+    Logger(level: 0)
+
+# Parse + lower one source string, then run the production C4 validation over
+# the resulting HIR. Returns the diagnostics list (empty = every contract met).
+fn eff_diagnostics(src: text, path: text) -> [text]:
+    val module = parse_full_frontend(src, path, "eff_probe", eff_logger())
+    var lowering = HirLowering.with_filename(path)
+    val hir = lowering.lower_module(module)
+    validate_effect_contracts({"eff_probe": hir})
+
+fn eff_has_contract(path: text, fn_name: text) -> bool:
+    effect_registry_claim_keys().contains(effect_claim_key(path, fn_name))
+
+# --- sources -----------------------------------------------------------------
+
+# CLEAN: a bounded counted loop under @bounded_loop, no copies.
+val SRC_OK = "@bounded_loop\nfn frame_tick():\n    var i = 0\n    while i < 16:\n        i = i + 1\n"
+
+# VIOLATION: `while true` has no provable trip bound (unbounded-loop).
+val SRC_UNBOUNDED = "@bounded_loop\nfn spin_forever():\n    var i = 0\n    while true:\n        i = i + 1\n"
+
+# VIOLATION: the trip count is bounded but the body grows a container every
+# iteration -- unbounded in MEMORY (growth-in-loop).
+val SRC_GROWTH = "@bounded_loop\nfn collect_tiles():\n    var acc: [i64] = []\n    for i in 0..8:\n        acc.push(i)\n"
+
+# OPT-IN: the SAME unbounded body with NO annotation must not be checked.
+val SRC_UNANNOTATED = "fn spin_unchecked():\n    var i = 0\n    while true:\n        i = i + 1\n"
+
+# VIOLATION: a whole-struct copy under @copy_budget(0) (implicit-copy, and
+# over-budget on top).
+val SRC_IMPLICIT_COPY = "struct Pixel:\n    r: i64\n    g: i64\n    b: i64\n\n@copy_budget(0)\nfn commit(src: Pixel) -> i64:\n    val snapshot: Pixel = src\n    snapshot.r\n"
+
+# CLEAN: the same function constructing in place instead of copying a place.
+val SRC_NO_COPY = "struct Pixel2:\n    r: i64\n    g: i64\n    b: i64\n\n@copy_budget(0)\nfn commit_inplace() -> i64:\n    val fresh: Pixel2 = Pixel2(r: 1, g: 2, b: 3)\n    fresh.r\n"
+
+# VIOLATION VIA THE CALL GRAPH: the annotated caller copies nothing itself; its
+# UNANNOTATED callee copies 24 bytes, and the transitive closure charges it.
+val SRC_TRANSITIVE = "struct Blob:\n    a: i64\n    b: i64\n    c: i64\n\nfn helper(src: Blob) -> i64:\n    val dup: Blob = src\n    dup.a\n\n@copy_budget(8)\nfn outer(src: Blob) -> i64:\n    helper(src)\n"
+
+# STACKED: both attributes on one function, and both are enforced.
+val SRC_STACKED = "@copy_budget(0)\n@bounded_loop\nfn stacked_commit():\n    var i = 0\n    while true:\n        i = i + 1\n"
+
+describe "C4 @copy_budget / @bounded_loop reach the real effect verifier":
+
+    it "records a contract from real source and proves a bounded loop":
+        val diags = eff_diagnostics(SRC_OK, "eff_ok.spl")
+        # The attribute actually parsed and recorded a contract: this is the
+        # assertion that is FALSE today-without-the-attribute-path (an unknown
+        # decorator is silently swallowed, so the registry stays empty).
+        expect(eff_has_contract("eff_ok.spl", "frame_tick")).to_equal(true)
+        expect(effect_registry_bounded_of_key(effect_claim_key("eff_ok.spl", "frame_tick"))).to_equal(true)
+        # ...and the real verifier ran on its real body and proved it.
+        expect(diags.len()).to_equal(0)
+
+    it "rejects a `while true` under @bounded_loop (unbounded-loop)":
+        val diags = eff_diagnostics(SRC_UNBOUNDED, "eff_unbounded.spl")
+        expect(diags.len()).to_equal(1)
+        expect(diags[0].contains("error[effect]")).to_equal(true)
+        expect(diags[0].contains("unbounded-loop")).to_equal(true)
+        expect(diags[0].contains("spin_forever")).to_equal(true)
+
+    it "rejects container growth inside a bounded loop (growth-in-loop)":
+        val diags = eff_diagnostics(SRC_GROWTH, "eff_growth.spl")
+        # The trip count IS bounded (0..8), so this is the growth class alone.
+        expect(diags.len()).to_equal(1)
+        expect(diags[0].contains("growth-in-loop")).to_equal(true)
+
+    it "does not check an unannotated function (@bounded_loop is opt-in)":
+        val diags = eff_diagnostics(SRC_UNANNOTATED, "eff_optin.spl")
+        expect(diags.len()).to_equal(0)
+        expect(eff_has_contract("eff_optin.spl", "spin_unchecked")).to_equal(false)
+
+    it "rejects a whole-struct copy under @copy_budget(0) (implicit-copy)":
+        val diags = eff_diagnostics(SRC_IMPLICIT_COPY, "eff_copy.spl")
+        # Two diagnostics: the implicit copy itself, and 24 > 0 over budget.
+        expect(diags.len()).to_equal(2)
+        expect(diags[0].contains("implicit-copy")).to_equal(true)
+        expect(diags[1].contains("copy-over-budget")).to_equal(true)
+        expect(effect_registry_budget_of_key(effect_claim_key("eff_copy.spl", "commit"))).to_equal(0)
+
+    it "measures the copy with the REAL layout engine, not a declared number":
+        val diags = eff_diagnostics(SRC_IMPLICIT_COPY, "eff_bytes.spl")
+        # Three i64 fields -> 24 bytes from compute_struct_layout. A hard-coded
+        # or zero size would print a different number here.
+        expect(diags[0].contains("24 bytes")).to_equal(true)
+
+    it "accepts in-place construction under @copy_budget(0)":
+        # Constructing is not copying: a StructLit initialiser is not a place.
+        val diags = eff_diagnostics(SRC_NO_COPY, "eff_nocopy.spl")
+        expect(diags.len()).to_equal(0)
+
+    it "charges an annotated caller for its unannotated callee's copy":
+        val diags = eff_diagnostics(SRC_TRANSITIVE, "eff_transitive.spl")
+        # `outer` copies nothing itself; without the real call graph feeding
+        # effect_copy_closure it would report 0 bytes and pass @copy_budget(8).
+        expect(diags.len()).to_equal(1)
+        expect(diags[0].contains("copy-over-budget")).to_equal(true)
+        expect(diags[0].contains("outer")).to_equal(true)
+        expect(diags[0].contains("24 from callees")).to_equal(true)
+
+    it "enforces both attributes when they are stacked on one function":
+        val diags = eff_diagnostics(SRC_STACKED, "eff_stacked.spl")
+        val key = effect_claim_key("eff_stacked.spl", "stacked_commit")
+        expect(effect_registry_budget_of_key(key)).to_equal(0)
+        expect(effect_registry_bounded_of_key(key)).to_equal(true)
+        # The unbounded loop is caught; the zero budget is met (no copies).
+        expect(diags.len()).to_equal(1)
+        expect(diags[0].contains("unbounded-loop")).to_equal(true)
+
+    it "leaves the decorated function itself an ordinary function":
+        # @copy_budget / @bounded_loop add a proof obligation, never a
+        # behaviour or representation change.
+        val module = parse_full_frontend(SRC_OK, "eff_shape.spl", "eff_probe", eff_logger())
+        expect(module.functions.contains("frame_tick")).to_equal(true)

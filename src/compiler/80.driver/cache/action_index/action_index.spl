@@ -1,0 +1,133 @@
+# Action Index — ActionDigest -> ResultManifestDigest mapping, namespace-scoped.
+#
+# Plan: doc/03_plan/compiler/cache/semantic_incremental_build_v2_plan_2026-08-09.md
+# (Agent C1 row). Schema: doc/03_plan/compiler/cache/c0_schema_freeze_2026-08-09.md
+# §"Namespace, manifests, receipts" — `CacheNamespace` values are
+# `workspace_local` / `machine_local` per `cache_trust` enum in
+# src/compiler/80.driver/cache/schema/cache_protocol.sdn.
+#
+# First-milestone scope only: exact-key lookup, no GC, no remote namespace.
+# One index entry per (namespace, action_digest), stored under its own
+# directory so it never collides with the CAS blob or action-manifest trees
+# in cas_store.spl.
+#
+#   <root>/index/<namespace>/sha256/<ab>/<cdef...>
+#
+# Conflict rule: the SAME action_digest mapping to a DIFFERENT
+# result_manifest_digest is a build-determinism violation. It is detected and
+# reported, never silently overwritten (see design §14, §18.7 crash safety —
+# an index entry is written via the same atomic-rename protocol as cas_store).
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_move(old_path: text, new_path: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+
+val ACTION_INDEX_HEADER: text = "simple-action-index-v1"
+
+# Namespace — mirrors `cache_trust`'s first two values in the frozen schema.
+# Only the two local tiers are in first-milestone scope; remote/CI trust
+# levels are out of scope for C1.
+enum CacheNamespace:
+    WorkspaceLocal
+    MachineLocal
+
+fn cache_namespace_dir(ns: CacheNamespace) -> text:
+    match ns:
+        case CacheNamespace.WorkspaceLocal: "workspace_local"
+        case CacheNamespace.MachineLocal: "machine_local"
+
+# Result of a lookup: distinguishes "no entry" from "entry present".
+enum IndexLookupResult:
+    Hit(text)
+    Miss
+
+# Result of a put: Ok on a fresh write or an idempotent identical rewrite;
+# Conflict when the same key already maps to a DIFFERENT value — the caller
+# must never overwrite in that case.
+enum IndexPutResult:
+    Ok
+    Conflict(text, text)
+
+fn action_index_dir(root: text, ns: CacheNamespace) -> text:
+    "{root}/index/{cache_namespace_dir(ns)}"
+
+fn action_index_path(root: text, ns: CacheNamespace, action_digest: text) -> text:
+    val base = action_index_dir(root, ns)
+    "{base}/sha256/{action_digest.substring(0, 2)}/{action_digest.substring(2, action_digest.len())}"
+
+fn action_index_parent_dir(path: text) -> text:
+    val slash = path.last_index_of("/")
+    if slash <= 0:
+        return ""
+    path.substring(0, slash)
+
+# Read the raw stored result_manifest_digest for a key, or nil if absent /
+# unparseable (unparseable is treated as absent — a corrupt index entry must
+# never be served).
+fn action_index_read_raw(root: text, ns: CacheNamespace, action_digest: text) -> text?:
+    val path = action_index_path(root, ns, action_digest)
+    if not rt_file_exists(path):
+        return nil
+    val content = rt_file_read_text(path) ?? ""
+    val lines = content.split("\n")
+    if lines.len() < 3:
+        return nil
+    if lines[0] != ACTION_INDEX_HEADER:
+        return nil
+    if lines[1] != action_digest:
+        return nil
+    lines[2]
+
+fn action_index_serialize(action_digest: text, result_manifest_digest: text) -> text:
+    "{ACTION_INDEX_HEADER}\n{action_digest}\n{result_manifest_digest}"
+
+# Exact-key lookup only — no prefix/fallback matching of any kind.
+fn action_index_get(root: text, ns: CacheNamespace, action_digest: text) -> IndexLookupResult:
+    match action_index_read_raw(root, ns, action_digest):
+        case Some(digest):
+            return IndexLookupResult.Hit(digest)
+        case nil:
+            return IndexLookupResult.Miss
+
+# Insert (action_digest -> result_manifest_digest). Idempotent when the
+# stored value already matches. Refuses to overwrite a different value:
+# returns Conflict(existing, attempted) and leaves the stored entry
+# untouched — this is the sole guard against a nondeterministic build
+# silently clobbering another result under the same key.
+fn action_index_put(root: text, ns: CacheNamespace, action_digest: text, result_manifest_digest: text) -> IndexPutResult:
+    match action_index_read_raw(root, ns, action_digest):
+        case Some(existing):
+            if existing == result_manifest_digest:
+                return IndexPutResult.Ok
+            return IndexPutResult.Conflict(existing, result_manifest_digest)
+        case nil:
+            pass_do_nothing
+
+    val path = action_index_path(root, ns, action_digest)
+    rt_dir_create_all(action_index_parent_dir(path))
+    val tmp_dir = "{root}/tmp"
+    rt_dir_create_all(tmp_dir)
+    val tmp = "{tmp_dir}/index-{action_digest}.{rt_getpid()}.{rt_time_now_unix_micros()}.tmp"
+    if not rt_file_write_text(tmp, action_index_serialize(action_digest, result_manifest_digest)):
+        return IndexPutResult.Conflict("", result_manifest_digest)
+    if not rt_file_move(tmp, path):
+        rt_file_delete(tmp)
+        # Lost race: re-check what landed. Identical bytes is success; a
+        # different value under a lost race is still a conflict.
+        match action_index_read_raw(root, ns, action_digest):
+            case Some(existing2):
+                if existing2 == result_manifest_digest:
+                    return IndexPutResult.Ok
+                return IndexPutResult.Conflict(existing2, result_manifest_digest)
+            case nil:
+                return IndexPutResult.Conflict("", result_manifest_digest)
+    IndexPutResult.Ok
+
+export CacheNamespace, IndexLookupResult, IndexPutResult
+export cache_namespace_dir, action_index_dir, action_index_path
+export action_index_get, action_index_put, action_index_read_raw

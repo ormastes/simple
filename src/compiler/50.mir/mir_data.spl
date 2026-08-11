@@ -1,0 +1,907 @@
+# MIR - Mid-level Intermediate Representation (Data Structures)
+#
+# Lower-level IR between HIR and native code generation.
+# Features:
+# - Explicit control flow (basic blocks, terminators)
+# - Explicit memory operations (load, store, alloc)
+# - SSA form (each value defined once)
+# - Type-annotated values
+# - Ready for optimization and codegen
+#
+# Split into:
+# - mir_types.spl: Type system and leaf data structures (~210 lines)
+# - mir_instructions.spl: Blocks, instructions, terminators, operands (~460 lines)
+# - mir_data.spl: MirBuilder API + re-exports (this file)
+
+use compiler.hir.hir_types.{SymbolId, HirType}
+use compiler.hir.hir_definitions.{HirParam}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.mir.mir_types.*
+use compiler.mir.mir_instructions.*
+# `eprint` is not an implicit builtin under the self-hosted HIR resolver: the
+# Rust seed happened to resolve it ambiently, so the three [mir-call-value]
+# probes below compiled under stage2 but failed Stage 3 with
+# `HIR lowering error in src/compiler/mir/mir_data.spl: unresolved name: eprint`.
+# Import it explicitly, exactly as the sibling lowering file does
+# (50.mir/_MirLowering/bootstrap_globals.spl:25). (2026-08-08 stage3)
+use std.nogc_sync_mut.io.process_ops.{eprint}
+
+extern fn rt_env_get(key: text) -> text
+
+# ============================================================================
+# MIR Builder
+# ============================================================================
+
+struct MirBuilder:
+    """Builder for constructing MIR."""
+    module: MirModule
+    current_function: MirFunction?
+    current_block: BlockId
+    next_local_id: i64
+    next_block_id: i64
+    locals: [MirLocal]
+    blocks: [MirBlock]
+    instructions: [MirInst]
+    # DS5 (mir-span-thread, 2026-07-28): source span attributed to whatever
+    # HIR node is *currently* being lowered. Seeded per-function from
+    # begin_function's span, then stacked (save/set/restore) around each
+    # lower_stmt / lower_expr entry so nested emit_* calls stamp the
+    # innermost node's real span instead of a hardcoded `nil`. See
+    # expr_dispatch.spl::lower_expr and mir_lowering_stmts.spl::lower_stmt
+    # for the save/restore wrappers that maintain this stack discipline.
+    current_span: Span?
+
+impl MirBuilder:
+    static fn new() -> MirBuilder:
+        MirBuilder(
+            module: MirModule(
+                name: "",
+                functions: {},
+                statics: {},
+                constants: {},
+                types: {}
+            ),
+            current_function: nil,
+            current_block: BlockId.entry(),
+            next_local_id: 0,
+            next_block_id: 1,
+            locals: [],
+            blocks: [],
+            instructions: [],
+            current_span: nil
+        )
+
+    # ========================================================================
+    # Function Building
+    # ========================================================================
+
+    me begin_function(symbol: SymbolId, name: text, signature: MirSignature, span: Span):
+        """Begin building a new function."""
+        self.current_function = Some(MirFunction(
+            symbol: symbol,
+            name: name,
+            signature: signature,
+            locals: [],
+            blocks: [],
+            entry_block: BlockId.entry(),
+            span: span,
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            gpu_target: "",
+            gpu_backend_order: "",
+            is_export_c: false,
+            export_name: "",
+            has_driver_manifest_attr: false,
+            driver_manifest_attr: nil,
+            has_vhdl_metadata: false,
+            vhdl_metadata: vhdl_hardware_metadata_default(),
+            has_fast_math: false,
+            unroll_factor: 0,
+            pipeline_ii: 0,
+            memory_banks: 0
+        ))
+        self.next_local_id = 0
+        self.next_block_id = 1
+        self.locals = []
+        self.blocks = []
+        self.instructions = []
+        self.current_block = BlockId.entry()
+        # DS5: seed the per-function default span from the function's own
+        # declaration span. lower_stmt/lower_expr push a more specific span
+        # while lowering a given node and restore this on the way back out,
+        # so anything emitted with no narrower node in scope (e.g. synthetic
+        # prologue instructions) still carries a real, in-function location
+        # instead of nil.
+        self.current_span = Some(span)
+        if (rt_env_get("SIMPLE_MIRB_TRACE") ?? "") == "1":
+            print "MIRB begin {name} post-reset blocks={self.blocks.len()} locals={self.locals.len()}"
+
+        # Create entry block
+        self.blocks = self.blocks.push(MirBlock(
+            id: BlockId.entry(),
+            label: Some("entry"),
+            instructions: [],
+            terminator: MirTerminator.Unreachable  # Placeholder
+        ))
+
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+            # Create return local
+            if signature.return_type.kind != MirTypeKind.Unit:
+                self.new_local(Some("_return"), signature.return_type, LocalKind.Return)
+
+        # NOTE(#133): parameter locals are created unconditionally, including
+        # under SIMPLE_BOOTSTRAP. HIR param lowering was fixed (declaration_lowering.spl
+        # lower_function) to stop dropping params under bootstrap, so `signature.params`
+        # is now correctly populated -- but this loop was still gated off, so no
+        # `LocalKind.Arg(i)` locals ever got created for bootstrap functions. Without
+        # them, function_lowering.spl's param-to-local mapping fell back to a phantom
+        # `LocalId(id: pli+1)` that was never registered as a real local (and collided
+        # with body-local ids, which also start counting from 0/1), so the codegen's
+        # Arg-local scan (core_codegen.spl) found nothing and emitted a zero-param
+        # `define`, while body references to the param read as `undef`. Creating the
+        # Arg locals here fixes both: real params on `define`, and body identifier
+        # references resolve to the correct local.
+        # `_return` local creation stays bootstrap-gated -- 0-param bootstrap functions
+        # (e.g. `bootstrap_version`, which returns `text`) already work today without
+        # it, so this is left untouched to avoid an unrelated behavior change.
+        for i in 0..signature.params.len():
+            self.new_local(nil, signature.params[i], LocalKind.Arg(i))
+
+    me end_function() -> MirFunction:
+        """Finish building current function and return it."""
+        # Finalize current block
+        self.finalize_block()
+
+        var fn_ = match self.current_function:
+            case Some(active_function):
+                active_function
+            case None:
+                MirFunction(
+                symbol: SymbolId.new(-1),
+                name: "<invalid>",
+                signature: MirSignature(params: [], return_type: MirType.unit(), is_variadic: false),
+                locals: [],
+                blocks: [],
+                entry_block: BlockId.entry(),
+                span: nil,
+                generic_params: [],
+                is_generic_template: false,
+                specialization_of: nil,
+                type_bindings: {},
+                layout_phase: nil,
+                is_kernel: false,
+                gpu_target: "",
+                gpu_backend_order: "",
+                is_export_c: false,
+                export_name: "",
+                has_driver_manifest_attr: false,
+                driver_manifest_attr: nil,
+                has_vhdl_metadata: false,
+                vhdl_metadata: vhdl_hardware_metadata_default(),
+                has_fast_math: false,
+                unroll_factor: 0,
+                pipeline_ii: 0,
+                memory_banks: 0
+                )
+        fn_.locals = self.locals
+        fn_.blocks = self.blocks
+        self.current_function = nil
+        if (rt_env_get("SIMPLE_MIRB_TRACE") ?? "") == "1":
+            var first_insts = -1
+            if fn_.blocks.len() > 0:
+                first_insts = fn_.blocks[0].instructions.len()
+            print "MIRB end {fn_.name} blocks={fn_.blocks.len()} b0_insts={first_insts} locals={fn_.locals.len()}"
+        return fn_
+
+    me add_function(fn_: MirFunction):
+        """Add a completed function to the module."""
+        var functions = self.module.functions
+        functions[fn_.symbol] = fn_
+        self.module.functions = functions
+
+    # ========================================================================
+    # Local Variables
+    # ========================================================================
+
+    me new_local(name: text?, type_: MirType, kind: LocalKind) -> LocalId:
+        """Create a new local variable."""
+        val id = LocalId(id: self.next_local_id)
+        self.next_local_id = self.next_local_id + 1
+
+        self.locals = self.locals.push(MirLocal(
+            id: id,
+            name: name,
+            type_: type_,
+            kind: kind,
+            is_ghost: false
+        ))
+
+        id
+
+    me new_temp(type_: MirType) -> LocalId:
+        """Create a new temporary."""
+        self.new_local(nil, type_, LocalKind.Temp)
+
+    me set_local_name(id: LocalId, name: text):
+        """Assign a source-level name to an existing local.
+
+        Used to thread real HIR parameter names onto the MIR arg locals that
+        begin_function creates nameless from the (types-only) MirSignature, so
+        backends emit real port names (e.g. imem_rdata) instead of arg0/arg1.
+        """
+        var updated: [MirLocal] = []
+        var i = 0
+        while i < self.locals.len():
+            val loc = self.locals[i]
+            if loc.id.id == id.id:
+                updated = updated.push(MirLocal(
+                    id: loc.id,
+                    name: Some(name),
+                    type_: loc.type_,
+                    kind: loc.kind,
+                    is_ghost: loc.is_ghost
+                ))
+            else:
+                updated = updated.push(loc)
+            i = i + 1
+        self.locals = updated
+
+    me set_local_type(id: LocalId, ty: MirType):
+        """Retype an existing local (mirror of set_local_name).
+
+        Used to thread an inferred result type onto a value-position
+        match/if merge temp after its arms are lowered — the temp is
+        created i64 before any arm type is known, and downstream consumers
+        (print's numeric-coercion check, spill slots) read the local's MIR
+        type. Instructions reference locals by id, so a post-hoc retype is
+        safe."""
+        var updated: [MirLocal] = []
+        var i = 0
+        while i < self.locals.len():
+            val loc = self.locals[i]
+            if loc.id.id == id.id:
+                updated = updated.push(MirLocal(
+                    id: loc.id,
+                    name: loc.name,
+                    type_: ty,
+                    kind: loc.kind,
+                    is_ghost: loc.is_ghost
+                ))
+            else:
+                updated = updated.push(loc)
+            i = i + 1
+        self.locals = updated
+
+    # ========================================================================
+    # Basic Blocks
+    # ========================================================================
+
+    me new_block(label: text?) -> BlockId:
+        """Create a new basic block."""
+        val id = BlockId.new(self.next_block_id)
+        self.next_block_id = self.next_block_id + 1
+
+        self.blocks = self.blocks.push(MirBlock(
+            id: id,
+            label: label,
+            instructions: [],
+            terminator: MirTerminator.Unreachable  # Placeholder
+        ))
+
+        id
+
+    me switch_to_block(block: BlockId):
+        """Switch to building a different block."""
+        self.finalize_block()
+        self.current_block = block
+        self.instructions = []
+
+    me finalize_block():
+        """Finalize current block with accumulated instructions."""
+        if self.instructions.is_empty():
+            return
+
+        # Find and update current block
+        var found = false
+        for i in 0..self.blocks.len():
+            if self.blocks[i].id.id == self.current_block.id:
+                var block = self.blocks[i]
+                block.instructions = self.instructions
+                self.blocks[i] = block
+                found = true
+                break
+
+        self.instructions = []
+
+    # ========================================================================
+    # Instructions
+    # ========================================================================
+
+    me emit(inst: MirInst):
+        """Emit an instruction to current block."""
+        self.instructions.push(inst)
+
+    me emit_const(dest: LocalId, value: MirConstValue, type_: MirType):
+        """Emit a constant load."""
+        self.emit(MirInst(
+            kind: MirInstKind.Const(dest, value, type_),
+            span: self.current_span
+        ))
+
+    me emit_const_int(value: i64) -> LocalId:
+        """Emit an integer constant and return its local."""
+        val dest = self.new_temp(MirType.i64())
+        self.emit_const(dest, MirConstValue.Int(value), MirType.i64())
+        dest
+
+    me emit_const_float(value: f64) -> LocalId:
+        """Emit a float constant and return its local."""
+        val dest = self.new_temp(MirType.f64())
+        self.emit_const(dest, MirConstValue.Float(value), MirType.f64())
+        dest
+
+    me emit_const_bool(value: bool) -> LocalId:
+        """Emit a boolean constant and return its local."""
+        val dest = self.new_temp(MirType.bool())
+        self.emit_const(dest, MirConstValue.Bool(value), MirType.bool())
+        dest
+
+    me emit_copy(dest: LocalId, src: LocalId):
+        """Emit a copy instruction."""
+        self.emit(MirInst(
+            kind: MirInstKind.Copy(dest, src),
+            span: self.current_span
+        ))
+
+    me emit_move(dest: LocalId, src: LocalId):
+        """Emit a move instruction.
+
+        SF1 audit (2026-07-28): Simple's surface language currently has NO
+        semantically-true move sites — assignment is copy for value types
+        (structs/arrays) and reference-share for classes (s19
+        mutation-by-design, see _MirLowering/function_lowering.spl class
+        param binding); there is no `move` keyword in the frontend; and the
+        `iso` (Isolated) move-only capability parses as a type
+        (parser_types_expr.spl) but is erased to Infer at HIR type lowering
+        (hir_lowering/types.spl "Infer / Atomic / Isolated" arm). So this
+        builder has no surface-lowering caller yet by DESIGN, not by
+        omission. When iso-capability lowering lands, iso-typed
+        variable-to-variable assignment is the genuine move site to wire
+        here. The NLL checker's Move handling is real and spec-proven via
+        hand-built MIR (test/01_unit/compiler/borrow/borrow_check_spec.spl).
+        """
+        self.emit(MirInst(
+            kind: MirInstKind.Move(dest, src),
+            span: self.current_span
+        ))
+
+    me emit_drop(local: LocalId):
+        """WP-E: emit a drop edge for an owned `resource`-typed local (see
+        MirInstKind.Drop's docstring, mir_instruction_kinds.spl). Callers are
+        responsible for exactly-once placement -- MirLowering.
+        emit_pending_resource_drops (mir_lowering_stmts.spl) tracks which
+        locals have already been consumed (moved out, returned, or already
+        `.close()`d) so this is never called twice for the same local on the
+        same control-flow path."""
+        self.emit(MirInst(
+            kind: MirInstKind.Drop(local),
+            span: self.current_span
+        ))
+
+    me emit_binop(op: MirBinOp, left: MirOperand, right: MirOperand, type_: MirType) -> LocalId:
+        """Emit a binary operation and return result local."""
+        val dest = self.new_temp(type_)
+        self.emit(MirInst(
+            kind: MirInstKind.BinOp(dest, op, left, right),
+            span: self.current_span
+        ))
+        dest
+
+    me emit_unary(op: MirUnaryOp, operand: MirOperand, type_: MirType) -> LocalId:
+        """Emit a unary operation and return result local."""
+        val dest = self.new_temp(type_)
+        self.emit(MirInst(
+            kind: MirInstKind.UnaryOp(dest, op, operand),
+            span: self.current_span
+        ))
+        dest
+
+    me emit_ref(place: MirPlace, borrow_kind: MirBorrowKind, type_: MirType) -> LocalId:
+        """Emit a borrow reference and return result local."""
+        val dest = self.new_temp(type_)
+        self.emit(MirInst(
+            kind: MirInstKind.Ref(dest, borrow_kind, place),
+            span: self.current_span
+        ))
+        dest
+
+    me emit_load(ptr: MirOperand, type_: MirType) -> LocalId:
+        """Emit a load instruction."""
+        val dest = self.new_temp(type_)
+        self.emit(MirInst(
+            kind: MirInstKind.Load(dest, ptr),
+            span: self.current_span
+        ))
+        dest
+
+    me emit_store(ptr: MirOperand, value: MirOperand):
+        """Emit a store instruction."""
+        self.emit(MirInst(
+            kind: MirInstKind.Store(ptr, value),
+            span: self.current_span
+        ))
+
+    me emit_alloc(type_: MirType) -> LocalId:
+        """Emit an allocation."""
+        val dest = self.new_temp(MirType.ptr(type_, true))
+        self.emit(MirInst(
+            kind: MirInstKind.Alloc(dest, type_),
+            span: self.current_span
+        ))
+        dest
+
+    me emit_entry_alloc(type_: MirType) -> LocalId:
+        """Emit a fixed-lifetime allocation in the function entry block."""
+        val dest = self.new_temp(MirType.ptr(type_, true))
+        val alloc = MirInst(kind: MirInstKind.Alloc(dest, type_), span: self.current_span)
+        if self.current_block.id == BlockId.entry().id:
+            self.emit(alloc)
+        else:
+            var entry = self.blocks[0]
+            entry.instructions = entry.instructions.push(alloc)
+            self.blocks[0] = entry
+        dest
+
+    me emit_call(func: MirOperand, args: [MirOperand], return_type: MirType) -> LocalId?:
+        """Emit a function call."""
+        # Bare-lift (no explicit Some): an explicit Some(...) builds a heap
+        # Option box on the stage4 native lane; downstream readers of the
+        # flat LocalId? payload then see the box header as the id.
+        val dest: LocalId? = if return_type.kind != MirTypeKind.Unit: self.new_temp(return_type) else: nil
+
+        self.emit(MirInst(
+            kind: MirInstKind.Call(dest, func, args),
+            span: self.current_span
+        ))
+
+        dest
+
+    me emit_call_value(func: MirOperand, args: [MirOperand], return_type: MirType) -> LocalId:
+        """Emit a function call whose non-unit result is required."""
+        # Level-gated behind this file's existing SIMPLE_MIRB_TRACE gate (see
+        # lines 113/186). These probes were unconditional, which on a hot path
+        # (every non-unit call emit) floods stderr for the whole build; they are
+        # retained, not deleted, per the log-retention policy. (2026-08-08)
+        val mirb_trace = (rt_env_get("SIMPLE_MIRB_TRACE") ?? "") == "1"
+        if mirb_trace:
+            eprint("[mir-call-value] new-temp-before next={self.next_local_id}\n")
+        val dest = self.new_temp(return_type)
+        if mirb_trace:
+            eprint("[mir-call-value] new-temp-after id={dest.id} next={self.next_local_id}\n")
+        self.emit(MirInst(
+            kind: MirInstKind.Call(dest, func, args),
+            span: self.current_span
+        ))
+        if mirb_trace:
+            eprint("[mir-call-value] emit-after id={dest.id}\n")
+        dest
+
+    me emit_call_indirect(ptr: MirOperand, args: [MirOperand], sig: MirSignature, return_type: MirType) -> LocalId?:
+        """Emit an indirect function call (through closure or function pointer)."""
+        # Bare-lift (no explicit Some): an explicit Some(...) builds a heap
+        # Option box on the stage4 native lane; downstream readers of the
+        # flat LocalId? payload then see the box header as the id.
+        val dest: LocalId? = if return_type.kind != MirTypeKind.Unit: self.new_temp(return_type) else: nil
+
+        self.emit(MirInst(
+            kind: MirInstKind.CallIndirect(dest, ptr, args, sig),
+            span: self.current_span
+        ))
+
+        dest
+
+    me emit_cast(operand: MirOperand, target: MirType) -> LocalId:
+        """Emit a type cast."""
+        val dest = self.new_temp(target)
+        self.emit(MirInst(
+            kind: MirInstKind.Cast(dest, operand, target),
+            span: self.current_span
+        ))
+        dest
+
+    me emit_bitcast(operand: MirOperand, target: MirType) -> LocalId:
+        val dest = self.new_temp(target)
+        self.emit(MirInst(
+            kind: MirInstKind.Bitcast(dest, operand, target),
+            span: self.current_span
+        ))
+        dest
+
+    me emit_aggregate(kind: AggregateKind, operands: [MirOperand], type_: MirType) -> LocalId:
+        """Emit aggregate construction."""
+        val dest = self.new_temp(type_)
+        self.emit(MirInst(
+            kind: MirInstKind.Aggregate(dest, kind, operands),
+            span: self.current_span
+        ))
+        dest
+
+    me emit_get_field(base: MirOperand, field: i64, type_: MirType) -> LocalId:
+        """Emit field access."""
+        val dest = self.new_temp(type_)
+        self.emit(MirInst(
+            kind: MirInstKind.GetField(dest, base, field),
+            span: self.current_span
+        ))
+        dest
+
+    me emit_set_field(base: MirOperand, field: i64, value: MirOperand):
+        """Emit field assignment."""
+        self.emit(MirInst(
+            kind: MirInstKind.SetField(base, field, value),
+            span: self.current_span
+        ))
+
+    me emit_gep(base: MirOperand, indices: [MirOperand], type_: MirType) -> LocalId:
+        """Emit GetElementPtr instruction."""
+        val dest = self.new_temp(type_)
+        self.emit(MirInst(
+            kind: MirInstKind.GetElementPtr(dest, base, indices),
+            span: self.current_span
+        ))
+        dest
+
+    # ========================================================================
+    # Terminators
+    # ========================================================================
+
+    me terminate_goto(target: BlockId):
+        """Terminate current block with unconditional jump."""
+        self.set_terminator(MirTerminator.Goto(target))
+
+    me terminate_return(value: MirOperand?):
+        """Terminate current block with return."""
+        self.set_terminator(MirTerminator.Ret(value))
+
+    me terminate_if(cond: MirOperand, then_: BlockId, else_: BlockId):
+        """Terminate current block with conditional branch."""
+        self.set_terminator(MirTerminator.If(cond, then_, else_))
+
+    me terminate_switch(value: MirOperand, targets: [SwitchCase], default: BlockId):
+        """Terminate current block with switch.
+
+        B5b dormant-bug fix: previously declared targets as [(i64, BlockId)]
+        which was incompatible with MirTerminator.Switch (which takes
+        [SwitchCase]). Zero callers existed when this was discovered; the
+        signature is now corrected so the MatchCase MIR lowerer can call it.
+        """
+        self.set_terminator(MirTerminator.Switch(value, targets, default))
+
+    me terminate_unreachable():
+        """Terminate current block as unreachable."""
+        self.set_terminator(MirTerminator.Unreachable)
+
+    me terminate_abort(message: text):
+        """Terminate current block with a diverging abort.
+
+        Until this existed there were ZERO `MirTerminator.Abort(...)`
+        construction sites anywhere in `src/**` -- the variant was declared
+        (mir_instruction_support.spl) and handled by every backend, but
+        nothing ever built one, so no MIR block was ever marked as
+        non-returning. A diverging construct (`panic(...)`) therefore lowered
+        to an ordinary Call and left the block falling through into whatever
+        came next, which is exactly the failure the isel fix in 30743ecd674
+        (Abort/CallTerminator lowering to a bare NOP) was about at the other
+        end of the pipeline. Backends lower Abort to a hard trap: INT3 on
+        x86_64, BRK #0 on aarch64, EBREAK on riscv32/64.
+        """
+        self.set_terminator(MirTerminator.Abort(message))
+
+    me set_terminator(term: MirTerminator):
+        """Set terminator for current block."""
+        self.finalize_block()
+
+        for i in 0..self.blocks.len():
+            if self.blocks[i].id.id == self.current_block.id:
+                var block = self.blocks[i]
+                block.terminator = term
+                self.blocks[i] = block
+                break
+
+    fn current_block_has_explicit_terminator() -> bool:
+        for block in self.blocks:
+            if block.id.id == self.current_block.id:
+                match block.terminator:
+                    case Unreachable:
+                        return false
+                    case _:
+                        return true
+        false
+
+    # ========================================================================
+    # Convenience Methods (for interpreter compatibility)
+    # ========================================================================
+
+    me begin_simple_function(name: text, return_type_kind: text):
+        """Begin a function with simple return type.
+        return_type_kind: "i64", "f64", "bool", "unit", "void"
+        """
+        var ret_type = MirType(kind: MirTypeKind.Unit)
+        if return_type_kind == "i64":
+            ret_type = MirType(kind: MirTypeKind.I64)
+        elif return_type_kind == "f64":
+            ret_type = MirType(kind: MirTypeKind.F64)
+        elif return_type_kind == "bool":
+            ret_type = MirType(kind: MirTypeKind.Bool)
+
+        val sig = MirSignature(params: [], return_type: ret_type, is_variadic: false)
+        val sym = SymbolId(id: self.module.functions.len())
+        self.begin_function(sym, name, sig, nil)
+
+    me emit_const_str(value: text) -> LocalId:
+        """Emit a string constant and return its local."""
+        val str_type = MirType(kind: MirTypeKind.Ptr(MirType(kind: MirTypeKind.I8), false))
+        val dest = self.new_temp(str_type)
+        self.emit_const(dest, MirConstValue.Str(value), str_type)
+        dest
+
+    me emit_void_call(func_name: text, args: [LocalId]):
+        """Emit a void call to a named function."""
+        val func_type = MirType(kind: MirTypeKind.Unit)
+        var operands: [MirOperand] = []
+        for a in args:
+            operands.push(MirOperand(kind: MirOperandKind.Copy(a)))
+
+        val func_op = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str(func_name),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                params: [],
+                return_type: func_type,
+                is_variadic: false
+            )))
+        ))
+
+        self.emit(MirInst(
+            kind: MirInstKind.Call(nil, func_op, operands),
+            span: self.current_span
+        ))
+
+    me terminate_return_copy(local: LocalId):
+        """Terminate with return copying a local."""
+        self.set_terminator(MirTerminator.Ret(
+            MirOperand(kind: MirOperandKind.Copy(local))
+        ))
+
+    me terminate_return_void():
+        """Terminate with void return."""
+        self.set_terminator(MirTerminator.Ret(nil))
+
+# ============================================================================
+# Exports (re-export all from split modules + MirBuilder)
+# ============================================================================
+
+# From mir_types
+
+# From mir_instructions
+export MirBody, MirTypeDef
+export MirBlock, MirInst, MirInstKind
+export MirOperand, MirOperandKind, MirTerminator
+export MirBinOp, MirUnaryOp, AggregateKind, GpuAtomicOpKind, MirBorrowKind
+export SwitchCase, MirAsmOperand
+export VhdlProcessKind, VhdlClockDomain, VhdlClockEdge
+export mir_operand_copy, mir_operand_move, mir_operand_const_int
+export mir_operand_const_float, mir_operand_const_bool
+
+# Borrow checking support types
+
+# GPU support types
+
+# VHDL support types
+
+# MirBuilder (defined in this file)
+export LocalId, LocalKind, MirLocal
+export MirTypeKind, MirType, MirSignature, MirConstValue
+# --------------------------------------------------------------------------
+# Bootstrap call-return-type registry (native_call_return_type_loss 2026-07-23)
+#
+# In the bootstrap flat path a call site's SymbolId often cannot recover the
+# callee's HirTypeKind.Function (symbol-table mutations don't survive the
+# HIR->MIR pass boundary), so call dests degraded to i64 and every
+# static-type consumer (interpolation, concat coercion) mis-rendered
+# text-returning calls as raw integers. The bootstrap prep loops register
+# each function's declared MIR return type here (bare + qualified names,
+# accumulated ACROSS modules for cross-module calls);
+# bootstrap_resolved_call_return_type consults it before the i64 fallback.
+# Lives in mir_data (not mir_lowering) so _MirLoweringExpr can import it
+# without an import cycle.
+# Deliberately has NO reset: the registry must accumulate across ALL closure
+# modules because cross-module call sites need the callee module's declared
+# types, and the native-build worker is one process per build. See the design
+# note at bootstrap_globals.spl (bootstrap_mir_functions_reset). A reset would
+# also be inert on the common path — the reader consults the HIR symbol table
+# first and registration is Str-returns only.
+var _bootstrap_fn_ret_types: Dict<text, MirType> = {}
+
+fn bootstrap_fn_ret_type_register(name: text, ty: MirType):
+    _bootstrap_fn_ret_types[name] = ty
+
+fn bootstrap_fn_ret_type_lookup(name: text) -> MirType?:
+    # contains_key + [] rather than .get(): Dict.get returns nil on present
+    # keys in the interpreter lane (known quirk).
+    if _bootstrap_fn_ret_types.contains_key(name):
+        return Some(_bootstrap_fn_ret_types[name])
+    nil
+
+# HIR-typed declared-return registry, name-keyed, accumulated across ALL
+# closure modules in the flat pre-pass (bootstrap_register_flat_function_values).
+# Symbol IDs are per-module-table, so id-keyed maps can't answer for a callee
+# defined in another module; without this a cross-module call to an `-> i32`
+# fn defaulted to the erased i64 return and 32-bit targets read the a0/a1
+# REGISTER PAIR — garbage a1 OR'd into every i32 result (NVMe rv32 fw
+# mask-361, 2026-07-24). Duplicate free-fn names (e.g. two `main`s) are marked
+# ambiguous and never answered.
+var _bootstrap_fn_ret_hir_types: Dict<text, HirType> = {}
+var _bootstrap_fn_ret_hir_ambig: Dict<text, bool> = {}
+
+fn bootstrap_fn_ret_hir_type_register(name: text, ty: HirType):
+    if _bootstrap_fn_ret_hir_ambig.contains_key(name):
+        return
+    if _bootstrap_fn_ret_hir_types.contains_key(name):
+        _bootstrap_fn_ret_hir_ambig[name] = true
+        _bootstrap_fn_ret_hir_types = _bootstrap_fn_ret_hir_types.remove(name)
+        return
+    _bootstrap_fn_ret_hir_types[name] = ty
+
+fn bootstrap_fn_ret_hir_type_lookup(name: text) -> HirType?:
+    if _bootstrap_fn_ret_hir_types.contains_key(name):
+        return Some(_bootstrap_fn_ret_hir_types[name])
+    nil
+
+# Canonical callable return shape accumulated across flat closure modules.
+# Values are module-qualified aggregate layout keys or "__runtime_array__".
+var _bootstrap_fn_ret_shapes: Dict<text, text> = {}
+var _bootstrap_fn_ret_shape_ambig: Dict<text, bool> = {}
+
+fn bootstrap_fn_ret_shape_register(name: text, shape: text):
+    if shape == "" or _bootstrap_fn_ret_shape_ambig.contains_key(name):
+        return
+    if _bootstrap_fn_ret_shapes.contains_key(name):
+        if _bootstrap_fn_ret_shapes[name] != shape:
+            _bootstrap_fn_ret_shape_ambig[name] = true
+            _bootstrap_fn_ret_shapes = _bootstrap_fn_ret_shapes.remove(name)
+        return
+    _bootstrap_fn_ret_shapes[name] = shape
+
+fn bootstrap_fn_ret_shape_lookup(name: text) -> text?:
+    if _bootstrap_fn_ret_shapes.contains_key(name):
+        return Some(_bootstrap_fn_ret_shapes[name])
+    nil
+
+# Result<T, E>'s Ok-payload struct/class layout key, name-keyed like the plain
+# return-shape registry above. Needed because a Result<T,E> return type's
+# inner `ok_type` is an HirTypeKind.Named(SymbolId) whose SymbolId was minted
+# in the DEFINING module's own per-module SymbolTable id-space
+# (native_build_cross_module_result_payload_struct_name_collision_2026-08-09,
+# 6th/7th layer): re-deferencing that id against a DIFFERENT module's
+# `self.symbols` (entry-closure lowering replaces the active SymbolTable per
+# module) can coincidentally land on an unrelated symbol with the same
+# numeric id (e.g. a sibling Method), silently mis-resolving the payload's
+# struct name. Registered here, name-keyed, at prescan time — while
+# `module.symbols` is still the DEFINING module's own, self-consistent table —
+# so consumers never need to dereference the foreign id at all.
+var _bootstrap_fn_ret_ok_shapes: Dict<text, text> = {}
+var _bootstrap_fn_ret_ok_shape_ambig: Dict<text, bool> = {}
+
+fn bootstrap_fn_ret_ok_shape_register(name: text, shape: text):
+    if shape == "" or _bootstrap_fn_ret_ok_shape_ambig.contains_key(name):
+        return
+    if _bootstrap_fn_ret_ok_shapes.contains_key(name):
+        if _bootstrap_fn_ret_ok_shapes[name] != shape:
+            _bootstrap_fn_ret_ok_shape_ambig[name] = true
+            _bootstrap_fn_ret_ok_shapes = _bootstrap_fn_ret_ok_shapes.remove(name)
+        return
+    _bootstrap_fn_ret_ok_shapes[name] = shape
+
+fn bootstrap_fn_ret_ok_shape_lookup(name: text) -> text?:
+    if _bootstrap_fn_ret_ok_shapes.contains_key(name):
+        return Some(_bootstrap_fn_ret_ok_shapes[name])
+    nil
+
+# Companion PARAM-type registry (same ambiguity set as returns): without it a
+# cross-module call to `fn f(a: i32, b: i64)` erased both params to i64 — on
+# rv32 ilp32 the caller then marshaled the i64 into the wrong (unaligned)
+# register pair while the callee read the ABI-correct one (band/policy/dram/
+# target section failures, 2026-07-24).
+var _bootstrap_fn_param_hir_types: Dict<text, [HirType]> = {}
+
+fn bootstrap_fn_param_hir_types_register(name: text, tys: [HirType]):
+    if _bootstrap_fn_ret_hir_ambig.contains_key(name):
+        if _bootstrap_fn_param_hir_types.contains_key(name):
+            _bootstrap_fn_param_hir_types = _bootstrap_fn_param_hir_types.remove(name)
+        return
+    _bootstrap_fn_param_hir_types[name] = tys
+
+fn bootstrap_fn_param_hir_types_lookup(name: text) -> [HirType]?:
+    if _bootstrap_fn_ret_hir_ambig.contains_key(name):
+        return nil
+    if _bootstrap_fn_param_hir_types.contains_key(name):
+        return Some(_bootstrap_fn_param_hir_types[name])
+    nil
+
+# Per-parameter DEFAULT-expression registry.
+#
+# `35.semantics/resolve.spl:fill_call_defaults` is the only other default-fill
+# machinery and it is NOT on the AOT lane at all (proven by instrumentation:
+# `dbg-fill: 0` under `native-build`), so an omitted trailing defaulted
+# argument reached the callee as an UNINITIALIZED register/stack slot -- the
+# callee read garbage, not the declared default
+# (doc/08_tracking/bug/native_trailing_default_param_reads_uninitialized_2026-08-09.md).
+# The pad now happens in MIR call lowering, which every call kind (same-module
+# free function, cross-module callee, instance/static method) passes through.
+#
+# Whole `HirParam`s are stored, not just the default expressions, because the
+# pad must know per-index `has_default` as well as the declared arity. For
+# INSTANCE methods `HirFunction.params[0]` is the implicit `self`
+# (20.hir/hir_lowering/_Items/declaration_lowering.spl:317) and the lowered MIR
+# call likewise carries the receiver as arg 0, so index alignment holds for
+# free functions, static methods and instance methods alike.
+#
+# Ambiguity policy is STRICTER than the sibling registries above: padding the
+# wrong callee would inject a bogus argument, so any name that two definitions
+# disagree on (different arity, or a different has_default pattern) is dropped
+# and never answered. Same-shape duplicates are harmless and keep the first.
+var _bootstrap_fn_param_defaults: Dict<text, [HirParam]> = {}
+var _bootstrap_fn_param_defaults_ambig: Dict<text, bool> = {}
+
+fn _fn_param_defaults_shape(params: [HirParam]) -> text:
+    var shape = ""
+    for p in params:
+        shape = shape + (if p.has_default: "D" else: "-")
+    shape
+
+fn bootstrap_fn_param_defaults_register(name: text, params: [HirParam]):
+    if name == "" or _bootstrap_fn_param_defaults_ambig.contains_key(name):
+        return
+    var any_default = false
+    for p in params:
+        if p.has_default:
+            any_default = true
+    if not any_default:
+        # Nothing to pad. Still record the arity shape so a LATER same-name
+        # definition that DOES have defaults is recognised as ambiguous
+        # rather than silently winning.
+        if _bootstrap_fn_param_defaults.contains_key(name):
+            if _fn_param_defaults_shape(_bootstrap_fn_param_defaults[name]) != _fn_param_defaults_shape(params):
+                _bootstrap_fn_param_defaults_ambig[name] = true
+                _bootstrap_fn_param_defaults = _bootstrap_fn_param_defaults.remove(name)
+        return
+    if _bootstrap_fn_param_defaults.contains_key(name):
+        if _fn_param_defaults_shape(_bootstrap_fn_param_defaults[name]) != _fn_param_defaults_shape(params):
+            _bootstrap_fn_param_defaults_ambig[name] = true
+            _bootstrap_fn_param_defaults = _bootstrap_fn_param_defaults.remove(name)
+        return
+    _bootstrap_fn_param_defaults[name] = params
+
+fn bootstrap_fn_param_defaults_lookup(name: text) -> [HirParam]?:
+    if _bootstrap_fn_param_defaults_ambig.contains_key(name):
+        return nil
+    if _bootstrap_fn_param_defaults.contains_key(name):
+        return Some(_bootstrap_fn_param_defaults[name])
+    nil
+
+export BlockId, MirBlock, MirInst, MirInstKind
+export MirFunction, MirModule
+export MirOperand, MirOperandKind, MirTerminator
+export MirBinOp, MirUnaryOp, AggregateKind, GpuAtomicOpKind, MirBorrowKind
+export mir_operand_copy, mir_operand_const_int
+export MirBuilder
+export bootstrap_fn_ret_type_register, bootstrap_fn_ret_type_lookup
+export bootstrap_fn_ret_hir_type_register, bootstrap_fn_ret_hir_type_lookup
+export bootstrap_fn_ret_shape_register, bootstrap_fn_ret_shape_lookup
+export bootstrap_fn_param_hir_types_register, bootstrap_fn_param_hir_types_lookup
+export bootstrap_fn_param_defaults_register, bootstrap_fn_param_defaults_lookup

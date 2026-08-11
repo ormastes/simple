@@ -1,0 +1,1721 @@
+extern fn serial_println(msg: text)
+
+use os.compositor.cursor.{CursorState}
+use os.compositor.display_backend_core.{CompositorBackend}
+use os.compositor.input_backend.{InputBackend, input_backend_poll_event}
+# The compositor no longer names any driver-shaped event type. It used to have
+# to import `os.drivers.input.ps2_mouse.{MouseEvent}` explicitly, because a
+# SECOND unrelated `MouseEvent` lived at `os.drivers.input.input_event` and
+# same-named types collapse in the global registry (first registration wins) --
+# without the explicit import the field accesses lowered against the wrong type
+# and HIR failed with "struct 'ANY' field 'left_just_pressed'". That duplicate
+# is gone (WS-C C1: `input_event.spl` is now the HostInputEvent queue and
+# declares no event structs), and input arrives here as exactly one type.
+use os.drivers.input.input_event.{InputEventQueue}
+use common.ui.host_input_event.{
+    HostInputEvent,
+    HOST_BTN_LEFT,
+    HOST_BTN_RIGHT,
+    HOST_BTN_MIDDLE,
+    HOST_MOD_SHIFT,
+    HOST_MOD_CTRL,
+    HOST_MOD_ALT,
+}
+
+# Per-frame ceiling on how many events are pulled from a backend into the
+# queue. Fixed so a chatty or stuck backend cannot starve the frame.
+val INPUT_DRAIN_PER_FRAME: i64 = 64
+use os.drivers.framebuffer.fb_driver.{Color}
+use os.kernel.boot.cpu.{port_inb, port_outb}
+use common.window_protocol.geometry.{WindowId}
+use common.ui.window_scene.{SharedWmScene}
+use common.ui.widget.{UITree, UIEvent}
+use common.io.window_event.{window_generation_handle}
+use common.ui.wm_window_state.{
+    WM_WINDOW_STATE_NORMAL,
+    WM_WINDOW_STATE_MINIMIZED,
+    WM_WINDOW_STATE_MAXIMIZED,
+    wm_window_state_accepts_input,
+    wm_window_state_before_minimize,
+    wm_window_state_minimize,
+    wm_window_state_maximize,
+    wm_window_state_restore,
+    wm_window_state_begin_close,
+    wm_window_state_finish_close
+}
+use os.compositor.wm_action_lifecycle.{
+    wm_lifecycle_bounded_window_width,
+    wm_lifecycle_bounded_window_height,
+    wm_lifecycle_resize_grip_hit
+}
+use nogc_sync_mut.ui.session.{UISession}
+use std.gc_async_mut.ui.gui_content_renderer.{gui_session_content_frame}
+use common.ui.wm_chrome_theme.{wm_chrome_theme}
+use os.compositor.shared_mdi_framebuffer_scene.{
+    SharedMdiRenderWindow,
+    shared_mdi_render_window,
+    render_shared_mdi_desktop_chrome,
+    draw_shared_mdi_window_chrome,
+    draw_shared_mdi_taskbar
+}
+use os.compositor.simple_web_window_renderer.{
+    render_simple_web_content,
+    simple_web_bounded_scroll_y
+}
+use os.compositor.ps2_wm_key_decode.{
+    ps2_wm_character,
+    ps2_wm_key_name,
+}
+use os.compositor.pixel_content_store.{
+    pixel_content_store_create,
+    pixel_content_store_index,
+    pixel_content_store_live_count,
+    pixel_content_store_add,
+    pixel_content_store_width,
+    pixel_content_store_height,
+    pixel_content_store_length,
+    pixel_content_store_color,
+    pixel_content_store_set,
+    pixel_content_store_release,
+    pixel_content_store_destroy,
+}
+
+val WM_CONTENT_KIND_EMPTY: i32 = 0
+val WM_CONTENT_KIND_GUI_SESSION: i32 = 1
+val WM_CONTENT_KIND_WEB_DOCUMENT: i32 = 2
+val WM_CONTENT_KIND_PIXEL_SURFACE: i32 = 3
+val WM_CONTENT_SCROLL_STEP_PX: i32 = 40
+val WM_CONTENT_SCROLL_MAX_WHEEL_STEPS: i32 = 16
+
+fn _ps2_wm_pointer_button_code(left_btn: bool, right_btn: bool, middle_btn: bool) -> i32:
+    """Map PS/2 mouse status-byte button bits (status byte bits 0/1/2) to
+    the pending_wm_pointer_button_code contract shared with shell.spl's
+    decode (see Compositor.pending_wm_pointer_button_code doc comment):
+    0 = none, 1 = left, 2 = middle, 3 = right. At most one code is
+    reported per packet; when multiple bits are set simultaneously, left
+    takes priority, then right, then middle (left already took priority
+    over any simultaneous button before this decode was widened)."""
+    if left_btn:
+        return 1
+    if right_btn:
+        return 3
+    if middle_btn:
+        return 2
+    return 0
+
+# ---------------------------------------------------------------------------
+# WS-D6 — occlusion culling support.
+#
+# `Compositor.surfaces` is stored bottom-to-top (`focused_idx` is set to
+# `surfaces.len() - 1` on create/raise, so the LAST entry is the topmost
+# window). A window whose whole PAINTED EXTENT — its rect plus the chrome drop
+# shadow, see WM_WINDOW_SHADOW_D{X,Y} below — is covered by the union of the
+# opaque body rects of the windows ABOVE it contributes nothing to the
+# framebuffer, so all of its chrome and content rasterisation can be skipped.
+#
+# `_wm_rect_covered` is an EXACT region-subtraction test, not a bounding-box
+# approximation: a rect is covered iff every one of the (up to four) strips
+# left over after removing the first intersecting occluder is itself covered by
+# the occluders that follow it. Recursing with `start + 1` bounds the recursion
+# by the occluder count. It never returns a false "covered" — a window is
+# skipped only when it is provably invisible — which is what keeps the
+# whole-framebuffer equivalence in
+# `test/01_unit/os/compositor/compositor_occlusion_spec.spl` true.
+
+# Drop-shadow offset used by draw_shared_mdi_window_chrome
+# (`shared_mdi_framebuffer_scene.spl:75` — `fill_rect(x+5, y+6, w, h)`). Kept in
+# sync with that call site; if the chrome shadow offset grows, this must grow
+# with it or the occlusion pre-pass will start culling visible shadow pixels.
+val WM_WINDOW_SHADOW_DX: i32 = 5
+val WM_WINDOW_SHADOW_DY: i32 = 6
+
+# The chrome title is drawn at `x + 66` with NO clip to the window rect — the
+# backends clip to the SCREEN, not to the surface — so a long enough title
+# paints past `x + w`. That extra ink has no rectangle the pre-pass can bound
+# without knowing the backend's glyph advance, so the tested footprint is
+# widened to cover the worst-case title run. 16 is a deliberate UPPER bound on
+# per-glyph advance (the 8x16 chrome font advances 8); over-estimating here
+# only costs a missed cull, never a dropped pixel.
+val WM_TITLE_TEXT_X: i32 = 66
+val WM_TITLE_MAX_GLYPH_ADVANCE: i32 = 16
+
+# Test/diagnostic switch. Production always leaves this ON; the
+# whole-framebuffer equivalence spec turns it OFF to render the full-redraw
+# reference frame that the culled frame must match pixel-for-pixel.
+var _wm_occlusion_culling_enabled: bool = true
+
+# How many windows the LAST render_all() pre-pass skipped. This is the
+# anti-vacuity oracle: a whole-framebuffer equivalence assertion passes
+# trivially when nothing was ever culled, so the spec pins this count as well
+# as the pixels. Reset at the top of every render_all().
+var _wm_occlusion_culled_count: i32 = 0
+
+fn wm_occlusion_culled_count() -> i32:
+    _wm_occlusion_culled_count
+
+fn wm_set_occlusion_culling(on: bool):
+    _wm_occlusion_culling_enabled = on
+
+fn wm_occlusion_culling_enabled() -> bool:
+    _wm_occlusion_culling_enabled
+
+fn _wm_max_i32(a: i32, b: i32) -> i32:
+    if a > b: a else: b
+
+fn _wm_min_i32(a: i32, b: i32) -> i32:
+    if a < b: a else: b
+
+fn wm_rect_covered(rx: i32, ry: i32, rw: i32, rh: i32,
+                       ox: [i32], oy: [i32], ow: [i32], oh: [i32],
+                       start: i32) -> bool:
+    """Public alias of the occlusion coverage predicate, for direct spec use.
+
+    `render_all()` is interpreter-bound on this tree (a `jit-fallback` drops
+    the web-engine module), so the whole-framebuffer equivalence spec is slow;
+    this entry point lets the predicate itself be exercised exhaustively and
+    fast. It is the SAME function, not a copy — a spec against it is not a
+    shim-vacuity test of a local clone."""
+    _wm_rect_covered(rx, ry, rw, rh, ox, oy, ow, oh, start)
+
+fn _wm_rect_covered(rx: i32, ry: i32, rw: i32, rh: i32,
+                    ox: [i32], oy: [i32], ow: [i32], oh: [i32],
+                    start: i32) -> bool:
+    if rw <= 0 or rh <= 0:
+        return true
+    var i = start
+    while i < ox.len().to_i32():
+        val cx0 = _wm_max_i32(rx, ox[i])
+        val cy0 = _wm_max_i32(ry, oy[i])
+        val cx1 = _wm_min_i32(rx + rw, ox[i] + ow[i])
+        val cy1 = _wm_min_i32(ry + rh, oy[i] + oh[i])
+        if cx1 > cx0 and cy1 > cy0:
+            # Top strip above the overlap.
+            if not _wm_rect_covered(rx, ry, rw, cy0 - ry, ox, oy, ow, oh, i + 1):
+                return false
+            # Bottom strip below the overlap.
+            if not _wm_rect_covered(rx, cy1, rw, ry + rh - cy1, ox, oy, ow, oh, i + 1):
+                return false
+            # Left strip beside the overlap.
+            if not _wm_rect_covered(rx, cy0, cx0 - rx, cy1 - cy0, ox, oy, ow, oh, i + 1):
+                return false
+            # Right strip beside the overlap.
+            if not _wm_rect_covered(cx1, cy0, rx + rw - cx1, cy1 - cy0, ox, oy, ow, oh, i + 1):
+                return false
+            return true
+        i = i + 1
+    false
+
+
+class WindowSurface:
+    id: i32
+    title: text
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+    visible: bool
+    content_kind: i32
+    content_handle: i64
+    # Runtime-owned web content. GUI identity is the scalar content_handle;
+    # native-safe tree/focus state lives in Compositor's GUI registry.
+    content_html: text
+    content_revision: i64
+    scroll_y: i32 = 0
+    dirty: bool
+    owner_port: i64
+    process_id: i64
+    app_id: text
+    state: i32 = WM_WINDOW_STATE_NORMAL
+    state_before_minimize: i32 = WM_WINDOW_STATE_NORMAL
+    maximized: bool = false
+    restore_x: i32 = 0
+    restore_y: i32 = 0
+    restore_width: i32 = 0
+    restore_height: i32 = 0
+
+class Compositor:
+    surfaces: [WindowSurface]
+    focused_idx: i32
+    backend: CompositorBackend
+    input: InputBackend?
+    # The ONE input queue. Every backend event lands here as a HostInputEvent
+    # before any of it reaches compositor state.
+    input_queue: InputEventQueue
+    cursor: CursorState
+    desktop_bg: Color
+    next_id: i32
+    screen_width: i32
+    screen_height: i32
+    running: bool
+    dragging: bool
+    drag_window_id: i32
+    drag_offset_x: i32
+    drag_offset_y: i32
+    resizing: bool
+    resize_window_id: i32
+    resize_start_x: i32
+    resize_start_y: i32
+    resize_start_w: i32
+    resize_start_h: i32
+    gui_pointer_capture_window_id: i32
+    pending_meta_key: i32
+    pending_shortcut: text
+    ps2_shift_held: bool
+    ps2_ctrl_held: bool
+    ps2_alt_held: bool
+    pending_wm_pointer_valid: bool
+    pending_wm_pointer_x: i32
+    pending_wm_pointer_y: i32
+    # i32 codes, not text: text stored through this struct field arrived at
+    # rt_string_eq as a raw integer on baremetal (cr2=-114 fault class,
+    # 2026-07-18 input-correlation lane).
+    # button_code: 0=none, 1=left, 2=middle, 3=right (see
+    # _ps2_wm_pointer_button_code). kind_code: 0=none, 1=down, 2=up,
+    # 3=move, 4=drag. Decoded back to text in shell.spl's
+    # wm_pointer_button_from_code / wm_pointer_kind_from_code (see
+    # handle_pending_wm_pointer_step) — keep both ends in sync.
+    pending_wm_pointer_button_code: i32
+    pending_wm_pointer_kind_code: i32
+    # Window the pending pointer step landed on (0 = none) and the pointer
+    # position expressed in that window's local coordinate space. Read
+    # directly off a local copy by shell.spl; see the accessor NOTE below.
+    pending_wm_pointer_window_id: i32
+    pending_wm_pointer_local_x: i32
+    pending_wm_pointer_local_y: i32
+    pending_wm_key_valid: bool
+    pending_wm_key_window_id: i32
+    pending_wm_key_scancode: i32
+    pending_wm_key_shift: bool
+    pending_wm_key_ctrl: bool
+    pending_wm_key_alt: bool
+    pending_wm_text_valid: bool
+    pending_wm_text_window_id: i32
+    pending_wm_text_scancode: i32
+    pending_wm_text_shift: bool
+    # Button code held as of the previous PS/2 packet, used only to detect
+    # the release (down -> none) edge and report which button went up.
+    prev_wm_pointer_button_code: i32
+    input_sequence: i64
+    # F11 make and break are separate physical-device receipts.  Only the
+    # make edge requests fullscreen; retaining the break edge independently
+    # lets the canonical QEMU checker prove that the guest consumed the full
+    # key lifecycle without treating release as a second WM action.
+    pending_fullscreen_sequence: i64
+    pending_fullscreen_release_sequence: i64
+    # Maintained at materialize time instead of scanning surface elements:
+    # rerun24 faulted inside the scan (element text-field read produced a
+    # tagged wild pointer, cr2=0xa1000000...) after the vector-font path
+    # shifted the build layout. Scalar counter writes/reads stay on proven
+    # channels, and close decrements for return-to-baseline evidence.
+    owned_surface_scalar_count: i64
+    gui_content_handles: [i64]
+    gui_content_trees: [UITree]
+    gui_content_focused_ids: [text]
+    desktop_clipboard_text: text
+    pixel_content_registry_addr: i64
+    next_content_handle_index: i64
+
+    static fn with_backends(backend: CompositorBackend, input: InputBackend?, width: i32, height: i32) -> Compositor:
+        Compositor(
+            surfaces: [],
+            focused_idx: -1,
+            backend: backend,
+            input: input,
+            input_queue: InputEventQueue.create(),
+            cursor: CursorState(x: width / 2, y: height / 2, visible: true, hotspot_x: 1, hotspot_y: 1),
+            desktop_bg: Color.rgb(0, 48, 96),
+            next_id: 1,
+            screen_width: width,
+            screen_height: height,
+            running: false,
+            dragging: false,
+            drag_window_id: 0,
+            drag_offset_x: 0,
+            drag_offset_y: 0,
+            resizing: false,
+            resize_window_id: 0,
+            resize_start_x: 0,
+            resize_start_y: 0,
+            resize_start_w: 0,
+            resize_start_h: 0,
+            gui_pointer_capture_window_id: 0,
+            pending_meta_key: 0,
+            pending_shortcut: "",
+            ps2_shift_held: false,
+            ps2_ctrl_held: false,
+            ps2_alt_held: false,
+            pending_wm_pointer_valid: false,
+            pending_wm_pointer_x: 0,
+            pending_wm_pointer_y: 0,
+            pending_wm_pointer_button_code: 0,
+            pending_wm_pointer_kind_code: 0,
+            pending_wm_pointer_window_id: 0,
+            pending_wm_pointer_local_x: 0,
+            pending_wm_pointer_local_y: 0,
+            pending_wm_key_valid: false,
+            pending_wm_key_window_id: 0,
+            pending_wm_key_scancode: 0,
+            pending_wm_key_shift: false,
+            pending_wm_key_ctrl: false,
+            pending_wm_key_alt: false,
+            pending_wm_text_valid: false,
+            pending_wm_text_window_id: 0,
+            pending_wm_text_scancode: 0,
+            pending_wm_text_shift: false,
+            prev_wm_pointer_button_code: 0,
+            input_sequence: 0,
+            pending_fullscreen_sequence: 0,
+            pending_fullscreen_release_sequence: 0,
+            owned_surface_scalar_count: 0,
+            gui_content_handles: [],
+            gui_content_trees: [],
+            gui_content_focused_ids: [],
+            desktop_clipboard_text: "",
+            pixel_content_registry_addr: 0,
+            next_content_handle_index: 0
+        )
+
+    me create_window(title: text, x: i32, y: i32, width: i32, height: i32) -> i32:
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+        self.surfaces.push(WindowSurface(
+            id: id,
+            title: title,
+            x: x,
+            y: y,
+            width: width,
+            height: height,
+            visible: true,
+            content_kind: WM_CONTENT_KIND_EMPTY,
+            content_handle: 0,
+            content_html: "",
+            content_revision: 1,
+            scroll_y: 0,
+            dirty: true,
+            state: WM_WINDOW_STATE_NORMAL,
+            state_before_minimize: WM_WINDOW_STATE_NORMAL,
+            owner_port: 0,
+            process_id: 0,
+            app_id: "",
+            # Explicit, not defaulted: defaulted struct fields are NOT
+            # zero-initialized on the freestanding lane — a fresh window read
+            # maximized=true and F11's first press dispatched action=restore
+            # instead of maximize (proven live 2026-07-18).
+            maximized: false,
+            restore_x: 0,
+            restore_y: 0,
+            restore_width: 0,
+            restore_height: 0
+        ))
+        self.focused_idx = self.surfaces.len() - 1
+        id
+
+    me add_surface(title: text, x: i32, y: i32, width: i32, height: i32) -> WindowId:
+        # Typed intermediate + `as` cast — no conversion dispatch chained on
+        # a function return (freestanding_safe_channels.md).
+        val created_id = self.create_window(title, x, y, width, height)
+        WindowId(value: created_id as u64)
+
+    me create_window_with_tree(title: text, x: i32, y: i32, width: i32, height: i32, tree: UITree) -> WindowId:
+        val id = self.create_window(title, x, y, width, height)
+        self.update_window_tree(id as u64, tree)
+        WindowId(value: id as u64)
+
+    me create_windows_from_shared_scene(scene: SharedWmScene) -> [WindowId]:
+        var ids: [WindowId] = []
+        for window in scene.windows:
+            var wid = WindowId(value: 0u64)
+            if val tree = window.tree:
+                wid = self.create_window_with_tree(window.title, window.x, window.y, window.width, window.height, tree)
+            else:
+                wid = self.add_surface(window.title, window.x, window.y, window.width, window.height)
+                val surface = self.get_surface(wid.value)
+                if surface != nil and window.html != "":
+                    self.update_window_content(wid.value, window.html)
+            if window.process_id > 0u64 or window.app_id != "":
+                self.set_window_identity(wid.value.to_i32(), window.process_id.to_i64(), window.app_id)
+            if window.minimized:
+                self.minimize_window(wid.value)
+            ids = ids.push(wid)
+        ids
+
+    me create_remote_window(title: text, x: i32, y: i32, width: i32, height: i32, owner_port: u64) -> WindowId:
+        val id = self.create_window(title, x, y, width, height)
+        val i = self.surface_index(id as u64)
+        if i >= 0:
+            var surface = self.surfaces[i]
+            surface.owner_port = owner_port.to_i64()
+            self.surfaces[i] = surface
+        WindowId(value: id as u64)
+
+    me _cancel_drag_for_window(id: i32):
+        if self.dragging and self.drag_window_id == id:
+            self.dragging = false
+            self.drag_window_id = 0
+        if self.resizing and self.resize_window_id == id:
+            self.resizing = false
+            self.resize_window_id = 0
+            self.resize_start_x = 0
+            self.resize_start_y = 0
+            self.resize_start_w = 0
+            self.resize_start_h = 0
+        if self.gui_pointer_capture_window_id == id:
+            self.gui_pointer_capture_window_id = 0
+
+    me _focus_top_visible():
+        self.focused_idx = -1
+        var i = self.surfaces.len() - 1
+        # cpu-lane-loop-ok: reverse scan for the topmost visible window surface; bound is the open-window count, not a pixel or glyph count
+        while i >= 0:
+            if (self.surfaces[i].visible and
+                wm_window_state_accepts_input(self.surfaces[i].state)):
+                self.focused_idx = i
+                return
+            i = i - 1
+
+    me destroy_window(id: i32):
+        val removed_index = self.surface_index(id as u64)
+        var prior_focused_id = 0
+        if self.focused_idx >= 0 and self.focused_idx < self.surfaces.len():
+            prior_focused_id = self.surfaces[self.focused_idx].id
+        if removed_index >= 0:
+            var removed = self.surfaces[removed_index]
+            removed.state = wm_window_state_begin_close(removed.state)
+            self.surfaces[removed_index] = removed
+            self._release_gui_content(removed.content_handle)
+            self._release_pixel_content(removed.content_handle)
+            if removed.process_id > 0 and self.owned_surface_scalar_count > 0:
+                self.owned_surface_scalar_count = self.owned_surface_scalar_count - 1
+            removed.state = wm_window_state_finish_close(removed.state)
+        self._cancel_drag_for_window(id)
+        var out: [WindowSurface] = []
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].id != id:
+                out.push(self.surfaces[i])
+            i = i + 1
+        self.surfaces = out
+        self.focused_idx = -1
+        if prior_focused_id != id:
+            val prior_index = self.surface_index(prior_focused_id as u64)
+            if (prior_index >= 0 and self.surfaces[prior_index].visible and
+                wm_window_state_accepts_input(self.surfaces[prior_index].state)):
+                self.focused_idx = prior_index
+        if self.focused_idx < 0:
+            self._focus_top_visible()
+
+    me focus_window(id: i32):
+        val found = self.surface_index(id as u64)
+        if (found < 0 or not self.surfaces[found].visible or
+            not wm_window_state_accepts_input(self.surfaces[found].state)):
+            return
+        val chosen = self.surfaces[found]
+        var out: [WindowSurface] = []
+        var i = 0
+        while i < self.surfaces.len():
+            if i != found:
+                out.push(self.surfaces[i])
+            i = i + 1
+        out.push(chosen)
+        self.surfaces = out
+        self.focused_idx = self.surfaces.len() - 1
+
+    me cycle_focus():
+        if self.surfaces.len() == 0:
+            self.focused_idx = -1
+            return
+        var step = 1
+        # cpu-lane-loop-ok: one step per open window while cycling focus; bound is the surface count
+        while step <= self.surfaces.len():
+            val idx = (self.focused_idx + step) % self.surfaces.len()
+            if (self.surfaces[idx].visible and
+                wm_window_state_accepts_input(self.surfaces[idx].state)):
+                self.focus_window(self.surfaces[idx].id)
+                return
+            step = step + 1
+        self.focused_idx = -1
+
+    me move_window(id: i32, x: i32, y: i32):
+        val i = self.surface_index(id as u64)
+        if i >= 0:
+            var surface = self.surfaces[i]
+            surface.x = x
+            surface.y = y
+            surface.dirty = true
+            self.surfaces[i] = surface
+
+    me resize_window(id: u64, width: i32, height: i32):
+        val i = self.surface_index(id)
+        if i >= 0:
+            var surface = self.surfaces[i]
+            surface.width = width
+            surface.height = height
+            surface.dirty = true
+            self.surfaces[i] = surface
+
+    me scroll_window(id: u64, wheel_delta: i32):
+        val i = self.surface_index(id)
+        if i < 0 or self.surfaces[i].content_kind != WM_CONTENT_KIND_WEB_DOCUMENT:
+            return
+        var bounded_steps = wheel_delta
+        if bounded_steps > WM_CONTENT_SCROLL_MAX_WHEEL_STEPS:
+            bounded_steps = WM_CONTENT_SCROLL_MAX_WHEEL_STEPS
+        if bounded_steps < 0 - WM_CONTENT_SCROLL_MAX_WHEEL_STEPS:
+            bounded_steps = 0 - WM_CONTENT_SCROLL_MAX_WHEEL_STEPS
+        var surface = self.surfaces[i]
+        val next_scroll_y = simple_web_bounded_scroll_y(
+            surface.scroll_y + bounded_steps * WM_CONTENT_SCROLL_STEP_PX
+        )
+        if next_scroll_y != surface.scroll_y:
+            surface.scroll_y = next_scroll_y
+            surface.dirty = true
+            self.surfaces[i] = surface
+
+    me set_window_title(id: u64, title: text):
+        val i = self.surface_index(id)
+        if i >= 0:
+            var surface = self.surfaces[i]
+            surface.title = title
+            surface.dirty = true
+            self.surfaces[i] = surface
+
+    me minimize_window(id: u64):
+        val i = self.surface_index(id)
+        if i >= 0:
+            var surface = self.surfaces[i]
+            if surface.state != WM_WINDOW_STATE_MINIMIZED:
+                surface.state_before_minimize = wm_window_state_before_minimize(surface.state)
+            surface.state = wm_window_state_minimize(surface.state)
+            surface.visible = false
+            surface.dirty = true
+            self.surfaces[i] = surface
+            self._cancel_drag_for_window(surface.id)
+            if self.focused_idx == i:
+                self._focus_top_visible()
+
+    me maximize_window(id: u64):
+        val i = self.surface_index(id)
+        if i >= 0:
+            var surface = self.surfaces[i]
+            if not surface.maximized:
+                surface.restore_x = surface.x
+                surface.restore_y = surface.y
+                surface.restore_width = surface.width
+                surface.restore_height = surface.height
+            surface.x = 0
+            surface.y = 44
+            surface.width = self.screen_width
+            surface.height = self.screen_height - 100
+            surface.visible = true
+            surface.maximized = true
+            surface.state = wm_window_state_maximize(surface.state)
+            surface.dirty = true
+            self.surfaces[i] = surface
+            self._cancel_drag_for_window(surface.id)
+            self.focus_window(surface.id)
+
+    me restore_window(id: u64):
+        val i = self.surface_index(id)
+        if i >= 0:
+            var surface = self.surfaces[i]
+            val prior_state = surface.state
+            val was_minimized = prior_state == WM_WINDOW_STATE_MINIMIZED
+            if (not was_minimized and surface.maximized and
+                surface.restore_width > 0 and surface.restore_height > 0):
+                surface.x = surface.restore_x
+                surface.y = surface.restore_y
+                surface.width = surface.restore_width
+                surface.height = surface.restore_height
+            surface.state = wm_window_state_restore(
+                prior_state, surface.state_before_minimize
+            )
+            surface.visible = true
+            surface.maximized = surface.state == WM_WINDOW_STATE_MAXIMIZED
+            surface.dirty = true
+            self.surfaces[i] = surface
+            self.focus_window(surface.id)
+
+    me _release_gui_content(handle: i64):
+        if handle <= 0:
+            return
+        var kept_handles: [i64] = []
+        var kept_trees: [UITree] = []
+        var kept_focused_ids: [text] = []
+        var i = 0
+        # cpu-lane-loop-ok: linear lookup of one GUI content handle in the handle registry; bound is the live handle count
+        while i < self.gui_content_handles.len():
+            if self.gui_content_handles[i] != handle:
+                kept_handles.push(self.gui_content_handles[i])
+                kept_trees.push(self.gui_content_trees[i])
+                kept_focused_ids.push(self.gui_content_focused_ids[i])
+            i = i + 1
+        self.gui_content_handles = kept_handles
+        self.gui_content_trees = kept_trees
+        self.gui_content_focused_ids = kept_focused_ids
+
+    me _release_pixel_content(handle: i64):
+        if not pixel_content_store_release(
+            self.pixel_content_registry_addr, handle
+        ):
+            return
+        if pixel_content_store_live_count(
+            self.pixel_content_registry_addr
+        ) == 0:
+            pixel_content_store_destroy(self.pixel_content_registry_addr)
+            self.pixel_content_registry_addr = 0
+
+    me pixel_content_index(handle: i64) -> i32:
+        pixel_content_store_index(
+            self.pixel_content_registry_addr, handle
+        ) as i32
+
+    fn pixel_content_count() -> i64:
+        pixel_content_store_live_count(self.pixel_content_registry_addr)
+
+    fn pixel_content_color(handle: i64, index: i64) -> u32:
+        pixel_content_store_color(
+            self.pixel_content_registry_addr, handle, index
+        )
+
+    me create_pixel_content(width: i32, height: i32, fill: u32) -> i64:
+        if (width <= 0 or height <= 0 or
+            width > self.screen_width or height > self.screen_height):
+            return 0
+        if self.pixel_content_registry_addr == 0:
+            self.pixel_content_registry_addr = pixel_content_store_create()
+            if self.pixel_content_registry_addr == 0:
+                return 0
+        val handle = window_generation_handle(
+            self.next_content_handle_index, 1
+        )
+        if not pixel_content_store_add(
+            self.pixel_content_registry_addr,
+            handle,
+            width,
+            height,
+            fill
+        ):
+            if pixel_content_store_live_count(
+                self.pixel_content_registry_addr
+            ) == 0:
+                pixel_content_store_destroy(
+                    self.pixel_content_registry_addr
+                )
+                self.pixel_content_registry_addr = 0
+            return 0
+        self.next_content_handle_index = self.next_content_handle_index + 1
+        handle
+
+    me set_pixel_content(handle: i64, index: i64, color: u32) -> bool:
+        if not pixel_content_store_set(
+            self.pixel_content_registry_addr, handle, index, color
+        ):
+            return false
+        var i = 0
+        while i < self.surfaces.len():
+            if (self.surfaces[i].content_kind ==
+                WM_CONTENT_KIND_PIXEL_SURFACE and
+                self.surfaces[i].content_handle == handle):
+                var surface = self.surfaces[i]
+                surface.content_revision = surface.content_revision + 1
+                surface.dirty = true
+                self.surfaces[i] = surface
+            i = i + 1
+        true
+
+    me attach_window_pixel_content(id: u64, handle: i64) -> bool:
+        val surface_index = self.surface_index(id)
+        val registry_index = self.pixel_content_index(handle)
+        if surface_index < 0 or registry_index < 0:
+            return false
+        var scan = 0
+        # cpu-lane-loop-ok: window id lookup over open surfaces while attaching pixel content; bound is the surface count
+        while scan < self.surfaces.len():
+            if (scan != surface_index and
+                self.surfaces[scan].content_kind ==
+                    WM_CONTENT_KIND_PIXEL_SURFACE and
+                self.surfaces[scan].content_handle == handle):
+                return false
+            scan = scan + 1
+        var surface = self.surfaces[surface_index]
+        if (pixel_content_store_width(
+            self.pixel_content_registry_addr, handle
+        ) != surface.width - 8 or pixel_content_store_height(
+            self.pixel_content_registry_addr, handle
+        ) != surface.height - 36):
+            return false
+        self._release_gui_content(surface.content_handle)
+        if (surface.content_kind == WM_CONTENT_KIND_PIXEL_SURFACE and
+            surface.content_handle != handle):
+            self._release_pixel_content(surface.content_handle)
+        surface.content_kind = WM_CONTENT_KIND_PIXEL_SURFACE
+        surface.content_handle = handle
+        surface.content_html = ""
+        surface.content_revision = surface.content_revision + 1
+        surface.dirty = true
+        self.surfaces[surface_index] = surface
+        true
+
+    me gui_content_index(handle: i64) -> i32:
+        var i = 0
+        # cpu-lane-loop-ok: handle-to-index lookup in the GUI content registry; bound is the live handle count
+        while i < self.gui_content_handles.len():
+            if self.gui_content_handles[i] == handle:
+                return i
+            i = i + 1
+        -1
+
+    fn gui_content_tree(handle: i64) -> UITree?:
+        var i = 0
+        # cpu-lane-loop-ok: handle-to-tree lookup in the GUI content registry; bound is the live handle count
+        while i < self.gui_content_handles.len():
+            if self.gui_content_handles[i] == handle:
+                return Some(self.gui_content_trees[i])
+            i = i + 1
+        nil
+
+    fn gui_content_count() -> i64:
+        self.gui_content_handles.len()
+
+    me update_window_tree(id: u64, tree: UITree):
+        val i = self.surface_index(id)
+        if i >= 0:
+            var surface = self.surfaces[i]
+            if surface.content_kind == WM_CONTENT_KIND_PIXEL_SURFACE:
+                self._release_pixel_content(surface.content_handle)
+            var registry_index = -1
+            var scan = 0
+            # cpu-lane-loop-ok: handle lookup while rebinding a window UI tree; bound is the live handle count
+            while scan < self.gui_content_handles.len():
+                if self.gui_content_handles[scan] == surface.content_handle:
+                    registry_index = scan
+                scan = scan + 1
+            if registry_index >= 0:
+                self.gui_content_trees[registry_index] = tree
+                self.gui_content_focused_ids[registry_index] = ""
+            else:
+                val handle = window_generation_handle(
+                    self.next_content_handle_index, 1
+                )
+                self.next_content_handle_index = self.next_content_handle_index + 1
+                self.gui_content_handles.push(handle)
+                self.gui_content_trees.push(tree)
+                self.gui_content_focused_ids.push("")
+                surface.content_handle = handle
+            surface.content_kind = WM_CONTENT_KIND_GUI_SESSION
+            surface.content_html = ""
+            surface.content_revision = surface.content_revision + 1
+            surface.dirty = true
+            self.surfaces[i] = surface
+
+    me dispatch_gui_pointer_event(
+        window_id: i32,
+        desktop_x: i32,
+        desktop_y: i32,
+        button: text,
+        kind: text
+    ) -> bool:
+        var route_window_id = window_id
+        val captured = self.gui_pointer_capture_window_id > 0 and kind != "down"
+        if captured:
+            route_window_id = self.gui_pointer_capture_window_id
+        val surface_index = self.surface_index(route_window_id as u64)
+        if surface_index < 0:
+            if kind == "up":
+                self.gui_pointer_capture_window_id = 0
+            return false
+        var surface = self.surfaces[surface_index]
+        if (surface.content_kind != WM_CONTENT_KIND_GUI_SESSION or
+            not surface.visible or
+            not wm_window_state_accepts_input(surface.state)):
+            if kind == "up":
+                self.gui_pointer_capture_window_id = 0
+            return false
+        val client_x = desktop_x - surface.x - 4
+        val client_y = desktop_y - surface.y - 32
+        val client_w = surface.width - 8
+        val client_h = surface.height - 36
+        val inside = (
+            client_x >= 0 and client_y >= 0 and
+            client_x < client_w and client_y < client_h
+        )
+        if not inside and not captured:
+            if kind == "up":
+                self.gui_pointer_capture_window_id = 0
+            return false
+        val registry_index = self.gui_content_index(surface.content_handle)
+        if registry_index < 0:
+            if kind == "up":
+                self.gui_pointer_capture_window_id = 0
+            return false
+        var session = UISession.new(self.gui_content_trees[registry_index])
+        val focused_id = self.gui_content_focused_ids[registry_index]
+        if focused_id != "":
+            session.dispatch(UIEvent.FocusEvent(focused_id, "focus"))
+        session.dispatch(UIEvent.Resize(client_w, client_h))
+        session.dispatch(UIEvent.MouseEvent(
+            client_x.to_f64(), client_y.to_f64(), button, kind
+        ))
+        self.gui_content_trees[registry_index] = session.current_tree()
+        self.gui_content_focused_ids[registry_index] = session.focused_widget()
+        if kind == "down":
+            self.gui_pointer_capture_window_id = route_window_id
+        elif kind == "up":
+            self.gui_pointer_capture_window_id = 0
+        surface.content_revision = surface.content_revision + 1
+        surface.dirty = true
+        self.surfaces[surface_index] = surface
+        true
+
+    me dispatch_gui_key_event(
+        window_id: i32,
+        key: text,
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+        super_key: bool
+    ) -> bool:
+        val surface_index = self.surface_index(window_id as u64)
+        if (surface_index < 0 or surface_index != self.focused_idx or
+            key == ""):
+            return false
+        var surface = self.surfaces[surface_index]
+        if (surface.content_kind != WM_CONTENT_KIND_GUI_SESSION or
+            not surface.visible or
+            not wm_window_state_accepts_input(surface.state)):
+            return false
+        val registry_index = self.gui_content_index(surface.content_handle)
+        if registry_index < 0:
+            return false
+        var session = UISession.new(self.gui_content_trees[registry_index])
+        val focused_id = self.gui_content_focused_ids[registry_index]
+        if focused_id != "":
+            session.dispatch(UIEvent.FocusEvent(focused_id, "focus"))
+        if (ctrl and (key == "v" or key == "V") and
+            self.desktop_clipboard_text != ""):
+            session.clipboard.copy("text/plain", self.desktop_clipboard_text)
+        if key == "tab":
+            session.dispatch(if shift: UIEvent.FocusPrev else: UIEvent.FocusNext)
+        else:
+            session.dispatch_key_with_modifiers(
+                key, ctrl, shift, alt, super_key
+            )
+        if ctrl and (
+            key == "c" or key == "C" or key == "x" or key == "X"
+        ):
+            val copied = session.clipboard.paste()
+            if copied != nil:
+                self.desktop_clipboard_text = copied.data
+        self.gui_content_trees[registry_index] = session.current_tree()
+        self.gui_content_focused_ids[registry_index] = session.focused_widget()
+        surface.content_revision = surface.content_revision + 1
+        surface.dirty = true
+        self.surfaces[surface_index] = surface
+        true
+
+    me dispatch_gui_text_event(window_id: i32, committed_text: text) -> bool:
+        if committed_text == "":
+            return false
+        val surface_index = self.surface_index(window_id as u64)
+        if surface_index < 0 or surface_index != self.focused_idx:
+            return false
+        var surface = self.surfaces[surface_index]
+        if (surface.content_kind != WM_CONTENT_KIND_GUI_SESSION or
+            not surface.visible or
+            not wm_window_state_accepts_input(surface.state)):
+            return false
+        val registry_index = self.gui_content_index(surface.content_handle)
+        if registry_index < 0:
+            return false
+        var session = UISession.new(self.gui_content_trees[registry_index])
+        val focused_id = self.gui_content_focused_ids[registry_index]
+        if focused_id != "":
+            session.dispatch(UIEvent.FocusEvent(focused_id, "focus"))
+        session.dispatch(UIEvent.CompositionCommit(committed_text))
+        self.gui_content_trees[registry_index] = session.current_tree()
+        self.gui_content_focused_ids[registry_index] = session.focused_widget()
+        surface.content_revision = surface.content_revision + 1
+        surface.dirty = true
+        self.surfaces[surface_index] = surface
+        true
+
+    me take_gui_content_action(window_id: i32) -> text:
+        val surface_index = self.surface_index(window_id as u64)
+        if surface_index < 0:
+            return ""
+        val surface = self.surfaces[surface_index]
+        if surface.content_kind != WM_CONTENT_KIND_GUI_SESSION:
+            return ""
+        val registry_index = self.gui_content_index(surface.content_handle)
+        if registry_index < 0:
+            return ""
+        var session = UISession.new(self.gui_content_trees[registry_index])
+        val focused_id = self.gui_content_focused_ids[registry_index]
+        if focused_id != "":
+            session.dispatch(UIEvent.FocusEvent(focused_id, "focus"))
+        val action = session.take_pending_action()
+        self.gui_content_trees[registry_index] = session.current_tree()
+        self.gui_content_focused_ids[registry_index] = session.focused_widget()
+        action
+
+    me update_window_content(id: u64, content_html: text):
+        """Retain authoritative text/HTML without coercing an opaque tree."""
+        val i = self.surface_index(id)
+        if i >= 0:
+            var surface = self.surfaces[i]
+            if surface.content_html != content_html:
+                self._release_gui_content(surface.content_handle)
+                self._release_pixel_content(surface.content_handle)
+                surface.content_kind = WM_CONTENT_KIND_WEB_DOCUMENT
+                surface.content_handle = 0
+                surface.content_html = content_html
+                surface.content_revision = surface.content_revision + 1
+                surface.dirty = true
+                self.surfaces[i] = surface
+
+    me set_window_identity(id: i32, process_id: i64, app_id: text):
+        val i = self.surface_index(id as u64)
+        if i >= 0:
+            var surface = self.surfaces[i]
+            surface.process_id = process_id
+            surface.app_id = app_id
+            self.surfaces[i] = surface
+
+    me compositor_materialize_process_surface_scalar(title: text, x: i32, y: i32, width: i32, height: i32, process_id: i64, app_id: text, content_html: text) -> i64:
+        val id = self.create_window(title, x, y, width, height)
+        if id <= 0:
+            return 0
+        val i = self.surface_index(id as u64)
+        if i >= 0:
+            var surface = self.surfaces[i]
+            surface.process_id = process_id
+            surface.app_id = app_id
+            surface.content_kind = WM_CONTENT_KIND_WEB_DOCUMENT
+            surface.content_html = content_html
+            surface.content_revision = surface.content_revision + 1
+            surface.dirty = true
+            self.surfaces[i] = surface
+            # Params only (scalar + text params are proven channels); a just-
+            # created surface cannot double-count.
+            if process_id > 0:
+                if app_id.len() > 0:
+                    self.owned_surface_scalar_count = self.owned_surface_scalar_count + 1
+                    # Attribution receipt (rerun25 read 1112424581442379886 at
+                    # readiness): garbage HERE = field RMW broken in this
+                    # class; clean 1..3 here + garbage at readiness = the
+                    # shell->compositor read chain corrupts.
+                    val owned_now: i64 = self.owned_surface_scalar_count
+                    serial_println("[compositor] owned-count-inc now={owned_now}")
+        id
+
+    me compositor_process_owned_surface_count_scalar() -> i64:
+        # `me`, not `fn`: rerun26 receipts proved the field increments cleanly
+        # (owned-count-inc now=1,2,3 — me-method channel) while the immutable
+        # read chain delivered 1112424581442379886 at readiness. The mutable
+        # receiver path is the one proven to address the real compositor.
+        # Maintained scalar, not a surface scan: the rerun13 for-loop copy
+        # faulted, the rerun14 index-based scalar-bind rewrite read zeros, and
+        # the rerun24 build (vector-font layout shift) faulted inside the
+        # rewritten scan on an element text-field read (cr2=0xa1000000...).
+        # Surface-element reads are not a stable channel on this lane; the
+        # counter is updated at materialize time from call params instead.
+        self.owned_surface_scalar_count
+
+    fn window_count() -> i32:
+        self.surfaces.len()
+
+    fn window_titles() -> [text]:
+        var titles: [text] = []
+        for surface in self.surfaces:
+            titles = titles.push(surface.title)
+        titles
+
+    fn surface_index(id: u64) -> i32:
+        var i = 0
+        # cpu-lane-loop-ok: bounded compositor window-table identity lookup
+        while i < self.surfaces.len():
+            val surface_id = self.surfaces[i].id
+            if (surface_id as u64) == id:
+                return i
+            i = i + 1
+        -1
+
+    fn get_surface(id: u64) -> WindowSurface?:
+        val i = self.surface_index(id)
+        if i >= 0:
+            return self.surfaces[i]
+        nil
+
+    fn window_title(id: u64) -> text:
+        val i = self.surface_index(id)
+        if i >= 0:
+            return self.surfaces[i].title
+        ""
+
+    fn window_owner_port(id: u64) -> u64:
+        val i = self.surface_index(id)
+        if i >= 0:
+            val port = self.surfaces[i].owner_port
+            return port as u64
+        0
+
+    fn window_process_id(id: i32) -> i64:
+        val i = self.surface_index(id as u64)
+        if i >= 0:
+            return self.surfaces[i].process_id
+        0
+
+    fn window_app_id(id: i32) -> text:
+        val i = self.surface_index(id as u64)
+        if i >= 0:
+            return self.surfaces[i].app_id
+        ""
+
+    fn window_count_for_app(app_id: text) -> i32:
+        var count = 0
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].app_id == app_id:
+                count = count + 1
+            i = i + 1
+        count
+
+    fn window_count_for_process(process_id: i64) -> i32:
+        var count = 0
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].process_id == process_id:
+                count = count + 1
+            i = i + 1
+        count
+
+    fn windows_for_process(process_id: i64) -> [u64]:
+        var out: [u64] = []
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].process_id == process_id:
+                val surface_id = self.surfaces[i].id
+                out = out.push(surface_id as u64)
+            i = i + 1
+        out
+
+    fn windows_for_app(app_id: text) -> [u64]:
+        var out: [u64] = []
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].app_id == app_id:
+                val surface_id = self.surfaces[i].id
+                out = out.push(surface_id as u64)
+            i = i + 1
+        out
+
+    me handle_input():
+        if self.input != nil:
+            self._handle_input_backend()
+            return
+        self._handle_input_ps2()
+
+    me handle_input_baremetal_ps2():
+        self._handle_input_ps2()
+
+    me _drain_input_source():
+        """Pump the backend into the single queue.
+
+        Bounded at INPUT_DRAIN_PER_FRAME so a stuck or chatty backend cannot
+        starve the frame. Everything the backend produces -- key or pointer --
+        arrives as one type, `HostInputEvent`."""
+        val inp = self.input
+        if inp == nil:
+            return
+        var i = 0
+        # cpu-lane-loop-ok: fixed per-frame drain bound, not a data-size loop
+        while i < INPUT_DRAIN_PER_FRAME:
+            val ev = input_backend_poll_event(inp)
+            if ev == nil:
+                return
+            if val host_ev = ev:
+                self.input_queue.push(host_ev)
+            i = i + 1
+
+    me _handle_input_backend():
+        """Drain the backend into the queue, then apply the queue.
+
+        This is the whole of the unified path: ONE event type in the queue, ONE
+        reducer (`_apply_host_event`) behind it."""
+        if self.input == nil:
+            return
+        self._drain_input_source()
+        # EXACTLY ONE event is applied per call, and that is not a throughput
+        # oversight -- it is required for correctness. `note_pending_wm_pointer_step`
+        # writes a SINGLE slot (`pending_wm_pointer_valid/_x/_y/_button_code/
+        # _kind_code`), and the shell event loop consumes one step per frame:
+        # `handle_input()` then `handle_pending_wm_pointer_step()`
+        # (shell.spl:941-942, :1180-1181). Applying a whole drained batch here
+        # would overwrite up to 63 pending steps before the shell could read
+        # one -- a press followed by a move in the same batch would leave
+        # `button=0,kind=3` and the click would never reach the WM; a drag
+        # would arrive as a teleport.
+        #
+        # The queue is what makes this safe: the rest of the burst WAITS in the
+        # ring instead of being dropped at the driver, which is what the legacy
+        # single-poll-per-frame path did to anything beyond the first event.
+        val next = self.input_queue.pop()
+        if val ev = next:
+            self._apply_host_event(ev)
+
+    me _apply_host_event(ev: HostInputEvent):
+        """The single reducer from ingress event to compositor state.
+
+        Behaviour is a straight re-expression of the pre-unification body that
+        read `KeyEvent`/`MouseEvent` directly; the (button_code, kind_code)
+        table below reproduces its branch order edge for edge, and
+        `test/01_unit/os/compositor/compositor_input_unification_spec.spl`
+        pins that equivalence -- it was green against the OLD body before this
+        one was written."""
+        match ev:
+            HostInputEvent.Key(code, ch, down, mods):
+                if (mods & HOST_MOD_ALT) != 0:
+                    self.pending_meta_key = 1
+                # Only presses produce shortcut characters.
+                if not down:
+                    return
+                if ch == "":
+                    return
+                val ctrl = (mods & HOST_MOD_CTRL) != 0
+                val shift = (mods & HOST_MOD_SHIFT) != 0
+                val alt = (mods & HOST_MOD_ALT) != 0
+                if ctrl and alt:
+                    self.pending_shortcut = ch
+                elif (self.focused_idx >= 0 and
+                    self.focused_idx < self.surfaces.len()):
+                    val focused_id = self.surfaces[self.focused_idx].id
+                    self.dispatch_gui_key_event(
+                        focused_id,
+                        ch,
+                        ctrl,
+                        shift,
+                        alt,
+                        false
+                    )
+                    # Legacy PS/2/virtio/SDL2 adapters expose characters
+                    # through key_to_char. Normalized GLFW/SDL text input
+                    # stays on WINDOW_EVENT_TEXT instead.
+                    if not ctrl and not alt:
+                        self.dispatch_gui_text_event(focused_id, ch)
+            HostInputEvent.Pointer(px, py, button, pressed, wheel):
+                var new_x = px
+                var new_y = py
+                if new_x < 0:
+                    new_x = 0
+                if new_x >= self.screen_width:
+                    new_x = self.screen_width - 1
+                if new_y < 0:
+                    new_y = 0
+                if new_y >= self.screen_height:
+                    new_y = self.screen_height - 1
+                var cursor_ref = self.cursor
+                cursor_ref.x = new_x
+                cursor_ref.y = new_y
+                self.cursor = cursor_ref
+
+                # WM pointer codes are their own space and do NOT match
+                # HOST_BTN_* (WM right is 3, middle is 2; HOST_BTN right is 2,
+                # middle is 3). Translate explicitly rather than casting.
+                val left_press = button == HOST_BTN_LEFT and pressed
+                var pointer_button_code: i32 = 0
+                var pointer_kind_code: i32 = 3
+                if left_press:
+                    pointer_button_code = 1
+                    if self.dragging:
+                        pointer_kind_code = 4
+                        self.move_window(
+                            self.drag_window_id,
+                            new_x - self.drag_offset_x,
+                            new_y - self.drag_offset_y
+                        )
+                    elif self.resizing:
+                        val resized_width = wm_lifecycle_bounded_window_width(
+                            self.resize_start_w + (new_x - self.resize_start_x),
+                            self.screen_width
+                        )
+                        val resized_height = wm_lifecycle_bounded_window_height(
+                            self.resize_start_h + (new_y - self.resize_start_y),
+                            self.screen_height
+                        )
+                        self.resize_window(
+                            self.resize_window_id.to_u64(),
+                            resized_width,
+                            resized_height
+                        )
+                    else:
+                        pointer_kind_code = 1
+                elif button == HOST_BTN_RIGHT and pressed:
+                    pointer_button_code = 3
+                    pointer_kind_code = 1
+                elif button == HOST_BTN_LEFT and not pressed:
+                    pointer_button_code = 1
+                    pointer_kind_code = 2
+                elif button == HOST_BTN_MIDDLE:
+                    pointer_button_code = 2
+                self.note_pending_wm_pointer_step(
+                    new_x,
+                    new_y,
+                    pointer_button_code,
+                    pointer_kind_code
+                )
+
+                if wheel != 0:
+                    var scroll_hit_idx = -1
+                    var scroll_scan = 0
+                    # cpu-lane-loop-ok: pointer scroll hit test over open window surfaces, once per backend input event; bound is the surface count
+                    while scroll_scan < self.surfaces.len():
+                        val surface = self.surfaces[scroll_scan]
+                        if (surface.visible and
+                            wm_window_state_accepts_input(surface.state) and
+                            new_x >= surface.x and new_x < surface.x + surface.width and
+                            new_y >= surface.y and new_y < surface.y + surface.height):
+                            scroll_hit_idx = scroll_scan
+                        scroll_scan = scroll_scan + 1
+                    if scroll_hit_idx >= 0:
+                        self.scroll_window(
+                            self.surfaces[scroll_hit_idx].id.to_u64(), wheel
+                        )
+
+                if left_press and not self.dragging and not self.resizing:
+                    var hit_idx = -1
+                    var wi = 0
+                    # cpu-lane-loop-ok: pointer hit test over open window surfaces, once per backend input event; bound is the surface count
+                    while wi < self.surfaces.len():
+                        val surface = self.surfaces[wi]
+                        if (surface.visible and
+                            wm_window_state_accepts_input(surface.state) and
+                            new_x >= surface.x and new_x < surface.x + surface.width and
+                            new_y >= surface.y and new_y < surface.y + surface.height):
+                            hit_idx = wi
+                        wi = wi + 1
+                    if hit_idx >= 0:
+                        val hit = self.surfaces[hit_idx]
+                        self.focus_window(hit.id)
+                        if wm_lifecycle_resize_grip_hit(
+                            hit.x, hit.y, hit.width, hit.height, new_x, new_y
+                        ):
+                            self.resizing = true
+                            self.resize_window_id = hit.id
+                            self.resize_start_x = new_x
+                            self.resize_start_y = new_y
+                            self.resize_start_w = hit.width
+                            self.resize_start_h = hit.height
+                        elif new_y < hit.y + 24:
+                            self.dragging = true
+                            self.drag_window_id = hit.id
+                            self.drag_offset_x = new_x - hit.x
+                            self.drag_offset_y = new_y - hit.y
+                elif button == HOST_BTN_LEFT and not pressed:
+                    self.dragging = false
+                    self.drag_window_id = 0
+                    self.resizing = false
+                    self.resize_window_id = 0
+                    self.resize_start_x = 0
+                    self.resize_start_y = 0
+                    self.resize_start_w = 0
+                    self.resize_start_h = 0
+            HostInputEvent.Resize(w, h):
+                # No resize producer reaches this path yet (WS-C C4/C5 wire the
+                # host toolkits). Ignored rather than guessed at.
+                return
+
+    me _handle_input_ps2():
+        var status = port_inb(0x64)
+        # cpu-lane-loop-ok: PS/2 controller drain: the bound is the 8042 status register output-full bit, a hardware condition, not a pixel/element/string count - reported as a detector false positive against the design section 6 bound-based rule
+        while ((status as i32) & 1) != 0:
+            # AUX bytes belong to the mouse packet decoder below. Consuming
+            # them as keyboard scancodes made QMP pointer input disappear
+            # before it could reach the shared WM event path.
+            if ((status as i32) & 0x20) != 0:
+                break
+            var scancode = port_inb(0x60)
+            var sc = scancode as i32
+            if sc == 0x2A or sc == 0x36:
+                self.ps2_shift_held = true
+            elif sc == 0xAA or sc == 0xB6:
+                self.ps2_shift_held = false
+            elif sc == 0x1D:
+                self.ps2_ctrl_held = true
+            elif sc == 0x9D:
+                self.ps2_ctrl_held = false
+            elif sc == 0x38:
+                self.ps2_alt_held = true
+                self.pending_meta_key = 1
+            elif sc == 0xB8:
+                self.ps2_alt_held = false
+            elif self.ps2_alt_held and sc == 0x0F:
+                self.cycle_focus()
+            elif self.ps2_alt_held and sc == 0x3E:
+                if (self.focused_idx >= 0 and
+                    self.focused_idx < self.surfaces.len()):
+                    val focused_id = self.surfaces[self.focused_idx].id
+                    self.destroy_window(focused_id)
+            elif sc == 0x57:
+                self.input_sequence = self.input_sequence + 1
+                self.pending_fullscreen_sequence = self.input_sequence
+            elif sc == 0xD7:
+                self.input_sequence = self.input_sequence + 1
+                self.pending_fullscreen_release_sequence = self.input_sequence
+            elif sc < 0x80:
+                if (self.focused_idx >= 0 and
+                    self.focused_idx < self.surfaces.len()):
+                    val focused_id = self.surfaces[self.focused_idx].id
+                    if self.ps2_ctrl_held and sc == 0x32:
+                        if self.ps2_shift_held:
+                            if self.surfaces[self.focused_idx].maximized:
+                                self.restore_window(focused_id)
+                            else:
+                                self.maximize_window(focused_id)
+                        else:
+                            self.minimize_window(focused_id)
+                    else:
+                        val key_name = ps2_wm_key_name(sc)
+                        if key_name != "":
+                            self.input_sequence = self.input_sequence + 1
+                            self.pending_wm_key_valid = true
+                            self.pending_wm_key_window_id = focused_id
+                            self.pending_wm_key_scancode = sc
+                            self.pending_wm_key_shift = self.ps2_shift_held
+                            self.pending_wm_key_ctrl = self.ps2_ctrl_held
+                            self.pending_wm_key_alt = self.ps2_alt_held
+                            self.dispatch_gui_key_event(
+                                focused_id,
+                                key_name,
+                                self.ps2_ctrl_held,
+                                self.ps2_shift_held,
+                                self.ps2_alt_held,
+                                false
+                            )
+                        val committed = ps2_wm_character(
+                            sc, self.ps2_shift_held
+                        )
+                        if (committed != "" and
+                            not self.ps2_ctrl_held and
+                            not self.ps2_alt_held):
+                            self.pending_wm_text_valid = true
+                            self.pending_wm_text_window_id = focused_id
+                            self.pending_wm_text_scancode = sc
+                            self.pending_wm_text_shift = self.ps2_shift_held
+                            self.dispatch_gui_text_event(
+                                focused_id, committed
+                            )
+                        if key_name != "":
+                            # One scalar pending slot is safe only when the
+                            # hardware FIFO retains the remaining key burst.
+                            return
+            var next_status = port_inb(0x64)
+            status = next_status
+
+        # PS/2 mouse: drain the whole pending packet burst, then emit ONE
+        # pointer step for it. QEMU splits a single large QMP rel-motion into
+        # many 3-byte packets each capped at +/-127, and the shell re-renders
+        # once per emitted pointer step. Consuming one packet per poll therefore
+        # cost a full 4K render per 127 pixels of travel, and the button-press
+        # packet starved behind a motion backlog the guest could never drain
+        # (evidence lane rerun36: motion observed at x=1666,1539,1412 stepping
+        # -127, press never seen, capture died on
+        # guest-pointer-irq-state-frame-correlation-missing kind_code=1).
+        # Draining STOPS at a button-state change so a press or release always
+        # keeps its own step, sequence and frame — that irq/state/frame triple
+        # is the WM contract the evidence wrapper correlates on.
+        var pointer_saw_packet = false
+        var pointer_x = self.cursor.x
+        var pointer_y = self.cursor.y
+        var pointer_left_btn = false
+        var pointer_right_btn = false
+        var pointer_middle_btn = false
+        var pointer_code = 0
+        var pointer_drained = 0
+        var pointer_draining = true
+        # cpu-lane-loop-ok: PS/2 mouse packet drain, hard-capped at 64 packets per poll; the bound is a hardware queue condition, not an element count - reported as a detector false positive
+        while pointer_draining:
+            if pointer_drained >= 64:
+                pointer_draining = false
+            else:
+                var mstatus = port_inb(0x64)
+                if ((mstatus as i32) & 0x21) != 0x21:
+                    pointer_draining = false
+                else:
+                    var b0 = port_inb(0x60)
+                    var ms1 = port_inb(0x64)
+                    if ((ms1 as i32) & 1) == 0:
+                        pointer_draining = false
+                    else:
+                        var b1 = port_inb(0x60)
+                        var ms2 = port_inb(0x64)
+                        if ((ms2 as i32) & 1) == 0:
+                            pointer_draining = false
+                        else:
+                            var b2 = port_inb(0x60)
+                            var dx = b1 as i32
+                            var dy = b2 as i32
+                            if ((b0 as i32) & 0x10) != 0:
+                                dx = dx - 256
+                            if ((b0 as i32) & 0x20) != 0:
+                                dy = dy - 256
+                            var new_x = pointer_x + dx
+                            var new_y = pointer_y - dy
+                            if new_x < 0:
+                                new_x = 0
+                            if new_x >= self.screen_width:
+                                new_x = self.screen_width - 1
+                            if new_y < 0:
+                                new_y = 0
+                            if new_y >= self.screen_height:
+                                new_y = self.screen_height - 1
+                            pointer_x = new_x
+                            pointer_y = new_y
+                            pointer_left_btn = ((b0 as i32) & 0x01) != 0
+                            pointer_right_btn = ((b0 as i32) & 0x02) != 0
+                            pointer_middle_btn = ((b0 as i32) & 0x04) != 0
+                            pointer_code = _ps2_wm_pointer_button_code(pointer_left_btn, pointer_right_btn, pointer_middle_btn)
+                            pointer_saw_packet = true
+                            pointer_drained = pointer_drained + 1
+                            # Button transition ends the burst so this packet is
+                            # reported on its own; remaining packets are picked
+                            # up by the next poll.
+                            if pointer_code != self.prev_wm_pointer_button_code:
+                                pointer_draining = false
+        if pointer_saw_packet:
+            var cursor_ref = self.cursor
+            cursor_ref.x = pointer_x
+            cursor_ref.y = pointer_y
+            self.cursor = cursor_ref
+            self.input_sequence = self.input_sequence + 1
+            val prev_wm_pointer_button_code = self.prev_wm_pointer_button_code
+            if pointer_code != 0:
+                self.note_pending_wm_pointer_step(pointer_x, pointer_y, pointer_code, 1)
+            elif prev_wm_pointer_button_code != 0:
+                self.note_pending_wm_pointer_step(pointer_x, pointer_y, prev_wm_pointer_button_code, 2)
+            else:
+                self.note_pending_wm_pointer_step(pointer_x, pointer_y, 0, 3)
+            self.prev_wm_pointer_button_code = pointer_code
+            if pointer_left_btn:
+                if self.dragging:
+                    val new_win_x = pointer_x - self.drag_offset_x
+                    val new_win_y = pointer_y - self.drag_offset_y
+                    self.move_window(self.drag_window_id, new_win_x, new_win_y)
+                else:
+                    var hit_idx = -1
+                    var wi = 0
+                    # cpu-lane-loop-ok: pointer hit test over open window surfaces, once per PS/2 mouse packet; bound is the surface count
+                    while wi < self.surfaces.len():
+                        val s = self.surfaces[wi]
+                        if (pointer_x >= s.x and pointer_x < s.x + s.width and
+                            pointer_y >= s.y and pointer_y < s.y + s.height):
+                            hit_idx = wi
+                        wi = wi + 1
+                    if hit_idx >= 0:
+                        val hit = self.surfaces[hit_idx]
+                        if pointer_y < hit.y + 24:
+                            self.dragging = true
+                            self.drag_window_id = hit.id
+                            self.drag_offset_x = pointer_x - hit.x
+                            self.drag_offset_y = pointer_y - hit.y
+                            self.focus_window(hit.id)
+                        else:
+                            self.focus_window(hit.id)
+            else:
+                self.dragging = false
+
+    me render_all():
+        # Project the live SimpleOS compositor into the same shared-MDI model
+        # used by the hosted WM. Chrome/taskbar are executed by the common
+        # Draw-IR renderer and every visible body is rasterized by the same
+        # pure-Simple Web pixel pipeline as the host; only the final backend
+        # differs (framebuffer here, winit pixel buffer on the host).
+        val theme = wm_chrome_theme()
+        render_shared_mdi_desktop_chrome(self.backend, self.screen_width, self.screen_height, theme)
+
+        # WS-D6 occlusion pre-pass. Walk TOP-DOWN accumulating the opaque rects
+        # already claimed by higher windows; a visible window fully covered by
+        # them paints nothing observable, so its chrome + content rasterisation
+        # (including the per-pixel PIXEL_SURFACE blit below) is skipped. The
+        # window still enters `shared_windows` so the taskbar is unaffected.
+        # Only fully-opaque, on-screen windows become occluders.
+        _wm_occlusion_culled_count = 0
+        var occluded: [bool] = [false; self.surfaces.len()]
+        var occ_x: [i32] = []
+        var occ_y: [i32] = []
+        var occ_w: [i32] = []
+        var occ_h: [i32] = []
+        var t = self.surfaces.len().to_i32() - 1
+        # cpu-lane-loop-ok: top-down z-order walk; bound is the surface count
+        while t >= 0:
+            val ts = self.surfaces[t]
+            if _wm_occlusion_culling_enabled and ts.visible and ts.width > 0 and ts.height > 0:
+                # A window paints OUTSIDE its own rect: draw_shared_mdi_window_chrome
+                # (shared_mdi_framebuffer_scene.spl:75) lays a drop shadow at
+                # (x+5, y+6, w, h) BEFORE the body fill. So the footprint that has
+                # to be covered before culling is legal is the painted extent,
+                # not the window rect — culling on the rect alone would silently
+                # drop the shadow band. Conservative on both sides: the tested
+                # footprint is widened by the shadow offset, while only the
+                # unconditional opaque body fill (x, y, w, h) is offered as an
+                # occluder. Both errors point at "render anyway".
+                val title_extent = WM_TITLE_TEXT_X + WM_TITLE_MAX_GLYPH_ADVANCE * ts.title.len().to_i32()
+                val footprint_w = _wm_max_i32(ts.width + WM_WINDOW_SHADOW_DX, title_extent)
+                if _wm_rect_covered(ts.x, ts.y,
+                                    footprint_w,
+                                    ts.height + WM_WINDOW_SHADOW_DY,
+                                    occ_x, occ_y, occ_w, occ_h, 0):
+                    occluded[t] = true
+                    _wm_occlusion_culled_count = _wm_occlusion_culled_count + 1
+                else:
+                    occ_x.push(ts.x)
+                    occ_y.push(ts.y)
+                    occ_w.push(ts.width)
+                    occ_h.push(ts.height)
+            t = t - 1
+
+        var shared_windows: [SharedMdiRenderWindow] = []
+        var i = 0
+        while i < self.surfaces.len():
+            val s = self.surfaces[i]
+            val shared = shared_mdi_render_window(
+                s.id.to_i64(),
+                s.title,
+                s.app_id,
+                s.content_html,
+                s.x,
+                s.y,
+                s.width,
+                s.height,
+                s.process_id,
+                not s.visible,
+                i == self.focused_idx,
+                0
+            )
+            shared_windows.push(shared)
+            if s.visible and not occluded[i]:
+                draw_shared_mdi_window_chrome(self.backend, shared, theme)
+                val content_w = s.width - 8
+                val content_h = s.height - 36
+                if content_w > 0 and content_h > 0:
+                    if s.content_kind == WM_CONTENT_KIND_GUI_SESSION:
+                        val registry_index = self.gui_content_index(
+                            s.content_handle
+                        )
+                        if registry_index >= 0:
+                            var session = UISession.new(
+                                self.gui_content_trees[registry_index]
+                            )
+                            val focused_id = self.gui_content_focused_ids[registry_index]
+                            if focused_id != "":
+                                session.dispatch(UIEvent.FocusEvent(
+                                    focused_id, "focus"
+                                ))
+                            val frame = gui_session_content_frame(
+                                session, s.id.to_text(), "", 0, 0,
+                                content_w, content_h, 1,
+                                s.content_revision, []
+                            )
+                            if frame.pixels.len() == content_w * content_h:
+                                self.backend.blit_pixels(
+                                    s.x + 4, s.y + 32,
+                                    content_w, content_h, frame.pixels
+                                )
+                    elif s.content_kind == WM_CONTENT_KIND_WEB_DOCUMENT:
+                        render_simple_web_content(
+                            self.backend,
+                            s.title,
+                            s.x + 4,
+                            s.y + 32,
+                            content_w,
+                            content_h,
+                            s.content_html
+                        )
+                    elif s.content_kind == WM_CONTENT_KIND_PIXEL_SURFACE:
+                        val length = pixel_content_store_length(
+                            self.pixel_content_registry_addr,
+                            s.content_handle
+                        )
+                        if length == content_w * content_h:
+                            # ponytail: scalar fallback avoids the broken
+                            # aggregate pixel ABI; use backend handle blits
+                            # when large surfaces need more throughput.
+                            var pixel: i64 = 0
+                            # cpu-lane-loop-ok: genuine CPU lane per-pixel blit of a window pixel-content buffer into the framebuffer; this is the CPU lane rasterisation work the dual-algorithm design exists to describe
+                            while pixel < length:
+                                self.backend.put_pixel(
+                                    s.x + 4 + (pixel % content_w) as i32,
+                                    s.y + 32 + (pixel / content_w) as i32,
+                                    pixel_content_store_color(
+                                        self.pixel_content_registry_addr,
+                                        s.content_handle,
+                                        pixel
+                                    )
+                                )
+                                pixel = pixel + 1
+            i = i + 1
+        draw_shared_mdi_taskbar(self.backend, shared_windows, self.screen_width, self.screen_height, theme)
+        val cx = self.cursor.x
+        val cy = self.cursor.y
+        self.backend.fill_rect(cx, cy, 8, 8, 0xFFFFFFFF)
+
+    me consume_pending_meta_key() -> i32:
+        val k = self.pending_meta_key
+        self.pending_meta_key = 0
+        k
+
+    me consume_pending_shortcut() -> text:
+        val s = self.pending_shortcut
+        self.pending_shortcut = ""
+        s
+
+    me note_pending_wm_pointer_step(x: i32, y: i32, button_code: i32, kind_code: i32):
+        self.pending_wm_pointer_valid = true
+        self.pending_wm_pointer_x = x
+        self.pending_wm_pointer_y = y
+        self.pending_wm_pointer_button_code = button_code
+        self.pending_wm_pointer_kind_code = kind_code
+        var hit_id: i32 = 0
+        var hit_local_x: i32 = 0
+        var hit_local_y: i32 = 0
+        var wi = 0
+        # cpu-lane-loop-ok: surface lookup while recording a pending WM pointer step; bound is the surface count
+        while wi < self.surfaces.len():
+            val s = self.surfaces[wi]
+            if (x >= s.x and x < s.x + s.width and
+                y >= s.y and y < s.y + s.height):
+                hit_id = s.id
+                hit_local_x = x - s.x
+                hit_local_y = y - s.y
+            wi = wi + 1
+        self.pending_wm_pointer_window_id = hit_id
+        self.pending_wm_pointer_local_x = hit_local_x
+        self.pending_wm_pointer_local_y = hit_local_y
+
+    # NOTE(2026-07-26): the has_pending_wm_pointer_step / pending_wm_pointer_*_value
+    # `fn` accessors were DELETED, not left unused. On the freestanding
+    # entry-closure lane their immutable-fn receiver reads returned garbage
+    # (x=2866688 y=162665157 for a pointer step whose fields held 730/274) and
+    # silently broke the WM pointer hit-test. Read these fields DIRECTLY off a
+    # local copy of the compositor, as shell.spl's event loop and
+    # handle_pending_wm_pointer_step both now do. Do not reintroduce accessors.
+    me clear_pending_wm_pointer_step():
+        self.pending_wm_pointer_valid = false
+        self.pending_wm_pointer_x = 0
+        self.pending_wm_pointer_y = 0
+        self.pending_wm_pointer_button_code = 0
+        self.pending_wm_pointer_kind_code = 0
+        self.pending_wm_pointer_window_id = 0
+        self.pending_wm_pointer_local_x = 0
+        self.pending_wm_pointer_local_y = 0
+
+    me render_frame():
+        self.render_all()
+        self.backend.present()
+
+    me run_loop():
+        self.running = true
+        while self.running:
+            self.handle_input()
+            self.render_all()
+            self.backend.present()
+            self.running = false

@@ -1,0 +1,292 @@
+# DB Accel Phase 3 — Query Planner + ML Cost Model Regression Tests
+#
+# Exercises the PRODUCT implementations in src/lib/nogc_sync_mut/db/.
+# There are deliberately NO inline re-implementations here: a spec that
+# defines the code it claims to test can never observe a product change.
+
+use std.db.ml_cost_model.{
+    PlanCost,
+    cost_model_new,
+    cost_model_with_weights,
+    estimate_cost,
+    plan_cost_total,
+    plan_cost_rows
+}
+use std.db.query_planner.{
+    IndexDescriptor,
+    IndexKind,
+    PlanCandidate,
+    PlanNodeKind,
+    predicate_eq,
+    predicate_range,
+    predicate_prefix,
+    predicate_and,
+    predicate_or,
+    index_descriptor_new,
+    plan_node_full_scan,
+    plan_node_index_lookup,
+    plan_node_kind_name,
+    plan_node_index_fts,
+    plan_node_page_summary,
+    plan_query,
+    pick_best,
+    choose_plan
+}
+
+# =============================================================================
+# CostModel Tests
+# =============================================================================
+
+describe "CostModel":
+    it "cost_model_new sets row_count":
+        val m = cost_model_new(1000)
+        expect(m.row_count).to_equal(1000)
+
+    it "cost_model_new defaults io_weight to 1.0":
+        val m = cost_model_new(500)
+        expect(m.io_weight).to_equal(1.0)
+
+    it "cost_model_new defaults cpu_weight to 0.1":
+        val m = cost_model_new(500)
+        expect(m.cpu_weight).to_equal(0.1)
+
+    it "cost_model_new defaults selectivity to 0.1":
+        val m = cost_model_new(500)
+        expect(m.selectivity_default).to_equal(0.1)
+
+    it "cost_model_with_weights uses supplied weights":
+        val m = cost_model_with_weights(100, 2.0, 0.5)
+        expect(m.io_weight).to_equal(2.0)
+
+# =============================================================================
+# PlanCost Accessor Tests
+# =============================================================================
+
+describe "PlanCost accessors":
+    it "plan_cost_total returns total_cost field":
+        val c = PlanCost(estimated_rows: 10, io_cost: 5.0, cpu_cost: 1.0, total_cost: 6.0)
+        expect(plan_cost_total(c)).to_equal(6.0)
+
+    it "plan_cost_rows returns estimated_rows field":
+        val c = PlanCost(estimated_rows: 42, io_cost: 1.0, cpu_cost: 0.5, total_cost: 1.5)
+        expect(plan_cost_rows(c)).to_equal(42)
+
+# =============================================================================
+# estimate_cost Tests
+# =============================================================================
+
+describe "estimate_cost":
+    it "FullScan rows equals row_count":
+        val m = cost_model_new(1000)
+        val pc = estimate_cost("FullScan", m)
+        expect(plan_cost_rows(pc)).to_equal(1000)
+
+    it "IndexLookup rows less than FullScan for large table":
+        val m = cost_model_new(1000)
+        val full = estimate_cost("FullScan", m)
+        val lookup = estimate_cost("IndexLookup", m)
+        expect(plan_cost_rows(lookup) < plan_cost_rows(full)).to_equal(true)
+
+    it "IndexLookup total_cost less than FullScan total_cost for large table":
+        val m = cost_model_new(1000)
+        val full = estimate_cost("FullScan", m)
+        val lookup = estimate_cost("IndexLookup", m)
+        expect(plan_cost_total(lookup) < plan_cost_total(full)).to_equal(true)
+
+    it "IndexRange rows less than FullScan for large table":
+        val m = cost_model_new(1000)
+        val full = estimate_cost("FullScan", m)
+        val rng = estimate_cost("IndexRange", m)
+        expect(plan_cost_rows(rng) < plan_cost_rows(full)).to_equal(true)
+
+    it "IndexPrefix rows less than IndexRange for large table":
+        val m = cost_model_new(1000)
+        val rng = estimate_cost("IndexRange", m)
+        val pfx = estimate_cost("IndexPrefix", m)
+        expect(plan_cost_rows(pfx) < plan_cost_rows(rng)).to_equal(true)
+
+    it "Join rows positive for any table":
+        val m = cost_model_new(100)
+        val jn = estimate_cost("Join", m)
+        expect(plan_cost_rows(jn) > 0).to_equal(true)
+
+    it "unknown kind falls back to FullScan rows":
+        val m = cost_model_new(200)
+        val unk = estimate_cost("Unknown", m)
+        val full = estimate_cost("FullScan", m)
+        expect(plan_cost_rows(unk)).to_equal(plan_cost_rows(full))
+
+    it "IndexLookup at min (1 row) returns 1":
+        val m = cost_model_new(1)
+        val lookup = estimate_cost("IndexLookup", m)
+        expect(plan_cost_rows(lookup)).to_equal(1)
+
+# =============================================================================
+# plan_query Tests
+# =============================================================================
+
+describe "plan_query":
+    it "Eq predicate with no indexes returns FullScan only":
+        val pred = predicate_eq("col_a", "val1")
+        val indexes: [IndexDescriptor] = []
+        val m = cost_model_new(500)
+        val candidates = plan_query(pred, indexes, m)
+        expect(candidates.len()).to_equal(1)
+
+    it "Eq predicate with matching BTree index returns two candidates":
+        val pred = predicate_eq("col_a", "val1")
+        val idx = index_descriptor_new("idx_a", "col_a", IndexKind.BTree)
+        val indexes = [idx]
+        val m = cost_model_new(500)
+        val candidates = plan_query(pred, indexes, m)
+        expect(candidates.len()).to_equal(2)
+
+    it "Range predicate with BTree index includes IndexRange candidate":
+        val pred = predicate_range("col_b", "a", "z")
+        val idx = index_descriptor_new("idx_b", "col_b", IndexKind.BTree)
+        val indexes = [idx]
+        val m = cost_model_new(500)
+        val candidates = plan_query(pred, indexes, m)
+        expect(candidates.len() >= 2).to_equal(true)
+
+    it "Prefix predicate with Prefix index includes IndexPrefix candidate":
+        val pred = predicate_prefix("col_c", "ns/")
+        val idx = index_descriptor_new("idx_c", "col_c", IndexKind.Prefix)
+        val indexes = [idx]
+        val m = cost_model_new(500)
+        val candidates = plan_query(pred, indexes, m)
+        expect(candidates.len() >= 2).to_equal(true)
+
+    it "Or predicate returns exactly one FullScan candidate":
+        val p1 = predicate_eq("col_a", "x")
+        val p2 = predicate_eq("col_a", "y")
+        val pred = predicate_or([p1, p2])
+        val indexes: [IndexDescriptor] = []
+        val m = cost_model_new(500)
+        val candidates = plan_query(pred, indexes, m)
+        expect(candidates.len()).to_equal(1)
+
+    it "And predicate with two children includes Join candidate":
+        val p1 = predicate_eq("col_a", "x")
+        val p2 = predicate_eq("col_b", "y")
+        val pred = predicate_and([p1, p2])
+        val indexes: [IndexDescriptor] = []
+        val m = cost_model_new(500)
+        val candidates = plan_query(pred, indexes, m)
+        # Two FullScans (one per child) + one Join
+        expect(candidates.len()).to_equal(3)
+
+    it "index on wrong column is not used for Eq predicate":
+        val pred = predicate_eq("col_a", "val1")
+        val idx = index_descriptor_new("idx_b", "col_b", IndexKind.BTree)
+        val indexes = [idx]
+        val m = cost_model_new(500)
+        val candidates = plan_query(pred, indexes, m)
+        # Only FullScan since index is on col_b, not col_a
+        expect(candidates.len()).to_equal(1)
+
+# =============================================================================
+# pick_best Tests
+# =============================================================================
+
+describe "pick_best":
+    it "empty candidates returns FullScan node":
+        val candidates: [PlanCandidate] = []
+        val nd = pick_best(candidates)
+        expect(nd.kind).to_equal(PlanNodeKind.FullScan)
+
+    it "single candidate is returned":
+        val nd = plan_node_index_lookup("idx_x", "col_x")
+        val co = PlanCost(estimated_rows: 5, io_cost: 6.0, cpu_cost: 0.5, total_cost: 6.5)
+        val candidates = [PlanCandidate(node: nd, cost: co)]
+        val result = pick_best(candidates)
+        expect(result.kind).to_equal(PlanNodeKind.IndexLookup)
+
+    it "picks candidate with lower total_cost":
+        val nd1 = plan_node_full_scan()
+        val co1 = PlanCost(estimated_rows: 1000, io_cost: 1000.0, cpu_cost: 100.0, total_cost: 1100.0)
+        val nd2 = plan_node_index_lookup("idx_x", "col_x")
+        val co2 = PlanCost(estimated_rows: 10, io_cost: 11.0, cpu_cost: 1.0, total_cost: 12.0)
+        val candidates = [PlanCandidate(node: nd1, cost: co1), PlanCandidate(node: nd2, cost: co2)]
+        val result = pick_best(candidates)
+        expect(result.kind).to_equal(PlanNodeKind.IndexLookup)
+
+    it "first wins on tie":
+        val nd1 = plan_node_full_scan()
+        val co1 = PlanCost(estimated_rows: 100, io_cost: 50.0, cpu_cost: 5.0, total_cost: 55.0)
+        val nd2 = plan_node_index_lookup("idx_x", "col_x")
+        val co2 = PlanCost(estimated_rows: 100, io_cost: 50.0, cpu_cost: 5.0, total_cost: 55.0)
+        val candidates = [PlanCandidate(node: nd1, cost: co1), PlanCandidate(node: nd2, cost: co2)]
+        val result = pick_best(candidates)
+        expect(result.kind).to_equal(PlanNodeKind.FullScan)
+
+# =============================================================================
+# choose_plan End-to-End Tests
+# =============================================================================
+
+describe "choose_plan":
+    it "Eq with BTree index chooses IndexLookup over FullScan":
+        val pred = predicate_eq("col_a", "42")
+        val idx = index_descriptor_new("idx_a", "col_a", IndexKind.BTree)
+        val indexes = [idx]
+        val nd = choose_plan(pred, indexes, 10000)
+        expect(nd.kind).to_equal(PlanNodeKind.IndexLookup)
+
+    it "Prefix with Prefix index chooses IndexPrefix":
+        val pred = predicate_prefix("col_b", "ns/")
+        val idx = index_descriptor_new("idx_b", "col_b", IndexKind.Prefix)
+        val indexes = [idx]
+        val nd = choose_plan(pred, indexes, 10000)
+        expect(nd.kind).to_equal(PlanNodeKind.IndexPrefix)
+
+    it "Range with BTree index chooses IndexRange":
+        val pred = predicate_range("col_c", "a", "m")
+        val idx = index_descriptor_new("idx_c", "col_c", IndexKind.BTree)
+        val indexes = [idx]
+        val nd = choose_plan(pred, indexes, 10000)
+        expect(nd.kind).to_equal(PlanNodeKind.IndexRange)
+
+    it "Eq with no indexes returns FullScan":
+        val pred = predicate_eq("col_a", "x")
+        val indexes: [IndexDescriptor] = []
+        val nd = choose_plan(pred, indexes, 500)
+        expect(nd.kind).to_equal(PlanNodeKind.FullScan)
+
+    it "Or predicate always returns FullScan":
+        val p1 = predicate_eq("col_a", "x")
+        val p2 = predicate_eq("col_a", "y")
+        val pred = predicate_or([p1, p2])
+        val idx = index_descriptor_new("idx_a", "col_a", IndexKind.Hash)
+        val indexes = [idx]
+        val nd = choose_plan(pred, indexes, 1000)
+        expect(nd.kind).to_equal(PlanNodeKind.FullScan)
+
+    it "index_name populated on IndexLookup result":
+        val pred = predicate_eq("col_a", "42")
+        val idx = index_descriptor_new("my_idx", "col_a", IndexKind.Hash)
+        val indexes = [idx]
+        val nd = choose_plan(pred, indexes, 10000)
+        expect(nd.index_name).to_equal("my_idx")
+
+    it "predicate_column populated on IndexRange result":
+        val pred = predicate_range("col_d", "0", "9")
+        val idx = index_descriptor_new("idx_d", "col_d", IndexKind.BTree)
+        val indexes = [idx]
+        val nd = choose_plan(pred, indexes, 10000)
+        expect(nd.predicate_column).to_equal("col_d")
+
+# =============================================================================
+# Plan node kinds the in-spec copy used to omit
+# =============================================================================
+
+describe "PlanNodeKind coverage":
+    it "names the full-text-search plan node":
+        val nd = plan_node_index_fts("fts_idx", "body")
+        expect(plan_node_kind_name(nd)).to_equal("IndexFts")
+
+    it "names the page-summary scan plan node":
+        val nd = plan_node_page_summary("ps_idx", "key")
+        expect(plan_node_kind_name(nd)).to_equal("PageSummaryScan")
+
+    it "names the fallback full scan":
+        expect(plan_node_kind_name(plan_node_full_scan())).to_equal("FullScan")

@@ -1,0 +1,252 @@
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.driver_pipeline.*
+use compiler.driver.driver_aot_pipeline.*
+use compiler.driver.driver_aot_output.{driver_native_sources_fingerprint}
+use compiler.driver.driver_log_helpers.{
+    log_debug,
+    log_trace,
+    log_warn,
+    log_error,
+    log_phase,
+    log_build_progress
+}
+use compiler.common.driver_core_types.{CompileMode, CompileResult}
+use compiler.common.attributes.{
+    VhdlHardwareMetadataFlatRow,
+    VhdlResetPolarity,
+    VhdlResetSynchrony,
+    parse_vhdl_hardware_attrs
+}
+use compiler.frontend.parser_types.{ParserModule, ParserFunction}
+use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+
+extern fn rt_env_get(key: text) -> text
+
+pub fn driver_streaming_surface_enabled(ctx: CompileContext) -> bool:
+    ctx.options.mode == CompileMode.Aot and
+        (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and
+        (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1" and
+        (rt_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") == "1" and
+        (rt_env_get("SIMPLE_STAGE4_STREAMING_SURFACES") ?? "") == "1" and
+        ctx.options.backend != "vhdl"
+
+impl CompilerDriver:
+    me capture_vhdl_metadata():
+        var metadata_rows: [VhdlHardwareMetadataFlatRow] = []
+        for module_name in self.ctx.modules.keys():
+            val source_module: ParserModule = self.ctx.modules[module_name]
+            for function_name in source_module.functions.keys():
+                val source_function: ParserFunction = source_module.functions[function_name]
+                val metadata = parse_vhdl_hardware_attrs(source_function.attributes)
+                if metadata.is_hardware:
+                    var generic_names: [text] = []
+                    var generic_type_texts: [text] = []
+                    var generic_default_texts: [text] = []
+                    for generic in metadata.generics:
+                        generic_names = generic_names.push(generic.name)
+                        generic_type_texts = generic_type_texts.push(generic.type_text)
+                        generic_default_texts = generic_default_texts.push(
+                            generic.default_text)
+                    var return_field_labels: [text] = []
+                    var return_field_type_texts: [text] = []
+                    for field in metadata.return_fields:
+                        return_field_labels = return_field_labels.push(field.label)
+                        return_field_type_texts = return_field_type_texts.push(
+                            field.type_text)
+                    metadata_rows = metadata_rows.push(VhdlHardwareMetadataFlatRow(
+                        module_name: module_name,
+                        function_name: source_function.name,
+                        generic_names: generic_names,
+                        generic_type_texts: generic_type_texts,
+                        generic_default_texts: generic_default_texts,
+                        has_clocked: if metadata.has_clocked: 1 else: 0,
+                        clock_signal: metadata.clocked.clock_signal,
+                        reset_signal: metadata.clocked.reset_signal,
+                        has_reset: if metadata.clocked.has_reset: 1 else: 0,
+                        reset_polarity: if metadata.clocked.reset_polarity ==
+                            VhdlResetPolarity.ActiveHigh: 1 else: 0,
+                        reset_synchrony: if metadata.clocked.reset_synchrony ==
+                            VhdlResetSynchrony.Sync: 1 else:
+                            if metadata.clocked.reset_synchrony ==
+                                VhdlResetSynchrony.None_: 2 else: 0,
+                        domain: metadata.clocked.domain,
+                        clocked_is_valid: if metadata.clocked.is_valid: 1 else: 0,
+                        clocked_validation_errors: metadata.clocked.validation_errors,
+                        return_field_labels: return_field_labels,
+                        return_field_type_texts: return_field_type_texts,
+                        flatten_struct_output: if metadata.flatten_struct_output:
+                            1
+                        else:
+                            0
+                    ))
+        self.ctx.vhdl_hardware_metadata_rows = metadata_rows
+        if (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1":
+            eprint("[vhdl-driver] captured-metadata={metadata_rows.len()}")
+
+    me compile() -> CompileResult:
+        val log = self.ctx.logger
+        var compile_mode_text = self.ctx.options.mode.to_text()
+        if self.ctx.options.cli_mode_text != "":
+            compile_mode_text = self.ctx.options.cli_mode_text
+
+        log_phase("compile:start")
+        log_build_progress("load_sources", "files", -1, -1,
+            "starting", 0, 6, 0, 0, "running")
+        log_phase("phase1:load_sources:start")
+        val (loaded_ctx, load_ok) = self.load_sources_impl()
+        self.ctx = loaded_ctx
+        if not load_ok:
+            log_error("phase 1 FAILED")
+            log_build_progress("load_sources", "files", -1, -1,
+                "failed", 0, 6, 1, 0, "failed")
+            return CompileResult.ParseError(self.ctx.errors)
+        if compile_mode_text == "aot":
+            self.ctx.native_sources_fingerprint = driver_native_sources_fingerprint(self.ctx.sources)
+        log_phase("phase1:load_sources:done n_sources={self.ctx.sources.len()}")
+        log_build_progress("load_sources", "files", self.ctx.sources.len(),
+            self.ctx.sources.len(), "complete", 1, 6, 0, 0, "running")
+
+        log_phase("phase2:parse:start")
+        log_debug("phase 2: parsing...")
+        val (parsed_ctx, parse_ok) = self.parse_all_impl()
+        self.ctx = parsed_ctx
+        if not parse_ok:
+            log_error("phase 2 FAILED")
+            log_build_progress("parse", "files", -1, self.ctx.sources.len(),
+                "failed", 1, 6, 1, 0, "failed")
+            return CompileResult.ParseError(self.ctx.errors)
+        if self.ctx.options.backend == "vhdl":
+            self.capture_vhdl_metadata()
+        log_debug("phase 2 done")
+        val parsed_module_count = self.ctx.modules.keys().len()
+        log_phase("phase2:parse:done n_modules={parsed_module_count}")
+        log_build_progress("parse", "modules", parsed_module_count,
+            parsed_module_count, "complete", 2, 6, 0, 0, "running")
+
+        if self.ctx.source_contents_reclaimable() and not driver_streaming_surface_enabled(self.ctx):
+            log_phase("phase2:source_reclaim:start low_memory=true")
+            log_debug("low-memory: evicting source text")
+            lexer_release_parse_source_globals()
+            val reclaimed_sources = self.ctx.reclaim_source_contents()
+            log_debug("low-memory: reclaimed source buffers={reclaimed_sources}")
+            self.ctx.evict_sources()
+            log_phase("phase2:source_reclaim:done reclaimed={reclaimed_sources}")
+
+        log_phase("phase3:hir_typecheck:start")
+        log_trace("BEFORE phase 3")
+        val (analyzed_ctx, analyze_ok) = self.lower_and_check_impl()
+        self.ctx = analyzed_ctx
+        log_trace("AFTER phase 3")
+        if not analyze_ok:
+            log_error("phase 3 FAILED")
+            if (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1":
+                val phase3_error_count = self.ctx.errors.len()
+                eprint("[bootstrap-phase3-errors] count={phase3_error_count}")
+                var phase3_error_index = 0
+                while phase3_error_index < phase3_error_count and phase3_error_index < 20:
+                    val phase3_error = self.ctx.errors[phase3_error_index]
+                    eprint("[bootstrap-phase3-error] index={phase3_error_index} len={phase3_error.len()} text={phase3_error}")
+                    phase3_error_index = phase3_error_index + 1
+            log_build_progress("hir", "modules", -1, -1,
+                "failed", 2, 6, 1, 0, "failed")
+            if self.ctx.has_errors():
+                val first_error = self.ctx.errors[0]
+                if first_error.contains("Method resolution"):
+                    return CompileResult.ResolveError(self.ctx.errors)
+            return CompileResult.TypeError(self.ctx.errors)
+        log_debug("phase 3 done")
+        log_phase("phase3:hir_typecheck:done")
+        log_build_progress("hir", "modules", -1, -1,
+            "complete", 3, 6, 0, 0, "running")
+
+        if self.ctx.options.low_memory:
+            log_debug("low-memory: evicting AST modules")
+            self.ctx.evict_ast()
+
+        if compile_mode_text == "check":
+            log_debug("check mode")
+            return CompileResult.Success(nil)
+
+        log_phase("phase4:monomorphize:start")
+        log_debug("phase 4: monomorphization...")
+        val mono_ok = self.monomorphize_impl()
+        if not mono_ok:
+            log_error("phase 4 FAILED")
+            log_build_progress("monomorphize", "modules", -1, -1,
+                "failed", 3, 6, 1, 0, "failed")
+            return CompileResult.TypeError(self.ctx.errors)
+        log_debug("phase 4 done")
+        log_phase("phase4:monomorphize:done")
+        log_build_progress("monomorphize", "modules", -1, -1,
+            "complete", 4, 6, 0, 0, "running")
+
+        log_phase("phase5:mode_dispatch:start")
+        log_debug("phase 5: mode-specific processing...")
+        if compile_mode_text == "check":
+            log_debug("check mode")
+            return CompileResult.Success(nil)
+        if compile_mode_text == "sdn":
+            log_debug("sdn mode")
+            return self.process_sdn()
+        if compile_mode_text == "interpret":
+            log_debug("interpret mode")
+            return self.interpret()
+        if compile_mode_text == "jit":
+            log_debug("jit mode")
+            return self.jit_compile_and_run()
+        if compile_mode_text == "aot":
+            log_debug("aot mode")
+            return self.aot_compile()
+        if compile_mode_text == "smf_exec":
+            log_debug("smf_exec mode")
+            return self.execute_smf()
+
+        log_warn("no mode matched, falling through")
+        CompileResult.Success(nil)
+
+    me compile_vhdl_only() -> CompileResult:
+        if self.ctx.options.backend != "vhdl" or self.ctx.options.mode != CompileMode.Aot:
+            return CompileResult.CodegenError(
+                "fixed VHDL runner requires AOT mode with backend=vhdl")
+
+        val (loaded_ctx, load_ok) = self.load_sources_impl()
+        self.ctx = loaded_ctx
+        if not load_ok:
+            return CompileResult.ParseError(self.ctx.errors)
+
+        val (parsed_ctx, parse_ok) = self.parse_all_impl()
+        self.ctx = parsed_ctx
+        if not parse_ok:
+            return CompileResult.ParseError(self.ctx.errors)
+        self.capture_vhdl_metadata()
+        val (analyzed_ctx, analyze_ok) = self.lower_and_check_impl()
+        self.ctx = analyzed_ctx
+        if not analyze_ok:
+            if self.ctx.has_errors() and self.ctx.errors[0].contains("Method resolution"):
+                return CompileResult.ResolveError(self.ctx.errors)
+            return CompileResult.TypeError(self.ctx.errors)
+        if self.ctx.options.low_memory:
+            self.ctx.evict_ast()
+
+        if not self.monomorphize_impl():
+            return CompileResult.TypeError(self.ctx.errors)
+        if not self.lower_to_mir():
+            # See driver_aot_pipeline.spl's aot_compile() for the full
+            # writeup: builtin `Array.first()` has no MIR method symbol
+            # under native codegen and lowers to a `call 0` placeholder --
+            # a genuine SIGSEGV baked into stage3's own binary, confirmed
+            # via gdb/objdump. Avoid it with a length-guarded index read.
+            val message = if self.ctx.has_errors():
+                self.ctx.errors[0]
+            else:
+                "MIR lowering failed"
+            return CompileResult.CodegenError(message)
+        if not self.borrow_check():
+            return CompileResult.BorrowError(self.ctx.errors)
+
+        val _ = self.process_async()
+        self.weave_aop()
+        self.apply_debug_trace()
+        self.compile_to_vhdl(self.ctx.options.output_file ?? "a.out")

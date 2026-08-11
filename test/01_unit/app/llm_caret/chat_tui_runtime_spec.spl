@@ -1,0 +1,607 @@
+# codex-system-test
+# LLM Caret TUI runtime seam specification.
+#
+# Directly exercises the production CaretIo boundary and chat loops with
+# deterministic function-valued I/O. No terminal/runtime extern is copied into
+# this spec, and every lifecycle assertion observes production control flow.
+
+use std.spec.*
+use std.tui.terminal.{TerminalSize}
+use app.llm_caret.types.{Message}
+use app.llm_caret.tools.{
+    ModelResponse, PermissionPolicy, default_policy, new_model_text
+}
+use app.llm_caret.tui_io.{CaretIo, CaretLoopResult, CaretTerminalResult}
+use app.llm_caret.chat_tui.{
+    ChatTui, ProviderSwitchResult, SessionResumeResult, SessionHooks,
+    make_chat_tui, tui_transcript_reset, render_turn, is_scrolled,
+    _inner_height, _draw_frame, _read_line,
+    run_chat_tui, run_chat_plain, caret_chat
+}
+
+val RUNTIME_WS = "build/tmp/llm_caret_tui_runtime_spec"
+
+var IO_TTY = true
+var IO_BEGIN_OK = true
+var IO_BEGIN_PHASE = ""
+var IO_BEGIN_ERROR = ""
+var IO_END_OK = true
+var IO_END_PHASE = ""
+var IO_END_ERROR = ""
+var IO_BEGIN_CALLS = 0
+var IO_END_CALLS = 0
+var IO_COLS = 80
+var IO_ROWS = 24
+var IO_SIZE_CALLS = 0
+var IO_FLUSH_CALLS = 0
+var IO_DRAW_CALLS = 0
+var IO_DRAW_ROWS: [i64] = []
+var IO_BYTES: [i64] = []
+var IO_BYTE_INDEX = 0
+var IO_LINES: [text] = []
+var IO_LINE_INDEX = 0
+var IO_EVENTS = ""
+var IO_OUTPUT = ""
+
+var HOOK_MODEL = ""
+var HOOK_HIDDEN_CALLS = 0
+var HOOK_HIDDEN_NAME = ""
+var HOOK_HIDDEN_ARG = ""
+var HOOK_PERSIST_COUNT = 0
+var HOOK_PERSIST_SESSION = ""
+var HOOK_PERSIST_MESSAGES = 0
+var RESPONDER_CALLS = 0
+
+struct CaretPromptlessCommandCase:
+    input: text
+    canonical: text
+    expected_message: text
+
+fn _record(event: text):
+    IO_EVENTS = IO_EVENTS + event + "|"
+
+fn _fake_is_tty() -> bool:
+    _record("is_tty")
+    IO_TTY
+
+fn _fake_terminal_size() -> TerminalSize:
+    IO_SIZE_CALLS = IO_SIZE_CALLS + 1
+    _record("size")
+    TerminalSize(cols: IO_COLS, rows: IO_ROWS)
+
+fn _fake_begin_tui() -> CaretTerminalResult:
+    IO_BEGIN_CALLS = IO_BEGIN_CALLS + 1
+    _record("begin_tui")
+    CaretTerminalResult(
+        ok: IO_BEGIN_OK,
+        phase: IO_BEGIN_PHASE,
+        error: IO_BEGIN_ERROR
+    )
+
+fn _fake_end_tui() -> CaretTerminalResult:
+    IO_END_CALLS = IO_END_CALLS + 1
+    _record("end_tui")
+    CaretTerminalResult(
+        ok: IO_END_OK,
+        phase: IO_END_PHASE,
+        error: IO_END_ERROR
+    )
+
+fn _fake_clear_screen():
+    _record("clear")
+
+fn _fake_draw_at(row: i64, col: i64, content: text):
+    IO_DRAW_CALLS = IO_DRAW_CALLS + 1
+    IO_DRAW_ROWS = IO_DRAW_ROWS + [row]
+
+fn _fake_flush():
+    IO_FLUSH_CALLS = IO_FLUSH_CALLS + 1
+    _record("flush")
+
+fn _fake_read_byte() -> i64:
+    if IO_BYTE_INDEX >= IO_BYTES.len():
+        return -1
+    val value = IO_BYTES[IO_BYTE_INDEX]
+    IO_BYTE_INDEX = IO_BYTE_INDEX + 1
+    value
+
+fn _fake_read_line() -> text?:
+    if IO_LINE_INDEX >= IO_LINES.len():
+        return nil
+    val value = IO_LINES[IO_LINE_INDEX]
+    IO_LINE_INDEX = IO_LINE_INDEX + 1
+    value
+
+fn _fake_emit(content: text):
+    IO_OUTPUT = IO_OUTPUT + content
+    _record("emit")
+
+fn _fake_io() -> CaretIo:
+    CaretIo(
+        is_tty: _fake_is_tty,
+        terminal_size: _fake_terminal_size,
+        begin_tui: _fake_begin_tui,
+        end_tui: _fake_end_tui,
+        clear_screen: _fake_clear_screen,
+        draw_at: _fake_draw_at,
+        flush: _fake_flush,
+        read_byte: _fake_read_byte,
+        read_line: _fake_read_line,
+        emit: _fake_emit
+    )
+
+fn _reset_fakes():
+    IO_TTY = true
+    IO_BEGIN_OK = true
+    IO_BEGIN_PHASE = ""
+    IO_BEGIN_ERROR = ""
+    IO_END_OK = true
+    IO_END_PHASE = ""
+    IO_END_ERROR = ""
+    IO_BEGIN_CALLS = 0
+    IO_END_CALLS = 0
+    IO_COLS = 80
+    IO_ROWS = 24
+    IO_SIZE_CALLS = 0
+    IO_FLUSH_CALLS = 0
+    IO_DRAW_CALLS = 0
+    IO_DRAW_ROWS = []
+    IO_BYTES = []
+    IO_BYTE_INDEX = 0
+    IO_LINES = []
+    IO_LINE_INDEX = 0
+    IO_EVENTS = ""
+    IO_OUTPUT = ""
+    HOOK_MODEL = ""
+    HOOK_HIDDEN_CALLS = 0
+    HOOK_HIDDEN_NAME = ""
+    HOOK_HIDDEN_ARG = ""
+    HOOK_PERSIST_COUNT = 0
+    HOOK_PERSIST_SESSION = ""
+    HOOK_PERSIST_MESSAGES = 0
+    RESPONDER_CALLS = 0
+    tui_transcript_reset()
+
+fn _hook_model(name: text) -> text:
+    HOOK_MODEL = name
+    "model set to " + name
+
+fn _hook_provider(name: text) -> ProviderSwitchResult:
+    ProviderSwitchResult(
+        accepted: true,
+        message: "provider set to " + name,
+        provider: name,
+        model: "fixture-model"
+    )
+
+fn _hook_sessions() -> text:
+    "Sessions: fixture"
+
+fn _hook_new() -> text:
+    "fixture-new"
+
+fn _hook_resume(id: text) -> SessionResumeResult:
+    SessionResumeResult(
+        found: false,
+        message: "no saved session '" + id + "'",
+        messages: [],
+        session_id: "",
+        provider: "",
+        model: ""
+    )
+
+fn _hook_hidden(name: text, arg: text) -> text:
+    HOOK_HIDDEN_CALLS = HOOK_HIDDEN_CALLS + 1
+    HOOK_HIDDEN_NAME = name
+    HOOK_HIDDEN_ARG = arg
+    "hidden " + name + " " + arg
+
+fn _hook_persist(session_id: text, messages: [Message]):
+    HOOK_PERSIST_COUNT = HOOK_PERSIST_COUNT + 1
+    HOOK_PERSIST_SESSION = session_id
+    HOOK_PERSIST_MESSAGES = messages.len()
+
+fn _hooks() -> SessionHooks:
+    SessionHooks(
+        session_id: "fixture-session",
+        hidden_commands_enabled: false,
+        on_model: _hook_model,
+        on_provider: _hook_provider,
+        on_sessions: _hook_sessions,
+        on_new: _hook_new,
+        on_resume: _hook_resume,
+        on_hidden_command: _hook_hidden,
+        on_persist: _hook_persist
+    )
+
+fn _responder(messages: [Message]) -> ModelResponse:
+    RESPONDER_CALLS = RESPONDER_CALLS + 1
+    new_model_text("fixture reply")
+
+fn _policy() -> PermissionPolicy:
+    default_policy(RUNTIME_WS)
+
+fn _exit_command_bytes() -> [i64]:
+    [47, 101, 120, 105, 116, 13]
+
+fn setup_promptless_command_cases() -> [CaretPromptlessCommandCase]:
+    [
+        CaretPromptlessCommandCase(
+            input: "/compact",
+            canonical: "/compact",
+            expected_message: "Command not implemented in Caret: /compact"
+        ),
+        CaretPromptlessCommandCase(
+            input: "/summarize",
+            canonical: "/compact",
+            expected_message: "Command not implemented in Caret: /compact"
+        ),
+        CaretPromptlessCommandCase(
+            input: "/init",
+            canonical: "/init",
+            expected_message: "Command not implemented in Caret: /init"
+        ),
+        CaretPromptlessCommandCase(
+            input: "/bootstrap",
+            canonical: "/init",
+            expected_message: "Command not implemented in Caret: /init"
+        )
+    ]
+
+fn check_promptless_dispatch(
+    cases: [CaretPromptlessCommandCase],
+    result: CaretLoopResult
+):
+    expect(cases.len()).to_equal(4)
+    expect(cases[0].input).to_equal("/compact")
+    expect(cases[0].canonical).to_equal("/compact")
+    expect(cases[0].expected_message).to_equal(
+        "Command not implemented in Caret: /compact"
+    )
+    expect(cases[1].input).to_equal("/summarize")
+    expect(cases[1].canonical).to_equal("/compact")
+    expect(cases[1].expected_message).to_equal(
+        "Command not implemented in Caret: /compact"
+    )
+    expect(cases[2].input).to_equal("/init")
+    expect(cases[2].canonical).to_equal("/init")
+    expect(cases[2].expected_message).to_equal(
+        "Command not implemented in Caret: /init"
+    )
+    expect(cases[3].input).to_equal("/bootstrap")
+    expect(cases[3].canonical).to_equal("/init")
+    expect(cases[3].expected_message).to_equal(
+        "Command not implemented in Caret: /init"
+    )
+    expect(result.mode).to_equal("plain")
+    expect(result.ok).to_be(true)
+    expect(result.exit_reason).to_equal("command_exit")
+    expect(IO_OUTPUT).to_equal(
+        "> Command not implemented in Caret: /compact\n" +
+        "> Command not implemented in Caret: /compact\n" +
+        "> Command not implemented in Caret: /init\n" +
+        "> Command not implemented in Caret: /init\n" +
+        "> "
+    )
+    expect(RESPONDER_CALLS).to_equal(0)
+    expect(HOOK_PERSIST_COUNT).to_equal(0)
+    expect(HOOK_PERSIST_SESSION).to_equal("")
+    expect(HOOK_PERSIST_MESSAGES).to_equal(0)
+    expect(IO_LINE_INDEX).to_equal(5)
+    expect(IO_LINE_INDEX).to_equal(IO_LINES.len())
+    expect(IO_BYTE_INDEX).to_equal(0)
+    expect(IO_SIZE_CALLS).to_equal(0)
+    expect(IO_DRAW_CALLS).to_equal(0)
+    expect(IO_FLUSH_CALLS).to_equal(0)
+    expect(IO_EVENTS).to_equal(
+        "emit|emit|emit|emit|emit|emit|emit|emit|emit|"
+    )
+
+describe "REQ-LLM-CARET-TUI-HARDEN-009: frame and input behavior":
+    it "should clamp inner content height for undersized terminals":
+        step("Calculate production frame heights below the minimum")
+        expect(_inner_height(0)).to_equal(1)
+        expect(_inner_height(1)).to_equal(1)
+        expect(_inner_height(5)).to_equal(1)
+
+    it "should derive normal inner content height from the supplied rows":
+        step("Calculate a normal production frame height")
+        expect(_inner_height(24)).to_equal(19)
+        expect(_inner_height(40)).to_equal(35)
+
+    it "should draw a frame from one geometry snapshot and flush once":
+        step("Render one production frame through deterministic CaretIo")
+        _reset_fakes()
+        IO_COLS = 72
+        IO_ROWS = 20
+        _draw_frame(make_chat_tui("Caret"), _fake_io())
+        expect(IO_SIZE_CALLS).to_equal(1)
+        expect(IO_FLUSH_CALLS).to_equal(1)
+        expect(IO_DRAW_CALLS).to_be_greater_than(3)
+        expect(IO_EVENTS).to_start_with("clear|size|")
+        expect(IO_EVENTS).to_end_with("flush|")
+
+    it "should keep every draw within undersized terminal rows":
+        step("Configure a terminal below the minimum layout height")
+        _reset_fakes()
+        IO_COLS = 40
+        IO_ROWS = 5
+
+        step("Draw one bounded frame through deterministic CaretIo")
+        _draw_frame(make_chat_tui("Caret"), _fake_io())
+
+        step("Check every draw row stays inside the terminal snapshot")
+        expect(IO_SIZE_CALLS).to_equal(1)
+        expect(IO_DRAW_ROWS.len()).to_be_greater_than(0)
+        for row in IO_DRAW_ROWS:
+            expect(row).to_be_greater_than(-1)
+            expect(row).to_be_less_than(IO_ROWS)
+        expect(IO_FLUSH_CALLS).to_equal(1)
+
+    it "should edit and submit bytes through the production line reader":
+        step("Type ab, move left, insert X, and submit")
+        _reset_fakes()
+        IO_BYTES = [97, 98, 27, 91, 68, 88, 13]
+        val result = _read_line(make_chat_tui("Caret"), _fake_io())
+        expect(result.1).to_equal("aXb")
+        expect(result.2).to_equal(0)
+        expect(result.0.input.value).to_equal("aXb")
+
+    it "should report EOF without submitting partial input":
+        step("End input after one unsubmitted byte")
+        _reset_fakes()
+        IO_BYTES = [120, -1]
+        val result = _read_line(make_chat_tui("Caret"), _fake_io())
+        expect(result.1).to_equal("")
+        expect(result.2).to_equal(1)
+        expect(result.0.input.value).to_equal("x")
+
+    it "should route page controls without inserting them into input":
+        step("Page away from and back to the transcript tail")
+        _reset_fakes()
+        IO_ROWS = 8
+        for line in ["0", "1", "2", "3", "4", "5", "6", "7"]:
+            render_turn("assistant", line)
+        IO_BYTES = [16, 14, 13]
+        val result = _read_line(make_chat_tui("Caret"), _fake_io())
+        expect(result.1).to_equal("")
+        expect(result.0.input.value).to_equal("")
+        expect(is_scrolled()).to_be(false)
+
+    it "should stop the plain loop on EOF without terminal mutation":
+        step("Run the production plain loop with exhausted line input")
+        _reset_fakes()
+        val result = run_chat_plain(
+            _policy(), _responder, _hooks(), [], _fake_io()
+        )
+        expect(result.mode).to_equal("plain")
+        expect(result.ok).to_be(true)
+        expect(result.exit_reason).to_equal("eof")
+        expect(IO_BEGIN_CALLS).to_equal(0)
+        expect(IO_END_CALLS).to_equal(0)
+
+    it "should ignore blank plain input without discarding later commands":
+        step("Queue blank input before a valid plain turn")
+        _reset_fakes()
+        IO_LINES = ["", "   ", "hello", "/exit"]
+
+        step("Run the production plain loop through deterministic CaretIo")
+        val result = run_chat_plain(
+            _policy(), _responder, _hooks(), [], _fake_io()
+        )
+
+        step("Check blank input was ignored and the later turn persisted")
+        expect(result.mode).to_equal("plain")
+        expect(result.ok).to_be(true)
+        expect(result.exit_reason).to_equal("command_exit")
+        expect(IO_LINE_INDEX).to_equal(4)
+        expect(IO_LINE_INDEX).to_equal(IO_LINES.len())
+        expect(RESPONDER_CALLS).to_equal(1)
+        expect(HOOK_PERSIST_COUNT).to_equal(1)
+        expect(HOOK_PERSIST_SESSION).to_equal("fixture-session")
+        expect(HOOK_PERSIST_MESSAGES).to_equal(2)
+        expect(IO_OUTPUT).to_contain("Assistant: fixture reply")
+        expect(IO_BEGIN_CALLS).to_equal(0)
+        expect(IO_END_CALLS).to_equal(0)
+
+    it "should process plain model commands and persist model turns":
+        step("Switch model, submit one turn, and exit the production plain loop")
+        _reset_fakes()
+        IO_LINES = ["/model sonnet", "hello", "/exit"]
+        val result = run_chat_plain(
+            _policy(), _responder, _hooks(), [], _fake_io()
+        )
+        expect(result.exit_reason).to_equal("command_exit")
+        expect(HOOK_MODEL).to_equal("sonnet")
+        expect(HOOK_PERSIST_COUNT).to_equal(1)
+        expect(HOOK_PERSIST_SESSION).to_equal("fixture-session")
+        expect(HOOK_PERSIST_MESSAGES).to_equal(2)
+        expect(IO_OUTPUT).to_contain("model set to sonnet")
+        expect(IO_OUTPUT).to_contain("Assistant: fixture reply")
+        expect(RESPONDER_CALLS).to_equal(1)
+
+    it "should dispatch accepted promptless aliases without model submission":
+        step("Load the accepted promptless command aliases")
+        val cases = setup_promptless_command_cases()
+        _reset_fakes()
+        IO_LINES = [
+            cases[0].input,
+            cases[1].input,
+            cases[2].input,
+            cases[3].input,
+            "/exit"
+        ]
+
+        step("Dispatch the command through the shipped Caret path")
+        val result = run_chat_plain(
+            _policy(), _responder, _hooks(), [], _fake_io()
+        )
+
+        step("Check canonical output and zero model submission")
+        check_promptless_dispatch(cases, result)
+
+describe "REQ-LLM-CARET-HIDDEN-008: plain hidden-command admission":
+    it "should conceal hidden canonical and alias commands and reject disabled aliases":
+        step("Queue hidden and disabled command spellings with the hidden gate off")
+        _reset_fakes()
+        IO_LINES = [
+            "/debug-tool-call fixture-envelope",
+            "/debug_tool_call fixture-envelope",
+            "/remote_setup",
+            "/exit"
+        ]
+
+        step("Dispatch the production plain loop through injected CaretIo")
+        val result = run_chat_plain(
+            _policy(), _responder, _hooks(), [], _fake_io()
+        )
+
+        step("Check hidden membership stays concealed and no model or terminal work occurs")
+        expect(result.mode).to_equal("plain")
+        expect(result.ok).to_be(true)
+        expect(result.exit_reason).to_equal("command_exit")
+        expect(IO_OUTPUT).to_equal(
+            "> Unknown command: /debug-tool-call (try /help)\n" +
+            "> Unknown command: /debug_tool_call (try /help)\n" +
+            "> Command disabled: /remote_setup\n" +
+            "> "
+        )
+        expect(HOOK_HIDDEN_CALLS).to_equal(0)
+        expect(HOOK_HIDDEN_NAME).to_equal("")
+        expect(HOOK_HIDDEN_ARG).to_equal("")
+        expect(RESPONDER_CALLS).to_equal(0)
+        expect(HOOK_PERSIST_COUNT).to_equal(0)
+        expect(HOOK_PERSIST_SESSION).to_equal("")
+        expect(HOOK_PERSIST_MESSAGES).to_equal(0)
+        expect(IO_BEGIN_CALLS).to_equal(0)
+        expect(IO_END_CALLS).to_equal(0)
+        expect(IO_SIZE_CALLS).to_equal(0)
+        expect(IO_DRAW_CALLS).to_equal(0)
+        expect(IO_FLUSH_CALLS).to_equal(0)
+        expect(IO_BYTE_INDEX).to_equal(0)
+        expect(IO_LINE_INDEX).to_equal(IO_LINES.len())
+
+describe "REQ-LLM-CARET-TUI-HARDEN-007: lifecycle and routing":
+    it "should compensate setup failures without drawing model calls or persistence":
+        step("Reject each typed setup failure through the production TUI loop")
+        for phase in ["raw-mode", "alternate-screen", "cursor-hide"]:
+            _reset_fakes()
+            IO_BEGIN_OK = false
+            IO_BEGIN_PHASE = phase
+            IO_BEGIN_ERROR = "failed " + phase
+            val result = run_chat_tui(
+                make_chat_tui("Caret"), _policy(), _responder, _hooks(), [],
+                _fake_io()
+            )
+            expect(result.mode).to_equal("tui")
+            expect(result.ok).to_be(false)
+            expect(result.exit_reason).to_equal("terminal-setup-failed")
+            expect(result.error).to_equal("failed " + phase)
+            expect(IO_BEGIN_CALLS).to_equal(1)
+            expect(IO_END_CALLS).to_equal(1)
+            expect(IO_DRAW_CALLS).to_equal(0)
+            expect(IO_OUTPUT).to_equal("")
+            expect(RESPONDER_CALLS).to_equal(0)
+            expect(HOOK_PERSIST_COUNT).to_equal(0)
+
+    it "should end the TUI exactly once and emit the success footer":
+        step("Exit by command after entering the full-screen production loop")
+        _reset_fakes()
+        IO_BYTES = _exit_command_bytes()
+        val result = run_chat_tui(
+            make_chat_tui("Caret"), _policy(), _responder, _hooks(), [],
+            _fake_io()
+        )
+        expect(result.ok).to_be(true)
+        expect(result.exit_reason).to_equal("command_exit")
+        expect(IO_BEGIN_CALLS).to_equal(1)
+        expect(IO_END_CALLS).to_equal(1)
+        expect(IO_EVENTS).to_start_with("begin_tui|")
+        expect(IO_EVENTS).to_end_with("end_tui|emit|")
+        expect(IO_OUTPUT).to_equal("chat session ended\n")
+
+    it "should report cleanup failure without a success footer":
+        step("Fail compensating terminal cleanup after a command exit")
+        _reset_fakes()
+        IO_END_OK = false
+        IO_END_PHASE = "raw-mode"
+        IO_END_ERROR = "failed to restore terminal raw mode"
+        IO_BYTES = _exit_command_bytes()
+        val result = run_chat_tui(
+            make_chat_tui("Caret"), _policy(), _responder, _hooks(), [],
+            _fake_io()
+        )
+        expect(result.ok).to_be(false)
+        expect(result.exit_reason).to_equal("terminal-cleanup-failed")
+        expect(result.error).to_equal("failed to restore terminal raw mode")
+        expect(IO_BEGIN_CALLS).to_equal(1)
+        expect(IO_END_CALLS).to_equal(1)
+        expect(IO_OUTPUT).to_equal("")
+
+    it "should end exactly once for command control and EOF exits":
+        step("Exercise every normal TUI exit through the shared lifecycle")
+        for input in [_exit_command_bytes(), [3], [4], [-1]]:
+            _reset_fakes()
+            IO_BYTES = input
+            val result = run_chat_tui(
+                make_chat_tui("Caret"), _policy(), _responder, _hooks(), [],
+                _fake_io()
+            )
+            expect(result.ok).to_be(true)
+            expect(IO_BEGIN_CALLS).to_equal(1)
+            expect(IO_END_CALLS).to_equal(1)
+            expect(IO_OUTPUT).to_equal("chat session ended\n")
+
+    it "should force TUI routing without a tty":
+        step("Request TUI mode while the injected tty probe is false")
+        _reset_fakes()
+        IO_TTY = false
+        IO_BYTES = _exit_command_bytes()
+        val result = caret_chat(
+            make_chat_tui("Caret"), _policy(), _responder, "tui",
+            _hooks(), [], _fake_io()
+        )
+        expect(result.mode).to_equal("tui")
+        expect(IO_BEGIN_CALLS).to_equal(1)
+        expect(IO_END_CALLS).to_equal(1)
+
+    it "should force plain routing on a tty":
+        step("Request plain mode while the injected tty probe is true")
+        _reset_fakes()
+        IO_TTY = true
+        IO_LINES = ["/exit"]
+        val result = caret_chat(
+            make_chat_tui("Caret"), _policy(), _responder, "plain",
+            _hooks(), [], _fake_io()
+        )
+        expect(result.mode).to_equal("plain")
+        expect(IO_BEGIN_CALLS).to_equal(0)
+        expect(IO_END_CALLS).to_equal(0)
+
+    it "should automatically route tty input to TUI":
+        step("Select automatic mode with an injected tty")
+        _reset_fakes()
+        IO_TTY = true
+        IO_BYTES = [3]
+        val result = caret_chat(
+            make_chat_tui("Caret"), _policy(), _responder, "auto",
+            _hooks(), [], _fake_io()
+        )
+        expect(result.mode).to_equal("tui")
+        expect(IO_EVENTS).to_start_with("is_tty|begin_tui|")
+        expect(IO_BEGIN_CALLS).to_equal(1)
+        expect(IO_END_CALLS).to_equal(1)
+
+    it "should automatically route non-tty input to plain mode":
+        step("Select automatic mode without an injected tty")
+        _reset_fakes()
+        IO_TTY = false
+        IO_LINES = ["/exit"]
+        val result = caret_chat(
+            make_chat_tui("Caret"), _policy(), _responder, "auto",
+            _hooks(), [], _fake_io()
+        )
+        expect(result.mode).to_equal("plain")
+        expect(IO_EVENTS).to_start_with("is_tty|emit|")
+        expect(IO_BEGIN_CALLS).to_equal(0)
+        expect(IO_END_CALLS).to_equal(0)

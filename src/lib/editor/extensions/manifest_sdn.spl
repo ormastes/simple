@@ -1,0 +1,418 @@
+# Extension Manifest SDN decoder — decodes `extension.sdn` files into the
+# typed manifest model using the std.common.sdn parser + schema helpers.
+#
+# Schema id: "simple.ide.extension/1"
+#   extension:    {schema, id, display_name, version, engine, entry, host}
+#   permissions:  {workspace_read, workspace_write, process_spawn,
+#                  network_client, secrets, native_ffi}   (default deny)
+#   activation:   {events: [...]}
+#   contributes:  {commands: [{id, title, category}],
+#                  languages: [{id, extensions}],
+#                  custom_editors: [{id, document_kind, priority}],
+#                  keybindings: [{command, key, when}],
+#                  themes: [{id, label, ui_theme, path}],
+#                  debug_adapters: [{id, label, program}]}
+#
+# All decode problems are collected into diagnostics (no first-error abort).
+# Legacy quote-style manifests (flat "name"/"version"/"main" JSON-ish files)
+# still load through a compatibility scraper.
+#
+# Provides: ExtensionManifestLoad, extension_manifest_schema_id,
+#           extension_manifest_decode, extension_manifest_load,
+#           extension_manifest_load_with_diagnostics.
+
+use std.editor.extensions.manifest.*
+use std.editor.extensions.contract.{extension_id_is_valid, semver_parse,
+    semver_range_parse, extension_host_placement_known}
+use std.common.sdn.value.{SdnValue, SdnSpan}
+use std.common.sdn.parser.{parse_with_spans_and_issues, SdnIssue}
+use std.common.sdn.schema.*
+use std.io_runtime.{file_read}
+
+fn extension_manifest_schema_id() -> text:
+    "simple.ide.extension/1"
+
+# Result of decoding one manifest: the typed model plus every diagnostic
+# collected on the way. `ok` is true when the manifest is usable (has a name).
+struct ExtensionManifestLoad:
+    manifest: ExtensionManifest
+    issues: [SdnDecodeIssue]
+    ok: bool
+
+# ---- public facade ----------------------------------------------------------
+
+# Backward-compatible loader: same signature as the old quote-scraper.
+fn extension_manifest_load(path: text) -> ExtensionManifest:
+    extension_manifest_load_with_diagnostics(path).manifest
+
+fn extension_manifest_load_with_diagnostics(path: text) -> ExtensionManifestLoad:
+    val content = file_read(path) ?? ""
+    extension_manifest_decode(content)
+
+fn extension_manifest_decode(content: text) -> ExtensionManifestLoad:
+    if content.trim() == "":
+        return ExtensionManifestLoad(
+            manifest: extension_manifest_empty(),
+            issues: [SdnDecodeIssue(path: "", message: "manifest is empty", line: 0, col: 0)],
+            ok: false
+        )
+    match parse_with_spans_and_issues(content):
+        case Ok(r):
+            val root = r.0
+            val spans = r.1
+            val parser_issues = r.2
+            match root.get_path("extension"):
+                case Some(_):
+                    _extension_manifest_decode_v1(root, spans, parser_issues)
+                case None:
+                    _extension_manifest_decode_legacy(content)
+        case Err(e):
+            val legacy = _extension_manifest_decode_legacy(content)
+            if legacy.ok:
+                return legacy
+            ExtensionManifestLoad(
+                manifest: extension_manifest_empty(),
+                issues: [SdnDecodeIssue(path: "", message: "SDN parse error: " + e, line: 0, col: 0)],
+                ok: false
+            )
+
+# ---- v1 schema decode -------------------------------------------------------
+
+fn _opt_text(v: SdnValue, path: text, issues: SdnDecodeIssues) -> text:
+    match sdn_get_text(v, path, issues):
+        case Some(s): s
+        case None: ""
+
+fn _req_text(v: SdnValue, path: text, issues: SdnDecodeIssues) -> text:
+    match sdn_require_text(v, path, issues):
+        case Some(s): s
+        case None: ""
+
+fn _opt_bool(v: SdnValue, path: text, issues: SdnDecodeIssues) -> bool:
+    match sdn_get_bool(v, path, issues):
+        case Some(b): b
+        case None: false
+
+fn _opt_int(v: SdnValue, path: text, issues: SdnDecodeIssues, default: i64) -> i64:
+    match sdn_get_int(v, path, issues):
+        case Some(i): i
+        case None: default
+
+# Copy per-item issues into the main collector with the array path prefixed.
+fn _merge_item_issues(issues: SdnDecodeIssues, sub: SdnDecodeIssues, base: text, idx: i64):
+    for it in sub.items:
+        issues.add(base + "." + idx.to_text() + "." + it.path, it.message)
+
+fn _extension_manifest_decode_v1(root: SdnValue, spans: Dict<text, SdnSpan>, parser_issues: [SdnIssue]) -> ExtensionManifestLoad:
+    val issues = SdnDecodeIssues.new()
+    var m = extension_manifest_empty()
+
+    # extension section
+    val schema = _req_text(root, "extension.schema", issues)
+    if schema != "" and schema != extension_manifest_schema_id():
+        issues.add("extension.schema", "unsupported schema '" + schema + "' (expected '" + extension_manifest_schema_id() + "')")
+    m.schema_version = schema
+
+    val id = _req_text(root, "extension.id", issues)
+    if id != "" and not extension_id_is_valid(id):
+        issues.add("extension.id", "invalid extension id '" + id + "'")
+    m.name = id
+
+    m.display_name = _opt_text(root, "extension.display_name", issues)
+    if m.display_name == "":
+        m.display_name = id
+
+    val version = _req_text(root, "extension.version", issues)
+    if version != "":
+        match semver_parse(version):
+            case Some(_): pass_do_nothing
+            case None:
+                issues.add("extension.version", "invalid semver '" + version + "'")
+    m.version = version
+
+    val engine = _opt_text(root, "extension.engine", issues)
+    if engine != "":
+        match semver_range_parse(engine):
+            case Some(_): pass_do_nothing
+            case None:
+                issues.add("extension.engine", "invalid engine range '" + engine + "'")
+    m.engine = engine
+
+    val entry = _opt_text(root, "extension.entry", issues)
+    m.entry = entry
+    m.main = entry
+
+    val host = _opt_text(root, "extension.host", issues)
+    if not extension_host_placement_known(host):
+        issues.add("extension.host", "unknown host placement '" + host + "'")
+    m.host = host
+
+    # permissions section (default deny)
+    var perms = extension_permissions_none()
+    perms.workspace_read = _opt_bool(root, "permissions.workspace_read", issues)
+    perms.workspace_write = _opt_bool(root, "permissions.workspace_write", issues)
+    perms.process_spawn = _opt_bool(root, "permissions.process_spawn", issues)
+    perms.network_client = _opt_bool(root, "permissions.network_client", issues)
+    perms.secrets = _opt_bool(root, "permissions.secrets", issues)
+    perms.native_ffi = _opt_bool(root, "permissions.native_ffi", issues)
+    m.permissions = perms
+
+    # activation section
+    match sdn_get_text_array(root, "activation.events", issues):
+        case Some(events):
+            m.activation_events = events
+        case None:
+            m.activation_events = []
+
+    # contributes section
+    m.contributes_commands = _decode_commands(root, issues)
+    m.contributes_languages = _decode_languages(root, issues)
+    m.contributes_custom_editors = _decode_custom_editors(root, issues)
+    m.contributes_keybindings = _decode_keybindings(root, issues)
+    m.contributes_themes = _decode_themes(root, issues)
+    m.contributes_debug_adapters = _decode_debug_adapters(root, issues)
+
+    val located = _locate_with_parents(issues, spans)
+    var merged: [SdnDecodeIssue] = []
+    for it in located:
+        merged.push(it)
+    for pi in parser_issues:
+        merged.push(SdnDecodeIssue(path: pi.path, message: pi.message, line: pi.line, col: pi.col))
+    ExtensionManifestLoad(manifest: m, issues: merged, ok: m.name != "")
+
+fn _decode_commands(root: SdnValue, issues: SdnDecodeIssues) -> [ExtensionCommand]:
+    var out: [ExtensionCommand] = []
+    var seen: [text] = []
+    match sdn_get_array(root, "contributes.commands", issues):
+        case Some(items):
+            var idx = 0
+            for item in items:
+                val sub = SdnDecodeIssues.new()
+                val id = _req_text(item, "id", sub)
+                val title = _opt_text(item, "title", sub)
+                val category = _opt_text(item, "category", sub)
+                _merge_item_issues(issues, sub, "contributes.commands", idx)
+                if id != "":
+                    var duplicate = false
+                    for s in seen:
+                        if s == id:
+                            duplicate = true
+                    if duplicate:
+                        issues.add("contributes.commands." + idx.to_text() + ".id", "duplicate command id '" + id + "'")
+                    else:
+                        seen.push(id)
+                        out.push(ExtensionCommand(id: id, title: if title == "" then id else: title, category: category))
+                idx = idx + 1
+        case None:
+            pass_do_nothing
+    out
+
+fn _decode_languages(root: SdnValue, issues: SdnDecodeIssues) -> [ExtensionLanguage]:
+    var out: [ExtensionLanguage] = []
+    match sdn_get_array(root, "contributes.languages", issues):
+        case Some(items):
+            var idx = 0
+            for item in items:
+                val sub = SdnDecodeIssues.new()
+                val id = _req_text(item, "id", sub)
+                var exts: [text] = []
+                match sdn_get_text_array(item, "extensions", sub):
+                    case Some(xs):
+                        exts = xs
+                    case None:
+                        exts = []
+                _merge_item_issues(issues, sub, "contributes.languages", idx)
+                if id != "":
+                    out.push(ExtensionLanguage(id: id, extensions: exts))
+                idx = idx + 1
+        case None:
+            pass_do_nothing
+    out
+
+fn _decode_custom_editors(root: SdnValue, issues: SdnDecodeIssues) -> [ExtensionCustomEditor]:
+    var out: [ExtensionCustomEditor] = []
+    match sdn_get_array(root, "contributes.custom_editors", issues):
+        case Some(items):
+            var idx = 0
+            for item in items:
+                val sub = SdnDecodeIssues.new()
+                val id = _req_text(item, "id", sub)
+                val kind = _req_text(item, "document_kind", sub)
+                val priority = _opt_int(item, "priority", sub, 0)
+                _merge_item_issues(issues, sub, "contributes.custom_editors", idx)
+                if id != "":
+                    out.push(ExtensionCustomEditor(id: id, document_kind: kind, priority: priority))
+                idx = idx + 1
+        case None:
+            pass_do_nothing
+    out
+
+fn _decode_keybindings(root: SdnValue, issues: SdnDecodeIssues) -> [ExtensionKeybinding]:
+    var out: [ExtensionKeybinding] = []
+    match sdn_get_array(root, "contributes.keybindings", issues):
+        case Some(items):
+            var idx = 0
+            for item in items:
+                val sub = SdnDecodeIssues.new()
+                val command = _req_text(item, "command", sub)
+                val key = _req_text(item, "key", sub)
+                val when = _opt_text(item, "when", sub)
+                _merge_item_issues(issues, sub, "contributes.keybindings", idx)
+                if command != "" and key != "":
+                    out.push(ExtensionKeybinding(command: command, key: key, when: when))
+                idx = idx + 1
+        case None:
+            pass_do_nothing
+    out
+
+fn _decode_themes(root: SdnValue, issues: SdnDecodeIssues) -> [ExtensionTheme]:
+    var out: [ExtensionTheme] = []
+    match sdn_get_array(root, "contributes.themes", issues):
+        case Some(items):
+            var idx = 0
+            for item in items:
+                val sub = SdnDecodeIssues.new()
+                val id = _req_text(item, "id", sub)
+                val label = _opt_text(item, "label", sub)
+                val ui_theme = _opt_text(item, "ui_theme", sub)
+                val path = _opt_text(item, "path", sub)
+                _merge_item_issues(issues, sub, "contributes.themes", idx)
+                if id != "":
+                    out.push(ExtensionTheme(id: id, label: if label == "" then id else: label, ui_theme: ui_theme, path: path))
+                idx = idx + 1
+        case None:
+            pass_do_nothing
+    out
+
+fn _decode_debug_adapters(root: SdnValue, issues: SdnDecodeIssues) -> [ExtensionDebugAdapterManifest]:
+    var out: [ExtensionDebugAdapterManifest] = []
+    match sdn_get_array(root, "contributes.debug_adapters", issues):
+        case Some(items):
+            var idx = 0
+            for item in items:
+                val sub = SdnDecodeIssues.new()
+                val id = _req_text(item, "id", sub)
+                val label = _opt_text(item, "label", sub)
+                val program = _opt_text(item, "program", sub)
+                _merge_item_issues(issues, sub, "contributes.debug_adapters", idx)
+                if id != "":
+                    out.push(ExtensionDebugAdapterManifest(id: id, label: label, program: program))
+                idx = idx + 1
+        case None:
+            pass_do_nothing
+    out
+
+# Locate issues via the span map; issues whose exact path has no span fall
+# back to the nearest parent path that does (so "extension.version missing"
+# points at the `extension:` line).
+fn _locate_with_parents(issues: SdnDecodeIssues, spans: Dict<text, SdnSpan>) -> [SdnDecodeIssue]:
+    var out: [SdnDecodeIssue] = []
+    for it in issues.items:
+        var path = it.path
+        var located = false
+        while path != "" and not located:
+            if spans.contains_key(path):
+                val sp = spans[path]
+                out.push(SdnDecodeIssue(path: it.path, message: it.message, line: sp.line, col: sp.column))
+                located = true
+            else:
+                val dot = _last_dot(path)
+                if dot < 0:
+                    path = ""
+                else:
+                    path = path.slice(0, dot)
+        if not located:
+            out.push(it)
+    out
+
+fn _last_dot(path: text) -> i64:
+    var i = path.len() - 1
+    while i >= 0:
+        if path.char_at(i) == ".":
+            return i
+        i = i - 1
+    -1
+
+# ---- legacy quote-style manifests ------------------------------------------
+# Flat JSON-ish files with quoted keys: {"name": "...", "version": "...", ...}.
+# Kept verbatim from the old loader for backward compatibility with
+# already-installed extensions.
+
+fn _extension_manifest_decode_legacy(content: text) -> ExtensionManifestLoad:
+    var manifest = extension_manifest_empty()
+    manifest.name = _legacy_text_value(content, "name")
+    manifest.version = _legacy_text_value(content, "version")
+    manifest.main = _legacy_text_value(content, "main")
+    manifest.entry = manifest.main
+    manifest.display_name = manifest.name
+    manifest.activation_events = _legacy_list_value(content, "activation_events")
+    manifest.contributes_commands = _legacy_command_list(content)
+    manifest.contributes_languages = _legacy_language_list(content)
+    var issues: [SdnDecodeIssue] = []
+    if manifest.name == "":
+        issues.push(SdnDecodeIssue(path: "name", message: "missing extension name", line: 0, col: 0))
+    ExtensionManifestLoad(manifest: manifest, issues: issues, ok: manifest.name != "")
+
+fn _legacy_text_value(content: text, key: text) -> text:
+    val lines = content.split("\n")
+    val quoted = "\"" + key + "\""
+    for line in lines:
+        if line.index_of(quoted) >= 0:
+            val parts = line.split("\"")
+            var i = 0
+            while i + 2 < parts.len():
+                if parts[i] == key:
+                    return parts[i + 2]
+                i = i + 1
+    ""
+
+fn _legacy_list_value(content: text, key: text) -> [text]:
+    val lines = content.split("\n")
+    val quoted = "\"" + key + "\""
+    var result: [text] = []
+    for line in lines:
+        if line.index_of(quoted) >= 0:
+            val parts = line.split("\"")
+            var seen_key = false
+            var i = 0
+            while i < parts.len():
+                if parts[i] == key:
+                    seen_key = true
+                elif seen_key and i % 2 == 1:
+                    result.push(parts[i])
+                i = i + 1
+            return result
+    result
+
+fn _legacy_command_list(content: text) -> [ExtensionCommand]:
+    val ids = _legacy_object_field_values(content, "id")
+    val titles = _legacy_object_field_values(content, "title")
+    var result: [ExtensionCommand] = []
+    var i = 0
+    while i < ids.len():
+        var title = ids[i]
+        if i < titles.len():
+            title = titles[i]
+        result.push(ExtensionCommand(id: ids[i], title: title, category: ""))
+        i = i + 1
+    result
+
+fn _legacy_language_list(content: text) -> [ExtensionLanguage]:
+    val ids = _legacy_object_field_values(content, "id")
+    var result: [ExtensionLanguage] = []
+    for id in ids:
+        if id != "":
+            result.push(ExtensionLanguage(id: id, extensions: []))
+    result
+
+fn _legacy_object_field_values(content: text, field: text) -> [text]:
+    var values: [text] = []
+    val lines = content.split("\n")
+    for line in lines:
+        val parts = line.split("\"")
+        var i = 0
+        while i + 2 < parts.len():
+            if parts[i] == field and parts[i + 2] != "":
+                values.push(parts[i + 2])
+            i = i + 1
+    values

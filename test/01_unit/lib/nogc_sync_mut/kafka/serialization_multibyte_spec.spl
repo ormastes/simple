@@ -1,0 +1,49 @@
+use std.nogc_sync_mut.kafka.serialization.{serialize_string, crc32_calculate}
+
+# Multi-byte regression coverage for
+# src/lib/nogc_sync_mut/kafka/serialization.spl (+ byte-identical mirrors
+# nogc_async_mut/... and gc_async_mut/...). Kafka message keys/values
+# legitimately carry arbitrary UTF-8 text.
+#
+# serialize_string and crc32_calculate both did `X[idx].ord()`
+# (single-index, CHARACTER-indexed) in a loop bounded by `.len()` (BYTE
+# length) -- same bug shape as toml.spl/mqtt packet.spl in this campaign.
+# For crc32_calculate this is a correctness bug even where it didn't
+# crash: a real Kafka broker computes CRC32 over the actual wire bytes,
+# not Unicode codepoint values, so a codepoint-based CRC would silently
+# disagree with the broker's for any non-ASCII content. Fixed via
+# `.bytes()[idx]`.
+#
+# deserialize_string was also fixed (UTF-8-decode the collected raw bytes
+# instead of `.chr()`-per-byte, same fix as mqtt_decode_string), but its
+# round-trip could not be verified end-to-end this pass: tracing showed
+# `bytes_to_int32` misdecoding the length prefix (5 read back as 40) via
+# this file's generic `list`-typed indexing -- a separate, pre-existing,
+# out-of-scope bug unrelated to text content (it reproduces on the
+# structural length-prefix bytes, not the payload), consistent with the
+# documented list/array indexing tag-shift defect family. Not fixed here;
+# only the encode direction and crc32 are asserted below.
+
+describe "serialize_string / crc32_calculate multi-byte":
+    it "café serializes to its exact 4-byte-length-prefixed UTF-8 wire bytes":
+        val encoded = serialize_string("café")
+        # 4-byte big-endian length prefix (0,0,0,5) + 5 payload bytes
+        expect(encoded.len()).to_equal(9)
+        expect(encoded[3]).to_equal(5)
+        expect(encoded[4]).to_equal(99)
+        expect(encoded[5]).to_equal(97)
+        expect(encoded[6]).to_equal(102)
+        expect(encoded[7]).to_equal(195)
+        expect(encoded[8]).to_equal(169)
+
+    it "crc32_calculate does not crash on multi-byte input and differs from an unrelated ASCII string's CRC":
+        val crc_ascii = crc32_calculate("hello")
+        val crc_mb = crc32_calculate("café")
+        expect(crc_mb == crc_ascii).to_be(false)
+
+    it "pure ASCII serialize_string is unaffected (regression guard)":
+        val encoded = serialize_string("hi")
+        expect(encoded.len()).to_equal(6)
+        expect(encoded[3]).to_equal(2)
+        expect(encoded[4]).to_equal(104)
+        expect(encoded[5]).to_equal(105)

@@ -1,0 +1,112 @@
+"""Bounded KERNEL32 TLS slot bridge for Wine startup probes."""
+
+use common.wine_nt_api_catalog.{wine_nt_api_kernel32_tls_dispatch_gate}
+
+class WineKernel32TlsSlot:
+    index: i64
+    value: text
+    allocated: bool
+
+class WineKernel32TlsTable:
+    slots: [WineKernel32TlsSlot]
+    next_index: i64
+
+class WineKernel32TlsResult:
+    ok: bool
+    error: text
+    table: WineKernel32TlsTable
+    index: i64
+    value: text
+    operations: text
+
+fn _slot(index: i64, value: text, allocated: bool) -> WineKernel32TlsSlot:
+    WineKernel32TlsSlot(index: index, value: value, allocated: allocated)
+
+fn _table(slots: [WineKernel32TlsSlot], next_index: i64) -> WineKernel32TlsTable:
+    WineKernel32TlsTable(slots: slots, next_index: next_index)
+
+fn _result(ok: bool, error: text, table: WineKernel32TlsTable, index: i64, value: text, operations: text) -> WineKernel32TlsResult:
+    WineKernel32TlsResult(ok: ok, error: error, table: table, index: index, value: value, operations: operations)
+
+fn _find_slot(table: WineKernel32TlsTable, index: i64) -> WineKernel32TlsSlot:
+    for slot in table.slots:
+        if slot.index == index and slot.allocated:
+            return slot
+    _slot(-1, "", false)
+
+fn _set_slot_value(table: WineKernel32TlsTable, index: i64, value: text) -> WineKernel32TlsTable:
+    var slots: [WineKernel32TlsSlot] = []
+    for slot in table.slots:
+        if slot.index == index and slot.allocated:
+            slots.push(_slot(slot.index, value, true))
+        else:
+            slots.push(slot)
+    _table(slots, table.next_index)
+
+fn _remove_slot(table: WineKernel32TlsTable, index: i64) -> WineKernel32TlsTable:
+    var slots: [WineKernel32TlsSlot] = []
+    for slot in table.slots:
+        if slot.index != index:
+            slots.push(slot)
+    _table(slots, table.next_index)
+
+fn _sequence_gate(symbols: [text]) -> text:
+    val dispatch_state = wine_nt_api_kernel32_tls_dispatch_gate(symbols)
+    if dispatch_state != "ready":
+        return dispatch_state
+    if symbols.len() != 4:
+        return "kernel32-tls-sequence-count-mismatch"
+    if symbols[0] != "TlsAlloc":
+        return "kernel32-tls-sequence-expected:TlsAlloc"
+    if symbols[1] != "TlsSetValue":
+        return "kernel32-tls-sequence-expected:TlsSetValue"
+    if symbols[2] != "TlsGetValue":
+        return "kernel32-tls-sequence-expected:TlsGetValue"
+    if symbols[3] != "TlsFree":
+        return "kernel32-tls-sequence-expected:TlsFree"
+    "ready"
+
+pub fn wine_kernel32_tls_table_new() -> WineKernel32TlsTable:
+    _table([], 0)
+
+pub fn wine_kernel32_tls_alloc(table: WineKernel32TlsTable) -> WineKernel32TlsResult:
+    val index = table.next_index
+    var slots = table.slots
+    slots.push(_slot(index, "", true))
+    _result(true, "", _table(slots, index + 1), index, "", "TlsAlloc")
+
+pub fn wine_kernel32_tls_set_value(table: WineKernel32TlsTable, index: i64, value: text) -> WineKernel32TlsResult:
+    val slot = _find_slot(table, index)
+    if not slot.allocated:
+        return _result(false, "TlsSetValue:invalid-tls-index", table, index, value, "")
+    _result(true, "", _set_slot_value(table, index, value), index, value, "TlsSetValue")
+
+pub fn wine_kernel32_tls_get_value(table: WineKernel32TlsTable, index: i64) -> WineKernel32TlsResult:
+    val slot = _find_slot(table, index)
+    if not slot.allocated:
+        return _result(false, "TlsGetValue:invalid-tls-index", table, index, "", "")
+    _result(true, "", table, index, slot.value, "TlsGetValue")
+
+pub fn wine_kernel32_tls_free(table: WineKernel32TlsTable, index: i64) -> WineKernel32TlsResult:
+    val slot = _find_slot(table, index)
+    if not slot.allocated:
+        return _result(false, "TlsFree:invalid-tls-index", table, index, "", "")
+    _result(true, "", _remove_slot(table, index), index, slot.value, "TlsFree")
+
+pub fn wine_kernel32_execute_tls(symbols: [text], table: WineKernel32TlsTable, value: text) -> WineKernel32TlsResult:
+    val sequence_state = _sequence_gate(symbols)
+    if sequence_state != "ready":
+        return _result(false, sequence_state, table, -1, "", "")
+    val allocated = wine_kernel32_tls_alloc(table)
+    if not allocated.ok:
+        return allocated
+    val set_value = wine_kernel32_tls_set_value(allocated.table, allocated.index, value)
+    if not set_value.ok:
+        return _result(false, set_value.error, set_value.table, allocated.index, value, "TlsAlloc")
+    val got_value = wine_kernel32_tls_get_value(set_value.table, allocated.index)
+    if not got_value.ok:
+        return _result(false, got_value.error, got_value.table, allocated.index, value, "TlsAlloc TlsSetValue")
+    val freed = wine_kernel32_tls_free(got_value.table, allocated.index)
+    if not freed.ok:
+        return _result(false, freed.error, freed.table, allocated.index, got_value.value, "TlsAlloc TlsSetValue TlsGetValue")
+    _result(true, "", freed.table, allocated.index, got_value.value, "TlsAlloc TlsSetValue TlsGetValue TlsFree")

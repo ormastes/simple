@@ -1,0 +1,255 @@
+# CSS float exclusion bands and `clear` — common.layout.float_bands
+#
+# WHY THIS MODULE EXISTS
+#
+# Floats and `clear` are blocker 7 of
+# doc/03_plan/ui/rendering/blink_wiring_plan.md. The live browser lane has them
+# in `gc_async_mut/gpu/browser_engine/layout_float.spl`, in `i32` device pixels
+# and reachable only from a lane blink may not import (blink is a LEAF: `blink`,
+# `skia`, `common` only). Rather than copy that file into blink — which would
+# add another member to a duplicate family the wiring plan exists to shrink —
+# the geometry lands HERE, in `common/`, as pure rectangle arithmetic with no
+# DOM node and no style type. Both lanes can import it.
+#
+# It is not a translation of the live file. Two contract differences are
+# deliberate:
+#   - `f64` CSS pixels, not `i32` device pixels, because blink's `BoxGeometry`
+#     and skia's `SkRect` are both `f64` and rounding at every band query would
+#     accumulate error across a deep tree.
+#   - Bands are queried over a HEIGHT RANGE (`y` .. `y + height`), not at a
+#     single scanline. `layout_float.spl:47 float_available_width_at(y, ...)`
+#     samples one y, so a float that starts one pixel BELOW a tall block's top
+#     edge does not narrow that block at all, even though it overlaps most of
+#     it. Range queries are what CSS 2.1 §9.5 actually describes.
+#
+# WHAT IS NOT MODELLED (state gaps rather than produce silent wrong geometry):
+#   - Floats never escape the formatting context they are placed in. This
+#     module has no notion of an outer context, so a caller that shares one
+#     `FloatArea` across nested boxes gets escaping floats and a caller that
+#     makes one per box gets none. blink chooses the latter; see
+#     `blink/layout/block_flow.spl (its per-box `area`)`.
+#   - No shape-outside, no float margins other than what the caller folds into
+#     the rect it hands in, no `float: inline-start/end` (writing modes).
+#   - Overlapping floats on the SAME side are stacked by the placement search,
+#     but a float wider than the available band is placed anyway at the
+#     container edge (CSS 2.1 §9.5.1 rule 3's overflow case) rather than being
+#     shrunk.
+
+# --------------------------------------------------------------------------
+# Sides and clearance kinds
+# --------------------------------------------------------------------------
+
+enum FloatSide:
+    """Which side of its containing block a float is pulled to."""
+    NoFloat
+    Left
+    Right
+
+enum ClearKind:
+    """Which sides' floats a box must clear before it may be placed."""
+    NoClear
+    ClearLeft
+    ClearRight
+    ClearBoth
+
+struct FloatRect:
+    """A placed float's MARGIN box, in the containing block's coordinates.
+
+    Margin box rather than border box because CSS 2.1 §9.5 excludes the float's
+    margins from the line boxes beside it too — the caller folds the margins in
+    before handing the rect over."""
+    left: f64
+    top: f64
+    right: f64
+    bottom: f64
+    side: FloatSide
+
+pub fn float_rect(left: f64, top: f64, right: f64, bottom: f64, side: FloatSide) -> FloatRect:
+    """Construct a float rect from its four edges and its side."""
+    FloatRect(left: left, top: top, right: right, bottom: bottom, side: side)
+
+# --------------------------------------------------------------------------
+# The exclusion area
+# --------------------------------------------------------------------------
+
+class FloatArea:
+    """Every float placed so far in one block formatting context."""
+    floats: [FloatRect]
+
+pub fn float_area_new() -> FloatArea:
+    """Create an empty float area — nothing excluded anywhere."""
+    FloatArea(floats: [])
+
+fn _overlaps_band(f: FloatRect, y: f64, height: f64) -> bool:
+    """True when float `f` overlaps the vertical range [y, y + height).
+
+    A zero-height probe (`height == 0.0`) is treated as the single scanline at
+    `y`, so `y >= f.top and y < f.bottom`. Half-open on both sides means a
+    float whose bottom is exactly `y` no longer excludes anything at `y`, which
+    is what makes `clearance_for` and `available_width_at` agree."""
+    val probe_bottom = if height > 0.0: y + height else: y + 0.000001
+    y < f.bottom and probe_bottom > f.top
+
+impl FloatArea:
+    fn add(f: FloatRect):
+        """Record a float as placed. No overlap checking is done."""
+        self.floats.push(f)
+
+    fn count() -> i64:
+        """Number of floats recorded."""
+        self.floats.len()
+
+    fn is_empty() -> bool:
+        """True when no float has been placed, the common fast-path case."""
+        self.floats.len() == 0
+
+    fn left_edge_at(y: f64, height: f64, container_left: f64) -> f64:
+        """Return the leftmost x a line or block may occupy over [y, y+height).
+
+        That is `container_left` pushed right past the right edge of every
+        LEFT float overlapping the band."""
+        var edge = container_left
+        var i: i64 = 0
+        while i < self.floats.len():
+            val f = self.floats[i as i32]
+            if f.side == FloatSide.Left and _overlaps_band(f, y, height):
+                if f.right > edge:
+                    edge = f.right
+            i = i + 1
+        edge
+
+    fn right_edge_at(y: f64, height: f64, container_right: f64) -> f64:
+        """Return the rightmost x a line or block may occupy over [y, y+height).
+
+        `container_right` pulled left past the left edge of every RIGHT float
+        overlapping the band."""
+        var edge = container_right
+        var i: i64 = 0
+        while i < self.floats.len():
+            val f = self.floats[i as i32]
+            if f.side == FloatSide.Right and _overlaps_band(f, y, height):
+                if f.left < edge:
+                    edge = f.left
+            i = i + 1
+        edge
+
+    fn available_width_at(y: f64, height: f64, container_left: f64, container_right: f64) -> f64:
+        """Width left between the floats over [y, y+height). Never negative."""
+        val l = self.left_edge_at(y, height, container_left)
+        val r = self.right_edge_at(y, height, container_right)
+        if r > l:
+            return r - l
+        0.0
+
+    fn lowest_bottom() -> f64:
+        """Bottom of the lowest float on either side, or `0.0` when empty.
+
+        This is what a BFC root's auto height must grow to include: CSS 2.1
+        §10.6.7 makes a BFC root contain its own floats."""
+        var lowest: f64 = 0.0
+        var i: i64 = 0
+        while i < self.floats.len():
+            val f = self.floats[i as i32]
+            if f.bottom > lowest:
+                lowest = f.bottom
+            i = i + 1
+        lowest
+
+    fn lowest_bottom_on(side: FloatSide) -> f64:
+        """Bottom of the lowest float on one side, or `0.0` when there is none."""
+        var lowest: f64 = 0.0
+        var i: i64 = 0
+        while i < self.floats.len():
+            val f = self.floats[i as i32]
+            if f.side == side and f.bottom > lowest:
+                lowest = f.bottom
+            i = i + 1
+        lowest
+
+    fn clearance_for(kind: ClearKind, y: f64) -> f64:
+        """Return the y a box with `clear: kind` must start at, given it would
+        otherwise start at `y`.
+
+        Never moves a box UP: the result is `max(y, lowest relevant float
+        bottom)`. `NoClear` returns `y` unchanged."""
+        var target = y
+        val left_bottom = self.lowest_bottom_on(FloatSide.Left)
+        val right_bottom = self.lowest_bottom_on(FloatSide.Right)
+        val both_bottom = if left_bottom > right_bottom: left_bottom else: right_bottom
+        val needed = match kind:
+            case ClearKind.NoClear: y
+            case ClearKind.ClearLeft: left_bottom
+            case ClearKind.ClearRight: right_bottom
+            case ClearKind.ClearBoth: both_bottom
+        if needed > target:
+            target = needed
+        target
+
+    fn place(
+        width: f64,
+        height: f64,
+        side: FloatSide,
+        start_y: f64,
+        container_left: f64,
+        container_right: f64
+    ) -> FloatRect:
+        """Find and RETURN (without recording) the position of a new float.
+
+        CSS 2.1 §9.5.1: the float goes as high as possible, never above
+        `start_y`, and as far to its own side as possible; if it does not fit
+        beside the floats already at that y, it drops to the next y where the
+        band changes — the bottom of some already-placed float — and tries
+        again. If no band is wide enough anywhere, it is placed at the last
+        candidate y flush against its own container edge and is allowed to
+        overflow, which is what the spec's rule 3 requires rather than shrinking
+        it.
+
+        Call `add` on the result to record it; placement is separated from
+        recording so a caller can measure a hypothetical placement."""
+        var y = start_y
+        var guard: i64 = 0
+        while guard < 256:
+            val l = self.left_edge_at(y, height, container_left)
+            val r = self.right_edge_at(y, height, container_right)
+            if r - l >= width:
+                if side == FloatSide.Right:
+                    return FloatRect(left: r - width, top: y, right: r, bottom: y + height, side: side)
+                return FloatRect(left: l, top: y, right: l + width, bottom: y + height, side: side)
+            # Does not fit here. Drop to the next float bottom strictly below y.
+            var next_y = y
+            var found = false
+            var i: i64 = 0
+            while i < self.floats.len():
+                val f = self.floats[i as i32]
+                if f.bottom > y:
+                    if (not found) or (f.bottom < next_y):
+                        next_y = f.bottom
+                        found = true
+                i = i + 1
+            if not found:
+                break
+            y = next_y
+            guard = guard + 1
+        # Nothing fits anywhere: overflow at the container edge (spec rule 3).
+        if side == FloatSide.Right:
+            return FloatRect(
+                left: container_right - width, top: y,
+                right: container_right, bottom: y + height, side: side
+            )
+        FloatRect(
+            left: container_left, top: y,
+            right: container_left + width, bottom: y + height, side: side
+        )
+
+    fn place_and_add(
+        width: f64,
+        height: f64,
+        side: FloatSide,
+        start_y: f64,
+        container_left: f64,
+        container_right: f64
+    ) -> FloatRect:
+        """`place` then `add`, for the ordinary case where the caller keeps it."""
+        val r = self.place(width, height, side, start_y, container_left, container_right)
+        self.floats.push(r)
+        r

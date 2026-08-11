@@ -1,0 +1,425 @@
+"""DOCX hyperlinks, images, and headers/footers — full-pipeline spec.
+
+Covers the three MS Word gap features through model -> .docx export ->
+.docx import -> markdown, plus the header/footer sibling writer:
+
+  - Hyperlinks: markdown `[text](url)` is a first-class TextSpan (link_url),
+    exported as `<w:hyperlink r:id="rIdN">` + an external relationship in
+    word/_rels/document.xml.rels, imported back by resolving r:id, and
+    serialized back to `[text](url)`.
+  - Images: markdown `![alt](path)` (whole-paragraph convention, same as the
+    html renderer) embeds the PNG bytes as word/media/imageN.png + a minimal
+    wp:inline DrawingML picture when the file exists; a missing (or non-PNG)
+    path falls back to a plain alt-text run instead of crashing. alt/src are
+    stashed on wp:docPr name/descr so import reconstructs the exact
+    `![alt](src)` reference losslessly.
+  - Headers/footers: `document_to_docx_bytes_hf(doc, header, footer)` is a
+    sibling of `document_to_docx_bytes` (which stays byte-identical when
+    called with header_text/footer_text both "") that adds
+    word/header1.xml + word/footer1.xml, wired via sectPr headerReference/
+    footerReference + rels + content types; the footer always carries a
+    PAGE field (`<w:fldSimple w:instr=" PAGE "/>`).
+"""
+
+use std.spec
+use app.office.file_formats.{parse_markdown_document, document_to_markdown}
+use app.office.odf_ooxml.{document_to_docx_bytes, document_to_docx_bytes_hf, docx_bytes_to_document, docx_bytes_to_header_footer, docx_document_xml_to_document}
+use app.office.word.html_render.{render_document_html}
+use common.rich_text.attributed_text.{BlockKind}
+use std.common.archive.zip.{zip_entries, zip_extract_text}
+
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+extern fn rt_file_delete(path: text) -> bool
+
+fn _tiny_png_bytes() -> [u8]:
+    """A hand-verified valid 1x1 PNG (68 bytes; `file` reports
+    'PNG image data, 1 x 1, 8-bit gray+alpha, non-interlaced')."""
+    var b: [u8] = []
+    for v in [137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 4, 0, 0, 0, 181, 28, 12, 2, 0, 0, 0, 11, 73, 68, 65, 84, 120, 156, 99, 96, 0, 2, 0, 0, 5, 0, 1, 233, 250, 220, 216, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130]:
+        b.push(v.to_u8())
+    b
+
+fn _has_entry(zip_bytes: [u8], name: text) -> bool:
+    var found = false
+    for e in zip_entries(zip_bytes):
+        if e.name == name:
+            found = true
+    found
+
+describe "DOCX hyperlinks: markdown [text](url) round trip":
+    """[text](url) survives md -> model -> docx -> model -> md exactly, via
+    a first-class TextSpan.link_url and a real w:hyperlink + external rel."""
+
+    it "round-trips a link mixed with other inline styles exactly":
+        val md = "See [details](http://example.com/x) for **more** info."
+        val doc = parse_markdown_document(md, "d")
+        val docx = document_to_docx_bytes(doc)
+        val back = docx_bytes_to_document(docx, "d2")
+        expect(document_to_markdown(back)).to_equal(md)
+
+    it "emits word/_rels/document.xml.rels with the URL as an External target":
+        val doc = parse_markdown_document("[go](http://example.org/page)", "d")
+        val docx = document_to_docx_bytes(doc)
+        val rels = zip_extract_text(docx, "word/_rels/document.xml.rels")
+        expect(rels).to_contain("http://example.org/page")
+        expect(rels).to_contain("TargetMode=\"External\"")
+        expect(rels).to_contain("relationships/hyperlink")
+
+    it "wraps the run in <w:hyperlink r:id=...> in word/document.xml":
+        val doc = parse_markdown_document("[go](http://example.org/page)", "d")
+        val docx = document_to_docx_bytes(doc)
+        val document_xml = zip_extract_text(docx, "word/document.xml")
+        expect(document_xml).to_contain("<w:hyperlink r:id=\"")
+        expect(document_xml).to_contain("</w:hyperlink>")
+
+    it "round-trips a paragraph with two different links":
+        val md = "[one](http://a.example/1) and [two](http://b.example/2)."
+        val doc = parse_markdown_document(md, "d")
+        val docx = document_to_docx_bytes(doc)
+        val back = docx_bytes_to_document(docx, "d2")
+        expect(document_to_markdown(back)).to_equal(md)
+
+describe "DOCX images: markdown ![alt](path) round trip":
+    """An existing PNG embeds as word/media/imageN.png + a minimal inline
+    DrawingML picture; a missing path (or non-.png) falls back to the alt
+    text as a placeholder run, never crashing the export."""
+
+    it "embeds an existing PNG and round-trips the ![alt](src) reference":
+        val png_path = "/tmp/word_docx_features_spec_tiny.png"
+        rt_file_write_bytes(png_path, _tiny_png_bytes())
+        val md = "![a tiny dot]({png_path})"
+        val doc = parse_markdown_document(md, "d")
+        val docx = document_to_docx_bytes(doc)
+        expect(_has_entry(docx, "word/media/image1.png")).to_be(true)
+        val document_xml = zip_extract_text(docx, "word/document.xml")
+        expect(document_xml).to_contain("<w:drawing>")
+        expect(document_xml).to_contain("a:blip r:embed=\"")
+        val back = docx_bytes_to_document(docx, "d2")
+        expect(document_to_markdown(back)).to_equal(md)
+        rt_file_delete(png_path)
+
+    it "falls back to the alt text when the image file is missing (no crash)":
+        val md = "![missing pic](/no/such/path/does-not-exist.png)"
+        val doc = parse_markdown_document(md, "d")
+        val docx = document_to_docx_bytes(doc)
+        val document_xml = zip_extract_text(docx, "word/document.xml")
+        expect(document_xml.contains("<w:drawing>")).to_be(false)
+        expect(document_xml).to_contain("missing pic")
+        expect(_has_entry(docx, "word/media/image1.png")).to_be(false)
+
+    it "falls back to the alt text for a non-PNG path even if it exists":
+        val jpg_path = "/tmp/word_docx_features_spec_tiny.jpg"
+        rt_file_write_bytes(jpg_path, _tiny_png_bytes())
+        val md = "![a jpeg]({jpg_path})"
+        val doc = parse_markdown_document(md, "d")
+        val docx = document_to_docx_bytes(doc)
+        val document_xml = zip_extract_text(docx, "word/document.xml")
+        expect(document_xml.contains("<w:drawing>")).to_be(false)
+        expect(document_xml).to_contain("a jpeg")
+        rt_file_delete(jpg_path)
+
+describe "DOCX headers/footers: document_to_docx_bytes_hf":
+    """A sibling of document_to_docx_bytes: header1.xml/footer1.xml parts
+    wired via sectPr + rels + content types, footer carries a PAGE field.
+    The base writer stays byte-identical when header/footer are both empty."""
+
+    it "document_to_docx_bytes is byte-identical to the _hf sibling called with empty header/footer":
+        val doc = parse_markdown_document("# Report\n\nBody text.", "d")
+        val plain = document_to_docx_bytes(doc)
+        val hf_empty = document_to_docx_bytes_hf(doc, "", "")
+        expect(plain).to_equal(hf_empty)
+
+    it "emits word/header1.xml and word/footer1.xml, wired into sectPr and content types":
+        val doc = parse_markdown_document("# Report\n\nBody text.", "d")
+        val docx = document_to_docx_bytes_hf(doc, "Acme Corp", "Confidential")
+        expect(_has_entry(docx, "word/header1.xml")).to_be(true)
+        expect(_has_entry(docx, "word/footer1.xml")).to_be(true)
+        val document_xml = zip_extract_text(docx, "word/document.xml")
+        expect(document_xml).to_contain("<w:headerReference w:type=\"default\" r:id=\"")
+        expect(document_xml).to_contain("<w:footerReference w:type=\"default\" r:id=\"")
+        val types = zip_extract_text(docx, "[Content_Types].xml")
+        expect(types).to_contain("/word/header1.xml")
+        expect(types).to_contain("/word/footer1.xml")
+        val rels = zip_extract_text(docx, "word/_rels/document.xml.rels")
+        expect(rels).to_contain("relationships/header")
+        expect(rels).to_contain("relationships/footer")
+
+    it "footer includes a PAGE field":
+        val doc = parse_markdown_document("Body.", "d")
+        val docx = document_to_docx_bytes_hf(doc, "H", "F")
+        val footer_xml = zip_extract_text(docx, "word/footer1.xml")
+        expect(footer_xml).to_contain("<w:fldSimple w:instr=\" PAGE \"/>")
+
+    it "header/footer text reads back via docx_bytes_to_header_footer":
+        val doc = parse_markdown_document("Body.", "d")
+        val docx = document_to_docx_bytes_hf(doc, "Acme Corp", "Confidential")
+        val hf = docx_bytes_to_header_footer(docx)
+        expect(hf.header_text).to_equal("Acme Corp")
+        expect(hf.footer_text.contains("Confidential")).to_be(true)
+
+    it "docx_bytes_to_header_footer returns empty strings for a header/footer-less docx":
+        val doc = parse_markdown_document("Body.", "d")
+        val docx = document_to_docx_bytes(doc)
+        val hf = docx_bytes_to_header_footer(docx)
+        expect(hf.header_text).to_equal("")
+        expect(hf.footer_text).to_equal("")
+
+describe "DOCX footnotes: markdown [^1] / [^1]: note round trip":
+    """A footnote reference (`[^1]`, an empty-text TextSpan carrying
+    footnote_id) and its definition (a FootnoteDef block, conventionally at
+    the end of the document) round-trip through word/footnotes.xml: the two
+    mandatory separator footnotes (w:id -1/0), one <w:footnote> per
+    definition, and <w:footnoteReference w:id="N"/> runs in the body."""
+
+    it "round-trips a single footnote reference + definition exactly":
+        val md = "See the note.[^1]\n\n[^1]: This is the note text."
+        val doc = parse_markdown_document(md, "d")
+        val docx = document_to_docx_bytes(doc)
+        val back = docx_bytes_to_document(docx, "d2")
+        expect(document_to_markdown(back)).to_equal(md)
+
+    it "emits word/footnotes.xml with the two mandatory separators and the real footnote":
+        val md = "Ref here.[^1]\n\n[^1]: Note body."
+        val doc = parse_markdown_document(md, "d")
+        val docx = document_to_docx_bytes(doc)
+        expect(_has_entry(docx, "word/footnotes.xml")).to_be(true)
+        val footnotes_xml = zip_extract_text(docx, "word/footnotes.xml")
+        expect(footnotes_xml).to_contain("w:type=\"separator\"")
+        expect(footnotes_xml).to_contain("w:type=\"continuationSeparator\"")
+        expect(footnotes_xml).to_contain("<w:footnote w:id=\"1\">")
+        expect(footnotes_xml).to_contain("Note body.")
+
+    it "emits a <w:footnoteReference w:id=...> run in word/document.xml":
+        val md = "Ref here.[^1]\n\n[^1]: Note body."
+        val doc = parse_markdown_document(md, "d")
+        val docx = document_to_docx_bytes(doc)
+        val document_xml = zip_extract_text(docx, "word/document.xml")
+        expect(document_xml).to_contain("<w:footnoteReference w:id=\"1\"/>")
+
+    it "wires word/footnotes.xml into content types and document.xml.rels":
+        val md = "Ref here.[^1]\n\n[^1]: Note body."
+        val doc = parse_markdown_document(md, "d")
+        val docx = document_to_docx_bytes(doc)
+        val types = zip_extract_text(docx, "[Content_Types].xml")
+        expect(types).to_contain("/word/footnotes.xml")
+        val rels = zip_extract_text(docx, "word/_rels/document.xml.rels")
+        expect(rels).to_contain("relationships/footnotes")
+
+    it "round-trips two footnote references with two definitions":
+        val md = "First.[^1] Second.[^2]\n\n[^1]: One.\n[^2]: Two."
+        val doc = parse_markdown_document(md, "d")
+        val docx = document_to_docx_bytes(doc)
+        val back = docx_bytes_to_document(docx, "d2")
+        expect(document_to_markdown(back)).to_equal(md)
+
+    it "a footnote-less document has no footnotes.xml part (plain-doc byte identity)":
+        val doc = parse_markdown_document("# Report\n\nBody text.", "d")
+        val docx = document_to_docx_bytes(doc)
+        expect(_has_entry(docx, "word/footnotes.xml")).to_be(false)
+
+describe "DOCX ordered lists: markdown `1. item` round trip":
+    """An OrderedItem block exports as w:numPr (numId 1, decimal) against a
+    minimal word/numbering.xml, imports back via <w:numPr> detection, renders
+    as a real <ol><li> (not the per-item <div> bullets get today), and
+    re-serializes with sequential 1-based numbers."""
+
+    it "round-trips a 3-item ordered list exactly":
+        val md = "1. First\n2. Second\n3. Third"
+        val doc = parse_markdown_document(md, "d")
+        val docx = document_to_docx_bytes(doc)
+        val back = docx_bytes_to_document(docx, "d2")
+        expect(document_to_markdown(back)).to_equal(md)
+
+    it "emits w:numPr with numId 1 and a minimal word/numbering.xml":
+        val md = "1. First\n2. Second"
+        val doc = parse_markdown_document(md, "d")
+        val docx = document_to_docx_bytes(doc)
+        val document_xml = zip_extract_text(docx, "word/document.xml")
+        expect(document_xml).to_contain("<w:numPr><w:ilvl w:val=\"0\"/><w:numId w:val=\"1\"/></w:numPr>")
+        expect(_has_entry(docx, "word/numbering.xml")).to_be(true)
+        val numbering_xml = zip_extract_text(docx, "word/numbering.xml")
+        expect(numbering_xml).to_contain("w:numFmt w:val=\"decimal\"")
+
+    it "wires word/numbering.xml into content types and document.xml.rels":
+        val md = "1. First\n2. Second"
+        val doc = parse_markdown_document(md, "d")
+        val docx = document_to_docx_bytes(doc)
+        val types = zip_extract_text(docx, "[Content_Types].xml")
+        expect(types).to_contain("/word/numbering.xml")
+        val rels = zip_extract_text(docx, "word/_rels/document.xml.rels")
+        expect(rels).to_contain("relationships/numbering")
+
+    it "an ordered-list-less document has no numbering.xml part (plain-doc byte identity)":
+        val doc = parse_markdown_document("# Report\n\nBody text.", "d")
+        val docx = document_to_docx_bytes(doc)
+        expect(_has_entry(docx, "word/numbering.xml")).to_be(false)
+
+    it "a plain document with no new features is byte-identical to a header/footer-empty call":
+        val doc = parse_markdown_document("# Report\n\n- a bullet\n\nBody text.", "d")
+        val plain = document_to_docx_bytes(doc)
+        val hf_empty = document_to_docx_bytes_hf(doc, "", "")
+        expect(plain).to_equal(hf_empty)
+
+describe "DOCX comments: markdown [>>author: text<<] round trip":
+    """A word comment attaches to the immediately preceding span (markdown
+    `[>>author: text<<]`, a TextSpan.comment_id) and round-trips through
+    word/comments.xml (<w:comment w:id w:author w:date>) plus
+    <w:commentRangeStart/End w:id> + <w:commentReference w:id> runs around
+    the commented run in word/document.xml — mirroring the footnotes lane's
+    architecture (see attributed_text.spl/file_formats.spl/odf_ooxml.spl),
+    but with author+text carried inline at the point of use and resolved via
+    a parallel RichDocument.comments list rather than a separate FootnoteDef-
+    shaped block, since a comment has no `[^id]:`-style definition line
+    elsewhere in the source."""
+
+    it "round-trips a single comment exactly":
+        val md = "Please check this claim.[>>Alice: needs a citation<<]"
+        val doc = parse_markdown_document(md, "d")
+        val docx = document_to_docx_bytes(doc)
+        val back = docx_bytes_to_document(docx, "d2")
+        expect(document_to_markdown(back)).to_equal(md)
+
+    it "emits word/comments.xml with the author attribute and a fixed w:date":
+        val md = "Flagged text.[>>Alice: needs a citation<<]"
+        val doc = parse_markdown_document(md, "d")
+        val docx = document_to_docx_bytes(doc)
+        expect(_has_entry(docx, "word/comments.xml")).to_be(true)
+        val comments_xml = zip_extract_text(docx, "word/comments.xml")
+        expect(comments_xml).to_contain("w:author=\"Alice\"")
+        expect(comments_xml).to_contain("w:date=\"2026-01-01T00:00:00Z\"")
+        expect(comments_xml).to_contain("needs a citation")
+
+    it "wraps the commented run in commentRangeStart/End + commentReference in word/document.xml":
+        val md = "Flagged text.[>>Alice: needs a citation<<]"
+        val doc = parse_markdown_document(md, "d")
+        val docx = document_to_docx_bytes(doc)
+        val document_xml = zip_extract_text(docx, "word/document.xml")
+        expect(document_xml).to_contain("<w:commentRangeStart w:id=\"")
+        expect(document_xml).to_contain("<w:commentRangeEnd w:id=\"")
+        expect(document_xml).to_contain("<w:commentReference w:id=\"")
+
+    it "wires word/comments.xml into content types and document.xml.rels":
+        val md = "Flagged text.[>>Alice: needs a citation<<]"
+        val doc = parse_markdown_document(md, "d")
+        val docx = document_to_docx_bytes(doc)
+        val types = zip_extract_text(docx, "[Content_Types].xml")
+        expect(types).to_contain("/word/comments.xml")
+        val rels = zip_extract_text(docx, "word/_rels/document.xml.rels")
+        expect(rels).to_contain("relationships/comments")
+
+    it "round-trips two comments by different authors exactly":
+        val md = "First point.[>>Alice: check this<<] Second point.[>>Bob: and this too<<]"
+        val doc = parse_markdown_document(md, "d")
+        val docx = document_to_docx_bytes(doc)
+        val back = docx_bytes_to_document(docx, "d2")
+        expect(document_to_markdown(back)).to_equal(md)
+        val comments_xml = zip_extract_text(docx, "word/comments.xml")
+        expect(comments_xml).to_contain("w:author=\"Alice\"")
+        expect(comments_xml).to_contain("w:author=\"Bob\"")
+
+    it "a comment-less document has no comments.xml part (plain-doc byte identity)":
+        val doc = parse_markdown_document("# Report\n\nBody text.", "d")
+        val docx = document_to_docx_bytes(doc)
+        expect(_has_entry(docx, "word/comments.xml")).to_be(false)
+        val plain = document_to_docx_bytes(doc)
+        val hf_empty = document_to_docx_bytes_hf(doc, "", "")
+        expect(plain).to_equal(hf_empty)
+
+    it "renders a dotted underline and a trailing comments section in HTML":
+        val md = "Flagged text.[>>Alice: needs a citation<<]"
+        val doc = parse_markdown_document(md, "d")
+        val html = render_document_html(doc)
+        expect(html).to_contain("border-bottom: 1px dotted #888;")
+        expect(html).to_contain("title=\"Alice: needs a citation\"")
+        expect(html).to_contain("<div class=\"comments\"><ul>")
+        expect(html).to_contain("<li>Alice: needs a citation</li>")
+
+describe "DOCX named paragraph styles: catalog + heading/blockquote/code round trip":
+    """A real named-style catalog (Normal, Heading1-3, Quote, Code,
+    ListParagraph) replaces the old bold-only Heading1-3 placeholder.
+    Headings already exported as w:pStyle before this change; blockquote and
+    fenced-code blocks did NOT — they exported as a plain <w:p> with no
+    pStyle at all, so re-importing saw an ordinary Paragraph and silently
+    dropped the `> ` prefix / code fence on the next markdown save. This
+    describe block proves the catalog, the two new pStyle mappings (export
+    AND import), and the fixed round trip."""
+
+    it "emits the full named-style catalog in word/styles.xml":
+        val doc = parse_markdown_document("# Report\n\nBody.", "d")
+        val docx = document_to_docx_bytes(doc)
+        val styles_xml = zip_extract_text(docx, "word/styles.xml")
+        expect(styles_xml).to_contain("w:styleId=\"Normal\"")
+        expect(styles_xml).to_contain("w:styleId=\"Heading1\"")
+        expect(styles_xml).to_contain("w:styleId=\"Heading2\"")
+        expect(styles_xml).to_contain("w:styleId=\"Heading3\"")
+        expect(styles_xml).to_contain("w:styleId=\"Quote\"")
+        expect(styles_xml).to_contain("w:styleId=\"Code\"")
+        expect(styles_xml).to_contain("w:styleId=\"ListParagraph\"")
+        expect(styles_xml).to_contain("w:sz w:val=\"32\"")
+        expect(styles_xml).to_contain("w:sz w:val=\"26\"")
+        expect(styles_xml).to_contain("w:sz w:val=\"22\"")
+        expect(styles_xml).to_contain("<w:i/>")
+        expect(styles_xml).to_contain("Courier New")
+
+    it "Heading1-3 are basedOn Normal and bold":
+        val doc = parse_markdown_document("# Report\n\nBody.", "d")
+        val docx = document_to_docx_bytes(doc)
+        val styles_xml = zip_extract_text(docx, "word/styles.xml")
+        expect(styles_xml).to_contain("<w:basedOn w:val=\"Normal\"/>")
+        expect(styles_xml).to_contain("<w:b/>")
+
+    it "exports a Heading1 paragraph with w:pStyle Heading1 in the body":
+        val doc = parse_markdown_document("# Title", "d")
+        val docx = document_to_docx_bytes(doc)
+        val document_xml = zip_extract_text(docx, "word/document.xml")
+        expect(document_xml).to_contain("<w:pStyle w:val=\"Heading1\"/>")
+
+    it "round-trips a blockquote through docx exactly (was silently lost before this change)":
+        val md = "> A wise quote."
+        val doc = parse_markdown_document(md, "d")
+        expect(doc.blocks[0].kind).to_equal(BlockKind.Quote)
+        val docx = document_to_docx_bytes(doc)
+        val document_xml = zip_extract_text(docx, "word/document.xml")
+        expect(document_xml).to_contain("<w:pStyle w:val=\"Quote\"/>")
+        val back = docx_bytes_to_document(docx, "d2")
+        expect(back.blocks[0].kind).to_equal(BlockKind.Quote)
+        expect(document_to_markdown(back)).to_equal(md)
+
+    it "round-trips a fenced code block through docx exactly (was silently lost before this change)":
+        val md = "```\nlet x = 1\nlet y = 2\n```"
+        val doc = parse_markdown_document(md, "d")
+        expect(doc.blocks[0].kind).to_equal(BlockKind.CodeBlock)
+        val docx = document_to_docx_bytes(doc)
+        val document_xml = zip_extract_text(docx, "word/document.xml")
+        expect(document_xml).to_contain("<w:pStyle w:val=\"Code\"/>")
+        val back = docx_bytes_to_document(docx, "d2")
+        expect(back.blocks[0].kind).to_equal(BlockKind.CodeBlock)
+        expect(document_to_markdown(back)).to_equal(md)
+
+    it "round-trips headings + blockquote + code together, md -> docx -> md exact":
+        val md = "# Title\n\n## Sub\n\n### Detail\n\n> Quoted line\n\nBody paragraph.\n\n```\ncode line one\ncode line two\n```"
+        val doc = parse_markdown_document(md, "d")
+        val docx = document_to_docx_bytes(doc)
+        val back = docx_bytes_to_document(docx, "d2")
+        expect(document_to_markdown(back)).to_equal(md)
+
+    it "an unrecognized w:pStyle value falls back to a plain Paragraph on import":
+        val document_xml = "<w:body><w:p><w:pPr><w:pStyle w:val=\"SomeOtherAppsStyle\"/></w:pPr><w:r><w:t>Text</w:t></w:r></w:p></w:body>"
+        val back = docx_document_xml_to_document(document_xml, "d")
+        expect(back.blocks[0].kind).to_equal(BlockKind.Paragraph)
+
+    it "a document with no headings/quote/code is byte-identical to a header/footer-empty call":
+        val doc = parse_markdown_document("Just a plain paragraph.", "d")
+        val plain = document_to_docx_bytes(doc)
+        val hf_empty = document_to_docx_bytes_hf(doc, "", "")
+        expect(plain).to_equal(hf_empty)
+
+    it "renders a Quote block as a real <blockquote> and a CodeBlock as <pre><code> in HTML":
+        val md = "> Quoted line\n\n```\ncode here\n```"
+        val doc = parse_markdown_document(md, "d")
+        val html = render_document_html(doc)
+        expect(html).to_contain("<blockquote class=\"quote\"")
+        expect(html).to_contain("</blockquote>")
+        expect(html).to_contain("<pre class=\"code_block\"")
+        expect(html).to_contain("<code>code here</code>")
+        expect(html).to_contain("</pre>")

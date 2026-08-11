@@ -1,0 +1,402 @@
+# Effect verifier — @copy_budget(N) and @bounded_loop.
+#
+# Companion to noalloc_checker.spl, covering the two steady-state invariants
+# the render-perf plan (doc/03_plan/ui/perf/render_perf_redesign_plan_2026-08-06.md
+# §11) states but nothing currently enforces:
+#
+#   scene_copy_bytes = 0        -> @copy_budget(0) on the commit path
+#   bounded frame time          -> @bounded_loop on per-frame executors
+#
+# Three violation classes:
+#   1. copy-over-budget   declared copy bytes exceed the annotated budget
+#   2. implicit-copy      a compiler-inserted whole-value copy under budget 0
+#   3. unbounded-loop     a loop with no provable trip bound, or one that grows
+#                         a container per iteration
+#
+# TRANSITIVE BY CONSTRUCTION. `effect_copy_closure` computes a fixpoint over the
+# call graph, so a caller inherits its callees' copy cost. noalloc_checker does
+# NOT do this — it reads a precomputed `allocates` flag one level deep and is
+# only as transitive as whatever populated its manifest. See the survey note in
+# that file's companion spec.
+#
+# SCOPE, stated plainly: this is a verdict engine over EXTRACTED FACTS, in the
+# same style as layer_eq_checker.spl. It decides correctly given copy sites and
+# loop descriptors.
+#
+# WIRED (C4, 2026-08-09). Those facts now come from REAL LOWERED BODIES:
+# `10.frontend/effect_registry.spl` records `@copy_budget(N)` / `@bounded_loop`
+# at parse time, and `35.semantics/effect_validation.spl` drains the registry
+# after HIR lowering, walking each annotated function's body for real loop and
+# copy sites and returning real compile diagnostics through the same driver
+# hook C1's `validate_layer_eq_types` uses. Before that, everything below ran
+# on hand-built fixtures only and could not fail a build. The residual gaps are
+# enumerated honestly in the "Still deferred" note at the foot of this file --
+# they are narrower than the original list, and none of them is silently
+# reported as proven.
+
+# ============================================================================
+# Kind codes
+# ============================================================================
+# Plain integers rather than an enum, deliberately: this tree has open
+# enum-match defects under BOTH engines (a match on a variant can fire no arm
+# at all, silently). An enum here would make the verifier's own dispatch its
+# least trustworthy part.
+
+val EFFECT_COPY_OVER_BUDGET: i64 = 1
+val EFFECT_IMPLICIT_COPY: i64 = 2
+val EFFECT_UNBOUNDED_LOOP: i64 = 3
+val EFFECT_GROWTH_IN_LOOP: i64 = 4
+
+# Loop bound classification.
+val LOOP_BOUND_NONE: i64 = 0        # `while true`, or no provable bound
+val LOOP_BOUND_CONST: i64 = 1       # counted loop, constant trip count
+val LOOP_BOUND_CAPACITY: i64 = 2    # iterates a fixed-capacity collection
+
+# `@copy_budget` absent. -1, not 0: 0 is the STRICTEST budget (no copies at
+# all), so conflating "unannotated" with "zero" would invert the check.
+val COPY_BUDGET_UNSET: i64 = 0 - 1
+
+# Saturation ceiling for the transitive closure. A recursive cycle saturates
+# here rather than looping forever, and saturation violates every finite
+# budget — fail-closed, which is the correct direction for an effect proof.
+val EFFECT_COPY_CEILING: i64 = 1000000000
+
+# ============================================================================
+# Records
+# ============================================================================
+
+struct CopySite:
+    """One value copy attributed to a function body.
+
+    Fields:
+        detail:   What is copied (type or binding name), for the diagnostic.
+        bytes:    Declared copy size in bytes.
+        implicit: true when the compiler inserts the copy (whole-struct pass,
+                  return-by-value, field snapshot) rather than the author
+                  writing it. Under @copy_budget(0) these are rejected on
+                  sight, because an implicit copy is exactly the one a reader
+                  cannot see when auditing a hot path.
+        line:     Source line (0 when unavailable).
+    """
+    detail: text
+    bytes: i64
+    implicit: bool
+    line: i64
+
+struct LoopSite:
+    """One loop in a function body.
+
+    Fields:
+        detail:         Loop description for the diagnostic.
+        bound_kind:     LOOP_BOUND_NONE | _CONST | _CAPACITY.
+        grows_container: true when the body pushes/inserts into a container.
+        line:           Source line (0 when unavailable).
+    """
+    detail: text
+    bound_kind: i64
+    grows_container: bool
+    line: i64
+
+struct EffectViolation:
+    """A single effect-contract violation."""
+    fn_name: text
+    kind: i64
+    detail: text
+    line: i64
+
+# ============================================================================
+# Manifest — mirrors NoallocCapabilityManifest's shape on purpose
+# ============================================================================
+
+struct EffectFnEntry:
+    """Per-function effect-contract record.
+
+    Fields:
+        name:         Fully-qualified function name.
+        copy_budget:  Annotated @copy_budget(N), or COPY_BUDGET_UNSET.
+        bounded_loop: true when the function is annotated @bounded_loop.
+        own_bytes:    Copy bytes attributable to this body alone, excluding
+                      callees. The closure adds callee cost on top.
+    """
+    name: text
+    copy_budget: i64
+    bounded_loop: bool
+    own_bytes: i64
+
+class EffectManifest:
+    """Registry of per-function effect contracts for one compilation unit."""
+    entries: [EffectFnEntry]
+    index: {text: i64}
+
+impl EffectManifest:
+    static fn new() -> EffectManifest:
+        """Create an empty manifest."""
+        EffectManifest(entries: [], index: {})
+
+    me register(name: text, copy_budget: i64, bounded_loop: bool, own_bytes: i64):
+        """Register a function's effect contract."""
+        val idx = self.entries.len()
+        self.entries.push(EffectFnEntry(
+            name: name,
+            copy_budget: copy_budget,
+            bounded_loop: bounded_loop,
+            own_bytes: own_bytes
+        ))
+        self.index[name] = idx
+
+    fn lookup(name: text) -> EffectFnEntry:
+        """Look up a function. Unknown names get an unannotated, zero-cost entry."""
+        if self.index.has(name):
+            val idx = self.index[name]
+            return self.entries[idx]
+        EffectFnEntry(name: name, copy_budget: COPY_BUDGET_UNSET,
+            bounded_loop: false, own_bytes: 0)
+
+    fn has_copy_budget(name: text) -> bool:
+        """Check whether a function carries a @copy_budget annotation."""
+        self.lookup(name).copy_budget != COPY_BUDGET_UNSET
+
+# ============================================================================
+# Transitive closure over the call graph
+# ============================================================================
+
+fn effect_find_name(names: [text], target: text) -> i64:
+    """Index of `target` in `names`, or -1."""
+    var i = 0
+    while i < names.len():
+        if names[i] == target:
+            return i
+        i = i + 1
+    0 - 1
+
+fn effect_copy_closure(names: [text], own_bytes: [i64], callees: [[text]]) -> [i64]:
+    """Total copy bytes per function, including everything it calls.
+
+    Parallel arrays rather than mutation through a class field: this tree's
+    interpreter value-copies class references on field and array stores, so a
+    closure that wrote back into manifest entries would silently compute
+    nothing under one engine and work under the other.
+
+    Iterates to a fixpoint. A recursive cycle saturates at EFFECT_COPY_CEILING
+    instead of diverging, and saturation violates every finite budget.
+
+    sdoctest:
+        # leaf(100) <- mid(10) <- top(1): top pays 111.
+        val t = effect_copy_closure(["top", "mid", "leaf"], [1, 10, 100],
+            [["mid"], ["leaf"], []])
+        expect(t[0]).to_equal(111)
+        expect(t[1]).to_equal(110)
+        expect(t[2]).to_equal(100)
+    """
+    var total: [i64] = []
+    var i = 0
+    while i < names.len():
+        total.push(own_bytes[i])
+        i = i + 1
+
+    # An acyclic graph converges within |V|+1 rounds (longest path). A CYCLE
+    # never does — it grows by a constant every round, so a plain round cap
+    # would return an arbitrary partial sum that happens to look finite. That
+    # is the fail-OPEN outcome: a mutually recursive pair would report a small
+    # copy cost and pass a tight budget. Instead, non-convergence at the round
+    # budget is treated as proof of a cycle and the still-moving entries are
+    # saturated; clamping then lets their callers converge.
+    val budget = names.len() + 1
+    var saturated = false
+    var round = 0
+    while round < budget * 2 + 2:
+        var changed_any = false
+        var changed_this: [bool] = []
+        var j = 0
+        while j < names.len():
+            var sum = own_bytes[j]
+            for c in callees[j]:
+                val ci = effect_find_name(names, c)
+                if ci >= 0:
+                    sum = sum + total[ci]
+            if sum > EFFECT_COPY_CEILING:
+                sum = EFFECT_COPY_CEILING
+            if sum != total[j]:
+                total[j] = sum
+                changed_this.push(true)
+                changed_any = true
+            else:
+                changed_this.push(false)
+            j = j + 1
+
+        if not changed_any:
+            return total
+
+        if round >= budget and not saturated:
+            # Only the entries still moving are saturated. Saturating every
+            # node with a nonzero callee contribution would also condemn
+            # unrelated acyclic chains that had already converged.
+            var k = 0
+            while k < names.len():
+                if changed_this[k]:
+                    total[k] = EFFECT_COPY_CEILING
+                k = k + 1
+            saturated = true
+
+        round = round + 1
+    total
+
+# ============================================================================
+# Checks
+# ============================================================================
+
+fn check_copy_budget(fn_name: text, budget: i64, sites: [CopySite], callee_bytes: i64) -> [EffectViolation]:
+    """Check one function's copy sites against its @copy_budget.
+
+    `callee_bytes` is the transitive cost of everything this function calls,
+    from effect_copy_closure. Passing 0 checks the body in isolation.
+
+    An unannotated function (COPY_BUDGET_UNSET) is not checked — @copy_budget
+    is opt-in, exactly like @noalloc.
+
+    sdoctest:
+        val small = CopySite(detail: "Rect", bytes: 16, implicit: false, line: 0)
+        # Under budget: clean.
+        expect(check_copy_budget("f", 64, [small], 0).len()).to_equal(0)
+        # Over budget: one violation.
+        expect(check_copy_budget("f", 8, [small], 0).len()).to_equal(1)
+        # Unannotated: not checked at all.
+        expect(check_copy_budget("f", COPY_BUDGET_UNSET, [small], 0).len()).to_equal(0)
+    """
+    var violations: [EffectViolation] = []
+    if budget == COPY_BUDGET_UNSET:
+        return violations
+
+    var total = callee_bytes
+    for s in sites:
+        total = total + s.bytes
+        # Under a zero budget an implicit copy is rejected on sight, with its
+        # own diagnostic — "you have a hidden copy" is more actionable than
+        # "you are 24 bytes over".
+        if budget == 0 and s.implicit:
+            violations.push(EffectViolation(
+                fn_name: fn_name,
+                kind: EFFECT_IMPLICIT_COPY,
+                detail: "implicit whole-value copy of '" + s.detail
+                    + "' (" + s.bytes.to_text() + " bytes) under @copy_budget(0)",
+                line: s.line
+            ))
+
+    if total > budget:
+        violations.push(EffectViolation(
+            fn_name: fn_name,
+            kind: EFFECT_COPY_OVER_BUDGET,
+            detail: "copies " + total.to_text() + " bytes ("
+                + callee_bytes.to_text() + " from callees) but @copy_budget is "
+                + budget.to_text(),
+            line: 0
+        ))
+
+    violations
+
+fn check_bounded_loops(fn_name: text, annotated: bool, loops: [LoopSite]) -> [EffectViolation]:
+    """Check one function's loops against @bounded_loop.
+
+    Unannotated functions are not checked. A loop violates when it has no
+    provable trip bound, or when it grows a container per iteration — the
+    latter is unbounded in both time AND memory, so it is reported even when
+    the trip count itself is bounded.
+
+    sdoctest:
+        val ok = LoopSite(detail: "for tile", bound_kind: LOOP_BOUND_CAPACITY, grows_container: false, line: 0)
+        val bad = LoopSite(detail: "while true", bound_kind: LOOP_BOUND_NONE, grows_container: false, line: 0)
+        expect(check_bounded_loops("f", true, [ok]).len()).to_equal(0)
+        expect(check_bounded_loops("f", true, [bad]).len()).to_equal(1)
+        expect(check_bounded_loops("f", false, [bad]).len()).to_equal(0)
+    """
+    var violations: [EffectViolation] = []
+    if not annotated:
+        return violations
+
+    for lp in loops:
+        if lp.bound_kind == LOOP_BOUND_NONE:
+            violations.push(EffectViolation(
+                fn_name: fn_name,
+                kind: EFFECT_UNBOUNDED_LOOP,
+                detail: "loop '" + lp.detail + "' has no provable trip bound",
+                line: lp.line
+            ))
+        if lp.grows_container:
+            violations.push(EffectViolation(
+                fn_name: fn_name,
+                kind: EFFECT_GROWTH_IN_LOOP,
+                detail: "loop '" + lp.detail + "' grows a container per iteration",
+                line: lp.line
+            ))
+
+    violations
+
+# ============================================================================
+# Formatting
+# ============================================================================
+
+fn effect_kind_label(kind: i64) -> text:
+    """Diagnostic label for a violation kind code."""
+    if kind == EFFECT_COPY_OVER_BUDGET:
+        return "copy-over-budget"
+    if kind == EFFECT_IMPLICIT_COPY:
+        return "implicit-copy"
+    if kind == EFFECT_UNBOUNDED_LOOP:
+        return "unbounded-loop"
+    if kind == EFFECT_GROWTH_IN_LOOP:
+        return "growth-in-loop"
+    "unknown"
+
+fn format_effect_violation(v: EffectViolation) -> text:
+    """Format a violation as a compiler diagnostic.
+
+    sdoctest:
+        val v = EffectViolation(fn_name: "commit", kind: EFFECT_IMPLICIT_COPY, detail: "x", line: 7)
+        expect(format_effect_violation(v).starts_with("error[effect]")).to_equal(true)
+    """
+    val label = effect_kind_label(v.kind)
+    if v.line > 0:
+        return "error[effect]: in fn '" + v.fn_name + "' (line " + v.line.to_text()
+            + "): " + label + " — " + v.detail
+    "error[effect]: in fn '" + v.fn_name + "': " + label + " — " + v.detail
+
+fn format_effect_violations(violations: [EffectViolation]) -> [text]:
+    """Format all violations as diagnostic strings."""
+    var messages: [text] = []
+    for v in violations:
+        messages.push(format_effect_violation(v))
+    messages
+
+# ============================================================================
+# Still deferred (C4 wiring landed 2026-08-09; these four remain)
+# ============================================================================
+# 1. CLOSED. `35.semantics/effect_validation.spl` populates the facts from real
+#    lowered HIR bodies and is invoked from
+#    `80.driver/driver_hir_pipeline_lowering.spl`, the same hook C1 uses. The
+#    sibling gap it names — `noalloc_checker.spl` still has ZERO production
+#    call sites — is unchanged and is NOT covered by this work.
+# 2. CLOSED for struct copies. Copy sizes now come from the production layout
+#    engine (`compute_struct_layout`), the same source C1 proves layouts with,
+#    not from declared numbers. Non-struct copy sites (arrays, dicts, text) are
+#    still not measured — they are simply not reported, never reported as zero.
+# 3. OPEN. Indirect calls — closures, function values, trait-object dispatch —
+#    still have no callee name, so `effect_copy_closure` cannot see through
+#    them; `effect_validation` follows DIRECT calls only, which makes a
+#    caller's reported cost a LOWER bound. Saturating on every indirect call
+#    (the fail-closed alternative) would reject essentially every real function
+#    and is deferred until callee-set facts exist.
+# 4. NARROWED. Loop bounds are now derived from real HIR shapes: `while true`
+#    and bare `loop:` classify NONE, `while i < <literal>` and
+#    `for x in a..<literal>` classify CONST, and any other `for` classifies
+#    CAPACITY. Full induction-variable analysis for a non-literal bound is
+#    still absent, and such a bound classifies NONE — fail-closed, so the
+#    missing analysis can only over-report, never silently pass a loop.
+
+export CopySite, LoopSite, EffectViolation, EffectFnEntry, EffectManifest
+export EFFECT_COPY_OVER_BUDGET, EFFECT_IMPLICIT_COPY
+export EFFECT_UNBOUNDED_LOOP, EFFECT_GROWTH_IN_LOOP
+export LOOP_BOUND_NONE, LOOP_BOUND_CONST, LOOP_BOUND_CAPACITY
+export COPY_BUDGET_UNSET, EFFECT_COPY_CEILING
+export effect_find_name, effect_copy_closure
+export check_copy_budget, check_bounded_loops
+export effect_kind_label, format_effect_violation, format_effect_violations

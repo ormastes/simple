@@ -1,0 +1,325 @@
+# Metal lane session for the GPU Remote Interpreter test lanes.
+#
+# Design: doc/05_design/app/tools/metal_gpu_lane_and_vulkan_jit_notebook_architecture_2026-08-09.md
+# section 4 (parent design section 6.3 asymmetry note: Metal, like Vulkan,
+# needs a pipeline before any dispatch -- an `MTLComputePipelineState` must be
+# built from a compiled `MTLFunction` up front, and there is no metal-native
+# persistent-kernel/polling-ring primitive analogous to a CUDA resident
+# kernel). This is why `init` bundles pipeline creation here, mirroring
+# `vulkan_lane_session.spl`'s shape rather than `cuda_lane_session.spl`'s
+# separate `load_entry` step.
+#
+# This is a clean-room lane session: it uses the same underlying `rt_metal_*`
+# FFI calls as `std.nogc_sync_mut.gpu.engine2d.metal_session.MetalSession`
+# (read for the FFI call sequence / error-handling convention only) but does
+# not import or extend that class -- 2D session concerns (textures, render
+# passes, swapchains) don't belong in this tier.
+
+mod std.gc_async_mut.gpu_lane.metal_lane_session
+
+use std.nogc_sync_mut.io.env_ops.{env_get}
+
+# ============================================================================
+# Extern declarations (resolved at link time against the Rust runtime --
+# src/compiler_rust/compiler/src/interpreter_extern/gpu.rs /
+# src/compiler_rust/runtime/src/metal_graphics_runtime.rs). Only the subset
+# gpu_lane needs: device init, command queue, buffer alloc (for the SVM-G
+# arena), compile-shader, compute-pipeline-create, dispatch, command-buffer
+# commit+wait. No new Rust FFI was needed for this session shell.
+# ============================================================================
+
+extern fn rt_metal_is_available() -> bool
+extern fn rt_metal_device_count() -> i64
+extern fn rt_metal_device_name(device: i64) -> text
+extern fn rt_metal_create_device(ordinal: i64) -> i64
+extern fn rt_metal_destroy_device(device: i64) -> i64
+extern fn rt_metal_create_command_queue(device: i64) -> i64
+extern fn rt_metal_destroy_command_queue(queue: i64) -> i64
+extern fn rt_metal_alloc_buffer(device: i64, size: i64) -> i64
+extern fn rt_metal_free_buffer(buffer: i64) -> i64
+extern fn rt_metal_buffer_upload(buffer: i64, data: [u8], size: i64) -> bool
+extern fn rt_metal_buffer_download(data: [u8], buffer: i64, size: i64) -> bool
+extern fn rt_metal_compile_shader(device: i64, source: text) -> i64
+extern fn rt_metal_destroy_shader(shader: i64) -> bool
+extern fn rt_metal_create_compute_pipeline(device: i64, shader: i64, entry: text) -> i64
+extern fn rt_metal_destroy_pipeline(pipeline: i64) -> bool
+extern fn rt_metal_create_command_buffer(queue: i64) -> i64
+extern fn rt_metal_destroy_command_buffer(cmd: i64) -> i64
+extern fn rt_metal_create_compute_encoder(cmd: i64) -> i64
+extern fn rt_metal_destroy_compute_encoder(encoder: i64) -> i64
+extern fn rt_metal_set_buffer(encoder: i64, buffer: i64, offset: i64, index: i64) -> i64
+extern fn rt_metal_dispatch_compute(encoder: i64, pipeline: i64, gx: i64, gy: i64, gz: i64, bx: i64, by: i64, bz: i64) -> i64
+extern fn rt_metal_end_compute_encoder(encoder: i64) -> i64
+extern fn rt_metal_commit_command_buffer(cmd: i64) -> i64
+extern fn rt_metal_wait_completed(cmd: i64) -> i64
+extern fn rt_metal_get_last_error() -> text
+
+# GMB-1 sentinels (doc/05_design/runtime/gpu_remote_interpreter_architecture.md
+# section 3.1 / 7), same values as `vulkan_lane_session.spl`.
+val METAL_LANE_TIMEOUT_SENTINEL: i64 = 0xDEAD0000
+val METAL_LANE_OK_SENTINEL: i64 = 0xCAFE0000
+
+# Default Metal threadgroup size along X when the caller does not need finer
+# control -- SVM-G's per-lane opcode loop is embarrassingly parallel across
+# threads, so a flat 1-D threadgroup mirrors the Vulkan local_size_x=1 lane
+# shape used by `svmg_vulkan_kernel.spv`.
+val _METAL_LANE_THREADGROUP_X: i64 = 1
+
+fn _metal_lane_default_timeout_ms() -> i64:
+    val raw = env_get("GPU_LANE_TIMEOUT_MS")
+    if raw == "" or raw == nil:
+        30000
+    else:
+        val parsed = raw.trim().to_i64()
+        if parsed > 0:
+            parsed
+        else:
+            30000
+
+# `rt_metal_buffer_download` writes into the caller-supplied `[u8]` array in
+# place (it is a raw-pointer destination on the Rust side, not an
+# allocate-and-return call like `vulkan_sffi_read_buffer_bytes`) -- see
+# `metal_download` in `std.nogc_sync_mut.io.metal_sffi` for the same
+# pre-sized-buffer convention this session follows.
+fn _metal_lane_zero_bytes(len: i64) -> [u8]:
+    var buf: [u8] = []
+    var i: i64 = 0
+    while i < len:
+        buf = buf.push(0u8)
+        i = i + 1
+    buf
+
+fn _metal_lane_default_device_index() -> i64:
+    val raw = env_get("METAL_DEVICE_INDEX")
+    if raw == "" or raw == nil:
+        0
+    else:
+        val parsed = raw.trim().to_i64()
+        if parsed >= 0:
+            parsed
+        else:
+            0
+
+# `MetalLaneSession` -- one arena `MTLBuffer`, one persistent compute
+# pipeline (the SVM-G interpreter kernel in later work; a caller-supplied
+# MSL source here), one command queue. No descriptor-set analog is needed
+# (Metal binds buffers directly on the compute-command encoder via
+# `rt_metal_set_buffer`), and no separate fence object exists -- command
+# buffer completion is queried directly via `rt_metal_wait_completed`.
+class MetalLaneSession:
+    device_ordinal: i64
+    timeout_ms: i64
+    initialized: bool
+    completion_unknown: bool
+    release_pending: bool
+    device_handle: i64
+    device_name: text
+    queue_handle: i64
+    arena_buffer: i64
+    arena_capacity: i64
+    lane_shader: i64
+    lane_pipeline: i64
+    last_dispatch_sentinel: i64
+    last_error: text
+
+    static fn create() -> MetalLaneSession:
+        MetalLaneSession.create_for_device(_metal_lane_default_device_index())
+
+    static fn create_for_device(ordinal: i64) -> MetalLaneSession:
+        MetalLaneSession(
+            device_ordinal: ordinal,
+            timeout_ms: _metal_lane_default_timeout_ms(),
+            initialized: false, completion_unknown: false,
+            release_pending: false,
+            device_handle: 0, device_name: "", queue_handle: 0,
+            arena_buffer: 0, arena_capacity: 0,
+            lane_shader: 0, lane_pipeline: 0,
+            last_dispatch_sentinel: 0, last_error: "")
+
+    # Host-aware capability probe. Never raises, never hangs: returns ""
+    # when a live Metal-capable device is usable, or a "skip:<reason>"
+    # string per the GMB-1 SKIP contract when macOS/Metal is absent. Safe to
+    # call before `init`. Per design section 3 ("OS-gating precedent"),
+    # Metal availability is an OS-build-time property
+    # (`#[cfg(target_os = "macos")]` in the Rust runtime), not a runtime
+    # dlopen probe like CUDA/Vulkan -- `rt_metal_is_available()` already
+    # folds that check in (it hard-returns `false` when the runtime was not
+    # built for macOS), so this probe is a thin wrapper, not a duplicate
+    # OS check.
+    me probe() -> text:
+        if not rt_metal_is_available():
+            return "skip:metal-unavailable-not-macos"
+        val device_count = rt_metal_device_count()
+        if device_count < 1:
+            return "skip:metal-no-physical-device"
+        if self.device_ordinal >= device_count:
+            return "skip:metal-device-ordinal-unavailable"
+        ""
+
+    me init(arena_bytes: i64, lane_msl: text, entry: text) -> text:
+        if self.initialized or self.completion_unknown or self.release_pending:
+            return "metal-lane-session-state-invalid"
+        if arena_bytes <= 0 or lane_msl == "" or entry == "":
+            return "metal-lane-arena-artifact-invalid"
+        val probe_result = self.probe()
+        if probe_result != "":
+            return probe_result
+        val device = rt_metal_create_device(self.device_ordinal)
+        if device <= 0:
+            return "metal-lane-device-create-failed"
+        self.device_handle = device
+        self.device_name = rt_metal_device_name(device)
+        val queue = rt_metal_create_command_queue(device)
+        if queue <= 0:
+            rt_metal_destroy_device(device)
+            self.device_handle = 0
+            return "metal-lane-queue-create-failed"
+        self.queue_handle = queue
+        self.lane_shader = rt_metal_compile_shader(device, lane_msl)
+        if self.lane_shader <= 0:
+            rt_metal_destroy_command_queue(queue)
+            rt_metal_destroy_device(device)
+            self.queue_handle = 0
+            self.device_handle = 0
+            return "metal-lane-shader-compile-failed"
+        self.lane_pipeline = rt_metal_create_compute_pipeline(
+            device, self.lane_shader, entry)
+        if self.lane_pipeline <= 0:
+            rt_metal_destroy_shader(self.lane_shader)
+            rt_metal_destroy_command_queue(queue)
+            rt_metal_destroy_device(device)
+            self.lane_shader = 0
+            self.queue_handle = 0
+            self.device_handle = 0
+            return "metal-lane-pipeline-create-failed"
+        self.arena_buffer = rt_metal_alloc_buffer(device, arena_bytes)
+        if self.arena_buffer <= 0:
+            rt_metal_destroy_pipeline(self.lane_pipeline)
+            rt_metal_destroy_shader(self.lane_shader)
+            rt_metal_destroy_command_queue(queue)
+            rt_metal_destroy_device(device)
+            self.lane_pipeline = 0
+            self.lane_shader = 0
+            self.queue_handle = 0
+            self.device_handle = 0
+            return "metal-lane-arena-alloc-failed"
+        self.arena_capacity = arena_bytes
+        self.initialized = true
+        ""
+
+    # Host-side arena write. Returns false without raising on failure so a
+    # caller can decide how to fold that into its own contract.
+    me arena_write(data: [u8]) -> bool:
+        if not self.initialized or self.completion_unknown or self.release_pending:
+            return false
+        if data.len().to_i64() > self.arena_capacity:
+            return false
+        rt_metal_buffer_upload(self.arena_buffer, data, data.len().to_i64())
+
+    me arena_read(byte_count: i64) -> [u8]:
+        if not self.initialized or self.completion_unknown or self.release_pending:
+            return []
+        if byte_count <= 0 or byte_count > self.arena_capacity:
+            return []
+        val out = _metal_lane_zero_bytes(byte_count)
+        val ok = rt_metal_buffer_download(out, self.arena_buffer, byte_count)
+        if not ok:
+            return []
+        out
+
+    # Dispatch the session's persistent pipeline once against the arena
+    # (bound at compute-encoder index 0), commit, and wait for completion
+    # bounded by `self.timeout_ms`. Never blocks past the timeout: a
+    # command buffer that does not report completed in time is forced to
+    # METAL_LANE_TIMEOUT_SENTINEL, matching the GMB-1 sentinel contract
+    # already implemented for CUDA/Vulkan. `rt_metal_wait_completed` is a
+    # bounded poll on the Rust side (mirrors the CUDA/Vulkan fence-wait
+    # shape) -- see `rt_metal_wait_completed` in
+    # `src/compiler_rust/runtime/src/metal_graphics_runtime.rs`.
+    me dispatch_once(grid_x: i64) -> text:
+        if not self.initialized or self.completion_unknown or self.release_pending:
+            return "metal-lane-session-unavailable"
+        if grid_x <= 0:
+            return "metal-lane-dispatch-invalid"
+        val cmd = rt_metal_create_command_buffer(self.queue_handle)
+        if cmd <= 0:
+            return "metal-lane-command-buffer-create-failed"
+        val encoder = rt_metal_create_compute_encoder(cmd)
+        if encoder <= 0:
+            rt_metal_destroy_command_buffer(cmd)
+            return "metal-lane-encoder-create-failed"
+        val bind_ok = rt_metal_set_buffer(encoder, self.arena_buffer, 0, 0)
+        if bind_ok != 1:
+            rt_metal_destroy_compute_encoder(encoder)
+            rt_metal_destroy_command_buffer(cmd)
+            return "metal-lane-bind-buffer-failed"
+        val dispatch_ok = rt_metal_dispatch_compute(
+            encoder, self.lane_pipeline,
+            grid_x, 1, 1,
+            _METAL_LANE_THREADGROUP_X, 1, 1)
+        if dispatch_ok != 1:
+            rt_metal_destroy_compute_encoder(encoder)
+            rt_metal_destroy_command_buffer(cmd)
+            return "metal-lane-dispatch-failed"
+        val end_ok = rt_metal_end_compute_encoder(encoder)
+        rt_metal_destroy_compute_encoder(encoder)
+        if end_ok != 1:
+            rt_metal_destroy_command_buffer(cmd)
+            return "metal-lane-encoder-end-failed"
+        val commit_ok = rt_metal_commit_command_buffer(cmd)
+        if commit_ok != 1:
+            self.last_dispatch_sentinel = METAL_LANE_TIMEOUT_SENTINEL
+            rt_metal_destroy_command_buffer(cmd)
+            return "metal-lane-commit-failed"
+        # `rt_metal_wait_completed` has no timeout parameter of its own
+        # (unlike Vulkan's `vulkan_sffi_wait_fence(fence, timeout_ns)`); the
+        # completion-unknown quarantine path below is the fallback if that
+        # ever changes to a bounded/non-blocking poll -- for now a failed
+        # completion report is treated the same as a timeout, per the GMB-1
+        # sentinel contract (never a silent pass on an unproven completion).
+        val completed = rt_metal_wait_completed(cmd)
+        if completed != 1:
+            self.completion_unknown = true
+            self.release_pending = true
+            self.last_dispatch_sentinel = METAL_LANE_TIMEOUT_SENTINEL
+            self.last_error = rt_metal_get_last_error()
+            return "metal-lane-completion-timeout"
+        rt_metal_destroy_command_buffer(cmd)
+        self.last_dispatch_sentinel = METAL_LANE_OK_SENTINEL
+        ""
+
+    me shutdown() -> text:
+        if self.completion_unknown or self.release_pending:
+            return "metal-lane-session-cleanup-pending"
+        if self.arena_buffer > 0:
+            if rt_metal_free_buffer(self.arena_buffer) == 1:
+                self.arena_buffer = 0
+        if self.arena_buffer > 0:
+            return "metal-lane-session-buffer-release-pending"
+        self.arena_capacity = 0
+        if self.lane_pipeline > 0:
+            if rt_metal_destroy_pipeline(self.lane_pipeline):
+                self.lane_pipeline = 0
+        if self.lane_pipeline > 0:
+            return "metal-lane-session-pipeline-release-pending"
+        if self.lane_shader > 0:
+            if rt_metal_destroy_shader(self.lane_shader):
+                self.lane_shader = 0
+        if self.lane_shader > 0:
+            return "metal-lane-session-shader-release-pending"
+        if self.queue_handle > 0:
+            if rt_metal_destroy_command_queue(self.queue_handle) == 1:
+                self.queue_handle = 0
+        if self.queue_handle > 0:
+            return "metal-lane-session-queue-release-pending"
+        if self.device_handle > 0:
+            if rt_metal_destroy_device(self.device_handle) == 1:
+                self.device_handle = 0
+        if self.device_handle > 0:
+            return "metal-lane-session-device-release-pending"
+        self.initialized = false
+        self.device_name = ""
+        self.release_pending = false
+        ""
+
+export MetalLaneSession, METAL_LANE_TIMEOUT_SENTINEL, METAL_LANE_OK_SENTINEL

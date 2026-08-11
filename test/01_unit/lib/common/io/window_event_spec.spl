@@ -1,0 +1,37 @@
+use std.spec
+use common.io.window_event.{
+    WINDOW_STATUS_OK,
+    WINDOW_STATUS_OVERFLOW,
+    WINDOW_STATUS_INVALID_HANDLE,
+    WINDOW_EVENT_KEY,
+    WINDOW_EVENT_TEXT,
+    WINDOW_ACTION_PRESS,
+    WINDOW_MOD_CTRL,
+    WindowEventLoop,
+    window_event_key,
+}
+
+describe "normalized window event queue":
+    it "preserves FIFO key and text events with independent modifiers":
+        var loop = WindowEventLoop.create(4, 2)
+        val key = window_event_key(7, 1, 10, 67, 46, WINDOW_ACTION_PRESS, WINDOW_MOD_CTRL)
+        expect(loop.enqueue(key)).to_equal(WINDOW_STATUS_OK)
+        expect(loop.enqueue_text(7, 2, 11, "c")).to_equal(WINDOW_STATUS_OK)
+
+        val first = loop.poll()
+        val second = loop.poll()
+        expect(first.kind).to_equal(WINDOW_EVENT_KEY)
+        expect(first.modifiers).to_equal(WINDOW_MOD_CTRL)
+        expect(second.kind).to_equal(WINDOW_EVENT_TEXT)
+        expect(loop.text_value(second.text_handle)).to_equal("c")
+        expect(loop.release_text(second.text_handle)).to_equal(WINDOW_STATUS_OK)
+        expect(loop.release_text(second.text_handle)).to_equal(WINDOW_STATUS_INVALID_HANDLE)
+
+    it "fails closed on overflow without overwriting queued events":
+        var loop = WindowEventLoop.create(1, 1)
+        val first = window_event_key(1, 1, 10, 65, 30, WINDOW_ACTION_PRESS, 0)
+        val second = window_event_key(1, 2, 11, 66, 48, WINDOW_ACTION_PRESS, 0)
+        expect(loop.enqueue(first)).to_equal(WINDOW_STATUS_OK)
+        expect(loop.enqueue(second)).to_equal(WINDOW_STATUS_OVERFLOW)
+        expect(loop.dropped_event_count).to_equal(1)
+        expect(loop.poll().key).to_equal(65)

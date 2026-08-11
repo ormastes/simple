@@ -1,0 +1,57 @@
+# @cover src/lib/nogc_async_mut_noalloc/execution/watchdog_manager.spl
+# @cover src/app/interpreter/core/watchdog.spl
+# @tag: unit, execution, backend_isolation
+#
+# Backend-isolation Gap D (doc/03_plan/ui/rendering/backend_isolation_plan.md
+# § P3 Gap D): before this change, `src/app/interpreter/core/watchdog.spl`
+# declared `extern fn rt_watchdog_start`/`rt_watchdog_stop` directly in the
+# app layer (a Class C violation of the isolation gate
+# `scripts/check/check-ui-backend-isolation.shs`). Those externs now live
+# only in the `WatchdogManager` facade
+# (`src/lib/nogc_async_mut_noalloc/execution/watchdog_manager.spl`); the
+# app-layer module calls `WatchdogManager.start`/`.stop` instead.
+#
+# Note: `rt_watchdog_start`/`rt_watchdog_stop` have no native implementation
+# registered anywhere in the Rust runtime (verified: no
+# `"rt_watchdog_start"`/`"rt_watchdog_stop"` FFI registration exists outside
+# `src/compiler_rust/compiler/src/watchdog.rs`, which the CLI driver calls
+# directly in Rust, never through this extern). Actually invoking
+# `WatchdogManager.start`/`.stop` (or `start_watchdog`/`stop_watchdog`) at
+# runtime aborts the whole process with `unknown extern function:
+# rt_watchdog_start` -- true before and after this migration, so this spec
+# intentionally does NOT call them (that would crash the test runner, not
+# just fail an assertion). It instead pins the source-contract shape: no
+# `extern rt_watchdog_*` remains in the app layer, and the facade is the only
+# owner.
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{read_file, file_exists}
+
+describe "backend-isolation Gap D: WatchdogManager facade owns rt_watchdog_* externs":
+    it "adds the WatchdogManager facade module":
+        expect(file_exists("src/lib/nogc_async_mut_noalloc/execution/watchdog_manager.spl")).to_equal(true)
+        val source = read_file("src/lib/nogc_async_mut_noalloc/execution/watchdog_manager.spl")
+        expect(source.contains("extern fn rt_watchdog_start")).to_equal(true)
+        expect(source.contains("extern fn rt_watchdog_stop")).to_equal(true)
+        expect(source.contains("class WatchdogManager")).to_equal(true)
+        expect(source.contains("fn start(timeout_secs: i64)")).to_equal(true)
+        expect(source.contains("fn stop()")).to_equal(true)
+
+    it "removes the rt_watchdog_* externs from the app-layer interpreter module":
+        val source = read_file("src/app/interpreter/core/watchdog.spl")
+        expect(source.contains("extern fn rt_watchdog_start")).to_equal(false)
+        expect(source.contains("extern fn rt_watchdog_stop")).to_equal(false)
+        expect(source.contains("rt_watchdog_start(")).to_equal(false)
+        expect(source.contains("rt_watchdog_stop(")).to_equal(false)
+
+    it "routes the app-layer watchdog API through the WatchdogManager facade":
+        val source = read_file("src/app/interpreter/core/watchdog.spl")
+        expect(source.contains("use std.nogc_async_mut_noalloc.execution.watchdog_manager.{" + "WatchdogManager}")).to_equal(true)
+        expect(source.contains("WatchdogManager.start(timeout_secs)")).to_equal(true)
+        expect(source.contains("WatchdogManager.stop()")).to_equal(true)
+        # The public app-layer API surface (start_watchdog/stop_watchdog/
+        # check_timeout) is unchanged -- only the FFI ownership moved.
+        expect(source.contains("export start_watchdog, stop_watchdog, check_timeout")).to_equal(true)
+        expect(source.contains("fn start_watchdog(timeout_secs: i64):")).to_equal(true)
+        expect(source.contains("fn stop_watchdog():")).to_equal(true)
+        expect(source.contains("fn check_timeout() -> Result<(), text>:")).to_equal(true)

@@ -1,0 +1,167 @@
+# `@layer_eq` / `@layer_field` declaration registry (C1, doc/03_plan/compiler/
+# forwarding/zero_cost_layers_c0_c5_staged_implementation_plan_2026-08-07.md;
+# closes the C1 gap of doc/03_plan/ui/perf/
+# render_perf_redesign_plan_2026-08-06.md §3).
+#
+# BEFORE this file existed, `35.semantics/layer_eq_checker.spl` implemented all
+# 8 proof obligations but there was NO way to spell `@layer_eq` in source: the
+# checker only ever ran against hand-built `LayerEqType` fixtures, so its
+# obligations were unenforced on the real tree. This registry is the missing
+# link: the parser records `@layer_eq(Target)` (plus per-field
+# `@layer_field(target_name)` renames) here, and
+# `35.semantics/layer_eq_validation.spl` drains it after HIR lowering, feeding
+# the compiler's OWN computed struct layouts into `check_layer_eq`.
+#
+# Why a side-registry and not a `ParserModule`/`HirStruct` field: exactly the
+# reasoning already written down in `resource_registry.spl` (WP-C) --
+# a new struct field would force edits across 10.frontend, 20.hir, 35.semantics,
+# 70.backend and 80.driver, several of which are owned by other in-flight
+# sessions on this shared working copy. `resource_registry` and
+# `LayerDagRegistry` are the two established precedents; this mirrors the
+# former's shape exactly (module-level vars + reset + declare + query).
+#
+# Reset: `parser_init_with_path` (10.frontend/core/parser.spl) calls
+# `layer_eq_registry_reset()` on every fresh parse, right beside
+# `resource_registry_reset()`, so a second `parse_module_body()` in one process
+# cannot leak the previous parse's `@layer_eq` facts.
+
+var layer_eq_registry_views: [text] = []
+var layer_eq_registry_targets: Dict<text, text> = {}
+var layer_eq_registry_renames: Dict<text, text> = {}
+
+fn layer_eq_registry_reset():
+    layer_eq_registry_views = []
+    layer_eq_registry_targets = {}
+    layer_eq_registry_renames = {}
+
+# Per-parse scoped reset: drop only the claims recorded for `path`, keeping
+# every OTHER module's claims alive.
+#
+# A whole-registry wipe in `parser_init_with_path` (what `resource_registry`
+# does) would be WRONG here and silently fail open: a multi-module compile
+# parses every module before any HIR-stage validation runs, so a blanket reset
+# would leave only the LAST-parsed module's `@layer_eq` claims to check and
+# every earlier module's obligations would go unproven while still reporting
+# green. Scoping the reset to the module being (re-)parsed keeps repeat parses
+# of one path idempotent without discarding siblings.
+fn layer_eq_registry_reset_module(path: text):
+    val prefix = path + "|"
+    var kept: [text] = []
+    for key in layer_eq_registry_views:
+        if key.starts_with(prefix):
+            continue
+        kept.push(key)
+    layer_eq_registry_views = kept
+
+# Claims are keyed "<module path>|<view type name>" so two modules can each
+# declare a view of the same name without one silently overwriting the other.
+fn layer_eq_claim_key(path: text, view: text) -> text:
+    path + "|" + view
+
+fn layer_eq_claim_path(key: text) -> text:
+    val parts = key.split("|")
+    if parts.len() == 0:
+        return ""
+    parts[0]
+
+fn layer_eq_claim_view(key: text) -> text:
+    val parts = key.split("|")
+    if parts.len() < 2:
+        return ""
+    parts[1]
+
+# Record one `@layer_eq(Target) struct View:` declaration.
+#
+# `renames_csv` is the comma-separated, declaration-order-parallel list of
+# `@layer_field(NAME)` targets for View's fields -- "" in a slot means "infer by
+# same name", exactly the convention `LayerEqField.mapped_name` already uses.
+# An entirely untagged struct passes "" (or a CSV of empty slots); either
+# spelling round-trips to an all-"" rename list.
+#
+# Re-declaring the same (path, view) overwrites rather than duplicates, so a
+# re-parse of one module cannot make the validator report the same obligation
+# twice.
+fn layer_eq_registry_declare(path: text, view: text, target: text, renames_csv: text):
+    if view == "" or target == "":
+        return
+    val key = layer_eq_claim_key(path, view)
+    if not layer_eq_registry_views.contains(key):
+        layer_eq_registry_views.push(key)
+    layer_eq_registry_targets[key] = target
+    layer_eq_registry_renames[key] = renames_csv
+
+# Every recorded claim key, declaration order across modules.
+fn layer_eq_registry_claim_keys() -> [text]:
+    layer_eq_registry_views
+
+fn layer_eq_is_declared(path: text, view: text) -> bool:
+    layer_eq_registry_views.contains(layer_eq_claim_key(path, view))
+
+fn layer_eq_registry_target_of_key(key: text) -> text:
+    if layer_eq_registry_targets.contains_key(key):
+        return layer_eq_registry_targets[key]
+    ""
+
+fn layer_eq_registry_target_of(path: text, view: text) -> text:
+    layer_eq_registry_target_of_key(layer_eq_claim_key(path, view))
+
+# Declaration-order rename list for a claim key. Always returns a list; an
+# untagged struct yields [] and the checker's same-name inference applies.
+fn layer_eq_registry_renames_of_key(key: text) -> [text]:
+    if not layer_eq_registry_renames.contains_key(key):
+        return []
+    val csv = layer_eq_registry_renames[key]
+    if csv == "":
+        return []
+    var out: [text] = []
+    for part in csv.split(","):
+        out.push(part)
+    out
+
+fn layer_eq_registry_renames_of(path: text, view: text) -> [text]:
+    layer_eq_registry_renames_of_key(layer_eq_claim_key(path, view))
+
+# ===== Parse-time scratch for per-field `@layer_field(NAME)` tags =====
+#
+# `parse_struct_or_trait_decl` (10.frontend/core/_ParserDecls/fn_struct_decls.spl)
+# collects one slot per parsed field -- "" for an untagged field, the tag target
+# for a tagged one, so the list is parallel to the struct's real declaration
+# order -- and publishes the WHOLE list here in one `layer_field_pending_set`
+# call as it returns. `enum_module_body.spl`'s `@layer_eq` arm reads it right
+# after `parse_struct_decl` returns and encodes it into the marker call.
+#
+# Whole-list publish (not incremental push) on purpose: the previous struct's
+# slots are replaced rather than appended to, so an `@layer_field` tag on a
+# struct that carries no `@layer_eq` cannot leak into the NEXT struct's rename
+# list and silently shift every mapping by one.
+#
+# Kept here rather than as a `PENDING_*` global in fn_struct_decls.spl so both
+# the producer (struct-body parser) and the consumer (module-body decorator
+# dispatch) read one definition instead of two drifting copies.
+var layer_field_pending_renames: [text] = []
+var layer_field_pending_seen: bool = false
+
+fn layer_field_pending_reset():
+    layer_field_pending_renames = []
+    layer_field_pending_seen = false
+
+# Publish the just-parsed struct's full, declaration-order rename slot list.
+fn layer_field_pending_set(renames: [text], saw_any: bool):
+    layer_field_pending_renames = renames
+    layer_field_pending_seen = saw_any
+
+fn layer_field_pending_get() -> [text]:
+    layer_field_pending_renames
+
+# True when at least one `@layer_field` tag was actually seen in the struct body
+# just parsed. Lets the caller encode "" (no tags at all) instead of a CSV of
+# empty slots, keeping the marker payload honest.
+fn layer_field_pending_any() -> bool:
+    layer_field_pending_seen
+
+export layer_eq_registry_reset, layer_eq_registry_reset_module, layer_eq_registry_declare
+export layer_eq_registry_claim_keys, layer_eq_claim_key, layer_eq_claim_path, layer_eq_claim_view
+export layer_eq_is_declared, layer_eq_registry_target_of, layer_eq_registry_renames_of
+export layer_eq_registry_target_of_key, layer_eq_registry_renames_of_key
+export layer_field_pending_reset, layer_field_pending_set, layer_field_pending_get
+export layer_field_pending_any

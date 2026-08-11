@@ -1,0 +1,49 @@
+#!/bin/sh
+# Poor-man's sampling profiler for `bin/simple lint`.
+#
+# Why this exists: /proc/sys/kernel/perf_event_paranoid is 4 on this host, so
+# `perf record` is unavailable to non-root, and yama ptrace_scope=1 forbids
+# attaching to a process that is not a descendant. gdb CAN attach to its own
+# descendant, so we launch the target ourselves and sample its stack on an
+# interval.
+#
+# Usage: sh scripts/perf/sample-lint-stacks.shs <file.spl> [samples] [interval_s]
+# Output: a leaf-frame histogram on stdout, most frequent first.
+set -eu
+
+target="${1:?usage: sample-lint-stacks.shs <file.spl> [samples] [interval]}"
+samples="${2:-40}"
+interval="${3:-2}"
+
+repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
+bin="$repo_root/bin/simple"
+outdir="${TMPDIR:-/tmp}/lint-sample.$$"
+mkdir -p "$outdir"
+
+"$bin" lint "$target" >"$outdir/lint.out" 2>"$outdir/lint.err" &
+pid=$!
+
+echo "sampling pid=$pid target=$target samples=$samples interval=${interval}s"
+i=0
+while [ "$i" -lt "$samples" ]; do
+    kill -0 "$pid" 2>/dev/null || { echo "target exited after $i samples"; break; }
+    gdb -q -p "$pid" -batch -ex "bt" 2>/dev/null >>"$outdir/stacks.txt" || true
+    i=$((i + 1))
+    sleep "$interval"
+done
+
+kill "$pid" 2>/dev/null || true
+wait "$pid" 2>/dev/null || true
+
+echo "--- captured $(grep -c '^#0' "$outdir/stacks.txt" 2>/dev/null || echo 0) stacks ---"
+echo "--- top leaf frames ---"
+grep -h '^#0 ' "$outdir/stacks.txt" 2>/dev/null \
+    | sed 's/^#0 *//; s/ (.*//; s/^0x[0-9a-f]* in //' \
+    | sort | uniq -c | sort -rn | head -25
+
+echo "--- top frames anywhere in stack ---"
+grep -hE '^#[0-9]+ ' "$outdir/stacks.txt" 2>/dev/null \
+    | sed 's/^#[0-9]* *//; s/ (.*//; s/^0x[0-9a-f]* in //' \
+    | sort | uniq -c | sort -rn | head -25
+
+echo "stacks kept at: $outdir/stacks.txt"

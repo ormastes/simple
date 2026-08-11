@@ -1,0 +1,415 @@
+extern fn rt_string_len(s: text) -> i64
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
+# Basic string operations
+fn str_len(s: text) -> i64:
+    rt_string_len(s)
+
+fn str_concat(a: text, b: text) -> text:
+    a + b
+
+fn str_eq(a: text, b: text) -> bool:
+    a == b
+
+# Slicing
+#
+# These use the language's own `s[a:b]` slice expression rather than the
+# `rt_slice` / `rt_string_char_at` externs. Both externs are declared for the
+# LLVM/C backends but NEITHER is registered in the interpreter's extern table,
+# so every interpreted call died with "unknown extern function: rt_slice" /
+# "... rt_string_char_at". `s[a:b]` is lowered natively by all three engines,
+# and this module already indexes natively elsewhere (str_trim_left,
+# str_replace_all), so this removes an inconsistency rather than adding one.
+fn str_slice(s: text, start: i64, end: i64) -> text:
+    if start >= end:
+        return ""
+    val slen = rt_string_len(s)
+    if start >= slen:
+        return ""
+    s[start:end]
+
+fn str_safe_slice(s: text, start: i64, end: i64) -> text:
+    val slen = rt_string_len(s)
+    var s2 = start
+    var e2 = end
+    if s2 < 0:
+        s2 = 0
+    if e2 > slen:
+        e2 = slen
+    if s2 >= e2:
+        return ""
+    s[s2:e2]
+
+fn str_char_at(s: text, idx: i64) -> text:
+    if idx < 0 or idx >= rt_string_len(s):
+        return ""
+    s[idx:idx + 1]
+
+# Search
+#
+# These are implemented with the language's own slice expression rather than the
+# `rt_string_contains` / `rt_string_starts_with` / `rt_string_ends_with` /
+# `rt_string_find` / `rt_string_rfind` externs, for exactly the reason recorded
+# above `str_slice`: those five externs are declared for the LLVM/C backends but
+# NONE of them is registered in the interpreter's extern table. Unlike `rt_slice`
+# that did not raise "unknown extern function" — it silently yielded the return
+# type's zero value, so `str_index_of` / `str_last_index_of` answered -1 for
+# every input and `str_contains` / `str_starts_with` / `str_ends_with` answered
+# false for every input, including inputs that plainly match. -1 is the
+# "not found" sentinel, so callers quietly took the absent branch instead of
+# failing. `s[a:b]` is lowered natively by all three engines.
+fn str_starts_with(s: text, prefix: text) -> bool:
+    val plen = prefix.len()
+    if plen == 0:
+        return true
+    if plen > s.len():
+        return false
+    s[0:plen] == prefix
+
+fn str_ends_with(s: text, suffix: text) -> bool:
+    val slen = s.len()
+    val flen = suffix.len()
+    if flen == 0:
+        return true
+    if flen > slen:
+        return false
+    s[slen - flen:slen] == suffix
+
+fn str_index_of(s: text, sub: text) -> i64:
+    val slen = s.len()
+    val sublen = sub.len()
+    if sublen == 0:
+        return 0
+    if sublen > slen:
+        return -1
+    var i = 0
+    while i <= slen - sublen:
+        if s[i:i + sublen] == sub:
+            return i
+        i = i + 1
+    -1
+
+fn str_last_index_of(s: text, sub: text) -> i64:
+    val slen = s.len()
+    val sublen = sub.len()
+    if sublen == 0:
+        return slen
+    if sublen > slen:
+        return -1
+    var i = slen - sublen
+    while i >= 0:
+        if s[i:i + sublen] == sub:
+            return i
+        i = i - 1
+    -1
+
+fn str_contains(s: text, sub: text) -> bool:
+    str_index_of(s, sub) >= 0
+
+# Whitespace helpers
+fn is_whitespace_char(c: text) -> bool:
+    c == " " or c == "\t" or c == "\n" or c == "\u000B" or c == "\u000C" or c == "\r"
+
+fn str_trim_left(s: text) -> text:
+    val slen = s.len()
+    var i = 0
+    while i < slen and is_whitespace_char(s[i]):
+        i = i + 1
+    str_slice(s, i, slen)
+
+fn str_trim_right(s: text) -> text:
+    val slen = s.len()
+    var i = slen - 1
+    while i >= 0 and is_whitespace_char(s[i]):
+        i = i - 1
+    str_slice(s, 0, i + 1)
+
+fn str_trim(s: text) -> text:
+    str_trim_right(str_trim_left(s))
+
+fn trim_whitespace(s: text) -> text:
+    str_trim(s)
+
+fn trim_left(s: text) -> text:
+    str_trim_left(s)
+
+fn trim_right(s: text) -> text:
+    str_trim_right(s)
+
+fn trim_field(field: text, should_trim: bool) -> text:
+    if should_trim:
+        str_trim(field)
+    else:
+        field
+
+# Replacement
+fn str_replace_all(s: text, old: text, new_s: text) -> text:
+    if old == "":
+        return s
+    val slen = s.len()
+    val olen = old.len()
+    var result: [text] = []
+    var i = 0
+    while i < slen:
+        if i + olen <= slen and str_slice(s, i, i + olen) == old:
+            result.push(new_s)
+            i = i + olen
+        else:
+            result.push(s[i])
+            i = i + 1
+    result.join("")
+
+fn str_replace(s: text, old: text, new_s: text) -> text:
+    str_replace_all(s, old, new_s)
+
+# Split and Join
+fn str_split(s: text, sep: text) -> [text]:
+    val slen = s.len()
+    val plen = sep.len()
+    var result: [text] = []
+    if slen == 0:
+        result.push("")
+        return result
+    if plen == 0:
+        var k = 0
+        while k < slen:
+            result.push(s[k])
+            k = k + 1
+        return result
+    var start = 0
+    var i = 0
+    while i <= slen - plen:
+        if str_slice(s, i, i + plen) == sep:
+            result.push(str_slice(s, start, i))
+            i = i + plen
+            start = i
+        else:
+            i = i + 1
+    result.push(str_slice(s, start, slen))
+    result
+
+fn str_join(parts: [text], sep: text) -> text:
+    parts.join(sep)
+
+# Inline char code lookup (ASCII-based)
+fn char_code_inline(c: text) -> i64:
+    val bytes = rt_text_to_bytes(c)
+    if bytes.len() == 0:
+        return 0
+    val code = bytes[0] as i64
+    if code >= 0 and code <= 127:
+        return code
+    0
+
+fn char_from_code_inline(code: i64) -> text:
+    if code == 9:
+        return "\t"
+    elif code == 10:
+        return "\n"
+    elif code == 11:
+        return "\u000B"
+    elif code == 12:
+        return "\u000C"
+    elif code == 13:
+        return "\r"
+    elif code >= 32 and code <= 126:
+        val chars = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+        val index = code - 32
+        return chars[index]
+    # Everything else (other C0 control codes, and any codepoint >= 127)
+    # is encoded as UTF-8 instead of silently dropped. Reject invalid
+    # codepoints (negative, above U+10FFFF, or UTF-16 surrogate range
+    # U+D800..U+DFFF) by returning empty text -- same policy the ASCII
+    # table above already used for anything it couldn't represent.
+    #
+    # U+0000 is DELIBERATELY NOT rejected. It is a valid Unicode scalar, and
+    # the lexer (src/compiler/10.frontend/core/lexer.spl:331 and
+    # lexer_struct.spl:426,799) calls `char_from_code(0)` to build a NUL
+    # needle for `.contains()`. Returning "" for code 0 would make that needle
+    # match every string -- `s.contains("")` is unconditionally true -- and
+    # silently blank every saved token text on a bootstrap-critical path.
+    # Ruling + evidence: doc/08_tracking/bug/
+    #   char_from_code_zero_returns_nul_not_empty_2026-08-10.md
+    if code < 0 or code > 0x10FFFF or (code >= 0xD800 and code <= 0xDFFF):
+        return ""
+    _utf8_char_from_codepoint_inline(code)
+
+# Extern raw byte-array -> text conversion (runtime memcpy, no re-validation
+# of the bytes -- see rt_bytes_to_text in src/runtime/runtime_native.c and
+# src/runtime/runtime.c). Declared locally rather than importing binary_io /
+# encoding.utf8 to keep this bootstrap-critical file dependency-free of the
+# heavier modules those pull in.
+#
+# Two other primitives were tried and rejected during this fix's
+# verification (see doc/08_tracking/bug/char_from_code_non_ascii_unsupported_2026-07-20.md):
+#   - `bytes_to_string(bytes: [u8]) -> text` (the extern declared identically
+#     in ~18 other stdlib files) does not link at all -- there is no
+#     `bytes_to_string` runtime symbol, only `rt_bytes_to_text`. `simple
+#     compile` fails with "Undefined symbol: bytes_to_string".
+#   - `rt_char_from_code(code: i64) -> text` (the canonical scalar ABI
+#     backing `.chr()`/`.to_char()`, src/runtime/simple_core/core_string.spl)
+#     is a real native/C runtime symbol. Current compiler source registers a
+#     Rust-interpreter handler; retained binaries need rebuilding before
+#     `bin/simple run` and `bin/simple test` can use it.
+# rt_bytes_to_text is the one that is both a real runtime symbol AND has an
+# interpreter handler, so it is the only one of the three that runs under
+# `bin/simple run` today (verified: correct output for every UTF-8 length
+# class). It does NOT work under the SSpec `bin/simple test` evaluator --
+# calls silently return "" there (rt_core_as_array on the C side gets
+# `!array || !array->data`, i.e. the `[u8]` argument is marshaled
+# differently by that evaluator) rather than erroring -- which is a
+# pre-existing interpreter/test-runner infrastructure gap in this seed
+# binary, not a defect in the encoding logic below (see
+# _utf8_char_from_codepoint_inline, which mirrors utf8_encode_one's already
+# fully covered byte math). The regression spec still asserts the correct
+# end-to-end behavior so this is caught the moment the toolchain gap closes.
+extern fn rt_bytes_to_text(bytes: [u8]) -> text
+
+# UTF-8 encode a single validated codepoint (0..0x10FFFF, non-surrogate) and
+# hand the raw bytes to the runtime byte->text conversion. Mirrors
+# std.common.encoding.utf8.utf8_encode_one's byte math, inlined here rather
+# than imported to avoid pulling utf8.spl's SIMD dependencies into this
+# foundational module.
+fn _utf8_char_from_codepoint_inline(code: i64) -> text:
+    if code < 0x80:
+        val b: [u8] = [code as u8]
+        return rt_bytes_to_text(b)
+    elif code < 0x800:
+        val b: [u8] = [
+            (0xC0 | (code >> 6)) as u8,
+            (0x80 | (code & 0x3F)) as u8
+        ]
+        return rt_bytes_to_text(b)
+    elif code < 0x10000:
+        val b: [u8] = [
+            (0xE0 | (code >> 12)) as u8,
+            (0x80 | ((code >> 6) & 0x3F)) as u8,
+            (0x80 | (code & 0x3F)) as u8
+        ]
+        return rt_bytes_to_text(b)
+    else:
+        val b: [u8] = [
+            (0xF0 | (code >> 18)) as u8,
+            (0x80 | ((code >> 12) & 0x3F)) as u8,
+            (0x80 | ((code >> 6) & 0x3F)) as u8,
+            (0x80 | (code & 0x3F)) as u8
+        ]
+        return rt_bytes_to_text(b)
+
+# Character classification
+fn is_alpha_char(c: text) -> bool:
+    val code = char_code_inline(c)
+    (code >= 65 and code <= 90) or (code >= 97 and code <= 122)
+
+fn is_digit_char(c: text) -> bool:
+    val code = char_code_inline(c)
+    code >= 48 and code <= 57
+
+fn is_alnum_char(c: text) -> bool:
+    is_alpha_char(c) or is_digit_char(c)
+
+# Case conversion
+fn str_to_lower(s: text) -> text:
+    val slen = s.len()
+    var result: [text] = []
+    var i = 0
+    while i < slen:
+        val ch = s[i]
+        val code = char_code_inline(ch)
+        if code >= 65 and code <= 90:
+            result.push(char_from_code_inline(code + 32))
+        else:
+            result.push(ch)
+        i = i + 1
+    result.join("")
+
+fn str_to_upper(s: text) -> text:
+    val slen = s.len()
+    var result: [text] = []
+    var i = 0
+    while i < slen:
+        val ch = s[i]
+        val code = char_code_inline(ch)
+        if code >= 97 and code <= 122:
+            result.push(char_from_code_inline(code - 32))
+        else:
+            result.push(ch)
+        i = i + 1
+    result.join("")
+
+fn str_capitalize(s: text) -> text:
+    if s.len() == 0:
+        return ""
+    str_to_upper(str_slice(s, 0, 1)) + str_slice(s, 1, s.len())
+
+# Manipulation
+fn str_reverse(s: text) -> text:
+    val slen = s.len()
+    var result: [text] = []
+    var i = slen - 1
+    while i >= 0:
+        result.push(s[i])
+        i = i - 1
+    result.join("")
+
+fn str_repeat(s: text, count: i64) -> text:
+    if count <= 0:
+        return ""
+    var parts: [text] = []
+    var i = 0
+    while i < count:
+        parts.push(s)
+        i = i + 1
+    parts.join("")
+
+fn str_truncate(s: text, max_len: i64) -> text:
+    if s.len() == 0:
+        return ""
+    if s.len() <= max_len:
+        return s
+    str_slice(s, 0, max_len) + "..."
+
+fn str_pad_left(s: text, width: i64, pad: text) -> text:
+    val slen = s.len()
+    if slen >= width:
+        return s
+    val need = width - slen
+    str_repeat(pad, need) + s
+
+fn str_pad_right(s: text, width: i64, pad: text) -> text:
+    val slen = s.len()
+    if slen >= width:
+        return s
+    val need = width - slen
+    s + str_repeat(pad, need)
+
+fn str_center(s: text, width: i64) -> text:
+    val slen = s.len()
+    if slen >= width:
+        return s
+    val need = width - slen
+    val left_pad = need / 2
+    val right_pad = need - left_pad
+    str_repeat(" ", left_pad) + s + str_repeat(" ", right_pad)
+
+# Char code aliases delegating to inline versions
+fn char_code(c: text) -> i64:
+    char_code_inline(c)
+
+fn char_from_code(code: i64) -> text:
+    char_from_code_inline(code)
+
+export str_len, str_concat, str_eq
+export str_slice, str_char_at, str_safe_slice
+export str_contains, str_starts_with, str_ends_with
+export str_index_of, str_last_index_of
+export is_whitespace_char, str_trim, str_trim_left, str_trim_right
+export trim_whitespace, trim_left, trim_right, trim_field
+export str_replace, str_replace_all
+export str_split, str_join
+export char_code_inline, char_from_code_inline
+export is_alpha_char, is_digit_char, is_alnum_char
+export str_to_lower, str_to_upper, str_capitalize
+export str_reverse, str_repeat, str_truncate
+export str_pad_left, str_pad_right, str_center
+export char_code, char_from_code

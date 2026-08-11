@@ -1,0 +1,267 @@
+# @cover src/lib/nogc_sync_mut/sffi/counterpart_abi.spl 80%
+# @req REQ-COUNTERPART-ABI-001
+"""
+# Counterpart Provider Adapter ABI (v1)
+
+**Category:** Infrastructure
+**Design:** doc/05_design/infra/counterpart/counterpart_conformance_infrastructure_design_2026-08-09.md
+**Plan:** doc/03_plan/infra/counterpart/counterpart_conformance_parallel_agent_plan_2026-08-09.md
+
+## Purpose and Audience
+
+Every counterpart conformance provider — a zstd wrapper, a Chrome driver, a
+Vulkan reference — is loaded through one stable C ABI, `scf_api_v1`. This
+scenario is how an infrastructure engineer confirms that ABI actually holds:
+that a wrong version is refused rather than misread, that a manifest describes
+real components, that a deterministic component really is deterministic, and
+that a component's failure arrives as structured evidence instead of silently
+becoming a pass.
+
+The subject under test is the mock adapter, which exists for exactly this
+purpose: it has no upstream dependency, so a red result here is a defect in the
+ABI, the runtime shim, or the Simple wrapper — never in a third-party library.
+
+## Scope and Preconditions
+
+The mock adapter must be built as a shared library at
+`build/counterparts/libsimple_counterpart_mock.so`:
+
+    cc -std=c99 -fPIC -shared -Itools/counterpart/sdk/c \\
+       tools/counterpart/adapters/mock/simple_counterpart_mock.c \\
+       -o build/counterparts/libsimple_counterpart_mock.so
+
+When that library is absent, the provider is UNAVAILABLE and these scenarios
+fail. They are never reported as passing, because a conformance framework that
+green-lights a missing provider is the exact failure this infrastructure exists
+to prevent.
+
+## Primary Workflow
+
+Negotiate ABI v1 against the adapter, read its manifest, invoke each component,
+and read the response and trace envelopes it wrote through the caller-owned
+writer. The adapter allocates nothing the caller must free, and no raw pointer
+reaches Simple.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| `scf_get_api` | The single bootstrap symbol every adapter exports |
+| ABI negotiation | `scf_get_api(v)` returns NULL for an unsupported `v` |
+| Response envelope | SDN text carrying the component's result, error included |
+| Trace envelope | SDN text carrying how the invocation was executed |
+| Structured error | A failure expressed as data, not as an overloaded nonzero return |
+
+## Related Specifications
+
+- [Frozen counterpart contracts](../../../../src/lib/common/spec/evidence/counterpart/model.spl) — ProviderStatus and manifest records
+
+## Evidence and Provenance
+
+Evidence is the live adapter: manifest text, response envelopes and digests are
+read from a real dlopen'd library at run time, not from a fixture.
+
+## Recovery and Troubleshooting
+
+`library_not_loadable` means the shared library is missing — build it with the
+command above. `abi_version_mismatch` or `adapter_refused_abi` means the adapter
+was built against a different ABI revision; rebuild it against
+`tools/counterpart/sdk/c/simple_counterpart_abi.h`.
+
+## Compatibility and Limitations
+
+The `mock.crash` component deliberately `abort()`s and is therefore NOT invoked
+here: in-process loading cannot contain a crashing adapter. Proving that a crash
+is reported as `provider_status: crashed` belongs to the isolated worker (F3),
+which runs the adapter in a separate process. This spec covers the in-process
+lane only, and says so rather than pretending the crash path is covered.
+"""
+
+use std.spec.*
+use std.nogc_sync_mut.sffi.counterpart_abi.{
+    CounterpartLibrary,
+    counterpart_manifest_field,
+    counterpart_manifest_component_ids,
+    counterpart_status_text
+}
+
+# ============================================================================
+# Step Helpers
+# ============================================================================
+
+val MOCK_ADAPTER_PATH: text = "build/counterparts/libsimple_counterpart_mock.so"
+
+fn open_mock_adapter() -> CounterpartLibrary:
+    val opened = CounterpartLibrary.open(MOCK_ADAPTER_PATH, "")
+    match opened:
+        Ok(library) => library
+        Err(failure) =>
+            fail("mock adapter is UNAVAILABLE (" + failure.status_name
+                + "): " + MOCK_ADAPTER_PATH + " — build it, do not skip")
+            CounterpartLibrary(path: "", handle: 0)
+
+fn read_manifest(library: CounterpartLibrary) -> text:
+    match library.manifest():
+        Ok(sdn) => sdn
+        Err(failure) =>
+            fail("manifest rejected: " + failure.status_name)
+            ""
+
+fn invoke_component(library: CounterpartLibrary, component: text, request: text) -> text:
+    match library.invoke(component, request):
+        Ok(response) => response.response
+        Err(failure) =>
+            fail("invoke " + component + " failed: " + failure.status_name)
+            ""
+
+fn digest_of(envelope: text) -> text:
+    counterpart_manifest_field(envelope, "digest")
+
+
+# ============================================================================
+# Primary Scenarios
+# ============================================================================
+# @manual_section: Provider ABI Conformance
+
+describe "Counterpart provider adapter ABI v1":
+
+    it "refuses a version it does not implement and accepts the one it does":
+        step("Ask the adapter whether it serves ABI version 1")
+        val serves_v1 = CounterpartLibrary.serves_abi(MOCK_ADAPTER_PATH, 1)
+        match serves_v1:
+            Ok(served) => assert_true(served)
+            Err(failure) => fail("ABI probe failed: " + failure.status_name)
+
+        step("Ask the same adapter for ABI version 2, which does not exist")
+        val serves_v2 = CounterpartLibrary.serves_abi(MOCK_ADAPTER_PATH, 2)
+        match serves_v2:
+            Ok(served) => assert_false(served)
+            Err(failure) => fail("ABI probe failed: " + failure.status_name)
+
+        step("Confirm negotiation against a nonexistent library reports unavailable, not served")
+        val missing = CounterpartLibrary.serves_abi("build/counterparts/libno_such_provider.so", 1)
+        match missing:
+            Ok(served) => fail("a nonexistent library reported served=" + served.to_text())
+            Err(failure) => expect(failure.status_name).to_equal("library_not_loadable")
+
+    it "publishes a manifest naming its provider and every component":
+        step("Open the mock adapter")
+        var library = open_mock_adapter()
+
+        step("Read the provider manifest")
+        val manifest = read_manifest(library)
+
+        step("Verify the manifest identifies the provider and its independence group")
+        expect(counterpart_manifest_field(manifest, "provider_id")).to_equal("mock")
+        expect(counterpart_manifest_field(manifest, "independence_group")).to_equal("mock")
+        expect(counterpart_manifest_field(manifest, "abi_version")).to_equal("1")
+
+        step("Verify all four declared components are present")
+        val components = counterpart_manifest_component_ids(manifest)
+        expect(components.len()).to_equal(4)
+        expect(components).to_contain("mock.echo")
+        expect(components).to_contain("mock.hash")
+        expect(components).to_contain("mock.error")
+        expect(components).to_contain("mock.crash")
+
+        library.close()
+
+    it "round-trips a request through mock.echo unchanged":
+        step("Open the mock adapter")
+        var library = open_mock_adapter()
+
+        step("Send a request containing a quote, which the envelope must escape")
+        val envelope = invoke_component(library, "mock.echo", "counterpart \"probe\"")
+
+        step("Verify the response reports ok and carries the request back verbatim")
+        expect(counterpart_manifest_field(envelope, "status")).to_equal("ok")
+        expect(counterpart_manifest_field(envelope, "schema_id")).to_equal("mock.echo_response@1")
+        expect(envelope).to_contain("counterpart \\\"probe\\\"")
+
+        library.close()
+
+    it "produces the same mock.hash digest for the same input twice":
+        step("Open the mock adapter")
+        var library = open_mock_adapter()
+
+        step("Hash the same input on two separate invocations")
+        val first = digest_of(invoke_component(library, "mock.hash", "deterministic-input"))
+        val second = digest_of(invoke_component(library, "mock.hash", "deterministic-input"))
+
+        step("Verify both invocations produced a non-empty digest")
+        expect(first.len()).to_equal(16)
+        expect(second.len()).to_equal(16)
+
+        step("Verify the two digests are identical")
+        expect(first).to_equal(second)
+
+        step("Verify a different input produces a different digest, so equality is not vacuous")
+        val other = digest_of(invoke_component(library, "mock.hash", "other-input"))
+        assert_not_equal(first, other)
+
+        library.close()
+
+    it "reports a mock.error failure as a structured envelope, never as a pass":
+        step("Open the mock adapter")
+        var library = open_mock_adapter()
+
+        step("Invoke the component that always fails by contract")
+        val outcome = library.invoke("mock.error", "any-request")
+
+        step("Verify the ABI call itself succeeded — the failure is carried as data")
+        match outcome:
+            Ok(response) =>
+                step("Verify the envelope declares an error status with a machine-readable code")
+                expect(counterpart_manifest_field(response.response, "status")).to_equal("error")
+                expect(counterpart_manifest_field(response.response, "error_code"))
+                    .to_equal("mock.deliberate_failure")
+                expect(counterpart_manifest_field(response.response, "item_count")).to_equal("0")
+                step("Verify the failure is not mistakable for a successful component")
+                assert_not_equal(counterpart_manifest_field(response.response, "status"), "ok")
+            Err(failure) =>
+                fail("mock.error returned a bare status " + failure.status_name
+                    + " instead of a structured error envelope")
+
+        library.close()
+
+
+# ============================================================================
+# Edge Cases
+# ============================================================================
+
+describe "Counterpart provider adapter ABI v1 edge cases":
+
+    it "rejects an unknown component instead of returning an empty success":
+        step("Open the mock adapter")
+        var library = open_mock_adapter()
+
+        step("Invoke a component the manifest does not declare")
+        val outcome = library.invoke("mock.not_declared", "x")
+
+        step("Verify the call is refused with unknown_component")
+        match outcome:
+            Ok(response) => fail("undeclared component returned a response: " + response.response)
+            Err(failure) => expect(failure.status_name).to_equal("unknown_component")
+
+        library.close()
+
+    it "refuses every call once the library has been closed":
+        step("Open and immediately close the mock adapter")
+        var library = open_mock_adapter()
+        library.close()
+
+        step("Verify the handle is no longer live")
+        assert_false(library.is_open())
+
+        step("Verify a further invoke is refused rather than silently ignored")
+        match library.invoke("mock.echo", "x"):
+            Ok(response) => fail("closed library served a request: " + response.response)
+            Err(failure) => expect(failure.status_name).to_equal("bad_handle")
+
+    it "names every status code it can report":
+        step("Verify each ABI status maps to a stable diagnostic name")
+        expect(counterpart_status_text(0)).to_equal("ok")
+        expect(counterpart_status_text(2)).to_equal("unknown_component")
+        expect(counterpart_status_text(3)).to_equal("schema_mismatch")
+        expect(counterpart_status_text(-5)).to_equal("abi_version_mismatch")
+        expect(counterpart_status_text(-9)).to_equal("bad_handle")

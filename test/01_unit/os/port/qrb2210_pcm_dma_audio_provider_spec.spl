@@ -1,0 +1,186 @@
+use std.spec.{describe, it, expect}
+use app.io.mod.{file_read_text}
+use os.port.qrb2210_native_2d_ports.{Qrb2210BoardDeviceHandle, QRB2210_DEVICE_AUDIO}
+use os.port.qrb2210_pcm_dma_audio_provider.{
+    Qrb2210PcmDmaKernelIdentity,
+    Qrb2210PcmDmaSubmitReceipt,
+    Qrb2210PcmDmaCompletionReceipt,
+    qrb2210_pcm_dma_identity_ready,
+    qrb2210_pcm_s16le_checksum,
+    qrb2210_pcm_payload_admissible,
+    qrb2210_pcm_submit_correlates,
+    qrb2210_pcm_completion_correlates
+}
+
+val PROVIDER = "src/os/port/qrb2210_pcm_dma_audio_provider.spl"
+
+fn device(boot: text = "boot-17") -> Qrb2210BoardDeviceHandle:
+    Qrb2210BoardDeviceHandle(
+        board_id: "qrb2210-uno-q", boot_id: boot, owner: QRB2210_DEVICE_AUDIO,
+        device_node: "/dev/snd/pcmC0D0p", native_handle: 44u64,
+        driver_generation: 3)
+
+fn identity() -> Qrb2210PcmDmaKernelIdentity:
+    Qrb2210PcmDmaKernelIdentity(
+        device: device(), irq_line: 41, kernel_owner_handle: 51u64,
+        submit_ring_handle: 52u64, completion_ring_handle: 53u64,
+        dma_pool_handle: 54u64, channels: 2, sample_rate_hz: 48000,
+        period_frames: 2, max_frames: 8, physical_device: true)
+
+fn submit(samples: [i64]) -> Qrb2210PcmDmaSubmitReceipt:
+    Qrb2210PcmDmaSubmitReceipt(
+        device: device(), kernel_owner_handle: 51u64, submit_ring_handle: 52u64,
+        dma_pool_handle: 54u64, dma_buffer_handle: 55u64,
+        submission_id: 61, submit_sequence: 7,
+        first_frame_id: 101, frame_count: samples.len / 2,
+        sample_count: samples.len, pcm_checksum: qrb2210_pcm_s16le_checksum(samples),
+        accepted: true)
+
+fn completion(samples: [i64]) -> Qrb2210PcmDmaCompletionReceipt:
+    Qrb2210PcmDmaCompletionReceipt(
+        device: device(), kernel_owner_handle: 51u64, completion_ring_handle: 53u64,
+        dma_pool_handle: 54u64, dma_buffer_handle: 55u64,
+        submission_id: 61, submit_sequence: 7,
+        completion_sequence: 9, first_frame_id: 101,
+        completed_frame_count: samples.len / 2, completed_sample_count: samples.len,
+        pcm_checksum: qrb2210_pcm_s16le_checksum(samples), completion_id: 71,
+        irq_line: 41, irq_sequence: 11, interrupt_timestamp_ns: 900u64,
+        driver_generation: 3, completed: true)
+
+describe "QRB2210 physical PCM DMA audio provider":
+    it "requires physical boot device owner generation and bounded DMA rings":
+        expect(qrb2210_pcm_dma_identity_ready(identity())).to_be(true)
+        var hosted = identity()
+        hosted.physical_device = false
+        expect(qrb2210_pcm_dma_identity_ready(hosted)).to_be(false)
+        var no_owner = identity()
+        no_owner.kernel_owner_handle = 0u64
+        expect(qrb2210_pcm_dma_identity_ready(no_owner)).to_be(false)
+        var no_irq = identity()
+        no_irq.irq_line = 0
+        expect(qrb2210_pcm_dma_identity_ready(no_irq)).to_be(false)
+        var no_ring = identity()
+        no_ring.completion_ring_handle = 0u64
+        expect(qrb2210_pcm_dma_identity_ready(no_ring)).to_be(false)
+        var no_pool = identity()
+        no_pool.dma_pool_handle = 0u64
+        expect(qrb2210_pcm_dma_identity_ready(no_pool)).to_be(false)
+        var bad_generation = identity()
+        bad_generation.device.driver_generation = 0
+        expect(qrb2210_pcm_dma_identity_ready(bad_generation)).to_be(false)
+        var stale_boot = identity()
+        stale_boot.device.boot_id = ""
+        expect(qrb2210_pcm_dma_identity_ready(stale_boot)).to_be(false)
+
+    it "accepts bounded aligned non-silent s16le and rejects silence or bad geometry":
+        val samples: [i64] = [100, -100, 200, -200]
+        expect(qrb2210_pcm_payload_admissible(identity(), samples, 2, 48000)).to_be(true)
+        expect(qrb2210_pcm_payload_admissible(identity(), [0, 0, 0, 0], 2, 48000)).to_be(false)
+        expect(qrb2210_pcm_payload_admissible(identity(), [1, 2, 3], 2, 48000)).to_be(false)
+        expect(qrb2210_pcm_payload_admissible(identity(), [32768, 0], 2, 48000)).to_be(false)
+        expect(qrb2210_pcm_payload_admissible(identity(), [-32769, 0], 2, 48000)).to_be(false)
+        expect(qrb2210_pcm_payload_admissible(
+            identity(), [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0],
+            2, 48000)).to_be(false)
+        expect(qrb2210_pcm_payload_admissible(identity(), samples, 1, 48000)).to_be(false)
+        expect(qrb2210_pcm_payload_admissible(identity(), samples, 2, 44100)).to_be(false)
+        var wrong_period = identity()
+        wrong_period.period_frames = 4
+        wrong_period.max_frames = 8
+        expect(qrb2210_pcm_payload_admissible(wrong_period, samples, 2, 48000)).to_be(false)
+
+    it "binds submission to exact boot owner ring buffer frame sequence and PCM":
+        val samples: [i64] = [100, -100, 200, -200]
+        val accepted = submit(samples)
+        expect(qrb2210_pcm_submit_correlates(identity(), accepted, samples, 6)).to_be(true)
+        expect(qrb2210_pcm_submit_correlates(identity(), accepted, samples, 7)).to_be(false)
+        var wrong_boot = accepted
+        wrong_boot.device = device("boot-previous")
+        expect(qrb2210_pcm_submit_correlates(identity(), wrong_boot, samples, 6)).to_be(false)
+        var wrong_ring = accepted
+        wrong_ring.submit_ring_handle = 99u64
+        expect(qrb2210_pcm_submit_correlates(identity(), wrong_ring, samples, 6)).to_be(false)
+        var wrong_owner = accepted
+        wrong_owner.kernel_owner_handle = 99u64
+        expect(qrb2210_pcm_submit_correlates(identity(), wrong_owner, samples, 6)).to_be(false)
+        var wrong_pool = accepted
+        wrong_pool.dma_pool_handle = 99u64
+        expect(qrb2210_pcm_submit_correlates(identity(), wrong_pool, samples, 6)).to_be(false)
+        var no_buffer = accepted
+        no_buffer.dma_buffer_handle = 0u64
+        expect(qrb2210_pcm_submit_correlates(identity(), no_buffer, samples, 6)).to_be(false)
+        var wrong_frame = accepted
+        wrong_frame.first_frame_id = 0
+        expect(qrb2210_pcm_submit_correlates(identity(), wrong_frame, samples, 6)).to_be(false)
+        var wrong_frame_count = accepted
+        wrong_frame_count.frame_count = 4
+        expect(qrb2210_pcm_submit_correlates(identity(), wrong_frame_count, samples, 6)).to_be(false)
+        var wrong_sample_count = accepted
+        wrong_sample_count.sample_count = 2
+        expect(qrb2210_pcm_submit_correlates(identity(), wrong_sample_count, samples, 6)).to_be(false)
+        var wrong_pcm = accepted
+        wrong_pcm.pcm_checksum = wrong_pcm.pcm_checksum + 1
+        expect(qrb2210_pcm_submit_correlates(identity(), wrong_pcm, samples, 6)).to_be(false)
+
+    it "accepts one exact hardware completion and rejects replay or cross-boot evidence":
+        val samples: [i64] = [100, -100, 200, -200]
+        val accepted = submit(samples)
+        val done = completion(samples)
+        expect(qrb2210_pcm_completion_correlates(identity(), accepted, done, 8, 10)).to_be(true)
+        expect(qrb2210_pcm_completion_correlates(identity(), accepted, done, 9, 10)).to_be(false)
+        expect(qrb2210_pcm_completion_correlates(identity(), accepted, done, 8, 11)).to_be(false)
+        var stale_boot = done
+        stale_boot.device = device("boot-previous")
+        expect(qrb2210_pcm_completion_correlates(identity(), accepted, stale_boot, 8, 10)).to_be(false)
+        var wrong_buffer = done
+        wrong_buffer.dma_buffer_handle = 99u64
+        expect(qrb2210_pcm_completion_correlates(identity(), accepted, wrong_buffer, 8, 10)).to_be(false)
+        var wrong_owner = done
+        wrong_owner.kernel_owner_handle = 99u64
+        expect(qrb2210_pcm_completion_correlates(identity(), accepted, wrong_owner, 8, 10)).to_be(false)
+        var wrong_ring = done
+        wrong_ring.completion_ring_handle = 99u64
+        expect(qrb2210_pcm_completion_correlates(identity(), accepted, wrong_ring, 8, 10)).to_be(false)
+        var wrong_frame = done
+        wrong_frame.completed_frame_count = 1
+        expect(qrb2210_pcm_completion_correlates(identity(), accepted, wrong_frame, 8, 10)).to_be(false)
+        var wrong_first_frame = done
+        wrong_first_frame.first_frame_id = 102
+        expect(qrb2210_pcm_completion_correlates(identity(), accepted, wrong_first_frame, 8, 10)).to_be(false)
+        var wrong_samples = done
+        wrong_samples.completed_sample_count = 2
+        expect(qrb2210_pcm_completion_correlates(identity(), accepted, wrong_samples, 8, 10)).to_be(false)
+        var wrong_checksum = done
+        wrong_checksum.pcm_checksum = wrong_checksum.pcm_checksum + 1
+        expect(qrb2210_pcm_completion_correlates(identity(), accepted, wrong_checksum, 8, 10)).to_be(false)
+        var wrong_submission = done
+        wrong_submission.submission_id = 62
+        expect(qrb2210_pcm_completion_correlates(identity(), accepted, wrong_submission, 8, 10)).to_be(false)
+        var wrong_submit_sequence = done
+        wrong_submit_sequence.submit_sequence = 8
+        expect(qrb2210_pcm_completion_correlates(identity(), accepted, wrong_submit_sequence, 8, 10)).to_be(false)
+        var wrong_irq = done
+        wrong_irq.irq_line = 42
+        expect(qrb2210_pcm_completion_correlates(identity(), accepted, wrong_irq, 8, 10)).to_be(false)
+        var wrong_generation = done
+        wrong_generation.driver_generation = 4
+        expect(qrb2210_pcm_completion_correlates(identity(), accepted, wrong_generation, 8, 10)).to_be(false)
+        var no_irq = done
+        no_irq.interrupt_timestamp_ns = 0u64
+        expect(qrb2210_pcm_completion_correlates(identity(), accepted, no_irq, 8, 10)).to_be(false)
+        var no_completion = done
+        no_completion.completion_id = 0
+        expect(qrb2210_pcm_completion_correlates(identity(), accepted, no_completion, 8, 10)).to_be(false)
+
+    it "has no hosted QEMU transcript or fabricated completion path":
+        val source = file_read_text(PROVIDER)
+        expect(source).to_contain("kernel.submit_pcm_dma(samples, channels, sample_rate_hz)")
+        expect(source).to_contain("kernel.poll_pcm_dma_completion(submission_id)")
+        expect(source).to_contain("UNO_Q_DESKTOP_STATUS_PORT_UNAVAILABLE")
+        expect(source).to_contain("self.active_submission_id != 0")
+        expect(source).to_contain("self.active_submission_id = -1")
+        expect(source).to_contain("self.active_submission_id = 0")
+        expect(source.contains("rt_process")).to_be(false)
+        expect(source.contains("virtio")).to_be(false)
+        expect(source.contains("qemu")).to_be(false)
+        expect(source.contains("transcript")).to_be(false)

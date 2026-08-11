@@ -1,0 +1,112 @@
+# Unified Packed UI Scene — owner/action records and reverse-event-routing
+# primitives (design §2.4).
+#
+# Design authority: `doc/05_design/ui/unified_packed_ui_scene.md` §2.4.
+# Lane: L1 (`doc/03_plan/ui/unified_packed_ui_scene_agent_lanes.md`).
+#
+# Pure value vocabulary + pure functions over caller-supplied tables only.
+# `owner_id` / `parent_owner_id` / `action_binding_id` are 0-based flat row
+# indices into the OWNER_RECORDS / ACTION_BINDINGS tables (design §2.1),
+# consistent with the id convention `draw_ir_v3.spl` already uses for its
+# side tables. `DRAW_IR_V3_NO_ID` (frozen, `draw_ir_v3.spl`) is reused as the
+# sentinel rather than inventing a parallel "no id" constant.
+
+use common.ui.draw_ir_v3.{DRAW_IR_V3_NO_ID}
+
+# --- event policy bitset (design §2.4 `UiOwnerRecord.event_policy`) --------
+pub val UI_SCENE_EVENT_POLICY_NONE: u16 = 0u16
+pub val UI_SCENE_EVENT_POLICY_HIT_OPAQUE: u16 = 1u16
+pub val UI_SCENE_EVENT_POLICY_HIT_TRANSPARENT: u16 = 2u16
+pub val UI_SCENE_EVENT_POLICY_FOCUSABLE: u16 = 4u16
+pub val UI_SCENE_EVENT_POLICY_SCROLL_TARGET: u16 = 8u16
+
+# --- dispatch verdict reasons ----------------------------------------------
+pub val UI_SCENE_DISPATCH_OK: u16 = 0u16
+pub val UI_SCENE_DISPATCH_REFUSE_STALE_APP_GENERATION: u16 = 1u16
+pub val UI_SCENE_DISPATCH_REFUSE_STALE_MENU_REVISION: u16 = 2u16
+
+# =========================================================================
+# Records (design §2.4)
+# =========================================================================
+
+struct UiOwnerRecord:
+    producer_kind: u16        # UI_PRODUCER_WM | _GUI | _WEB | _EXTERNAL
+    event_policy: u16         # bitset: HIT_OPAQUE|HIT_TRANSPARENT|FOCUSABLE|SCROLL_TARGET|...
+    semantic_id: u32          # producer-private node id
+    semantic_generation: u32
+    parent_owner_id: u32      # DRAW_IR_V3_NO_ID at the WM root
+    action_binding_id: u32    # DRAW_IR_V3_NO_ID when none
+
+struct MenuActionBinding:
+    app_id: u32
+    app_generation: u32
+    menu_revision: u32
+    action_id: u32
+    default_target_owner_id: u32
+
+# No function pointers anywhere in these records (design §2.4).
+
+struct UiSceneDispatchVerdict:
+    accepted: bool
+    reason: u16
+    action_id: u32
+    target_owner_id: u32
+
+# =========================================================================
+# Owner-chain walk (pure). Bounded by the table length so a corrupt/cyclic
+# parent chain cannot loop forever — fail-closed: it stops and returns the
+# chain built so far rather than guessing or looping.
+# =========================================================================
+
+fn ui_scene_owner_chain(owners: [UiOwnerRecord], owner_id: u32) -> [u32]:
+    var chain: [u32] = []
+    var current = owner_id
+    var steps = 0
+    val limit = owners.len() + 1
+    while current != DRAW_IR_V3_NO_ID and steps < limit:
+        chain.push(current)
+        val idx = current.to_i64()
+        if idx < 0 or idx >= owners.len().to_i64():
+            return chain
+        current = owners[idx].parent_owner_id
+        steps = steps + 1
+    chain
+
+# =========================================================================
+# Generation-validated dispatch check (pure). Stale `app_generation` or
+# `menu_revision` drops the event with a routed refusal rather than
+# delivering to a recycled slot (design §2.4). Hit-shape `component_generation`
+# validation composes with this at the resolver layer (L2), not here.
+# =========================================================================
+
+fn ui_scene_validate_menu_action_dispatch(
+    binding: MenuActionBinding, current_app_generation: u32, current_menu_revision: u32
+) -> UiSceneDispatchVerdict:
+    if binding.app_generation != current_app_generation:
+        return UiSceneDispatchVerdict(
+            accepted: false,
+            reason: UI_SCENE_DISPATCH_REFUSE_STALE_APP_GENERATION,
+            action_id: binding.action_id,
+            target_owner_id: DRAW_IR_V3_NO_ID
+        )
+    if binding.menu_revision != current_menu_revision:
+        return UiSceneDispatchVerdict(
+            accepted: false,
+            reason: UI_SCENE_DISPATCH_REFUSE_STALE_MENU_REVISION,
+            action_id: binding.action_id,
+            target_owner_id: DRAW_IR_V3_NO_ID
+        )
+    UiSceneDispatchVerdict(
+        accepted: true,
+        reason: UI_SCENE_DISPATCH_OK,
+        action_id: binding.action_id,
+        target_owner_id: binding.default_target_owner_id
+    )
+
+export UI_SCENE_EVENT_POLICY_NONE, UI_SCENE_EVENT_POLICY_HIT_OPAQUE,
+    UI_SCENE_EVENT_POLICY_HIT_TRANSPARENT, UI_SCENE_EVENT_POLICY_FOCUSABLE,
+    UI_SCENE_EVENT_POLICY_SCROLL_TARGET,
+    UI_SCENE_DISPATCH_OK, UI_SCENE_DISPATCH_REFUSE_STALE_APP_GENERATION,
+    UI_SCENE_DISPATCH_REFUSE_STALE_MENU_REVISION,
+    UiOwnerRecord, MenuActionBinding, UiSceneDispatchVerdict,
+    ui_scene_owner_chain, ui_scene_validate_menu_action_dispatch

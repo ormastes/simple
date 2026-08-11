@@ -1,0 +1,277 @@
+"""
+# CLI Help Text Alignment Specification
+
+**Feature IDs:** #3026-3030
+**Category:** Tooling
+**Difficulty:** 2/5
+**Status:** In Progress
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+
+## Overview
+
+The Simple CLI keeps its command list by hand in several places. Only ONE of
+them actually executes: the `str_eq(first, "...")` chain in
+`src/app/cli/_CliMain/main_and_help.spl`. The help text
+(`cli_helpers.spl print_cli_help()`) and the dispatch table
+(`src/app/cli/dispatch/table.spl`) are separate hand-written lists that drift
+away from it silently.
+
+This spec READS those three sources and COUNTS. It does not hardcode counts.
+Every number below is derived from the files at run time, so a command added
+to or removed from any of the three lists changes the measurement.
+
+The executing elif chain is the oracle. "Phantom" and "dead entry" are both
+defined relative to it.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| Dispatch command | A `str_eq(first, "X")` branch — the only list that runs |
+| Help command | A command printed by `print_cli_help()` |
+| Table command | A `CommandEntry(name: "X"` in `dispatch/table.spl` |
+| Phantom command | Advertised in help but absent from dispatch — user hits an error |
+| Dead table entry | In the table but absent from dispatch — unreachable data |
+| Undocumented command | Dispatchable but never mentioned in help |
+
+## Related Specifications
+
+- [CLI Command Inventory](cli_command_inventory_spec.spl)
+- [CLI Dispatch Unit Tests](cli_dispatch_unit_spec.spl)
+"""
+
+use std.spec
+use std.io_runtime.{file_exists, file_read}
+
+val DISPATCH_SRC: text = "src/app/cli/_CliMain/main_and_help.spl"
+val HELP_SRC:     text = "src/app/cli/cli_helpers.spl"
+val TABLE_SRC:    text = "src/app/cli/dispatch/table.spl"
+
+# A command token is lowercase alphanumeric plus dashes. Anything else
+# (`<file.spl>`, `--notui`, `-c`) is a flag or a placeholder, not a command.
+fn is_command_token(tok: text) -> bool:
+    if tok == "":
+        return false
+    if tok.starts_with("-"):
+        return false
+    for ch in tok.chars():
+        val ok = (ch >= "a" and ch <= "z") or (ch >= "0" and ch <= "9") or ch == "-"
+        if not ok:
+            return false
+    true
+
+fn push_unique(acc: [text], value: text) -> [text]:
+    if acc.contains(value):
+        return acc
+    acc.push(value)
+
+fn source_lines(path: text) -> [text]:
+    if not file_exists(path):
+        return []
+    file_read(path).split("\n")
+
+# ---------------------------------------------------------------------------
+# Extractors — each reads a real source file and returns the command set.
+# ---------------------------------------------------------------------------
+
+fn scan_dispatch_needle(acc: [text], needle: text) -> [text]:
+    var out = acc
+    for line in source_lines(DISPATCH_SRC):
+        var rest = line
+        while true:
+            val at = rest.index_of(needle)
+            if at < 0:
+                break
+            rest = rest.substring(at + needle.len(), rest.len())
+            val close = rest.index_of("\"")
+            if close < 0:
+                break
+            val tok = rest.substring(0, close)
+            if is_command_token(tok):
+                out = push_unique(out, tok)
+            rest = rest.substring(close + 1, rest.len())
+    out
+
+fn extract_dispatch_commands() -> [text]:
+    """Every executing command branch in the CLI entry point.
+
+    Two forms execute, and BOTH must be counted or a real command reads as
+    drift: the main `str_eq(first, "X")` elif chain, and the handful of
+    branches that run BEFORE the chain against the unfiltered argv with
+    `str_eq(args[0], "X")` (`native-build` bypasses `filter_internal_flags`
+    so its backend flags survive). Counting only the first form reported
+    `native-build` as both a phantom and a dead table entry on 2026-08-11
+    when it is in fact reachable.
+    """
+    var out: [text] = []
+    out = scan_dispatch_needle(out, "str_eq(first, \"")
+    out = scan_dispatch_needle(out, "str_eq(args[0], \"")
+    out
+
+fn extract_table_commands() -> [text]:
+    """Every `name: "X"` field of a CommandEntry in the dispatch table."""
+    var out: [text] = []
+    val needle = "name: \""
+    for line in source_lines(TABLE_SRC):
+        val stripped = line.trim()
+        if not stripped.starts_with(needle):
+            continue
+        val rest = stripped.substring(needle.len(), stripped.len())
+        val close = rest.index_of("\"")
+        if close < 0:
+            continue
+        val tok = rest.substring(0, close)
+        if is_command_token(tok):
+            out = push_unique(out, tok)
+    out
+
+fn extract_help_commands() -> [text]:
+    """Every command advertised by print_cli_help() as `simple <cmd>`."""
+    var out: [text] = []
+    val needle = "print \"  simple "
+    for line in source_lines(HELP_SRC):
+        val stripped = line.trim()
+        if not stripped.starts_with(needle):
+            continue
+        val rest = stripped.substring(needle.len(), stripped.len())
+        var tok = rest
+        val space = rest.index_of(" ")
+        if space >= 0:
+            tok = rest.substring(0, space)
+        if is_command_token(tok):
+            out = push_unique(out, tok)
+    out
+
+fn missing_from(source: [text], reference: [text]) -> [text]:
+    var out: [text] = []
+    for cmd in source:
+        if not reference.contains(cmd):
+            out = out.push(cmd)
+    out
+
+# ---------------------------------------------------------------------------
+# 0. Positive controls — an empty extraction must never read as "aligned".
+# ---------------------------------------------------------------------------
+
+describe "CLI alignment — extraction is real":
+    """
+    Every alignment assertion below is a set-difference, and a set difference
+    against an EMPTY set passes vacuously. If a source file is renamed or its
+    formatting changes, the extractors would silently return nothing and the
+    whole spec would go green while measuring nothing at all. These controls
+    make that failure loud.
+    """
+
+    it "all three CLI sources exist":
+        expect(file_exists(DISPATCH_SRC)).to_equal(true)
+        expect(file_exists(HELP_SRC)).to_equal(true)
+        expect(file_exists(TABLE_SRC)).to_equal(true)
+
+    it "each extractor returns a plausibly-sized command set":
+        # Floors are deliberately far below the measured sizes (dispatch 103,
+        # table 84, help 58 on 2026-08-11). They catch a broken extractor,
+        # not ordinary command churn.
+        expect(extract_dispatch_commands().len()).to_be_greater_than(50)
+        expect(extract_table_commands().len()).to_be_greater_than(40)
+        expect(extract_help_commands().len()).to_be_greater_than(20)
+
+    it "known-good commands are found in every list that should hold them":
+        # Anchor probe: these are present in ALL THREE sources (verified by
+        # set intersection on 2026-08-11). If the extractors regress to
+        # returning junk tokens, these named lookups fail even though the
+        # counts might still look plausible.
+        # NOTE deliberately excludes `run`: help advertises running a file as
+        # `simple <file.spl>`, so `run` is legitimately absent from help.
+        for cmd in ["compile", "build", "check"]:
+            expect(extract_dispatch_commands().contains(cmd)).to_equal(true)
+            expect(extract_table_commands().contains(cmd)).to_equal(true)
+            expect(extract_help_commands().contains(cmd)).to_equal(true)
+
+    it "flags and placeholders are not mistaken for commands":
+        val help = extract_help_commands()
+        expect(help.contains("--notui")).to_equal(false)
+        expect(help.contains("-c")).to_equal(false)
+        expect(help.contains("<file.spl>")).to_equal(false)
+
+# ---------------------------------------------------------------------------
+# 1. No phantom commands — help must not advertise what cannot run.
+# ---------------------------------------------------------------------------
+
+describe "CLI No Phantom Commands":
+    """
+    ## Phantom Command Detection
+
+    A phantom command is advertised by `print_cli_help()` but has no branch in
+    the executing elif chain. A user who copies it out of `--help` gets an
+    error. This is the highest-severity drift class.
+    """
+
+    it "every command in help text has a dispatch branch":
+        """MEASURED 2026-08-11: was RED with 1 phantom, `check-capsule`. Fixed
+        by wiring the existing `handle_check_capsule` implementation into the
+        dispatch chain. See
+        doc/08_tracking/bug/cli_help_dispatch_drift_2026-08-11.md.
+        Do not delete this assertion to obtain green; fix help or dispatch."""
+        val phantoms = missing_from(extract_help_commands(),
+            extract_dispatch_commands())
+        expect(phantoms).to_equal([])
+
+# ---------------------------------------------------------------------------
+# 2. No dead table entries — the table must not describe unreachable commands.
+# ---------------------------------------------------------------------------
+
+describe "CLI Dispatch Table Reachability":
+    """
+    ## Dead Table Entries
+
+    `dispatch/table.spl` is a parallel hand-written list. An entry with no
+    matching elif branch is unreachable data that reads, to anyone browsing
+    the table, like a supported command.
+    """
+
+    it "every dispatch-table entry has a dispatch branch":
+        """MEASURED 2026-08-11: was RED with 24 unreachable table entries.
+        Fixed: 22 were wired into the dispatch chain (every implementation was
+        verified present), `bench` was deleted from the table (its app no
+        longer exists), and `native-build` was never really dead — it is
+        dispatched before the chain and the extractor now sees it. See
+        doc/08_tracking/bug/cli_help_dispatch_drift_2026-08-11.md."""
+        val dead = missing_from(extract_table_commands(),
+            extract_dispatch_commands())
+        expect(dead).to_equal([])
+
+# ---------------------------------------------------------------------------
+# 3. Documentation-coverage ratchet — undocumented commands must not grow.
+# ---------------------------------------------------------------------------
+
+describe "CLI Help Coverage Ratchet":
+    """
+    ## Undocumented Dispatch Commands
+
+    44 dispatchable commands had no help text when this spec was written
+    (measured 2026-08-11). Help text was added for all of them, so the ratchet
+    is now at its floor: ZERO. Every dispatchable command must be advertised by
+    `print_cli_help()`. Adding a new command without help text turns this RED
+    on the very next run.
+
+    The baseline may only ever DECREASE. It is now 0 and cannot be lowered
+    further, so the companion staleness guard that used to require
+    `undocumented > 0` has been replaced by the exact-equality assertion below
+    — a strictly stronger check, not a relaxed one.
+    """
+
+    val UNDOCUMENTED_BASELINE: i64 = 0
+
+    it "the undocumented-command count does not exceed its baseline":
+        val undocumented = missing_from(extract_dispatch_commands(),
+            extract_help_commands())
+        expect(undocumented.len()).to_be_less_than(UNDOCUMENTED_BASELINE + 1)
+
+    it "every dispatchable command is advertised in help text":
+        # Exact equality, not a bound: names the offenders when it fails.
+        val undocumented = missing_from(extract_dispatch_commands(),
+            extract_help_commands())
+        expect(undocumented).to_equal([])

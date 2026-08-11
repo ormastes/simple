@@ -1,0 +1,163 @@
+# Backward-compatible evidence facade (FR-14, sspec_scenario_manual).
+#
+# @manual_section Legacy evidence compatibility bridge
+# @req REQ-SSPEC-EVD-FR14
+
+use std.spec.*
+use std.common.spec.scenario_evidence.{
+    ScenarioCaptureKind, scenario_evidence_artifact,
+    scenario_redacted_evidence_artifact, scenario_checker_evidence
+}
+use std.common.spec.evidence.model.{EvidenceStatus, EvidenceAudience}
+use std.common.spec.evidence.manual_render.{render_block}
+use std.common.spec.evidence.legacy_facade.{
+    legacy_evidence_to_canonical, legacy_checker_to_comparison,
+    legacy_evidence_manual_block
+}
+use std.common.spec.evidence.model.{oracle_spec_open, check_exact}
+use std.common.spec.evidence.evidence_comparator.{compare_evidence}
+
+describe "Legacy evidence facade":
+    """
+    Existing specs build evidence with the old, frozen ScenarioEvidenceArtifact
+    API. This module is the compatibility bridge that lets that evidence flow
+    into the new typed-evidence comparator and manual renderer, so existing
+    specs are not orphaned when they don't get rewritten to the new API.
+    """
+
+    it "converts an old-style artifact into typed evidence with every field preserved":
+        step("Build an old-style artifact via the real constructor")
+        val artifact = scenario_evidence_artifact(
+            ScenarioCaptureKind.exec,
+            "Run build",
+            "text/plain",
+            "artifacts/build.log",
+            "$ build\nexit: 0",
+            "scenario-1",
+            "step-1"
+        )
+
+        step("Convert it into CanonicalEvidence")
+        val evidence = legacy_evidence_to_canonical(artifact)
+
+        step("Verify the conversion is lossless for kind/title/mime/scenario_id/step_id")
+        expect(evidence.nodes[0].value).to_equal("exec")
+        expect(evidence.nodes[1].value).to_equal("Run build")
+        expect(evidence.nodes[2].value).to_equal("text/plain")
+        expect(evidence.nodes[5].value).to_equal("scenario-1")
+        expect(evidence.nodes[6].value).to_equal("step-1")
+        expect(evidence.parse_ok).to_equal(true)
+
+        step("Verify through the real typed-evidence comparator, not just direct node reads")
+        val oracle = oracle_spec_open("legacy_facade_run_build_evidence", [
+            check_exact("kind", "exec"),
+            check_exact("title", "Run build"),
+            check_exact("mime", "text/plain"),
+            check_exact("body", "$ build\nexit: 0")
+        ])
+        val comparison = compare_evidence(evidence, oracle)
+        expect(comparison.status).to_equal(EvidenceStatus.passed)
+
+    it "never leaks a redacted artifact's body or path through the conversion":
+        step("Build a redacted artifact via the real constructor")
+        val artifact = scenario_redacted_evidence_artifact(
+            ScenarioCaptureKind.api,
+            "Secret token exchange",
+            "text/plain",
+            "scenario-2",
+            "step-2"
+        )
+
+        step("Convert it into CanonicalEvidence")
+        val evidence = legacy_evidence_to_canonical(artifact)
+
+        step("Verify path is empty and body carries only the redacted marker")
+        expect(evidence.nodes[3].value).to_equal("")
+        expect(evidence.nodes[4].value).to_equal("(redacted)")
+        expect(evidence.nodes[7].value).to_equal("true")
+
+    it "renders a redacted artifact's manual block with a redacted marker and no leaked body":
+        step("Build a redacted artifact and render it")
+        val artifact = scenario_redacted_evidence_artifact(
+            ScenarioCaptureKind.protocol,
+            "Credential handshake",
+            "message/json",
+            "scenario-3",
+            "step-3"
+        )
+        val block = legacy_evidence_manual_block(artifact)
+        val lines = render_block(block)
+
+        step("Verify the rendered block says redacted and carries no path/body value")
+        expect(lines[0]).to_contain("redacted")
+        expect(lines[0]).to_not_contain("scenario-3")
+
+    it "converts a failed old-style checker into EvidenceStatus.failed, not swallowed":
+        step("Build a failing old-style checker via the real constructor")
+        val artifact = scenario_evidence_artifact(
+            ScenarioCaptureKind.api,
+            "List response",
+            "text/plain",
+            "",
+            "status: 500",
+            "scenario-4",
+            "step-4"
+        )
+        val checker = scenario_checker_evidence("status should be 200", false, artifact)
+
+        step("Convert it into a ComparisonResult")
+        val result = legacy_checker_to_comparison(checker)
+
+        step("Verify the status is failed and the checks list carries the failure")
+        expect(result.status).to_equal(EvidenceStatus.failed)
+        expect(result.checks[0].status).to_equal(EvidenceStatus.failed)
+        expect(result.checks[0].actual).to_equal("failed")
+
+    it "converts a passed old-style checker into EvidenceStatus.passed":
+        step("Build a passing old-style checker via the real constructor")
+        val artifact = scenario_evidence_artifact(
+            ScenarioCaptureKind.api,
+            "List response",
+            "text/plain",
+            "",
+            "status: 200",
+            "scenario-5",
+            "step-5"
+        )
+        val checker = scenario_checker_evidence("status should be 200", true, artifact)
+
+        step("Convert it into a ComparisonResult")
+        val result = legacy_checker_to_comparison(checker)
+
+        step("Verify the status is passed")
+        expect(result.status).to_equal(EvidenceStatus.passed)
+        expect(result.checks[0].status).to_equal(EvidenceStatus.passed)
+
+    it "renders an old-style capture through the same render_block as new typed evidence, end to end":
+        step("Build an old-style artifact and convert it into a manual block")
+        val artifact = scenario_evidence_artifact(
+            ScenarioCaptureKind.exec,
+            "Deploy script",
+            "text/plain",
+            "",
+            "$ deploy\nexit: 0",
+            "scenario-6",
+            "step-6"
+        )
+        val block = legacy_evidence_manual_block(artifact)
+
+        step("Render it through the real manual_render.render_block used by new typed evidence")
+        val lines = render_block(block)
+
+        step("Verify the summary line matches the old module's own summary text")
+        expect(lines[0]).to_equal("Deploy script (exec, text/plain)")
+
+        step("Verify the same artifact also passes typed-evidence comparison")
+        val deploy_canonical = legacy_evidence_to_canonical(artifact)
+        val deploy_oracle = oracle_spec_open("legacy_facade_deploy_script_evidence", [
+            check_exact("kind", "exec"),
+            check_exact("title", "Deploy script"),
+            check_exact("body", "$ deploy\nexit: 0")
+        ])
+        val deploy_comparison = compare_evidence(deploy_canonical, deploy_oracle)
+        expect(deploy_comparison.status).to_equal(EvidenceStatus.passed)

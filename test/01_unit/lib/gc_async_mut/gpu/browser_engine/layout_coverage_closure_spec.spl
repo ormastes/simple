@@ -1,0 +1,195 @@
+use std.spec.{describe, it, assert_true, assert_false, assert_equal}
+
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, StyleProps}
+use std.gc_async_mut.gpu.browser_engine.css.{CssPx}
+use std.gc_async_mut.gpu.browser_engine.layout.{
+    layout_tree, layout_to_scene, paint_box, layout_get_x, layout_get_y,
+    layout_get_width, layout_get_height, layout_get_node, layout_get_children,
+    layout_flex, layout_text, hit_test, hit_test_anchor, first_anchor_box
+}
+use std.gc_async_mut.gpu.browser_engine.layout_box.{BeLayoutBox}
+
+# @cover src/lib/gc_async_mut/gpu/browser_engine/layout.spl 60%
+
+"""Closure spec for layout.spl paths untouched by layout_spec.spl:
+layout_to_scene/paint_box paint-command emission (background, border, text,
+recursion), the layout_get_* geometry accessors, hit_test/hit_test_anchor/
+first_anchor_box tree walks (including the miss/nil paths), and the
+layout_flex/layout_text passthrough stubs."""
+
+fn _style(bg: text, color: text, font_size: f64) -> StyleProps:
+    var style = StyleProps.empty()
+    style.background_color = bg
+    style.color = color
+    style.font_size = font_size
+    style
+
+fn _bordered_style() -> StyleProps:
+    var style = StyleProps.empty()
+    style.border_width = 2.0
+    style.border_color = "#ff0000"
+    style
+
+fn _text(id: i64, value: text) -> BeDomNode:
+    var node = BeDomNode.text_node(id, value)
+    node.style = _style("", "#111111", 10.0)
+    node
+
+fn _anchor(id: i64, children: [BeDomNode]) -> BeDomNode:
+    BeDomNode(
+        node_id: id,
+        tag_name: "a",
+        data: "",
+        attributes: {},
+        style: StyleProps.empty(),
+        children: children,
+        parent_id: 1)
+
+fn _root(children: [BeDomNode]) -> BeDomNode:
+    BeDomNode(
+        node_id: 1,
+        tag_name: "main",
+        data: "",
+        attributes: {},
+        style: _style("#ffffff", "#000000", 16.0),
+        children: children,
+        parent_id: -1)
+
+fn _bordered_root(children: [BeDomNode]) -> BeDomNode:
+    BeDomNode(
+        node_id: 1,
+        tag_name: "main",
+        data: "",
+        attributes: {},
+        style: _bordered_style(),
+        children: children,
+        parent_id: -1)
+
+describe "Browser engine layout_to_scene + paint_box command emission":
+
+    it "emits a background fill command for a styled root with a background color":
+        val root = _root([_text(2, "hi")])
+        val scene = layout_to_scene(root, CssPx(value: 200.0), CssPx(value: 100.0))
+
+        var found_fill = false
+        var i = 0
+        while i < scene.commands.len():
+            if scene.commands[i].starts_with("fill_rect"):
+                found_fill = true
+            i = i + 1
+        assert_true(found_fill, "expected a fill_rect command for the background-colored root box")
+
+    it "emits a stroke command when the root has a border width and color":
+        val root = _bordered_root([_text(2, "hi")])
+        val scene = layout_to_scene(root, CssPx(value: 200.0), CssPx(value: 100.0))
+
+        var found_stroke = false
+        var i = 0
+        while i < scene.commands.len():
+            if scene.commands[i].starts_with("stroke_rect"):
+                found_stroke = true
+            i = i + 1
+        assert_true(found_stroke, "expected a stroke_rect command for the bordered root box")
+
+    it "emits draw_text commands for each text child, in source order":
+        val root = _root([_text(2, "hello"), _text(3, "world")])
+        val scene = layout_to_scene(root, CssPx(value: 200.0), CssPx(value: 100.0))
+
+        var draw_count = 0
+        var i = 0
+        while i < scene.commands.len():
+            if scene.commands[i].starts_with("draw_text"):
+                draw_count = draw_count + 1
+            i = i + 1
+        assert_equal(draw_count, 2)
+
+    it "does not emit a fill_rect for a root with no background color set":
+        val root = BeDomNode(
+            node_id: 1,
+            tag_name: "main",
+            data: "",
+            attributes: {},
+            style: StyleProps.empty(),
+            children: [_text(2, "plain")],
+            parent_id: -1)
+        val scene = layout_to_scene(root, CssPx(value: 100.0), CssPx(value: 50.0))
+
+        var found_fill = false
+        var i = 0
+        while i < scene.commands.len():
+            if scene.commands[i].starts_with("fill_rect"):
+                found_fill = true
+            i = i + 1
+        assert_false(found_fill, "no background_color set, so no fill_rect should be emitted")
+
+describe "Browser engine layout_get_* accessors":
+
+    it "reports x, y, width, and node id for the layout root box":
+        val root = _root([_text(2, "hello")])
+        val layout = layout_tree(root, 200.0, 100.0)
+
+        assert_equal(layout_get_x(layout), 0.0)
+        assert_equal(layout_get_y(layout), 0.0)
+        assert_equal(layout_get_width(layout), 200.0)
+        assert_equal(layout_get_node(layout), 1)
+
+describe "Browser engine hit_test / hit_test_anchor / first_anchor_box":
+
+    it "hit_test finds the deepest node containing the point":
+        val root = _root([_text(2, "hello"), _text(3, "world")])
+        val layout = layout_tree(root, 200.0, 100.0)
+        val children = layout_get_children(layout)
+        # first text child occupies the top rows starting at y=0
+        val hit = hit_test(layout, root, children[0].x + 1.0, children[0].y + 1.0)
+        assert_true(hit.?, "expected a hit inside the first text child's box")
+
+    it "hit_test returns nil when the point falls outside every box":
+        val root = _root([_text(2, "hello")])
+        val layout = layout_tree(root, 200.0, 100.0)
+        val miss = hit_test(layout, root, -50.0, -50.0)
+        assert_false(miss.?, "point outside the root box should miss")
+
+    it "hit_test_anchor finds the innermost enclosing anchor for a point inside it":
+        val anchor_child = _text(3, "link text")
+        val anchor = _anchor(2, [anchor_child])
+        val root = _root([anchor])
+        val layout = layout_tree(root, 200.0, 100.0)
+        val anchor_box = layout_get_children(layout)[0]
+        val found = hit_test_anchor(layout, root, anchor_box.x + 1.0, anchor_box.y + 1.0)
+        assert_true(found.?, "expected the point to resolve inside the anchor subtree")
+
+    it "hit_test_anchor returns nil when the hit target has no enclosing anchor":
+        val root = _root([_text(2, "plain text, no anchor")])
+        val layout = layout_tree(root, 200.0, 100.0)
+        val child_box = layout_get_children(layout)[0]
+        val found = hit_test_anchor(layout, root, child_box.x + 1.0, child_box.y + 1.0)
+        assert_false(found.?, "no <a> ancestor exists, so hit_test_anchor should return nil")
+
+    it "first_anchor_box returns the box of the first anchor element in document order":
+        val anchor = _anchor(2, [_text(3, "link")])
+        val root = _root([anchor, _text(4, "trailing text")])
+        val layout = layout_tree(root, 200.0, 100.0)
+        val found = first_anchor_box(layout, root)
+        assert_true(found.?, "expected to find the anchor box")
+
+    it "first_anchor_box returns nil when the tree has no anchor elements":
+        val root = _root([_text(2, "no anchors here")])
+        val layout = layout_tree(root, 200.0, 100.0)
+        val found = first_anchor_box(layout, root)
+        assert_false(found.?, "no <a> elements present, so first_anchor_box should be nil")
+
+describe "Browser engine layout_flex / layout_text passthrough stubs":
+
+    it "layout_flex returns the container box unchanged":
+        val root = _root([_text(2, "hello")])
+        val layout = layout_tree(root, 200.0, 100.0)
+        val style = StyleProps.empty()
+        val result = layout_flex(root, layout, style, nil)
+        assert_equal(layout_get_width(result), layout_get_width(layout))
+
+    it "layout_text returns the container box unchanged":
+        val root = _root([_text(2, "hello")])
+        val layout = layout_tree(root, 200.0, 100.0)
+        val style = StyleProps.empty()
+        val result = layout_text(root, layout, style)
+        assert_equal(layout_get_height(result), layout_get_height(layout))

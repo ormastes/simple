@@ -1,0 +1,303 @@
+# Sound synthesis primitives — pure Simple, FFI-free, deterministic.
+#
+# Generators produce f64 sample buffers in [-1.0, 1.0] at a caller-chosen
+# sample rate; `apply_adsr` shapes a buffer with a linear ADSR envelope;
+# `mix` sums layered voices sample-accurately with clamping. Noise is seeded
+# via the explicit-state LcgRng (std.common.random_pure) — no OS entropy, so
+# the same seed always reproduces the same buffer.
+#
+# Deliberately excluded (plan: doc/03_plan/app/game_tools/sound_music_effects_plan.md
+# Step 2): multi-oscillator/FM/wavetable synthesis, HRTF (stays deferred).
+# Layering is just calling a generator N times and `mix`-ing the buffers — no
+# voice abstraction needed. `reverb` (below) is a fixed Schroeder network —
+# see its own docstring for the ceiling/upgrade path.
+
+use std.common.random_pure.{LcgRng, lcg_rng, lcg_advance, lcg_value}
+
+val PI: f64 = 3.141592653589793
+
+extern fn rt_math_sin(x: f64) -> f64
+
+fn _sin(x: f64) -> f64:
+    rt_math_sin(x)
+
+# ============================================================================
+# Frame-count helper
+# ============================================================================
+
+fn _frames(duration_ms: f64, sample_rate: i64) -> i64:
+    """Frame count for a duration: trunc(duration_ms * sample_rate / 1000)."""
+    ((duration_ms * (sample_rate as f64)) / 1000.0) as i64
+
+# ============================================================================
+# Generators
+# ============================================================================
+
+pub fn gen_sine(freq_hz: f64, duration_ms: f64, sample_rate: i64) -> [f64]:
+    """Sine tone: sample[i] = sin(2*pi*freq_hz*i/sample_rate)."""
+    val n = _frames(duration_ms, sample_rate)
+    val sr = sample_rate as f64
+    var out: [f64] = []
+    var i: i64 = 0
+    while i < n:
+        val t = (i as f64) / sr
+        out.push(_sin(2.0 * PI * freq_hz * t))
+        i = i + 1
+    out
+
+pub fn gen_square(freq_hz: f64, duration_ms: f64, sample_rate: i64) -> [f64]:
+    """Square tone: sign of the equivalent sine at the same phase."""
+    val n = _frames(duration_ms, sample_rate)
+    val sr = sample_rate as f64
+    var out: [f64] = []
+    var i: i64 = 0
+    while i < n:
+        val t = (i as f64) / sr
+        val s = _sin(2.0 * PI * freq_hz * t)
+        out.push(if s >= 0.0: 1.0 else: -1.0)
+        i = i + 1
+    out
+
+pub fn gen_white_noise(duration_ms: f64, sample_rate: i64, seed: i64) -> [f64]:
+    """Seeded white noise in [-1.0, 1.0). Deterministic for a given seed."""
+    val n = _frames(duration_ms, sample_rate)
+    var rng = lcg_rng(seed)
+    var out: [f64] = []
+    var i: i64 = 0
+    while i < n:
+        rng = lcg_advance(rng)
+        val v = (lcg_value(rng) as f64) / 4294967296.0
+        out.push(v * 2.0 - 1.0)
+        i = i + 1
+    out
+
+# ============================================================================
+# ADSR envelope
+# ============================================================================
+
+pub fn apply_adsr(samples: [f64], attack_ms: f64, decay_ms: f64, sustain_level: f64, release_ms: f64, sample_rate: i64) -> [f64]:
+    """Linear ADSR over `samples`. Attack ramps 0->1, decay ramps 1->sustain
+    (reaching sustain_level exactly at attack+decay frames), sustain holds
+    flat, release ramps sustain->0 (reaching exactly 0 at the last frame)."""
+    val n = samples.len()
+    val fa = _frames(attack_ms, sample_rate)
+    val fd = _frames(decay_ms, sample_rate)
+    val fr = _frames(release_ms, sample_rate)
+    var out: [f64] = []
+    var i: i64 = 0
+    while i < n:
+        var env = sustain_level
+        if i < fa:
+            env = if fa > 0: (i as f64) / (fa as f64) else: 0.0
+        elif i < fa + fd:
+            val di = i - fa
+            val t = if fd > 0: (di as f64) / (fd as f64) else: 1.0
+            env = 1.0 - t * (1.0 - sustain_level)
+        elif fr > 0 and i >= n - fr:
+            val ri = i - (n - fr)
+            val t = if fr > 1: (ri as f64) / ((fr - 1) as f64) else: 1.0
+            env = sustain_level * (1.0 - t)
+        out.push(samples[i] * env)
+        i = i + 1
+    out
+
+# ============================================================================
+# Mixing
+# ============================================================================
+
+pub fn mix(buffers: [[f64]]) -> [f64]:
+    """Sample-accurate sum of layered voices, clamped to [-1.0, 1.0].
+    Buffers may differ in length; missing samples count as 0."""
+    var max_len: i64 = 0
+    for b in buffers:
+        if b.len() > max_len:
+            max_len = b.len()
+    var out: [f64] = []
+    var i: i64 = 0
+    while i < max_len:
+        var sum: f64 = 0.0
+        for b in buffers:
+            if i < b.len():
+                sum = sum + b[i]
+        if sum > 1.0:
+            sum = 1.0
+        if sum < -1.0:
+            sum = -1.0
+        out.push(sum)
+        i = i + 1
+    out
+
+# ============================================================================
+# Pure-Simple effects (a few lines each — HRTF stays deferred, see plan)
+# ============================================================================
+
+pub fn apply_lowpass(samples: [f64], cutoff_hz: f64, sample_rate: i64) -> [f64]:
+    """One-pole low-pass filter."""
+    val dt = 1.0 / (sample_rate as f64)
+    val rc = 1.0 / (2.0 * PI * cutoff_hz)
+    val alpha = dt / (rc + dt)
+    var out: [f64] = []
+    var prev: f64 = 0.0
+    for x in samples:
+        val y = prev + alpha * (x - prev)
+        out.push(y)
+        prev = y
+    out
+
+pub fn apply_highpass(samples: [f64], cutoff_hz: f64, sample_rate: i64) -> [f64]:
+    """One-pole high-pass filter."""
+    val dt = 1.0 / (sample_rate as f64)
+    val rc = 1.0 / (2.0 * PI * cutoff_hz)
+    val alpha = rc / (rc + dt)
+    var out: [f64] = []
+    var prev_in: f64 = 0.0
+    var prev_out: f64 = 0.0
+    for x in samples:
+        val y = alpha * (prev_out + x - prev_in)
+        out.push(y)
+        prev_in = x
+        prev_out = y
+    out
+
+pub fn apply_delay(samples: [f64], time_ms: f64, feedback: f64, sample_rate: i64) -> [f64]:
+    """Feedback delay line: out[i] = in[i] + feedback * out[i - delay_frames]."""
+    val delay_frames = _frames(time_ms, sample_rate)
+    val n = samples.len()
+    var out: [f64] = []
+    var i: i64 = 0
+    while i < n:
+        var v = samples[i]
+        if delay_frames > 0 and i >= delay_frames:
+            v = v + feedback * out[i - delay_frames]
+        if v > 1.0:
+            v = 1.0
+        if v < -1.0:
+            v = -1.0
+        out.push(v)
+        i = i + 1
+    out
+
+# ============================================================================
+# Reverb — Schroeder reverberator (4 parallel comb + 2 series allpass)
+# ============================================================================
+#
+# Classic Schroeder/Moorer delay constants (ms), chosen historically to be
+# mutually non-commensurate so the four comb echoes don't line up and cause
+# audible periodicity/coloration: comb delays 29.7/37.1/41.1/43.7 ms, allpass
+# delays 5.0/1.7 ms. Allpass gain is a fixed 0.7 (standard Schroeder value);
+# comb feedback is `room_size` (0..1), applied uniformly to all four combs —
+# one knob, not a per-comb decay-time-normalized gain.
+#
+# Ceiling: this is a fixed 4-comb/2-allpass Schroeder network — no diffusion
+# matrix, no modulation, no early-reflection model. Upgrade path if the tail
+# ever needs to sound less metallic/more diffuse: a Feedback Delay Network
+# (FDN) with a Householder/Hadamard mixing matrix. HRTF stays separately
+# deferred (plan: doc/03_plan/app/game_tools/sound_music_effects_plan.md).
+
+val _REVERB_COMB_MS: [f64] = [29.7, 37.1, 41.1, 43.7]
+val _REVERB_ALLPASS_MS: [f64] = [5.0, 1.7]
+val _REVERB_ALLPASS_GAIN: f64 = 0.7
+
+fn _comb_wet(samples: [f64], delay_frames: i64, feedback: f64) -> [f64]:
+    """Feedback comb filter, wet-only tap. Internal register r[n] = x[n] +
+    feedback*r[n-D] (same recursion as apply_delay); the returned tap is the
+    feedback contribution alone, r[n]-x[n] — exactly 0 for n < D, and exactly
+    `feedback` at n = D for a unit impulse at n = 0."""
+    val n = samples.len()
+    var r: [f64] = []
+    var i: i64 = 0
+    while i < n:
+        var v = samples[i]
+        if delay_frames > 0 and i >= delay_frames:
+            v = v + feedback * r[i - delay_frames]
+        r.push(v)
+        i = i + 1
+    var out: [f64] = []
+    i = 0
+    while i < n:
+        out.push(r[i] - samples[i])
+        i = i + 1
+    out
+
+fn _allpass(samples: [f64], delay_frames: i64, gain: f64) -> [f64]:
+    """Schroeder allpass filter: y[n] = -gain*x[n] + x[n-D] + gain*y[n-D]."""
+    val n = samples.len()
+    var out: [f64] = []
+    var i: i64 = 0
+    while i < n:
+        val x = samples[i]
+        var x_d: f64 = 0.0
+        var y_d: f64 = 0.0
+        if delay_frames > 0 and i >= delay_frames:
+            x_d = samples[i - delay_frames]
+            y_d = out[i - delay_frames]
+        out.push(-gain * x + x_d + gain * y_d)
+        i = i + 1
+    out
+
+# ============================================================================
+# Pitch shift — resample (tape-speed style: pitch and duration move together)
+# ============================================================================
+
+pub fn apply_pitch_shift(samples: [f64], pitch_factor: f64, sample_rate: i64) -> [f64]:
+    """Pitch shift via linear-interpolation resample: output[i] reads the
+    input at position i*pitch_factor (fractional index, linearly
+    interpolated between the two nearest input samples). pitch_factor > 1.0
+    raises pitch and shortens the buffer (tape sped up); pitch_factor < 1.0
+    lowers pitch and lengthens it (tape slowed down) — the same trade-off a
+    real-time node-graph resampler makes, just applied offline to a full
+    buffer instead of a live stream. `sample_rate` is accepted for call-site
+    symmetry with the other effects (apply_lowpass/apply_highpass/apply_delay/
+    reverb all take it) even though this function only needs the ratio, not
+    the absolute rate. pitch_factor <= 0.0 or an empty buffer returns
+    `samples` unchanged (defined, not an error — callers pass validated SDN
+    values; this is a pure function like the other effects)."""
+    val n = samples.len()
+    if (n == 0 or pitch_factor <= 0.0):
+        return samples
+    val out_len = ((n as f64) / pitch_factor) as i64
+    var out: [f64] = []
+    var i: i64 = 0
+    while i < out_len:
+        val src_pos = (i as f64) * pitch_factor
+        val idx0 = src_pos as i64
+        var idx1 = idx0 + 1
+        if idx1 >= n:
+            idx1 = n - 1
+        val frac = src_pos - (idx0 as f64)
+        out.push(samples[idx0] * (1.0 - frac) + samples[idx1] * frac)
+        i = i + 1
+    out
+
+pub fn reverb(samples: [f64], sample_rate: i64, room_size: f64, wet: f64) -> [f64]:
+    """Schroeder reverb: 4 parallel combs (feedback = room_size, classic
+    29.7/37.1/41.1/43.7 ms delays) summed, then 2 series allpass filters
+    (fixed gain 0.7, classic 5.0/1.7 ms delays), mixed with the dry signal by
+    `wet` (0.0 = dry only, 1.0 = wet only), clamped to [-1.0, 1.0]. Caller
+    validates room_size/wet in [0,1] — like apply_delay/apply_lowpass, this
+    is an unvalidated pure function."""
+    val n = samples.len()
+    var wet_sig: [f64] = []
+    var i: i64 = 0
+    while i < n:
+        wet_sig.push(0.0)
+        i = i + 1
+    for ms in _REVERB_COMB_MS:
+        val tap = _comb_wet(samples, _frames(ms, sample_rate), room_size)
+        i = 0
+        while i < n:
+            wet_sig[i] = wet_sig[i] + tap[i]
+            i = i + 1
+    for ms in _REVERB_ALLPASS_MS:
+        wet_sig = _allpass(wet_sig, _frames(ms, sample_rate), _REVERB_ALLPASS_GAIN)
+    var out: [f64] = []
+    i = 0
+    while i < n:
+        var v = samples[i] * (1.0 - wet) + wet_sig[i] * wet
+        if v > 1.0:
+            v = 1.0
+        if v < -1.0:
+            v = -1.0
+        out.push(v)
+        i = i + 1
+    out

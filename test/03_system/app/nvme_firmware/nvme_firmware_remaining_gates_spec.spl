@@ -1,0 +1,62 @@
+"""
+NVMe firmware remaining-gate orchestration.
+
+This specification prepares the checks that become runnable after a
+source-matched pure-Simple runtime is deployed. It verifies explicit current
+and requested target profiles, rejects incomplete physical-board evidence, and
+keeps UNO Q evidence supplementary. It does not claim REQ-012, NFR-011, or
+physical target availability from profile/package evidence.
+"""
+
+use std.spec.*
+use std.io_runtime.{process_run}
+use app.io.mod.{file_read_text}
+
+val GATE: text = "scripts/check/check-nvme-firmware-remaining-gates.shs"
+val TARGETS: text = "examples/09_embedded/simpleos_nvme_fw/fw/openssd_config.spl"
+val REQUESTS: text = "doc/08_tracking/feature/cosmos_nvme_firmware_remaining_requests_2026-07-28.md"
+
+fn _run(cmd: text) -> (text, text, i64):
+    process_run("/bin/sh", ["-c", cmd])
+
+describe "NVMe firmware remaining gates":
+    it "should retain simulator and OpenSSD target profiles":
+        step("Inspect the current target-neutral firmware configuration")
+        val source = file_read_text(TARGETS)
+        expect(source).to_contain("TARGET_SIMPLE_SIM")
+        expect(source).to_contain("TARGET_OPENSSD_2CH8WAY")
+        expect(source).to_contain("TARGET_OPENSSD_8CH8WAY")
+        expect(source).to_contain("TARGET_RV32_QEMU_RAM_NAND")
+        expect(source).to_contain("TARGET_RV32_KV260_AXI_RAM_NAND")
+        expect(source).to_contain("TARGET_INVALID")
+        expect(source).to_contain("fn nvme_fw_target_config")
+        expect(source).to_contain("invalid_target_config()")
+        expect(source).to_contain("target: unknown fails closed")
+        expect(source).to_contain("available: false")
+
+    it "should track QEMU and FPGA profiles without fabricating support":
+        step("Inspect the selected multi-target feature request")
+        val requests = file_read_text(REQUESTS)
+        expect(requests).to_contain("QEMU/FEMU")
+        expect(requests).to_contain("KV260/FPGA")
+        expect(requests).to_contain("fail closed")
+        expect(requests).to_contain("they do not fork the NVMe command, FTL, or recovery core")
+
+    it "should reject incomplete board evidence and postpone unavailable environments":
+        step("Run the remaining-gate contract self-test")
+        val (out, err, code) = _run("sh " + GATE + " --self-test")
+        expect(code).to_equal(0)
+        expect(err).to_equal("")
+        expect(out).to_contain("TARGET simple-sim PROFILE_PRESENT")
+        expect(out).to_contain("TARGET openssd-2ch8way PROFILE_PRESENT H2_POSTPONED")
+        expect(out).to_contain("TARGET openssd-8ch8way PROFILE_PRESENT H2_POSTPONED")
+        expect(out).to_contain("COSMOS_PACKAGE_PROVENANCE_PASS source=clean board=bound tools=clang,lld,bootgen")
+        expect(out).to_contain("REJECTION missing-bt PASS")
+        expect(out).to_contain("REJECTION tampered-log PASS")
+        expect(out).to_contain("REJECTION path-traversal PASS")
+        expect(out).to_contain("REJECTION duplicate-field PASS")
+        expect(out).to_contain("REJECTION same-reviewer PASS")
+        expect(out).to_contain("REJECTION package-source-mismatch PASS")
+        expect(out).to_contain("STATUS: PASS nvme-firmware-remaining-gates self-test")
+        expect(out).to_contain("STATUS: POSTPONED uno-q-supplementary environment-unavailable")
+        expect(out).to_contain("STATUS: POSTPONED cosmos-board BT-001..BT-006")

@@ -1,0 +1,40 @@
+# Proves SharedHeap.allocate_sub_binary validates the requested [offset,
+# offset+length) range against the parent binary's bounds. A negative
+# offset must be rejected even when offset + length still fits under
+# parent_len, since the sub-binary would otherwise read before the start
+# of the parent's data.
+
+use std.nogc_async_mut_noalloc.memory.refc_binary.{SharedHeap, SharedHeapConfig}
+
+describe "SharedHeap.allocate_sub_binary range validation":
+    """Proves negative offsets are rejected as an invalid range, matching
+    the positive-offset-past-end validation that already exists."""
+
+    it "rejects a negative offset even though offset + length <= parent_len":
+        var heap = SharedHeap.new(SharedHeapConfig.small())
+        val parent = heap.allocate(process_id: 1, size: 20)
+        expect(parent.is_success()).to_equal(true)
+        val parent_id = parent.unwrap().id.value
+
+        # offset=-5, length=10 => range_end=5 <= parent_len=20, but the
+        # negative offset makes this an invalid range.
+        val sub = heap.allocate_sub_binary(parent_id: parent_id, offset: -5, length: 10)
+        expect(sub.is_success()).to_equal(false)
+        expect(sub.tag).to_equal("InvalidRange")
+
+    it "accepts a valid non-negative offset within bounds":
+        var heap = SharedHeap.new(SharedHeapConfig.small())
+        val parent = heap.allocate(process_id: 1, size: 20)
+        val parent_id = parent.unwrap().id.value
+
+        val sub = heap.allocate_sub_binary(parent_id: parent_id, offset: 5, length: 10)
+        expect(sub.is_success()).to_equal(true)
+
+    it "still rejects an out-of-bounds positive offset (regression guard)":
+        var heap = SharedHeap.new(SharedHeapConfig.small())
+        val parent = heap.allocate(process_id: 1, size: 20)
+        val parent_id = parent.unwrap().id.value
+
+        val sub = heap.allocate_sub_binary(parent_id: parent_id, offset: 15, length: 10)
+        expect(sub.is_success()).to_equal(false)
+        expect(sub.tag).to_equal("InvalidRange")

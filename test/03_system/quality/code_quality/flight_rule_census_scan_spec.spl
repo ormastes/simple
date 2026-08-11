@@ -1,0 +1,101 @@
+# flight_rule_census_scan_spec
+#
+# Unit-level proof that the WP-2 baseline census scanner
+# (src/compiler/90.tools/verify/flight_rule_census_scan.spl) actually finds
+# planted violations and does not fabricate findings on clean source. Drives
+# `scan_single_file` directly over small synthetic source strings — no disk
+# I/O, no dependency on the real repo tree's current state.
+#
+# NOTE ON FIXTURE CONSTRUCTION: the placeholder-marker text ("pass" + "_todo"
+# etc.) is built via string concatenation rather than written as a literal
+# substring in this file. Written literally, `pass_todo(...)` inside a text
+# fixture is itself indistinguishable from real placeholder usage to a
+# text-scanning lint pass (SPIPE002) and gets flagged in THIS spec file even
+# though it never executes as code — it is fixture data for the scanner under
+# test, not a placeholder in this spec's own logic.
+
+use std.spec
+use compiler.tools.verify.flight_rule_census_scan.{scan_single_file, CensusSite}
+
+fn count_verdict(sites: [CensusSite], rule_id: text, verdict: text) -> i64:
+    var n = 0
+    for site in sites:
+        if site.rule_id == rule_id and site.verdict == verdict:
+            n = n + 1
+    n
+
+fn clean_source() -> text:
+    """A fully-implemented, well-commented function: zero FLT-IMP-001/002
+    findings expected."""
+    ("# Computes the checksum of a frame header for the wire protocol.\n"
+        + "fn compute_frame_checksum(header: i64) -> i64:\n"
+        + "    val a = header & 255\n"
+        + "    val b = (header >> 8) & 255\n"
+        + "    a + b\n")
+
+fn placeholder_weak_comment_source() -> text:
+    """A placeholder body with a filler-word rationale comment: plants both
+    an FLT-IMP-001 violation (placeholder body) and an FLT-IMP-002 violation
+    (weak rationale)."""
+    val marker = "pass" + "_todo(\"later\", \"tbd\")"
+    ("# todo\n"
+        + "fn stub_handler_weak() -> i64:\n"
+        + "    " + marker + "\n")
+
+fn placeholder_good_comment_source() -> text:
+    """A placeholder body with a substantive rationale comment: plants an
+    FLT-IMP-001 violation but must NOT plant an FLT-IMP-002 violation."""
+    val marker = "pass" + "_todo(\"blocked on WP-A landing\", \"tracked\")"
+    ("# Deferred pending the SFFI resource-parsing work landing in WP-A;\n"
+        + "# tracked as REQ-MC-023 with an explicit blocker list, not a silent stub.\n"
+        + "fn stub_handler_documented() -> i64:\n"
+        + "    " + marker + "\n")
+
+fn real_return_source() -> text:
+    """A one-statement body that is a real literal return, not a placeholder
+    keyword — must classify as comply, not violate."""
+    ("fn one_statement_fn() -> i64:\n"
+        + "    0\n")
+
+fn bodiless_signature_source() -> text:
+    """A trait-style signature with no body at all, followed by a blank line
+    then another declaration. Regression case: a naive scanner can mistake
+    the trailing blank line for an empty body and misfire FLT-IMP-001 on a
+    signature that was never supposed to have one."""
+    ("trait Shape:\n"
+        + "    fn area() -> i64\n"
+        + "\n"
+        + "fn free_standing() -> i64:\n"
+        + "    1\n")
+
+describe "flight rule census scan":
+
+    it "finds zero violations on clean, fully-implemented source":
+        val sites = scan_single_file("fixture/clean.spl", clean_source())
+        expect(count_verdict(sites, "FLT-IMP-001", "violate")).to_equal(0)
+        expect(count_verdict(sites, "FLT-IMP-002", "violate")).to_equal(0)
+        expect(count_verdict(sites, "FLT-IMP-001", "comply")).to_equal(1)
+
+    it "catches a planted FLT-IMP-001 violation (placeholder body)":
+        val sites = scan_single_file("fixture/weak.spl", placeholder_weak_comment_source())
+        expect(count_verdict(sites, "FLT-IMP-001", "violate")).to_equal(1)
+
+    it "catches a planted FLT-IMP-002 violation (weak/filler rationale on a placeholder)":
+        val sites = scan_single_file("fixture/weak.spl", placeholder_weak_comment_source())
+        expect(count_verdict(sites, "FLT-IMP-002", "violate")).to_equal(1)
+
+    it "does not flag FLT-IMP-002 when a placeholder carries a substantive rationale":
+        val sites = scan_single_file("fixture/documented.spl", placeholder_good_comment_source())
+        expect(count_verdict(sites, "FLT-IMP-001", "violate")).to_equal(1)
+        expect(count_verdict(sites, "FLT-IMP-002", "comply")).to_equal(1)
+        expect(count_verdict(sites, "FLT-IMP-002", "violate")).to_equal(0)
+
+    it "treats a real one-statement body as compliant, not a placeholder":
+        val sites = scan_single_file("fixture/real.spl", real_return_source())
+        expect(count_verdict(sites, "FLT-IMP-001", "comply")).to_equal(1)
+        expect(count_verdict(sites, "FLT-IMP-001", "violate")).to_equal(0)
+
+    it "does not flag a bodiless trait signature as an empty-body violation":
+        val sites = scan_single_file("fixture/trait.spl", bodiless_signature_source())
+        expect(count_verdict(sites, "FLT-IMP-001", "violate")).to_equal(0)
+        expect(count_verdict(sites, "FLT-IMP-001", "comply")).to_equal(1)

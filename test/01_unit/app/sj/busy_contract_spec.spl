@@ -1,0 +1,97 @@
+"""
+# BUSY Contract Specification
+
+As a caller of the `sj` daemon, when a lease cannot be acquired I need a
+BUSY refusal that is unmistakable: `exit_code` 75 (EX_TEMPFAIL), a non-empty
+stderr naming the blocking lease and holder pid, and a JSON wire response that
+carries both. A successful command must carry exit 0 and no BUSY text.
+
+This spec exercises the REAL product path — `std.service.lease_manager` for the
+BUSY message and `app.sj_daemon.request_handler` for the exit code and wire
+format. It previously declared its own copy of `LeaseManager` and its own
+`format_busy_json` (a function that does not exist in `src/`), so it proved
+nothing about the product.
+"""
+
+use std.io_runtime
+use std.service.lease_manager
+use app.sj_daemon.request_handler
+
+extern fn rt_getpid() -> i64
+
+describe "BUSY Contract - Refusal Signal":
+    it "BUSY result indicates failure":
+        var mgr = lease_manager_new()
+        val pid = rt_getpid()
+        val first = try_acquire_exclusive(mgr, pid, 30000i64)
+        val second = try_acquire_exclusive(mgr, pid, 30000i64)
+        expect(first.ok).to_equal(true)
+        expect(second.ok).to_equal(false)
+        val msg = second.busy_message
+        expect(msg).to_contain("BUSY")
+
+    it "BUSY message is not empty":
+        var mgr = lease_manager_new()
+        val pid = rt_getpid()
+        val first = try_acquire_exclusive(mgr, pid, 30000i64)
+        val second = try_acquire_exclusive(mgr, pid, 30000i64)
+        val msg = second.busy_message
+        expect(msg.len()).to_be_greater_than(0i64)
+
+    it "BUSY message names the blocking lease id and holder pid":
+        var mgr = lease_manager_new()
+        val pid = rt_getpid()
+        val first = try_acquire_exclusive(mgr, pid, 30000i64)
+        val second = try_acquire_exclusive(mgr, pid, 30000i64)
+        val msg = second.busy_message
+        val fid = first.lease_id
+        expect(msg).to_contain(fid)
+        expect(msg).to_contain("pid")
+
+describe "BUSY Contract - Exit Code 75":
+    it "refuses a mutating command with exit 75 while an exclusive lease is held":
+        var handler = sj_request_handler_new(".", 30000i64)
+        val pid = rt_getpid()
+        val held = try_acquire_exclusive(handler.lease_manager, pid, 30000i64)
+        expect(held.ok).to_equal(true)
+        val resp = handle_cli_args(handler, ["commit", "-m", "x"], pid)
+        expect(resp.exit_code).to_equal(75i64)
+        expect(resp.stderr).to_contain("BUSY")
+
+describe "BUSY Contract - JSON Wire Format":
+    it "serializes the BUSY refusal with exit code and stderr":
+        var mgr = lease_manager_new()
+        val pid = rt_getpid()
+        val first = try_acquire_exclusive(mgr, pid, 30000i64)
+        val second = try_acquire_exclusive(mgr, pid, 30000i64)
+        val resp = CommandResponse(
+            exit_code: 75i64,
+            stdout: "",
+            stderr: second.busy_message,
+            classification: "mutating",
+            lease_kind: LEASE_EXCLUSIVE
+        )
+        val json = response_json(resp)
+        expect(json).to_contain("\"exit_code\":75")
+        expect(json).to_contain("BUSY")
+        expect(json).to_contain("\"classification\":\"mutating\"")
+
+describe "BUSY Contract - Exit 0 Regression":
+    it "successful lease does not produce BUSY":
+        var mgr = lease_manager_new()
+        val pid = rt_getpid()
+        val result = try_acquire_exclusive(mgr, pid, 30000i64)
+        expect(result.ok).to_equal(true)
+        val msg = result.busy_message
+        expect(msg).to_equal("")
+
+    it "released lease allows next acquire":
+        var mgr = lease_manager_new()
+        val pid = rt_getpid()
+        val first = try_acquire_exclusive(mgr, pid, 30000i64)
+        val released = release_lease(mgr, first.lease_id)
+        expect(released).to_equal(true)
+        val second = try_acquire_exclusive(mgr, pid, 30000i64)
+        expect(second.ok).to_equal(true)
+        val msg = second.busy_message
+        expect(msg).to_equal("")

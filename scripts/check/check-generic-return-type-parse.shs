@@ -1,0 +1,44 @@
+#!/bin/sh
+# Guards against a regression of generic return-type annotation parsing,
+# e.g. `fn f() -> Result<i64, text>:`. A defect of this shape was reported
+# 2026-08-11 as "expected expression, found Lt" but did not reproduce on a
+# fresh seed build off that day's origin tip (9809e69df6) — see
+# doc/08_tracking/bug/generic_return_type_annotation_rejected_2026-08-11.md
+set -eu
+SEED="${SEED:-bin/seed/simple}"
+if [ ! -x "$SEED" ]; then
+  echo "ERROR — nothing was checked (seed binary not found at $SEED, exit 2)"
+  exit 2
+fi
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+n=0
+fail=0
+check() {
+  n=$((n + 1))
+  f="$TMP/case_$n.spl"
+  printf '%s\n' "$1" > "$f"
+  out=$("$SEED" compile "$f" 2>&1) || { fail=$((fail + 1)); echo "FAIL case $n: $1"; echo "$out" | tail -5; }
+}
+check 'fn f() -> Result<i64, text>:
+    pass'
+check 'fn f() -> Option<i64>:
+    pass'
+check 'fn f() -> List<i64>:
+    pass'
+check 'fn f() -> Result<List<i64>, text>:
+    pass'
+check 'fn f(x: Result<i64, text>) -> i64:
+    return 1'
+check 'val v: Result<i64, text> = Ok(1)'
+
+if [ "$n" -eq 0 ]; then
+  echo "ERROR — nothing was checked (exit 2)"
+  exit 2
+fi
+if [ "$fail" -gt 0 ]; then
+  echo "FAIL — $fail of $n generic-return-type case(s) rejected by the parser"
+  exit 1
+fi
+echo "PASS — $n generic-return-type case(s) checked, 0 rejected"
+exit 0

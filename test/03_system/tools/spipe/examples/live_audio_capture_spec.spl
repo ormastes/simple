@@ -1,0 +1,171 @@
+# @req T2g live-capture spec: real WAV decode + audio_profile
+#
+# T2g task of doc/03_plan/infra/sspec/modern_sspec_completion_plan_2026-08-09.md:
+# a live-capture spec composing a REAL WAV byte-level encoder/decoder with the
+# audio_profile typed-evidence adapter. Known PCM16 samples are packed into
+# real RIFF/WAVE bytes, written to a real file on scratch disk, read back via
+# the repo's real file I/O, and decoded through `std.common.audio.wav_decode`
+# (`decode_wav`) — the actual chunk-walking WAV parser, not a fixture that
+# hands audio_profile pre-decoded numbers. The decoded f32 samples are then
+# rescaled to integer PCM and fed into `audio_to_evidence`, and checked
+# against an oracle whose RMS/peak/duration/silence values were computed BY
+# HAND (see comment block below), independent of the code under test — never
+# read back from the evidence being checked, so the check cannot be
+# tautological.
+#
+# Design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# Research: doc/01_research/infra/sspec/modern_sspec_typed_evidence_research_2026-08-08.md
+
+use std.spec.{describe, it, step, assert_true, assert_equal}
+use std.common.spec.evidence.model.{
+    OracleSpec, EvidenceStatus, check_exact, oracle_spec
+}
+use std.common.spec.evidence.evidence_comparator.{compare_evidence}
+use std.common.spec.evidence.format.audio_profile.{AudioSampleSet, audio_to_evidence}
+use std.common.audio.wav_decode.{decode_wav, WavAudio}
+use std.nogc_sync_mut.io_runtime.{file_write_bytes, file_read_bytes, file_delete}
+
+# Hand-computed oracle (independent of audio_profile.spl — never read from
+# the evidence under test):
+#
+# PCM16 mono @ 8000 Hz, 4 samples: 16384, -16384, 8192, -8192
+#   (these are exact halves/quarters of full scale: 0.5, -0.5, 0.25, -0.25
+#   as f32, so the f32 round-trip through decode_wav is bit-exact and
+#   rescaling by *32768 recovers the original integers exactly)
+#
+# duration_ms = frames*1000/rate = (4/1)*1000/8000 = 4000/8000 = 0 (integer div)
+# sum of squares = 16384^2 + (-16384)^2 + 8192^2 + (-8192)^2
+#                = 268435456 + 268435456 + 67108864 + 67108864 = 671088640
+# mean_sq = 671088640 / 4 = 167772160
+# rms = floor(sqrt(167772160)) = 12952   (12952^2=167754304 <= x < 167780209=12953^2)
+# peak = max(|16384|,|-16384|,|8192|,|-8192|) = 16384
+# silence_ratio_permille (threshold 0): 0 of 4 samples are exactly 0 -> 0
+
+fn wav_le_u16(v: i64) -> [u8]:
+    val lo = v % 256
+    val hi = (v / 256) % 256
+    [lo as u8, hi as u8]
+
+fn wav_le_u32(v: i64) -> [u8]:
+    var bytes: [u8] = []
+    var rem = v
+    var i = 0
+    while i < 4:
+        bytes.push((rem % 256) as u8)
+        rem = rem / 256
+        i = i + 1
+    bytes
+
+fn push_all(dest: [u8], src: [u8]) -> [u8]:
+    var out = dest
+    for b in src:
+        out.push(b)
+    out
+
+fn push_text(dest: [u8], s: text) -> [u8]:
+    var out = dest
+    for ch in s.bytes():
+        out.push(ch)
+    out
+
+# Builds real RIFF/WAVE PCM16 bytes for the given mono i16 samples, byte for
+# byte, so `decode_wav` parses an actual well-formed WAV file — not a
+# synthetic struct standing in for one.
+fn build_wav_pcm16_mono(samples: [i64], sample_rate: i64) -> [u8]:
+    val bits_per_sample = 16
+    val channels = 1
+    val block_align = channels * (bits_per_sample / 8)
+    val byte_rate = sample_rate * block_align
+    val data_size = samples.len() * (bits_per_sample / 8)
+    val fmt_size = 16
+    val riff_size = 4 + (8 + fmt_size) + (8 + data_size)
+
+    var bytes: [u8] = []
+    bytes = push_text(bytes, "RIFF")
+    bytes = push_all(bytes, wav_le_u32(riff_size))
+    bytes = push_text(bytes, "WAVE")
+
+    bytes = push_text(bytes, "fmt ")
+    bytes = push_all(bytes, wav_le_u32(fmt_size))
+    bytes = push_all(bytes, wav_le_u16(1))              # audio_format = PCM
+    bytes = push_all(bytes, wav_le_u16(channels))
+    bytes = push_all(bytes, wav_le_u32(sample_rate))
+    bytes = push_all(bytes, wav_le_u32(byte_rate))
+    bytes = push_all(bytes, wav_le_u16(block_align))
+    bytes = push_all(bytes, wav_le_u16(bits_per_sample))
+
+    bytes = push_text(bytes, "data")
+    bytes = push_all(bytes, wav_le_u32(data_size))
+    for s in samples:
+        var v = s
+        if v < 0:
+            v = v + 65536
+        bytes = push_all(bytes, wav_le_u16(v))
+
+    bytes
+
+describe "Live audio capture via real WAV bytes + wav_decode + audio_profile":
+    """
+    Known PCM16 samples are packed into real RIFF/WAVE bytes, written to
+    scratch disk, read back through real file I/O, decoded through the
+    real WAV chunk-walking parser, converted to audio_profile evidence, and
+    checked against RMS/peak/duration/silence values computed by hand —
+    never read back from the evidence itself.
+    """
+
+    it "decodes a real WAV file on disk and matches hand-computed audio evidence":
+        step("build real RIFF/WAVE PCM16 bytes for 4 known samples at 8000 Hz mono")
+        val samples_i64: [i64] = [16384, -16384, 8192, -8192]
+        val wav_bytes = build_wav_pcm16_mono(samples_i64, 8000)
+
+        step("write the real WAV bytes to a scratch file on disk")
+        val fixture_path = "/tmp/claude-1000/-home-ormastes-dev-pub-simple/93f9b900-8e65-4a83-b9d7-c9a85fbe5ecf/scratchpad/live_audio_fixture.wav"
+        file_write_bytes(fixture_path, wav_bytes)
+
+        step("read the bytes back from disk for real")
+        val read_bytes = file_read_bytes(fixture_path)
+        assert_equal(read_bytes.len(), wav_bytes.len())
+
+        step("decode the real bytes through the real WAV parser (decode_wav)")
+        val decoded = decode_wav(read_bytes)
+        assert_true(decoded.is_ok())
+        val wav_audio: WavAudio = decoded.unwrap()
+        assert_equal(wav_audio.channels, 1)
+        assert_equal(wav_audio.sample_rate, 8000)
+        assert_equal(wav_audio.samples.len(), 4)
+
+        step("rescale the real decoded f32 samples back to integer PCM (exact for these values)")
+        var int_samples: [i64] = []
+        for s in wav_audio.samples:
+            val scaled = (s as f64) * 32768.0
+            int_samples.push(scaled as i64)
+        assert_equal(int_samples, samples_i64)
+
+        step("convert the real decoded samples into audio_profile evidence")
+        val sample_set = AudioSampleSet(
+            channel_count: 1,
+            sample_rate_hz: 8000,
+            bit_depth: 16,
+            samples: int_samples
+        )
+        val evidence = audio_to_evidence(sample_set, "audio/live_wav")
+        assert_true(evidence.parse_ok)
+
+        step("check against an oracle computed by hand, independent of the evidence under test")
+        val oracle: OracleSpec = oracle_spec(
+            "audio/live_wav",
+            [
+                check_exact("audio.channel_count", "1"),
+                check_exact("audio.sample_rate_hz", "8000"),
+                check_exact("audio.bit_depth", "16"),
+                check_exact("audio.duration_ms", "0"),
+                check_exact("audio.rms", "12952"),
+                check_exact("audio.peak", "16384"),
+                check_exact("audio.silence_ratio_permille", "0")
+            ]
+        )
+        val result = compare_evidence(evidence, oracle)
+        assert_true(result.status == EvidenceStatus.passed)
+
+        step("clean up the scratch fixture")
+        file_delete(fixture_path)

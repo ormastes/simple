@@ -1,0 +1,167 @@
+val LIGHT_REQUEST_DEFAULT_TIMEOUT_MS: i64 = 600000
+# Ceiling on an EXPLICITLY requested budget, not the default (which stays
+# 600s above). It used to equal the default, so a spec that asked for more —
+# via `--timeout` or the `# @timeout_secs <N>` header directive — was silently
+# clamped back to 600s on the light-daemon lane, killed mid-run, and reported
+# "Process timed out" with no verdict line: a spec that cannot print a verdict
+# can never print a failure either. Only specs that declare a larger budget
+# can reach this ceiling. See tile_paint_parity_spec (measured 1108s honest).
+val LIGHT_REQUEST_MAX_TIMEOUT_MS: i64 = 2400000
+val LIGHT_REQUEST_RESPONSE_GRACE_MS: i64 = 2000
+val LIGHT_REQUEST_V1_HEADER: text = "simple-test-daemon-request-v1"
+
+fn light_request_clamp_timeout_ms(timeout_ms: i64) -> i64:
+    if timeout_ms <= 0:
+        return LIGHT_REQUEST_DEFAULT_TIMEOUT_MS
+    if timeout_ms > LIGHT_REQUEST_MAX_TIMEOUT_MS:
+        return LIGHT_REQUEST_MAX_TIMEOUT_MS
+    timeout_ms
+
+fn light_request_timeout_ms_from_seconds(timeout_secs: i64) -> i64:
+    if timeout_secs <= 0:
+        return LIGHT_REQUEST_DEFAULT_TIMEOUT_MS
+    if timeout_secs > LIGHT_REQUEST_MAX_TIMEOUT_MS / 1000:
+        return LIGHT_REQUEST_MAX_TIMEOUT_MS
+    timeout_secs * 1000
+
+fn light_request_expiry_micros(now_micros: i64, timeout_ms: i64) -> i64:
+    now_micros + (light_request_clamp_timeout_ms(timeout_ms) * 1000)
+
+fn light_request_encode(path: text, expiry_micros: i64) -> text:
+    "{LIGHT_REQUEST_V1_HEADER}\n{expiry_micros}\n{path}"
+
+fn light_request_parse(content: text) -> (text, i64):
+    val lines = content.split("\n")
+    if lines.len() == 0 or lines[0] != LIGHT_REQUEST_V1_HEADER:
+        return (content, 0)
+    if lines.len() < 3:
+        return ("", -1)
+    val expiry_text = lines[1].trim()
+    val parsed_expiry_micros = expiry_text.to_i64() ?? -1
+    val expiry_micros = if parsed_expiry_micros > 0: parsed_expiry_micros else: -1
+    var path_parts: [text] = []
+    var i = 2
+    while i < lines.len():
+        path_parts.push(lines[i])
+        i = i + 1
+    (path_parts.join("\n"), expiry_micros)
+
+# ---------------------------------------------------------------------------
+# Timeout verdict emission (bug: killed_spec_emits_no_verdict_line_2026-08-09)
+# ---------------------------------------------------------------------------
+# A spec killed at the per-file budget used to produce "Process timed out",
+# exit 255, and NO verdict line at all. In a sweep that reads as "not yet run"
+# rather than "broken" — the most dangerous shape in this corpus, because a
+# broken spec becomes invisible instead of red. Every timeout path in the test
+# lane now emits THIS line so existing tooling (which greps
+# `^SPEC FILE VERDICT:` and parses executed=/passed=/failed=/dropped=) counts
+# the kill as a real failure. The shape is byte-compatible with the driver's
+# own verdict line (report_spec_file_verdict); the extra `timeout=1` and
+# `reason=` fields are appended AFTER dropped= so no existing parser is
+# disturbed, and give a grep-able marker that distinguishes a killed spec from
+# an honestly-failing one.
+fn timeout_verdict_line(path: text, reason: text, budget_ms: i64) -> text:
+    "SPEC FILE VERDICT: {path} declared>=1 executed=1 passed=0 failed=1 dropped=0 timeout=1 reason={reason} budget_ms={budget_ms}"
+
+fn has_verdict_line(output: text) -> bool:
+    output.contains("SPEC FILE VERDICT:")
+
+# Unrun verdict emission (bug: unrun_spec_emits_no_verdict_line_2026-08-10)
+# ---------------------------------------------------------------------------
+# Same invisibility mechanism as the timeout line above, different cause. A
+# spec that CANNOT LOAD — its `use` names a module that does not exist, it does
+# not parse, or it otherwise reaches the driver epilogue having executed
+# nothing — never emits a verdict line either. The exit code is already correct
+# and loud (the `real_executed == 0` guard in test_runner_single.spl fails
+# closed at exit 1), but any sweep that counts `^SPEC FILE VERDICT:` lines
+# instead of exit codes reads such a file as NOT YET RUN rather than BROKEN.
+# That is how 24 missing render-lane modules / 25 specs stayed invisible: the
+# per-file exit code was never what the automation looked at.
+#
+# The shape is byte-compatible with report_spec_file_verdict and with
+# timeout_verdict_line. `executed=0 dropped=1` is the load-bearing pair: it
+# distinguishes a spec that DECLARED examples but could not load (this line)
+# from a spec that honestly declares zero examples, and it keeps the file RED
+# under the existing `dropped == 0` greenwash gate in test_runner_single.spl,
+# which refuses to treat any verdict with dropped>0 as positive evidence of
+# completion. `unrun=1` and `reason=` are appended AFTER dropped= so no
+# existing parser is disturbed.
+fn unrun_verdict_line(path: text, reason: text) -> text:
+    "SPEC FILE VERDICT: {path} declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason={reason}"
+
+# Classify WHY a spec executed nothing, from the child's combined output. The
+# reason is a grep-able token on the verdict line so a sweep can separate a
+# missing module (an infrastructure gap someone must land) from a spec that
+# genuinely declares no examples (an authoring gap). Ordered most-specific
+# first; falls back to a token that never claims more than it knows.
+fn unrun_reason(output: text) -> text:
+    if output.contains("Cannot resolve module:"):
+        return "unresolved-module"
+    if output.contains("compile failed: parse:") or output.contains("error: parse") or output.contains("error: syntax") or output.contains("Unexpected token"):
+        return "parse-error"
+    if output.contains("Cannot resolve") or output.contains("unresolved symbol"):
+        return "unresolved-symbol"
+    return "zero-examples"
+
+# Did this spec fail to LOAD, as opposed to running and failing an assertion?
+# The distinction is the whole point of the unrun line: a spec that asserted
+# something and got the wrong answer is a product defect; a spec that could not
+# be loaded at all is an infrastructure gap, and it declared examples nobody
+# ever evaluated. `unrun_reason` is the single classifier — this is a named
+# predicate over it, NOT a second copy of the token list, so the two can never
+# drift apart.
+fn is_load_failure(output: text) -> bool:
+    unrun_reason(output) != "zero-examples"
+
+# Verdict line for a spec the AGGREGATING (directory) lane actually ran.
+#
+# Bug: directory_lane_emits_no_verdict_line_2026-08-10. The directory lane was
+# the missing half of 0ff267a366a: that commit taught the SINGLE-FILE lane
+# (test_runner_single.spl) to emit an unrun line, and it does — measured, one
+# verdict line, reason=unresolved-module. But `bin/simple test <dir>` never
+# routed through that branch at all. It aggregates per-file TestFileResult
+# records and prints its own `PASS`/`FAIL <path> (n passed, m failed)` summary
+# lines, so it emitted ZERO `SPEC FILE VERDICT:` lines for EVERY file in the
+# directory -- passing files included, not just the unloadable ones. A sweep
+# counting verdict lines therefore read an entire green directory as "not yet
+# run" exactly as it read a broken one. The single-file fix could never have
+# closed that, because the gap was not in the classification of a failure; it
+# was that this lane emitted no verdict lines whatsoever.
+#
+# `dropped` is 0 here: this file RAN. Skips are reported separately and must
+# not be laundered into `dropped`, which the greenwash gate reads as evidence
+# that a file did not complete.
+fn ran_verdict_line(path: text, passed: i64, failed: i64) -> text:
+    val executed = passed + failed
+    "SPEC FILE VERDICT: {path} declared>={executed} executed={executed} passed={passed} failed={failed} dropped=0"
+
+# Human-readable gloss for a process exit status seen on the test lane. Exit
+# codes here have repeatedly been misread (144 was chased as a spec defect when
+# it comes from the reporting harness), so every timeout/abort report prints
+# the number WITH this sentence. See doc/07_guide/infra/testing.md
+# "Test-lane exit codes".
+fn exit_code_reason(code: i64) -> text:
+    if code == 0:
+        return "exit 0 (clean; but with NO verdict line it means the spec RAN NOTHING)"
+    if code == 124:
+        return "exit 124 (coreutils/`timeout` wall-clock kill)"
+    if code == 143:
+        return "exit 143 (128+15, SIGTERM — usually the kill_monitor watchdog on a >=60s high-CPU run; re-run with SIMPLE_TIMEOUT_SECONDS=3600)"
+    if code == 144:
+        return "exit 144 (from the reporting harness, NOT from any spec; a `pkill -f` that matched its own wrapper produces this)"
+    if code == 255:
+        return "exit 255 (worker killed / daemon request timed out)"
+    if code == -1:
+        return "code -1 (process_run_bounded killed the child at its budget)"
+    "exit {code}"
+
+fn light_request_deadline(expiry_micros: i64, now_micros: i64) -> (bool, i64):
+    if expiry_micros == 0:
+        return (false, LIGHT_REQUEST_DEFAULT_TIMEOUT_MS)
+    if expiry_micros < 0 or expiry_micros <= now_micros:
+        return (true, 0)
+    val max_expiry_micros = now_micros + (LIGHT_REQUEST_MAX_TIMEOUT_MS * 1000)
+    if expiry_micros > max_expiry_micros:
+        return (false, LIGHT_REQUEST_MAX_TIMEOUT_MS)
+    val remaining_micros = expiry_micros - now_micros
+    (false, (remaining_micros + 999) / 1000)

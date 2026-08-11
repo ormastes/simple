@@ -1,0 +1,89 @@
+use std.spec.{describe, it, expect}
+use app.io.mod.{file_read_text}
+use os.port.qrb2210_vulkan_primitive_provider.{
+    Qrb2210VulkanPhysicalBinding,
+    Qrb2210VulkanKernelIdentity,
+    qrb2210_vulkan_binding_has_kernel_handles,
+    qrb2210_vulkan_identity_matches_binding
+}
+use os.port.qrb2210_native_2d_ports.{Qrb2210BoardDeviceHandle, QRB2210_DEVICE_GPU}
+
+val PROVIDER = "src/os/port/qrb2210_vulkan_primitive_provider.spl"
+
+fn binding(device: u64, queue: u64, fence: u64, readback: u64) -> Qrb2210VulkanPhysicalBinding:
+    Qrb2210VulkanPhysicalBinding(
+        device: Qrb2210BoardDeviceHandle(
+            board_id: "qrb2210-uno-q", boot_id: "boot-17", owner: QRB2210_DEVICE_GPU,
+            device_node: "/dev/dri/renderD128", native_handle: 10u64, driver_generation: 3),
+        firmware_handle: 101u64, mmu_context_handle: 102u64,
+        cache_domain_handle: 103u64,
+        physical_device_handle: device,
+        logical_device_handle: device + 1u64,
+        queue_handle: queue,
+        command_pool_handle: 104u64,
+        fence_handle: fence,
+        readback_handle: readback)
+
+fn identity(device: u64, queue: u64, physical: bool) -> Qrb2210VulkanKernelIdentity:
+    Qrb2210VulkanKernelIdentity(
+        board_id: "qrb2210-uno-q", boot_id: "boot-17", driver_generation: 3,
+        vendor_id: 0x5143,
+        device_name: "Adreno 702", driver_name: "simpleos-adreno-vulkan",
+        firmware_handle: 101u64, mmu_context_handle: 102u64,
+        cache_domain_handle: 103u64,
+        physical_device_handle: device,
+        logical_device_handle: device + 1u64,
+        queue_handle: queue, command_pool_handle: 104u64,
+        fence_handle: 13u64, readback_handle: 14u64,
+        physical_device: physical)
+
+describe "QRB2210 physical Vulkan primitive provider":
+    it "requires every kernel-owned Vulkan resource handle":
+        expect(qrb2210_vulkan_binding_has_kernel_handles(binding(11u64, 12u64, 13u64, 14u64))).to_be(true)
+        expect(qrb2210_vulkan_binding_has_kernel_handles(binding(0u64, 12u64, 13u64, 14u64))).to_be(false)
+        expect(qrb2210_vulkan_binding_has_kernel_handles(binding(11u64, 0u64, 13u64, 14u64))).to_be(false)
+        expect(qrb2210_vulkan_binding_has_kernel_handles(binding(11u64, 12u64, 0u64, 14u64))).to_be(false)
+        expect(qrb2210_vulkan_binding_has_kernel_handles(binding(11u64, 12u64, 13u64, 0u64))).to_be(false)
+        var missing_firmware = binding(11u64, 12u64, 13u64, 14u64)
+        missing_firmware.firmware_handle = 0u64
+        expect(qrb2210_vulkan_binding_has_kernel_handles(missing_firmware)).to_be(false)
+        var missing_mmu = binding(11u64, 12u64, 13u64, 14u64)
+        missing_mmu.mmu_context_handle = 0u64
+        expect(qrb2210_vulkan_binding_has_kernel_handles(missing_mmu)).to_be(false)
+        var missing_cache = binding(11u64, 12u64, 13u64, 14u64)
+        missing_cache.cache_domain_handle = 0u64
+        expect(qrb2210_vulkan_binding_has_kernel_handles(missing_cache)).to_be(false)
+        var missing_pool = binding(11u64, 12u64, 13u64, 14u64)
+        missing_pool.command_pool_handle = 0u64
+        expect(qrb2210_vulkan_binding_has_kernel_handles(missing_pool)).to_be(false)
+
+    it "admits only matching physical QRB2210 Qualcomm Adreno identity":
+        val resources = binding(11u64, 12u64, 13u64, 14u64)
+        expect(qrb2210_vulkan_identity_matches_binding(identity(11u64, 12u64, true), resources)).to_be(true)
+        expect(qrb2210_vulkan_identity_matches_binding(identity(11u64, 12u64, false), resources)).to_be(false)
+        expect(qrb2210_vulkan_identity_matches_binding(identity(21u64, 12u64, true), resources)).to_be(false)
+        expect(qrb2210_vulkan_identity_matches_binding(identity(11u64, 22u64, true), resources)).to_be(false)
+        var stale_boot = identity(11u64, 12u64, true)
+        stale_boot.boot_id = "boot-16"
+        expect(qrb2210_vulkan_identity_matches_binding(stale_boot, resources)).to_be(false)
+        var stale_generation = identity(11u64, 12u64, true)
+        stale_generation.driver_generation = 2
+        expect(qrb2210_vulkan_identity_matches_binding(stale_generation, resources)).to_be(false)
+
+    it "wires submit fence and device-memory readback without fallback":
+        val source = file_read_text(PROVIDER)
+        expect(source).to_contain("trait Qrb2210VulkanKernelPort:")
+        expect(source).to_contain("self.binding, batch.frame_id, batch.command_buffer_handle")
+        expect(source).to_contain("self.binding, submission_id, QRB2210_FENCE_TIMEOUT_NS")
+        expect(source).to_contain("self.binding, submission_id, frame_id, width, height")
+        expect(source).to_contain("receipt.command_buffer_handle == batch.command_buffer_handle")
+        expect(source).to_contain("receipt.driver_generation == self.binding.device.driver_generation")
+        expect(source).to_contain("receipt.readback_handle == self.binding.readback_handle")
+        expect(source).to_contain("receipt.queue_handle == self.binding.queue_handle")
+        expect(source).to_contain("receipt.fence_handle == self.binding.fence_handle")
+        expect(source).to_contain("qrb2210-vulkan-device-memory")
+        expect(source).to_contain("UNO_Q_DESKTOP_STATUS_PORT_UNAVAILABLE")
+        expect(source.contains("host_gpu")).to_be(false)
+        expect(source.contains("android")).to_be(false)
+        expect(source.contains("virtio")).to_be(false)
+        expect(source.contains("software")).to_be(false)

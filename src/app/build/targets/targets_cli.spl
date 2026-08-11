@@ -1,0 +1,70 @@
+# `simple build --target <name>` — named-target CLI surface (first slice).
+#
+# Resolution and reporting only: the resolved closure is PRINTED and the build
+# then continues exactly as before. Absent `--target`, nothing here runs and
+# behavior is byte-for-byte unchanged.
+#
+# `--target <triple>` keeps its existing platform meaning: a value that looks
+# like a platform triple (two or more '-') is passed straight through and this
+# module stays out of the way.
+
+use app.build.targets.build_targets.{TargetSet, load_targets_file, validate_targets}
+use app.build.targets.target_resolve.{resolve_target, format_target_plan}
+use std.io_runtime.{file_exists}
+
+fn looks_like_platform_triple(v: text) -> bool:
+    """`x86_64-unknown-linux-gnu` style values stay platform selectors."""
+    v.split("-").len() >= 3
+
+fn target_arg(args: [text]) -> text:
+    """The named build target from `--target <name>` / `--target=<name>`.
+
+    Returns "" when absent or when the value is a platform triple (the
+    pre-existing meaning of the flag)."""
+    var i = 0
+    while i < args.len():
+        val a = args[i]
+        var v = ""
+        if a == "--target" and i + 1 < args.len():
+            v = args[i + 1]
+        elif a.starts_with("--target="):
+            v = a[9:]
+        if v.len() > 0 and not looks_like_platform_triple(v):
+            return v
+        i = i + 1
+    ""
+
+fn targets_file_path(repo_root: text) -> text:
+    """`build.sdn` first, then `targets.sdn`; "" when neither exists."""
+    val a = repo_root + "/build.sdn"
+    if file_exists(a):
+        return a
+    val b = repo_root + "/targets.sdn"
+    if file_exists(b):
+        return b
+    ""
+
+fn run_target_plan(repo_root: text, name: text) -> i64:
+    """Resolve `name` and print `target-plan: <name>: a, b, c`.
+
+    Returns 0 when the plan was printed, nonzero (with the named error on
+    stdout) for a missing targets file, any validation error, or an unknown
+    target name. Fail-closed: no plan is ever printed for an invalid set."""
+    val path = targets_file_path(repo_root)
+    if path.len() == 0:
+        print("target-error: no build.sdn or targets.sdn declaring build targets")
+        return 2
+    val ts = load_targets_file(path, repo_root)
+    val errors = validate_targets(ts, repo_root)
+    if errors.len() > 0:
+        var i = 0
+        while i < errors.len():
+            print(errors[i])
+            i = i + 1
+        return 2
+    val plan = resolve_target(ts, name)
+    if plan.error.len() > 0:
+        print(plan.error)
+        return 2
+    print(format_target_plan(name, plan))
+    0

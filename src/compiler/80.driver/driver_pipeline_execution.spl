@@ -1,0 +1,61 @@
+# CompilerDriver JIT and SMF execution methods.
+
+use compiler.backend.codegen.{CodegenPipeline, CompiledModule}
+use compiler.common.driver_core_types.{CompileResult}
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_log_helpers.{log_debug, log_warn}
+
+impl CompilerDriver:
+    me jit_compile_and_run() -> CompileResult:
+        if not self.lower_to_mir():
+            # See driver_aot_pipeline.spl's aot_compile() for the full
+            # writeup: builtin `Array.first()` has no MIR method symbol
+            # under native codegen and lowers to a `call 0` placeholder --
+            # a genuine SIGSEGV baked into stage3's own binary, confirmed
+            # via gdb/objdump. Avoid it with a length-guarded index read.
+            val msg = if self.ctx.has_errors(): self.ctx.errors[0] else: "MIR lowering failed"
+            return CompileResult.CodegenError(msg)
+
+        if self.ctx.options.low_memory:
+            self.ctx.evict_hir()
+        if not self.borrow_check():
+            return CompileResult.BorrowError(self.ctx.errors)
+
+        val _async_state_machines = self.process_async()
+        self.optimize_mir_level(self.ctx.options.opt_level ?? 0)
+        self.weave_aop()
+        self.apply_debug_trace()
+
+        var pipeline = CodegenPipeline.jit()
+        var compiled_modules: [CompiledModule] = []
+        for name in self.ctx.mir_modules.keys():
+            match pipeline.compile_module(self.ctx.mir_modules[name]):
+                case Ok(compiled):
+                    compiled_modules.push(compiled)
+                case Err(e):
+                    return CompileResult.CodegenError(
+                        "JIT compile error in {name}: {e.message}")
+
+        if compiled_modules.len() == 0:
+            return CompileResult.RuntimeError("No modules compiled")
+
+        val compiled = compiled_modules[compiled_modules.len() - 1]
+        match compiled.call("main", []):
+            case Ok(result):
+                compiled.release_codegen_module()
+                CompileResult.Success(result)
+            case Err(e):
+                compiled.release_codegen_module()
+                CompileResult.RuntimeError(e.message)
+
+    me execute_smf() -> CompileResult:
+        val smf_path = self.ctx.options.input_files[0]
+        log_debug("execute_smf: loading {smf_path}")
+
+        var pipeline = CodegenPipeline.jit()
+        match pipeline.load_smf_and_execute(smf_path):
+            case Ok(result):
+                CompileResult.Success(result)
+            case Err(e):
+                log_warn("SMF exec failed: {e}, falling back")
+                CompileResult.RuntimeError("SMF execution failed: {e}")

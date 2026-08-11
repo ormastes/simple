@@ -1,0 +1,266 @@
+# codex-impl
+# Physical QRB2210 DRM/KMS display and capture provider.
+#
+# This adapter consumes receipts from a SimpleOS kernel DRM/KMS owner. It does
+# not open a hosted device node, synthesize a page flip, or promote the
+# canonical UNO Q capability table.
+
+use os.port.uno_q_desktop_contract.{
+    UNO_Q_DESKTOP_STATUS_OK,
+    UNO_Q_DESKTOP_STATUS_PORT_UNAVAILABLE
+}
+use os.port.qrb2210_native_2d_ports.{
+    Qrb2210BoardDeviceHandle,
+    Qrb2210DisplayMode,
+    Qrb2210DisplayPresentReceipt,
+    Qrb2210DisplayCaptureReceipt,
+    Qrb2210DisplayPort,
+    Qrb2210DeviceReadbackReceipt,
+    QRB2210_DEVICE_DISPLAY,
+    qrb2210_board_device_handle_ready
+}
+
+val QRB2210_DRM_FORMAT_XRGB8888: text = "xrgb8888"
+val QRB2210_DRM_CAPTURE_SOURCE: text = "qrb2210-drm-kms-scanout"
+val QRB2210_DRM_PRIMARY_DEVICE_NODE: text = "/dev/dri/card0"
+
+class Qrb2210DrmKmsPhysicalBinding:
+    device: Qrb2210BoardDeviceHandle
+    kernel_owner_handle: u64
+    connector_id: u64
+    crtc_id: u64
+    plane_id: u64
+    framebuffer_handle: u64
+    mode: Qrb2210DisplayMode
+
+class Qrb2210DrmKmsKernelIdentity:
+    device: Qrb2210BoardDeviceHandle
+    kernel_owner_handle: u64
+    connector_id: u64
+    crtc_id: u64
+    plane_id: u64
+    framebuffer_handle: u64
+    driver_generation: i64
+    physical_device: bool
+
+class Qrb2210DrmKmsKernelPresentReceipt:
+    device: Qrb2210BoardDeviceHandle
+    kernel_owner_handle: u64
+    connector_id: u64
+    crtc_id: u64
+    plane_id: u64
+    framebuffer_handle: u64
+    driver_generation: i64
+    submission_id: i64
+    frame_id: i64
+    present_id: i64
+    readback_checksum: i64
+    presented: bool
+
+class Qrb2210DrmKmsKernelCaptureReceipt:
+    device: Qrb2210BoardDeviceHandle
+    kernel_owner_handle: u64
+    connector_id: u64
+    crtc_id: u64
+    plane_id: u64
+    framebuffer_handle: u64
+    driver_generation: i64
+    frame_id: i64
+    present_id: i64
+    capture_id: i64
+    width: i32
+    height: i32
+    byte_count: i64
+    readback_checksum: i64
+    source: text
+    completed: bool
+
+trait Qrb2210DrmKmsKernelPort:
+    fn readiness_status() -> i64
+    fn physical_identity(binding: Qrb2210DrmKmsPhysicalBinding) -> Qrb2210DrmKmsKernelIdentity
+    me atomic_present(
+        binding: Qrb2210DrmKmsPhysicalBinding,
+        readback: Qrb2210DeviceReadbackReceipt
+    ) -> Qrb2210DrmKmsKernelPresentReceipt
+    me capture_scanout(
+        binding: Qrb2210DrmKmsPhysicalBinding,
+        present: Qrb2210DrmKmsKernelPresentReceipt
+    ) -> Qrb2210DrmKmsKernelCaptureReceipt
+
+fn _qrb2210_drm_same_device(
+    left: Qrb2210BoardDeviceHandle,
+    right: Qrb2210BoardDeviceHandle
+) -> bool:
+    left.board_id == right.board_id and left.boot_id == right.boot_id and
+        left.owner == right.owner and left.device_node == right.device_node and
+        left.native_handle == right.native_handle and
+        left.driver_generation == right.driver_generation
+
+fn qrb2210_drm_kms_binding_ready(binding: Qrb2210DrmKmsPhysicalBinding) -> bool:
+    qrb2210_board_device_handle_ready(binding.device, QRB2210_DEVICE_DISPLAY) and
+        binding.device.device_node == QRB2210_DRM_PRIMARY_DEVICE_NODE and
+        binding.kernel_owner_handle > 0u64 and binding.connector_id > 0u64 and
+        binding.crtc_id > 0u64 and binding.plane_id > 0u64 and
+        binding.framebuffer_handle > 0u64 and binding.mode.width > 0 and
+        binding.mode.height > 0 and
+        binding.mode.stride_bytes >= binding.mode.width.to_i64() * 4 and
+        binding.mode.format == QRB2210_DRM_FORMAT_XRGB8888
+
+fn qrb2210_drm_kms_identity_matches_binding(
+    identity: Qrb2210DrmKmsKernelIdentity,
+    binding: Qrb2210DrmKmsPhysicalBinding
+) -> bool:
+    qrb2210_drm_kms_binding_ready(binding) and identity.physical_device and
+        _qrb2210_drm_same_device(identity.device, binding.device) and
+        identity.kernel_owner_handle == binding.kernel_owner_handle and
+        identity.connector_id == binding.connector_id and
+        identity.crtc_id == binding.crtc_id and identity.plane_id == binding.plane_id and
+        identity.framebuffer_handle == binding.framebuffer_handle and
+        identity.driver_generation == binding.device.driver_generation
+
+fn qrb2210_drm_kms_present_correlates(
+    binding: Qrb2210DrmKmsPhysicalBinding,
+    readback: Qrb2210DeviceReadbackReceipt,
+    receipt: Qrb2210DrmKmsKernelPresentReceipt
+) -> bool:
+    qrb2210_drm_kms_binding_ready(binding) and
+        _qrb2210_drm_same_device(receipt.device, binding.device) and
+        receipt.kernel_owner_handle == binding.kernel_owner_handle and
+        receipt.connector_id == binding.connector_id and receipt.crtc_id == binding.crtc_id and
+        receipt.plane_id == binding.plane_id and
+        receipt.framebuffer_handle == binding.framebuffer_handle and
+        receipt.driver_generation == binding.device.driver_generation and
+        receipt.presented and readback.submission_id > 0 and readback.frame_id > 0 and
+        readback.width == binding.mode.width and readback.height == binding.mode.height and
+        readback.pixels.len().to_i64() == readback.width.to_i64() * readback.height.to_i64() and
+        readback.checksum > 0 and readback.source == "qrb2210-vulkan-device-memory" and
+        receipt.submission_id == readback.submission_id and receipt.frame_id == readback.frame_id and
+        receipt.present_id > 0 and receipt.readback_checksum == readback.checksum
+
+fn qrb2210_drm_kms_capture_correlates(
+    binding: Qrb2210DrmKmsPhysicalBinding,
+    present: Qrb2210DrmKmsKernelPresentReceipt,
+    capture: Qrb2210DrmKmsKernelCaptureReceipt
+) -> bool:
+    qrb2210_drm_kms_binding_ready(binding) and present.presented and
+        _qrb2210_drm_same_device(present.device, binding.device) and
+        _qrb2210_drm_same_device(capture.device, binding.device) and
+        present.kernel_owner_handle == binding.kernel_owner_handle and
+        capture.kernel_owner_handle == binding.kernel_owner_handle and
+        present.connector_id == binding.connector_id and capture.connector_id == binding.connector_id and
+        present.crtc_id == binding.crtc_id and capture.crtc_id == binding.crtc_id and
+        present.plane_id == binding.plane_id and capture.plane_id == binding.plane_id and
+        present.framebuffer_handle == binding.framebuffer_handle and
+        capture.framebuffer_handle == binding.framebuffer_handle and
+        present.driver_generation == binding.device.driver_generation and
+        capture.driver_generation == binding.device.driver_generation and
+        capture.completed and present.frame_id > 0 and capture.frame_id == present.frame_id and
+        present.present_id > 0 and capture.present_id == present.present_id and
+        capture.capture_id > 0 and capture.width == binding.mode.width and
+        capture.height == binding.mode.height and
+        capture.byte_count > 0 and capture.byte_count % 4 == 0 and
+        capture.byte_count / 4 == capture.width.to_i64() * capture.height.to_i64() and
+        present.readback_checksum > 0 and capture.readback_checksum == present.readback_checksum and
+        capture.source == QRB2210_DRM_CAPTURE_SOURCE
+
+fn qrb2210_drm_kms_present_advances(
+    receipt: Qrb2210DrmKmsKernelPresentReceipt,
+    last_submission_id: i64,
+    last_frame_id: i64,
+    last_present_id: i64
+) -> bool:
+    receipt.submission_id > last_submission_id and
+        receipt.frame_id > last_frame_id and receipt.present_id > last_present_id
+
+fn _qrb2210_drm_kms_provider_ready(
+    kernel: Qrb2210DrmKmsKernelPort,
+    binding: Qrb2210DrmKmsPhysicalBinding
+) -> bool:
+    kernel.readiness_status() == UNO_Q_DESKTOP_STATUS_OK and
+        qrb2210_drm_kms_identity_matches_binding(kernel.physical_identity(binding), binding)
+
+fn _qrb2210_failed_present(
+    device: Qrb2210BoardDeviceHandle,
+    frame_id: i64
+) -> Qrb2210DisplayPresentReceipt:
+    Qrb2210DisplayPresentReceipt(
+        device: device, frame_id: frame_id, present_id: 0,
+        readback_checksum: 0, presented: false)
+
+fn _qrb2210_failed_capture(
+    device: Qrb2210BoardDeviceHandle,
+    frame_id: i64,
+    present_id: i64
+) -> Qrb2210DisplayCaptureReceipt:
+    Qrb2210DisplayCaptureReceipt(
+        device: device, frame_id: frame_id, present_id: present_id, capture_id: 0,
+        width: 0, height: 0, byte_count: 0, readback_checksum: 0, completed: false)
+
+class Qrb2210DrmKmsDisplayProvider:
+    kernel: Qrb2210DrmKmsKernelPort
+    binding: Qrb2210DrmKmsPhysicalBinding
+    last_present: Qrb2210DrmKmsKernelPresentReceipt?
+    last_submission_id: i64
+    last_frame_id: i64
+    last_present_id: i64
+    last_capture_id: i64
+
+impl Qrb2210DisplayPort for Qrb2210DrmKmsDisplayProvider:
+    fn readiness_status() -> i64:
+        if _qrb2210_drm_kms_provider_ready(self.kernel, self.binding):
+            return UNO_Q_DESKTOP_STATUS_OK
+        UNO_Q_DESKTOP_STATUS_PORT_UNAVAILABLE
+
+    fn device_handle() -> Qrb2210BoardDeviceHandle:
+        self.binding.device
+
+    fn mode() -> Qrb2210DisplayMode:
+        self.binding.mode
+
+    me present_device_readback(readback: Qrb2210DeviceReadbackReceipt) -> Qrb2210DisplayPresentReceipt:
+        self.last_present = nil
+        if not _qrb2210_drm_kms_provider_ready(self.kernel, self.binding):
+            return _qrb2210_failed_present(self.binding.device, readback.frame_id)
+        val receipt = self.kernel.atomic_present(self.binding, readback)
+        if (not qrb2210_drm_kms_present_correlates(self.binding, readback, receipt) or
+            not qrb2210_drm_kms_present_advances(
+                receipt, self.last_submission_id, self.last_frame_id,
+                self.last_present_id)):
+            return _qrb2210_failed_present(self.binding.device, readback.frame_id)
+        self.last_submission_id = receipt.submission_id
+        self.last_frame_id = receipt.frame_id
+        self.last_present_id = receipt.present_id
+        self.last_present = receipt
+        Qrb2210DisplayPresentReceipt(
+            device: self.binding.device, frame_id: receipt.frame_id,
+            present_id: receipt.present_id, readback_checksum: receipt.readback_checksum,
+            presented: true)
+
+    me capture_present(present_id: i64, frame_id: i64) -> Qrb2210DisplayCaptureReceipt:
+        if (not _qrb2210_drm_kms_provider_ready(self.kernel, self.binding) or
+            present_id <= 0 or frame_id <= 0):
+            return _qrb2210_failed_capture(self.binding.device, frame_id, present_id)
+        if val present = self.last_present:
+            if present.present_id != present_id or present.frame_id != frame_id:
+                return _qrb2210_failed_capture(self.binding.device, frame_id, present_id)
+            self.last_present = nil
+            val capture = self.kernel.capture_scanout(self.binding, present)
+            if (capture.capture_id <= self.last_capture_id or
+                not qrb2210_drm_kms_capture_correlates(self.binding, present, capture)):
+                return _qrb2210_failed_capture(self.binding.device, frame_id, present_id)
+            self.last_capture_id = capture.capture_id
+            return Qrb2210DisplayCaptureReceipt(
+                device: self.binding.device, frame_id: capture.frame_id,
+                present_id: capture.present_id, capture_id: capture.capture_id,
+                width: capture.width, height: capture.height, byte_count: capture.byte_count,
+                readback_checksum: capture.readback_checksum, completed: true)
+        _qrb2210_failed_capture(self.binding.device, frame_id, present_id)
+
+export QRB2210_DRM_FORMAT_XRGB8888, QRB2210_DRM_CAPTURE_SOURCE
+export QRB2210_DRM_PRIMARY_DEVICE_NODE
+export Qrb2210DrmKmsPhysicalBinding, Qrb2210DrmKmsKernelIdentity
+export Qrb2210DrmKmsKernelPresentReceipt, Qrb2210DrmKmsKernelCaptureReceipt
+export Qrb2210DrmKmsKernelPort, Qrb2210DrmKmsDisplayProvider
+export qrb2210_drm_kms_binding_ready, qrb2210_drm_kms_identity_matches_binding
+export qrb2210_drm_kms_present_correlates, qrb2210_drm_kms_capture_correlates
+export qrb2210_drm_kms_present_advances

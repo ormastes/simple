@@ -1,0 +1,109 @@
+"""Static contract for the one-guest ARM64 Vulkan/input/audio adapter."""
+
+use std.spec.*
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use std.io_runtime.{process_run}
+
+val WRAPPER = "scripts/check/check-simpleos-arm64-unified-live.shs"
+val ENTRY = "examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop_linux_qemu_unified.spl"
+val EXECUTOR = "src/os/compositor/engine2d_wm_frame_executor.spl"
+val VALIDATOR = "scripts/check/validate-simpleos-arm64-unified-live-receipt.spl"
+val INPUT_INJECTOR = "scripts/check/qmp-send-virtio-input.py"
+val PROTOCOL = "src/lib/common/gpu/simpleos_host_gpu_protocol.spl"
+val BRIDGE = "src/os/lib/gpu_bridge/host_gpu_ivshmem.spl"
+val HOST = "src/app/simpleos_gpu_host/daemon_runner.spl"
+val CPU_ORACLE_FIXTURE = "test/01_unit/os/compositor/simpleos_qemu_drawir_cpu_oracle_fixture_spec.spl"
+
+describe "ARM64 unified SimpleOS primitive adapter":
+    it "launches all primitive devices in one QEMU process":
+        val source = file_read(WRAPPER)
+        expect(source).to_contain("guest_process_count=1")
+        expect(source).to_contain("-device ivshmem-plain,memdev=hostgpu")
+        expect(source).to_contain("-device virtio-keyboard-device")
+        expect(source).to_contain("-device virtio-mouse-device")
+        expect(source).to_contain("-device virtio-sound-device,audiodev=audio0")
+        expect(source).to_contain("--processing-backend=vulkan")
+        expect(source).to_contain("-device virtio-blk-device,drive=fontdisk")
+        expect(source).to_contain("readonly=on")
+        expect(source).to_contain("disk_sha256=")
+
+    it "uses the canonical audio probe before the canonical desktop":
+        val source = file_read(ENTRY)
+        val audio = source.index_of("simpleos_virtio_snd_probe(\"aarch64\"")
+        val desktop = source.index_of("gui_entry_desktop_start(0u64")
+        expect(audio >= 0).to_be(true)
+        expect(desktop > audio).to_be(true)
+        expect(source).to_contain("SIMPLEOS_UNIFIED_PRIMITIVE_FAIL reason=audio")
+
+    it "injects modifier, click, drag, and wheel primitives":
+        val source = file_read(INPUT_INJECTOR)
+        expect(source).to_contain('"data": "ctrl"')
+        expect(source).to_contain('"data": "ctrl_r"')
+        expect(source).to_contain('"data": "alt"')
+        expect(source).to_contain('"data": "alt_r"')
+        expect(source).to_contain('"button": "left"')
+        expect(source).to_contain('"button": "wheel-up"')
+        expect(source).to_contain('"axis": "x", "value": 11')
+
+        val wrapper = file_read(WRAPPER)
+        expect(wrapper).to_contain("sequence=pointer_move,pointer_down,pointer_drag,pointer_up,pointer_wheel,left_ctrl_down,left_ctrl_up,right_ctrl_down,right_ctrl_up,left_alt_down,left_alt_up,right_alt_down,right_alt_up delivered=true")
+
+    it "exposes device identity only after strict DrawIR receipt validation":
+        val source = file_read(EXECUTOR)
+        val validation = source.index_of("host_gpu_ivshmem_device_receipt_valid")
+        val evidence = source.index_of("host-gpu-device-evidence")
+        expect(validation >= 0).to_be(true)
+        expect(evidence > validation).to_be(true)
+        expect(source).to_contain("readback=device")
+        expect(source).to_contain("identity={" + "receipt.device_identity}")
+        expect(source).to_contain("submit_id={" + "receipt.submit_id}")
+        expect(source).to_contain("fence_completed={" + "receipt.fence_signaled}")
+        expect(source).to_contain("device_frame_id={" + "receipt.device_frame_id}")
+
+    it "carries submit, fence completion, and device frame identity on the wire":
+        val protocol = file_read(PROTOCOL)
+        val bridge = file_read(BRIDGE)
+        val host = file_read(HOST)
+        expect(protocol).to_contain("SIMPLEOS_HOST_GPU_WIRE_COMPLETION_FENCE_SIGNALED")
+        expect(protocol).to_contain("simpleos_host_gpu_submission_correlation_valid")
+        expect(bridge).to_contain("receipt.submit_id == expected_generation")
+        expect(bridge).to_contain("receipt.device_frame_id == expected_frame_id")
+        expect(host).to_contain("fence_completed=true")
+
+    it "enforces the primitive performance and memory budgets":
+        val source = file_read(WRAPPER)
+        expect(source).to_contain("test \"$p95_us\" -le 16700")
+        expect(source).to_contain("test \"$max_rss_kib\" -le \"$showcase_combined_rss_budget_kib\"")
+        expect(source).to_contain("SIMPLEOS_ARM64_COMBINED_RSS_BUDGET_KIB:-1048576")
+        expect(source).to_contain("showcase-submit-fence-device-frame-correlation")
+
+    it "freezes the animated guest before correlating the PPM frame":
+        val source = file_read(INPUT_INJECTOR)
+        val stop = source.index_of("execute(sock, \"stop\")")
+        val dump = source.index_of("execute(sock, \"screendump\"")
+        expect(stop).to_be_greater_than(0)
+        expect(dump).to_be_greater_than(stop)
+
+    it "versions the extended submit and completion wire ABI":
+        val source = file_read(PROTOCOL)
+        expect(source).to_contain("SIMPLEOS_HOST_GPU_PROTOCOL_VERSION: i64 = 2")
+        expect(source).to_contain("SIMPLEOS_HOST_GPU_WIRE_DEVICE_FRAME_ID: i64 = 336")
+
+    it "keeps an exact primitive pixel fixture against the canonical CPU oracle":
+        val source = file_read(CPU_ORACLE_FIXTURE)
+        expect(source).to_contain("oracle_src_over")
+        expect(source).to_contain("expect(core.buf[5]).to_equal(expected)")
+        expect(source).to_contain("expect(core.buf[0]).to_equal(0xFF102030u32)")
+
+    it "delegates final promotion to both environment profile admissions":
+        val source = file_read(VALIDATOR)
+        expect(source).to_contain("validate_arm64_simpleos_qemu_primitives")
+        expect(source).to_contain("validate_ui_environment_evidence")
+        expect(source).to_contain("UiEnvironmentEvidenceClass.LiveGuest")
+        expect(source).to_contain("primitive.status == UiEnvironmentAdmissionStatus.Pass")
+        expect(source).to_contain("combined.status == UiEnvironmentAdmissionStatus.Pass")
+
+    it "passes its no-QEMU launcher self test":
+        val result = process_run("/bin/sh", [WRAPPER, "--self-test"])
+        expect(result.2).to_equal(0)
+        expect(result.0).to_contain("simpleos_arm64_unified_live_self_test=pass")

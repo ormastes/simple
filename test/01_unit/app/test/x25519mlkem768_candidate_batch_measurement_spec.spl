@@ -1,0 +1,232 @@
+# @tag: unit, crypto, x25519mlkem768, performance, measurement
+# @req NFR-009 NFR-010 NFR-017
+
+use std.spec.{describe, it, expect, step}
+use std.sffi.io.{file_read_text}
+use lib.common.crypto.x25519_mlkem768.contract.{
+    X25519MlKem768Backend, X25519MlKem768SelectionMode,
+    X25519MlKem768VerificationPolicy, X25519MlKem768Config,
+    X25519MlKem768SimdAdmission}
+use lib.common.crypto.x25519_mlkem768.evidence_contract.{
+    X25519MlKem768EvidenceBackend}
+use lib.common.crypto.x25519_mlkem768.measurement_qualification.{
+    X25519MlKem768MeasurementQualification,
+    x25519_mlkem768_qualified_simd_measurement_reason}
+use app.test.x25519mlkem768_candidate_batch_measurement.{
+    x25519_mlkem768_paired_elapsed_ns,
+    x25519_mlkem768_measure_simd_paired_timing}
+use test.helpers.x25519mlkem768_performance_fixture.{
+    x25519_mlkem768_synthetic_measurement_qualification}
+
+fn _measurement_qualification(
+        ) -> X25519MlKem768MeasurementQualification:
+    x25519_mlkem768_synthetic_measurement_qualification(
+        X25519MlKem768EvidenceBackend.Avx2)
+
+fn _measurement_config(
+        qualification: X25519MlKem768MeasurementQualification
+        ) -> X25519MlKem768Config:
+    X25519MlKem768Config(
+        implementation_version: qualification.implementation_version,
+        profile_version: qualification.profile_version,
+        requested_backend: X25519MlKem768Backend.Avx2,
+        selection_mode: X25519MlKem768SelectionMode.Require,
+        verification_policy: X25519MlKem768VerificationPolicy.AbsoluteAndScalar,
+        minimum_batch: 1, batch_size: qualification.batch_size)
+
+fn _measurement_admission(
+        qualification: X25519MlKem768MeasurementQualification
+        ) -> X25519MlKem768SimdAdmission:
+    X25519MlKem768SimdAdmission(
+        encoded_provenance: "synthetic-unit-fixture",
+        actual_binary_sha256: qualification.target.backend_artifact_sha256,
+        actual_provenance_sha256: "a" * 64)
+
+describe "X25519MLKEM768 qualified SIMD batch measurement":
+    it "rejects unavailable or non-increasing monotonic timing bounds":
+        expect(x25519_mlkem768_paired_elapsed_ns(0, 1).unwrap_err()).to_equal(
+            "X25519MLKEM768 paired monotonic timing unavailable")
+        expect(x25519_mlkem768_paired_elapsed_ns(-1, 1).unwrap_err()).to_equal(
+            "X25519MLKEM768 paired monotonic timing unavailable")
+        expect(x25519_mlkem768_paired_elapsed_ns(7, 7).unwrap_err()).to_equal(
+            "X25519MLKEM768 paired monotonic timing unavailable")
+        expect(x25519_mlkem768_paired_elapsed_ns(8, 7).unwrap_err()).to_equal(
+            "X25519MLKEM768 paired monotonic timing unavailable")
+
+    it "returns the exact positive monotonic timing delta":
+        expect(x25519_mlkem768_paired_elapsed_ns(7, 19).unwrap()).to_equal(12)
+
+    it "keeps ABBA collection secret-safe and platform-observation owned":
+        val source = file_read_text(
+            "src/app/test/x25519mlkem768_candidate_batch_measurement.spl")
+        val owner_source = file_read_text(
+            "src/os/crypto/x25519_mlkem768/hybrid.spl")
+        expect(source).to_contain("X25519MlKem768PairedTimingResult")
+        expect(source).to_contain("x25519_mlkem768_admit_paired_schedule")
+        expect(source).to_contain("if index % 2 == 0:")
+        expect(source).to_contain(
+            "x25519_mlkem768_paired_exchange_observation(")
+        expect(source).to_contain("_copy_bytes(client_private)")
+        expect(source).to_contain("_copy_bytes(server_private)")
+        expect(source).to_contain("_copy_list(d)")
+        expect(source).to_contain("_copy_list(z)")
+        expect(source).to_contain("_copy_list(m)")
+        expect(source).to_contain(
+            "defer x25519_mlkem768_wipe_owned(oracle.shared_secret)")
+        expect(source).to_contain(
+            "qualification.platform_observation")
+        expect(source.contains("/proc/self/status")).to_be(false)
+        expect(source.contains("shared_secret_digest")).to_be(false)
+        expect(owner_source).to_contain(
+            "struct X25519MlKem768PairedExchangeObservation:")
+        expect(owner_source).to_contain(
+            "_x25519_mlkem768_keygen_simd_candidate(")
+        expect(owner_source).to_contain(
+            "selected_config, admission, client_private, d, z, false)?")
+        expect(owner_source).to_contain(
+            "_hybrid_lists_equal(scalar.shared_secret, candidate.shared_secret)")
+        expect(owner_source).to_contain(
+            "export x25519_mlkem768_paired_exchange_observation")
+
+    it "binds the refreshed qualification before any measured operation":
+        val source = file_read_text(
+            "src/app/test/x25519mlkem768_candidate_batch_measurement.spl")
+        val refresh_at = source.index_of(
+            "val refreshed_observation =")
+        val session_at = source.index_of(
+            "final_qualification.target.session_id =")
+        val oracle_at = source.index_of("val oracle = _qualify_oracle(")
+        val samples_at = source.index_of("val samples = _collect_paired_samples(")
+        expect(refresh_at).to_be_greater_than(-1)
+        expect(session_at).to_be_greater_than(refresh_at)
+        expect(oracle_at).to_be_greater_than(session_at)
+        expect(samples_at).to_be_greater_than(oracle_at)
+        expect(source).to_contain(
+            "_collect_paired_samples(\n        final_qualification")
+
+    it "freezes the finalized session across oracle, receipts, and schedule":
+        # Regression for a provenance error where a post-run RSS refresh could
+        # mint a new session identity after the timed samples had completed.
+        val source = file_read_text(
+            "src/app/test/x25519mlkem768_candidate_batch_measurement.spl")
+        val final_reason_at = source.index_of(
+            "val final_qualification_reason =")
+        val oracle_at = source.index_of("val oracle = _qualify_oracle(")
+        val samples_at = source.index_of("val samples = _collect_paired_samples(")
+        val session_assignment_at = source.index_of(
+            "final_qualification.target.session_id =")
+        val after_session_assignment = source.substring(
+            session_assignment_at + 1, source.len())
+        val after_samples = source.substring(samples_at, source.len())
+        val second_session_assignment_at = after_session_assignment.index_of(
+            "final_qualification.target.session_id =")
+        val post_sample_refresh_at = after_samples.index_of(
+            "platform_measurement_refresh_process_rss(")
+        expect(final_reason_at).to_be_greater_than(session_assignment_at)
+        expect(oracle_at).to_be_greater_than(final_reason_at)
+        expect(samples_at).to_be_greater_than(oracle_at)
+        expect(second_session_assignment_at).to_equal(-1)
+        expect(post_sample_refresh_at).to_equal(-1)
+        expect(source).to_contain(
+            "session_id: warm.session_id, monotonic_clock_id: warm.monotonic_clock_id")
+        expect(source).to_contain(
+            "session_id: final_qualification.target.session_id,")
+        expect(source).to_contain(
+            "val max_rss_kb = refreshed_observation.peak_memory_kib")
+
+    it "accepts only exact qualification config and SIMD artifact binding":
+        val qualification = _measurement_qualification()
+        val config = _measurement_config(qualification)
+        val admission = _measurement_admission(qualification)
+        expect(x25519_mlkem768_qualified_simd_measurement_reason(
+            qualification, config, admission)).to_equal("")
+        var wrong_config = config
+        wrong_config.selection_mode = X25519MlKem768SelectionMode.Suggest
+        expect(x25519_mlkem768_qualified_simd_measurement_reason(
+            qualification, wrong_config, admission)).to_equal(
+            "measurement-qualification-config-mismatch")
+        var wrong_admission = admission
+        wrong_admission.actual_binary_sha256 = "8" * 64
+        expect(x25519_mlkem768_qualified_simd_measurement_reason(
+            qualification, config, wrong_admission)).to_equal(
+            "measurement-qualification-simd-admission-mismatch")
+
+    it "rejects a mutated qualification before input validation or dispatch":
+        step("Invalidate the retained matrix row-set binding")
+        var qualification = _measurement_qualification()
+        val config = _measurement_config(qualification)
+        val admission = _measurement_admission(qualification)
+        qualification.target.matrix_row_set_sha256 = "7" * 64
+        val empty_bytes: [u8] = []
+        val empty_list: list = []
+        val result = x25519_mlkem768_measure_simd_paired_timing(
+            qualification, config, admission,
+            empty_bytes, empty_list, empty_list,
+            empty_bytes, empty_list, 30)
+        expect(result.unwrap_err()).to_equal(
+            "X25519MLKEM768 measurement qualification is invalid")
+
+    it "routes each timed ABBA ordinal through one same-owner observation":
+        val source = file_read_text(
+            "src/app/test/x25519mlkem768_candidate_batch_measurement.spl")
+        expect(source).to_contain(
+            "val paired = x25519_mlkem768_paired_exchange_observation(")
+        expect(source).to_contain(
+            "val candidate_first = if index % 2 == 0: false else: true")
+        expect(source).to_contain(
+            "if not _paired_observation_valid(qualification, oracle, paired):")
+        expect(source.contains(
+            "trusted same-owner SIMD timing unavailable")).to_be(false)
+
+    it "enforces at least thirty timed samples before cryptographic work":
+        val qualification = _measurement_qualification()
+        val config = _measurement_config(qualification)
+        val admission = _measurement_admission(qualification)
+        val empty_bytes: [u8] = []
+        val empty_list: list = []
+        val result = x25519_mlkem768_measure_simd_paired_timing(
+            qualification, config, admission,
+            empty_bytes, empty_list, empty_list,
+            empty_bytes, empty_list, 29)
+        expect(result.unwrap_err()).to_equal(
+            "X25519MLKEM768 paired sample count must be even in 30..1024")
+
+    it "rejects an odd ABBA pair count before cryptographic work":
+        val qualification = _measurement_qualification()
+        val config = _measurement_config(qualification)
+        val admission = _measurement_admission(qualification)
+        val empty_bytes: [u8] = []
+        val empty_list: list = []
+        val result = x25519_mlkem768_measure_simd_paired_timing(
+            qualification, config, admission,
+            empty_bytes, empty_list, empty_list,
+            empty_bytes, empty_list, 31)
+        expect(result.unwrap_err()).to_equal(
+            "X25519MLKEM768 paired sample count must be even in 30..1024")
+
+    it "rejects a malformed qualification before the sample-count branch":
+        var qualification = _measurement_qualification()
+        val config = _measurement_config(qualification)
+        val admission = _measurement_admission(qualification)
+        qualification.qualification_sha256 = "A" * 64
+        val empty_bytes: [u8] = []
+        val empty_list: list = []
+        val result = x25519_mlkem768_measure_simd_paired_timing(
+            qualification, config, admission,
+            empty_bytes, empty_list, empty_list,
+            empty_bytes, empty_list, 29)
+        expect(result.unwrap_err()).to_equal(
+            "X25519MLKEM768 measurement qualification is invalid")
+
+    it "enforces at most 1024 samples before cryptographic work":
+        val qualification = _measurement_qualification()
+        val config = _measurement_config(qualification)
+        val admission = _measurement_admission(qualification)
+        val empty_bytes: [u8] = []
+        val empty_list: list = []
+        val result = x25519_mlkem768_measure_simd_paired_timing(
+            qualification, config, admission,
+            empty_bytes, empty_list, empty_list,
+            empty_bytes, empty_list, 1025)
+        expect(result.unwrap_err()).to_equal(
+            "X25519MLKEM768 paired sample count must be even in 30..1024")

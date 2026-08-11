@@ -1,0 +1,826 @@
+# Pure-Simple X25519MLKEM768 measured branch-coverage receipt composer.
+#
+# This consumer never runs tests and never infers measurement from authored
+# specs.  It accepts only a provenance-bound native coverage run, recomputes
+# all declared owner totals, requires every critical outcome, and writes a
+# validator-compatible receipt plus immutable supporting inventories.
+
+use std.cli.cli_util.{get_cli_args}
+use app.io.mod.{
+    dir_create_all, file_atomic_write, file_exists, file_hash_sha256,
+    file_is_regular_no_follow, file_read}
+use lib.common.crypto.x25519_mlkem768.contract.{
+    X25519_MLKEM768_IMPLEMENTATION_VERSION,
+    X25519_MLKEM768_PROFILE_VERSION}
+use std.test_runner.test_runner_coverage.{
+    CoverageOwnerOutcomeSummary, check_critical_branch_outcomes,
+    coverage_owner_outcome_summary, record_coverage_sdn,
+    reset_coverage_state}
+use common.provenance.stage4_compiler_provenance.{
+    stage4_compiler_provenance_from_text, stage4_compiler_provenance_reason}
+use app.test.x25519mlkem768_coverage_contract.{
+    X25519_MLKEM768_COVERAGE_SCHEMA,
+    X25519_MLKEM768_RUN_MANIFEST_SCHEMA,
+    X25519_MLKEM768_COVERAGE_TARGET_BP,
+    X25519_MLKEM768_COVERAGE_OWNER_COUNT,
+    X25519_MLKEM768_COVERAGE_SPEC_COUNT,
+    X25519_MLKEM768_CRITICAL_OUTCOME_COUNT,
+    X25519_MLKEM768_CRITICAL_SYMBOLIC_PATH,
+    X25519_MLKEM768_CRITICAL_SYMBOLIC_SHA256,
+    X25519_MLKEM768_COVERAGE_COMPOSER_PATH,
+    X25519_MLKEM768_COVERAGE_CONTRACT_PATH,
+    X25519MlKem768CoverageReceiptCli,
+    X25519MlKem768CoverageRunManifest,
+    X25519MlKem768CoverageReceipt,
+    X25519MlKem768CoverageReceiptArtifacts,
+    X25519MlKem768CoverageComposeError,
+    x25519_mlkem768_coverage_error,
+    x25519_mlkem768_coverage_owner_ids,
+    x25519_mlkem768_coverage_owner_paths,
+    x25519_mlkem768_coverage_spec_paths}
+
+fn _coverage_error(code: text, subject: text = "") -> X25519MlKem768CoverageComposeError:
+    x25519_mlkem768_coverage_error(code, subject)
+
+fn _coverage_owner_ids() -> [text]: x25519_mlkem768_coverage_owner_ids()
+fn _coverage_owner_paths() -> [text]: x25519_mlkem768_coverage_owner_paths()
+fn _coverage_spec_paths() -> [text]: x25519_mlkem768_coverage_spec_paths()
+
+fn _coverage_path_safe(path: text) -> bool:
+    if path == "" or path.starts_with("/") or path.starts_with("\\"):
+        return false
+    if path.len() >= 2 and path[1:2] == ":":
+        return false
+    if path == "." or path == ".." or path.starts_with("./") or
+            path.starts_with("../") or path.contains("/./") or
+            path.ends_with("/.") or path.contains("/../") or
+            path.ends_with("/..") or path.contains("//") or
+            path.contains("\\"):
+        return false
+    true
+
+fn _coverage_hex64(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    var index: i64 = 0
+    while index < value.len():
+        val digit = value[index:index + 1]
+        if not ((digit >= "0" and digit <= "9") or
+                (digit >= "a" and digit <= "f")):
+            return false
+        index = index + 1
+    true
+
+fn _coverage_tool_provenance_valid(
+        receipt: X25519MlKem768CoverageReceipt) -> bool:
+    if (not _coverage_hex64(receipt.composer_source_sha256) or
+            not _coverage_hex64(receipt.contract_source_sha256)):
+        return false
+    if (not file_is_regular_no_follow(
+            X25519_MLKEM768_COVERAGE_COMPOSER_PATH) or
+            not file_is_regular_no_follow(
+                X25519_MLKEM768_COVERAGE_CONTRACT_PATH)):
+        return false
+    (file_hash_sha256(X25519_MLKEM768_COVERAGE_COMPOSER_PATH) ==
+        receipt.composer_source_sha256 and
+        file_hash_sha256(X25519_MLKEM768_COVERAGE_CONTRACT_PATH) ==
+        receipt.contract_source_sha256)
+
+fn _coverage_uint(value: text, positive: bool = false) -> bool:
+    if value == "": return false
+    if value.len() > 10: return false
+    if value.len() > 1 and value.starts_with("0"): return false
+    var index: i64 = 0
+    while index < value.len():
+        val digit = value[index:index + 1]
+        if digit < "0" or digit > "9": return false
+        index = index + 1
+    val parsed = value.parse_i64() ?? -1
+    if parsed < 0 or parsed > 1000000000: return false
+    not positive or parsed > 0
+
+fn _coverage_environment_valid(value: text) -> bool:
+    val suffix = "-llvm-native"
+    if not value.ends_with(suffix): return false
+    val host = value[0:value.len() - suffix.len()]
+    for platform in ["linux", "macos", "windows", "freebsd", "simpleos"]:
+        for arch in ["x86_64", "aarch64", "riscv64"]:
+            if host == platform + "-" + arch: return true
+    false
+
+fn _coverage_parse_pairs(args: [text]) -> Result<Dict<text, text>, text>:
+    var fields: Dict<text, text> = {}
+    var index: i64 = 0
+    while index < args.len():
+        val option = args[index]
+        if not option.starts_with("--"): return Err("unknown-argument-" + option)
+        if index + 1 >= args.len(): return Err("missing-value-for-" + option)
+        val key = option[2:]
+        if fields.has(key): return Err("duplicate-" + key)
+        fields[key] = args[index + 1]
+        index = index + 2
+    Ok(fields)
+
+fn _coverage_required(fields: Dict<text, text>, key: text) -> Result<text, text>:
+    if not fields.has(key): return Err("missing-" + key)
+    val value = fields[key] ?? ""
+    if value == "": return Err("empty-" + key)
+    Ok(value)
+
+fn x25519_mlkem768_parse_coverage_receipt_cli(
+        args: [text]) -> Result<X25519MlKem768CoverageReceiptCli, text>:
+    val fields = _coverage_parse_pairs(args)?
+    val allowed = [
+        "raw-coverage", "run-manifest", "critical-inventory",
+        "compiler-artifact", "runtime-artifact", "output-dir"
+    ]
+    for key in fields.keys():
+        if not allowed.contains(key): return Err("unknown-argument---" + key)
+    val cli = X25519MlKem768CoverageReceiptCli(
+        raw_coverage: _coverage_required(fields, "raw-coverage")?,
+        run_manifest: _coverage_required(fields, "run-manifest")?,
+        critical_inventory: _coverage_required(fields, "critical-inventory")?,
+        compiler_artifact: _coverage_required(fields, "compiler-artifact")?,
+        runtime_artifact: _coverage_required(fields, "runtime-artifact")?,
+        output_dir: _coverage_required(fields, "output-dir")?)
+    val paths = [cli.raw_coverage, cli.run_manifest, cli.critical_inventory,
+                 cli.compiler_artifact, cli.runtime_artifact, cli.output_dir]
+    for path in paths:
+        if not _coverage_path_safe(path): return Err("unsafe-repository-path-" + path)
+    Ok(cli)
+
+fn _coverage_parse_env(text_value: text) -> Result<Dict<text, text>, text>:
+    var fields: Dict<text, text> = {}
+    for raw_line in text_value.split("\n"):
+        val line = raw_line.trim()
+        if line == "": continue
+        val separator = line.index_of("=")
+        if separator <= 0: return Err("run-manifest-row-invalid")
+        val key = line[0:separator]
+        val value = line[separator + 1:]
+        if key == "" or value == "": return Err("run-manifest-row-invalid")
+        if fields.has(key): return Err("run-manifest-duplicate-" + key)
+        fields[key] = value
+    Ok(fields)
+
+fn x25519_mlkem768_parse_coverage_run_manifest(
+        text_value: text) -> Result<X25519MlKem768CoverageRunManifest, text>:
+    val fields = _coverage_parse_env(text_value)?
+    var allowed: [text] = [
+        "schema", "status", "instrumentation_active", "fallback_used",
+        "static_analysis", "coverage_mode", "runtime_bundle",
+        "raw_coverage_path", "raw_coverage_sha256", "compiler_artifact_path",
+        "compiler_artifact_sha256", "compiler_provenance_path",
+        "compiler_provenance_sha256", "compiler_provenance_schema",
+        "compiler_artifact_kind", "compiler_source_revision_kind",
+        "compiler_source_revision", "compiler_source_roots",
+        "compiler_completed_gate", "compiler_version_path",
+        "compiler_version_sha256", "compiler_version", "runtime_version",
+        "execution_environment", "runtime_artifact_path",
+        "runtime_artifact_sha256", "measurement_tool_version",
+        "source_count", "spec_count"
+    ]
+    val source_count_text = _coverage_required(fields, "source_count")?
+    val spec_count_text = _coverage_required(fields, "spec_count")?
+    if not _coverage_uint(source_count_text, true) or
+            not _coverage_uint(spec_count_text, true):
+        return Err("run-manifest-count-invalid")
+    val source_count = source_count_text.parse_i64() ?? 0
+    val spec_count = spec_count_text.parse_i64() ?? 0
+    if source_count > 4096 or spec_count != _coverage_spec_paths().len():
+        return Err("run-manifest-count-invalid")
+    var allowed_source_index: i64 = 1
+    while allowed_source_index <= source_count:
+        val key = "source_" + allowed_source_index.to_text()
+        allowed.push(key + "_path")
+        allowed.push(key + "_sha256")
+        allowed_source_index = allowed_source_index + 1
+    var allowed_spec_index: i64 = 1
+    while allowed_spec_index <= spec_count:
+        val key = "spec_" + allowed_spec_index.to_text()
+        allowed.push(key + "_path")
+        allowed.push(key + "_sha256")
+        allowed.push(key + "_aot_path")
+        allowed.push(key + "_aot_sha256")
+        allowed.push(key + "_outcome")
+        allowed_spec_index = allowed_spec_index + 1
+    for key in fields.keys():
+        if not allowed.contains(key): return Err("run-manifest-unknown-" + key)
+    if (_coverage_required(fields, "schema")? != X25519_MLKEM768_RUN_MANIFEST_SCHEMA or
+            _coverage_required(fields, "status")? != "measured" or
+            _coverage_required(fields, "instrumentation_active")? != "true" or
+            _coverage_required(fields, "fallback_used")? != "false" or
+            _coverage_required(fields, "static_analysis")? != "false" or
+            _coverage_required(fields, "coverage_mode")? != "llvm-native" or
+            _coverage_required(fields, "runtime_bundle")? != "core-c-bootstrap"):
+        return Err("run-manifest-measurement-contract-invalid")
+    val raw_path = _coverage_required(fields, "raw_coverage_path")?
+    val compiler_path = _coverage_required(fields, "compiler_artifact_path")?
+    val compiler_provenance_path = _coverage_required(
+        fields, "compiler_provenance_path")?
+    val compiler_version_path = _coverage_required(fields, "compiler_version_path")?
+    val runtime_path = _coverage_required(fields, "runtime_artifact_path")?
+    if (not _coverage_path_safe(raw_path) or not _coverage_path_safe(compiler_path) or
+            not _coverage_path_safe(compiler_provenance_path) or
+            not _coverage_path_safe(runtime_path) or
+            compiler_provenance_path != compiler_path + ".provenance.env" or
+            compiler_version_path != "VERSION"):
+        return Err("run-manifest-path-invalid")
+    val raw_sha = _coverage_required(fields, "raw_coverage_sha256")?
+    val compiler_sha = _coverage_required(fields, "compiler_artifact_sha256")?
+    val compiler_provenance_sha = _coverage_required(
+        fields, "compiler_provenance_sha256")?
+    val compiler_version_sha = _coverage_required(fields, "compiler_version_sha256")?
+    val runtime_sha = _coverage_required(fields, "runtime_artifact_sha256")?
+    if not _coverage_hex64(raw_sha) or not _coverage_hex64(compiler_sha) or
+            not _coverage_hex64(compiler_provenance_sha) or
+            not _coverage_hex64(compiler_version_sha) or
+            not _coverage_hex64(runtime_sha):
+        return Err("run-manifest-sha256-invalid")
+    val compiler_source_revision = _coverage_required(
+        fields, "compiler_source_revision")?
+    val execution_environment = _coverage_required(fields, "execution_environment")?
+    if (_coverage_required(fields, "compiler_provenance_schema")? !=
+            "simple-bootstrap-stage4-provenance-v2" or
+            _coverage_required(fields, "compiler_artifact_kind")? !=
+            "pure-simple-full-cli" or
+            _coverage_required(fields, "compiler_source_revision_kind")? !=
+            "content-sha256" or not _coverage_hex64(compiler_source_revision) or
+            _coverage_required(fields, "compiler_source_roots")? !=
+            "src/compiler:src/lib:src/app:src/runtime:examples/10_tooling" or
+            _coverage_required(fields, "compiler_completed_gate")? !=
+            "stage4-essential-tools-smoke" or
+            _coverage_required(fields, "runtime_version")? !=
+            "simple-core-c-runtime-source-snapshot-v1" or
+            not _coverage_environment_valid(execution_environment)):
+        return Err("run-manifest-toolchain-contract-invalid")
+    var sources: Dict<text, text> = {}
+    var source_index: i64 = 1
+    while source_index <= source_count:
+        val key = "source_" + source_index.to_text()
+        val source_path = _coverage_required(fields, key + "_path")?
+        val source_sha = _coverage_required(fields, key + "_sha256")?
+        if not _coverage_path_safe(source_path) or sources.has(source_path):
+            return Err("run-manifest-source-path-invalid-" + key)
+        if not _coverage_hex64(source_sha):
+            return Err("run-manifest-source-sha256-invalid-" + key)
+        sources[source_path] = source_sha
+        source_index = source_index + 1
+    var specs: Dict<text, text> = {}
+    var spec_aot_paths: Dict<text, text> = {}
+    var spec_aot_sha256: Dict<text, text> = {}
+    val spec_paths = _coverage_spec_paths()
+    var spec_index: i64 = 0
+    while spec_index < spec_paths.len():
+        val key = "spec_" + (spec_index + 1).to_text()
+        if _coverage_required(fields, key + "_path")? != spec_paths[spec_index]:
+            return Err("run-manifest-spec-path-mismatch-" + key)
+        val spec_sha = _coverage_required(fields, key + "_sha256")?
+        if not _coverage_hex64(spec_sha):
+            return Err("run-manifest-spec-sha256-invalid-" + key)
+        val aot_path = _coverage_required(fields, key + "_aot_path")?
+        val aot_sha = _coverage_required(fields, key + "_aot_sha256")?
+        if not _coverage_path_safe(aot_path) or not _coverage_hex64(aot_sha):
+            return Err("run-manifest-spec-aot-invalid-" + key)
+        if _coverage_required(fields, key + "_outcome")? != "passed":
+            return Err("run-manifest-spec-outcome-invalid-" + key)
+        specs[spec_paths[spec_index]] = spec_sha
+        spec_aot_paths[spec_paths[spec_index]] = aot_path
+        spec_aot_sha256[spec_paths[spec_index]] = aot_sha
+        spec_index = spec_index + 1
+    Ok(X25519MlKem768CoverageRunManifest(
+        raw_coverage_path: raw_path,
+        raw_coverage_sha256: raw_sha,
+        compiler_artifact_path: compiler_path,
+        compiler_artifact_sha256: compiler_sha,
+        compiler_provenance_path: compiler_provenance_path,
+        compiler_provenance_sha256: compiler_provenance_sha,
+        compiler_source_revision: compiler_source_revision,
+        compiler_version_path: compiler_version_path,
+        compiler_version_sha256: compiler_version_sha,
+        compiler_version: _coverage_required(fields, "compiler_version")?,
+        runtime_version: _coverage_required(fields, "runtime_version")?,
+        execution_environment: execution_environment,
+        runtime_artifact_path: runtime_path,
+        runtime_artifact_sha256: runtime_sha,
+        measurement_tool_version: _coverage_required(fields, "measurement_tool_version")?,
+        source_sha256: sources,
+        spec_sha256: specs,
+        spec_aot_path: spec_aot_paths,
+        spec_aot_sha256: spec_aot_sha256))
+
+fn _coverage_validate_raw(text_value: text) -> Result<(), text>:
+    var section = "header"
+    var version_count: i64 = 0
+    var extension_count: i64 = 0
+    var decision_count: i64 = 0
+    var condition_count: i64 = 0
+    var seen: Dict<text, bool> = {}
+    for raw_line in text_value.split("\n"):
+        val line = raw_line.trim()
+        if line == "" or line.starts_with("#"): continue
+        if line == "version: 1.0" and section == "header":
+            version_count = version_count + 1
+            continue
+        if line == "coverage_extension: decision-condition-v1" and section == "header":
+            extension_count = extension_count + 1
+            continue
+        if line == "decisions |id, file, line, column, true_count, false_count|" and section == "header":
+            section = "decisions"
+            continue
+        if line == "conditions |decision_id, condition_id, file, line, column, true_count, false_count|" and section == "decisions":
+            section = "conditions"
+            continue
+        if line == "summary:" and section == "conditions":
+            section = "summary"
+            continue
+        if section == "summary":
+            val separator = line.index_of(":")
+            if separator <= 0 or not _coverage_uint(line[separator + 1:].trim()):
+                return Err("raw-coverage-summary-invalid")
+            continue
+        val parts = line.split(",")
+        if section == "decisions":
+            if parts.len() != 6: return Err("raw-coverage-decision-row-invalid")
+            if (not _coverage_uint(parts[0].trim()) or parts[1].trim() == "" or
+                    not _coverage_uint(parts[2].trim(), true) or
+                    not _coverage_uint(parts[3].trim()) or
+                    not _coverage_uint(parts[4].trim()) or
+                    not _coverage_uint(parts[5].trim())):
+                return Err("raw-coverage-decision-row-invalid")
+            val key = "d|" + parts[0].trim() + "|" + parts[1].trim() + "|" +
+                parts[2].trim() + "|" + parts[3].trim()
+            if seen.has(key): return Err("raw-coverage-decision-duplicate")
+            seen[key] = true
+            decision_count = decision_count + 1
+            continue
+        if section == "conditions":
+            if parts.len() != 7: return Err("raw-coverage-condition-row-invalid")
+            if (not _coverage_uint(parts[0].trim()) or
+                    not _coverage_uint(parts[1].trim()) or parts[2].trim() == "" or
+                    not _coverage_uint(parts[3].trim(), true) or
+                    not _coverage_uint(parts[4].trim()) or
+                    not _coverage_uint(parts[5].trim()) or
+                    not _coverage_uint(parts[6].trim())):
+                return Err("raw-coverage-condition-row-invalid")
+            val key = "c|" + parts[0].trim() + "|" + parts[1].trim() + "|" +
+                parts[2].trim() + "|" + parts[3].trim() + "|" + parts[4].trim()
+            if seen.has(key): return Err("raw-coverage-condition-duplicate")
+            seen[key] = true
+            condition_count = condition_count + 1
+            continue
+        return Err("raw-coverage-section-invalid")
+    if version_count != 1: return Err("raw-coverage-version-invalid")
+    if extension_count != 1: return Err("raw-coverage-extension-invalid")
+    if decision_count == 0 or condition_count == 0:
+        return Err("raw-coverage-denominator-empty")
+    Ok(())
+
+fn _coverage_critical_rows(text_value: text) -> Result<[text], text>:
+    var rows: [text] = []
+    var first = true
+    var seen: Dict<text, bool> = {}
+    var owner_counts: Dict<text, i64> = {}
+    var pair_true: Dict<text, bool> = {}
+    var pair_false: Dict<text, bool> = {}
+    val owner_ids = _coverage_owner_ids()
+    val owner_paths = _coverage_owner_paths()
+    for raw_line in text_value.split("\n"):
+        val line = raw_line.trim()
+        if line == "": continue
+        if first:
+            if line != "owner|source_path|line|decision_id|condition_id|outcome":
+                return Err("critical-branch-inventory-header")
+            first = false
+            continue
+        val fields = line.split("|")
+        if fields.len() != 6: return Err("critical-branch-inventory-row-invalid")
+        val owner_index = owner_ids.index_of(fields[0])
+        if (owner_index < 0 or owner_paths[owner_index] != fields[1] or
+                not _coverage_uint(fields[2], true) or
+                not _coverage_uint(fields[3]) or not _coverage_uint(fields[4]) or
+                (fields[5] != "true" and fields[5] != "false")):
+            return Err("critical-branch-inventory-row-invalid")
+        if seen.has(line): return Err("critical-branch-inventory-duplicate")
+        seen[line] = true
+        owner_counts[fields[0]] = (owner_counts[fields[0]] ?? 0) + 1
+        val pair_key = fields[0] + "|" + fields[1] + "|" + fields[2] +
+            "|" + fields[3] + "|" + fields[4]
+        if fields[5] == "true": pair_true[pair_key] = true
+        else: pair_false[pair_key] = true
+        rows.push(line)
+    if first or rows.len() != X25519_MLKEM768_CRITICAL_OUTCOME_COUNT:
+        return Err("critical-branch-inventory-cardinality-invalid")
+    for owner in owner_ids:
+        if (owner_counts[owner] ?? 0) < 2:
+            return Err("critical-branch-inventory-owner-cardinality-invalid")
+    for key in pair_true.keys():
+        if not pair_false.has(key):
+            return Err("critical-branch-inventory-outcome-pair-incomplete")
+    for key in pair_false.keys():
+        if not pair_true.has(key):
+            return Err("critical-branch-inventory-outcome-pair-incomplete")
+    Ok(rows)
+
+fn x25519_mlkem768_owner_coverage_reason(
+        branch_outcome_covered: i64,
+        branch_outcome_total: i64) -> text:
+    if (branch_outcome_total <= 0 or branch_outcome_covered < 0 or
+            branch_outcome_covered > branch_outcome_total):
+        return "coverage-owner-outcome-count-invalid"
+    val basis_points = branch_outcome_covered * 10000 / branch_outcome_total
+    if basis_points < X25519_MLKEM768_COVERAGE_TARGET_BP:
+        return "branch-coverage-owner-below-98-percent:" + basis_points.to_text()
+    ""
+
+fn x25519_mlkem768_compose_coverage_receipt_from_text(
+        cli: X25519MlKem768CoverageReceiptCli,
+        manifest: X25519MlKem768CoverageRunManifest,
+        run_manifest_sha256: text,
+        raw_coverage: text,
+        critical_inventory: text,
+        critical_inventory_sha256: text) -> Result<X25519MlKem768CoverageReceipt, X25519MlKem768CoverageComposeError>:
+    if not _coverage_hex64(critical_inventory_sha256):
+        return Err(_coverage_error("critical-branch-inventory-sha256-invalid"))
+    val composer_source_sha256 = file_hash_sha256(
+        X25519_MLKEM768_COVERAGE_COMPOSER_PATH)
+    val contract_source_sha256 = file_hash_sha256(
+        X25519_MLKEM768_COVERAGE_CONTRACT_PATH)
+    if (not _coverage_hex64(composer_source_sha256) or
+            not _coverage_hex64(contract_source_sha256)):
+        return Err(_coverage_error("coverage-tool-source-sha256-unavailable"))
+    match _coverage_validate_raw(raw_coverage):
+        case Err(reason): return Err(_coverage_error(reason))
+        case Ok(_): ()
+    val critical_rows = match _coverage_critical_rows(critical_inventory):
+        case Ok(rows): rows
+        case Err(reason): return Err(_coverage_error(reason))
+    reset_coverage_state()
+    record_coverage_sdn(raw_coverage)
+    val owner_ids = _coverage_owner_ids()
+    val owner_paths = _coverage_owner_paths()
+    if (owner_ids.len() != X25519_MLKEM768_COVERAGE_OWNER_COUNT or
+            owner_paths.len() != X25519_MLKEM768_COVERAGE_OWNER_COUNT or
+            _coverage_spec_paths().len() != X25519_MLKEM768_COVERAGE_SPEC_COUNT):
+        return Err(_coverage_error("coverage-contract-cardinality-invalid"))
+    var owners: [CoverageOwnerOutcomeSummary] = []
+    var zero_rows: [text] = []
+    var decision_total: i64 = 0
+    var condition_total: i64 = 0
+    var outcome_total: i64 = 0
+    var outcome_covered: i64 = 0
+    var index: i64 = 0
+    while index < owner_ids.len():
+        val summary = coverage_owner_outcome_summary(owner_ids[index], owner_paths[index])
+        if summary.decision_site_total <= 0 or summary.condition_site_total <= 0:
+            reset_coverage_state()
+            return Err(_coverage_error("coverage-owner-denominator-empty", owner_ids[index]))
+        if summary.decision_site_total > summary.condition_site_total:
+            reset_coverage_state()
+            return Err(_coverage_error("coverage-owner-condition-count-invalid", owner_ids[index]))
+        val owner_coverage_reason = x25519_mlkem768_owner_coverage_reason(
+            summary.branch_outcome_covered, summary.branch_outcome_total)
+        if owner_coverage_reason != "":
+            reset_coverage_state()
+            return Err(_coverage_error(owner_coverage_reason, owner_ids[index]))
+        owners.push(summary)
+        decision_total = decision_total + summary.decision_site_total
+        condition_total = condition_total + summary.condition_site_total
+        outcome_total = outcome_total + summary.branch_outcome_total
+        outcome_covered = outcome_covered + summary.branch_outcome_covered
+        for row in summary.zero_outcome_rows: zero_rows.push(row)
+        index = index + 1
+    val critical = check_critical_branch_outcomes(critical_rows)
+    if not critical.valid_inventory or critical.missing_outcome_rows.len() != 0 or
+            critical.covered_outcome_total != critical.required_outcome_total:
+        reset_coverage_state()
+        return Err(_coverage_error("critical-branch-below-100-percent"))
+    val basis_points = outcome_covered * 10000 / outcome_total
+    if basis_points < X25519_MLKEM768_COVERAGE_TARGET_BP:
+        reset_coverage_state()
+        return Err(_coverage_error("branch-coverage-below-98-percent", basis_points.to_text()))
+    reset_coverage_state()
+    Ok(X25519MlKem768CoverageReceipt(
+        cli: cli,
+        run_manifest_sha256: run_manifest_sha256,
+        raw_coverage_sha256: manifest.raw_coverage_sha256,
+        compiler_artifact_sha256: manifest.compiler_artifact_sha256,
+        compiler_provenance_path: manifest.compiler_provenance_path,
+        compiler_provenance_sha256: manifest.compiler_provenance_sha256,
+        compiler_source_revision: manifest.compiler_source_revision,
+        compiler_version_path: manifest.compiler_version_path,
+        compiler_version_sha256: manifest.compiler_version_sha256,
+        compiler_version: manifest.compiler_version,
+        runtime_version: manifest.runtime_version,
+        execution_environment: manifest.execution_environment,
+        runtime_artifact_sha256: manifest.runtime_artifact_sha256,
+        measurement_tool_version: manifest.measurement_tool_version,
+        composer_source_sha256: composer_source_sha256,
+        contract_source_sha256: contract_source_sha256,
+        owners: owners,
+        owner_source_sha256: manifest.source_sha256,
+        critical_outcome_total: critical.required_outcome_total,
+        decision_site_total: decision_total,
+        condition_site_total: condition_total,
+        branch_outcome_total: outcome_total,
+        branch_outcome_covered: outcome_covered,
+        branch_coverage_basis_points: basis_points,
+        zero_outcome_rows: zero_rows,
+        critical_inventory_sha256: critical_inventory_sha256))
+
+fn _coverage_source_manifest(receipt: X25519MlKem768CoverageReceipt) -> text:
+    var lines: [text] = [
+        "schema=x25519mlkem768-coverage-source-manifest-v1",
+        "run_manifest_sha256=" + receipt.run_manifest_sha256,
+        "owner_count=" + _coverage_owner_ids().len().to_text(), "coverage_tool_source_count=2",
+        "coverage_composer_path=" + X25519_MLKEM768_COVERAGE_COMPOSER_PATH,
+        "coverage_composer_source_sha256=" + receipt.composer_source_sha256,
+        "coverage_contract_path=" + X25519_MLKEM768_COVERAGE_CONTRACT_PATH,
+        "coverage_contract_source_sha256=" + receipt.contract_source_sha256
+    ]
+    val ids = _coverage_owner_ids()
+    val paths = _coverage_owner_paths()
+    var index: i64 = 0
+    while index < ids.len():
+        lines.push(ids[index] + "_path=" + paths[index])
+        lines.push(ids[index] + "_source_sha256=" +
+            (receipt.owner_source_sha256[paths[index]] ?? ""))
+        index = index + 1
+    lines.join("\n") + "\n"
+
+fn _coverage_spec_manifest(manifest: X25519MlKem768CoverageRunManifest) -> text:
+    var lines: [text] = [
+        "schema=x25519mlkem768-coverage-spec-manifest-v1",
+        "spec_count=" + _coverage_spec_paths().len().to_text()
+    ]
+    val paths = _coverage_spec_paths()
+    var index: i64 = 0
+    while index < paths.len():
+        lines.push("spec_" + (index + 1).to_text() + "_path=" + paths[index])
+        lines.push("spec_" + (index + 1).to_text() + "_sha256=" +
+            (manifest.spec_sha256[paths[index]] ?? ""))
+        lines.push("spec_" + (index + 1).to_text() + "_aot_path=" +
+            (manifest.spec_aot_path[paths[index]] ?? ""))
+        lines.push("spec_" + (index + 1).to_text() + "_aot_sha256=" +
+            (manifest.spec_aot_sha256[paths[index]] ?? ""))
+        index = index + 1
+    lines.join("\n") + "\n"
+
+fn x25519_mlkem768_render_coverage_receipt(
+        receipt: X25519MlKem768CoverageReceipt,
+        zero_path: text, zero_sha: text,
+        source_path: text, source_sha: text,
+        spec_path: text, spec_sha: text,
+        validator_sha: text) -> text:
+    var lines: [text] = [
+        "schema_version=" + X25519_MLKEM768_COVERAGE_SCHEMA,
+        "feature=x25519mlkem768", "measurement_status=measured",
+        "measurement_kind=instrumented-decision-counters",
+        "decision_counter_unit=condition-outcome",
+        "coverage_runtime_format=simple-coverage-sdn-v1+decision-condition-extension-v1",
+        "raw_counter_semantics=decision-id,condition-id,true-count,false-count",
+        "instrumentation_active=true", "static_analysis=false", "fallback_used=false",
+        "promotion_basis=measured-decision-coverage", "promotion_status=eligible",
+        "status=pass", "critical_branch_gate=measured-condition-outcomes",
+        "critical_branch_status=pass", "owner_set_version=x25519mlkem768-branch-owners-v3",
+        "owner_count=" + _coverage_owner_ids().len().to_text(), "implementation_version=" + X25519_MLKEM768_IMPLEMENTATION_VERSION,
+        "profile_version=" + X25519_MLKEM768_PROFILE_VERSION,
+        "measurement_tool=simple-test-runner",
+        "measurement_tool_version=" + receipt.measurement_tool_version,
+        "compiler_version=" + receipt.compiler_version,
+        "runtime_version=" + receipt.runtime_version,
+        "execution_mode=llvm-native-coverage",
+        "execution_environment=" + receipt.execution_environment,
+        "raw_coverage_path=" + receipt.cli.raw_coverage,
+        "raw_coverage_sha256=" + receipt.raw_coverage_sha256,
+        "zero_count_inventory_path=" + zero_path,
+        "zero_count_inventory_sha256=" + zero_sha,
+        "critical_branch_inventory_path=" + receipt.cli.critical_inventory,
+        "critical_branch_inventory_sha256=" + receipt.critical_inventory_sha256,
+        "critical_symbolic_path=" + X25519_MLKEM768_CRITICAL_SYMBOLIC_PATH,
+        "critical_symbolic_sha256=" + X25519_MLKEM768_CRITICAL_SYMBOLIC_SHA256,
+        "source_manifest_path=" + source_path, "source_manifest_sha256=" + source_sha,
+        "spec_manifest_path=" + spec_path, "spec_manifest_sha256=" + spec_sha,
+        "compiler_artifact_path=" + receipt.cli.compiler_artifact,
+        "compiler_artifact_sha256=" + receipt.compiler_artifact_sha256,
+        "compiler_provenance_path=" + receipt.compiler_provenance_path,
+        "compiler_provenance_sha256=" + receipt.compiler_provenance_sha256,
+        "compiler_source_revision=" + receipt.compiler_source_revision,
+        "compiler_version_path=" + receipt.compiler_version_path,
+        "compiler_version_sha256=" + receipt.compiler_version_sha256,
+        "runtime_artifact_path=" + receipt.cli.runtime_artifact,
+        "runtime_artifact_sha256=" + receipt.runtime_artifact_sha256,
+        "coverage_composer_path=" + X25519_MLKEM768_COVERAGE_COMPOSER_PATH,
+        "coverage_composer_source_sha256=" + receipt.composer_source_sha256,
+        "coverage_contract_path=" + X25519_MLKEM768_COVERAGE_CONTRACT_PATH,
+        "coverage_contract_source_sha256=" + receipt.contract_source_sha256,
+        "runner_sha256=" + validator_sha
+    ]
+    val ids = _coverage_owner_ids()
+    var index: i64 = 0
+    while index < receipt.owners.len():
+        val owner = receipt.owners[index]
+        val id = ids[index]
+        lines.push(id + "_path=" + owner.path)
+        lines.push(id + "_source_sha256=" +
+            (receipt.owner_source_sha256[owner.path] ?? ""))
+        lines.push(id + "_decision_site_total=" + owner.decision_site_total.to_text())
+        lines.push(id + "_condition_site_total=" + owner.condition_site_total.to_text())
+        lines.push(id + "_branch_outcome_total=" + owner.branch_outcome_total.to_text())
+        lines.push(id + "_branch_outcome_covered=" + owner.branch_outcome_covered.to_text())
+        lines.push(id + "_zero_outcome_count=" + owner.zero_outcome_rows.len().to_text())
+        index = index + 1
+    lines.push("decision_site_total=" + receipt.decision_site_total.to_text())
+    lines.push("condition_site_total=" + receipt.condition_site_total.to_text())
+    lines.push("branch_outcome_total=" + receipt.branch_outcome_total.to_text())
+    lines.push("branch_outcome_covered=" + receipt.branch_outcome_covered.to_text())
+    lines.push("zero_count_outcomes=" + receipt.zero_outcome_rows.len().to_text())
+    lines.push("zero_count_inventory_entry_count=" + receipt.zero_outcome_rows.len().to_text())
+    lines.push("branch_coverage_basis_points=" + receipt.branch_coverage_basis_points.to_text())
+    lines.push("critical_branch_outcome_total=" + receipt.critical_outcome_total.to_text())
+    lines.push("critical_branch_outcome_covered=" + receipt.critical_outcome_total.to_text())
+    lines.push("critical_branch_missing_outcomes=0")
+    lines.join("\n") + "\n"
+
+fn x25519_mlkem768_write_coverage_receipt_artifacts(
+        receipt: X25519MlKem768CoverageReceipt,
+        manifest: X25519MlKem768CoverageRunManifest) -> Result<X25519MlKem768CoverageReceiptArtifacts, X25519MlKem768CoverageComposeError>:
+    if not _coverage_tool_provenance_valid(receipt):
+        return Err(_coverage_error("coverage-tool-source-provenance-mismatch"))
+    val base = receipt.cli.output_dir
+    val receipt_path = base + "/branch_coverage.receipt.env"
+    val zero_path = base + "/zero_count_inventory.psv"
+    val source_path = base + "/source_manifest.env"
+    val spec_path = base + "/spec_manifest.env"
+    val validator_path = "scripts/check/check-x25519mlkem768-branch-coverage-receipt.shs"
+    # The directory is a single-use package boundary. A failed write may leave
+    # an incomplete, non-promotable package; retry must use a fresh path.
+    if file_exists(base):
+        return Err(_coverage_error("output-directory-exists", base))
+    for path in [receipt_path, zero_path, source_path, spec_path]:
+        if file_exists(path): return Err(_coverage_error("output-artifact-exists", path))
+    dir_create_all(base)
+    val zero_text = "owner|source_path|line|decision_id|condition_id|outcome\n" +
+        receipt.zero_outcome_rows.join("\n") +
+        (if receipt.zero_outcome_rows.len() > 0: "\n" else: "")
+    val source_text = _coverage_source_manifest(receipt)
+    val spec_text = _coverage_spec_manifest(manifest)
+    if not file_atomic_write(zero_path, zero_text):
+        return Err(_coverage_error("zero-inventory-write-failed"))
+    if not file_atomic_write(source_path, source_text):
+        return Err(_coverage_error("source-manifest-write-failed"))
+    if not file_atomic_write(spec_path, spec_text):
+        return Err(_coverage_error("spec-manifest-write-failed"))
+    if not _coverage_tool_provenance_valid(receipt):
+        return Err(_coverage_error("coverage-tool-source-mutated-during-write"))
+    val zero_sha = file_hash_sha256(zero_path)
+    val source_sha = file_hash_sha256(source_path)
+    val spec_sha = file_hash_sha256(spec_path)
+    val validator_sha = file_hash_sha256(validator_path)
+    if (not _coverage_hex64(zero_sha) or not _coverage_hex64(source_sha) or
+            not _coverage_hex64(spec_sha) or not _coverage_hex64(validator_sha)):
+        return Err(_coverage_error("output-sha256-unavailable"))
+    val rendered = x25519_mlkem768_render_coverage_receipt(
+        receipt, zero_path, zero_sha, source_path, source_sha,
+        spec_path, spec_sha, validator_sha)
+    if not file_atomic_write(receipt_path, rendered):
+        return Err(_coverage_error("receipt-write-failed"))
+    if not _coverage_tool_provenance_valid(receipt):
+        return Err(_coverage_error("coverage-tool-source-mutated-during-write"))
+    val receipt_sha = file_hash_sha256(receipt_path)
+    if not _coverage_hex64(receipt_sha):
+        return Err(_coverage_error("receipt-sha256-unavailable"))
+    Ok(X25519MlKem768CoverageReceiptArtifacts(
+        receipt_path: receipt_path, zero_inventory_path: zero_path,
+        source_manifest_path: source_path, spec_manifest_path: spec_path,
+        receipt_sha256: receipt_sha,
+        branch_coverage_basis_points: receipt.branch_coverage_basis_points))
+
+fn _coverage_bind_inputs(
+        cli: X25519MlKem768CoverageReceiptCli,
+        manifest: X25519MlKem768CoverageRunManifest) -> Result<(), X25519MlKem768CoverageComposeError>:
+    for path in [cli.raw_coverage, cli.run_manifest, cli.critical_inventory,
+                 cli.compiler_artifact, manifest.compiler_provenance_path,
+                 manifest.compiler_version_path, cli.runtime_artifact,
+                 X25519_MLKEM768_CRITICAL_SYMBOLIC_PATH,
+                 X25519_MLKEM768_COVERAGE_COMPOSER_PATH,
+                 X25519_MLKEM768_COVERAGE_CONTRACT_PATH]:
+        if not file_is_regular_no_follow(path):
+            return Err(_coverage_error("input-not-regular-no-follow", path))
+    if (manifest.raw_coverage_path != cli.raw_coverage or
+            manifest.compiler_artifact_path != cli.compiler_artifact or
+            manifest.runtime_artifact_path != cli.runtime_artifact):
+        return Err(_coverage_error("run-manifest-path-binding-mismatch"))
+    if (file_hash_sha256(cli.raw_coverage) != manifest.raw_coverage_sha256 or
+            file_hash_sha256(cli.compiler_artifact) != manifest.compiler_artifact_sha256 or
+            file_hash_sha256(manifest.compiler_provenance_path) !=
+                manifest.compiler_provenance_sha256 or
+            file_hash_sha256(manifest.compiler_version_path) !=
+                manifest.compiler_version_sha256 or
+            file_hash_sha256(X25519_MLKEM768_CRITICAL_SYMBOLIC_PATH) !=
+                X25519_MLKEM768_CRITICAL_SYMBOLIC_SHA256 or
+            file_read(manifest.compiler_version_path).trim() !=
+                manifest.compiler_version or
+            file_hash_sha256(cli.runtime_artifact) != manifest.runtime_artifact_sha256):
+        return Err(_coverage_error("run-manifest-artifact-sha256-mismatch"))
+    val compiler_provenance = stage4_compiler_provenance_from_text(
+        file_read(manifest.compiler_provenance_path))
+    val compiler_provenance_status = stage4_compiler_provenance_reason(
+        compiler_provenance, manifest.compiler_artifact_sha256,
+        manifest.compiler_provenance_sha256)
+    if (compiler_provenance_status != "ready" or
+            compiler_provenance.source_revision !=
+                manifest.compiler_source_revision):
+        return Err(_coverage_error("run-manifest-compiler-provenance-invalid"))
+    val ids = _coverage_owner_ids()
+    val paths = _coverage_owner_paths()
+    var index: i64 = 0
+    while index < ids.len():
+        if not file_is_regular_no_follow(paths[index]) or
+                file_hash_sha256(paths[index]) != (manifest.source_sha256[paths[index]] ?? ""):
+            return Err(_coverage_error("run-manifest-source-sha256-mismatch", ids[index]))
+        index = index + 1
+    val specs = _coverage_spec_paths()
+    for path in specs:
+        if not file_is_regular_no_follow(path) or
+                file_hash_sha256(path) != (manifest.spec_sha256[path] ?? ""):
+            return Err(_coverage_error("run-manifest-spec-sha256-mismatch", path))
+        val aot_path = manifest.spec_aot_path[path] ?? ""
+        if not file_is_regular_no_follow(aot_path) or
+                file_hash_sha256(aot_path) !=
+                    (manifest.spec_aot_sha256[path] ?? ""):
+            return Err(_coverage_error("run-manifest-spec-aot-sha256-mismatch", path))
+    Ok(())
+
+fn _coverage_print_failure(reason: text):
+    print "schema=" + X25519_MLKEM768_COVERAGE_SCHEMA
+    print "status=fail"
+    print "reason=" + reason
+
+fn main() -> i64:
+    val cli = match x25519_mlkem768_parse_coverage_receipt_cli(get_cli_args()):
+        case Ok(value): value
+        case Err(reason):
+            _coverage_print_failure(reason)
+            return 2
+    val run_text = if file_is_regular_no_follow(cli.run_manifest):
+        file_read(cli.run_manifest)
+    else:
+        _coverage_print_failure("run-manifest-missing-or-unbound")
+        return 2
+    val manifest = match x25519_mlkem768_parse_coverage_run_manifest(run_text):
+        case Ok(value): value
+        case Err(reason):
+            _coverage_print_failure(reason)
+            return 2
+    match _coverage_bind_inputs(cli, manifest):
+        case Err(reason):
+            _coverage_print_failure(reason.code +
+                (if reason.subject == "": "" else: "-" + reason.subject))
+            return 2
+        case Ok(_): ()
+    val run_sha_before = file_hash_sha256(cli.run_manifest)
+    val critical_sha_before = file_hash_sha256(cli.critical_inventory)
+    val raw_text = file_read(cli.raw_coverage)
+    val critical_text = file_read(cli.critical_inventory)
+    val receipt = match x25519_mlkem768_compose_coverage_receipt_from_text(
+            cli, manifest, run_sha_before, raw_text, critical_text,
+            critical_sha_before):
+        case Ok(value): value
+        case Err(reason):
+            _coverage_print_failure(reason.code +
+                (if reason.subject == "": "" else: "-" + reason.subject))
+            return 1
+    if (run_sha_before != file_hash_sha256(cli.run_manifest) or
+            critical_sha_before != file_hash_sha256(cli.critical_inventory) or
+            manifest.raw_coverage_sha256 != file_hash_sha256(cli.raw_coverage) or
+            not _coverage_tool_provenance_valid(receipt)):
+        _coverage_print_failure("input-mutated-during-compose")
+        return 2
+    match _coverage_bind_inputs(cli, manifest):
+        case Err(_):
+            _coverage_print_failure("input-mutated-during-compose")
+            return 2
+        case Ok(_): ()
+    val artifacts = match x25519_mlkem768_write_coverage_receipt_artifacts(receipt, manifest):
+        case Ok(value): value
+        case Err(reason):
+            _coverage_print_failure(reason.code +
+                (if reason.subject == "": "" else: "-" + reason.subject))
+            return 2
+    print "schema=" + X25519_MLKEM768_COVERAGE_SCHEMA
+    print "status=pass"
+    print "receipt_path=" + artifacts.receipt_path
+    print "receipt_sha256=" + artifacts.receipt_sha256
+    print "branch_coverage_basis_points=" + artifacts.branch_coverage_basis_points.to_text()
+    0
+
+export X25519MlKem768CoverageReceiptCli, X25519MlKem768CoverageRunManifest
+export X25519MlKem768CoverageReceipt, X25519MlKem768CoverageReceiptArtifacts
+export X25519MlKem768CoverageComposeError
+export x25519_mlkem768_parse_coverage_receipt_cli
+export x25519_mlkem768_parse_coverage_run_manifest
+export x25519_mlkem768_compose_coverage_receipt_from_text
+export x25519_mlkem768_owner_coverage_reason
+export x25519_mlkem768_render_coverage_receipt
+export x25519_mlkem768_write_coverage_receipt_artifacts

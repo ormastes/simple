@@ -1,0 +1,244 @@
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_decl_apply.spl
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout.spl
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_layout.spl
+# @req REQ-WEB-CSS-007
+# @gui: headless
+"""
+# Web CSS Positioning System Test
+
+**Plan:** doc/03_plan/ui/testing/wm_gui_web_system_test_coverage_plan_2026-08-07.md (unit U3.7)
+
+## Purpose and Audience
+
+A reader wants to know whether the headless web/HTML-CSS renderer computes
+CSS positioning geometry correctly: `position: relative` offsetting a box's
+own paint rect without disturbing sibling flow, `position: absolute`
+resolving its offset against the nearest positioned ancestor's box (not the
+viewport or the immediate DOM parent), `position: fixed` anchoring to the
+viewport regardless of ancestor offsets, `z-index` reordering the paint order
+of overlapping positioned boxes, `clear` moving a block below preceding
+floated content, and `float` taking a box out of normal flow so following
+inline content wraps beside it.
+
+## Scope and Preconditions
+
+Runs entirely in-process, headless, no display server: assertions read real
+`DrawIrCommand.x`/`.y`/`.width`/`.height` fields off
+`simple_web_layout_render_html_draw_ir(html, width, height)` output — never a
+"didn't crash" check. Paint order (for z-index) is read from the position of
+each element's command within `composition.batches[0].commands`.
+
+## A genuine renderer-architecture finding (read before editing this file)
+
+Probed directly against this renderer before writing assertions (not assumed
+from the CSS spec): `position: fixed` parses correctly into
+`Style.position_fixed` (`simple_web_html_layout_renderer_decl_apply.spl:800`)
+but that field is read back only by a debug `getComputedStyle`-style text
+accessor (`simple_web_html_layout_renderer_core.spl:3028`) — no layout pass
+ever branches on it to establish the viewport as the containing block, so a
+fixed-positioned box's offset resolves against its nearest DOM ancestor's box
+exactly like `position: absolute` would, instead of the viewport. See
+`it "position: fixed anchors to the viewport"` below (RED-by-design; bug
+filed: `doc/08_tracking/bug/browser_engine_css_position_fixed_not_viewport_anchored_2026-08-08.md`).
+
+Separately, `float` is already tracked as unimplemented
+(`doc/08_tracking/bug/browser_engine_css_float_layout_unimplemented_2026-07-20.md`):
+two `float: left` siblings stack vertically instead of sitting side by side,
+and a paragraph following a float starts below it instead of wrapping beside
+it. Because floated boxes never leave normal flow, a following block already
+lands below them with or without `clear` — so `clear` currently has no
+independent, observable effect either; that same bug doc has been updated
+with this spec's citation rather than filing a duplicate. Both `it` blocks
+below (`"float: left takes a box out of flow with text wrap"` and `"clear
+moves a block below preceding content"`) are RED-by-design for that shared
+root cause.
+
+## Primary Workflow
+
+Render small fixed HTML/CSS fixtures at a fixed viewport, look up the command
+for a named element by `component_id` (or the first `kind == "text"` command
+for the float/wrap case), and assert exact computed geometry or paint-order
+position.
+
+## Evidence and Provenance
+
+DrawIR-tree oracle per plan §3.6; source:
+`src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`,
+`src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_decl_apply.spl`.
+"""
+
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir}
+use common.ui.draw_ir.{DrawIrCommand}
+
+fn _draw_ir_command_by_id(
+    commands: [DrawIrCommand], component_id: text
+) -> DrawIrCommand:
+    var idx = 0
+    while idx < commands.len():
+        if commands[idx].component_id == component_id:
+            return commands[idx]
+        idx = idx + 1
+    commands[0]
+
+fn _draw_ir_command_index_by_id(
+    commands: [DrawIrCommand], component_id: text
+) -> i64:
+    var idx = 0
+    while idx < commands.len():
+        if commands[idx].component_id == component_id:
+            return idx.to_i64()
+        idx = idx + 1
+    -1
+
+fn _draw_ir_first_text_command(commands: [DrawIrCommand]) -> DrawIrCommand:
+    var idx = 0
+    while idx < commands.len():
+        if commands[idx].kind == "text":
+            return commands[idx]
+        idx = idx + 1
+    commands[0]
+
+describe "Web CSS positioning":
+    """
+    Readers of this manual section can trust that the headless HTML/CSS
+    renderer's Draw IR carries correct `position: relative` paint offsets
+    that leave sibling flow untouched, `position: absolute` offsets resolved
+    against the nearest positioned ancestor, and `z-index` paint-order
+    reordering of overlapping positioned boxes. Two related facts are
+    tracked as open renderer gaps rather than silently passed over:
+    `position: fixed` does not yet anchor to the viewport, and `float`/
+    `clear` do not yet take a box out of normal flow.
+    """
+
+    # @manual_section "Positioning"
+
+    it "position: relative offsets paint without moving siblings":
+        step("Render a relatively-offset block followed by a plain sibling")
+        val html = (
+            "<html><head><style>" +
+            "html,body{margin:0;padding:0;background:#ffffff}" +
+            "#r1{display:block;width:20px;height:10px;background-color:#3b82f6;" +
+            "position:relative;left:5px;top:3px}" +
+            "#r2{display:block;width:20px;height:10px;background-color:#22c55e}" +
+            "</style></head><body><div id='r1'></div><div id='r2'></div></body></html>"
+        )
+        val composition = simple_web_layout_render_html_draw_ir(html, 64, 64)
+        val r1 = _draw_ir_command_by_id(composition.batches[0].commands, "r1")
+        val r2 = _draw_ir_command_by_id(composition.batches[0].commands, "r2")
+
+        step("Assert the relatively-positioned box painted at its static position plus its own left/top offset")
+        expect(r1.x).to_equal(5)
+        expect(r1.y).to_equal(3)
+
+        step("Assert the following sibling flows as if r1 had never been offset: r2 starts at r1's UNOFFSET static x (0) and at r1's static height below (10), proving relative offset is paint-only")
+        expect(r2.x).to_equal(0)
+        expect(r2.y).to_equal(10)
+
+    it "position: absolute anchors to the nearest positioned ancestor":
+        step("Render a relatively-positioned ancestor containing an absolutely-positioned child")
+        val html = (
+            "<html><head><style>" +
+            "html,body{margin:0;padding:0;background:#ffffff}" +
+            "#anc{display:block;position:relative;width:40px;height:40px;margin:5px;" +
+            "background-color:#3b82f6}" +
+            "#abs{position:absolute;left:2px;top:3px;width:10px;height:10px;" +
+            "background-color:#22c55e}" +
+            "</style></head><body><div id='anc'><div id='abs'></div></div></body></html>"
+        )
+        val composition = simple_web_layout_render_html_draw_ir(html, 64, 64)
+        val anc = _draw_ir_command_by_id(composition.batches[0].commands, "anc")
+        val abs_box = _draw_ir_command_by_id(composition.batches[0].commands, "abs")
+
+        step("Assert the positioned ancestor itself sits at its own margin offset")
+        expect(anc.x).to_equal(5)
+        expect(anc.y).to_equal(5)
+
+        step("Assert the absolutely-positioned child's box is the ancestor's own box origin plus the child's left/top offset, not the viewport origin plus the offset")
+        expect(abs_box.x).to_equal(anc.x + 2)
+        expect(abs_box.y).to_equal(anc.y + 3)
+
+    it "position: fixed anchors to the viewport":
+        step("Render a margined, non-positioned wrapper containing a fixed-positioned box")
+        val html = (
+            "<html><head><style>" +
+            "html,body{margin:0;padding:0;background:#ffffff}" +
+            "#wrap{display:block;margin:20px;width:10px;height:10px}" +
+            "#fx{position:fixed;left:1px;top:2px;width:8px;height:8px;" +
+            "background-color:#ff0000}" +
+            "</style></head><body><div id='wrap'><div id='fx'></div></div></body></html>"
+        )
+        val composition = simple_web_layout_render_html_draw_ir(html, 64, 64)
+        val fx = _draw_ir_command_by_id(composition.batches[0].commands, "fx")
+
+        step("Assert the fixed box resolves its left/top offset against the viewport origin (0,0), ignoring the 20px-margined ancestor entirely -- RED-by-design, see header finding and bug doc")
+        expect(fx.x).to_equal(1)
+        expect(fx.y).to_equal(2)
+
+    it "z-index reorders overlapping positioned boxes":
+        step("Render two overlapping absolutely-positioned boxes; the higher z-index box comes FIRST in DOM order")
+        val html = (
+            "<html><head><style>" +
+            "html,body{margin:0;padding:0;background:#ffffff}" +
+            "#z_hi{position:absolute;left:0px;top:0px;width:20px;height:20px;" +
+            "background-color:#ff0000;z-index:5}" +
+            "#z_lo{position:absolute;left:5px;top:5px;width:20px;height:20px;" +
+            "background-color:#00ff00;z-index:1}" +
+            "</style></head><body><div id='z_hi'></div><div id='z_lo'></div></body></html>"
+        )
+        val composition = simple_web_layout_render_html_draw_ir(html, 64, 64)
+        val hi_index = _draw_ir_command_index_by_id(composition.batches[0].commands, "z_hi")
+        val lo_index = _draw_ir_command_index_by_id(composition.batches[0].commands, "z_lo")
+
+        step("Assert both commands were found")
+        assert_true(hi_index >= 0)
+        assert_true(lo_index >= 0)
+
+        step("Assert the higher z-index box paints AFTER (on top of) the lower z-index box, even though it comes first in DOM order, proving z-index -- not DOM order -- controls paint order")
+        assert_true(hi_index > lo_index)
+
+    it "clear moves a block below preceding content":
+        step("Render a float followed by a plain block with no clear, then the same shape with clear:left")
+        val html_no_clear = (
+            "<html><head><style>" +
+            "html,body{margin:0;padding:0;background:#ffffff}" +
+            "#fl_a{float:left;width:10px;height:20px;background-color:#3b82f6}" +
+            "#nc{display:block;width:20px;height:5px;background-color:#eab308}" +
+            "</style></head><body><div id='fl_a'></div><div id='nc'></div></body></html>"
+        )
+        val html_clear = (
+            "<html><head><style>" +
+            "html,body{margin:0;padding:0;background:#ffffff}" +
+            "#fl_b{float:left;width:10px;height:20px;background-color:#3b82f6}" +
+            "#cl{clear:left;display:block;width:20px;height:5px;background-color:#22c55e}" +
+            "</style></head><body><div id='fl_b'></div><div id='cl'></div></body></html>"
+        )
+        val composition_no_clear = simple_web_layout_render_html_draw_ir(html_no_clear, 64, 64)
+        val composition_clear = simple_web_layout_render_html_draw_ir(html_clear, 64, 64)
+        val fl_a = _draw_ir_command_by_id(composition_no_clear.batches[0].commands, "fl_a")
+        val nc = _draw_ir_command_by_id(composition_no_clear.batches[0].commands, "nc")
+        val cl = _draw_ir_command_by_id(composition_clear.batches[0].commands, "cl")
+
+        step("Assert the un-cleared block's own top is unaffected by the preceding float (block-level boxes ignore floats for their own flow position in real CSS) -- RED-by-design, float takes nothing out of flow yet, see header finding and bug doc")
+        expect(nc.y).to_equal(0)
+
+        step("Assert the cleared block moves below the float's bottom edge specifically because of clear, not because it would land there anyway")
+        expect(cl.y).to_equal(fl_a.height)
+
+    it "float: left takes a box out of flow with text wrap":
+        step("Render a float followed by a paragraph, expecting the paragraph's text to wrap beside the float rather than start below it")
+        val html = (
+            "<html><head><style>" +
+            "html,body{margin:0;padding:0;background:#ffffff}" +
+            "#fl{float:left;width:10px;height:20px;background-color:#3b82f6}" +
+            "#p{display:block;width:40px}" +
+            "</style></head><body><div id='fl'></div>" +
+            "<p id='p'>hello world</p></body></html>"
+        )
+        val composition = simple_web_layout_render_html_draw_ir(html, 64, 64)
+        val text_command = _draw_ir_first_text_command(composition.batches[0].commands)
+
+        step("Assert the text run starts beside the float (past its width) at the top of the flow, not below it -- RED-by-design, see doc/08_tracking/bug/browser_engine_css_float_layout_unimplemented_2026-07-20.md")
+        expect(text_command.x).to_equal(10)
+        expect(text_command.y).to_equal(0)

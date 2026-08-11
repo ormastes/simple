@@ -1,0 +1,404 @@
+# codex-impl
+# Controller-facing GPU offload helper for coarse web framework routes.
+
+use std.http_server.types.{HttpResponseData}
+use std.web_framework.controller.{ControllerContext}
+use std.web_db_offload.web_route.{
+    WebGpuRouteKind,
+    WebGpuRouteOffloadExecution,
+    WebGpuRouteAccumulatedExecution,
+    web_gpu_route_offload_execute_scheduled,
+    web_gpu_route_offload_execute_accumulating,
+    web_gpu_route_offload_execute,
+    web_gpu_route_offload_used_gpu
+}
+use std.web_db_offload.contract.{GpuWdbBudget, gpu_wdb_default_budget}
+use std.web_db_offload.queue.{GpuWdbQueueState}
+use std.web_db_offload.library.{GpuWdbLibraryRegistry}
+use std.web_db_offload.web_profile.{
+    WebGpuOffloadProfile,
+    WebGpuProfileValidatedDeviceExecution,
+    web_gpu_profile_cpu_only,
+    web_gpu_profile_execute_device_validated
+}
+use std.web_db_offload.device_backend.{GpuWdbDeviceBackend}
+use std.web_db_offload.scheduler.{GpuWdbScheduleClass, GpuWdbBatchAccumulator}
+
+struct WebFrameworkGpuRouteConfig:
+    controller_name: text
+    action_name: text
+    route_kind: WebGpuRouteKind
+    default_item_count: i64
+    default_bytes_per_item: i64
+
+struct WebFrameworkGpuRouteExecution:
+    controller_name: text
+    action_name: text
+    request_path: text
+    offload: WebGpuRouteOffloadExecution
+    response: HttpResponseData
+
+struct WebFrameworkGpuRouteAccumulatedExecution:
+    controller_name: text
+    action_name: text
+    request_path: text
+    accumulated: WebGpuRouteAccumulatedExecution
+    response: HttpResponseData
+
+struct WebFrameworkGpuRouteValidatedExecution:
+    controller_name: text
+    action_name: text
+    request_path: text
+    validated: WebGpuProfileValidatedDeviceExecution
+    response: HttpResponseData
+
+struct WebFrameworkGpuRouteAdoption:
+    matched: bool
+    reason: text
+    execution: WebFrameworkGpuRouteExecution
+
+struct WebFrameworkGpuRouteValidatedAdoption:
+    matched: bool
+    reason: text
+    execution: WebFrameworkGpuRouteValidatedExecution
+
+fn web_framework_gpu_route_config(controller_name: text, action_name: text,
+                                  route_kind: WebGpuRouteKind,
+                                  default_item_count: i64,
+                                  default_bytes_per_item: i64) -> WebFrameworkGpuRouteConfig:
+    WebFrameworkGpuRouteConfig(
+        controller_name: controller_name,
+        action_name: action_name,
+        route_kind: route_kind,
+        default_item_count: default_item_count,
+        default_bytes_per_item: default_bytes_per_item
+    )
+
+fn web_framework_gpu_route_matches(config: WebFrameworkGpuRouteConfig,
+                                   controller_name: text, action_name: text) -> bool:
+    config.controller_name == controller_name and config.action_name == action_name
+
+fn web_framework_gpu_item_count(ctx: ControllerContext, config: WebFrameworkGpuRouteConfig) -> i64:
+    val raw = ctx.params.get("gpu_items") ?? ""
+    if raw != "":
+        val parsed = raw.parse_int() ?? config.default_item_count
+        if parsed > 0:
+            return parsed
+    config.default_item_count
+
+fn web_framework_gpu_bytes_per_item(ctx: ControllerContext, config: WebFrameworkGpuRouteConfig) -> i64:
+    val raw = ctx.params.get("gpu_bytes_per_item") ?? ""
+    if raw != "":
+        val parsed = raw.parse_int() ?? config.default_bytes_per_item
+        if parsed > 0:
+            return parsed
+    config.default_bytes_per_item
+
+fn web_framework_gpu_response_with_body(response: HttpResponseData,
+                                        status: i64,
+                                        body: text) -> HttpResponseData:
+    HttpResponseData(
+        status: status,
+        reason: response.reason,
+        headers: response.headers,
+        body: body,
+        body_bytes: response.body_bytes,
+        body_file: response.body_file,
+        body_offset: response.body_offset,
+        body_length: response.body_length,
+        chunked: response.chunked
+    )
+
+fn web_framework_gpu_route_execute(ctx: ControllerContext,
+                                   config: WebFrameworkGpuRouteConfig,
+                                   state: GpuWdbQueueState,
+                                   registry: GpuWdbLibraryRegistry,
+                                   gpu_available: bool,
+                                   cpu_fallback_available: bool,
+                                   budget: GpuWdbBudget,
+                                   response: HttpResponseData) -> WebFrameworkGpuRouteExecution:
+    val item_count = web_framework_gpu_item_count(ctx, config)
+    val bytes_per_item = web_framework_gpu_bytes_per_item(ctx, config)
+    val offload = web_gpu_route_offload_execute(
+        ctx.request.path,
+        config.route_kind,
+        item_count,
+        bytes_per_item,
+        state,
+        registry,
+        gpu_available,
+        cpu_fallback_available,
+        budget,
+        response.status,
+        response.body
+    )
+    WebFrameworkGpuRouteExecution(
+        controller_name: config.controller_name,
+        action_name: config.action_name,
+        request_path: ctx.request.path,
+        offload: offload,
+        response: response
+    )
+
+fn web_framework_gpu_route_execute_device_validated(ctx: ControllerContext,
+                                                    config: WebFrameworkGpuRouteConfig,
+                                                    profile: WebGpuOffloadProfile,
+                                                    backend: GpuWdbDeviceBackend,
+                                                    expected_generation: i64,
+                                                    gpu_candidate_response: HttpResponseData,
+                                                    started_us: i64,
+                                                    finished_us: i64,
+                                                    measured_device_time_us: i64,
+                                                    timing_source: text,
+                                                    response: HttpResponseData) -> WebFrameworkGpuRouteValidatedExecution:
+    val item_count = web_framework_gpu_item_count(ctx, config)
+    val bytes_per_item = web_framework_gpu_bytes_per_item(ctx, config)
+    val validated = web_gpu_profile_execute_device_validated(
+        profile,
+        ctx.request.path,
+        config.route_kind,
+        item_count,
+        bytes_per_item,
+        response.status,
+        response.body,
+        backend,
+        expected_generation,
+        gpu_candidate_response.status,
+        gpu_candidate_response.body,
+        started_us,
+        finished_us,
+        measured_device_time_us,
+        timing_source
+    )
+    val selected_response =
+        if validated.gpu_candidate_validated:
+            web_framework_gpu_response_with_body(response, gpu_candidate_response.status, gpu_candidate_response.body)
+        else:
+            response
+    WebFrameworkGpuRouteValidatedExecution(
+        controller_name: config.controller_name,
+        action_name: config.action_name,
+        request_path: ctx.request.path,
+        validated: validated,
+        response: selected_response
+    )
+
+fn web_framework_gpu_route_execute_scheduled(ctx: ControllerContext,
+                                             config: WebFrameworkGpuRouteConfig,
+                                             state: GpuWdbQueueState,
+                                             registry: GpuWdbLibraryRegistry,
+                                             gpu_available: bool,
+                                             cpu_fallback_available: bool,
+                                             budget: GpuWdbBudget,
+                                             schedule_class: GpuWdbScheduleClass,
+                                             allow_defer: bool,
+                                             response: HttpResponseData) -> WebFrameworkGpuRouteExecution:
+    val item_count = web_framework_gpu_item_count(ctx, config)
+    val bytes_per_item = web_framework_gpu_bytes_per_item(ctx, config)
+    val offload = web_gpu_route_offload_execute_scheduled(
+        ctx.request.path,
+        config.route_kind,
+        item_count,
+        bytes_per_item,
+        state,
+        registry,
+        gpu_available,
+        cpu_fallback_available,
+        budget,
+        schedule_class,
+        allow_defer,
+        response.status,
+        response.body
+    )
+    WebFrameworkGpuRouteExecution(
+        controller_name: config.controller_name,
+        action_name: config.action_name,
+        request_path: ctx.request.path,
+        offload: offload,
+        response: response
+    )
+
+fn web_framework_gpu_route_execute_accumulating(ctx: ControllerContext,
+                                                config: WebFrameworkGpuRouteConfig,
+                                                state: GpuWdbQueueState,
+                                                registry: GpuWdbLibraryRegistry,
+                                                gpu_available: bool,
+                                                cpu_fallback_available: bool,
+                                                budget: GpuWdbBudget,
+                                                schedule_class: GpuWdbScheduleClass,
+                                                accumulator: GpuWdbBatchAccumulator,
+                                                response: HttpResponseData) -> WebFrameworkGpuRouteAccumulatedExecution:
+    val item_count = web_framework_gpu_item_count(ctx, config)
+    val bytes_per_item = web_framework_gpu_bytes_per_item(ctx, config)
+    val accumulated = web_gpu_route_offload_execute_accumulating(
+        ctx.request.path,
+        config.route_kind,
+        item_count,
+        bytes_per_item,
+        state,
+        registry,
+        gpu_available,
+        cpu_fallback_available,
+        budget,
+        schedule_class,
+        accumulator,
+        response.status,
+        response.body
+    )
+    WebFrameworkGpuRouteAccumulatedExecution(
+        controller_name: config.controller_name,
+        action_name: config.action_name,
+        request_path: ctx.request.path,
+        accumulated: accumulated,
+        response: response
+    )
+
+fn web_framework_gpu_route_execute_default(ctx: ControllerContext,
+                                           config: WebFrameworkGpuRouteConfig,
+                                           state: GpuWdbQueueState,
+                                           registry: GpuWdbLibraryRegistry,
+                                           gpu_available: bool,
+                                           cpu_fallback_available: bool,
+                                           response: HttpResponseData) -> WebFrameworkGpuRouteExecution:
+    web_framework_gpu_route_execute(
+        ctx,
+        config,
+        state,
+        registry,
+        gpu_available,
+        cpu_fallback_available,
+        gpu_wdb_default_budget(),
+        response
+    )
+
+fn web_framework_gpu_route_execute_for_action(ctx: ControllerContext,
+                                              configs: [WebFrameworkGpuRouteConfig],
+                                              controller_name: text,
+                                              action_name: text,
+                                              state: GpuWdbQueueState,
+                                              registry: GpuWdbLibraryRegistry,
+                                              gpu_available: bool,
+                                              cpu_fallback_available: bool,
+                                              budget: GpuWdbBudget,
+                                              response: HttpResponseData) -> WebFrameworkGpuRouteAdoption:
+    for config in configs:
+        if web_framework_gpu_route_matches(config, controller_name, action_name):
+            return WebFrameworkGpuRouteAdoption(
+                matched: true,
+                reason: "matched-gpu-route-config",
+                execution: web_framework_gpu_route_execute(
+                    ctx,
+                    config,
+                    state,
+                    registry,
+                    gpu_available,
+                    cpu_fallback_available,
+                    budget,
+                    response
+                )
+            )
+
+    val fallback_config = web_framework_gpu_route_config(
+        controller_name,
+        action_name,
+        WebGpuRouteKind.HttpControlPlane,
+        1,
+        1
+    )
+    WebFrameworkGpuRouteAdoption(
+        matched: false,
+        reason: "no-gpu-route-config",
+        execution: web_framework_gpu_route_execute(
+            ctx,
+            fallback_config,
+            state,
+            registry,
+            false,
+            cpu_fallback_available,
+            budget,
+            response
+        )
+    )
+
+fn web_framework_gpu_route_execute_device_validated_for_action(ctx: ControllerContext,
+                                                               configs: [WebFrameworkGpuRouteConfig],
+                                                               controller_name: text,
+                                                               action_name: text,
+                                                               profile: WebGpuOffloadProfile,
+                                                               backend: GpuWdbDeviceBackend,
+                                                               expected_generation: i64,
+                                                               gpu_candidate_response: HttpResponseData,
+                                                               started_us: i64,
+                                                               finished_us: i64,
+                                                               measured_device_time_us: i64,
+                                                               timing_source: text,
+                                                               response: HttpResponseData) -> WebFrameworkGpuRouteValidatedAdoption:
+    for config in configs:
+        if web_framework_gpu_route_matches(config, controller_name, action_name):
+            return WebFrameworkGpuRouteValidatedAdoption(
+                matched: true,
+                reason: "matched-gpu-route-config",
+                execution: web_framework_gpu_route_execute_device_validated(
+                    ctx,
+                    config,
+                    profile,
+                    backend,
+                    expected_generation,
+                    gpu_candidate_response,
+                    started_us,
+                    finished_us,
+                    measured_device_time_us,
+                    timing_source,
+                    response
+                )
+            )
+
+    val fallback_config = web_framework_gpu_route_config(
+        controller_name,
+        action_name,
+        WebGpuRouteKind.HttpControlPlane,
+        1,
+        1
+    )
+    WebFrameworkGpuRouteValidatedAdoption(
+        matched: false,
+        reason: "no-gpu-route-config",
+        execution: web_framework_gpu_route_execute_device_validated(
+            ctx,
+            fallback_config,
+            web_gpu_profile_cpu_only("web-framework-control-plane"),
+            backend,
+            expected_generation,
+            gpu_candidate_response,
+            started_us,
+            finished_us,
+            measured_device_time_us,
+            timing_source,
+            response
+        )
+    )
+
+fn web_framework_gpu_route_execute_scheduled_default(ctx: ControllerContext,
+                                                     config: WebFrameworkGpuRouteConfig,
+                                                     state: GpuWdbQueueState,
+                                                     registry: GpuWdbLibraryRegistry,
+                                                     gpu_available: bool,
+                                                     cpu_fallback_available: bool,
+                                                     schedule_class: GpuWdbScheduleClass,
+                                                     allow_defer: bool,
+                                                     response: HttpResponseData) -> WebFrameworkGpuRouteExecution:
+    web_framework_gpu_route_execute_scheduled(
+        ctx,
+        config,
+        state,
+        registry,
+        gpu_available,
+        cpu_fallback_available,
+        gpu_wdb_default_budget(),
+        schedule_class,
+        allow_defer,
+        response
+    )
+
+fn web_framework_gpu_route_used_gpu(execution: WebFrameworkGpuRouteExecution) -> bool:
+    web_gpu_route_offload_used_gpu(execution.offload)

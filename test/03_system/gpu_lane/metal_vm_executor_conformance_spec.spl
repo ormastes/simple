@@ -1,0 +1,245 @@
+# Host-aware system spec: SVM-G D3 conformance vectors driven through a real
+# Metal device via MetalVmExecutor (stream N3 of the Metal GPU lane).
+#
+# Design: doc/05_design/app/tools/metal_gpu_lane_and_vulkan_jit_notebook_architecture_2026-08-09.md
+# section 5, on top of doc/05_design/runtime/gpu_remote_interpreter_architecture.md
+# section 4.1/4.2-4.4/6.3.
+#
+# ===========================================================================
+# WHY THIS SPEC IS SELF-DESCRIBING -- read before "fixing" a green run
+# ===========================================================================
+# On this repo's Linux hosts there is NO Metal, ever: the Rust runtime's Metal
+# path is `#[cfg(target_os = "macos")]`, so `rt_metal_is_available()` hard-
+# returns false and `MetalLaneSession.probe()` returns
+# "skip:metal-unavailable-not-macos". This spec therefore SKIPS here, and that
+# skip is CORRECT -- it is not a failure to repair and not a device result to
+# fabricate.
+#
+# But a spec that passes either by skipping OR by matching proves nothing on
+# its own: a reader cannot tell which branch ran, so a green tick is
+# uninformative. The sibling `vulkan_vm_executor_conformance_spec.spl` has
+# exactly that shape. This one does not:
+#
+#   1. EVERY branching `it` PRINTS a line naming the branch it took --
+#      "[metal_vm_executor_conformance] SKIPPED: <reason>" or
+#      "[metal_vm_executor_conformance] DEVICE-RAN: ...". Grep the spec output
+#      for `SKIPPED:` vs `DEVICE-RAN:` and you know, without reading this file,
+#      which one happened. This uses `print`, NOT `step(...)`: step text is
+#      swallowed on a PASSING run (verified -- a step-only marker is invisible
+#      exactly when you need it, i.e. on the green run you are trying to
+#      interpret), which is the whole failure mode this guards against.
+#   2. The skip branch asserts the reason is the EXPECTED one, so a *different*
+#      skip (a Mac with no device, a bad device ordinal) is still visible as a
+#      distinct string rather than being laundered into "skipped, fine".
+#   3. The device branch carries a LAUNCH-COUNT FLOOR: it asserts the number
+#      of vectors actually dispatched exceeds a threshold no skip path could
+#      ever reach. That is what makes the device branch POSITIVE proof of a
+#      real run rather than a vacuous pass -- the same technique that caught a
+#      fake Vulkan run on P6b (sabotage produced "expected 20 to be greater
+#      than 100000").
+#
+# DEVICE VERIFICATION STATUS: the `DEVICE-RAN` branch below has NEVER
+# EXECUTED. It cannot execute on Linux. Nothing in this file constitutes
+# evidence that the Metal kernel computes correct results; it is structurally
+# complete and host-aware-skip-clean, and no more than that until a real Mac
+# runs it. Tracked in
+# doc/08_tracking/bug/metal_gpu_lane_device_verification_pending_2026-08-09.md.
+
+use std.spipe.*
+use std.gc_async_mut.gpu_lane.metal_vm_executor.{MetalVmExecutor, SvmgRunOutcome}
+use std.gc_async_mut.gpu_lane.metal_lane_session.{MetalLaneSession}
+use std.sffi.io.{file_read_text}
+use test.fixtures.svmg.conformance_vectors.{ConformanceVector, all_vectors}
+
+# MSL SOURCE, not a compiled artifact -- Metal compiles the kernel at runtime
+# through rt_metal_compile_shader, and there is no offline metal/metallib
+# toolchain on a non-macOS build host. See metal_vm_executor.spl's module
+# docstring for why this differs from the .ptx/.spv siblings.
+val _KERNEL_MSL_PATH: text = "src/lib/gc_async_mut/gpu_lane/svmg_metal_kernel.metal"
+
+# The one skip reason this host is expected to produce. Any other skip string
+# is reported verbatim rather than being silently accepted as equivalent.
+val _EXPECTED_HOST_SKIP: text = "skip:metal-unavailable-not-macos"
+
+# "mem_store_load_byte" is EXCLUDED from the bulk tally -- not a kernel defect,
+# a real host/device semantic divergence already filed as
+# doc/08_tracking/bug/svmg_device_arena_code_coresidency_diverges_from_ref_vm_2026-08-07.md
+# and reproduced identically on CUDA and Vulkan. ref_vm.spl keeps `code` and
+# `arena` as two SEPARATE host arrays, so a STORE8 into DATA can never perturb
+# instruction fetch. Every real device has ONE buffer (Metal's arena MTLBuffer
+# no less than CUDA's arena_ptr or Vulkan's SSBO), matching the SGP wire
+# format's literal meaning that code_off/code_len locate code WITHIN the single
+# arena. That vector stores 200 to absolute arena offset 50, which lands inside
+# its own code footprint (code_off=36, code_len=25 -> [36,61)) -- byte 2 of the
+# immediate of the very next `PUSHI 1` -- so the pushed value becomes
+# 1 | (200<<16) = 13107201. This is predicted, not observed, for Metal: it is
+# the arithmetic consequence of single-buffer co-residency, which the MSL
+# kernel shares by construction. If a real Mac ever shows a DIFFERENT value
+# here, that is a genuine Metal finding and must be filed, not assimilated.
+val _SELF_MODIFYING_CODE_DIVERGENCE_VECTOR: text = "mem_store_load_byte"
+val _SELF_MODIFYING_CODE_DIVERGENT_PASS: i64 = 13107201
+
+# Launch-count floor for the device branch. The D3 vector table is far larger
+# than this; a skip path dispatches ZERO. Any number at or below this means
+# the "device run" did not actually drive the device.
+val _MIN_DEVICE_LAUNCHES: i64 = 20
+
+fn _probe() -> text:
+    var session = MetalLaneSession.create()
+    session.probe()
+
+describe "MetalVmExecutor -- SVM-G D3 conformance vectors on a live Metal device":
+    """
+    Either SKIPS with a named, asserted reason (every non-macOS host), or runs
+    every D3 conformance vector through the checked-in svmg_metal_kernel.metal
+    on a live Metal device and proves the run was real via a launch-count
+    floor. The spec output always states which of the two happened.
+    """
+
+    it "should skip cleanly with a named reason, or run every conformance vector on a live device":
+        step("Probe for a Metal-capable device")
+        val probe_result = _probe()
+
+        if probe_result.starts_with("skip:"):
+            print("[metal_vm_executor_conformance] SKIPPED: " + probe_result +
+                " (conformance-vector table) -- no Metal device on this host; " +
+                "the DEVICE-RAN branch did NOT run")
+            # Assert the SPECIFIC reason, not merely "some skip": a Mac that
+            # skips for a different reason must not look identical to this.
+            assert_equal(probe_result, _EXPECTED_HOST_SKIP)
+        else:
+            print("[metal_vm_executor_conformance] DEVICE-RAN: live Metal device present " +
+                "(conformance-vector table)")
+            step("Load the checked-in svmg_metal_kernel.metal source")
+            val kernel_msl = file_read_text(_KERNEL_MSL_PATH)
+            expect(kernel_msl.len()).to_be_greater_than(0)
+
+            step("Initialize the executor (compiles MSL + builds the compute pipeline)")
+            var executor = MetalVmExecutor.create()
+            val init_err = executor.init(kernel_msl)
+            expect(init_err).to_equal("")
+
+            step("Run every D3 conformance vector and tally pass/fail")
+            val vectors = all_vectors()
+            var launches = 0
+            var passed = 0
+            var failed = 0
+            var failed_names = ""
+            for v in vectors:
+                if v.name == _SELF_MODIFYING_CODE_DIVERGENCE_VECTOR:
+                    continue
+                val outcome = executor.run_source(v.source, v.step_budget, v.entry_pc)
+                launches = launches + 1
+                val ok = (outcome.ok and outcome.trapped == v.expected_trapped and
+                    outcome.timed_out == v.expected_timed_out and
+                    outcome.sentinel == v.expected_sentinel and
+                    outcome.log_text == v.expected_log and
+                    outcome.records.len() == v.expected_records.len())
+                if ok:
+                    passed = passed + 1
+                else:
+                    failed = failed + 1
+                    failed_names = failed_names + v.name + " "
+
+            print("[metal_vm_executor_conformance] DEVICE-RAN: {launches} launches, " +
+                "{passed} vectors passed")
+            step("DEVICE-RAN: {launches} real device launches, {passed}/{vectors.len() - 1} " +
+                "vectors passed (1 excluded: {_SELF_MODIFYING_CODE_DIVERGENCE_VECTOR})" +
+                (if failed > 0: " (failed: " + failed_names + ")" else: ""))
+
+            # POSITIVE PROOF the device branch really drove the device: a skip
+            # path reaches zero launches, and no plausible short-circuit
+            # reaches this floor.
+            expect(launches).to_be_greater_than(_MIN_DEVICE_LAUNCHES)
+            assert_equal(failed, 0)
+            assert_equal(passed, vectors.len() - 1)
+
+            step("Separately verify the excluded vector produces the DEVICE-correct " +
+                "self-modified result (not ref_vm's host-side expectation)")
+            var divergent_vector = vectors[0]
+            for v in vectors:
+                if v.name == _SELF_MODIFYING_CODE_DIVERGENCE_VECTOR:
+                    divergent_vector = v
+            val divergent_outcome = executor.run_source(
+                divergent_vector.source, divergent_vector.step_budget, divergent_vector.entry_pc)
+            assert_true(divergent_outcome.ok)
+            assert_equal(divergent_outcome.records.len(), 1)
+            assert_equal(divergent_outcome.records[0].passed, _SELF_MODIFYING_CODE_DIVERGENT_PASS)
+            assert_equal(divergent_outcome.records[0].value, 200)
+
+            step("Shut the executor down cleanly")
+            expect(executor.shutdown()).to_equal("")
+
+    it "should TRAP (not hang/device-lose) on call-stack overflow (33 nested CALLs, csp cap 32)":
+        step("Probe for a Metal-capable device")
+        val probe_result = _probe()
+
+        if probe_result.starts_with("skip:"):
+            print("[metal_vm_executor_conformance] SKIPPED: " + probe_result +
+                " (call-stack-overflow trap) -- NOT verified on a device")
+            assert_equal(probe_result, _EXPECTED_HOST_SKIP)
+        else:
+            print("[metal_vm_executor_conformance] DEVICE-RAN: call-stack-overflow trap " +
+                "on a live device")
+            val kernel_msl = file_read_text(_KERNEL_MSL_PATH)
+            var executor = MetalVmExecutor.create()
+            val init_err = executor.init(kernel_msl)
+            expect(init_err).to_equal("")
+
+            # 33 back-to-back CALLs into the very next instruction (each CALL
+            # is 3 bytes: opcode + u16 target), pushing a return address every
+            # time without ever RET-ing -- the 33rd CALL observes
+            # csp == CALL_STACK_SIZE (32) and must TRAP with TRAP_CALLOF(3),
+            # not hang or lose the device. ref_vm.step PANICS here (a host/
+            # assembler bug); a device cannot panic, so it maps to trap value
+            # 3, matching svmg_cuda_kernel.ptx's L_CALLSTACK_OVERFLOW and the
+            # SPIR-V sibling's %c_TRAP_CALLOF.
+            var source = ""
+            var i = 0
+            while i < 33:
+                source = source + "CALL {(i + 1) * 3}\n"
+                i = i + 1
+            source = source + "HALT 0"
+
+            val outcome = executor.run_source(source, 10000, 0)
+            step("DEVICE-RAN: sentinel=0x{outcome.sentinel} trapped={outcome.trapped} " +
+                "timed_out={outcome.timed_out} records={outcome.records.len()}")
+
+            assert_true(outcome.ok)
+            assert_false(outcome.timed_out)
+            assert_true(outcome.trapped)
+            assert_equal(outcome.sentinel, 0xCAFE007F)
+            # A trap is NOT a debug break, even though both live in the
+            # 0xCAFE00xx family -- see metal_vm_executor.debug_break_of.
+            assert_false(outcome.debug_break)
+            assert_equal(outcome.records.len(), 1)
+            assert_equal(outcome.records[0].passed, 0)
+            assert_equal(outcome.records[0].value, 3)
+
+            expect(executor.shutdown()).to_equal("")
+
+    it "should report the Metal probe reason unchanged through the executor wrapper":
+        step("MetalVmExecutor.probe forwards MetalLaneSession.probe verbatim, so a " +
+            "caller can decide to skip before building anything device-side")
+        var executor = MetalVmExecutor.create()
+        val via_executor = executor.probe()
+        val via_session = _probe()
+        assert_equal(via_executor, via_session)
+
+        if via_executor.starts_with("skip:"):
+            print("[metal_vm_executor_conformance] SKIPPED: " + via_executor +
+                " (probe routing) -- routing verified on the skip path")
+            assert_equal(via_executor, _EXPECTED_HOST_SKIP)
+        else:
+            print("[metal_vm_executor_conformance] DEVICE-RAN: probe reports a usable device")
+            assert_equal(via_executor, "")
+
+    it "should refuse to run before init, on ANY host (no device required)":
+        step("This assertion runs on EVERY host, Metal or not: a run_source " +
+            "before init must fail closed, never dispatch, never silently no-op")
+        var executor = MetalVmExecutor.create()
+        val outcome = executor.run_source("HALT 0", 1000, 0)
+        assert_false(outcome.ok)
+        assert_equal(outcome.error, "metal-vm-entry-not-loaded")
+        assert_equal(outcome.out_arena.len(), 0)
+        assert_false(outcome.debug_break)

@@ -1,0 +1,143 @@
+# Fail-closed provenance envelope for a native X25519MLKEM768 evidence runner.
+mod lib.common.crypto.x25519_mlkem768.runner_artifact_provenance
+
+use lib.common.crypto.x25519_mlkem768.evidence_contract.{
+    X25519MlKem768EvidenceBackend, x25519_mlkem768_evidence_backend_name}
+
+val X25519_MLKEM768_RUNNER_ARTIFACT_PROVENANCE_SCHEMA =
+    "x25519mlkem768-runner-artifact-provenance-v1"
+
+struct X25519MlKem768RunnerArtifactProvenance:
+    backend: X25519MlKem768EvidenceBackend
+    artifact_path: text
+    artifact_sha256: text
+    source_path: text
+    source_sha256: text
+    compiler_artifact_sha256: text
+    compiler_provenance_sha256: text
+    build_command_sha256: text
+
+# The shell builder publishes this exact text through a temporary sibling and
+# rename.  Keeping the encoder here gives every producer and consumer one
+# source-level contract; it is intentionally for the full-operation runner,
+# never an NTT-only probe.
+fn x25519_mlkem768_render_runner_artifact_provenance(
+        provenance: X25519MlKem768RunnerArtifactProvenance
+        ) -> Result<text, text>:
+    val encoded =
+        "schema=" + X25519_MLKEM768_RUNNER_ARTIFACT_PROVENANCE_SCHEMA + "\n" +
+        "status=pass\n" +
+        "backend=" + x25519_mlkem768_evidence_backend_name(
+            provenance.backend) + "\n" +
+        "artifact_path=" + provenance.artifact_path + "\n" +
+        "artifact_sha256=" + provenance.artifact_sha256 + "\n" +
+        "source_path=" + provenance.source_path + "\n" +
+        "source_sha256=" + provenance.source_sha256 + "\n" +
+        "compiler_artifact_sha256=" + provenance.compiler_artifact_sha256 + "\n" +
+        "compiler_provenance_sha256=" + provenance.compiler_provenance_sha256 + "\n" +
+        "build_command_sha256=" + provenance.build_command_sha256 + "\n" +
+        "completed_gate=native-runner-build\n"
+    match x25519_mlkem768_parse_runner_artifact_provenance(encoded):
+        case Ok(_): Ok(encoded)
+        case Err(reason): Err(reason)
+
+fn _runner_provenance_sha256_valid(value: text) -> bool:
+    if value.len() != 64: return false
+    var index: i64 = 0
+    while index < value.len():
+        val code = value.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)):
+            return false
+        index = index + 1
+    true
+
+fn _runner_provenance_path_valid(value: text) -> bool:
+    value != "" and not value.starts_with("/") and not value.starts_with("\\") and
+        not value.starts_with("../") and not value.contains("/../") and
+        not value.contains("//") and not value.contains("\\") and
+        value == value.trim()
+
+fn _runner_provenance_backend(value: text
+        ) -> Result<X25519MlKem768EvidenceBackend, text>:
+    if value == "cuda": return Ok(X25519MlKem768EvidenceBackend.Cuda)
+    if value == "vulkan": return Ok(X25519MlKem768EvidenceBackend.Vulkan)
+    if value == "metal": return Ok(X25519MlKem768EvidenceBackend.Metal)
+    Err("runner-provenance-backend-invalid")
+
+fn x25519_mlkem768_parse_runner_artifact_provenance(encoded: text
+        ) -> Result<X25519MlKem768RunnerArtifactProvenance, text>:
+    if not encoded.ends_with("\n") or encoded.ends_with("\n\n"):
+        return Err("runner-provenance-termination-invalid")
+    val allowed = ["schema", "status", "backend", "artifact_path",
+        "artifact_sha256", "source_path", "source_sha256",
+        "compiler_artifact_sha256", "compiler_provenance_sha256",
+        "build_command_sha256", "completed_gate"]
+    var fields: Dict<text, text> = {}
+    for line in encoded.trim().split("\n"):
+        val separator = line.index_of("=")
+        if separator < 1: return Err("runner-provenance-field-invalid")
+        val key = line.substring(0, separator)
+        val value = line.substring(separator + 1, line.len())
+        if not allowed.contains(key): return Err("runner-provenance-field-unknown-" + key)
+        if fields.has(key): return Err("runner-provenance-duplicate-" + key)
+        fields[key] = value
+    if fields.len().to_i64() != 11:
+        return Err("runner-provenance-field-count-invalid")
+    if (fields["schema"] ?? "") != X25519_MLKEM768_RUNNER_ARTIFACT_PROVENANCE_SCHEMA:
+        return Err("runner-provenance-schema-invalid")
+    if (fields["status"] ?? "") != "pass":
+        return Err("runner-provenance-status-not-pass")
+    if (fields["completed_gate"] ?? "") != "native-runner-build":
+        return Err("runner-provenance-completed-gate-invalid")
+    val backend = _runner_provenance_backend(fields["backend"] ?? "")?
+    val artifact_path = fields["artifact_path"] ?? ""
+    val source_path = fields["source_path"] ?? ""
+    if (not _runner_provenance_path_valid(artifact_path) or
+            not _runner_provenance_path_valid(source_path)):
+        return Err("runner-provenance-path-invalid")
+    val artifact_sha256 = fields["artifact_sha256"] ?? ""
+    val source_sha256 = fields["source_sha256"] ?? ""
+    val compiler_artifact_sha256 = fields["compiler_artifact_sha256"] ?? ""
+    val compiler_provenance_sha256 = fields["compiler_provenance_sha256"] ?? ""
+    val build_command_sha256 = fields["build_command_sha256"] ?? ""
+    if (not _runner_provenance_sha256_valid(artifact_sha256) or
+            not _runner_provenance_sha256_valid(source_sha256) or
+            not _runner_provenance_sha256_valid(compiler_artifact_sha256) or
+            not _runner_provenance_sha256_valid(compiler_provenance_sha256) or
+            not _runner_provenance_sha256_valid(build_command_sha256)):
+        return Err("runner-provenance-sha256-invalid")
+    Ok(X25519MlKem768RunnerArtifactProvenance(
+        backend: backend, artifact_path: artifact_path,
+        artifact_sha256: artifact_sha256, source_path: source_path,
+        source_sha256: source_sha256,
+        compiler_artifact_sha256: compiler_artifact_sha256,
+        compiler_provenance_sha256: compiler_provenance_sha256,
+        build_command_sha256: build_command_sha256))
+
+fn x25519_mlkem768_runner_artifact_provenance_reason(
+        provenance: X25519MlKem768RunnerArtifactProvenance,
+        backend: X25519MlKem768EvidenceBackend, artifact_path: text,
+        artifact_sha256: text, source_path: text, source_sha256: text,
+        compiler_artifact_sha256: text, compiler_provenance_sha256: text
+        ) -> text:
+    if provenance.backend != backend:
+        return "runner-provenance-backend-mismatch"
+    if provenance.artifact_path != artifact_path:
+        return "runner-provenance-artifact-path-mismatch"
+    if provenance.artifact_sha256 != artifact_sha256:
+        return "runner-provenance-artifact-sha256-mismatch"
+    if provenance.source_path != source_path:
+        return "runner-provenance-source-path-mismatch"
+    if provenance.source_sha256 != source_sha256:
+        return "runner-provenance-source-sha256-mismatch"
+    if provenance.compiler_artifact_sha256 != compiler_artifact_sha256:
+        return "runner-provenance-compiler-artifact-mismatch"
+    if provenance.compiler_provenance_sha256 != compiler_provenance_sha256:
+        return "runner-provenance-compiler-provenance-mismatch"
+    ""
+
+export X25519_MLKEM768_RUNNER_ARTIFACT_PROVENANCE_SCHEMA
+export X25519MlKem768RunnerArtifactProvenance
+export x25519_mlkem768_parse_runner_artifact_provenance
+export x25519_mlkem768_render_runner_artifact_provenance
+export x25519_mlkem768_runner_artifact_provenance_reason

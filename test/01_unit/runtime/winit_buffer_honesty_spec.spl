@@ -1,0 +1,90 @@
+"""rt_winit_buffer_* honesty contract on a display-less host.
+
+The 13 rt_winit_buffer_* / rt_winit_save_pixels_bmp symbols used to be
+interpreter-only match arms in winit_sffi_buffer.rs that fabricated success
+(a plausible-looking buffer id from `rt_winit_buffer_create`, `true` from
+`rt_winit_buffer_present`) with no real winit surface behind them. That file
+is now a thin dlopen router: it loads the sibling `spl_winit` cdylib (the
+SAME sibling gui_renderer.spl:96-144 loads) and verifies all 13 exports are
+present before forwarding a single call; the cdylib's own
+`rt_winit_buffer_create`/`rt_winit_buffer_present` are in turn wired to a
+REAL winit event loop and window surface, so they cannot succeed without one.
+
+This host has DISPLAY/WAYLAND_DISPLAY unset, so winit's own event-loop
+construction genuinely fails here -- these assertions are about honest
+failure text, not pixels. Requires a seed built WITH the `gui` cargo feature
+(`cargo build --release --bin simple --features gui` from
+src/compiler_rust); without that feature `rt_winit_buffer_*` is not a
+registered extern at all (a different, also-honest failure mode -- link
+error, not fake success -- that this spec does not need to distinguish from).
+
+Two run modes exercise two DIFFERENT honest-failure reasons with distinct
+message text (verified manually as part of this lane's gate, by running this
+same file with the process CWD pointed at a temp copy of build/sffi/ whose
+libspl_winit.so has been renamed away -- never the real one):
+  * cdylib present, no display -> "no live winit surface" (winit's own
+    event-loop construction genuinely fails headless).
+  * cdylib absent -> "no rt_winit_buffer_* cdylib found (tried: ...)",
+    naming every candidate soname and the specific dlopen error for each.
+This spec's own assertions accept either reason (both are honest,
+non-fabricated messages); the two-way text diff proving they really differ
+is captured in the lane's report, not encoded as an in-process env toggle
+(the router's cdylib handle is a `OnceLock`, resolved once per process, so a
+single process cannot exercise both code paths).
+"""
+
+use std.spec.{describe, it, expect}
+
+extern fn rt_winit_buffer_create(width: i64, height: i64, fill_color: i64) -> i64
+extern fn rt_winit_buffer_present(window_id: i64, buffer_id: i64) -> bool
+extern fn rt_winit_buffer_fill_rect(buf: i64, x: i64, y: i64, w: i64, h: i64, color: i64) -> bool
+extern fn rt_winit_buffer_free(buf: i64) -> bool
+extern fn rt_winit_buffer_read_pixel(buf: i64, x: i64, y: i64) -> i64
+extern fn rt_winit_buffer_get_pixels(buf: i64) -> [i64]
+extern fn rt_winit_get_last_error() -> text
+
+describe "rt_winit_buffer_* honesty on a display-less host":
+    it "rt_winit_buffer_create never returns a fake id without a real winit surface":
+        val id = rt_winit_buffer_create(4, 4, 0)
+        expect(id).to_equal(0)
+
+    it "rt_winit_buffer_create's failure is a non-empty structured message, not silence":
+        val id2 = rt_winit_buffer_create(4, 4, 0)
+        expect(id2).to_equal(0)
+        val msg = rt_winit_get_last_error()
+        expect(msg.len() > 0).to_equal(true)
+
+    it "rt_winit_buffer_present NEVER returns true without a real window surface":
+        val ok = rt_winit_buffer_present(0, 0)
+        expect(ok).to_equal(false)
+
+    it "rt_winit_buffer_present fails honestly even for plausible-looking nonexistent handles":
+        val ok2 = rt_winit_buffer_present(999999, 888888)
+        expect(ok2).to_equal(false)
+
+    it "rt_winit_buffer_fill_rect on an invalid buffer handle fails, not silently succeeds":
+        val ok3 = rt_winit_buffer_fill_rect(424242, 0, 0, 2, 2, 0)
+        expect(ok3).to_equal(false)
+
+    it "rt_winit_buffer_read_pixel on an invalid handle returns 0, not fabricated pixel data":
+        expect(rt_winit_buffer_read_pixel(424242, 0, 0)).to_equal(0)
+
+    it "rt_winit_buffer_get_pixels on an invalid handle returns an empty array, not fabricated pixels":
+        val pixels = rt_winit_buffer_get_pixels(424242)
+        expect(pixels.len()).to_equal(0)
+
+    it "rt_winit_buffer_free on an invalid handle does not crash":
+        val freed = rt_winit_buffer_free(424242)
+        expect(freed).to_equal(true)
+
+    it "the failure text names a specific honest reason, never the old lying-success text":
+        val id3 = rt_winit_buffer_create(4, 4, 0)
+        expect(id3).to_equal(0)
+        val msg2 = rt_winit_get_last_error()
+        # Exactly one of these two reasons, depending on whether the sibling
+        # cdylib was resolvable in THIS process (see module doc: cdylib
+        # present-but-headless vs. cdylib absent). Never empty, never a
+        # cheerful "ok"/"true"-shaped string.
+        val names_no_surface = msg2.contains("no live winit surface")
+        val names_missing_cdylib = msg2.contains("cdylib") and msg2.contains("unavailable")
+        expect(names_no_surface or names_missing_cdylib).to_equal(true)

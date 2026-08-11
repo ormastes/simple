@@ -1,0 +1,261 @@
+# Blink HTML tokenizer — blink.html_parser.tokenizer
+#
+# Mirrors Chromium Blink's HTMLTokenizer (html_tokenizer.h) in reduced form:
+# a hand-rolled character-by-character state machine over the WHATWG HTML5
+# tokenization states, producing the [HtmlToken] stream tree_builder.spl
+# consumes.
+#
+# Supported states (WHATWG 13.2.5 subset): Data, TagOpen, EndTagOpen,
+# TagName, BeforeAttributeName, AttributeName, BeforeAttributeValue,
+# AttributeValueDoubleQuoted, AttributeValueSingleQuoted,
+# AttributeValueUnquoted, SelfClosingStartTag, MarkupDeclarationOpen
+# (comment/doctype dispatch), CommentStart/Comment/CommentEnd, Doctype.
+#
+# Character references ARE decoded, in the two places WHATWG recognises them:
+# text data (flushed Character tokens) and attribute values. Named
+# (`&amp;`), decimal (`&#233;`) and hex (`&#x2014;`) forms all resolve, via
+# the one shared implementation in `std.common.html.character_references` —
+# blink does not keep a private table. A reference that module cannot decode
+# (unterminated, unknown name, malformed or out-of-range number) is passed
+# through VERBATIM rather than replaced by a guess, so `&bogus;` reaches the
+# DOM as the literal text `&bogus;`. Comment and doctype data are NOT decoded,
+# also per spec.
+#
+# Deliberately out of scope (see html_tokenizer_spec.spl and callers):
+#   - RAWTEXT / RCDATA / script-data special modes — <script>/<style>
+#     content is tokenized as ordinary Data (Character) text, not raw text.
+#   - CDATA sections.
+#   - Malformed-input error recovery beyond "don't crash" (abrupt EOF inside
+#     a tag/comment/doctype flushes what was scanned so far).
+
+use std.blink.html_parser.token.{HtmlTokenKind, HtmlAttribute, HtmlToken}
+use std.common.html.character_references.{decode_character_references}
+
+fn _is_space(ch: i64) -> bool:
+    """ASCII whitespace per WHATWG tokenizer (space, tab, LF, CR, FF)."""
+    ch == 32 or ch == 9 or ch == 10 or ch == 13 or ch == 12
+
+fn _lower(s: text) -> text:
+    """ASCII-lowercase a string (tag/attribute names are case-insensitive)."""
+    s.to_lower()
+
+fn _flush_text(tokens: [HtmlToken], html: text, text_start: i64, i: i64) -> [HtmlToken]:
+    """Push a coalesced Character token for html[text_start:i], if non-empty.
+
+    Shared by every tag/comment/doctype/EOF boundary in tokenize_html so a
+    pending run of plain text is flushed exactly once per boundary.
+    """
+    var out = tokens
+    if text_start >= 0 and i > text_start:
+        out.push(HtmlToken(
+            kind: HtmlTokenKind.Character,
+            name: "",
+            data: decode_character_references(html.slice(text_start, i)),
+            attributes: [],
+            self_closing: false
+        ))
+    out
+
+fn tokenize_html(html: text) -> [HtmlToken]:
+    """Tokenize `html` into a flat [HtmlToken] stream, ending in Eof.
+
+    Character runs between tags are coalesced into a single Character
+    token per run (not per-char), matching the tree builder's expected
+    granularity.
+    """
+    var tokens: [HtmlToken] = []
+    val length = html.len()
+    var i = 0
+    var text_start = -1
+
+    while i < length:
+        val ch = html.char_code_at(i)
+        if ch == 60 and i + 1 < length:   # '<' with at least one more char
+            # Possible tag/comment/doctype open — peek ahead before
+            # committing, so a lone stray '<' at EOF-ish positions still
+            # falls through to plain text handling below.
+            val next = html.char_code_at(i + 1)
+            if next == 47:   # '</'
+                tokens = _flush_text(tokens, html, text_start, i)
+                text_start = -1
+                i = i + 2
+                val name_start = i
+                while i < length and html.char_code_at(i) != 62:
+                    i = i + 1
+                val name = _lower(html.slice(name_start, i).trim())
+                if i < length:
+                    i = i + 1   # consume '>'
+                tokens.push(HtmlToken(
+                    kind: HtmlTokenKind.EndTag,
+                    name: name,
+                    data: "",
+                    attributes: [],
+                    self_closing: false
+                ))
+                text_start = i
+            else if next == 33:   # '<!' — comment or doctype
+                tokens = _flush_text(tokens, html, text_start, i)
+                text_start = -1
+                if (i + 3 < length and html.char_code_at(i + 2) == 45 and
+                        html.char_code_at(i + 3) == 45):
+                    # Comment: <!-- ... -->
+                    i = i + 4
+                    val data_start = i
+                    var end_idx = -1
+                    var j = i
+                    while j + 2 < length and end_idx == -1:
+                        if (html.char_code_at(j) == 45 and
+                                html.char_code_at(j + 1) == 45 and
+                                html.char_code_at(j + 2) == 62):
+                            end_idx = j
+                        j = j + 1
+                    if end_idx == -1:
+                        # Abrupt EOF inside comment: rest of input is data.
+                        tokens.push(HtmlToken(
+                            kind: HtmlTokenKind.Comment,
+                            name: "",
+                            data: html.slice(data_start, length),
+                            attributes: [],
+                            self_closing: false
+                        ))
+                        i = length
+                    else:
+                        tokens.push(HtmlToken(
+                            kind: HtmlTokenKind.Comment,
+                            name: "",
+                            data: html.slice(data_start, end_idx),
+                            attributes: [],
+                            self_closing: false
+                        ))
+                        i = end_idx + 3
+                else:
+                    # Doctype: <!DOCTYPE name> (case-insensitive keyword).
+                    i = i + 2
+                    val decl_start = i
+                    while i < length and html.char_code_at(i) != 62:
+                        i = i + 1
+                    val decl = html.slice(decl_start, i)
+                    if i < length:
+                        i = i + 1   # consume '>'
+                    var doctype_name = _lower(decl.trim())
+                    # Strip a leading "DOCTYPE" keyword (case-insensitive)
+                    # and following whitespace to leave just the name.
+                    if doctype_name.starts_with("doctype"):
+                        doctype_name = doctype_name.slice(7, doctype_name.len()).trim()
+                    tokens.push(HtmlToken(
+                        kind: HtmlTokenKind.Doctype,
+                        name: doctype_name,
+                        data: "",
+                        attributes: [],
+                        self_closing: false
+                    ))
+                text_start = i
+            else if _is_tag_name_start(next):
+                tokens = _flush_text(tokens, html, text_start, i)
+                text_start = -1
+                i = i + 1
+                val name_start = i
+                while i < length and _is_tag_name_char(html.char_code_at(i)):
+                    i = i + 1
+                val tag_name = _lower(html.slice(name_start, i))
+                var attrs: [HtmlAttribute] = []
+                var self_closing = false
+                var done = false
+                while i < length and not done:
+                    while i < length and _is_space(html.char_code_at(i)):
+                        i = i + 1
+                    if i >= length:
+                        done = true
+                    else:
+                        val c = html.char_code_at(i)
+                        if c == 62:   # '>'
+                            i = i + 1
+                            done = true
+                        else if c == 47:   # '/'
+                            i = i + 1
+                            if i < length and html.char_code_at(i) == 62:
+                                self_closing = true
+                                i = i + 1
+                                done = true
+                        else:
+                            val attr_name_start = i
+                            while (i < length and
+                                   not _is_space(html.char_code_at(i)) and
+                                   html.char_code_at(i) != 61 and
+                                   html.char_code_at(i) != 62 and
+                                   html.char_code_at(i) != 47):
+                                i = i + 1
+                            val attr_name = _lower(html.slice(attr_name_start, i))
+                            while i < length and _is_space(html.char_code_at(i)):
+                                i = i + 1
+                            var attr_value = ""
+                            if i < length and html.char_code_at(i) == 61:   # '='
+                                i = i + 1
+                                while i < length and _is_space(html.char_code_at(i)):
+                                    i = i + 1
+                                if i < length and html.char_code_at(i) == 34:   # '"'
+                                    i = i + 1
+                                    val v_start = i
+                                    while i < length and html.char_code_at(i) != 34:
+                                        i = i + 1
+                                    attr_value = html.slice(v_start, i)
+                                    if i < length:
+                                        i = i + 1
+                                else if i < length and html.char_code_at(i) == 39:   # '\''
+                                    i = i + 1
+                                    val v_start = i
+                                    while i < length and html.char_code_at(i) != 39:
+                                        i = i + 1
+                                    attr_value = html.slice(v_start, i)
+                                    if i < length:
+                                        i = i + 1
+                                else:
+                                    val v_start = i
+                                    while (i < length and
+                                           not _is_space(html.char_code_at(i)) and
+                                           html.char_code_at(i) != 62):
+                                        i = i + 1
+                                    attr_value = html.slice(v_start, i)
+                            if attr_name.len() > 0:
+                                # Attribute values are one of the two places
+                                # character references are recognised (the
+                                # other is text data). `href="?a=1&amp;b=2"`
+                                # must reach the DOM as `?a=1&b=2`.
+                                attrs.push(HtmlAttribute(name: attr_name, value: decode_character_references(attr_value)))
+                tokens.push(HtmlToken(
+                    kind: HtmlTokenKind.StartTag,
+                    name: tag_name,
+                    data: "",
+                    attributes: attrs,
+                    self_closing: self_closing
+                ))
+                text_start = i
+            else:
+                # '<' not followed by a recognizable tag/comment/doctype
+                # opener — treat as plain text.
+                if text_start == -1:
+                    text_start = i
+                i = i + 1
+        else:
+            if text_start == -1:
+                text_start = i
+            i = i + 1
+    tokens = _flush_text(tokens, html, text_start, i)
+    text_start = -1
+    tokens.push(HtmlToken(
+        kind: HtmlTokenKind.Eof,
+        name: "",
+        data: "",
+        attributes: [],
+        self_closing: false
+    ))
+    tokens
+
+fn _is_tag_name_start(ch: i64) -> bool:
+    """First char after '<' that starts a tag name: ASCII letter."""
+    (ch >= 65 and ch <= 90) or (ch >= 97 and ch <= 122)
+
+fn _is_tag_name_char(ch: i64) -> bool:
+    """Subsequent tag-name chars: letters, digits, '-', ':'."""
+    (ch >= 65 and ch <= 90) or (ch >= 97 and ch <= 122) or
+    (ch >= 48 and ch <= 57) or ch == 45 or ch == 58

@@ -1,0 +1,1562 @@
+#!/bin/sh
+# Canonical Stage 3 bootstrap provenance helpers.
+#
+# This file is sourced by bootstrap-from-scratch.sh and by consumers that need
+# to admit the bootstrap compiler without mistaking it for the full CLI.
+
+bootstrap_stage3_provenance_fail() {
+    echo "bootstrap Stage 3 provenance: FAIL ($1)" >&2
+    return 1
+}
+
+bootstrap_stage3_hash_file() {
+    [ -f "$1" ] || return 1
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    elif command -v sha256 >/dev/null 2>&1; then
+        sha256 -q "$1"
+    else
+        openssl dgst -sha256 "$1" | awk '{print $NF}'
+    fi
+}
+
+bootstrap_stage3_hash_stream() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 | awk '{print $1}'
+    elif command -v sha256 >/dev/null 2>&1; then
+        sha256 | awk '{print $NF}'
+    else
+        openssl dgst -sha256 | awk '{print $NF}'
+    fi
+}
+
+# Hash an ordered newline-delimited path manifest without starting a hash and
+# parser process for every file. The authority manifests already reject
+# newline-bearing paths; NUL-delimited xargs keeps every other shell character
+# opaque while batching to the host's argument limit. sha256/openssl retain the
+# portable single-file path because their multi-file output formats differ.
+bootstrap_stage3_hash_path_list() {
+    [ "$#" -eq 1 ] || return 1
+    bootstrap_stage3_hash_paths=$1
+    [ -f "$bootstrap_stage3_hash_paths" ] || return 1
+    [ -s "$bootstrap_stage3_hash_paths" ] || return 0
+    if command -v xargs >/dev/null 2>&1 &&
+        printf '' | xargs -0 true >/dev/null 2>&1; then
+        if command -v sha256sum >/dev/null 2>&1; then
+            while IFS= read -r bootstrap_stage3_hash_path; do
+                printf '%s\0' "$bootstrap_stage3_hash_path"
+            done <"$bootstrap_stage3_hash_paths" |
+                xargs -0 sha256sum --
+            return
+        elif command -v shasum >/dev/null 2>&1; then
+            while IFS= read -r bootstrap_stage3_hash_path; do
+                printf '%s\0' "$bootstrap_stage3_hash_path"
+            done <"$bootstrap_stage3_hash_paths" |
+                xargs -0 shasum -a 256 --
+            return
+        fi
+    fi
+    while IFS= read -r bootstrap_stage3_hash_path; do
+        bootstrap_stage3_path_hash=$(
+            bootstrap_stage3_hash_file "$bootstrap_stage3_hash_path"
+        ) || return 1
+        printf '%s  %s\n' "$bootstrap_stage3_path_hash" \
+            "$bootstrap_stage3_hash_path" || return 1
+    done <"$bootstrap_stage3_hash_paths"
+}
+
+bootstrap_stage3_args_sha256() {
+    for bootstrap_stage3_arg in "$@"; do
+        printf '%s:%s\n' "${#bootstrap_stage3_arg}" "$bootstrap_stage3_arg"
+    done | bootstrap_stage3_hash_stream
+}
+
+# Return one canonical absolute path and reject a symlinked leaf.  pwd -P
+# resolves every parent component, so comparing a recorded path with this value
+# also rejects aliases through symlinked directories.
+bootstrap_stage3_canonical_path() {
+    bootstrap_stage3_input=$1
+    case "$bootstrap_stage3_input" in
+        /*) ;;
+        *) return 1 ;;
+    esac
+    [ ! -L "$bootstrap_stage3_input" ] || return 1
+    bootstrap_stage3_parent=$(
+        CDPATH= cd -- "$(dirname -- "$bootstrap_stage3_input")" &&
+            pwd -P
+    ) || return 1
+    printf '%s/%s\n' "$bootstrap_stage3_parent" \
+        "$(basename -- "$bootstrap_stage3_input")"
+}
+
+bootstrap_stage3_canonical_file() {
+    [ -f "$1" ] || return 1
+    bootstrap_stage3_canonical_path "$1"
+}
+
+# Bind an existing directory authority to its physical root.  A worktree may
+# intentionally provide the authority root as a symlink to a completed Rust
+# bootstrap tree.  Resolving only the root keeps directory_snapshot's stricter
+# invariant intact: symlinks contained by that tree are still rejected.
+bootstrap_stage3_physical_directory() (
+    [ -d "$1" ] || return 1
+    CDPATH= cd -- "$1" && pwd -P
+)
+
+bootstrap_stage3_host_platform() {
+    bootstrap_stage3_host_arch=$(uname -m 2>/dev/null) || return 1
+    bootstrap_stage3_host_os=$(uname -s 2>/dev/null) || return 1
+    case "$bootstrap_stage3_host_arch:$bootstrap_stage3_host_os" in
+        arm64:Darwin|aarch64:Darwin) echo aarch64-apple-darwin ;;
+        x86_64:Darwin) echo x86_64-apple-darwin ;;
+        x86_64:Linux) echo x86_64-unknown-linux-gnu ;;
+        arm64:Linux|aarch64:Linux) echo aarch64-unknown-linux-gnu ;;
+        x86_64:FreeBSD) echo x86_64-unknown-freebsd ;;
+        arm64:FreeBSD|aarch64:FreeBSD) echo aarch64-unknown-freebsd ;;
+        x86_64:MINGW*|x86_64:MSYS*|x86_64:CYGWIN*|x86_64:Windows*)
+            case "${SIMPLE_WINDOWS_ABI:-${MSYSTEM:+gnu}}" in
+                gnu) echo x86_64-pc-windows-gnu ;;
+                ""|msvc) echo x86_64-pc-windows-msvc ;;
+                *) return 1 ;;
+            esac
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+bootstrap_stage3_target_c_compiler() {
+    case "$1" in
+        *-pc-windows-msvc)
+            command -v cl 2>/dev/null ||
+                command -v cl.exe 2>/dev/null ||
+                command -v clang-cl 2>/dev/null ||
+                command -v clang-cl.exe 2>/dev/null
+            ;;
+        x86_64-pc-windows-gnu)
+            command -v "${CC_x86_64_pc_windows_gnu:-gcc}" 2>/dev/null
+            ;;
+        *)
+            command -v cc 2>/dev/null
+            ;;
+    esac
+}
+
+bootstrap_stage3_resolve_rust_toolchain() (
+    [ "$#" -eq 2 ] || return 1
+    bootstrap_stage3_rust_root=$1
+    bootstrap_stage3_rust_path=$2
+    [ "$(bootstrap_stage3_canonical_path \
+        "$bootstrap_stage3_rust_root")" = \
+        "$bootstrap_stage3_rust_root" ] || return 1
+    case "$bootstrap_stage3_rust_path" in
+        /*) ;;
+        *) return 1 ;;
+    esac
+    if printf '%s\n' "$bootstrap_stage3_rust_path" |
+        grep -Eq '(^|:)([^/]|$)'; then
+        return 1
+    fi
+    PATH=$bootstrap_stage3_rust_path
+    export PATH
+    bootstrap_stage3_rust_policy=\
+"$bootstrap_stage3_rust_root/src/compiler_rust/rust-toolchain.toml"
+    [ "$(bootstrap_stage3_canonical_file \
+        "$bootstrap_stage3_rust_policy")" = \
+        "$bootstrap_stage3_rust_policy" ] || return 1
+    bootstrap_stage3_rust_channel=$(
+        awk -F= '
+            /^[[:space:]]*channel[[:space:]]*=/ {
+                value = $2
+                gsub(/^[[:space:]]*"/, "", value)
+                gsub(/"[[:space:]]*$/, "", value)
+                print value
+                count += 1
+            }
+            END { if (count != 1) exit 1 }
+        ' "$bootstrap_stage3_rust_policy"
+    ) || return 1
+    case "$bootstrap_stage3_rust_channel" in
+        ''|*[!A-Za-z0-9._-]*) return 1 ;;
+    esac
+    bootstrap_stage3_rust_frontend=$(command -v rustc) || return 1
+    bootstrap_stage3_rust_sysroot=$(
+        env -i PATH="$PATH" \
+            RUSTUP_TOOLCHAIN="$bootstrap_stage3_rust_channel" \
+            "$bootstrap_stage3_rust_frontend" --print sysroot
+    ) || return 1
+    bootstrap_stage3_rust_sysroot=$(
+        CDPATH= cd -- "$bootstrap_stage3_rust_sysroot" && pwd -P
+    ) || return 1
+    bootstrap_stage3_rustc="$bootstrap_stage3_rust_sysroot/bin/rustc"
+    bootstrap_stage3_cargo="$bootstrap_stage3_rust_sysroot/bin/cargo"
+    for bootstrap_stage3_rust_binary in \
+        "$bootstrap_stage3_rustc" "$bootstrap_stage3_cargo"; do
+        [ -x "$bootstrap_stage3_rust_binary" ] &&
+            [ ! -L "$bootstrap_stage3_rust_binary" ] &&
+            [ "$(bootstrap_stage3_canonical_file \
+                "$bootstrap_stage3_rust_binary")" = \
+                "$bootstrap_stage3_rust_binary" ] || return 1
+    done
+    printf 'rust-policy-path=%s\nrust-policy-sha256=%s\nrust-channel=%s\n' \
+        "$bootstrap_stage3_rust_policy" \
+        "$(bootstrap_stage3_hash_file "$bootstrap_stage3_rust_policy")" \
+        "$bootstrap_stage3_rust_channel"
+    printf 'rust-sysroot=%s\nrustc-path=%s\ncargo-path=%s\n' \
+        "$bootstrap_stage3_rust_sysroot" "$bootstrap_stage3_rustc" \
+        "$bootstrap_stage3_cargo"
+)
+
+bootstrap_stage3_resolve_llvm_build_authority() (
+    [ "$#" -eq 2 ] || return 1
+    bootstrap_stage3_llvm_path=$1
+    bootstrap_stage3_llvm_features=$2
+    case "$bootstrap_stage3_llvm_features" in
+        *llvm*) ;;
+        *)
+            echo 'llvm-build-status=disabled'
+            return 0
+            ;;
+    esac
+    case "$bootstrap_stage3_llvm_path" in
+        /*) ;;
+        *) return 1 ;;
+    esac
+    PATH=$bootstrap_stage3_llvm_path
+    export PATH
+    bootstrap_stage3_llvm_config=$(command -v llvm-config) || return 1
+    bootstrap_stage3_llvm_config_canonical=$(
+        perl -MCwd=abs_path -e \
+            'my $p = abs_path($ARGV[0]); defined($p) or exit 1; print $p' \
+            "$bootstrap_stage3_llvm_config"
+    ) || return 1
+    bootstrap_stage3_llvm_version=$(
+        env -i PATH="$PATH" LC_ALL=C LANG=C \
+            "$bootstrap_stage3_llvm_config" --version
+    ) || return 1
+    bootstrap_stage3_llvm_major=${bootstrap_stage3_llvm_version%%.*}
+    case "$bootstrap_stage3_llvm_major" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    bootstrap_stage3_llvm_prefix=$(
+        env -i PATH="$PATH" LC_ALL=C LANG=C \
+            "$bootstrap_stage3_llvm_config" --prefix
+    ) || return 1
+    bootstrap_stage3_llvm_prefix=$(
+        CDPATH= cd -- "$bootstrap_stage3_llvm_prefix" && pwd -P
+    ) || return 1
+    bootstrap_stage3_llvm_libfiles=$(
+        env -i PATH="$PATH" LC_ALL=C LANG=C \
+            "$bootstrap_stage3_llvm_config" --link-static --libfiles
+    ) || return 1
+    [ -n "$bootstrap_stage3_llvm_libfiles" ] || return 1
+    case "$bootstrap_stage3_llvm_libfiles" in
+        *'
+'*|*'	'*) return 1 ;;
+    esac
+    bootstrap_stage3_llvm_libdir=$(
+        env -i PATH="$PATH" LC_ALL=C LANG=C \
+            "$bootstrap_stage3_llvm_config" --libdir
+    ) || return 1
+    bootstrap_stage3_llvm_libdir=$(
+        CDPATH= cd -- "$bootstrap_stage3_llvm_libdir" && pwd -P
+    ) || return 1
+    bootstrap_stage3_llvm_system_libs=$(
+        env -i PATH="$PATH" LC_ALL=C LANG=C \
+            "$bootstrap_stage3_llvm_config" --link-static --system-libs
+    ) || return 1
+    case "$bootstrap_stage3_llvm_system_libs" in
+        *'
+'*|*'	'*) return 1 ;;
+    esac
+    bootstrap_stage3_llvm_sdkroot=
+    bootstrap_stage3_llvm_sdk_version=
+    if command -v xcrun >/dev/null 2>&1; then
+        bootstrap_stage3_llvm_sdkroot=$(
+            env -i PATH="$PATH" LC_ALL=C LANG=C \
+                xcrun --sdk macosx --show-sdk-path
+        ) || return 1
+        bootstrap_stage3_llvm_sdkroot=$(
+            CDPATH= cd -- "$bootstrap_stage3_llvm_sdkroot" && pwd -P
+        ) || return 1
+        bootstrap_stage3_llvm_sdk_version=$(
+            env -i PATH="$PATH" LC_ALL=C LANG=C \
+                xcrun --sdk macosx --show-sdk-version
+        ) || return 1
+    fi
+    bootstrap_stage3_llvm_homebrew_prefix=
+    bootstrap_stage3_llvm_library_path=
+    if command -v brew >/dev/null 2>&1; then
+        bootstrap_stage3_llvm_homebrew_prefix=$(
+            env -i HOME=/var/empty PATH="$PATH" LC_ALL=C LANG=C \
+                brew --prefix
+        ) || return 1
+        bootstrap_stage3_llvm_homebrew_prefix=$(
+            CDPATH= cd -- "$bootstrap_stage3_llvm_homebrew_prefix" && pwd -P
+        ) || return 1
+        bootstrap_stage3_llvm_library_path=\
+"$bootstrap_stage3_llvm_homebrew_prefix/lib"
+        [ -d "$bootstrap_stage3_llvm_library_path" ] || return 1
+    fi
+    bootstrap_stage3_llvm_resolve_system_lib() {
+        [ "$#" -eq 1 ] || return 1
+        bootstrap_stage3_llvm_system_name=$1
+        case "$bootstrap_stage3_llvm_system_name" in
+            ''|*[!A-Za-z0-9_+.-]*) return 1 ;;
+        esac
+        for bootstrap_stage3_llvm_system_dir in \
+            "$bootstrap_stage3_llvm_libdir" \
+            "$bootstrap_stage3_llvm_library_path" \
+            "${bootstrap_stage3_llvm_sdkroot:+$bootstrap_stage3_llvm_sdkroot/usr/lib}"
+        do
+            [ -n "$bootstrap_stage3_llvm_system_dir" ] || continue
+            for bootstrap_stage3_llvm_system_suffix in dylib so tbd a; do
+                bootstrap_stage3_llvm_system_candidate=\
+"$bootstrap_stage3_llvm_system_dir/lib$bootstrap_stage3_llvm_system_name.$bootstrap_stage3_llvm_system_suffix"
+                [ -f "$bootstrap_stage3_llvm_system_candidate" ] || continue
+                bootstrap_stage3_llvm_system_canonical=$(
+                    perl -MCwd=abs_path -e \
+                        'my $p = abs_path($ARGV[0]); defined($p) or exit 1; print $p' \
+                        "$bootstrap_stage3_llvm_system_candidate"
+                ) || return 1
+                [ -f "$bootstrap_stage3_llvm_system_canonical" ] || return 1
+                printf '%s\n%s\n' "$bootstrap_stage3_llvm_system_candidate" \
+                    "$bootstrap_stage3_llvm_system_canonical"
+                return 0
+            done
+        done
+        bootstrap_stage3_llvm_system_cc=$(command -v cc) || return 1
+        for bootstrap_stage3_llvm_system_suffix in so dylib a; do
+            bootstrap_stage3_llvm_system_candidate=$(
+                env -i PATH="$PATH" LC_ALL=C LANG=C \
+                    "$bootstrap_stage3_llvm_system_cc" -print-file-name=\
+"lib$bootstrap_stage3_llvm_system_name.$bootstrap_stage3_llvm_system_suffix"
+            ) || return 1
+            case "$bootstrap_stage3_llvm_system_candidate" in
+                /*) ;;
+                *) continue ;;
+            esac
+            [ -f "$bootstrap_stage3_llvm_system_candidate" ] || continue
+            bootstrap_stage3_llvm_system_canonical=$(
+                perl -MCwd=abs_path -e \
+                    'my $p = abs_path($ARGV[0]); defined($p) or exit 1; print $p' \
+                    "$bootstrap_stage3_llvm_system_candidate"
+            ) || return 1
+            [ -f "$bootstrap_stage3_llvm_system_canonical" ] || return 1
+            printf '%s\n%s\n' "$bootstrap_stage3_llvm_system_candidate" \
+                "$bootstrap_stage3_llvm_system_canonical"
+            return 0
+        done
+        return 1
+    }
+    printf 'llvm-build-status=enabled\nllvm-major=%s\n' \
+        "$bootstrap_stage3_llvm_major"
+    printf 'llvm-prefix=%s\nllvm-libdir=%s\nllvm-config-path=%s\n' \
+        "$bootstrap_stage3_llvm_prefix" "$bootstrap_stage3_llvm_libdir" \
+        "$bootstrap_stage3_llvm_config_canonical"
+    printf 'llvm-config-sha256=%s\n' \
+        "$(bootstrap_stage3_hash_file \
+            "$bootstrap_stage3_llvm_config_canonical")"
+    printf 'llvm-sdkroot=%s\nllvm-sdk-version=%s\n' \
+        "$bootstrap_stage3_llvm_sdkroot" "$bootstrap_stage3_llvm_sdk_version"
+    printf 'llvm-homebrew-prefix=%s\nllvm-library-path=%s\n' \
+        "$bootstrap_stage3_llvm_homebrew_prefix" \
+        "$bootstrap_stage3_llvm_library_path"
+    set -f
+    bootstrap_stage3_llvm_saved_ifs=$IFS
+    IFS=' '
+    # llvm-config defines libfiles as a space-delimited link-order list.
+    # Whitespace inside paths was rejected above, so positional splitting is
+    # deterministic and cannot expand globs.
+    set -- $bootstrap_stage3_llvm_libfiles
+    IFS=$bootstrap_stage3_llvm_saved_ifs
+    [ "$#" -gt 0 ] || return 1
+    printf 'llvm-static-lib-count=%s\n' "$#"
+    bootstrap_stage3_llvm_index=0
+    for bootstrap_stage3_llvm_lib in "$@"; do
+        case "$bootstrap_stage3_llvm_lib" in
+            /*) ;;
+            *) return 1 ;;
+        esac
+        bootstrap_stage3_llvm_lib=$(
+            bootstrap_stage3_canonical_file "$bootstrap_stage3_llvm_lib"
+        ) || return 1
+        bootstrap_stage3_llvm_index=$((bootstrap_stage3_llvm_index + 1))
+        bootstrap_stage3_llvm_key=$(
+            printf '%04d' "$bootstrap_stage3_llvm_index"
+        ) || return 1
+        printf 'llvm-static-lib-%s-path=%s\n' \
+            "$bootstrap_stage3_llvm_key" "$bootstrap_stage3_llvm_lib"
+        printf 'llvm-static-lib-%s-sha256=%s\n' \
+            "$bootstrap_stage3_llvm_key" \
+            "$(bootstrap_stage3_hash_file "$bootstrap_stage3_llvm_lib")"
+    done
+    IFS=' '
+    # Preserve the exact system-link token order as well as each resolved
+    # library file. Other compiler/linker flags remain explicit ordered tokens
+    # and are covered transitively by the bound compiler/linker authorities.
+    set -- $bootstrap_stage3_llvm_system_libs
+    IFS=$bootstrap_stage3_llvm_saved_ifs
+    printf 'llvm-system-lib-count=%s\n' "$#"
+    bootstrap_stage3_llvm_index=0
+    while [ "$#" -gt 0 ]; do
+        bootstrap_stage3_llvm_system_token=$1
+        shift
+        bootstrap_stage3_llvm_index=$((bootstrap_stage3_llvm_index + 1))
+        bootstrap_stage3_llvm_key=$(
+            printf '%04d' "$bootstrap_stage3_llvm_index"
+        ) || return 1
+        printf 'llvm-system-lib-%s-token=%s\n' \
+            "$bootstrap_stage3_llvm_key" "$bootstrap_stage3_llvm_system_token"
+        case "$bootstrap_stage3_llvm_system_token" in
+            -l?*)
+                bootstrap_stage3_llvm_system_resolution=$(
+                    bootstrap_stage3_llvm_resolve_system_lib \
+                        "${bootstrap_stage3_llvm_system_token#-l}"
+                ) || return 1
+                bootstrap_stage3_llvm_system_requested=$(
+                    printf '%s\n' "$bootstrap_stage3_llvm_system_resolution" |
+                        sed -n '1p'
+                ) || return 1
+                bootstrap_stage3_llvm_system_canonical=$(
+                    printf '%s\n' "$bootstrap_stage3_llvm_system_resolution" |
+                        sed -n '2p'
+                ) || return 1
+                [ -n "$bootstrap_stage3_llvm_system_requested" ] &&
+                    [ -n "$bootstrap_stage3_llvm_system_canonical" ] ||
+                    return 1
+                printf 'llvm-system-lib-%s-requested=%s\n' \
+                    "$bootstrap_stage3_llvm_key" \
+                    "$bootstrap_stage3_llvm_system_requested"
+                printf 'llvm-system-lib-%s-path=%s\n' \
+                    "$bootstrap_stage3_llvm_key" \
+                    "$bootstrap_stage3_llvm_system_canonical"
+                printf 'llvm-system-lib-%s-sha256=%s\n' \
+                    "$bootstrap_stage3_llvm_key" \
+                    "$(bootstrap_stage3_hash_file \
+                        "$bootstrap_stage3_llvm_system_canonical")"
+                ;;
+            /*)
+                bootstrap_stage3_llvm_system_canonical=$(
+                    bootstrap_stage3_canonical_file \
+                        "$bootstrap_stage3_llvm_system_token"
+                ) || return 1
+                printf 'llvm-system-lib-%s-path=%s\n' \
+                    "$bootstrap_stage3_llvm_key" \
+                    "$bootstrap_stage3_llvm_system_canonical"
+                printf 'llvm-system-lib-%s-sha256=%s\n' \
+                    "$bootstrap_stage3_llvm_key" \
+                    "$(bootstrap_stage3_hash_file \
+                        "$bootstrap_stage3_llvm_system_canonical")"
+                ;;
+            -framework)
+                [ "$#" -gt 0 ] || return 1
+                bootstrap_stage3_llvm_framework=$1
+                shift
+                bootstrap_stage3_llvm_index=$((bootstrap_stage3_llvm_index + 1))
+                bootstrap_stage3_llvm_key=$(
+                    printf '%04d' "$bootstrap_stage3_llvm_index"
+                ) || return 1
+                case "$bootstrap_stage3_llvm_framework" in
+                    ''|*[!A-Za-z0-9_+.-]*) return 1 ;;
+                esac
+                printf 'llvm-system-lib-%s-token=%s\n' \
+                    "$bootstrap_stage3_llvm_key" \
+                    "$bootstrap_stage3_llvm_framework"
+                [ -n "$bootstrap_stage3_llvm_sdkroot" ] || return 1
+                bootstrap_stage3_llvm_framework_path=\
+"$bootstrap_stage3_llvm_sdkroot/System/Library/Frameworks/$bootstrap_stage3_llvm_framework.framework/$bootstrap_stage3_llvm_framework.tbd"
+                bootstrap_stage3_llvm_framework_path=$(
+                    perl -MCwd=abs_path -e \
+                        'my $p = abs_path($ARGV[0]); defined($p) or exit 1; print $p' \
+                        "$bootstrap_stage3_llvm_framework_path"
+                ) || return 1
+                [ -f "$bootstrap_stage3_llvm_framework_path" ] || return 1
+                printf 'llvm-system-lib-%s-path=%s\n' \
+                    "$bootstrap_stage3_llvm_key" \
+                    "$bootstrap_stage3_llvm_framework_path"
+                printf 'llvm-system-lib-%s-sha256=%s\n' \
+                    "$bootstrap_stage3_llvm_key" \
+                    "$(bootstrap_stage3_hash_file \
+                        "$bootstrap_stage3_llvm_framework_path")"
+                ;;
+            # llvm-config system link output participates in the actual linker
+            # search. Accept only token forms whose resolution is bound above;
+            # silently preserving flags such as -L would leave their searched
+            # directories and selected files outside the authority record.
+            -*) return 1 ;;
+            *) return 1 ;;
+        esac
+    done
+)
+
+bootstrap_stage3_tool_authority_snapshot() (
+    bootstrap_stage3_tool_output=$1
+    bootstrap_stage3_tool_path=$2
+    bootstrap_stage3_tool_root=$3
+    bootstrap_stage3_tool_tmp="${bootstrap_stage3_tool_output}.tmp.$$"
+    case "$bootstrap_stage3_tool_path" in
+        /*) ;;
+        *) return 1 ;;
+    esac
+    : >"$bootstrap_stage3_tool_tmp" || return 1
+    printf 'PATH=%s\n' "$bootstrap_stage3_tool_path" \
+        >>"$bootstrap_stage3_tool_tmp" || return 1
+    bootstrap_stage3_tool_old_ifs=$IFS
+    IFS=:
+    for bootstrap_stage3_tool_dir in $bootstrap_stage3_tool_path; do
+        IFS=$bootstrap_stage3_tool_old_ifs
+        [ -d "$bootstrap_stage3_tool_dir" ] || return 1
+        bootstrap_stage3_tool_dir_canonical=$(
+            CDPATH= cd -- "$bootstrap_stage3_tool_dir" && pwd -P
+        ) || return 1
+        [ "$bootstrap_stage3_tool_dir" = \
+            "$bootstrap_stage3_tool_dir_canonical" ] || return 1
+        printf 'path-component=%s\n' "$bootstrap_stage3_tool_dir_canonical" \
+            >>"$bootstrap_stage3_tool_tmp" || return 1
+        IFS=:
+    done
+    IFS=$bootstrap_stage3_tool_old_ifs
+    PATH=$bootstrap_stage3_tool_path
+    export PATH
+    bootstrap_stage3_rust_authority=$(
+        bootstrap_stage3_resolve_rust_toolchain \
+            "$bootstrap_stage3_tool_root" "$bootstrap_stage3_tool_path"
+    ) || return 1
+    bootstrap_stage3_real_rustc=$(
+        printf '%s\n' "$bootstrap_stage3_rust_authority" |
+            sed -n 's/^rustc-path=//p'
+    ) || return 1
+    bootstrap_stage3_real_cargo=$(
+        printf '%s\n' "$bootstrap_stage3_rust_authority" |
+            sed -n 's/^cargo-path=//p'
+    ) || return 1
+    [ -n "$bootstrap_stage3_real_rustc" ] &&
+        [ -n "$bootstrap_stage3_real_cargo" ] || return 1
+    bootstrap_stage3_tool_c_name=cc
+    case "$(bootstrap_stage3_host_platform)" in
+        *-pc-windows-msvc)
+            bootstrap_stage3_tool_c_path=$(
+                bootstrap_stage3_target_c_compiler \
+                    "$(bootstrap_stage3_host_platform)"
+            ) || return 1
+            bootstrap_stage3_tool_c_name=$(basename \
+                "$bootstrap_stage3_tool_c_path")
+            bootstrap_stage3_tool_c_name=${bootstrap_stage3_tool_c_name%.exe}
+            ;;
+    esac
+    for bootstrap_stage3_tool_name in \
+        cargo rustc "$bootstrap_stage3_tool_c_name" clang ld ar ranlib sh env perl sed file \
+        shasum openssl; do
+        bootstrap_stage3_tool_requested=$(
+            command -v "$bootstrap_stage3_tool_name" 2>/dev/null
+        ) || {
+            return 1
+        }
+        case "$bootstrap_stage3_tool_requested" in
+            /*) ;;
+            *) return 1 ;;
+        esac
+        bootstrap_stage3_tool_canonical=$(
+            perl -MCwd=abs_path -e \
+                'my $p = abs_path($ARGV[0]); defined($p) or exit 1; print $p' \
+                "$bootstrap_stage3_tool_requested"
+        ) || return 1
+        [ -f "$bootstrap_stage3_tool_canonical" ] || return 1
+        # BSD userland tools such as macOS sed(1) and ld(1) do not implement
+        # GNU-style --version.  The executable bytes remain authoritative; bind
+        # the probe status and first diagnostic line without requiring success.
+        # Invoke the requested path, not the resolved target: rustup proxies
+        # dispatch cargo/rustc according to argv[0].
+        bootstrap_stage3_tool_version_output=\
+"${bootstrap_stage3_tool_tmp}.version"
+        bootstrap_stage3_tool_version_status=0
+        bootstrap_stage3_tool_version_executable=\
+"$bootstrap_stage3_tool_requested"
+        case "$bootstrap_stage3_tool_name" in
+            rustc) bootstrap_stage3_tool_version_executable=$bootstrap_stage3_real_rustc ;;
+            cargo) bootstrap_stage3_tool_version_executable=$bootstrap_stage3_real_cargo ;;
+        esac
+        env -i PATH="$PATH" LC_ALL=C LANG=C \
+            "$bootstrap_stage3_tool_version_executable" --version \
+            >"$bootstrap_stage3_tool_version_output" 2>&1 ||
+            bootstrap_stage3_tool_version_status=$?
+        bootstrap_stage3_tool_version=$(
+            sed -n '1p' "$bootstrap_stage3_tool_version_output"
+        ) || {
+            rm -f "$bootstrap_stage3_tool_version_output"
+            return 1
+        }
+        rm -f "$bootstrap_stage3_tool_version_output"
+        [ -n "$bootstrap_stage3_tool_version" ] ||
+            bootstrap_stage3_tool_version=absent
+        # Darwin file(1) emits one summary plus per-architecture continuation
+        # lines for universal binaries. Keep this line-oriented snapshot to one
+        # deterministic summary record; the executable SHA binds all bytes.
+        bootstrap_stage3_tool_arch_output="${bootstrap_stage3_tool_tmp}.arch"
+        file -b "$bootstrap_stage3_tool_canonical" \
+            >"$bootstrap_stage3_tool_arch_output" 2>&1 || {
+            rm -f "$bootstrap_stage3_tool_arch_output"
+            return 1
+        }
+        bootstrap_stage3_tool_arch=$(
+            sed -n '1p' "$bootstrap_stage3_tool_arch_output"
+        ) || {
+            rm -f "$bootstrap_stage3_tool_arch_output"
+            return 1
+        }
+        rm -f "$bootstrap_stage3_tool_arch_output"
+        [ -n "$bootstrap_stage3_tool_arch" ] || return 1
+        printf 'tool=%s|requested=%s|canonical=%s|sha256=%s|version-status=%s|version=%s|arch=%s\n' \
+            "$bootstrap_stage3_tool_name" "$bootstrap_stage3_tool_requested" \
+            "$bootstrap_stage3_tool_canonical" \
+            "$(bootstrap_stage3_hash_file \
+                "$bootstrap_stage3_tool_canonical")" \
+            "$bootstrap_stage3_tool_version_status" \
+            "$bootstrap_stage3_tool_version" "$bootstrap_stage3_tool_arch" \
+            >>"$bootstrap_stage3_tool_tmp" || return 1
+        if [ "$bootstrap_stage3_tool_name" = rustc ]; then
+            printf '%s\n' "$bootstrap_stage3_rust_authority" \
+                >>"$bootstrap_stage3_tool_tmp" || return 1
+            printf 'rustc-toolchain-sha256=%s\ncargo-toolchain-sha256=%s\n' \
+                "$(bootstrap_stage3_hash_file \
+                    "$bootstrap_stage3_real_rustc")" \
+                "$(bootstrap_stage3_hash_file \
+                    "$bootstrap_stage3_real_cargo")" \
+                >>"$bootstrap_stage3_tool_tmp" || return 1
+        fi
+    done
+    if command -v llvm-config >/dev/null 2>&1; then
+        bootstrap_stage3_tool_llvm_requested=$(command -v llvm-config) ||
+            return 1
+        bootstrap_stage3_tool_llvm_canonical=$(
+            perl -MCwd=abs_path -e \
+                'my $p = abs_path($ARGV[0]); defined($p) or exit 1; print $p' \
+                "$bootstrap_stage3_tool_llvm_requested"
+        ) || return 1
+        [ -f "$bootstrap_stage3_tool_llvm_canonical" ] || return 1
+        bootstrap_stage3_tool_llvm_version=$(
+            env -i PATH="$PATH" LC_ALL=C LANG=C \
+                "$bootstrap_stage3_tool_llvm_requested" --version
+        ) || return 1
+        bootstrap_stage3_tool_llvm_prefix=$(
+            env -i PATH="$PATH" LC_ALL=C LANG=C \
+                "$bootstrap_stage3_tool_llvm_requested" --prefix
+        ) || return 1
+        printf 'llvm-config-requested=%s|canonical=%s|sha256=%s|version=%s|prefix=%s\n' \
+            "$bootstrap_stage3_tool_llvm_requested" \
+            "$bootstrap_stage3_tool_llvm_canonical" \
+            "$(bootstrap_stage3_hash_file \
+                "$bootstrap_stage3_tool_llvm_canonical")" \
+            "$bootstrap_stage3_tool_llvm_version" \
+            "$bootstrap_stage3_tool_llvm_prefix" \
+            >>"$bootstrap_stage3_tool_tmp" || return 1
+    else
+        echo 'llvm-config=absent' >>"$bootstrap_stage3_tool_tmp" || return 1
+    fi
+    if command -v xcrun >/dev/null 2>&1; then
+        # An inherited or cached default SDKROOT may name a removed Command
+        # Line Tools SDK even when the selected Xcode has a valid macOS SDK.
+        # Select the platform explicitly for deterministic authority.
+        bootstrap_stage3_sdk_path=$(
+            xcrun --sdk macosx --show-sdk-path
+        ) || return 1
+        bootstrap_stage3_sdk_canonical=$(
+            CDPATH= cd -- "$bootstrap_stage3_sdk_path" && pwd -P
+        ) || return 1
+        bootstrap_stage3_sdk_version=$(
+            xcrun --sdk macosx --show-sdk-version
+        ) || return 1
+        printf 'sdk-path=%s|sdk-version=%s\n' \
+            "$bootstrap_stage3_sdk_canonical" \
+            "$bootstrap_stage3_sdk_version" \
+            >>"$bootstrap_stage3_tool_tmp" || return 1
+    fi
+    mv "$bootstrap_stage3_tool_tmp" "$bootstrap_stage3_tool_output"
+)
+
+bootstrap_stage3_directory_snapshot() {
+    bootstrap_stage3_directory_snapshot_output=$1
+    bootstrap_stage3_directory_snapshot_root=$2
+    [ -d "$bootstrap_stage3_directory_snapshot_root" ] &&
+        [ ! -L "$bootstrap_stage3_directory_snapshot_root" ] || return 1
+    perl -MDigest::SHA=sha256_hex -MFile::Find -e '
+        use strict;
+        use warnings;
+        my ($root) = @ARGV;
+        my @records;
+        find(
+            {
+                no_chdir => 1,
+                wanted => sub {
+                    my $absolute = $File::Find::name;
+                    return if $absolute eq $root;
+                    -l $absolute and die "authority symlink rejected\n";
+                    return unless -f $absolute;
+                    open my $fh, "<:raw", $absolute or die "open\n";
+                    local $/;
+                    my $bytes = <$fh>;
+                    close $fh or die "close\n";
+                    my $relative = substr($absolute, length($root) + 1);
+                    push @records, join(
+                        ":", "file-hex", unpack("H*", $relative),
+                        (-x $absolute ? 1 : 0), sha256_hex($bytes)
+                    );
+                },
+            },
+            $root
+        );
+        @records or die "empty authority\n";
+        print join("\n", sort @records), "\n";
+    ' "$bootstrap_stage3_directory_snapshot_root" \
+        >"$bootstrap_stage3_directory_snapshot_output"
+}
+
+bootstrap_stage3_copy_authority() {
+    bootstrap_stage3_copy_source=$1
+    bootstrap_stage3_copy_destination=$2
+    [ -d "$bootstrap_stage3_copy_source" ] &&
+        [ ! -L "$bootstrap_stage3_copy_source" ] || return 1
+    [ ! -e "$bootstrap_stage3_copy_destination" ] || return 1
+    mkdir -p "$bootstrap_stage3_copy_destination" || return 1
+    perl -MFile::Find -MFile::Copy=copy -MFile::Path=make_path -e '
+        use strict;
+        use warnings;
+        my ($source, $destination) = @ARGV;
+        my @directories;
+        find(
+            {
+                no_chdir => 1,
+                wanted => sub {
+                    my $absolute = $File::Find::name;
+                    return if $absolute eq $source;
+                    -l $absolute and die "authority symlink rejected\n";
+                    my $relative = substr($absolute, length($source) + 1);
+                    my $target = "$destination/$relative";
+                    if (-d $absolute) {
+                        make_path($target, { mode => 0700 });
+                        push @directories, $target;
+                        return;
+                    }
+                    return unless -f $absolute;
+                    my $parent = $target;
+                    $parent =~ s{/[^/]+$}{};
+                    make_path($parent, { mode => 0700 }) unless -d $parent;
+                    copy($absolute, $target) or die "copy\n";
+                    chmod((-x $absolute ? 0500 : 0400), $target) or die "chmod\n";
+                },
+            },
+            $source
+        );
+        # Freeze directories only after all descendants have been populated.
+        # Freezing during traversal prevents later child/sibling creation.
+        for my $directory (sort { length($b) <=> length($a) } @directories) {
+            chmod(0500, $directory) or die "chmod directory\n";
+        }
+    ' "$bootstrap_stage3_copy_source" "$bootstrap_stage3_copy_destination" ||
+        return 1
+    chmod 500 "$bootstrap_stage3_copy_destination"
+}
+
+bootstrap_stage3_write_seed_stamp() {
+    bootstrap_stage3_stamp=$1
+    bootstrap_stage3_stamp_inputs=$2
+    bootstrap_stage3_stamp_seed=$3
+    bootstrap_stage3_stamp_native_all=$4
+    bootstrap_stage3_stamp_backfill=$5
+    bootstrap_stage3_stamp_tmp="${bootstrap_stage3_stamp}.tmp.$$"
+    [ -x "$bootstrap_stage3_stamp_seed" ] &&
+        [ -f "$bootstrap_stage3_stamp_native_all" ] || return 1
+    bootstrap_stage3_stamp_backfill_status=absent
+    bootstrap_stage3_stamp_backfill_sha=absent
+    if [ -f "$bootstrap_stage3_stamp_backfill" ]; then
+        bootstrap_stage3_stamp_backfill_status=present
+        bootstrap_stage3_stamp_backfill_sha=$(
+            bootstrap_stage3_hash_file "$bootstrap_stage3_stamp_backfill"
+        ) || return 1
+    fi
+    {
+        echo "schema=simple-bootstrap-seed-artifact-stamp-v2"
+        echo "inputs_fingerprint=$bootstrap_stage3_stamp_inputs"
+        echo "seed_sha256=$(bootstrap_stage3_hash_file \
+            "$bootstrap_stage3_stamp_seed")"
+        echo "native_all_sha256=$(bootstrap_stage3_hash_file \
+            "$bootstrap_stage3_stamp_native_all")"
+        echo "backfill_status=$bootstrap_stage3_stamp_backfill_status"
+        echo "backfill_sha256=$bootstrap_stage3_stamp_backfill_sha"
+    } >"$bootstrap_stage3_stamp_tmp" || return 1
+    mv "$bootstrap_stage3_stamp_tmp" "$bootstrap_stage3_stamp"
+}
+
+bootstrap_stage3_verify_seed_stamp() {
+    bootstrap_stage3_stamp=$1
+    bootstrap_stage3_stamp_inputs=$2
+    bootstrap_stage3_stamp_seed=$3
+    bootstrap_stage3_stamp_native_all=$4
+    bootstrap_stage3_stamp_backfill=$5
+    [ -f "$bootstrap_stage3_stamp" ] &&
+        [ ! -L "$bootstrap_stage3_stamp" ] || return 1
+    [ "$(bootstrap_stage3_manifest_value schema \
+        "$bootstrap_stage3_stamp")" = \
+        simple-bootstrap-seed-artifact-stamp-v2 ] || return 1
+    [ "$(bootstrap_stage3_manifest_value inputs_fingerprint \
+        "$bootstrap_stage3_stamp")" = "$bootstrap_stage3_stamp_inputs" ] ||
+        return 1
+    [ "$(bootstrap_stage3_manifest_value seed_sha256 \
+        "$bootstrap_stage3_stamp")" = \
+        "$(bootstrap_stage3_hash_file "$bootstrap_stage3_stamp_seed")" ] ||
+        return 1
+    [ "$(bootstrap_stage3_manifest_value native_all_sha256 \
+        "$bootstrap_stage3_stamp")" = \
+        "$(bootstrap_stage3_hash_file "$bootstrap_stage3_stamp_native_all")" ] ||
+        return 1
+    if [ -f "$bootstrap_stage3_stamp_backfill" ]; then
+        [ "$(bootstrap_stage3_manifest_value backfill_status \
+            "$bootstrap_stage3_stamp")" = present ] &&
+            [ "$(bootstrap_stage3_manifest_value backfill_sha256 \
+                "$bootstrap_stage3_stamp")" = \
+                "$(bootstrap_stage3_hash_file \
+                    "$bootstrap_stage3_stamp_backfill")" ] || return 1
+    else
+        [ "$(bootstrap_stage3_manifest_value backfill_status \
+            "$bootstrap_stage3_stamp")" = absent ] &&
+            [ "$(bootstrap_stage3_manifest_value backfill_sha256 \
+                "$bootstrap_stage3_stamp")" = absent ] || return 1
+    fi
+}
+
+bootstrap_stage3_valid_fingerprint() {
+    [ "$#" -eq 1 ] || return 1
+    [ "${#1}" -eq 64 ] || return 1
+    case "$1" in *[!0-9a-f]*) return 1 ;; esac
+}
+
+bootstrap_stage3_safe_generation_name() {
+    [ "$#" -eq 1 ] || return 1
+    case "$1" in ''|.|..|*/*|*\\*|*[!A-Za-z0-9._-]*) return 1 ;; esac
+}
+
+bootstrap_stage3_rust_tuple_requires_complete_rebuild() {
+    [ "$#" -eq 4 ] || return 1
+    [ -x "$1" ] && [ -f "$2" ] && [ -f "$3" ] && [ "$4" -eq 0 ] &&
+        return 1
+    return 0
+}
+
+bootstrap_stage3_pin_private_authority() {
+    [ "$#" -eq 4 ] || return 1
+    bootstrap_stage3_private_root=$1
+    bootstrap_stage3_private_seed_name=$2
+    bootstrap_stage3_private_native_name=$3
+    bootstrap_stage3_private_backfill_name=$4
+    [ -d "$bootstrap_stage3_private_root" ] &&
+        [ ! -L "$bootstrap_stage3_private_root" ] &&
+        [ -x "$bootstrap_stage3_private_root/$bootstrap_stage3_private_seed_name" ] &&
+        [ -f "$bootstrap_stage3_private_root/$bootstrap_stage3_private_native_name" ] &&
+        [ -f "$bootstrap_stage3_private_root/$bootstrap_stage3_private_backfill_name" ] || return 1
+    BOOTSTRAP_STAGE3_PRIVATE_RUNTIME=$bootstrap_stage3_private_root
+    BOOTSTRAP_STAGE3_PRIVATE_SEED=\
+"$bootstrap_stage3_private_root/$bootstrap_stage3_private_seed_name"
+    BOOTSTRAP_STAGE3_PRIVATE_NATIVE_ALL=\
+"$bootstrap_stage3_private_root/$bootstrap_stage3_private_native_name"
+    BOOTSTRAP_STAGE3_PRIVATE_BACKFILL=\
+"$bootstrap_stage3_private_root/$bootstrap_stage3_private_backfill_name"
+}
+
+# Prepare and publish immutable Rust authority generations. The current marker
+# is the commit record; a generation is never mutated after marker admission.
+bootstrap_stage3_prepare_seed_generation() {
+    [ "$#" -eq 7 ] || return 1
+    bootstrap_stage3_generation_source=$1
+    bootstrap_stage3_generation_root=$2
+    bootstrap_stage3_generation_inputs=$3
+    bootstrap_stage3_generation_seed_name=$4
+    bootstrap_stage3_generation_native_name=$5
+    bootstrap_stage3_generation_backfill_name=$6
+    bootstrap_stage3_generation_nonce=$7
+    bootstrap_stage3_valid_fingerprint "$bootstrap_stage3_generation_inputs" || return 1
+    bootstrap_stage3_generation_staging=\
+"$bootstrap_stage3_generation_root/.staging.$bootstrap_stage3_generation_nonce"
+    rm -rf "$bootstrap_stage3_generation_staging"
+    mkdir -p "$bootstrap_stage3_generation_root" || return 1
+    bootstrap_stage3_copy_authority "$bootstrap_stage3_generation_source" \
+        "$bootstrap_stage3_generation_staging" || return 1
+    chmod 700 "$bootstrap_stage3_generation_staging" || return 1
+    bootstrap_stage3_generation_stamp=\
+"$bootstrap_stage3_generation_staging/$bootstrap_stage3_generation_seed_name.inputs.sha256"
+    bootstrap_stage3_write_seed_stamp "$bootstrap_stage3_generation_stamp" \
+        "$bootstrap_stage3_generation_inputs" \
+        "$bootstrap_stage3_generation_staging/$bootstrap_stage3_generation_seed_name" \
+        "$bootstrap_stage3_generation_staging/$bootstrap_stage3_generation_native_name" \
+        "$bootstrap_stage3_generation_staging/$bootstrap_stage3_generation_backfill_name" || return 1
+    chmod 400 "$bootstrap_stage3_generation_stamp" || return 1
+    bootstrap_stage3_verify_seed_stamp "$bootstrap_stage3_generation_stamp" \
+        "$bootstrap_stage3_generation_inputs" \
+        "$bootstrap_stage3_generation_staging/$bootstrap_stage3_generation_seed_name" \
+        "$bootstrap_stage3_generation_staging/$bootstrap_stage3_generation_native_name" \
+        "$bootstrap_stage3_generation_staging/$bootstrap_stage3_generation_backfill_name" || return 1
+    bootstrap_stage3_generation_snapshot=\
+"$bootstrap_stage3_generation_root/.snapshot.$bootstrap_stage3_generation_nonce"
+    bootstrap_stage3_directory_snapshot "$bootstrap_stage3_generation_snapshot" \
+        "$bootstrap_stage3_generation_staging" || return 1
+    bootstrap_stage3_generation_hash=$(bootstrap_stage3_hash_file \
+        "$bootstrap_stage3_generation_snapshot") || return 1
+    rm -f "$bootstrap_stage3_generation_snapshot"
+    BOOTSTRAP_STAGE3_PREPARED_GENERATION=\
+"$bootstrap_stage3_generation_root/$bootstrap_stage3_generation_inputs-$bootstrap_stage3_generation_hash"
+    BOOTSTRAP_STAGE3_PREPARED_STAGING=$bootstrap_stage3_generation_staging
+    BOOTSTRAP_STAGE3_PREPARED_HASH=$bootstrap_stage3_generation_hash
+    chmod 500 "$bootstrap_stage3_generation_staging" || return 1
+}
+
+bootstrap_stage3_publish_seed_generation() {
+    [ "$#" -eq 7 ] || return 1
+    bootstrap_stage3_publish_staging=$1
+    bootstrap_stage3_publish_final=$2
+    bootstrap_stage3_publish_marker=$3
+    bootstrap_stage3_publish_inputs=$4
+    bootstrap_stage3_publish_hash=$5
+    bootstrap_stage3_publish_observed_inputs=$6
+    bootstrap_stage3_publish_compatibility=$7
+    [ "$bootstrap_stage3_publish_inputs" = \
+        "$bootstrap_stage3_publish_observed_inputs" ] || return 1
+    bootstrap_stage3_valid_fingerprint "$bootstrap_stage3_publish_inputs" || return 1
+    bootstrap_stage3_valid_fingerprint "$bootstrap_stage3_publish_hash" || return 1
+    bootstrap_stage3_publish_root=$(dirname -- "$bootstrap_stage3_publish_final")
+    bootstrap_stage3_publish_name=$(basename -- "$bootstrap_stage3_publish_final")
+    bootstrap_stage3_safe_generation_name "$bootstrap_stage3_publish_name" || return 1
+    [ "$bootstrap_stage3_publish_name" = \
+        "$bootstrap_stage3_publish_inputs-$bootstrap_stage3_publish_hash" ] || return 1
+    if [ -d "$bootstrap_stage3_publish_staging" ]; then
+        bootstrap_stage3_publish_material=$bootstrap_stage3_publish_staging
+    elif [ -d "$bootstrap_stage3_publish_final" ]; then
+        bootstrap_stage3_publish_material=$bootstrap_stage3_publish_final
+    else
+        return 1
+    fi
+    set -- "$bootstrap_stage3_publish_material"/*.inputs.sha256
+    [ "$#" -eq 1 ] && [ -f "$1" ] || return 1
+    bootstrap_stage3_publish_stamp=$1
+    [ "$(bootstrap_stage3_manifest_value inputs_fingerprint \
+        "$bootstrap_stage3_publish_stamp")" = \
+        "$bootstrap_stage3_publish_inputs" ] || return 1
+    bootstrap_stage3_publish_stamp_hash=$(bootstrap_stage3_hash_file \
+        "$bootstrap_stage3_publish_stamp") || return 1
+    if [ -d "$bootstrap_stage3_publish_final" ]; then
+        bootstrap_stage3_publish_existing=\
+"$bootstrap_stage3_publish_root/.existing.$$"
+        bootstrap_stage3_directory_snapshot "$bootstrap_stage3_publish_existing" \
+            "$bootstrap_stage3_publish_final" || return 1
+        [ "$(bootstrap_stage3_hash_file "$bootstrap_stage3_publish_existing")" = \
+            "$bootstrap_stage3_publish_hash" ] || return 1
+        rm -f "$bootstrap_stage3_publish_existing"
+        chmod -R u+w "$bootstrap_stage3_publish_staging" 2>/dev/null || true
+        rm -rf "$bootstrap_stage3_publish_staging"
+    else
+        mv "$bootstrap_stage3_publish_staging" \
+            "$bootstrap_stage3_publish_final" || return 1
+    fi
+    bootstrap_stage3_publish_transaction="$bootstrap_stage3_publish_marker.transaction"
+    bootstrap_stage3_publish_transaction_tmp=\
+"$bootstrap_stage3_publish_transaction.tmp.$$"
+    {
+        echo 'schema=simple-bootstrap-authority-transaction-v1'
+        echo "generation=$bootstrap_stage3_publish_name"
+        echo "inputs_fingerprint=$bootstrap_stage3_publish_inputs"
+        echo "generation_sha256=$bootstrap_stage3_publish_hash"
+        echo "stamp_sha256=$bootstrap_stage3_publish_stamp_hash"
+    } >"$bootstrap_stage3_publish_transaction_tmp" || return 1
+    mv "$bootstrap_stage3_publish_transaction_tmp" \
+        "$bootstrap_stage3_publish_transaction" || return 1
+    bootstrap_stage3_publish_compatibility_pointer \
+        "$bootstrap_stage3_publish_compatibility" \
+        "$bootstrap_stage3_publish_final" \
+        "$bootstrap_stage3_publish_root" || return 1
+    if [ "${BOOTSTRAP_STAGE3_TEST_STOP_AFTER_COMPATIBILITY:-0}" = 1 ]; then
+        return 99
+    fi
+    bootstrap_stage3_publish_tmp="$bootstrap_stage3_publish_marker.tmp.$$"
+    {
+        echo 'schema=simple-bootstrap-authority-current-v1'
+        echo "generation=$bootstrap_stage3_publish_name"
+        echo "inputs_fingerprint=$bootstrap_stage3_publish_inputs"
+        echo "generation_sha256=$bootstrap_stage3_publish_hash"
+        echo "stamp_sha256=$bootstrap_stage3_publish_stamp_hash"
+    } >"$bootstrap_stage3_publish_tmp" || return 1
+    mv "$bootstrap_stage3_publish_tmp" "$bootstrap_stage3_publish_marker" || return 1
+    rm -f "$bootstrap_stage3_publish_transaction"
+}
+
+bootstrap_stage3_recover_seed_transaction() {
+    [ "$#" -eq 3 ] || return 1
+    bootstrap_stage3_recover_root=$1
+    bootstrap_stage3_recover_marker=$2
+    bootstrap_stage3_recover_compatibility=$3
+    bootstrap_stage3_recover_transaction=\
+"$bootstrap_stage3_recover_marker.transaction"
+    [ -f "$bootstrap_stage3_recover_transaction" ] &&
+        [ ! -L "$bootstrap_stage3_recover_transaction" ] || return 1
+    [ "$(bootstrap_stage3_manifest_value schema \
+        "$bootstrap_stage3_recover_transaction")" = \
+        simple-bootstrap-authority-transaction-v1 ] || return 1
+    bootstrap_stage3_recover_name=$(bootstrap_stage3_manifest_value generation \
+        "$bootstrap_stage3_recover_transaction") || return 1
+    bootstrap_stage3_recover_inputs=$(bootstrap_stage3_manifest_value \
+        inputs_fingerprint "$bootstrap_stage3_recover_transaction") || return 1
+    bootstrap_stage3_recover_hash=$(bootstrap_stage3_manifest_value \
+        generation_sha256 "$bootstrap_stage3_recover_transaction") || return 1
+    bootstrap_stage3_recover_stamp_hash=$(bootstrap_stage3_manifest_value \
+        stamp_sha256 "$bootstrap_stage3_recover_transaction") || return 1
+    bootstrap_stage3_safe_generation_name "$bootstrap_stage3_recover_name" || return 1
+    bootstrap_stage3_valid_fingerprint "$bootstrap_stage3_recover_inputs" || return 1
+    bootstrap_stage3_valid_fingerprint "$bootstrap_stage3_recover_hash" || return 1
+    bootstrap_stage3_valid_fingerprint "$bootstrap_stage3_recover_stamp_hash" || return 1
+    [ "$bootstrap_stage3_recover_name" = \
+        "$bootstrap_stage3_recover_inputs-$bootstrap_stage3_recover_hash" ] || return 1
+    bootstrap_stage3_recover_generation=\
+"$bootstrap_stage3_recover_root/$bootstrap_stage3_recover_name"
+    [ -d "$bootstrap_stage3_recover_generation" ] &&
+        [ ! -L "$bootstrap_stage3_recover_generation" ] || return 1
+    bootstrap_stage3_recover_snapshot="$bootstrap_stage3_recover_root/.recover.$$"
+    bootstrap_stage3_directory_snapshot "$bootstrap_stage3_recover_snapshot" \
+        "$bootstrap_stage3_recover_generation" || return 1
+    [ "$(bootstrap_stage3_hash_file "$bootstrap_stage3_recover_snapshot")" = \
+        "$bootstrap_stage3_recover_hash" ] || return 1
+    rm -f "$bootstrap_stage3_recover_snapshot"
+    set -- "$bootstrap_stage3_recover_generation"/*.inputs.sha256
+    [ "$#" -eq 1 ] && [ -f "$1" ] || return 1
+    [ "$(bootstrap_stage3_hash_file "$1")" = \
+        "$bootstrap_stage3_recover_stamp_hash" ] || return 1
+    [ "$(bootstrap_stage3_manifest_value inputs_fingerprint "$1")" = \
+        "$bootstrap_stage3_recover_inputs" ] || return 1
+    bootstrap_stage3_publish_compatibility_pointer \
+        "$bootstrap_stage3_recover_compatibility" \
+        "$bootstrap_stage3_recover_generation" \
+        "$bootstrap_stage3_recover_root" || return 1
+    bootstrap_stage3_recover_tmp="$bootstrap_stage3_recover_marker.tmp.$$"
+    {
+        echo 'schema=simple-bootstrap-authority-current-v1'
+        echo "generation=$bootstrap_stage3_recover_name"
+        echo "inputs_fingerprint=$bootstrap_stage3_recover_inputs"
+        echo "generation_sha256=$bootstrap_stage3_recover_hash"
+        echo "stamp_sha256=$bootstrap_stage3_recover_stamp_hash"
+    } >"$bootstrap_stage3_recover_tmp" || return 1
+    mv "$bootstrap_stage3_recover_tmp" "$bootstrap_stage3_recover_marker" || return 1
+    rm -f "$bootstrap_stage3_recover_transaction"
+    bootstrap_stage3_resolve_committed_seed "$bootstrap_stage3_recover_root" \
+        "$bootstrap_stage3_recover_marker"
+}
+
+bootstrap_stage3_resolve_committed_seed() {
+    [ "$#" -eq 2 ] || return 1
+    bootstrap_stage3_resolve_root=$1
+    bootstrap_stage3_resolve_marker=$2
+    [ -d "$bootstrap_stage3_resolve_root" ] &&
+        [ ! -L "$bootstrap_stage3_resolve_root" ] &&
+        [ -f "$bootstrap_stage3_resolve_marker" ] &&
+        [ ! -L "$bootstrap_stage3_resolve_marker" ] || return 1
+    [ ! -e "$bootstrap_stage3_resolve_marker.transaction" ] || return 1
+    [ "$(bootstrap_stage3_manifest_value schema \
+        "$bootstrap_stage3_resolve_marker")" = \
+        simple-bootstrap-authority-current-v1 ] || return 1
+    bootstrap_stage3_resolve_name=$(bootstrap_stage3_manifest_value generation \
+        "$bootstrap_stage3_resolve_marker") || return 1
+    bootstrap_stage3_safe_generation_name "$bootstrap_stage3_resolve_name" || return 1
+    bootstrap_stage3_resolve_inputs=$(bootstrap_stage3_manifest_value \
+        inputs_fingerprint "$bootstrap_stage3_resolve_marker") || return 1
+    bootstrap_stage3_valid_fingerprint "$bootstrap_stage3_resolve_inputs" || return 1
+    bootstrap_stage3_resolve_marker_hash=$(bootstrap_stage3_manifest_value \
+        generation_sha256 "$bootstrap_stage3_resolve_marker") || return 1
+    bootstrap_stage3_valid_fingerprint \
+        "$bootstrap_stage3_resolve_marker_hash" || return 1
+    [ "$bootstrap_stage3_resolve_name" = \
+        "$bootstrap_stage3_resolve_inputs-$bootstrap_stage3_resolve_marker_hash" ] || return 1
+    bootstrap_stage3_resolve_dir=\
+"$bootstrap_stage3_resolve_root/$bootstrap_stage3_resolve_name"
+    [ -d "$bootstrap_stage3_resolve_dir" ] &&
+        [ ! -L "$bootstrap_stage3_resolve_dir" ] || return 1
+    bootstrap_stage3_resolve_snapshot="$bootstrap_stage3_resolve_root/.resolve.$$"
+    bootstrap_stage3_directory_snapshot "$bootstrap_stage3_resolve_snapshot" \
+        "$bootstrap_stage3_resolve_dir" || return 1
+    bootstrap_stage3_resolve_hash=$(bootstrap_stage3_hash_file \
+        "$bootstrap_stage3_resolve_snapshot") || return 1
+    rm -f "$bootstrap_stage3_resolve_snapshot"
+    [ "$bootstrap_stage3_resolve_hash" = \
+        "$bootstrap_stage3_resolve_marker_hash" ] || return 1
+    set -- "$bootstrap_stage3_resolve_dir"/*.inputs.sha256
+    [ "$#" -eq 1 ] && [ -f "$1" ] || return 1
+    [ "$(bootstrap_stage3_manifest_value inputs_fingerprint "$1")" = \
+        "$bootstrap_stage3_resolve_inputs" ] || return 1
+    [ "$(bootstrap_stage3_hash_file "$1")" = \
+        "$(bootstrap_stage3_manifest_value stamp_sha256 \
+            "$bootstrap_stage3_resolve_marker")" ] || return 1
+    BOOTSTRAP_STAGE3_COMMITTED_AUTHORITY=$bootstrap_stage3_resolve_dir
+}
+
+bootstrap_stage3_publish_compatibility_pointer() {
+    [ "$#" -eq 3 ] || return 1
+    bootstrap_stage3_compatibility_path=$1
+    bootstrap_stage3_compatibility_generation=$2
+    bootstrap_stage3_compatibility_root=$3
+    bootstrap_stage3_compatibility_marker=\
+"$bootstrap_stage3_compatibility_path.migration.env"
+    bootstrap_stage3_compatibility_name=$(basename -- \
+        "$bootstrap_stage3_compatibility_generation")
+    {
+        echo 'schema=simple-bootstrap-authority-migration-v1'
+        echo "generation=$bootstrap_stage3_compatibility_name"
+    } >"$bootstrap_stage3_compatibility_marker.tmp.$$" || return 1
+    mv "$bootstrap_stage3_compatibility_marker.tmp.$$" \
+        "$bootstrap_stage3_compatibility_marker" || return 1
+    if [ -d "$bootstrap_stage3_compatibility_path" ] &&
+        [ ! -L "$bootstrap_stage3_compatibility_path" ]; then
+        bootstrap_stage3_compatibility_snapshot=\
+"$bootstrap_stage3_compatibility_root/.legacy.$$"
+        bootstrap_stage3_directory_snapshot \
+            "$bootstrap_stage3_compatibility_snapshot" \
+            "$bootstrap_stage3_compatibility_path" || return 1
+        bootstrap_stage3_compatibility_legacy_hash=$(bootstrap_stage3_hash_file \
+            "$bootstrap_stage3_compatibility_snapshot") || return 1
+        rm -f "$bootstrap_stage3_compatibility_snapshot"
+        bootstrap_stage3_compatibility_legacy=\
+"$bootstrap_stage3_compatibility_root/legacy-$bootstrap_stage3_compatibility_legacy_hash"
+        if [ ! -e "$bootstrap_stage3_compatibility_legacy" ]; then
+            mv "$bootstrap_stage3_compatibility_path" \
+                "$bootstrap_stage3_compatibility_legacy" || return 1
+        else
+            return 1
+        fi
+    fi
+    bootstrap_stage3_compatibility_parent=$(dirname -- \
+        "$bootstrap_stage3_compatibility_path")
+    bootstrap_stage3_compatibility_relative=\
+"$(basename -- "$bootstrap_stage3_compatibility_root")/$bootstrap_stage3_compatibility_name"
+    bootstrap_stage3_compatibility_tmp=\
+"$bootstrap_stage3_compatibility_parent/.bootstrap-link.$$"
+    rm -f "$bootstrap_stage3_compatibility_tmp"
+    ln -s "$bootstrap_stage3_compatibility_relative" \
+        "$bootstrap_stage3_compatibility_tmp" || return 1
+    perl -e 'rename($ARGV[0], $ARGV[1]) or die "rename: $!\n"' \
+        "$bootstrap_stage3_compatibility_tmp" \
+        "$bootstrap_stage3_compatibility_path" || return 1
+    rm -f "$bootstrap_stage3_compatibility_marker"
+}
+
+# Bind the checked-out commit plus the actual tracked dirty bytes/symlink
+# targets and untracked bytes/symlink targets.  A porcelain path list alone is
+# insufficient because an already-dirty file can change without changing it.
+bootstrap_stage3_git_state() {
+    bootstrap_stage3_git_root=$1
+    bootstrap_stage3_git_output=$2
+    bootstrap_stage3_git_diff="${bootstrap_stage3_git_output}.diff.$$"
+    bootstrap_stage3_git_untracked="${bootstrap_stage3_git_output}.untracked.$$"
+    bootstrap_stage3_git_untracked_sorted="${bootstrap_stage3_git_output}.untracked.sorted.$$"
+    bootstrap_stage3_git_records="${bootstrap_stage3_git_output}.records.$$"
+    bootstrap_stage3_jj_stderr="${bootstrap_stage3_git_output}.jj-stderr.$$"
+    if ! (
+        cd "$bootstrap_stage3_git_root" &&
+            git rev-parse --verify HEAD >/dev/null 2>&1
+    ); then
+        command -v jj >/dev/null 2>&1 || return 1
+        (
+            cd "$bootstrap_stage3_git_root" || exit 1
+            bootstrap_stage3_git_head=$(
+                jj --no-pager --color=never log -r @ --no-graph \
+                    -T 'commit_id ++ "\n"' 2>"$bootstrap_stage3_jj_stderr"
+            ) || exit 1
+            [ ! -s "$bootstrap_stage3_jj_stderr" ] || exit 1
+            jj --ignore-working-copy --no-pager --color=never diff \
+                --git -r "$bootstrap_stage3_git_head" \
+                >"$bootstrap_stage3_git_diff" \
+                2>"$bootstrap_stage3_jj_stderr" || exit 1
+            [ ! -s "$bootstrap_stage3_jj_stderr" ] || exit 1
+            printf 'jj-working-copy-diff-sha256=%s\n' \
+                "$(bootstrap_stage3_hash_file "$bootstrap_stage3_git_diff")" \
+                >"$bootstrap_stage3_git_records" || exit 1
+            bootstrap_stage3_git_dirty=$(
+                bootstrap_stage3_hash_file "$bootstrap_stage3_git_records"
+            ) || exit 1
+            printf 'head=%s\n' "$bootstrap_stage3_git_head"
+            printf 'dirty_fingerprint=%s\n' "$bootstrap_stage3_git_dirty"
+        ) >"${bootstrap_stage3_git_output}.tmp.$$" || {
+            rm -f "${bootstrap_stage3_git_output}.tmp.$$" \
+                "$bootstrap_stage3_git_diff" "$bootstrap_stage3_git_records" \
+                "$bootstrap_stage3_jj_stderr"
+            return 1
+        }
+        rm -f "$bootstrap_stage3_git_diff" "$bootstrap_stage3_git_records" \
+            "$bootstrap_stage3_jj_stderr"
+        mv "${bootstrap_stage3_git_output}.tmp.$$" \
+            "$bootstrap_stage3_git_output"
+        return
+    fi
+    (
+        cd "$bootstrap_stage3_git_root" || exit 1
+        bootstrap_stage3_git_head=$(git rev-parse --verify HEAD) || exit 1
+        git diff --binary --full-index --no-ext-diff --no-textconv HEAD -- \
+            >"$bootstrap_stage3_git_diff" || exit 1
+        git ls-files --others --exclude-standard \
+            >"$bootstrap_stage3_git_untracked" || exit 1
+        LC_ALL=C sort -u "$bootstrap_stage3_git_untracked" \
+            >"$bootstrap_stage3_git_untracked_sorted" || exit 1
+        : >"$bootstrap_stage3_git_records" || exit 1
+        printf 'tracked-diff-sha256=%s\n' \
+            "$(bootstrap_stage3_hash_file "$bootstrap_stage3_git_diff")" \
+            >>"$bootstrap_stage3_git_records" || exit 1
+        while IFS= read -r bootstrap_stage3_git_path; do
+            [ -n "$bootstrap_stage3_git_path" ] || continue
+            if [ -L "$bootstrap_stage3_git_path" ]; then
+                bootstrap_stage3_git_target=$(
+                    readlink "$bootstrap_stage3_git_path"
+                ) || exit 1
+                bootstrap_stage3_git_target_sha=$(
+                    printf '%s' "$bootstrap_stage3_git_target" |
+                        bootstrap_stage3_hash_stream
+                ) || exit 1
+                printf 'untracked-link:%s:%s:%s:%s\n' \
+                    "${#bootstrap_stage3_git_path}" "$bootstrap_stage3_git_path" \
+                    "${#bootstrap_stage3_git_target}" \
+                    "$bootstrap_stage3_git_target_sha" \
+                    >>"$bootstrap_stage3_git_records" || exit 1
+            elif [ -f "$bootstrap_stage3_git_path" ]; then
+                bootstrap_stage3_git_file_sha=$(
+                    bootstrap_stage3_hash_file "$bootstrap_stage3_git_path"
+                ) || exit 1
+                bootstrap_stage3_git_executable=0
+                [ ! -x "$bootstrap_stage3_git_path" ] ||
+                    bootstrap_stage3_git_executable=1
+                printf 'untracked-file:%s:%s:%s:%s\n' \
+                    "${#bootstrap_stage3_git_path}" "$bootstrap_stage3_git_path" \
+                    "$bootstrap_stage3_git_executable" \
+                    "$bootstrap_stage3_git_file_sha" \
+                    >>"$bootstrap_stage3_git_records" || exit 1
+            else
+                exit 1
+            fi
+        done <"$bootstrap_stage3_git_untracked_sorted"
+        bootstrap_stage3_git_dirty=$(
+            bootstrap_stage3_hash_file "$bootstrap_stage3_git_records"
+        ) || exit 1
+        printf 'head=%s\n' "$bootstrap_stage3_git_head"
+        printf 'dirty_fingerprint=%s\n' "$bootstrap_stage3_git_dirty"
+    ) >"${bootstrap_stage3_git_output}.tmp.$$" || {
+        rm -f "${bootstrap_stage3_git_output}.tmp.$$" \
+            "$bootstrap_stage3_git_diff" "$bootstrap_stage3_git_untracked" \
+            "$bootstrap_stage3_git_untracked_sorted" \
+            "$bootstrap_stage3_git_records"
+        return 1
+    }
+    rm -f "$bootstrap_stage3_git_diff" "$bootstrap_stage3_git_untracked" \
+        "$bootstrap_stage3_git_untracked_sorted" \
+        "$bootstrap_stage3_git_records"
+    mv "${bootstrap_stage3_git_output}.tmp.$$" "$bootstrap_stage3_git_output"
+}
+
+# Re-derive the Rust seed input fingerprint using the same complete authority
+# as bootstrap-from-scratch.sh.  The caller supplies the selected backend and
+# LLVM feature set and the exact canonical tool PATH used by the build. Tool
+# identity is re-derived from that recorded PATH, never from verifier ambient
+# state.
+bootstrap_stage3_seed_inputs_fingerprint() (
+    case "$#" in
+        4|5) ;;
+        *) return 1 ;;
+    esac
+    bootstrap_stage3_seed_root=$1
+    bootstrap_stage3_seed_backend=$2
+    bootstrap_stage3_seed_features=$3
+    bootstrap_stage3_seed_tool_path=$4
+    bootstrap_stage3_seed_target=${5:-}
+    if [ -z "$bootstrap_stage3_seed_target" ]; then
+        bootstrap_stage3_seed_target=$(bootstrap_stage3_host_platform) ||
+            return 1
+    fi
+    case "$bootstrap_stage3_seed_target" in
+        *-pc-windows-gnu|*-pc-windows-msvc|*-unknown-linux-gnu|\
+        *-apple-darwin|*-unknown-freebsd) ;;
+        *) return 1 ;;
+    esac
+    case "$bootstrap_stage3_seed_tool_path" in
+        /*) ;;
+        *) return 1 ;;
+    esac
+    if printf '%s\n' "$bootstrap_stage3_seed_tool_path" |
+        grep -Eq '(^|:)([^/]|$)'; then
+        return 1
+    fi
+    PATH=$bootstrap_stage3_seed_tool_path
+    export PATH
+    bootstrap_stage3_seed_tmp=$(
+        mktemp -d "${TMPDIR:-/tmp}/bootstrap-stage3-seed.XXXXXX"
+    ) || return 1
+    bootstrap_stage3_seed_records="$bootstrap_stage3_seed_tmp/records"
+    : >"$bootstrap_stage3_seed_records" || {
+        rm -rf "$bootstrap_stage3_seed_tmp"
+        return 1
+    }
+    (
+        cd "$bootstrap_stage3_seed_root" || exit 1
+        if find src/compiler_rust src/runtime \
+            \( -type d -name target -prune \) -o \
+            -type l -print -quit | grep -q .; then
+            exit 1
+        fi
+        find src/compiler_rust \
+            \( -type d -name target \) -prune -o \
+            -type f -print 2>/dev/null \
+            >"$bootstrap_stage3_seed_tmp/compiler.unsorted" || exit 1
+        LC_ALL=C sort -u "$bootstrap_stage3_seed_tmp/compiler.unsorted" \
+            >"$bootstrap_stage3_seed_tmp/compiler.paths" || exit 1
+        bootstrap_stage3_hash_path_list \
+            "$bootstrap_stage3_seed_tmp/compiler.paths" \
+            >>"$bootstrap_stage3_seed_records" || exit 1
+        # Cargo path dependencies may live outside src/compiler_rust (the
+        # hosted runtime currently does). Discover them from dependency
+        # sections instead of maintaining a partial hand-written allowlist.
+        # Every resolved dependency must stay inside this checkout, must not
+        # traverse a symlink, and must contribute all Cargo.toml/Rust inputs.
+        find src/compiler_rust -name Cargo.toml -type f \
+            -not -path '*/target/*' -print \
+            >"$bootstrap_stage3_seed_tmp/cargo-manifests" || exit 1
+        : >"$bootstrap_stage3_seed_tmp/path-deps.unsorted" || exit 1
+        while IFS= read -r bootstrap_stage3_seed_manifest; do
+            bootstrap_stage3_seed_manifest_dir=$(
+                dirname -- "$bootstrap_stage3_seed_manifest"
+            ) || exit 1
+            awk '
+                /^\[/ {
+                    dependency_section = 0
+                    if ($0 ~ /^\[(dependencies|build-dependencies)([.][^]]+)?\]$/)
+                        dependency_section = 1
+                    if ($0 ~ /^\[target[.][^]]+[.](dependencies|build-dependencies)([.][^]]+)?\]$/)
+                        dependency_section = 1
+                    if ($0 ~ /^\[workspace[.]dependencies([.][^]]+)?\]$/)
+                        dependency_section = 1
+                    if ($0 ~ /^\[patch[.][^]]+([.][^]]+)?\]$/)
+                        dependency_section = 1
+                    if ($0 ~ /^\[replace\]$/)
+                        dependency_section = 1
+                }
+                dependency_section && match($0, /path[[:space:]]*=[[:space:]]*"[^"]+"/) {
+                    value = substr($0, RSTART, RLENGTH)
+                    sub(/^[^"]*"/, "", value)
+                    sub(/"$/, "", value)
+                    print value
+                    next
+                }
+                dependency_section && match($0, /\{[^}]*path[[:space:]]*=[[:space:]]*"[^"]+"/) {
+                    value = substr($0, RSTART, RLENGTH)
+                    sub(/^.*path[[:space:]]*=[[:space:]]*"/, "", value)
+                    sub(/"$/, "", value)
+                    print value
+                }
+            ' "$bootstrap_stage3_seed_manifest" |
+                while IFS= read -r bootstrap_stage3_seed_dep; do
+                    [ -n "$bootstrap_stage3_seed_dep" ] || exit 1
+                    bootstrap_stage3_seed_dep_absolute=$(
+                        CDPATH= cd -- \
+                            "$bootstrap_stage3_seed_manifest_dir/$bootstrap_stage3_seed_dep" &&
+                            pwd -P
+                    ) || exit 1
+                    [ ! -L \
+                        "$bootstrap_stage3_seed_manifest_dir/$bootstrap_stage3_seed_dep" ] ||
+                        exit 1
+                    case "$bootstrap_stage3_seed_dep_absolute" in
+                        "$bootstrap_stage3_seed_root"/src/compiler_rust/*)
+                            ;;
+                        "$bootstrap_stage3_seed_root"/*)
+                            printf '%s\n' \
+                                "${bootstrap_stage3_seed_dep_absolute#"$bootstrap_stage3_seed_root"/}" \
+                                >>"$bootstrap_stage3_seed_tmp/path-deps.unsorted" ||
+                                exit 1
+                            ;;
+                        *) exit 1 ;;
+                    esac
+                done || exit 1
+        done <"$bootstrap_stage3_seed_tmp/cargo-manifests"
+        LC_ALL=C sort -u "$bootstrap_stage3_seed_tmp/path-deps.unsorted" \
+            >"$bootstrap_stage3_seed_tmp/path-deps" || exit 1
+        while IFS= read -r bootstrap_stage3_seed_dep_root; do
+            [ -n "$bootstrap_stage3_seed_dep_root" ] || continue
+            case "$bootstrap_stage3_seed_dep_root" in
+                */target|*/target/*) exit 1 ;;
+            esac
+            find "$bootstrap_stage3_seed_dep_root" \
+                \( -type d -name target -prune \) -o \
+                -type f -print \
+                >"$bootstrap_stage3_seed_tmp/path-dep-files.unsorted" ||
+                exit 1
+            LC_ALL=C sort -u \
+                "$bootstrap_stage3_seed_tmp/path-dep-files.unsorted" \
+                >"$bootstrap_stage3_seed_tmp/path-dep-files" || exit 1
+            [ -s "$bootstrap_stage3_seed_tmp/path-dep-files" ] || exit 1
+            bootstrap_stage3_hash_path_list \
+                "$bootstrap_stage3_seed_tmp/path-dep-files" \
+                >>"$bootstrap_stage3_seed_records" || exit 1
+        done <"$bootstrap_stage3_seed_tmp/path-deps"
+        find src/runtime \( -name '*.c' -o -name '*.h' \) \
+            -type f -print 2>/dev/null \
+            >"$bootstrap_stage3_seed_tmp/runtime.unsorted" || exit 1
+        LC_ALL=C sort -u "$bootstrap_stage3_seed_tmp/runtime.unsorted" \
+            >"$bootstrap_stage3_seed_tmp/runtime.paths" || exit 1
+        bootstrap_stage3_hash_path_list \
+            "$bootstrap_stage3_seed_tmp/runtime.paths" \
+            >>"$bootstrap_stage3_seed_records" || exit 1
+        bootstrap_stage3_seed_lock_hash=$(
+            bootstrap_stage3_hash_file src/compiler_rust/Cargo.lock
+        ) || exit 1
+        printf '%s  %s\n' "$bootstrap_stage3_seed_lock_hash" \
+            src/compiler_rust/Cargo.lock \
+            >>"$bootstrap_stage3_seed_records" || exit 1
+        bootstrap_stage3_version_hash=$(
+            bootstrap_stage3_hash_file VERSION
+        ) || exit 1
+        printf '%s  %s\n' "$bootstrap_stage3_version_hash" VERSION \
+            >>"$bootstrap_stage3_seed_records" || exit 1
+        printf 'profile=bootstrap backend=%s features=%s target=%s\n' \
+            "$bootstrap_stage3_seed_backend" \
+            "$bootstrap_stage3_seed_features" \
+            "$bootstrap_stage3_seed_target" \
+            >>"$bootstrap_stage3_seed_records" || exit 1
+        if [ "$bootstrap_stage3_seed_target" = \
+            x86_64-pc-windows-gnu ]; then
+            printf 'target-linker=%s\ntarget-cc=%s\ntarget-ar=%s\n' \
+                "${CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER:-gcc}" \
+                "${CC_x86_64_pc_windows_gnu:-gcc}" \
+                "${AR_x86_64_pc_windows_gnu:-ar}" \
+                >>"$bootstrap_stage3_seed_records" || exit 1
+        elif [ "$bootstrap_stage3_seed_target" = \
+            x86_64-pc-windows-msvc ]; then
+            printf 'windows-INCLUDE=%s\nwindows-LIB=%s\nwindows-LIBPATH=%s\nwindows-SystemRoot=%s\nwindows-TEMP=%s\n' \
+                "${INCLUDE:-}" "${LIB:-}" "${LIBPATH:-}" \
+                "${SystemRoot:-}" "${TEMP:-}" \
+                >>"$bootstrap_stage3_seed_records" || exit 1
+        fi
+        bootstrap_stage3_seed_llvm_authority=$(
+            bootstrap_stage3_resolve_llvm_build_authority \
+                "$PATH" "$bootstrap_stage3_seed_features"
+        ) || exit 1
+        printf '%s\n' "$bootstrap_stage3_seed_llvm_authority" \
+            >>"$bootstrap_stage3_seed_records" || exit 1
+        printf '%s\n' \
+            'recipe.1=cargo build --locked --offline --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap --target <selected-platform> -p simple-driver <selected-llvm-features>' \
+            'recipe.2=cargo build --locked --offline --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap --target <selected-platform> -p simple-native-all <selected-llvm-features>' \
+            'recipe.3=env CARGO_PROFILE_BOOTSTRAP_LTO=off cargo build --locked --offline --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap --target <selected-platform> -p simple-runtime --features runtime-symbol-table' \
+            'recipe.4=cargo build --locked --offline --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap --target <selected-platform> -p simple-compiler-backfill' \
+            >>"$bootstrap_stage3_seed_records" || exit 1
+        # Rust authority builds execute under env -i with explicit RUSTC/CC
+        # paths. Ambient SDK/LLVM/general flag variables are therefore not
+        # build inputs. The target and its MinGW tool selections are bound
+        # above; tool versions and backend/features are bound below.
+        bootstrap_stage3_seed_rust_authority=$(
+            bootstrap_stage3_resolve_rust_toolchain \
+                "$bootstrap_stage3_seed_root" "$PATH"
+        ) || exit 1
+        bootstrap_stage3_seed_rust_sysroot=$(
+            printf '%s\n' "$bootstrap_stage3_seed_rust_authority" |
+                sed -n 's/^rust-sysroot=//p'
+        ) || exit 1
+        bootstrap_stage3_seed_rustc=\
+"$bootstrap_stage3_seed_rust_sysroot/bin/rustc"
+        bootstrap_stage3_seed_cargo=\
+"$bootstrap_stage3_seed_rust_sysroot/bin/cargo"
+        [ -x "$bootstrap_stage3_seed_rustc" ] || exit 1
+        [ -x "$bootstrap_stage3_seed_cargo" ] || exit 1
+        printf '%s\n' "$bootstrap_stage3_seed_rust_authority" \
+            >>"$bootstrap_stage3_seed_records" || exit 1
+        printf 'rustc-toolchain-sha256=%s\ncargo-toolchain-sha256=%s\n' \
+            "$(bootstrap_stage3_hash_file \
+                "$bootstrap_stage3_seed_rustc")" \
+            "$(bootstrap_stage3_hash_file \
+                "$bootstrap_stage3_seed_cargo")" \
+            >>"$bootstrap_stage3_seed_records" || exit 1
+        env -i PATH="$PATH" LC_ALL=C LANG=C \
+            "$bootstrap_stage3_seed_rustc" -vV \
+            >"$bootstrap_stage3_seed_tmp/rustc-version" 2>/dev/null ||
+            exit 1
+        [ -s "$bootstrap_stage3_seed_tmp/rustc-version" ] || exit 1
+        cat "$bootstrap_stage3_seed_tmp/rustc-version" \
+            >>"$bootstrap_stage3_seed_records" || exit 1
+        env -i PATH="$PATH" LC_ALL=C LANG=C \
+            "$bootstrap_stage3_seed_cargo" -V \
+            >>"$bootstrap_stage3_seed_records" 2>/dev/null || exit 1
+        bootstrap_stage3_seed_cc=$(
+            bootstrap_stage3_target_c_compiler \
+                "$bootstrap_stage3_seed_target"
+        ) || exit 1
+        if [ -n "$bootstrap_stage3_seed_cc" ]; then
+            bootstrap_stage3_seed_cc_canonical=$(
+                perl -MCwd=abs_path -e \
+                    'my $p = abs_path($ARGV[0]); defined($p) or exit 1; print $p' \
+                    "$bootstrap_stage3_seed_cc"
+            ) || exit 1
+            printf 'cc-path=%s\ncc-sha256=%s\n' \
+                "$bootstrap_stage3_seed_cc_canonical" \
+                "$(bootstrap_stage3_hash_file \
+                    "$bootstrap_stage3_seed_cc_canonical")" \
+                >>"$bootstrap_stage3_seed_records" || exit 1
+            bootstrap_stage3_seed_cc_version=\
+"$bootstrap_stage3_seed_tmp/cc-version"
+            bootstrap_stage3_seed_cc_status=0
+            env -i PATH="$PATH" LC_ALL=C LANG=C \
+                "$bootstrap_stage3_seed_cc" --version \
+                >"$bootstrap_stage3_seed_cc_version" 2>&1 ||
+                bootstrap_stage3_seed_cc_status=$?
+            printf 'cc-version-status=%s\n' \
+                "$bootstrap_stage3_seed_cc_status" \
+                >>"$bootstrap_stage3_seed_records" || exit 1
+            sed -n '1p' "$bootstrap_stage3_seed_cc_version" \
+                >>"$bootstrap_stage3_seed_records" || exit 1
+        fi
+        if command -v llvm-config >/dev/null 2>&1; then
+            bootstrap_stage3_seed_llvm_config=$(command -v llvm-config) ||
+                exit 1
+            bootstrap_stage3_seed_llvm_config_canonical=$(
+                perl -MCwd=abs_path -e \
+                    'my $p = abs_path($ARGV[0]); defined($p) or exit 1; print $p' \
+                    "$bootstrap_stage3_seed_llvm_config"
+            ) || exit 1
+            printf 'llvm-config-path=%s\nllvm-config-sha256=%s\n' \
+                "$bootstrap_stage3_seed_llvm_config_canonical" \
+                "$(bootstrap_stage3_hash_file \
+                    "$bootstrap_stage3_seed_llvm_config_canonical")" \
+                >>"$bootstrap_stage3_seed_records" || exit 1
+            bootstrap_stage3_seed_llvm_version=$(
+                env -i PATH="$PATH" LC_ALL=C LANG=C \
+                    "$bootstrap_stage3_seed_llvm_config" --version
+            ) || exit 1
+            bootstrap_stage3_seed_llvm_prefix=$(
+                env -i PATH="$PATH" LC_ALL=C LANG=C \
+                    "$bootstrap_stage3_seed_llvm_config" --prefix
+            ) || exit 1
+            printf 'llvm-config-version=%s\n' \
+                "$bootstrap_stage3_seed_llvm_version" \
+                >>"$bootstrap_stage3_seed_records" || exit 1
+            printf 'llvm-config-prefix=%s\n' \
+                "$bootstrap_stage3_seed_llvm_prefix" \
+                >>"$bootstrap_stage3_seed_records" || exit 1
+        else
+            echo "llvm-config=absent" >>"$bootstrap_stage3_seed_records" ||
+                exit 1
+        fi
+    ) || {
+        rm -rf "$bootstrap_stage3_seed_tmp"
+        return 1
+    }
+    bootstrap_stage3_seed_result=$(
+        bootstrap_stage3_hash_file "$bootstrap_stage3_seed_records"
+    ) || {
+        rm -rf "$bootstrap_stage3_seed_tmp"
+        return 1
+    }
+    rm -rf "$bootstrap_stage3_seed_tmp"
+    printf '%s\n' "$bootstrap_stage3_seed_result"
+)
+
+# Store the literal command and the exact sanitized environment used to execute
+# it. Every record is length-prefixed, including values with spaces.
+# Arguments before "--" are explicit NAME=VALUE entries; arguments after it are
+# the executable and argv exactly as passed to env(1).

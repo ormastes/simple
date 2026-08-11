@@ -1,0 +1,98 @@
+# Architecture-parameterized boundary capture (lane L6).
+#
+# Purpose: the board-Vulkan boundary IDs (vulkan.shader.spirv_binary@1,
+# vulkan.submit.command_stream@1, vulkan.present.readback_image@1) can be
+# captured under three SimpleOS guest architectures (x86_64, aarch64,
+# riscv64). This module makes the CAPTURED-UNDER architecture a first-class,
+# checked part of the record instead of an implicit assumption baked into
+# the x86_64 development host — and enforces that a result captured under
+# one architecture is never silently compared against, or substituted for,
+# a result captured under another, UNLESS the boundary is one that is
+# legitimately architecture-invariant (SPIR-V binaries: SPIR-V is a portable
+# IR). Command streams and readback images are NOT arch-invariant: they
+# encode GPU-vendor/ISA-specific submission and framebuffer layout.
+#
+# `environment_profile` here reuses the field already declared on
+# CounterpartPlan / ProvenanceReceipt / CounterpartRun in
+# src/lib/common/spec/evidence/counterpart/model.spl — this module does not
+# invent a parallel mechanism. Convention: "<arch>/<board>/<boot_path>",
+# e.g. "x86_64/intel_gen12/ovmf-pflash", "aarch64/adreno/edk2-aavmf",
+# "riscv64/img_bxe/opensbi".
+
+use std.text.trim
+
+pub struct ArchBoundaryCapture:
+    boundary_id: text
+    environment_profile: text
+    arch: text
+    captured: bool
+
+pub fn arch_boundary_capture(boundary_id: text, environment_profile: text, arch: text, captured: bool) -> ArchBoundaryCapture:
+    ArchBoundaryCapture(
+        boundary_id: boundary_id,
+        environment_profile: environment_profile,
+        arch: arch,
+        captured: captured
+    )
+
+# Boundaries that are legitimately architecture-invariant: SPIR-V is a
+# portable intermediate representation, so a SPIR-V binary captured on one
+# arch may be compared against one captured on another WITHOUT that being a
+# substitution defect. Everything else defaults to arch-SPECIFIC.
+pub fn boundary_is_arch_invariant(boundary_id: text) -> bool:
+    boundary_id == "vulkan.shader.spirv_binary@1"
+
+# Fail-closed predicate: returns the list of rejection reasons for comparing
+# two captures. Empty list means the comparison is legitimate. This is the
+# core correctness rule for lane L6 — it must reject a cross-arch
+# comparison unless the boundary is declared arch-invariant.
+pub fn cross_arch_comparison_rejections(left: ArchBoundaryCapture, right: ArchBoundaryCapture) -> [text]:
+    var failures: [text] = []
+    if left.boundary_id != right.boundary_id:
+        failures.push("boundary_id mismatch: " + left.boundary_id + " vs " + right.boundary_id)
+        return failures
+    if not left.captured:
+        failures.push("left side was never captured (boundary_id=" + left.boundary_id + ")")
+    if not right.captured:
+        failures.push("right side was never captured (boundary_id=" + right.boundary_id + ")")
+    if left.arch != right.arch:
+        if not boundary_is_arch_invariant(left.boundary_id):
+            failures.push(
+                "cross-arch substitution rejected: " + left.boundary_id +
+                " captured under " + left.environment_profile +
+                " (arch=" + left.arch + ") compared against " +
+                right.environment_profile + " (arch=" + right.arch + ") — " +
+                "this boundary is architecture-specific, not portable"
+            )
+    failures
+
+pub fn cross_arch_comparison_is_valid(left: ArchBoundaryCapture, right: ArchBoundaryCapture) -> bool:
+    cross_arch_comparison_rejections(left, right).len() == 0
+
+# Truthful coverage count: the number of DISTINCT architectures that
+# actually produced a captured (executed) record for a given boundary_id.
+# A claim of "N-arch coverage" is only honest if this returns N — it must
+# not be inflated by declaring an arch profile without a captured record.
+pub fn arch_coverage_count(boundary_id: text, captures: [ArchBoundaryCapture]) -> i64:
+    var seen: [text] = []
+    for c in captures:
+        if c.boundary_id == boundary_id and c.captured:
+            var already: bool = false
+            for s in seen:
+                if s == c.arch:
+                    already = true
+            if not already:
+                seen.push(c.arch)
+    seen.len()
+
+pub fn arch_coverage_archs(boundary_id: text, captures: [ArchBoundaryCapture]) -> [text]:
+    var seen: [text] = []
+    for c in captures:
+        if c.boundary_id == boundary_id and c.captured:
+            var already: bool = false
+            for s in seen:
+                if s == c.arch:
+                    already = true
+            if not already:
+                seen.push(c.arch)
+    seen

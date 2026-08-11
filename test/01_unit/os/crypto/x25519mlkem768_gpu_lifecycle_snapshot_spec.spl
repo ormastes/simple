@@ -1,0 +1,186 @@
+# @tag: unit, crypto, x25519mlkem768, cuda, vulkan, metal, branch-coverage
+# @req NFR-009 NFR-010 NFR-017
+
+use std.spec.{describe, it, expect, fail, step}
+use os.crypto.x25519_mlkem768.gpu_lifecycle_snapshot.{
+    X25519MlKem768GpuLifecycleSnapshot,
+    X25519MlKem768GpuLifecycleDelta,
+    x25519_mlkem768_gpu_lifecycle_snapshot,
+    x25519_mlkem768_gpu_lifecycle_snapshot_reason,
+    x25519_mlkem768_gpu_lifecycle_delta,
+    x25519_mlkem768_gpu_lifecycle_delta_valid}
+use os.crypto.x25519_mlkem768.cuda_ntt_provider.{
+    X25519MlKem768CudaNttExecutor}
+use os.crypto.x25519_mlkem768.vulkan_ntt_provider.{
+    X25519MlKem768VulkanNttExecutor}
+use os.crypto.x25519_mlkem768.metal_ntt_provider.{
+    X25519MlKem768MetalNttExecutor}
+
+fn _snapshot(transfer_count: i64, launch_count: i64,
+        synchronization_count: i64, readback_count: i64,
+        kernel_count: i64) -> X25519MlKem768GpuLifecycleSnapshot:
+    x25519_mlkem768_gpu_lifecycle_snapshot(
+        transfer_count, launch_count, synchronization_count,
+        readback_count, kernel_count)
+
+fn _delta_reason(baseline: X25519MlKem768GpuLifecycleSnapshot,
+        current: X25519MlKem768GpuLifecycleSnapshot) -> text:
+    match x25519_mlkem768_gpu_lifecycle_delta(baseline, current):
+        case Ok(_): "unexpected-success"
+        case Err(reason): reason
+
+describe "X25519MLKEM768 typed GPU lifecycle snapshots":
+    it "accepts finite nonnegative snapshots and rejects every negative field":
+        step("Validate each typed counter independently before subtraction")
+        expect(x25519_mlkem768_gpu_lifecycle_snapshot_reason(
+            _snapshot(0, 1, 2, 3, 4))).to_equal("")
+        expect(x25519_mlkem768_gpu_lifecycle_snapshot_reason(
+            _snapshot(-1, 0, 0, 0, 0))).to_equal(
+                "gpu-lifecycle-transfer-negative")
+        expect(x25519_mlkem768_gpu_lifecycle_snapshot_reason(
+            _snapshot(0, -1, 0, 0, 0))).to_equal(
+                "gpu-lifecycle-launch-negative")
+        expect(x25519_mlkem768_gpu_lifecycle_snapshot_reason(
+            _snapshot(0, 0, -1, 0, 0))).to_equal(
+                "gpu-lifecycle-synchronization-negative")
+        expect(x25519_mlkem768_gpu_lifecycle_snapshot_reason(
+            _snapshot(0, 0, 0, -1, 0))).to_equal(
+                "gpu-lifecycle-readback-negative")
+        expect(x25519_mlkem768_gpu_lifecycle_snapshot_reason(
+            _snapshot(0, 0, 0, 0, -1))).to_equal(
+                "gpu-lifecycle-kernel-negative")
+
+    it "accepts every representable terminal counter without arithmetic overflow":
+        step("Retain i64 maximum as a final snapshot while rejecting later work")
+        val maximum: i64 = 9223372036854775807
+        expect(x25519_mlkem768_gpu_lifecycle_snapshot_reason(
+            _snapshot(maximum, 0, 0, 0, 0))).to_equal("")
+        expect(x25519_mlkem768_gpu_lifecycle_snapshot_reason(
+            _snapshot(0, maximum, 0, 0, 0))).to_equal("")
+        expect(x25519_mlkem768_gpu_lifecycle_snapshot_reason(
+            _snapshot(0, 0, maximum, 0, 0))).to_equal("")
+        expect(x25519_mlkem768_gpu_lifecycle_snapshot_reason(
+            _snapshot(0, 0, 0, maximum, 0))).to_equal("")
+        expect(x25519_mlkem768_gpu_lifecycle_snapshot_reason(
+            _snapshot(0, 0, 0, 0, maximum))).to_equal("")
+
+    it "computes one positive equal delta bound to the kernel delta":
+        step("Subtract a monotonic before/after pair without device access")
+        val checked = x25519_mlkem768_gpu_lifecycle_delta(
+            _snapshot(7, 7, 7, 7, 7), _snapshot(10, 10, 10, 10, 10))
+        match checked:
+            case Ok(delta):
+                expect(delta.transfer_count).to_equal(3)
+                expect(delta.launch_count).to_equal(3)
+                expect(delta.synchronization_count).to_equal(3)
+                expect(delta.readback_count).to_equal(3)
+                expect(delta.kernel_count).to_equal(3)
+                expect(x25519_mlkem768_gpu_lifecycle_delta_valid(
+                    delta)).to_equal(true)
+            case Err(reason): fail("valid lifecycle delta was rejected: " + reason)
+
+    it "rejects every independently future baseline field":
+        step("Prove monotonicity across all five counters")
+        val current = _snapshot(4, 4, 4, 4, 4)
+        expect(_delta_reason(_snapshot(5, 4, 4, 4, 4), current)).to_equal(
+            "gpu-lifecycle-transfer-baseline-future")
+        expect(_delta_reason(_snapshot(4, 5, 4, 4, 4), current)).to_equal(
+            "gpu-lifecycle-launch-baseline-future")
+        expect(_delta_reason(_snapshot(4, 4, 5, 4, 4), current)).to_equal(
+            "gpu-lifecycle-synchronization-baseline-future")
+        expect(_delta_reason(_snapshot(4, 4, 4, 5, 4), current)).to_equal(
+            "gpu-lifecycle-readback-baseline-future")
+        expect(_delta_reason(_snapshot(4, 4, 4, 4, 5), current)).to_equal(
+            "gpu-lifecycle-kernel-baseline-future")
+
+    it "rejects zero work and every lifecycle-to-kernel mismatch":
+        step("Bind transfer, launch, synchronization, and readback to kernels")
+        val baseline = _snapshot(10, 10, 10, 10, 10)
+        expect(_delta_reason(baseline, baseline)).to_equal(
+            "gpu-lifecycle-kernel-delta-not-positive")
+        expect(_delta_reason(baseline,
+            _snapshot(11, 12, 12, 12, 12))).to_equal(
+                "gpu-lifecycle-transfer-delta-mismatch")
+        expect(_delta_reason(baseline,
+            _snapshot(12, 11, 12, 12, 12))).to_equal(
+                "gpu-lifecycle-launch-delta-mismatch")
+        expect(_delta_reason(baseline,
+            _snapshot(12, 12, 11, 12, 12))).to_equal(
+                "gpu-lifecycle-synchronization-delta-mismatch")
+        expect(_delta_reason(baseline,
+            _snapshot(12, 12, 12, 11, 12))).to_equal(
+                "gpu-lifecycle-readback-delta-mismatch")
+
+    it "rejects invalid baseline and current snapshots before delta math":
+        step("Preserve which side supplied malformed or wrapped evidence")
+        expect(_delta_reason(_snapshot(-1, 0, 0, 0, 0),
+            _snapshot(1, 1, 1, 1, 1))).to_equal(
+                "gpu-lifecycle-baseline-invalid:gpu-lifecycle-transfer-negative")
+        expect(_delta_reason(_snapshot(0, 0, 0, 0, 0),
+            _snapshot(0, 0, 0, 0, -1))).to_equal(
+                "gpu-lifecycle-current-invalid:gpu-lifecycle-kernel-negative")
+
+    it "keeps the standalone delta predicate fail closed on every field":
+        step("Exercise predicate branches independently of checked subtraction")
+        expect(x25519_mlkem768_gpu_lifecycle_delta_valid(
+            X25519MlKem768GpuLifecycleDelta(
+                transfer_count: 0, launch_count: 0,
+                synchronization_count: 0, readback_count: 0,
+                kernel_count: 0))).to_equal(false)
+        expect(x25519_mlkem768_gpu_lifecycle_delta_valid(
+            X25519MlKem768GpuLifecycleDelta(
+                transfer_count: 1, launch_count: 2,
+                synchronization_count: 2, readback_count: 2,
+                kernel_count: 2))).to_equal(false)
+        expect(x25519_mlkem768_gpu_lifecycle_delta_valid(
+            X25519MlKem768GpuLifecycleDelta(
+                transfer_count: 2, launch_count: 1,
+                synchronization_count: 2, readback_count: 2,
+                kernel_count: 2))).to_equal(false)
+        expect(x25519_mlkem768_gpu_lifecycle_delta_valid(
+            X25519MlKem768GpuLifecycleDelta(
+                transfer_count: 2, launch_count: 2,
+                synchronization_count: 1, readback_count: 2,
+                kernel_count: 2))).to_equal(false)
+        expect(x25519_mlkem768_gpu_lifecycle_delta_valid(
+            X25519MlKem768GpuLifecycleDelta(
+                transfer_count: 2, launch_count: 2,
+                synchronization_count: 2, readback_count: 1,
+                kernel_count: 2))).to_equal(false)
+
+    it "projects typed snapshots read-only from all three executors":
+        step("Read CUDA, Vulkan, and Metal counters through one stable API")
+        var cuda = X25519MlKem768CudaNttExecutor.create_binary(
+            "missing.cubin", "0" * 64)
+        var vulkan = X25519MlKem768VulkanNttExecutor.create_binaries(
+            "missing-forward.spv", "1" * 64,
+            "missing-inverse.spv", "2" * 64)
+        var metal = X25519MlKem768MetalNttExecutor.create_binary(
+            "missing.metallib", "3" * 64)
+        cuda.transfer_count = 1
+        cuda.launch_count = 2
+        cuda.synchronization_count = 3
+        cuda.readback_count = 4
+        cuda.kernel_invocations = 5
+        vulkan.transfer_count = 6
+        vulkan.launch_count = 7
+        vulkan.synchronization_count = 8
+        vulkan.readback_count = 9
+        vulkan.kernel_invocations = 10
+        metal.transfer_count = 11
+        metal.launch_count = 12
+        metal.synchronization_count = 13
+        metal.readback_count = 14
+        metal.kernel_invocations = 15
+        val cuda_snapshot = cuda.lifecycle_snapshot()
+        val vulkan_snapshot = vulkan.lifecycle_snapshot()
+        val metal_snapshot = metal.lifecycle_snapshot()
+        expect(cuda_snapshot.transfer_count).to_equal(1)
+        expect(cuda_snapshot.kernel_count).to_equal(5)
+        expect(vulkan_snapshot.synchronization_count).to_equal(8)
+        expect(vulkan_snapshot.kernel_count).to_equal(10)
+        expect(metal_snapshot.readback_count).to_equal(14)
+        expect(metal_snapshot.kernel_count).to_equal(15)
+        cuda.shutdown()
+        vulkan.shutdown()
+        metal.shutdown()

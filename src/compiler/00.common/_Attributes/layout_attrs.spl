@@ -1,0 +1,565 @@
+# Layout/platform attribute parsing, task-policy validation, and argument-extraction helpers.
+use compiler.common.attributes.*
+# Attribute Parsing - Parse and Validate Attributes
+#
+# Handles parsing of layout-related attributes:
+# - @repr("C")         - C ABI compatible layout
+# - @repr("packed")    - No padding between fields
+# - @repr("transparent") - Single-field wrapper layout
+# - @packed            - Shorthand for @repr("packed")
+# - @align(N)          - Minimum alignment (must be power of 2)
+#
+# Handles parsing of volatile attributes:
+# - @volatile          - Full volatile (reads and writes)
+# - @volatile_read     - Read-only volatile
+# - @volatile_write    - Write-only volatile
+# - @nonvolatile       - Explicitly non-volatile (override)
+#
+# Returns a LayoutAttr for use in type layout computation.
+
+# bypass: parsing functions need L1 (Attribute/Expr) and L3 (LayoutAttr/TypeLayoutKind) types.
+# Split deferred — spawn_analysis.spl (L1) consumes parse_function_attrs/parse_task_attr,
+# so moving parsing fns to L2 would create a new L1→L2 violation.
+use compiler.frontend.parser_types.{Attribute}
+use compiler.frontend.parser_types_expr.{Expr, ExprKind, expr_kind}
+use compiler.types.type_layout.{
+    LayoutAttr, TypeLayoutKind,
+    PlatformAbi, PlatformBit, PlatformPredicate, PlatformVariant, PlatformParseResult,
+    PlatformLayoutDiagnostic, platform_abi_from_text, platform_bit_from_text,
+    platform_cpu_from_text, platform_os_from_text,
+    platform_predicate_default, platform_validate_variants
+}
+use compiler.common.diagnostics.span.{Span}
+
+# ============================================================================
+# Named Argument Extraction Helpers
+# ============================================================================
+
+# Import shared helpers from attributes.spl
+use compiler.common.attributes.{NamedArg, extract_named_args, get_named_string_arg, get_named_int_arg, get_named_int_array_arg}
+
+# ============================================================================
+# Volatile Attribute Types
+# ============================================================================
+
+struct TaskPolicyValidation:
+    """Validation result for @task scheduler policy metadata."""
+    diagnostics: [TaskPolicyDiagnostic]
+    has_errors: bool
+
+fn parse_task_attr(attrs: [Attribute]) -> TaskAttr?:
+    """Extract @task attributes from a list of attributes."""
+    var found = false
+    var instances = 1
+    var has_group = false
+    var group_value = ""
+    var has_frame = false
+    var frame_value: i64 = 0
+    var wait_nodes = 0
+    var policy = "fair"
+    var has_weight = false
+    var weight_value: i64 = 0
+    var has_priority = false
+    var priority_value: i64 = 0
+    var has_latency_hint = false
+    var latency_hint_value = ""
+    var has_runtime_ns = false
+    var runtime_ns_value: i64 = 0
+    var has_period_ns = false
+    var period_ns_value: i64 = 0
+    var has_deadline_ns = false
+    var deadline_ns_value: i64 = 0
+
+    for attr in attrs:
+        if attr.name == "task":
+            found = true
+            val named_args = extract_named_args(attr)
+            if named_args.has("instances"):
+                val v = extract_int_arg(named_args["instances"])
+                if v != nil:
+                    instances = v ?? 1
+            if named_args.has("group"):
+                val g = extract_string_arg(named_args["group"])
+                if g.len() > 0:
+                    has_group = true
+                    group_value = g
+            if named_args.has("frame"):
+                val frame_parsed = extract_int_arg(named_args["frame"])
+                if frame_parsed.?:
+                    has_frame = true
+                    frame_value = frame_parsed.unwrap()
+            if named_args.has("wait_nodes"):
+                val w = extract_int_arg(named_args["wait_nodes"])
+                if w != nil:
+                    wait_nodes = w ?? 0
+            if named_args.has("policy"):
+                policy = extract_string_arg(named_args["policy"])
+            if named_args.has("weight"):
+                val weight_parsed = extract_int_arg(named_args["weight"])
+                if weight_parsed.?:
+                    has_weight = true
+                    weight_value = weight_parsed.unwrap()
+            if named_args.has("priority"):
+                val priority_parsed = extract_int_arg(named_args["priority"])
+                if priority_parsed.?:
+                    has_priority = true
+                    priority_value = priority_parsed.unwrap()
+            if named_args.has("latency_hint"):
+                val h = extract_string_arg(named_args["latency_hint"])
+                if h.len() > 0:
+                    has_latency_hint = true
+                    latency_hint_value = h
+            if named_args.has("runtime"):
+                val runtime_parsed = extract_int_arg(named_args["runtime"])
+                if runtime_parsed.?:
+                    has_runtime_ns = true
+                    runtime_ns_value = runtime_parsed.unwrap()
+            if named_args.has("period"):
+                val period_parsed = extract_int_arg(named_args["period"])
+                if period_parsed.?:
+                    has_period_ns = true
+                    period_ns_value = period_parsed.unwrap()
+            if named_args.has("deadline"):
+                val deadline_parsed = extract_int_arg(named_args["deadline"])
+                if deadline_parsed.?:
+                    has_deadline_ns = true
+                    deadline_ns_value = deadline_parsed.unwrap()
+
+            for arg in attr.args:
+                match arg.kind:
+                    case IntLit(value):
+                        # Bare integer: @task(4) means instances=4
+                        instances = value
+                    case _: ()
+
+    if not found:
+        return nil
+
+    TaskAttr(
+        instances: instances,
+        group: if has_group: Some(group_value) else: nil,
+        frame: if has_frame: Some(frame_value) else: nil,
+        wait_nodes: wait_nodes,
+        policy: policy,
+        weight: if has_weight: Some(weight_value) else: nil,
+        priority: if has_priority: Some(priority_value) else: nil,
+        latency_hint: if has_latency_hint: Some(latency_hint_value) else: nil,
+        runtime_ns: if has_runtime_ns: Some(runtime_ns_value) else: nil,
+        period_ns: if has_period_ns: Some(period_ns_value) else: nil,
+        deadline_ns: if has_deadline_ns: Some(deadline_ns_value) else: nil
+    )
+
+fn validate_task_policy_attr(attr: TaskAttr, runtime_family: text, effects: [text]) -> TaskPolicyValidation:
+    """Validate @task scheduler policy against runtime family/effects.
+
+    Fair/background policies are valid in any runtime family. RT and deadline
+    policies require noalloc runtime code; deadline additionally requires a
+    valid runtime/period/deadline tuple for scheduler admission.
+    """
+    var diagnostics: [TaskPolicyDiagnostic] = []
+    var has_errors = false
+
+    val is_rt = attr.policy == "rt_fifo" or attr.policy == "rt_rr"
+    val is_deadline = attr.policy == "deadline"
+    val is_supported = (
+        attr.policy == "fair" or attr.policy == "background" or
+        attr.policy == "rt_fifo" or attr.policy == "rt_rr" or
+        attr.policy == "deadline"
+    )
+
+    if not is_supported:
+        diagnostics.push(TaskPolicyDiagnostic(
+            level: "error",
+            message: "unknown @task scheduler policy '{attr.policy}'"
+        ))
+        has_errors = true
+
+    if is_rt or is_deadline:
+        if runtime_family != "nogc_async_mut_noalloc":
+            diagnostics.push(TaskPolicyDiagnostic(
+                level: "error",
+                message: "@task(policy='{attr.policy}') requires nogc_async_mut_noalloc runtime family"
+            ))
+            has_errors = true
+
+    if is_deadline:
+        if attr.runtime_ns == nil or attr.period_ns == nil or attr.deadline_ns == nil:
+            diagnostics.push(TaskPolicyDiagnostic(
+                level: "error",
+                message: "@task(policy='deadline') requires runtime, period, and deadline parameters"
+            ))
+            has_errors = true
+        else:
+            val runtime = attr.runtime_ns ?? 0
+            val period = attr.period_ns ?? 0
+            val deadline = attr.deadline_ns ?? 0
+            if runtime <= 0 or period <= 0 or deadline <= 0:
+                diagnostics.push(TaskPolicyDiagnostic(
+                    level: "error",
+                    message: "@task(policy='deadline') requires positive runtime, period, and deadline parameters"
+                ))
+                has_errors = true
+            elif runtime > deadline:
+                diagnostics.push(TaskPolicyDiagnostic(
+                    level: "error",
+                    message: "@task(policy='deadline') requires runtime <= deadline"
+                ))
+                has_errors = true
+            elif deadline > period:
+                diagnostics.push(TaskPolicyDiagnostic(
+                    level: "error",
+                    message: "@task(policy='deadline') requires deadline <= period"
+                ))
+                has_errors = true
+
+    if is_rt or is_deadline:
+        for effect in effects:
+            if effect == "gc" or effect == "alloc" or effect == "unbounded_block":
+                diagnostics.push(TaskPolicyDiagnostic(
+                    level: "error",
+                    message: "@task(policy='{attr.policy}') cannot use effect '{effect}'"
+                ))
+                has_errors = true
+
+    TaskPolicyValidation(
+        diagnostics: diagnostics,
+        has_errors: has_errors
+    )
+
+# ============================================================================
+# Layout Attribute Parsing
+# ============================================================================
+
+fn parse_layout_attrs(attrs: [Attribute]) -> LayoutAttr:
+    """Extract layout attributes from a list of attributes."""
+    var layout_kind = TypeLayoutKind.Simple
+    var has_explicit_align = false
+    var explicit_align_value: i64 = 0
+    var is_packed = false
+    var is_preserve_order = false
+    var is_compactq = false
+
+    for attr in attrs:
+        if attr.name == "repr":
+            if attr.args.len() > 0:
+                val repr_kind = extract_string_arg(attr.args[0])
+                if repr_kind == "C":
+                    layout_kind = TypeLayoutKind.C
+                    is_preserve_order = true
+                elif repr_kind == "packed":
+                    layout_kind = TypeLayoutKind.Packed
+                    is_packed = true
+                elif repr_kind == "transparent":
+                    layout_kind = TypeLayoutKind.Transparent
+        elif attr.name == "packed":
+            layout_kind = TypeLayoutKind.Packed
+            is_packed = true
+        elif attr.name == "align":
+            if attr.args.len() > 0:
+                val align_val = extract_int_arg(attr.args[0])
+                if align_val.? and is_power_of_two(align_val.unwrap()):
+                    has_explicit_align = true
+                    explicit_align_value = align_val.unwrap()
+        elif attr.name == "preserve_order":
+            is_preserve_order = true
+        elif attr.name == "compactq":
+            is_compactq = true
+
+    LayoutAttr(
+        layout_kind: layout_kind,
+        explicit_align: if has_explicit_align: Some(explicit_align_value) else: nil,
+        is_packed: is_packed,
+        is_preserve_order: is_preserve_order,
+        is_compactq: is_compactq
+    )
+
+fn parse_platform_attrs(attrs: [Attribute]) -> PlatformParseResult:
+    """Extract @platform attributes from a list of attributes.
+
+    Parses each @platform occurrence into a typed PlatformVariant and
+    collects diagnostics for unknown keys, duplicate predicates, duplicate
+    defaults, ambiguous variants, and missing explicit layout hints.
+    """
+    var variants: [PlatformVariant] = []
+    var diagnostics: [PlatformLayoutDiagnostic] = []
+
+    for attr in attrs:
+        if attr.name != "platform":
+            continue
+
+        var predicate = platform_predicate_default()
+        var has_explicit_size = false
+        var explicit_size = 0
+        var has_explicit_align = false
+        var explicit_align = 0
+
+        if attr.args.len() == 0:
+            predicate.has_default = true
+
+        for arg in attr.args:
+            match arg.kind:
+                case Ident(name):
+                    if name == "default":
+                        predicate.has_default = true
+                    elif name == "bit":
+                        predicate.has_bit = true
+                        predicate.bit = PlatformBit.Pointer
+                    else:
+                        diagnostics.push(PlatformLayoutDiagnostic.UnknownKey(
+                            key: name,
+                            span: arg.span
+                        ))
+                case IntLit(value):
+                    if not predicate.has_bit:
+                        predicate.has_bit = true
+                        if value == 16:
+                            predicate.bit = PlatformBit.Bits16
+                        elif value == 32:
+                            predicate.bit = PlatformBit.Bits32
+                        elif value == 64:
+                            predicate.bit = PlatformBit.Bits64
+                        else:
+                            diagnostics.push(PlatformLayoutDiagnostic.UnknownValue(
+                                key: "bit",
+                                value: "{value}",
+                                span: arg.span
+                            ))
+                    else:
+                        diagnostics.push(PlatformLayoutDiagnostic.UnknownValue(
+                            key: "platform",
+                            value: "{value}",
+                            span: arg.span
+                        ))
+                case Assign(left, op, right):
+                    match left.kind:
+                        case Ident(name):
+                            if name == "default":
+                                match right.kind:
+                                    case BoolLit(v):
+                                        predicate.has_default = v
+                                    case Ident(text_value):
+                                        if text_value == "true":
+                                            predicate.has_default = true
+                                        elif text_value == "false":
+                                            predicate.has_default = false
+                                        else:
+                                            diagnostics.push(PlatformLayoutDiagnostic.UnknownValue(
+                                                key: "default",
+                                                value: text_value,
+                                                span: right.span
+                                            ))
+                                    case _:
+                                        diagnostics.push(PlatformLayoutDiagnostic.UnknownValue(
+                                            key: "default",
+                                            value: "",
+                                            span: right.span
+                                        ))
+                            elif name == "cpu":
+                                val cpu_name = extract_text_arg(right)
+                                val cpu = platform_cpu_from_text(cpu_name)
+                                if cpu.?:
+                                    predicate.has_cpu = true
+                                    predicate.cpu = cpu.unwrap()
+                                else:
+                                    diagnostics.push(PlatformLayoutDiagnostic.UnknownValue(
+                                        key: "cpu",
+                                        value: cpu_name,
+                                        span: right.span
+                                    ))
+                            elif name == "os":
+                                val os_name = extract_text_arg(right)
+                                val os = platform_os_from_text(os_name)
+                                if os.?:
+                                    predicate.has_os = true
+                                    predicate.os = os.unwrap()
+                                else:
+                                    diagnostics.push(PlatformLayoutDiagnostic.UnknownValue(
+                                        key: "os",
+                                        value: os_name,
+                                        span: right.span
+                                    ))
+                            elif name == "abi":
+                                val abi_name = extract_text_arg(right)
+                                val abi = platform_abi_from_text(abi_name)
+                                if abi.?:
+                                    predicate.has_abi = true
+                                    predicate.abi = abi.unwrap()
+                                else:
+                                    diagnostics.push(PlatformLayoutDiagnostic.UnknownValue(
+                                        key: "abi",
+                                        value: abi_name,
+                                        span: right.span
+                                    ))
+                            elif name == "bit":
+                                match right.kind:
+                                    case IntLit(v):
+                                        predicate.has_bit = true
+                                        if v == 16:
+                                            predicate.bit = PlatformBit.Bits16
+                                        elif v == 32:
+                                            predicate.bit = PlatformBit.Bits32
+                                        elif v == 64:
+                                            predicate.bit = PlatformBit.Bits64
+                                        else:
+                                            diagnostics.push(PlatformLayoutDiagnostic.UnknownValue(
+                                                key: "bit",
+                                                value: "{v}",
+                                                span: right.span
+                                            ))
+                                    case Ident(text_value):
+                                        val bit = platform_bit_from_text(text_value)
+                                        if bit.?:
+                                            predicate.has_bit = true
+                                            predicate.bit = bit.unwrap()
+                                        else:
+                                            diagnostics.push(PlatformLayoutDiagnostic.UnknownValue(
+                                                key: "bit",
+                                                value: text_value,
+                                                span: right.span
+                                            ))
+                                    case _:
+                                        diagnostics.push(PlatformLayoutDiagnostic.UnknownValue(
+                                            key: "bit",
+                                            value: "",
+                                            span: right.span
+                                        ))
+                            elif name == "size":
+                                val size_val = extract_int_arg(right)
+                                if size_val.? and size_val.unwrap() > 0:
+                                    has_explicit_size = true
+                                    explicit_size = size_val.unwrap()
+                                else:
+                                    diagnostics.push(PlatformLayoutDiagnostic.UnknownValue(
+                                        key: "size",
+                                        value: extract_text_arg(right),
+                                        span: right.span
+                                    ))
+                            elif name == "align":
+                                val align_val = extract_int_arg(right)
+                                if align_val.? and align_val.unwrap() > 0:
+                                    has_explicit_align = true
+                                    explicit_align = align_val.unwrap()
+                                else:
+                                    diagnostics.push(PlatformLayoutDiagnostic.UnknownValue(
+                                        key: "align",
+                                        value: extract_text_arg(right),
+                                        span: right.span
+                                    ))
+                            else:
+                                diagnostics.push(PlatformLayoutDiagnostic.UnknownKey(
+                                    key: name,
+                                    span: left.span
+                                ))
+                        case _:
+                            diagnostics.push(PlatformLayoutDiagnostic.UnknownKey(
+                                key: extract_text_arg(left),
+                                span: left.span
+                            ))
+                case _:
+                    diagnostics.push(PlatformLayoutDiagnostic.UnknownKey(
+                        key: extract_text_arg(arg),
+                        span: arg.span
+                    ))
+
+        variants.push(PlatformVariant(
+            predicate: predicate,
+            has_explicit_size: has_explicit_size,
+            explicit_size: explicit_size,
+            has_explicit_align: has_explicit_align,
+            explicit_align: explicit_align,
+            span: attr.span
+        ))
+
+    val validation = platform_validate_variants(variants)
+    for diag in validation:
+        diagnostics.push(diag)
+
+    PlatformParseResult(
+        variants: variants,
+        diagnostics: diagnostics
+    )
+
+# Extract string value from an expression (for @repr("C"))
+fn extract_string_arg(expr: Expr) -> text:
+    match expr_kind(expr):
+        case StringLit(value, _):
+            value
+        case _:
+            ""
+
+fn extract_text_arg(expr: Expr) -> text:
+    match expr_kind(expr):
+        case StringLit(value, _):
+            value
+        case Ident(name):
+            name
+        case IntLit(value):
+            "{value}"
+        case BoolLit(value):
+            if value: "true" else: "false"
+        case _:
+            ""
+
+fn extract_int_array_arg(expr: Expr) -> [i64]:
+    var out: [i64] = []
+    match expr_kind(expr):
+        case ArrayLit(items):
+            for item in items:
+                val v = extract_int_arg(item)
+                if v.?:
+                    out.push(v.unwrap())
+        case IntLit(value):
+            out.push(value)
+        case _:
+            pass_dn
+    out
+
+# Extract barriers option from attribute args
+# Handles: @volatile(true), @volatile(barriers: true)
+fn extract_barriers_arg(args: [Expr]) -> bool:
+    for arg in args:
+        # Check for bare true literal: @volatile(true)
+        match arg.kind:
+            case BoolLit(v):
+                return v
+            case Assign(left, op, right):
+                # Check for named arg: barriers = true
+                match left.kind:
+                    case Ident(name):
+                        if name == "barriers":
+                            match right.kind:
+                                case BoolLit(v):
+                                    return v
+                                case _: ()
+                    case _: ()
+            case _: ()
+    false
+
+# Extract integer value from an expression (for @align(16))
+fn extract_int_arg(expr: Expr) -> i64?:
+    match expr_kind(expr):
+        case IntLit(value):
+            Some(value)
+        case _:
+            nil
+
+# Check if a number is a power of 2
+fn is_power_of_two(n: i64) -> bool:
+    """Check if n is a power of 2.
+
+    Uses bitwise trick: n & (n-1) == 0 for powers of 2.
+    """
+    n > 0 and (n & (n - 1)) == 0
+
+# Validate alignment value
+fn validate_alignment(align: i64, span: Span) -> Result<i64, text>:
+    """Validate that alignment is a positive power of 2.
+
+    Returns the alignment if valid, or an error message.
+    """
+    if align <= 0:
+        Err("alignment must be positive, got {align}")
+    elif not is_power_of_two(align):
+        Err("alignment must be a power of 2, got {align}")
+    else:
+        Ok(align)

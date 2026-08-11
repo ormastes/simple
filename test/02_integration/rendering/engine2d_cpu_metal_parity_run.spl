@@ -1,0 +1,480 @@
+# Bit-level CPU-vs-Metal engine2d parity harness.
+#
+# Renders identical draw scripts on the CPU (software/SIMD) backend and the
+# Metal GPU backend, downloads BOTH framebuffers from their own backend, and
+# asserts pixel-exact equality. This is NOT a spec because the test runner
+# currently segfaults when the engine2d GPU module graph is imported; it is run
+# directly via `bin/simple run ... --mode=interpreter`.
+#
+# Guards against the false-greens this area has a history of:
+#   - Metal must run on the GPU (gpu_frame_complete == true and read_pixels
+#     downloads the GPU framebuffer, not the CPU mirror).
+#   - The two framebuffers are produced independently (one per backend), never
+#     one renderer compared against itself.
+#
+# Output: one line per scene "<name>: MATCH|DIVERGE ..." and a final
+# "PARITY: pass|fail" line consumed by the check script.
+
+use std.gc_async_mut.gpu.engine2d.backend_cpu.{CpuBackend}
+use std.gc_async_mut.gpu.engine2d.backend_metal.{MetalBackend}
+use std.env.variables.{env_get}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+var _failures = 0
+
+# NOTE: backend_metal.spl transitively imports `is_macos`/`detect_os` from
+# std.gc_async_mut.env.platform (nogc_async_mut, no `uname -s` fallback),
+# which collides with this file's own `use std.nogc_sync_mut.env.platform`
+# import in the interpreter's global (non-module-scoped) symbol table --
+# whichever definition the dependency graph registers first wins, silently
+# shadowing the sync one. That made this harness call the async `is_macos`
+# (OSTYPE-only, no fallback), which returns false whenever OSTYPE isn't an
+# exported env var, and the gate reported a false "skip reason=not-macos"
+# without actually running the parity assertions.
+# Work around it with a locally-named, non-colliding check.
+fn _harness_is_macos() -> bool:
+    val ostype = env_get("OSTYPE").lower()
+    if ostype.contains("darwin") or ostype.contains("mac"):
+        return true
+    val result = rt_process_run("/bin/sh", ["-c", "uname -s"])
+    val stdout = result[0]
+    val code = result[2]
+    if code == 0:
+        return stdout.trim() == "Darwin"
+    false
+
+fn compare(name: text, cpu_px: [u32], metal_px: [u32], gpu_ok: bool):
+    if not gpu_ok:
+        _failures = _failures + 1
+        print("{name}: DIVERGE reason=metal-fell-back-to-cpu-mirror gpu_ok=false")
+        return
+    if cpu_px.len() != metal_px.len():
+        _failures = _failures + 1
+        print("{name}: DIVERGE reason=length cpu={cpu_px.len()} metal={metal_px.len()}")
+        return
+    var mismatches = 0
+    var first_idx = -1
+    var first_cpu: u32 = 0u32
+    var first_metal: u32 = 0u32
+    var i = 0
+    while i < cpu_px.len():
+        if cpu_px[i] != metal_px[i]:
+            mismatches = mismatches + 1
+            if first_idx < 0:
+                first_idx = i
+                first_cpu = cpu_px[i]
+                first_metal = metal_px[i]
+        i = i + 1
+    if mismatches == 0:
+        print("{name}: MATCH mismatches=0/{cpu_px.len()} gpu_ok=true")
+    else:
+        _failures = _failures + 1
+        print("{name}: DIVERGE mismatches={mismatches}/{cpu_px.len()} gpu_ok=true first_idx={first_idx} cpu={first_cpu.to_text()} metal={first_metal.to_text()}")
+
+# Asserts every pixel in `px` equals `expected` (used to pin degenerate-dim
+# no-op scenes, where the whole buffer must stay exactly at the clear color).
+fn assert_uniform(name: text, px: [u32], expected: u32):
+    var mismatches = 0
+    var first_idx = -1
+    var first_val: u32 = 0u32
+    var i = 0
+    while i < px.len():
+        if px[i] != expected:
+            mismatches = mismatches + 1
+            if first_idx < 0:
+                first_idx = i
+                first_val = px[i]
+        i = i + 1
+    if mismatches == 0:
+        print("{name}: MATCH mismatches=0/{px.len()} expected={expected.to_text()}")
+    else:
+        _failures = _failures + 1
+        print("{name}: DIVERGE mismatches={mismatches}/{px.len()} expected={expected.to_text()} first_idx={first_idx} got={first_val.to_text()}")
+
+# ---- scene: clear ----
+fn cpu_clear(w: i32, h: i32) -> [u32]:
+    var b = CpuBackend.create()
+    b.init(w, h)
+    b.clear(0x10203040 as u32)
+    b.present()
+    b.read_pixels()
+
+fn metal_clear(w: i32, h: i32) -> MetalBackend:
+    var b = MetalBackend.create()
+    b.init(w, h)
+    b.clear(0x10203040 as u32)
+    b.present()
+    b
+
+# ---- scene: rects (filled + outline) ----
+fn cpu_rects(w: i32, h: i32) -> [u32]:
+    var b = CpuBackend.create()
+    b.init(w, h)
+    b.clear(0xFF000000 as u32)
+    b.draw_rect_filled(2, 2, 10, 6, 0xFF112233 as u32)
+    b.draw_rect_filled(20, 5, 8, 8, 0xFFAABBCC as u32)
+    b.draw_rect_filled(28, 28, 8, 8, 0xFF445566 as u32)
+    b.draw_rect(1, 1, 30, 30, 0xFFFFFFFF as u32)
+    b.present()
+    b.read_pixels()
+
+fn metal_rects(w: i32, h: i32) -> MetalBackend:
+    var b = MetalBackend.create()
+    b.init(w, h)
+    b.clear(0xFF000000 as u32)
+    b.draw_rect_filled(2, 2, 10, 6, 0xFF112233 as u32)
+    b.draw_rect_filled(20, 5, 8, 8, 0xFFAABBCC as u32)
+    b.draw_rect_filled(28, 28, 8, 8, 0xFF445566 as u32)
+    b.draw_rect(1, 1, 30, 30, 0xFFFFFFFF as u32)
+    b.present()
+    b
+
+# ---- scene: translucent rects (Porter-Duff src-over, alpha < 255) ----
+# Pins the WM chrome translucency lane: solid rgba() panel fills must
+# composite identically on CPU (color.spl blend()) and Metal (MSL
+# blend_src_over) — overlapping translucent fills exercise repeated blends.
+fn cpu_blend_rects(w: i32, h: i32) -> [u32]:
+    var b = CpuBackend.create()
+    b.init(w, h)
+    b.clear(0xFF0F172A as u32)
+    b.draw_rect_filled(2, 2, 20, 20, 0x29FFFFFF as u32)
+    b.draw_rect_filled(10, 10, 20, 20, 0x80FFFFFF as u32)
+    b.draw_rect_filled(6, 14, 20, 8, 0x3D2563EB as u32)
+    b.present()
+    b.read_pixels()
+
+fn metal_blend_rects(w: i32, h: i32) -> MetalBackend:
+    var b = MetalBackend.create()
+    b.init(w, h)
+    b.clear(0xFF0F172A as u32)
+    b.draw_rect_filled(2, 2, 20, 20, 0x29FFFFFF as u32)
+    b.draw_rect_filled(10, 10, 20, 20, 0x80FFFFFF as u32)
+    b.draw_rect_filled(6, 14, 20, 8, 0x3D2563EB as u32)
+    b.present()
+    b
+
+# ---- scene: vertical gradient ----
+fn cpu_gradient(w: i32, h: i32) -> [u32]:
+    var b = CpuBackend.create()
+    b.init(w, h)
+    b.clear(0xFF000000 as u32)
+    b.draw_gradient_rect(0, 0, 32, 32, 0xFFFF0000 as u32, 0xFF0000FF as u32)
+    b.present()
+    b.read_pixels()
+
+fn metal_gradient(w: i32, h: i32) -> MetalBackend:
+    var b = MetalBackend.create()
+    b.init(w, h)
+    b.clear(0xFF000000 as u32)
+    b.draw_gradient_rect(0, 0, 32, 32, 0xFFFF0000 as u32, 0xFF0000FF as u32)
+    b.present()
+    b
+
+# ---- scene: lines (thin + thick, several slopes) ----
+fn _draw_lines(b: any):
+    b.clear(0xFF000000 as u32)
+    b.draw_line(1, 1, 30, 6, 0xFFFF8040 as u32, 1)
+    b.draw_line(2, 30, 28, 2, 0xFF40FF80 as u32, 1)
+    b.draw_line(0, 16, 31, 16, 0xFF4080FF as u32, 1)
+    b.draw_line(16, 0, 16, 31, 0xFFFFFF00 as u32, 1)
+    b.draw_line(4, 4, 26, 26, 0xFFFF00FF as u32, 3)
+
+fn cpu_lines(w: i32, h: i32) -> [u32]:
+    var b = CpuBackend.create()
+    b.init(w, h)
+    _draw_lines(b)
+    b.present()
+    b.read_pixels()
+
+fn metal_lines(w: i32, h: i32) -> MetalBackend:
+    var b = MetalBackend.create()
+    b.init(w, h)
+    _draw_lines(b)
+    b.present()
+    b
+
+# ---- scene: circles (outline + filled) ----
+fn _draw_circles(b: any):
+    b.clear(0xFF000000 as u32)
+    b.draw_circle(16, 16, 12, 0xFF00FFAA as u32)
+    b.draw_circle(16, 16, 7, 0xFFFFAA00 as u32)
+    b.draw_circle_filled(16, 16, 4, 0xFFAA00FF as u32)
+
+fn cpu_circles(w: i32, h: i32) -> [u32]:
+    var b = CpuBackend.create()
+    b.init(w, h)
+    _draw_circles(b)
+    b.present()
+    b.read_pixels()
+
+fn metal_circles(w: i32, h: i32) -> MetalBackend:
+    var b = MetalBackend.create()
+    b.init(w, h)
+    _draw_circles(b)
+    b.present()
+    b
+
+# ---- scene: rounded rect outline ----
+fn _draw_rounded(b: any):
+    b.clear(0xFF000000 as u32)
+    b.draw_rounded_rect(2, 2, 28, 24, 6, 0xFFFFFFFF as u32)
+    b.draw_rounded_rect(8, 8, 16, 14, 3, 0xFF00AAFF as u32)
+
+fn cpu_rounded(w: i32, h: i32) -> [u32]:
+    var b = CpuBackend.create()
+    b.init(w, h)
+    _draw_rounded(b)
+    b.present()
+    b.read_pixels()
+
+fn metal_rounded(w: i32, h: i32) -> MetalBackend:
+    var b = MetalBackend.create()
+    b.init(w, h)
+    _draw_rounded(b)
+    b.present()
+    b
+
+# ---- scene: rounded rect thick outline (widget chrome) ----
+fn _draw_rounded_outline(b: any):
+    b.clear(0xFF000000 as u32)
+    b.draw_rounded_rect_outline(2, 2, 28, 24, 6, 0xFFFFFFFF as u32, 2)
+    b.draw_rounded_rect_outline(8, 8, 16, 14, 3, 0xFF00AAFF as u32, 1)
+    b.draw_rounded_rect_outline(0, 0, 20, 20, 5, 0xFFFF8800 as u32, 3)
+
+fn cpu_rounded_outline(w: i32, h: i32) -> [u32]:
+    var b = CpuBackend.create()
+    b.init(w, h)
+    _draw_rounded_outline(b)
+    b.present()
+    b.read_pixels()
+
+fn metal_rounded_outline(w: i32, h: i32) -> MetalBackend:
+    var b = MetalBackend.create()
+    b.init(w, h)
+    _draw_rounded_outline(b)
+    b.present()
+    b
+
+# ---- scene: triangles ----
+fn _draw_triangles(b: any):
+    b.clear(0xFF000000 as u32)
+    b.draw_triangle_filled(16, 2, 2, 28, 30, 28, 0xFFFF4040 as u32)
+    b.draw_triangle_filled(4, 4, 28, 8, 10, 24, 0xFF4040FF as u32)
+
+fn cpu_triangles(w: i32, h: i32) -> [u32]:
+    var b = CpuBackend.create()
+    b.init(w, h)
+    _draw_triangles(b)
+    b.present()
+    b.read_pixels()
+
+fn metal_triangles(w: i32, h: i32) -> MetalBackend:
+    var b = MetalBackend.create()
+    b.init(w, h)
+    _draw_triangles(b)
+    b.present()
+    b
+
+# ---- scene: circle_filled with alpha blend (E1 regression pin) ----
+# Before the fix, kernel_draw_circle_filled wrote p.color raw (no blend),
+# so a translucent fill clobbered the background on Metal only while the
+# CPU mirror composited it via sw_hline_blend/color.blend().
+fn _draw_circle_filled_blend(b: any):
+    b.clear(0xFF102030 as u32)
+    b.draw_circle_filled(16, 16, 10, 0x80FF0000 as u32)
+
+fn cpu_circle_filled_blend(w: i32, h: i32) -> [u32]:
+    var b = CpuBackend.create()
+    b.init(w, h)
+    _draw_circle_filled_blend(b)
+    b.present()
+    b.read_pixels()
+
+fn metal_circle_filled_blend(w: i32, h: i32) -> MetalBackend:
+    var b = MetalBackend.create()
+    b.init(w, h)
+    _draw_circle_filled_blend(b)
+    b.present()
+    b
+
+# ---- scene: triangle_filled with alpha blend (E2 regression pin) ----
+fn _draw_triangle_filled_blend(b: any):
+    b.clear(0xFF102030 as u32)
+    b.draw_triangle_filled(16, 4, 4, 28, 28, 28, 0x80FF0000 as u32)
+
+fn cpu_triangle_filled_blend(w: i32, h: i32) -> [u32]:
+    var b = CpuBackend.create()
+    b.init(w, h)
+    _draw_triangle_filled_blend(b)
+    b.present()
+    b.read_pixels()
+
+fn metal_triangle_filled_blend(w: i32, h: i32) -> MetalBackend:
+    var b = MetalBackend.create()
+    b.init(w, h)
+    _draw_triangle_filled_blend(b)
+    b.present()
+    b
+
+# ---- scene: degenerate dims (E3/E4/E5 regression pin) ----
+# draw_rect with h < 0, draw_circle_filled with r == 0, and draw_rounded_rect
+# with w == 0 must all be complete no-ops on BOTH backends — before the fix
+# the CPU mirror still painted partial content (edges/center pixel) while
+# Metal's dispatch guard skipped the call entirely, so the two diverged from
+# each other AND from the plain clear color.
+val DEGENERATE_CLEAR: u32 = 0xFF203040 as u32
+
+fn _draw_degenerate(b: any):
+    b.clear(DEGENERATE_CLEAR)
+    b.draw_rect(10, 10, 20, -5, 0xFFFF0000 as u32)
+    b.draw_circle_filled(10, 10, 0, 0xFF00FF00 as u32)
+    b.draw_rounded_rect(5, 5, 0, 20, 3, 0xFF0000FF as u32)
+
+fn cpu_degenerate(w: i32, h: i32) -> [u32]:
+    var b = CpuBackend.create()
+    b.init(w, h)
+    _draw_degenerate(b)
+    b.present()
+    b.read_pixels()
+
+fn metal_degenerate(w: i32, h: i32) -> MetalBackend:
+    var b = MetalBackend.create()
+    b.init(w, h)
+    _draw_degenerate(b)
+    b.present()
+    b
+
+# ---- scene: draw_image blit (2026-07-07 parity-sweep coverage close) ----
+# kernel_blit_image (raw src->fb copy, px/py bounds clip, no blend) had a
+# real Metal dispatch path since the GPU-offload work landed
+# (backend_metal.spl draw_image(), gated on session.pipe_blit != 0) but was
+# never exercised by this harness. Covers a fully on-surface blit plus both
+# left/top and right/bottom off-framebuffer-edge clips, with a varied
+# (non-solid) source buffer so a transposition/stride bug would show.
+fn _image_src(w: i32, h: i32) -> [u32]:
+    var px: [u32] = [0u32; w * h]
+    var i = 0
+    while i < w * h:
+        px[i] = (0xFF000000 as u32) + ((i as u32) * 2654435761u32 & 0x00FFFFFFu32)
+        i = i + 1
+    px
+
+fn _draw_image_scene(b: any):
+    b.clear(0xFF0F172A as u32)
+    b.draw_image(4, 4, 10, 8, _image_src(10, 8))
+    b.draw_image(24, 24, 12, 12, _image_src(12, 12))
+    b.draw_image(-5, -3, 10, 10, _image_src(10, 10))
+
+fn cpu_image(w: i32, h: i32) -> [u32]:
+    var b = CpuBackend.create()
+    b.init(w, h)
+    _draw_image_scene(b)
+    b.present()
+    b.read_pixels()
+
+fn metal_image(w: i32, h: i32) -> MetalBackend:
+    var b = MetalBackend.create()
+    b.init(w, h)
+    _draw_image_scene(b)
+    b.present()
+    b
+
+# ---- scene: GPU-only clip + clear_clip restoration ----
+fn _draw_clip_scene(b: any):
+    b.clear(0xFF102030 as u32)
+    b.set_clip(5, 6, 9, 7)
+    b.draw_rect_filled(0, 0, 24, 20, 0xFFFF0000 as u32)
+    b.clear_clip()
+    b.draw_rect_filled(28, 28, 3, 3, 0xFF00FF00 as u32)
+
+fn cpu_clip(w: i32, h: i32) -> [u32]:
+    var b = CpuBackend.create()
+    b.init(w, h)
+    _draw_clip_scene(b)
+    b.present()
+    b.read_pixels()
+
+fn metal_clip_gpu_only(w: i32, h: i32) -> MetalBackend:
+    var b = MetalBackend.create()
+    b.init(w, h)
+    b.use_gpu_only()
+    _draw_clip_scene(b)
+    b.present()
+    b
+
+fn main():
+    if not _harness_is_macos():
+        print("PARITY: skip reason=not-macos")
+        return
+
+    val c1 = cpu_clear(32, 32)
+    var m1 = metal_clear(32, 32)
+    compare("clear", c1, m1.read_pixels(), m1.gpu_frame_complete)
+
+    val c2 = cpu_rects(32, 32)
+    var m2 = metal_rects(32, 32)
+    compare("rects", c2, m2.read_pixels(), m2.gpu_frame_complete)
+
+    val c3 = cpu_gradient(32, 32)
+    var m3 = metal_gradient(32, 32)
+    compare("gradient", c3, m3.read_pixels(), m3.gpu_frame_complete)
+
+    val c2b = cpu_blend_rects(32, 32)
+    var m2b = metal_blend_rects(32, 32)
+    compare("rect_blend", c2b, m2b.read_pixels(), m2b.gpu_frame_complete)
+
+    # Primitive rasterization, now aligned to a single canonical algorithm per op
+    # so CPU and the Metal GPU produce bit-identical output:
+    #   - line: GPU replays the CPU Bresenham loop per step
+    #   - circle outline: GPU replays the CPU midpoint loop per step
+    #   - circle filled: both use the per-pixel distance test (CPU as isqrt spans)
+    #   - rounded_rect outline: GPU replays edges + midpoint corner arcs
+    #   - triangle: both use the same integer barycentric (edge-function) fill
+    val c4 = cpu_lines(32, 32)
+    var m4 = metal_lines(32, 32)
+    compare("line", c4, m4.read_pixels(), m4.gpu_frame_complete)
+
+    val c5 = cpu_circles(32, 32)
+    var m5 = metal_circles(32, 32)
+    compare("circle", c5, m5.read_pixels(), m5.gpu_frame_complete)
+
+    val c6 = cpu_rounded(32, 32)
+    var m6 = metal_rounded(32, 32)
+    compare("rounded_rect", c6, m6.read_pixels(), m6.gpu_frame_complete)
+
+    val c7 = cpu_triangles(32, 32)
+    var m7 = metal_triangles(32, 32)
+    compare("triangle", c7, m7.read_pixels(), m7.gpu_frame_complete)
+
+    val c8 = cpu_rounded_outline(32, 32)
+    var m8 = metal_rounded_outline(32, 32)
+    compare("rounded_rect_outline", c8, m8.read_pixels(), m8.gpu_frame_complete)
+
+    val c9 = cpu_circle_filled_blend(32, 32)
+    var m9 = metal_circle_filled_blend(32, 32)
+    compare("circle_filled_blend", c9, m9.read_pixels(), m9.gpu_frame_complete)
+
+    val c10 = cpu_triangle_filled_blend(32, 32)
+    var m10 = metal_triangle_filled_blend(32, 32)
+    compare("triangle_filled_blend", c10, m10.read_pixels(), m10.gpu_frame_complete)
+
+    val c11 = cpu_degenerate(32, 32)
+    var m11 = metal_degenerate(32, 32)
+    compare("degenerate_dims", c11, m11.read_pixels(), m11.gpu_frame_complete)
+    assert_uniform("degenerate_dims_cpu_unchanged", c11, DEGENERATE_CLEAR)
+    assert_uniform("degenerate_dims_metal_unchanged", m11.read_pixels(), DEGENERATE_CLEAR)
+
+    val c12 = cpu_image(32, 32)
+    var m12 = metal_image(32, 32)
+    compare("image", c12, m12.read_pixels(), m12.gpu_frame_complete)
+
+    val c13 = cpu_clip(32, 32)
+    var m13 = metal_clip_gpu_only(32, 32)
+    compare("clip_gpu_only", c13, m13.read_pixels(), m13.gpu_frame_complete)
+
+    print("SCOPE: asserts clear,rect_filled,rect_outline,gradient,line,circle(+filled),rounded_rect,rounded_rect_outline,triangle,circle_filled_blend,triangle_filled_blend,degenerate_dims,image,clip_gpu_only (all bit-exact CPU vs Metal GPU)")
+    if _failures == 0:
+        print("PARITY: pass")
+    else:
+        print("PARITY: fail failures={_failures}")

@@ -1,0 +1,373 @@
+# ScreenHost impl #4 of 4 -- web.
+#
+# WHAT THIS DOES: presents the DrawIrV3 scene as an absolutely-positioned HTML
+# document (one element per RECT/TEXT/PATH command, colours straight from the
+# paint table; GROUP commands become overflow:hidden clipping wrappers whose
+# transform shifts their children)
+# written to a served document path, and drains browser-posted input from
+# numbered event files. The scene->HTML translation and the event ingress are
+# both module-level and exported, so they are unit-testable with no browser
+# and no listening socket.
+#
+# WHAT THIS DELIBERATELY DOES NOT DO, and why -- read before "finishing" it:
+#   * It does not bind an HTTP listener. `src/app/ui.web/server.spl` serves a
+#     `UISession` through the `WebServer` class; driving a DrawIrV3 scene
+#     through it means editing `src/app/ui.web/**`, which this workstream is
+#     explicitly not allowed to write. Serving the emitted document is left to
+#     whoever owns that tree (or to any static server pointed at the path).
+#   * It does not use `WebPackedProducer` (ui_web_packed_producer.spl). That
+#     producer goes html -> DrawIrV3Scene; this host already HAS the scene and
+#     needs the opposite direction, so calling it would be decoration.
+# Both are stated here rather than hidden behind a plausible-looking adapter.
+#
+# Event ingress reuses the WmFsAppEvent wire encoding rather than inventing a
+# second one: a posted event is exactly the text `wm_fs_app_event_encode`
+# produces, decoded and converted by the same landed helpers the WM host uses.
+
+use std.io_runtime.{env_get, file_exists, file_read, write_file, mkdir_p}
+use common.ui.draw_ir_v3.{
+    DrawIrV3Scene, draw_ir_v3_geometry_at, draw_ir_v3_paint_at,
+    draw_ir_v3_text_run_at, draw_ir_v3_glyph_at, draw_ir_v3_path_span_at,
+    draw_ir_v3_path_point_at, draw_ir_v3_has_flag,
+    draw_ir_v3_clip_at, draw_ir_v3_transform_at,
+    DRAW_IR_V3_KIND_RECT, DRAW_IR_V3_KIND_EDGE, DRAW_IR_V3_KIND_TEXT,
+    DRAW_IR_V3_KIND_PATH, DRAW_IR_V3_KIND_GROUP, DRAW_IR_V3_FLAG_HIDDEN,
+    DRAW_IR_V3_NO_ID,
+    DRAW_IR_V3_VERB_MOVE, DRAW_IR_V3_VERB_LINE, DRAW_IR_V3_VERB_QUAD,
+    DRAW_IR_V3_VERB_CUBIC, DRAW_IR_V3_VERB_CLOSE
+}
+use common.ui.glyph_bitmap_5x7.{FONT_CHARSET, glyph_row_bits}
+use common.ui.screen_host.{ScreenHost}
+use common.ui.host_input_event.{HostInputEvent, host_input_from_wm_fs_event}
+use common.ui.wm_app_process_contract.{wm_fs_app_event_decode, wm_fs_app_event_seq_path}
+use app.ui_showcase.hosts.scene_raster.{RASTER_BG}
+
+fn web_color_css(argb: u32) -> text:
+    """ARGB u32 -> `rgba(r,g,b,a)`. Alpha is computed in thousandths and
+    written as a fixed 3-decimal fraction, so no float formatting is
+    involved and a fully opaque colour comes out as exactly `1` rather than
+    a bogus `0.1000`."""
+    val c: i64 = argb.to_i64()
+    val a = (c >> 24) & 255
+    val r = (c >> 16) & 255
+    val g = (c >> 8) & 255
+    val b = c & 255
+    val milli = a * 1000 / 255
+    var alpha = "1"
+    if milli < 1000:
+        var digits = "{milli}"
+        while digits.len() < 3:
+            digits = "0" + digits
+        alpha = "0." + digits
+    "rgba({r},{g},{b},{alpha})"
+
+fn web_html_escape(value: text) -> text:
+    """Escape text placed in HTML text or attribute content."""
+    var out = ""
+    var segment = 0
+    var i = 0
+    while i < value.len():
+        val ch = value.slice(i, i + 1)
+        if ch == "&" or ch == "<" or ch == ">" or ch == "\"" or ch == "'":
+            out = out + value.slice(segment, i)
+            if ch == "&": out = out + "&amp;"
+            elif ch == "<": out = out + "&lt;"
+            elif ch == ">": out = out + "&gt;"
+            elif ch == "\"": out = out + "&quot;"
+            else: out = out + "&#39;"
+            segment = i + 1
+        i = i + 1
+    out + value.slice(segment, value.len())
+
+fn web_glyph_char(glyph_id: u32) -> text:
+    val id = glyph_id.to_i64()
+    if id < 0 or id >= FONT_CHARSET.len():
+        "?"
+    else:
+        FONT_CHARSET.slice(id, id + 1)
+
+fn web_text_scale(font_size_milli: i32) -> i32:
+    # The shared 5x7 face is authored at the 12px reference size.
+    val requested = font_size_milli / 1000
+    if requested < 12: 1
+    else:
+        val scale = requested / 12
+        if scale < 1: 1 else: scale
+
+fn web_glyph_html(glyph_id: u32, x: i32, baseline_y: i32, color: u32, scale: i32, cmd_index: i64) -> text:
+    val safe_scale = if scale < 1: 1 else: scale
+    val top = baseline_y - 7 * safe_scale
+    val ch = web_html_escape(web_glyph_char(glyph_id))
+    var pixels = ""
+    var row = 0
+    while row < 7:
+        val bits = glyph_row_bits(glyph_id.to_i64() as i32, row)
+        var col = 0
+        while col < 5:
+            val mask = 1 << (4 - col)
+            if (bits & mask) != 0:
+                pixels = pixels + "<i style=\"position:absolute;left:{col * safe_scale}px;top:{row * safe_scale}px;width:{safe_scale}px;height:{safe_scale}px;background:{web_color_css(color)}\"></i>"
+            col = col + 1
+        row = row + 1
+    "<span data-cmd=\"{cmd_index}\" data-glyph=\"{glyph_id}\" aria-label=\"{ch}\" style=\"position:absolute;left:{x}px;top:{top}px;width:{5 * safe_scale}px;height:{7 * safe_scale}px\">{pixels}</span>"
+
+fn web_text_html(scene: DrawIrV3Scene, cmd_index: i64, off_x: i32, off_y: i32) -> (text, bool):
+    """Glyph spans for one TEXT command. off_x/off_y shift every glyph, so a
+    caller walking a GROUP passes the group's child offset here."""
+    val cmd = scene.commands[cmd_index]
+    val run = draw_ir_v3_text_run_at(scene.text_runs, cmd.text_run_id)
+    if not run.present or run.glyph_count == 0u32:
+        return ("", false)
+    val scale = web_text_scale(run.font_size_milli)
+    var out = ""
+    var i: i64 = 0
+    while i < run.glyph_count.to_i64():
+        val glyph = draw_ir_v3_glyph_at(scene.text_runs, run.glyph_start + i.to_u32())
+        if not glyph.present:
+            return ("", false)
+        out = out + web_glyph_html(glyph.glyph_id, glyph.x + off_x, glyph.y + off_y, run.color, scale, cmd_index)
+        i = i + 1
+    (out, true)
+
+fn web_path_d(scene: DrawIrV3Scene, path_id: u32) -> (text, bool):
+    val span = draw_ir_v3_path_span_at(scene.path_points, path_id)
+    if not span.present or span.point_count == 0u32:
+        return ("", false)
+    var d = ""
+    var i: i64 = 0
+    while i < span.point_count.to_i64():
+        val point = draw_ir_v3_path_point_at(scene.path_points, span.point_start + i.to_u32())
+        if not point.present:
+            return ("", false)
+        if point.verb == DRAW_IR_V3_VERB_MOVE:
+            d = d + "M {point.x} {point.y} "
+        elif point.verb == DRAW_IR_V3_VERB_LINE:
+            d = d + "L {point.x} {point.y} "
+        elif point.verb == DRAW_IR_V3_VERB_CLOSE:
+            d = d + "Z "
+        else:
+            # v3 stores one point per verb; quadratic/cubic control points
+            # need multiple points and cannot be guessed from this record.
+            return ("", false)
+        i = i + 1
+    (d.trim(), true)
+
+fn web_path_html(scene: DrawIrV3Scene, cmd_index: i64, off_x: i32, off_y: i32) -> (text, bool):
+    """SVG element for one PATH command. The path data keeps its authored
+    coordinates; off_x/off_y shift the whole <svg> so a GROUP's child offset
+    lands the path where the group placed it."""
+    val cmd = scene.commands[cmd_index]
+    val (path_d, valid) = web_path_d(scene, cmd.path_span_id)
+    if not valid:
+        return ("", false)
+    val paint = draw_ir_v3_paint_at(scene.paint, cmd.paint_id)
+    if not paint.present:
+        return ("", false)
+    val stroke_width = paint.stroke_width_milli / 1000
+    val stroke = if stroke_width > 0: "stroke:{web_color_css(paint.stroke_color)};stroke-width:{stroke_width}px;" else: "stroke:none;"
+    ("<svg data-cmd=\"{cmd_index}\" style=\"position:absolute;left:{off_x}px;top:{off_y}px;width:100%;height:100%;overflow:visible\"><path d=\"{path_d}\" style=\"fill:{web_color_css(paint.fill_color)};{stroke}\"></path></svg>", true)
+
+fn web_scene_unsupported_count(scene: DrawIrV3Scene) -> i64:
+    """Count visible records not owned by this projection.
+
+    Valid TEXT, EDGE and line/close PATH records are projected. IMAGE remains
+    unsupported because v3 carries only a content hash, not a URI or pixels.
+    GROUP records are structural wrappers (transform/clip containers that the
+    HTML walk expands around their children), never unsupported content --
+    the v2->v3 adapter emits one per batch, so counting them would fail every
+    real scene.
+    """
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < scene.commands.len().to_i64():
+        val cmd = scene.commands[i]
+        if not draw_ir_v3_has_flag(cmd, DRAW_IR_V3_FLAG_HIDDEN) and cmd.kind != DRAW_IR_V3_KIND_GROUP:
+            if cmd.kind == DRAW_IR_V3_KIND_TEXT:
+                val (ignored_html, valid) = web_text_html(scene, i, 0, 0)
+                if not valid: count = count + 1
+            elif cmd.kind == DRAW_IR_V3_KIND_PATH:
+                val (ignored_path, valid) = web_path_html(scene, i, 0, 0)
+                if not valid: count = count + 1
+            elif cmd.kind != DRAW_IR_V3_KIND_RECT and cmd.kind != DRAW_IR_V3_KIND_EDGE:
+                count = count + 1
+        i = i + 1
+    count
+
+fn web_scene_to_html(scene: DrawIrV3Scene, width: i32, height: i32) -> text:
+    """Scene -> standalone HTML, preserving painter's-algorithm order.
+
+    GROUP commands are structural: a GROUP's transform dx/dy shifts every
+    child command (children are authored in group-local coordinates), and a
+    GROUP carrying a clip rect opens an absolutely-positioned wrapper div
+    with overflow:hidden at that rect, children positioned relative to it.
+    Children are the commands whose parent_id matches the GROUP's
+    component_id; the v2->v3 adapter never nests groups, so a single
+    open-group cursor suffices. Only dx/dy are honoured -- the adapter
+    synthesises translations with an identity matrix, nothing else exists
+    to apply.
+    """
+    var body = ""
+    var i: i64 = 0
+    val n = scene.commands.len().to_i64()
+    # Open-group cursor: which GROUP owns the commands being walked, the
+    # offset added to each child's authored coordinates, and whether a
+    # clipping wrapper div is open and must be closed when the group ends.
+    var cur_group_id: u32 = DRAW_IR_V3_NO_ID
+    var cur_off_x: i32 = 0
+    var cur_off_y: i32 = 0
+    var wrapper_open = false
+    while i < n:
+        val cmd = scene.commands[i]
+        if cmd.kind == DRAW_IR_V3_KIND_GROUP and not draw_ir_v3_has_flag(cmd, DRAW_IR_V3_FLAG_HIDDEN):
+            if wrapper_open:
+                body = body + "</div>\n"
+                wrapper_open = false
+            cur_group_id = cmd.component_id
+            var dx: i32 = 0
+            var dy: i32 = 0
+            if cmd.transform_id != DRAW_IR_V3_NO_ID:
+                val transform = draw_ir_v3_transform_at(scene.transforms, cmd.transform_id)
+                if transform.present:
+                    dx = transform.dx
+                    dy = transform.dy
+            var clipped = false
+            if cmd.clip_id != DRAW_IR_V3_NO_ID:
+                val clip = draw_ir_v3_clip_at(scene.clips, cmd.clip_id)
+                if clip.present and clip.width > 0 and clip.height > 0:
+                    body = body + "<div data-cmd=\"{i}\" style=\"position:absolute;left:{dx + clip.x}px;top:{dy + clip.y}px;width:{clip.width}px;height:{clip.height}px;overflow:hidden\">\n"
+                    wrapper_open = true
+                    clipped = true
+                    # The wrapper origin already carries dx/dy and the clip
+                    # corner, so children go in relative to the clip corner.
+                    cur_off_x = -clip.x
+                    cur_off_y = -clip.y
+            if not clipped:
+                cur_off_x = dx
+                cur_off_y = dy
+        else:
+            if cmd.parent_id != cur_group_id:
+                # Walked past the current group's children (or never had a
+                # group): close any wrapper and fall back to absolute coords.
+                if wrapper_open:
+                    body = body + "</div>\n"
+                    wrapper_open = false
+                cur_group_id = DRAW_IR_V3_NO_ID
+                cur_off_x = 0
+                cur_off_y = 0
+            if (cmd.kind == DRAW_IR_V3_KIND_RECT or cmd.kind == DRAW_IR_V3_KIND_EDGE) and cmd.geometry_id != DRAW_IR_V3_NO_ID and
+                    not draw_ir_v3_has_flag(cmd, DRAW_IR_V3_FLAG_HIDDEN):
+                val geom = draw_ir_v3_geometry_at(scene.geometry, cmd.geometry_id)
+                val paint = draw_ir_v3_paint_at(scene.paint, cmd.paint_id)
+                if geom.present and geom.width > 0 and geom.height > 0:
+                    var style = "position:absolute;left:{geom.x + cur_off_x}px;top:{geom.y + cur_off_y}px;"
+                    style = style + "width:{geom.width}px;height:{geom.height}px;"
+                    if paint.present:
+                        style = style + "background:" + web_color_css(paint.fill_color) + ";"
+                        if geom.corner_radius > 0:
+                            style = style + "border-radius:{geom.corner_radius}px;"
+                        if paint.stroke_width_milli >= 1000:
+                            # box-sizing:border-box keeps the border inside the
+                            # authored geometry, matching the raster hosts.
+                            val stroke_px = paint.stroke_width_milli / 1000
+                            style = style + "border:{stroke_px}px solid {web_color_css(paint.stroke_color)};box-sizing:border-box;"
+                    body = body + "<div data-cmd=\"{i}\" style=\"" + style + "\"></div>\n"
+            elif cmd.kind == DRAW_IR_V3_KIND_TEXT and not draw_ir_v3_has_flag(cmd, DRAW_IR_V3_FLAG_HIDDEN):
+                val (text_html, valid) = web_text_html(scene, i, cur_off_x, cur_off_y)
+                if valid: body = body + text_html + "\n"
+            elif cmd.kind == DRAW_IR_V3_KIND_PATH and not draw_ir_v3_has_flag(cmd, DRAW_IR_V3_FLAG_HIDDEN):
+                val (path_html, valid) = web_path_html(scene, i, cur_off_x, cur_off_y)
+                if valid: body = body + path_html + "\n"
+        i = i + 1
+    if wrapper_open:
+        body = body + "</div>\n"
+    val unsupported = web_scene_unsupported_count(scene)
+    var receipt = ""
+    if unsupported > 0:
+        receipt = "<!-- drawir-unsupported-count={unsupported} -->\n"
+    # Full document shell, not a bare fragment. Without it the browser applies
+    # its default 8px body margin (the whole scene shifts right/down versus
+    # the raster hosts) and composites the glass theme's translucent surfaces
+    # over a WHITE default page (the scene washes out; the raster hosts blend
+    # the same alpha over the opaque glass_dark ground RASTER_BG). The shell
+    # pins margin:0 and the same opaque ground so all hosts agree.
+    "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\">" +
+        "<style>html,body{margin:0;padding:0;background:" + web_color_css(RASTER_BG) + ";}</style>" +
+        "</head><body>\n" +
+        "<div id=\"showcase-root\" style=\"position:relative;width:{width}px;height:{height}px\">\n" +
+        body + "</div>\n" + receipt + "</body></html>\n"
+
+fn web_read_event_at(event_dir: text, seq: i64) -> HostInputEvent?:
+    """Next browser-posted event, or nil when it has not arrived."""
+    val path = wm_fs_app_event_seq_path(event_dir + "/event", seq)
+    if not file_exists(path):
+        return nil
+    val doc = file_read(path)
+    if doc.trim() == "":
+        return nil
+    val decoded = wm_fs_app_event_decode(doc)
+    # The filename is the delivery cursor, while the wire sequence is the
+    # producer's claim.  Both must agree: accepting a stale/replayed payload
+    # would advance the cursor and permanently skip the real next event.
+    if decoded.seq != seq:
+        return nil
+    host_input_from_wm_fs_event(decoded)
+
+class ScreenWebHost:
+    var w: i32
+    var h: i32
+    var doc_path: text
+    var event_dir: text
+    var event_seq: i64
+    var last_html_len: i64
+    var last_unsupported_count: i64
+
+    static fn open(w: i32, h: i32, doc_path: text, event_dir: text) -> ScreenWebHost?:
+        """nil when there is no document path to publish to -- with nowhere to
+        write, nothing is presented and saying otherwise would be a lie."""
+        if doc_path.trim() == "":
+            return nil
+        ScreenWebHost(
+            w: w, h: h, doc_path: doc_path.trim(),
+            event_dir: event_dir.trim(), event_seq: 0, last_html_len: 0,
+            last_unsupported_count: 0
+        )
+
+    static fn open_from_env(w: i32, h: i32) -> ScreenWebHost?:
+        ScreenWebHost.open(
+            w, h,
+            env_get("SIMPLE_SHOWCASE_WEB_DOC"),
+            env_get("SIMPLE_SHOWCASE_WEB_EVENTS")
+        )
+
+impl ScreenHost for ScreenWebHost:
+    me host_name() -> text:
+        "web"
+
+    me size() -> (i32, i32):
+        (self.w, self.h)
+
+    me present_scene(scene: DrawIrV3Scene) -> bool:
+        self.last_unsupported_count = web_scene_unsupported_count(scene)
+        if self.last_unsupported_count > 0:
+            return false
+        val html = web_scene_to_html(scene, self.w, self.h)
+        self.last_html_len = html.len().to_i64()
+        if self.last_html_len == 0:
+            return false
+        write_file(self.doc_path, html)
+
+    me poll_input() -> HostInputEvent?:
+        if self.event_dir == "":
+            return nil
+        val next = self.event_seq + 1
+        val ev = web_read_event_at(self.event_dir, next)
+        if ev == nil:
+            return nil
+        self.event_seq = next
+        ev
+
+    me shutdown():
+        self.doc_path = ""
+
+export ScreenWebHost, web_scene_to_html, web_color_css, web_read_event_at,
+    web_scene_unsupported_count

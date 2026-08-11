@@ -1,0 +1,301 @@
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_definitions.{HirEnum, HirVariant, HirVariantKind, HirExpr, HirExprKind}
+use compiler.hir.hir_types.{SymbolId, SymbolTable}
+use compiler.mir.mir_data.{MirSignature, MirType}
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.core.interpreter.eval_tables.{enum_table_register, enum_table_lookup, enum_table_reset}
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn read_source(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+# Bare-name enum collision, step (c): DUAL KEY BY runtime_name.
+#
+# Step (b) made the miss loud. This step gives the lowering a keyspace in which
+# the miss does not have to happen: `enum_variant_index_q` /
+# `enum_variant_discriminants_q` / `enum_runtime_id_index_q` are keyed by
+# `HirEnum.runtime_name` ("{owner_module}.{Name}"), which is unique per
+# DECLARATION, so both sides of a bare-name contest survive registration.
+#
+# The bare maps are deliberately KEPT and still last-wins. Readers try the
+# qualified key first and fall back to the bare key, so an un-migrated caller
+# behaves exactly as before -- the fallback can never be a NEW silent wrong
+# answer, only the pre-existing one.
+#
+# Every expectation below is hand-computed from the declared variant order, not
+# read back from the implementation. Note that 3 is the nil sentinel, so no
+# assertion here has 3 as its correct answer.
+#
+# See doc/08_tracking/bug/enum_bare_name_collision_registry_2026-08-01.md.
+
+fn make_variant(name: text, index: i64) -> HirVariant:
+    HirVariant(
+        symbol: SymbolId(id: 9000 + index),
+        name: name,
+        kind: HirVariantKind.Unit,
+        has_discriminant: false,
+        discriminant: HirExpr(kind: HirExprKind.NilLit, type_: nil, span: Span.empty()),
+        span: Span.empty())
+
+fn make_enum(name: text, runtime_name: text, variant_names: [text]) -> HirEnum:
+    var variants: [HirVariant] = []
+    var i = 0
+    while i < variant_names.len():
+        variants = variants.push(make_variant(variant_names[i], i))
+        i = i + 1
+    HirEnum(
+        symbol: SymbolId(id: 8000),
+        name: name,
+        runtime_name: runtime_name,
+        type_params: [],
+        variants: variants,
+        visibility: Visibility.Public,
+        is_public: true,
+        doc_comment: nil,
+        span: Span.empty(),
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {})
+
+describe "the qualified keyspace retains every declaration":
+    it "keeps BOTH sides of a divergent bare-name contest":
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.register_enum_variants(make_enum(
+            "Style", "web.layout.Style", ["Bold", "Italic", "Underline"]))
+        lowering.register_enum_variants(make_enum(
+            "Style", "term.render.Style", ["Plain", "Reverse"]))
+
+        # The BARE map is still last-wins -- unchanged, on purpose.
+        expect(lowering.enum_variant_index.has("Style")).to_equal(true)
+        # The QUALIFIED map holds one entry per declaration; nothing evicted.
+        expect(lowering.enum_variant_index_q.has("web.layout.Style")).to_equal(true)
+        expect(lowering.enum_variant_index_q.has("term.render.Style")).to_equal(true)
+
+    it "resolves the EVICTED enum's variant through its runtime_name":
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.register_enum_variants(make_enum(
+            "Style", "web.layout.Style", ["Bold", "Italic", "Underline"]))
+        lowering.register_enum_variants(make_enum(
+            "Style", "term.render.Style", ["Plain", "Reverse"]))
+
+        # TRUE-POSITIVE CONTROL, MIR surface. The bare lookup must STILL miss in
+        # this same object: that is what proves the qualified hit below is a
+        # genuinely new capability and not the bare map quietly answering.
+        expect(lowering.enum_variant_discriminant("Style", "Bold")).to_equal(-1)
+        expect(lowering.enum_variant_discriminant("Style", "Underline")).to_equal(-1)
+
+        # Hand-computed from the declared order ["Bold","Italic","Underline"].
+        expect(lowering.enum_variant_discriminant("web.layout.Style", "Bold")).to_equal(0)
+        expect(lowering.enum_variant_discriminant("web.layout.Style", "Italic")).to_equal(1)
+        expect(lowering.enum_variant_discriminant("web.layout.Style", "Underline")).to_equal(2)
+        # And the survivor still resolves under its own runtime_name.
+        expect(lowering.enum_variant_discriminant("term.render.Style", "Reverse")).to_equal(1)
+
+    it "does NOT let the bare map rescue a genuine qualified miss":
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.register_enum_variants(make_enum(
+            "Style", "web.layout.Style", ["Bold", "Italic", "Underline"]))
+        lowering.register_enum_variants(make_enum(
+            "Style", "term.render.Style", ["Plain", "Reverse"]))
+
+        # `Plain` is declared by term.render.Style, NOT by web.layout.Style.
+        # A qualified lookup that fell back to the bare (last-wins = term) map
+        # on a -1 would answer 0 here -- silently borrowing another enum's
+        # discriminant, exactly the defect being fixed. It must stay a miss.
+        expect(lowering.enum_variant_discriminant("web.layout.Style", "Plain")).to_equal(-1)
+
+    it "raises the ambiguity flag only on DIVERGENCE":
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.register_enum_variants(make_enum(
+            "Style", "web.layout.Style", ["Bold", "Italic"]))
+        lowering.register_enum_variants(make_enum(
+            "Style", "term.render.Style", ["Plain", "Reverse"]))
+        lowering.register_enum_variants(make_enum(
+            "Colour", "ui.a.Colour", ["Red", "Green"]))
+        lowering.register_enum_variants(make_enum(
+            "Colour", "ui.b.Colour", ["Red", "Green"]))
+
+        expect(lowering.enum_bare_ambiguous.has("Style")).to_equal(true)
+        # Identical variant sets are the 192 benign duplicates; they must not
+        # be flagged, or the flag is useless noise.
+        expect(lowering.enum_bare_ambiguous.has("Colour")).to_equal(false)
+
+    it "maps every runtime_name back to its bare name":
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.register_enum_variants(make_enum(
+            "Style", "web.layout.Style", ["Bold", "Italic"]))
+
+        expect(lowering.enum_bare_of("web.layout.Style")).to_equal("Style")
+        # An unknown key passes through unchanged, so a bare name stays bare.
+        expect(lowering.enum_bare_of("Style")).to_equal("Style")
+
+describe "the owner-search scans count over the qualified keyspace":
+    # These four scans (module_lowering prescan_enum_owner_for_variant,
+    # expr_dispatch binding reclassification, and two in switch_operators_calls)
+    # are the design problem of step (c): the owner is the UNKNOWN they search
+    # for, so they can never be HANDED a runtime_name. The fix is that they
+    # CONSUME the qualified keyspace instead, which is what makes their counts
+    # truthful.
+    it "counts two owners where the bare map showed one":
+        var lowering = MirLowering.new(SymbolTable.new())
+        # `Atom` is index 0 in parser.Kind but index 1 in render.Kind, so the
+        # two declarations give DIFFERENT answers for the same bare variant --
+        # the actual hazard. The bare-keyed map holds a single "Kind" entry, so
+        # the old scan reported exactly one owner and silently emitted the
+        # survivor's 1 where the real answer was 0 (or vice versa).
+        lowering.register_enum_variants(make_enum(
+            "Kind", "parser.Kind", ["Atom", "List"]))
+        lowering.register_enum_variants(make_enum(
+            "Kind", "render.Kind", ["Table", "Atom", "Grid"]))
+
+        expect(lowering.enum_variant_index.has("Kind")).to_equal(true)
+        expect(lowering.enum_variant_discriminant("parser.Kind", "Atom")).to_equal(0)
+        expect(lowering.enum_variant_discriminant("render.Kind", "Atom")).to_equal(1)
+        expect(lowering.variant_owner_keys("Atom").len()).to_equal(2)
+
+    it "counts two owners when the bare names differ too":
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.register_enum_variants(make_enum(
+            "Shape", "geom.Shape", ["Circle", "Square"]))
+        lowering.register_enum_variants(make_enum(
+            "Widget", "ui.Widget", ["Circle", "Slider"]))
+
+        # Same discriminant (0 in both) but DIFFERENT enums: a bare
+        # `case Circle:` cannot be resolved without a qualifier.
+        expect(lowering.variant_owner_keys("Circle").len()).to_equal(2)
+
+    it "still reports a single owner for an uncontested variant":
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.register_enum_variants(make_enum(
+            "Kind", "parser.Kind", ["Atom", "List"]))
+        lowering.register_enum_variants(make_enum(
+            "Kind", "render.Kind", ["Table", "Atom", "Grid"]))
+
+        # `Grid` is declared only by render.Kind -- index 2 there.
+        expect(lowering.variant_owner_keys("Grid").len()).to_equal(1)
+        expect(lowering.variant_owner_keys("Grid")[0]).to_equal("render.Kind")
+        expect(lowering.enum_variant_discriminant("render.Kind", "Grid")).to_equal(2)
+        # `List` is declared only by parser.Kind -- index 1 there. This one
+        # ALSO proves the qualified path reaches an enum the bare map evicted.
+        expect(lowering.variant_owner_keys("List").len()).to_equal(1)
+        expect(lowering.enum_variant_discriminant("parser.Kind", "List")).to_equal(1)
+
+    it "collapses benign duplicates so ordinary code does not start erroring":
+        var lowering = MirLowering.new(SymbolTable.new())
+        # Same bare name, same variants, same discriminants, two modules: the
+        # 192 identical re-registrations. Counting these as two owners would
+        # turn every unqualified pattern over them into an ambiguity error.
+        lowering.register_enum_variants(make_enum(
+            "Colour", "ui.a.Colour", ["Red", "Green", "Blue"]))
+        lowering.register_enum_variants(make_enum(
+            "Colour", "ui.b.Colour", ["Red", "Green", "Blue"]))
+
+        expect(lowering.enum_variant_index_q.has("ui.a.Colour")).to_equal(true)
+        expect(lowering.enum_variant_index_q.has("ui.b.Colour")).to_equal(true)
+        expect(lowering.variant_owner_keys("Blue").len()).to_equal(1)
+        expect(lowering.enum_variant_discriminant("ui.b.Colour", "Blue")).to_equal(2)
+
+    it "reports no owner for a variant nobody declares":
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.register_enum_variants(make_enum(
+            "Kind", "parser.Kind", ["Atom", "List"]))
+
+        expect(lowering.variant_owner_keys("Hexagon").len()).to_equal(0)
+
+describe "the runtime identity is dual-keyed alongside the variants":
+    it "registers the runtime ID under the runtime_name too":
+        var lowering = MirLowering.new(SymbolTable.new())
+        val web = make_enum("Style", "web.layout.Style", ["Bold", "Italic"])
+        val term = make_enum("Style", "term.render.Style", ["Plain", "Reverse"])
+        lowering.register_enum_runtime_id(web)
+        lowering.register_enum_runtime_id(term)
+
+        # The bare map holds one identity; the qualified map holds both, and
+        # they must DIFFER -- pairing one enum's identity with another's
+        # discriminant is the same class of silent wrong value.
+        expect(lowering.enum_runtime_id_index_q.has("web.layout.Style")).to_equal(true)
+        expect(lowering.enum_runtime_id_index_q.has("term.render.Style")).to_equal(true)
+        val web_id = lowering.enum_runtime_id_index_q["web.layout.Style"]
+        val term_id = lowering.enum_runtime_id_index_q["term.render.Style"]
+        expect(web_id == term_id).to_equal(false)
+
+    it "resolves a runtime ID through either key":
+        var lowering = MirLowering.new(SymbolTable.new())
+        val web = make_enum("Style", "web.layout.Style", ["Bold", "Italic"])
+        lowering.register_enum_runtime_id(web)
+
+        expect(lowering.enum_runtime_id("web.layout.Style")).to_equal(
+            lowering.enum_runtime_id_index["Style"])
+
+describe "the miss diagnostic names the qualified owner":
+    it "names the EVICTED declaration by its runtime_name":
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.register_enum_variants(make_enum(
+            "Style", "web.layout.Style", ["Bold", "Italic"]))
+        lowering.register_enum_variants(make_enum(
+            "Style", "term.render.Style", ["Plain", "Reverse"]))
+
+        # Before step (c) the scan ran over the bare map, where the evicted
+        # declaration no longer existed, so it could not be named at all.
+        val detail = lowering.enum_variant_miss_detail("Style", "Bold")
+        expect(detail).to_contain("web.layout.Style")
+
+describe "construction resolves against the constructed enum, not the survivor":
+    it "keeps a construction miss loud when the qualified enum lacks the variant":
+        var lowering = MirLowering.new(SymbolTable.new())
+        val web = make_enum("Style", "web.layout.Style", ["Bold", "Italic"])
+        val term = make_enum("Style", "term.render.Style", ["Plain", "Reverse"])
+        lowering.register_enum_variants(web)
+        lowering.register_enum_runtime_id(web)
+        lowering.register_enum_variants(term)
+        lowering.register_enum_runtime_id(term)
+
+        var builder = lowering.builder
+        builder.begin_function(SymbolId(id: 7200), "dual_ctor_probe", MirSignature(
+            params: [], return_type: MirType.unit(), is_variadic: false), Span.empty())
+        lowering.builder = builder
+
+        val before = lowering.errors.len()
+        lowering.lower_enum_construct_named("Style", "Bold", [])
+        expect(lowering.errors.len()).to_be_greater_than(before)
+        val message = lowering.errors[lowering.errors.len() - 1].message
+        expect(message).to_contain("enum variant lookup miss")
+        # Step (c) upgrade: the message now points at the declaration that
+        # actually owns `Bold`.
+        expect(message).to_contain("web.layout.Style")
+
+describe "the other two engines still disagree -- dual-keying is MIR-only":
+    # True-positive controls on the remaining surfaces, in this same run. These
+    # are not aspirational: they assert the CURRENT, still-divergent behaviour,
+    # so if either engine went silent instead of disagreeing, these fail.
+    it "interpreter: first-wins drop is still live and observable":
+        enum_table_reset()
+        enum_table_register("Style", ["Bold", "Italic"])
+        enum_table_register("Style", ["Plain", "Reverse"])
+
+        # FIRST-wins -- the exact opposite of MIR's last-wins, on the same
+        # source. Step (c) does not touch this; step (d) and the registry doc
+        # own the reconciliation.
+        expect(enum_table_lookup("Style")).to_equal("Bold,Italic")
+        # Control that the table is actually live in this process: a fresh
+        # name must register normally.
+        enum_table_register("Kind", ["Atom", "List", "Table", "Grid"])
+        expect(enum_table_lookup("Kind")).to_equal("Atom,List,Table,Grid")
+
+    it "rust seed: the discriminant is still derived from the variant name alone":
+        # The seed computes a discriminant by hashing the VARIANT NAME with no
+        # enum identity at all, so it collapses every bare-name collision by
+        # construction AND returns a hash rather than the declared ordinal --
+        # meaning it disagrees numerically with MIR even for enums that do not
+        # collide. Pinned at the source; reconciling it is step (d).
+        val seed = read_source(
+            "src/compiler_rust/compiler/src/mir/lower/lowering_expr_method.rs")
+        # Control that the file was actually read (a missing path would return
+        # "" and make every `contains` below vacuously false, not true).
+        expect(seed.contains("fn enum_variant_discriminant")).to_equal(true)
+        # The signature takes ONLY a variant name -- no enum identity.
+        expect(seed).to_contain("fn enum_variant_discriminant(variant_name: &str) -> i64")
+        expect(seed).to_contain("variant_name.hash(&mut hasher)")
+        expect(seed).to_contain("(hasher.finish() & 0xFFFF_FFFF) as i64")

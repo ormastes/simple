@@ -1,0 +1,209 @@
+# Input batch / coalescing policy — the plan's section-7 "Events" rules.
+#
+# Plan: doc/03_plan/ui/perf/render_perf_redesign_plan_2026-08-06.md section 7,
+# "coalesce move/wheel, never down/up/key/text/focus/close" and
+# "`drain_into(batch)` not allocating `drain()`".
+#
+# WHAT EACH SCENARIO CATCHES (stated so a green run means something):
+#  1. drain_into moves everything: catches a drain_into that silently drops
+#     the tail, or that forgets to clear the queue (double delivery).
+#  2. drain_into does NOT coalesce: catches a "helpful" default that merges on
+#     the verbatim path, which would make the two entry points indistinguishable.
+#  3. moves coalesce: catches a coalescing path that is a no-op (the perf claim
+#     would be false while the spec stayed green).
+#  4. wheel notches SUM: catches a coalescer that keeps only the newest wheel
+#     event -- scroll distance silently vanishing, the classic "my trackpad
+#     eats half my scroll" bug.
+#  5. KEY DOWN/UP/TEXT IS NEVER MERGED OR DROPPED: the correctness scenario.
+#     Catches any coalescer that treats a Key as mergeable. A regression here
+#     eats user keystrokes; every key event and its `ch` must survive verbatim
+#     and in order.
+#  6. POINTER PRESS/RELEASE IS NEVER MERGED: catches a coalescer keyed on
+#     "is a Pointer" rather than on `button == HOST_BTN_NONE` -- that variant
+#     would swallow clicks.
+#  7. Resize (the focus/close lifecycle class) is never merged.
+#  8. Move never absorbs a wheel: catches a merge predicate that only asks
+#     "both coalescable?" and loses either the scroll or the position.
+#  9. The batch is reused in place across fills: catches a refill that grows
+#     the batch or leaks the previous fill's tail into the next one.
+# 10. input_event_is_coalescable is the single policy oracle, asserted
+#     directly for all six classes -- catches drift between the predicate and
+#     the append path.
+
+use common.ui.host_input_event.{HostInputEvent, host_pointer_move, host_pointer_wheel, host_pointer_down, host_pointer_up, host_key_down, host_key_up, host_resize, HOST_BTN_LEFT}
+use os.drivers.input.input_event.{InputEventQueue}
+use os.drivers.input.input_batch.{InputBatch, input_event_is_coalescable, input_event_can_merge}
+
+fn _ev_kind(ev: HostInputEvent) -> text:
+    match ev:
+        HostInputEvent.Pointer(x, y, button, pressed, wheel):
+            return "P"
+        HostInputEvent.Key(code, ch, down, mods):
+            return "K"
+        _:
+            return "R"
+
+fn _ev_tag(ev: HostInputEvent) -> text:
+    match ev:
+        HostInputEvent.Pointer(x, y, button, pressed, wheel):
+            return "P:" + x.to_text() + "," + y.to_text() + ",b" + button.to_text() +
+                ",w" + wheel.to_text()
+        HostInputEvent.Key(code, ch, down, mods):
+            return "K:" + code.to_text() + "," + ch + "," + (if down: "d" else: "u")
+        HostInputEvent.Resize(w, h):
+            return "R:" + w.to_text() + "x" + h.to_text()
+
+fn _tags(b: InputBatch) -> text:
+    var out = ""
+    var i = 0
+    while i < b.len():
+        if i > 0:
+            out = out + "|"
+        out = out + _ev_tag(b.at(i))
+        i = i + 1
+    out
+
+describe "input batch drain_into and coalescing policy":
+
+    it "drain_into moves every event and empties the queue":
+        val q = InputEventQueue.create()
+        val b = InputBatch.create()
+        q.push(host_key_down(65, "a", 0))
+        q.push(host_pointer_down(3 as i32, 4 as i32, HOST_BTN_LEFT))
+        q.push(host_resize(80 as i32, 24 as i32))
+        val n = q.drain_into(b)
+        expect(n).to_equal(3)
+        expect(b.len()).to_equal(3)
+        expect(q.len()).to_equal(0)
+        expect(_tags(b)).to_equal("K:65,a,d|P:3,4,b1,w0|R:80x24")
+
+    it "drain_into never coalesces even a run of moves":
+        val q = InputEventQueue.create()
+        val b = InputBatch.create()
+        q.push(host_pointer_move(1 as i32, 1 as i32))
+        q.push(host_pointer_move(2 as i32, 2 as i32))
+        q.push(host_pointer_move(3 as i32, 3 as i32))
+        q.drain_into(b)
+        expect(b.len()).to_equal(3)
+        expect(b.coalesced_count()).to_equal(0)
+
+    it "drain_into_coalesced collapses a run of moves to the newest position":
+        val q = InputEventQueue.create()
+        val b = InputBatch.create()
+        q.push(host_pointer_move(1 as i32, 1 as i32))
+        q.push(host_pointer_move(2 as i32, 2 as i32))
+        q.push(host_pointer_move(9 as i32, 7 as i32))
+        q.drain_into_coalesced(b)
+        expect(b.len()).to_equal(1)
+        expect(b.coalesced_count()).to_equal(2)
+        expect(_ev_tag(b.at(0))).to_equal("P:9,7,b0,w0")
+
+    it "coalescing wheel events SUMS the notches so scroll distance survives":
+        val q = InputEventQueue.create()
+        val b = InputBatch.create()
+        q.push(host_pointer_wheel(5 as i32, 5 as i32, 1 as i32))
+        q.push(host_pointer_wheel(5 as i32, 5 as i32, 2 as i32))
+        q.push(host_pointer_wheel(6 as i32, 5 as i32, 3 as i32))
+        q.drain_into_coalesced(b)
+        expect(b.len()).to_equal(1)
+        expect(_ev_tag(b.at(0))).to_equal("P:6,5,b0,w6")
+
+    it "key down, key up and key text are NEVER merged or dropped":
+        val q = InputEventQueue.create()
+        val b = InputBatch.create()
+        q.push(host_key_down(72, "h", 0))
+        q.push(host_key_up(72, "h", 0))
+        q.push(host_key_down(73, "i", 0))
+        q.push(host_key_up(73, "i", 0))
+        q.drain_into_coalesced(b)
+        expect(b.len()).to_equal(4)
+        expect(b.coalesced_count()).to_equal(0)
+        expect(_tags(b)).to_equal("K:72,h,d|K:72,h,u|K:73,i,d|K:73,i,u")
+
+    it "keys interleaved with a move storm all survive in order":
+        val q = InputEventQueue.create()
+        val b = InputBatch.create()
+        q.push(host_pointer_move(1 as i32, 1 as i32))
+        q.push(host_pointer_move(2 as i32, 2 as i32))
+        q.push(host_key_down(65, "a", 0))
+        q.push(host_pointer_move(3 as i32, 3 as i32))
+        q.push(host_pointer_move(4 as i32, 4 as i32))
+        q.push(host_key_up(65, "a", 0))
+        q.drain_into_coalesced(b)
+        var keys = 0
+        var i = 0
+        while i < b.len():
+            if _ev_kind(b.at(i)) == "K":
+                keys = keys + 1
+            i = i + 1
+        expect(keys).to_equal(2)
+        expect(_tags(b)).to_equal("P:2,2,b0,w0|K:65,a,d|P:4,4,b0,w0|K:65,a,u")
+
+    it "pointer press and release are NEVER merged into a move":
+        val q = InputEventQueue.create()
+        val b = InputBatch.create()
+        q.push(host_pointer_move(1 as i32, 1 as i32))
+        q.push(host_pointer_down(1 as i32, 1 as i32, HOST_BTN_LEFT))
+        q.push(host_pointer_up(1 as i32, 1 as i32, HOST_BTN_LEFT))
+        q.push(host_pointer_move(2 as i32, 2 as i32))
+        q.drain_into_coalesced(b)
+        expect(b.len()).to_equal(4)
+        expect(b.coalesced_count()).to_equal(0)
+
+    it "two consecutive clicks stay two clicks":
+        val q = InputEventQueue.create()
+        val b = InputBatch.create()
+        q.push(host_pointer_down(1 as i32, 1 as i32, HOST_BTN_LEFT))
+        q.push(host_pointer_up(1 as i32, 1 as i32, HOST_BTN_LEFT))
+        q.push(host_pointer_down(1 as i32, 1 as i32, HOST_BTN_LEFT))
+        q.push(host_pointer_up(1 as i32, 1 as i32, HOST_BTN_LEFT))
+        q.drain_into_coalesced(b)
+        expect(b.len()).to_equal(4)
+
+    it "resize is never merged with an adjacent resize":
+        val q = InputEventQueue.create()
+        val b = InputBatch.create()
+        q.push(host_resize(10 as i32, 10 as i32))
+        q.push(host_resize(20 as i32, 20 as i32))
+        q.drain_into_coalesced(b)
+        expect(b.len()).to_equal(2)
+        expect(_tags(b)).to_equal("R:10x10|R:20x20")
+
+    it "a move never absorbs a wheel and a wheel never absorbs a move":
+        val q = InputEventQueue.create()
+        val b = InputBatch.create()
+        q.push(host_pointer_move(1 as i32, 1 as i32))
+        q.push(host_pointer_wheel(1 as i32, 1 as i32, 4 as i32))
+        q.push(host_pointer_move(2 as i32, 2 as i32))
+        q.drain_into_coalesced(b)
+        expect(b.len()).to_equal(3)
+        expect(b.coalesced_count()).to_equal(0)
+
+    it "the batch is reused in place with no tail leaking between fills":
+        val q = InputEventQueue.create()
+        val b = InputBatch.create()
+        q.push(host_key_down(65, "a", 0))
+        q.push(host_key_down(66, "b", 0))
+        q.push(host_key_down(67, "c", 0))
+        q.drain_into(b)
+        expect(b.len()).to_equal(3)
+        q.push(host_key_down(90, "z", 0))
+        q.drain_into(b)
+        expect(b.len()).to_equal(1)
+        expect(_tags(b)).to_equal("K:90,z,d")
+        expect(b.capacity()).to_equal(256)
+
+    it "the coalescing policy oracle admits only move and wheel":
+        expect(input_event_is_coalescable(host_pointer_move(0 as i32, 0 as i32))).to_equal(true)
+        expect(input_event_is_coalescable(host_pointer_wheel(0 as i32, 0 as i32, 1 as i32))).to_equal(true)
+        expect(input_event_is_coalescable(host_pointer_down(0 as i32, 0 as i32, HOST_BTN_LEFT))).to_equal(false)
+        expect(input_event_is_coalescable(host_pointer_up(0 as i32, 0 as i32, HOST_BTN_LEFT))).to_equal(false)
+        expect(input_event_is_coalescable(host_key_down(65, "a", 0))).to_equal(false)
+        expect(input_event_is_coalescable(host_key_up(65, "a", 0))).to_equal(false)
+        expect(input_event_is_coalescable(host_resize(1 as i32, 1 as i32))).to_equal(false)
+
+    it "can_merge refuses every cross-class pair":
+        expect(input_event_can_merge(host_pointer_move(0 as i32, 0 as i32), host_key_down(65, "a", 0))).to_equal(false)
+        expect(input_event_can_merge(host_key_down(65, "a", 0), host_pointer_move(0 as i32, 0 as i32))).to_equal(false)
+        expect(input_event_can_merge(host_key_down(65, "a", 0), host_key_up(65, "a", 0))).to_equal(false)
+        expect(input_event_can_merge(host_pointer_move(0 as i32, 0 as i32), host_pointer_move(1 as i32, 1 as i32))).to_equal(true)

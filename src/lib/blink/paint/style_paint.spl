@@ -1,0 +1,46 @@
+# Blink style→paint bridge — blink.paint.style_paint
+#
+# Converts a laid-out, styled document (`StyledLayout`, from
+# `blink.layout.style_bridge`) into the flat rect+colour list
+# (`PaintChunkRects`, from `common.ui.render_opt.paint_chunk_rasterizer`) that
+# the existing, already-proven rasterizer consumes.
+#
+# Scope (deliberately minimal — see
+# doc/03_plan/lib/browser/blink_style_paint_plan_2026-08-10.md):
+#   IN:  one axis-aligned rect per box (from `layout.rect_for`) plus its
+#        `background_color`, packed via `SkColor4f.to_sk_color()`.
+#   OUT: no borders, no text/glyph rendering, no transparent-background skip
+#        (alpha=0 rects are still emitted), no z-order/stacking sort (the
+#        block-flow lane is already a flat document-order list), and no
+#        `PaintChunks`/`RenderRevisions` staleness wiring (an orthogonal
+#        damage-tracking optimization layered on top of this rect list).
+
+use std.blink.layout.style_bridge.{StyledLayout}
+use std.common.ui.render_opt.paint_chunk_rasterizer.{PaintChunkRects}
+
+# Walk `layout.node_ids`/`layout.styles` in index-parallel order (the index
+# `i` is a POSITION, not a node id) and emit one rect per box that actually
+# laid out. A node with no computed rect (should not happen for anything in
+# `node_ids`, but `rect_for` returns an option) contributes nothing.
+pub fn paint_chunks_from_styled_layout(layout: StyledLayout) -> PaintChunkRects:
+    """Flatten a styled, laid-out document into background-colour paint rects."""
+    var rects = PaintChunkRects.create()
+    var i = 0
+    while i < layout.node_ids.len():
+        val node_id = layout.node_ids[i as i32]
+        val style = layout.styles[i as i32]
+        match layout.rect_for(node_id):
+            Some(r):
+                val l = r.0
+                val t = r.1
+                val right = r.2
+                val bottom = r.3
+                val argb = style.background_color.to_sk_color()
+                rects.add_rect(l.to_i64(), t.to_i64(),
+                                (right - l).to_i64(), (bottom - t).to_i64(), argb)
+            None:
+                pass_do_nothing()
+        i = i + 1
+    rects
+
+export paint_chunks_from_styled_layout
