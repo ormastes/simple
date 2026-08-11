@@ -6,7 +6,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|-------:|--------:|--------:|
-| 8 | 8 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 This manual records zero executed scenarios and does not claim PASS because
 cached process execution is blocked until a qualified Caret artifact exists.
@@ -159,6 +159,37 @@ expect(result.stdout).to_contain("case=utf8-edit-navigation status=PASS")
 expect(result.stdout).to_contain("case=small-terminal-geometry status=PASS")
 step("Check transcript and status")
 expect(result.stdout).to_contain("evidence_status=PASS")
+expect(result.exit_code).to_equal(0)
+```
+
+</details>
+
+#### should recover from malformed UTF-8 without leaking invalid bytes
+
+- Open the caret TUI at the fixed 12x80 PTY geometry.
+- Send the malformed two-byte UTF-8 sequence `C0 AF`, submit it, then submit
+  the valid line `utf8-recovery-ok` and `/exit`.
+  - Expected: the raw malformed bytes never appear in `typescript.txt`; the
+    subsequent valid transcript line is `You: utf8-recovery-ok`.
+- Check transcript and terminal restoration.
+  - Expected: the child records `caret_exit=0`, alternate screen and cursor
+    state are restored, geometry and raw-mode baseline match, and the checker
+    reports zero failures. This is a bounded recovery outcome, not replacement
+    of malformed input with a displayed surrogate.
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+step("Open the caret TUI")
+val result = run_caret_pty_case("invalid-utf8-recovery")
+step("Send malformed bytes then a valid prompt through the visible input")
+expect(result.stdout).to_contain(
+    "case=invalid-utf8-recovery status=PASS"
+)
+step("Check transcript and terminal restoration")
+expect(result.stdout).to_contain("evidence_status=PASS")
+expect(result.stdout).to_contain("failed_cases=0")
 expect(result.exit_code).to_equal(0)
 ```
 

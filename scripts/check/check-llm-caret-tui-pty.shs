@@ -17,7 +17,7 @@ FAILURES=0
 CASE_TIMEOUT_SECONDS=20
 
 usage() {
-    printf '%s\n' "usage: sh scripts/check/check-llm-caret-tui-pty.shs --case <prerequisites|routing|lifecycle|editing|hidden|promptless|offline-claude|provider-error|raw-failure|all>"
+    printf '%s\n' "usage: sh scripts/check/check-llm-caret-tui-pty.shs --case <prerequisites|routing|lifecycle|editing|invalid-utf8-recovery|hidden|promptless|offline-claude|provider-error|raw-failure|all>"
 }
 
 fail_prerequisite() {
@@ -342,6 +342,11 @@ write_input() {
         utf8-edit)
             # "ac", left, U+754C, end, "!" => submitted text "a界c!".
             printf 'ac\033[D界\033[F!\r/exit\r' >"${input_path}"
+            ;;
+        invalid-utf8-recovery)
+            # Submit malformed UTF-8 first, then prove the next valid line is
+            # accepted and the TUI can still restore the terminal on /exit.
+            printf '\300\257\rutf8-recovery-ok\r/exit\r' >"${input_path}"
             ;;
         hidden-default|hidden-enabled|hidden-false)
             printf '/debug-tool-call {"type":"tool_use","id":"call-1","name":"Read","input":{"file_path":"fixture.txt"}}\r/exit\r' \
@@ -783,6 +788,14 @@ run_pty_case() {
     elif [ "${input_kind}" = "utf8-edit" ] &&
          ! grep -a -F "You: a界c!" "${capture}" >/dev/null 2>&1; then
         record_failure "${label}" "utf8_edited_submission_missing" "${case_dir}"
+    elif [ "${input_kind}" = "invalid-utf8-recovery" ] &&
+         LC_ALL=C grep -a -F "$(printf '\300\257')" \
+             "${capture}" >/dev/null 2>&1; then
+        record_failure "${label}" "invalid_utf8_leaked_to_transcript" "${case_dir}"
+    elif [ "${input_kind}" = "invalid-utf8-recovery" ] &&
+         ! grep -a -F "You: utf8-recovery-ok" \
+             "${capture}" >/dev/null 2>&1; then
+        record_failure "${label}" "utf8_recovery_submission_missing" "${case_dir}"
     elif [ "${provider_mode}" = "fixture-claude" ] &&
          [ "${input_kind}" = "fixture-success" ] &&
          ! grep -a -F "You: fixture-success" "${capture}" >/dev/null 2>&1; then
@@ -978,6 +991,11 @@ run_editing() {
     run_pty_case "small-terminal-geometry" "forced" "exit" "12x50" "dummy"
 }
 
+run_invalid_utf8_recovery() {
+    run_pty_case \
+        "invalid-utf8-recovery" "forced" "invalid-utf8-recovery" "12x80" "dummy"
+}
+
 run_hidden() {
     run_pty_case "hidden-default-rejected" "forced" "hidden-default" "12x80" "dummy"
     run_pty_case "hidden-false-rejected" "forced" "hidden-false" "12x80" "dummy"
@@ -1059,6 +1077,9 @@ case "${CASE_NAME}" in
     editing)
         run_editing
         ;;
+    invalid-utf8-recovery)
+        run_invalid_utf8_recovery
+        ;;
     hidden)
         run_hidden
         ;;
@@ -1078,6 +1099,7 @@ case "${CASE_NAME}" in
         run_routing
         run_lifecycle
         run_editing
+        run_invalid_utf8_recovery
         run_hidden
         run_promptless
         run_offline_claude
