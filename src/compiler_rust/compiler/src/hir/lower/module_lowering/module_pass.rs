@@ -1097,6 +1097,20 @@ impl Lowerer {
         }
     }
 
+    /// Native entry-closure lowering compiles every source file into one link
+    /// unit.  A generic `__module_init_dynamic` therefore collides whenever
+    /// two modules have runtime global initializers.  The driver supplies a
+    /// stable path-derived prefix for that mode; retain the legacy name for
+    /// standalone/interpreter lowering where no native identity is present.
+    fn native_dynamic_initializer_name(&self) -> String {
+        match self.native_module_prefix.as_deref() {
+            Some(prefix) if !prefix.is_empty() => {
+                format!("__module_init_{prefix}_dynamic")
+            }
+            _ => "__module_init_dynamic".to_string(),
+        }
+    }
+
     pub fn lower_module(mut self, ast_module: &Module) -> LowerResult<HirModule> {
         // Hoist nested type definitions (e.g. `class Foo:` defined inside an
         // SPipe `it` block) to module scope so the rest of the lowering
@@ -1602,7 +1616,7 @@ impl Lowerer {
             if !dyn_body.is_empty() && !has_preinjected_dynamic_initializer {
                 dyn_body.push(HirStmt::Return(None));
                 self.module.functions.push(HirFunction {
-                    name: "__module_init_dynamic".to_string(),
+                    name: self.native_dynamic_initializer_name(),
                     span: None,
                     params: Vec::new(),
                     locals: dyn_ctx.locals,
@@ -1941,7 +1955,7 @@ impl Lowerer {
             if !dyn_body.is_empty() && !has_preinjected_dynamic_initializer {
                 dyn_body.push(HirStmt::Return(None));
                 self.module.functions.push(HirFunction {
-                    name: "__module_init_dynamic".to_string(),
+                    name: self.native_dynamic_initializer_name(),
                     span: None,
                     params: Vec::new(),
                     locals: dyn_ctx.locals,

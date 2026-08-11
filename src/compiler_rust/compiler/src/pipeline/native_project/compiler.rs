@@ -457,6 +457,7 @@ pub(crate) fn compile_file_to_object(
     let resolver =
         ModuleResolver::new(project_root.to_path_buf(), hir_source_root).with_extra_source_roots(resolver_roots);
     let mut lowerer = Lowerer::with_module_resolver(resolver, file_path.to_path_buf());
+    lowerer.set_native_module_prefix(module_prefix_from_path(file_path, source_root));
     lowerer.set_strict_mode(false);
     lowerer.set_lenient_types(true);
     // Pass the global struct defs to the lowerer so cross-module field access

@@ -43,6 +43,11 @@ pub struct Lowerer {
     pub(super) module_resolver: Option<ModuleResolver>,
     /// Current file being compiled (for resolving relative imports)
     pub(super) current_file: Option<PathBuf>,
+    /// Stable source-path identity supplied by the native entry-closure
+    /// driver.  Unlike an optional `module` declaration, this is present for
+    /// every compilation unit and can therefore safely participate in native
+    /// link-symbol names.
+    pub(super) native_module_prefix: Option<String>,
     /// Track loaded modules to prevent circular dependencies
     pub(super) loaded_modules: HashSet<PathBuf>,
     /// Track materialized import targets per module path. A module can be
@@ -138,6 +143,7 @@ impl Lowerer {
             current_function_name: None,
             module_resolver: None,
             current_file: None,
+            native_module_prefix: None,
             loaded_modules: HashSet::new(),
             loaded_import_targets: HashSet::new(),
             memory_warnings: MemoryWarningCollector::strict(), // STRICT mode for Rust-level safety
@@ -182,6 +188,7 @@ impl Lowerer {
             current_function_name: None,
             module_resolver: Some(module_resolver),
             current_file: Some(current_file),
+            native_module_prefix: None,
             loaded_modules: HashSet::new(),
             loaded_import_targets: HashSet::new(),
             memory_warnings: MemoryWarningCollector::strict(), // STRICT by default
@@ -219,6 +226,13 @@ impl Lowerer {
         self.type_inference_config = config;
     }
 
+    /// Set the source-path-qualified identity used for native-only synthetic
+    /// functions.  Ordinary interpreter lowering intentionally leaves this
+    /// unset so its historical names remain unchanged.
+    pub fn set_native_module_prefix(&mut self, prefix: String) {
+        self.native_module_prefix = Some(prefix);
+    }
+
     /// Get the current type inference configuration
     pub fn type_inference_config(&self) -> &TypeInferenceConfig {
         &self.type_inference_config
@@ -249,6 +263,7 @@ impl Lowerer {
             current_function_name: None,
             module_resolver: None,
             current_file: None,
+            native_module_prefix: None,
             loaded_modules: HashSet::new(),
             loaded_import_targets: HashSet::new(),
             memory_warnings: MemoryWarningCollector::new(), // Lenient mode (warnings only)
