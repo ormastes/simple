@@ -285,6 +285,15 @@ fn complete_claude_api_exchange(raw: text, transport_error: text) -> ApiResponse
         )
     parse_claude_api_response(raw)
 
+# Keep the retry callback expression-only.  The self-hosted parser accepts a
+# trailing-colon function literal as a call argument, but its callback grammar
+# does not admit a local `val` declaration inside that expression block.
+# Keeping the impure transport in this named helper makes the production entry
+# closure parse the same way as the unit-level retry contract.
+fn claude_api_retry_transport(request: ClaudeApiRequest, attempt: i64) -> (i64, text, text, i64):
+    val result = http_request_raw(request.method, request.url, request.headers, request.body)
+    (result.0, result.1 ?? "", result.2 ?? "", 0)
+
 # ============================================================================
 # Impure Function: send request
 # ============================================================================
@@ -304,7 +313,6 @@ fn claude_api_send(api_key: text, base_url: text, model: text, messages_json: te
     val request = build_claude_api_request(api_key, base_url, model, messages_json, system_prompt, max_tokens)
     val policy = retry_policy_from_env()
     val outcome = with_retry(policy, fn(attempt: i64) -> (i64, text, text, i64):
-        val result = http_request_raw(request.method, request.url, request.headers, request.body)
-        (result.0, result.1 ?? "", result.2 ?? "", 0)
+        claude_api_retry_transport(request, attempt)
     )
     complete_claude_api_exchange(outcome.body, outcome.error)
