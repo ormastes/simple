@@ -365,29 +365,36 @@ fn _live_workflow(runtime: text, root: text) -> (bool, text):
     val (commit_invalid, commit_invalid_err, commit_invalid_code) = _act(
         runtime, port, "main#confirm_edit", "invoke", "", revision15
     )
+    val commit_invalid_response = commit_invalid + commit_invalid_err
     val (invalid_after, invalid_after_err, invalid_after_code) = _ui(runtime, port, ["find", "--canonical", "main#cell_D1"])
     val invalid_after_value = _json_text(invalid_after, "text")
     val (after, after_err, after_code) = _ui(runtime, port, ["snapshot"])
     val (b1, b1_err, b1_code) = _ui(runtime, port, ["find", "--canonical", "main#cell_B1"])
     val (c1, c1_err, c1_code) = _ui(runtime, port, ["find", "--canonical", "main#cell_C1"])
     val (history, history_err, history_code) = _ui(runtime, port, ["history", "--surface", "main", "--count", "64"])
-    val (_stale, stale_err, stale_code) = _act(runtime, port, "main#cell_A1", "select", "", revision0)
-    val (_missing, missing_err, missing_code) = _act(runtime, port, "main#cell_Z999", "select", "", _revision(after))
-    val (_unsupported, unsupported_err, unsupported_code) = _act(runtime, port, "main#cell_A1", "delete_everything", "", _revision(after))
+    val (stale_out, stale_err, stale_code) = _act(runtime, port, "main#cell_A1", "select", "", revision0)
+    val (missing_out, missing_err, missing_code) = _act(runtime, port, "main#cell_Z999", "select", "", _revision(after))
+    val (unsupported_out, unsupported_err, unsupported_code) = _act(runtime, port, "main#cell_A1", "delete_everything", "", _revision(after))
+    val stale_response = stale_out + stale_err
+    val missing_response = missing_out + missing_err
+    val unsupported_response = unsupported_out + unsupported_err
     val evidence_ok = file_write(root + "/protocol/snapshot-before.json", before) and
         file_write(root + "/protocol/snapshot-after.json", after) and
         file_write(root + "/protocol/find-b1.json", b1) and
         file_write(root + "/protocol/find-c1.json", c1) and
         file_write(root + "/protocol/malformed-before.json", invalid_before) and
         file_write(root + "/protocol/malformed-after.json", invalid_after) and
-        file_write(root + "/protocol/malformed-rejection.txt", commit_invalid + commit_invalid_err) and
+        file_write(root + "/protocol/malformed-rejection.txt", commit_invalid_response) and
         file_write(root + "/protocol/history.json", history) and
         file_write(root + "/protocol/windows.json", windows) and
         file_write(root + "/protocol/surface-main.json", surface) and
-        file_write(root + "/protocol/rejections.txt", stale_err + "\n" + missing_err + "\n" + unsupported_err)
+        file_write(root + "/protocol/rejections.txt", stale_response + "\n" + missing_response + "\n" + unsupported_response)
     val tui_ok = _finish_real_tui(root)
     val (closed_out, closed_err, closed_code) = _ui(runtime, port, ["snapshot"])
-    val port_closed = closed_code != 0
+    val closed_response = closed_out + closed_err
+    val port_closed = (closed_code != 0 and
+        _protocol_json_ok(closed_response) and
+        closed_response.contains("source_unavailable"))
     file_write(
         root + "/protocol/service-closed.txt",
         "port=" + port.to_text() + "\nclosed=" + port_closed.to_text() +
@@ -400,7 +407,7 @@ fn _live_workflow(runtime: text, root: text) -> (bool, text):
         select_c1_code == 0 and type_c1_code == 0 and commit_c1_code == 0 and
         windows_code == 0 and surface_code == 0 and evict_code == 0 and revision13 >= 0 and
         select_d1_code == 0 and invalid_before_code == 0 and type_invalid_code == 0 and
-        commit_invalid_code != 0 and commit_invalid_err.contains("malformed_formula") and
+        commit_invalid_code != 0 and commit_invalid_response.contains("malformed_formula") and
         invalid_after_code == 0 and invalid_before_value == invalid_after_value and
         after_code == 0 and b1_code == 0 and c1_code == 0 and history_code == 0 and
         _protocol_json_ok(windows) and _protocol_json_ok(before) and
@@ -412,7 +419,7 @@ fn _live_workflow(runtime: text, root: text) -> (bool, text):
         _protocol_json_ok(select_c1) and _protocol_json_ok(type_c1) and
         _protocol_json_ok(commit_c1) and _protocol_json_ok(evict_action) and
         _protocol_json_ok(select_d1) and _protocol_json_ok(invalid_before) and
-        _protocol_json_ok(type_invalid) and _protocol_json_ok(commit_invalid + commit_invalid_err) and
+        _protocol_json_ok(type_invalid) and _protocol_json_ok(commit_invalid_response) and
         _protocol_json_ok(invalid_after) and _protocol_json_ok(after) and
         _protocol_json_ok(b1) and _protocol_json_ok(c1) and _protocol_json_ok(history) and
         windows.contains("main") and
@@ -421,9 +428,9 @@ fn _live_workflow(runtime: text, root: text) -> (bool, text):
         c1.contains("main#cell_C1") and c1.contains("7") and
         history.contains("access_request") and history.contains("access_result") and
         _count_text(history, "\"event_kind\"") == 64 and early_request_id != "" and not history.contains(early_request_id) and
-        stale_code != 0 and stale_err.contains("stale_target") and
-        missing_code != 0 and missing_err.contains("target_not_found") and
-        unsupported_code != 0 and unsupported_err.contains("unsupported_action") and tui_ok and port_closed
+        stale_code != 0 and stale_response.contains("stale_target") and
+        missing_code != 0 and missing_response.contains("target_not_found") and
+        unsupported_code != 0 and unsupported_response.contains("unsupported_action") and tui_ok and port_closed
         and screen.contains("48") and screen.contains("7") and
         screen.contains("T") and screen.contains("30") and
         screen.split("\n").len() == 38

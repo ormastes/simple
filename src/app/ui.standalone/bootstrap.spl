@@ -14,7 +14,8 @@
 use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
 use nogc_sync_mut.ui.session.{UISession}
 use common.ui.widget.{UIEvent}
-use app.ui.test_api.mount.{test_api_matches, dispatch_and_format, format_http_response}
+use app.ui.test_api.handler.{UiTestActionResult}
+use app.ui.test_api.mount.{test_api_matches, dispatch_and_format_with_action_result, format_http_response}
 
 class StandaloneOptions:
     bind_addr: text
@@ -56,6 +57,12 @@ fn _accept_loop(listener: TcpListener, session: UISession, inject_event: fn(UIEv
                 _handle_one(stream, session, inject_event, opts)
 
 fn _handle_one(stream: TcpStream, session: UISession, inject_event: fn(UIEvent), opts: StandaloneOptions):
+    val inject_action = \event:
+        inject_event(event)
+        UiTestActionResult.accepted()
+    _handle_one_with_action_result(stream, session, inject_event, inject_action, opts)
+
+fn _handle_one_with_action_result(stream: TcpStream, session: UISession, inject_event: fn(UIEvent), inject_action: fn(UIEvent) -> UiTestActionResult, opts: StandaloneOptions):
     match stream.read_line():
         Err(_):
             return
@@ -87,7 +94,7 @@ fn _handle_one(stream: TcpStream, session: UISession, inject_event: fn(UIEvent),
                         pass_dn
 
             if test_api_matches(path):
-                stream.write_all(dispatch_and_format(path, method, body, session, inject_event))
+                stream.write_all(dispatch_and_format_with_action_result(path, method, body, session, inject_event, inject_action))
                 return
             if path == "/" and method == "GET":
                 stream.write_all(format_http_response(200, "text/html", _index_html(opts)))
@@ -102,6 +109,12 @@ fn standalone_handle_stream(stream: TcpStream, session: UISession, inject_event:
     this helper only parses and responds to the already-accepted stream.
     """
     _handle_one(stream, session, inject_event, opts)
+
+fn standalone_handle_stream_with_action_result(stream: TcpStream, session: UISession, inject_event: fn(UIEvent), inject_action: fn(UIEvent) -> UiTestActionResult, opts: StandaloneOptions):
+    """Serve one stream and propagate application-domain action rejection."""
+    _handle_one_with_action_result(stream, session, inject_event, inject_action, opts)
+
+export standalone_handle_stream_with_action_result
 
 fn _index_html(opts: StandaloneOptions) -> text:
     return "<!doctype html><html><head><meta charset=\"utf-8\"><title>{opts.title}</title>" +

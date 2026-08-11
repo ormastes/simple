@@ -5,7 +5,8 @@
 # controller, UISession, workbook, history, and rendered frame.
 
 use app.office.sheets.calc_session_host.{CalcSessionHost}
-use app.ui.standalone.bootstrap.{StandaloneOptions, standalone_handle_stream}
+use app.ui.test_api.handler.{UiTestActionResult}
+use app.ui.standalone.bootstrap.{StandaloneOptions, standalone_handle_stream_with_action_result}
 use std.nogc_sync_mut.io.tcp.{TcpListener}
 
 extern fn rt_terminal_enable_raw_mode() -> bool
@@ -29,13 +30,19 @@ fn run_calc_access_session_host(port: i32, in_path: text) -> i32:
             val inject = \event:
                 host.controller.apply_ui_event_to_session(host.session, event)
                 host.redraw()
+            val inject_action = \event:
+                val result = host.controller.apply_ui_event_to_session(host.session, event)
+                host.redraw()
+                UiTestActionResult(ok: result.ok, code: result.code)
             while host.running:
                 match listener.accept_timeout(25):
                     Ok(stream):
                         # Bound partial clients so terminal input remains live.
                         stream.set_read_timeout(1000)
                         stream.set_write_timeout(1000)
-                        standalone_handle_stream(stream, host.session, inject, opts)
+                        standalone_handle_stream_with_action_result(
+                            stream, host.session, inject, inject_action, opts
+                        )
                     Err(_):
                         pass_dn
                 host.drain_terminal_bytes()

@@ -142,3 +142,17 @@ corrective-implementation-and-evidence
   Stage 3 binary, stable `/tmp/office-stage4/cache`, and output
   `/tmp/office-stage4/out/simple`; only a fresh artifact may run the gate and
   regenerate the manual. Owner and final reviewer remain `/root`.
+- post-sync static correction (2026-08-11): The normal Calc host now loads
+  sheets through the narrow `sheet_io` owner rather than importing the broad
+  interactive/GUI closure, and every explicit invalid access-port value is
+  rejected instead of silently falling back to terminal-only mode. The SPipe
+  setup is a real inline scenario expanded by `@prev`, so the generated manual
+  can show one shared fresh evidence campaign without rerunning the gate.
+- typed rejection propagation (2026-08-11): The common UI test protocol keeps
+  its void-injector compatibility entrypoint and adds a typed action-result
+  seam. Calc maps `CalcAccessActionResult` through that seam, preserves
+  `malformed_formula` in the public CLI error, records the correlated rejection,
+  and leaves the live session unchanged. The checker now consumes JSON errors
+  from stdout or stderr and requires a schema-qualified `source_unavailable`
+  response after shutdown. These source changes are diff-clean but remain
+  pending validation by the fresh Stage 4 artifact and deployed system gate.

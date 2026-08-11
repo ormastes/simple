@@ -34,6 +34,16 @@ val DRAW_IR_PROTOCOL_VERSION = 2
 val DRAW_IR_CAPABILITY = "draw_ir"
 val DRAW_IR_PROTOCOL_VERSION_HEADER = "X-UI-Protocol-Version"
 
+struct UiTestActionResult:
+    ok: bool
+    code: text
+
+    static fn accepted() -> UiTestActionResult:
+        UiTestActionResult(ok: true, code: "ok")
+
+    static fn rejected(code: text) -> UiTestActionResult:
+        UiTestActionResult(ok: false, code: code)
+
 extern fn rt_time_ms() -> u64
 extern fn rt_sleep_ms(ms: i64)
 
@@ -41,7 +51,7 @@ extern fn rt_sleep_ms(ms: i64)
 # Main Handler
 # =========================================================================
 
-fn handle_test_request(path: text, method: text, body: text, state: UIState, inject_event: fn(UIEvent), session: UISession?) -> (i32, text, text):
+fn _handle_test_request_with_action_result(path: text, method: text, body: text, state: UIState, inject_event: fn(UIEvent), inject_action: fn(UIEvent) -> UiTestActionResult, session: UISession?) -> (i32, text, text):
     """Handle an incoming test API request.
 
     Returns (status_code, content_type, response_body).
@@ -51,7 +61,7 @@ fn handle_test_request(path: text, method: text, body: text, state: UIState, inj
 
     if method == "POST":
         if route == "/api/test/ui/act":
-            return _handle_ui_act(body, inject_event, session)
+            return _handle_ui_act(body, inject_action, session)
         elif route == "/api/test/ui/state":
             return _handle_ui_state_post(body, inject_event, session)
         elif route == "/api/test/ui/value":
@@ -240,7 +250,7 @@ fn _handle_event(body: text, inject_event: fn(UIEvent)) -> (i32, text, text):
         _:
             return (400, "application/json", "{\"error\":\"unknown_event_type\",\"message\":\"Unknown event type\"}")
 
-fn _handle_ui_act(body: text, inject_event: fn(UIEvent), session: UISession?) -> (i32, text, text):
+fn _handle_ui_act(body: text, inject_action: fn(UIEvent) -> UiTestActionResult, session: UISession?) -> (i32, text, text):
     """Handle POST /api/test/ui/act — additive UI access action route."""
     val surface_id = extract_json_field(body, "surface_id")
     val canonical_id = extract_json_field(body, "canonical_id")
@@ -284,14 +294,19 @@ fn _handle_ui_act(body: text, inject_event: fn(UIEvent), session: UISession?) ->
     else:
         action
     session.set_active_surface(resolved_surface_id)
-    if action_name == "type_text":
-        inject_event(UIEvent.InputChange(target_id: widget_id, value: value))
+    val action_result = if action_name == "type_text":
+        inject_action(UIEvent.InputChange(target_id: widget_id, value: value))
     elif action_name == "select":
         # Selection is target-bearing. Preserve the canonical widget identity
         # instead of reducing it to an unscoped Action("select").
-        inject_event(UIEvent.FocusEvent(target_id: widget_id, kind: "focus"))
+        inject_action(UIEvent.FocusEvent(target_id: widget_id, kind: "focus"))
     else:
-        inject_event(UIEvent.Action(name: action_name))
+        inject_action(UIEvent.Action(name: action_name))
+    if not action_result.ok:
+        val code = if action_result.code == "": "action_rejected" else: action_result.code
+        if session != nil:
+            session.record_access_correlation(resolved_surface_id, widget_id, request_id, "result", code)
+        return (400, "application/json", "{\"error\":\"{escape_json(code)}\",\"message\":\"UI application rejected the action\",\"request_id\":\"{escape_json(request_id)}\"}")
     if session != nil:
         session.record_access_correlation(resolved_surface_id, widget_id, request_id, "result", "ok")
     return (200, "application/json", "{\"ok\":true,\"surface_id\":\"{escape_json(resolved_surface_id)}\",\"canonical_id\":\"{escape_json(canonical_id)}\",\"request_id\":\"{escape_json(request_id)}\"}")
@@ -990,6 +1005,19 @@ fn _join_text(values: [text], separator: text) -> text:
         else:
             out = "{out}{separator}{value}"
     return out
+
+fn handle_test_request(path: text, method: text, body: text, state: UIState, inject_event: fn(UIEvent), session: UISession?) -> (i32, text, text):
+    """Compatibility entrypoint for consumers whose event injector is void."""
+    val inject_action = \event:
+        inject_event(event)
+        UiTestActionResult.accepted()
+    _handle_test_request_with_action_result(path, method, body, state, inject_event, inject_action, session)
+
+fn handle_test_request_with_action_result(path: text, method: text, body: text, state: UIState, inject_event: fn(UIEvent), inject_action: fn(UIEvent) -> UiTestActionResult, session: UISession?) -> (i32, text, text):
+    """Result-aware entrypoint for applications with domain action rejection."""
+    _handle_test_request_with_action_result(path, method, body, state, inject_event, inject_action, session)
+
+export UiTestActionResult, handle_test_request, handle_test_request_with_action_result
 
 # =========================================================================
 # HTML Snapshot Rendering
