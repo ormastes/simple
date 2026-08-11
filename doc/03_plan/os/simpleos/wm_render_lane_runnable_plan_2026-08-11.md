@@ -187,18 +187,13 @@ run dir holding old content is the NORMAL signature of a run that has *started*.
   oracle proves it's not a no-op/solid-fill (4/4, bounds one glyph's painted
   pixels strictly 10-128), stated honest limits (fixed 8x16 scale, no AA, no
   line wrap, ASCII 0x20-0x7E only, `<style>`/`<script>` text excluded); (3)
-  inline `style=` — **CORRECTED, REOPENED: not actually landed.** Verified
-  directly against a fresh origin fetch (`4de559653b14`):
-  `resolve_style_with_state` exists but has **zero** calls to
-  `parse_declarations`, so the inline-style attribute is parsed but still not
-  consulted. An earlier report of this as CLOSED was premature — described
-  completed local work but never confirmed a landed sha. It also collides on
-  the shared symbol name `parse_declarations`/`CssDecl` with an unrelated,
-  much older module (`gc_async_mut/gpu/browser_engine/style_block.spl`,
-  predates this session) that the interpreter resolves by name across module
-  boundaries — landing the unlanded local copy as-is will go RED the moment
-  it's pushed. Needs a rename in one of the two lanes before/with landing.
-  Filed: `doc/08_tracking/bug/blink_parse_declarations_cross_module_collision_2026-08-11.md`.
+  inline `style=` — **CLOSED for real this time (verified at `3d80fd897723`).**
+  Renamed to `blink_parse_declarations`/`CssDeclaration` (blink-scoped), no
+  collision with the unrelated `gc_async_mut/gpu/browser_engine/style_block.spl`
+  module's `parse_declarations`/`CssDecl`. (An earlier report of this as CLOSED
+  was premature — described completed local work without confirming a landed
+  sha, and the first landing attempt would have collided; corrected, then
+  actually fixed and landed.)
   (4) borders/shadow — **CLOSED (`3b0465891bd9`)**, up to 4 border edge rects
   + 1 offset box-shadow rect per box, sabotage-verified (6/6, exact rect
   counts not a flat-fill shortcut); transforms/gradients explicitly deferred,
