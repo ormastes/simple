@@ -105,6 +105,20 @@ Completion evidence:
 4. From inside SimpleOS, compile and run a small `hello world` source from the
    mounted filesystem.
 
+The canonical host gate for this evidence is:
+
+```bash
+sh scripts/check/check-simpleos-compiler-filesystem-qemu.shs \
+  --arch=x86_64 --timeout=180 \
+  --output-dir=build/test-artifacts/simpleos-compiler-filesystem-qemu/live
+```
+
+It rejects duplicate or missing markers, any guest `FAIL`/`SKIP`, host compiler
+paths, malformed hashes, and unbound evidence. It atomically publishes a
+SHA-256-bound manifest and receipt. The `aarch64` interface currently exits
+with an explicit blocker because the live target-native compiler execution
+route does not yet exist; this is not a skipped or passing row.
+
 Fixed SSH command responses, host-side compilation, or a QEMU-only hardcoded
 `simple --check` response are not enough. For board claims, record the board,
 download/boot path, serial or SSH transcript, and the exact in-guest
