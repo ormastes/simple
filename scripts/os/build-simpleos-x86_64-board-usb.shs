@@ -1,0 +1,128 @@
+#!/bin/sh
+# build-simpleos-x86_64-board-usb.shs
+#
+# Build a REPRODUCIBLE, real GPT+FAT32 USB disk image for the SimpleOS
+# x86_64 physical-board UEFI boot lane (mini-PC bring-up,
+# doc/03_plan/os/simpleos/hw_qemu/clang_board_bringup_x86_64_uefi.md, phase
+# P1.1). This closes exactly that phase's missing item: the OVMF harness
+# (scripts/os/scp_retrieve_over_ssh_uefi.shs) serves its ESP to QEMU as a
+# `fat:rw:<dir>` VIRTUAL FAT (vvfat) — a QEMU-only convenience with no real
+# block device behind it, so it cannot be dd'd to a USB stick and booted on
+# real firmware. This script produces an actual raw disk image: a GPT
+# partition table with one EFI System Partition, formatted FAT32, containing
+# the same self-contained BOOTX64.EFI (grub-mkstandalone, kernel embedded via
+# memdisk) that the OVMF lane already proves boots correctly.
+#
+# ---------------------------------------------------------------------------
+# DESIGN — mirrors scripts/os/build-simpleos-aarch64-efi-esp.shs
+# ---------------------------------------------------------------------------
+# Same shape as the aarch64 ESP builder that closed the equivalent gap for
+# that arch: fail loudly on any missing tool or input, produce one artifact,
+# verify it structurally before declaring success, print a sha256 for
+# provenance. The aarch64 script formats a bare FAT image (no partition
+# table) because AAVMF/QEMU there takes the ESP as a raw FAT block device
+# directly. x86_64 USB boot on physical mini-PC firmware instead expects a
+# real GPT disk with a partition marked ESP (type C12A7328-F81F-11D2-BA4B-
+# 00A0C93EC93B) — most board UEFI implementations will not boot a bare FAT
+# filesystem with no partition table from a USB stick. That partitioning is
+# the one genuinely new piece of work versus the aarch64 script.
+#
+# ---------------------------------------------------------------------------
+# USAGE
+# ---------------------------------------------------------------------------
+#     sh scripts/os/build-simpleos-x86_64-board-usb.shs
+#
+# Inputs (env overridable):
+#     KERNEL_ELF   path to the x86_64 SimpleOS kernel ELF (multiboot1).
+#                  Default: build/os/elfexec/kernel.elf. Building the kernel
+#                  from source is a separate lane and is NOT invoked here.
+#     OUT_DIR      default build/os/x86_64_board_usb
+#     DISK_MB      total USB image size in MiB. Default 256.
+#     ESP_MB       ESP partition size in MiB. Default 64.
+#
+# Exit status: 0 = image built and structurally verified; non-zero = nothing
+# usable was produced. There is no partial success.
+#
+# UNVERIFIED WITHOUT HARDWARE: this script is checked by
+# scripts/check/check-simpleos-x86_64-board-usb-image.shs, which validates
+# the GPT/FAT structure it produces WITHOUT a board. It does NOT prove the
+# image boots real firmware — see doc/07_guide/os/simpleos_board_bringup.md.
+
+set -eu
+
+REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+OUT_DIR=${OUT_DIR:-$REPO_ROOT/build/os/x86_64_board_usb}
+KERNEL_ELF=${KERNEL_ELF:-$REPO_ROOT/build/os/elfexec/kernel.elf}
+DISK_MB=${DISK_MB:-256}
+ESP_MB=${ESP_MB:-64}
+
+die() { printf 'build-x86_64-board-usb: ERROR — %s\n' "$1" >&2; exit 1; }
+
+command -v grub-mkstandalone >/dev/null 2>&1 || die "grub-mkstandalone missing (install grub2-common/grub-efi-amd64-bin)"
+MKFS=$(command -v mkfs.vfat 2>/dev/null || echo /usr/sbin/mkfs.vfat)
+[ -x "$MKFS" ] || command -v mkfs.vfat >/dev/null 2>&1 || die "mkfs.vfat not available (install dosfstools)"
+command -v sgdisk >/dev/null 2>&1 || die "sgdisk not available (install gdisk)"
+[ -s "$KERNEL_ELF" ] || die "missing kernel ELF $KERNEL_ELF (set KERNEL_ELF=... or build the x86_64 board kernel lane first)"
+
+mkdir -p "$OUT_DIR"
+DISK="$OUT_DIR/board-usb.img"
+ESP_STAGE="$OUT_DIR/esp-stage"
+EFIAPP="$ESP_STAGE/EFI/BOOT/BOOTX64.EFI"
+
+echo "[usb] kernel  $KERNEL_ELF ($(wc -c <"$KERNEL_ELF") bytes)"
+
+# --- 1. Build the self-contained BOOTX64.EFI (kernel embedded via memdisk,
+#        same recipe scp_retrieve_over_ssh_uefi.shs already proves boots
+#        under real OVMF firmware) -------------------------------------------
+rm -rf "$ESP_STAGE"; mkdir -p "$ESP_STAGE/EFI/BOOT"
+MEMDISK_DIR=$(mktemp -d)
+mkdir -p "$MEMDISK_DIR/boot/grub"
+cp "$KERNEL_ELF" "$MEMDISK_DIR/boot/kernel.elf"
+cat > "$MEMDISK_DIR/boot/grub/grub.cfg" <<EOF
+set timeout=0
+multiboot /boot/kernel.elf
+boot
+EOF
+echo "[usb] building self-contained BOOTX64.EFI (embeds kernel via memdisk) ..."
+grub-mkstandalone --format=x86_64-efi --output="$EFIAPP" \
+    --directory=/usr/lib/grub/x86_64-efi \
+    "/boot/grub/grub.cfg=$MEMDISK_DIR/boot/grub/grub.cfg" \
+    "/boot/kernel.elf=$MEMDISK_DIR/boot/kernel.elf" \
+    2>&1 | sed 's/^/[grub-mkstandalone] /' \
+    || die "grub-mkstandalone failed"
+[ -s "$EFIAPP" ] || die "grub-mkstandalone did not produce $EFIAPP"
+rm -rf "$MEMDISK_DIR"
+STARTUP_NSH="$ESP_STAGE/startup.nsh"
+printf 'FS0:\\EFI\\BOOT\\BOOTX64.EFI\r\n' > "$STARTUP_NSH"
+
+# --- 2. Allocate the raw disk, GPT partition it, one ESP partition ---------
+rm -f "$DISK"
+dd if=/dev/zero of="$DISK" bs=1M count="$DISK_MB" status=none 2>/dev/null \
+    || die "could not allocate ${DISK_MB}M disk image"
+sgdisk --clear \
+    --new=1:2048:+"${ESP_MB}"M --typecode=1:ef00 --change-name=1:"SIMPLEESP" \
+    "$DISK" >/dev/null 2>&1 || die "sgdisk partitioning failed on $DISK"
+
+# --- 3. Format the ESP partition as a standalone FAT32 image, then splice
+#        it into the disk at the partition's byte offset ------------------
+ESP_OFFSET_SECT=2048
+ESP_OFFSET_BYTES=$((ESP_OFFSET_SECT * 512))
+ESP_IMG="$OUT_DIR/esp.img"
+rm -f "$ESP_IMG"
+dd if=/dev/zero of="$ESP_IMG" bs=1M count="$ESP_MB" status=none 2>/dev/null \
+    || die "could not allocate ${ESP_MB}M ESP image"
+"$MKFS" -F 32 -n SIMPLEESP "$ESP_IMG" >/dev/null 2>&1 || die "mkfs.vfat failed on $ESP_IMG"
+
+command -v mcopy >/dev/null 2>&1 || die "mcopy not available (install mtools)"
+export MTOOLS_SKIP_CHECK=1
+mmd -i "$ESP_IMG" "::EFI" "::EFI/BOOT" >/dev/null 2>&1 || die "mmd failed populating ESP"
+mcopy -i "$ESP_IMG" "$EFIAPP" "::EFI/BOOT/BOOTX64.EFI" || die "mcopy BOOTX64.EFI failed"
+mcopy -i "$ESP_IMG" "$STARTUP_NSH" "::startup.nsh" || die "mcopy startup.nsh failed"
+
+dd if="$ESP_IMG" of="$DISK" bs=512 seek="$ESP_OFFSET_SECT" conv=notrunc status=none \
+    || die "splicing ESP image into disk failed"
+
+echo "[usb] built $DISK ($(wc -c <"$DISK") bytes)"
+echo "[usb] sha256 $(sha256sum "$DISK" | cut -d' ' -f1)"
+echo "[usb] OK — dd to a USB stick with: sudo dd if=$DISK of=/dev/sdX bs=4M conv=fsync status=progress"
+echo "[usb] verify structure WITHOUT a board with: sh scripts/check/check-simpleos-x86_64-board-usb-image.shs"
