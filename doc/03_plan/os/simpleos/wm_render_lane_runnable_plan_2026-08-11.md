@@ -61,9 +61,20 @@ are independent; do not sequence one behind the other.
    this is a source-content regression guard, not a runtime execution spec — no
    self-hosted binary was available this session to exercise native/JIT codegen
    directly, so the fix's effect at runtime is still unproven by execution.
-6. sha256_core x8-boxing fix + FIPS regression specs (**specs last** — filed
-   first they land permanently RED); determine why `sha256_simd_parity_spec` did
-   not catch a wrong live digest. In progress.
+6. **sha256_core value-boxing — STILL OPEN, and harder than first framed.**
+   Further investigation found the corruption is not consistently ×8 (sometimes
+   ÷8, depending on call shape) — the original "shift-left-3" framing was too
+   narrow. Traced to somewhere among ~10 nested calls inside
+   `sha256_process_block`, spanning a third module
+   (`std.common.crypto.types`), not isolated to one call boundary. FIPS vectors
+   (empty string, "abc") still fail on the live seed JIT lane. No fix landed —
+   correctly, no regression specs were added either (specs-last discipline
+   held). `sha256_simd_parity_spec.spl` does assert real FIPS vectors (not
+   vacuous) but why it isn't catching this live corruption is still unexplained
+   — both `bin/simple <file>` and `bin/simple test <file>` timed out at 60s
+   when checked. **Next step for a future session:** bisect the ~10 nested
+   calls individually rather than assume the boxing family from other modules
+   applies unchanged here.
 
 **Guard duplication found and resolved (2026-08-11):** two agents independently
 built overlapping C-runtime-compiles pre-push guards
@@ -80,6 +91,51 @@ lane (`-std=gnu11`, `-I src/runtime/platform`) — was merged into the canonical
 script; the sibling file was deleted.
 
 ## Track B — rung (d) (independent of A)
+
+**New blocker found and partially fixed:** an untracked in-flight file
+(`src/os/sosix/fs/ipc_codec_v1.spl`, another session's work) that's pulled into
+the 1537-file kernel closure triggered a real parser defect — a statement-
+leading `out.method(...)` call gets hijacked because the parser's contract-
+block dispatcher decides on a bare `out`/`out_err` token instead of checking
+for the disambiguating `(`. Same family as the already-fixed
+`identifier_named_grid` hijack bug. **Fixed in the Rust seed
+(`0ebc775977`)**, family-swept (`in`/`invariant`/`requires`/`ensures`/
+`decreases` don't share the shape; `fn f(out x: T)` modifier-position is a
+separate, still-open sub-bug). **Checked against the self-hosted frontend —
+no fix needed there**, but for a more fundamental reason than "already
+correct": `src/compiler/10.frontend` has **no `out`/`out_err` contract-block
+grammar at all** (`keyword_lookup` has no such branch, falls through to plain
+`TOK_IDENT`), so the hijack literally cannot occur — there's no keyword
+dispatch to trip. This means design-by-contract `out(ret): ...` syntax is
+currently **seed-only**, a feature gap, not parity with the seed.
+**Blocking everything regardless: no self-hosted binary exists on this
+machine right now.** Every binary checked (`bin/simple`,
+`bin/release/.../simple`, `build/bootstrap/stage3/.../simple`) prints the
+Rust-seed warning banner; `build/bootstrap/stage2/` is still empty from the
+earlier concurrent `bootstrap-from-scratch.sh` wipe. **A fresh self-hosted
+build is now the actual next blocker for any real gate run**, ahead of
+whatever `ipc_codec_v1.spl` does next.
+
+**Correction, twice over — the real picture is worse than either investigation
+found alone.** A full-bootstrap attempt tonight failed at phase4:monomorphize
+with `error: ... src/compiler/backend/backend/interpreter.spl: unresolved type:
+Symbol`. Static-source investigation found the fix already exists at HEAD
+(TAL2/TAL3, 2026-08-01/08-04) and hypothesized the failed run used a stale
+stage3. **But checking the actual machine state directly (not another
+investigation) found: `systemctl --user list-units --all | grep
+simple-stage4` lists 25 bootstrap attempts tonight, ALL failed, none
+currently running.** The most recent (07:18-07:56 UTC) never even reached the
+Symbol bug — **Stage 3 self-host was `Terminated` (exit 143, killed) before
+Stage 4 could run at all**: `warning: stage3 self-host failed (exit 143);
+Stage 4 unavailable` / `error: full CLI build requires a verified pure-Simple
+stage2/stage3 compiler; refusing seed fallback`. Under tonight's contention
+(many concurrent sessions, 32 CPUs saturated), **resource exhaustion is
+killing Stage 3 before code correctness is even reachable as a question.**
+The Symbol-bug hypothesis is neither confirmed nor falsified — it's simply
+never been tested against a Stage 3 that survives long enough to reach it.
+**Not relaunching another bootstrap attempt into the same contention** — next
+session should retry once the machine is genuinely quieter, and specifically
+watch whether Stage 3 completes at all before worrying about Stage 4.
 
 Current blocker order, each replacing the last as it clears:
 
@@ -131,11 +187,31 @@ run dir holding old content is the NORMAL signature of a run that has *started*.
   oracle proves it's not a no-op/solid-fill (4/4, bounds one glyph's painted
   pixels strictly 10-128), stated honest limits (fixed 8x16 scale, no AA, no
   line wrap, ASCII 0x20-0x7E only, `<style>`/`<script>` text excluded); (3)
-  inline `style=` — **CLOSED**, `resolve_style_with_state` now folds it in at
-  inline specificity; (4) borders/shadow/transforms/gradients — open;
-  (5) stylesheet sources beyond `<style>` (no `<link>`, no UA default) — open;
-  (6) `check-electron-simple-web-layout-bitmap-evidence.shs` green with the
-  flag ON — not run. The flip now stays blocked on (4)-(6) only.
+  inline `style=` — **CORRECTED, REOPENED: not actually landed.** Verified
+  directly against a fresh origin fetch (`4de559653b14`):
+  `resolve_style_with_state` exists but has **zero** calls to
+  `parse_declarations`, so the inline-style attribute is parsed but still not
+  consulted. An earlier report of this as CLOSED was premature — described
+  completed local work but never confirmed a landed sha. It also collides on
+  the shared symbol name `parse_declarations`/`CssDecl` with an unrelated,
+  much older module (`gc_async_mut/gpu/browser_engine/style_block.spl`,
+  predates this session) that the interpreter resolves by name across module
+  boundaries — landing the unlanded local copy as-is will go RED the moment
+  it's pushed. Needs a rename in one of the two lanes before/with landing.
+  Filed: `doc/08_tracking/bug/blink_parse_declarations_cross_module_collision_2026-08-11.md`.
+  (4) borders/shadow — **CLOSED (`3b0465891bd9`)**, up to 4 border edge rects
+  + 1 offset box-shadow rect per box, sabotage-verified (6/6, exact rect
+  counts not a flat-fill shortcut); transforms/gradients explicitly deferred,
+  not attempted. (Note: the text-glyph-regression concern raised earlier
+  turned out to be muddled shared-worktree state, not a real bug — re-verified
+  4/4 pass against actual origin content.)
+  (5) stylesheet sources — **UA default stylesheet CLOSED (`8836deae37b4`)**,
+  ~30 tags' display defaults, `a{color:blue}`, merged at UA specificity below
+  author rules; `<link>` explicitly deferred — the adapter takes an in-memory
+  HTML string with no fetch capability, closing this needs either real fetch
+  or a signature change, left to whoever owns the interface. (6)
+  `check-electron-simple-web-layout-bitmap-evidence.shs` green with the flag
+  ON — not run. The flip stays blocked on (3) inline `style=` and (6).
 - Note: blink has **zero production callers** in `src/app/**` or `src/os/**`.
   This is a build-out, not a repair.
 
