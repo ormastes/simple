@@ -6,6 +6,13 @@ use std.env.types.{rt_env_home, rt_hostname, rt_env_cwd, rt_process_run}
 use std.env.variables.{env_get}
 use std.path.{join2}
 
+# No-shell existence probe, same as the established `is_char_device`
+# precedent (io_runtime.spl) — used below to skip the `uname -s` shell-out
+# entirely when `/bin/sh` is not present, instead of trapping on baremetal
+# where `rt_process_run` is a TRAP_STUB. See
+# doc/08_tracking/bug/simpleos_baremetal_backend_resolve_empty_override_rt_process_run_trap_2026-08-11.md
+extern fn rt_file_exists(path: text) -> bool
+
 # ============================================================================
 # Platform Detection
 # ============================================================================
@@ -44,6 +51,15 @@ fn detect_os() -> text:
         return "openbsd"
     if ostype.contains("netbsd"):
         return "netbsd"
+
+    # BAREMETAL GUARD (2026-08-11): `rt_process_run` is a TRAP_STUB on
+    # baremetal targets (halts the kernel), while `rt_file_exists` is a real
+    # VFS-backed no-shell primitive there. When `/bin/sh` is absent (the
+    # baremetal signature — no process facility at all), skip the shell-out
+    # and fall through to "unknown" instead of trapping. On every hosted
+    # target `/bin/sh` exists, so this is a no-op there.
+    if not rt_file_exists("/bin/sh"):
+        return "unknown"
 
     val uname = _platform_shell_output_trim("uname -s")
     if uname == "Linux":

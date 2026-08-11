@@ -1,6 +1,27 @@
 # SimpleOS baremetal backend-resolve empty-override trap — partial fix, deeper trap remains
 
-## Status
+## Status (updated 2026-08-11, second pass)
+Root cause (a) (empty-override) and root cause (b) (the `rt_process_run`
+trap inside `MetalBackend` probe via `is_macos()`) are BOTH fixed and
+verified by serial evidence. The `[TRAP] rt_process_run called on
+baremetal -- halting` line is now GONE from the boot serial log — the
+priority-order probe loop now advances past `metal` (correctly rejected:
+"Metal requires macOS"), `cuda`, and `rocm`, each logging its own
+`[backend-resolve] <name> rejected: ...` line. A NEW, DIFFERENT blocker
+(root cause (c), NOT YET LOCATED to a specific file:line) now halts the
+boot: 21 repeated `FAULT @ 0x0000000049bacXXX` lines immediately after the
+`rocm rejected` line, then the serial log goes silent and the gate reports
+`boot_ladder_observation=failure-after-qemu-quiescence`. This is very
+likely the `qualcomm` or `vulkan` backend probe (next in
+`backend_default_priority_order()`) hitting a genuine CPU fault (page
+fault / GP fault), not a `TRAP_STUB` halt — a different defect class from
+(a)/(b). Gate marker state is STILL `web:false backend:false ...`
+(unchanged) because marker advancement requires reaching a rendered frame,
+which is now blocked by (c) instead of (b). Root cause (b)'s fix is real
+forward progress even though the gate verdict string is unchanged — see
+"Root cause (b) — FIXED" below for the encoding of that progress.
+
+## Original status (root cause (a) only, superseded by (b) above)
 PARTIAL FIX LANDED. Root cause (a) fixed and verified by serial evidence.
 Gate marker state did NOT advance (still `web:false backend:false ...`) — a
 second, deeper `rt_process_run` trap sits immediately behind the fixed one.
@@ -179,9 +200,105 @@ entirely (a shared object cache, safe to clear) was required before the
 edit's effect became observable in a real boot. Filed here as a measurement
 trap for future sessions re-running this gate after a `src/lib` edit.
 
+## Root cause (b) — FIXED (2026-08-11, second pass)
+
+Pinned call site: `src/lib/nogc_async_mut/env/platform.spl`, function
+`detect_os()` (its `uname -s` shell-out fallback, previously unconditional).
+`is_macos()` (`nogc_async_mut/env/platform.spl` — re-exported through
+`gc_async_mut/env/platform.spl` and imported by
+`src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl:19,286,394`) calls
+`detect_os()`. On this baremetal target, `env_get("OS")` and
+`env_get("OSTYPE")` both return nil (no process environment), so
+`detect_os()` fell through to `_platform_shell_output_trim("uname -s")` →
+`rt_process_run("/bin/sh", ...)` — a `TRAP_STUB_RET` on baremetal
+(`examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c:14980`)
+that halts the kernel. `Engine2D.detect_best_backend_viable()`
+(`src/lib/gc_async_mut/gpu/engine2d/engine.spl:1071-1086`) probes `metal`
+FIRST in `backend_default_priority_order()`, so this fires on literally
+every baremetal auto-resolution before any `[backend-resolve]` diagnostic
+for the first candidate can print — matching the static trace in this doc
+exactly (zero direct `call rt_process_run` sites in the ELF; the dispatch
+is indirect through `Engine2D.probe_backend` → `MetalBackend.create().init()`
+→ `is_macos()` → `detect_os()` → `_platform_shell_output_trim`). A prior
+2026-08-02 bug fix comment already on this exact function
+(`nogc_async_mut/env/platform.spl:22-29`, "probe_metal -> is_macos ->
+detect_os") independently corroborates this is the standing first-probe
+path for every `"auto"` resolution.
+
+Serial evidence, before fix (this session, rebuilt from a cleared
+`build/native_cache`):
+```
+[web-demo] rendering Simple Web pixels
+[TRAP] rt_process_run called on baremetal -- halting
+```
+Serial evidence, after fix (same clean-cache rebuild procedure):
+```
+[web-demo] rendering Simple Web pixels
+[backend-resolve] metal rejected: unavailable: Metal requires macOS
+[backend-resolve] cuda rejected: unavailable:
+[backend-resolve] rocm rejected: unavailable: ROCm/HIP runtime, device, or module unavailable
+FAULT @ 0x0000000049baccca
+... (21 total FAULT lines, then serial goes silent — see root cause (c) below)
+```
+The `[TRAP] rt_process_run ...` line is gone; the priority-order loop now
+runs metal/cuda/rocm to completion with real per-candidate rejection
+reasons before hitting the next (different) blocker.
+
+### Fix applied
+
+Added a no-shell existence guard, using the same no-shell-primitive idiom
+already established for `is_char_device` in
+`src/lib/nogc_sync_mut/io_runtime.spl` (comment there: "so callers ... don't
+need `/bin/sh` to be present (baremetal has none)"), immediately before the
+`uname -s` shell-out in both `detect_os()` copies (the real implementation
+in `nogc_async_mut/env/platform.spl`, and the parallel copy in
+`nogc_sync_mut/env/platform.spl` which has the same defect and is reachable
+from other callers):
+
+```
+if not rt_file_exists("/bin/sh"):
+    return "unknown"
+
+val uname = _platform_shell_output_trim("uname -s")
+...
+```
+
+`rt_file_exists` is a real no-shell primitive (`extern fn rt_file_exists`)
+that is either genuinely VFS-backed on targets that have a filesystem, or a
+`NOP1` stub returning nil/false on baremetal targets with no VFS
+(`examples/09_embedded/simple_os/arch/x86_64/boot/rt_extras.c:1809`,
+`#define NOP1(n) RuntimeValue n(RuntimeValue a) { ...; return NIL_VALUE; }`)
+— unlike `rt_process_run`, it never traps. Either way, on a target with no
+`/bin/sh`, the guard now returns `"unknown"` (routing every `is_macos()`
+caller to correctly treat the platform as non-macOS, which is what enables
+the existing GPU-backend priority-order fallback chain to keep working) —
+not a silent success fake-out, and not a TRAP. On every hosted target
+`/bin/sh` exists, so the guard is a no-op there and the real `uname -s`
+fallback (added 2026-08-02 to fix macOS detection when `OSTYPE` isn't
+exported) is fully preserved.
+
+## Root cause (c) — NOT LOCATED, next blocker (new, deeper)
+
+After (b)'s fix, the boot now progresses to a repeated `FAULT @ 0x...`
+sequence (21 occurrences, addresses in the `0x49bacXXX` range) immediately
+after `[backend-resolve] rocm rejected: ...`, then the serial log goes
+silent (`boot_ladder_observation=failure-after-qemu-quiescence`). Candidate
+hypothesis: the NEXT candidate in `backend_default_priority_order()` after
+metal/cuda/rocm (`qualcomm` or `vulkan`) triggers a genuine CPU fault (page
+fault / GP fault) during its probe — a different defect class from (a)/(b),
+not a clean `TRAP_STUB` halt. Not fixed in this pass; recommend the same
+instrumentation approach used for (b) (a serial print immediately before
+each `Engine2D.probe_backend(1, 1, name)` call in
+`detect_best_backend_viable()`'s loop, `engine.spl:1076`) to pin which
+candidate's probe raises the fault, then inspect that backend's `.init()`
+for an unguarded pointer/FFI/dlopen access on a baremetal target with no
+such device.
+
 ## Files changed
-- `src/lib/gc_async_mut/gpu/engine2d/engine.spl` (fix)
+- `src/lib/gc_async_mut/gpu/engine2d/engine.spl` (root cause (a) fix)
 - `src/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer.spl` (defense-in-depth, unreached in this trace)
+- `src/lib/nogc_async_mut/env/platform.spl` (root cause (b) fix — the real `detect_os()` implementation reached from `is_macos()`)
+- `src/lib/nogc_sync_mut/env/platform.spl` (same-defect sibling fix, reachable from other `detect_os()`/`is_macos()` callers outside the engine2d chain)
 
 ## Evidence commands
 ```
