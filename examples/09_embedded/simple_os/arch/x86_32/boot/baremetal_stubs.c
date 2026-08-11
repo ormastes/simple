@@ -466,6 +466,65 @@ RuntimeValue rt_string_eq(RuntimeValue a, RuntimeValue b)
     return ENCODE_INT(1);
 }
 
+/* Bug (2026-08-11): freestanding `text == ""` / `!= ""` against a RAW literal.
+ *
+ * rt_native_eq below content-compares two texts only when BOTH operands are
+ * IS_HEAP. On this lane a `.trim()` / `.lower()` result is ALWAYS a freshly
+ * malloc'd HEAP string (rt_string_slice / rt_string_to_lower), while a bare
+ * `""` literal is emitted as a RAW, untagged char* global
+ * (emit_bootstrap_str_const). The mixed heap-vs-raw pair therefore fell
+ * through to `return 0` -- NOT EQUAL -- unconditionally, so `x != ""` was
+ * TRUE even for a genuinely empty x, while `{x}` interpolated as empty and
+ * `.len() == 0` still worked. Observed live on an x86_64 OVMF SimpleOS boot as
+ *   [backend-resolve] override  rejected: Unknown backend:
+ * (note the double space). This is hosted bug #148 -- fixed there by
+ * rt_text_eq_any's tagged-or-raw normalization in runtime_native.c -- never
+ * having been ported to the freestanding lane, which has no rt_text_eq_any at
+ * all. (It did get the ORDERING counterpart rt_text_cmp_any, which is what
+ * made the gap easy to miss.)
+ *
+ * Deliberately conservative, because TAG_INT is 0x0 here and a raw pointer is
+ * therefore indistinguishable from a tagged small integer by tag bits alone
+ * (that ambiguity already caused an untagged-smallint dereference --
+ * doc/08_tracking/bug/native_text_eq_any_untagged_smallint_deref_2026-07-23.md).
+ * Two guards keep it safe: the raw path is entered ONLY when the OTHER operand
+ * is a proven HEAP_STRING, so a word is reinterpreted as char* only in a
+ * known-TEXT comparison; and a plausibility floor rejects small words. The
+ * scan is bounded by the heap string's own length and demands a NUL exactly at
+ * that offset, so it never reads past the literal.
+ *
+ * Selfcheck: src/runtime/test/rt_native_eq_heap_vs_raw_empty_literal_selfcheck.c
+ */
+static int rt_text_eq_heap_vs_raw(RuntimeString *s, RuntimeValue raw)
+{
+    const char *p;
+    uint32_t i;
+    if ((uint64_t)raw < 0x10000ULL) return 0;               /* nil / bool / small int */
+    if (((uint64_t)raw & TAG_MASK) == TAG_HEAP) return 0;   /* not a raw pointer */
+    p = (const char *)(uintptr_t)raw;
+    for (i = 0; i < s->len; i++) {
+        if (p[i] == '\0' || p[i] != s->data[i]) return 0;
+    }
+    return p[s->len] == '\0';
+}
+
+/* Mixed heap-string vs raw char* literal: compare by CONTENT. Returns -1 when
+ * neither side is a heap string (caller keeps its existing answer). */
+static int rt_native_eq_mixed_text(RuntimeValue a, RuntimeValue b)
+{
+    if (IS_HEAP(a)) {
+        HeapHeader *ha = (HeapHeader *)DECODE_PTR(a);
+        if (ha && ha->type == HEAP_STRING)
+            return rt_text_eq_heap_vs_raw((RuntimeString *)ha, b) ? 1 : 0;
+    }
+    if (IS_HEAP(b)) {
+        HeapHeader *hb = (HeapHeader *)DECODE_PTR(b);
+        if (hb && hb->type == HEAP_STRING)
+            return rt_text_eq_heap_vs_raw((RuntimeString *)hb, a) ? 1 : 0;
+    }
+    return -1;
+}
+
 RuntimeValue rt_native_eq(RuntimeValue a, RuntimeValue b)
 {
     if (a == b) return 1;
@@ -481,6 +540,11 @@ RuntimeValue rt_native_eq(RuntimeValue a, RuntimeValue b)
             }
             return 1;
         }
+        return 0;
+    }
+    {
+        int mixed = rt_native_eq_mixed_text(a, b);
+        if (mixed >= 0) return (RuntimeValue)mixed;
     }
     return 0;
 }

@@ -546,7 +546,6 @@ typedef struct {
     RuntimeValue *values;
 } RuntimeMap;
 
-RuntimeValue rt_array_remove(RuntimeValue arr, RuntimeValue idx);
 RuntimeValue rt_map_clone(RuntimeValue map);
 RuntimeValue rt_map_new(void);
 RuntimeValue rt_map_set(RuntimeValue map, RuntimeValue key, RuntimeValue value);
@@ -1278,50 +1277,6 @@ RuntimeValue rt_index_set(RuntimeValue v, RuntimeValue idx, RuntimeValue val)
     return 0;
 }
 
-/* rt_value_unbox_int — total, tag-aware `UnboxInt` decode.
- *
- * Both backends now emit a CALL to this instead of inlining the old
- * shift/select (see codegen/instr/mod.rs and cranelift_emitter.rs). Without a
- * real body here the freestanding link fabricates a weak `return 0` stub, which
- * silently zeroes every unboxed integer in the kernel.
- *
- *   - tagged native scalar (TAG_INT)          -> ARITHMETIC `>> 3`;
- *   - anything else (heap ptr, float, special)-> passed through VERBATIM, so
- *     `.unwrap()` / dict-get on a heap enum is not `>> 3` mangled.
- *
- * Booleans need no special case in this runtime: TRUE_VALUE / FALSE_VALUE are
- * ENCODE_INT(1) / ENCODE_INT(0), so they already decode to 1 / 0 via TAG_INT.
- * Safe on ANY input, including a raw untagged i64. */
-RuntimeValue rt_value_unbox_int(RuntimeValue v)
-{
-    if (IS_INT(v)) return (RuntimeValue)DECODE_INT(v);
-    return v;
-}
-
-/* rt_collection_remove — receiver-dispatched `.remove(k)`.
- *
- * It replaced `rt_dict_remove` as the target both backends emit for the
- * `remove` method name (the name-keyed table applied the dict version to arrays
- * too and silently no-opped `arr.remove(i)`). The key arrives TAGGED, so an int
- * index is `(i << 3) | TAG_INT`.
- *   - array -> removes at that index, shifts the tail down, returns the REMOVED
- *     ELEMENT (not the mutated array);
- *   - map   -> deletes the key, returns the removed VALUE, or nil on miss. */
-RuntimeValue rt_collection_remove(RuntimeValue collection, RuntimeValue key)
-{
-    if (!IS_HEAP(collection)) return NIL_VALUE;
-    HeapHeader *h = (HeapHeader *)DECODE_PTR(collection);
-    if (!h) return NIL_VALUE;
-    if (h->type == HEAP_ARRAY) {
-        if (!IS_INT(key)) return NIL_VALUE;
-        return rt_array_remove(collection, key);
-    }
-    if (h->type == HEAP_MAP) {
-        return rt_map_remove(collection, key);
-    }
-    return NIL_VALUE;
-}
-
 void rt_print_str(RuntimeValue str)
 {
     if (IS_HEAP(str)) {
@@ -1514,6 +1469,65 @@ RuntimeValue rt_fb_fill_rect32(RuntimeValue addr, RuntimeValue stride_pixels,
     return ENCODE_INT(0);
 }
 
+/* Bug (2026-08-11): freestanding `text == ""` / `!= ""` against a RAW literal.
+ *
+ * rt_native_eq below content-compares two texts only when BOTH operands are
+ * IS_HEAP. On this lane a `.trim()` / `.lower()` result is ALWAYS a freshly
+ * malloc'd HEAP string (rt_string_slice / rt_string_to_lower), while a bare
+ * `""` literal is emitted as a RAW, untagged char* global
+ * (emit_bootstrap_str_const). The mixed heap-vs-raw pair therefore fell
+ * through to `return 0` -- NOT EQUAL -- unconditionally, so `x != ""` was
+ * TRUE even for a genuinely empty x, while `{x}` interpolated as empty and
+ * `.len() == 0` still worked. Observed live on an x86_64 OVMF SimpleOS boot as
+ *   [backend-resolve] override  rejected: Unknown backend:
+ * (note the double space). This is hosted bug #148 -- fixed there by
+ * rt_text_eq_any's tagged-or-raw normalization in runtime_native.c -- never
+ * having been ported to the freestanding lane, which has no rt_text_eq_any at
+ * all. (It did get the ORDERING counterpart rt_text_cmp_any, which is what
+ * made the gap easy to miss.)
+ *
+ * Deliberately conservative, because TAG_INT is 0x0 here and a raw pointer is
+ * therefore indistinguishable from a tagged small integer by tag bits alone
+ * (that ambiguity already caused an untagged-smallint dereference --
+ * doc/08_tracking/bug/native_text_eq_any_untagged_smallint_deref_2026-07-23.md).
+ * Two guards keep it safe: the raw path is entered ONLY when the OTHER operand
+ * is a proven HEAP_STRING, so a word is reinterpreted as char* only in a
+ * known-TEXT comparison; and a plausibility floor rejects small words. The
+ * scan is bounded by the heap string's own length and demands a NUL exactly at
+ * that offset, so it never reads past the literal.
+ *
+ * Selfcheck: src/runtime/test/rt_native_eq_heap_vs_raw_empty_literal_selfcheck.c
+ */
+static int rt_text_eq_heap_vs_raw(RuntimeString *s, RuntimeValue raw)
+{
+    const char *p;
+    uint32_t i;
+    if ((uint64_t)raw < 0x10000ULL) return 0;               /* nil / bool / small int */
+    if (((uint64_t)raw & TAG_MASK) == TAG_HEAP) return 0;   /* not a raw pointer */
+    p = (const char *)(uintptr_t)raw;
+    for (i = 0; i < s->len; i++) {
+        if (p[i] == '\0' || p[i] != s->data[i]) return 0;
+    }
+    return p[s->len] == '\0';
+}
+
+/* Mixed heap-string vs raw char* literal: compare by CONTENT. Returns -1 when
+ * neither side is a heap string (caller keeps its existing answer). */
+static int rt_native_eq_mixed_text(RuntimeValue a, RuntimeValue b)
+{
+    if (IS_HEAP(a)) {
+        HeapHeader *ha = (HeapHeader *)DECODE_PTR(a);
+        if (ha && ha->type == HEAP_STRING)
+            return rt_text_eq_heap_vs_raw((RuntimeString *)ha, b) ? 1 : 0;
+    }
+    if (IS_HEAP(b)) {
+        HeapHeader *hb = (HeapHeader *)DECODE_PTR(b);
+        if (hb && hb->type == HEAP_STRING)
+            return rt_text_eq_heap_vs_raw((RuntimeString *)hb, a) ? 1 : 0;
+    }
+    return -1;
+}
+
 RuntimeValue rt_native_eq(RuntimeValue a, RuntimeValue b)
 {
     /* Fast path: bitwise identical (same int, same pointer, both nil) */
@@ -1531,6 +1545,11 @@ RuntimeValue rt_native_eq(RuntimeValue a, RuntimeValue b)
             }
             return 1;
         }
+        return 0;
+    }
+    {
+        int mixed = rt_native_eq_mixed_text(a, b);
+        if (mixed >= 0) return (RuntimeValue)mixed;
     }
     return 0;
 }

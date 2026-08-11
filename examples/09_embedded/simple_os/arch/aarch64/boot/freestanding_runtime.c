@@ -840,11 +840,54 @@ spl_i64 common__config_env__ConfigEnv_dot_len(spl_i64 value) {
     return 0;
 }
 
+/* Bug (2026-08-11): freestanding `text == ""` / `!= ""` against a RAW literal.
+ *
+ * A `.trim()` / `.lower()` result on this lane is a tagged heap string, but a
+ * bare `""` literal is emitted as a RAW, untagged char* global
+ * (emit_bootstrap_str_const), for which rt_as_string() returns NULL. The
+ * `!a || !b` guard below therefore answered NOT EQUAL unconditionally for
+ * every heap-vs-literal text comparison, so `x != ""` was TRUE even when x was
+ * genuinely empty -- while `{x}` interpolated as empty and `.len() == 0` still
+ * worked. Observed live on an x86_64 OVMF SimpleOS boot as
+ *   [backend-resolve] override  rejected: Unknown backend:
+ * (note the double space). Same defect as the baremetal_stubs.c lanes; this is
+ * hosted bug #148 (fixed there by rt_text_eq_any's tagged-or-raw normalization
+ * in runtime_native.c) never having been ported to the freestanding lanes.
+ *
+ * rt_string_char_code_at just below already uses exactly this raw-buffer
+ * fallback idiom, so the shape is the established one for this file.
+ *
+ * Conservative by construction: the raw side is only ever interpreted as a
+ * char* when the OTHER side is a proven RtString, so a non-text word is never
+ * dereferenced in a non-text comparison (cf.
+ * doc/08_tracking/bug/native_text_eq_any_untagged_smallint_deref_2026-07-23.md),
+ * and a plausibility floor rejects small words. The scan is bounded by the
+ * decoded string's length and demands a NUL exactly at that offset.
+ *
+ * Selfcheck: src/runtime/test/rt_native_eq_heap_vs_raw_empty_literal_selfcheck.c
+ */
+static spl_i64 rt_text_eq_str_vs_raw(RtString *s, spl_i64 raw) {
+    const spl_u8 *p;
+    spl_u64 i;
+    if ((spl_u64)raw < 0x10000u) return 0;   /* nil / bool / small int */
+    p = (const spl_u8 *)(spl_u64)raw;
+    for (i = 0; i < s->len; i = i + 1) {
+        if (p[i] == 0 || p[i] != (spl_u8)s->data[i]) return 0;
+    }
+    return p[s->len] == 0 ? 1 : 0;
+}
+
 spl_i64 rt_native_eq(spl_i64 lhs, spl_i64 rhs) {
     RtString *a = rt_as_string(lhs);
     RtString *b = rt_as_string(rhs);
     if (a || b) {
-        if (!a || !b || a->len != b->len) {
+        if (!a && b) {
+            return rt_text_eq_str_vs_raw(b, lhs);
+        }
+        if (a && !b) {
+            return rt_text_eq_str_vs_raw(a, rhs);
+        }
+        if (a->len != b->len) {
             return 0;
         }
         for (spl_u64 i = 0; i < a->len; i = i + 1) {
