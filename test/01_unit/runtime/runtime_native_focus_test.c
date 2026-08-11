@@ -98,8 +98,16 @@ int main(void) {
         assert((uint64_t)rt_value_as_u64(rt_enum_payload(wrapped)) == u64_boundaries[i]);
         assert(rt_native_eq(boxed, equal_box) == 1);
     }
-    assert(rt_native_eq(rt_value_u64(-1), rt_value_int(-1)) == 1);
+    assert(rt_native_eq(rt_value_u64(-1), rt_value_int(-1)) == 0);
+    assert(rt_native_eq(rt_value_u64(7), rt_value_int(7)) == 1);
     assert(rt_value_as_int(rt_value_int(-1)) == -1);
+
+    int64_t uint_dict = rt_dict_new(8);
+    assert(rt_dict_set(uint_dict, rt_value_u64(0), rt_value_int(10)) == 1);
+    assert(rt_dict_set(uint_dict, rt_value_u64(INT64_C(1) << 61), rt_value_int(20)) == 1);
+    assert(rt_dict_len(uint_dict) == 2);
+    assert(rt_value_as_int(rt_dict_get(uint_dict, rt_value_u64(0))) == 10);
+    assert(rt_value_as_int(rt_dict_get(uint_dict, rt_value_u64(INT64_C(1) << 61))) == 20);
 
     int stdout_pipe[2];
     assert(pipe(stdout_pipe) == 0);

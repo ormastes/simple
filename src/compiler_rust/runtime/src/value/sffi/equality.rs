@@ -90,7 +90,11 @@ fn value_hash_inner(v: RuntimeValue, depth: u32) -> u64 {
         return fnv1a_bits(d.to_bits());
     }
     if let Some(value) = v.as_heap_u64() {
-        return fnv1a_bits(RuntimeValue::from_int(value as i64).to_raw());
+        return if value <= ((1u64 << 60) - 1) {
+            fnv1a_bits(RuntimeValue::from_int(value as i64).to_raw())
+        } else {
+            fnv1a_bits(value ^ 0x5549_4e54_5f55_3634)
+        };
     }
     if v.tag() != tags::TAG_HEAP {
         return fnv1a_bits(v.to_raw());
@@ -183,12 +187,13 @@ fn value_eq_inner(a: RuntimeValue, b: RuntimeValue, visited: &mut Vec<(usize, us
         return a.is_float() && b.is_float() && a.as_float() == b.as_float();
     }
     if let Some(left) = a.as_heap_u64() {
-        return b
-            .as_heap_u64()
-            .map_or_else(|| b.is_int() && left as i64 == b.as_int(), |right| left == right);
+        return b.as_heap_u64().map_or_else(
+            || b.is_int() && b.as_int() >= 0 && left == b.as_int() as u64,
+            |right| left == right,
+        );
     }
     if let Some(right) = b.as_heap_u64() {
-        return a.is_int() && a.as_int() == right as i64;
+        return a.is_int() && a.as_int() >= 0 && a.as_int() as u64 == right;
     }
 
     match (a.tag(), b.tag()) {
@@ -399,7 +404,7 @@ unsafe fn array_eq_contents(
 }
 
 fn generic_int_eq(value: RuntimeValue, expected: i64) -> bool {
-    (value.is_int() && value.as_int() == expected)
+    (value.is_int() && expected >= 0 && value.as_int() >= 0 && value.as_int() == expected)
         || value.as_heap_u64().is_some_and(|actual| actual == expected as u64)
 }
 
