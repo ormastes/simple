@@ -1,0 +1,162 @@
+# Board Vulkan — Imagination IMG BXE-4-32 (StarFive JH7110 / VisionFive 2)
+# submission encoder. Lane E2, stage 3 ("submit") of the per-lane stage
+# ladder in doc/03_plan/os/vulkan/board_vulkan_parallel_soc_lanes_2026-08-10.md.
+#
+# === Architectural finding (read this before touching anything below) ===
+#
+# PowerVR Rogue/BXE is FIRMWARE-MEDIATED, not a freely-authored GPU packet
+# stream like Adreno's CP packets or Intel's MI_*/3DSTATE_* batch buffer.
+# The GPU never executes userspace-authored opcodes directly: the kernel
+# driver (`drivers/gpu/drm/imagination`, upstreamed into Linux; Mesa's
+# `powervr`/`pvr` driver is the userspace counterpart) hands work to an
+# on-die firmware processor (the "RGX firmware", running on a META or RISC-V
+# microcontroller depending on core revision) via a small, KERNEL-DEFINED
+# ioctl surface:
+#   - DRM_IOCTL_PVR_CREATE_CONTEXT / DRM_IOCTL_PVR_CREATE_HWRT_DATASET
+#   - DRM_IOCTL_PVR_SUBMIT_JOBS — one or more `struct drm_pvr_job` entries,
+#     each naming a job TYPE (geometry / fragment / compute / transfer), a
+#     context handle, sync-in/sync-out fence operations, and a pointer+length
+#     to a userspace-built "control stream" (CCB — circular command buffer)
+#     that the FIRMWARE, not the GPU core, interprets.
+#
+# The ioctl envelope (job type, context/HWRT handles, sync-op fences,
+# stream pointer+length) is publicly documented — it is the Linux UAPI
+# header. The CONTROL-STREAM CONTENTS the firmware consumes are a
+# vendor-internal firmware-interface format (`pvr_rogue_fwif*` in the
+# kernel driver) that is versioned per firmware release and not a stable,
+# freely-encodable ISA the way Adreno CP packets or Intel batch-buffer
+# opcodes are. This repo has no verified, byte-exact copy of that kernel
+# UAPI struct's field OFFSETS in front of it right now (no local kernel
+# header, no reachable network fetch route wired into this task), so this
+# encoder does NOT claim byte-exact conformance to the real
+# `struct drm_pvr_job` layout. What IS honestly encodable, and is encoded
+# below: the FIELD SET every PowerVR submission structurally requires
+# (job type, context handle, HWRT dataset handle, sync-in/out fence ops,
+# stream length) with a self-consistent, testable layout — deterministic
+# field offsets, a size field that provably equals the encoded payload
+# length, and alignment/range validation that rejects malformed input.
+# The firmware-side CCB payload itself is treated as an OPAQUE blob: this
+# encoder carries its length and a single "opaque_firmware_blob" field and
+# never pretends to decompose or fabricate its internal encoding.
+#
+# This is why `submit_implemented` on `img_bxe_board_profile()` in
+# `backend_img_bxe.spl` stays FALSE: stage 3 requires a `byte_exact`
+# comparison against Mesa `powervr`'s real `vulkan.submit.command_stream@1`
+# capture, and this host has neither IMG BXE silicon nor a way to produce
+# that real capture (see soc_profile.spl board_profile_false_claim, which
+# also still blocks on spirv_implemented=false — stage 2 is untouched by
+# this lane). Filed: see the bug doc committed alongside this file.
+#
+# Reuses the generic packet schema from `boundary_cmdstream_canonicalize.spl`
+# (CmdPacket/CmdField, lane R4-owned, READ-ONLY here) so a future real
+# capture can be compared with the same comparator every other lane uses.
+
+use os.drivers.gpu.board_vulkan.boundary_cmdstream_canonicalize.{CmdField, CmdPacket, cmd_field, cmd_packet}
+
+# One fence operation attached to a job: wait-on or signal, by sync-object
+# handle plus the point value (PowerVR sync objects are timeline-style,
+# like Adreno/Intel's own fence primitives — this shape is the one thing
+# every firmware-mediated GPU submission model needs regardless of vendor).
+pub struct ImgBxeSyncOp:
+    handle: i64
+    flags: i64
+    value: i64
+
+pub fn img_bxe_sync_op(handle: i64, flags: i64, value: i64) -> ImgBxeSyncOp:
+    ImgBxeSyncOp(handle: handle, flags: flags, value: value)
+
+# One submission job descriptor. `stream_len` is the byte length of the
+# opaque firmware control-stream payload this job carries; the payload
+# bytes themselves are never modeled here (see the architectural note
+# above) — only their length, which the envelope must carry correctly.
+pub struct ImgBxeJobDesc:
+    job_type: text
+    context_handle: i64
+    hwrt_data_set_handle: i64
+    stream_len: i64
+    sync_ops: [ImgBxeSyncOp]
+
+pub fn img_bxe_job_desc(job_type: text, context_handle: i64, hwrt_data_set_handle: i64, stream_len: i64, sync_ops: [ImgBxeSyncOp]) -> ImgBxeJobDesc:
+    ImgBxeJobDesc(job_type: job_type, context_handle: context_handle, hwrt_data_set_handle: hwrt_data_set_handle, stream_len: stream_len, sync_ops: sync_ops)
+
+pub fn img_bxe_known_job_types() -> [text]:
+    ["geometry", "fragment", "compute", "transfer"]
+
+fn _img_bxe_list_contains(items: [text], value: text) -> bool:
+    var found = false
+    for item in items:
+        if item == value:
+            found = true
+    found
+
+# === Layout constants ===
+#
+# Fixed-header field count for the envelope, before any sync ops: job_type,
+# flags(reserved-zero), context_handle, hwrt_data_set_handle, stream_len.
+# Each header field is one dword (4 bytes); every sync op is 3 dwords
+# (handle, flags, value) per PowerVR's timeline-sync-object shape. This is
+# this encoder's OWN internal layout — see the note above on why it is not
+# asserted to match the real kernel struct byte-for-byte.
+pub val IMG_BXE_HEADER_DWORDS: i64 = 5
+pub val IMG_BXE_SYNC_OP_DWORDS: i64 = 3
+pub val IMG_BXE_DWORD_BYTES: i64 = 4
+
+pub fn img_bxe_job_field_offset(field_index: i64) -> i64:
+    field_index * IMG_BXE_DWORD_BYTES
+
+pub fn img_bxe_sync_op_offset(header_dwords: i64, sync_index: i64) -> i64:
+    (header_dwords + sync_index * IMG_BXE_SYNC_OP_DWORDS) * IMG_BXE_DWORD_BYTES
+
+# Total encoded payload size in bytes: header dwords + (sync ops * 3 dwords),
+# all dword-aligned by construction (every field is exactly one dword).
+pub fn img_bxe_job_payload_size(job: ImgBxeJobDesc) -> i64:
+    (IMG_BXE_HEADER_DWORDS + job.sync_ops.len() * IMG_BXE_SYNC_OP_DWORDS) * IMG_BXE_DWORD_BYTES
+
+# Validation: reject anything a real submission could never carry.
+# - job_type must be one of the known PowerVR job classes
+# - stream_len must be non-negative
+# - handles must be non-negative (kernel handles are unsigned identifiers)
+# - the payload size must itself be dword-aligned (true by construction,
+#   checked anyway so a future layout change can't silently break it)
+pub fn img_bxe_job_is_valid(job: ImgBxeJobDesc) -> bool:
+    if not _img_bxe_list_contains(img_bxe_known_job_types(), job.job_type):
+        false
+    elif job.stream_len < 0:
+        false
+    elif job.context_handle < 0 or job.hwrt_data_set_handle < 0:
+        false
+    elif img_bxe_job_payload_size(job) % IMG_BXE_DWORD_BYTES != 0:
+        false
+    else:
+        var ok = true
+        for op in job.sync_ops:
+            if op.handle < 0:
+                ok = false
+        ok
+
+# Encode one job into the shared CmdPacket schema. `length` is the dword
+# count INCLUDING the implicit header dword, matching the convention
+# `boundary_cmdstream_canonicalize.spl` already documents for the Intel
+# lane — this is the size field the spec proves equals the real payload.
+pub fn img_bxe_encode_job(job: ImgBxeJobDesc) -> CmdPacket:
+    var fields: [CmdField] = []
+    fields.push(cmd_field("job_type", job.job_type))
+    fields.push(cmd_field("context_handle", job.context_handle.to_text()))
+    fields.push(cmd_field("hwrt_data_set_handle", job.hwrt_data_set_handle.to_text()))
+    fields.push(cmd_field("stream_len", job.stream_len.to_text()))
+    fields.push(cmd_field("opaque_firmware_blob", "<" + job.stream_len.to_text() + "-byte-firmware-ccb-not-decoded>"))
+    var i: i64 = 0
+    while i < job.sync_ops.len():
+        val op = job.sync_ops[i]
+        fields.push(cmd_field("sync_handle", op.handle.to_text()))
+        fields.push(cmd_field("sync_flags", op.flags.to_text()))
+        fields.push(cmd_field("sync_value", op.value.to_text()))
+        i = i + 1
+    val dwords = img_bxe_job_payload_size(job) / IMG_BXE_DWORD_BYTES
+    cmd_packet("PVR_SUBMIT_JOB:" + job.job_type, dwords, fields)
+
+pub fn img_bxe_encode_jobs(jobs: [ImgBxeJobDesc]) -> [CmdPacket]:
+    var out: [CmdPacket] = []
+    for job in jobs:
+        out.push(img_bxe_encode_job(job))
+    out

@@ -1,0 +1,180 @@
+# Board Vulkan — Intel Gen12 / Xe-LP command-stream ENCODER.
+#
+# Lane E3 (stage 3, "submit"). Counterpart: Mesa `anv`.
+#
+# This is the first real driver code under board_vulkan/: everything else in
+# this directory (soc_profile.spl, backend_intel_gen12.spl,
+# boundary_cmdstream_canonicalize.spl) is schema, profile, or comparator —
+# none of it emits an actual Gen12 dword. This file does.
+#
+# SCOPE: pure encoding (deterministic computation), not execution. This host
+# has no Intel GPU (doc/08_tracking/bug/cmdstream_boundary_no_intel_gpu_on_
+# capture_host_2026-08-11.md) so a real submit/readback cannot happen here —
+# that is a hardware-absence gap for stage 4, not a reason to withhold the
+# encoder. Encoding what the hardware would consume is deterministic and
+# host-independent.
+#
+# FACT SOURCES (each field below is annotated with confidence):
+#
+#   CONFIDENT — from Intel's public command-stream architecture, stable
+#   across generations and widely cross-checked against Mesa's `genxml`
+#   headers (`src/intel/genxml/gen12.xml` upstream) and the Intel PRM
+#   "Memory Interface Instructions" / "Command Structures" volumes:
+#     - Command Type occupies bits [31:29] of the first dword of every
+#       instruction. MI (Memory Interface) commands use Command Type 0x0.
+#       GFXPIPE (3DSTATE_*/3DPRIMITIVE-class) commands use Command Type 0x3.
+#     - MI opcode occupies bits [28:23] (6 bits) for fixed-length MI
+#       commands such as MI_NOOP (opcode 0x00) and MI_BATCH_BUFFER_END
+#       (opcode 0x0A). Both are single-dword, fixed-length commands with NO
+#       DWord Length field at all — the header dword IS the whole command.
+#     - For length-carrying instructions (GFXPIPE 3DSTATE_*/3DPRIMITIVE and
+#       variable-length MI commands alike), the DWord Length sub-field
+#       always encodes (total_dwords_in_packet - 2), an Intel-wide
+#       convention: "Length" in the PRM is defined as
+#       "the length of the command in DWords minus 2, since 2 DWords are
+#       always assumed to be part of the header." Getting this off-by-two
+#       wrong (e.g. writing raw dword count instead of count-minus-2) is a
+#       classic real defect, so it is isolated in its own tested function
+#       (`dword_length_field`) rather than inlined anywhere.
+#     - Command-stream dwords are little-endian on x86-64 (Gen12/Xe-LP is
+#       x86-64-hosted only, via i915 DRM), matching the host CPU and PCIe
+#       memory-mapped ring-buffer convention.
+#
+#   UNCERTAIN — marked inline, not guessed:
+#     - The exact bit width/position split of GFXPIPE's Pipeline / Opcode /
+#       Sub-Opcode sub-fields (bits [28:16] as a whole) varies by which
+#       3DSTATE_* command is being encoded and needs confirming per-opcode
+#       against `gen12.xml` before this encoder is trusted for a SPECIFIC
+#       3DSTATE_* instruction beyond the generic placeholder used here.
+
+pub struct GenDword:
+    value: i64
+
+pub fn gen_dword(value: i64) -> GenDword:
+    GenDword(value: value)
+
+# === Bit-field helpers (pure arithmetic, generation-independent) ===
+
+fn _mask(bits: i64) -> i64:
+    (1 << bits) - 1
+
+fn _field(value: i64, shift: i64, bits: i64) -> i64:
+    (value & _mask(bits)) << shift
+
+fn _extract(dword: i64, shift: i64, bits: i64) -> i64:
+    (dword >> shift) & _mask(bits)
+
+# === DWord Length convention (CONFIDENT, Intel-wide, off-by-two-prone) ===
+#
+# `total_dwords` is the FULL packet size including its own header dword(s).
+# The field written into the header is always total_dwords - 2.
+pub fn dword_length_field(total_dwords: i64) -> i64:
+    total_dwords - 2
+
+# Inverse, used by the round-trip spec to prove the arithmetic is not
+# accidentally one-sided.
+pub fn total_dwords_from_length_field(length_field: i64) -> i64:
+    length_field + 2
+
+# An 8-bit DWord Length field (the common width for GFXPIPE 3DSTATE_*
+# commands) can hold 0..255, i.e. total_dwords in [2, 257].
+pub fn dword_length_field_fits_u8(length_field: i64) -> bool:
+    length_field >= 0 and length_field <= 255
+
+# === MI (Memory Interface) command type (CONFIDENT) ===
+
+pub val MI_COMMAND_TYPE: i64 = 0x0
+pub val MI_OPCODE_NOOP: i64 = 0x00
+pub val MI_OPCODE_BATCH_BUFFER_END: i64 = 0x0A
+
+# Fixed-length single-dword MI command header: no DWord Length field exists
+# on these two opcodes — the header dword is the entire command.
+pub fn mi_fixed_header(opcode: i64) -> i64:
+    _field(MI_COMMAND_TYPE, 29, 3) + _field(opcode, 23, 6)
+
+pub fn encode_mi_noop() -> [i64]:
+    [mi_fixed_header(MI_OPCODE_NOOP)]
+
+pub fn encode_mi_batch_buffer_end() -> [i64]:
+    [mi_fixed_header(MI_OPCODE_BATCH_BUFFER_END)]
+
+pub fn decode_mi_command_type(dword: i64) -> i64:
+    _extract(dword, 29, 3)
+
+pub fn decode_mi_opcode(dword: i64) -> i64:
+    _extract(dword, 23, 6)
+
+# === GFXPIPE (3DSTATE_*/3DPRIMITIVE-class) state packet (CONFIDENT type,
+# UNCERTAIN sub-field split) ===
+
+pub val GFXPIPE_COMMAND_TYPE: i64 = 0x3
+
+# UNCERTAIN: the split of bits [28:16] into Pipeline/Opcode/Sub-Opcode is
+# opcode-specific in the real PRM/genxml and is NOT re-derived here — this
+# function only places a caller-supplied combined "pipeline_opcode" value in
+# that span and writes a CONFIDENT DWord Length field in bits [7:0]. A caller
+# wiring a SPECIFIC 3DSTATE_* instruction must confirm the exact sub-split
+# for that opcode against gen12.xml before relying on pipeline_opcode's
+# internal bit layout; the length-field placement and arithmetic below do
+# not depend on that confirmation.
+pub fn gfxpipe_header(pipeline_opcode: i64, total_dwords: i64) -> i64:
+    _field(GFXPIPE_COMMAND_TYPE, 29, 3) +
+        _field(pipeline_opcode, 16, 13) +
+        _field(dword_length_field(total_dwords), 0, 8)
+
+pub fn decode_gfxpipe_command_type(dword: i64) -> i64:
+    _extract(dword, 29, 3)
+
+pub fn decode_gfxpipe_length_field(dword: i64) -> i64:
+    _extract(dword, 0, 8)
+
+# Minimal state packet: header dword + `operand_dwords` payload dwords.
+pub fn encode_gfxpipe_state_packet(pipeline_opcode: i64, operand_dwords: [i64]) -> [i64]:
+    val total_dwords = operand_dwords.len() + 1
+    var out: [i64] = [gfxpipe_header(pipeline_opcode, total_dwords)]
+    for d in operand_dwords:
+        out.push(d)
+    out
+
+# === Little-endian dword -> byte emission (CONFIDENT) ===
+
+pub fn dword_to_le_bytes(dword: i64) -> [i64]:
+    [
+        dword & 0xFF,
+        (dword >> 8) & 0xFF,
+        (dword >> 16) & 0xFF,
+        (dword >> 24) & 0xFF
+    ]
+
+pub fn dwords_to_le_bytes(dwords: [i64]) -> [i64]:
+    var out: [i64] = []
+    for d in dwords:
+        for b in dword_to_le_bytes(d):
+            out.push(b)
+    out
+
+# === Minimal batch: a small valid Gen12 sequence ending in
+# MI_BATCH_BUFFER_END (small and correct over broad and speculative). ===
+#
+# One placeholder GFXPIPE state packet (2 payload dwords, pipeline_opcode 0 —
+# a real 3DSTATE_* opcode value is the UNCERTAIN piece noted above) sandwiched
+# between MI_NOOP and MI_BATCH_BUFFER_END. This exists to exercise the
+# header/length machinery end to end, not to claim a specific real 3DSTATE_*
+# instruction.
+pub fn encode_minimal_gen12_batch() -> [i64]:
+    var out: [i64] = []
+    for d in encode_mi_noop():
+        out.push(d)
+    for d in encode_gfxpipe_state_packet(0, [0x0, 0x0]):
+        out.push(d)
+    for d in encode_mi_batch_buffer_end():
+        out.push(d)
+    out
+
+pub fn batch_ends_with_mi_batch_buffer_end(dwords: [i64]) -> bool:
+    if dwords.len() == 0:
+        false
+    else:
+        val last = dwords[dwords.len() - 1]
+        decode_mi_command_type(last) == MI_COMMAND_TYPE and
+            decode_mi_opcode(last) == MI_OPCODE_BATCH_BUFFER_END
