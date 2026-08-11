@@ -414,6 +414,51 @@ Guide: [`doc/07_guide/infra/sspec_typed_evidence.md`](../../doc/07_guide/infra/s
 design: [`doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md`](../../doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md);
 plan: [`doc/03_plan/infra/sspec/modern_sspec_parallel_agents_plan.md`](../../doc/03_plan/infra/sspec/modern_sspec_parallel_agents_plan.md).
 
+## Writing a Simple Counterparts Compare Test
+
+The **Simple Counterparts Compare Test** program runs the Simple implementation
+and an independent open-source counterpart over the same input at a frozen
+boundary (`<domain>.<mdsoc-layer>.<stage>@<schema-version>`), then compares
+under a declared relation. Before writing a new differential spec, check
+`doc/00_llm_process/feature_expert/counterpart_conformance/skill.md` — there
+is exactly one such pipeline, do not start a second.
+
+Import surface:
+
+```simple
+use std.spec.evidence.counterpart.model            # frozen contracts (common)
+use std.spec.evidence.counterpart.evidence_projection
+# registries / converter graph / relation engine / matrix / artifact store:
+# src/lib/nogc_sync_mut/spec/evidence/counterpart/
+```
+
+**A provider that cannot run reports `ProviderStatus.unavailable` and the run
+is REJECTED — never reported as a pass.** Do not fabricate the expected
+counterpart output from the candidate's own output, and do not substitute a
+hand-typed literal for what the counterpart tool actually printed.
+
+Two harness facts that cost lanes hours:
+
+- **`executed=0` in a verdict is a parse error; `timeout=1` is a harness
+  budget kill.** Neither is evidence for or against the thing under test —
+  don't record either as a result.
+- **Use `--no-session-daemon` for real counterpart-tool invocations.**
+  Measured ~38x faster on a minimal spec (0.68s vs 26.08s default) because the
+  session daemon runs a full-tree lint pass twice per run; it also caps a
+  worker at 120s, which a real subprocess call (e.g. `vulkaninfo`, `glslang`)
+  can exceed. Pair with `--timeout <secs>` when a real tool call needs more
+  room:
+
+```bash
+bin/simple test test/01_unit/infra/counterpart/<spec>.spl --no-session-daemon --timeout 60
+```
+
+Every lane must ship a sabotage spec that turns green to red — "the adapter
+ran" is not an acceptance criterion. Add a new provider or plan as a
+**descriptor**, not by editing central registry files. See also Boundary,
+Counterpart, Independence Group, Relation, Execution Receipt, GPU Gate,
+Vacuity, and Conversion Loss in `doc/glossary.md`.
+
 ## Declare the entry layer
 
 A compiler-layer spec (parser, HIR, MIR, borrow-check, codegen, …) sometimes

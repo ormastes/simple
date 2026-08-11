@@ -2,13 +2,19 @@
 
 ## Role
 
-Own process knowledge for the Counterpart Conformance Infrastructure: the single
-differential/oracle pipeline under Modern SSpec that compares Simple against upstream
+Own process knowledge for the **Simple Counterparts Compare Test** — the program name for
+the Counterpart Conformance Infrastructure: the single differential/oracle pipeline under
+Modern SSpec that runs Simple and an independent open-source counterpart over the SAME
+input at a frozen boundary (`<domain>.<mdsoc-layer>.<stage>@<schema-version>`, e.g.
+`vulkan.shader.spirv_binary@1`) and compares under a declared relation, against upstream
 reference implementations (Chrome, HarfBuzz, SwiftShader/Venus, OpenSSL/Mbed TLS, zlib/zstd)
 and against its own CPU/GPU execution modes.
 
 There is exactly one such pipeline. If you are about to add a second differential framework,
-stop — absorb it into this one instead.
+stop — absorb it into this one instead. Glossary terms for this program (Boundary,
+Independence Group, Relation, Execution Receipt, GPU Gate, Vacuity, Conversion Loss):
+`doc/glossary.md`. Writing a new counterpart spec: `.claude/skills/spipe.md` §
+"Writing a Simple Counterparts Compare Test".
 
 ## Pipeline Links
 
