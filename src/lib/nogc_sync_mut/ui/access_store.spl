@@ -9,6 +9,7 @@ use std.database.sql.connection.{Database}
 use std.database.sql.types.{DbValue, DbRow, DbError}
 use std.nogc_sync_mut.io.string_helpers.{text_hash_native}
 use common.ui.access.{UiAccessNode, UiAccessProp, UiAccessSurface, UiAccessEvent, UiAccessSnapshot}
+use nogc_sync_mut.ui.session.{UISession, UiAccessPersistence}
 use std.base_encoding.base64.{base64_encode, base64_decode}
 use std.env.variables.{env_get}
 use std.sffi.io.{dir_create_all}
@@ -16,6 +17,48 @@ use common.string_builder.{StringBuilder}
 
 class UiAccessStore:
     db: Database
+
+fn _ui_access_store_error_text(error: DbError) -> text:
+    error.message()
+
+fn _ui_access_insert(store: UiAccessStore, event: UiAccessEvent) -> Result<(), text>:
+    match store.insert_event(event):
+        Ok(_): Ok(())
+        Err(error): Err(_ui_access_store_error_text(error))
+
+fn _ui_access_persist_snapshot(store: UiAccessStore, snapshot: UiAccessSnapshot) -> Result<(), text>:
+    match store.persist_snapshot(snapshot):
+        Ok(_): Ok(())
+        Err(error): Err(_ui_access_store_error_text(error))
+
+fn _ui_access_list_events(store: UiAccessStore, surface_id: text, count: i64) -> Result<[UiAccessEvent], text>:
+    match store.list_events(surface_id, count):
+        Ok(events): Ok(events)
+        Err(error): Err(_ui_access_store_error_text(error))
+
+fn _ui_access_query_nodes(store: UiAccessStore, surface_id: text, kind: text, text_query: text, limit: i64) -> Result<[UiAccessNode], text>:
+    match store.query_nodes(surface_id, kind, text_query, limit):
+        Ok(nodes): Ok(nodes)
+        Err(error): Err(_ui_access_store_error_text(error))
+
+fn ui_access_persistence(store: UiAccessStore) -> UiAccessPersistence:
+    """Adapt the SQLite store to UISession's storage-independent port.
+
+    UiAccessStore is a class identity/reference. Each callback captures that
+    handle, so all operations retain the same Database connection rather than
+    copying database state into four independent closures.
+    """
+    UiAccessPersistence(
+        insert_event_fn: \event: _ui_access_insert(store, event),
+        persist_snapshot_fn: \snapshot: _ui_access_persist_snapshot(store, snapshot),
+        list_events_fn: \surface_id, count: _ui_access_list_events(store, surface_id, count),
+        query_nodes_fn: \surface_id, kind, text_query, limit: _ui_access_query_nodes(store, surface_id, kind, text_query, limit)
+    )
+
+impl UISession:
+    me attach_access_store(store: UiAccessStore):
+        """Attach the SQLite compatibility adapter and seed its snapshot."""
+        self.attach_access_persistence(ui_access_persistence(store))
 
 impl UiAccessStore:
     static fn open(path: text) -> Result<UiAccessStore, DbError>:

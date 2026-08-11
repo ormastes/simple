@@ -1,0 +1,49 @@
+use std.spec.{describe, it, expect}
+use common.ui.builder.{button, build_tree}
+use common.ui.widget.{UIEvent}
+use common.ui.access.{UiAccessEvent, UiAccessNode, UiAccessSnapshot}
+use nogc_sync_mut.ui.session.{UISession, UiAccessPersistence}
+
+class AccessPersistenceProbe:
+    snapshot_count: i64
+    event_count: i64
+
+impl AccessPersistenceProbe:
+    me persist_snapshot(snapshot: UiAccessSnapshot) -> Result<(), text>:
+        self.snapshot_count = self.snapshot_count + 1
+        Ok(())
+
+    me insert_event(event: UiAccessEvent) -> Result<(), text>:
+        self.event_count = self.event_count + 1
+        Ok(())
+
+    fn list_events(surface_id: text, count: i64) -> Result<[UiAccessEvent], text>:
+        Ok([])
+
+    fn query_nodes(surface_id: text, kind: text, query: text, limit: i64) -> Result<[UiAccessNode], text>:
+        Ok([])
+
+fn access_persistence_probe_port(probe: AccessPersistenceProbe) -> UiAccessPersistence:
+    UiAccessPersistence(
+        insert_event_fn: \event: probe.insert_event(event),
+        persist_snapshot_fn: \snapshot: probe.persist_snapshot(snapshot),
+        list_events_fn: \surface_id, count: probe.list_events(surface_id, count),
+        query_nodes_fn: \surface_id, kind, query, limit: probe.query_nodes(surface_id, kind, query, limit)
+    )
+
+describe "UISession access persistence port":
+    it "seeds and updates an attached storage-independent persistence port":
+        var probe = AccessPersistenceProbe(snapshot_count: 0, event_count: 0)
+        var session = UISession.new(build_tree(button("save", "Save", "save")))
+        session.attach_access_persistence(access_persistence_probe_port(probe))
+        expect(probe.snapshot_count).to_equal(1)
+
+        session.dispatch(UIEvent.Action(name: "save"))
+        expect(probe.event_count).to_equal(1)
+        expect(probe.snapshot_count).to_equal(2)
+        expect(session.access_persisted_events("main", 10)?.len()).to_equal(0)
+        expect(session.access_search_nodes("main", "button", "save", 10)?.len()).to_equal(0)
+
+    it "keeps persistence optional for the core session":
+        val session = UISession.new(build_tree(button("save", "Save", "save")))
+        expect(session.access_persisted_events("main", 10).err().unwrap()).to_equal("no access store attached")

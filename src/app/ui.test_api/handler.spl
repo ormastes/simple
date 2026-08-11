@@ -28,6 +28,7 @@ use common.ui.draw_ir_sdn.{sdn_to_draw_ir}
 use common.ui.draw_ir_diff.{draw_ir_diff_compositions, draw_ir_diff_report_to_json}
 use os.services.llm.ui_access_resolver.{ui_access_resolve_adapter, ui_access_resolve_visual_probe}
 use app.ui.test_api.json.{element_to_json, elements_to_json, extract_json_field, escape_json, state_to_json}
+use std.nogc_sync_mut.io.time_ops.{time_now_micros}
 
 val PROTOCOL_VERSION = 1
 val DRAW_IR_PROTOCOL_VERSION = 2
@@ -44,8 +45,10 @@ struct UiTestActionResult:
     static fn rejected(code: text) -> UiTestActionResult:
         UiTestActionResult(ok: false, code: code)
 
-extern fn rt_time_ms() -> u64
 extern fn rt_sleep_ms(ms: i64)
+
+fn _ui_test_monotonic_ms() -> i64:
+    time_now_micros() / 1_000
 
 # =========================================================================
 # Main Handler
@@ -451,16 +454,16 @@ fn _handle_ui_ensure(surface_id: text, canonical_id: text, kind: text, text_quer
     if poll_str != "":
         poll_ms = poll_str.to_i64()
     val focused = _is_truthy(focused_only)
-    val started = rt_time_ms()
+    val started = _ui_test_monotonic_ms()
     var snapshot = _build_access_snapshot(state, session)
     var result = _ui_access_ensure_response_json(snapshot, surface_id, canonical_id, kind, text_query, focused, limit, expectation, expected_value, 0)
-    while session != nil and timeout_ms > 0 and not result.contains("\"satisfied\":true") and (rt_time_ms() - started) < timeout_ms:
+    while session != nil and timeout_ms > 0 and not result.contains("\"satisfied\":true") and (_ui_test_monotonic_ms() - started) < timeout_ms:
         if poll_ms > 0:
             rt_sleep_ms(poll_ms)
         snapshot = _build_access_snapshot(state, session)
         result = _ui_access_ensure_response_json(snapshot, surface_id, canonical_id, kind, text_query, focused, limit, expectation, expected_value, 0)
-    val elapsed_ms = rt_time_ms() - started
-    val json = _ui_access_ensure_response_json(snapshot, surface_id, canonical_id, kind, text_query, focused, limit, expectation, expected_value, elapsed_ms.to_i64())
+    val elapsed_ms = _ui_test_monotonic_ms() - started
+    val json = _ui_access_ensure_response_json(snapshot, surface_id, canonical_id, kind, text_query, focused, limit, expectation, expected_value, elapsed_ms)
     return (200, "application/json", json)
 
 fn _handle_ui_observe(surface_id: text, canonical_id: text, kind: text, text_query: text, focused_only: text, state: UIState, session: UISession?) -> (i32, text, text):

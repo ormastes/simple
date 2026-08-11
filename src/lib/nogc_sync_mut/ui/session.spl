@@ -16,7 +16,6 @@ use common.ui.viewport.{Viewport, default_viewport}
 use common.ui.changelog.{ChangeLog, default_changelog}
 use common.ui.lifecycle.{LifecycleRegistry, LifecycleEvent, new_lifecycle_registry, emit_lifecycle_events, describe_lifecycle_event}
 use common.ui.access.{UiAccessSnapshot, UiAccessNode, UiAccessEvent, ui_access_record_action, ui_access_lifecycle_events, ui_access_history_events, ui_access_snapshot_from_session, ui_access_snapshot_from_state, ui_access_snapshot_persistable}
-use nogc_sync_mut.ui.access_store.{UiAccessStore}
 use common.ui.diff.{diff_trees_with}
 use common.ui.state.{update_state}
 use common.ui.surface.{SurfaceHandle, SurfaceManager, new_surface_manager}
@@ -57,6 +56,12 @@ struct UiDrawIrEvent:
     input_key: text
     event: UIEvent
 
+class UiAccessPersistence:
+    insert_event_fn: fn(UiAccessEvent) -> Result<(), text>
+    persist_snapshot_fn: fn(UiAccessSnapshot) -> Result<(), text>
+    list_events_fn: fn(text, i64) -> Result<[UiAccessEvent], text>
+    query_nodes_fn: fn(text, text, text, i64) -> Result<[UiAccessNode], text>
+
 class UISession:
     state: UIState
     store: WidgetStore
@@ -69,7 +74,7 @@ class UISession:
     capability_policy: CapabilityPolicy?
     access_events: [UiAccessEvent]
     access_sequence: i64
-    access_store: UiAccessStore?
+    access_persistence: UiAccessPersistence?
     window_surfaces: UiWindowSurfaceRegistry
     patch_stream: PatchStream
     clipboard: ClipboardService
@@ -96,7 +101,7 @@ class UISession:
             capability_policy: nil,
             access_events: [],
             access_sequence: 0,
-            access_store: nil,
+            access_persistence: nil,
             window_surfaces: UiWindowSurfaceRegistry.new(),
             patch_stream: PatchStream.new(),
             clipboard: ClipboardService.new(),
@@ -123,7 +128,7 @@ class UISession:
             capability_policy: nil,
             access_events: [],
             access_sequence: 0,
-            access_store: nil,
+            access_persistence: nil,
             window_surfaces: UiWindowSurfaceRegistry.new(),
             patch_stream: PatchStream.new(),
             clipboard: ClipboardService.new(),
@@ -151,7 +156,7 @@ class UISession:
             capability_policy: policy,
             access_events: [],
             access_sequence: 0,
-            access_store: nil,
+            access_persistence: nil,
             window_surfaces: UiWindowSurfaceRegistry.new(),
             patch_stream: PatchStream.new(),
             clipboard: ClipboardService.new(),
@@ -304,27 +309,19 @@ impl UISession:
 
     fn access_persisted_events(surface_id: text, count: i64) -> Result<[UiAccessEvent], text>:
         """Read persisted access events when a store is attached."""
-        if self.access_store == nil:
+        if self.access_persistence == nil:
             return Err("no access store attached")
-        match self.access_store.list_events(surface_id, count):
-            Ok(events):
-                return Ok(events)
-            Err(e):
-                return Err(e.message())
+        self.access_persistence.list_events_fn(surface_id, count)
 
     fn access_search_nodes(surface_id: text, kind: text, text_query: text, limit: i64) -> Result<[UiAccessNode], text>:
         """Query persisted latest-node rows when a store is attached."""
-        if self.access_store == nil:
+        if self.access_persistence == nil:
             return Err("no access store attached")
-        match self.access_store.query_nodes(surface_id, kind, text_query, limit):
-            Ok(nodes):
-                return Ok(nodes)
-            Err(e):
-                return Err(e.message())
+        self.access_persistence.query_nodes_fn(surface_id, kind, text_query, limit)
 
-    me attach_access_store(store: UiAccessStore):
-        """Attach a persisted UI access store and immediately seed it."""
-        self.access_store = store
+    me attach_access_persistence(persistence: UiAccessPersistence):
+        """Attach persistence through the storage-independent access port."""
+        self.access_persistence = persistence
         self._sync_access_store_snapshot()
 
     # -- State mutation ------------------------------------------------------
@@ -827,22 +824,22 @@ impl UISession:
         return self.profile_resolver.orientation()
 
     me _persist_latest_access_event():
-        if self.access_store == nil:
+        if self.access_persistence == nil:
             return
         if self.access_events.len() == 0:
             return
         val latest = self.access_events[self.access_events.len() - 1]
-        match self.access_store.insert_event(latest):
+        match self.access_persistence.insert_event_fn(latest):
             Ok(_):
                 pass_dn
             Err(_):
                 pass_dn
 
     me _sync_access_store_snapshot():
-        if self.access_store == nil:
+        if self.access_persistence == nil:
             return
         val snapshot = ui_access_snapshot_persistable(self.access_snapshot())
-        match self.access_store.persist_snapshot(snapshot):
+        match self.access_persistence.persist_snapshot_fn(snapshot):
             Ok(_):
                 pass_dn
             Err(_):
