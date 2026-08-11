@@ -101,33 +101,11 @@ pub val IMG_BXE_HEADER_DWORDS: i64 = 5
 pub val IMG_BXE_SYNC_OP_DWORDS: i64 = 3
 pub val IMG_BXE_DWORD_BYTES: i64 = 4
 
-# `stream_len` is a byte length carried in a single dword field of this
-# encoder's own envelope layout — bound it to what a 32-bit unsigned length
-# field can hold so a caller cannot ask for a length that would overflow
-# that field when the real kernel struct's actual width is wired in later.
-pub val IMG_BXE_MAX_STREAM_LEN: i64 = 0xFFFFFFFF
-
-pub struct EncodeError:
-    field_name: text
-    message: text
-
-fn encode_error(field_name: text, message: text) -> EncodeError:
-    EncodeError(field_name: field_name, message: message)
-
 pub fn img_bxe_job_field_offset(field_index: i64) -> i64:
     field_index * IMG_BXE_DWORD_BYTES
 
 pub fn img_bxe_sync_op_offset(header_dwords: i64, sync_index: i64) -> i64:
     (header_dwords + sync_index * IMG_BXE_SYNC_OP_DWORDS) * IMG_BXE_DWORD_BYTES
-
-# Every offset this encoder produces must be dword-aligned by construction
-# (every field is exactly one dword) — reject any offset that isn't, naming
-# the offending value, rather than letting a future layout change hand the
-# firmware a misaligned pointer silently.
-pub fn img_bxe_check_alignment(offset: i64) -> Result<i64, EncodeError>:
-    if offset % IMG_BXE_DWORD_BYTES != 0:
-        return Err(encode_error("offset", "offset is not dword-aligned (must be a multiple of " + IMG_BXE_DWORD_BYTES.to_text() + "): " + offset.to_text()))
-    Ok(offset)
 
 # Total encoded payload size in bytes: header dwords + (sync ops * 3 dwords),
 # all dword-aligned by construction (every field is exactly one dword).
@@ -182,44 +160,3 @@ pub fn img_bxe_encode_jobs(jobs: [ImgBxeJobDesc]) -> [CmdPacket]:
     for job in jobs:
         out.push(img_bxe_encode_job(job))
     out
-
-# Typed, field-naming validation — the Result-returning counterpart to
-# `img_bxe_job_is_valid`'s bare bool. Every rejection names the offending
-# field and value; "invalid input" is not acceptable here because this is
-# exactly the message a future driver author has to debug against.
-#
-# Zero/empty decision: `stream_len == 0` and `sync_ops == []` are both LEGAL
-# — a zero-length transfer job with no fences is a degenerate but
-# structurally valid submission (the envelope still carries a real header),
-# so neither is rejected here.
-pub fn img_bxe_job_validate(job: ImgBxeJobDesc) -> Result<(), EncodeError>:
-    if not _img_bxe_list_contains(img_bxe_known_job_types(), job.job_type):
-        return Err(encode_error("job_type", "unknown PowerVR job type (expected geometry/fragment/compute/transfer): " + job.job_type))
-    if job.stream_len < 0:
-        return Err(encode_error("stream_len", "stream_len must be non-negative: " + job.stream_len.to_text()))
-    if job.stream_len > IMG_BXE_MAX_STREAM_LEN:
-        return Err(encode_error("stream_len", "stream_len exceeds the 32-bit length field maximum (" + IMG_BXE_MAX_STREAM_LEN.to_text() + "): " + job.stream_len.to_text()))
-    if job.context_handle < 0:
-        return Err(encode_error("context_handle", "context_handle must be non-negative (kernel handles are unsigned): " + job.context_handle.to_text()))
-    if job.hwrt_data_set_handle < 0:
-        return Err(encode_error("hwrt_data_set_handle", "hwrt_data_set_handle must be non-negative (kernel handles are unsigned): " + job.hwrt_data_set_handle.to_text()))
-    img_bxe_check_alignment(img_bxe_job_payload_size(job))?
-    var i: i64 = 0
-    while i < job.sync_ops.len():
-        val op = job.sync_ops[i]
-        if op.handle < 0:
-            return Err(encode_error("sync_ops[" + i.to_text() + "].handle", "sync handle must be non-negative: " + op.handle.to_text()))
-        i = i + 1
-    Ok(())
-
-# Encode a job only after validating it — the Result-returning counterpart
-# to `img_bxe_encode_job` that never hands back a packet built from a job
-# `img_bxe_job_is_valid` would have rejected.
-pub fn img_bxe_encode_job_checked(job: ImgBxeJobDesc) -> Result<CmdPacket, EncodeError>:
-    img_bxe_job_validate(job)?
-    val packet = img_bxe_encode_job(job)
-    val declared_dwords = packet.length
-    val actual_dwords = img_bxe_job_payload_size(job) / IMG_BXE_DWORD_BYTES
-    if declared_dwords != actual_dwords:
-        return Err(encode_error("length", "packet declared length (" + declared_dwords.to_text() + ") disagrees with computed payload dwords (" + actual_dwords.to_text() + ")"))
-    Ok(packet)
