@@ -29,6 +29,18 @@ alongside it: `hal_smp_spec` 12/12, `hal_riscv64_phase_a_spec` 6/6.
 with and without these edits (`semantic: variable sbi_probe_then_send_ipi not
 found`, in the stdlib baremetal riscv module, untouched here).
 
+### SBI family census (unrestricted `/usr/bin/grep`, 2026-08-11)
+
+Four live declaration sites carried shared SBI constants, not two:
+
+| file | after wave 3 |
+|------|--------------|
+| `arch/common/sbi_shim.spl` | 21 — the single source |
+| `arch/riscv64/sbi.spl` | 13 -> **1** (the `SBI_EXT_SYSTEM_RESET = SBI_EXT_SRST` alias) |
+| `arch/riscv32/sbi.spl` | 9 — u32, deferred, values pinned by spec |
+| `arch/riscv32/hal_smp.spl` | 1 — `SBI_EXT_IPI_RV32: u32 = 0x735049u32`, a **fourth** copy of the IPI ext ID; same u32 deferral, value pinned by spec |
+| `src/lib/.../baremetal/riscv/sbi.spl` | 3 — stdlib, layering-blocked (above) |
+
 ## Re-affirmed on 2026-08-11 (reasons re-read, not overridden)
 
 `paging_walker` and `interrupt_dispatch` are **redesigns, not extractions** —
