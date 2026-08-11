@@ -717,6 +717,14 @@ int64_t  rt_signal_check(int64_t signal_num);
 int64_t  rt_atexit_install(void);
 int64_t  rt_atexit_check(void);
 
+/* ===== Terminal ===== */
+
+bool     rt_terminal_enable_raw_mode(void);
+bool     rt_terminal_disable_raw_mode(void);
+int64_t  rt_terminal_get_size(void); /* tagged `(i64, i64)` tuple handle */
+bool     rt_terminal_is_tty(void);
+bool     rt_terminal_stdout_is_tty(void);
+int64_t  rt_stdin_read_byte(void); /* 0..255, or -1 on EOF/error */
 /* ===== Memory ===== */
 
 void*    spl_malloc(int64_t size);
