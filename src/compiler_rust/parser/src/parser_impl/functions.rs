@@ -202,10 +202,19 @@ impl<'a> Parser<'a> {
 
                 // Parse optional contract block at the start of the function body
                 // (new: in/out/out_err/invariant/decreases, legacy: requires/ensures)
+                // `out`/`out_err` are contextual: they only introduce a contract
+                // clause when immediately followed by `(` (`out(ret):`,
+                // `out_err(err):`). Without that lookahead, a parameter that is
+                // legitimately named `out`/`out_err` and used as the body's
+                // first statement (e.g. `out.push(1)`) gets hijacked here and
+                // misreported deep inside contract parsing (same family as the
+                // `grid`-identifier hijack). See
+                // doc/08_tracking/bug/identifier_named_out_param_hijacked_by_modifier_keyword_2026-08-11.md.
+                let out_starts_contract = (self.check(&TokenKind::Out) || self.check(&TokenKind::OutErr))
+                    && self.peek_is(&TokenKind::LParen);
                 let contract = if self.check(&TokenKind::In)
                     || self.check(&TokenKind::Invariant)
-                    || self.check(&TokenKind::Out)
-                    || self.check(&TokenKind::OutErr)
+                    || out_starts_contract
                     || self.check(&TokenKind::Requires)
                     || self.check(&TokenKind::Ensures)
                     || self.check(&TokenKind::Decreases)

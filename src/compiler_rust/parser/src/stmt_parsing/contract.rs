@@ -160,8 +160,13 @@ impl Parser<'_> {
     ///     result > 0
     /// ```
     pub(crate) fn parse_exit_contracts(&mut self, contract: &mut ContractBlock) -> Result<(), ParseError> {
-        // Parse out(ret): block (new spec)
-        if self.check(&TokenKind::Out) {
+        // Parse out(ret): block (new spec). `out` only introduces this clause
+        // when immediately followed by `(` — otherwise it is a plain
+        // identifier (e.g. a parameter named `out` used as the first body
+        // statement after an `in:`/`invariant:` entry-contract block), and
+        // must fall through to ordinary statement parsing. See
+        // doc/08_tracking/bug/identifier_named_out_param_hijacked_by_modifier_keyword_2026-08-11.md.
+        if self.check(&TokenKind::Out) && self.peek_is(&TokenKind::LParen) {
             self.advance();
             self.expect(&TokenKind::LParen)?;
 
@@ -200,8 +205,9 @@ impl Parser<'_> {
             self.parse_contract_clause_block(&mut contract.postconditions)?;
         }
 
-        // Parse out_err(err): block (new spec)
-        if self.check(&TokenKind::OutErr) {
+        // Parse out_err(err): block (new spec). Same `(`-lookahead
+        // disambiguation as `out(ret):` above.
+        if self.check(&TokenKind::OutErr) && self.peek_is(&TokenKind::LParen) {
             self.advance();
             self.expect(&TokenKind::LParen)?;
 
