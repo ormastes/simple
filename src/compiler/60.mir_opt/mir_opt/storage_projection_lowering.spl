@@ -1,0 +1,123 @@
+# Typed fixed-record AoS/SoA projection sidecar and affine address recipe.
+# Ordinary RuntimeValue arrays never enter this explicitly bound path.
+
+use std.common.structural.storage_layout.storage_layout_contracts.{
+    StorageLayoutKind, StorageLayoutPlanV1, storage_layout_plan_v1_well_formed
+}
+
+val MIR_STORAGE_PROJECT_ADDRESS_V1: text = "mir.storage.project_address.v1"
+
+struct MirStorageFieldBindingV1:
+    field_id: i64
+    logical_offset: i64
+    field_size: i64
+    column_offset: i64
+
+struct MirStorageViewBindingV1:
+    logical_type_id: i64
+    revision: i64
+    element_count: i64
+    logical_stride: i64
+    address_observed: bool
+    plan: StorageLayoutPlanV1
+    fields: [MirStorageFieldBindingV1]
+
+struct MirStorageAddressRecipeV1:
+    ok: bool
+    scale: i64
+    base_offset: i64
+    field_size: i64
+    reason: text
+
+fn mir_storage_field_binding_v1(field_id: i64, logical_offset: i64,
+                                field_size: i64, column_offset: i64) -> MirStorageFieldBindingV1:
+    MirStorageFieldBindingV1(field_id: field_id, logical_offset: logical_offset,
+        field_size: field_size, column_offset: column_offset)
+
+fn mir_storage_view_binding_v1(logical_type_id: i64, revision: i64,
+                               element_count: i64, logical_stride: i64,
+                               address_observed: bool, plan: StorageLayoutPlanV1,
+                               fields: [MirStorageFieldBindingV1]) -> MirStorageViewBindingV1:
+    MirStorageViewBindingV1(logical_type_id: logical_type_id, revision: revision,
+        element_count: element_count, logical_stride: logical_stride,
+        address_observed: address_observed, plan: plan, fields: fields)
+
+fn mir_storage_recipe_failure(reason: text) -> MirStorageAddressRecipeV1:
+    MirStorageAddressRecipeV1(ok: false, scale: 0, base_offset: 0,
+        field_size: 0, reason: reason)
+
+fn mir_storage_address_recipe_v1(binding: MirStorageViewBindingV1,
+                                 field_id: i64) -> MirStorageAddressRecipeV1:
+    if not storage_layout_plan_v1_well_formed(binding.plan):
+        return mir_storage_recipe_failure("invalid-layout-plan")
+    if binding.logical_type_id <= 0 or binding.plan.logical_type_id != binding.logical_type_id:
+        return mir_storage_recipe_failure("logical-type-mismatch")
+    if binding.revision < 0 or binding.element_count < 0
+        or binding.logical_stride <= 0 or binding.fields.len() == 0:
+        return mir_storage_recipe_failure("invalid-view-binding")
+    if binding.address_observed or binding.plan.abi_pinned:
+        return mir_storage_recipe_failure("address-observed-or-abi-pinned")
+    var i = 0
+    while i < binding.fields.len():
+        val checked = binding.fields[i]
+        if checked.field_id < 0 or checked.field_size <= 0
+            or checked.logical_offset < 0
+            or checked.logical_offset > binding.logical_stride - checked.field_size
+            or checked.column_offset < 0:
+            return mir_storage_recipe_failure("invalid-field-binding")
+        var j = i + 1
+        while j < binding.fields.len():
+            val other = binding.fields[j]
+            if checked.field_id == other.field_id:
+                return mir_storage_recipe_failure("duplicate-field-binding")
+            val checked_logical_end = checked.logical_offset + checked.field_size
+            val other_logical_end = other.logical_offset + other.field_size
+            if checked.logical_offset < other_logical_end
+                and other.logical_offset < checked_logical_end:
+                return mir_storage_recipe_failure("overlapping-logical-fields")
+            if binding.plan.layout == StorageLayoutKind.SoA:
+                if binding.element_count > 0
+                    and (binding.element_count > 9223372036854775807 / checked.field_size
+                        or binding.element_count > 9223372036854775807 / other.field_size):
+                    return mir_storage_recipe_failure("affine-address-overflow")
+                val checked_bytes = binding.element_count * checked.field_size
+                val other_bytes = binding.element_count * other.field_size
+                if checked.column_offset > 9223372036854775807 - checked_bytes
+                    or other.column_offset > 9223372036854775807 - other_bytes:
+                    return mir_storage_recipe_failure("affine-address-overflow")
+                val checked_end = checked.column_offset + checked_bytes
+                val other_end = other.column_offset + other_bytes
+                if checked.column_offset < other_end and other.column_offset < checked_end:
+                    return mir_storage_recipe_failure("overlapping-physical-columns")
+            j = j + 1
+        i = i + 1
+    var found = false
+    var field = mir_storage_field_binding_v1(0, 0, 0, 0)
+    for candidate in binding.fields:
+        if candidate.field_id == field_id:
+            if found: return mir_storage_recipe_failure("duplicate-field-binding")
+            found = true
+            field = candidate
+    if not found: return mir_storage_recipe_failure("unknown-field")
+    var scale = 0
+    var base_offset = 0
+    if binding.plan.layout == StorageLayoutKind.AoS:
+        scale = binding.logical_stride
+        base_offset = field.logical_offset
+    elif binding.plan.layout == StorageLayoutKind.SoA:
+        scale = field.field_size
+        base_offset = field.column_offset
+    else:
+        return mir_storage_recipe_failure("layout-requires-specialized-lowering")
+    if scale <= 0 or base_offset > 9223372036854775807 - field.field_size:
+        return mir_storage_recipe_failure("affine-address-overflow")
+    if binding.element_count > 0:
+        val last_index = binding.element_count - 1
+        if last_index > 9223372036854775807 / scale:
+            return mir_storage_recipe_failure("affine-address-overflow")
+        val last_scaled = last_index * scale
+        if base_offset > 9223372036854775807 - last_scaled
+            or field.field_size > 9223372036854775807 - (base_offset + last_scaled):
+            return mir_storage_recipe_failure("affine-address-overflow")
+    MirStorageAddressRecipeV1(ok: true, scale: scale, base_offset: base_offset,
+        field_size: field.field_size, reason: "typed-fixed-record-affine")

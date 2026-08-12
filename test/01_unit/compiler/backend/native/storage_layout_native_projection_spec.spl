@@ -1,0 +1,114 @@
+use std.spec.{describe, it, assert_equal, assert_true, assert_false}
+use std.common.structural.storage_layout.storage_layout_contracts.{
+    StorageConversionPolicy, StorageLayoutKind, storage_layout_plan_v1
+}
+use std.common.structural.storage_layout.mapping.{
+    storage_layout_project, storage_projection_request_v1
+}
+use compiler.mir_opt.mir_opt.storage_projection_lowering.{
+    MIR_STORAGE_PROJECT_ADDRESS_V1,
+    mir_storage_address_recipe_v1, mir_storage_field_binding_v1,
+    mir_storage_view_binding_v1
+}
+use compiler.mir.mir_data.*
+use compiler.backend.native.isel_x86_64.{isel_module}
+use compiler.backend.native.mach_inst.{
+    X86_OP_ADD, X86_OP_ADD_IMM, X86_OP_IMUL, X86_OP_NOP
+}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+
+fn projection_plan(layout: StorageLayoutKind):
+    storage_layout_plan_v1(7001, layout, 1, 8, false,
+        StorageConversionPolicy.Cached, "wp22-native-v1", "typed-host-view")
+
+fn projection_binding(layout: StorageLayoutKind, observed: bool):
+    mir_storage_view_binding_v1(7001, 9, 64, 16, observed,
+        projection_plan(layout), [
+            mir_storage_field_binding_v1(0, 0, 1, 0),
+            mir_storage_field_binding_v1(1, 4, 4, 64),
+            mir_storage_field_binding_v1(2, 8, 8, 320)
+        ])
+
+fn projection_intrinsic_module(scale: i64, base_offset: i64) -> MirModule:
+    val i64_type = MirType(kind: MirTypeKind.I64)
+    val ptr_type = MirType(kind: MirTypeKind.Ptr(pointee: i64_type, mutable: true))
+    val locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("base"), type_: ptr_type, kind: LocalKind.Arg(0)),
+        MirLocal(id: LocalId(id: 1), name: Some("index"), type_: i64_type, kind: LocalKind.Arg(1)),
+        MirLocal(id: LocalId(id: 2), name: Some("address"), type_: ptr_type, kind: LocalKind.Temp)
+    ]
+    val instruction = MirInst(kind: MirInstKind.Intrinsic(
+        Some(LocalId(id: 2)), MIR_STORAGE_PROJECT_ADDRESS_V1, [
+            MirOperand.copy(LocalId(id: 0)), MirOperand.copy(LocalId(id: 1)),
+            MirOperand.const_int(scale),
+            MirOperand.const_int(base_offset)
+        ]), span: nil)
+    val function = MirFunction(
+        symbol: SymbolId.new(0), name: "project_address",
+        signature: MirSignature(params: [ptr_type, i64_type], return_type: ptr_type, is_variadic: false),
+        locals: locals, blocks: [MirBlock(
+            id: BlockId.new(0), label: Some("entry"), instructions: [instruction],
+            terminator: MirTerminator.Ret(Some(MirOperand.copy(LocalId(id: 2)))))],
+        entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1), generic_params: [],
+        is_generic_template: false, specialization_of: nil, type_bindings: {})
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = function
+    MirModule(name: "storage_projection", functions: functions,
+        statics: {}, constants: {}, types: {})
+
+describe "typed host AoS and SoA native projection":
+    it "matches canonical projection for unequal fields and runtime indices":
+        for layout in [StorageLayoutKind.AoS, StorageLayoutKind.SoA]:
+            val binding = projection_binding(layout, false)
+            for field_id in 0..3:
+                val recipe = mir_storage_address_recipe_v1(binding, field_id)
+                assert_true(recipe.ok)
+                for index in 0..64:
+                    val field = binding.fields[field_id]
+                    val expected = storage_layout_project(binding.plan,
+                        storage_projection_request_v1(index, binding.element_count,
+                            field.logical_offset, field.field_size,
+                            binding.logical_stride, field.column_offset, 0, 0))
+                    assert_true(expected.ok)
+                    assert_equal(recipe.base_offset + index * recipe.scale,
+                        expected.byte_offset)
+
+    it "lowers the affine recipe through real native machine selection":
+        val recipe = mir_storage_address_recipe_v1(
+            projection_binding(StorageLayoutKind.SoA, false), 2)
+        val selected = isel_module(
+            projection_intrinsic_module(recipe.scale, recipe.base_offset))
+        var saw_mul = false
+        var saw_add = false
+        var saw_base_offset = false
+        for block in selected.functions[0].blocks:
+            for instruction in block.insts:
+                if instruction.opcode == X86_OP_IMUL: saw_mul = true
+                if instruction.opcode == X86_OP_ADD: saw_add = true
+                if instruction.opcode == X86_OP_ADD_IMM: saw_base_offset = true
+                assert_false(instruction.opcode == X86_OP_NOP)
+        assert_true(saw_mul and saw_add and saw_base_offset)
+
+    it "rejects observed ABI and unsupported physical layouts":
+        val observed = mir_storage_address_recipe_v1(
+            projection_binding(StorageLayoutKind.SoA, true), 1)
+        assert_false(observed.ok)
+        assert_equal(observed.reason, "address-observed-or-abi-pinned")
+        val grouped = mir_storage_address_recipe_v1(
+            projection_binding(StorageLayoutKind.Grouped, false), 1)
+        assert_false(grouped.ok)
+        assert_equal(grouped.reason, "layout-requires-specialized-lowering")
+        assert_equal(mir_storage_address_recipe_v1(
+            projection_binding(StorageLayoutKind.AoS, false), 99).reason,
+            "unknown-field")
+
+    it "rejects overlapping SoA columns across the whole bound schema":
+        val malformed = mir_storage_view_binding_v1(7001, 9, 64, 16, false,
+            projection_plan(StorageLayoutKind.SoA), [
+                mir_storage_field_binding_v1(0, 0, 4, 0),
+                mir_storage_field_binding_v1(1, 8, 8, 128)
+            ])
+        assert_equal(mir_storage_address_recipe_v1(malformed, 0).reason,
+            "overlapping-physical-columns")

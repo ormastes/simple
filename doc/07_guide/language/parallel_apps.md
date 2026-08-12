@@ -60,6 +60,17 @@ limited to 64 MiB, copies value-semantic byte arrays, and rejects malformed or
 overlapping physical mappings. It is test evidence, not the optimized typed
 array view or backend lowering promised by WP-22.
 
+The compiler now has a first explicitly bound typed fixed-record host view.
+Given the frozen storage plan, revision, element count, logical stride, and
+exact field schema, it derives an overflow-checked affine address recipe:
+`base + index * stride + field_offset` for AoS or
+`base + column_offset + index * field_size` for SoA. The custom x86 native
+selector lowers that canonical MIR intrinsic to real multiply/add addressing.
+Address-observed or ABI-pinned records, malformed schemas, unknown fields, and
+specialized layouts fail closed. This does not reinterpret ordinary dynamic
+`T[]`; automatic typed-array allocation/binding and complete load/store
+rewriting remain open.
+
 The MIR optimizer now also checks whether an AoSoA block is compatible with a
 selected fixed-width SIMD route. Matching AVX/NEON-style widths are admitted;
 AoS and SoA retain the scalar/reference fallback; ABI-pinned or mismatched

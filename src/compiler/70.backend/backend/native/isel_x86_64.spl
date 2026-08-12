@@ -16,6 +16,7 @@ use compiler.backend.native.mach_inst.{X86_OP_MOV_REG_REG, X86_OP_MOV_REG_IMM, X
 use compiler.backend.common.isel_context.{ISelContext, new_isel_context, isel_alloc_vreg, isel_get_vreg, isel_alloc_frame_slot, isel_frame_offset, isel_add_extern, isel_add_string_data, isel_last_string_label}
 use compiler.backend.common.ascii_utils.{char_to_ascii}
 use compiler.backend.native.native_avx2_capability.{NativeAvx2CapabilityV1, native_avx2_denied_v1}
+use compiler.mir_opt.mir_opt.storage_projection_lowering.{MIR_STORAGE_PROJECT_ADDRESS_V1}
 
 # ============================================================================
 # Operand Lowering
@@ -661,7 +662,40 @@ fn isel_intrinsic(ctx: ISelContext, dest: LocalId?, name: text, args: [MirOperan
         return isel_popcount(ctx, dest.unwrap(), args)
     if name == BIT_BSWAP:
         return isel_bswap(ctx, dest.unwrap(), args)
+    if name == MIR_STORAGE_PROJECT_ADDRESS_V1:
+        return isel_storage_project_address_v1(ctx, dest.unwrap(), args)
     ISelInstResult(insts: [new_mach_inst(X86_OP_NOP, [])], ctx: ctx)
+
+fn isel_storage_const_i64(operand: MirOperand) -> i64:
+    match operand.kind:
+        case Const(MirConstValue.Int(value), _): value
+        case _: -1
+
+fn isel_storage_project_address_v1(ctx: ISelContext, dest: LocalId,
+                                   args: [MirOperand]) -> ISelInstResult:
+    if args.len() != 4:
+        panic("x86_64 storage projection requires four arguments")
+    val scale = isel_storage_const_i64(args[2])
+    val base_offset = isel_storage_const_i64(args[3])
+    if scale <= 0 or base_offset < 0:
+        panic("x86_64 storage projection requires valid affine constants")
+    val base_low = lower_operand(ctx, args[0])
+    val index_low = lower_operand(base_low.ctx, args[1])
+    var current_ctx = isel_alloc_vreg(index_low.ctx)
+    val scaled = op_reg(virtual_reg(isel_get_vreg(current_ctx)))
+    val dest_op = local_vreg_op(dest.id)
+    var insts = base_low.insts + index_low.insts
+    insts.push(new_mach_inst(X86_OP_MOV_REG_REG, [scaled, index_low.result]))
+    if scale != 1:
+        current_ctx = isel_alloc_vreg(current_ctx)
+        val scale_reg = op_reg(virtual_reg(isel_get_vreg(current_ctx)))
+        insts.push(new_mach_inst(X86_OP_MOV_REG_IMM, [scale_reg, op_imm(scale)]))
+        insts.push(new_mach_inst(X86_OP_IMUL, [scaled, scale_reg]))
+    insts.push(new_mach_inst(X86_OP_MOV_REG_REG, [dest_op, base_low.result]))
+    insts.push(new_mach_inst(X86_OP_ADD, [dest_op, scaled]))
+    if base_offset > 0:
+        insts.push(new_mach_inst(X86_OP_ADD_IMM, [dest_op, op_imm(base_offset)]))
+    ISelInstResult(insts: insts, ctx: current_ctx)
 
 fn isel_popcount(ctx: ISelContext, dest: LocalId, args: [MirOperand]) -> ISelInstResult:
     if args.len() != 1:

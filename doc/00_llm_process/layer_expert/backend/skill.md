@@ -71,6 +71,11 @@ marshalling in the deployed binary (not seed-dependent).
    scalar spill rewrite: its slots and MOV operations are 8-byte GPR-only.
    Vector spills require one aliased XMM/YMM bank, CFG def/use liveness,
    32-byte-aligned slots, vector reload/store lowering, and call-clobber rules.
+5. **Typed storage projection is opt-in:** only
+   `mir.storage.project_address.v1`, built from the compiler-owned revisioned
+   fixed-record sidecar, may select AoS/SoA affine addressing in the custom x86
+   backend. Do not reinterpret generic GEP/GetField or RuntimeValue arrays.
+   ABI-pinned/address-observed and specialized layouts must reject before ISel.
 
 ## Redeploy #79 Findings (2026-07-11)
 

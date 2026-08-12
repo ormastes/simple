@@ -407,3 +407,15 @@ dev-done
   not reusable for vectors: CFG vector liveness, one aliased XMM/YMM bank,
   32-byte aligned spill slots, def/use-aware reloads, and call handling remain
   prerequisites before vector spills can be claimed.
+- impl: Advanced WP-22 from a conversion-only oracle to the first production
+  host address-lowering boundary. A compiler-owned typed fixed-record view
+  sidecar consumes the frozen `StorageLayoutPlanV1`, revision, element count,
+  logical stride, and exact field schema, then derives overflow-checked affine
+  AoS or SoA recipes for runtime indices. The custom x86 native selector lowers
+  the canonical storage-address intrinsic through multiply/add machine ops.
+  Focused evidence compares 64 runtime indices across unequal 1/4/8-byte fields
+  with the common projector and rejects observed/ABI, unknown-field, and
+  specialized-layout inputs. Luna audits identified the missing backend
+  consumer and shared-oracle weakness; primary review kept ordinary RuntimeValue
+  arrays untouched. Automatic `T[]` view binding/allocation, complete loads and
+  stores, other backends, and executed randomized parity remain open.
