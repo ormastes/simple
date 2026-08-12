@@ -80,6 +80,22 @@ are independent; do not sequence one behind the other.
    prints all verdict lines in seconds, the process just doesn't exit
    afterward (teardown/GC hang, unmeasured, orthogonal to this bug) — read the
    printed verdict, not the exit code.
+7. **sha3.spl — same family, FIXED (`9d70a002cd6`).** Also read-side untyped-
+   `list` boxing (bracket index-ASSIGNMENT was innocent — write-side probes
+   read back bit-exact on both typed and untyped lists; the earlier "fix
+   attempt failed" was the stale-stdlib-root trap above, not a different
+   mechanism). Fix: same retype-everything-to-`[i64]` pattern, extended to
+   the context tuple and `[[i64]]` chunk arrays. Verified against real FIPS
+   202 vectors: SHA3-256/384/512 × {"", "abc"}, streaming == one-shot, all
+   exact. Existing `sha3_kat_spec.spl` 7/7, `hmac_sha3_spec.spl` 6/6 — no new
+   specs needed, KAT coverage already existed. **Flagged, not fixed:**
+   `sha1.spl` has ~20 untyped `list` annotations, same vulnerability class —
+   the earlier sweep's "not corrupted" verdict for sha1 needs re-checking
+   given the stdlib-root trap. sha512/sha384/hmac/hkdf/blake2 are already
+   fully typed. **The underlying compiler defect remains open** — typed
+   `[i64]` params do not unbox a tagged argument if the value originated from
+   an untyped `list`'s `.get()`; `[i64]`-everywhere is a source-level
+   mitigation, not a fix to the interpreter/codegen itself.
 
 **Guard duplication found and resolved (2026-08-11):** two agents independently
 built overlapping C-runtime-compiles pre-push guards
@@ -234,6 +250,20 @@ QEMU-only result is a defect, not a completion.
 
 ## Process findings that change how work lands here
 
+- **CRITICAL: the deployed `bin/simple` (Rust seed) loads stdlib from a SECOND
+  root, not the repo path.** Proven by strace: `/mnt/data/build-clean/src/lib/**`,
+  not `src/lib/**` in this checkout. Discovered because an earlier attempted
+  sha3 fix appeared to fail — edits to the repo's `sha3.spl` changed nothing,
+  because they were never executed; the "corrupted output changing but staying
+  wrong" was just nondeterministic pointer bytes from the same unpatched code
+  running every time. **Any verification tonight that ran `bin/simple` against
+  a repo-path edit without confirming which stdlib root it actually loaded is
+  suspect** — this specifically calls into question the earlier list-boxing
+  sweep's verdict that `sha1.spl` was "not corrupted" (it may have gotten a
+  false negative the same way sha3's fix falsely appeared to fail). Before
+  trusting any `bin/simple`-based test result against a source edit, confirm
+  the loaded stdlib root matches the edited path (strace or an explicit marker
+  string in the edited file that must appear in output).
 - **Guards-then-push is livelocked.** Origin advances every ~60s; the divergence
   guard takes ~50 min. Land the guard-verified byte-identical delta via a tight
   fetch/rebuild/push loop, then re-guard the landed range — and state the
