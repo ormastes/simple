@@ -87,11 +87,16 @@ fn byte_of(v: &Value) -> u8 {
 }
 
 fn extract_bytes(args: &[Value], idx: usize) -> Vec<u8> {
-    args.get(idx).and_then(Value::try_array_bytes).unwrap_or_default()
+    match args.get(idx) {
+        Some(Value::Array(arr)) => arr.iter().map(byte_of).collect(),
+        Some(Value::FrozenArray(arr)) => arr.iter().map(byte_of).collect(),
+        Some(Value::FixedSizeArray { data, .. }) => data.iter().map(byte_of).collect(),
+        _ => Vec::new(),
+    }
 }
 
 fn bytes_to_value(bytes: &[u8]) -> Value {
-    Value::byte_array(bytes.to_vec())
+    Value::array(bytes.iter().map(|&b| Value::Int(b as i64)).collect())
 }
 
 fn secs_since_epoch(t: std::io::Result<std::time::SystemTime>) -> i64 {

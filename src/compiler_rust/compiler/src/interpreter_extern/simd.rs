@@ -50,9 +50,20 @@ fn expect_no_args(name: &str, args: &[Value]) -> Result<(), CompileError> {
 }
 
 fn expect_byte_array(name: &str, value: &Value) -> Result<Vec<u8>, CompileError> {
-    value
-        .try_array_bytes()
-        .ok_or_else(|| CompileError::runtime(format!("{name} expects an array of byte values")))
+    match value {
+        Value::Array(items) => items
+            .iter()
+            .map(|item| match item {
+                Value::Int(byte) if (0..=255).contains(byte) => Ok(*byte as u8),
+                Value::UInt { value, .. } if *value <= 255 => Ok(*value as u8),
+                Value::Int(_) | Value::UInt { .. } => {
+                    Err(CompileError::runtime(format!("{name} expects byte values in 0..255")))
+                }
+                _ => Err(CompileError::runtime(format!("{name} expects an array of integers"))),
+            })
+            .collect(),
+        _ => Err(CompileError::runtime(format!("{name} expects an array argument"))),
+    }
 }
 
 fn utf8_sequence_len(byte: u8) -> Option<usize> {
@@ -275,7 +286,7 @@ pub fn rt_aes128_encrypt_block_pure(args: &[Value]) -> Result<Value, CompileErro
         return Ok(Value::array(vec![]));
     }
     let cipher = aes128_encrypt_one_block(&key, &block).unwrap_or([0u8; 16]);
-    Ok(Value::byte_array(cipher.to_vec()))
+    Ok(Value::array(cipher.iter().map(|b| Value::Int(*b as i64)).collect()))
 }
 
 pub fn rt_aes128_decrypt_block_pure(args: &[Value]) -> Result<Value, CompileError> {
@@ -287,7 +298,7 @@ pub fn rt_aes128_decrypt_block_pure(args: &[Value]) -> Result<Value, CompileErro
     let key = expect_byte_array("rt_aes128_decrypt_block_pure", &args[0])?;
     let block = expect_byte_array("rt_aes128_decrypt_block_pure", &args[1])?;
     let plain = aes128_decrypt_one_block(&key, &block).unwrap_or([0u8; 16]);
-    Ok(Value::byte_array(plain.to_vec()))
+    Ok(Value::array(plain.iter().map(|b| Value::Int(*b as i64)).collect()))
 }
 
 // rt_tls13_aes128_gcm_encrypt(key: [u8], nonce: [u8], plaintext: [u8], aad: [u8]) -> [u8]
@@ -344,7 +355,7 @@ pub fn rt_aes256_encrypt_block_pure(args: &[Value]) -> Result<Value, CompileErro
         return Ok(Value::array(vec![]));
     }
     let cipher = aes256_encrypt_one_block(&key, &block).unwrap_or([0u8; 16]);
-    Ok(Value::byte_array(cipher.to_vec()))
+    Ok(Value::array(cipher.iter().map(|b| Value::Int(*b as i64)).collect()))
 }
 
 // rt_tls13_aes256_gcm_encrypt(key: [u8] (32B), nonce: [u8] (12B), plaintext: [u8], aad: [u8]) -> [u8]
@@ -395,7 +406,7 @@ pub fn rt_tls13_aes128_gcm_decrypt(args: &[Value]) -> Result<Value, CompileError
             out.extend_from_slice(&pt);
         }
     }
-    Ok(Value::byte_array(out))
+    Ok(Value::array(out.into_iter().map(|b| Value::Int(b as i64)).collect()))
 }
 
 // rt_tls13_aes256_gcm_decrypt(key (32B), nonce (12B), ciphertext, aad, tag (16B)) -> [u8]
@@ -421,7 +432,7 @@ pub fn rt_tls13_aes256_gcm_decrypt(args: &[Value]) -> Result<Value, CompileError
             out.extend_from_slice(&pt);
         }
     }
-    Ok(Value::byte_array(out))
+    Ok(Value::array(out.into_iter().map(|b| Value::Int(b as i64)).collect()))
 }
 
 pub fn rt_ssh_aes256_gcm_decrypt_packet(args: &[Value]) -> Result<Value, CompileError> {

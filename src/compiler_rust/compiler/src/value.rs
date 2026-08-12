@@ -1149,12 +1149,8 @@ pub enum Value {
     /// Mutable array (default for array literals)
     /// Wrapped in Arc for O(1) clone (COW via Arc::make_mut for mutations)
     Array(Arc<Vec<Value>>),
-    /// Packed mutable `[u8]` storage. Mutations use `Arc::make_mut` COW.
-    ByteArray(Arc<Vec<u8>>),
     /// Immutable frozen array (created via freeze(), copy-on-freeze semantics)
     FrozenArray(Arc<Vec<Value>>),
-    /// Packed immutable `[u8]` storage.
-    FrozenByteArray(Arc<Vec<u8>>),
     /// Fixed-size array with runtime size checking ([T; N] syntax)
     /// Rejects size-changing operations (push, pop, insert, remove, clear)
     FixedSizeArray {
@@ -1326,56 +1322,9 @@ impl Value {
         Value::Array(Arc::new(vec))
     }
 
-    pub fn byte_array(vec: Vec<u8>) -> Self {
-        Value::ByteArray(Arc::new(vec))
-    }
-
     /// Create a new frozen (immutable) array value
     pub fn frozen_array(vec: Vec<Value>) -> Self {
         Value::FrozenArray(Arc::new(vec))
-    }
-
-    pub fn frozen_byte_array(vec: Vec<u8>) -> Self {
-        Value::FrozenByteArray(Arc::new(vec))
-    }
-
-    /// Borrow packed byte storage without confusing it with raw text bytes.
-    pub fn byte_array_view(&self) -> Option<&[u8]> {
-        match self {
-            Value::ByteArray(bytes) | Value::FrozenByteArray(bytes) => Some(bytes.as_slice()),
-            _ => None,
-        }
-    }
-
-    /// Widen packed bytes to ordinary interpreter values at a generic-array boundary.
-    pub fn byte_array_values(bytes: &[u8]) -> Vec<Value> {
-        bytes
-            .iter()
-            .map(|byte| Value::UInt {
-                value: u64::from(*byte),
-                width: 8,
-            })
-            .collect()
-    }
-
-    /// Extract `[u8]` semantics from packed or legacy boxed array storage.
-    pub fn try_array_bytes(&self) -> Option<Vec<u8>> {
-        if let Some(bytes) = self.byte_array_view() {
-            return Some(bytes.to_vec());
-        }
-        let values = match self {
-            Value::Array(values) | Value::FrozenArray(values) => values.as_slice(),
-            Value::FixedSizeArray { data, .. } => data.as_slice(),
-            _ => return None,
-        };
-        values
-            .iter()
-            .map(|value| match value {
-                Value::UInt { value, .. } => u8::try_from(*value).ok(),
-                Value::Int(value) => u8::try_from(*value).ok(),
-                _ => None,
-            })
-            .collect()
     }
 
     /// Create a new mutable dict value (default for dict literals)

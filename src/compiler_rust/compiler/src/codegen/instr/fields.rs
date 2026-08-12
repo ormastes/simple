@@ -27,14 +27,6 @@ fn guard_nonnull_receiver<M: Module>(
     byte_offset: usize,
     access_width: usize,
 ) -> InstrResult<()> {
-    // LOCAL BUILD NEUTRALIZATION (not committed): the receiver guard calls
-    // rt_struct_receiver_valid, which lives only in runtime_native.c — a TU
-    // the seed crate cannot link (duplicate rt_host_gpu_* symbols). Until the
-    // guard lane lands the seed-side symbol, emit no guard so the JIT keeps
-    // the pre-guard behavior. Revert via /tmp/fields_rs_guarded.rs.
-    if std::env::var("SIMPLE_SEED_FIELD_GUARD").is_err() {
-        return Ok(());
-    }
     let err_block = builder.create_block();
     let ok_block = builder.create_block();
     let offset = builder.ins().iconst(types::I64, byte_offset as i64);

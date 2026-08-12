@@ -128,9 +128,20 @@ const SHA512_H: [u64; 8] = [
 ];
 
 fn expect_byte_array(name: &str, value: &Value) -> Result<Vec<u8>, CompileError> {
-    value
-        .try_array_bytes()
-        .ok_or_else(|| CompileError::runtime(format!("{name} expects an array of byte values")))
+    match value {
+        Value::Array(items) => items
+            .iter()
+            .map(|item| match item {
+                Value::Int(byte) if (0..=255).contains(byte) => Ok(*byte as u8),
+                Value::UInt { value, .. } if *value <= 255 => Ok(*value as u8),
+                Value::Int(_) | Value::UInt { .. } => {
+                    Err(CompileError::runtime(format!("{name} expects byte values in 0..255")))
+                }
+                _ => Err(CompileError::runtime(format!("{name} expects an array of integers"))),
+            })
+            .collect(),
+        _ => Err(CompileError::runtime(format!("{name} expects an array argument"))),
+    }
 }
 
 fn expect_index(name: &str, value: &Value, max_inclusive: i64) -> Result<i64, CompileError> {

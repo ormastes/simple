@@ -298,28 +298,25 @@ impl Lowerer {
             return Ok(out);
         };
 
-        // Same-bare-name variant selection: the local registry is
-        // last-registration-wins, so `declared` may be a DIFFERENT module's
-        // layout for this name. Only when that layout does NOT cover every
-        // provided named argument — i.e. the construction would hit the
-        // hard-error gate below — and exactly ONE recorded variant covers them
-        // all, adopt that variant's layout. When the registry layout already
-        // covers everything, keep it: swapping layouts for a covering
-        // constructor risks writer/reader divergence, which is worse than the
-        // de-JIT this avoids. Ambiguous coverage keeps the registry layout.
+        // Same-bare-name variant selection (run/JIT lane): the local registry
+        // is last-registration-wins, so `declared` may be a DIFFERENT module's
+        // layout for this name. When the duplicate-variant map records several
+        // layouts for the bare name and exactly ONE of them covers every
+        // provided named argument, that layout is the one this construction
+        // means -- use it for both the typo check below and the field order of
+        // the emitted value. Ambiguous coverage (zero or several matches)
+        // keeps the registry layout and the existing soundness gate.
         let mut declared = declared;
         let bare_name = name.rsplit('.').next().unwrap_or(name);
-        let provided_names: Vec<&str> = provided.iter().filter_map(|(n, _)| *n).collect();
-        let registry_covers = provided_names
-            .iter()
-            .all(|pn| declared.iter().any(|d| d == pn));
-        if !registry_covers && !provided_names.is_empty() {
-            if let Some(variants) = self
-                .duplicate_global_struct_defs
-                .as_ref()
-                .and_then(|defs| defs.get(bare_name))
-            {
-                if variants.len() > 1 {
+        if let Some(variants) = self
+            .duplicate_global_struct_defs
+            .as_ref()
+            .and_then(|defs| defs.get(bare_name))
+        {
+            if variants.len() > 1 {
+                let provided_names: Vec<&str> =
+                    provided.iter().filter_map(|(n, _)| *n).collect();
+                if !provided_names.is_empty() {
                     let mut covering = variants.iter().filter(|fields| {
                         provided_names
                             .iter()
@@ -328,7 +325,11 @@ impl Lowerer {
                     let first = covering.next();
                     let second = covering.next();
                     if let (Some(best), None) = (first, second) {
-                        declared = best.iter().map(|(n, _)| n.clone()).collect();
+                        let best_names: Vec<String> =
+                            best.iter().map(|(n, _)| n.clone()).collect();
+                        if best_names != declared {
+                            declared = best_names;
+                        }
                     }
                 }
             }

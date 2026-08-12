@@ -233,9 +233,7 @@ impl Clone for Value {
             Value::StrBytes(b) => Value::StrBytes(Arc::clone(b)),
             Value::Symbol(s) => Value::Symbol(s.clone()),
             Value::Array(a) => Value::Array(Arc::clone(a)),
-            Value::ByteArray(a) => Value::ByteArray(Arc::clone(a)),
             Value::FrozenArray(a) => Value::FrozenArray(a.clone()),
-            Value::FrozenByteArray(a) => Value::FrozenByteArray(Arc::clone(a)),
             Value::FixedSizeArray { size, data } => Value::FixedSizeArray {
                 size: *size,
                 data: data.clone(),
@@ -326,9 +324,7 @@ impl Clone for Value {
                 payload: payload.clone(),
                 result: result.clone(),
             },
-            Value::ByteArray(bytes) => Value::ByteArray(Arc::clone(bytes)),
             Value::FrozenArray(arr) => Value::FrozenArray(Arc::clone(arr)),
-            Value::FrozenByteArray(bytes) => Value::FrozenByteArray(Arc::clone(bytes)),
             Value::FrozenDict(dict) => Value::FrozenDict(Arc::clone(dict)),
             Value::Nil => Value::Nil,
         }
@@ -359,18 +355,6 @@ impl PartialEq for Value {
             (Value::StrBytes(a), Value::Str(b)) => a.as_slice() == b.as_bytes(),
             (Value::Symbol(a), Value::Symbol(b)) => a == b,
             (Value::Array(a), Value::Array(b)) => a == b,
-            (Value::ByteArray(a), Value::ByteArray(b))
-            | (Value::ByteArray(a), Value::FrozenByteArray(b))
-            | (Value::FrozenByteArray(a), Value::ByteArray(b))
-            | (Value::FrozenByteArray(a), Value::FrozenByteArray(b)) => a == b,
-            (Value::ByteArray(a), Value::Array(b))
-            | (Value::FrozenByteArray(a), Value::Array(b))
-            | (Value::ByteArray(a), Value::FrozenArray(b))
-            | (Value::FrozenByteArray(a), Value::FrozenArray(b)) => packed_bytes_equal_values(a, b),
-            (Value::Array(a), Value::ByteArray(b))
-            | (Value::Array(a), Value::FrozenByteArray(b))
-            | (Value::FrozenArray(a), Value::ByteArray(b))
-            | (Value::FrozenArray(a), Value::FrozenByteArray(b)) => packed_bytes_equal_values(b, a),
             (Value::Tuple(a), Value::Tuple(b)) => a == b,
             (Value::LabeledTuple { labels: la, values: va }, Value::LabeledTuple { labels: lb, values: vb }) => {
                 la == lb && va == vb
@@ -452,42 +436,5 @@ impl PartialEq for Value {
             (Value::Nil, Value::Nil) => true,
             _ => false,
         }
-    }
-}
-
-fn packed_bytes_equal_values(bytes: &[u8], values: &[Value]) -> bool {
-    bytes.len() == values.len()
-        && bytes.iter().zip(values).all(|(byte, value)| match value {
-            Value::UInt { value, .. } => *value == u64::from(*byte),
-            Value::Int(value) => *value == i64::from(*byte),
-            _ => false,
-        })
-}
-
-#[cfg(test)]
-mod packed_byte_tests {
-    use super::*;
-
-    #[test]
-    fn packed_bytes_preserve_legacy_array_equality() {
-        let packed = Value::byte_array(vec![0, 127, 255]);
-        let legacy = Value::array(vec![
-            Value::Int(0),
-            Value::UInt { value: 127, width: 8 },
-            Value::Int(255),
-        ]);
-        assert_eq!(packed, legacy);
-        assert_ne!(Value::byte_array(vec![1]), Value::array(vec![Value::Int(257)]));
-    }
-
-    #[test]
-    fn packed_byte_clone_is_copy_on_write_and_frozen_bytes_extract() {
-        let original = Value::byte_array(vec![1, 2, 3]);
-        let mut changed = original.clone();
-        let Value::ByteArray(bytes) = &mut changed else { panic!("packed clone changed kind") };
-        Arc::make_mut(bytes)[0] = 9;
-        assert_eq!(original.byte_array_view(), Some([1, 2, 3].as_slice()));
-        assert_eq!(changed.byte_array_view(), Some([9, 2, 3].as_slice()));
-        assert_eq!(Value::frozen_byte_array(vec![4, 5]).try_array_bytes(), Some(vec![4, 5]));
     }
 }

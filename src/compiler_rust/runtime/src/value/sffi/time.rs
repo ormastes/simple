@@ -35,16 +35,6 @@ mod c_sffi {
 pub fn rt_time_now_nanos() -> i64 {
     unsafe { c_sffi::rt_time_now_nanos() }
 }
-
-/// Suspend the current host thread for at least `ns` nanoseconds.
-///
-/// Non-positive durations are a no-op, matching the C runtime contract.
-#[no_mangle]
-pub extern "C" fn rt_sleep_nanos(ns: i64) {
-    if ns > 0 {
-        std::thread::sleep(std::time::Duration::from_nanos(ns as u64));
-    }
-}
 #[inline(always)]
 pub fn rt_time_now_micros() -> i64 {
     unsafe { c_sffi::rt_time_now_micros() }

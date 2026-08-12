@@ -169,11 +169,9 @@ fn simd_isa_mask_src_over(mut dst: [u32], dst_offset: i64, colour: i64,
 # src/runtime/runtime_simd_dispatch.c) with zero heap allocation and no
 # gather/scatter copy loop. See
 # doc/03_plan/ui/perf/engine2d_simd_blend_span_kernel_design_plan_2026-08-07.md.
-# These are the real SIMD-dispatch implementations for the two blend slots.
-# The caller's kernel table still admits either slot only after its timing gate
-# proves exactness and a win for that bucket.  Crucially, the native ABI edits
-# `dst` in place and returns that same array only as an FFI convention: copying
-# the returned span back over `dst` here used to add a second full row walk.
+# Not wired into simd_span_batch_execute below or KERNEL_PROVIDER_SIMD_ISA
+# registration — the honest-gate timing pass in simd_isa_provider_spec.spl
+# decides whether either earns a slot; see that spec for the actual verdict.
 
 fn simd_isa_blend_span(mut dst: [u32], dst_offset: i64, src: [u32],
                        src_offset: i64, count: i64):
@@ -181,22 +179,26 @@ fn simd_isa_blend_span(mut dst: [u32], dst_offset: i64, src: [u32],
     gather/scatter row buffers), matching oracle_src_over_image."""
     if count <= 0:
         return
-    # The C ABI validates both spans, changes dst in place, and returns dst.
-    # Keep the returned value only as a fail-closed ABI-shape check; do not
-    # rescan the span and copy it back into itself.
-    val result = engine2d_simd_blend_span_u32(dst, dst_offset, src, src_offset, count)
-    if result.len() != dst.len():
+    val blended = engine2d_simd_blend_span_u32(dst, dst_offset, src, src_offset, count)
+    if blended.len() != dst.len():
         return
+    var i: i64 = 0
+    while i < count:
+        dst[(dst_offset + i).to_i32()] = blended[(dst_offset + i).to_i32()]
+        i = i + 1
 
 fn simd_isa_blend_const_span(mut dst: [u32], offset: i64, count: i64, colour: i64):
     """src_over_const via the in-place blend-const-span kernel (no malloc, no
     row buffers), matching oracle_src_over_const (sa==0 no-op included)."""
     if count <= 0:
         return
-    # As above, the returned array is the same in-place destination.
-    val result = engine2d_simd_blend_const_span_u32(dst, offset, count, colour)
-    if result.len() != dst.len():
+    val blended = engine2d_simd_blend_const_span_u32(dst, offset, count, colour)
+    if blended.len() != dst.len():
         return
+    var i: i64 = 0
+    while i < count:
+        dst[(offset + i).to_i32()] = blended[(offset + i).to_i32()]
+        i = i + 1
 
 # --- real per-op dispatcher --------------------------------------------------
 #
@@ -239,13 +241,13 @@ fn simd_span_batch_execute(mut batch: SpanOpBatch, mut dst: [u32], src: [u32],
                 executed = executed + 1
             elif op == KERNEL_OP_SRC_OVER_CONST:
                 if use_simd:
-                    simd_isa_blend_const_span(dst, dst_off, count, batch.colours[idx])
+                    simd_isa_src_over_const(dst, dst_off, count, batch.colours[idx])
                 else:
                     oracle_src_over_const(dst, dst_off, count, batch.colours[idx])
                 executed = executed + 1
             elif op == KERNEL_OP_SRC_OVER_IMAGE:
                 if use_simd:
-                    simd_isa_blend_span(dst, dst_off, src, src_off, count)
+                    simd_isa_src_over_image(dst, dst_off, src, src_off, count)
                 else:
                     oracle_src_over_image(dst, dst_off, src, src_off, count)
                 executed = executed + 1

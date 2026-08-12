@@ -141,10 +141,7 @@ function bitmapEvidence(bitmap) {
 }
 
 function attachElectronLiveSmokeScreenshot(win, envelope) {
-    // Default mirrors check-electron-live-smoke.shs: screenshot lives next to
-    // the proof as <proof>.png when no explicit path is provided.
-    const screenshotPath = process.env.SIMPLE_ELECTRON_SCREENSHOT_PATH
-        || (process.env.SIMPLE_ELECTRON_PROOF_PATH ? process.env.SIMPLE_ELECTRON_PROOF_PATH + '.png' : '');
+    const screenshotPath = process.env.SIMPLE_ELECTRON_SCREENSHOT_PATH || '';
     if (!screenshotPath || !win || !win.webContents) {
         return Promise.resolve(Object.assign({}, envelope, {
             screenshot_path: '',
@@ -156,14 +153,6 @@ function attachElectronLiveSmokeScreenshot(win, envelope) {
         const png = image.toPNG();
         const bitmap = image.toBitmap();
         const size = image.getSize();
-        // capturePage returns physical pixels; on HiDPI/Retina displays the
-        // bitmap is scaleFactor x the logical content size. Report the measured
-        // factor so validators can scale expectations instead of failing on
-        // dimensions (Linux/xvfb measures exactly 1).
-        const contentSize = typeof win.getContentSize === 'function' ? win.getContentSize() : [0, 0];
-        const scaleFactor = Array.isArray(contentSize) && contentSize[0] > 0
-            ? size.width / contentSize[0]
-            : 1;
         const pixels = bitmapEvidence(bitmap);
         fs.mkdirSync(path.dirname(resolvedScreenshotPath), { recursive: true });
         fs.writeFileSync(resolvedScreenshotPath, png);
@@ -171,7 +160,6 @@ function attachElectronLiveSmokeScreenshot(win, envelope) {
             screenshot_path: resolvedScreenshotPath,
             screenshot_width: size.width,
             screenshot_height: size.height,
-            screenshot_scale_factor: scaleFactor,
             screenshot_png_size_bytes: png.length,
             screenshot_bitmap_byte_count: bitmap.length,
             screenshot_pixel_checksum: pixels.checksum,

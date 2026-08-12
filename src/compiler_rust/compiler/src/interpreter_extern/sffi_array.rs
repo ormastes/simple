@@ -55,8 +55,8 @@ pub fn rt_array_new_with_cap_fn(_args: &[Value]) -> Result<Value, CompileError> 
 
 /// Create a typed byte array for interpreter mode.
 ///
-/// The interpreter stores `[u8]` as packed bytes.  Generic `[T]` arrays stay
-/// boxed, so this only changes the explicitly byte-typed SFFI boundary.
+/// The interpreter stores typed arrays as regular `Value::Array` values while
+/// preserving byte values with `Value::UInt { width: 8 }`.
 pub fn rt_byte_array_new_fn(args: &[Value]) -> Result<Value, CompileError> {
     let capacity = args
         .first()
@@ -68,7 +68,7 @@ pub fn rt_byte_array_new_fn(args: &[Value]) -> Result<Value, CompileError> {
         })?
         .as_int()?;
     let len = capacity.max(0) as usize;
-    Ok(Value::byte_array(vec![0; len]))
+    Ok(Value::array(vec![Value::UInt { value: 0, width: 8 }; len]))
 }
 
 /// Set array length when the interpreter already materialized the requested size.
@@ -114,7 +114,6 @@ pub fn rt_array_concat_fn(args: &[Value]) -> Result<Value, CompileError> {
 
     let mut items = match left {
         Value::Array(values) | Value::FrozenArray(values) => values.as_ref().clone(),
-        Value::ByteArray(values) | Value::FrozenByteArray(values) => Value::byte_array_values(values),
         Value::FixedSizeArray { data, .. } => data.clone(),
         other => {
             return Err(CompileError::semantic(format!(
@@ -125,7 +124,6 @@ pub fn rt_array_concat_fn(args: &[Value]) -> Result<Value, CompileError> {
     };
     let right_items = match right {
         Value::Array(values) | Value::FrozenArray(values) => values.as_ref().clone(),
-        Value::ByteArray(values) | Value::FrozenByteArray(values) => Value::byte_array_values(values),
         Value::FixedSizeArray { data, .. } => data.clone(),
         other => {
             return Err(CompileError::semantic(format!(
@@ -162,10 +160,7 @@ pub fn rt_bytes_u8_at_fn(args: &[Value]) -> Result<Value, CompileError> {
         .as_int()?;
 
     match arr {
-        Value::ByteArray(vec) | Value::FrozenByteArray(vec) => {
-            Ok(Value::Int(vec.get(idx as usize).copied().map(i64::from).unwrap_or(0)))
-        }
-        Value::Array(vec) | Value::FrozenArray(vec) => {
+        Value::Array(vec) => {
             let byte_val = vec.get(idx as usize).unwrap_or(&Value::Int(0));
             Ok(Value::Int(interpreter_byte_at(byte_val)))
         }
@@ -209,20 +204,7 @@ fn interpreter_bytes_le_at(args: &[Value], width: usize, name: &str) -> Result<V
         .as_int()?;
 
     match arr {
-        Value::ByteArray(vec) | Value::FrozenByteArray(vec) => {
-            let Some(start) = normalized_byte_index(index, vec.len()) else {
-                return Ok(Value::Int(0));
-            };
-            if start + width > vec.len() {
-                return Ok(Value::Int(0));
-            }
-            let mut value = 0u64;
-            for offset in 0..width {
-                value |= u64::from(vec[start + offset]) << (offset * 8);
-            }
-            Ok(Value::Int(value as i64))
-        }
-        Value::Array(vec) | Value::FrozenArray(vec) => {
+        Value::Array(vec) => {
             let Some(start) = normalized_byte_index(index, vec.len()) else {
                 return Ok(Value::Int(0));
             };

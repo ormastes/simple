@@ -36,21 +36,47 @@ use std::sync::Arc;
 /// 0x80) round-trip correctly. Typed byte literals arrive as `Value::UInt`,
 /// and must not be dropped from SFFI byte arrays.
 fn extract_bytes(args: &[Value], index: usize) -> Option<Vec<u8>> {
-    args.get(index)?.try_array_bytes()
+    match args.get(index)? {
+        Value::Array(arr) => Some(
+            arr.iter()
+                .filter_map(|v| match v {
+                    Value::Int(i) => Some(*i as u8),
+                    Value::UInt { value, .. } => Some(*value as u8),
+                    _ => None,
+                })
+                .collect(),
+        ),
+        _ => None,
+    }
 }
 
 /// Wrap raw bytes in a `Value::Array(Arc<Vec<Value::Int(byte)>>)` shape
 /// so Simple code sees a genuine `[u8]`.
 fn bytes_to_value(bytes: &[u8]) -> Value {
-    Value::byte_array(bytes.to_vec())
+    Value::Array(Arc::new(bytes.iter().map(|b| Value::Int(*b as i64)).collect()))
 }
 
 fn bytes_to_value_with_first_u8(bytes: &[u8]) -> Value {
-    Value::byte_array(bytes.to_vec())
+    Value::Array(Arc::new(
+        bytes
+            .iter()
+            .enumerate()
+            .map(|(index, byte)| {
+                if index == 0 {
+                    Value::UInt {
+                        value: *byte as u64,
+                        width: 8,
+                    }
+                } else {
+                    Value::Int(*byte as i64)
+                }
+            })
+            .collect(),
+    ))
 }
 
 fn empty_bytes() -> Value {
-    Value::byte_array(Vec::new())
+    Value::Array(Arc::new(Vec::new()))
 }
 
 fn ed25519_pkcs8_v1_seed(pkcs8: &[u8]) -> Option<&[u8]> {

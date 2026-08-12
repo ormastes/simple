@@ -1198,6 +1198,7 @@ static uint32_t engine2d_blend_sse2_pixel(uint32_t s, uint32_t d) {
 
 static void engine2d_blend_into_sse2(int64_t* out, const int64_t* dst,
                                      const int64_t* src, int64_t n) {
+    if (n > 0) engine2d_record_simd_row_hit();
     for (int64_t i = 0; i < n; i++) {
         uint32_t s = (uint32_t)(uint64_t)src[i];
         uint32_t d = (uint32_t)(uint64_t)dst[i];
@@ -1209,6 +1210,7 @@ SIMPLE_RUNTIME_TARGET_AVX2
 static void engine2d_blend_into_avx2(int64_t* out, const int64_t* dst,
                                      const int64_t* src, int64_t n) {
     int64_t i = 0;
+    if (n > 0) engine2d_record_simd_row_hit();
     for (; i + 2 <= n; i += 2) {
         uint32_t s0 = (uint32_t)(uint64_t)src[i];
         uint32_t d0 = (uint32_t)(uint64_t)dst[i];
@@ -1310,11 +1312,9 @@ static void engine2d_blend_into(int64_t* out, const int64_t* dst,
     }
 #elif defined(__x86_64__) || defined(_M_X64)
     if (simd_detect_avx2()) {
-        if (n > 0) engine2d_record_simd_row_hit();
         engine2d_blend_into_avx2(out, dst, src, n);
         return;
     }
-    if (n > 0) engine2d_record_simd_row_hit();
     engine2d_blend_into_sse2(out, dst, src, n);
     return;
 #else
@@ -1625,119 +1625,6 @@ SplArray* rt_engine2d_simd_copy_span_u32(SplArray* dst, int64_t dst_off,
     return dst;
 }
 
-/* Classify four boxed pixels and copy an opaque block in the same vector load.
- * Return 1 for copied opaque, 2 for transparent no-op, 0 for mixed alpha. */
-#if defined(__x86_64__) || defined(_M_X64)
-static int engine2d_classify_copy_block4_sse2(int64_t* dst,
-                                               const int64_t* src) {
-    const uint64_t alpha_mask = 0x7F8000000ull;
-    const uint64_t a0 = (uint64_t)src[0] & alpha_mask;
-    const uint64_t a1 = (uint64_t)src[1] & alpha_mask;
-    const uint64_t a2 = (uint64_t)src[2] & alpha_mask;
-    const uint64_t a3 = (uint64_t)src[3] & alpha_mask;
-    __m128i lo = _mm_loadu_si128((const __m128i*)(const void*)src);
-    __m128i hi = _mm_loadu_si128((const __m128i*)(const void*)(src + 2));
-    if (a0 == alpha_mask && a1 == alpha_mask &&
-        a2 == alpha_mask && a3 == alpha_mask) {
-        _mm_storeu_si128((__m128i*)(void*)dst, lo);
-        _mm_storeu_si128((__m128i*)(void*)(dst + 2), hi);
-        return 1;
-    }
-    if ((a0 | a1 | a2 | a3) == 0)
-        return 2;
-    return 0;
-}
-
-SIMPLE_RUNTIME_TARGET_AVX2
-static int engine2d_classify_copy_block4_avx2(int64_t* dst,
-                                               const int64_t* src) {
-    const __m256i alpha_mask = _mm256_set1_epi64x((int64_t)0x7F8000000ull);
-    __m256i pixels = _mm256_loadu_si256((const __m256i*)(const void*)src);
-    __m256i alpha = _mm256_and_si256(pixels, alpha_mask);
-    if (_mm256_movemask_pd(_mm256_castsi256_pd(
-            _mm256_cmpeq_epi64(alpha, alpha_mask))) == 0xF) {
-        _mm256_storeu_si256((__m256i*)(void*)dst, pixels);
-        return 1;
-    }
-    if (_mm256_movemask_pd(_mm256_castsi256_pd(
-            _mm256_cmpeq_epi64(alpha, _mm256_setzero_si256()))) == 0xF)
-        return 2;
-    return 0;
-}
-#endif
-
-static int engine2d_classify_copy_block4(int64_t* dst, const int64_t* src,
-                                         int x86_use_avx2) {
-#if defined(__x86_64__) || defined(_M_X64)
-    return x86_use_avx2 ?
-        engine2d_classify_copy_block4_avx2(dst, src) :
-        engine2d_classify_copy_block4_sse2(dst, src);
-#elif defined(__aarch64__) || defined(_M_ARM64)
-    uint64x2_t lo = vld1q_u64((const uint64_t*)(const void*)src);
-    uint64x2_t hi = vld1q_u64((const uint64_t*)(const void*)(src + 2));
-    uint64x2_t mask = vdupq_n_u64(0x7F8000000ull);
-    uint64x2_t alo = vandq_u64(lo, mask);
-    uint64x2_t ahi = vandq_u64(hi, mask);
-    uint64x2_t olo = vceqq_u64(alo, mask);
-    uint64x2_t ohi = vceqq_u64(ahi, mask);
-    if (vgetq_lane_u64(olo, 0) == UINT64_MAX &&
-        vgetq_lane_u64(olo, 1) == UINT64_MAX &&
-        vgetq_lane_u64(ohi, 0) == UINT64_MAX &&
-        vgetq_lane_u64(ohi, 1) == UINT64_MAX) {
-        vst1q_u64((uint64_t*)(void*)dst, lo);
-        vst1q_u64((uint64_t*)(void*)(dst + 2), hi);
-        return 1;
-    }
-    if ((vgetq_lane_u64(alo, 0) | vgetq_lane_u64(alo, 1) |
-         vgetq_lane_u64(ahi, 0) | vgetq_lane_u64(ahi, 1)) == 0)
-        return 2;
-#elif defined(__riscv) && defined(__riscv_vector)
-    uint32_t a0 = engine2d_unbox_pixel(src[0]) >> 24;
-    uint32_t a1 = engine2d_unbox_pixel(src[1]) >> 24;
-    uint32_t a2 = engine2d_unbox_pixel(src[2]) >> 24;
-    uint32_t a3 = engine2d_unbox_pixel(src[3]) >> 24;
-    if ((a0 & a1 & a2 & a3) == 255u) {
-        int64_t copied = 0;
-        while (copied < 4) {
-            size_t vl = __riscv_vsetvl_e64m1((size_t)(4 - copied));
-            if (vl == 0) return 0;
-            vint64m1_t pixels = __riscv_vle64_v_i64m1(src + copied, vl);
-            __riscv_vse64_v_i64m1(dst + copied, pixels, vl);
-            copied += (int64_t)vl;
-        }
-        return 1;
-    }
-#endif
-    (void)dst;
-    (void)src;
-    return 0;
-}
-
-/* The public span ABI stores tagged pixels. Constant-colour blocks can still
- * amortize unbox/re-box overhead, but the equivalent mixed-source bridge is
- * intentionally absent: the current four-pixel scratch route measures slower
- * than the exact scalar body and therefore does not earn production dispatch. */
-#if defined(__x86_64__) || defined(_M_X64)
-static void engine2d_blend_boxed_const_block4_x86(int64_t* dst,
-                                                   uint32_t src,
-                                                   int use_avx2) {
-    int64_t raw_dst[4];
-    const int64_t raw_src[4] = { (int64_t)src, (int64_t)src,
-                                 (int64_t)src, (int64_t)src };
-    for (int64_t lane = 0; lane < 4; lane++) {
-        raw_dst[lane] = (int64_t)engine2d_unbox_pixel(dst[lane]);
-    }
-    if (use_avx2) {
-        engine2d_blend_into_avx2(raw_dst, raw_dst, raw_src, 4);
-    } else {
-        engine2d_blend_into_sse2(raw_dst, raw_dst, raw_src, 4);
-    }
-    for (int64_t lane = 0; lane < 4; lane++) {
-        dst[lane] = engine2d_box_pixel((uint32_t)raw_dst[lane]);
-    }
-}
-#endif
-
 /* Blend src[src_off..src_off+n) over dst[dst_off..dst_off+n) in place,
  * straight-alpha src-over (oracle_src_over). No malloc — matches
  * fill_span/copy_span's in-place convention, not blend_row's
@@ -1753,54 +1640,7 @@ SplArray* rt_engine2d_simd_blend_span_u32(SplArray* dst, int64_t dst_off,
     int64_t* dst_data = (int64_t*)(uintptr_t)rt_array_data_ptr(dst);
     const int64_t* src_data = (const int64_t*)(uintptr_t)rt_array_data_ptr(src);
     if (!dst_data || !src_data) return dst;
-    int64_t* dst_start = dst_data + d_off;
-    const int64_t* src_start = src_data + s_off;
-    int overlaps = (dst_data == src_data && dst_start < src_start + n &&
-                    src_start < dst_start + n);
-    int vector_classify_available = 0;
-    int x86_use_avx2 = 0;
-#if defined(__x86_64__) || defined(_M_X64)
-    /* x86-64 guarantees SSE2. AVX2 remains separately runtime-dispatched. */
-    vector_classify_available = 1;
-    x86_use_avx2 = simd_detect_avx2();
-#elif defined(__aarch64__) || defined(_M_ARM64)
-    vector_classify_available = 1;
-#elif defined(__riscv) && defined(__riscv_vector)
-    vector_classify_available = rt_simd_has_rvv();
-#endif
-    int64_t i = 0;
-    if (!overlaps) {
-        for (; i + 4 <= n; i += 4) {
-            const uint64_t first_alpha =
-                (uint64_t)src_start[i] & 0x7F8000000ull;
-            int block_kind = (vector_classify_available &&
-                              (first_alpha == 0 ||
-                               first_alpha == 0x7F8000000ull)) ?
-                engine2d_classify_copy_block4(
-                    dst_start + i, src_start + i, x86_use_avx2) : 0;
-            if (block_kind != 0) {
-                engine2d_record_simd_row_hit();
-                continue;
-            }
-            uint32_t s0 = engine2d_unbox_pixel(src_start[i]);
-            uint32_t s1 = engine2d_unbox_pixel(src_start[i + 1]);
-            uint32_t s2 = engine2d_unbox_pixel(src_start[i + 2]);
-            uint32_t s3 = engine2d_unbox_pixel(src_start[i + 3]);
-            uint32_t d0 = engine2d_unbox_pixel(dst_start[i]);
-            uint32_t d1 = engine2d_unbox_pixel(dst_start[i + 1]);
-            uint32_t d2 = engine2d_unbox_pixel(dst_start[i + 2]);
-            uint32_t d3 = engine2d_unbox_pixel(dst_start[i + 3]);
-            dst_start[i] = engine2d_box_pixel(
-                (uint32_t)engine2d_blend_pixel((int64_t)s0, (int64_t)d0));
-            dst_start[i + 1] = engine2d_box_pixel(
-                (uint32_t)engine2d_blend_pixel((int64_t)s1, (int64_t)d1));
-            dst_start[i + 2] = engine2d_box_pixel(
-                (uint32_t)engine2d_blend_pixel((int64_t)s2, (int64_t)d2));
-            dst_start[i + 3] = engine2d_box_pixel(
-                (uint32_t)engine2d_blend_pixel((int64_t)s3, (int64_t)d3));
-        }
-    }
-    for (; i < n; i++) {
+    for (int64_t i = 0; i < n; i++) {
         uint32_t s = engine2d_unbox_pixel(src_data[s_off + i]);
         uint32_t d = engine2d_unbox_pixel(dst_data[d_off + i]);
         dst_data[d_off + i] = engine2d_box_pixel((uint32_t)engine2d_blend_pixel((int64_t)s, (int64_t)d));
@@ -1819,22 +1659,7 @@ SplArray* rt_engine2d_simd_blend_const_span_u32(SplArray* dst, int64_t offset,
     uint32_t s = (uint32_t)(uint64_t)const_color;
     uint32_t sa = (s >> 24) & 0xFFu;
     if (sa == 0u) return dst;
-    if (sa == 255u) {
-        rt_engine2d_simd_fill_u32(dst, offset, n, const_color);
-        return dst;
-    }
-    int64_t i = 0;
-#if defined(__x86_64__) || defined(_M_X64)
-    const int use_avx2 = simd_detect_avx2();
-    int used_vector_blend = 0;
-    for (; i + 4 <= n; i += 4) {
-        engine2d_blend_boxed_const_block4_x86(dst_data + off + i, s,
-                                               use_avx2);
-        used_vector_blend = 1;
-    }
-    if (used_vector_blend) engine2d_record_simd_row_hit();
-#endif
-    for (; i < n; i++) {
+    for (int64_t i = 0; i < n; i++) {
         uint32_t d = engine2d_unbox_pixel(dst_data[off + i]);
         dst_data[off + i] = engine2d_box_pixel((uint32_t)engine2d_blend_pixel((int64_t)s, (int64_t)d));
     }

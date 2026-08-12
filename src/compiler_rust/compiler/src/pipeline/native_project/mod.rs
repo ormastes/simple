@@ -33,7 +33,6 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use object::{Architecture, BinaryFormat, Object, ObjectKind};
 use simple_parser::Parser;
 
 use crate::optimizations::NativeOptimizationLevel;
@@ -60,49 +59,6 @@ fn native_object_staging_dir(cache_base_dir: &Path, cache_dir: &Path) -> Result<
         .prefix("native-objects-")
         .tempdir_in(staging_parent)
         .map_err(|e| format!("create native object staging in {}: {e}", staging_parent.display()))
-}
-
-/// Read a cache entry only when it is a parseable relocatable object.
-///
-/// The key identifies build inputs; it does not make arbitrary payload bytes
-/// trustworthy. Require the expected relocatable format and architecture.
-/// Invalid entries are left in place: another builder may have atomically
-/// published a valid object after our read, so unlinking here would race it.
-fn expected_cached_object_identity() -> (Architecture, BinaryFormat) {
-    use simple_common::target::{TargetArch, TargetOS};
-    let target = effective_target();
-    let architecture = match target.arch {
-        TargetArch::X86_64 => Architecture::X86_64,
-        TargetArch::Aarch64 => Architecture::Aarch64,
-        TargetArch::X86 => Architecture::I386,
-        TargetArch::Arm => Architecture::Arm,
-        TargetArch::Riscv64 => Architecture::Riscv64,
-        TargetArch::Riscv32 => Architecture::Riscv32,
-        TargetArch::Wasm32 => Architecture::Wasm32,
-        TargetArch::Wasm64 => Architecture::Wasm64,
-    };
-    let format = match target.os {
-        TargetOS::Windows => BinaryFormat::Coff,
-        TargetOS::MacOS => BinaryFormat::MachO,
-        TargetOS::Any if matches!(target.arch, TargetArch::Wasm32 | TargetArch::Wasm64) => BinaryFormat::Wasm,
-        TargetOS::Any | TargetOS::Linux | TargetOS::FreeBSD | TargetOS::SimpleOS | TargetOS::None => BinaryFormat::Elf,
-    };
-    (architecture, format)
-}
-
-fn read_usable_cached_object(path: &Path) -> Option<Vec<u8>> {
-    let Ok(bytes) = std::fs::read(path) else {
-        return None;
-    };
-    let (expected_arch, expected_format) = expected_cached_object_identity();
-    let usable = object::File::parse(bytes.as_slice())
-        .map(|object| {
-            object.kind() == ObjectKind::Relocatable
-                && object.architecture() == expected_arch
-                && object.format() == expected_format
-        })
-        .unwrap_or(false);
-    usable.then_some(bytes)
 }
 
 /// Initialize the rayon global thread pool with appropriate stack size and
@@ -912,10 +868,6 @@ impl NativeProjectBuilder {
                 target: hash_one(&triple),
                 linker_script: ls_hash,
                 layout: layout_fp,
-                instrumentation: hash_one(&(
-                    self.config.backend == "llvm" && self.config.sanitize,
-                    self.config.backend == "llvm" && self.config.memprof,
-                )),
             })
         } else {
             None
@@ -938,7 +890,7 @@ impl NativeProjectBuilder {
                 }
                 // Always recompile the entry file (its main->spl_main renaming depends on is_entry)
                 let is_entry = is_entry_file(path, &canon_entry_for_cache);
-                let cache_eligible = object_cache_eligible(is_entry, source);
+                let cache_eligible = !is_entry && !source_may_emit_inline_asm_sidecar(source);
                 let mut immediate_cache = None;
                 if cache_eligible {
                     let per_file_root = self.effective_source_root_for(path);
@@ -957,21 +909,17 @@ impl NativeProjectBuilder {
                     // object built against the OLD declarations.
                     let hash = hash_one(&(base_hash, global_fp_combined));
                     let cached_o = objects_dir.join(format!("{:016x}.o", hash));
-                    if let Some(cached_bytes) = read_usable_cached_object(&cached_o) {
-                        // Cache hit: use the bytes already read for validation
-                        // instead of issuing a second filesystem read via copy.
+                    if cached_o.exists() {
+                        // Cache hit: copy to temp dir
                         let obj_path = temp_dir_path.join(format!("mod_{}.o", i));
-                        if std::fs::write(&obj_path, cached_bytes).is_ok() {
+                        if std::fs::copy(&cached_o, &obj_path).is_ok() {
                             cached_objects.push((i, obj_path));
                             continue;
                         }
                     }
-                    // Persist every cache-eligible object as soon as its compile
-                    // succeeds. The key already includes the full cross-module
-                    // fingerprint, so mangled modules are just as safe to make
-                    // durable here as no-mangle modules. Entry objects and
-                    // inline-asm sidecars remain excluded above.
-                    immediate_cache = Some(cached_o);
+                    if self.config.no_mangle {
+                        immediate_cache = Some(cached_o);
+                    }
                 }
                 to_compile.push((i, path.clone(), source.clone(), immediate_cache));
             }
@@ -1081,9 +1029,32 @@ impl NativeProjectBuilder {
             object_paths.push(security_registry_o);
         }
 
-        // 6. Cache writes happen atomically per successful module in the compile
-        // workers. This intentionally leaves useful keyed objects behind when a
-        // sibling module fails or the process is interrupted before link.
+        // 6. Cache freshly compiled objects
+        if use_incremental {
+            for (idx, obj_path) in &freshly_compiled {
+                if let Some((path, source)) = file_sources.get(*idx) {
+                    let is_entry = is_entry_file(path, &canonical_entry);
+                    if self.config.no_mangle && !is_entry && !source_may_emit_inline_asm_sidecar(source) {
+                        continue;
+                    }
+                    let per_file_root = self.effective_source_root_for(path);
+                    let module_prefix = crate::codegen::common_backend::module_prefix_from_path(path, &per_file_root);
+                    let base_hash = object_cache_key(
+                        source,
+                        is_entry,
+                        effective_backend,
+                        self.config.no_mangle,
+                        &module_prefix,
+                        self.config.opt_level,
+                    );
+                    // Must mirror the read-loop key exactly (see above) or a fresh
+                    // object would be cached under a key the next build never looks up.
+                    let hash = hash_one(&(base_hash, global_fp_combined));
+                    let cached_o = objects_dir.join(format!("{:016x}.o", hash));
+                    let _copy_result = std::fs::copy(obj_path, cached_o);
+                }
+            }
+        }
 
         // 6b. Safe-incremental cache summary + manifest (one line per build).
         // Names the changed component when a global input forced a full rebuild,
@@ -1315,10 +1286,6 @@ fn source_may_emit_inline_asm_sidecar(source: &str) -> bool {
             || trimmed.starts_with("asm(")
             || trimmed.starts_with("asm:")
     })
-}
-
-fn object_cache_eligible(is_entry: bool, source: &str) -> bool {
-    !is_entry && !source_may_emit_inline_asm_sidecar(source)
 }
 
 fn source_may_declare_security(source: &str) -> bool {
@@ -1584,7 +1551,6 @@ pub(crate) struct GlobalBuildFingerprint {
     pub target: u64,
     pub linker_script: u64,
     pub layout: u64,
-    pub instrumentation: u64,
 }
 
 impl GlobalBuildFingerprint {
@@ -1598,7 +1564,6 @@ impl GlobalBuildFingerprint {
         self.target.hash(&mut hasher);
         self.linker_script.hash(&mut hasher);
         self.layout.hash(&mut hasher);
-        self.instrumentation.hash(&mut hasher);
         hasher.finish()
     }
 
@@ -1617,8 +1582,6 @@ impl GlobalBuildFingerprint {
             Some("linker script changed")
         } else if self.layout != prev.layout {
             Some("cross-module type layout / signatures changed")
-        } else if self.instrumentation != prev.instrumentation {
-            Some("codegen instrumentation changed")
         } else {
             None
         }
@@ -1627,9 +1590,8 @@ impl GlobalBuildFingerprint {
     /// Serialize to the manifest line format used beside cached objects.
     pub(crate) fn to_manifest_line(&self) -> String {
         format!(
-            "producer={:016x};opt={:016x};ec={:016x};t={:016x};ls={:016x};layout={:016x};instr={:016x}",
-            self.producer, self.opt_level, self.entry_closure, self.target, self.linker_script, self.layout,
-            self.instrumentation
+            "producer={:016x};opt={:016x};ec={:016x};t={:016x};ls={:016x};layout={:016x}",
+            self.producer, self.opt_level, self.entry_closure, self.target, self.linker_script, self.layout
         )
     }
 
@@ -1642,7 +1604,6 @@ impl GlobalBuildFingerprint {
             target: 0,
             linker_script: 0,
             layout: 0,
-            instrumentation: 0,
         };
         let mut seen = 0;
         for part in line.trim().split(';') {
@@ -1655,12 +1616,11 @@ impl GlobalBuildFingerprint {
                 "t" => fp.target = n,
                 "ls" => fp.linker_script = n,
                 "layout" => fp.layout = n,
-                "instr" => fp.instrumentation = n,
                 _ => continue,
             }
             seen += 1;
         }
-        if seen == 7 {
+        if seen == 5 || seen == 6 {
             Some(fp)
         } else {
             None

@@ -38,7 +38,15 @@ pub fn rt_sha1_write(args: &[Value]) -> Result<Value, CompileError> {
             // Fall back to empty
             Vec::new()
         }
-        value => value.try_array_bytes().unwrap_or_default(),
+        Value::Array(arr) => {
+            // Array of u8 values
+            arr.iter()
+                .filter_map(|v| match v {
+                    Value::Int(i) => Some(*i as u8),
+                    _ => None,
+                })
+                .collect()
+        }
         _ => Vec::new(),
     };
     if let Ok(mut state) = SHA1_STATE.lock() {
@@ -76,7 +84,9 @@ pub fn rt_sha1_finish_bytes(args: &[Value]) -> Result<Value, CompileError> {
         let mut hasher = Sha1::new();
         hasher.update(&data);
         let result = hasher.finalize();
-        Ok(Value::byte_array(result.to_vec()))
+        // Return raw bytes as a string (byte-transparent)
+        let bytes: Vec<u8> = result.to_vec();
+        Ok(Value::text(String::from_utf8_lossy(&bytes).into_owned()))
     } else {
         Ok(Value::Nil)
     }
@@ -125,7 +135,13 @@ pub fn rt_sha1_finish_base64(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_base64_encode(args: &[Value]) -> Result<Value, CompileError> {
     let data = match args.first() {
         Some(Value::Str(s)) => s.as_bytes().to_vec(),
-        Some(value) => value.try_array_bytes().unwrap_or_default(),
+        Some(Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|v| match v {
+                Value::Int(i) => Some(*i as u8),
+                _ => None,
+            })
+            .collect(),
         _ => Vec::new(),
     };
     let encoded = base64::engine::general_purpose::STANDARD.encode(&data);

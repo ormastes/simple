@@ -29,13 +29,12 @@ are independent; do not sequence one behind the other.
 1. **`src/runtime/runtime_native.c`** — DONE. The unsigned-box fix landed and is
    verified by the new compile guard: `runtime_native.c` now compiles clean.
 2. **C-runtime compile guard** (`check-c-runtime-compiles-push.shs`) — landed
-   `04848434af0c`. **Promotion COMPLETED 2026-08-12 (audit finding: vcs.md
-   claimed the promotion on 08-11 but the code side was never at origin —
-   doc-without-code clobber).** Re-landed: `<stddef.h>` include in
-   `async_linux_uring.c` (guard now `PASS — 99 file(s) compiled, 0 errors`),
-   guard wired into `pre-push-conflict-tree-guard.shs` as mandatory, sibling
-   duplicate `check-c-runtime-compiles.shs` deleted with its `-std=gnu11` /
-   `-I src/runtime/platform` flags merged into the canonical script.
+   `04848434af0c`, kept **advisory**, not mandatory. It is honestly RED on one
+   remaining never-compiled file: **`src/runtime/platform/async_linux_uring.c:733`
+   — `use of undeclared identifier 'NULL'`, missing `<stddef.h>`**. Same class as
+   the original defect, previously unfiled, still unowned. Fix it, then flip the
+   guard to mandatory and wire into `pre-push-conflict-tree-guard.shs` — that is
+   the written promotion criterion.
 3. **`bin/simple native-build` now works** — `a1f3adeff791` implemented the
    missing unsigned-value box in `runtime_native.c`, derived byte-for-byte from
    the pure-Simple twin `simple_core/core_values.spl` (not guessed — a guessed
@@ -62,31 +61,20 @@ are independent; do not sequence one behind the other.
    this is a source-content regression guard, not a runtime execution spec — no
    self-hosted binary was available this session to exercise native/JIT codegen
    directly, so the fix's effect at runtime is still unproven by execution.
-6. **sha256_core value-boxing — FIXED (`abf967a7516d`).** Root cause isolated
-   by minimal repro: `list.get()` on an untyped `list` (not `[i64]`) returns a
-   boxed/tagged value — `print` has a special-cased decode path that shows the
-   right number, but any further arithmetic (`+`, `<<`) or passing it to
-   another function operates on the raw tag bits, producing the ×8/÷8-shaped
-   corruption that flips direction with call depth. Matches the documented
-   container-boxing family exactly. Fix: retyped every `list` annotation in
-   `sha256_core.spl` to `[i64]` — return types, params, AND internal locals
-   (the earlier investigation's miss). Verified against real FIPS 180-4
-   vectors: empty string and "abc" now match exactly;
-   `sha256_simd_parity_spec.spl` 10/10 (multi-block, 1024/2048-byte payloads,
-   native-byte path, no collision warning). **Second independent bug found and
-   fixed en route:** a dead `compress_block` helper in `sha256.spl` name-
-   collided with the compiler's crypto-intrinsic pattern matcher for
-   `sha256_core_compress_block`, causing non-deterministic wrong dispatch —
-   deleted. The earlier "60s timeout" was never a hang: the spec completes and
-   prints all verdict lines in seconds, the process just doesn't exit
-   afterward (teardown/GC hang, unmeasured, orthogonal to this bug) — read the
-   printed verdict, not the exit code. **Correction (2026-08-12 audit): this
-   "verdicts print in seconds" claim did not reproduce — two runs (90s, 250s+)
-   under `bin/simple test` produced ZERO verdict lines; the hang is upstream of
-   the first it-block in the test-runner path, not in teardown. The underlying
-   parity logic is fine (plain-script `sha256_bytes` vs `_scalar` on "abc"
-   matches instantly), and `sha256_core_vectors_spec` is 13/13 GREEN. The
-   spec-harness hang is unowned; use the vectors spec as the gate meanwhile.**
+6. **sha256_core value-boxing — STILL OPEN, and harder than first framed.**
+   Further investigation found the corruption is not consistently ×8 (sometimes
+   ÷8, depending on call shape) — the original "shift-left-3" framing was too
+   narrow. Traced to somewhere among ~10 nested calls inside
+   `sha256_process_block`, spanning a third module
+   (`std.common.crypto.types`), not isolated to one call boundary. FIPS vectors
+   (empty string, "abc") still fail on the live seed JIT lane. No fix landed —
+   correctly, no regression specs were added either (specs-last discipline
+   held). `sha256_simd_parity_spec.spl` does assert real FIPS vectors (not
+   vacuous) but why it isn't catching this live corruption is still unexplained
+   — both `bin/simple <file>` and `bin/simple test <file>` timed out at 60s
+   when checked. **Next step for a future session:** bisect the ~10 nested
+   calls individually rather than assume the boxing family from other modules
+   applies unchanged here.
 
 **Guard duplication found and resolved (2026-08-11):** two agents independently
 built overlapping C-runtime-compiles pre-push guards
@@ -200,12 +188,6 @@ run dir holding old content is the NORMAL signature of a run that has *started*.
   pixels strictly 10-128), stated honest limits (fixed 8x16 scale, no AA, no
   line wrap, ASCII 0x20-0x7E only, `<style>`/`<script>` text excluded); (3)
   inline `style=` — **CLOSED for real this time (verified at `3d80fd897723`).**
-  **Second correction (2026-08-12 audit): that verification was still wrong —
-  the rename existed only at cascade.spl's call site; `css_parser/parser.spl`
-  still defined `parse_declarations`, so the inline-style path crashed
-  "function not found" at runtime. Rename completed in parser.spl/__init__.spl;
-  browser_render_lane_spec now asserts inline `style=` is HONOURED (50 red
-  pixels), 11/11 GREEN.**
   Renamed to `blink_parse_declarations`/`CssDeclaration` (blink-scoped), no
   collision with the unrelated `gc_async_mut/gpu/browser_engine/style_block.spl`
   module's `parse_declarations`/`CssDecl`. (An earlier report of this as CLOSED
@@ -223,20 +205,8 @@ run dir holding old content is the NORMAL signature of a run that has *started*.
   author rules; `<link>` explicitly deferred — the adapter takes an in-memory
   HTML string with no fetch capability, closing this needs either real fetch
   or a signature change, left to whoever owns the interface. (6)
-  `check-electron-simple-web-layout-bitmap-evidence.shs` — **run, and found
-  the gate itself can't test this criterion.** Its fixture imports
-  `simple_web_render_html_to_pixels` from `browser_engine` directly, never
-  `render_lane.browser_render_html_to_pixel_array`, and never reads
-  `SIMPLE_BROWSER_RENDER_LANE` — live-lane and blink-lane runs produced
-  byte-identical output because the flag is never consulted. Separately, both
-  runs also hit `simple-layout-render-failed` (SIGSEGV, exit 139) rendering
-  the gate's scene through the live renderer before blink is even reached —
-  consistent with tonight's no-working-self-hosted-binary situation, not a
-  blink defect. Filed:
-  `doc/08_tracking/bug/electron_simple_web_layout_gate_bypasses_render_lane_flag_2026-08-11.md`.
-  Criterion 6 needs the gate fixed before it can be evaluated at all. Inline
-  `style=` (3) is genuinely CLOSED (verified collision-free at `3d80fd897723`)
-  — the flip now stays blocked on (6) only.
+  `check-electron-simple-web-layout-bitmap-evidence.shs` green with the flag
+  ON — not run. The flip stays blocked on (3) inline `style=` and (6).
 - Note: blink has **zero production callers** in `src/app/**` or `src/os/**`.
   This is a build-out, not a repair.
 
@@ -272,52 +242,3 @@ QEMU-only result is a defect, not a completion.
   not the export form; a loose `pgrep` counts probe shells; a glob that doesn't
   descend). Every one was caught by *executing* something, not by inspecting
   declarations. Prefer execution oracles.
-- **An agent's own final report is not proof its edits landed.** A full audit
-  pass tonight found its plan-doc corrections describing real fixes never
-  actually applied to this file — same shape as several sub-agent reports
-  earlier in the session. Always verify against a fresh fetch, never trust a
-  completion summary at face value, including this document's own history.
-
-## Session close-out audit (2026-08-12)
-
-A full audit pass verified every item above against fresh origin content and
-real spec runs (not stale reports), completed what was found incomplete, and
-closed three real gaps:
-
-1. **Guard/doc mismatch fixed.** `vcs.md` claimed the C-runtime-compiles guard
-   was mandatory with `async_linux_uring.c` already fixed — neither was
-   actually true in code. Landed for real (`f5af65b2a705`): the `<stddef.h>`
-   fix, hook wiring, and the sibling guard's `-std=gnu11`/`-I platform` flags
-   merged in before deletion.
-2. **sha1 re-checked with the correct stdlib root — genuinely clean.**
-   (`fab2f224e2f3`) Using the lesson from the stdlib-second-root trap above:
-   sha1.spl is **not corrupted** on the live path. 21 dead bare-`list` sites in
-   an unused code path were retyped defensively anyway. New KAT spec (4/4).
-   This resolves the flag raised earlier — the original "sha1 not corrupted"
-   sweep verdict was correct after all, just unverified against the right root
-   at the time.
-3. **Inline `style=` was only HALF closed.** (`d0de046c100b`) The
-   `blink_parse_declarations` rename existed only at the call site, not in the
-   defining modules (`parser.spl`/`__init__.spl`) — completed. Render-lane spec
-   now asserts inline style is genuinely honoured (11/11).
-4. **`command_dispatch_spec.spl` fake-gate fix, actually landed this time**
-   (`3919c0ae80c4` + `8590fea74638`). The rewrite reported by an earlier agent
-   tonight never made it to origin. Redone as real `rt_file_exists_str` checks
-   — **honestly RED**: `src/app/formatter/` and `src/app/depgraph/main.spl` are
-   genuinely missing. Filed at
-   `doc/08_tracking/bug/command_dispatch_migrated_app_paths_missing_2026-08-12.md`
-   rather than weakened to pass.
-
-**Genuinely still open, and why:** MIR And/Or fix stays a source-content guard
-only (no self-hosted binary to exercise it at runtime); guest-heap-gate re-run,
-blink pixel evidence, and the electron gate fixture all remain blocked on the
-same missing self-hosted binary (bootstrap excluded from tonight's scope per
-documented resource exhaustion — 25 failed attempts); `sha256_simd_parity_spec`
-hangs before printing its first verdict line, contradicting an earlier note in
-this doc — use `sha256_core_vectors_spec` (13/13) as the real gate for that
-module instead; blink transforms/gradients/`<link>` remain deferred, out of
-scope by design.
-
-TODO DB regenerated (`bin/simple todo-scan`, 274 items) — already matched
-origin, follow-up commit was an empty no-op, noted rather than silently
-dropped.

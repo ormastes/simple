@@ -27,7 +27,16 @@ use simple_runtime::value::pbkdf2_native;
 /// Mirrors `signatures.rs::extract_bytes` — `i as u8` truncates to the
 /// low 8 bits so signed-wraparound byte values round-trip correctly.
 fn extract_bytes(args: &[Value], index: usize) -> Vec<u8> {
-    args.get(index).and_then(Value::try_array_bytes).unwrap_or_default()
+    match args.get(index) {
+        Some(Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|v| match v {
+                Value::Int(i) => Some(*i as u8),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 fn extract_i64(args: &[Value], index: usize) -> i64 {
@@ -38,7 +47,7 @@ fn extract_i64(args: &[Value], index: usize) -> i64 {
 }
 
 fn bytes_to_value(bytes: &[u8]) -> Value {
-    Value::byte_array(bytes.to_vec())
+    Value::Array(Arc::new(bytes.iter().map(|b| Value::Int(*b as i64)).collect()))
 }
 
 /// `rt_pbkdf2_hmac_sha1(password: [u8], salt: [u8], iterations: i64, dk_len: i64) -> [u8]`

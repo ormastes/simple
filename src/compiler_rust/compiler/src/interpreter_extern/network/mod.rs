@@ -165,7 +165,7 @@ pub fn rt_http_request(args: &[Value]) -> Result<Value, CompileError> {
 /// Callable from Simple as: `rt_async_ws_read_raw(fd: i64, max_size: i64) -> List<i64>`
 pub fn rt_async_ws_read_raw(_args: &[Value]) -> Result<Value, CompileError> {
     // WebSocket raw I/O is not supported in interpreter mode; return empty array
-    Ok(Value::byte_array(vec![]))
+    Ok(Value::Array(Arc::new(vec![])))
 }
 
 /// Stub for async WebSocket raw write — not available in interpreter mode.

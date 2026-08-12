@@ -10,12 +10,6 @@
 #include <string.h>
 #include <limits.h>
 
-#if defined(_WIN32)
-#include <windows.h>
-#else
-#include <pthread.h>
-#endif
-
 #include "runtime_memory_guard.h"
 
 #if defined(_MSC_VER)
@@ -39,8 +33,6 @@ static RT_MEMORY_THREAD_LOCAL int rt_transient_raw_paused = 0;
 #define RT_TRANSIENT_RAW_TOMBSTONE ((uintptr_t)1)
 #define RT_TRANSIENT_RAW_OWNED_BIT ((size_t)1 << (sizeof(size_t) * CHAR_BIT - 1))
 #define RT_TRANSIENT_RAW_SIZE_MASK (~RT_TRANSIENT_RAW_OWNED_BIT)
-
-void rt_free(uint8_t* ptr);
 
 static size_t rt_transient_raw_hash(uintptr_t ptr) {
     uint64_t value = (uint64_t)ptr;
@@ -163,9 +155,7 @@ int32_t rt_transient_raw_scope_end(void) {
     for (size_t i = 0; i < rt_transient_raw_cap; i++) {
         RtTransientRawAlloc* entry = &rt_transient_raw_allocs[i];
         if (entry->ptr == 0 || entry->ptr == RT_TRANSIENT_RAW_TOMBSTONE) continue;
-        if (entry->bytes & RT_TRANSIENT_RAW_OWNED_BIT) {
-            rt_free((uint8_t*)entry->ptr);
-        }
+        if (entry->bytes & RT_TRANSIENT_RAW_OWNED_BIT) free((void*)entry->ptr);
     }
     if (rt_transient_raw_cap != 0) {
         memset(rt_transient_raw_allocs, 0,
@@ -291,258 +281,8 @@ uint8_t* rt_alloc(int64_t size) {
     return ptr;
 }
 
-/* Struct field accesses are emitted as direct native loads/stores.  Keep a
- * registry of allocations that may legally back those accesses so forged or
- * stale tagged values are rejected before dereference. */
-typedef struct RtStructAllocation {
-    uintptr_t ptr;
-    size_t bytes;
-} RtStructAllocation;
-
-#define RT_STRUCT_ALLOC_TOMBSTONE ((uintptr_t)1)
-#define RT_STRUCT_ALLOC_MAX_CAP ((size_t)1 << 22)
-
-static RtStructAllocation* rt_struct_allocs = NULL;
-static size_t rt_struct_alloc_cap = 0;
-static size_t rt_struct_alloc_len = 0;
-static size_t rt_struct_alloc_tombs = 0;
-#if defined(_WIN32)
-static SRWLOCK rt_struct_alloc_lock = SRWLOCK_INIT;
-#else
-static pthread_rwlock_t rt_struct_alloc_lock = PTHREAD_RWLOCK_INITIALIZER;
-#endif
-
-static void rt_struct_alloc_lock_acquire(void) {
-#if defined(_WIN32)
-    AcquireSRWLockExclusive(&rt_struct_alloc_lock);
-#else
-    pthread_rwlock_wrlock(&rt_struct_alloc_lock);
-#endif
-}
-
-static void rt_struct_alloc_lock_release(void) {
-#if defined(_WIN32)
-    ReleaseSRWLockExclusive(&rt_struct_alloc_lock);
-#else
-    pthread_rwlock_unlock(&rt_struct_alloc_lock);
-#endif
-}
-
-static void rt_struct_alloc_read_lock_acquire(void) {
-#if defined(_WIN32)
-    AcquireSRWLockShared(&rt_struct_alloc_lock);
-#else
-    pthread_rwlock_rdlock(&rt_struct_alloc_lock);
-#endif
-}
-
-static void rt_struct_alloc_read_lock_release(void) {
-#if defined(_WIN32)
-    ReleaseSRWLockShared(&rt_struct_alloc_lock);
-#else
-    pthread_rwlock_unlock(&rt_struct_alloc_lock);
-#endif
-}
-
-static int rt_struct_alloc_insert_raw(uintptr_t ptr, size_t bytes) {
-    size_t mask = rt_struct_alloc_cap - 1;
-    size_t index = rt_transient_raw_hash(ptr) & mask;
-    size_t first_tomb = SIZE_MAX;
-    for (;;) {
-        uintptr_t entry = rt_struct_allocs[index].ptr;
-        if (entry == 0) {
-            size_t target = first_tomb == SIZE_MAX ? index : first_tomb;
-            rt_struct_allocs[target] = (RtStructAllocation){ptr, bytes};
-            if (first_tomb != SIZE_MAX) rt_struct_alloc_tombs--;
-            rt_struct_alloc_len++;
-            return 1;
-        }
-        if (entry == RT_STRUCT_ALLOC_TOMBSTONE) {
-            if (first_tomb == SIZE_MAX) first_tomb = index;
-        } else if (entry == ptr) {
-            rt_struct_allocs[index].bytes = bytes;
-            return 1;
-        }
-        index = (index + 1) & mask;
-    }
-}
-
-static int rt_struct_alloc_resize(size_t next_cap) {
-    if (next_cap > RT_STRUCT_ALLOC_MAX_CAP ||
-            next_cap > SIZE_MAX / sizeof(RtStructAllocation)) return 0;
-    RtStructAllocation* fresh = (RtStructAllocation*)calloc(
-        next_cap, sizeof(RtStructAllocation));
-    if (!fresh) return 0;
-    RtStructAllocation* old = rt_struct_allocs;
-    size_t old_cap = rt_struct_alloc_cap;
-    rt_struct_allocs = fresh;
-    rt_struct_alloc_cap = next_cap;
-    rt_struct_alloc_len = 0;
-    rt_struct_alloc_tombs = 0;
-    for (size_t i = 0; i < old_cap; i++) {
-        uintptr_t ptr = old[i].ptr;
-        if (ptr != 0 && ptr != RT_STRUCT_ALLOC_TOMBSTONE) {
-            rt_struct_alloc_insert_raw(ptr, old[i].bytes);
-        }
-    }
-    free(old);
-    return 1;
-}
-
-static int rt_struct_alloc_register(void* ptr, size_t bytes) {
-    if (!ptr) return 0;
-    rt_struct_alloc_lock_acquire();
-    int ok = rt_struct_alloc_cap != 0 || rt_struct_alloc_resize(256);
-    if (ok && (rt_struct_alloc_len + rt_struct_alloc_tombs + 1) * 10
-            >= rt_struct_alloc_cap * 7) {
-        if (rt_struct_alloc_cap < RT_STRUCT_ALLOC_MAX_CAP) {
-            ok = rt_struct_alloc_resize(rt_struct_alloc_cap * 2);
-        } else if (rt_struct_alloc_tombs > rt_struct_alloc_len / 4) {
-            ok = rt_struct_alloc_resize(rt_struct_alloc_cap);
-        } else if (rt_struct_alloc_len + 1 >= rt_struct_alloc_cap) {
-            ok = 0;
-        }
-    }
-    if (ok) ok = rt_struct_alloc_insert_raw((uintptr_t)ptr, bytes);
-    rt_struct_alloc_lock_release();
-    return ok;
-}
-
-static void rt_struct_alloc_unregister(void* ptr) {
-    if (!ptr) return;
-    rt_struct_alloc_lock_acquire();
-    if (rt_struct_alloc_cap != 0) {
-        size_t mask = rt_struct_alloc_cap - 1;
-        size_t index = rt_transient_raw_hash((uintptr_t)ptr) & mask;
-        for (;;) {
-            uintptr_t entry = rt_struct_allocs[index].ptr;
-            if (entry == 0) break;
-            if (entry == (uintptr_t)ptr) {
-                rt_struct_allocs[index] =
-                    (RtStructAllocation){RT_STRUCT_ALLOC_TOMBSTONE, 0};
-                rt_struct_alloc_len--;
-                rt_struct_alloc_tombs++;
-                break;
-            }
-            index = (index + 1) & mask;
-        }
-    }
-    rt_struct_alloc_lock_release();
-}
-
-static int rt_struct_alloc_lookup_size(void* ptr, size_t* bytes_out) {
-    if (!ptr) return 0;
-    int found = 0;
-    rt_struct_alloc_read_lock_acquire();
-    if (rt_struct_alloc_cap != 0) {
-        size_t mask = rt_struct_alloc_cap - 1;
-        size_t index = rt_transient_raw_hash((uintptr_t)ptr) & mask;
-        for (;;) {
-            uintptr_t entry = rt_struct_allocs[index].ptr;
-            if (entry == 0) break;
-            if (entry == (uintptr_t)ptr) {
-                *bytes_out = rt_struct_allocs[index].bytes;
-                found = 1;
-                break;
-            }
-            index = (index + 1) & mask;
-        }
-    }
-    rt_struct_alloc_read_lock_release();
-    return found;
-}
-
-uint8_t* rt_struct_alloc(int64_t size) {
-    if (size <= 0) return NULL;
-    uint8_t* ptr = rt_alloc(size);
-    if (ptr && !rt_struct_alloc_register(ptr, (size_t)size)) {
-        rt_free(ptr);
-        return NULL;
-    }
-    return ptr;
-}
-
-int8_t rt_struct_receiver_valid(
-    int64_t receiver, int64_t byte_offset, int64_t access_width) {
-    if (receiver == 0 || byte_offset < 0 || access_width <= 0) return 0;
-    uintptr_t ptr = ((uintptr_t)receiver) & ~(uintptr_t)7;
-    if (ptr == 0) return 0;
-
-    int8_t valid = 0;
-    rt_struct_alloc_read_lock_acquire();
-    if (rt_struct_alloc_cap != 0) {
-        size_t mask = rt_struct_alloc_cap - 1;
-        size_t index = rt_transient_raw_hash(ptr) & mask;
-        for (;;) {
-            uintptr_t entry = rt_struct_allocs[index].ptr;
-            if (entry == 0) break;
-            if (entry == ptr) {
-                size_t offset = (size_t)byte_offset;
-                size_t width = (size_t)access_width;
-                size_t bytes = rt_struct_allocs[index].bytes;
-                valid = offset <= bytes && width <= bytes - offset;
-                break;
-            }
-            index = (index + 1) & mask;
-        }
-    }
-    rt_struct_alloc_read_lock_release();
-    return valid;
-}
-
-void* rt_realloc(void* ptr, int64_t size) {
-    if (size < 0) return NULL;
-    if (!ptr) return rt_alloc(size);
-    if (size == 0) {
-        rt_free((uint8_t*)ptr);
-        return NULL;
-    }
-
-    size_t old_size = 0;
-    if (rt_struct_alloc_lookup_size(ptr, &old_size)) {
-        void* next = rt_struct_alloc(size);
-        if (!next) return NULL;
-        memcpy(next, ptr, old_size < (size_t)size ? old_size : (size_t)size);
-        rt_free((uint8_t*)ptr);
-        return next;
-    }
-
-    RtMemGuardSlot* guard_slot = rt_mem_guard_find(ptr);
-    if (guard_slot != NULL) {
-        old_size = guard_slot->size;
-        void* next = rt_alloc(size);
-        if (!next) return NULL;
-        memcpy(next, ptr, old_size < (size_t)size ? old_size : (size_t)size);
-        rt_free((uint8_t*)ptr);
-        return next;
-    }
-
-    if (rt_mem_harden_enabled()) {
-        uint8_t* base = (uint8_t*)ptr - RT_MEM_HARDEN_HEADER_BYTES;
-        old_size = *(size_t*)base;
-        void* next = rt_alloc(size);
-        if (!next) return NULL;
-        memcpy(next, ptr, old_size < (size_t)size ? old_size : (size_t)size);
-        rt_free((uint8_t*)ptr);
-        return next;
-    }
-
-    RtTransientRawAlloc* tracked = rt_transient_raw_lookup((uintptr_t)ptr);
-    if (tracked != NULL) {
-        old_size = tracked->bytes & RT_TRANSIENT_RAW_SIZE_MASK;
-        void* next = rt_alloc(size);
-        if (!next) return NULL;
-        memcpy(next, ptr, old_size < (size_t)size ? old_size : (size_t)size);
-        rt_free((uint8_t*)ptr);
-        return next;
-    }
-
-    return realloc(ptr, (size_t)size);
-}
-
 void rt_free(uint8_t* ptr) {
     if (!ptr) return;
-    rt_struct_alloc_unregister(ptr);
     if (rt_mem_guard_is_slot(ptr)) {
         /* Guard slots are never transient-scope-owned and never enter the
          * harden quarantine -- guard_free_sampled already PROT_NONEs the

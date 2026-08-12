@@ -3086,29 +3086,7 @@ pub fn compile_call<M: Module>(
     // Map Simple builtin names to runtime SFFI function names (for SFFI lookup only)
     // Note: "str", "int", "input" are handled in compile_builtin_io_call, not here
     // The alias table is shared with referenced_call_names via sffi_alias_target().
-    let direct_leaf_is_bytes = |name: &str| {
-        name.rsplit("_dot_")
-            .next()
-            .unwrap_or(name)
-            .rsplit('.')
-            .next()
-            .is_some_and(|leaf| leaf == "bytes")
-    };
-    // MIR normally canonicalizes typed text `.bytes()` calls.  Keep the
-    // Cranelift boundary fail-safe as well: hand-built/legacy MIR may retain
-    // only the leaf, and resolving that leaf through the module-wide function
-    // map can otherwise bind an unrelated user-defined `*.bytes` owner.
-    let exact_string_bytes_runtime = args.len() == 1
-        && args
-            .first()
-            .and_then(|receiver| ctx.vreg_types.get(receiver))
-            .is_some_and(|ty| *ty == TypeId::STRING)
-        && direct_leaf_is_bytes(func_name_raw);
-    let sffi_name: &str = if exact_string_bytes_runtime {
-        "rt_string_bytes"
-    } else {
-        sffi_alias_target(func_name_for_sffi).unwrap_or(func_name_for_sffi)
-    };
+    let sffi_name: &str = sffi_alias_target(func_name_for_sffi).unwrap_or(func_name_for_sffi);
     // Use raw name for user-function lookups (func_ids, use_map, import_map)
     // but mapped SFFI name for runtime_funcs and builtin I/O checks
     let func_name: &str = func_name_raw;

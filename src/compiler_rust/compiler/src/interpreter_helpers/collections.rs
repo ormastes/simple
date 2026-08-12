@@ -398,7 +398,6 @@ pub(crate) fn iter_to_vec(val: &Value) -> Result<Vec<Value>, CompileError> {
     match val {
         Value::Array(arr) => Ok(arr.as_ref().clone()),
         Value::FrozenArray(arr) => Ok(arr.as_ref().clone()),
-        Value::ByteArray(bytes) | Value::FrozenByteArray(bytes) => Ok(Value::byte_array_values(bytes)),
         Value::FixedSizeArray { data, .. } => Ok(data.clone()),
         Value::Tuple(tup) => Ok(tup.clone()),
         Value::Str(s) => Ok(s.chars().map(|c| Value::text(c.to_string())).collect()),

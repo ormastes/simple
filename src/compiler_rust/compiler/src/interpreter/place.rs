@@ -124,14 +124,6 @@ fn normalize_index(len: usize, index: &Value) -> Option<usize> {
     Some(resolved as usize)
 }
 
-fn value_as_u8(value: &Value) -> Option<u8> {
-    match value {
-        Value::UInt { value, .. } => u8::try_from(*value).ok(),
-        Value::Int(value) => u8::try_from(*value).ok(),
-        _ => None,
-    }
-}
-
 /// Take one projection step, yielding a mutable reference to the projected
 /// storage. `Arc::make_mut` keeps copy-on-write semantics: unique containers
 /// mutate in place, shared ones deep-copy first.
@@ -196,20 +188,6 @@ fn store_last(container: &mut Value, projection: &Projection, value: Value) -> b
             }
             None => false,
         },
-        (slot @ Value::ByteArray(_), Projection::Index(index)) => {
-            let Value::ByteArray(bytes) = slot else { unreachable!() };
-            let Some(idx) = normalize_index(bytes.len(), index) else {
-                return false;
-            };
-            if let Some(byte) = value_as_u8(&value) {
-                Arc::make_mut(bytes)[idx] = byte;
-            } else {
-                let mut widened = Value::byte_array_values(bytes);
-                widened[idx] = value;
-                *slot = Value::array(widened);
-            }
-            true
-        }
         (Value::FixedSizeArray { data, .. }, Projection::Index(index)) => match normalize_index(data.len(), index) {
             Some(idx) => {
                 data[idx] = value;
@@ -466,26 +444,5 @@ mod tests {
             projections: vec![Projection::Field("items".into()), Projection::Index(Value::Int(5))],
         };
         assert!(!place_is_live(&env, &place));
-    }
-
-    #[test]
-    fn packed_byte_index_write_is_cow_and_non_byte_assignment_widens() {
-        let mut env = Env::new();
-        env.insert("bytes".into(), Value::byte_array(vec![1, 2]));
-        env.insert("alias".into(), env.get("bytes").unwrap().clone());
-        let first = Place {
-            root: "bytes".into(),
-            projections: vec![Projection::Index(Value::Int(0))],
-        };
-        assert!(write_place(&mut env, &first, Value::UInt { value: 9, width: 8 }));
-        assert_eq!(env.get("bytes").unwrap().byte_array_view(), Some([9, 2].as_slice()));
-        assert_eq!(env.get("alias").unwrap().byte_array_view(), Some([1, 2].as_slice()));
-
-        let second = Place {
-            root: "bytes".into(),
-            projections: vec![Projection::Index(Value::Int(1))],
-        };
-        assert!(write_place(&mut env, &second, Value::text("not a byte")));
-        assert!(matches!(env.get("bytes"), Some(Value::Array(_))));
     }
 }

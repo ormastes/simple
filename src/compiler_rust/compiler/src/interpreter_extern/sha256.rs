@@ -106,7 +106,6 @@ fn payload_bytes(v: &Value) -> Result<Vec<u8>, CompileError> {
     match v {
         Value::Str(s) => Ok(s.as_bytes().to_vec()),
         Value::StrBytes(b) => Ok(b.as_ref().clone()),
-        Value::ByteArray(bytes) | Value::FrozenByteArray(bytes) => Ok(bytes.as_ref().clone()),
         Value::Array(arr) | Value::FrozenArray(arr) => {
             let mut out = Vec::with_capacity(arr.len());
             for (i, e) in arr.iter().enumerate() {

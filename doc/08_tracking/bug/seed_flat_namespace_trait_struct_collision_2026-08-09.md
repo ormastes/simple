@@ -113,33 +113,6 @@ externs under JIT (init reports unavailable — the JIT extern ABI family).
 Those are separate documented classes; the GUI showcase still interprets
 because of them.
 
-## 2026-08-11 final state (third session)
-
-- The run-lane feed is now GATED: `run_file_jit` only collects/feeds the
-  duplicate-struct map when `SIMPLE_JIT_DUP_STRUCT_FEED=1` is set. Default
-  off. Reason: with the feed on, the ui_showcase 2D render JIT-compiles and
-  produces a WRONG frame (missing widgets, lost clip groups; 52192/76800 px
-  differ from the interpreter-correct capture) — the map only unblocks HIR;
-  the JIT then miscompiles this module graph for independent, pre-existing
-  reasons (likely the global widget-store semantics class). Fast-but-wrong
-  is worse than slow-but-right, so the feed defaults off until the JIT
-  correctness gap is fixed.
-- `lower_struct_init_fields` variant selection is now coverage-gated: it
-  only overrides the registry layout when that layout fails to cover the
-  provided named arguments (the hard-error case), never for constructors
-  the registry already covers.
-- The field-receiver guard (`rt_struct_receiver_valid`, in flight on the
-  `codex/runtime-struct-receiver-guard-*` branch) has no seed-linkable
-  symbol yet — its C definition lives in runtime_native.c, which the seed
-  crate cannot link wholesale. `instr/fields.rs` therefore neutralizes the
-  guard unless `SIMPLE_SEED_FIELD_GUARD=1` is set; without this, EVERY JIT
-  field access panics (`missing runtime fn 'rt_struct_receiver_valid'`),
-  making the seed unusable for `run`. Flip the default once the guard lane
-  lands the seed-side symbol.
-- A/B on ui_showcase main_2d (320x240, 1 frame): feed off = 2m57s,
-  pixel-identical to the interpreter reference; feed on = ~3s but wrong
-  frame. Simple two-module collision repro: JITs correctly with feed on.
-
 ## 2026-08-09 follow-up (gui/web/2D vulkan sweep): why Fix 2 does not help `simple run`
 
 `main_gui.spl` / `web_standards_showcase_gui.spl` still log the

@@ -173,7 +173,6 @@ pub(super) fn eval_builtin(
             let val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             match val {
                 Value::Array(a) => Ok(Some(Value::Int(a.len() as i64))),
-                Value::ByteArray(a) | Value::FrozenByteArray(a) => Ok(Some(Value::Int(a.len() as i64))),
                 Value::Tuple(t) => Ok(Some(Value::Int(t.len() as i64))),
                 Value::Dict(d) => Ok(Some(Value::Int(d.len() as i64))),
                 Value::Str(s) => Ok(Some(Value::Int(s.len() as i64))),
@@ -195,12 +194,11 @@ pub(super) fn eval_builtin(
                     // Create immutable frozen copy of array (Arc is shared)
                     Ok(Some(Value::FrozenArray(arc)))
                 }
-                Value::ByteArray(arc) => Ok(Some(Value::FrozenByteArray(arc))),
                 Value::Dict(map) => {
                     // Create immutable frozen copy of dict (map is already Arc<HashMap>)
                     Ok(Some(Value::FrozenDict(map)))
                 }
-                Value::FrozenArray(_) | Value::FrozenByteArray(_) | Value::FrozenDict(_) => {
+                Value::FrozenArray(_) | Value::FrozenDict(_) => {
                     // Already frozen, return as-is
                     Ok(Some(val))
                 }

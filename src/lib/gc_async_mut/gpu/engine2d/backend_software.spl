@@ -18,7 +18,7 @@ use std.gpu.engine2d.color.{color_a, color_r, color_g, color_b, rgba, blend}
 use std.gpu.engine2d.helpers_text.{text_metrics, text_aa_blit_buffer}
 use common.ui.glyph_bitmap_5x7.{glyph_index_for_char_code, glyph_row_bits}
 use std.gpu.engine2d.simd_provider.{record_simd_fill_hit, record_simd_copy_hit, record_simd_alpha_hit}
-use std.gpu.engine2d.simd_kernels.{native_pixel_rows_enabled, _scalar_fill_row, rt_engine2d_simd_fill_span_u32, rt_engine2d_simd_copy_span_u32}
+use std.gpu.engine2d.simd_kernels.{native_pixel_rows_enabled, _scalar_fill_row, rt_engine2d_simd_fill_span_u32, rt_engine2d_simd_copy_span_u32, engine2d_simd_blend_row_u32}
 use std.gpu.engine2d.simd_kernels.{active_arch_text}
 use common.gpu.engine2d.kernel_registry.{
     CpuKernelTable, SpanOpBatch,
@@ -33,9 +33,6 @@ use common.gpu.engine2d.kernel_registry.{
 use std.nogc_sync_mut.gpu.engine2d.simd_isa_provider.{
     simd_span_batch_execute, simd_isa_fill_const,
     simd_isa_src_over_const, simd_isa_src_over_image, simd_isa_mask_src_over,
-}
-use std.nogc_sync_mut.gpu.engine2d.simd_native_rows.{
-    engine2d_simd_blend_span_u32, engine2d_simd_blend_const_span_u32,
 }
 use common.gpu.engine2d.scalar_oracle.{
     oracle_fill_const, oracle_src_over_const, oracle_src_over_image, oracle_mask_src_over,
@@ -61,17 +58,6 @@ use std.gpu.engine2d.backend_emu.{
 # ============================================================================
 
 val TILE_SIZE: i32 = 64     # Tile width/height in pixels (fits in L1 cache)
-
-fn software_damage_exceeds_full_threshold(
-    surface_w: i32, surface_h: i32, bound_w: i32, bound_h: i32,
-    threshold_percent: i64 = 60
-) -> bool:
-    if (surface_w <= 0 or surface_h <= 0 or bound_w <= 0 or bound_h <= 0 or
-        threshold_percent < 0):
-        return false
-    val bound_area = bound_w.to_i64() * bound_h.to_i64()
-    val surface_area = surface_w.to_i64() * surface_h.to_i64()
-    bound_area * 100 > surface_area * threshold_percent
 
 # ============================================================================
 # Honest per-bucket kernel-table timing probe (fill_const)
@@ -848,11 +834,30 @@ impl RenderBackend for SoftwareBackend:
                     else:
                         val dst_off = py * self.w + start_x
                         val src_off = src_row_base + src_x
-                        if self.native_simd_spans and native_pixel_rows_enabled():
-                            self.buf = engine2d_simd_blend_span_u32(
-                                self.buf, dst_off as i64, pixels,
-                                src_off as i64, count as i64)
-                            record_simd_alpha_hit()
+                        if self.native_simd_spans and native_pixel_rows_enabled() and active_arch_text() == "x86_64":
+                            var dst_row: [u32] = [0u32; count]
+                            var src_row: [u32] = [0u32; count]
+                            # cpu-lane-loop-ok: SIMD gather: materialises the dst and src spans for engine2d_simd_blend_row_u32; bound is the clipped span width and it feeds the bulk path
+                            while col < count:
+                                dst_row[col] = self.buf[dst_off + col]
+                                src_row[col] = pixels[src_off + col]
+                                col = col + 1
+                            val blended = engine2d_simd_blend_row_u32(dst_row, src_row)
+                            if blended.len() == count:
+                                record_simd_alpha_hit()
+                                col = 0
+                                # cpu-lane-loop-ok: SIMD scatter: writes the bulk-blended row back to the framebuffer; bound is the clipped span width
+                                while col < count:
+                                    self.buf[dst_off + col] = blended[col]
+                                    col = col + 1
+                            else:
+                                col = 0
+                                # cpu-lane-loop-ok: scalar fallback taken when the SIMD row blend returned a short row; correctness fallback for the bulk path, not a replacement for it
+                                while col < count:
+                                    val src = pixels[src_off + col]
+                                    if color_a(src) > 0:
+                                        self.buf[dst_off + col] = blend(src, self.buf[dst_off + col])
+                                    col = col + 1
                         else:
                             # cpu-lane-loop-ok: scalar fallback taken when SIMD spans are unavailable on this arch; this is the reference blend body the SIMD path is checked against
                             while col < count:
@@ -1096,8 +1101,23 @@ impl SoftwareBackend:
             return
         if self.native_simd_spans and native_pixel_rows_enabled():
             record_simd_alpha_hit()
-            self.buf = engine2d_simd_blend_const_span_u32(
-                self.buf, offset as i64, safe_count as i64, color as i64)
+            var dst_row: [u32] = [0; safe_count]
+            var src_row: [u32] = [color; safe_count]
+            var j = 0
+            # cpu-lane-loop-ok: SIMD gather inside the sw_blend_const_raw_span bulk primitive; materialises the dst span for engine2d_simd_blend_row_u32
+            while j < safe_count:
+                dst_row[j] = self.buf[offset + j]
+                j = j + 1
+            val row = engine2d_simd_blend_row_u32(dst_row, src_row)
+            j = 0
+            # cpu-lane-loop-ok: SIMD scatter inside sw_blend_const_raw_span, length-guarded against a short blended row
+            while j < safe_count and j < row.len():
+                self.buf[offset + j] = row[j]
+                j = j + 1
+            # cpu-lane-loop-ok: tail fallback for the elements a short SIMD blended row did not cover; normally zero iterations
+            while j < safe_count:
+                self.buf[offset + j] = blend(color, self.buf[offset + j])
+                j = j + 1
             return
         var i = 0
         # cpu-lane-loop-ok: scalar fallback inside sw_blend_const_raw_span when SIMD spans are unavailable; this IS the bulk span primitive
@@ -1141,11 +1161,11 @@ impl SoftwareBackend:
         and a flat array is trivially assertable from a spec.
 
         Scan is row-major over the tile grid, emitting one rect per run of
-        horizontally-adjacent dirty tiles, then merging every vertically-
-        stacked run that shares x and w. Past `max_rects`, or when exact dirty
-        area covers >60% of the surface, the set becomes the full surface.
-        Consumers receive either exact local coverage or an explicit full
-        frame, never a widened partial bounding rectangle.
+        horizontally-adjacent dirty tiles, then merging vertically-stacked runs
+        that share x and w. Past `max_rects` the set collapses to its single
+        bounding rect; if the bound covers >60% of the surface the whole
+        surface is returned as one rect (a partial path costing more than the
+        full copy is a loss).
 
         This does NOT clear damage — present() remains the single clear owner.
         """
@@ -1155,8 +1175,6 @@ impl SoftwareBackend:
         var cap = max_rects
         if cap <= 0:
             cap = 16
-        var run_last_row: [i32] = [-2; self.tiles_x]
-        var run_output: [i32] = [-1; self.tiles_x]
         var ty = 0
         while ty < self.tiles_y:
             val y0 = ty * TILE_SIZE
@@ -1176,26 +1194,19 @@ impl SoftwareBackend:
                     val rw = x1 - x0
                     val rh = y1 - y0
                     if rw > 0 and rh > 0:
+                        # Vertical merge with the previous rect when the column
+                        # extent matches and the rows abut exactly.
+                        val n = out.len()
                         var merged = false
-                        var output_index: i32 = -1
-                        if run_last_row[tx] == ty - 1:
-                            val candidate = run_output[tx]
-                            if candidate >= 0:
-                                val offset = candidate * 4
-                                if out[offset + 2] == rw and out[offset + 1] + out[offset + 3] == y0:
-                                    out[offset + 3] = out[offset + 3] + rh
-                                    output_index = candidate
-                                    merged = true
+                        if n >= 4:
+                            if out[n - 4] == x0 and out[n - 2] == rw and (out[n - 3] + out[n - 1]) == y0:
+                                out[n - 1] = out[n - 1] + rh
+                                merged = true
                         if not merged:
-                            output_index = out.len() / 4
-                            if output_index >= cap:
-                                return [0, 0, self.w, self.h]
                             out.push(x0)
                             out.push(y0)
                             out.push(rw)
                             out.push(rh)
-                        run_last_row[tx] = ty
-                        run_output[tx] = output_index
                     tx = run_end
                 else:
                     tx = tx + 1
@@ -1203,15 +1214,29 @@ impl SoftwareBackend:
         val rect_count = out.len() / 4
         if rect_count == 0:
             return out
-        var dirty_area: i64 = 0
-        var r = 0
+        # Bounding rect of everything we emitted.
+        var bx0 = out[0]
+        var by0 = out[1]
+        var bx1 = out[0] + out[2]
+        var by1 = out[1] + out[3]
+        var r = 1
         while r < rect_count:
             val o = r * 4
-            dirty_area = dirty_area + out[o + 2].to_i64() * out[o + 3].to_i64()
+            if out[o] < bx0:
+                bx0 = out[o]
+            if out[o + 1] < by0:
+                by0 = out[o + 1]
+            if out[o] + out[o + 2] > bx1:
+                bx1 = out[o] + out[o + 2]
+            if out[o + 1] + out[o + 3] > by1:
+                by1 = out[o + 1] + out[o + 3]
             r = r + 1
-        val surface_area = self.w.to_i64() * self.h.to_i64()
-        if dirty_area * 100 > surface_area * 60:
+        val bound_area = (bx1 - bx0) * (by1 - by0)
+        val surface_area = self.w * self.h
+        if surface_area > 0 and bound_area * 100 > surface_area * 60:
             return [0, 0, self.w, self.h]
+        if rect_count > cap:
+            return [bx0, by0, bx1 - bx0, by1 - by0]
         out
 
     me damage_is_empty() -> bool:

@@ -236,10 +236,6 @@ impl Value {
                 let parts: Vec<String> = items.iter().map(|v| v.to_key_string()).collect();
                 format!("[{}]", parts.join(","))
             }
-            Value::ByteArray(items) | Value::FrozenByteArray(items) => {
-                let parts: Vec<String> = items.iter().map(u8::to_string).collect();
-                format!("[{}]", parts.join(","))
-            }
             other => format!("{other:?}"),
         }
     }
@@ -339,9 +335,7 @@ impl Value {
             Value::StrBytes(b) => !b.is_empty(),
             Value::Symbol(_) => true,
             Value::Array(a) => !a.is_empty(),
-            Value::ByteArray(a) => !a.is_empty(),
             Value::FrozenArray(a) => !a.is_empty(),
-            Value::FrozenByteArray(a) => !a.is_empty(),
             Value::FixedSizeArray { data, .. } => !data.is_empty(),
             Value::Tuple(t) => !t.is_empty(),
             Value::LabeledTuple { values, .. } => !values.is_empty(),
@@ -413,10 +407,6 @@ impl Value {
             Value::Bool(b) => b.to_string(),
             Value::Array(items) => {
                 let parts: Vec<String> = items.iter().map(|v| v.to_display_string()).collect();
-                format!("[{}]", parts.join(", "))
-            }
-            Value::ByteArray(items) | Value::FrozenByteArray(items) => {
-                let parts: Vec<String> = items.iter().map(u8::to_string).collect();
                 format!("[{}]", parts.join(", "))
             }
             Value::FrozenArray(items) => {
@@ -600,9 +590,7 @@ impl Value {
             Value::StrBytes(_) => "str",
             Value::Symbol(_) => "symbol",
             Value::Array(_) => "array",
-            Value::ByteArray(_) => "array",
             Value::FrozenArray(_) => "array",
-            Value::FrozenByteArray(_) => "array",
             Value::FixedSizeArray { .. } => "array",
             Value::Tuple(_) | Value::LabeledTuple { .. } => "tuple",
             Value::Dict(_) => "dict",
@@ -653,9 +641,7 @@ impl Value {
             Value::StrBytes(_) => ValueKind::String,
             Value::Symbol(_) => ValueKind::Symbol,
             Value::Array(_) => ValueKind::Array,
-            Value::ByteArray(_) => ValueKind::Array,
             Value::FrozenArray(_) => ValueKind::Array,
-            Value::FrozenByteArray(_) => ValueKind::Array,
             Value::FixedSizeArray { .. } => ValueKind::Array,
             Value::Tuple(_) | Value::LabeledTuple { .. } => ValueKind::Tuple,
             Value::Dict(_) => ValueKind::Dict,
@@ -711,10 +697,7 @@ impl Value {
             // Nil/None
             "nil" | "Nil" | "None" => matches!(self, Value::Nil),
             // Array
-            "array" | "Array" => matches!(
-                self,
-                Value::Array(_) | Value::FrozenArray(_) | Value::ByteArray(_) | Value::FrozenByteArray(_)
-            ),
+            "array" | "Array" => matches!(self, Value::Array(_)),
             // Tuple
             "tuple" | "Tuple" => matches!(self, Value::Tuple(_) | Value::LabeledTuple { .. }),
             // Dict

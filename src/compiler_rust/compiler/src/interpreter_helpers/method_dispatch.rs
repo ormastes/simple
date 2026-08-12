@@ -756,11 +756,7 @@ pub(crate) fn call_method_on_value(
             Value::Float(_) => &["f64", "float"],
             Value::Float32(_) => &["f32", "float"],
             Value::Bool(_) => &["bool"],
-            Value::Array(_)
-            | Value::FrozenArray(_)
-            | Value::ByteArray(_)
-            | Value::FrozenByteArray(_)
-            | Value::FixedSizeArray { .. } => &["array", "Array"],
+            Value::Array(_) | Value::FrozenArray(_) | Value::FixedSizeArray { .. } => &["array", "Array"],
             Value::Dict(_) | Value::FrozenDict(_) => &["dict", "Dict"],
             Value::Tuple(_) => &["tuple", "Tuple"],
             _ => &[],

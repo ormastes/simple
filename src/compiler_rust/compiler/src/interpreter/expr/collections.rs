@@ -419,24 +419,6 @@ pub(super) fn eval_collection_expr(
                                 .unwrap_or_default();
                             Ok(Value::array(sliced))
                         }
-                        Value::ByteArray(bytes) => {
-                            let len = bytes.len() as i64;
-                            let (start_idx, end_idx) = compute_slice_indices(start, end, len, inclusive);
-                            let sliced = bytes
-                                .get(start_idx..end_idx.min(bytes.len()))
-                                .map(<[u8]>::to_vec)
-                                .unwrap_or_default();
-                            Ok(Value::byte_array(sliced))
-                        }
-                        Value::FrozenByteArray(bytes) => {
-                            let len = bytes.len() as i64;
-                            let (start_idx, end_idx) = compute_slice_indices(start, end, len, inclusive);
-                            let sliced = bytes
-                                .get(start_idx..end_idx.min(bytes.len()))
-                                .map(<[u8]>::to_vec)
-                                .unwrap_or_default();
-                            Ok(Value::frozen_byte_array(sliced))
-                        }
                         Value::Str(s) => {
                             // BYTE-indexed, matching the native lane (`rt_slice`
                             // slices `s->data` raw bytes), the byte-indexed
@@ -542,23 +524,6 @@ pub(super) fn eval_collection_expr(
                             ctx,
                         )
                     })
-                }
-                Value::ByteArray(bytes) | Value::FrozenByteArray(bytes) => {
-                    let raw_idx = require_integer_index_value(&idx_val, "byte array")?;
-                    let len = bytes.len() as i64;
-                    let idx = if raw_idx < 0 { (len + raw_idx) as usize } else { raw_idx as usize };
-                    bytes
-                        .get(idx)
-                        .map(|byte| Value::UInt { value: u64::from(*byte), width: 8 })
-                        .ok_or_else(|| {
-                            let ctx = ErrorContext::new()
-                                .with_code(codes::INDEX_OUT_OF_BOUNDS)
-                                .with_help(format!("byte array has {} element(s)", len));
-                            CompileError::semantic_with_context(
-                                format!("array index out of bounds: index is {} but length is {}", raw_idx, len),
-                                ctx,
-                            )
-                        })
                 }
                 Value::FrozenArray(arr) => {
                     let raw_idx = require_integer_index_value(&idx_val, "frozen array")?;
@@ -848,7 +813,6 @@ pub(super) fn eval_collection_expr(
             let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?.deref_pointer();
             let len = match &recv_val {
                 Value::Array(arr) => arr.len() as i64,
-                Value::ByteArray(arr) | Value::FrozenByteArray(arr) => arr.len() as i64,
                 Value::Str(s) => s.len() as i64,
                 Value::Tuple(t) => t.len() as i64,
                 Value::LabeledTuple { values, .. } => values.len() as i64,
@@ -973,12 +937,6 @@ pub(super) fn eval_collection_expr(
 
             let result = match recv_val {
                 Value::Array(arr) => Ok(Value::array(slice_collection(&arr, start_idx, end_idx, step_val))),
-                Value::ByteArray(bytes) => {
-                    Ok(Value::byte_array(slice_collection(&bytes, start_idx, end_idx, step_val)))
-                }
-                Value::FrozenByteArray(bytes) => {
-                    Ok(Value::frozen_byte_array(slice_collection(&bytes, start_idx, end_idx, step_val)))
-                }
                 Value::Str(s) => {
                     // BYTE-indexed slicing. The `len` these indices were
                     // normalized against (above) is already the BYTE length
