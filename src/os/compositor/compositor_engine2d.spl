@@ -426,8 +426,11 @@ class Engine2dCompositorBackend:
     ) -> bool:
         """Update a retained visible window through one exact damage plan.
 
-        A missing retained seed, malformed damage, unsafe embedding, or
-        unsupported command conservatively uses the existing full-frame path.
+        A missing retained seed or malformed damage uses the existing
+        full-frame path before any retained writes. Once damaged execution has
+        started, failures invalidate the retained revision and return without
+        presenting: replaying a full translucent composition over partially
+        updated pixels would double-blend them.
         """
         if self.window_revision_composition_revision < 0:
             return self.render_draw_ir_composition_resources_window_revision(
@@ -466,16 +469,24 @@ class Engine2dCompositorBackend:
         self.engine = outcome.engine
         if (outcome.unsupported_kinds != "none" or
             outcome.ops_skipped != 0 or outcome.ops_rendered <= 0):
-            return self.render_draw_ir_composition_resources_window_revision(
-                composition, resources, producer_generation,
-                composition_revision)
+            self.invalidate_revision_cache()
+            return false
+        # The damaged DrawIR executor finalizes its compute batch before
+        # returning, which deliberately clears transient presentation state.
+        # Restage the exact canonical plan on the retained engine so the
+        # following swapchain present owns truthful damage metadata (and can
+        # select a region transfer when the runtime supports it).
+        if not self.engine.stage_present_damage(plan.rects):
+            self.invalidate_revision_cache()
+            return false
         if not self.engine.present_window_device():
             self.invalidate_revision_cache()
             return false
         if val Some(receipt) = self.engine.latest_vulkan_frame_receipt():
             if (receipt.present_mode == "window-swapchain" and
                 receipt.present_completed and receipt.device_present and
-                receipt.no_readback and receipt.completion_known):
+                receipt.no_readback and receipt.completion_known and
+                receipt.dirty_rect_count == plan.output_rect_count):
                 self.window_render_count += 1
                 self.window_revision_producer_generation = producer_generation
                 self.window_revision_composition_revision = composition_revision
