@@ -70,6 +70,18 @@ int64_t rt_pool_completed_count(void);
 int64_t rt_pool_pending_count(void);
 int64_t rt_pool_busy_count(void);
 int64_t rt_pool_blocked_count(void);
+int64_t rt_pool_state_create_v1(int64_t capacity);
+int64_t rt_pool_state_try_submit_i64_v1(int64_t state_handle, int64_t entry_fn, int64_t input_i64);
+int64_t rt_pool_task_status_i64_v1(int64_t task_handle);
+int64_t rt_pool_task_join_i64_v1(int64_t task_handle);
+int64_t rt_pool_task_release_i64_v1(int64_t task_handle);
+int64_t rt_pool_state_close_v1(int64_t state_handle);
+int64_t rt_pool_state_join_idle_v1(int64_t state_handle);
+int64_t rt_pool_state_outstanding_v1(int64_t state_handle);
+int64_t rt_pool_state_pending_v1(int64_t state_handle);
+int64_t rt_pool_state_running_v1(int64_t state_handle);
+int64_t rt_pool_state_completed_v1(int64_t state_handle);
+int64_t rt_pool_state_destroy_v1(int64_t state_handle);
 
 /**
  * Detach thread (no join required).

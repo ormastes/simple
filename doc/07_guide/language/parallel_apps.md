@@ -39,6 +39,16 @@ structured task groups, physical layout lowering, and end-to-end process/device
 evidence remain work-package gates. Consult the receipt and the matching
 runtime gate before relying on a path in production.
 
+WP-18 now has internal runtime groundwork for a deliberately narrow bounded
+scalar pool-state pilot. Capacity counts pending, running, and completed but
+unreleased tasks; credit returns only on release. Tagged generation handles are
+pinned during runtime calls, so stale and wrong-kind handles fail closed. The
+runtime ABI validates and copies a compiler-produced noncapturing direct-function
+descriptor before returning from submit. This ABI is not public Simple API:
+end-to-end native Simple callback evidence, alternate-provider execution,
+language-enforced handle uniqueness, captured closures, heap results,
+cancellation, blocking submit, and migration of legacy globals remain open.
+
 The native runtime currently has one deliberately narrow heap-copy building
 block: boxed `f64`, boxed `u64`, and immutable UTF-8 strings can be encoded by
 logical content with a bounded `EncodedCopy` packet and reconstructed with a

@@ -629,6 +629,18 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_pool_pending_count" => simple_runtime::rt_pool_pending_count as *const () as usize,
         "rt_pool_busy_count" => simple_runtime::rt_pool_busy_count as *const () as usize,
         "rt_pool_blocked_count" => simple_runtime::rt_pool_blocked_count as *const () as usize,
+        "rt_pool_state_create_v1" => simple_runtime::rt_pool_state_create_v1 as *const () as usize,
+        "rt_pool_state_try_submit_i64_v1" => simple_runtime::rt_pool_state_try_submit_i64_v1 as *const () as usize,
+        "rt_pool_task_status_i64_v1" => simple_runtime::rt_pool_task_status_i64_v1 as *const () as usize,
+        "rt_pool_task_join_i64_v1" => simple_runtime::rt_pool_task_join_i64_v1 as *const () as usize,
+        "rt_pool_task_release_i64_v1" => simple_runtime::rt_pool_task_release_i64_v1 as *const () as usize,
+        "rt_pool_state_close_v1" => simple_runtime::rt_pool_state_close_v1 as *const () as usize,
+        "rt_pool_state_join_idle_v1" => simple_runtime::rt_pool_state_join_idle_v1 as *const () as usize,
+        "rt_pool_state_outstanding_v1" => simple_runtime::rt_pool_state_outstanding_v1 as *const () as usize,
+        "rt_pool_state_pending_v1" => simple_runtime::rt_pool_state_pending_v1 as *const () as usize,
+        "rt_pool_state_running_v1" => simple_runtime::rt_pool_state_running_v1 as *const () as usize,
+        "rt_pool_state_completed_v1" => simple_runtime::rt_pool_state_completed_v1 as *const () as usize,
+        "rt_pool_state_destroy_v1" => simple_runtime::rt_pool_state_destroy_v1 as *const () as usize,
 
         // Generator operations
         "rt_generator_new" => simple_runtime::rt_generator_new as *const () as usize,
@@ -907,6 +919,18 @@ mod tests {
             "rt_pool_pending_count",
             "rt_pool_busy_count",
             "rt_pool_blocked_count",
+            "rt_pool_state_create_v1",
+            "rt_pool_state_try_submit_i64_v1",
+            "rt_pool_task_status_i64_v1",
+            "rt_pool_task_join_i64_v1",
+            "rt_pool_task_release_i64_v1",
+            "rt_pool_state_close_v1",
+            "rt_pool_state_join_idle_v1",
+            "rt_pool_state_outstanding_v1",
+            "rt_pool_state_pending_v1",
+            "rt_pool_state_running_v1",
+            "rt_pool_state_completed_v1",
+            "rt_pool_state_destroy_v1",
         ] {
             assert!(resolve_runtime_symbol(symbol).unwrap_or(0) != 0, "{symbol}");
         }

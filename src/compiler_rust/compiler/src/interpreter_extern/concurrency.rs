@@ -130,6 +130,14 @@ pub fn rt_pool_submit(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(0))
 }
 
+/// PoolStateV1 is a real native-worker contract. Interpreter mode must not
+/// pretend that bounded admission or OS-thread execution occurred.
+pub fn rt_pool_state_v1_unavailable(_args: &[Value]) -> Result<Value, CompileError> {
+    Err(CompileError::Runtime(
+        "PoolStateV1 requires the native runtime".to_string(),
+    ))
+}
+
 /// Defensive interpreter stub for native pool handles.
 pub fn rt_pool_is_done(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(1))

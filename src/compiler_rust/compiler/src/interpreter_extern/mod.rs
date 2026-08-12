@@ -728,6 +728,18 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     );
     insert_simple!("rt_pool_uses_work_stealing", concurrency::rt_pool_uses_work_stealing);
     insert_simple!("rt_pool_safepoint", concurrency::rt_pool_safepoint);
+    insert_simple!("rt_pool_state_create_v1", concurrency::rt_pool_state_v1_unavailable);
+    insert_simple!("rt_pool_state_try_submit_i64_v1", concurrency::rt_pool_state_v1_unavailable);
+    insert_simple!("rt_pool_task_status_i64_v1", concurrency::rt_pool_state_v1_unavailable);
+    insert_simple!("rt_pool_task_join_i64_v1", concurrency::rt_pool_state_v1_unavailable);
+    insert_simple!("rt_pool_task_release_i64_v1", concurrency::rt_pool_state_v1_unavailable);
+    insert_simple!("rt_pool_state_close_v1", concurrency::rt_pool_state_v1_unavailable);
+    insert_simple!("rt_pool_state_join_idle_v1", concurrency::rt_pool_state_v1_unavailable);
+    insert_simple!("rt_pool_state_outstanding_v1", concurrency::rt_pool_state_v1_unavailable);
+    insert_simple!("rt_pool_state_pending_v1", concurrency::rt_pool_state_v1_unavailable);
+    insert_simple!("rt_pool_state_running_v1", concurrency::rt_pool_state_v1_unavailable);
+    insert_simple!("rt_pool_state_completed_v1", concurrency::rt_pool_state_v1_unavailable);
+    insert_simple!("rt_pool_state_destroy_v1", concurrency::rt_pool_state_v1_unavailable);
     insert_simple!("rt_channel_recv", concurrency::rt_channel_recv);
     insert_simple!("rt_channel_send", concurrency::rt_channel_send);
     insert_simple!("rt_channel_try_recv", concurrency::rt_channel_try_recv);

@@ -128,6 +128,18 @@ unsafe extern "C" {
     pub fn rt_pool_pending_count() -> i64;
     pub fn rt_pool_busy_count() -> i64;
     pub fn rt_pool_blocked_count() -> i64;
+    pub fn rt_pool_state_create_v1(capacity: i64) -> i64;
+    pub fn rt_pool_state_try_submit_i64_v1(state: i64, entry: i64, input: i64) -> i64;
+    pub fn rt_pool_task_status_i64_v1(handle: i64) -> i64;
+    pub fn rt_pool_task_join_i64_v1(handle: i64) -> i64;
+    pub fn rt_pool_task_release_i64_v1(handle: i64) -> i64;
+    pub fn rt_pool_state_close_v1(state: i64) -> i64;
+    pub fn rt_pool_state_join_idle_v1(state: i64) -> i64;
+    pub fn rt_pool_state_outstanding_v1(state: i64) -> i64;
+    pub fn rt_pool_state_pending_v1(state: i64) -> i64;
+    pub fn rt_pool_state_running_v1(state: i64) -> i64;
+    pub fn rt_pool_state_completed_v1(state: i64) -> i64;
+    pub fn rt_pool_state_destroy_v1(state: i64) -> i64;
 }
 
 #[cfg(feature = "runtime-symbol-table")]
@@ -148,6 +160,42 @@ static SIMPLE_KEEP_RT_POOL_BLOCKED_COUNT: unsafe extern "C" fn() -> i64 = rt_poo
 #[cfg(feature = "runtime-symbol-table")]
 #[used]
 static SIMPLE_KEEP_RT_POOL_SAFEPOINT: unsafe extern "C" fn() -> i64 = rt_pool_safepoint;
+#[cfg(feature = "runtime-symbol-table")]
+#[used]
+static SIMPLE_KEEP_RT_POOL_STATE_CREATE: unsafe extern "C" fn(i64) -> i64 = rt_pool_state_create_v1;
+#[cfg(feature = "runtime-symbol-table")]
+#[used]
+static SIMPLE_KEEP_RT_POOL_STATE_TRY_SUBMIT_I64: unsafe extern "C" fn(i64, i64, i64) -> i64 = rt_pool_state_try_submit_i64_v1;
+#[cfg(feature = "runtime-symbol-table")]
+#[used]
+static SIMPLE_KEEP_RT_POOL_TASK_STATUS_I64: unsafe extern "C" fn(i64) -> i64 = rt_pool_task_status_i64_v1;
+#[cfg(feature = "runtime-symbol-table")]
+#[used]
+static SIMPLE_KEEP_RT_POOL_TASK_JOIN_I64: unsafe extern "C" fn(i64) -> i64 = rt_pool_task_join_i64_v1;
+#[cfg(feature = "runtime-symbol-table")]
+#[used]
+static SIMPLE_KEEP_RT_POOL_TASK_RELEASE_I64: unsafe extern "C" fn(i64) -> i64 = rt_pool_task_release_i64_v1;
+#[cfg(feature = "runtime-symbol-table")]
+#[used]
+static SIMPLE_KEEP_RT_POOL_STATE_CLOSE: unsafe extern "C" fn(i64) -> i64 = rt_pool_state_close_v1;
+#[cfg(feature = "runtime-symbol-table")]
+#[used]
+static SIMPLE_KEEP_RT_POOL_STATE_JOIN_IDLE: unsafe extern "C" fn(i64) -> i64 = rt_pool_state_join_idle_v1;
+#[cfg(feature = "runtime-symbol-table")]
+#[used]
+static SIMPLE_KEEP_RT_POOL_STATE_OUTSTANDING: unsafe extern "C" fn(i64) -> i64 = rt_pool_state_outstanding_v1;
+#[cfg(feature = "runtime-symbol-table")]
+#[used]
+static SIMPLE_KEEP_RT_POOL_STATE_PENDING: unsafe extern "C" fn(i64) -> i64 = rt_pool_state_pending_v1;
+#[cfg(feature = "runtime-symbol-table")]
+#[used]
+static SIMPLE_KEEP_RT_POOL_STATE_RUNNING: unsafe extern "C" fn(i64) -> i64 = rt_pool_state_running_v1;
+#[cfg(feature = "runtime-symbol-table")]
+#[used]
+static SIMPLE_KEEP_RT_POOL_STATE_COMPLETED: unsafe extern "C" fn(i64) -> i64 = rt_pool_state_completed_v1;
+#[cfg(feature = "runtime-symbol-table")]
+#[used]
+static SIMPLE_KEEP_RT_POOL_STATE_DESTROY: unsafe extern "C" fn(i64) -> i64 = rt_pool_state_destroy_v1;
 
 #[cfg(not(feature = "pytorch"))]
 fn torch_runtime_library() -> Option<&'static libloading::Library> {
@@ -1189,6 +1237,7 @@ mod tests {
     mod gc_allocator;
     mod gc_logging;
     mod no_gc_allocator;
+    mod pool_state_tests;
     #[cfg(feature = "vulkan")]
     mod vulkan_sffi_tests;
 }

@@ -558,3 +558,16 @@ dev-done
   transport parity, not actual concurrency: `ParallelBuilder.build` still
   invokes callbacks sequentially, while process workers require a complete MIR
   codec rather than in-memory class pointers.
+- impl: Began WP-18 with a bounded runtime-owned scalar task domain rather than
+  copied mutable `ThreadPool` values. Capacity covers each accepted unreleased
+  task; release restores credit and frees the task record. State/task handles
+  use disjoint tagged generation domains and lifetime pins, so stale, forged,
+  wrong-kind, release/destroy races reject instead of dereferencing process
+  pointers. The internal entry contract accepts a compiler-produced,
+  noncapturing direct-function descriptor with InlineCopy input/result and
+  copies that descriptor into the task record. Both shipped C providers and
+  compiler symbol routes are aligned; the common capacity limit is 65,534.
+  Rust gates cover bounded credit, independent states, 100k reuse,
+  stale/cross-kind rejection, and a destroy-vs-metric pin race. Public Simple
+  exposure, alternate-provider execution, legacy ThreadPool globals,
+  cancellation, blocking backpressure, and heap transfer remain open.

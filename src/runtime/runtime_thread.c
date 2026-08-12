@@ -455,8 +455,15 @@ void rt_thread_yield(void) {
 typedef struct RtPoolTask {
     rt_closure_fn_t entry;
     int64_t closure_ptr;
+    int64_t (*scalar_entry)(int64_t, int64_t);
+    int64_t scalar_closure[2];
+    int64_t scalar_input;
     int64_t result;
     int done;
+    int joined;
+    int released;
+    int64_t public_handle;
+    struct RtPoolStateV1* state_v1;
     struct RtPoolTask* next;
 #ifdef SPL_THREAD_PTHREAD
     pthread_mutex_t lock;
@@ -466,6 +473,169 @@ typedef struct RtPoolTask {
     CONDITION_VARIABLE done_cond;
 #endif
 } RtPoolTask;
+
+#define RT_POOL_V1_DIRECT_FUNCTION_MARKER INT64_C(0x5344495245435446)
+
+static int64_t rt_pool_v1_scalar_task_dispatch(int64_t raw_task) {
+    RtPoolTask* task = (RtPoolTask*)(intptr_t)raw_task;
+    if (!task || !task->scalar_entry) return 0;
+    return task->scalar_entry((int64_t)(intptr_t)&task->scalar_closure[0], task->scalar_input);
+}
+
+typedef struct RtPoolStateV1 {
+    int64_t capacity;
+    int64_t outstanding;
+    int64_t pending;
+    int64_t running;
+    int64_t completed;
+    int closed;
+    int destroying;
+#ifdef SPL_THREAD_PTHREAD
+    pthread_mutex_t lock;
+    pthread_cond_t changed;
+#else
+    CRITICAL_SECTION lock;
+    CONDITION_VARIABLE changed;
+#endif
+} RtPoolStateV1;
+
+/* V1 handles carry a generation and kind, and every lookup pins its object.
+ * This registry is deliberately private: the legacy lane's small integer
+ * handle table has neither generations nor lifetime pins. */
+#define RT_POOL_V1_MAX_HANDLES 65536
+#define RT_POOL_V1_MAX_CAPACITY 65534
+typedef enum { RT_POOL_V1_FREE = 0, RT_POOL_V1_STATE = 1, RT_POOL_V1_TASK = 2 } RtPoolV1Kind;
+typedef struct {
+    void* ptr;
+    uint32_t generation;
+    uint32_t pins;
+    RtPoolV1Kind kind;
+    int removing;
+} RtPoolV1HandleEntry;
+static RtPoolV1HandleEntry g_pool_v1_handles[RT_POOL_V1_MAX_HANDLES];
+#ifdef SPL_THREAD_PTHREAD
+static pthread_mutex_t g_pool_v1_handle_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_pool_v1_handle_changed = PTHREAD_COND_INITIALIZER;
+#else
+static SRWLOCK g_pool_v1_handle_lock = SRWLOCK_INIT;
+static CONDITION_VARIABLE g_pool_v1_handle_changed = CONDITION_VARIABLE_INIT;
+#endif
+
+static int64_t rt_pool_v1_handle_encode(uint32_t slot, uint32_t generation) {
+    return (int64_t)(((uint64_t)generation << 32) | (uint64_t)slot);
+}
+
+static int rt_pool_v1_handle_decode(int64_t handle, uint32_t* slot, uint32_t* generation) {
+    uint64_t raw = (uint64_t)handle;
+    *slot = (uint32_t)(raw & 0xffffffffu);
+    *generation = (uint32_t)(raw >> 32);
+    return *slot > 0 && *slot < RT_POOL_V1_MAX_HANDLES && *generation != 0;
+}
+
+static int64_t rt_pool_v1_handle_alloc(RtPoolV1Kind kind, void* ptr) {
+#ifdef SPL_THREAD_PTHREAD
+    pthread_mutex_lock(&g_pool_v1_handle_lock);
+#else
+    AcquireSRWLockExclusive(&g_pool_v1_handle_lock);
+#endif
+    int64_t handle = 0;
+    for (uint32_t slot = 1; slot < RT_POOL_V1_MAX_HANDLES; slot++) {
+        RtPoolV1HandleEntry* entry = &g_pool_v1_handles[slot];
+        if (entry->kind == RT_POOL_V1_FREE && entry->ptr == NULL && !entry->removing) {
+            entry->generation++;
+            if (entry->generation == 0) entry->generation = 1;
+            entry->ptr = ptr;
+            entry->kind = kind;
+            entry->pins = 0;
+            handle = rt_pool_v1_handle_encode(slot, entry->generation);
+            break;
+        }
+    }
+#ifdef SPL_THREAD_PTHREAD
+    pthread_mutex_unlock(&g_pool_v1_handle_lock);
+#else
+    ReleaseSRWLockExclusive(&g_pool_v1_handle_lock);
+#endif
+    return handle;
+}
+
+static void* rt_pool_v1_handle_acquire(int64_t handle, RtPoolV1Kind kind) {
+    uint32_t slot, generation;
+    if (!rt_pool_v1_handle_decode(handle, &slot, &generation)) return NULL;
+#ifdef SPL_THREAD_PTHREAD
+    pthread_mutex_lock(&g_pool_v1_handle_lock);
+#else
+    AcquireSRWLockExclusive(&g_pool_v1_handle_lock);
+#endif
+    RtPoolV1HandleEntry* entry = &g_pool_v1_handles[slot];
+    void* ptr = NULL;
+    if (!entry->removing && entry->kind == kind && entry->generation == generation && entry->ptr != NULL) {
+        entry->pins++;
+        ptr = entry->ptr;
+    }
+#ifdef SPL_THREAD_PTHREAD
+    pthread_mutex_unlock(&g_pool_v1_handle_lock);
+#else
+    ReleaseSRWLockExclusive(&g_pool_v1_handle_lock);
+#endif
+    return ptr;
+}
+
+static void rt_pool_v1_handle_release(int64_t handle) {
+    uint32_t slot, generation;
+    if (!rt_pool_v1_handle_decode(handle, &slot, &generation)) return;
+#ifdef SPL_THREAD_PTHREAD
+    pthread_mutex_lock(&g_pool_v1_handle_lock);
+#else
+    AcquireSRWLockExclusive(&g_pool_v1_handle_lock);
+#endif
+    RtPoolV1HandleEntry* entry = &g_pool_v1_handles[slot];
+    if (entry->generation == generation && entry->pins > 0) entry->pins--;
+#ifdef SPL_THREAD_PTHREAD
+    pthread_cond_broadcast(&g_pool_v1_handle_changed);
+    pthread_mutex_unlock(&g_pool_v1_handle_lock);
+#else
+    WakeAllConditionVariable(&g_pool_v1_handle_changed);
+    ReleaseSRWLockExclusive(&g_pool_v1_handle_lock);
+#endif
+}
+
+static int rt_pool_v1_handle_remove(int64_t handle, RtPoolV1Kind kind, void* ptr) {
+    uint32_t slot, generation;
+    if (!rt_pool_v1_handle_decode(handle, &slot, &generation)) return 0;
+#ifdef SPL_THREAD_PTHREAD
+    pthread_mutex_lock(&g_pool_v1_handle_lock);
+#else
+    AcquireSRWLockExclusive(&g_pool_v1_handle_lock);
+#endif
+    RtPoolV1HandleEntry* entry = &g_pool_v1_handles[slot];
+    if (entry->kind != kind || entry->generation != generation || entry->ptr != ptr || entry->removing) {
+#ifdef SPL_THREAD_PTHREAD
+        pthread_mutex_unlock(&g_pool_v1_handle_lock);
+#else
+        ReleaseSRWLockExclusive(&g_pool_v1_handle_lock);
+#endif
+        return 0;
+    }
+    entry->removing = 1;
+    /* The remover owns one acquisition pin; wait for every competing caller. */
+#ifdef SPL_THREAD_PTHREAD
+    while (entry->pins > 1) pthread_cond_wait(&g_pool_v1_handle_changed, &g_pool_v1_handle_lock);
+#else
+    while (entry->pins > 1) SleepConditionVariableSRW(&g_pool_v1_handle_changed,
+        &g_pool_v1_handle_lock, INFINITE, 0);
+#endif
+    entry->ptr = NULL;
+    entry->kind = RT_POOL_V1_FREE;
+    entry->pins = 0;
+    entry->removing = 0;
+#ifdef SPL_THREAD_PTHREAD
+    pthread_mutex_unlock(&g_pool_v1_handle_lock);
+#else
+    ReleaseSRWLockExclusive(&g_pool_v1_handle_lock);
+#endif
+    return 1;
+}
 
 #define RT_POOL_MAX_WORKERS 64
 
@@ -581,6 +751,42 @@ static void rt_pool_queue_push_tail(RtPoolQueue* queue, RtPoolTask* task) {
     queue->tail = task;
 }
 
+static void rt_pool_state_v1_started(RtPoolTask* task) {
+    RtPoolStateV1* state = task ? task->state_v1 : NULL;
+    if (!state) return;
+#ifdef SPL_THREAD_PTHREAD
+    pthread_mutex_lock(&state->lock);
+    if (state->pending > 0) state->pending--;
+    state->running++;
+    pthread_cond_broadcast(&state->changed);
+    pthread_mutex_unlock(&state->lock);
+#else
+    EnterCriticalSection(&state->lock);
+    if (state->pending > 0) state->pending--;
+    state->running++;
+    WakeAllConditionVariable(&state->changed);
+    LeaveCriticalSection(&state->lock);
+#endif
+}
+
+static void rt_pool_state_v1_completed(RtPoolTask* task) {
+    RtPoolStateV1* state = task ? task->state_v1 : NULL;
+    if (!state) return;
+#ifdef SPL_THREAD_PTHREAD
+    pthread_mutex_lock(&state->lock);
+    if (state->running > 0) state->running--;
+    state->completed++;
+    pthread_cond_broadcast(&state->changed);
+    pthread_mutex_unlock(&state->lock);
+#else
+    EnterCriticalSection(&state->lock);
+    if (state->running > 0) state->running--;
+    state->completed++;
+    WakeAllConditionVariable(&state->changed);
+    LeaveCriticalSection(&state->lock);
+#endif
+}
+
 static RtPoolTask* rt_pool_pop_task(int worker_id) {
 #ifdef SPL_THREAD_PTHREAD
     pthread_mutex_lock(&g_pool_lock);
@@ -598,6 +804,7 @@ static RtPoolTask* rt_pool_pop_task(int worker_id) {
         g_pool_busy_workers++;
     }
     pthread_mutex_unlock(&g_pool_lock);
+    if (task != NULL) rt_pool_state_v1_started(task);
     return task;
 #else
     EnterCriticalSection(&g_pool_lock);
@@ -615,6 +822,7 @@ static RtPoolTask* rt_pool_pop_task(int worker_id) {
         g_pool_busy_workers++;
     }
     LeaveCriticalSection(&g_pool_lock);
+    if (task != NULL) rt_pool_state_v1_started(task);
     return task;
 #endif
 }
@@ -628,6 +836,10 @@ static void rt_pool_complete_task(RtPoolTask* task, int64_t result) {
     pthread_mutex_lock(&task->lock);
     task->result = result;
     task->done = 1;
+    /* Publish state completion while the task is still pinned by its lock.
+     * A waiter may release and free the task immediately after done becomes
+     * observable. */
+    rt_pool_state_v1_completed(task);
     pthread_cond_broadcast(&task->done_cond);
     pthread_mutex_unlock(&task->lock);
 #else
@@ -638,6 +850,7 @@ static void rt_pool_complete_task(RtPoolTask* task, int64_t result) {
     EnterCriticalSection(&task->lock);
     task->result = result;
     task->done = 1;
+    rt_pool_state_v1_completed(task);
     WakeAllConditionVariable(&task->done_cond);
     LeaveCriticalSection(&task->lock);
 #endif
@@ -918,6 +1131,10 @@ int64_t rt_pool_submit(int64_t arg0, int64_t arg1) {
     task->closure_ptr = closure_ptr;
     task->result = 0;
     task->done = 0;
+    task->joined = 0;
+    task->released = 0;
+    task->public_handle = 0;
+    task->state_v1 = NULL;
     task->next = NULL;
 #ifdef SPL_THREAD_PTHREAD
     pthread_mutex_init(&task->lock, NULL);
@@ -997,6 +1214,308 @@ int64_t rt_pool_join(int64_t handle) {
     SPL_FREE(task);
     free_handle(handle);
     return result;
+}
+
+static void rt_pool_v1_task_dispose(RtPoolTask* task) {
+    if (!task) return;
+#ifdef SPL_THREAD_PTHREAD
+    pthread_cond_destroy(&task->done_cond);
+    pthread_mutex_destroy(&task->lock);
+#else
+    DeleteCriticalSection(&task->lock);
+#endif
+    SPL_FREE(task);
+}
+
+static RtPoolTask* rt_pool_v1_scalar_task_create(int64_t function_value, int64_t input) {
+    if (function_value == 0) return NULL;
+    const int64_t* descriptor = (const int64_t*)(intptr_t)function_value;
+    if (descriptor[0] == 0 || descriptor[1] != RT_POOL_V1_DIRECT_FUNCTION_MARKER) return NULL;
+    RtPoolTask* task = (RtPoolTask*)SPL_MALLOC(sizeof(RtPoolTask), "rt_pool_v1_task");
+    if (!task) return NULL;
+    memset(task, 0, sizeof(*task));
+    task->scalar_entry = (int64_t (*)(int64_t, int64_t))(intptr_t)descriptor[0];
+    task->scalar_closure[0] = descriptor[0];
+    task->scalar_closure[1] = descriptor[1];
+    task->scalar_input = input;
+    task->entry = rt_pool_v1_scalar_task_dispatch;
+    task->closure_ptr = (int64_t)(intptr_t)task;
+#ifdef SPL_THREAD_PTHREAD
+    pthread_mutex_init(&task->lock, NULL);
+    pthread_cond_init(&task->done_cond, NULL);
+#else
+    InitializeCriticalSection(&task->lock);
+    InitializeConditionVariable(&task->done_cond);
+#endif
+    return task;
+}
+
+int64_t rt_pool_state_create_v1(int64_t capacity) {
+    if (capacity < 1 || capacity > RT_POOL_V1_MAX_CAPACITY) return 0;
+    RtPoolStateV1* state = (RtPoolStateV1*)SPL_MALLOC(sizeof(RtPoolStateV1), "rt_pool_v1_state");
+    if (!state) return 0;
+    memset(state, 0, sizeof(*state));
+    state->capacity = capacity;
+#ifdef SPL_THREAD_PTHREAD
+    pthread_mutex_init(&state->lock, NULL);
+    pthread_cond_init(&state->changed, NULL);
+#else
+    InitializeCriticalSection(&state->lock);
+    InitializeConditionVariable(&state->changed);
+#endif
+    int64_t handle = rt_pool_v1_handle_alloc(RT_POOL_V1_STATE, state);
+    if (!handle) {
+#ifdef SPL_THREAD_PTHREAD
+        pthread_cond_destroy(&state->changed);
+        pthread_mutex_destroy(&state->lock);
+#else
+        DeleteCriticalSection(&state->lock);
+#endif
+        SPL_FREE(state);
+    }
+    return handle;
+}
+
+int64_t rt_pool_state_try_submit_i64_v1(int64_t state_handle, int64_t entry_fn, int64_t input_i64) {
+    RtPoolStateV1* state = (RtPoolStateV1*)rt_pool_v1_handle_acquire(state_handle, RT_POOL_V1_STATE);
+    if (!state) return -3;
+    RtPoolTask* task = rt_pool_v1_scalar_task_create(entry_fn, input_i64);
+    if (!task) {
+        rt_pool_v1_handle_release(state_handle);
+        return -3;
+    }
+#ifdef SPL_THREAD_PTHREAD
+    pthread_mutex_lock(&state->lock);
+#else
+    EnterCriticalSection(&state->lock);
+#endif
+    int rejection = state->closed || state->destroying ? -2 :
+        (state->outstanding >= state->capacity ? -1 : 0);
+    if (!rejection) {
+        task->state_v1 = state;
+        state->outstanding++;
+        state->pending++;
+    }
+#ifdef SPL_THREAD_PTHREAD
+    pthread_mutex_unlock(&state->lock);
+#else
+    LeaveCriticalSection(&state->lock);
+#endif
+    if (rejection) {
+        rt_pool_v1_task_dispose(task);
+        rt_pool_v1_handle_release(state_handle);
+        return rejection;
+    }
+    int64_t task_handle = rt_pool_v1_handle_alloc(RT_POOL_V1_TASK, task);
+    if (!task_handle) {
+#ifdef SPL_THREAD_PTHREAD
+        pthread_mutex_lock(&state->lock);
+#else
+        EnterCriticalSection(&state->lock);
+#endif
+        state->outstanding--;
+        state->pending--;
+#ifdef SPL_THREAD_PTHREAD
+        pthread_mutex_unlock(&state->lock);
+#else
+        LeaveCriticalSection(&state->lock);
+#endif
+        rt_pool_v1_task_dispose(task);
+        rt_pool_v1_handle_release(state_handle);
+        return -3;
+    }
+    task->public_handle = task_handle;
+    if (rt_pool_start() <= 0) {
+#ifdef SPL_THREAD_PTHREAD
+        pthread_mutex_lock(&g_pool_lock);
+        g_pool_submitted_tasks++;
+        pthread_mutex_unlock(&g_pool_lock);
+#else
+        InitOnceExecuteOnce(&g_pool_once, rt_pool_init_once, NULL, NULL);
+        EnterCriticalSection(&g_pool_lock);
+        g_pool_submitted_tasks++;
+        LeaveCriticalSection(&g_pool_lock);
+#endif
+        rt_pool_state_v1_started(task);
+        rt_pool_complete_task(task, task->entry(task->closure_ptr));
+    } else {
+        rt_pool_push_task(task);
+    }
+    rt_pool_v1_handle_release(state_handle);
+    return task_handle;
+}
+
+int64_t rt_pool_task_status_i64_v1(int64_t task_handle) {
+    RtPoolTask* task = (RtPoolTask*)rt_pool_v1_handle_acquire(task_handle, RT_POOL_V1_TASK);
+    if (!task) return -1;
+#ifdef SPL_THREAD_PTHREAD
+    pthread_mutex_lock(&task->lock);
+#else
+    EnterCriticalSection(&task->lock);
+#endif
+    int64_t status = task->released ? 3 : (task->joined ? 2 : (task->done ? 1 : 0));
+#ifdef SPL_THREAD_PTHREAD
+    pthread_mutex_unlock(&task->lock);
+#else
+    LeaveCriticalSection(&task->lock);
+#endif
+    rt_pool_v1_handle_release(task_handle);
+    return status;
+}
+
+int64_t rt_pool_task_join_i64_v1(int64_t task_handle) {
+    RtPoolTask* task = (RtPoolTask*)rt_pool_v1_handle_acquire(task_handle, RT_POOL_V1_TASK);
+    if (!task) return 0;
+#ifdef SPL_THREAD_PTHREAD
+    pthread_mutex_lock(&task->lock);
+    while (!task->done) pthread_cond_wait(&task->done_cond, &task->lock);
+#else
+    EnterCriticalSection(&task->lock);
+    while (!task->done) SleepConditionVariableCS(&task->done_cond, &task->lock, INFINITE);
+#endif
+    task->joined = 1;
+    int64_t result = task->result;
+#ifdef SPL_THREAD_PTHREAD
+    pthread_mutex_unlock(&task->lock);
+#else
+    LeaveCriticalSection(&task->lock);
+#endif
+    rt_pool_v1_handle_release(task_handle);
+    return result;
+}
+
+int64_t rt_pool_task_release_i64_v1(int64_t task_handle) {
+    RtPoolTask* task = (RtPoolTask*)rt_pool_v1_handle_acquire(task_handle, RT_POOL_V1_TASK);
+    if (!task || !task->state_v1) return -1;
+    RtPoolStateV1* state = task->state_v1;
+#ifdef SPL_THREAD_PTHREAD
+    pthread_mutex_lock(&task->lock);
+#else
+    EnterCriticalSection(&task->lock);
+#endif
+    int rejection = !task->done ? -3 : (task->released ? -2 : 0);
+    if (!rejection) task->released = 1;
+#ifdef SPL_THREAD_PTHREAD
+    pthread_mutex_unlock(&task->lock);
+#else
+    LeaveCriticalSection(&task->lock);
+#endif
+    if (rejection) {
+        rt_pool_v1_handle_release(task_handle);
+        return rejection;
+    }
+#ifdef SPL_THREAD_PTHREAD
+    pthread_mutex_lock(&state->lock);
+#else
+    EnterCriticalSection(&state->lock);
+#endif
+    if (state->outstanding > 0) state->outstanding--;
+#ifdef SPL_THREAD_PTHREAD
+    pthread_cond_broadcast(&state->changed);
+    pthread_mutex_unlock(&state->lock);
+#else
+    WakeAllConditionVariable(&state->changed);
+    LeaveCriticalSection(&state->lock);
+#endif
+    if (!rt_pool_v1_handle_remove(task_handle, RT_POOL_V1_TASK, task)) {
+        rt_pool_v1_handle_release(task_handle);
+        return -1;
+    }
+    rt_pool_v1_task_dispose(task);
+    return 1;
+}
+
+int64_t rt_pool_state_close_v1(int64_t state_handle) {
+    RtPoolStateV1* state = (RtPoolStateV1*)rt_pool_v1_handle_acquire(state_handle, RT_POOL_V1_STATE);
+    if (!state) return 0;
+#ifdef SPL_THREAD_PTHREAD
+    pthread_mutex_lock(&state->lock);
+    state->closed = 1;
+    pthread_cond_broadcast(&state->changed);
+    pthread_mutex_unlock(&state->lock);
+#else
+    EnterCriticalSection(&state->lock);
+    state->closed = 1;
+    WakeAllConditionVariable(&state->changed);
+    LeaveCriticalSection(&state->lock);
+#endif
+    rt_pool_v1_handle_release(state_handle);
+    return 1;
+}
+
+int64_t rt_pool_state_join_idle_v1(int64_t state_handle) {
+    RtPoolStateV1* state = (RtPoolStateV1*)rt_pool_v1_handle_acquire(state_handle, RT_POOL_V1_STATE);
+    if (!state) return 0;
+#ifdef SPL_THREAD_PTHREAD
+    pthread_mutex_lock(&state->lock);
+    while (state->pending > 0 || state->running > 0) pthread_cond_wait(&state->changed, &state->lock);
+    pthread_mutex_unlock(&state->lock);
+#else
+    EnterCriticalSection(&state->lock);
+    while (state->pending > 0 || state->running > 0)
+        SleepConditionVariableCS(&state->changed, &state->lock, INFINITE);
+    LeaveCriticalSection(&state->lock);
+#endif
+    rt_pool_v1_handle_release(state_handle);
+    return 1;
+}
+
+static int64_t rt_pool_state_counter_v1(int64_t state_handle, int which) {
+    RtPoolStateV1* state = (RtPoolStateV1*)rt_pool_v1_handle_acquire(state_handle, RT_POOL_V1_STATE);
+    if (!state) return -1;
+#ifdef SPL_THREAD_PTHREAD
+    pthread_mutex_lock(&state->lock);
+#else
+    EnterCriticalSection(&state->lock);
+#endif
+    int64_t value = which == 0 ? state->outstanding :
+        (which == 1 ? state->pending : (which == 2 ? state->running : state->completed));
+#ifdef SPL_THREAD_PTHREAD
+    pthread_mutex_unlock(&state->lock);
+#else
+    LeaveCriticalSection(&state->lock);
+#endif
+    rt_pool_v1_handle_release(state_handle);
+    return value;
+}
+
+int64_t rt_pool_state_outstanding_v1(int64_t state_handle) { return rt_pool_state_counter_v1(state_handle, 0); }
+int64_t rt_pool_state_pending_v1(int64_t state_handle) { return rt_pool_state_counter_v1(state_handle, 1); }
+int64_t rt_pool_state_running_v1(int64_t state_handle) { return rt_pool_state_counter_v1(state_handle, 2); }
+int64_t rt_pool_state_completed_v1(int64_t state_handle) { return rt_pool_state_counter_v1(state_handle, 3); }
+
+int64_t rt_pool_state_destroy_v1(int64_t state_handle) {
+    RtPoolStateV1* state = (RtPoolStateV1*)rt_pool_v1_handle_acquire(state_handle, RT_POOL_V1_STATE);
+    if (!state) return 0;
+#ifdef SPL_THREAD_PTHREAD
+    pthread_mutex_lock(&state->lock);
+#else
+    EnterCriticalSection(&state->lock);
+#endif
+    int can_destroy = state->closed && !state->destroying && state->outstanding == 0 &&
+        state->pending == 0 && state->running == 0;
+    if (can_destroy) state->destroying = 1;
+#ifdef SPL_THREAD_PTHREAD
+    pthread_mutex_unlock(&state->lock);
+#else
+    LeaveCriticalSection(&state->lock);
+#endif
+    if (!can_destroy) {
+        rt_pool_v1_handle_release(state_handle);
+        return 0;
+    }
+    if (!rt_pool_v1_handle_remove(state_handle, RT_POOL_V1_STATE, state)) {
+        rt_pool_v1_handle_release(state_handle);
+        return 0;
+    }
+#ifdef SPL_THREAD_PTHREAD
+    pthread_cond_destroy(&state->changed);
+    pthread_mutex_destroy(&state->lock);
+#else
+    DeleteCriticalSection(&state->lock);
+#endif
+    SPL_FREE(state);
+    return 1;
 }
 
 int64_t rt_pool_submitted_count(void) {
