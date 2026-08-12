@@ -2621,9 +2621,10 @@ fn _engine2d_draw_ir_damage_rects_valid(rects: [i64], width: i32, height: i32) -
         i += 4
     true
 
-fn engine2d_draw_ir_render_damaged(
+fn engine2d_draw_ir_render_damaged_with_images(
     engine: Engine2D,
     commands: [DrawIrCommand],
+    images: [Engine2dResolvedDrawIrImage],
     damage_rects: [i64],
     readback_frame: bool
 ) -> Engine2dDrawIrTileOutcome:
@@ -2654,7 +2655,6 @@ fn engine2d_draw_ir_render_damaged(
     var skipped = 0
     var unsupported = ""
     val budget = eng.width().to_i64() * eng.height().to_i64()
-    var images: [Engine2dResolvedDrawIrImage] = []
     var i = 0
     while i < damage_rects.len():
         val clip = draw_ir_rect_bounds(
@@ -2694,6 +2694,90 @@ fn engine2d_draw_ir_render_damaged(
         unsupported_kinds: unsupported,
         readback: readback)
 
+fn engine2d_draw_ir_render_damaged(
+    engine: Engine2D,
+    commands: [DrawIrCommand],
+    damage_rects: [i64],
+    readback_frame: bool
+) -> Engine2dDrawIrTileOutcome:
+    var images: [Engine2dResolvedDrawIrImage] = []
+    engine2d_draw_ir_render_damaged_with_images(
+        engine, commands, images, damage_rects, readback_frame)
+
+fn engine2d_draw_ir_render_composition_damaged_with_images(
+    engine: Engine2D,
+    composition: DrawIrComposition,
+    images: [Engine2dResolvedDrawIrImage],
+    damage_rects: [i64],
+    readback_frame: bool
+) -> Engine2dDrawIrTileOutcome:
+    """Retained damaged replay with the composition's resolved image table."""
+    val preflight_reason = _engine2d_draw_ir_fresh_device_reason(
+        composition, images, engine.width(), engine.height())
+    if preflight_reason != "":
+        return Engine2dDrawIrTileOutcome(
+            engine: engine, tiles_total: 0, tiles_rendered: 0,
+            tiles_skipped: 0, ops_rendered: 0, ops_skipped: 0,
+            unsupported_kinds: preflight_reason,
+            readback: engine2d_readback([], "preflight_rejected"))
+    for batch in composition.batches:
+        val embedding = batch.embedding
+        if (embedding.width <= 0 or embedding.height <= 0 or
+            embedding.opacity_milli != 1000 or
+            _engine2d_draw_ir_batch_samples_parent(batch)):
+            return Engine2dDrawIrTileOutcome(
+                engine: engine, tiles_total: 0, tiles_rendered: 0,
+                tiles_skipped: 0, ops_rendered: 0,
+                ops_skipped: batch.commands.len().to_i32(),
+                unsupported_kinds: "retained-composition-unsafe-embedding",
+                readback: engine2d_readback([], "preflight_rejected"))
+    var eng = engine
+    var rendered = 0
+    var skipped = 0
+    var unsupported = ""
+    val budget = eng.width().to_i64() * eng.height().to_i64()
+    var i = 0
+    while i < damage_rects.len():
+        val damage = draw_ir_rect_bounds(
+            damage_rects[i].to_i32(), damage_rects[i + 1].to_i32(),
+            damage_rects[i + 2].to_i32(), damage_rects[i + 3].to_i32())
+        for batch in composition.batches:
+            val embedding = batch.embedding
+            val bounds = draw_ir_rect_bounds(
+                embedding.x, embedding.y, embedding.width, embedding.height)
+            val clip = draw_ir_rect_intersection(damage, bounds)
+            if clip.width > 0 and clip.height > 0:
+                eng.set_clip(clip.x, clip.y, clip.width, clip.height)
+                val outcome = _engine2d_draw_ir_render_commands(
+                    eng, batch.commands, embedding.x, embedding.y, images,
+                    false, false, clip, budget)
+                eng = outcome.engine
+                eng.clear_clip()
+                rendered += outcome.rendered
+                skipped += outcome.skipped
+                if (outcome.unsupported_kinds != "" and
+                    outcome.unsupported_kinds != "none"):
+                    if unsupported != "": unsupported = unsupported + ","
+                    unsupported = unsupported + outcome.unsupported_kinds
+        i += 4
+    if unsupported == "": unsupported = "none"
+    eng.submit_batch()
+    var readback = engine2d_readback([], "not_requested")
+    if readback_frame:
+        eng.present()
+        readback = eng.read_pixels_with_source()
+    else:
+        if not eng.finalize_compute_frame_no_readback(): eng.present()
+    Engine2dDrawIrTileOutcome(
+        engine: eng,
+        tiles_total: damage_rects.len().to_i32() / 4,
+        tiles_rendered: damage_rects.len().to_i32() / 4,
+        tiles_skipped: 0,
+        ops_rendered: rendered,
+        ops_skipped: skipped,
+        unsupported_kinds: unsupported,
+        readback: readback)
+
 fn engine2d_draw_ir_render_composition_damaged(
     engine: Engine2D,
     composition: DrawIrComposition,
@@ -2720,8 +2804,9 @@ fn engine2d_draw_ir_render_composition_damaged(
             ops_skipped: batch.commands.len().to_i32(),
             unsupported_kinds: "retained-composition-unsafe-embedding",
             readback: engine2d_readback([], "preflight_rejected"))
-    engine2d_draw_ir_render_damaged(
-        engine, batch.commands, damage_rects, readback_frame)
+    var images: [Engine2dResolvedDrawIrImage] = []
+    engine2d_draw_ir_render_damaged_with_images(
+        engine, batch.commands, images, damage_rects, readback_frame)
 
 fn engine2d_draw_ir_render_tiled(
     engine: Engine2D,
@@ -2803,5 +2888,7 @@ export engine2d_draw_ir_adv_strict_vulkan_primitives_with_images
 export engine2d_draw_ir_command_samples_parent
 export engine2d_draw_ir_render_tiled
 export engine2d_draw_ir_render_damaged
+export engine2d_draw_ir_render_damaged_with_images
 export engine2d_draw_ir_render_composition_damaged
+export engine2d_draw_ir_render_composition_damaged_with_images
 export engine2d_resolved_draw_ir_image

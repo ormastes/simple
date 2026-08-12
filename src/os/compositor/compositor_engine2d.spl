@@ -3,9 +3,11 @@ use std.common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource}
 use common.ui.draw_ir.{DRAW_IR_COMMAND_IMAGE, DrawIrComposition}
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
     Engine2dDrawIrAdvResult,
+    Engine2dDrawIrTileOutcome,
     Engine2dResolvedDrawIrImage,
     engine2d_draw_ir_adv_composition_window_present_with_images,
     engine2d_draw_ir_adv_composition_with_images,
+    engine2d_draw_ir_render_composition_damaged_with_images,
     engine2d_resolved_draw_ir_image
 }
 use os.compositor.display_backend_core.{CompositorBackend, CompositorGlassCapable}
@@ -411,6 +413,74 @@ class Engine2dCompositorBackend:
                     self.window_revision_composition_revision = composition_revision
                     self.window_revision_composition = Some(composition)
                     self.window_revision_resources = resources
+                return true
+        self.invalidate_revision_cache()
+        false
+
+    me render_draw_ir_composition_resources_window_revision_damaged(
+        composition: DrawIrComposition,
+        resources: [SimpleOsHostGpuImageResource],
+        producer_generation: i64,
+        composition_revision: i64,
+        dirty_rects: [i64]
+    ) -> bool:
+        """Update a retained visible window through one exact damage plan.
+
+        A missing retained seed, malformed damage, unsafe embedding, or
+        unsupported command conservatively uses the existing full-frame path.
+        """
+        if self.window_revision_composition_revision < 0:
+            return self.render_draw_ir_composition_resources_window_revision(
+                composition, resources, producer_generation,
+                composition_revision)
+        if dirty_rects.len() == 0 or dirty_rects.len() % 4 != 0:
+            return self.render_draw_ir_composition_resources_window_revision(
+                composition, resources, producer_generation,
+                composition_revision)
+
+        self.damage_pyramid.begin_frame()
+        var i = 0
+        while i < dirty_rects.len():
+            self.damage_pyramid.mark_rect(
+                dirty_rects[i], dirty_rects[i + 1],
+                dirty_rects[i + 2], dirty_rects[i + 3])
+            i += 4
+        val plan = build_damage_plan(
+            self.damage_pyramid, 0, DamagePlanPolicy.create(256, 60))
+        self.last_damage_plan_mode = plan.mode
+        self.last_damage_plan_rect_count = plan.output_rect_count
+        self.last_damage_plan_pixels = plan.planned_pixels
+        if plan.rects.len() == 0:
+            return self.render_draw_ir_composition_resources_window_revision(
+                composition, resources, producer_generation,
+                composition_revision)
+
+        var images: [Engine2dResolvedDrawIrImage] = []
+        for resource in resources:
+            images.push(engine2d_resolved_draw_ir_image(
+                resource.image_uri, resource.width, resource.height,
+                resource.pixels))
+        val outcome: Engine2dDrawIrTileOutcome =
+            engine2d_draw_ir_render_composition_damaged_with_images(
+                self.engine, composition, images, plan.rects, false)
+        self.engine = outcome.engine
+        if (outcome.unsupported_kinds != "none" or
+            outcome.ops_skipped != 0 or outcome.ops_rendered <= 0):
+            return self.render_draw_ir_composition_resources_window_revision(
+                composition, resources, producer_generation,
+                composition_revision)
+        if not self.engine.present_window_device():
+            self.invalidate_revision_cache()
+            return false
+        if val Some(receipt) = self.engine.latest_vulkan_frame_receipt():
+            if (receipt.present_mode == "window-swapchain" and
+                receipt.present_completed and receipt.device_present and
+                receipt.no_readback and receipt.completion_known):
+                self.window_render_count += 1
+                self.window_revision_producer_generation = producer_generation
+                self.window_revision_composition_revision = composition_revision
+                self.window_revision_composition = Some(composition)
+                self.window_revision_resources = resources
                 return true
         self.invalidate_revision_cache()
         false
