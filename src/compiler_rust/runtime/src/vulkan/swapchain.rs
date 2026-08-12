@@ -30,6 +30,38 @@ fn retained_damage_regions(history: &[PresentDamageRecord], prior: i64, current:
     if regions.is_empty() { None } else { Some(regions) }
 }
 
+fn retained_damage_regions_with_candidate(history: &[PresentDamageRecord], prior: i64, current: i64, damage: &[[u32; 4]], width: u32, height: u32) -> Option<Vec<[u32; 4]>> {
+    if history.last().map(|record| record.revision) == Some(current) {
+        return retained_damage_regions(history, prior, current, width, height);
+    }
+    if prior < 0 { return None; }
+    let start = history.iter().position(|record| record.revision == prior)?;
+    // Appending a new revision to a full history evicts index zero before the
+    // next frame can consume it. Model that prospective eviction without
+    // cloning the 128-record history.
+    if history.len() >= 128 && start == 0 { return None; }
+    let mut regions = Vec::new();
+    for record in &history[start + 1..] {
+        if record.rects.is_empty() { return None; }
+        for &rect in &record.rects {
+            if regions.len() >= 256 { return None; }
+            if !regions.contains(&rect) { regions.push(rect); }
+        }
+    }
+    if damage.is_empty() { return None; }
+    for &[x, y, w, h] in damage {
+        if w == 0 || h == 0 || x >= width || y >= height || w > width - x || h > height - y || regions.len() >= 256 { return None; }
+        let rect = [x, y, w, h];
+        if !regions.contains(&rect) { regions.push(rect); }
+    }
+    if regions.is_empty() { None } else { Some(regions) }
+}
+
+fn invalidate_present_history(image_revisions: &mut [i64], history: &mut Vec<PresentDamageRecord>) {
+    image_revisions.fill(-1);
+    history.clear();
+}
+
 /// Vulkan swapchain for image presentation
 pub struct VulkanSwapchain {
     device: Arc<VulkanDevice>,
@@ -353,7 +385,9 @@ impl VulkanSwapchain {
 
     /// Present an image to the swapchain
     ///
-    /// Returns true if swapchain is out of date and needs recreation
+    /// Returns true only for a successfully queued suboptimal presentation.
+    /// An out-of-date swapchain returns `SwapchainOutOfDate` and must not be
+    /// recorded as presented.
     pub fn present(&self, image_index: u32, wait_semaphores: &[&Semaphore]) -> VulkanResult<bool> {
         let wait_sems: Vec<vk::Semaphore> = wait_semaphores.iter().map(|s| s.handle()).collect();
 
@@ -370,9 +404,7 @@ impl VulkanSwapchain {
         unsafe {
             match self.swapchain_loader.queue_present(*queue, &present_info) {
                 Ok(suboptimal) => Ok(suboptimal),
-                Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                    Ok(true) // Needs recreation
-                }
+                Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => Err(VulkanError::SwapchainOutOfDate),
                 Err(e) => Err(VulkanError::SurfaceError(format!("Failed to present: {:?}", e))),
             }
         }
@@ -441,14 +473,6 @@ impl VulkanSwapchain {
         for &[x, y, w, h] in damage {
             if w == 0 || h == 0 || x >= width || y >= height || w > width - x || h > height - y { return Err(VulkanError::BufferTooSmall); }
         }
-        {
-            let mut history = self.damage_history.lock();
-            if history.last().map(|record| record.revision) != Some(content_revision) {
-                history.push(PresentDamageRecord { revision: content_revision, rects: damage.to_vec() });
-                if history.len() > 128 { history.remove(0); }
-            }
-        }
-
         let acquire_fence = self.acquire_fence.lock();
         acquire_fence.reset()?;
         let (image_index, acquire_suboptimal) = unsafe {
@@ -464,10 +488,18 @@ impl VulkanSwapchain {
         if prior_revision == content_revision && damage.is_empty() {
             *self.last_present_copy_bytes.lock() = 0;
             *self.last_present_copy_rects.lock() = 0;
-            let present_suboptimal = self.present(image_index, &[])?;
+            let present_suboptimal = match self.present(image_index, &[]) {
+                Ok(value) => value,
+                Err(error) => {
+                    invalidate_present_history(&mut self.image_revision.lock(), &mut self.damage_history.lock());
+                    return Err(error);
+                }
+            };
             return Ok((image_index, acquire_suboptimal || present_suboptimal, false));
         }
-        let copy_regions = retained_damage_regions(&self.damage_history.lock(), prior_revision, content_revision, width, height);
+        let copy_regions = retained_damage_regions_with_candidate(
+            &self.damage_history.lock(), prior_revision, content_revision,
+            damage, width, height);
         let was_presented = prior_revision >= 0;
         let old_layout = if was_presented { vk::ImageLayout::PRESENT_SRC_KHR } else { vk::ImageLayout::UNDEFINED };
         let cmd = self.device.begin_transfer_command()?;
@@ -508,8 +540,23 @@ impl VulkanSwapchain {
             *self.last_present_copy_bytes.lock() = expected;
             *self.last_present_copy_rects.lock() = 1;
         }
+        let present_suboptimal = match self.present(image_index, &[]) {
+            Ok(value) => value,
+            Err(error) => {
+                invalidate_present_history(&mut self.image_revision.lock(), &mut self.damage_history.lock());
+                *self.last_present_copy_bytes.lock() = 0;
+                *self.last_present_copy_rects.lock() = 0;
+                return Err(error);
+            }
+        };
         self.image_revision.lock()[image_index as usize] = content_revision;
-        let present_suboptimal = self.present(image_index, &[])?;
+        {
+            let mut history = self.damage_history.lock();
+            if history.last().map(|record| record.revision) != Some(content_revision) {
+                history.push(PresentDamageRecord { revision: content_revision, rects: damage.to_vec() });
+                if history.len() > 128 { history.remove(0); }
+            }
+        }
         Ok((image_index, acquire_suboptimal || present_suboptimal, copy_regions.is_some()))
     }
 }
@@ -709,5 +756,36 @@ mod tests {
             PresentDamageRecord { revision: 35, rects: vec![[8, 9, 2, 2]] },
         ];
         assert_eq!(retained_damage_regions(&full, 10, 35, 100, 80), None);
+        let pending = [[40, 50, 3, 2]];
+        assert_eq!(
+            retained_damage_regions_with_candidate(&history, 20, 50, &pending, 100, 80),
+            Some(vec![[8, 9, 2, 2], [40, 50, 3, 2]])
+        );
+        assert_eq!(history.len(), 3);
+    }
+
+    #[test]
+    fn failed_present_invalidates_revision_and_damage_history() {
+        let mut revisions = vec![10, 20, 35];
+        let mut history = vec![
+            PresentDamageRecord { revision: 10, rects: vec![[1, 2, 3, 4]] },
+            PresentDamageRecord { revision: 20, rects: vec![[5, 6, 7, 8]] },
+        ];
+        invalidate_present_history(&mut revisions, &mut history);
+        assert_eq!(revisions, vec![-1, -1, -1]);
+        assert!(history.is_empty());
+        assert_eq!(retained_damage_regions(&history, 20, 35, 100, 80), None);
+    }
+
+    #[test]
+    fn candidate_damage_models_full_history_eviction() {
+        let history: Vec<PresentDamageRecord> = (0..128)
+            .map(|revision| PresentDamageRecord { revision, rects: vec![[revision as u32, 0, 1, 1]] })
+            .collect();
+        let pending = [[200, 0, 1, 1]];
+        assert_eq!(retained_damage_regions_with_candidate(&history, 0, 128, &pending, 256, 4), None);
+        let retained = retained_damage_regions_with_candidate(&history, 1, 128, &pending, 256, 4);
+        assert!(retained.is_some());
+        assert_eq!(retained.unwrap().last(), Some(&pending[0]));
     }
 }
