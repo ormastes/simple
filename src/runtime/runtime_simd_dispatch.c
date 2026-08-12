@@ -1764,6 +1764,124 @@ static void engine2d_blend_boxed_sse2(int64_t* dst, const int64_t* src,
 }
 #endif
 
+#if defined(__aarch64__) || defined(_M_ARM64)
+static void engine2d_blend_boxed_neon(int64_t* dst, const int64_t* src,
+                                      int64_t n, uint32_t const_src,
+                                      int use_const) {
+    int64_t i = 0;
+    if (n >= 4) engine2d_record_simd_row_hit();
+    for (; i + 4 <= n; i += 4) {
+        uint32_t s[4], d[4];
+        int opaque_dst = 1;
+        for (int lane = 0; lane < 4; lane++) {
+            s[lane] = use_const ? const_src : engine2d_unbox_pixel(src[i + lane]);
+            d[lane] = engine2d_unbox_pixel(dst[i + lane]);
+            opaque_dst &= ((d[lane] >> 24) == 255u);
+        }
+        if (!opaque_dst) {
+            for (int lane = 0; lane < 4; lane++) {
+                dst[i + lane] = engine2d_box_pixel((uint32_t)
+                    engine2d_blend_pixel((int64_t)(uint64_t)s[lane],
+                                         (int64_t)(uint64_t)d[lane]));
+            }
+            continue;
+        }
+        uint32x4_t sv = vld1q_u32(s);
+        uint32x4_t dv = vld1q_u32(d);
+        uint32x4_t mask = vdupq_n_u32(255u);
+        uint32x4_t sa = vshrq_n_u32(sv, 24);
+        uint32x4_t inv = vsubq_u32(mask, sa);
+#define ENGINE2D_BLEND_CHANNEL_NEON(shift) \
+        vmlaq_u32(vmulq_u32(vandq_u32(vshrq_n_u32(sv, shift), mask), sa), \
+                   vandq_u32(vshrq_n_u32(dv, shift), mask), inv)
+        uint32x4_t racc = ENGINE2D_BLEND_CHANNEL_NEON(16);
+        uint32x4_t gacc = ENGINE2D_BLEND_CHANNEL_NEON(8);
+        uint32x4_t bacc = ENGINE2D_BLEND_CHANNEL_NEON(0);
+#undef ENGINE2D_BLEND_CHANNEL_NEON
+        uint32_t rv[4], gv[4], bv[4];
+        vst1q_u32(rv, racc);
+        vst1q_u32(gv, gacc);
+        vst1q_u32(bv, bacc);
+        for (int lane = 0; lane < 4; lane++) {
+            uint32_t alpha = s[lane] >> 24;
+            uint32_t out = alpha == 255u ? s[lane] :
+                (alpha == 0u ? d[lane] :
+                 (0xff000000u | ((rv[lane] / 255u) << 16) |
+                  ((gv[lane] / 255u) << 8) | (bv[lane] / 255u)));
+            dst[i + lane] = engine2d_box_pixel(out);
+        }
+    }
+    for (; i < n; i++) {
+        uint32_t s = use_const ? const_src : engine2d_unbox_pixel(src[i]);
+        uint32_t d = engine2d_unbox_pixel(dst[i]);
+        dst[i] = engine2d_box_pixel((uint32_t)engine2d_blend_pixel(
+            (int64_t)(uint64_t)s, (int64_t)(uint64_t)d));
+    }
+}
+#endif
+
+#if defined(__riscv) && defined(__riscv_vector)
+static void engine2d_blend_boxed_rvv(int64_t* dst, const int64_t* src,
+                                     int64_t n, uint32_t const_src,
+                                     int use_const) {
+    int64_t i = 0;
+    if (n > 0) engine2d_record_simd_row_hit();
+    while (i < n) {
+        size_t request = (size_t)(n - i);
+        if (request > 64) request = 64;
+        size_t vl = __riscv_vsetvl_e32m1(request);
+        uint32_t s_words[64], d_words[64];
+        int opaque_dst = 1;
+        for (size_t lane = 0; lane < vl; lane++) {
+            s_words[lane] = use_const ? const_src :
+                engine2d_unbox_pixel(src[i + (int64_t)lane]);
+            d_words[lane] = engine2d_unbox_pixel(dst[i + (int64_t)lane]);
+            opaque_dst &= ((d_words[lane] >> 24) == 255u);
+        }
+        if (!opaque_dst) {
+            for (size_t lane = 0; lane < vl; lane++) {
+                dst[i + (int64_t)lane] = engine2d_box_pixel((uint32_t)
+                    engine2d_blend_pixel(
+                        (int64_t)(uint64_t)s_words[lane],
+                        (int64_t)(uint64_t)d_words[lane]));
+            }
+            i += (int64_t)vl;
+            continue;
+        }
+        vuint32m1_t sv = __riscv_vle32_v_u32m1(s_words, vl);
+        vuint32m1_t dv = __riscv_vle32_v_u32m1(d_words, vl);
+        vuint32m1_t sav = __riscv_vand_vx_u32m1(
+            __riscv_vsrl_vx_u32m1(sv, 24, vl), 255u, vl);
+        vuint32m1_t inv = __riscv_vrsub_vx_u32m1(sav, 255u, vl);
+        uint32_t sa[64], rv[64], gv[64], bv[64];
+        __riscv_vse32_v_u32m1(sa, sav, vl);
+#define ENGINE2D_BLEND_CHANNEL_RVV(shift) \
+        __riscv_vadd_vv_u32m1( \
+            __riscv_vmul_vv_u32m1( \
+                __riscv_vand_vx_u32m1( \
+                    __riscv_vsrl_vx_u32m1(sv, shift, vl), 255u, vl), \
+                sav, vl), \
+            __riscv_vmul_vv_u32m1( \
+                __riscv_vand_vx_u32m1( \
+                    __riscv_vsrl_vx_u32m1(dv, shift, vl), 255u, vl), \
+                inv, vl), vl)
+        __riscv_vse32_v_u32m1(rv, ENGINE2D_BLEND_CHANNEL_RVV(16), vl);
+        __riscv_vse32_v_u32m1(gv, ENGINE2D_BLEND_CHANNEL_RVV(8), vl);
+        __riscv_vse32_v_u32m1(bv, ENGINE2D_BLEND_CHANNEL_RVV(0), vl);
+#undef ENGINE2D_BLEND_CHANNEL_RVV
+        for (size_t lane = 0; lane < vl; lane++) {
+            uint32_t alpha = sa[lane];
+            uint32_t out = alpha == 255u ? s_words[lane] :
+                (alpha == 0u ? d_words[lane] :
+                 (0xff000000u | ((rv[lane] / 255u) << 16) |
+                  ((gv[lane] / 255u) << 8) | (bv[lane] / 255u)));
+            dst[i + (int64_t)lane] = engine2d_box_pixel(out);
+        }
+        i += (int64_t)vl;
+    }
+}
+#endif
+
 /* Blend src[src_off..src_off+n) over dst[dst_off..dst_off+n) in place,
  * straight-alpha src-over (oracle_src_over). No malloc — matches
  * fill_span/copy_span's in-place convention, not blend_row's
@@ -1789,6 +1907,18 @@ SplArray* rt_engine2d_simd_blend_span_u32(SplArray* dst, int64_t dst_off,
             engine2d_blend_boxed_sse2(dst_data + d_off, src_data + s_off,
                                       n, 0u, 0);
         }
+        return dst;
+    }
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    if (!backwards) {
+        engine2d_blend_boxed_neon(dst_data + d_off, src_data + s_off,
+                                  n, 0u, 0);
+        return dst;
+    }
+#elif defined(__riscv) && defined(__riscv_vector)
+    if (!backwards) {
+        engine2d_blend_boxed_rvv(dst_data + d_off, src_data + s_off,
+                                 n, 0u, 0);
         return dst;
     }
 #endif
@@ -1840,6 +1970,12 @@ SplArray* rt_engine2d_simd_blend_const_span_u32(SplArray* dst, int64_t offset,
     } else {
         engine2d_blend_boxed_sse2(dst_data + off, NULL, n, s, 1);
     }
+    return dst;
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    engine2d_blend_boxed_neon(dst_data + off, NULL, n, s, 1);
+    return dst;
+#elif defined(__riscv) && defined(__riscv_vector)
+    engine2d_blend_boxed_rvv(dst_data + off, NULL, n, s, 1);
     return dst;
 #endif
     uint32_t inv = 255u - sa;
