@@ -5,7 +5,7 @@
 # - link_objects: Legacy linker helper
 #
 # Backend helpers for module compilation and backend resolution
-use compiler.backend.backend.backend_helpers.{compile_module_with_backend, get_effective_backend_name}
+use compiler.backend.backend.backend_helpers.{compile_module_with_backend, compile_module_with_backend_target_cpu, get_effective_backend_name}
 use compiler.backend.llvm_backend_tools.{llvm_bootstrap_last_object_path}
 use compiler.backend.backend.llvm_capability.{find_archive_portable}
 use std.platform.{get_host_os}
@@ -71,10 +71,15 @@ fn driver_native_build_cache_dir() -> text:
 fn driver_native_build_cache_path(cache_dir: text) -> text:
     rt_path_join(cache_dir, "build_cache.sdn")
 
-fn driver_native_build_cache_scope(backend: text, cache_dir: text, target_cpu: text, opt_level: i64, symbol_mode: text) -> (text, text):
-    val raw_target = if target_cpu == "": nil else: Some(target_cpu)
+extern fn rt_simd_has_avx2() -> bool
+
+fn driver_native_build_cache_scope(backend: text, cache_dir: text, target: text, target_cpu: text, opt_level: i64, symbol_mode: text) -> (text, text):
+    val raw_target = if target == "": nil else: Some(target)
     val compiler_id = native_build_compiler_identity() + if symbol_mode == "": "" else: "-" + symbol_mode
-    val scope = native_build_cache_scope_key(Some(backend), raw_target, [], opt_level as i32, compiler_id)
+    val host_avx2 = target == "" and rt_simd_has_avx2()
+    val capability_key = "native-avx2-policy-v1:cpu={target_cpu};host={host_avx2}"
+    val scope = native_build_cache_scope_key(
+        Some(backend), raw_target, [capability_key], opt_level as i32, compiler_id)
     val cache_scope_root = rt_path_join(cache_dir, scope)
     (cache_scope_root, scope)
 
@@ -366,8 +371,11 @@ impl CompilerDriver:
         val cache_dir = driver_native_build_cache_dir()
         rt_dir_create(cache_dir, true)
         val native_target = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+        val native_cpu = rt_env_get("SIMPLE_NATIVE_CPU") ?? ""
         val symbol_mode = if no_mangle_requested: "no-mangle" else: ""
-        val (base_cache_scope_root, _) = driver_native_build_cache_scope(effective_backend, cache_dir, native_target, driver_opt_level, symbol_mode)
+        val (base_cache_scope_root, _) = driver_native_build_cache_scope(
+            effective_backend, cache_dir, native_target, native_cpu,
+            driver_opt_level, symbol_mode)
         if ctx.native_sources_fingerprint == "":
             return CompileResult.CodegenError(
                 "native build source fingerprint missing before cache setup")
@@ -727,7 +735,9 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
             return Err("Bootstrap empty object compile failed: {cc_err}")
         return Ok(obj_path)
 
-    val compiled = compile_module_with_backend(backend_name, mir_module, is_release, opt_level)
+    val target_cpu = rt_env_get("SIMPLE_NATIVE_CPU") ?? ""
+    val compiled = compile_module_with_backend_target_cpu(
+        backend_name, mir_module, is_release, opt_level, target_cpu)
 
     match compiled:
         case Err(err):

@@ -15,7 +15,8 @@ use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction}
 use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget, BuildMode, OptimizationLevel, BackendCompileOptions, CompiledModule, CompileError,
     compileerror_backend_error}
-use compiler.mir_opt.mir_opt.mod.{target_opt_context_default, optimize_module_for_backend, OptLevel}
+use compiler.mir_opt.mir_opt.mod.{TargetOptContext, target_opt_context_default, optimize_module_for_backend, OptLevel}
+use compiler.backend.feature_caps.{TargetCapsKind, x86_caps_from_target}
 use compiler.backend.backend.llvm_codegen_adapter.{llvm_compile_module_direct, llvm_compile_module_direct_compiled}
 use compiler.backend.codegen_types.{CodegenOutput}
 use compiler.backend.codegen_factory.{CodegenFactory}
@@ -25,6 +26,7 @@ use compiler.backend.llvm_support_matrix.{lookup_support, is_combination_usable}
 use compiler.common.mir_target_context.{mir_target_context_normalize_arch}
 
 extern fn rt_env_get(key: text) -> text
+extern fn rt_simd_has_avx2() -> bool
 
 # ============================================================================
 # Helper Functions
@@ -63,6 +65,22 @@ fn backend_helper_native_target_for(target: text) -> CodegenTarget:
 
 fn backend_helper_native_target() -> CodegenTarget:
     backend_helper_native_target_for(rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? "")
+
+fn backend_helper_target_opt_context(
+    configured_target: text,
+    target_cpu: text,
+    host_avx2_available: bool
+) -> TargetOptContext:
+    # Cross-target CPU names are requests, not proof about the execution
+    # domain. Until an explicit cross-target capability receipt is accepted,
+    # only the canonical host CPUID/XGETBV result may admit AVX2.
+    if configured_target != "" or target_cpu == "" or not host_avx2_available:
+        return target_opt_context_default()
+    val x86_caps = x86_caps_from_target(target_cpu)
+    TargetOptContext(
+        x86_caps: x86_caps,
+        cipher_remark: false,
+        caps_kind: TargetCapsKind.X86(x86_caps))
 
 fn target_is_irtc(target: CodegenTarget) -> bool:
     target == CodegenTarget.Avr or target == CodegenTarget.I8086
@@ -284,6 +302,16 @@ fn compile_module_with_backend(
     is_release: bool,
     opt_level_i64: i64
 ) -> Result<CompiledModule, CompileError>:
+    compile_module_with_backend_target_cpu(
+        backend_name, module, is_release, opt_level_i64, "")
+
+fn compile_module_with_backend_target_cpu(
+    backend_name: text,
+    module: MirModule,
+    is_release: bool,
+    opt_level_i64: i64,
+    target_cpu: text
+) -> Result<CompiledModule, CompileError>:
     """Compile a MIR module using the named backend.
 
     This is a convenience function for the driver that avoids Backend class
@@ -355,6 +383,9 @@ fn compile_module_with_backend(
         print "[backend-helper] opt resolved"
 
     # Create backend options and compile
+    val configured_target = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    val target_opt_ctx = backend_helper_target_opt_context(
+        configured_target, target_cpu, rt_simd_has_avx2())
     val options = BackendCompileOptions(
         target: backend_helper_native_target(),
         opt_level: opt,
@@ -363,7 +394,7 @@ fn compile_module_with_backend(
         emit_llvm_ir: false,
         emit_mir: false,
         verify_output: true,
-        target_opt_ctx: target_opt_context_default(),
+        target_opt_ctx: target_opt_ctx,
         backend_kind: nil
     )
     if trace:

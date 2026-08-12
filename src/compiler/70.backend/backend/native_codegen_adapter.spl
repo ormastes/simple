@@ -8,7 +8,10 @@ use compiler.mir.mir_instructions.{MirModule, MirFunction}
 use compiler.mir.mir_types.{MirTypeKind}
 use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget, BackendCompileOptions, CompileError}
 use compiler.backend.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutputKind}
-use compiler.backend.backend.native.mod.{native_compile_result}
+use compiler.backend.backend.native.mod.{native_compile_result, native_compile_result_with_avx2_capability}
+use compiler.backend.backend.native.native_avx2_capability.{
+    NativeAvx2CapabilityV1, native_avx2_capability_v1
+}
 use compiler.backend.portable_numeric_capabilities.{PortableNumericLoweringPlan, portable_numeric_default_plan_for_target}
 
 # ============================================================================
@@ -33,11 +36,31 @@ impl NativeCodegenAdapter:
 
         ["scalable_vector_target_lacks_native_capability"]
 
+    fn avx2_capability() -> NativeAvx2CapabilityV1:
+        val caps = self.options.target_opt_ctx.x86_caps
+        val admitted = caps.has_avx and caps.has_avx2
+        val fingerprint = "x86-caps-v1:avx={caps.has_avx};avx2={caps.has_avx2};avx512={caps.has_avx512}"
+        native_avx2_capability_v1(
+            self.options.target.to_text(),
+            "resolved-target-opt-context",
+            fingerprint,
+            admitted)
+
 fn native_module_has_scalable_vec(module: MirModule) -> bool:
     for func in module.functions.values():
         for local in func.locals:
             match local.type_.kind:
                 case MirTypeKind.ScalableVec(_, _):
+                    return true
+                case _:
+                    ()
+    false
+
+fn native_module_has_fixed_simd(module: MirModule) -> bool:
+    for func in module.functions.values():
+        for local in func.locals:
+            match local.type_.kind:
+                case MirTypeKind.Vec(_, _):
                     return true
                 case _:
                     ()
@@ -61,7 +84,11 @@ impl Codegen for NativeCodegenAdapter:
         if scalable_diags.len() > 0:
             return Ok(CodegenOutput.object(module.name, []))
 
-        val compiled = native_compile_result(module, self.options.target)
+        val compiled = if self.options.target == CodegenTarget.X86_64 and native_module_has_fixed_simd(module):
+            native_compile_result_with_avx2_capability(
+                module, self.options.target, self.avx2_capability())
+        else:
+            native_compile_result(module, self.options.target)
         val bytes = if compiled.object_code.?: compiled.object_code.unwrap() else: []
         Ok(CodegenOutput.object(module.name, bytes))
 

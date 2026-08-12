@@ -383,3 +383,16 @@ dev-done
   primary review added explicit capability injection and retained honest
   skips only for absent AVX2 hardware. Production driver propagation of the
   receipt and reusable/spillable vector allocation remain open.
+- impl: Propagated the resolved host AVX2 decision through the pure-Simple
+  custom-native driver boundary. `SIMPLE_NATIVE_CPU` is converted to the
+  existing `TargetOptContext` only when the canonical CPUID/XGETBV runtime
+  probe admits AVX2; a configured cross target remains denied because a CPU
+  name is not execution-domain evidence. Fixed-width SIMD modules now carry a
+  deterministic `NativeAvx2CapabilityV1` from the adapter into native ISel,
+  and the native cache scope includes the CPU/probe decision. Focused policy
+  tests cover admitted host v3, unavailable-host denial, cross-target denial,
+  and baseline/unknown denial. Three Luna audits reviewed the Simple route,
+  Rust boundary, and receipt-test patterns; primary review corrected the
+  initial target-vs-CPU channel mix-up. Explicit cross-target receipt import,
+  public CLI admission of the custom-native backend, and vector spills remain
+  open.
