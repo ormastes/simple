@@ -5,9 +5,54 @@ use common.ui.window_scene.{WmContentFrame}
 use nogc_sync_mut.ui.session.{UISession}
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
     Engine2dResolvedDrawIrImage,
+    Engine2dDrawIrTileOutcome,
     engine2d_draw_ir_adv_composition_with_images,
+    engine2d_draw_ir_render_composition_damaged,
 }
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use common.ui.render_opt.damage_plan.{DamagePlan}
+
+class GuiRetainedRenderSession:
+    engine: Engine2D
+    width: i32
+    height: i32
+    backend: text
+    seeded: bool
+
+    static fn create(width: i32, height: i32,
+                     backend: text) -> GuiRetainedRenderSession:
+        GuiRetainedRenderSession(
+            engine: Engine2D.create_with_backend(width, height, backend),
+            width: width, height: height, backend: backend, seeded: false)
+
+    me seed(session: UISession) -> bool:
+        val composition = session.submit_widget_draw_ir(
+            self.width, self.height, self.backend)
+        self.engine.clear(gui_content_frame_clear_color())
+        val rendered = engine2d_draw_ir_adv_composition_with_images(
+            self.engine, composition, self.backend != "cpu" and self.backend != "software", [])
+        if rendered.fallback_required or rendered.skipped_command_count != 0:
+            return false
+        self.seeded = true
+        true
+
+    me render_damage(session: UISession, plan: DamagePlan,
+                     readback_frame: bool) -> Engine2dDrawIrTileOutcome:
+        if not self.seeded:
+            return engine2d_draw_ir_render_composition_damaged(
+                self.engine, session.submit_widget_draw_ir(
+                    self.width, self.height, self.backend),
+                [0], readback_frame)
+        val composition = session.submit_widget_draw_ir(
+            self.width, self.height, self.backend)
+        val outcome = engine2d_draw_ir_render_composition_damaged(
+            self.engine, composition, plan.rects, readback_frame)
+        self.engine = outcome.engine
+        outcome
+
+    me shutdown():
+        self.engine.shutdown()
+        self.seeded = false
 
 fn gui_content_frame_clear_color() -> u32:
     """The canonical widget composition owns its first theme-derived seed."""
@@ -52,3 +97,4 @@ fn gui_session_content_frame(
     )
 
 export gui_content_frame_clear_color
+export GuiRetainedRenderSession
