@@ -35,3 +35,23 @@ frame, because no frame was timed.
   reuse count.
 - Only a measured p95 at or below 12.5 ms with exact reuse and checksum evidence
   may promote the retained Web/DrawIR lane to 8K/80 pass.
+
+## Native narrow-closure follow-up
+
+The cached native builder reached discovery using the admitted pure-Simple
+compiler at
+`build/evidence-stage3-fix/stage3/x86_64-unknown-linux-gnu/stage2-admitted/simple`.
+That compiler passes `simple_compiler_usable`; its identity string is
+`simple-bootstrap 1.0.0-beta`, so version text alone must not classify it as the
+Rust seed.
+
+The narrow build then failed immediately at
+`src/os/compositor/compositor_engine2d.spl:193:55` with:
+
+```text
+Unexpected token: expected expression, found Newline
+```
+
+The active uncommitted Vulkan-present lane splits the right-hand side of an
+assignment onto the next line there. This is now the first native gate. The
+benchmark has not executed and still provides no 8K timing row.
