@@ -1,0 +1,118 @@
+# codex-system-test
+# @manual_section Locked commit.retire observational aspects
+
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig, HwNodeId}
+use compiler.mir.hwir.retirement_composition.{strict_zca_single_outstanding_retirement_composition}
+use compiler.mir.hwir.aspects.{HwAspectApplication, HwAspectLock, HwAspectManifest,
+    HwAspectPlan, HwRetireObservation, hwir_aspect_lock_for_plan,
+    hwir_aspect_plan_absent, hwir_commit_retire_node_id,
+    weave_hwir_commit_retire_observations_locked}
+
+fn retire_manifest(port_count: i32) -> HwAspectManifest:
+    HwAspectManifest(id: "debug.rvfi.retire", version: "1.0.0",
+        content_hash: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+        stage: "Architecture", advice_kind: "observe", effect_class: "observational",
+        required: true, required_capabilities: [], provided_capabilities: ["debug.rvfi"],
+        conflicts_with: [], join_point_selectors: ["commit.retire"],
+        added_port_count: port_count, added_state_count: 0, latency_contract: "transparent",
+        proof_obligations: ["architectural_noninterference"])
+
+fn retire_plan(node_id: HwNodeId, port_count: i32) -> HwAspectPlan:
+    HwAspectPlan(manifests: [retire_manifest(port_count)], applications: [
+        HwAspectApplication(aspect_id: "debug.rvfi.retire", matched_node_ids: [node_id],
+            woven_node_count: port_count)])
+
+describe "typed commit.retire aspect weaving":
+    # @req REQ-FV2-011 REQ-FV2-015
+    it "should keep an absent retirement observer structurally zero-cost":
+        step("Build the typed retirement composition and apply the absent observer plan")
+        val built = strict_zca_single_outstanding_retirement_composition(
+            "retire_aspect_absent", CoreConfig.rv32_zca_mission_critical(),
+            "riscv_gen2_rv32_architectural_retirement")
+        if built.is_ok():
+            val composition = built.ok().unwrap()
+            val result = weave_hwir_commit_retire_observations_locked(composition,
+                hwir_aspect_plan_absent(), HwAspectLock(entries: []), [])
+            expect(result.is_ok()).to_equal(true)
+            if result.is_ok():
+                val absent = result.ok().unwrap()
+                expect(absent.is_unchanged()).to_equal(true)
+                expect(absent.route).to_equal("hwir-aspect-absent")
+                expect(absent.composition.node_id.value).to_equal(composition.node_id.value)
+                expect(absent.composition.bindings.len()).to_equal(composition.bindings.len())
+                expect(absent.composition.producer.ports().len()).to_equal(composition.producer.ports().len())
+            else:
+                expect(false).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    # @req REQ-FV2-011 REQ-FV2-015
+    it "should weave locked typed receipt observations without changing architectural composition":
+        step("Lock two commit.retire observations and compare their order-independent weave receipt")
+        val built = strict_zca_single_outstanding_retirement_composition(
+            "retire_aspect_on", CoreConfig.rv64_zca_mission_critical(),
+            "riscv_gen2_rv64_architectural_retirement")
+        if built.is_ok():
+            val composition = built.ok().unwrap()
+            val node_id = hwir_commit_retire_node_id(composition)
+            val plan = retire_plan(node_id, 2)
+            val lock = hwir_aspect_lock_for_plan(plan)
+            if lock.is_ok():
+                val lineage = HwRetireObservation(aspect_id: "debug.rvfi.retire",
+                    target_node_id: node_id, receipt_value: "retire_lineage",
+                    output_port: "rvfi_retire_lineage", bit_width: 64)
+                val valid = HwRetireObservation(aspect_id: "debug.rvfi.retire",
+                    target_node_id: node_id, receipt_value: "retire_valid",
+                    output_port: "rvfi_retire_valid", bit_width: 1)
+                val first = weave_hwir_commit_retire_observations_locked(
+                    composition, plan, lock.ok().unwrap(), [lineage, valid])
+                val second = weave_hwir_commit_retire_observations_locked(
+                    composition, plan, lock.ok().unwrap(), [valid, lineage])
+                expect(first.is_ok()).to_equal(true)
+                expect(second.is_ok()).to_equal(true)
+                if first.is_ok() and second.is_ok():
+                    val woven = first.ok().unwrap()
+                    expect(woven.route).to_equal("hwir-aspect-commit-retire-observe")
+                    expect(woven.added_port_count).to_equal(2)
+                    expect(woven.weave_sha256).to_equal(second.ok().unwrap().weave_sha256)
+                    expect(woven.composition.bindings.len()).to_equal(composition.bindings.len())
+                    expect(woven.composition.producer.ports().len()).to_equal(composition.producer.ports().len())
+                    expect(woven.composition.shape_diagnostic()).to_equal("")
+                else:
+                    expect(false).to_equal(true)
+            else:
+                expect(false).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    # @req REQ-FV2-011 REQ-FV2-015 REQ-FV2-019
+    it "should reject a foreign join point and a mistyped retirement field":
+        step("Submit foreign and width-mismatched observations against the stable commit.retire node")
+        val built = strict_zca_single_outstanding_retirement_composition(
+            "retire_aspect_reject", CoreConfig.rv32_zca_mission_critical(),
+            "riscv_gen2_rv32_architectural_retirement")
+        if built.is_ok():
+            val composition = built.ok().unwrap()
+            val node_id = hwir_commit_retire_node_id(composition)
+            val plan = retire_plan(node_id, 1)
+            val lock = hwir_aspect_lock_for_plan(plan)
+            if lock.is_ok():
+                val foreign = HwRetireObservation(aspect_id: "debug.rvfi.retire",
+                    target_node_id: HwNodeId.module_root("foreign"), receipt_value: "retire_valid",
+                    output_port: "rvfi_retire_valid", bit_width: 1)
+                val foreign_result = weave_hwir_commit_retire_observations_locked(
+                    composition, plan, lock.ok().unwrap(), [foreign])
+                expect(foreign_result.is_err()).to_equal(true)
+                expect(foreign_result.err()).to_equal("HWIR-E-ASPECT-RETIRE-TARGET: retirement observation must bind the supplied composition's stable commit.retire node")
+                val mistyped = HwRetireObservation(aspect_id: "debug.rvfi.retire",
+                    target_node_id: node_id, receipt_value: "retire_lineage",
+                    output_port: "rvfi_retire_lineage", bit_width: 32)
+                val type_result = weave_hwir_commit_retire_observations_locked(
+                    composition, plan, lock.ok().unwrap(), [mistyped])
+                expect(type_result.is_err()).to_equal(true)
+                expect(type_result.err()).to_equal("HWIR-E-ASPECT-RETIRE-TYPE: retirement observation must name an exact typed producer receipt output")
+            else:
+                expect(false).to_equal(true)
+        else:
+            expect(false).to_equal(true)

@@ -1,3 +1,6 @@
+# codex-system-test
+# @manual_section Typed HWIR aspect manifest admission
+
 use std.spec.*
 use compiler.mir.hwir.types.{CoreConfig, HwNodeId}
 use compiler.mir.hwir.mir_to_hwir.{HwirLowerInput, lower_strict_hwir_and_module}
@@ -23,19 +26,25 @@ fn observed_port_manifest() -> HwAspectManifest:
         proof_obligations: ["architectural_noninterference"])
 
 describe "typed Gen2 hardware aspect manifests":
-    it "keeps the disabled plan structurally zero-cost":
+    # @req REQ-FV2-011
+    it "should keep a disabled aspect plan structurally zero-cost":
+        step("Construct the canonical absent plan without manifests or applications")
         val plan = hwir_aspect_plan_absent()
         expect(plan.is_absent()).to_equal(true)
         expect(plan.diagnostic()).to_equal("")
 
-    it "accepts a required observational aspect only with a semantic HWIR match":
+    # @req REQ-FV2-011
+    it "should admit a required observational aspect only with a semantic HWIR match":
+        step("Bind the required manifest to the stable typed commit node")
         val manifest = aspect_manifest("debug.rvfi", true, [])
         val plan = HwAspectPlan(manifests: [manifest], applications: [
             HwAspectApplication(aspect_id: "debug.rvfi", matched_node_ids: [HwNodeId.module_root("commit")], woven_node_count: 1)
         ])
         expect(plan.diagnostic()).to_equal("")
 
-    it "fails closed for a required zero-match or conflicting aspect plan":
+    # @req REQ-FV2-011 REQ-FV2-019
+    it "should fail closed for missing, zero-match, or conflicting aspect plans":
+        step("Validate required applications and mutually conflicting manifest declarations")
         val missing = HwAspectPlan(manifests: [aspect_manifest("debug.rvfi", true, [])], applications: [])
         expect(missing.diagnostic()).to_equal("HWIR-E-ASPECT-REQUIRED: required hardware aspect did not produce an application")
         val zero_match = HwAspectPlan(manifests: [aspect_manifest("debug.rvfi", true, [])], applications: [
@@ -49,7 +58,9 @@ describe "typed Gen2 hardware aspect manifests":
         val conflict = HwAspectPlan(manifests: [aspect_manifest("debug.rvfi", false, ["safety.lockstep"]), aspect_manifest("safety.lockstep", false, [])], applications: [])
         expect(conflict.diagnostic()).to_equal("HWIR-E-ASPECT-CONFLICT: conflicting hardware aspects cannot share one plan")
 
-    it "rejects unsupported textual advice shapes before any weaver can run":
+    # @req REQ-FV2-011 REQ-FV2-019
+    it "should reject unsupported textual advice before any weaver can run":
+        step("Declare a textual VHDL advice kind at the typed manifest boundary")
         val invalid = HwAspectManifest(id: "debug.raw_vhdl", version: "1.0.0",
             content_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             stage: "RTL", advice_kind: "vhdl_text", effect_class: "observational",
@@ -58,7 +69,9 @@ describe "typed Gen2 hardware aspect manifests":
             latency_contract: "transparent", proof_obligations: ["architectural_noninterference"])
         expect(invalid.diagnostic()).to_equal("HWIR-E-ASPECT-ADVICE: hardware aspect advice kind is unsupported")
 
-    it "requires the proof obligation appropriate to every effect class":
+    # @req REQ-FV2-011 REQ-FV2-019
+    it "should require the declared proof obligation for each effect class":
+        step("Validate observational and provider-replacement manifest proof obligations")
         var missing_observational_proof = aspect_manifest("debug.bad_proof", false, [])
         missing_observational_proof.proof_obligations = ["cycle_equivalence"]
         expect(missing_observational_proof.diagnostic()).to_equal("HWIR-E-ASPECT-PROOF: hardware aspect effect class requires its declared proof obligation")
@@ -71,7 +84,9 @@ describe "typed Gen2 hardware aspect manifests":
             proof_obligations: ["interface_refinement"])
         expect(provider.diagnostic()).to_equal("")
 
-    it "weaves only a matched transparent observational output into typed HWIR":
+    # @req REQ-FV2-011
+    it "should weave only a matched transparent observational output into typed HWIR":
+        step("Lower a typed module and attach one declared module-port observation")
         val lowered = lower_strict_hwir_and_module(
             HwirLowerInput.hardware("aspect_and", 2, 1, 0, 0), CoreConfig.rv32())
         if val module = lowered.module:
@@ -103,7 +118,9 @@ describe "typed Gen2 hardware aspect manifests":
         else:
             expect(false).to_equal(true)
 
-    it "keeps an absent plan physically unchanged and rejects undeclared probes":
+    # @req REQ-FV2-011 REQ-FV2-019
+    it "should leave an absent plan unchanged and reject undeclared probes":
+        step("Apply the absent plan before attempting an undeclared observational probe")
         val lowered = lower_strict_hwir_and_module(
             HwirLowerInput.hardware("absent_aspect_and", 2, 1, 0, 0), CoreConfig.rv32())
         if val module = lowered.module:
@@ -123,7 +140,9 @@ describe "typed Gen2 hardware aspect manifests":
         else:
             expect(false).to_equal(true)
 
-    it "binds aspect weave accounting and scope to the supplied typed module":
+    # @req REQ-FV2-011 REQ-FV2-019
+    it "should bind weave accounting and scope to the supplied typed module":
+        step("Submit mismatched attachment counts and a foreign typed module node")
         val lowered = lower_strict_hwir_and_module(
             HwirLowerInput.hardware("accounted_aspect_and", 2, 1, 0, 0), CoreConfig.rv32())
         if val module = lowered.module:
@@ -146,7 +165,9 @@ describe "typed Gen2 hardware aspect manifests":
         else:
             expect(false).to_equal(true)
 
-    it "fails closed when a probe transform cannot realize the declared semantic join point":
+    # @req REQ-FV2-011 REQ-FV2-019
+    it "should fail closed when a probe cannot realize its declared semantic join point":
+        step("Request module-port weaving through unsupported join-point and stage declarations")
         val lowered = lower_strict_hwir_and_module(
             HwirLowerInput.hardware("join_scope_aspect_and", 2, 1, 0, 0), CoreConfig.rv32())
         if val module = lowered.module:
