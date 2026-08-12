@@ -1,0 +1,72 @@
+# @tag: unit, app, riscv, hwir, qualification, receipt
+# @req REQ-G2-004 NFR-G2-001 NFR-G2-006
+
+use std.spec.{describe, expect, it}
+use app.test.riscv_gen2_qualification_receipt.{
+    RISCV_GEN2_QUALIFICATION_SCHEMA,
+    riscv_gen2_parse_qualification_manifest,
+    riscv_gen2_render_qualification_receipt}
+
+val _HASH = "a" * 64
+
+fn _row(index: i64, architecture: text) -> text:
+    val prefix = "row_{index}_"
+    prefix + "architecture={architecture}\n" +
+    prefix + "command=ghdl -a --std=08 {architecture}.vhd && ghdl -e --std=08 gen2_{architecture} && ghdl -r --std=08 gen2_{architecture}\n" +
+    prefix + "exit_code=0\n" +
+    prefix + "vhdl_path=evidence/{architecture}.vhd\n" +
+    prefix + "vhdl_sha256={_HASH}\n" +
+    prefix + "analyze_log_path=evidence/{architecture}.analyze.log\n" +
+    prefix + "analyze_log_sha256={_HASH}\n" +
+    prefix + "elaborate_log_path=evidence/{architecture}.elaborate.log\n" +
+    prefix + "elaborate_log_sha256={_HASH}\n" +
+    prefix + "run_log_path=evidence/{architecture}.run.log\n" +
+    prefix + "run_log_sha256={_HASH}\n" +
+    prefix + "source_identity_sha256={_HASH}\n" +
+    prefix + "config_identity_sha256={_HASH}\n" +
+    prefix + "graph_identity_sha256={_HASH}\n"
+
+fn _manifest() -> text:
+    "schema={RISCV_GEN2_QUALIFICATION_SCHEMA}\n" +
+    "status=passed\n" +
+    "cli_path=build/stage4/simple\ncli_sha256={_HASH}\n" +
+    "cli_provenance_path=build/stage4/simple.provenance.env\n" +
+    "cli_provenance_sha256={_HASH}\nsource_revision={_HASH}\n" +
+    "coverage_kind=branch\nbranch_coverage_threshold_basis_points=8000\n" +
+    "branch_coverage_basis_points=8000\n" +
+    "branch_coverage_log_path=evidence/branch_coverage.log\n" +
+    "branch_coverage_log_sha256={_HASH}\n" + _row(1, "rv32") + _row(2, "rv64")
+
+describe "RISC-V Gen2 qualification receipt contract":
+    it "should accept the fixed RV32 and RV64 measured branch manifest":
+        val parsed = riscv_gen2_parse_qualification_manifest(_manifest())
+        expect(parsed.is_ok()).to_be(true)
+        val manifest = parsed.unwrap()
+        expect(manifest.rows.len()).to_equal(2)
+        expect(manifest.rows[0].architecture).to_equal("rv32")
+        expect(manifest.rows[1].architecture).to_equal("rv64")
+        expect(manifest.branch_coverage_basis_points).to_equal(8000)
+
+    it "should reject missing rows, nonzero exits, and subcanonical branch coverage":
+        expect(riscv_gen2_parse_qualification_manifest(
+            _manifest().replace("row_2_architecture=rv64\n", "")
+        ).is_err()).to_be(true)
+        expect(riscv_gen2_parse_qualification_manifest(
+            _manifest().replace("row_1_exit_code=0", "row_1_exit_code=1")
+        ).is_err()).to_be(true)
+        expect(riscv_gen2_parse_qualification_manifest(
+            _manifest().replace("branch_coverage_basis_points=8000",
+                "branch_coverage_basis_points=7999")
+        ).is_err()).to_be(true)
+
+    it "should render only bound command and retained evidence identities":
+        val manifest = riscv_gen2_parse_qualification_manifest(_manifest()).unwrap()
+        val rendered = riscv_gen2_render_qualification_receipt(
+            manifest, "qualified-run-001", _HASH)
+        expect(rendered).to_contain("\"schema\":\"" +
+            RISCV_GEN2_QUALIFICATION_SCHEMA + "\"")
+        expect(rendered).to_contain("\"threshold_basis_points\":8000")
+        expect(rendered).to_contain("\"architecture\":\"rv32\"")
+        expect(rendered).to_contain("\"architecture\":\"rv64\"")
+        expect(rendered).to_contain("\"exit_code\":0")
+
