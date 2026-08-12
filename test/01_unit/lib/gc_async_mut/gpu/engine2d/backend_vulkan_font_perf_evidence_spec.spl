@@ -1,7 +1,7 @@
 use std.spec.{describe, it, expect}
 use std.io_runtime.{file_read}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
-use std.gc_async_mut.gpu.engine2d.backend_vulkan_font.{VULKAN_FONT_FRAME_GLYPH_CAP, vulkan_font_elapsed_ns, vulkan_font_gpu_resource_bytes, vulkan_font_gpu_resource_bytes_for_params, vulkan_font_timed_ns, vulkan_font_frame_batch_contract}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_font.{VULKAN_FONT_FRAME_GLYPH_CAP, VULKAN_FONT_PACKED_MAX_BYTES, vulkan_font_elapsed_ns, vulkan_font_gpu_resource_bytes, vulkan_font_gpu_resource_bytes_for_params, vulkan_font_timed_ns, vulkan_font_frame_batch_contract, vulkan_font_packed_params}
 use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad}
 
 fn _perf_batch() -> FontRenderBatch:
@@ -26,6 +26,15 @@ describe "Vulkan font performance evidence counters":
         expect(backend.font_descriptor_pool).to_equal([])
         expect(backend.font_params_pool).to_equal([])
 
+    it "packs one frame-wide header and one seven-word glyph record":
+        val packed = vulkan_font_packed_params(_perf_batch(), 3, 4, 8, 8)
+        expect(packed.len()).to_equal(60)
+        expect(VULKAN_FONT_PACKED_MAX_BYTES).to_equal(114720)
+        expect(packed[24]).to_equal(1u8)
+        expect(packed[28]).to_equal(1u8)
+        expect(packed[48]).to_equal(3u8)
+        expect(packed[52]).to_equal(4u8)
+
     it "queues glyphs into the shared frame command without hot-path evidence work":
         val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font.spl")
         val helpers = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_helpers.spl")
@@ -39,6 +48,8 @@ describe "Vulkan font performance evidence counters":
         expect(source).to_contain("self.font_descriptor_pool[pool_index]")
         expect(source).to_contain("self.font_params_pool.push(params)")
         expect(source).to_contain("self.font_descriptor_pool.push(descriptor)")
+        expect(source).to_contain("queued-packed-font-batch")
+        expect(source).to_contain("vulkan_sffi_dispatch(packed_command, vulkan_font_dispatch_groups(max_pixels), batch.quads.len(), 1)")
         expect(source).to_contain("font-frame-glyph-cap-exceeded")
         expect(source).to_contain("if self.pending_font_descriptors.len() == 0")
         expect(source).to_contain("if self.frame_batching_enabled and not self.font_oracle_mode")

@@ -142,3 +142,30 @@ the next bottleneck cleanly: one staging upload and one dispatch per glyph.
 Packing all glyph parameters into one buffer and dispatching a two-dimensional
 glyph/pixel grid is required for dense Web text. This is not physical-GPU,
 swapchain, mixed-DrawIR, or end-to-end 8K/80 proof.
+
+## Packed atlas-text production cutover
+
+The measured per-glyph upload/dispatch ceiling was architectural, not pixel
+throughput. The pinned Vulkan font artifact now consumes one frame header plus
+seven words per glyph from one storage buffer. A two-dimensional dispatch maps
+X to pixels within the largest glyph and Y to glyph records. The production
+owner uploads once, binds one descriptor, and records one dispatch per text
+batch. Pool entries are frame-fence reusable and sized for the explicit
+4,096-glyph cap; cumulative glyph accounting still rejects an oversized frame.
+
+Exact 8K llvmpipe results for 16x16 glyphs, including the packed parameter
+upload, command recording, submission, and fence:
+
+| Packed glyphs | p50 ns | p95 ns | Mismatches | Budget |
+|---:|---:|---:|---:|---:|
+| 512 | 646,544 | 972,346 | 0 | PASS |
+| 1,024 | 914,165 | 1,137,523 | 0 | PASS |
+| 2,048 | 1,600,005 | 2,067,117 | 0 | PASS |
+| 4,096 | 3,324,689 | 4,647,876 | 0 | PASS |
+
+At 512 glyphs this reduces p95 from 80,649,691 ns to 972,346 ns (82.9x).
+The pinned GLSL and embedded 7,012-byte SPIR-V hashes are checked against the
+same source, and the full 132,710,400-byte framebuffer oracle reports exact
+parity. Readback, DrawIR traversal, mixed primitives, and swapchain presentation
+remain outside the timed interval, so this is a text-operation result rather
+than an end-to-end 8K/80 claim.

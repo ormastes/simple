@@ -1,16 +1,16 @@
 # Vulkan Font Atlas Composite Specification
 
-The 22 active scenarios cover the frozen 13-word parameter ABI, bounded
-dispatch, atlas replacement, deterministic checksums, exact packed-pixel
+The 22 active scenarios cover the frame header plus seven-word glyph-record
+ABI, bounded two-dimensional dispatch, atlas replacement, deterministic checksums, exact packed-pixel
 parity, artifact admission, cache identity, batch validation, session
 ownership, and idempotent cleanup.
 
 The embedded compute artifact is generated from semantics revision 2:
 
 - GLSL SHA-256:
-  `ee0e8a35748553891fc82013b09e96abf569072630fed0333e469f20cc1c1162`
+  `8a5c542279bbd37d03be5b9a2fea636f3171bb68cf4072d87162b382541d4444`
 - SPIR-V SHA-256:
-  `ca5a3d644e5d4dd1c3b6d453be4db252f8ed7b9d65b78e2f7ae37c17769dc55d`
+  `4b5f44e2803a55f6b94bcb3f443ff1c1d209aca7fe890ce1208a340e5c7358e8`
 - Target environment: Vulkan 1.1
 - Entry point: `main`
 

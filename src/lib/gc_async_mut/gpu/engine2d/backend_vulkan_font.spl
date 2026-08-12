@@ -26,6 +26,9 @@ use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
 }
 
 val VULKAN_FONT_PARAMS_BYTES: i64 = 52
+val VULKAN_FONT_PACKED_HEADER_WORDS: i64 = 8
+val VULKAN_FONT_PACKED_GLYPH_WORDS: i64 = 7
+val VULKAN_FONT_PACKED_MAX_BYTES: i64 = (VULKAN_FONT_PACKED_HEADER_WORDS + VULKAN_FONT_FRAME_GLYPH_CAP * VULKAN_FONT_PACKED_GLYPH_WORDS) * 4
 val VULKAN_FONT_FRAME_GLYPH_CAP: i64 = 4096
 val _VULKAN_STORAGE_BUFFER: i64 = 0x80
 
@@ -84,6 +87,36 @@ fn vulkan_font_dispatch_groups(pixel_count: i64) -> i64:
         0
     else:
         (pixel_count + 63) / 64
+
+fn vulkan_font_packed_params(batch: FontRenderBatch, origin_x: i32, origin_y: i32,
+                             dst_width: i32, dst_height: i32) -> [u8]:
+    val glyph_count = batch.quads.len()
+    val word_count = VULKAN_FONT_PACKED_HEADER_WORDS + glyph_count * VULKAN_FONT_PACKED_GLYPH_WORDS
+    if glyph_count <= 0 or glyph_count > VULKAN_FONT_FRAME_GLYPH_CAP or word_count > 2147483647 / 4:
+        return []
+    val atlas_count = batch.atlas_width.to_i64() * batch.atlas_height.to_i64()
+    val dst_count = dst_width.to_i64() * dst_height.to_i64()
+    if atlas_count <= 0 or atlas_count > 2147483647 or dst_count <= 0 or dst_count > 2147483647:
+        return []
+    var packed: [u8] = [0u8; word_count * 4]
+    var off = 0
+    var max_pixels: i64 = 0
+    val header: [i32] = [batch.atlas_width, batch.atlas_height, atlas_count as i32,
+        dst_width, dst_height, dst_count as i32, glyph_count as i32, 0]
+    for value in header:
+        off = _vulkan_font_pack_i32_le(packed, off, value)
+    for q in batch.quads:
+        val pixels = q.width.to_i64() * q.height.to_i64()
+        if pixels > max_pixels: max_pixels = pixels
+        val dst_x = font_destination_origin(origin_x, q.dst_x, q.width)
+        val dst_y = font_destination_origin(origin_y, q.dst_y, q.height)
+        if dst_x == nil or dst_y == nil: return []
+        val values: [i32] = [q.atlas_x, q.atlas_y, q.width, q.height,
+            dst_x.?, dst_y.?, q.color as i32]
+        for value in values:
+            off = _vulkan_font_pack_i32_le(packed, off, value)
+    _vulkan_font_pack_i32_le(packed, 28, max_pixels as i32)
+    packed
 
 fn vulkan_font_atlas_replacement_status(old_present: bool, old_freed: bool, fresh_freed: bool) -> text:
     if not old_present or old_freed:
@@ -260,7 +293,7 @@ fn vulkan_font_promotion_ready(artifact_mode: text, dispatch_count: i64, quad_co
                                device_name: text, device_type: text,
                                driver_identity: text) -> bool:
     (artifact_mode == "precompiled-spirv" and
-     quad_count > 0 and dispatch_count == quad_count and submitted and waited and
+     quad_count > 0 and dispatch_count == 1 and submitted and waited and
      readback_bytes > 0 and parity and fence_handle > 0 and fence_available and
      fence_destroyed and device_name != "" and
      (device_type == "discrete" or device_type == "integrated" or device_type == "virtual") and
@@ -276,7 +309,7 @@ fn vulkan_font_stage_evidence_ready(evidence: VulkanFontCompositeEvidence) -> bo
      evidence.atlas_buffer_handle > 0 and evidence.params_buffer_handle > 0 and
      evidence.command_handle > 0 and evidence.fence_handle > 0 and
      evidence.readback_buffer_handle > 0 and evidence.quad_count > 0 and
-     evidence.dispatch_count == evidence.quad_count and evidence.submitted and
+     evidence.dispatch_count == 1 and evidence.submitted and
      evidence.completion_waited and evidence.fence_evidence_available and
      evidence.fence_destroyed and evidence.readback_source == "device_readback" and
      evidence.readback_byte_count > 0 and evidence.queue_device_ns > 0 and
@@ -377,7 +410,7 @@ impl VulkanBackend:
             return _vulkan_font_evidence(pipeline, "unavailable", "font-pipeline-not-ready", 0, 0, 0, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
         if not font_atlas_composite_program_version_valid(batch.program_version) or not batch.valid or batch.quads.len() == 0:
             return _vulkan_font_evidence(pipeline, "rejected", "invalid-font-batch", self.d_font_atlas, 0, 0, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
-        val pending_glyph_count = self.pending_font_descriptors.len()
+        val pending_glyph_count = self.pending_font_glyph_count
         if (batch.quads.len() > VULKAN_FONT_FRAME_GLYPH_CAP or
             (self.frame_batching_enabled and
              pending_glyph_count > VULKAN_FONT_FRAME_GLYPH_CAP - batch.quads.len())):
@@ -470,6 +503,160 @@ impl VulkanBackend:
             self.font_atlas_owner_identity = owner_identity
             self.font_atlas_upload_count = self.font_atlas_upload_count + 1
             self.font_atlas_upload_bytes = self.font_atlas_upload_bytes + atlas_bytes
+        if pipeline.artifact_mode == "precompiled-spirv" or pipeline.artifact_mode == "runtime-glsl":
+            val packed = vulkan_font_packed_params(batch, origin_x, origin_y, width, height)
+            val pool_index = self.pending_font_params.len()
+            val use_packed_pool = self.frame_batching_enabled and not self.font_oracle_mode
+            if packed.len() == 0 or packed.len() > VULKAN_FONT_PACKED_MAX_BYTES:
+                return _vulkan_font_evidence(pipeline, "rejected", "invalid-packed-font-params", self.d_font_atlas, 0, 0, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
+            var packed_params: i64 = 0
+            var packed_descriptor: i64 = 0
+            if use_packed_pool and pool_index < self.font_params_pool.len():
+                packed_params = self.font_params_pool[pool_index]
+                packed_descriptor = self.font_descriptor_pool[pool_index]
+                if self.font_params_pool_capacity[pool_index] < packed.len():
+                    return _vulkan_font_evidence(pipeline, "failed", "packed-font-pool-capacity-invalid", self.d_font_atlas, packed_params, packed_descriptor, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
+            else:
+                val allocation_bytes = if use_packed_pool: VULKAN_FONT_PACKED_MAX_BYTES else: packed.len()
+                packed_params = vulkan_sffi_alloc_buffer(allocation_bytes, _VULKAN_STORAGE_BUFFER)
+                packed_descriptor = vulkan_sffi_create_descriptor_set(pipeline.pipeline_handle)
+                if packed_params <= 0 or packed_descriptor <= 0:
+                    if packed_params > 0: vulkan_sffi_free_buffer(packed_params)
+                    if packed_descriptor > 0: vulkan_sffi_destroy_descriptor_set(packed_descriptor)
+                    return _vulkan_font_evidence(pipeline, "failed", "packed-font-pool-allocation-failed", self.d_font_atlas, 0, 0, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
+                if use_packed_pool:
+                    self.font_params_pool.push(packed_params)
+                    self.font_descriptor_pool.push(packed_descriptor)
+                    self.font_params_pool_capacity.push(VULKAN_FONT_PACKED_MAX_BYTES)
+            var packed_pool_bytes: i64 = 0
+            for capacity in self.font_params_pool_capacity:
+                packed_pool_bytes = packed_pool_bytes + capacity
+            val packed_resource_bytes = atlas_bytes + dst_count * 4 + packed_pool_bytes
+            if packed_resource_bytes > self.font_gpu_resource_high_water_bytes:
+                self.font_gpu_resource_high_water_bytes = packed_resource_bytes
+            val packed_ready = (
+                vulkan_sffi_copy_to_buffer(packed_params, packed, 0) and
+                vulkan_sffi_bind_buffer(packed_descriptor, 0, self.d_font_atlas) and
+                vulkan_sffi_bind_buffer(packed_descriptor, 1, framebuffer) and
+                vulkan_sffi_bind_buffer(packed_descriptor, 2, packed_params))
+            if not packed_ready:
+                if not use_packed_pool:
+                    if packed_descriptor > 0: vulkan_sffi_destroy_descriptor_set(packed_descriptor)
+                    if packed_params > 0: vulkan_sffi_free_buffer(packed_params)
+                return _vulkan_font_evidence(pipeline, "failed", "packed-font-prepare-failed", self.d_font_atlas, packed_params, packed_descriptor, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
+            val packed_command = if self.pending_compute_command > 0:
+                self.pending_compute_command
+            else:
+                vulkan_sffi_begin_compute()
+            var max_pixels: i64 = 0
+            for q in batch.quads:
+                val glyph_pixels = q.width.to_i64() * q.height.to_i64()
+                if glyph_pixels > max_pixels: max_pixels = glyph_pixels
+            val packed_recorded = (packed_command > 0 and
+                vulkan_sffi_bind_pipeline(packed_command, pipeline.pipeline_handle) and
+                vulkan_sffi_bind_descriptors(packed_command, packed_descriptor) and
+                vulkan_sffi_dispatch(packed_command, vulkan_font_dispatch_groups(max_pixels), batch.quads.len(), 1))
+            if not packed_recorded:
+                if packed_command > 0: vulkan_sffi_quarantine_unsubmitted_command(packed_command, 0, 0)
+                if use_packed_pool:
+                    self._quarantine_pending_compute_descriptors()
+                    self._clear_pending_compute_state()
+                else:
+                    vulkan_sffi_quarantine_dependencies(packed_descriptor, packed_params, 0, 0)
+                self.completion_unknown = true
+                return _vulkan_font_evidence(pipeline, "failed", "packed-font-record-failed", self.d_font_atlas, packed_params, packed_descriptor, packed_command, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
+            if use_packed_pool:
+                if self.pending_compute_command == 0:
+                    self.pending_compute_command = packed_command
+                if self.pending_font_descriptors.len() == 0:
+                    self.font_frame_command_count = self.font_frame_command_count + 1
+                self.pending_font_descriptors.push(packed_descriptor)
+                self.pending_font_params.push(packed_params)
+                self.pending_font_glyph_count = self.pending_font_glyph_count + batch.quads.len()
+                var packed_evidence = _vulkan_font_evidence(pipeline, "recorded", "queued-packed-font-batch",
+                    self.d_font_atlas, packed_params, packed_descriptor, packed_command, batch.quads.len(), 1,
+                    false, false, framebuffer, 0, 0, 0, false)
+                packed_evidence.batch_identity = font_render_batch_atlas_cache_identity(batch)
+                packed_evidence.atlas_payload_sha256 = self.font_atlas_payload_sha256
+                packed_evidence.dirty_upload_ns = dirty_upload_ns
+                packed_evidence.command_buffer_count = 1
+                packed_evidence.submission_count = 0
+                packed_evidence.fence_count = 0
+                packed_evidence.descriptor_count = 1
+                packed_evidence.oracle_mode = false
+                self.dirty = true
+                return packed_evidence
+
+            var oracle_before: [u32] = []
+            var oracle = SoftwareBackend.create()
+            var packed_oracle_ns: i64 = 0
+            if self.font_oracle_mode:
+                oracle_before = _vulkan_font_bytes_to_pixels(
+                    _vulkan_font_download(framebuffer, dst_count * 4), dst_count)
+                if oracle_before.len() != dst_count:
+                    vulkan_sffi_quarantine_unsubmitted_command(packed_command, 0, 0)
+                    vulkan_sffi_quarantine_dependencies(packed_descriptor, packed_params, 0, 0)
+                    return _vulkan_font_evidence(pipeline, "failed", "packed-font-oracle-seed-failed", self.d_font_atlas, packed_params, packed_descriptor, packed_command, batch.quads.len(), 1, false, false, framebuffer, 0, 0, 0, false)
+                oracle.init(width, height)
+                oracle.buf = oracle_before
+                val oracle_started = clock.now_micros() * 1000
+                for q in batch.quads:
+                    val dst_x = font_destination_origin(origin_x, q.dst_x, q.width)
+                    val dst_y = font_destination_origin(origin_y, q.dst_y, q.height)
+                    val glyph_pixels = font_atlas_subrect_pixels(batch.atlas_pixels, batch.atlas_width, batch.atlas_height,
+                        q.atlas_x, q.atlas_y, q.width, q.height, q.color)
+                    oracle.draw_image_blend(dst_x.?, dst_y.?, q.width, q.height, glyph_pixels)
+                packed_oracle_ns = vulkan_font_elapsed_ns(oracle_started, clock.now_micros() * 1000)
+            val queue_started = clock.now_micros() * 1000
+            val ended = vulkan_sffi_end_compute(packed_command)
+            if not ended:
+                vulkan_sffi_quarantine_unsubmitted_command(packed_command, 0, 0)
+                vulkan_sffi_quarantine_dependencies(packed_descriptor, packed_params, 0, 0)
+                self.completion_unknown = true
+                return _vulkan_font_evidence(pipeline, "failed", "packed-font-command-end-failed", self.d_font_atlas, packed_params, packed_descriptor, packed_command, batch.quads.len(), 1, false, false, framebuffer, 0, 0, 0, false)
+            val fence = vulkan_sffi_submit_and_wait_fence(packed_command)
+            if fence < 0:
+                vulkan_sffi_quarantine_dependencies(packed_descriptor, packed_params, 0, 0)
+                self.completion_unknown = true
+                return _vulkan_font_evidence(pipeline, "failed", "packed-font-completion-unknown", self.d_font_atlas, packed_params, packed_descriptor, packed_command, batch.quads.len(), 1, false, false, framebuffer, 0, 0, 0, false)
+            val packed_queue_ns = vulkan_font_elapsed_ns(queue_started, clock.now_micros() * 1000)
+            val sync_started = clock.now_micros() * 1000
+            val waited = fence > 0 and vulkan_sffi_wait_fence(fence, 0)
+            val packed_sync_ns = vulkan_font_elapsed_ns(sync_started, clock.now_micros() * 1000)
+            val fence_destroyed = fence > 0 and vulkan_sffi_destroy_fence(fence)
+            var after: [u32] = []
+            var packed_readback_ns: i64 = 0
+            if self.font_oracle_mode and waited:
+                val readback_started = clock.now_micros() * 1000
+                after = _vulkan_font_bytes_to_pixels(_vulkan_font_download(framebuffer, dst_count * 4), dst_count)
+                packed_readback_ns = vulkan_font_elapsed_ns(readback_started, clock.now_micros() * 1000)
+            val parity = self.font_oracle_mode and after.len() == dst_count and vulkan_font_pixels_equal(after, oracle.buf)
+            val descriptor_destroyed = vulkan_sffi_destroy_descriptor_set(packed_descriptor)
+            val params_freed = vulkan_sffi_free_buffer(packed_params)
+            var executed = _vulkan_font_evidence(pipeline,
+                if waited and (not self.font_oracle_mode or parity): "executed" else: "failed",
+                if waited and (not self.font_oracle_mode or parity): "single-packed-font-submit" else: "packed-font-completion-or-parity-failed",
+                self.d_font_atlas, packed_params, if descriptor_destroyed: -packed_descriptor else: packed_descriptor,
+                packed_command, batch.quads.len(), 1, fence > 0, waited, framebuffer,
+                if self.font_oracle_mode: dst_count * 4 else: 0,
+                if self.font_oracle_mode: vulkan_font_pixels_checksum(after) else: 0,
+                if self.font_oracle_mode: vulkan_font_pixels_checksum(oracle.buf) else: 0, parity)
+            executed.batch_identity = font_render_batch_atlas_cache_identity(batch)
+            executed.atlas_payload_sha256 = self.font_atlas_payload_sha256
+            executed.dirty_upload_ns = dirty_upload_ns
+            executed.command_buffer_count = 1
+            executed.submission_count = if fence > 0: 1 else: 0
+            executed.fence_count = if fence > 0: 1 else: 0
+            executed.descriptor_count = 1
+            executed.oracle_mode = self.font_oracle_mode
+            executed.queue_device_ns = packed_queue_ns
+            executed.sync_wait_ns = packed_sync_ns
+            executed.present_readback_ns = packed_readback_ns
+            executed.cpu_oracle_ns = packed_oracle_ns
+            executed.readback_nonblank_pixels = vulkan_font_changed_pixel_count(oracle_before, after)
+            if not descriptor_destroyed or not params_freed: executed.status = "failed"
+            if waited: self.dirty = true
+            return _vulkan_font_completion(executed, fence, fence > 0, fence_destroyed)
         if not self.frame_batching_enabled and self.d_font_params == 0:
             self.d_font_params = vulkan_sffi_alloc_buffer(VULKAN_FONT_PARAMS_BYTES, _VULKAN_STORAGE_BUFFER)
             if self.d_font_params == 0:
@@ -532,6 +719,7 @@ impl VulkanBackend:
                 if params > 0 and descriptor > 0:
                     self.font_params_pool.push(params)
                     self.font_descriptor_pool.push(descriptor)
+                    self.font_params_pool_capacity.push(VULKAN_FONT_PARAMS_BYTES)
                 else:
                     if params > 0: vulkan_sffi_free_buffer(params)
                     if descriptor > 0: vulkan_sffi_destroy_descriptor_set(descriptor)
@@ -580,6 +768,7 @@ impl VulkanBackend:
                 self.font_frame_command_count = self.font_frame_command_count + 1
             for descriptor in descriptors: self.pending_font_descriptors.push(descriptor)
             for params in params_handles: self.pending_font_params.push(params)
+            self.pending_font_glyph_count = self.pending_font_glyph_count + batch.quads.len()
             val retained_params_count = self.pending_font_params.len() + (if self.d_font_params > 0: 1 else: 0)
             val retained_resource_bytes = vulkan_font_gpu_resource_bytes_for_params(
                 atlas_bytes, dst_count * 4, retained_params_count)
@@ -708,4 +897,6 @@ export vulkan_font_changed_pixel_count, vulkan_font_stage_evidence_ready
 export vulkan_font_timed_ns
 export vulkan_font_frame_batch_contract
 export VULKAN_FONT_FRAME_GLYPH_CAP, vulkan_font_gpu_resource_bytes_for_params
+export VULKAN_FONT_PACKED_HEADER_WORDS, VULKAN_FONT_PACKED_GLYPH_WORDS
+export VULKAN_FONT_PACKED_MAX_BYTES, vulkan_font_packed_params
 use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend, Engine2DExtended}

@@ -476,22 +476,19 @@ loaders fail closed until they have an equivalent tracer; `glslangValidator`
 is diagnostic-only and cannot produce an admitted Vulkan font candidate.
 
 The retained semantics-revision-2 candidate uses source SHA-256
-`ee0e8a35748553891fc82013b09e96abf569072630fed0333e469f20cc1c1162`.
-The NDK compiler produces byte-identical 10,884-byte SPIR-V twice with SHA-256
-`ca5a3d644e5d4dd1c3b6d453be4db252f8ed7b9d65b78e2f7ae37c17769dc55d`;
+`8a5c542279bbd37d03be5b9a2fea636f3171bb68cf4072d87162b382541d4444`.
+The reviewed packed artifact is a 7,012-byte SPIR-V module with SHA-256
+`4b5f44e2803a55f6b94bcb3f443ff1c1d209aca7fe890ce1208a340e5c7358e8`;
 `spirv-val --target-env vulkan1.1` passes. This is candidate evidence only:
-the retained revision-1 pins remain authoritative until device-origin font
-readback and CPU-oracle parity pass.
+the retained pins remain authoritative and exact device-origin font readback
+must continue to match the CPU oracle.
 
 Admission has two explicit phases. Candidate generation requires semantics
 revision 2, `candidate_compiled=true`, and `artifact_validated=true`, including
-`vulkan_font_validator_result=pass` and validator path/version/SHA-256. With
-the retained revision-1 pins, the expected result is
-`pinned_verified=false`; that is a reviewable candidate, not promotion. After
-independent review updates the tracked source/artifact pins and embedded
-companion, a fresh run must reproduce the same tuple and set
-`pinned_verified=true`. Never update pins merely to make the first run green.
-After the reviewed Vulkan pins and embedded companion are updated, rerun with
+`vulkan_font_validator_result=pass` and validator path/version/SHA-256. The
+reviewed packed source, tracked pins, and embedded companion must reproduce the
+same tuple and set `pinned_verified=true`. Never update pins merely to make the
+first run green. After changing Vulkan pins or the embedded companion, rerun with
 both `PORTABLE_COMPUTE_TARGETS=vulkan` and
 `PORTABLE_COMPUTE_REQUIRE_VERIFIED=1`. Strict mode still writes the
 report and `evidence.env`, then exits nonzero unless both candidate validation
