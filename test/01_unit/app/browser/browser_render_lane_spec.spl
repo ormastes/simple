@@ -165,7 +165,7 @@ describe "where blink still differs from the live lane today":
         # page text can move to blink.
         expect(_count(pixels, WHITE)).to_equal(VIEW_PIXELS)
 
-    it "ignores an inline style= attribute that the live lane would honour":
+    it "honours an inline style= attribute exactly as the live lane does":
         step("render a div styled only by its own style= attribute")
         val pixels = _blink(
             "<html><body><style>body { background-color: white; " +
@@ -173,13 +173,14 @@ describe "where blink still differs from the live lane today":
             "<div style=\"background-color: red; width: 10px; height: 5px\">" +
             "</div></body></html>")
 
-        step("not one of the 200 pixels is red: the attribute never reached the cascade")
-        # blink's CSS parser CAN read this (`parse_inline_style`), but
-        # `blink.style.cascade.resolve_style` consults only the stylesheet, so
-        # nothing feeds it in. Stated as behaviour rather than left to a
-        # comment, because the failure mode is a silently unstyled box.
-        expect(_count(pixels, RED)).to_equal(0)
-        expect(_count(pixels, WHITE)).to_equal(VIEW_PIXELS)
+        step("the div's 10 x 5 = 50 pixels are red; the rest stay page white")
+        # `blink.style.cascade.resolve_style` now feeds the `style=` attribute
+        # through `blink_parse_declarations` into the same cascade as author
+        # rules (the earlier cross-module `parse_declarations` name collision
+        # that blocked this path was fixed by the `blink_` rename), so inline
+        # style is no longer a lane-flip blocker.
+        expect(_count(pixels, RED)).to_equal(50)
+        expect(_count(pixels, WHITE)).to_equal(VIEW_PIXELS - 50)
 
     it "does resolve the full CSS colour set, so colour is no longer a blocker":
         step("render the same 10 x 5 = 50 pixel box four different ways")
@@ -216,18 +217,11 @@ describe "the user-agent default stylesheet — exit criterion 5, partially clos
 
     # An `<a>` with no colour declared anywhere, sized via a plain `a { ... }`
     # type-selector author rule rather than an inline `style=` attribute —
-    # deliberately, not for style: `blink.style.cascade`'s inline-style path
-    # (`tree.get_attribute(node_id, "style")` -> `parse_declarations`) hits a
-    # pre-existing, unrelated cross-module symbol collision the moment this
-    # spec's transitive imports pull in BOTH blink's
-    # `css_parser.parser.parse_declarations` (returns `[CssDeclaration]`) and
-    # the live engine's own same-named `parse_declarations` (returns
-    # `[CssDecl]`) — the interpreter resolves a class by NAME across modules,
-    # so calling through the wrong one raises "class `CssDecl` has no field
-    # named `important`". Reproduced independently of every change in this
-    # file: the pre-existing "ignores an inline style=" example below hits
-    # the identical error on `main`. A plain type-selector rule never reaches
-    # that code path, so it is what this file's own sizing uses.
+    # deliberately, not for style: it keeps this example's sizing independent
+    # of the inline-style cascade path, which has its own dedicated example
+    # above. (The historical cross-module `parse_declarations` name collision
+    # that once broke that path was fixed by renaming blink's parser entry to
+    # `blink_parse_declarations`.)
     # No `display` is set either: this lane's layout stacks every box the
     # same way regardless of `display` (a separate, layout-side gap stated in
     # `html_pixels.spl`'s header), so `display` itself has no pixel signature

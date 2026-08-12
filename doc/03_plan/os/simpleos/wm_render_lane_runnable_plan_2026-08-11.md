@@ -80,7 +80,13 @@ are independent; do not sequence one behind the other.
    deleted. The earlier "60s timeout" was never a hang: the spec completes and
    prints all verdict lines in seconds, the process just doesn't exit
    afterward (teardown/GC hang, unmeasured, orthogonal to this bug) — read the
-   printed verdict, not the exit code.
+   printed verdict, not the exit code. **Correction (2026-08-12 audit): this
+   "verdicts print in seconds" claim did not reproduce — two runs (90s, 250s+)
+   under `bin/simple test` produced ZERO verdict lines; the hang is upstream of
+   the first it-block in the test-runner path, not in teardown. The underlying
+   parity logic is fine (plain-script `sha256_bytes` vs `_scalar` on "abc"
+   matches instantly), and `sha256_core_vectors_spec` is 13/13 GREEN. The
+   spec-harness hang is unowned; use the vectors spec as the gate meanwhile.**
 
 **Guard duplication found and resolved (2026-08-11):** two agents independently
 built overlapping C-runtime-compiles pre-push guards
@@ -194,6 +200,12 @@ run dir holding old content is the NORMAL signature of a run that has *started*.
   pixels strictly 10-128), stated honest limits (fixed 8x16 scale, no AA, no
   line wrap, ASCII 0x20-0x7E only, `<style>`/`<script>` text excluded); (3)
   inline `style=` — **CLOSED for real this time (verified at `3d80fd897723`).**
+  **Second correction (2026-08-12 audit): that verification was still wrong —
+  the rename existed only at cascade.spl's call site; `css_parser/parser.spl`
+  still defined `parse_declarations`, so the inline-style path crashed
+  "function not found" at runtime. Rename completed in parser.spl/__init__.spl;
+  browser_render_lane_spec now asserts inline `style=` is HONOURED (50 red
+  pixels), 11/11 GREEN.**
   Renamed to `blink_parse_declarations`/`CssDeclaration` (blink-scoped), no
   collision with the unrelated `gc_async_mut/gpu/browser_engine/style_block.spl`
   module's `parse_declarations`/`CssDecl`. (An earlier report of this as CLOSED
