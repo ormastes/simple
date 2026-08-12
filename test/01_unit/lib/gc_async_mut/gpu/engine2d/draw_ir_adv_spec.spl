@@ -132,6 +132,30 @@ describe "Engine2D advanced Draw IR executor":
         ])
         engine.shutdown()
 
+    it "reuses one coalesced command plan across disjoint retained damage":
+        var engine = Engine2D.create_with_backend(8, 3, "cpu")
+        engine.clear(BG)
+        engine.present()
+        # These adjacent commands coalesce into one physical command while
+        # retaining a logical weight of two. Both disjoint damage rectangles
+        # must replay that same plan and preserve the logical receipt count.
+        val commands = [
+            draw_ir_rect("left", 0, 0, 4, 3, RED),
+            draw_ir_rect("right", 4, 0, 4, 3, RED)
+        ]
+        val outcome = engine2d_draw_ir_render_damaged(
+            engine, commands, [0, 0, 2, 1, 6, 2, 2, 1], true)
+        engine = outcome.engine
+        expect(outcome.unsupported_kinds).to_equal("none")
+        expect(outcome.ops_rendered).to_equal(4)
+        expect(outcome.ops_skipped).to_equal(0)
+        expect(outcome.readback.pixels).to_equal([
+            RED, RED, BG, BG, BG, BG, BG, BG,
+            BG, BG, BG, BG, BG, BG, BG, BG,
+            BG, BG, BG, BG, BG, BG, RED, RED
+        ])
+        engine.shutdown()
+
     it "culls only exact commands outside retained damage":
         var engine = Engine2D.create_with_backend(8, 4, "cpu")
         engine.clear(BG)
