@@ -1,0 +1,48 @@
+# codex-system-test
+# @req REQ-G2-001 REQ-G2-002 REQ-G2-003 NFR-G2-006
+# @manual_section RISC-V Gen2 scalar ALU retire projection
+# @evidence-display: links
+"""# RISC-V Gen2 scalar ALU retire projection
+
+Checks that a high-bit ADDI instruction is emitted with a portable exact-width
+VHDL literal and, when the required external analyzer is available, that GHDL
+accepts the generated combinational projection. A missing analyzer produces a
+visible conditional skip with its reason; it is never analysis evidence. This
+is not architectural retirement or processor qualification.
+"""
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.backend.backend.riscv_scalar_hwir_to_vhdl.{compile_strict_riscv_scalar_alu_retire_projection_product}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_process_run(command: text, args: [text]) -> (text, text, i64)
+
+describe "strict scalar ALU retire projection VHDL":
+    # @req REQ-G2-001 REQ-G2-002 REQ-G2-003 NFR-G2-006
+    # @capture exec
+    # @capture artifact
+    it "should analyze the RV32 ADDI 0xFFF08293 vector without INTEGER overflow when GHDL is available":
+        step("Compile the exact RV32 high-bit ADDI scalar ALU retire projection")
+        val emitted = compile_strict_riscv_scalar_alu_retire_projection_product(
+            "scalar_addi_high_bit_rv32", CoreConfig.rv32(), 0xFFF08293)
+        expect(emitted.is_success()).to_equal(true)
+        step("Inspect the generated instruction literal for exact-width portable VHDL")
+        expect(emitted.vhdl).to_contain(
+            "constant instruction : std_logic_vector(31 downto 0) := \"11111111111100001000001010010011\";")
+        expect(emitted.vhdl.contains("to_unsigned(4293952147")).to_equal(false)
+        step("Probe the required GHDL VHDL-2008 analyzer once")
+        val (_version_stdout, _version_stderr, version_code) = rt_process_run("ghdl", ["--version"])
+        if version_code == 0:
+            step("Write the generated scalar ALU VHDL artifact for external analysis")
+            expect(rt_file_write_text("/tmp/riscv_gen2_scalar_addi_high_bit.vhd", emitted.vhdl)).to_equal(true)
+            step("Analyze the generated VHDL artifact with GHDL VHDL-2008")
+            val (_stdout, _stderr, analyze_code) = rt_process_run("ghdl",
+                ["-a", "--std=08", "/tmp/riscv_gen2_scalar_addi_high_bit.vhd"])
+            expect(analyze_code).to_equal(0)
+        else:
+            val reason = "ghdl --version returned exit code " + version_code.to_text() +
+                "; GHDL VHDL-2008 analysis did not run on this host"
+            skip("GHDL VHDL-2008 analyzer unavailable", reason)
+            step("Record the visible skip and preserve the emitted-VHDL-only evidence boundary")
+            print "[riscv_gen2_scalar_alu_projection_spec] SKIP reason=" + reason
+            expect(reason).to_contain("ghdl --version returned exit code")
