@@ -89,11 +89,15 @@ selection with a 32-byte projection-alignment proof. It lowers f32x8 aligned
 loads, Add/Sub/Mul/Div, and aligned stores through machine selection, low-eight
 YMM assignment, scalar pointer allocation, and exact VEX encoding. Unsupported
 shapes, missing alignment evidence, missing target-capability receipts, and
-vector pressure fail closed. A compiled-only system spec now maps the emitted
+true overlapping vector pressure fail closed. Straight-line regions reuse
+YMM lanes after a value's exact last use, so a chain may contain more than
+eight destinations without manufacturing spill support. Multi-block SIMD
+regions and calls are rejected because CFG liveness is not authoritative and
+the supported SysV YMM lanes are caller-clobbered. A compiled-only system spec maps the emitted
 bytes W^X, runs them only after the canonical CPUID/XGETBV AVX2 probe, and
-checks eight exact f32 results plus unchanged input. Production driver receipt
-propagation, YMM liveness reuse/spills, high vector registers, and broader
-application migration remain required before this is a production route.
+checks eight exact f32 results plus unchanged input. CFG vector liveness,
+32-byte aligned spills/reloads, high vector registers, and broader application
+migration remain required before this is a production route.
 
 ## Recommended shape
 

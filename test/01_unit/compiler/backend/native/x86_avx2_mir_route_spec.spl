@@ -1,6 +1,6 @@
 use std.spec.{describe, it, assert_equal, assert_true}
 use compiler.mir.mir_data.*
-use compiler.backend.native.isel_x86_64.{isel_module_with_avx2_capability}
+use compiler.backend.native.isel_x86_64.{isel_module_with_avx2_capability, x86_plan_avx2_f32x8}
 use compiler.backend.native.native_avx2_capability.{native_avx2_capability_v1, native_avx2_receipt_key}
 use compiler.backend.native.regalloc.{regalloc_module}
 use compiler.backend.native.encode_x86_64.{encode_module}
@@ -43,6 +43,101 @@ fn avx2_test_module() -> MirModule:
     functions[SymbolId.new(0)] = function
     MirModule(name: "avx2_route", functions: functions, statics: {}, constants: {}, types: {})
 
+fn avx2_reuse_module() -> MirModule:
+    val f32_type = MirType(kind: MirTypeKind.F32)
+    val ptr_type = MirType(kind: MirTypeKind.Ptr(pointee: f32_type, mutable: true))
+    val vec_type = MirType(kind: MirTypeKind.Vec8f)
+    val unit_type = MirType(kind: MirTypeKind.Unit)
+    var locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("left"), type_: ptr_type, kind: LocalKind.Arg(0)),
+        MirLocal(id: LocalId(id: 1), name: Some("right"), type_: ptr_type, kind: LocalKind.Arg(1)),
+        MirLocal(id: LocalId(id: 2), name: Some("output"), type_: ptr_type, kind: LocalKind.Arg(2)),
+        MirLocal(id: LocalId(id: 3), name: Some("left_vec"), type_: vec_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 4), name: Some("right_vec"), type_: vec_type, kind: LocalKind.Temp)
+    ]
+    var instructions = [
+        MirInst(kind: MirInstKind.MirSimdLoad(LocalId(id: 3), MirOperand.copy(LocalId(id: 0)), true, vec_type), span: nil),
+        MirInst(kind: MirInstKind.MirSimdLoad(LocalId(id: 4), MirOperand.copy(LocalId(id: 1)), true, vec_type), span: nil)
+    ]
+    var previous = 3
+    for index in 0..10:
+        val dest = 5 + index
+        locals.push(MirLocal(
+            id: LocalId(id: dest), name: Some("chain_{index}"),
+            type_: vec_type, kind: LocalKind.Temp))
+        instructions.push(MirInst(
+            kind: MirInstKind.MirSimdBinop(
+                LocalId(id: dest), MirOperand.copy(LocalId(id: previous)),
+                MirOperand.copy(LocalId(id: 4)), "Add"), span: nil))
+        previous = dest
+    instructions.push(MirInst(
+        kind: MirInstKind.MirSimdStore(
+            MirOperand.copy(LocalId(id: previous)), MirOperand.copy(LocalId(id: 2)), true),
+        span: nil))
+    val entry = MirBlock(
+        id: BlockId.new(0), label: Some("entry"), instructions: instructions,
+        terminator: MirTerminator.Ret(nil))
+    val function = MirFunction(
+        symbol: SymbolId.new(0), name: "reuse_f32x8",
+        signature: MirSignature(params: [ptr_type, ptr_type, ptr_type], return_type: unit_type, is_variadic: false),
+        locals: locals, blocks: [entry], entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1), generic_params: [],
+        is_generic_template: false, specialization_of: nil, type_bindings: {})
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = function
+    MirModule(name: "avx2_reuse", functions: functions, statics: {}, constants: {}, types: {})
+
+fn avx2_pressure_function() -> MirFunction:
+    val f32_type = MirType(kind: MirTypeKind.F32)
+    val ptr_type = MirType(kind: MirTypeKind.Ptr(pointee: f32_type, mutable: true))
+    val vec_type = MirType(kind: MirTypeKind.Vec8f)
+    var locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("input"), type_: ptr_type, kind: LocalKind.Arg(0))
+    ]
+    var instructions: [MirInst] = []
+    for index in 0..9:
+        val local_id = 1 + index
+        locals.push(MirLocal(
+            id: LocalId(id: local_id), name: Some("live_{index}"),
+            type_: vec_type, kind: LocalKind.Temp))
+        instructions.push(MirInst(
+            kind: MirInstKind.MirSimdLoad(
+                LocalId(id: local_id), MirOperand.copy(LocalId(id: 0)), true, vec_type),
+            span: nil))
+    var previous = 1
+    for index in 0..8:
+        val dest = 10 + index
+        locals.push(MirLocal(
+            id: LocalId(id: dest), name: Some("reduce_{index}"),
+            type_: vec_type, kind: LocalKind.Temp))
+        instructions.push(MirInst(
+            kind: MirInstKind.MirSimdBinop(
+                LocalId(id: dest), MirOperand.copy(LocalId(id: previous)),
+                MirOperand.copy(LocalId(id: index + 2)), "Add"), span: nil))
+        previous = dest
+    val entry = MirBlock(
+        id: BlockId.new(0), label: Some("entry"), instructions: instructions,
+        terminator: MirTerminator.Ret(nil))
+    MirFunction(
+        symbol: SymbolId.new(0), name: "pressure_f32x8",
+        signature: MirSignature(params: [ptr_type], return_type: MirType.unit(), is_variadic: false),
+        locals: locals, blocks: [entry], entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1), generic_params: [],
+        is_generic_template: false, specialization_of: nil, type_bindings: {})
+
+fn avx2_multiblock_function() -> MirFunction:
+    val base = avx2_test_module().functions[0]
+    val second = MirBlock(
+        id: BlockId.new(1), label: Some("second"), instructions: [],
+        terminator: MirTerminator.Ret(nil))
+    MirFunction(
+        symbol: base.symbol, name: base.name, signature: base.signature,
+        locals: base.locals, blocks: [base.blocks[0], second],
+        entry_block: base.entry_block, span: base.span,
+        generic_params: base.generic_params,
+        is_generic_template: base.is_generic_template,
+        specialization_of: base.specialization_of, type_bindings: base.type_bindings)
+
 fn contains_bytes(haystack: [i64], needle: [i64]) -> bool:
     if needle.len() == 0 or haystack.len() < needle.len(): return false
     for start in 0..(haystack.len() - needle.len() + 1):
@@ -60,6 +155,31 @@ fn selected_module():
     isel_module_with_avx2_capability(avx2_test_module(), avx2_capability())
 
 describe "x86 AVX2 typed MIR route":
+    it "reuses YMM registers for more than eight sequential destinations":
+        val module = isel_module_with_avx2_capability(avx2_reuse_module(), avx2_capability())
+        val block = module.functions[0].blocks[1]
+        var used: Dict<i64, bool> = {}
+        var vector_ops = 0
+        for inst in block.insts:
+            if inst.opcode == X86_OP_VADDPS_YMM:
+                vector_ops = vector_ops + 1
+                for operand in inst.operands:
+                    match operand.kind:
+                        case Reg(reg): used[reg_id(reg)] = true
+                        case _: ()
+        assert_equal(vector_ops, 10)
+        assert_true(used.keys().len() <= 3)
+
+    it "keeps nine simultaneously live vectors fail closed":
+        val plan = x86_plan_avx2_f32x8(avx2_pressure_function())
+        assert_equal(plan.ok, false)
+        assert_equal(plan.reason, "simd-register-pressure")
+
+    it "rejects multi-block SIMD until CFG liveness is authoritative":
+        val plan = x86_plan_avx2_f32x8(avx2_multiblock_function())
+        assert_equal(plan.ok, false)
+        assert_equal(plan.reason, "simd-cfg-liveness-unavailable")
+
     it "selects aligned f32x8 MIR without scalar NOP substitution":
         val module = selected_module()
         val block = module.functions[0].blocks[1]

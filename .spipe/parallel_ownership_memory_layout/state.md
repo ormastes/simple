@@ -396,3 +396,14 @@ dev-done
   initial target-vs-CPU channel mix-up. Explicit cross-target receipt import,
   public CLI admission of the custom-native backend, and vector spills remain
   open.
+- impl: Removed the custom AVX2 route's false eight-destination ceiling for
+  straight-line MIR. The selector computes deterministic last-use facts,
+  releases dead YMM lanes before AVX three-operand destinations, and keeps
+  true overlapping pressure fail-closed. More than eight sequential vector
+  destinations now compile using at most three physical lanes in the focused
+  fixture. Multi-block SIMD and calls are rejected because CFG liveness is not
+  authoritative yet and SysV YMM state is
+  caller-clobbered. Three Luna audits confirmed that generic scalar spills are
+  not reusable for vectors: CFG vector liveness, one aliased XMM/YMM bank,
+  32-byte aligned spill slots, def/use-aware reloads, and call handling remain
+  prerequisites before vector spills can be claimed.

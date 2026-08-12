@@ -64,6 +64,13 @@ marshalling in the deployed binary (not seed-dependent).
    method resolution happens, backend will stub a body, forcing interpreter
    fallback. See
    [doc/00_llm_process/feature_expert/codegen_ambiguous_method/skill.md](../../feature_expert/codegen_ambiguous_method/skill.md).
+4. **Custom x86 AVX2 allocation is deliberately bounded:** straight-line
+   f32x8 MIR reuses low-eight YMM lanes from exact last-use facts. Multi-block
+   SIMD retains conservative unique allocation, calls reject, and peak pressure
+   above eight rejects. Do not route vector values through `regalloc.spl`'s
+   scalar spill rewrite: its slots and MOV operations are 8-byte GPR-only.
+   Vector spills require one aliased XMM/YMM bank, CFG def/use liveness,
+   32-byte-aligned slots, vector reload/store lowering, and call-clobber rules.
 
 ## Redeploy #79 Findings (2026-07-11)
 
