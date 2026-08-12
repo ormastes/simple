@@ -39,3 +39,25 @@ Reproduce with `scripts/check/check-engine2d-simd-8k-ops.shs`. Cross lanes set
 `CC`, `ENGINE2D_SIMD_8K_CFLAGS`, `ENGINE2D_SIMD_8K_RUNNER`, and
 `ENGINE2D_SIMD_8K_MODE`; raw receipts are written to the selected build
 directory as `receipt.env`.
+
+## Native x86 retained-damage envelope
+
+The same production ABI can restrict work with
+`ENGINE2D_SIMD_8K_ACTIVE_BASIS_POINTS` (100 = 1%). This models a contiguous
+horizontal-band damage payload while retaining the full 8K allocation. A
+15-sample native run at 1% (331,776 pixels) measured:
+
+| Operation | p50 ns | p95 ns | Isolated 12.5 ms budget |
+|---|---:|---:|---:|
+| fill | 219,010 | 287,921 | PASS |
+| copy | 287,761 | 313,320 | PASS |
+| variable alpha blend | 5,173,988 | 5,440,439 | PASS |
+| constant alpha blend | 5,190,500 | 5,608,681 | PASS |
+
+A coarse sweep found fill and copy still individually below budget at 42.5%,
+while blend became unstable around 2%–2.5% (7-sample p95 ranged from 12.1 ms to
+17.4 ms). Therefore **1% is the measured conservative all-operation envelope**
+on this host. It is not a whole-frame guarantee: DrawIR traversal, damage-plan
+construction, multiple operations, scheduling, presentation, and scanout must
+share the remaining budget. Arbitrary disjoint rectangles may have different
+cache behavior and require separate evidence.

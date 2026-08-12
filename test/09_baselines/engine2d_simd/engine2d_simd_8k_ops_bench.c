@@ -71,9 +71,14 @@ int main(int argc, char **argv) {
     int64_t height = argc > 2 ? atoll(argv[2]) : 4320;
     int samples = argc > 3 ? atoi(argv[3]) : 7;
     const char *mode = argc > 4 ? argv[4] : "native";
+    int64_t active_basis_points = argc > 5 ? atoll(argv[5]) : 10000;
     if (width <= 0 || height <= 0 || samples < 3 || width > INT64_MAX / height)
         return 2;
+    if (active_basis_points <= 0 || active_basis_points > 10000) return 2;
     int64_t pixels = width * height;
+    int64_t active_pixels = pixels / 10000 * active_basis_points;
+    active_pixels += (pixels % 10000) * active_basis_points / 10000;
+    if (active_pixels < 1) active_pixels = 1;
     if ((uint64_t)pixels > SIZE_MAX / sizeof(int64_t)) return 2;
     size_t bytes = (size_t)pixels * sizeof(int64_t);
     int64_t *dst = (int64_t *)malloc(bytes);
@@ -94,24 +99,24 @@ int main(int argc, char **argv) {
     rt_simd_engine2d_neon_reset();
     for (int sample = 0; sample < samples; sample++) {
         uint64_t start = now_ns();
-        rt_engine2d_simd_fill_span_u32((SplArray *)&dst_array, 0, pixels, 0xff102030u);
+        rt_engine2d_simd_fill_span_u32((SplArray *)&dst_array, 0, active_pixels, 0xff102030u);
         fill_ns[sample] = now_ns() - start;
 
         start = now_ns();
         rt_engine2d_simd_copy_span_u32((SplArray *)&dst_array, 0,
-                                      (SplArray *)&src_array, 0, pixels);
+                                      (SplArray *)&src_array, 0, active_pixels);
         copy_ns[sample] = now_ns() - start;
 
-        rt_engine2d_simd_fill_span_u32((SplArray *)&dst_array, 0, pixels, 0xff102030u);
+        rt_engine2d_simd_fill_span_u32((SplArray *)&dst_array, 0, active_pixels, 0xff102030u);
         start = now_ns();
         rt_engine2d_simd_blend_span_u32((SplArray *)&dst_array, 0,
-                                       (SplArray *)&src_array, 0, pixels);
+                                       (SplArray *)&src_array, 0, active_pixels);
         blend_ns[sample] = now_ns() - start;
 
-        rt_engine2d_simd_fill_span_u32((SplArray *)&dst_array, 0, pixels, 0xff102030u);
+        rt_engine2d_simd_fill_span_u32((SplArray *)&dst_array, 0, active_pixels, 0xff102030u);
         start = now_ns();
         rt_engine2d_simd_blend_const_span_u32((SplArray *)&dst_array, 0,
-                                             pixels, 0x804080c0u);
+                                             active_pixels, 0x804080c0u);
         blend_const_ns[sample] = now_ns() - start;
     }
     const uint64_t budget_ns = 12500000ULL;
@@ -120,13 +125,15 @@ int main(int argc, char **argv) {
     printf("engine2d_8k_width=%lld\n", (long long)width);
     printf("engine2d_8k_height=%lld\n", (long long)height);
     printf("engine2d_8k_pixels=%lld\n", (long long)pixels);
+    printf("engine2d_8k_active_pixels=%lld\n", (long long)active_pixels);
+    printf("engine2d_8k_active_basis_points=%lld\n", (long long)active_basis_points);
     printf("engine2d_8k_storage_bytes_per_buffer=%llu\n", (unsigned long long)bytes);
     printf("engine2d_8k_samples=%d\n", samples);
     printf("engine2d_8k_frame_budget_ns=%llu\n", (unsigned long long)budget_ns);
-    emit_times("fill", fill_ns, samples, pixels, budget_ns);
-    emit_times("copy", copy_ns, samples, pixels, budget_ns);
-    emit_times("blend", blend_ns, samples, pixels, budget_ns);
-    emit_times("blend_const", blend_const_ns, samples, pixels, budget_ns);
+    emit_times("fill", fill_ns, samples, active_pixels, budget_ns);
+    emit_times("copy", copy_ns, samples, active_pixels, budget_ns);
+    emit_times("blend", blend_ns, samples, active_pixels, budget_ns);
+    emit_times("blend_const", blend_const_ns, samples, active_pixels, budget_ns);
     printf("engine2d_8k_native_simd_hits=%lld\n",
            (long long)rt_simd_engine2d_neon_hits());
     printf("engine2d_8k_checksum=%llu\n", (unsigned long long)checksum(dst, pixels));
