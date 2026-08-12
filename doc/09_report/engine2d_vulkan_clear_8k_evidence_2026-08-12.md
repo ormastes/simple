@@ -198,16 +198,47 @@ exact post-timing oracle.
 
 ## Frame-receipt honesty gate
 
-`VulkanBackend.latest_frame_receipt()` now distinguishes three observable
-states: `device-retained`, `host-cache`, and `none`. A retained compute frame
+`VulkanBackend.latest_frame_receipt()` distinguishes `device-retained`,
+`headless-swapchain`, `host-cache`, and `none`. A retained compute frame
 records zero readback bytes but never claims presentation. The historical
 `present()` call records its device-to-host byte count and cache-refresh result,
 while `device_present` and `present_completed` remain false. Failed partial
 readback preserves the dirty framebuffer and reports incomplete readback with a
 specific reason; idle calls record no readback and no completed presentation.
 
-This closes a provenance hole but does not close the swapchain gate. Engine2D's
-compute framebuffer and the existing window/swapchain API currently live in
-different native Vulkan device registries. The required same-device transfer
-is tracked in
+The headless same-device bridge below closes that registry split for CI
+presentation evidence. A visible window surface adapter remains tracked in
 `doc/08_tracking/bug/engine2d_vulkan_swapchain_registry_split_2026-08-12.md`.
+
+## Same-device headless swapchain presentation
+
+The native runtime now supports an opt-in `VK_EXT_headless_surface` owner that
+is created before physical/logical device selection. Engine2D compute storage,
+swapchain acquisition, the fenced buffer-to-image transfer, and
+`vkQueuePresentKHR` therefore share one device. The path performs no
+device-to-host framebuffer transfer. A 64x32 llvmpipe live test completed two
+successive presentations, exercising both first-use and retained image-layout
+transitions.
+
+At 7680x4320 on llvmpipe, 20 retained presentations measured p50 12,242,784 ns
+and p95 12,611,891 ns, with peak RSS 579,696 KiB, zero readback bytes, known
+completion, no CPU fallback, and source-buffer checksum
+1055514150447629187. This is a narrow FAIL against 12.5 ms p95 by 111,891 ns.
+The checksum proves the immutable presented source payload, not post-scanout
+pixels; headless `vkQueuePresentKHR` completion is the presentation receipt.
+
+The swapchain owner now tracks the content revision installed in each image.
+After every image has been seeded, an unchanged retained frame is acquired and
+re-presented without repeating the 132,710,400-byte device copy. With four
+untimed seed presentations, the same 20-frame 8K probe measured p50 20,318 ns
+and p95 30,117 ns, peak RSS 579,972 KiB, zero readback bytes, known completion,
+no CPU fallback, and the same source checksum. This retained frame-switching
+row passes the 12.5 ms budget, but it is explicitly cached replay: any changed
+content revision seeds each acquired swapchain image again and remains governed
+by the 12.612 ms dynamic-copy row above.
+
+An earlier hardware-preferred NVIDIA headless probe terminated with SIGSEGV
+while the pinned llvmpipe ICD passed. The headless evidence entry now prefers a
+CPU ICD when one is enumerated, avoiding accidental hardware promotion. No
+physical-GPU or visible-window promotion is claimed until that driver path is
+diagnosed and the winit surface is wired to the same pre-device owner.

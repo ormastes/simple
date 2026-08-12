@@ -97,6 +97,15 @@ impl VulkanInstance {
         #[cfg(feature = "vulkan")]
         {
             extension_names_raw.push(ash::khr::surface::NAME.to_owned());
+            let headless_available = unsafe {
+                entry.enumerate_instance_extension_properties(None)
+                    .map(|extensions| extensions.iter().any(|extension| {
+                        CStr::from_ptr(extension.extension_name.as_ptr()) == ash::ext::headless_surface::NAME
+                    })).unwrap_or(false)
+            };
+            if headless_available {
+                extension_names_raw.push(ash::ext::headless_surface::NAME.to_owned());
+            }
 
             // Platform-specific surface extensions
             #[cfg(target_os = "windows")]
@@ -257,6 +266,7 @@ unsafe extern "system" fn debug_callback(
 }
 
 /// Physical device wrapper with capability queries
+#[derive(Clone)]
 pub struct VulkanPhysicalDevice {
     pub handle: vk::PhysicalDevice,
     pub properties: vk::PhysicalDeviceProperties,

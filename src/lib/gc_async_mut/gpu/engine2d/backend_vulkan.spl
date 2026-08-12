@@ -53,7 +53,9 @@ use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_read_buffer_bytes,
     vulkan_sffi_destroy_shader, vulkan_sffi_destroy_pipeline,
     vulkan_sffi_last_error,
-    vulkan_sffi_recover_dependency_quarantine
+    vulkan_sffi_recover_dependency_quarantine,
+    vulkan_sffi_init_headless_present, vulkan_sffi_present_buffer,
+    vulkan_sffi_destroy_swapchain
 }
 use std.gc_async_mut.gpu.engine2d.vulkan_session.{VulkanSession}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_types.{VulkanFontPipelineEvidence}
@@ -114,6 +116,7 @@ struct VulkanFrameReceipt:
     completion_known: bool
     backend_handle: i64
     device_identity: i64
+    swapchain_identity: i64
 
 fn _err_is_device_lost(err: text) -> bool:
     err.contains("device lost") or err.contains("DEVICE_LOST")
@@ -241,6 +244,8 @@ class VulkanBackend:
     present_full_readback_count: i64
     present_noop_count: i64
     device_finalize_no_readback_count: i64
+    presentation_swapchain: i64
+    device_content_revision: i64
     frame_index: i64
     frame_dirty_rect_count: i64
     frame_readback_requested: bool
@@ -251,6 +256,7 @@ class VulkanBackend:
     frame_host_cache_refresh_completed: bool
     frame_full_fallback: bool
     frame_fallback_reason: text
+    frame_device_present: bool
     frame_batching_enabled: bool
     pending_compute_command: i64
     pending_compute_pipelines: [i64]   # preallocated, VK_PENDING_COMPUTE_CAP=16 slots
@@ -329,6 +335,8 @@ class VulkanBackend:
             present_full_readback_count: 0,
             present_noop_count: 0,
             device_finalize_no_readback_count: 0,
+            presentation_swapchain: 0,
+            device_content_revision: 0,
             frame_index: 0,
             frame_dirty_rect_count: 0,
             frame_readback_requested: false,
@@ -339,6 +347,7 @@ class VulkanBackend:
             frame_host_cache_refresh_completed: false,
             frame_full_fallback: false,
             frame_fallback_reason: "",
+            frame_device_present: false,
             frame_batching_enabled: false,
             pending_compute_command: 0,
             pending_compute_pipelines: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -389,6 +398,27 @@ impl RenderBackend for VulkanBackend:
             session.release()
             return false
         session.release()
+        true
+
+    me init_headless_present(width: i32, height: i32, vsync: bool) -> bool:
+        """Initialize compute and a same-device headless swapchain.
+
+        This must be the first Vulkan owner in the process. The resulting
+        presentation is a real vkQueuePresentKHR completion but is explicitly
+        headless and must not be reported as a visible window/screen surface.
+        """
+        if self.initialized or self.presentation_swapchain != 0:
+            self.last_error = "Vulkan backend already initialized"
+            return false
+        val swapchain = vulkan_sffi_init_headless_present(
+            width.to_i64(), height.to_i64(), vsync)
+        if swapchain <= 0:
+            self.last_error = vulkan_sffi_last_error()
+            return false
+        if not self.init(width, height):
+            vulkan_sffi_destroy_swapchain(swapchain)
+            return false
+        self.presentation_swapchain = swapchain
         true
 
     me init_with_session(width: i32, height: i32, session: VulkanSession) -> bool:
@@ -471,6 +501,7 @@ impl RenderBackend for VulkanBackend:
         self.present_full_readback_count = 0
         self.present_noop_count = 0
         self.device_finalize_no_readback_count = 0
+        self.device_content_revision = 0
         self.frame_index = 0
         self.frame_dirty_rect_count = 0
         self.frame_readback_requested = false
@@ -481,6 +512,7 @@ impl RenderBackend for VulkanBackend:
         self.frame_host_cache_refresh_completed = false
         self.frame_full_fallback = false
         self.frame_fallback_reason = ""
+        self.frame_device_present = false
         self.pending_compute_command = 0
         self.pending_compute_pipelines = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
         self.pending_compute_descriptors = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
@@ -500,6 +532,12 @@ impl RenderBackend for VulkanBackend:
     me mark_completion_unknown():
         self.completion_unknown = true
 
+    me mark_device_content_changed():
+        if self.device_content_revision >= 9223372036854775806:
+            self.device_content_revision = 1
+        else:
+            self.device_content_revision += 1
+
     me enable_frame_batching():
         self.frame_batching_enabled = true
 
@@ -516,6 +554,9 @@ impl RenderBackend for VulkanBackend:
                 # quarantine owns eventual process-level cleanup.
                 return
             self.completion_unknown = false
+        if self.presentation_swapchain != 0:
+            vulkan_sffi_destroy_swapchain(self.presentation_swapchain)
+            self.presentation_swapchain = 0
         if self.d_font_params != 0:
             vulkan_sffi_free_buffer(self.d_font_params)
             self.d_font_params = 0
@@ -822,6 +863,7 @@ impl RenderBackend for VulkanBackend:
             vulkan_order_trace("image-composite x={x} y={y} w={dst_w} h={dst_h} mode={composite_mode} rc={dispatched} fb={self.d_framebuffer}")
         if dispatched > 0:
             self.dirty = true
+            self.mark_device_content_changed()
             if dispatched == VK_DISPATCH_COMPLETED_INELIGIBLE:
                 self.mark_cpu_fallback("image-composite-cleanup-ineligible")
         dispatched
@@ -960,6 +1002,7 @@ impl RenderBackend for VulkanBackend:
         self.frame_host_cache_refresh_completed = false
         self.frame_full_fallback = false
         self.frame_fallback_reason = ""
+        self.frame_device_present = false
 
     fn latest_frame_receipt() -> VulkanFrameReceipt:
         """Snapshot the latest finalized frame without implying swapchain work.
@@ -979,7 +1022,7 @@ impl RenderBackend for VulkanBackend:
             present_attempted: self.frame_present_attempted,
             present_completed: self.frame_present_completed,
             present_mode: self.frame_present_mode,
-            device_present: false,
+            device_present: self.frame_device_present,
             host_cache_refresh_completed: self.frame_host_cache_refresh_completed,
             no_readback: not self.frame_readback_requested and self.present_readback_bytes == 0,
             full_frame_fallback: self.frame_full_fallback,
@@ -987,7 +1030,39 @@ impl RenderBackend for VulkanBackend:
             cpu_fallback_used: self.cpu_fallback_used,
             completion_known: not self.completion_unknown,
             backend_handle: self.d_framebuffer,
-            device_identity: self.session.device)
+            device_identity: self.session.device,
+            swapchain_identity: self.presentation_swapchain)
+
+    me present_headless_device() -> bool:
+        """Complete a same-device headless swapchain presentation."""
+        self._begin_frame_receipt("headless-swapchain", false, true)
+        self.present_readback_bytes = 0
+        self.present_readback_rect_count = 0
+        if self.presentation_swapchain <= 0 or self.d_framebuffer <= 0:
+            self.frame_fallback_reason = "headless-swapchain-unavailable"
+            return false
+        if self.completion_unknown:
+            self.frame_fallback_reason = "completion-unknown"
+            return false
+        val pending_status = self._flush_pending_compute()
+        if pending_status <= 0:
+            if pending_status < 0:
+                self.completion_unknown = true
+            self.frame_fallback_reason = "compute-finalize-failed"
+            return false
+        val presented = vulkan_sffi_present_buffer(
+            self.presentation_swapchain, self.d_framebuffer,
+            self.w.to_i64(), self.h.to_i64(), self.device_content_revision)
+        if presented <= 0:
+            self.frame_fallback_reason = "headless-swapchain-present-failed"
+            return false
+        self.frame_present_completed = true
+        self.frame_device_present = true
+        self.host_mirror_valid = false
+        self._clear_present_damage()
+        if presented == 2:
+            self.frame_fallback_reason = "swapchain-suboptimal"
+        true
 
     me finalize_compute_frame_no_readback() -> bool:
         """Finish a storage-buffer frame without copying it to the host.

@@ -1,6 +1,6 @@
 # Engine2D Vulkan swapchain registry split
 
-Status: open
+Status: partial — same-device headless bridge implemented; visible-window adapter open
 
 Engine2D's Vulkan backend renders into `vulkan_graphics_runtime_core::STATE`
 storage buffers. The implemented window/swapchain SFFI instead owns devices,
@@ -12,6 +12,13 @@ The current backend `present()` is correctly a device-to-host cache refresh.
 This blocks honest device-present and end-to-end 8K/80 claims even when the
 isolated compute frame meets 12.5 ms. A host readback followed by an upload to a
 second presentation device is not an acceptable optimized bridge.
+
+The canonical runtime now has an opt-in initialization path that creates a
+`VK_EXT_headless_surface` before device selection, allocates the Engine2D
+storage buffer on that presentation-capable device, copies it directly to an
+acquired BGRA8 swapchain image, and completes `vkQueuePresentKHR`. This removes
+the registry split for headless evidence without claiming a visible screen.
+The visible winit/window surface must next enter the same pre-device owner.
 
 Acceptance:
 

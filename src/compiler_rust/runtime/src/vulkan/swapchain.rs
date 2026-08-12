@@ -1,10 +1,12 @@
 //! Vulkan swapchain management for presentation
 
+use super::buffer::VulkanBuffer;
 use super::device::VulkanDevice;
 use super::error::{VulkanError, VulkanResult};
 use super::surface::Surface;
-use super::sync::Semaphore;
+use super::sync::{Fence, Semaphore};
 use ash::vk;
+use parking_lot::Mutex;
 use std::sync::Arc;
 
 /// Vulkan swapchain for image presentation
@@ -18,6 +20,8 @@ pub struct VulkanSwapchain {
     format: vk::SurfaceFormatKHR,
     extent: vk::Extent2D,
     image_count: u32,
+    image_revision: Mutex<Vec<i64>>,
+    acquire_fence: Mutex<Fence>,
 }
 
 impl VulkanSwapchain {
@@ -39,9 +43,15 @@ impl VulkanSwapchain {
 
         // Query surface capabilities
         let capabilities = surface.get_capabilities(physical_device)?;
+        if !capabilities.supported_usage_flags.contains(vk::ImageUsageFlags::TRANSFER_DST) {
+            return Err(VulkanError::SurfaceError("Swapchain surface does not support transfer-destination images".to_string()));
+        }
 
         // Select format (prefer HDR if requested)
         let format = surface.select_format(physical_device, prefer_hdr)?;
+        if format.format != vk::Format::B8G8R8A8_UNORM && format.format != vk::Format::B8G8R8A8_SRGB {
+            return Err(VulkanError::SurfaceError(format!("Engine2D presentation requires BGRA8 swapchain format, got {:?}", format.format)));
+        }
 
         // Select present mode (mailbox preferred, fifo fallback)
         let present_mode = surface.select_present_mode(physical_device, prefer_no_vsync)?;
@@ -94,6 +104,7 @@ impl VulkanSwapchain {
         // Create image views
         let image_views = Self::create_image_views(&device, &images, format.format)?;
 
+        let acquire_fence = Fence::new(device.clone(), false)?;
         Ok(Arc::new(Self {
             device,
             surface,
@@ -104,6 +115,8 @@ impl VulkanSwapchain {
             format,
             extent,
             image_count: actual_image_count,
+            image_revision: Mutex::new(vec![-1; actual_image_count as usize]),
+            acquire_fence: Mutex::new(acquire_fence),
         }))
     }
 
@@ -173,6 +186,7 @@ impl VulkanSwapchain {
         };
 
         self.image_count = self.images.len() as u32;
+        self.image_revision = Mutex::new(vec![-1; self.image_count as usize]);
         self.surface = surface;
 
         // Create new image views
@@ -210,8 +224,11 @@ impl VulkanSwapchain {
         }
 
         // Queue family sharing mode
-        let (sharing_mode, queue_families) = if graphics_family != present_family {
-            (vk::SharingMode::CONCURRENT, vec![graphics_family, present_family])
+        let mut queue_families = vec![graphics_family, present_family, device.transfer_queue_family()];
+        queue_families.sort_unstable();
+        queue_families.dedup();
+        let (sharing_mode, queue_families) = if queue_families.len() > 1 {
+            (vk::SharingMode::CONCURRENT, queue_families)
         } else {
             (vk::SharingMode::EXCLUSIVE, vec![])
         };
@@ -224,7 +241,7 @@ impl VulkanSwapchain {
             .image_color_space(format.color_space)
             .image_extent(extent)
             .image_array_layers(1)
-            .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+            .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST)
             .image_sharing_mode(sharing_mode)
             .queue_family_indices(&queue_families)
             .pre_transform(capabilities.current_transform)
@@ -366,6 +383,62 @@ impl VulkanSwapchain {
     /// Get height
     pub fn height(&self) -> u32 {
         self.extent.height
+    }
+
+    /// Copy a tightly packed ARGB/BGRA storage buffer into an acquired image
+    /// and complete presentation. Prior writes to `source` must be fenced.
+    pub fn copy_buffer_and_present(self: &Arc<Self>, source: &VulkanBuffer, width: u32, height: u32, content_revision: i64) -> VulkanResult<(u32, bool)> {
+        if width != self.extent.width || height != self.extent.height {
+            return Err(VulkanError::SurfaceError(format!("Present buffer extent {}x{} does not match swapchain {}x{}", width, height, self.extent.width, self.extent.height)));
+        }
+        let expected = u64::from(width).checked_mul(u64::from(height)).and_then(|n| n.checked_mul(4)).ok_or(VulkanError::BufferTooSmall)?;
+        if source.size() < expected { return Err(VulkanError::BufferTooSmall); }
+
+        let acquire_fence = self.acquire_fence.lock();
+        acquire_fence.reset()?;
+        let (image_index, acquire_suboptimal) = unsafe {
+            self.swapchain_loader.acquire_next_image(self.swapchain, u64::MAX, vk::Semaphore::null(), acquire_fence.handle())
+                .map_err(|error| match error {
+                    vk::Result::ERROR_OUT_OF_DATE_KHR => VulkanError::SwapchainOutOfDate,
+                    other => VulkanError::SurfaceError(format!("Failed to acquire image: {:?}", other)),
+                })?
+        };
+        acquire_fence.wait(u64::MAX)?;
+        let image = *self.images.get(image_index as usize).ok_or(VulkanError::InvalidHandle)?;
+        let prior_revision = self.image_revision.lock()[image_index as usize];
+        if prior_revision == content_revision {
+            let present_suboptimal = self.present(image_index, &[])?;
+            return Ok((image_index, acquire_suboptimal || present_suboptimal));
+        }
+        let was_presented = prior_revision >= 0;
+        let old_layout = if was_presented { vk::ImageLayout::PRESENT_SRC_KHR } else { vk::ImageLayout::UNDEFINED };
+        let cmd = self.device.begin_transfer_command()?;
+        let range = vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 };
+        let to_transfer = vk::ImageMemoryBarrier::default()
+            .old_layout(old_layout).new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED).dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .image(image).subresource_range(range).src_access_mask(vk::AccessFlags::empty())
+            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE);
+        unsafe {
+            self.device.handle().cmd_pipeline_barrier(cmd,
+                if was_presented { vk::PipelineStageFlags::BOTTOM_OF_PIPE } else { vk::PipelineStageFlags::TOP_OF_PIPE },
+                vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &[to_transfer]);
+            let copy = vk::BufferImageCopy::default().buffer_offset(0).buffer_row_length(width).buffer_image_height(height)
+                .image_subresource(vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 })
+                .image_extent(vk::Extent3D { width, height, depth: 1 });
+            self.device.handle().cmd_copy_buffer_to_image(cmd, source.handle(), image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[copy]);
+            let to_present = vk::ImageMemoryBarrier::default()
+                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL).new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED).dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(image).subresource_range(range).src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::empty());
+            self.device.handle().cmd_pipeline_barrier(cmd, vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::BOTTOM_OF_PIPE, vk::DependencyFlags::empty(), &[], &[], &[to_present]);
+        }
+        self.device.submit_transfer_command(cmd)?;
+        self.image_revision.lock()[image_index as usize] = content_revision;
+        let present_suboptimal = self.present(image_index, &[])?;
+        Ok((image_index, acquire_suboptimal || present_suboptimal))
     }
 }
 

@@ -13,6 +13,15 @@ pub struct Surface {
 }
 
 impl Surface {
+    /// Create a headless presentation surface for same-device swapchain tests.
+    pub fn new_headless(instance: Arc<VulkanInstance>) -> VulkanResult<Arc<Self>> {
+        let loader = ash::ext::headless_surface::Instance::new(instance.entry(), instance.instance());
+        let info = vk::HeadlessSurfaceCreateInfoEXT::default();
+        let surface = unsafe { loader.create_headless_surface(&info, None) }
+            .map_err(|e| VulkanError::SurfaceError(format!("Failed to create headless surface: {:?}", e)))?;
+        Ok(Arc::new(Self::from_handle(instance, surface)))
+    }
+
     /// Create a surface wrapper (takes ownership of existing surface)
     pub fn from_handle(instance: Arc<VulkanInstance>, surface: vk::SurfaceKHR) -> Self {
         let surface_loader = ash::khr::surface::Instance::new(instance.entry(), instance.instance());

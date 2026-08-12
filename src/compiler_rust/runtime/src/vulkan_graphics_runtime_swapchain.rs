@@ -1,5 +1,5 @@
 #[cfg(feature = "vulkan")]
-use super::vulkan_graphics_runtime_core::{alloc_handle, Framebuffer, VulkanSwapchain, STATE};
+use super::vulkan_graphics_runtime_core::{alloc_handle, Framebuffer, SemaphorePool, Surface, VulkanDevice, VulkanInstance, VulkanSwapchain, STATE};
 #[cfg(feature = "vulkan")]
 use std::sync::Arc;
 
@@ -95,6 +95,66 @@ pub extern "C" fn rt_vulkan_destroy_framebuffer(_fb: i64) -> i64 {
 // ============================================================================
 // Swapchain
 // ============================================================================
+
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_init_headless_present(w: i64, h: i64, vsync: i64) -> i64 {
+    if w <= 0 || h <= 0 || w > u32::MAX as i64 || h > u32::MAX as i64 { return 0; }
+    let mut state = STATE.lock();
+    if state.device.is_some() || state.has_device_resources() {
+        state.set_error("headless presentation must initialize before Vulkan resources".to_string());
+        return 0;
+    }
+    let instance = match VulkanInstance::get_or_init() { Ok(v) => v, Err(e) => { state.set_error(format!("headless present instance: {e}")); return 0; } };
+    let surface = match Surface::new_headless(instance.clone()) { Ok(v) => v, Err(e) => { state.set_error(format!("headless present surface: {e}")); return 0; } };
+    let mut devices = match instance.enumerate_devices() { Ok(v) => v, Err(e) => { state.set_error(format!("headless present enumerate: {e}")); return 0; } };
+    // Headless mode is a CI/evidence surface. Prefer a CPU ICD when present;
+    // the explicit visible/physical adapter will own hardware selection.
+    devices.sort_by_key(|device| (
+        device.properties.device_type != ash::vk::PhysicalDeviceType::CPU,
+        std::cmp::Reverse(device.compute_score()),
+    ));
+    let mut selected = None;
+    for physical in &devices {
+        if physical.find_compute_queue_family().is_none() || physical.find_graphics_queue_family().is_none()
+            || physical.find_present_queue_family(&instance, surface.handle()).is_none() { continue; }
+        if let Ok(device) = VulkanDevice::new_for_surface(physical.clone(), &surface) { selected = Some(device); break; }
+    }
+    let device = match selected { Some(v) => v, None => { state.set_error("no device supports the headless presentation surface".to_string()); return 0; } };
+    let swapchain = match VulkanSwapchain::new(device.clone(), surface.clone(), w as u32, h as u32, false, vsync == 0) {
+        Ok(v) => v, Err(e) => { state.set_error(format!("headless present swapchain: {e}")); return 0; }
+    };
+    let surface_handle = alloc_handle();
+    let swapchain_handle = alloc_handle();
+    state.instance = Some(instance);
+    state.physical_devices = devices;
+    state.semaphore_pool = Some(SemaphorePool::new(device.clone()));
+    state.device = Some(device);
+    state.surfaces.insert(surface_handle, surface);
+    state.swapchains.insert(swapchain_handle, swapchain);
+    swapchain_handle
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_init_headless_present(_w: i64, _h: i64, _vsync: i64) -> i64 { 0 }
+
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_present_buffer(sc: i64, buffer: i64, w: i64, h: i64, content_revision: i64) -> i64 {
+    if w <= 0 || h <= 0 || w > u32::MAX as i64 || h > u32::MAX as i64 { return 0; }
+    let mut state = STATE.lock();
+    let swapchain = match state.swapchains.get(&sc).cloned() { Some(v) => v, None => { state.set_error(format!("present buffer: swapchain {sc} not found")); return 0; } };
+    let source = match state.buffers.get(&buffer).cloned() { Some(v) => v, None => { state.set_error(format!("present buffer: storage buffer {buffer} not found")); return 0; } };
+    match swapchain.copy_buffer_and_present(&source, w as u32, h as u32, content_revision) {
+        Ok((_image, suboptimal)) => if suboptimal { 2 } else { 1 },
+        Err(e) => { state.set_error(format!("present buffer: {e}")); 0 }
+    }
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_present_buffer(_sc: i64, _buffer: i64, _w: i64, _h: i64, _content_revision: i64) -> i64 { 0 }
 
 #[no_mangle]
 #[cfg(feature = "vulkan")]
@@ -212,4 +272,67 @@ pub extern "C" fn rt_vulkan_present(sc: i64, image_index: i64) -> i64 {
 #[cfg(not(feature = "vulkan"))]
 pub extern "C" fn rt_vulkan_present(_sc: i64, _image_index: i64) -> i64 {
     0
+}
+
+#[cfg(all(test, feature = "vulkan"))]
+mod tests {
+    use super::{rt_vulkan_destroy_swapchain, rt_vulkan_init_headless_present, rt_vulkan_present_buffer};
+    use crate::vulkan_graphics_runtime::vulkan_graphics_runtime_buffer::{rt_vulkan_alloc_buffer, rt_vulkan_copy_to_buffer_raw, rt_vulkan_free_buffer};
+    use crate::vulkan_graphics_runtime::vulkan_graphics_runtime_core::rt_vulkan_shutdown;
+
+    fn upload_chunks(buffer: i64, bytes: &[u8]) {
+        const MAX_UPLOAD: usize = 64 * 1024 * 1024;
+        for (index, chunk) in bytes.chunks(MAX_UPLOAD).enumerate() {
+            assert_eq!(rt_vulkan_copy_to_buffer_raw(buffer, chunk.as_ptr() as i64, chunk.len() as i64, (index * MAX_UPLOAD) as i64), 1);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires VK_EXT_headless_surface and a presentation-capable Vulkan ICD"]
+    fn live_headless_swapchain_presents_same_device_buffer_twice() {
+        let (width, height) = (64i64, 32i64);
+        let swapchain = rt_vulkan_init_headless_present(width, height, 0);
+        assert!(swapchain > 0);
+        let pixels = vec![0xff3366ccu32; (width * height) as usize];
+        let bytes = unsafe { std::slice::from_raw_parts(pixels.as_ptr().cast::<u8>(), (width * height * 4) as usize) };
+        let buffer = rt_vulkan_alloc_buffer(width * height * 4, 0x80);
+        assert!(buffer > 0);
+        upload_chunks(buffer, bytes);
+        assert!(rt_vulkan_present_buffer(swapchain, buffer, width, height, 1) > 0);
+        assert!(rt_vulkan_present_buffer(swapchain, buffer, width, height, 1) > 0);
+        assert_eq!(rt_vulkan_free_buffer(buffer), 1);
+        assert_eq!(rt_vulkan_destroy_swapchain(swapchain), 1);
+        assert_eq!(rt_vulkan_shutdown(), 1);
+    }
+
+    #[test]
+    #[ignore = "8K same-device headless presentation evidence"]
+    fn bench_headless_swapchain_present_8k() {
+        use std::time::Instant;
+        let (width, height, frames) = (7680i64, 4320i64, 20usize);
+        let swapchain = rt_vulkan_init_headless_present(width, height, 0);
+        assert!(swapchain > 0);
+        let pixels = vec![0xff17365du32; (width * height) as usize];
+        let byte_count = width * height * 4;
+        let bytes = unsafe { std::slice::from_raw_parts(pixels.as_ptr().cast::<u8>(), byte_count as usize) };
+        let buffer = rt_vulkan_alloc_buffer(byte_count, 0x80);
+        assert!(buffer > 0);
+        upload_chunks(buffer, bytes);
+        for _ in 0..4 { assert!(rt_vulkan_present_buffer(swapchain, buffer, width, height, 1) > 0); }
+        let mut samples = Vec::with_capacity(frames);
+        for _ in 0..frames {
+            let start = Instant::now();
+            assert!(rt_vulkan_present_buffer(swapchain, buffer, width, height, 1) > 0);
+            samples.push(start.elapsed().as_nanos() as u64);
+        }
+        samples.sort_unstable();
+        let p50 = samples[(samples.len() - 1) * 50 / 100];
+        let p95 = samples[(samples.len() - 1) * 95 / 100];
+        let checksum = pixels.iter().fold(1469598103934665603u64, |hash, pixel| (hash ^ u64::from(*pixel)).wrapping_mul(1099511628211));
+        let rss_kib = std::fs::read_to_string("/proc/self/status").ok().and_then(|status| status.lines().find_map(|line| line.strip_prefix("VmHWM:").and_then(|v| v.split_whitespace().next()).and_then(|v| v.parse::<u64>().ok()))).unwrap_or(0);
+        println!("headless_present width={width} height={height} frames={frames} p50_ns={p50} p95_ns={p95} rss_kib={rss_kib} readback_bytes=0 fallback=false completion_known=true present_mode=headless-swapchain checksum={checksum}");
+        assert_eq!(rt_vulkan_free_buffer(buffer), 1);
+        assert_eq!(rt_vulkan_destroy_swapchain(swapchain), 1);
+        assert_eq!(rt_vulkan_shutdown(), 1);
+    }
 }
