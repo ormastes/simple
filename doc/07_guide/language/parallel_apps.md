@@ -68,6 +68,14 @@ the native scalable-vector lowering path is not yet implemented. Admission is
 only a legality gate: it emits no vector instructions, tail mask, or alias
 metadata.
 
+For admitted fixed-width plans, the optimizer can now derive a bounded physical
+block schedule. Exact blocks are eligible for later vector lowering; a partial
+last block always records its logical start/count as a scalar tail. The
+schedule checks byte capacity, block budgets, forged admission shapes, and
+arithmetic overflow. It never treats padded AoSoA lanes as logical elements and
+does not manufacture a generic masked tail that current native backends cannot
+yet prove safe.
+
 ## Recommended shape
 
 ```simple

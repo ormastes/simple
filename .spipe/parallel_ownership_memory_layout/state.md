@@ -327,3 +327,13 @@ dev-done
   nested checks repeatedly require a missing local `bin/simple`. The focused
   module check, spec, diff check, and direct-environment guards are the current
   evidence; Stage 4 and broad parity remain open rather than being called PASS.
+- impl: Extended WP-23 with a checked fixed-width AoSoA block schedule. Empty
+  inputs issue no block; exact multiples contain full vector blocks; every
+  partial block records a mandatory scalar tail and never a generic mask.
+  Physical byte capacity, maximum block budget, required-byte overflow, and
+  forged admission shapes fail closed. Fallback, rejected, and scalable
+  admissions cannot produce a fixed schedule. A Luna follow-up audit confirmed
+  that native backends do not share a safe masked-load/store contract; primary
+  review added public-record revalidation and corrected the admission
+  multiplication ceiling to signed i64. Six focused examples pass. Actual MIR
+  vector instruction emission and per-backend tail lowering remain open.

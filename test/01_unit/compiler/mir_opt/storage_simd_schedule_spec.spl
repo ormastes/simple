@@ -1,0 +1,122 @@
+use std.spec.{describe, it, assert_equal, assert_false, assert_true}
+use std.common.structural.storage_layout.storage_layout_contracts.{
+    StorageConversionPolicy,
+    StorageLayoutKind,
+    storage_layout_plan_v1
+}
+use compiler.mir_opt.mir_opt.simd_recipe_infra.{VectorWidthRouter}
+use compiler.mir_opt.mir_opt.storage_simd_admission.{
+    StorageSimdAdmissionKind,
+    storage_simd_admission_v1,
+    storage_simd_admit
+}
+use compiler.mir_opt.mir_opt.storage_simd_schedule.{
+    StorageSimdTailMode,
+    storage_simd_schedule
+}
+
+fn admitted_eight_lane_f32():
+    val plan = storage_layout_plan_v1(51, StorageLayoutKind.AoSoA, 8, 32,
+        false, StorageConversionPolicy.Cached, "simd-policy", "simd-block")
+    storage_simd_admit(plan, 32, 8, VectorWidthRouter.x86_64_avx2())
+
+describe "storage SIMD full-block schedule":
+    it "represents an empty array without issuing a vector block":
+        val schedule = storage_simd_schedule(
+            admitted_eight_lane_f32(), 0, 64, 0, 0)
+        assert_true(schedule.valid)
+        assert_equal(schedule.tail_mode, StorageSimdTailMode.Empty)
+        assert_equal(schedule.full_block_count, 0)
+        assert_equal(schedule.physical_block_count, 0)
+        assert_equal(schedule.required_bytes, 0)
+
+    it "schedules exact multiples as full blocks only":
+        val schedule = storage_simd_schedule(
+            admitted_eight_lane_f32(), 16, 64, 128, 2)
+        assert_true(schedule.valid)
+        assert_equal(schedule.full_block_count, 2)
+        assert_equal(schedule.physical_block_count, 2)
+        assert_equal(schedule.tail_count, 0)
+        assert_equal(schedule.tail_start, 16)
+        assert_equal(schedule.required_bytes, 128)
+        assert_equal(schedule.tail_mode, StorageSimdTailMode.FullBlocksOnly)
+
+    it "keeps a ninth element in an explicit scalar tail":
+        val schedule = storage_simd_schedule(
+            admitted_eight_lane_f32(), 9, 64, 128, 2)
+        assert_true(schedule.valid)
+        assert_equal(schedule.full_block_count, 1)
+        assert_equal(schedule.physical_block_count, 2)
+        assert_equal(schedule.tail_count, 1)
+        assert_equal(schedule.tail_start, 8)
+        assert_equal(schedule.tail_mode, StorageSimdTailMode.ScalarTail)
+        assert_equal(schedule.reason, "scalar-tail-required")
+
+    it "uses only a scalar tail when the array is smaller than one block":
+        val schedule = storage_simd_schedule(
+            admitted_eight_lane_f32(), 7, 64, 64, 1)
+        assert_true(schedule.valid)
+        assert_equal(schedule.full_block_count, 0)
+        assert_equal(schedule.physical_block_count, 1)
+        assert_equal(schedule.tail_count, 7)
+        assert_equal(schedule.tail_start, 0)
+        assert_equal(schedule.tail_mode, StorageSimdTailMode.ScalarTail)
+
+    it "rejects invalid inputs block budgets capacity and overflow":
+        assert_equal(storage_simd_schedule(
+            admitted_eight_lane_f32(), -1, 64, 64, 1).reason,
+            "invalid-schedule-input")
+        assert_equal(storage_simd_schedule(
+            admitted_eight_lane_f32(), 8, -1, 64, 1).reason,
+            "invalid-schedule-input")
+        assert_equal(storage_simd_schedule(
+            admitted_eight_lane_f32(), 8, 64, -1, 1).reason,
+            "invalid-schedule-input")
+        assert_equal(storage_simd_schedule(
+            admitted_eight_lane_f32(), 8, 64, 64, -1).reason,
+            "invalid-schedule-input")
+        assert_equal(storage_simd_schedule(
+            admitted_eight_lane_f32(), 9, 64, 128, 1).reason,
+            "block-budget-exceeded")
+        assert_equal(storage_simd_schedule(
+            admitted_eight_lane_f32(), 9, 64, 127, 2).reason,
+            "physical-capacity-too-small")
+        assert_equal(storage_simd_schedule(
+            admitted_eight_lane_f32(), 8,
+            9223372036854775807, 9223372036854775807, 1).required_bytes,
+            9223372036854775807)
+        assert_equal(storage_simd_schedule(
+            admitted_eight_lane_f32(), 16,
+            9223372036854775807, 9223372036854775807, 2).reason,
+            "required-bytes-overflow")
+
+    it "refuses fallback scalable and rejected admissions":
+        val aos = storage_layout_plan_v1(51, StorageLayoutKind.AoS, 1, 8,
+            false, StorageConversionPolicy.Never, "simd-policy", "reference")
+        val fallback = storage_simd_admit(
+            aos, 32, 8, VectorWidthRouter.x86_64_avx2())
+        assert_equal(storage_simd_schedule(
+            fallback, 8, 64, 64, 1).reason,
+            "scalar-fallback-has-no-simd-schedule")
+        val aosoa = storage_layout_plan_v1(51, StorageLayoutKind.AoSoA, 8, 32,
+            false, StorageConversionPolicy.Cached, "simd-policy", "simd-block")
+        val scalable = storage_simd_admit(
+            aosoa, 32, 8, VectorWidthRouter.aarch64_sve(256))
+        assert_equal(storage_simd_schedule(
+            scalable, 8, 64, 64, 1).reason,
+            "scalable-schedule-deferred")
+        val rejected = storage_simd_admit(
+            aosoa, 32, 8, VectorWidthRouter.x86_64_sse2())
+        assert_equal(storage_simd_schedule(
+            rejected, 8, 64, 64, 1).reason,
+            "simd-admission-rejected")
+        val forged = storage_simd_admission_v1(
+            StorageSimdAdmissionKind.AdmittedFixed, 8, 130, "forged")
+        assert_equal(storage_simd_schedule(
+            forged, 8, 64, 64, 1).reason,
+            "invalid-admission-shape")
+        val zero_lanes = storage_simd_admission_v1(
+            StorageSimdAdmissionKind.AdmittedFixed, 0, 128, "forged")
+        assert_equal(storage_simd_schedule(
+            zero_lanes, 8, 64, 64, 1).reason,
+            "invalid-admission-shape")

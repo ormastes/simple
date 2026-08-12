@@ -32,7 +32,7 @@ Do not redefine them in runtime, MDSOC, backend, or application lanes.
 | WP-20 access analysis | partial implementation | compiler MIR analysis now emits ownership-bound logical field/index read/write facts; dynamic/nested/unbound accesses remain conservative and no physical-layout or alias claim is made |
 | WP-21 layout planner | partial implementation | common deterministic planning/projection exists, but the full cost model and policy/PGO inputs remain |
 | WP-22 host AoS/SoA lowering | partial implementation | a checked fixed-record byte oracle converts AoS, SoA, and tail-padded AoSoA with exact round-trip tests; it is deliberately bounded to 64 MiB and is not backend lowering or a fast typed-array view |
-| WP-23 AoSoA/SIMD lowering | partial implementation | MIR now has fail-closed storage/SIMD admission for fixed-width AoSoA blocks, scalar fallback, ABI refusal, and explicit SVE/RVV deferral; no native SIMD instruction lowering or tail-mask emission is claimed |
+| WP-23 AoSoA/SIMD lowering | partial implementation | MIR now has fail-closed storage/SIMD admission plus bounded full-block schedules; partial blocks always become explicit scalar tails, while ABI layouts and scalable SVE/RVV remain refused/deferred; no native SIMD instruction lowering or masked-tail emission is claimed |
 | WP-24..27 layout/performance | planned | no GPU backend lowering, layout-view cache, allocator adoption, NUMA/false-sharing implementation, or end-to-end evidence yet |
 | WP-30..36 MDSOC/pilots | planned | do not start before safe transport and layout inputs |
 | WP-40..44 docs/formal/benchmarks | in progress | guide and skills added; real system/manual/formal evidence remains |
