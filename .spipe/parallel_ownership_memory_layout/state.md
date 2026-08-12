@@ -595,3 +595,12 @@ dev-done
   independent value queues. This is not yet an admitted actor transport:
   scheduler/global lifecycle values remain legacy, and native send/ask routing
   plus close/cancellation behavior need execution evidence.
+- impl: Tightened the WP-15 parent commit ordering path. The bounded
+  65,535-result admission limit previously fed a quadratic repeated-selection
+  sort; ordering now uses stable bottom-up merge passes, preserving left-run
+  order for equal keys and reducing ordering work to O(n log n) with bounded
+  temporary arrays. A reverse-completion 16-result regression is present.
+  The available source-check wrapper timed out without a final verdict; resume
+  with `bin/simple test test/01_unit/common/structural/parallel_commit_contract_spec.spl --mode=interpreter`
+  on an admitted self-hosted CLI before treating the regression as execution
+  evidence.

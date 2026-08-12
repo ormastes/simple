@@ -116,26 +116,46 @@ fn parallel_commit_validation_failure(reason: text) -> ParallelCommitValidationV
 
 fn parallel_commit_order_results(results: [ResultEnvelopeV1],
                                  order: ParallelCommitOrder) -> [ResultEnvelopeV1]:
-    """Stable selection order. The first equal result wins, so callers get a
-    canonical order independent of mailbox completion timing."""
-    var used: [bool] = []
-    var i = 0
-    while i < results.len():
-        used.push(false)
-        i = i + 1
-    var ordered: [ResultEnvelopeV1] = []
-    while ordered.len() < results.len():
-        var candidate = -1
-        var j = 0
-        while j < results.len():
-            if not used[j]:
-                if candidate < 0 or parallel_result_before(results[j], results[candidate], order):
-                    candidate = j
-            j = j + 1
-        if candidate >= 0:
-            used[candidate] = true
-            ordered.push(results[candidate])
-    ordered
+    """Stable O(n log n) bottom-up merge order for bounded result batches.
+
+    The prior repeated-selection implementation was deterministic but O(n²),
+    which made the 65,535-item admission limit impractical. Equal ordering
+    keys retain their input order by selecting the left run unless the right
+    value is strictly before it.
+    """
+    if results.len() <= 1:
+        return results
+    var current = results
+    var width: i64 = 1
+    while width < current.len():
+        var next: [ResultEnvelopeV1] = []
+        var start: i64 = 0
+        while start < current.len():
+            var left = start
+            var middle = start + width
+            if middle > current.len():
+                middle = current.len()
+            var right = middle
+            var end = middle + width
+            if end > current.len():
+                end = current.len()
+            while left < middle or right < end:
+                if left >= middle:
+                    next.push(current[right])
+                    right = right + 1
+                else if right >= end:
+                    next.push(current[left])
+                    left = left + 1
+                else if parallel_result_before(current[right], current[left], order):
+                    next.push(current[right])
+                    right = right + 1
+                else:
+                    next.push(current[left])
+                    left = left + 1
+            start = end
+        current = next
+        width = width * 2
+    current
 
 fn parallel_commit_batch_has_duplicate_identity(results: [ResultEnvelopeV1]) -> bool:
     var i = 0

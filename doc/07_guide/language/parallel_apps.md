@@ -51,6 +51,12 @@ The legacy actor mailbox now uses one class-backed state shared by copied
 but is not yet an ownership-safe actor transport: native send/ask routing,
 lifecycle closure, cancellation, and typed transfer envelopes remain required.
 
+Parent commit order is independent of child completion order. The bounded
+commit engine uses stable merge ordering, so equal keys preserve their
+left-to-right input order while large result batches avoid quadratic selection
+work. Payload application and concurrent publication remain owner-runtime
+responsibilities.
+
 WP-18 now has internal runtime groundwork for a deliberately narrow bounded
 scalar pool-state pilot. Capacity counts pending, running, and completed but
 unreleased tasks; credit returns only on release. Tagged generation handles are
