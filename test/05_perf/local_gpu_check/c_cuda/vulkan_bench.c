@@ -117,6 +117,20 @@ static int offload_preferred(long long cpu_ns, long long device_ns) {
         cpu_ns - device_ns >= device_ns / 2 + device_ns % 2;
 }
 
+static int compare_u64(const void* a, const void* b) {
+    uint64_t av = *(const uint64_t*)a, bv = *(const uint64_t*)b;
+    return av < bv ? -1 : av > bv;
+}
+
+static uint32_t env_u32(const char* name, uint32_t fallback, uint32_t maximum) {
+    const char* raw = getenv(name);
+    if (!raw || !*raw) return fallback;
+    char* end = NULL;
+    unsigned long value = strtoul(raw, &end, 10);
+    if (!end || *end || value == 0 || value > maximum) return fallback;
+    return (uint32_t)value;
+}
+
 static int self_test(void) {
     unsigned char buf[8] = {0};
     struct timespec delay = { .tv_nsec = 1000000 };
@@ -203,11 +217,19 @@ int main(int argc, char** argv) {
     f_epd(instance, &dev_count, devs);
     VkPhysicalDevice phys = devs[0];
 
+    uint32_t selected_device_type = 0;
+    char selected_device_name[256] = "unknown";
     if (f_gpp) {
         for (uint32_t i = 0; i < dev_count && i < 4; i++) {
             char props[1024] = {0};
             f_gpp(devs[i], props);
             printf("    Device %u: %s\n", i, props + 20);
+            if (i == 0) {
+                memcpy(&selected_device_type, props + 16, sizeof(uint32_t));
+                memcpy(selected_device_name, props + 20,
+                       sizeof(selected_device_name) - 1);
+                selected_device_name[sizeof(selected_device_name) - 1] = '\0';
+            }
         }
     }
     free(devs);
@@ -224,9 +246,20 @@ int main(int argc, char** argv) {
     VkQueue queue = NULL;
     f_gdq(dev, 0, 0, &queue);
 
-    /* --- Buffer (1080p, storage+transfer_dst) --- */
-    uint32_t pixels = 1920 * 1080;
+    /* --- Configurable framebuffer-sized storage+transfer buffer --- */
+    uint32_t width = env_u32("VULKAN_BENCH_WIDTH", 1920, 16384);
+    uint32_t height = env_u32("VULKAN_BENCH_HEIGHT", 1080, 16384);
+    uint32_t iterations = env_u32("VULKAN_BENCH_ITERATIONS", 100, 1000);
+    uint32_t active_basis_points = env_u32(
+        "VULKAN_BENCH_ACTIVE_BASIS_POINTS", 10000, 10000);
+    uint64_t pixel_count = (uint64_t)width * height;
+    if (pixel_count > UINT32_MAX) { printf("FAIL: pixel count overflow\n"); return 1; }
+    uint32_t pixels = (uint32_t)pixel_count;
     VkDeviceSize bytes = (VkDeviceSize)pixels * 4;
+    uint64_t active_pixels = pixel_count / 10000 * active_basis_points +
+        (pixel_count % 10000) * active_basis_points / 10000;
+    if (active_pixels == 0) active_pixels = 1;
+    VkDeviceSize active_bytes = (VkDeviceSize)active_pixels * 4;
     VkBufferCreateInfo bci = { .sType = 12, .size = bytes, .usage = 0x82 };
     VkBuffer buf = NULL;
     res = f_cb(dev, &bci, NULL, &buf);
@@ -270,7 +303,7 @@ int main(int argc, char** argv) {
     VkCommandBufferBeginInfo cbbi = { .sType = 42 };
     res = f_bcb(cmd, &cbbi);
     if (res) { printf("FAIL: vkBeginCommandBuffer = %u\n", res); return 1; }
-    f_cfb(cmd, buf, 0, bytes, 0xFF);
+    f_cfb(cmd, buf, 0, active_bytes, 0xFF);
     res = f_ecb(cmd);
     if (res) { printf("FAIL: vkEndCommandBuffer = %u\n", res); return 1; }
 
@@ -283,18 +316,29 @@ int main(int argc, char** argv) {
     if (!res) res = f_rf(dev, 1, &fence);
     if (res) { printf("FAIL: Vulkan warmup = %u\n", res); return 1; }
 
-    /* --- Timed fill (100 iterations) --- */
-    printf("\n--- GPU vkCmdFillBuffer 1080p (100 iterations) ---\n");
+    /* --- Timed fill (each sample includes queue submit + fence wait/reset) --- */
+    printf("\n--- GPU vkCmdFillBuffer %ux%u (%u iterations) ---\n", width, height, iterations);
+    uint64_t* samples = calloc(iterations, sizeof(uint64_t));
+    if (!samples) { printf("FAIL: timing allocation\n"); return 1; }
     t0 = now_ns();
-    for (int i = 0; i < 100; i++) {
+    for (uint32_t i = 0; i < iterations; i++) {
+        long long sample_start = now_ns();
         res = f_qs(queue, 1, &si, fence);
         if (!res) res = f_wf(dev, 1, &fence, 1, timeout);
         if (!res) res = f_rf(dev, 1, &fence);
         if (res) { printf("FAIL: Vulkan timed fill = %u\n", res); return 1; }
+        samples[i] = (uint64_t)(now_ns() - sample_start);
     }
     long long gpu_ns = now_ns() - t0;
+    qsort(samples, iterations, sizeof(uint64_t), compare_u64);
+    uint64_t gpu_p50_ns = samples[(iterations - 1) / 2];
+    uint32_t p95_index = (95 * iterations + 99) / 100 - 1;
+    if (p95_index >= iterations) p95_index = iterations - 1;
+    uint64_t gpu_p95_ns = samples[p95_index];
     printf("  Total: %.3f ms\n", (double)gpu_ns / 1000000.0);
-    printf("  Avg:   %.3f ms/frame\n", (double)gpu_ns / 100000000.0);
+    printf("  Avg:   %.3f ms/frame\n", (double)gpu_ns / (double)iterations / 1000000.0);
+    printf("  p50:   %.3f ms/frame\n", (double)gpu_p50_ns / 1000000.0);
+    printf("  p95:   %.3f ms/frame\n", (double)gpu_p95_ns / 1000000.0);
 
     /* --- Readback --- */
     printf("\n--- Readback ---\n");
@@ -313,19 +357,32 @@ int main(int argc, char** argv) {
     long long rb_ns = now_ns() - t0;
     uint32_t px0;
     memcpy(&px0, host, sizeof(px0));
+    uint64_t active_checksum = 1469598103934665603ULL;
+    uint64_t active_mismatch_count = 0;
+    for (uint64_t i = 0; i < (uint64_t)active_bytes; i++) {
+        active_checksum ^= host[i];
+        active_checksum *= 1099511628211ULL;
+    }
+    for (uint64_t i = 0; i < active_pixels; i++) {
+        uint32_t pixel;
+        memcpy(&pixel, host + i * 4, sizeof(pixel));
+        if (pixel != 0x000000FFu) active_mismatch_count++;
+    }
     printf("  First pixel (u32): %u\n", px0);
     printf("  Full mapped readback: %.3f ms\n", (double)rb_ns / 1000000.0);
 
     /* --- CPU baseline --- */
     printf("\n--- CPU memset comparison (100 iterations) ---\n");
-    unsigned char* cpu_buf = malloc(bytes);
+    unsigned char* cpu_buf = malloc((size_t)active_bytes);
     t0 = now_ns();
-    for (int i = 0; i < 100; i++) measured_memset(cpu_buf, 0x1E, bytes);
+    for (uint32_t i = 0; i < iterations; i++)
+        measured_memset(cpu_buf, 0x1E, (size_t)active_bytes);
     long long cpu_ns = now_ns() - t0;
     printf("  Total: %.3f ms\n", (double)cpu_ns / 1000000.0);
     printf("  Avg:   %.3f ms/frame\n", (double)cpu_ns / 100000000.0);
     free(cpu_buf);
     free(host);
+    free(samples);
 
     /* --- Cleanup --- */
     if (f_dwi) f_dwi(dev);
@@ -341,21 +398,41 @@ int main(int argc, char** argv) {
     printf("\n========================================\n");
     printf("VULKAN VERDICT\n");
     printf("========================================\n");
+    printf("vulkan_8k_schema=vulkan-buffer-fill-v2\n");
+    printf("vulkan_8k_width=%u\n", width);
+    printf("vulkan_8k_height=%u\n", height);
+    printf("vulkan_8k_pixels=%u\n", pixels);
+    printf("vulkan_8k_active_pixels=%llu\n", (unsigned long long)active_pixels);
+    printf("vulkan_8k_active_basis_points=%u\n", active_basis_points);
+    printf("vulkan_8k_active_bytes=%llu\n", (unsigned long long)active_bytes);
+    printf("vulkan_8k_iterations=%u\n", iterations);
+    printf("vulkan_8k_device_name=%s\n", selected_device_name);
+    printf("vulkan_8k_device_type_code=%u\n", selected_device_type);
+    printf("vulkan_8k_physical_gpu=%s\n", selected_device_type == 1 || selected_device_type == 2 ? "true" : "false");
+    printf("vulkan_8k_submit_fence_p50_ns=%llu\n", (unsigned long long)gpu_p50_ns);
+    printf("vulkan_8k_submit_fence_p95_ns=%llu\n", (unsigned long long)gpu_p95_ns);
+    printf("vulkan_8k_submit_fence_within_80fps_budget=%s\n", gpu_p95_ns <= 12500000ULL ? "true" : "false");
+    printf("vulkan_8k_timed_readback_bytes=0\n");
+    printf("vulkan_8k_evidence_readback_bytes=%llu\n", (unsigned long long)bytes);
+    printf("vulkan_8k_active_checksum=%llu\n", (unsigned long long)active_checksum);
+    printf("vulkan_8k_active_mismatch_count=%llu\n", (unsigned long long)active_mismatch_count);
+    printf("vulkan_8k_swapchain_presented=false\n");
+    printf("vulkan_8k_dynamic_frame_80fps_proven=false\n");
     printf("  Vulkan available: YES (%u devices)\n", dev_count);
     printf("  Init time: %.3f ms (target < 500 ms)\n", init_ms);
     if (init_ms < 500) printf("  PASS: init within NFR target\n");
     else printf("  WARN: init exceeds 500ms target\n");
-    printf("  GPU fill avg: %.2f ms\n", (double)gpu_ns / 100000000.0);
-    printf("  CPU memset avg: %.2f ms\n", (double)cpu_ns / 100000000.0);
+    printf("  GPU fill avg: %.2f ms\n", (double)gpu_ns / (double)iterations / 1000000.0);
+    printf("  CPU memset avg: %.2f ms\n", (double)cpu_ns / (double)iterations / 1000000.0);
     printf("  GPU fill + full mapped readback: %.2f ms\n",
-        (double)gpu_ns / 100000000.0 + (double)rb_ns / 1000000.0);
+        (double)gpu_ns / (double)iterations / 1000000.0 + (double)rb_ns / 1000000.0);
     if (gpu_ns > 0 && cpu_ns > gpu_ns) printf("  GPU speedup: %.1fx\n", (double)cpu_ns / gpu_ns);
     if (gpu_ns > 0 && gpu_ns >= cpu_ns) printf("  NOTE: host-visible mem slower than CPU (expected on discrete GPU)\n");
     if (offload_preferred(cpu_ns, gpu_ns)) printf("  Fill offload: preferred\n");
     else printf("  Fill offload: available-not-preferred\n");
-    if (offload_preferred(cpu_ns, gpu_ns + rb_ns * 100)) printf("  Roundtrip offload: preferred\n");
+    if (offload_preferred(cpu_ns, gpu_ns + rb_ns * iterations)) printf("  Roundtrip offload: preferred\n");
     else printf("  Roundtrip offload: available-not-preferred (communication overhead)\n");
-    if ((double)gpu_ns / 100000000.0 < 16.7) printf("  PASS: GPU < 16.7ms/frame -> 60Hz capable\n");
+    if ((double)gpu_ns / (double)iterations / 1000000.0 < 16.7) printf("  PASS: GPU < 16.7ms/frame -> 60Hz capable\n");
     else printf("  WARN: GPU > 16.7ms/frame\n");
     printf("========================================\n");
     return 0;
