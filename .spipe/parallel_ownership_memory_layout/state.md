@@ -431,3 +431,14 @@ dev-done
   `smf_mmap_native.spl::ptr_read_u8` codegen failure. Three bounded attempts
   were stopped; no native PASS is claimed. Driver registration and public typed
   view allocation remain open.
+- impl: Connected WP-22 bindings to the production native driver boundary.
+  `CompileContext` owns module-qualified aligned rows, rejects duplicate sites,
+  evicts rows with MIR, and generates registration-order-independent complete
+  sidecar identity for the native cache scope. The backend helper optimizes
+  first, atomically rewrites a fresh module, then admits only custom-native
+  x86_64 pointer-width fields. Canonical MIR cannot be partially rewritten on
+  failure. Large base offsets use an i64 register beyond signed `ADD_IMM` range.
+  Focused storage and registry specs pass (`11` and `3` assertions/groups via
+  the bounded Rust-runner diagnostic lane). Public typed-view allocation and
+  producer registration, formal receipts, subword fields, other backends, and
+  the blocked W^X scenario remain open.

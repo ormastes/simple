@@ -24,6 +24,9 @@ use compiler.backend.backend.llvm_lib_backend.{llvm_lib_compile_module_direct}
 use compiler.backend.backend.cranelift_codegen_adapter.{CraneliftCodegenAdapter, cranelift_compile_module_direct}
 use compiler.backend.llvm_support_matrix.{lookup_support, is_combination_usable}
 use compiler.common.mir_target_context.{mir_target_context_normalize_arch}
+use compiler.mir_opt.mir_opt.storage_projection_lowering.{
+    MirStorageViewSiteBindingV1, lower_mir_storage_project_fields_v1
+}
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_simd_has_avx2() -> bool
@@ -312,6 +315,17 @@ fn compile_module_with_backend_target_cpu(
     opt_level_i64: i64,
     target_cpu: text
 ) -> Result<CompiledModule, CompileError>:
+    compile_module_with_backend_target_cpu_storage_bindings(
+        backend_name, module, is_release, opt_level_i64, target_cpu, [])
+
+fn compile_module_with_backend_target_cpu_storage_bindings(
+    backend_name: text,
+    module: MirModule,
+    is_release: bool,
+    opt_level_i64: i64,
+    target_cpu: text,
+    storage_bindings: [MirStorageViewSiteBindingV1]
+) -> Result<CompiledModule, CompileError>:
     """Compile a MIR module using the named backend.
 
     This is a convenience function for the driver that avoids Backend class
@@ -410,6 +424,20 @@ fn compile_module_with_backend_target_cpu(
         get_effective_backend_name(backend_name, is_release)
     val mir_opt_level = backend_helper_mir_opt_level(opt)
     val optimized_module = optimize_module_for_backend(module, mir_opt_level, effective_backend)
+    val storage_lowered = lower_mir_storage_project_fields_v1(
+        optimized_module, storage_bindings)
+    if not storage_lowered.ok:
+        return Err(compileerror_backend_error(kind,
+            "storage projection lowering failed: {storage_lowered.reason}"))
+    if storage_lowered.rewritten_count > 0 and kind != BackendKind.Native:
+        return Err(compileerror_backend_error(kind,
+            "typed storage projections require the custom native backend"))
+    if storage_lowered.rewritten_count > 0
+        and options.target != CodegenTarget.X86_64
+        and options.target != CodegenTarget.Host:
+        return Err(compileerror_backend_error(kind,
+            "typed storage projections require the x86_64 native target"))
+    val backend_module = storage_lowered.module
 
     if kind == BackendKind.Llvm and not backend_helper_llc_available():
         return Err(compileerror_backend_error(BackendKind.Llvm,
@@ -422,8 +450,8 @@ fn compile_module_with_backend_target_cpu(
         if trace:
             print "[backend-helper] direct llvm"
         if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-            return llvm_compile_module_direct_compiled(options, optimized_module)
-        val result = llvm_compile_module_direct(options, optimized_module)
+            return llvm_compile_module_direct_compiled(options, backend_module)
+        val result = llvm_compile_module_direct(options, backend_module)
         match result:
             case Ok(output):
                 return Ok(codegen_output_to_compiled_module(output))
@@ -433,7 +461,7 @@ fn compile_module_with_backend_target_cpu(
     if kind == BackendKind.LlvmLib:
         if trace:
             print "[backend-helper] direct llvm-lib"
-        val result = llvm_lib_compile_module_direct(options, optimized_module)
+        val result = llvm_lib_compile_module_direct(options, backend_module)
         match result:
             case Ok(output):
                 return Ok(codegen_output_to_compiled_module(output))
@@ -441,7 +469,7 @@ fn compile_module_with_backend_target_cpu(
                 return Err(err)
 
     if kind == BackendKind.Cranelift:
-        val result = cranelift_compile_module_direct(options, optimized_module)
+        val result = cranelift_compile_module_direct(options, backend_module)
         match result:
             case Ok(output):
                 return Ok(codegen_output_to_compiled_module(output))
@@ -449,7 +477,7 @@ fn compile_module_with_backend_target_cpu(
                 return Err(err)
 
     val codegen = CodegenFactory.create(kind, options)
-    val result = codegen.compile_module(optimized_module)
+    val result = codegen.compile_module(backend_module)
     match result:
         case Ok(output):
             Ok(codegen_output_to_compiled_module(output))

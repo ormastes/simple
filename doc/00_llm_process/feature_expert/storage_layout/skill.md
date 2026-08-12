@@ -15,6 +15,8 @@
 - Compiler-owned revisioned typed-view binding and affine AoS/SoA recipe.
 - Custom x86 native lowering for `mir.storage.project_address.v1`.
 - Exact function/base-local rewrite from `mir.storage.project_field.v1`.
+- Module-qualified `CompileContext` registry, MIR-coupled eviction, late atomic
+  rewrite, and complete sorted binding identity in native cache scope.
 
 ## Still proposed or incomplete
 
@@ -34,6 +36,10 @@
    native intrinsics may otherwise degrade to NOP.
 7. Require index-bound evidence and validate the maximum affine byte address
    against the bound allocation capacity.
+8. Freeze registration before parallel codegen; never mutate bindings in a
+   worker or store them in `MirModule`.
+9. Admit only x86_64 custom-native 8-byte fields until other backend/width
+   owners land; every unsupported route is an error.
 
 The W^X store/load parity scenario is executable but not admitted while the
 native runner fails compiling `smf_mmap_native.ptr_read_u8` before it starts.

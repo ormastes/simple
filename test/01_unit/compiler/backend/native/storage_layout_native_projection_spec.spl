@@ -13,8 +13,11 @@ use compiler.mir_opt.mir_opt.storage_projection_lowering.{
 }
 use compiler.mir.mir_data.*
 use compiler.backend.native.isel_x86_64.{isel_module}
+use compiler.backend.backend.backend_helpers.{
+    compile_module_with_backend_target_cpu_storage_bindings
+}
 use compiler.backend.native.mach_inst.{
-    X86_OP_ADD, X86_OP_ADD_IMM, X86_OP_IMUL, X86_OP_NOP
+    X86_OP_ADD, X86_OP_ADD_IMM, X86_OP_IMUL, X86_OP_MOV_REG_IMM, X86_OP_NOP
 }
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_types.{SymbolId}
@@ -106,10 +109,45 @@ fn assert_rewritten_recipe(layout: StorageLayoutKind, expected_scale: i64,
                 case _: assert_true(false)
         case _: assert_true(false)
 
+fn atomic_failure_module() -> MirModule:
+    var module = logical_projection_module(MirOperand.const_int(2))
+    val function = module.functions[SymbolId.new(41)]
+    val first = function.blocks[0].instructions[0]
+    val second = MirInst(kind: MirInstKind.Intrinsic(
+        Some(LocalId(id: 2)), MIR_STORAGE_PROJECT_FIELD_V1, [
+            MirOperand.copy(LocalId(id: 1)), MirOperand.copy(LocalId(id: 1)),
+            MirOperand.const_int(2)
+        ]), span: nil)
+    module.functions[SymbolId.new(41)] = MirFunction(..function, blocks: [
+        MirBlock(id: BlockId.new(0), label: Some("entry"),
+            instructions: [first, second], terminator: function.blocks[0].terminator)
+    ])
+    module
+
+fn assert_logical_projection_name(instruction: MirInst):
+    match instruction.kind:
+        case Intrinsic(_, name, _): assert_equal(name, MIR_STORAGE_PROJECT_FIELD_V1)
+        case _: assert_true(false)
+
 describe "typed host AoS and SoA native projection":
     it "automatically rewrites logical field projections with exact site bindings":
         assert_rewritten_recipe(StorageLayoutKind.AoS, 16, 8)
         assert_rewritten_recipe(StorageLayoutKind.SoA, 8, 320)
+
+    it "routes logical projections through the post-optimization native boundary":
+        val module = logical_projection_module(MirOperand.const_int(2))
+        val site = mir_storage_view_site_binding_v1(41, 0, true,
+            projection_binding(StorageLayoutKind.SoA, false))
+        match compile_module_with_backend_target_cpu_storage_bindings(
+            "native", module, false, 0, "", [site]):
+            case Ok(compiled): assert_true(compiled.object_code != nil)
+            case Err(_): assert_true(false)
+        match compile_module_with_backend_target_cpu_storage_bindings(
+            "cranelift", module, false, 0, "", [site]):
+            case Ok(_): assert_true(false)
+            case Err(error):
+                assert_true(error.message.contains(
+                    "typed storage projections require the custom native backend"))
 
     it "fails closed on missing duplicate dynamic and observed bindings":
         val logical = logical_projection_module(MirOperand.const_int(2))
@@ -131,6 +169,16 @@ describe "typed host AoS and SoA native projection":
         assert_equal(lower_mir_storage_project_fields_v1(logical, [unproven]).reason,
             "storage-view-index-bounds-unproven")
 
+    it "leaves the entire input MIR logical when a later site fails":
+        val module = atomic_failure_module()
+        val site = mir_storage_view_site_binding_v1(41, 0, true,
+            projection_binding(StorageLayoutKind.SoA, false))
+        val result = lower_mir_storage_project_fields_v1(module, [site])
+        assert_false(result.ok)
+        assert_equal(result.reason, "missing-storage-view-site-binding")
+        assert_logical_projection_name(module.functions[SymbolId.new(41)].blocks[0].instructions[0])
+        assert_logical_projection_name(module.functions[SymbolId.new(41)].blocks[0].instructions[1])
+
     it "rejects a binding whose allocation cannot contain the projection":
         val too_small = mir_storage_view_binding_v1(7001, 9, 64, 64, 16, false,
             projection_plan(StorageLayoutKind.SoA), [
@@ -138,6 +186,13 @@ describe "typed host AoS and SoA native projection":
             ])
         assert_equal(mir_storage_address_recipe_v1(too_small, 0).reason,
             "storage-view-allocation-too-small")
+
+    it "rejects non-pointer-width fields until typed memory operations land":
+        val logical = logical_projection_module(MirOperand.const_int(1))
+        val site = mir_storage_view_site_binding_v1(41, 0, true,
+            projection_binding(StorageLayoutKind.SoA, false))
+        assert_equal(lower_mir_storage_project_fields_v1(logical, [site]).reason,
+            "native-storage-field-width-unsupported")
 
     it "matches canonical projection for unequal fields and runtime indices":
         for layout in [StorageLayoutKind.AoS, StorageLayoutKind.SoA]:
@@ -170,6 +225,19 @@ describe "typed host AoS and SoA native projection":
                 if instruction.opcode == X86_OP_ADD_IMM: saw_base_offset = true
                 assert_false(instruction.opcode == X86_OP_NOP)
         assert_true(saw_mul and saw_add and saw_base_offset)
+
+    it "materializes base offsets that exceed signed ADD immediate width":
+        val selected = isel_module(projection_intrinsic_module(8, 2147483648))
+        var saw_offset_register = false
+        var saw_immediate_add = false
+        for block in selected.functions[0].blocks:
+            for instruction in block.insts:
+                if instruction.opcode == X86_OP_MOV_REG_IMM:
+                    saw_offset_register = true
+                if instruction.opcode == X86_OP_ADD_IMM:
+                    saw_immediate_add = true
+        assert_true(saw_offset_register)
+        assert_false(saw_immediate_add)
 
     it "rejects observed ABI and unsupported physical layouts":
         val observed = mir_storage_address_recipe_v1(

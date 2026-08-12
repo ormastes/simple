@@ -79,6 +79,15 @@ fail closed. The site must also carry a proven index bound and a byte-capacity
 that contains the maximum projected address. Driver-owned registration and a public `StorageView<T>` allocation
 owner are still planned; ordinary arrays must not be inferred into this path.
 
+The compiler driver owns these bindings per module for one compile session.
+They freeze before parallel code generation, are removed with MIR eviction,
+and their complete sorted semantics participate in native cache identity. The
+rewrite happens atomically after generic MIR optimization and immediately
+before backend dispatch, leaving canonical MIR unchanged on success or failure.
+Current production admission is deliberately limited to custom-native x86_64
+and 8-byte fields; other backends and widths fail rather than emitting a NOP or
+using the wrong scalar load/store width.
+
 The MIR optimizer now also checks whether an AoSoA block is compatible with a
 selected fixed-width SIMD route. Matching AVX/NEON-style widths are admitted;
 AoS and SoA retain the scalar/reference fallback; ABI-pinned or mismatched

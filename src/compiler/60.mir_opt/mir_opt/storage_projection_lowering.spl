@@ -155,25 +155,26 @@ fn mir_storage_projection_operand_local(operand: MirOperand) -> i64:
         case Copy(local) | Move(local): local.id
         case _: -1
 
-fn mir_storage_projection_const_i64(operand: MirOperand) -> i64?:
+fn mir_storage_projection_const_i64(operand: MirOperand) -> (bool, i64):
     match operand.kind:
-        case Const(MirConstValue.Int(value), _): Some(value)
-        case _: nil
+        case Const(MirConstValue.Int(value), _): (true, value)
+        case _: (false, 0)
 
-fn mir_storage_projection_site_binding(
+fn mir_storage_projection_site_index(
     bindings: [MirStorageViewSiteBindingV1], function_symbol_id: i64,
     base_local_id: i64
-) -> (MirStorageViewBindingV1?, bool):
-    var found: MirStorageViewBindingV1? = nil
-    var duplicate = false
-    for site in bindings:
+) -> (i64, i64):
+    var found_index = -1
+    var match_count = 0
+    var index = 0
+    while index < bindings.len():
+        val site = bindings[index]
         if site.function_symbol_id == function_symbol_id
             and site.base_local_id == base_local_id:
-            if found != nil:
-                duplicate = true
-            else:
-                found = Some(site.binding)
-    (found, duplicate)
+            found_index = index
+            match_count = match_count + 1
+        index = index + 1
+    (found_index, match_count)
 
 fn mir_storage_projection_failure(module: MirModule, rewritten_count: i64,
                                   reason: text) -> MirStorageProjectionLoweringResultV1:
@@ -183,8 +184,8 @@ fn mir_storage_projection_failure(module: MirModule, rewritten_count: i64,
 fn lower_mir_storage_project_fields_v1(
     module: MirModule, bindings: [MirStorageViewSiteBindingV1]
 ) -> MirStorageProjectionLoweringResultV1:
-    var result = module
     var rewritten_count = 0
+    var rewritten_functions: Dict<SymbolId, MirFunction> = {}
     for symbol in module.functions.keys():
         val function = module.functions[symbol]
         var blocks: [MirBlock] = []
@@ -195,19 +196,19 @@ fn lower_mir_storage_project_fields_v1(
                 match instruction.kind:
                     case Intrinsic(dest, name, args):
                         if name == MIR_STORAGE_PROJECT_FIELD_V1:
-                            if dest == nil or args.len() != 3:
+                            if not dest.? or args.len() != 3:
                                 return mir_storage_projection_failure(module, rewritten_count,
                                     "invalid-logical-projection-signature")
                             val base_local_id = mir_storage_projection_operand_local(args[0])
                             if base_local_id < 0:
                                 return mir_storage_projection_failure(module, rewritten_count,
                                     "logical-projection-base-must-be-local")
-                            val selected = mir_storage_projection_site_binding(
+                            val selected = mir_storage_projection_site_index(
                                 bindings, symbol.id, base_local_id)
-                            if selected[1]:
+                            if selected[1] > 1:
                                 return mir_storage_projection_failure(module, rewritten_count,
                                     "duplicate-storage-view-site-binding")
-                            if selected[0] == nil:
+                            if selected[0] < 0:
                                 return mir_storage_projection_failure(module, rewritten_count,
                                     "missing-storage-view-site-binding")
                             var index_bounds_proven = false
@@ -219,14 +220,20 @@ fn lower_mir_storage_project_fields_v1(
                                 return mir_storage_projection_failure(module, rewritten_count,
                                     "storage-view-index-bounds-unproven")
                             val field_id = mir_storage_projection_const_i64(args[2])
-                            if field_id == nil:
+                            if not field_id[0]:
                                 return mir_storage_projection_failure(module, rewritten_count,
                                     "logical-projection-field-must-be-constant")
                             val recipe = mir_storage_address_recipe_v1(
-                                selected[0].unwrap(), field_id.unwrap())
+                                bindings[selected[0]].binding, field_id[1])
                             if not recipe.ok:
                                 return mir_storage_projection_failure(module, rewritten_count,
                                     "storage-view-recipe:{recipe.reason}")
+                            # The current custom-native scalar Load/Store owner
+                            # emits pointer-sized memory operations. Admit only
+                            # matching fields until typed-width memory ops land.
+                            if recipe.field_size != 8:
+                                return mir_storage_projection_failure(module, rewritten_count,
+                                    "native-storage-field-width-unsupported")
                             rewritten = MirInst(kind: MirInstKind.Intrinsic(dest,
                                 MIR_STORAGE_PROJECT_ADDRESS_V1, [
                                     args[0], args[1], MirOperand.const_int(recipe.scale),
@@ -237,6 +244,8 @@ fn lower_mir_storage_project_fields_v1(
                 instructions.push(rewritten)
             blocks.push(MirBlock(id: block.id, label: block.label,
                 instructions: instructions, terminator: block.terminator))
-        result.functions[symbol] = MirFunction(..function, blocks: blocks)
+        rewritten_functions[symbol] = MirFunction(..function, blocks: blocks)
+    val result = MirModule(name: module.name, functions: rewritten_functions,
+        statics: module.statics, constants: module.constants, types: module.types)
     MirStorageProjectionLoweringResultV1(ok: true, module: result,
         rewritten_count: rewritten_count, reason: "ok")

@@ -26,6 +26,10 @@ use compiler.common.compiler_services.{CompilerServices, create_default_services
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
 use compiler.common.assurance.policy.{policy_from_env_value}
 use compiler.common.assurance.policy_schema.{ResolvedAssurancePolicyV1}
+use compiler.mir_opt.mir_opt.storage_projection_lowering.{MirStorageViewSiteBindingV1}
+use std.common.structural.storage_layout.storage_layout_contracts.{
+    storage_layout_kind_to_u8, storage_conversion_policy_to_u8
+}
 
 extern fn rt_string_free(value: text) -> i64
 extern fn rt_env_get(key: text) -> text
@@ -99,6 +103,10 @@ class CompileContext:
     # to dereference the array when no module was poisoned.
     poisoned_module_count_value: i64
     vhdl_hardware_metadata_rows: [VhdlHardwareMetadataFlatRow]
+    # Module-qualified aligned rows. Arrays are reassigned together because
+    # nested Dict<text,[struct]> mutation is not reliable on Stage4.
+    storage_binding_module_names: [text]
+    storage_view_site_bindings: [MirStorageViewSiteBindingV1]
 
     static fn create(options: CompileOptions) -> CompileContext:
         # Load config
@@ -196,8 +204,83 @@ class CompileContext:
             visibility_warnings: [],
             poisoned_modules: [],
             poisoned_module_count_value: 0,
-            vhdl_hardware_metadata_rows: []
+            vhdl_hardware_metadata_rows: [],
+            storage_binding_module_names: [],
+            storage_view_site_bindings: []
         )
+
+    fn storage_binding_rows_well_formed() -> bool:
+        self.storage_binding_module_names.len() == self.storage_view_site_bindings.len()
+
+    me register_storage_view_site_binding(
+        module_name: text, site: MirStorageViewSiteBindingV1
+    ) -> text:
+        if module_name == "" or not self.storage_binding_rows_well_formed():
+            return "invalid-storage-binding-registry"
+        var index = 0
+        while index < self.storage_binding_module_names.len():
+            val existing = self.storage_view_site_bindings[index]
+            if self.storage_binding_module_names[index] == module_name
+                and existing.function_symbol_id == site.function_symbol_id
+                and existing.base_local_id == site.base_local_id:
+                return "duplicate-storage-view-site-binding"
+            index = index + 1
+        var names = self.storage_binding_module_names
+        var bindings = self.storage_view_site_bindings
+        names.push(module_name)
+        bindings.push(site)
+        self.storage_binding_module_names = names
+        self.storage_view_site_bindings = bindings
+        "ok"
+
+    fn storage_view_site_bindings_for_module(module_name: text) -> [MirStorageViewSiteBindingV1]:
+        var result: [MirStorageViewSiteBindingV1] = []
+        if not self.storage_binding_rows_well_formed():
+            return result
+        var index = 0
+        while index < self.storage_binding_module_names.len():
+            if self.storage_binding_module_names[index] == module_name:
+                result.push(self.storage_view_site_bindings[index])
+            index = index + 1
+        result
+
+    fn storage_binding_identity() -> text:
+        if not self.storage_binding_rows_well_formed():
+            return "invalid"
+        var rows: [text] = []
+        var index = 0
+        while index < self.storage_binding_module_names.len():
+            val site = self.storage_view_site_bindings[index]
+            val view = site.binding
+            val plan = view.plan
+            var field_rows: [text] = []
+            for field in view.fields:
+                field_rows.push("{field.field_id},{field.logical_offset},{field.field_size},{field.column_offset}")
+            var field_i = 0
+            while field_i < field_rows.len():
+                var field_j = field_i + 1
+                while field_j < field_rows.len():
+                    if field_rows[field_j] < field_rows[field_i]:
+                        val field_tmp = field_rows[field_i]
+                        field_rows[field_i] = field_rows[field_j]
+                        field_rows[field_j] = field_tmp
+                    field_j = field_j + 1
+                field_i = field_i + 1
+            val fields = field_rows.join(":")
+            rows.push("{self.storage_binding_module_names[index]}|{site.function_symbol_id}|{site.base_local_id}|{site.index_bounds_proven}|{view.logical_type_id}|{view.revision}|{view.element_count}|{view.allocation_byte_len}|{view.logical_stride}|{view.address_observed}|{plan.contract_version}|{storage_layout_kind_to_u8(plan.layout)}|{plan.block_width}|{plan.alignment}|{plan.abi_pinned}|{storage_conversion_policy_to_u8(plan.conversion)}|{plan.policy_hash}|{plan.decision_reason}|{fields}")
+            index = index + 1
+        # Registration order is not semantic. Keep the cache identity stable.
+        var i = 0
+        while i < rows.len():
+            var j = i + 1
+            while j < rows.len():
+                if rows[j] < rows[i]:
+                    val tmp = rows[i]
+                    rows[i] = rows[j]
+                    rows[j] = tmp
+                j = j + 1
+            i = i + 1
+        rows.join(";")
 
     me add_error(message: text):
         self.errors.push(message)
@@ -340,6 +423,17 @@ class CompileContext:
     # clears its `bootstrap_entry_hir` twin.
     me evict_mir_module(name: text):
         self.mir_modules.remove(name)
+        var kept_names: [text] = []
+        var kept_bindings: [MirStorageViewSiteBindingV1] = []
+        if self.storage_binding_rows_well_formed():
+            var index = 0
+            while index < self.storage_binding_module_names.len():
+                if self.storage_binding_module_names[index] != name:
+                    kept_names.push(self.storage_binding_module_names[index])
+                    kept_bindings.push(self.storage_view_site_bindings[index])
+                index = index + 1
+        self.storage_binding_module_names = kept_names
+        self.storage_view_site_bindings = kept_bindings
         if self.bootstrap_entry_mir_name != "" and self.bootstrap_entry_mir_name == name:
             self.bootstrap_entry_mir = nil
             self.bootstrap_entry_mir_name = ""

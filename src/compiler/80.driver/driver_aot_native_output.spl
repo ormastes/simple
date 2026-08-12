@@ -5,7 +5,8 @@
 # - link_objects: Legacy linker helper
 #
 # Backend helpers for module compilation and backend resolution
-use compiler.backend.backend.backend_helpers.{compile_module_with_backend, compile_module_with_backend_target_cpu, get_effective_backend_name}
+use compiler.backend.backend.backend_helpers.{compile_module_with_backend,
+    compile_module_with_backend_target_cpu_storage_bindings, get_effective_backend_name}
 use compiler.backend.llvm_backend_tools.{llvm_bootstrap_last_object_path}
 use compiler.backend.backend.llvm_capability.{find_archive_portable}
 use std.platform.{get_host_os}
@@ -24,10 +25,12 @@ use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_bootstrap.{bootstrap_entry_module_name}
 use compiler.common.config.{Logger}
 use compiler.mir.mir_data.{MirModule}
+use compiler.mir_opt.mir_opt.storage_projection_lowering.{MirStorageViewSiteBindingV1}
 use compiler.frontend.parser_types.{ParserModule}
 use compiler.driver.driver_build.incremental.{BuildCache, FileFingerprint, native_build_cache_scope_key, native_build_compiler_identity}
 use compiler.driver.driver_build.parallel.{ParallelBuilder, ParallelBuildConfig, BuildResult}
 use compiler.driver.driver_log_helpers.{log_build_progress}
+use std.common.crypto.sha256.{sha256_text}
 
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
@@ -73,9 +76,13 @@ fn driver_native_build_cache_path(cache_dir: text) -> text:
 
 extern fn rt_simd_has_avx2() -> bool
 
-fn driver_native_build_cache_scope(backend: text, cache_dir: text, target: text, target_cpu: text, opt_level: i64, symbol_mode: text) -> (text, text):
+fn driver_native_build_cache_scope(backend: text, cache_dir: text, target: text,
+                                   target_cpu: text, opt_level: i64,
+                                   symbol_mode: text, storage_identity: text) -> (text, text):
     val raw_target = if target == "": nil else: Some(target)
-    val compiler_id = native_build_compiler_identity() + if symbol_mode == "": "" else: "-" + symbol_mode
+    val compiler_id = native_build_compiler_identity()
+        + if symbol_mode == "": "" else: "-" + symbol_mode
+        + "-storage-" + sha256_text(storage_identity)
     val host_avx2 = target == "" and rt_simd_has_avx2()
     val capability_key = "native-avx2-policy-v1:cpu={target_cpu};host={host_avx2}"
     val scope = native_build_cache_scope_key(
@@ -375,7 +382,7 @@ impl CompilerDriver:
         val symbol_mode = if no_mangle_requested: "no-mangle" else: ""
         val (base_cache_scope_root, _) = driver_native_build_cache_scope(
             effective_backend, cache_dir, native_target, native_cpu,
-            driver_opt_level, symbol_mode)
+            driver_opt_level, symbol_mode, ctx.storage_binding_identity())
         if ctx.native_sources_fingerprint == "":
             return CompileResult.CodegenError(
                 "native build source fingerprint missing before cache setup")
@@ -712,13 +719,19 @@ fn _compile_one_module(ctx: any, backend_name: text, is_release: bool, opt_level
             if trace:
                 print "[NATIVE] select module:bootstrap field"
             val direct_mir = ctx.bootstrap_entry_mir.unwrap()
-            return _compile_selected_module(backend_name, is_release, opt_level, output_base, name, direct_mir)
+            return _compile_selected_module(backend_name, is_release, opt_level,
+                output_base, name, direct_mir,
+                ctx.storage_view_site_bindings_for_module(name))
     if trace:
         print "[NATIVE] select module:dict"
     val mir_module = ctx.mir_modules[name]
-    return _compile_selected_module(backend_name, is_release, opt_level, output_base, name, mir_module)
+    return _compile_selected_module(backend_name, is_release, opt_level,
+        output_base, name, mir_module,
+        ctx.storage_view_site_bindings_for_module(name))
 
-fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64, output_base: text, name: text, mir_module: MirModule) -> Result<text, text>:
+fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64,
+                            output_base: text, name: text, mir_module: MirModule,
+                            storage_bindings: [MirStorageViewSiteBindingV1]) -> Result<text, text>:
     if (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1":
         print "[NATIVE] select module:done"
     if mir_module.functions.keys().len() == 0:
@@ -736,8 +749,9 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
         return Ok(obj_path)
 
     val target_cpu = rt_env_get("SIMPLE_NATIVE_CPU") ?? ""
-    val compiled = compile_module_with_backend_target_cpu(
-        backend_name, mir_module, is_release, opt_level, target_cpu)
+    val compiled = compile_module_with_backend_target_cpu_storage_bindings(
+        backend_name, mir_module, is_release, opt_level, target_cpu,
+        storage_bindings)
 
     match compiled:
         case Err(err):

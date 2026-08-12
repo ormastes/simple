@@ -1,0 +1,62 @@
+use std.spec.{describe, it, assert_equal, assert_true, assert_false}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.mir_opt.mir_opt.storage_projection_lowering.{
+    mir_storage_field_binding_v1, mir_storage_view_binding_v1,
+    mir_storage_view_site_binding_v1
+}
+use std.common.structural.storage_layout.storage_layout_contracts.{
+    StorageConversionPolicy, StorageLayoutKind, storage_layout_plan_v1
+}
+
+fn registry_site(layout: StorageLayoutKind, revision: i64, column: i64):
+    val plan = storage_layout_plan_v1(8101, layout, 1, 8, false,
+        StorageConversionPolicy.Cached, "registry-policy-v1", "driver-registry")
+    mir_storage_view_site_binding_v1(41, 0, true,
+        mir_storage_view_binding_v1(8101, revision, 8, 256, 16, false,
+            plan, [mir_storage_field_binding_v1(1, 4, 4, column)]))
+
+describe "driver-owned storage projection registry":
+    it "keeps repeated MIR local identities isolated by module":
+        val ctx = CompileContext.create(driver_core_compile_options_default())
+        assert_true(ctx.storage_binding_rows_well_formed())
+        assert_equal(ctx.storage_view_site_bindings_for_module("particles").len(), 0)
+        assert_equal(ctx.register_storage_view_site_binding("particles",
+            registry_site(StorageLayoutKind.SoA, 7, 64)), "ok")
+        assert_equal(ctx.register_storage_view_site_binding("other",
+            registry_site(StorageLayoutKind.AoS, 9, 0)), "ok")
+        val particles = ctx.storage_view_site_bindings_for_module("particles")
+        val other = ctx.storage_view_site_bindings_for_module("other")
+        assert_equal(particles.len(), 1)
+        assert_equal(other.len(), 1)
+        assert_equal(particles[0].binding.revision, 7)
+        assert_true(particles[0].binding.plan.layout == StorageLayoutKind.SoA)
+        assert_true(other[0].binding.plan.layout == StorageLayoutKind.AoS)
+
+    it "rejects duplicate sites without partially mutating aligned rows":
+        val ctx = CompileContext.create(driver_core_compile_options_default())
+        val site = registry_site(StorageLayoutKind.SoA, 7, 64)
+        assert_equal(ctx.register_storage_view_site_binding("particles", site), "ok")
+        assert_equal(ctx.register_storage_view_site_binding("particles", site),
+            "duplicate-storage-view-site-binding")
+        assert_equal(ctx.storage_binding_module_names.len(), 1)
+        assert_equal(ctx.storage_view_site_bindings.len(), 1)
+        assert_true(ctx.storage_binding_rows_well_formed())
+
+    it "builds registration-order-independent cache identity and evicts by module":
+        val first = CompileContext.create(driver_core_compile_options_default())
+        val second = CompileContext.create(driver_core_compile_options_default())
+        val particles = registry_site(StorageLayoutKind.SoA, 7, 64)
+        val other = registry_site(StorageLayoutKind.AoS, 9, 0)
+        _ = first.register_storage_view_site_binding("particles", particles)
+        _ = first.register_storage_view_site_binding("other", other)
+        _ = second.register_storage_view_site_binding("other", other)
+        _ = second.register_storage_view_site_binding("particles", particles)
+        assert_equal(first.storage_binding_identity(), second.storage_binding_identity())
+        val changed = CompileContext.create(driver_core_compile_options_default())
+        _ = changed.register_storage_view_site_binding("particles",
+            registry_site(StorageLayoutKind.SoA, 8, 96))
+        assert_false(first.storage_binding_identity() == changed.storage_binding_identity())
+        first.evict_mir_module("particles")
+        assert_equal(first.storage_view_site_bindings_for_module("particles").len(), 0)
+        assert_equal(first.storage_view_site_bindings_for_module("other").len(), 1)
