@@ -21,7 +21,8 @@ Do not redefine them in runtime, MDSOC, backend, or application lanes.
 | WP-04 policy resolver | partial implementation | raise-only common resolver exists; SDN/driver integration remains |
 | WP-05 requirements/diagnostics | partial implementation | selected requirements/state exist; stable compiler diagnostic registry remains |
 | WP-10 borrow soundness | in progress | dynamic indices are conservative; CFG successors and one global MIR/NLL point layout now cover non-entry blocks; path-sensitive move joins, loop fixed points, and proven range disjointness remain |
-| WP-11..12 compiler boundaries/MIR | planned | no HIR boundary classifier or MIR transfer operations yet |
+| WP-11 HIR boundary checker | partial implementation | compiler-owned copy/frozen/move/runtime-classified/reject decisions, parent-origin diagnostics, and assurance-derived policy wiring exist for literal `spawn` HIR; parser-seed `spawn(...)` lowering and complete capture/boundary coverage remain |
+| WP-12 MIR transfer operations | planned | no explicit MIR TransferOut/In, Freeze, Snapshot, or Commit operations yet |
 | WP-13 native transfer codec | partial implementation | strict 40-byte envelope and 48-byte inline packet; graph/encoded/owned payload codecs remain |
 | WP-14 bounded mailbox | partial implementation | native compatibility channel and actor/common inbox/outbox queues have finite capacity 256; channel/common handle report full, but the legacy void native actor ABI cannot surface it; policy-selected capacities and checked public actor send remain |
 | WP-15 commit engine | partial implementation | common functional owner transition validates the whole batch before one revision/snapshot-token root assignment and emits canonical-order receipts; concurrent CAS/lock publication, payload apply/verify, and admitted Stage 4 evidence remain |

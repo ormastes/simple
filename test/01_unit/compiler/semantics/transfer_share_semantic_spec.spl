@@ -1,5 +1,5 @@
 #!/usr/bin/env simple
-# E1049 transfer-share (lane G8).
+# WP-11 compiler-owned execution-boundary transfer classification.
 #
 # Phase-1 scoping in
 # doc/01_research/language/simple_vs_rust_safety_property_audit_2026-07-28.md
@@ -11,10 +11,11 @@
 # the full block comment above `safetychecker_check_transfer_module` in
 # `35.semantics/safety_checker.spl` for the complete evidence trail.
 #
-# The decision-free slice implemented: a bare parameter reference of a
-# module-local `class` type (share/reference semantics) passed DIRECTLY as
-# an argument to a call to a function literally named `spawn`, when that
-# parameter's DECLARED type is not wrapped in `iso`. `spawn` is identified
+# The reachable integration slice is a bare parameter reference passed
+# DIRECTLY as an argument to a call to a function literally named `spawn`.
+# Its declared HIR type is classified as copy, frozen share, isolated move,
+# runtime-classified, or rejected, with profile-sensitive ownership policy.
+# `spawn` is identified
 # by callee-name string match, the same precedent already used
 # independently by `30.types/type_system/checker.spl`,
 # `builtin_registry.spl`, and `50.mir/mir_effects.spl`.
@@ -72,6 +73,12 @@ use compiler.common.dependency.visibility.{Visibility}
 use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind}
 use compiler.common.attributes.{FunctionAttr, ExportAttr}
 use compiler.semantics.safety_checker.{SafetyChecker, SafetyError, safetychecker_check_module, safetychecker_check_transfer_module}
+use compiler.semantics.boundary_transfer.{
+    HirExecutionBoundary, HirRegionOrigin,
+    classify_hir_boundary_transfer
+}
+use compiler.common.parallel_policy.policy_schema.{ResolvedParallelPolicyV1}
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
 
 fn mk_span(line: i64) -> Span:
     Span(start: 0, end: 0, line: line, col: 1, file: "synthetic", length: 0)
@@ -235,18 +242,18 @@ fn make_module(fns: [HirFunction], classes: [HirClass], structs: [HirStruct]) ->
         types: []
     )
 
-fn count_e1049(errors: [SafetyError]) -> i64:
+fn count_parallel_transfer(errors: [SafetyError]) -> i64:
     var n = 0
     for e in errors:
         match e:
             case Other(message, _):
-                if message.starts_with("E1049"):
+                if message.contains("PAR-"):
                     n = n + 1
             case _:
                 pass
     n
 
-describe "E1049 transfer-share":
+describe "parallel boundary transfer classification":
     it "fires when a non-iso class-typed param is passed bare to spawn()":
         val worker_sym = SymbolId(id: 1)
         val spawn_sym = SymbolId(id: 2)
@@ -260,9 +267,9 @@ describe "E1049 transfer-share":
         val checker = SafetyChecker.create()
         val _ = safetychecker_check_module(checker, hir)
         val errors = safetychecker_check_transfer_module(checker, hir)
-        expect(count_e1049(errors)).to_equal(1)
+        expect(count_parallel_transfer(errors)).to_equal(1)
 
-    it "is silent when the class-typed param is declared iso":
+    it "warns that an implicit existing iso transfer consumes the parent":
         val worker_sym = SymbolId(id: 1)
         val spawn_sym = SymbolId(id: 2)
         val w_sym = SymbolId(id: 3)
@@ -275,7 +282,7 @@ describe "E1049 transfer-share":
         val checker = SafetyChecker.create()
         val _ = safetychecker_check_module(checker, hir)
         val errors = safetychecker_check_transfer_module(checker, hir)
-        expect(count_e1049(errors)).to_equal(0)
+        expect(count_parallel_transfer(errors)).to_equal(1)
 
     it "is silent for a freshly-constructed spawn argument (not a bare identifier)":
         val worker_sym = SymbolId(id: 1)
@@ -292,9 +299,9 @@ describe "E1049 transfer-share":
         val checker = SafetyChecker.create()
         val _ = safetychecker_check_module(checker, hir)
         val errors = safetychecker_check_transfer_module(checker, hir)
-        expect(count_e1049(errors)).to_equal(0)
+        expect(count_parallel_transfer(errors)).to_equal(0)
 
-    it "is silent for a struct-typed (value-type) param passed to spawn()":
+    it "requires runtime classification for an aggregate param":
         val task_sym = SymbolId(id: 1)
         val spawn_sym = SymbolId(id: 2)
         val t_sym = SymbolId(id: 3)
@@ -307,7 +314,7 @@ describe "E1049 transfer-share":
         val checker = SafetyChecker.create()
         val _ = safetychecker_check_module(checker, hir)
         val errors = safetychecker_check_transfer_module(checker, hir)
-        expect(count_e1049(errors)).to_equal(0)
+        expect(count_parallel_transfer(errors)).to_equal(1)
 
     it "is silent for an ordinary call whose callee is not named spawn":
         val worker_sym = SymbolId(id: 1)
@@ -322,4 +329,30 @@ describe "E1049 transfer-share":
         val checker = SafetyChecker.create()
         val _ = safetychecker_check_module(checker, hir)
         val errors = safetychecker_check_transfer_module(checker, hir)
-        expect(count_e1049(errors)).to_equal(0)
+        expect(count_parallel_transfer(errors)).to_equal(0)
+
+    it "rejects raw pointers at process boundaries":
+        val pointer = HirType(kind: HirTypeKind.Ptr(i64_type(), true),
+            span: mk_span(1))
+        val decision = classify_hir_boundary_transfer(pointer, false,
+            HirExecutionBoundary.Process, HirRegionOrigin.ParentExisting,
+            false, ResolvedParallelPolicyV1.balanced())
+        expect(decision.allowed).to_equal(false)
+        expect(decision.code).to_equal("E-PAR-PROC-003")
+
+    it "denies existing parent iso state under critical policy":
+        val isolated = iso_named_type(SymbolId(id: 99))
+        val critical = ResolvedParallelPolicyV1.for_assurance(
+            AssuranceStrictness.Critical)
+        val decision = classify_hir_boundary_transfer(isolated, true,
+            HirExecutionBoundary.Thread, HirRegionOrigin.ParentExisting,
+            true, critical)
+        expect(decision.allowed).to_equal(false)
+        expect(decision.code).to_equal("E-PAR-OWN-001")
+
+    it "copies scalar values without diagnostics":
+        val decision = classify_hir_boundary_transfer(i64_type(), false,
+            HirExecutionBoundary.Thread, HirRegionOrigin.ParentExisting,
+            false, ResolvedParallelPolicyV1.balanced())
+        expect(decision.allowed).to_equal(true)
+        expect(decision.code).to_equal("")

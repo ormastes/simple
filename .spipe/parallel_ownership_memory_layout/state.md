@@ -212,3 +212,14 @@ dev-done
   detects shared/mutable conflict in the successor. Path-sensitive moved-state
   joins, loop fixed points, borrow liveness termination, and range proofs remain
   open; backend `noalias` still must not rely on this checker as fully authoritative.
+- impl: Advanced WP-11 with a compiler-owned HIR boundary classifier for
+  inline copies, frozen shares, isolated moves, runtime-classified aggregates,
+  and rejected borrows/raw pointers/mutable class graphs. Existing parent-owned
+  `iso` input produces `W-PAR-OWN-001` under the balanced policy and
+  `E-PAR-OWN-001` under critical assurance; process/remote pointers produce
+  `E-PAR-PROC-003`. The driver derives the parallel policy from its resolved
+  assurance strictness. Eight focused HIR examples pass once. This is partial:
+  the active seed still lowers source `spawn(...)` incorrectly, method/task/
+  actor/process capture surfaces are incomplete, explicit source `move` is not
+  yet preserved at this HIR call site, and MIR TransferOut/In operations remain
+  WP-12 work.

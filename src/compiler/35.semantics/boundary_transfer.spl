@@ -1,0 +1,138 @@
+# Compiler-owned transfer classification for execution-domain boundaries.
+# This is conservative: unknown reachability never becomes implicit sharing.
+
+use compiler.hir.hir_types.{HirType, HirTypeKind}
+use compiler.common.parallel_policy.policy_schema.{
+    ExistingParentMovePolicy,
+    ResolvedParallelPolicyV1,
+    existing_parent_move_policy_to_u8
+}
+
+enum HirExecutionBoundary:
+    Thread
+    Process
+    Actor
+    Device
+    Remote
+
+enum HirTransferClass:
+    InlineCopy
+    FrozenShare
+    IsolatedMove
+    RuntimeClassified
+    NotTransferable
+
+enum HirRegionOrigin:
+    ParentExisting
+    ChildFresh
+    SharedImmutable
+
+fn hir_execution_boundary_to_u8(value: HirExecutionBoundary) -> i64:
+    match value:
+        case HirExecutionBoundary.Thread: 0
+        case HirExecutionBoundary.Process: 1
+        case HirExecutionBoundary.Actor: 2
+        case HirExecutionBoundary.Device: 3
+        case HirExecutionBoundary.Remote: 4
+
+fn hir_region_origin_to_u8(value: HirRegionOrigin) -> i64:
+    match value:
+        case HirRegionOrigin.ParentExisting: 0
+        case HirRegionOrigin.ChildFresh: 1
+        case HirRegionOrigin.SharedImmutable: 2
+
+struct HirBoundaryTransferDecision:
+    class_: HirTransferClass
+    allowed: bool
+    consumes_source: bool
+    requires_runtime_classification: bool
+    code: text
+    message: text
+
+fn hir_boundary_is_process_like(boundary: HirExecutionBoundary) -> bool:
+    match boundary:
+        case HirExecutionBoundary.Process: true
+        case HirExecutionBoundary.Remote: true
+        case _: false
+
+fn hir_transfer_decision(class_: HirTransferClass, allowed: bool,
+                         consumes_source: bool, runtime_classify: bool,
+                         code: text, message: text) -> HirBoundaryTransferDecision:
+    HirBoundaryTransferDecision(class_: class_, allowed: allowed,
+        consumes_source: consumes_source,
+        requires_runtime_classification: runtime_classify,
+        code: code, message: message)
+
+fn hir_type_is_inline_copy(type_: HirType) -> bool:
+    match type_.kind:
+        case Int(_, _): true
+        case Float(_): true
+        case Bool: true
+        case Char: true
+        case Unit: true
+        case Never: true
+        case Tuple(elements):
+            for element in elements:
+                if not hir_type_is_inline_copy(element):
+                    return false
+            true
+        case _: false
+
+fn classify_hir_boundary_transfer(type_: HirType, is_class_type: bool,
+                                  boundary: HirExecutionBoundary,
+                                  origin: HirRegionOrigin,
+                                  explicit_move: bool,
+                                  policy: ResolvedParallelPolicyV1) -> HirBoundaryTransferDecision:
+    if hir_type_is_inline_copy(type_):
+        return hir_transfer_decision(HirTransferClass.InlineCopy, true,
+            false, false, "", "")
+    match type_.kind:
+        case Ptr(_, _):
+            val code = if hir_boundary_is_process_like(boundary):
+                "E-PAR-PROC-003"
+            else:
+                "E-PAR-SEND-002"
+            return hir_transfer_decision(HirTransferClass.NotTransferable,
+                false, false, false, code,
+                "raw pointer authority cannot cross an execution-domain boundary")
+        case Ref(_, _):
+            return hir_transfer_decision(HirTransferClass.NotTransferable,
+                false, false, false, "E-PAR-SEND-002",
+                "a language borrow cannot escape through an unstructured execution boundary")
+        case Any:
+            if policy.deny_dynamic_transport:
+                return hir_transfer_decision(HirTransferClass.NotTransferable,
+                    false, false, false, "E-PAR-SEND-002",
+                    "dynamic Any transport is denied because its reachable graph is unclassified")
+            return hir_transfer_decision(HirTransferClass.RuntimeClassified,
+                true, false, true, "W-PAR-TYPE-001",
+                "dynamic Any transport requires runtime envelope classification")
+        case Isolated(_):
+            if hir_boundary_is_process_like(boundary)
+                or hir_execution_boundary_to_u8(boundary) == 3:
+                return hir_transfer_decision(HirTransferClass.NotTransferable,
+                    false, false, false, "E-PAR-PROC-003",
+                    "an isolated host graph requires an encoded process payload or device lease")
+            if hir_region_origin_to_u8(origin) == 0:
+                if existing_parent_move_policy_to_u8(
+                        policy.parent_to_child_existing) == 1:
+                    return hir_transfer_decision(HirTransferClass.NotTransferable,
+                        false, true, false, "E-PAR-OWN-001",
+                        "existing parent-owned state cannot be transferred downward under this policy")
+                if not explicit_move:
+                    return hir_transfer_decision(HirTransferClass.IsolatedMove,
+                        true, true, false, "W-PAR-OWN-001",
+                        "existing parent-owned state is permanently consumed; write `move` explicitly")
+            return hir_transfer_decision(HirTransferClass.IsolatedMove, true,
+                true, false, "", "")
+        case _:
+            if hir_region_origin_to_u8(origin) == 2:
+                return hir_transfer_decision(HirTransferClass.FrozenShare,
+                    true, false, false, "", "")
+            if is_class_type:
+                return hir_transfer_decision(HirTransferClass.NotTransferable,
+                    false, false, false, "E-PAR-SEND-002",
+                    "mutable class graph is neither isolated nor deeply immutable")
+    hir_transfer_decision(HirTransferClass.RuntimeClassified, true, false,
+        true, "W-PAR-TYPE-001",
+        "aggregate transfer requires structural runtime classification")
