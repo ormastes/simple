@@ -26,10 +26,11 @@ use std.common.ui.draw_ir.{
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_tiles_gpu.{
     TileLaneRender, tile_gpu_backend_name, tile_gpu_flag_enabled,
     tile_lane_render_commands, tile_lane_render_retained_damage_into,
-    tile_lane_render_retained_pyramid_into
+    tile_lane_render_retained_pyramid_into, tile_lane_render_retained_plan_into
 }
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use common.ui.render_opt.damage_tiles.{DirtyTilePyramid}
+use common.ui.render_opt.damage_plan.{DamagePlanPolicy, build_damage_plan}
 # Two 600x400 readback + per-tile checksum passes exceed the interpreter's
 # default 10M-operation cap. The driver reads SIMPLE_EXECUTION_LIMIT once at
 # startup, so the runner forwards this directive into the child env:
@@ -146,6 +147,23 @@ describe "tile gpu lane (T4)":
         expect(idle.render.tiles_rendered).to_equal(0)
         expect(idle.render.ops_rendered).to_equal(0)
         expect(idle.render.readback_source).to_equal("not_requested")
+        engine.shutdown()
+
+    it "consumes one coalesced plan unchanged on the retained renderer":
+        var engine = Engine2D.create_with_backend(8, 4, "software")
+        engine.clear(CLEAR)
+        engine.present()
+        var pyramid = DirtyTilePyramid.create(8, 4, [2], [1])
+        pyramid.mark_rect(2, 1, 4, 2)
+        val plan = build_damage_plan(
+            pyramid, 0, DamagePlanPolicy.create(8, 90))
+        expect(plan.rects).to_equal([2, 1, 4, 2])
+        val frame = tile_lane_render_retained_plan_into(
+            engine, [draw_ir_rect("update", 0, 0, 8, 4, 0xFFCC2222u32)],
+            plan, "software", false)
+        engine = frame.engine
+        expect(frame.render.tiles_rendered).to_equal(1)
+        expect(frame.render.readback_source).to_equal("not_requested")
         engine.shutdown()
 
     it "defaults the gpu lane flag off and resolves a backend name":

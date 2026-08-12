@@ -1,0 +1,168 @@
+# Deterministic exact damage planning over one DirtyTilePyramid level.
+
+use common.ui.render_opt.damage_tiles.{DirtyTilePyramid}
+
+val DAMAGE_PLAN_NONE: i64 = 0
+val DAMAGE_PLAN_LOCAL: i64 = 1
+val DAMAGE_PLAN_FULL: i64 = 2
+
+val DAMAGE_FALLBACK_NONE: i64 = 0
+val DAMAGE_FALLBACK_AREA: i64 = 1
+val DAMAGE_FALLBACK_CAP: i64 = 2
+val DAMAGE_FALLBACK_INVALID: i64 = 3
+
+class DamagePlanPolicy:
+    max_rects: i64
+    full_threshold_percent: i64
+
+    static fn create(max_rects: i64,
+                     full_threshold_percent: i64) -> DamagePlanPolicy:
+        DamagePlanPolicy(
+            max_rects: max_rects,
+            full_threshold_percent: full_threshold_percent)
+
+class DamagePlan:
+    rects: [i64]
+    mode: i64
+    source_tile_count: i64
+    output_rect_count: i64
+    merged_tile_count: i64
+    dirty_pixels: i64
+    planned_pixels: i64
+    full_fallback_count: i64
+    fallback_reason: i64
+    tiles_examined: i64
+
+fn _damage_plan_none(tiles_examined: i64) -> DamagePlan:
+    DamagePlan(
+        rects: [], mode: DAMAGE_PLAN_NONE, source_tile_count: 0,
+        output_rect_count: 0, merged_tile_count: 0, dirty_pixels: 0,
+        planned_pixels: 0, full_fallback_count: 0,
+        fallback_reason: DAMAGE_FALLBACK_NONE,
+        tiles_examined: tiles_examined)
+
+fn _damage_plan_full(pyramid: DirtyTilePyramid, source_tiles: i64,
+                     dirty_pixels: i64, reason: i64,
+                     tiles_examined: i64) -> DamagePlan:
+    var area: i64 = 0
+    if (pyramid.viewport_w > 0 and pyramid.viewport_h > 0 and
+        pyramid.viewport_w <= 9223372036854775807 / pyramid.viewport_h):
+        area = pyramid.viewport_w * pyramid.viewport_h
+    DamagePlan(
+        rects: [0, 0, pyramid.viewport_w, pyramid.viewport_h],
+        mode: DAMAGE_PLAN_FULL, source_tile_count: source_tiles,
+        output_rect_count: 1,
+        merged_tile_count: if source_tiles > 0: source_tiles - 1 else: 0,
+        dirty_pixels: dirty_pixels, planned_pixels: area,
+        full_fallback_count: 1, fallback_reason: reason,
+        tiles_examined: tiles_examined)
+
+fn build_damage_plan(pyramid: DirtyTilePyramid, level: i64,
+                     policy: DamagePlanPolicy) -> DamagePlan:
+    if (not pyramid.valid or level < 0 or level >= pyramid.level_count() or
+        policy.max_rects <= 0 or policy.full_threshold_percent <= 0 or
+        policy.full_threshold_percent > 100 or
+        pyramid.viewport_w > 92233720368547758 / pyramid.viewport_h):
+        if pyramid.viewport_w > 0 and pyramid.viewport_h > 0:
+            return _damage_plan_full(
+                pyramid, 0, 0, DAMAGE_FALLBACK_INVALID, 0)
+        return _damage_plan_none(0)
+
+    val cols = pyramid.cols[level]
+    val rows = pyramid.rows[level]
+    val offset = pyramid.level_offset[level]
+    var source_tiles: i64 = 0
+    var dirty_pixels: i64 = 0
+    var local_id: i64 = 0
+    while local_id < pyramid.level_capacity[level]:
+        if pyramid.tile_epoch[offset + local_id] == pyramid.frame_epoch:
+            val tx = local_id % cols
+            val ty = local_id / cols
+            val x = tx * pyramid.tile_w[level]
+            val y = ty * pyramid.tile_h[level]
+            var tw = pyramid.tile_w[level]
+            var th = pyramid.tile_h[level]
+            if x + tw > pyramid.viewport_w: tw = pyramid.viewport_w - x
+            if y + th > pyramid.viewport_h: th = pyramid.viewport_h - y
+            dirty_pixels += tw * th
+            source_tiles += 1
+        local_id += 1
+    if source_tiles == 0:
+        return _damage_plan_none(pyramid.level_capacity[level])
+
+    val surface_area = pyramid.viewport_w * pyramid.viewport_h
+    if dirty_pixels * 100 >= surface_area * policy.full_threshold_percent:
+        return _damage_plan_full(
+            pyramid, source_tiles, dirty_pixels, DAMAGE_FALLBACK_AREA,
+            pyramid.level_capacity[level])
+
+    var rects: [i64] = []
+    var prev_x: [i64] = []
+    var prev_w: [i64] = []
+    var prev_rect: [i64] = []
+    var row: i64 = 0
+    while row < rows:
+        var curr_x: [i64] = []
+        var curr_w: [i64] = []
+        var curr_rect: [i64] = []
+        var col: i64 = 0
+        while col < cols:
+            val tile = row * cols + col
+            if pyramid.tile_epoch[offset + tile] != pyramid.frame_epoch:
+                col += 1
+                continue
+            val run_start = col
+            col += 1
+            while col < cols and pyramid.tile_epoch[offset + row * cols + col] == pyramid.frame_epoch:
+                col += 1
+            val run_end = col
+            val x = run_start * pyramid.tile_w[level]
+            val y = row * pyramid.tile_h[level]
+            var w = (run_end - run_start) * pyramid.tile_w[level]
+            var h = pyramid.tile_h[level]
+            if x + w > pyramid.viewport_w: w = pyramid.viewport_w - x
+            if y + h > pyramid.viewport_h: h = pyramid.viewport_h - y
+            var match_index: i64 = -1
+            var p: i64 = 0
+            while p < prev_x.len():
+                if prev_x[p] == x and prev_w[p] == w:
+                    match_index = p
+                    break
+                p += 1
+            var rect_index: i64 = -1
+            if match_index >= 0:
+                rect_index = prev_rect[match_index]
+                rects[rect_index + 3] += h
+            else:
+                if rects.len() / 4 >= policy.max_rects:
+                    return _damage_plan_full(
+                        pyramid, source_tiles, dirty_pixels,
+                        DAMAGE_FALLBACK_CAP,
+                        pyramid.level_capacity[level])
+                rect_index = rects.len()
+                rects.push(x)
+                rects.push(y)
+                rects.push(w)
+                rects.push(h)
+            curr_x.push(x)
+            curr_w.push(w)
+            curr_rect.push(rect_index)
+        prev_x = curr_x
+        prev_w = curr_w
+        prev_rect = curr_rect
+        row += 1
+
+    val output_count = rects.len() / 4
+    DamagePlan(
+        rects: rects, mode: DAMAGE_PLAN_LOCAL,
+        source_tile_count: source_tiles,
+        output_rect_count: output_count,
+        merged_tile_count: source_tiles - output_count,
+        dirty_pixels: dirty_pixels, planned_pixels: dirty_pixels,
+        full_fallback_count: 0, fallback_reason: DAMAGE_FALLBACK_NONE,
+        tiles_examined: pyramid.level_capacity[level])
+
+export DamagePlanPolicy, DamagePlan, build_damage_plan
+export DAMAGE_PLAN_NONE, DAMAGE_PLAN_LOCAL, DAMAGE_PLAN_FULL
+export DAMAGE_FALLBACK_NONE, DAMAGE_FALLBACK_AREA
+export DAMAGE_FALLBACK_CAP, DAMAGE_FALLBACK_INVALID
