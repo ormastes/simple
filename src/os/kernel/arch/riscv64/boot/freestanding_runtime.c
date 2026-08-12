@@ -4283,6 +4283,18 @@ spl_u64 rt_gui_fill4(spl_u64 xy, spl_u64 wh, spl_u64 color, spl_u64 unused) {
     return 1ULL;
 }
 
+/* The RISC-V virtio scanout does not expose the generic direct-LFB array ABI
+ * yet. Returning zero keeps FramebufferDriver on its exact portable fallback
+ * instead of falsely claiming that a row was presented. */
+spl_u64 rt_gui_blend_span4(spl_u64 xy, spl_u64 src, spl_u64 src_offset,
+                           spl_u64 count) {
+    (void)xy;
+    (void)src;
+    (void)src_offset;
+    (void)count;
+    return 0ULL;
+}
+
 spl_i64 rt_gui_flush(void) {
     if (!g_rt_display_ready || !g_rt_gpu_fb) {
         return -1;

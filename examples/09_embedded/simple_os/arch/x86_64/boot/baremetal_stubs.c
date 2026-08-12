@@ -8860,6 +8860,48 @@ RuntimeValue rt_gui_hline(RuntimeValue y, RuntimeValue x, RuntimeValue count, Ru
     return 0;
 }
 
+static uint32_t gui_blend_argb(uint32_t s, uint32_t d)
+{
+    uint32_t sa = s >> 24;
+    if (sa == 255u) return s;
+    if (sa == 0u) return d;
+    uint32_t da = d >> 24;
+    uint32_t dw = (da * (255u - sa)) / 255u;
+    uint32_t oa = sa + dw;
+    uint32_t r = ((((s >> 16) & 255u) * sa) +
+                  (((d >> 16) & 255u) * dw)) / oa;
+    uint32_t g = ((((s >> 8) & 255u) * sa) +
+                  (((d >> 8) & 255u) * dw)) / oa;
+    uint32_t b = (((s & 255u) * sa) + ((d & 255u) * dw)) / oa;
+    return (oa << 24) | (r << 16) | (g << 8) | b;
+}
+
+RuntimeValue rt_gui_blend_span4(RuntimeValue xy, RuntimeValue src_value,
+                                RuntimeValue src_offset_value,
+                                RuntimeValue count_value)
+{
+    uint32_t x = (uint32_t)((uint64_t)xy >> 32);
+    uint32_t y = (uint32_t)(uint64_t)xy;
+    int64_t src_offset = (int64_t)src_offset_value;
+    int64_t count = (int64_t)count_value;
+    RuntimeArray *src = runtime_array_from_abi(src_value);
+    RuntimeValue *items = runtime_array_items(src);
+    if (!src || !items || src_offset < 0 || count <= 0 ||
+        src_offset > (int64_t)src->len || count > (int64_t)src->len - src_offset ||
+        x >= g_fb_w || y >= g_fb_height || (uint64_t)count > g_fb_w - x) {
+        return 0;
+    }
+    volatile uint32_t *dst = (volatile uint32_t *)(uintptr_t)
+        (g_fb_addr + ((uint64_t)y * g_fb_w + x) * 4u);
+    for (int64_t i = 0; i < count; i++) {
+        RuntimeValue tagged = items[src_offset + i];
+        uint32_t source = (uint32_t)(IS_INT(tagged) ?
+            (uint64_t)DECODE_INT(tagged) : (uint64_t)tagged);
+        dst[i] = gui_blend_argb(source, dst[i]);
+    }
+    return 1;
+}
+
 RuntimeValue rt_gui_simd_fill_hits(void) { return (RuntimeValue)g_gui_simd_fill_hits; }
 RuntimeValue rt_gui_simd_fill_chunks(void) { return (RuntimeValue)g_gui_simd_fill_chunks; }
 RuntimeValue rt_gui_simd_fill_tail_pixels(void) { return (RuntimeValue)g_gui_simd_fill_tail_pixels; }

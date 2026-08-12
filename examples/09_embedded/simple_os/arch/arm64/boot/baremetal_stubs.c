@@ -2484,6 +2484,7 @@ RuntimeValue rt_gui_set_fb(RuntimeValue addr, RuntimeValue w)
 }
 
 RuntimeValue rt_gui_hline(RuntimeValue y, RuntimeValue x, RuntimeValue count, RuntimeValue color) { (void)y;(void)x;(void)count;(void)color; return 0; }
+RuntimeValue rt_gui_blend_span4(RuntimeValue xy, RuntimeValue src, RuntimeValue src_offset, RuntimeValue count) { (void)xy;(void)src;(void)src_offset;(void)count; return 0; }
 
 /*
  * Read-only execution receipts for the compositor evidence adapter.  These
