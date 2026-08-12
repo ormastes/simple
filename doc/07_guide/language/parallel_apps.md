@@ -84,11 +84,13 @@ block and iterate only across `full_block_count`; scalar tails are never handed
 to the emitter. Native x86/AArch64/RISC-V targets reject before emission because
 their current selectors would otherwise reduce these operations to NOPs.
 
-The x86 native prerequisite now defines canonical XMM/YMM register classes and
-distinct aligned AVX2 f32x8 machine operations. Allocation is deliberately
-limited to XMM0-7/YMM0-7 and rejects spill pressure: extended-register VEX
-bits, vector spills, and MIR-to-native instruction selection are not yet
-admitted. This keeps native execution fail-closed while that route is wired.
+The x86 native route accepts only an explicit `native-x86_64-avx2` storage
+selection with a 32-byte projection-alignment proof. It lowers f32x8 aligned
+loads, Add/Sub/Mul/Div, and aligned stores through machine selection, low-eight
+YMM assignment, scalar pointer allocation, and exact VEX encoding. Unsupported
+shapes, missing alignment evidence, and vector pressure fail closed. CPU
+feature receipts, YMM liveness reuse/spills, high vector registers, and a real
+host-execution system test remain required before this is a production route.
 
 ## Recommended shape
 

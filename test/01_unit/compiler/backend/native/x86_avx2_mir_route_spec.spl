@@ -1,0 +1,82 @@
+use std.spec.{describe, it, assert_equal, assert_true}
+use compiler.mir.mir_data.*
+use compiler.backend.native.isel_x86_64.{isel_module}
+use compiler.backend.native.regalloc.{regalloc_module}
+use compiler.backend.native.encode_x86_64.{encode_module}
+use compiler.backend.native.mach_inst.{
+    X86_OP_VMOVAPS_LOAD_YMM, X86_OP_VMOVAPS_STORE_YMM, X86_OP_VADDPS_YMM,
+    X86_YMM0, X86_YMM7, reg_id
+}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+
+fn avx2_test_module() -> MirModule:
+    val f32_type = MirType(kind: MirTypeKind.F32)
+    val ptr_type = MirType(kind: MirTypeKind.Ptr(pointee: f32_type, mutable: true))
+    val vec_type = MirType(kind: MirTypeKind.Vec8f)
+    val unit_type = MirType(kind: MirTypeKind.Unit)
+    val locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("left"), type_: ptr_type, kind: LocalKind.Arg(0)),
+        MirLocal(id: LocalId(id: 1), name: Some("right"), type_: ptr_type, kind: LocalKind.Arg(1)),
+        MirLocal(id: LocalId(id: 2), name: Some("output"), type_: ptr_type, kind: LocalKind.Arg(2)),
+        MirLocal(id: LocalId(id: 3), name: Some("left_vec"), type_: vec_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 4), name: Some("right_vec"), type_: vec_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 5), name: Some("sum"), type_: vec_type, kind: LocalKind.Temp)
+    ]
+    val entry = MirBlock(
+        id: BlockId.new(0), label: Some("entry"),
+        instructions: [
+            MirInst(kind: MirInstKind.MirSimdLoad(LocalId(id: 3), MirOperand.copy(LocalId(id: 0)), true, vec_type), span: nil),
+            MirInst(kind: MirInstKind.MirSimdLoad(LocalId(id: 4), MirOperand.copy(LocalId(id: 1)), true, vec_type), span: nil),
+            MirInst(kind: MirInstKind.MirSimdBinop(LocalId(id: 5), MirOperand.copy(LocalId(id: 3)), MirOperand.copy(LocalId(id: 4)), "Add"), span: nil),
+            MirInst(kind: MirInstKind.MirSimdStore(MirOperand.copy(LocalId(id: 5)), MirOperand.copy(LocalId(id: 2)), true), span: nil)
+        ],
+        terminator: MirTerminator.Ret(nil))
+    val function = MirFunction(
+        symbol: SymbolId.new(0), name: "add_f32x8",
+        signature: MirSignature(params: [ptr_type, ptr_type, ptr_type], return_type: unit_type, is_variadic: false),
+        locals: locals, blocks: [entry], entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1), generic_params: [],
+        is_generic_template: false, specialization_of: nil, type_bindings: {})
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = function
+    MirModule(name: "avx2_route", functions: functions, statics: {}, constants: {}, types: {})
+
+fn contains_bytes(haystack: [i64], needle: [i64]) -> bool:
+    if needle.len() == 0 or haystack.len() < needle.len(): return false
+    for start in 0..(haystack.len() - needle.len() + 1):
+        var matches = true
+        for index in 0..needle.len():
+            if haystack[start + index] != needle[index]: matches = false
+        if matches: return true
+    false
+
+describe "x86 AVX2 typed MIR route":
+    it "selects aligned f32x8 MIR without scalar NOP substitution":
+        val module = isel_module(avx2_test_module())
+        val block = module.functions[0].blocks[1]
+        assert_equal(block.insts.len(), 4)
+        assert_equal(block.insts[0].opcode, X86_OP_VMOVAPS_LOAD_YMM)
+        assert_equal(block.insts[1].opcode, X86_OP_VMOVAPS_LOAD_YMM)
+        assert_equal(block.insts[2].opcode, X86_OP_VADDPS_YMM)
+        assert_equal(block.insts[3].opcode, X86_OP_VMOVAPS_STORE_YMM)
+
+    it "preserves YMM classes through scalar pointer allocation":
+        val module = regalloc_module(isel_module(avx2_test_module()))
+        val block = module.functions[0].blocks[1]
+        for inst in block.insts:
+            if inst.opcode == X86_OP_VADDPS_YMM:
+                for operand in inst.operands:
+                    match operand.kind:
+                        case Reg(reg):
+                            val id = reg_id(reg)
+                            assert_true(id >= X86_YMM0 and id <= X86_YMM7)
+                        case _: assert_true(false)
+
+    it "encodes the selected load add store route as AVX2 bytes":
+        val allocated = regalloc_module(isel_module(avx2_test_module()))
+        val encoded = encode_module(allocated)[0].code
+        assert_true(contains_bytes(encoded, [0xC4, 0xE1, 0x7C, 0x28, 0x83, 0, 0, 0, 0]))
+        assert_true(contains_bytes(encoded, [0xC4, 0xC1, 0x7C, 0x28, 0x8C, 0x24, 0, 0, 0, 0]))
+        assert_true(contains_bytes(encoded, [0xC4, 0xE1, 0x7C, 0x58, 0xD1]))
+        assert_true(contains_bytes(encoded, [0xC4, 0xC1, 0x7C, 0x29, 0x95, 0, 0, 0, 0]))

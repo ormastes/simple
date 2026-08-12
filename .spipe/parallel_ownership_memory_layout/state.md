@@ -360,3 +360,14 @@ dev-done
   operands fail closed. MIR-to-native selection, aligned-address proof, opcode
   dispatch, executable native bytes, high registers, and vector spills remain
   open and are not claimed by this slice.
+- impl: Connected the first bounded storage-to-native x86 AVX2 route. An
+  explicit `native-x86_64-avx2` request now requires a 32-byte projected-pointer
+  proof before emitting aligned f32x8 MIR. Native selection assigns distinct
+  low-eight YMM registers, leaves pointer values in the scalar allocator, and
+  emits VMOVAPS plus Add/Sub/Mul/Div through VEX encoding that covers low/high
+  GPR bases and RSP/R12 SIB addressing. Exact MIR, machine-op, register-class,
+  and byte-route tests pass. Three Luna audits identified the selector,
+  encoder, and test-harness gaps; primary review preserved fail-closed pressure
+  and alignment rules. The current native system harness is vacuous, so real
+  AVX2 host execution, CPU-feature receipts, liveness reuse/spills, and native
+  end-to-end system evidence remain open rather than being called complete.

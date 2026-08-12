@@ -22,9 +22,9 @@ fn codegen_schedule(element_count: i64):
     storage_simd_schedule(admission, element_count, 96, blocks * 96, blocks)
 
 fn emit_for(schedule, block_index: i64, scalar_kind: text,
-            operation: text, target_backend: text):
+            operation: text, target_backend: text, aligned_32: bool = false):
     storage_simd_emit_full_block(
-        schedule, block_index, scalar_kind, operation, target_backend,
+        schedule, block_index, scalar_kind, operation, target_backend, aligned_32,
         LocalId(id: 1), LocalId(id: 2), LocalId(id: 3),
         LocalId(id: 10), LocalId(id: 11), LocalId(id: 12))
 
@@ -77,6 +77,18 @@ describe "storage SIMD typed MIR codegen":
         assert_equal(emit_for(
             schedule, 0, "f32", "Add", "native-x86_64").reason,
             "backend-has-no-typed-simd-lowering")
+
+    it "emits aligned f32x8 MIR only for a proven native AVX2 projection":
+        val schedule = codegen_schedule(8)
+        val unproven = emit_for(schedule, 0, "f32", "Add", "native-x86_64-avx2")
+        assert_false(unproven.ok)
+        assert_equal(unproven.reason, "native-avx2-alignment-unproven")
+        val proven = emit_for(schedule, 0, "f32", "Add", "native-x86_64-avx2", true)
+        assert_true(proven.ok)
+        val aligned_load = match proven.instructions[0].kind:
+            case MirSimdLoad(_, _, aligned, vec_type): aligned and vec_type.kind == MirTypeKind.Vec8f
+            case _: false
+        assert_true(aligned_load)
 
     it "rejects an invalid schedule before emitting MIR":
         val empty = codegen_schedule(0)
