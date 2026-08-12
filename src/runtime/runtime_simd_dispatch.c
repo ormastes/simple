@@ -1686,6 +1686,84 @@ SplArray* rt_engine2d_simd_copy_span_u32(SplArray* dst, int64_t dst_off,
     return dst;
 }
 
+#if defined(__x86_64__) || defined(_M_X64)
+/* Blend boxed Simple pixels in place. Opaque destinations are the dominant
+ * framebuffer case and admit exact /255 channel math; mixed-alpha chunks stay
+ * on engine2d_blend_pixel so straight-alpha semantics never approximate. */
+SIMPLE_RUNTIME_TARGET_AVX2
+static void engine2d_blend_boxed_avx2(int64_t* dst, const int64_t* src,
+                                      int64_t n, uint32_t const_src,
+                                      int use_const) {
+    int64_t i = 0;
+    if (n >= 8) engine2d_record_simd_row_hit();
+    for (; i + 8 <= n; i += 8) {
+        uint32_t s[8], d[8];
+        int opaque_dst = 1;
+        for (int lane = 0; lane < 8; lane++) {
+            s[lane] = use_const ? const_src : engine2d_unbox_pixel(src[i + lane]);
+            d[lane] = engine2d_unbox_pixel(dst[i + lane]);
+            opaque_dst &= ((d[lane] >> 24) == 255u);
+        }
+        if (!opaque_dst) {
+            for (int lane = 0; lane < 8; lane++) {
+                dst[i + lane] = engine2d_box_pixel((uint32_t)
+                    engine2d_blend_pixel((int64_t)(uint64_t)s[lane],
+                                         (int64_t)(uint64_t)d[lane]));
+            }
+            continue;
+        }
+        __m256i sv = _mm256_set_epi32(
+            (int)s[7], (int)s[6], (int)s[5], (int)s[4],
+            (int)s[3], (int)s[2], (int)s[1], (int)s[0]);
+        __m256i dv = _mm256_set_epi32(
+            (int)d[7], (int)d[6], (int)d[5], (int)d[4],
+            (int)d[3], (int)d[2], (int)d[1], (int)d[0]);
+        const __m256i mask = _mm256_set1_epi32(255);
+        __m256i sa = _mm256_srli_epi32(sv, 24);
+        __m256i inv = _mm256_sub_epi32(mask, sa);
+#define ENGINE2D_BLEND_CHANNEL_AVX2(shift) \
+        _mm256_add_epi32( \
+            _mm256_mullo_epi32(_mm256_and_si256( \
+                _mm256_srli_epi32(sv, shift), mask), sa), \
+            _mm256_mullo_epi32(_mm256_and_si256( \
+                _mm256_srli_epi32(dv, shift), mask), inv))
+        __m256i racc = ENGINE2D_BLEND_CHANNEL_AVX2(16);
+        __m256i gacc = ENGINE2D_BLEND_CHANNEL_AVX2(8);
+        __m256i bacc = ENGINE2D_BLEND_CHANNEL_AVX2(0);
+#undef ENGINE2D_BLEND_CHANNEL_AVX2
+        uint32_t rv[8], gv[8], bv[8];
+        _mm256_storeu_si256((__m256i*)(void*)rv, racc);
+        _mm256_storeu_si256((__m256i*)(void*)gv, gacc);
+        _mm256_storeu_si256((__m256i*)(void*)bv, bacc);
+        for (int lane = 0; lane < 8; lane++) {
+            uint32_t alpha = s[lane] >> 24;
+            uint32_t out = alpha == 255u ? s[lane] :
+                (alpha == 0u ? d[lane] :
+                 (0xff000000u | ((rv[lane] / 255u) << 16) |
+                  ((gv[lane] / 255u) << 8) | (bv[lane] / 255u)));
+            dst[i + lane] = engine2d_box_pixel(out);
+        }
+    }
+    for (; i < n; i++) {
+        uint32_t s = use_const ? const_src : engine2d_unbox_pixel(src[i]);
+        uint32_t d = engine2d_unbox_pixel(dst[i]);
+        dst[i] = engine2d_box_pixel((uint32_t)engine2d_blend_pixel(
+            (int64_t)(uint64_t)s, (int64_t)(uint64_t)d));
+    }
+}
+
+static void engine2d_blend_boxed_sse2(int64_t* dst, const int64_t* src,
+                                      int64_t n, uint32_t const_src,
+                                      int use_const) {
+    if (n > 0) engine2d_record_simd_row_hit();
+    for (int64_t i = 0; i < n; i++) {
+        uint32_t s = use_const ? const_src : engine2d_unbox_pixel(src[i]);
+        uint32_t d = engine2d_unbox_pixel(dst[i]);
+        dst[i] = engine2d_box_pixel(engine2d_blend_sse2_pixel(s, d));
+    }
+}
+#endif
+
 /* Blend src[src_off..src_off+n) over dst[dst_off..dst_off+n) in place,
  * straight-alpha src-over (oracle_src_over). No malloc — matches
  * fill_span/copy_span's in-place convention, not blend_row's
@@ -1702,6 +1780,18 @@ SplArray* rt_engine2d_simd_blend_span_u32(SplArray* dst, int64_t dst_off,
     const int64_t* src_data = (const int64_t*)(uintptr_t)rt_array_data_ptr(src);
     if (!dst_data || !src_data) return dst;
     int backwards = (dst_data == src_data && d_off > s_off && d_off < s_off + n);
+#if defined(__x86_64__) || defined(_M_X64)
+    if (!backwards) {
+        if (simd_detect_avx2()) {
+            engine2d_blend_boxed_avx2(dst_data + d_off, src_data + s_off,
+                                      n, 0u, 0);
+        } else {
+            engine2d_blend_boxed_sse2(dst_data + d_off, src_data + s_off,
+                                      n, 0u, 0);
+        }
+        return dst;
+    }
+#endif
     for (int64_t step = 0; step < n; step++) {
         int64_t i = backwards ? n - 1 - step : step;
         uint32_t s = engine2d_unbox_pixel(src_data[s_off + i]);
@@ -1744,6 +1834,14 @@ SplArray* rt_engine2d_simd_blend_const_span_u32(SplArray* dst, int64_t offset,
         engine2d_fill_into(dst_data + off, n, engine2d_box_pixel(s));
         return dst;
     }
+#if defined(__x86_64__) || defined(_M_X64)
+    if (simd_detect_avx2()) {
+        engine2d_blend_boxed_avx2(dst_data + off, NULL, n, s, 1);
+    } else {
+        engine2d_blend_boxed_sse2(dst_data + off, NULL, n, s, 1);
+    }
+    return dst;
+#endif
     uint32_t inv = 255u - sa;
     uint32_t sr_sa = ((s >> 16) & 255u) * sa;
     uint32_t sg_sa = ((s >> 8) & 255u) * sa;

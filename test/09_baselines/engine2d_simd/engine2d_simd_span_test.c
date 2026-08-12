@@ -123,7 +123,8 @@ int main(void) {
     for (int i = 0; i < 520; i++)
         long_pixels[i] = (int64_t)((uint64_t)(0xff001000u + (uint32_t)i) << 3);
     for (int i = 0; i < 300; i++) {
-        uint32_t s = 0x8000ff00u + (uint32_t)(i & 255);
+        uint32_t s = ((uint32_t)((i * 37) & 255) << 24) |
+                     ((uint32_t)(i * 2654435761u) & 0x00ffffffu);
         long_src_pixels[i] = (int64_t)((uint64_t)s << 3);
         expected[i] = (int64_t)((uint64_t)blend_ref(s, 0xff001000u + (uint32_t)i) << 3);
     }
@@ -132,6 +133,17 @@ int main(void) {
     result = rt_engine2d_simd_blend_span_u32(
         (SplArray *)&long_dst, 0, (SplArray *)&long_src, 0, 300);
     for (int i = 0; i < 300; i++) if (long_pixels[i] != expected[i]) return 12;
+
+    for (int i = 0; i < 300; i++) {
+        uint32_t d = ((uint32_t)((i * 53) & 255) << 24) |
+                     ((uint32_t)(i * 2246822519u) & 0x00ffffffu);
+        uint32_t s = (uint32_t)((uint64_t)long_src_pixels[i] >> 3);
+        long_pixels[i] = (int64_t)((uint64_t)d << 3);
+        expected[i] = (int64_t)((uint64_t)blend_ref(s, d) << 3);
+    }
+    result = rt_engine2d_simd_blend_span_u32(
+        (SplArray *)&long_dst, 0, (SplArray *)&long_src, 0, 300);
+    for (int i = 0; i < 300; i++) if (long_pixels[i] != expected[i]) return 15;
 
     for (int i = 0; i < 300; i++) long_pixels[i] = (int64_t)((uint64_t)(0x800000ffu + (uint32_t)i) << 3);
     result = rt_engine2d_simd_blend_span_u32(
