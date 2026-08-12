@@ -1,0 +1,68 @@
+# codex-system-test
+# @manual_section Standalone typed sequential HWIR
+
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig, HwNodeId, HwOrigin, HwPort}
+use compiler.mir.hwir.sequential.{HwSeqAssignment, HwSeqGuard,
+    HwSeqInstancePin, HwSeqOutputBinding, HwSeqRule, HwSeqValue, HwSequentialModuleDef,
+    HwSequentialPlan, HwStateRegister}
+use compiler.backend.backend.hwir_to_vhdl.{render_strict_sequential_hwir}
+
+fn standalone_ready_module() -> HwSequentialModuleDef:
+    val name = "standalone_ready_register"
+    val ports = [HwPort.input("clk", "Bits", 1), HwPort.input("rst", "Bits", 1),
+        HwPort.input("in_valid", "Bits", 1), HwPort.input("in_data", "Bits", 32),
+        HwPort.input("consume", "Bits", 1), HwPort.output("in_ready", "Bits", 1),
+        HwPort.output("out_valid", "Bits", 1), HwPort.output("out_data", "Bits", 32)]
+    val plan = HwSequentialPlan(owner_id: HwNodeId.child(name, "sequential"),
+        registers: [HwStateRegister(name: "valid_reg", bit_width: 1,
+                clock_domain: "default", reset_value: 0),
+            HwStateRegister(name: "data_reg", bit_width: 32,
+                clock_domain: "default", reset_value: 0)],
+        rules: [HwSeqRule(name: "consume", guards: [HwSeqGuard.high("consume"),
+                    HwSeqGuard.high("valid_reg")], assignments: [
+                    HwSeqAssignment(destination: "valid_reg", value: HwSeqValue.zero(1)),
+                    HwSeqAssignment(destination: "data_reg", value: HwSeqValue.zero(32))]),
+            HwSeqRule(name: "capture", guards: [HwSeqGuard.high("in_valid"),
+                    HwSeqGuard.low("valid_reg")], assignments: [
+                    HwSeqAssignment(destination: "valid_reg", value: HwSeqValue.copy("in_valid", 1)),
+                    HwSeqAssignment(destination: "data_reg", value: HwSeqValue.copy("in_data", 32))])],
+        outputs: [HwSeqOutputBinding.all("in_ready", [HwSeqGuard.low("valid_reg")]),
+            HwSeqOutputBinding.direct("out_valid", "valid_reg", 1),
+            HwSeqOutputBinding.guarded("out_data", "data_reg", 32,
+                [HwSeqGuard.high("valid_reg")])], decoder_pins: [])
+    HwSequentialModuleDef(node_id: HwNodeId.module_root(name), entity_name: name,
+        config: CoreConfig.rv32(), origins: [HwOrigin(
+            node_id: HwNodeId.child(name, "protocol"),
+            source_name: "hwir.sequential.standalone.ready")], ports: ports,
+        plan: plan, child_entity: "", child_graph_sha256: "")
+
+describe "standalone typed sequential HWIR":
+    # @req REQ-G2-010
+    it "should admit a register-ready plan without a fabricated child":
+        step("Render a standalone ready-register plan with no child entity or pins")
+        val module = standalone_ready_module()
+        expect(module.diagnostic()).to_equal("")
+        expect(module.plan.decoder_pins.len()).to_equal(0)
+        val emitted = render_strict_sequential_hwir(module, "hwir-standalone-sequential-v1")
+        expect(emitted.is_success()).to_equal(true)
+        expect(emitted.vhdl).to_contain("entity standalone_ready_register is")
+        expect(emitted.vhdl).to_contain("in_ready <= '1' when valid_reg='0' else '0';")
+        expect(emitted.vhdl).to_contain("out_data <= data_reg when valid_reg='1' else (others=>'0');")
+        expect(emitted.vhdl.contains("entity work.")).to_equal(false)
+
+    # @req REQ-G2-010
+    it "should reject standalone plans that retain child pins":
+        step("Add a child decoder pin to an otherwise standalone sequential plan")
+        val module = standalone_ready_module()
+        val malformed_plan = HwSequentialPlan(owner_id: module.plan.owner_id,
+            registers: module.plan.registers, rules: module.plan.rules,
+            outputs: module.plan.outputs, decoder_pins: [
+                HwSeqInstancePin(port_name: "data",
+                    signal_name: "in_data", direction: "in", bit_width: 32)])
+        val malformed = HwSequentialModuleDef(node_id: module.node_id,
+            entity_name: module.entity_name, config: module.config, origins: module.origins,
+            ports: module.ports, plan: malformed_plan, child_entity: "",
+            child_graph_sha256: "")
+        expect(malformed.diagnostic()).to_equal(
+            "HWIR-E-SEQUENTIAL-MODULE-CHILD: standalone modules cannot retain child identity or pins")
