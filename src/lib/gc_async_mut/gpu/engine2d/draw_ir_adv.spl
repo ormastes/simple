@@ -1446,6 +1446,11 @@ struct Engine2dDrawIrCommandPlan:
     commands: [DrawIrCommand]
     logical_weights: [i32]
 
+struct Engine2dDrawIrDamageSelection:
+    plan: Engine2dDrawIrCommandPlan
+    culled_logical_count: i32
+    culled_command_count: i32
+
 struct Engine2dOcclusionProof:
     covered: bool
     remaining: i32
@@ -1664,6 +1669,51 @@ fn engine2d_draw_ir_coalesce_plain_fills(commands: [DrawIrCommand]) -> Engine2dD
         merged.push(command)
         weights.push(1)
     Engine2dDrawIrCommandPlan(commands: merged, logical_weights: weights)
+
+# Select commands for one exact retained-frame clip before entering the full
+# renderer/occlusion walker. Only plain fills have a paint extent proven by
+# their command rectangle; every styled, clipped, image, text, path, nil, or
+# otherwise uncertain command remains in its original paint position.
+fn _engine2d_draw_ir_select_damage_commands(
+    plan: Engine2dDrawIrCommandPlan, clip: DrawIrRect,
+    offset_x: i32, offset_y: i32
+) -> Engine2dDrawIrDamageSelection:
+    var selected: [DrawIrCommand] = []
+    var selected_weights: [i32] = []
+    var culled = 0
+    var culled_commands = 0
+    var index: i64 = 0
+    while index < plan.commands.len():
+        val command = plan.commands[index]
+        val weight = if plan.logical_weights.len() == 0:
+            1
+        else:
+            plan.logical_weights[index]
+        var keep = true
+        if _engine2d_draw_ir_plain_fill(command):
+            val x0 = offset_x.to_i64() + command.x.to_i64()
+            val y0 = offset_y.to_i64() + command.y.to_i64()
+            val x1 = x0 + command.width.to_i64()
+            val y1 = y0 + command.height.to_i64()
+            val clip_x0 = clip.x.to_i64()
+            val clip_y0 = clip.y.to_i64()
+            val clip_x1 = clip_x0 + clip.width.to_i64()
+            val clip_y1 = clip_y0 + clip.height.to_i64()
+            keep = (x0 < clip_x1 and clip_x0 < x1 and
+                    y0 < clip_y1 and clip_y0 < y1)
+        if keep:
+            selected.push(command)
+            if plan.logical_weights.len() != 0:
+                selected_weights.push(weight)
+        else:
+            culled += weight
+            culled_commands += 1
+        index += 1
+    Engine2dDrawIrDamageSelection(
+        plan: Engine2dDrawIrCommandPlan(
+            commands: selected, logical_weights: selected_weights),
+        culled_logical_count: culled,
+        culled_command_count: culled_commands)
 
 # Render one batch's flat command list onto `engine`, with every command's
 # local (x, y) shifted by (offset_x, offset_y). Shared by the direct
@@ -2796,6 +2846,11 @@ struct Engine2dDrawIrTileOutcome:
     ops_skipped: i32
     unsupported_kinds: text
     readback: Engine2DReadback
+    # Commands admitted to the expensive render/occlusion walker after the
+    # exact-damage prefilter. This is deliberately distinct from ops_rendered:
+    # unsupported and otherwise skipped commands are still considered.
+    commands_considered: i32 = 0
+    commands_culled_by_damage: i32 = 0
 
 fn _engine2d_draw_ir_damage_rects_valid(rects: [i64], width: i32, height: i32) -> bool:
     if rects.len() % 4 != 0 or rects.len() > 4096:
@@ -2856,6 +2911,8 @@ fn engine2d_draw_ir_render_damaged_with_images(
 
     var rendered = 0
     var skipped = 0
+    var commands_considered = 0
+    var commands_culled_by_damage = 0
     var unsupported = ""
     val budget = eng.width().to_i64() * eng.height().to_i64()
     # Coalescing depends only on the immutable display list, not on the active
@@ -2869,12 +2926,16 @@ fn engine2d_draw_ir_render_damaged_with_images(
             damage_rects[i].to_i32(), damage_rects[i + 1].to_i32(),
             damage_rects[i + 2].to_i32(), damage_rects[i + 3].to_i32())
         eng.set_clip(clip.x, clip.y, clip.width, clip.height)
+        val selection = _engine2d_draw_ir_select_damage_commands(
+            command_plan, clip, 0, 0)
         val outcome = _engine2d_draw_ir_render_command_plan(
-            eng, command_plan, 0, 0, images, false, false, clip, budget)
+            eng, selection.plan, 0, 0, images, false, false, clip, budget)
         eng = outcome.engine
         eng.clear_clip()
         rendered += outcome.rendered
-        skipped += outcome.skipped
+        skipped += outcome.skipped + selection.culled_logical_count
+        commands_considered += selection.plan.commands.len().to_i32()
+        commands_culled_by_damage += selection.culled_command_count
         if unsupported == "" and outcome.unsupported_kinds != "" and outcome.unsupported_kinds != "none":
             unsupported = outcome.unsupported_kinds
         i += 4
@@ -2900,7 +2961,9 @@ fn engine2d_draw_ir_render_damaged_with_images(
         ops_rendered: rendered,
         ops_skipped: skipped,
         unsupported_kinds: unsupported,
-        readback: readback)
+        readback: readback,
+        commands_considered: commands_considered,
+        commands_culled_by_damage: commands_culled_by_damage)
 
 fn engine2d_draw_ir_render_damaged(
     engine: Engine2D,

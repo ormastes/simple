@@ -172,8 +172,33 @@ describe "Engine2D advanced Draw IR executor":
         expect(outcome.unsupported_kinds).to_equal("none")
         expect(outcome.ops_rendered).to_equal(2)
         expect(outcome.ops_skipped).to_equal(1)
+        expect(outcome.commands_considered).to_equal(2)
+        expect(outcome.commands_culled_by_damage).to_equal(1)
         expect(outcome.readback.pixels[0]).to_equal(BG)
         expect(outcome.readback.pixels[1 * 8 + 2]).to_equal(RED)
+        engine.shutdown()
+
+    it "deduplicates coalesced logical fills while filtering retained damage":
+        var engine = Engine2D.create_with_backend(512, 2, "cpu")
+        engine.clear(BG)
+        engine.present()
+        # The adjacent fills coalesce into one physical command with logical
+        # weight two. A clip at the far edge must consider it once and retain
+        # both logical operation receipts.
+        val commands = [
+            draw_ir_rect("left", 0, 0, 256, 2, RED),
+            draw_ir_rect("right", 256, 0, 256, 2, RED),
+            draw_ir_rect("outside", 0, 0, 1, 1, BLUE)
+        ]
+        val outcome = engine2d_draw_ir_render_damaged(
+            engine, commands, [511, 1, 1, 1], true)
+        engine = outcome.engine
+        expect(outcome.ops_rendered).to_equal(2)
+        expect(outcome.ops_skipped).to_equal(1)
+        expect(outcome.commands_considered).to_equal(1)
+        expect(outcome.commands_culled_by_damage).to_equal(1)
+        expect(outcome.readback.pixels[1 * 512 + 511]).to_equal(RED)
+        expect(outcome.readback.pixels[0]).to_equal(BG)
         engine.shutdown()
 
     it "rejects overlapping retained damage before raster":
