@@ -568,6 +568,14 @@ dev-done
   copies that descriptor into the task record. Both shipped C providers and
   compiler symbol routes are aligned; the common capacity limit is 65,534.
   Rust gates cover bounded credit, independent states, 100k reuse,
-  stale/cross-kind rejection, and a destroy-vs-metric pin race. Public Simple
-  exposure, alternate-provider execution, legacy ThreadPool globals,
+  stale/cross-kind rejection, and a destroy-vs-metric pin race. The native
+  descriptor path now normalizes tagged Simple function values before
+  validating and copying the direct-function record. The attempted native
+  Simple facade gate
+  `test/03_system/feature/usage/pool_state_i64_native_spec.spl --mode=native`
+  reached the runner daemon but timed out without an assertion verdict; its
+  uncommitted facade/spec are therefore not release evidence. Resume with one
+  bounded self-hosted native run that reaches the scalar callback, Full until
+  release, close/idle, and destroy checks. Public Simple exposure,
+  alternate-provider execution, legacy ThreadPool globals,
   cancellation, blocking backpressure, and heap transfer remain open.

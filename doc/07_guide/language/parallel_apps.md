@@ -45,7 +45,9 @@ unreleased tasks; credit returns only on release. Tagged generation handles are
 pinned during runtime calls, so stale and wrong-kind handles fail closed. The
 runtime ABI validates and copies a compiler-produced noncapturing direct-function
 descriptor before returning from submit. This ABI is not public Simple API:
-end-to-end native Simple callback evidence, alternate-provider execution,
+the attempted native facade spec timed out in the runner before a callback
+assertion verdict, so end-to-end native Simple callback evidence and
+alternate-provider execution,
 language-enforced handle uniqueness, captured closures, heap results,
 cancellation, blocking submit, and migration of legacy globals remain open.
 
