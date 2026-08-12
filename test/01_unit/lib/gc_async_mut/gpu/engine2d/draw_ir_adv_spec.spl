@@ -291,6 +291,38 @@ describe "Engine2D advanced Draw IR executor":
         expected_engine.shutdown()
         damaged_engine.shutdown()
 
+    it "reuses immutable batch plans across disjoint retained damage":
+        val root = draw_ir_batch(
+            "desktop-plan", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config(
+                "desktop-plan", "desktop", 0, 0, 8, 4, 0, 1000, false),
+            [draw_ir_rect("background-plan", 0, 0, 8, 4, BG)])
+        val window = draw_ir_batch(
+            "window-plan", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config(
+                "window-plan", "window", 3, 1, 3, 2, 1, 1000, true),
+            [draw_ir_rect("window-fill-plan", 0, 0, 3, 2, GREEN)])
+        val composition = draw_ir_composition(
+            "wm-plan", "wm-plan:8x4", DRAW_IR_BACKEND_CPU, [root, window])
+        var images: [Engine2dResolvedDrawIrImage] = []
+        var expected_engine = Engine2D.create_with_backend(8, 4, "cpu")
+        expected_engine.clear(BG)
+        val expected = engine2d_draw_ir_adv_composition_with_images(
+            expected_engine, composition, false, images)
+        var damaged_engine = Engine2D.create_with_backend(8, 4, "cpu")
+        damaged_engine.clear(BG)
+        damaged_engine.present()
+        val damaged = engine2d_draw_ir_render_composition_damaged_with_images(
+            damaged_engine, composition, images,
+            [0, 0, 1, 1, 3, 1, 3, 2], true)
+        damaged_engine = damaged.engine
+        expect(damaged.unsupported_kinds).to_equal("none")
+        expect(damaged.ops_rendered).to_equal(3)
+        expect(damaged.ops_skipped).to_equal(0)
+        expect(damaged.readback.pixels).to_equal(expected.pixels)
+        expected_engine.shutdown()
+        damaged_engine.shutdown()
+
     it "matches full redraw for cropped translucent retained images":
         val root = draw_ir_batch(
             "desktop", DRAW_IR_BACKEND_CPU,

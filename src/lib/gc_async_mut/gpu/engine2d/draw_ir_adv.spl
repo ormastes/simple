@@ -2969,20 +2969,37 @@ fn engine2d_draw_ir_render_composition_damaged_with_images(
     var unsupported = ""
     var css_background_pixel_work_remaining = (
         eng.width().to_i64() * eng.height().to_i64())
+    # Batch display lists are immutable for this retained replay. Cache each
+    # coalesced plan on its first damage intersection, then reuse it while
+    # keeping the original damage-major/batch-major execution order. Untouched
+    # batches incur no planning work.
+    var command_plans: [Engine2dDrawIrCommandPlan] = []
+    var command_plan_ready: [bool] = []
+    for batch in composition.batches:
+        command_plans.push(Engine2dDrawIrCommandPlan(
+            commands: [], logical_weights: []))
+        command_plan_ready.push(false)
     var i = 0
     while i < damage_rects.len():
         val damage = draw_ir_rect_bounds(
             damage_rects[i].to_i32(), damage_rects[i + 1].to_i32(),
             damage_rects[i + 2].to_i32(), damage_rects[i + 3].to_i32())
-        for batch in composition.batches:
+        var batch_index = 0
+        while batch_index < composition.batches.len():
+            val batch = composition.batches[batch_index]
             val embedding = batch.embedding
             val bounds = draw_ir_rect_bounds(
                 embedding.x, embedding.y, embedding.width, embedding.height)
             val clip = draw_ir_rect_intersection(damage, bounds)
             if clip.width > 0 and clip.height > 0:
+                if not command_plan_ready[batch_index]:
+                    command_plans[batch_index] = (
+                        engine2d_draw_ir_coalesce_plain_fills(batch.commands))
+                    command_plan_ready[batch_index] = true
                 eng.set_clip(clip.x, clip.y, clip.width, clip.height)
-                val outcome = _engine2d_draw_ir_render_commands(
-                    eng, batch.commands, embedding.x, embedding.y, images,
+                val outcome = _engine2d_draw_ir_render_command_plan(
+                    eng, command_plans[batch_index],
+                    embedding.x, embedding.y, images,
                     true, false, clip,
                     css_background_pixel_work_remaining)
                 eng = outcome.engine
@@ -2996,6 +3013,7 @@ fn engine2d_draw_ir_render_composition_damaged_with_images(
                     outcome.unsupported_kinds != "none"):
                     if unsupported != "": unsupported = unsupported + ","
                     unsupported = unsupported + outcome.unsupported_kinds
+            batch_index += 1
         i += 4
     if unsupported == "": unsupported = "none"
     eng.submit_batch()
