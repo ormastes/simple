@@ -10,6 +10,7 @@ use compiler.common.assurance.policy.{policy_from_env_value}
 use compiler.driver.driver.{compiler_driver_create,
     compiler_driver_run_riscv_gen2_zca_control_predecode_product,
     compiler_driver_run_riscv_gen2_zca_rv32_cjal_migrating_predecode_product}
+use compiler.mir.mir_aop_injection.{aop_weave_accounting_add, aop_weave_accounting_reset}
 
 # Regression for the Gen2 receipt boundary.  This invokes the compiler-owned
 # product runners, not the generic artifact writer: prior output must survive
@@ -74,3 +75,30 @@ describe "RISC-V Gen2 artifact authorization boundary":
             "HWIR-E-CRITICAL-POLICY")
         gen2_authorization_assert_prior_bundle(output)
         gen2_authorization_cleanup(output)
+
+    # @req REQ-G2-009 NFR-G2-010
+    it "should reject requested or woven AOP contamination before receipt cleanup":
+        step("Reject a requested advice count and retain every prior artifact")
+        val requested_output = gen2_authorization_output("requested-aop")
+        gen2_authorization_seed_prior_bundle(requested_output)
+        aop_weave_accounting_reset(1)
+        val requested = compiler_driver_run_riscv_gen2_zca_control_predecode_product(
+            gen2_authorization_driver(requested_output, "rv32-zca-critical", "critical"))
+        expect(compile_result_is_success(requested)).to_equal(false)
+        expect(compile_result_errors(requested).join("\n")).to_contain(
+            "HWIR-E-GEN2-PRODUCT-AOP")
+        gen2_authorization_assert_prior_bundle(requested_output)
+        step("Reject a woven advice count and retain every prior artifact")
+        val woven_output = gen2_authorization_output("woven-aop")
+        gen2_authorization_seed_prior_bundle(woven_output)
+        aop_weave_accounting_reset(0)
+        aop_weave_accounting_add(1)
+        val woven = compiler_driver_run_riscv_gen2_zca_control_predecode_product(
+            gen2_authorization_driver(woven_output, "rv32-zca-critical", "critical"))
+        expect(compile_result_is_success(woven)).to_equal(false)
+        expect(compile_result_errors(woven).join("\n")).to_contain(
+            "HWIR-E-GEN2-PRODUCT-AOP")
+        gen2_authorization_assert_prior_bundle(woven_output)
+        aop_weave_accounting_reset(0)
+        gen2_authorization_cleanup(requested_output)
+        gen2_authorization_cleanup(woven_output)
