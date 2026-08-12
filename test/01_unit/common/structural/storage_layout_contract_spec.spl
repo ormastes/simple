@@ -14,6 +14,12 @@ use std.common.structural.storage_layout.storage_layout_codec.{
     storage_layout_plan_v1_equal,
     storage_layout_plan_v1_sha256
 }
+use std.common.structural.storage_layout.reference_conversion.{
+    storage_reference_convert,
+    storage_reference_field_v1,
+    storage_reference_shape_v1,
+    storage_reference_shape_well_formed
+}
 use std.common.structural.wire.{wire_to_hex}
 
 describe "StorageLayoutPlanV1 contract":
@@ -118,3 +124,108 @@ describe "StorageLayoutPlanV1 contract":
         var invalid_utf8 = encode_storage_layout_plan(plan)
         invalid_utf8[40] = 255
         assert_equal(decode_storage_layout_plan(invalid_utf8).reason, "invalid-policy-utf8")
+
+    it "converts fixed records from AoS to SoA and back exactly":
+        val aos_plan = storage_layout_plan_v1(19, StorageLayoutKind.AoS, 1, 4,
+            false, StorageConversionPolicy.Never, "reference", "aos")
+        val soa_plan = storage_layout_plan_v1(19, StorageLayoutKind.SoA, 1, 4,
+            false, StorageConversionPolicy.Cached, "reference", "soa")
+        val aos_shape = storage_reference_shape_v1(3, 8, 24, 0, [
+            storage_reference_field_v1(0, 4, 0, 0),
+            storage_reference_field_v1(4, 4, 0, 0)
+        ])
+        val soa_shape = storage_reference_shape_v1(3, 8, 24, 0, [
+            storage_reference_field_v1(0, 4, 0, 0),
+            storage_reference_field_v1(4, 4, 12, 0)
+        ])
+        val aos_bytes: [u8] = [
+            1u8, 2u8, 3u8, 4u8, 11u8, 12u8, 13u8, 14u8,
+            5u8, 6u8, 7u8, 8u8, 15u8, 16u8, 17u8, 18u8,
+            9u8, 10u8, 11u8, 12u8, 19u8, 20u8, 21u8, 22u8
+        ]
+        val converted = storage_reference_convert(
+            aos_plan, aos_shape, aos_bytes, soa_plan, soa_shape)
+        assert_true(converted.ok)
+        assert_equal(converted.bytes, [
+            1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 7u8, 8u8,
+            9u8, 10u8, 11u8, 12u8, 11u8, 12u8, 13u8, 14u8,
+            15u8, 16u8, 17u8, 18u8, 19u8, 20u8, 21u8, 22u8
+        ])
+        val round_trip = storage_reference_convert(
+            soa_plan, soa_shape, converted.bytes, aos_plan, aos_shape)
+        assert_true(round_trip.ok)
+        assert_equal(round_trip.bytes, aos_bytes)
+
+    it "converts AoS through tail-safe AoSoA blocks":
+        val aos_plan = storage_layout_plan_v1(19, StorageLayoutKind.AoS, 1, 4,
+            false, StorageConversionPolicy.Never, "reference", "aos")
+        val aosoa_plan = storage_layout_plan_v1(19, StorageLayoutKind.AoSoA, 2, 4,
+            false, StorageConversionPolicy.Cached, "reference", "aosoa")
+        val aos_shape = storage_reference_shape_v1(3, 8, 24, 0, [
+            storage_reference_field_v1(0, 4, 0, 0),
+            storage_reference_field_v1(4, 4, 0, 0)
+        ])
+        val aosoa_shape = storage_reference_shape_v1(3, 8, 32, 16, [
+            storage_reference_field_v1(0, 4, 0, 0),
+            storage_reference_field_v1(4, 4, 0, 8)
+        ])
+        val aos_bytes: [u8] = [
+            1u8, 2u8, 3u8, 4u8, 11u8, 12u8, 13u8, 14u8,
+            5u8, 6u8, 7u8, 8u8, 15u8, 16u8, 17u8, 18u8,
+            9u8, 10u8, 11u8, 12u8, 19u8, 20u8, 21u8, 22u8
+        ]
+        val converted = storage_reference_convert(
+            aos_plan, aos_shape, aos_bytes, aosoa_plan, aosoa_shape)
+        assert_true(converted.ok)
+        assert_equal(converted.bytes, [
+            1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 7u8, 8u8,
+            11u8, 12u8, 13u8, 14u8, 15u8, 16u8, 17u8, 18u8,
+            9u8, 10u8, 11u8, 12u8, 0u8, 0u8, 0u8, 0u8,
+            19u8, 20u8, 21u8, 22u8, 0u8, 0u8, 0u8, 0u8
+        ])
+        val round_trip = storage_reference_convert(
+            aosoa_plan, aosoa_shape, converted.bytes, aos_plan, aos_shape)
+        assert_true(round_trip.ok)
+        assert_equal(round_trip.bytes, aos_bytes)
+
+    it "rejects overlapping fields incompatible schemas and short buffers":
+        val aos_plan = storage_layout_plan_v1(19, StorageLayoutKind.AoS, 1, 4,
+            false, StorageConversionPolicy.Never, "reference", "aos")
+        val valid = storage_reference_shape_v1(1, 8, 8, 0, [
+            storage_reference_field_v1(0, 4, 0, 0),
+            storage_reference_field_v1(4, 4, 0, 0)
+        ])
+        val overlap = storage_reference_shape_v1(1, 8, 8, 0, [
+            storage_reference_field_v1(0, 6, 0, 0),
+            storage_reference_field_v1(4, 4, 0, 0)
+        ])
+        val incompatible = storage_reference_shape_v1(1, 8, 8, 0, [
+            storage_reference_field_v1(0, 4, 0, 0),
+            storage_reference_field_v1(4, 2, 0, 0)
+        ])
+        val overlapping_soa = storage_reference_shape_v1(1, 8, 8, 0, [
+            storage_reference_field_v1(0, 4, 0, 0),
+            storage_reference_field_v1(4, 4, 2, 0)
+        ])
+        val other_type = storage_layout_plan_v1(20, StorageLayoutKind.AoS, 1, 4,
+            false, StorageConversionPolicy.Never, "reference", "aos")
+        val oversized = storage_reference_shape_v1(1, 8,
+            STORAGE_REFERENCE_MAX_BYTES + 1, 0, [
+            storage_reference_field_v1(0, 4, 0, 0)
+        ])
+        assert_false(storage_reference_shape_well_formed(aos_plan, overlap))
+        assert_false(storage_reference_shape_well_formed(aos_plan, oversized))
+        val soa_plan = storage_layout_plan_v1(19, StorageLayoutKind.SoA, 1, 4,
+            false, StorageConversionPolicy.Cached, "reference", "soa")
+        assert_false(storage_reference_shape_well_formed(soa_plan, overlapping_soa))
+        assert_equal(storage_reference_convert(
+            aos_plan, valid, [0u8], aos_plan, valid).reason,
+            "source-byte-length-mismatch")
+        assert_equal(storage_reference_convert(
+            aos_plan, valid, [0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8],
+            aos_plan, incompatible).reason,
+            "incompatible-logical-schema")
+        assert_equal(storage_reference_convert(
+            aos_plan, valid, [0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8],
+            other_type, valid).reason,
+            "logical-type-mismatch")

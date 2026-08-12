@@ -53,6 +53,13 @@ unbound pointers, and field paths remain conservative. Field names are useful
 layout-planning evidence but do not yet prove physical disjointness. No current
 backend may infer `noalias` or claim AoS/SoA lowering from these facts alone.
 
+The common storage contract also includes a checked reference conversion oracle
+for fixed-size records. It can convert non-overlapping fields among AoS, SoA,
+and tail-padded AoSoA plans and verify exact logical round trips. The oracle is
+limited to 64 MiB, copies value-semantic byte arrays, and rejects malformed or
+overlapping physical mappings. It is test evidence, not the optimized typed
+array view or backend lowering promised by WP-22.
+
 ## Recommended shape
 
 ```simple

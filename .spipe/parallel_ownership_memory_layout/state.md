@@ -302,3 +302,13 @@ dev-done
   of 42); these are not treated as evidence against the new exact tests. The C
   `runtime_thread.c` lane still passes raw two-argument payloads and cannot yet
   distinguish synchronized heap handles, so cross-runtime parity remains open.
+- impl: Advanced WP-22 with a bounded, checked fixed-record storage conversion
+  oracle. It validates logical schemas, type identity, non-overlapping logical
+  and projected physical bytes, exact source size, and all AoS/SoA/AoSoA
+  projections before copying. Exact AoS/SoA and tail-padded AoSoA round trips
+  are covered, along with malformed mappings, short buffers, incompatible
+  schemas, type mismatch, and the 64 MiB ceiling. A fast Luna sidecar audited
+  the existing contract surface; primary review added the physical-overlap,
+  type-identity, and allocation-bound defenses. This is reference evidence,
+  not optimized typed-array or backend lowering, and value-semantic byte-array
+  copying remains intentionally unsuitable for the production fast path.
