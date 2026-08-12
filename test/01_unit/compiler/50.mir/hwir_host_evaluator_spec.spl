@@ -4,7 +4,7 @@
 
 use std.spec.*
 use compiler.mir.hwir.types.{CoreConfig}
-use compiler.mir.hwir.host_evaluator.{HwHostInput, evaluate_strict_comb_hwir}
+use compiler.mir.hwir.host_evaluator.{HwHostInput, evaluate_strict_comb_hwir, prepare_strict_comb_hwir}
 use compiler.mir.hwir.trap_frontend.{strict_zca_target_trap_migrating_predecode_hwir}
 
 fn target_trap_inputs(parcel: i64, pc: i64, rs1_index: i64, rs1_value: i64) -> [HwHostInput]:
@@ -32,6 +32,18 @@ describe "RISC-V Gen2 strict HWIR host evaluator":
             expect(result.value_of("trap_valid").unwrap()).to_equal(1)
             expect(result.value_of("trap_cause").unwrap()).to_equal(3)
             expect(result.value_of("trap_tval").unwrap()).to_equal(0)
+
+    # @req REQ-G2-001 NFR-G2-001 NFR-G2-012
+    it "should prepare one deterministic schedule for repeated concrete parcels":
+        step("Resolve the target-trap graph once before varying its parcel input")
+        val prepared = prepare_strict_comb_hwir(
+            target_trap_module(CoreConfig.rv32_zca_cjal_mission_critical())).unwrap()
+        val first = prepared.evaluate(target_trap_inputs(0x2001, 0x100, 0, 0)).unwrap()
+        val second = prepared.evaluate(target_trap_inputs(0x9002, 0x100, 0, 0)).unwrap()
+        expect(first.value_of("canonical_instruction").unwrap()).to_equal(0x000000ef)
+        expect(first.value_of("redirect_valid").unwrap()).to_equal(1)
+        expect(second.value_of("canonical_instruction").unwrap()).to_equal(0x00100073)
+        expect(second.value_of("trap_valid").unwrap()).to_equal(1)
 
     # @req REQ-G2-010 REQ-G2-011 NFR-G2-012
     it "should fail closed for an unsupported parcel through the composed graph":

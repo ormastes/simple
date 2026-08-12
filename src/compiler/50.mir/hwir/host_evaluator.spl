@@ -17,27 +17,6 @@ pub class HwHostValue:
     name: text
     value: i64
 
-class HwHostEvaluationState:
-    values: [HwHostValue]
-
-    me get(name: text) -> Option<i64>:
-        for entry in self.values:
-            if entry.name == name:
-                return Some(entry.value)
-        None
-
-    me set(name: text, value: i64) -> bool:
-        var index = 0
-        while index < self.values.len():
-            if self.values[index].name == name:
-                if self.values[index].value == value:
-                    return false
-                self.values[index] = HwHostValue(name: name, value: value)
-                return true
-            index = index + 1
-        self.values.push(HwHostValue(name: name, value: value))
-        true
-
 pub class HwHostEvaluation:
     """Concrete values produced by one validated strict combinational graph."""
     values: [HwHostValue]
@@ -47,6 +26,92 @@ pub class HwHostEvaluation:
             if entry.name == name:
                 return Ok(entry.value)
         Err("HWIR-E-HOST-EVAL-VALUE: requested result is absent from the evaluated graph: " + name)
+
+class HwPreparedOperation:
+    kind: text
+    op: text
+    result_slot: i32
+    lhs_slot: i32
+    rhs_slot: i32
+    condition_slot: i32
+    bit_width: i32
+    source_width: i32
+
+    static fn comb(op: HwCombOp, result_slot: i32, lhs_slot: i32,
+        rhs_slot: i32, source_width: i32) -> HwPreparedOperation:
+        HwPreparedOperation(kind: "comb", op: op.op, result_slot: result_slot,
+            lhs_slot: lhs_slot, rhs_slot: rhs_slot, condition_slot: -1,
+            bit_width: op.bit_width, source_width: source_width)
+
+    static fn compare(op: HwCompareOp, result_slot: i32, lhs_slot: i32,
+        rhs_slot: i32) -> HwPreparedOperation:
+        HwPreparedOperation(kind: "compare", op: "equal", result_slot: result_slot,
+            lhs_slot: lhs_slot, rhs_slot: rhs_slot, condition_slot: -1,
+            bit_width: 1, source_width: 0)
+
+    static fn select(op: HwSelectOp, result_slot: i32, condition_slot: i32,
+        when_true_slot: i32, when_false_slot: i32) -> HwPreparedOperation:
+        HwPreparedOperation(kind: "select", op: "mux", result_slot: result_slot,
+            lhs_slot: when_true_slot, rhs_slot: when_false_slot,
+            condition_slot: condition_slot, bit_width: op.bit_width, source_width: 0)
+
+pub class HwPreparedStrictCombHwir:
+    """Validated, topologically scheduled strict combinational HWIR.
+
+    Preparation happens once per graph: name resolution, validation, and the
+    dependency schedule are frozen before an exhaustive oracle supplies its
+    varying input tuples. Evaluation itself uses only integer slots.
+    """
+    value_names: [text]
+    value_widths: [i32]
+    initial_values: [i64]
+    initial_known: [bool]
+    input_names: [text]
+    input_slots: [i32]
+    scheduled_ops: [HwPreparedOperation]
+
+    me input_slot(name: text) -> i32:
+        var index = 0
+        while index < self.input_names.len():
+            if self.input_names[index] == name:
+                return self.input_slots[index]
+            index = index + 1
+        -1
+
+    me evaluate(inputs: [HwHostInput]) -> Result<HwHostEvaluation, text>:
+        var values = self.initial_values
+        var known = self.initial_known
+        var supplied: [text] = []
+        for input in inputs:
+            if input.name == "" or supplied.contains(input.name):
+                return Err("HWIR-E-HOST-EVAL-INPUT: host evaluation inputs must have unique non-empty names")
+            val slot = self.input_slot(input.name)
+            if slot < 0:
+                return Err("HWIR-E-HOST-EVAL-INPUT: host evaluation input is not a declared graph input: " + input.name)
+            values[slot] = hwir_host_normalize(input.value, self.value_widths[slot])
+            known[slot] = true
+            supplied.push(input.name)
+        for name in self.input_names:
+            if not supplied.contains(name):
+                return Err("HWIR-E-HOST-EVAL-INPUT: host evaluation is missing declared graph input: " + name)
+        for op in self.scheduled_ops:
+            if op.kind == "comb":
+                values[op.result_slot] = hwir_host_comb_value(op,
+                    values[op.lhs_slot], if op.rhs_slot < 0: 0 else: values[op.rhs_slot])?
+            elif op.kind == "compare":
+                values[op.result_slot] = if values[op.lhs_slot] == values[op.rhs_slot]: 1 else: 0
+            else:
+                values[op.result_slot] = hwir_host_normalize(
+                    if values[op.condition_slot] != 0: values[op.lhs_slot] else: values[op.rhs_slot],
+                    op.bit_width)
+            known[op.result_slot] = true
+        var result: [HwHostValue] = []
+        var index = 0
+        while index < self.value_names.len():
+            if known[index]:
+                result.push(HwHostValue(name: self.value_names[index], value: values[index]))
+            index = index + 1
+        Ok(HwHostEvaluation(values: result))
 
 fn hwir_host_mask(width: i32) -> i64:
     if width < 1 or width > 64:
@@ -58,8 +123,8 @@ fn hwir_host_mask(width: i32) -> i64:
 fn hwir_host_normalize(value: i64, width: i32) -> i64:
     value & hwir_host_mask(width)
 
-fn hwir_host_comb_value(module: HwModuleDef, op: HwCombOp,
-    lhs: i64, rhs: i64) -> Result<i64, text>:
+fn hwir_host_comb_value(op: HwPreparedOperation, lhs: i64,
+    rhs: i64) -> Result<i64, text>:
     if op.op == "and":
         return Ok(hwir_host_normalize(lhs & rhs, op.bit_width))
     if op.op == "or":
@@ -67,10 +132,16 @@ fn hwir_host_comb_value(module: HwModuleDef, op: HwCombOp,
     if op.op == "add":
         return Ok(hwir_host_normalize(lhs + rhs, op.bit_width))
     if op.op == "shl":
+        # The strict serializer keeps one-bit shifts as identity assignments
+        # because numeric_std shift conversion is not used for std_logic.
+        if op.bit_width == 1:
+            return Ok(lhs & 1)
         if rhs < 0 or rhs >= 64:
             return Ok(0)
         return Ok(hwir_host_normalize(lhs << rhs, op.bit_width))
     if op.op == "shr":
+        if op.bit_width == 1:
+            return Ok(lhs & 1)
         if rhs < 0 or rhs >= op.bit_width:
             return Ok(0)
         # Strict VHDL lowers SHR through numeric_std.unsigned shift_right.
@@ -81,7 +152,7 @@ fn hwir_host_comb_value(module: HwModuleDef, op: HwCombOp,
     if op.op == "passthrough" or op.op == "zext" or op.op == "trunc":
         return Ok(hwir_host_normalize(lhs, op.bit_width))
     if op.op == "sext":
-        val source_width = module.value_width(op.lhs)
+        val source_width = op.source_width
         if source_width < 1 or source_width > op.bit_width:
             return Err("HWIR-E-HOST-EVAL-SEXT: sign extension requires a declared source width no larger than its result")
         val source = hwir_host_normalize(lhs, source_width)
@@ -90,81 +161,100 @@ fn hwir_host_comb_value(module: HwModuleDef, op: HwCombOp,
         return Ok(hwir_host_normalize(source | (-1 << source_width), op.bit_width))
     Err("HWIR-E-HOST-EVAL-OP: unsupported strict combinational operation " + op.op)
 
-fn hwir_host_apply_comb(module: HwModuleDef, state: HwHostEvaluationState,
-    op: HwCombOp) -> Result<bool, text>:
-    if val lhs = state.get(op.lhs):
-        if op.rhs == "":
-            return Ok(state.set(op.result, hwir_host_comb_value(module, op, lhs, 0)?))
-        if val rhs = state.get(op.rhs):
-            return Ok(state.set(op.result, hwir_host_comb_value(module, op, lhs, rhs)?))
-    Ok(false)
+fn hwir_host_slot(names: [text], name: text) -> i32:
+    var index = 0
+    while index < names.len():
+        if names[index] == name:
+            return index
+        index = index + 1
+    -1
 
-fn hwir_host_apply_compare(state: HwHostEvaluationState,
-    op: HwCompareOp) -> bool:
-    if val lhs = state.get(op.lhs):
-        if val rhs = state.get(op.rhs):
-            return state.set(op.result, if lhs == rhs: 1 else: 0)
-    false
-
-fn hwir_host_apply_select(state: HwHostEvaluationState,
-    op: HwSelectOp) -> bool:
-    if val condition = state.get(op.condition):
-        if val when_true = state.get(op.when_true):
-            if val when_false = state.get(op.when_false):
-                return state.set(op.result,
-                    hwir_host_normalize(if condition != 0: when_true else: when_false,
-                        op.bit_width))
-    false
-
-fn hwir_host_inputs_diagnostic(module: HwModuleDef, inputs: [HwHostInput]) -> text:
-    var names: [text] = []
-    for input in inputs:
-        if input.name == "" or names.contains(input.name):
-            return "HWIR-E-HOST-EVAL-INPUT: host evaluation inputs must have unique non-empty names"
-        if module.port_direction(input.name) != "in":
-            return "HWIR-E-HOST-EVAL-INPUT: host evaluation input is not a declared graph input: " + input.name
-        names.push(input.name)
-    for port in module.ports:
-        if port.direction == "in" and not names.contains(port.name):
-            return "HWIR-E-HOST-EVAL-INPUT: host evaluation is missing declared graph input: " + port.name
+fn hwir_host_prepare_operation_diagnostic(result_slot: i32, lhs_slot: i32,
+    rhs_slot: i32, condition_slot: i32) -> text:
+    if result_slot < 0 or lhs_slot < 0 or rhs_slot < -1 or condition_slot < -1:
+        return "HWIR-E-HOST-EVAL-PREPARE: strict graph operation references an unresolved value"
     ""
 
-pub fn evaluate_strict_comb_hwir(module: HwModuleDef,
-    inputs: [HwHostInput]) -> Result<HwHostEvaluation, text>:
-    """Evaluate a validated strict combinational graph to a fixed point.
-
-    This verifier accepts only the same typed operations supported by strict
-    VHDL emission. It rejects missing inputs, unresolved dependencies, and
-    unsupported operations rather than inventing a fallback semantic path.
-    """
+pub fn prepare_strict_comb_hwir(module: HwModuleDef) -> Result<HwPreparedStrictCombHwir, text>:
+    """Validate, resolve, and topologically schedule a strict HWIR graph once."""
     val diagnostic = module.shape_diagnostic()
     if diagnostic != "":
         return Err(diagnostic)
-    val input_diagnostic = hwir_host_inputs_diagnostic(module, inputs)
-    if input_diagnostic != "":
-        return Err(input_diagnostic)
-    val state = HwHostEvaluationState(values: [])
-    for constant in module.constants:
-        state.set(constant.name, hwir_host_normalize(constant.value, constant.bit_width))
-    for input in inputs:
-        state.set(input.name, hwir_host_normalize(input.value, module.value_width(input.name)))
-    var round = 0
-    val limit = (module.comb_ops.len() + module.compare_ops.len() + module.select_ops.len() + 1) * 2
-    while round < limit:
-        var changed = false
-        for op in module.comb_ops:
-            if hwir_host_apply_comb(module, state, op)?:
-                changed = true
-        for op in module.compare_ops:
-            if hwir_host_apply_compare(state, op):
-                changed = true
-        for op in module.select_ops:
-            if hwir_host_apply_select(state, op):
-                changed = true
-        if not changed:
-            break
-        round = round + 1
+    var names: [text] = []
+    var widths: [i32] = []
+    var initial_values: [i64] = []
+    var initial_known: [bool] = []
+    var input_names: [text] = []
+    var input_slots: [i32] = []
     for port in module.ports:
-        if port.direction == "out" and state.get(port.name) == None:
+        names.push(port.name)
+        widths.push(port.bit_width)
+        initial_values.push(0)
+        initial_known.push(port.direction == "in")
+        if port.direction == "in":
+            input_names.push(port.name)
+            input_slots.push(names.len() - 1)
+    for signal in module.signals:
+        names.push(signal.name)
+        widths.push(signal.bit_width)
+        initial_values.push(0)
+        initial_known.push(false)
+    for constant in module.constants:
+        names.push(constant.name)
+        widths.push(constant.bit_width)
+        initial_values.push(hwir_host_normalize(constant.value, constant.bit_width))
+        initial_known.push(true)
+    var pending: [HwPreparedOperation] = []
+    for op in module.comb_ops:
+        val result = hwir_host_slot(names, op.result)
+        val lhs = hwir_host_slot(names, op.lhs)
+        val rhs = if op.rhs == "": -1 else: hwir_host_slot(names, op.rhs)
+        val operation_diagnostic = hwir_host_prepare_operation_diagnostic(result, lhs, rhs, -1)
+        if operation_diagnostic != "":
+            return Err(operation_diagnostic)
+        pending.push(HwPreparedOperation.comb(op, result, lhs, rhs, widths[lhs]))
+    for op in module.compare_ops:
+        val result = hwir_host_slot(names, op.result)
+        val lhs = hwir_host_slot(names, op.lhs)
+        val rhs = hwir_host_slot(names, op.rhs)
+        val operation_diagnostic = hwir_host_prepare_operation_diagnostic(result, lhs, rhs, -1)
+        if operation_diagnostic != "":
+            return Err(operation_diagnostic)
+        pending.push(HwPreparedOperation.compare(op, result, lhs, rhs))
+    for op in module.select_ops:
+        val result = hwir_host_slot(names, op.result)
+        val condition = hwir_host_slot(names, op.condition)
+        val when_true = hwir_host_slot(names, op.when_true)
+        val when_false = hwir_host_slot(names, op.when_false)
+        val operation_diagnostic = hwir_host_prepare_operation_diagnostic(result, when_true, when_false, condition)
+        if operation_diagnostic != "":
+            return Err(operation_diagnostic)
+        pending.push(HwPreparedOperation.select(op, result, condition, when_true, when_false))
+    var scheduled: [HwPreparedOperation] = []
+    var known = initial_known
+    while pending.len() > 0:
+        var remaining: [HwPreparedOperation] = []
+        var progressed = false
+        for op in pending:
+            if known[op.lhs_slot] and (op.rhs_slot < 0 or known[op.rhs_slot]) and
+                (op.condition_slot < 0 or known[op.condition_slot]):
+                scheduled.push(op)
+                known[op.result_slot] = true
+                progressed = true
+            else:
+                remaining.push(op)
+        if not progressed:
+            return Err("HWIR-E-HOST-EVAL-UNRESOLVED: strict graph has a cyclic or unresolved combinational dependency")
+        pending = remaining
+    for port in module.ports:
+        val output_slot = hwir_host_slot(names, port.name)
+        if port.direction == "out" and (output_slot < 0 or not known[output_slot]):
             return Err("HWIR-E-HOST-EVAL-UNRESOLVED: strict graph did not resolve output " + port.name)
-    Ok(HwHostEvaluation(values: state.values))
+    Ok(HwPreparedStrictCombHwir(value_names: names, value_widths: widths,
+        initial_values: initial_values, initial_known: initial_known,
+        input_names: input_names, input_slots: input_slots, scheduled_ops: scheduled))
+
+pub fn evaluate_strict_comb_hwir(module: HwModuleDef,
+    inputs: [HwHostInput]) -> Result<HwHostEvaluation, text>:
+    """One-shot compatibility wrapper around the prepared strict evaluator."""
+    prepare_strict_comb_hwir(module)?.evaluate(inputs)
