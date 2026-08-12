@@ -5,6 +5,7 @@
 
 use app.io.mod.{dir_create_all, file_atomic_write, file_copy, file_exists,
     file_hash_sha256, file_is_regular_no_follow, file_read}
+use std.cli.cli_util.{get_cli_args}
 use common.provenance.stage4_compiler_provenance.{
     stage4_compiler_provenance_from_text, stage4_compiler_provenance_reason}
 
@@ -322,6 +323,53 @@ fn riscv_gen2_write_qualification_receipt(
         run_dir: run_dir, receipt_path: receipt_path, receipt_sha256: receipt_sha,
         branch_coverage_basis_points: manifest.branch_coverage_basis_points))
 
+# This deliberately accepts only the composer boundary.  A shell runner must
+# create the evidence manifest from command-owned results first, then invoke
+# the admitted CLI on this source with these two switches.  There is no
+# `--emit-evidence` mode here, so this module cannot fabricate a GHDL result.
+fn _g2_parse_composer_cli(args: [text]) -> Result<(text, text), text>:
+    var manifest_path = ""
+    var run_id = ""
+    var index: i64 = 0
+    while index < args.len():
+        val option = args[index]
+        if index + 1 >= args.len():
+            return Err("qualification-cli-missing-value-" + option)
+        val value = args[index + 1]
+        if option == "--manifest":
+            if manifest_path != "": return Err("qualification-cli-duplicate-manifest")
+            manifest_path = value
+        elif option == "--run-id":
+            if run_id != "": return Err("qualification-cli-duplicate-run-id")
+            run_id = value
+        else:
+            return Err("qualification-cli-unknown-argument-" + option)
+        index = index + 2
+    if manifest_path == "" or run_id == "":
+        return Err("qualification-cli-required-argument-missing")
+    Ok((manifest_path, run_id))
+
+fn main() -> i64:
+    val (manifest_path, run_id) = match _g2_parse_composer_cli(get_cli_args()):
+        case Ok(value): value
+        case Err(reason):
+            print "schema=" + RISCV_GEN2_QUALIFICATION_SCHEMA
+            print "status=fail"
+            print "reason=" + reason
+            return 2
+    match riscv_gen2_write_qualification_receipt(manifest_path, run_id):
+        case Ok(artifacts):
+            print "schema=" + RISCV_GEN2_QUALIFICATION_SCHEMA
+            print "status=pass"
+            print "receipt_path=" + artifacts.receipt_path
+            print "receipt_sha256=" + artifacts.receipt_sha256
+            0
+        case Err(reason):
+            print "schema=" + RISCV_GEN2_QUALIFICATION_SCHEMA
+            print "status=fail"
+            print "reason=" + reason
+            1
+
 export RISCV_GEN2_QUALIFICATION_SCHEMA, RISCV_GEN2_QUALIFICATION_ROOT
 export RISCV_GEN2_BRANCH_COVERAGE_THRESHOLD_BP
 export RiscvGen2QualificationRow, RiscvGen2QualificationManifest
@@ -329,4 +377,3 @@ export RiscvGen2QualificationArtifacts
 export riscv_gen2_parse_qualification_manifest
 export riscv_gen2_render_qualification_receipt
 export riscv_gen2_write_qualification_receipt
-

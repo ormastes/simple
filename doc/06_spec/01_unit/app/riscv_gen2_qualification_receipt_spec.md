@@ -11,16 +11,20 @@ The Pure-Simple writer accepts one exactly-shaped, runner-produced manifest:
 - a zero exit plus generated VHDL, GHDL analyze, elaborate, and run log path
   and SHA-256 for every row;
 - source, config, and graph identity SHA-256 values for every row;
-- an admitted Stage-4 \`pure-simple-full-cli\`, its provenance envelope, and its
+- an admitted Stage-4 `pure-simple-full-cli`, its provenance envelope, and its
   source revision; and
-- measured \`branch\` coverage with the canonical 8,000 basis-point (80%)
+- measured `branch` coverage with the canonical 8,000 basis-point (80%)
   threshold or higher.
 
 The writer never invokes GHDL or a test command and never creates a command
 result. It binds supplied files with no-follow regular-file checks and SHA-256,
 retains copies under the fresh relative directory
-\`build/evidence/riscv_gen2_hwir_foundation/<run-id>/\`, checks the inputs again,
-and writes \`qualification_receipt.json\` last. Reusing a run directory, a
+`build/evidence/riscv_gen2_hwir_foundation/<run-id>/`, checks the inputs again,
+and writes `qualification_receipt.json` last. Reusing a run directory, a
 missing/changed input, nonzero exit, incomplete row, unknown manifest field, or
 unadmitted compiler provenance fails closed.
 
+An admitted Stage-4 CLI invokes the writer source with exactly
+`--manifest <relative-manifest-path> --run-id <safe-run-id>`. There is no
+evidence-emission switch: a runner must first create the complete manifest from
+its command-owned results outside the final receipt directory.
