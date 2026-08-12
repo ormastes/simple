@@ -272,3 +272,52 @@ QEMU-only result is a defect, not a completion.
   not the export form; a loose `pgrep` counts probe shells; a glob that doesn't
   descend). Every one was caught by *executing* something, not by inspecting
   declarations. Prefer execution oracles.
+- **An agent's own final report is not proof its edits landed.** A full audit
+  pass tonight found its plan-doc corrections describing real fixes never
+  actually applied to this file — same shape as several sub-agent reports
+  earlier in the session. Always verify against a fresh fetch, never trust a
+  completion summary at face value, including this document's own history.
+
+## Session close-out audit (2026-08-12)
+
+A full audit pass verified every item above against fresh origin content and
+real spec runs (not stale reports), completed what was found incomplete, and
+closed three real gaps:
+
+1. **Guard/doc mismatch fixed.** `vcs.md` claimed the C-runtime-compiles guard
+   was mandatory with `async_linux_uring.c` already fixed — neither was
+   actually true in code. Landed for real (`f5af65b2a705`): the `<stddef.h>`
+   fix, hook wiring, and the sibling guard's `-std=gnu11`/`-I platform` flags
+   merged in before deletion.
+2. **sha1 re-checked with the correct stdlib root — genuinely clean.**
+   (`fab2f224e2f3`) Using the lesson from the stdlib-second-root trap above:
+   sha1.spl is **not corrupted** on the live path. 21 dead bare-`list` sites in
+   an unused code path were retyped defensively anyway. New KAT spec (4/4).
+   This resolves the flag raised earlier — the original "sha1 not corrupted"
+   sweep verdict was correct after all, just unverified against the right root
+   at the time.
+3. **Inline `style=` was only HALF closed.** (`d0de046c100b`) The
+   `blink_parse_declarations` rename existed only at the call site, not in the
+   defining modules (`parser.spl`/`__init__.spl`) — completed. Render-lane spec
+   now asserts inline style is genuinely honoured (11/11).
+4. **`command_dispatch_spec.spl` fake-gate fix, actually landed this time**
+   (`3919c0ae80c4` + `8590fea74638`). The rewrite reported by an earlier agent
+   tonight never made it to origin. Redone as real `rt_file_exists_str` checks
+   — **honestly RED**: `src/app/formatter/` and `src/app/depgraph/main.spl` are
+   genuinely missing. Filed at
+   `doc/08_tracking/bug/command_dispatch_migrated_app_paths_missing_2026-08-12.md`
+   rather than weakened to pass.
+
+**Genuinely still open, and why:** MIR And/Or fix stays a source-content guard
+only (no self-hosted binary to exercise it at runtime); guest-heap-gate re-run,
+blink pixel evidence, and the electron gate fixture all remain blocked on the
+same missing self-hosted binary (bootstrap excluded from tonight's scope per
+documented resource exhaustion — 25 failed attempts); `sha256_simd_parity_spec`
+hangs before printing its first verdict line, contradicting an earlier note in
+this doc — use `sha256_core_vectors_spec` (13/13) as the real gate for that
+module instead; blink transforms/gradients/`<link>` remain deferred, out of
+scope by design.
+
+TODO DB regenerated (`bin/simple todo-scan`, 274 items) — already matched
+origin, follow-up commit was an empty no-op, noted rather than silently
+dropped.
