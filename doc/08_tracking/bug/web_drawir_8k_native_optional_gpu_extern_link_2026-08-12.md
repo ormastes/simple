@@ -55,3 +55,17 @@ three missing `rt_pg_parallel_worker_handoff_*` exports in `runtime/src/lib.rs`
 and passes the `extern "C"` function `rt_shared_get` directly to `Option.map` in
 `runtime/src/value/objects.rs`. These are runtime build blockers, not rendering
 measurements, and were not changed by this lane.
+
+After those concurrent runtime compile errors were repaired, a current
+Vulkan-enabled `libsimple_runtime.a` built successfully. Linking against it
+reduced the unresolved set again. One remaining symbol was a Simple-side defect:
+`simd_isa_provider.spl` imported `engine2d_simd_fill_span_u32`, but
+`simd_native_rows.spl` exposed only the `rt_engine2d_simd_fill_span_u32` extern
+and omitted the public wrapper. Adding the symmetric wrapper removed that symbol
+from the native linker receipt. The broad SIMD provider spec exceeded its
+180-second runner budget, so the native link receipt is the acceptance evidence
+for this narrow ABI repair.
+
+The current remaining unresolved groups are `gc_env_get`, Intel Engine2D kernel
+argument/upload/download calls, three WebGPU surface calls, and
+`rt_sleep_nanos`.
