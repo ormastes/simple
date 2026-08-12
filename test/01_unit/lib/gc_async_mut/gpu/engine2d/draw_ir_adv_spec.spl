@@ -1653,6 +1653,86 @@ describe "Engine2D advanced Draw IR executor":
             expect(pixel).to_equal(RED)
         engine.shutdown()
 
+    it "skips an exact plain fill hidden by a later opaque fill":
+        var engine = Engine2D.create_with_backend(12, 8, "cpu")
+        engine.clear(BG)
+        val batch = draw_ir_batch(
+            "occluded-fill", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config(
+                "surf", "win", 0, 0, 12, 8, 1, 1000, false), [
+                draw_ir_rect("hidden", 0, 0, 12, 8, RED),
+                draw_ir_rect("cover", 0, 0, 12, 8, BLUE),
+            ])
+
+        val result = engine2d_draw_ir_adv_batch(engine, batch, false)
+
+        expect(result.rendered_command_count).to_equal(1)
+        expect(result.skipped_command_count).to_equal(1)
+        for pixel in result.pixels:
+            expect(pixel).to_equal(BLUE)
+        engine.shutdown()
+
+    it "proves hidden fill coverage from two later opaque halves":
+        var engine = Engine2D.create_with_backend(12, 8, "cpu")
+        engine.clear(BG)
+        val batch = draw_ir_batch(
+            "union-occluded-fill", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config(
+                "surf", "win", 0, 0, 12, 8, 1, 1000, false), [
+                draw_ir_rect("hidden", 0, 0, 12, 8, RED),
+                draw_ir_rect("left", 0, 0, 6, 8, GREEN),
+                draw_ir_rect("right", 6, 0, 6, 8, BLUE),
+            ])
+
+        val result = engine2d_draw_ir_adv_batch(engine, batch, false)
+
+        expect(result.rendered_command_count).to_equal(2)
+        expect(result.skipped_command_count).to_equal(1)
+        expect(result.pixels[0]).to_equal(GREEN)
+        expect(result.pixels[11]).to_equal(BLUE)
+        engine.shutdown()
+
+    it "keeps an earlier fill when the later cover is translucent":
+        var engine = Engine2D.create_with_backend(4, 4, "cpu")
+        engine.clear(BG)
+        val batch = draw_ir_batch(
+            "translucent-not-occluder", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config(
+                "surf", "win", 0, 0, 4, 4, 1, 1000, false), [
+                draw_ir_rect("base", 0, 0, 4, 4, GREEN),
+                draw_ir_rect("blend", 0, 0, 4, 4, HALF_RED),
+            ])
+
+        val result = engine2d_draw_ir_adv_batch(engine, batch, false)
+
+        expect(result.rendered_command_count).to_equal(2)
+        expect(result.skipped_command_count).to_equal(0)
+        expect(result.pixels[0]).to_equal(0xff807f00u32)
+        engine.shutdown()
+
+    it "fails open when an exact coverage proof exhausts its bounded budget":
+        var engine = Engine2D.create_with_backend(65, 1, "cpu")
+        engine.clear(BG)
+        var commands: [DrawIrCommand] = [
+            draw_ir_rect("base", 0, 0, 65, 1, RED),
+        ]
+        var x = 0
+        while x < 65:
+            val color = if (x % 2) == 0: GREEN else: BLUE
+            commands.push(draw_ir_rect(
+                "strip-" + x.to_text(), x, 0, 1, 1, color))
+            x += 1
+        val batch = draw_ir_batch(
+            "occlusion-budget", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config(
+                "surf", "win", 0, 0, 65, 1, 1, 1000, false), commands)
+
+        val result = engine2d_draw_ir_adv_batch(engine, batch, false)
+
+        expect(result.rendered_command_count).to_equal(66)
+        expect(result.skipped_command_count).to_equal(0)
+        engine.shutdown()
+
     it "reports unsupported Draw IR commands without rendering them":
         var engine = Engine2D.create_with_backend(16, 16, "cpu")
         engine.clear(BG)

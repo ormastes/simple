@@ -1,0 +1,169 @@
+# Conservative exact-rectangle occlusion for retained DrawIR consumers.
+
+struct OcclusionPlan:
+    visible: [bool]
+    occluded_count: i64
+    offscreen_count: i64
+    overflow_count: i64
+    examined_count: i64
+
+class OcclusionWorkspace:
+    capacity: i64
+    ping: [i64]
+    pong: [i64]
+    overflowed: bool
+
+    static fn create(capacity: i64) -> OcclusionWorkspace:
+        var cap = capacity
+        if cap < 1:
+            cap = 1
+        if cap > 4096:
+            cap = 4096
+        OcclusionWorkspace(
+            capacity: cap,
+            ping: [0; (cap * 4).to_i32()],
+            pong: [0; (cap * 4).to_i32()],
+            overflowed: false)
+
+    me _emit(use_ping: bool, count: i64,
+             x: i64, y: i64, w: i64, h: i64) -> i64:
+        if w <= 0 or h <= 0:
+            return count
+        if count >= self.capacity:
+            self.overflowed = true
+            return count
+        val base = count * 4
+        if use_ping:
+            self.ping[base] = x
+            self.ping[base + 1] = y
+            self.ping[base + 2] = w
+            self.ping[base + 3] = h
+        else:
+            self.pong[base] = x
+            self.pong[base + 1] = y
+            self.pong[base + 2] = w
+            self.pong[base + 3] = h
+        count + 1
+
+    me covered_by(x: i64, y: i64, w: i64, h: i64,
+                  occluders: [i64]) -> bool:
+        self.overflowed = false
+        self.ping[0] = x
+        self.ping[1] = y
+        self.ping[2] = w
+        self.ping[3] = h
+        var fragment_count: i64 = 1
+        var input_is_ping = true
+        var o = 0
+        while o < occluders.len() and fragment_count > 0:
+            var output_count: i64 = 0
+            var f: i64 = 0
+            while f < fragment_count:
+                val base = f * 4
+                val fx = if input_is_ping: self.ping[base] else: self.pong[base]
+                val fy = if input_is_ping: self.ping[base + 1] else: self.pong[base + 1]
+                val fw = if input_is_ping: self.ping[base + 2] else: self.pong[base + 2]
+                val fh = if input_is_ping: self.ping[base + 3] else: self.pong[base + 3]
+                val ox = occluders[o]
+                val oy = occluders[o + 1]
+                val ow = occluders[o + 2]
+                val oh = occluders[o + 3]
+                val ix0 = if fx > ox: fx else: ox
+                val iy0 = if fy > oy: fy else: oy
+                val fx1 = fx + fw
+                val fy1 = fy + fh
+                val ox1 = ox + ow
+                val oy1 = oy + oh
+                val ix1 = if fx1 < ox1: fx1 else: ox1
+                val iy1 = if fy1 < oy1: fy1 else: oy1
+                val output_is_ping = not input_is_ping
+                if ix1 <= ix0 or iy1 <= iy0:
+                    output_count = self._emit(
+                        output_is_ping, output_count, fx, fy, fw, fh)
+                else:
+                    output_count = self._emit(
+                        output_is_ping, output_count,
+                        fx, fy, fw, iy0 - fy)
+                    output_count = self._emit(
+                        output_is_ping, output_count,
+                        fx, iy1, fw, fy1 - iy1)
+                    output_count = self._emit(
+                        output_is_ping, output_count,
+                        fx, iy0, ix0 - fx, iy1 - iy0)
+                    output_count = self._emit(
+                        output_is_ping, output_count,
+                        ix1, iy0, fx1 - ix1, iy1 - iy0)
+                if self.overflowed:
+                    return false
+                f += 1
+            fragment_count = output_count
+            input_is_ping = not input_is_ping
+            o += 4
+        fragment_count == 0
+
+fn _occlusion_visible_all(count: i64) -> [bool]:
+    [true; count.to_i32()]
+
+fn build_occlusion_plan(rects: [i64], eligible: [bool], opaque: [bool],
+                        viewport_w: i64, viewport_h: i64,
+                        workspace_capacity: i64,
+                        occluder_capacity: i64) -> OcclusionPlan:
+    val count = rects.len().to_i64() / 4
+    if ((rects.len() % 4) != 0 or eligible.len().to_i64() != count or
+        opaque.len().to_i64() != count or viewport_w <= 0 or viewport_h <= 0):
+        return OcclusionPlan(
+            visible: _occlusion_visible_all(count), occluded_count: 0,
+            offscreen_count: 0, overflow_count: 1, examined_count: 0)
+    var visible = _occlusion_visible_all(count)
+    var occluders: [i64] = []
+    var workspace = OcclusionWorkspace.create(workspace_capacity)
+    var occluded_count: i64 = 0
+    var offscreen_count: i64 = 0
+    var overflow_count: i64 = 0
+    var examined_count: i64 = 0
+    var index = count - 1
+    while index >= 0:
+        val base = index * 4
+        val x = rects[base]
+        val y = rects[base + 1]
+        val w = rects[base + 2]
+        val h = rects[base + 3]
+        val geometry_safe = (
+            x >= -2147483648 and x <= 2147483647 and
+            y >= -2147483648 and y <= 2147483647 and
+            w > 0 and w <= 2147483647 and h > 0 and h <= 2147483647)
+        if eligible[index] and not geometry_safe:
+            overflow_count += 1
+        elif eligible[index] and geometry_safe:
+            val x0 = if x > 0: x else: 0
+            val y0 = if y > 0: y else: 0
+            val raw_x1 = x + w
+            val raw_y1 = y + h
+            val x1 = if raw_x1 < viewport_w: raw_x1 else: viewport_w
+            val y1 = if raw_y1 < viewport_h: raw_y1 else: viewport_h
+            if x1 <= x0 or y1 <= y0:
+                visible[index] = false
+                offscreen_count += 1
+            else:
+                examined_count += 1
+                if workspace.covered_by(
+                    x0, y0, x1 - x0, y1 - y0, occluders):
+                    visible[index] = false
+                    occluded_count += 1
+                elif workspace.overflowed:
+                    overflow_count += 1
+                if visible[index] and opaque[index]:
+                    if occluders.len().to_i64() / 4 < occluder_capacity:
+                        occluders.push(x0)
+                        occluders.push(y0)
+                        occluders.push(x1 - x0)
+                        occluders.push(y1 - y0)
+                    else:
+                        overflow_count += 1
+        index -= 1
+    OcclusionPlan(
+        visible: visible, occluded_count: occluded_count,
+        offscreen_count: offscreen_count, overflow_count: overflow_count,
+        examined_count: examined_count)
+
+export OcclusionPlan, OcclusionWorkspace, build_occlusion_plan

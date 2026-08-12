@@ -1399,6 +1399,7 @@ fn _engine2d_draw_ir_result_from_composition_plan_with_unsupported(plan: Simple2
 # stack: past this depth the batch falls back to today's direct translate+clip
 # render instead of allocating another offscreen Engine2D.
 val ENGINE2D_DRAW_IR_EMBED_MAX_DEPTH: i32 = 3
+val ENGINE2D_DRAW_IR_OCCLUSION_PROOF_BUDGET: i32 = 64
 
 # Single-slot reusable software offscreen for embedded (translucent) batches.
 # SimpleOS runs on a NON-reclaiming baremetal bump heap: Engine2D.create_offscreen
@@ -1444,6 +1445,11 @@ fn _engine2d_embed_offscreen_acquire(owner: Engine2D, w: i32, h: i32) -> Result<
 struct Engine2dDrawIrCommandPlan:
     commands: [DrawIrCommand]
     logical_weights: [i32]
+
+struct Engine2dOcclusionProof:
+    covered: bool
+    remaining: i32
+    overflowed: bool
 
 struct Engine2dClippedImage:
     handled: bool
@@ -1505,6 +1511,98 @@ fn _engine2d_draw_ir_plain_fill(command: DrawIrCommand) -> bool:
      command.height > 0 and command.computed_style.len() == 0 and
      not command.clip_rect.present and
      ((command.color >> 24) & 0xFFu32) > 0u32)
+
+fn _engine2d_draw_ir_exact_plain_bounds(
+    command: DrawIrCommand, offset_x: i32, offset_y: i32,
+    active_clip: DrawIrRect, viewport_w: i32, viewport_h: i32
+) -> DrawIrRect:
+    if not _engine2d_draw_ir_plain_fill(command):
+        return DrawIrRect(present: false, x: 0, y: 0, width: 0, height: 0)
+    val global_x = offset_x.to_i64() + command.x.to_i64()
+    val global_y = offset_y.to_i64() + command.y.to_i64()
+    if (global_x < -2147483648 or global_x > 2147483647 or
+        global_y < -2147483648 or global_y > 2147483647):
+        return DrawIrRect(present: false, x: 0, y: 0, width: 0, height: 0)
+    var bounds = draw_ir_rect_bounds(
+        global_x.to_i32(), global_y.to_i32(),
+        command.width, command.height)
+    bounds = draw_ir_rect_intersection(
+        bounds, draw_ir_rect_bounds(0, 0, viewport_w, viewport_h))
+    if active_clip.present:
+        bounds = draw_ir_rect_intersection(bounds, active_clip)
+    if bounds.width <= 0 or bounds.height <= 0:
+        return DrawIrRect(present: false, x: 0, y: 0, width: 0, height: 0)
+    bounds
+
+fn _engine2d_draw_ir_prove_rect_covered(
+    commands: [DrawIrCommand], start_index: i64, target: DrawIrRect,
+    offset_x: i32, offset_y: i32, active_clip: DrawIrRect,
+    viewport_w: i32, viewport_h: i32, budget: i32
+) -> Engine2dOcclusionProof:
+    if target.width <= 0 or target.height <= 0:
+        return Engine2dOcclusionProof(
+            covered: true, remaining: budget, overflowed: false)
+    if budget <= 0:
+        return Engine2dOcclusionProof(
+            covered: false, remaining: 0, overflowed: true)
+    var index = start_index
+    while index < commands.len():
+        val command = commands[index]
+        if command.? == false:
+            index += 1
+            continue
+        if ((command.color >> 24) & 0xFFu32) == 0xFFu32:
+            val occluder = _engine2d_draw_ir_exact_plain_bounds(
+                command, offset_x, offset_y, active_clip,
+                viewport_w, viewport_h)
+            if occluder.present:
+                val intersection = draw_ir_rect_intersection(target, occluder)
+                if intersection.width > 0 and intersection.height > 0:
+                    var remaining = budget - 1
+                    val target_x1 = target.x + target.width
+                    val target_y1 = target.y + target.height
+                    val ix1 = intersection.x + intersection.width
+                    val iy1 = intersection.y + intersection.height
+                    val top = draw_ir_rect_bounds(
+                        target.x, target.y, target.width,
+                        intersection.y - target.y)
+                    val bottom = draw_ir_rect_bounds(
+                        target.x, iy1, target.width, target_y1 - iy1)
+                    val left = draw_ir_rect_bounds(
+                        target.x, intersection.y,
+                        intersection.x - target.x, intersection.height)
+                    val right = draw_ir_rect_bounds(
+                        ix1, intersection.y, target_x1 - ix1,
+                        intersection.height)
+                    val top_proof = _engine2d_draw_ir_prove_rect_covered(
+                        commands, index + 1, top, offset_x, offset_y,
+                        active_clip, viewport_w, viewport_h, remaining)
+                    if not top_proof.covered:
+                        return top_proof
+                    remaining = top_proof.remaining
+                    val bottom_proof = _engine2d_draw_ir_prove_rect_covered(
+                        commands, index + 1, bottom, offset_x, offset_y,
+                        active_clip, viewport_w, viewport_h, remaining)
+                    if not bottom_proof.covered:
+                        return bottom_proof
+                    remaining = bottom_proof.remaining
+                    val left_proof = _engine2d_draw_ir_prove_rect_covered(
+                        commands, index + 1, left, offset_x, offset_y,
+                        active_clip, viewport_w, viewport_h, remaining)
+                    if not left_proof.covered:
+                        return left_proof
+                    remaining = left_proof.remaining
+                    val right_proof = _engine2d_draw_ir_prove_rect_covered(
+                        commands, index + 1, right, offset_x, offset_y,
+                        active_clip, viewport_w, viewport_h, remaining)
+                    if not right_proof.covered:
+                        return right_proof
+                    return Engine2dOcclusionProof(
+                        covered: true, remaining: right_proof.remaining,
+                        overflowed: false)
+        index += 1
+    Engine2dOcclusionProof(
+        covered: false, remaining: budget, overflowed: false)
 
 fn _engine2d_draw_ir_command_geometry(command: DrawIrCommand,
                                       x: i32, y: i32, w: i32, h: i32) -> DrawIrCommand:
@@ -1575,13 +1673,13 @@ fn engine2d_draw_ir_coalesce_plain_fills(commands: [DrawIrCommand]) -> Engine2dD
 # _engine2d_draw_ir_render_box), so callers reassign the typed outcome engine.
 fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand], offset_x: i32, offset_y: i32, images: [Engine2dResolvedDrawIrImage], blend_images: bool, metal_device_glass_required: bool, active_clip: DrawIrRect, css_background_pixel_work_budget: i64) -> Engine2dDrawIrRenderOutcome:
     var eng = engine
-    val command_plan = engine2d_draw_ir_coalesce_plain_fills(commands)
     # Surface dimensions read ONCE at loop entry and threaded down to the
     # glass-material bounds check; deep re-reads of eng.width()/height()
     # returned corrupted values on the freestanding lane (see
     # _engine2d_draw_ir_render_glass_material).
     val surface_fb_w = eng.width()
     val surface_fb_h = eng.height()
+    val command_plan = engine2d_draw_ir_coalesce_plain_fills(commands)
     var rendered = 0
     var skipped = 0
     var unsupported_kinds = ""
@@ -1596,6 +1694,7 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
     var css_background_pixel_work_remaining = css_background_pixel_work_budget
     var command_index: i64 = 0
     for command in command_plan.commands:
+        val current_index = command_index
         val command_weight = if command_plan.logical_weights.len() == 0:
             1
         else:
@@ -1607,6 +1706,18 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
         if command.? == false:
             skipped = skipped + 1
             continue
+        val exact_bounds = _engine2d_draw_ir_exact_plain_bounds(
+            command, offset_x, offset_y, active_clip,
+            surface_fb_w, surface_fb_h)
+        if exact_bounds.present:
+            val proof = _engine2d_draw_ir_prove_rect_covered(
+                command_plan.commands, current_index + 1, exact_bounds,
+                offset_x, offset_y, active_clip,
+                surface_fb_w, surface_fb_h,
+                ENGINE2D_DRAW_IR_OCCLUSION_PROOF_BUDGET)
+            if proof.covered:
+                skipped = skipped + command_weight
+                continue
         val command_kind: text = command.kind
         val x = offset_x + command.x
         val y = offset_y + command.y
