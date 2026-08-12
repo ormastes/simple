@@ -64,6 +64,40 @@ describe "SoftwareBackend SIMD integration":
 # ============================================================================
 
     describe "alpha blending":
+        it "in-place span image blend matches scalar pixels, clipping, and damage":
+            var scalar = SoftwareBackend.create()
+            var simd = SoftwareBackend.create_cpu_simd()
+            expect(scalar.init(9, 3)).to_equal(true)
+            expect(simd.init(9, 3)).to_equal(true)
+            scalar.clear(0x80402010u32)
+            simd.clear(0x80402010u32)
+            scalar.present()
+            simd.present()
+            val image: [u32] = [
+                0x00000000u32, 0x40FF0000u32, 0x8000FF00u32,
+                0xFFFFFFFFu32, 0x7F1020F0u32, 0x010000FFu32,
+                0xC0FF8040u32, 0x20010203u32, 0xFF112233u32,
+                0x00000000u32, 0x80808080u32, 0xFFFF00FFu32
+            ]
+            # Negative x clips the source offset while keeping the fast
+            # mask-off span path active.
+            scalar.draw_image_blend(-2, 1, 6, 2, image)
+            simd.draw_image_blend(-2, 1, 6, 2, image)
+            expect(simd.read_pixels()).to_equal(scalar.read_pixels())
+            expect(simd.damage_rects(16)).to_equal(scalar.damage_rects(16))
+            scalar.shutdown()
+            simd.shutdown()
+
+        it "transparent in-place image span is an exact no-op":
+            var simd = SoftwareBackend.create_cpu_simd()
+            expect(simd.init(4, 1)).to_equal(true)
+            simd.clear(0x7F123456u32)
+            simd.present()
+            val before = simd.read_pixels()
+            simd.draw_image_blend(0, 0, 4, 1, [0x00000000u32; 4])
+            expect(simd.read_pixels()).to_equal(before)
+            simd.shutdown()
+
         it "AC-6: draw_rect_filled opaque spans record simd fill hits":
             var backend = SoftwareBackend.create()
             reset_simd_hits()

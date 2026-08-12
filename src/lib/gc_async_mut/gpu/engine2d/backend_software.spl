@@ -18,8 +18,7 @@ use std.gpu.engine2d.color.{color_a, color_r, color_g, color_b, rgba, blend}
 use std.gpu.engine2d.helpers_text.{text_metrics, text_aa_blit_buffer}
 use common.ui.glyph_bitmap_5x7.{glyph_index_for_char_code, glyph_row_bits}
 use std.gpu.engine2d.simd_provider.{record_simd_fill_hit, record_simd_copy_hit, record_simd_alpha_hit}
-use std.gpu.engine2d.simd_kernels.{native_pixel_rows_enabled, _scalar_fill_row, rt_engine2d_simd_fill_span_u32, rt_engine2d_simd_copy_span_u32, engine2d_simd_blend_row_u32}
-use std.gpu.engine2d.simd_kernels.{active_arch_text}
+use std.gpu.engine2d.simd_kernels.{native_pixel_rows_enabled, _scalar_fill_row, rt_engine2d_simd_fill_span_u32, rt_engine2d_simd_copy_span_u32, rt_engine2d_simd_blend_span_u32, rt_engine2d_simd_blend_const_span_u32}
 use common.gpu.engine2d.kernel_registry.{
     CpuKernelTable, SpanOpBatch,
     kernel_table_new, kernel_table_register, kernel_table_seal,
@@ -834,30 +833,11 @@ impl RenderBackend for SoftwareBackend:
                     else:
                         val dst_off = py * self.w + start_x
                         val src_off = src_row_base + src_x
-                        if self.native_simd_spans and native_pixel_rows_enabled() and active_arch_text() == "x86_64":
-                            var dst_row: [u32] = [0u32; count]
-                            var src_row: [u32] = [0u32; count]
-                            # cpu-lane-loop-ok: SIMD gather: materialises the dst and src spans for engine2d_simd_blend_row_u32; bound is the clipped span width and it feeds the bulk path
-                            while col < count:
-                                dst_row[col] = self.buf[dst_off + col]
-                                src_row[col] = pixels[src_off + col]
-                                col = col + 1
-                            val blended = engine2d_simd_blend_row_u32(dst_row, src_row)
-                            if blended.len() == count:
-                                record_simd_alpha_hit()
-                                col = 0
-                                # cpu-lane-loop-ok: SIMD scatter: writes the bulk-blended row back to the framebuffer; bound is the clipped span width
-                                while col < count:
-                                    self.buf[dst_off + col] = blended[col]
-                                    col = col + 1
-                            else:
-                                col = 0
-                                # cpu-lane-loop-ok: scalar fallback taken when the SIMD row blend returned a short row; correctness fallback for the bulk path, not a replacement for it
-                                while col < count:
-                                    val src = pixels[src_off + col]
-                                    if color_a(src) > 0:
-                                        self.buf[dst_off + col] = blend(src, self.buf[dst_off + col])
-                                    col = col + 1
+                        if self.native_simd_spans and native_pixel_rows_enabled():
+                            record_simd_alpha_hit()
+                            self.buf = rt_engine2d_simd_blend_span_u32(
+                                self.buf, dst_off.to_i64(), pixels,
+                                src_off.to_i64(), count.to_i64())
                         else:
                             # cpu-lane-loop-ok: scalar fallback taken when SIMD spans are unavailable on this arch; this is the reference blend body the SIMD path is checked against
                             while col < count:
@@ -1101,23 +1081,8 @@ impl SoftwareBackend:
             return
         if self.native_simd_spans and native_pixel_rows_enabled():
             record_simd_alpha_hit()
-            var dst_row: [u32] = [0; safe_count]
-            var src_row: [u32] = [color; safe_count]
-            var j = 0
-            # cpu-lane-loop-ok: SIMD gather inside the sw_blend_const_raw_span bulk primitive; materialises the dst span for engine2d_simd_blend_row_u32
-            while j < safe_count:
-                dst_row[j] = self.buf[offset + j]
-                j = j + 1
-            val row = engine2d_simd_blend_row_u32(dst_row, src_row)
-            j = 0
-            # cpu-lane-loop-ok: SIMD scatter inside sw_blend_const_raw_span, length-guarded against a short blended row
-            while j < safe_count and j < row.len():
-                self.buf[offset + j] = row[j]
-                j = j + 1
-            # cpu-lane-loop-ok: tail fallback for the elements a short SIMD blended row did not cover; normally zero iterations
-            while j < safe_count:
-                self.buf[offset + j] = blend(color, self.buf[offset + j])
-                j = j + 1
+            self.buf = rt_engine2d_simd_blend_const_span_u32(
+                self.buf, offset.to_i64(), safe_count.to_i64(), color.to_i64())
             return
         var i = 0
         # cpu-lane-loop-ok: scalar fallback inside sw_blend_const_raw_span when SIMD spans are unavailable; this IS the bulk span primitive
