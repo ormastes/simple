@@ -27,6 +27,9 @@ extern fn rt_vulkan_init_headless_present(width: i64, height: i64, vsync: i64) -
 extern fn rt_vulkan_init_window_present(width: i64, height: i64, vsync: i64) -> i64
 extern fn rt_vulkan_init_external_window_present(kind: i64, display: i64, window: i64, width: i64, height: i64, vsync: i64) -> i64
 extern fn rt_vulkan_present_buffer(swapchain: i64, buffer: i64, width: i64, height: i64, content_revision: i64) -> i64
+extern fn rt_vulkan_present_buffer_regions_raw(swapchain: i64, buffer: i64, width: i64, height: i64, content_revision: i64, rects_ptr: i64, rects_len: i64) -> i64
+extern fn rt_vulkan_last_present_copy_bytes(swapchain: i64) -> i64
+extern fn rt_vulkan_last_present_copy_rects(swapchain: i64) -> i64
 extern fn rt_vulkan_destroy_swapchain(swapchain: i64) -> bool
 extern fn rt_vulkan_shutdown() -> bool
 extern fn rt_vulkan_is_available() -> bool
@@ -767,6 +770,36 @@ fn vulkan_sffi_init_external_window_present(kind: i64, display: i64, window: i64
 
 fn vulkan_sffi_present_buffer(swapchain: i64, buffer: i64, width: i64, height: i64, content_revision: i64) -> i64:
     rt_vulkan_present_buffer(swapchain, buffer, width, height, content_revision)
+
+fn vulkan_sffi_present_buffer_regions(swapchain: i64, buffer: i64, width: i64, height: i64, content_revision: i64, rects: [i64]) -> i64:
+    if rects.len() == 0 or rects.len() % 4 != 0 or rects.len() > 1024:
+        return 0
+    if gpu_sffi_uses_interpreter_array_abi():
+        return rt_vulkan_present_buffer(
+            swapchain, buffer, width, height, content_revision)
+    var descriptor_bytes: [u8] = []
+    var i = 0
+    while i < rects.len():
+        var field = 0
+        while field < 4:
+            val value = rects[i + field]
+            if value < 0:
+                return 0
+            var byte = 0
+            while byte < 8:
+                descriptor_bytes.push(((value >> (byte * 8)) & 255).to_u8())
+                byte += 1
+            field += 1
+        i += 4
+    rt_vulkan_present_buffer_regions_raw(
+        swapchain, buffer, width, height, content_revision,
+        rt_array_data_ptr_u8(descriptor_bytes), descriptor_bytes.len().to_i64())
+
+fn vulkan_sffi_last_present_copy_bytes(swapchain: i64) -> i64:
+    rt_vulkan_last_present_copy_bytes(swapchain)
+
+fn vulkan_sffi_last_present_copy_rects(swapchain: i64) -> i64:
+    rt_vulkan_last_present_copy_rects(swapchain)
 
 fn vulkan_sffi_destroy_swapchain(swapchain: i64) -> bool:
     rt_vulkan_destroy_swapchain(swapchain)

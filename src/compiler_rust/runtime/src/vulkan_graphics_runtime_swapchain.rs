@@ -248,8 +248,54 @@ pub extern "C" fn rt_vulkan_present_buffer(sc: i64, buffer: i64, w: i64, h: i64,
 }
 
 #[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_present_buffer_regions_raw(sc: i64, buffer: i64, w: i64, h: i64, content_revision: i64, rects_ptr: i64, rects_len: i64) -> i64 {
+    if rects_ptr <= 0 || rects_len <= 0 || rects_len % 32 != 0 || rects_len > 32 * 256 || w <= 0 || h <= 0 || w > u32::MAX as i64 || h > u32::MAX as i64 { return 0; }
+    let bytes = unsafe { std::slice::from_raw_parts(rects_ptr as *const u8, rects_len as usize) };
+    let mut rects = Vec::with_capacity(bytes.len() / 32);
+    for tuple in bytes.chunks_exact(32) {
+        let mut values = [0i64; 4];
+        for (field, value) in values.iter_mut().enumerate() {
+            let start = field * 8;
+            *value = i64::from_le_bytes(tuple[start..start + 8].try_into().unwrap());
+        }
+        if values.iter().any(|value| *value < 0 || *value > u32::MAX as i64) { return 0; }
+        rects.push([values[0] as u32, values[1] as u32, values[2] as u32, values[3] as u32]);
+    }
+    let mut state = STATE.lock();
+    let swapchain = match state.swapchains.get(&sc).cloned() { Some(value) => value, None => return 0 };
+    let source = match state.buffers.get(&buffer).cloned() { Some(value) => value, None => return 0 };
+    match swapchain.copy_buffer_regions_and_present(&source, w as u32, h as u32, content_revision, &rects) {
+        Ok((_image, suboptimal, partial)) => match (partial, suboptimal) { (true, true) => 4, (true, false) => 3, (false, true) => 2, (false, false) => 1 },
+        Err(error) => { state.set_error(format!("present buffer regions: {error}")); 0 }
+    }
+}
+
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_last_present_copy_bytes(sc: i64) -> i64 {
+    STATE.lock().swapchains.get(&sc).and_then(|value| i64::try_from(value.last_present_copy_bytes()).ok()).unwrap_or(-1)
+}
+
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_last_present_copy_rects(sc: i64) -> i64 {
+    STATE.lock().swapchains.get(&sc).and_then(|value| i64::try_from(value.last_present_copy_rects()).ok()).unwrap_or(-1)
+}
+
+#[no_mangle]
 #[cfg(not(feature = "vulkan"))]
 pub extern "C" fn rt_vulkan_present_buffer(_sc: i64, _buffer: i64, _w: i64, _h: i64, _content_revision: i64) -> i64 { 0 }
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_present_buffer_regions_raw(_sc: i64, _buffer: i64, _w: i64, _h: i64, _revision: i64, _rects: i64, _len: i64) -> i64 { 0 }
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_last_present_copy_bytes(_sc: i64) -> i64 { -1 }
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_last_present_copy_rects(_sc: i64) -> i64 { -1 }
 
 #[no_mangle]
 #[cfg(feature = "vulkan")]
@@ -375,7 +421,7 @@ pub extern "C" fn rt_vulkan_present(_sc: i64, _image_index: i64) -> i64 {
 
 #[cfg(all(test, feature = "vulkan"))]
 mod tests {
-    use super::{rt_vulkan_destroy_swapchain, rt_vulkan_init_external_window_present, rt_vulkan_init_headless_present, rt_vulkan_init_window_present, rt_vulkan_present_buffer};
+    use super::{rt_vulkan_destroy_swapchain, rt_vulkan_init_external_window_present, rt_vulkan_init_headless_present, rt_vulkan_init_window_present, rt_vulkan_last_present_copy_bytes, rt_vulkan_last_present_copy_rects, rt_vulkan_present_buffer, rt_vulkan_present_buffer_regions_raw};
     use crate::vulkan_graphics_runtime::vulkan_graphics_runtime_buffer::{rt_vulkan_alloc_buffer, rt_vulkan_copy_to_buffer_raw, rt_vulkan_free_buffer};
     use crate::vulkan_graphics_runtime::vulkan_graphics_runtime_core::{rt_vulkan_shutdown, STATE};
     use crate::vulkan_graphics_runtime::vulkan_graphics_runtime_device::rt_vulkan_selected_device_driver_identity;
@@ -385,6 +431,40 @@ mod tests {
         for (index, chunk) in bytes.chunks(MAX_UPLOAD).enumerate() {
             assert_eq!(rt_vulkan_copy_to_buffer_raw(buffer, chunk.as_ptr() as i64, chunk.len() as i64, (index * MAX_UPLOAD) as i64), 1);
         }
+    }
+
+    #[test]
+    fn damaged_present_rejects_invalid_descriptor_storage() {
+        assert_eq!(rt_vulkan_present_buffer_regions_raw(0, 0, 8, 8, 1, 0, 32), 0);
+        assert_eq!(rt_vulkan_present_buffer_regions_raw(0, 0, 8, 8, 1, 1, 31), 0);
+    }
+
+    #[test]
+    #[ignore = "requires VK_EXT_headless_surface and a presentation-capable Vulkan ICD"]
+    fn live_headless_swapchain_reaches_exact_damage_after_seeding() {
+        let (width, height) = (64i64, 32i64);
+        let swapchain = rt_vulkan_init_headless_present(width, height, 0);
+        assert!(swapchain > 0, "{}", STATE.lock().last_error);
+        let pixels = vec![0xff112233u32; (width * height) as usize];
+        let bytes = unsafe { std::slice::from_raw_parts(pixels.as_ptr().cast::<u8>(), (width * height * 4) as usize) };
+        let buffer = rt_vulkan_alloc_buffer(width * height * 4, 0x80);
+        upload_chunks(buffer, bytes);
+        for revision in 1..=3 { assert!(rt_vulkan_present_buffer(swapchain, buffer, width, height, revision) > 0); }
+        let rect = [4i64, 5, 3, 2];
+        let mut partial = false;
+        for revision in 4..=9 {
+            let status = rt_vulkan_present_buffer_regions_raw(swapchain, buffer, width, height, revision, rect.as_ptr() as i64, 32);
+            assert!(status > 0);
+            if status >= 3 {
+                partial = true;
+                assert_eq!(rt_vulkan_last_present_copy_bytes(swapchain), 24);
+                assert_eq!(rt_vulkan_last_present_copy_rects(swapchain), 1);
+            }
+        }
+        assert!(partial);
+        assert_eq!(rt_vulkan_free_buffer(buffer), 1);
+        assert_eq!(rt_vulkan_destroy_swapchain(swapchain), 1);
+        assert_eq!(rt_vulkan_shutdown(), 1);
     }
 
     #[test]

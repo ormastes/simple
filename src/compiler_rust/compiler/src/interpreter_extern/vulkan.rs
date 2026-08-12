@@ -95,6 +95,9 @@ pub const VULKAN_FNS: &[(&str, Ret, &str)] = &[
     ("rt_vulkan_copy_to_buffer", Ret::I, "ivi"),
     ("rt_vulkan_copy_to_buffer_raw", Ret::I, "iiii"),
     ("rt_vulkan_copy_to_image", Ret::I, "iv"),
+    ("rt_vulkan_present_buffer_regions_raw", Ret::I, "iiiiiii"),
+    ("rt_vulkan_last_present_copy_bytes", Ret::I, "i"),
+    ("rt_vulkan_last_present_copy_rects", Ret::I, "i"),
     ("rt_vulkan_create_compute_pipeline", Ret::I, "iii"),
     ("rt_vulkan_create_descriptor_set", Ret::I, "i"),
     ("rt_vulkan_create_fence", Ret::I, ""),
@@ -438,11 +441,11 @@ mod tests {
         );
     }
 
-    /// Both cross-validation methods agreed on 92; hold that number so a silent
+    /// Both cross-validation methods agreed on 95; hold that number so a silent
     /// drop is a failure rather than a smaller sweep.
     #[test]
-    fn family_size_is_ninety_two() {
-        assert_eq!(VULKAN_FNS.len(), 92);
+    fn family_size_is_ninety_five() {
+        assert_eq!(VULKAN_FNS.len(), 95);
     }
 
     /// Names outside the family are rejected, never silently succeed.

@@ -1606,6 +1606,13 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_vulkan_copy_from_buffer", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_copy_from_buffer_raw", &[I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new(
+        "rt_vulkan_present_buffer_regions_raw",
+        &[I64, I64, I64, I64, I64, I64, I64],
+        &[I64],
+    ),
+    RuntimeFuncSpec::new("rt_vulkan_last_present_copy_bytes", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_vulkan_last_present_copy_rects", &[I64], &[I64]),
+    RuntimeFuncSpec::new(
         "rt_vulkan_copy_from_buffer_regions_raw",
         &[I64, I64, I64, I64, I64],
         &[I64],

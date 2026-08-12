@@ -56,7 +56,8 @@ use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_recover_dependency_quarantine,
     vulkan_sffi_init_headless_present, vulkan_sffi_init_window_present,
     vulkan_sffi_init_external_window_present,
-    vulkan_sffi_present_buffer,
+    vulkan_sffi_present_buffer, vulkan_sffi_present_buffer_regions,
+    vulkan_sffi_last_present_copy_bytes, vulkan_sffi_last_present_copy_rects,
     vulkan_sffi_destroy_swapchain
 }
 use std.gc_async_mut.gpu.engine2d.vulkan_session.{VulkanSession}
@@ -103,6 +104,8 @@ struct VulkanFrameReceipt:
     framebuffer_width: i32
     framebuffer_height: i32
     dirty_rect_count: i64
+    device_to_present_bytes: i64
+    device_to_present_rect_count: i64
     readback_requested: bool
     readback_completed: bool
     readback_bytes: i64
@@ -251,6 +254,8 @@ class VulkanBackend:
     device_content_revision: i64
     frame_index: i64
     frame_dirty_rect_count: i64
+    frame_device_to_present_bytes: i64
+    frame_device_to_present_rect_count: i64
     frame_readback_requested: bool
     frame_readback_completed: bool
     frame_present_attempted: bool
@@ -343,6 +348,8 @@ class VulkanBackend:
             device_content_revision: 0,
             frame_index: 0,
             frame_dirty_rect_count: 0,
+            frame_device_to_present_bytes: 0,
+            frame_device_to_present_rect_count: 0,
             frame_readback_requested: false,
             frame_readback_completed: false,
             frame_present_attempted: false,
@@ -543,6 +550,8 @@ impl RenderBackend for VulkanBackend:
         self.device_content_revision = 0
         self.frame_index = 0
         self.frame_dirty_rect_count = 0
+        self.frame_device_to_present_bytes = 0
+        self.frame_device_to_present_rect_count = 0
         self.frame_readback_requested = false
         self.frame_readback_completed = false
         self.frame_present_attempted = false
@@ -1035,6 +1044,8 @@ impl RenderBackend for VulkanBackend:
             self.present_damage_rects.len().to_i64() / 4
         else:
             0
+        self.frame_device_to_present_bytes = 0
+        self.frame_device_to_present_rect_count = 0
         self.frame_readback_requested = readback_requested
         self.frame_readback_completed = false
         self.frame_present_attempted = present_attempted
@@ -1057,6 +1068,8 @@ impl RenderBackend for VulkanBackend:
             framebuffer_width: self.w,
             framebuffer_height: self.h,
             dirty_rect_count: self.frame_dirty_rect_count,
+            device_to_present_bytes: self.frame_device_to_present_bytes,
+            device_to_present_rect_count: self.frame_device_to_present_rect_count,
             readback_requested: self.frame_readback_requested,
             readback_completed: self.frame_readback_completed,
             readback_bytes: self.present_readback_bytes,
@@ -1094,17 +1107,32 @@ impl RenderBackend for VulkanBackend:
                 self.completion_unknown = true
             self.frame_fallback_reason = "compute-finalize-failed"
             return false
-        val presented = vulkan_sffi_present_buffer(
-            self.presentation_swapchain, self.d_framebuffer,
-            self.w.to_i64(), self.h.to_i64(), self.device_content_revision)
+        val requested_regions = (
+            self.present_damage_valid and self.present_damage_rects.len() > 0)
+        val presented = if requested_regions:
+            vulkan_sffi_present_buffer_regions(
+                self.presentation_swapchain, self.d_framebuffer,
+                self.w.to_i64(), self.h.to_i64(),
+                self.device_content_revision, self.present_damage_rects)
+        else:
+            vulkan_sffi_present_buffer(
+                self.presentation_swapchain, self.d_framebuffer,
+                self.w.to_i64(), self.h.to_i64(), self.device_content_revision)
         if presented <= 0:
             self.frame_fallback_reason = mode + "-present-failed"
             return false
         self.frame_present_completed = true
         self.frame_device_present = true
+        self.frame_device_to_present_bytes = vulkan_sffi_last_present_copy_bytes(
+            self.presentation_swapchain)
+        self.frame_device_to_present_rect_count = vulkan_sffi_last_present_copy_rects(
+            self.presentation_swapchain)
         self.host_mirror_valid = false
         self._clear_present_damage()
-        if presented == 2:
+        if requested_regions and presented <= 2:
+            self.frame_full_fallback = true
+            self.frame_fallback_reason = "swapchain-image-history-seed"
+        if presented == 2 or presented == 4:
             self.frame_fallback_reason = "swapchain-suboptimal"
         true
 
