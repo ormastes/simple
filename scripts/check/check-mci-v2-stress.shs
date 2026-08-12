@@ -1,0 +1,93 @@
+#!/bin/sh
+# Fail-closed MCI-v2 24-hour stress evidence producer.
+set -eu
+LC_ALL=C; export LC_ALL
+
+usage() {
+    echo "usage: $0 --evidence DIR --input-dir DIR --run-id ID --source-hash SHA256 --configuration-hash SHA256 --trusted-key PEM --trusted-key-id ID [--contract-fixture]" >&2
+    exit 2
+}
+evidence= input= run_id= source_hash= configuration_hash= trusted_key= trusted_key_id= fixture=false
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --evidence) evidence=$2; shift 2;; --input-dir) input=$2; shift 2;;
+        --run-id) run_id=$2; shift 2;; --source-hash) source_hash=$2; shift 2;;
+        --configuration-hash) configuration_hash=$2; shift 2;;
+        --trusted-key) trusted_key=$2; shift 2;; --trusted-key-id) trusted_key_id=$2; shift 2;;
+        --contract-fixture) fixture=true; shift;; *) usage;;
+    esac
+done
+safe_token() { [ -n "$1" ] && case "$1" in *[!A-Za-z0-9._-]*) return 1;; esac; }
+is_sha256() { [ "${#1}" -eq 64 ] && case "$1" in *[!0-9a-f]*) return 1;; esac; }
+is_uint() { [ -n "$1" ] && case "$1" in *[!0-9]*) return 1;; esac; }
+hash_file() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
+field() { [ "$(awk -F= -v k="$1" '$1==k{n++}END{print n+0}' "$2")" -eq 1 ] || return 1; sed -n "s/^$1=//p" "$2"; }
+regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
+snapshot() { regular "$1" || return 1; before=$(hash_file "$1"); cp -- "$1" "$2"; [ "$(hash_file "$2")" = "$before" ] && [ "$(hash_file "$1")" = "$before" ]; }
+decimal_delta_is_day() { awk -v a="$1" -v b="$2" 'function norm(x){sub(/^0+/,"",x);return x==""?"0":x} function deq(x,y){x=norm(x);y=norm(y);return length(x)==length(y)&&("x" x)==("x" y)} function add(x,y, i,j,c,d,z){x=norm(x);y=norm(y);i=length(x);j=length(y);z="";c=0;while(i||j||c){d=c+(i?substr(x,i--,1):0)+(j?substr(y,j--,1):0);z=(d%10) z;c=int(d/10)}return norm(z)} BEGIN { if(a !~ /^[0-9]+$/ || b !~ /^[0-9]+$/) exit 1; exit !deq(add(a,"86400000000000"),b) }'; }
+
+[ -n "$evidence" ] && [ -n "$input" ] && safe_token "$run_id" && is_sha256 "$source_hash" && is_sha256 "$configuration_hash" && regular "$trusted_key" && safe_token "$trusted_key_id" || usage
+command -v openssl >/dev/null 2>&1 || { echo 'BLOCKED: OpenSSL is required' >&2; exit 2; }
+root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd -P)
+case "$evidence" in /*) evidence_abs=$evidence;; *) evidence_abs=$root/$evidence;; esac
+case "$evidence_abs" in "$root"/*) :;; *) echo 'BLOCKED: evidence must be below repository root' >&2; exit 2;; esac
+walk=$root; rel=${evidence_abs#"$root"/}; oldifs=$IFS; IFS=/
+for part in $rel; do [ -n "$part" ] && [ "$part" != . ] && [ "$part" != .. ] || exit 2; walk=$walk/$part; [ ! -L "$walk" ] || { echo 'BLOCKED: symlink in evidence path' >&2; exit 2; }; done
+IFS=$oldifs
+mkdir -p "$evidence_abs/artifacts" "$evidence_abs/receipts"
+chmod 0700 "$evidence_abs/artifacts" "$evidence_abs/receipts"
+work=$(mktemp -d "$evidence_abs/.stress.XXXXXX"); trap 'rm -rf "$work"' EXIT HUP INT TERM
+snapshot "$trusted_key" "$work/trusted.pem" || { echo 'BLOCKED: trust key changed during snapshot' >&2; exit 2; }
+publisher_source=$root/scripts/check/lib/mci-secure-publish.c
+regular "$publisher_source" && command -v cc >/dev/null 2>&1 || { echo 'BLOCKED: secure publication owner or C compiler missing' >&2; exit 2; }
+snapshot "$publisher_source" "$work/mci-secure-publish.c" || { echo 'BLOCKED: secure publication owner changed during snapshot' >&2; exit 2; }
+cc -std=c11 -O2 "$work/mci-secure-publish.c" -o "$work/secure-publish" || { echo 'BLOCKED: secure publication owner build failed' >&2; exit 2; }
+
+platform_id= start_ns= end_ns= combined="$work/lanes.env"; : > "$combined"
+for lane in platform allocation process rendering; do
+    receipt=$input/$lane.receipt; signature=$input/$lane.sig; resources=$input/$lane.resources.tsv
+    snapshot "$receipt" "$work/$lane.receipt" && snapshot "$signature" "$work/$lane.sig" && snapshot "$resources" "$work/$lane.resources.tsv" || { echo "BLOCKED: missing, unsafe, or changing $lane stress evidence" >&2; exit 2; }
+    [ "$(field receipt_schema "$work/$lane.receipt" 2>/dev/null || true)" = mci-stress-lane-receipt-v1 ] || { echo "BLOCKED: invalid $lane receipt schema" >&2; exit 2; }
+    [ "$(field lane "$work/$lane.receipt" 2>/dev/null || true)" = "$lane" ] || { echo "BLOCKED: lane mismatch for $lane" >&2; exit 2; }
+    got_platform=$(field certified_platform "$work/$lane.receipt" 2>/dev/null || true); safe_token "$got_platform" || { echo 'BLOCKED: unsafe certified platform identity' >&2; exit 2; }
+    [ -z "$platform_id" ] && platform_id=$got_platform; [ "$got_platform" = "$platform_id" ] || { echo 'BLOCKED: certified platform correlation mismatch' >&2; exit 2; }
+    [ "$(field run_id "$work/$lane.receipt" 2>/dev/null || true)" = "$run_id" ] && [ "$(field source_hash "$work/$lane.receipt" 2>/dev/null || true)" = "$source_hash" ] && [ "$(field configuration_hash "$work/$lane.receipt" 2>/dev/null || true)" = "$configuration_hash" ] || { echo "BLOCKED: source/run/config correlation mismatch for $lane" >&2; exit 2; }
+    got_start=$(field start_utc_ns "$work/$lane.receipt" 2>/dev/null || true); got_end=$(field end_utc_ns "$work/$lane.receipt" 2>/dev/null || true)
+    is_uint "$got_start" && is_uint "$got_end" && decimal_delta_is_day "$got_start" "$got_end" || { echo "BLOCKED: $lane duration is not exactly 24 hours" >&2; exit 2; }
+    [ -z "$start_ns" ] && start_ns=$got_start && end_ns=$got_end; [ "$got_start" = "$start_ns" ] && [ "$got_end" = "$end_ns" ] || { echo 'BLOCKED: lane time correlation mismatch' >&2; exit 2; }
+    declared_resources=$(field resource_series_sha256 "$work/$lane.receipt" 2>/dev/null || true); [ "$declared_resources" = "$(hash_file "$work/$lane.resources.tsv")" ] || { echo "BLOCKED: $lane resource series digest mismatch" >&2; exit 2; }
+    samples=$(field sample_count "$work/$lane.receipt" 2>/dev/null || true); is_uint "$samples" && [ "$samples" -ge 2 ] || { echo "BLOCKED: insufficient $lane resource samples" >&2; exit 2; }
+    rss_ceiling=$(field rss_ceiling_bytes "$work/$lane.receipt" 2>/dev/null || true); cpu_ceiling=$(field cpu_ceiling_millis "$work/$lane.receipt" 2>/dev/null || true); queue_ceiling=$(field queue_ceiling "$work/$lane.receipt" 2>/dev/null || true); storage_ceiling=$(field storage_ceiling_bytes "$work/$lane.receipt" 2>/dev/null || true)
+    rss_min=$(field rss_min_bytes "$work/$lane.receipt" 2>/dev/null || true); rss_max=$(field rss_max_bytes "$work/$lane.receipt" 2>/dev/null || true); cpu_min=$(field cpu_min_millis "$work/$lane.receipt" 2>/dev/null || true); cpu_max=$(field cpu_max_millis "$work/$lane.receipt" 2>/dev/null || true); queue_min=$(field queue_min "$work/$lane.receipt" 2>/dev/null || true); queue_max=$(field queue_max "$work/$lane.receipt" 2>/dev/null || true); storage_min=$(field storage_min_bytes "$work/$lane.receipt" 2>/dev/null || true); storage_max=$(field storage_max_bytes "$work/$lane.receipt" 2>/dev/null || true)
+    for value in "$rss_ceiling" "$cpu_ceiling" "$queue_ceiling" "$storage_ceiling" "$rss_min" "$rss_max" "$cpu_min" "$cpu_max" "$queue_min" "$queue_max" "$storage_min" "$storage_max"; do is_uint "$value" || { echo "BLOCKED: invalid $lane resource bound" >&2; exit 2; }; done
+    awk -F '\t' -v s="$got_start" -v e="$got_end" -v n="$samples" -v rc="$rss_ceiling" -v cc="$cpu_ceiling" -v qc="$queue_ceiling" -v sc="$storage_ceiling" -v rmin="$rss_min" -v rmax="$rss_max" -v cmin="$cpu_min" -v cmax="$cpu_max" -v qmin="$queue_min" -v qmax="$queue_max" -v stmin="$storage_min" -v stmax="$storage_max" '
+      function norm(x){sub(/^0+/,"",x);return x==""?"0":x} function cmp(a,b,la,lb){a=norm(a);b=norm(b);la=length(a);lb=length(b);if(la<lb)return -1;if(la>lb)return 1;if(("x" a)==("x" b))return 0;return ("x" a)<("x" b)?-1:1} function deq(a,b){return cmp(a,b)==0}
+      NR==1 {if($0!="utc_ns\trss_bytes\tcpu_millis\tqueue_depth\tstorage_bytes")exit 1;next}
+      {for(i=1;i<=5;i++)if($i!~/^[0-9]+$/)exit 1; if(cmp($1,s)<0||cmp($1,e)>0||(c&&cmp(last,$1)>=0))exit 1; if(cmp($2,rc)>0||cmp($3,cc)>0||cmp($4,qc)>0||cmp($5,sc)>0)exit 1; if(!c){first=$1;armin=armax=$2;acmin=acmax=$3;aqmin=aqmax=$4;asmin=asmax=$5}else{if(cmp($2,armin)<0)armin=$2;if(cmp($2,armax)>0)armax=$2;if(cmp($3,acmin)<0)acmin=$3;if(cmp($3,acmax)>0)acmax=$3;if(cmp($4,aqmin)<0)aqmin=$4;if(cmp($4,aqmax)>0)aqmax=$4;if(cmp($5,asmin)<0)asmin=$5;if(cmp($5,asmax)>0)asmax=$5} last=$1;c++}
+      END{if(!deq(sprintf("%d",c),n)||!deq(first,s)||!deq(last,e)||!deq(armin,rmin)||!deq(armax,rmax)||!deq(acmin,cmin)||!deq(acmax,cmax)||!deq(aqmin,qmin)||!deq(aqmax,qmax)||!deq(asmin,stmin)||!deq(asmax,stmax))exit 1}' "$work/$lane.resources.tsv" || { echo "BLOCKED: malformed, out-of-order, out-of-range, or misreported $lane resource series" >&2; exit 2; }
+    for counter in invariant_violations timeout_violations leak_violations queue_violations; do [ "$(field "$counter" "$work/$lane.receipt" 2>/dev/null || true)" = 0 ] || { echo "BLOCKED: nonzero $counter in $lane" >&2; exit 2; }; done
+    [ "$(field attestation "$work/$lane.receipt" 2>/dev/null || true)" = signed-v1 ] && [ "$(field trusted_key_id "$work/$lane.receipt" 2>/dev/null || true)" = "$trusted_key_id" ] || { echo "BLOCKED: unsigned or wrong-key $lane receipt" >&2; exit 2; }
+    openssl dgst -sha256 -verify "$work/trusted.pem" -signature "$work/$lane.sig" "$work/$lane.receipt" >/dev/null 2>&1 || { echo "BLOCKED: invalid $lane signature" >&2; exit 2; }
+    echo "lane=$lane|receipt_sha256=$(hash_file "$work/$lane.receipt")|signature_sha256=$(hash_file "$work/$lane.sig")|resource_series_sha256=$declared_resources|samples=$samples|rss_max=$rss_max|cpu_max=$cpu_max|queue_max=$queue_max|storage_max=$storage_max" >> "$combined"
+done
+
+mode=live; release=true; result=pass
+if [ "$fixture" = true ]; then [ "${MCI_STRESS_CONTROLLED_FIXTURE:-0}" = 1 ] || { echo 'BLOCKED: fixture environment opt-in missing' >&2; exit 2; }; mode=contract-only; release=false; result=contract_only; fi
+producer_sha=$(hash_file "$root/scripts/check/check-mci-v2-stress.shs")
+{
+    echo 'artifact_schema=mci-stress-evidence-v1'; echo "artifact_mode=$mode"; echo "release_eligible=$release"
+    echo "result=$result"; echo "run_id=$run_id"; echo "source_hash=$source_hash"; echo "configuration_hash=$configuration_hash"
+    echo "certified_platform=$platform_id"; echo "start_utc_ns=$start_ns"; echo "end_utc_ns=$end_ns"; echo 'duration_ns=86400000000000'
+    echo 'required_lanes=platform,allocation,process,rendering'; echo 'resource_series=complete'; echo 'invariant_violations=0'; echo 'timeout_violations=0'; echo 'leak_violations=0'; echo 'queue_violations=0'
+    echo "producer_sha256=$producer_sha"; cat "$combined"
+} > "$work/stress.evidence"
+artifact_sha=$(hash_file "$work/stress.evidence")
+{
+    echo 'receipt_schema=mci-lane-receipt-v1'; echo 'check_id=stress'; echo 'producer_class=stress-target'; echo 'attestation=EXTERNAL_SIGNER_SETS_signed-v1'; echo 'trusted_key_id=EXTERNAL_SIGNER_SETS_key_id'; echo 'signature_relpath=stress.sig'
+    echo "run_id=$run_id"; echo "source_hash=$source_hash"; echo "configuration_hash=$configuration_hash"; echo "captured_at_utc_ns=$end_ns"; echo 'valid_until_utc_ns=EXTERNAL_SIGNER_SETS_valid_until_utc_ns'; echo "result=$result"
+    echo 'scenarios=MCI-NFR-015,MCI-NFR-016'; echo 'artifact_relpath=stress.evidence'; echo "artifact_sha256=$artifact_sha"; echo 'artifact_schema=mci-stress-evidence-v1'; echo "artifact_mode=$mode"; echo "release_eligible=$release"
+} > "$work/stress.canonical"
+echo "receipt_hash=$(hash_file "$work/stress.canonical")" >> "$work/stress.canonical"
+"$work/secure-publish" "$evidence_abs/artifacts" "$work/stress.evidence" stress.evidence || { echo 'BLOCKED: secure artifact publication failed (existing output must be preserved)' >&2; exit 2; }
+"$work/secure-publish" "$evidence_abs/receipts" "$work/stress.canonical" stress.receipt.unsigned.template || { echo 'BLOCKED: secure receipt-template publication failed (existing output must be preserved)' >&2; exit 2; }
+echo "$result: MCI-v2 stress evidence contract; artifact=$evidence_abs/artifacts/stress.evidence"

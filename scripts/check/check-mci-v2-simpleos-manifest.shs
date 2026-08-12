@@ -1,0 +1,320 @@
+#!/bin/sh
+# Fail-closed schema-2 SimpleOS platform-manifest evidence producer.
+set -eu
+LC_ALL=C; export LC_ALL
+
+usage() {
+    echo "usage: $0 --evidence DIR --manifest FILE --configuration-manifest FILE --run-id ID --source-hash SHA256 --configuration-hash SHA256 --compiler-receipt-hash SHA256 --captured-at-utc-ns NS --valid-until-utc-ns NS --now-utc-ns NS --trusted-key-id ID --collector-trust-key PEM --collector-key-id ID [--contract-fixture]" >&2
+    exit 2
+}
+evidence= manifest= config_manifest= run_id= source_hash= config_hash= compiler_hash= captured= valid_until= now=
+trusted_key_id= collector_key= collector_key_id= fixture=false
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --evidence) evidence=$2; shift 2;; --manifest) manifest=$2; shift 2;; --configuration-manifest) config_manifest=$2; shift 2;;
+        --run-id) run_id=$2; shift 2;; --source-hash) source_hash=$2; shift 2;;
+        --configuration-hash) config_hash=$2; shift 2;; --compiler-receipt-hash) compiler_hash=$2; shift 2;;
+        --captured-at-utc-ns) captured=$2; shift 2;; --valid-until-utc-ns) valid_until=$2; shift 2;; --now-utc-ns) now=$2; shift 2;;
+        --trusted-key-id) trusted_key_id=$2; shift 2;; --collector-trust-key) collector_key=$2; shift 2;;
+        --collector-key-id) collector_key_id=$2; shift 2;; --contract-fixture) fixture=true; shift;; *) usage;;
+    esac
+done
+safe_token() { case "$1" in ''|*[!A-Za-z0-9._-]*) return 1;; esac; }
+is_hash() { [ "${#1}" -eq 64 ] && case "$1" in *[!0-9a-f]*) return 1;; esac; }
+is_uint() { case "$1" in ''|*[!0-9]*) return 1;; esac; }
+dec_le() { awk -v a="$1" -v b="$2" 'BEGIN{sub(/^0+/,"",a);sub(/^0+/,"",b);if(a=="")a="0";if(b=="")b="0";exit !((length(a)<length(b))||(length(a)==length(b)&&a<=b))}'; }
+within_day() { awk -v a="$1" -v b="$2" 'BEGIN{sub(/^0+/,"",a);sub(/^0+/,"",b);if(a=="")a="0";if(b=="")b="0";if(length(b)<length(a)||(length(b)==length(a)&&b<a))exit 1;borrow=0;out="";i=length(b);j=length(a);while(i>0){x=substr(b,i,1)+0-borrow;y=(j>0?substr(a,j,1)+0:0);if(x<y){x+=10;borrow=1}else borrow=0;out=(x-y)out;i--;j--}sub(/^0+/,"",out);if(out=="")out="0";lim="86400000000000";exit !((length(out)<length(lim))||(length(out)==length(lim)&&out<=lim))}'; }
+diff_is_day() { awk -v a="$1" -v b="$2" 'BEGIN{sub(/^0+/,"",a);sub(/^0+/,"",b);if(a=="")a="0";if(b=="")b="0";if(length(b)<length(a)||(length(b)==length(a)&&b<a))exit 1;borrow=0;out="";i=length(b);j=length(a);while(i>0){x=substr(b,i,1)+0-borrow;y=(j>0?substr(a,j,1)+0:0);if(x<y){x+=10;borrow=1}else borrow=0;out=(x-y)out;i--;j--}sub(/^0+/,"",out);if(out=="")out="0";exit !(out=="86400000000000")}'; }
+hash_file() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
+regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
+safe_rel() { case "$1" in ''|/*|*..*|*[!A-Za-z0-9._/-]*) return 1;; esac; }
+field() { k=$1 f=$2; [ "$(awk -F= -v k="$k" '$1==k{n++}END{print n+0}' "$f")" -eq 1 ] || return 1; sed -n "s/^$k=//p" "$f"; }
+identity() { if stat -c '%F:%d:%i:%s:%y:%z' "$1" >/dev/null 2>&1; then m=$(stat -c '%F:%d:%i:%s:%y:%z' "$1"); else m=$(stat -f '%HT:%d:%i:%z:%m:%c' "$1"); fi; printf '%s|%s\n' "$m" "$(hash_file "$1")"; }
+snapshot() { s=$1 d=$2; regular "$s" || return 1; i=$(identity "$s") || return 1; cp -- "$s" "$d"; regular "$d" && [ "$(hash_file "$d")" = "${i##*|}" ] && [ "$(identity "$s")" = "$i" ]; }
+safe_existing_path() { p=$1 base=$2; case "$p" in "$base"/*) :;; *) return 1;; esac; relp=${p#"$base"/}; w=$base; saveifs=$IFS; IFS=/; for part in $relp; do [ -n "$part" ] && [ "$part" != . ] && [ "$part" != .. ] || { IFS=$saveifs; return 1; }; w=$w/$part; [ ! -L "$w" ] || { IFS=$saveifs; return 1; }; done; IFS=$saveifs; }
+exact_keys() { f=$1 expected=$2; [ "$(sed 's/=.*//' "$f")" = "$expected" ]; }
+raw_companion() { relpath=$1 expected_hash=$2 label=$3; safe_rel "$relpath" && is_hash "$expected_hash" || return 1; raw_source=$evidence_abs/$relpath; safe_existing_path "$raw_source" "$evidence_abs" || return 1; raw_target=$work/raw-$label; snapshot "$raw_source" "$raw_target" && [ "$(hash_file "$raw_target")" = "$expected_hash" ]; }
+verify_bundle_artifact() {
+    relpath=$1 expected_hash=$2 expected_schema=$3 label=$4
+    safe_rel "$relpath" && is_hash "$expected_hash" || return 1
+    source=$evidence_abs/$relpath; safe_existing_path "$source" "$evidence_abs" || return 1
+    target=$work/$label; snapshot "$source" "$target" || return 1
+    [ "$(hash_file "$target")" = "$expected_hash" ] || return 1
+    [ "$(field artifact_schema "$target" 2>/dev/null || true)" = "$expected_schema" ] || return 1
+    case "$expected_schema" in
+        simpleos-version-transcript-v1)
+            exact_keys "$target" 'artifact_schema
+cell_id
+run_id
+host_identity
+guest_identity
+command_sha256
+exit_code
+version_text_sha256
+raw_relpath
+raw_sha256
+result' && [ "$(field command_sha256 "$target")" = "$(field version_command_sha256 "$r")" ] && [ "$(field exit_code "$target")" = 0 ] && is_hash "$(field version_text_sha256 "$target")" ;;
+        simpleos-compile-transcript-v1)
+            exact_keys "$target" 'artifact_schema
+cell_id
+run_id
+host_identity
+guest_identity
+command_sha256
+exit_code
+source_hash
+output_sha256
+transcript_body_sha256
+raw_relpath
+raw_sha256
+result' && [ "$(field command_sha256 "$target")" = "$(field compile_command_sha256 "$r")" ] && [ "$(field exit_code "$target")" = 0 ] && [ "$(field source_hash "$target")" = "$source_hash" ] && is_hash "$(field output_sha256 "$target")" && is_hash "$(field transcript_body_sha256 "$target")" ;;
+        simpleos-run-transcript-v1)
+            exact_keys "$target" 'artifact_schema
+cell_id
+run_id
+host_identity
+guest_identity
+command_sha256
+exit_code
+image_hash
+payload_sha256
+stdout_sha256
+raw_relpath
+raw_sha256
+result' && [ "$(field command_sha256 "$target")" = "$(field run_command_sha256 "$r")" ] && [ "$(field exit_code "$target")" = 0 ] && [ "$(field image_hash "$target")" = "$image" ] && [ "$(field payload_sha256 "$target")" = "$(field usr_bin_sha256 "$r")" ] && is_hash "$(field stdout_sha256 "$target")" ;;
+        simpleos-alias-identity-v1)
+            exact_keys "$target" 'artifact_schema
+cell_id
+run_id
+host_identity
+guest_identity
+usr_bin_sha256
+bin_sha256
+sys_apps_sha256
+sys_simpletool_sdn_sha256
+result' && [ "$(field usr_bin_sha256 "$target")" = "$(field usr_bin_sha256 "$r")" ] && [ "$(field bin_sha256 "$target")" = "$(field bin_sha256 "$r")" ] && [ "$(field sys_apps_sha256 "$target")" = "$(field sys_apps_sha256 "$r")" ] && [ "$(field sys_simpletool_sdn_sha256 "$target")" = "$(field sys_simpletool_sdn_sha256 "$r")" ] ;;
+        simpleos-stress-resource-series-v1)
+            exact_keys "$target" 'artifact_schema
+cell_id
+run_id
+host_identity
+guest_identity
+started_at_utc_ns
+ended_at_utc_ns
+sample_count
+rss_min_bytes
+rss_max_bytes
+cpu_min_millis
+cpu_max_millis
+storage_min_bytes
+storage_max_bytes
+samples_sha256
+raw_relpath
+raw_sha256
+result' && [ "$(field started_at_utc_ns "$target")" = "$(field stress_started_at_utc_ns "$r")" ] && [ "$(field ended_at_utc_ns "$target")" = "$(field stress_ended_at_utc_ns "$r")" ] && is_uint "$(field sample_count "$target")" && [ "$(field sample_count "$target")" -gt 0 ] && is_hash "$(field samples_sha256 "$target")" && dec_le "$(field rss_min_bytes "$target")" "$(field rss_max_bytes "$target")" && dec_le "$(field cpu_min_millis "$target")" "$(field cpu_max_millis "$target")" && dec_le "$(field storage_min_bytes "$target")" "$(field storage_max_bytes "$target")" ;;
+        simpleos-stress-invariant-ledger-v1)
+            exact_keys "$target" 'artifact_schema
+cell_id
+run_id
+host_identity
+guest_identity
+check_count
+violation_count
+ledger_body_sha256
+raw_relpath
+raw_sha256
+result' && is_uint "$(field check_count "$target")" && [ "$(field check_count "$target")" -gt 0 ] && [ "$(field violation_count "$target")" = 0 ] && is_hash "$(field ledger_body_sha256 "$target")" ;;
+        *) return 1;;
+    esac || return 1
+    [ "$(field cell_id "$target")" = "$cell" ] && [ "$(field run_id "$target")" = "$run_id" ] && [ "$(field host_identity "$target")" = "$host" ] && [ "$(field guest_identity "$target")" = "$guest" ] && [ "$(field result "$target")" = pass ] || return 1
+    case "$expected_schema" in simpleos-alias-identity-v1) return 0;; esac
+    raw_companion "$(field raw_relpath "$target" 2>/dev/null || true)" "$(field raw_sha256 "$target" 2>/dev/null || true)" "$label" || return 1
+    case "$expected_schema" in
+        simpleos-version-transcript-v1) grep -Eq '^Simple [0-9]+\.[0-9]+\.[0-9]+ \(pure-Simple\)$' "$raw_target" && [ "$(hash_file "$raw_target")" = "$(field version_text_sha256 "$target")" ] ;;
+        simpleos-compile-transcript-v1) grep -Fxq "output_sha256=$(field output_sha256 "$target")" "$raw_target" && grep -Fxq 'compile_result=pass' "$raw_target" && [ "$(hash_file "$raw_target")" = "$(field transcript_body_sha256 "$target")" ] ;;
+        simpleos-run-transcript-v1) [ "$(cat "$raw_target")" = 'hello world' ] && [ "$(hash_file "$raw_target")" = "$(field stdout_sha256 "$target")" ] ;;
+        simpleos-stress-resource-series-v1) awk -F'|' -v n="$(field sample_count "$target")" -v rmin="$(field rss_min_bytes "$target")" -v rmax="$(field rss_max_bytes "$target")" -v cmin="$(field cpu_min_millis "$target")" -v cmax="$(field cpu_max_millis "$target")" -v smin="$(field storage_min_bytes "$target")" -v smax="$(field storage_max_bytes "$target")" 'BEGIN{loR=loC=loS=""} /^sample\|[0-9]+\|[0-9]+\|[0-9]+\|[0-9]+$/{k++;r=$3;c=$4;s=$5;if(loR==""||r<loR)loR=r;if(r>hiR)hiR=r;if(loC==""||c<loC)loC=c;if(c>hiC)hiC=c;if(loS==""||s<loS)loS=s;if(s>hiS)hiS=s;next}{bad=1} END{exit !(bad==0&&k==n&&loR==rmin&&hiR==rmax&&loC==cmin&&hiC==cmax&&loS==smin&&hiS==smax)}' "$raw_target" && [ "$(hash_file "$raw_target")" = "$(field samples_sha256 "$target")" ] ;;
+        simpleos-stress-invariant-ledger-v1) awk -F'|' -v n="$(field check_count "$target")" '/^check\|[A-Za-z0-9._-]+\|pass\|0$/{k++;next}{bad=1}END{exit !(bad==0&&k==n)}' "$raw_target" && [ "$(hash_file "$raw_target")" = "$(field ledger_body_sha256 "$target")" ] ;;
+    esac
+}
+
+safe_token "$run_id" && is_hash "$source_hash" && is_hash "$config_hash" && is_hash "$compiler_hash" &&
+is_uint "$captured" && is_uint "$valid_until" && is_uint "$now" && dec_le "$captured" "$now" && dec_le "$now" "$valid_until" && within_day "$captured" "$now" && within_day "$captured" "$valid_until" &&
+safe_token "$trusted_key_id" && safe_token "$collector_key_id" || usage
+root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd -P)
+case "$evidence" in /*) evidence_abs=$evidence;; *) evidence_abs=$root/$evidence;; esac
+case "$manifest" in /*) manifest_abs=$manifest;; *) manifest_abs=$root/$manifest;; esac
+case "$config_manifest" in /*) config_manifest_abs=$config_manifest;; *) config_manifest_abs=$root/$config_manifest;; esac
+case "$collector_key" in /*) key_abs=$collector_key;; *) key_abs=$root/$collector_key;; esac
+case "$evidence_abs" in "$root"/*) :;; *) echo 'BLOCKED: evidence must be below repository root' >&2; exit 2;; esac
+rel=${evidence_abs#"$root"/}; walk=$root; oldifs=$IFS; IFS=/
+for c in $rel; do [ -n "$c" ] && [ "$c" != . ] && [ "$c" != .. ] || exit 2; walk=$walk/$c; [ ! -L "$walk" ] || { echo 'BLOCKED: symlink in evidence path' >&2; exit 2; }; [ -e "$walk" ] || mkdir "$walk"; [ -d "$walk" ] || exit 2; done
+IFS=$oldifs
+for d in artifacts receipts signatures; do [ ! -L "$evidence_abs/$d" ] || exit 2; [ -e "$evidence_abs/$d" ] || mkdir "$evidence_abs/$d"; [ -d "$evidence_abs/$d" ] || exit 2; done
+for o in "$evidence_abs/artifacts/simpleos.evidence" "$evidence_abs/receipts/simpleos.receipt.unsigned.template" "$evidence_abs/receipts/simpleos.receipt" "$evidence_abs/signatures/simpleos.sig"; do [ ! -e "$o" ] && [ ! -L "$o" ] || { echo "BLOCKED: evidence collision: $o" >&2; exit 2; }; done
+safe_existing_path "$manifest_abs" "$root" && safe_existing_path "$config_manifest_abs" "$root" && safe_existing_path "$key_abs" "$root" || { echo 'BLOCKED: unsafe input ancestor' >&2; exit 2; }
+regular "$manifest_abs" && regular "$config_manifest_abs" && regular "$key_abs" || { echo 'BLOCKED: manifest, configuration manifest, or collector trust key missing/unsafe' >&2; exit 2; }
+work=$(mktemp -d "$root/build/mci-simpleos.XXXXXX"); trap 'rm -rf "$work"' EXIT HUP INT TERM
+snapshot "$manifest_abs" "$work/manifest" && snapshot "$config_manifest_abs" "$work/configuration.manifest" && snapshot "$key_abs" "$work/key.pem" || { echo 'BLOCKED: input changed during snapshot' >&2; exit 2; }
+[ "$(hash_file "$work/configuration.manifest")" = "$config_hash" ] || { echo 'BLOCKED: configuration hash is not derived from configuration manifest' >&2; exit 2; }
+
+catalog='linux:x86_32 linux:x86_64 linux:arm32 linux:arm64 linux:riscv32 linux:riscv64 windows:x86_32 windows:x86_64 windows:arm32 windows:arm64 windows:riscv32 windows:riscv64 macos:x86_32 macos:x86_64 macos:arm32 macos:arm64 macos:riscv32 macos:riscv64 freebsd:x86_32 freebsd:x86_64 freebsd:arm32 freebsd:arm64 freebsd:riscv32 freebsd:riscv64'
+reason=none; selected=0; passed=0; index=1
+[ "$(field manifest_schema "$work/manifest" 2>/dev/null || true)" = certified-platform-manifest-v2 ] || reason=unsupported-schema
+[ "$(field run_id "$work/manifest" 2>/dev/null || true)" = "$run_id" ] || reason=manifest-run-mismatch
+[ "$(field source_hash "$work/manifest" 2>/dev/null || true)" = "$source_hash" ] || reason=manifest-source-mismatch
+[ "$(field compiler_receipt_hash "$work/manifest" 2>/dev/null || true)" = "$compiler_hash" ] || reason=manifest-compiler-mismatch
+[ "$(wc -l < "$work/manifest" | tr -d ' ')" -eq 28 ] && [ "$(grep -c '^row=' "$work/manifest")" -eq 24 ] || reason=manifest-must-have-exact-schema-and-24-rows
+[ "$(sed -n '1p' "$work/manifest")" = 'manifest_schema=certified-platform-manifest-v2' ] && [ "$(sed -n '2p' "$work/manifest")" = "run_id=$run_id" ] && [ "$(sed -n '3p' "$work/manifest")" = "source_hash=$source_hash" ] && [ "$(sed -n '4p' "$work/manifest")" = "compiler_receipt_hash=$compiler_hash" ] || reason=manifest-header-must-be-exact
+rows="$work/rows"; : > "$rows"
+for expected in $catalog; do
+    line=$(awk -v wanted="$index" '/^row=/{n++;if(n==wanted){sub(/^row=/,"");print;exit}}' "$work/manifest")
+    IFS='|' read -r cell chosen why host guest row_config image receipt_rel signature_rel extra <<EOF
+$line
+EOF
+    IFS=$oldifs
+    [ -z "${extra:-}" ] && [ "$cell" = "$expected" ] || reason=cells-must-exactly-match-catalog
+    expected_host=host-${cell%%:*}; expected_guest=guest-${cell#*:}
+    [ "$host" = "$expected_host" ] && [ "$guest" = "$expected_guest" ] || reason=cell-coordinate-identity-mismatch
+    is_hash "${row_config:-}" && [ "$row_config" = "$config_hash" ] && is_hash "${image:-}" || reason=missing-or-unbound-cell-identity
+    row_status=UNSELECTED; row_reason=${why:-missing-unselected-reason}
+    if [ "$chosen" = true ]; then
+        selected=$((selected + 1)); row_status=BLOCKED; row_reason=collector-evidence-missing
+        if safe_rel "$receipt_rel" && safe_rel "$signature_rel"; then
+            rp=$evidence_abs/$receipt_rel; sp=$evidence_abs/$signature_rel
+            if safe_existing_path "$rp" "$evidence_abs" && safe_existing_path "$sp" "$evidence_abs" && snapshot "$rp" "$work/collector-$index" 2>/dev/null; then
+                r="$work/collector-$index"; canonical="$work/collector-$index.canonical"; sed '/^receipt_hash=/d' "$r" > "$canonical"
+                rh=$(field receipt_hash "$r" 2>/dev/null || true)
+                keys=$(sed 's/=.*//' "$r")
+                expected_keys='collector_schema
+attestation
+collector_key_id
+cell_id
+host_identity
+guest_identity
+run_id
+source_hash
+compiler_receipt_hash
+configuration_hash
+image_hash
+qemu_or_host_collector
+target_side
+guest_filesystem_execution
+payload_paths
+usr_bin_sha256
+bin_sha256
+sys_apps_sha256
+sys_simpletool_sdn_sha256
+captured_at_utc_ns
+valid_until_utc_ns
+payload_execution_schema
+version_command_sha256
+version_exit_code
+version_transcript_relpath
+version_transcript_sha256
+compile_command_sha256
+compile_exit_code
+compile_transcript_relpath
+compile_transcript_sha256
+run_command_sha256
+run_exit_code
+run_transcript_relpath
+run_transcript_sha256
+alias_identity_relpath
+alias_identity_sha256
+stress_schema
+stress_started_at_utc_ns
+stress_ended_at_utc_ns
+stress_duration_ns
+stress_resource_series_relpath
+stress_resource_series_sha256
+stress_invariant_violations
+stress_invariant_ledger_relpath
+stress_invariant_ledger_sha256
+receipt_hash'
+                if [ "$keys" != "$expected_keys" ] || [ "$(field collector_schema "$r" 2>/dev/null || true)" != simpleos-qemu-host-collector-v1 ]; then row_reason=invalid-collector-schema
+                elif [ "$(field attestation "$r" 2>/dev/null || true)" != signed-real-v1 ]; then row_reason=synthetic-or-unsigned-collector
+                elif [ "$(field collector_key_id "$r" 2>/dev/null || true)" != "$collector_key_id" ]; then row_reason=untrusted-collector
+                elif [ "$(field cell_id "$r" 2>/dev/null || true)" != "$cell" ] || [ "$(field host_identity "$r" 2>/dev/null || true)" != "$host" ] || [ "$(field guest_identity "$r" 2>/dev/null || true)" != "$guest" ]; then row_reason=collector-coordinate-mismatch
+                elif [ "$(field run_id "$r" 2>/dev/null || true)" != "$run_id" ] || [ "$(field source_hash "$r" 2>/dev/null || true)" != "$source_hash" ] || [ "$(field compiler_receipt_hash "$r" 2>/dev/null || true)" != "$compiler_hash" ]; then row_reason=collector-correlation-mismatch
+                elif [ "$(field configuration_hash "$r" 2>/dev/null || true)" != "$row_config" ] || [ "$(field image_hash "$r" 2>/dev/null || true)" != "$image" ]; then row_reason=artifact-correlation-mismatch
+                elif [ "$(field qemu_or_host_collector "$r" 2>/dev/null || true)" != real ] || [ "$(field target_side "$r" 2>/dev/null || true)" != true ] || [ "$(field guest_filesystem_execution "$r" 2>/dev/null || true)" != true ]; then row_reason=not-real-target-execution
+                elif [ "$(field payload_paths "$r" 2>/dev/null || true)" != '/usr/bin,/bin,/sys/apps,/SYS/SIMPLETOOL.SDN' ]; then row_reason=incomplete-payload-paths
+                elif ! is_hash "$(field usr_bin_sha256 "$r" 2>/dev/null || true)" || ! is_hash "$(field bin_sha256 "$r" 2>/dev/null || true)" || ! is_hash "$(field sys_apps_sha256 "$r" 2>/dev/null || true)" || ! is_hash "$(field sys_simpletool_sdn_sha256 "$r" 2>/dev/null || true)"; then row_reason=invalid-payload-hash
+                elif [ "$(field payload_execution_schema "$r" 2>/dev/null || true)" != simpleos-payload-execution-v1 ] || ! is_hash "$(field version_command_sha256 "$r" 2>/dev/null || true)" || [ "$(field version_exit_code "$r" 2>/dev/null || true)" != 0 ] || ! is_hash "$(field compile_command_sha256 "$r" 2>/dev/null || true)" || [ "$(field compile_exit_code "$r" 2>/dev/null || true)" != 0 ] || ! is_hash "$(field run_command_sha256 "$r" 2>/dev/null || true)" || [ "$(field run_exit_code "$r" 2>/dev/null || true)" != 0 ]; then row_reason=invalid-payload-execution
+                elif ! verify_bundle_artifact "$(field version_transcript_relpath "$r" 2>/dev/null || true)" "$(field version_transcript_sha256 "$r" 2>/dev/null || true)" simpleos-version-transcript-v1 "version-$index" || ! verify_bundle_artifact "$(field compile_transcript_relpath "$r" 2>/dev/null || true)" "$(field compile_transcript_sha256 "$r" 2>/dev/null || true)" simpleos-compile-transcript-v1 "compile-$index" || ! verify_bundle_artifact "$(field run_transcript_relpath "$r" 2>/dev/null || true)" "$(field run_transcript_sha256 "$r" 2>/dev/null || true)" simpleos-run-transcript-v1 "run-$index" || ! verify_bundle_artifact "$(field alias_identity_relpath "$r" 2>/dev/null || true)" "$(field alias_identity_sha256 "$r" 2>/dev/null || true)" simpleos-alias-identity-v1 "aliases-$index"; then row_reason=invalid-payload-artifact
+                elif [ "$(field stress_schema "$r" 2>/dev/null || true)" != simpleos-stress-receipt-v1 ] || [ "$(field stress_invariant_violations "$r" 2>/dev/null || true)" != 0 ]; then row_reason=invalid-stress-receipt
+                elif ! verify_bundle_artifact "$(field stress_resource_series_relpath "$r" 2>/dev/null || true)" "$(field stress_resource_series_sha256 "$r" 2>/dev/null || true)" simpleos-stress-resource-series-v1 "resources-$index" || ! verify_bundle_artifact "$(field stress_invariant_ledger_relpath "$r" 2>/dev/null || true)" "$(field stress_invariant_ledger_sha256 "$r" 2>/dev/null || true)" simpleos-stress-invariant-ledger-v1 "invariants-$index"; then row_reason=invalid-stress-artifact
+                else
+                    ca=$(field captured_at_utc_ns "$r" 2>/dev/null || true); vu=$(field valid_until_utc_ns "$r" 2>/dev/null || true); stress=$(field stress_duration_ns "$r" 2>/dev/null || true)
+                    ss=$(field stress_started_at_utc_ns "$r" 2>/dev/null || true); se=$(field stress_ended_at_utc_ns "$r" 2>/dev/null || true)
+                    if ! is_uint "$ca" || ! is_uint "$vu" || ! is_uint "$stress" || ! is_uint "$ss" || ! is_uint "$se" || [ "$ca" != "$captured" ] || [ "$vu" != "$valid_until" ] || ! dec_le "$ca" "$now" || ! dec_le "$now" "$vu" || ! within_day "$ca" "$now" || ! within_day "$ca" "$vu" || [ "$stress" != 86400000000000 ] || ! diff_is_day "$ss" "$se" || ! dec_le "$se" "$ca"; then row_reason=stale-or-invalid-stress
+                    elif [ "$rh" != "$(hash_file "$canonical")" ]; then row_reason=invalid-collector-receipt-hash
+                    elif [ "$fixture" = true ]; then row_reason=fixture-contract-only
+                    elif ! snapshot "$sp" "$work/collector-$index.sig" 2>/dev/null || ! openssl dgst -sha256 -verify "$work/key.pem" -signature "$work/collector-$index.sig" "$canonical" >/dev/null 2>&1; then row_reason=invalid-collector-signature
+                    else row_status=PASS; row_reason=none; passed=$((passed + 1)); fi
+                fi
+            fi
+        else row_reason=unsafe-collector-path
+        fi
+    elif [ "$chosen" != false ] || [ -z "$why" ] || [ -n "$receipt_rel$signature_rel" ]; then reason=invalid-unselected-row; row_status=BLOCKED; row_reason=invalid-unselected-row
+    fi
+    echo "row=$cell|$row_status|$row_reason|$host|$guest|$row_config|$image" >> "$rows"
+    index=$((index + 1))
+done
+[ "$selected" -gt 0 ] || reason=no-certified-cells-selected
+[ "$reason" = none ] && [ "$passed" -eq "$selected" ] && [ "$fixture" = false ] && result=PASS || result=BLOCKED
+artifact="$work/simpleos.evidence"
+{
+    echo artifact_schema=mci-simpleos-platform-evidence-v1
+    [ "$fixture" = false ] && echo artifact_mode=live || echo artifact_mode=fixture
+    [ "$result" = PASS ] && [ "$fixture" = false ] && echo release_eligible=true || echo release_eligible=false
+    echo policy=simple/certified-platform-manifest-v2
+    echo manifest_sha256="$(hash_file "$work/manifest")"
+    echo collector_trust_key_id="$collector_key_id"
+    echo collector_trust_key_sha256="$(hash_file "$work/key.pem")"
+    echo run_id="$run_id"
+    echo source_hash="$source_hash"
+    echo configuration_hash="$config_hash"
+    echo compiler_receipt_hash="$compiler_hash"
+    echo visible_cell_count=24
+    echo selected_cell_count="$selected"
+    echo passing_cell_count="$passed"
+    [ "$selected" -eq 24 ] && [ "$passed" -eq 24 ] && echo umbrella_all_platforms=true || echo umbrella_all_platforms=false
+    echo fixture_contract_only="$fixture"
+    echo structural_reason="$reason"
+    cat "$rows"
+    echo result="$result"
+} > "$artifact"
+artifact_hash=$(hash_file "$artifact")
+template="$work/simpleos.receipt.unsigned.template"
+{
+    echo receipt_template_schema=mci-lane-unsigned-template-v1
+    echo check_id=simpleos
+    echo producer_class=simpleos-target
+    echo attestation=unsigned-v1
+    echo trusted_key_id="$trusted_key_id"
+    echo signature_relpath=simpleos.sig
+    echo run_id="$run_id"
+    echo source_hash="$source_hash"
+    echo configuration_hash="$config_hash"
+    echo captured_at_utc_ns="$captured"
+    echo valid_until_utc_ns="$valid_until"
+    [ "$result" = PASS ] && echo result=pass || echo result=blocked
+    echo scenarios=MCI-OS-001,MCI-OS-002,MCI-OS-003,MCI-OS-004,MCI-OS-005,MCI-OS-006
+    echo artifact_relpath=simpleos.evidence
+    echo artifact_sha256="$artifact_hash"
+    echo artifact_schema=mci-simpleos-platform-evidence-v1
+    [ "$result" = PASS ] && [ "$fixture" = false ] && { echo artifact_mode=live; echo release_eligible=true; } || { echo artifact_mode=fixture; echo release_eligible=false; }
+} > "$template"
+publisher_source=$root/scripts/check/lib/mci-secure-publish.c
+snapshot "$publisher_source" "$work/mci-secure-publish.c" || { echo 'BLOCKED: secure publisher source missing/unsafe' >&2; exit 2; }
+command -v cc >/dev/null 2>&1 || { echo 'BLOCKED: C compiler required for secure publication' >&2; exit 2; }
+cc -std=c11 -O2 "$work/mci-secure-publish.c" -o "$work/secure-publish" || exit 2
+"$work/secure-publish" "$evidence_abs/artifacts" "$artifact" simpleos.evidence || { echo 'BLOCKED: secure artifact publication failed' >&2; exit 2; }
+"$work/secure-publish" "$evidence_abs/receipts" "$template" simpleos.receipt.unsigned.template || { echo 'BLOCKED: secure template publication failed' >&2; exit 2; }
+echo "simpleos_manifest_contract=PASS"
+echo "result=$result"
+echo "artifact=$evidence_abs/artifacts/simpleos.evidence"
+echo "unsigned_template=$evidence_abs/receipts/simpleos.receipt.unsigned.template"
+[ "$result" = PASS ] || exit 2

@@ -121,6 +121,57 @@ Resume commands are instructions only: the collector never starts hardware,
 QEMU, stress, rendering, or subordinate tooling. Therefore unavailable rows
 remain visibly blocked until their canonical receipts are supplied.
 
+The allocation producer executes the canonical `DomainArenaV1` ledger once but
+publishes two independently signable lanes. `allocation.unsigned.template`
+binds the allocation/quota subset (`MCI-ALLOC-001..005`, `MCI-NFR-007/008`) to
+`mci-allocation-domain-arena-evidence-v1`;
+`fault-injection.unsigned.template` binds the injection/isolation subset
+(`MCI-ALLOC-006`, `MCI-NFR-009/010`) to
+`mci-fault-injection-domain-arena-evidence-v1`. Controlled fixtures remain
+`artifact_mode=fixture`, `release_eligible=false`; changing those fields after
+signing invalidates the detached signature and cannot promote fixture evidence.
+
+### SimpleOS schema-2 manifest producer
+
+`scripts/check/check-mci-v2-simpleos-manifest.shs` consumes an ordered
+`certified-platform-manifest-v2` file containing exactly the canonical 24 rows
+(`linux`, `windows`, `macos`, `freebsd` × `x86_32`, `x86_64`, `arm32`, `arm64`,
+`riscv32`, `riscv64`). Each `row=` is pipe-delimited as
+`cell|selected|reason|host_identity|guest_identity|configuration_hash|image_hash|collector_receipt_relpath|collector_signature_relpath`.
+Unselected rows require a reason and no receipt paths. Selected rows require a
+trusted `simpleos-qemu-host-collector-v1` receipt correlated to the exact cell,
+run, source, compiler receipt, configuration, and image. The producer derives
+the aggregate configuration identity from the snapshotted
+`--configuration-manifest`; every visible row must carry that same digest.
+
+Live admission additionally requires a detached signature from the configured
+collector trust root, `attestation=signed-real-v1`, a real QEMU/host collector,
+target-side execution from guest filesystem storage, hashes for `/usr/bin`,
+`/bin`, `/sys/apps`, and `/SYS/SIMPLETOOL.SDN`, an exact 24-hour stress receipt,
+and evidence freshness/lifetime no greater than 24 hours relative to the
+decimal-safe `--now-utc-ns` admission time. Payload evidence includes hashed
+version, compile, and run commands, zero exit statuses, and snapshotted
+schema-tagged transcript artifacts plus a schema-tagged alias-identity artifact.
+Stress evidence includes exact start/end times, snapshotted schema-tagged
+resource-series and invariant-ledger artifacts, and zero invariant violations.
+Every selected collector uses exactly the lane template's capture and expiry
+times; a merely overlapping collector interval is rejected.
+Missing, synthetic,
+unsigned, stale, mismatched, symlinked, or incomplete evidence remains
+`BLOCKED`. `--contract-fixture` exercises these classifications but can never
+produce live PASS.
+
+The producer rejects symlinks in every input ancestor, snapshots inputs, and
+publishes through the shared `openat`/`O_NOFOLLOW`, fsyncing,
+atomic-no-replace helper,
+and emits `artifacts/simpleos.evidence` plus
+`receipts/simpleos.receipt.unsigned.template`. It never creates the aggregate-
+admissible `.receipt` or signature. An independent producer-key operator must
+review the evidence, convert the template to the canonical signed lane receipt,
+and publish the detached signature. The focused fixture contract is
+`test/01_unit/scripts/mci_v2_simpleos_manifest_contract_test.shs`; it does not
+run QEMU or claim platform certification.
+
 The reviewer row is deliberately separate from traceability. Pass
 `--reviewer-key` and `--reviewer-key-id` as a trust root distinct from the lane
 producer key and ID. The reviewer decision canonically binds identity,

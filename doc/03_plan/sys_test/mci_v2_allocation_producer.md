@@ -11,7 +11,23 @@ a seed runner, fixture-mode authorization, the tracked unprovisioned live
 policy, fixture-policy rejection in live mode, an invalid Ed25519 signature,
 a mismatched public-key digest, and an unreviewed policy. Fixture output is always marked
 `release_eligible=false` and `result=CONTRACT_ONLY`; it never publishes the
-signed `allocation.receipt` consumed by the aggregate gate.
+signed `allocation.receipt` consumed by the aggregate gate. The same canonical
+run publishes a separate `mci-fault-injection-domain-arena-evidence-v1`
+artifact and `fault-injection.unsigned.template`; allocation binds
+`MCI-ALLOC-001..005` plus `MCI-NFR-007/008`, while fault injection binds only
+`MCI-ALLOC-006` plus `MCI-NFR-009/010`. An external signer converts and signs
+each receipt independently. The contract verifies that conversion and proves
+that editing fixture policy fields invalidates its detached signature.
+
+Expected outputs are `artifacts/allocation-domain-arena-v1.log`,
+`artifacts/allocation-domain-arena-v1.evidence`,
+`artifacts/fault-injection-domain-arena-v1.evidence`,
+`receipts/allocation.unsigned.template`,
+`receipts/fault-injection.unsigned.template`, and
+`allocation-report-v1.env`. The producer owns both unsigned templates; the
+aggregate owns signed-receipt parsing and the distinct scenario maps. Its
+contract synthesizes live-shaped artifacts independently to prove exact
+template-to-parser compatibility without relabeling controlled fixture output.
 
 The production path fails closed for a runner outside `bin/release/*/simple`, a
 seed authority string, unsafe paths, changed source/log snapshots, duplicated or

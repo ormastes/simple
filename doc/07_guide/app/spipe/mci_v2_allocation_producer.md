@@ -49,14 +49,20 @@ run and configuration identities in a versioned receipt schema before use.
 On success the producer writes
 `artifacts/allocation-domain-arena-v1.evidence`, its content-addressed raw
 `artifacts/allocation-domain-arena-v1.log`, and
-`receipts/allocation.unsigned.template`, with the stable summary in
-`allocation-report-v1.env`. The artifact binds the exact runner,
+`receipts/allocation.unsigned.template`. It also writes the independently
+owned `artifacts/fault-injection-domain-arena-v1.evidence` and
+`receipts/fault-injection.unsigned.template`; the stable summary is
+`allocation-report-v1.env`. The allocation artifact owns
+`MCI-ALLOC-001..005` and `MCI-NFR-007/008`. The fault-injection artifact owns
+`MCI-ALLOC-006` and `MCI-NFR-009/010`, including the complete two-entry fault
+ledger. Both artifacts bind the exact runner,
 DomainArena spec and implementation hashes, raw-log hash, 12/12 scenario set,
-sealed-profile snapshot, committed-state snapshot, and complete two-entry fault
-ledger. An external signer must replace the signer placeholders, canonicalize
-and hash the receipt, create `signatures/allocation.sig`, and publish it as
-`receipts/allocation.receipt`. The producer intentionally never handles a
-private key or claims a signed attestation.
+sealed-profile snapshot, and committed-state snapshot. An external signer must
+replace each template's signer placeholders, canonicalize and hash it, then
+publish `receipts/allocation.receipt` + `signatures/allocation.sig` and
+`receipts/fault-injection.receipt` + `signatures/fault-injection.sig`. The
+producer intentionally never handles a private key or claims a signed
+attestation.
 
 Controlled fixture mode is only for the unit contract and requires
 `MCI_ALLOCATION_CONTROLLED_FIXTURE=1`, both fixture files, and an explicitly

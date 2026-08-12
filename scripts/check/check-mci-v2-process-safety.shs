@@ -1,0 +1,398 @@
+#!/bin/sh
+set -eu
+
+usage() {
+    echo "usage: $0 --evidence DIR --run-id ID --source-hash SHA256 --configuration-hash SHA256 --captured-at-utc-ns NS --valid-until-utc-ns NS --trusted-key-id ID [--simple-runner FILE --runner-admission FILE --runner-admission-signature FILE --compiler-admission-trust-key FILE --native-facade-executable FILE --native-facade-receipt FILE]" >&2
+    exit 2
+}
+
+evidence= run_id= source_hash= configuration_hash= captured_at= valid_until=
+trusted_key_id= simple_runner= runner_admission= runner_signature= runner_trust_key=
+native_facade_executable= native_facade_receipt= native_facade_signature= native_trust_key= native_key_id=
+now_utc_ns=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --evidence) [ "$#" -ge 2 ] || usage; evidence=$2; shift 2 ;;
+        --run-id) [ "$#" -ge 2 ] || usage; run_id=$2; shift 2 ;;
+        --source-hash) [ "$#" -ge 2 ] || usage; source_hash=$2; shift 2 ;;
+        --configuration-hash) [ "$#" -ge 2 ] || usage; configuration_hash=$2; shift 2 ;;
+        --captured-at-utc-ns) [ "$#" -ge 2 ] || usage; captured_at=$2; shift 2 ;;
+        --valid-until-utc-ns) [ "$#" -ge 2 ] || usage; valid_until=$2; shift 2 ;;
+        --trusted-key-id) [ "$#" -ge 2 ] || usage; trusted_key_id=$2; shift 2 ;;
+        --simple-runner) [ "$#" -ge 2 ] || usage; simple_runner=$2; shift 2 ;;
+        --runner-admission) [ "$#" -ge 2 ] || usage; runner_admission=$2; shift 2 ;;
+        --runner-admission-signature) [ "$#" -ge 2 ] || usage; runner_signature=$2; shift 2 ;;
+        --compiler-admission-trust-key) [ "$#" -ge 2 ] || usage; runner_trust_key=$2; shift 2 ;;
+        --native-facade-executable) [ "$#" -ge 2 ] || usage; native_facade_executable=$2; shift 2 ;;
+        --native-facade-receipt) [ "$#" -ge 2 ] || usage; native_facade_receipt=$2; shift 2 ;;
+        --native-facade-signature) [ "$#" -ge 2 ] || usage; native_facade_signature=$2; shift 2 ;;
+        --native-evidence-trust-key) [ "$#" -ge 2 ] || usage; native_trust_key=$2; shift 2 ;;
+        --native-evidence-key-id) [ "$#" -ge 2 ] || usage; native_key_id=$2; shift 2 ;;
+        --now-utc-ns) [ "$#" -ge 2 ] || usage; now_utc_ns=$2; shift 2 ;;
+        *) usage ;;
+    esac
+done
+
+is_sha256() { case "$1" in *[!0-9a-f]*|'') return 1;; esac; [ "${#1}" -eq 64 ]; }
+safe_token() { case "$1" in *[!A-Za-z0-9._-]*|'') return 1;; esac; }
+is_uint() { case "$1" in *[!0-9]*|'') return 1;; esac; }
+dec_norm() { value=$(printf '%s' "$1" | sed 's/^0*//'); printf '%s\n' "${value:-0}"; }
+dec_le() {
+    left=$(dec_norm "$1"); right=$(dec_norm "$2")
+    [ "${#left}" -lt "${#right}" ] && return 0
+    [ "${#left}" -gt "${#right}" ] && return 1
+    [ "$left" = "$right" ] || [ "$left" \< "$right" ]
+}
+within_day_ns() {
+    earlier=$(dec_norm "$1"); later=$(dec_norm "$2")
+    dec_le "$earlier" "$later" || return 1
+    [ $((later - earlier)) -le 86400000000000 ]
+}
+hash_file() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+    else shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
+field() {
+    key=$1 file=$2
+    count=$(awk -F= -v key="$key" '$1 == key { count++ } END { print count + 0 }' "$file")
+    [ "$count" -eq 1 ] || return 1
+    sed -n "s/^$key=//p" "$file"
+}
+regular_nonsymlink() { [ -f "$1" ] && [ ! -L "$1" ]; }
+file_identity() {
+    if stat -c '%F:%d:%i:%s:%y:%z' "$1" >/dev/null 2>&1; then metadata=$(stat -c '%F:%d:%i:%s:%y:%z' "$1")
+    else metadata=$(stat -f '%HT:%d:%i:%z:%m:%c' "$1"); fi
+    printf '%s|%s\n' "$metadata" "$(hash_file "$1")"
+}
+snapshot_file() {
+    snapshot_source=$1 snapshot_target=$2
+    regular_nonsymlink "$snapshot_source" || return 1
+    snapshot_identity=$(file_identity "$snapshot_source") || return 1
+    cp -- "$snapshot_source" "$snapshot_target" || return 1
+    regular_nonsymlink "$snapshot_target" || return 1
+    [ "$(hash_file "$snapshot_target")" = "${snapshot_identity##*|}" ] || return 1
+    [ "$(file_identity "$snapshot_source")" = "$snapshot_identity" ] || return 1
+}
+secure_directory_below() {
+    base=$1 relative=$2 current=$1
+    case "$relative" in ''|/*|.|..|../*|*/../*|*/..) return 1;; esac
+    old_ifs=$IFS; IFS=/
+    set -- $relative
+    IFS=$old_ifs
+    for component in "$@"; do
+        [ -n "$component" ] && [ "$component" != . ] && [ "$component" != .. ] || return 1
+        current=$current/$component
+        [ ! -L "$current" ] || return 1
+        if [ -e "$current" ]; then [ -d "$current" ] || return 1
+        else mkdir "$current" || return 1
+        fi
+        [ "$(CDPATH= cd -- "$current" && pwd -P)" = "$current" ] || return 1
+    done
+}
+publish_private() {
+    source=$1 target=$2 directory=${target%/*}
+    [ ! -L "$target" ] || { echo "BLOCKED: refusing symlink output: $target" >&2; exit 2; }
+    [ ! -e "$target" ] || regular_nonsymlink "$target" || {
+        echo "BLOCKED: refusing non-regular output: $target" >&2; exit 2
+    }
+    staged=$(mktemp "$directory/.process-safety.publish.XXXXXX")
+    chmod 600 "$staged"
+    cp "$source" "$staged"
+    mv "$staged" "$target"
+}
+
+[ -n "$evidence" ] && safe_token "$run_id" && is_sha256 "$source_hash" &&
+    is_sha256 "$configuration_hash" && is_uint "$captured_at" &&
+    is_uint "$valid_until" && safe_token "$trusted_key_id" || usage
+dec_le "$captured_at" "$valid_until" || usage
+[ -n "$now_utc_ns" ] || now_utc_ns=$(date -u +%s)000000000
+is_uint "$now_utc_ns" && dec_le "$captured_at" "$now_utc_ns" && dec_le "$now_utc_ns" "$valid_until" &&
+    within_day_ns "$captured_at" "$now_utc_ns" && within_day_ns "$captured_at" "$valid_until" || usage
+if [ -n "$simple_runner$runner_admission$runner_signature$runner_trust_key" ] &&
+   { [ -z "$simple_runner" ] || [ -z "$runner_admission" ] || [ -z "$runner_signature" ] || [ -z "$runner_trust_key" ]; }; then
+    usage
+fi
+if [ -n "$native_facade_executable$native_facade_receipt$native_facade_signature$native_trust_key$native_key_id" ] &&
+   { [ -z "$native_facade_executable" ] || [ -z "$native_facade_receipt" ] || [ -z "$native_facade_signature" ] || [ -z "$native_trust_key" ] || [ -z "$native_key_id" ]; }; then usage; fi
+
+root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd -P)
+cd "$root"
+case "$evidence" in
+    "$root"/*) evidence_rel=${evidence#"$root"/} ;;
+    /*) echo 'BLOCKED: evidence must be below repository root' >&2; exit 2 ;;
+    *) evidence_rel=$evidence ;;
+esac
+secure_directory_below "$root" "$evidence_rel" || { echo 'BLOCKED: unsafe evidence path' >&2; exit 2; }
+evidence_abs=$(CDPATH= cd -- "$root/$evidence_rel" && pwd -P)
+[ "$evidence_abs" = "$root/$evidence_rel" ] || { echo 'BLOCKED: evidence path is not canonical' >&2; exit 2; }
+for directory in artifacts artifacts/process-safety-c-subchecks receipts signatures; do
+    secure_directory_below "$evidence_abs" "$directory" || { echo 'BLOCKED: unsafe evidence directory' >&2; exit 2; }
+done
+secure_directory_below "$root" build || { echo 'BLOCKED: unsafe build directory' >&2; exit 2; }
+# Transaction preflight: this producer never mutates an existing evidence set.
+for output in "$evidence_abs/artifacts/process-safety.evidence" \
+    "$evidence_abs/receipts/process-safety.receipt.unsigned.template" \
+    "$evidence_abs/receipts/process-safety.receipt" "$evidence_abs/signatures/process-safety.sig" \
+    "$evidence_abs/artifacts/process-safety-c-subchecks/runtime_process_owned_selfcheck.command" \
+    "$evidence_abs/artifacts/process-safety-c-subchecks/runtime_process_owned_selfcheck.status" \
+    "$evidence_abs/artifacts/process-safety-c-subchecks/runtime_process_owned_selfcheck.log" \
+    "$evidence_abs/artifacts/process-safety-c-subchecks/runtime_process_owned_adapter_selfcheck.command" \
+    "$evidence_abs/artifacts/process-safety-c-subchecks/runtime_process_owned_adapter_selfcheck.status" \
+    "$evidence_abs/artifacts/process-safety-c-subchecks/runtime_process_owned_adapter_selfcheck.log" \
+    "$evidence_abs/artifacts/process-safety-c-subchecks/runtime_process_owned_nonunix_selfcheck.command" \
+    "$evidence_abs/artifacts/process-safety-c-subchecks/runtime_process_owned_nonunix_selfcheck.status" \
+    "$evidence_abs/artifacts/process-safety-c-subchecks/runtime_process_owned_nonunix_selfcheck.log"
+do [ ! -e "$output" ] && [ ! -L "$output" ] || { echo "BLOCKED: evidence collision: $output" >&2; exit 2; }; done
+work=$(mktemp -d "$root/build/mci-process-safety.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+
+cc=${CC:-cc}
+command -v "$cc" >/dev/null 2>&1 || { echo 'BLOCKED: C compiler unavailable' >&2; exit 2; }
+command -v timeout >/dev/null 2>&1 || { echo 'BLOCKED: timeout utility unavailable' >&2; exit 2; }
+
+compile_and_run() {
+    name=$1; shift
+    binary="$work/$name"
+    log="$work/$name.log"
+    retained="$evidence_abs/artifacts/process-safety-c-subchecks/$name"
+    retained_command="$work/$name.command"
+    retained_status="$work/$name.status"
+    core_define=
+    [ "$name" != runtime_process_owned_selfcheck ] || core_define=-DRT_PROCESS_OWNED_CORE_ONLY
+    {
+        printf 'compile=timeout 60 %s -std=c11 -D_GNU_SOURCE' "$cc"
+        [ -z "$core_define" ] || printf ' %s' "$core_define"
+        printf ' -Wall -Wextra -Werror -Wpedantic -O2 -pthread -Isrc/runtime'
+        for source in "$@"; do printf ' %s' "$source"; done
+        printf ' -o %s\n' "$binary"
+        printf 'run=timeout 30 %s\n' "$binary"
+    } > "$retained_command"
+    if ! timeout 60 "$cc" -std=c11 -D_GNU_SOURCE $core_define -Wall -Wextra -Werror -Wpedantic -O2 -pthread -Isrc/runtime "$@" -o "$binary" >"$log" 2>&1; then
+        echo BLOCKED:compile > "$retained_status"
+        publish_private "$retained_command" "$retained.command"
+        publish_private "$retained_status" "$retained.status"
+        publish_private "$log" "$retained.log"
+        echo "$name=BLOCKED:compile"; return 1
+    fi
+    if ! timeout 30 "$binary" >"$log" 2>&1; then
+        echo BLOCKED:run > "$retained_status"
+        publish_private "$retained_command" "$retained.command"
+        publish_private "$retained_status" "$retained.status"
+        publish_private "$log" "$retained.log"
+        echo "$name=BLOCKED:run"; return 1
+    fi
+    if ! grep -q "^${name}: PASS$" "$log"; then
+        echo BLOCKED:marker > "$retained_status"
+        publish_private "$retained_command" "$retained.command"
+        publish_private "$retained_status" "$retained.status"
+        publish_private "$log" "$retained.log"
+        echo "$name=BLOCKED:marker"; return 1
+    fi
+    echo PASS > "$retained_status"
+    publish_private "$retained_command" "$retained.command"
+    publish_private "$retained_status" "$retained.status"
+    publish_private "$log" "$retained.log"
+    echo "$name=PASS"
+    echo "${name}_binary_sha256=$(hash_file "$binary")"
+}
+
+checks="$work/checks"
+status=PASS
+compile_and_run runtime_process_owned_selfcheck \
+    src/runtime/test/runtime_process_owned_selfcheck.c src/runtime/runtime_process_owned.c > "$checks" || status=BLOCKED
+compile_and_run runtime_process_owned_adapter_selfcheck \
+    src/runtime/test/runtime_process_owned_adapter_selfcheck.c >> "$checks" || status=BLOCKED
+compile_and_run runtime_process_owned_nonunix_selfcheck \
+    src/runtime/test/runtime_process_owned_nonunix_selfcheck.c >> "$checks" || status=BLOCKED
+
+closure="$work/closure"
+for path in \
+    src/runtime/runtime.h \
+    src/runtime/runtime_process_owned.c \
+    src/lib/nogc_sync_mut/io/process_ops.spl \
+    src/app/io/mod.spl \
+    src/app/io/__init__.spl \
+    src/compiler_rust/common/src/runtime_symbols.rs \
+    src/compiler_rust/compiler/src/codegen/runtime_sffi.rs \
+    src/compiler/70.backend/backend/stage4_symbol_closure.spl \
+    src/compiler/70.backend/backend/runtime_compiler.spl
+do
+    regular_nonsymlink "$root/$path" || { echo "BLOCKED: required closure source missing: $path" >&2; exit 2; }
+    echo "$path=$(hash_file "$root/$path")" >> "$closure"
+done
+closure_hash=$(hash_file "$closure")
+[ "$source_hash" = "$closure_hash" ] || { echo 'BLOCKED: source hash does not match derived source manifest' >&2; exit 2; }
+
+simple_status=BLOCKED
+simple_reason=authoritative-runner-admission-unavailable
+runner_hash=none
+admission_hash=none
+if [ -n "$native_facade_executable" ]; then
+    case "$native_facade_executable" in /*) native_abs=$native_facade_executable;; *) native_abs=$root/$native_facade_executable;; esac
+    case "$native_facade_receipt" in /*) native_receipt_abs=$native_facade_receipt;; *) native_receipt_abs=$root/$native_facade_receipt;; esac
+    case "$native_facade_signature" in /*) native_signature_abs=$native_facade_signature;; *) native_signature_abs=$root/$native_facade_signature;; esac
+    case "$native_trust_key" in /*) native_key_abs=$native_trust_key;; *) native_key_abs=$root/$native_trust_key;; esac
+fi
+if [ -n "$simple_runner" ]; then
+    case "$simple_runner" in /*) runner_abs=$simple_runner;; *) runner_abs=$root/$simple_runner;; esac
+    case "$runner_admission" in /*) admission_abs=$runner_admission;; *) admission_abs=$root/$runner_admission;; esac
+    case "$runner_signature" in /*) signature_abs=$runner_signature;; *) signature_abs=$root/$runner_signature;; esac
+    case "$runner_trust_key" in /*) trust_key_abs=$runner_trust_key;; *) trust_key_abs=$root/$runner_trust_key;; esac
+    runner_snapshot=$work/runner.snapshot; admission_snapshot=$work/admission.snapshot
+    signature_snapshot=$work/admission.signature.snapshot; trust_key_snapshot=$work/trust-key.snapshot
+    if snapshot_file "$runner_abs" "$runner_snapshot" && [ -x "$runner_abs" ] &&
+       snapshot_file "$admission_abs" "$admission_snapshot" && snapshot_file "$signature_abs" "$signature_snapshot" &&
+       snapshot_file "$trust_key_abs" "$trust_key_snapshot"; then
+        chmod 500 "$runner_snapshot"
+        runner_hash=$(hash_file "$runner_snapshot")
+        admission_hash=$(hash_file "$admission_snapshot")
+        trust_key_hash=$(hash_file "$trust_key_snapshot")
+        configuration_manifest=$work/configuration.manifest
+        {
+            echo manifest_schema=mci-process-configuration-manifest-v1
+            echo producer_sha256="$(hash_file "$root/scripts/check/check-mci-v2-process-safety.shs")"
+            echo runner_sha256="$runner_hash"
+            echo controlled_fixture="${MCI_PROCESS_CONTROLLED_FIXTURE:-0}"
+        } > "$configuration_manifest"
+        derived_configuration_hash=$(hash_file "$configuration_manifest")
+        [ "$configuration_hash" = "$derived_configuration_hash" ] || { echo 'BLOCKED: configuration hash does not match derived configuration manifest' >&2; exit 2; }
+        admission_expected=$work/admission.expected
+        {
+            echo admission_schema=mci-simple-runner-admission-v2
+            echo authority=exact-current-pure-simple
+            echo signing_algorithm=ed25519
+            echo trust_key_id="$trusted_key_id"
+            echo trust_key_sha256="$trust_key_hash"
+            echo native_evidence_key_id="$native_key_id"
+            echo native_evidence_key_sha256="$(hash_file "$native_key_abs")"
+            echo runner_sha256="$runner_hash"
+            echo source_manifest_sha256="$closure_hash"
+            echo configuration_manifest_sha256="$derived_configuration_hash"
+            echo result=pass
+        } > "$admission_expected"
+        if cmp -s "$admission_snapshot" "$admission_expected" &&
+           openssl pkeyutl -verify -rawin -pubin -inkey "$trust_key_snapshot" -sigfile "$signature_snapshot" -in "$admission_snapshot" >/dev/null 2>&1 &&
+           [ "$(field admission_schema "$admission_snapshot" 2>/dev/null || true)" = mci-simple-runner-admission-v2 ] &&
+           [ "$(field authority "$admission_snapshot" 2>/dev/null || true)" = exact-current-pure-simple ] &&
+           [ "$(field runner_sha256 "$admission_snapshot" 2>/dev/null || true)" = "$runner_hash" ] &&
+           [ "$(field source_manifest_sha256 "$admission_snapshot" 2>/dev/null || true)" = "$source_hash" ] &&
+           [ "$(field configuration_manifest_sha256 "$admission_snapshot" 2>/dev/null || true)" = "$configuration_hash" ] &&
+           [ "$(field result "$admission_snapshot" 2>/dev/null || true)" = pass ]; then
+            simple_log="$work/simple-policy.log"
+            if timeout 120 env SIMPLE_LIB=src "$runner_snapshot" test \
+                test/01_unit/lib/nogc_sync_mut/mission_critical/bounded_process_policy_spec.spl \
+                test/01_unit/app/io/process_owned_facade_contract_spec.spl \
+                --mode=interpreter > "$simple_log" 2>&1 &&
+               [ "$(wc -c < "$simple_log")" -le 1048576 ]; then
+                simple_status=PASS
+                simple_reason=none
+            else
+                simple_reason=focused-simple-check-failed-or-overflowed
+            fi
+        else
+            simple_reason=invalid-authoritative-runner-admission
+        fi
+    else
+        simple_reason=unsafe-or-missing-authoritative-runner
+    fi
+fi
+[ "$simple_status" = PASS ] || status=BLOCKED
+
+native_status=BLOCKED
+native_reason=native-facade-executable-receipt-unavailable
+controlled_fixture=false
+[ "${MCI_PROCESS_CONTROLLED_FIXTURE:-0}" = 1 ] && controlled_fixture=true
+if [ -n "$native_facade_executable" ]; then
+    native_snapshot=$work/native-facade.snapshot; native_receipt_snapshot=$work/native-facade.receipt.snapshot
+    native_signature_snapshot=$work/native.signature.snapshot; native_key_snapshot=$work/native-key.snapshot
+    if snapshot_file "$native_abs" "$native_snapshot" && [ -x "$native_abs" ] && snapshot_file "$native_receipt_abs" "$native_receipt_snapshot" && snapshot_file "$native_signature_abs" "$native_signature_snapshot" && snapshot_file "$native_key_abs" "$native_key_snapshot"; then
+        chmod 500 "$native_snapshot"; native_hash=$(hash_file "$native_snapshot")
+        native_marker='process_owned_native_facade: PASS'; native_marker_hash=$(printf '%s' "$native_marker" | { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; } | awk '{print $1}')
+        native_result=pass; [ "$controlled_fixture" = false ] || native_result=contract-only
+        native_expected=$work/native.expected
+        { echo receipt_schema=mci-process-native-facade-v2; echo signing_algorithm=ed25519; echo trust_key_id="$native_key_id"; echo trust_key_sha256="$(hash_file "$native_key_snapshot")"; echo run_id="$run_id"; echo source_manifest_sha256="$source_hash"; echo configuration_manifest_sha256="$configuration_hash"; echo executable_sha256="$native_hash"; echo marker_sha256="$native_marker_hash"; echo captured_at_utc_ns="$captured_at"; echo valid_until_utc_ns="$valid_until"; echo result="$native_result"; } > "$native_expected"
+        pinned_native_key_id=$(field native_evidence_key_id "$admission_snapshot" 2>/dev/null || true)
+        pinned_native_key_hash=$(field native_evidence_key_sha256 "$admission_snapshot" 2>/dev/null || true)
+        if [ "$native_key_id" = "$pinned_native_key_id" ] && [ "$(hash_file "$native_key_snapshot")" = "$pinned_native_key_hash" ] &&
+           cmp -s "$native_receipt_snapshot" "$native_expected" &&
+           openssl pkeyutl -verify -rawin -pubin -inkey "$native_key_snapshot" -sigfile "$native_signature_snapshot" -in "$native_receipt_snapshot" >/dev/null 2>&1 &&
+           timeout 30 "$native_snapshot" > "$work/native-facade.log" 2>&1 &&
+           grep -Fxq "$native_marker" "$work/native-facade.log"; then
+            native_status=PASS; native_reason=none
+        else native_reason=invalid-or-failed-native-facade-receipt
+        fi
+    else native_reason=unsafe-or-changing-native-facade-evidence
+    fi
+fi
+[ "$native_status" = PASS ] || status=BLOCKED
+if [ "$controlled_fixture" = true ] && [ "$status" = PASS ]; then status=CONTRACT_ONLY; fi
+
+artifact_tmp="$work/process-safety.evidence"
+{
+    echo artifact_schema=mci-process-safety-evidence-v1
+    [ "$controlled_fixture" = false ] && echo artifact_mode=live || echo artifact_mode=fixture
+    echo check_id=process-safety
+    echo producer_class=process-runtime
+    echo evidence_class=host-independent-runtime
+    echo run_id="$run_id"
+    echo source_hash="$source_hash"
+    echo configuration_hash="$configuration_hash"
+    echo scenarios=MCI-PROC-001,MCI-PROC-002,MCI-PROC-003
+    echo c_runtime_result="$(sed -n 's/^runtime_process_owned_selfcheck=//p' "$checks")"
+    echo c_adapter_result="$(sed -n 's/^runtime_process_owned_adapter_selfcheck=//p' "$checks")"
+    echo c_nonunix_result="$(sed -n 's/^runtime_process_owned_nonunix_selfcheck=//p' "$checks")"
+    sed -n '/_binary_sha256=/p' "$checks"
+    echo simple_policy_result="$simple_status"
+    echo simple_policy_reason="$simple_reason"
+    echo native_facade_result="$native_status"
+    echo native_facade_reason="$native_reason"
+    echo authoritative_runner_sha256="$runner_hash"
+    echo runner_admission_sha256="$admission_hash"
+    echo abi_source_symbol_closure_sha256="$closure_hash"
+    sed 's/^/closure=/' "$closure"
+    echo bounds=compile_timeout_ms:60000,run_timeout_ms:30000,simple_timeout_ms:120000,simple_capture_bytes:1048576,process_slots:16
+    echo result="$status"
+    if [ "$status" = PASS ] && [ "$controlled_fixture" = false ]; then echo release_candidate=true; else echo release_candidate=false; fi
+    if [ "$status" = PASS ] && [ "$controlled_fixture" = false ]; then echo release_eligible=true; else echo release_eligible=false; fi
+    echo attestation_state=unsigned-external-signature-required
+} > "$artifact_tmp"
+artifact="$evidence_abs/artifacts/process-safety.evidence"
+publish_private "$artifact_tmp" "$artifact"
+artifact_hash=$(hash_file "$artifact")
+
+template_tmp="$work/process-safety.receipt.unsigned.template"
+{
+    echo receipt_schema=mci-lane-receipt-v1
+    echo check_id=process-safety
+    echo producer_class=process-runtime
+    echo attestation=signed-v1
+    echo trusted_key_id="$trusted_key_id"
+    echo signature_relpath=process-safety.sig
+    echo run_id="$run_id"
+    echo source_hash="$source_hash"
+    echo configuration_hash="$configuration_hash"
+    echo captured_at_utc_ns="$captured_at"
+    echo valid_until_utc_ns="$valid_until"
+    if [ "$status" = PASS ] && [ "$controlled_fixture" = false ]; then echo result=pass; else echo result=blocked; fi
+    echo scenarios=MCI-PROC-001,MCI-PROC-002,MCI-PROC-003
+    echo artifact_relpath=process-safety.evidence
+    echo artifact_sha256="$artifact_hash"
+    echo artifact_schema=mci-process-safety-evidence-v1
+    if [ "$status" = PASS ] && [ "$controlled_fixture" = false ]; then echo artifact_mode=live; echo release_eligible=true; else echo artifact_mode=fixture; echo release_eligible=false; fi
+} > "$template_tmp"
+echo "receipt_hash=$(hash_file "$template_tmp")" >> "$template_tmp"
+template="$evidence_abs/receipts/process-safety.receipt.unsigned.template"
+[ ! -e "$template" ] && [ ! -L "$template" ] || { echo 'BLOCKED: unsigned receipt template collision' >&2; exit 2; }
+publish_private "$template_tmp" "$template"
+
+if [ "$status" = PASS ]; then
+    echo "PASS: process-safety release-candidate evidence; external signing required"
+    exit 0
+fi
+if [ "$status" = CONTRACT_ONLY ]; then
+    echo "PASS: process-safety controlled contract evidence; not release eligible"
+    exit 0
+fi
+echo "BLOCKED: process-safety diagnostic evidence only ($simple_reason)" >&2
+exit 2

@@ -68,6 +68,12 @@ Rules:
   canonical serialization, and structural validation only.
 - Compiler, SimpleOS, rendering, and allocation siblings expose receipts through
   those contracts. They do not import another sibling's private implementation.
+- The allocation runtime owns one canonical `DomainArenaV1` execution and two
+  release lanes. Allocation emits `mci-allocation-domain-arena-evidence-v1`
+  plus `allocation.unsigned.template`; fault injection emits
+  `mci-fault-injection-domain-arena-evidence-v1` plus
+  `fault-injection.unsigned.template`. The admission capsule owns their distinct
+  scenario maps and parses each signed conversion as a separate required row.
 - Policy belongs to the admission owner, not to adapters or evidence producers.
 - Backend-specific execution remains beside its backend because its invariants and
   hot paths differ. Only its stable provenance/readback receipt moves upward.

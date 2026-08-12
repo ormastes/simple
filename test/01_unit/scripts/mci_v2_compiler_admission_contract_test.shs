@@ -1,0 +1,30 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd -P); gate=$root/scripts/check/check-mci-v2-compiler-admission.shs; policy=$root/scripts/check/policy/mci-v2-compiler-live-policy.env
+mkdir -p "$root/build"; work=$(mktemp -d "$root/build/mci-compiler-contract.XXXXXX"); trap 'rm -rf "$work"' EXIT HUP INT TERM
+h() { sha256sum "$1" | awk '{print $1}'; }
+openssl genpkey -algorithm ED25519 -out "$work/key.pem" >/dev/null 2>&1; openssl pkey -in "$work/key.pem" -pubout -out "$work/pub.pem" >/dev/null 2>&1
+cat > "$work/compiler" <<'EOF'
+#!/bin/sh
+out=
+while [ "$#" -gt 0 ]; do case "$1" in --output) out=$2; shift 2;; *) shift;; esac; done
+src=${out}.c; printf '#include <stdio.h>\nint mci_admission_add(int a,int b){return a+b;}\nint main(void){printf("mci-compiler-admission:%%d\\n",mci_admission_add(19,22));return 0;}\n' > "$src"
+cc -O0 "$src" -o "$out"
+EOF
+chmod +x "$work/compiler"
+source_manifest=$work/source.manifest; git -C "$root" ls-files src/compiler src/app src/lib | LC_ALL=C sort | while IFS= read -r f; do [ -f "$root/$f" ] || continue; printf '%s=%s\n' "$f" "$(h "$root/$f")"; done > "$source_manifest"
+fixture=$root/test/fixtures/mission_critical/compiler_admission_discriminating.spl
+config=$work/config.manifest
+make_parent() { { echo receipt_schema=mci-compiler-parent-receipt-v1; echo lineage=pure-simple; echo child_compiler_sha256=$(h "$work/compiler"); echo source_manifest_sha256=$(h "$source_manifest"); echo signing_algorithm=ed25519; echo trust_key_sha256=$(h "$work/pub.pem"); } > "$work/parent"; openssl pkeyutl -sign -rawin -inkey "$work/key.pem" -in "$work/parent" -out "$work/parent.sig"; { echo policy_sha256=$(h "$policy"); echo producer_sha256=$(h "$gate"); echo mode=fixture; echo source_roots=src/compiler:src/app:src/lib; echo fixture_sha256=$(h "$fixture"); echo fixture_stdout=mci-compiler-admission:41; echo required_symbol=mci_admission_add; echo toolchain_identity="$(cc --version 2>/dev/null | head -1 | sha256sum | awk '{print $1}')"; echo dependency_manifest_sha256=$(h "$work/parent"); echo environment_identity_sha256="$(printf 'LC_ALL=C\nPATH=%s\n' "$PATH" | sha256sum | awk '{print $1}')"; } > "$config"; }
+make_prov() { lineage=$1; { echo provenance_schema=mci-compiler-provenance-v2; echo authority=exact-current-pure-simple; echo lineage="$lineage"; echo trust_key_id=contract-fixture-ephemeral; echo compiler_sha256=$(h "$work/compiler"); echo compiler_source_manifest_sha256=$(h "$source_manifest"); echo configuration_manifest_sha256=$(h "$config"); echo fixture_sha256=$(h "$fixture"); echo parent_receipt_sha256=$(h "$work/parent"); } > "$work/prov"; openssl pkeyutl -sign -rawin -inkey "$work/key.pem" -in "$work/prov" -out "$work/sig"; }
+make_parent; make_prov pure-simple
+common="--mode fixture --run-id contract --compiler $work/compiler --provenance $work/prov --provenance-signature $work/sig --trust-key $work/pub.pem --parent-receipt $work/parent --parent-signature $work/parent.sig --parent-trust-key $work/pub.pem --captured-at-utc-ns 100 --valid-until-utc-ns 1000 --now-utc-ns 500"
+"$gate" --evidence "$work/good" $common | grep -q '^CONTRACT_ONLY:'; grep -q '^scenarios=MCI-COMP-001$' "$work/good/artifacts/compiler.evidence"; grep -q '^blocked_scenarios=MCI-COMP-002,MCI-COMP-003,MCI-NFR-003,MCI-NFR-004$' "$work/good/artifacts/compiler.evidence"; [ ! -e "$work/good/receipts/compiler.receipt.unsigned.template" ]
+for mode in seed hybrid stale spoof parent nonexec replay; do
+ make_parent; make_prov pure-simple
+ case "$mode" in seed) make_prov rust-seed;; hybrid) make_prov hybrid;; stale) sed -i 's/^compiler_sha256=.*/compiler_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' "$work/prov"; openssl pkeyutl -sign -rawin -inkey "$work/key.pem" -in "$work/prov" -out "$work/sig";; spoof) printf x >> "$work/sig";; parent) sed -i 's/^lineage=.*/lineage=rust-seed/' "$work/parent";; nonexec) chmod -x "$work/compiler";; replay) replay_time=1001;; esac
+ args="$common"; [ "$mode" != replay ] || args=$(printf '%s' "$common" | sed 's/--now-utc-ns 500/--now-utc-ns 1001/')
+ if "$gate" --evidence "$work/$mode" $args >/dev/null 2>&1; then exit 1; fi; chmod +x "$work/compiler"
+done
+if "$gate" --mode live --evidence "$work/live" ${common#--mode fixture } >/dev/null 2>&1; then exit 1; fi
+echo 'PASS: fixed compiler admission fixture and fail-closed negatives are CONTRACT_ONLY'

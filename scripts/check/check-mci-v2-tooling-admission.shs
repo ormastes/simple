@@ -1,0 +1,267 @@
+#!/bin/sh
+# Single-owner, fail-closed MCI-v2 tooling evidence producer.
+set -eu
+LC_ALL=C
+export LC_ALL
+
+child_ids='compiler-check lib-check mcp-check lsp-check bootstrap-essential bootstrap-portability bootstrap-parity lint duplicate whole-test direct-env-working direct-env-staged runtime-contract artifact-execution warm-cli warm-mcp warm-lsp'
+scenarios='MCI-TOOL-001,MCI-TOOL-002,MCI-TOOL-003,MCI-NFR-001,MCI-NFR-002,MCI-NFR-005,MCI-NFR-006,MCI-NFR-013,MCI-NFR-014'
+capture_limit=16777216
+timeout_seconds=1800
+
+usage() {
+    echo "usage: $0 --evidence DIR --run-id ID --source-hash SHA256 --configuration-hash SHA256 --captured-at-utc-ns NS --valid-until-utc-ns NS [--simple-bin FILE] [--fixture-manifest FILE]" >&2
+    exit 2
+}
+
+evidence= run_id= source_hash= configuration_hash= captured_at= valid_until= simple_bin= fixture_manifest=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --evidence) [ "$#" -ge 2 ] || usage; evidence=$2; shift 2 ;;
+        --run-id) [ "$#" -ge 2 ] || usage; run_id=$2; shift 2 ;;
+        --source-hash) [ "$#" -ge 2 ] || usage; source_hash=$2; shift 2 ;;
+        --configuration-hash) [ "$#" -ge 2 ] || usage; configuration_hash=$2; shift 2 ;;
+        --captured-at-utc-ns) [ "$#" -ge 2 ] || usage; captured_at=$2; shift 2 ;;
+        --valid-until-utc-ns) [ "$#" -ge 2 ] || usage; valid_until=$2; shift 2 ;;
+        --simple-bin) [ "$#" -ge 2 ] || usage; simple_bin=$2; shift 2 ;;
+        --fixture-manifest) [ "$#" -ge 2 ] || usage; fixture_manifest=$2; shift 2 ;;
+        *) usage ;;
+    esac
+done
+
+is_sha256() { [ "${#1}" -eq 64 ] && case "$1" in *[!0-9a-f]*) return 1;; esac; }
+is_uint() { [ -n "$1" ] && case "$1" in *[!0-9]*) return 1;; esac; }
+safe_token() { [ -n "$1" ] && case "$1" in *[!A-Za-z0-9._-]*) return 1;; esac; }
+regular_nonsymlink() { [ -f "$1" ] && [ ! -L "$1" ]; }
+hash_file() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+    else echo 'BLOCKED: no SHA-256 implementation' >&2; exit 2
+    fi
+}
+field() {
+    field_name=$1 field_file=$2
+    [ "$(awk -F= -v key="$field_name" '$1 == key {n++} END {print n+0}' "$field_file")" -eq 1 ] || return 1
+    sed -n "s/^${field_name}=//p" "$field_file"
+}
+snapshot_file() {
+    snapshot_source=$1 snapshot_target=$2
+    regular_nonsymlink "$snapshot_source" || return 1
+    before=$(hash_file "$snapshot_source") || return 1
+    cp -- "$snapshot_source" "$snapshot_target" || return 1
+    regular_nonsymlink "$snapshot_target" && [ "$(hash_file "$snapshot_target")" = "$before" ] &&
+        [ "$(hash_file "$snapshot_source")" = "$before" ]
+}
+blocked() { echo "BLOCKED: $1" >&2; exit 2; }
+
+[ -n "$evidence" ] && safe_token "$run_id" && is_sha256 "$source_hash" &&
+    is_sha256 "$configuration_hash" && is_uint "$captured_at" && is_uint "$valid_until" || usage
+[ "$captured_at" -le "$valid_until" ] 2>/dev/null || usage
+repo_root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd -P)
+case "$evidence" in /*) evidence_abs=$evidence;; *) evidence_abs=$repo_root/$evidence;; esac
+case "$evidence_abs" in "$repo_root"/*) :;; *) blocked 'evidence must be below repository root';; esac
+walk=$repo_root; relative=${evidence_abs#"$repo_root"/}; old_ifs=$IFS; IFS=/
+for component in $relative; do
+    [ -n "$component" ] && [ "$component" != . ] && [ "$component" != .. ] || { IFS=$old_ifs; usage; }
+    walk=$walk/$component; [ ! -L "$walk" ] || { IFS=$old_ifs; blocked 'symlink in evidence path'; }
+done
+IFS=$old_ifs
+mkdir -p "$evidence_abs/artifacts" "$evidence_abs/receipts"
+[ -d "$evidence_abs/artifacts" ] && [ ! -L "$evidence_abs/artifacts" ] &&
+    [ -d "$evidence_abs/receipts" ] && [ ! -L "$evidence_abs/receipts" ] || blocked 'unsafe evidence directories'
+work=$(mktemp -d "$evidence_abs/.tooling.XXXXXX") || exit 2
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+run_bounded() {
+    cmd=$1 out=$2 err=$3; of=$work/out.fifo; ef=$work/err.fifo; mkfifo "$of" "$ef"
+    awk -v n="$capture_limit" -v meta="$work/out.meta" '{s=$0 ORS;t+=length(s);if(w<n){r=n-w;printf "%s",substr(s,1,r);w+=length(s)}} END{print t+0 > meta}' <"$of" >"$out" & op=$!
+    awk -v n="$capture_limit" -v meta="$work/err.meta" '{s=$0 ORS;t+=length(s);if(w<n){r=n-w;printf "%s",substr(s,1,r);w+=length(s)}} END{print t+0 > meta}' <"$ef" >"$err" & ep=$!
+    set +e; timeout -k 10 "$timeout_seconds" sh -c "$cmd" >"$of" 2>"$ef"; rc=$?; wait "$op"; orc=$?; wait "$ep"; erc=$?; set -e
+    rm -f "$of" "$ef"; [ "$orc" -eq 0 ] && [ "$erc" -eq 0 ] || return 125
+    bounded_stdout_total=$(sed -n '1p' "$work/out.meta"); bounded_stderr_total=$(sed -n '1p' "$work/err.meta")
+    bounded_overflow=false
+    [ "$bounded_stdout_total" -le "$capture_limit" ] && [ "$bounded_stderr_total" -le "$capture_limit" ] || bounded_overflow=true
+    return "$rc"
+}
+
+validate_manifest() {
+    manifest=$1 expected_mode=$2
+    [ "$(field manifest_schema "$manifest" 2>/dev/null || true)" = mci-tooling-child-manifest-v1 ] || return 1
+    [ "$(field producer_class "$manifest" 2>/dev/null || true)" = tooling-admission ] || return 1
+    [ "$(field mode "$manifest" 2>/dev/null || true)" = "$expected_mode" ] || return 1
+    [ "$(field run_id "$manifest" 2>/dev/null || true)" = "$run_id" ] || return 1
+    [ "$(field source_hash "$manifest" 2>/dev/null || true)" = "$source_hash" ] || return 1
+    [ "$(field configuration_hash "$manifest" 2>/dev/null || true)" = "$configuration_hash" ] || return 1
+    [ "$(field required_child_ids "$manifest" 2>/dev/null || true)" = "$child_ids" ] || return 1
+    [ "$(field capture_limit_bytes "$manifest" 2>/dev/null || true)" = "$capture_limit" ] || return 1
+    [ "$(field timeout_seconds "$manifest" 2>/dev/null || true)" = "$timeout_seconds" ] || return 1
+    manifest_rows=$(grep -c '^row=' "$manifest" || true)
+    [ "$manifest_rows" -eq 17 ] || return 1
+    for child_id in $child_ids; do
+        row=$(sed -n "s/^row=${child_id}|//p" "$manifest")
+        [ "$(printf '%s\n' "$row" | grep -c . || true)" -eq 1 ] || return 1
+        old_ifs=$IFS; IFS='|'; set -- $row; IFS=$old_ifs
+        [ "$#" -eq 19 ] || return 1
+        case "$1" in pass|blocked|fail) :;; *) return 1;; esac
+        is_sha256 "$2" && is_sha256 "$3" && is_sha256 "$4" && is_sha256 "$6" || return 1
+        for number in "$5" "$7" "$8" "$9" "${10}" "${11}" "${13}" "${14}" "${15}" "${16}" "${17}" "${18}" "${19}"; do is_uint "$number" || return 1; done
+        [ "$5" -le "$capture_limit" ] && [ "$7" -le "$capture_limit" ] && [ "${19}" -le 500 ] || return 1
+        case "${12}" in true|false) :;; *) return 1;; esac
+        if [ "$1" = pass ]; then [ "${11}" -eq 0 ] && [ "${12}" = false ] || return 1; fi
+    done
+    # No unknown, duplicate, skip, or ambiguous row may be hidden in the file.
+    awk -F'[=|]' '/^row=/{print $2}' "$manifest" | sort > "$work/actual-ids"
+    for child_id in $child_ids; do echo "$child_id"; done | sort > "$work/expected-ids"
+    cmp -s "$work/actual-ids" "$work/expected-ids"
+}
+
+if [ -n "$fixture_manifest" ]; then
+    [ "${MCI_TOOLING_CONTROLLED_FIXTURE:-0}" = 1 ] || blocked 'fixture mode requires MCI_TOOLING_CONTROLLED_FIXTURE=1'
+    snapshot_file "$fixture_manifest" "$work/fixture.manifest" || blocked 'fixture manifest missing, unsafe, or changed'
+    validate_manifest "$work/fixture.manifest" fixture || blocked 'fixture child manifest schema or exact row set is invalid'
+    grep -q '^row=.*|pass|' "$work/fixture.manifest" || blocked 'fixture must exercise at least one nominal row'
+    grep -Eq '^row=.*\|(blocked|fail)\|' "$work/fixture.manifest" || blocked 'fixture must prove fail-closed row handling'
+    if [ "${MCI_TOOLING_CAPTURE_SELFTEST:-0}" = 1 ]; then
+        set +e; run_bounded "dd if=/dev/zero bs=1048576 count=17 2>/dev/null" "$work/flood.out" "$work/flood.err"; flood_rc=$?; set -e
+        [ "$flood_rc" -eq 0 ] && [ "$bounded_overflow" = true ] && [ "$bounded_stdout_total" -gt "$capture_limit" ] && [ "$(wc -c < "$work/flood.out")" -le "$capture_limit" ] || blocked 'real flood capture did not fail closed'
+        saved_timeout=$timeout_seconds; timeout_seconds=1
+        set +e; run_bounded 'sleep 3' "$work/timeout.out" "$work/timeout.err"; timeout_rc=$?; set -e
+        timeout_seconds=$saved_timeout
+        [ "$timeout_rc" -eq 124 ] || blocked 'real timeout did not terminate and report timeout'
+    fi
+    mkdir "$work/contract-generation"
+    {
+        cat "$work/fixture.manifest"
+        echo 'evidence_mode=CONTRACT_ONLY'
+        echo 'release_eligible=false'
+    } > "$work/contract-generation/manifest.env"
+    tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+        -cf "$work/tooling-contract-v1.tar" -C "$work/contract-generation" .
+    {
+        echo 'report_schema=mci-tooling-report-v1'
+        echo 'mode=contract-only'
+        echo 'result=blocked'
+        echo 'reason=controlled-fixture-is-not-release-evidence'
+        echo 'evidence_mode=CONTRACT_ONLY'
+        echo 'release_eligible=false'
+        echo "manifest_sha256=$(hash_file "$work/tooling-contract-v1.tar")"
+    } > "$work/tooling-report-v1.env"
+    cp "$work/tooling-contract-v1.tar" "$evidence_abs/artifacts/tooling-contract-v1.tar"
+    cp "$work/tooling-report-v1.env" "$evidence_abs/tooling-report-v1.env"
+    rm -f "$evidence_abs/receipts/tooling.unsigned.template" "$evidence_abs/receipts/tooling.receipt"
+    echo 'tooling_contract=PASS'
+    echo 'tooling_admission=CONTRACT_ONLY'
+    exit 0
+fi
+
+# A live claim is valid only for an exact committed tree and its admitted,
+# deployed pure-Simple runner. The canonical source identity is SHA-256 over
+# Git's stable, recursive HEAD tree listing (mode, type, object, and path).
+[ -z "$(git -C "$repo_root" status --porcelain --untracked-files=normal)" ] || blocked 'live tooling admission requires an exact clean source tree'
+tree_listing=$work/source-tree.list
+git -C "$repo_root" ls-tree -r --full-tree HEAD > "$tree_listing" || blocked 'cannot resolve current source tree'
+current_source_hash=$(hash_file "$tree_listing")
+[ "$current_source_hash" = "$source_hash" ] || blocked 'source hash is not the exact current tree identity'
+[ -n "$simple_bin" ] || simple_bin=$repo_root/bin/simple
+runner=$(readlink -f "$simple_bin" 2>/dev/null || true)
+case "$runner" in "$repo_root"/bin/release/*/simple) :;; *) blocked 'runner is not an admitted bin/release pure-Simple artifact';; esac
+regular_nonsymlink "$runner" && [ -x "$runner" ] || blocked 'runner is missing or unsafe'
+runner_version=$($runner --version 2>&1) || blocked 'runner identity probe failed'
+case "$runner_version" in *[Rr]ust*|*[Bb]ootstrap*seed*) blocked 'Rust/bootstrap seed cannot produce live tooling admission';; esac
+runner_sha=$(hash_file "$runner")
+sidecar=$runner.sha256
+regular_nonsymlink "$sidecar" || blocked 'runner admission sidecar missing'
+[ "$(awk 'NR==1{print $1}' "$sidecar")" = "$runner_sha" ] || blocked 'runner admission sidecar digest mismatch'
+for output in "$evidence_abs/artifacts/tooling-generation-v1.tar" "$evidence_abs/receipts/tooling.unsigned.template"; do
+    [ ! -e "$output" ] && [ ! -L "$output" ] || blocked "evidence collision: $output"
+done
+
+# Publication is owned by the repository's openat/O_NOFOLLOW, fsyncing,
+# atomic-no-replace helper. A live run never publishes with cp/mv.
+publisher_source=$repo_root/scripts/check/lib/mci-secure-publish.c
+snapshot_file "$publisher_source" "$work/mci-secure-publish.c" || blocked 'secure publisher source missing, unsafe, or changed'
+command -v cc >/dev/null 2>&1 || blocked 'C compiler required for secure publication'
+cc -std=c11 -O2 "$work/mci-secure-publish.c" -o "$work/secure-publish" || blocked 'secure publisher build failed'
+chmod 0500 "$work/secure-publish"
+secure_publish() { "$work/secure-publish" "$1" "$2" "$3"; }
+
+command_for() {
+    case "$1" in
+        compiler-check) echo "$runner check src/compiler";;
+        lib-check) echo "$runner check src/lib";;
+        mcp-check) echo "$runner check src/app/mcp";;
+        lsp-check) echo "$runner check src/app/simple_lsp_mcp";;
+        bootstrap-essential) echo "env SIMPLE_BINARY=$runner sh scripts/check/check-bootstrap-essential-tools-smoke.shs";;
+        bootstrap-portability) echo 'sh scripts/check/check-bootstrap-portability.shs';;
+        bootstrap-parity) echo "env SIMPLE_BINARY=$runner NATIVE_PARITY_FAIL_ON_XFAIL=1 sh scripts/check/check-native-seed-parity.shs";;
+        lint) echo "$runner lint src/compiler src/lib src/app/mcp src/app/simple_lsp_mcp";;
+        duplicate) echo "$runner duplicate-check src --mode token --min-lines 5";;
+        whole-test) echo "$runner test test --whole --mode=interpreter";;
+        direct-env-working) echo 'sh scripts/audit/direct-env-runtime-guard.shs --working';;
+        direct-env-staged) echo 'sh scripts/audit/direct-env-runtime-guard.shs --staged';;
+        runtime-contract) echo 'sh scripts/check/check-runtime-contract-provider-native.shs';;
+        artifact-execution) echo 'sh scripts/check/check-mcp-native-smoke.shs';;
+        warm-cli) echo "env SIMPLE_BINARY=$runner sh scripts/check/check-startup-size-performance-audit.shs";;
+        warm-mcp) echo 'env MCI_NFR_ONLY=mcp sh scripts/check/check-mcp-lsp-nfr-evidence.shs';;
+        warm-lsp) echo 'env MCI_NFR_ONLY=lsp sh scripts/check/check-mcp-lsp-nfr-evidence.shs';;
+    esac
+}
+
+{
+    echo 'manifest_schema=mci-tooling-child-manifest-v1'; echo 'producer_class=tooling-admission'; echo 'mode=live'; echo 'release_eligible=true'
+    echo "run_id=$run_id"; echo "source_hash=$source_hash"; echo "configuration_hash=$configuration_hash"
+    echo "required_child_ids=$child_ids"; echo "capture_limit_bytes=$capture_limit"; echo "timeout_seconds=$timeout_seconds"
+} > "$work/manifest"
+result=pass
+cd "$repo_root"
+for child_id in $child_ids; do
+    command_text=$(command_for "$child_id"); command_sha=$(printf '%s' "$command_text" | { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; } | awk '{print $1}')
+    stdout="$work/$child_id.stdout"; stderr="$work/$child_id.stderr"
+    fixture_sha=$(printf '%s' "$source_hash|$configuration_hash|$child_id" | { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; } | awk '{print $1}')
+    start_ns=$(date +%s)000000000; timed_out=false
+    if command -v timeout >/dev/null 2>&1; then
+        bounded_overflow=false; bounded_stdout_total=0; bounded_stderr_total=0
+        set +e; run_bounded "$command_text" "$stdout" "$stderr"; exit_code=$?; set -e
+        case "$exit_code" in 124|137) timed_out=true;; esac
+        if [ "$exit_code" -eq 0 ]; then status=pass; else status=fail; result=blocked; fi
+    else blocked 'timeout command is required for bounded live execution'; fi
+    end_ns=$(date +%s)000000000; duration_ns=$((end_ns - start_ns))
+    stdout_bytes=$(wc -c < "$stdout" | tr -d ' '); stderr_bytes=$(wc -c < "$stderr" | tr -d ' ')
+    [ "$bounded_overflow" = false ] || { status=blocked; result=blocked; }
+    if [ "$stdout_bytes" -gt "$capture_limit" ] || [ "$stderr_bytes" -gt "$capture_limit" ]; then status=blocked; result=blocked; fi
+    stdout_sha=$(hash_file "$stdout"); stderr_sha=$(hash_file "$stderr")
+    scan_count=$(grep -Eic 'scan|files? checked' "$stdout" "$stderr" 2>/dev/null || true)
+    samples=$(sed -n 's/^samples=//p' "$stdout" | tail -1); samples=${samples:-1}
+    p50=$(sed -n 's/^.*p50[^=]*=\([0-9][0-9]*\).*$/\1/p' "$stdout" | tail -1); p50=${p50:-0}
+    p95=$(sed -n 's/^.*p95[^=]*=\([0-9][0-9]*\).*$/\1/p' "$stdout" | tail -1); p95=${p95:-0}
+    max_rss=$(sed -n 's/^.*max_rss[^=]*=\([0-9][0-9]*\).*$/\1/p' "$stdout" | sort -n | tail -1); max_rss=${max_rss:-0}
+    baseline=$(sed -n 's/^.*baseline[^=]*=\([0-9][0-9]*\).*$/\1/p' "$stdout" | tail -1); baseline=${baseline:-$p95}
+    regression_bp=0
+    if [ "$baseline" -gt 0 ] && [ "$p95" -gt "$baseline" ]; then regression_bp=$(( (p95 - baseline) * 10000 / baseline )); fi
+    [ "$regression_bp" -le 500 ] || { status=blocked; result=blocked; }
+    echo "row=$child_id|$status|$command_sha|$fixture_sha|$stdout_sha|$stdout_bytes|$stderr_sha|$stderr_bytes|$start_ns|$end_ns|$duration_ns|$exit_code|$timed_out|$scan_count|$samples|$p50|$p95|$max_rss|$baseline|$regression_bp" >> "$work/manifest"
+done
+validate_manifest "$work/manifest" live || blocked 'internally produced child manifest failed validation'
+[ "$result" = pass ] || blocked 'one or more required tooling children failed, timed out, exceeded capture, or regressed beyond five percent'
+
+mkdir "$work/generation"
+cp "$work/manifest" "$work/generation/manifest.env"
+for stream in "$work"/*.stdout "$work"/*.stderr; do cp "$stream" "$work/generation/$(basename "$stream")"; done
+tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -cf "$work/tooling-generation-v1.tar" -C "$work/generation" .
+manifest_sha=$(hash_file "$work/tooling-generation-v1.tar")
+{
+    echo 'receipt_schema=mci-lane-receipt-v1'; echo 'check_id=tooling'; echo 'producer_class=tooling-admission'
+    echo 'attestation=unsigned-template'; echo 'trusted_key_id=signer-must-set'; echo 'signature_relpath=tooling.sig'
+    echo "run_id=$run_id"; echo "source_hash=$source_hash"; echo "configuration_hash=$configuration_hash"
+    echo "captured_at_utc_ns=$captured_at"; echo "valid_until_utc_ns=$valid_until"; echo 'result=pass'
+    echo "scenarios=$scenarios"; echo 'artifact_relpath=tooling-generation-v1.tar'; echo "artifact_sha256=$manifest_sha"
+    echo 'artifact_schema=mci-tooling-child-manifest-v1'; echo 'artifact_mode=live'; echo 'release_eligible=true'
+    echo 'receipt_hash=signer-must-canonicalize-hash-and-sign'
+} > "$work/tooling.unsigned.template"
+# The template is intentionally non-admissible (unsigned-template and invalid
+# placeholder hash). Publishing it first cannot create a PASS. The bound final
+# tar publishes last; any failure leaves no admissible signed receipt/artifact
+# pair and never performs pathname rollback deletion.
+secure_publish "$evidence_abs/receipts" "$work/tooling.unsigned.template" tooling.unsigned.template || blocked 'secure receipt-template publication failed'
+secure_publish "$evidence_abs/artifacts" "$work/tooling-generation-v1.tar" tooling-generation-v1.tar || blocked 'secure final-generation publication failed; unsigned template remains non-admissible'
+echo 'tooling_admission=PASS'
+echo "tooling_manifest_sha256=$manifest_sha"

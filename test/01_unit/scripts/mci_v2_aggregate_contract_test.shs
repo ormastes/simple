@@ -24,7 +24,8 @@ scenarios() {
         tooling) echo 'MCI-TOOL-001,MCI-TOOL-002,MCI-TOOL-003,MCI-NFR-001,MCI-NFR-002,MCI-NFR-005,MCI-NFR-006,MCI-NFR-013,MCI-NFR-014' ;;
         simpleos) echo 'MCI-OS-001,MCI-OS-002,MCI-OS-003,MCI-OS-004,MCI-OS-005,MCI-OS-006' ;;
         rendering) echo 'MCI-REN-001,MCI-REN-002,MCI-REN-003,MCI-REN-004,MCI-REN-005,MCI-REN-006,MCI-NFR-011,MCI-NFR-012' ;;
-        allocation|fault-injection) echo 'MCI-ALLOC-001,MCI-ALLOC-002,MCI-ALLOC-003,MCI-ALLOC-004,MCI-ALLOC-005,MCI-ALLOC-006,MCI-NFR-007,MCI-NFR-008,MCI-NFR-009,MCI-NFR-010' ;;
+        allocation) echo 'MCI-ALLOC-001,MCI-ALLOC-002,MCI-ALLOC-003,MCI-ALLOC-004,MCI-ALLOC-005,MCI-NFR-007,MCI-NFR-008' ;;
+        fault-injection) echo 'MCI-ALLOC-006,MCI-NFR-009,MCI-NFR-010' ;;
         process-safety) echo 'MCI-PROC-001,MCI-PROC-002,MCI-PROC-003' ;;
         stress) echo 'MCI-NFR-015,MCI-NFR-016' ;;
         traceability) echo 'MCI-DOC-001,MCI-DOC-002,MCI-DOC-003' ;;
@@ -60,27 +61,79 @@ build_review() {
         echo run_id="$run_id"; echo source_hash="$source_hash"; echo configuration_hash="$config_hash"
         echo aggregate_candidate_sha256="$candidate"; echo decided_at_utc_ns=18446657673709551615; echo valid_until_utc_ns=18446744073709551615
         echo decision=approve; echo scenarios="$(scenarios reviewer)"
+        echo artifact_schema=mci-aggregate-candidate-v1; echo artifact_mode=independent-review; echo release_eligible=true
     } > "$receipt"
     sign_review "$receipt" "$evidence/signatures/reviewer.sig"
 }
 build_baseline() {
     evidence=$1
     rm -rf "$evidence"; mkdir -p "$evidence/receipts" "$evidence/artifacts" "$evidence/signatures"
-    for check in $checks; do
-        [ "$check" = reviewer ] && continue
-        artifact="$evidence/artifacts/$check.evidence"; echo "$check evidence" > "$artifact"
-        receipt="$evidence/receipts/$check.receipt"
+    for baseline_check in $checks; do
+        [ "$baseline_check" = reviewer ] && continue
+        artifact="$evidence/artifacts/$baseline_check.evidence"
+        case "$baseline_check" in
+            compiler) schema=mci-compiler-collector-receipt-v2; schema_key=schema_version;;
+            tooling) schema=mci-tooling-child-manifest-v1; schema_key=manifest_schema;;
+            simpleos) schema=mci-simpleos-platform-evidence-v1; schema_key=artifact_schema;;
+            rendering) schema=mci-rendering-evidence-v1; schema_key=artifact_schema;;
+            allocation) schema=mci-allocation-domain-arena-evidence-v1; schema_key=artifact_schema;;
+            fault-injection) schema=mci-fault-injection-domain-arena-evidence-v1; schema_key=artifact_schema;;
+            process-safety) schema=mci-process-safety-evidence-v1; schema_key=artifact_schema;;
+            stress) schema=mci-stress-evidence-v1; schema_key=artifact_schema;;
+            traceability) schema=mci-traceability-artifact-v1; schema_key=schema_version;;
+        esac
+        if [ "$baseline_check" = tooling ]; then
+            mkdir -p "$work/tooling-generation"
+            { echo "$schema_key=$schema"; echo producer_class=tooling-admission; echo mode=live; echo release_eligible=true; echo result=pass; } > "$work/tooling-generation/manifest.env"
+            tar -cf "$artifact" -C "$work/tooling-generation" ./manifest.env
+        elif [ "$baseline_check" = allocation ]; then
+            {
+                echo "$schema_key=$schema"; echo artifact_mode=live; echo release_eligible=true
+                echo "run_id=$run_id"; echo "source_hash=$source_hash"; echo "configuration_hash=$config_hash"
+                echo focused_run_count=1; echo scenario_schema=domain-arena-v1-12
+                echo canonical_markers_passed=12; echo canonical_markers_required=12
+                echo profile_schema_version=1; echo ledger_schema_version=1; echo ledger_rows=2
+                echo ledger_registry_points=before_cursor_advance,before_publication; echo contract_result=PASS
+            } > "$artifact"
+        elif [ "$baseline_check" = fault-injection ]; then
+            {
+                echo "$schema_key=$schema"; echo artifact_mode=live; echo release_eligible=true
+                echo "run_id=$run_id"; echo "source_hash=$source_hash"; echo "configuration_hash=$config_hash"
+                echo focused_run_count=1; echo scenario_subset=MCI-ALLOC-006,MCI-NFR-009,MCI-NFR-010
+                echo ledger_schema_version=1; echo ledger_rows=2
+                echo ledger_registry_points=before_cursor_advance,before_publication
+                echo injected_rows=2; echo rolled_back_rows=2; echo subject_hashes_unchanged=2; echo isolated_hashes_unchanged=2
+                echo contract_result=PASS
+            } > "$artifact"
+        else
+            { echo "$schema_key=$schema"; echo artifact_mode=live; echo release_eligible=true; echo result=PASS; } > "$artifact"
+        fi
+        receipt="$evidence/receipts/$baseline_check.receipt"
         {
-            echo receipt_schema=mci-lane-receipt-v1; echo check_id="$check"
-            case "$check" in compiler) producer=compiler-admission;; tooling) producer=tooling-admission;; simpleos) producer=simpleos-target;; rendering) producer=rendering-target;; allocation|fault-injection) producer=allocation-runtime;; process-safety) producer=process-runtime;; stress) producer=stress-target;; traceability) producer=traceability-gate;; reviewer) producer=independent-review;; esac
+            echo receipt_schema=mci-lane-receipt-v1; echo check_id="$baseline_check"
+            case "$baseline_check" in compiler) producer=compiler-admission;; tooling) producer=tooling-admission;; simpleos) producer=simpleos-target;; rendering) producer=rendering-target;; allocation|fault-injection) producer=allocation-runtime;; process-safety) producer=process-runtime;; stress) producer=stress-target;; traceability) producer=traceability-gate;; reviewer) producer=independent-review;; esac
             echo producer_class="$producer"; echo attestation=signed-v1
-            echo trusted_key_id=test-key; echo signature_relpath="$check.sig"; echo run_id="$run_id"
+            echo trusted_key_id=test-key; echo signature_relpath="$baseline_check.sig"; echo run_id="$run_id"
             echo source_hash="$source_hash"; echo configuration_hash="$config_hash"
             echo captured_at_utc_ns=18446657673709551615; echo valid_until_utc_ns=18446744073709551615
-            echo result=pass; echo scenarios="$(scenarios "$check")"
-            echo artifact_relpath="$check.evidence"; echo artifact_sha256="$(hash_file "$artifact")"
-        } > "$receipt"
-        sign_receipt "$receipt" "$evidence/signatures/$check.sig"
+            echo result=pass; echo scenarios="$(scenarios "$baseline_check")"
+            echo artifact_relpath="$baseline_check.evidence"; echo artifact_sha256="$(hash_file "$artifact")"
+            echo artifact_schema="$schema"; echo artifact_mode=live; echo release_eligible=true
+        } > "$work/$baseline_check.unsigned.template"
+        if [ "$baseline_check" = allocation ] || [ "$baseline_check" = fault-injection ]; then
+            # Exact producer-template conversion: only signer-owned fields and
+            # the canonical receipt hash are replaced before detached signing.
+            sed -e 's/^attestation=.*/attestation=EXTERNAL_SIGNER_SETS_signed-v1/' \
+                -e 's/^trusted_key_id=.*/trusted_key_id=EXTERNAL_SIGNER_KEY_ID/' \
+                -e "s/^signature_relpath=.*/signature_relpath=$baseline_check.sig/" \
+                "$work/$baseline_check.unsigned.template" > "$work/$baseline_check.external-template"
+            sed -e 's/^attestation=.*/attestation=signed-v1/' \
+                -e 's/^trusted_key_id=.*/trusted_key_id=test-key/' \
+                "$work/$baseline_check.external-template" > "$receipt"
+        else
+            cp "$work/$baseline_check.unsigned.template" "$receipt"
+        fi
+        sign_receipt "$receipt" "$evidence/signatures/$baseline_check.sig"
     done
     "$gate" --evidence "$evidence" --run-id "$run_id" --source-hash "$source_hash" --configuration-hash "$config_hash" --now-utc-ns 18446744073709551614 $trust_args >/dev/null 2>&1 || :
     build_review "$evidence"
@@ -88,11 +141,16 @@ build_baseline() {
 build_baseline "$evidence"
 
 now_ns=18446744073709551614
-"$gate" --evidence "$evidence" --run-id "$run_id" --source-hash "$source_hash" --configuration-hash "$config_hash" --now-utc-ns "$now_ns" $trust_args
+if ! "$gate" --evidence "$evidence" --run-id "$run_id" --source-hash "$source_hash" --configuration-hash "$config_hash" --now-utc-ns "$now_ns" $trust_args; then
+    sed -n '/^row=/p' "$evidence/aggregate-report-v1.env" >&2
+    exit 1
+fi
 grep -q '^collector_contract=PASS$' "$evidence/aggregate-report-v1.env"
 grep -q '^collector_contract_scenarios=MCI-AGG-001,MCI-AGG-002,MCI-AGG-003$' "$evidence/aggregate-report-v1.env"
 grep -q '^result=PASS$' "$evidence/aggregate-report-v1.env"
 grep -q '^row=reviewer|PASS|none|' "$evidence/aggregate-report-v1.env"
+grep -q '^row=allocation|PASS|none|MCI-ALLOC-001,MCI-ALLOC-002,MCI-ALLOC-003,MCI-ALLOC-004,MCI-ALLOC-005,MCI-NFR-007,MCI-NFR-008$' "$evidence/aggregate-report-v1.env"
+grep -q '^row=fault-injection|PASS|none|MCI-ALLOC-006,MCI-NFR-009,MCI-NFR-010$' "$evidence/aggregate-report-v1.env"
 [ "$(grep -c '^row=.*|PASS|none|' "$evidence/aggregate-report-v1.env")" -eq 10 ]
 first_hash=$(sed -n 's/^manifest_sha256=//p' "$evidence/aggregate-report-v1.env")
 evidence_reverse="$work/evidence-reverse"; mkdir -p "$evidence_reverse/receipts" "$evidence_reverse/artifacts" "$evidence_reverse/signatures"
@@ -107,7 +165,8 @@ done
 # A valid-to-valid evidence generation change keeps its lane PASS but makes an
 # old review a replay. A separately signed review of generation B admits it.
 old_candidate=$(sed -n 's/^aggregate_candidate_sha256=//p' "$evidence/aggregate-report-v1.env")
-echo 'tooling evidence generation B' > "$evidence/artifacts/tooling.evidence"
+echo generation=B >> "$work/tooling-generation/manifest.env"
+tar -cf "$evidence/artifacts/tooling.evidence" -C "$work/tooling-generation" ./manifest.env
 sed "s/^artifact_sha256=.*/artifact_sha256=$(hash_file "$evidence/artifacts/tooling.evidence")/" "$evidence/receipts/tooling.receipt" > "$work/tooling-b.receipt"
 mv "$work/tooling-b.receipt" "$evidence/receipts/tooling.receipt"
 sign_receipt "$evidence/receipts/tooling.receipt" "$evidence/signatures/tooling.sig"
@@ -177,6 +236,26 @@ for mode in symlink artifact_path synthetic screenshot_only source_only cached u
     negative_count=$((negative_count + 1))
 done
 [ "$negative_count" -eq 15 ]
+
+# A valid producer signature cannot promote controlled or diagnostic artifacts.
+for check in tooling allocation process-safety simpleos; do
+    build_baseline "$evidence"
+    artifact="$evidence/artifacts/$check.evidence"
+    if [ "$check" = tooling ]; then
+        sed 's/^mode=live$/mode=contract-only/; s/^release_eligible=true$/release_eligible=false/' "$work/tooling-generation/manifest.env" > "$work/tooling-generation/manifest.fixture"
+        mv "$work/tooling-generation/manifest.fixture" "$work/tooling-generation/manifest.env"
+        tar -cf "$artifact" -C "$work/tooling-generation" ./manifest.env
+    else
+        sed 's/^artifact_mode=live$/artifact_mode=fixture/; s/^release_eligible=true$/release_eligible=false/' "$artifact" > "$work/controlled-artifact"
+        mv "$work/controlled-artifact" "$artifact"
+    fi
+    receipt="$evidence/receipts/$check.receipt"
+    sed "s/^artifact_sha256=.*/artifact_sha256=$(hash_file "$artifact")/" "$receipt" > "$work/controlled.receipt"
+    mv "$work/controlled.receipt" "$receipt"
+    sign_receipt "$receipt" "$evidence/signatures/$check.sig"
+    "$gate" --evidence "$evidence" --run-id "$run_id" --source-hash "$source_hash" --configuration-hash "$config_hash" --now-utc-ns "$now_ns" $trust_args >/dev/null 2>&1 && exit 1
+    grep -q "^row=$check|BLOCKED|non-release-artifact-policy|" "$evidence/aggregate-report-v1.env"
+done
 
 # Reviewer trust is independent: missing, producer-key/self-issued, stale,
 # replayed candidate, and missing identity fail; a distinct signature admits.

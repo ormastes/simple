@@ -229,6 +229,20 @@ AllocationExhaustionV1 {
 }
 ```
 
+Producer outputs use one validated run but form two admission rows:
+
+- allocation: `artifacts/allocation-domain-arena-v1.evidence` and
+  `receipts/allocation.unsigned.template`, owning `MCI-ALLOC-001..005` and
+  `MCI-NFR-007/008`;
+- fault injection: `artifacts/fault-injection-domain-arena-v1.evidence` and
+  `receipts/fault-injection.unsigned.template`, owning `MCI-ALLOC-006` and
+  `MCI-NFR-009/010`.
+
+Only an external producer-key operator converts each template to its matching
+signed receipt. Controlled fixture output remains fixture/non-release evidence;
+the aggregate compatibility contract uses separately synthesized, live-shaped
+schemas to exercise parsing and never promotes a controlled producer artifact.
+
 The V1 arena registers exactly two deterministic one-shot injection boundaries:
 `before_cursor_advance` and `before_publication`. Arming any other identifier or
 arming outside an open transaction fails closed. The allocation boundary returns

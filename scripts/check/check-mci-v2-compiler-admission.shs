@@ -1,0 +1,57 @@
+#!/bin/sh
+set -eu
+LC_ALL=C; export LC_ALL
+usage() { echo "usage: $0 --mode live|fixture --evidence DIR --run-id ID --compiler FILE --provenance FILE --provenance-signature FILE --trust-key FILE --parent-receipt FILE --parent-signature FILE --parent-trust-key FILE --captured-at-utc-ns NS --valid-until-utc-ns NS [--now-utc-ns NS]" >&2; exit 2; }
+mode= evidence= run_id= compiler= provenance= signature= trust_key= parent= parent_signature= parent_key= captured= valid= now=
+while [ "$#" -gt 0 ]; do case "$1" in --mode) mode=$2;; --evidence) evidence=$2;; --run-id) run_id=$2;; --compiler) compiler=$2;; --provenance) provenance=$2;; --provenance-signature) signature=$2;; --trust-key) trust_key=$2;; --parent-receipt) parent=$2;; --parent-signature) parent_signature=$2;; --parent-trust-key) parent_key=$2;; --captured-at-utc-ns) captured=$2;; --valid-until-utc-ns) valid=$2;; --now-utc-ns) now=$2;; *) usage;; esac; shift 2; done
+case "$mode" in live|fixture) :;; *) usage;; esac
+[ -n "$evidence$run_id$compiler$provenance$signature$trust_key$parent$parent_signature$parent_key$captured$valid" ] || usage
+root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd -P); cd "$root"; policy=$root/scripts/check/policy/mci-v2-compiler-live-policy.env
+fail() { echo "BLOCKED: $1" >&2; exit 2; }
+hash_file() { sha256sum "$1" | awk '{print $1}'; }; hash_text() { sha256sum | awk '{print $1}'; }
+field() { k=$1 f=$2; [ "$(awk -F= -v k="$k" '$1==k{n++}END{print n+0}' "$f")" -eq 1 ] || return 1; sed -n "s/^$k=//p" "$f"; }
+regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
+resolve() { case "$1" in /*) printf '%s\n' "$1";; *) printf '%s/%s\n' "$root" "$1";; esac; }
+canonical_below_root() { p=$(resolve "$1"); [ ! -L "$p" ] && [ "$(readlink -f "$p")" = "$p" ] && case "$p" in "$root"/*) :;; *) return 1;; esac; }
+snapshot() { src=$1 dst=$2; regular "$src" || return 1; before=$(stat -Lc '%d:%i:%s:%Y:%Z' "$src")/$(hash_file "$src"); cp "$src" "$dst"; [ "$before" = "$(stat -Lc '%d:%i:%s:%Y:%Z' "$src")/$(hash_file "$src")" ] && [ "$(hash_file "$src")" = "$(hash_file "$dst")" ]; }
+case "$run_id" in ''|*[!A-Za-z0-9._-]*) usage;; esac; case "$captured$valid${now:-0}" in *[!0-9]*) usage;; esac
+[ -n "$now" ] || now=$(date -u +%s)000000000
+awk -v a="$captured" -v n="$now" -v z="$valid" 'BEGIN{exit !(a<=n&&n<=z&&z-a<=86400000000000)}' || fail stale-or-invalid-lifetime
+regular "$policy" || fail missing-live-policy
+if [ "$mode" = live ] && [ "$(field provisioning_status "$policy")" != provisioned ]; then fail live-trust-policy-unprovisioned; fi
+if [ "$mode" = live ] && [ -n "$(git status --porcelain --untracked-files=all -- src/compiler src/app src/lib)" ]; then fail dirty-or-untracked-build-inputs; fi
+compiler=$(resolve "$compiler"); provenance=$(resolve "$provenance"); signature=$(resolve "$signature"); trust_key=$(resolve "$trust_key"); parent=$(resolve "$parent"); parent_signature=$(resolve "$parent_signature"); parent_key=$(resolve "$parent_key")
+for f in "$compiler" "$provenance" "$signature" "$trust_key" "$parent" "$parent_signature" "$parent_key"; do canonical_below_root "$f" && regular "$f" || fail unsafe-input-path; done
+[ -x "$compiler" ] || fail compiler-not-executable
+case "$evidence" in /*) evidence_abs=$evidence;; *) evidence_abs=$root/$evidence;; esac; case "$evidence_abs" in "$root"/*) :;; *) fail evidence-outside-root;; esac
+walk=$root; rel=${evidence_abs#"$root"/}; oldifs=$IFS; IFS=/; for c in $rel; do [ -n "$c" ] && [ "$c" != . ] && [ "$c" != .. ] || fail unsafe-evidence-component; walk=$walk/$c; [ ! -L "$walk" ] || fail symlink-evidence-ancestor; done; IFS=$oldifs
+mkdir -p "$evidence_abs/artifacts" "$evidence_abs/receipts" "$root/build"; [ ! -e "$evidence_abs/artifacts/compiler.evidence" ] || fail evidence-collision
+work=$(mktemp -d "$root/build/mci-compiler.XXXXXX"); trap 'rm -rf "$work"' EXIT HUP INT TERM
+snapshot "$compiler" "$work/compiler" && snapshot "$provenance" "$work/provenance" && snapshot "$signature" "$work/signature" && snapshot "$trust_key" "$work/key" && snapshot "$parent" "$work/parent" && snapshot "$parent_signature" "$work/parent.sig" && snapshot "$parent_key" "$work/parent.key" || fail aba-or-input-mutation
+chmod 500 "$work/compiler"; compiler_hash=$(hash_file "$work/compiler"); key_hash=$(hash_file "$work/key")
+source_roots=$(field source_roots "$policy"); source_manifest=$work/source.manifest
+git ls-files ${source_roots//:/ } | LC_ALL=C sort | while IFS= read -r f; do [ -f "$root/$f" ] || continue; regular "$root/$f" || exit 3; printf '%s=%s\n' "$f" "$(hash_file "$root/$f")"; done > "$source_manifest" || fail source-manifest-derivation-failed
+source_hash=$(hash_file "$source_manifest"); config_manifest=$work/config.manifest
+fixture=$(field fixture_path "$policy"); expected=$(field fixture_stdout "$policy"); minimum=$(field minimum_emitted_function_count "$policy"); required_symbol=$(field required_symbol "$policy"); canonical_below_root "$fixture" && regular "$root/$fixture" || fail unsafe-fixed-fixture
+snapshot "$root/$fixture" "$work/fixture.spl" || fail fixture-aba-or-mutation; fixture_hash=$(hash_file "$work/fixture.spl")
+{ echo policy_sha256=$(hash_file "$policy"); echo producer_sha256=$(hash_file "$root/scripts/check/check-mci-v2-compiler-admission.shs"); echo mode="$mode"; echo source_roots="$source_roots"; echo fixture_sha256="$fixture_hash"; echo fixture_stdout="$expected"; echo required_symbol="$required_symbol"; echo toolchain_identity="$(cc --version 2>/dev/null | head -1 | hash_text)"; echo dependency_manifest_sha256="$(hash_file "$work/parent")"; echo environment_identity_sha256="$(printf 'LC_ALL=C\nPATH=%s\n' "$PATH" | hash_text)"; } > "$config_manifest"; config_hash=$(hash_file "$config_manifest")
+authority=$(field authority "$policy"); expected_key_id=$(field trusted_key_id "$policy"); expected_key_hash=$(field trusted_key_sha256 "$policy")
+if [ "$mode" = fixture ]; then expected_key_id=contract-fixture-ephemeral; expected_key_hash=$key_hash; fi
+[ "$(field provenance_schema "$work/provenance" 2>/dev/null || true)" = mci-compiler-provenance-v2 ] || fail invalid-provenance-schema
+[ "$(field authority "$work/provenance" 2>/dev/null || true)" = "$authority" ] && [ "$(field lineage "$work/provenance" 2>/dev/null || true)" = pure-simple ] || fail non-pure-simple-lineage
+[ "$(field trust_key_id "$work/provenance" 2>/dev/null || true)" = "$expected_key_id" ] && [ "$key_hash" = "$expected_key_hash" ] || fail unpinned-trust-key
+[ "$(field compiler_sha256 "$work/provenance" 2>/dev/null || true)" = "$compiler_hash" ] && [ "$(field compiler_source_manifest_sha256 "$work/provenance" 2>/dev/null || true)" = "$source_hash" ] && [ "$(field configuration_manifest_sha256 "$work/provenance" 2>/dev/null || true)" = "$config_hash" ] || fail stale-current-identity
+[ "$(field fixture_sha256 "$work/provenance" 2>/dev/null || true)" = "$fixture_hash" ] || fail stale-fixture-identity
+parent_hash=$(hash_file "$work/parent"); [ "$(field parent_receipt_sha256 "$work/provenance" 2>/dev/null || true)" = "$parent_hash" ] || fail invalid-parent-chain
+[ "$(field receipt_schema "$work/parent" 2>/dev/null || true)" = mci-compiler-parent-receipt-v1 ] && [ "$(field lineage "$work/parent" 2>/dev/null || true)" = pure-simple ] && [ "$(field child_compiler_sha256 "$work/parent" 2>/dev/null || true)" = "$compiler_hash" ] && [ "$(field source_manifest_sha256 "$work/parent" 2>/dev/null || true)" = "$source_hash" ] || fail unauthenticated-parent-chain
+parent_key_hash=$(hash_file "$work/parent.key"); [ "$(field signing_algorithm "$work/parent" 2>/dev/null || true)" = ed25519 ] && [ "$(field trust_key_sha256 "$work/parent" 2>/dev/null || true)" = "$parent_key_hash" ] || fail invalid-parent-trust
+openssl pkeyutl -verify -rawin -pubin -inkey "$work/parent.key" -sigfile "$work/parent.sig" -in "$work/parent" >/dev/null 2>&1 || fail invalid-parent-signature
+openssl pkeyutl -verify -rawin -pubin -inkey "$work/key" -sigfile "$work/signature" -in "$work/provenance" >/dev/null 2>&1 || fail invalid-signature
+emitted=$work/emitted; timeout 180 env SIMPLE_LIB=src "$work/compiler" native-build --source src/compiler --source src/app --source src/lib --entry-closure --entry "$work/fixture.spl" --strip --output "$emitted" >$work/compile.log 2>&1 || fail compile-failed
+regular "$emitted" && [ -x "$emitted" ] || fail non-executable-artifact; readelf -h "$emitted" | grep -q 'Type:.*EXEC\|Type:.*DYN' || fail emitted-format-not-elf
+functions=$(nm "$emitted" 2>/dev/null | awk '$2 ~ /^[Tt]$/ {n++} END{print n+0}'); [ "$functions" -ge "$minimum" ] || fail missing-function-evidence
+nm "$emitted" 2>/dev/null | awk -v wanted="$required_symbol" '$2 ~ /^[Tt]$/ && index($3,wanted){found=1} END{exit !found}' || fail required-symbol-missing
+timeout 30 "$emitted" >$work/run.log 2>&1 || fail emitted-execution-failed; [ "$(tr -d '\r\n' <$work/run.log)" = "$expected" ] || fail fixed-oracle-mismatch
+artifact=$evidence_abs/artifacts/compiler.evidence; { echo schema_version=mci-compiler-collector-receipt-v2; echo run_id="$run_id"; echo source_hash="$source_hash"; echo config_hash="$config_hash"; echo fixture_sha256="$fixture_hash"; echo compiler_executable_hash="$compiler_hash"; echo parent_receipt_hash="$parent_hash"; echo parent_signature_sha256=$(hash_file "$work/parent.sig"); echo emitted_artifact_hash=$(hash_file "$emitted"); echo emitted_function_count="$functions"; echo required_symbol="$required_symbol"; echo fixture_capture_hash=$(hash_file "$work/run.log"); echo scenarios=MCI-COMP-001; echo blocked_scenarios=MCI-COMP-002,MCI-COMP-003,MCI-NFR-003,MCI-NFR-004; echo aggregate_lane_status=blocked-incomplete-scenario-set; echo result=$(if [ "$mode" = fixture ]; then echo CONTRACT_ONLY; else echo PASS; fi); echo release_candidate=false; } > "$artifact"
+if [ "$mode" = fixture ]; then echo 'CONTRACT_ONLY: fixed compiler fixture passed; no receipt template published'; exit 0; fi
+echo 'BLOCKED: MCI-COMP-001 passed, but compiler aggregate lane requires COMP-002/003 and NFR-003/004' >&2; exit 2

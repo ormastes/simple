@@ -68,3 +68,19 @@ journalctl -k | grep -i oom          # kernel OOM (was empty in both incidents)
 
 Simultaneous teardown + `exit.target` + no OOM lines = pid broadcast; audit
 recently added kill/cleanup paths.
+## MCI-v2 producer admission
+
+`check-mci-v2-process-safety.shs` uses `mci-simple-runner-admission-v2`.
+The canonical Ed25519-signed admission binds the pinned trust-key ID and digest,
+the snapshotted runner digest, and producer-derived source and configuration
+manifest digests. The runner snapshot, not the caller path, is executed.
+
+Native facade evidence uses the distinct `mci-process-native-facade-v2` trust
+key. Its canonical signed receipt binds run ID, source/configuration manifests,
+executable and PASS-marker digests, capture/expiry timestamps, and result.
+Controlled fixtures emit `CONTRACT_ONLY` and are never release eligible.
+
+The unsigned lane receipt is published non-destructively as
+`receipts/process-safety.receipt.unsigned.template`. Before running any checks,
+the producer rejects collisions with that template, its artifact/subcheck
+outputs, or existing signed `process-safety.receipt`/`process-safety.sig` files.

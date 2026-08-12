@@ -150,7 +150,7 @@ set +e
 fsync_rc=$?
 set -e
 [ "$fsync_rc" -eq 3 ] && [ -f "$work/publish-dir/__test_fsync_fail__" ]
-for output_name in allocation-domain-arena-v1.log allocation-domain-arena-v1.evidence allocation.unsigned.template allocation-report-v1.env; do
+for output_name in allocation-domain-arena-v1.log allocation-domain-arena-v1.evidence fault-injection-domain-arena-v1.evidence allocation.unsigned.template fault-injection.unsigned.template allocation-report-v1.env; do
     printf existing > "$work/publish-dir/$output_name"
     if "$work/secure-publish" "$work/publish-dir" "$work/publish-source" "$output_name"; then exit 1; fi
 done
@@ -169,8 +169,33 @@ grep -Fxq 'controlled_fixture=true' "$work/evidence/artifacts/allocation-domain-
 grep -Fxq 'release_eligible=false' "$work/evidence/artifacts/allocation-domain-arena-v1.evidence"
 grep -Fxq 'canonical_markers_passed=12' "$work/evidence/artifacts/allocation-domain-arena-v1.evidence"
 grep -Fxq 'attestation=EXTERNAL_SIGNER_SETS_signed-v1' "$work/evidence/receipts/allocation.unsigned.template"
+grep -Fxq 'scenarios=MCI-ALLOC-001,MCI-ALLOC-002,MCI-ALLOC-003,MCI-ALLOC-004,MCI-ALLOC-005,MCI-NFR-007,MCI-NFR-008' "$work/evidence/receipts/allocation.unsigned.template"
+grep -Fxq 'artifact_schema=mci-fault-injection-domain-arena-evidence-v1' "$work/evidence/artifacts/fault-injection-domain-arena-v1.evidence"
+grep -Fxq 'scenarios=MCI-ALLOC-006,MCI-NFR-009,MCI-NFR-010' "$work/evidence/receipts/fault-injection.unsigned.template"
+grep -Fxq 'release_eligible=false' "$work/evidence/receipts/fault-injection.unsigned.template"
 grep -Fxq 'result=CONTRACT_ONLY' "$work/evidence/allocation-report-v1.env"
 [ ! -e "$work/evidence/receipts/allocation.receipt" ]
+[ ! -e "$work/evidence/receipts/fault-injection.receipt" ]
+
+# An external signer can canonically convert either template and produce a
+# verifiable detached signature, but cannot turn controlled fixture evidence
+# into an aggregate-admissible release claim.
+openssl genpkey -algorithm ED25519 -out "$work/producer-private.pem" >/dev/null 2>&1
+openssl pkey -in "$work/producer-private.pem" -pubout -out "$work/producer-public.pem" >/dev/null 2>&1
+for lane in allocation fault-injection; do
+    sed -e 's/^attestation=.*/attestation=signed-v1/' \
+        -e 's/^trusted_key_id=.*/trusted_key_id=contract-producer-key/' \
+        -e "s/^signature_relpath=.*/signature_relpath=$lane.sig/" \
+        -e '/^receipt_hash=/d' "$work/evidence/receipts/$lane.unsigned.template" > "$work/$lane.canonical"
+    canonical_hash=$(hash_file "$work/$lane.canonical")
+    { cat "$work/$lane.canonical"; echo "receipt_hash=$canonical_hash"; } > "$work/$lane.receipt"
+    openssl pkeyutl -sign -inkey "$work/producer-private.pem" -rawin -in "$work/$lane.canonical" -out "$work/$lane.sig"
+    openssl pkeyutl -verify -pubin -inkey "$work/producer-public.pem" -rawin -in "$work/$lane.canonical" -sigfile "$work/$lane.sig" >/dev/null 2>&1
+    grep -Fxq 'artifact_mode=fixture' "$work/$lane.receipt"
+    grep -Fxq 'release_eligible=false' "$work/$lane.receipt"
+    sed -e 's/^artifact_mode=.*/artifact_mode=live/' -e 's/^release_eligible=.*/release_eligible=true/' "$work/$lane.canonical" > "$work/$lane.promoted"
+    if openssl pkeyutl -verify -pubin -inkey "$work/producer-public.pem" -rawin -in "$work/$lane.promoted" -sigfile "$work/$lane.sig" >/dev/null 2>&1; then exit 1; fi
+done
 
 # Live mode is blocked by the tracked unprovisioned policy; fixture trust cannot
 # be substituted into live mode.

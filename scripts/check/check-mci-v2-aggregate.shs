@@ -94,12 +94,12 @@ resume_for() {
     case "$1" in
         compiler) echo 'sh scripts/check/check-mci-v2-compiler-admission.shs --evidence "$MCI_EVIDENCE/compiler"' ;;
         simpleos) echo 'sh scripts/check/check-mci-v2-simpleos-manifest.shs --evidence "$MCI_EVIDENCE/simpleos"' ;;
-        rendering) echo 'sh scripts/check/check-mci-v2-rendering.shs --evidence "$MCI_EVIDENCE/rendering"' ;;
+        rendering) echo 'sh scripts/check/check-mci-v2-rendering.shs --evidence "$MCI_EVIDENCE" --manifest "$MCI_RENDERING_MANIFEST" --manifest-signature "$MCI_RENDERING_MANIFEST_SIG" --collector-key "$MCI_RENDERING_COLLECTOR_KEY" --collector-key-id "$MCI_RENDERING_COLLECTOR_KEY_ID" --collector-trust-policy "$MCI_RENDERING_TRUST_POLICY" --run-id "$MCI_RUN_ID" --source-hash "$MCI_SOURCE_HASH" --configuration-hash "$MCI_CONFIGURATION_HASH" --captured-at-utc-ns "$MCI_CAPTURED_AT_UTC_NS" --valid-until-utc-ns "$MCI_VALID_UNTIL_UTC_NS" --now-utc-ns "$MCI_NOW_UTC_NS"' ;;
         allocation|fault-injection) echo 'sh scripts/check/check-mci-v2-allocation.shs --evidence "$MCI_EVIDENCE/allocation"' ;;
         process-safety) echo 'sh scripts/check/check-mci-v2-process-safety.shs --evidence "$MCI_EVIDENCE/process"' ;;
-        stress) echo 'sh scripts/check/check-mci-v2-stress.shs --duration 24h --evidence "$MCI_EVIDENCE/stress"' ;;
+        stress) echo 'BLOCKED prerequisite: provide signed platform/allocation/process/rendering lane receipts, trust key, run/source/config identities, then run scripts/check/check-mci-v2-stress.shs with its required arguments' ;;
         traceability) echo 'sh scripts/check/check-mci-v2-traceability.shs --evidence "$MCI_EVIDENCE/docs"' ;;
-        tooling) echo 'sh scripts/check/check-mci-v2-tooling-admission.shs --evidence "$MCI_EVIDENCE/tooling"' ;;
+        tooling) echo 'sh scripts/check/check-mci-v2-tooling-admission.shs --evidence "$MCI_EVIDENCE"' ;;
         reviewer) echo 'BLOCKED prerequisite: obtain a fresh decision from the independently operated reviewer producer for aggregate_candidate_sha256' ;;
     esac
 }
@@ -118,13 +118,49 @@ producer_for() {
     esac
 }
 
+artifact_schema_for() {
+    case "$1" in
+        compiler) echo mci-compiler-collector-receipt-v2 ;;
+        tooling) echo mci-tooling-child-manifest-v1 ;;
+        simpleos) echo mci-simpleos-platform-evidence-v1 ;;
+        rendering) echo mci-rendering-evidence-v1 ;;
+        allocation) echo mci-allocation-domain-arena-evidence-v1 ;;
+        fault-injection) echo mci-fault-injection-domain-arena-evidence-v1 ;;
+        process-safety) echo mci-process-safety-evidence-v1 ;;
+        stress) echo mci-stress-evidence-v1 ;;
+        traceability) echo mci-traceability-artifact-v1 ;;
+        reviewer) echo mci-aggregate-candidate-v1 ;;
+    esac
+}
+
+artifact_mode_for() {
+    case "$1" in reviewer) echo independent-review;; *) echo live;; esac
+}
+
+artifact_header() {
+    check=$1 artifact=$2 output=$3
+    if [ "$check" = tooling ]; then
+        # The tooling artifact is a generation archive. Only its canonical
+        # manifest is policy-bearing; never trust a receipt-side description.
+        tar -xOf "$artifact" ./manifest.env > "$output" 2>/dev/null || return 1
+    else
+        cp -- "$artifact" "$output" || return 1
+    fi
+}
+
+artifact_schema_field() {
+    check=$1 header=$2
+    case "$check" in compiler|traceability) field schema_version "$header";; tooling) field manifest_schema "$header";; *) field artifact_schema "$header";; esac
+}
+
 scenario_map() {
     case "$1" in
         compiler) echo 'MCI-COMP-001,MCI-COMP-002,MCI-COMP-003,MCI-NFR-003,MCI-NFR-004' ;;
         tooling) echo 'MCI-TOOL-001,MCI-TOOL-002,MCI-TOOL-003,MCI-NFR-001,MCI-NFR-002,MCI-NFR-005,MCI-NFR-006,MCI-NFR-013,MCI-NFR-014' ;;
         simpleos) echo 'MCI-OS-001,MCI-OS-002,MCI-OS-003,MCI-OS-004,MCI-OS-005,MCI-OS-006' ;;
         rendering) echo 'MCI-REN-001,MCI-REN-002,MCI-REN-003,MCI-REN-004,MCI-REN-005,MCI-REN-006,MCI-NFR-011,MCI-NFR-012' ;;
-        allocation|fault-injection) echo 'MCI-ALLOC-001,MCI-ALLOC-002,MCI-ALLOC-003,MCI-ALLOC-004,MCI-ALLOC-005,MCI-ALLOC-006,MCI-NFR-007,MCI-NFR-008,MCI-NFR-009,MCI-NFR-010' ;;
+        allocation) echo 'MCI-ALLOC-001,MCI-ALLOC-002,MCI-ALLOC-003,MCI-ALLOC-004,MCI-ALLOC-005,MCI-NFR-007,MCI-NFR-008' ;;
+        fault-injection) echo 'MCI-ALLOC-006,MCI-NFR-009,MCI-NFR-010' ;;
         process-safety) echo 'MCI-PROC-001,MCI-PROC-002,MCI-PROC-003' ;;
         stress) echo 'MCI-NFR-015,MCI-NFR-016' ;;
         traceability) echo 'MCI-DOC-001,MCI-DOC-002,MCI-DOC-003' ;;
@@ -229,6 +265,9 @@ for check_id in $required_checks; do
         scenarios=$(field scenarios "$snapshot" 2>/dev/null || true)
         artifact_relpath=$(field artifact_relpath "$snapshot" 2>/dev/null || true)
         artifact_hash=$(field artifact_sha256 "$snapshot" 2>/dev/null || true)
+        bound_artifact_schema=$(field artifact_schema "$snapshot" 2>/dev/null || true)
+        bound_artifact_mode=$(field artifact_mode "$snapshot" 2>/dev/null || true)
+        bound_release_eligible=$(field release_eligible "$snapshot" 2>/dev/null || true)
         receipt_hash=$(field receipt_hash "$snapshot" 2>/dev/null || true)
         expected_scenarios=$(scenario_map "$check_id")
         if [ "$reason" != none ]; then :
@@ -249,6 +288,7 @@ for check_id in $required_checks; do
             elif ! is_sha256 "$candidate_hash" || [ "$candidate_hash" != "$aggregate_candidate_hash" ]; then reason=review-replay-or-wrong-candidate
             elif ! is_uint "$decided_at" || ! is_uint "$valid_until" || ! dec_le "$decided_at" "$now_ns" || ! dec_le "$now_ns" "$valid_until" || ! age_within_day "$decided_at" "$now_ns" || ! age_within_day "$decided_at" "$valid_until"; then reason=stale-or-invalid-review
             elif [ "$decision" != approve ]; then reason=review-not-approved
+            elif [ "$bound_artifact_schema" != "$(artifact_schema_for reviewer)" ] || [ "$bound_artifact_mode" != "$(artifact_mode_for reviewer)" ] || [ "$bound_release_eligible" != true ]; then reason=non-release-artifact-policy
             elif [ "$scenarios" != "$expected_scenarios" ]; then reason=scenario-map-mismatch
             else
                 {
@@ -258,6 +298,7 @@ for check_id in $required_checks; do
                     echo "run_id=$got_run"; echo "source_hash=$got_source"; echo "configuration_hash=$got_config"
                     echo "aggregate_candidate_sha256=$candidate_hash"; echo "decided_at_utc_ns=$decided_at"; echo "valid_until_utc_ns=$valid_until"
                     echo "decision=$decision"; echo "scenarios=$scenarios"
+                    echo "artifact_schema=$bound_artifact_schema"; echo "artifact_mode=$bound_artifact_mode"; echo "release_eligible=$bound_release_eligible"
                 } > "$tmp.canonical"
                 if ! sed '/^receipt_hash=/d' "$snapshot" | cmp -s - "$tmp.canonical" || ! is_sha256 "$receipt_hash" || [ "$(hash_file "$tmp.canonical")" != "$receipt_hash" ]; then reason=invalid-receipt-hash
                 else
@@ -276,6 +317,7 @@ for check_id in $required_checks; do
         elif ! is_uint "$captured_at" || ! is_uint "$valid_until" || ! dec_le "$captured_at" "$now_ns" || ! dec_le "$now_ns" "$valid_until" || ! age_within_day "$captured_at" "$now_ns" || ! age_within_day "$captured_at" "$valid_until"; then reason=stale-or-invalid-lifetime
         elif [ "$result" = skipped ]; then reason=skipped
         elif [ "$result" != pass ]; then reason=failed-or-blocked
+        elif [ "$bound_artifact_schema" != "$(artifact_schema_for "$check_id")" ] || [ "$bound_artifact_mode" != "$(artifact_mode_for "$check_id")" ] || [ "$bound_release_eligible" != true ]; then reason=non-release-artifact-policy
         elif [ "$scenarios" != "$expected_scenarios" ]; then reason=scenario-map-mismatch
         elif ! safe_token "$artifact_relpath"; then reason=unsafe-artifact-path
         else
@@ -283,7 +325,22 @@ for check_id in $required_checks; do
             if ! regular_nonsymlink "$artifact_path"; then reason=unsafe-artifact-file
             else
                 asnapshot="$work/$check_id.artifact"
-                if ! snapshot_file "$artifact_path" "$asnapshot" || ! is_sha256 "$artifact_hash" || [ "$(hash_file "$asnapshot")" != "$artifact_hash" ]; then reason=invalid-artifact-hash; fi
+                if ! snapshot_file "$artifact_path" "$asnapshot" || ! is_sha256 "$artifact_hash" || [ "$(hash_file "$asnapshot")" != "$artifact_hash" ]; then
+                    reason=invalid-artifact-hash
+                else
+                    artifact_header_path="$work/$check_id.artifact-header"
+                    if ! artifact_header "$check_id" "$asnapshot" "$artifact_header_path"; then
+                        reason=invalid-artifact-header
+                    else
+                        actual_schema=$(artifact_schema_field "$check_id" "$artifact_header_path" 2>/dev/null || true)
+                        actual_mode=$(field artifact_mode "$artifact_header_path" 2>/dev/null || field mode "$artifact_header_path" 2>/dev/null || true)
+                        actual_release=$(field release_eligible "$artifact_header_path" 2>/dev/null || field release_candidate "$artifact_header_path" 2>/dev/null || true)
+                        case "$actual_mode" in fixture|contract-only|CONTRACT_ONLY|diagnostic|source-only|cached|screenshot|screenshot-only) reason=non-release-artifact-policy;; esac
+                        if [ "$reason" = none ] && { [ "$actual_schema" != "$bound_artifact_schema" ] || [ "$actual_mode" != "$bound_artifact_mode" ] || [ "$actual_release" != true ]; }; then
+                            reason=non-release-artifact-policy
+                        fi
+                    fi
+                fi
             fi
         fi
         if [ "$reason" = none ] && [ "$check_id" != reviewer ]; then
@@ -294,6 +351,7 @@ for check_id in $required_checks; do
                 echo "captured_at_utc_ns=$captured_at"; echo "valid_until_utc_ns=$valid_until"; echo "result=$result"
                 echo "scenarios=$scenarios"; echo "artifact_relpath=$artifact_relpath"
                 echo "artifact_sha256=$artifact_hash"
+                echo "artifact_schema=$bound_artifact_schema"; echo "artifact_mode=$bound_artifact_mode"; echo "release_eligible=$bound_release_eligible"
             } > "$tmp.canonical"
             if ! sed '/^receipt_hash=/d' "$snapshot" | cmp -s - "$tmp.canonical" ||
                ! is_sha256 "$receipt_hash" || [ "$(hash_file "$tmp.canonical")" != "$receipt_hash" ]; then
@@ -320,9 +378,12 @@ for check_id in $required_checks; do
         if [ "$check_id" = reviewer ]; then
             echo "resume=$check_id|$command" >> "$tmp"
         else
-            script=$(printf '%s\n' "$command" | awk '{print $2}'); owner="$repo_root/$script"
-            if [ -x "$owner" ] && regular_nonsymlink "$owner"; then echo "resume=$check_id|sh $owner ${command#*"$script"}" >> "$tmp"
-            else echo "resume=$check_id|BLOCKED prerequisite: executable owner script missing: $owner" >> "$tmp"; fi
+            case "$command" in
+                BLOCKED\ prerequisite:*) echo "resume=$check_id|$command" >> "$tmp" ;;
+                *) script=$(printf '%s\n' "$command" | awk '{print $2}'); owner="$repo_root/$script"
+                   if [ -x "$owner" ] && regular_nonsymlink "$owner"; then echo "resume=$check_id|sh $owner ${command#*"$script"}" >> "$tmp"
+                   else echo "resume=$check_id|BLOCKED prerequisite: executable owner script missing: $owner" >> "$tmp"; fi ;;
+            esac
         fi
     fi
     if [ "$check_id" != reviewer ]; then
@@ -332,10 +393,10 @@ for check_id in $required_checks; do
         [ -f "${signature_snapshot:-}" ] && signature_digest=$(hash_file "$signature_snapshot")
         [ -f "${asnapshot:-}" ] && verified_artifact_digest=$(hash_file "$asnapshot")
         command=$(resume_for "$check_id")
-        script=$(printf '%s\n' "$command" | awk '{print $2}')
-        owner="$repo_root/$script"
-        if [ -x "$owner" ] && regular_nonsymlink "$owner"; then resume_owner="executable:$script"
-        else resume_owner="blocked-owner:$script"; fi
+        case "$command" in BLOCKED\ prerequisite:*) resume_owner=blocked-prerequisite;; *)
+            script=$(printf '%s\n' "$command" | awk '{print $2}'); owner="$repo_root/$script"
+            if [ -x "$owner" ] && regular_nonsymlink "$owner"; then resume_owner="executable:$script"
+            else resume_owner="blocked-owner:$script"; fi;; esac
         echo "evidence=$check_id|$status|$reason|receipt_bytes=$receipt_bytes|canonical_receipt=$canonical_digest|receipt_field=$receipt_hash|signature=$signature_digest|declared_artifact=$artifact_hash|verified_artifact=$verified_artifact_digest|resume=$resume_owner" >> "$candidate_graph"
     fi
 done
