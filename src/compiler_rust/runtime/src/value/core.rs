@@ -495,29 +495,25 @@ impl RuntimeValue {
     ///
     /// This is used for isolated threads to ensure no shared mutable state.
     pub fn deep_copy(self) -> Self {
-        match self.tag() {
-            // Primitives are Copy, just return self
-            tags::TAG_INT | tags::TAG_FLOAT | tags::TAG_SPECIAL => self,
-            tags::TAG_HEAP => {
-                let ptr = self.as_heap_ptr();
-                if ptr.is_null() {
-                    return Self::NIL;
-                }
-                let Some(object_type) = self.heap_type() else {
-                    return Self::NIL;
-                };
+        self.clone_for_isolated_thread().unwrap_or(Self::NIL)
+    }
 
-                // Explicit synchronized handles may be shared. Every other heap
-                // graph must fail closed until its type has a real graph clone or
-                // ownership-transfer implementation; returning `self` here would
-                // silently preserve mutable pointer identity across the boundary.
-                match object_type {
-                    // Channels are thread-safe, can be shared
-                    HeapObjectType::Channel => self,
-                    _ => Self::NIL,
+    /// Prepare one input for an isolated OS thread.
+    ///
+    /// Inline values are copied. Explicit synchronized channel handles may be
+    /// shared. Every other heap graph fails closed until a real typed graph
+    /// clone, frozen handle, or owned-region move is available. `Option`
+    /// preserves the distinction between a valid NIL input and rejection.
+    pub fn clone_for_isolated_thread(self) -> Option<Self> {
+        match self.tag() {
+            tags::TAG_INT | tags::TAG_FLOAT | tags::TAG_SPECIAL => Some(self),
+            tags::TAG_HEAP => {
+                match super::heap::registered_heap_type(self) {
+                    Some(HeapObjectType::Channel) => Some(self),
+                    _ => None,
                 }
             }
-            _ => self,
+            _ => None,
         }
     }
 

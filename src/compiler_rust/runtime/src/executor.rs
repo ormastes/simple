@@ -700,14 +700,14 @@ unsafe fn native_callable(closure_arg: u64) -> Option<NativeCallable> {
 /// A thread handle that can be used to join the thread
 #[no_mangle]
 pub extern "C" fn rt_thread_spawn_isolated(closure_ptr: u64, data: RuntimeValue) -> u64 {
-    let thread_id = NEXT_THREAD_ID.fetch_add(1, Ordering::SeqCst);
-
     let Some(callable) = (unsafe { native_callable(closure_ptr) }) else {
         return 0;
     };
 
-    // Clone data for the thread (deep copy for isolation)
-    let copied_data = data.deep_copy();
+    let Some(copied_data) = data.clone_for_isolated_thread() else {
+        return 0;
+    };
+    let thread_id = NEXT_THREAD_ID.fetch_add(1, Ordering::SeqCst);
 
     // Spawn the OS thread
     let handle = thread::Builder::new()
@@ -745,15 +745,17 @@ pub extern "C" fn rt_thread_spawn_isolated_with_args(
     data1: RuntimeValue,
     data2: RuntimeValue,
 ) -> u64 {
-    let thread_id = NEXT_THREAD_ID.fetch_add(1, Ordering::SeqCst);
-
     let Some(callable) = (unsafe { native_callable(closure_ptr) }) else {
         return 0;
     };
 
-    // Clone data for the thread
-    let copied_data1 = data1.deep_copy();
-    let copied_data2 = data2; // Channels are already thread-safe, don't deep copy
+    let Some(copied_data1) = data1.clone_for_isolated_thread() else {
+        return 0;
+    };
+    let Some(copied_data2) = data2.clone_for_isolated_thread() else {
+        return 0;
+    };
+    let thread_id = NEXT_THREAD_ID.fetch_add(1, Ordering::SeqCst);
 
     // Spawn the OS thread
     let handle = thread::Builder::new()
@@ -981,14 +983,14 @@ pub extern "C" fn rt_thread_spawn_limited(
     fd_limit: i64,
     thread_limit: i64,
 ) -> u64 {
-    let thread_id = NEXT_THREAD_ID.fetch_add(1, Ordering::SeqCst);
-
     let Some(callable) = (unsafe { native_callable(closure_ptr) }) else {
         return 0;
     };
 
-    // Clone data for the thread (deep copy for isolation)
-    let copied_data = data.deep_copy();
+    let Some(copied_data) = data.clone_for_isolated_thread() else {
+        return 0;
+    };
+    let thread_id = NEXT_THREAD_ID.fetch_add(1, Ordering::SeqCst);
 
     // Prepare resource limits
     let cpu_limit = if cpu_seconds >= 0 {
@@ -1070,15 +1072,17 @@ pub extern "C" fn rt_thread_spawn_limited_with_args(
     fd_limit: i64,
     thread_limit: i64,
 ) -> u64 {
-    let thread_id = NEXT_THREAD_ID.fetch_add(1, Ordering::SeqCst);
-
     let Some(callable) = (unsafe { native_callable(closure_ptr) }) else {
         return 0;
     };
 
-    // Clone data for the thread
-    let copied_data1 = data1.deep_copy();
-    let copied_data2 = data2; // Channels are already thread-safe
+    let Some(copied_data1) = data1.clone_for_isolated_thread() else {
+        return 0;
+    };
+    let Some(copied_data2) = data2.clone_for_isolated_thread() else {
+        return 0;
+    };
+    let thread_id = NEXT_THREAD_ID.fetch_add(1, Ordering::SeqCst);
 
     // Prepare resource limits
     let cpu_limit = if cpu_seconds >= 0 {

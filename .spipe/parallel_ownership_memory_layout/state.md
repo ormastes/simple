@@ -253,3 +253,16 @@ dev-done
   (3 ownership, 4 transfer). Graph sealing/materialization, global/session-safe
   registry identity, typed handle transport, and actor/channel/process wiring
   remain open.
+- impl: Closed the native isolated-thread NIL-substitution hole. A new
+  `clone_for_isolated_thread() -> Option<RuntimeValue>` distinguishes valid NIL
+  from rejected input, copies inline values, admits only registered channel
+  handles as synchronized sharing, and rejects every other heap graph. All four
+  Rust spawn variants (ordinary/limited, one/two inputs) validate every input
+  before allocating a thread ID or creating an OS thread; the formerly raw
+  second argument is no longer an arbitrary heap-pointer bypass. Five focused
+  regressions pass (single input, second input, limited equivalents, channel
+  handle). A broader `isolated_thread` filter also exposed two pre-existing
+  scalar worker ABI heuristic flakes (`raw_worker_args`, results 5/36 instead
+  of 42); these are not treated as evidence against the new exact tests. The C
+  `runtime_thread.c` lane still passes raw two-argument payloads and cannot yet
+  distinguish synchronized heap handles, so cross-runtime parity remains open.
