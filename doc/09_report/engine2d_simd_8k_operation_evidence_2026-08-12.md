@@ -100,3 +100,27 @@ all-operation isolated envelope** on this host. This remains below an
 end-to-end guarantee because multiple operations and frame-management overhead
 must share 12.5 ms. AArch64 and RVV QEMU correctness gates pass, including a
 280-pixel overlapping same-array span crossing the former scratch boundary.
+
+## AVX2 vector output follow-up
+
+The x86-64 opaque-destination kernel previously vectorized channel
+multiplication, then spilled all three channel accumulators to stack, performed
+24 scalar divisions per eight pixels, rebuilt eight boxed values scalar, and
+stored them individually. The follow-up keeps exact division by 255, channel
+assembly, and Simple pixel boxing in AVX2 registers through the final stores.
+
+On the same native 7680x4320, one-percent-damage, seven-sample harness, the
+before/after p95 measurements were:
+
+| Operation | Before ns | After ns |
+|---|---:|---:|
+| variable alpha blend | 1,146,163 | 667,181 |
+| constant alpha blend | 1,155,741 | 493,558 |
+| six-call frame | 3,272,168 | 2,051,119 |
+
+Both runs produced checksum `2436809228175672195`; the after run recorded 35
+native SIMD hits, and the native C kernel plus in-place span corpus passed.
+Seven-sample p95 is directional host evidence rather than a broad statistical
+claim. This remains an isolated retained-damage operation row: it does not prove
+full-frame CPU 8K/80, end-to-end DrawIR/GUI/WM throughput, physical display
+scanout, or ARM/RISC-V hardware performance.

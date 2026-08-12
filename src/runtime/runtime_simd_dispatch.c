@@ -1731,18 +1731,27 @@ static void engine2d_blend_boxed_avx2(int64_t* dst, const int64_t* src,
         __m256i gacc = ENGINE2D_BLEND_CHANNEL_AVX2(8);
         __m256i bacc = ENGINE2D_BLEND_CHANNEL_AVX2(0);
 #undef ENGINE2D_BLEND_CHANNEL_AVX2
-        uint32_t rv[8], gv[8], bv[8];
-        _mm256_storeu_si256((__m256i*)(void*)rv, racc);
-        _mm256_storeu_si256((__m256i*)(void*)gv, gacc);
-        _mm256_storeu_si256((__m256i*)(void*)bv, bacc);
-        for (int lane = 0; lane < 8; lane++) {
-            uint32_t alpha = s[lane] >> 24;
-            uint32_t out = alpha == 255u ? s[lane] :
-                (alpha == 0u ? d[lane] :
-                 (0xff000000u | ((rv[lane] / 255u) << 16) |
-                  ((gv[lane] / 255u) << 8) | (bv[lane] / 255u)));
-            dst[i + lane] = engine2d_box_pixel(out);
-        }
+#define ENGINE2D_DIV255_AVX2(value) \
+        _mm256_srli_epi32( \
+            _mm256_add_epi32( \
+                _mm256_add_epi32((value), _mm256_set1_epi32(1)), \
+                _mm256_srli_epi32((value), 8)), 8)
+        __m256i rv = ENGINE2D_DIV255_AVX2(racc);
+        __m256i gv = ENGINE2D_DIV255_AVX2(gacc);
+        __m256i bv = ENGINE2D_DIV255_AVX2(bacc);
+#undef ENGINE2D_DIV255_AVX2
+        __m256i out = _mm256_or_si256(
+            _mm256_or_si256(_mm256_slli_epi32(rv, 16),
+                            _mm256_slli_epi32(gv, 8)),
+            _mm256_or_si256(bv, _mm256_set1_epi32((int)0xff000000u)));
+        __m128i out_lo = _mm256_castsi256_si128(out);
+        __m128i out_hi = _mm256_extracti128_si256(out, 1);
+        __m256i boxed_lo = _mm256_slli_epi64(
+            _mm256_cvtepu32_epi64(out_lo), 3);
+        __m256i boxed_hi = _mm256_slli_epi64(
+            _mm256_cvtepu32_epi64(out_hi), 3);
+        _mm256_storeu_si256((__m256i*)(void*)(dst + i), boxed_lo);
+        _mm256_storeu_si256((__m256i*)(void*)(dst + i + 4), boxed_hi);
     }
     for (; i < n; i++) {
         uint32_t s = use_const ? const_src : engine2d_unbox_pixel(src[i]);
