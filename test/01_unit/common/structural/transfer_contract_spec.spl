@@ -1,0 +1,66 @@
+use std.spec
+use std.common.structural.transfer.transfer_contracts.{
+    PARALLEL_DOMAIN_COUNT,
+    PARALLEL_TRANSFER_MODE_COUNT,
+    PARALLEL_TRANSFER_PAYLOAD_COUNT,
+    TRANSFER_SCHEMA_VERSION,
+    ParallelExecutionDomain,
+    ParallelTransferMode,
+    ParallelTransferPayload,
+    parallel_execution_domain_to_u8,
+    parallel_execution_domain_valid,
+    parallel_transfer_payload_allows_raw_pointer,
+    transfer_envelope_v1,
+    transfer_envelope_v1_boundary_allowed,
+    transfer_envelope_v1_well_formed
+}
+
+describe "TransferEnvelopeV1 contract":
+    it "pins the v1 vocabulary and has no raw pointer payload":
+        assert_equal(TRANSFER_SCHEMA_VERSION, 1)
+        assert_equal(PARALLEL_DOMAIN_COUNT, 6)
+        assert_equal(PARALLEL_TRANSFER_MODE_COUNT, 5)
+        assert_equal(PARALLEL_TRANSFER_PAYLOAD_COUNT, 7)
+        assert_equal(parallel_execution_domain_to_u8(ParallelExecutionDomain.Process), 2)
+        assert_true(parallel_execution_domain_valid(5))
+        assert_false(parallel_execution_domain_valid(6))
+        assert_false(parallel_transfer_payload_allows_raw_pointer())
+
+    it "requires a consuming owned move to invalidate its source":
+        val moved = transfer_envelope_v1(7, 2,
+            ParallelExecutionDomain.Parent, ParallelExecutionDomain.Thread,
+            ParallelTransferMode.OwnedMove, ParallelTransferPayload.OwnedRegion,
+            99, true)
+        assert_true(transfer_envelope_v1_well_formed(moved))
+
+        val invalid = transfer_envelope_v1(7, 2,
+            ParallelExecutionDomain.Parent, ParallelExecutionDomain.Thread,
+            ParallelTransferMode.OwnedMove, ParallelTransferPayload.OwnedRegion,
+            0, false)
+        assert_false(transfer_envelope_v1_well_formed(invalid))
+
+    it "restricts scoped mutable loans to thread object handles":
+        val loan = transfer_envelope_v1(8, 0,
+            ParallelExecutionDomain.Parent, ParallelExecutionDomain.Thread,
+            ParallelTransferMode.ScopedLoan, ParallelTransferPayload.ObjectHandle,
+            0, false)
+        assert_true(transfer_envelope_v1_well_formed(loan))
+
+        val process_loan = transfer_envelope_v1(8, 0,
+            ParallelExecutionDomain.Parent, ParallelExecutionDomain.Process,
+            ParallelTransferMode.ScopedLoan, ParallelTransferPayload.ObjectHandle,
+            0, false)
+        assert_false(transfer_envelope_v1_well_formed(process_loan))
+
+    it "rejects an owned heap region at process and device boundaries":
+        val process_move = transfer_envelope_v1(9, 0,
+            ParallelExecutionDomain.Parent, ParallelExecutionDomain.Process,
+            ParallelTransferMode.OwnedMove, ParallelTransferPayload.OwnedRegion,
+            100, true)
+        assert_false(transfer_envelope_v1_boundary_allowed(process_move))
+
+        val encoded = transfer_envelope_v1(9, 0,
+            ParallelExecutionDomain.Parent, ParallelExecutionDomain.Process,
+            ParallelTransferMode.Copy, ParallelTransferPayload.EncodedCopy,
+            0, false)
+        assert_true(transfer_envelope_v1_boundary_allowed(encoded))

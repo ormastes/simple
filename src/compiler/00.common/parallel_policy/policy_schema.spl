@@ -1,0 +1,84 @@
+# ============================================================================
+# compiler/common/parallel_policy/policy_schema.spl — WP-04 typed policy v1
+#
+# This policy is intentionally independent of SDN parsing. Driver/config code
+# will construct candidates later; the common resolver makes weakening
+# impossible regardless of source precedence.
+# ============================================================================
+
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
+
+enum ExistingParentMovePolicy:
+    Warn
+    Deny
+
+fn existing_parent_move_policy_to_u8(value: ExistingParentMovePolicy) -> i64:
+    match value:
+        case ExistingParentMovePolicy.Warn: 0
+        case ExistingParentMovePolicy.Deny: 1
+
+struct ResolvedParallelPolicyV1:
+    parent_to_child_existing: ExistingParentMovePolicy
+    require_bounded_mailbox: bool
+    require_deterministic_commit: bool
+    deny_dynamic_transport: bool
+    require_frozen_layout_receipt: bool
+
+impl ResolvedParallelPolicyV1:
+    static fn balanced() -> ResolvedParallelPolicyV1:
+        ResolvedParallelPolicyV1(
+            parent_to_child_existing: ExistingParentMovePolicy.Warn,
+            require_bounded_mailbox: true,
+            require_deterministic_commit: true,
+            deny_dynamic_transport: false,
+            require_frozen_layout_receipt: false
+        )
+
+    static fn for_assurance(strictness: AssuranceStrictness) -> ResolvedParallelPolicyV1:
+        val base = ResolvedParallelPolicyV1.balanced()
+        if strictness.at_least(AssuranceStrictness.Critical):
+            return ResolvedParallelPolicyV1(
+                parent_to_child_existing: ExistingParentMovePolicy.Deny,
+                require_bounded_mailbox: true,
+                require_deterministic_commit: true,
+                deny_dynamic_transport: true,
+                require_frozen_layout_receipt: true
+            )
+        base
+
+    fn canonical_text() -> text:
+        "ParallelPolicyV1|parent_move=" + existing_parent_move_policy_to_u8(self.parent_to_child_existing).to_string()
+            + "|bounded=" + self.require_bounded_mailbox.to_string()
+            + "|deterministic=" + self.require_deterministic_commit.to_string()
+            + "|dynamic=" + self.deny_dynamic_transport.to_string()
+            + "|layout_receipt=" + self.require_frozen_layout_receipt.to_string()
+
+    fn is_at_least_as_strict_as(other: ResolvedParallelPolicyV1) -> bool:
+        if existing_parent_move_policy_to_u8(self.parent_to_child_existing)
+            < existing_parent_move_policy_to_u8(other.parent_to_child_existing):
+            return false
+        if other.require_bounded_mailbox and not self.require_bounded_mailbox:
+            return false
+        if other.require_deterministic_commit and not self.require_deterministic_commit:
+            return false
+        if other.deny_dynamic_transport and not self.deny_dynamic_transport:
+            return false
+        if other.require_frozen_layout_receipt and not self.require_frozen_layout_receipt:
+            return false
+        true
+
+fn resolve_parallel_policy(project: ResolvedParallelPolicyV1,
+                           candidate: ResolvedParallelPolicyV1) -> ResolvedParallelPolicyV1:
+    """Raise-only merge. An environment/CLI/child candidate may add a guard,
+    but cannot lower the project pin."""
+    var move_policy = project.parent_to_child_existing
+    if existing_parent_move_policy_to_u8(candidate.parent_to_child_existing)
+        > existing_parent_move_policy_to_u8(move_policy):
+        move_policy = candidate.parent_to_child_existing
+    ResolvedParallelPolicyV1(
+        parent_to_child_existing: move_policy,
+        require_bounded_mailbox: project.require_bounded_mailbox or candidate.require_bounded_mailbox,
+        require_deterministic_commit: project.require_deterministic_commit or candidate.require_deterministic_commit,
+        deny_dynamic_transport: project.deny_dynamic_transport or candidate.deny_dynamic_transport,
+        require_frozen_layout_receipt: project.require_frozen_layout_receipt or candidate.require_frozen_layout_receipt
+    )

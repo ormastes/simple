@@ -1,0 +1,51 @@
+# Conservative deterministic layout selection. Physical lowering consumes the
+# resulting plan later; this module never changes public ABI representation.
+
+use std.common.structural.storage_layout.storage_layout_contracts.{
+    StorageConversionPolicy,
+    StorageLayoutKind,
+    StorageLayoutPlanV1,
+    storage_layout_plan_v1
+}
+
+struct StorageLayoutRequestV1:
+    logical_type_id: i64
+    element_count: i64
+    alignment: i64
+    simd_width: i64
+    gpu_bulk_fields: bool
+    independent_field_access: bool
+    abi_pinned: bool
+    policy_hash: text
+
+fn storage_layout_request_v1(logical_type_id: i64, element_count: i64,
+                             alignment: i64, simd_width: i64,
+                             gpu_bulk_fields: bool,
+                             independent_field_access: bool,
+                             abi_pinned: bool, policy_hash: text) -> StorageLayoutRequestV1:
+    StorageLayoutRequestV1(logical_type_id: logical_type_id,
+                           element_count: element_count, alignment: alignment,
+                           simd_width: simd_width, gpu_bulk_fields: gpu_bulk_fields,
+                           independent_field_access: independent_field_access,
+                           abi_pinned: abi_pinned, policy_hash: policy_hash)
+
+fn storage_layout_plan_auto(request: StorageLayoutRequestV1) -> StorageLayoutPlanV1:
+    if request.abi_pinned:
+        return storage_layout_plan_v1(request.logical_type_id,
+            StorageLayoutKind.ExternalFixed, 1, request.alignment, true,
+            StorageConversionPolicy.Pinned, request.policy_hash, "abi-pinned")
+    if request.gpu_bulk_fields and request.independent_field_access:
+        return storage_layout_plan_v1(request.logical_type_id,
+            StorageLayoutKind.Grouped, 1, request.alignment, false,
+            StorageConversionPolicy.Cached, request.policy_hash, "gpu-field-groups")
+    if request.simd_width > 1 and request.element_count >= request.simd_width:
+        return storage_layout_plan_v1(request.logical_type_id,
+            StorageLayoutKind.AoSoA, request.simd_width, request.alignment, false,
+            StorageConversionPolicy.Cached, request.policy_hash, "simd-block")
+    if request.independent_field_access and request.element_count >= 16:
+        return storage_layout_plan_v1(request.logical_type_id,
+            StorageLayoutKind.SoA, 1, request.alignment, false,
+            StorageConversionPolicy.OnDemand, request.policy_hash, "field-separation")
+    storage_layout_plan_v1(request.logical_type_id, StorageLayoutKind.AoS, 1,
+        request.alignment, false, StorageConversionPolicy.Never,
+        request.policy_hash, "reference-aos")

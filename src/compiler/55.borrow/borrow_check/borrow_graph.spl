@@ -88,6 +88,38 @@ pub fn place_elem_equals(a: PlaceElem, b: PlaceElem) -> bool:
                 case Downcast(b_v): a_v == b_v
                 case _: false
 
+pub fn place_elem_may_overlap(a: PlaceElem, b: PlaceElem) -> bool:
+    """Conservative projection overlap.
+
+    `Index(local)` records the local that supplies an index, not its runtime
+    value. Two different locals can therefore select the same element. They
+    must conflict until range/value analysis emits an explicit disjointness
+    proof; treating their local IDs as element IDs was unsound.
+    """
+    match a:
+        case Field(a_idx):
+            match b:
+                case Field(b_idx): a_idx == b_idx
+                case _: false
+        case ConstantIndex(a_idx):
+            match b:
+                case ConstantIndex(b_idx): a_idx == b_idx
+                case Index(_): true
+                case _: false
+        case Index(_):
+            match b:
+                case Index(_): true
+                case ConstantIndex(_): true
+                case _: false
+        case Downcast(a_v):
+            match b:
+                case Downcast(b_v): a_v == b_v
+                case _: false
+        case Deref:
+            match b:
+                case Deref: true
+                case _: false
+
 pub fn place_conflicts_with(a: Place, b: Place) -> bool:
     """Check if two places conflict (one is a prefix of the other).
 
@@ -103,7 +135,7 @@ pub fn place_conflicts_with(a: Place, b: Place) -> bool:
     val min_len = if a_len < b_len: a_len else: b_len
     var i = 0
     while i < min_len:
-        if not place_elem_equals(a.projections[i], b.projections[i]):
+        if not place_elem_may_overlap(a.projections[i], b.projections[i]):
             return false
         i = i + 1
     true

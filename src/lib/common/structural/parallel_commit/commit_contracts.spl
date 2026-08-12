@@ -1,0 +1,90 @@
+# ============================================================================
+# common/structural/parallel_commit/commit_contracts.spl — frozen v1 parent
+# commit vocabulary. MutationPlan remains the detailed structural payload.
+# ============================================================================
+
+val PARALLEL_COMMIT_SCHEMA_VERSION: i64 = 1
+
+enum ParallelResultKind:
+    Replace
+    Patch
+    Append
+    Reduce
+    NewShard
+
+enum ParallelCommitOrder:
+    TaskIdThenSequence
+    InputKey
+    FixedTree
+
+enum ParallelConflictPolicy:
+    Reject
+    DeterministicRebase
+    Reduce
+
+val PARALLEL_RESULT_KIND_COUNT: i64 = 5
+val PARALLEL_COMMIT_ORDER_COUNT: i64 = 3
+val PARALLEL_CONFLICT_POLICY_COUNT: i64 = 3
+
+fn parallel_result_kind_to_u8(value: ParallelResultKind) -> i64:
+    match value:
+        case ParallelResultKind.Replace: 0
+        case ParallelResultKind.Patch: 1
+        case ParallelResultKind.Append: 2
+        case ParallelResultKind.Reduce: 3
+        case ParallelResultKind.NewShard: 4
+
+fn parallel_commit_order_to_u8(value: ParallelCommitOrder) -> i64:
+    match value:
+        case ParallelCommitOrder.TaskIdThenSequence: 0
+        case ParallelCommitOrder.InputKey: 1
+        case ParallelCommitOrder.FixedTree: 2
+
+fn parallel_conflict_policy_to_u8(value: ParallelConflictPolicy) -> i64:
+    match value:
+        case ParallelConflictPolicy.Reject: 0
+        case ParallelConflictPolicy.DeterministicRebase: 1
+        case ParallelConflictPolicy.Reduce: 2
+
+struct ResultEnvelopeV1:
+    contract_version: i64
+    base_revision: i64
+    task_id: i64
+    sequence: i64
+    write_region: i64
+    kind: ParallelResultKind
+    payload_token: i64
+    deterministic_key: text
+
+fn result_envelope_v1(base_revision: i64, task_id: i64, sequence: i64,
+                      write_region: i64, kind: ParallelResultKind,
+                      payload_token: i64, deterministic_key: text) -> ResultEnvelopeV1:
+    ResultEnvelopeV1(contract_version: PARALLEL_COMMIT_SCHEMA_VERSION,
+                     base_revision: base_revision, task_id: task_id,
+                     sequence: sequence, write_region: write_region, kind: kind,
+                     payload_token: payload_token,
+                     deterministic_key: deterministic_key)
+
+fn result_envelope_v1_well_formed(value: ResultEnvelopeV1) -> bool:
+    value.contract_version == PARALLEL_COMMIT_SCHEMA_VERSION
+        and value.base_revision >= 0 and value.task_id > 0 and value.sequence >= 0
+        and value.write_region > 0 and value.payload_token > 0
+        and value.deterministic_key.len() > 0
+
+fn parallel_result_before(a: ResultEnvelopeV1, b: ResultEnvelopeV1,
+                          order: ParallelCommitOrder) -> bool:
+    if parallel_commit_order_to_u8(order) == 1:
+        if a.deterministic_key != b.deterministic_key:
+            return a.deterministic_key < b.deterministic_key
+    if a.task_id != b.task_id:
+        return a.task_id < b.task_id
+    a.sequence < b.sequence
+
+fn parallel_results_conflict(a: ResultEnvelopeV1, b: ResultEnvelopeV1) -> bool:
+    a.write_region == b.write_region
+        and not (parallel_result_kind_to_u8(a.kind) == 3
+            and parallel_result_kind_to_u8(b.kind) == 3)
+
+trait ParallelCommitPort:
+    fn accepts(result: ResultEnvelopeV1) -> bool
+    fn order() -> ParallelCommitOrder

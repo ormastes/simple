@@ -1,0 +1,65 @@
+# Deterministic validation/order step for parent-authoritative commit.
+# Snapshot application stays in the owning domain/runtime; this pure common
+# step prevents an adapter from treating completion order as commit order.
+
+use std.common.structural.parallel_commit.commit_contracts.{
+    ParallelCommitOrder,
+    ParallelConflictPolicy,
+    ResultEnvelopeV1,
+    parallel_conflict_policy_to_u8,
+    parallel_result_before,
+    parallel_results_conflict,
+    result_envelope_v1_well_formed
+}
+
+struct ParallelCommitValidationV1:
+    ok: bool
+    ordered: [ResultEnvelopeV1]
+    reason: text
+
+fn parallel_commit_validation_failure(reason: text) -> ParallelCommitValidationV1:
+    ParallelCommitValidationV1(ok: false, ordered: [], reason: reason)
+
+fn parallel_commit_order_results(results: [ResultEnvelopeV1],
+                                 order: ParallelCommitOrder) -> [ResultEnvelopeV1]:
+    """Stable selection order. The first equal result wins, so callers get a
+    canonical order independent of mailbox completion timing."""
+    var used: [bool] = []
+    var i = 0
+    while i < results.len():
+        used.push(false)
+        i = i + 1
+    var ordered: [ResultEnvelopeV1] = []
+    while ordered.len() < results.len():
+        var candidate = -1
+        var j = 0
+        while j < results.len():
+            if not used[j]:
+                if candidate < 0 or parallel_result_before(results[j], results[candidate], order):
+                    candidate = j
+            j = j + 1
+        if candidate >= 0:
+            used[candidate] = true
+            ordered.push(results[candidate])
+    ordered
+
+fn parallel_commit_validate(results: [ResultEnvelopeV1],
+                            order: ParallelCommitOrder,
+                            conflict: ParallelConflictPolicy) -> ParallelCommitValidationV1:
+    for result in results:
+        if not result_envelope_v1_well_formed(result):
+            return parallel_commit_validation_failure("invalid-result-envelope")
+    val ordered = parallel_commit_order_results(results, order)
+    var i = 0
+    while i < ordered.len():
+        var j = i + 1
+        while j < ordered.len():
+            if parallel_results_conflict(ordered[i], ordered[j]):
+                # Rebase requires payload-aware application owned by a later
+                # runtime adapter; common validation therefore fails closed.
+                if parallel_conflict_policy_to_u8(conflict) != 2:
+                    return parallel_commit_validation_failure("overlapping-write-region")
+                return parallel_commit_validation_failure("reduce-policy-requires-reduction-results")
+            j = j + 1
+        i = i + 1
+    ParallelCommitValidationV1(ok: true, ordered: ordered, reason: "")
