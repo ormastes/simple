@@ -25,9 +25,11 @@ use std.common.ui.draw_ir.{
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_tiles_gpu.{
     TileLaneRender, tile_gpu_backend_name, tile_gpu_flag_enabled,
-    tile_lane_render_commands, tile_lane_render_retained_damage_into
+    tile_lane_render_commands, tile_lane_render_retained_damage_into,
+    tile_lane_render_retained_pyramid_into
 }
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use common.ui.render_opt.damage_tiles.{DirtyTilePyramid}
 # Two 600x400 readback + per-tile checksum passes exceed the interpreter's
 # default 10M-operation cap. The driver reads SIMPLE_EXECUTION_LIMIT once at
 # startup, so the runner forwards this directive into the child env:
@@ -119,6 +121,31 @@ describe "tile gpu lane (T4)":
             CLEAR, CLEAR, 0xFFCC2222u32, 0xFFCC2222u32, CLEAR, CLEAR,
             CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR
         ])
+        engine.shutdown()
+
+    it "consumes the canonical damage pyramid without a WebIR copy":
+        var engine = Engine2D.create_with_backend(6, 3, "software")
+        engine.clear(CLEAR)
+        engine.present()
+        var pyramid = DirtyTilePyramid.create(6, 3, [2], [1])
+        pyramid.mark_rect(2, 1, 1, 1)
+        val frame = tile_lane_render_retained_pyramid_into(
+            engine, [draw_ir_rect("update", 0, 0, 6, 3, 0xFFCC2222u32)],
+            pyramid, 0, "software", true)
+        engine = frame.engine
+        expect(frame.render.pixels).to_equal([
+            CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR,
+            CLEAR, CLEAR, 0xFFCC2222u32, 0xFFCC2222u32, CLEAR, CLEAR,
+            CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR
+        ])
+        pyramid.begin_frame()
+        val idle = tile_lane_render_retained_pyramid_into(
+            engine, [draw_ir_rect("unchanged", 0, 0, 6, 3, 0xFFFFFFFFu32)],
+            pyramid, 0, "software", false)
+        engine = idle.engine
+        expect(idle.render.tiles_rendered).to_equal(0)
+        expect(idle.render.ops_rendered).to_equal(0)
+        expect(idle.render.readback_source).to_equal("not_requested")
         engine.shutdown()
 
     it "defaults the gpu lane flag off and resolves a backend name":
