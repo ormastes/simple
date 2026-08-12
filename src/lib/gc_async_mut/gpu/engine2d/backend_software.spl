@@ -15,6 +15,7 @@
 use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engine2DReadback, engine2d_readback, ReadbackSource, readback_source_label}
 use std.gc_async_mut.gpu.engine2d.backend_capability.{BackendCapability, backend_capability_software}
 use std.gpu.engine2d.color.{color_a, color_r, color_g, color_b, rgba, blend}
+use std.gpu.engine2d.backend_emu_math.{_emu_overlay_ch}
 use std.gpu.engine2d.helpers_text.{text_metrics, text_aa_blit_buffer}
 use common.ui.glyph_bitmap_5x7.{glyph_index_for_char_code, glyph_row_bits}
 use std.gpu.engine2d.simd_provider.{record_simd_fill_hit, record_simd_copy_hit, record_simd_alpha_hit}
@@ -1104,7 +1105,84 @@ impl RenderBackend for SoftwareBackend:
         emu_draw_image_transform(self, dst_x, dst_y, src_w, src_h, a, b, c, d, tx, ty, pixels)
 
     me draw_rect_blend_mode(x: i32, y: i32, w: i32, h: i32, color: u32, mode: i32):
-        emu_draw_rect_blend_mode(self, x, y, w, h, color, mode)
+        if w <= 0 or h <= 0:
+            return
+        val sr = color_r(color)
+        val sg = color_g(color)
+        val sb = color_b(color)
+        val sa = color_a(color)
+        if mode != 1 and mode != 2 and mode != 3 and mode != 4 and sa == 255:
+            self.draw_rect_filled(x, y, w, h, color)
+            return
+        var x0_64 = x.to_i64()
+        var y0_64 = y.to_i64()
+        var x1_64 = x.to_i64() + w.to_i64()
+        var y1_64 = y.to_i64() + h.to_i64()
+        if x0_64 < 0: x0_64 = 0
+        if y0_64 < 0: y0_64 = 0
+        if x1_64 > self.w.to_i64(): x1_64 = self.w.to_i64()
+        if y1_64 > self.h.to_i64(): y1_64 = self.h.to_i64()
+        if self.clip_enabled:
+            val clip_x0 = self.clip_x.to_i64()
+            val clip_y0 = self.clip_y.to_i64()
+            val clip_x1 = clip_x0 + self.clip_w.to_i64()
+            val clip_y1 = clip_y0 + self.clip_h.to_i64()
+            if x0_64 < clip_x0: x0_64 = clip_x0
+            if y0_64 < clip_y0: y0_64 = clip_y0
+            if x1_64 > clip_x1: x1_64 = clip_x1
+            if y1_64 > clip_y1: y1_64 = clip_y1
+        val x0 = x0_64 as i32
+        val y0 = y0_64 as i32
+        val x1 = x1_64 as i32
+        val y1 = y1_64 as i32
+        if x1 <= x0 or y1 <= y0:
+            return
+        val mask_active = self.mask_buf.len() > 0
+        var py = y0
+        while py < y1:
+            var px = x0
+            while px < x1:
+                val dst = self.buf[py * self.w + px]
+                val dr = color_r(dst)
+                val dg = color_g(dst)
+                val db = color_b(dst)
+                val da = color_a(dst)
+                var rr = sr
+                var rg = sg
+                var rb = sb
+                if mode == 1:
+                    rr = sr * dr / 255
+                    rg = sg * dg / 255
+                    rb = sb * db / 255
+                else if mode == 2:
+                    rr = 255 - (255 - sr) * (255 - dr) / 255
+                    rg = 255 - (255 - sg) * (255 - dg) / 255
+                    rb = 255 - (255 - sb) * (255 - db) / 255
+                else if mode == 3:
+                    rr = _emu_overlay_ch(sr, dr)
+                    rg = _emu_overlay_ch(sg, dg)
+                    rb = _emu_overlay_ch(sb, db)
+                else if mode == 4:
+                    rr = sr + dr
+                    rg = sg + dg
+                    rb = sb + db
+                    if rr > 255: rr = 255
+                    if rg > 255: rg = 255
+                    if rb > 255: rb = 255
+                val out_r = dr + (rr - dr) * sa / 255
+                val out_g = dg + (rg - dg) * sa / 255
+                val out_b = db + (rb - db) * sa / 255
+                var out_a = da
+                if sa > out_a: out_a = sa
+                val output = rgba(out_r, out_g, out_b, out_a)
+                if mask_active:
+                    self.sw_set_pixel(px, py, output)
+                else:
+                    self.buf[py * self.w + px] = output
+                px = px + 1
+            if not mask_active:
+                self.mark_span_dirty(x0, py, x1 - x0)
+            py = py + 1
 
 impl SoftwareBackend:
     # Phase 1 fallback: paint the cell with `bg` first, then overlay the

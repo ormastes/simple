@@ -45,6 +45,8 @@ the recorded fill hit count.
 
 use std.spec.{describe, it, expect}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
+use std.gpu.engine2d.backend_emu.{emu_draw_rect_blend_mode}
 use std.gpu.engine2d.simd_provider.{reset_simd_hits, simd_hit_counts}
 
 val WIDTH: i32 = 16
@@ -155,6 +157,55 @@ fn expect_draw_image_transform_clip_mask(backend: text):
     expect(pixels[2 * 6 + 1]).to_equal(BG)
 
 describe "Engine2D facade backend mutation":
+    it "software blend-mode rectangles match the emulation oracle for every mode":
+        var mode = 0
+        while mode <= 5:
+            var direct = SoftwareBackend.create()
+            var oracle = SoftwareBackend.create()
+            expect(direct.init(7, 4)).to_equal(true)
+            expect(oracle.init(7, 4)).to_equal(true)
+            var seed: [u32] = [0u32; 28]
+            var i = 0
+            while i < seed.len():
+                seed[i] = 0x40201008u32 + ((i as u32) * 0x0003070Bu32)
+                i = i + 1
+            direct.draw_image(0, 0, 7, 4, seed)
+            oracle.draw_image(0, 0, 7, 4, seed)
+            direct.present()
+            oracle.present()
+            direct.draw_rect_blend_mode(-2, 1, 7, 4, 0x80D05020u32, mode)
+            emu_draw_rect_blend_mode(oracle, -2, 1, 7, 4, 0x80D05020u32, mode)
+            expect(direct.read_pixels()).to_equal(oracle.read_pixels())
+            expect(direct.damage_rects(16)).to_equal(oracle.damage_rects(16))
+            direct.shutdown()
+            oracle.shutdown()
+            mode = mode + 1
+
+    it "software blend-mode rectangle preserves clip mask and zero-alpha damage":
+        var direct = SoftwareBackend.create()
+        var oracle = SoftwareBackend.create()
+        expect(direct.init(6, 4)).to_equal(true)
+        expect(oracle.init(6, 4)).to_equal(true)
+        direct.clear(0x60402010u32)
+        oracle.clear(0x60402010u32)
+        direct.present()
+        oracle.present()
+        var mask: [u8] = [0u8; 24]
+        var i = 0
+        while i < mask.len():
+            if (i % 2) == 0: mask[i] = 255u8
+            i = i + 1
+        direct.set_clip(1, 1, 4, 2)
+        oracle.set_clip(1, 1, 4, 2)
+        direct.set_mask(mask, 6, 4)
+        oracle.set_mask(mask, 6, 4)
+        direct.draw_rect_blend_mode(0, 0, 6, 4, 0x00D05020u32, 3)
+        emu_draw_rect_blend_mode(oracle, 0, 0, 6, 4, 0x00D05020u32, 3)
+        expect(direct.read_pixels()).to_equal(oracle.read_pixels())
+        expect(direct.damage_rects(16)).to_equal(oracle.damage_rects(16))
+        direct.shutdown()
+        oracle.shutdown()
+
     it "software scaled image snapshots an aliased framebuffer source":
         var backend = SoftwareBackend.create()
         expect(backend.init(3, 2)).to_equal(true)
