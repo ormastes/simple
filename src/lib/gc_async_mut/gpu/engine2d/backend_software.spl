@@ -900,7 +900,65 @@ impl RenderBackend for SoftwareBackend:
             row = row + 1
 
     me draw_image_scaled(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):
-        emu_draw_image_scaled(self, dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
+        val src_count = src_w.to_i64() * src_h.to_i64()
+        val dst_count = dst_w.to_i64() * dst_h.to_i64()
+        val right = dst_x.to_i64() + dst_w.to_i64()
+        val bottom = dst_y.to_i64() + dst_h.to_i64()
+        if (dst_w <= 0 or dst_h <= 0 or src_w <= 0 or src_h <= 0 or
+            src_count <= 0 or pixels.len().to_i64() != src_count or
+            dst_count <= 0 or dst_count > 2147483647 or
+            (dst_w.to_i64() - 1) * src_w.to_i64() > 2147483647 or
+            (dst_h.to_i64() - 1) * src_h.to_i64() > 2147483647 or
+            right - 1 > 2147483647 or bottom - 1 > 2147483647):
+            return
+
+        # `buf` is public and may be supplied as the source array.  Preserve
+        # the emulation path's snapshot-before-write semantics whenever the
+        # source shape could cover this framebuffer; other source lengths
+        # cannot alias `self.buf`.
+        var source_pixels = pixels
+        if src_count == self.buf.len().to_i64():
+            var snapshot: [u32] = [0u32; src_count]
+            var source_i: i64 = 0
+            while source_i < src_count:
+                snapshot[source_i] = pixels[source_i]
+                source_i = source_i + 1
+            source_pixels = snapshot
+
+        # Precompute horizontal nearest-neighbour indices once and stream one
+        # reusable row through draw_image.  The emulation path materialized
+        # dst_w * dst_h pixels before the first write; this bounds transient
+        # storage to two dst_w arrays and lets opaque rows use SIMD copies.
+        var src_x: [i32] = [0; dst_w]
+        var row_pixels: [u32] = [0u32; dst_w]
+        var dx = 0
+        while dx < dst_w:
+            src_x[dx] = (dx.to_i64() * src_w.to_i64() / dst_w.to_i64()) as i32
+            dx = dx + 1
+        var dy0_64: i64 = 0
+        if dst_y < 0:
+            dy0_64 = 0 - dst_y.to_i64()
+        var dy1_64 = dst_h.to_i64()
+        val surface_end = self.h.to_i64() - dst_y.to_i64()
+        if dy1_64 > surface_end:
+            dy1_64 = surface_end
+        if dy0_64 < 0: dy0_64 = 0
+        if dy1_64 > dst_h.to_i64(): dy1_64 = dst_h.to_i64()
+        if dy0_64 >= dy1_64:
+            return
+        var dy = dy0_64 as i32
+        var last_sy: i32 = -1
+        while dy < (dy1_64 as i32):
+            val sy = (dy.to_i64() * src_h.to_i64() / dst_h.to_i64()) as i32
+            if sy != last_sy:
+                val src_base = sy * src_w
+                dx = 0
+                while dx < dst_w:
+                    row_pixels[dx] = source_pixels[src_base + src_x[dx]]
+                    dx = dx + 1
+                last_sy = sy
+            self.draw_image(dst_x, dst_y + dy, dst_w, 1, row_pixels)
+            dy = dy + 1
 
     me draw_triangle_outline(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32, thickness: i32):
         emu_draw_triangle_outline(self, x1, y1, x2, y2, x3, y3, color, thickness)
