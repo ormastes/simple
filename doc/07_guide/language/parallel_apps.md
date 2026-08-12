@@ -46,6 +46,13 @@ new heap identity. This is not a general object-graph codec. Arrays, mappings,
 tuples, objects, capabilities, device values, and unauthenticated remote routes
 remain rejected until their schema, ownership, or lease contract lands.
 
+The compiler also has an initial logical storage-access analysis. Given region
+identities established by ownership analysis, MIR constant-index loads and
+stores retain known half-open ranges, while dynamic indices, nested indices,
+unbound pointers, and field paths remain conservative. Field names are useful
+layout-planning evidence but do not yet prove physical disjointness. No current
+backend may infer `noalias` or claim AoS/SoA lowering from these facts alone.
+
 ## Recommended shape
 
 ```simple

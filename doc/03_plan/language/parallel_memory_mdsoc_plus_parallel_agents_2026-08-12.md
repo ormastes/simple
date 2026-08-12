@@ -29,7 +29,8 @@ Do not redefine them in runtime, MDSOC, backend, or application lanes.
 | WP-16 actor/channel migration | partial implementation | native safe paths carry route-validated inline packets, actor reply provenance is explicit, and heap actor context is rejected; typed heap/owned payloads remain |
 | WP-17 process transport | partial implementation | common/native bounded encoded-copy frames share a complete golden vector and a real exec-child round trip; production spawn/piped integration, session/replay binding, schema registry, ObjectRef, and rollback remain |
 | WP-18 thread pool | planned | stable typed pool rewrite not started |
-| WP-20..27 layout/performance | planned | no MIR lowering, allocator adoption, or evidence yet |
+| WP-20 access analysis | partial implementation | compiler MIR analysis now emits ownership-bound logical field/index read/write facts; dynamic/nested/unbound accesses remain conservative and no physical-layout or alias claim is made |
+| WP-21..27 layout/performance | planned | no typed host lowering, layout-view cache, allocator adoption, NUMA/false-sharing implementation, or end-to-end evidence yet |
 | WP-30..36 MDSOC/pilots | planned | do not start before safe transport and layout inputs |
 | WP-40..44 docs/formal/benchmarks | in progress | guide and skills added; real system/manual/formal evidence remains |
 

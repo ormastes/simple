@@ -1,0 +1,123 @@
+use std.spec
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_data.{
+    BlockId, LocalId, MirBlock, MirConstValue, MirFunction, MirInst,
+    MirInstKind, MirOperand, MirOperandKind, MirSignature, MirTerminator,
+    MirType, MirTypeKind
+}
+use compiler.mir_opt.mir_opt.storage_access_analysis.{
+    MIR_STORAGE_UNKNOWN_REGION_ID,
+    analyze_mir_storage_accesses,
+    mir_storage_region_binding_v1,
+    mir_storage_bindings_well_formed
+}
+use std.common.structural.parallel_commit.access_contracts.{
+    parallel_access_mode_to_u8,
+    parallel_access_paths_conflict,
+    parallel_access_paths_overlap
+}
+
+fn storage_copy(local_id: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Copy(LocalId(id: local_id)))
+
+fn storage_index(value: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(
+        MirConstValue.Int(value), MirType(kind: MirTypeKind.I64)))
+
+fn storage_test_function(instructions: [MirInst]) -> MirFunction:
+    val i64_type = MirType(kind: MirTypeKind.I64)
+    MirFunction(
+        symbol: SymbolId.new(901), name: "storage_access_test",
+        signature: MirSignature(params: [], return_type: i64_type, is_variadic: false),
+        locals: [],
+        blocks: [MirBlock(
+            id: BlockId(id: 0), label: Some("entry"), instructions: instructions,
+            terminator: MirTerminator.Ret(nil))],
+        entry_block: BlockId(id: 0), span: nil, generic_params: [],
+        is_generic_template: false, specialization_of: nil, type_bindings: {})
+
+describe "MIR storage access analysis":
+    it "preserves constant element ranges and read write modes":
+        val instructions = [
+            MirInst(kind: MirInstKind.GetElementPtr(
+                LocalId(id: 1), storage_copy(10), [storage_index(2)]), span: nil),
+            MirInst(kind: MirInstKind.Load(LocalId(id: 2), storage_copy(1)), span: nil),
+            MirInst(kind: MirInstKind.GetElementPtr(
+                LocalId(id: 3), storage_copy(20), [storage_index(3)]), span: nil),
+            MirInst(kind: MirInstKind.Store(storage_copy(3), storage_copy(2)), span: nil)
+        ]
+        val bindings = [
+            mir_storage_region_binding_v1(10, 100),
+            mir_storage_region_binding_v1(20, 100)
+        ]
+        val accesses = analyze_mir_storage_accesses(storage_test_function(instructions), bindings)
+        assert_equal(accesses.len(), 2)
+        assert_true(accesses[0].known_range)
+        assert_equal(accesses[0].start, 2)
+        assert_equal(accesses[0].end, 3)
+        assert_equal(accesses[0].projection, "index:2")
+        assert_equal(parallel_access_mode_to_u8(accesses[0].mode), 0)
+        assert_equal(parallel_access_mode_to_u8(accesses[1].mode), 1)
+        assert_false(parallel_access_paths_overlap(accesses[0], accesses[1]))
+        assert_false(parallel_access_paths_conflict(accesses[0], accesses[1]))
+
+    it "collapses dynamic and unbound accesses conservatively":
+        val instructions = [
+            MirInst(kind: MirInstKind.GetElementPtr(
+                LocalId(id: 1), storage_copy(10), [storage_copy(30)]), span: nil),
+            MirInst(kind: MirInstKind.Load(LocalId(id: 2), storage_copy(1)), span: nil),
+            MirInst(kind: MirInstKind.GetElementPtr(
+                LocalId(id: 3), storage_copy(20), [storage_copy(31)]), span: nil),
+            MirInst(kind: MirInstKind.Store(storage_copy(3), storage_copy(2)), span: nil),
+            MirInst(kind: MirInstKind.Load(LocalId(id: 4), storage_copy(99)), span: nil)
+        ]
+        val bindings = [
+            mir_storage_region_binding_v1(10, 100),
+            mir_storage_region_binding_v1(20, 100)
+        ]
+        val accesses = analyze_mir_storage_accesses(storage_test_function(instructions), bindings)
+        assert_equal(accesses.len(), 3)
+        assert_false(accesses[0].known_range)
+        assert_false(accesses[1].known_range)
+        assert_true(parallel_access_paths_conflict(accesses[0], accesses[1]))
+        assert_equal(accesses[2].region_id, MIR_STORAGE_UNKNOWN_REGION_ID)
+        assert_false(accesses[2].known_range)
+
+    it "records field paths without inventing field disjointness":
+        val instructions = [
+            MirInst(kind: MirInstKind.GetField(
+                LocalId(id: 1), storage_copy(10), 4), span: nil),
+            MirInst(kind: MirInstKind.SetField(
+                storage_copy(10), 7, storage_copy(40)), span: nil)
+        ]
+        val accesses = analyze_mir_storage_accesses(
+            storage_test_function(instructions),
+            [mir_storage_region_binding_v1(10, 100)])
+        assert_equal(accesses.len(), 2)
+        assert_equal(accesses[0].projection, "field:4")
+        assert_equal(accesses[1].projection, "field:7")
+        assert_false(accesses[0].known_range)
+        assert_false(accesses[1].known_range)
+        assert_true(parallel_access_paths_conflict(accesses[0], accesses[1]))
+
+    it "rejects ambiguous bindings and nested range claims":
+        val duplicate = [
+            mir_storage_region_binding_v1(10, 100),
+            mir_storage_region_binding_v1(10, 200)
+        ]
+        assert_false(mir_storage_bindings_well_formed(duplicate))
+        assert_equal(analyze_mir_storage_accesses(storage_test_function([]), duplicate).len(), 0)
+
+        val nested = [
+            MirInst(kind: MirInstKind.GetElementPtr(
+                LocalId(id: 1), storage_copy(10), [storage_index(2)]), span: nil),
+            MirInst(kind: MirInstKind.GetElementPtr(
+                LocalId(id: 2), storage_copy(1), [storage_index(3)]), span: nil),
+            MirInst(kind: MirInstKind.Load(LocalId(id: 3), storage_copy(2)), span: nil)
+        ]
+        val accesses = analyze_mir_storage_accesses(
+            storage_test_function(nested),
+            [mir_storage_region_binding_v1(10, 100)])
+        assert_equal(accesses.len(), 1)
+        assert_false(accesses[0].known_range)
+        assert_equal(accesses[0].projection, "index:*")

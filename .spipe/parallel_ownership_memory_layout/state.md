@@ -170,6 +170,23 @@ dev-done
   primary high-capability review caught and closed remote/device admission
   before merge. All seven focused transfer tests passed once after review.
   Graph/schema codecs and production actor/channel/process integration remain.
+- impl: Began WP-20 with a compiler-owned MIR storage-access analyzer. It
+  consumes explicit ownership-region bindings and emits the existing
+  `ParallelAccessPathV1` vocabulary for GEP loads/stores and field reads/writes.
+  Constant single indices retain half-open ranges; dynamic, nested, unbound,
+  and field projections remain conservative. Missing bindings collapse into
+  one unknown region, duplicate bindings are rejected, and no backend alias or
+  physical-layout claim is emitted. A fast Luna audit selected the leaf scope;
+  primary review caught nested-index and ambiguous-binding soundness gaps before
+  verification. The focused spec passed 4/4 through the repository wrapper;
+  its orchestrator reported bootstrap-seed warnings while the test child was
+  the configured pure-Simple release binary. WP-22 lowering remains open.
+  The mandated compiler/lib/MCP/LSP check batch was attempted from the isolated
+  worktree, then stopped under the repository runaway guard after a process
+  audit found multiple unrelated 50–67 minute `check src/compiler` sessions
+  already contending on the same shared compiled runtime. It is not PASS
+  evidence and must be rerun by the integration owner after those stale checks
+  are cleared; this lane did not terminate other sessions' processes.
 - impl: Advanced WP-17 with `process_transfer.rs`: an encoded-copy-only process
   frame reuses the 40-byte `SPTR` metadata, enforces the destination domain,
   carries an exact length and corruption checksum, and caps codec payloads at

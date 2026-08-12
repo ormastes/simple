@@ -1,0 +1,140 @@
+# Conservative logical storage-access facts for layout planning.
+#
+# This pass does not choose a physical layout and does not emit alias metadata.
+# Region identities come from an ownership-analysis binding supplied by the
+# caller. Unbound locals collapse into region 1 so missing evidence can only
+# add conflicts, never manufacture disjointness.
+
+use compiler.mir.mir_data.{MirFunction, MirInstKind, MirOperand, MirOperandKind, MirConstValue}
+use std.common.structural.parallel_commit.access_contracts.{
+    ParallelAccessMode,
+    ParallelAccessPathV1,
+    parallel_access_path_v1
+}
+
+val MIR_STORAGE_UNKNOWN_REGION_ID: i64 = 1
+
+struct MirStorageRegionBindingV1:
+    local_id: i64
+    region_id: i64
+
+struct MirStorageProjectionV1:
+    region_id: i64
+    start: i64
+    end: i64
+    known_range: bool
+    projection: text
+
+fn mir_storage_region_binding_v1(local_id: i64, region_id: i64) -> MirStorageRegionBindingV1:
+    MirStorageRegionBindingV1(local_id: local_id, region_id: region_id)
+
+fn mir_storage_bindings_well_formed(bindings: [MirStorageRegionBindingV1]) -> bool:
+    var i = 0
+    while i < bindings.len():
+        if bindings[i].local_id < 0 or bindings[i].region_id <= MIR_STORAGE_UNKNOWN_REGION_ID:
+            return false
+        var j = i + 1
+        while j < bindings.len():
+            if bindings[i].local_id == bindings[j].local_id:
+                return false
+            j = j + 1
+        i = i + 1
+    true
+
+fn mir_storage_binding_region(bindings: [MirStorageRegionBindingV1], local_id: i64) -> i64:
+    for binding in bindings:
+        if binding.local_id == local_id and binding.region_id > MIR_STORAGE_UNKNOWN_REGION_ID:
+            return binding.region_id
+    MIR_STORAGE_UNKNOWN_REGION_ID
+
+fn mir_storage_operand_local(operand: MirOperand) -> i64:
+    match operand.kind:
+        case Copy(local): local.id
+        case Move(local): local.id
+        case _: -1
+
+fn mir_storage_projection_for_operand(
+    operand: MirOperand,
+    projections: {i64: MirStorageProjectionV1},
+    bindings: [MirStorageRegionBindingV1]
+) -> MirStorageProjectionV1:
+    val local_id = mir_storage_operand_local(operand)
+    if local_id >= 0 and projections.has(local_id):
+        return projections[local_id]
+    MirStorageProjectionV1(
+        region_id: mir_storage_binding_region(bindings, local_id),
+        start: 0, end: 0, known_range: false, projection: "whole")
+
+fn mir_storage_index_projection(
+    base: MirStorageProjectionV1,
+    indices: [MirOperand]
+) -> MirStorageProjectionV1:
+    if base.projection == "whole" and indices.len() == 1:
+        match indices[0].kind:
+            case Const(MirConstValue.Int(index), _):
+                if index >= 0 and index < 9223372036854775807:
+                    return MirStorageProjectionV1(
+                        region_id: base.region_id, start: index, end: index + 1,
+                        known_range: true, projection: "index:{index}")
+            case _:
+                pass
+    MirStorageProjectionV1(
+        region_id: base.region_id, start: 0, end: 0,
+        known_range: false, projection: "index:*")
+
+fn mir_storage_field_projection(base: MirStorageProjectionV1, field: i64) -> MirStorageProjectionV1:
+    val prefix = if base.projection == "whole": "" else: "{base.projection}."
+    MirStorageProjectionV1(
+        region_id: base.region_id, start: 0, end: 0, known_range: false,
+        projection: "{prefix}field:{field}")
+
+fn mir_storage_access_fact(
+    projection: MirStorageProjectionV1,
+    mode: ParallelAccessMode
+) -> ParallelAccessPathV1:
+    parallel_access_path_v1(
+        projection.region_id, projection.start, projection.end,
+        projection.known_range, projection.projection, mode)
+
+fn analyze_mir_storage_accesses(
+    function: MirFunction,
+    bindings: [MirStorageRegionBindingV1]
+) -> [ParallelAccessPathV1]:
+    if not mir_storage_bindings_well_formed(bindings):
+        return []
+    var projections: {i64: MirStorageProjectionV1} = {}
+    var accesses: [ParallelAccessPathV1] = []
+
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case GetElementPtr(dest, base, indices):
+                    val base_projection = mir_storage_projection_for_operand(base, projections, bindings)
+                    projections[dest.id] = mir_storage_index_projection(base_projection, indices)
+                case GetField(dest, base, field):
+                    val base_projection = mir_storage_projection_for_operand(base, projections, bindings)
+                    val field_projection = mir_storage_field_projection(base_projection, field)
+                    projections[dest.id] = field_projection
+                    accesses.push(mir_storage_access_fact(field_projection, ParallelAccessMode.Read))
+                case SetField(base, field, _):
+                    val base_projection = mir_storage_projection_for_operand(base, projections, bindings)
+                    accesses.push(mir_storage_access_fact(
+                        mir_storage_field_projection(base_projection, field),
+                        ParallelAccessMode.Write))
+                case Load(_, pointer):
+                    accesses.push(mir_storage_access_fact(
+                        mir_storage_projection_for_operand(pointer, projections, bindings),
+                        ParallelAccessMode.Read))
+                case Store(pointer, _):
+                    accesses.push(mir_storage_access_fact(
+                        mir_storage_projection_for_operand(pointer, projections, bindings),
+                        ParallelAccessMode.Write))
+                case Copy(dest, source):
+                    if projections.has(source.id):
+                        projections[dest.id] = projections[source.id]
+                case Move(dest, source):
+                    if projections.has(source.id):
+                        projections[dest.id] = projections[source.id]
+                case _:
+                    pass
+    accesses
