@@ -435,8 +435,9 @@ fn dispatch_memory_barrier() -> (
     (
         vk::PipelineStageFlags::COMPUTE_SHADER,
         vk::AccessFlags::SHADER_WRITE,
-        vk::PipelineStageFlags::COMPUTE_SHADER | vk::PipelineStageFlags::HOST,
-        vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE | vk::AccessFlags::HOST_READ,
+        vk::PipelineStageFlags::COMPUTE_SHADER | vk::PipelineStageFlags::TRANSFER,
+        vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE |
+            vk::AccessFlags::TRANSFER_READ,
     )
 }
 
@@ -484,15 +485,17 @@ mod dispatch_barrier_tests {
     use ash::vk;
 
     #[test]
-    fn dispatch_barrier_orders_compute_writes_before_compute_and_host_reads() {
+    fn dispatch_barrier_orders_compute_writes_before_compute_and_transfer_reads() {
         let (src_stage, src_access, dst_stage, dst_access) = dispatch_memory_barrier();
         assert_eq!(src_stage, vk::PipelineStageFlags::COMPUTE_SHADER);
         assert_eq!(src_access, vk::AccessFlags::SHADER_WRITE);
         assert!(dst_stage.contains(vk::PipelineStageFlags::COMPUTE_SHADER));
-        assert!(dst_stage.contains(vk::PipelineStageFlags::HOST));
+        assert!(dst_stage.contains(vk::PipelineStageFlags::TRANSFER));
         assert!(dst_access.contains(vk::AccessFlags::SHADER_READ));
         assert!(dst_access.contains(vk::AccessFlags::SHADER_WRITE));
-        assert!(dst_access.contains(vk::AccessFlags::HOST_READ));
+        assert!(dst_access.contains(vk::AccessFlags::TRANSFER_READ));
+        assert!(!dst_stage.contains(vk::PipelineStageFlags::HOST));
+        assert!(!dst_access.contains(vk::AccessFlags::HOST_READ));
     }
 }
 
