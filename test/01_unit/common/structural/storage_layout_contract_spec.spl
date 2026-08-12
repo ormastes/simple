@@ -6,7 +6,8 @@ use std.common.structural.storage_layout.storage_layout_contracts.{
     storage_layout_plan_v1,
     storage_layout_plan_v1_well_formed
 }
-use std.common.structural.storage_layout.planner.{storage_layout_plan_auto, storage_layout_request_v1}
+use std.common.structural.storage_layout.planner.{storage_layout_plan_auto, storage_layout_request_v1, storage_layout_request_v1_well_formed}
+use std.common.structural.storage_layout.mapping.{storage_layout_project, storage_projection_request_v1}
 
 describe "StorageLayoutPlanV1 contract":
     it "allows private auto-convertible layout plans":
@@ -27,3 +28,52 @@ describe "StorageLayoutPlanV1 contract":
         val request = storage_layout_request_v1(4, 1024, 16, 8, false, true, false, "policy")
         val plan = storage_layout_plan_auto(request)
         assert_equal(storage_layout_kind_to_u8(plan.layout), storage_layout_kind_to_u8(StorageLayoutKind.AoSoA))
+
+    it "rejects malformed planner requests before auto selection":
+        val invalid_alignment = storage_layout_request_v1(4, 1024, 24, 8,
+            false, true, false, "policy")
+        val invalid_width = storage_layout_request_v1(4, 1024, 16, 0,
+            false, true, false, "policy")
+        assert_false(storage_layout_request_v1_well_formed(invalid_alignment))
+        assert_false(storage_layout_request_v1_well_formed(invalid_width))
+
+    it "projects one logical field through AoS and external ABI storage":
+        val request = storage_projection_request_v1(3, 8, 8, 4, 24, 0, 0, 0)
+        val aos = storage_layout_plan_v1(9, StorageLayoutKind.AoS, 1, 8,
+            false, StorageConversionPolicy.Never, "policy-v1", "aos")
+        val external = storage_layout_plan_v1(9, StorageLayoutKind.ExternalFixed, 1, 8,
+            true, StorageConversionPolicy.Pinned, "abi-v1", "external")
+        assert_equal(storage_layout_project(aos, request).byte_offset, 80)
+        assert_equal(storage_layout_project(external, request).byte_offset, 80)
+
+    it "projects the same logical field through SoA storage":
+        val plan = storage_layout_plan_v1(9, StorageLayoutKind.SoA, 1, 16,
+            false, StorageConversionPolicy.Cached, "policy-v1", "soa")
+        val request = storage_projection_request_v1(3, 8, 8, 4, 24, 128, 0, 0)
+        val projected = storage_layout_project(plan, request)
+        assert_true(projected.ok)
+        assert_equal(projected.byte_offset, 140)
+
+    it "projects AoSoA blocks and lanes with tail-safe indices":
+        val plan = storage_layout_plan_v1(9, StorageLayoutKind.AoSoA, 4, 16,
+            false, StorageConversionPolicy.Cached, "policy-v1", "aosoa")
+        val request = storage_projection_request_v1(6, 7, 8, 4, 24, 0, 96, 32)
+        val projected = storage_layout_project(plan, request)
+        assert_true(projected.ok)
+        assert_equal(projected.block_index, 1)
+        assert_equal(projected.lane_index, 2)
+        assert_equal(projected.byte_offset, 136)
+
+    it "rejects out-of-bounds fields unsupported mappings and overflow":
+        val aos = storage_layout_plan_v1(9, StorageLayoutKind.AoS, 1, 8,
+            false, StorageConversionPolicy.Never, "policy-v1", "aos")
+        val outside = storage_projection_request_v1(0, 1, 23, 4, 24, 0, 0, 0)
+        assert_false(storage_layout_project(aos, outside).ok)
+        val grouped = storage_layout_plan_v1(9, StorageLayoutKind.Grouped, 1, 8,
+            false, StorageConversionPolicy.Cached, "policy-v1", "grouped")
+        assert_equal(storage_layout_project(grouped, outside).reason,
+            "layout-requires-specialized-mapping")
+        val huge = storage_projection_request_v1(4611686018427387903,
+            4611686018427387904, 0, 8, 8, 0, 0, 0)
+        assert_equal(storage_layout_project(aos, huge).reason,
+            "physical-offset-overflow")

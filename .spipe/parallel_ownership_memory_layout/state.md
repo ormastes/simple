@@ -65,6 +65,12 @@ dev-done
   Runtime transfer codecs, bounded mailboxes, policy resolution, and actual
   parent commit are still unimplemented Wave 1 work, not implied by these
   contract records.
+- impl: Extended WP-02 with a storage-specific, overflow-safe projection
+  contract for AoS, SoA, AoSoA, and pinned external layouts. Bounds, field
+  extent, power-of-two alignment, ABI conversion, and block-stride violations
+  now fail closed. Grouped/tiled/packed/factored mapping and canonical wire/hash
+  vectors remain explicit follow-up work. Seven focused examples exit zero via
+  the available Rust bootstrap seed; this is not self-host authority evidence.
 - impl: Added WP-04 `ResolvedParallelPolicyV1`. Its critical/verified overlay
   denies existing parent-owned moves, requires bounded mailboxes and
   deterministic commits, denies dynamic transport, and requires frozen layout
