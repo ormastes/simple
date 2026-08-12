@@ -1,0 +1,25 @@
+#!/bin/sh
+set -eu
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+BUILD_DIR="${BUILD_DIR:-$ROOT/build/check/engine2d-vulkan-mixed-8k}"
+ICD="${VK_ICD_FILENAMES:-/usr/share/vulkan/icd.d/lvp_icd.json}"
+SAMPLES="${ENGINE2D_VULKAN_SAMPLES:-31}"
+GLYPHS="${ENGINE2D_VULKAN_GLYPHS:-1024}"
+LINES="${ENGINE2D_VULKAN_LINES:-16}"
+RUNTIME_LIB="$ROOT/src/compiler_rust/target/release/libsimple_runtime.so"
+mkdir -p "$BUILD_DIR"
+if [ ! -f "$ICD" ]; then echo "engine2d_vulkan_mixed_status=blocked reason=missing-icd"; exit 2; fi
+if [ ! -f "$RUNTIME_LIB" ]; then
+    (cd "$ROOT/src/compiler_rust" && cargo build -p simple-runtime --release --no-default-features --features vulkan)
+fi
+for shader in clear rect_filled image_copy font_atlas_packed; do
+    glslangValidator -V "$ROOT/test/09_baselines/engine2d_vulkan/$shader.comp" -o "$BUILD_DIR/$shader.spv" >/dev/null
+done
+gcc -O2 -Wall -Wextra -Werror "$ROOT/test/09_baselines/engine2d_vulkan/engine2d_vulkan_mixed_8k_bench.c" \
+    -L"$ROOT/src/compiler_rust/target/release" -lsimple_runtime \
+    -Wl,-rpath,"$ROOT/src/compiler_rust/target/release" -lpthread -ldl -lm -o "$BUILD_DIR/bench"
+VK_ICD_FILENAMES="$ICD" "$BUILD_DIR/bench" "$BUILD_DIR" "$SAMPLES" "$GLYPHS" "$LINES" | tee "$BUILD_DIR/receipt.env"
+grep -q '^engine2d_vulkan_mixed_mismatch_count=0$' "$BUILD_DIR/receipt.env"
+grep -q '^engine2d_vulkan_mixed_submission_count=1$' "$BUILD_DIR/receipt.env"
+grep -q '^engine2d_vulkan_mixed_timed_readback_bytes=0$' "$BUILD_DIR/receipt.env"
+echo "engine2d_vulkan_mixed_status=pass"

@@ -169,3 +169,29 @@ same source, and the full 132,710,400-byte framebuffer oracle reports exact
 parity. Readback, DrawIR traversal, mixed primitives, and swapchain presentation
 remain outside the timed interval, so this is a text-operation result rather
 than an end-to-end 8K/80 claim.
+
+## Mixed retained primitive envelope
+
+The mixed native ABI probe records clear, solid fills, axis-aligned lines, one
+stable pre-uploaded image, and packed atlas text into one command buffer and
+waits one fence. Exact full-frame readback reports zero mismatches in every
+row below. A deliberately fragmented 50-dispatch scene measured 59,386,000 ns
+p95. Merging its 16 exactly adjacent solid fills reduced the scene to 19
+dispatches and 12,758,000 ns p95, still just outside the 12.5 ms budget.
+
+| Packed glyphs | Lines | Dispatches | p50 ns | p95 ns | Mismatches | Budget |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1,024 | 12 | 15 | 6,542,000 | 8,051,000 | 0 | PASS |
+| 1,024 | 16 | 19 | 9,577,000 | 12,758,000 | 0 | FAIL |
+| 4,096 | 12 | 15 | — | 16,028,000 | 0 | FAIL |
+
+Production DrawIR now performs the same exact fill reduction for consecutive,
+unstyled, unclipped, same-colour rectangles that abut without overlap. It does
+not reorder commands and retains logical command counts in executor receipts.
+
+This is a conservative llvmpipe operation envelope, not an end-to-end 8K/80
+claim. The timed interval excludes DrawIR traversal, source allocation/upload
+for stable images, full-frame readback, and swapchain presentation. It also is
+not physical-GPU evidence. The passing row establishes only that this retained
+15-dispatch primitive mix fits the host software-Vulkan frame budget with an
+exact post-timing oracle.

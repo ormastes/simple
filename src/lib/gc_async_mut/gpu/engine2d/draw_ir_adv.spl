@@ -1437,6 +1437,79 @@ fn _engine2d_embed_offscreen_acquire(owner: Engine2D, w: i32, h: i32) -> Result<
             _engine2d_embed_pool_backend = owner.backend_name()
             Ok(fresh)
 
+struct Engine2dDrawIrCommandPlan:
+    commands: [DrawIrCommand]
+    logical_weights: [i32]
+
+fn _engine2d_draw_ir_plain_fill(command: DrawIrCommand) -> bool:
+    if command.? == false:
+        return false
+    (command.kind == DRAW_IR_COMMAND_RECT and command.width > 0 and
+     command.height > 0 and command.computed_style.len() == 0 and
+     not command.clip_rect.present and
+     ((command.color >> 24) & 0xFFu32) > 0u32)
+
+fn _engine2d_draw_ir_command_geometry(command: DrawIrCommand,
+                                      x: i32, y: i32, w: i32, h: i32) -> DrawIrCommand:
+    DrawIrCommand(
+        kind: command.kind, component_id: command.component_id,
+        x: x, y: y, width: w, height: h, color: command.color,
+        text_value: command.text_value, advance_widths: command.advance_widths,
+        border_rect: command.border_rect, content_rect: command.content_rect,
+        hit_rect: command.hit_rect, clip_rect: command.clip_rect,
+        computed_style: command.computed_style, edge: command.edge,
+        parent_id: command.parent_id, image_uri: command.image_uri,
+        points: command.points, glyph_run: command.glyph_run)
+
+fn engine2d_draw_ir_coalesce_plain_fills(commands: [DrawIrCommand]) -> Engine2dDrawIrCommandPlan:
+    var merge_present = false
+    var scan: i64 = 1
+    while scan < commands.len():
+        val a = commands[scan - 1]
+        val b = commands[scan]
+        if (_engine2d_draw_ir_plain_fill(a) and _engine2d_draw_ir_plain_fill(b) and
+            a.color == b.color):
+            val horizontal = (a.y == b.y and a.height == b.height and
+                a.x.to_i64() + a.width.to_i64() == b.x.to_i64())
+            val vertical = (a.x == b.x and a.width == b.width and
+                a.y.to_i64() + a.height.to_i64() == b.y.to_i64())
+            if horizontal or vertical:
+                merge_present = true
+                break
+        scan = scan + 1
+    if not merge_present:
+        return Engine2dDrawIrCommandPlan(commands: commands, logical_weights: [])
+    var merged: [DrawIrCommand] = []
+    var weights: [i32] = []
+    for command in commands:
+        if merged.len() > 0:
+            val last_index = merged.len() - 1
+            val last = merged[last_index]
+            if (_engine2d_draw_ir_plain_fill(last) and
+                _engine2d_draw_ir_plain_fill(command) and
+                last.color == command.color):
+                val horizontal = (last.y == command.y and last.height == command.height and
+                    last.x.to_i64() + last.width.to_i64() == command.x.to_i64())
+                val vertical = (last.x == command.x and last.width == command.width and
+                    last.y.to_i64() + last.height.to_i64() == command.y.to_i64())
+                if horizontal:
+                    val combined = last.width.to_i64() + command.width.to_i64()
+                    if combined > 0 and combined <= 2147483647:
+                        merged[last_index] = _engine2d_draw_ir_command_geometry(
+                            last, last.x, last.y, combined.to_i32(), last.height)
+                        weights[last_index] = weights[last_index] + 1
+                        continue
+                elif vertical:
+                    val combined = last.height.to_i64() + command.height.to_i64()
+                    if combined > 0 and combined <= 2147483647:
+                        merged[last_index] = _engine2d_draw_ir_command_geometry(
+                            last, last.x, last.y, last.width, combined.to_i32())
+                        weights[last_index] = weights[last_index] + 1
+                        continue
+        merged.push(command)
+        weights.push(1)
+    Engine2dDrawIrCommandPlan(commands: merged, logical_weights: weights)
+
 # Render one batch's flat command list onto `engine`, with every command's
 # local (x, y) shifted by (offset_x, offset_y). Shared by the direct
 # translate+clip path and the offscreen embedded-surface path (where
@@ -1445,6 +1518,7 @@ fn _engine2d_embed_offscreen_acquire(owner: Engine2D, w: i32, h: i32) -> Result<
 # _engine2d_draw_ir_render_box), so callers reassign the typed outcome engine.
 fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand], offset_x: i32, offset_y: i32, images: [Engine2dResolvedDrawIrImage], blend_images: bool, metal_device_glass_required: bool, active_clip: DrawIrRect, css_background_pixel_work_budget: i64) -> Engine2dDrawIrRenderOutcome:
     var eng = engine
+    val command_plan = engine2d_draw_ir_coalesce_plain_fills(commands)
     # Surface dimensions read ONCE at loop entry and threaded down to the
     # glass-material bounds check; deep re-reads of eng.width()/height()
     # returned corrupted values on the freestanding lane (see
@@ -1463,7 +1537,13 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
     var glass_backend_handle: i64 = 0
     var glass_device_identity: i64 = 0
     var css_background_pixel_work_remaining = css_background_pixel_work_budget
-    for command in commands:
+    var command_index: i64 = 0
+    for command in command_plan.commands:
+        val command_weight = if command_plan.logical_weights.len() == 0:
+            1
+        else:
+            command_plan.logical_weights[command_index]
+        command_index = command_index + 1
         # A nil display-list element must be skipped before any field access.
         # Keep the explicit comparison: freestanding codegen has miscompiled
         # `not` in this condition position.
@@ -1542,7 +1622,7 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
                         readback_checksum: 0
                     )
                 )
-            rendered = rendered + 1
+            rendered = rendered + command_weight
         elif command_kind == DRAW_IR_COMMAND_TEXT:
             # Text remains on the canonical Engine2D font/batch route. The
             # generic command clip also covers selection/caret rectangles.
