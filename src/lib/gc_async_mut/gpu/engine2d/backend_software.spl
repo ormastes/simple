@@ -906,7 +906,138 @@ impl RenderBackend for SoftwareBackend:
         emu_draw_triangle_outline(self, x1, y1, x2, y2, x3, y3, color, thickness)
 
     me draw_blur_rect(x: i32, y: i32, w: i32, h: i32, radius: i32):
-        emu_draw_blur_rect(self, x, y, w, h, radius)
+        if w <= 0 or h <= 0 or radius <= 0:
+            return
+        var out_x0_64 = x.to_i64()
+        var out_y0_64 = y.to_i64()
+        var out_x1_64 = x.to_i64() + w.to_i64()
+        var out_y1_64 = y.to_i64() + h.to_i64()
+        if out_x0_64 < 0: out_x0_64 = 0
+        if out_y0_64 < 0: out_y0_64 = 0
+        if out_x1_64 > self.w.to_i64(): out_x1_64 = self.w.to_i64()
+        if out_y1_64 > self.h.to_i64(): out_y1_64 = self.h.to_i64()
+        val out_x0 = out_x0_64 as i32
+        val out_y0 = out_y0_64 as i32
+        val out_x1 = out_x1_64 as i32
+        val out_y1 = out_y1_64 as i32
+        val out_w = out_x1 - out_x0
+        val out_h = out_y1 - out_y0
+        if out_w <= 0 or out_h <= 0:
+            return
+
+        # Only framebuffer rows that can contribute to a visible output are
+        # materialized.  The emulation owner allocated (h + 2r) * w entries
+        # for five planes and first copied the entire framebuffer; this keeps
+        # the same separable sums while bounding scratch to
+        # visible_width * contributing_framebuffer_rows.
+        var src_y0_64 = out_y0.to_i64() - radius.to_i64()
+        var src_y1_64 = out_y1.to_i64() + radius.to_i64()
+        if src_y0_64 < 0: src_y0_64 = 0
+        if src_y1_64 > self.h.to_i64(): src_y1_64 = self.h.to_i64()
+        val src_y0 = src_y0_64 as i32
+        val src_y1 = src_y1_64 as i32
+        val src_rows = src_y1 - src_y0
+        val span = src_rows.to_i64() * out_w.to_i64()
+        val out_count = out_w.to_i64() * out_h.to_i64()
+        if span <= 0 or span > 2147483647 or out_count <= 0 or out_count > 2147483647:
+            return
+        var hr: [i32] = [0; span]
+        var hg: [i32] = [0; span]
+        var hb: [i32] = [0; span]
+        var ha: [i32] = [0; span]
+        var hc: [i32] = [0; span]
+        var ri = 0
+        while ri < src_rows:
+            val fy = src_y0 + ri
+            val row_base = fy * self.w
+            val out_base = ri * out_w
+            var sr = 0
+            var sg = 0
+            var sb = 0
+            var sa = 0
+            var cnt = 0
+            var fx_64 = out_x0.to_i64() - radius.to_i64()
+            var fx_end_64 = out_x0.to_i64() + radius.to_i64()
+            if fx_64 < 0: fx_64 = 0
+            if fx_end_64 >= self.w.to_i64(): fx_end_64 = self.w.to_i64() - 1
+            while fx_64 <= fx_end_64:
+                val p = self.buf[row_base + (fx_64 as i32)]
+                sr = sr + (((p >> 16) & 0xFFu32) as i32)
+                sg = sg + (((p >> 8) & 0xFFu32) as i32)
+                sb = sb + ((p & 0xFFu32) as i32)
+                sa = sa + (((p >> 24) & 0xFFu32) as i32)
+                cnt = cnt + 1
+                fx_64 = fx_64 + 1
+            var px = 0
+            while px < out_w:
+                hr[out_base + px] = sr
+                hg[out_base + px] = sg
+                hb[out_base + px] = sb
+                ha[out_base + px] = sa
+                hc[out_base + px] = cnt
+                val leave_x = out_x0.to_i64() + px.to_i64() - radius.to_i64()
+                if leave_x >= 0 and leave_x < self.w.to_i64():
+                    val p = self.buf[row_base + (leave_x as i32)]
+                    sr = sr - (((p >> 16) & 0xFFu32) as i32)
+                    sg = sg - (((p >> 8) & 0xFFu32) as i32)
+                    sb = sb - ((p & 0xFFu32) as i32)
+                    sa = sa - (((p >> 24) & 0xFFu32) as i32)
+                    cnt = cnt - 1
+                val enter_x = out_x0.to_i64() + px.to_i64() + radius.to_i64() + 1
+                if enter_x >= 0 and enter_x < self.w.to_i64():
+                    val p = self.buf[row_base + (enter_x as i32)]
+                    sr = sr + (((p >> 16) & 0xFFu32) as i32)
+                    sg = sg + (((p >> 8) & 0xFFu32) as i32)
+                    sb = sb + ((p & 0xFFu32) as i32)
+                    sa = sa + (((p >> 24) & 0xFFu32) as i32)
+                    cnt = cnt + 1
+                px = px + 1
+            ri = ri + 1
+
+        var temp: [u32] = [0u32; out_count]
+        var px = 0
+        while px < out_w:
+            var sr = 0
+            var sg = 0
+            var sb = 0
+            var sa = 0
+            var cnt = 0
+            var fy = src_y0
+            var fy_end_64 = out_y0.to_i64() + radius.to_i64() + 1
+            if fy_end_64 > self.h.to_i64(): fy_end_64 = self.h.to_i64()
+            val fy_end = fy_end_64 as i32
+            while fy < fy_end:
+                val idx = (fy - src_y0) * out_w + px
+                sr = sr + hr[idx]
+                sg = sg + hg[idx]
+                sb = sb + hb[idx]
+                sa = sa + ha[idx]
+                cnt = cnt + hc[idx]
+                fy = fy + 1
+            var py = 0
+            while py < out_h:
+                if cnt > 0:
+                    temp[py * out_w + px] = rgba(sr / cnt, sg / cnt, sb / cnt, sa / cnt)
+                val gy = out_y0 + py
+                val leave_y = gy.to_i64() - radius.to_i64()
+                if leave_y >= src_y0.to_i64() and leave_y < src_y1.to_i64():
+                    val idx = ((leave_y as i32) - src_y0) * out_w + px
+                    sr = sr - hr[idx]
+                    sg = sg - hg[idx]
+                    sb = sb - hb[idx]
+                    sa = sa - ha[idx]
+                    cnt = cnt - hc[idx]
+                val enter_y = gy.to_i64() + radius.to_i64() + 1
+                if enter_y >= src_y0.to_i64() and enter_y < src_y1.to_i64():
+                    val idx = ((enter_y as i32) - src_y0) * out_w + px
+                    sr = sr + hr[idx]
+                    sg = sg + hg[idx]
+                    sb = sb + hb[idx]
+                    sa = sa + ha[idx]
+                    cnt = cnt + hc[idx]
+                py = py + 1
+            px = px + 1
+        self.draw_image(out_x0, out_y0, out_w, out_h, temp)
 
     me draw_shadow_rect(x: i32, y: i32, w: i32, h: i32, offset_x: i32, offset_y: i32, blur_r: i32, color: u32):
         emu_draw_shadow_rect(self, x, y, w, h, offset_x, offset_y, blur_r, color)
