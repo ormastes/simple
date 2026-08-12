@@ -526,3 +526,14 @@ This must not be overstated. The self-hosted compiler executable is unavailable
 in this checkout, so bootstrap-seed output does not establish artifact evidence.
 Release qualification still requires self-hosted CLI plus GHDL evidence for the
 strict source route. Until then this is development-stage source evidence only.
+
+## Typed `commit.retire` observation boundary
+
+The aspect engine can bind a locked Architecture-stage observational aspect to
+the retirement composition's stable `commit.retire` node. Each attachment must
+name an exact typed `retire_*` producer output and declare its width. The weaver
+retains the composition and producer unchanged, adds no state or latency, and
+derives an order-independent digest from the composition, lock, and attachment
+set. An absent plan accepts no attachments and returns the original composition
+with zero added ports. This is a pre-legalization contract, not RVFI or formal
+noninterference qualification.

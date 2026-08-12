@@ -101,6 +101,9 @@ fn trap_stateful_identity_fault_testbench(entity_name: text, testbench_name: tex
     address_bits: i32, xlen: i32, pc_literal: text) -> text:
     "library ieee;\nuse ieee.std_logic_1164.all;\nuse std.env.all;\nentity " + testbench_name + " is end entity;\narchitecture tb of " + testbench_name + " is\n signal clk: std_logic := '0'; signal rst,fetch_valid,dispatch_accept,retire_valid: std_logic := '0'; signal fetch_parcel,retire_original_parcel,original_parcel: std_logic_vector(15 downto 0) := x\"9002\"; signal fetch_pc,next_pc,redirect_target: std_logic_vector(" + (address_bits - 1).to_text() + " downto 0) := " + pc_literal + "; signal rs1_index: std_logic_vector(4 downto 0) := (others=>'0'); signal rs1_value,trap_cause,trap_tval: std_logic_vector(" + (xlen - 1).to_text() + " downto 0) := (others=>'0'); signal retire_lineage,dispatch_lineage: std_logic_vector(63 downto 0) := (others=>'0'); signal retire_canonical_instruction: std_logic_vector(31 downto 0) := x\"00100073\"; signal retire_original_length_bytes: std_logic_vector(1 downto 0) := \"10\"; signal fetch_ready,dispatch_valid,protocol_fault,legal,redirect_valid,trap_valid: std_logic; signal canonical_instruction: std_logic_vector(31 downto 0); signal original_length_bytes: std_logic_vector(1 downto 0);\nbegin\n clk<=not clk after 5 ns;\n dut: entity work." + entity_name + " port map(clk,rst,fetch_valid,fetch_parcel,fetch_pc,rs1_index,rs1_value,dispatch_accept,retire_valid,retire_lineage,retire_original_parcel,retire_canonical_instruction,retire_original_length_bytes,fetch_ready,dispatch_valid,dispatch_lineage,protocol_fault,original_parcel,canonical_instruction,original_length_bytes,legal,next_pc,redirect_valid,redirect_target,trap_valid,trap_cause,trap_tval);\n stim: process begin\n  rst<='1'; wait until rising_edge(clk); rst<='0';\n  fetch_valid<='1'; wait until rising_edge(clk); fetch_valid<='0'; dispatch_accept<='1'; wait until rising_edge(clk); dispatch_accept<='0'; retire_lineage<=dispatch_lineage; retire_original_parcel<=x\"0001\"; retire_valid<='1'; wait until rising_edge(clk); retire_valid<='0'; wait for 1 ns; assert protocol_fault='1' and fetch_ready='0' report \"same-lineage wrong parcel must fault\" severity failure;\n  rst<='1'; wait until rising_edge(clk); rst<='0'; retire_original_parcel<=x\"9002\"; wait for 1 ns; assert protocol_fault='0' and fetch_ready='1' report \"reset must recover wrong parcel\" severity failure;\n  fetch_valid<='1'; wait until rising_edge(clk); fetch_valid<='0'; dispatch_accept<='1'; wait until rising_edge(clk); dispatch_accept<='0'; retire_lineage<=dispatch_lineage; retire_canonical_instruction<=x\"00000013\"; retire_valid<='1'; wait until rising_edge(clk); retire_valid<='0'; wait for 1 ns; assert protocol_fault='1' and fetch_ready='0' report \"same-lineage wrong canonical instruction must fault\" severity failure;\n  rst<='1'; wait until rising_edge(clk); rst<='0'; retire_canonical_instruction<=x\"00100073\"; wait for 1 ns; assert protocol_fault='0' and fetch_ready='1' report \"reset must recover wrong canonical instruction\" severity failure;\n  fetch_valid<='1'; wait until rising_edge(clk); fetch_valid<='0'; dispatch_accept<='1'; wait until rising_edge(clk); dispatch_accept<='0'; retire_lineage<=dispatch_lineage; retire_original_length_bytes<=\"00\"; retire_valid<='1'; wait until rising_edge(clk); retire_valid<='0'; wait for 1 ns; assert protocol_fault='1' and fetch_ready='0' report \"same-lineage wrong length must fault\" severity failure;\n  rst<='1'; wait until rising_edge(clk); rst<='0'; retire_original_length_bytes<=\"10\"; wait for 1 ns; assert protocol_fault='0' and fetch_ready='1' report \"reset must recover wrong length\" severity failure; finish; end process;\nend architecture;\n"
 
+fn rv64_full_trap_decoder_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse std.env.all;\nentity strict_rv64_full_trap_decoder_tb is end entity;\narchitecture tb of strict_rv64_full_trap_decoder_tb is\n signal original_parcel: std_logic_vector(15 downto 0):=x\"6480\"; signal fetch_pc,next_pc,redirect_target: std_logic_vector(55 downto 0):=x\"00000000000100\"; signal rs1_index: std_logic_vector(4 downto 0):=(others=>'0'); signal rs1_value: std_logic_vector(63 downto 0):=(others=>'0'); signal canonical_instruction: std_logic_vector(31 downto 0); signal original_length_bytes: std_logic_vector(1 downto 0); signal legal,redirect_valid,trap_valid: std_logic; signal trap_cause,trap_tval: std_logic_vector(63 downto 0);\nbegin\n dut: entity work.riscv_gen2_zca_rv64_addiw_trap_migrating_predecode port map(original_parcel,fetch_pc,rs1_index,rs1_value,canonical_instruction,original_length_bytes,legal,next_pc,redirect_valid,redirect_target,trap_valid,trap_cause,trap_tval);\n process begin\n  wait for 1 ns; assert legal='1' and canonical_instruction=x\"0084B403\" and trap_valid='0' report \"C.LD must participate in the RV64 product\" severity failure;\n  original_parcel<=x\"E880\"; wait for 1 ns; assert legal='1' and canonical_instruction=x\"0084B823\" report \"C.SD must participate in the RV64 product\" severity failure;\n  original_parcel<=x\"6522\"; wait for 1 ns; assert legal='1' and canonical_instruction=x\"00813503\" report \"C.LDSP must participate in the RV64 product\" severity failure;\n  original_parcel<=x\"E42A\"; wait for 1 ns; assert legal='1' and canonical_instruction=x\"00A13423\" report \"C.SDSP must participate in the RV64 product\" severity failure;\n  original_parcel<=x\"9C21\"; wait for 1 ns; assert legal='1' and canonical_instruction=x\"0084043B\" report \"C.ADDW must participate in the RV64 product\" severity failure;\n  original_parcel<=x\"9C01\"; wait for 1 ns; assert legal='1' and canonical_instruction=x\"4084043B\" report \"C.SUBW must participate in the RV64 product\" severity failure;\n  original_parcel<=x\"1082\"; wait for 1 ns; assert legal='1' and canonical_instruction=x\"02009093\" report \"RV64 C.SLLI must retain shamt bit five\" severity failure;\n  original_parcel<=x\"9002\"; wait for 1 ns; assert legal='1' and canonical_instruction=x\"00100073\" and trap_valid='1' and trap_cause=x\"0000000000000003\" report \"C.EBREAK must remain the sole trap row\" severity failure;\n  original_parcel<=x\"0000\"; wait for 1 ns; assert legal='0' and canonical_instruction=x\"00000000\" and trap_valid='0' report \"unadmitted parcel must fail closed\" severity failure; finish; end process;\nend architecture;\n"
+
 fn parcel_field_testbench() -> text:
     "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\n\nentity strict_parcel_field_tb is\nend entity strict_parcel_field_tb;\n\narchitecture tb of strict_parcel_field_tb is\n    signal parcel : std_logic_vector(31 downto 0) := std_logic_vector(to_unsigned(40960, 32));\n    signal field : std_logic_vector(31 downto 0);\nbegin\n    dut: entity work.strict_parcel_field\n        port map (parcel => parcel, field => field);\n    stim: process\n    begin\n        wait for 1 ns;\n        assert field = std_logic_vector(to_unsigned(5, 32))\n            report \"expected parcel field 5\" severity failure;\n        finish;\n    end process;\nend architecture tb;\n"
 
@@ -1556,12 +1559,37 @@ describe "RISC-V Gen2 HWIR foundation":
         expect(manifest).to_contain("\"target\":\"riscv64\"")
         expect(manifest).to_contain("\"profile\":\"riscv-gen2-rv64-zca-addiw-critical\"")
         expect(manifest).to_contain("\"kind\":\"compiler_product_dependency\",\"name\":\"riscv_gen2_zca_rv64_addiw_trap_migrating_predecode\"")
-        expect(manifest.split("\"zca.c.").len()).to_equal(27)
+        expect(manifest.split("\"zca.c.").len()).to_equal(33)
         expect(manifest).to_contain("\"zca.c.addiw\"")
+        expect(manifest).to_contain("\"zca.c.ld\"")
+        expect(manifest).to_contain("\"zca.c.sd\"")
+        expect(manifest).to_contain("\"zca.c.ldsp\"")
+        expect(manifest).to_contain("\"zca.c.sdsp\"")
+        expect(manifest).to_contain("\"zca.c.addw\"")
+        expect(manifest).to_contain("\"zca.c.subw\"")
         expect(manifest.contains("\"zca.c.jal\"")).to_equal(false)
         expect(manifest).to_contain("\"target_evidence_complete\":false")
         strict_remove_file_if_present(output_path)
         strict_remove_file_if_present(manifest_path)
+
+    # @req REQ-G2-002 REQ-G2-010 REQ-G2-011 NFR-G2-010 NFR-G2-012
+    # @capture exec
+    it "should execute the exact RV64 32-row decoder vectors through GHDL when available":
+        val product = compile_strict_zca_trap_single_outstanding_frontend_product(
+            CoreConfig.rv64_zca_addiw_mission_critical())
+        expect(product.is_success()).to_equal(true)
+        expect(product.vhdl).to_contain("global_overlap_after_31")
+        if strict_ghdl_available():
+            val product_path = "/tmp/riscv_gen2_rv64_full_trap_product.vhd"
+            val testbench_path = "/tmp/riscv_gen2_rv64_full_trap_decoder_tb.vhd"
+            expect(strict_vhdl_write_file(product_path, product.vhdl)).to_equal(true)
+            expect(strict_vhdl_write_file(testbench_path, rv64_full_trap_decoder_testbench())).to_equal(true)
+            expect(strict_ghdl_analyze(product_path)).to_equal(true)
+            expect(strict_ghdl_analyze(testbench_path)).to_equal(true)
+            expect(strict_ghdl_elaborate("strict_rv64_full_trap_decoder_tb")).to_equal(true)
+            expect(strict_ghdl_run("strict_rv64_full_trap_decoder_tb", "20ns")).to_equal(true)
+            strict_remove_file_if_present(product_path)
+            strict_remove_file_if_present(testbench_path)
 
     # @req REQ-G2-009 NFR-G2-010
     # @capture exec

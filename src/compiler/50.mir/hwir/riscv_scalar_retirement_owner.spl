@@ -1,0 +1,115 @@
+# Typed one-entry architectural retirement owner for the scalar Gen2 path.
+
+use compiler.mir.hwir.types.{CoreConfig, HwNodeId, HwOrigin, HwPort}
+use compiler.mir.hwir.sequential.{HwSeqAssignment, HwSeqGuard,
+    HwSeqOutputBinding, HwSeqRule, HwSeqValue, HwSequentialModuleDef,
+    HwSequentialPlan, HwStateRegister}
+
+fn retire_record_fields(xlen: i32) -> [(text, i32)]:
+    [("xlen", 7), ("privilege", 2), ("original_instruction", 32),
+        ("canonical_instruction", 32), ("instruction_length_bytes", 3),
+        ("pc_before", xlen), ("pc_after", xlen), ("rd", 5),
+        ("rd_write", 1), ("rd_value", xlen), ("memory_address", xlen),
+        ("memory_read_mask", 32), ("memory_write_mask", 32),
+        ("memory_read_data", xlen), ("memory_write_data", xlen),
+        ("trap", 1), ("interrupt", 1), ("cause", xlen), ("tval", xlen)]
+
+fn retirement_ports(xlen: i32) -> [HwPort]:
+    var ports = [HwPort.input("clk", "Bits", 1), HwPort.input("rst", "Bits", 1),
+        HwPort.input("dispatch_valid", "Bits", 1), HwPort.input("retire_ready", "Bits", 1),
+        HwPort.output("dispatch_ready", "Bits", 1), HwPort.output("dispatch_accept", "Bits", 1),
+        HwPort.output("retire_valid", "Bits", 1), HwPort.output("retire_order", "Bits", 64),
+        HwPort.output("protocol_fault", "Bits", 1)]
+    for field in retire_record_fields(xlen):
+        if field[0] != "xlen":
+            ports.push(HwPort.input("dispatch_" + field[0], "Bits", field[1]))
+        ports.push(HwPort.output("retire_" + field[0], "Bits", field[1]))
+    ports
+
+fn retirement_registers(xlen: i32) -> [HwStateRegister]:
+    var registers = [HwStateRegister(name: "full_reg", bit_width: 1,
+            clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "fault_reg", bit_width: 1,
+            clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "next_order_reg", bit_width: 64,
+            clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "order_reg", bit_width: 64,
+            clock_domain: "default", reset_value: 0)]
+    for field in retire_record_fields(xlen):
+        val reset_value = if field[0] == "xlen": xlen as i64 else: 0
+        registers.push(HwStateRegister(name: field[0] + "_reg", bit_width: field[1],
+            clock_domain: "default", reset_value: reset_value))
+    registers
+
+fn capture_assignments(xlen: i32, terminal: bool) -> [HwSeqAssignment]:
+    var assignments = [HwSeqAssignment(destination: "full_reg",
+            value: HwSeqValue.copy("dispatch_valid", 1)),
+        HwSeqAssignment(destination: "order_reg",
+            value: HwSeqValue.copy("next_order_reg", 64))]
+    if terminal:
+        assignments.push(HwSeqAssignment(destination: "fault_reg",
+            value: HwSeqValue.copy("dispatch_valid", 1)))
+    else:
+        assignments.push(HwSeqAssignment(destination: "next_order_reg",
+            value: HwSeqValue.increment("next_order_reg", 64)))
+    for field in retire_record_fields(xlen):
+        if field[0] != "xlen":
+            assignments.push(HwSeqAssignment(destination: field[0] + "_reg",
+                value: HwSeqValue.copy("dispatch_" + field[0], field[1])))
+    assignments
+
+fn consume_assignments(xlen: i32) -> [HwSeqAssignment]:
+    var assignments = [HwSeqAssignment(destination: "full_reg", value: HwSeqValue.zero(1)),
+        HwSeqAssignment(destination: "order_reg", value: HwSeqValue.zero(64))]
+    for field in retire_record_fields(xlen):
+        if field[0] != "xlen":
+            assignments.push(HwSeqAssignment(destination: field[0] + "_reg",
+                value: HwSeqValue.zero(field[1])))
+    assignments
+
+fn retirement_outputs(xlen: i32) -> [HwSeqOutputBinding]:
+    val empty_healthy = [HwSeqGuard.low("full_reg"), HwSeqGuard.low("fault_reg")]
+    val accepted = [HwSeqGuard.high("dispatch_valid"), HwSeqGuard.low("full_reg"),
+        HwSeqGuard.low("fault_reg")]
+    val occupied = [HwSeqGuard.high("full_reg")]
+    var outputs = [HwSeqOutputBinding.all("dispatch_ready", empty_healthy),
+        HwSeqOutputBinding.all("dispatch_accept", accepted),
+        HwSeqOutputBinding.direct("retire_valid", "full_reg", 1),
+        HwSeqOutputBinding.guarded("retire_order", "order_reg", 64, occupied),
+        HwSeqOutputBinding.direct("protocol_fault", "fault_reg", 1)]
+    for field in retire_record_fields(xlen):
+        outputs.push(HwSeqOutputBinding.guarded("retire_" + field[0],
+            field[0] + "_reg", field[1], occupied))
+    outputs
+
+pub fn strict_riscv_scalar_retirement_owner(module_name: text,
+    config: CoreConfig) -> Result<HwSequentialModuleDef, text>:
+    if module_name == "":
+        return Err("HWIR-E-RISCV-RETIRE-OWNER-ID: scalar retirement owner requires a module name")
+    val config_error = config.diagnostic()
+    if config_error != "": return Err(config_error)
+    val plan = HwSequentialPlan(owner_id: HwNodeId.child(module_name, "sequential"),
+        registers: retirement_registers(config.xlen), rules: [
+            HwSeqRule(name: "consume", guards: [HwSeqGuard.high("retire_ready"),
+                    HwSeqGuard.high("full_reg")], assignments: consume_assignments(config.xlen)),
+            HwSeqRule(name: "capture_terminal_order", guards: [HwSeqGuard.high("dispatch_valid"),
+                    HwSeqGuard.low("full_reg"), HwSeqGuard.low("fault_reg"),
+                    HwSeqGuard.all_ones("next_order_reg")],
+                assignments: capture_assignments(config.xlen, true)),
+            HwSeqRule(name: "capture", guards: [HwSeqGuard.high("dispatch_valid"),
+                    HwSeqGuard.low("full_reg"), HwSeqGuard.low("fault_reg")],
+                assignments: capture_assignments(config.xlen, false))],
+        outputs: retirement_outputs(config.xlen), decoder_pins: [])
+    val module = HwSequentialModuleDef(node_id: HwNodeId.module_root(module_name),
+        entity_name: module_name, config: config, origins: [
+            HwOrigin(node_id: HwNodeId.child(module_name, "accept"),
+                source_name: "riscv.scalar.retirement.accepted-event"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "record"),
+                source_name: "riscv.scalar.retirement.record"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "order"),
+                source_name: "riscv.scalar.retirement.monotonic-order")],
+        ports: retirement_ports(config.xlen), plan: plan,
+        child_entity: "", child_graph_sha256: "")
+    val diagnostic = module.diagnostic()
+    if diagnostic != "": return Err(diagnostic)
+    Ok(module)

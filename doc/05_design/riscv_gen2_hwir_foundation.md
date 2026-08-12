@@ -155,3 +155,9 @@
     second time. On ambiguity it emits the bounded illegal `PC+2` tuple and
     zero trap metadata; otherwise it preserves the selected canonical word,
     original length, redirect tuple, and explicit breakpoint cause/tval.
+21. A locked `Architecture`/`observe`/`commit.retire` aspect may attach typed
+    outputs to the exact stable retirement-composition node. Validation rejects
+    foreign nodes, non-receipt producer fields, width mismatches, duplicate
+    output names, resource/accounting mismatches, state, and nontransparent
+    latency. The disabled path returns the composition verbatim. The weave hash
+    sorts attachment identities, so discovery order cannot change provenance.

@@ -1,7 +1,7 @@
 # Typed sequential-HWIR primitives for bounded Gen2 products.
 
 use std.common.crypto.sha256.{sha256_text}
-use compiler.mir.hwir.types.{HwNodeId, HwPort, hwir_hash_fields, hwir_vhdl_identifier}
+use compiler.mir.hwir.types.{CoreConfig, HwNodeId, HwOrigin, HwPort, hwir_hash_fields, hwir_vhdl_identifier}
 
 pub class HwStateRegister:
     name: text
@@ -132,8 +132,8 @@ pub class HwSequentialPlan:
 
     me diagnostic() -> text:
         if not self.owner_id.is_valid(): return "HWIR-E-SEQUENTIAL-ID: sequential plan requires a stable owner node ID"
-        if self.registers.len() == 0 or self.rules.len() == 0 or self.outputs.len() == 0 or self.decoder_pins.len() == 0:
-            return "HWIR-E-SEQUENTIAL-PLAN: sequential plan requires registers, ordered rules, outputs, and decoder pins"
+        if self.registers.len() == 0 or self.rules.len() == 0 or self.outputs.len() == 0:
+            return "HWIR-E-SEQUENTIAL-PLAN: sequential plan requires registers, ordered rules, and outputs"
         # Keep the authored spelling for VHDL and provenance, but compare
         # identifiers as VHDL does.  Without folded keys, two records such as
         # `valid_reg` and `VALID_REG` would silently describe one register.
@@ -230,6 +230,86 @@ pub class HwSequentialPlan:
         for pin in self.decoder_pins:
             text = text + hwir_hash_fields(["pin", pin.port_name, pin.signal_name, pin.direction, pin.bit_width.to_text()])
         text
+
+    me structural_sha256() -> text:
+        sha256_text(self.canonical_text())
+
+pub class HwSequentialModuleDef:
+    """Typed standalone or single-child sequential module boundary.
+
+    An empty child entity is an explicit standalone module and therefore
+    requires no decoder pins.  A non-empty child retains the closed typed pin
+    contract used by existing stateful products.
+    """
+    node_id: HwNodeId
+    entity_name: text
+    config: CoreConfig
+    origins: [HwOrigin]
+    ports: [HwPort]
+    plan: HwSequentialPlan
+    child_entity: text
+    child_graph_sha256: text
+
+    me diagnostic() -> text:
+        val config_error = self.config.diagnostic()
+        if config_error != "": return config_error
+        if not self.node_id.is_valid() or not hwir_vhdl_identifier(self.entity_name) or
+            self.plan.owner_id.value == self.node_id.value:
+            return "HWIR-E-SEQUENTIAL-MODULE-ID: sequential module and plan require distinct stable identities"
+        if self.origins.len() == 0:
+            return "HWIR-E-SEQUENTIAL-MODULE-ORIGIN: sequential module requires source lineage"
+        var port_names: [text] = []
+        var has_clk = false
+        var has_rst = false
+        for port in self.ports:
+            val folded = port.name.lower()
+            if not hwir_vhdl_identifier(port.name) or port.type_name != "Bits" or
+                port.bit_width < 1 or port.clock_domain != "default" or port_names.contains(folded):
+                return "HWIR-E-SEQUENTIAL-MODULE-PORT: sequential ports require unique default-domain Bits values"
+            if port.name == "clk" and port.direction == "in" and port.bit_width == 1: has_clk = true
+            if port.name == "rst" and port.direction == "in" and port.bit_width == 1: has_rst = true
+            port_names.push(folded)
+        if not has_clk or not has_rst:
+            return "HWIR-E-SEQUENTIAL-MODULE-CLOCK: sequential module requires one-bit clk and synchronous active-high rst inputs"
+        var origin_ids: [text] = []
+        for origin in self.origins:
+            if not origin.node_id.is_valid() or origin.source_name == "" or
+                origin.node_id.value == self.node_id.value or origin_ids.contains(origin.node_id.value):
+                return "HWIR-E-SEQUENTIAL-MODULE-ORIGIN: sequential origins must be distinct and valid"
+            origin_ids.push(origin.node_id.value)
+        val plan_error = self.plan.diagnostic_for_ports(self.ports)
+        if plan_error != "": return plan_error
+        if self.child_entity == "":
+            if self.child_graph_sha256 != "" or self.plan.decoder_pins.len() != 0:
+                return "HWIR-E-SEQUENTIAL-MODULE-CHILD: standalone modules cannot retain child identity or pins"
+        else:
+            if not hwir_vhdl_identifier(self.child_entity) or self.child_graph_sha256 == "" or
+                self.plan.decoder_pins.len() == 0:
+                return "HWIR-E-SEQUENTIAL-MODULE-CHILD: child-bound modules require entity, graph hash, and typed pins"
+        ""
+
+    me canonical_text() -> text:
+        var fields = ["simple-hwir-sequential-module/v1", self.node_id.value, self.entity_name,
+            self.config.xlen.to_text(), self.config.physical_address_bits.to_text(),
+            self.config.register_count.to_text(), self.config.profile,
+            self.config.isa_profile, self.config.compressed_decode_profile]
+        for origin in self.origins:
+            fields.push("origin")
+            fields.push(origin.node_id.value)
+            fields.push(origin.source_name)
+        for port in self.ports:
+            fields.push("port")
+            fields.push(port.name)
+            fields.push(port.direction)
+            fields.push(port.type_name)
+            fields.push(port.bit_width.to_text())
+            fields.push(port.clock_domain)
+        fields.push("plan")
+        fields.push(self.plan.canonical_text())
+        fields.push("child")
+        fields.push(self.child_entity)
+        fields.push(self.child_graph_sha256)
+        hwir_hash_fields(fields)
 
     me structural_sha256() -> text:
         sha256_text(self.canonical_text())

@@ -419,8 +419,12 @@ fn hwir_value_is_readable(module: HwModuleDef, name: text) -> bool:
     hwir_width_for_name(module, name) != 0 and module.port_direction(name) != "out"
 
 fn hwir_supported_comb_op(op: text) -> bool:
-    op == "and" or op == "or" or op == "add" or op == "shl" or op == "shr" or
+    op == "and" or op == "or" or op == "xor" or op == "add" or op == "sub" or op == "shl" or op == "shr" or
+        op == "eq" or op == "ne" or op == "slt" or op == "sge" or op == "ult" or op == "uge" or
         op == "passthrough" or op == "zext" or op == "trunc" or op == "sext"
+
+fn hwir_comb_is_predicate(op: text) -> bool:
+    op == "eq" or op == "ne" or op == "slt" or op == "sge" or op == "ult" or op == "uge"
 
 class HwModuleDef:
     summary: HwModule
@@ -548,15 +552,19 @@ class HwModuleDef:
             return "HWIR-E-ORIGIN: strict HWIR module requires source origins"
         var driven: [text] = []
         for op in self.comb_ops:
-            if not hwir_supported_comb_op(op.op) or not hwir_value_is_writable(self, op.result) or hwir_width_for_name(self, op.result) != op.bit_width:
+            if not hwir_supported_comb_op(op.op) or not hwir_value_is_writable(self, op.result) or
+                hwir_width_for_name(self, op.result) != (if hwir_comb_is_predicate(op.op): 1 else: op.bit_width):
                 return "HWIR-E-COMB: combinational operations require a supported writable result"
             if not hwir_value_is_readable(self, op.lhs) or (op.rhs != "" and not hwir_value_is_readable(self, op.rhs)):
                 return "HWIR-E-OP-OPERAND-DIRECTION: operation operands must be input ports"
             if op.lhs == op.result or op.rhs == op.result:
                 return "HWIR-E-COMB-CYCLE: strict combinational operation cannot read its own result"
-            if (op.op == "and" or op.op == "or" or op.op == "add") and
+            if (op.op == "and" or op.op == "or" or op.op == "xor" or op.op == "add" or op.op == "sub") and
                 (op.rhs == "" or hwir_width_for_name(self, op.lhs) != op.bit_width or hwir_width_for_name(self, op.rhs) != op.bit_width):
                 return "HWIR-E-COMB-WIDTH: binary operation operands and result must have the declared width"
+            if hwir_comb_is_predicate(op.op) and
+                (op.rhs == "" or hwir_width_for_name(self, op.lhs) != op.bit_width or hwir_width_for_name(self, op.rhs) != op.bit_width):
+                return "HWIR-E-COMB-WIDTH: predicate operands must have the declared comparison width"
             if (op.op == "shl" or op.op == "shr") and
                 (op.rhs == "" or hwir_width_for_name(self, op.lhs) != op.bit_width):
                 return "HWIR-E-COMB-WIDTH: shift input and result must have the declared width"

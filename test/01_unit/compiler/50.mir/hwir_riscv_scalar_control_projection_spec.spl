@@ -1,0 +1,132 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.host_evaluator.{HwHostInput, prepare_strict_comb_hwir}
+use compiler.mir.hwir.riscv_scalar_control_projection.{strict_riscv_scalar_control_projection_hwir}
+use compiler.backend.backend.riscv_scalar_control_hwir_to_vhdl.{compile_strict_riscv_scalar_control_projection_product}
+
+fn control_value(config: CoreConfig, instruction: u32, pc: i64,
+    rs1_index: i64, rs1_value: i64, rs2_index: i64, rs2_value: i64,
+    name: text) -> i64:
+    val built = strict_riscv_scalar_control_projection_hwir("control_eval", config, instruction)
+    if built.is_err(): return -99
+    val prepared = prepare_strict_comb_hwir(built.ok().unwrap())
+    if prepared.is_err(): return -98
+    val evaluated = prepared.ok().unwrap().evaluate([
+        HwHostInput.bits("in_valid", 1), HwHostInput.bits("in_order", 7),
+        HwHostInput.bits("in_privilege", 3), HwHostInput.bits("in_pc", pc),
+        HwHostInput.bits("rs1_index", rs1_index), HwHostInput.bits("rs1_value", rs1_value),
+        HwHostInput.bits("rs2_index", rs2_index), HwHostInput.bits("rs2_value", rs2_value)])
+    if evaluated.is_err(): return -97
+    val value = evaluated.ok().unwrap().value_of(name)
+    if value.is_err(): return -96
+    value.ok().unwrap()
+
+describe "shared scalar branch and jump projection":
+    it "evaluates branch conditions and wrapped targets for both concrete XLENs":
+        for config in [CoreConfig.rv32(), CoreConfig.rv64()]:
+            expect(control_value(config, 0x00208463, 0x1000, 1, 9, 2, 9,
+                "redirect_target")).to_equal(0x1008)
+            expect(control_value(config, 0x00208463, 0x1000, 1, 9, 2, 8,
+                "redirect_valid")).to_equal(0)
+            expect(control_value(config, 0x0020C463, 0x1000, 1, -1, 2, 1,
+                "redirect_valid")).to_equal(1)
+            expect(control_value(config, 0x0020F463, 0x1000, 1, -1, 2, 1,
+                "redirect_valid")).to_equal(1)
+
+    it "clears JALR bit zero and rejects mismatched register binding":
+        for config in [CoreConfig.rv32(), CoreConfig.rv64()]:
+            expect(control_value(config, 0xFFF082E7, 0x2000, 1, 0x1000, 0, 0,
+                "redirect_target")).to_equal(0x0FFE)
+            expect(control_value(config, 0xFFF082E7, 0x2000, 3, 0x1000, 0, 0,
+                "retire_valid")).to_equal(0)
+            expect(control_value(config, 0xFFF082E7, 0x2000, 3, 0x1000, 0, 0,
+                "retire_original_instruction")).to_equal(0)
+
+    it "projects IALIGN32 exceptions and admits IALIGN16 halfword targets":
+        # JAL x5,+2. Base-I has IALIGN=32, so target PC+2 traps; the admitted
+        # compressed product has IALIGN=16 and redirects to that same target.
+        val jal_plus_two: u32 = 0x002002EF
+        for config in [CoreConfig.rv32(), CoreConfig.rv64()]:
+            expect(control_value(config, jal_plus_two, 0x1000, 0, 0, 0, 0,
+                "execute_exception")).to_equal(1)
+            expect(control_value(config, jal_plus_two, 0x1000, 0, 0, 0, 0,
+                "retire_trap")).to_equal(1)
+            expect(control_value(config, jal_plus_two, 0x1000, 0, 0, 0, 0,
+                "retire_tval")).to_equal(0x1002)
+            expect(control_value(config, jal_plus_two, 0x1000, 0, 0, 0, 0,
+                "redirect_valid")).to_equal(0)
+            expect(control_value(config, jal_plus_two, 0x1000, 0, 0, 0, 0,
+                "retire_rd_write")).to_equal(0)
+        for config in [CoreConfig.rv32_zca(), CoreConfig.rv64_zca()]:
+            expect(control_value(config, jal_plus_two, 0x1000, 0, 0, 0, 0,
+                "execute_exception")).to_equal(0)
+            expect(control_value(config, jal_plus_two, 0x1000, 0, 0, 0, 0,
+                "redirect_target")).to_equal(0x1002)
+            expect(control_value(config, jal_plus_two, 0x1000, 0, 0, 0, 0,
+                "retire_rd_write")).to_equal(1)
+
+    it "checks taken B and post-bit-clear JALR targets against product IALIGN":
+        # BEQ +2 is misaligned only for IALIGN32. A non-taken branch never
+        # raises the target exception even though its encoded target is +2.
+        val beq_plus_two: u32 = 0x00208163
+        expect(control_value(CoreConfig.rv32(), beq_plus_two, 0x2000, 1, 7, 2, 7,
+            "execute_exception")).to_equal(1)
+        expect(control_value(CoreConfig.rv32(), beq_plus_two, 0x2000, 1, 7, 2, 8,
+            "execute_exception")).to_equal(0)
+        expect(control_value(CoreConfig.rv32_zca(), beq_plus_two, 0x2000, 1, 7, 2, 7,
+            "redirect_target")).to_equal(0x2002)
+        # JALR clears bit zero first: 0x1003 becomes 0x1002 and still traps for
+        # IALIGN32, while the compressed product admits it.
+        expect(control_value(CoreConfig.rv64(), 0x000082E7, 0x3000, 1, 0x1003, 0, 0,
+            "retire_tval")).to_equal(0x1002)
+        expect(control_value(CoreConfig.rv64_zca(), 0x000082E7, 0x3000, 1, 0x1003, 0, 0,
+            "redirect_target")).to_equal(0x1002)
+
+    it "wraps boundary immediates and RV64 signed extremes":
+        # JAL's most-negative immediate (-1048576) wraps at XLEN.
+        val jal_min: u32 = 0x800002EF
+        expect(control_value(CoreConfig.rv32(), jal_min, 0, 0, 0, 0, 0,
+            "redirect_target")).to_equal(0xFFF00000)
+        expect(control_value(CoreConfig.rv64(), jal_min, 0, 0, 0, 0, 0,
+            "redirect_target")).to_equal(-1048576)
+        # Signed BLT recognizes INT64_MIN < INT64_MAX; unsigned BLTU does not.
+        expect(control_value(CoreConfig.rv64(), 0x0020C463, 0x1000, 1,
+            -9223372036854775807 - 1, 2, 9223372036854775807, "redirect_valid")).to_equal(1)
+        expect(control_value(CoreConfig.rv64(), 0x0020E463, 0x1000, 1,
+            -9223372036854775807 - 1, 2, 9223372036854775807, "redirect_valid")).to_equal(0)
+
+    it "emits one typed VHDL projection for every admitted control row":
+        val instructions: [u32] = [0x00208463, 0x00209463, 0x0020C463, 0x0020D463,
+            0x0020E463, 0x0020F463, 0x008002EF, 0xFFF082E7]
+        for instruction in instructions:
+            val rv32 = compile_strict_riscv_scalar_control_projection_product(
+                "control_rv32_" + instruction.to_text(), CoreConfig.rv32(), instruction)
+            val rv64 = compile_strict_riscv_scalar_control_projection_product(
+                "control_rv64_" + instruction.to_text(), CoreConfig.rv64(), instruction)
+            expect(rv32.is_success()).to_equal(true)
+            expect(rv64.is_success()).to_equal(true)
+            expect(rv32.route).to_equal("hwir-gen2-scalar-control-projection-v1")
+            expect(rv32.vhdl).to_contain("redirect_target : out std_logic_vector(31 downto 0)")
+            expect(rv64.vhdl).to_contain("redirect_target : out std_logic_vector(63 downto 0)")
+            expect(rv32.vhdl.contains("if xlen") or rv64.vhdl.contains("if xlen")).to_equal(false)
+
+    it "retains deterministic graph identity and normalized invalid payloads":
+        val first = strict_riscv_scalar_control_projection_hwir(
+            "control_hash", CoreConfig.rv32(), 0xFFF082E7)
+        val repeated = strict_riscv_scalar_control_projection_hwir(
+            "control_hash", CoreConfig.rv32(), 0xFFF082E7)
+        val rv64 = strict_riscv_scalar_control_projection_hwir(
+            "control_hash", CoreConfig.rv64(), 0xFFF082E7)
+        expect(first.is_ok()).to_equal(true)
+        expect(repeated.is_ok()).to_equal(true)
+        expect(rv64.is_ok()).to_equal(true)
+        if first.is_ok() and repeated.is_ok() and rv64.is_ok():
+            expect(first.ok().unwrap().structural_sha256()).to_equal(
+                repeated.ok().unwrap().structural_sha256())
+            expect(first.ok().unwrap().structural_sha256() ==
+                rv64.ok().unwrap().structural_sha256()).to_equal(false)
+            var normalized = 0
+            for select in first.ok().unwrap().select_ops:
+                if select.result.starts_with("retire_") and select.when_false.starts_with("zero"):
+                    normalized = normalized + 1
+            expect(normalized).to_equal(11)

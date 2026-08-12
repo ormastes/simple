@@ -5,6 +5,7 @@
 # legalization; an empty plan contributes no ports, state, or logic.
 
 use compiler.mir.hwir.types.{HwCombOp, HwModule, HwModuleDef, HwNodeId, HwOrigin, HwPort, hwir_vhdl_identifier}
+use compiler.mir.hwir.retirement_composition.{HwParcelRetirementComposition}
 use std.common.crypto.sha256.{sha256_text}
 
 fn hwir_aspect_hash_valid(content_hash: text) -> bool:
@@ -371,3 +372,116 @@ pub fn weave_hwir_observational_ports_locked(module: HwModuleDef, plan: HwAspect
     val lock_diagnostic = hwir_aspect_plan_lock_diagnostic(plan, lock)
     if lock_diagnostic != "": return Err(lock_diagnostic)
     weave_hwir_observational_ports(module, plan, probes)
+
+pub fn hwir_commit_retire_node_id(composition: HwParcelRetirementComposition) -> HwNodeId:
+    """Return the sole stable semantic join point for this composition's receipt."""
+    HwNodeId.child(composition.node_id.value, "commit.retire")
+
+pub class HwRetireObservation:
+    """One typed, read-only attachment to the architectural retirement receipt."""
+    aspect_id: text
+    target_node_id: HwNodeId
+    receipt_value: text
+    output_port: text
+    bit_width: i32
+
+    me diagnostic() -> text:
+        if self.aspect_id == "" or not self.target_node_id.is_valid() or
+            self.receipt_value == "" or not hwir_vhdl_identifier(self.output_port) or
+            self.bit_width < 1:
+            return "HWIR-E-ASPECT-RETIRE-PROBE: retirement observation requires an aspect, stable join point, typed receipt value, and VHDL-safe output"
+        ""
+
+pub class HwRetireAspectWeaveResult:
+    """Pre-legalization retirement observation plan; it never mutates the producer."""
+    composition: HwParcelRetirementComposition
+    observations: [HwRetireObservation]
+    added_port_count: i32
+    route: text
+    weave_sha256: text
+
+    me is_unchanged() -> bool:
+        self.added_port_count == 0 and self.observations.len() == 0
+
+fn hwir_retire_observation_count(observations: [HwRetireObservation], aspect_id: text) -> i32:
+    var count = 0
+    for observation in observations:
+        if observation.aspect_id == aspect_id: count = count + 1
+    count
+
+fn hwir_retire_weave_sha256(composition: HwParcelRetirementComposition,
+    lock: HwAspectLock, observations: [HwRetireObservation]) -> Result<text, text>:
+    var rows: [text] = []
+    for observation in observations:
+        rows.push(observation.aspect_id + "\n" + observation.target_node_id.value + "\n" +
+            observation.receipt_value + "\n" + observation.output_port + "\n" + observation.bit_width.to_text())
+    var index = 0
+    while index < rows.len():
+        var next = index + 1
+        while next < rows.len():
+            if rows[next] < rows[index]:
+                val temporary = rows[index]
+                rows[index] = rows[next]
+                rows[next] = temporary
+            next = next + 1
+        index = index + 1
+    val lock_hash = hwir_aspect_lock_sha256(lock)?
+    Ok(sha256_text("simple-hwir-commit-retire-weave/v1\n" + composition.node_id.value + "\n" +
+        composition.config.xlen.to_text() + "\n" + lock_hash + "\n" + rows.join("\n")))
+
+pub fn weave_hwir_commit_retire_observations_locked(composition: HwParcelRetirementComposition,
+    plan: HwAspectPlan, lock: HwAspectLock,
+    observations: [HwRetireObservation]) -> Result<HwRetireAspectWeaveResult, text>:
+    """Bind transparent observers to the exact typed `commit.retire` receipt.
+
+    The composition and producer are retained verbatim.  This stage creates no
+    state, control, latency, or VHDL text; target legalization may later expose
+    only the typed observation ports recorded here.
+    """
+    val composition_diagnostic = composition.shape_diagnostic()
+    if composition_diagnostic != "": return Err(composition_diagnostic)
+    val lock_diagnostic = hwir_aspect_plan_lock_diagnostic(plan, lock)
+    if lock_diagnostic != "": return Err(lock_diagnostic)
+    if plan.is_absent():
+        if observations.len() != 0:
+            return Err("HWIR-E-ASPECT-ABSENT: disabled hardware aspect plan cannot receive retirement observations")
+        return Ok(HwRetireAspectWeaveResult(composition: composition, observations: [],
+            added_port_count: 0, route: "hwir-aspect-absent", weave_sha256:
+                hwir_retire_weave_sha256(composition, lock, [])?))
+    val retire_node = hwir_commit_retire_node_id(composition)
+    var output_ports: [text] = []
+    for observation in observations:
+        val diagnostic = observation.diagnostic()
+        if diagnostic != "": return Err(diagnostic)
+        if observation.target_node_id.value != retire_node.value or
+            not hwir_aspect_application_matches(plan, observation.aspect_id, retire_node):
+            return Err("HWIR-E-ASPECT-RETIRE-TARGET: retirement observation must bind the supplied composition's stable commit.retire node")
+        val manifest_index = hwir_aspect_manifest_index(plan, observation.aspect_id)
+        if manifest_index < 0:
+            return Err("HWIR-E-ASPECT-PROBE-ASPECT: retirement observation must name a planned hardware aspect")
+        val manifest = plan.manifests[manifest_index]
+        if manifest.stage != "Architecture" or manifest.advice_kind != "observe" or
+            manifest.effect_class != "observational" or manifest.added_state_count != 0 or
+            manifest.latency_contract != "transparent" or manifest.join_point_selectors.len() != 1 or
+            manifest.join_point_selectors[0] != "commit.retire":
+            return Err("HWIR-E-ASPECT-RETIRE-SCOPE: retirement weaving requires one transparent state-free Architecture commit.retire observer")
+        val width = composition.producer.port_width(observation.receipt_value)
+        if width < 1 or composition.producer.port_direction(observation.receipt_value) != "out" or
+            not observation.receipt_value.starts_with("retire_") or width != observation.bit_width:
+            return Err("HWIR-E-ASPECT-RETIRE-TYPE: retirement observation must name an exact typed producer receipt output")
+        if output_ports.contains(observation.output_port):
+            return Err("HWIR-E-ASPECT-RETIRE-PORT: retirement observation output ports must be unique")
+        output_ports.push(observation.output_port)
+    for manifest in plan.manifests:
+        val count = hwir_retire_observation_count(observations, manifest.id)
+        if count != manifest.added_port_count:
+            return Err("HWIR-E-ASPECT-RESOURCE-MISMATCH: declared aspect port count must match typed retirement observations")
+    for application in plan.applications:
+        for matched in application.matched_node_ids:
+            if matched.value != retire_node.value:
+                return Err("HWIR-E-ASPECT-SCOPE: retirement observational weaving requires every matched node to be the supplied commit.retire node")
+        if application.woven_node_count != hwir_retire_observation_count(observations, application.aspect_id):
+            return Err("HWIR-E-ASPECT-ACCOUNTING: declared weave count must equal typed retirement observations")
+    Ok(HwRetireAspectWeaveResult(composition: composition, observations: observations,
+        added_port_count: observations.len(), route: "hwir-aspect-commit-retire-observe",
+        weave_sha256: hwir_retire_weave_sha256(composition, lock, observations)?))

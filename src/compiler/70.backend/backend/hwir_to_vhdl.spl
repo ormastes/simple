@@ -10,7 +10,7 @@ use compiler.mir.mir_data.{MirFunction, MirModule}
 use compiler.mir.hwir.frontend.{strict_zca_control_predecode_hwir, strict_zca_migrating_predecode_hwir, strict_zca_rv32_cjal_migrating_predecode_hwir, strict_zca_rv64_addiw_migrating_predecode_hwir}
 use compiler.mir.hwir.trap_frontend.{strict_zca_trap_migrating_predecode_hwir, strict_zca_target_trap_migrating_predecode_hwir}
 use compiler.mir.hwir.stateful_frontend.{HwParcelFrontendDef, HwTrapParcelFrontendDef, strict_parcel_frontend_decoder_entity, strict_zca_single_outstanding_frontend_hwir, strict_zca_trap_single_outstanding_frontend_hwir}
-use compiler.mir.hwir.sequential.{HwSeqAssignment, HwSeqGuard, HwSeqOutputBinding, HwSeqRule, HwSeqValue, HwSequentialPlan, HwStateRegister}
+use compiler.mir.hwir.sequential.{HwSeqAssignment, HwSeqGuard, HwSeqOutputBinding, HwSeqRule, HwSeqValue, HwSequentialModuleDef, HwSequentialPlan, HwStateRegister}
 use compiler.mir.hwir.retirement_composition.{HwParcelRetirementComposition, HwRetireCompositionBinding}
 use std.common.crypto.sha256.{sha256_text}
 
@@ -50,7 +50,7 @@ pub class HwirStrictVhdlResult:
         HwirStrictVhdlResult(success: false, vhdl: "", diagnostic: diagnostic,
             route: "hwir-strict", module_node_id: "", config_xlen: 0, config_profile: "", hwir_graph_sha256: "")
 
-    static fn emitted(module: HwModuleDef, vhdl: text, route: text) -> HwirStrictVhdlResult:
+    pub static fn emitted(module: HwModuleDef, vhdl: text, route: text) -> HwirStrictVhdlResult:
         HwirStrictVhdlResult(success: true, vhdl: vhdl, diagnostic: "", route: route,
             module_node_id: module.node_id.value, config_xlen: module.config.xlen,
             config_profile: module.config.profile, hwir_graph_sha256: module.structural_sha256())
@@ -108,12 +108,16 @@ fn strict_vhdl_signed(value: text, width: i32) -> text:
         return "signed'(0 => " + value + ")"
     "signed(" + value + ")"
 
+fn strict_vhdl_bit_literal(value: i64, width: i32) -> text:
+    """Serialize the low `width` bits without passing through VHDL INTEGER."""
+    var bits = ""
+    var index = width - 1
+    while index >= 0:
+        bits = bits + (if ((value >> index) & 1) == 1: "1" else: "0")
+        index = index - 1
+    "\"" + bits + "\""
+
 fn strict_vhdl_constant(constant: HwConstant) -> Result<text, text>:
-    if constant.value < 0:
-        if constant.bit_width == 1:
-            return Err("HWIR-E-CONSTANT-VALUE: one-bit constants must be zero or one")
-        return Ok("    constant " + constant.name + " : " + strict_vhdl_type(constant.bit_width) +
-            " := std_logic_vector(to_signed(" + constant.value.to_text() + ", " + constant.bit_width.to_text() + "));\n")
     if constant.bit_width == 1:
         if constant.value == 0:
             return Ok("    constant " + constant.name + " : std_logic := '0';\n")
@@ -121,19 +125,31 @@ fn strict_vhdl_constant(constant: HwConstant) -> Result<text, text>:
             return Ok("    constant " + constant.name + " : std_logic := '1';\n")
         return Err("HWIR-E-CONSTANT-VALUE: one-bit constants must be zero or one")
     Ok("    constant " + constant.name + " : " + strict_vhdl_type(constant.bit_width) +
-        " := std_logic_vector(to_unsigned(" + constant.value.to_text() + ", " + constant.bit_width.to_text() + "));\n")
+        " := " + strict_vhdl_bit_literal(constant.value, constant.bit_width) + ";\n")
 
 fn strict_vhdl_comb(module: HwModuleDef, op: HwCombOp) -> Result<text, text>:
     val lhs_width = module.value_width(op.lhs)
     # The graph validator resolves signals/constants too; emitter-specific
     # width checks use the operation declaration as the serializer contract.
-    if op.op == "and" or op.op == "or":
+    if op.op == "and" or op.op == "or" or op.op == "xor":
         return Ok("    " + op.result + " <= " + op.lhs + " " + op.op + " " + op.rhs + ";\n")
     if op.op == "add":
         if op.bit_width == 1:
             return Ok("    " + op.result + " <= " + op.lhs + " xor " + op.rhs + ";\n")
         return Ok("    " + op.result + " <= std_logic_vector(" + strict_vhdl_unsigned(op.lhs, op.bit_width) +
             " + " + strict_vhdl_unsigned(op.rhs, op.bit_width) + ");\n")
+    if op.op == "sub":
+        return Ok("    " + op.result + " <= std_logic_vector(" + strict_vhdl_unsigned(op.lhs, op.bit_width) +
+            " - " + strict_vhdl_unsigned(op.rhs, op.bit_width) + ");\n")
+    if op.op == "eq" or op.op == "ne":
+        val relation = if op.op == "eq": " = " else: " /= "
+        return Ok("    " + op.result + " <= '1' when " + op.lhs + relation + op.rhs + " else '0';\n")
+    if op.op == "slt" or op.op == "sge":
+        val relation = if op.op == "slt": " < " else: " >= "
+        return Ok("    " + op.result + " <= '1' when signed(" + op.lhs + ")" + relation + "signed(" + op.rhs + ") else '0';\n")
+    if op.op == "ult" or op.op == "uge":
+        val relation = if op.op == "ult": " < " else: " >= "
+        return Ok("    " + op.result + " <= '1' when unsigned(" + op.lhs + ")" + relation + "unsigned(" + op.rhs + ") else '0';\n")
     if op.op == "shl":
         if op.bit_width == 1:
             return Ok("    " + op.result + " <= " + op.lhs + ";\n")
@@ -369,6 +385,41 @@ fn strict_stateful_vhdl(entity: text, config: CoreConfig, decoder_entity: text,
         "entity " + entity + " is port(\n" + strict_stateful_ports(ports) + "    ); end entity;\n" +
         "architecture rtl of " + entity + " is\n" + strict_seq_declarations(plan) + "\nbegin\n decoder: entity work." + decoder_entity + " port map(" + strict_seq_decoder_map(plan) + ");\n" +
         outputs + "\n" + process_vhdl + "end architecture rtl;\n")
+
+pub fn render_strict_sequential_hwir(module: HwSequentialModuleDef,
+    route: text) -> HwirStrictVhdlResult:
+    """Serialize a typed sequential module with zero or one typed child.
+
+    Clients construct HWIR only.  Standalone modules leave child identity and
+    pins empty; child-bound modules retain the same pin mapping primitives as
+    the existing frontend products.
+    """
+    val diagnostic = module.diagnostic()
+    if diagnostic != "": return HwirStrictVhdlResult.rejected(diagnostic)
+    if route == "":
+        return HwirStrictVhdlResult.rejected("HWIR-E-SEQUENTIAL-ROUTE: strict sequential route must be explicit")
+    val profile = strict_vhdl_profile_comment(module.config.profile)
+    if profile.is_err(): return HwirStrictVhdlResult.rejected(profile.err().unwrap())
+    val outputs = strict_seq_outputs(module.plan)
+    if outputs.is_err(): return HwirStrictVhdlResult.rejected(outputs.err().unwrap())
+    val process_vhdl = strict_seq_process(module.plan)
+    if process_vhdl.is_err(): return HwirStrictVhdlResult.rejected(process_vhdl.err().unwrap())
+    var child = ""
+    if module.child_entity != "":
+        child = " child: entity work." + module.child_entity +
+            " port map(" + strict_seq_decoder_map(module.plan) + ");\n"
+    val graph_sha256 = module.structural_sha256()
+    val vhdl = "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\n\n" +
+        "-- simple-hwir route=" + route + " profile=" + profile.ok().unwrap() +
+        " graph=" + graph_sha256 + "\n" +
+        "-- simple-hwir port-schema=" + strict_hwir_port_schema_sha256(module.ports) + "\n" +
+        "entity " + module.entity_name + " is port(\n" + strict_stateful_ports(module.ports) +
+        "    ); end entity;\narchitecture rtl of " + module.entity_name + " is\n" +
+        strict_seq_declarations(module.plan) + "\nbegin\n" + child + outputs.ok().unwrap() +
+        "\n" + process_vhdl.ok().unwrap() + "end architecture rtl;\n"
+    HwirStrictVhdlResult(success: true, vhdl: vhdl, diagnostic: "", route: route,
+        module_node_id: module.node_id.value, config_xlen: module.config.xlen,
+        config_profile: module.config.profile, hwir_graph_sha256: graph_sha256)
 
 pub fn strict_stateful_graph_sha(node_id: text, config: CoreConfig, origins: [HwOrigin], ports: [HwPort],
     decoder_entity: text, plan: HwSequentialPlan, decoder_graph_sha: text) -> text:

@@ -53,8 +53,9 @@ SIMPLE_SAFETY_PROFILE=critical simple-vhdl \
 
 `rv64-zca-critical` selects the corresponding RV64 graph. The enabled IDs are
 `riscv-gen2-zca-control-predecode-v1`,
-`riscv-gen2-zca-migrating-predecode-v1`, and
-`riscv-gen2-zca-trap-single-outstanding-v2`. The trap frontend serializes only
+`riscv-gen2-zca-migrating-predecode-v1`, the RV32/RV64 specialized migrating
+and stateful products listed below, and
+`riscv-gen2-zca-trap-single-outstanding-v3`. The trap frontend serializes only
 from its typed sequential state plan and records its decoder-closure hash. A source pathname and
 `--riscv-gen2-product` are mutually exclusive. The emitted manifest preserves
 the exact `generation_route`, a `compiler-product:` entry identity, and an
@@ -62,13 +63,21 @@ empty user `source_closure`; it must not be represented as a generated source
 program. These are bounded frontend products, not full Zca or qualified
 processor products.
 
+The current non-trap composition is precisely a **24-ID common low-shamt
+tranche**. The concrete RV32 product adds C.JAL and the concrete RV64 product
+adds C.ADDIW, producing separate **25-ID product closures**. This count is not
+a claim of complete Zca: the remaining high-shamt/XLEN-dependent rows and the
+C.EBREAK trap row require their own typed product composition and evidence.
+Every admitted row contributes an explicit `legal` or `match_legal` selector;
+classifier overlap fails closed to the illegal `PC+2` tuple.
+
 The generic raw artifact writer refuses any bundle that claims a compiler-owned
 Gen2 route before removing a prior output. Product drivers use the dedicated
 Gen2 writer after rebuilding and checking their typed graph/provenance. This is
 an internal compiler boundary, not a cryptographic signature; the remaining
 module-encapsulation requirement is tracked before release.
 
-The v2 trap product accepts retirement only when the 64-bit lineage, original
+The v3 trap product accepts retirement only when the 64-bit lineage, original
 16-bit parcel, canonical 32-bit instruction, and original-length encoding all
 match the outstanding entry. Matching lineage alone is insufficient. Any valid
 retirement with an identity mismatch enters sticky `protocol_fault`; only reset
@@ -80,10 +89,14 @@ RV32/RV64 VHDL/GHDL receipts. Bootstrap-seed output, including warning-truncated
 test output, is diagnostic only and does not establish any of those conditions.
 
 The added retirement identity inputs change the stateful frontend's public port
-sequence and graph closure hash. Treat existing stateful product IDs as
-development identifiers, not stable ABI claims, until the compiler assigns an
-explicit compatible or breaking version and fresh self-hosted manifest/GHDL
-receipts prove that decision.
+sequence and graph closure hash. The widened non-trap products therefore use
+the `*-single-outstanding-v2` IDs and `hwir-gen2-stateful-product-v2` route; the
+widened trap product uses `*-trap-single-outstanding-v3` and
+`hwir-gen2-trap-stateful-product-v3`. The CLI rejects the retired v1/v2 product
+IDs, and provenance admission does not recognize the retired unversioned
+stateful routes. Existing artifacts must be regenerated; there is no compatible
+in-place manifest migration. Fresh self-hosted manifest/GHDL receipts are still
+required before qualification.
 
 `riscv-gen2-zca-rv32-cjal-migrating-predecode-v1` is a separate RV32-only
 product and requires `--riscv-gen2-target rv32-zca-cjal-critical`. It adds the
@@ -98,11 +111,20 @@ profile, rejects `rd=x0`, and records a distinct capability hash. It is also
 `frontend-predecode-only`; neither product is a processor or an ISA-profile
 compliance claim.
 
-The corresponding `riscv-gen2-zca-rv32-cjal-single-outstanding-v1` and
-`riscv-gen2-zca-rv64-addiw-single-outstanding-v1` products retain the same
+The corresponding `riscv-gen2-zca-rv32-cjal-single-outstanding-v2` and
+`riscv-gen2-zca-rv64-addiw-single-outstanding-v2` products retain the same
 respective targets and add the bounded one-entry fetch/dispatch/retire lineage
 protocol. Their manifests record the specialized decoder as a graph-hashed
 dependency. They remain frontend products, not processor/profile claims.
+
+The effectful target route closes each 25-row specialized decoder with the
+explicit C.EBREAK row, for exactly 26 admitted IDs. A global ambiguity guard
+rejects overlap between those partitions and clears legality, canonical output,
+redirect, and trap metadata. C.JR/C.JALR register binding and redirect semantics
+remain owned only by the embedded target decoder. The stateful wrapper preserves
+the fetched parcel and original two-byte length through dispatch and retirement;
+no runtime XLEN or extension selector is emitted. These products remain
+development-stage until self-hosted and GHDL qualification receipts exist.
 this is not a full RV32 core claim.
 
 See also: [`riscv_guide.md`](riscv_guide.md),

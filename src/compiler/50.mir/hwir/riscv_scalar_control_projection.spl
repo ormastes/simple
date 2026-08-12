@@ -1,0 +1,164 @@
+# Shared stateless RV32/RV64 scalar branch/jump projection.
+
+use compiler.mir.hwir.types.{CoreConfig, HwClockDomain, HwCombOp, HwConstant,
+    HwCostModel, HwModule, HwModuleDef, HwNodeId, HwOrigin, HwPort, HwSelectOp,
+    HwSignal}
+use compiler.mir.hwir.riscv_scalar_core.{riscv_gen2_scalar_dispatch,
+    riscv_gen2_scalar_elaboration}
+
+fn control_kind(entry_id: text) -> text:
+    if entry_id == "rv.i.beq": return "eq"
+    if entry_id == "rv.i.bne": return "ne"
+    if entry_id == "rv.i.blt": return "slt"
+    if entry_id == "rv.i.bge": return "sge"
+    if entry_id == "rv.i.bltu": return "ult"
+    if entry_id == "rv.i.bgeu": return "uge"
+    if entry_id == "rv.i.jal": return "jal"
+    if entry_id == "rv.i.jalr": return "jalr"
+    ""
+
+fn control_sign_extend(value: i64, bits: i32) -> i64:
+    if (value & (1 << (bits - 1))) == 0: value else: value | (-1 << bits)
+
+fn control_immediate(instruction: u32, kind: text) -> i64:
+    if kind == "jal":
+        val raw = (((instruction >> 31) & 1) << 20) |
+            (((instruction >> 21) & 1023) << 1) |
+            (((instruction >> 20) & 1) << 11) |
+            (((instruction >> 12) & 255) << 12)
+        return control_sign_extend(raw as i64, 21)
+    if kind == "jalr":
+        return control_sign_extend(((instruction >> 20) & 4095) as i64, 12)
+    val raw = (((instruction >> 31) & 1) << 12) |
+        (((instruction >> 25) & 63) << 5) |
+        (((instruction >> 8) & 15) << 1) |
+        (((instruction >> 7) & 1) << 11)
+    control_sign_extend(raw as i64, 13)
+
+fn control_ports(xlen: i32) -> [HwPort]:
+    [HwPort.input("in_valid", "Bits", 1), HwPort.input("in_order", "Bits", 64),
+        HwPort.input("in_privilege", "Bits", 2), HwPort.input("in_pc", "Bits", xlen),
+        HwPort.input("rs1_index", "Bits", 5), HwPort.input("rs1_value", "Bits", xlen),
+        HwPort.input("rs2_index", "Bits", 5), HwPort.input("rs2_value", "Bits", xlen),
+        HwPort.output("execute_exception", "Bits", 1),
+        HwPort.output("redirect_valid", "Bits", 1), HwPort.output("redirect_target", "Bits", xlen),
+        HwPort.output("retire_valid", "Bits", 1), HwPort.output("retire_order", "Bits", 64),
+        HwPort.output("retire_xlen", "Bits", 7), HwPort.output("retire_privilege", "Bits", 2),
+        HwPort.output("retire_original_instruction", "Bits", 32),
+        HwPort.output("retire_canonical_instruction", "Bits", 32),
+        HwPort.output("retire_instruction_length_bytes", "Bits", 3),
+        HwPort.output("retire_pc_before", "Bits", xlen), HwPort.output("retire_pc_after", "Bits", xlen),
+        HwPort.output("retire_rd", "Bits", 5), HwPort.output("retire_rd_write", "Bits", 1),
+        HwPort.output("retire_rd_value", "Bits", xlen),
+        HwPort.output("retire_memory_address", "Bits", xlen),
+        HwPort.output("retire_memory_read_mask", "Bits", 32),
+        HwPort.output("retire_memory_write_mask", "Bits", 32),
+        HwPort.output("retire_memory_read_data", "Bits", xlen),
+        HwPort.output("retire_memory_write_data", "Bits", xlen),
+        HwPort.output("retire_trap", "Bits", 1), HwPort.output("retire_interrupt", "Bits", 1),
+        HwPort.output("retire_cause", "Bits", xlen), HwPort.output("retire_tval", "Bits", xlen)]
+
+pub fn strict_riscv_scalar_control_projection_hwir(module_name: text,
+    config: CoreConfig, instruction: u32) -> Result<HwModuleDef, text>:
+    if module_name == "": return Err("HWIR-E-RISCV-CONTROL-ID: scalar control projection requires a module name")
+    val elaboration = riscv_gen2_scalar_elaboration(config, "none")?
+    val dispatch = riscv_gen2_scalar_dispatch(elaboration, instruction)?
+    val kind = control_kind(dispatch.entry.id)
+    if kind == "" or dispatch.provider != "scalar-integer" or
+        dispatch.entry.execution_class != "control-flow":
+        return Err("HWIR-E-RISCV-CONTROL-SCOPE: control projection admits only base-I branches, JAL, and JALR")
+    val xlen = config.xlen
+    val rs1 = ((instruction >> 15) & 31) as i64
+    val rs2 = ((instruction >> 20) & 31) as i64
+    val rd = ((instruction >> 7) & 31) as i64
+    val is_jump = kind == "jal" or kind == "jalr"
+    val needs_rs1 = kind != "jal"
+    val needs_rs2 = not is_jump
+    # IALIGN is a product property fixed before RTL. C/Zca products admit
+    # halfword targets; base-only RV32I/RV64I require word alignment.
+    val ialign_bytes = if config.compressed_decode_profile == "none": 4 else: 2
+    val mask = if kind == "jalr": (if xlen == 64: -2 else: 4294967294) else: -1
+    val constants = [HwConstant.bits("instruction", 32, instruction as i64),
+        HwConstant.bits("immediate", xlen, control_immediate(instruction, kind)),
+        HwConstant.bits("rs1_expected", 5, rs1), HwConstant.bits("rs2_expected", 5, rs2),
+        HwConstant.bits("rd_index", 5, rd), HwConstant.bits("target_mask", xlen, mask),
+        HwConstant.bits("ialign_mask", xlen, (ialign_bytes - 1) as i64),
+        HwConstant.bits("four", xlen, 4), HwConstant.bits("one1", 1, 1),
+        HwConstant.bits("zero1", 1, 0), HwConstant.bits("zero2", 2, 0),
+        HwConstant.bits("zero3", 3, 0), HwConstant.bits("zero5", 5, 0),
+        HwConstant.bits("zero7", 7, 0), HwConstant.bits("zero32", 32, 0),
+        HwConstant.bits("zero64", 64, 0), HwConstant.bits("zero_xlen", xlen, 0),
+        HwConstant.bits("xlen_value", 7, xlen as i64), HwConstant.bits("length4", 3, 4)]
+    val signals = [HwSignal.comb("rs1_bound", "Bits", 1), HwSignal.comb("rs2_bound", "Bits", 1),
+        HwSignal.comb("bindings_valid", "Bits", 1), HwSignal.comb("effective_valid", "Bits", 1),
+        HwSignal.comb("control_taken", "Bits", 1), HwSignal.comb("redirect_value_valid", "Bits", 1),
+        HwSignal.comb("taken_valid", "Bits", 1), HwSignal.comb("target_low_bits", "Bits", xlen),
+        HwSignal.comb("target_misaligned", "Bits", 1), HwSignal.comb("target_aligned", "Bits", 1),
+        HwSignal.comb("exception_event", "Bits", 1),
+        HwSignal.comb("fallthrough_pc", "Bits", xlen), HwSignal.comb("raw_target", "Bits", xlen),
+        HwSignal.comb("control_target", "Bits", xlen), HwSignal.comb("pc_after_value", "Bits", xlen)]
+    var ops: [HwCombOp] = []
+    if needs_rs1: ops.push(HwCombOp.binary("eq", "rs1_bound", "rs1_index", "rs1_expected", 5))
+    else: ops.push(HwCombOp.unary("passthrough", "rs1_bound", "one1", 1))
+    if needs_rs2: ops.push(HwCombOp.binary("eq", "rs2_bound", "rs2_index", "rs2_expected", 5))
+    else: ops.push(HwCombOp.unary("passthrough", "rs2_bound", "one1", 1))
+    ops.push(HwCombOp.binary("and", "bindings_valid", "rs1_bound", "rs2_bound", 1))
+    ops.push(HwCombOp.binary("and", "effective_valid", "in_valid", "bindings_valid", 1))
+    if is_jump: ops.push(HwCombOp.unary("passthrough", "control_taken", "one1", 1))
+    else: ops.push(HwCombOp.binary(kind, "control_taken", "rs1_value", "rs2_value", xlen))
+    ops.push(HwCombOp.binary("add", "fallthrough_pc", "in_pc", "four", xlen))
+    val target_base = if kind == "jalr": "rs1_value" else: "in_pc"
+    ops.push(HwCombOp.binary("add", "raw_target", target_base, "immediate", xlen))
+    ops.push(HwCombOp.binary("and", "control_target", "raw_target", "target_mask", xlen))
+    ops.push(HwCombOp.binary("and", "target_low_bits", "control_target", "ialign_mask", xlen))
+    ops.push(HwCombOp.binary("ne", "target_misaligned", "target_low_bits", "zero_xlen", xlen))
+    ops.push(HwCombOp.binary("eq", "target_aligned", "target_low_bits", "zero_xlen", xlen))
+    ops.push(HwCombOp.binary("and", "taken_valid", "effective_valid", "control_taken", 1))
+    ops.push(HwCombOp.binary("and", "exception_event", "taken_valid", "target_misaligned", 1))
+    ops.push(HwCombOp.binary("and", "redirect_value_valid", "taken_valid", "target_aligned", 1))
+    ops.push(HwCombOp.unary("passthrough", "retire_valid", "effective_valid", 1))
+    ops.push(HwCombOp.unary("passthrough", "execute_exception", "exception_event", 1))
+    ops.push(HwCombOp.unary("passthrough", "redirect_valid", "redirect_value_valid", 1))
+    val jump_rd_write = is_jump and rd != 0
+    val rd_write_source = if jump_rd_write: "redirect_value_valid" else: "zero1"
+    ops.push(HwCombOp.unary("passthrough", "retire_rd_write", rd_write_source, 1))
+    for output in ["retire_memory_address", "retire_memory_read_data", "retire_memory_write_data"]:
+        ops.push(HwCombOp.unary("passthrough", output, "zero_xlen", xlen))
+    for output in ["retire_memory_read_mask", "retire_memory_write_mask"]:
+        ops.push(HwCombOp.unary("passthrough", output, "zero32", 32))
+    ops.push(HwCombOp.unary("passthrough", "retire_trap", "exception_event", 1))
+    ops.push(HwCombOp.unary("passthrough", "retire_interrupt", "zero1", 1))
+    # RISC-V instruction-address-misaligned cause is zero. tval carries the
+    # post-JALR-bit-clear target only for the projected exception event.
+    ops.push(HwCombOp.unary("passthrough", "retire_cause", "zero_xlen", xlen))
+    val pc_select = HwSelectOp.mux("pc_after_value", "control_taken", "control_target", "fallthrough_pc", xlen)
+    val rd_source = if jump_rd_write: "rd_index" else: "zero5"
+    val rd_value_source = if jump_rd_write: "fallthrough_pc" else: "zero_xlen"
+    val selects = [pc_select,
+        HwSelectOp.mux("redirect_target", "redirect_value_valid", "control_target", "zero_xlen", xlen),
+        HwSelectOp.mux("retire_order", "effective_valid", "in_order", "zero64", 64),
+        HwSelectOp.mux("retire_xlen", "effective_valid", "xlen_value", "zero7", 7),
+        HwSelectOp.mux("retire_privilege", "effective_valid", "in_privilege", "zero2", 2),
+        HwSelectOp.mux("retire_original_instruction", "effective_valid", "instruction", "zero32", 32),
+        HwSelectOp.mux("retire_canonical_instruction", "effective_valid", "instruction", "zero32", 32),
+        HwSelectOp.mux("retire_instruction_length_bytes", "effective_valid", "length4", "zero3", 3),
+        HwSelectOp.mux("retire_pc_before", "effective_valid", "in_pc", "zero_xlen", xlen),
+        HwSelectOp.mux("retire_pc_after", "effective_valid", "pc_after_value", "zero_xlen", xlen),
+        HwSelectOp.mux("retire_rd", "redirect_value_valid", rd_source, "zero5", 5),
+        HwSelectOp.mux("retire_rd_value", "redirect_value_valid", rd_value_source, "zero_xlen", xlen),
+        HwSelectOp.mux("retire_tval", "exception_event", "control_target", "zero_xlen", xlen)]
+    val ports = control_ports(xlen)
+    val summary = HwModule(name: module_name, profile: config.profile, port_count: ports.len(),
+        signal_count: signals.len(), register_count: 0, memory_count: 0,
+        comb_op_count: ops.len() + selects.len(), clock_domain_count: 1,
+        fallback_function: "", cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name), origins: [
+            HwOrigin(node_id: HwNodeId.child(module_name, "decode"), source_name: "riscv.scalar.isa." + dispatch.entry.id),
+            HwOrigin(node_id: HwNodeId.child(module_name, "binding"), source_name: "riscv.scalar.control.register_binding"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "projection"), source_name: "riscv.scalar.control_projection.combinational")],
+        ports: ports, signals: signals, constants: constants, comb_ops: ops,
+        compare_ops: [], select_ops: selects, clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "": return Err(diagnostic)
+    Ok(module)

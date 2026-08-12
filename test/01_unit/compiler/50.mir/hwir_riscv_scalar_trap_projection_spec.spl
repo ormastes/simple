@@ -1,0 +1,97 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig, HwModuleDef}
+use compiler.mir.hwir.host_evaluator.{HwHostInput, prepare_strict_comb_hwir}
+use compiler.mir.hwir.riscv_scalar_trap_projection.{strict_riscv_scalar_trap_projection_hwir}
+
+fn has_select(module: HwModuleDef, result: text, condition: text,
+    when_true: text, when_false: text) -> bool:
+    for op in module.select_ops:
+        if op.result == result and op.condition == condition and op.when_true == when_true and op.when_false == when_false: return true
+    false
+
+fn trap_inputs(valid: i64, illegal: i64, execute: i64, memory: i64,
+    interrupt: i64) -> [HwHostInput]:
+    [HwHostInput.bits("in_valid", valid), HwHostInput.bits("in_privilege", 3),
+        HwHostInput.bits("in_pc", 0x100), HwHostInput.bits("in_pc_after", 0x104),
+        HwHostInput.bits("in_original_instruction", 0xFFFFFFFF),
+        HwHostInput.bits("in_canonical_instruction", 0x13),
+        HwHostInput.bits("in_instruction_length_bytes", 4),
+        HwHostInput.bits("in_rd", 5), HwHostInput.bits("in_rd_write", 1),
+        HwHostInput.bits("in_rd_value", 0x55),
+        HwHostInput.bits("in_memory_address", 0x200),
+        HwHostInput.bits("in_memory_read_mask", 0xFF),
+        HwHostInput.bits("in_memory_write_mask", 0xF0),
+        HwHostInput.bits("in_memory_read_data", 0x66),
+        HwHostInput.bits("in_memory_write_data", 0x77),
+        HwHostInput.bits("illegal_valid", illegal),
+        HwHostInput.bits("execute_trap_valid", execute),
+        HwHostInput.bits("execute_trap_cause", 5),
+        HwHostInput.bits("execute_trap_tval", 0xE5),
+        HwHostInput.bits("memory_trap_valid", memory),
+        HwHostInput.bits("memory_trap_cause", 7),
+        HwHostInput.bits("memory_trap_tval", 0xA7),
+        HwHostInput.bits("interrupt_valid", interrupt),
+        HwHostInput.bits("interrupt_cause", 11)]
+
+fn expect_trap_shape(config: CoreConfig):
+    val module = strict_riscv_scalar_trap_projection_hwir("trap_projection_" + config.xlen.to_text(), config).ok().unwrap()
+    expect(module.shape_diagnostic()).to_equal("")
+    expect(module.port_width("execute_trap_cause")).to_equal(config.xlen)
+    expect(module.port_width("dispatch_cause")).to_equal(config.xlen)
+    expect(module.port_width("dispatch_tval")).to_equal(config.xlen)
+    expect(module.port_width("dispatch_pc_before")).to_equal(config.xlen)
+    expect(module.port_width("dispatch_privilege")).to_equal(2)
+
+describe "precise scalar trap retirement projection":
+    it "monomorphizes the same contract for RV32 and RV64":
+        expect_trap_shape(CoreConfig.rv32())
+        expect_trap_shape(CoreConfig.rv64())
+
+    it "prioritizes memory, execute, illegal, then interrupt effects":
+        val module = strict_riscv_scalar_trap_projection_hwir("trap_priority", CoreConfig.rv64()).ok().unwrap()
+        expect(has_select(module, "selected_sync_cause_low", "execute_trap_valid", "execute_trap_cause", "illegal_instruction_cause")).to_equal(true)
+        expect(has_select(module, "selected_sync_cause", "memory_trap_valid", "memory_trap_cause", "selected_sync_cause_low")).to_equal(true)
+        expect(has_select(module, "selected_cause", "sync_trap", "selected_sync_cause", "interrupt_cause")).to_equal(true)
+        expect(has_select(module, "selected_sync_tval_low", "execute_trap_valid", "execute_trap_tval", "illegal_tval")).to_equal(true)
+        expect(has_select(module, "selected_tval", "sync_trap", "selected_sync_tval", "zero_xlen")).to_equal(true)
+        expect(module.shape_diagnostic()).to_equal("")
+
+    it "suppresses every architectural write and normalizes invalid payloads":
+        val module = strict_riscv_scalar_trap_projection_hwir("trap_normalize", CoreConfig.rv32()).ok().unwrap()
+        expect(has_select(module, "dispatch_rd", "architectural_write_enable", "in_rd", "zero5")).to_equal(true)
+        expect(has_select(module, "dispatch_rd_write", "architectural_write_enable", "in_rd_write", "zero1")).to_equal(true)
+        expect(has_select(module, "dispatch_memory_write_mask", "architectural_write_enable", "in_memory_write_mask", "zero32")).to_equal(true)
+        expect(has_select(module, "dispatch_cause", "valid_trap", "selected_cause", "zero_xlen")).to_equal(true)
+        expect(has_select(module, "dispatch_tval", "valid_trap", "selected_tval", "zero_xlen")).to_equal(true)
+
+    it "does not leak an invalid trap request into the normalized payload":
+        val module = strict_riscv_scalar_trap_projection_hwir(
+            "trap_invalid", CoreConfig.rv64()).ok().unwrap()
+        val result = prepare_strict_comb_hwir(module).unwrap().evaluate(
+            trap_inputs(0, 1, 1, 1, 1)).unwrap()
+        expect(result.value_of("dispatch_valid").unwrap()).to_equal(0)
+        expect(result.value_of("dispatch_trap").unwrap()).to_equal(0)
+        expect(result.value_of("dispatch_interrupt").unwrap()).to_equal(0)
+        expect(result.value_of("dispatch_cause").unwrap()).to_equal(0)
+        expect(result.value_of("dispatch_tval").unwrap()).to_equal(0)
+        expect(result.value_of("dispatch_rd_write").unwrap()).to_equal(0)
+        expect(result.value_of("dispatch_memory_write_mask").unwrap()).to_equal(0)
+
+    it "executes memory over execute over illegal and suppresses interrupt":
+        val module = strict_riscv_scalar_trap_projection_hwir(
+            "trap_priority_eval", CoreConfig.rv32()).ok().unwrap()
+        val prepared = prepare_strict_comb_hwir(module).unwrap()
+        val memory = prepared.evaluate(trap_inputs(1, 1, 1, 1, 1)).unwrap()
+        expect(memory.value_of("dispatch_cause").unwrap()).to_equal(7)
+        expect(memory.value_of("dispatch_tval").unwrap()).to_equal(0xA7)
+        expect(memory.value_of("dispatch_interrupt").unwrap()).to_equal(0)
+        val execute = prepared.evaluate(trap_inputs(1, 1, 1, 0, 1)).unwrap()
+        expect(execute.value_of("dispatch_cause").unwrap()).to_equal(5)
+        expect(execute.value_of("dispatch_tval").unwrap()).to_equal(0xE5)
+        val illegal = prepared.evaluate(trap_inputs(1, 1, 0, 0, 1)).unwrap()
+        expect(illegal.value_of("dispatch_cause").unwrap()).to_equal(2)
+        expect(illegal.value_of("dispatch_tval").unwrap()).to_equal(0xFFFFFFFF)
+
+    it "rejects an empty stable identity":
+        val result = strict_riscv_scalar_trap_projection_hwir("", CoreConfig.rv32())
+        expect(result.err().unwrap()).to_contain("HWIR-E-RISCV-TRAP-PROJECTION-ID")

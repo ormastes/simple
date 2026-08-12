@@ -1,0 +1,47 @@
+use std.spec.*
+use compiler.mir.hwir.types.{HwResourceBinding}
+use compiler.mir_opt.hwir_opt.{HwirRiscvScalarBindingPlan, hwir_riscv_scalar_binding_plan}
+use lib.hardware.riscv_common.isa.scalar_database.{riscv_scalar_elaborate_provider}
+
+describe "RISC-V scalar HWIR resource-binding plan":
+    it "binds Zmmul multiply rows without materializing divide resources":
+        val selection = riscv_scalar_elaborate_provider("rv64i_zmmul", "dsp").unwrap()
+        val plan = hwir_riscv_scalar_binding_plan(selection, "area").unwrap()
+        expect(plan.diagnostic()).to_equal("")
+        expect(plan.multiply_operation_count).to_equal(5)
+        expect(plan.divide_operation_count).to_equal(0)
+        expect(plan.bindings.len()).to_equal(5)
+        for binding in plan.bindings:
+            expect(binding.resource_kind).to_equal("multiply_dsp")
+            expect(binding.sharing_group).to_equal("multiply_dsp_shared")
+            expect(binding.latency_contract).to_equal("uncommitted")
+            expect(binding.latency_cycles).to_equal(-1)
+            expect(binding.latency_is_committed()).to_equal(false)
+
+    it "binds full M divide and remainder rows only under its fixed provider":
+        val selection = riscv_scalar_elaborate_provider("rv64im", "iterative").unwrap()
+        val plan = hwir_riscv_scalar_binding_plan(selection, "balanced").unwrap()
+        expect(plan.multiply_operation_count).to_equal(5)
+        expect(plan.divide_operation_count).to_equal(8)
+        expect(plan.bindings.len()).to_equal(13)
+        var has_divw = false
+        for binding in plan.bindings:
+            if binding.resource_id == "rv64.m.divw" and binding.resource_kind == "divide_iterative":
+                has_divw = true
+            expect(binding.latency_contract).to_equal("uncommitted")
+            expect(binding.latency_cycles).to_equal(-1)
+        expect(has_divw).to_equal(true)
+
+    it "rejects an unknown target profile before any binding exists":
+        val selection = riscv_scalar_elaborate_provider("rv32i_zmmul", "pipelined").unwrap()
+        expect(hwir_riscv_scalar_binding_plan(selection, "runtime").unwrap_err()).to_equal(
+            "HWIR-E-RISCV-BINDING-PROFILE: scalar binding requires area, balanced, or speed target profile")
+
+    it "rejects an estimated latency in the critical scalar binding boundary":
+        val forged = HwirRiscvScalarBindingPlan(isa_profile: "rv32i_zmmul", xlen: 32,
+            target_profile: "speed", bindings: [HwResourceBinding(resource_id: "rv32.m.mul",
+            resource_kind: "multiply_pipelined", profile: "speed", sharing_group: "",
+            latency_cycles: 1, latency_contract: "estimated")],
+            multiply_operation_count: 1, divide_operation_count: 0)
+        expect(forged.diagnostic()).to_equal(
+            "HWIR-E-RISCV-BINDING-IDENTITY: scalar bindings require unique ISA IDs and one target profile")

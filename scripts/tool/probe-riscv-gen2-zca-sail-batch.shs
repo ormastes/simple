@@ -1,0 +1,23 @@
+#!/bin/sh
+# Diagnose whether this host can build the independent Sail batch executable.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+checkout=${SAIL_RISCV_CHECKOUT:-"$root/build/oracles/sail-riscv-a33475a"}
+revision=a33475aeb80090127433b5a8b30e717edaa19e71
+
+fail() { echo "BLOCKED: $*" >&2; exit 1; }
+
+[ -d "$checkout/.git" ] || fail "SAIL-CHECKOUT-MISSING: run acquire-riscv-gen2-zca-oracle.shs"
+[ "$(git -C "$checkout" rev-parse HEAD)" = "$revision" ] || fail "SAIL-REVISION-MISMATCH: pinned checkout is not at $revision"
+command -v sail >/dev/null 2>&1 || fail "SAIL-COMPILER-MISSING: Sail >=0.20.1 is required to compile an independent batch overlay"
+
+version_output=$(sail --version 2>&1) || fail "SAIL-COMPILER-BROKEN: sail --version failed"
+version=$(printf '%s\n' "$version_output" | sed -n '1p')
+number=$(printf '%s\n' "$version" | sed -n 's/[^0-9]*\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p')
+printf '%s\n' "$number" | awk -F. '
+    NF == 3 { exit !(($1 > 0) || ($1 == 0 && (($2 > 20) || ($2 == 20 && $3 >= 1)))) }
+    { exit 1 }
+' || fail "SAIL-COMPILER-TOO-OLD: found $version; require >=0.20.1"
+
+fail "SAIL-BATCH-API-MISSING: the pinned build preserves emulator/RVFI entry points but no reviewed ext_decode_compressed/ExecuteAs/encdec batch API or executable receipt exists"

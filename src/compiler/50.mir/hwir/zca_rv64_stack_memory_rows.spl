@@ -1,0 +1,194 @@
+# RV64-only stack-relative doubleword Zca rows and explicit outcomes.
+
+use compiler.mir.hwir.types.{CoreConfig, HwClockDomain, HwCombOp, HwCompareOp, HwConstant, HwCostModel, HwModule, HwModuleDef, HwNodeId, HwOrigin, HwPort, HwSelectOp, HwSignal}
+use compiler.mir.hwir.predecode.{strict_riscv_predecode_interface}
+use compiler.mir.hwir.frontend.{strict_frontend_data_row_fragment}
+
+fn require_rv64_stack_row(module_name: text, config: CoreConfig) -> Result<(), text>:
+    if module_name == "": return Err("HWIR-E-MODULE-ID: RV64 stack-memory row requires a module name")
+    val diagnostic = config.diagnostic()
+    if diagnostic != "": return Err(diagnostic)
+    if config.compressed_decode_profile != "zca-common-critical":
+        return Err("HWIR-E-COMPRESSED-PROFILE: RV64 stack-memory row requires zca-common-critical profile")
+    if config.xlen != 64:
+        return Err("HWIR-E-ZCA-RV64: C.LDSP/C.SDSP require a concrete RV64 mission-critical product")
+    Ok(())
+
+pub fn strict_zca_ldsp_rv64_row_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    """Build C.LDSP with uimm[8:6|5|4:3]=inst[4:2|12|6:5]."""
+    require_rv64_stack_row(module_name, config)?
+    val signals = [HwSignal.comb("parcel16", "Bits", 32), HwSignal.comb("opcode_tag", "Bits", 32),
+        HwSignal.comb("is_c_ldsp", "Bits", 1), HwSignal.comb("rd_shifted", "Bits", 32),
+        HwSignal.comb("rd", "Bits", 32), HwSignal.comb("rd_is_zero", "Bits", 1),
+        HwSignal.comb("imm_8_6_shifted", "Bits", 32), HwSignal.comb("imm_8_6_raw", "Bits", 32), HwSignal.comb("imm_8_6", "Bits", 32),
+        HwSignal.comb("imm_5_shifted", "Bits", 32), HwSignal.comb("imm_5_raw", "Bits", 32), HwSignal.comb("imm_5", "Bits", 32),
+        HwSignal.comb("imm_4_3_shifted", "Bits", 32), HwSignal.comb("imm_4_3_raw", "Bits", 32), HwSignal.comb("imm_4_3", "Bits", 32),
+        HwSignal.comb("imm_upper", "Bits", 32), HwSignal.comb("immediate", "Bits", 32),
+        HwSignal.comb("imm_field", "Bits", 32), HwSignal.comb("rd_field", "Bits", 32),
+        HwSignal.comb("instruction_partial", "Bits", 32), HwSignal.comb("instruction_with_rd", "Bits", 32),
+        HwSignal.comb("instruction_with_funct3", "Bits", 32), HwSignal.comb("ld_instruction", "Bits", 32),
+        HwSignal.comb("legal_instruction", "Bits", 32)]
+    val constants = [HwConstant.bits("low16", 32, 65535), HwConstant.bits("tag_mask", 32, 57347),
+        HwConstant.bits("ldsp_tag", 32, 24578), HwConstant.bits("shr7", 32, 7),
+        HwConstant.bits("reg_mask", 32, 31), HwConstant.bits("shr2", 32, 2),
+        HwConstant.bits("three_mask", 32, 7), HwConstant.bits("shl6", 32, 6),
+        HwConstant.bits("shr12", 32, 12), HwConstant.bits("one_mask", 32, 1),
+        HwConstant.bits("shl5", 32, 5), HwConstant.bits("shr5", 32, 5),
+        HwConstant.bits("two_mask", 32, 3), HwConstant.bits("shl3", 32, 3),
+        HwConstant.bits("shl20", 32, 20), HwConstant.bits("shl7", 32, 7),
+        HwConstant.bits("sp_rs1", 32, 65536), HwConstant.bits("ld_funct3", 32, 12288),
+        HwConstant.bits("ld_opcode", 32, 3), HwConstant.bits("zero", 32, 0)]
+    val ops = [HwCombOp.binary("and", "parcel16", "parcel", "low16", 32),
+        HwCombOp.binary("and", "opcode_tag", "parcel16", "tag_mask", 32),
+        HwCombOp.binary("shr", "rd_shifted", "parcel16", "shr7", 32),
+        HwCombOp.binary("and", "rd", "rd_shifted", "reg_mask", 32),
+        HwCombOp.binary("shr", "imm_8_6_shifted", "parcel16", "shr2", 32),
+        HwCombOp.binary("and", "imm_8_6_raw", "imm_8_6_shifted", "three_mask", 32),
+        HwCombOp.binary("shl", "imm_8_6", "imm_8_6_raw", "shl6", 32),
+        HwCombOp.binary("shr", "imm_5_shifted", "parcel16", "shr12", 32),
+        HwCombOp.binary("and", "imm_5_raw", "imm_5_shifted", "one_mask", 32),
+        HwCombOp.binary("shl", "imm_5", "imm_5_raw", "shl5", 32),
+        HwCombOp.binary("shr", "imm_4_3_shifted", "parcel16", "shr5", 32),
+        HwCombOp.binary("and", "imm_4_3_raw", "imm_4_3_shifted", "two_mask", 32),
+        HwCombOp.binary("shl", "imm_4_3", "imm_4_3_raw", "shl3", 32),
+        HwCombOp.binary("or", "imm_upper", "imm_8_6", "imm_5", 32),
+        HwCombOp.binary("or", "immediate", "imm_upper", "imm_4_3", 32),
+        HwCombOp.binary("shl", "imm_field", "immediate", "shl20", 32),
+        HwCombOp.binary("shl", "rd_field", "rd", "shl7", 32),
+        HwCombOp.binary("or", "instruction_partial", "imm_field", "sp_rs1", 32),
+        HwCombOp.binary("or", "instruction_with_rd", "instruction_partial", "rd_field", 32),
+        HwCombOp.binary("or", "instruction_with_funct3", "instruction_with_rd", "ld_funct3", 32),
+        HwCombOp.binary("or", "ld_instruction", "instruction_with_funct3", "ld_opcode", 32)]
+    val compares = [HwCompareOp.equal("is_c_ldsp", "opcode_tag", "ldsp_tag", 32),
+        HwCompareOp.equal("rd_is_zero", "rd", "zero", 32)]
+    val selects = [HwSelectOp.mux("legal_instruction", "rd_is_zero", "zero", "ld_instruction", 32),
+        HwSelectOp.mux("canonical_instruction", "is_c_ldsp", "legal_instruction", "zero", 32)]
+    val summary = HwModule(name: module_name, profile: config.profile, port_count: 2,
+        signal_count: signals.len(), register_count: 0, memory_count: 0,
+        comb_op_count: ops.len() + compares.len() + selects.len(), clock_domain_count: 1,
+        fallback_function: "", cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config, node_id: HwNodeId.module_root(module_name),
+        origins: [HwOrigin(node_id: HwNodeId.child(module_name, "row"), source_name: "zca.rv64.c.ldsp")],
+        ports: [HwPort.input("parcel", "Bits", 32), HwPort.output("canonical_instruction", "Bits", 32)],
+        signals: signals, constants: constants, comb_ops: ops, compare_ops: compares,
+        select_ops: selects, clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "": return Err(diagnostic)
+    Ok(module)
+
+pub fn strict_zca_sdsp_rv64_row_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    """Build C.SDSP with uimm[8:6|5:3]=inst[9:7|12:10]."""
+    require_rv64_stack_row(module_name, config)?
+    val signals = [HwSignal.comb("parcel16", "Bits", 32), HwSignal.comb("opcode_tag", "Bits", 32),
+        HwSignal.comb("is_c_sdsp", "Bits", 1), HwSignal.comb("rs2_shifted", "Bits", 32),
+        HwSignal.comb("rs2", "Bits", 32), HwSignal.comb("imm_8_6_shifted", "Bits", 32),
+        HwSignal.comb("imm_8_6_raw", "Bits", 32), HwSignal.comb("imm_8_6", "Bits", 32),
+        HwSignal.comb("imm_5_3_shifted", "Bits", 32), HwSignal.comb("imm_5_3_raw", "Bits", 32),
+        HwSignal.comb("imm_5_3", "Bits", 32), HwSignal.comb("immediate", "Bits", 32),
+        HwSignal.comb("imm_upper", "Bits", 32), HwSignal.comb("imm_low", "Bits", 32),
+        HwSignal.comb("imm_upper_field", "Bits", 32), HwSignal.comb("imm_low_field", "Bits", 32),
+        HwSignal.comb("rs2_field", "Bits", 32), HwSignal.comb("instruction_partial", "Bits", 32),
+        HwSignal.comb("instruction_with_rs1", "Bits", 32), HwSignal.comb("instruction_with_imm", "Bits", 32),
+        HwSignal.comb("instruction_with_funct3", "Bits", 32), HwSignal.comb("sd_instruction", "Bits", 32)]
+    val constants = [HwConstant.bits("low16", 32, 65535), HwConstant.bits("tag_mask", 32, 57347),
+        HwConstant.bits("sdsp_tag", 32, 57346), HwConstant.bits("shr2", 32, 2),
+        HwConstant.bits("reg_mask", 32, 31), HwConstant.bits("shr7", 32, 7),
+        HwConstant.bits("three_mask", 32, 7), HwConstant.bits("shl6", 32, 6),
+        HwConstant.bits("shr10", 32, 10), HwConstant.bits("shl3", 32, 3),
+        HwConstant.bits("shr5", 32, 5), HwConstant.bits("low5_mask", 32, 31),
+        HwConstant.bits("shl25", 32, 25), HwConstant.bits("shl7", 32, 7),
+        HwConstant.bits("shl20", 32, 20), HwConstant.bits("sp_rs1", 32, 65536),
+        HwConstant.bits("sd_funct3", 32, 12288), HwConstant.bits("sd_opcode", 32, 35),
+        HwConstant.bits("zero", 32, 0)]
+    val ops = [HwCombOp.binary("and", "parcel16", "parcel", "low16", 32),
+        HwCombOp.binary("and", "opcode_tag", "parcel16", "tag_mask", 32),
+        HwCombOp.binary("shr", "rs2_shifted", "parcel16", "shr2", 32),
+        HwCombOp.binary("and", "rs2", "rs2_shifted", "reg_mask", 32),
+        HwCombOp.binary("shr", "imm_8_6_shifted", "parcel16", "shr7", 32),
+        HwCombOp.binary("and", "imm_8_6_raw", "imm_8_6_shifted", "three_mask", 32),
+        HwCombOp.binary("shl", "imm_8_6", "imm_8_6_raw", "shl6", 32),
+        HwCombOp.binary("shr", "imm_5_3_shifted", "parcel16", "shr10", 32),
+        HwCombOp.binary("and", "imm_5_3_raw", "imm_5_3_shifted", "three_mask", 32),
+        HwCombOp.binary("shl", "imm_5_3", "imm_5_3_raw", "shl3", 32),
+        HwCombOp.binary("or", "immediate", "imm_8_6", "imm_5_3", 32),
+        HwCombOp.binary("shr", "imm_upper", "immediate", "shr5", 32),
+        HwCombOp.binary("and", "imm_low", "immediate", "low5_mask", 32),
+        HwCombOp.binary("shl", "imm_upper_field", "imm_upper", "shl25", 32),
+        HwCombOp.binary("shl", "imm_low_field", "imm_low", "shl7", 32),
+        HwCombOp.binary("shl", "rs2_field", "rs2", "shl20", 32),
+        HwCombOp.binary("or", "instruction_partial", "imm_upper_field", "rs2_field", 32),
+        HwCombOp.binary("or", "instruction_with_rs1", "instruction_partial", "sp_rs1", 32),
+        HwCombOp.binary("or", "instruction_with_imm", "instruction_with_rs1", "imm_low_field", 32),
+        HwCombOp.binary("or", "instruction_with_funct3", "instruction_with_imm", "sd_funct3", 32),
+        HwCombOp.binary("or", "sd_instruction", "instruction_with_funct3", "sd_opcode", 32)]
+    val compares = [HwCompareOp.equal("is_c_sdsp", "opcode_tag", "sdsp_tag", 32)]
+    val selects = [HwSelectOp.mux("canonical_instruction", "is_c_sdsp", "sd_instruction", "zero", 32)]
+    val summary = HwModule(name: module_name, profile: config.profile, port_count: 2,
+        signal_count: signals.len(), register_count: 0, memory_count: 0,
+        comb_op_count: ops.len() + compares.len() + selects.len(), clock_domain_count: 1,
+        fallback_function: "", cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config, node_id: HwNodeId.module_root(module_name),
+        origins: [HwOrigin(node_id: HwNodeId.child(module_name, "row"), source_name: "zca.rv64.c.sdsp")],
+        ports: [HwPort.input("parcel", "Bits", 32), HwPort.output("canonical_instruction", "Bits", 32)],
+        signals: signals, constants: constants, comb_ops: ops, compare_ops: compares,
+        select_ops: selects, clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "": return Err(diagnostic)
+    Ok(module)
+
+fn strict_stack_memory_outcome(module_name: text, config: CoreConfig, prefix: text,
+    source_name: text, row: HwModuleDef, classifier: text, reserved: text,
+    memory_read: bool) -> Result<HwModuleDef, text>:
+    val contract = strict_riscv_predecode_interface(config)?
+    val fragment = strict_frontend_data_row_fragment(module_name, prefix, row, "parcel32")?
+    val pa = config.physical_address_bits
+    var signals: [HwSignal] = [HwSignal.comb("parcel32", "Bits", 32), HwSignal.comb("fallthrough_pc", "Bits", pa),
+        HwSignal.comb("legal_nonreserved", "Bits", 1), HwSignal.comb("match_legal", "Bits", 1),
+        HwSignal.comb("effect_register_write", "Bits", 1), HwSignal.comb("effect_memory_read", "Bits", 1),
+        HwSignal.comb("effect_memory_write", "Bits", 1), HwSignal.comb("control_fallthrough", "Bits", 1)]
+    for signal in fragment.signals: signals.push(signal)
+    var constants: [HwConstant] = [HwConstant.bits("two_bytes", pa, 2), HwConstant.bits("two_length", 2, 2),
+        HwConstant.bits("zero_flag", 1, 0), HwConstant.bits("one_flag", 1, 1),
+        HwConstant.bits("read_value", 1, if memory_read: 1 else: 0),
+        HwConstant.bits("write_value", 1, if memory_read: 0 else: 1)]
+    for constant in fragment.constants: constants.push(constant)
+    var ops: [HwCombOp] = [HwCombOp.unary("zext", "parcel32", "original_parcel", 32),
+        HwCombOp.binary("add", "fallthrough_pc", "fetch_pc", "two_bytes", pa),
+        HwCombOp.unary("passthrough", "canonical_instruction", prefix + "_canonical_instruction", 32),
+        HwCombOp.unary("passthrough", "original_length_bytes", "two_length", 2),
+        HwCombOp.unary("passthrough", "next_pc", "fallthrough_pc", pa),
+        HwCombOp.unary("passthrough", "redirect_valid", "zero_flag", 1),
+        HwCombOp.unary("passthrough", "redirect_target", "fetch_pc", pa),
+        HwCombOp.unary("passthrough", "legal", "match_legal", 1),
+        HwCombOp.binary("and", "effect_register_write", "match_legal", "read_value", 1),
+        HwCombOp.binary("and", "effect_memory_read", "match_legal", "read_value", 1),
+        HwCombOp.binary("and", "effect_memory_write", "match_legal", "write_value", 1),
+        HwCombOp.unary("passthrough", "control_fallthrough", "one_flag", 1)]
+    for op in fragment.comb_ops: ops.push(op)
+    var selects = fragment.select_ops
+    if reserved == "":
+        selects.push(HwSelectOp.mux("match_legal", prefix + "_" + classifier, "one_flag", "zero_flag", 1))
+    else:
+        selects.push(HwSelectOp.mux("legal_nonreserved", prefix + "_" + reserved, "zero_flag", "one_flag", 1))
+        selects.push(HwSelectOp.mux("match_legal", prefix + "_" + classifier, "legal_nonreserved", "zero_flag", 1))
+    var origins = fragment.origins
+    origins.push(HwOrigin(node_id: HwNodeId.child(module_name, "outcome"), source_name: source_name + ".outcome"))
+    val summary = HwModule(name: module_name, profile: config.profile, port_count: contract.ports().len(),
+        signal_count: signals.len(), register_count: 0, memory_count: 0,
+        comb_op_count: ops.len() + fragment.compare_ops.len() + selects.len(), clock_domain_count: 1,
+        fallback_function: "", cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config, node_id: HwNodeId.module_root(module_name),
+        origins: origins, ports: contract.ports(), signals: signals, constants: constants,
+        comb_ops: ops, compare_ops: fragment.compare_ops, select_ops: selects,
+        clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "": return Err(diagnostic)
+    Ok(module)
+
+pub fn strict_zca_ldsp_rv64_outcome_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    strict_stack_memory_outcome(module_name, config, "ldsp64", "zca.rv64.c.ldsp",
+        strict_zca_ldsp_rv64_row_hwir(module_name + "_row", config)?, "is_c_ldsp", "rd_is_zero", true)
+
+pub fn strict_zca_sdsp_rv64_outcome_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    strict_stack_memory_outcome(module_name, config, "sdsp64", "zca.rv64.c.sdsp",
+        strict_zca_sdsp_rv64_row_hwir(module_name + "_row", config)?, "is_c_sdsp", "", false)

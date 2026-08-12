@@ -1,0 +1,34 @@
+# codex-system-test
+# @req REQ-G2-001 REQ-G2-002 REQ-G2-003 NFR-G2-006
+"""# RISC-V Gen2 scalar control projection
+
+GHDL-analyzes concrete RV32 and RV64 JALR projections when the analyzer is
+installed. This is stateless projection evidence, not processor qualification.
+"""
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.backend.backend.riscv_scalar_control_hwir_to_vhdl.{compile_strict_riscv_scalar_control_projection_product}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_process_run(command: text, args: [text]) -> (text, text, i64)
+
+describe "strict scalar control projection VHDL":
+    it "should analyze concrete RV32 and RV64 JALR bit-clear graphs":
+        val rv32 = compile_strict_riscv_scalar_control_projection_product(
+            "scalar_jalr_projection_rv32", CoreConfig.rv32(), 0xFFF082E7)
+        val rv64 = compile_strict_riscv_scalar_control_projection_product(
+            "scalar_jalr_projection_rv64", CoreConfig.rv64(), 0xFFF082E7)
+        expect(rv32.is_success()).to_equal(true)
+        expect(rv64.is_success()).to_equal(true)
+        expect(rv32.vhdl).to_contain("control_target <= raw_target and target_mask;")
+        expect(rv64.vhdl).to_contain("control_target <= raw_target and target_mask;")
+        val (_version_stdout, _version_stderr, version_code) = rt_process_run("ghdl", ["--version"])
+        if version_code == 0:
+            expect(rt_file_write_text("/tmp/riscv_scalar_control_rv32.vhd", rv32.vhdl)).to_equal(true)
+            expect(rt_file_write_text("/tmp/riscv_scalar_control_rv64.vhd", rv64.vhdl)).to_equal(true)
+            val (_out32, _err32, code32) = rt_process_run("ghdl", ["-a", "--std=08", "/tmp/riscv_scalar_control_rv32.vhd"])
+            val (_out64, _err64, code64) = rt_process_run("ghdl", ["-a", "--std=08", "/tmp/riscv_scalar_control_rv64.vhd"])
+            expect(code32).to_equal(0)
+            expect(code64).to_equal(0)
+        else:
+            expect(version_code != 0).to_equal(true)

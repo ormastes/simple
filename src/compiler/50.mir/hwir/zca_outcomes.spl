@@ -7,10 +7,12 @@
 use compiler.mir.hwir.types.{CoreConfig, HwClockDomain, HwCombOp, HwConstant, HwCostModel, HwModule, HwModuleDef, HwNodeId, HwOrigin, HwSelectOp, HwSignal}
 use compiler.mir.hwir.predecode.{strict_riscv_predecode_interface}
 use compiler.mir.hwir.zca_rows.{strict_zca_addi4spn_row_hwir, strict_zca_lw_row_hwir, strict_zca_sw_row_hwir, strict_zca_lwsp_row_hwir, strict_zca_swsp_row_hwir, strict_zca_cli_row_hwir, strict_zca_caddi_row_hwir, strict_zca_caddi16sp_row_hwir, strict_zca_clui_row_hwir, strict_zca_slli_low_row_hwir, strict_zca_srli_low_row_hwir, strict_zca_srai_low_row_hwir, strict_zca_candi_row_hwir, strict_zca_csub_row_hwir, strict_zca_cxor_row_hwir, strict_zca_cor_row_hwir, strict_zca_cand_row_hwir, strict_zca_cmv_row_hwir, strict_zca_cadd_row_hwir}
+use compiler.mir.hwir.zca_rv64_rows.{strict_zca_caddw_rv64_row_hwir, strict_zca_csubw_rv64_row_hwir, strict_zca_slli6_rv64_row_hwir, strict_zca_srli6_rv64_row_hwir, strict_zca_srai6_rv64_row_hwir}
 use compiler.mir.hwir.frontend.{strict_frontend_data_row_fragment}
 
 fn strict_zca_tagged_data_outcome_hwir(module_name: text, config: CoreConfig,
-    prefix: text, source_name: text, row: HwModuleDef, classifier_name: text) -> Result<HwModuleDef, text>:
+    prefix: text, source_name: text, row: HwModuleDef, classifier_name: text,
+    effect_kind: text) -> Result<HwModuleDef, text>:
     """Normalize a row whose tag classifier is its complete legality rule.
 
     This helper is intentionally not available to rows with reserved encodings,
@@ -20,15 +22,25 @@ fn strict_zca_tagged_data_outcome_hwir(module_name: text, config: CoreConfig,
     """
     if module_name == "":
         return Err("HWIR-E-ZCA-OUTCOME-ID: normalized row outcome requires a module name")
+    if effect_kind != "register-write" and effect_kind != "memory-read" and effect_kind != "memory-write":
+        return Err("HWIR-E-ZCA-OUTCOME-EFFECT: normal outcome requires an explicit supported effect kind")
     val contract = strict_riscv_predecode_interface(config)?
     val fragment = strict_frontend_data_row_fragment(module_name, prefix, row, "parcel32")?
     val pa = config.physical_address_bits
     var signals: [HwSignal] = [HwSignal.comb("parcel32", "Bits", 32),
-        HwSignal.comb("fallthrough_pc", "Bits", pa)]
+        HwSignal.comb("fallthrough_pc", "Bits", pa), HwSignal.comb("match_legal", "Bits", 1),
+        HwSignal.comb("effect_register_write", "Bits", 1), HwSignal.comb("effect_memory_read", "Bits", 1),
+        HwSignal.comb("effect_memory_write", "Bits", 1), HwSignal.comb("control_fallthrough", "Bits", 1)]
     for signal in fragment.signals: signals.push(signal)
     var constants: [HwConstant] = [HwConstant.bits("two_bytes", pa, 2),
         HwConstant.bits("two_length", 2, 2), HwConstant.bits("zero_flag", 1, 0),
-        HwConstant.bits("one_flag", 1, 1)]
+        HwConstant.bits("one_flag", 1, 1),
+        # A load has two inseparable architectural effects: memory read and
+        # destination-register writeback. Both remain gated by match_legal.
+        HwConstant.bits("effect_register_write_value", 1,
+            if effect_kind == "register-write" or effect_kind == "memory-read": 1 else: 0),
+        HwConstant.bits("effect_memory_read_value", 1, if effect_kind == "memory-read": 1 else: 0),
+        HwConstant.bits("effect_memory_write_value", 1, if effect_kind == "memory-write": 1 else: 0)]
     for constant in fragment.constants: constants.push(constant)
     var comb_ops: [HwCombOp] = [HwCombOp.unary("zext", "parcel32", "original_parcel", 32),
         HwCombOp.binary("add", "fallthrough_pc", "fetch_pc", "two_bytes", pa),
@@ -36,11 +48,16 @@ fn strict_zca_tagged_data_outcome_hwir(module_name: text, config: CoreConfig,
         HwCombOp.unary("passthrough", "original_length_bytes", "two_length", 2),
         HwCombOp.unary("passthrough", "next_pc", "fallthrough_pc", pa),
         HwCombOp.unary("passthrough", "redirect_valid", "zero_flag", 1),
-        HwCombOp.unary("passthrough", "redirect_target", "fetch_pc", pa)]
+        HwCombOp.unary("passthrough", "redirect_target", "fetch_pc", pa),
+        HwCombOp.unary("passthrough", "legal", "match_legal", 1),
+        HwCombOp.binary("and", "effect_register_write", "match_legal", "effect_register_write_value", 1),
+        HwCombOp.binary("and", "effect_memory_read", "match_legal", "effect_memory_read_value", 1),
+        HwCombOp.binary("and", "effect_memory_write", "match_legal", "effect_memory_write_value", 1),
+        HwCombOp.unary("passthrough", "control_fallthrough", "one_flag", 1)]
     for op in fragment.comb_ops: comb_ops.push(op)
     var compare_ops = fragment.compare_ops
     var select_ops = fragment.select_ops
-    select_ops.push(HwSelectOp.mux("legal", prefix + "_" + classifier_name, "one_flag", "zero_flag", 1))
+    select_ops.push(HwSelectOp.mux("match_legal", prefix + "_" + classifier_name, "one_flag", "zero_flag", 1))
     var origins: [HwOrigin] = [HwOrigin(node_id: HwNodeId.child(module_name, "outcome"), source_name: source_name + ".outcome")]
     for origin in fragment.origins: origins.push(origin)
     val summary = HwModule(name: module_name, profile: config.profile,
@@ -59,7 +76,7 @@ fn strict_zca_tagged_data_outcome_hwir(module_name: text, config: CoreConfig,
 
 fn strict_zca_reserved_data_outcome_hwir(module_name: text, config: CoreConfig,
     prefix: text, source_name: text, row: HwModuleDef, classifier_name: text,
-    reserved_conditions: [text]) -> Result<HwModuleDef, text>:
+    reserved_conditions: [text], effect_kind: text) -> Result<HwModuleDef, text>:
     """Normalize a data row with explicit true-means-reserved conditions.
 
     Each condition is produced by the preserved row graph. The legality chain
@@ -71,15 +88,24 @@ fn strict_zca_reserved_data_outcome_hwir(module_name: text, config: CoreConfig,
         return Err("HWIR-E-ZCA-OUTCOME-RESERVED: reserved outcome requires at least one explicit reserved predicate")
     if module_name == "":
         return Err("HWIR-E-ZCA-OUTCOME-ID: normalized row outcome requires a module name")
+    if effect_kind != "register-write" and effect_kind != "memory-read" and effect_kind != "memory-write":
+        return Err("HWIR-E-ZCA-OUTCOME-EFFECT: normal outcome requires an explicit supported effect kind")
     val contract = strict_riscv_predecode_interface(config)?
     val fragment = strict_frontend_data_row_fragment(module_name, prefix, row, "parcel32")?
     val pa = config.physical_address_bits
     var signals: [HwSignal] = [HwSignal.comb("parcel32", "Bits", 32),
-        HwSignal.comb("fallthrough_pc", "Bits", pa)]
+        HwSignal.comb("fallthrough_pc", "Bits", pa), HwSignal.comb("match_legal", "Bits", 1),
+        HwSignal.comb("effect_register_write", "Bits", 1), HwSignal.comb("effect_memory_read", "Bits", 1),
+        HwSignal.comb("effect_memory_write", "Bits", 1), HwSignal.comb("control_fallthrough", "Bits", 1)]
     for signal in fragment.signals: signals.push(signal)
     var constants: [HwConstant] = [HwConstant.bits("two_bytes", pa, 2),
         HwConstant.bits("two_length", 2, 2), HwConstant.bits("zero_flag", 1, 0),
-        HwConstant.bits("one_flag", 1, 1)]
+        HwConstant.bits("one_flag", 1, 1),
+        # Reserved load encodings must suppress both the read and its writeback.
+        HwConstant.bits("effect_register_write_value", 1,
+            if effect_kind == "register-write" or effect_kind == "memory-read": 1 else: 0),
+        HwConstant.bits("effect_memory_read_value", 1, if effect_kind == "memory-read": 1 else: 0),
+        HwConstant.bits("effect_memory_write_value", 1, if effect_kind == "memory-write": 1 else: 0)]
     for constant in fragment.constants: constants.push(constant)
     var comb_ops: [HwCombOp] = [HwCombOp.unary("zext", "parcel32", "original_parcel", 32),
         HwCombOp.binary("add", "fallthrough_pc", "fetch_pc", "two_bytes", pa),
@@ -87,7 +113,12 @@ fn strict_zca_reserved_data_outcome_hwir(module_name: text, config: CoreConfig,
         HwCombOp.unary("passthrough", "original_length_bytes", "two_length", 2),
         HwCombOp.unary("passthrough", "next_pc", "fallthrough_pc", pa),
         HwCombOp.unary("passthrough", "redirect_valid", "zero_flag", 1),
-        HwCombOp.unary("passthrough", "redirect_target", "fetch_pc", pa)]
+        HwCombOp.unary("passthrough", "redirect_target", "fetch_pc", pa),
+        HwCombOp.unary("passthrough", "legal", "match_legal", 1),
+        HwCombOp.binary("and", "effect_register_write", "match_legal", "effect_register_write_value", 1),
+        HwCombOp.binary("and", "effect_memory_read", "match_legal", "effect_memory_read_value", 1),
+        HwCombOp.binary("and", "effect_memory_write", "match_legal", "effect_memory_write_value", 1),
+        HwCombOp.unary("passthrough", "control_fallthrough", "one_flag", 1)]
     for op in fragment.comb_ops: comb_ops.push(op)
     var compare_ops = fragment.compare_ops
     var select_ops = fragment.select_ops
@@ -99,7 +130,7 @@ fn strict_zca_reserved_data_outcome_hwir(module_name: text, config: CoreConfig,
         select_ops.push(HwSelectOp.mux(legal_name, prefix + "_" + reserved, "zero_flag", prior, 1))
         prior = legal_name
         index = index + 1
-    select_ops.push(HwSelectOp.mux("legal", prefix + "_" + classifier_name, prior, "zero_flag", 1))
+    select_ops.push(HwSelectOp.mux("match_legal", prefix + "_" + classifier_name, prior, "zero_flag", 1))
     var origins: [HwOrigin] = [HwOrigin(node_id: HwNodeId.child(module_name, "outcome"), source_name: source_name + ".outcome")]
     for origin in fragment.origins: origins.push(origin)
     val summary = HwModule(name: module_name, profile: config.profile,
@@ -130,7 +161,9 @@ pub fn strict_zca_addi4spn_outcome_hwir(module_name: text, config: CoreConfig) -
     val pa = config.physical_address_bits
     var signals: [HwSignal] = [HwSignal.comb("parcel32", "Bits", 32),
         HwSignal.comb("fallthrough_pc", "Bits", pa),
-        HwSignal.comb("legal_nonreserved", "Bits", 1)]
+        HwSignal.comb("legal_nonreserved", "Bits", 1), HwSignal.comb("match_legal", "Bits", 1),
+        HwSignal.comb("effect_register_write", "Bits", 1), HwSignal.comb("effect_memory_read", "Bits", 1),
+        HwSignal.comb("effect_memory_write", "Bits", 1), HwSignal.comb("control_fallthrough", "Bits", 1)]
     for signal in fragment.signals: signals.push(signal)
     var constants: [HwConstant] = [HwConstant.bits("two_bytes", pa, 2),
         HwConstant.bits("two_length", 2, 2), HwConstant.bits("zero_flag", 1, 0),
@@ -142,13 +175,18 @@ pub fn strict_zca_addi4spn_outcome_hwir(module_name: text, config: CoreConfig) -
         HwCombOp.unary("passthrough", "original_length_bytes", "two_length", 2),
         HwCombOp.unary("passthrough", "next_pc", "fallthrough_pc", pa),
         HwCombOp.unary("passthrough", "redirect_valid", "zero_flag", 1),
-        HwCombOp.unary("passthrough", "redirect_target", "fetch_pc", pa)]
+        HwCombOp.unary("passthrough", "redirect_target", "fetch_pc", pa),
+        HwCombOp.unary("passthrough", "legal", "match_legal", 1),
+        HwCombOp.unary("passthrough", "effect_register_write", "match_legal", 1),
+        HwCombOp.unary("passthrough", "effect_memory_read", "zero_flag", 1),
+        HwCombOp.unary("passthrough", "effect_memory_write", "zero_flag", 1),
+        HwCombOp.unary("passthrough", "control_fallthrough", "one_flag", 1)]
     for op in fragment.comb_ops: comb_ops.push(op)
     var compare_ops = fragment.compare_ops
     var select_ops: [HwSelectOp] = []
     for op in fragment.select_ops: select_ops.push(op)
     select_ops.push(HwSelectOp.mux("legal_nonreserved", "addi4spn_immediate_is_zero", "zero_flag", "one_flag", 1))
-    select_ops.push(HwSelectOp.mux("legal", "addi4spn_is_c_addi4spn", "legal_nonreserved", "zero_flag", 1))
+    select_ops.push(HwSelectOp.mux("match_legal", "addi4spn_is_c_addi4spn", "legal_nonreserved", "zero_flag", 1))
     var origins: [HwOrigin] = [HwOrigin(node_id: HwNodeId.child(module_name, "outcome"), source_name: "zca.c.addi4spn.outcome")]
     for origin in fragment.origins: origins.push(origin)
     val summary = HwModule(name: module_name, profile: config.profile,
@@ -168,24 +206,24 @@ pub fn strict_zca_addi4spn_outcome_hwir(module_name: text, config: CoreConfig) -
 pub fn strict_zca_lw_outcome_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
     """Normalize C.LW using its explicit Q0/funct3 classifier."""
     val row = strict_zca_lw_row_hwir(module_name + "_row", config)?
-    strict_zca_tagged_data_outcome_hwir(module_name, config, "lw", "zca.c.lw", row, "is_c_lw")
+    strict_zca_tagged_data_outcome_hwir(module_name, config, "lw", "zca.c.lw", row, "is_c_lw", "memory-read")
 
 pub fn strict_zca_sw_outcome_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
     """Normalize C.SW using its explicit Q0/funct3 classifier."""
     val row = strict_zca_sw_row_hwir(module_name + "_row", config)?
-    strict_zca_tagged_data_outcome_hwir(module_name, config, "sw", "zca.c.sw", row, "is_c_sw")
+    strict_zca_tagged_data_outcome_hwir(module_name, config, "sw", "zca.c.sw", row, "is_c_sw", "memory-write")
 
 # These rows have complete, disjoint classifiers in the frozen critical Zca
 # subset. Rows with a reserved gate or architectural side effect deliberately
 # do not call this helper.
 pub fn strict_zca_swsp_outcome_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
-    strict_zca_tagged_data_outcome_hwir(module_name, config, "swsp", "zca.c.swsp", strict_zca_swsp_row_hwir(module_name + "_row", config)?, "is_c_swsp")
+    strict_zca_tagged_data_outcome_hwir(module_name, config, "swsp", "zca.c.swsp", strict_zca_swsp_row_hwir(module_name + "_row", config)?, "is_c_swsp", "memory-write")
 
 pub fn strict_zca_cli_outcome_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
-    strict_zca_tagged_data_outcome_hwir(module_name, config, "cli", "zca.c.li", strict_zca_cli_row_hwir(module_name + "_row", config)?, "is_c_li")
+    strict_zca_tagged_data_outcome_hwir(module_name, config, "cli", "zca.c.li", strict_zca_cli_row_hwir(module_name + "_row", config)?, "is_c_li", "register-write")
 
 pub fn strict_zca_caddi_outcome_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
-    strict_zca_tagged_data_outcome_hwir(module_name, config, "caddi", "zca.c.addi", strict_zca_caddi_row_hwir(module_name + "_row", config)?, "is_c_addi")
+    strict_zca_tagged_data_outcome_hwir(module_name, config, "caddi", "zca.c.addi", strict_zca_caddi_row_hwir(module_name + "_row", config)?, "is_c_addi", "register-write")
 
 pub fn strict_zca_caddi16sp_outcome_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
     """Normalize C.ADDI16SP with its positive `rd=x2` eligibility rule.
@@ -204,7 +242,9 @@ pub fn strict_zca_caddi16sp_outcome_hwir(module_name: text, config: CoreConfig) 
     var signals: [HwSignal] = [HwSignal.comb("parcel32", "Bits", 32),
         HwSignal.comb("fallthrough_pc", "Bits", pa),
         HwSignal.comb("legal_positive_rd", "Bits", 1),
-        HwSignal.comb("legal_nonzero_immediate", "Bits", 1)]
+        HwSignal.comb("legal_nonzero_immediate", "Bits", 1), HwSignal.comb("match_legal", "Bits", 1),
+        HwSignal.comb("effect_register_write", "Bits", 1), HwSignal.comb("effect_memory_read", "Bits", 1),
+        HwSignal.comb("effect_memory_write", "Bits", 1), HwSignal.comb("control_fallthrough", "Bits", 1)]
     for signal in fragment.signals: signals.push(signal)
     var constants: [HwConstant] = [HwConstant.bits("two_bytes", pa, 2),
         HwConstant.bits("two_length", 2, 2), HwConstant.bits("zero_flag", 1, 0),
@@ -216,13 +256,18 @@ pub fn strict_zca_caddi16sp_outcome_hwir(module_name: text, config: CoreConfig) 
         HwCombOp.unary("passthrough", "original_length_bytes", "two_length", 2),
         HwCombOp.unary("passthrough", "next_pc", "fallthrough_pc", pa),
         HwCombOp.unary("passthrough", "redirect_valid", "zero_flag", 1),
-        HwCombOp.unary("passthrough", "redirect_target", "fetch_pc", pa)]
+        HwCombOp.unary("passthrough", "redirect_target", "fetch_pc", pa),
+        HwCombOp.unary("passthrough", "legal", "match_legal", 1),
+        HwCombOp.unary("passthrough", "effect_register_write", "match_legal", 1),
+        HwCombOp.unary("passthrough", "effect_memory_read", "zero_flag", 1),
+        HwCombOp.unary("passthrough", "effect_memory_write", "zero_flag", 1),
+        HwCombOp.unary("passthrough", "control_fallthrough", "one_flag", 1)]
     for op in fragment.comb_ops: comb_ops.push(op)
     var compare_ops = fragment.compare_ops
     var select_ops = fragment.select_ops
     select_ops.push(HwSelectOp.mux("legal_positive_rd", "caddi16sp_rd_is_sp", "one_flag", "zero_flag", 1))
     select_ops.push(HwSelectOp.mux("legal_nonzero_immediate", "caddi16sp_imm_is_zero", "zero_flag", "legal_positive_rd", 1))
-    select_ops.push(HwSelectOp.mux("legal", "caddi16sp_is_c_addi16sp", "legal_nonzero_immediate", "zero_flag", 1))
+    select_ops.push(HwSelectOp.mux("match_legal", "caddi16sp_is_c_addi16sp", "legal_nonzero_immediate", "zero_flag", 1))
     var origins: [HwOrigin] = [HwOrigin(node_id: HwNodeId.child(module_name, "outcome"), source_name: "zca.c.addi16sp.outcome")]
     for origin in fragment.origins: origins.push(origin)
     val summary = HwModule(name: module_name, profile: config.profile,
@@ -240,37 +285,52 @@ pub fn strict_zca_caddi16sp_outcome_hwir(module_name: text, config: CoreConfig) 
     Ok(module)
 
 pub fn strict_zca_slli_low_outcome_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
-    strict_zca_tagged_data_outcome_hwir(module_name, config, "slli_low", "zca.c.slli.low", strict_zca_slli_low_row_hwir(module_name + "_row", config)?, "is_c_slli_low")
+    strict_zca_tagged_data_outcome_hwir(module_name, config, "slli_low", "zca.c.slli.low", strict_zca_slli_low_row_hwir(module_name + "_row", config)?, "is_c_slli_low", "register-write")
 
 pub fn strict_zca_srli_low_outcome_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
-    strict_zca_tagged_data_outcome_hwir(module_name, config, "srli_low", "zca.c.srli.low", strict_zca_srli_low_row_hwir(module_name + "_row", config)?, "is_c_srli_low")
+    strict_zca_tagged_data_outcome_hwir(module_name, config, "srli_low", "zca.c.srli.low", strict_zca_srli_low_row_hwir(module_name + "_row", config)?, "is_c_srli_low", "register-write")
 
 pub fn strict_zca_srai_low_outcome_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
-    strict_zca_tagged_data_outcome_hwir(module_name, config, "srai_low", "zca.c.srai.low", strict_zca_srai_low_row_hwir(module_name + "_row", config)?, "is_c_srai_low")
+    strict_zca_tagged_data_outcome_hwir(module_name, config, "srai_low", "zca.c.srai.low", strict_zca_srai_low_row_hwir(module_name + "_row", config)?, "is_c_srai_low", "register-write")
 
 pub fn strict_zca_candi_outcome_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
-    strict_zca_tagged_data_outcome_hwir(module_name, config, "candi", "zca.c.andi", strict_zca_candi_row_hwir(module_name + "_row", config)?, "is_c_andi")
+    strict_zca_tagged_data_outcome_hwir(module_name, config, "candi", "zca.c.andi", strict_zca_candi_row_hwir(module_name + "_row", config)?, "is_c_andi", "register-write")
 
 pub fn strict_zca_csub_outcome_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
-    strict_zca_tagged_data_outcome_hwir(module_name, config, "csub", "zca.c.sub", strict_zca_csub_row_hwir(module_name + "_row", config)?, "is_c_sub")
+    strict_zca_tagged_data_outcome_hwir(module_name, config, "csub", "zca.c.sub", strict_zca_csub_row_hwir(module_name + "_row", config)?, "is_c_sub", "register-write")
 
 pub fn strict_zca_cxor_outcome_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
-    strict_zca_tagged_data_outcome_hwir(module_name, config, "cxor", "zca.c.xor", strict_zca_cxor_row_hwir(module_name + "_row", config)?, "is_c_xor")
+    strict_zca_tagged_data_outcome_hwir(module_name, config, "cxor", "zca.c.xor", strict_zca_cxor_row_hwir(module_name + "_row", config)?, "is_c_xor", "register-write")
 
 pub fn strict_zca_cor_outcome_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
-    strict_zca_tagged_data_outcome_hwir(module_name, config, "cor", "zca.c.or", strict_zca_cor_row_hwir(module_name + "_row", config)?, "is_c_or")
+    strict_zca_tagged_data_outcome_hwir(module_name, config, "cor", "zca.c.or", strict_zca_cor_row_hwir(module_name + "_row", config)?, "is_c_or", "register-write")
 
 pub fn strict_zca_cand_outcome_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
-    strict_zca_tagged_data_outcome_hwir(module_name, config, "cand", "zca.c.and", strict_zca_cand_row_hwir(module_name + "_row", config)?, "is_c_and")
+    strict_zca_tagged_data_outcome_hwir(module_name, config, "cand", "zca.c.and", strict_zca_cand_row_hwir(module_name + "_row", config)?, "is_c_and", "register-write")
 
 pub fn strict_zca_cmv_outcome_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
-    strict_zca_tagged_data_outcome_hwir(module_name, config, "cmv", "zca.c.mv", strict_zca_cmv_row_hwir(module_name + "_row", config)?, "is_c_mv")
+    strict_zca_reserved_data_outcome_hwir(module_name, config, "cmv", "zca.c.mv", strict_zca_cmv_row_hwir(module_name + "_row", config)?, "is_c_mv", ["rs2_is_zero"], "register-write")
 
 pub fn strict_zca_cadd_outcome_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
-    strict_zca_tagged_data_outcome_hwir(module_name, config, "cadd", "zca.c.add", strict_zca_cadd_row_hwir(module_name + "_row", config)?, "is_c_add")
+    strict_zca_reserved_data_outcome_hwir(module_name, config, "cadd", "zca.c.add", strict_zca_cadd_row_hwir(module_name + "_row", config)?, "is_c_add", ["rs2_is_zero"], "register-write")
 
 pub fn strict_zca_lwsp_outcome_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
-    strict_zca_reserved_data_outcome_hwir(module_name, config, "lwsp", "zca.c.lwsp", strict_zca_lwsp_row_hwir(module_name + "_row", config)?, "is_c_lwsp", ["rd_is_zero"])
+    strict_zca_reserved_data_outcome_hwir(module_name, config, "lwsp", "zca.c.lwsp", strict_zca_lwsp_row_hwir(module_name + "_row", config)?, "is_c_lwsp", ["rd_is_zero"], "memory-read")
 
 pub fn strict_zca_clui_outcome_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
-    strict_zca_reserved_data_outcome_hwir(module_name, config, "clui", "zca.c.lui", strict_zca_clui_row_hwir(module_name + "_row", config)?, "is_c_lui", ["rd_is_zero", "rd_is_sp", "imm_is_zero"])
+    strict_zca_reserved_data_outcome_hwir(module_name, config, "clui", "zca.c.lui", strict_zca_clui_row_hwir(module_name + "_row", config)?, "is_c_lui", ["rd_is_zero", "rd_is_sp", "imm_is_zero"], "register-write")
+
+pub fn strict_zca_caddw_rv64_outcome_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    strict_zca_tagged_data_outcome_hwir(module_name, config, "caddw64", "zca.rv64.c.addw", strict_zca_caddw_rv64_row_hwir(module_name + "_row", config)?, "is_c_addw", "register-write")
+
+pub fn strict_zca_csubw_rv64_outcome_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    strict_zca_tagged_data_outcome_hwir(module_name, config, "csubw64", "zca.rv64.c.subw", strict_zca_csubw_rv64_row_hwir(module_name + "_row", config)?, "is_c_subw", "register-write")
+
+pub fn strict_zca_slli6_rv64_outcome_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    strict_zca_tagged_data_outcome_hwir(module_name, config, "slli6", "zca.rv64.c.slli6", strict_zca_slli6_rv64_row_hwir(module_name + "_row", config)?, "is_c_slli6", "register-write")
+
+pub fn strict_zca_srli6_rv64_outcome_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    strict_zca_tagged_data_outcome_hwir(module_name, config, "srli6", "zca.rv64.c.srli6", strict_zca_srli6_rv64_row_hwir(module_name + "_row", config)?, "is_c_srli6", "register-write")
+
+pub fn strict_zca_srai6_rv64_outcome_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    strict_zca_tagged_data_outcome_hwir(module_name, config, "srai6", "zca.rv64.c.srai6", strict_zca_srai6_rv64_row_hwir(module_name + "_row", config)?, "is_c_srai6", "register-write")

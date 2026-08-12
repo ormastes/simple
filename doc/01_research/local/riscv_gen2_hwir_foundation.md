@@ -348,3 +348,22 @@ supported strict seed only. The same scenario suite feeds unsupported Boolean
 XOR under critical policy and asserts nonzero exit with neither VHDL nor
 manifest sidecar, proving that strict failure cannot fall through to legacy
 emission.
+
+## Independent exhaustive compressed-oracle lane (2026-08-12)
+
+The repository contained row-local exhaustive VHDL testbenches but no pinned
+Sail checkout, executable Sail/Spike/RISCOF tool, or independent 65,536-parcel
+RV32/RV64 truth asset. Those row tests are valuable implementation evidence,
+but their expected values are constructed beside the HWIR tests and therefore
+cannot serve as an independent semantic oracle.
+
+The new oracle lane is deliberately outside decoder source. It pins upstream
+`riscv/sail-riscv` tag `0.10` at commit
+`a33475aeb80090127433b5a8b30e717edaa19e71`, checks both a deterministic Git
+archive SHA-256 and the Zca semantic source SHA-256, and defines two ordered TSV
+tables covering parcels `0000` through `FFFF`. The validator refuses absent
+tables, duplicate/missing/reordered parcels, malformed records, digest drift,
+unpinned provenance, generator drift, and fixture-level qualification claims.
+The checked-in manifest intentionally remains `status=absent` because this host
+does not contain an independently reviewed Sail batch adapter. No qualification
+flag is promoted by scaffolding or validator self-tests.

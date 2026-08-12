@@ -1,7 +1,11 @@
 # Versioned effectful compressed-predecode composition for strict RISC-V Gen2.
 
-use compiler.mir.hwir.types.{CoreConfig, HwClockDomain, HwCombOp, HwConstant, HwCostModel, HwModule, HwModuleDef, HwNodeId, HwOrigin, HwSelectOp, HwSignal}
-use compiler.mir.hwir.frontend.{HwFrontendRowFragment, strict_frontend_control_row_fragment, strict_zca_migrating_isa_ids, strict_zca_migrating_predecode_hwir, strict_zca_rv32_cjal_migrating_isa_ids, strict_zca_rv32_cjal_migrating_predecode_hwir, strict_zca_rv64_addiw_migrating_isa_ids, strict_zca_rv64_addiw_migrating_predecode_hwir}
+use compiler.mir.hwir.types.{CoreConfig, HwClockDomain, HwCombOp, HwCompareOp, HwConstant, HwCostModel, HwModule, HwModuleDef, HwNodeId, HwOrigin, HwSelectOp, HwSignal}
+use compiler.mir.hwir.frontend.{HwFrontendRowFragment, strict_frontend_control_row_fragment, strict_frontend_predecode_row_fragment, strict_zca_cjr_predecode_row_hwir, strict_zca_cjalr_predecode_row_hwir, strict_zca_migrating_isa_ids, strict_zca_migrating_predecode_hwir, strict_zca_rv32_cjal_migrating_isa_ids, strict_zca_rv32_cjal_migrating_predecode_hwir, strict_zca_rv64_addiw_migrating_isa_ids}
+use compiler.mir.hwir.zca_rows.{strict_zca_cj_predecode_row_hwir, strict_zca_caddiw_rv64_predecode_row_hwir, strict_zca_cbeqz_predecode_row_hwir, strict_zca_cbnez_predecode_row_hwir}
+use compiler.mir.hwir.zca_outcomes.{strict_zca_addi4spn_outcome_hwir, strict_zca_lw_outcome_hwir, strict_zca_sw_outcome_hwir, strict_zca_lwsp_outcome_hwir, strict_zca_swsp_outcome_hwir, strict_zca_cli_outcome_hwir, strict_zca_caddi_outcome_hwir, strict_zca_caddi16sp_outcome_hwir, strict_zca_clui_outcome_hwir, strict_zca_slli6_rv64_outcome_hwir, strict_zca_srli6_rv64_outcome_hwir, strict_zca_srai6_rv64_outcome_hwir, strict_zca_candi_outcome_hwir, strict_zca_csub_outcome_hwir, strict_zca_cxor_outcome_hwir, strict_zca_cor_outcome_hwir, strict_zca_cand_outcome_hwir, strict_zca_cmv_outcome_hwir, strict_zca_cadd_outcome_hwir, strict_zca_caddw_rv64_outcome_hwir, strict_zca_csubw_rv64_outcome_hwir}
+use compiler.mir.hwir.zca_rv64_ld_sd_rows.{strict_zca_cld_rv64_outcome_hwir, strict_zca_csd_rv64_outcome_hwir}
+use compiler.mir.hwir.zca_rv64_stack_memory_rows.{strict_zca_ldsp_rv64_outcome_hwir, strict_zca_sdsp_rv64_outcome_hwir}
 use compiler.mir.hwir.trap_predecode.{strict_riscv_trap_predecode_interface, strict_zca_cebreak_trap_predecode_hwir}
 
 pub fn strict_zca_trap_migrating_isa_ids() -> [text]:
@@ -24,6 +28,12 @@ pub fn strict_zca_target_trap_migrating_isa_ids(config: CoreConfig) -> Result<[t
     elif config.xlen == 64 and config.profile == "riscv-gen2-rv64-zca-addiw-critical" and
         config.isa_profile == "rv64i_zca":
         ids = strict_zca_rv64_addiw_migrating_isa_ids()
+        ids.push("zca.c.ld")
+        ids.push("zca.c.sd")
+        ids.push("zca.c.ldsp")
+        ids.push("zca.c.sdsp")
+        ids.push("zca.c.addw")
+        ids.push("zca.c.subw")
     else:
         return Err("HWIR-E-ZCA-TARGET-TRAP-PROFILE: target trap decoder requires a concrete RV32 C.JAL or RV64 C.ADDIW product")
     var unique: [text] = []
@@ -33,6 +43,159 @@ pub fn strict_zca_target_trap_migrating_isa_ids(config: CoreConfig) -> Result<[t
         unique.push(id)
     ids.push("zca.c.ebreak")
     Ok(ids)
+
+fn strict_zca_rv64_full_trap_compose(module_name: text, config: CoreConfig,
+    fragments: [HwFrontendRowFragment], prefixes: [text], legal_selectors: [text]) -> Result<HwModuleDef, text>:
+    """Compose every RV64 row under one fail-closed overlap accumulator."""
+    if fragments.len() != 32 or prefixes.len() != 32 or legal_selectors.len() != 32:
+        return Err("HWIR-E-ZCA-RV64-FULL-CLOSURE: RV64 trap decoder requires exactly 32 row fragments")
+    val contract = strict_riscv_trap_predecode_interface(config)?
+    val ports = contract.ports()
+    val pa = config.physical_address_bits
+    val xlen = config.xlen
+    var signals: [HwSignal] = [HwSignal.comb("global_fallthrough_pc", "Bits", pa)]
+    var constants: [HwConstant] = [HwConstant.bits("global_zero_instruction", 32, 0),
+        HwConstant.bits("global_zero_flag", 1, 0), HwConstant.bits("global_one_flag", 1, 1),
+        HwConstant.bits("global_two_length", 2, 2), HwConstant.bits("global_two_bytes", pa, 2),
+        HwConstant.bits("global_zero_xlen", xlen, 0)]
+    var comb_ops: [HwCombOp] = [HwCombOp.binary("add", "global_fallthrough_pc", "fetch_pc", "global_two_bytes", pa)]
+    var compare_ops: [HwCompareOp] = []
+    var select_ops: [HwSelectOp] = []
+    var origins: [HwOrigin] = [HwOrigin(node_id: HwNodeId.child(module_name, "compose"),
+        source_name: "riscv.gen2.rv64_full_trap_migrating_predecode")]
+    for fragment in fragments:
+        for signal in fragment.signals: signals.push(signal)
+        for constant in fragment.constants: constants.push(constant)
+        for op in fragment.comb_ops: comb_ops.push(op)
+        for op in fragment.compare_ops: compare_ops.push(op)
+        for op in fragment.select_ops: select_ops.push(op)
+        for origin in fragment.origins: origins.push(origin)
+    var canonical_prior = "global_zero_instruction"
+    var legal_prior = "global_zero_flag"
+    var next_prior = "global_fallthrough_pc"
+    var redirect_valid_prior = "global_zero_flag"
+    var redirect_target_prior = "fetch_pc"
+    var index = fragments.len()
+    while index > 0:
+        index = index - 1
+        val prefix = prefixes[index]
+        val selector = legal_selectors[index]
+        val canonical_result = "global_canonical_after_" + index.to_text()
+        val legal_result = "global_legal_after_" + index.to_text()
+        val next_result = "global_next_after_" + index.to_text()
+        val redirect_valid_result = "global_redirect_valid_after_" + index.to_text()
+        val redirect_target_result = "global_redirect_target_after_" + index.to_text()
+        for signal in [HwSignal.comb(canonical_result, "Bits", 32),
+            HwSignal.comb(legal_result, "Bits", 1), HwSignal.comb(next_result, "Bits", pa),
+            HwSignal.comb(redirect_valid_result, "Bits", 1),
+            HwSignal.comb(redirect_target_result, "Bits", pa)]: signals.push(signal)
+        select_ops.push(HwSelectOp.mux(canonical_result, selector, prefix + "_canonical_instruction", canonical_prior, 32))
+        select_ops.push(HwSelectOp.mux(legal_result, selector, selector, legal_prior, 1))
+        select_ops.push(HwSelectOp.mux(next_result, selector, prefix + "_next_pc", next_prior, pa))
+        select_ops.push(HwSelectOp.mux(redirect_valid_result, selector, prefix + "_redirect_valid", redirect_valid_prior, 1))
+        select_ops.push(HwSelectOp.mux(redirect_target_result, selector, prefix + "_redirect_target", redirect_target_prior, pa))
+        canonical_prior = canonical_result
+        legal_prior = legal_result
+        next_prior = next_result
+        redirect_valid_prior = redirect_valid_result
+        redirect_target_prior = redirect_target_result
+    var seen_prior = "global_zero_flag"
+    var overlap_prior = "global_zero_flag"
+    var overlap_index = 0
+    while overlap_index < legal_selectors.len():
+        val selector = legal_selectors[overlap_index]
+        val overlap_here = "global_overlap_here_" + overlap_index.to_text()
+        val seen_result = "global_seen_after_" + overlap_index.to_text()
+        val overlap_result = "global_overlap_after_" + overlap_index.to_text()
+        for signal in [HwSignal.comb(overlap_here, "Bits", 1),
+            HwSignal.comb(seen_result, "Bits", 1), HwSignal.comb(overlap_result, "Bits", 1)]: signals.push(signal)
+        comb_ops.push(HwCombOp.binary("and", overlap_here, seen_prior, selector, 1))
+        comb_ops.push(HwCombOp.binary("or", seen_result, seen_prior, selector, 1))
+        comb_ops.push(HwCombOp.binary("or", overlap_result, overlap_prior, overlap_here, 1))
+        seen_prior = seen_result
+        overlap_prior = overlap_result
+        overlap_index = overlap_index + 1
+    for signal in [HwSignal.comb("global_no_overlap", "Bits", 1),
+        HwSignal.comb("global_unique_legal", "Bits", 1),
+        HwSignal.comb("global_trap_selected", "Bits", 1)]: signals.push(signal)
+    select_ops.push(HwSelectOp.mux("global_no_overlap", overlap_prior, "global_zero_flag", "global_one_flag", 1))
+    comb_ops.push(HwCombOp.binary("and", "global_unique_legal", legal_prior, "global_no_overlap", 1))
+    comb_ops.push(HwCombOp.binary("and", "global_trap_selected", "cebreak_trap_valid", "global_no_overlap", 1))
+    select_ops.push(HwSelectOp.mux("canonical_instruction", "global_no_overlap", canonical_prior, "global_zero_instruction", 32))
+    comb_ops.push(HwCombOp.unary("passthrough", "legal", "global_unique_legal", 1))
+    select_ops.push(HwSelectOp.mux("original_length_bytes", "global_no_overlap", "global_two_length", "global_two_length", 2))
+    select_ops.push(HwSelectOp.mux("next_pc", "global_no_overlap", next_prior, "global_fallthrough_pc", pa))
+    select_ops.push(HwSelectOp.mux("redirect_valid", "global_no_overlap", redirect_valid_prior, "global_zero_flag", 1))
+    select_ops.push(HwSelectOp.mux("redirect_target", "global_no_overlap", redirect_target_prior, "fetch_pc", pa))
+    comb_ops.push(HwCombOp.unary("passthrough", "trap_valid", "global_trap_selected", 1))
+    select_ops.push(HwSelectOp.mux("trap_cause", "global_trap_selected", "cebreak_trap_cause", "global_zero_xlen", xlen))
+    select_ops.push(HwSelectOp.mux("trap_tval", "global_trap_selected", "cebreak_trap_tval", "global_zero_xlen", xlen))
+    origins.push(HwOrigin(node_id: HwNodeId.child(module_name, "overlap_guard"),
+        source_name: "riscv.gen2.rv64_full_trap_migrating_predecode.overlap_guard"))
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: ports.len(), signal_count: signals.len(), register_count: 0,
+        memory_count: 0, comb_op_count: comb_ops.len() + compare_ops.len() + select_ops.len(),
+        clock_domain_count: 1, fallback_function: "", cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name), origins: origins, ports: ports,
+        signals: signals, constants: constants, comb_ops: comb_ops, compare_ops: compare_ops,
+        select_ops: select_ops, clock_domains: [HwClockDomain.default_domain()])
+    # Normalize summary counts from the completed immutable graph. This avoids
+    # relying on collection alias behavior while fragments are accumulated.
+    module.summary.port_count = module.ports.len()
+    module.summary.signal_count = module.signals.len()
+    module.summary.comb_op_count = module.comb_ops.len() + module.compare_ops.len() + module.select_ops.len()
+    module.summary.clock_domain_count = module.clock_domains.len()
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "": return Err(diagnostic)
+    Ok(module)
+
+pub fn strict_zca_rv64_full_trap_migrating_predecode_hwir(module_name: text,
+    config: CoreConfig) -> Result<HwModuleDef, text>:
+    """Build the exact 32-row RV64 Zca mission-critical trap decoder."""
+    if module_name == "": return Err("HWIR-E-ZCA-RV64-FULL-ID: RV64 trap decoder requires a module name")
+    if config.xlen != 64 or config.profile != "riscv-gen2-rv64-zca-addiw-critical" or config.isa_profile != "rv64i_zca":
+        return Err("HWIR-E-ZCA-RV64-FULL-PROFILE: RV64 trap decoder requires its concrete critical product")
+    val control_modules = [strict_zca_cj_predecode_row_hwir(module_name + "_cj", config)?,
+        strict_zca_cbeqz_predecode_row_hwir(module_name + "_cbeqz", config)?,
+        strict_zca_cbnez_predecode_row_hwir(module_name + "_cbnez", config)?,
+        strict_zca_cjr_predecode_row_hwir(module_name + "_cjr", config)?,
+        strict_zca_cjalr_predecode_row_hwir(module_name + "_cjalr", config)?,
+        strict_zca_caddiw_rv64_predecode_row_hwir(module_name + "_caddiw", config)?]
+    val data_modules = [strict_zca_addi4spn_outcome_hwir(module_name + "_addi4spn", config)?,
+        strict_zca_lw_outcome_hwir(module_name + "_lw", config)?, strict_zca_sw_outcome_hwir(module_name + "_sw", config)?,
+        strict_zca_cld_rv64_outcome_hwir(module_name + "_cld", config)?, strict_zca_csd_rv64_outcome_hwir(module_name + "_csd", config)?,
+        strict_zca_lwsp_outcome_hwir(module_name + "_lwsp", config)?, strict_zca_swsp_outcome_hwir(module_name + "_swsp", config)?,
+        strict_zca_ldsp_rv64_outcome_hwir(module_name + "_ldsp64", config)?, strict_zca_sdsp_rv64_outcome_hwir(module_name + "_sdsp64", config)?,
+        strict_zca_cli_outcome_hwir(module_name + "_cli", config)?, strict_zca_caddi_outcome_hwir(module_name + "_caddi", config)?,
+        strict_zca_caddi16sp_outcome_hwir(module_name + "_caddi16sp", config)?, strict_zca_clui_outcome_hwir(module_name + "_clui", config)?,
+        strict_zca_slli6_rv64_outcome_hwir(module_name + "_slli6", config)?, strict_zca_srli6_rv64_outcome_hwir(module_name + "_srli6", config)?,
+        strict_zca_srai6_rv64_outcome_hwir(module_name + "_srai6", config)?, strict_zca_candi_outcome_hwir(module_name + "_candi", config)?,
+        strict_zca_csub_outcome_hwir(module_name + "_csub", config)?, strict_zca_cxor_outcome_hwir(module_name + "_cxor", config)?,
+        strict_zca_cor_outcome_hwir(module_name + "_cor", config)?, strict_zca_cand_outcome_hwir(module_name + "_cand", config)?,
+        strict_zca_csubw_rv64_outcome_hwir(module_name + "_csubw64", config)?, strict_zca_caddw_rv64_outcome_hwir(module_name + "_caddw64", config)?,
+        strict_zca_cmv_outcome_hwir(module_name + "_cmv", config)?, strict_zca_cadd_outcome_hwir(module_name + "_cadd", config)?]
+    var fragments: [HwFrontendRowFragment] = []
+    val control_prefixes = ["cj", "cbeqz", "cbnez", "cjr", "cjalr", "caddiw"]
+    var index = 0
+    while index < control_modules.len():
+        fragments.push(strict_frontend_control_row_fragment(module_name, control_prefixes[index], control_modules[index])?)
+        index = index + 1
+    val data_prefixes = ["addi4spn", "lw", "sw", "cld", "csd", "lwsp", "swsp", "ldsp64", "sdsp64", "cli", "caddi", "caddi16sp", "clui", "slli6", "srli6", "srai6", "candi", "csub", "cxor", "cor", "cand", "csubw64", "caddw64", "cmv", "cadd"]
+    index = 0
+    while index < data_modules.len():
+        fragments.push(strict_frontend_predecode_row_fragment(module_name, data_prefixes[index], data_modules[index])?)
+        index = index + 1
+    val cbreak = strict_zca_cebreak_trap_predecode_hwir(module_name + "_cebreak", config)?
+    fragments.push(strict_frontend_control_row_fragment(module_name, "cebreak", cbreak)?)
+    val prefixes = control_prefixes + data_prefixes + ["cebreak"]
+    val selectors = ["cj_legal", "cbeqz_legal", "cbnez_legal", "cjr_legal", "cjalr_legal", "caddiw_legal",
+        "addi4spn_match_legal", "lw_match_legal", "sw_match_legal", "cld_match_legal", "csd_match_legal",
+        "lwsp_match_legal", "swsp_match_legal", "ldsp64_match_legal", "sdsp64_match_legal", "cli_match_legal",
+        "caddi_match_legal", "caddi16sp_match_legal", "clui_match_legal", "slli6_match_legal", "srli6_match_legal",
+        "srai6_match_legal", "candi_match_legal", "csub_match_legal", "cxor_match_legal", "cor_match_legal",
+        "cand_match_legal", "csubw64_match_legal", "caddw64_match_legal", "cmv_match_legal", "cadd_match_legal", "cebreak_legal"]
+    strict_zca_rv64_full_trap_compose(module_name, config, fragments, prefixes, selectors)
 
 pub fn strict_zca_target_trap_migrating_predecode_hwir(module_name: text,
     config: CoreConfig) -> Result<HwModuleDef, text>:
@@ -46,13 +209,13 @@ pub fn strict_zca_target_trap_migrating_predecode_hwir(module_name: text,
     if module_name == "":
         return Err("HWIR-E-ZCA-TARGET-TRAP-ID: target trap decoder requires a module name")
     val ids = strict_zca_target_trap_migrating_isa_ids(config)?
-    if ids.len() != 26:
-        return Err("HWIR-E-ZCA-TARGET-TRAP-CLOSURE: target trap decoder requires exactly 26 admitted rows")
+    val expected_rows = if config.xlen == 64: 32 else: 26
+    if ids.len() != expected_rows:
+        return Err("HWIR-E-ZCA-TARGET-TRAP-CLOSURE: target trap decoder row count does not match its concrete product")
+    if config.xlen == 64:
+        return strict_zca_rv64_full_trap_migrating_predecode_hwir(module_name, config)
     val contract = strict_riscv_trap_predecode_interface(config)?
-    val target = if config.xlen == 32:
-        strict_zca_rv32_cjal_migrating_predecode_hwir(module_name + "_target", config)?
-    else:
-        strict_zca_rv64_addiw_migrating_predecode_hwir(module_name + "_target", config)?
+    val target = strict_zca_rv32_cjal_migrating_predecode_hwir(module_name + "_target", config)?
     val cbreak = strict_zca_cebreak_trap_predecode_hwir(module_name + "_cebreak", config)?
     val target_fragment = strict_frontend_control_row_fragment(module_name, "target", target)?
     val cbreak_fragment = strict_frontend_control_row_fragment(module_name, "cebreak", cbreak)?

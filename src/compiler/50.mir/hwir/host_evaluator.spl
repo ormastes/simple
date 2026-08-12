@@ -131,6 +131,14 @@ fn hwir_host_comb_value(op: HwPreparedOperation, lhs: i64,
         return Ok(hwir_host_normalize(lhs | rhs, op.bit_width))
     if op.op == "add":
         return Ok(hwir_host_normalize(lhs + rhs, op.bit_width))
+    if op.op == "eq": return Ok(if lhs == rhs: 1 else: 0)
+    if op.op == "ne": return Ok(if lhs != rhs: 1 else: 0)
+    if op.op == "ult": return Ok(if hwir_host_unsigned_less(lhs, rhs, op.bit_width): 1 else: 0)
+    if op.op == "uge": return Ok(if not hwir_host_unsigned_less(lhs, rhs, op.bit_width): 1 else: 0)
+    if op.op == "slt" or op.op == "sge":
+        val lhs_signed = hwir_host_sign_value(lhs, op.bit_width)
+        val rhs_signed = hwir_host_sign_value(rhs, op.bit_width)
+        return Ok(if op.op == "slt": (if lhs_signed < rhs_signed: 1 else: 0) else: (if lhs_signed >= rhs_signed: 1 else: 0))
     if op.op == "shl":
         # The strict serializer keeps one-bit shifts as identity assignments
         # because numeric_std shift conversion is not used for std_logic.
@@ -160,6 +168,17 @@ fn hwir_host_comb_value(op: HwPreparedOperation, lhs: i64,
             return Ok(hwir_host_normalize(source, op.bit_width))
         return Ok(hwir_host_normalize(source | (-1 << source_width), op.bit_width))
     Err("HWIR-E-HOST-EVAL-OP: unsupported strict combinational operation " + op.op)
+
+fn hwir_host_sign_value(value: i64, width: i32) -> i64:
+    val normalized = hwir_host_normalize(value, width)
+    if width == 64 or (normalized & (1 << (width - 1))) == 0: return normalized
+    normalized | (-1 << width)
+
+fn hwir_host_unsigned_less(lhs: i64, rhs: i64, width: i32) -> bool:
+    val left = hwir_host_normalize(lhs, width)
+    val right = hwir_host_normalize(rhs, width)
+    if width == 64 and (left < 0) != (right < 0): return left >= 0
+    left < right
 
 fn hwir_host_slot(names: [text], name: text) -> i32:
     var index = 0

@@ -1,0 +1,129 @@
+# RV64-only mission-critical Zca row constructors.
+
+use compiler.mir.hwir.types.{CoreConfig, HwClockDomain, HwCombOp, HwCompareOp, HwConstant, HwCostModel, HwModule, HwModuleDef, HwNodeId, HwOrigin, HwPort, HwSelectOp, HwSignal}
+use compiler.mir.hwir.zca_rows.{strict_zca_slli_low_row_hwir, strict_zca_srli_low_row_hwir, strict_zca_srai_low_row_hwir}
+
+fn require_rv64_zca(module_name: text, config: CoreConfig, instruction_name: text) -> Result<(), text>:
+    if module_name == "": return Err("HWIR-E-MODULE-ID: strict Zca row requires a module name")
+    val diagnostic = config.diagnostic()
+    if diagnostic != "": return Err(diagnostic)
+    if config.compressed_decode_profile != "zca-common-critical":
+        return Err("HWIR-E-COMPRESSED-PROFILE: strict Zca row requires zca-common-critical profile")
+    if config.xlen != 64:
+        return Err("HWIR-E-ZCA-RV64: " + instruction_name + " requires a concrete RV64 mission-critical product")
+    Ok(())
+
+fn rv64_shift6_from_low(module_name: text, config: CoreConfig, instruction_name: text,
+    source_name: text, low_predicate_name: text, predicate_name: text,
+    low: HwModuleDef) -> Result<HwModuleDef, text>:
+    """Extend a proven five-bit row with bit12 as architectural shamt[5]."""
+    require_rv64_zca(module_name, config, instruction_name)?
+    var constants: [HwConstant] = []
+    for constant in low.constants:
+        constants.push(HwConstant.bits(constant.name, constant.bit_width,
+            if constant.name == "opcode_tag_mask": constant.value - 4096 else: constant.value))
+    constants.push(HwConstant.bits("bit12_mask", 32, 4096))
+    constants.push(HwConstant.bits("right_shift_7_for_shamt5", 32, 7))
+    var signals: [HwSignal] = []
+    for signal in low.signals:
+        val name = if signal.name == "shamt": "shamt_low" else if signal.name == low_predicate_name: predicate_name else: signal.name
+        signals.push(HwSignal.comb(name, signal.type_name, signal.bit_width))
+    signals.push(HwSignal.comb("bit12_source", "Bits", 32))
+    signals.push(HwSignal.comb("shamt_high", "Bits", 32))
+    signals.push(HwSignal.comb("shamt", "Bits", 32))
+    var comb_ops: [HwCombOp] = []
+    for op in low.comb_ops:
+        val result = if op.result == "shamt": "shamt_low" else: op.result
+        comb_ops.push(HwCombOp(op: op.op, result: result, lhs: op.lhs, rhs: op.rhs, bit_width: op.bit_width))
+    comb_ops.push(HwCombOp.binary("and", "bit12_source", "parcel16", "bit12_mask", 32))
+    comb_ops.push(HwCombOp.binary("shr", "shamt_high", "bit12_source", "right_shift_7_for_shamt5", 32))
+    comb_ops.push(HwCombOp.binary("or", "shamt", "shamt_low", "shamt_high", 32))
+    var compare_ops: [HwCompareOp] = []
+    for op in low.compare_ops:
+        compare_ops.push(HwCompareOp(result: predicate_name, lhs: op.lhs, rhs: op.rhs, bit_width: op.bit_width))
+    var select_ops: [HwSelectOp] = []
+    for op in low.select_ops:
+        select_ops.push(HwSelectOp.mux(op.result, predicate_name, op.when_true, op.when_false, op.bit_width))
+    var origins: [HwOrigin] = []
+    for origin in low.origins: origins.push(origin)
+    origins.push(HwOrigin(node_id: HwNodeId.child(module_name, "shamt6"), source_name: source_name))
+    val signal_count = signals.len()
+    val comb_op_count = comb_ops.len() + compare_ops.len() + select_ops.len()
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: low.ports.len(), signal_count: signal_count, register_count: 0,
+        memory_count: 0, comb_op_count: comb_op_count, clock_domain_count: low.clock_domains.len(),
+        fallback_function: "", cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name), origins: origins, ports: low.ports,
+        signals: signals, constants: constants, comb_ops: comb_ops, compare_ops: compare_ops,
+        select_ops: select_ops, clock_domains: low.clock_domains)
+    val shape = module.shape_diagnostic()
+    if shape != "": return Err(shape)
+    Ok(module)
+
+pub fn strict_zca_slli6_rv64_row_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    rv64_shift6_from_low(module_name, config, "C.SLLI", "zca.rv64.c.slli6", "is_c_slli_low", "is_c_slli6",
+        strict_zca_slli_low_row_hwir(module_name + "_low", config)?)
+
+pub fn strict_zca_srli6_rv64_row_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    rv64_shift6_from_low(module_name, config, "C.SRLI", "zca.rv64.c.srli6", "is_c_srli_low", "is_c_srli6",
+        strict_zca_srli_low_row_hwir(module_name + "_low", config)?)
+
+pub fn strict_zca_srai6_rv64_row_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    rv64_shift6_from_low(module_name, config, "C.SRAI", "zca.rv64.c.srai6", "is_c_srai_low", "is_c_srai6",
+        strict_zca_srai_low_row_hwir(module_name + "_low", config)?)
+
+fn rv64_word_row(module_name: text, config: CoreConfig, instruction_name: text,
+    source_name: text, predicate_name: text, tag: i64, funct7: i64) -> Result<HwModuleDef, text>:
+    require_rv64_zca(module_name, config, instruction_name)?
+    val signals = [HwSignal.comb("parcel16", "Bits", 32), HwSignal.comb("tag", "Bits", 32),
+        HwSignal.comb(predicate_name, "Bits", 1), HwSignal.comb("rd_shifted", "Bits", 32),
+        HwSignal.comb("rd_raw", "Bits", 32), HwSignal.comb("rd", "Bits", 32),
+        HwSignal.comb("rs2_shifted", "Bits", 32), HwSignal.comb("rs2_raw", "Bits", 32),
+        HwSignal.comb("rs2", "Bits", 32), HwSignal.comb("rd_field", "Bits", 32),
+        HwSignal.comb("rs1_field", "Bits", 32), HwSignal.comb("rs2_field", "Bits", 32),
+        HwSignal.comb("partial1", "Bits", 32), HwSignal.comb("partial2", "Bits", 32),
+        HwSignal.comb("partial3", "Bits", 32), HwSignal.comb("instruction", "Bits", 32)]
+    val constants = [HwConstant.bits("low16", 32, 65535), HwConstant.bits("tag_mask", 32, 64611),
+        HwConstant.bits("expected_tag", 32, tag), HwConstant.bits("shr7", 32, 7),
+        HwConstant.bits("shr2", 32, 2), HwConstant.bits("prime_mask", 32, 7),
+        HwConstant.bits("prime_base", 32, 8), HwConstant.bits("shl7", 32, 7),
+        HwConstant.bits("shl15", 32, 15), HwConstant.bits("shl20", 32, 20),
+        HwConstant.bits("funct7", 32, funct7), HwConstant.bits("op32", 32, 59),
+        HwConstant.bits("zero", 32, 0)]
+    val ops = [HwCombOp.binary("and", "parcel16", "parcel", "low16", 32),
+        HwCombOp.binary("and", "tag", "parcel16", "tag_mask", 32),
+        HwCombOp.binary("shr", "rd_shifted", "parcel16", "shr7", 32),
+        HwCombOp.binary("and", "rd_raw", "rd_shifted", "prime_mask", 32),
+        HwCombOp.binary("or", "rd", "rd_raw", "prime_base", 32),
+        HwCombOp.binary("shr", "rs2_shifted", "parcel16", "shr2", 32),
+        HwCombOp.binary("and", "rs2_raw", "rs2_shifted", "prime_mask", 32),
+        HwCombOp.binary("or", "rs2", "rs2_raw", "prime_base", 32),
+        HwCombOp.binary("shl", "rd_field", "rd", "shl7", 32),
+        HwCombOp.binary("shl", "rs1_field", "rd", "shl15", 32),
+        HwCombOp.binary("shl", "rs2_field", "rs2", "shl20", 32),
+        HwCombOp.binary("or", "partial1", "rd_field", "rs1_field", 32),
+        HwCombOp.binary("or", "partial2", "partial1", "rs2_field", 32),
+        HwCombOp.binary("or", "partial3", "partial2", "funct7", 32),
+        HwCombOp.binary("or", "instruction", "partial3", "op32", 32)]
+    val compares = [HwCompareOp.equal(predicate_name, "tag", "expected_tag", 32)]
+    val selects = [HwSelectOp.mux("canonical_instruction", predicate_name, "instruction", "zero", 32)]
+    val summary = HwModule(name: module_name, profile: config.profile, port_count: 2,
+        signal_count: signals.len(), register_count: 0, memory_count: 0,
+        comb_op_count: ops.len() + compares.len() + selects.len(), clock_domain_count: 1,
+        fallback_function: "", cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config, node_id: HwNodeId.module_root(module_name),
+        origins: [HwOrigin(node_id: HwNodeId.child(module_name, "classify"), source_name: source_name),
+            HwOrigin(node_id: HwNodeId.child(module_name, "assemble"), source_name: source_name)],
+        ports: [HwPort.input("parcel", "Bits", 32), HwPort.output("canonical_instruction", "Bits", 32)],
+        signals: signals, constants: constants, comb_ops: ops, compare_ops: compares,
+        select_ops: selects, clock_domains: [HwClockDomain.default_domain()])
+    val shape = module.shape_diagnostic()
+    if shape != "": return Err(shape)
+    Ok(module)
+
+pub fn strict_zca_csubw_rv64_row_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    rv64_word_row(module_name, config, "C.SUBW", "zca.rv64.c.subw", "is_c_subw", 39937, 1073741824)
+
+pub fn strict_zca_caddw_rv64_row_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    rv64_word_row(module_name, config, "C.ADDW", "zca.rv64.c.addw", "is_c_addw", 39969, 0)

@@ -1,0 +1,134 @@
+# First emitted shared RV32/RV64 scalar ALU retirement projection.
+#
+# One concrete instruction is selected during elaboration from the declarative
+# ISA database. The emitted graph contains no XLEN, extension, opcode, or
+# provider selection mux. It is a bounded ALU/retirement transition, not a
+# complete processor core or an architectural retirement owner.
+
+use compiler.mir.hwir.types.{CoreConfig, HwClockDomain, HwCombOp, HwConstant,
+    HwCostModel, HwModule, HwModuleDef, HwNodeId, HwOrigin, HwPort, HwSelectOp,
+    HwSignal}
+use compiler.mir.hwir.riscv_scalar_core.{RiscvGen2ScalarDispatchPlan,
+    riscv_gen2_scalar_dispatch, riscv_gen2_scalar_elaboration}
+
+fn scalar_alu_operation(entry_id: text) -> text:
+    if entry_id == "rv.i.add" or entry_id == "rv.i.addi": return "add"
+    if entry_id == "rv.i.sub": return "sub"
+    if entry_id == "rv.i.and" or entry_id == "rv.i.andi": return "and"
+    if entry_id == "rv.i.or" or entry_id == "rv.i.ori": return "or"
+    if entry_id == "rv.i.xor" or entry_id == "rv.i.xori": return "xor"
+    ""
+
+fn scalar_alu_is_immediate(entry_id: text) -> bool:
+    entry_id == "rv.i.addi" or entry_id == "rv.i.andi" or
+        entry_id == "rv.i.ori" or entry_id == "rv.i.xori"
+
+fn scalar_alu_immediate(instruction: u32) -> i64:
+    val raw = ((instruction >> 20) & 4095) as i64
+    if raw >= 2048: raw - 4096 else: raw
+
+fn scalar_alu_ports(xlen: i32) -> [HwPort]:
+    [HwPort.input("in_valid", "Bits", 1),
+        HwPort.input("in_order", "Bits", 64),
+        HwPort.input("in_privilege", "Bits", 2),
+        HwPort.input("in_pc", "Bits", xlen),
+        HwPort.input("rs1_value", "Bits", xlen),
+        HwPort.input("rs2_value", "Bits", xlen),
+        HwPort.output("retire_valid", "Bits", 1),
+        HwPort.output("retire_order", "Bits", 64),
+        HwPort.output("retire_xlen", "Bits", 7),
+        HwPort.output("retire_privilege", "Bits", 2),
+        HwPort.output("retire_original_instruction", "Bits", 32),
+        HwPort.output("retire_canonical_instruction", "Bits", 32),
+        HwPort.output("retire_instruction_length_bytes", "Bits", 3),
+        HwPort.output("retire_pc_before", "Bits", xlen),
+        HwPort.output("retire_pc_after", "Bits", xlen),
+        HwPort.output("retire_rd", "Bits", 5),
+        HwPort.output("retire_rd_write", "Bits", 1),
+        HwPort.output("retire_rd_value", "Bits", xlen),
+        HwPort.output("retire_memory_address", "Bits", xlen),
+        HwPort.output("retire_memory_read_mask", "Bits", 32),
+        HwPort.output("retire_memory_write_mask", "Bits", 32),
+        HwPort.output("retire_memory_read_data", "Bits", xlen),
+        HwPort.output("retire_memory_write_data", "Bits", xlen),
+        HwPort.output("retire_trap", "Bits", 1),
+        HwPort.output("retire_interrupt", "Bits", 1),
+        HwPort.output("retire_cause", "Bits", xlen),
+        HwPort.output("retire_tval", "Bits", xlen)]
+
+fn scalar_alu_default_drivers(xlen: i32, rd_nonzero: bool) -> [HwCombOp]:
+    val rd_write_source = if rd_nonzero: "in_valid" else: "zero1"
+    [HwCombOp.unary("passthrough", "retire_valid", "in_valid", 1),
+        HwCombOp.unary("passthrough", "retire_rd_write", rd_write_source, 1),
+        HwCombOp.unary("passthrough", "retire_memory_address", "zero_xlen", xlen),
+        HwCombOp.unary("passthrough", "retire_memory_read_mask", "zero32", 32),
+        HwCombOp.unary("passthrough", "retire_memory_write_mask", "zero32", 32),
+        HwCombOp.unary("passthrough", "retire_memory_read_data", "zero_xlen", xlen),
+        HwCombOp.unary("passthrough", "retire_memory_write_data", "zero_xlen", xlen),
+        HwCombOp.unary("passthrough", "retire_trap", "zero1", 1),
+        HwCombOp.unary("passthrough", "retire_interrupt", "zero1", 1),
+        HwCombOp.unary("passthrough", "retire_cause", "zero_xlen", xlen),
+        HwCombOp.unary("passthrough", "retire_tval", "zero_xlen", xlen)]
+
+fn scalar_alu_payload_selects(xlen: i32, rd_nonzero: bool) -> [HwSelectOp]:
+    val rd_source = if rd_nonzero: "rd_index" else: "zero5"
+    val result_source = if rd_nonzero: "alu_result" else: "zero_xlen"
+    [HwSelectOp.mux("retire_order", "in_valid", "in_order", "zero64", 64),
+        HwSelectOp.mux("retire_xlen", "in_valid", "xlen_value", "zero7", 7),
+        HwSelectOp.mux("retire_privilege", "in_valid", "in_privilege", "zero2", 2),
+        HwSelectOp.mux("retire_original_instruction", "in_valid", "instruction", "zero32", 32),
+        HwSelectOp.mux("retire_canonical_instruction", "in_valid", "instruction", "zero32", 32),
+        HwSelectOp.mux("retire_instruction_length_bytes", "in_valid", "length4", "zero3", 3),
+        HwSelectOp.mux("retire_pc_before", "in_valid", "in_pc", "zero_xlen", xlen),
+        HwSelectOp.mux("retire_pc_after", "in_valid", "pc_after_value", "zero_xlen", xlen),
+        HwSelectOp.mux("retire_rd", "in_valid", rd_source, "zero5", 5),
+        HwSelectOp.mux("retire_rd_value", "in_valid", result_source, "zero_xlen", xlen)]
+
+pub fn strict_riscv_scalar_alu_retire_projection_hwir(module_name: text, config: CoreConfig,
+    instruction: u32) -> Result<HwModuleDef, text>:
+    """Monomorphize one base-I ALU operation into a stateless retire projection."""
+    if module_name == "": return Err("HWIR-E-RISCV-SCALAR-EMIT-ID: scalar ALU retire projection requires a module name")
+    val elaboration = riscv_gen2_scalar_elaboration(config, "none")?
+    val dispatch: RiscvGen2ScalarDispatchPlan = riscv_gen2_scalar_dispatch(elaboration, instruction)?
+    val operation = scalar_alu_operation(dispatch.entry.id)
+    if operation == "" or dispatch.provider != "scalar-integer" or
+        dispatch.entry.execution_class != "integer" or dispatch.entry.memory_effect != "none" or
+        dispatch.entry.trap_behavior != "precise":
+        return Err("HWIR-E-RISCV-SCALAR-EMIT-SCOPE: scalar ALU slice admits only precise base-I ADD/SUB/AND/OR/XOR register or immediate rows")
+    val xlen = config.xlen
+    val rd = ((instruction >> 7) & 31) as i64
+    var constants = [HwConstant.bits("instruction", 32, instruction as i64),
+        HwConstant.bits("xlen_value", 7, xlen as i64),
+        HwConstant.bits("length4", 3, 4), HwConstant.bits("rd_index", 5, rd),
+        HwConstant.bits("four", xlen, 4), HwConstant.bits("zero1", 1, 0),
+        HwConstant.bits("zero2", 2, 0), HwConstant.bits("zero3", 3, 0),
+        HwConstant.bits("zero5", 5, 0), HwConstant.bits("zero7", 7, 0),
+        HwConstant.bits("zero32", 32, 0), HwConstant.bits("zero64", 64, 0),
+        HwConstant.bits("zero_xlen", xlen, 0)]
+    val rhs = if scalar_alu_is_immediate(dispatch.entry.id): "immediate" else: "rs2_value"
+    if scalar_alu_is_immediate(dispatch.entry.id):
+        constants.push(HwConstant.bits("immediate", xlen, scalar_alu_immediate(instruction)))
+    var operations = scalar_alu_default_drivers(xlen, rd != 0)
+    operations.push(HwCombOp.binary(operation, "alu_result", "rs1_value", rhs, xlen))
+    operations.push(HwCombOp.binary("add", "pc_after_value", "in_pc", "four", xlen))
+    val selects = scalar_alu_payload_selects(xlen, rd != 0)
+    val ports = scalar_alu_ports(xlen)
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: ports.len(), signal_count: 2, register_count: 0, memory_count: 0,
+        comb_op_count: operations.len() + selects.len(), clock_domain_count: 1, fallback_function: "",
+        cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name), origins: [
+            HwOrigin(node_id: HwNodeId.child(module_name, "decode"),
+                source_name: "riscv.scalar.isa." + dispatch.entry.id),
+            HwOrigin(node_id: HwNodeId.child(module_name, "execute"),
+                source_name: "riscv.scalar.execute." + operation),
+            HwOrigin(node_id: HwNodeId.child(module_name, "retire_projection"),
+                source_name: "riscv.scalar.alu_retire_projection.combinational")],
+        ports: ports, signals: [HwSignal.comb("alu_result", "Bits", xlen),
+            HwSignal.comb("pc_after_value", "Bits", xlen)], constants: constants,
+        comb_ops: operations, compare_ops: [], select_ops: selects,
+        clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "": return Err(diagnostic)
+    Ok(module)
