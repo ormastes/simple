@@ -27,7 +27,13 @@ cli_native_build_main_contract_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 15 | 15 | 0 | 0 |
+
+> Evidence note (2026-08-12): the encompassing source-contract run reports
+> 11/15 assertions passing with four unrelated existing failures. The new
+> indexed-traversal guard is static evidence; a rebuilt native executable was
+> not produced. The scenario body below predates the expanded source spec and
+> must not be read as a current generated PASS receipt.
 
 <details>
 <summary>Full Scenario Manual</summary>
