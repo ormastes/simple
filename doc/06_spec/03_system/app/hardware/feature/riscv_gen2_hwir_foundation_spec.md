@@ -150,6 +150,10 @@ required planned qualification scenario, not completed self-hosted evidence.
   retirement proof.
 - REQ-G2-006: a noncritical `--riscv-gen2-target` request is rejected before it
   can take the legacy route or replace a pre-existing artifact.
+- NFR-G2-006: compiler-owned Gen2 artifacts retain the canonical critical
+  assurance-policy snapshot and policy hash captured by the compile context;
+  validation rejects a missing, noncanonical, or noncritical snapshot before
+  the VHDL bundle is persisted.
 - REQ-G2-009/NFR-G2-010: the compiler-owned migrating product accepts only the
   concrete critical Zca target, emits distinct `hwir-gen2-product` provenance
   with no fabricated user source closure, and rejects before cleanup when
