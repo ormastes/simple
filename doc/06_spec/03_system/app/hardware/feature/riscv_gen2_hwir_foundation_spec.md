@@ -11,6 +11,9 @@ qualification writer, not this manual or a bootstrap-seed scenario run, must
 write the RV32/RV64 GHDL receipt set under the retention policy in the system
 test plan before any qualification claim is made.
 
+Every GHDL “proves”, “covers”, or “simulates” statement below describes a
+required planned qualification scenario, not completed self-hosted evidence.
+
 ## Scenarios
 
 1. Create an RV32 product with two `Bits[32]` inputs and one output; verify

@@ -25,6 +25,10 @@ The retirement composition renderer is likewise quarantined until it receives
 a typed architectural producer emission receipt; metadata-bearing VHDL text is
 not accepted as evidence of a child implementation.
 
+Every GHDL “proves”, “covers”, or “simulates” row below is a required planned
+qualification scenario until its self-hosted receipt is retained; bootstrap
+diagnostics and source-level assertions do not satisfy a target-evidence row.
+
 | Requirement | Implemented check or qualification receipt required |
 | --- | --- |
 | REQ-G2-001 | schema/origin construction and uniqueness unit tests |
