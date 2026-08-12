@@ -3,7 +3,10 @@
 //! Note: These tests use thread-local state and rt_actor_join to avoid
 //! race conditions between parallel test execution.
 
-use super::{encode_inline_actor_message, rt_actor_id, rt_actor_is_alive, rt_actor_join, rt_actor_recv, rt_actor_send, rt_actor_spawn};
+use super::{
+    decode_inline_actor_message, encode_inline_actor_message, rt_actor_id, rt_actor_is_alive, rt_actor_join,
+    rt_actor_recv, rt_actor_send, rt_actor_spawn,
+};
 use crate::value::RuntimeValue;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::thread;
@@ -14,9 +17,25 @@ static ACTOR_RAN: AtomicBool = AtomicBool::new(false);
 
 #[test]
 fn actor_wire_accepts_inline_values_and_rejects_heap_addresses() {
-    assert!(encode_inline_actor_message(RuntimeValue::from_int(42)).is_some());
-    assert!(encode_inline_actor_message(RuntimeValue::from_raw(0x1001)).is_none());
-    assert!(encode_inline_actor_message(RuntimeValue::from_raw(0x1004)).is_none());
+    let message = encode_inline_actor_message(
+        RuntimeValue::from_int(42),
+        super::TransferDomain::Parent,
+        super::TransferDomain::Actor,
+    )
+    .unwrap();
+    assert_eq!(decode_inline_actor_message(message), Some(RuntimeValue::from_int(42)));
+    assert!(encode_inline_actor_message(
+        RuntimeValue::from_raw(0x1001),
+        super::TransferDomain::Parent,
+        super::TransferDomain::Actor
+    )
+    .is_none());
+    assert!(encode_inline_actor_message(
+        RuntimeValue::from_raw(0x1004),
+        super::TransferDomain::Parent,
+        super::TransferDomain::Actor
+    )
+    .is_none());
 }
 
 extern "C" fn flag_setting_actor(_ctx: *const u8) {
@@ -322,8 +341,7 @@ fn test_actor_recv_timeout() {
 }
 
 #[test]
-fn test_actor_with_context() {
-    // Test spawning actor with context value
+fn test_actor_rejects_heap_context() {
     static CONTEXT_VALUE: AtomicI32 = AtomicI32::new(0);
 
     extern "C" fn context_actor(_ctx: *const u8) {
@@ -334,15 +352,12 @@ fn test_actor_with_context() {
 
     CONTEXT_VALUE.store(0, Ordering::SeqCst);
 
-    // Create context value (heap-allocated)
-    use crate::value::rt_array_new;
+    use crate::value::{rt_array_free, rt_array_new};
     let ctx = rt_array_new(1);
 
     let actor = rt_actor_spawn(context_actor as *const () as u64, ctx);
 
-    // Wait for actor
-    rt_actor_join(actor);
-
-    // Actor should have executed
-    assert_eq!(CONTEXT_VALUE.load(Ordering::SeqCst), 123);
+    assert_eq!(actor, RuntimeValue::NIL);
+    assert_eq!(CONTEXT_VALUE.load(Ordering::SeqCst), 0);
+    rt_array_free(ctx);
 }

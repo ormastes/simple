@@ -325,11 +325,11 @@ pub(super) fn eval_builtin(
                         CompileError::semantic_with_context("reply() called outside actor".to_string(), ctx)
                     })
                     .and_then(|tx| {
-                        tx.send(Message::Value(msg_val.to_display_string())).map_err(|e| {
+                        tx.try_send(Message::Value(msg_val.to_display_string())).map_err(|e| {
                             // E1201 - Actor Send Failed
                             let ctx = ErrorContext::new()
                                 .with_code(codes::ACTOR_SEND_FAILED)
-                                .with_help("check that the reply channel is still active")
+                                .with_help("check that the bounded reply channel is active and has capacity")
                                 .with_note(format!("reply error: {}", e));
                             CompileError::semantic_with_context("failed to send reply to actor".to_string(), ctx)
                         })

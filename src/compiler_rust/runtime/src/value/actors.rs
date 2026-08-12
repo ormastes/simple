@@ -5,14 +5,14 @@ use std::collections::HashMap;
 use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use super::collections::rt_string_new;
 use super::core::RuntimeValue;
 use super::heap::{get_typed_ptr_mut, HeapHeader, HeapObjectType};
+use super::transfer::{RuntimeTransferPacket, TransferDomain};
 use crate::concurrency::{spawn_actor, ActorHandle, Message};
 
 thread_local! {
     pub(crate) static CURRENT_ACTOR_INBOX: RefCell<Option<Arc<Mutex<mpsc::Receiver<Message>>>>> = const { RefCell::new(None) };
-    pub(crate) static CURRENT_ACTOR_OUTBOX: RefCell<Option<mpsc::Sender<Message>>> = const { RefCell::new(None) };
+    pub(crate) static CURRENT_ACTOR_OUTBOX: RefCell<Option<mpsc::SyncSender<Message>>> = const { RefCell::new(None) };
 }
 
 // Global registry for ActorHandles (avoids storing Arc/Mutex in heap memory)
@@ -53,17 +53,32 @@ fn get_actor_handle(actor_id: usize) -> Option<ActorHandle> {
     ACTOR_REGISTRY.read().ok()?.get(&actor_id).cloned()
 }
 
-fn encode_inline_actor_message(value: RuntimeValue) -> Option<Message> {
-    if !value.is_inline_transfer_value() {
+fn encode_inline_actor_message(
+    value: RuntimeValue,
+    source_domain: TransferDomain,
+    target_domain: TransferDomain,
+) -> Option<Message> {
+    let packet = RuntimeTransferPacket::inline_copy(value, source_domain, target_domain)?;
+    Some(Message::TransferPacket(packet.encode()?))
+}
+
+fn decode_inline_actor_message(message: Message) -> Option<RuntimeValue> {
+    let Message::TransferPacket(bytes) = message else {
         return None;
-    }
-    Some(Message::Bytes(value.to_raw().to_le_bytes().to_vec()))
+    };
+    RuntimeTransferPacket::decode(&bytes)?.runtime_value_for_target(TransferDomain::Actor)
 }
 
 /// Spawn a new actor. `body_func` is a pointer to the actor body.
 /// Returns a heap-allocated actor handle.
 #[no_mangle]
 pub extern "C" fn rt_actor_spawn(body_func: u64, ctx: RuntimeValue) -> RuntimeValue {
+    // Passing a heap context would donate a process-local pointer to another
+    // execution domain. Reject it until actor construction accepts an owned or
+    // encoded transfer packet.
+    if ctx.is_heap() {
+        return RuntimeValue::NIL;
+    }
     // Interpret body_func as an extern "C" fn(ctx: *const u8) and run it inside the actor thread.
     // If body_func is 0, spawn a no-op actor that still owns a mailbox.
     let func: Option<extern "C" fn(*const u8)> = if body_func == 0 {
@@ -71,19 +86,13 @@ pub extern "C" fn rt_actor_spawn(body_func: u64, ctx: RuntimeValue) -> RuntimeVa
     } else {
         Some(unsafe { std::mem::transmute::<usize, extern "C" fn(*const u8)>(body_func as usize) })
     };
-    let ctx_ptr: usize = if ctx.is_heap() { ctx.as_heap_ptr() as usize } else { 0 };
     let handle = spawn_actor(move |inbox, outbox| {
         let inbox = Arc::new(Mutex::new(inbox));
         CURRENT_ACTOR_INBOX.with(|cell| *cell.borrow_mut() = Some(inbox.clone()));
         CURRENT_ACTOR_OUTBOX.with(|cell| *cell.borrow_mut() = Some(outbox.clone()));
 
         if let Some(f) = func {
-            let raw_ctx = if ctx_ptr == 0 {
-                std::ptr::null()
-            } else {
-                ctx_ptr as *const u8
-            };
-            f(raw_ctx);
+            f(std::ptr::null());
         }
 
         CURRENT_ACTOR_INBOX.with(|cell| *cell.borrow_mut() = None);
@@ -108,7 +117,12 @@ pub extern "C" fn rt_actor_send(actor: RuntimeValue, message: RuntimeValue) {
         unsafe {
             let actor_id = (*actor_ptr).actor_id;
             if let Some(handle) = get_actor_handle(actor_id) {
-                if let Some(payload) = encode_inline_actor_message(message) {
+                let source_domain = if CURRENT_ACTOR_INBOX.with(|cell| cell.borrow().is_some()) {
+                    TransferDomain::Actor
+                } else {
+                    TransferDomain::Parent
+                };
+                if let Some(payload) = encode_inline_actor_message(message, source_domain, TransferDomain::Actor) {
                     let _ = handle.send(payload);
                 }
             }
@@ -127,15 +141,7 @@ pub extern "C" fn rt_actor_recv() -> RuntimeValue {
             .and_then(|guard| guard.recv_timeout(Duration::from_secs(5)).ok())
     });
 
-    match msg {
-        Some(Message::Bytes(bytes)) if bytes.len() >= 8 => {
-            let mut buf = [0u8; 8];
-            buf.copy_from_slice(&bytes[..8]);
-            RuntimeValue::from_raw(u64::from_le_bytes(buf))
-        }
-        Some(Message::Value(s)) => rt_string_new(s.as_ptr(), s.len() as u64),
-        _ => RuntimeValue::NIL,
-    }
+    msg.and_then(decode_inline_actor_message).unwrap_or(RuntimeValue::NIL)
 }
 
 /// Reply to parent actor by sending a message through the outbox.
@@ -144,8 +150,8 @@ pub extern "C" fn rt_actor_recv() -> RuntimeValue {
 pub extern "C" fn rt_actor_reply(message: RuntimeValue) -> RuntimeValue {
     CURRENT_ACTOR_OUTBOX.with(|cell| {
         if let Some(tx) = cell.borrow().as_ref() {
-            if let Some(payload) = encode_inline_actor_message(message) {
-                let _ = tx.send(payload);
+            if let Some(payload) = encode_inline_actor_message(message, TransferDomain::Actor, TransferDomain::Parent) {
+                let _ = tx.try_send(payload);
             }
         }
     });

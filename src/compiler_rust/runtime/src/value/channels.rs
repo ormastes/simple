@@ -3,12 +3,15 @@
 //! Channels provide multi-producer, single-consumer communication between
 //! actors or async tasks.
 
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use super::core::RuntimeValue;
 use super::heap::{get_typed_ptr_mut, register_heap_ptr, unregister_heap_ptr, HeapHeader, HeapObjectType};
+use super::transfer::{RuntimeTransferPacket, TransferDomain};
+
+const DEFAULT_CHANNEL_CAPACITY: usize = 256;
 
 // ============================================================================
 // Channel Types
@@ -19,7 +22,7 @@ use super::heap::{get_typed_ptr_mut, register_heap_ptr, unregister_heap_ptr, Hea
 pub struct RuntimeChannelSender {
     pub header: HeapHeader,
     /// Sender handle (boxed Arc<Mutex<Sender>>)
-    pub sender: *mut Arc<Mutex<Sender<RuntimeValue>>>,
+    pub sender: *mut Arc<Mutex<SyncSender<RuntimeTransferPacket>>>,
     /// Channel ID for identification
     pub channel_id: u64,
 }
@@ -29,7 +32,7 @@ pub struct RuntimeChannelSender {
 pub struct RuntimeChannelReceiver {
     pub header: HeapHeader,
     /// Receiver handle (boxed Arc<Mutex<Receiver>>)
-    pub receiver: *mut Arc<Mutex<Receiver<RuntimeValue>>>,
+    pub receiver: *mut Arc<Mutex<Receiver<RuntimeTransferPacket>>>,
     /// Channel ID for identification
     pub channel_id: u64,
     /// Closed flag
@@ -41,9 +44,9 @@ pub struct RuntimeChannelReceiver {
 pub struct RuntimeChannel {
     pub header: HeapHeader,
     /// Sender handle
-    pub sender: *mut Arc<Mutex<Sender<RuntimeValue>>>,
+    pub sender: *mut Arc<Mutex<SyncSender<RuntimeTransferPacket>>>,
     /// Receiver handle
-    pub receiver: *mut Arc<Mutex<Receiver<RuntimeValue>>>,
+    pub receiver: *mut Arc<Mutex<Receiver<RuntimeTransferPacket>>>,
     /// Channel ID
     pub channel_id: u64,
     /// Closed flag
@@ -63,7 +66,7 @@ static NEXT_CHANNEL_ID: AtomicU64 = AtomicU64::new(1);
 /// Create a new channel. Returns a channel pair with sender and receiver.
 #[no_mangle]
 pub extern "C" fn rt_channel_new() -> RuntimeValue {
-    let (tx, rx) = mpsc::channel::<RuntimeValue>();
+    let (tx, rx) = mpsc::sync_channel::<RuntimeTransferPacket>(DEFAULT_CHANNEL_CAPACITY);
     let channel_id = NEXT_CHANNEL_ID.fetch_add(1, Ordering::SeqCst);
 
     let sender = Box::into_raw(Box::new(Arc::new(Mutex::new(tx))));
@@ -98,17 +101,21 @@ fn as_channel_ptr(value: RuntimeValue) -> Option<*mut RuntimeChannel> {
 }
 
 /// Send a value through the channel.
-/// Returns 1 on success, 0 on failure (channel closed or disconnected).
+/// Returns 1 on success, 0 when full, closed, disconnected, or non-transferable.
 #[no_mangle]
 pub extern "C" fn rt_channel_send(channel: RuntimeValue, value: RuntimeValue) -> i64 {
     let Some(ch_ptr) = as_channel_ptr(channel) else {
         return 0;
     };
-    // A heap-tagged RuntimeValue contains process-local pointer identity. Safe
-    // channel transport must use a typed envelope/codec rather than copying it.
-    if !value.is_inline_transfer_value() {
+    // The legacy channel API has no endpoint-role metadata. Until typed channel
+    // endpoints land, its admitted compatibility route is parent -> thread.
+    let Some(packet) = RuntimeTransferPacket::inline_copy(
+        value,
+        TransferDomain::Parent,
+        TransferDomain::Thread,
+    ) else {
         return 0;
-    }
+    };
 
     unsafe {
         if (*ch_ptr).closed != 0 || (*ch_ptr).sender.is_null() {
@@ -118,7 +125,7 @@ pub extern "C" fn rt_channel_send(channel: RuntimeValue, value: RuntimeValue) ->
         let sender = &*(*ch_ptr).sender;
         match sender.lock() {
             Ok(guard) => {
-                if guard.send(value).is_ok() {
+                if guard.try_send(packet).is_ok() {
                     1
                 } else {
                     0
@@ -147,7 +154,7 @@ pub extern "C" fn rt_channel_recv(channel: RuntimeValue) -> RuntimeValue {
             Ok(guard) => {
                 // Use timeout to avoid blocking forever
                 match guard.recv_timeout(Duration::from_secs(30)) {
-                    Ok(val) => val,
+                    Ok(packet) => packet.runtime_value_for_target(TransferDomain::Thread).unwrap_or(RuntimeValue::NIL),
                     Err(_) => RuntimeValue::NIL,
                 }
             }
@@ -172,7 +179,7 @@ pub extern "C" fn rt_channel_try_recv(channel: RuntimeValue) -> RuntimeValue {
         let receiver = &*(*ch_ptr).receiver;
         match receiver.lock() {
             Ok(guard) => match guard.try_recv() {
-                Ok(val) => val,
+                Ok(packet) => packet.runtime_value_for_target(TransferDomain::Thread).unwrap_or(RuntimeValue::NIL),
                 Err(TryRecvError::Empty) => RuntimeValue::NIL,
                 Err(TryRecvError::Disconnected) => RuntimeValue::NIL,
             },
@@ -203,7 +210,7 @@ pub extern "C" fn rt_channel_recv_timeout(channel: RuntimeValue, timeout_ms: i64
         let receiver = &*(*ch_ptr).receiver;
         match receiver.lock() {
             Ok(guard) => match guard.recv_timeout(timeout) {
-                Ok(val) => val,
+                Ok(packet) => packet.runtime_value_for_target(TransferDomain::Thread).unwrap_or(RuntimeValue::NIL),
                 Err(_) => RuntimeValue::NIL,
             },
             Err(_) => RuntimeValue::NIL,
@@ -394,5 +401,16 @@ mod tests {
         assert!(array.is_heap());
         assert_eq!(array.deep_copy(), RuntimeValue::NIL);
         rt_array_free(array);
+    }
+
+    #[test]
+    fn test_channel_has_finite_default_capacity() {
+        let ch = rt_channel_new();
+        for i in 0..DEFAULT_CHANNEL_CAPACITY {
+            assert_eq!(rt_channel_send(ch, RuntimeValue::from_int(i as i64)), 1);
+        }
+        assert_eq!(rt_channel_send(ch, RuntimeValue::from_int(999)), 0);
+
+        rt_channel_free(ch);
     }
 }

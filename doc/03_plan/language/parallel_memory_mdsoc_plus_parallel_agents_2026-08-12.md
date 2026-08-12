@@ -15,13 +15,19 @@ Do not redefine them in runtime, MDSOC, backend, or application lanes.
 | Work package | Status | Evidence / next gate |
 |---|---|---|
 | WP-00 baseline/census | complete for this lane | local research names existing placement/mutation owners |
-| WP-01 transfer contract | partial implementation | common envelope/boundary checks; codec/wire vectors remain |
+| WP-01 transfer contract | partial implementation | common + native 40-byte codecs agree on a golden vector; token uniqueness model remains |
 | WP-02 storage contract | partial implementation | plan and conservative planner exist; mapping/wire vectors remain |
 | WP-03 commit contract | partial implementation | deterministic order/conflict validator exists; receipt/apply remains |
 | WP-04 policy resolver | partial implementation | raise-only common resolver exists; SDN/driver integration remains |
 | WP-05 requirements/diagnostics | partial implementation | selected requirements/state exist; stable compiler diagnostic registry remains |
 | WP-10 borrow soundness | in progress | dynamic index is now conservative; CFG/NLL rewrite remains |
-| WP-11..18 runtime/boundaries | blocked on implementation | P0 raw RuntimeValue transport record identifies exact sources |
+| WP-11..12 compiler boundaries/MIR | planned | no HIR boundary classifier or MIR transfer operations yet |
+| WP-13 native transfer codec | partial implementation | strict 40-byte envelope and 48-byte inline packet; graph/encoded/owned payload codecs remain |
+| WP-14 bounded mailbox | partial implementation | native compatibility channel and actor/common inbox/outbox queues have finite capacity 256; channel/common handle report full, but the legacy void native actor ABI cannot surface it; policy-selected capacities and checked public actor send remain |
+| WP-15 commit engine | partial implementation | common validation/order exists; atomic runtime publication remains |
+| WP-16 actor/channel migration | partial implementation | native safe paths carry route-validated inline packets, actor reply provenance is explicit, and heap actor context is rejected; typed heap/owned payloads remain |
+| WP-17 process transport | blocked on implementation | no separate-process codec/ObjectRef transport evidence |
+| WP-18 thread pool | planned | stable typed pool rewrite not started |
 | WP-20..27 layout/performance | planned | no MIR lowering, allocator adoption, or evidence yet |
 | WP-30..36 MDSOC/pilots | planned | do not start before safe transport and layout inputs |
 | WP-40..44 docs/formal/benchmarks | in progress | guide and skills added; real system/manual/formal evidence remains |

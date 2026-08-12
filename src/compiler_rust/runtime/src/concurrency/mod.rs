@@ -3,7 +3,7 @@ use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 
 // Re-export actor ABI types from common for convenience
-pub use simple_common::actor::{ActorHandle, ActorSpawner, Message, ThreadSpawner};
+pub use simple_common::actor::{ActorHandle, ActorSpawner, Message, ThreadSpawner, DEFAULT_ACTOR_MAILBOX_CAPACITY};
 
 // Death reasons for actors whose body panicked, keyed by actor id.
 // Written only on the panic path; queried by rt_actor_death_reason.
@@ -32,7 +32,7 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 }
 
 struct Scheduler {
-    mailboxes: Mutex<HashMap<usize, mpsc::Sender<Message>>>,
+    mailboxes: Mutex<HashMap<usize, mpsc::SyncSender<Message>>>,
     // Cloned actor handles: ActorHandle shares its lifecycle via Arc, so a
     // clone here lets join_actor(id) perform a REAL join. The previous design
     // registered an always-empty JoinHandle slot, so join_actor silently
@@ -41,7 +41,7 @@ struct Scheduler {
 }
 
 impl Scheduler {
-    fn register(&self, id: usize, inbox: mpsc::Sender<Message>, handle: ActorHandle) {
+    fn register(&self, id: usize, inbox: mpsc::SyncSender<Message>, handle: ActorHandle) {
         let mut mb = self.mailboxes.lock().unwrap_or_else(|e| e.into_inner());
         mb.insert(id, inbox);
         let mut joins = self.joins.lock().unwrap_or_else(|e| e.into_inner());
@@ -52,7 +52,7 @@ impl Scheduler {
         let mb = self.mailboxes.lock().unwrap_or_else(|e| e.into_inner());
         mb.get(&id)
             .ok_or_else(|| format!("unknown actor id {id}"))?
-            .send(msg)
+            .try_send(msg)
             .map_err(|e| format!("send failed: {e}"))
     }
 
@@ -79,13 +79,13 @@ fn scheduler() -> &'static Scheduler {
 /// Spawn a new actor thread with mailbox setup. Returns a handle.
 pub fn spawn_actor<F>(f: F) -> ActorHandle
 where
-    F: FnOnce(mpsc::Receiver<Message>, mpsc::Sender<Message>) + Send + 'static,
+    F: FnOnce(mpsc::Receiver<Message>, mpsc::SyncSender<Message>) + Send + 'static,
 {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static NEXT_ID: AtomicUsize = AtomicUsize::new(1);
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    let (in_tx, in_rx) = mpsc::channel();
-    let (out_tx, out_rx) = mpsc::channel();
+    let (in_tx, in_rx) = mpsc::sync_channel(DEFAULT_ACTOR_MAILBOX_CAPACITY);
+    let (out_tx, out_rx) = mpsc::sync_channel(DEFAULT_ACTOR_MAILBOX_CAPACITY);
     let jh = thread::spawn(move || {
         // Record a death reason before the panic propagates so joiners can ask
         // why the actor died (the JoinHandle error payload alone is opaque by
@@ -135,7 +135,7 @@ impl ScheduledSpawner {
 impl ActorSpawner for ScheduledSpawner {
     fn spawn<F>(&self, f: F) -> ActorHandle
     where
-        F: FnOnce(mpsc::Receiver<Message>, mpsc::Sender<Message>) + Send + 'static,
+        F: FnOnce(mpsc::Receiver<Message>, mpsc::SyncSender<Message>) + Send + 'static,
     {
         spawn_actor(f)
     }

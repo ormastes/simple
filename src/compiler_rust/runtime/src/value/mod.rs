@@ -72,6 +72,7 @@ pub mod simd_byte_ops;
 pub mod simd_clmul_ops;
 pub mod simd_int_ops;
 mod sync;
+mod transfer;
 pub mod tags;
 mod utf8_kernels;
 #[cfg(feature = "bench-internals")]

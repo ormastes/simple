@@ -47,3 +47,25 @@ Focused native tests pass for actor rejection, channel rejection, and mutable
 heap-copy rejection. This does **not** close the P0: bounded mailboxes, typed
 graph/envelope transport, ownership-token lifecycle, actor/process codecs, and
 real cancellation/backpressure evidence remain required.
+
+## 2026-08-12 typed-packet progress
+
+The native value runtime now implements the frozen 40-byte `SPTR` v1 metadata
+contract and a fixed-size 48-byte inline packet. The native actor path encodes
+and decodes that packet without a per-message byte-vector allocation instead of
+reconstructing an eight-byte raw value, rejects heap
+construction context, and the native compatibility channel stores typed packets
+in a finite 256-item queue. A full queue returns send failure rather than
+blocking while holding its compatibility mutex.
+
+The Simple/native golden envelope agrees byte-for-byte. Native tests cover
+reserved fields, unknown/heap value tags, packet round trip, actor context
+rejection, finite capacity, and existing channel behavior. Test compilation
+currently requires temporarily omitting the unrelated broken
+`rt_io_tcp_probe_peer` re-export already present on `origin/main`; that omission
+is not part of this change.
+
+The P0 remains open for typed frozen/owned/encoded graph payloads,
+policy-selected mailbox capacities, ownership-token lifecycle, close/free concurrency hardening,
+separate-process transport, cancellation rollback, and admitted self-hosted
+end-to-end evidence.

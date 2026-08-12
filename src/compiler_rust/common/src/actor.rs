@@ -9,11 +9,17 @@
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
+/// Default finite actor inbox/outbox capacity. Full sends report backpressure.
+pub const DEFAULT_ACTOR_MAILBOX_CAPACITY: usize = 256;
+
 /// Message type for actor communication.
 #[derive(Debug, Clone)]
 pub enum Message {
     Value(String),
     Bytes(Vec<u8>),
+    /// Fixed native ownership-transfer packet; avoids one heap allocation per
+    /// inline actor message while preserving exact packet length.
+    TransferPacket([u8; 48]),
 }
 
 /// Explicit actor lifecycle state for formal verification.
@@ -67,7 +73,7 @@ impl ActorLifecycle {
 #[derive(Debug, Clone)]
 pub struct ActorHandle {
     id: usize,
-    inbox: mpsc::Sender<Message>,
+    inbox: mpsc::SyncSender<Message>,
     outbox: Arc<Mutex<mpsc::Receiver<Message>>>,
     /// Explicit lifecycle state (replaces Option<JoinHandle>)
     lifecycle: Arc<Mutex<ActorLifecycle>>,
@@ -83,7 +89,7 @@ impl ActorHandle {
     /// Create a new actor handle (called by runtime's spawn implementation).
     pub fn new(
         id: usize,
-        inbox: mpsc::Sender<Message>,
+        inbox: mpsc::SyncSender<Message>,
         outbox: mpsc::Receiver<Message>,
         join_handle: Option<std::thread::JoinHandle<()>>,
     ) -> Self {
@@ -106,7 +112,7 @@ impl ActorHandle {
 
     /// Send a message to this actor.
     pub fn send(&self, msg: Message) -> Result<(), String> {
-        self.inbox.send(msg).map_err(|e| format!("send failed: {e}"))
+        self.inbox.try_send(msg).map_err(|e| format!("send failed: {e}"))
     }
 
     /// Receive a message from this actor (blocking).
@@ -157,7 +163,7 @@ impl ActorHandle {
     }
 
     /// Get the inbox sender for registering with scheduler.
-    pub fn inbox_sender(&self) -> mpsc::Sender<Message> {
+    pub fn inbox_sender(&self) -> mpsc::SyncSender<Message> {
         self.inbox.clone()
     }
 }
@@ -174,7 +180,7 @@ pub trait ActorSpawner: Send + Sync {
     /// - `outbox`: Channel sender for outgoing messages
     fn spawn<F>(&self, f: F) -> ActorHandle
     where
-        F: FnOnce(mpsc::Receiver<Message>, mpsc::Sender<Message>) + Send + 'static;
+        F: FnOnce(mpsc::Receiver<Message>, mpsc::SyncSender<Message>) + Send + 'static;
 }
 
 /// A simple thread-based actor spawner.
@@ -197,13 +203,31 @@ impl ThreadSpawner {
 impl ActorSpawner for ThreadSpawner {
     fn spawn<F>(&self, f: F) -> ActorHandle
     where
-        F: FnOnce(mpsc::Receiver<Message>, mpsc::Sender<Message>) + Send + 'static,
+        F: FnOnce(mpsc::Receiver<Message>, mpsc::SyncSender<Message>) + Send + 'static,
     {
         use std::sync::atomic::Ordering;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (in_tx, in_rx) = mpsc::channel();
-        let (out_tx, out_rx) = mpsc::channel();
+        let (in_tx, in_rx) = mpsc::sync_channel(DEFAULT_ACTOR_MAILBOX_CAPACITY);
+        let (out_tx, out_rx) = mpsc::sync_channel(DEFAULT_ACTOR_MAILBOX_CAPACITY);
         let jh = std::thread::spawn(move || f(in_rx, out_tx));
         ActorHandle::new(id, in_tx, out_rx, Some(jh))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn actor_handle_reports_bounded_mailbox_backpressure() {
+        let (in_tx, _in_rx) = mpsc::sync_channel(DEFAULT_ACTOR_MAILBOX_CAPACITY);
+        let (_out_tx, out_rx) = mpsc::sync_channel(DEFAULT_ACTOR_MAILBOX_CAPACITY);
+        let handle = ActorHandle::new(1, in_tx, out_rx, None);
+
+        for i in 0..DEFAULT_ACTOR_MAILBOX_CAPACITY {
+            assert!(handle.send(Message::Value(i.to_string())).is_ok());
+        }
+        let error = handle.send(Message::Value("full".to_string())).unwrap_err();
+        assert!(error.contains("full"));
     }
 }

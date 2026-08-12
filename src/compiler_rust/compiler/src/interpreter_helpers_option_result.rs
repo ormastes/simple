@@ -37,6 +37,9 @@ pub(crate) fn message_to_value(msg: Message) -> Value {
     match msg {
         Message::Value(s) => Value::text(s),
         Message::Bytes(b) => Value::text(String::from_utf8_lossy(&b).to_string()),
+        // Native ownership packets are not interpreter text messages. Fail
+        // closed until the interpreter has a matching typed decoder.
+        Message::TransferPacket(_) => Value::Nil,
     }
 }
 

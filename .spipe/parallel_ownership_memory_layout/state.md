@@ -120,3 +120,22 @@ dev-done
   (1/1), and mutable heap deep-copy reject (1/1). Full `TransferEnvelopeV1`
   runtime decoding, bounded mailbox/backpressure, graph codecs, ownership-token
   lifecycle, and separate-process evidence remain open; the P0 bug stays open.
+- impl: Added the native `SPTR` v1 envelope and inline packet implementation.
+  The 40-byte metadata matches the Simple golden vector; actors now exchange
+  exact 48-byte validated packets, heap actor construction context is rejected,
+  and the native compatibility channel stores packets in a finite 256-item
+  queue with full reported as send failure. Focused evidence passed once: two
+  transfer codec tests, actor packet round trip, heap-context rejection, and all
+  nine channel tests, and bounded actor backpressure. Actor inbox/outbox queues
+  are also finite at 256 and actor reply provenance is `Actor -> Parent`.
+  Compilation used a temporary isolated-worktree removal of
+  the unrelated missing `rt_io_tcp_probe_peer` re-export and restored it after
+  testing. Full graph codecs, policy-selected mailbox capacities, ownership-token
+  lifecycle, process transport, cancellation, and self-hosted evidence remain.
+- runtime decision: `runtime_need` = native safe boundaries delegated below the
+  Pure Simple common contract still lacked a byte-compatible packet and finite
+  channel storage; `facade_checked` = common `TransferEnvelopeV1` codec and
+  existing `std.concurrent.channel`; `chosen_path` = runtime-owned change with
+  no new public `rt_*` entrypoint; `rejected_shortcuts` = raw pointer bits,
+  unclassified `Any`, unbounded replacement queue, fixture-only bypass, and
+  pretending inline-only packets implement graph ownership transfer.

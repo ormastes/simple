@@ -239,7 +239,7 @@ pub(crate) fn const_trace(site: &str, name: &str) {
 thread_local! {
     pub(crate) static ACTOR_SPAWNER: ThreadSpawner = ThreadSpawner::new();
     pub(crate) static ACTOR_INBOX: RefCell<Option<Arc<Mutex<mpsc::Receiver<Message>>>>> = const { RefCell::new(None) };
-    pub(crate) static ACTOR_OUTBOX: RefCell<Option<mpsc::Sender<Message>>> = const { RefCell::new(None) };
+    pub(crate) static ACTOR_OUTBOX: RefCell<Option<mpsc::SyncSender<Message>>> = const { RefCell::new(None) };
     pub(crate) static CONST_NAMES: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
     /// Immutable variables tracked by naming pattern (lowercase without underscore suffix)
     /// These cannot be reassigned but support functional update with ->
@@ -392,7 +392,7 @@ pub enum ExecutionMode {
     /// Actor execution with message channels
     Actor {
         inbox: Arc<Mutex<mpsc::Receiver<Message>>>,
-        outbox: mpsc::Sender<Message>,
+        outbox: mpsc::SyncSender<Message>,
     },
     /// Generator execution accumulating yield values
     Generator { yields: Vec<Value> },
@@ -425,7 +425,7 @@ impl ExecutionMode {
     }
 
     /// Get actor outbox if in actor mode
-    pub fn actor_outbox(&self) -> Option<&mpsc::Sender<Message>> {
+    pub fn actor_outbox(&self) -> Option<&mpsc::SyncSender<Message>> {
         match self {
             ExecutionMode::Actor { outbox, .. } => Some(outbox),
             _ => None,
