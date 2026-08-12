@@ -61,3 +61,25 @@ on this host. It is not a whole-frame guarantee: DrawIR traversal, damage-plan
 construction, multiple operations, scheduling, presentation, and scanout must
 share the remaining budget. Arbitrary disjoint rectangles may have different
 cache behavior and require separate evidence.
+
+## Constant-alpha direct-buffer optimization
+
+The original constant-alpha production span gathered and unboxed a 256-pixel
+destination row, materialized a second constant-source row, ran the general
+variable-alpha kernel, then boxed and scattered the result. Replacing that
+path with direct boxed-buffer traversal, precomputed source terms, an exact
+opaque-destination denominator, and the general formula only for translucent
+destinations reduced native full-frame p50 from 519,693,902 ns to 102,879,542
+ns (5.05×). Full-frame p95 remains 105,194,024 ns and therefore still fails
+8K/80.
+
+Fifteen-sample retained-damage receipts measured constant-alpha p95 of
+5,359,340 ns at 5% damage and 9,632,421 ns at 7.5% damage, both individually
+within budget. At 10% the p95 was 13,812,478 ns and failed. The measured
+conservative isolated envelope for this operation is therefore 7.5% on the
+host. ARM NEON and RVV QEMU correctness gates pass for opaque, translucent,
+and transparent destinations; those emulated runs remain correctness evidence,
+not physical throughput evidence. This direct fixed-denominator path is not
+yet credited with an operation-local SIMD hit, so explicit vector attribution
+remains open even though surrounding fill and variable-blend calls make the
+aggregate benchmark hit counter nonzero.

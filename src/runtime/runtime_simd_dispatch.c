@@ -1738,24 +1738,24 @@ SplArray* rt_engine2d_simd_blend_const_span_u32(SplArray* dst, int64_t offset,
         engine2d_fill_into(dst_data + off, n, engine2d_box_pixel(s));
         return dst;
     }
-    enum { ENGINE2D_BLEND_CONST_STACK_PIXELS = 256 };
-    int64_t raw_dst[ENGINE2D_BLEND_CONST_STACK_PIXELS];
-    int64_t raw_src[ENGINE2D_BLEND_CONST_STACK_PIXELS];
-    for (int64_t i = 0; i < ENGINE2D_BLEND_CONST_STACK_PIXELS; i++) {
-        raw_src[i] = (int64_t)(uint64_t)s;
-    }
-    int64_t done = 0;
-    while (done < n) {
-        int64_t chunk = n - done;
-        if (chunk > ENGINE2D_BLEND_CONST_STACK_PIXELS) chunk = ENGINE2D_BLEND_CONST_STACK_PIXELS;
-        for (int64_t i = 0; i < chunk; i++) {
-            raw_dst[i] = (int64_t)(uint64_t)engine2d_unbox_pixel(dst_data[off + done + i]);
+    uint32_t inv = 255u - sa;
+    uint32_t sr_sa = ((s >> 16) & 255u) * sa;
+    uint32_t sg_sa = ((s >> 8) & 255u) * sa;
+    uint32_t sb_sa = (s & 255u) * sa;
+    for (int64_t i = 0; i < n; i++) {
+        uint32_t d = engine2d_unbox_pixel(dst_data[off + i]);
+        uint32_t da = d >> 24;
+        if (da == 255u) {
+            uint32_t r = (sr_sa + (((d >> 16) & 255u) * inv)) / 255u;
+            uint32_t g = (sg_sa + (((d >> 8) & 255u) * inv)) / 255u;
+            uint32_t b = (sb_sa + ((d & 255u) * inv)) / 255u;
+            dst_data[off + i] = engine2d_box_pixel(
+                0xff000000u | (r << 16) | (g << 8) | b);
+        } else {
+            dst_data[off + i] = engine2d_box_pixel((uint32_t)
+                engine2d_blend_pixel((int64_t)(uint64_t)s,
+                                     (int64_t)(uint64_t)d));
         }
-        engine2d_blend_into(raw_dst, raw_dst, raw_src, chunk);
-        for (int64_t i = 0; i < chunk; i++) {
-            dst_data[off + done + i] = engine2d_box_pixel((uint32_t)(uint64_t)raw_dst[i]);
-        }
-        done += chunk;
     }
     return dst;
 }

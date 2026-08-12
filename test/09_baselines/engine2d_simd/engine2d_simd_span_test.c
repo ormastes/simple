@@ -107,6 +107,16 @@ int main(void) {
     if (rt_simd_engine2d_neon_hits() != 0) return 10;
 #endif
 
+    uint32_t const_dst_values[3] = {0x00112233u, 0x800000ffu, 0xff102030u};
+    for (int i = 0; i < 3; i++)
+        blend_dst_pixels[i] = (int64_t)((uint64_t)const_dst_values[i] << 3);
+    result = rt_engine2d_simd_blend_const_span_u32(
+        (SplArray *)&blend_dst, 0, 3, 0x804080c0u);
+    for (int i = 0; i < 3; i++) {
+        uint32_t want = blend_ref(0x804080c0u, const_dst_values[i]);
+        if (blend_dst_pixels[i] != (int64_t)((uint64_t)want << 3)) return 11;
+    }
+
     int64_t long_pixels[520];
     int64_t long_src_pixels[300];
     int64_t expected[300];
@@ -121,7 +131,7 @@ int main(void) {
     TestArray long_src = {0, 0, {0}, 300, 300, long_src_pixels};
     result = rt_engine2d_simd_blend_span_u32(
         (SplArray *)&long_dst, 0, (SplArray *)&long_src, 0, 300);
-    for (int i = 0; i < 300; i++) if (long_pixels[i] != expected[i]) return 11;
+    for (int i = 0; i < 300; i++) if (long_pixels[i] != expected[i]) return 12;
 
     for (int i = 0; i < 300; i++) long_pixels[i] = (int64_t)((uint64_t)(0x800000ffu + (uint32_t)i) << 3);
     result = rt_engine2d_simd_blend_span_u32(
@@ -129,14 +139,14 @@ int main(void) {
     for (int i = 0; i < 280; i++) {
         uint32_t s = 0x800000ffu + (uint32_t)i;
         uint32_t d = 0x800000ffu + (uint32_t)(i + 20);
-        if (long_pixels[i + 20] != (int64_t)((uint64_t)blend_ref(s, d) << 3)) return 12;
+        if (long_pixels[i + 20] != (int64_t)((uint64_t)blend_ref(s, d) << 3)) return 13;
     }
 
     for (int i = 0; i < 300; i++) long_pixels[i] = (int64_t)((uint64_t)0xff102030u << 3);
     result = rt_engine2d_simd_blend_const_span_u32(
         (SplArray *)&long_dst, 0, 300, 0x804080c0u);
     for (int i = 0; i < 300; i++) {
-        if (long_pixels[i] != (int64_t)((uint64_t)blend_ref(0x804080c0u, 0xff102030u) << 3)) return 13;
+        if (long_pixels[i] != (int64_t)((uint64_t)blend_ref(0x804080c0u, 0xff102030u) << 3)) return 14;
     }
     puts("ENGINE2D_SIMD_SPAN_TEST: PASS");
     return 0;
