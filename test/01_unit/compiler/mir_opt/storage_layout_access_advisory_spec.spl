@@ -1,0 +1,178 @@
+use std.spec.{describe, it, assert_equal, assert_true, assert_false}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_data.*
+use compiler.mir_opt.mir_opt.storage_access_analysis.{
+    analyze_mir_storage_access_summary, mir_storage_region_binding_v1
+}
+use compiler.mir_opt.mir_opt.storage_layout_access_advisory.{
+    storage_layout_access_advisory_v1
+}
+use std.common.structural.parallel_commit.access_contracts.{
+    parallel_access_paths_conflict
+}
+use std.common.structural.storage_layout.planner.{storage_layout_plan_auto}
+use std.common.structural.storage_layout.storage_layout_contracts.{
+    StorageLayoutKind, storage_layout_kind_to_u8
+}
+
+fn advisory_copy(local_id: i64) -> MirOperand:
+    MirOperand.copy(LocalId(id: local_id))
+
+fn advisory_index(value: i64) -> MirOperand:
+    MirOperand.const_int(value)
+
+fn advisory_function(reverse_order: bool, dynamic_index: bool) -> MirFunction:
+    val first_index = if dynamic_index:
+        advisory_copy(30)
+    else:
+        advisory_index(3)
+    val first = [
+        MirInst(kind: MirInstKind.GetElementPtr(
+            LocalId(id: 1), advisory_copy(10), [first_index]), span: nil),
+        MirInst(kind: MirInstKind.Load(
+            LocalId(id: 2), advisory_copy(1)), span: nil),
+        MirInst(kind: MirInstKind.GetField(
+            LocalId(id: 3), advisory_copy(2), 4), span: nil)
+    ]
+    val second = [
+        MirInst(kind: MirInstKind.GetElementPtr(
+            LocalId(id: 4), advisory_copy(10), [advisory_index(5)]), span: nil),
+        MirInst(kind: MirInstKind.Load(
+            LocalId(id: 5), advisory_copy(4)), span: nil),
+        MirInst(kind: MirInstKind.GetField(
+            LocalId(id: 6), advisory_copy(5), 7), span: nil)
+    ]
+    val instructions = if reverse_order: second + first else: first + second
+    MirFunction(symbol: SymbolId.new(951), name: "layout_advisory",
+        signature: MirSignature(params: [], return_type: MirType.unit(),
+            is_variadic: false), locals: [], blocks: [MirBlock(
+                id: BlockId.new(0), label: Some("entry"),
+                instructions: instructions, terminator: MirTerminator.Ret(nil))],
+        entry_block: BlockId.new(0), span: nil, generic_params: [],
+        is_generic_template: false, specialization_of: nil, type_bindings: {})
+
+fn advisory_for(function: MirFunction, simd_width: i64,
+                gpu: bool, abi: bool):
+    val summary = analyze_mir_storage_access_summary(function,
+        [mir_storage_region_binding_v1(10, 200)])
+    storage_layout_access_advisory_v1(summary, 9201, 3, 32, 16,
+        simd_width, gpu, abi, "access-policy-v1")
+
+fn advisory_layout_tag(function: MirFunction, simd_width: i64,
+                       gpu: bool, abi: bool) -> i64:
+    storage_layout_kind_to_u8(
+        storage_layout_plan_auto(
+            advisory_for(function, simd_width, gpu, abi).request).layout)
+
+describe "typed storage access layout advisory":
+    it "advises SoA SIMD AoSoA explicit GPU grouping and pinned ABI":
+        val function = advisory_function(false, false)
+        assert_equal(advisory_layout_tag(function, 1, false, false),
+            storage_layout_kind_to_u8(StorageLayoutKind.SoA))
+        assert_equal(advisory_layout_tag(function, 8, false, false),
+            storage_layout_kind_to_u8(StorageLayoutKind.AoSoA))
+        assert_equal(advisory_layout_tag(function, 1, true, false),
+            storage_layout_kind_to_u8(StorageLayoutKind.Grouped))
+        assert_equal(advisory_layout_tag(function, 1, true, true),
+            storage_layout_kind_to_u8(StorageLayoutKind.ExternalFixed))
+
+    it "falls back to AoS for dynamic unknown and empty evidence":
+        val dynamic = advisory_for(advisory_function(false, true), 1, false, false)
+        assert_false(dynamic.complete)
+        assert_false(dynamic.independent_field_access)
+        assert_equal(storage_layout_kind_to_u8(
+            storage_layout_plan_auto(dynamic.request).layout),
+            storage_layout_kind_to_u8(StorageLayoutKind.AoS))
+
+        val unknown_summary = analyze_mir_storage_access_summary(
+            advisory_function(false, false), [])
+        val unknown = storage_layout_access_advisory_v1(unknown_summary,
+            9201, 3, 32, 16, 1, false, false, "access-policy-v1")
+        assert_false(unknown.complete)
+        assert_equal(storage_layout_kind_to_u8(
+            storage_layout_plan_auto(unknown.request).layout),
+            storage_layout_kind_to_u8(StorageLayoutKind.AoS))
+
+        val empty_function = MirFunction(..advisory_function(false, false),
+            blocks: [MirBlock(id: BlockId.new(0), label: Some("entry"),
+                instructions: [], terminator: MirTerminator.Ret(nil))])
+        val empty = advisory_for(empty_function, 1, false, false)
+        assert_false(empty.complete)
+        assert_equal(storage_layout_kind_to_u8(
+            storage_layout_plan_auto(empty.request).layout),
+            storage_layout_kind_to_u8(StorageLayoutKind.AoS))
+
+        val observed_function = MirFunction(..advisory_function(false, false),
+            blocks: [MirBlock(id: BlockId.new(0), label: Some("entry"),
+                instructions: [MirInst(kind: MirInstKind.Cast(
+                    LocalId(id: 50), advisory_copy(10), MirType.i64()), span: nil)],
+                terminator: MirTerminator.Ret(nil))])
+        val observed = advisory_for(observed_function, 1, false, false)
+        assert_false(observed.complete)
+        assert_equal(storage_layout_kind_to_u8(
+            storage_layout_plan_auto(observed.request).layout),
+            storage_layout_kind_to_u8(StorageLayoutKind.AoS))
+
+    it "keeps co-accessing field paths conflicting and identity order stable":
+        val forward_summary = analyze_mir_storage_access_summary(
+            advisory_function(false, false),
+            [mir_storage_region_binding_v1(10, 200)])
+        assert_false(parallel_access_paths_conflict(
+            forward_summary.accesses[1], forward_summary.accesses[3]))
+        val forward = storage_layout_access_advisory_v1(forward_summary,
+            9201, 3, 32, 16, 1, false, false, "access-policy-v1")
+        val reversed = advisory_for(advisory_function(true, false),
+            1, false, false)
+        assert_true(forward.complete)
+        assert_equal(forward.identity, reversed.identity)
+
+        val coaccess_function = MirFunction(..advisory_function(false, false),
+            blocks: [MirBlock(id: BlockId.new(0), label: Some("entry"),
+                instructions: [
+                    MirInst(kind: MirInstKind.GetField(
+                        LocalId(id: 1), advisory_copy(10), 4), span: nil),
+                    MirInst(kind: MirInstKind.SetField(
+                        advisory_copy(10), 7, advisory_copy(40)), span: nil)
+                ], terminator: MirTerminator.Ret(nil))])
+        val coaccess_summary = analyze_mir_storage_access_summary(
+            coaccess_function, [mir_storage_region_binding_v1(10, 200)])
+        assert_true(parallel_access_paths_conflict(
+            coaccess_summary.accesses[0], coaccess_summary.accesses[1]))
+        val coaccess = storage_layout_access_advisory_v1(coaccess_summary,
+            9201, 3, 32, 16, 1, false, false, "access-policy-v1")
+        assert_false(coaccess.complete)
+        assert_equal(storage_layout_kind_to_u8(
+            storage_layout_plan_auto(coaccess.request).layout),
+            storage_layout_kind_to_u8(StorageLayoutKind.AoS))
+
+    it "denies all-field and non-field record uses":
+        val clean_summary = analyze_mir_storage_access_summary(
+            advisory_function(false, false),
+            [mir_storage_region_binding_v1(10, 200)])
+        val all_fields = storage_layout_access_advisory_v1(clean_summary,
+            9201, 2, 32, 16, 1, false, false, "access-policy-v1")
+        assert_false(all_fields.complete)
+        assert_false(all_fields.independent_field_access)
+        assert_equal(storage_layout_kind_to_u8(
+            storage_layout_plan_auto(all_fields.request).layout),
+            storage_layout_kind_to_u8(StorageLayoutKind.AoS))
+
+        val base = advisory_function(false, false)
+        val block = base.blocks[0]
+        var instructions = block.instructions
+        val call_type = MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+            params: [MirType.i64()], return_type: MirType.unit(),
+            is_variadic: false)))
+        instructions.push(MirInst(kind: MirInstKind.Call(nil,
+            MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("consume_record"), call_type)),
+            [advisory_copy(2)]), span: nil))
+        val escaped_record = MirFunction(..base, blocks: [
+            MirBlock(..block, instructions: instructions)
+        ])
+        val escaped = advisory_for(escaped_record, 1, false, false)
+        assert_false(escaped.complete)
+        assert_false(escaped.independent_field_access)
+        assert_equal(storage_layout_kind_to_u8(
+            storage_layout_plan_auto(escaped.request).layout),
+            storage_layout_kind_to_u8(StorageLayoutKind.AoS))

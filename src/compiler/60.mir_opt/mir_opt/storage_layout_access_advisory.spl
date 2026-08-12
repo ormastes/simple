@@ -1,0 +1,85 @@
+# Advisory bridge from typed WP-20 access facts to the frozen layout planner.
+#
+# This adapter never parses descriptive projection text and never emits alias
+# metadata. GPU intent and ABI pinning remain explicit hard inputs.
+
+use compiler.mir_opt.mir_opt.storage_access_analysis.{
+    MIR_STORAGE_UNKNOWN_REGION_ID, MirStorageAccessSummaryV1
+}
+use std.common.structural.parallel_commit.access_contracts.{
+    parallel_access_mode_to_u8
+}
+use std.common.structural.storage_layout.planner.{
+    StorageLayoutRequestV1, storage_layout_request_v1
+}
+
+struct StorageLayoutAccessAdvisoryV1:
+    request: StorageLayoutRequestV1
+    complete: bool
+    independent_field_access: bool
+    identity: text
+
+fn storage_layout_access_advisory_v1(
+    summary: MirStorageAccessSummaryV1,
+    logical_type_id: i64, schema_field_count: i64,
+    element_count: i64, alignment: i64,
+    simd_width: i64, gpu_bulk_fields: bool, abi_pinned: bool,
+    policy_hash: text
+) -> StorageLayoutAccessAdvisoryV1:
+    var complete = summary.complete and summary.typed_facts.len() > 0
+        and not summary.address_observed and not summary.unknown_access
+    var field_ids: [i64] = []
+    var identity_rows: [text] = []
+    for fact in summary.typed_facts:
+        if fact.path.region_id == MIR_STORAGE_UNKNOWN_REGION_ID:
+            complete = false
+        if fact.has_field:
+            if fact.field_id < 0 or not fact.path.known_range:
+                complete = false
+            var found = false
+            for existing in field_ids:
+                if existing == fact.field_id: found = true
+            if not found: field_ids.push(fact.field_id)
+            identity_rows.push("{fact.field_id}|{fact.path.region_id}|{fact.path.start}|{fact.path.end}|{parallel_access_mode_to_u8(fact.path.mode)}")
+        elif not fact.structural_record_load:
+            complete = false
+    if field_ids.len() < 2 or schema_field_count <= field_ids.len():
+        complete = false
+
+    # Fields consumed together from an overlapping logical element range are
+    # co-access, not evidence for physical separation.
+    var left = 0
+    while left < summary.typed_facts.len():
+        val left_fact = summary.typed_facts[left]
+        if left_fact.has_field:
+            var right = left + 1
+            while right < summary.typed_facts.len():
+                val right_fact = summary.typed_facts[right]
+                if right_fact.has_field and left_fact.field_id != right_fact.field_id
+                    and left_fact.path.region_id == right_fact.path.region_id
+                    and left_fact.path.known_range and right_fact.path.known_range
+                    and left_fact.path.start < right_fact.path.end
+                    and right_fact.path.start < left_fact.path.end:
+                    complete = false
+                right = right + 1
+        left = left + 1
+
+    var i = 0
+    while i < identity_rows.len():
+        var j = i + 1
+        while j < identity_rows.len():
+            if identity_rows[j] < identity_rows[i]:
+                val temporary = identity_rows[i]
+                identity_rows[i] = identity_rows[j]
+                identity_rows[j] = temporary
+            j = j + 1
+        i = i + 1
+
+    val independent = complete and field_ids.len() >= 2
+    val request = storage_layout_request_v1(logical_type_id, element_count,
+        alignment, simd_width, gpu_bulk_fields, independent, abi_pinned,
+        policy_hash)
+    val rows_identity = identity_rows.join(";")
+    StorageLayoutAccessAdvisoryV1(request: request, complete: complete,
+        independent_field_access: independent,
+        identity: "access-advisory-v1|{logical_type_id}|{schema_field_count}|{element_count}|{alignment}|{simd_width}|{gpu_bulk_fields}|{abi_pinned}|{policy_hash.len()}:{policy_hash}|{complete}|{summary.address_observed}|{summary.unknown_access}|{independent}|{rows_identity}")

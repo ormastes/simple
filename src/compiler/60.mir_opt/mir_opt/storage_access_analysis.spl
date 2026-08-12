@@ -6,6 +6,7 @@
 # add conflicts, never manufacture disjointness.
 
 use compiler.mir.mir_data.*
+use compiler.mir_opt.mir_opt.auto_vectorize_analysis.{get_inst_uses, get_operand_locals}
 use std.common.structural.parallel_commit.access_contracts.{
     ParallelAccessMode,
     ParallelAccessPathV1,
@@ -25,10 +26,18 @@ struct MirStorageProjectionV1:
     known_range: bool
     projection: text
 
+struct MirStorageAccessFactV1:
+    path: ParallelAccessPathV1
+    has_field: bool
+    field_id: i64
+    structural_record_load: bool
+
 struct MirStorageAccessSummaryV1:
     accesses: [ParallelAccessPathV1]
+    typed_facts: [MirStorageAccessFactV1]
     address_observed: bool
     unknown_access: bool
+    complete: bool
 
 fn mir_storage_region_binding_v1(local_id: i64, region_id: i64) -> MirStorageRegionBindingV1:
     MirStorageRegionBindingV1(local_id: local_id, region_id: region_id)
@@ -137,10 +146,15 @@ fn analyze_mir_storage_access_summary(
 ) -> MirStorageAccessSummaryV1:
     if not mir_storage_bindings_well_formed(bindings):
         return MirStorageAccessSummaryV1(
-            accesses: [], address_observed: false, unknown_access: true)
+            accesses: [], typed_facts: [], address_observed: false,
+            unknown_access: true, complete: false)
     var projections: {i64: MirStorageProjectionV1} = {}
     var address_locals: {i64: bool} = {}
+    var load_fact_by_local: {i64: i64} = {}
+    var load_total_uses: {i64: i64} = {}
+    var load_field_uses: {i64: i64} = {}
     var accesses: [ParallelAccessPathV1] = []
+    var typed_facts: [MirStorageAccessFactV1] = []
     var address_observed = false
     var unknown_access = false
 
@@ -149,6 +163,9 @@ fn analyze_mir_storage_access_summary(
 
     for block in function.blocks:
         for instruction in block.instructions:
+            for used in get_inst_uses(instruction):
+                if load_total_uses.has(used.id):
+                    load_total_uses[used.id] = load_total_uses[used.id] + 1
             match instruction.kind:
                 case GetElementPtr(dest, base, indices):
                     val base_projection = mir_storage_projection_for_operand(base, projections, bindings)
@@ -158,28 +175,55 @@ fn analyze_mir_storage_access_summary(
                     val base_projection = mir_storage_projection_for_operand(base, projections, bindings)
                     val field_projection = mir_storage_field_projection(base_projection, field)
                     projections[dest.id] = field_projection
-                    accesses.push(mir_storage_access_fact(field_projection, ParallelAccessMode.Read))
+                    val path = mir_storage_access_fact(
+                        field_projection, ParallelAccessMode.Read)
+                    accesses.push(path)
+                    typed_facts.push(MirStorageAccessFactV1(
+                        path: path, has_field: true, field_id: field,
+                        structural_record_load: false))
+                    val base_local_id = mir_storage_operand_local(base)
+                    if load_fact_by_local.has(base_local_id):
+                        if not load_field_uses.has(base_local_id):
+                            load_field_uses[base_local_id] = 0
+                        load_field_uses[base_local_id] =
+                            load_field_uses[base_local_id] + 1
                 case SetField(base, field, value):
                     val base_projection = mir_storage_projection_for_operand(base, projections, bindings)
-                    accesses.push(mir_storage_access_fact(
-                        mir_storage_field_projection(base_projection, field),
-                        ParallelAccessMode.Write))
+                    val field_projection = mir_storage_field_projection(
+                        base_projection, field)
+                    val path = mir_storage_access_fact(
+                        field_projection, ParallelAccessMode.Write)
+                    accesses.push(path)
+                    typed_facts.push(MirStorageAccessFactV1(
+                        path: path, has_field: true, field_id: field,
+                        structural_record_load: false))
                     if mir_storage_operand_has_address(value, address_locals, bindings):
                         address_observed = true
                         unknown_access = true
                 case Load(dest, pointer):
                     val loaded_projection = mir_storage_projection_for_operand(
                         pointer, projections, bindings)
-                    accesses.push(mir_storage_access_fact(
-                        loaded_projection,
-                        ParallelAccessMode.Read))
+                    val path = mir_storage_access_fact(
+                        loaded_projection, ParallelAccessMode.Read)
+                    accesses.push(path)
+                    typed_facts.push(MirStorageAccessFactV1(
+                        path: path, has_field: false, field_id: -1,
+                        structural_record_load: false))
+                    load_fact_by_local[dest.id] = typed_facts.len() - 1
+                    load_total_uses[dest.id] = 0
+                    load_field_uses[dest.id] = 0
                     # Preserve record provenance through GEP -> Load -> GetField.
                     # The loaded value is not itself an address capability.
                     projections[dest.id] = loaded_projection
                 case Store(pointer, value):
-                    accesses.push(mir_storage_access_fact(
-                        mir_storage_projection_for_operand(pointer, projections, bindings),
-                        ParallelAccessMode.Write))
+                    val stored_projection = mir_storage_projection_for_operand(
+                        pointer, projections, bindings)
+                    val path = mir_storage_access_fact(
+                        stored_projection, ParallelAccessMode.Write)
+                    accesses.push(path)
+                    typed_facts.push(MirStorageAccessFactV1(
+                        path: path, has_field: false, field_id: -1,
+                        structural_record_load: false))
                     if mir_storage_operand_has_address(
                         value, address_locals, bindings):
                         address_observed = true
@@ -226,18 +270,51 @@ fn analyze_mir_storage_access_summary(
                     pass
         match block.terminator:
             case Ret(value):
+                if value.?:
+                    for used in get_operand_locals(value.unwrap()):
+                        if load_total_uses.has(used.id):
+                            load_total_uses[used.id] = load_total_uses[used.id] + 1
                 if value.? and mir_storage_operand_has_address(
                     value.unwrap(), address_locals, bindings):
                     address_observed = true
                     unknown_access = true
+            case If(condition, _, _):
+                for used in get_operand_locals(condition):
+                    if load_total_uses.has(used.id):
+                        load_total_uses[used.id] = load_total_uses[used.id] + 1
+            case Switch(value, _, _):
+                for used in get_operand_locals(value):
+                    if load_total_uses.has(used.id):
+                        load_total_uses[used.id] = load_total_uses[used.id] + 1
             case CallTerminator(_, function_operand, args, _, _):
+                for used in get_operand_locals(function_operand):
+                    if load_total_uses.has(used.id):
+                        load_total_uses[used.id] = load_total_uses[used.id] + 1
                 val owner_finalizer = mir_storage_is_owner_finalizer_call(
                     function_operand, args, bindings)
                 for arg in args:
+                    for used in get_operand_locals(arg):
+                        if load_total_uses.has(used.id):
+                            load_total_uses[used.id] = load_total_uses[used.id] + 1
                     if mir_storage_operand_has_address(arg, address_locals, bindings)
                         and not owner_finalizer:
                         address_observed = true
                         unknown_access = true
             case _: pass
-    MirStorageAccessSummaryV1(accesses: accesses,
-        address_observed: address_observed, unknown_access: unknown_access)
+    for loaded_local in load_fact_by_local.keys():
+        if load_field_uses[loaded_local] > 0
+            and load_total_uses[loaded_local] == load_field_uses[loaded_local]:
+            val fact_index = load_fact_by_local[loaded_local]
+            typed_facts[fact_index] = MirStorageAccessFactV1(
+                ..typed_facts[fact_index], structural_record_load: true)
+    var complete = accesses.len() > 0 and not address_observed and not unknown_access
+    for fact in typed_facts:
+        if fact.path.region_id == MIR_STORAGE_UNKNOWN_REGION_ID:
+            complete = false
+        if fact.has_field and not fact.path.known_range:
+            complete = false
+        if not fact.has_field and not fact.structural_record_load:
+            complete = false
+    MirStorageAccessSummaryV1(accesses: accesses, typed_facts: typed_facts,
+        address_observed: address_observed, unknown_access: unknown_access,
+        complete: complete)

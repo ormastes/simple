@@ -524,3 +524,12 @@ dev-done
   owner regions before rewriting. Focused analysis and producer suites pass
   6/6 and 5/5. These facts emit no alias metadata or scheduling permission;
   completeness-tracked layout advisory and planner integration remain open.
+- impl: Added the bounded WP-20-to-WP-21 typed layout advisory bridge. Public
+  access paths deliberately retain conservative record-load and field facts;
+  a separate def/use-derived terminal-event view excludes a record Load from
+  planner counts only when every use is a direct field projection. Unknown,
+  dynamic, address-observed, whole-record, co-accessed, empty, and non-sparse
+  evidence keeps the reference layout. Complete sparse field evidence may set
+  the existing planner's locality hint, while ABI, GPU, and SIMD inputs remain
+  explicit and no alias/scheduling authority is emitted. Advisory, access, and
+  producer gates pass 4/4, 6/6, and 5/5.

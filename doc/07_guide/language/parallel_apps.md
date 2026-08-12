@@ -53,6 +53,12 @@ unbound pointers, and field paths remain conservative. Field names are useful
 layout-planning evidence but do not yet prove physical disjointness. No current
 backend may infer `noalias` or claim AoS/SoA lowering from these facts alone.
 
+The layout advisory uses a separate typed terminal-event view. A conservative
+record Load remains visible to ownership/conflict analysis, but is excluded
+from locality counts only when all of its uses are direct field projections.
+This deliberate difference never flows backward: a SoA recommendation cannot
+prove field disjointness, ownership, or parallel scheduling safety.
+
 The common storage contract also includes a checked reference conversion oracle
 for fixed-size records. It can convert non-overlapping fields among AoS, SoA,
 and tail-padded AoSoA plans and verify exact logical round trips. The oracle is
