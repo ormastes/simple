@@ -176,6 +176,7 @@ artifact_header() {
         # The tooling artifact is a generation archive. Only its canonical
         # manifest is policy-bearing; never trust a receipt-side description.
         [ "$(tar -tf "$artifact" 2>/dev/null | wc -l | tr -d ' ')" -le "${MCI_AGGREGATE_TAR_MEMBER_LIMIT:-256}" ] || return 1
+        [ "$(tar -xOf "$artifact" 2>/dev/null | wc -c | tr -d ' ')" -le "${MCI_AGGREGATE_TAR_EXPANDED_LIMIT_BYTES:-1073741824}" ] || return 1
         tar -xOf "$artifact" ./manifest.env | dd bs=65537 count=1 of="$output" 2>/dev/null || return 1
         [ "$(wc -c < "$output")" -le 65536 ] || return 1
     else
@@ -219,6 +220,8 @@ work=$(mktemp -d "$evidence/.aggregate.XXXXXX") || exit 2
 tmp="$work/report"
 candidate_graph="$work/aggregate-candidate-v1"
 trap 'rm -rf "$work"' EXIT HUP INT TERM
+publisher=$work/secure-publish
+cc -std=c11 -O2 "$repo_root/scripts/check/lib/mci-secure-publish.c" -o "$publisher" >/dev/null 2>&1 || { echo 'BLOCKED: secure publisher unavailable' >&2; exit 2; }
 trusted_key_snapshot="$work/trusted-public-key.pem"
 reviewer_key_snapshot="$work/reviewer-public-key.pem"
 snapshot_file "$trusted_key" "$trusted_key_snapshot" || {
@@ -406,6 +409,7 @@ for check_id in $required_checks; do
         else
             artifact_path="$evidence/artifacts/$artifact_relpath"
             if ! regular_nonsymlink "$artifact_path"; then reason=unsafe-artifact-file
+            elif [ "$(wc -c < "$artifact_path")" -gt "${MCI_AGGREGATE_ARTIFACT_LIMIT_BYTES:-1073741824}" ]; then reason=artifact-size-limit
             else
                 asnapshot="$work/$check_id.artifact"
                 if ! snapshot_file "$artifact_path" "$asnapshot" || ! is_sha256 "$artifact_hash" || [ "$(hash_file "$asnapshot")" != "$artifact_hash" ]; then
@@ -528,9 +532,9 @@ manifest_hash=$(hash_file "$tmp")
 echo "manifest_sha256=$manifest_hash" >> "$tmp"
 sync
 [ "$(sed '$d' "$tmp" | hash_file /dev/stdin 2>/dev/null || true)" = "$manifest_hash" ] || { echo 'BLOCKED: report verification failed' >&2; exit 2; }
-if [ "$reviewer_status" = PASS ]; then report_path=$evidence/aggregate-final-report-v1.env; else report_path=$evidence/aggregate-report-v1.env; fi
-[ ! -e "$report_path" ] && [ ! -L "$report_path" ] || { echo 'BLOCKED: aggregate report collision' >&2; exit 2; }
-mv "$tmp" "$report_path"
+if [ "$reviewer_status" = PASS ]; then report_path=$evidence/aggregate-final-report-v1.env; else report_path=$evidence/aggregate-candidate-report-v1.env; fi
+report_dir=$(dirname "$report_path"); report_name=$(basename "$report_path")
+"$publisher" "$report_dir" "$tmp" "$report_name" || { echo 'BLOCKED: aggregate report collision or unsafe publication' >&2; exit 2; }
 sync
 [ "$(sed '$d' "$report_path" | hash_file /dev/stdin 2>/dev/null || true)" = "$manifest_hash" ] || { echo 'BLOCKED: published report verification failed' >&2; exit 2; }
 # The first pass must expose the exact candidate bytes to the independent
@@ -540,10 +544,11 @@ candidate_final=$evidence/aggregate-candidate-v1.env
 if [ -e "$candidate_final" ]; then
     regular_nonsymlink "$candidate_final" && [ "$(hash_file "$candidate_final")" = "$(hash_file "$candidate_graph")" ] || { echo 'BLOCKED: candidate collision' >&2; exit 2; }
 else
-    candidate_publish="$evidence/.aggregate-candidate-v1.env.$$"
-    (set -C; cp -- "$candidate_graph" "$candidate_publish") || { echo 'BLOCKED: candidate temporary collision' >&2; exit 2; }
-    [ "$(hash_file "$candidate_publish")" = "$(field aggregate_candidate_sha256 "$report_path")" ] || { rm -f "$candidate_publish"; echo 'BLOCKED: candidate publication hash mismatch' >&2; exit 2; }
-    mv "$candidate_publish" "$candidate_final"
+    [ "$(hash_file "$candidate_graph")" = "$(field aggregate_candidate_sha256 "$report_path")" ] || { echo 'BLOCKED: candidate publication hash mismatch' >&2; exit 2; }
+    "$publisher" "$evidence" "$candidate_graph" aggregate-candidate-v1.env || { echo 'BLOCKED: candidate collision or unsafe publication' >&2; exit 2; }
+fi
+if [ "$reviewer_status" = PASS ]; then
+    "$publisher" "$evidence" "$report_path" aggregate-report-v1.env || { echo 'BLOCKED: compatibility report alias collision' >&2; exit 2; }
 fi
 sync
 trap - EXIT HUP INT TERM

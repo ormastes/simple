@@ -43,10 +43,16 @@ values before invoking the fixed canonical producer executable. It then uses
 `sign-mci-v2-lane.shs`, requires the first aggregate to block pending review,
 activates the independent reviewer generation, and runs one final aggregate.
 The evidence directory must be fresh and canonically below the repository;
-dot-segment traversal and collisions fail before publication. Children have a
-fixed timeout, per-stream capture ceiling, memory/process ceilings, and
-no-overwrite captures. Candidate and final aggregate reports use distinct
-paths, preserving the candidate bytes reviewed in pass one. The live compiler
+dot-segment traversal and collisions fail before publication. The orchestrator
+pins the evidence directory identity across every child and accepts live argv
+files only as unique option/value pairs whose common identity values are
+adjacent and exact. Children have a fixed timeout, per-stream capture ceiling,
+and memory/process ceilings through `prlimit` or supported BSD/macOS shell
+limits. Captures and aggregate publications are atomic no-replace outputs.
+Candidate and final aggregate reports use distinct paths, preserving the
+candidate bytes reviewed in pass one; the final report is also published under
+the compatibility name `aggregate-report-v1.env`. Artifact bytes, tooling
+archive members, and expanded tooling bytes are capped before admission. The live compiler
 producer's independent cross-host prerequisite remains an explicit BLOCKED and
 prevents signing when it cannot produce an unsigned template. `--contract-fixture` is only
 for the focused shell contract and always reports `CONTRACT_ONLY`, never PASS.
