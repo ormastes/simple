@@ -33,3 +33,25 @@ unresolved.
 - The cached artifact must execute the canonical typed revision-cache API and
   emit the complete 7680x4320 p50/p95/RSS/fallback/readback/checksum receipt.
 - This failure occurs before execution and is not an 8K performance result.
+
+## Runtime-authority follow-up
+
+Passing the admitted compiler's sibling
+`stage2-runtime-authority` through `--runtime-path` substantially reduces the
+unresolved set, but `core-c-bootstrap` still lacks current strided Vulkan,
+Engine2D SIMD blend, Intel, WebGPU, OneAPI, OpenGL, TLS SHA-256, environment, and
+sleep symbols. Both supported bundles were tested; `core-c-bootstrap` is the
+compiler-recommended default for this hosted transitional lane.
+
+An attempted current runtime archive build used:
+
+```sh
+CARGO_TARGET_DIR=/dev/shm/simple-vk-runtime-target \
+  cargo build -p simple-runtime --features vulkan
+```
+
+It failed before archive emission because concurrent runtime work currently has
+three missing `rt_pg_parallel_worker_handoff_*` exports in `runtime/src/lib.rs`
+and passes the `extern "C"` function `rt_shared_get` directly to `Option.map` in
+`runtime/src/value/objects.rs`. These are runtime build blockers, not rendering
+measurements, and were not changed by this lane.
