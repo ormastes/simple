@@ -337,3 +337,17 @@ dev-done
   review added public-record revalidation and corrected the admission
   multiplication ceiling to signed i64. Six focused examples pass. Actual MIR
   vector instruction emission and per-backend tail lowering remain open.
+- impl: Added the first executable WP-23 typed-MIR emission path. For an
+  admitted full AoSoA block with already-projected input/output pointers, the
+  compiler emits `MirSimdLoad`, `MirSimdBinop`, and `MirSimdStore` for the
+  concrete f32/f64/i32 vector shapes already present in MIR. Tail block indexes,
+  unsupported types/operations, and invalid schedules emit nothing. The API is
+  currently OpenCL-only and explicitly rejects native targets before emission,
+  because audit proved current x86/AArch64/RV64 selectors silently NOP these
+  opcodes. Five focused MIR examples and a dedicated storage-emitted OpenCL
+  source integration example pass. A diagnostic run of the broader OpenCL spec
+  confirmed this new example before it was isolated, while exposing three
+  unrelated pre-existing failures (Engine2D entry symbol, branch interpolation,
+  atomic lowering); they are not counted as this slice's evidence. Automatic
+  storage-aware loop rewriting, pointer projection, and native vector-register
+  selection/encoding remain open.

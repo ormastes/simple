@@ -76,6 +76,14 @@ arithmetic overflow. It never treats padded AoSoA lanes as logical elements and
 does not manufacture a generic masked tail that current native backends cannot
 yet prove safe.
 
+A storage-aware emitter can now turn one proven full block into typed MIR SIMD
+loads, arithmetic, and a store. It accepts only concrete MIR vector shapes and
+only the OpenCL backend, whose lowering is exercised by an emitted-source
+fixture. Callers pass pointers already projected to the requested physical
+block and iterate only across `full_block_count`; scalar tails are never handed
+to the emitter. Native x86/AArch64/RISC-V targets reject before emission because
+their current selectors would otherwise reduce these operations to NOPs.
+
 ## Recommended shape
 
 ```simple

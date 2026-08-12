@@ -1,0 +1,85 @@
+use std.spec.{describe, it, assert_equal, assert_false, assert_true}
+use std.common.structural.storage_layout.storage_layout_contracts.{
+    StorageConversionPolicy,
+    StorageLayoutKind,
+    storage_layout_plan_v1
+}
+use compiler.mir.mir_data.{MirInstKind, LocalId}
+use compiler.mir.mir_types.{MirTypeKind}
+use compiler.mir_opt.mir_opt.simd_recipe_infra.{VectorWidthRouter}
+use compiler.mir_opt.mir_opt.storage_simd_admission.{storage_simd_admit}
+use compiler.mir_opt.mir_opt.storage_simd_schedule.{storage_simd_schedule}
+use compiler.mir_opt.mir_opt.storage_simd_codegen.{
+    storage_simd_emit_full_block
+}
+
+fn codegen_schedule(element_count: i64):
+    val plan = storage_layout_plan_v1(61, StorageLayoutKind.AoSoA, 8, 32,
+        false, StorageConversionPolicy.Cached, "simd-policy", "simd-block")
+    val admission = storage_simd_admit(
+        plan, 32, 8, VectorWidthRouter.x86_64_avx2())
+    val blocks = if element_count == 0: 0 else: (element_count + 7) / 8
+    storage_simd_schedule(admission, element_count, 96, blocks * 96, blocks)
+
+fn emit_for(schedule, block_index: i64, scalar_kind: text,
+            operation: text, target_backend: text):
+    storage_simd_emit_full_block(
+        schedule, block_index, scalar_kind, operation, target_backend,
+        LocalId(id: 1), LocalId(id: 2), LocalId(id: 3),
+        LocalId(id: 10), LocalId(id: 11), LocalId(id: 12))
+
+fn emit(schedule, block_index: i64, scalar_kind: text, operation: text):
+    emit_for(schedule, block_index, scalar_kind, operation, "opencl")
+
+describe "storage SIMD typed MIR codegen":
+    it "emits typed f32x8 load binop and store for a proven full block":
+        val result = emit(codegen_schedule(16), 1, "f32", "Add")
+        assert_true(result.ok)
+        assert_equal(result.instructions.len(), 4)
+        val first_is_load = match result.instructions[0].kind:
+            case MirSimdLoad(dest, ptr, aligned, vec_type):
+                dest.id == 10 and not aligned and vec_type.kind == MirTypeKind.Vec8f
+            case _: false
+        val operation_is_add = match result.instructions[2].kind:
+            case MirSimdBinop(dest, lhs, rhs, operation):
+                dest.id == 12 and operation == "Add"
+            case _: false
+        val last_is_store = match result.instructions[3].kind:
+            case MirSimdStore(value, ptr, aligned): not aligned
+            case _: false
+        assert_true(first_is_load)
+        assert_true(operation_is_add)
+        assert_true(last_is_store)
+        assert_equal(result.reason, "typed-full-block-emitted")
+
+    it "never emits a vector operation for a scalar tail block":
+        val schedule = codegen_schedule(9)
+        assert_equal(schedule.full_block_count, 1)
+        assert_equal(schedule.tail_count, 1)
+        val tail = emit(schedule, 1, "f32", "Add")
+        assert_false(tail.ok)
+        assert_equal(tail.reason, "block-is-not-a-full-vector-block")
+
+    it "refuses arrays with no full block":
+        val schedule = codegen_schedule(7)
+        assert_equal(schedule.full_block_count, 0)
+        val result = emit(schedule, 0, "f32", "Add")
+        assert_false(result.ok)
+        assert_equal(result.instructions.len(), 0)
+        assert_equal(result.reason, "block-is-not-a-full-vector-block")
+
+    it "supports only concrete MIR vector types and known operations":
+        val schedule = codegen_schedule(8)
+        assert_equal(emit(schedule, 0, "f64", "Add").reason,
+            "unsupported-vector-type")
+        assert_equal(emit(schedule, 0, "f32", "Pow").reason,
+            "unsupported-vector-operation")
+        assert_equal(emit_for(
+            schedule, 0, "f32", "Add", "native-x86_64").reason,
+            "backend-has-no-typed-simd-lowering")
+
+    it "rejects an invalid schedule before emitting MIR":
+        val empty = codegen_schedule(0)
+        val result = emit(empty, 0, "f32", "Add")
+        assert_false(result.ok)
+        assert_equal(result.reason, "block-is-not-a-full-vector-block")
