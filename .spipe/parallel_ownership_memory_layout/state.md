@@ -496,3 +496,21 @@ dev-done
   freeze is denied and MIR eviction cannot mutate frozen receipt authority.
   Registry + producer suites pass 7/7 and 4/4. A real compiler pilot still
   needs to call the allocation owner and install transaction before freeze.
+- impl: Added the contained compiler-private WP-22 compile-chain pilot
+  (`driver_typed_storage_pilot.spl`) and its integration fixture. The pilot
+  uses the real MIR allocation owner, derives its declaration from the returned
+  allocation fact, emits `rt_free`, invokes
+  the automatic producer, and routes the result through CompileContext install,
+  freeze, and custom-native compilation. It is not public `T[]` support.
+  The focused integration gate passes 3/3 in interpreter mode. Static review
+  found and removed a physical initialization GEP (slot 8/10) that had been
+  checked as a logical element index against count 5; the fixture also avoids a nested
+  module/producer-result wrapper, uses scalar AoS/SoA leaf installers to avoid
+  known Stage4 enum transport hazards, and guards evidence indexing. A new
+  companion system fixture derives affine constants from the installed/frozen/
+  lowered module and executes them through W^X. Its first run was rejected for
+  missing coverage metadata, its native-mode retry could not find a worktree-local
+  `bin/simple`, and its interpreter-mode scenario failed without exposing the
+  assertion. The three-cycle cap stopped further retries. Therefore executable
+  derived-constant and installed-function allocation/free lifetime evidence
+  remain open; no W^X PASS is claimed.

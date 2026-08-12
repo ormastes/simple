@@ -1,0 +1,92 @@
+use std.spec.{describe, it, assert_equal, assert_true, assert_false}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.driver_typed_storage_pilot.{
+    driver_typed_storage_pilot_install_aos_v1,
+    driver_typed_storage_pilot_install_soa_v1
+}
+use compiler.mir.mir_data.{MirModule}
+use compiler.mir.intrinsics.{MIR_STORAGE_ALLOC_OWNED_RAW_V1}
+use compiler.mir_opt.mir_opt.storage_projection_lowering.{
+    MIR_STORAGE_PROJECT_ADDRESS_V1, MIR_STORAGE_PROJECT_FIELD_V1,
+    lower_mir_storage_project_fields_v1
+}
+use compiler.backend.backend.backend_helpers.{
+    compile_module_with_backend_target_cpu_storage_bindings
+}
+fn count_intrinsic(module, name: text) -> i64:
+    var count = 0
+    for function in module.functions.values():
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case Intrinsic(_, observed, _):
+                        if observed == name: count = count + 1
+                    case _: pass
+    count
+
+describe "compiler-owned typed storage compile-chain pilot":
+    it "runs owner declaration producer install freeze and native compile for AoS and SoA":
+        for layout_tag in [0, 1]:
+            val ctx = CompileContext.create(driver_core_compile_options_default())
+            val module_name = if layout_tag == 0:
+                "__simple_storage_pilot_aos_v1"
+            else:
+                "__simple_storage_pilot_soa_v1"
+            val installed = if layout_tag == 0:
+                driver_typed_storage_pilot_install_aos_v1(
+                    ctx, "snapshot:pilot-v1")
+            else:
+                driver_typed_storage_pilot_install_soa_v1(
+                    ctx, "snapshot:pilot-v1")
+            assert_equal(installed, "ok")
+            assert_equal(count_intrinsic(ctx.mir_modules[module_name],
+                MIR_STORAGE_ALLOC_OWNED_RAW_V1), 0)
+            assert_equal(count_intrinsic(ctx.mir_modules[module_name],
+                MIR_STORAGE_PROJECT_FIELD_V1), 1)
+            val evidence = ctx.storage_view_evidence_for_module(module_name)
+            assert_equal(evidence.len(), 1)
+            if evidence.len() == 1:
+                assert_equal(evidence[0].produced_projection_count, 1)
+            val frozen = ctx.freeze_storage_registry()
+            assert_true(frozen.starts_with("frozen:"))
+            val sites = ctx.storage_view_site_bindings_for_module(module_name)
+            assert_equal(sites.len(), 1)
+            val lowered = lower_mir_storage_project_fields_v1(
+                ctx.mir_modules[module_name], sites)
+            assert_true(lowered.ok)
+            assert_equal(lowered.rewritten_count, 1)
+            assert_equal(count_intrinsic(lowered.module,
+                MIR_STORAGE_PROJECT_ADDRESS_V1), 1)
+            match compile_module_with_backend_target_cpu_storage_bindings(
+                "native", ctx.mir_modules[module_name], false, 0, "", sites):
+                case Ok(compiled): assert_true(compiled.object_code != nil)
+                case Err(error): assert_equal(error.message, "native compile must succeed")
+            val late = if layout_tag == 0:
+                driver_typed_storage_pilot_install_aos_v1(ctx, "snapshot:late")
+            else:
+                driver_typed_storage_pilot_install_soa_v1(ctx, "snapshot:late")
+            assert_equal(late, "storage-registry-frozen")
+
+    it "keeps AoS and SoA physical evidence and frozen identities distinct":
+        val aos_ctx = CompileContext.create(driver_core_compile_options_default())
+        val soa_ctx = CompileContext.create(driver_core_compile_options_default())
+        assert_equal(driver_typed_storage_pilot_install_aos_v1(
+            aos_ctx, "snapshot:pilot-v1"), "ok")
+        assert_equal(driver_typed_storage_pilot_install_soa_v1(
+            soa_ctx, "snapshot:pilot-v1"), "ok")
+        val aos_identity = aos_ctx.freeze_storage_registry()
+        val soa_identity = soa_ctx.freeze_storage_registry()
+        assert_true(aos_identity.contains("__simple_storage_pilot_aos_v1"))
+        assert_true(soa_identity.contains("__simple_storage_pilot_soa_v1"))
+        assert_false(aos_identity == soa_identity)
+
+    it "fails closed on module collision without registering evidence":
+        val ctx = CompileContext.create(driver_core_compile_options_default())
+        val module_name = "__simple_storage_pilot_soa_v1"
+        ctx.mir_modules[module_name] = MirModule(name: module_name,
+            functions: {}, statics: {}, constants: {}, types: {})
+        assert_equal(driver_typed_storage_pilot_install_soa_v1(ctx,
+            "snapshot:pilot-v1"),
+            "typed-storage-pilot-module-collision")
+        assert_equal(ctx.storage_view_evidence_rows.len(), 0)
