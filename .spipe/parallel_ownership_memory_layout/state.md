@@ -151,6 +151,15 @@ dev-done
   no new public `rt_*` entrypoint; `rejected_shortcuts` = raw pointer bits,
   unclassified `Any`, unbounded replacement queue, fixture-only bypass, and
   pretending inline-only packets implement graph ownership transfer.
+- impl: Hardened the WP-13/WP-16 native compatibility channel lifetime. The
+  heap handle now owns one ref-counted channel state; every public operation
+  clones that state while the heap-allocation registry lock still proves the
+  handle live. Close is atomic, sender teardown is serialized, and free uses
+  checked unregister so concurrent or repeated frees fail closed. Focused
+  native evidence passed once: all 11 channel tests, including acquired-state
+  survival after handle free and concurrent send/close/free. This does not yet
+  add graph codecs, typed public endpoints, policy-selected capacity, or
+  ownership-token payload transfer.
 - impl: Advanced WP-17 with `process_transfer.rs`: an encoded-copy-only process
   frame reuses the 40-byte `SPTR` metadata, enforces the destination domain,
   carries an exact length and corruption checksum, and caps codec payloads at

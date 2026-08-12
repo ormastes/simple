@@ -47,7 +47,7 @@ Do not redefine them in runtime, MDSOC, backend, or application lanes.
 ## Immediate next gates
 
 1. WP-10: replace block/point ambiguity with CFG-sensitive region facts and add dynamic-index, branch, loop, capture, and move regression evidence.
-2. WP-13/WP-16/WP-17: connect bounded encoded process frames to the production spawn/piped facade, add schema/ObjectRef codecs, and prove failure rollback; never revive the removed aggregate `rt_pg_parallel_worker_handoff_*` design.
+2. WP-13/WP-16/WP-17: connect bounded encoded process frames to the production spawn/piped facade, add schema/ObjectRef codecs, and prove failure rollback; the native compatibility channel now has checked ref-counted lifetime across concurrent send/close/free, but still needs typed public endpoints and policy-selected capacity. Never revive the removed aggregate `rt_pg_parallel_worker_handoff_*` design.
 3. WP-15: connect the common functional snapshot-root transition to serialized/CAS owner publication, payload-aware apply/verify, mutation receipts, and admitted Stage 4 evidence.
 4. WP-20/WP-22: preserve MIR access paths into typed AoS/SoA reference parity before SIMD/GPU lowering.
 
