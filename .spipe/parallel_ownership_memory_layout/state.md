@@ -351,3 +351,12 @@ dev-done
   atomic lowering); they are not counted as this slice's evidence. Automatic
   storage-aware loop rewriting, pointer projection, and native vector-register
   selection/encoding remain open.
+- impl: Added the bounded x86 native prerequisite for WP-23. Canonical machine
+  IDs now normalize consistently, AVX2 aligned f32x8 operations have distinct
+  machine opcodes, and class-specific XMM/YMM allocation rejects unsupported
+  widths and all spill pressure. A Luna sidecar exposed incorrect historical
+  register ranges and missing high-register VEX extension handling; primary
+  review therefore limited allocation to XMM0-7/YMM0-7 and made invalid SIMD
+  operands fail closed. MIR-to-native selection, aligned-address proof, opcode
+  dispatch, executable native bytes, high registers, and vector spills remain
+  open and are not claimed by this slice.

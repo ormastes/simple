@@ -84,6 +84,12 @@ block and iterate only across `full_block_count`; scalar tails are never handed
 to the emitter. Native x86/AArch64/RISC-V targets reject before emission because
 their current selectors would otherwise reduce these operations to NOPs.
 
+The x86 native prerequisite now defines canonical XMM/YMM register classes and
+distinct aligned AVX2 f32x8 machine operations. Allocation is deliberately
+limited to XMM0-7/YMM0-7 and rejects spill pressure: extended-register VEX
+bits, vector spills, and MIR-to-native instruction selection are not yet
+admitted. This keeps native execution fail-closed while that route is wired.
+
 ## Recommended shape
 
 ```simple

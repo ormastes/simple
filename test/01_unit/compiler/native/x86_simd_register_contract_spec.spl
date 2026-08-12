@@ -1,0 +1,72 @@
+use std.spec.{describe, it, assert_equal, assert_false, assert_true}
+use compiler.backend.native.mach_inst.{
+    X86_XMM0, X86_XMM7, X86_XMM15, X86_YMM0, X86_YMM7, X86_YMM15,
+    X86_OP_VMOVAPS_LOAD_YMM, X86_OP_VMOVAPS_STORE_YMM,
+    X86_OP_VADDPS_YMM,
+}
+use compiler.backend.native.x86_64_simd.{
+    xmm_to_index, ymm_to_index, encode_vaddps_ymm, encode_vmovaps_load_ymm
+}
+use compiler.backend.native.regalloc.{
+    LiveInterval, new_live_interval, interval_update_start,
+    interval_update_end, linear_scan_x86_64_simd
+}
+
+fn overlapping_interval(id: i64) -> LiveInterval:
+    var interval = new_live_interval(id)
+    interval = interval_update_start(interval, 0)
+    interval_update_end(interval, 10)
+
+describe "x86 SIMD machine register contract":
+    it "normalizes canonical physical XMM and YMM ranges":
+        assert_equal(xmm_to_index(X86_XMM0), 0)
+        assert_equal(xmm_to_index(X86_XMM15), 15)
+        assert_equal(ymm_to_index(X86_YMM0), 0)
+        assert_equal(ymm_to_index(X86_YMM15), 15)
+        assert_equal(xmm_to_index(X86_YMM0), -1)
+        assert_equal(ymm_to_index(X86_XMM0), -1)
+
+    it "keeps vector machine opcodes distinct from scalar and each other":
+        assert_true(X86_OP_VMOVAPS_LOAD_YMM > 80)
+        assert_false(X86_OP_VMOVAPS_LOAD_YMM == X86_OP_VMOVAPS_STORE_YMM)
+        assert_false(X86_OP_VMOVAPS_STORE_YMM == X86_OP_VADDPS_YMM)
+
+    it "assigns overlapping 128-bit intervals only to XMM registers":
+        val result = linear_scan_x86_64_simd([
+            overlapping_interval(1), overlapping_interval(2),
+            overlapping_interval(3)
+        ], 128)
+        assert_true(result.ok)
+        assert_true(result.assignments[1] >= X86_XMM0)
+        assert_true(result.assignments[1] <= X86_XMM7)
+        assert_false(result.assignments[1] == result.assignments[2])
+
+    it "assigns overlapping 256-bit intervals only to YMM registers":
+        val result = linear_scan_x86_64_simd([
+            overlapping_interval(1), overlapping_interval(2),
+            overlapping_interval(3)
+        ], 256)
+        assert_true(result.ok)
+        assert_true(result.assignments[1] >= X86_YMM0)
+        assert_true(result.assignments[1] <= X86_YMM7)
+        assert_false(result.assignments[1] == result.assignments[2])
+
+    it "fails closed when vector pressure would require a spill":
+        var intervals: [LiveInterval] = []
+        var id = 0
+        while id < 9:
+            intervals.push(overlapping_interval(id))
+            id = id + 1
+        val result = linear_scan_x86_64_simd(intervals, 256)
+        assert_false(result.ok)
+        assert_equal(result.assignments.len(), 0)
+        assert_equal(result.reason, "simd-spill-lowering-unavailable")
+
+    it "rejects non-YMM operands instead of encoding register zero":
+        assert_equal(encode_vaddps_ymm(X86_XMM0, X86_YMM0, X86_YMM0).len(), 0)
+        assert_equal(encode_vmovaps_load_ymm(X86_XMM0, 0, 0).len(), 0)
+
+    it "rejects an unsupported vector register width":
+        val result = linear_scan_x86_64_simd([overlapping_interval(1)], 512)
+        assert_false(result.ok)
+        assert_equal(result.reason, "unsupported-vector-register-width")
