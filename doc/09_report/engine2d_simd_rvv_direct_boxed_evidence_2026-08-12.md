@@ -69,3 +69,28 @@ prior 18.580 ms sample, so no per-operation constant-blend improvement is
 claimed. A rejected trial classified opacity with RVV compare plus `vcpop`;
 although bit-exact, it regressed six-call p95 to 68.420 ms under QEMU and was
 not retained.
+
+## Constant-source specialization
+
+Constant-source blending now has a distinct RVV helper. It precomputes the
+three source-channel products and scalar inverse alpha once, loads only the
+boxed destination vector, and keeps channel arithmetic, exact division by 255,
+boxing, and stores in RVV registers. The variable-source helper remains
+separate, avoiding the register-pressure and p95 regression observed in a
+rejected shared branch-heavy trial. The earlier measured scalar destination
+opacity scan remains in use; the slower `vcpop` classifier was not restored.
+
+With a fresh matched seven-sample baseline and final run at 7680x4320 and one
+percent active damage under QEMU RVV VLEN=128, p95 changed as follows:
+
+| Operation | Before ns | After ns |
+|---|---:|---:|
+| variable alpha blend | 34,761,390 | 30,259,328 |
+| constant alpha blend | 28,467,147 | 21,531,085 |
+| six-call frame | 88,514,093 | 69,404,572 |
+
+The RISC-V C kernel and in-place span corpus passed. Both runs produced checksum
+`2436809228175672195`; the final run recorded 42 native SIMD hits. The six-call
+p95 improved by 21.6% but remains 5.55 times the 12.5 ms frame budget. These are
+QEMU regression-direction measurements, not physical RISC-V or end-to-end
+8K/80 evidence.

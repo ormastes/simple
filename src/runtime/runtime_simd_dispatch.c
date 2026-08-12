@@ -1900,8 +1900,7 @@ static void engine2d_blend_boxed_neon(int64_t* dst, const int64_t* src,
 
 #if defined(__riscv) && defined(__riscv_vector)
 static void engine2d_blend_boxed_rvv(int64_t* dst, const int64_t* src,
-                                     int64_t n, uint32_t const_src,
-                                     int use_const) {
+                                     int64_t n) {
     int64_t i = 0;
     if (n > 0) engine2d_record_simd_row_hit();
     while (i < n) {
@@ -1916,8 +1915,8 @@ static void engine2d_blend_boxed_rvv(int64_t* dst, const int64_t* src,
         }
         if (!opaque_dst) {
             for (size_t lane = 0; lane < vl; lane++) {
-                uint32_t s_word = use_const ? const_src :
-                    engine2d_unbox_pixel(src[i + (int64_t)lane]);
+                uint32_t s_word = engine2d_unbox_pixel(
+                    src[i + (int64_t)lane]);
                 uint32_t d_word = engine2d_unbox_pixel(
                     dst[i + (int64_t)lane]);
                 dst[i + (int64_t)lane] = engine2d_box_pixel((uint32_t)
@@ -1928,12 +1927,10 @@ static void engine2d_blend_boxed_rvv(int64_t* dst, const int64_t* src,
             i += (int64_t)vl;
             continue;
         }
-        vuint64m2_t s_boxed = use_const
-            ? __riscv_vmv_v_x_u64m2((uint64_t)engine2d_box_pixel(const_src), vl)
-            : __riscv_vle64_v_u64m2(
-                (const uint64_t*)(const void*)(src + i), vl);
         vuint64m2_t d_boxed = __riscv_vle64_v_u64m2(
             (const uint64_t*)(const void*)(dst + i), vl);
+        vuint64m2_t s_boxed = __riscv_vle64_v_u64m2(
+            (const uint64_t*)(const void*)(src + i), vl);
         vuint32m1_t sv = __riscv_vnsrl_wx_u32m1(
             __riscv_vsrl_vx_u64m2(s_boxed, 3, vl), 0, vl);
         vuint32m1_t dv = __riscv_vnsrl_wx_u32m1(
@@ -1942,15 +1939,15 @@ static void engine2d_blend_boxed_rvv(int64_t* dst, const int64_t* src,
             __riscv_vsrl_vx_u32m1(sv, 24, vl), 255u, vl);
         vuint32m1_t inv = __riscv_vrsub_vx_u32m1(sav, 255u, vl);
 #define ENGINE2D_BLEND_CHANNEL_RVV(shift) \
-        __riscv_vadd_vv_u32m1( \
-            __riscv_vmul_vv_u32m1( \
-                __riscv_vand_vx_u32m1( \
-                    __riscv_vsrl_vx_u32m1(sv, shift, vl), 255u, vl), \
-                sav, vl), \
-            __riscv_vmul_vv_u32m1( \
-                __riscv_vand_vx_u32m1( \
-                    __riscv_vsrl_vx_u32m1(dv, shift, vl), 255u, vl), \
-                inv, vl), vl)
+            __riscv_vadd_vv_u32m1( \
+                __riscv_vmul_vv_u32m1( \
+                    __riscv_vand_vx_u32m1( \
+                        __riscv_vsrl_vx_u32m1(sv, shift, vl), 255u, vl), \
+                    sav, vl), \
+                __riscv_vmul_vv_u32m1( \
+                    __riscv_vand_vx_u32m1( \
+                        __riscv_vsrl_vx_u32m1(dv, shift, vl), 255u, vl), \
+                    inv, vl), vl)
         vuint32m1_t rv = ENGINE2D_BLEND_CHANNEL_RVV(16);
         vuint32m1_t gv = ENGINE2D_BLEND_CHANNEL_RVV(8);
         vuint32m1_t bv = ENGINE2D_BLEND_CHANNEL_RVV(0);
@@ -1964,6 +1961,71 @@ static void engine2d_blend_boxed_rvv(int64_t* dst, const int64_t* src,
         gv = ENGINE2D_DIV255_RVV(gv);
         bv = ENGINE2D_DIV255_RVV(bv);
 #undef ENGINE2D_DIV255_RVV
+        vuint32m1_t out = __riscv_vor_vx_u32m1(
+            __riscv_vor_vv_u32m1(
+                __riscv_vsll_vx_u32m1(rv, 16, vl),
+                __riscv_vsll_vx_u32m1(gv, 8, vl), vl),
+            0xff000000u, vl);
+        out = __riscv_vor_vv_u32m1(out, bv, vl);
+        __riscv_vse64_v_u64m2(
+            (uint64_t*)(void*)(dst + i),
+            __riscv_vsll_vx_u64m2(
+                __riscv_vzext_vf2_u64m2(out, vl), 3, vl), vl);
+        i += (int64_t)vl;
+    }
+}
+
+static void engine2d_blend_const_boxed_rvv(int64_t* dst, int64_t n,
+                                           uint32_t const_src) {
+    uint32_t sa = const_src >> 24;
+    uint32_t inv = 255u - sa;
+    uint32_t sr = ((const_src >> 16) & 255u) * sa;
+    uint32_t sg = ((const_src >> 8) & 255u) * sa;
+    uint32_t sb = (const_src & 255u) * sa;
+    int64_t i = 0;
+    if (n > 0) engine2d_record_simd_row_hit();
+    while (i < n) {
+        size_t request = (size_t)(n - i);
+        if (request > 64) request = 64;
+        size_t vl = __riscv_vsetvl_e32m1(request);
+        int opaque_dst = 1;
+        for (size_t lane = 0; lane < vl; lane++) {
+            uint32_t d = engine2d_unbox_pixel(dst[i + (int64_t)lane]);
+            opaque_dst &= ((d >> 24) == 255u);
+        }
+        if (!opaque_dst) {
+            for (size_t lane = 0; lane < vl; lane++) {
+                uint32_t d = engine2d_unbox_pixel(dst[i + (int64_t)lane]);
+                dst[i + (int64_t)lane] = engine2d_box_pixel((uint32_t)
+                    engine2d_blend_pixel((int64_t)(uint64_t)const_src,
+                                         (int64_t)(uint64_t)d));
+            }
+            i += (int64_t)vl;
+            continue;
+        }
+        vuint64m2_t d_boxed = __riscv_vle64_v_u64m2(
+            (const uint64_t*)(const void*)(dst + i), vl);
+        vuint32m1_t dv = __riscv_vnsrl_wx_u32m1(
+            __riscv_vsrl_vx_u64m2(d_boxed, 3, vl), 0, vl);
+#define ENGINE2D_BLEND_CONST_RVV(shift, source_term) \
+        __riscv_vadd_vx_u32m1( \
+            __riscv_vmul_vx_u32m1( \
+                __riscv_vand_vx_u32m1( \
+                    __riscv_vsrl_vx_u32m1(dv, shift, vl), 255u, vl), \
+                inv, vl), source_term, vl)
+        vuint32m1_t rv = ENGINE2D_BLEND_CONST_RVV(16, sr);
+        vuint32m1_t gv = ENGINE2D_BLEND_CONST_RVV(8, sg);
+        vuint32m1_t bv = ENGINE2D_BLEND_CONST_RVV(0, sb);
+#undef ENGINE2D_BLEND_CONST_RVV
+#define ENGINE2D_DIV255_CONST_RVV(value) \
+        __riscv_vsrl_vx_u32m1( \
+            __riscv_vadd_vv_u32m1( \
+                __riscv_vadd_vx_u32m1(value, 1u, vl), \
+                __riscv_vsrl_vx_u32m1(value, 8, vl), vl), 8, vl)
+        rv = ENGINE2D_DIV255_CONST_RVV(rv);
+        gv = ENGINE2D_DIV255_CONST_RVV(gv);
+        bv = ENGINE2D_DIV255_CONST_RVV(bv);
+#undef ENGINE2D_DIV255_CONST_RVV
         vuint32m1_t out = __riscv_vor_vx_u32m1(
             __riscv_vor_vv_u32m1(
                 __riscv_vsll_vx_u32m1(rv, 16, vl),
@@ -1994,7 +2056,8 @@ SplArray* rt_engine2d_simd_blend_span_u32(SplArray* dst, int64_t dst_off,
     int64_t* dst_data = (int64_t*)(uintptr_t)rt_array_data_ptr(dst);
     const int64_t* src_data = (const int64_t*)(uintptr_t)rt_array_data_ptr(src);
     if (!dst_data || !src_data) return dst;
-    int backwards = (dst_data == src_data && d_off > s_off && d_off < s_off + n);
+    int backwards = (dst_data == src_data && d_off > s_off &&
+                     d_off - s_off < n);
 #if defined(__x86_64__) || defined(_M_X64)
     if (!backwards) {
         if (simd_detect_avx2()) {
@@ -2014,8 +2077,7 @@ SplArray* rt_engine2d_simd_blend_span_u32(SplArray* dst, int64_t dst_off,
     }
 #elif defined(__riscv) && defined(__riscv_vector)
     if (!backwards) {
-        engine2d_blend_boxed_rvv(dst_data + d_off, src_data + s_off,
-                                 n, 0u, 0);
+        engine2d_blend_boxed_rvv(dst_data + d_off, src_data + s_off, n);
         return dst;
     }
 #endif
@@ -2072,7 +2134,7 @@ SplArray* rt_engine2d_simd_blend_const_span_u32(SplArray* dst, int64_t offset,
     engine2d_blend_boxed_neon(dst_data + off, NULL, n, s, 1);
     return dst;
 #elif defined(__riscv) && defined(__riscv_vector)
-    engine2d_blend_boxed_rvv(dst_data + off, NULL, n, s, 1);
+    engine2d_blend_const_boxed_rvv(dst_data + off, n, s);
     return dst;
 #endif
     uint32_t inv = 255u - sa;
