@@ -8,10 +8,19 @@ simulation or qualification receipt.
 
 ## Scenarios
 
-1. Scan each semantic Gen2 HWIR owner for VHDL grammar fragments and reject
-   `library ieee`, `std_logic`, direct `entity work.` instantiation, and
-   `architecture` declarations outside the backend.
-2. Confirm that the strict backend emitter owns the VHDL prelude.
+1. Walk every `.spl` source under `src/compiler/50.mir/hwir/`, rather than a
+   hand-maintained subset. Exclude only `types.spl`, whose declarative
+   vocabulary records VHDL reserved identifiers for validation, and any
+   testbench-only literal path.
+2. Reject unmistakable serializer constructs from every remaining source:
+   VHDL preludes, `std_logic_vector`/`std_ulogic`, numeric conversion and
+   edge-detection calls, architecture delimiters, and direct instantiation or
+   map syntax. The guard intentionally does not reject isolated reserved words
+   that valid typed HWIR can name or discuss.
+3. Exercise the guard with a synthetic VHDL prelude/architecture fragment and
+   show that a typed `HwSignal` description and a testbench literal do not
+   create a false positive.
+4. Confirm that the strict backend emitter owns the VHDL prelude.
 
 ## Requirement traceability
 

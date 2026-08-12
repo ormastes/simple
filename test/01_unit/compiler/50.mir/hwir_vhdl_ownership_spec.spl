@@ -5,28 +5,78 @@
 use std.spec.*
 use std.io_runtime.{file_read}
 
+extern fn rt_dir_walk(path: text) -> [text]
+
+const HWIR_SOURCE_ROOT = "src/compiler/50.mir/hwir"
+
+fn hwir_vhdl_scan_exempt(path: text) -> bool:
+    # HWIR's declarative type vocabulary legitimately records VHDL reserved
+    # identifiers for validation. Generated testbench literals are not Gen2
+    # semantics and are deliberately outside this source-policy scan.
+    path.ends_with("/types.spl") or
+        path.contains("/testbench/") or
+        path.ends_with("_testbench.spl")
+
+fn hwir_raw_vhdl_serializer_fragments() -> [text]:
+    # These are unambiguous emitted-VHDL constructs, rather than individual
+    # reserved words such as `signal` or `architecture` that typed HWIR may
+    # correctly name, validate, or discuss.
+    ["library ieee;",
+        "use ieee.std_logic_1164.all;",
+        "use ieee.numeric_std.all;",
+        "std_logic_vector(",
+        "std_ulogic",
+        "to_unsigned(",
+        "to_signed(",
+        "rising_edge(",
+        "falling_edge(",
+        "architecture rtl of ",
+        "end architecture rtl;",
+        "entity work.",
+        " port map(",
+        " generic map("]
+
+fn hwir_contains_raw_vhdl_serializer_fragment(source: text) -> bool:
+    for fragment in hwir_raw_vhdl_serializer_fragments():
+        if source.contains(fragment):
+            return true
+    false
+
 fn hwir_semantic_source_files() -> [text]:
-    ["src/compiler/50.mir/hwir/types.spl",
-        "src/compiler/50.mir/hwir/mir_to_hwir.spl",
-        "src/compiler/50.mir/hwir/predecode.spl",
-        "src/compiler/50.mir/hwir/branch_predecode.spl",
-        "src/compiler/50.mir/hwir/frontend.spl",
-        "src/compiler/50.mir/hwir/trap_predecode.spl",
-        "src/compiler/50.mir/hwir/trap_frontend.spl",
-        "src/compiler/50.mir/hwir/stateful_frontend.spl",
-        "src/compiler/50.mir/hwir/sequential.spl",
-        "src/compiler/50.mir/hwir/aspects.spl"]
+    var files: [text] = []
+    for path in rt_dir_walk(HWIR_SOURCE_ROOT):
+        if path.ends_with(".spl") and not hwir_vhdl_scan_exempt(path):
+            files.push(path)
+    files
 
 describe "RISC-V Gen2 HWIR VHDL ownership":
     # @req NFR-G2-004
-    it "should keep VHDL grammar confined to the strict backend emitter":
-        step("Scan each typed Gen2 semantic owner for target-language grammar")
+    it "should scan every non-exempt typed Gen2 HWIR source for raw VHDL serializer fragments":
+        step("Walk the entire Gen2 HWIR source tree instead of maintaining a partial file list")
+        expect(hwir_semantic_source_files().len()).to_be_greater_than(0)
+
+        step("Exclude only declarative type vocabulary and testbench-only literal paths")
+        expect(hwir_vhdl_scan_exempt(HWIR_SOURCE_ROOT + "/types.spl")).to_equal(true)
+        expect(hwir_vhdl_scan_exempt(HWIR_SOURCE_ROOT + "/example_testbench.spl")).to_equal(true)
+        expect(hwir_vhdl_scan_exempt(HWIR_SOURCE_ROOT + "/frontend.spl")).to_equal(false)
+
+        step("Reject unambiguous target-language serializer constructs from every semantic source")
         for path in hwir_semantic_source_files():
             val source = file_read(path)
-            expect(source.contains("library ieee")).to_equal(false)
-            expect(source.contains("std_logic")).to_equal(false)
-            expect(source.contains("entity work.")).to_equal(false)
-            expect(source.contains("architecture ")).to_equal(false)
+            expect(hwir_contains_raw_vhdl_serializer_fragment(source)).to_equal(false)
+
+    # @req NFR-G2-004
+    it "should distinguish raw serializer grammar from typed HWIR vocabulary":
+        step("Exercise the guard with an unmistakable VHDL prelude and process fragment")
+        val raw_vhdl = "library ieee;\nuse ieee.std_logic_1164.all;\narchitecture rtl of probe is\nbegin\nend architecture rtl;"
+        expect(hwir_contains_raw_vhdl_serializer_fragment(raw_vhdl)).to_equal(true)
+
+        step("Keep ordinary typed-HWIR names and testbench literals outside the false-positive set")
+        val typed_hwir = "HwSignal.comb(\"result\", \"Bits\", 32)"
+        val testbench_literal = "entity probe_tb is"
+        expect(hwir_contains_raw_vhdl_serializer_fragment(typed_hwir)).to_equal(false)
+        expect(hwir_vhdl_scan_exempt(HWIR_SOURCE_ROOT + "/testbench/probe.spl")).to_equal(true)
+        expect(hwir_contains_raw_vhdl_serializer_fragment(testbench_literal)).to_equal(false)
 
     # @req NFR-G2-004
     it "should keep the strict VHDL backend as the designated serializer owner":
