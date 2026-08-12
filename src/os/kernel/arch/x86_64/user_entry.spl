@@ -8,12 +8,23 @@ use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.types.task_types.{TaskContext}
 use os.kernel.arch.x86_64.user_entry_validation.{validate_enter_user_blocking_handoff}
 
+extern fn rt_x86_exec_token_install(task_id: u64, generation: u64, expected_cr3: u64) -> i64
+extern fn rt_x86_exec_token_cancel(task_id: u64, generation: u64, expected_cr3: u64) -> i64
+extern fn rt_x86_exec_token_take_result(task_id: u64, generation: u64, expected_cr3: u64) -> i64
+
 fn dispatch_enter_user_blocking(pid_hint: u64, scheduler: Scheduler) -> i64:
     """Syscall 14: EnterUserBlocking — look up a user TCB and jump to ring-3."""
     val validation = validate_enter_user_blocking_handoff(pid_hint, scheduler)
     if not validation.ok:
         return -22
 
+    if rt_x86_exec_token_install(validation.pid, validation.generation, validation.cr3) != 1:
+        return -16
+
     val ctx: TaskContext = validation.context.unwrap()
     arch_x86_64_enter_user_task(ctx, validation.cr3)
-    -22
+    val rc = rt_x86_exec_token_take_result(validation.pid, validation.generation, validation.cr3)
+    if rc == -4096:
+        val _cancelled = rt_x86_exec_token_cancel(validation.pid, validation.generation, validation.cr3)
+        return -22
+    rc

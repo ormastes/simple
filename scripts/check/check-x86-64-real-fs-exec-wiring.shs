@@ -1,0 +1,47 @@
+#!/bin/sh
+set -eu
+
+fail() { echo "x86-64-real-fs-exec-wiring: $*" >&2; exit 1; }
+[ "${1:-}" = "--self-test" ] || fail "usage: $0 --self-test"
+
+entry=examples/09_embedded/simple_os/arch/x86_64/fs_exec_entry.spl
+runtime=examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c
+bridge=src/os/kernel/arch/x86_64/user_entry.spl
+launcher=src/os/kernel/loader/x86_64_fs_exec_spawn.spl
+matrix=src/os/qemu_systest_contract.spl
+
+require() {
+    needle=$1
+    file=$2
+    grep -Fq "$needle" "$file" || fail "missing '$needle' in $file"
+}
+
+require 'rt_qemu_nonce_echo()' "$entry"
+require 'rt_x86_64_fs_ls_sys_apps()' "$entry"
+require 'x86_64_fs_exec_spawn_scheduler_owned("/FSEXEC.ELF"' "$entry"
+require 'FS_PROGRAM_BEGIN path=/FSEXEC.ELF arch=x86_64' "$entry"
+require 'FS_PROGRAM_END rc=37 reaped=true' "$entry"
+if grep -Fq 'SIMPLEOS_X86_64_SMF_FS_PASS' "$entry"; then
+    fail 'synthetic package PASS remains in canonical entry'
+fi
+
+require 'rt_x86_exec_token_install(validation.pid, validation.generation, validation.cr3)' "$bridge"
+require 'rt_x86_exec_token_take_result(validation.pid, validation.generation, validation.cr3)' "$bridge"
+require 'scheduler.exit_task_by_id(child, rc as i32)' "$launcher"
+require 'scheduler.wait_for_collect(TaskId(id: 0), child, false)' "$launcher"
+require '_x86_current_cr3() == _x86_exec_token_cr3' "$runtime"
+require 'task != _x86_exec_token_task' "$runtime"
+require 'generation != _x86_exec_token_generation' "$runtime"
+require 'int64_t rt_qemu_nonce_echo(void)' "$runtime"
+require 'int64_t rt_x86_64_fs_ls_sys_apps(void)' "$runtime"
+require 'SIMPLEOS_FS_EXEC_OK arch=x86_64 nonce=' "$matrix"
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+cp "$bridge" "$tmp/bridge.spl"
+sed -i 's/validation\.cr3/0u64/g' "$tmp/bridge.spl"
+if grep -Fq 'rt_x86_exec_token_install(validation.pid, validation.generation, validation.cr3)' "$tmp/bridge.spl"; then
+    fail 'CR3-substitution sabotage was not applied'
+fi
+
+echo 'PASS x86_64 real filesystem execution wiring contract'

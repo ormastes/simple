@@ -6,6 +6,8 @@ use os.kernel.loader.fs_exec_spawn.{fs_exec_prepare_spawn_from_bytes}
 use os.kernel.loader.cap_exec_gate.{exec_cap_check}
 use os.kernel.loader.process_image.{build_user_process_image_unchecked}
 use os.kernel.loader.x86_64_fs_exec_ring3.{x86_64_fs_exec_enter_image_ring3, x86_64_fs_exec_enter_stream_ring3, x86_64_fs_exec_enter_stream_heap_ring3}
+use os.kernel.arch.user_entry_bridge.{dispatch_fs_exec_user_handoff}
+use os.kernel.types.task_types.{TaskId, wait_collect_result_error, wait_collect_result_status}
 
 extern fn serial_println(msg: text)
 extern fn simpleos_fat32_path_read_buffer_addr() -> u64
@@ -72,6 +74,26 @@ pub fn x86_64_fs_exec_handoff_blob_ready(byte_len: i64, raw_blob: u64) -> bool:
 pub fn x86_64_fs_exec_spawn(path: text, argv: [text], envp: [text]) -> i64:
     """Spawn an x86_64 executable from the filesystem (kernel-origin caller)."""
     x86_64_fs_exec_spawn_as(0, path, argv, envp)
+
+pub fn x86_64_fs_exec_spawn_scheduler_owned(path: text, argv: [text], envp: [text]) -> i64:
+    """Run a bounded filesystem ELF as one authenticated scheduler child."""
+    val (bytes, _raw_blob) = _x86_64_read_spawn_bytes_and_blob(path)
+    if bytes.len() <= 4:
+        return -2
+    val prepared = fs_exec_prepare_spawn_from_bytes(path, bytes, Architecture.X86_64, argv, envp)
+    if prepared.pid <= 0:
+        return prepared.pid
+    val child = TaskId(id: prepared.pid as u64)
+    val rc = dispatch_fs_exec_user_handoff(Architecture.X86_64, child.id, prepared.scheduler)
+    var scheduler = prepared.scheduler
+    scheduler.exit_task_by_id(child, rc as i32)
+    val collected = scheduler.wait_for_collect(TaskId(id: 0), child, false)
+    if wait_collect_result_error(collected) != 0:
+        return -10
+    if wait_collect_result_status(collected) != rc as i32:
+        return -14
+    serial_println("[x86_64-user] reaped pid={prepared.pid} rc={rc}")
+    rc
 
 pub fn x86_64_fs_exec_spawn_as(caller: i64, path: text, argv: [text], envp: [text]) -> i64:
     """Capability-gated x86_64 spawn.

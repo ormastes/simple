@@ -19,6 +19,7 @@ use os.simpleos_config_matrix.{
     qemu_riscv64_desktop_qemu_args,
     qemu_riscv64_desktop_qemu_args_status
 }
+use std.nogc_sync_mut.io.env_ops.{env_get}
 
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 extern fn rt_file_exists(path: text) -> bool
@@ -33,8 +34,43 @@ pub val SYSTEST_PASS: text = "pass"
 pub val SYSTEST_PREFIX_MISSING_MEDIA: text = "missing-media:"
 pub val SYSTEST_PREFIX_BOOT_FAIL: text = "boot-fail:"
 pub val SYSTEST_BOOT_FAIL_FALLBACK: text = "boot-fail:fallback"
+pub val SYSTEST_BOOT_FAIL_NONCE_UNSUPPORTED: text = "boot-fail:nonce-unsupported"
+pub val SYSTEST_BOOT_FAIL_ACCELERATOR_UNSUPPORTED: text = "boot-fail:accelerator-unsupported"
 
 export SYSTEST_PASS, SYSTEST_PREFIX_MISSING_MEDIA, SYSTEST_PREFIX_BOOT_FAIL, SYSTEST_BOOT_FAIL_FALLBACK
+
+pub fn qemu_args_with_accelerator(qemu_args: [text], accelerator: text) -> [text]:
+    if accelerator != "kvm" and accelerator != "tcg":
+        return []
+    var result: [text] = []
+    for arg in qemu_args:
+        result.push(arg)
+    result.push("-accel")
+    result.push(accelerator)
+    result
+
+pub fn classify_serial_with_nonce(serial: text, markers: [text], nonce: text) -> text:
+    if nonce.len() == 0 or not serial.contains(qemu_nonce_serial_marker(nonce)):
+        return SYSTEST_BOOT_FAIL_NONCE_UNSUPPORTED
+    classify_serial(serial, markers)
+
+pub fn qemu_nonce_serial_marker(nonce: text) -> text:
+    "SIMPLEOS_QEMU_NONCE=" + nonce
+
+pub fn qemu_args_with_run_image(qemu_args: [text], source_image: text, run_image: text) -> [text]:
+    if source_image.len() == 0 or run_image.len() == 0:
+        return []
+    var result: [text] = []
+    var replacements = 0
+    for arg in qemu_args:
+        if arg.contains(source_image):
+            result.push(arg.replace(source_image, run_image))
+            replacements = replacements + 1
+        else:
+            result.push(arg)
+    if replacements != 1:
+        return []
+    result
 
 # ---------------------------------------------------------------------------
 # Classifier — pure text-in, no I/O (testable without QEMU)
@@ -95,7 +131,7 @@ pub fn riscv64_qemu_bin() -> text:
 pub fn riscv64_qemu_args() -> [text]:
     ["-machine", "virt",
      "-cpu", "rv64",
-     "-m", "512M",
+     "-m", "2G",
      "-nographic",
      "-bios", "default",
      "-global", "virtio-mmio.force-legacy=false",
@@ -104,11 +140,13 @@ pub fn riscv64_qemu_args() -> [text]:
      "-kernel", "build/os/simpleos_riscv64_smf_fs.elf"]
 
 pub fn riscv64_markers() -> [text]:
-    ["ELF_LOAD_OK",
-     "SMF_CLI_LAUNCH_OK",
-     "SMF_WM_GUI_LAUNCH_OK",
-     "NATIVE_GUI_PROCESS_RENDER_OK",
-     "SIMPLEOS_RISCV_SMF_FS_PASS",
+    ["SimpleOS RV64 boot OK",
+     "FS_LS_BEGIN path=/SYS/APPS",
+     "FS_LS_ENTRY name=",
+     "FS_LS_END status=pass",
+     "FS_PROGRAM_BEGIN path=/FSEXEC.ELF arch=riscv64",
+     "SIMPLEOS_FS_EXEC_OK arch=riscv64 nonce=",
+     "FS_PROGRAM_END rc=37 reaped=true",
      "TEST PASSED"]
 
 pub fn riscv64_timeout_ms() -> i64:
@@ -151,7 +189,14 @@ pub fn riscv32_qemu_args() -> [text]:
      "-kernel", "build/os/simpleos_riscv32_smf_fs.elf"]
 
 pub fn riscv32_markers() -> [text]:
-    standard_smf_markers()
+    ["SimpleOS RV32 boot OK",
+     "FS_LS_BEGIN path=/SYS/APPS",
+     "FS_LS_ENTRY name=",
+     "FS_LS_END status=pass",
+     "FS_PROGRAM_BEGIN path=/FSEXEC.ELF arch=riscv32",
+     "SIMPLEOS_FS_EXEC_OK arch=riscv32 nonce=",
+     "FS_PROGRAM_END rc=37 reaped=true",
+     "TEST PASSED"]
 
 pub fn riscv32_timeout_ms() -> i64:
     default_qemu_timeout_ms()
@@ -198,12 +243,17 @@ pub fn arm64_markers() -> [text]:
     #                        the payload's raw zero exit status before ending this QEMU gate.
     ["[vfs-init] FAT32 bpb parsed",
      "[arm-fs-exec] vfs:ok",
+     "FS_LS_BEGIN path=/SYS/APPS",
+     "FS_LS_ENTRY name=HELLOSMF.SMF",
+     "FS_LS_END status=pass",
      "ELF_LOAD_OK arch=aarch64",
      "SMF_CLI_LAUNCH_OK app=/sys/apps/hello_world.smf",
      "[desktop-e2e] process-backed:ok app=hello_world",
+     "FS_PROGRAM_BEGIN path=/FSEXEC.ELF arch=arm64",
      "[arm64-fs-user] mounted-elf-ok",
-     "[arm-fs-exec] user-svc-exit:ok",
-     "[arm64-user] kernel-resumed exit=0",
+     "[arm-fs-exec] user-svc-exit:ok code=37",
+     "FS_PROGRAM_END rc=37 reaped=true",
+     "[arm64-user] kernel-resumed exit=37",
      "TEST PASSED"]
 
 pub fn arm64_timeout_ms() -> i64:
@@ -235,7 +285,14 @@ pub fn arm32_qemu_args() -> [text]:
      "-device", "loader,addr=0x40200000,cpu-num=0"]
 
 pub fn arm32_markers() -> [text]:
-    standard_smf_markers()
+    ["FS_MOUNT_OK",
+     "FS_LS_BEGIN path=/SYS/APPS",
+     "FS_LS_ENTRY name=",
+     "FS_LS_END status=pass",
+     "FS_PROGRAM_BEGIN path=/FSEXEC.ELF arch=arm32",
+     "SIMPLEOS_FS_EXEC_OK arch=arm32 nonce=",
+     "FS_PROGRAM_END rc=37 reaped=true",
+     "TEST PASSED"]
 
 pub fn arm32_timeout_ms() -> i64:
     default_qemu_timeout_ms()
@@ -259,14 +316,21 @@ pub fn x86_64_qemu_args() -> [text]:
      "-m", "512M",
      "-nographic",
      "-no-reboot",
-     "-kernel", "build/os/simpleos_x86_64_fs_exec.elf",
+     "-device", "loader,file=build/os/simpleos_x86_64_fs_exec.elf,cpu-num=0",
      "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
      "-device", "nvme,id=fsexec,serial=x86-64-fs-exec",
      "-drive", "file=build/os/fat32-x86_64.img,if=none,id=fsexecns1,format=raw",
      "-device", "nvme-ns,drive=fsexecns1,bus=fsexec,nsid=1"]
 
 pub fn x86_64_markers() -> [text]:
-    standard_smf_markers()
+    ["SimpleOS x86_64 boot OK",
+     "FS_LS_BEGIN path=/SYS/APPS",
+     "FS_LS_ENTRY name=",
+     "FS_LS_END status=pass",
+     "FS_PROGRAM_BEGIN path=/FSEXEC.ELF arch=x86_64",
+     "SIMPLEOS_FS_EXEC_OK arch=x86_64 nonce=",
+     "FS_PROGRAM_END rc=37 reaped=true",
+     "TEST PASSED"]
 
 pub fn x86_64_timeout_ms() -> i64:
     default_qemu_timeout_ms()
@@ -294,11 +358,14 @@ pub fn x86_32_qemu_args() -> [text]:
      "-kernel", "build/os/simpleos_x86_32_initrd_fs_exec_probe.elf"]
 
 pub fn x86_32_markers() -> [text]:
-    ["[x86_32 fs] initrd fat32 ok",
-     "[x86_32 fs] hello_world smf ok",
-     "[x86_32 fs] browser smf ok",
-     "[x86_32 fs] x86_32 payload ok",
-     "[x86_32 fs] app execution ok"]
+    ["SimpleOS x86_32 boot OK",
+     "FS_LS_BEGIN path=/SYS/APPS",
+     "FS_LS_ENTRY name=",
+     "FS_LS_END status=pass",
+     "FS_PROGRAM_BEGIN path=/FSEXEC.ELF arch=x86_32",
+     "SIMPLEOS_FS_EXEC_OK arch=x86_32 nonce=",
+     "FS_PROGRAM_END rc=37 reaped=true",
+     "TEST PASSED"]
 
 pub fn x86_32_timeout_ms() -> i64:
     default_qemu_timeout_ms()
@@ -366,12 +433,27 @@ pub fn run_qemu_systest(
         return SYSTEST_PREFIX_MISSING_MEDIA + kernel_path
     if not rt_file_exists(image_path):
         return SYSTEST_PREFIX_MISSING_MEDIA + image_path
+    val accelerator = env_get("SIMPLE_QEMU_ACCELERATOR") ?? ""
+    val accelerated_args = qemu_args_with_accelerator(qemu_args, accelerator)
+    if accelerated_args.len() == 0:
+        return SYSTEST_BOOT_FAIL_ACCELERATOR_UNSUPPORTED
+    val nonce = env_get("SOSIX_QEMU_NONCE") ?? ""
+    if nonce.len() == 0:
+        return SYSTEST_BOOT_FAIL_NONCE_UNSUPPORTED
     rt_dir_create_all("build/os/systest")
+    val run_image = "build/os/systest/" + arch + "." + nonce + ".nonce.img"
+    val prepared = rt_process_run_timeout(
+        "sh", ["scripts/os/prepare_qemu_nonce_media.shs", image_path, run_image, nonce], 30000)
+    if prepared[2] != 0:
+        return SYSTEST_BOOT_FAIL_NONCE_UNSUPPORTED
+    val effective_args = qemu_args_with_run_image(accelerated_args, image_path, run_image)
+    if effective_args.len() == 0:
+        return SYSTEST_BOOT_FAIL_NONCE_UNSUPPORTED
     val log_path = "build/os/systest/" + arch + ".serial.log"
-    val result = rt_process_run_timeout(qemu_bin, qemu_args, timeout_ms)
+    val result = rt_process_run_timeout(qemu_bin, effective_args, timeout_ms)
     val serial = result[0] + result[1]
     rt_file_write_text(log_path, serial)
-    classify_serial(serial, markers)
+    classify_serial_with_nonce(serial, markers, nonce)
 
 
 # ---------------------------------------------------------------------------
@@ -415,4 +497,3 @@ pub fn harden_pie_relro_markers() -> [text]:
      "[hardening] RELRO=1 BIND_NOW=1",
      "[hardening] NX=1 SMEP=1 SMAP=1",
      "[hardening] STACK_CANARY=1"]
-

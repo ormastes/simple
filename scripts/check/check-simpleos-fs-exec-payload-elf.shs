@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+fail() { echo "[fs-exec-payload-elf] ERROR: $*" >&2; exit 1; }
+[ "$#" -eq 2 ] || fail "usage: $0 <x86_32|x86_64|arm32|arm64|riscv32|riscv64> ELF"
+arch=$1; elf=$2; placeholder=__SIMPLEOS_FS_EXEC_NONCE_SLOT_V1__
+case "$arch" in x86_32) machine='Intel 80386'; class=ELF32 ;; x86_64) machine='Advanced Micro Devices X86-64'; class=ELF64 ;; arm32) machine=ARM; class=ELF32 ;; arm64) machine=AArch64; class=ELF64 ;; riscv32) machine=RISC-V; class=ELF32 ;; riscv64) machine=RISC-V; class=ELF64 ;; *) fail "unsupported architecture: $arch" ;; esac
+[ -s "$elf" ] || fail "ELF missing or empty"
+readelf_tool=${READELF:-readelf}; command -v "$readelf_tool" >/dev/null 2>&1 || fail "readelf required"
+h=$("$readelf_tool" -W -h "$elf"); p=$("$readelf_tool" -W -l "$elf")
+printf '%s\n' "$h" | grep -Eq "Class:[[:space:]]+$class" || fail "not $class"
+printf '%s\n' "$h" | grep -Eq 'Type:[[:space:]]+EXEC' || fail "not ET_EXEC"
+printf '%s\n' "$h" | grep -Fq "Machine:                           $machine" || fail "wrong machine"
+printf '%s\n' "$p" | grep -Eq '^[[:space:]]*LOAD.* E ' || fail "no executable PT_LOAD"
+! printf '%s\n' "$p" | grep -Eq '^[[:space:]]*INTERP' || fail "PT_INTERP forbidden"
+count=$(LC_ALL=C grep -aFo "$placeholder" "$elf" | wc -l | tr -d ' ')
+[ "$count" -eq 1 ] || fail "nonce placeholder count=$count"
+LC_ALL=C grep -aFq "SIMPLEOS_FS_EXEC_OK arch=$arch nonce=" "$elf" || fail "exact marker absent"
+printf '[fs-exec-payload-elf] PASS: arch=%s elf=%s\n' "$arch" "$elf"

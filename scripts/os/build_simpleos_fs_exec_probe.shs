@@ -1,0 +1,118 @@
+#!/bin/sh
+# Build the minimal nonce-bound filesystem child used by SimpleOS guests.
+set -eu
+fail() { echo "fs-exec-probe-builder: $*" >&2; exit 1; }
+[ "$#" -eq 3 ] || fail "usage: $0 <x86_32|x86_64|arm32|arm64|riscv32|riscv64> OUTPUT_ELF OUTPUT_MANIFEST"
+arch=$1; output=$2; manifest=$3
+clang=${CLANG:-clang}; ld_lld=${LD_LLD:-ld.lld}
+for tool in "$clang" "$ld_lld" "${READELF:-readelf}"; do command -v "$tool" >/dev/null 2>&1 || fail "required tool absent: $tool"; done
+work=$(mktemp -d "${TMPDIR:-/tmp}/simpleos-fs-exec-probe.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+placeholder=__SIMPLEOS_FS_EXEC_NONCE_SLOT_V1__
+case "$arch" in
+ x86_32) triple=i386-unknown-none-elf; emulation=elf_i386
+ cat > "$work/probe.S" <<EOF
+.section .text
+.global _start
+_start:
+ mov \$prefix,%esi; mov \$prefix_len,%edi
+1: movzbl (%esi),%ebx; incl %esi; mov \$60,%eax; int \$0x80; decl %edi; jnz 1b
+ mov \$nonce,%esi; mov \$96,%edi
+2: movzbl (%esi),%ebx; incl %esi; test %bl,%bl; jz 3f; mov \$60,%eax; int \$0x80; decl %edi; jnz 2b
+3: mov \$10,%ebx; mov \$60,%eax; int \$0x80; mov \$37,%ebx; xor %eax,%eax; int \$0x80
+4: hlt; jmp 4b
+.section .rodata
+prefix: .ascii "SIMPLEOS_FS_EXEC_OK arch=x86_32 nonce="
+.set prefix_len,.-prefix
+nonce: .ascii "$placeholder"; .zero 96-(.-nonce)
+EOF
+ ;;
+ x86_64) triple=x86_64-unknown-none-elf; emulation=elf_x86_64
+ cat > "$work/probe.S" <<EOF
+.section .text
+.global _start
+_start:
+ lea prefix(%rip),%r12; mov \$prefix_len,%r13
+1: movzbq (%r12),%rdi; inc %r12; mov \$60,%rax; syscall; dec %r13; jnz 1b
+ lea nonce(%rip),%r12; mov \$96,%r13
+2: movzbq (%r12),%rdi; inc %r12; test %dil,%dil; jz 3f; mov \$60,%rax; syscall; dec %r13; jnz 2b
+3: mov \$10,%rdi; mov \$60,%rax; syscall; mov \$37,%rdi; xor %rax,%rax; syscall
+4: hlt; jmp 4b
+.section .rodata
+prefix: .ascii "SIMPLEOS_FS_EXEC_OK arch=x86_64 nonce="
+.set prefix_len,.-prefix
+nonce: .ascii "$placeholder"; .zero 96-(.-nonce)
+EOF
+ ;;
+ arm32) triple=armv7a-unknown-none-eabi; emulation=armelf
+ cat > "$work/probe.S" <<EOF
+.syntax unified
+.arm
+.section .text
+.global _start
+_start:
+ ldr r4,=prefix; ldr r5,=prefix_end; sub r5,r5,r4
+1: ldrb r0,[r4],#1; mov r7,#60; svc #0; subs r5,r5,#1; bne 1b
+ ldr r4,=nonce; mov r5,#96
+2: ldrb r0,[r4],#1; cmp r0,#0; beq 3f; mov r7,#60; svc #0; subs r5,r5,#1; bne 2b
+3: mov r0,#10; mov r7,#60; svc #0; mov r0,#37; mov r7,#0; svc #0
+4: wfe; b 4b
+.section .rodata
+prefix: .ascii "SIMPLEOS_FS_EXEC_OK arch=arm32 nonce="
+prefix_end:
+nonce: .ascii "$placeholder"; .zero 96-(.-nonce)
+EOF
+ ;;
+ arm64) triple=aarch64-unknown-none-elf; emulation=aarch64elf
+ cat > "$work/probe.S" <<EOF
+.section .text
+.global _start
+_start:
+ mov x8,#60; svc #0
+ mov x0,#37; mov x8,#0; svc #0
+4: wfe; b 4b
+.section .rodata
+prefix: .ascii "SIMPLEOS_FS_EXEC_OK arch=arm64 nonce="
+.set prefix_len,.-prefix
+nonce: .ascii "$placeholder"; .zero 96-(.-nonce)
+EOF
+ ;;
+ riscv32|riscv64)
+ if [ "$arch" = riscv32 ]; then triple=riscv32-unknown-none-elf; emulation=elf32lriscv; else triple=riscv64-unknown-none-elf; emulation=elf64lriscv; fi
+ cat > "$work/probe.S" <<EOF
+.option norvc
+.section .text
+.global _start
+_start:
+ la s1,prefix; la s2,prefix_end; sub s2,s2,s1
+1: lbu a0,0(s1); li a7,60; ecall; addi s1,s1,1; addi s2,s2,-1; bnez s2,1b
+ la s1,nonce; li s2,96
+2: lbu a0,0(s1); beqz a0,3f; li a7,60; ecall; addi s1,s1,1; addi s2,s2,-1; bnez s2,2b
+3: li a0,10; li a7,60; ecall; li a0,37; li a7,0; ecall
+4: wfi; j 4b
+.section .rodata
+prefix: .ascii "SIMPLEOS_FS_EXEC_OK arch=$arch nonce="
+prefix_end:
+nonce: .ascii "$placeholder"; .zero 96-(.-nonce)
+EOF
+ ;;
+ *) fail "unsupported architecture: $arch" ;;
+esac
+"$clang" --target="$triple" -c -ffreestanding -nostdlib "$work/probe.S" -o "$work/probe.o"
+"$ld_lld" -m "$emulation" -static --build-id=none -z max-page-size=4096 -e _start -Ttext=0x201000 "$work/probe.o" -o "$work/probe.elf"
+sh scripts/check/check-simpleos-fs-exec-payload-elf.shs "$arch" "$work/probe.elf"
+mkdir -p "$(dirname "$output")" "$(dirname "$manifest")"
+cp "$work/probe.elf" "$output.tmp"; mv "$output.tmp" "$output"
+hash=$(sha256sum "$output" | awk '{print $1}'); size=$(wc -c < "$output" | tr -d ' ')
+cat > "$manifest.tmp" <<EOF
+contract=simpleos-fs-exec-probe-v1
+arch=$arch
+marker=SIMPLEOS_FS_EXEC_OK arch=$arch nonce=<patched-nonce>
+nonce_slot_bytes=96
+nonce_placeholder=$placeholder
+exit_status=37
+elf_size=$size
+template_sha256=$hash
+EOF
+mv "$manifest.tmp" "$manifest"
+printf 'fs_exec_probe_built=pass arch=%s elf=%s manifest=%s sha256=%s\n' "$arch" "$output" "$manifest" "$hash"

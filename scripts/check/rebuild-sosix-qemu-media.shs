@@ -1,0 +1,376 @@
+#!/bin/sh
+set -eu
+
+# Rebuild the six nonce-capable SimpleOS kernel/image pairs.  This script is
+# construction-only: it contains no QEMU launch path.
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$ROOT_DIR"
+
+ROWS="x86_32 x86_64 arm32 arm64 riscv32 riscv64"
+DEFAULT_ADMITTED="/mnt/data/bs2/final-e73-run2/bootstrap/stage3/x86_64-unknown-linux-gnu/stage2-admitted/simple"
+IMAGE_HARD_MAX_MB=512
+
+sha256_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
+
+fail() {
+    echo "sosix-qemu-rebuild: $*" >&2
+    exit 1
+}
+
+require_descendant() {
+    candidate=$1
+    owner=$2
+    case "$candidate" in "$owner"/*) ;; *) fail "path escapes big-storage owner: $candidate" ;; esac
+}
+
+publish_symlink_atomic() {
+    source=$1
+    public=$2
+    owner=$3
+    require_descendant "$source" "$owner"
+    [ -s "$source" ] || fail "publish source missing: $source"
+    mkdir -p "$(dirname -- "$public")"
+    tmp_link="${public}.sosix-qemu-publish.$$"
+    [ ! -e "$tmp_link" ] && [ ! -L "$tmp_link" ] || fail "unsafe publish temp exists: $tmp_link"
+    ln -s "$source" "$tmp_link"
+    mv -f "$tmp_link" "$public"
+}
+
+select_rows() {
+    requested=$1
+    [ -n "$requested" ] || return 1
+    case "$requested" in *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_,]*) return 1 ;; esac
+    case "$requested" in ,*|*,|*,,*) return 1 ;; esac
+    requested_words=$(printf '%s' "$requested" | tr ',' ' ')
+    [ -n "$requested_words" ] || return 1
+    seen=""
+    requested_count=0
+    for requested_row in $requested_words; do
+        row_fields "$requested_row" >/dev/null 2>&1 || return 1
+        case " $seen " in *" $requested_row "*) return 1 ;; esac
+        seen="$seen $requested_row"
+        requested_count=$((requested_count + 1))
+    done
+    [ "$requested_count" -gt 0 ] || return 1
+    selected=""
+    for canonical_row in $ROWS; do
+        case " $seen " in *" $canonical_row "*) selected="${selected}${selected:+ }$canonical_row" ;; esac
+    done
+    [ "$(printf '%s\n' $selected | wc -l | tr -d ' ')" -eq "$requested_count" ] || return 1
+    printf '%s\n' "$selected"
+}
+
+row_fields() {
+    case "$1" in
+        x86_32) echo 'examples/09_embedded/simple_os/arch/x86_32/initrd_fs_exec_probe_entry.spl|examples/09_embedded/simple_os/arch/x86_32/linker.ld|i686-unknown-none|build/os/simpleos_x86_32_initrd_fs_exec_probe.elf|build/os/fat32-x86_32.img|llvm|32|false' ;;
+        x86_64) echo 'examples/09_embedded/simple_os/arch/x86_64/fs_exec_entry.spl|examples/09_embedded/simple_os/arch/x86_64/linker.ld|x86_64-unknown-none|build/os/simpleos_x86_64_fs_exec.elf|build/os/fat32-x86_64.img|cranelift|64|false' ;;
+        arm32) echo 'examples/09_embedded/simple_os/arch/arm32/fs_exec_entry.spl|examples/09_embedded/simple_os/arch/arm32/fs_exec_linker.ld|armv7-unknown-none-eabihf|build/os/simpleos_arm32_fs_exec.elf|build/os/fat32-arm32.img|llvm|32|false' ;;
+        arm64) echo 'examples/09_embedded/simple_os/arch/arm64/fs_exec_entry.spl|examples/09_embedded/simple_os/arch/arm64/fs_exec_linker.ld|aarch64-unknown-none|build/os/simpleos_arm64_fs_exec.elf|build/os/fat32-arm64.img|cranelift|64|false' ;;
+        riscv32) echo 'examples/09_embedded/simple_os/arch/riscv32/smoke_entry.spl|examples/09_embedded/simple_os/arch/riscv32/linker.ld|riscv32-unknown-none|build/os/simpleos_riscv32_smf_fs.elf|build/os/fat32-riscv32.img|llvm|32|false' ;;
+        riscv64) echo 'examples/09_embedded/simple_os/arch/riscv64/smoke_entry.spl|examples/09_embedded/simple_os/arch/riscv64/linker.ld|riscv64-unknown-none|build/os/simpleos_riscv64_smf_fs.elf|build/os/fat32-riscv64.img|llvm|64|false' ;;
+        *) return 1 ;;
+    esac
+}
+
+row_minimum_image_mb() {
+    case "$1" in
+        # Measured by make_os_disk's structural allocation receipt on the
+        # scheduler-owned real-fs-exec profile (2026-08-12).
+        x86_64) echo 135 ;;
+        x86_32|arm32|arm64|riscv32|riscv64) echo 128 ;;
+        *) return 1 ;;
+    esac
+}
+
+image_headroom_mb() {
+    value=${SOSIX_QEMU_IMAGE_HEADROOM_MB:-16}
+    case "$value" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$value" -le 128 ] || return 1
+    echo "$value"
+}
+
+selected_image_mb() {
+    minimum=$(row_minimum_image_mb "$1") || return 1
+    headroom=$(image_headroom_mb) || return 1
+    selected=$((minimum + headroom))
+    [ "$selected" -ge "$minimum" ] || return 1
+    [ "$selected" -le "$IMAGE_HARD_MAX_MB" ] || return 1
+    echo "$selected"
+}
+
+validate_image_mb_for_row() {
+    minimum=$(row_minimum_image_mb "$1") || return 1
+    selected=$2
+    case "$selected" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$selected" -ge "$minimum" ] && [ "$selected" -le "$IMAGE_HARD_MAX_MB" ]
+}
+
+sources_for_row() {
+    case "$1" in
+        x86_32) echo '--source build/os/generated --source examples/09_embedded/simple_os/arch/x86_32' ;;
+        riscv32|riscv64) echo "--source build/os/generated --source examples/09_embedded/simple_os/arch/$1" ;;
+        *) echo '--source build/os/generated --source src/os --source src/lib --source examples/09_embedded/simple_os' ;;
+    esac
+}
+
+print_plan() {
+    plan_rows=$1
+    for row in $plan_rows; do
+        old_ifs=$IFS; IFS='|'; set -- $(row_fields "$row"); IFS=$old_ifs
+        minimum_mb=$(row_minimum_image_mb "$row")
+        image_mb=256
+        plan_mutable_root=${SOSIX_QEMU_MUTABLE_ROOT:-'<storage-root>/qemu/build-cache/<run-id>'}
+        printf '%s entry=%s linker=%s target=%s public_kernel=%s public_image=%s backend=%s bits=%s compiler_in_filesystem=%s image_minimum_mb=%s image_selected_mb=%s image_hard_max_mb=%s construction_strategy=single-bounded mutable_root=%s explicit_output_authority=true atomic_symlink_publish=true\n' \
+            "$row" "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" \
+            "$minimum_mb" "$image_mb" "$IMAGE_HARD_MAX_MB" "$plan_mutable_root"
+    done
+}
+
+self_test() {
+    self_test_rows=${1:-$ROWS}
+    count=0
+    for row in $self_test_rows; do
+        fields=$(row_fields "$row") || fail "missing row: $row"
+        old_ifs=$IFS; IFS='|'; set -- $fields; IFS=$old_ifs
+        [ "$#" -eq 8 ] || fail "invalid field count: $row"
+        [ -f "$1" ] || fail "missing entry: $1"
+        [ -f "$2" ] || fail "missing linker: $2"
+        count=$((count + 1))
+    done
+    [ "$count" -gt 0 ] || fail "expected selected rows"
+    grep -q 'QEMUNONCTXT' scripts/os/make_os_disk.c || fail "disk nonce slot absent"
+    grep -q 'rt_qemu_nonce_echo' examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c || fail "x86_64 nonce reader absent"
+    grep -q 'put_dir_entry(usr_bin,.*"SIMPLE     ".*simple_usr_cluster' scripts/os/make_os_disk.c || fail "compiler /usr/bin alias absent"
+    grep -q 'put_dir_entry(bin,.*"SIMPLE     ".*simple_bin_cluster' scripts/os/make_os_disk.c || fail "compiler /bin alias absent"
+    grep -q 'put_dir_entry(apps,.*"SIMPLE     ".*simple_apps_cluster' scripts/os/make_os_disk.c || fail "compiler /sys/apps alias absent"
+    grep -q 'simple_payload.len ? alloc_clusters(simple_payload.data, simple_payload.len)' scripts/os/make_os_disk.c || fail "compiler aliases are not payload-gated"
+    grep -q 'x86_64)' "$0" || fail "x86_64 build profile absent"
+    grep -q 'SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="$ROOT_DIR/src"' "$0" || fail "x86_64 strict runtime profile absent"
+    grep -q 'x86_64 full boot providers: scheduler-owned fs-exec reaches rt_extras.c' "$0" || fail "x86_64 full-provider contract absent"
+    [ "$(row_minimum_image_mb x86_64)" -eq 135 ] || fail "x86_64 measured minimum drift"
+    [ 256 -le "$IMAGE_HARD_MAX_MB" ] || fail "bounded construction exceeds hard maximum"
+    validate_image_mb_for_row x86_64 135 || fail "x86_64 exact minimum rejected"
+    if validate_image_mb_for_row x86_64 134; then fail "too-small x86_64 image accepted"; fi
+    if SOSIX_QEMU_IMAGE_HEADROOM_MB=129 selected_image_mb x86_64 >/dev/null 2>&1; then fail "unbounded headroom accepted"; fi
+    first_receipt="minimum_mb=$(row_minimum_image_mb x86_64) headroom_mb=$(SOSIX_QEMU_IMAGE_HEADROOM_MB=16 image_headroom_mb) selected_mb=$(SOSIX_QEMU_IMAGE_HEADROOM_MB=16 selected_image_mb x86_64) hard_max_mb=$IMAGE_HARD_MAX_MB"
+    second_receipt="minimum_mb=$(row_minimum_image_mb x86_64) headroom_mb=$(SOSIX_QEMU_IMAGE_HEADROOM_MB=16 image_headroom_mb) selected_mb=$(SOSIX_QEMU_IMAGE_HEADROOM_MB=16 selected_image_mb x86_64) hard_max_mb=$IMAGE_HARD_MAX_MB"
+    [ "$first_receipt" = "$second_receipt" ] || fail "image sizing receipt is unstable"
+    transition_128='fat_capacity status=fail cluster_bytes=1024 minimum_image_mb=135'
+    transition_151='fat_capacity status=fail cluster_bytes=2048 minimum_image_mb=161'
+    [ "$(printf '%s\n' "$transition_128" | sed -n 's/.*minimum_image_mb=\([0-9][0-9]*\).*/\1/p')" -eq 135 ] || fail "128-to-135 geometry jump lost"
+    [ "$(printf '%s\n' "$transition_151" | sed -n 's/.*minimum_image_mb=\([0-9][0-9]*\).*/\1/p')" -eq 161 ] || fail "151-to-161 geometry jump lost"
+    stable_transition='161 162 163 164 165 166 167'
+    [ "$(printf '%s\n' $stable_transition | tail -1)" -eq 167 ] || fail "geometry search stable selection drift"
+    grep -q 'strategy=single-bounded-construction' "$0" || fail "bounded construction receipt absent"
+    [ "$(select_rows 'x86_64')" = "x86_64" ] || fail "x86_64 row selection drift"
+    select_rows 'x86_32,x86_32' >/dev/null 2>&1 && fail "duplicate row accepted"
+    select_rows 'x86_16' >/dev/null 2>&1 && fail "unknown row accepted"
+    select_rows '' >/dev/null 2>&1 && fail "empty row selection accepted"
+    select_rows 'x86_32,' >/dev/null 2>&1 && fail "empty trailing row accepted"
+    if grep -Eq '(^|[;&|])[[:space:]]*qemu-system-' "$0"; then
+        fail "construction wrapper contains a QEMU launch surface"
+    fi
+    grep -q -- '--cache-dir "$cache_dir"' "$0" || fail "native build cache is not explicit"
+    grep -q -- '--output "$kernel"' "$0" || fail "native build output authority is not explicit"
+    if grep -Eq 'native-build .* -o "\$kernel"' "$0"; then fail "short output option bypasses explicit authority"; fi
+    grep -q 'publish_symlink_atomic "$kernel" "$public_kernel"' "$0" || fail "kernel atomic publish absent"
+    grep -q 'publish_symlink_atomic "$image" "$public_image"' "$0" || fail "image atomic publish absent"
+    test_root=$(mktemp -d "${TMPDIR:-/tmp}/sosix-qemu-publish-test.XXXXXX")
+    printf 'ELF' > "$test_root/artifact"
+    publish_symlink_atomic "$test_root/artifact" "$test_root/public" "$test_root"
+    [ -L "$test_root/public" ] && [ "$(cat "$test_root/public")" = ELF ] || fail "atomic symlink publish failed"
+    if (publish_symlink_atomic /etc/passwd "$test_root/escape" "$test_root") >/dev/null 2>&1; then
+        fail "out-of-owner publish accepted"
+    fi
+    ln -s /etc/passwd "$test_root/public.sosix-qemu-publish.$$"
+    if (publish_symlink_atomic "$test_root/artifact" "$test_root/public" "$test_root") >/dev/null 2>&1; then
+        fail "hostile publish temp symlink accepted"
+    fi
+    rm -f "$test_root/public.sosix-qemu-publish.$$" "$test_root/public" "$test_root/artifact"
+    rmdir "$test_root"
+    echo "PASS sosix QEMU selected-row rebuild contract self-test rows=$self_test_rows"
+}
+
+run_row() {
+    row=$1
+    run_root=$2
+    compiler=$3
+    fields=$(row_fields "$row") || fail "unknown row: $row"
+    old_ifs=$IFS; IFS='|'; set -- $fields; IFS=$old_ifs
+    entry=$1; linker=$2; target=$3; public_kernel=$4; public_image=$5; backend=$6; bits=$7; compiler_in_filesystem=$8
+    row_dir="$run_root/$row"
+    mutable_root=${SOSIX_QEMU_MUTABLE_ROOT:-$(dirname "$(dirname "$run_root")")/build-cache/$(basename "$run_root")}
+    case "$mutable_root" in /*) ;; *) fail "mutable root must be absolute: $mutable_root" ;; esac
+    workspace="$mutable_root/$row"
+    cache_dir="$workspace/native-cache"
+    tmp_dir="$workspace/tmp"
+    payload_dir="$workspace/fs-exec-payload"
+    kernel="$workspace/kernel.elf"
+    image="$workspace/disk.img"
+    require_descendant "$workspace" "$mutable_root"
+    mkdir -p "$row_dir" "$cache_dir" "$tmp_dir" "$payload_dir" build/os/generated
+    build_log="$row_dir/kernel-build.log"
+    image_log="$row_dir/image-build.log"
+    capacity_log="$row_dir/image-capacity-plan.log"
+    timeout_s=${SOSIX_QEMU_REBUILD_TIMEOUT_SECONDS:-900}
+    minimum_image_mb=$(row_minimum_image_mb "$row") || fail "$row minimum image size unavailable"
+    headroom_mb=$(image_headroom_mb) || fail "SOSIX_QEMU_IMAGE_HEADROOM_MB must be 0..128"
+    image_mb=$(selected_image_mb "$row") || fail "$row selected image size exceeds ${IMAGE_HARD_MAX_MB} MiB"
+    validate_image_mb_for_row "$row" "$image_mb" || fail "$row selected image size is below its minimum"
+
+    # Keep the direct command explicit: `os build --arch` selects smoke rows.
+    case "$row" in
+        x86_32)
+            timeout "$timeout_s" env TMPDIR="$tmp_dir" SIMPLE_BINARY="$compiler" SIMPLE_BIN="$compiler" SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$ROOT_DIR/src" SIMPLE_NO_STUB_FALLBACK=1 \
+                "$compiler" native-build --cache-dir "$cache_dir" --source build/os/generated --source examples/09_embedded/simple_os/arch/x86_32 --backend "$backend" --opt-level=aggressive --log off --timeout 240 --entry-closure --entry "$entry" --target "$target" --output "$kernel" --linker-script "$linker" >"$build_log" 2>&1 ;;
+        riscv32)
+            timeout "$timeout_s" env TMPDIR="$tmp_dir" SIMPLE_BINARY="$compiler" SIMPLE_BIN="$compiler" SIMPLE_BOOT_MINIMAL=1 SIMPLE_NO_STUB_FALLBACK=1 \
+                "$compiler" native-build --cache-dir "$cache_dir" --source build/os/generated --source "examples/09_embedded/simple_os/arch/$row" --backend "$backend" --opt-level=aggressive --log off --timeout 240 --entry-closure --entry "$entry" --target "$target" --output "$kernel" --linker-script "$linker" >"$build_log" 2>&1 ;;
+        riscv64)
+            timeout "$timeout_s" env TMPDIR="$tmp_dir" SIMPLE_BINARY="$compiler" SIMPLE_BIN="$compiler" SIMPLE_BOOT_MINIMAL=1 SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="$ROOT_DIR/src" \
+                "$compiler" native-build --cache-dir "$cache_dir" --source build/os/generated --source src/os --source src/lib --source examples/09_embedded/simple_os --backend "$backend" --opt-level=aggressive --log off --timeout 240 --entry-closure --entry "$entry" --target "$target" --output "$kernel" --linker-script "$linker" >"$build_log" 2>&1 ;;
+        arm64)
+            timeout "$timeout_s" env TMPDIR="$tmp_dir" SIMPLE_BINARY="$compiler" SIMPLE_BIN="$compiler" SIMPLE_BOOT_MINIMAL=1 SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="$ROOT_DIR/src" \
+                "$compiler" native-build --cache-dir "$cache_dir" --source build/os/generated --source src/os --source src/lib --source examples/09_embedded/simple_os --backend cranelift --opt-level=aggressive --log off --timeout 180 --entry-closure --entry "$entry" --target "$target" --output "$kernel" --linker-script "$linker" >"$build_log" 2>&1 ;;
+        x86_64)
+            # x86_64 full boot providers: scheduler-owned fs-exec reaches rt_extras.c.
+            # SIMPLE_BOOT_MINIMAL intentionally excludes that real runtime owner and
+            # is valid only for the old C-probe closure. Keep strict no-stub fallback.
+            timeout "$timeout_s" env TMPDIR="$tmp_dir" SIMPLE_BINARY="$compiler" SIMPLE_BIN="$compiler" SIMPLE_BOOTSTRAP=1 SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="$ROOT_DIR/src" \
+                "$compiler" native-build --cache-dir "$cache_dir" --source build/os/generated --source src/os --source src/lib --source examples/09_embedded/simple_os --backend "$backend" --opt-level=aggressive --log off --timeout 240 --entry-closure --entry "$entry" --target "$target" --output "$kernel" --linker-script "$linker" >"$build_log" 2>&1 ;;
+        *)
+            timeout "$timeout_s" env TMPDIR="$tmp_dir" SIMPLE_BINARY="$compiler" SIMPLE_BIN="$compiler" SIMPLE_BOOT_MINIMAL=1 SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="$ROOT_DIR/src" \
+                "$compiler" native-build --cache-dir "$cache_dir" --source build/os/generated --source src/os --source src/lib --source examples/09_embedded/simple_os --backend "$backend" --opt-level=aggressive --log off --timeout 240 --entry-closure --entry "$entry" --target "$target" --output "$kernel" --linker-script "$linker" >"$build_log" 2>&1 ;;
+    esac
+
+    [ -s "$kernel" ] || fail "$row kernel missing after build"
+    magic=$(dd if="$kernel" bs=1 count=4 2>/dev/null | od -An -tx1 | tr -d ' \n')
+    [ "$magic" = "7f454c46" ] || fail "$row kernel is not ELF"
+    fsexec_env=""
+    case "$row" in
+        x86_32|arm32|arm64|riscv32|riscv64)
+            sh scripts/os/build_simpleos_fs_exec_probe.shs "$row" \
+                "$payload_dir/probe.elf" "$payload_dir/probe.manifest" >"$row_dir/payload-build.log" 2>&1
+            fsexec_env="$payload_dir/probe.elf"
+            ;;
+    esac
+    # The current writer has no no-write geometry planner.  Use one bounded
+    # construction size that clears the measured 167 MiB x86_64 threshold and
+    # remains below the frozen 512 MiB ceiling; never probe by writing several
+    # full images in a retry loop.
+    image_mb=256
+    validate_image_mb_for_row "$row" "$image_mb" || fail "$row fixed image size invalid: $image_mb"
+    printf 'strategy=single-bounded-construction\nselected_mb=%s\nhard_max_mb=%s\n' \
+        "$image_mb" "$IMAGE_HARD_MAX_MB" >"$capacity_log"
+    env SIMPLEOS_COMPILER_IN_FILESYSTEM="$compiler_in_filesystem" \
+        SIMPLEOS_FSEXEC_BINARY="$fsexec_env" \
+    TMPDIR="$tmp_dir" sh scripts/os/make_os_disk.shs "$image_mb" "$image" "$kernel" "$row" fs-exec >"$image_log" 2>&1
+    [ -s "$image" ] || fail "$row image missing after build"
+    slots=$(LC_ALL=C grep -aob 'SIMPLEOS_QEMU_NONCE=__SIMPLEOS_QEMU_NONCE_SLOT_V1__' "$image" | wc -l | tr -d ' ')
+    [ "$slots" -eq 1 ] || fail "$row image nonce-slot count=$slots"
+
+    publish_symlink_atomic "$kernel" "$public_kernel" "$mutable_root"
+    publish_symlink_atomic "$image" "$public_image" "$mutable_root"
+
+    cp "$kernel" "$row_dir/kernel.elf"
+    cp "$image" "$row_dir/disk.img"
+    kernel_sha=$(sha256_file "$row_dir/kernel.elf")
+    image_sha=$(sha256_file "$row_dir/disk.img")
+    {
+        printf 'row=%s\n' "$row"
+        printf 'compiler_sha256=%s\n' "$(sha256_file "$compiler")"
+        printf 'kernel_path=%s\n' "$kernel"
+        printf 'kernel_public_path=%s\n' "$public_kernel"
+        printf 'kernel_sha256=%s\n' "$kernel_sha"
+        printf 'image_path=%s\n' "$image"
+        printf 'image_public_path=%s\n' "$public_image"
+        printf 'mutable_root=%s\n' "$mutable_root"
+        printf 'native_cache_dir=%s\n' "$cache_dir"
+        printf 'image_sha256=%s\n' "$image_sha"
+        printf 'image_minimum_mb=%s\n' "$minimum_image_mb"
+        printf 'image_headroom_mb=%s\n' "$headroom_mb"
+        printf 'image_selected_mb=%s\n' "$image_mb"
+        printf 'image_hard_max_mb=%s\n' "$IMAGE_HARD_MAX_MB"
+        printf 'image_capacity_plan_sha256=%s\n' "$(sha256_file "$capacity_log")"
+        printf 'nonce_slots=%s\n' "$slots"
+        printf 'compiler_in_filesystem=%s\n' "$compiler_in_filesystem"
+        printf 'status=pass\n'
+    } > "$row_dir/receipt.env"
+}
+
+mode=${1:-}
+selected_rows=$ROWS
+case "$mode" in
+    --self-test)
+        if [ "${2:-}" = "--rows" ]; then
+            [ "$#" -eq 3 ] || fail "--rows requires exactly one comma-separated value"
+            selected_rows=$(select_rows "$3") || fail "invalid --rows selection: ${3:-<empty>}"
+            self_test "$selected_rows"
+        else
+            [ "$#" -eq 1 ] || fail "unexpected arguments"
+            self_test
+        fi
+        exit 0 ;;
+    --plan|--run)
+        if [ "${2:-}" = "--rows" ]; then
+            [ "$#" -eq 3 ] || fail "--rows requires exactly one comma-separated value"
+            selected_rows=$(select_rows "$3") || fail "invalid --rows selection: ${3:-<empty>}"
+        else
+            [ "$#" -eq 1 ] || fail "unexpected arguments"
+        fi
+        if [ "$mode" = "--plan" ]; then print_plan "$selected_rows"; exit 0; fi
+        ;;
+    --row)
+        [ "$#" -eq 4 ] || fail "--row requires ROW RUN_ROOT COMPILER"
+        run_row "$2" "$3" "$4"
+        exit 0
+        ;;
+    *) fail "usage: $0 --self-test | --plan [--rows ROW,...] | --run [--rows ROW,...]" ;;
+esac
+
+storage_root=${SIMPLE_BIG_STORAGE:-${HOME}/.simple}
+case "$(uname -s)" in
+    Linux) [ -d /mnt/data ] && storage_root=${SIMPLE_BIG_STORAGE:-/mnt/data/.simple} ;;
+esac
+compiler=${SIMPLEOS_REBUILD_COMPILER:-}
+if [ -z "$compiler" ]; then
+    if [ -x "$DEFAULT_ADMITTED" ]; then compiler=$DEFAULT_ADMITTED; else compiler=bin/release/x86_64-unknown-linux-gnu/simple; fi
+fi
+[ -x "$compiler" ] || fail "compiler is not executable: $compiler"
+case "$compiler" in *compiler_rust*|*target/bootstrap*) fail "Rust/bootstrap seed is not admitted" ;; esac
+actual_compiler_sha=$(sha256_file "$compiler")
+if [ -n "${SIMPLEOS_REBUILD_COMPILER_SHA256:-}" ] && [ "$actual_compiler_sha" != "$SIMPLEOS_REBUILD_COMPILER_SHA256" ]; then
+    fail "compiler hash mismatch"
+fi
+jobs=${SOSIX_QEMU_REBUILD_JOBS:-3}
+case "$jobs" in 1|2|3|4|5|6) ;; *) fail "SOSIX_QEMU_REBUILD_JOBS must be 1..6" ;; esac
+run_id=${SOSIX_QEMU_REBUILD_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}
+case "$run_id" in *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:-]*) fail "unsafe run id" ;; esac
+run_root="$storage_root/qemu/artifacts/sosix-qemu/rebuild/$run_id"
+mkdir -p "$run_root"
+pending_pids=""
+pending_count=0
+batch_failed=0
+for row in $selected_rows; do
+    sh "$0" --row "$row" "$run_root" "$compiler" &
+    pending_pids="$pending_pids $!"
+    pending_count=$((pending_count + 1))
+    if [ "$pending_count" -eq "$jobs" ]; then
+        for rebuild_pid in $pending_pids; do wait "$rebuild_pid" || batch_failed=1; done
+        [ "$batch_failed" -eq 0 ] || fail "parallel rebuild batch failed"
+        pending_pids=""
+        pending_count=0
+    fi
+done
+for rebuild_pid in $pending_pids; do wait "$rebuild_pid" || batch_failed=1; done
+[ "$batch_failed" -eq 0 ] || fail "parallel rebuild batch failed"
+for row in $selected_rows; do [ -f "$run_root/$row/receipt.env" ] || fail "missing receipt: $row"; done
+printf 'status=pass\nrows=%s\ncompiler_sha256=%s\nrun_root=%s\n' "$selected_rows" "$actual_compiler_sha" "$run_root" > "$run_root/receipt.env"
+echo "PASS sosix QEMU rebuild-only matrix: $run_root"

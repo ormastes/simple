@@ -1,0 +1,114 @@
+#!/bin/sh
+# Validate the architecture envelope shared by all six filesystem-exec guests.
+set -eu
+
+fail() {
+    echo "[fs-exec-kernel-elf] ERROR: $*" >&2
+    exit 1
+}
+
+expected_class() {
+    case "$1" in
+        x86_32|arm32|riscv32) echo ELF32 ;;
+        x86_64|arm64|riscv64) echo ELF64 ;;
+        *) fail "unknown guest: $1" ;;
+    esac
+}
+
+expected_machine_pattern() {
+    case "$1" in
+        x86_32) echo 'Intel 80386' ;;
+        x86_64) echo 'Advanced Micro Devices X86-64' ;;
+        arm32) echo 'ARM' ;;
+        arm64) echo 'AArch64' ;;
+        riscv32|riscv64) echo 'RISC-V' ;;
+        *) fail "unknown guest: $1" ;;
+    esac
+}
+
+validate_header() {
+    guest=$1
+    header=$2
+    class=$(expected_class "$guest")
+    machine=$(expected_machine_pattern "$guest")
+    printf '%s\n' "$header" | grep -Eq "Class:[[:space:]]+${class}([[:space:]]|$)" \
+        || fail "$guest kernel has wrong ELF class"
+    printf '%s\n' "$header" | grep -Eq 'Data:.*little endian' \
+        || fail "$guest kernel is not little-endian"
+    printf '%s\n' "$header" | grep -Eq 'Type:[[:space:]]+EXEC([[:space:]]|$)' \
+        || fail "$guest kernel is not an executable ELF"
+    printf '%s\n' "$header" | grep -Fq "Machine:                           ${machine}" \
+        || fail "$guest kernel has wrong machine"
+    printf '%s\n' "$header" | awk '/Entry point address:/ { if ($4 != "0x0" && $4 != "0") ok = 1 } END { exit ok ? 0 : 1 }' \
+        || fail "$guest kernel entry point is missing or zero"
+}
+
+validate_program_headers() {
+    guest=$1
+    headers=$2
+    printf '%s\n' "$headers" | grep -Eq '^[[:space:]]*LOAD[[:space:]]' \
+        || fail "$guest kernel has no PT_LOAD segment"
+    if printf '%s\n' "$headers" | grep -Eq '^[[:space:]]*INTERP[[:space:]]'; then
+        fail "$guest kernel has a PT_INTERP segment"
+    fi
+}
+
+validate_symbols() {
+    guest=$1
+    symbols=$2
+    printf '%s\n' "$symbols" | awk '
+$5 == "GLOBAL" && $7 == "UND" { bad = 1 }
+END { exit bad ? 1 : 0 }
+' || fail "$guest kernel contains a strong undefined symbol"
+}
+
+run_self_test() {
+    for row in 'x86_64|ELF64|Advanced Micro Devices X86-64'; do
+        guest=${row%%|*}
+        rest=${row#*|}
+        class=${rest%%|*}
+        machine=${rest#*|}
+        header="  Class:                             ${class}
+  Data:                              2s complement, little endian
+  Type:                              EXEC (Executable file)
+  Machine:                           ${machine}
+  Entry point address:               0x1000"
+        validate_header "$guest" "$header"
+        validate_program_headers "$guest" '  LOAD 0x0 0x1000 0x1000 0x10 0x10 R E 0x1000'
+        validate_symbols "$guest" '     1: 0000000000001000 16 FUNC GLOBAL DEFAULT 1 entry'
+    done
+    if (validate_header x86_64 '  Class: ELF32') >/dev/null 2>&1; then
+        fail "self-test accepted wrong x86_64 class"
+    fi
+    if (validate_program_headers x86_64 '  INTERP 0x0 0x0 0x0 0x1 0x1 R 0x1') >/dev/null 2>&1; then
+        fail "self-test accepted missing LOAD/PT_INTERP"
+    fi
+    if (validate_symbols x86_64 '     1: 0 0 NOTYPE GLOBAL DEFAULT UND missing') >/dev/null 2>&1; then
+        fail "self-test accepted a strong undefined symbol"
+    fi
+    echo "simpleos_fs_exec_kernel_elf_self_test=pass"
+}
+
+if [ "$#" -eq 1 ] && [ "$1" = "--self-test" ]; then
+    run_self_test
+    exit 0
+fi
+[ "$#" -eq 2 ] || fail "usage: $0 GUEST ELF | --self-test"
+guest=$1
+elf=$2
+[ -s "$elf" ] || fail "$guest kernel ELF is missing or empty: $elf"
+
+READELF=${READELF:-}
+if [ -z "$READELF" ]; then
+    READELF=$(command -v llvm-readelf || command -v readelf || true)
+fi
+[ -n "$READELF" ] || fail "llvm-readelf or readelf is required"
+
+header=$("$READELF" -W -h "$elf") || fail "cannot read kernel ELF header: $elf"
+program_headers=$("$READELF" -W -l "$elf") || fail "cannot read kernel program headers: $elf"
+symbols=$("$READELF" -W -s "$elf") || fail "cannot read kernel symbols: $elf"
+
+validate_header "$guest" "$header"
+validate_program_headers "$guest" "$program_headers"
+validate_symbols "$guest" "$symbols"
+echo "[fs-exec-kernel-elf] PASS: guest=$guest elf=$elf"

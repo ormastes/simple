@@ -3,6 +3,7 @@
 
 #include "embedded_ssh_host_rsa.h"
 #include "embedded_ssh_host_rsa_crt.h"
+#include "x86_64_nonce_slot_contract.h"
 
 typedef int64_t RuntimeValue;
 
@@ -3400,6 +3401,73 @@ done:
     serial_put_dec((int64_t)count);
     serial_puts(" entries\r\n");
     return 0;
+}
+
+static void _fat32_serial_name83(const uint8_t *entry) {
+    for (uint32_t i = 0; i < 8U && entry[i] != ' '; i++)
+        serial_putchar((char)entry[i]);
+    if (entry[8] != ' ') {
+        serial_putchar('.');
+        for (uint32_t i = 8U; i < 11U && entry[i] != ' '; i++)
+            serial_putchar((char)entry[i]);
+    }
+}
+
+int64_t rt_x86_64_fs_ls_sys_apps(void) {
+    if (!_fat32.initialized && _fat32_init() != 0) return 0;
+    uint32_t dir_cluster = 0, dir_size = 0;
+    uint8_t attr = 0;
+    if (_fat32_find_path("/SYS/APPS", &dir_cluster, &dir_size, &attr) != 0 ||
+        (attr & 0x10U) == 0 || dir_cluster < 2U)
+        return 0;
+
+    uint32_t cluster_bytes = _fat32.sectors_per_cluster * 512U;
+    uint8_t *dir_buf = (uint8_t *)nvme_alloc_aligned(cluster_bytes, 512U);
+    if (!dir_buf) return 0;
+    serial_puts("FS_LS_BEGIN path=/SYS/APPS\r\n");
+
+    uint32_t cluster = dir_cluster;
+    uint32_t cluster_budget = 128U;
+    uint32_t entry_count = 0U;
+    int complete = 0;
+    while (cluster >= 2U && cluster < 0x0FFFFFF8U && cluster_budget-- > 0U) {
+        if (_fat32_read_cluster(cluster, dir_buf) != 0) break;
+        uint32_t entries = cluster_bytes / 32U;
+        for (uint32_t i = 0; i < entries; i++) {
+            const uint8_t *entry = dir_buf + i * 32U;
+            if (entry[0] == 0x00U) { complete = 1; goto listing_done; }
+            if (entry[0] == 0xE5U || (entry[11] & 0x0FU) == 0x0FU ||
+                (entry[11] & 0x08U) != 0U || entry[0] == '.')
+                continue;
+            if (entry_count >= 256U) goto listing_done;
+            serial_puts("FS_LS_ENTRY name=");
+            _fat32_serial_name83(entry);
+            serial_puts("\r\n");
+            entry_count++;
+        }
+        uint32_t next = _fat32_next_cluster(cluster);
+        if (next >= 0x0FFFFFF8U) { complete = 1; break; }
+        if (next < 2U || next == cluster) break;
+        cluster = next;
+    }
+listing_done:
+    nvme_free_aligned(dir_buf);
+    if (!complete || entry_count == 0U) return 0;
+    serial_puts("FS_LS_END status=pass\r\n");
+    return 1;
+}
+
+int64_t rt_qemu_nonce_echo(void) {
+    uint8_t nonce_file[118];
+    uint32_t bytes_read = 0;
+    if (!_fat32.initialized && _fat32_init() != 0) return 0;
+    if (fat32_read_file("/QEMUNONC.TXT", nonce_file, sizeof(nonce_file),
+                        &bytes_read) != 0)
+        return 0;
+    size_t line_len = x86_64_nonce_slot_line_length(nonce_file, bytes_read);
+    if (line_len == 0U) return 0;
+    for (size_t i = 0; i < line_len; i++) serial_putchar((char)nonce_file[i]);
+    return 1;
 }
 
 /* Syscall wrapper: Fat32ReadFile
@@ -16929,6 +16997,67 @@ static uint64_t _user_heap_end  = 0;
 static int _bare_exec_mode = 0;
 static int _bare_exec_halt_on_exit = 0;
 
+/* Scheduler-owned ring-3 execution token.  The address-space id is the
+ * generation: it is monotonic for every freshly-created user address space.
+ * Syscalls authenticate the live CR3 before producing output or completing
+ * the saved frame; the result can then be taken exactly once by the scheduler
+ * bridge using the full identity tuple. */
+static uint64_t _x86_exec_token_task = 0;
+static uint64_t _x86_exec_token_generation = 0;
+static uint64_t _x86_exec_token_cr3 = 0;
+static int _x86_exec_token_active = 0;
+static int _x86_exec_result_valid = 0;
+static int64_t _x86_exec_result_rc = 0;
+static uint64_t _x86_exec_result_task = 0;
+static uint64_t _x86_exec_result_generation = 0;
+static uint64_t _x86_exec_result_cr3 = 0;
+
+static uint64_t _x86_current_cr3(void) {
+    uint64_t value;
+    __asm__ __volatile__("mov %%cr3,%0" : "=r"(value));
+    return value & ~0xfffULL;
+}
+
+int64_t rt_x86_exec_token_install(uint64_t task, uint64_t generation,
+                                  uint64_t expected_cr3) {
+    expected_cr3 &= ~0xfffULL;
+    if (_x86_exec_token_active || task == 0 || generation == 0 || expected_cr3 == 0)
+        return 0;
+    _x86_exec_token_task = task;
+    _x86_exec_token_generation = generation;
+    _x86_exec_token_cr3 = expected_cr3;
+    _x86_exec_token_active = 1;
+    _x86_exec_result_valid = 0;
+    _bare_exec_mode = 1;
+    _bare_exec_halt_on_exit = 0;
+    return 1;
+}
+
+static int _x86_exec_token_current_valid(void) {
+    return _x86_exec_token_active &&
+           _x86_current_cr3() == _x86_exec_token_cr3;
+}
+
+int64_t rt_x86_exec_token_cancel(uint64_t task, uint64_t generation,
+                                 uint64_t expected_cr3) {
+    if (!_x86_exec_token_active || task != _x86_exec_token_task ||
+        generation != _x86_exec_token_generation ||
+        (expected_cr3 & ~0xfffULL) != _x86_exec_token_cr3)
+        return 0;
+    _x86_exec_token_active = 0;
+    return 1;
+}
+
+int64_t rt_x86_exec_token_take_result(uint64_t task, uint64_t generation,
+                                      uint64_t expected_cr3) {
+    if (!_x86_exec_result_valid || task != _x86_exec_result_task ||
+        generation != _x86_exec_result_generation ||
+        (expected_cr3 & ~0xfffULL) != _x86_exec_result_cr3)
+        return -4096;
+    _x86_exec_result_valid = 0;
+    return _x86_exec_result_rc;
+}
+
 extern void rt_x86_ring3_resume(int64_t rc);
 extern int64_t rt_x86_ring3_resume_valid(void);
 
@@ -17159,6 +17288,7 @@ static int _bare_exec_handle(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2
     (void)a5;
     switch (num) {
         case 0:   /* exit(status) — dump RAM outputs, then QEMU isa-debug-exit */
+            if (!_x86_exec_token_current_valid()) { *out = -1; return 1; }
             /* A nested child's outputs stay in the shared RAM table for its
              * parent to consume; only the outermost exit dumps them to serial,
              * otherwise every level re-dumps the same objects. */
@@ -17166,6 +17296,12 @@ static int _bare_exec_handle(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2
             serial_puts("[syscall] exit status=");
             serial_put_dec((int64_t)a0);
             serial_puts("\r\n");
+            _x86_exec_result_task = _x86_exec_token_task;
+            _x86_exec_result_generation = _x86_exec_token_generation;
+            _x86_exec_result_cr3 = _x86_exec_token_cr3;
+            _x86_exec_result_rc = (int64_t)a0;
+            _x86_exec_result_valid = 1;
+            _x86_exec_token_active = 0;
             if (!_bare_exec_halt_on_exit && rt_x86_ring3_resume_valid())
                 rt_x86_ring3_resume((int64_t)a0);
             outb(0xF4, (uint8_t)((a0 << 1) | 1));
@@ -17489,6 +17625,7 @@ static int _bare_exec_handle(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2
             *out = 0; return 1;
         }
         case 60:  /* debug_write(char) — libc routes fd 1/2 through 60 per-char */
+            if (!_x86_exec_token_current_valid()) { *out = -1; return 1; }
             _serial_putchar_impl((char)a0);
             *out = 0; return 1;
         default:

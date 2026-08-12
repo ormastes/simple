@@ -919,6 +919,12 @@ int main(int argc, char **argv)
     struct bytes bootloader = bootloader_file.len ? bootloader_file : text_bytes("SIMPLEOS_UEFI_BOOTLOADER_MISSING\n");
     struct bytes limine = text_bytes("timeout: 0\nserial: yes\n/ SimpleOS\nprotocol: multiboot1\npath: boot():/kernel.elf\ntextmode: no\nresolution: 1024x768x32\ncmdline: console=serial root=/dev/nvme0n1\n");
     struct bytes hello_txt = text_bytes("Hello from SimpleOS\n");
+    static unsigned char qemu_nonce_slot_data[118];
+    static const char qemu_nonce_placeholder[] =
+        "SIMPLEOS_QEMU_NONCE=__SIMPLEOS_QEMU_NONCE_SLOT_V1__\n";
+    memcpy(qemu_nonce_slot_data, qemu_nonce_placeholder,
+           sizeof(qemu_nonce_placeholder) - 1U);
+    struct bytes qemu_nonce_slot = {qemu_nonce_slot_data, sizeof(qemu_nonce_slot_data)};
     struct bytes numbers_txt = text_bytes("5\n");
     struct bytes hello_spl = text_bytes("fn main() -> i64:\n    print \"Hello from SimpleOS\"\n    return 0\n");
     struct bytes nvfs = textf("nvfs-image-version=1\nplatform=%s\nlane=%s\n", platform, lane);
@@ -981,6 +987,7 @@ int main(int argc, char **argv)
     int bootloader_cluster = alloc_clusters(bootloader.data, bootloader.len);
     int limine_cluster = alloc_clusters(limine.data, limine.len);
     int hello_txt_cluster = alloc_clusters(hello_txt.data, hello_txt.len);
+    int qemu_nonce_cluster = alloc_clusters(qemu_nonce_slot.data, qemu_nonce_slot.len);
     int numbers_cluster = alloc_clusters(numbers_txt.data, numbers_txt.len);
     int hello_spl_cluster = alloc_clusters(hello_spl.data, hello_spl.len);
     int nvfs_cluster = alloc_clusters(nvfs.data, nvfs.len);
@@ -1104,6 +1111,7 @@ int main(int argc, char **argv)
     put_dir_entry(root, &root_n, "KERNEL  ELF", kernel_cluster, kernel.len, 0x20);
     put_dir_entry(root, &root_n, "LIMINE  CNF", limine_cluster, limine.len, 0x20);
     put_dir_entry(root, &root_n, "HELLO   TXT", hello_txt_cluster, hello_txt.len, 0x20);
+    put_dir_entry(root, &root_n, "QEMUNONCTXT", qemu_nonce_cluster, qemu_nonce_slot.len, 0x20);
     put_dir_entry(root, &root_n, "NUMBERS TXT", numbers_cluster, numbers_txt.len, 0x20);
     put_dir_entry(root, &root_n, "HELLO   SPL", hello_spl_cluster, hello_spl.len, 0x20);
     put_dir_entry(root, &root_n, "HELLO   C  ", hello_c_cluster, clang_c.len, 0x20);
