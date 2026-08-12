@@ -20,7 +20,7 @@ common_tail(){
 }
 
 # Tooling normalization and detached-signature contract.
-mkdir "$work/tooling-generation"; printf 'artifact_schema=mci-tooling-child-manifest-v1\nartifact_mode=live\nrelease_eligible=true\n' > "$work/tooling-generation/manifest.env"
+mkdir "$work/tooling-generation"; printf 'manifest_schema=mci-tooling-child-manifest-v1\nmode=live\nrelease_eligible=true\n' > "$work/tooling-generation/manifest.env"
 tar -cf "$work/tooling-generation-v1.tar" -C "$work/tooling-generation" .
 tooling_hash=$(hash_file "$work/tooling-generation-v1.tar")
 tooling_scenarios=MCI-TOOL-001,MCI-TOOL-002,MCI-TOOL-003,MCI-NFR-001,MCI-NFR-002,MCI-NFR-005,MCI-NFR-006,MCI-NFR-013,MCI-NFR-014
@@ -37,6 +37,11 @@ sed '/^receipt_hash=/d' "$work/tooling-evidence/receipts/tooling.receipt" > "$wo
 field_hash=$(sed -n 's/^receipt_hash=//p' "$work/tooling-evidence/receipts/tooling.receipt")
 [ "$field_hash" = "$(hash_file "$work/tooling.canonical")" ]
 openssl dgst -sha256 -verify "$work/public.pem" -signature "$work/tooling-evidence/signatures/tooling.sig" "$work/tooling.canonical" >/dev/null 2>&1
+
+# The compiler helper is always resolved from the repository, never evidence-adjacent source.
+mkdir -p "$work/scripts/check/lib"; printf '#error attacker-controlled helper compiled\n' > "$work/scripts/check/lib/mci-secure-publish.c"
+make_root "$work/helper-root"
+"$signer" --evidence "$work/helper-root" --lane tooling --template "$work/tooling.template" --artifact "$work/tooling-generation-v1.tar" --private-key "$work/key.pem" --trusted-key-id contract-key >/dev/null
 
 # SimpleOS's distinct unsigned schema is normalized to the same canonical receipt.
 printf 'artifact_schema=mci-simpleos-platform-evidence-v1\nartifact_mode=live\nrelease_eligible=true\n' > "$work/simpleos.evidence"
@@ -60,4 +65,11 @@ fixture_hash=$(hash_file "$work/fixture-input/simpleos.evidence"); sed "s/$simpl
 make_root "$work/reject-fixture"
 if "$signer" --evidence "$work/reject-fixture" --lane simpleos --template "$work/fixture.template" --artifact "$work/fixture-input/simpleos.evidence" --private-key "$work/key.pem" --trusted-key-id contract-key >/dev/null 2>&1; then exit 1; fi
 [ ! -e "$work/reject-fixture/receipts/simpleos.receipt" ] && [ ! -e "$work/reject-fixture/signatures/simpleos.sig" ]
+
+# Stress expiry is signer-owned and must be supplied as a bounded decimal.
+printf 'artifact_schema=mci-stress-evidence-v1\nartifact_mode=live\nrelease_eligible=true\n' > "$work/stress.evidence"; stress_hash=$(hash_file "$work/stress.evidence")
+{ echo receipt_schema=mci-lane-receipt-v1; echo check_id=stress; echo producer_class=stress-target; echo attestation=EXTERNAL_SIGNER_SETS_signed-v1; echo trusted_key_id=EXTERNAL_SIGNER_SETS_key_id; echo signature_relpath=stress.sig; common_tail stress stress.evidence "$stress_hash" mci-stress-evidence-v1 MCI-NFR-015,MCI-NFR-016; echo receipt_hash=placeholder; } > "$work/stress.template"
+sed 's/^valid_until_utc_ns=200$/valid_until_utc_ns=EXTERNAL_SIGNER_SETS_valid_until_utc_ns/' "$work/stress.template" > "$work/stress.placeholder"; mv "$work/stress.placeholder" "$work/stress.template"
+make_root "$work/stress-root"; "$signer" --evidence "$work/stress-root" --lane stress --template "$work/stress.template" --artifact "$work/stress.evidence" --private-key "$work/key.pem" --trusted-key-id contract-key --valid-until-utc-ns 200 >/dev/null
+grep -Fxq valid_until_utc_ns=200 "$work/stress-root/receipts/stress.receipt"
 echo 'mci_v2_lane_signer_contract_test: PASS'

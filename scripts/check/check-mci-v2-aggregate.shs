@@ -175,7 +175,9 @@ artifact_header() {
     if [ "$check" = tooling ]; then
         # The tooling artifact is a generation archive. Only its canonical
         # manifest is policy-bearing; never trust a receipt-side description.
-        tar -xOf "$artifact" ./manifest.env > "$output" 2>/dev/null || return 1
+        [ "$(tar -tf "$artifact" 2>/dev/null | wc -l | tr -d ' ')" -le "${MCI_AGGREGATE_TAR_MEMBER_LIMIT:-256}" ] || return 1
+        tar -xOf "$artifact" ./manifest.env | dd bs=65537 count=1 of="$output" 2>/dev/null || return 1
+        [ "$(wc -c < "$output")" -le 65536 ] || return 1
     else
         cp -- "$artifact" "$output" || return 1
     fi
@@ -267,6 +269,7 @@ snapshot_file "$reviewer_key" "$reviewer_key_snapshot" || {
 } > "$candidate_graph"
 
 blocked=0
+reviewer_status=BLOCKED
 for check_id in $required_checks; do
     snapshot= signature_snapshot= asnapshot= receipt_hash= artifact_hash=
     rm -f "$tmp.canonical"
@@ -460,6 +463,7 @@ for check_id in $required_checks; do
         fi
     fi
     if [ "$reason" = none ]; then status=PASS; else status=BLOCKED; blocked=$((blocked + 1)); fi
+    [ "$check_id" != reviewer ] || reviewer_status=$status
     echo "row=$check_id|$status|$reason|$(scenario_map "$check_id")" >> "$tmp"
     if [ "$status" = BLOCKED ]; then
         command=$(resume_for "$check_id")
@@ -512,27 +516,37 @@ echo 'collector_contract=PASS' >> "$tmp"
 echo 'collector_contract_scenarios=MCI-AGG-001,MCI-AGG-002,MCI-AGG-003' >> "$tmp"
 if [ "$blocked" -eq 0 ]; then
     result=PASS
+    release_blockers=none
 else
     result=BLOCKED
+    release_blockers=$blocked
 fi
 echo "result=$result" >> "$tmp"
 echo "blocked_count=$blocked" >> "$tmp"
+echo "release_blockers=$release_blockers" >> "$tmp"
 manifest_hash=$(hash_file "$tmp")
 echo "manifest_sha256=$manifest_hash" >> "$tmp"
 sync
 [ "$(sed '$d' "$tmp" | hash_file /dev/stdin 2>/dev/null || true)" = "$manifest_hash" ] || { echo 'BLOCKED: report verification failed' >&2; exit 2; }
-mv "$tmp" "$evidence/aggregate-report-v1.env"
+if [ "$reviewer_status" = PASS ]; then report_path=$evidence/aggregate-final-report-v1.env; else report_path=$evidence/aggregate-report-v1.env; fi
+[ ! -e "$report_path" ] && [ ! -L "$report_path" ] || { echo 'BLOCKED: aggregate report collision' >&2; exit 2; }
+mv "$tmp" "$report_path"
 sync
-[ "$(sed '$d' "$evidence/aggregate-report-v1.env" | hash_file /dev/stdin 2>/dev/null || true)" = "$manifest_hash" ] || { echo 'BLOCKED: published report verification failed' >&2; exit 2; }
+[ "$(sed '$d' "$report_path" | hash_file /dev/stdin 2>/dev/null || true)" = "$manifest_hash" ] || { echo 'BLOCKED: published report verification failed' >&2; exit 2; }
 # The first pass must expose the exact candidate bytes to the independent
 # reviewer.  Publish only the already-frozen graph whose digest is in the
 # report; the second pass recomputes the same bytes and resolves its activation.
-candidate_publish="$evidence/.aggregate-candidate-v1.env.$$"
-cp -- "$candidate_graph" "$candidate_publish"
-[ "$(hash_file "$candidate_publish")" = "$(field aggregate_candidate_sha256 "$evidence/aggregate-report-v1.env")" ] || { rm -f "$candidate_publish"; echo 'BLOCKED: candidate publication hash mismatch' >&2; exit 2; }
-mv "$candidate_publish" "$evidence/aggregate-candidate-v1.env"
+candidate_final=$evidence/aggregate-candidate-v1.env
+if [ -e "$candidate_final" ]; then
+    regular_nonsymlink "$candidate_final" && [ "$(hash_file "$candidate_final")" = "$(hash_file "$candidate_graph")" ] || { echo 'BLOCKED: candidate collision' >&2; exit 2; }
+else
+    candidate_publish="$evidence/.aggregate-candidate-v1.env.$$"
+    (set -C; cp -- "$candidate_graph" "$candidate_publish") || { echo 'BLOCKED: candidate temporary collision' >&2; exit 2; }
+    [ "$(hash_file "$candidate_publish")" = "$(field aggregate_candidate_sha256 "$report_path")" ] || { rm -f "$candidate_publish"; echo 'BLOCKED: candidate publication hash mismatch' >&2; exit 2; }
+    mv "$candidate_publish" "$candidate_final"
+fi
 sync
 trap - EXIT HUP INT TERM
 rm -rf "$work"
-echo "$result: MCI aggregate ($blocked blocked); report=$evidence/aggregate-report-v1.env sha256=$manifest_hash"
+echo "$result: MCI aggregate ($blocked blocked); report=$report_path sha256=$manifest_hash"
 [ "$blocked" -eq 0 ]

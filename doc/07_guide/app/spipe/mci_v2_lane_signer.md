@@ -5,6 +5,10 @@ boundary for every non-review aggregate lane. It consumes the producer's exact
 unsigned template and the already-published artifact, validates the lane's
 producer class, scenario set, artifact schema, `live` mode, release eligibility,
 artifact name, and SHA-256, then writes the aggregate's canonical field order.
+Tooling archives are admitted through their bounded `./manifest.env` member
+using the producer's `manifest_schema`/`mode` vocabulary; archive member count
+and extracted-header size are capped. Stress templates keep expiry as a signer
+placeholder, so that lane additionally requires `--valid-until-utc-ns NS`.
 It sets `attestation=signed-v1`, the operator-supplied key ID, the flat
 `<lane>.sig` path, and the canonical receipt hash before detached signing.
 
@@ -29,6 +33,8 @@ published first and the admissible receipt last. Thus an interruption can leave
 only a non-admissible signature, never an unsigned or partially written receipt.
 The secure publisher uses no-follow opens, snapshots, fsync, and atomic
 no-replace links.
+Its C source is resolved only from the canonical repository script root, never
+from an evidence-relative path.
 
 Fixture, contract-only, blocked, wrong-schema, wrong-lane, malformed, reordered,
 extra-field, hash-mismatched, or non-release inputs fail before publication.

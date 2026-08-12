@@ -179,8 +179,12 @@ same-key/self-issued, missing, stale, and replayed decisions. The focused shell
 fixture uses ephemeral distinct keys only to prove this contract; operating the
 real independent reviewer producer remains outside the merge owner. WARN cannot satisfy a
 mission-critical release claim. Any missing, indirect, or unexercised evidence
-is FAIL/BLOCKED and returns to the owning lane through root Codex. Release is
-blocked for REQ-MCI-009 until the canonical facade registry, atomic slot synchronization,
-and spawn/process-group signal/registered reap syscall integration have executable evidence.
-eligible only after the independent receipt accepts all 20 requirements and
+is FAIL/BLOCKED and returns to the owning lane through root Codex. The
+REQ-MCI-009 implementation now includes the canonical facade/ABI symbol
+registry, mutex-synchronized fixed slot admission, and executable
+spawn/process-group/pidfd signal/registered-reap selfchecks. Release remains
+blocked until an admitted exact-current pure-Simple runner exercises the policy
+specs and a signed native-facade receipt exercises the source-matched deployed
+ABI; the focused C evidence alone is not a release claim. Release is eligible
+only after the independent receipt accepts all 20 requirements and
 the aggregate reports `release_blockers=none`.

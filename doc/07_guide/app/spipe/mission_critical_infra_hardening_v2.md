@@ -42,7 +42,13 @@ the runner verifies the common evidence root, run, source, and configuration
 values before invoking the fixed canonical producer executable. It then uses
 `sign-mci-v2-lane.shs`, requires the first aggregate to block pending review,
 activates the independent reviewer generation, and runs one final aggregate.
-Children have a fixed timeout and capture ceiling. `--contract-fixture` is only
+The evidence directory must be fresh and canonically below the repository;
+dot-segment traversal and collisions fail before publication. Children have a
+fixed timeout, per-stream capture ceiling, memory/process ceilings, and
+no-overwrite captures. Candidate and final aggregate reports use distinct
+paths, preserving the candidate bytes reviewed in pass one. The live compiler
+producer's independent cross-host prerequisite remains an explicit BLOCKED and
+prevents signing when it cannot produce an unsigned template. `--contract-fixture` is only
 for the focused shell contract and always reports `CONTRACT_ONLY`, never PASS.
 
 1. Resolve the existing conflict in

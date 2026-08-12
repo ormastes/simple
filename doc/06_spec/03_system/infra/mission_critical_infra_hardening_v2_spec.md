@@ -68,10 +68,10 @@ This flow proves deterministic behavior of the implemented pure-Simple policies 
 | REQ-MCI-003, REQ-MCI-004 | Certified subset, 24 visible cells, canonical payload fields, no umbrella claim | Policy exercised; real guest execution blocked |
 | REQ-MCI-005 | Exact-capacity DrawIR plan/admit/seal/retire and +1 rejection with identity | Exercised |
 | REQ-MCI-007, REQ-MCI-008 | Sealed quota, forbidden ISR context, quota exhaustion, rollback, telemetry | Exercised |
-| REQ-MCI-009 policy subset | PID, queue, distinct in-flight, capture, timeout, cancellation, terminal, and invalid-transition boundaries | Policy exercised only; owner-facade signal/wait/process integration remains **BLOCKED** |
+| REQ-MCI-009 policy subset | PID, queue, distinct in-flight, capture, timeout, cancellation, terminal, and invalid-transition boundaries | Policy exercised here; the native provider's registered mutex/slot and spawn/process-group/pidfd signal/reap integration has focused C selfchecks. Release evidence remains **BLOCKED** because the synchronous Simple facade exposes no public cancel/terminate operation, the interpreter fails closed, and no admitted exact-current native Simple receipt exercises the source-matched ABI. |
 | REQ-MCI-010 | Focused policy aggregate blocks on a missing external receipt. Collector mechanics `MCI-AGG-001/002/003` are owned by and linked to `test/01_unit/scripts/mci_v2_aggregate_contract_test.shs`. | Collector contract PASS; release aggregate **BLOCKED** |
 | REQ-MCI-011 | Executable source and this operator mirror | Present; generated-doc freshness receipt blocked |
-| NFR-MCI-003 policy subset; NFR-MCI-004, NFR-MCI-006 | Bounded timeout/capture/queue/in-flight policy, arena quota, DrawIR count bounds | Deterministic policy subset exercised; real hung/flooding child evidence remains **BLOCKED** |
+| NFR-MCI-003 policy subset; NFR-MCI-004, NFR-MCI-006 | Bounded timeout/capture/queue/in-flight policy, arena quota, DrawIR count bounds | Deterministic policy subset exercised; focused native C selfchecks cover hung/flooding children under fixed bounds, but admitted exact-current native Simple facade evidence remains **BLOCKED**. |
 | REQ-MCI-002, REQ-MCI-006; NFR-MCI-001/002/005/007/008/009 | External/tool/device/campaign/reviewer evidence | **BLOCKED — not faked** |
 
 ## Frozen scenario classification matrix
