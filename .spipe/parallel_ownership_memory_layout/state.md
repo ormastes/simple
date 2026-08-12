@@ -160,6 +160,16 @@ dev-done
   survival after handle free and concurrent send/close/free. This does not yet
   add graph codecs, typed public endpoints, policy-selected capacity, or
   ownership-token payload transfer.
+- impl: Added the reviewed WP-13 bounded leaf `EncodedCopy` codec in the native
+  runtime. Lossless boxed `f64`, boxed `u64`, and immutable UTF-8 strings are
+  copied by logical content under registry protection and materialize as new
+  heap identities; arrays, dictionaries, tuples, forged pointers, device, and
+  unauthenticated remote routes fail closed. The deterministic wire includes
+  the `SPTR` envelope, leaf kind, exact length, reserved bytes, a corruption
+  checksum, and a 1 MiB ceiling. A fast Luna sidecar scoped the audit; the
+  primary high-capability review caught and closed remote/device admission
+  before merge. All seven focused transfer tests passed once after review.
+  Graph/schema codecs and production actor/channel/process integration remain.
 - impl: Advanced WP-17 with `process_transfer.rs`: an encoded-copy-only process
   frame reuses the 40-byte `SPTR` metadata, enforces the destination domain,
   carries an exact length and corruption checksum, and caps codec payloads at

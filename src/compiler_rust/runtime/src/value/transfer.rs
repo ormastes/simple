@@ -6,12 +6,15 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use super::collections::{rt_string_new, RuntimeString};
 use super::core::RuntimeValue;
-use super::heap::{registered_heap_type, HeapObjectType};
+use super::heap::{registered_heap_type, with_typed_ptr, HeapFloat, HeapObjectType, HeapUInt};
 
 pub(crate) const TRANSFER_SCHEMA_VERSION: u16 = 1;
 pub(crate) const TRANSFER_ENVELOPE_LEN: usize = 40;
 pub(crate) const TRANSFER_PACKET_LEN: usize = 48;
+pub(crate) const MAX_ENCODED_COPY_BYTES: usize = 1024 * 1024;
+const ENCODED_COPY_HEADER_LEN: usize = TRANSFER_ENVELOPE_LEN + 24;
 const TRANSFER_MAGIC: [u8; 4] = *b"SPTR";
 static NEXT_TRANSFER_REGION_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -230,6 +233,166 @@ pub(crate) struct RuntimeTransferPacket {
     inline_bits: u64,
 }
 
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EncodedLeafKind {
+    Float64 = 1,
+    UInt64 = 2,
+    Utf8 = 3,
+}
+
+impl TryFrom<u8> for EncodedLeafKind {
+    type Error = ();
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Self::Float64),
+            2 => Ok(Self::UInt64),
+            3 => Ok(Self::Utf8),
+            _ => Err(()),
+        }
+    }
+}
+
+/// A bounded logical copy of one admitted heap leaf.
+///
+/// No runtime heap address is retained in this value or emitted on the wire.
+/// Reachable graphs require a separate schema-aware graph codec.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RuntimeEncodedCopy {
+    envelope: RuntimeTransferEnvelopeV1,
+    kind: EncodedLeafKind,
+    payload: Vec<u8>,
+}
+
+impl RuntimeEncodedCopy {
+    pub(crate) fn from_value(
+        value: RuntimeValue,
+        source_domain: TransferDomain,
+        target_domain: TransferDomain,
+    ) -> Option<Self> {
+        if matches!(target_domain, TransferDomain::Device | TransferDomain::Remote) {
+            return None;
+        }
+        let heap_type = registered_heap_type(value)?;
+        let (kind, payload) = match heap_type {
+            HeapObjectType::Float => (
+                EncodedLeafKind::Float64,
+                with_typed_ptr::<HeapFloat, _>(value, HeapObjectType::Float, |ptr| unsafe {
+                    (*ptr).value.to_bits().to_le_bytes().to_vec()
+                })?,
+            ),
+            HeapObjectType::UInt => (
+                EncodedLeafKind::UInt64,
+                with_typed_ptr::<HeapUInt, _>(value, HeapObjectType::UInt, |ptr| unsafe {
+                    (*ptr).value.to_le_bytes().to_vec()
+                })?,
+            ),
+            HeapObjectType::String => (
+                EncodedLeafKind::Utf8,
+                with_typed_ptr::<RuntimeString, _>(value, HeapObjectType::String, |ptr| unsafe {
+                    (*ptr).as_bytes().to_vec()
+                })?,
+            ),
+            _ => return None,
+        };
+        if payload.len() > MAX_ENCODED_COPY_BYTES
+            || (kind == EncodedLeafKind::Utf8 && std::str::from_utf8(&payload).is_err())
+        {
+            return None;
+        }
+        Some(Self {
+            envelope: RuntimeTransferEnvelopeV1::encoded_copy(source_domain, target_domain)?,
+            kind,
+            payload,
+        })
+    }
+
+    pub(crate) fn encode(&self) -> Option<Vec<u8>> {
+        if !self.payload_is_valid() {
+            return None;
+        }
+        let mut out = Vec::with_capacity(ENCODED_COPY_HEADER_LEN + self.payload.len());
+        out.extend_from_slice(&self.envelope.encode()?);
+        out.push(self.kind as u8);
+        out.extend_from_slice(&[0; 7]);
+        out.extend_from_slice(&(self.payload.len() as u64).to_le_bytes());
+        out.extend_from_slice(&encoded_copy_checksum(self.kind, &self.payload).to_le_bytes());
+        out.extend_from_slice(&self.payload);
+        Some(out)
+    }
+
+    pub(crate) fn decode_for_target(bytes: &[u8], target: TransferDomain) -> Option<Self> {
+        if bytes.len() < ENCODED_COPY_HEADER_LEN {
+            return None;
+        }
+        let envelope = RuntimeTransferEnvelopeV1::decode(&bytes[..TRANSFER_ENVELOPE_LEN])?;
+        if envelope.target_domain != target
+            || envelope.mode != TransferMode::Copy
+            || envelope.payload != TransferPayload::EncodedCopy
+        {
+            return None;
+        }
+        let kind = EncodedLeafKind::try_from(bytes[TRANSFER_ENVELOPE_LEN]).ok()?;
+        if bytes[TRANSFER_ENVELOPE_LEN + 1..TRANSFER_ENVELOPE_LEN + 8] != [0; 7] {
+            return None;
+        }
+        let payload_len = u64::from_le_bytes(bytes[48..56].try_into().ok()?);
+        if payload_len > MAX_ENCODED_COPY_BYTES as u64
+            || bytes.len() != ENCODED_COPY_HEADER_LEN.checked_add(payload_len as usize)?
+        {
+            return None;
+        }
+        let expected_checksum = u64::from_le_bytes(bytes[56..64].try_into().ok()?);
+        let value = Self {
+            envelope,
+            kind,
+            payload: bytes[ENCODED_COPY_HEADER_LEN..].to_vec(),
+        };
+        (value.payload_is_valid() && encoded_copy_checksum(kind, &value.payload) == expected_checksum)
+            .then_some(value)
+    }
+
+    pub(crate) fn materialize(&self) -> Option<RuntimeValue> {
+        if !self.payload_is_valid() {
+            return None;
+        }
+        match self.kind {
+            EncodedLeafKind::Float64 => Some(RuntimeValue::from_float(f64::from_bits(u64::from_le_bytes(
+                self.payload.as_slice().try_into().ok()?,
+            )))),
+            EncodedLeafKind::UInt64 => Some(RuntimeValue::from_u64(u64::from_le_bytes(
+                self.payload.as_slice().try_into().ok()?,
+            ))),
+            EncodedLeafKind::Utf8 => {
+                std::str::from_utf8(&self.payload).ok()?;
+                Some(rt_string_new(self.payload.as_ptr(), self.payload.len() as u64))
+            }
+        }
+    }
+
+    fn payload_is_valid(&self) -> bool {
+        if self.payload.len() > MAX_ENCODED_COPY_BYTES {
+            return false;
+        }
+        match self.kind {
+            EncodedLeafKind::Float64 | EncodedLeafKind::UInt64 => self.payload.len() == 8,
+            EncodedLeafKind::Utf8 => std::str::from_utf8(&self.payload).is_ok(),
+        }
+    }
+}
+
+fn encoded_copy_checksum(kind: EncodedLeafKind, payload: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    hash ^= kind as u64;
+    hash = hash.wrapping_mul(0x100000001b3);
+    for byte in payload {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 impl RuntimeTransferPacket {
     pub(crate) fn inline_copy(
         value: RuntimeValue,
@@ -306,6 +469,7 @@ fn next_transfer_region_id() -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::value::{rt_array_free, rt_array_new, rt_string_free};
 
     #[test]
     fn transfer_envelope_matches_simple_golden_vector() {
@@ -376,5 +540,116 @@ mod tests {
             classify_runtime_value(RuntimeValue::from_int(7), TransferDomain::Device),
             RuntimeTransferClass::UnsupportedBoundary
         );
+    }
+
+    #[test]
+    fn encoded_leaf_copy_matches_golden_vector() {
+        let copy = RuntimeEncodedCopy {
+            envelope: RuntimeTransferEnvelopeV1 {
+                region_id: 7,
+                generation: 2,
+                source_domain: TransferDomain::Parent,
+                target_domain: TransferDomain::Process,
+                mode: TransferMode::Copy,
+                payload: TransferPayload::EncodedCopy,
+                ownership_token: 0,
+                source_invalidated: false,
+            },
+            kind: EncodedLeafKind::Utf8,
+            payload: b"typed".to_vec(),
+        };
+        assert_eq!(
+            copy.encode().unwrap(),
+            [
+                0x53, 0x50, 0x54, 0x52, 0x01, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x10, 0x9a, 0x9b, 0xda, 0x7b, 0x41, 0x33,
+                0x74, 0x79, 0x70, 0x65, 0x64,
+            ]
+        );
+    }
+
+    #[test]
+    fn encoded_leaf_values_materialize_without_pointer_identity() {
+        let values = [
+            RuntimeValue::from_float(0.1),
+            RuntimeValue::from_u64(u64::MAX),
+            rt_string_new(b"independent".as_ptr(), 11),
+        ];
+        for source in values {
+            let copy = RuntimeEncodedCopy::from_value(source, TransferDomain::Parent, TransferDomain::Thread).unwrap();
+            let encoded = copy.encode().unwrap();
+            let decoded = RuntimeEncodedCopy::decode_for_target(&encoded, TransferDomain::Thread).unwrap();
+            let destination = decoded.materialize().unwrap();
+            assert_ne!(source.to_raw(), destination.to_raw());
+            if source.is_float() {
+                assert_eq!(source.as_float().to_bits(), destination.as_float().to_bits());
+            } else if let Some(value) = source.as_heap_u64() {
+                assert_eq!(destination.as_heap_u64(), Some(value));
+            } else {
+                let destination_copy = RuntimeEncodedCopy::from_value(
+                    destination,
+                    TransferDomain::Thread,
+                    TransferDomain::Parent,
+                )
+                .unwrap();
+                assert_eq!(copy.payload, destination_copy.payload);
+                assert_eq!(rt_string_free(source), 1);
+                assert_eq!(rt_string_free(destination), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn encoded_leaf_copy_rejects_graphs_forgery_and_malformed_wire() {
+        let array = rt_array_new(1);
+        assert!(RuntimeEncodedCopy::from_value(array, TransferDomain::Parent, TransferDomain::Thread).is_none());
+        assert!(RuntimeEncodedCopy::from_value(
+            RuntimeValue::from_raw(0x1001),
+            TransferDomain::Parent,
+            TransferDomain::Thread,
+        )
+        .is_none());
+        rt_array_free(array);
+
+        let source = rt_string_new(b"valid".as_ptr(), 5);
+        assert!(RuntimeEncodedCopy::from_value(source, TransferDomain::Parent, TransferDomain::Device).is_none());
+        assert!(RuntimeEncodedCopy::from_value(source, TransferDomain::Parent, TransferDomain::Remote).is_none());
+        let encoded = RuntimeEncodedCopy::from_value(source, TransferDomain::Parent, TransferDomain::Actor)
+            .unwrap()
+            .encode()
+            .unwrap();
+        assert!(RuntimeEncodedCopy::decode_for_target(&encoded, TransferDomain::Thread).is_none());
+
+        for index in [40usize, 41, 56, encoded.len() - 1] {
+            let mut malformed = encoded.clone();
+            malformed[index] ^= 0xff;
+            assert!(RuntimeEncodedCopy::decode_for_target(&malformed, TransferDomain::Actor).is_none());
+        }
+        assert!(RuntimeEncodedCopy::decode_for_target(&encoded[..encoded.len() - 1], TransferDomain::Actor).is_none());
+        let mut trailing = encoded.clone();
+        trailing.push(0);
+        assert!(RuntimeEncodedCopy::decode_for_target(&trailing, TransferDomain::Actor).is_none());
+        let mut oversize = encoded.clone();
+        oversize[48..56].copy_from_slice(&((MAX_ENCODED_COPY_BYTES as u64) + 1).to_le_bytes());
+        assert!(RuntimeEncodedCopy::decode_for_target(&oversize, TransferDomain::Actor).is_none());
+        let invalid_utf8 = RuntimeEncodedCopy {
+            envelope: RuntimeTransferEnvelopeV1::encoded_copy(
+                TransferDomain::Parent,
+                TransferDomain::Actor,
+            )
+            .unwrap(),
+            kind: EncodedLeafKind::Utf8,
+            payload: vec![0xff],
+        };
+        assert!(invalid_utf8.encode().is_none());
+        let oversized = RuntimeEncodedCopy {
+            envelope: invalid_utf8.envelope,
+            kind: EncodedLeafKind::Utf8,
+            payload: vec![b'a'; MAX_ENCODED_COPY_BYTES + 1],
+        };
+        assert!(oversized.encode().is_none());
+        assert_eq!(rt_string_free(source), 1);
     }
 }

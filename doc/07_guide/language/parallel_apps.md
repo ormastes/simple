@@ -39,6 +39,13 @@ structured task groups, physical layout lowering, and end-to-end process/device
 evidence remain work-package gates. Consult the receipt and the matching
 runtime gate before relying on a path in production.
 
+The native runtime currently has one deliberately narrow heap-copy building
+block: boxed `f64`, boxed `u64`, and immutable UTF-8 strings can be encoded by
+logical content with a bounded `EncodedCopy` packet and reconstructed with a
+new heap identity. This is not a general object-graph codec. Arrays, mappings,
+tuples, objects, capabilities, device values, and unauthenticated remote routes
+remain rejected until their schema, ownership, or lease contract lands.
+
 ## Recommended shape
 
 ```simple
