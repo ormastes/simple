@@ -18,7 +18,8 @@ use compiler.backend.linker.linker_wrapper.{
 use compiler.backend.backend.llvm_native_link.{link_llvm_native, NativeLinkOptions}
 use compiler.driver.smf_writer.{Target}
 use compiler.driver.smf_binary_helpers.{smf_u64_to_bytes}
-use driver_types.{CompileResult, CompileContext, FrozenStorageModuleSnapshotV1}
+use driver_types.{CompileResult, CompileContext, FrozenStorageModuleSnapshotV1,
+    FrozenNativeModuleCapsuleV1, FrozenNativeModuleCapsuleBatchV1}
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.common.driver_core_modes.{driver_mir_eviction_enabled}
 use compiler.driver.driver_compiler_type.{CompilerDriver}
@@ -33,6 +34,7 @@ use compiler.driver.driver_log_helpers.{log_build_progress}
 use std.common.crypto.sha256.{sha256_text}
 
 extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_copy(src: text, dst: text) -> bool
 extern fn rt_dir_create(path: text, recursive: bool) -> bool
@@ -109,6 +111,44 @@ fn driver_native_module_cache_source(ctx: CompileContext, module_name: text) -> 
         found_path
     else:
         ""
+
+pub fn driver_native_capsule_result_valid_v1(capsule: FrozenNativeModuleCapsuleV1) -> bool:
+    if not capsule.identity_valid() or not rt_file_exists(capsule.object_path):
+        return false
+    val receipt_path = capsule.object_path + ".capsule-receipt"
+    if not rt_file_exists(receipt_path): return false
+    val object_fp = FileFingerprint.from_file(capsule.object_path)
+    if not object_fp.?: return false
+    var expected = ""
+    if val fp = object_fp:
+        expected = "native-capsule-result-v1\n{capsule.capsule_identity}\n{capsule.object_path}\n{fp.size}\n{fp.content_hash}\n"
+    (rt_file_read_text(receipt_path) ?? "") == expected
+
+pub fn driver_native_collect_capsule_result_v1(
+    batch: FrozenNativeModuleCapsuleBatchV1, build_cache: BuildCache,
+    module_name: text, object_path: text
+) -> text:
+    """Owner-only authenticated cache checkpoint for one completed capsule."""
+    val capsule = batch.find(module_name)
+    if not capsule.ok or object_path != capsule.object_path:
+        return "native-capsule-result-mismatch:{module_name}"
+    if not driver_native_capsule_result_valid_v1(capsule):
+        return "native-capsule-receipt-invalid:{module_name}"
+    if capsule.cache_source == "": return ""
+    val source_fp = FileFingerprint.from_file(capsule.cache_source)
+    if val source_fp_val = source_fp:
+        build_cache.update_entry(capsule.cache_source, source_fp_val, [], [object_path])
+        build_cache.save()
+        return ""
+    "native-capsule-fingerprint-failed:{module_name}"
+
+pub fn driver_native_capsule_inputs_valid_v1(
+    capsule: FrozenNativeModuleCapsuleV1, backend_name: text, target: text,
+    is_release: bool, opt_level: i64
+) -> bool:
+    capsule.identity_valid() and capsule.backend_name == backend_name
+        and capsule.target == target and capsule.opt_level == opt_level
+        and capsule.is_release == is_release
 
 fn driver_native_leading_spaces(line: text) -> i64:
     var i: i64 = 0
@@ -322,7 +362,13 @@ pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: te
         print "[NATIVE] bootstrap direct effective_backend={effective_backend}"
 
     val entry_module_name = bootstrap_entry_module_name(ctx)
-    val direct_result = _compile_one_module(ctx, backend_name, is_release, driver_opt_level, output, entry_module_name)
+    val capsules = ctx.freeze_native_module_capsules_v1([entry_module_name],
+        output, backend_name, "", rt_env_get("SIMPLE_NATIVE_CPU") ?? "",
+        driver_opt_level, is_release)
+    if not capsules.ok:
+        return CompileResult.CodegenError(capsules.reason)
+    val direct_result = _compile_frozen_module_capsule(capsules, backend_name,
+        "", is_release, driver_opt_level, entry_module_name)
     match direct_result:
         case Ok(obj_path):
             if effective_backend == "llvm" or effective_backend == "llvm-lib":
@@ -500,28 +546,25 @@ impl CompilerDriver:
             total_modules - uncached_names.len(), total_modules,
             native_compile_current, 5, 6, 0, cache_hit_count, "running")
         if uncached_names.len() > 0:
-            # Storage-bearing modules remain on the owner thread until native
-            # workers receive an immutable MIR+storage capsule. This prevents
-            # the parallel closure from capturing live CompileContext storage
-            # authority while preserving parallelism for ordinary modules.
-            val storage_names = ctx.frozen_storage_names_with_sites(uncached_names)
-            val parallel_names = ctx.frozen_storage_names_without_sites(uncached_names)
-            for storage_name in storage_names:
-                val storage_result = _compile_one_module_and_cache(ctx, build_cache,
-                    backend_name, is_release, driver_opt_level, object_base,
-                    storage_name)
-                match storage_result:
-                    case Err(e): return CompileResult.CodegenError(e)
-                    case Ok(_): cache_miss_count = cache_miss_count + 1
-            if parallel_names.len() == 1:
-                val name = parallel_names[0]
-                val direct_result = _compile_one_module_and_cache(ctx, build_cache, backend_name, is_release, driver_opt_level, object_base, name)
+            val capsules = ctx.freeze_native_module_capsules_v1(uncached_names,
+                object_base, backend_name, native_target, native_cpu,
+                driver_opt_level, is_release)
+            if not capsules.ok:
+                return CompileResult.CodegenError(capsules.reason)
+            if uncached_names.len() == 1:
+                val name = uncached_names[0]
+                val direct_result = _compile_frozen_module_capsule(capsules,
+                    backend_name, native_target, is_release, driver_opt_level, name)
                 match direct_result:
-                    case Ok(_):
+                    case Ok(obj_path):
+                        val collect_error = driver_native_collect_capsule_result_v1(
+                            capsules, build_cache, name, obj_path)
+                        if collect_error != "":
+                            return CompileResult.CodegenError(collect_error)
                         cache_miss_count = cache_miss_count + 1
                     case Err(e):
                         return CompileResult.CodegenError(e)
-            elif parallel_names.len() > 1:
+            else:
                 val parallel_cfg = ParallelBuildConfig(
                     num_threads: driver_native_build_threads(),
                     parallel_threshold: 4,
@@ -529,11 +572,15 @@ impl CompilerDriver:
                     verbose: ctx.options.verbose
                 )
                 var builder = ParallelBuilder.create(parallel_cfg)
+                builder.set_owner_collect(driver_native_collect_capsule_result_v1(
+                    capsules, build_cache, _1, _2))
 
-                for name in parallel_names:
+                for name in uncached_names:
                     builder.add_unit(name, [])
 
-                val build_result = builder.build(_compile_one_module_and_cache(ctx, build_cache, backend_name, is_release, driver_opt_level, object_base, _1))
+                val build_result = builder.build(_compile_frozen_module_capsule(
+                    capsules, backend_name, native_target, is_release,
+                    driver_opt_level, _1))
                 cache_miss_count = cache_miss_count + build_result.stats.completed
                     + build_result.stats.failed
 
@@ -551,28 +598,14 @@ impl CompilerDriver:
             # objects at this stable path, so reconstruct from uncached_names.
             var reconstructed_outputs: [text] = []
             for name in uncached_names:
-                val obj_path = "{object_base}.{name}.o"
-                if rt_file_exists(obj_path):
+                val capsule = capsules.find(name)
+                val obj_path = if capsule.ok: capsule.object_path else: ""
+                if capsule.ok and driver_native_capsule_result_valid_v1(capsule):
                     reconstructed_outputs = reconstructed_outputs.push(obj_path)
                     object_files = object_files.push(obj_path)
-            for obj_path in reconstructed_outputs:
-                val obj_fp = FileFingerprint.from_file(obj_path)
-                if obj_fp.?:
-                    # Extract module name from obj_path: "{object_base}.{name}.o"
-                    val prefix = object_base + "."
-                    var mod_name = obj_path
-                    if obj_path.starts_with(prefix):
-                        mod_name = obj_path[prefix.len():obj_path.len() - 2]
-                    val cache_source = driver_native_module_cache_source(ctx, mod_name)
-                    if cache_source != "":
-                        val source_fp = FileFingerprint.from_file(cache_source)
-                        # Flat-safe: .unwrap() on a flat optional lowers to the
-                        # box-assuming rt_enum_payload on the stage4 lane and
-                        # stores a garbage fingerprint (BuildCache.save then
-                        # traps on fp.content_hash); if-val is the safe form.
-                        if val source_fp_val = source_fp:
-                            build_cache.update_entry(cache_source, source_fp_val, [], [obj_path])
-
+                else:
+                    return CompileResult.CodegenError(
+                        "native capsule result missing or identity mismatch for {name}")
             # Evict MIR for compiled modules in low-memory mode
             if low_memory:
                 for name in uncached_names:
@@ -702,61 +735,51 @@ impl CompilerDriver:
 # Single-ParserModule Compilation Helper (for ParallelBuilder)
 # ============================================================================
 
-fn _compile_one_module_and_cache(ctx: any, build_cache: BuildCache, backend_name: text, is_release: bool, opt_level: i64, output_base: text, name: text) -> Result<text, text>:
-    """Compile a single module and immediately persist its cache entry.
-
-    Wraps _compile_one_module so the build_cache index is updated (and
-    periodically saved) as each module finishes, not only after the whole
-    Phase-2 loop returns. Without this, a mid-build kill leaves orphan .o
-    files with no index entry and every rerun stays cold (see
-    doc/08_tracking/bug/native_build_cache_never_written_on_timeout_2026-07-26.md).
-    """
-    val result = _compile_one_module(ctx, backend_name, is_release, opt_level, output_base, name)
-    match result:
-        case Ok(obj_path):
-            val cache_source = driver_native_module_cache_source(ctx, name)
-            if cache_source != "":
-                val source_fp = FileFingerprint.from_file(cache_source)
-                if val source_fp_val = source_fp:
-                    build_cache.update_entry(cache_source, source_fp_val, [], [obj_path])
-                    # Batch the (whole-file-rewrite) save every 5 entries so a
-                    # kill mid-build still leaves a mostly-current index.
-                    if build_cache.entries.len() % 5 == 0:
-                        build_cache.save()
-        case Err(_):
-            ()
-    result
-
-fn _compile_one_module(ctx: any, backend_name: text, is_release: bool, opt_level: i64, output_base: text, name: text) -> Result<text, text>:
-    """Compile a single module by name, write object file, return path."""
-    val storage_snapshot = ctx.frozen_storage_module_snapshot(name)
-    if not storage_snapshot.ok:
-        return Err("AOT compile error in {name}: {storage_snapshot.reason}")
+fn _compile_frozen_module_capsule(
+    batch: FrozenNativeModuleCapsuleBatchV1, backend_name: text, target: text,
+    is_release: bool, opt_level: i64, name: text
+) -> Result<text, text>:
+    """Compile one parent-frozen module capsule without CompileContext/cache access."""
+    if not batch.ok:
+        return Err("AOT compile error in {name}: invalid-capsule-batch")
+    val capsule = batch.find(name)
+    if not capsule.ok or capsule.module_name != name:
+        return Err("AOT compile error in {name}: capsule-not-found")
+    if not driver_native_capsule_inputs_valid_v1(capsule, backend_name, target,
+        is_release, opt_level):
+        return Err("AOT compile error in {name}: capsule-identity-mismatch")
+    if capsule.storage_snapshot.registry_identity != batch.registry_identity:
+        return Err("AOT compile error in {name}: capsule-registry-mismatch")
     val trace = (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
     if trace:
         print "[NATIVE] compiling module: {name}"
         rt_stdout_flush()
-        print "[NATIVE] select module:start"
-    if name == bootstrap_entry_module_name(ctx):
-        if trace:
-            print "[NATIVE] select module:bootstrap check"
-        if ctx.bootstrap_entry_mir.?:
-            if trace:
-                print "[NATIVE] select module:bootstrap field"
-            val direct_mir = ctx.bootstrap_entry_mir.unwrap()
-            return _compile_selected_module(backend_name, is_release, opt_level,
-                output_base, name, direct_mir,
-                storage_snapshot)
-    if trace:
-        print "[NATIVE] select module:dict"
-    val mir_module = ctx.mir_modules[name]
-    return _compile_selected_module(backend_name, is_release, opt_level,
-        output_base, name, mir_module,
-        storage_snapshot)
+    val result = _compile_selected_module(backend_name, is_release, opt_level,
+        capsule.output_base,
+        name, capsule.mir_module, capsule.storage_snapshot,
+        capsule.target_cpu)
+    match result:
+        case Err(_): return result
+        case Ok(object_path):
+            if not capsule.identity_valid():
+                return Err("AOT compile error in {name}: capsule-mir-lease-violated")
+            if object_path != capsule.object_path:
+                return Err("AOT compile error in {name}: capsule-object-path-mismatch")
+            val object_fp = FileFingerprint.from_file(object_path)
+            if not object_fp.?:
+                return Err("AOT compile error in {name}: capsule-object-fingerprint-failed")
+            val receipt_path = capsule.object_path + ".capsule-receipt"
+            var receipt = ""
+            if val fp = object_fp:
+                receipt = "native-capsule-result-v1\n{capsule.capsule_identity}\n{capsule.object_path}\n{fp.size}\n{fp.content_hash}\n"
+            if not rt_file_write_text(receipt_path, receipt):
+                return Err("AOT compile error in {name}: capsule-receipt-write-failed")
+            Ok(object_path)
 
 fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64,
                             output_base: text, name: text, mir_module: MirModule,
-                            storage_snapshot: FrozenStorageModuleSnapshotV1) -> Result<text, text>:
+                            storage_snapshot: FrozenStorageModuleSnapshotV1,
+                            frozen_target_cpu: text) -> Result<text, text>:
     if not storage_snapshot.ok or storage_snapshot.module_name != name:
         return Err("AOT compile error in {name}: storage-snapshot-module-mismatch")
     if (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1":
@@ -775,9 +798,8 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
             return Err("Bootstrap empty object compile failed: {cc_err}")
         return Ok(obj_path)
 
-    val target_cpu = rt_env_get("SIMPLE_NATIVE_CPU") ?? ""
     val compiled = compile_module_with_backend_target_cpu_storage_bindings(
-        backend_name, mir_module, is_release, opt_level, target_cpu,
+        backend_name, mir_module, is_release, opt_level, frozen_target_cpu,
         storage_snapshot.sites)
 
     match compiled:

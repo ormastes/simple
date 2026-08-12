@@ -1,0 +1,69 @@
+use std.spec.{describe, it, assert_equal, assert_true, assert_false}
+use std.io.{file_write, file_delete}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.mir.mir_data.{MirModule}
+use compiler.driver.driver_build.incremental.{BuildCache, FileFingerprint}
+use compiler.driver.driver_aot_native_output.{
+    driver_native_capsule_result_valid_v1,
+    driver_native_collect_capsule_result_v1,
+    driver_native_capsule_inputs_valid_v1
+}
+
+fn receipt_fixture():
+    val ctx = CompileContext.create(driver_core_compile_options_default())
+    ctx.mir_modules["receipt"] = MirModule(name: "receipt", functions: {},
+        statics: {}, constants: {}, types: {})
+    _ = ctx.freeze_storage_registry()
+    ctx.freeze_native_module_capsules_v1(["receipt"],
+        "/tmp/simple-native-capsule-receipt", "native", "x86_64",
+        "frozen-cpu", 2, false)
+
+describe "native capsule result receipt":
+    it "binds object bytes size path identity and frozen inputs":
+        val batch = receipt_fixture()
+        assert_true(batch.ok)
+        if batch.ok:
+            val capsule = batch.find("receipt")
+            assert_true(capsule.ok)
+            if capsule.ok:
+                assert_true(driver_native_capsule_inputs_valid_v1(capsule,
+                    "native", "x86_64", false, 2))
+                capsule.target_cpu = "mutated-cpu"
+                assert_false(driver_native_capsule_inputs_valid_v1(capsule,
+                    "native", "x86_64", false, 2))
+
+                val fresh = receipt_fixture().find("receipt")
+                _ = file_write(fresh.object_path, "object-v1")
+                val fingerprint = FileFingerprint.from_file(fresh.object_path)
+                assert_true(fingerprint.?)
+                if val fp = fingerprint:
+                    val receipt = "native-capsule-result-v1\n{fresh.capsule_identity}\n{fresh.object_path}\n{fp.size}\n{fp.content_hash}\n"
+                    _ = file_write(fresh.object_path + ".capsule-receipt", receipt)
+                    assert_true(driver_native_capsule_result_valid_v1(fresh))
+                    val cache = BuildCache.empty("/tmp/simple-native-capsule-cache.sdn")
+                    assert_equal(driver_native_collect_capsule_result_v1(
+                        receipt_fixture(), cache, "receipt", fresh.object_path), "")
+                    _ = file_write(fresh.object_path, "object-v2-tampered")
+                    assert_false(driver_native_capsule_result_valid_v1(fresh))
+                    assert_true(driver_native_collect_capsule_result_v1(
+                        receipt_fixture(), cache, "receipt", fresh.object_path) != "")
+                _ = file_delete(fresh.object_path + ".capsule-receipt")
+                assert_false(driver_native_capsule_result_valid_v1(fresh))
+                _ = file_delete(fresh.object_path)
+
+    it "rejects malformed receipt identity path and trailing bytes":
+        val batch = receipt_fixture()
+        if batch.ok:
+            val capsule = batch.find("receipt")
+            if capsule.ok:
+                _ = file_write(capsule.object_path, "object-v1")
+                for bad in [
+                    "native-capsule-result-v1\nwrong\n{capsule.object_path}\n",
+                    "native-capsule-result-v1\n{capsule.capsule_identity}\nwrong-path\n",
+                    "native-capsule-result-v1\n{capsule.capsule_identity}\n{capsule.object_path}\n0\nwrong\ntrailing"
+                ]:
+                    _ = file_write(capsule.object_path + ".capsule-receipt", bad)
+                    assert_false(driver_native_capsule_result_valid_v1(capsule))
+                _ = file_delete(capsule.object_path + ".capsule-receipt")
+                _ = file_delete(capsule.object_path)

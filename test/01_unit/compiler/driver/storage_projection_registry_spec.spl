@@ -1,5 +1,5 @@
 use std.spec.{describe, it, assert_equal, assert_true, assert_false}
-use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.driver_types.{CompileContext, FrozenNativeModuleCapsuleBatchV1}
 use compiler.common.driver_core_types.{driver_core_compile_options_default}
 use compiler.mir_opt.mir_opt.storage_projection_lowering.{
     mir_storage_field_binding_v1, mir_storage_view_binding_v1,
@@ -7,7 +7,9 @@ use compiler.mir_opt.mir_opt.storage_projection_lowering.{
 }
 use compiler.mir_opt.mir_opt.typed_storage_view_producer.{MirTypedStorageViewEvidenceV1}
 use compiler.mir_opt.mir_opt.typed_storage_view_producer.{MirTypedStorageViewProducerResultV1}
-use compiler.mir.mir_data.{MirModule}
+use compiler.mir.mir_data.{MirModule, MirConstant, MirConstValue, MirType}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.driver.driver_build.parallel.{ParallelBuilder, ParallelBuildConfig}
 use std.common.structural.storage_layout.storage_layout_contracts.{
     StorageConversionPolicy, StorageLayoutKind, storage_layout_plan_v1
 }
@@ -29,6 +31,18 @@ fn registry_evidence(layout: StorageLayoutKind, revision: i64, column: i64,
         producer_pattern: "same-block-gep-load-getfield-v1",
         bounds_proof_kind: "constant-index-range-v1",
         produced_projection_count: 1)
+
+fn route_frozen_capsule(batch: FrozenNativeModuleCapsuleBatchV1,
+                        module_name: text) -> Result<text, text>:
+    val capsule = batch.find(module_name)
+    if capsule.ok: Ok(capsule.capsule_identity)
+    else: Err(capsule.reason)
+
+fn collect_ok(module_name: text, output: text) -> text:
+    ""
+
+fn collect_fail(module_name: text, output: text) -> text:
+    "collector-rejected:{module_name}"
 
 describe "driver-owned storage projection registry":
     it "keeps repeated MIR local identities isolated by module":
@@ -276,3 +290,124 @@ describe "driver-owned storage projection registry":
         _ = second.register_storage_view_evidence_batch("a", [
             registry_evidence(StorageLayoutKind.SoA, 7, 64, "b|c", "snapshot")])
         assert_false(first.freeze_storage_registry() == second.freeze_storage_registry())
+
+    it "captures MIR and storage authority before live context replacement":
+        val ctx = CompileContext.create(driver_core_compile_options_default())
+        val original_a = MirModule(name: "a", functions: {}, statics: {}, constants: {}, types: {})
+        val original_b = MirModule(name: "b", functions: {}, statics: {}, constants: {}, types: {})
+        ctx.mir_modules["a"] = original_a
+        ctx.mir_modules["b"] = original_b
+        val row = registry_evidence(StorageLayoutKind.SoA, 7, 64,
+            "allocation:a", "snapshot:a")
+        assert_equal(ctx.register_storage_view_evidence_batch("a", [row]), "ok")
+        _ = ctx.freeze_storage_registry()
+        val batch = ctx.freeze_native_module_capsules_v1(["b", "a"],
+            "/tmp/capsule", "native", "x86_64", "baseline", 2, false)
+        assert_true(batch.ok)
+        if batch.ok:
+            val a = batch.find("a")
+            val b = batch.find("b")
+            assert_true(a.ok and b.ok)
+            if a.ok and b.ok:
+                assert_equal(a.storage_snapshot.sites.len(), 1)
+                assert_equal(b.storage_snapshot.sites.len(), 0)
+                assert_equal(a.mir_module.name, "a")
+                assert_equal(b.mir_module.name, "b")
+                assert_false(a.capsule_identity == b.capsule_identity)
+            ctx.mir_modules["a"] = MirModule(name: "replacement", functions: {},
+                statics: {}, constants: {}, types: {})
+            ctx.evict_mir_module("b")
+            ctx.storage_binding_module_names = []
+            ctx.storage_view_site_bindings = []
+            assert_equal(batch.find("a").mir_module.name, "a")
+            assert_equal(batch.find("b").mir_module.name, "b")
+            assert_equal(batch.find("a").storage_snapshot.sites.len(), 1)
+
+    it "routes four frozen capsules through the parallel builder branch":
+        val ctx = CompileContext.create(driver_core_compile_options_default())
+        for name in ["a", "b", "c", "d"]:
+            ctx.mir_modules[name] = MirModule(name: name, functions: {},
+                statics: {}, constants: {}, types: {})
+        _ = ctx.register_storage_view_evidence_batch("a", [
+            registry_evidence(StorageLayoutKind.SoA, 7, 64,
+                "allocation:a", "snapshot:a")])
+        val row_b = MirTypedStorageViewEvidenceV1(..registry_evidence(
+            StorageLayoutKind.AoS, 9, 0, "allocation:b", "snapshot:b"),
+            site: mir_storage_view_site_binding_v1(42, 1, true,
+                registry_site(StorageLayoutKind.AoS, 9, 0).binding))
+        _ = ctx.register_storage_view_evidence_batch("b", [row_b])
+        _ = ctx.freeze_storage_registry()
+        val batch = ctx.freeze_native_module_capsules_v1(["d", "b", "a", "c"],
+            "/tmp/capsule", "native", "x86_64", "baseline", 2, false)
+        assert_true(batch.ok)
+        if batch.ok:
+            var builder = ParallelBuilder.create(ParallelBuildConfig(
+                num_threads: 2, parallel_threshold: 4,
+                deterministic: false, verbose: false))
+            for name in ["d", "b", "a", "c"]:
+                builder.add_unit(name, [])
+            val result = builder.build(route_frozen_capsule(batch, _1))
+            assert_true(result.success)
+            assert_equal(result.stats.total_units, 4)
+            assert_equal(result.stats.completed, 4)
+            assert_equal(result.stats.failed, 0)
+            assert_true(result.stats.parallel_batches > 0)
+            assert_equal(result.outputs.len(), 4)
+
+    it "fails closed on duplicate capsule lookup and reachable identity mutation":
+        val ctx = CompileContext.create(driver_core_compile_options_default())
+        ctx.mir_modules["a"] = MirModule(name: "a", functions: {}, statics: {}, constants: {}, types: {})
+        _ = ctx.register_storage_view_evidence_batch("a", [
+            registry_evidence(StorageLayoutKind.SoA, 7, 64,
+                "allocation:a", "snapshot:a")])
+        _ = ctx.freeze_storage_registry()
+        val batch = ctx.freeze_native_module_capsules_v1(["a"],
+            "/tmp/capsule", "native", "x86_64", "baseline", 2, false)
+        assert_true(batch.ok)
+        if batch.ok:
+            val capsule = batch.find("a")
+            assert_true(capsule.ok and capsule.identity_valid())
+            val duplicate_batch = FrozenNativeModuleCapsuleBatchV1(ok: true,
+                registry_identity: batch.registry_identity,
+                capsules: [capsule, capsule], reason: "ok")
+            assert_false(duplicate_batch.find("a").ok)
+            assert_equal(duplicate_batch.find("a").reason, "duplicate-capsule")
+            var changed_sites = capsule.storage_snapshot.sites
+            changed_sites[0] = registry_site(StorageLayoutKind.AoS, 7, 0)
+            capsule.storage_snapshot.sites = changed_sites
+            assert_false(capsule.identity_valid())
+        val mir_batch = ctx.freeze_native_module_capsules_v1(["a"],
+            "/tmp/capsule", "native", "x86_64", "baseline", 2, false)
+        if mir_batch.ok:
+            val mir_capsule = mir_batch.find("a")
+            var changed_constants = mir_capsule.mir_module.constants
+            changed_constants[SymbolId.new(999)] = MirConstant(
+                symbol: SymbolId.new(999), name: "changed",
+                type_: MirType.i64(), value: MirConstValue.Int(1))
+            mir_capsule.mir_module = MirModule(..mir_capsule.mir_module,
+                constants: changed_constants)
+            assert_false(mir_capsule.identity_valid())
+
+    it "turns owner collection rejection into a failed build unit":
+        var deterministic = ParallelBuilder.create(ParallelBuildConfig(
+            num_threads: 1, parallel_threshold: 4,
+            deterministic: true, verbose: false))
+        deterministic.add_unit("a", [])
+        deterministic.set_owner_collect(collect_fail)
+        val first = deterministic.build(Ok("object:" + _1))
+        assert_false(first.success)
+        assert_equal(first.stats.completed, 0)
+        assert_equal(first.stats.failed, 1)
+        assert_equal(first.outputs.len(), 0)
+        assert_equal(first.errors.len(), 1)
+
+        var batched = ParallelBuilder.create(ParallelBuildConfig(
+            num_threads: 2, parallel_threshold: 1,
+            deterministic: false, verbose: false))
+        batched.add_unit("a", [])
+        batched.set_owner_collect(collect_ok)
+        val second = batched.build(Ok("object:" + _1))
+        assert_true(second.success)
+        assert_equal(second.stats.completed, 1)
+        assert_equal(second.stats.failed, 0)
+        assert_equal(second.outputs.len(), 1)

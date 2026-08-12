@@ -32,6 +32,9 @@ use compiler.mir_opt.mir_opt.storage_projection_lowering.{
 use compiler.mir_opt.mir_opt.typed_storage_view_producer.{
     MirTypedStorageViewEvidenceV1, MirTypedStorageViewProducerResultV1
 }
+use compiler.mir.mir_json.{serialize_mir_function, serialize_mir_type,
+    serialize_const_value}
+use std.common.crypto.sha256.{sha256_text}
 use std.common.structural.storage_layout.storage_layout_contracts.{
     storage_layout_kind_to_u8, storage_conversion_policy_to_u8
 }
@@ -45,11 +48,271 @@ class FrozenStorageModuleSnapshotV1:
     evidence: [MirTypedStorageViewEvidenceV1]
     reason: text
 
+    fn identity_valid() -> bool:
+        self.ok and self.module_identity
+            == frozen_storage_module_identity_v1(self.module_name, self.sites, self.evidence)
+
+class FrozenNativeModuleCapsuleV1:
+    ok: bool
+    module_name: text
+    capsule_identity: text
+    mir_identity: text
+    mir_module: MirModule
+    storage_snapshot: FrozenStorageModuleSnapshotV1
+    cache_source: text
+    output_base: text
+    object_path: text
+    backend_name: text
+    target: text
+    target_cpu: text
+    opt_level: i64
+    is_release: bool
+    reason: text
+
+    fn expected_identity() -> text:
+        "native-capsule-v1|{storage_identity_text_v1(self.module_name)}|{storage_identity_text_v1(self.mir_identity)}|{storage_identity_text_v1(self.storage_snapshot.module_identity)}|{storage_identity_text_v1(self.cache_source)}|{storage_identity_text_v1(self.backend_name)}|{storage_identity_text_v1(self.target)}|{storage_identity_text_v1(self.target_cpu)}|{self.opt_level}|{self.is_release}|{storage_identity_text_v1(self.object_path)}"
+
+    fn identity_valid() -> bool:
+        self.ok and self.mir_identity == native_capsule_mir_identity_v1(self.mir_module)
+            and self.storage_snapshot.identity_valid()
+            and self.capsule_identity == self.expected_identity()
+
+class FrozenNativeModuleCapsuleBatchV1:
+    ok: bool
+    registry_identity: text
+    capsules: [FrozenNativeModuleCapsuleV1]
+    reason: text
+
+    fn find(module_name: text) -> FrozenNativeModuleCapsuleV1:
+        var found = FrozenNativeModuleCapsuleV1(ok: false,
+            module_name: module_name, capsule_identity: "",
+            mir_identity: "",
+            mir_module: MirModule(name: "", functions: {}, statics: {},
+                constants: {}, types: {}),
+            storage_snapshot: FrozenStorageModuleSnapshotV1(ok: false,
+                module_name: module_name, registry_identity: "",
+                module_identity: "", sites: [], evidence: [],
+                reason: "capsule-not-found"),
+            cache_source: "", output_base: "", object_path: "",
+            backend_name: "", target: "", target_cpu: "", opt_level: 0,
+            is_release: false,
+            reason: "capsule-not-found")
+        var count = 0
+        for capsule in self.capsules:
+            if capsule.module_name == module_name:
+                found = capsule
+                count = count + 1
+        if count != 1:
+            found.ok = false
+            found.reason = if count == 0: "capsule-not-found" else: "duplicate-capsule"
+            return found
+        found
+
 extern fn rt_string_free(value: text) -> i64
 extern fn rt_env_get(key: text) -> text
 
 fn storage_identity_text_v1(value: text) -> text:
     "{value.len()}:{value}"
+
+fn native_capsule_sorted_symbol_ids_v1(keys: [SymbolId]) -> [SymbolId]:
+    var result = keys
+    var i = 0
+    while i < result.len():
+        var j = i + 1
+        while j < result.len():
+            if result[j].id < result[i].id:
+                val temporary = result[i]
+                result[i] = result[j]
+                result[j] = temporary
+            j = j + 1
+        i = i + 1
+    result
+
+fn native_capsule_type_def_identity_v1(type_def: MirTypeDef) -> text:
+    var kind_identity = ""
+    match type_def.kind:
+        case Struct(fields):
+            var rows: [text] = []
+            for field in fields:
+                rows.push("{storage_identity_text_v1(field.name)}|{serialize_mir_type(field.type_)}|{field.offset}|{field.has_bits_attr}|{field.bits_width}")
+            val joined_rows = rows.join(";")
+            kind_identity = "struct|{storage_identity_text_v1(joined_rows)}"
+        case Enum(variants):
+            var rows: [text] = []
+            for variant in variants:
+                var payload = "none"
+                if val payload_type = variant.payload:
+                    payload = serialize_mir_type(payload_type)
+                rows.push("{storage_identity_text_v1(variant.name)}|{variant.discriminant}|{storage_identity_text_v1(payload)}")
+            val joined_rows = rows.join(";")
+            kind_identity = "enum|{storage_identity_text_v1(joined_rows)}"
+        case Union(variants):
+            var rows: [text] = []
+            for variant in variants: rows.push(serialize_mir_type(variant))
+            val joined_rows = rows.join(";")
+            kind_identity = "union|{storage_identity_text_v1(joined_rows)}"
+    "{type_def.symbol.id}|{storage_identity_text_v1(type_def.name)}|{storage_identity_text_v1(kind_identity)}|{type_def.is_export_c}|{storage_identity_text_v1(type_def.export_name)}"
+
+fn native_capsule_hir_type_identity_v1(type_: HirType) -> text:
+    match type_.kind:
+        case Int(bits, signed): "int:{bits}:{signed}"
+        case Float(bits): "float:{bits}"
+        case Bool: "bool"
+        case Char: "char"
+        case Str: "str"
+        case Unit: "unit"
+        case Tuple(elements):
+            var rows: [text] = []
+            for element in elements: rows.push(native_capsule_hir_type_identity_v1(element))
+            "tuple:{storage_identity_text_v1(rows.join(";"))}"
+        case Array(element, size):
+            var size_identity = "dynamic"
+            if val fixed_size = size: size_identity = fixed_size.to_text()
+            "array:{storage_identity_text_v1(native_capsule_hir_type_identity_v1(element))}:{size_identity}"
+        case Slice(element): "slice:{storage_identity_text_v1(native_capsule_hir_type_identity_v1(element))}"
+        case Dict(key, value): "dict:{storage_identity_text_v1(native_capsule_hir_type_identity_v1(key))}:{storage_identity_text_v1(native_capsule_hir_type_identity_v1(value))}"
+        case Ref(inner, mutable): "ref:{mutable}:{storage_identity_text_v1(native_capsule_hir_type_identity_v1(inner))}"
+        case Ptr(inner, mutable): "ptr:{mutable}:{storage_identity_text_v1(native_capsule_hir_type_identity_v1(inner))}"
+        case Optional(inner): "optional:{storage_identity_text_v1(native_capsule_hir_type_identity_v1(inner))}"
+        case Result(ok, err): "result:{storage_identity_text_v1(native_capsule_hir_type_identity_v1(ok))}:{storage_identity_text_v1(native_capsule_hir_type_identity_v1(err))}"
+        case Named(symbol, args):
+            var rows: [text] = []
+            for arg in args: rows.push(native_capsule_hir_type_identity_v1(arg))
+            "named:{symbol.id}:{storage_identity_text_v1(rows.join(";"))}"
+        case TypeParam(name, bounds):
+            var rows: [text] = []
+            for bound in bounds: rows.push(native_capsule_hir_type_identity_v1(bound))
+            "param:{storage_identity_text_v1(name)}:{storage_identity_text_v1(rows.join(";"))}"
+        case Union(members):
+            var rows: [text] = []
+            for member in members: rows.push(native_capsule_hir_type_identity_v1(member))
+            "union:{storage_identity_text_v1(rows.join(";"))}"
+        case DynTrait(trait_): "dyn:{trait_.id}"
+        case Function(params, ret, effects):
+            var param_rows: [text] = []
+            for param in params: param_rows.push(native_capsule_hir_type_identity_v1(param))
+            var effect_rows: [text] = []
+            for effect in effects: effect_rows.push(native_capsule_effect_identity_v1(effect))
+            "fn:{storage_identity_text_v1(param_rows.join(";"))}:{storage_identity_text_v1(native_capsule_hir_type_identity_v1(ret))}:{storage_identity_text_v1(effect_rows.join(";"))}"
+        case Projection(base, assoc_name): "projection:{storage_identity_text_v1(native_capsule_hir_type_identity_v1(base))}:{storage_identity_text_v1(assoc_name)}"
+        case Isolated(inner): "isolated:{storage_identity_text_v1(native_capsule_hir_type_identity_v1(inner))}"
+        case Infer(id, level): "infer:{id}:{level}"
+        case Error: "error"
+        case Never: "never"
+        case Any: "any"
+        case Tensor(element, dims, device):
+            var dim_rows: [text] = []
+            for dim in dims: dim_rows.push(native_capsule_dim_identity_v1(dim))
+            var device_identity = "none"
+            if val selected_device = device: device_identity = native_capsule_device_identity_v1(selected_device)
+            "tensor:{storage_identity_text_v1(native_capsule_hir_type_identity_v1(element))}:{storage_identity_text_v1(dim_rows.join(";"))}:{device_identity}"
+        case Layer(input, output):
+            var input_rows: [text] = []
+            for dim in input: input_rows.push(native_capsule_dim_identity_v1(dim))
+            var output_rows: [text] = []
+            for dim in output: output_rows.push(native_capsule_dim_identity_v1(dim))
+            "layer:{storage_identity_text_v1(input_rows.join(";"))}:{storage_identity_text_v1(output_rows.join(";"))}"
+
+fn native_capsule_dim_identity_v1(dim: DimExpr) -> text:
+    match dim.kind:
+        case Literal(value): "literal:{value}"
+        case Named(name, lo, hi):
+            var lo_identity = "none"
+            var hi_identity = "none"
+            if val lo_value = lo: lo_identity = lo_value.to_text()
+            if val hi_value = hi: hi_identity = hi_value.to_text()
+            "named:{storage_identity_text_v1(name)}:{lo_identity}:{hi_identity}"
+        case Var(id): "var:{id}"
+        case Dynamic: "dynamic"
+        case Broadcast: "broadcast"
+        case ConstParam(name): "const:{storage_identity_text_v1(name)}"
+        case Add(left, right): "add:{storage_identity_text_v1(native_capsule_dim_identity_v1(left))}:{storage_identity_text_v1(native_capsule_dim_identity_v1(right))}"
+        case Mul(left, right): "mul:{storage_identity_text_v1(native_capsule_dim_identity_v1(left))}:{storage_identity_text_v1(native_capsule_dim_identity_v1(right))}"
+        case Div(left, right): "div:{storage_identity_text_v1(native_capsule_dim_identity_v1(left))}:{storage_identity_text_v1(native_capsule_dim_identity_v1(right))}"
+
+fn native_capsule_device_identity_v1(device: DeviceType) -> text:
+    match device:
+        case CPU: "cpu"
+        case CUDA(id): "cuda:{id}"
+        case Vulkan(id): "vulkan:{id}"
+
+fn native_capsule_effect_identity_v1(effect: Effect) -> text:
+    match effect.kind:
+        case Pure: "pure"
+        case IO: "io"
+        case Async: "async"
+        case Throws(type_): "throws:{storage_identity_text_v1(native_capsule_hir_type_identity_v1(type_))}"
+        case Mutates: "mutates"
+        case Allocates: "allocates"
+        case Custom(name): "custom:{storage_identity_text_v1(name)}"
+
+fn native_capsule_function_metadata_identity_v1(function: MirFunction) -> text:
+    var generic_rows: [text] = []
+    for param in function.generic_params: generic_rows.push(storage_identity_text_v1(param))
+    var specialization = "none"
+    if val specialization_name = function.specialization_of:
+        specialization = storage_identity_text_v1(specialization_name)
+    var binding_keys = function.type_bindings.keys()
+    var i = 0
+    while i < binding_keys.len():
+        var j = i + 1
+        while j < binding_keys.len():
+            if binding_keys[j] < binding_keys[i]:
+                val temporary = binding_keys[i]
+                binding_keys[i] = binding_keys[j]
+                binding_keys[j] = temporary
+            j = j + 1
+        i = i + 1
+    var binding_rows: [text] = []
+    for key in binding_keys:
+        binding_rows.push("{storage_identity_text_v1(key)}:{storage_identity_text_v1(native_capsule_hir_type_identity_v1(function.type_bindings[key]))}")
+    var layout_identity = "none"
+    if val layout = function.layout_phase:
+        layout_identity = match layout:
+            case Startup: "startup"
+            case FirstFrame: "first-frame"
+            case Steady: "steady"
+            case Cold: "cold"
+    val manifest_kind = match function.driver_manifest_attr.kind:
+        case Driver: "driver"
+        case NativeLib: "native-lib"
+    var device_rows: [text] = []
+    for device_id in function.driver_manifest_attr.device_ids: device_rows.push(device_id.to_text())
+    var vhdl_generic_rows: [text] = []
+    for generic in function.vhdl_metadata.generics:
+        vhdl_generic_rows.push("{storage_identity_text_v1(generic.name)}:{storage_identity_text_v1(generic.type_text)}:{storage_identity_text_v1(generic.default_text)}")
+    var validation_rows: [text] = []
+    for error in function.vhdl_metadata.clocked.validation_errors:
+        validation_rows.push(storage_identity_text_v1(error))
+    var return_rows: [text] = []
+    for field in function.vhdl_metadata.return_fields:
+        return_rows.push("{storage_identity_text_v1(field.label)}:{storage_identity_text_v1(field.type_text)}")
+    val reset_polarity = match function.vhdl_metadata.clocked.reset_polarity:
+        case ActiveLow: "active-low"
+        case ActiveHigh: "active-high"
+    val reset_synchrony = match function.vhdl_metadata.clocked.reset_synchrony:
+        case Async: "async"
+        case Sync: "sync"
+        case None_: "none"
+    "generic={storage_identity_text_v1(generic_rows.join(";"))}|template={function.is_generic_template}|specialization={specialization}|bindings={storage_identity_text_v1(binding_rows.join(";"))}|layout={layout_identity}|kernel={function.is_kernel}:{storage_identity_text_v1(function.gpu_target)}:{storage_identity_text_v1(function.gpu_backend_order)}|export={function.is_export_c}:{storage_identity_text_v1(function.export_name)}|manifest={function.has_driver_manifest_attr}:{manifest_kind}:{function.driver_manifest_attr.driver_class}:{function.driver_manifest_attr.vendor}:{storage_identity_text_v1(device_rows.join(";"))}:{storage_identity_text_v1(function.driver_manifest_attr.version)}:{storage_identity_text_v1(function.driver_manifest_attr.abi)}|vhdl={function.has_vhdl_metadata}:{function.vhdl_metadata.is_hardware}:{storage_identity_text_v1(vhdl_generic_rows.join(";"))}:{function.vhdl_metadata.has_clocked}:{storage_identity_text_v1(function.vhdl_metadata.clocked.clock_signal)}:{storage_identity_text_v1(function.vhdl_metadata.clocked.reset_signal)}:{function.vhdl_metadata.clocked.has_reset}:{reset_polarity}:{reset_synchrony}:{storage_identity_text_v1(function.vhdl_metadata.clocked.domain)}:{function.vhdl_metadata.clocked.is_valid}:{storage_identity_text_v1(validation_rows.join(";"))}:{storage_identity_text_v1(return_rows.join(";"))}:{function.vhdl_metadata.flatten_struct_output}|fast-math={function.has_fast_math}|fpga={function.unroll_factor}:{function.pipeline_ii}:{function.memory_banks}"
+
+fn native_capsule_mir_identity_v1(module: MirModule) -> text:
+    var rows: [text] = ["module|{storage_identity_text_v1(module.name)}"]
+    for symbol in native_capsule_sorted_symbol_ids_v1(module.functions.keys()):
+        val function = module.functions[symbol]
+        rows.push("fn|{symbol.id}|{storage_identity_text_v1(serialize_mir_function(function))}|{storage_identity_text_v1(native_capsule_function_metadata_identity_v1(function))}")
+    for symbol in native_capsule_sorted_symbol_ids_v1(module.constants.keys()):
+        val constant = module.constants[symbol]
+        rows.push("const|{symbol.id}|{storage_identity_text_v1(constant.name)}|{serialize_mir_type(constant.type_)}|{storage_identity_text_v1(serialize_const_value(constant.value))}")
+    for symbol in native_capsule_sorted_symbol_ids_v1(module.statics.keys()):
+        val static_value = module.statics[symbol]
+        var init_identity = "none"
+        if val init = static_value.init:
+            init_identity = "{init.symbol.id}|{storage_identity_text_v1(init.name)}|{serialize_mir_type(init.type_)}|{storage_identity_text_v1(serialize_const_value(init.value))}"
+        rows.push("static|{symbol.id}|{storage_identity_text_v1(static_value.name)}|{serialize_mir_type(static_value.type_)}|{static_value.is_mutable}|{storage_identity_text_v1(init_identity)}")
+    for symbol in native_capsule_sorted_symbol_ids_v1(module.types.keys()):
+        rows.push("type|{native_capsule_type_def_identity_v1(module.types[symbol])}")
+    sha256_text(rows.join("\n"))
 
 fn frozen_storage_site_identity_v1(site: MirStorageViewSiteBindingV1,
                                    evidence: MirTypedStorageViewEvidenceV1) -> text:
@@ -70,6 +333,36 @@ fn frozen_storage_site_identity_v1(site: MirStorageViewSiteBindingV1,
         i = i + 1
     val fields_identity = field_rows.join(":")
     "{site.function_symbol_id}|{site.base_local_id}|{site.index_bounds_proven}|{view.logical_type_id}|{view.revision}|{view.element_count}|{view.allocation_byte_len}|{view.logical_stride}|{view.address_observed}|{plan.contract_version}|{storage_layout_kind_to_u8(plan.layout)}|{plan.block_width}|{plan.alignment}|{plan.abi_pinned}|{storage_conversion_policy_to_u8(plan.conversion)}|{storage_identity_text_v1(plan.policy_hash)}|{storage_identity_text_v1(plan.decision_reason)}|{storage_identity_text_v1(fields_identity)}|{storage_identity_text_v1(evidence.allocation_identity)}|{storage_identity_text_v1(evidence.allocation_provenance)}|{storage_identity_text_v1(evidence.source_revision)}|{evidence.producer_contract_version}|{storage_identity_text_v1(evidence.producer_pattern)}|{storage_identity_text_v1(evidence.bounds_proof_kind)}|{evidence.produced_projection_count}"
+
+fn frozen_storage_module_identity_v1(
+    module_name: text, sites: [MirStorageViewSiteBindingV1],
+    evidence: [MirTypedStorageViewEvidenceV1]
+) -> text:
+    if sites.len() != evidence.len(): return "invalid"
+    var rows: [text] = []
+    var index = 0
+    while index < sites.len():
+        val site = sites[index]
+        val row = evidence[index]
+        if site.function_symbol_id != row.site.function_symbol_id
+            or site.base_local_id != row.site.base_local_id
+            or frozen_storage_site_identity_v1(site, row)
+                != frozen_storage_site_identity_v1(row.site, row):
+            return "invalid"
+        rows.push(frozen_storage_site_identity_v1(site, row))
+        index = index + 1
+    var i = 0
+    while i < rows.len():
+        var j = i + 1
+        while j < rows.len():
+            if rows[j] < rows[i]:
+                val temporary = rows[i]
+                rows[i] = rows[j]
+                rows[j] = temporary
+            j = j + 1
+        i = i + 1
+    val joined = rows.join(";")
+    "storage-module-v1|{storage_identity_text_v1(module_name)}|{storage_identity_text_v1(joined)}"
 
 fn frozen_storage_copy_site_v1(site: MirStorageViewSiteBindingV1) -> MirStorageViewSiteBindingV1:
     var copied_fields: [MirStorageFieldBindingV1] = []
@@ -539,7 +832,6 @@ class CompileContext:
                 reason: "frozen-storage-registry-malformed")
         var sites: [MirStorageViewSiteBindingV1] = []
         var evidence: [MirTypedStorageViewEvidenceV1] = []
-        var identity_rows: [text] = []
         var found_frozen_module = false
         var index = 0
         while index < self.frozen_storage_module_names.len():
@@ -550,18 +842,7 @@ class CompileContext:
                 val copied_site = frozen_storage_copy_site_v1(site)
                 sites.push(copied_site)
                 evidence.push(frozen_storage_copy_evidence_v1(row, copied_site))
-                identity_rows.push(frozen_storage_site_identity_v1(site, row))
             index = index + 1
-        var i = 0
-        while i < identity_rows.len():
-            var j = i + 1
-            while j < identity_rows.len():
-                if identity_rows[j] < identity_rows[i]:
-                    val temporary = identity_rows[i]
-                    identity_rows[i] = identity_rows[j]
-                    identity_rows[j] = temporary
-                j = j + 1
-            i = i + 1
         var known_module = found_frozen_module
         for known_name in self.frozen_storage_known_module_names:
             if known_name == module_name: known_module = true
@@ -570,10 +851,9 @@ class CompileContext:
                 registry_identity: self.storage_registry_frozen_identity,
                 module_identity: "", sites: [], evidence: [],
                 reason: "module-not-in-frozen-storage-registry")
-        val module_rows_identity = identity_rows.join(";")
         FrozenStorageModuleSnapshotV1(ok: true, module_name: module_name,
             registry_identity: self.storage_registry_frozen_identity,
-            module_identity: "storage-module-v1|{storage_identity_text_v1(module_name)}|{storage_identity_text_v1(module_rows_identity)}",
+            module_identity: frozen_storage_module_identity_v1(module_name, sites, evidence),
             sites: sites, evidence: evidence, reason: "ok")
 
     fn frozen_storage_module_has_sites(module_name: text) -> bool:
@@ -595,6 +875,81 @@ class CompileContext:
             if not self.frozen_storage_module_has_sites(module_name):
                 result.push(module_name)
         result
+
+    fn frozen_native_cache_source_v1(module_name: text) -> text:
+        var found_path = ""
+        for source in self.sources:
+            if source.module_name == module_name:
+                found_path = source.path
+        if found_path == "": return ""
+        var path_count = 0
+        for source in self.sources:
+            if source.path == found_path: path_count = path_count + 1
+        if path_count == 1: found_path else: ""
+
+    fn freeze_native_module_capsules_v1(
+        module_names: [text], object_base: text, backend_name: text,
+        target: text, target_cpu: text, opt_level: i64, is_release: bool
+    ) -> FrozenNativeModuleCapsuleBatchV1:
+        if not self.storage_registry_frozen
+            or not self.frozen_storage_registry_well_formed():
+            return FrozenNativeModuleCapsuleBatchV1(ok: false,
+                registry_identity: self.storage_binding_identity(), capsules: [],
+                reason: "storage-registry-not-frozen")
+        var capsules: [FrozenNativeModuleCapsuleV1] = []
+        var index = 0
+        while index < module_names.len():
+            val module_name = module_names[index]
+            if module_name == "":
+                return FrozenNativeModuleCapsuleBatchV1(ok: false,
+                    registry_identity: self.storage_binding_identity(), capsules: [],
+                    reason: "invalid-capsule-module-name")
+            var prior = 0
+            while prior < index:
+                if module_names[prior] == module_name:
+                    return FrozenNativeModuleCapsuleBatchV1(ok: false,
+                        registry_identity: self.storage_binding_identity(), capsules: [],
+                        reason: "duplicate-capsule-module")
+                prior = prior + 1
+            val snapshot = self.frozen_storage_module_snapshot(module_name)
+            if not snapshot.ok:
+                return FrozenNativeModuleCapsuleBatchV1(ok: false,
+                    registry_identity: self.storage_binding_identity(), capsules: [],
+                    reason: snapshot.reason)
+            var module_found = false
+            var module = MirModule(name: "", functions: {}, statics: {},
+                constants: {}, types: {})
+            if module_name == self.bootstrap_entry_mir_name
+                and self.bootstrap_entry_mir.?:
+                module = self.bootstrap_entry_mir.unwrap()
+                module_found = true
+            elif self.mir_modules.has(module_name):
+                module = self.mir_modules[module_name]
+                module_found = true
+            if not module_found:
+                return FrozenNativeModuleCapsuleBatchV1(ok: false,
+                    registry_identity: self.storage_binding_identity(), capsules: [],
+                    reason: "capsule-mir-module-missing")
+            if module.name != "" and module.name != module_name:
+                return FrozenNativeModuleCapsuleBatchV1(ok: false,
+                    registry_identity: self.storage_binding_identity(), capsules: [],
+                    reason: "capsule-mir-module-name-mismatch")
+            val cache_source = self.frozen_native_cache_source_v1(module_name)
+            val object_path = "{object_base}.{module_name}.o"
+            var capsule = FrozenNativeModuleCapsuleV1(ok: true,
+                module_name: module_name, capsule_identity: "",
+                mir_identity: native_capsule_mir_identity_v1(module),
+                mir_module: module, storage_snapshot: snapshot,
+                cache_source: cache_source, output_base: object_base,
+                object_path: object_path, backend_name: backend_name,
+                target: target, target_cpu: target_cpu, opt_level: opt_level,
+                is_release: is_release, reason: "ok")
+            capsule.capsule_identity = capsule.expected_identity()
+            capsules.push(capsule)
+            index = index + 1
+        FrozenNativeModuleCapsuleBatchV1(ok: true,
+            registry_identity: self.storage_binding_identity(),
+            capsules: capsules, reason: "ok")
 
     me add_error(message: text):
         self.errors.push(message)

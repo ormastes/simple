@@ -544,3 +544,17 @@ dev-done
   the bootstrap leaf check passes; the large AOT leaf/check and changed-file
   lint exceed the current pure checker 180-second watchdog, so full Stage4
   worker-capsule and compiler-wide verification remain open.
+- impl: Added the compiler-owner MIR+storage capsule boundary. After cache-hit
+  classification, the parent resolves bootstrap/dictionary MIR once, pairs it
+  with the frozen module storage snapshot and immutable compile scalars, and
+  creates class-handle capsules for every uncached module. The builder callback
+  accepts only the frozen batch and module name: it has no CompileContext or
+  BuildCache access. Codegen revalidates complete MIR metadata and storage
+  evidence before and after compilation; the result receipt binds capsule,
+  object path, byte size, and content hash. A parent-only collector validates
+  each receipt and checkpoints the cache per successful unit. The 16/16 focused gate proves capture
+  survives live MIR/registry replacement and routes four mixed storage/zero-
+  site capsules through the non-deterministic builder branch. This is branch
+  transport parity, not actual concurrency: `ParallelBuilder.build` still
+  invokes callbacks sequentially, while process workers require a complete MIR
+  codec rather than in-memory class pointers.

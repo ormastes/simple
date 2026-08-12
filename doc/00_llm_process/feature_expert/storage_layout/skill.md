@@ -63,9 +63,15 @@
 14. Freeze owns a deep-copied, module-qualified site/evidence registry and the
     zero-site module universe. Never consult live registration rows after the
     one-way freeze or use delimiter-concatenated configurable text as identity.
-15. Until an immutable MIR+storage capsule exists, compile storage-bearing
-    modules on the driver owner thread. ParallelBuilder may handle ordinary
-    modules, but capturing mutable CompileContext is not storage-worker proof.
+15. The native parent creates class-handle MIR+storage capsules before the
+    builder branch. Worker callbacks may receive only the frozen batch/module
+    name and must not capture CompileContext or BuildCache. Recompute complete
+    MIR and storage identities around codegen; bind object size/hash in the
+    result receipt; publish only through the parent completion hook. This
+    proves branch transport parity only.
+16. Never send in-memory capsule/class pointers to process workers. True
+    process concurrency requires a complete canonical MIR+storage codec and
+    identity validation; the functions-only MIR JSON wrapper is insufficient.
 
 The W^X store/load parity scenario requires a fresh runtime containing
 `rt_ptr_read_u8`; a stale runner or unresolved-symbol stub is not evidence.

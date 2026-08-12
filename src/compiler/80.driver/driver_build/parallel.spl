@@ -243,11 +243,17 @@ class ParallelBuilder:
     config: ParallelBuildConfig
     graph: BuildGraph
     stats: BuildStats
+    # Owner-thread completion hook. Compile callbacks never receive shared
+    # cache authority; the orchestrator invokes this after each successful unit.
+    owner_collect_fn: any
 
 impl ParallelBuilder:
     static fn create(config: ParallelBuildConfig) -> ParallelBuilder:
         ParallelBuilder(config: config, graph: BuildGraph.empty(),
-                        stats: BuildStats.empty())
+                        stats: BuildStats.empty(), owner_collect_fn: nil)
+
+    me set_owner_collect(collect_fn: any):
+        self.owner_collect_fn = collect_fn
 
     fn wait_for_finished_process(in_flight_pid: {i64: i64}, in_flight_count: i64) -> (i64, i64):
         """Wait for any in-flight process to finish using bounded polling.
@@ -325,13 +331,25 @@ impl ParallelBuilder:
                 val result = compile_fn(build_unit.path)
                 match result:
                     case Ok(output):
-                        self.graph.mark_completed(id, Some(output))
-                        outputs = outputs.push(output)
-                        self.stats = BuildStats(total_units: self.stats.total_units,
-                            completed: self.stats.completed + 1,
-                            failed: self.stats.failed,
-                            skipped: self.stats.skipped,
-                            parallel_batches: self.stats.parallel_batches)
+                        var collect_error: text = ""
+                        if self.owner_collect_fn != nil:
+                            collect_error = self.owner_collect_fn(build_unit.path, output)
+                        if collect_error != "":
+                            self.graph.mark_failed(id, collect_error)
+                            errors = errors.push((build_unit.path, collect_error))
+                            self.stats = BuildStats(total_units: self.stats.total_units,
+                                completed: self.stats.completed,
+                                failed: self.stats.failed + 1,
+                                skipped: self.stats.skipped,
+                                parallel_batches: self.stats.parallel_batches)
+                        else:
+                            self.graph.mark_completed(id, Some(output))
+                            outputs = outputs.push(output)
+                            self.stats = BuildStats(total_units: self.stats.total_units,
+                                completed: self.stats.completed + 1,
+                                failed: self.stats.failed,
+                                skipped: self.stats.skipped,
+                                parallel_batches: self.stats.parallel_batches)
                     case Err(msg):
                         self.graph.mark_failed(id, msg)
                         errors = errors.push((build_unit.path, msg))
@@ -376,13 +394,25 @@ impl ParallelBuilder:
                         val result = compile_fn(build_unit.path)
                         match result:
                             case Ok(output):
-                                self.graph.mark_completed(build_unit.id, Some(output))
-                                outputs = outputs.push(output)
-                                self.stats = BuildStats(total_units: self.stats.total_units,
-                                    completed: self.stats.completed + 1,
-                                    failed: self.stats.failed,
-                                    skipped: self.stats.skipped,
-                                    parallel_batches: self.stats.parallel_batches)
+                                var collect_error: text = ""
+                                if self.owner_collect_fn != nil:
+                                    collect_error = self.owner_collect_fn(build_unit.path, output)
+                                if collect_error != "":
+                                    self.graph.mark_failed(build_unit.id, collect_error)
+                                    errors = errors.push((build_unit.path, collect_error))
+                                    self.stats = BuildStats(total_units: self.stats.total_units,
+                                        completed: self.stats.completed,
+                                        failed: self.stats.failed + 1,
+                                        skipped: self.stats.skipped,
+                                        parallel_batches: self.stats.parallel_batches)
+                                else:
+                                    self.graph.mark_completed(build_unit.id, Some(output))
+                                    outputs = outputs.push(output)
+                                    self.stats = BuildStats(total_units: self.stats.total_units,
+                                        completed: self.stats.completed + 1,
+                                        failed: self.stats.failed,
+                                        skipped: self.stats.skipped,
+                                        parallel_batches: self.stats.parallel_batches)
                             case Err(msg):
                                 self.graph.mark_failed(build_unit.id, msg)
                                 errors = errors.push((build_unit.path, msg))

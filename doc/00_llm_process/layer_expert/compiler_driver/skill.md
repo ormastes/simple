@@ -33,6 +33,9 @@ MCP end-to-end witness:
 `test/02_integration/app/mcp_stdio_integration_spec.spl`.
 
 Typed-storage native codegen freezes deep-copied module-qualified evidence
-before cache lookup. Storage-bearing modules remain owner-threaded until the
-driver can pass an immutable MIR+storage capsule; do not re-enable them in the
-ParallelBuilder closure by reading live `CompileContext` arrays.
+before cache lookup. The parent then creates class-handle MIR+storage capsules;
+the builder callback sees only the frozen batch and module name. Revalidate
+complete MIR/storage identity before and after codegen, bind object bytes and
+size in the result receipt, and publish cache checkpoints only through the
+parent completion hook. Do not call this real concurrency: the current
+builder branch batches sequentially, and process workers need a complete codec.
