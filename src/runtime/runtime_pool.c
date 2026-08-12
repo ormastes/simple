@@ -8,6 +8,7 @@
 
 #include <stdint.h>
 #include <stdlib.h>
+#include "runtime_value.h"
 
 #if defined(_WIN32) || defined(_WIN64)
     #define RT_POOL_WINDOWS
@@ -20,9 +21,10 @@
 #endif
 
 typedef int64_t (*rt_pool_closure_fn_t)(int64_t);
-typedef int64_t (*rt_pool_scalar_closure_fn_t)(int64_t, int64_t);
+typedef int64_t (*rt_pool_scalar_fn_t)(int64_t);
 
 #define RT_POOL_DIRECT_FUNCTION_MARKER INT64_C(0x5344495245435446)
+#define RT_POOL_X86_64_MAX_CANONICAL_USER_PTR UINT64_C(0x00007fffffffffff)
 
 typedef struct RtPoolState RtPoolState;
 
@@ -34,8 +36,7 @@ typedef struct RtPoolTask {
     int joined;
     int released;
     int state_owned;
-    rt_pool_scalar_closure_fn_t scalar_entry;
-    int64_t scalar_closure[2];
+    rt_pool_scalar_fn_t scalar_entry;
     int64_t scalar_input;
     int64_t public_handle;
     RtPoolState* state;
@@ -53,7 +54,18 @@ typedef struct RtPoolTask {
 static int64_t rt_pool_scalar_task_dispatch(int64_t raw_task) {
     RtPoolTask* task = (RtPoolTask*)(intptr_t)raw_task;
     if (task == NULL || task->scalar_entry == NULL) return 0;
-    return task->scalar_entry((int64_t)(intptr_t)&task->scalar_closure[0], task->scalar_input);
+    return task->scalar_entry(task->scalar_input);
+}
+
+/* Native Simple function values can arrive as a tagged heap record. The task
+ * boundary accepts only the compiler's direct-function record and copies its
+ * entry before returning, so no caller-owned closure record escapes submit. */
+static int64_t rt_pool_native_function_payload(int64_t raw) {
+    uint64_t value = (uint64_t)raw;
+    if (value < 4096ULL) return 0;
+    if (value > RT_POOL_X86_64_MAX_CANONICAL_USER_PTR) return (int64_t)(value >> 3);
+    if ((value & TAG_MASK) == TAG_HEAP) return (int64_t)(value & ~TAG_MASK);
+    return raw;
 }
 
 struct RtPoolState {
@@ -781,14 +793,13 @@ static RtPoolTask* rt_pool_task_create(int64_t arg0, int64_t arg1) {
 }
 
 static RtPoolTask* rt_pool_scalar_task_create(int64_t function_value, int64_t input_i64) {
-    if (function_value == 0) return NULL;
-    const int64_t* descriptor = (const int64_t*)(intptr_t)function_value;
+    int64_t payload = rt_pool_native_function_payload(function_value);
+    if (payload == 0) return NULL;
+    const int64_t* descriptor = (const int64_t*)(intptr_t)payload;
     if (descriptor[0] == 0 || descriptor[1] != RT_POOL_DIRECT_FUNCTION_MARKER) return NULL;
     RtPoolTask* task = (RtPoolTask*)calloc(1, sizeof(RtPoolTask));
     if (task == NULL) return NULL;
-    task->scalar_entry = (rt_pool_scalar_closure_fn_t)(intptr_t)descriptor[0];
-    task->scalar_closure[0] = descriptor[0];
-    task->scalar_closure[1] = descriptor[1];
+    task->scalar_entry = (rt_pool_scalar_fn_t)(intptr_t)descriptor[0];
     task->scalar_input = input_i64;
     task->entry = rt_pool_scalar_task_dispatch;
     task->closure_ptr = (int64_t)(intptr_t)task;

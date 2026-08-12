@@ -455,8 +455,7 @@ void rt_thread_yield(void) {
 typedef struct RtPoolTask {
     rt_closure_fn_t entry;
     int64_t closure_ptr;
-    int64_t (*scalar_entry)(int64_t, int64_t);
-    int64_t scalar_closure[2];
+    int64_t (*scalar_entry)(int64_t);
     int64_t scalar_input;
     int64_t result;
     int done;
@@ -479,7 +478,7 @@ typedef struct RtPoolTask {
 static int64_t rt_pool_v1_scalar_task_dispatch(int64_t raw_task) {
     RtPoolTask* task = (RtPoolTask*)(intptr_t)raw_task;
     if (!task || !task->scalar_entry) return 0;
-    return task->scalar_entry((int64_t)(intptr_t)&task->scalar_closure[0], task->scalar_input);
+    return task->scalar_entry(task->scalar_input);
 }
 
 typedef struct RtPoolStateV1 {
@@ -1228,15 +1227,14 @@ static void rt_pool_v1_task_dispose(RtPoolTask* task) {
 }
 
 static RtPoolTask* rt_pool_v1_scalar_task_create(int64_t function_value, int64_t input) {
-    if (function_value == 0) return NULL;
-    const int64_t* descriptor = (const int64_t*)(intptr_t)function_value;
+    int64_t payload = rt_native_closure_payload(function_value);
+    if (payload == 0) return NULL;
+    const int64_t* descriptor = (const int64_t*)(intptr_t)payload;
     if (descriptor[0] == 0 || descriptor[1] != RT_POOL_V1_DIRECT_FUNCTION_MARKER) return NULL;
     RtPoolTask* task = (RtPoolTask*)SPL_MALLOC(sizeof(RtPoolTask), "rt_pool_v1_task");
     if (!task) return NULL;
     memset(task, 0, sizeof(*task));
-    task->scalar_entry = (int64_t (*)(int64_t, int64_t))(intptr_t)descriptor[0];
-    task->scalar_closure[0] = descriptor[0];
-    task->scalar_closure[1] = descriptor[1];
+    task->scalar_entry = (int64_t (*)(int64_t))(intptr_t)descriptor[0];
     task->scalar_input = input;
     task->entry = rt_pool_v1_scalar_task_dispatch;
     task->closure_ptr = (int64_t)(intptr_t)task;

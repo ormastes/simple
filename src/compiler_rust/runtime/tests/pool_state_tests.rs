@@ -7,12 +7,12 @@ use crate::{
 
 const DIRECT_FUNCTION_MARKER: i64 = 0x5344_4952_4543_5446;
 
-extern "C" fn plus_one(_closure: i64, input: i64) -> i64 { input + 1 }
-extern "C" fn identity(_closure: i64, input: i64) -> i64 { input }
+extern "C" fn plus_one(input: i64) -> i64 { input + 1 }
+extern "C" fn identity(input: i64) -> i64 { input }
 
 unsafe fn submit(
     state: i64,
-    entry: extern "C" fn(i64, i64) -> i64,
+    entry: extern "C" fn(i64) -> i64,
     input: i64,
 ) -> i64 {
     // Native Simple function values are two-word direct-function descriptors.
