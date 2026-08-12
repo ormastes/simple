@@ -60,6 +60,25 @@ pub(crate) struct RuntimeTransferEnvelopeV1 {
 }
 
 impl RuntimeTransferEnvelopeV1 {
+    pub(crate) fn encoded_copy(source_domain: TransferDomain, target_domain: TransferDomain) -> Option<Self> {
+        let region_id = next_transfer_region_id()?;
+        let envelope = Self {
+            region_id,
+            generation: 0,
+            source_domain,
+            target_domain,
+            mode: TransferMode::Copy,
+            payload: TransferPayload::EncodedCopy,
+            ownership_token: 0,
+            source_invalidated: false,
+        };
+        envelope.boundary_allowed().then_some(envelope)
+    }
+
+    pub(crate) fn target_domain(self) -> TransferDomain {
+        self.target_domain
+    }
+
     pub(crate) fn boundary_allowed(self) -> bool {
         if self.region_id == 0 || self.region_id > i64::MAX as u64 || self.generation > i64::MAX as u64 {
             return false;
@@ -189,10 +208,7 @@ impl RuntimeTransferPacket {
         if !value.is_inline_transfer_value() {
             return None;
         }
-        let region_id = NEXT_TRANSFER_REGION_ID.fetch_add(1, Ordering::Relaxed);
-        if region_id == 0 || region_id > i64::MAX as u64 {
-            return None;
-        }
+        let region_id = next_transfer_region_id()?;
         let envelope = RuntimeTransferEnvelopeV1 {
             region_id,
             generation: 0,
@@ -241,6 +257,19 @@ impl RuntimeTransferPacket {
         packet.runtime_value()?;
         Some(packet)
     }
+}
+
+fn next_transfer_region_id() -> Option<u64> {
+    // Fork duplicates process memory, including atomic counters. Namespace the
+    // low 32-bit sequence by the current PID so parent and child cannot mint
+    // the same region id after a fork.
+    let sequence = NEXT_TRANSFER_REGION_ID.fetch_add(1, Ordering::Relaxed);
+    if sequence == 0 || sequence > u32::MAX as u64 {
+        return None;
+    }
+    let process = u64::from(std::process::id()) & 0x7fff_ffff;
+    let region_id = (process << 32) | sequence;
+    (region_id > 0 && region_id <= i64::MAX as u64).then_some(region_id)
 }
 
 #[cfg(test)]

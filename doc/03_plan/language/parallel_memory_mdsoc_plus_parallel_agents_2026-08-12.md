@@ -26,7 +26,7 @@ Do not redefine them in runtime, MDSOC, backend, or application lanes.
 | WP-14 bounded mailbox | partial implementation | native compatibility channel and actor/common inbox/outbox queues have finite capacity 256; channel/common handle report full, but the legacy void native actor ABI cannot surface it; policy-selected capacities and checked public actor send remain |
 | WP-15 commit engine | partial implementation | common validation/order exists; atomic runtime publication remains |
 | WP-16 actor/channel migration | partial implementation | native safe paths carry route-validated inline packets, actor reply provenance is explicit, and heap actor context is rejected; typed heap/owned payloads remain |
-| WP-17 process transport | blocked on implementation | no separate-process codec/ObjectRef transport evidence |
+| WP-17 process transport | partial implementation | bounded encoded-copy framing and a real forked parent/child round trip exist; production spawn/piped integration, schema registry, ObjectRef, and rollback remain |
 | WP-18 thread pool | planned | stable typed pool rewrite not started |
 | WP-20..27 layout/performance | planned | no MIR lowering, allocator adoption, or evidence yet |
 | WP-30..36 MDSOC/pilots | planned | do not start before safe transport and layout inputs |
@@ -46,7 +46,7 @@ Do not redefine them in runtime, MDSOC, backend, or application lanes.
 ## Immediate next gates
 
 1. WP-10: replace block/point ambiguity with CFG-sensitive region facts and add dynamic-index, branch, loop, capture, and move regression evidence.
-2. WP-13/WP-16/WP-17: replace raw RuntimeValue transport with envelope codecs and bounded typed mailboxes; prove separate-process pointer isolation.
+2. WP-13/WP-16/WP-17: connect bounded encoded process frames to the production spawn/piped facade, add schema/ObjectRef codecs, and prove failure rollback; never revive the removed aggregate `rt_pg_parallel_worker_handoff_*` design.
 3. WP-15: connect validated ordered results to atomic owner-side snapshot publication and receipts.
 4. WP-20/WP-22: preserve MIR access paths into typed AoS/SoA reference parity before SIMD/GPU lowering.
 

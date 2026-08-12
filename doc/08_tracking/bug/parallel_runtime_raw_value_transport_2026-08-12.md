@@ -69,3 +69,24 @@ The P0 remains open for typed frozen/owned/encoded graph payloads,
 policy-selected mailbox capacities, ownership-token lifecycle, close/free concurrency hardening,
 separate-process transport, cancellation rollback, and admitted self-hosted
 end-to-end evidence.
+
+## 2026-08-12 encoded process-frame progress
+
+The native runtime now has a bounded process frame over the same `SPTR` v1
+metadata. Only `EncodedCopy` is admitted for the process destination; the frame
+adds an exact payload length, stable corruption checksum, a 4 MiB ceiling, and
+destination-domain validation. Region IDs combine the current process ID with
+a bounded local sequence so independently executing parent/child allocators
+cannot collide. A real child test process decodes a parent-created frame and
+writes a child-created encoded result for the parent to validate. Wrong-target,
+wrong-route, corrupt, and oversized frames fail closed.
+
+The previously named `rt_pg_parallel_worker_handoff_*` ABI is absent from
+current `main` and is not reintroduced: its aggregate pointer-retention model
+would contradict this contract. Production `native_spawn_worker` and C piped
+process APIs are not yet connected to the frame, so this is foundational
+separate-process evidence rather than public process-transfer completion.
+
+The P0 remains open for registered graph/schema codecs, ObjectRef transport,
+production spawn/piped integration, ownership-token lifecycle, cancellation
+rollback, close/free concurrency hardening, and admitted self-hosted evidence.

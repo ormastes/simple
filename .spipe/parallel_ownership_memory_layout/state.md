@@ -139,3 +139,22 @@ dev-done
   no new public `rt_*` entrypoint; `rejected_shortcuts` = raw pointer bits,
   unclassified `Any`, unbounded replacement queue, fixture-only bypass, and
   pretending inline-only packets implement graph ownership transfer.
+- impl: Advanced WP-17 with `process_transfer.rs`: an encoded-copy-only process
+  frame reuses the 40-byte `SPTR` metadata, enforces the destination domain,
+  carries an exact length and corruption checksum, and caps codec payloads at
+  4 MiB. PID-namespaced region IDs prevent parent/child counter collisions. One
+  focused test launches a real child test process to decode parent input and
+  return a child-created result; a second test rejects wrong
+  targets, corruption, and oversize. Both passed once. Current `main` has no
+  `rt_pg_parallel_worker_handoff_*` implementation, so the stale plan wording
+  was corrected instead of recreating an aggregate-pointer handoff. Production
+  spawn/piped integration, schema/ObjectRef codecs, cancellation rollback, and
+  self-hosted evidence remain open.
+- runtime decision: `runtime_need` = a process destination cannot admit the
+  inline RuntimeValue packet used by thread/actor boundaries;
+  `facade_checked` = common `TransferEnvelopeV1`, native transfer codec,
+  `native_spawn_worker`, and the C piped process surface; `chosen_path` =
+  `runtime-owned-change` adding bounded internal framing without a new public
+  `rt_*` symbol; `rejected_shortcuts` = inherited heap pointers, raw
+  RuntimeValue bits, the removed aggregate PG-worker handoff, unbounded bytes,
+  and calling a focused fork test production integration.

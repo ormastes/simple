@@ -23,6 +23,13 @@ The native inline packet appends eight payload bytes and uses the fixed-size
 `Message::TransferPacket([u8; 48])` actor representation. Only known inline
 RuntimeValue tags are admitted. Heap addresses and reserved tags are rejected.
 
+`src/compiler_rust/runtime/src/value/process_transfer.rs` owns the native
+encoded-copy process frame. It appends a bounded payload length, stable
+corruption checksum, and at most 4 MiB of codec bytes to the same 40-byte
+metadata. Decoding requires the expected destination domain. It is framing,
+not a graph serializer or authenticated remote protocol. V1 admits only
+`Parent -> Process` input and `Process -> Parent` result routes.
+
 ## Queue and actor rules
 
 - Native compatibility channels and actor inbox/outbox queues have capacity
@@ -42,8 +49,10 @@ RuntimeValue tags are admitted. Heap addresses and reserved tags are rejected.
   path; native RuntimeValue actor messages use typed packets.
 - Raw channel close/free ownership still needs synchronized quiescence before
   concurrent lifecycle safety can be claimed.
-- No graph codec, ownership registry, process transport, cancellation rollback,
-  or critical receipt implementation exists yet.
+- A real forked test proves encoded parent-to-process and process-to-parent
+  framing, but production spawn/piped wiring, codec/schema registration,
+  ObjectRef transport, cancellation rollback, and critical receipts remain.
+- No graph codec or ownership registry exists yet.
 - See `doc/08_tracking/bug/parallel_runtime_raw_value_transport_2026-08-12.md`.
 
 Update this page together with the common transfer contract, native packet
