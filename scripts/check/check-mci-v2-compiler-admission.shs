@@ -86,11 +86,31 @@ parent_hash=$(hash_file "$work/parent"); [ "$(field parent_receipt_sha256 "$work
 parent_key_hash=$(hash_file "$work/parent.key"); [ "$(field signing_algorithm "$work/parent" 2>/dev/null || true)" = ed25519 ] && [ "$(field trust_key_sha256 "$work/parent" 2>/dev/null || true)" = "$parent_key_hash" ] || fail invalid-parent-trust
 openssl pkeyutl -verify -rawin -pubin -inkey "$work/parent.key" -sigfile "$work/parent.sig" -in "$work/parent" >/dev/null 2>&1 || fail invalid-parent-signature
 openssl pkeyutl -verify -rawin -pubin -inkey "$work/key" -sigfile "$work/signature" -in "$work/provenance" >/dev/null 2>&1 || fail invalid-signature
-emitted=$work/emitted; timeout 180 env SIMPLE_LIB="$work/source/src" "$work/compiler" native-build --source "$work/source/src/compiler" --source "$work/source/src/app" --source "$work/source/src/lib" --entry-closure --entry "$work/fixture.spl" --strip --output "$emitted" >$work/compile.log 2>&1 || fail compile-failed
-regular "$emitted" && [ -x "$emitted" ] || fail non-executable-artifact; readelf -h "$emitted" | grep -q 'Type:.*EXEC\|Type:.*DYN' || fail emitted-format-not-elf
-functions=$(nm "$emitted" 2>/dev/null | awk '$2 ~ /^[Tt]$/ {n++} END{print n+0}'); [ "$functions" -ge "$minimum" ] || fail missing-function-evidence
-nm "$emitted" 2>/dev/null | awk -v wanted="$required_symbol" '$2 ~ /^[Tt]$/ && index($3,wanted){found=1} END{exit !found}' || fail required-symbol-missing
-timeout 30 "$emitted" >$work/run.log 2>&1 || fail emitted-execution-failed; [ "$(tr -d '\r\n' <$work/run.log)" = "$expected" ] || fail fixed-oracle-mismatch
-artifact=$evidence_abs/artifacts/compiler.evidence; { echo schema_version=mci-compiler-collector-receipt-v2; echo run_id="$run_id"; echo source_hash="$source_hash"; echo config_hash="$config_hash"; echo fixture_sha256="$fixture_hash"; echo compiler_executable_hash="$compiler_hash"; echo parent_receipt_hash="$parent_hash"; echo parent_signature_sha256=$(hash_file "$work/parent.sig"); echo emitted_artifact_hash=$(hash_file "$emitted"); echo emitted_function_count="$functions"; echo required_symbol="$required_symbol"; echo fixture_capture_hash=$(hash_file "$work/run.log"); echo scenarios=MCI-COMP-001; echo blocked_scenarios=MCI-COMP-002,MCI-COMP-003,MCI-NFR-003,MCI-NFR-004; echo aggregate_lane_status=blocked-incomplete-scenario-set; echo result=$(if [ "$mode" = fixture ]; then echo CONTRACT_ONLY; else echo PASS; fi); echo release_candidate=false; } > "$artifact"
-if [ "$mode" = fixture ]; then echo 'CONTRACT_ONLY: fixed compiler fixture passed; no receipt template published'; exit 0; fi
-echo 'BLOCKED: MCI-COMP-001 passed, but compiler aggregate lane requires COMP-002/003 and NFR-003/004' >&2; exit 2
+run_isolated_build() {
+  label=$1; build_root=$work/build-$label; mkdir -p "$build_root"
+  cp -a "$work/source" "$build_root/source"
+  cp "$config_manifest" "$build_root/config.manifest"
+  cmp -s "$source_manifest" "$build_root/source.manifest" 2>/dev/null || cp "$source_manifest" "$build_root/source.manifest"
+  [ "$(hash_file "$build_root/source.manifest")" = "$source_hash" ] && [ "$(hash_file "$build_root/config.manifest")" = "$config_hash" ] || fail isolated-input-identity-mismatch
+  emitted=$build_root/emitted
+  timeout 180 env SIMPLE_LIB="$build_root/source/src" "$work/compiler" native-build --source "$build_root/source/src/compiler" --source "$build_root/source/src/app" --source "$build_root/source/src/lib" --entry-closure --entry "$work/fixture.spl" --strip --output "$emitted" >"$build_root/compile.log" 2>&1 || fail compile-failed-$label
+  regular "$emitted" && [ -x "$emitted" ] || fail non-executable-artifact-$label
+  readelf -h "$emitted" | grep -q 'Type:.*EXEC\|Type:.*DYN' || fail emitted-format-not-elf-$label
+  functions=$(nm "$emitted" 2>/dev/null | awk '$2 ~ /^[Tt]$/ {n++} END{print n+0}'); [ "$functions" -ge "$minimum" ] || fail missing-function-evidence-$label
+  nm "$emitted" 2>/dev/null | awk -v wanted="$required_symbol" '$2 ~ /^[Tt]$/ && index($3,wanted){found=1} END{exit !found}' || fail required-symbol-missing-$label
+  timeout 30 "$emitted" >"$build_root/run.log" 2>&1 || fail emitted-execution-failed-$label
+  [ "$(tr -d '\r\n' <"$build_root/run.log")" = "$expected" ] || fail fixed-oracle-mismatch-$label
+}
+run_isolated_build a; run_isolated_build b
+emitted_a=$work/build-a/emitted; emitted_b=$work/build-b/emitted
+artifact_hash_a=$(hash_file "$emitted_a"); artifact_hash_b=$(hash_file "$emitted_b")
+[ "$artifact_hash_a" = "$artifact_hash_b" ] || fail nondeterministic-isolated-artifacts
+[ "$(hash_file "$work/build-a/run.log")" = "$(hash_file "$work/build-b/run.log")" ] || fail nondeterministic-fixture-captures
+cp "$emitted_a" "$work/corrupt.emitted"; printf '\001' >> "$work/corrupt.emitted"
+corrupt_hash=$(hash_file "$work/corrupt.emitted"); [ "$corrupt_hash" != "$artifact_hash_a" ] || fail corruption-negative-not-detected
+
+comparison=$evidence_abs/receipts/compiler.cross-host-comparison.unsigned.template
+{ echo receipt_schema=mci-compiler-cross-host-comparison-v1; echo run_id="$run_id"; echo source_hash="$source_hash"; echo config_hash="$config_hash"; echo fixture_sha256="$fixture_hash"; echo local_build_a_artifact_hash="$artifact_hash_a"; echo local_build_b_artifact_hash="$artifact_hash_b"; echo local_fixture_capture_hash=$(hash_file "$work/build-a/run.log"); echo corruption_candidate_hash="$corrupt_hash"; echo corruption_rejected=true; echo peer_host_identity_sha256=REQUIRED; echo peer_environment_manifest_sha256=REQUIRED; echo peer_artifact_hash=REQUIRED; echo peer_fixture_capture_hash=REQUIRED; echo peer_receipt_sha256=REQUIRED; echo peer_signature_sha256=REQUIRED; echo cross_host_status=BLOCKED_PENDING_INDEPENDENT_SIGNED_PEER; echo release_candidate=false; } > "$comparison"
+artifact=$evidence_abs/artifacts/compiler.evidence; { echo schema_version=mci-compiler-collector-receipt-v2; echo run_id="$run_id"; echo source_hash="$source_hash"; echo config_hash="$config_hash"; echo fixture_sha256="$fixture_hash"; echo compiler_executable_hash="$compiler_hash"; echo parent_receipt_hash="$parent_hash"; echo parent_signature_sha256=$(hash_file "$work/parent.sig"); echo emitted_artifact_hash="$artifact_hash_a"; echo isolated_build_a_artifact_hash="$artifact_hash_a"; echo isolated_build_b_artifact_hash="$artifact_hash_b"; echo corruption_candidate_hash="$corrupt_hash"; echo corruption_rejected=true; echo emitted_function_count="$functions"; echo required_symbol="$required_symbol"; echo fixture_capture_hash=$(hash_file "$work/build-a/run.log"); echo contract_scenarios=MCI-COMP-001,MCI-COMP-002,MCI-COMP-003,MCI-NFR-003,MCI-NFR-004; echo blocked_scenarios=MCI-COMP-002,MCI-COMP-003,MCI-NFR-003,MCI-NFR-004; echo cross_host_comparison_status=BLOCKED_PENDING_INDEPENDENT_SIGNED_PEER; echo aggregate_lane_status=blocked-no-cross-host-evidence; echo result=$(if [ "$mode" = fixture ]; then echo CONTRACT_ONLY; else echo BLOCKED; fi); echo release_candidate=false; } > "$artifact"
+if [ "$mode" = fixture ]; then echo 'CONTRACT_ONLY: isolated reproducibility and corruption controls passed; cross-host comparison remains BLOCKED'; exit 0; fi
+echo 'BLOCKED: local compiler controls passed, but independent signed cross-host evidence is absent' >&2; exit 2

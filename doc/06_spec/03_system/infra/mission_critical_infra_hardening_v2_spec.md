@@ -2,12 +2,12 @@
 
 **Evidence class:** executable pure-policy validation plus explicit release blockers
 **Executable source:** `test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl`
-**Executable source SHA-256:** `f0bd2b3f650a3c6e6ef14e930f929b30ca7b093d9a0583a57a2b29091fad5537`
+**Executable source SHA-256:** `58c24ea2d717bee9e4c2b09622702e41df7c2d5c02b90648526e87f221ce6d7b`
 **Generation status:** hand-maintained mirror; SPipe doc generation is blocked by the known compiler conflict in `src/compiler/70.backend/backend/runtime_compiler.spl` and was not run.
 
 ## Claim boundary
 
-This flow proves deterministic behavior of the implemented pure-Simple compiler-admission, certified-SimpleOS-manifest, packed DrawIR generation, sealed domain-arena, and bounded-process policy APIs. It does **not** claim that external tooling ran, that a real graphics device or RenderDoc capture was validated, or that any platform completed the required 24-hour stress campaign. Those missing evidence classes keep the release-wide mission-critical claim blocked.
+This flow proves deterministic behavior of the implemented pure-Simple policies and the controlled producer contracts named below. An `evidence-contract` row records only that narrower contract coverage; it does **not** claim that live external tooling ran, that a real guest or graphics device was exercised, that a real RenderDoc capture was validated, or that any platform completed the required 24-hour stress campaign. Those missing live evidence classes keep every affected release scenario blocked.
 
 ## Operator flow
 
@@ -91,48 +91,48 @@ contract evidence; `blocked` names the missing release-grade owner or evidence.
 | MCI-ALLOC-004 | evidence-contract | `test/01_unit/scripts/mci_v2_allocation_contract_test.shs` | `allocation-contract-only` | `sign-current-allocation-producer-receipt` |
 | MCI-ALLOC-005 | evidence-contract | `test/01_unit/scripts/mci_v2_allocation_contract_test.shs` | `allocation-contract-only` | `sign-current-allocation-producer-receipt` |
 | MCI-ALLOC-006 | evidence-contract | `test/01_unit/scripts/mci_v2_allocation_contract_test.shs` | `allocation-contract-only` | `sign-current-allocation-producer-receipt` |
-| MCI-COMP-001 | blocked | `scripts/check/check-mci-v2-compiler-admission.shs` | `owner-producer-missing` | `implement-and-run-current-compiler-producer` |
-| MCI-COMP-002 | blocked | `scripts/check/check-mci-v2-compiler-admission.shs` | `owner-producer-missing` | `implement-and-run-current-compiler-producer` |
-| MCI-COMP-003 | blocked | `scripts/check/check-mci-v2-compiler-admission.shs` | `owner-producer-missing` | `implement-and-run-current-compiler-producer` |
+| MCI-COMP-001 | evidence-contract | `test/01_unit/scripts/mci_v2_compiler_admission_contract_test.shs` | `fixed-compiler-fixture-contract-only` | `run-authenticated-current-compiler-producer` |
+| MCI-COMP-002 | blocked | `scripts/check/check-mci-v2-compiler-admission.shs` | `cross-host-signed-peer-missing` | `run-independent-host-and-sign-peer-receipt` |
+| MCI-COMP-003 | blocked | `scripts/check/check-mci-v2-compiler-admission.shs` | `live-negative-campaign-not-admitted` | `run-current-live-negative-campaign` |
 | MCI-DOC-001 | blocked | `bin/simple-spipe-docgen` | `docgen-receipt-absent` | `resolve-runtime-compiler-conflict-and-run-docgen-once` |
 | MCI-DOC-002 | blocked | `bin/simple-spipe-docgen` | `generated-helper-visibility-unverified` | `resolve-runtime-compiler-conflict-and-run-docgen-once` |
 | MCI-DOC-003 | evidence-contract | `test/01_unit/scripts/mci_v2_traceability_contract_test.shs` | `negative-traceability-contract-only` | `run-docgen-after-compiler-conflict-resolves` |
 | MCI-NFR-001 | evidence-contract | `test/01_unit/scripts/mci_v2_aggregate_contract_test.shs` | `freshness-contract-only` | `collect-current-signed-lane-receipts` |
 | MCI-NFR-002 | evidence-contract | `test/01_unit/scripts/mci_v2_aggregate_contract_test.shs` | `identity-contract-only` | `collect-current-signed-lane-receipts` |
-| MCI-NFR-003 | blocked | `scripts/check/check-mci-v2-compiler-admission.shs` | `reproducibility-producer-missing` | `implement-and-run-two-clean-host-builds` |
-| MCI-NFR-004 | blocked | `scripts/check/check-mci-v2-compiler-admission.shs` | `reproducibility-negative-producer-missing` | `implement-and-run-corruption-negative-control` |
-| MCI-NFR-005 | blocked | `scripts/check/check-mci-v2-tooling-admission.shs` | `bounded-tooling-producer-missing` | `implement-timeout-capture-and-scan-telemetry` |
-| MCI-NFR-006 | blocked | `scripts/check/check-mci-v2-tooling-admission.shs` | `tooling-negative-producer-missing` | `implement-hang-flood-and-repeat-scan-controls` |
+| MCI-NFR-003 | blocked | `scripts/check/check-mci-v2-compiler-admission.shs` | `cross-host-signed-peer-missing` | `run-independent-host-and-sign-peer-receipt` |
+| MCI-NFR-004 | blocked | `scripts/check/check-mci-v2-compiler-admission.shs` | `live-corruption-campaign-not-admitted` | `run-current-live-corruption-negative` |
+| MCI-NFR-005 | evidence-contract | `test/01_unit/scripts/mci_v2_tooling_admission_contract_test.shs` | `tooling-bounds-contract-only` | `run-live-timeout-capture-and-scan-telemetry` |
+| MCI-NFR-006 | evidence-contract | `test/01_unit/scripts/mci_v2_tooling_admission_contract_test.shs` | `tooling-negative-contract-only` | `run-live-hang-flood-and-repeat-scan-controls` |
 | MCI-NFR-007 | evidence-contract | `test/01_unit/scripts/mci_v2_allocation_contract_test.shs` | `allocation-budget-contract-only` | `sign-current-allocation-producer-receipt` |
 | MCI-NFR-008 | evidence-contract | `test/01_unit/scripts/mci_v2_allocation_contract_test.shs` | `allocation-budget-contract-only` | `sign-current-allocation-producer-receipt` |
 | MCI-NFR-009 | evidence-contract | `test/01_unit/scripts/mci_v2_allocation_contract_test.shs` | `fault-registry-contract-only` | `sign-current-allocation-producer-receipt` |
 | MCI-NFR-010 | evidence-contract | `test/01_unit/scripts/mci_v2_allocation_contract_test.shs` | `rollback-hash-contract-only` | `sign-current-allocation-producer-receipt` |
-| MCI-NFR-011 | blocked | `scripts/check/check-mci-v2-rendering.shs` | `real-budget-samples-missing` | `capture-current-rendering-budget-samples` |
-| MCI-NFR-012 | blocked | `scripts/check/check-mci-v2-rendering.shs` | `deadline-negative-evidence-missing` | `run-capacity-and-deadline-negative-controls` |
-| MCI-NFR-013 | blocked | `scripts/check/check-mci-v2-tooling-admission.shs` | `tool-latency-rss-samples-missing` | `capture-pinned-warm-tooling-benchmarks` |
-| MCI-NFR-014 | blocked | `scripts/check/check-mci-v2-tooling-admission.shs` | `tool-regression-negative-missing` | `run-configured-regression-negative-controls` |
-| MCI-NFR-015 | blocked | `scripts/check/check-mci-v2-stress.shs` | `twenty-four-hour-campaign-missing` | `implement-and-complete-current-stress-campaign` |
-| MCI-NFR-016 | blocked | `scripts/check/check-mci-v2-stress.shs` | `interrupted-cell-control-missing` | `implement-and-run-stress-interruption-control` |
+| MCI-NFR-011 | evidence-contract | `test/01_unit/scripts/mci_v2_rendering_producer_contract_test.shs` | `rendering-budget-fixture-contract-only` | `capture-current-rendering-budget-samples` |
+| MCI-NFR-012 | evidence-contract | `test/01_unit/scripts/mci_v2_rendering_producer_contract_test.shs` | `rendering-deadline-contract-only` | `run-live-capacity-and-deadline-negative-controls` |
+| MCI-NFR-013 | evidence-contract | `test/01_unit/scripts/mci_v2_tooling_admission_contract_test.shs` | `tooling-metrics-contract-only` | `capture-pinned-warm-tooling-benchmarks` |
+| MCI-NFR-014 | evidence-contract | `test/01_unit/scripts/mci_v2_tooling_admission_contract_test.shs` | `tooling-regression-contract-only` | `run-live-configured-regression-negative-controls` |
+| MCI-NFR-015 | evidence-contract | `test/01_unit/scripts/mci_v2_stress_contract_test.shs` | `stress-fixture-contract-only` | `complete-current-twenty-four-hour-campaign` |
+| MCI-NFR-016 | evidence-contract | `test/01_unit/scripts/mci_v2_stress_contract_test.shs` | `stress-interruption-contract-only` | `run-live-stress-interruption-control` |
 | MCI-NFR-017 | evidence-contract | `test/01_unit/scripts/mci_v2_aggregate_contract_test.shs` | `focused-reviewer-contract-only` | `obtain-independent-reviewer-receipt` |
 | MCI-NFR-018 | evidence-contract | `test/01_unit/scripts/mci_v2_aggregate_contract_test.shs` | `focused-reviewer-negative-contract-only` | `obtain-independent-reviewer-receipt` |
-| MCI-OS-001 | blocked | `scripts/check/check-mci-v2-simpleos-manifest.shs` | `real-guest-producer-missing` | `implement-and-run-current-guest-matrix` |
-| MCI-OS-002 | blocked | `scripts/check/check-mci-v2-simpleos-manifest.shs` | `real-guest-producer-missing` | `implement-and-run-current-guest-matrix` |
-| MCI-OS-003 | blocked | `scripts/check/check-mci-v2-simpleos-manifest.shs` | `real-guest-producer-missing` | `implement-and-run-current-guest-matrix` |
-| MCI-OS-004 | blocked | `scripts/check/check-mci-v2-simpleos-manifest.shs` | `real-guest-producer-missing` | `implement-and-run-current-guest-payloads` |
-| MCI-OS-005 | blocked | `scripts/check/check-mci-v2-simpleos-manifest.shs` | `real-guest-producer-missing` | `implement-and-run-current-guest-payloads` |
-| MCI-OS-006 | blocked | `scripts/check/check-mci-v2-simpleos-manifest.shs` | `real-guest-producer-missing` | `implement-and-run-current-guest-payloads` |
+| MCI-OS-001 | evidence-contract | `test/01_unit/scripts/mci_v2_simpleos_manifest_contract_test.shs` | `simpleos-manifest-contract-only` | `run-current-guest-matrix` |
+| MCI-OS-002 | evidence-contract | `test/01_unit/scripts/mci_v2_simpleos_manifest_contract_test.shs` | `simpleos-matrix-contract-only` | `run-current-guest-matrix` |
+| MCI-OS-003 | evidence-contract | `test/01_unit/scripts/mci_v2_simpleos_manifest_contract_test.shs` | `simpleos-negative-contract-only` | `run-current-guest-matrix` |
+| MCI-OS-004 | evidence-contract | `test/01_unit/scripts/mci_v2_simpleos_manifest_contract_test.shs` | `simpleos-payload-contract-only` | `run-current-guest-payloads` |
+| MCI-OS-005 | evidence-contract | `test/01_unit/scripts/mci_v2_simpleos_manifest_contract_test.shs` | `simpleos-alias-contract-only` | `run-current-guest-payloads` |
+| MCI-OS-006 | evidence-contract | `test/01_unit/scripts/mci_v2_simpleos_manifest_contract_test.shs` | `simpleos-payload-negative-contract-only` | `run-current-guest-payloads` |
 | MCI-PROC-001 | evidence-contract | `test/01_unit/scripts/mci_v2_process_safety_contract_test.shs` | `process-contract-only` | `admit-current-pure-simple-runner-and-sign-receipt` |
 | MCI-PROC-002 | evidence-contract | `test/01_unit/scripts/mci_v2_process_safety_contract_test.shs` | `process-contract-only` | `admit-current-pure-simple-runner-and-sign-receipt` |
 | MCI-PROC-003 | evidence-contract | `test/01_unit/scripts/mci_v2_process_safety_contract_test.shs` | `process-contract-only` | `admit-current-pure-simple-runner-and-sign-receipt` |
-| MCI-REN-001 | blocked | `scripts/check/check-mci-v2-rendering.shs` | `real-rendering-producer-missing` | `implement-and-run-current-rendering-producer` |
-| MCI-REN-002 | blocked | `scripts/check/check-mci-v2-rendering.shs` | `real-rendering-producer-missing` | `implement-and-run-current-rendering-producer` |
-| MCI-REN-003 | blocked | `scripts/check/check-mci-v2-rendering.shs` | `real-rendering-producer-missing` | `implement-and-run-current-rendering-producer` |
-| MCI-REN-004 | blocked | `scripts/check/check-mci-v2-rendering.shs` | `device-and-ui-evidence-missing` | `capture-real-device-ui-and-readback` |
-| MCI-REN-005 | blocked | `scripts/check/check-mci-v2-rendering.shs` | `renderdoc-evidence-missing` | `capture-and-validate-real-renderdoc-artifact` |
-| MCI-REN-006 | blocked | `scripts/check/check-mci-v2-rendering.shs` | `rendering-negative-producer-missing` | `implement-and-run-rendering-negative-controls` |
-| MCI-TOOL-001 | blocked | `scripts/check/check-mci-v2-tooling-admission.shs` | `owner-producer-missing` | `implement-and-run-tooling-producer` |
-| MCI-TOOL-002 | blocked | `scripts/check/check-mci-v2-tooling-admission.shs` | `owner-producer-missing` | `implement-and-run-tooling-producer` |
-| MCI-TOOL-003 | blocked | `scripts/check/check-mci-v2-tooling-admission.shs` | `owner-producer-missing` | `implement-and-run-tooling-producer` |
+| MCI-REN-001 | evidence-contract | `test/01_unit/scripts/mci_v2_rendering_producer_contract_test.shs` | `rendering-fixture-contract-only` | `run-live-rendering-producer` |
+| MCI-REN-002 | evidence-contract | `test/01_unit/scripts/mci_v2_rendering_producer_contract_test.shs` | `rendering-capacity-contract-only` | `run-live-rendering-producer` |
+| MCI-REN-003 | evidence-contract | `test/01_unit/scripts/mci_v2_rendering_producer_contract_test.shs` | `rendering-overflow-contract-only` | `run-live-rendering-producer` |
+| MCI-REN-004 | evidence-contract | `test/01_unit/scripts/mci_v2_rendering_producer_contract_test.shs` | `device-ui-fixture-contract-only` | `capture-real-device-ui-and-readback` |
+| MCI-REN-005 | evidence-contract | `test/01_unit/scripts/mci_v2_rendering_producer_contract_test.shs` | `renderdoc-fixture-contract-only` | `capture-and-validate-real-renderdoc-artifact` |
+| MCI-REN-006 | evidence-contract | `test/01_unit/scripts/mci_v2_rendering_producer_contract_test.shs` | `rendering-negative-contract-only` | `run-live-rendering-negative-controls` |
+| MCI-TOOL-001 | evidence-contract | `test/01_unit/scripts/mci_v2_tooling_admission_contract_test.shs` | `tooling-fixture-contract-only` | `run-live-tooling-producer` |
+| MCI-TOOL-002 | evidence-contract | `test/01_unit/scripts/mci_v2_tooling_admission_contract_test.shs` | `tooling-bounds-contract-only` | `run-live-tooling-producer` |
+| MCI-TOOL-003 | evidence-contract | `test/01_unit/scripts/mci_v2_tooling_admission_contract_test.shs` | `tooling-negative-contract-only` | `run-live-tooling-producer` |
 
 ## Required follow-up gates
 

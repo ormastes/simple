@@ -1,0 +1,58 @@
+#!/bin/sh
+set -eu
+LC_ALL=C; export LC_ALL
+usage(){ echo "usage: $0 --profile mixed-criticality-high-assurance --evidence DIR [--contract-fixture --tool-dir DIR]" >&2; exit 2; }
+profile= evidence= fixture=false tool_dir=
+while [ "$#" -gt 0 ]; do case "$1" in --profile) profile=$2; shift 2;; --evidence) evidence=$2; shift 2;; --contract-fixture) fixture=true; shift;; --tool-dir) tool_dir=$2; shift 2;; *) usage;; esac; done
+[ "$profile" = mixed-criticality-high-assurance ] && [ -n "$evidence" ] || usage
+root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd -P); case "$evidence" in /*) out=$evidence;; *) out=$root/$evidence;; esac
+case "$out" in "$root"/*) :;; *) echo 'BLOCKED: evidence must be below repository root' >&2; exit 2;; esac
+[ "$fixture" = true ] || tool_dir=$root/scripts/check
+if [ "$fixture" = true ]; then [ -n "$tool_dir" ] || usage; tool_dir=$(CDPATH= cd -- "$tool_dir" && pwd -P); fi
+blocked(){ echo "BLOCKED: $*" >&2; exit 2; }; need(){ eval "v=\${$1-}"; [ -n "$v" ] || blocked "missing external/live prerequisite: $1"; }
+regular(){ [ -f "$1" ] && [ ! -L "$1" ]; }; hash_file(){ sha256sum "$1" | awk '{print $1}'; }
+tool(){ p=$tool_dir/$1; regular "$p" && [ -x "$p" ] || blocked "missing canonical executable: $p"; printf '%s\n' "$p"; }
+for n in MCI_RUN_ID MCI_SOURCE_HASH MCI_CONFIGURATION_HASH MCI_CAPTURED_AT_UTC_NS MCI_VALID_UNTIL_UTC_NS MCI_NOW_UTC_NS MCI_PRODUCER_PRIVATE_KEY MCI_PRODUCER_PUBLIC_KEY MCI_PRODUCER_KEY_ID MCI_REVIEWER_PUBLIC_KEY MCI_REVIEWER_KEY_ID MCI_REVIEW_DECISION MCI_REVIEW_DECISION_SIGNATURE MCI_REVIEWER_TRUST_POLICY; do need "$n"; done
+for f in "$MCI_PRODUCER_PRIVATE_KEY" "$MCI_PRODUCER_PUBLIC_KEY" "$MCI_REVIEWER_PUBLIC_KEY" "$MCI_REVIEW_DECISION" "$MCI_REVIEW_DECISION_SIGNATURE" "$MCI_REVIEWER_TRUST_POLICY"; do regular "$f" || blocked "external prerequisite is not a regular file: $f"; done
+[ "$MCI_PRODUCER_KEY_ID" != "$MCI_REVIEWER_KEY_ID" ] && [ "$(hash_file "$MCI_PRODUCER_PUBLIC_KEY")" != "$(hash_file "$MCI_REVIEWER_PUBLIC_KEY")" ] || blocked 'producer and reviewer trust roots must differ'
+timeout_s=${MCI_RELEASE_GATE_TIMEOUT_SECONDS:-900}; capture_n=${MCI_RELEASE_CAPTURE_LIMIT_BYTES:-1048576}; case "$timeout_s$capture_n" in *[!0-9]*) usage;; esac
+mkdir -p "$out/orchestrator-captures"; manifest=$out/orchestrator-run.env; [ ! -e "$manifest" ] || blocked 'evidence collision; use a fresh directory'
+{ echo orchestrator_schema=mci-v2-release-orchestrator-v1; echo mode=$(if [ "$fixture" = true ]; then echo CONTRACT_ONLY; else echo live; fi); echo profile=$profile; echo run_id=$MCI_RUN_ID; echo source_hash=$MCI_SOURCE_HASH; echo configuration_hash=$MCI_CONFIGURATION_HASH; echo timeout_seconds=$timeout_s; echo capture_limit_bytes=$capture_n; } > "$manifest"
+run_gate(){ id=$1; shift; o=$out/orchestrator-captures/$id.stdout; e=$out/orchestrator-captures/$id.stderr; blocks=$(( (capture_n + 511) / 512 )); set +e; (ulimit -f "$blocks"; exec timeout -k 5 "$timeout_s" "$@") >"$o" 2>"$e"; rc=$?; set -e; os=$(wc -c <"$o"); es=$(wc -c <"$e"); if [ "$os" -gt "$capture_n" ] || [ "$es" -gt "$capture_n" ]; then : >"$o"; : >"$e"; echo "stage=$id|BLOCKED|capture-overflow|$rc|$os|$es" >>"$manifest"; return 124; fi; echo "stage=$id|$(if [ "$rc" -eq 0 ]; then echo PASS; else echo BLOCKED; fi)|exit-$rc|$rc|$os|$es" >>"$manifest"; return "$rc"; }
+common="--evidence $out --run-id $MCI_RUN_ID --source-hash $MCI_SOURCE_HASH --configuration-hash $MCI_CONFIGURATION_HASH --captured-at-utc-ns $MCI_CAPTURED_AT_UTC_NS --valid-until-utc-ns $MCI_VALID_UNTIL_UTC_NS --now-utc-ns $MCI_NOW_UTC_NS"
+if [ "$fixture" = true ]; then
+ for id in compiler tooling simpleos rendering allocation process-safety stress traceability; do run_gate "$id" "$(tool check-mci-v2-$id.shs)" --orchestrated $common || blocked "$id producer failed"; done
+else
+ # Lane-specific argv is supplied as one whitespace-free argument per line. The
+ # orchestrator owns the executable and verifies the shared identity tuple.
+ for id in compiler tooling simpleos rendering allocation process-safety stress traceability; do
+   var=MCI_$(printf '%s' "$id" | tr 'a-z-' 'A-Z_')_ARGS_FILE; need "$var"; eval "af=\$$var"; regular "$af" || blocked "$var is not a regular argv file"
+   case "$(sed -n '1p' "$af")" in --*) :;; *) blocked "$var has invalid argv format";; esac
+   grep -Fx -- --evidence "$af" >/dev/null && grep -Fx -- "$out" "$af" >/dev/null || blocked "$var lacks common evidence root"
+   grep -Fx -- --run-id "$af" >/dev/null && grep -Fx -- "$MCI_RUN_ID" "$af" >/dev/null || blocked "$var lacks common run id"
+   grep -Fx -- --source-hash "$af" >/dev/null && grep -Fx -- "$MCI_SOURCE_HASH" "$af" >/dev/null || blocked "$var lacks common source hash"
+   grep -Fx -- --configuration-hash "$af" >/dev/null && grep -Fx -- "$MCI_CONFIGURATION_HASH" "$af" >/dev/null || blocked "$var lacks common configuration hash"
+   if grep -Eq '[[:space:]]' "$af"; then blocked "$var arguments must be one whitespace-free value per line"; fi
+   # Deliberate field splitting turns the validated argv file into arguments.
+   run_gate "$id" "$(tool check-mci-v2-$id.shs)" $(tr '\n' ' ' <"$af") || blocked "$id producer failed"
+ done
+fi
+for lane in compiler tooling simpleos rendering allocation fault-injection process-safety stress traceability; do
+ if [ "$fixture" = true ]; then run_gate "sign-$lane" "$(tool sign-mci-v2-lane.shs)" --orchestrated --lane "$lane" --evidence "$out" || blocked "$lane signer failed"
+ else
+  case "$lane" in compiler) t=compiler.unsigned.template; a=compiler.evidence;; tooling) t=tooling.unsigned.template; a=tooling-generation-v1.tar;; simpleos) t=simpleos.receipt.unsigned.template; a=simpleos.evidence;; rendering) t=rendering.unsigned.template; a=rendering-v1.evidence;; allocation) t=allocation.unsigned.template; a=allocation-domain-arena-v1.evidence;; fault-injection) t=fault-injection.unsigned.template; a=fault-injection-domain-arena-v1.evidence;; process-safety) t=process-safety.receipt.unsigned.template; a=process-safety.evidence;; stress) t=stress.receipt.unsigned.template; a=stress.evidence;; traceability) t=traceability.unsigned.template; a=traceability-v1.env;; esac
+  run_gate "sign-$lane" "$(tool sign-mci-v2-lane.shs)" --evidence "$out" --lane "$lane" --template "$out/receipts/$t" --artifact "$out/artifacts/$a" --private-key "$MCI_PRODUCER_PRIVATE_KEY" --trusted-key-id "$MCI_PRODUCER_KEY_ID" || blocked "$lane signing failed"
+ fi
+done
+aggregate=$(tool check-mci-v2-aggregate.shs); reviewer=$(tool check-mci-v2-independent-review.shs)
+if [ "$fixture" = true ]; then
+ set +e; run_gate aggregate-candidate "$aggregate" --orchestrated --pass candidate --evidence "$out"; rc=$?; set -e; [ "$rc" -eq 2 ] || blocked 'candidate aggregate must block before reviewer activation'
+ run_gate reviewer "$reviewer" --orchestrated --evidence "$out" || blocked 'reviewer activation failed'; run_gate aggregate-final "$aggregate" --orchestrated --pass final --evidence "$out" || blocked 'final aggregate failed'
+ echo result=CONTRACT_ONLY >>"$manifest"; echo 'CONTRACT_ONLY: synthetic MCI-v2 workflow completed; no live release claimed'
+else
+ set +e; run_gate aggregate-candidate "$aggregate" --evidence "$out" --run-id "$MCI_RUN_ID" --source-hash "$MCI_SOURCE_HASH" --configuration-hash "$MCI_CONFIGURATION_HASH" --now-utc-ns "$MCI_NOW_UTC_NS" --trusted-key "$MCI_PRODUCER_PUBLIC_KEY" --trusted-key-id "$MCI_PRODUCER_KEY_ID" --reviewer-key "$MCI_REVIEWER_PUBLIC_KEY" --reviewer-key-id "$MCI_REVIEWER_KEY_ID"; rc=$?; set -e
+ [ "$rc" -eq 2 ] || blocked 'candidate aggregate must block before reviewer activation'
+ run_gate reviewer "$reviewer" --evidence "$out" --aggregate-report "$out/aggregate-report-v1.env" --candidate-graph "$out/aggregate-candidate-v1.env" --decision "$MCI_REVIEW_DECISION" --decision-signature "$MCI_REVIEW_DECISION_SIGNATURE" --reviewer-key "$MCI_REVIEWER_PUBLIC_KEY" --reviewer-key-id "$MCI_REVIEWER_KEY_ID" --reviewer-trust-policy "$MCI_REVIEWER_TRUST_POLICY" --producer-key "$MCI_PRODUCER_PUBLIC_KEY" --producer-key-id "$MCI_PRODUCER_KEY_ID" --now-utc-ns "$MCI_NOW_UTC_NS" || blocked 'reviewer activation failed'
+ run_gate aggregate-final "$aggregate" --evidence "$out" --run-id "$MCI_RUN_ID" --source-hash "$MCI_SOURCE_HASH" --configuration-hash "$MCI_CONFIGURATION_HASH" --now-utc-ns "$MCI_NOW_UTC_NS" --trusted-key "$MCI_PRODUCER_PUBLIC_KEY" --trusted-key-id "$MCI_PRODUCER_KEY_ID" --reviewer-key "$MCI_REVIEWER_PUBLIC_KEY" --reviewer-key-id "$MCI_REVIEWER_KEY_ID" || blocked 'final aggregate failed'
+ grep -qx release_blockers=none "$out/aggregate-report-v1.env" || blocked 'release blockers remain'; echo result=PASS >>"$manifest"; echo 'PASS: live MCI-v2 release evidence admitted'
+fi

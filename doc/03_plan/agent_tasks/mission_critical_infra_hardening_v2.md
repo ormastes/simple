@@ -119,13 +119,19 @@ self-promote to an aggregate PASS.
   same-directory private snapshots, regular-file/symlink/path confinement,
   bounded capture/lifetime validation, real producer-class attestation,
   aggregate ownership of `MCI-AGG-001/002/003`, executable-owner-only resume
-  commands, and sync/atomic-rename/post-publication hash verification.
+  commands, common aggregate-root routing, complete producer argument/env
+  mappings, static usage-compatibility coverage, and
+  sync/atomic-rename/post-publication hash verification.
 - Verified locally: focused script contract covers complete PASS plus stale,
   mutated-hash, and missing-receipt BLOCKED behavior.
+- Implemented: `check-mci-v2-release.shs` dependency-orders producers,
+  canonical external signing, candidate aggregation, independent-review
+  activation, and final aggregation with common identities and bounded child
+  execution. Its synthetic workflow is permanently `CONTRACT_ONLY`.
 - Still BLOCKED: all real hardware, QEMU, 24-hour stress, GPU/RenderDoc, and
   other lane executions not represented by fresh same-run receipts. This work
   did not execute or promote any of those rows. The canonical release
-  entrypoint is absent, so release is BLOCKED rather than runnable.
+  entrypoint fails closed until those external/live prerequisites exist.
 
 ## Wave 4 — independent final review
 

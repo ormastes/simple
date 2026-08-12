@@ -34,6 +34,17 @@ host, compiler, GPU, RenderDoc, stress, or external-platform evidence.
 
 ## Operator flow
 
+The canonical release entrypoint is `scripts/check/check-mci-v2-release.shs`.
+It requires externally provisioned producer/reviewer keys and decision inputs;
+it never generates a key. Live lane arguments are supplied through
+`MCI_<LANE>_ARGS_FILE` files containing one whitespace-free argument per line;
+the runner verifies the common evidence root, run, source, and configuration
+values before invoking the fixed canonical producer executable. It then uses
+`sign-mci-v2-lane.shs`, requires the first aggregate to block pending review,
+activates the independent reviewer generation, and runs one final aggregate.
+Children have a fixed timeout and capture ceiling. `--contract-fixture` is only
+for the focused shell contract and always reports `CONTRACT_ONLY`, never PASS.
+
 1. Resolve the existing conflict in
    `src/compiler/70.backend/backend/runtime_compiler.spl` under its owning
    session. Until then, every Simple spec is blocked at `TripleLt` parsing.

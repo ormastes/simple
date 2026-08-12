@@ -82,9 +82,15 @@ The compiler producer derives current source/config manifests, requires an
 authenticated pure-Simple parent chain and pinned live trust policy, then
 compiles a fixed repository fixture and inspects its ELF/function evidence.
 Live trust is deliberately `unprovisioned` until an operator pins the key.
-Fixture mode uses ephemeral trust, records `CONTRACT_ONLY`, and emits no lane
-receipt. It covers only `MCI-COMP-001`; COMP-002/003 and NFR-003/004 remain
-blocked pending independent reproducibility and mutation campaigns.
+Fixture mode uses ephemeral trust and records `CONTRACT_ONLY`. It runs two
+isolated copies of the snapshotted source/config inputs, requires identical
+artifact and fixture-capture hashes, and proves a byte-corrupted candidate is
+rejected by identity. It emits only
+`compiler.cross-host-comparison.unsigned.template`: the schema requires an
+independently signed peer host/environment/artifact/capture receipt and remains
+`BLOCKED_PENDING_INDEPENDENT_SIGNED_PEER`. These controls exercise the
+COMP-002/003 and NFR-003/004 contract without claiming live or cross-host
+evidence; all four scenarios remain blocked until that peer evidence exists.
 The fixed fixture is snapshotted and digest-bound before compilation; its
 `mci_admission_add` symbol and semantic stdout are checked in the emitted ELF.
 The complete tracked compiler/app/lib input set is copied to a private
