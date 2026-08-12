@@ -1,0 +1,134 @@
+# codex-system-test
+# @manual_section RISC-V Gen2 exhaustive target-trap parcel oracle
+"""Exhaustively execute the composed strict HWIR graph for every 16-bit parcel.
+
+This test deliberately has no parallel decoder/classifier.  Its oracle is the
+typed target-trap graph itself, executed through two separately prepared
+evaluators.  The assertions validate the closed output partition and exact
+tuple determinism for both concrete critical products.
+"""
+
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.host_evaluator.{HwHostEvaluation, HwHostInput, prepare_strict_comb_hwir}
+use compiler.mir.hwir.trap_frontend.{strict_zca_target_trap_migrating_predecode_hwir}
+
+class TargetTrapTuple:
+    canonical_instruction: i64
+    original_length_bytes: i64
+    legal: i64
+    next_pc: i64
+    redirect_valid: i64
+    redirect_target: i64
+    trap_valid: i64
+    trap_cause: i64
+    trap_tval: i64
+
+    me same_as(other: TargetTrapTuple) -> bool:
+        self.canonical_instruction == other.canonical_instruction and
+            self.original_length_bytes == other.original_length_bytes and
+            self.legal == other.legal and self.next_pc == other.next_pc and
+            self.redirect_valid == other.redirect_valid and
+            self.redirect_target == other.redirect_target and
+            self.trap_valid == other.trap_valid and
+            self.trap_cause == other.trap_cause and self.trap_tval == other.trap_tval
+
+fn target_trap_inputs(parcel: i64) -> [HwHostInput]:
+    [HwHostInput.bits("original_parcel", parcel), HwHostInput.bits("fetch_pc", 0x1000),
+        HwHostInput.bits("rs1_index", 8), HwHostInput.bits("rs1_value", 0x5000)]
+
+fn target_trap_tuple(evaluation: HwHostEvaluation) -> TargetTrapTuple:
+    var canonical_instruction = -1
+    var original_length_bytes = -1
+    var legal = -1
+    var next_pc = -1
+    var redirect_valid = -1
+    var redirect_target = -1
+    var trap_valid = -1
+    var trap_cause = -1
+    var trap_tval = -1
+    for value in evaluation.values:
+        if value.name == "canonical_instruction": canonical_instruction = value.value
+        elif value.name == "original_length_bytes": original_length_bytes = value.value
+        elif value.name == "legal": legal = value.value
+        elif value.name == "next_pc": next_pc = value.value
+        elif value.name == "redirect_valid": redirect_valid = value.value
+        elif value.name == "redirect_target": redirect_target = value.value
+        elif value.name == "trap_valid": trap_valid = value.value
+        elif value.name == "trap_cause": trap_cause = value.value
+        elif value.name == "trap_tval": trap_tval = value.value
+    TargetTrapTuple(canonical_instruction: canonical_instruction,
+        original_length_bytes: original_length_bytes, legal: legal, next_pc: next_pc,
+        redirect_valid: redirect_valid, redirect_target: redirect_target,
+        trap_valid: trap_valid, trap_cause: trap_cause, trap_tval: trap_tval)
+
+fn target_trap_tuple_digest_step(digest: i64, parcel: i64, tuple: TargetTrapTuple) -> i64:
+    var result = digest
+    for value in [parcel, tuple.canonical_instruction, tuple.original_length_bytes,
+        tuple.legal, tuple.next_pc, tuple.redirect_valid, tuple.redirect_target,
+        tuple.trap_valid, tuple.trap_cause, tuple.trap_tval]:
+        result = ((result * 65599) + (value % 1000003) + 17) % 2147483647
+    result
+
+fn target_trap_closed_partition_holds(tuple: TargetTrapTuple) -> bool:
+    if tuple.original_length_bytes != 2:
+        return false
+    if tuple.legal != 0 and tuple.legal != 1:
+        return false
+    if tuple.redirect_valid != 0 and tuple.redirect_valid != 1:
+        return false
+    if tuple.trap_valid != 0 and tuple.trap_valid != 1:
+        return false
+    if tuple.legal == 0:
+        return tuple.canonical_instruction == 0 and tuple.next_pc == 0x1002 and
+            tuple.redirect_valid == 0 and tuple.redirect_target == 0x1000 and
+            tuple.trap_valid == 0 and tuple.trap_cause == 0 and tuple.trap_tval == 0
+    if tuple.trap_valid == 1:
+        return tuple.canonical_instruction == 0x00100073 and tuple.next_pc == 0x1002 and
+            tuple.redirect_valid == 0 and tuple.redirect_target == 0x1000 and
+            tuple.trap_cause == 3 and tuple.trap_tval == 0
+    if tuple.canonical_instruction == 0 or tuple.trap_cause != 0 or tuple.trap_tval != 0:
+        return false
+    if tuple.redirect_valid == 1:
+        return tuple.next_pc == tuple.redirect_target
+    tuple.next_pc == 0x1002 and tuple.redirect_target == 0x1000
+
+fn run_target_trap_parcel_oracle(config: CoreConfig, parcel_limit: i64) -> [i64]:
+    val module = strict_zca_target_trap_migrating_predecode_hwir(
+        "exhaustive_target_trap_" + config.xlen.to_text(), config).unwrap()
+    val primary = prepare_strict_comb_hwir(module).unwrap()
+    val replay = prepare_strict_comb_hwir(module).unwrap()
+    var legal_count = 0
+    var illegal_count = 0
+    var trap_count = 0
+    var primary_digest = 1
+    var replay_digest = 1
+    var parcel = 0
+    while parcel < parcel_limit:
+        val first = target_trap_tuple(primary.evaluate(target_trap_inputs(parcel)).unwrap())
+        val second = target_trap_tuple(replay.evaluate(target_trap_inputs(parcel)).unwrap())
+        expect(first.same_as(second)).to_equal(true)
+        expect(target_trap_closed_partition_holds(first)).to_equal(true)
+        if first.legal == 1:
+            legal_count = legal_count + 1
+        else:
+            illegal_count = illegal_count + 1
+        if first.trap_valid == 1:
+            trap_count = trap_count + 1
+        primary_digest = target_trap_tuple_digest_step(primary_digest, parcel, first)
+        replay_digest = target_trap_tuple_digest_step(replay_digest, parcel, second)
+        parcel = parcel + 1
+    expect(primary_digest).to_equal(replay_digest)
+    [legal_count, illegal_count, trap_count, primary_digest]
+
+describe "RISC-V Gen2 exhaustive target-trap parcel oracle":
+    # @req REQ-G2-002 REQ-G2-010 REQ-G2-011 NFR-G2-010 NFR-G2-012
+    it "executes every RV32 and RV64 parcel through two prepared strict graphs":
+        step("Sweep the complete 16-bit parcel space without an independent decoder proxy")
+        for config in [CoreConfig.rv32_zca_cjal_mission_critical(),
+            CoreConfig.rv64_zca_addiw_mission_critical()]:
+            val counts = run_target_trap_parcel_oracle(config, 65536)
+            expect(counts[0] + counts[1]).to_equal(65536)
+            expect(counts[0]).to_be_greater_than(0)
+            expect(counts[1]).to_be_greater_than(0)
+            expect(counts[2]).to_equal(1)
