@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Build production Engine2D copy spans from committed HEAD and execute the
+# same real-8K/64x64 damage oracle on x86, AArch64, and RV64GCV.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/../.." && pwd)"
+for tool in git cc aarch64-linux-gnu-gcc riscv64-linux-gnu-gcc qemu-aarch64 qemu-riscv64 timeout; do
+    command -v "$tool" >/dev/null 2>&1 || {
+        echo "engine2d_damage_rect_8k_cross_status=blocked reason=missing-$tool" >&2
+        exit 2
+    }
+done
+
+work="$(mktemp -d "${TMPDIR:-/tmp}/engine2d-damage-rect-8k.XXXXXX")"
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+mkdir -p "$work/test"
+git -C "$root" archive HEAD src/runtime | tar -x -C "$work"
+git -C "$root" show HEAD:test/09_baselines/engine2d_simd/engine2d_simd_damage_rect_8k_bench.c > "$work/test/bench.c"
+
+common=(-O3 -ffunction-sections -fdata-sections -I"$work/src/runtime")
+cc "${common[@]}" -march=native "$work/src/runtime/runtime_simd_dispatch.c" \
+    "$work/test/bench.c" -Wl,--gc-sections -o "$work/bench-x86"
+aarch64-linux-gnu-gcc "${common[@]}" -static -march=armv8-a+simd \
+    "$work/src/runtime/runtime_simd_dispatch.c" "$work/test/bench.c" \
+    -Wl,--gc-sections -o "$work/bench-arm64"
+riscv64-linux-gnu-gcc "${common[@]}" -static -march=rv64gcv -mabi=lp64d \
+    "$work/src/runtime/runtime_simd_dispatch.c" "$work/test/bench.c" \
+    -Wl,--gc-sections -o "$work/bench-rv64"
+
+run_lane() {
+    local lane="$1"; shift
+    local output
+    output="$(timeout 60s "$@")" || {
+        echo "engine2d_damage_rect_8k_lane=$lane status=fail reason=execution" >&2
+        return 1
+    }
+    [[ "$output" == *"ENGINE2D_DAMAGE_RECT_8K width=7680 height=4320 rect=64x64 frames=200"* ]] || {
+        echo "engine2d_damage_rect_8k_lane=$lane status=fail reason=geometry-receipt" >&2
+        return 1
+    }
+    [[ "$output" == *"blit_equal=1 scroll_equal=1 checksum=1137747138162655232"* ]] || {
+        echo "engine2d_damage_rect_8k_lane=$lane status=fail reason=parity-receipt" >&2
+        return 1
+    }
+    echo "$output"
+    echo "engine2d_damage_rect_8k_lane=$lane status=pass"
+}
+
+run_lane x86_64 "$work/bench-x86"
+run_lane aarch64 qemu-aarch64 -cpu max "$work/bench-arm64"
+run_lane riscv64 qemu-riscv64 -cpu rv64,v=true,vlen=128,elen=64,vext_spec=v1.0 "$work/bench-rv64"
+echo "engine2d_damage_rect_8k_cross_status=pass source=committed-head"
