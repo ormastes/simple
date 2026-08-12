@@ -4,6 +4,7 @@ use common.ui.draw_ir.{DRAW_IR_COMMAND_IMAGE, DrawIrComposition}
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
     Engine2dDrawIrAdvResult,
     Engine2dResolvedDrawIrImage,
+    engine2d_draw_ir_adv_composition_window_present_with_images,
     engine2d_draw_ir_adv_composition_with_images,
     engine2d_resolved_draw_ir_image
 }
@@ -43,6 +44,27 @@ fn _engine2d_compositor_clear_override(owner_id: i32):
     _engine2d_compositor_override_width = 0
     _engine2d_compositor_override_height = 0
     _engine2d_compositor_override_pixels = []
+
+fn engine2d_window_revision_exact_match(
+    cached_producer_generation: i64,
+    cached_composition_revision: i64,
+    cached_composition: DrawIrComposition?,
+    cached_resources: [SimpleOsHostGpuImageResource],
+    producer_generation: i64,
+    composition_revision: i64,
+    composition: DrawIrComposition,
+    resources: [SimpleOsHostGpuImageResource]
+) -> bool:
+    """Exact retained-frame key; revisions alone are never trusted."""
+    if (producer_generation < 0 or composition_revision < 0 or
+        composition_revision >= _ENGINE2D_REVISION_CACHE_COMPOSITION_SATURATION or
+        cached_producer_generation != producer_generation or
+        cached_composition_revision != composition_revision or
+        cached_resources != resources):
+        return false
+    if val Some(cached) = cached_composition:
+        return cached == composition
+    false
 
 # WM raster backend key. SIMPLE_GUI_BACKEND selects the Engine2D backend for
 # the compositor raster lane (e.g. "metal"); default "software" keeps the
@@ -84,6 +106,12 @@ class Engine2dCompositorBackend:
     revision_cache_result: Engine2dDrawIrAdvResult? = nil
     revision_reuse_count: i64 = 0
     revision_render_count: i64 = 0
+    window_revision_producer_generation: i64 = -1
+    window_revision_composition_revision: i64 = -1
+    window_revision_composition: DrawIrComposition? = nil
+    window_revision_resources: [SimpleOsHostGpuImageResource] = []
+    window_render_count: i64 = 0
+    window_represent_count: i64 = 0
     # Explicit damage-reporting sink (WS-D3 §9 fix). `get_pixel_buffer()`
     # returns a live alias, so callers (glass_dispatch.spl, text_render.spl)
     # call `report_damage()` with the region they just touched instead of
@@ -137,6 +165,14 @@ class Engine2dCompositorBackend:
     static fn create_from_env(width: i32, height: i32) -> Engine2dCompositorBackend:
         Engine2dCompositorBackend.create_named(width, height, host_wm_render_backend_key())
 
+    static fn create_vulkan_window_present(width: i32, height: i32, vsync: bool = true) -> Result<Engine2dCompositorBackend, text>:
+        """Create the persistent same-device DrawIR + visible-window owner."""
+        match Engine2D.create_vulkan_window_present(width, height, vsync):
+            Ok(engine):
+                Ok(Engine2dCompositorBackend.create(engine))
+            Err(reason):
+                Err(reason)
+
     # The compositor owns the resolved session; child Web/WM producers must
     # consume this concrete name instead of independently reinterpreting auto.
     fn selected_backend() -> text:
@@ -164,6 +200,10 @@ class Engine2dCompositorBackend:
         self.revision_cache_composition = nil
         self.revision_cache_resources = []
         self.revision_cache_result = nil
+        self.window_revision_producer_generation = -1
+        self.window_revision_composition_revision = -1
+        self.window_revision_composition = nil
+        self.window_revision_resources = []
 
     fn invalidate_frame_receipt():
         self.invalidate_revision_cache()
@@ -294,6 +334,63 @@ class Engine2dCompositorBackend:
             self.revision_cache_result = Some(result)
         result
 
+    me render_draw_ir_composition_resources_window_revision(
+        composition: DrawIrComposition,
+        resources: [SimpleOsHostGpuImageResource],
+        producer_generation: i64,
+        composition_revision: i64
+    ) -> bool:
+        """Render a changed DrawIR revision once; re-present unchanged frames.
+
+        Exact composition and immutable resource equality protect callers that
+        accidentally reuse a revision. Successful receipts must prove a real
+        visible swapchain present, known completion, and zero host readback.
+        """
+        val cacheable = (
+            producer_generation >= 0 and composition_revision >= 0 and
+            composition_revision < _ENGINE2D_REVISION_CACHE_COMPOSITION_SATURATION)
+        if engine2d_window_revision_exact_match(
+            self.window_revision_producer_generation,
+            self.window_revision_composition_revision,
+            self.window_revision_composition,
+            self.window_revision_resources,
+            producer_generation, composition_revision, composition, resources
+        ):
+            if self.engine.present_window_device():
+                if val Some(receipt) = self.engine.latest_vulkan_frame_receipt():
+                    if (receipt.present_mode == "window-swapchain" and
+                        receipt.present_completed and receipt.device_present and
+                        receipt.no_readback and receipt.completion_known):
+                        self.window_represent_count += 1
+                        return true
+            self.invalidate_revision_cache()
+            return false
+
+        var images: [Engine2dResolvedDrawIrImage] = []
+        for resource in resources:
+            images.push(engine2d_resolved_draw_ir_image(
+                resource.image_uri, resource.width, resource.height,
+                resource.pixels))
+        val result = engine2d_draw_ir_adv_composition_window_present_with_images(
+            self.engine, composition, images)
+        self.window_render_count += 1
+        if (result.fallback_required or result.skipped_command_count != 0 or
+            result.rendered_command_count <= 0):
+            self.invalidate_revision_cache()
+            return false
+        if val Some(receipt) = self.engine.latest_vulkan_frame_receipt():
+            if (receipt.present_mode == "window-swapchain" and
+                receipt.present_completed and receipt.device_present and
+                receipt.no_readback and receipt.completion_known):
+                if cacheable:
+                    self.window_revision_producer_generation = producer_generation
+                    self.window_revision_composition_revision = composition_revision
+                    self.window_revision_composition = Some(composition)
+                    self.window_revision_resources = resources
+                return true
+        self.invalidate_revision_cache()
+        false
+
     # Honest frame provenance (greppable): for the metal lane this must say
     # source=device_readback — a cpu_mirror source means the GPU lane silently
     # fell back and must never be presented as GPU rendering.
@@ -390,3 +487,5 @@ impl CompositorBackend for Engine2dCompositorBackend:
         if cx2 <= cx or cy2 <= cy:
             return
         self.damage.push_damage(cx.to_u32(), cy.to_u32(), (cx2 - cx).to_u32(), (cy2 - cy).to_u32())
+
+export engine2d_window_revision_exact_match
