@@ -158,3 +158,18 @@ dev-done
   `rt_*` symbol; `rejected_shortcuts` = inherited heap pointers, raw
   RuntimeValue bits, the removed aggregate PG-worker handoff, unbounded bytes,
   and calling a focused fork test production integration.
+- impl: Advanced WP-15 with a memory-bounded functional owner transition.
+  `ParallelCommitStateV1` retains only `(revision, snapshot_token)` rather than
+  an unbounded envelope history. The engine validates the complete batch before
+  one proposed root assignment; stale bases, conflicts, duplicate task/sequence identity,
+  duplicate in-batch payload tokens, malformed state, and invalid candidate
+  roots leave the original state unchanged. Successful non-empty batches
+  advance exactly one revision and receipt canonical task/sequence/payload
+  order, and receipt shape is validated. Nine focused examples pass, including three completion permutations,
+  stale mixed input, conflict, duplicate identity, and successful publication.
+  The available binary explicitly identifies as a Rust bootstrap seed, so this
+  is focused development evidence, not admitted Stage 4 acceptance. Payload
+  apply/verify, mutation-receipt adaptation, receipt hashing/wire format,
+  access-range/fixed-tree integration, candidate capability checks, and a
+  serialized/CAS runtime/MDSOC owner adapter remain open; this common value
+  function is not itself concurrent atomic publication.

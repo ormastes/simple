@@ -19,6 +19,10 @@
 - Native 48-byte inline transfer packets; heap and reserved RuntimeValue tags
   fail closed.
 - Finite 256-item native compatibility channels and actor inbox/outbox queues.
+- Bounded Parent-to-Process/Process-to-Parent encoded frames with a real
+  exec-child round trip.
+- Common constant-size functional owner snapshot-root transition with stale/conflict/duplicate
+  rejection and canonical-order batch receipts.
 - Conservative dynamic-index overlap in the live borrow checker.
 
 ## Still proposed or incomplete
@@ -26,8 +30,9 @@
 - Typed frozen, owned, encoded, ObjectRef, reduction, and device-lease payloads.
 - Ownership-token registry, generation transitions, rollback, and receipts.
 - HIR/MIR transfer operations and source invalidation in every compiler mode.
-- Safe process/device transport, structured task groups, task arenas, atomic
-  parent publication, and AoS/SoA/AoSoA physical lowering.
+- Production process/device transport, structured task groups, task arenas,
+  serialized/CAS publication and payload-aware commit apply/verify adapters,
+  and AoS/SoA/AoSoA lowering.
 - Admitted self-hosted and real process/device system evidence.
 
 ## Operational rules

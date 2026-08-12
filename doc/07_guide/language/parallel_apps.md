@@ -19,14 +19,25 @@ plans, access paths, parent-commit ordering, and assurance policy:
 Critical policy denies implicit parent-to-child moves and dynamic transport, and
 requires bounded mailboxes, deterministic commits, and frozen layout receipts.
 
+The common commit engine now models a functional owner transition with a
+constant-size final snapshot-root assignment. It first validates every result's base revision, identity, deterministic
+order, and conflict policy. Only a fully valid non-empty batch advances the
+revision and replaces the snapshot token. Failures return the original owner
+state, and a shape-validated receipt records input/output roots plus the canonical task,
+sequence, and payload-token order. The owning application adapter still builds
+and verifies the candidate snapshot before supplying its token. A concurrent
+runtime owner must serialize or CAS the transition against the live root; the
+common value function alone is not an atomic synchronization primitive.
+
 ## Status
 
 These are common/compiler contract foundations, not a claim that every current
 actor, process, thread-pool, generic channel, or backend layout path already
-enforces them. Runtime codecs, typed bounded public transport, structured task
-groups, physical layout lowering, and end-to-end process/device evidence remain
-work-package gates. Consult the receipt and the matching runtime gate before
-relying on a path in production.
+enforces them. The snapshot transition does not itself interpret payloads or
+run an application verifier. Runtime adapters, typed bounded public transport,
+structured task groups, physical layout lowering, and end-to-end process/device
+evidence remain work-package gates. Consult the receipt and the matching
+runtime gate before relying on a path in production.
 
 ## Recommended shape
 

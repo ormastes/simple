@@ -17,16 +17,16 @@ Do not redefine them in runtime, MDSOC, backend, or application lanes.
 | WP-00 baseline/census | complete for this lane | local research names existing placement/mutation owners |
 | WP-01 transfer contract | partial implementation | common + native 40-byte codecs agree on a golden vector; token uniqueness model remains |
 | WP-02 storage contract | partial implementation | plan and conservative planner exist; mapping/wire vectors remain |
-| WP-03 commit contract | partial implementation | deterministic order/conflict validator exists; receipt/apply remains |
+| WP-03 commit contract | partial implementation | deterministic order/conflict validation plus constant-size snapshot-root state and validated batch receipt exist; wire hash/apply adapter remains |
 | WP-04 policy resolver | partial implementation | raise-only common resolver exists; SDN/driver integration remains |
 | WP-05 requirements/diagnostics | partial implementation | selected requirements/state exist; stable compiler diagnostic registry remains |
 | WP-10 borrow soundness | in progress | dynamic index is now conservative; CFG/NLL rewrite remains |
 | WP-11..12 compiler boundaries/MIR | planned | no HIR boundary classifier or MIR transfer operations yet |
 | WP-13 native transfer codec | partial implementation | strict 40-byte envelope and 48-byte inline packet; graph/encoded/owned payload codecs remain |
 | WP-14 bounded mailbox | partial implementation | native compatibility channel and actor/common inbox/outbox queues have finite capacity 256; channel/common handle report full, but the legacy void native actor ABI cannot surface it; policy-selected capacities and checked public actor send remain |
-| WP-15 commit engine | partial implementation | common validation/order exists; atomic runtime publication remains |
+| WP-15 commit engine | partial implementation | common functional owner transition validates the whole batch before one revision/snapshot-token root assignment and emits canonical-order receipts; concurrent CAS/lock publication, payload apply/verify, and admitted Stage 4 evidence remain |
 | WP-16 actor/channel migration | partial implementation | native safe paths carry route-validated inline packets, actor reply provenance is explicit, and heap actor context is rejected; typed heap/owned payloads remain |
-| WP-17 process transport | partial implementation | bounded encoded-copy framing and a real forked parent/child round trip exist; production spawn/piped integration, schema registry, ObjectRef, and rollback remain |
+| WP-17 process transport | partial implementation | bounded encoded-copy framing and a real exec-child round trip exist; production spawn/piped integration, schema registry, ObjectRef, and rollback remain |
 | WP-18 thread pool | planned | stable typed pool rewrite not started |
 | WP-20..27 layout/performance | planned | no MIR lowering, allocator adoption, or evidence yet |
 | WP-30..36 MDSOC/pilots | planned | do not start before safe transport and layout inputs |
@@ -47,7 +47,7 @@ Do not redefine them in runtime, MDSOC, backend, or application lanes.
 
 1. WP-10: replace block/point ambiguity with CFG-sensitive region facts and add dynamic-index, branch, loop, capture, and move regression evidence.
 2. WP-13/WP-16/WP-17: connect bounded encoded process frames to the production spawn/piped facade, add schema/ObjectRef codecs, and prove failure rollback; never revive the removed aggregate `rt_pg_parallel_worker_handoff_*` design.
-3. WP-15: connect validated ordered results to atomic owner-side snapshot publication and receipts.
+3. WP-15: connect the common functional snapshot-root transition to serialized/CAS owner publication, payload-aware apply/verify, mutation receipts, and admitted Stage 4 evidence.
 4. WP-20/WP-22: preserve MIR access paths into typed AoS/SoA reference parity before SIMD/GPU lowering.
 
 ## Mandatory handoff record
