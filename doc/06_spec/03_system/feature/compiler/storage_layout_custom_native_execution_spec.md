@@ -11,6 +11,8 @@ Evidence includes multiply/add/load/store selection, emitted bytes, W^X
 transition, exact little-endian mapped bytes, the untouched alternate-layout
 address, and adjacent canaries.
 
-Current status: blocked before scenario execution by the deployed native
-runner's existing failure to compile `smf_mmap_native.spl::ptr_read_u8`. A PASS
-requires the scenario to emit `STORAGE_LAYOUT_NATIVE_PARITY_PASS`.
+Current status: the loader now uses canonical exact-width `rt_ptr_read_u8`, but
+the scenario must be rerun with a freshly rebuilt runtime containing that
+symbol. A native runner that fabricates unresolved assertion/helper stubs is
+not evidence. A PASS requires one executed example and
+`STORAGE_LAYOUT_NATIVE_PARITY_PASS`.

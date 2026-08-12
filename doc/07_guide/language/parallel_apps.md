@@ -88,6 +88,13 @@ Current production admission is deliberately limited to custom-native x86_64
 and 8-byte fields; other backends and widths fail rather than emitting a NOP or
 using the wrong scalar load/store width.
 
+Mapped-byte evidence uses the canonical exact-width `rt_ptr_read_u8` boundary.
+The loader performs one direct copy into its result array; it no longer lowers
+raw `*u8` dereference (which the current MIR path misclassifies) or builds an
+intermediate slice. This also avoids an i32/i64 over-read at the last byte of a
+mapping. A fresh runtime artifact containing the symbol is required before the
+W^X parity scenario can be admitted again.
+
 The MIR optimizer now also checks whether an AoSoA block is compatible with a
 selected fixed-width SIMD route. Matching AVX/NEON-style widths are admitted;
 AoS and SoA retain the scalar/reference fallback; ABI-pinned or mismatched

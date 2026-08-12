@@ -698,7 +698,7 @@ pub use value::{
     rt_object_field_get,
     rt_object_field_set,
     rt_object_new,
-    rt_ptr_read_i64,
+    rt_ptr_read_i64, rt_ptr_read_u8,
     rt_ptr_to_value,
     rt_ptr_write_i32,
     rt_ptr_write_i64,

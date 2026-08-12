@@ -570,6 +570,10 @@ int64_t rt_ptr_read_i64(int64_t addr, int64_t offset) {
     return *(int64_t*)((char*)(uintptr_t)addr + offset);
 }
 
+int64_t rt_ptr_read_u8(int64_t addr, int64_t offset) {
+    return (int64_t)*(uint8_t*)((char*)(uintptr_t)addr + offset);
+}
+
 int32_t rt_ptr_read_i32(int64_t addr, int64_t offset) {
     return *(int32_t*)((char*)(uintptr_t)addr + offset);
 }

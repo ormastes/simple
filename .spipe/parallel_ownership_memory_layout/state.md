@@ -442,3 +442,16 @@ dev-done
   the bounded Rust-runner diagnostic lane). Public typed-view allocation and
   producer registration, formal receipts, subword fields, other backends, and
   the blocked W^X scenario remain open.
+- impl: Removed the loader blocker beneath the W^X layout scenario. The old
+  `native_mmap_read_bytes -> slice_from_raw_parts -> *u8` path was both
+  unsupported by MIR lowering and copied each byte twice. Canonical
+  `rt_ptr_read_u8` now exists in runtime C, Rust SFFI, interpreter dispatch,
+  codegen signatures, and the runtime-symbol registry; the Simple loader copies
+  once through exact-width reads. Rust exact-byte tests cover 0x00/0x7f/0x80/
+  0xff/0x5a and argument rejection, and a Simple adjacent spec covers ranges,
+  invalid inputs, and strings. A native runner briefly reported green only by
+  fabricating unresolved assertion/helper stubs; that result was rejected.
+  A clean bounded `cargo check -p simple-compiler -p simple-runtime` now passes.
+  The focused Rust test build reached compilation but hit its 90-second cap
+  before executing, so re-admission still requires a fresh runtime artifact and
+  a non-stub W^X execution.

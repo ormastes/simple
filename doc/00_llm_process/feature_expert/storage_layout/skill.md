@@ -41,8 +41,8 @@
 9. Admit only x86_64 custom-native 8-byte fields until other backend/width
    owners land; every unsupported route is an error.
 
-The W^X store/load parity scenario is executable but not admitted while the
-native runner fails compiling `smf_mmap_native.ptr_read_u8` before it starts.
+The W^X store/load parity scenario requires a fresh runtime containing
+`rt_ptr_read_u8`; a stale runner or unresolved-symbol stub is not evidence.
 
 ## Focused evidence
 

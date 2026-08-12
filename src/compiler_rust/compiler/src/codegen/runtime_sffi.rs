@@ -643,6 +643,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // MMIO (memory-mapped I/O — Core tier for baremetal device drivers)
     // =========================================================================
     RuntimeFuncSpec::new("rt_mmio_read_u8", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_ptr_read_u8", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_mmio_write_u8", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_mmio_read_u16", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_mmio_write_u16", &[I64, I64], &[I64]),

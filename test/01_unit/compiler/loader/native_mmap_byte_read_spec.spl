@@ -1,0 +1,51 @@
+use std.spec.{describe, it, assert_equal, assert_true}
+use compiler.loader.loader.smf_mmap_native.{
+    native_mmap_read_bytes, native_mmap_read_string
+}
+
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_free(address: i64)
+extern fn rt_ptr_write_u8(address: i64, offset: i64, value: i64)
+extern fn rt_ptr_read_u8(address: i64, offset: i64) -> i64
+
+describe "exact-width mapped byte reads":
+    it "reads unsigned bytes and subranges without a second copy":
+        val address = rt_alloc(16)
+        assert_true(address != 0)
+        for index in 0..16:
+            rt_ptr_write_u8(address, index, 0)
+        rt_ptr_write_u8(address, 0, 0x00)
+        rt_ptr_write_u8(address, 1, 0x7F)
+        rt_ptr_write_u8(address, 2, 0x80)
+        rt_ptr_write_u8(address, 7, 0xFF)
+        rt_ptr_write_u8(address, 15, 0x5A)
+        assert_equal(rt_ptr_read_u8(address, 2), 0x80)
+        assert_equal(rt_ptr_read_u8(address, 7), 0xFF)
+        val bytes = native_mmap_read_bytes(address, 0, 16)
+        assert_equal(bytes.len(), 16)
+        assert_equal(bytes[0] as i64, 0x00)
+        assert_equal(bytes[1] as i64, 0x7F)
+        assert_equal(bytes[2] as i64, 0x80)
+        assert_equal(bytes[7] as i64, 0xFF)
+        assert_equal(bytes[15] as i64, 0x5A)
+        val subrange = native_mmap_read_bytes(address, 1, 3)
+        assert_equal(subrange.len(), 3)
+        assert_equal(subrange[0] as i64, 0x7F)
+        assert_equal(subrange[1] as i64, 0x80)
+        assert_equal(subrange[2] as i64, 0)
+        rt_free(address)
+
+    it "rejects invalid ranges before dereferencing":
+        assert_equal(native_mmap_read_bytes(0, 0, 1).len(), 0)
+        assert_equal(native_mmap_read_bytes(1, -1, 1).len(), 0)
+        assert_equal(native_mmap_read_bytes(1, 0, 0).len(), 0)
+
+    it "shares exact byte reads with bounded string decoding":
+        val address = rt_alloc(4)
+        assert_true(address != 0)
+        rt_ptr_write_u8(address, 0, 65)
+        rt_ptr_write_u8(address, 1, 66)
+        rt_ptr_write_u8(address, 2, 67)
+        rt_ptr_write_u8(address, 3, 0)
+        assert_equal(native_mmap_read_string(address, 0, 4), "ABC")
+        rt_free(address)

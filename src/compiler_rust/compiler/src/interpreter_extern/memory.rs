@@ -715,6 +715,154 @@ pub fn rt_ptr_read_i64(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// Read one unsigned byte from addr+offset without over-reading.
+pub fn rt_ptr_read_u8(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 2 {
+        return Err(CompileError::runtime(
+            "rt_ptr_read_u8 requires 2 arguments (addr, offset)",
+        ));
+    }
+    let addr = args[0].as_int()? as usize;
+    let offset = args[1].as_int()?;
+    unsafe {
+        let ptr = (addr as *const u8).offset(offset as isize);
+        Ok(Value::Int(ptr.read() as i64))
+    }
+}
+
+/// Hosted interpreter bridge for the loader's raw mmap contract.
+#[cfg(unix)]
+pub fn rt_mmap_raw(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 6 {
+        return Err(CompileError::runtime("rt_mmap_raw requires 6 arguments"));
+    }
+    let addr = args[0].as_int()? as usize as *mut libc::c_void;
+    let length = args[1].as_int()?;
+    if length <= 0 {
+        return Ok(Value::Int(-1));
+    }
+    let mapped = unsafe {
+        libc::mmap(
+            addr,
+            length as usize,
+            args[2].as_int()? as i32,
+            args[3].as_int()? as i32,
+            args[4].as_int()? as i32,
+            args[5].as_int()? as libc::off_t,
+        )
+    };
+    if mapped == libc::MAP_FAILED {
+        Ok(Value::Int(-1))
+    } else {
+        Ok(Value::Int(mapped as usize as i64))
+    }
+}
+
+#[cfg(not(unix))]
+pub fn rt_mmap_raw(_args: &[Value]) -> Result<Value, CompileError> {
+    Err(CompileError::runtime("rt_mmap_raw is unavailable on this host"))
+}
+
+#[cfg(unix)]
+pub fn rt_munmap_raw(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 2 {
+        return Err(CompileError::runtime("rt_munmap_raw requires 2 arguments"));
+    }
+    let result = unsafe {
+        libc::munmap(
+            args[0].as_int()? as usize as *mut libc::c_void,
+            args[1].as_int()? as usize,
+        )
+    };
+    Ok(Value::Int(i64::from(result)))
+}
+
+#[cfg(not(unix))]
+pub fn rt_munmap_raw(_args: &[Value]) -> Result<Value, CompileError> {
+    Err(CompileError::runtime("rt_munmap_raw is unavailable on this host"))
+}
+
+#[cfg(unix)]
+pub fn rt_mprotect(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 3 {
+        return Err(CompileError::runtime("rt_mprotect requires 3 arguments"));
+    }
+    let result = unsafe {
+        libc::mprotect(
+            args[0].as_int()? as usize as *mut libc::c_void,
+            args[1].as_int()? as usize,
+            args[2].as_int()? as i32,
+        )
+    };
+    Ok(Value::Int(i64::from(result)))
+}
+
+#[cfg(not(unix))]
+pub fn rt_mprotect(_args: &[Value]) -> Result<Value, CompileError> {
+    Err(CompileError::runtime("rt_mprotect is unavailable on this host"))
+}
+
+#[cfg(test)]
+mod ptr_read_u8_tests {
+    use super::{rt_mmap_raw, rt_mprotect, rt_munmap_raw, rt_ptr_read_u8};
+    use crate::value::Value;
+
+    #[cfg(unix)]
+    #[test]
+    fn reads_exact_unsigned_byte_offsets() {
+        let bytes = [0x00_u8, 0x7f, 0x80, 0xff, 0x5a];
+        let addr = bytes.as_ptr() as usize as i64;
+        for (offset, expected) in bytes.iter().enumerate() {
+            let value = rt_ptr_read_u8(&[
+                Value::Int(addr),
+                Value::Int(offset as i64),
+            ])
+            .expect("byte read");
+            assert_eq!(value.as_int().expect("integer byte"), i64::from(*expected));
+        }
+    }
+
+    #[test]
+    fn rejects_missing_arguments() {
+        assert!(rt_ptr_read_u8(&[]).is_err());
+        assert!(rt_ptr_read_u8(&[Value::Int(1)]).is_err());
+    }
+
+    #[test]
+    fn maps_protects_and_unmaps_host_memory() {
+        let mapped = rt_mmap_raw(&[
+            Value::Int(0),
+            Value::Int(4096),
+            Value::Int(libc::PROT_READ as i64 | libc::PROT_WRITE as i64),
+            Value::Int(libc::MAP_PRIVATE as i64 | libc::MAP_ANONYMOUS as i64),
+            Value::Int(-1),
+            Value::Int(0),
+        ])
+        .unwrap()
+        .as_int()
+        .unwrap();
+        assert_ne!(mapped, -1);
+        assert_eq!(
+            rt_mprotect(&[
+                Value::Int(mapped),
+                Value::Int(4096),
+                Value::Int(libc::PROT_READ as i64),
+            ])
+            .unwrap()
+            .as_int()
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            rt_munmap_raw(&[Value::Int(mapped), Value::Int(4096)])
+                .unwrap()
+                .as_int()
+                .unwrap(),
+            0
+        );
+    }
+}
+
 /// Read i32 value from addr+offset.
 ///
 /// Callable from Simple as: `rt_ptr_read_i32(addr: i64, offset: i64) -> i32`

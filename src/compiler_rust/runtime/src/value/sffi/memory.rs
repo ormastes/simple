@@ -9,6 +9,7 @@ mod c_sffi {
         pub(super) fn rt_alloc(size: i64) -> *mut u8;
         pub(super) fn rt_free(ptr: *mut u8);
         pub(super) fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64;
+        pub(super) fn rt_ptr_read_u8(addr: i64, offset: i64) -> i64;
         pub(super) fn rt_ptr_read_i32(addr: i64, offset: i64) -> i32;
         pub(super) fn rt_ptr_write_u8(addr: i64, offset: i64, value: i64);
         pub(super) fn rt_ptr_write_i32(addr: i64, offset: i64, value: i32);
@@ -34,6 +35,10 @@ pub fn rt_free(ptr: *mut u8) {
 #[inline(always)]
 pub fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64 {
     unsafe { c_sffi::rt_ptr_read_i64(addr, offset) }
+}
+#[inline(always)]
+pub fn rt_ptr_read_u8(addr: i64, offset: i64) -> i64 {
+    unsafe { c_sffi::rt_ptr_read_u8(addr, offset) }
 }
 #[inline(always)]
 pub fn rt_ptr_read_i32(addr: i64, offset: i64) -> i32 {

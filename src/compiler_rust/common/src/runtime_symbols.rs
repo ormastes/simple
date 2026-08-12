@@ -647,6 +647,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     // Raw pointer operations
     "rt_ptr_read_i32",
     "rt_ptr_read_i64",
+    "rt_ptr_read_u8",
     "rt_ptr_write_u8",
     "rt_ptr_write_i32",
     "rt_ptr_write_i64",
@@ -2266,6 +2267,7 @@ mod tests {
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_volatile_read_u64"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_volatile_write_u64"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_ptr_read_i32"));
+        assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_ptr_read_u8"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_write_u32s_to_raw_checksum"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_write_fill_u32s_to_raw_checksum"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_rocm_init"));

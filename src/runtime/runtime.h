@@ -225,6 +225,7 @@ void     rt_write_cr3(uint64_t value);
 uint64_t rt_read_cr3_raw(void);
 void     rt_write_cr3_raw(uint64_t value);
 int64_t  rt_volatile_read_u8(int64_t addr);
+int64_t  rt_ptr_read_u8(int64_t addr, int64_t offset);
 int64_t  rt_volatile_read_u16(int64_t addr);
 int64_t  rt_volatile_read_u32(int64_t addr);
 int64_t  rt_volatile_read_u64(int64_t addr);
