@@ -16,6 +16,8 @@
 
 #if defined(__linux__)
 
+#include <stddef.h>  /* NULL — needed by the non-io_uring fallback branch too */
+
 #ifdef SPL_HAS_IO_URING
 
 #define _GNU_SOURCE

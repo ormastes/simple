@@ -29,12 +29,13 @@ are independent; do not sequence one behind the other.
 1. **`src/runtime/runtime_native.c`** — DONE. The unsigned-box fix landed and is
    verified by the new compile guard: `runtime_native.c` now compiles clean.
 2. **C-runtime compile guard** (`check-c-runtime-compiles-push.shs`) — landed
-   `04848434af0c`, kept **advisory**, not mandatory. It is honestly RED on one
-   remaining never-compiled file: **`src/runtime/platform/async_linux_uring.c:733`
-   — `use of undeclared identifier 'NULL'`, missing `<stddef.h>`**. Same class as
-   the original defect, previously unfiled, still unowned. Fix it, then flip the
-   guard to mandatory and wire into `pre-push-conflict-tree-guard.shs` — that is
-   the written promotion criterion.
+   `04848434af0c`. **Promotion COMPLETED 2026-08-12 (audit finding: vcs.md
+   claimed the promotion on 08-11 but the code side was never at origin —
+   doc-without-code clobber).** Re-landed: `<stddef.h>` include in
+   `async_linux_uring.c` (guard now `PASS — 99 file(s) compiled, 0 errors`),
+   guard wired into `pre-push-conflict-tree-guard.shs` as mandatory, sibling
+   duplicate `check-c-runtime-compiles.shs` deleted with its `-std=gnu11` /
+   `-I src/runtime/platform` flags merged into the canonical script.
 3. **`bin/simple native-build` now works** — `a1f3adeff791` implemented the
    missing unsigned-value box in `runtime_native.c`, derived byte-for-byte from
    the pure-Simple twin `simple_core/core_values.spl` (not guessed — a guessed
@@ -80,22 +81,6 @@ are independent; do not sequence one behind the other.
    prints all verdict lines in seconds, the process just doesn't exit
    afterward (teardown/GC hang, unmeasured, orthogonal to this bug) — read the
    printed verdict, not the exit code.
-7. **sha3.spl — same family, FIXED (`9d70a002cd6`).** Also read-side untyped-
-   `list` boxing (bracket index-ASSIGNMENT was innocent — write-side probes
-   read back bit-exact on both typed and untyped lists; the earlier "fix
-   attempt failed" was the stale-stdlib-root trap above, not a different
-   mechanism). Fix: same retype-everything-to-`[i64]` pattern, extended to
-   the context tuple and `[[i64]]` chunk arrays. Verified against real FIPS
-   202 vectors: SHA3-256/384/512 × {"", "abc"}, streaming == one-shot, all
-   exact. Existing `sha3_kat_spec.spl` 7/7, `hmac_sha3_spec.spl` 6/6 — no new
-   specs needed, KAT coverage already existed. **Flagged, not fixed:**
-   `sha1.spl` has ~20 untyped `list` annotations, same vulnerability class —
-   the earlier sweep's "not corrupted" verdict for sha1 needs re-checking
-   given the stdlib-root trap. sha512/sha384/hmac/hkdf/blake2 are already
-   fully typed. **The underlying compiler defect remains open** — typed
-   `[i64]` params do not unbox a tagged argument if the value originated from
-   an untyped `list`'s `.get()`; `[i64]`-everywhere is a source-level
-   mitigation, not a fix to the interpreter/codegen itself.
 
 **Guard duplication found and resolved (2026-08-11):** two agents independently
 built overlapping C-runtime-compiles pre-push guards
@@ -250,20 +235,6 @@ QEMU-only result is a defect, not a completion.
 
 ## Process findings that change how work lands here
 
-- **CRITICAL: the deployed `bin/simple` (Rust seed) loads stdlib from a SECOND
-  root, not the repo path.** Proven by strace: `/mnt/data/build-clean/src/lib/**`,
-  not `src/lib/**` in this checkout. Discovered because an earlier attempted
-  sha3 fix appeared to fail — edits to the repo's `sha3.spl` changed nothing,
-  because they were never executed; the "corrupted output changing but staying
-  wrong" was just nondeterministic pointer bytes from the same unpatched code
-  running every time. **Any verification tonight that ran `bin/simple` against
-  a repo-path edit without confirming which stdlib root it actually loaded is
-  suspect** — this specifically calls into question the earlier list-boxing
-  sweep's verdict that `sha1.spl` was "not corrupted" (it may have gotten a
-  false negative the same way sha3's fix falsely appeared to fail). Before
-  trusting any `bin/simple`-based test result against a source edit, confirm
-  the loaded stdlib root matches the edited path (strace or an explicit marker
-  string in the edited file that must appear in output).
 - **Guards-then-push is livelocked.** Origin advances every ~60s; the divergence
   guard takes ~50 min. Land the guard-verified byte-identical delta via a tight
   fetch/rebuild/push loop, then re-guard the landed range — and state the
