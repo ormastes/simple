@@ -589,6 +589,29 @@ impl RenderBackend for VulkanBackend:
         val dy = _i64(y2) - _i64(y1)
         val abs_dx = if dx < 0: -dx else: dx
         val abs_dy = if dy < 0: -dy else: dy
+        # A thickness-1 axis-aligned Bresenham line is exactly one inclusive
+        # filled rectangle. Route this dominant GUI/Web border/separator case
+        # through the parallel 16x16 rectangle shader; keep diagonal and thick
+        # strokes on the ordered single-invocation Bresenham oracle.
+        if thickness == 1 and (x1 == x2 or y1 == y2) and abs_dx < 2147483647 and abs_dy < 2147483647:
+            val rx = if x1 < x2: x1 else: x2
+            val ry = if y1 < y2: y1 else: y2
+            val rw = (abs_dx + 1).to_i32()
+            val rh = (abs_dy + 1).to_i32()
+            val rect_pc = _pack_rect_pc(
+                rx, ry, rw, rh, color, self.w, self.h,
+                self.clip_x, self.clip_y, self.clip_w, self.clip_h,
+                self.clip_enabled)
+            val rect_dispatched = self._dispatch_framebuffer_checked(
+                self.pipe_rect_filled, rect_pc,
+                (_i64(rw) + 15) / 16, (_i64(rh) + 15) / 16, 1)
+            if rect_dispatched > 0:
+                self.dirty = true
+            else:
+                self.mark_cpu_fallback("axis-line-rect-dispatch-failed")
+                if rect_dispatched < 0:
+                    self.completion_unknown = true
+            return
         # The line kernel owns the ordered Bresenham state and every pixel
         # write in one device invocation.  This is deliberately not a host
         # raster loop and cannot be counted when the dispatch fails.

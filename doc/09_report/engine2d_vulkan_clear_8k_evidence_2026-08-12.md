@@ -56,3 +56,32 @@ At 5% damage on llvmpipe:
 The conservative isolated envelope is therefore 16 filled rectangles at 5%
 damage on this software Vulkan device. These rows still exclude DrawIR traversal
 and swapchain presentation and are not physical-GPU proof.
+
+## Batched lines and the axis-aligned fast path
+
+The ordered line shader preserves Bresenham semantics by walking an entire line
+in one invocation. Exact full-buffer readback reported zero mismatches, but a
+7680-pixel horizontal line is consequently serial inside the device invocation.
+
+| Ordered full-width lines | p50 ns | p95 ns | Budget |
+|---:|---:|---:|---:|
+| 4 | 3,295,017 | 3,934,111 | PASS |
+| 8 | 7,199,411 | 8,629,792 | PASS |
+| 12 | 9,837,918 | 10,905,985 | PASS |
+| 16 | 14,960,966 | 16,741,019 | FAIL |
+
+Thickness-1 horizontal and vertical lines are exactly inclusive filled
+rectangles. Engine2D now routes that common border/separator case through the
+parallel rectangle pipeline while retaining the ordered oracle for diagonal and
+thick lines. Reversed endpoints and inclusive endpoints are covered explicitly.
+
+| Axis-aligned full-width lines | p50 ns | p95 ns | Budget |
+|---:|---:|---:|---:|
+| 16 | 3,337,894 | 4,082,089 | PASS |
+| 32 | 6,597,206 | 8,837,706 | PASS |
+| 48 | 10,405,449 | 11,976,258 | PASS |
+| 64 | 13,200,004 | 15,473,279 | FAIL |
+
+The conservative isolated envelope is 12 ordered lines or 48 axis-aligned
+lines on llvmpipe. This remains compute-only evidence: it proves neither a
+physical GPU nor swapchain presentation nor end-to-end dynamic 8K/80 rendering.

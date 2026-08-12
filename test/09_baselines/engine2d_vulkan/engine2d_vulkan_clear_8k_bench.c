@@ -34,6 +34,12 @@ typedef struct {
     int32_t fb_width, fb_height, clip_x, clip_y, clip_width, clip_height,
             clip_enabled, reserved[4];
 } RectPush;
+typedef struct {
+    int32_t x1, y1, x2, y2;
+    uint32_t color;
+    int32_t thickness, fb_width, fb_height, clip_x, clip_y, clip_width,
+            clip_height, clip_enabled, reserved[3];
+} LinePush;
 
 static uint64_t now_ns(void) {
     struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
@@ -59,6 +65,8 @@ int main(int argc, char **argv) {
     uint32_t samples = (uint32_t)strtoul(argv[4], NULL, 10);
     uint32_t bp = (uint32_t)strtoul(argv[5], NULL, 10);
     int rect_mode = argc == 8;
+    int line_mode = rect_mode && strstr(argv[6], "line") != NULL;
+    int axis_line_mode = line_mode && strstr(argv[6], "axis_line") != NULL;
     uint32_t requested_rects = rect_mode ? (uint32_t)strtoul(argv[7], NULL, 10) : 0;
     uint64_t full_pixels = (uint64_t)width * height;
     uint64_t active_pixels = full_pixels / 10000 * bp + (full_pixels % 10000) * bp / 10000;
@@ -112,7 +120,30 @@ int main(int argc, char **argv) {
         if (ok) { cmd = rt_vulkan_begin_compute(); ok = cmd > 0; }
         if (ok) ok = rt_vulkan_bind_pipeline(cmd, active_pipe);
         if (ok) ok = rt_vulkan_bind_descriptors(cmd, desc);
-        if (rect_mode) {
+        if (line_mode) {
+            for (uint32_t line = 0; ok && line < requested_rects; line++) {
+                int32_t y = (int32_t)(line * 2);
+                if (axis_line_mode) {
+                    RectPush rpc = { .x = 0, .y = y, .width = (int32_t)width,
+                        .height = 1, .color = 0xff22cc44u,
+                        .fb_width = (int32_t)width, .fb_height = (int32_t)height,
+                        .clip_x = 0, .clip_y = 0, .clip_width = (int32_t)width,
+                        .clip_height = (int32_t)height, .clip_enabled = 1 };
+                    ok = rt_vulkan_push_constants_raw(cmd, rect_pipe,
+                        (int64_t)(uintptr_t)&rpc, 64) &&
+                        rt_vulkan_dispatch(cmd, (width + 15) / 16, 1, 1);
+                } else {
+                    LinePush lpc = { .x1 = 0, .y1 = y, .x2 = (int32_t)width - 1,
+                        .y2 = y, .color = 0xff22cc44u, .thickness = 1,
+                        .fb_width = (int32_t)width, .fb_height = (int32_t)height,
+                        .clip_x = 0, .clip_y = 0, .clip_width = (int32_t)width,
+                        .clip_height = (int32_t)height, .clip_enabled = 1 };
+                    ok = rt_vulkan_push_constants_raw(cmd, rect_pipe,
+                        (int64_t)(uintptr_t)&lpc, 64) &&
+                        rt_vulkan_dispatch(cmd, 1, 1, 1);
+                }
+            }
+        } else if (rect_mode) {
             uint64_t full_rows = active_pixels / width;
             uint32_t tail = (uint32_t)(active_pixels % width);
             uint32_t rects = requested_rects;
@@ -171,8 +202,14 @@ int main(int argc, char **argv) {
     }
     uint64_t mismatch = 0, checksum = 1469598103934665603ULL;
     for (uint64_t i = 0; i < evidence_pixels; i++) {
-        uint32_t expected = rect_mode ?
-            (i < active_pixels ? 0xffcc2222u : 0xff101010u) : pc.color;
+        uint32_t expected = pc.color;
+        if (line_mode) {
+            uint64_t y = i / width;
+            expected = (y < (uint64_t)requested_rects * 2 && y % 2 == 0) ?
+                0xff22cc44u : 0xff101010u;
+        } else if (rect_mode) {
+            expected = i < active_pixels ? 0xffcc2222u : 0xff101010u;
+        }
         if (readback[i] != expected) mismatch++;
         checksum ^= readback[i]; checksum *= 1099511628211ULL;
     }
@@ -180,7 +217,9 @@ int main(int argc, char **argv) {
     printf("engine2d_vulkan_width=%u\nengine2d_vulkan_height=%u\n", width, height);
     printf("engine2d_vulkan_active_basis_points=%u\n", bp);
     printf("engine2d_vulkan_active_pixels=%llu\n", (unsigned long long)active_pixels);
-    printf("engine2d_vulkan_operation=%s\n", rect_mode ? "rect_filled_batched" : "clear");
+    printf("engine2d_vulkan_operation=%s\n", axis_line_mode ? "axis_line_rect_batched" :
+        (line_mode ? "line_batched" :
+        (rect_mode ? "rect_filled_batched" : "clear")));
     printf("engine2d_vulkan_requested_rect_count=%u\n", requested_rects);
     printf("engine2d_vulkan_samples=%u\n", samples);
     printf("engine2d_vulkan_submit_fence_p50_ns=%llu\n", (unsigned long long)times[(samples-1)/2]);
