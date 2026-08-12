@@ -1,0 +1,121 @@
+# Canonical DrawIR retained-damage benchmark. Seed cost and final readback are
+# deliberately outside the timed region; each timed frame changes one 7680x43
+# band and replays the root composition through the production damage executor.
+
+use common.ui.draw_ir.{
+    DRAW_IR_BACKEND_CPU,
+    draw_ir_batch,
+    draw_ir_composition,
+    draw_ir_embedding_config,
+    draw_ir_rect,
+}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
+    Engine2dResolvedDrawIrImage,
+    engine2d_draw_ir_adv_composition_present_with_images,
+    engine2d_draw_ir_render_composition_damaged_with_images,
+}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+
+extern fn rt_time_now_nanos() -> i64
+
+val WIDTH: i32 = 7680
+val HEIGHT: i32 = 4320
+val DAMAGE_HEIGHT: i32 = 43
+val FRAMES: i32 = 20
+val BG: u32 = 0xff102030u32
+val A: u32 = 0xff315783u32
+val B: u32 = 0xff8a4b29u32
+
+fn sort_i64(values: [i64]) -> [i64]:
+    var result = values
+    var i = 1
+    while i < result.len():
+        val key = result[i]
+        var j = i - 1
+        while j >= 0 and result[j] > key:
+            result[j + 1] = result[j]
+            j -= 1
+        result[j + 1] = key
+        i += 1
+    result
+
+fn composition_for(color: u32):
+    val root = draw_ir_batch(
+        "root", DRAW_IR_BACKEND_CPU,
+        draw_ir_embedding_config(
+            "root", "root", 0, 0, WIDTH, HEIGHT, 0, 1000, false),
+        [
+            draw_ir_rect("background", 0, 0, WIDTH, HEIGHT, BG),
+            draw_ir_rect("damage-band", 0, 0, WIDTH, DAMAGE_HEIGHT, color),
+        ])
+    draw_ir_composition(
+        "drawir-damage-8k", "drawir-damage-8k", DRAW_IR_BACKEND_CPU,
+        [root])
+
+fn main():
+    var engine = Engine2D.create_with_backend(WIDTH, HEIGHT, "cpu")
+    var images: [Engine2dResolvedDrawIrImage] = []
+    val seed = composition_for(A)
+    engine.clear(BG)
+    val seeded = engine2d_draw_ir_adv_composition_present_with_images(
+        engine, seed, false, images)
+    if (seeded.fallback_required or seeded.rendered_command_count != 2 or
+        seeded.skipped_command_count != 0):
+        print "draw_ir_damage_8k_status=seed-failed"
+        engine.shutdown()
+        return
+
+    var samples: [i64] = []
+    var frame = 0
+    var valid = true
+    while frame < FRAMES:
+        val composition = composition_for(if frame % 2 == 0: B else: A)
+        val started = rt_time_now_nanos()
+        val outcome = engine2d_draw_ir_render_composition_damaged_with_images(
+            engine, composition, images,
+            [0, 0, WIDTH.to_i64(), DAMAGE_HEIGHT.to_i64()], false)
+        val finished = rt_time_now_nanos()
+        engine = outcome.engine
+        if (outcome.unsupported_kinds != "none" or
+            outcome.ops_rendered != 2 or outcome.ops_skipped != 0):
+            valid = false
+        samples.push(finished - started)
+        frame += 1
+
+    val ordered = sort_i64(samples)
+    val pixels = engine.read_pixels()
+    var checksum: i64 = 0
+    var mismatches = 0
+    var pixel_index = 0
+    val final_color = if (FRAMES - 1) % 2 == 0: B else: A
+    while pixel_index < pixels.len():
+        val pixel = pixels[pixel_index]
+        checksum += pixel.to_i64()
+        val expected = if pixel_index < WIDTH * DAMAGE_HEIGHT: final_color else: BG
+        if pixel != expected:
+            mismatches += 1
+        pixel_index += 1
+    val first_pixel = pixels[0]
+    val band_last_pixel = pixels[(DAMAGE_HEIGHT - 1) * WIDTH + WIDTH - 1]
+    val below_band_pixel = pixels[DAMAGE_HEIGHT * WIDTH]
+    val last_pixel = pixels[pixels.len() - 1]
+    val parity = (valid and pixels.len() == WIDTH * HEIGHT and mismatches == 0 and
+        first_pixel == final_color and band_last_pixel == final_color and
+        below_band_pixel == BG and last_pixel == BG)
+    print "draw_ir_damage_8k_status={if parity: \"pass\" else: \"fail\"}"
+    print "draw_ir_damage_8k_viewport={WIDTH}x{HEIGHT}"
+    print "draw_ir_damage_8k_backend=cpu"
+    print "draw_ir_damage_8k_scope=executor-only-prebuilt-composition"
+    print "draw_ir_damage_8k_frames={FRAMES}"
+    print "draw_ir_damage_8k_damage_rect=0,0,{WIDTH},{DAMAGE_HEIGHT}"
+    print "draw_ir_damage_8k_damage_pixels={WIDTH * DAMAGE_HEIGHT}"
+    print "draw_ir_damage_8k_p50_ns={ordered[FRAMES * 50 / 100]}"
+    print "draw_ir_damage_8k_p95_ns={ordered[FRAMES * 95 / 100]}"
+    print "draw_ir_damage_8k_readback_mode=final-full-cpu-mirror-outside-timing"
+    print "draw_ir_damage_8k_fallback=false"
+    print "draw_ir_damage_8k_checksum={checksum}"
+    print "draw_ir_damage_8k_full_frame_mismatches={mismatches}"
+    print "draw_ir_damage_8k_max_rss_kib=outer-harness"
+    engine.shutdown()
+
+main()
