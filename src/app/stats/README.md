@@ -17,6 +17,13 @@ simple stats --brief
 
 # Verbose output (with directory details)
 simple stats --verbose
+
+# Write the default doc/09_report/project_statistics.md report
+simple stats
+
+# Select or disable the Markdown report
+simple stats --report=build/project-statistics.md
+simple stats --no-report
 ```
 
 ## Statistics Displayed
@@ -62,3 +69,17 @@ Typical execution time: 2-3 seconds for full project scan
 - Test results: `doc/08_tracking/test/test_result.md`
 - Feature tracking: `doc/08_tracking/feature/feature.md`
 - Build status: `doc/08_tracking/build/recent_build.md`
+# Project Statistics
+
+`simple stats` summarizes owned project files, source lines, executable test
+surfaces, tracked features, and available coverage evidence. A normal run also
+writes `doc/09_report/project_statistics.md`.
+
+Use `--report=<path>` (or `--report <path>`) to choose another Markdown output
+and `--no-report` for read-only console/JSON use. `--quick` skips expensive LOC
+analysis; its report retains zero for metrics that were deliberately skipped.
+
+The report excludes vendored/third-party source and excludes `*_tldr.md` from
+Markdown file/test counts. Runnable test LOC is reported separately for SSpec
+files, fenced Markdown examples, and `>>>` source-comment SDoctests so these
+tests are visible without inflating production Simple SLOC.
