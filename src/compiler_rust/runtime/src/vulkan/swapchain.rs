@@ -461,7 +461,7 @@ impl VulkanSwapchain {
         acquire_fence.wait(u64::MAX)?;
         let image = *self.images.get(image_index as usize).ok_or(VulkanError::InvalidHandle)?;
         let prior_revision = self.image_revision.lock()[image_index as usize];
-        if prior_revision == content_revision {
+        if prior_revision == content_revision && damage.is_empty() {
             *self.last_present_copy_bytes.lock() = 0;
             *self.last_present_copy_rects.lock() = 0;
             let present_suboptimal = self.present(image_index, &[])?;

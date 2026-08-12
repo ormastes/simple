@@ -480,6 +480,32 @@ mod tests {
         upload_chunks(buffer, bytes);
         assert!(rt_vulkan_present_buffer(swapchain, buffer, width, height, 1) > 0);
         assert!(rt_vulkan_present_buffer(swapchain, buffer, width, height, 1) > 0);
+        assert_eq!(rt_vulkan_last_present_copy_bytes(swapchain), 0);
+        assert_eq!(rt_vulkan_last_present_copy_rects(swapchain), 0);
+        assert_eq!(rt_vulkan_free_buffer(buffer), 1);
+        assert_eq!(rt_vulkan_destroy_swapchain(swapchain), 1);
+        assert_eq!(rt_vulkan_shutdown(), 1);
+    }
+
+    #[test]
+    #[ignore = "requires VK_EXT_headless_surface and a presentation-capable Vulkan ICD"]
+    fn live_headless_same_revision_damage_falls_back_to_full_copy() {
+        let (width, height) = (64i64, 32i64);
+        let swapchain = rt_vulkan_init_headless_present(width, height, 0);
+        assert!(swapchain > 0, "{}", STATE.lock().last_error);
+        let pixels = vec![0xff224466u32; (width * height) as usize];
+        let bytes = unsafe { std::slice::from_raw_parts(pixels.as_ptr().cast::<u8>(), (width * height * 4) as usize) };
+        let buffer = rt_vulkan_alloc_buffer(width * height * 4, 0x80);
+        assert!(buffer > 0);
+        upload_chunks(buffer, bytes);
+        for _ in 0..4 { assert!(rt_vulkan_present_buffer(swapchain, buffer, width, height, 7) > 0); }
+        let replacement = 0xffcc8844u32.to_ne_bytes();
+        assert_eq!(rt_vulkan_copy_to_buffer_raw(buffer, replacement.as_ptr() as i64, 4, 0), 1);
+        let rect = [0i64, 0, 1, 1];
+        let status = rt_vulkan_present_buffer_regions_raw(swapchain, buffer, width, height, 7, rect.as_ptr() as i64, 32);
+        assert!(status == 1 || status == 2);
+        assert_eq!(rt_vulkan_last_present_copy_bytes(swapchain), width * height * 4);
+        assert_eq!(rt_vulkan_last_present_copy_rects(swapchain), 1);
         assert_eq!(rt_vulkan_free_buffer(buffer), 1);
         assert_eq!(rt_vulkan_destroy_swapchain(swapchain), 1);
         assert_eq!(rt_vulkan_shutdown(), 1);
