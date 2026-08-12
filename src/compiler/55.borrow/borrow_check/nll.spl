@@ -22,6 +22,7 @@ struct BasicBlock:
     """A basic block in the CFG."""
     id: i64
     statements: [i64]      # Statement indices
+    terminator_point: i64   # Global point shared with MIR fact emission
     terminator: Terminator
     predecessors: [i64]    # Block IDs
     successors: [i64]      # Block IDs
@@ -31,6 +32,7 @@ impl BasicBlock:
         BasicBlock(
             id: id,
             statements: [],
+            terminator_point: 0,
             terminator: Terminator.Unreachable,
             predecessors: [],
             successors: []
@@ -54,6 +56,7 @@ fn basicblock_create(id: i64) -> BasicBlock:
         BasicBlock(
             id: id,
             statements: [],
+            terminator_point: 0,
             terminator: Terminator.Unreachable,
             predecessors: [],
             successors: []
@@ -102,34 +105,34 @@ class ControlFlowGraph:
             return self.blocks[id]
         return BasicBlock.create(id)
 
+    fn block_entry_point(id: i64) -> i64:
+        val block = self.get_block(id)
+        if block.statements.len() > 0:
+            return block.statements[0]
+        block.terminator_point
+
     fn reverse_postorder() -> [i64]:
-        """Get blocks in reverse postorder (for dataflow)."""
-        var visited: [i64] = []
-        var order: [i64] = []
+        """Get every reachable block in deterministic predecessor-first order.
 
-        self.dfs_postorder(self.entry, visited, order)
-
-        # Reverse the order
+        The old recursive helper mutated array parameters passed by value, so
+        its caller observed empty `visited`/`order` arrays and NLL checked no
+        blocks. This worklist is intentionally explicit. Loop-sensitive fixed
+        point processing is a later step; no block may silently disappear."""
         var result: [i64] = []
-        var i = order.len() - 1
-        while i >= 0:
-            result = result.push(order[i])
-            i = i - 1
+        var pending: [i64] = [self.entry]
+        var cursor = 0
+        while cursor < pending.len():
+            val block_id = pending[cursor]
+            cursor = cursor + 1
+            if not result.contains(block_id):
+                result = result.push(block_id)
+                if self.blocks.has(block_id):
+                    val block = self.blocks[block_id]
+                    for successor in block.successors:
+                        if not result.contains(successor)
+                            and not pending.contains(successor):
+                            pending = pending.push(successor)
         result
-
-    me dfs_postorder(block_id: i64, visited: [i64], order: [i64]):
-        """DFS for postorder traversal."""
-        if visited.contains(block_id):
-            return
-
-        visited = visited.push(block_id)
-
-        if self.blocks.has(block_id):
-            val block = self.blocks[block_id]
-            for succ_id in block.successors:
-                self.dfs_postorder(succ_id, visited, order)
-
-        order = order.push(block_id)
 
 # ============================================================================
 # Liveness Analysis
@@ -364,39 +367,44 @@ class NLLChecker:
         if not self.cfg.blocks.has(block_id):
             return
         val block = self.cfg.get_block(block_id)
+        val entry_point = self.cfg.block_entry_point(block_id)
         # Propagate borrows from predecessors
         for pred_id in block.predecessors:
-            self.borrow_graph.propagate_borrows(pred_id, block_id)
+            val pred = self.cfg.get_block(pred_id)
+            self.borrow_graph.propagate_borrows(pred.terminator_point, entry_point)
 
         # Check each statement
-        var point = block_id * 1000  # Simple point numbering
-        for stmt_id in block.statements:
-            self.check_statement(stmt_id, point)
-            point = point + 1
+        var previous_point = -1
+        for point in block.statements:
+            if previous_point >= 0:
+                self.borrow_graph.propagate_borrows(previous_point, point)
+            self.check_statement(point)
+            previous_point = point
 
         # Check terminator
-        self.check_terminator(block.terminator, point, liveness)
+        if previous_point >= 0:
+            self.borrow_graph.propagate_borrows(previous_point,
+                block.terminator_point)
+        self.check_terminator(block.terminator, block.terminator_point, liveness)
 
-    me check_statement(stmt_id: i64, point: i64):
+    me check_statement(point: i64):
         """Check a statement for borrow violations.
 
         Checks the borrow graph at each program point for conflicts.
         Statements are identified by ID; the borrow graph tracks
         borrows, uses, and moves at each point.
         """
-        # Propagate borrows from previous point to current
-        if point > 0:
-            self.borrow_graph.propagate_borrows(point - 1, point)
-
         # Check for borrow conflicts at this point
         # Free-function + if-val forms: receiver-transport and box-assuming
         # .unwrap() are miscompiled on the stage4 native lane (bug doc 2026-07-23).
         val borrow_set = self.borrow_graph.get_or_create_borrows(point)
         val active = borrowset_active_list(borrow_set.borrows)
         for borrow in active:
-            val conflict = borrowset_conflicting(borrow_set.borrows, borrow.place, borrow.kind)
+            val conflict = borrowset_conflicting_other(borrow_set.borrows, borrow)
             if val conflict_b = conflict:
-                self.errors = self.errors.push(nllerror_borrow_conflict(borrow, conflict_b))
+                if borrow.id > conflict_b.id:
+                    self.errors = self.errors.push(
+                        nllerror_borrow_conflict(borrow, conflict_b))
 
     me check_terminator(term: Terminator, point: i64, liveness: LivenessResult):
         """Check terminator for borrow violations."""
@@ -416,16 +424,21 @@ class NLLChecker:
                     ))
             case Call(target, unwind):
                 # Propagate borrows through call; check for conflicts
-                self.borrow_graph.propagate_borrows(point, target)
+                self.borrow_graph.propagate_borrows(point,
+                    self.cfg.block_entry_point(target))
             case Drop(target, unwind):
                 # Propagate borrows through drop; check for conflicts
-                self.borrow_graph.propagate_borrows(point, target)
+                self.borrow_graph.propagate_borrows(point,
+                    self.cfg.block_entry_point(target))
             case Goto(target):
-                self.borrow_graph.propagate_borrows(point, target)
+                self.borrow_graph.propagate_borrows(point,
+                    self.cfg.block_entry_point(target))
             case SwitchInt(targets, otherwise):
                 for t in targets:
-                    self.borrow_graph.propagate_borrows(point, t)
-                self.borrow_graph.propagate_borrows(point, otherwise)
+                    self.borrow_graph.propagate_borrows(point,
+                        self.cfg.block_entry_point(t))
+                self.borrow_graph.propagate_borrows(point,
+                    self.cfg.block_entry_point(otherwise))
             case Unreachable:
                 pass
 

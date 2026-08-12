@@ -203,3 +203,12 @@ dev-done
   does not attest payload contents, candidate-root lineage, or concurrent
   atomic publication; those still require the runtime owner adapter and V2
   root/payload evidence.
+- impl: Advanced WP-10 by unifying MIR fact emission and NLL checking on one
+  global program-point layout. CFG construction now records terminator points,
+  derives successor/predecessor edges, and reaches non-entry blocks. Borrow
+  propagation uses block entry/terminator points rather than conflating block
+  IDs with fact points, and borrow IDs are function-global so predecessor facts
+  cannot overwrite each other at joins. A two-block adversarial MIR test now
+  detects shared/mutable conflict in the successor. Path-sensitive moved-state
+  joins, loop fixed points, borrow liveness termination, and range proofs remain
+  open; backend `noalias` still must not rely on this checker as fully authoritative.

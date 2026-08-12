@@ -82,6 +82,7 @@ class BorrowChecker:
     me build_cfg(func: MirBody) -> ControlFlowGraph:
         """Build CFG from MIR function."""
         var cfg = ControlFlowGraph.create()
+        var point = 0
 
         # Create basic blocks
         var block_id = 0
@@ -89,13 +90,15 @@ class BorrowChecker:
             var block = BasicBlock.create(block_id)
 
             # Add statements
-            var stmt_id = 0
             for inst in mir_block.instructions:
-                block.statements = block.statements.push(stmt_id)
-                stmt_id = stmt_id + 1
+                block.statements = block.statements.push(point)
+                point = point + 1
 
             # Set terminator based on MIR terminator
             block.terminator = self.convert_terminator(mir_block.terminator, block_id)
+            block.terminator_point = point
+            point = point + 1
+            block.successors = self.terminator_successors(block.terminator)
 
             cfg.add_block(block)
             block_id = block_id + 1
@@ -106,6 +109,28 @@ class BorrowChecker:
         cfg.compute_predecessors()
 
         cfg
+
+    fn terminator_successors(term: Terminator) -> [i64]:
+        match term:
+            case Goto(target): [target]
+            case SwitchInt(targets, otherwise):
+                var result = targets
+                if not result.contains(otherwise):
+                    result = result.push(otherwise)
+                result
+            case Call(target, unwind):
+                var result = [target]
+                if val unwind_target = unwind:
+                    if not result.contains(unwind_target):
+                        result = result.push(unwind_target)
+                result
+            case Drop(target, unwind):
+                var result = [target]
+                if val unwind_target = unwind:
+                    if not result.contains(unwind_target):
+                        result = result.push(unwind_target)
+                result
+            case _: []
 
     fn convert_terminator(mir_term: MirTerminator, block_id: i64) -> Terminator:
         """Convert MIR terminator to CFG terminator."""
