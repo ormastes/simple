@@ -240,3 +240,16 @@ dev-done
   Runtime/backend transfer-envelope lowering, process/device domains, incoming
   receive emission, and real source-to-MIR execution evidence remain open; no
   backend alias claim may rely on this partial slice.
+- impl: Advanced WP-13 with fail-closed native RuntimeValue classification and
+  an opaque ownership-region authority state machine. Inline values are the
+  only bit-copy class; forged heap tags are distinguished from registered heap
+  graphs, mutable graphs require a codec, synchronized handles require their
+  own handle envelope, and device/remote inputs are unsupported rather than
+  copied. The state machine admits only regions already proven sealed, records
+  `Local -> InTransit -> Local(generation+1)`, rejects a second move and wrong
+  receiver, and rolls transport failure back to the source with a new
+  generation. It transports no pointer or RuntimeValue payload and therefore
+  does not claim arbitrary graph isolation. Seven focused Rust tests pass
+  (3 ownership, 4 transfer). Graph sealing/materialization, global/session-safe
+  registry identity, typed handle transport, and actor/channel/process wiring
+  remain open.

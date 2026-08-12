@@ -7,6 +7,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::core::RuntimeValue;
+use super::heap::{registered_heap_type, HeapObjectType};
 
 pub(crate) const TRANSFER_SCHEMA_VERSION: u16 = 1;
 pub(crate) const TRANSFER_ENVELOPE_LEN: usize = 40;
@@ -45,6 +46,36 @@ pub(crate) enum TransferPayload {
     ObjectHandle = 4,
     SharedSync = 5,
     DeviceLease = 6,
+}
+
+/// Static runtime classification at a safe execution-domain boundary.
+///
+/// This deliberately does not equate "registered heap pointer" with
+/// transferable ownership. Heap graphs need a typed codec, frozen handle, or
+/// a region-registry move; unknown/forged heap identity is rejected outright.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RuntimeTransferClass {
+    InlineCopy,
+    SharedSynchronizedHandle,
+    HeapGraphRequiresCodec,
+    InvalidHeapIdentity,
+    UnsupportedBoundary,
+}
+
+pub(crate) fn classify_runtime_value(value: RuntimeValue, target: TransferDomain) -> RuntimeTransferClass {
+    if target == TransferDomain::Device || target == TransferDomain::Remote {
+        return RuntimeTransferClass::UnsupportedBoundary;
+    }
+    if value.is_inline_transfer_value() {
+        return RuntimeTransferClass::InlineCopy;
+    }
+    let Some(heap_type) = registered_heap_type(value) else {
+        return RuntimeTransferClass::InvalidHeapIdentity;
+    };
+    if heap_type == HeapObjectType::Channel && matches!(target, TransferDomain::Thread | TransferDomain::Actor) {
+        return RuntimeTransferClass::SharedSynchronizedHandle;
+    }
+    RuntimeTransferClass::HeapGraphRequiresCodec
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -205,7 +236,7 @@ impl RuntimeTransferPacket {
         source_domain: TransferDomain,
         target_domain: TransferDomain,
     ) -> Option<Self> {
-        if !value.is_inline_transfer_value() {
+        if classify_runtime_value(value, target_domain) != RuntimeTransferClass::InlineCopy {
             return None;
         }
         let region_id = next_transfer_region_id()?;
@@ -323,5 +354,27 @@ mod tests {
             TransferDomain::Actor
         )
         .is_none());
+    }
+
+    #[test]
+    fn runtime_classification_distinguishes_invalid_and_registered_heap_identity() {
+        assert_eq!(
+            classify_runtime_value(RuntimeValue::from_raw(0x1001), TransferDomain::Thread),
+            RuntimeTransferClass::InvalidHeapIdentity
+        );
+        let array = crate::value::rt_array_new(1);
+        assert_eq!(
+            classify_runtime_value(array, TransferDomain::Thread),
+            RuntimeTransferClass::HeapGraphRequiresCodec
+        );
+        crate::value::rt_array_free(array);
+    }
+
+    #[test]
+    fn runtime_classification_never_treats_device_input_as_host_copy() {
+        assert_eq!(
+            classify_runtime_value(RuntimeValue::from_int(7), TransferDomain::Device),
+            RuntimeTransferClass::UnsupportedBoundary
+        );
     }
 }

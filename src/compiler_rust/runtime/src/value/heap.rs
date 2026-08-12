@@ -421,6 +421,25 @@ pub fn with_typed_ptr<T, R>(
     Some(read(ptr as *const T))
 }
 
+/// Copy a heap object's type while holding the allocation-registry lock.
+/// Safe boundary classifiers use this instead of validating membership and
+/// dereferencing the header in two separately synchronized steps.
+pub(crate) fn registered_heap_type(val: RuntimeValue) -> Option<HeapObjectType> {
+    if !val.is_heap() {
+        return None;
+    }
+    let ptr = val.as_heap_ptr();
+    let addr = ptr as usize;
+    if ptr.is_null() || addr < MIN_VALID_HEAP_ADDR || addr & 0x7 != 0 {
+        return None;
+    }
+    let registry = heap_allocation_registry().lock().ok()?;
+    if !registry.contains(&addr) {
+        return None;
+    }
+    Some(unsafe { (*ptr).object_type })
+}
+
 /// Get mutable typed pointer from heap object with validation.
 /// Returns None if the value is not a valid heap object of the expected type.
 #[inline]
