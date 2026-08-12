@@ -2,6 +2,7 @@
 
 use std.common.crypto.sha256.{sha256_text}
 use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use compiler.common.assurance.policy_schema.{AssuranceConvention, AssuranceGrade, AssuranceStrictness, ResolvedAssurancePolicyV1}
 use compiler.mir.hwir.aspects.{HwAspectLock, HwAspectLockEntry, hwir_aspect_lock_sha256}
 use compiler.mir.hwir.types.{CoreConfig, HwPort}
 use compiler.mir.hwir.frontend.{strict_zca_control_predecode_hwir, strict_zca_migrating_isa_ids, strict_zca_migrating_predecode_hwir, strict_zca_rv32_cjal_migrating_isa_ids, strict_zca_rv32_cjal_migrating_predecode_hwir, strict_zca_rv64_addiw_migrating_isa_ids, strict_zca_rv64_addiw_migrating_predecode_hwir}
@@ -46,6 +47,30 @@ struct VhdlArtifactAspect:
     version: text
     content_hash: text
 
+# A compiler-owned Gen2 bundle records the policy already resolved into the
+# driver context. Rendering and persistence do not consult process configuration.
+struct VhdlArtifactAssurancePolicySnapshot:
+    strictness: AssuranceStrictness
+    runtime_family: text
+    assurance_grade: AssuranceGrade
+    convention: AssuranceConvention
+    policy_hash: text
+
+fn vhdl_artifact_assurance_policy_snapshot(policy: ResolvedAssurancePolicyV1) -> VhdlArtifactAssurancePolicySnapshot:
+    VhdlArtifactAssurancePolicySnapshot(strictness: policy.strictness,
+        runtime_family: policy.runtime_family,
+        assurance_grade: policy.assurance_grade, convention: policy.convention,
+        policy_hash: policy.policy_hash())
+
+fn vhdl_artifact_assurance_policy_snapshot_is_canonical(
+    snapshot: VhdlArtifactAssurancePolicySnapshot) -> bool:
+    if snapshot.runtime_family == "" or snapshot.policy_hash == "":
+        return false
+    val reconstructed = ResolvedAssurancePolicyV1(strictness: snapshot.strictness,
+        runtime_family: snapshot.runtime_family,
+        assurance_grade: snapshot.assurance_grade, convention: snapshot.convention)
+    snapshot.policy_hash == reconstructed.policy_hash()
+
 struct VhdlArtifactInput:
     output_path: text
     entry_module: text
@@ -72,6 +97,9 @@ struct VhdlArtifactInput:
     riscv_admitted_instruction_ids: [text]
     riscv_capability_sha256: text
     riscv_target_evidence_complete: bool
+    # Optional for legacy/source-owned callers. Compiler-owned Gen2 validates
+    # that it is present, canonical, and critical before rendering.
+    assurance_policy: VhdlArtifactAssurancePolicySnapshot?
     hwir_aspect_lock_sha256: text
     hwir_aspects: [VhdlArtifactAspect]
     generated_items: [VhdlArtifactGeneratedItem]
@@ -499,6 +527,13 @@ fn vhdl_validate_production_artifact_input(input: VhdlArtifactInput) -> Result<(
     if compiler_product and (input.riscv_isa_profile == "" or
         input.riscv_compressed_decode_profile == ""):
         return Err("VHDL Gen2 product provenance requires concrete RISC-V ISA and compressed profiles")
+    if compiler_product:
+        if input.assurance_policy == nil:
+            return Err("VHDL Gen2 product provenance requires a canonical critical assurance-policy snapshot")
+        val assurance_policy = input.assurance_policy.unwrap()
+        if not vhdl_artifact_assurance_policy_snapshot_is_canonical(assurance_policy) or
+            not assurance_policy.strictness.at_least(AssuranceStrictness.Critical):
+            return Err("VHDL Gen2 product provenance requires a canonical critical assurance-policy snapshot")
     if compiler_product and not sha256_lower_hex_valid(input.hwir_aspect_lock_sha256):
         return Err("VHDL Gen2 product provenance requires a canonical typed aspect-lock SHA-256")
     if compiler_product and (input.aop_advices_requested != 0 or input.aop_weave_count != 0):
@@ -605,6 +640,17 @@ fn vhdl_artifact_json_text_array(values: [text]) -> text:
 
 fn vhdl_artifact_json_bool(value: bool) -> text:
     if value: "true" else: "false"
+
+fn vhdl_artifact_assurance_policy_json(snapshot: VhdlArtifactAssurancePolicySnapshot?) -> text:
+    if snapshot == nil:
+        return "null"
+    val value = snapshot.unwrap()
+    "{" +
+        "\"strictness\":" + vhdl_artifact_json_text(value.strictness.name()) + "," +
+        "\"runtime_family\":" + vhdl_artifact_json_text(value.runtime_family) + "," +
+        "\"assurance_grade\":" + vhdl_artifact_json_text(value.assurance_grade.name()) + "," +
+        "\"convention\":" + vhdl_artifact_json_text(value.convention.name()) + "," +
+        "\"policy_hash\":" + vhdl_artifact_json_text(value.policy_hash) + "}"
 
 fn vhdl_artifact_location_json(location: VhdlArtifactLocation) -> text:
     if not location.available:
@@ -787,6 +833,7 @@ fn vhdl_render_production_artifacts(input: VhdlArtifactInput, vhdl: text) -> Vhd
         "  \"hwir\":{\"module_node_id\":" + vhdl_artifact_json_text(input.hwir_module_node_id) + ",\"config_profile\":" + vhdl_artifact_json_text(input.hwir_config_profile) + ",\"graph_sha256\":" + vhdl_artifact_json_text(input.hwir_graph_sha256) + "},\n" +
         "  \"hwir_aspects\":{\"lock_sha256\":" + vhdl_artifact_json_text(input.hwir_aspect_lock_sha256) + ",\"entries\":" + vhdl_artifact_aspects_json(input.hwir_aspects) + "},\n" +
         "  \"riscv\":{\"isa_profile\":" + vhdl_artifact_json_text(input.riscv_isa_profile) + ",\"compressed_decode_profile\":" + vhdl_artifact_json_text(input.riscv_compressed_decode_profile) + ",\"implementation_scope\":" + vhdl_artifact_json_text(input.riscv_capability_scope) + ",\"implemented_instruction_ids\":" + vhdl_artifact_json_text_array(input.riscv_admitted_instruction_ids) + ",\"capability_sha256\":" + vhdl_artifact_json_text(input.riscv_capability_sha256) + ",\"target_evidence_complete\":" + vhdl_artifact_json_bool(input.riscv_target_evidence_complete) + "},\n" +
+        "  \"assurance_policy\":" + vhdl_artifact_assurance_policy_json(input.assurance_policy) + ",\n" +
         "  \"ports\":" + vhdl_artifact_ports_json(
             vhdl_artifact_entry_ports(input.ports, input.entry_entity)) + ",\n" +
         "  \"target\":{\"name\":" + vhdl_artifact_json_text(input.target) + ",\"xlen\":" + input.xlen.to_text() + ",\"profile\":" + vhdl_artifact_json_text(input.profile) + "},\n" +
@@ -869,8 +916,9 @@ pub fn vhdl_write_production_artifacts(output: text, vhdl: text,
     vhdl_write_artifacts_after_authorization(output, vhdl, rendered)
 
 export VhdlArtifactSource, VhdlArtifactLocation, VhdlArtifactGeneratedItem
-export VhdlArtifactPort, VhdlArtifactAspect, VhdlArtifactInput, VhdlArtifactRendered
+export VhdlArtifactPort, VhdlArtifactAspect, VhdlArtifactAssurancePolicySnapshot, VhdlArtifactInput, VhdlArtifactRendered
 export VhdlArtifactTarget, vhdl_artifact_target_for_entity
 export vhdl_validate_production_artifact_input
 export vhdl_artifact_source_aggregate_hash, vhdl_render_production_artifacts
+export vhdl_artifact_assurance_policy_snapshot, vhdl_artifact_assurance_policy_snapshot_is_canonical
 export vhdl_remove_production_artifacts, vhdl_write_production_artifacts

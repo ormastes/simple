@@ -8,7 +8,7 @@
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_types.{CompileContext}
 use compiler.common.driver_core_types.{CompileMode, CompileResult}
-use compiler.common.assurance.policy_schema.{AssuranceStrictness}
+use compiler.common.assurance.policy_schema.{AssuranceStrictness, ResolvedAssurancePolicyV1}
 use compiler.mir.mir_aop_injection.{aop_advices_requested, aop_weave_count}
 use compiler.mir.hwir.types.{CoreConfig, HwModuleDef, HwPort}
 use compiler.mir.hwir.aspects.{HwAspectLock, hwir_aspect_lock_sha256}
@@ -17,7 +17,7 @@ use compiler.mir.hwir.stateful_frontend.{strict_zca_single_outstanding_frontend_
 use compiler.mir.hwir.trap_frontend.{strict_zca_trap_migrating_predecode_hwir, strict_zca_target_trap_migrating_predecode_hwir}
 use compiler.backend.backend.hwir_to_vhdl.{compile_strict_zca_control_predecode_product, compile_strict_zca_migrating_predecode_product, compile_strict_zca_rv32_cjal_migrating_predecode_product, compile_strict_zca_rv64_addiw_migrating_predecode_product, compile_strict_zca_single_outstanding_frontend_product, compile_strict_zca_trap_single_outstanding_frontend_product, strict_stateful_graph_sha}
 use compiler.driver.driver_build.incremental.{native_build_compiler_identity, native_build_compiler_executable_hash}
-use compiler.driver.driver_vhdl_artifacts.{VhdlArtifactGeneratedItem, VhdlArtifactInput, VhdlArtifactLocation, VhdlArtifactPort, VhdlArtifactRendered, vhdl_gen2_capability_ids, vhdl_gen2_capability_sha256, vhdl_render_production_artifacts, vhdl_remove_production_artifacts, vhdl_validate_production_artifact_input}
+use compiler.driver.driver_vhdl_artifacts.{VhdlArtifactAssurancePolicySnapshot, VhdlArtifactGeneratedItem, VhdlArtifactInput, VhdlArtifactLocation, VhdlArtifactPort, VhdlArtifactRendered, vhdl_artifact_assurance_policy_snapshot, vhdl_artifact_assurance_policy_snapshot_is_canonical, vhdl_gen2_capability_ids, vhdl_gen2_capability_sha256, vhdl_render_production_artifacts, vhdl_remove_production_artifacts, vhdl_validate_production_artifact_input}
 use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
 
 extern fn rt_file_write_text(path: text, content: text) -> bool
@@ -45,6 +45,7 @@ struct Gen2VhdlArtifactEmissionReceipt:
     vhdl: text
     rendered: VhdlArtifactRendered
     hwir_graph_sha256: text
+    assurance_policy: VhdlArtifactAssurancePolicySnapshot
 
 fn gen2_is_compiler_product_route(route: text) -> bool:
     route == "hwir-gen2-product" or
@@ -59,22 +60,33 @@ fn gen2_authorize_vhdl_artifact_emission(input: VhdlArtifactInput,
     vhdl_validate_production_artifact_input(input)?
     if not vhdl.contains("graph=" + input.hwir_graph_sha256):
         return Err("VHDL Gen2 artifact receipt requires the canonical HWIR closure SHA-256 in emitted VHDL")
+    if input.assurance_policy == nil:
+        return Err("VHDL Gen2 artifact receipt requires the context assurance-policy snapshot")
+    val assurance_policy = input.assurance_policy.unwrap()
     val rendered = vhdl_render_production_artifacts(input, vhdl)
     if not rendered.manifest.contains("\"graph_sha256\":\"" +
         input.hwir_graph_sha256 + "\""):
         return Err("VHDL Gen2 artifact receipt requires the canonical HWIR closure SHA-256 in its manifest")
+    if not rendered.manifest.contains("\"policy_hash\":\"" +
+        assurance_policy.policy_hash + "\""):
+        return Err("VHDL Gen2 artifact receipt requires the context assurance-policy hash in its manifest")
     Ok(Gen2VhdlArtifactEmissionReceipt(output_path: input.output_path,
         vhdl: vhdl, rendered: rendered,
-        hwir_graph_sha256: input.hwir_graph_sha256))
+        hwir_graph_sha256: input.hwir_graph_sha256,
+        assurance_policy: assurance_policy))
 
 fn gen2_write_authorized_vhdl_artifact_emission(
     receipt: Gen2VhdlArtifactEmissionReceipt) -> Result<(), text>:
     """Persist only a bundle authorized by the private Gen2 product receipt."""
     if not sha256_lower_hex_valid(receipt.hwir_graph_sha256) or
+        not vhdl_artifact_assurance_policy_snapshot_is_canonical(receipt.assurance_policy) or
+        not receipt.assurance_policy.strictness.at_least(AssuranceStrictness.Critical) or
         not receipt.vhdl.contains("graph=" + receipt.hwir_graph_sha256) or
         not receipt.rendered.manifest.contains("\"graph_sha256\":\"" +
-            receipt.hwir_graph_sha256 + "\""):
-        return Err("VHDL Gen2 artifact write requires one consistent canonical HWIR closure SHA-256")
+            receipt.hwir_graph_sha256 + "\"") or
+        not receipt.rendered.manifest.contains("\"policy_hash\":\"" +
+            receipt.assurance_policy.policy_hash + "\""):
+        return Err("VHDL Gen2 artifact write requires one consistent canonical HWIR closure and assurance-policy snapshot")
     val output = receipt.output_path
     if not vhdl_remove_production_artifacts(output):
         return Err("Failed to remove stale VHDL artifacts for {output}")
@@ -123,7 +135,8 @@ fn gen2_product_config(ctx: CompileContext, product_id: text) -> Result<CoreConf
         return Err("HWIR-E-GEN2-PRODUCT-CONFIG: product requires zca-common-critical elaboration")
     Ok(config)
 
-fn gen2_product_artifact_input(output: text, module: HwModuleDef, entry_module: text) -> Result<VhdlArtifactInput, text>:
+fn gen2_product_artifact_input(output: text, module: HwModuleDef, entry_module: text,
+    assurance_policy: ResolvedAssurancePolicyV1) -> Result<VhdlArtifactInput, text>:
     var ports: [VhdlArtifactPort] = []
     var index = 0
     for port in module.ports:
@@ -157,6 +170,7 @@ fn gen2_product_artifact_input(output: text, module: HwModuleDef, entry_module: 
         riscv_admitted_instruction_ids: capability_ids,
         riscv_capability_sha256: capability_sha256,
         riscv_target_evidence_complete: false,
+        assurance_policy: vhdl_artifact_assurance_policy_snapshot(assurance_policy),
         hwir_aspect_lock_sha256: aspect_lock_sha256, hwir_aspects: [],
         generated_items: [VhdlArtifactGeneratedItem(kind: "compiler_product_entity",
             name: module.summary.name, location: unavailable)], ports: ports,
@@ -166,7 +180,8 @@ fn gen2_product_artifact_input(output: text, module: HwModuleDef, entry_module: 
 
 fn gen2_stateful_product_artifact_input(output: text, entity: text, node_id: text,
     config: CoreConfig, ports: [HwPort], entry_module: text, route: text,
-    decoder_entity: text, hwir_graph_sha256: text) -> Result<VhdlArtifactInput, text>:
+    decoder_entity: text, hwir_graph_sha256: text,
+    assurance_policy: ResolvedAssurancePolicyV1) -> Result<VhdlArtifactInput, text>:
     var artifact_ports: [VhdlArtifactPort] = []
     var index = 0
     for port in ports:
@@ -191,6 +206,7 @@ fn gen2_stateful_product_artifact_input(output: text, entity: text, node_id: tex
         riscv_admitted_instruction_ids: capability_ids,
         riscv_capability_sha256: capability_sha256,
         riscv_target_evidence_complete: false,
+        assurance_policy: vhdl_artifact_assurance_policy_snapshot(assurance_policy),
         hwir_aspect_lock_sha256: aspect_lock_sha256, hwir_aspects: [],
         generated_items: [VhdlArtifactGeneratedItem(kind: "compiler_product_entity", name: entity, location: unavailable),
             VhdlArtifactGeneratedItem(kind: "compiler_product_dependency", name: decoder_entity, location: unavailable)],
@@ -229,7 +245,7 @@ fn compile_riscv_gen2_special_stateful_product(driver: CompilerDriver,
         return CompileResult.CodegenError("HWIR-E-GEN2-PRODUCT-PROVENANCE: emitted HWIR identity does not match the product graph")
     val artifact = match gen2_stateful_product_artifact_input(output, module.summary_name,
         module.node_id.value, module.config, module.frontend_contract.ports(), entry_module,
-        emitted.route, module.decoder_entity, emitted.hwir_graph_sha256):
+        emitted.route, module.decoder_entity, emitted.hwir_graph_sha256, ctx.assurance_policy):
         case Ok(value): value
         case Err(error): return CompileResult.CodegenError("HWIR-E-GEN2-PRODUCT-PROVENANCE: {error}")
     val receipt = match gen2_authorize_vhdl_artifact_emission(artifact, emitted.vhdl):
@@ -266,7 +282,8 @@ impl CompilerDriver:
         if emitted.module_node_id != module.node_id.value or emitted.config_profile != module.config.profile or
             emitted.hwir_graph_sha256 != module.structural_sha256():
             return CompileResult.CodegenError("HWIR-E-GEN2-PRODUCT-PROVENANCE: emitted HWIR identity does not match the product graph")
-        val artifact = match gen2_product_artifact_input(output, module, RISCV_GEN2_PRODUCT_ENTRY_MODULE):
+        val artifact = match gen2_product_artifact_input(output, module, RISCV_GEN2_PRODUCT_ENTRY_MODULE,
+            ctx.assurance_policy):
             case Ok(value): value
             case Err(error): return CompileResult.CodegenError("HWIR-E-GEN2-PRODUCT-PROVENANCE: {error}")
         val receipt = match gen2_authorize_vhdl_artifact_emission(artifact, emitted.vhdl):
@@ -303,7 +320,8 @@ impl CompilerDriver:
         if emitted.module_node_id != module.node_id.value or emitted.config_profile != module.config.profile or
             emitted.hwir_graph_sha256 != module.structural_sha256():
             return CompileResult.CodegenError("HWIR-E-GEN2-PRODUCT-PROVENANCE: emitted HWIR identity does not match the product graph")
-        val artifact = match gen2_product_artifact_input(output, module, RISCV_GEN2_MIGRATING_PRODUCT_ENTRY_MODULE):
+        val artifact = match gen2_product_artifact_input(output, module, RISCV_GEN2_MIGRATING_PRODUCT_ENTRY_MODULE,
+            ctx.assurance_policy):
             case Ok(value): value
             case Err(error): return CompileResult.CodegenError("HWIR-E-GEN2-PRODUCT-PROVENANCE: {error}")
         val receipt = match gen2_authorize_vhdl_artifact_emission(artifact, emitted.vhdl):
@@ -338,7 +356,7 @@ impl CompilerDriver:
             emitted.hwir_graph_sha256 != module.structural_sha256():
             return CompileResult.CodegenError("HWIR-E-GEN2-PRODUCT-PROVENANCE: emitted HWIR identity does not match the product graph")
         val artifact = match gen2_product_artifact_input(output, module,
-            RISCV_GEN2_RV32_CJAL_MIGRATING_PRODUCT_ENTRY_MODULE):
+            RISCV_GEN2_RV32_CJAL_MIGRATING_PRODUCT_ENTRY_MODULE, ctx.assurance_policy):
             case Ok(value): value
             case Err(error): return CompileResult.CodegenError("HWIR-E-GEN2-PRODUCT-PROVENANCE: {error}")
         val receipt = match gen2_authorize_vhdl_artifact_emission(artifact, emitted.vhdl):
@@ -373,7 +391,7 @@ impl CompilerDriver:
             emitted.hwir_graph_sha256 != module.structural_sha256():
             return CompileResult.CodegenError("HWIR-E-GEN2-PRODUCT-PROVENANCE: emitted HWIR identity does not match the product graph")
         val artifact = match gen2_product_artifact_input(output, module,
-            RISCV_GEN2_RV64_ADDIW_MIGRATING_PRODUCT_ENTRY_MODULE):
+            RISCV_GEN2_RV64_ADDIW_MIGRATING_PRODUCT_ENTRY_MODULE, ctx.assurance_policy):
             case Ok(value): value
             case Err(error): return CompileResult.CodegenError("HWIR-E-GEN2-PRODUCT-PROVENANCE: {error}")
         val receipt = match gen2_authorize_vhdl_artifact_emission(artifact, emitted.vhdl):
@@ -447,7 +465,7 @@ impl CompilerDriver:
         val artifact = match gen2_stateful_product_artifact_input(output, module.summary_name,
             module.node_id.value, module.config, module.frontend_contract.ports(),
             RISCV_GEN2_TRAP_SINGLE_OUTSTANDING_ENTRY_MODULE, emitted.route,
-            module.decoder_entity, emitted.hwir_graph_sha256):
+            module.decoder_entity, emitted.hwir_graph_sha256, ctx.assurance_policy):
             case Ok(value): value
             case Err(error): return CompileResult.CodegenError("HWIR-E-GEN2-PRODUCT-PROVENANCE: {error}")
         val receipt = match gen2_authorize_vhdl_artifact_emission(artifact, emitted.vhdl):
