@@ -20,11 +20,11 @@ Verification:
   bounded 180-second compiler allowance.
 - Optimizer: 70 advisory opportunities, estimated ~50%; no performance claim
   is derived from this estimate.
-- The focused SPipe spec was updated with unchanged/command-change/image-change
-  controls, but the shared test runner currently fails before examples on the
-  unrelated parse error in `src/compiler/80.driver/driver_vhdl_artifacts.spl`.
-- A seed-only direct fixture also hit the existing `invalid field receiver`
-  runtime defect and was not retained as evidence.
+- Focused SPipe spec: PASS 6/6, including unchanged multi-batch admission,
+  changed-command rejection, and changed-image-checksum rejection.
+- A seed-only direct fixture had previously hit the existing `invalid field
+  receiver` runtime defect and was not retained as evidence; the canonical
+  SPipe runner now supplies the authoritative semantic result above.
 
 This establishes the zero-work idle decision in production source. It does not
 yet prove physical scanout, pixel parity after LOCAL damage, RSS, or measured
