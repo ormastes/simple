@@ -50,6 +50,14 @@ route. MIR lowering will eventually consume an admitted declaration and emit
 module-qualifies and freezes that evidence before cache lookup and parallel
 codegen; workers may only read module-local snapshots.
 
+The v1 producer recognizes only one same-block SSA-shaped chain. A canonical
+owned-raw marker must bind the base, allocation bytes, logical type, revision,
+and element count. The producer independently verifies a constant index range
+and exclusive intermediate uses, then emits an address projection followed by
+the original typed value load. Allocation markers are consumed as compile-time
+evidence and never reach a backend. Logical projections resolve against their
+final LocalIds before generic optimization can renumber them.
+
 ## Migration order
 
 Freeze contracts and diagnostic names; make boundary/borrow facts authoritative; replace unsafe transport and add bounded task lifecycle; add parent commit; then implement typed storage layouts and MDSOC/project pilots. Performance lowering cannot precede the raw-pointer and alias-soundness gates.

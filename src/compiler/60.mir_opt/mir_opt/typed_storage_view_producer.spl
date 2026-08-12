@@ -1,0 +1,249 @@
+# Automatic canonical-MIR producer for compiler-owned typed storage views.
+#
+# Input MIR is still ordinary fixed-record pointer projection.  Only an
+# admitted declaration may authorize replacing the exact
+# GEP -> Load(record) -> GetField(address) chain with PROJECT_FIELD.
+
+use compiler.mir.mir_data.*
+use compiler.mir_opt.mir_opt.auto_vectorize_analysis.{get_inst_uses, get_operand_locals}
+use compiler.mir_opt.mir_opt.storage_projection_lowering.{
+    MIR_STORAGE_PROJECT_FIELD_V1, MirStorageViewSiteBindingV1,
+    mir_storage_address_recipe_v1
+}
+use compiler.mir_opt.mir_opt.typed_storage_view_declaration.{
+    MirTypedStorageViewDeclarationV1, admit_mir_typed_storage_view_v1
+}
+
+val MIR_STORAGE_OWNED_RAW_BASE_V1: text = "mir.storage.owned_raw_base.v1"
+
+struct MirTypedStorageViewEvidenceV1:
+    site: MirStorageViewSiteBindingV1
+    allocation_provenance: text
+    source_revision: text
+    producer_contract_version: i64
+    producer_pattern: text
+
+struct MirTypedStorageViewProducerResultV1:
+    ok: bool
+    module: MirModule
+    sites: [MirStorageViewSiteBindingV1]
+    evidence: [MirTypedStorageViewEvidenceV1]
+    produced_count: i64
+    reason: text
+
+fn mir_typed_storage_view_producer_failure(
+    module: MirModule, reason: text
+) -> MirTypedStorageViewProducerResultV1:
+    MirTypedStorageViewProducerResultV1(ok: false, module: module, sites: [], evidence: [],
+        produced_count: 0, reason: reason)
+
+fn mir_typed_storage_operand_local_v1(operand: MirOperand) -> i64:
+    match operand.kind:
+        case Copy(local) | Move(local): local.id
+        case _: -1
+
+fn mir_typed_storage_extra_intrinsic_uses(inst: MirInst, local_id: i64) -> i64:
+    match inst.kind:
+        case Intrinsic(_, _, args):
+            var count = 0
+            for arg in args:
+                for used in get_operand_locals(arg):
+                    if used.id == local_id: count = count + 1
+            count
+        case _: 0
+
+fn mir_typed_storage_instruction_use_count(function: MirFunction,
+                                            local_id: i64) -> i64:
+    var count = 0
+    for block in function.blocks:
+        for instruction in block.instructions:
+            for used in get_inst_uses(instruction):
+                if used.id == local_id: count = count + 1
+            count = count + mir_typed_storage_extra_intrinsic_uses(
+                instruction, local_id)
+        match block.terminator:
+            case Ret(value):
+                if value.?:
+                    for used in get_operand_locals(value.unwrap()):
+                        if used.id == local_id: count = count + 1
+            case If(cond, _, _):
+                for used in get_operand_locals(cond):
+                    if used.id == local_id: count = count + 1
+            case Switch(value, _, _):
+                for used in get_operand_locals(value):
+                    if used.id == local_id: count = count + 1
+            case CallTerminator(_, func, args, _, _):
+                for used in get_operand_locals(func):
+                    if used.id == local_id: count = count + 1
+                for arg in args:
+                    for used in get_operand_locals(arg):
+                        if used.id == local_id: count = count + 1
+            case _: pass
+    count
+
+fn mir_typed_storage_declaration_index(
+    declarations: [MirTypedStorageViewDeclarationV1], function_symbol_id: i64,
+    base_local_id: i64
+) -> (i64, i64):
+    var selected = -1
+    var count = 0
+    var index = 0
+    while index < declarations.len():
+        val declaration = declarations[index]
+        if declaration.function_symbol_id == function_symbol_id
+            and declaration.base_local_id == base_local_id:
+            selected = index
+            count = count + 1
+        index = index + 1
+    (selected, count)
+
+fn mir_typed_storage_const_before_v1(block: MirBlock, before: i64,
+                                     operand: MirOperand) -> (bool, i64):
+    match operand.kind:
+        case Const(MirConstValue.Int(value), _): return (true, value)
+        case Copy(local) | Move(local):
+            var index = 0
+            while index < before:
+                match block.instructions[index].kind:
+                    case Const(dest, MirConstValue.Int(value), _):
+                        if dest.id == local.id: return (true, value)
+                    case _: pass
+                index = index + 1
+        case _: pass
+    (false, 0)
+
+fn mir_typed_storage_has_owned_base_marker_v1(
+    block: MirBlock, before: i64, declaration: MirTypedStorageViewDeclarationV1
+) -> bool:
+    var index = 0
+    while index < before:
+        match block.instructions[index].kind:
+            case Intrinsic(_, name, args):
+                if name == MIR_STORAGE_OWNED_RAW_BASE_V1 and args.len() == 5
+                    and mir_typed_storage_operand_local_v1(args[0]) == declaration.base_local_id:
+                    val bytes = mir_typed_storage_const_before_v1(block, index, args[1])
+                    val logical_type = mir_typed_storage_const_before_v1(block, index, args[2])
+                    val revision = mir_typed_storage_const_before_v1(block, index, args[3])
+                    val count = mir_typed_storage_const_before_v1(block, index, args[4])
+                    if bytes[0] and bytes[1] == declaration.allocation_byte_len
+                        and logical_type[0] and logical_type[1] == declaration.logical_type_id
+                        and revision[0] and revision[1] == declaration.revision
+                        and count[0] and count[1] == declaration.element_count:
+                        return true
+            case _: pass
+        index = index + 1
+    false
+
+fn produce_mir_typed_storage_views_v1(
+    module: MirModule, declarations: [MirTypedStorageViewDeclarationV1]
+) -> MirTypedStorageViewProducerResultV1:
+    var sites: [MirStorageViewSiteBindingV1] = []
+    var evidence: [MirTypedStorageViewEvidenceV1] = []
+    for declaration in declarations:
+        val admitted = admit_mir_typed_storage_view_v1(declaration)
+        if not admitted.ok:
+            return mir_typed_storage_view_producer_failure(module,
+                "typed-storage-declaration:{admitted.reason}")
+        sites.push(admitted.site.unwrap())
+        evidence.push(MirTypedStorageViewEvidenceV1(site: admitted.site.unwrap(),
+            allocation_provenance: admitted.allocation_provenance,
+            source_revision: admitted.source_revision, producer_contract_version: 1,
+            producer_pattern: "same-block-gep-load-getfield-v1"))
+
+    var produced_count = 0
+    var declaration_hits: [i64] = []
+    for _ in declarations: declaration_hits.push(0)
+    var rewritten_functions: Dict<SymbolId, MirFunction> = {}
+    for symbol in module.functions.keys():
+        val function = module.functions[symbol]
+        var blocks: [MirBlock] = []
+        for block in function.blocks:
+            var instructions: [MirInst] = []
+            var index = 0
+            while index < block.instructions.len():
+                var consumed = false
+                if index + 2 < block.instructions.len():
+                    val first = block.instructions[index]
+                    val second = block.instructions[index + 1]
+                    val third = block.instructions[index + 2]
+                    match first.kind:
+                        case GetElementPtr(gep_dest, base, indices):
+                            val base_local_id = mir_typed_storage_operand_local_v1(base)
+                            val selected = mir_typed_storage_declaration_index(
+                                declarations, symbol.id, base_local_id)
+                            if selected[1] > 1:
+                                return mir_typed_storage_view_producer_failure(module,
+                                    "duplicate-typed-storage-declaration")
+                            if selected[0] >= 0 and indices.len() == 1:
+                                val declaration = declarations[selected[0]]
+                                if not mir_typed_storage_has_owned_base_marker_v1(
+                                    block, index, declaration):
+                                    return mir_typed_storage_view_producer_failure(module,
+                                        "storage-view-owned-base-marker-missing")
+                                val proven_index = mir_typed_storage_const_before_v1(
+                                    block, index, indices[0])
+                                if not proven_index[0] or proven_index[1] < 0
+                                    or proven_index[1] >= declaration.element_count:
+                                    return mir_typed_storage_view_producer_failure(module,
+                                        "storage-view-index-bounds-unproven")
+                                match second.kind:
+                                    case Load(record_dest, record_ptr):
+                                        if mir_typed_storage_operand_local_v1(record_ptr) == gep_dest.id:
+                                            match third.kind:
+                                                case GetField(field_dest, record, field_id):
+                                                    if mir_typed_storage_operand_local_v1(record) == record_dest.id:
+                                                        if mir_typed_storage_instruction_use_count(
+                                                            function, gep_dest.id) != 1
+                                                            or mir_typed_storage_instruction_use_count(
+                                                                function, record_dest.id) != 1:
+                                                            return mir_typed_storage_view_producer_failure(
+                                                                module, "storage-projection-temporary-escapes")
+                                                        val admitted = admit_mir_typed_storage_view_v1(declaration)
+                                                        val recipe = mir_storage_address_recipe_v1(
+                                                            admitted.site.unwrap().binding, field_id)
+                                                        if not recipe.ok:
+                                                            return mir_typed_storage_view_producer_failure(
+                                                                module, "typed-storage-field:{recipe.reason}")
+                                                        instructions.push(MirInst(
+                                                            kind: MirInstKind.Intrinsic(
+                                                                Some(gep_dest),
+                                                                MIR_STORAGE_PROJECT_FIELD_V1,
+                                                                [base, indices[0],
+                                                                 MirOperand.const_int(field_id)]),
+                                                            span: third.span))
+                                                        instructions.push(MirInst(
+                                                            kind: MirInstKind.Load(field_dest,
+                                                                MirOperand.copy(gep_dest)),
+                                                            span: third.span))
+                                                        declaration_hits[selected[0]] =
+                                                            declaration_hits[selected[0]] + 1
+                                                        produced_count = produced_count + 1
+                                                        index = index + 3
+                                                        consumed = true
+                                                case _: pass
+                                    case _: pass
+                        case _: pass
+                if not consumed:
+                    var keep = true
+                    match block.instructions[index].kind:
+                        case Intrinsic(_, name, _):
+                            # Allocation proof markers are compile-time
+                            # evidence. No backend may see or lower them.
+                            if name == MIR_STORAGE_OWNED_RAW_BASE_V1: keep = false
+                        case _: pass
+                    if keep: instructions.push(block.instructions[index])
+                    index = index + 1
+            blocks.push(MirBlock(id: block.id, label: block.label,
+                instructions: instructions, terminator: block.terminator))
+        rewritten_functions[symbol] = MirFunction(..function, blocks: blocks)
+
+    var declaration_index = 0
+    while declaration_index < declaration_hits.len():
+        if declaration_hits[declaration_index] == 0:
+            return mir_typed_storage_view_producer_failure(module,
+                "stale-typed-storage-declaration")
+        declaration_index = declaration_index + 1
+    val rewritten = MirModule(name: module.name, functions: rewritten_functions,
+        statics: module.statics, constants: module.constants, types: module.types)
+    MirTypedStorageViewProducerResultV1(ok: true, module: rewritten,
+        sites: sites, evidence: evidence, produced_count: produced_count, reason: "ok")

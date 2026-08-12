@@ -27,6 +27,8 @@ use compiler.common.mir_target_context.{mir_target_context_normalize_arch}
 use compiler.mir_opt.mir_opt.storage_projection_lowering.{
     MirStorageViewSiteBindingV1, lower_mir_storage_project_fields_v1
 }
+use compiler.mir_opt.mir_opt.typed_storage_view_declaration.{MirTypedStorageViewDeclarationV1}
+use compiler.mir_opt.mir_opt.typed_storage_view_producer.{produce_mir_typed_storage_views_v1}
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_simd_has_avx2() -> bool
@@ -318,6 +320,24 @@ fn compile_module_with_backend_target_cpu(
     compile_module_with_backend_target_cpu_storage_bindings(
         backend_name, module, is_release, opt_level_i64, target_cpu, [])
 
+fn compile_module_with_backend_target_cpu_storage_declarations(
+    backend_name: text,
+    module: MirModule,
+    is_release: bool,
+    opt_level_i64: i64,
+    target_cpu: text,
+    declarations: [MirTypedStorageViewDeclarationV1]
+) -> Result<CompiledModule, CompileError>:
+    # Atomic producer boundary: failure returns before a rewritten module or
+    # evidence row can enter generic optimization/codegen.
+    val produced = produce_mir_typed_storage_views_v1(module, declarations)
+    if not produced.ok:
+        return Err(compileerror_backend_error(BackendKind.Native,
+            "typed storage producer failed: {produced.reason}"))
+    compile_module_with_backend_target_cpu_storage_bindings(
+        backend_name, produced.module, is_release, opt_level_i64, target_cpu,
+        produced.sites)
+
 fn compile_module_with_backend_target_cpu_storage_bindings(
     backend_name: text,
     module: MirModule,
@@ -423,9 +443,10 @@ fn compile_module_with_backend_target_cpu_storage_bindings(
     else:
         get_effective_backend_name(backend_name, is_release)
     val mir_opt_level = backend_helper_mir_opt_level(opt)
-    val optimized_module = optimize_module_for_backend(module, mir_opt_level, effective_backend)
+    # Resolve site-keyed logical projections before generic optimization can
+    # renumber or remove the locals named by the compiler-owned sidecar.
     val storage_lowered = lower_mir_storage_project_fields_v1(
-        optimized_module, storage_bindings)
+        module, storage_bindings)
     if not storage_lowered.ok:
         return Err(compileerror_backend_error(kind,
             "storage projection lowering failed: {storage_lowered.reason}"))
@@ -437,7 +458,8 @@ fn compile_module_with_backend_target_cpu_storage_bindings(
         and options.target != CodegenTarget.Host:
         return Err(compileerror_backend_error(kind,
             "typed storage projections require the x86_64 native target"))
-    val backend_module = storage_lowered.module
+    val backend_module = optimize_module_for_backend(
+        storage_lowered.module, mir_opt_level, effective_backend)
 
     if kind == BackendKind.Llvm and not backend_helper_llc_available():
         return Err(compileerror_backend_error(BackendKind.Llvm,

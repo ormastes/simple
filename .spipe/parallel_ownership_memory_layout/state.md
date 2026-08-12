@@ -464,3 +464,16 @@ dev-done
   missing bounds, undersized allocations, and unsupported layouts fail closed.
   The focused spec passes 3/3. Automatic source-pattern production and
   registration of the provenance/revision evidence remain open.
+- impl: Added the automatic canonical-MIR producer for
+  admitted compiler-owned views. It requires a same-block owned-raw allocation
+  marker and independently proves a constant index is within the declared
+  element count before replacing `GEP -> Load(record) -> GetField` with
+  `PROJECT_FIELD(address) -> Load(value)`. Temporary escapes, stale/duplicate
+  declarations, missing markers, and out-of-range indices fail atomically.
+  Producer evidence retains allocation provenance, source revision, contract
+  version, and pattern identity. Backend projection now resolves site LocalIds
+  before generic optimization, then optimizes backend-ready address MIR.
+  The focused producer spec passes 4/4 and the adjacent native projection suite
+  passes 11/11. The production helper accepts declarations, runs the producer
+  atomically, resolves logical sites before generic optimization, and then
+  compiles backend-ready address MIR.

@@ -1,0 +1,154 @@
+use std.spec.{describe, it, assert_equal, assert_true, assert_false}
+use compiler.mir.mir_data.*
+use compiler.hir.hir_types.{SymbolId}
+use compiler.common.diagnostics.span.{Span}
+use compiler.mir_opt.mir_opt.storage_projection_lowering.{
+    MIR_STORAGE_PROJECT_ADDRESS_V1, MIR_STORAGE_PROJECT_FIELD_V1,
+    lower_mir_storage_project_fields_v1, mir_storage_field_binding_v1
+}
+use compiler.mir_opt.mir_opt.typed_storage_view_declaration.*
+use compiler.mir_opt.mir_opt.typed_storage_view_producer.*
+use compiler.backend.backend.backend_helpers.{
+    compile_module_with_backend_target_cpu_storage_declarations
+}
+use std.common.structural.storage_layout.storage_layout_contracts.{
+    StorageConversionPolicy, StorageLayoutKind, storage_layout_plan_v1
+}
+
+fn producer_declaration(layout: StorageLayoutKind) -> MirTypedStorageViewDeclarationV1:
+    val plan = storage_layout_plan_v1(9201, layout, 1, 8, false,
+        StorageConversionPolicy.Cached, "producer-policy-v1", "compiler-private")
+    mir_typed_storage_view_declaration_v1(41, 0, 9201,
+        "arena:task-9:allocation-1", "snapshot:def456", 4,
+        MirTypedStorageBackingKindV1.CompilerOwnedRaw, 5, 128, 24, false,
+        true, plan, [
+            mir_storage_field_binding_v1(0, 0, 8, 0),
+            mir_storage_field_binding_v1(1, 8, 8, 40),
+            mir_storage_field_binding_v1(2, 16, 8, 80)
+        ])
+
+fn producer_module(marker: bool, index_value: i64, extra_use: bool) -> MirModule:
+    val i64_type = MirType(kind: MirTypeKind.I64)
+    val record_type = MirType(kind: MirTypeKind.Struct(SymbolId.new(9201)))
+    val base_type = MirType(kind: MirTypeKind.Ptr(pointee: record_type, mutable: true))
+    val locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("base"), type_: base_type, kind: LocalKind.Arg(0)),
+        MirLocal(id: LocalId(id: 1), name: Some("index"), type_: i64_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 2), name: Some("element_ptr"), type_: base_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 3), name: Some("record"), type_: record_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 4), name: Some("mass"), type_: i64_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 5), name: Some("escape"), type_: base_type, kind: LocalKind.Temp)
+    ]
+    var instructions: [MirInst] = []
+    if marker:
+        instructions.push(MirInst(kind: MirInstKind.Intrinsic(nil,
+            MIR_STORAGE_OWNED_RAW_BASE_V1, [MirOperand.copy(LocalId(id: 0)),
+                MirOperand.const_int(128), MirOperand.const_int(9201),
+                MirOperand.const_int(4), MirOperand.const_int(5)]), span: nil))
+    instructions.push(MirInst(kind: MirInstKind.Const(LocalId(id: 1),
+        MirConstValue.Int(index_value), i64_type), span: nil))
+    instructions.push(MirInst(kind: MirInstKind.GetElementPtr(LocalId(id: 2),
+        MirOperand.copy(LocalId(id: 0)), [MirOperand.copy(LocalId(id: 1))]), span: nil))
+    instructions.push(MirInst(kind: MirInstKind.Load(LocalId(id: 3),
+        MirOperand.copy(LocalId(id: 2))), span: nil))
+    instructions.push(MirInst(kind: MirInstKind.GetField(LocalId(id: 4),
+        MirOperand.copy(LocalId(id: 3)), 1), span: nil))
+    if extra_use:
+        instructions.push(MirInst(kind: MirInstKind.Copy(LocalId(id: 5),
+            LocalId(id: 2)), span: nil))
+    val function = MirFunction(symbol: SymbolId.new(41), name: "read_mass",
+        signature: MirSignature(params: [base_type], return_type: i64_type,
+            is_variadic: false), locals: locals,
+        blocks: [MirBlock(id: BlockId.new(0), label: Some("entry"),
+            instructions: instructions,
+            terminator: MirTerminator.Ret(Some(MirOperand.copy(LocalId(id: 4)))))],
+        entry_block: BlockId.new(0), span: Span(start: 0, end: 0, line: 1, col: 1),
+        generic_params: [], is_generic_template: false, specialization_of: nil,
+        type_bindings: {})
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(41)] = function
+    MirModule(name: "typed_storage_producer", functions: functions,
+        statics: {}, constants: {}, types: {})
+
+fn count_intrinsic(module: MirModule, name: text) -> i64:
+    var count = 0
+    for function in module.functions.values():
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case Intrinsic(_, observed, _):
+                        if observed == name: count = count + 1
+                    case _: pass
+    count
+
+describe "automatic compiler-owned typed storage producer":
+    it "replaces the canonical record chain and retains the value load":
+        val original = producer_module(true, 3, false)
+        val produced = produce_mir_typed_storage_views_v1(original,
+            [producer_declaration(StorageLayoutKind.SoA)])
+        assert_true(produced.ok)
+        assert_equal(produced.produced_count, 1)
+        assert_equal(produced.sites.len(), 1)
+        assert_equal(produced.evidence.len(), 1)
+        assert_equal(produced.evidence[0].allocation_provenance,
+            "arena:task-9:allocation-1")
+        assert_equal(count_intrinsic(original, MIR_STORAGE_PROJECT_FIELD_V1), 0)
+        assert_equal(count_intrinsic(produced.module, MIR_STORAGE_PROJECT_FIELD_V1), 1)
+        val instructions = produced.module.functions[SymbolId.new(41)].blocks[0].instructions
+        match instructions[instructions.len() - 2].kind:
+            case Intrinsic(Some(dest), name, args):
+                assert_equal(dest.id, 2)
+                assert_equal(name, MIR_STORAGE_PROJECT_FIELD_V1)
+                assert_equal(args.len(), 3)
+            case _: assert_true(false)
+        match instructions[instructions.len() - 1].kind:
+            case Load(dest, ptr):
+                assert_equal(dest.id, 4)
+                match ptr.kind:
+                    case Copy(local): assert_equal(local.id, 2)
+                    case _: assert_true(false)
+            case _: assert_true(false)
+
+    it "feeds the existing exact AoS and SoA late address rewrite":
+        for layout in [StorageLayoutKind.AoS, StorageLayoutKind.SoA]:
+            val produced = produce_mir_typed_storage_views_v1(
+                producer_module(true, 3, false), [producer_declaration(layout)])
+            val lowered = lower_mir_storage_project_fields_v1(
+                produced.module, produced.sites)
+            assert_true(lowered.ok)
+            assert_equal(lowered.rewritten_count, 1)
+            assert_equal(count_intrinsic(lowered.module,
+                MIR_STORAGE_PROJECT_ADDRESS_V1), 1)
+        match compile_module_with_backend_target_cpu_storage_declarations(
+            "native", producer_module(true, 3, false), false, 0, "",
+            [producer_declaration(StorageLayoutKind.SoA)]):
+            case Ok(compiled): assert_true(compiled.object_code != nil)
+            case Err(_): assert_true(false)
+
+    it "rejects absent allocation proof out-of-range indices and escapes atomically":
+        val no_marker_input = producer_module(false, 3, false)
+        val no_marker = produce_mir_typed_storage_views_v1(no_marker_input,
+            [producer_declaration(StorageLayoutKind.SoA)])
+        assert_false(no_marker.ok)
+        assert_equal(no_marker.reason, "storage-view-owned-base-marker-missing")
+        assert_equal(count_intrinsic(no_marker.module, MIR_STORAGE_PROJECT_FIELD_V1), 0)
+        val out_of_range = produce_mir_typed_storage_views_v1(
+            producer_module(true, 5, false),
+            [producer_declaration(StorageLayoutKind.SoA)])
+        assert_equal(out_of_range.reason, "storage-view-index-bounds-unproven")
+        val escaped = produce_mir_typed_storage_views_v1(
+            producer_module(true, 3, true),
+            [producer_declaration(StorageLayoutKind.SoA)])
+        assert_equal(escaped.reason, "storage-projection-temporary-escapes")
+
+    it "rejects unused declarations rather than emitting stale evidence":
+        val empty = producer_module(true, 3, false)
+        val declaration = mir_typed_storage_view_declaration_v1(99, 0, 9201,
+            "arena:other", "snapshot:other", 4,
+            MirTypedStorageBackingKindV1.CompilerOwnedRaw, 5, 128, 24, false,
+            true, producer_declaration(StorageLayoutKind.AoS).plan,
+            producer_declaration(StorageLayoutKind.AoS).fields)
+        val result = produce_mir_typed_storage_views_v1(empty, [declaration])
+        assert_false(result.ok)
+        assert_equal(result.reason, "stale-typed-storage-declaration")
+        assert_equal(result.sites.len(), 0)
