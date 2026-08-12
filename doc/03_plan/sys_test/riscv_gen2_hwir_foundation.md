@@ -190,6 +190,12 @@ composed frontend equivalence, which remains false pending one
 parcel/operand/redirect/retirement target path. It is not established by the
 implemented scenario catalog or bootstrap-seed activity.
 
+The host-side `hwir_zca_target_trap_exhaustive_oracle_spec` now executes the
+actual prepared RV32 C.JAL and RV64 C.ADDIW target-trap HWIR graphs for every
+16-bit parcel, checking tuple determinism, the legal/illegal/trap partition,
+and the sole C.EBREAK trap. This closes the composition-oracle design gap but
+is not an independent generated-RTL/retirement equivalence receipt.
+
 The 24 non-terminal strict-HWIR rows are resolved from a single
 `RiscvZcaStrictContract` catalog shared by compiler lowering and target-evidence
 metadata. Unit evidence verifies catalog identity and evidence provenance; target
