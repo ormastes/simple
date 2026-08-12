@@ -148,3 +148,27 @@ produced checksum `2436809228175672195`, and the final run recorded 42 native
 SIMD hits. This demonstrates bit-exact cross-architecture execution and a QEMU
 regression direction. Emulator timing is not physical ARM performance, bare
 metal scanout, or end-to-end 8K/80 proof.
+
+## SSE2 fallback vectorization and forced-dispatch evidence
+
+The x86-64 SSE2 fallback previously invoked a one-pixel helper for every pixel.
+It now processes four opaque-destination pixels at a time using SSE2 byte
+unpacking, 16-bit channel multiplication, exact division by 255, packed channel
+assembly, and boxed 64-bit stores. Mixed-alpha destinations and scalar tails
+retain the exact general oracle. A compile-time-only
+`SIMPLE_RUNTIME_FORCE_NO_AVX2` switch makes this fallback directly measurable on
+an AVX2 host without changing normal runtime dispatch.
+
+On the native 7680x4320, one-percent-damage, seven-sample harness with forced
+SSE2 dispatch, p95 changed as follows:
+
+| Operation | Before ns | After ns |
+|---|---:|---:|
+| variable alpha blend | 4,642,000 | 929,329 |
+| constant alpha blend | 4,652,659 | 734,316 |
+| six-call frame | 10,089,472 | 2,944,076 |
+
+The forced-SSE2 C kernel and in-place span corpus passed. Both benchmark runs
+produced checksum `2436809228175672195`; the after run recorded 35 native SIMD
+hits. This proves the production SSE2 fallback under forced dispatch and its
+isolated retained-damage envelope, not full-frame or end-to-end 8K/80.

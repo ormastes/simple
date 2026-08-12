@@ -91,7 +91,9 @@ int64_t   rt_mlkem_modq_avx2_selfcheck(void);
 #endif
 
 static inline int simd_detect_avx2(void) {
-#if SIMD_CAN_AVX2
+#if defined(SIMPLE_RUNTIME_FORCE_NO_AVX2)
+    return 0;
+#elif SIMD_CAN_AVX2
 #  if defined(__GNUC__) || defined(__clang__)
     unsigned int eax, ebx, ecx, edx;
     /* AVX2 requires AVX plus OS-managed XMM/YMM state. */

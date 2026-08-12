@@ -1764,8 +1764,60 @@ static void engine2d_blend_boxed_avx2(int64_t* dst, const int64_t* src,
 static void engine2d_blend_boxed_sse2(int64_t* dst, const int64_t* src,
                                       int64_t n, uint32_t const_src,
                                       int use_const) {
-    if (n > 0) engine2d_record_simd_row_hit();
-    for (int64_t i = 0; i < n; i++) {
+    int64_t i = 0;
+    if (n >= 4) engine2d_record_simd_row_hit();
+    for (; i + 4 <= n; i += 4) {
+        uint32_t s[4], d[4];
+        int opaque_dst = 1;
+        for (int lane = 0; lane < 4; lane++) {
+            s[lane] = use_const ? const_src : engine2d_unbox_pixel(src[i + lane]);
+            d[lane] = engine2d_unbox_pixel(dst[i + lane]);
+            opaque_dst &= ((d[lane] >> 24) == 255u);
+        }
+        if (!opaque_dst) {
+            for (int lane = 0; lane < 4; lane++) {
+                dst[i + lane] = engine2d_box_pixel((uint32_t)
+                    engine2d_blend_pixel((int64_t)(uint64_t)s[lane],
+                                         (int64_t)(uint64_t)d[lane]));
+            }
+            continue;
+        }
+        __m128i sv = _mm_set_epi32((int)s[3], (int)s[2],
+                                   (int)s[1], (int)s[0]);
+        __m128i dv = _mm_set_epi32((int)d[3], (int)d[2],
+                                   (int)d[1], (int)d[0]);
+        const __m128i zero = _mm_setzero_si128();
+        const __m128i one = _mm_set1_epi16(1);
+        const __m128i alpha_mask = _mm_set_epi16(
+            255, 0, 0, 0, 255, 0, 0, 0);
+        __m128i packed_halves[2];
+        for (int half = 0; half < 2; half++) {
+            int lane0 = half * 2;
+            uint16_t sa0 = (uint16_t)(s[lane0] >> 24);
+            uint16_t sa1 = (uint16_t)(s[lane0 + 1] >> 24);
+            __m128i sch = half == 0 ? _mm_unpacklo_epi8(sv, zero) :
+                                       _mm_unpackhi_epi8(sv, zero);
+            __m128i dch = half == 0 ? _mm_unpacklo_epi8(dv, zero) :
+                                       _mm_unpackhi_epi8(dv, zero);
+            __m128i saw = _mm_set_epi16(sa1, sa1, sa1, sa1,
+                                        sa0, sa0, sa0, sa0);
+            __m128i invw = _mm_set_epi16(255 - sa1, 255 - sa1,
+                                         255 - sa1, 255 - sa1,
+                                         255 - sa0, 255 - sa0,
+                                         255 - sa0, 255 - sa0);
+            __m128i acc = _mm_add_epi16(_mm_mullo_epi16(sch, saw),
+                                        _mm_mullo_epi16(dch, invw));
+            __m128i q = _mm_srli_epi16(
+                _mm_add_epi16(_mm_add_epi16(acc, one),
+                              _mm_srli_epi16(acc, 8)), 8);
+            q = _mm_or_si128(q, alpha_mask);
+            packed_halves[half] = _mm_slli_epi64(
+                _mm_unpacklo_epi32(_mm_packus_epi16(q, zero), zero), 3);
+        }
+        _mm_storeu_si128((__m128i*)(void*)(dst + i), packed_halves[0]);
+        _mm_storeu_si128((__m128i*)(void*)(dst + i + 2), packed_halves[1]);
+    }
+    for (; i < n; i++) {
         uint32_t s = use_const ? const_src : engine2d_unbox_pixel(src[i]);
         uint32_t d = engine2d_unbox_pixel(dst[i]);
         dst[i] = engine2d_box_pixel(engine2d_blend_sse2_pixel(s, d));
