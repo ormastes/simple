@@ -56,7 +56,7 @@ use common.ui.draw_ir.{
     draw_ir_text_shaped_font,
     draw_ir_style_prop
 }
-use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{Engine2dResolvedDrawIrImage, engine2d_draw_ir_adv_batch, engine2d_draw_ir_adv_batch_with_images, engine2d_draw_ir_adv_composition, engine2d_draw_ir_adv_composition_present_with_images, engine2d_draw_ir_adv_fresh_device_composition_with_images, engine2d_draw_ir_adv_strict_vulkan_primitives_with_images, engine2d_resolved_draw_ir_image}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{Engine2dResolvedDrawIrImage, engine2d_draw_ir_adv_batch, engine2d_draw_ir_adv_batch_with_images, engine2d_draw_ir_adv_composition, engine2d_draw_ir_adv_composition_present_with_images, engine2d_draw_ir_adv_fresh_device_composition_with_images, engine2d_draw_ir_adv_strict_vulkan_primitives_with_images, engine2d_draw_ir_render_damaged, engine2d_resolved_draw_ir_image}
 use std.gc_async_mut.gpu.engine2d.draw_ir_runtime_adv.{engine2d_draw_ir_adv_batch_runtime_queue}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.host_gpu_event_queue.{engine2d_host_gpu_runtime_queue_with_backend_handle, engine2d_host_gpu_runtime_reset}
@@ -113,6 +113,41 @@ fn _css_background_result(style: [DrawIrStyleProp], command_x: i32, command_y: i
     result
 
 describe "Engine2D advanced Draw IR executor":
+
+    it "updates only exact retained-frame damage":
+        var engine = Engine2D.create_with_backend(8, 4, "cpu")
+        engine.clear(BG)
+        engine.present()
+        val command = draw_ir_rect("full-red", 0, 0, 8, 4, RED)
+        val outcome = engine2d_draw_ir_render_damaged(
+            engine, [command], [2, 1, 2, 1], true)
+        engine = outcome.engine
+        expect(outcome.unsupported_kinds).to_equal("none")
+        expect(outcome.ops_rendered).to_equal(1)
+        expect(outcome.readback.pixels).to_equal([
+            BG, BG, BG, BG, BG, BG, BG, BG,
+            BG, BG, RED, RED, BG, BG, BG, BG,
+            BG, BG, BG, BG, BG, BG, BG, BG,
+            BG, BG, BG, BG, BG, BG, BG, BG
+        ])
+        engine.shutdown()
+
+    it "rejects overlapping retained damage before raster":
+        var engine = Engine2D.create_with_backend(8, 4, "cpu")
+        engine.clear(BG)
+        val command = draw_ir_rect("full-red", 0, 0, 8, 4, RED)
+        val outcome = engine2d_draw_ir_render_damaged(
+            engine, [command], [0, 0, 4, 2, 3, 1, 2, 2], true)
+        engine = outcome.engine
+        expect(outcome.unsupported_kinds).to_equal("invalid-damage-plan")
+        expect(outcome.ops_rendered).to_equal(0)
+        expect(engine.read_pixels()).to_equal([
+            BG, BG, BG, BG, BG, BG, BG, BG,
+            BG, BG, BG, BG, BG, BG, BG, BG,
+            BG, BG, BG, BG, BG, BG, BG, BG,
+            BG, BG, BG, BG, BG, BG, BG, BG
+        ])
+        engine.shutdown()
 
     it "fails closed before strict Vulkan primitive execution without a Vulkan engine":
         var engine = Engine2D.create_with_backend(8, 6, "cpu")
