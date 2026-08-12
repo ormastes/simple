@@ -46,6 +46,11 @@ retention. The actor FIFO uses a bounded head cursor and compacts only when a
 full backing buffer needs reuse; a native execution gate and typed public
 backpressure receipt remain open.
 
+The legacy actor mailbox now uses one class-backed state shared by copied
+`ActorRef` and scheduler values. This repairs the previous copied-queue split,
+but is not yet an ownership-safe actor transport: native send/ask routing,
+lifecycle closure, cancellation, and typed transfer envelopes remain required.
+
 WP-18 now has internal runtime groundwork for a deliberately narrow bounded
 scalar pool-state pilot. Capacity counts pending, running, and completed but
 unreleased tasks; credit returns only on release. Tagged generation handles are

@@ -69,26 +69,24 @@ impl ActorMessage:
 # Actor Mailbox
 # ================================================================
 
-struct ActorMailbox:
-    """Thread-safe bounded message queue for actors.
-
-    Messages are processed in FIFO order. When the mailbox reaches
-    capacity, new messages are rejected (back-pressure).
-
-    Fields:
-        queue: Internal bounded message storage
-        head: Index of the next pending message in `queue`
-        capacity: Maximum number of messages
-        mutex: Mutex handle for thread-safe access
-        total_received: Count of messages received
-        total_dropped: Count of messages dropped due to capacity
-    """
+class ActorMailboxState:
+    """The single mutable authority shared by every mailbox handle copy."""
     queue: [ActorMessage]
     head: i64
     capacity: i64
     mutex: MutexHandle
     total_received: i64
     total_dropped: i64
+
+struct ActorMailbox:
+    """Copyable handle to one thread-safe bounded actor mailbox authority.
+
+    Messages are processed in FIFO order. When the mailbox reaches
+    capacity, new messages are rejected (back-pressure). Copying this handle
+    retains the same `ActorMailboxState`; it never creates an independent
+    queue for an ActorRef or scheduler registry entry.
+    """
+    state: ActorMailboxState
 
 impl ActorMailbox:
     static fn new(capacity: i64) -> ActorMailbox:
@@ -98,14 +96,15 @@ impl ActorMailbox:
             capacity: Maximum messages before back-pressure. Zero or a
                 negative value resolves to the finite policy default (256).
         """
-        ActorMailbox(
+        val resolved_capacity = actor_mailbox_effective_capacity(capacity)
+        ActorMailbox(state: ActorMailboxState(
             queue: [],
             head: 0,
-            capacity: actor_mailbox_effective_capacity(capacity),
+            capacity: resolved_capacity,
             mutex: mutex_create(),
             total_received: 0,
             total_dropped: 0
-        )
+        ))
 
     static fn default() -> ActorMailbox:
         """Create a mailbox with the finite policy default capacity (256)."""
@@ -113,7 +112,7 @@ impl ActorMailbox:
 
     fn pending_count() -> i64:
         """Count pending entries without treating consumed prefix storage as live."""
-        val pending = self.queue.len() - self.head
+        val pending = self.state.queue.len() - self.state.head
         if pending < 0:
             return 0
         pending
@@ -124,10 +123,10 @@ impl ActorMailbox:
         This makes dequeue cursor-only in the normal case and turns array
         copying into one bounded compaction per capacity-sized reuse cycle.
         """
-        if self.head <= 0 or self.queue.len() < self.capacity:
+        if self.state.head <= 0 or self.state.queue.len() < self.state.capacity:
             return
-        self.queue = self.queue.slice(self.head, self.queue.len())
-        self.head = 0
+        self.state.queue = self.state.queue.slice(self.state.head, self.state.queue.len())
+        self.state.head = 0
 
     me enqueue(msg: ActorMessage) -> bool:
         """Add a message to the mailbox.
@@ -135,17 +134,17 @@ impl ActorMailbox:
         Returns true if the message was accepted, false if mailbox is full.
         Thread-safe via mutex.
         """
-        self.mutex.lock()
-        self.total_received = self.total_received + 1
+        self.state.mutex.lock()
+        self.state.total_received = self.state.total_received + 1
 
-        if self.pending_count() >= self.capacity:
-            self.total_dropped = self.total_dropped + 1
-            self.mutex.unlock()
+        if self.pending_count() >= self.state.capacity:
+            self.state.total_dropped = self.state.total_dropped + 1
+            self.state.mutex.unlock()
             return false
 
         self.compact_consumed_prefix_if_needed()
-        self.queue.push(msg)
-        self.mutex.unlock()
+        self.state.queue.push(msg)
+        self.state.mutex.unlock()
         true
 
     me dequeue() -> ActorMessage?:
@@ -153,18 +152,18 @@ impl ActorMailbox:
 
         Returns nil if the mailbox is empty. Thread-safe via mutex.
         """
-        self.mutex.lock()
+        self.state.mutex.lock()
         if self.pending_count() <= 0:
-            self.mutex.unlock()
+            self.state.mutex.unlock()
             return nil
-        val msg = self.queue[self.head]
-        self.head = self.head + 1
+        val msg = self.state.queue[self.state.head]
+        self.state.head = self.state.head + 1
         # Dropping the fully consumed storage keeps the retained footprint
         # bounded even when the producer stops before the next enqueue.
-        if self.head >= self.queue.len():
-            self.queue = []
-            self.head = 0
-        self.mutex.unlock()
+        if self.state.head >= self.state.queue.len():
+            self.state.queue = []
+            self.state.head = 0
+        self.state.mutex.unlock()
         Some(msg)
 
     fn is_empty() -> bool:
@@ -177,20 +176,20 @@ impl ActorMailbox:
 
     fn is_full() -> bool:
         """Check if the mailbox is at capacity."""
-        self.pending_count() >= self.capacity
+        self.pending_count() >= self.state.capacity
 
     me drain() -> [ActorMessage]:
         """Remove and return all messages from the mailbox."""
-        self.mutex.lock()
-        val all = if self.head <= 0:
-            self.queue
+        self.state.mutex.lock()
+        val all = if self.state.head <= 0:
+            self.state.queue
         else:
-            self.queue.slice(self.head, self.queue.len())
-        self.queue = []
-        self.head = 0
-        self.mutex.unlock()
+            self.state.queue.slice(self.state.head, self.state.queue.len())
+        self.state.queue = []
+        self.state.head = 0
+        self.state.mutex.unlock()
         all
 
     fn stats_string() -> text:
         """Return mailbox statistics as a string."""
-        "Mailbox(pending={self.pending_count()}, capacity={self.capacity}, received={self.total_received}, dropped={self.total_dropped})"
+        "Mailbox(pending={self.pending_count()}, capacity={self.state.capacity}, received={self.state.total_received}, dropped={self.state.total_dropped})"

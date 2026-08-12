@@ -589,10 +589,9 @@ dev-done
   dependency warnings without a final verdict; it is not counted as behavioral
   evidence. A real self-hosted native FIFO/compaction/backpressure execution
   gate remains required.
-- audit: The legacy `std.actor` facade is not an admitted WP-16 transport
-  implementation. `ActorRef` stores an `ActorMailbox` value while the
-  scheduler stores a separate `Actor` value, and `ActorRef.send` writes its
-  retained mailbox directly. The design therefore lacks one shared
-  scheduler-owned mailbox authority. Do not route parent/child transfers
-  through it; replace this pair with a stable state handle and prove send/ask
-  reach the same mailbox before claiming actor migration.
+- impl: Began the WP-16 actor ownership repair. `ActorMailbox` is now a
+  copyable handle around one `ActorMailboxState` class, so an `ActorRef` and
+  scheduler-held `Actor` copy address the same bounded queue rather than two
+  independent value queues. This is not yet an admitted actor transport:
+  scheduler/global lifecycle values remain legacy, and native send/ask routing
+  plus close/cancellation behavior need execution evidence.
