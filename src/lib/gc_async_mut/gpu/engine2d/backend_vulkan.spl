@@ -224,6 +224,7 @@ class VulkanBackend:
     pending_compute_command: i64
     pending_compute_pipelines: [i64]   # preallocated, VK_PENDING_COMPUTE_CAP=16 slots
     pending_compute_descriptors: [i64] # preallocated, parallel to pipelines
+    pending_compute_sources: [i64]     # image source buffer per slot; zero for framebuffer-only work
     pending_compute_count: i64         # live entries in the two arrays above
     pending_font_descriptors: [i64]
     pending_font_params: [i64]
@@ -297,6 +298,7 @@ class VulkanBackend:
             pending_compute_command: 0,
             pending_compute_pipelines: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             pending_compute_descriptors: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            pending_compute_sources: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             pending_compute_count: 0,
             pending_font_descriptors: [],
             pending_font_params: [],
@@ -732,14 +734,6 @@ impl RenderBackend for VulkanBackend:
                 right > clip_right or bottom > clip_bottom):
                 return 0
 
-        val pending_status = self._flush_pending_compute()
-        if pending_status <= 0:
-            if pending_status < 0:
-                self.completion_unknown = true
-            return pending_status
-        if pending_status == VK_DISPATCH_COMPLETED_INELIGIBLE:
-            self.mark_cpu_fallback("primitive-batch-cleanup-ineligible")
-
         val src_size = pixel_count * 4
         val d_src = vulkan_sffi_alloc_buffer(src_size, 0x80)
         if d_src <= 0:
@@ -753,7 +747,10 @@ impl RenderBackend for VulkanBackend:
             opacity_milli, composite_mode, src_w, src_h)
         val gx = (_i64(dst_w) + 15) / 16
         val gy = (_i64(dst_h) + 15) / 16
-        val dispatched = vulkan_dispatch_image_composite_checked(self.d_framebuffer, self.pipe_blit, d_src, pc, gx, gy, 1)
+        val dispatched = if self.frame_batching_enabled:
+            self._enqueue_image_composite(self.pipe_blit, d_src, pc, gx, gy, 1)
+        else:
+            vulkan_dispatch_image_composite_checked(self.d_framebuffer, self.pipe_blit, d_src, pc, gx, gy, 1)
         if vulkan_order_trace_enabled():
             vulkan_order_trace("image-composite x={x} y={y} w={dst_w} h={dst_h} mode={composite_mode} rc={dispatched} fb={self.d_framebuffer}")
         if dispatched > 0:

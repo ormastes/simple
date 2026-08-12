@@ -26,6 +26,7 @@ extern int64_t rt_vulkan_submit_and_wait_fence(int64_t);
 extern int64_t rt_vulkan_wait_fence(int64_t, int64_t);
 extern int64_t rt_vulkan_destroy_fence(int64_t);
 extern int64_t rt_vulkan_copy_from_buffer_raw(int64_t, int64_t, int64_t, int64_t);
+extern int64_t rt_vulkan_copy_to_buffer_raw(int64_t, int64_t, int64_t, int64_t);
 
 typedef struct { uint32_t color, width, height, reserved[13]; } ClearPush;
 typedef struct {
@@ -40,6 +41,11 @@ typedef struct {
     int32_t thickness, fb_width, fb_height, clip_x, clip_y, clip_width,
             clip_height, clip_enabled, reserved[3];
 } LinePush;
+typedef struct {
+    int32_t x, y, width, height, fb_width, fb_height;
+    int32_t clip_x, clip_y, clip_width, clip_height, clip_enabled;
+    int32_t opacity_milli, composite_mode, src_width, src_height, reserved;
+} ImagePush;
 
 static uint64_t now_ns(void) {
     struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
@@ -67,6 +73,7 @@ int main(int argc, char **argv) {
     int rect_mode = argc == 8;
     int line_mode = rect_mode && strstr(argv[6], "line") != NULL;
     int axis_line_mode = line_mode && strstr(argv[6], "axis_line") != NULL;
+    int image_mode = rect_mode && strstr(argv[6], "image_copy") != NULL;
     uint32_t requested_rects = rect_mode ? (uint32_t)strtoul(argv[7], NULL, 10) : 0;
     uint64_t full_pixels = (uint64_t)width * height;
     uint64_t active_pixels = full_pixels / 10000 * bp + (full_pixels % 10000) * bp / 10000;
@@ -79,6 +86,7 @@ int main(int argc, char **argv) {
     int64_t shader = rt_vulkan_compile_spirv_raw((int64_t)(uintptr_t)spirv, (int64_t)spirv_size);
     int64_t pipe = rt_vulkan_create_compute_pipeline(shader, (int64_t)(uintptr_t)"main", 64);
     if (!buffer || !shader || !pipe) return 4;
+    int64_t source = 0;
     int64_t rect_shader = 0, rect_pipe = 0;
     if (rect_mode) {
         size_t rect_spirv_size = 0;
@@ -90,6 +98,17 @@ int main(int argc, char **argv) {
             rect_shader, (int64_t)(uintptr_t)"main", 64);
         free(rect_spirv);
         if (!rect_shader || !rect_pipe) return 4;
+        if (image_mode) {
+            uint64_t source_bytes = active_pixels * 4;
+            source = rt_vulkan_alloc_buffer((int64_t)source_bytes, 0x83);
+            uint32_t *source_pixels = malloc((size_t)source_bytes);
+            if (!source || !source_pixels) return 4;
+            for (uint64_t i = 0; i < active_pixels; i++) source_pixels[i] = 0xff8844ccu;
+            int uploaded = rt_vulkan_copy_to_buffer_raw(source,
+                (int64_t)(uintptr_t)source_pixels, (int64_t)source_bytes, 0);
+            free(source_pixels);
+            if (!uploaded) return 4;
+        }
     }
     uint64_t *times = calloc(samples, sizeof(uint64_t));
     ClearPush pc = { .color = 0xff336699u, .width = (uint32_t)active_pixels, .height = 1 };
@@ -117,6 +136,7 @@ int main(int argc, char **argv) {
         int64_t desc = rt_vulkan_create_descriptor_set(active_pipe);
         int64_t cmd = 0, fence = 0;
         int ok = desc > 0 && rt_vulkan_bind_buffer(desc, 0, buffer);
+        if (ok && image_mode) ok = rt_vulkan_bind_buffer(desc, 1, source);
         if (ok) { cmd = rt_vulkan_begin_compute(); ok = cmd > 0; }
         if (ok) ok = rt_vulkan_bind_pipeline(cmd, active_pipe);
         if (ok) ok = rt_vulkan_bind_descriptors(cmd, desc);
@@ -142,6 +162,26 @@ int main(int argc, char **argv) {
                         (int64_t)(uintptr_t)&lpc, 64) &&
                         rt_vulkan_dispatch(cmd, 1, 1, 1);
                 }
+            }
+        } else if (image_mode) {
+            uint64_t full_rows = active_pixels / width;
+            uint32_t images = requested_rects;
+            if (images > full_rows) images = (uint32_t)full_rows;
+            uint64_t row = 0;
+            for (uint32_t r = 0; ok && r < images; r++) {
+                uint64_t remaining = full_rows - row;
+                uint32_t ih = (uint32_t)((remaining + (images - r) - 1) / (images - r));
+                ImagePush ipc = { .x = 0, .y = (int32_t)row,
+                    .width = (int32_t)width, .height = (int32_t)ih,
+                    .fb_width = (int32_t)width, .fb_height = (int32_t)height,
+                    .clip_x = 0, .clip_y = 0, .clip_width = (int32_t)width,
+                    .clip_height = (int32_t)height, .clip_enabled = 1,
+                    .opacity_milli = 1000, .composite_mode = 0,
+                    .src_width = (int32_t)width, .src_height = (int32_t)ih };
+                ok = rt_vulkan_push_constants_raw(cmd, rect_pipe,
+                    (int64_t)(uintptr_t)&ipc, 64) &&
+                    rt_vulkan_dispatch(cmd, (width + 15) / 16, (ih + 15) / 16, 1);
+                row += ih;
             }
         } else if (rect_mode) {
             uint64_t full_rows = active_pixels / width;
@@ -207,6 +247,9 @@ int main(int argc, char **argv) {
             uint64_t y = i / width;
             expected = (y < (uint64_t)requested_rects * 2 && y % 2 == 0) ?
                 0xff22cc44u : 0xff101010u;
+        } else if (image_mode) {
+            expected = i < active_pixels - active_pixels % width ?
+                0xff8844ccu : 0xff101010u;
         } else if (rect_mode) {
             expected = i < active_pixels ? 0xffcc2222u : 0xff101010u;
         }
@@ -219,7 +262,8 @@ int main(int argc, char **argv) {
     printf("engine2d_vulkan_active_pixels=%llu\n", (unsigned long long)active_pixels);
     printf("engine2d_vulkan_operation=%s\n", axis_line_mode ? "axis_line_rect_batched" :
         (line_mode ? "line_batched" :
-        (rect_mode ? "rect_filled_batched" : "clear")));
+        (image_mode ? "image_copy_batched" :
+        (rect_mode ? "rect_filled_batched" : "clear"))));
     printf("engine2d_vulkan_requested_rect_count=%u\n", requested_rects);
     printf("engine2d_vulkan_samples=%u\n", samples);
     printf("engine2d_vulkan_submit_fence_p50_ns=%llu\n", (unsigned long long)times[(samples-1)/2]);
@@ -234,6 +278,7 @@ int main(int argc, char **argv) {
     free(readback); free(times); free(spirv);
     if (rect_pipe) rt_vulkan_destroy_pipeline(rect_pipe);
     if (rect_shader) rt_vulkan_destroy_shader(rect_shader);
+    if (source) rt_vulkan_free_buffer(source);
     rt_vulkan_destroy_pipeline(pipe); rt_vulkan_destroy_shader(shader);
     rt_vulkan_free_buffer(buffer); rt_vulkan_shutdown();
     return mismatch ? 7 : 0;

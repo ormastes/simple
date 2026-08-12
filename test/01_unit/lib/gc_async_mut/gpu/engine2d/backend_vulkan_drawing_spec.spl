@@ -285,6 +285,32 @@ describe "Vulkan 2D drawing lane — VulkanBackend raster":
                 val kind = vulkan_classify_error(b.last_error)
                 assert_not_equal(kind, VulkanErrorKind.None)
 
+        it "retains multiple image sources through one frame batch fence":
+            var b = VulkanBackend.create()
+            if b.init(4, 1):
+                val bg = 0xFF101010u32
+                val red = 0xFFFF0000u32
+                val green = 0xFF00FF00u32
+                b.enable_frame_batching()
+                b.clear(bg)
+                b.draw_image(0, 0, 1, 1, [red])
+                b.draw_image(3, 0, 1, 1, [green])
+                expect(b.pending_compute_count).to_equal(3)
+                expect(b.pending_compute_sources[0]).to_equal(0)
+                expect(b.pending_compute_sources[1]).to_be_greater_than(0)
+                expect(b.pending_compute_sources[2]).to_be_greater_than(0)
+                val readback = b.read_pixels_with_source()
+                expect(readback.pixels).to_equal([red, bg, bg, green])
+                expect(readback.source).to_equal("device_readback")
+                expect(b.pending_compute_count).to_equal(0)
+                expect(b.pending_compute_sources).to_equal(
+                    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+                expect(b.cpu_fallback_used).to_be(false)
+                b.shutdown()
+            else:
+                val kind = vulkan_classify_error(b.last_error)
+                assert_not_equal(kind, VulkanErrorKind.None)
+
         it "draw_line does not crash backend":
             var b = VulkanBackend.create()
             if b.init(8, 8):

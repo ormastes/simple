@@ -85,3 +85,32 @@ thick lines. Reversed endpoints and inclusive endpoints are covered explicitly.
 The conservative isolated envelope is 12 ordered lines or 48 axis-aligned
 lines on llvmpipe. This remains compute-only evidence: it proves neither a
 physical GPU nor swapchain presentation nor end-to-end dynamic 8K/80 rendering.
+
+## Retained image copies and frame-owned source lifetime
+
+The production image path previously flushed preceding primitives and issued a
+separate fenced submission for every image. It now records image composites in
+the Engine-owned frame command buffer. Each descriptor and uploaded source
+buffer remains live until the shared fence completes, then the normal release
+or quarantine owner disposes it. The fixed batch capacity flushes safely before
+accepting a seventeenth unique image dependency.
+
+The native ABI probe pre-uploads one opaque source, copies 5% of the retained
+8K framebuffer, times only record/submit/fence completion, and performs an
+untimed full-buffer oracle readback:
+
+| Image regions | p50 ns | p95 ns | Mismatches | Budget |
+|---:|---:|---:|---:|---:|
+| 1 | 7,649,250 | 9,783,128 | 0 | PASS |
+| 2 | 6,840,534 | 8,226,973 | 0 | PASS |
+| 4 | 12,283,696 | 16,353,735 | 0 | FAIL |
+| 8 | 10,745,798 | 15,498,321 | 0 | FAIL |
+| 16 | 10,759,795 | 17,231,895 | 0 | FAIL |
+| 32 | 15,268,782 | 17,531,196 | 0 | FAIL |
+
+The conservative isolated llvmpipe envelope is two image regions at 5% damage.
+Source allocation, CPU-to-device upload, DrawIR traversal, readback, and
+presentation are excluded from the timed interval and must not be inferred as
+8K/80 proof. Production still allocates/uploads each transient pixel array;
+stable resource identities and a bounded device image cache remain required to
+remove that cost for retained Web/GUI images.
