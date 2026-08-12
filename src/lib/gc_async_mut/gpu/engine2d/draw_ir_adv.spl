@@ -1451,6 +1451,18 @@ struct Engine2dDrawIrDamageSelection:
     culled_logical_count: i32
     culled_command_count: i32
 
+class Engine2dDrawIrSpatialIndex:
+    valid: bool
+    cells_x: i32
+    cells_y: i32
+    starts: [i32]
+    items: [i32]
+    uncertain: [i32]
+    logical_total: i32
+
+val ENGINE2D_DRAW_IR_INDEX_CELL_PX: i64 = 256
+val ENGINE2D_DRAW_IR_INDEX_MAX_ENTRIES: i32 = 1048576
+
 struct Engine2dOcclusionProof:
     covered: bool
     remaining: i32
@@ -1714,6 +1726,208 @@ fn _engine2d_draw_ir_select_damage_commands(
             commands: selected, logical_weights: selected_weights),
         culled_logical_count: culled,
         culled_command_count: culled_commands)
+
+fn _engine2d_draw_ir_spatial_index_invalid() -> Engine2dDrawIrSpatialIndex:
+    Engine2dDrawIrSpatialIndex(
+        valid: false, cells_x: 0, cells_y: 0,
+        starts: [], items: [], uncertain: [], logical_total: 0)
+
+# Build one bounded counting-sort grid for the immutable coalesced plan. Only
+# exact plain fills enter cells; uncertain commands live in one ordered lane.
+# The cap fails open to the linear selector instead of risking unbounded index
+# growth for a pathological full-surface command stream.
+fn _engine2d_draw_ir_build_spatial_index(
+    plan: Engine2dDrawIrCommandPlan, width: i32, height: i32
+) -> Engine2dDrawIrSpatialIndex:
+    if width <= 0 or height <= 0:
+        return _engine2d_draw_ir_spatial_index_invalid()
+    val cells_x = ((width.to_i64() + ENGINE2D_DRAW_IR_INDEX_CELL_PX - 1) /
+                   ENGINE2D_DRAW_IR_INDEX_CELL_PX).to_i32()
+    val cells_y = ((height.to_i64() + ENGINE2D_DRAW_IR_INDEX_CELL_PX - 1) /
+                   ENGINE2D_DRAW_IR_INDEX_CELL_PX).to_i32()
+    val cell_count_i64 = cells_x.to_i64() * cells_y.to_i64()
+    if cell_count_i64 <= 0 or cell_count_i64 > 1048576:
+        return _engine2d_draw_ir_spatial_index_invalid()
+    val cell_count = cell_count_i64.to_i32()
+    var counts: [i32] = [0; cell_count + 1]
+    var uncertain: [i32] = []
+    var logical_total = 0
+    var entry_total = 0
+    var index: i64 = 0
+    while index < plan.commands.len():
+        val command = plan.commands[index]
+        val weight = if plan.logical_weights.len() == 0:
+            1
+        else:
+            plan.logical_weights[index]
+        logical_total += weight
+        if not _engine2d_draw_ir_plain_fill(command):
+            uncertain.push(index.to_i32())
+            index += 1
+            continue
+        var x0 = command.x.to_i64()
+        var y0 = command.y.to_i64()
+        var x1 = x0 + command.width.to_i64()
+        var y1 = y0 + command.height.to_i64()
+        if x0 < 0:
+            x0 = 0
+        if y0 < 0:
+            y0 = 0
+        if x1 > width.to_i64():
+            x1 = width.to_i64()
+        if y1 > height.to_i64():
+            y1 = height.to_i64()
+        if x1 > x0 and y1 > y0:
+            val tx0 = (x0 / ENGINE2D_DRAW_IR_INDEX_CELL_PX).to_i32()
+            val ty0 = (y0 / ENGINE2D_DRAW_IR_INDEX_CELL_PX).to_i32()
+            val tx1 = ((x1 - 1) / ENGINE2D_DRAW_IR_INDEX_CELL_PX).to_i32()
+            val ty1 = ((y1 - 1) / ENGINE2D_DRAW_IR_INDEX_CELL_PX).to_i32()
+            var ty = ty0
+            while ty <= ty1:
+                var tx = tx0
+                while tx <= tx1:
+                    val cell = ty * cells_x + tx
+                    counts[cell] = counts[cell] + 1
+                    entry_total += 1
+                    if entry_total > ENGINE2D_DRAW_IR_INDEX_MAX_ENTRIES:
+                        return _engine2d_draw_ir_spatial_index_invalid()
+                    tx += 1
+                ty += 1
+        index += 1
+    var starts: [i32] = [0; cell_count + 1]
+    var total = 0
+    var cell = 0
+    while cell < cell_count:
+        starts[cell] = total
+        total += counts[cell]
+        cell += 1
+    starts[cell_count] = total
+    var fill: [i32] = [0; cell_count]
+    var items: [i32] = [0; total]
+    index = 0
+    while index < plan.commands.len():
+        val command = plan.commands[index]
+        if _engine2d_draw_ir_plain_fill(command):
+            var x0 = command.x.to_i64()
+            var y0 = command.y.to_i64()
+            var x1 = x0 + command.width.to_i64()
+            var y1 = y0 + command.height.to_i64()
+            if x0 < 0:
+                x0 = 0
+            if y0 < 0:
+                y0 = 0
+            if x1 > width.to_i64():
+                x1 = width.to_i64()
+            if y1 > height.to_i64():
+                y1 = height.to_i64()
+            if x1 > x0 and y1 > y0:
+                val tx0 = (x0 / ENGINE2D_DRAW_IR_INDEX_CELL_PX).to_i32()
+                val ty0 = (y0 / ENGINE2D_DRAW_IR_INDEX_CELL_PX).to_i32()
+                val tx1 = ((x1 - 1) / ENGINE2D_DRAW_IR_INDEX_CELL_PX).to_i32()
+                val ty1 = ((y1 - 1) / ENGINE2D_DRAW_IR_INDEX_CELL_PX).to_i32()
+                var ty = ty0
+                while ty <= ty1:
+                    var tx = tx0
+                    while tx <= tx1:
+                        val target = ty * cells_x + tx
+                        items[starts[target] + fill[target]] = index.to_i32()
+                        fill[target] = fill[target] + 1
+                        tx += 1
+                    ty += 1
+        index += 1
+    Engine2dDrawIrSpatialIndex(
+        valid: true, cells_x: cells_x, cells_y: cells_y,
+        starts: starts, items: items, uncertain: uncertain,
+        logical_total: logical_total)
+
+# K-way merge the ordered uncertain lane and each touched cell list. Advancing
+# every source holding the minimum index deduplicates fills spanning cells and
+# retains exact global paint order without scanning the whole command plan.
+fn _engine2d_draw_ir_select_damage_indexed(
+    plan: Engine2dDrawIrCommandPlan, spatial: Engine2dDrawIrSpatialIndex,
+    clip: DrawIrRect
+) -> Engine2dDrawIrDamageSelection:
+    if not spatial.valid:
+        return _engine2d_draw_ir_select_damage_commands(plan, clip, 0, 0)
+    val tx0 = (clip.x.to_i64() / ENGINE2D_DRAW_IR_INDEX_CELL_PX).to_i32()
+    val ty0 = (clip.y.to_i64() / ENGINE2D_DRAW_IR_INDEX_CELL_PX).to_i32()
+    val tx1 = ((clip.x.to_i64() + clip.width.to_i64() - 1) /
+               ENGINE2D_DRAW_IR_INDEX_CELL_PX).to_i32()
+    val ty1 = ((clip.y.to_i64() + clip.height.to_i64() - 1) /
+               ENGINE2D_DRAW_IR_INDEX_CELL_PX).to_i32()
+    val source_count = (tx1 - tx0 + 1) * (ty1 - ty0 + 1) + 1
+    var cursors: [i32] = [0; source_count]
+    var ends: [i32] = [0; source_count]
+    cursors[0] = 0
+    ends[0] = spatial.uncertain.len().to_i32()
+    var source = 1
+    var ty = ty0
+    while ty <= ty1:
+        var tx = tx0
+        while tx <= tx1:
+            val cell = ty * spatial.cells_x + tx
+            cursors[source] = spatial.starts[cell]
+            ends[source] = spatial.starts[cell + 1]
+            source += 1
+            tx += 1
+        ty += 1
+    var selected: [DrawIrCommand] = []
+    var selected_weights: [i32] = []
+    var selected_logical = 0
+    var selected_commands = 0
+    while true:
+        var minimum = 2147483647
+        source = 0
+        while source < source_count:
+            if cursors[source] < ends[source]:
+                val candidate = if source == 0:
+                    spatial.uncertain[cursors[source]]
+                else:
+                    spatial.items[cursors[source]]
+                if candidate < minimum:
+                    minimum = candidate
+            source += 1
+        if minimum == 2147483647:
+            break
+        val weight = if plan.logical_weights.len() == 0:
+            1
+        else:
+            plan.logical_weights[minimum]
+        val command = plan.commands[minimum]
+        var keep = true
+        if _engine2d_draw_ir_plain_fill(command):
+            val x0 = command.x.to_i64()
+            val y0 = command.y.to_i64()
+            val x1 = x0 + command.width.to_i64()
+            val y1 = y0 + command.height.to_i64()
+            val clip_x0 = clip.x.to_i64()
+            val clip_y0 = clip.y.to_i64()
+            val clip_x1 = clip_x0 + clip.width.to_i64()
+            val clip_y1 = clip_y0 + clip.height.to_i64()
+            keep = (x0 < clip_x1 and clip_x0 < x1 and
+                    y0 < clip_y1 and clip_y0 < y1)
+        if keep:
+            selected.push(command)
+            if plan.logical_weights.len() != 0:
+                selected_weights.push(weight)
+            selected_logical += weight
+            selected_commands += 1
+        source = 0
+        while source < source_count:
+            if cursors[source] < ends[source]:
+                val candidate = if source == 0:
+                    spatial.uncertain[cursors[source]]
+                else:
+                    spatial.items[cursors[source]]
+                if candidate == minimum:
+                    cursors[source] = cursors[source] + 1
+            source += 1
+    Engine2dDrawIrDamageSelection(
+        plan: Engine2dDrawIrCommandPlan(
+            commands: selected, logical_weights: selected_weights),
+        culled_logical_count: spatial.logical_total - selected_logical,
+        culled_command_count:
+            plan.commands.len().to_i32() - selected_commands)
 
 # Render one batch's flat command list onto `engine`, with every command's
 # local (x, y) shifted by (offset_x, offset_y). Shared by the direct
@@ -2920,14 +3134,16 @@ fn engine2d_draw_ir_render_damaged_with_images(
     # once avoids rebuilding and reallocating the same command arrays for
     # every rectangle.
     val command_plan = engine2d_draw_ir_coalesce_plain_fills(commands)
+    val spatial_index = _engine2d_draw_ir_build_spatial_index(
+        command_plan, eng.width(), eng.height())
     var i = 0
     while i < damage_rects.len():
         val clip = draw_ir_rect_bounds(
             damage_rects[i].to_i32(), damage_rects[i + 1].to_i32(),
             damage_rects[i + 2].to_i32(), damage_rects[i + 3].to_i32())
         eng.set_clip(clip.x, clip.y, clip.width, clip.height)
-        val selection = _engine2d_draw_ir_select_damage_commands(
-            command_plan, clip, 0, 0)
+        val selection = _engine2d_draw_ir_select_damage_indexed(
+            command_plan, spatial_index, clip)
         val outcome = _engine2d_draw_ir_render_command_plan(
             eng, selection.plan, 0, 0, images, false, false, clip, budget)
         eng = outcome.engine
