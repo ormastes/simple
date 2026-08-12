@@ -1,10 +1,12 @@
 # Strict HWIR extraction from real MIR function graphs.
+# codex-system-test
+# @manual_section Strict real-MIR to HWIR extraction
 
 use compiler.common.attributes.{vhdl_hardware_metadata_default}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_types.{SymbolId}
 use compiler.mir.mir_data.*
-use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.types.{CoreConfig, HwModuleDef}
 use compiler.mir.hwir.mir_to_hwir.{lower_strict_mir_function_to_hwir}
 use compiler.backend.backend.hwir_to_vhdl.{render_strict_hwir_vhdl, compile_strict_hwir_module}
 
@@ -258,6 +260,18 @@ fn hardware_cli_intrinsic_function() -> MirFunction:
         unroll_factor: 0, pipeline_ii: 0, memory_banks: 0
     )
 
+fn hardware_rv64_zca_row_intrinsic_function(intrinsic_name: text, function_name: text) -> MirFunction:
+    var function = hardware_cli_intrinsic_function()
+    function.name = function_name
+    function = with_entry_instruction(function, MirInst(kind: MirInstKind.Intrinsic(
+        Some(LocalId(id: 1)), intrinsic_name, [copy(0)]), span: nil))
+    function
+
+fn has_origin_source(module: HwModuleDef, source_name: text) -> bool:
+    for origin in module.origins:
+        if origin.source_name == source_name: return true
+    false
+
 fn hardware_cj_predecode_intrinsic_function(address_bits: i64) -> MirFunction:
     val parcel = bits_type(16)
     val pc = bits_type(address_bits)
@@ -490,7 +504,71 @@ fn strict_module(function: MirFunction) -> MirModule:
     MirModule(name: "strict_hwir", functions: functions, statics: {}, constants: {}, types: {})
 
 describe "strict HWIR real MIR extraction":
-    it "extracts the real Bool BitAnd and its MIR origins":
+    # @req REQ-G2-003
+    it "should extract every closed RV64-only Zca row intrinsic without fallback":
+        step("Lower each declared RV64-only Zca intrinsic through the strict real-MIR boundary")
+        val intrinsic_ids = ["__simple_riscv_zca_cld_rv64_row_v1", "__simple_riscv_zca_csd_rv64_row_v1",
+            "__simple_riscv_zca_ldsp_rv64_row_v1", "__simple_riscv_zca_sdsp_rv64_row_v1",
+            "__simple_riscv_zca_caddw_rv64_row_v1", "__simple_riscv_zca_csubw_rv64_row_v1",
+            "__simple_riscv_zca_slli6_rv64_row_v1", "__simple_riscv_zca_srli6_rv64_row_v1",
+            "__simple_riscv_zca_srai6_rv64_row_v1"]
+        val origin_ids = ["zca.rv64.c.ld", "zca.rv64.c.sd", "zca.rv64.c.ldsp", "zca.rv64.c.sdsp",
+            "zca.rv64.c.addw", "zca.rv64.c.subw", "zca.rv64.c.slli6", "zca.rv64.c.srli6",
+            "zca.rv64.c.srai6"]
+        var index = 0
+        for intrinsic_id in intrinsic_ids:
+            val result = lower_strict_mir_function_to_hwir(
+                hardware_rv64_zca_row_intrinsic_function(intrinsic_id, "mir_rv64_zca_" + index.to_text()),
+                CoreConfig.rv64_zca_mission_critical())
+            expect(result.is_success()).to_equal(true)
+            expect(result.uses_legacy_fallback()).to_equal(false)
+            if val module = result.module:
+                expect(module.config.xlen).to_equal(64)
+                expect(has_origin_source(module, origin_ids[index])).to_equal(true)
+            else:
+                expect(false).to_equal(true)
+            index = index + 1
+
+    # @req REQ-G2-003
+    it "should reject every closed RV64-only Zca row intrinsic for RV32 elaboration":
+        step("Present each RV64-only intrinsic to the RV32 strict-lowering configuration")
+        val intrinsic_ids = ["__simple_riscv_zca_cld_rv64_row_v1", "__simple_riscv_zca_csd_rv64_row_v1",
+            "__simple_riscv_zca_ldsp_rv64_row_v1", "__simple_riscv_zca_sdsp_rv64_row_v1",
+            "__simple_riscv_zca_caddw_rv64_row_v1", "__simple_riscv_zca_csubw_rv64_row_v1",
+            "__simple_riscv_zca_slli6_rv64_row_v1", "__simple_riscv_zca_srli6_rv64_row_v1",
+            "__simple_riscv_zca_srai6_rv64_row_v1"]
+        for intrinsic_id in intrinsic_ids:
+            val result = lower_strict_mir_function_to_hwir(
+                hardware_rv64_zca_row_intrinsic_function(intrinsic_id, "mir_rv32_reject"),
+                CoreConfig.rv32_zca_mission_critical())
+            expect(result.is_success()).to_equal(false)
+            expect(result.diagnostic).to_contain("RV64")
+            expect(result.uses_legacy_fallback()).to_equal(false)
+
+    # @req REQ-G2-003
+    it "should reject malformed and prefix-lookalike RV64 Zca intrinsics at the closed boundary":
+        step("Vary operands, result flow, and intrinsic identity at the closed RV64 boundary")
+        var missing_operand = hardware_rv64_zca_row_intrinsic_function(
+            "__simple_riscv_zca_cld_rv64_row_v1", "mir_rv64_missing_operand")
+        missing_operand = with_entry_instruction(missing_operand, MirInst(kind: MirInstKind.Intrinsic(
+            Some(LocalId(id: 1)), "__simple_riscv_zca_cld_rv64_row_v1", []), span: nil))
+        val missing_result = lower_strict_mir_function_to_hwir(missing_operand, CoreConfig.rv64_zca_mission_critical())
+        expect(missing_result.is_success()).to_equal(false)
+        expect(missing_result.diagnostic).to_contain("one u32 parcel semantic operand")
+        var wrong_return = hardware_rv64_zca_row_intrinsic_function(
+            "__simple_riscv_zca_csd_rv64_row_v1", "mir_rv64_wrong_return")
+        wrong_return = with_block_terminator(wrong_return, 0, MirTerminator.Ret(Some(copy(0))))
+        val return_result = lower_strict_mir_function_to_hwir(wrong_return, CoreConfig.rv64_zca_mission_critical())
+        expect(return_result.is_success()).to_equal(false)
+        expect(return_result.diagnostic).to_contain("must return the semantic result")
+        val lookalike = lower_strict_mir_function_to_hwir(
+            hardware_rv64_zca_row_intrinsic_function("__simple_riscv_zca_cld_extra_rv64_row_v1", "mir_rv64_lookalike"),
+            CoreConfig.rv64_zca_mission_critical())
+        expect(lookalike.is_success()).to_equal(false)
+        expect(lookalike.diagnostic).to_equal("HWIR-E-MIR-INTRINSIC: strict RV64 Zca intrinsic is absent from the closed contract")
+    # @req REQ-G2-003
+    it "should extract the real Bool BitAnd and its MIR origins":
+        step("Lower a boolean real-MIR function and inspect its typed origins and strict rendering")
         val result = lower_strict_mir_function_to_hwir(hardware_and_function(), CoreConfig.rv64())
         expect(result.is_success()).to_equal(true)
         if val module = result.module:
@@ -510,7 +588,9 @@ describe "strict HWIR real MIR extraction":
         else:
             expect(false).to_equal(true)
 
-    it "extracts a fixed-width u32 BitAnd without using XLEN for datapath width":
+    # @req REQ-G2-003
+    it "should extract a fixed-width u32 BitAnd without using XLEN for datapath width":
+        step("Lower a u32 BitAnd under an RV64 configuration and inspect the fixed datapath width")
         val result = lower_strict_mir_function_to_hwir(hardware_u32_and_function(), CoreConfig.rv64())
         expect(result.is_success()).to_equal(true)
         if val module = result.module:
@@ -524,7 +604,9 @@ describe "strict HWIR real MIR extraction":
         else:
             expect(false).to_equal(true)
 
-    it "extracts a fixed-width u32 BitOr for instruction assembly":
+    # @req REQ-G2-003
+    it "should extract a fixed-width u32 BitOr for instruction assembly":
+        step("Lower a u32 BitOr instruction-assembly fixture through strict HWIR")
         var mir_function = hardware_u32_and_function()
         mir_function.name = "mir_u32_or"
         mir_function = with_entry_instruction(mir_function, MirInst(kind: MirInstKind.BinOp(LocalId(id: 2), MirBinOp.BitOr, copy(0), copy(1)), span: nil))
@@ -538,7 +620,9 @@ describe "strict HWIR real MIR extraction":
         else:
             expect(false).to_equal(true)
 
-    it "extracts a real typed u32 parcel mask constant graph":
+    # @req REQ-G2-003
+    it "should extract a real typed u32 parcel mask constant graph":
+        step("Lower the typed parcel-mask constant graph and inspect its strict HWIR shape")
         val result = lower_strict_mir_function_to_hwir(hardware_u32_parcel_mask_function(), CoreConfig.rv64_zca_integer())
         expect(result.is_success()).to_equal(true)
         if val module = result.module:
@@ -555,7 +639,9 @@ describe "strict HWIR real MIR extraction":
         else:
             expect(false).to_equal(true)
 
-    it "extracts a real typed bounded parcel shift graph":
+    # @req REQ-G2-003
+    it "should extract a real typed bounded parcel shift graph":
+        step("Lower the bounded parcel right-shift graph through strict HWIR")
         val result = lower_strict_mir_function_to_hwir(hardware_u32_parcel_shift_function(), CoreConfig.rv64_zca_integer())
         expect(result.is_success()).to_equal(true)
         if val module = result.module:
@@ -568,7 +654,9 @@ describe "strict HWIR real MIR extraction":
         else:
             expect(false).to_equal(true)
 
-    it "extracts a real typed bounded left shift for canonical instruction fields":
+    # @req REQ-G2-003
+    it "should extract a real typed bounded left shift for canonical instruction fields":
+        step("Lower the bounded left-shift instruction-field graph through strict HWIR")
         var mir_function = hardware_u32_parcel_shift_function()
         mir_function.name = "mir_u32_canonical_field_shift"
         mir_function = with_block_instruction(mir_function, 0, 1, MirInst(kind: MirInstKind.BinOp(LocalId(id: 2), MirBinOp.Shl, copy(0), copy(1)), span: nil))
@@ -582,7 +670,9 @@ describe "strict HWIR real MIR extraction":
         else:
             expect(false).to_equal(true)
 
-    it "extracts a real two-stage parcel field graph through an internal signal":
+    # @req REQ-G2-003
+    it "should extract a real two-stage parcel field graph through an internal signal":
+        step("Lower the internal-signal parcel-field graph through strict HWIR")
         val result = lower_strict_mir_function_to_hwir(hardware_u32_parcel_field_function(), CoreConfig.rv32_zca_integer())
         expect(result.is_success()).to_equal(true)
         if val module = result.module:
@@ -600,7 +690,9 @@ describe "strict HWIR real MIR extraction":
         else:
             expect(false).to_equal(true)
 
-    it "extracts the C.EBREAK canonical instruction constant leaf":
+    # @req REQ-G2-003
+    it "should extract the C.EBREAK canonical instruction constant leaf":
+        step("Lower the C.EBREAK canonical instruction constant fixture")
         val result = lower_strict_mir_function_to_hwir(hardware_cebreak_canonical_function(), CoreConfig.rv32_zca_integer())
         expect(result.is_success()).to_equal(true)
         if val module = result.module:
@@ -613,7 +705,9 @@ describe "strict HWIR real MIR extraction":
         else:
             expect(false).to_equal(true)
 
-    it "extracts the frontend-style C.EBREAK match, select, and joined return":
+    # @req REQ-G2-003
+    it "should extract the frontend-style C.EBREAK match, select, and joined return":
+        step("Lower the C.EBREAK branch and joined-return real-MIR fixture")
         val result = lower_strict_mir_function_to_hwir(hardware_cebreak_decode_function(), CoreConfig.rv32_zca_mission_critical())
         expect(result.is_success()).to_equal(true)
         if val module = result.module:
@@ -634,7 +728,9 @@ describe "strict HWIR real MIR extraction":
         else:
             expect(false).to_equal(true)
 
-    it "extracts C.NOP through the shared C.ADDI/C.NOP semantic row":
+    # @req REQ-G2-003
+    it "should extract C.NOP through the shared C.ADDI/C.NOP semantic row":
+        step("Lower the shared C.ADDI/C.NOP semantic-row fixture")
         var mir_function = hardware_cebreak_decode_function()
         mir_function.name = "mir_cnop_decode"
         mir_function = with_block_instruction(mir_function, 0, 0, MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Int(1), u32_type()), span: nil))
@@ -654,7 +750,9 @@ describe "strict HWIR real MIR extraction":
         else:
             expect(false).to_equal(true)
 
-    it "extracts the reserved real-MIR C.LI semantic intrinsic without fallback":
+    # @req REQ-G2-003
+    it "should extract the reserved real-MIR C.LI semantic intrinsic without fallback":
+        step("Lower the declared C.LI semantic intrinsic without a fallback route")
         val result = lower_strict_mir_function_to_hwir(hardware_cli_intrinsic_function(), CoreConfig.rv32_zca_mission_critical())
         expect(result.is_success()).to_equal(true)
         expect(result.uses_legacy_fallback()).to_equal(false)
@@ -666,7 +764,9 @@ describe "strict HWIR real MIR extraction":
         else:
             expect(false).to_equal(true)
 
-    it "rejects a malformed C.LI semantic intrinsic before HWIR emission":
+    # @req REQ-G2-003
+    it "should reject a malformed C.LI semantic intrinsic before HWIR emission":
+        step("Submit a malformed C.LI intrinsic before strict HWIR emission")
         var mir_function = hardware_cli_intrinsic_function()
         mir_function = with_entry_instruction(mir_function, MirInst(kind: MirInstKind.Intrinsic(Some(LocalId(id: 1)), "__simple_riscv_zca_cli_row_v1", []), span: nil))
         val result = lower_strict_mir_function_to_hwir(mir_function, CoreConfig.rv32_zca_mission_critical())
@@ -674,7 +774,9 @@ describe "strict HWIR real MIR extraction":
         expect(result.diagnostic).to_equal("HWIR-E-MIR-INTRINSIC: strict C.LI lowering requires the reserved parcel semantic intrinsic")
         expect(result.uses_legacy_fallback()).to_equal(false)
 
-    it "rejects a reserved-looking Zca intrinsic that is absent from the canonical contract":
+    # @req REQ-G2-003
+    it "should reject a reserved-looking Zca intrinsic absent from the canonical contract":
+        step("Submit an undeclared reserved-looking intrinsic to the closed contract")
         var mir_function = hardware_cli_intrinsic_function()
         mir_function = with_entry_instruction(mir_function, MirInst(kind: MirInstKind.Intrinsic(Some(LocalId(id: 1)), "__simple_riscv_zca_unproven_row_v1", [copy(0)]), span: nil))
         val result = lower_strict_mir_function_to_hwir(mir_function, CoreConfig.rv32_zca_mission_critical())
@@ -682,7 +784,9 @@ describe "strict HWIR real MIR extraction":
         expect(result.diagnostic).to_equal("HWIR-E-MIR-INTRINSIC: strict Zca intrinsic is absent from the canonical contract")
         expect(result.uses_legacy_fallback()).to_equal(false)
 
-    it "extracts the reserved real-MIR C.ADDI/C.NOP semantic intrinsic without fallback":
+    # @req REQ-G2-003
+    it "should extract the reserved real-MIR C.ADDI/C.NOP semantic intrinsic without fallback":
+        step("Lower the declared C.ADDI/C.NOP semantic intrinsic without a fallback route")
         val result = lower_strict_mir_function_to_hwir(hardware_caddi_intrinsic_function(), CoreConfig.rv32_zca_mission_critical())
         expect(result.is_success()).to_equal(true)
         expect(result.uses_legacy_fallback()).to_equal(false)
@@ -697,7 +801,9 @@ describe "strict HWIR real MIR extraction":
         else:
             expect(false).to_equal(true)
 
-    it "extracts the reserved real-MIR C.ADDI16SP semantic intrinsic without fallback":
+    # @req REQ-G2-003
+    it "should extract the reserved real-MIR C.ADDI16SP semantic intrinsic without fallback":
+        step("Lower the declared C.ADDI16SP semantic intrinsic without a fallback route")
         val result = lower_strict_mir_function_to_hwir(hardware_caddi16sp_intrinsic_function(), CoreConfig.rv64_zca_mission_critical())
         expect(result.is_success()).to_equal(true)
         expect(result.uses_legacy_fallback()).to_equal(false)
@@ -711,7 +817,9 @@ describe "strict HWIR real MIR extraction":
         else:
             expect(false).to_equal(true)
 
-    it "extracts the reserved real-MIR C.LUI semantic intrinsic without fallback":
+    # @req REQ-G2-003
+    it "should extract the reserved real-MIR C.LUI semantic intrinsic without fallback":
+        step("Lower the declared C.LUI semantic intrinsic without a fallback route")
         val result = lower_strict_mir_function_to_hwir(hardware_clui_intrinsic_function(), CoreConfig.rv32_zca_mission_critical())
         expect(result.is_success()).to_equal(true)
         expect(result.uses_legacy_fallback()).to_equal(false)
@@ -725,7 +833,9 @@ describe "strict HWIR real MIR extraction":
         else:
             expect(false).to_equal(true)
 
-    it "rejects a C.ADDI semantic intrinsic with a non-semantic return":
+    # @req REQ-G2-003
+    it "should reject a C.ADDI semantic intrinsic with a non-semantic return":
+        step("Return a non-semantic value from the C.ADDI intrinsic fixture")
         var mir_function = hardware_caddi_intrinsic_function()
         mir_function = with_block_terminator(mir_function, 0, MirTerminator.Ret(Some(copy(0))))
         val result = lower_strict_mir_function_to_hwir(mir_function, CoreConfig.rv32_zca_mission_critical())
@@ -733,7 +843,9 @@ describe "strict HWIR real MIR extraction":
         expect(result.diagnostic).to_equal("HWIR-E-MIR-RETURN: strict C.ADDI intrinsic lowering must return the semantic result")
         expect(result.uses_legacy_fallback()).to_equal(false)
 
-    it "extracts the reserved real-MIR C.ADDI4SPN semantic intrinsic without fallback":
+    # @req REQ-G2-003
+    it "should extract the reserved real-MIR C.ADDI4SPN semantic intrinsic without fallback":
+        step("Lower the declared C.ADDI4SPN semantic intrinsic without a fallback route")
         val result = lower_strict_mir_function_to_hwir(hardware_addi4spn_intrinsic_function(), CoreConfig.rv64_zca_mission_critical())
         expect(result.is_success()).to_equal(true)
         expect(result.uses_legacy_fallback()).to_equal(false)
@@ -746,7 +858,9 @@ describe "strict HWIR real MIR extraction":
         else:
             expect(false).to_equal(true)
 
-    it "extracts the reserved real-MIR C.LW semantic intrinsic without fallback":
+    # @req REQ-G2-003
+    it "should extract the reserved real-MIR C.LW semantic intrinsic without fallback":
+        step("Lower the declared C.LW semantic intrinsic without a fallback route")
         val result = lower_strict_mir_function_to_hwir(hardware_lw_intrinsic_function(), CoreConfig.rv32_zca_mission_critical())
         expect(result.is_success()).to_equal(true)
         expect(result.uses_legacy_fallback()).to_equal(false)
@@ -758,7 +872,9 @@ describe "strict HWIR real MIR extraction":
         else:
             expect(false).to_equal(true)
 
-    it "extracts the reserved real-MIR C.SW semantic intrinsic without fallback":
+    # @req REQ-G2-003
+    it "should extract the reserved real-MIR C.SW semantic intrinsic without fallback":
+        step("Lower the declared C.SW semantic intrinsic without a fallback route")
         val result = lower_strict_mir_function_to_hwir(hardware_sw_intrinsic_function(), CoreConfig.rv64_zca_mission_critical())
         expect(result.is_success()).to_equal(true)
         expect(result.uses_legacy_fallback()).to_equal(false)
@@ -770,7 +886,9 @@ describe "strict HWIR real MIR extraction":
         else:
             expect(false).to_equal(true)
 
-    it "extracts the reserved real-MIR C.LWSP semantic intrinsic without fallback":
+    # @req REQ-G2-003
+    it "should extract the reserved real-MIR C.LWSP semantic intrinsic without fallback":
+        step("Lower the declared C.LWSP semantic intrinsic without a fallback route")
         val result = lower_strict_mir_function_to_hwir(hardware_lwsp_intrinsic_function(), CoreConfig.rv32_zca_mission_critical())
         expect(result.is_success()).to_equal(true)
         expect(result.uses_legacy_fallback()).to_equal(false)
@@ -782,7 +900,9 @@ describe "strict HWIR real MIR extraction":
         else:
             expect(false).to_equal(true)
 
-    it "extracts the reserved real-MIR C.SWSP semantic intrinsic without fallback":
+    # @req REQ-G2-003
+    it "should extract the reserved real-MIR C.SWSP semantic intrinsic without fallback":
+        step("Lower the declared C.SWSP semantic intrinsic without a fallback route")
         val result = lower_strict_mir_function_to_hwir(hardware_swsp_intrinsic_function(), CoreConfig.rv64_zca_mission_critical())
         expect(result.is_success()).to_equal(true)
         expect(result.uses_legacy_fallback()).to_equal(false)
@@ -794,7 +914,9 @@ describe "strict HWIR real MIR extraction":
         else:
             expect(false).to_equal(true)
 
-    it "extracts the reserved real-MIR five-bit C.SLLI semantic intrinsic without fallback":
+    # @req REQ-G2-003
+    it "should extract the reserved real-MIR five-bit C.SLLI semantic intrinsic without fallback":
+        step("Lower the declared five-bit C.SLLI semantic intrinsic without a fallback route")
         val result = lower_strict_mir_function_to_hwir(hardware_slli_low_intrinsic_function(), CoreConfig.rv32_zca_mission_critical())
         expect(result.is_success()).to_equal(true)
         expect(result.uses_legacy_fallback()).to_equal(false)
@@ -806,7 +928,9 @@ describe "strict HWIR real MIR extraction":
         else:
             expect(false).to_equal(true)
 
-    it "extracts the reserved real-MIR five-bit C.SRLI semantic intrinsic without fallback":
+    # @req REQ-G2-003
+    it "should extract the reserved real-MIR five-bit C.SRLI semantic intrinsic without fallback":
+        step("Lower the declared five-bit C.SRLI semantic intrinsic without a fallback route")
         val result = lower_strict_mir_function_to_hwir(hardware_srli_low_intrinsic_function(), CoreConfig.rv32_zca_mission_critical())
         expect(result.is_success()).to_equal(true)
         expect(result.uses_legacy_fallback()).to_equal(false)
@@ -818,7 +942,9 @@ describe "strict HWIR real MIR extraction":
         else:
             expect(false).to_equal(true)
 
-    it "extracts the reserved real-MIR five-bit C.SRAI semantic intrinsic without fallback":
+    # @req REQ-G2-003
+    it "should extract the reserved real-MIR five-bit C.SRAI semantic intrinsic without fallback":
+        step("Lower the declared five-bit C.SRAI semantic intrinsic without a fallback route")
         val result = lower_strict_mir_function_to_hwir(hardware_srai_low_intrinsic_function(), CoreConfig.rv32_zca_mission_critical())
         expect(result.is_success()).to_equal(true)
         expect(result.uses_legacy_fallback()).to_equal(false)
@@ -830,7 +956,9 @@ describe "strict HWIR real MIR extraction":
         else:
             expect(false).to_equal(true)
 
-    it "extracts the reserved real-MIR C.ANDI semantic intrinsic without fallback":
+    # @req REQ-G2-003
+    it "should extract the reserved real-MIR C.ANDI semantic intrinsic without fallback":
+        step("Lower the declared C.ANDI semantic intrinsic without a fallback route")
         val result = lower_strict_mir_function_to_hwir(hardware_candi_intrinsic_function(), CoreConfig.rv32_zca_mission_critical())
         expect(result.is_success()).to_equal(true)
         expect(result.uses_legacy_fallback()).to_equal(false)
@@ -842,7 +970,9 @@ describe "strict HWIR real MIR extraction":
         else:
             expect(false).to_equal(true)
 
-    it "extracts the reserved real-MIR C.SUB semantic intrinsic without fallback":
+    # @req REQ-G2-003
+    it "should extract the reserved real-MIR C.SUB semantic intrinsic without fallback":
+        step("Lower the declared C.SUB semantic intrinsic without a fallback route")
         val result = lower_strict_mir_function_to_hwir(hardware_csub_intrinsic_function(), CoreConfig.rv32_zca_mission_critical())
         expect(result.is_success()).to_equal(true)
         expect(result.uses_legacy_fallback()).to_equal(false)
@@ -854,7 +984,9 @@ describe "strict HWIR real MIR extraction":
         else:
             expect(false).to_equal(true)
 
-    it "extracts the reserved real-MIR C.XOR semantic intrinsic without fallback":
+    # @req REQ-G2-003
+    it "should extract the reserved real-MIR C.XOR semantic intrinsic without fallback":
+        step("Lower the declared C.XOR semantic intrinsic without a fallback route")
         val result = lower_strict_mir_function_to_hwir(hardware_cxor_intrinsic_function(), CoreConfig.rv32_zca_mission_critical())
         expect(result.is_success()).to_equal(true)
         expect(result.uses_legacy_fallback()).to_equal(false)
@@ -866,7 +998,9 @@ describe "strict HWIR real MIR extraction":
         else:
             expect(false).to_equal(true)
 
-    it "extracts the reserved real-MIR C.OR semantic intrinsic without fallback":
+    # @req REQ-G2-003
+    it "should extract the reserved real-MIR C.OR semantic intrinsic without fallback":
+        step("Lower the declared C.OR semantic intrinsic without a fallback route")
         val result = lower_strict_mir_function_to_hwir(hardware_cor_intrinsic_function(), CoreConfig.rv32_zca_mission_critical())
         expect(result.is_success()).to_equal(true)
         expect(result.uses_legacy_fallback()).to_equal(false)
@@ -878,7 +1012,9 @@ describe "strict HWIR real MIR extraction":
         else:
             expect(false).to_equal(true)
 
-    it "extracts the reserved real-MIR C.AND semantic intrinsic without fallback":
+    # @req REQ-G2-003
+    it "should extract the reserved real-MIR C.AND semantic intrinsic without fallback":
+        step("Lower the declared C.AND semantic intrinsic without a fallback route")
         val result = lower_strict_mir_function_to_hwir(hardware_cand_intrinsic_function(), CoreConfig.rv32_zca_mission_critical())
         expect(result.is_success()).to_equal(true)
         expect(result.uses_legacy_fallback()).to_equal(false)
@@ -890,7 +1026,9 @@ describe "strict HWIR real MIR extraction":
         else:
             expect(false).to_equal(true)
 
-    it "extracts the reserved real-MIR C.JR semantic intrinsic without fallback":
+    # @req REQ-G2-003
+    it "should extract the reserved real-MIR C.JR semantic intrinsic without fallback":
+        step("Lower the declared C.JR semantic intrinsic without a fallback route")
         val result = lower_strict_mir_function_to_hwir(hardware_cjr_intrinsic_function(), CoreConfig.rv32_zca_mission_critical())
         expect(result.is_success()).to_equal(true)
         expect(result.uses_legacy_fallback()).to_equal(false)
@@ -902,7 +1040,9 @@ describe "strict HWIR real MIR extraction":
         else:
             expect(false).to_equal(true)
 
-    it "extracts the real-MIR C.MV semantic intrinsic without fallback":
+    # @req REQ-G2-003
+    it "should extract the real-MIR C.MV semantic intrinsic without fallback":
+        step("Lower the declared C.MV semantic intrinsic without a fallback route")
         val result = lower_strict_mir_function_to_hwir(hardware_cmv_intrinsic_function(), CoreConfig.rv32_zca_mission_critical())
         expect(result.is_success()).to_equal(true)
         expect(result.uses_legacy_fallback()).to_equal(false)
@@ -915,7 +1055,9 @@ describe "strict HWIR real MIR extraction":
         else:
             expect(false).to_equal(true)
 
-    it "extracts the reserved real-MIR C.JALR semantic intrinsic without fallback":
+    # @req REQ-G2-003
+    it "should extract the reserved real-MIR C.JALR semantic intrinsic without fallback":
+        step("Lower the declared C.JALR semantic intrinsic without a fallback route")
         val result = lower_strict_mir_function_to_hwir(hardware_cjalr_intrinsic_function(), CoreConfig.rv32_zca_mission_critical())
         expect(result.is_success()).to_equal(true)
         expect(result.uses_legacy_fallback()).to_equal(false)
@@ -927,7 +1069,9 @@ describe "strict HWIR real MIR extraction":
         else:
             expect(false).to_equal(true)
 
-    it "extracts the aggregate real-MIR C.J predecode intrinsic without fallback":
+    # @req REQ-G2-003
+    it "should extract the aggregate real-MIR C.J predecode intrinsic without fallback":
+        step("Lower the aggregate C.J predecode intrinsic through strict HWIR")
         val rv32 = lower_strict_mir_function_to_hwir(hardware_cj_predecode_intrinsic_function(32), CoreConfig.rv32_zca_mission_critical())
         val rv64 = lower_strict_mir_function_to_hwir(hardware_cj_predecode_intrinsic_function(56), CoreConfig.rv64_zca_mission_critical())
         expect(rv32.is_success()).to_equal(true)
@@ -946,7 +1090,9 @@ describe "strict HWIR real MIR extraction":
         else:
             expect(false).to_equal(true)
 
-    it "rejects an aggregate C.J predecode MIR signature with a non-Bits PC":
+    # @req REQ-G2-003
+    it "should reject an aggregate C.J predecode MIR signature with a non-Bits PC":
+        step("Submit a C.J predecode signature with a non-Bits program counter")
         var mir_function = hardware_cj_predecode_intrinsic_function(32)
         mir_function.signature = MirSignature(params: [bits_type(16), u32_type()],
             return_type: cj_predecode_result_type(32), is_variadic: false)
@@ -955,7 +1101,9 @@ describe "strict HWIR real MIR extraction":
         expect(result.diagnostic).to_equal("HWIR-E-MIR-SIGNATURE: strict C.J predecode lowering requires Bits[16], Bits[PA] -> (Bits[32], Bits[2], Bool, Bits[PA], Bool, Bits[PA])")
         expect(result.uses_legacy_fallback()).to_equal(false)
 
-    it "extracts aggregate C.BEQZ/C.BNEZ real-MIR predecode intrinsics without fallback":
+    # @req REQ-G2-003
+    it "should extract aggregate C.BEQZ/C.BNEZ real-MIR predecode intrinsics without fallback":
+        step("Lower the aggregate C.BEQZ and C.BNEZ predecode intrinsics")
         val beqz = lower_strict_mir_function_to_hwir(
             hardware_cb_predecode_intrinsic_function(32, 32, "__simple_riscv_zca_cbeqz_predecode_v1", "mir_cbeqz_predecode_intrinsic"),
             CoreConfig.rv32_zca_mission_critical())
@@ -980,7 +1128,9 @@ describe "strict HWIR real MIR extraction":
         else:
             expect(false).to_equal(true)
 
-    it "rejects C.BEQZ predecode when its architectural operand is not Bits[XLEN]":
+    # @req REQ-G2-003
+    it "should reject C.BEQZ predecode when its architectural operand is not Bits[XLEN]":
+        step("Submit C.BEQZ predecode with an operand outside the configured architectural width")
         var mir_function = hardware_cb_predecode_intrinsic_function(32, 32,
             "__simple_riscv_zca_cbeqz_predecode_v1", "mir_cbeqz_bad_operand")
         mir_function.signature = MirSignature(params: [bits_type(16), bits_type(32), bits_type(5), bits_type(31)],
@@ -990,7 +1140,9 @@ describe "strict HWIR real MIR extraction":
         expect(result.diagnostic).to_equal("HWIR-E-MIR-SIGNATURE: strict C.BEQZ predecode lowering requires Bits[16], Bits[PA], Bits[5], Bits[XLEN] -> (Bits[32], Bits[2], Bool, Bits[PA], Bool, Bits[PA])")
         expect(result.uses_legacy_fallback()).to_equal(false)
 
-    it "extracts real-MIR C.ADD with elaborated RV32/RV64 hint behavior":
+    # @req REQ-G2-003
+    it "should extract real-MIR C.ADD with elaborated RV32/RV64 hint behavior":
+        step("Lower the C.ADD semantic fixture for its concrete RV32 and RV64 configurations")
         val rv32 = lower_strict_mir_function_to_hwir(hardware_cadd_intrinsic_function(), CoreConfig.rv32_zca_mission_critical())
         val rv64 = lower_strict_mir_function_to_hwir(hardware_cadd_intrinsic_function(), CoreConfig.rv64_zca_mission_critical())
         expect(rv32.is_success()).to_equal(true)
@@ -1010,13 +1162,17 @@ describe "strict HWIR real MIR extraction":
         else:
             expect(false).to_equal(true)
 
-    it "rejects a terminal compressed graph outside the common-critical product profile":
+    # @req REQ-G2-003
+    it "should reject a terminal compressed graph outside the common-critical product profile":
+        step("Lower a terminal compressed graph under a non-admitted product profile")
         val result = lower_strict_mir_function_to_hwir(hardware_cebreak_decode_function(), CoreConfig.rv32())
         expect(result.is_success()).to_equal(false)
         expect(result.diagnostic).to_equal("HWIR-E-COMPRESSED-PROFILE: strict terminal decode requires the zca-common-critical product profile")
         expect(result.uses_legacy_fallback()).to_equal(false)
 
-    it "rejects an unapproved terminal parcel literal without legacy fallback":
+    # @req REQ-G2-003
+    it "should reject an unapproved terminal parcel literal without legacy fallback":
+        step("Lower an unapproved terminal parcel literal through the strict boundary")
         var mir_function = hardware_cebreak_decode_function()
         mir_function = with_block_instruction(mir_function, 0, 0, MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Int(2), u32_type()), span: nil))
         val result = lower_strict_mir_function_to_hwir(mir_function, CoreConfig.rv32_zca_mission_critical())
@@ -1024,7 +1180,9 @@ describe "strict HWIR real MIR extraction":
         expect(result.diagnostic).to_equal("HWIR-E-MIR-CONSTANT: strict terminal decode has no approved critical parcel literal")
         expect(result.uses_legacy_fallback()).to_equal(false)
 
-    it "rejects a malformed C.EBREAK branch edge without legacy fallback":
+    # @req REQ-G2-003
+    it "should reject a malformed C.EBREAK branch edge without legacy fallback":
+        step("Corrupt the C.EBREAK branch edge before strict semantic extraction")
         var mir_function = hardware_cebreak_decode_function()
         mir_function = with_block_terminator(mir_function, 2, MirTerminator.Goto(BlockId(id: 1)))
         val result = lower_strict_mir_function_to_hwir(mir_function, CoreConfig.rv32_zca_mission_critical())
@@ -1032,7 +1190,9 @@ describe "strict HWIR real MIR extraction":
         expect(result.diagnostic).to_equal("HWIR-E-MIR-CFG: strict terminal miss branch must jump to the join block")
         expect(result.uses_legacy_fallback()).to_equal(false)
 
-    it "rejects a non-hardware real MIR function without a legacy fallback":
+    # @req REQ-G2-003
+    it "should reject a non-hardware real MIR function without a legacy fallback":
+        step("Submit a real-MIR function lacking hardware metadata to strict lowering")
         var mir_function = hardware_and_function()
         mir_function.has_vhdl_metadata = false
         val result = lower_strict_mir_function_to_hwir(mir_function, CoreConfig.rv32())
@@ -1040,7 +1200,9 @@ describe "strict HWIR real MIR extraction":
         expect(result.diagnostic).to_equal("HWIR-E-NOT-HARDWARE: strict MIR lowering requires @hardware metadata")
         expect(result.uses_legacy_fallback()).to_equal(false)
 
-    it "rejects an open or variadic MIR local boundary before semantic extraction":
+    # @req REQ-G2-003
+    it "should reject an open or variadic MIR local boundary before semantic extraction":
+        step("Submit open and variadic local boundaries before strict semantic extraction")
         var variadic = hardware_cli_intrinsic_function()
         variadic.signature.is_variadic = true
         val variadic_result = lower_strict_mir_function_to_hwir(variadic, CoreConfig.rv32_zca_mission_critical())
@@ -1055,7 +1217,9 @@ describe "strict HWIR real MIR extraction":
         expect(wrong_arg_result.diagnostic).to_equal("HWIR-E-MIR-LOCAL: strict MIR Arg locals must match the fixed signature")
         expect(wrong_arg_result.uses_legacy_fallback()).to_equal(false)
 
-    it "rejects a duplicate real-MIR local ID before semantic extraction":
+    # @req REQ-G2-003
+    it "should reject a duplicate real-MIR local ID before semantic extraction":
+        step("Duplicate a real-MIR local identifier before strict semantic extraction")
         var mir_function = hardware_cli_intrinsic_function()
         mir_function.locals.push(MirLocal(id: LocalId(id: 0), name: Some("duplicate_parcel"), type_: u32_type(), kind: LocalKind.Temp))
         val result = lower_strict_mir_function_to_hwir(mir_function, CoreConfig.rv32_zca_mission_critical())
@@ -1063,7 +1227,9 @@ describe "strict HWIR real MIR extraction":
         expect(result.diagnostic).to_equal("HWIR-E-MIR-LOCAL: strict MIR local IDs must be unique")
         expect(result.uses_legacy_fallback()).to_equal(false)
 
-    it "rejects dangling and mistyped real-MIR values before semantic extraction":
+    # @req REQ-G2-003
+    it "should reject dangling and mistyped real-MIR values before semantic extraction":
+        step("Submit dangling and mistyped values before strict semantic extraction")
         var dangling = hardware_cli_intrinsic_function()
         dangling = with_entry_instruction(dangling, MirInst(kind: MirInstKind.Intrinsic(Some(LocalId(id: 99)), "__simple_riscv_zca_cli_row_v1", [copy(0)]), span: nil))
         val dangling_result = lower_strict_mir_function_to_hwir(dangling, CoreConfig.rv32_zca_mission_critical())
@@ -1078,7 +1244,9 @@ describe "strict HWIR real MIR extraction":
         expect(bad_copy_result.diagnostic).to_equal("HWIR-E-MIR-LOCAL: copy values must resolve to equal declared types")
         expect(bad_copy_result.uses_legacy_fallback()).to_equal(false)
 
-    it "rejects malformed binary and branch types before semantic extraction":
+    # @req REQ-G2-003
+    it "should reject malformed binary and branch types before semantic extraction":
+        step("Submit malformed binary and branch operand types to strict lowering")
         var bad_binary = hardware_and_function()
         bad_binary.locals[2].type_ = u32_type()
         val bad_binary_result = lower_strict_mir_function_to_hwir(bad_binary, CoreConfig.rv32())
@@ -1105,7 +1273,9 @@ describe "strict HWIR real MIR extraction":
             "HWIR-E-MIR-CFG: branch targets must resolve to declared blocks")
         expect(bad_target_result.uses_legacy_fallback()).to_equal(false)
 
-    it "rejects a terminal join with hidden instructions before semantic extraction":
+    # @req REQ-G2-003
+    it "should reject a terminal join with hidden instructions before semantic extraction":
+        step("Insert hidden work into a terminal join before strict semantic extraction")
         var contaminated = hardware_cebreak_decode_function()
         var blocks = contaminated.blocks
         var join = blocks[3]
@@ -1117,28 +1287,36 @@ describe "strict HWIR real MIR extraction":
         expect(result.diagnostic).to_equal("HWIR-E-MIR-CFG: strict terminal join block must not contain instructions")
         expect(result.uses_legacy_fallback()).to_equal(false)
 
-    it "rejects a wrong real MIR operation before emission":
+    # @req REQ-G2-003
+    it "should reject a wrong real MIR operation before emission":
+        step("Replace the supported real-MIR operation before strict emission")
         var mir_function = hardware_and_function()
         mir_function = with_entry_instruction(mir_function, MirInst(kind: MirInstKind.BinOp(LocalId(id: 2), MirBinOp.BitXor, copy(0), copy(1)), span: nil))
         val result = lower_strict_mir_function_to_hwir(mir_function, CoreConfig.rv32())
         expect(result.is_success()).to_equal(false)
         expect(result.diagnostic).to_equal("HWIR-E-MIR-INSTRUCTION: strict MIR lowering requires one supported bitwise instruction")
 
-    it "rejects clocked MIR until sequential HWIR is implemented":
+    # @req REQ-G2-003
+    it "should reject clocked MIR until sequential HWIR is implemented":
+        step("Mark the real-MIR fixture clocked before strict HWIR extraction")
         var mir_function = hardware_and_function()
         mir_function.vhdl_metadata = hardware_metadata(true)
         val result = lower_strict_mir_function_to_hwir(mir_function, CoreConfig.rv32())
         expect(result.is_success()).to_equal(false)
         expect(result.diagnostic).to_equal("HWIR-E-CLOCKED: strict MIR lowering currently supports combinational functions only")
 
-    it "routes a real single-function MIR module through strict HWIR only":
+    # @req REQ-G2-003
+    it "should route a real single-function MIR module through strict HWIR only":
+        step("Compile a single-function real-MIR module through the strict HWIR route")
         val result = compile_strict_hwir_module(strict_module(hardware_and_function()), CoreConfig.rv32())
         expect(result.is_success()).to_equal(true)
         expect(result.route).to_equal("hwir-strict")
         expect(result.config_xlen).to_equal(32)
         expect(result.vhdl.contains("entity mir_bool_and is")).to_equal(true)
 
-    it "routes the real parcel mask module through strict HWIR only":
+    # @req REQ-G2-003
+    it "should route the real parcel mask module through strict HWIR only":
+        step("Compile the real parcel-mask module through the strict HWIR route")
         val result = compile_strict_hwir_module(strict_module(hardware_u32_parcel_mask_function()), CoreConfig.rv32_zca_integer())
         expect(result.is_success()).to_equal(true)
         expect(result.route).to_equal("hwir-strict")
@@ -1146,7 +1324,9 @@ describe "strict HWIR real MIR extraction":
         expect(result.vhdl.contains("entity mir_u32_parcel_mask is")).to_equal(true)
         expect(result.vhdl.contains("to_unsigned(65535, 32)")).to_equal(true)
 
-    it "rejects an unsupported real MIR module without a legacy route":
+    # @req REQ-G2-003
+    it "should reject an unsupported real MIR module without a legacy route":
+        step("Compile an unsupported real-MIR module and require no legacy route")
         var mir_function = hardware_and_function()
         mir_function = with_entry_instruction(mir_function, MirInst(kind: MirInstKind.BinOp(LocalId(id: 2), MirBinOp.BitXor, copy(0), copy(1)), span: nil))
         val result = compile_strict_hwir_module(strict_module(mir_function), CoreConfig.rv32())

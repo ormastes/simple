@@ -1,0 +1,100 @@
+# codex-system-test
+# @manual_section Bounded scalar ALU retirement projection
+
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_scalar_execution.{strict_riscv_scalar_alu_retire_projection_hwir}
+use compiler.backend.backend.riscv_scalar_hwir_to_vhdl.{compile_strict_riscv_scalar_alu_retire_projection_product}
+
+fn expect_scalar_shape(config: CoreConfig, instruction: u32, operation: text):
+    val built = strict_riscv_scalar_alu_retire_projection_hwir(
+        "scalar_" + config.xlen.to_text() + "_" + operation, config, instruction)
+    expect(built.is_ok()).to_equal(true)
+    if built.is_ok():
+        val module = built.ok().unwrap()
+        expect(module.shape_diagnostic()).to_equal("")
+        expect(module.config.xlen).to_equal(config.xlen)
+        expect(module.port_width("rs1_value")).to_equal(config.xlen)
+        expect(module.port_width("retire_rd_value")).to_equal(config.xlen)
+        expect(module.port_width("retire_pc_before")).to_equal(config.xlen)
+        expect(module.port_width("retire_memory_address")).to_equal(config.xlen)
+        expect(module.port_width("retire_original_instruction")).to_equal(32)
+        expect(module.port_width("retire_instruction_length_bytes")).to_equal(3)
+        expect(module.port_width("retire_rd")).to_equal(5)
+        expect(module.summary.register_count).to_equal(0)
+        expect(module.summary.memory_count).to_equal(0)
+        var found = false
+        for op in module.comb_ops:
+            if op.result == "alu_result" and op.op == operation:
+                found = true
+        expect(found).to_equal(true)
+
+describe "shared emitted Gen2 scalar ALU retirement slice":
+    # @req REQ-G2-003 REQ-G2-004
+    it "should monomorphize the same base-I ALU rows for RV32 and RV64":
+        step("Build each bounded base-I ALU row for concrete RV32 and RV64 configurations")
+        val instructions: [u32] = [0x002082B3, 0x402082B3, 0x0020F2B3,
+            0x0020E2B3, 0x0020C2B3, 0xFFF08293]
+        val operations = ["add", "sub", "and", "or", "xor", "add"]
+        var index = 0
+        while index < instructions.len():
+            expect_scalar_shape(CoreConfig.rv32(), instructions[index], operations[index])
+            expect_scalar_shape(CoreConfig.rv64(), instructions[index], operations[index])
+            index = index + 1
+
+    # @req REQ-G2-004
+    it "should emit strict concrete-width VHDL and exact retirement outputs":
+        step("Compile concrete RV32 ADD and RV64 SUB retirement-projection products")
+        val rv32 = compile_strict_riscv_scalar_alu_retire_projection_product(
+            "scalar_add_rv32", CoreConfig.rv32(), 0x002082B3)
+        val rv64 = compile_strict_riscv_scalar_alu_retire_projection_product(
+            "scalar_sub_rv64", CoreConfig.rv64(), 0x402082B3)
+        expect(rv32.is_success()).to_equal(true)
+        expect(rv64.is_success()).to_equal(true)
+        expect(rv32.route).to_equal("hwir-gen2-scalar-alu-retire-projection-v1")
+        expect(rv64.route).to_equal("hwir-gen2-scalar-alu-retire-projection-v1")
+        expect(rv32.vhdl).to_contain("rs1_value : in std_logic_vector(31 downto 0)")
+        expect(rv64.vhdl).to_contain("rs1_value : in std_logic_vector(63 downto 0)")
+        expect(rv32.vhdl).to_contain("alu_result <= std_logic_vector(unsigned(rs1_value) + unsigned(rs2_value));")
+        expect(rv64.vhdl).to_contain("alu_result <= std_logic_vector(unsigned(rs1_value) - unsigned(rs2_value));")
+        expect(rv32.vhdl).to_contain("retire_rd_value <= alu_result when in_valid = '1' else zero_xlen;")
+        expect(rv32.vhdl).to_contain("retire_trap <= zero1;")
+        expect(rv64.vhdl).to_contain("retire_memory_write_mask <= zero32;")
+        expect(rv32.vhdl.contains("xlen =") or rv32.vhdl.contains("if xlen")).to_equal(false)
+        expect(rv64.vhdl.contains("xlen =") or rv64.vhdl.contains("if xlen")).to_equal(false)
+
+    # @req REQ-G2-003
+    it "should reject instructions outside the bounded ALU slice":
+        step("Submit a load instruction to the bounded scalar ALU projection")
+        val load = strict_riscv_scalar_alu_retire_projection_hwir(
+            "scalar_load_rejected", CoreConfig.rv32(), 0x00002083)
+        expect(load.is_err()).to_equal(true)
+        expect(load.err().unwrap()).to_equal("HWIR-E-RISCV-SCALAR-EMIT-SCOPE: scalar ALU slice admits only precise base-I ADD/SUB/AND/OR/XOR register or immediate rows")
+
+    # @req REQ-G2-004
+    it "should normalize invalid and x0 projection payloads and hash the exact structure":
+        step("Build repeated and cross-width ADD projections and inspect their normalized structure")
+        val first = strict_riscv_scalar_alu_retire_projection_hwir(
+            "scalar_projection_hash", CoreConfig.rv32(), 0x00208033)
+        val repeated = strict_riscv_scalar_alu_retire_projection_hwir(
+            "scalar_projection_hash", CoreConfig.rv32(), 0x00208033)
+        val rv64 = strict_riscv_scalar_alu_retire_projection_hwir(
+            "scalar_projection_hash", CoreConfig.rv64(), 0x00208033)
+        expect(first.is_ok()).to_equal(true)
+        expect(repeated.is_ok()).to_equal(true)
+        expect(rv64.is_ok()).to_equal(true)
+        if first.is_ok() and repeated.is_ok() and rv64.is_ok():
+            val module = first.ok().unwrap()
+            expect(module.structural_sha256()).to_equal(repeated.ok().unwrap().structural_sha256())
+            expect(module.structural_sha256() == rv64.ok().unwrap().structural_sha256()).to_equal(false)
+            var normalized_payloads = 0
+            for select in module.select_ops:
+                if select.condition == "in_valid" and select.when_false.starts_with("zero"):
+                    normalized_payloads = normalized_payloads + 1
+                if select.result == "retire_rd": expect(select.when_true).to_equal("zero5")
+                if select.result == "retire_rd_value": expect(select.when_true).to_equal("zero_xlen")
+            expect(normalized_payloads).to_equal(10)
+            var rd_write_zero = false
+            for op in module.comb_ops:
+                if op.result == "retire_rd_write" and op.lhs == "zero1": rd_write_zero = true
+            expect(rd_write_zero).to_equal(true)
