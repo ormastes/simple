@@ -3,7 +3,8 @@
 """Execute the exact strict combinational graph for composed-predecode oracles."""
 
 use std.spec.*
-use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.types.{CoreConfig, HwClockDomain, HwCombOp, HwCompareOp,
+    HwCostModel, HwModule, HwModuleDef, HwNodeId, HwOrigin, HwPort, HwSelectOp}
 use compiler.mir.hwir.host_evaluator.{HwHostInput, evaluate_strict_comb_hwir, prepare_strict_comb_hwir}
 use compiler.mir.hwir.trap_frontend.{strict_zca_target_trap_migrating_predecode_hwir}
 
@@ -13,6 +14,26 @@ fn target_trap_inputs(parcel: i64, pc: i64, rs1_index: i64, rs1_value: i64) -> [
 
 fn target_trap_module(config: CoreConfig):
     strict_zca_target_trap_migrating_predecode_hwir("host_eval_target_trap", config).unwrap()
+
+fn host_evaluator_mixed_module() -> HwModuleDef:
+    val config = CoreConfig.rv32_zca_mission_critical()
+    HwModuleDef(
+        summary: HwModule(name: "host_evaluator_mixed", profile: config.profile,
+            port_count: 6, signal_count: 0, register_count: 0, memory_count: 0,
+            comb_op_count: 3, clock_domain_count: 1, fallback_function: "",
+            cost: HwCostModel.empty()),
+        config: config,
+        node_id: HwNodeId.module_root("host_evaluator_mixed"),
+        origins: [HwOrigin(node_id: HwNodeId.child("host_evaluator_mixed", "source"),
+            source_name: "test.host_evaluator_mixed")],
+        ports: [HwPort.input("lhs", "Bits", 4), HwPort.input("rhs", "Bits", 4),
+            HwPort.input("choose_lhs", "Bits", 1), HwPort.output("sum", "Bits", 4),
+            HwPort.output("equal", "Bits", 1), HwPort.output("selected", "Bits", 4)],
+        signals: [], constants: [],
+        comb_ops: [HwCombOp.binary("add", "sum", "lhs", "rhs", 4)],
+        compare_ops: [HwCompareOp.equal("equal", "lhs", "rhs", 4)],
+        select_ops: [HwSelectOp.mux("selected", "choose_lhs", "lhs", "rhs", 4)],
+        clock_domains: [HwClockDomain.default_domain()])
 
 describe "RISC-V Gen2 strict HWIR host evaluator":
     # @req REQ-G2-010 REQ-G2-011 NFR-G2-012
@@ -106,3 +127,48 @@ describe "RISC-V Gen2 strict HWIR host evaluator":
                 HwHostInput.bits("rs1_index", 8), HwHostInput.bits("rs1_value", 0),
                 HwHostInput.bits("legal", 1)])
         expect(output_as_input.err().unwrap()).to_contain("HWIR-E-HOST-EVAL-INPUT")
+
+    # @req REQ-G2-001 NFR-G2-002
+    it "should reject empty and duplicate host inputs before any result is produced":
+        step("Prepare the concrete graph once and present malformed host input tuples")
+        val prepared = prepare_strict_comb_hwir(
+            target_trap_module(CoreConfig.rv32_zca_cjal_mission_critical())).unwrap()
+        val empty_name = prepared.evaluate([
+            HwHostInput.bits("original_parcel", 0x9002), HwHostInput.bits("fetch_pc", 0),
+            HwHostInput.bits("rs1_index", 8), HwHostInput.bits("", 0)])
+        expect(empty_name.err().unwrap()).to_start_with("HWIR-E-HOST-EVAL-INPUT")
+        val duplicate = prepared.evaluate([
+            HwHostInput.bits("original_parcel", 0x9002), HwHostInput.bits("fetch_pc", 0),
+            HwHostInput.bits("rs1_index", 8), HwHostInput.bits("rs1_value", 0),
+            HwHostInput.bits("fetch_pc", 2)])
+        expect(duplicate.err().unwrap()).to_start_with("HWIR-E-HOST-EVAL-INPUT")
+
+    # @req REQ-G2-001 NFR-G2-001 NFR-G2-012
+    it "should normalize inputs and evaluate both equality and mux outcomes":
+        step("Evaluate a compact strict graph through both compare and select branches")
+        val prepared = prepare_strict_comb_hwir(host_evaluator_mixed_module()).unwrap()
+        val choose_lhs = prepared.evaluate([
+            HwHostInput.bits("lhs", 0x1f), HwHostInput.bits("rhs", 3),
+            HwHostInput.bits("choose_lhs", 1)]).unwrap()
+        expect(choose_lhs.value_of("sum").unwrap()).to_equal(2)
+        expect(choose_lhs.value_of("equal").unwrap()).to_equal(0)
+        expect(choose_lhs.value_of("selected").unwrap()).to_equal(15)
+        val choose_rhs_equal = prepared.evaluate([
+            HwHostInput.bits("lhs", 3), HwHostInput.bits("rhs", 3),
+            HwHostInput.bits("choose_lhs", 0)]).unwrap()
+        expect(choose_rhs_equal.value_of("sum").unwrap()).to_equal(6)
+        expect(choose_rhs_equal.value_of("equal").unwrap()).to_equal(1)
+        expect(choose_rhs_equal.value_of("selected").unwrap()).to_equal(3)
+
+    # @req REQ-G2-001 NFR-G2-002
+    it "should reject unsupported, width-invalid, and unreadable self-referential strict graphs before scheduling":
+        step("Mutate independent typed graphs at the strict validation boundary")
+        val unsupported = host_evaluator_mixed_module()
+        unsupported.comb_ops[0].op = "not_a_strict_op"
+        expect(prepare_strict_comb_hwir(unsupported).err().unwrap()).to_start_with("HWIR-E-COMB")
+        val wrong_width = host_evaluator_mixed_module()
+        wrong_width.comb_ops[0].bit_width = 3
+        expect(prepare_strict_comb_hwir(wrong_width).err().unwrap()).to_start_with("HWIR-E-COMB")
+        val cycle = host_evaluator_mixed_module()
+        cycle.comb_ops[0].lhs = "sum"
+        expect(prepare_strict_comb_hwir(cycle).err().unwrap()).to_start_with("HWIR-E-OP-OPERAND-DIRECTION")

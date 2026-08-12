@@ -15,6 +15,14 @@ classifier.
 2. Execute an unsupported parcel through the same composed graph and verify its
    illegal fallthrough tuple with no redirect or trap.
 3. Reject missing or output-port inputs before graph execution.
+4. Reject empty and duplicate declared-input tuples before the graph can produce
+   a value.
+5. Normalize narrow input values and execute both equality results and both mux
+   choices through the prepared strict graph.
+6. Reject unsupported operations, mismatched operation widths, and unreadable
+   self-referential operands at typed graph preparation rather than attempting
+   a partial evaluation. Strict graph ownership makes a schedulable
+   multi-operation cycle unconstructible because only input ports are readable.
 
 ## Requirement traceability
 
