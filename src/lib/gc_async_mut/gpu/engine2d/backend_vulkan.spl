@@ -212,6 +212,13 @@ class VulkanBackend:
     clip_enabled: bool
     initialized: bool
     dirty: bool                  # True when GPU has changes not yet copied to host
+    present_damage_rects: [i64]  # Validated flat x,y,w,h tuples owned by this backend
+    present_damage_valid: bool
+    host_mirror_valid: bool
+    present_readback_bytes: i64
+    present_readback_rect_count: i64
+    present_full_readback_count: i64
+    present_noop_count: i64
     frame_batching_enabled: bool
     pending_compute_command: i64
     pending_compute_pipelines: [i64]   # preallocated, VK_PENDING_COMPUTE_CAP=16 slots
@@ -277,6 +284,13 @@ class VulkanBackend:
             clip_enabled: false,
             initialized: false,
             dirty: false,
+            present_damage_rects: [],
+            present_damage_valid: false,
+            host_mirror_valid: false,
+            present_readback_bytes: 0,
+            present_readback_rect_count: 0,
+            present_full_readback_count: 0,
+            present_noop_count: 0,
             frame_batching_enabled: false,
             pending_compute_command: 0,
             pending_compute_pipelines: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -396,6 +410,13 @@ impl RenderBackend for VulkanBackend:
         self.clip_enabled = false
         self.initialized = true
         self.dirty = false
+        self.present_damage_rects = []
+        self.present_damage_valid = false
+        self.host_mirror_valid = false
+        self.present_readback_bytes = 0
+        self.present_readback_rect_count = 0
+        self.present_full_readback_count = 0
+        self.present_noop_count = 0
         self.pending_compute_command = 0
         self.pending_compute_pipelines = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
         self.pending_compute_descriptors = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
@@ -457,6 +478,9 @@ impl RenderBackend for VulkanBackend:
                 vulkan_sffi_free_buffer(self.d_framebuffer)
                 self.d_framebuffer = 0
             self.host_buf = []
+            self.present_damage_rects = []
+            self.present_damage_valid = false
+            self.host_mirror_valid = false
             self.w = 0
             self.h = 0
             self.mask_buf = []
@@ -496,6 +520,9 @@ impl RenderBackend for VulkanBackend:
             vulkan_sffi_free_buffer(self.d_framebuffer)
             self.d_framebuffer = 0
         self.host_buf = []
+        self.present_damage_rects = []
+        self.present_damage_valid = false
+        self.host_mirror_valid = false
         self.w = 0
         self.h = 0
         self.mask_buf = []
@@ -759,6 +786,7 @@ impl RenderBackend for VulkanBackend:
                 self._mark_readback_length_failed()
                 return
             self.host_buf = refreshed
+            self.host_mirror_valid = true
 
         self.mark_cpu_fallback("image-copy-host-fallback")
         val clip_end_x = self.clip_x + self.clip_w
@@ -785,6 +813,7 @@ impl RenderBackend for VulkanBackend:
         val upload_bytes = _pixels_to_bytes(self.host_buf, _i64(self.w) * _i64(self.h))
         vulkan_sffi_copy_to_buffer(self.d_framebuffer, upload_bytes, 0)
         self.dirty = false
+        self.host_mirror_valid = true
 
     me set_clip(x: i32, y: i32, w: i32, h: i32):
         self.clip_x = x
@@ -826,7 +855,116 @@ impl RenderBackend for VulkanBackend:
             return false
         pending_status != 0
 
+    me stage_present_damage(rects: [i64]) -> bool:
+        """Copy an exact, non-overlapping damage plan for the next present.
+
+        The backend rejects malformed or overlapping plans instead of widening
+        them. An absent/invalid plan conservatively selects full readback.
+        """
+        self.present_damage_rects = []
+        self.present_damage_valid = false
+        if rects.len() % 4 != 0 or rects.len() > 4096:
+            return false
+        var i = 0
+        while i < rects.len():
+            val x = rects[i]
+            val y = rects[i + 1]
+            val rw = rects[i + 2]
+            val rh = rects[i + 3]
+            if x < 0 or y < 0 or rw <= 0 or rh <= 0:
+                return false
+            if x > _i64(self.w) or y > _i64(self.h):
+                return false
+            if rw > _i64(self.w) - x or rh > _i64(self.h) - y:
+                return false
+            var j = 0
+            while j < i:
+                val ox = rects[j]
+                val oy = rects[j + 1]
+                val ow = rects[j + 2]
+                val oh = rects[j + 3]
+                if x < ox + ow and ox < x + rw and y < oy + oh and oy < y + rh:
+                    return false
+                j += 4
+            i += 4
+        i = 0
+        while i < rects.len():
+            self.present_damage_rects.push(rects[i])
+            i += 1
+        self.present_damage_valid = true
+        true
+
+    me _clear_present_damage():
+        self.present_damage_rects = []
+        self.present_damage_valid = false
+
+    me _refresh_host_full() -> bool:
+        val fb_size = _i64(self.w) * _i64(self.h) * 4
+        val fb_bytes = vulkan_sffi_read_buffer_bytes(self.d_framebuffer, fb_size, 0)
+        val refreshed = _bytes_to_pixel_array(fb_bytes, self.w * self.h)
+        if refreshed.len() != self.w * self.h:
+            self._mark_readback_length_failed()
+            return false
+        self.host_buf = refreshed
+        self.host_mirror_valid = true
+        self.present_readback_bytes = fb_size
+        self.present_readback_rect_count = 1
+        self.present_full_readback_count += 1
+        true
+
+    me _refresh_host_damage() -> bool:
+        if not self.host_mirror_valid or not self.present_damage_valid:
+            return false
+        if self.present_damage_rects.len() == 0:
+            return false
+        var packed_pixels: [u32] = []
+        var expected_pixels: i64 = 0
+        var i = 0
+        while i < self.present_damage_rects.len():
+            val x = self.present_damage_rects[i]
+            val y = self.present_damage_rects[i + 1]
+            val rw = self.present_damage_rects[i + 2]
+            val rh = self.present_damage_rects[i + 3]
+            val pixel_count = rw * rh
+            val src_offset = (y * _i64(self.w) + x) * 4
+            val packed = vulkan_sffi_read_buffer_strided_bytes(
+                self.d_framebuffer, src_offset, rw * 4, rh, _i64(self.w) * 4)
+            val pixels = _bytes_to_pixel_array(packed, pixel_count.to_i32())
+            if pixels.len().to_i64() != pixel_count:
+                self.last_error = "Vulkan damaged framebuffer readback byte count mismatch"
+                return false
+            var p = 0
+            while p < pixels.len():
+                packed_pixels.push(pixels[p])
+                p += 1
+            expected_pixels += pixel_count
+            i += 4
+        if packed_pixels.len().to_i64() != expected_pixels:
+            return false
+
+        var source_index: i64 = 0
+        i = 0
+        while i < self.present_damage_rects.len():
+            val x = self.present_damage_rects[i].to_i32()
+            val y = self.present_damage_rects[i + 1].to_i32()
+            val rw = self.present_damage_rects[i + 2].to_i32()
+            val rh = self.present_damage_rects[i + 3].to_i32()
+            var row = 0
+            while row < rh:
+                var col = 0
+                while col < rw:
+                    self.host_buf[(y + row) * self.w + x + col] = packed_pixels[source_index]
+                    source_index += 1
+                    col += 1
+                row += 1
+            i += 4
+        self.present_readback_bytes = expected_pixels * 4
+        self.present_readback_rect_count = self.present_damage_rects.len().to_i64() / 4
+        true
+
     me present():
+        self.present_readback_bytes = 0
+        self.present_readback_rect_count = 0
         if self.completion_unknown:
             return
         val pending_status = self._flush_pending_compute()
@@ -834,16 +972,18 @@ impl RenderBackend for VulkanBackend:
             if pending_status < 0:
                 self.completion_unknown = true
             return
-        # Copy GPU storage buffer to host memory
-        if self.dirty:
-            val fb_size = _i64(self.w) * _i64(self.h) * 4
-            val fb_bytes = vulkan_sffi_read_buffer_bytes(self.d_framebuffer, fb_size, 0)
-            val refreshed = _bytes_to_pixel_array(fb_bytes, self.w * self.h)
-            if refreshed.len() != self.w * self.h:
-                self._mark_readback_length_failed()
+        if not self.dirty:
+            self.present_noop_count += 1
+            self._clear_present_damage()
+            return
+        if self.present_damage_valid and self.host_mirror_valid:
+            if not self._refresh_host_damage():
                 return
-            self.host_buf = refreshed
-            self.dirty = false
+        else:
+            if not self._refresh_host_full():
+                return
+        self.dirty = false
+        self._clear_present_damage()
 
     me read_pixels() -> [u32]:
         self.read_pixels_with_source().pixels
