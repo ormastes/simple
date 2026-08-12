@@ -13,11 +13,18 @@ val RISCV_GEN2_QUALIFICATION_SCHEMA = "riscv-gen2-hwir-qualification-run-v1"
 val RISCV_GEN2_QUALIFICATION_ROOT =
     "build/evidence/riscv_gen2_hwir_foundation"
 val RISCV_GEN2_BRANCH_COVERAGE_THRESHOLD_BP: i64 = 8000
+val RISCV_GEN2_QUALIFICATION_PRODUCT =
+    "riscv-gen2-zca-trap-single-outstanding-v3"
 
 class RiscvGen2QualificationRow:
     architecture: text
+    product_id: text
+    target: text
+    profile: text
     command: text
     exit_code: i64
+    manifest_path: text
+    manifest_sha256: text
     vhdl_path: text
     vhdl_sha256: text
     analyze_log_path: text
@@ -123,18 +130,35 @@ fn _g2_row_from_fields(fields: Dict<text, text>, index: i64,
     val prefix = "row_" + index.to_text() + "_"
     if _g2_required(fields, prefix + "architecture")? != architecture:
         return Err("qualification-manifest-row-architecture-invalid")
+    val expected_target = if architecture == "rv32":
+        "rv32-zca-cjal-critical"
+    else:
+        "rv64-zca-addiw-critical"
+    val expected_profile = if architecture == "rv32":
+        "riscv-gen2-rv32-zca-cjal-critical"
+    else:
+        "riscv-gen2-rv64-zca-addiw-critical"
+    val product_id = _g2_required(fields, prefix + "product_id")?
+    val target = _g2_required(fields, prefix + "target")?
+    val profile = _g2_required(fields, prefix + "profile")?
+    if (product_id != RISCV_GEN2_QUALIFICATION_PRODUCT or
+            target != expected_target or profile != expected_profile):
+        return Err("qualification-manifest-row-product-binding-invalid")
     val command = _g2_required(fields, prefix + "command")?
     if command.contains("\n") or command.contains("\r"):
         return Err("qualification-manifest-row-command-invalid")
     val exit_code = _g2_uint(_g2_required(fields, prefix + "exit_code")?)?
     if exit_code != 0: return Err("qualification-manifest-row-exit-nonzero")
+    val manifest_path = _g2_required(fields, prefix + "manifest_path")?
     val vhdl_path = _g2_required(fields, prefix + "vhdl_path")?
     val analyze_log_path = _g2_required(fields, prefix + "analyze_log_path")?
     val elaborate_log_path = _g2_required(fields, prefix + "elaborate_log_path")?
     val run_log_path = _g2_required(fields, prefix + "run_log_path")?
-    for path in [vhdl_path, analyze_log_path, elaborate_log_path, run_log_path]:
+    for path in [manifest_path, vhdl_path, analyze_log_path, elaborate_log_path,
+                 run_log_path]:
         if not _g2_safe_relative_path(path):
             return Err("qualification-manifest-row-path-invalid")
+    val manifest_sha = _g2_required(fields, prefix + "manifest_sha256")?
     val vhdl_sha = _g2_required(fields, prefix + "vhdl_sha256")?
     val analyze_sha = _g2_required(fields, prefix + "analyze_log_sha256")?
     val elaborate_sha = _g2_required(fields, prefix + "elaborate_log_sha256")?
@@ -142,12 +166,14 @@ fn _g2_row_from_fields(fields: Dict<text, text>, index: i64,
     val source_sha = _g2_required(fields, prefix + "source_identity_sha256")?
     val config_sha = _g2_required(fields, prefix + "config_identity_sha256")?
     val graph_sha = _g2_required(fields, prefix + "graph_identity_sha256")?
-    for digest in [vhdl_sha, analyze_sha, elaborate_sha, run_sha, source_sha,
+    for digest in [manifest_sha, vhdl_sha, analyze_sha, elaborate_sha, run_sha, source_sha,
                    config_sha, graph_sha]:
         if not _g2_hex64(digest):
             return Err("qualification-manifest-row-sha256-invalid")
     Ok(RiscvGen2QualificationRow(
-        architecture: architecture, command: command, exit_code: exit_code,
+        architecture: architecture, product_id: product_id, target: target,
+        profile: profile, command: command, exit_code: exit_code,
+        manifest_path: manifest_path, manifest_sha256: manifest_sha,
         vhdl_path: vhdl_path, vhdl_sha256: vhdl_sha,
         analyze_log_path: analyze_log_path, analyze_log_sha256: analyze_sha,
         elaborate_log_path: elaborate_log_path,
@@ -166,7 +192,8 @@ fn riscv_gen2_parse_qualification_manifest(
         "branch_coverage_log_path", "branch_coverage_log_sha256"]
     for index in [1, 2]:
         val prefix = "row_" + index.to_text() + "_"
-        for suffix in ["architecture", "command", "exit_code", "vhdl_path",
+        for suffix in ["architecture", "product_id", "target", "profile",
+                "command", "exit_code", "manifest_path", "manifest_sha256", "vhdl_path",
                 "vhdl_sha256", "analyze_log_path", "analyze_log_sha256",
                 "elaborate_log_path", "elaborate_log_sha256", "run_log_path",
                 "run_log_sha256", "source_identity_sha256",
@@ -226,7 +253,8 @@ fn _g2_inputs_bound(manifest: RiscvGen2QualificationManifest) -> bool:
             provenance.source_revision != manifest.source_revision):
         return false
     for row in manifest.rows:
-        if (not _g2_bound_file(row.vhdl_path, row.vhdl_sha256) or
+        if (not _g2_bound_file(row.manifest_path, row.manifest_sha256) or
+                not _g2_bound_file(row.vhdl_path, row.vhdl_sha256) or
                 not _g2_bound_file(row.analyze_log_path, row.analyze_log_sha256) or
                 not _g2_bound_file(row.elaborate_log_path,
                     row.elaborate_log_sha256) or
@@ -241,8 +269,12 @@ fn _g2_copy_bound(source: text, expected_sha256: text, destination: text) -> boo
 
 fn _g2_render_row(row: RiscvGen2QualificationRow, retained_prefix: text) -> text:
     "    {\"architecture\":\"{_g2_json_escape(row.architecture)}\",\n" +
+    "     \"product_id\":\"{_g2_json_escape(row.product_id)}\",\n" +
+    "     \"target\":\"{_g2_json_escape(row.target)}\",\n" +
+    "     \"profile\":\"{_g2_json_escape(row.profile)}\",\n" +
     "     \"command\":\"{_g2_json_escape(row.command)}\",\n" +
     "     \"exit_code\":0,\n" +
+    "     \"product_manifest\":{\"source_path\":\"{_g2_json_escape(row.manifest_path)}\",\"sha256\":\"{row.manifest_sha256}\",\"retained_path\":\"{retained_prefix}.manifest.json\"},\n" +
     "     \"vhdl\":{\"source_path\":\"{_g2_json_escape(row.vhdl_path)}\",\"sha256\":\"{row.vhdl_sha256}\",\"retained_path\":\"{retained_prefix}.vhd\"},\n" +
     "     \"ghdl_analyze_log\":{\"source_path\":\"{_g2_json_escape(row.analyze_log_path)}\",\"sha256\":\"{row.analyze_log_sha256}\",\"retained_path\":\"{retained_prefix}.analyze.log\"},\n" +
     "     \"ghdl_elaborate_log\":{\"source_path\":\"{_g2_json_escape(row.elaborate_log_path)}\",\"sha256\":\"{row.elaborate_log_sha256}\",\"retained_path\":\"{retained_prefix}.elaborate.log\"},\n" +
@@ -297,7 +329,9 @@ fn riscv_gen2_write_qualification_receipt(
     while row_index < manifest.rows.len():
         val row = manifest.rows[row_index]
         val prefix = run_dir + "/" + row.architecture
-        if (not _g2_copy_bound(row.vhdl_path, row.vhdl_sha256, prefix + ".vhd") or
+        if (not _g2_copy_bound(row.manifest_path, row.manifest_sha256,
+                    prefix + ".manifest.json") or
+                not _g2_copy_bound(row.vhdl_path, row.vhdl_sha256, prefix + ".vhd") or
                 not _g2_copy_bound(row.analyze_log_path, row.analyze_log_sha256,
                     prefix + ".analyze.log") or
                 not _g2_copy_bound(row.elaborate_log_path,
@@ -372,6 +406,7 @@ fn main() -> i64:
 
 export RISCV_GEN2_QUALIFICATION_SCHEMA, RISCV_GEN2_QUALIFICATION_ROOT
 export RISCV_GEN2_BRANCH_COVERAGE_THRESHOLD_BP
+export RISCV_GEN2_QUALIFICATION_PRODUCT
 export RiscvGen2QualificationRow, RiscvGen2QualificationManifest
 export RiscvGen2QualificationArtifacts
 export riscv_gen2_parse_qualification_manifest

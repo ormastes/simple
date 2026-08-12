@@ -8,6 +8,10 @@ Gen2 receipt has been retained or that a target has qualified.
 The Pure-Simple writer accepts one exactly-shaped, runner-produced manifest:
 
 - exactly two rows, ordered RV32 then RV64;
+- the fixed product `riscv-gen2-zca-trap-single-outstanding-v3`, bound to
+  `rv32-zca-cjal-critical` / `riscv-gen2-rv32-zca-cjal-critical` for RV32 and
+  `rv64-zca-addiw-critical` / `riscv-gen2-rv64-zca-addiw-critical` for RV64;
+- a no-follow regular product-manifest sidecar and SHA-256 for every row;
 - a zero exit plus generated VHDL, GHDL analyze, elaborate, and run log path
   and SHA-256 for every row;
 - source, config, and graph identity SHA-256 values for every row;
