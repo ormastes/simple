@@ -12,3 +12,18 @@ Merge owner: `/root`. Final reviewer: normal/highest-capability reviewer. Shared
 | P5 evidence/docs | WP-40..44 | guides, skills, SSpec, formal/benchmark tooling | public contracts/pilots |
 
 No lower-model sidecars are started until P0 publishes contract hashes, helper names, and fail-fast placeholders. Each lane supplies a focused test, one real integration fixture, an operator-readable documentation delta, unsupported cases, and receipt samples. The CSV work-package plan is authoritative for dependencies and acceptance gates.
+
+## Current execution ownership
+
+| Lane | Current state | Next owned action | Gate before handoff |
+|---|---|---|---|
+| P1 ownership analysis | Partial: HIR boundary classification and MIR transfer facts exist; source-to-runtime transfer remains incomplete. | Keep dynamic/borrowed values fail-closed while connecting a real transfer receiver. | Source-to-MIR-to-runtime fixture proves one admitted transfer and one rejected raw/borrowed value. |
+| P2 runtime transport | Active: scalar pool-state ABI is internal-only and bounded; public facade is deliberately not admitted. | Finish a bounded self-hosted native `PoolStateV1` callback run, then migrate the generic pool separately. In parallel, replace any explicit unbounded mailbox constructor with a policy-selected finite capacity. | Native callback result, Full-until-release, close/idle/destroy, and alternate-provider execution; no `GLOBAL_*` path may be presented as the new pool. |
+| P3 storage | Partial: compiler-private AoS/SoA and capsule evidence are landed; no public transformed array claim. | Keep the typed-view pilot private until a real owner/allocation route and executable parity are admitted. | Physical plan, binding, cache/receipt identity, and native execution must agree; unsupported layouts reject. |
+| P4 MDSOC/pilots | Pending downstream integration. | Route the already-frozen transfer/layout/commit policies through one real MDSOC stage. | Bypass probe fails and the stage emits the selected policy receipt. |
+| P5 evidence/docs | Continuous merge-owner responsibility. | Preserve exact blocked commands and do not upgrade runtime/internal evidence into public API claims. | Every plan/guide/skill statement has a matching focused result or explicit blocker. |
+
+P2 currently has no sidecar write authority. Its public pool facade and native SSpec
+are retained only as uncommitted evidence candidates after the prior test-runner
+timeout; they must not be folded into a transport or storage change without the
+native callback gate above.
