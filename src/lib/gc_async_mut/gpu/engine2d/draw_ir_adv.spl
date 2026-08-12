@@ -1441,6 +1441,53 @@ struct Engine2dDrawIrCommandPlan:
     commands: [DrawIrCommand]
     logical_weights: [i32]
 
+struct Engine2dClippedImage:
+    handled: bool
+    valid: bool
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+    pixels: [u32]
+
+fn _engine2d_draw_ir_clip_exact_image(
+    image: Engine2dResolvedDrawIrImage, x: i32, y: i32,
+    command: DrawIrCommand, active_clip: DrawIrRect,
+    offset_x: i32, offset_y: i32
+) -> Engine2dClippedImage:
+    if (not active_clip.present or command.width != image.width or
+        command.height != image.height):
+        return Engine2dClippedImage(
+            handled: false, valid: false, x: x, y: y,
+            width: 0, height: 0, pixels: [])
+    var clip = draw_ir_rect_intersection(
+        draw_ir_rect_bounds(x, y, command.width, command.height), active_clip)
+    if command.clip_rect.present:
+        clip = draw_ir_rect_intersection(
+            clip, draw_ir_rect_translate(command.clip_rect, offset_x, offset_y))
+    if clip.width <= 0 or clip.height <= 0:
+        return Engine2dClippedImage(
+            handled: true, valid: false, x: clip.x, y: clip.y,
+            width: 0, height: 0, pixels: [])
+    if clip.width == image.width and clip.height == image.height:
+        return Engine2dClippedImage(
+            handled: false, valid: false, x: x, y: y,
+            width: 0, height: 0, pixels: [])
+    val source_x = clip.x - x
+    val source_y = clip.y - y
+    var cropped: [u32] = []
+    var row = 0
+    while row < clip.height:
+        var col = 0
+        while col < clip.width:
+            cropped.push(image.pixels[
+                (source_y + row) * image.width + source_x + col])
+            col += 1
+        row += 1
+    Engine2dClippedImage(
+        handled: true, valid: true, x: clip.x, y: clip.y,
+        width: clip.width, height: clip.height, pixels: cropped)
+
 fn _engine2d_draw_ir_plain_fill(command: DrawIrCommand) -> bool:
     if command.? == false:
         return false
@@ -1731,13 +1778,26 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
                         unsupported_kinds = _engine2d_draw_ir_note_unsupported_kind(
                             unsupported_kinds, "image-css-background")
                 else:
-                    if blend_images and not _engine2d_draw_ir_image_is_opaque(image):
-                        if command.width == image.width and command.height == image.height:
-                            eng.draw_image_blend(x, y, image.width, image.height, image.pixels)
+                    val clipped = _engine2d_draw_ir_clip_exact_image(
+                        image, x, y, command, active_clip,
+                        offset_x, offset_y)
+                    if clipped.valid:
+                        if blend_images and not _engine2d_draw_ir_image_is_opaque(image):
+                            eng.draw_image_blend(
+                                clipped.x, clipped.y, clipped.width,
+                                clipped.height, clipped.pixels)
                         else:
-                            eng.draw_image_scaled_blend(x, y, command.width, command.height, image.width, image.height, image.pixels)
-                    else:
-                        eng.draw_image_scaled(x, y, command.width, command.height, image.width, image.height, image.pixels)
+                            eng.draw_image(
+                                clipped.x, clipped.y, clipped.width,
+                                clipped.height, clipped.pixels)
+                    elif not clipped.handled:
+                        if blend_images and not _engine2d_draw_ir_image_is_opaque(image):
+                            if command.width == image.width and command.height == image.height:
+                                eng.draw_image_blend(x, y, image.width, image.height, image.pixels)
+                            else:
+                                eng.draw_image_scaled_blend(x, y, command.width, command.height, image.width, image.height, image.pixels)
+                        else:
+                            eng.draw_image_scaled(x, y, command.width, command.height, image.width, image.height, image.pixels)
                     rendered = rendered + 1
             else:
                 skipped = skipped + 1
@@ -2750,7 +2810,7 @@ fn engine2d_draw_ir_render_composition_damaged_with_images(
                 eng.set_clip(clip.x, clip.y, clip.width, clip.height)
                 val outcome = _engine2d_draw_ir_render_commands(
                     eng, batch.commands, embedding.x, embedding.y, images,
-                    false, false, clip, budget)
+                    true, false, clip, budget)
                 eng = outcome.engine
                 eng.clear_clip()
                 rendered += outcome.rendered

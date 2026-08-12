@@ -244,6 +244,39 @@ describe "Engine2D advanced Draw IR executor":
         expected_engine.shutdown()
         damaged_engine.shutdown()
 
+    it "matches full redraw for cropped translucent retained images":
+        val root = draw_ir_batch(
+            "desktop", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config(
+                "desktop", "desktop", 0, 0, 4, 2, 0, 1000, false),
+            [draw_ir_rect("background", 0, 0, 4, 2, BG)])
+        val image = engine2d_resolved_draw_ir_image(
+            "image://alpha", 2, 1, [HALF_RED, GREEN])
+        val overlay = draw_ir_batch(
+            "overlay", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config(
+                "overlay", "overlay", 1, 0, 2, 1, 1, 1000, false),
+            [draw_ir_image_command(
+                "alpha", 0, 0, 2, 1, image.image_uri, [])])
+        val composition = draw_ir_composition(
+            "alpha-wm", "alpha:4x2", DRAW_IR_BACKEND_CPU,
+            [root, overlay])
+        var expected_engine = Engine2D.create_with_backend(4, 2, "cpu")
+        expected_engine.clear(BG)
+        val expected = engine2d_draw_ir_adv_composition_present_with_images(
+            expected_engine, composition, [image])
+        var damaged_engine = Engine2D.create_with_backend(4, 2, "cpu")
+        damaged_engine.clear(BG)
+        damaged_engine.present()
+        val damaged = engine2d_draw_ir_render_composition_damaged_with_images(
+            damaged_engine, composition, [image], [1, 0, 1, 1], true)
+        damaged_engine = damaged.engine
+        expect(damaged.unsupported_kinds).to_equal("none")
+        expect(damaged.readback.pixels).to_equal(expected.pixels)
+        expect(damaged.readback.pixels[1]).to_equal(HALF_RED_OVER_BG)
+        expected_engine.shutdown()
+        damaged_engine.shutdown()
+
     it "rejects translucent GUI embedding from retained damage":
         var engine = Engine2D.create_with_backend(8, 4, "cpu")
         engine.clear(BG)
