@@ -195,3 +195,19 @@ for stable images, full-frame readback, and swapchain presentation. It also is
 not physical-GPU evidence. The passing row establishes only that this retained
 15-dispatch primitive mix fits the host software-Vulkan frame budget with an
 exact post-timing oracle.
+
+## Frame-receipt honesty gate
+
+`VulkanBackend.latest_frame_receipt()` now distinguishes three observable
+states: `device-retained`, `host-cache`, and `none`. A retained compute frame
+records zero readback bytes but never claims presentation. The historical
+`present()` call records its device-to-host byte count and cache-refresh result,
+while `device_present` and `present_completed` remain false. Failed partial
+readback preserves the dirty framebuffer and reports incomplete readback with a
+specific reason; idle calls record no readback and no completed presentation.
+
+This closes a provenance hole but does not close the swapchain gate. Engine2D's
+compute framebuffer and the existing window/swapchain API currently live in
+different native Vulkan device registries. The required same-device transfer
+is tracked in
+`doc/08_tracking/bug/engine2d_vulkan_swapchain_registry_split_2026-08-12.md`.

@@ -94,6 +94,27 @@ enum VulkanErrorKind:
     # Not an error (last_error is empty).
     None
 
+struct VulkanFrameReceipt:
+    frame_index: i64
+    framebuffer_width: i32
+    framebuffer_height: i32
+    dirty_rect_count: i64
+    readback_requested: bool
+    readback_completed: bool
+    readback_bytes: i64
+    present_attempted: bool
+    present_completed: bool
+    present_mode: text
+    device_present: bool
+    host_cache_refresh_completed: bool
+    no_readback: bool
+    full_frame_fallback: bool
+    fallback_reason: text
+    cpu_fallback_used: bool
+    completion_known: bool
+    backend_handle: i64
+    device_identity: i64
+
 fn _err_is_device_lost(err: text) -> bool:
     err.contains("device lost") or err.contains("DEVICE_LOST")
 
@@ -220,6 +241,16 @@ class VulkanBackend:
     present_full_readback_count: i64
     present_noop_count: i64
     device_finalize_no_readback_count: i64
+    frame_index: i64
+    frame_dirty_rect_count: i64
+    frame_readback_requested: bool
+    frame_readback_completed: bool
+    frame_present_attempted: bool
+    frame_present_completed: bool
+    frame_present_mode: text
+    frame_host_cache_refresh_completed: bool
+    frame_full_fallback: bool
+    frame_fallback_reason: text
     frame_batching_enabled: bool
     pending_compute_command: i64
     pending_compute_pipelines: [i64]   # preallocated, VK_PENDING_COMPUTE_CAP=16 slots
@@ -298,6 +329,16 @@ class VulkanBackend:
             present_full_readback_count: 0,
             present_noop_count: 0,
             device_finalize_no_readback_count: 0,
+            frame_index: 0,
+            frame_dirty_rect_count: 0,
+            frame_readback_requested: false,
+            frame_readback_completed: false,
+            frame_present_attempted: false,
+            frame_present_completed: false,
+            frame_present_mode: "none",
+            frame_host_cache_refresh_completed: false,
+            frame_full_fallback: false,
+            frame_fallback_reason: "",
             frame_batching_enabled: false,
             pending_compute_command: 0,
             pending_compute_pipelines: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -430,6 +471,16 @@ impl RenderBackend for VulkanBackend:
         self.present_full_readback_count = 0
         self.present_noop_count = 0
         self.device_finalize_no_readback_count = 0
+        self.frame_index = 0
+        self.frame_dirty_rect_count = 0
+        self.frame_readback_requested = false
+        self.frame_readback_completed = false
+        self.frame_present_attempted = false
+        self.frame_present_completed = false
+        self.frame_present_mode = "none"
+        self.frame_host_cache_refresh_completed = false
+        self.frame_full_fallback = false
+        self.frame_fallback_reason = ""
         self.pending_compute_command = 0
         self.pending_compute_pipelines = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
         self.pending_compute_descriptors = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
@@ -894,6 +945,50 @@ impl RenderBackend for VulkanBackend:
             return false
         pending_status != 0
 
+    me _begin_frame_receipt(mode: text, readback_requested: bool,
+                            present_attempted: bool):
+        self.frame_index += 1
+        self.frame_dirty_rect_count = if self.present_damage_valid:
+            self.present_damage_rects.len().to_i64() / 4
+        else:
+            0
+        self.frame_readback_requested = readback_requested
+        self.frame_readback_completed = false
+        self.frame_present_attempted = present_attempted
+        self.frame_present_completed = false
+        self.frame_present_mode = mode
+        self.frame_host_cache_refresh_completed = false
+        self.frame_full_fallback = false
+        self.frame_fallback_reason = ""
+
+    fn latest_frame_receipt() -> VulkanFrameReceipt:
+        """Snapshot the latest finalized frame without implying swapchain work.
+
+        `device_present` and `present_completed` remain false until a native
+        surface/swapchain owner completes a real presentation call. A retained
+        compute frame and a refreshed host cache are reported as distinct modes.
+        """
+        VulkanFrameReceipt(
+            frame_index: self.frame_index,
+            framebuffer_width: self.w,
+            framebuffer_height: self.h,
+            dirty_rect_count: self.frame_dirty_rect_count,
+            readback_requested: self.frame_readback_requested,
+            readback_completed: self.frame_readback_completed,
+            readback_bytes: self.present_readback_bytes,
+            present_attempted: self.frame_present_attempted,
+            present_completed: self.frame_present_completed,
+            present_mode: self.frame_present_mode,
+            device_present: false,
+            host_cache_refresh_completed: self.frame_host_cache_refresh_completed,
+            no_readback: not self.frame_readback_requested and self.present_readback_bytes == 0,
+            full_frame_fallback: self.frame_full_fallback,
+            fallback_reason: self.frame_fallback_reason,
+            cpu_fallback_used: self.cpu_fallback_used,
+            completion_known: not self.completion_unknown,
+            backend_handle: self.d_framebuffer,
+            device_identity: self.session.device)
+
     me finalize_compute_frame_no_readback() -> bool:
         """Finish a storage-buffer frame without copying it to the host.
 
@@ -902,19 +997,23 @@ impl RenderBackend for VulkanBackend:
         mirror so any later present/readback must reseed it from the complete
         device framebuffer instead of patching a stale retained frame.
         """
+        self._begin_frame_receipt("device-retained", false, false)
         self.present_readback_bytes = 0
         self.present_readback_rect_count = 0
         if self.completion_unknown:
+            self.frame_fallback_reason = "completion-unknown"
             return false
         val pending_status = self._flush_pending_compute()
         if pending_status <= 0:
             if pending_status < 0:
                 self.completion_unknown = true
+            self.frame_fallback_reason = "compute-finalize-failed"
             return false
         if self.dirty:
             self.host_mirror_valid = false
         self._clear_present_damage()
         self.device_finalize_no_readback_count += 1
+        self.frame_present_completed = false
         true
 
     me stage_present_damage(rects: [i64]) -> bool:
@@ -1025,26 +1124,40 @@ impl RenderBackend for VulkanBackend:
         true
 
     me present():
+        self._begin_frame_receipt("host-cache", true, false)
         self.present_readback_bytes = 0
         self.present_readback_rect_count = 0
         if self.completion_unknown:
+            self.frame_fallback_reason = "completion-unknown"
             return
         val pending_status = self._flush_pending_compute()
         if pending_status <= 0:
             if pending_status < 0:
                 self.completion_unknown = true
+            self.frame_fallback_reason = "compute-finalize-failed"
             return
         if not self.dirty:
             self.present_noop_count += 1
+            self.frame_present_mode = "none"
+            self.frame_readback_requested = false
             self._clear_present_damage()
             return
         if self.present_damage_valid and self.host_mirror_valid:
             if not self._refresh_host_damage():
+                self.frame_fallback_reason = "damaged-host-cache-refresh-failed"
                 return
         else:
+            self.frame_full_fallback = true
+            self.frame_fallback_reason = if self.host_mirror_valid:
+                "damage-plan-unavailable"
+            else:
+                "host-mirror-seed"
             if not self._refresh_host_full():
+                self.frame_fallback_reason = "full-host-cache-refresh-failed"
                 return
         self.dirty = false
+        self.frame_readback_completed = true
+        self.frame_host_cache_refresh_completed = true
         self._clear_present_damage()
 
     me read_pixels() -> [u32]:
