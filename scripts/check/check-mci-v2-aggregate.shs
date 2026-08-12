@@ -275,8 +275,42 @@ for check_id in $required_checks; do
         echo "aggregate_candidate_sha256=$aggregate_candidate_hash" >> "$tmp"
     fi
     receipt="$evidence/receipts/$check_id.receipt"
+    reviewer_generation_signature=
+    reviewer_resolution_error=
+    if [ "$check_id" = reviewer ] && [ -e "$evidence/reviewer-generation.current" ]; then
+        marker="$work/reviewer-generation.current"
+        if ! regular_nonsymlink "$evidence/reviewer-generation.current" ||
+           ! snapshot_file "$evidence/reviewer-generation.current" "$marker"; then
+            reviewer_resolution_error=invalid-reviewer-generation-marker
+        else
+            generation=$(sed -n '1p' "$marker")
+            if [ "$(wc -l < "$marker" | tr -d ' ')" -ne 1 ] ||
+               ! is_sha256 "$generation" || [ "$generation" != "$aggregate_candidate_hash" ]; then
+                reviewer_resolution_error=review-replay-or-wrong-candidate
+            else
+                generation_dir="$evidence/reviewer-generations/$generation"
+                complete="$generation_dir/complete.env"
+                complete_snapshot="$work/reviewer-generation.complete"
+                receipt="$generation_dir/reviewer.receipt"
+                reviewer_generation_signature="$generation_dir/reviewer.sig"
+                if ! dir_nonsymlink "$evidence/reviewer-generations" ||
+                   ! dir_nonsymlink "$generation_dir" ||
+                   ! regular_nonsymlink "$complete" ||
+                   ! snapshot_file "$complete" "$complete_snapshot" ||
+                   [ "$(field generation_schema "$complete_snapshot" 2>/dev/null || true)" != mci-independent-review-generation-v1 ] ||
+                   [ "$(field aggregate_candidate_sha256 "$complete_snapshot" 2>/dev/null || true)" != "$generation" ] ||
+                   ! is_sha256 "$(field receipt_sha256 "$complete_snapshot" 2>/dev/null || true)" ||
+                   ! is_sha256 "$(field signature_sha256 "$complete_snapshot" 2>/dev/null || true)" ||
+                   [ "$(wc -l < "$complete_snapshot" | tr -d ' ')" -ne 4 ]; then
+                    reviewer_resolution_error=invalid-reviewer-generation
+                fi
+            fi
+        fi
+    fi
     reason=none
-    if [ ! -e "$receipt" ]; then
+    if [ -n "$reviewer_resolution_error" ]; then
+        reason=$reviewer_resolution_error
+    elif [ ! -e "$receipt" ]; then
         reason=missing
     elif ! regular_nonsymlink "$receipt"; then
         reason=unsafe-receipt-file
@@ -338,8 +372,19 @@ for check_id in $required_checks; do
                 if ! sed '/^receipt_hash=/d' "$snapshot" | cmp -s - "$tmp.canonical" || ! is_sha256 "$receipt_hash" || [ "$(hash_file "$tmp.canonical")" != "$receipt_hash" ]; then reason=invalid-receipt-hash
                 else
                     signature_path="$evidence/signatures/$signature_relpath"
+                    if [ -n "$reviewer_generation_signature" ]; then
+                        signature_path=$reviewer_generation_signature
+                        declared_receipt_hash=$(field receipt_sha256 "$complete_snapshot" 2>/dev/null || true)
+                        declared_signature_hash=$(field signature_sha256 "$complete_snapshot" 2>/dev/null || true)
+                        if [ "$(hash_file "$snapshot")" != "$declared_receipt_hash" ] ||
+                           ! regular_nonsymlink "$signature_path"; then
+                            reason=invalid-reviewer-generation
+                        fi
+                    fi
                     signature_snapshot="$work/reviewer.signature"
-                    if ! regular_nonsymlink "$signature_path" || ! snapshot_file "$signature_path" "$signature_snapshot"; then reason=invalid-signature
+                    if [ "$reason" != none ]; then :
+                    elif ! regular_nonsymlink "$signature_path" || ! snapshot_file "$signature_path" "$signature_snapshot"; then reason=invalid-signature
+                    elif [ -n "$reviewer_generation_signature" ] && [ "$(hash_file "$signature_snapshot")" != "$declared_signature_hash" ]; then reason=invalid-reviewer-generation
                     elif ! openssl dgst -sha256 -verify "$reviewer_key_snapshot" -signature "$signature_snapshot" "$tmp.canonical" >/dev/null 2>&1; then reason=invalid-signature
                     fi
                 fi
@@ -479,6 +524,14 @@ sync
 mv "$tmp" "$evidence/aggregate-report-v1.env"
 sync
 [ "$(sed '$d' "$evidence/aggregate-report-v1.env" | hash_file /dev/stdin 2>/dev/null || true)" = "$manifest_hash" ] || { echo 'BLOCKED: published report verification failed' >&2; exit 2; }
+# The first pass must expose the exact candidate bytes to the independent
+# reviewer.  Publish only the already-frozen graph whose digest is in the
+# report; the second pass recomputes the same bytes and resolves its activation.
+candidate_publish="$evidence/.aggregate-candidate-v1.env.$$"
+cp -- "$candidate_graph" "$candidate_publish"
+[ "$(hash_file "$candidate_publish")" = "$(field aggregate_candidate_sha256 "$evidence/aggregate-report-v1.env")" ] || { rm -f "$candidate_publish"; echo 'BLOCKED: candidate publication hash mismatch' >&2; exit 2; }
+mv "$candidate_publish" "$evidence/aggregate-candidate-v1.env"
+sync
 trap - EXIT HUP INT TERM
 rm -rf "$work"
 echo "$result: MCI aggregate ($blocked blocked); report=$evidence/aggregate-report-v1.env sha256=$manifest_hash"

@@ -6,12 +6,12 @@ requirement has current executable evidence and `$verify` reports PASS.
 
 ## Current implementation surfaces
 
-- Compiler admission: `compiler.common.mission_critical.compiler_admission`
-  accepts only a versioned collector receipt bound to exact run/source/config/
-  toolchain/dependency/environment/input-bundle hashes, resolved executable,
-  pure-Simple parent lineage, and the complete ordered discriminating-fixture
-  set. Rust seed, hybrid, stale, unknown, incomplete, duplicate, malformed, or
-  mismatched evidence is rejected.
+- Compiler admission: the host-independent producer
+  `scripts/check/check-mci-v2-compiler-admission.shs` validates the single fixed
+  `MCI-COMP-001` fixture against an authenticated exact-current pure-Simple
+  compiler lineage. It does not implement the independent two-build,
+  mutation-campaign, or reproducibility scenarios. `MCI-COMP-002/003` and
+  `MCI-NFR-003/004` remain explicit release blockers.
 - SimpleOS manifest: `os.sosix.mission_critical.certified_manifest` requires the
   exact canonical four-host × six-guest catalog. A fully evidenced selected subset may pass only its
   scoped certification; `umbrella_all_platforms` remains false unless all 24
@@ -46,6 +46,24 @@ host, compiler, GPU, RenderDoc, stress, or external-platform evidence.
    rows remain visible blockers to broader claims.
 6. Run the final aggregate and `$verify`; do not release from source inspection
    or static receipts alone.
+
+### Compiler admission producer
+
+The producer derives the ordered tracked-file set for `src/compiler`,
+`src/app`, and `src/lib`, copies every regular file into a private build
+snapshot while checking its identity and digest, and then re-derives the live
+manifest. A file-set or digest change during capture fails closed. Compilation
+uses only the private snapshot through absolute `--source` paths and a
+snapshot-local `SIMPLE_LIB`, so later worktree changes cannot create a
+manifest/build TOCTOU mismatch. The fixture, compiler, provenance, signatures,
+and trust keys are independently snapshotted too.
+
+Passing fixture mode proves only the `MCI-COMP-001` producer contract and emits
+`CONTRACT_ONLY`. Live mode can prove `MCI-COMP-001` only after trust policy is
+provisioned, and still exits blocked with `release_candidate=false` because
+`MCI-COMP-002`, `MCI-COMP-003`, `MCI-NFR-003`, and `MCI-NFR-004` have no
+executed evidence. No compiler lane receipt is published from this incomplete
+producer.
 
 ### Unified aggregate admission
 

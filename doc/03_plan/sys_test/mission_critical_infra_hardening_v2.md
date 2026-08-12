@@ -87,6 +87,11 @@ receipt. It covers only `MCI-COMP-001`; COMP-002/003 and NFR-003/004 remain
 blocked pending independent reproducibility and mutation campaigns.
 The fixed fixture is snapshotted and digest-bound before compilation; its
 `mci_admission_add` symbol and semantic stdout are checked in the emitted ELF.
+The complete tracked compiler/app/lib input set is copied to a private
+digest-verified snapshot, revalidated against the worktree after capture, and
+the compiler consumes only that snapshot. This prevents a manifest/build
+TOCTOU mismatch while concurrent worktree changes after capture remain
+irrelevant to the admitted build.
 The parent receipt has its own verified Ed25519 signature/key. Live mode blocks
 on dirty or untracked build inputs, and COMP-001 alone remains aggregate-blocked.
 | REQ-MCI-002 | `MCI-TOOL-001` executes compiler, lib, MCP, LSP, bootstrap tool, lint, duplication, whole-test, perf, runtime-contract, and direct-env checks into one tooling manifest | `MCI-TOOL-002` proves maximum output/capture and timeout boundaries without truncating identity metadata | `MCI-TOOL-003` forces one stale internal row, timeout, unavailable tool, nonzero exit, and oversized capture; the single tooling manifest remains blocked | one tooling-owner receipt, its complete internal row manifest, and bounded capture metadata | `sh scripts/check/check-mci-v2-tooling-admission.shs --evidence build/evidence/mci-v2` |

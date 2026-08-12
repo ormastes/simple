@@ -45,6 +45,9 @@ root `receipts/tooling.receipt` plus `signatures/tooling.sig`; the signer does
 not move or rename `artifacts/tooling-generation-v1.tar`.
 This producer never accepts or handles a private key and never claims that its
 template is aggregate-admissible.
+Use the canonical external signing procedure in
+[`mci_v2_lane_signer.md`](mci_v2_lane_signer.md); producer-specific ad hoc
+receipt rewriting is not supported.
 
 Controlled fixture mode requires `MCI_TOOLING_CONTROLLED_FIXTURE=1` and
 `--fixture-manifest`. It checks the schema, identities, exact row set, bounded

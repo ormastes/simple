@@ -1,0 +1,98 @@
+#!/bin/sh
+# Canonical external signer/publisher for MCI-v2 non-review lanes.
+set -eu
+LC_ALL=C
+export LC_ALL
+
+usage() {
+    echo "usage: $0 --evidence DIR --lane ID --template FILE --artifact FILE --private-key PEM --trusted-key-id ID" >&2
+    exit 2
+}
+evidence= lane= template= artifact= private_key= key_id=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --evidence) [ "$#" -ge 2 ] || usage; evidence=$2; shift 2 ;;
+        --lane) [ "$#" -ge 2 ] || usage; lane=$2; shift 2 ;;
+        --template) [ "$#" -ge 2 ] || usage; template=$2; shift 2 ;;
+        --artifact) [ "$#" -ge 2 ] || usage; artifact=$2; shift 2 ;;
+        --private-key) [ "$#" -ge 2 ] || usage; private_key=$2; shift 2 ;;
+        --trusted-key-id) [ "$#" -ge 2 ] || usage; key_id=$2; shift 2 ;;
+        *) usage ;;
+    esac
+done
+[ -n "$evidence" ] && [ -n "$lane" ] && [ -n "$template" ] && [ -n "$artifact" ] && [ -n "$private_key" ] && [ -n "$key_id" ] || usage
+case "$key_id" in ''|*[!A-Za-z0-9._-]*) usage;; esac
+case "$lane" in
+    compiler) producer=compiler-admission; artifact_schema=mci-compiler-collector-receipt-v2; scenarios=MCI-COMP-001,MCI-COMP-002,MCI-COMP-003,MCI-NFR-003,MCI-NFR-004 ;;
+    tooling) producer=tooling-admission; artifact_schema=mci-tooling-child-manifest-v1; scenarios=MCI-TOOL-001,MCI-TOOL-002,MCI-TOOL-003,MCI-NFR-001,MCI-NFR-002,MCI-NFR-005,MCI-NFR-006,MCI-NFR-013,MCI-NFR-014 ;;
+    simpleos) producer=simpleos-target; artifact_schema=mci-simpleos-platform-evidence-v1; scenarios=MCI-OS-001,MCI-OS-002,MCI-OS-003,MCI-OS-004,MCI-OS-005,MCI-OS-006 ;;
+    rendering) producer=rendering-target; artifact_schema=mci-rendering-evidence-v1; scenarios=MCI-REN-001,MCI-REN-002,MCI-REN-003,MCI-REN-004,MCI-REN-005,MCI-REN-006,MCI-NFR-011,MCI-NFR-012 ;;
+    allocation) producer=allocation-runtime; artifact_schema=mci-allocation-domain-arena-evidence-v1; scenarios=MCI-ALLOC-001,MCI-ALLOC-002,MCI-ALLOC-003,MCI-ALLOC-004,MCI-ALLOC-005,MCI-NFR-007,MCI-NFR-008 ;;
+    fault-injection) producer=allocation-runtime; artifact_schema=mci-fault-injection-domain-arena-evidence-v1; scenarios=MCI-ALLOC-006,MCI-NFR-009,MCI-NFR-010 ;;
+    process-safety) producer=process-runtime; artifact_schema=mci-process-safety-evidence-v1; scenarios=MCI-PROC-001,MCI-PROC-002,MCI-PROC-003 ;;
+    stress) producer=stress-target; artifact_schema=mci-stress-evidence-v1; scenarios=MCI-NFR-015,MCI-NFR-016 ;;
+    traceability) producer=traceability-gate; artifact_schema=mci-traceability-artifact-v1; scenarios=MCI-DOC-003 ;;
+    *) echo "BLOCKED: unsupported or review lane: $lane" >&2; exit 2 ;;
+esac
+
+regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
+field() { awk -F= -v k="$1" '$1==k{n++;v=substr($0,length(k)+2)} END{if(n!=1)exit 1;print v}' "$2"; }
+hash_file() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+    else openssl dgst -sha256 "$1" | sed 's/^.*= //'
+    fi
+}
+blocked() { echo "BLOCKED: $*" >&2; exit 2; }
+regular "$template" && regular "$artifact" && regular "$private_key" || blocked 'inputs must be regular non-symlink files'
+command -v openssl >/dev/null 2>&1 || blocked 'OpenSSL is required for detached signing'
+[ -d "$evidence" ] && [ ! -L "$evidence" ] || blocked 'unsafe evidence root'
+evidence=$(CDPATH= cd -- "$evidence" && pwd -P)
+mkdir -p "$evidence/receipts" "$evidence/signatures"
+[ -d "$evidence/receipts" ] && [ ! -L "$evidence/receipts" ] && [ -d "$evidence/signatures" ] && [ ! -L "$evidence/signatures" ] || blocked 'unsafe publication directories'
+[ ! -e "$evidence/receipts/$lane.receipt" ] && [ ! -L "$evidence/receipts/$lane.receipt" ] || blocked 'receipt collision'
+[ ! -e "$evidence/signatures/$lane.sig" ] && [ ! -L "$evidence/signatures/$lane.sig" ] || blocked 'signature collision'
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/mci-lane-signer.XXXXXX") || exit 2
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+cp -- "$template" "$work/template"; cp -- "$artifact" "$work/artifact"
+[ "$(hash_file "$template")" = "$(hash_file "$work/template")" ] && [ "$(hash_file "$artifact")" = "$(hash_file "$work/artifact")" ] || blocked 'input changed during snapshot'
+
+# Exact unique key set: 19 common fields, plus the traceability provenance pair.
+keys='receipt_schema check_id producer_class attestation trusted_key_id signature_relpath run_id source_hash configuration_hash captured_at_utc_ns valid_until_utc_ns result scenarios artifact_relpath artifact_sha256 artifact_schema artifact_mode release_eligible receipt_hash'
+[ "$lane" = simpleos ] && keys='receipt_template_schema check_id producer_class attestation trusted_key_id signature_relpath run_id source_hash configuration_hash captured_at_utc_ns valid_until_utc_ns result scenarios artifact_relpath artifact_sha256 artifact_schema artifact_mode release_eligible'
+[ "$lane" = traceability ] && keys='receipt_schema check_id producer_class attestation trusted_key_id signature_relpath run_id source_hash configuration_hash captured_at_utc_ns valid_until_utc_ns result scenarios artifact_relpath artifact_sha256 artifact_schema artifact_mode release_eligible docgen_receipt_relpath docgen_receipt_sha256 receipt_hash'
+actual=$(awk -F= '{print $1}' "$work/template" | paste -sd' ' -)
+[ "$actual" = "$keys" ] || blocked 'template field set/order is not canonical for lane'
+[ "$(field check_id "$work/template")" = "$lane" ] && [ "$(field producer_class "$work/template")" = "$producer" ] || blocked 'wrong lane or producer class'
+[ "$(field signature_relpath "$work/template")" = "$lane.sig" ] || blocked 'non-canonical signature path'
+[ "$(field result "$work/template")" = pass ] && [ "$(field scenarios "$work/template")" = "$scenarios" ] || blocked 'non-pass or wrong scenario set'
+[ "$(field artifact_schema "$work/template")" = "$artifact_schema" ] && [ "$(field artifact_mode "$work/template")" = live ] && [ "$(field release_eligible "$work/template")" = true ] || blocked 'non-release template'
+[ "$(field artifact_sha256 "$work/template")" = "$(hash_file "$work/artifact")" ] || blocked 'artifact hash mismatch'
+[ "$(basename "$artifact")" = "$(field artifact_relpath "$work/template")" ] || blocked 'artifact path mismatch'
+
+if [ "$lane" = tooling ]; then tar -xOf "$work/artifact" ./manifest.env > "$work/header" 2>/dev/null || blocked 'malformed tooling artifact'
+else cp -- "$work/artifact" "$work/header"; fi
+actual_schema=$(field artifact_schema "$work/header" 2>/dev/null || field schema_version "$work/header" 2>/dev/null || true)
+actual_mode=$(field artifact_mode "$work/header" 2>/dev/null || field mode "$work/header" 2>/dev/null || true)
+actual_release=$(field release_eligible "$work/header" 2>/dev/null || field release_candidate "$work/header" 2>/dev/null || true)
+[ "$actual_schema" = "$artifact_schema" ] && [ "$actual_mode" = live ] && [ "$actual_release" = true ] || blocked 'artifact schema/mode/release policy mismatch'
+
+schema=$(field receipt_schema "$work/template" 2>/dev/null || field receipt_template_schema "$work/template")
+case "$schema" in mci-lane-receipt-v1|mci-lane-unsigned-template-v1) :;; *) blocked 'invalid receipt template schema';; esac
+{
+    echo receipt_schema=mci-lane-receipt-v1; echo check_id="$lane"; echo producer_class="$producer"
+    echo attestation=signed-v1; echo trusted_key_id="$key_id"; echo signature_relpath="$lane.sig"
+    for k in run_id source_hash configuration_hash captured_at_utc_ns valid_until_utc_ns result scenarios artifact_relpath artifact_sha256 artifact_schema artifact_mode release_eligible; do echo "$k=$(field "$k" "$work/template")"; done
+    if [ "$lane" = traceability ]; then echo "docgen_receipt_relpath=$(field docgen_receipt_relpath "$work/template")"; echo "docgen_receipt_sha256=$(field docgen_receipt_sha256 "$work/template")"; fi
+} > "$work/canonical"
+echo "receipt_hash=$(hash_file "$work/canonical")" > "$work/hash-line"
+cp -- "$work/canonical" "$work/receipt"; sed -n '1p' "$work/hash-line" >> "$work/receipt"
+openssl dgst -sha256 -sign "$private_key" -out "$work/signature" "$work/canonical" >/dev/null 2>&1 || blocked 'detached signing failed'
+
+publisher=$work/secure-publish
+cc -std=c11 -O2 "$evidence/../scripts/check/lib/mci-secure-publish.c" -o "$publisher" 2>/dev/null || \
+cc -std=c11 -O2 "$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd -P)/scripts/check/lib/mci-secure-publish.c" -o "$publisher" || blocked 'secure publisher unavailable'
+"$publisher" "$evidence/signatures" "$work/signature" "$lane.sig" || blocked 'signature publication failed'
+"$publisher" "$evidence/receipts" "$work/receipt" "$lane.receipt" || blocked 'receipt publication failed; non-admissible detached signature retained'
+echo "PASS: signed and published MCI-v2 lane receipt; lane=$lane receipt=$evidence/receipts/$lane.receipt signature=$evidence/signatures/$lane.sig"

@@ -1,0 +1,63 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd -P)
+signer=$root/scripts/check/sign-mci-v2-lane.shs
+work=$(mktemp -d "$root/build/mci-lane-signer-contract.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+chmod 700 "$work"
+# Contract-only key material: production keys are supplied externally.
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$work/key.pem" >/dev/null 2>&1
+openssl pkey -in "$work/key.pem" -pubout -out "$work/public.pem" >/dev/null 2>&1
+hash_file(){ if command -v sha256sum >/dev/null 2>&1;then sha256sum "$1"|awk '{print $1}';else shasum -a 256 "$1"|awk '{print $1}';fi; }
+make_root(){ mkdir -p "$1/receipts" "$1/signatures"; chmod 700 "$1" "$1/receipts" "$1/signatures"; }
+common_tail(){
+    lane=$1 artifact_name=$2 artifact_hash=$3 artifact_schema=$4 scenarios=$5
+    echo run_id=contract-run; echo source_hash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    echo configuration_hash=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    echo captured_at_utc_ns=100; echo valid_until_utc_ns=200; echo result=pass; echo scenarios="$scenarios"
+    echo artifact_relpath="$artifact_name"; echo artifact_sha256="$artifact_hash"; echo artifact_schema="$artifact_schema"
+    echo artifact_mode=live; echo release_eligible=true
+}
+
+# Tooling normalization and detached-signature contract.
+mkdir "$work/tooling-generation"; printf 'artifact_schema=mci-tooling-child-manifest-v1\nartifact_mode=live\nrelease_eligible=true\n' > "$work/tooling-generation/manifest.env"
+tar -cf "$work/tooling-generation-v1.tar" -C "$work/tooling-generation" .
+tooling_hash=$(hash_file "$work/tooling-generation-v1.tar")
+tooling_scenarios=MCI-TOOL-001,MCI-TOOL-002,MCI-TOOL-003,MCI-NFR-001,MCI-NFR-002,MCI-NFR-005,MCI-NFR-006,MCI-NFR-013,MCI-NFR-014
+{
+ echo receipt_schema=mci-lane-receipt-v1; echo check_id=tooling; echo producer_class=tooling-admission
+ echo attestation=unsigned-template; echo trusted_key_id=signer-must-set; echo signature_relpath=tooling.sig
+ common_tail tooling tooling-generation-v1.tar "$tooling_hash" mci-tooling-child-manifest-v1 "$tooling_scenarios"
+ echo receipt_hash=signer-must-canonicalize-hash-and-sign
+} > "$work/tooling.template"
+make_root "$work/tooling-evidence"
+"$signer" --evidence "$work/tooling-evidence" --lane tooling --template "$work/tooling.template" --artifact "$work/tooling-generation-v1.tar" --private-key "$work/key.pem" --trusted-key-id contract-key >/dev/null
+grep -Fxq attestation=signed-v1 "$work/tooling-evidence/receipts/tooling.receipt"
+sed '/^receipt_hash=/d' "$work/tooling-evidence/receipts/tooling.receipt" > "$work/tooling.canonical"
+field_hash=$(sed -n 's/^receipt_hash=//p' "$work/tooling-evidence/receipts/tooling.receipt")
+[ "$field_hash" = "$(hash_file "$work/tooling.canonical")" ]
+openssl dgst -sha256 -verify "$work/public.pem" -signature "$work/tooling-evidence/signatures/tooling.sig" "$work/tooling.canonical" >/dev/null 2>&1
+
+# SimpleOS's distinct unsigned schema is normalized to the same canonical receipt.
+printf 'artifact_schema=mci-simpleos-platform-evidence-v1\nartifact_mode=live\nrelease_eligible=true\n' > "$work/simpleos.evidence"
+simpleos_hash=$(hash_file "$work/simpleos.evidence")
+{
+ echo receipt_template_schema=mci-lane-unsigned-template-v1; echo check_id=simpleos; echo producer_class=simpleos-target
+ echo attestation=unsigned-v1; echo trusted_key_id=producer-key; echo signature_relpath=simpleos.sig
+ common_tail simpleos simpleos.evidence "$simpleos_hash" mci-simpleos-platform-evidence-v1 MCI-OS-001,MCI-OS-002,MCI-OS-003,MCI-OS-004,MCI-OS-005,MCI-OS-006
+} > "$work/simpleos.template"
+make_root "$work/simpleos-root"
+"$signer" --evidence "$work/simpleos-root" --lane simpleos --template "$work/simpleos.template" --artifact "$work/simpleos.evidence" --private-key "$work/key.pem" --trusted-key-id contract-key >/dev/null
+grep -Fxq receipt_schema=mci-lane-receipt-v1 "$work/simpleos-root/receipts/simpleos.receipt"
+
+# Fail closed before publication for malformed templates and fixture artifacts.
+sed 's/^artifact_mode=live$/artifact_mode=fixture/' "$work/simpleos.template" > "$work/malformed.template"
+make_root "$work/reject-malformed"
+if "$signer" --evidence "$work/reject-malformed" --lane simpleos --template "$work/malformed.template" --artifact "$work/simpleos.evidence" --private-key "$work/key.pem" --trusted-key-id contract-key >/dev/null 2>&1; then exit 1; fi
+[ ! -e "$work/reject-malformed/receipts/simpleos.receipt" ] && [ ! -e "$work/reject-malformed/signatures/simpleos.sig" ]
+mkdir "$work/fixture-input"; printf 'artifact_schema=mci-simpleos-platform-evidence-v1\nartifact_mode=fixture\nrelease_eligible=false\n' > "$work/fixture-input/simpleos.evidence"
+fixture_hash=$(hash_file "$work/fixture-input/simpleos.evidence"); sed "s/$simpleos_hash/$fixture_hash/" "$work/simpleos.template" > "$work/fixture.template"
+make_root "$work/reject-fixture"
+if "$signer" --evidence "$work/reject-fixture" --lane simpleos --template "$work/fixture.template" --artifact "$work/fixture-input/simpleos.evidence" --private-key "$work/key.pem" --trusted-key-id contract-key >/dev/null 2>&1; then exit 1; fi
+[ ! -e "$work/reject-fixture/receipts/simpleos.receipt" ] && [ ! -e "$work/reject-fixture/signatures/simpleos.sig" ]
+echo 'mci_v2_lane_signer_contract_test: PASS'

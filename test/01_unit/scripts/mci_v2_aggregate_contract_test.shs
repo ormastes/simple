@@ -2,6 +2,7 @@
 set -eu
 root=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd)
 gate="$root/scripts/check/check-mci-v2-aggregate.shs"
+reviewer_gate="$root/scripts/check/check-mci-v2-independent-review.shs"
 mkdir -p "$root/build"
 work=$(mktemp -d "$root/build/mci-aggregate.XXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
@@ -16,6 +17,7 @@ trust_args="--trusted-key $work/public.pem --trusted-key-id test-key --reviewer-
 source_hash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 config_hash=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 run_id=run-contract
+now_ns=18446744073709551614
 
 hash_file() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
 scenarios() {
@@ -146,7 +148,6 @@ build_baseline() {
 }
 build_baseline "$evidence"
 
-now_ns=18446744073709551614
 if ! "$gate" --evidence "$evidence" --run-id "$run_id" --source-hash "$source_hash" --configuration-hash "$config_hash" --now-utc-ns "$now_ns" $trust_args; then
     sed -n '/^row=/p' "$evidence/aggregate-report-v1.env" >&2
     exit 1
@@ -159,6 +160,37 @@ grep -q '^row=allocation|PASS|none|MCI-ALLOC-001,MCI-ALLOC-002,MCI-ALLOC-003,MCI
 grep -q '^row=fault-injection|PASS|none|MCI-ALLOC-006,MCI-NFR-009,MCI-NFR-010$' "$evidence/aggregate-report-v1.env"
 grep -q '^row=traceability|PASS|none|MCI-DOC-003$' "$evidence/aggregate-report-v1.env"
 [ "$(grep -c '^row=.*|PASS|none|' "$evidence/aggregate-report-v1.env")" -eq 10 ]
+
+# Real two-pass handoff: the producer activates a content-addressed reviewer
+# generation and the aggregate consumes that generation without flat copies.
+generation_evidence="$work/evidence-generation"
+build_baseline "$generation_evidence"
+sed '/^receipt_hash=/d' "$generation_evidence/receipts/reviewer.receipt" > "$work/generation-decision.env"
+openssl dgst -sha256 -sign "$work/reviewer-private.pem" -out "$work/generation-decision.sig" "$work/generation-decision.env"
+rm "$generation_evidence/receipts/reviewer.receipt" "$generation_evidence/signatures/reviewer.sig"
+{
+    echo policy_schema=mci-independent-review-trust-v1
+    echo reviewer_key_id=reviewer-key
+    echo reviewer_key_sha256="$(hash_file "$work/reviewer-public.pem")"
+    echo reviewer_role=independent-release-reviewer
+    echo reviewer_scope=mci-v2-aggregate
+    echo mode=live
+} > "$work/generation-review-policy.env"
+"$reviewer_gate" --evidence "$generation_evidence" \
+    --aggregate-report "$generation_evidence/aggregate-report-v1.env" \
+    --candidate-graph "$generation_evidence/aggregate-candidate-v1.env" \
+    --decision "$work/generation-decision.env" --decision-signature "$work/generation-decision.sig" \
+    --reviewer-key "$work/reviewer-public.pem" --reviewer-key-id reviewer-key \
+    --reviewer-trust-policy "$work/generation-review-policy.env" \
+    --producer-key "$work/public.pem" --producer-key-id test-key --now-utc-ns "$now_ns" >/dev/null
+"$gate" --evidence "$generation_evidence" --run-id "$run_id" --source-hash "$source_hash" \
+    --configuration-hash "$config_hash" --now-utc-ns "$now_ns" $trust_args >/dev/null
+grep -q '^row=reviewer|PASS|none|' "$generation_evidence/aggregate-report-v1.env"
+[ ! -e "$generation_evidence/receipts/reviewer.receipt" ]
+[ ! -e "$generation_evidence/signatures/reviewer.sig" ]
+# POSIX shell functions share variables; restore the original fixture root for
+# the existing flat-compatibility and negative-control matrix below.
+evidence="$work/evidence"
 first_hash=$(sed -n 's/^manifest_sha256=//p' "$evidence/aggregate-report-v1.env")
 evidence_reverse="$work/evidence-reverse"; mkdir -p "$evidence_reverse/receipts" "$evidence_reverse/artifacts" "$evidence_reverse/signatures"
 for check in $(printf '%s\n' $checks | sort -r); do

@@ -14,6 +14,33 @@ regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
 resolve() { case "$1" in /*) printf '%s\n' "$1";; *) printf '%s/%s\n' "$root" "$1";; esac; }
 canonical_below_root() { p=$(resolve "$1"); [ ! -L "$p" ] && [ "$(readlink -f "$p")" = "$p" ] && case "$p" in "$root"/*) :;; *) return 1;; esac; }
 snapshot() { src=$1 dst=$2; regular "$src" || return 1; before=$(stat -Lc '%d:%i:%s:%Y:%Z' "$src")/$(hash_file "$src"); cp "$src" "$dst"; [ "$before" = "$(stat -Lc '%d:%i:%s:%Y:%Z' "$src")/$(hash_file "$src")" ] && [ "$(hash_file "$src")" = "$(hash_file "$dst")" ]; }
+derive_live_source_manifest() {
+  list=$1 manifest=$2
+  git ls-files $(printf '%s' "$source_roots" | tr ':' ' ') | LC_ALL=C sort > "$list" || return 1
+  [ -s "$list" ] || return 1
+  : > "$manifest"
+  while IFS= read -r f; do
+    if [ -L "$root/$f" ]; then
+      resolved=$(readlink -f "$root/$f") || return 1
+      case "$resolved" in "$root"/*) :;; *) return 1;; esac
+    else
+      regular "$root/$f" || return 1
+    fi
+    if [ -f "$root/$f" ]; then printf '%s=%s\n' "$f" "$(hash_file "$root/$f")" >> "$manifest" || return 1; fi
+  done < "$list"
+}
+snapshot_source_entry() {
+  src=$1 dst=$2
+  if [ -L "$src" ]; then
+    link=$(readlink "$src") || return 1
+    resolved=$(readlink -f "$src") || return 1
+    case "$resolved" in "$root"/*) :;; *) return 1;; esac
+    cp -P "$src" "$dst" || return 1
+    [ -L "$src" ] && [ "$(readlink "$src")" = "$link" ] && [ -L "$dst" ] && [ "$(readlink "$dst")" = "$link" ]
+  else
+    snapshot "$src" "$dst"
+  fi
+}
 case "$run_id" in ''|*[!A-Za-z0-9._-]*) usage;; esac; case "$captured$valid${now:-0}" in *[!0-9]*) usage;; esac
 [ -n "$now" ] || now=$(date -u +%s)000000000
 awk -v a="$captured" -v n="$now" -v z="$valid" 'BEGIN{exit !(a<=n&&n<=z&&z-a<=86400000000000)}' || fail stale-or-invalid-lifetime
@@ -30,7 +57,19 @@ work=$(mktemp -d "$root/build/mci-compiler.XXXXXX"); trap 'rm -rf "$work"' EXIT 
 snapshot "$compiler" "$work/compiler" && snapshot "$provenance" "$work/provenance" && snapshot "$signature" "$work/signature" && snapshot "$trust_key" "$work/key" && snapshot "$parent" "$work/parent" && snapshot "$parent_signature" "$work/parent.sig" && snapshot "$parent_key" "$work/parent.key" || fail aba-or-input-mutation
 chmod 500 "$work/compiler"; compiler_hash=$(hash_file "$work/compiler"); key_hash=$(hash_file "$work/key")
 source_roots=$(field source_roots "$policy"); source_manifest=$work/source.manifest
-git ls-files ${source_roots//:/ } | LC_ALL=C sort | while IFS= read -r f; do [ -f "$root/$f" ] || continue; regular "$root/$f" || exit 3; printf '%s=%s\n' "$f" "$(hash_file "$root/$f")"; done > "$source_manifest" || fail source-manifest-derivation-failed
+derive_live_source_manifest "$work/source.files.before" "$work/source.live.before" || fail source-manifest-derivation-failed
+mkdir -p "$work/source"
+: > "$source_manifest"
+while IFS= read -r f; do
+  mkdir -p "$work/source/$(dirname "$f")"
+  snapshot_source_entry "$root/$f" "$work/source/$f" || fail source-aba-or-input-mutation
+done < "$work/source.files.before"
+while IFS= read -r f; do
+  if [ -f "$work/source/$f" ]; then printf '%s=%s\n' "$f" "$(hash_file "$work/source/$f")" >> "$source_manifest"; fi
+done < "$work/source.files.before"
+cmp -s "$work/source.live.before" "$source_manifest" || fail source-snapshot-mismatch
+derive_live_source_manifest "$work/source.files.after" "$work/source.live.after" || fail source-manifest-revalidation-failed
+cmp -s "$work/source.files.before" "$work/source.files.after" && cmp -s "$source_manifest" "$work/source.live.after" || fail source-mutated-during-snapshot
 source_hash=$(hash_file "$source_manifest"); config_manifest=$work/config.manifest
 fixture=$(field fixture_path "$policy"); expected=$(field fixture_stdout "$policy"); minimum=$(field minimum_emitted_function_count "$policy"); required_symbol=$(field required_symbol "$policy"); canonical_below_root "$fixture" && regular "$root/$fixture" || fail unsafe-fixed-fixture
 snapshot "$root/$fixture" "$work/fixture.spl" || fail fixture-aba-or-mutation; fixture_hash=$(hash_file "$work/fixture.spl")
@@ -47,7 +86,7 @@ parent_hash=$(hash_file "$work/parent"); [ "$(field parent_receipt_sha256 "$work
 parent_key_hash=$(hash_file "$work/parent.key"); [ "$(field signing_algorithm "$work/parent" 2>/dev/null || true)" = ed25519 ] && [ "$(field trust_key_sha256 "$work/parent" 2>/dev/null || true)" = "$parent_key_hash" ] || fail invalid-parent-trust
 openssl pkeyutl -verify -rawin -pubin -inkey "$work/parent.key" -sigfile "$work/parent.sig" -in "$work/parent" >/dev/null 2>&1 || fail invalid-parent-signature
 openssl pkeyutl -verify -rawin -pubin -inkey "$work/key" -sigfile "$work/signature" -in "$work/provenance" >/dev/null 2>&1 || fail invalid-signature
-emitted=$work/emitted; timeout 180 env SIMPLE_LIB=src "$work/compiler" native-build --source src/compiler --source src/app --source src/lib --entry-closure --entry "$work/fixture.spl" --strip --output "$emitted" >$work/compile.log 2>&1 || fail compile-failed
+emitted=$work/emitted; timeout 180 env SIMPLE_LIB="$work/source/src" "$work/compiler" native-build --source "$work/source/src/compiler" --source "$work/source/src/app" --source "$work/source/src/lib" --entry-closure --entry "$work/fixture.spl" --strip --output "$emitted" >$work/compile.log 2>&1 || fail compile-failed
 regular "$emitted" && [ -x "$emitted" ] || fail non-executable-artifact; readelf -h "$emitted" | grep -q 'Type:.*EXEC\|Type:.*DYN' || fail emitted-format-not-elf
 functions=$(nm "$emitted" 2>/dev/null | awk '$2 ~ /^[Tt]$/ {n++} END{print n+0}'); [ "$functions" -ge "$minimum" ] || fail missing-function-evidence
 nm "$emitted" 2>/dev/null | awk -v wanted="$required_symbol" '$2 ~ /^[Tt]$/ && index($3,wanted){found=1} END{exit !found}' || fail required-symbol-missing
