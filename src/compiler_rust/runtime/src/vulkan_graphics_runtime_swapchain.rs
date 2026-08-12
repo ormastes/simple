@@ -339,6 +339,7 @@ mod tests {
     use super::{rt_vulkan_destroy_swapchain, rt_vulkan_init_headless_present, rt_vulkan_init_window_present, rt_vulkan_present_buffer};
     use crate::vulkan_graphics_runtime::vulkan_graphics_runtime_buffer::{rt_vulkan_alloc_buffer, rt_vulkan_copy_to_buffer_raw, rt_vulkan_free_buffer};
     use crate::vulkan_graphics_runtime::vulkan_graphics_runtime_core::{rt_vulkan_shutdown, STATE};
+    use crate::vulkan_graphics_runtime::vulkan_graphics_runtime_device::rt_vulkan_selected_device_driver_identity;
 
     fn upload_chunks(buffer: i64, bytes: &[u8]) {
         const MAX_UPLOAD: usize = 64 * 1024 * 1024;
@@ -409,6 +410,51 @@ mod tests {
         let checksum = pixels.iter().fold(1469598103934665603u64, |hash, pixel| (hash ^ u64::from(*pixel)).wrapping_mul(1099511628211));
         let rss_kib = std::fs::read_to_string("/proc/self/status").ok().and_then(|status| status.lines().find_map(|line| line.strip_prefix("VmHWM:").and_then(|v| v.split_whitespace().next()).and_then(|v| v.parse::<u64>().ok()))).unwrap_or(0);
         println!("headless_present width={width} height={height} frames={frames} p50_ns={p50} p95_ns={p95} rss_kib={rss_kib} readback_bytes=0 fallback=false completion_known=true present_mode=headless-swapchain checksum={checksum}");
+        assert_eq!(rt_vulkan_free_buffer(buffer), 1);
+        assert_eq!(rt_vulkan_destroy_swapchain(swapchain), 1);
+        assert_eq!(rt_vulkan_shutdown(), 1);
+    }
+
+    #[test]
+    #[ignore = "8K physical-device visible-window presentation evidence"]
+    fn bench_window_swapchain_present_8k() {
+        use std::ffi::CStr;
+        use std::time::Instant;
+        let (width, height, frames) = (7680i64, 4320i64, 20usize);
+        let swapchain = rt_vulkan_init_window_present(width, height, 0);
+        assert!(swapchain > 0, "{}", STATE.lock().last_error);
+        let identity_ptr = rt_vulkan_selected_device_driver_identity();
+        let identity = unsafe { CStr::from_ptr(identity_ptr) }.to_string_lossy().into_owned();
+        let native_present_mode = format!("{:?}", STATE.lock().swapchains.get(&swapchain).unwrap().present_mode());
+        let pixels = vec![0xff315783u32; (width * height) as usize];
+        let byte_count = width * height * 4;
+        let bytes = unsafe { std::slice::from_raw_parts(pixels.as_ptr().cast::<u8>(), byte_count as usize) };
+        let buffer = rt_vulkan_alloc_buffer(byte_count, 0x80);
+        assert!(buffer > 0);
+        upload_chunks(buffer, bytes);
+
+        let mut dynamic = Vec::with_capacity(frames);
+        for revision in 1..=frames as i64 {
+            let start = Instant::now();
+            assert!(rt_vulkan_present_buffer(swapchain, buffer, width, height, revision) > 0);
+            dynamic.push(start.elapsed().as_nanos() as u64);
+        }
+        for _ in 0..4 { assert!(rt_vulkan_present_buffer(swapchain, buffer, width, height, frames as i64) > 0); }
+        let mut retained = Vec::with_capacity(frames);
+        for _ in 0..frames {
+            let start = Instant::now();
+            assert!(rt_vulkan_present_buffer(swapchain, buffer, width, height, frames as i64) > 0);
+            retained.push(start.elapsed().as_nanos() as u64);
+        }
+        dynamic.sort_unstable();
+        retained.sort_unstable();
+        let dynamic_p50 = dynamic[(dynamic.len() - 1) * 50 / 100];
+        let dynamic_p95 = dynamic[(dynamic.len() - 1) * 95 / 100];
+        let retained_p50 = retained[(retained.len() - 1) * 50 / 100];
+        let retained_p95 = retained[(retained.len() - 1) * 95 / 100];
+        let checksum = pixels.iter().fold(1469598103934665603u64, |hash, pixel| (hash ^ u64::from(*pixel)).wrapping_mul(1099511628211));
+        let rss_kib = std::fs::read_to_string("/proc/self/status").ok().and_then(|status| status.lines().find_map(|line| line.strip_prefix("VmHWM:").and_then(|v| v.split_whitespace().next()).and_then(|v| v.parse::<u64>().ok()))).unwrap_or(0);
+        println!("window_present width={width} height={height} frames={frames} dynamic_p50_ns={dynamic_p50} dynamic_p95_ns={dynamic_p95} retained_p50_ns={retained_p50} retained_p95_ns={retained_p95} rss_kib={rss_kib} readback_bytes=0 fallback=false completion_known=true present_mode=window-swapchain native_present_mode={native_present_mode} checksum={checksum} device={identity}");
         assert_eq!(rt_vulkan_free_buffer(buffer), 1);
         assert_eq!(rt_vulkan_destroy_swapchain(swapchain), 1);
         assert_eq!(rt_vulkan_shutdown(), 1);

@@ -20,6 +20,7 @@ pub struct VulkanSwapchain {
     format: vk::SurfaceFormatKHR,
     extent: vk::Extent2D,
     image_count: u32,
+    present_mode: vk::PresentModeKHR,
     image_revision: Mutex<Vec<i64>>,
     acquire_fence: Mutex<Fence>,
 }
@@ -115,6 +116,7 @@ impl VulkanSwapchain {
             format,
             extent,
             image_count: actual_image_count,
+            present_mode,
             image_revision: Mutex::new(vec![-1; actual_image_count as usize]),
             acquire_fence: Mutex::new(acquire_fence),
         }))
@@ -186,6 +188,7 @@ impl VulkanSwapchain {
         };
 
         self.image_count = self.images.len() as u32;
+        self.present_mode = vk::PresentModeKHR::FIFO;
         self.image_revision = Mutex::new(vec![-1; self.image_count as usize]);
         self.surface = surface;
 
@@ -383,6 +386,10 @@ impl VulkanSwapchain {
     /// Get height
     pub fn height(&self) -> u32 {
         self.extent.height
+    }
+
+    pub fn present_mode(&self) -> vk::PresentModeKHR {
+        self.present_mode
     }
 
     /// Copy a tightly packed ARGB/BGRA storage buffer into an acquired image

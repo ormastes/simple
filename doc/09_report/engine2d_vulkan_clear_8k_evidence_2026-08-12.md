@@ -258,3 +258,28 @@ Under Xvfb with the llvmpipe ICD, a 320x180 live test completed two successive
 same-device visible-window presentations and clean teardown. This is a
 correctness/lifecycle result only: Xvfb is not a physical display, the test has
 no 8K timing row, and it does not promote the physical NVIDIA lane.
+
+## Physical-device 8K window probe
+
+The same Xvfb window surface selected a real NVIDIA RTX A6000
+(`vendor=000010de`, `device=00002230`, driver `911f8400`, Vulkan API
+`00404138`) and native `IMMEDIATE` presentation mode. Twenty 7680x4320 frames
+measured:
+
+| Frame class | p50 ns | p95 ns | Budget |
+|---|---:|---:|---:|
+| Changed revision / full device copy | 72,705,486 | 78,768,041 | FAIL |
+| Retained revision / seeded swapchain images | 67,359,848 | 70,119,663 | FAIL |
+
+Peak RSS was 602,412 KiB. Both rows record zero device-to-host framebuffer
+bytes, known completion, no CPU fallback, source checksum
+14100917488874079107, and completed `vkQueuePresentKHR` calls. The unchanged
+retained row avoids the Engine2D buffer copy yet remains about 67 ms, locating
+the dominant cost in the NVIDIA-to-Xvfb visible presentation path rather than
+DrawIR or framebuffer transfer.
+
+This is physical-device execution but not physical-display evidence: Xvfb is a
+virtual X server. The source checksum proves the immutable presented buffer,
+not post-scanout pixels. An attached display/direct-scanout test with a device
+origin readback or captured scanout checksum is still required before claiming
+physical-GPU 8K/80 completion.
