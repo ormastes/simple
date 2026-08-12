@@ -1807,18 +1807,35 @@ static void engine2d_blend_boxed_neon(int64_t* dst, const int64_t* src,
         uint32x4_t gacc = ENGINE2D_BLEND_CHANNEL_NEON(8);
         uint32x4_t bacc = ENGINE2D_BLEND_CHANNEL_NEON(0);
 #undef ENGINE2D_BLEND_CHANNEL_NEON
-        uint32_t rv[4], gv[4], bv[4];
-        vst1q_u32(rv, racc);
-        vst1q_u32(gv, gacc);
-        vst1q_u32(bv, bacc);
-        for (int lane = 0; lane < 4; lane++) {
-            uint32_t alpha = s[lane] >> 24;
-            uint32_t out = alpha == 255u ? s[lane] :
-                (alpha == 0u ? d[lane] :
-                 (0xff000000u | ((rv[lane] / 255u) << 16) |
-                  ((gv[lane] / 255u) << 8) | (bv[lane] / 255u)));
-            dst[i + lane] = engine2d_box_pixel(out);
+        if (use_const) {
+            uint32_t rv[4], gv[4], bv[4];
+            vst1q_u32(rv, racc);
+            vst1q_u32(gv, gacc);
+            vst1q_u32(bv, bacc);
+            for (int lane = 0; lane < 4; lane++) {
+                uint32_t alpha = s[lane] >> 24;
+                uint32_t scalar_out = alpha == 255u ? s[lane] :
+                    (alpha == 0u ? d[lane] :
+                     (0xff000000u | ((rv[lane] / 255u) << 16) |
+                      ((gv[lane] / 255u) << 8) | (bv[lane] / 255u)));
+                dst[i + lane] = engine2d_box_pixel(scalar_out);
+            }
+            continue;
         }
+#define ENGINE2D_DIV255_NEON(value) \
+        vshrq_n_u32(vaddq_u32(vaddq_u32((value), vdupq_n_u32(1u)), \
+                              vshrq_n_u32((value), 8)), 8)
+        uint32x4_t rv = ENGINE2D_DIV255_NEON(racc);
+        uint32x4_t gv = ENGINE2D_DIV255_NEON(gacc);
+        uint32x4_t bv = ENGINE2D_DIV255_NEON(bacc);
+#undef ENGINE2D_DIV255_NEON
+        uint32x4_t out = vorrq_u32(
+            vorrq_u32(vshlq_n_u32(rv, 16), vshlq_n_u32(gv, 8)),
+            vorrq_u32(bv, vdupq_n_u32(0xff000000u)));
+        uint64x2_t boxed_lo = vshlq_n_u64(vmovl_u32(vget_low_u32(out)), 3);
+        uint64x2_t boxed_hi = vshlq_n_u64(vmovl_u32(vget_high_u32(out)), 3);
+        vst1q_u64((uint64_t*)(void*)(dst + i), boxed_lo);
+        vst1q_u64((uint64_t*)(void*)(dst + i + 2), boxed_hi);
     }
     for (; i < n; i++) {
         uint32_t s = use_const ? const_src : engine2d_unbox_pixel(src[i]);

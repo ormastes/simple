@@ -124,3 +124,27 @@ Seven-sample p95 is directional host evidence rather than a broad statistical
 claim. This remains an isolated retained-damage operation row: it does not prove
 full-frame CPU 8K/80, end-to-end DrawIR/GUI/WM throughput, physical display
 scanout, or ARM/RISC-V hardware performance.
+
+## NEON variable-source vector output follow-up
+
+The AArch64 opaque-destination variable-source kernel now likewise keeps exact
+division by 255, channel assembly, and boxed-pixel stores in NEON registers.
+The constant-source path retains its former scalar output tail because applying
+the same rewrite there regressed its matched QEMU p95; this operation-specific
+selection avoids accepting that tradeoff.
+
+At 7680x4320 with one-percent damage and seven samples under static
+`aarch64-linux-gnu-gcc` output on `qemu-aarch64 -cpu max`, p95 changed as
+follows:
+
+| Operation | Before ns | After ns |
+|---|---:|---:|
+| variable alpha blend | 5,823,379 | 4,136,169 |
+| constant alpha blend | 3,138,710 | 3,071,448 |
+| six-call frame | 11,712,694 | 9,718,280 |
+
+The AArch64 NEON C kernel and in-place span corpus passed. Both benchmark runs
+produced checksum `2436809228175672195`, and the final run recorded 42 native
+SIMD hits. This demonstrates bit-exact cross-architecture execution and a QEMU
+regression direction. Emulator timing is not physical ARM performance, bare
+metal scanout, or end-to-end 8K/80 proof.
