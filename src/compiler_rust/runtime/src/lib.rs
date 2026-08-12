@@ -781,7 +781,7 @@ pub use value::{
     rt_browser_http_job_cancel, rt_browser_http_job_free, rt_browser_http_job_poll, rt_browser_http_job_start,
     rt_browser_http_job_start_public_limited, rt_browser_http_job_take_error, rt_browser_http_job_take_response,
     rt_dns_lookup, rt_io_tcp_connect, rt_io_tcp_connect_timeout, rt_io_tcp_drain_line, rt_io_tcp_flush,
-    rt_io_tcp_local_addr, rt_io_tcp_peer_addr, rt_io_tcp_probe_peer, rt_io_tcp_read, rt_io_tcp_read_exact, rt_io_tcp_read_exact_len,
+    rt_io_tcp_local_addr, rt_io_tcp_peer_addr, rt_io_tcp_read, rt_io_tcp_read_exact, rt_io_tcp_read_exact_len,
     rt_io_tcp_read_line, rt_io_tcp_set_nodelay, rt_io_tcp_set_read_timeout, rt_io_tcp_set_write_timeout,
     rt_io_tcp_shutdown, rt_io_tcp_write, rt_io_tcp_write_text, rt_io_tcp_write_text_read_exact_len,
     rt_tls_client_close, rt_tls_client_config_add_root_cert, rt_tls_client_config_enable_sni,
