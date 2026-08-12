@@ -71,6 +71,12 @@ dev-done
   now fail closed. Grouped/tiled/packed/factored mapping and canonical wire/hash
   vectors remain explicit follow-up work. Seven focused examples exit zero via
   the available Rust bootstrap seed; this is not self-host authority evidence.
+- impl: Completed the frozen WP-02 V1 identity layer without changing its
+  record shape: canonical `SPSL` bytes, exact checked decoding, explicit
+  field-wise equality, and SHA-256 over canonical bytes now have a pinned
+  golden vector. Unknown enums, bad envelopes, reserved bytes, trailing bytes,
+  and invalid UTF-8 fail closed. Additional research fields require a ratified
+  V2; specialized grouped/tiled/packed/factored projection remains separate.
 - impl: Added WP-04 `ResolvedParallelPolicyV1`. Its critical/verified overlay
   denies existing parent-owned moves, requires bounded mailboxes and
   deterministic commits, denies dynamic transport, and requires frozen layout

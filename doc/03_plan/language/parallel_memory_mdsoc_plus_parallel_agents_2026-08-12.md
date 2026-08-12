@@ -16,7 +16,7 @@ Do not redefine them in runtime, MDSOC, backend, or application lanes.
 |---|---|---|
 | WP-00 baseline/census | complete for this lane | local research names existing placement/mutation owners |
 | WP-01 transfer contract | partial implementation | common + native 40-byte codecs agree on a golden vector; token uniqueness model remains |
-| WP-02 storage contract | partial implementation | plan, conservative planner, and overflow-safe AoS/SoA/AoSoA projection mapping exist; canonical wire/hash vectors and specialized grouped/tiled mappings remain |
+| WP-02 storage contract | partial implementation | plan, conservative planner, overflow-safe AoS/SoA/AoSoA projection, canonical wire/equality/SHA-256 identity, and malformed-input vectors exist; specialized grouped/tiled/packed/factored mappings and a ratified V2 for additional semantic fields remain |
 | WP-03 commit contract | partial implementation | deterministic order/conflict validation plus constant-size snapshot-root state and validated batch receipt exist; wire hash/apply adapter remains |
 | WP-04 policy resolver | partial implementation | raise-only common resolver exists; SDN/driver integration remains |
 | WP-05 requirements/diagnostics | partial implementation | selected requirements/state exist; stable compiler diagnostic registry remains |
