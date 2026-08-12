@@ -20,7 +20,21 @@ configuration, public port contract, decoder identity/digest, origins, and
 trap-output lineage anchor. This is development-stage provenance evidence, not
 release qualification.
 
+## Target-specific trap products
+
+The scenario renders the closed RV32 C.JAL and RV64 C.ADDIW trap products. It
+checks each product's concrete critical profile, nonempty closure hash, and
+only its corresponding migrating decoder. It explicitly rejects the reciprocal
+decoder from each emitted VHDL payload. This is compiler-provenance coverage;
+the planned self-hosted RV32/RV64 VHDL/GHDL receipt remains mandatory before
+any target-equivalence or release claim.
+
 ## Traceability
 
+- REQ-G2-009: compiler-owned specialized products retain concrete critical
+  identity and do not mix the RV32 C.JAL and RV64 C.ADDIW decoder closures.
 - REQ-G2-010: typed stateful output is bound to an explicit closure graph and
   never falls back to a legacy textual VHDL path.
+- NFR-G2-010/NFR-G2-011: emitted provenance records concrete target/profile,
+  typed closure, and stateful decoder selection without a fabricated source
+  closure or runtime XLEN selection.
