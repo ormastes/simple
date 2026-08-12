@@ -14,6 +14,8 @@ after the typed product path has produced and authorized its emission receipt.
    fails.
 3. Reject requested and woven AOP contamination before receipt authorization,
    retaining the complete prior bundle in each case.
+4. Reject an API-level source closure mixed into a compiler-owned product,
+   retaining the complete prior bundle before the receipt boundary.
 
 ## Requirement traceability
 
