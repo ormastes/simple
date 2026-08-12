@@ -1,0 +1,90 @@
+# codex-system-test
+# @manual_section RISC-V Gen2 bounded RV64 Zca OP-32 and shift-row contract
+"""Exercise source-level typed-HWIR construction for five bounded RV64 Zca rows.
+
+The checks inspect classifiers, selected-width structure, configuration
+rejection, and normalized effects. They do not execute emitted RTL or qualify
+a processor, full Zca implementation, or architectural retirement behavior.
+"""
+
+use compiler.mir.hwir.types.{CoreConfig, HwModuleDef}
+use compiler.mir.hwir.zca_rv64_rows.{strict_zca_caddw_rv64_row_hwir, strict_zca_csubw_rv64_row_hwir, strict_zca_slli6_rv64_row_hwir, strict_zca_srli6_rv64_row_hwir, strict_zca_srai6_rv64_row_hwir}
+use compiler.mir.hwir.zca_outcomes.{strict_zca_caddw_rv64_outcome_hwir, strict_zca_csubw_rv64_outcome_hwir, strict_zca_slli6_rv64_outcome_hwir, strict_zca_srli6_rv64_outcome_hwir, strict_zca_srai6_rv64_outcome_hwir}
+
+fn has_compare(module: HwModuleDef, result: text) -> bool:
+    for op in module.compare_ops:
+        if op.result == result: return true
+    false
+
+fn has_select_condition(module: HwModuleDef, condition: text) -> bool:
+    for op in module.select_ops:
+        if op.condition == condition: return true
+    false
+
+fn has_signal(module: HwModuleDef, name: text) -> bool:
+    for signal in module.signals:
+        if signal.name == name: return true
+    false
+
+describe "mission-critical RV64 Zca typed rows":
+    # @req REQ-G2-001 REQ-G2-002 NFR-G2-003 NFR-G2-012
+    it "should build both RV64-only OP-32 rows with explicit classifiers":
+        step("Elaborate the bounded RV64 C.ADDW and C.SUBW rows")
+        val config = CoreConfig.rv64_zca_mission_critical()
+        val rows = [strict_zca_caddw_rv64_row_hwir("rv64_caddw", config).ok().unwrap(),
+            strict_zca_csubw_rv64_row_hwir("rv64_csubw", config).ok().unwrap()]
+        val classifiers = ["is_c_addw", "is_c_subw"]
+        var index = 0
+        for row in rows:
+            expect(row.shape_diagnostic()).to_equal("")
+            expect(has_compare(row, classifiers[index])).to_equal(true)
+            expect(has_select_condition(row, classifiers[index])).to_equal(true)
+            index = index + 1
+
+    # @req REQ-G2-002 NFR-G2-002 NFR-G2-003
+    it "should reject every RV64-only row for the RV32 critical product":
+        step("Attempt to elaborate the RV64-only OP-32 rows under the RV32 profile")
+        val config = CoreConfig.rv32_zca_mission_critical()
+        expect(strict_zca_caddw_rv64_row_hwir("rv32_caddw", config).err().unwrap()).to_contain("HWIR-E-ZCA-RV64")
+        expect(strict_zca_csubw_rv64_row_hwir("rv32_csubw", config).err().unwrap()).to_contain("HWIR-E-ZCA-RV64")
+
+    # @req REQ-G2-001 REQ-G2-002 NFR-G2-003 NFR-G2-012
+    it "should use bit12 as shamt bit five in all RV64 six-bit shift rows":
+        step("Elaborate each RV64 six-bit shift row and inspect the high shift-bit structure")
+        val config = CoreConfig.rv64_zca_mission_critical()
+        val slli = strict_zca_slli6_rv64_row_hwir("rv64_slli6", config)
+        if slli.is_err(): expect(slli.err().unwrap()).to_equal("")
+        val srli = strict_zca_srli6_rv64_row_hwir("rv64_srli6", config)
+        if srli.is_err(): expect(srli.err().unwrap()).to_equal("")
+        val srai = strict_zca_srai6_rv64_row_hwir("rv64_srai6", config)
+        if srai.is_err(): expect(srai.err().unwrap()).to_equal("")
+        val rows = [slli.ok().unwrap(), srli.ok().unwrap(), srai.ok().unwrap()]
+        val classifiers = ["is_c_slli6", "is_c_srli6", "is_c_srai6"]
+        var index = 0
+        for row in rows:
+            expect(row.shape_diagnostic()).to_equal("")
+            expect(row.summary.signal_count).to_equal(row.signals.len())
+            expect(row.summary.comb_op_count).to_equal(
+                row.comb_ops.len() + row.compare_ops.len() + row.select_ops.len())
+            expect(has_signal(row, "shamt_high")).to_equal(true)
+            expect(has_compare(row, classifiers[index])).to_equal(true)
+            index = index + 1
+        expect(strict_zca_slli6_rv64_row_hwir("rv32_slli6", CoreConfig.rv32_zca_mission_critical()).is_err()).to_equal(true)
+        expect(strict_zca_srli6_rv64_row_hwir("rv32_srli6", CoreConfig.rv32_zca_mission_critical()).is_err()).to_equal(true)
+        expect(strict_zca_srai6_rv64_row_hwir("rv32_srai6", CoreConfig.rv32_zca_mission_critical()).is_err()).to_equal(true)
+
+    # @req REQ-G2-011 NFR-G2-012
+    it "should normalize legality and architectural effects without canonical sentinels":
+        step("Construct the bounded normalized outcomes and inspect their explicit signals")
+        val config = CoreConfig.rv64_zca_mission_critical()
+        val outcomes = [strict_zca_caddw_rv64_outcome_hwir("out_caddw", config).ok().unwrap(),
+            strict_zca_csubw_rv64_outcome_hwir("out_csubw", config).ok().unwrap(),
+            strict_zca_slli6_rv64_outcome_hwir("out_slli6", config).ok().unwrap(),
+            strict_zca_srli6_rv64_outcome_hwir("out_srli6", config).ok().unwrap(),
+            strict_zca_srai6_rv64_outcome_hwir("out_srai6", config).ok().unwrap()]
+        for outcome in outcomes:
+            expect(outcome.shape_diagnostic()).to_equal("")
+            expect(has_signal(outcome, "match_legal")).to_equal(true)
+            expect(has_signal(outcome, "effect_register_write")).to_equal(true)
+            expect(has_signal(outcome, "effect_memory_read")).to_equal(true)
+            expect(has_signal(outcome, "effect_memory_write")).to_equal(true)

@@ -1,0 +1,54 @@
+# codex-system-test
+# @manual_section RISC-V Gen2 bounded Zca load-effect outcome contract
+"""Exercise source-level normalized outcome metadata for bounded Zca load rows.
+
+The checks inspect explicit legality and architectural-effect signals only. They
+do not issue memory transactions, execute emitted RTL, or qualify a processor
+or complete compressed ISA implementation.
+"""
+
+use compiler.mir.hwir.types.{CoreConfig, HwModuleDef}
+use compiler.mir.hwir.zca_outcomes.{strict_zca_lw_outcome_hwir, strict_zca_lwsp_outcome_hwir}
+
+fn constant_value(module: HwModuleDef, name: text) -> i64:
+    for constant in module.constants:
+        if constant.name == name: return constant.value
+    -1
+
+fn has_gate(module: HwModuleDef, result: text, value: text) -> bool:
+    for op in module.comb_ops:
+        if op.op == "and" and op.result == result and op.lhs == "match_legal" and op.rhs == value: return true
+    false
+
+fn has_select(module: HwModuleDef, result: text, condition: text,
+    when_true: text, when_false: text) -> bool:
+    for op in module.select_ops:
+        if op.result == result and op.condition == condition and op.when_true == when_true and op.when_false == when_false: return true
+    false
+
+describe "normalized Zca load effects":
+    # @req REQ-G2-011 NFR-G2-012
+    it "should gate both C.LW memory read and register writeback with tag legality":
+        step("Construct the bounded C.LW outcome and inspect explicit effect gates")
+        val outcome = strict_zca_lw_outcome_hwir("load_effect_lw", CoreConfig.rv32_zca_mission_critical()).ok().unwrap()
+        expect(outcome.shape_diagnostic()).to_equal("")
+        expect(constant_value(outcome, "effect_register_write_value")).to_equal(1)
+        expect(constant_value(outcome, "effect_memory_read_value")).to_equal(1)
+        expect(constant_value(outcome, "effect_memory_write_value")).to_equal(0)
+        expect(has_gate(outcome, "effect_register_write", "effect_register_write_value")).to_equal(true)
+        expect(has_gate(outcome, "effect_memory_read", "effect_memory_read_value")).to_equal(true)
+        expect(has_gate(outcome, "effect_memory_write", "effect_memory_write_value")).to_equal(true)
+        expect(has_select(outcome, "match_legal", "lw_is_c_lw", "one_flag", "zero_flag")).to_equal(true)
+
+    # @req REQ-G2-011 NFR-G2-012
+    it "should suppress both C.LWSP effects when rd is zero or the tag does not match":
+        step("Construct the bounded C.LWSP outcome and inspect tag and reserved-register gates")
+        val outcome = strict_zca_lwsp_outcome_hwir("load_effect_lwsp", CoreConfig.rv64_zca_mission_critical()).ok().unwrap()
+        expect(outcome.shape_diagnostic()).to_equal("")
+        expect(constant_value(outcome, "effect_register_write_value")).to_equal(1)
+        expect(constant_value(outcome, "effect_memory_read_value")).to_equal(1)
+        expect(constant_value(outcome, "effect_memory_write_value")).to_equal(0)
+        expect(has_gate(outcome, "effect_register_write", "effect_register_write_value")).to_equal(true)
+        expect(has_gate(outcome, "effect_memory_read", "effect_memory_read_value")).to_equal(true)
+        expect(has_select(outcome, "lwsp_legal_after_reserved_0", "lwsp_rd_is_zero", "zero_flag", "one_flag")).to_equal(true)
+        expect(has_select(outcome, "match_legal", "lwsp_is_c_lwsp", "lwsp_legal_after_reserved_0", "zero_flag")).to_equal(true)
