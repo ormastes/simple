@@ -4,11 +4,11 @@
 # combinational graph forms represented by HwModuleDef and never delegates a
 # rejected graph to the legacy textual VHDL path.
 
-use compiler.mir.hwir.types.{CoreConfig, HwCombOp, HwConstant, HwModule, HwModuleDef, HwNodeId, HwOrigin, HwPort, hwir_hash_fields}
+use compiler.mir.hwir.types.{CoreConfig, HwCombOp, HwConstant, HwModule, HwModuleDef, HwNodeId, HwOrigin, HwPort, hwir_hash_fields, hwir_safe_profile_name}
 use compiler.mir.hwir.mir_to_hwir.{lower_strict_mir_function_to_hwir}
 use compiler.mir.mir_data.{MirFunction, MirModule}
 use compiler.mir.hwir.frontend.{strict_zca_control_predecode_hwir, strict_zca_migrating_predecode_hwir, strict_zca_rv32_cjal_migrating_predecode_hwir, strict_zca_rv64_addiw_migrating_predecode_hwir}
-use compiler.mir.hwir.trap_frontend.{strict_zca_trap_migrating_predecode_hwir}
+use compiler.mir.hwir.trap_frontend.{strict_zca_trap_migrating_predecode_hwir, strict_zca_target_trap_migrating_predecode_hwir}
 use compiler.mir.hwir.stateful_frontend.{HwParcelFrontendDef, HwTrapParcelFrontendDef, strict_parcel_frontend_decoder_entity, strict_zca_single_outstanding_frontend_hwir, strict_zca_trap_single_outstanding_frontend_hwir}
 use compiler.mir.hwir.sequential.{HwSeqAssignment, HwSeqGuard, HwSeqOutputBinding, HwSeqRule, HwSeqValue, HwSequentialPlan, HwStateRegister}
 use compiler.mir.hwir.retirement_composition.{HwParcelRetirementComposition, HwRetireCompositionBinding}
@@ -71,6 +71,17 @@ pub fn strict_hwir_port_schema_sha256(ports: [HwPort]) -> text:
         fields.push(port.bit_width.to_text())
         fields.push(port.clock_domain)
     sha256_text(hwir_hash_fields(fields))
+
+fn strict_vhdl_profile_comment(profile: text) -> Result<text, text>:
+    """Return one safe opaque token for a strict VHDL provenance comment.
+
+    CoreConfig validation is the primary boundary.  This serializer-side
+    guard deliberately repeats it so future strict emitters cannot turn a
+    newly introduced configuration path into raw VHDL comment text.
+    """
+    if not hwir_safe_profile_name(profile):
+        return Err("HWIR-E-EMIT-PROFILE: strict VHDL provenance requires a safe profile token")
+    Ok(profile)
 
 fn hwir_bridge_preserve_existing_vhdl(module: HwModule) -> HwirVhdlBridgeResult:
     HwirVhdlBridgeResult.fallback(module, "HWIR bridge not selected; preserve existing VHDL compile path")
@@ -151,6 +162,9 @@ pub fn render_strict_hwir_vhdl(module: HwModuleDef) -> HwirStrictVhdlResult:
     val diagnostic = module.shape_diagnostic()
     if diagnostic != "":
         return HwirStrictVhdlResult.rejected(diagnostic)
+    val profile = strict_vhdl_profile_comment(module.config.profile)
+    if profile.is_err():
+        return HwirStrictVhdlResult.rejected(profile.err().unwrap())
     var ports = ""
     var port_index = 0
     for port in module.ports:
@@ -177,7 +191,7 @@ pub fn render_strict_hwir_vhdl(module: HwModuleDef) -> HwirStrictVhdlResult:
         body = body + "    " + op.result + " <= '1' when " + op.lhs + " = " + op.rhs + " else '0';\n"
     for op in module.select_ops:
         body = body + "    " + op.result + " <= " + op.when_true + " when " + op.condition + " = '1' else " + op.when_false + ";\n"
-    val vhdl = "-- simple-hwir route=hwir-strict node=" + module.node_id.value + " profile=" + module.config.profile + " graph=" + module.structural_sha256() + "\n" +
+    val vhdl = "-- simple-hwir route=hwir-strict node=" + module.node_id.value + " profile=" + profile.ok().unwrap() + " graph=" + module.structural_sha256() + "\n" +
         "-- simple-hwir port-schema=" + strict_hwir_port_schema_sha256(module.ports) + "\n" +
         "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\n\nentity " + module.summary.name + " is\n" +
         "    port(\n" + ports + "    );\nend entity " + module.summary.name + ";\n\narchitecture rtl of " + module.summary.name + " is\n" + declarations +
@@ -347,9 +361,10 @@ fn strict_seq_process(plan: HwSequentialPlan) -> Result<text, text>:
 fn strict_stateful_vhdl(entity: text, config: CoreConfig, decoder_entity: text,
     ports: [HwPort], plan: HwSequentialPlan, decoder_vhdl: text, route: text,
     graph_sha256: text) -> Result<text, text>:
+    val profile = strict_vhdl_profile_comment(config.profile)?
     val outputs = strict_seq_outputs(plan)?
     val process_vhdl = strict_seq_process(plan)?
-    Ok(decoder_vhdl + "\nlibrary ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\n\n-- simple-hwir route=" + route + " profile=" + config.profile + " graph=" + graph_sha256 + "\n" +
+    Ok(decoder_vhdl + "\nlibrary ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\n\n-- simple-hwir route=" + route + " profile=" + profile + " graph=" + graph_sha256 + "\n" +
         "-- simple-hwir port-schema=" + strict_hwir_port_schema_sha256(ports) + "\n" +
         "entity " + entity + " is port(\n" + strict_stateful_ports(ports) + "    ); end entity;\n" +
         "architecture rtl of " + entity + " is\n" + strict_seq_declarations(plan) + "\nbegin\n decoder: entity work." + decoder_entity + " port map(" + strict_seq_decoder_map(plan) + ");\n" +
@@ -410,8 +425,20 @@ fn strict_trap_stateful_result(frontend: HwTrapParcelFrontendDef) -> HwirStrictV
     val error = frontend.shape_diagnostic()
     if error != "":
         return HwirStrictVhdlResult.rejected(error)
-    val decoder_name = if frontend.config.xlen == 32: "riscv_gen2_zca_trap_migrating_predecode_rv32" else: "riscv_gen2_zca_trap_migrating_predecode_rv64"
-    val decoder_module = strict_zca_trap_migrating_predecode_hwir(decoder_name, frontend.config)
+    val specialized = (frontend.config.profile == "riscv-gen2-rv32-zca-cjal-critical" or
+        frontend.config.profile == "riscv-gen2-rv64-zca-addiw-critical")
+    val decoder_name = if frontend.config.profile == "riscv-gen2-rv32-zca-cjal-critical":
+        "riscv_gen2_zca_rv32_cjal_trap_migrating_predecode"
+    elif frontend.config.profile == "riscv-gen2-rv64-zca-addiw-critical":
+        "riscv_gen2_zca_rv64_addiw_trap_migrating_predecode"
+    elif frontend.config.xlen == 32:
+        "riscv_gen2_zca_trap_migrating_predecode_rv32"
+    else:
+        "riscv_gen2_zca_trap_migrating_predecode_rv64"
+    val decoder_module = if specialized:
+        strict_zca_target_trap_migrating_predecode_hwir(decoder_name, frontend.config)
+    else:
+        strict_zca_trap_migrating_predecode_hwir(decoder_name, frontend.config)
     if decoder_module.is_err():
         return HwirStrictVhdlResult.rejected(decoder_module.err().unwrap())
     val decoder = strict_product_result(decoder_module.ok().unwrap(), "hwir-gen2-product")
@@ -445,7 +472,14 @@ pub fn compile_strict_zca_single_outstanding_frontend_product(config: CoreConfig
     strict_stateful_result(frontend.ok().unwrap(), "hwir-gen2-stateful-product-v2")
 
 pub fn compile_strict_zca_trap_single_outstanding_frontend_product(config: CoreConfig) -> HwirStrictVhdlResult:
-    val name = if config.xlen == 32: "riscv_gen2_zca_trap_single_outstanding_frontend_rv32" else: "riscv_gen2_zca_trap_single_outstanding_frontend_rv64"
+    val name = if config.profile == "riscv-gen2-rv32-zca-cjal-critical":
+        "riscv_gen2_zca_rv32_cjal_trap_single_outstanding_frontend"
+    elif config.profile == "riscv-gen2-rv64-zca-addiw-critical":
+        "riscv_gen2_zca_rv64_addiw_trap_single_outstanding_frontend"
+    elif config.xlen == 32:
+        "riscv_gen2_zca_trap_single_outstanding_frontend_rv32"
+    else:
+        "riscv_gen2_zca_trap_single_outstanding_frontend_rv64"
     val frontend = strict_zca_trap_single_outstanding_frontend_hwir(name, config)
     if frontend.is_err():
         return HwirStrictVhdlResult.rejected(frontend.err().unwrap())
@@ -576,51 +610,13 @@ fn strict_retirement_composition_graph_sha(composition: HwParcelRetirementCompos
 
 pub fn render_strict_retirement_composition_vhdl(composition: HwParcelRetirementComposition,
     frontend: HwirStrictVhdlResult, producer: HwirStrictVhdlResult) -> HwirStrictVhdlResult:
-    """Render one closed frontend/receipt component boundary from admitted children.
+    """Fail closed until a typed architectural producer has a sealed emission path.
 
-    It is intentionally not a producer implementation: all behavior remains
-    inside the already-admitted child entities.  Missing, mismatched, or
-    unproven child metadata returns a diagnostic without any textual fallback.
+    The receipt contract is a real elaboration boundary, but an arbitrary
+    `HwirStrictVhdlResult` is mutable metadata plus text.  Concatenating that
+    text would make a forged child look like a typed hardware implementation.
+    A later sequential-HWIR producer must supply an opaque verified emission
+    receipt before this composition can become an emitter or a product route.
     """
-    val composition_error = composition.shape_diagnostic()
-    if composition_error != "":
-        return HwirStrictVhdlResult.rejected(composition_error)
-    val entity = strict_retirement_component_entity(composition)
-    if entity.is_err():
-        return HwirStrictVhdlResult.rejected(entity.err().unwrap())
-    val frontend_error = strict_retirement_child_diagnostic("frontend", frontend,
-        composition.frontend_entity, composition.frontend_route, composition.config,
-        composition.frontend.ports())
-    if frontend_error != "":
-        return HwirStrictVhdlResult.rejected(frontend_error)
-    val producer_error = strict_retirement_child_diagnostic("producer", producer,
-        composition.producer_entity, composition.producer_route, composition.config,
-        composition.producer.ports())
-    if producer_error != "":
-        return HwirStrictVhdlResult.rejected(producer_error)
-    val graph_sha256 = strict_retirement_composition_graph_sha(composition, frontend, producer)
-    val public_ports = strict_retirement_public_ports(composition)
-    var signals = ""
-    for binding in composition.bindings:
-        if binding.kind != "shared_input":
-            signals = signals + "    signal " + strict_retirement_binding_signal(binding) +
-                " : " + strict_vhdl_type(binding.bit_width) + ";\n"
-    val vhdl = frontend.vhdl + "\n" + producer.vhdl + "\n" +
-        "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\n\n" +
-        "-- simple-hwir route=hwir-gen2-retirement-composition-v1 node=" + composition.node_id.value +
-        " profile=" + composition.config.profile + " graph=" + graph_sha256 + "\n" +
-        "-- simple-hwir child=frontend route=" + frontend.route + " node=" + frontend.module_node_id +
-        " graph=" + frontend.hwir_graph_sha256 + " schema=" + strict_hwir_port_schema_sha256(composition.frontend.ports()) + "\n" +
-        "-- simple-hwir child=producer route=" + producer.route + " node=" + producer.module_node_id +
-        " graph=" + producer.hwir_graph_sha256 + " schema=" + strict_hwir_port_schema_sha256(composition.producer.ports()) + "\n" +
-        "-- simple-hwir composition only: retirement behavior is supplied by the admitted producer child.\n" +
-        "entity " + entity.ok().unwrap() + " is port(\n" + strict_stateful_ports(public_ports) +
-        "    ); end entity;\narchitecture rtl of " + entity.ok().unwrap() + " is\n" + signals +
-        "begin\n frontend: entity work." + composition.frontend_entity + " port map(" +
-        strict_retirement_child_map(composition, true) + ");\n producer: entity work." +
-        composition.producer_entity + " port map(" + strict_retirement_child_map(composition, false) +
-        ");\nend architecture rtl;\n"
-    HwirStrictVhdlResult(success: true, vhdl: vhdl, diagnostic: "",
-        route: "hwir-gen2-retirement-composition-v1", module_node_id: composition.node_id.value,
-        config_xlen: composition.config.xlen, config_profile: composition.config.profile,
-        hwir_graph_sha256: graph_sha256)
+    HwirStrictVhdlResult.rejected(
+        "HWIR-E-RETIRE-COMPOSITION-UNSUPPORTED: closed retirement composition requires a typed architectural producer emission receipt")

@@ -179,8 +179,15 @@ unqualified and neither claims full Zca; the migrating product is only the
 admitted row tranche. Its typed composition also accumulates row legality and
 overlap: if more than one classifier ever matches, it emits the explicit
 illegal/fall-through tuple (zero canonical word, `legal=0`, no redirect,
-`PC+2`) rather than silently selecting by mux order. The stateful/trap product
-is a separate compiler-owned
+`PC+2`) rather than silently selecting by mux order.
+The tranche contains 24 common low-shamt ISA IDs. RV32 C.JAL and RV64 C.ADDIW
+are each appended only by their concrete product, yielding separate 25-ID
+closures. These numbers are coverage boundaries, not complete-Zca claims;
+high-shamt/XLEN-dependent rows and C.EBREAK trap composition remain distinct.
+The 24 common selectors are independent—including C.J, C.BEQZ and C.BNEZ—so
+no aggregate control selector can hide a classifier collision.
+
+The stateful/trap product is a separate compiler-owned
 route: it is admitted only when its typed sequential plan supplies a concrete
 module node, profile, and 64-character frontend-plus-decoder closure hash.
 The common artifact validator applies those same graph-binding requirements to
@@ -447,12 +454,25 @@ wiring list rejects width changes, reset separation, and receipt rewiring at
 elaboration. It is not target-legalized because strict HWIR has no generic
 typed child-instance/effect lowering yet. RTL composition therefore remains a
 later scalar-retirement owner task, not evidence supplied by this contract.
+The current `HwirStrictVhdlResult` is mutable metadata plus emitted text, so it
+is deliberately not accepted as a composition-child authority: comment markers
+and port text are not a sealed proof of child behavior. The composition emitter
+must fail closed until a typed architectural producer can provide an opaque
+verified emission receipt and generated RTL/GHDL evidence.
 
 The v1 and v2 compositions also publish their admitted declarative ISA IDs.
 The contract test requires v1 to contain exactly the 24 non-trap entries and
 v2 to contain each of the 25 `zca-common-integer-v1` entries exactly once. This
 is an admission-closure guard against ISA-table drift; it is not a replacement
 for generated-RTL equivalence over all parcels.
+
+The target-specific effectful closure is a separate architectural boundary.
+It admits the 24 common rows, exactly one XLEN-specific row (RV32 C.JAL or RV64
+C.ADDIW), and C.EBREAK. The target graph owns all direct/indirect redirect and
+JR/JALR read binding; the outer effect layer owns only partition uniqueness and
+trap selection. Cross-partition overlap fails closed and cannot produce a
+redirect or stale trap metadata. Product identity and the child decoder digest
+remain part of the stateful graph closure.
 
 Compiler-owned Gen2 manifests distinguish the scalar ISA profile used during
 elaboration from the hardware behavior actually emitted. Every current product

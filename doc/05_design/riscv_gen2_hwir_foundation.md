@@ -128,6 +128,9 @@
     receipt tuple back. Shape validation rejects an omitted, reordered, or
     width-drifted binding. It is an elaboration-only contract until typed
     child instances and architectural effects have sequential HWIR lowering.
+    A serializable strict-VHDL result cannot substitute for that lowering:
+    its metadata and VHDL comments are inspectable but not an opaque producer
+    capability, so composition emission is explicitly rejected for now.
 18. `RiscvGen2ScalarElaboration` freezes one concrete `CoreConfig`, exact
     scalar decoder table, and provider selection. `RiscvGen2ScalarDispatchPlan`
     then resolves one 32-bit instruction from that fixed table and accepts its
@@ -145,3 +148,10 @@
     separate private chain for explicit true-means-reserved predicates (C.LWSP
     and C.LUI). Neither helper admits positive-eligibility, register-read/
     redirect, or trap rows.
+20. `strict_zca_target_trap_migrating_predecode_hwir` is the global effectful
+    product composition. Elaboration selects either the RV32 common+C.JAL graph
+    or the RV64 common+C.ADDIW graph, then composes C.EBREAK through one outer
+    uniqueness guard. The layer does not decode JR/JALR or read a register a
+    second time. On ambiguity it emits the bounded illegal `PC+2` tuple and
+    zero trap metadata; otherwise it preserves the selected canonical word,
+    original length, redirect tuple, and explicit breakpoint cause/tval.

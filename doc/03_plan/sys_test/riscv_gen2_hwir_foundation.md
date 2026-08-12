@@ -21,6 +21,9 @@ raw writer rejects those routes before cleanup. The product driver's private
 receipt narrows the public boundary; language-enforced opaque receipt semantics
 are still required before release and must not be treated as qualification
 evidence.
+The retirement composition renderer is likewise quarantined until it receives
+a typed architectural producer emission receipt; metadata-bearing VHDL text is
+not accepted as evidence of a child implementation.
 
 | Requirement | Implemented check or qualification receipt required |
 | --- | --- |
@@ -49,6 +52,7 @@ evidence.
 | REQ-G2-003 predecode contract | selected RV32/RV64 critical products materialize fixed parcel/canonical/control widths; base profile and malformed direction/PA width reject before emission |
 | REQ-G2-003/004 C.J redirect | implemented generated-VHDL scenario for a C.J positive offset, negative offset, and non-row fallthrough through typed `next_pc`/redirect ports; exact aggregate real-MIR admission is implemented, while row-level target evidence requires a self-hosted receipt |
 | REQ-G2-003/004 control composition | one flattened RV32/RV64 C.J/C.BEQZ/C.BNEZ module target-simulates direct jump, both conditional branches, index mismatch, and unsupported-parcel fallthrough; this is a stateless control slice, not full Zca/frontend evidence |
+| REQ-G2-011 normalized product partition | structural evidence counts 24 explicit common low-shamt selectors and 25 IDs in each XLEN-specialized closure; generated RV32/RV64 VHDL vectors distinguish C.JR `0x8082`, C.JALR `0x9082`, and non-trap C.EBREAK `0x9002`; overlap and reserved/default paths emit the illegal `PC+2` tuple; this is not complete-Zca evidence |
 | REQ-G2-004 C.LI row equivalence | generated VHDL exhausts all 2,048 C.LI row encodings, checks canonical ADDI-with-x0 assembly, and rejects a non-row parcel |
 | REQ-G2-005 | legacy bridge marker remains distinct from strict result test |
 | NFR-G2-001..003,006 | repeat render, negative mutation tests, and critical-profile lint checks; HWIR ports carry only typed width/type metadata while VHDL type serialization remains in the backend owner |
