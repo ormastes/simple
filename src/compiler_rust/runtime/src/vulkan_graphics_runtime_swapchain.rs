@@ -554,6 +554,66 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "8K one-percent damaged headless presentation evidence"]
+    fn bench_headless_swapchain_present_8k_one_percent_damage() {
+        use std::time::Instant;
+        let (width, height, frames) = (7680i64, 4320i64, 20usize);
+        let swapchain = rt_vulkan_init_headless_present(width, height, 0);
+        assert!(swapchain > 0, "{}", STATE.lock().last_error);
+        let pixels = vec![0xff29476bu32; (width * height) as usize];
+        let byte_count = width * height * 4;
+        let bytes = unsafe {
+            std::slice::from_raw_parts(pixels.as_ptr().cast::<u8>(), byte_count as usize)
+        };
+        let buffer = rt_vulkan_alloc_buffer(byte_count, 0x80);
+        assert!(buffer > 0);
+        upload_chunks(buffer, bytes);
+
+        let image_count = {
+            let state = STATE.lock();
+            i64::from(state.swapchains.get(&swapchain).expect("swapchain").image_count())
+        };
+        assert!(image_count > 0);
+        for revision in 1..=image_count {
+            assert!(rt_vulkan_present_buffer(swapchain, buffer, width, height, revision) > 0);
+        }
+        let rect = [0i64, 0, width, 43];
+        let expected_damage_bytes = width * 43 * 4;
+        for revision in (image_count + 1)..=(image_count * 2) {
+            let status = rt_vulkan_present_buffer_regions_raw(
+                swapchain, buffer, width, height, revision, rect.as_ptr() as i64, 32);
+            assert!(status >= 3);
+        }
+
+        let mut samples = Vec::with_capacity(frames);
+        for revision in (image_count * 2 + 1)..=(image_count * 2 + frames as i64) {
+            let start = Instant::now();
+            let status = rt_vulkan_present_buffer_regions_raw(
+                swapchain, buffer, width, height, revision, rect.as_ptr() as i64, 32);
+            samples.push(start.elapsed().as_nanos() as u64);
+            assert!(status >= 3);
+            assert_eq!(rt_vulkan_last_present_copy_bytes(swapchain), expected_damage_bytes);
+            assert_eq!(rt_vulkan_last_present_copy_rects(swapchain), 1);
+        }
+        samples.sort_unstable();
+        let p50 = samples[(samples.len() - 1) * 50 / 100];
+        let p95 = samples[(samples.len() - 1) * 95 / 100];
+        let checksum = pixels.iter().fold(1469598103934665603u64, |hash, pixel| {
+            (hash ^ u64::from(*pixel)).wrapping_mul(1099511628211)
+        });
+        let rss_kib = std::fs::read_to_string("/proc/self/status").ok()
+            .and_then(|status| status.lines().find_map(|line| {
+                line.strip_prefix("VmHWM:")
+                    .and_then(|v| v.split_whitespace().next())
+                    .and_then(|v| v.parse::<u64>().ok())
+            })).unwrap_or(0);
+        println!("headless_present_damage width={width} height={height} frames={frames} damage_x=0 damage_y=0 damage_w={width} damage_h=43 damage_bytes={expected_damage_bytes} damage_rects=1 p50_ns={p50} p95_ns={p95} rss_kib={rss_kib} readback_bytes=0 fallback=false completion_known=true present_mode=headless-swapchain checksum={checksum}");
+        assert_eq!(rt_vulkan_free_buffer(buffer), 1);
+        assert_eq!(rt_vulkan_destroy_swapchain(swapchain), 1);
+        assert_eq!(rt_vulkan_shutdown(), 1);
+    }
+
+    #[test]
     #[ignore = "8K physical-device visible-window presentation evidence"]
     fn bench_window_swapchain_present_8k() {
         use std::ffi::CStr;
