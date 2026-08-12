@@ -1,0 +1,88 @@
+# codex-system-test
+# @manual_section RISC-V Gen2 verification-only retirement receipt loopback
+"""Exercise the bounded reset-coupled receipt transport without claiming a core.
+
+The loopback is intentionally a host verification model.  These checks prove
+only its typed, one-entry transport behavior and explicitly reject use as an
+architectural retirement emitter or certificate.
+"""
+
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.retire_receipt_loopback.{HwRetireReceiptLoopbackInput, advance_strict_riscv_retire_receipt_loopback, strict_riscv_retire_receipt_loopback_initial_state, strict_riscv_retire_receipt_loopback_plan}
+
+fn dispatch(lineage: i64, parcel: i64, canonical: i64, length: i64) -> HwRetireReceiptLoopbackInput:
+    HwRetireReceiptLoopbackInput(rst: 0, dispatch_valid: 1, dispatch_lineage: lineage,
+        dispatch_original_parcel: parcel, dispatch_canonical_instruction: canonical,
+        dispatch_original_length_bytes: length)
+
+describe "RISC-V Gen2 verification-only retirement receipt loopback":
+    # @req REQ-G2-010 NFR-G2-011
+    it "preserves one accepted RV32 and RV64 identity tuple for exactly one post-dispatch cycle":
+        step("Capture and return one typed receipt for each concrete mission-critical configuration")
+        for config in [CoreConfig.rv32_zca_cjal_mission_critical(),
+            CoreConfig.rv64_zca_addiw_mission_critical()]:
+            val plan = strict_riscv_retire_receipt_loopback_plan(config).unwrap()
+            val initial = strict_riscv_retire_receipt_loopback_initial_state(plan).unwrap()
+            val accepted = advance_strict_riscv_retire_receipt_loopback(plan, initial,
+                dispatch(19, 0x9002, 0x001000ef, 2)).unwrap()
+            expect(accepted.dispatch_accept).to_equal(1)
+            expect(accepted.retire_valid).to_equal(0)
+            expect(accepted.next_state.pending).to_equal(1)
+            val retired = advance_strict_riscv_retire_receipt_loopback(plan,
+                accepted.next_state, HwRetireReceiptLoopbackInput.idle()).unwrap()
+            expect(retired.dispatch_accept).to_equal(0)
+            expect(retired.retire_valid).to_equal(1)
+            expect(retired.retire_lineage).to_equal(19)
+            expect(retired.retire_original_parcel).to_equal(0x9002)
+            expect(retired.retire_canonical_instruction).to_equal(0x001000ef)
+            expect(retired.retire_original_length_bytes).to_equal(2)
+            expect(retired.next_state.pending).to_equal(0)
+            val repeated = advance_strict_riscv_retire_receipt_loopback(plan,
+                retired.next_state, HwRetireReceiptLoopbackInput.idle()).unwrap()
+            expect(repeated.retire_valid).to_equal(0)
+
+    # @req REQ-G2-010 NFR-G2-011
+    it "gives synchronous reset priority and cannot replay a pre-reset receipt":
+        step("Reset a pending receipt then retire only a new post-reset identity")
+        val plan = strict_riscv_retire_receipt_loopback_plan(
+            CoreConfig.rv32_zca_cjal_mission_critical()).unwrap()
+        val initial = strict_riscv_retire_receipt_loopback_initial_state(plan).unwrap()
+        val pending = advance_strict_riscv_retire_receipt_loopback(plan, initial,
+            dispatch(7, 0x8082, 0x00008067, 2)).unwrap()
+        val reset = advance_strict_riscv_retire_receipt_loopback(plan, pending.next_state,
+            HwRetireReceiptLoopbackInput.reset()).unwrap()
+        expect(reset.dispatch_accept).to_equal(0)
+        expect(reset.retire_valid).to_equal(0)
+        expect(reset.next_state.pending).to_equal(0)
+        val after_reset = advance_strict_riscv_retire_receipt_loopback(plan, reset.next_state,
+            HwRetireReceiptLoopbackInput.idle()).unwrap()
+        expect(after_reset.retire_valid).to_equal(0)
+        val new_pending = advance_strict_riscv_retire_receipt_loopback(plan, after_reset.next_state,
+            dispatch(8, 0x9002, 0x001000ef, 2)).unwrap()
+        val new_retired = advance_strict_riscv_retire_receipt_loopback(plan,
+            new_pending.next_state, HwRetireReceiptLoopbackInput.idle()).unwrap()
+        expect(new_retired.retire_lineage).to_equal(8)
+        expect(new_retired.retire_original_parcel).to_equal(0x9002)
+        expect(new_retired.retire_canonical_instruction).to_equal(0x001000ef)
+
+    # @req REQ-G2-010 NFR-G2-006 NFR-G2-011
+    it "fails closed outside the one-entry verification-only transport boundary":
+        step("Reject a production-shaped plan and malformed typed dispatch values")
+        val plan = strict_riscv_retire_receipt_loopback_plan(
+            CoreConfig.rv64_zca_addiw_mission_critical()).unwrap()
+        val initial = strict_riscv_retire_receipt_loopback_initial_state(plan).unwrap()
+        expect(plan.production_diagnostic()).to_equal(
+            "HWIR-E-RETIRE-LOOPBACK-VERIFICATION-ONLY: loopback plan cannot emit or certify an architectural retirement producer")
+        val bad_plan = strict_riscv_retire_receipt_loopback_plan(
+            CoreConfig.rv64_zca_addiw_mission_critical()).unwrap()
+        bad_plan.verification_only = false
+        expect(bad_plan.shape_diagnostic()).to_equal(
+            "HWIR-E-RETIRE-LOOPBACK-SCOPE: loopback is a closed one-entry one-cycle verification-only plan")
+        val malformed = HwRetireReceiptLoopbackInput(rst: 0, dispatch_valid: 1,
+            dispatch_lineage: -1, dispatch_original_parcel: 0, dispatch_canonical_instruction: 0,
+            dispatch_original_length_bytes: 2)
+        val result = advance_strict_riscv_retire_receipt_loopback(plan, initial, malformed)
+        expect(result.is_ok()).to_equal(false)
+        expect(result.err()).to_equal(
+            "HWIR-E-RETIRE-LOOPBACK-INPUT: dispatch fields must fit the typed identity tuple")

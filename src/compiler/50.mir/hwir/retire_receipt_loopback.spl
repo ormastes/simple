@@ -1,0 +1,190 @@
+# Bounded verification-only retirement receipt loopback for Gen2 HWIR.
+# codex-impl
+#
+# This module deliberately models only the reset-coupled transport boundary
+# required by `HwParcelRetirementComposition`.  It is not a scalar execution
+# unit, effect owner, RTL emitter, or architectural-retirement proof.
+
+use compiler.mir.hwir.types.{CoreConfig, HwNodeId}
+use compiler.mir.hwir.retirement_composition.{HwRetireReceiptProducerInterface, strict_riscv_retire_receipt_producer_interface}
+
+pub class HwRetireReceiptLoopbackPlan:
+    """A one-entry, one-cycle verification model of the receipt boundary.
+
+    The plan is intentionally closed: it has one pending dispatch tuple and
+    produces that tuple exactly once on the following non-reset cycle.  It is
+    useful for checking reset ordering and tuple preservation while the real
+    scalar commit owner has no typed HWIR lowering.  `verification_only` is a
+    required safety bit, not a product option.
+    """
+    node_id: HwNodeId
+    config: CoreConfig
+    producer: HwRetireReceiptProducerInterface
+    verification_only: bool
+    maximum_inflight: i32
+    receipt_latency_cycles: i32
+    route: text
+
+    me shape_diagnostic() -> text:
+        val config_error = self.config.diagnostic()
+        if config_error != "": return config_error
+        if not self.node_id.is_valid():
+            return "HWIR-E-RETIRE-LOOPBACK-ID: verification loopback requires a stable node ID"
+        val producer_error = self.producer.shape_diagnostic()
+        if producer_error != "": return producer_error
+        if self.producer.config.xlen != self.config.xlen or
+            self.producer.config.physical_address_bits != self.config.physical_address_bits or
+            self.producer.config.profile != self.config.profile or
+            self.producer.config.isa_profile != self.config.isa_profile or
+            self.producer.config.compressed_decode_profile != self.config.compressed_decode_profile:
+            return "HWIR-E-RETIRE-LOOPBACK-CONFIG: verification loopback and producer require one concrete product configuration"
+        if not self.verification_only or self.maximum_inflight != 1 or
+            self.receipt_latency_cycles != 1 or
+            self.route != "hwir-retire-receipt-loopback-verification-v1":
+            return "HWIR-E-RETIRE-LOOPBACK-SCOPE: loopback is a closed one-entry one-cycle verification-only plan"
+        ""
+
+    me production_diagnostic() -> text:
+        "HWIR-E-RETIRE-LOOPBACK-VERIFICATION-ONLY: loopback plan cannot emit or certify an architectural retirement producer"
+
+pub class HwRetireReceiptLoopbackState:
+    """Host-model state; an empty slot owns no retained receipt identity."""
+    pending: i64
+    lineage: i64
+    original_parcel: i64
+    canonical_instruction: i64
+    original_length_bytes: i64
+
+    static fn empty() -> HwRetireReceiptLoopbackState:
+        HwRetireReceiptLoopbackState(pending: 0, lineage: 0, original_parcel: 0,
+            canonical_instruction: 0, original_length_bytes: 0)
+
+    me shape_diagnostic() -> text:
+        if self.pending != 0 and self.pending != 1:
+            return "HWIR-E-RETIRE-LOOPBACK-STATE: pending must be a one-bit value"
+        if self.lineage < 0 or self.original_parcel < 0 or self.original_parcel > 65535 or
+            self.canonical_instruction < 0 or self.canonical_instruction > 4294967295 or
+            self.original_length_bytes < 0 or self.original_length_bytes > 3:
+            return "HWIR-E-RETIRE-LOOPBACK-STATE: pending receipt fields must fit the typed identity tuple"
+        if self.pending == 0 and (self.lineage != 0 or self.original_parcel != 0 or
+            self.canonical_instruction != 0 or self.original_length_bytes != 0):
+            return "HWIR-E-RETIRE-LOOPBACK-STATE: an empty loopback slot must erase retained receipt identity"
+        ""
+
+pub class HwRetireReceiptLoopbackInput:
+    """One synchronous observation at the verification-only producer boundary."""
+    rst: i64
+    dispatch_valid: i64
+    dispatch_lineage: i64
+    dispatch_original_parcel: i64
+    dispatch_canonical_instruction: i64
+    dispatch_original_length_bytes: i64
+
+    static fn idle() -> HwRetireReceiptLoopbackInput:
+        HwRetireReceiptLoopbackInput(rst: 0, dispatch_valid: 0, dispatch_lineage: 0,
+            dispatch_original_parcel: 0, dispatch_canonical_instruction: 0,
+            dispatch_original_length_bytes: 0)
+
+    static fn reset() -> HwRetireReceiptLoopbackInput:
+        HwRetireReceiptLoopbackInput(rst: 1, dispatch_valid: 0, dispatch_lineage: 0,
+            dispatch_original_parcel: 0, dispatch_canonical_instruction: 0,
+            dispatch_original_length_bytes: 0)
+
+    me shape_diagnostic() -> text:
+        if (self.rst != 0 and self.rst != 1) or
+            (self.dispatch_valid != 0 and self.dispatch_valid != 1):
+            return "HWIR-E-RETIRE-LOOPBACK-INPUT: reset and dispatch valid must be one-bit values"
+        if self.dispatch_lineage < 0 or self.dispatch_original_parcel < 0 or
+            self.dispatch_original_parcel > 65535 or self.dispatch_canonical_instruction < 0 or
+            self.dispatch_canonical_instruction > 4294967295 or
+            self.dispatch_original_length_bytes < 0 or self.dispatch_original_length_bytes > 3:
+            return "HWIR-E-RETIRE-LOOPBACK-INPUT: dispatch fields must fit the typed identity tuple"
+        ""
+
+pub class HwRetireReceiptLoopbackObservation:
+    """Typed transport observation; zero receipt fields mean `retire_valid=0`."""
+    dispatch_accept: i64
+    retire_valid: i64
+    retire_lineage: i64
+    retire_original_parcel: i64
+    retire_canonical_instruction: i64
+    retire_original_length_bytes: i64
+    next_state: HwRetireReceiptLoopbackState
+
+    me shape_diagnostic() -> text:
+        if (self.dispatch_accept != 0 and self.dispatch_accept != 1) or
+            (self.retire_valid != 0 and self.retire_valid != 1):
+            return "HWIR-E-RETIRE-LOOPBACK-OBSERVATION: valid outputs must be one-bit values"
+        val state_error = self.next_state.shape_diagnostic()
+        if state_error != "": return state_error
+        if self.retire_lineage < 0 or self.retire_original_parcel < 0 or
+            self.retire_original_parcel > 65535 or self.retire_canonical_instruction < 0 or
+            self.retire_canonical_instruction > 4294967295 or
+            self.retire_original_length_bytes < 0 or self.retire_original_length_bytes > 3:
+            return "HWIR-E-RETIRE-LOOPBACK-OBSERVATION: receipt fields must fit the typed identity tuple"
+        if self.retire_valid == 0 and (self.retire_lineage != 0 or self.retire_original_parcel != 0 or
+            self.retire_canonical_instruction != 0 or self.retire_original_length_bytes != 0):
+            return "HWIR-E-RETIRE-LOOPBACK-OBSERVATION: invalid receipts must erase their identity tuple"
+        ""
+
+fn loopback_zero_observation(next_state: HwRetireReceiptLoopbackState,
+    dispatch_accept: i64) -> HwRetireReceiptLoopbackObservation:
+    HwRetireReceiptLoopbackObservation(dispatch_accept: dispatch_accept, retire_valid: 0,
+        retire_lineage: 0, retire_original_parcel: 0, retire_canonical_instruction: 0,
+        retire_original_length_bytes: 0,
+        next_state: next_state)
+
+pub fn strict_riscv_retire_receipt_loopback_plan(config: CoreConfig) -> Result<HwRetireReceiptLoopbackPlan, text>:
+    """Construct the sole bounded verification plan; it has no emission path."""
+    val producer = strict_riscv_retire_receipt_producer_interface(config)?
+    val plan = HwRetireReceiptLoopbackPlan(
+        node_id: HwNodeId.module_root("riscv_gen2_retire_receipt_loopback"), config: config,
+        producer: producer, verification_only: true, maximum_inflight: 1,
+        receipt_latency_cycles: 1, route: "hwir-retire-receipt-loopback-verification-v1")
+    val diagnostic = plan.shape_diagnostic()
+    if diagnostic != "": return Err(diagnostic)
+    Ok(plan)
+
+pub fn strict_riscv_retire_receipt_loopback_initial_state(
+    plan: HwRetireReceiptLoopbackPlan) -> Result<HwRetireReceiptLoopbackState, text>:
+    """Return the only permitted pre-cycle state after validating the plan."""
+    val diagnostic = plan.shape_diagnostic()
+    if diagnostic != "": return Err(diagnostic)
+    Ok(HwRetireReceiptLoopbackState.empty())
+
+pub fn advance_strict_riscv_retire_receipt_loopback(plan: HwRetireReceiptLoopbackPlan,
+    state: HwRetireReceiptLoopbackState,
+    input: HwRetireReceiptLoopbackInput) -> Result<HwRetireReceiptLoopbackObservation, text>:
+    """Advance one synchronous verification cycle with reset taking priority.
+
+    This is a host-side model of the receipt transport only.  It intentionally
+    has no method returning HWIR RTL, VHDL, a product artifact, or a retirement
+    equivalence certificate.
+    """
+    val plan_error = plan.shape_diagnostic()
+    if plan_error != "": return Err(plan_error)
+    val state_error = state.shape_diagnostic()
+    if state_error != "": return Err(state_error)
+    val input_error = input.shape_diagnostic()
+    if input_error != "": return Err(input_error)
+    if input.rst == 1:
+        return Ok(loopback_zero_observation(HwRetireReceiptLoopbackState.empty(), 0))
+    if state.pending == 1:
+        val observation = HwRetireReceiptLoopbackObservation(dispatch_accept: 0, retire_valid: 1,
+            retire_lineage: state.lineage, retire_original_parcel: state.original_parcel,
+            retire_canonical_instruction: state.canonical_instruction,
+            retire_original_length_bytes: state.original_length_bytes,
+            next_state: HwRetireReceiptLoopbackState.empty())
+        val observation_error = observation.shape_diagnostic()
+        if observation_error != "": return Err(observation_error)
+        return Ok(observation)
+    if input.dispatch_valid == 1:
+        val next_state = HwRetireReceiptLoopbackState(pending: 1,
+            lineage: input.dispatch_lineage, original_parcel: input.dispatch_original_parcel,
+            canonical_instruction: input.dispatch_canonical_instruction,
+            original_length_bytes: input.dispatch_original_length_bytes)
+        val observation = loopback_zero_observation(next_state, 1)
+        val observation_error = observation.shape_diagnostic()
+        if observation_error != "": return Err(observation_error)
+        return Ok(observation)
+    Ok(loopback_zero_observation(HwRetireReceiptLoopbackState.empty(), 0))
