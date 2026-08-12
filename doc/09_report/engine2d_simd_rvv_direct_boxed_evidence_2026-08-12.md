@@ -47,3 +47,25 @@ new p95 is 37.2% lower, but still exceeds the 12.5 ms budget. Individual blend
 operations also remain over budget. QEMU timing proves emulator execution and
 regression direction; it does not predict physical-board throughput. Bare-metal
 scanout and physical RVV measurements remain open gates.
+
+## Destination-opacity prepass follow-up
+
+The opaque-destination classifier no longer materializes and pre-unboxes two
+64-element source/destination stack arrays before entering the direct boxed
+vector body. It now scans destination alpha directly and only unboxes both
+inputs when the mixed-alpha scalar oracle is actually required.
+
+With the same compiler, QEMU CPU/VLEN, viewport, 1% active pixels, seven
+samples, checksum `2436809228175672195`, and 42 SIMD hits, the follow-up measured:
+
+- Blend p50/p95: 20.886 / 21.591 ms
+- Constant blend p50/p95: 18.108 / 18.725 ms
+- Six-call frame p50/p95: 51.952 / 54.183 ms
+- Max RSS: 525,056 KiB
+
+This is a modest aggregate p95 improvement from 54.809 ms to 54.183 ms and
+still fails the 12.5 ms frame budget. Constant-blend p95 is slightly above the
+prior 18.580 ms sample, so no per-operation constant-blend improvement is
+claimed. A rejected trial classified opacity with RVV compare plus `vcpop`;
+although bit-exact, it regressed six-call p95 to 68.420 ms under QEMU and was
+not retained.

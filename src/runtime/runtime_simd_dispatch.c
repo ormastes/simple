@@ -1830,20 +1830,22 @@ static void engine2d_blend_boxed_rvv(int64_t* dst, const int64_t* src,
         size_t request = (size_t)(n - i);
         if (request > 64) request = 64;
         size_t vl = __riscv_vsetvl_e32m1(request);
-        uint32_t s_words[64], d_words[64];
         int opaque_dst = 1;
         for (size_t lane = 0; lane < vl; lane++) {
-            s_words[lane] = use_const ? const_src :
-                engine2d_unbox_pixel(src[i + (int64_t)lane]);
-            d_words[lane] = engine2d_unbox_pixel(dst[i + (int64_t)lane]);
-            opaque_dst &= ((d_words[lane] >> 24) == 255u);
+            uint32_t d_word = engine2d_unbox_pixel(
+                dst[i + (int64_t)lane]);
+            opaque_dst &= ((d_word >> 24) == 255u);
         }
         if (!opaque_dst) {
             for (size_t lane = 0; lane < vl; lane++) {
+                uint32_t s_word = use_const ? const_src :
+                    engine2d_unbox_pixel(src[i + (int64_t)lane]);
+                uint32_t d_word = engine2d_unbox_pixel(
+                    dst[i + (int64_t)lane]);
                 dst[i + (int64_t)lane] = engine2d_box_pixel((uint32_t)
                     engine2d_blend_pixel(
-                        (int64_t)(uint64_t)s_words[lane],
-                        (int64_t)(uint64_t)d_words[lane]));
+                        (int64_t)(uint64_t)s_word,
+                        (int64_t)(uint64_t)d_word));
             }
             i += (int64_t)vl;
             continue;
