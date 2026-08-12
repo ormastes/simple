@@ -1,0 +1,27 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+producer=$root/scripts/check/produce-sosix-qemu-native-pass-bundle.shs
+collector=$root/scripts/check/collect-sosix-qemu-evidence.shs
+entry=$root/examples/09_embedded/simple_os/arch/riscv32/smoke_entry.spl
+fail() { echo "sosix-direct-kernel-schema: $*" >&2; exit 1; }
+
+grep -Fq "'direct-kernel:guest-entry'" "$producer" || fail "producer mode absent"
+grep -Fq "'direct-kernel:guest-entry'" "$collector" || fail "collector mode absent"
+grep -Fq 'firmware_identity=firmware:none' "$root/scripts/check/check-produce-sosix-qemu-native-pass-bundle.shs" || fail "no-firmware oracle absent"
+grep -Fq 'duplicate run nonce' "$collector" || fail "duplicate nonce rejection absent"
+grep -Fq 'hash mismatch for $artifact_path' "$collector" || fail "artifact hash rejection absent"
+grep -Fq 'program_identity must select exactly one declared artifact' "$collector" || fail "program uniqueness absent"
+grep -Fq 'serial_println("guest-entry")' "$entry" || fail "guest-entry producer absent"
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/sosix-direct-kernel-schema.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+sed "/'direct-kernel:guest-entry'/d" "$collector" > "$tmp/no-direct-kernel"
+grep -Fq "'direct-kernel:guest-entry'" "$tmp/no-direct-kernel" && fail "mode sabotage survived"
+sed '/duplicate run nonce/d' "$collector" > "$tmp/no-duplicate-nonce"
+grep -Fq 'duplicate run nonce' "$tmp/no-duplicate-nonce" && fail "nonce sabotage survived"
+sed 's/serial_println("guest-entry")/serial_println("workload-entry")/' "$entry" > "$tmp/fake-entry"
+grep -Fq 'serial_println("guest-entry")' "$tmp/fake-entry" && fail "guest-entry sabotage survived"
+
+sh "$root/scripts/check/check-produce-sosix-qemu-native-pass-bundle.shs"
+echo 'PASS SOSIX direct-kernel schema v2 contract'

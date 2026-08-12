@@ -1,0 +1,65 @@
+#!/bin/sh
+# Shared fail-closed source-lineage and run-nonce validation for SOSIX QEMU evidence.
+
+sosix_qemu_lineage_die() {
+    echo "sosix-qemu-lineage: $*" >&2
+    return 1
+}
+
+sosix_qemu_lineage_field() {
+    sql_key=$1 sql_file=$2
+    sql_count=$(awk -F= -v k="$sql_key" '$1 == k { n++ } END { print n+0 }' "$sql_file")
+    [ "$sql_count" -eq 1 ] || {
+        sosix_qemu_lineage_die "$sql_file: field $sql_key occurs $sql_count times"
+        return 1
+    }
+    awk -F= -v k="$sql_key" '$1 == k { print substr($0, index($0,"=")+1) }' "$sql_file"
+}
+
+sosix_qemu_validate_lineage() {
+    sql_env=$1 sql_bundle=$2
+    [ -f "$sql_env" ] && [ -d "$sql_bundle" ] || {
+        sosix_qemu_lineage_die "missing evidence file or bundle"
+        return 1
+    }
+    sql_source=$(sosix_qemu_lineage_field source_identity "$sql_env") || return 1
+    printf '%s\n' "$sql_source" | grep -Eq '^git:([0-9a-f]{40}|[0-9a-f]{64}):tree:([0-9a-f]{40}|[0-9a-f]{64}):clean$' || {
+        sosix_qemu_lineage_die "$sql_env: source_identity is not a clean git commit/tree identity"
+        return 1
+    }
+    sql_nonce=$(sosix_qemu_lineage_field run_nonce "$sql_env") || return 1
+    printf '%s\n' "$sql_nonce" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{15,127}$' || {
+        sosix_qemu_lineage_die "$sql_env: run_nonce must be 16-128 safe characters"
+        return 1
+    }
+    sql_transcript=$(sosix_qemu_lineage_field transcript_identity "$sql_env") || return 1
+    printf '%s\n' "$sql_transcript" | grep -Eq '^sha256:[0-9a-f]{64}$' || {
+        sosix_qemu_lineage_die "$sql_env: transcript_identity must be sha256:<lowercase-hex>"
+        return 1
+    }
+    sql_wanted=${sql_transcript#sha256:}
+    sql_count=$(sosix_qemu_lineage_field artifact_count "$sql_env") || return 1
+    case "$sql_count" in ''|*[!0-9]*) sosix_qemu_lineage_die "$sql_env: invalid artifact_count"; return 1;; esac
+    sql_matches=0
+    sql_i=1
+    while [ "$sql_i" -le "$sql_count" ]; do
+        sql_path=$(sosix_qemu_lineage_field "artifact_${sql_i}_path" "$sql_env") || return 1
+        case "$sql_path" in ''|/*|*../*|../*|*/..|..|*//*) sosix_qemu_lineage_die "$sql_env: unsafe artifact path"; return 1;; esac
+        sql_artifact=$sql_bundle/$sql_path
+        [ -f "$sql_artifact" ] || { sosix_qemu_lineage_die "$sql_env: missing artifact $sql_path"; return 1; }
+        sql_hash=$(sha256sum "$sql_artifact" | awk '{print $1}')
+        if [ "$sql_hash" = "$sql_wanted" ]; then
+            sql_matches=$((sql_matches + 1))
+            grep -F -- "$sql_nonce" "$sql_artifact" >/dev/null 2>&1 || {
+                sosix_qemu_lineage_die "$sql_env: transcript does not contain run_nonce"
+                return 1
+            }
+        fi
+        sql_i=$((sql_i + 1))
+    done
+    [ "$sql_matches" -eq 1 ] || {
+        sosix_qemu_lineage_die "$sql_env: transcript_identity must select exactly one artifact"
+        return 1
+    }
+}
+

@@ -1,0 +1,468 @@
+#!/bin/sh
+# Fail-closed SOSIX/SimpleOS QEMU host+guest matrix preflight and runner.
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "${repo_root}"
+
+host_override=
+guest_filter=
+mode=preflight
+all_guests=false
+parallel=false
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --host) shift; host_override=${1:-} ;;
+        --guest) shift; guest_filter=${1:-} ;;
+        --all-guests) all_guests=true ;;
+        --parallel) parallel=true ;;
+        --preflight) mode=preflight ;;
+        --run) mode=run ;;
+        --self-test) mode=self-test ;;
+        *) printf '%s\n' "check-sosix-qemu-matrix: unknown argument: $1" >&2; exit 64 ;;
+    esac
+    shift
+done
+
+[ "${all_guests}" = true ] || [ -n "${guest_filter}" ] || [ "${mode}" = self-test ] || {
+    printf '%s\n' 'check-sosix-qemu-matrix: --all-guests or --guest is required' >&2
+    exit 64
+}
+[ "${all_guests}" = false ] || [ -z "${guest_filter}" ] || {
+    printf '%s\n' 'check-sosix-qemu-matrix: choose --all-guests or --guest, not both' >&2
+    exit 64
+}
+[ "${parallel}" = false ] || [ "${all_guests}" = true ] || {
+    printf '%s\n' 'check-sosix-qemu-matrix: --parallel requires --all-guests' >&2
+    exit 64
+}
+case "${guest_filter}" in
+    ''|x86_32|x86_64|arm32|arm64|riscv32|riscv64) ;;
+    *) printf '%s\n' "check-sosix-qemu-matrix: unsupported guest: ${guest_filter}" >&2; exit 64 ;;
+esac
+
+settings_cmd=scripts/qemu/simple-qemu-settings.shs
+admission_cmd=scripts/qemu/simple-qemu-host-admission.shs
+if [ -n "${host_override}" ]; then
+    settings=$(SIMPLE_QEMU_HOST="${host_override}" "${settings_cmd}" --print)
+else
+    settings=$("${settings_cmd}" --print)
+fi
+
+setting() {
+    key=$1
+    printf '%s\n' "${settings}" | sed -n "s/^${key}=//p"
+}
+
+host=$(setting simple_qemu_host)
+artifact_root=$(setting simple_qemu_artifact_root)
+[ -n "${host}" ] && [ -n "${artifact_root}" ] || {
+    printf '%s\n' 'check-sosix-qemu-matrix: settings are incomplete' >&2
+    exit 2
+}
+
+host_isa() {
+    machine=${SOSIX_QEMU_HOST_ISA_OVERRIDE:-$(uname -m 2>/dev/null || printf unknown)}
+    case "${machine}" in
+        x86_64|amd64) printf x86_64 ;;
+        i386|i486|i586|i686|x86) printf x86_32 ;;
+        aarch64|arm64) printf arm64 ;;
+        armv7*|armv6*|arm) printf arm32 ;;
+        riscv64) printf riscv64 ;;
+        riscv32) printf riscv32 ;;
+        *) printf unknown ;;
+    esac
+}
+
+guest_is_native_compatible() {
+    case "$(host_isa):$1" in
+        x86_64:x86_32|x86_64:x86_64|x86_32:x86_32|\
+        arm64:arm32|arm64:arm64|arm32:arm32|\
+        riscv64:riscv32|riscv64:riscv64|riscv32:riscv32) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+accelerator_for() {
+    guest=$1
+    requested=${2:-$(setting simple_qemu_accelerator)}
+    if [ "${host}" = linux ] && [ "${requested}" = kvm ] && ! guest_is_native_compatible "${guest}"; then
+        printf tcg
+        return
+    fi
+    printf '%s' "${requested}"
+}
+
+if [ "${mode}" = self-test ]; then
+    [ "$(SIMPLE_QEMU_HOST=windows SIMPLE_QEMU_ACCELERATOR=whpx "${settings_cmd}" --print | sed -n 's/^simple_qemu_host=//p')" = windows ]
+    [ "$(SIMPLE_QEMU_HOST=freebsd SIMPLE_QEMU_ACCELERATOR=tcg "${settings_cmd}" --print | sed -n 's/^simple_qemu_native_timing_applicable=//p')" = false ]
+    if "$0" --guest mips64 --preflight >/dev/null 2>&1; then
+        printf '%s\n' 'sosix_qemu_matrix_self_test=failed:invalid-guest-accepted'
+        exit 1
+    fi
+    if "$0" --guest x86_64 --all-guests --preflight >/dev/null 2>&1; then
+        printf '%s\n' 'sosix_qemu_matrix_self_test=failed:ambiguous-selection-accepted'
+        exit 1
+    fi
+    if "$0" --guest x86_64 --parallel --preflight >/dev/null 2>&1; then
+        printf '%s\n' 'sosix_qemu_matrix_self_test=failed:parallel-single-guest-accepted'
+        exit 1
+    fi
+    [ "$(SOSIX_QEMU_HOST_ISA_OVERRIDE=x86_64 accelerator_for x86_64 kvm)" = kvm ]
+    [ "$(SOSIX_QEMU_HOST_ISA_OVERRIDE=x86_64 accelerator_for arm64 kvm)" = tcg ]
+    [ "$(SOSIX_QEMU_HOST_ISA_OVERRIDE=arm64 accelerator_for arm32 kvm)" = kvm ]
+    [ "$(SOSIX_QEMU_HOST_ISA_OVERRIDE=arm64 accelerator_for riscv64 kvm)" = tcg ]
+    [ "$(SOSIX_QEMU_HOST_ISA_OVERRIDE=x86_64 accelerator_for arm64 tcg)" = tcg ]
+    printf '%s\n' 'sosix_qemu_matrix_self_test=pass'
+    exit 0
+fi
+
+run_id=${SOSIX_QEMU_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}
+case "$run_id" in ''|*[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:-]*)
+    printf '%s\n' 'check-sosix-qemu-matrix: unsafe SOSIX_QEMU_RUN_ID' >&2
+    exit 64 ;;
+esac
+run_root=${artifact_root}/sosix-qemu/${host}/matrix/${run_id}
+mkdir -p "${run_root}"
+report=${run_root}/matrix.env
+: > "${report}"
+
+emit() {
+    printf '%s\n' "$1" | tee -a "${report}"
+}
+
+emit "sosix_qemu_matrix_host=${host}"
+emit "sosix_qemu_matrix_mode=${mode}"
+emit "sosix_qemu_matrix_guest_selection=$([ "${all_guests}" = true ] && printf all || printf '%s' "${guest_filter}")"
+emit "sosix_qemu_matrix_execution=$([ "${parallel}" = true ] && printf parallel || printf serial)"
+emit "sosix_qemu_matrix_accelerator=$(setting simple_qemu_accelerator)"
+emit "sosix_qemu_matrix_native_timing_applicable=$(setting simple_qemu_native_timing_applicable)"
+emit "sosix_qemu_matrix_artifact_root=${run_root}"
+
+blocked=0
+ready=0
+
+# Audited descriptor truth: none of the six current guests emits the canonical
+# nonce-bound compiler protocol yet.  Future promotions happen in this single
+# descriptor function; the run path below then validates and retains receipts.
+compiler_in_filesystem_for() {
+    case "$1" in
+        x86_32|x86_64|arm32|arm64|riscv32|riscv64) printf false ;;
+        *) return 1 ;;
+    esac
+}
+
+compiler_version_for() {
+    [ "$(compiler_in_filesystem_for "$1")" = true ] || return 0
+    printf '%s' "${SOSIX_QEMU_COMPILER_VERSION_EXPECTED:-}"
+}
+
+check_row() {
+    guest=$1
+    binary=$2
+    kernel=$3
+    image=$4
+    spec=$5
+    compiler_in_filesystem=$6
+    compiler_version_evidence_path=$7
+    compiler_hello_evidence_path=$8
+    if [ "${compiler_in_filesystem}" = true ]; then
+        compiler_version_evidence_path="${run_root}/${guest}.compiler-version.txt"
+        compiler_hello_evidence_path="${run_root}/${guest}.compiler-hello.txt"
+    fi
+    if [ -n "${guest_filter}" ] && [ "${guest_filter}" != "${guest}" ]; then
+        return
+    fi
+    prefix=sosix_qemu_matrix_${host}_${guest}
+    row_accelerator=$(accelerator_for "${guest}")
+
+    emit "${prefix}_kernel=${kernel}"
+    emit "${prefix}_image=${image}"
+    emit "${prefix}_spec=${spec}"
+    emit "${prefix}_compiler_in_filesystem=${compiler_in_filesystem}"
+    emit "${prefix}_compiler_version_evidence_path=${compiler_version_evidence_path}"
+    emit "${prefix}_compiler_hello_evidence_path=${compiler_hello_evidence_path}"
+    emit "${prefix}_accelerator=${row_accelerator}"
+    emit "${prefix}_native_timing_applicable=$([ "${row_accelerator}" = tcg ] && printf false || printf true)"
+    if ! command -v "${binary}" >/dev/null 2>&1 && [ ! -x "${binary}" ]; then
+        emit "${prefix}_status=blocked"
+        emit "${prefix}_reason=missing-qemu:${binary}"
+        blocked=$((blocked + 1))
+        return
+    fi
+    admission_output=
+    if ! admission_output=$("${admission_cmd}" --host "${host}" --arch "${guest}" \
+        --accelerator "${row_accelerator}" --qemu-binary "${binary}" 2>&1); then
+        printf '%s\n' "${admission_output}" | while IFS= read -r line; do
+            emit "${prefix}_admission_${line}"
+        done
+        emit "${prefix}_status=blocked"
+        emit "${prefix}_reason=host-or-accelerator-admission-failed"
+        blocked=$((blocked + 1))
+        return
+    fi
+    printf '%s\n' "${admission_output}" | while IFS= read -r line; do
+        emit "${prefix}_admission_${line}"
+    done
+    printf '%s\n' "${admission_output}" > "${run_root}/${guest}.host-admission.env"
+    if [ ! -f "${kernel}" ]; then
+        emit "${prefix}_status=blocked"
+        emit "${prefix}_reason=missing-kernel:${kernel}"
+        blocked=$((blocked + 1))
+        return
+    fi
+    if [ ! -f "${image}" ]; then
+        emit "${prefix}_status=blocked"
+        emit "${prefix}_reason=missing-image:${image}"
+        blocked=$((blocked + 1))
+        return
+    fi
+    if ! scripts/check/check-simpleos-fs-exec-kernel-elf.shs "${guest}" "${kernel}"; then
+        emit "${prefix}_status=blocked"
+        emit "${prefix}_reason=kernel-elf-contract-failed:${kernel}"
+        blocked=$((blocked + 1))
+        return
+    fi
+    if [ "${guest}" = arm64 ] && ! scripts/check/check-simpleos-arm64-fs-exec-elf.shs "${kernel}"; then
+        emit "${prefix}_status=blocked"
+        emit "${prefix}_reason=arm64-kernel-elf-contract-failed:${kernel}"
+        blocked=$((blocked + 1))
+        return
+    fi
+    emit "${prefix}_status=ready"
+    emit "${prefix}_reason=media-and-emulator-present"
+    ready=$((ready + 1))
+}
+
+check_row x86_32 "$(setting simple_qemu_x86_32_bin)" \
+    build/os/simpleos_x86_32_initrd_fs_exec_probe.elf build/os/fat32-x86_32.img \
+    test/03_system/os/qemu/sys_qemu_x86_32_fs_exec_spec.spl "$(compiler_in_filesystem_for x86_32)" '' ''
+check_row x86_64 "$(setting simple_qemu_x86_64_bin)" \
+    build/os/simpleos_x86_64_fs_exec.elf build/os/fat32-x86_64.img \
+    test/03_system/os/qemu/sys_qemu_x86_64_fs_exec_spec.spl "$(compiler_in_filesystem_for x86_64)" '' ''
+check_row arm32 "$(setting simple_qemu_arm32_bin)" \
+    build/os/simpleos_arm32_fs_exec.elf build/os/fat32-arm32.img \
+    test/03_system/os/qemu/sys_qemu_arm32_fs_exec_spec.spl "$(compiler_in_filesystem_for arm32)" '' ''
+check_row arm64 "$(setting simple_qemu_arm64_bin)" \
+    build/os/simpleos_arm64_fs_exec.elf build/os/fat32-arm64.img \
+    test/03_system/os/qemu/sys_qemu_arm64_fs_exec_spec.spl "$(compiler_in_filesystem_for arm64)" '' ''
+check_row riscv32 "$(setting simple_qemu_riscv32_bin)" \
+    build/os/simpleos_riscv32_smf_fs.elf build/os/fat32-riscv32.img \
+    test/03_system/os/qemu/sys_qemu_riscv32_fs_exec_spec.spl "$(compiler_in_filesystem_for riscv32)" '' ''
+check_row riscv64 "$(setting simple_qemu_riscv64_bin)" \
+    build/os/simpleos_riscv64_smf_fs.elf build/os/fat32-riscv64.img \
+    test/03_system/os/qemu/sys_qemu_riscv64_fs_exec_spec.spl "$(compiler_in_filesystem_for riscv64)" '' ''
+
+emit "sosix_qemu_matrix_ready_count=${ready}"
+emit "sosix_qemu_matrix_blocked_count=${blocked}"
+
+if [ "${mode}" = preflight ]; then
+    if [ "${blocked}" -ne 0 ]; then
+        emit 'sosix_qemu_matrix_status=blocked'
+        exit 1
+    fi
+    emit 'sosix_qemu_matrix_status=ready'
+    exit 0
+fi
+
+version_output=$(bin/simple --version 2>&1 || true)
+if printf '%s\n' "${version_output}" | grep -q 'bootstrap seed only'; then
+    emit 'sosix_qemu_matrix_status=blocked'
+    emit 'sosix_qemu_matrix_reason=deployed-cli-is-bootstrap-seed'
+    exit 1
+fi
+if [ "${blocked}" -ne 0 ]; then
+    emit 'sosix_qemu_matrix_status=blocked'
+    emit 'sosix_qemu_matrix_reason=required-row-not-ready'
+    exit 1
+fi
+
+run_spec_checked() {
+    guest=$1
+    spec=$2
+    log=$3
+    reason_file=$4
+    row_accelerator=$5
+    compiler_in_filesystem=$6
+    compiler_path=$7
+    compiler_version=$8
+    source_path=$9
+    executable_path=${10}
+    expected_stdout=${11}
+    nonce="${run_id}-${host}-${guest}"
+    : > "${reason_file}"
+    if ! SOSIX_QEMU_NONCE="${nonce}" SIMPLE_QEMU_ACCELERATOR="${row_accelerator}" \
+        SIMPLE_TIMEOUT_SECONDS=900 bin/simple test "${spec}" --no-session-daemon --timeout 180 >"${log}" 2>&1; then
+        printf '%s\n' "spec-failed:${spec}" > "${reason_file}"
+        return 1
+    fi
+    if ! grep -q 'SPEC FILE VERDICT:.*failed=0 dropped=0' "${log}"; then
+        printf '%s\n' "missing-authoritative-verdict:${spec}" > "${reason_file}"
+        return 1
+    fi
+    if [ "${compiler_in_filesystem}" = true ]; then
+        serial_path="build/os/systest/${guest}.serial.log"
+        version_artifact="${run_root}/${guest}.compiler-version.txt"
+        hello_artifact="${run_root}/${guest}.compiler-hello.txt"
+        if [ ! -f "${serial_path}" ]; then
+            printf '%s\n' "missing-compiler-serial:${serial_path}" > "${reason_file}"
+            return 1
+        fi
+        if ! bin/simple run scripts/check/validate-sosix-qemu-compiler-serial.spl -- \
+            "${serial_path}" "${host}" "${guest}" "${nonce}" "${compiler_path}" \
+            "${compiler_version}" "${source_path}" "${executable_path}" \
+            "${expected_stdout}" "${version_artifact}" "${hello_artifact}" >>"${log}" 2>&1; then
+            printf '%s\n' "compiler-serial-invalid:${guest}" > "${reason_file}"
+            return 1
+        fi
+        [ -s "${version_artifact}" ] && [ -s "${hello_artifact}" ] || {
+            printf '%s\n' "compiler-artifacts-missing:${guest}" > "${reason_file}"
+            return 1
+        }
+    fi
+    return 0
+}
+
+descriptor_field() {
+    descriptor_key=$1 descriptor_file=$2
+    descriptor_count=$(awk -F= -v k="$descriptor_key" '$1 == k { n++ } END { print n+0 }' "$descriptor_file")
+    [ "$descriptor_count" -eq 1 ] || return 1
+    awk -F= -v k="$descriptor_key" '$1 == k { print substr($0,index($0,"=")+1) }' "$descriptor_file"
+}
+
+resolve_repo_input() {
+    case "$1" in /*) printf '%s' "$1";; *) printf '%s/%s' "$repo_root" "$1";; esac
+}
+
+publish_native_pass() {
+    publish_guest=$1 publish_kernel=$2 publish_image=$3 publish_qemu=$4 publish_accelerator=$5
+    descriptor=$repo_root/build/os/systest/$publish_guest.native-pass.env
+    [ -f "$descriptor" ] || { printf '%s\n' "native-pass-descriptor-missing:$descriptor" >&2; return 1; }
+    if ! awk -F= '
+        /^[A-Za-z0-9_]+=/ {
+          if ($1=="schema_version" || $1=="nonce" || $1=="qemu_argv_file" || $1=="firmware_path" ||
+              $1=="firmware_id" || $1=="firmware_mode" || $1=="firmware_version" || $1=="firmware_stages" ||
+              $1=="program_path" || $1=="transcript_path" || $1=="required_markers_file" ||
+              $1=="owner" || $1=="reviewer" || $1=="compiler_identity") next
+        } { bad=1 } END { exit bad }
+    ' "$descriptor"; then
+        echo "native-pass-descriptor-open-or-malformed:$descriptor" >&2; return 1
+    fi
+    [ "$(descriptor_field schema_version "$descriptor")" = 1 ] || return 1
+    admission=$run_root/$publish_guest.host-admission.env
+    version_file=$run_root/$publish_guest.qemu.version
+    descriptor_field qemu_version "$admission" > "$version_file"
+    scripts/check/produce-sosix-qemu-native-pass-bundle.shs \
+        --host "$host" --guest "$publish_guest" --output "$artifact_root/sosix-qemu/native" \
+        --admission "$admission" --qemu-binary "$publish_qemu" \
+        --qemu-argv-file "$(resolve_repo_input "$(descriptor_field qemu_argv_file "$descriptor")")" \
+        --qemu-version-file "$version_file" --accelerator "$publish_accelerator" \
+        --firmware "$(resolve_repo_input "$(descriptor_field firmware_path "$descriptor")")" \
+        --firmware-id "$(descriptor_field firmware_id "$descriptor")" \
+        --firmware-mode "$(descriptor_field firmware_mode "$descriptor")" \
+        --firmware-version "$(descriptor_field firmware_version "$descriptor")" \
+        --firmware-stages "$(descriptor_field firmware_stages "$descriptor")" \
+        --kernel "$publish_kernel" --image "$publish_image" \
+        --program "$(resolve_repo_input "$(descriptor_field program_path "$descriptor")")" \
+        --transcript "$(resolve_repo_input "$(descriptor_field transcript_path "$descriptor")")" \
+        --required-markers-file "$(resolve_repo_input "$(descriptor_field required_markers_file "$descriptor")")" \
+        --nonce "$(descriptor_field nonce "$descriptor")" --owner "$(descriptor_field owner "$descriptor")" \
+        --reviewer "$(descriptor_field reviewer "$descriptor")" \
+        --compiler-identity "$(descriptor_field compiler_identity "$descriptor")" --source "$repo_root"
+}
+
+row_paths() {
+    case "$1" in
+        x86_32) echo 'build/os/simpleos_x86_32_initrd_fs_exec_probe.elf|build/os/fat32-x86_32.img';;
+        x86_64) echo 'build/os/simpleos_x86_64_fs_exec.elf|build/os/fat32-x86_64.img';;
+        arm32) echo 'build/os/simpleos_arm32_fs_exec.elf|build/os/fat32-arm32.img';;
+        arm64) echo 'build/os/simpleos_arm64_fs_exec.elf|build/os/fat32-arm64.img';;
+        riscv32) echo 'build/os/simpleos_riscv32_smf_fs.elf|build/os/fat32-riscv32.img';;
+        riscv64) echo 'build/os/simpleos_riscv64_smf_fs.elf|build/os/fat32-riscv64.img';;
+    esac
+}
+
+publish_completed_guest() {
+    publish_guest=$1
+    paths=$(row_paths "$publish_guest"); publish_kernel=${paths%%|*}; publish_image=${paths#*|}
+    publish_binary=$(setting "simple_qemu_${publish_guest}_bin")
+    publish_native_pass "$publish_guest" "$publish_kernel" "$publish_image" "$publish_binary" "$(accelerator_for "$publish_guest")"
+}
+
+run_spec_serial() {
+    guest=$1
+    spec=$2
+    if [ -n "${guest_filter}" ] && [ "${guest_filter}" != "${guest}" ]; then
+        return
+    fi
+    log=${run_root}/$(basename "${spec}" .spl).log
+    reason_file=${run_root}/${guest}.reason
+    if ! run_spec_checked "${guest}" "${spec}" "${log}" "${reason_file}" \
+        "$(accelerator_for "${guest}")" \
+        "$(compiler_in_filesystem_for "${guest}")" '/usr/bin/simple' "$(compiler_version_for "${guest}")" \
+        '/tmp/sosix-hello.spl' '/tmp/sosix-hello' "hello-${run_id}-${host}-${guest}"; then
+        emit 'sosix_qemu_matrix_status=failed'
+        emit "sosix_qemu_matrix_reason=$(cat "${reason_file}")"
+        exit 1
+    fi
+    if ! publish_completed_guest "${guest}" >> "${log}" 2>&1; then
+        emit 'sosix_qemu_matrix_status=failed'
+        emit "sosix_qemu_matrix_reason=native-pass-publication-failed:${guest}"
+        exit 1
+    fi
+    emit "sosix_qemu_matrix_${host}_${guest}_run_status=pass"
+}
+
+launch_spec_parallel() {
+    guest=$1
+    spec=$2
+    log=${run_root}/$(basename "${spec}" .spl).log
+    reason_file=${run_root}/${guest}.reason
+    (run_spec_checked "${guest}" "${spec}" "${log}" "${reason_file}" \
+        "$(accelerator_for "${guest}")" \
+        "$(compiler_in_filesystem_for "${guest}")" '/usr/bin/simple' "$(compiler_version_for "${guest}")" \
+        '/tmp/sosix-hello.spl' '/tmp/sosix-hello' "hello-${run_id}-${host}-${guest}") &
+    printf '%s|%s|%s|%s\n' "$!" "${guest}" "${spec}" "${reason_file}" >> "${jobs_file}"
+}
+
+if [ "${parallel}" = true ]; then
+    jobs_file=${run_root}/parallel.jobs
+    : > "${jobs_file}"
+    launch_spec_parallel x86_32 test/03_system/os/qemu/sys_qemu_x86_32_fs_exec_spec.spl
+    launch_spec_parallel x86_64 test/03_system/os/qemu/sys_qemu_x86_64_fs_exec_spec.spl
+    launch_spec_parallel arm32 test/03_system/os/qemu/sys_qemu_arm32_fs_exec_spec.spl
+    launch_spec_parallel arm64 test/03_system/os/qemu/sys_qemu_arm64_fs_exec_spec.spl
+    launch_spec_parallel riscv32 test/03_system/os/qemu/sys_qemu_riscv32_fs_exec_spec.spl
+    launch_spec_parallel riscv64 test/03_system/os/qemu/sys_qemu_riscv64_fs_exec_spec.spl
+    parallel_failed=0
+    while IFS='|' read -r pid guest spec reason_file; do
+        if wait "${pid}"; then
+            if publish_completed_guest "${guest}" >> "${run_root}/$(basename "${spec}" .spl).log" 2>&1; then
+                emit "sosix_qemu_matrix_${host}_${guest}_run_status=pass"
+            else
+                emit "sosix_qemu_matrix_${host}_${guest}_run_status=failed"
+                emit "sosix_qemu_matrix_${host}_${guest}_run_reason=native-pass-publication-failed"
+                parallel_failed=$((parallel_failed + 1))
+            fi
+        else
+            emit "sosix_qemu_matrix_${host}_${guest}_run_status=failed"
+            emit "sosix_qemu_matrix_${host}_${guest}_run_reason=$(cat "${reason_file}")"
+            parallel_failed=$((parallel_failed + 1))
+        fi
+    done < "${jobs_file}"
+    if [ "${parallel_failed}" -ne 0 ]; then
+        emit 'sosix_qemu_matrix_status=failed'
+        emit "sosix_qemu_matrix_reason=parallel-spec-failures:${parallel_failed}"
+        exit 1
+    fi
+else
+    run_spec_serial x86_32 test/03_system/os/qemu/sys_qemu_x86_32_fs_exec_spec.spl
+    run_spec_serial x86_64 test/03_system/os/qemu/sys_qemu_x86_64_fs_exec_spec.spl
+    run_spec_serial arm32 test/03_system/os/qemu/sys_qemu_arm32_fs_exec_spec.spl
+    run_spec_serial arm64 test/03_system/os/qemu/sys_qemu_arm64_fs_exec_spec.spl
+    run_spec_serial riscv32 test/03_system/os/qemu/sys_qemu_riscv32_fs_exec_spec.spl
+    run_spec_serial riscv64 test/03_system/os/qemu/sys_qemu_riscv64_fs_exec_spec.spl
+fi
+
+emit 'sosix_qemu_matrix_status=pass'
+

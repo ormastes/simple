@@ -1,0 +1,171 @@
+#!/bin/sh
+# Produce one immutable, collector-ready native SOSIX QEMU PASS bundle.
+set -eu
+
+usage() {
+    echo 'usage: produce-sosix-qemu-native-pass-bundle.shs --host HOST --guest GUEST --output ROOT --admission FILE --qemu-binary PATH --qemu-argv-file FILE --qemu-version-file FILE --accelerator NAME --firmware FILE --firmware-id ID --firmware-mode MODE --firmware-version VERSION --firmware-stages STAGES --kernel FILE --image FILE --program FILE --transcript FILE --required-markers-file FILE --nonce NONCE --owner NAME --reviewer NAME --compiler-identity ID [--source DIR]' >&2
+    exit 64
+}
+
+host= guest= output= admission= qemu_binary= qemu_argv_file= qemu_version_file=
+accelerator= firmware= firmware_id= firmware_mode= firmware_version= firmware_stages=
+kernel= image= program= transcript= required_markers_file= nonce= owner= reviewer= compiler_identity= source=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --host) host=$2; shift 2;; --guest) guest=$2; shift 2;; --output) output=$2; shift 2;;
+        --admission) admission=$2; shift 2;; --qemu-binary) qemu_binary=$2; shift 2;;
+        --qemu-argv-file) qemu_argv_file=$2; shift 2;; --qemu-version-file) qemu_version_file=$2; shift 2;;
+        --accelerator) accelerator=$2; shift 2;; --firmware) firmware=$2; shift 2;;
+        --firmware-id) firmware_id=$2; shift 2;; --firmware-mode) firmware_mode=$2; shift 2;;
+        --firmware-version) firmware_version=$2; shift 2;; --firmware-stages) firmware_stages=$2; shift 2;;
+        --kernel) kernel=$2; shift 2;; --image) image=$2; shift 2;; --program) program=$2; shift 2;;
+        --transcript) transcript=$2; shift 2;; --required-markers-file) required_markers_file=$2; shift 2;; --nonce) nonce=$2; shift 2;;
+        --owner) owner=$2; shift 2;; --reviewer) reviewer=$2; shift 2;;
+        --compiler-identity) compiler_identity=$2; shift 2;; --source) source=$2; shift 2;;
+        *) usage;;
+    esac
+done
+for required in host guest output admission qemu_binary qemu_argv_file qemu_version_file accelerator firmware firmware_id firmware_mode firmware_version firmware_stages kernel image program transcript required_markers_file nonce owner reviewer compiler_identity; do
+    eval "value=\${$required}"
+    [ -n "$value" ] || usage
+done
+case "$host" in linux|windows|macos|freebsd) ;; *) usage;; esac
+case "$guest" in x86_32|x86_64|arm32|arm64|riscv32|riscv64) ;; *) usage;; esac
+case "$firmware_mode:$firmware_stages" in
+    'uefi-pflash:firmware-entry>firmware-handoff>guest-entry'|\
+    'opensbi-bios:opensbi-entry>opensbi-handoff>guest-entry'|\
+    'board-rom:rom-entry>rom-handoff>guest-entry'|\
+    'direct-kernel:guest-entry') ;;
+    *) echo 'sosix-native-pass: firmware stages do not match mode' >&2; exit 2;;
+esac
+printf '%s\n' "$nonce" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{15,127}$' || { echo 'sosix-native-pass: unsafe nonce' >&2; exit 2; }
+printf '%s\n' "$firmware_id" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._+-]*$' || { echo 'sosix-native-pass: invalid firmware id' >&2; exit 2; }
+printf '%s\n' "$firmware_version" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._+-]*$' || { echo 'sosix-native-pass: invalid firmware version' >&2; exit 2; }
+
+repo_root=$(CDPATH= cd -- "${source:-$(dirname -- "$0")/../..}" && pwd)
+case "$output" in /*) ;; *) output=$PWD/$output;; esac
+hash_file() { sha256sum "$1" | awk '{print $1}'; }
+field() {
+    key=$1 file=$2
+    count=$(awk -F= -v k="$key" '$1 == k { n++ } END { print n+0 }' "$file")
+    [ "$count" -eq 1 ] || { echo "sosix-native-pass: $file: field $key occurs $count times" >&2; exit 2; }
+    awk -F= -v k="$key" '$1 == k { print substr($0,index($0,"=")+1) }' "$file"
+}
+for file in "$admission" "$qemu_argv_file" "$qemu_version_file" "$kernel" "$image" "$program" "$transcript" "$required_markers_file"; do
+    [ -f "$file" ] || { echo "sosix-native-pass: missing input: $file" >&2; exit 2; }
+done
+if [ "$firmware_mode" = direct-kernel ]; then
+    [ "$firmware" = none ] && [ "$firmware_id" = none ] &&
+        [ "$firmware_version" = none ] || {
+        echo 'sosix-native-pass: direct-kernel requires firmware/id/version none' >&2; exit 2;
+    }
+else
+    [ -f "$firmware" ] || { echo "sosix-native-pass: missing input: $firmware" >&2; exit 2; }
+fi
+
+# Admission is a closed record produced before the guest run.
+awk -F= '
+    /^[A-Za-z0-9_]+=/ {
+      if ($1=="detected_host" || $1=="requested_host" || $1=="host_identity_status" ||
+          $1=="host_identity_reason" || $1=="qemu_binary" || $1=="qemu_binary_resolved" ||
+          $1=="qemu_sha256" || $1=="qemu_version" || $1=="requested_accelerator" ||
+          $1=="accelerator_advertised_status" || $1=="accelerator_advertised_reason" ||
+          $1=="accelerator_probe_status" || $1=="accelerator_probe_reason" ||
+          $1=="native_timing_applicable" || $1=="simple_qemu_storage_root") next
+    } { bad=1 } END { exit bad }
+' "$admission" || { echo 'sosix-native-pass: malformed or open admission record' >&2; exit 2; }
+[ "$(field detected_host "$admission")" = "$host" ]
+[ "$(field requested_host "$admission")" = "$host" ]
+[ "$(field host_identity_status "$admission")" = pass ]
+[ "$(field accelerator_advertised_status "$admission")" = pass ]
+[ "$(field accelerator_probe_status "$admission")" = pass ]
+[ "$(field qemu_binary "$admission")" = "$qemu_binary" ]
+[ "$(field requested_accelerator "$admission")" = "$accelerator" ]
+if [ -x "$qemu_binary" ]; then
+    qemu_resolved=$(CDPATH= cd -- "$(dirname -- "$qemu_binary")" && pwd)/$(basename -- "$qemu_binary")
+else
+    qemu_resolved=$(command -v "$qemu_binary")
+fi
+[ "$(field qemu_binary_resolved "$admission")" = "$qemu_resolved" ]
+[ "$(field qemu_sha256 "$admission")" = "$(hash_file "$qemu_resolved")" ]
+[ "$(field qemu_version "$admission")" = "$(sed -n '1p' "$qemu_version_file")" ]
+
+git -C "$repo_root" diff --quiet --ignore-submodules -- &&
+git -C "$repo_root" diff --cached --quiet --ignore-submodules -- &&
+[ -z "$(git -C "$repo_root" ls-files --others --exclude-standard)" ] || {
+    echo 'sosix-native-pass: source worktree is not clean' >&2; exit 2;
+}
+commit=$(git -C "$repo_root" rev-parse HEAD)
+tree=$(git -C "$repo_root" rev-parse 'HEAD^{tree}')
+printf '%s\n' "$commit" | grep -Eq '^[0-9a-f]{40,64}$'
+printf '%s\n' "$tree" | grep -Eq '^[0-9a-f]{40,64}$'
+
+[ "$(wc -l < "$qemu_argv_file" | tr -d ' ')" -eq 1 ] || { echo 'sosix-native-pass: qemu argv must be exactly one line' >&2; exit 2; }
+[ "$(wc -l < "$qemu_version_file" | tr -d ' ')" -eq 1 ] || { echo 'sosix-native-pass: qemu version must be exactly one line' >&2; exit 2; }
+qemu_argv=$(sed -n '1p' "$qemu_argv_file")
+qemu_version=$(sed -n '1p' "$qemu_version_file")
+[ -n "$qemu_argv" ] && [ -n "$qemu_version" ]
+[ "$(grep -Foc -- "$nonce" "$transcript")" -eq 1 ] || { echo 'sosix-native-pass: nonce must occur exactly once in transcript' >&2; exit 2; }
+old_ifs=$IFS; IFS='>'
+for marker in $firmware_stages; do grep -F -- "$marker" "$transcript" >/dev/null || { echo "sosix-native-pass: missing stage $marker" >&2; exit 2; }; done
+IFS=$old_ifs
+[ -s "$required_markers_file" ] || { echo 'sosix-native-pass: empty required marker contract' >&2; exit 2; }
+previous=0
+while IFS= read -r marker || [ -n "$marker" ]; do
+    [ -n "$marker" ] || { echo 'sosix-native-pass: empty required marker' >&2; exit 2; }
+    line=$(grep -Fn -m1 -- "$marker" "$transcript" | cut -d: -f1 || true)
+    [ -n "$line" ] && [ "$line" -gt "$previous" ] || { echo "sosix-native-pass: missing or out-of-order required marker: $marker" >&2; exit 2; }
+    previous=$line
+done < "$required_markers_file"
+
+run_dir=$output/$host/$guest/run-$nonce
+[ ! -e "$run_dir" ] || { echo "sosix-native-pass: destination exists: $run_dir" >&2; exit 2; }
+stage=$(mktemp -d "${TMPDIR:-/tmp}/sosix-native-pass.XXXXXX")
+trap 'rm -rf "$stage"' EXIT HUP INT TERM
+cp "$admission" "$stage/host-admission.env"
+cp "$qemu_argv_file" "$stage/qemu.argv"
+cp "$qemu_version_file" "$stage/qemu.version"
+cp "$transcript" "$stage/transcript.log"
+cp "$kernel" "$stage/kernel.elf"
+cp "$image" "$stage/guest.img"
+cp "$program" "$stage/program.elf"
+[ "$firmware_mode" = direct-kernel ] || cp "$firmware" "$stage/firmware.bin"
+cp "$required_markers_file" "$stage/required-markers.txt"
+transcript_hash=$(hash_file "$stage/transcript.log")
+kernel_hash=$(hash_file "$stage/kernel.elf")
+image_hash=$(hash_file "$stage/guest.img")
+program_hash=$(hash_file "$stage/program.elf")
+if [ "$firmware_mode" = direct-kernel ]; then
+    firmware_hash=none
+    firmware_path=none
+else
+    firmware_hash=$(hash_file "$stage/firmware.bin")
+    firmware_path=$(CDPATH= cd -- "$(dirname -- "$firmware")" && pwd)/$(basename -- "$firmware")
+fi
+qemu_hash=$(hash_file "$qemu_resolved")
+{
+    echo schema_version=2; echo "host=$host"; echo "guest=$guest"; echo status=pass; echo reason=
+    echo "owner=$owner"; echo "reviewer=$reviewer"; echo resume_command=
+    echo "source_identity=git:$commit:tree:$tree:clean"; echo "compiler_identity=$compiler_identity"
+    echo "kernel_identity=sha256:$kernel_hash"; echo "image_identity=sha256:$image_hash"
+    echo "qemu_identity=sha256:$qemu_hash:version:$qemu_version"; echo "qemu_argv=$qemu_argv"
+    echo "accelerator_identity=$accelerator"; echo "firmware_identity=firmware:$firmware_id"
+    echo "firmware_mode=$firmware_mode"; echo "firmware_path=$firmware_path"
+    echo "firmware_version=version:$firmware_version"
+    if [ "$firmware_hash" = none ]; then echo firmware_sha256=none; else echo "firmware_sha256=sha256:$firmware_hash"; fi
+    echo "firmware_stage_markers=$firmware_stages"; echo "run_nonce=$nonce"
+    echo "transcript_identity=sha256:$transcript_hash"; echo "program_identity=sha256:$program_hash"
+    echo compiler_in_filesystem=false; echo compiler_version_evidence_path=; echo compiler_hello_evidence_path=
+    if [ "$firmware_mode" = direct-kernel ]; then echo artifact_count=8; else echo artifact_count=9; fi
+    i=1
+    artifact_names='host-admission.env qemu.argv qemu.version transcript.log kernel.elf guest.img program.elf required-markers.txt'
+    [ "$firmware_mode" = direct-kernel ] || artifact_names="$artifact_names firmware.bin"
+    for name in $artifact_names; do
+        echo "artifact_${i}_path=$name"; echo "artifact_${i}_sha256=$(hash_file "$stage/$name")"; i=$((i + 1))
+    done
+} > "$stage/evidence.env"
+mkdir -p "$(dirname -- "$run_dir")"
+mv "$stage" "$run_dir"
+trap - EXIT HUP INT TERM
+echo sosix_qemu_native_pass_bundle_status=pass
+echo "sosix_qemu_native_pass_bundle=$run_dir/evidence.env"
