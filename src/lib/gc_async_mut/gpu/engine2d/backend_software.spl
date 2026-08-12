@@ -617,6 +617,9 @@ impl RenderBackend for SoftwareBackend:
     me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         if w <= 0 or h <= 0:
             return
+        if w == 1:
+            self.draw_rect_filled(x, y, 1, h, left_color)
+            return
         val pixels_len = pixels.len()
         if w <= 0 or h <= 0:
             return
@@ -795,7 +798,40 @@ impl RenderBackend for SoftwareBackend:
             off = off + 1
 
     me draw_gradient_rect_h(x: i32, y: i32, w: i32, h: i32, left_color: u32, right_color: u32):
-        emu_draw_gradient_rect_h(self, x, y, w, h, left_color, right_color)
+        if w <= 0 or h <= 0:
+            return
+        val lr = color_r(left_color)
+        val lg = color_g(left_color)
+        val lb = color_b(left_color)
+        val la = color_a(left_color)
+        val rr = color_r(right_color)
+        val rg = color_g(right_color)
+        val rb = color_b(right_color)
+        val ra = color_a(right_color)
+        val opaque_ramp = la == 255 and ra == 255
+        var divisor = w - 1
+        if divisor < 1:
+            divisor = 1
+        # Build the immutable horizontal ramp once, then replay it through the
+        # contiguous variable-alpha span owner.  This preserves the emulation
+        # oracle's integer interpolation while avoiding w vertical draw calls
+        # and their strided framebuffer walks.
+        var gradient_row: [u32] = [0u32; w]
+        var col = 0
+        while col < w:
+            val r = lr + (rr - lr) * col / divisor
+            val g = lg + (rg - lg) * col / divisor
+            val b = lb + (rb - lb) * col / divisor
+            val a = la + (ra - la) * col / divisor
+            gradient_row[col] = rgba(r, g, b, a)
+            col = col + 1
+        var row = 0
+        while row < h:
+            if opaque_ramp:
+                self.draw_image(x, y + row, w, 1, gradient_row)
+            else:
+                self.draw_image_blend(x, y + row, w, 1, gradient_row)
+            row = row + 1
 
     me draw_radial_gradient(cx: i32, cy: i32, r: i32, center_color: u32, edge_color: u32):
         emu_draw_radial_gradient(self, cx, cy, r, center_color, edge_color)
