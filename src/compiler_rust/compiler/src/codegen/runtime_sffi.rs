@@ -1602,6 +1602,11 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_vulkan_copy_to_buffer_raw", &[I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_copy_from_buffer", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_copy_from_buffer_raw", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new(
+        "rt_vulkan_copy_from_buffer_strided_raw",
+        &[I64, I64, I64, I64, I64, I64, I64],
+        &[I64],
+    ),
     RuntimeFuncSpec::new("rt_vulkan_read_buffer_bytes", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_compile_spirv", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_compile_spirv_raw", &[I64, I64], &[I64]),

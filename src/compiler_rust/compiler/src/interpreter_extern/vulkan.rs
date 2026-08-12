@@ -89,6 +89,7 @@ pub const VULKAN_FNS: &[(&str, Ret, &str)] = &[
     ("rt_vulkan_copy_buffer", Ret::I, "iii"),
     ("rt_vulkan_copy_from_buffer", Ret::I, "vii"),
     ("rt_vulkan_copy_from_buffer_raw", Ret::I, "iiii"),
+    ("rt_vulkan_copy_from_buffer_strided_raw", Ret::I, "iiiiiii"),
     ("rt_vulkan_copy_from_image", Ret::I, "vi"),
     ("rt_vulkan_copy_to_buffer", Ret::I, "ivi"),
     ("rt_vulkan_copy_to_buffer_raw", Ret::I, "iiii"),

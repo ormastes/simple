@@ -252,6 +252,54 @@ pub extern "C" fn rt_vulkan_copy_from_buffer_raw(data_ptr: i64, byte_count: i64,
     1
 }
 
+/// Download strided device rows into tightly packed core-C-owned storage.
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_copy_from_buffer_strided_raw(
+    data_ptr: i64,
+    data_len: i64,
+    handle: i64,
+    src_offset: i64,
+    row_bytes: i64,
+    row_count: i64,
+    src_stride: i64,
+) -> i64 {
+    if data_len < 0
+        || src_offset < 0
+        || row_bytes < 0
+        || row_count < 0
+        || src_stride < 0
+        || (row_count > 0 && row_bytes > 0 && src_stride < row_bytes)
+        || data_len > 64 * 1024 * 1024
+        || row_count > 16_384
+    {
+        return 0;
+    }
+    let Some(packed_len) = row_bytes.checked_mul(row_count) else {
+        return 0;
+    };
+    if packed_len != data_len || (data_len > 0 && data_ptr <= 0) {
+        return 0;
+    }
+    let state = STATE.lock();
+    let Some(buf) = state.buffers.get(&handle) else {
+        return 0;
+    };
+    let Ok(downloaded) = buf.download_strided(src_offset as u64, row_bytes as u64, row_count as u64, src_stride as u64)
+    else {
+        return 0;
+    };
+    if downloaded.len() != data_len as usize {
+        return 0;
+    }
+    if !downloaded.is_empty() {
+        unsafe {
+            std::ptr::copy_nonoverlapping(downloaded.as_ptr(), data_ptr as *mut u8, downloaded.len());
+        }
+    }
+    1
+}
+
 #[no_mangle]
 #[cfg(not(feature = "vulkan"))]
 pub extern "C" fn rt_vulkan_copy_from_buffer(_data: i64, _handle: i64, _offset: i64) -> i64 {
@@ -261,6 +309,20 @@ pub extern "C" fn rt_vulkan_copy_from_buffer(_data: i64, _handle: i64, _offset: 
 #[no_mangle]
 #[cfg(not(feature = "vulkan"))]
 pub extern "C" fn rt_vulkan_copy_from_buffer_raw(_data_ptr: i64, _byte_count: i64, _handle: i64, _offset: i64) -> i64 {
+    0
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_copy_from_buffer_strided_raw(
+    _data_ptr: i64,
+    _data_len: i64,
+    _handle: i64,
+    _src_offset: i64,
+    _row_bytes: i64,
+    _row_count: i64,
+    _src_stride: i64,
+) -> i64 {
     0
 }
 
@@ -349,7 +411,7 @@ pub extern "C" fn rt_vulkan_copy_buffer(_dst: i64, _src: i64, _size: i64) -> i64
 
 #[cfg(test)]
 mod tests {
-    use super::{rt_vulkan_read_buffer_bytes, rt_vulkan_copy_to_buffer_raw};
+    use super::{rt_vulkan_copy_from_buffer_strided_raw, rt_vulkan_copy_to_buffer_raw, rt_vulkan_read_buffer_bytes};
     use crate::value::{byte_array_bytes, rt_array_len};
 
     #[test]
@@ -357,6 +419,13 @@ mod tests {
         assert_eq!(rt_array_len(rt_vulkan_read_buffer_bytes(0, 1, 0)), 0);
         assert_eq!(rt_array_len(rt_vulkan_read_buffer_bytes(1, -1, 0)), 0);
         assert_eq!(rt_array_len(rt_vulkan_read_buffer_bytes(1, 1, -1)), 0);
+    }
+
+    #[test]
+    fn strided_raw_guard_rejects_invalid_shape_before_pointer_access() {
+        assert_eq!(rt_vulkan_copy_from_buffer_strided_raw(0, 8, 0, 0, 4, 3, 8), 0);
+        assert_eq!(rt_vulkan_copy_from_buffer_strided_raw(0, 12, 0, 0, 4, 3, 2), 0);
+        assert_eq!(rt_vulkan_copy_from_buffer_strided_raw(0, 0, 0, 0, 0, 16_385, 0), 0);
     }
 
     #[cfg(feature = "vulkan")]
@@ -387,6 +456,17 @@ mod tests {
             payload
         );
         assert_eq!(rt_array_len(rt_vulkan_read_buffer_bytes(buffer, 4, 14)), 0);
+        let rows = [10u8, 11, 12, 13, 20, 21, 22, 23, 30, 31, 32, 33];
+        assert_eq!(
+            rt_vulkan_copy_to_buffer_raw(buffer, rows.as_ptr() as i64, rows.len() as i64, 0),
+            1
+        );
+        let mut packed = [0u8; 6];
+        assert_eq!(
+            rt_vulkan_copy_from_buffer_strided_raw(packed.as_mut_ptr() as i64, packed.len() as i64, buffer, 1, 2, 3, 4,),
+            1
+        );
+        assert_eq!(packed, [11, 12, 21, 22, 31, 32]);
         assert_eq!(rt_vulkan_copy_to_buffer_raw(buffer, 0, 0, 16), 1);
         assert_eq!(rt_vulkan_copy_to_buffer_raw(buffer, 0, 0, 17), 0);
         assert_eq!(rt_vulkan_free_buffer(buffer), 1);
