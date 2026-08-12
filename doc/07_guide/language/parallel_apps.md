@@ -71,6 +71,14 @@ specialized layouts fail closed. This does not reinterpret ordinary dynamic
 `T[]`; automatic typed-array allocation/binding and complete load/store
 rewriting remain open.
 
+Logical typed-view producers use `mir.storage.project_field.v1`. A late MIR
+rewrite resolves an exact `(function symbol, base local)` sidecar entry before
+emitting the validated affine address intrinsic. Missing or duplicate bindings,
+dynamic field IDs, observed addresses, ABI-pinned plans, and unsupported layouts
+fail closed. The site must also carry a proven index bound and a byte-capacity
+that contains the maximum projected address. Driver-owned registration and a public `StorageView<T>` allocation
+owner are still planned; ordinary arrays must not be inferred into this path.
+
 The MIR optimizer now also checks whether an AoSoA block is compatible with a
 selected fixed-width SIMD route. Matching AVX/NEON-style widths are admitted;
 AoS and SoA retain the scalar/reference fallback; ABI-pinned or mismatched

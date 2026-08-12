@@ -11,7 +11,7 @@ waves and must use real transport, not mocks:
 | AC-4 | child-created output through bounded typed thread transport | WP-13..18 | send/receive/cancel receipt |
 | AC-4 | process pointer rejection and encoded/object-ref transfer | WP-13, WP-17 | distinct-process identity proof |
 | AC-5 | unknown dynamic index overlap and proven disjoint slice | WP-10..12 | compile diagnostics/MIR facts |
-| AC-6 | AoS/SoA transformed view parity and ABI rejection | WP-20..25 | randomized logical oracle |
+| AC-6 | AoS/SoA transformed view parity and ABI rejection | WP-20..25 | `storage_layout_custom_native_execution_spec.spl` exact-byte/canary evidence; currently blocked before execution by `smf_mmap_native.ptr_read_u8` native codegen |
 | AC-7 | MDSOC port route with bypass sabotage | WP-30 | route receipt and deliberate bypass failure |
 | AC-8 | randomized child completion with canonical parent commit | WP-15 and pilot | deterministic receipt hash |
 

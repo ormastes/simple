@@ -6,9 +6,10 @@ use std.common.structural.storage_layout.mapping.{
     storage_layout_project, storage_projection_request_v1
 }
 use compiler.mir_opt.mir_opt.storage_projection_lowering.{
-    MIR_STORAGE_PROJECT_ADDRESS_V1,
+    MIR_STORAGE_PROJECT_ADDRESS_V1, MIR_STORAGE_PROJECT_FIELD_V1,
+    lower_mir_storage_project_fields_v1,
     mir_storage_address_recipe_v1, mir_storage_field_binding_v1,
-    mir_storage_view_binding_v1
+    mir_storage_view_binding_v1, mir_storage_view_site_binding_v1
 }
 use compiler.mir.mir_data.*
 use compiler.backend.native.isel_x86_64.{isel_module}
@@ -23,7 +24,7 @@ fn projection_plan(layout: StorageLayoutKind):
         StorageConversionPolicy.Cached, "wp22-native-v1", "typed-host-view")
 
 fn projection_binding(layout: StorageLayoutKind, observed: bool):
-    mir_storage_view_binding_v1(7001, 9, 64, 16, observed,
+    mir_storage_view_binding_v1(7001, 9, 64, 1024, 16, observed,
         projection_plan(layout), [
             mir_storage_field_binding_v1(0, 0, 1, 0),
             mir_storage_field_binding_v1(1, 4, 4, 64),
@@ -58,7 +59,86 @@ fn projection_intrinsic_module(scale: i64, base_offset: i64) -> MirModule:
     MirModule(name: "storage_projection", functions: functions,
         statics: {}, constants: {}, types: {})
 
+fn logical_projection_module(field: MirOperand) -> MirModule:
+    val i64_type = MirType(kind: MirTypeKind.I64)
+    val ptr_type = MirType(kind: MirTypeKind.Ptr(pointee: i64_type, mutable: true))
+    val locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("base"), type_: ptr_type, kind: LocalKind.Arg(0)),
+        MirLocal(id: LocalId(id: 1), name: Some("index"), type_: i64_type, kind: LocalKind.Arg(1)),
+        MirLocal(id: LocalId(id: 2), name: Some("address"), type_: ptr_type, kind: LocalKind.Temp)
+    ]
+    val instruction = MirInst(kind: MirInstKind.Intrinsic(
+        Some(LocalId(id: 2)), MIR_STORAGE_PROJECT_FIELD_V1, [
+            MirOperand.copy(LocalId(id: 0)), MirOperand.copy(LocalId(id: 1)), field
+        ]), span: nil)
+    val function = MirFunction(
+        symbol: SymbolId.new(41), name: "logical_project",
+        signature: MirSignature(params: [ptr_type, i64_type], return_type: ptr_type,
+            is_variadic: false), locals: locals,
+        blocks: [MirBlock(id: BlockId.new(0), label: Some("entry"),
+            instructions: [instruction],
+            terminator: MirTerminator.Ret(Some(MirOperand.copy(LocalId(id: 2)))))],
+        entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1), generic_params: [],
+        is_generic_template: false, specialization_of: nil, type_bindings: {})
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(41)] = function
+    MirModule(name: "logical_storage_projection", functions: functions,
+        statics: {}, constants: {}, types: {})
+
+fn assert_rewritten_recipe(layout: StorageLayoutKind, expected_scale: i64,
+                           expected_offset: i64):
+    val result = lower_mir_storage_project_fields_v1(
+        logical_projection_module(MirOperand.const_int(2)), [
+            mir_storage_view_site_binding_v1(41, 0, true, projection_binding(layout, false))
+        ])
+    assert_true(result.ok)
+    assert_equal(result.rewritten_count, 1)
+    val instruction = result.module.functions[SymbolId.new(41)].blocks[0].instructions[0]
+    match instruction.kind:
+        case Intrinsic(_, name, args):
+            assert_equal(name, MIR_STORAGE_PROJECT_ADDRESS_V1)
+            match args[2].kind:
+                case Const(MirConstValue.Int(scale), _): assert_equal(scale, expected_scale)
+                case _: assert_true(false)
+            match args[3].kind:
+                case Const(MirConstValue.Int(offset), _): assert_equal(offset, expected_offset)
+                case _: assert_true(false)
+        case _: assert_true(false)
+
 describe "typed host AoS and SoA native projection":
+    it "automatically rewrites logical field projections with exact site bindings":
+        assert_rewritten_recipe(StorageLayoutKind.AoS, 16, 8)
+        assert_rewritten_recipe(StorageLayoutKind.SoA, 8, 320)
+
+    it "fails closed on missing duplicate dynamic and observed bindings":
+        val logical = logical_projection_module(MirOperand.const_int(2))
+        assert_equal(lower_mir_storage_project_fields_v1(logical, []).reason,
+            "missing-storage-view-site-binding")
+        val site = mir_storage_view_site_binding_v1(41, 0, true,
+            projection_binding(StorageLayoutKind.SoA, false))
+        assert_equal(lower_mir_storage_project_fields_v1(logical, [site, site]).reason,
+            "duplicate-storage-view-site-binding")
+        val dynamic_field = logical_projection_module(MirOperand.copy(LocalId(id: 1)))
+        assert_equal(lower_mir_storage_project_fields_v1(dynamic_field, [site]).reason,
+            "logical-projection-field-must-be-constant")
+        val observed = mir_storage_view_site_binding_v1(41, 0, true,
+            projection_binding(StorageLayoutKind.SoA, true))
+        assert_equal(lower_mir_storage_project_fields_v1(logical, [observed]).reason,
+            "storage-view-recipe:address-observed-or-abi-pinned")
+        val unproven = mir_storage_view_site_binding_v1(41, 0, false,
+            projection_binding(StorageLayoutKind.SoA, false))
+        assert_equal(lower_mir_storage_project_fields_v1(logical, [unproven]).reason,
+            "storage-view-index-bounds-unproven")
+
+    it "rejects a binding whose allocation cannot contain the projection":
+        val too_small = mir_storage_view_binding_v1(7001, 9, 64, 64, 16, false,
+            projection_plan(StorageLayoutKind.SoA), [
+                mir_storage_field_binding_v1(0, 0, 8, 32)
+            ])
+        assert_equal(mir_storage_address_recipe_v1(too_small, 0).reason,
+            "storage-view-allocation-too-small")
+
     it "matches canonical projection for unequal fields and runtime indices":
         for layout in [StorageLayoutKind.AoS, StorageLayoutKind.SoA]:
             val binding = projection_binding(layout, false)
@@ -105,7 +185,7 @@ describe "typed host AoS and SoA native projection":
             "unknown-field")
 
     it "rejects overlapping SoA columns across the whole bound schema":
-        val malformed = mir_storage_view_binding_v1(7001, 9, 64, 16, false,
+        val malformed = mir_storage_view_binding_v1(7001, 9, 64, 1024, 16, false,
             projection_plan(StorageLayoutKind.SoA), [
                 mir_storage_field_binding_v1(0, 0, 4, 0),
                 mir_storage_field_binding_v1(1, 8, 8, 128)

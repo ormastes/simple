@@ -4,8 +4,10 @@
 use std.common.structural.storage_layout.storage_layout_contracts.{
     StorageLayoutKind, StorageLayoutPlanV1, storage_layout_plan_v1_well_formed
 }
+use compiler.mir.mir_data.*
 
 val MIR_STORAGE_PROJECT_ADDRESS_V1: text = "mir.storage.project_address.v1"
+val MIR_STORAGE_PROJECT_FIELD_V1: text = "mir.storage.project_field.v1"
 
 struct MirStorageFieldBindingV1:
     field_id: i64
@@ -17,6 +19,7 @@ struct MirStorageViewBindingV1:
     logical_type_id: i64
     revision: i64
     element_count: i64
+    allocation_byte_len: i64
     logical_stride: i64
     address_observed: bool
     plan: StorageLayoutPlanV1
@@ -29,18 +32,39 @@ struct MirStorageAddressRecipeV1:
     field_size: i64
     reason: text
 
+struct MirStorageViewSiteBindingV1:
+    function_symbol_id: i64
+    base_local_id: i64
+    index_bounds_proven: bool
+    binding: MirStorageViewBindingV1
+
+struct MirStorageProjectionLoweringResultV1:
+    ok: bool
+    module: MirModule
+    rewritten_count: i64
+    reason: text
+
 fn mir_storage_field_binding_v1(field_id: i64, logical_offset: i64,
                                 field_size: i64, column_offset: i64) -> MirStorageFieldBindingV1:
     MirStorageFieldBindingV1(field_id: field_id, logical_offset: logical_offset,
         field_size: field_size, column_offset: column_offset)
 
 fn mir_storage_view_binding_v1(logical_type_id: i64, revision: i64,
-                               element_count: i64, logical_stride: i64,
+                               element_count: i64, allocation_byte_len: i64,
+                               logical_stride: i64,
                                address_observed: bool, plan: StorageLayoutPlanV1,
                                fields: [MirStorageFieldBindingV1]) -> MirStorageViewBindingV1:
     MirStorageViewBindingV1(logical_type_id: logical_type_id, revision: revision,
-        element_count: element_count, logical_stride: logical_stride,
+        element_count: element_count, allocation_byte_len: allocation_byte_len,
+        logical_stride: logical_stride,
         address_observed: address_observed, plan: plan, fields: fields)
+
+fn mir_storage_view_site_binding_v1(function_symbol_id: i64, base_local_id: i64,
+                                    index_bounds_proven: bool,
+                                    binding: MirStorageViewBindingV1) -> MirStorageViewSiteBindingV1:
+    MirStorageViewSiteBindingV1(function_symbol_id: function_symbol_id,
+        base_local_id: base_local_id, index_bounds_proven: index_bounds_proven,
+        binding: binding)
 
 fn mir_storage_recipe_failure(reason: text) -> MirStorageAddressRecipeV1:
     MirStorageAddressRecipeV1(ok: false, scale: 0, base_offset: 0,
@@ -53,6 +77,7 @@ fn mir_storage_address_recipe_v1(binding: MirStorageViewBindingV1,
     if binding.logical_type_id <= 0 or binding.plan.logical_type_id != binding.logical_type_id:
         return mir_storage_recipe_failure("logical-type-mismatch")
     if binding.revision < 0 or binding.element_count < 0
+        or binding.allocation_byte_len < 0
         or binding.logical_stride <= 0 or binding.fields.len() == 0:
         return mir_storage_recipe_failure("invalid-view-binding")
     if binding.address_observed or binding.plan.abi_pinned:
@@ -119,5 +144,99 @@ fn mir_storage_address_recipe_v1(binding: MirStorageViewBindingV1,
         if base_offset > 9223372036854775807 - last_scaled
             or field.field_size > 9223372036854775807 - (base_offset + last_scaled):
             return mir_storage_recipe_failure("affine-address-overflow")
+        val required_end = base_offset + last_scaled + field.field_size
+        if required_end > binding.allocation_byte_len:
+            return mir_storage_recipe_failure("storage-view-allocation-too-small")
     MirStorageAddressRecipeV1(ok: true, scale: scale, base_offset: base_offset,
         field_size: field.field_size, reason: "typed-fixed-record-affine")
+
+fn mir_storage_projection_operand_local(operand: MirOperand) -> i64:
+    match operand.kind:
+        case Copy(local) | Move(local): local.id
+        case _: -1
+
+fn mir_storage_projection_const_i64(operand: MirOperand) -> i64?:
+    match operand.kind:
+        case Const(MirConstValue.Int(value), _): Some(value)
+        case _: nil
+
+fn mir_storage_projection_site_binding(
+    bindings: [MirStorageViewSiteBindingV1], function_symbol_id: i64,
+    base_local_id: i64
+) -> (MirStorageViewBindingV1?, bool):
+    var found: MirStorageViewBindingV1? = nil
+    var duplicate = false
+    for site in bindings:
+        if site.function_symbol_id == function_symbol_id
+            and site.base_local_id == base_local_id:
+            if found != nil:
+                duplicate = true
+            else:
+                found = Some(site.binding)
+    (found, duplicate)
+
+fn mir_storage_projection_failure(module: MirModule, rewritten_count: i64,
+                                  reason: text) -> MirStorageProjectionLoweringResultV1:
+    MirStorageProjectionLoweringResultV1(ok: false, module: module,
+        rewritten_count: rewritten_count, reason: reason)
+
+fn lower_mir_storage_project_fields_v1(
+    module: MirModule, bindings: [MirStorageViewSiteBindingV1]
+) -> MirStorageProjectionLoweringResultV1:
+    var result = module
+    var rewritten_count = 0
+    for symbol in module.functions.keys():
+        val function = module.functions[symbol]
+        var blocks: [MirBlock] = []
+        for block in function.blocks:
+            var instructions: [MirInst] = []
+            for instruction in block.instructions:
+                var rewritten = instruction
+                match instruction.kind:
+                    case Intrinsic(dest, name, args):
+                        if name == MIR_STORAGE_PROJECT_FIELD_V1:
+                            if dest == nil or args.len() != 3:
+                                return mir_storage_projection_failure(module, rewritten_count,
+                                    "invalid-logical-projection-signature")
+                            val base_local_id = mir_storage_projection_operand_local(args[0])
+                            if base_local_id < 0:
+                                return mir_storage_projection_failure(module, rewritten_count,
+                                    "logical-projection-base-must-be-local")
+                            val selected = mir_storage_projection_site_binding(
+                                bindings, symbol.id, base_local_id)
+                            if selected[1]:
+                                return mir_storage_projection_failure(module, rewritten_count,
+                                    "duplicate-storage-view-site-binding")
+                            if selected[0] == nil:
+                                return mir_storage_projection_failure(module, rewritten_count,
+                                    "missing-storage-view-site-binding")
+                            var index_bounds_proven = false
+                            for site in bindings:
+                                if site.function_symbol_id == symbol.id
+                                    and site.base_local_id == base_local_id:
+                                    index_bounds_proven = site.index_bounds_proven
+                            if not index_bounds_proven:
+                                return mir_storage_projection_failure(module, rewritten_count,
+                                    "storage-view-index-bounds-unproven")
+                            val field_id = mir_storage_projection_const_i64(args[2])
+                            if field_id == nil:
+                                return mir_storage_projection_failure(module, rewritten_count,
+                                    "logical-projection-field-must-be-constant")
+                            val recipe = mir_storage_address_recipe_v1(
+                                selected[0].unwrap(), field_id.unwrap())
+                            if not recipe.ok:
+                                return mir_storage_projection_failure(module, rewritten_count,
+                                    "storage-view-recipe:{recipe.reason}")
+                            rewritten = MirInst(kind: MirInstKind.Intrinsic(dest,
+                                MIR_STORAGE_PROJECT_ADDRESS_V1, [
+                                    args[0], args[1], MirOperand.const_int(recipe.scale),
+                                    MirOperand.const_int(recipe.base_offset)
+                                ]), span: instruction.span)
+                            rewritten_count = rewritten_count + 1
+                    case _: pass
+                instructions.push(rewritten)
+            blocks.push(MirBlock(id: block.id, label: block.label,
+                instructions: instructions, terminator: block.terminator))
+        result.functions[symbol] = MirFunction(..function, blocks: blocks)
+    MirStorageProjectionLoweringResultV1(ok: true, module: result,
+        rewritten_count: rewritten_count, reason: "ok")

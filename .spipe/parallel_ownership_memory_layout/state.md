@@ -419,3 +419,15 @@ dev-done
   consumer and shared-oracle weakness; primary review kept ordinary RuntimeValue
   arrays untouched. Automatic `T[]` view binding/allocation, complete loads and
   stores, other backends, and executed randomized parity remain open.
+- impl: Added the next WP-22 compiler boundary and a non-vacuous system oracle.
+  `mir.storage.project_field.v1` rewrites only through an exact function/base
+  local sidecar; missing, duplicate, dynamic-field, observed, ABI-pinned, and
+  unsupported sites fail closed. Index bounds must be proven and the maximum
+  affine address must fit the bound allocation capacity. The focused transform/recipe/native-selection
+  unit spec passes with the temporary Rust runner (`EXIT=0`). The W^X scenario
+  independently checks AoS offset 80, SoA offset 64, returned values,
+  wrong-offset zeroes, and adjacent canaries. Its admitted native run is blocked
+  before scenario execution by the existing
+  `smf_mmap_native.spl::ptr_read_u8` codegen failure. Three bounded attempts
+  were stopped; no native PASS is claimed. Driver registration and public typed
+  view allocation remain open.

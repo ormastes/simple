@@ -14,6 +14,7 @@
 - Bounded fixed-record conversion oracle with exact round trips.
 - Compiler-owned revisioned typed-view binding and affine AoS/SoA recipe.
 - Custom x86 native lowering for `mir.storage.project_address.v1`.
+- Exact function/base-local rewrite from `mir.storage.project_field.v1`.
 
 ## Still proposed or incomplete
 
@@ -29,6 +30,13 @@
 3. Reject ABI-pinned/address-observed records and unknown schemas before lowering.
 4. Never derive `noalias` from layout or incomplete WP-20 access facts.
 5. Compare logical results against an independent oracle, not round trip alone.
+6. Never let unresolved logical projection intrinsics reach a backend; unknown
+   native intrinsics may otherwise degrade to NOP.
+7. Require index-bound evidence and validate the maximum affine byte address
+   against the bound allocation capacity.
+
+The W^X store/load parity scenario is executable but not admitted while the
+native runner fails compiling `smf_mmap_native.ptr_read_u8` before it starts.
 
 ## Focused evidence
 
