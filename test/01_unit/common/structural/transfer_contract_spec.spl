@@ -14,6 +14,12 @@ use std.common.structural.transfer.transfer_contracts.{
     transfer_envelope_v1_boundary_allowed,
     transfer_envelope_v1_well_formed
 }
+use std.common.structural.transfer.transfer_codec.{
+    TRANSFER_ENVELOPE_WIRE_LEN,
+    decode_transfer_envelope,
+    encode_transfer_envelope
+}
+use std.common.structural.wire.{wire_to_hex}
 
 describe "TransferEnvelopeV1 contract":
     it "pins the v1 vocabulary and has no raw pointer payload":
@@ -64,3 +70,33 @@ describe "TransferEnvelopeV1 contract":
             ParallelTransferMode.Copy, ParallelTransferPayload.EncodedCopy,
             0, false)
         assert_true(transfer_envelope_v1_boundary_allowed(encoded))
+
+    it "round trips the canonical owned-move wire vector":
+        val moved = transfer_envelope_v1(7, 2,
+            ParallelExecutionDomain.Parent, ParallelExecutionDomain.Thread,
+            ParallelTransferMode.OwnedMove, ParallelTransferPayload.OwnedRegion,
+            99, true)
+        val encoded = encode_transfer_envelope(moved)
+        assert_equal(encoded.len(), TRANSFER_ENVELOPE_WIRE_LEN)
+        assert_equal(wire_to_hex(encoded),
+            "53505452010000000700000000000000020000000000000000010202630000000000000001000000")
+        val decoded = decode_transfer_envelope(encoded)
+        assert_true(decoded.ok)
+        assert_equal(decoded.value.region_id, 7)
+        assert_equal(decoded.value.ownership_token, 99)
+        assert_true(decoded.value.source_invalidated)
+
+    it "rejects reserved bytes and process-local owned regions":
+        val process_move = transfer_envelope_v1(9, 0,
+            ParallelExecutionDomain.Parent, ParallelExecutionDomain.Process,
+            ParallelTransferMode.OwnedMove, ParallelTransferPayload.OwnedRegion,
+            100, true)
+        assert_equal(encode_transfer_envelope(process_move).len(), 0)
+
+        val moved = transfer_envelope_v1(7, 2,
+            ParallelExecutionDomain.Parent, ParallelExecutionDomain.Thread,
+            ParallelTransferMode.OwnedMove, ParallelTransferPayload.OwnedRegion,
+            99, true)
+        var malformed = encode_transfer_envelope(moved)
+        malformed[TRANSFER_ENVELOPE_WIRE_LEN - 1] = 1
+        assert_false(decode_transfer_envelope(malformed).ok)

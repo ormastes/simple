@@ -101,3 +101,14 @@ dev-done
 - plan: Added the execution-status plan with frozen interfaces, WP status,
   non-overlap assignments, immediate gates, and the admitted-self-hosted
   verification handoff requirement.
+- impl: Added the canonical `TransferEnvelopeV1` byte codec. Encoding now
+  admits only boundary-valid transfers, has no raw-pointer discriminant, and
+  decoding rejects unknown enum values, non-boolean invalidation flags,
+  reserved bytes, trailing bytes, invalid source/target pairs, and unsafe
+  process-local owned-region transfers. The focused spec pins a golden owned-
+  move vector, round trip, reserved-byte rejection, and process-boundary
+  rejection. `git diff --check` passes. The one bounded seed lint run did not
+  converge and was interrupted; the one bounded focused test run timed out at
+  60 seconds amid unrelated bootstrap warnings. Neither is recorded as PASS.
+  Resume command when an admitted Stage 4 CLI exists:
+  `bin/simple test test/01_unit/common/structural/transfer_contract_spec.spl --mode=interpreter`.

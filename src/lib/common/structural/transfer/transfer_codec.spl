@@ -1,0 +1,120 @@
+# Canonical byte codec for TransferEnvelopeV1. Safe transport accepts only
+# boundary-admitted envelopes; there is deliberately no raw-pointer variant.
+
+use std.common.structural.wire.{
+    WIRE_ENVELOPE_LEN,
+    wire_check_envelope,
+    wire_get_u64,
+    wire_get_u8,
+    wire_has,
+    wire_magic,
+    wire_put_envelope,
+    wire_put_u64,
+    wire_put_u8
+}
+use std.common.structural.transfer.transfer_contracts.{
+    TRANSFER_SCHEMA_VERSION,
+    ParallelExecutionDomain,
+    ParallelTransferMode,
+    ParallelTransferPayload,
+    TransferEnvelopeV1,
+    parallel_execution_domain_to_u8,
+    parallel_execution_domain_valid,
+    parallel_transfer_mode_to_u8,
+    parallel_transfer_mode_valid,
+    parallel_transfer_payload_to_u8,
+    parallel_transfer_payload_valid,
+    transfer_envelope_v1,
+    transfer_envelope_v1_boundary_allowed
+}
+
+val TRANSFER_ENVELOPE_BODY_LEN: i64 = 32
+val TRANSFER_ENVELOPE_WIRE_LEN: i64 = WIRE_ENVELOPE_LEN + TRANSFER_ENVELOPE_BODY_LEN
+
+struct TransferEnvelopeResult:
+    ok: bool
+    value: TransferEnvelopeV1
+
+fn transfer_magic() -> i64:
+    wire_magic("SPTR")
+
+fn transfer_envelope_zero() -> TransferEnvelopeV1:
+    transfer_envelope_v1(0, 0, ParallelExecutionDomain.Parent,
+        ParallelExecutionDomain.Parent, ParallelTransferMode.Copy,
+        ParallelTransferPayload.InlineCopy, 0, false)
+
+fn transfer_domain_from_u8(value: i64) -> ParallelExecutionDomain:
+    if value == 1: return ParallelExecutionDomain.Thread
+    if value == 2: return ParallelExecutionDomain.Process
+    if value == 3: return ParallelExecutionDomain.Actor
+    if value == 4: return ParallelExecutionDomain.Device
+    if value == 5: return ParallelExecutionDomain.Remote
+    ParallelExecutionDomain.Parent
+
+fn transfer_mode_from_u8(value: i64) -> ParallelTransferMode:
+    if value == 1: return ParallelTransferMode.FrozenShare
+    if value == 2: return ParallelTransferMode.OwnedMove
+    if value == 3: return ParallelTransferMode.ScopedLoan
+    if value == 4: return ParallelTransferMode.Lease
+    ParallelTransferMode.Copy
+
+fn transfer_payload_from_u8(value: i64) -> ParallelTransferPayload:
+    if value == 1: return ParallelTransferPayload.FrozenRegion
+    if value == 2: return ParallelTransferPayload.OwnedRegion
+    if value == 3: return ParallelTransferPayload.EncodedCopy
+    if value == 4: return ParallelTransferPayload.ObjectHandle
+    if value == 5: return ParallelTransferPayload.SharedSync
+    if value == 6: return ParallelTransferPayload.DeviceLease
+    ParallelTransferPayload.InlineCopy
+
+fn encode_transfer_envelope(value: TransferEnvelopeV1) -> [u8]:
+    var out: [u8] = []
+    if not transfer_envelope_v1_boundary_allowed(value):
+        return out
+    out = wire_put_envelope(out, transfer_magic(), TRANSFER_SCHEMA_VERSION)
+    out = wire_put_u64(out, value.region_id)
+    out = wire_put_u64(out, value.generation)
+    out = wire_put_u8(out, parallel_execution_domain_to_u8(value.source_domain))
+    out = wire_put_u8(out, parallel_execution_domain_to_u8(value.target_domain))
+    out = wire_put_u8(out, parallel_transfer_mode_to_u8(value.mode))
+    out = wire_put_u8(out, parallel_transfer_payload_to_u8(value.payload))
+    out = wire_put_u64(out, value.ownership_token)
+    out = wire_put_u8(out, if value.source_invalidated: 1 else: 0)
+    out = wire_put_u8(out, 0)
+    out = wire_put_u8(out, 0)
+    wire_put_u8(out, 0)
+
+fn decode_transfer_envelope(data: [u8]) -> TransferEnvelopeResult:
+    val zero = transfer_envelope_zero()
+    if data.len() != TRANSFER_ENVELOPE_WIRE_LEN:
+        return TransferEnvelopeResult(ok: false, value: zero)
+    if not wire_check_envelope(data, 0, transfer_magic(), TRANSFER_SCHEMA_VERSION):
+        return TransferEnvelopeResult(ok: false, value: zero)
+    val off = WIRE_ENVELOPE_LEN
+    if not wire_has(data, off, TRANSFER_ENVELOPE_BODY_LEN):
+        return TransferEnvelopeResult(ok: false, value: zero)
+    val source = wire_get_u8(data, off + 16)
+    val target = wire_get_u8(data, off + 17)
+    val mode = wire_get_u8(data, off + 18)
+    val payload = wire_get_u8(data, off + 19)
+    val invalidated = wire_get_u8(data, off + 28)
+    if not parallel_execution_domain_valid(source) or not parallel_execution_domain_valid(target):
+        return TransferEnvelopeResult(ok: false, value: zero)
+    if not parallel_transfer_mode_valid(mode) or not parallel_transfer_payload_valid(payload):
+        return TransferEnvelopeResult(ok: false, value: zero)
+    if invalidated > 1:
+        return TransferEnvelopeResult(ok: false, value: zero)
+    if wire_get_u8(data, off + 29) != 0 or wire_get_u8(data, off + 30) != 0 or wire_get_u8(data, off + 31) != 0:
+        return TransferEnvelopeResult(ok: false, value: zero)
+    val value = transfer_envelope_v1(wire_get_u64(data, off),
+        wire_get_u64(data, off + 8), transfer_domain_from_u8(source),
+        transfer_domain_from_u8(target), transfer_mode_from_u8(mode),
+        transfer_payload_from_u8(payload), wire_get_u64(data, off + 20),
+        invalidated == 1)
+    if not transfer_envelope_v1_boundary_allowed(value):
+        return TransferEnvelopeResult(ok: false, value: zero)
+    TransferEnvelopeResult(ok: true, value: value)
+
+export TRANSFER_ENVELOPE_BODY_LEN, TRANSFER_ENVELOPE_WIRE_LEN
+export TransferEnvelopeResult, transfer_magic, transfer_envelope_zero
+export encode_transfer_envelope, decode_transfer_envelope
