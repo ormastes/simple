@@ -41,6 +41,10 @@ class TileOp:
 class TileGrid:
     origin_x: i32
     origin_y: i32
+    bound_x0: i32
+    bound_y0: i32
+    bound_x1: i32
+    bound_y1: i32
     tiles_x: i32
     tiles_y: i32
 
@@ -61,15 +65,25 @@ fn tile_floor_div(v: i32, d: i32) -> i32:
         q = q - 1
     q
 
+fn _tile_floor_div_i64(v: i64, d: i64) -> i64:
+    var q = v / d
+    if v % d != 0 and ((v < 0) != (d < 0)):
+        q = q - 1
+    q
+
 fn tile_grid_make(x0: i32, y0: i32, x1: i32, y1: i32) -> TileGrid:
     if x1 <= x0 or y1 <= y0:
-        return TileGrid(origin_x: x0, origin_y: y0, tiles_x: 0, tiles_y: 0)
+        return TileGrid(
+            origin_x: x0, origin_y: y0,
+            bound_x0: x0, bound_y0: y0, bound_x1: x0, bound_y1: y0,
+            tiles_x: 0, tiles_y: 0)
     val tx0 = tile_floor_div(x0, TILE_PX)
     val ty0 = tile_floor_div(y0, TILE_PX)
     val tx1 = tile_floor_div(x1 - 1, TILE_PX)
     val ty1 = tile_floor_div(y1 - 1, TILE_PX)
     TileGrid(
         origin_x: tx0 * TILE_PX, origin_y: ty0 * TILE_PX,
+        bound_x0: x0, bound_y0: y0, bound_x1: x1, bound_y1: y1,
         tiles_x: tx1 - tx0 + 1, tiles_y: ty1 - ty0 + 1
     )
 
@@ -77,20 +91,37 @@ fn tile_count(grid: TileGrid) -> i32:
     grid.tiles_x * grid.tiles_y
 
 fn tile_rect_x0(grid: TileGrid, t: i32) -> i32:
-    grid.origin_x + (t % grid.tiles_x) * TILE_PX
+    val edge = grid.origin_x + (t % grid.tiles_x) * TILE_PX
+    if edge > grid.bound_x0: edge else: grid.bound_x0
 
 fn tile_rect_y0(grid: TileGrid, t: i32) -> i32:
-    grid.origin_y + (t / grid.tiles_x) * TILE_PX
+    val edge = grid.origin_y + (t / grid.tiles_x) * TILE_PX
+    if edge > grid.bound_y0: edge else: grid.bound_y0
+
+fn tile_rect_x1(grid: TileGrid, t: i32) -> i32:
+    val edge = grid.origin_x + (t % grid.tiles_x + 1) * TILE_PX
+    if edge < grid.bound_x1: edge else: grid.bound_x1
+
+fn tile_rect_y1(grid: TileGrid, t: i32) -> i32:
+    val edge = grid.origin_y + (t / grid.tiles_x + 1) * TILE_PX
+    if edge < grid.bound_y1: edge else: grid.bound_y1
 
 # Covered tile-index column/row range of a device rect, clamped to the grid.
 # Returns (tx0, ty0, tx1, ty1) inclusive; tx1 < tx0 means no coverage.
 fn tile_cover_range(grid: TileGrid, x: i32, y: i32, w: i32, h: i32) -> (i32, i32, i32, i32):
     if w <= 0 or h <= 0 or grid.tiles_x <= 0 or grid.tiles_y <= 0:
         return (0, 0, -1, -1)
-    var tx0 = tile_floor_div(x - grid.origin_x, TILE_PX)
-    var ty0 = tile_floor_div(y - grid.origin_y, TILE_PX)
-    var tx1 = tile_floor_div(x + w - 1 - grid.origin_x, TILE_PX)
-    var ty1 = tile_floor_div(y + h - 1 - grid.origin_y, TILE_PX)
+    val rx0 = x.to_i64()
+    val ry0 = y.to_i64()
+    val rx1 = rx0 + w.to_i64()
+    val ry1 = ry0 + h.to_i64()
+    if rx1 <= grid.bound_x0.to_i64() or ry1 <= grid.bound_y0.to_i64() or
+            rx0 >= grid.bound_x1.to_i64() or ry0 >= grid.bound_y1.to_i64():
+        return (0, 0, -1, -1)
+    var tx0 = _tile_floor_div_i64(rx0 - grid.origin_x.to_i64(), TILE_PX.to_i64()).to_i32()
+    var ty0 = _tile_floor_div_i64(ry0 - grid.origin_y.to_i64(), TILE_PX.to_i64()).to_i32()
+    var tx1 = _tile_floor_div_i64(rx1 - 1 - grid.origin_x.to_i64(), TILE_PX.to_i64()).to_i32()
+    var ty1 = _tile_floor_div_i64(ry1 - 1 - grid.origin_y.to_i64(), TILE_PX.to_i64()).to_i32()
     if tx1 < 0 or ty1 < 0 or tx0 >= grid.tiles_x or ty0 >= grid.tiles_y:
         return (0, 0, -1, -1)
     if tx0 < 0:
@@ -219,8 +250,8 @@ fn tile_checksums(ops: [TileOp], bins: TileBins, grid: TileGrid) -> [i64]:
 fn tile_occluder_slot(ops: [TileOp], bins: TileBins, grid: TileGrid, t: i32) -> i32:
     val tx0 = tile_rect_x0(grid, t)
     val ty0 = tile_rect_y0(grid, t)
-    val tx1 = tx0 + TILE_PX
-    val ty1 = ty0 + TILE_PX
+    val tx1 = tile_rect_x1(grid, t)
+    val ty1 = tile_rect_y1(grid, t)
     var slot = -1
     var s = bins.starts[t]
     val e = bins.starts[t + 1]
@@ -228,7 +259,8 @@ fn tile_occluder_slot(ops: [TileOp], bins: TileBins, grid: TileGrid, t: i32) -> 
         val op = ops[bins.items[s]]
         if (
             op.opaque and op.x <= tx0 and op.y <= ty0 and
-            op.x + op.w >= tx1 and op.y + op.h >= ty1
+            op.x.to_i64() + op.w.to_i64() >= tx1.to_i64() and
+            op.y.to_i64() + op.h.to_i64() >= ty1.to_i64()
         ):
             slot = s
         s = s + 1

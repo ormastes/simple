@@ -16,7 +16,8 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_ti
     TILE_MARGIN_PX, TILE_PX, TileBins, TileGrid, TileOp, tile_bin_ops,
     tile_checksum, tile_checksums, tile_count, tile_cover_range,
     tile_floor_div, tile_grid_make, tile_live_set, tile_occluder_slot,
-    tile_op, tile_paint_flag_enabled, tile_rect_x0, tile_rect_y0,
+    tile_op, tile_paint_flag_enabled,
+    tile_rect_x0, tile_rect_x1, tile_rect_y0, tile_rect_y1,
     tile_stats_ops_painted, tile_stats_ops_total, tile_stats_record,
     tile_stats_reset, tile_stats_tiles_live, tile_stats_tiles_occluded,
     tile_stats_tiles_skipped, tile_stats_tiles_total, tile_survivors
@@ -55,6 +56,23 @@ describe "tile grid math":
         val grid = tile_grid_make(0, 0, 0, 4096)
         expect(tile_count(grid)).to_equal(0)
 
+    it "clips the ragged bottom-right 8K tile to the exact viewport":
+        val grid = tile_grid_make(0, 0, 7680, 4320)
+        expect(grid.tiles_x).to_equal(30)
+        expect(grid.tiles_y).to_equal(17)
+        expect(tile_count(grid)).to_equal(510)
+        expect(tile_rect_x0(grid, 509)).to_equal(7424)
+        expect(tile_rect_x1(grid, 509)).to_equal(7680)
+        expect(tile_rect_y0(grid, 509)).to_equal(4096)
+        expect(tile_rect_y1(grid, 509)).to_equal(4320)
+
+    it "clips a non-aligned leading tile to the document origin":
+        val grid = tile_grid_make(10, 20, 300, 310)
+        expect(tile_rect_x0(grid, 0)).to_equal(10)
+        expect(tile_rect_y0(grid, 0)).to_equal(20)
+        expect(tile_rect_x1(grid, 0)).to_equal(256)
+        expect(tile_rect_y1(grid, 0)).to_equal(256)
+
     it "exposes tile rect origins by index":
         val grid = tile_grid_make(0, 0, 1024, 1024)
         expect(tile_rect_x0(grid, 0)).to_equal(0)
@@ -63,6 +81,16 @@ describe "tile grid math":
         expect(tile_rect_y0(grid, 5)).to_equal(TILE_PX)
 
 describe "tile binning":
+
+    it "does not bin an op wholly inside a non-aligned grid's padded edge":
+        val grid = tile_grid_make(10, 20, 300, 310)
+        val bins = tile_bin_ops([_box(0, 0, 0, 9, 19)], grid)
+        expect(bins.items.len()).to_equal(0)
+
+    it "bins an intersecting rect without overflowing its far edge":
+        val grid = tile_grid_make(2147483000, 0, 2147483600, 256)
+        val bins = tile_bin_ops([_box(0, 2147483500, 0, 500, 256)], grid)
+        expect(bins.items.len()).to_equal(1)
 
     it "bins an op spanning four tiles into all four":
         val grid = tile_grid_make(0, 0, 1024, 1024)
@@ -177,6 +205,19 @@ describe "tile live set from scroll":
         expect(all_live).to_equal(true)
 
 describe "tile occlusion":
+
+    it "lets a full 8K opaque viewport occlude the ragged last tile":
+        val grid = tile_grid_make(0, 0, 7680, 4320)
+        val ops = [
+            _box(0, 7500, 4200, 20, 20),
+            _opaque(1, 0, 0, 7680, 4320),
+        ]
+        val bins = tile_bin_ops(ops, grid)
+        expect(tile_occluder_slot(ops, bins, grid, 509)).to_equal(
+            bins.starts[509] + 1)
+        val live = tile_live_set(grid, 0, 0, 7680, 4320, 0)
+        val survivors = tile_survivors(ops, bins, grid, live)
+        expect(survivors).to_equal([false, true])
 
     it "finds the latest full-tile opaque op as the occluder":
         val grid = tile_grid_make(0, 0, 512, 512)
