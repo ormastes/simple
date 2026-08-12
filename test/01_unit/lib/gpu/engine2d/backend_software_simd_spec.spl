@@ -8,6 +8,7 @@ hot paths when available. Covers AC-6.
 """
 
 use std.spec.{describe, context, it, expect}
+use std.io_runtime.{file_read}
 use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.gpu.engine2d.simd_provider.{reset_simd_hits, simd_hit_counts}
 
@@ -18,7 +19,7 @@ use std.gpu.engine2d.simd_provider.{reset_simd_hits, simd_hit_counts}
 describe "SoftwareBackend SIMD integration":
     describe "clear":
         it "AC-6: clear uses simd_fill_row when available":
-            var backend = SoftwareBackend.create()
+            var backend = SoftwareBackend.create_cpu_simd()
             reset_simd_hits()
             if backend.init(64, 64):
                 backend.clear(0xFFFF0000)
@@ -48,7 +49,7 @@ describe "SoftwareBackend SIMD integration":
 
     describe "blit_image":
         it "AC-6: blit uses simd_blit_row for row copies":
-            var backend = SoftwareBackend.create()
+            var backend = SoftwareBackend.create_cpu_simd()
             reset_simd_hits()
             val src_pixels: [u32] = [0xFFFF0000; 16]
             if backend.init(64, 64):
@@ -65,7 +66,7 @@ describe "SoftwareBackend SIMD integration":
 
     describe "alpha blending":
         it "AC-6: draw_rect_filled opaque spans record simd fill hits":
-            var backend = SoftwareBackend.create()
+            var backend = SoftwareBackend.create_cpu_simd()
             reset_simd_hits()
             if backend.init(64, 64):
                 backend.draw_rect_filled(4, 5, 16, 8, 0xFFFF0000)
@@ -75,7 +76,7 @@ describe "SoftwareBackend SIMD integration":
                 backend.shutdown()
 
         it "AC-6: draw_rect_filled with alpha uses simd_blend_row":
-            var backend = SoftwareBackend.create()
+            var backend = SoftwareBackend.create_cpu_simd()
             reset_simd_hits()
             if backend.init(64, 64):
                 backend.clear(0xFF0000FF)
@@ -97,6 +98,25 @@ describe "SoftwareBackend SIMD integration":
             expect(pixels[1]).to_equal(0x00000000u32)
             expect(simd_hit_counts().alpha_hits).to_be_greater_than(0)
             backend.shutdown()
+
+        it "in-place image spans match scalar with negative edge clipping":
+            var simd = SoftwareBackend.create_cpu_simd()
+            var scalar = SoftwareBackend.create()
+            expect(simd.init(5, 3)).to_equal(true)
+            expect(scalar.init(5, 3)).to_equal(true)
+            simd.clear(0x80402010u32)
+            scalar.clear(0x80402010u32)
+            val source: [u32] = [
+                0x00010203u32, 0x80FF0000u32, 0xFFFFFFFFu32,
+                0x4000FF00u32, 0xC00000FFu32, 0x7F123456u32,
+            ]
+            reset_simd_hits()
+            simd.draw_image_blend(-1, 1, 3, 2, source)
+            scalar.draw_image_blend(-1, 1, 3, 2, source)
+            expect(simd.read_pixels()).to_equal(scalar.read_pixels())
+            expect(simd_hit_counts().alpha_hits).to_be_greater_than(0)
+            simd.shutdown()
+            scalar.shutdown()
 
         it "matches straight-alpha composition for translucent source and destination":
             var backend = SoftwareBackend.create_cpu_simd()
@@ -179,3 +199,13 @@ describe "SoftwareBackend SIMD integration":
             expect(plain.kernel_table.lookups).to_equal(0)
             backend.shutdown()
             plain.shutdown()
+
+    describe "allocation-free production blend wiring":
+        it "uses in-place image and constant span ABIs without row buffers":
+            val source = file_read(
+                "src/lib/gc_async_mut/gpu/engine2d/backend_software.spl")
+            expect(source).to_contain("engine2d_simd_blend_span_u32(")
+            expect(source).to_contain("engine2d_simd_blend_const_span_u32(")
+            expect(source.contains("var dst_row: [u32]")).to_equal(false)
+            expect(source.contains("var src_row: [u32]")).to_equal(false)
+            expect(source.contains("engine2d_simd_blend_row_u32(")).to_equal(false)
