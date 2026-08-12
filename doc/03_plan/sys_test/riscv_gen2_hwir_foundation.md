@@ -156,9 +156,10 @@ interpreter. A later target-RTL route must prove its `CompressedHardwareExpansio
 lowers as fixed-width hardware; host-facing `CompressedExpansion` text fields
 are intentionally excluded from the adapter interface.
 
-GHDL analysis of the first strict HWIR module proves that the typed emitter
-produces valid VHDL-2008 for its supported Bool-AND seed. It does not prove
-that the compressed decoder itself currently lowers through HWIR.
+The qualified GHDL scenario is specified to prove that the typed emitter
+produces valid VHDL-2008 for its supported Bool-AND seed. Until its
+self-hosted receipt exists, it does not prove that the compressed decoder
+lowers through HWIR.
 
 The C.ADDI row scenario imports the standard SPipe surface and defines its
 GHDL vectors. Rerun it with a current self-hosted runtime before recording the
@@ -166,10 +167,10 @@ result as release evidence; do not substitute the legacy textual decoder's
 interpreter vectors.
 
 The bootstrap capture-based SFFI wrapper misreports the GHDL helper result.
-This scenario uses the repository's established tuple-return process façade
-instead; the exact VHDL-2008 analyze, elaborate, and simulation steps now pass
-inside the executable scenario. Fix the generic wrapper only in its owning
-test-runtime lane.
+The scenario therefore specifies the repository's established tuple-return
+process façade for the exact VHDL-2008 analyze, elaborate, and simulation
+steps. A qualified self-hosted receipt must demonstrate those steps; fix the
+generic wrapper only in its owning test-runtime lane.
 
 The C.EBREAK target scenario and C.ADDI4SPN/C.LW/C.SW/C.LWSP/C.SWSP/C.SLLI-low/C.SRLI-low/C.SRAI-low/C.ANDI/C.SUB/C.XOR/C.OR/C.AND/C.JR/C.MV/C.JALR/C.ADD/C.ADDI/C.NOP/C.LI row
 target-equivalence simulations invoke their compiler-owned row constructors.

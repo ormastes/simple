@@ -42,3 +42,14 @@ RV32/RV64 adapter vectors, and focused lint/duplication gates with
 qualification receipt: release evidence additionally requires the current
 self-hosted compiler, the RV32/RV64 generated-VHDL/GHDL route, and the
 maintenance gates recorded in the system test plan.
+
+## Coverage contract
+
+For compiler-owned Gen2 HWIR/product/provenance changes, the qualified
+self-hosted run must report at least **80% branch coverage** across the changed
+owned `.spl` modules and their directly corresponding focused tests. Generated
+VHDL, testbench literals, legacy V1 generators, unavailable GHDL tooling, and
+the separate architectural-retirement producer are explicit exclusions. The
+qualification receipt records the coverage command, report location, measured
+percentage, changed-file list, and each exclusion. A bootstrap-seed test run
+does not satisfy this contract.
