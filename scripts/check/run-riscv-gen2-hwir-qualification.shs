@@ -1,0 +1,338 @@
+#!/bin/sh
+# Run the compiler-owned Gen2 qualification composer under a bounded, admitted
+# Stage4 envelope.  This runner deliberately does not write a qualification
+# receipt: the admitted CLI/composer owns the immutable receipt and every
+# generated artifact below the fresh run directory.
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+EVIDENCE_ROOT=$ROOT_DIR/build/evidence/riscv_gen2_hwir_foundation
+TIMEOUT_SECS=1800
+QUALIFICATION_PRODUCT=riscv-gen2-zca-trap-single-outstanding-v3
+RV32_ROW=rv32-zca-cjal-critical
+RV64_ROW=rv64-zca-addiw-critical
+STAGE4_CLI=
+STAGE4_PROVENANCE=
+COMPOSER=
+OUT_DIR=
+
+usage() {
+    cat <<'EOF'
+usage: sh scripts/check/run-riscv-gen2-hwir-qualification.shs \
+  --stage4-cli ABSOLUTE_PATH --stage4-provenance ABSOLUTE_PATH \
+  --composer ABSOLUTE_PATH --output-dir ABSOLUTE_PATH
+
+The output directory must be a fresh direct child of
+build/evidence/riscv_gen2_hwir_foundation/.  The composer, not this wrapper,
+must write qualification_receipt.json and the fixed RV32/RV64 GHDL logs.
+EOF
+}
+
+cleanup_partial_receipt() {
+    [ -n "${RECEIPT:-}" ] || return 0
+    [ -f "$RECEIPT" ] && [ ! -L "$RECEIPT" ] || return 0
+    rm -f -- "$RECEIPT"
+}
+
+fail() {
+    cleanup_partial_receipt || :
+    printf '%s\n' 'riscv_gen2_hwir_qualification_status=fail'
+    printf '%s\n' "riscv_gen2_hwir_qualification_reason=$1"
+    exit 1
+}
+
+need_value() {
+    [ -n "$2" ] || fail "empty-value:$1"
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --stage4-cli)
+            [ "$#" -ge 2 ] || fail "missing-value:$1"
+            need_value "$1" "$2"
+            [ -z "$STAGE4_CLI" ] || fail 'duplicate-stage4-cli'
+            STAGE4_CLI=$2
+            shift 2
+            ;;
+        --stage4-provenance)
+            [ "$#" -ge 2 ] || fail "missing-value:$1"
+            need_value "$1" "$2"
+            [ -z "$STAGE4_PROVENANCE" ] || fail 'duplicate-stage4-provenance'
+            STAGE4_PROVENANCE=$2
+            shift 2
+            ;;
+        --composer)
+            [ "$#" -ge 2 ] || fail "missing-value:$1"
+            need_value "$1" "$2"
+            [ -z "$COMPOSER" ] || fail 'duplicate-composer'
+            COMPOSER=$2
+            shift 2
+            ;;
+        --output-dir)
+            [ "$#" -ge 2 ] || fail "missing-value:$1"
+            need_value "$1" "$2"
+            [ -z "$OUT_DIR" ] || fail 'duplicate-output-dir'
+            OUT_DIR=$2
+            shift 2
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        *)
+            fail "unknown-argument:$1"
+            ;;
+    esac
+done
+
+[ -n "$STAGE4_CLI" ] || fail 'missing-stage4-cli'
+[ -n "$STAGE4_PROVENANCE" ] || fail 'missing-stage4-provenance'
+[ -n "$COMPOSER" ] || fail 'missing-composer'
+[ -n "$OUT_DIR" ] || fail 'missing-output-dir'
+
+# A retained qualification run is immutable.  Do this check before admission,
+# GHDL, or the composer can make any evidence write.
+if [ -e "$OUT_DIR" ] || [ -L "$OUT_DIR" ]; then
+    fail 'output-directory-preexists'
+fi
+
+BOOTSTRAP_STAGE3_FACADE_PATH=$ROOT_DIR/scripts/check/lib/bootstrap-stage3-provenance.shs
+STAGE4_PROVENANCE_HELPER_PATH=$ROOT_DIR/scripts/check/lib/stage4-candidate-provenance.shs
+export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$STAGE4_PROVENANCE_HELPER_PATH"
+
+simple=$(bootstrap_stage3_canonical_file "$STAGE4_CLI") ||
+    fail 'stage4-cli-missing-symlinked-or-noncanonical'
+[ -x "$simple" ] || fail 'stage4-cli-not-executable'
+provenance=$(bootstrap_stage3_canonical_file "$STAGE4_PROVENANCE") ||
+    fail 'stage4-provenance-missing-symlinked-or-noncanonical'
+[ "$provenance" = "${simple}.provenance.env" ] ||
+    fail 'stage4-provenance-not-adjacent'
+stage4_verify_candidate_provenance "$provenance" "$simple" "$ROOT_DIR" ||
+    fail 'stage4-cli-provenance-not-admitted'
+
+command -v ghdl >/dev/null 2>&1 || fail 'ghdl-missing'
+command -v timeout >/dev/null 2>&1 || fail 'timeout-missing'
+
+composer=$(bootstrap_stage3_canonical_file "$COMPOSER") ||
+    fail 'composer-missing-symlinked-or-noncanonical'
+[ -x "$composer" ] || fail 'composer-not-executable'
+[ "$composer" != "$0" ] || fail 'composer-may-not-recurse-to-runner'
+
+# The requested output must resolve to one fresh, direct run directory under
+# the prescribed evidence root.  Refuse aliases through a symlinked build tree.
+mkdir -p "$EVIDENCE_ROOT" || fail 'evidence-root-create-failed'
+evidence_root=$(bootstrap_stage3_canonical_path "$EVIDENCE_ROOT") ||
+    fail 'evidence-root-noncanonical'
+[ "$evidence_root" = "$EVIDENCE_ROOT" ] || fail 'evidence-root-symlinked'
+resolved_out=$(bootstrap_stage3_canonical_path "$OUT_DIR") ||
+    fail 'output-directory-parent-missing-or-noncanonical'
+[ "$(dirname -- "$resolved_out")" = "$evidence_root" ] ||
+    fail 'output-directory-not-direct-evidence-child'
+run_id=$(basename -- "$resolved_out")
+case "$run_id" in ''|*[!A-Za-z0-9._-]*) fail 'output-directory-run-id-unsafe' ;; esac
+
+mkdir "$resolved_out" || fail 'output-directory-create-failed'
+chmod 700 "$resolved_out" || fail 'output-directory-permissions-failed'
+OUT_DIR=$resolved_out
+RECEIPT=$OUT_DIR/qualification_receipt.json
+COMPOSER_LOG=$OUT_DIR/composer.log
+STAGE4_SSPEC_LOG=$OUT_DIR/stage4-post-bootstrap-sspec.log
+
+# This admits the exact candidate before it is allowed to execute either phase
+# of qualification.  The log is retained and hash-bound by the final receipt.
+if timeout -k 30 "$TIMEOUT_SECS" \
+    "$ROOT_DIR/scripts/check/check-post-bootstrap-stage4-sspec.shs" \
+    "$simple" "$provenance" >"$STAGE4_SSPEC_LOG" 2>&1; then
+    :
+else
+    sspec_status=$?
+    fail "stage4-post-bootstrap-sspec-failed:$sspec_status"
+fi
+[ -s "$STAGE4_SSPEC_LOG" ] || fail 'stage4-post-bootstrap-sspec-log-empty'
+
+# Phase one has no authority to write the final receipt.  It emits the fixed
+# two-row inputs only; the wrapper verifies all row, coverage, VHDL, manifest,
+# GHDL command, and GHDL log material before it permits receipt composition.
+if timeout -k 30 "$TIMEOUT_SECS" "$composer" \
+    --emit-evidence \
+    --stage4-cli "$simple" --stage4-provenance "$provenance" \
+    --output-dir "$OUT_DIR" \
+    --product "$QUALIFICATION_PRODUCT" \
+    --required-row "$RV32_ROW" --required-row "$RV64_ROW" \
+    --required-coverage "$RV32_ROW" --required-coverage "$RV64_ROW" \
+    >"$COMPOSER_LOG" 2>&1; then
+    :
+else
+    producer_status=$?
+    fail "evidence-producer-failed:$producer_status"
+fi
+
+[ ! -e "$RECEIPT" ] && [ ! -L "$RECEIPT" ] ||
+    fail 'receipt-forbidden-before-evidence-validation'
+
+# The intentionally compact parser accepts only exactly-one quoted scalar for
+# each contract key.  A malformed or duplicate field fails rather than being
+# interpreted as qualification evidence.
+json_value() {
+    json_file=$1
+    json_key=$2
+    json_compact=$(tr -d '[:space:]' <"$json_file") || return 1
+    printf '%s\n' "$json_compact" |
+        awk -v needle="\"$json_key\":\"" '
+            {
+                rest = $0
+                while ((at = index(rest, needle)) != 0) {
+                    rest = substr(rest, at + length(needle))
+                    finish = index(rest, "\"")
+                    if (finish == 0) malformed = 1
+                    else {
+                        value = substr(rest, 1, finish - 1)
+                        count++
+                        rest = substr(rest, finish + 1)
+                    }
+                }
+            }
+            END {
+                if (malformed || count != 1) exit 1
+                print value
+            }'
+}
+require_json_value() {
+    json_file=$1
+    json_key=$2
+    json_expected=$3
+    json_actual=$(json_value "$json_file" "$json_key") ||
+        fail "json-field-missing-or-duplicate:$json_key"
+    [ "$json_actual" = "$json_expected" ] ||
+        fail "json-field-invalid:$json_key"
+}
+require_hashed_file() {
+    artifact_name=$1
+    artifact_hash_key=$2
+    artifact_path=$OUT_DIR/$artifact_name
+    [ -f "$artifact_path" ] && [ ! -L "$artifact_path" ] && [ -s "$artifact_path" ] ||
+        fail "qualification-artifact-missing:$artifact_name"
+    expected_hash=$(json_value "$RECEIPT" "$artifact_hash_key") ||
+        fail "receipt-field-missing-or-duplicate:$artifact_hash_key"
+    printf '%s\n' "$expected_hash" |
+        awk 'length($0) == 64 && $0 ~ /^[0-9a-fA-F]+$/ { ok = 1 } END { exit !ok }' ||
+        fail "receipt-field-invalid:$artifact_hash_key"
+    [ "$expected_hash" = "$(bootstrap_stage3_hash_file "$artifact_path")" ] ||
+        fail "qualification-artifact-hash-mismatch:$artifact_name"
+}
+require_hashed_log() {
+    log_name=$1
+    hash_key=$2
+    log_path=$OUT_DIR/$log_name
+    [ -f "$log_path" ] && [ ! -L "$log_path" ] && [ -s "$log_path" ] ||
+        fail "ghdl-log-missing:$log_name"
+    expected_hash=$(json_value "$RECEIPT" "$hash_key") ||
+        fail "receipt-field-missing-or-duplicate:$hash_key"
+    case "$expected_hash" in
+        ????????* ) ;;
+        * ) fail "receipt-field-invalid:$hash_key" ;;
+    esac
+    printf '%s\n' "$expected_hash" |
+        awk 'length($0) == 64 && $0 ~ /^[0-9a-fA-F]+$/ { ok = 1 } END { exit !ok }' ||
+        fail "receipt-field-invalid:$hash_key"
+    [ "$expected_hash" = "$(bootstrap_stage3_hash_file "$log_path")" ] ||
+        fail "ghdl-log-hash-mismatch:$log_name"
+}
+
+# Fixed evidence artifacts must be produced before composition.  Their own
+# compact JSON contract prevents a row or coverage result from being inferred
+# from a filename, test summary, or compiler exit status.
+for row in "$RV32_ROW" "$RV64_ROW"; do
+    coverage=$OUT_DIR/$row.coverage.json
+    [ -f "$coverage" ] && [ ! -L "$coverage" ] && [ -s "$coverage" ] ||
+        fail "coverage-artifact-missing:$row"
+    require_json_value "$coverage" schema simple-riscv-gen2-hwir-coverage-v1
+    require_json_value "$coverage" product "$QUALIFICATION_PRODUCT"
+    require_json_value "$coverage" row "$row"
+    require_json_value "$coverage" row_gate pass
+    require_json_value "$coverage" coverage_gate pass
+done
+for artifact in \
+    "$RV32_ROW.vhd" "$RV32_ROW.manifest.json" \
+    "$RV64_ROW.vhd" "$RV64_ROW.manifest.json"; do
+    [ -f "$OUT_DIR/$artifact" ] && [ ! -L "$OUT_DIR/$artifact" ] &&
+        [ -s "$OUT_DIR/$artifact" ] || fail "qualification-artifact-missing:$artifact"
+done
+for ghdl_log in \
+    rv32-ghdl-analyze.log rv32-ghdl-elaborate.log rv32-ghdl-run.log \
+    rv64-ghdl-analyze.log rv64-ghdl-elaborate.log rv64-ghdl-run.log; do
+    [ -f "$OUT_DIR/$ghdl_log" ] && [ ! -L "$OUT_DIR/$ghdl_log" ] &&
+        [ -s "$OUT_DIR/$ghdl_log" ] || fail "ghdl-log-missing:$ghdl_log"
+done
+for ghdl_command in \
+    rv32-ghdl-analyze.command rv32-ghdl-elaborate.command rv32-ghdl-run.command \
+    rv64-ghdl-analyze.command rv64-ghdl-elaborate.command rv64-ghdl-run.command; do
+    [ -f "$OUT_DIR/$ghdl_command" ] && [ ! -L "$OUT_DIR/$ghdl_command" ] &&
+        [ -s "$OUT_DIR/$ghdl_command" ] || fail "ghdl-command-missing:$ghdl_command"
+done
+
+# Receipt composition is intentionally a separate future command.  A failed
+# composition cannot leave a receipt behind: fail() removes only the final
+# receipt in this freshly-created directory and retains diagnostic evidence.
+if timeout -k 30 "$TIMEOUT_SECS" "$composer" \
+    --compose-receipt \
+    --stage4-cli "$simple" --stage4-provenance "$provenance" \
+    --output-dir "$OUT_DIR" --receipt "$RECEIPT" \
+    --product "$QUALIFICATION_PRODUCT" \
+    --required-row "$RV32_ROW" --required-row "$RV64_ROW" \
+    --required-coverage "$RV32_ROW" --required-coverage "$RV64_ROW" \
+    >>"$COMPOSER_LOG" 2>&1; then
+    :
+else
+    composer_status=$?
+    fail "receipt-composer-failed:$composer_status"
+fi
+
+[ -f "$RECEIPT" ] && [ ! -L "$RECEIPT" ] || fail 'composer-receipt-missing-or-symlinked'
+[ -s "$RECEIPT" ] || fail 'composer-receipt-empty'
+[ "$(wc -c <"$RECEIPT" | tr -d ' ')" -le 1048576 ] || fail 'composer-receipt-too-large'
+receipt=$(bootstrap_stage3_canonical_file "$RECEIPT") || fail 'composer-receipt-noncanonical'
+[ "$receipt" = "$RECEIPT" ] || fail 'composer-receipt-path-changed'
+RECEIPT_COMPACT=$(tr -d '[:space:]' <"$RECEIPT")
+
+require_json_value "$RECEIPT" schema 'simple-riscv-gen2-hwir-qualification-v1'
+require_json_value "$RECEIPT" status pass
+require_json_value "$RECEIPT" product "$QUALIFICATION_PRODUCT"
+require_json_value "$RECEIPT" rv32_row "$RV32_ROW"
+require_json_value "$RECEIPT" rv64_row "$RV64_ROW"
+require_json_value "$RECEIPT" stage4_cli_path "$simple"
+require_json_value "$RECEIPT" stage4_cli_sha256 "$(bootstrap_stage3_hash_file "$simple")"
+require_json_value "$RECEIPT" stage4_provenance_path "$provenance"
+require_json_value "$RECEIPT" stage4_provenance_sha256 "$(bootstrap_stage3_hash_file "$provenance")"
+require_json_value "$RECEIPT" source_revision "$(bootstrap_stage3_manifest_value source_revision "$provenance")"
+require_hashed_file stage4-post-bootstrap-sspec.log stage4_post_bootstrap_sspec_log_sha256
+
+for gate in \
+    rv32_row_gate rv64_row_gate \
+    rv32_coverage_gate rv64_coverage_gate \
+    rv32_ghdl_analyze rv32_ghdl_elaborate rv32_ghdl_run \
+    rv64_ghdl_analyze rv64_ghdl_elaborate rv64_ghdl_run; do
+    require_json_value "$RECEIPT" "$gate" pass
+done
+
+require_hashed_file "$RV32_ROW.vhd" rv32_vhdl_sha256
+require_hashed_file "$RV32_ROW.manifest.json" rv32_vhdl_manifest_sha256
+require_hashed_file "$RV64_ROW.vhd" rv64_vhdl_sha256
+require_hashed_file "$RV64_ROW.manifest.json" rv64_vhdl_manifest_sha256
+require_hashed_log rv32-ghdl-analyze.log rv32_ghdl_analyze_log_sha256
+require_hashed_log rv32-ghdl-elaborate.log rv32_ghdl_elaborate_log_sha256
+require_hashed_log rv32-ghdl-run.log rv32_ghdl_run_log_sha256
+require_hashed_log rv64-ghdl-analyze.log rv64_ghdl_analyze_log_sha256
+require_hashed_log rv64-ghdl-elaborate.log rv64_ghdl_elaborate_log_sha256
+require_hashed_log rv64-ghdl-run.log rv64_ghdl_run_log_sha256
+require_hashed_file rv32-ghdl-analyze.command rv32_ghdl_analyze_command_sha256
+require_hashed_file rv32-ghdl-elaborate.command rv32_ghdl_elaborate_command_sha256
+require_hashed_file rv32-ghdl-run.command rv32_ghdl_run_command_sha256
+require_hashed_file rv64-ghdl-analyze.command rv64_ghdl_analyze_command_sha256
+require_hashed_file rv64-ghdl-elaborate.command rv64_ghdl_elaborate_command_sha256
+require_hashed_file rv64-ghdl-run.command rv64_ghdl_run_command_sha256
+
+printf '%s\n' 'riscv_gen2_hwir_qualification_status=pass'
+printf '%s\n' "riscv_gen2_hwir_qualification_receipt=$RECEIPT"
