@@ -86,6 +86,36 @@ required planned qualification scenario, not completed self-hosted evidence.
     immediate canonical form plus reserved `rd=x0` rejection. Its product is
     distinct from RV32 C.JAL and remains frontend-predecode-only.
 
+17. **REQ-G2-009, REQ-G2-010, NFR-G2-010, NFR-G2-011 — RV32 C.JAL v3 product.**
+    1. Under critical policy, emit the source-less v3 trap product only for
+       `rv32-zca-cjal-critical`.
+    2. Check its dedicated C.JAL frontend entity, empty source closure,
+       concrete RISC-V 32 target/profile, C.JAL admission, and incomplete
+       target-evidence manifest marker.
+
+18. **REQ-G2-009, REQ-G2-010, NFR-G2-010, NFR-G2-011 — RV64 C.ADDIW v3 product.**
+    1. Under critical policy, emit the source-less v3 trap product only for
+       `rv64-zca-addiw-critical`.
+    2. Check its dedicated C.ADDIW frontend entity, empty source closure,
+       concrete RISC-V 64 target/profile, admitted RV64 Zca rows, exclusion of
+       C.JAL, and incomplete target-evidence manifest marker.
+
+19. **REQ-G2-002, REQ-G2-010, REQ-G2-011, NFR-G2-010, NFR-G2-012 — RV64
+    conditional decoder vector.**
+    1. Compile the RV64 C.ADDIW mission-critical trap frontend and confirm the
+       complete 32-row overlap closure is present.
+    2. When GHDL is available, analyze, elaborate, and run the exact RV64
+       decoder vector testbench; otherwise retain this as a required planned
+       qualification scenario rather than target evidence.
+
+20. **REQ-G2-003, REQ-G2-005, REQ-G2-009, REQ-G2-010, NFR-G2-010,
+    NFR-G2-011 — rejection and stale-artifact preservation.**
+    1. Reject a wrong RV32 C.JAL target and a noncritical RV64 C.ADDIW request
+       before either can replace a retained artifact or create a manifest.
+    2. Reject the retired v2 trap identity, a noncritical compiler-owned
+       product, and unsupported critical hardware before VHDL/manifest output
+       exists; each path preserves its prior artifact.
+
 ## Requirement traceability
 
 - REQ-G2-001..005: first scenario.
