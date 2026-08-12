@@ -40,6 +40,12 @@ fn artifact_gen2_ports(entity: text) -> [VhdlArtifactPort]:
     var typed_ports: [HwPort] = []
     if entity == "riscv_gen2_zca_trap_single_outstanding_frontend_rv32":
         typed_ports = strict_zca_trap_single_outstanding_frontend_hwir(entity, config).unwrap().frontend_contract.ports()
+    elif entity == "riscv_gen2_zca_rv32_cjal_trap_single_outstanding_frontend":
+        typed_ports = strict_zca_trap_single_outstanding_frontend_hwir(entity,
+            CoreConfig.rv32_zca_cjal_mission_critical()).unwrap().frontend_contract.ports()
+    elif entity == "riscv_gen2_zca_rv64_addiw_trap_single_outstanding_frontend":
+        typed_ports = strict_zca_trap_single_outstanding_frontend_hwir(entity,
+            CoreConfig.rv64_zca_addiw_mission_critical()).unwrap().frontend_contract.ports()
     elif entity == "riscv_gen2_zca_rv32_cjal_migrating_predecode":
         typed_ports = strict_zca_rv32_cjal_migrating_predecode_hwir(entity,
             CoreConfig.rv32_zca_cjal_mission_critical()).unwrap().ports
@@ -443,6 +449,44 @@ describe "VHDL production artifact manifest":
         expect(vhdl_validate_production_artifact_input(product).unwrap_err()).to_equal(
             "VHDL Gen2 stateful product provenance decoder dependency does not match the selected route")
 
+    it "admits the specialized RV32 target-trap manifest only with its 26-row decoder closure":
+        val entity = "riscv_gen2_zca_rv32_cjal_trap_single_outstanding_frontend"
+        val config = CoreConfig.rv32_zca_cjal_mission_critical()
+        val module = strict_zca_trap_single_outstanding_frontend_hwir(entity, config).unwrap()
+        var product = artifact_input([], artifact_gen2_ports(entity), "build/rv32-cjal-trap.vhd")
+        product.entry_module = "compiler-product:riscv-gen2-zca-trap-single-outstanding-v3"
+        product.entry_entity = entity
+        product.root_modules = [product.entry_module]
+        product.catalog_name = product.entry_module
+        product.generation_route = "hwir-gen2-trap-stateful-product-v3"
+        product.hwir_module_node_id = entity + ":module"
+        product.hwir_config_profile = config.profile
+        product.hwir_graph_sha256 = compile_strict_zca_trap_single_outstanding_frontend_product(
+            config).hwir_graph_sha256
+        product.target = "riscv32"
+        product.xlen = 32
+        product.profile = config.profile
+        product.riscv_isa_profile = config.isa_profile
+        product.riscv_compressed_decode_profile = config.compressed_decode_profile
+        product.riscv_capability_scope = "frontend-predecode-only"
+        product.riscv_admitted_instruction_ids = vhdl_gen2_capability_ids(
+            product.generation_route, entity).unwrap()
+        product.riscv_capability_sha256 = vhdl_gen2_capability_sha256(
+            product.riscv_admitted_instruction_ids).unwrap()
+        product.hwir_aspect_lock_sha256 = hwir_aspect_lock_sha256(HwAspectLock(entries: [])).unwrap()
+        product.module_count = 2
+        product.entity_count = 2
+        product.generated_items = [VhdlArtifactGeneratedItem(kind: "compiler_product_entity",
+            name: entity, location: artifact_port_location()),
+            VhdlArtifactGeneratedItem(kind: "compiler_product_dependency",
+                name: module.decoder_entity, location: artifact_port_location())]
+        expect(product.riscv_admitted_instruction_ids.len()).to_equal(26)
+        expect(vhdl_validate_production_artifact_input(product).is_ok()).to_equal(true)
+        product.generated_items[1] = VhdlArtifactGeneratedItem(kind: "compiler_product_dependency",
+            name: "riscv_gen2_zca_trap_migrating_predecode_rv32", location: artifact_port_location())
+        expect(vhdl_validate_production_artifact_input(product).unwrap_err()).to_equal(
+            "VHDL Gen2 stateful product provenance decoder dependency does not match the selected route")
+
     it "removes the VHDL when a sidecar write fails":
         val root = "build/vhdl_artifact_write_failure_contract"
         rt_dir_remove_all(root)
@@ -470,6 +514,15 @@ describe "VHDL production artifact manifest":
         expect(vhdl_validate_production_artifact_input(product).is_ok()).to_equal(true)
         val rendered = vhdl_render_production_artifacts(product, "entity gen2 is\n")
         expect(vhdl_write_production_artifacts(output, "entity gen2 is\n", rendered).unwrap_err()).to_equal(
+            "VHDL raw artifact writer refuses compiler-owned RISC-V Gen2 routes")
+        expect(rt_file_read_text(output).unwrap()).to_equal("known-vhdl")
+        expect(rt_file_read_text(output + ".map.json").unwrap()).to_equal("known-map")
+        expect(rt_file_read_text(output + ".gen.json").unwrap()).to_equal("known-manifest")
+        val legacy_rendered = vhdl_render_production_artifacts(
+            artifact_input([], [], output), "entity legacy is\n")
+        expect(vhdl_write_production_artifacts(output,
+            "-- simple-hwir route=hwir-gen2-stateful-product-v2\nentity forged is\n",
+            legacy_rendered).unwrap_err()).to_equal(
             "VHDL raw artifact writer refuses compiler-owned RISC-V Gen2 routes")
         expect(rt_file_read_text(output).unwrap()).to_equal("known-vhdl")
         expect(rt_file_read_text(output + ".map.json").unwrap()).to_equal("known-map")

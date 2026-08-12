@@ -6,7 +6,7 @@ use compiler.mir.hwir.aspects.{HwAspectLock, HwAspectLockEntry, hwir_aspect_lock
 use compiler.mir.hwir.types.{CoreConfig, HwPort}
 use compiler.mir.hwir.frontend.{strict_zca_control_predecode_hwir, strict_zca_migrating_isa_ids, strict_zca_migrating_predecode_hwir, strict_zca_rv32_cjal_migrating_isa_ids, strict_zca_rv32_cjal_migrating_predecode_hwir, strict_zca_rv64_addiw_migrating_isa_ids, strict_zca_rv64_addiw_migrating_predecode_hwir}
 use compiler.mir.hwir.stateful_frontend.{strict_zca_single_outstanding_frontend_hwir, strict_zca_trap_single_outstanding_frontend_hwir}
-use compiler.mir.hwir.trap_frontend.{strict_zca_trap_migrating_isa_ids, strict_zca_trap_migrating_predecode_hwir}
+use compiler.mir.hwir.trap_frontend.{strict_zca_trap_migrating_isa_ids, strict_zca_trap_migrating_predecode_hwir, strict_zca_target_trap_migrating_isa_ids, strict_zca_target_trap_migrating_predecode_hwir}
 use compiler.backend.backend.hwir_to_vhdl.{strict_stateful_graph_sha}
 
 extern fn rt_file_write_text(path: text, content: text) -> bool
@@ -130,6 +130,12 @@ fn vhdl_gen2_expected_isa_profile(xlen: i64) -> text:
     ""
 
 fn vhdl_gen2_expected_isa_profile_for_product(route: text, entity: text, xlen: i64) -> text:
+    if route == "hwir-gen2-trap-stateful-product-v3" and xlen == 32 and
+        entity == "riscv_gen2_zca_rv32_cjal_trap_single_outstanding_frontend":
+        return "rv32i_zca"
+    if route == "hwir-gen2-trap-stateful-product-v3" and xlen == 64 and
+        entity == "riscv_gen2_zca_rv64_addiw_trap_single_outstanding_frontend":
+        return "rv64i_zca"
     if (route == "hwir-gen2-product" or route == "hwir-gen2-stateful-product-v2") and xlen == 32 and
         entity == "riscv_gen2_zca_rv32_cjal_migrating_predecode":
         return "rv32i_zca"
@@ -165,9 +171,11 @@ fn vhdl_gen2_product_entity_allowed(route: text, entity: text, xlen: i64) -> boo
         return false
     if route == "hwir-gen2-trap-stateful-product-v3":
         if xlen == 32:
-            return entity == "riscv_gen2_zca_trap_single_outstanding_frontend_rv32"
+            return entity == "riscv_gen2_zca_trap_single_outstanding_frontend_rv32" or
+                entity == "riscv_gen2_zca_rv32_cjal_trap_single_outstanding_frontend"
         if xlen == 64:
-            return entity == "riscv_gen2_zca_trap_single_outstanding_frontend_rv64"
+            return entity == "riscv_gen2_zca_trap_single_outstanding_frontend_rv64" or
+                entity == "riscv_gen2_zca_rv64_addiw_trap_single_outstanding_frontend"
         return false
     false
 
@@ -178,6 +186,10 @@ fn vhdl_gen2_expected_stateful_entry_module(route: text, entity: text) -> text:
         if entity == "riscv_gen2_zca_rv64_addiw_single_outstanding_frontend":
             return "compiler-product:riscv-gen2-zca-rv64-addiw-single-outstanding-v2"
     if route == "hwir-gen2-trap-stateful-product-v3":
+        if entity == "riscv_gen2_zca_rv32_cjal_trap_single_outstanding_frontend":
+            return "riscv_gen2_zca_rv32_cjal_trap_migrating_predecode"
+        if entity == "riscv_gen2_zca_rv64_addiw_trap_single_outstanding_frontend":
+            return "riscv_gen2_zca_rv64_addiw_trap_migrating_predecode"
         return "compiler-product:riscv-gen2-zca-trap-single-outstanding-v3"
     ""
 
@@ -199,6 +211,12 @@ fn vhdl_gen2_expected_decoder_entity(route: text, entity: text, xlen: i64) -> te
     ""
 
 fn vhdl_gen2_product_config(route: text, entity: text, xlen: i64) -> Result<CoreConfig, text>:
+    if route == "hwir-gen2-trap-stateful-product-v3" and xlen == 32 and
+        entity == "riscv_gen2_zca_rv32_cjal_trap_single_outstanding_frontend":
+        return Ok(CoreConfig.rv32_zca_cjal_mission_critical())
+    if route == "hwir-gen2-trap-stateful-product-v3" and xlen == 64 and
+        entity == "riscv_gen2_zca_rv64_addiw_trap_single_outstanding_frontend":
+        return Ok(CoreConfig.rv64_zca_addiw_mission_critical())
     if (route == "hwir-gen2-product" or route == "hwir-gen2-stateful-product-v2") and xlen == 32 and
         entity == "riscv_gen2_zca_rv32_cjal_migrating_predecode":
         return Ok(CoreConfig.rv32_zca_cjal_mission_critical())
@@ -236,6 +254,10 @@ pub fn vhdl_gen2_capability_ids(route: text, entity: text) -> Result<[text], tex
         if entity == "riscv_gen2_zca_rv64_addiw_migrating_predecode":
             return Ok(strict_zca_rv64_addiw_migrating_isa_ids())
     elif route == "hwir-gen2-trap-stateful-product-v3":
+        if entity == "riscv_gen2_zca_rv32_cjal_trap_single_outstanding_frontend":
+            return strict_zca_target_trap_migrating_isa_ids(CoreConfig.rv32_zca_cjal_mission_critical())
+        if entity == "riscv_gen2_zca_rv64_addiw_trap_single_outstanding_frontend":
+            return strict_zca_target_trap_migrating_isa_ids(CoreConfig.rv64_zca_addiw_mission_critical())
         if entity == "riscv_gen2_zca_trap_single_outstanding_frontend_rv32" or
             entity == "riscv_gen2_zca_trap_single_outstanding_frontend_rv64":
             return Ok(strict_zca_trap_migrating_isa_ids())
@@ -346,8 +368,12 @@ fn vhdl_gen2_recomputed_graph_sha256(input: VhdlArtifactInput) -> Result<text, t
     elif input.generation_route == "hwir-gen2-trap-stateful-product-v3":
         val frontend = strict_zca_trap_single_outstanding_frontend_hwir(
             input.entry_entity, config)?
-        val decoder = strict_zca_trap_migrating_predecode_hwir(
-            frontend.decoder_entity, config)?
+        val specialized = (input.entry_entity == "riscv_gen2_zca_rv32_cjal_trap_single_outstanding_frontend" or
+            input.entry_entity == "riscv_gen2_zca_rv64_addiw_trap_single_outstanding_frontend")
+        val decoder = if specialized:
+            strict_zca_target_trap_migrating_predecode_hwir(frontend.decoder_entity, config)?
+        else:
+            strict_zca_trap_migrating_predecode_hwir(frontend.decoder_entity, config)?
         return Ok(strict_stateful_graph_sha(frontend.node_id.value,
             frontend.config, frontend.origins, frontend.frontend_contract.ports(),
             frontend.decoder_entity, frontend.sequential,
@@ -788,6 +814,20 @@ fn vhdl_rendered_claims_compiler_owned_gen2(rendered: VhdlArtifactRendered) -> b
         rendered.manifest.contains("hwir-gen2-stateful-product") or
         rendered.manifest.contains("hwir-gen2-trap-stateful-product")
 
+fn vhdl_text_claims_compiler_owned_gen2(vhdl: text) -> bool:
+    """Reject reserved compiler-product route markers in a raw VHDL payload.
+
+    The manifest is not an authority over the raw payload supplied to the
+    generic writer: a caller could otherwise present a legacy manifest while
+    embedding a Gen2 route marker in VHDL.  Compiler-owned products are the
+    only admitted producer of those markers, through the private Gen2 receipt
+    route.  Conservatively rejecting a marker in an arbitrary VHDL comment is
+    intentional; a raw writer has no typed evidence that the marker is safe.
+    """
+    vhdl.contains("route=hwir-gen2-product") or
+        vhdl.contains("route=hwir-gen2-stateful-product") or
+        vhdl.contains("route=hwir-gen2-trap-stateful-product")
+
 fn vhdl_write_artifacts_after_authorization(output: text, vhdl: text,
     rendered: VhdlArtifactRendered) -> Result<(), text>:
     if not vhdl_remove_production_artifacts(output):
@@ -817,7 +857,8 @@ pub fn vhdl_write_production_artifacts(output: text, vhdl: text,
     typed HWIR closure.  Rejection occurs before stale-artifact cleanup so a
     raw caller cannot erase a known product bundle while attempting a bypass.
     """
-    if vhdl_rendered_claims_compiler_owned_gen2(rendered):
+    if vhdl_rendered_claims_compiler_owned_gen2(rendered) or
+        vhdl_text_claims_compiler_owned_gen2(vhdl):
         return Err("VHDL raw artifact writer refuses compiler-owned RISC-V Gen2 routes")
     vhdl_write_artifacts_after_authorization(output, vhdl, rendered)
 

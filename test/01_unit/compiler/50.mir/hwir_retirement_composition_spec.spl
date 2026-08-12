@@ -1,11 +1,14 @@
 # Typed reset-coupled retirement-receipt composition tests.
+# codex-system-test
 
 use std.spec.*
 use compiler.mir.hwir.types.{CoreConfig, HwPort}
 use compiler.mir.hwir.retirement_composition.{HwParcelRetirementComposition, HwRetireCompositionBinding, strict_riscv_retire_receipt_producer_interface, strict_zca_single_outstanding_retirement_composition}
 
 describe "strict Gen2 retirement receipt composition":
-    it "REQ-G2-010 binds the one-entry frontend and receipt producer to one reset for RV32 and RV64":
+    # @req REQ-G2-010 NFR-G2-011
+    it "should bind the one-entry frontend and receipt producer to one reset for RV32 and RV64":
+        step("Construct the closed RV32 and RV64 retirement-receipt contracts")
         val rv32 = strict_zca_single_outstanding_retirement_composition(
             "rv32_retirement_composition", CoreConfig.rv32_zca_mission_critical(),
             "riscv_gen2_rv32_architectural_retirement")
@@ -27,7 +30,9 @@ describe "strict Gen2 retirement receipt composition":
         else:
             expect(false).to_equal(true)
 
-    it "REQ-G2-010 rejects a producer that loses the shared reset or a receipt width":
+    # @req REQ-G2-010 NFR-G2-011
+    it "should reject a producer that loses the shared reset or receipt width":
+        step("Mutate the typed producer reset and receipt tuple independently")
         val config = CoreConfig.rv32_zca_mission_critical()
         val producer = strict_riscv_retire_receipt_producer_interface(config)
         if producer.is_ok():
@@ -42,7 +47,9 @@ describe "strict Gen2 retirement receipt composition":
         else:
             expect(false).to_equal(true)
 
-    it "REQ-G2-010 rejects omitted or rewired receipt bindings before a producer can be composed":
+    # @req REQ-G2-010 NFR-G2-011
+    it "should reject omitted or rewired receipt bindings before composition":
+        step("Rewire one closed receipt binding before the composition boundary")
         val built = strict_zca_single_outstanding_retirement_composition(
             "retirement_binding_contract", CoreConfig.rv32_zca_mission_critical(),
             "riscv_gen2_rv32_architectural_retirement")
@@ -57,5 +64,19 @@ describe "strict Gen2 retirement receipt composition":
                 producer_entity: canonical.producer_entity, bindings: rewired)
             expect(malformed.shape_diagnostic()).to_equal(
                 "HWIR-E-RETIRE-COMPOSITION-BINDINGS: retirement composition requires the closed reset, dispatch, and receipt wiring set")
+        else:
+            expect(false).to_equal(true)
+
+    # @req REQ-G2-010 NFR-G2-006 NFR-G2-011
+    it "should reject a substituted child route before it can be bound":
+        step("Substitute an otherwise valid frontend route with a legacy route")
+        val built = strict_zca_single_outstanding_retirement_composition(
+            "retirement_child_schema_contract", CoreConfig.rv64_zca_mission_critical(),
+            "riscv_gen2_rv64_architectural_retirement")
+        if built.is_ok():
+            val malformed = built.ok().unwrap()
+            malformed.frontend_route = "legacy-vhdl"
+            expect(malformed.shape_diagnostic()).to_equal(
+                "HWIR-E-RETIRE-COMPOSITION-CHILD-SCHEMA: retirement composition requires the admitted frontend and strict producer child schemas")
         else:
             expect(false).to_equal(true)
