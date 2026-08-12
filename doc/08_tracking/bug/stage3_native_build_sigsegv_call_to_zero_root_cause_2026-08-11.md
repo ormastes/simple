@@ -130,3 +130,104 @@ counter over the `.data` section (parallel to `rodata_offset`/
 line-147 site. Not implemented in this session — no build was run to verify
 either the hypothesis or a fix, so no code change is landed here, only this
 documented finding.
+
+## RESOLVED (2026-08-12) — both hypotheses REFUTED; real cause found by actual build
+
+An empirical pass finally ran the repro through the pure-Simple backend. Both
+prior hypotheses are wrong, and the reason the panic never fired is that
+`native_elf.spl` **was never executed at all** on any native-build.
+
+### Method (so this is reproducible)
+
+The seed `bin/simple` is Rust and never runs `native_elf.spl`; `bm native-build
+--entry` routes to the legacy `rt_native_build` FFI ("not supported in
+interpreter mode"). The pure-Simple lane is reached by calling
+`run_focused_native_build` (`src/app/cli/bootstrap_focused_native_build.spl`,
+`pub`, no Stage4 gate) from a small driver script run under the seed, against a
+pristine `git archive origin/main` tree (the shared WC has in-flight foreign
+edits in `50.mir/hwir/**`, which produce an unrelated
+`enum MirInstKind not found in this scope`). Note `env_get` returns nil for
+unset vars in the interpreter, so the env vars this function saves/restores must
+be pre-set to `""` or it dies in `rt_env_set: value must be a string`.
+
+### Finding 1 — `native_elf.spl` is unreachable; `CodegenTarget.Host` silently emitted a stub
+
+`print` probes at `emit_elf_x86_64` and `compile_native_x86_64` recorded **zero
+hits**, both on the default backend and with an explicit `--backend native`.
+A probe on the dispatcher itself printed:
+
+```
+[PROBE] compile_native ENTERED target=CodegenTarget::Host
+[PROBE] compile_native FELL THROUGH TO STUB for target=CodegenTarget::Host
+```
+
+`compile_native`'s `match target` in
+`src/compiler/70.backend/backend/native/mod.spl` handled `X86_64`, `AArch64`,
+`Riscv64`, `Riscv32` and the two macOS targets, but **not `Host` or `Native`** —
+the two late-bound aliases the driver actually passes. Both fell into
+`case _: compile_native_stub(module, "unsupported")`, which returns a
+valid-but-empty ELF containing a single `ret` and no symbols, and reports
+success. That code-less object is the true origin of the whole failure family:
+depending on the linker it surfaces as `ld.lld: error: undefined symbol:
+__simple_main` (observed here) or as a binary whose calls land nowhere — the
+originally reported `call 0x0` SIGSEGV.
+
+Note `supports_target()` returns `true` for `Host`, so nothing upstream ever
+rejected it.
+
+### Finding 2 — the mutable-data hypothesis is refuted, not merely unconfirmed
+
+With the emitter finally reached, the reloc-site probe printed **zero**
+`reloc.symbol_name` lines: `func.relocations` is empty for the trivial repro, so
+the hardened `panic(...)` cannot fire and no symbol lookup happens at all. The
+`sym_name_to_idx` registration gap for non-readonly `data_sections` (the
+2026-08-12 static finding) is therefore **not** the cause of this bug. It may
+still be a latent gap for programs that do carry mutable module-level state, but
+it is unrelated to this report and no fix for it is landed here.
+
+### Fix landed
+
+`src/compiler/70.backend/backend/native/mod.spl`: resolve `Host`/`Native` to the
+concrete host architecture via a new `native_resolve_host_target()` (built on
+the existing `detect_host_arch()` in `backend/llvm_target.spl`; it never returns
+`Host`/`Native`, so the `compile_native` recursion is one level deep), and
+replace the silent `compile_native_stub` fallthrough with a `panic(...)` naming
+the unsupported target. Emitting a code-less object is never a correct outcome,
+so the same "loud beats silently wrong" rule already applied to the relocation
+sites now applies to target dispatch. `compile_native_stub` had no other caller
+and is deleted along with the now-unused `elf_writer` import it needed.
+
+### Verification (measured)
+
+| lane | before fix | after fix |
+|---|---|---|
+| default (`llvm`) | rc=0, binary runs, exit 0 | rc=0, binary runs, exit 0 — **no regression** |
+| `--backend native` | rc=1, `undefined symbol: __simple_main`, emitter never entered | `[PROBE] emit_elf_x86_64 ENTERED`, rc=0, links, 20752-byte binary |
+
+The `native` lane is opt-in via `--backend native`; the default `llvm` lane
+never calls `compile_native`, so this change cannot regress it.
+
+### Newly exposed, filed separately
+
+With the stub no longer masking it, the pure-Simple x86_64 encoder is shown to
+emit malformed machine code — the produced binary still segfaults. Disassembly
+of the generated `main` for `fn main() -> i64: 0`:
+
+```
+1edb: 48 89 4c 89 48   mov %rcx,0x48(%rcx,%rcx,4)   # botched frame-slot store
+1eef: 48 8b 4c 8b 48   mov 0x48(%rbx,%rcx,4),%rcx   # same bug, load side
+1ef4: 89 ec            mov %ebp,%esp                # missing REX.W in epilogue
+```
+
+Bad ModRM/SIB for frame-slot access plus a missing REX.W on the epilogue
+`mov %rbp,%rsp`. This is a distinct defect in `encode_x86_64.spl`, not in
+`native_elf.spl`, and is tracked in
+`doc/08_tracking/bug/native_x86_64_encoder_emits_malformed_modrm_sib_and_missing_rexw_2026-08-12.md`.
+
+### Status
+
+- Original `call 0x0` / SIGSEGV cause: **RESOLVED** — `Host` fell through to a
+  code-less stub object; fixed by host-target resolution + loud panic.
+- Mutable-data `sym_name_to_idx` hypothesis: **REFUTED** for this bug (no
+  relocations exist in the repro).
+- Pure-Simple x86_64 encoder correctness: **OPEN**, newly exposed, filed above.

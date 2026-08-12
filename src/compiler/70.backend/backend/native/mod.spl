@@ -22,10 +22,10 @@ use compiler.backend.backend.native.encode_x86_64.{encode_module}
 use compiler.backend.backend.native.encode_aarch64.{encode_module_aarch64}
 use compiler.backend.backend.native.encode_riscv64.{encode_module_riscv64}
 use compiler.backend.backend.native.encode_riscv32.{encode_module_rv32, rv32_elf32_header, rv32_elf32_phdr_load}
-use compiler.backend.backend.native.elf_writer.{elf_writer_x86_64, elf_add_section, new_text_section, write_elf64}
 use compiler.backend.backend.native.native_layout.{reorder_by_layout}
 use compiler.backend.backend.native.native_elf.{emit_elf_x86_64, emit_elf_aarch64, emit_elf_riscv64}
 use compiler.backend.backend.native.native_macho.{compile_native_macho_aarch64, compile_native_macho_x86_64, emit_macho_aarch64, emit_macho_x86_64}
+use compiler.backend.llvm_target.{detect_host_arch}
 
 # ============================================================================
 # Native Backend Entry Point
@@ -45,8 +45,26 @@ fn compile_native(module: MirModule, target: CodegenTarget) -> [i64]:
             compile_native_macho_aarch64(module)
         case CodegenTarget.X86_64_MacOS:
             compile_native_macho_x86_64(module)
+        # `Host` and `Native` are late-bound aliases that the driver hands us
+        # unresolved. They used to fall through to `compile_native_stub`, which
+        # silently returns a valid-but-empty ELF (a single `ret`, no symbols) --
+        # so a native-build "succeeded" while emitting an object with no real
+        # code, producing either an undefined-`__simple_main` link error or a
+        # binary whose calls land nowhere (the `call 0x0` SIGSEGV family).
+        # Resolve them to the concrete host architecture instead.
+        case CodegenTarget.Host | CodegenTarget.Native:
+            compile_native(module, native_resolve_host_target())
         case _:
-            compile_native_stub(module, "unsupported")
+            panic("native backend: unsupported codegen target '{target}' -- refusing to emit a stub object with no code (would link to an undefined entry symbol or produce a binary whose calls jump to 0)")
+
+# Map the running host's architecture onto a concrete native codegen target.
+# Never returns `Host`/`Native`, so the `compile_native` recursion is one-deep.
+fn native_resolve_host_target() -> CodegenTarget:
+    match detect_host_arch():
+        case "aarch64": CodegenTarget.AArch64
+        case "riscv64": CodegenTarget.Riscv64
+        case "riscv32": CodegenTarget.Riscv32
+        case _: CodegenTarget.X86_64
 
 fn compile_native_x86_64(module: MirModule) -> [i64]:
     # Phase 1: Instruction Selection (MIR -> MachInst)
@@ -127,13 +145,6 @@ fn emit_elf32_riscv32(encoded_funcs: [EncodedFunction]) -> [i64]:
         elf = elf.push(byte)
 
     elf
-
-fn compile_native_stub(module: MirModule, arch: text) -> [i64]:
-    # Stub for unsupported architectures - returns empty ELF
-    var writer = elf_writer_x86_64()
-    val text_section = new_text_section([0xc3])  # Just a ret
-    writer = elf_add_section(writer, text_section)
-    write_elf64(writer)
 
 # ============================================================================
 # High-Level API
