@@ -214,8 +214,8 @@ if ((Value-Or $evidence "backend_name") -ne "vulkan" -or
     (Value-Or $evidence "readback_exercised") -ne "true" -or
     (Value-Or $evidence "clear_status") -ne "pass" -or
     (Value-Or $evidence "rect_status") -ne "pass" -or
-    (Value-Or $evidence "clear_present_source") -ne "host_cache_after_device_present" -or
-    (Value-Or $evidence "rect_present_source") -ne "host_cache_after_device_present" -or
+    (Value-Or $evidence "clear_present_source") -ne "host_cache_after_device_copy" -or
+    (Value-Or $evidence "rect_present_source") -ne "host_cache_after_device_copy" -or
     (Value-Or $evidence "clear_mismatches") -ne "0" -or
     (Value-Or $evidence "rect_mismatches") -ne "0") {
     Write-Env "fail" "readback-evidence-invalid" "not_run"
