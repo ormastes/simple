@@ -114,3 +114,31 @@ presentation are excluded from the timed interval and must not be inferred as
 8K/80 proof. Production still allocates/uploads each transient pixel array;
 stable resource identities and a bounded device image cache remain required to
 remove that cost for retained Web/GUI images.
+
+## Warm pooled atlas text
+
+The font atlas was already retained, but each production frame still allocated
+one 52-byte parameter buffer and one descriptor per glyph. Batched text now
+grows a bounded resource pool on demand and reuses those handles after the
+shared frame fence. Parameter values and bindings are refreshed every draw;
+unknown completion quarantines the entire pool before it can be reused.
+
+The 8K native ABI probe uses the production atlas-composite semantics with
+16x16 opaque glyphs. Its timed interval includes every per-glyph parameter
+upload, command recording, one submission, and one fence, while excluding the
+cold pool creation, atlas upload, and exact full-frame evidence readback.
+
+| Warm glyphs | p50 ns | p95 ns | Mismatches | Budget |
+|---:|---:|---:|---:|---:|
+| 64 | 7,540,503 | 8,459,499 | 0 | PASS |
+| 80 | 10,043,442 | 11,671,110 | 0 | PASS |
+| 96 | 11,564,878 | 14,177,107 | 0 | FAIL |
+| 128 | 17,135,018 | 19,842,961 | 0 | FAIL |
+| 256 | 31,638,601 | 34,335,472 | 0 | FAIL |
+| 512 | 65,617,711 | 80,649,691 | 0 | FAIL |
+
+The conservative isolated llvmpipe envelope is 80 warm glyphs. This exposes
+the next bottleneck cleanly: one staging upload and one dispatch per glyph.
+Packing all glyph parameters into one buffer and dispatching a two-dimensional
+glyph/pixel grid is required for dense Web text. This is not physical-GPU,
+swapchain, mixed-DrawIR, or end-to-end 8K/80 proof.

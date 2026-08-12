@@ -187,14 +187,8 @@ impl VulkanBackend:
                 vulkan_sffi_quarantine_dependencies(0, source, 0, 0)
                 released = false
             i = i + 1
-        for descriptor in self.pending_font_descriptors:
-            if not vulkan_sffi_destroy_descriptor_set(descriptor):
-                vulkan_sffi_quarantine_dependencies(descriptor, 0, 0, 0)
-                released = false
-        for params in self.pending_font_params:
-            if not vulkan_sffi_free_buffer(params):
-                vulkan_sffi_quarantine_dependencies(0, params, 0, 0)
-                released = false
+        # Batched font handles belong to the warm pool. Completion makes them
+        # reusable; shutdown, not every frame, owns their destruction.
         self.pending_font_descriptors = []
         self.pending_font_params = []
         released
@@ -205,12 +199,16 @@ impl VulkanBackend:
             vulkan_sffi_quarantine_dependencies(
                 self.pending_compute_descriptors[i], self.pending_compute_sources[i], 0, 0)
             i = i + 1
-        for descriptor in self.pending_font_descriptors:
+        # Any member of the reusable pool may have been referenced by the
+        # unknown command. Quarantine every member once and discard the pool.
+        for descriptor in self.font_descriptor_pool:
             vulkan_sffi_quarantine_dependencies(descriptor, 0, 0, 0)
-        for params in self.pending_font_params:
+        for params in self.font_params_pool:
             vulkan_sffi_quarantine_dependencies(0, params, 0, 0)
         self.pending_font_descriptors = []
         self.pending_font_params = []
+        self.font_descriptor_pool = []
+        self.font_params_pool = []
 
     me _flush_pending_compute() -> i64:
         """Submit one Engine-managed primitive batch and release dependencies."""

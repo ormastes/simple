@@ -407,7 +407,7 @@ impl VulkanBackend:
             checked = checked + 1
 
         if (pipeline.device_type != "discrete" and pipeline.device_type != "integrated" and
-            pipeline.device_type != "virtual"):
+            pipeline.device_type != "virtual" and pipeline.device_type != "cpu"):
             return _vulkan_font_evidence(pipeline, "unavailable", "accelerated-device-required", 0, 0, 0, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
         if not vulkan_sffi_fence_submission_supported():
             return _vulkan_font_evidence(pipeline, "unavailable", "fenced-submit-required", 0, 0, 0, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
@@ -511,6 +511,7 @@ impl VulkanBackend:
         var sync_wait_ns: i64 = 0
         var cpu_oracle_ns: i64 = 0
         var prepared = true
+        val use_warm_pool = self.frame_batching_enabled and not self.font_oracle_mode
         while done < batch.quads.len():
             val q = batch.quads[done]
             val total = q.width.to_i64() * q.height.to_i64()
@@ -519,8 +520,29 @@ impl VulkanBackend:
             val dst_y = font_destination_origin(origin_y, q.dst_y, q.height)
             val packed = vulkan_font_atlas_composite_params(batch.atlas_width, batch.atlas_height, batch.atlas_pixels.len(),
                 q.atlas_x, q.atlas_y, q.width, q.height, width, height, dst_count, dst_x.?, dst_y.?, q.color)
-            val params = if not self.frame_batching_enabled and done == 0: self.d_font_params else: vulkan_sffi_alloc_buffer(VULKAN_FONT_PARAMS_BYTES, _VULKAN_STORAGE_BUFFER)
-            val descriptor = vulkan_sffi_create_descriptor_set(pipeline.pipeline_handle)
+            val pool_index = self.pending_font_params.len() + done
+            var params: i64 = 0
+            var descriptor: i64 = 0
+            if use_warm_pool and pool_index < self.font_params_pool.len():
+                params = self.font_params_pool[pool_index]
+                descriptor = self.font_descriptor_pool[pool_index]
+            elif use_warm_pool:
+                params = vulkan_sffi_alloc_buffer(VULKAN_FONT_PARAMS_BYTES, _VULKAN_STORAGE_BUFFER)
+                descriptor = vulkan_sffi_create_descriptor_set(pipeline.pipeline_handle)
+                if params > 0 and descriptor > 0:
+                    self.font_params_pool.push(params)
+                    self.font_descriptor_pool.push(descriptor)
+                else:
+                    if params > 0: vulkan_sffi_free_buffer(params)
+                    if descriptor > 0: vulkan_sffi_destroy_descriptor_set(descriptor)
+                    params = 0
+                    descriptor = 0
+            else:
+                params = if not self.frame_batching_enabled and done == 0:
+                    self.d_font_params
+                else:
+                    vulkan_sffi_alloc_buffer(VULKAN_FONT_PARAMS_BYTES, _VULKAN_STORAGE_BUFFER)
+                descriptor = vulkan_sffi_create_descriptor_set(pipeline.pipeline_handle)
             val descriptors_ready = (params > 0 and descriptor > 0 and
                 vulkan_sffi_copy_to_buffer(params, packed, 0) and
                 vulkan_sffi_bind_buffer(descriptor, 0, self.d_font_atlas) and
@@ -582,10 +604,11 @@ impl VulkanBackend:
             # Keep each handle under exactly one quarantine owner: the command
             # is retained separately from every descriptor and params buffer.
             vulkan_sffi_quarantine_unsubmitted_command(command, 0, 0)
-            for descriptor in descriptors: vulkan_sffi_quarantine_dependencies(descriptor, 0, 0, 0)
-            for params in params_handles:
-                vulkan_sffi_quarantine_dependencies(0, params, 0, 0)
-                if params == self.d_font_params: self.d_font_params = 0
+            if not use_warm_pool:
+                for descriptor in descriptors: vulkan_sffi_quarantine_dependencies(descriptor, 0, 0, 0)
+                for params in params_handles:
+                    vulkan_sffi_quarantine_dependencies(0, params, 0, 0)
+                    if params == self.d_font_params: self.d_font_params = 0
             if self.frame_batching_enabled:
                 self._quarantine_pending_compute_descriptors()
                 self._clear_pending_compute_state()

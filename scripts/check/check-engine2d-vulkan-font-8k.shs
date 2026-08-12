@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+BUILD_DIR="${BUILD_DIR:-$ROOT/build/check/engine2d-vulkan-font-8k}"
+ICD="${VK_ICD_FILENAMES:-/usr/share/vulkan/icd.d/lvp_icd.json}"
+GLYPHS="${ENGINE2D_VULKAN_GLYPHS:-64}"
+SAMPLES="${ENGINE2D_VULKAN_SAMPLES:-31}"
+RUNTIME_LIB="$ROOT/src/compiler_rust/target/release/libsimple_runtime.so"
+mkdir -p "$BUILD_DIR"
+if [ ! -f "$ICD" ]; then echo "engine2d_vulkan_font_status=blocked reason=missing-icd"; exit 2; fi
+if [ ! -f "$RUNTIME_LIB" ]; then
+    (cd "$ROOT/src/compiler_rust" && cargo build -p simple-runtime --release --no-default-features --features vulkan)
+fi
+glslangValidator -V "$ROOT/test/09_baselines/engine2d_vulkan/font_atlas.comp" -o "$BUILD_DIR/font.spv" >/dev/null
+gcc -O2 -Wall -Wextra -Werror "$ROOT/test/09_baselines/engine2d_vulkan/engine2d_vulkan_font_8k_bench.c" \
+    -L"$ROOT/src/compiler_rust/target/release" -lsimple_runtime \
+    -Wl,-rpath,"$ROOT/src/compiler_rust/target/release" -lpthread -ldl -lm -o "$BUILD_DIR/bench"
+VK_ICD_FILENAMES="$ICD" "$BUILD_DIR/bench" "$BUILD_DIR/font.spv" "$GLYPHS" "$SAMPLES" | tee "$BUILD_DIR/receipt.env"
+grep -q '^engine2d_vulkan_font_mismatch_count=0$' "$BUILD_DIR/receipt.env"
+grep -q '^engine2d_vulkan_font_timed_readback_bytes=0$' "$BUILD_DIR/receipt.env"
+echo "engine2d_vulkan_font_status=pass"

@@ -1,0 +1,29 @@
+#version 450
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(std430, binding = 0) readonly buffer AtlasBuffer { uint atlas[]; };
+layout(std430, binding = 1) buffer DestinationBuffer { uint dst[]; };
+layout(std430, binding = 2) readonly buffer ParamsBuffer {
+    uint atlas_width, atlas_height, atlas_count, atlas_x, atlas_y;
+    uint quad_width, quad_height, dst_width, dst_height, dst_count;
+    int dst_x, dst_y; uint color;
+} p;
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    uint count = p.quad_width * p.quad_height;
+    if (i >= count || p.atlas_count != p.atlas_width * p.atlas_height ||
+        p.dst_count != p.dst_width * p.dst_height) return;
+    uint lx = i % p.quad_width, ly = i / p.quad_width;
+    uint si = (p.atlas_y + ly) * p.atlas_width + p.atlas_x + lx;
+    int dx = p.dst_x + int(lx), dy = p.dst_y + int(ly);
+    if (si >= p.atlas_count || dx < 0 || dy < 0 ||
+        dx >= int(p.dst_width) || dy >= int(p.dst_height)) return;
+    uint di = uint(dy) * p.dst_width + uint(dx);
+    uint sa = ((atlas[si] >> 24u) * (p.color >> 24u) + 127u) / 255u;
+    if (sa == 0u) return;
+    uint d = dst[di], da = d >> 24u, dw = da * (255u - sa) / 255u;
+    uint oa = sa + dw;
+    uint r = (((p.color >> 16u) & 255u) * sa + ((d >> 16u) & 255u) * dw) / oa;
+    uint g = (((p.color >> 8u) & 255u) * sa + ((d >> 8u) & 255u) * dw) / oa;
+    uint b = ((p.color & 255u) * sa + (d & 255u) * dw) / oa;
+    dst[di] = (oa << 24u) | (r << 16u) | (g << 8u) | b;
+}
