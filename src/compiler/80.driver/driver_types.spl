@@ -27,6 +27,9 @@ use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
 use compiler.common.assurance.policy.{policy_from_env_value}
 use compiler.common.assurance.policy_schema.{ResolvedAssurancePolicyV1}
 use compiler.mir_opt.mir_opt.storage_projection_lowering.{MirStorageViewSiteBindingV1}
+use compiler.mir_opt.mir_opt.typed_storage_view_producer.{
+    MirTypedStorageViewEvidenceV1, MirTypedStorageViewProducerResultV1
+}
 use std.common.structural.storage_layout.storage_layout_contracts.{
     storage_layout_kind_to_u8, storage_conversion_policy_to_u8
 }
@@ -107,6 +110,10 @@ class CompileContext:
     # nested Dict<text,[struct]> mutation is not reliable on Stage4.
     storage_binding_module_names: [text]
     storage_view_site_bindings: [MirStorageViewSiteBindingV1]
+    storage_evidence_module_names: [text]
+    storage_view_evidence_rows: [MirTypedStorageViewEvidenceV1]
+    storage_registry_frozen: bool
+    storage_registry_frozen_identity: text
 
     static fn create(options: CompileOptions) -> CompileContext:
         # Load config
@@ -206,15 +213,40 @@ class CompileContext:
             poisoned_module_count_value: 0,
             vhdl_hardware_metadata_rows: [],
             storage_binding_module_names: [],
-            storage_view_site_bindings: []
+            storage_view_site_bindings: [],
+            storage_evidence_module_names: [],
+            storage_view_evidence_rows: [],
+            storage_registry_frozen: false,
+            storage_registry_frozen_identity: ""
         )
 
     fn storage_binding_rows_well_formed() -> bool:
         self.storage_binding_module_names.len() == self.storage_view_site_bindings.len()
 
+    fn storage_evidence_rows_well_formed() -> bool:
+        self.storage_evidence_module_names.len() == self.storage_view_evidence_rows.len()
+
+    fn storage_registry_rows_well_formed() -> bool:
+        if not self.storage_binding_rows_well_formed()
+            or not self.storage_evidence_rows_well_formed()
+            or self.storage_binding_module_names.len() != self.storage_evidence_module_names.len():
+            return false
+        var index = 0
+        while index < self.storage_binding_module_names.len():
+            val site = self.storage_view_site_bindings[index]
+            val evidence = self.storage_view_evidence_rows[index]
+            if self.storage_binding_module_names[index] != self.storage_evidence_module_names[index]
+                or site.function_symbol_id != evidence.site.function_symbol_id
+                or site.base_local_id != evidence.site.base_local_id:
+                return false
+            index = index + 1
+        true
+
     me register_storage_view_site_binding(
         module_name: text, site: MirStorageViewSiteBindingV1
     ) -> text:
+        if self.storage_registry_frozen:
+            return "storage-registry-frozen"
         if module_name == "" or not self.storage_binding_rows_well_formed():
             return "invalid-storage-binding-registry"
         var index = 0
@@ -233,6 +265,85 @@ class CompileContext:
         self.storage_view_site_bindings = bindings
         "ok"
 
+    me register_storage_view_evidence_batch(
+        module_name: text, rows: [MirTypedStorageViewEvidenceV1]
+    ) -> text:
+        if self.storage_registry_frozen:
+            return "storage-registry-frozen"
+        if module_name == "" or rows.len() == 0
+            or not self.storage_binding_rows_well_formed()
+            or not self.storage_evidence_rows_well_formed():
+            return "invalid-storage-evidence-registry"
+        # Preflight every existing and incoming site before mutating any row.
+        var incoming_index = 0
+        while incoming_index < rows.len():
+            val incoming = rows[incoming_index]
+            if incoming.allocation_identity == ""
+                or incoming.allocation_provenance == "" or incoming.source_revision == ""
+                or incoming.producer_contract_version <= 0
+                or incoming.producer_pattern == ""
+                or incoming.bounds_proof_kind == ""
+                or incoming.produced_projection_count <= 0:
+                return "invalid-storage-evidence-row"
+            var existing_index = 0
+            while existing_index < self.storage_binding_module_names.len():
+                val existing = self.storage_view_site_bindings[existing_index]
+                if self.storage_binding_module_names[existing_index] == module_name
+                    and existing.function_symbol_id == incoming.site.function_symbol_id
+                    and existing.base_local_id == incoming.site.base_local_id:
+                    return "duplicate-storage-view-site-binding"
+                existing_index = existing_index + 1
+            var prior = 0
+            while prior < incoming_index:
+                if rows[prior].site.function_symbol_id == incoming.site.function_symbol_id
+                    and rows[prior].site.base_local_id == incoming.site.base_local_id:
+                    return "duplicate-storage-view-site-binding"
+                prior = prior + 1
+            incoming_index = incoming_index + 1
+        var binding_names = self.storage_binding_module_names
+        var bindings = self.storage_view_site_bindings
+        var evidence_names = self.storage_evidence_module_names
+        var evidence_rows = self.storage_view_evidence_rows
+        for row in rows:
+            binding_names.push(module_name)
+            bindings.push(row.site)
+            evidence_names.push(module_name)
+            evidence_rows.push(row)
+        self.storage_binding_module_names = binding_names
+        self.storage_view_site_bindings = bindings
+        self.storage_evidence_module_names = evidence_names
+        self.storage_view_evidence_rows = evidence_rows
+        "ok"
+
+    me install_produced_storage_module(
+        module_name: text, produced: MirTypedStorageViewProducerResultV1
+    ) -> text:
+        if not produced.ok:
+            return "typed-storage-producer:{produced.reason}"
+        if produced.produced_count <= 0 or produced.evidence.len() == 0
+            or produced.evidence.len() != produced.sites.len():
+            return "invalid-produced-storage-module"
+        # Batch registration performs complete validation and assigns all
+        # aligned registry rows once. MIR replacement follows only after that
+        # preflight succeeds; assigning a Dict value cannot partially fail.
+        val registered = self.register_storage_view_evidence_batch(
+            module_name, produced.evidence)
+        if registered != "ok": return registered
+        self.mir_modules[module_name] = produced.module
+        if self.bootstrap_entry_mir_name == module_name:
+            self.bootstrap_entry_mir = Some(produced.module)
+        "ok"
+
+    fn storage_view_evidence_for_module(module_name: text) -> [MirTypedStorageViewEvidenceV1]:
+        var result: [MirTypedStorageViewEvidenceV1] = []
+        if not self.storage_evidence_rows_well_formed(): return result
+        var index = 0
+        while index < self.storage_evidence_module_names.len():
+            if self.storage_evidence_module_names[index] == module_name:
+                result.push(self.storage_view_evidence_rows[index])
+            index = index + 1
+        result
+
     fn storage_view_site_bindings_for_module(module_name: text) -> [MirStorageViewSiteBindingV1]:
         var result: [MirStorageViewSiteBindingV1] = []
         if not self.storage_binding_rows_well_formed():
@@ -244,7 +355,7 @@ class CompileContext:
             index = index + 1
         result
 
-    fn storage_binding_identity() -> text:
+    fn storage_live_binding_identity() -> text:
         if not self.storage_binding_rows_well_formed():
             return "invalid"
         var rows: [text] = []
@@ -281,6 +392,41 @@ class CompileContext:
                 j = j + 1
             i = i + 1
         rows.join(";")
+
+    fn storage_live_evidence_identity() -> text:
+        if not self.storage_evidence_rows_well_formed(): return "invalid"
+        var rows: [text] = []
+        var index = 0
+        while index < self.storage_evidence_module_names.len():
+            val evidence = self.storage_view_evidence_rows[index]
+            rows.push("{self.storage_evidence_module_names[index]}|{evidence.site.function_symbol_id}|{evidence.site.base_local_id}|{evidence.allocation_identity}|{evidence.allocation_provenance}|{evidence.source_revision}|{evidence.producer_contract_version}|{evidence.producer_pattern}|{evidence.bounds_proof_kind}|{evidence.produced_projection_count}")
+            index = index + 1
+        var i = 0
+        while i < rows.len():
+            var j = i + 1
+            while j < rows.len():
+                if rows[j] < rows[i]:
+                    val tmp = rows[i]
+                    rows[i] = rows[j]
+                    rows[j] = tmp
+                j = j + 1
+            i = i + 1
+        rows.join(";")
+
+    fn storage_binding_identity() -> text:
+        if self.storage_registry_frozen:
+            return self.storage_registry_frozen_identity
+        "unfrozen:{self.storage_live_binding_identity()}|evidence:{self.storage_live_evidence_identity()}"
+
+    me freeze_storage_registry() -> text:
+        if self.storage_registry_frozen:
+            return self.storage_registry_frozen_identity
+        if not self.storage_registry_rows_well_formed():
+            return "invalid"
+        self.storage_registry_frozen_identity =
+            "frozen:{self.storage_live_binding_identity()}|evidence:{self.storage_live_evidence_identity()}"
+        self.storage_registry_frozen = true
+        self.storage_registry_frozen_identity
 
     me add_error(message: text):
         self.errors.push(message)
@@ -425,15 +571,30 @@ class CompileContext:
         self.mir_modules.remove(name)
         var kept_names: [text] = []
         var kept_bindings: [MirStorageViewSiteBindingV1] = []
-        if self.storage_binding_rows_well_formed():
+        var kept_evidence_names: [text] = []
+        var kept_evidence: [MirTypedStorageViewEvidenceV1] = []
+        if not self.storage_registry_frozen and self.storage_binding_rows_well_formed():
             var index = 0
             while index < self.storage_binding_module_names.len():
                 if self.storage_binding_module_names[index] != name:
                     kept_names.push(self.storage_binding_module_names[index])
                     kept_bindings.push(self.storage_view_site_bindings[index])
                 index = index + 1
-        self.storage_binding_module_names = kept_names
-        self.storage_view_site_bindings = kept_bindings
+        if not self.storage_registry_frozen:
+            self.storage_binding_module_names = kept_names
+            self.storage_view_site_bindings = kept_bindings
+        if not self.storage_registry_frozen and self.storage_evidence_rows_well_formed():
+            var evidence_index = 0
+            while evidence_index < self.storage_evidence_module_names.len():
+                if self.storage_evidence_module_names[evidence_index] != name:
+                    kept_evidence_names.push(self.storage_evidence_module_names[evidence_index])
+                    kept_evidence.push(self.storage_view_evidence_rows[evidence_index])
+                evidence_index = evidence_index + 1
+        if not self.storage_registry_frozen:
+            self.storage_evidence_module_names = kept_evidence_names
+            self.storage_view_evidence_rows = kept_evidence
+        # Frozen site/evidence rows remain the immutable build receipt/cache
+        # authority; MIR eviction may reclaim payloads but not identity.
         if self.bootstrap_entry_mir_name != "" and self.bootstrap_entry_mir_name == name:
             self.bootstrap_entry_mir = nil
             self.bootstrap_entry_mir_name = ""

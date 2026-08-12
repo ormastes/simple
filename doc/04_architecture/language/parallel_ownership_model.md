@@ -66,6 +66,14 @@ one plan or source revision from being attached to another allocation. The
 producer consumes the private operation into `rt_alloc`; it is never a public
 intrinsic or ordinary `T[]` representation.
 
+CompileContext owns the module-qualified evidence lifecycle. It validates a
+whole producer batch, commits aligned site/evidence rows and rewritten MIR as
+one driver transaction, then transitions once from collecting to frozen before
+native cache lookup. The frozen identity includes allocation identity,
+provenance, source revision, producer contract/pattern, bounds proof, projection
+count, plan, and field schema. Codegen may evict MIR payloads, but cannot mutate
+the frozen receipt/cache authority.
+
 ## Migration order
 
 Freeze contracts and diagnostic names; make boundary/borrow facts authoritative; replace unsafe transport and add bounded task lifecycle; add parent commit; then implement typed storage layouts and MDSOC/project pilots. Performance lowering cannot precede the raw-pointer and alias-soundness gates.

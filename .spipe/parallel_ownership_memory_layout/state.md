@@ -487,3 +487,12 @@ dev-done
   `rt_alloc` before codegen. Focused owner/declaration/producer suites pass
   1/1, 4/4, and 4/4. No existing RuntimeValue, mmap, linker, or ABI-pinned
   allocation is relabeled. Driver full-evidence registration/freeze remains.
+- impl: Added the driver-owned full-evidence registry and install transaction.
+  CompileContext now batch-preflights aligned site/evidence rows, retains
+  allocation identity/provenance/source revision, producer version/pattern,
+  bounds-proof kind, and projection count, atomically installs rewritten MIR,
+  and rejects partial/duplicate/legacy rows. One-way freeze captures a sorted
+  immutable identity before native cache scope creation; registration after
+  freeze is denied and MIR eviction cannot mutate frozen receipt authority.
+  Registry + producer suites pass 7/7 and 4/4. A real compiler pilot still
+  needs to call the allocation owner and install transaction before freeze.

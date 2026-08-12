@@ -5,6 +5,9 @@ use compiler.mir_opt.mir_opt.storage_projection_lowering.{
     mir_storage_field_binding_v1, mir_storage_view_binding_v1,
     mir_storage_view_site_binding_v1
 }
+use compiler.mir_opt.mir_opt.typed_storage_view_producer.{MirTypedStorageViewEvidenceV1}
+use compiler.mir_opt.mir_opt.typed_storage_view_producer.{MirTypedStorageViewProducerResultV1}
+use compiler.mir.mir_data.{MirModule}
 use std.common.structural.storage_layout.storage_layout_contracts.{
     StorageConversionPolicy, StorageLayoutKind, storage_layout_plan_v1
 }
@@ -15,6 +18,17 @@ fn registry_site(layout: StorageLayoutKind, revision: i64, column: i64):
     mir_storage_view_site_binding_v1(41, 0, true,
         mir_storage_view_binding_v1(8101, revision, 8, 256, 16, false,
             plan, [mir_storage_field_binding_v1(1, 4, 4, column)]))
+
+fn registry_evidence(layout: StorageLayoutKind, revision: i64, column: i64,
+                     allocation_identity: text, source_revision: text):
+    MirTypedStorageViewEvidenceV1(
+        site: registry_site(layout, revision, column),
+        allocation_identity: allocation_identity,
+        allocation_provenance: "compiler-site:particles:read_mass:0",
+        source_revision: source_revision, producer_contract_version: 1,
+        producer_pattern: "same-block-gep-load-getfield-v1",
+        bounds_proof_kind: "constant-index-range-v1",
+        produced_projection_count: 1)
 
 describe "driver-owned storage projection registry":
     it "keeps repeated MIR local identities isolated by module":
@@ -60,3 +74,77 @@ describe "driver-owned storage projection registry":
         first.evict_mir_module("particles")
         assert_equal(first.storage_view_site_bindings_for_module("particles").len(), 0)
         assert_equal(first.storage_view_site_bindings_for_module("other").len(), 1)
+
+    it "registers full evidence atomically and freezes one immutable identity":
+        val ctx = CompileContext.create(driver_core_compile_options_default())
+        val first = registry_evidence(StorageLayoutKind.SoA, 7, 64,
+            "allocation:a", "snapshot:a")
+        val duplicate = registry_evidence(StorageLayoutKind.AoS, 9, 0,
+            "allocation:b", "snapshot:b")
+        # Duplicate site inside one batch must not append the first row.
+        assert_equal(ctx.register_storage_view_evidence_batch("particles",
+            [first, duplicate]), "duplicate-storage-view-site-binding")
+        assert_equal(ctx.storage_view_evidence_rows.len(), 0)
+        assert_equal(ctx.storage_view_site_bindings.len(), 0)
+        assert_equal(ctx.register_storage_view_evidence_batch("particles", [first]), "ok")
+        assert_true(ctx.storage_registry_rows_well_formed())
+        assert_equal(ctx.storage_view_evidence_for_module("particles").len(), 1)
+        val frozen = ctx.freeze_storage_registry()
+        assert_true(frozen.starts_with("frozen:"))
+        assert_equal(ctx.freeze_storage_registry(), frozen)
+        assert_equal(ctx.storage_binding_identity(), frozen)
+        assert_equal(ctx.register_storage_view_evidence_batch("other", [first]),
+            "storage-registry-frozen")
+        ctx.evict_mir_module("particles")
+        assert_equal(ctx.storage_binding_identity(), frozen)
+        assert_equal(ctx.storage_view_evidence_for_module("particles").len(), 1)
+
+    it "includes full producer evidence in registration-order-independent identity":
+        val first = CompileContext.create(driver_core_compile_options_default())
+        val second = CompileContext.create(driver_core_compile_options_default())
+        val row_a = registry_evidence(StorageLayoutKind.SoA, 7, 64,
+            "allocation:a", "snapshot:a")
+        val row_b = MirTypedStorageViewEvidenceV1(..registry_evidence(
+            StorageLayoutKind.AoS, 9, 0, "allocation:b", "snapshot:b"),
+            site: mir_storage_view_site_binding_v1(42, 1, true,
+                registry_site(StorageLayoutKind.AoS, 9, 0).binding))
+        _ = first.register_storage_view_evidence_batch("a", [row_a])
+        _ = first.register_storage_view_evidence_batch("b", [row_b])
+        _ = second.register_storage_view_evidence_batch("b", [row_b])
+        _ = second.register_storage_view_evidence_batch("a", [row_a])
+        assert_equal(first.freeze_storage_registry(), second.freeze_storage_registry())
+        val changed = CompileContext.create(driver_core_compile_options_default())
+        _ = changed.register_storage_view_evidence_batch("a", [
+            MirTypedStorageViewEvidenceV1(..row_a, source_revision: "snapshot:changed")
+        ])
+        assert_false(first.storage_binding_identity() == changed.freeze_storage_registry())
+
+    it "fails freeze when legacy site rows have no matching evidence":
+        val ctx = CompileContext.create(driver_core_compile_options_default())
+        assert_equal(ctx.register_storage_view_site_binding("legacy",
+            registry_site(StorageLayoutKind.SoA, 7, 64)), "ok")
+        assert_false(ctx.storage_registry_rows_well_formed())
+        assert_equal(ctx.freeze_storage_registry(), "invalid")
+
+    it "installs produced MIR and full evidence as one driver transaction":
+        val ctx = CompileContext.create(driver_core_compile_options_default())
+        val original = MirModule(name: "original", functions: {}, statics: {},
+            constants: {}, types: {})
+        val rewritten = MirModule(name: "rewritten", functions: {}, statics: {},
+            constants: {}, types: {})
+        ctx.mir_modules["particles"] = original
+        val row = registry_evidence(StorageLayoutKind.SoA, 7, 64,
+            "allocation:a", "snapshot:a")
+        val failed = MirTypedStorageViewProducerResultV1(ok: false,
+            module: rewritten, sites: [], evidence: [], produced_count: 0,
+            reason: "sabotage")
+        assert_equal(ctx.install_produced_storage_module("particles", failed),
+            "typed-storage-producer:sabotage")
+        assert_equal(ctx.mir_modules["particles"].name, "original")
+        assert_equal(ctx.storage_view_evidence_rows.len(), 0)
+        val produced = MirTypedStorageViewProducerResultV1(ok: true,
+            module: rewritten, sites: [row.site], evidence: [row],
+            produced_count: 1, reason: "ok")
+        assert_equal(ctx.install_produced_storage_module("particles", produced), "ok")
+        assert_equal(ctx.mir_modules["particles"].name, "rewritten")
+        assert_equal(ctx.storage_view_evidence_for_module("particles").len(), 1)

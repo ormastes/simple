@@ -20,6 +20,8 @@
 - Exact function/base-local rewrite from `mir.storage.project_field.v1`.
 - Module-qualified `CompileContext` registry, MIR-coupled eviction, late atomic
   rewrite, and complete sorted binding identity in native cache scope.
+- Atomic full-evidence module installation and one-way registry freeze before
+  cache lookup; frozen authority survives MIR eviction.
 - Compiler-private typed-view declaration admission for exact raw allocation
   provenance, source revision, fixed schema/capacity, and bounds evidence.
 - Canonical same-block MIR producer gated by owned-allocation marker, constant
@@ -56,6 +58,8 @@
     optimization; only optimize after it becomes backend-ready PROJECT_ADDRESS.
 12. Create declarations from `MirOwnedRawAllocationFactV1`; a parameter, call,
     cast, RuntimeValue array, or free-form provenance string is not ownership proof.
+13. Register producer evidence only through the driver batch/install owner;
+    freeze before cache lookup or parallel codegen and reject later mutation.
 
 The W^X store/load parity scenario requires a fresh runtime containing
 `rt_ptr_read_u8`; a stale runner or unresolved-symbol stub is not evidence.
