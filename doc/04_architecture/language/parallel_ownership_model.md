@@ -74,6 +74,15 @@ provenance, source revision, producer contract/pattern, bounds proof, projection
 count, plan, and field schema. Codegen may evict MIR payloads, but cannot mutate
 the frozen receipt/cache authority.
 
+Logical access evidence constrains which physical choices are legal; selecting
+a layout cannot make an access safer. Constant region/range facts may establish
+non-overlap for conflict analysis, while typed field paths are descriptive
+locality evidence only. Address escape, unknown access, empty or incomplete
+classification, and ABI-pinned storage force conservative handling. No access
+advisory may authorize ownership transfer, scheduling, disjoint loans,
+`noalias`, or alias scopes. A future planner adapter may rank only already-legal
+physical choices; that dependency is strictly one-way.
+
 ## Migration order
 
 Freeze contracts and diagnostic names; make boundary/borrow facts authoritative; replace unsafe transport and add bounded task lifecycle; add parent commit; then implement typed storage layouts and MDSOC/project pilots. Performance lowering cannot precede the raw-pointer and alias-soundness gates.

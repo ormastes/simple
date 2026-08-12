@@ -8,6 +8,7 @@ use compiler.mir.mir_data.{
 use compiler.mir_opt.mir_opt.storage_access_analysis.{
     MIR_STORAGE_UNKNOWN_REGION_ID,
     analyze_mir_storage_accesses,
+    analyze_mir_storage_access_summary,
     mir_storage_region_binding_v1,
     mir_storage_bindings_well_formed
 }
@@ -23,6 +24,12 @@ fn storage_copy(local_id: i64) -> MirOperand:
 fn storage_index(value: i64) -> MirOperand:
     MirOperand(kind: MirOperandKind.Const(
         MirConstValue.Int(value), MirType(kind: MirTypeKind.I64)))
+
+fn storage_function(name: text) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(name),
+        MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+            params: [MirType.i64()], return_type: MirType.unit(),
+            is_variadic: false)))))
 
 fn storage_test_function(instructions: [MirInst]) -> MirFunction:
     val i64_type = MirType(kind: MirTypeKind.I64)
@@ -99,6 +106,54 @@ describe "MIR storage access analysis":
         assert_false(accesses[0].known_range)
         assert_false(accesses[1].known_range)
         assert_true(parallel_access_paths_conflict(accesses[0], accesses[1]))
+
+    it "preserves proven element partitions through record field reads":
+        val instructions = [
+            MirInst(kind: MirInstKind.GetElementPtr(
+                LocalId(id: 1), storage_copy(10), [storage_index(2)]), span: nil),
+            MirInst(kind: MirInstKind.Load(
+                LocalId(id: 2), storage_copy(1)), span: nil),
+            MirInst(kind: MirInstKind.GetField(
+                LocalId(id: 3), storage_copy(2), 4), span: nil),
+            MirInst(kind: MirInstKind.GetElementPtr(
+                LocalId(id: 4), storage_copy(10), [storage_index(5)]), span: nil),
+            MirInst(kind: MirInstKind.Load(
+                LocalId(id: 5), storage_copy(4)), span: nil),
+            MirInst(kind: MirInstKind.GetField(
+                LocalId(id: 6), storage_copy(5), 7), span: nil)
+        ]
+        val accesses = analyze_mir_storage_accesses(
+            storage_test_function(instructions),
+            [mir_storage_region_binding_v1(10, 100)])
+        assert_equal(accesses.len(), 4)
+        assert_true(accesses[1].known_range)
+        assert_equal(accesses[1].start, 2)
+        assert_equal(accesses[1].end, 3)
+        assert_equal(accesses[1].projection, "index:2.field:4")
+        assert_true(accesses[3].known_range)
+        assert_equal(accesses[3].projection, "index:5.field:7")
+        assert_false(parallel_access_paths_conflict(accesses[1], accesses[3]))
+
+    it "fails closed when an owned address escapes but admits exact finalization":
+        val escaped = storage_test_function([
+            MirInst(kind: MirInstKind.GetElementPtr(
+                LocalId(id: 1), storage_copy(10), [storage_index(2)]), span: nil),
+            MirInst(kind: MirInstKind.Call(nil, storage_function("unknown_consumer"),
+                [storage_copy(1)]), span: nil)
+        ])
+        val escaped_summary = analyze_mir_storage_access_summary(
+            escaped, [mir_storage_region_binding_v1(10, 100)])
+        assert_true(escaped_summary.address_observed)
+        assert_true(escaped_summary.unknown_access)
+
+        val finalized = storage_test_function([
+            MirInst(kind: MirInstKind.Call(nil, storage_function("rt_free"),
+                [storage_copy(10)]), span: nil)
+        ])
+        val finalized_summary = analyze_mir_storage_access_summary(
+            finalized, [mir_storage_region_binding_v1(10, 100)])
+        assert_false(finalized_summary.address_observed)
+        assert_false(finalized_summary.unknown_access)
 
     it "rejects ambiguous bindings and nested range claims":
         val duplicate = [

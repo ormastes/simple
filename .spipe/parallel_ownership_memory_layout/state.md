@@ -514,3 +514,13 @@ dev-done
   assertion. The three-cycle cap stopped further retries. Therefore executable
   derived-constant and installed-function allocation/free lifetime evidence
   remain open; no W^X PASS is claimed.
+- impl: Strengthened WP-20 logical access facts at the production typed-storage
+  boundary. Constant element ranges now survive `GEP -> Load(record) ->
+  GetField`, retaining paths such as `index:2.field:4` without treating fields
+  themselves as disjoint. A flat summary conservatively derives address escape
+  and unknown access through stores, casts, aggregates, returns, indirect
+  calls, and unknown direct calls; only exact `rt_free(bound_base)` finalization
+  is admitted. The typed-storage producer rejects observed or unclassified
+  owner regions before rewriting. Focused analysis and producer suites pass
+  6/6 and 5/5. These facts emit no alias metadata or scheduling permission;
+  completeness-tracked layout advisory and planner integration remain open.

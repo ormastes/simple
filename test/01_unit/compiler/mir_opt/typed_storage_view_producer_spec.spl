@@ -75,6 +75,24 @@ fn producer_module(marker: bool, index_value: i64, extra_use: bool) -> MirModule
     MirModule(name: "typed_storage_producer", functions: functions,
         statics: {}, constants: {}, types: {})
 
+fn producer_module_with_owner_call(call_name: text) -> MirModule:
+    val module = producer_module(true, 3, false)
+    val symbol = SymbolId.new(41)
+    val function = module.functions[symbol]
+    val block = function.blocks[0]
+    var instructions = block.instructions
+    val call_sig = MirSignature(params: [MirType.i64()],
+        return_type: MirType.unit(), is_variadic: false)
+    val call_operand = MirOperand(kind: MirOperandKind.Const(
+        MirConstValue.Str(call_name), MirType(kind: MirTypeKind.FuncPtr(call_sig))))
+    instructions.push(MirInst(kind: MirInstKind.Call(nil, call_operand,
+        [MirOperand.copy(LocalId(id: 0))]), span: nil))
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[symbol] = MirFunction(..function, blocks: [
+        MirBlock(..block, instructions: instructions)
+    ])
+    MirModule(..module, functions: functions)
+
 fn count_intrinsic(module: MirModule, name: text) -> i64:
     var count = 0
     for function in module.functions.values():
@@ -157,3 +175,18 @@ describe "automatic compiler-owned typed storage producer":
         assert_false(result.ok)
         assert_equal(result.reason, "stale-typed-storage-declaration")
         assert_equal(result.sites.len(), 0)
+
+    it "derives address escape gating and permits the exact owner finalizer":
+        val escaped = produce_mir_typed_storage_views_v1(
+            producer_module_with_owner_call("unknown_consumer"),
+            [producer_declaration(StorageLayoutKind.SoA)])
+        assert_false(escaped.ok)
+        assert_equal(escaped.reason, "storage-view-address-observed")
+        assert_equal(count_intrinsic(escaped.module,
+            MIR_STORAGE_PROJECT_FIELD_V1), 0)
+
+        val finalized = produce_mir_typed_storage_views_v1(
+            producer_module_with_owner_call("rt_free"),
+            [producer_declaration(StorageLayoutKind.SoA)])
+        assert_true(finalized.ok)
+        assert_equal(finalized.produced_count, 1)

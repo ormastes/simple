@@ -15,6 +15,9 @@ description: Plan, implement, or verify Simple parallel code involving tasks, ac
 8. Keep logical `T[]` semantics separate from storage layout. Pin ABI, wire, persistent, MMIO, and address-observed data; use explicit conversions for layout changes.
 9. Prefer local accumulation and partitioning before cache-line padding. Record layout, transfer, and commit receipts for critical paths.
 10. Verify source invalidation after move, failure/cancellation cleanup, pointer identity isolation, randomized completion determinism, and layout semantic parity with real boundaries.
+11. Treat field paths as physical-layout observations only. Unknown or
+    incomplete MIR access facts force conservative reference layout and never
+    authorize alias metadata, scheduling, transfer, or disjoint loans.
 
 ## Authoritative surfaces
 

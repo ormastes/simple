@@ -12,5 +12,9 @@ description: Apply Simple owner-result parallelism and storage-layout safety whe
 5. Treat unknown access ranges as overlapping; preserve ABI-pinned layouts.
 6. Require bounded transport and deterministic commit where the resolved policy requires them.
 7. Verify move invalidation, cancellation, real transport isolation, and layout parity before claiming support.
+8. Treat MIR field paths as layout/locality observations only. Unknown or
+   incomplete access classification forces reference layout and may never
+   authorize `noalias`, scheduling, transfer, or disjoint loans; never parse
+   diagnostic projection text as planner evidence.
 
 Read `doc/04_architecture/language/parallel_ownership_model.md` and use the common contract modules before changing a runtime or compiler leaf.

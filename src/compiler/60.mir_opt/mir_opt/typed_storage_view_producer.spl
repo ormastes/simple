@@ -11,6 +11,9 @@ use compiler.mir_opt.mir_opt.storage_projection_lowering.{
     MIR_STORAGE_PROJECT_FIELD_V1, MirStorageViewSiteBindingV1,
     mir_storage_address_recipe_v1
 }
+use compiler.mir_opt.mir_opt.storage_access_analysis.{
+    analyze_mir_storage_access_summary, mir_storage_region_binding_v1
+}
 use compiler.mir_opt.mir_opt.typed_storage_view_declaration.{
     MirTypedStorageViewDeclarationV1, admit_mir_typed_storage_view_v1
 }
@@ -147,7 +150,21 @@ fn produce_mir_typed_storage_views_v1(
 ) -> MirTypedStorageViewProducerResultV1:
     var sites: [MirStorageViewSiteBindingV1] = []
     var evidence: [MirTypedStorageViewEvidenceV1] = []
+    var declaration_index = 0
     for declaration in declarations:
+        for function_symbol in module.functions.keys():
+            if function_symbol.id == declaration.function_symbol_id:
+                val summary = analyze_mir_storage_access_summary(
+                    module.functions[function_symbol], [
+                        mir_storage_region_binding_v1(
+                            declaration.base_local_id, declaration_index + 2)
+                    ])
+                if summary.address_observed:
+                    return mir_typed_storage_view_producer_failure(
+                        module, "storage-view-address-observed")
+                if summary.unknown_access:
+                    return mir_typed_storage_view_producer_failure(
+                        module, "storage-view-access-unclassified")
         val admitted = admit_mir_typed_storage_view_v1(declaration)
         if not admitted.ok:
             return mir_typed_storage_view_producer_failure(module,
@@ -160,6 +177,7 @@ fn produce_mir_typed_storage_views_v1(
             producer_pattern: "same-block-gep-load-getfield-v1",
             bounds_proof_kind: "constant-index-range-v1",
             produced_projection_count: 0))
+        declaration_index = declaration_index + 1
 
     var produced_count = 0
     var declaration_hits: [i64] = []
@@ -262,7 +280,7 @@ fn produce_mir_typed_storage_views_v1(
                 instructions: instructions, terminator: block.terminator))
         rewritten_functions[symbol] = MirFunction(..function, blocks: blocks)
 
-    var declaration_index = 0
+    declaration_index = 0
     while declaration_index < declaration_hits.len():
         if declaration_hits[declaration_index] == 0:
             return mir_typed_storage_view_producer_failure(module,
