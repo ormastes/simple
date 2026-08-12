@@ -1587,9 +1587,9 @@ static void engine2d_fill_u32_rvv(int64_t* data, int64_t count, int64_t color) {
     engine2d_record_simd_row_hit();
     int64_t i = 0;
     while (i < count) {
-        size_t vl = __riscv_vsetvl_e64m1((size_t)(count - i));
-        vint64m1_t v = __riscv_vmv_v_x_i64m1(color, vl);
-        __riscv_vse64_v_i64m1(data + i, v, vl);
+        size_t vl = __riscv_vsetvl_e64m8((size_t)(count - i));
+        vint64m8_t v = __riscv_vmv_v_x_i64m8(color, vl);
+        __riscv_vse64_v_i64m8(data + i, v, vl);
         i += (int64_t)vl;
     }
 }
@@ -1598,9 +1598,9 @@ static void engine2d_copy_u32_rvv(int64_t* dst, const int64_t* src, int64_t coun
     engine2d_record_simd_row_hit();
     int64_t i = 0;
     while (i < count) {
-        size_t vl = __riscv_vsetvl_e64m1((size_t)(count - i));
-        vint64m1_t v = __riscv_vle64_v_i64m1(src + i, vl);
-        __riscv_vse64_v_i64m1(dst + i, v, vl);
+        size_t vl = __riscv_vsetvl_e64m8((size_t)(count - i));
+        vint64m8_t v = __riscv_vle64_v_i64m8(src + i, vl);
+        __riscv_vse64_v_i64m8(dst + i, v, vl);
         i += (int64_t)vl;
     }
 }
@@ -1848,13 +1848,19 @@ static void engine2d_blend_boxed_rvv(int64_t* dst, const int64_t* src,
             i += (int64_t)vl;
             continue;
         }
-        vuint32m1_t sv = __riscv_vle32_v_u32m1(s_words, vl);
-        vuint32m1_t dv = __riscv_vle32_v_u32m1(d_words, vl);
+        vuint64m2_t s_boxed = use_const
+            ? __riscv_vmv_v_x_u64m2((uint64_t)engine2d_box_pixel(const_src), vl)
+            : __riscv_vle64_v_u64m2(
+                (const uint64_t*)(const void*)(src + i), vl);
+        vuint64m2_t d_boxed = __riscv_vle64_v_u64m2(
+            (const uint64_t*)(const void*)(dst + i), vl);
+        vuint32m1_t sv = __riscv_vnsrl_wx_u32m1(
+            __riscv_vsrl_vx_u64m2(s_boxed, 3, vl), 0, vl);
+        vuint32m1_t dv = __riscv_vnsrl_wx_u32m1(
+            __riscv_vsrl_vx_u64m2(d_boxed, 3, vl), 0, vl);
         vuint32m1_t sav = __riscv_vand_vx_u32m1(
             __riscv_vsrl_vx_u32m1(sv, 24, vl), 255u, vl);
         vuint32m1_t inv = __riscv_vrsub_vx_u32m1(sav, 255u, vl);
-        uint32_t sa[64], rv[64], gv[64], bv[64];
-        __riscv_vse32_v_u32m1(sa, sav, vl);
 #define ENGINE2D_BLEND_CHANNEL_RVV(shift) \
         __riscv_vadd_vv_u32m1( \
             __riscv_vmul_vv_u32m1( \
@@ -1865,18 +1871,29 @@ static void engine2d_blend_boxed_rvv(int64_t* dst, const int64_t* src,
                 __riscv_vand_vx_u32m1( \
                     __riscv_vsrl_vx_u32m1(dv, shift, vl), 255u, vl), \
                 inv, vl), vl)
-        __riscv_vse32_v_u32m1(rv, ENGINE2D_BLEND_CHANNEL_RVV(16), vl);
-        __riscv_vse32_v_u32m1(gv, ENGINE2D_BLEND_CHANNEL_RVV(8), vl);
-        __riscv_vse32_v_u32m1(bv, ENGINE2D_BLEND_CHANNEL_RVV(0), vl);
+        vuint32m1_t rv = ENGINE2D_BLEND_CHANNEL_RVV(16);
+        vuint32m1_t gv = ENGINE2D_BLEND_CHANNEL_RVV(8);
+        vuint32m1_t bv = ENGINE2D_BLEND_CHANNEL_RVV(0);
 #undef ENGINE2D_BLEND_CHANNEL_RVV
-        for (size_t lane = 0; lane < vl; lane++) {
-            uint32_t alpha = sa[lane];
-            uint32_t out = alpha == 255u ? s_words[lane] :
-                (alpha == 0u ? d_words[lane] :
-                 (0xff000000u | ((rv[lane] / 255u) << 16) |
-                  ((gv[lane] / 255u) << 8) | (bv[lane] / 255u)));
-            dst[i + (int64_t)lane] = engine2d_box_pixel(out);
-        }
+#define ENGINE2D_DIV255_RVV(value) \
+        __riscv_vsrl_vx_u32m1( \
+            __riscv_vadd_vv_u32m1( \
+                __riscv_vadd_vx_u32m1(value, 1u, vl), \
+                __riscv_vsrl_vx_u32m1(value, 8, vl), vl), 8, vl)
+        rv = ENGINE2D_DIV255_RVV(rv);
+        gv = ENGINE2D_DIV255_RVV(gv);
+        bv = ENGINE2D_DIV255_RVV(bv);
+#undef ENGINE2D_DIV255_RVV
+        vuint32m1_t out = __riscv_vor_vx_u32m1(
+            __riscv_vor_vv_u32m1(
+                __riscv_vsll_vx_u32m1(rv, 16, vl),
+                __riscv_vsll_vx_u32m1(gv, 8, vl), vl),
+            0xff000000u, vl);
+        out = __riscv_vor_vv_u32m1(out, bv, vl);
+        __riscv_vse64_v_u64m2(
+            (uint64_t*)(void*)(dst + i),
+            __riscv_vsll_vx_u64m2(
+                __riscv_vzext_vf2_u64m2(out, vl), 3, vl), vl);
         i += (int64_t)vl;
     }
 }
