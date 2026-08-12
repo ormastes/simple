@@ -40,6 +40,9 @@ use os.compositor.simple_web_window_renderer.{simple_web_content_frame_cached_at
 use os.compositor.shared_mdi_framebuffer_scene.{SharedMdiRenderWindow, shared_mdi_render_window, shared_mdi_scene_from_render_windows}
 use std.gc_async_mut.ui.web_render_pixel_backend.{WebRenderPixelArtifactCache, web_render_pixel_artifact_cache}
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{Engine2dDrawIrAdvResult, Engine2dResolvedDrawIrImage, engine2d_resolved_draw_ir_image}
+use std.common.gpu.simpleos_host_gpu_draw_ir.{
+    SimpleOsHostGpuImageResource, simpleos_host_gpu_image_resource
+}
 use common.ui.glyph_bitmap_8x16.{get_glyph_8x16}
 use common.ui.wm_chrome_theme.{wm_chrome_theme, active_wm_theme_render_snapshot, active_wm_theme_id, WmChromeColors}
 use nogc_sync_mut.ui.theme_package.{default_theme_id}
@@ -1654,6 +1657,20 @@ class HostCompositor:
             images.push(engine2d_resolved_draw_ir_image(shared_wm_content_frame_image_uri(frame), frame.width, frame.height, frame.pixels))
             top_frames.push(frame)
         val composition = shared_wm_scene_draw_ir_composition_with_content(scene, taskbar_input.taskbar, frames, selected_backend, 1000, taskbar_input.clock_label, 0)
+        if executor.window_present_enabled():
+            var resources: [SimpleOsHostGpuImageResource] = []
+            for frame in top_frames:
+                resources.push(simpleos_host_gpu_image_resource(
+                    shared_wm_content_frame_image_uri(frame), frame.width,
+                    frame.height, frame.pixels))
+            if not executor.render_draw_ir_composition_resources_window_revision(
+                composition, resources, self.render_revision,
+                self.render_revision):
+                return self._reject_engine2d_frame()
+            for frame in frames:
+                print "[hosted-wm] content-presented scene_revision={self.render_revision} path=vulkan-window-swapchain window_id={frame.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}"
+            self.dirty.clear()
+            return true
         var accepted_composition = composition
         var accepted_result = executor.render_draw_ir_composition(composition, images)
         # A concrete Metal WM frame is device-only. The executor must return

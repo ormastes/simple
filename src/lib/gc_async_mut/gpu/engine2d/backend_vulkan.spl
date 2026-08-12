@@ -55,6 +55,7 @@ use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_last_error,
     vulkan_sffi_recover_dependency_quarantine,
     vulkan_sffi_init_headless_present, vulkan_sffi_init_window_present,
+    vulkan_sffi_init_external_window_present,
     vulkan_sffi_present_buffer,
     vulkan_sffi_destroy_swapchain
 }
@@ -432,6 +433,23 @@ impl RenderBackend for VulkanBackend:
             return false
         val swapchain = vulkan_sffi_init_window_present(
             width.to_i64(), height.to_i64(), vsync)
+        if swapchain <= 0:
+            self.last_error = vulkan_sffi_last_error()
+            return false
+        if not self.init(width, height):
+            vulkan_sffi_destroy_swapchain(swapchain)
+            return false
+        self.presentation_swapchain = swapchain
+        self.presentation_mode = "window-swapchain"
+        true
+
+    me init_external_window_present(kind: i64, display: i64, window: i64, width: i32, height: i32, vsync: bool) -> bool:
+        """Adopt a caller-owned native window before Vulkan device selection."""
+        if self.initialized or self.presentation_swapchain != 0:
+            self.last_error = "Vulkan backend already initialized"
+            return false
+        val swapchain = vulkan_sffi_init_external_window_present(
+            kind, display, window, width.to_i64(), height.to_i64(), vsync)
         if swapchain <= 0:
             self.last_error = vulkan_sffi_last_error()
             return false
@@ -1054,6 +1072,10 @@ impl RenderBackend for VulkanBackend:
             backend_handle: self.d_framebuffer,
             device_identity: self.session.device,
             swapchain_identity: self.presentation_swapchain)
+
+    fn window_present_enabled() -> bool:
+        self.presentation_mode == "window-swapchain" and
+        self.presentation_swapchain > 0
 
     me _present_device(mode: text) -> bool:
         self._begin_frame_receipt(mode, false, true)

@@ -149,6 +149,45 @@ pub extern "C" fn rt_vulkan_init_window_present(w: i64, h: i64, vsync: i64) -> i
 }
 
 #[no_mangle]
+#[cfg(all(feature = "vulkan", target_os = "linux"))]
+pub extern "C" fn rt_vulkan_init_external_window_present(kind: i64, display: i64, window: i64, w: i64, h: i64, vsync: i64) -> i64 {
+    if kind != 1 || display == 0 || window <= 0 || w <= 0 || h <= 0
+        || w > u32::MAX as i64 || h > u32::MAX as i64 { return 0; }
+    let mut state = STATE.lock();
+    if state.device.is_some() || state.has_device_resources() {
+        state.set_error("external window presentation must initialize before Vulkan resources".to_string());
+        return 0;
+    }
+    let instance = match VulkanInstance::get_or_init() { Ok(v) => v, Err(e) => { state.set_error(format!("external window instance: {e}")); return 0; } };
+    let surface = match Surface::new_xlib(instance.clone(), display, window) { Ok(v) => v, Err(e) => { state.set_error(format!("external window surface: {e}")); return 0; } };
+    let mut devices = match instance.enumerate_devices() { Ok(v) => v, Err(e) => { state.set_error(format!("external window enumerate: {e}")); return 0; } };
+    devices.sort_by_key(|device| std::cmp::Reverse(device.compute_score()));
+    let mut selected = None;
+    for physical in &devices {
+        if physical.find_compute_queue_family().is_none() || physical.find_graphics_queue_family().is_none()
+            || physical.find_present_queue_family(&instance, surface.handle()).is_none() { continue; }
+        if let Ok(device) = VulkanDevice::new_for_surface(physical.clone(), &surface) { selected = Some(device); break; }
+    }
+    let device = match selected { Some(v) => v, None => { state.set_error("no device supports the external window surface".to_string()); return 0; } };
+    let swapchain = match VulkanSwapchain::new(device.clone(), surface.clone(), w as u32, h as u32, false, vsync == 0) {
+        Ok(v) => v, Err(e) => { state.set_error(format!("external window swapchain: {e}")); return 0; }
+    };
+    let surface_handle = alloc_handle();
+    let swapchain_handle = alloc_handle();
+    state.instance = Some(instance);
+    state.physical_devices = devices;
+    state.semaphore_pool = Some(SemaphorePool::new(device.clone()));
+    state.device = Some(device);
+    state.surfaces.insert(surface_handle, surface);
+    state.swapchains.insert(swapchain_handle, swapchain);
+    swapchain_handle
+}
+
+#[no_mangle]
+#[cfg(not(all(feature = "vulkan", target_os = "linux")))]
+pub extern "C" fn rt_vulkan_init_external_window_present(_kind: i64, _display: i64, _window: i64, _w: i64, _h: i64, _vsync: i64) -> i64 { 0 }
+
+#[no_mangle]
 #[cfg(not(feature = "vulkan"))]
 pub extern "C" fn rt_vulkan_init_window_present(_w: i64, _h: i64, _vsync: i64) -> i64 { 0 }
 
@@ -336,7 +375,7 @@ pub extern "C" fn rt_vulkan_present(_sc: i64, _image_index: i64) -> i64 {
 
 #[cfg(all(test, feature = "vulkan"))]
 mod tests {
-    use super::{rt_vulkan_destroy_swapchain, rt_vulkan_init_headless_present, rt_vulkan_init_window_present, rt_vulkan_present_buffer};
+    use super::{rt_vulkan_destroy_swapchain, rt_vulkan_init_external_window_present, rt_vulkan_init_headless_present, rt_vulkan_init_window_present, rt_vulkan_present_buffer};
     use crate::vulkan_graphics_runtime::vulkan_graphics_runtime_buffer::{rt_vulkan_alloc_buffer, rt_vulkan_copy_to_buffer_raw, rt_vulkan_free_buffer};
     use crate::vulkan_graphics_runtime::vulkan_graphics_runtime_core::{rt_vulkan_shutdown, STATE};
     use crate::vulkan_graphics_runtime::vulkan_graphics_runtime_device::rt_vulkan_selected_device_driver_identity;
@@ -382,6 +421,25 @@ mod tests {
         assert_eq!(rt_vulkan_free_buffer(buffer), 1);
         assert_eq!(rt_vulkan_destroy_swapchain(swapchain), 1);
         assert_eq!(rt_vulkan_shutdown(), 1);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    #[ignore = "requires a live X11 display and presentation-capable Vulkan ICD"]
+    fn live_external_xlib_window_is_adopted_without_second_window() {
+        let instance = crate::vulkan::VulkanInstance::get_or_init().expect("instance");
+        let mut manager = crate::vulkan::WindowManager::new(instance).expect("manager");
+        manager.start_event_loop_thread().expect("event loop");
+        let owner_window = manager.create_window(64, 48, "external Vulkan owner")
+            .expect("owner window");
+        let (display, window) = manager.xlib_descriptor(owner_window)
+            .expect("Xlib descriptor");
+        let swapchain = rt_vulkan_init_external_window_present(
+            1, display, window, 64, 48, 0);
+        assert!(swapchain > 0, "{}", STATE.lock().last_error);
+        assert_eq!(rt_vulkan_destroy_swapchain(swapchain), 1);
+        assert_eq!(rt_vulkan_shutdown(), 1);
+        manager.destroy_window(owner_window).expect("destroy owner window");
     }
 
     #[test]

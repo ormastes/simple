@@ -129,6 +129,9 @@ extern fn rt_winit_window_is_fullscreen(win: i64) -> i64
 extern fn rt_winit_window_inner_width(win: i64) -> i64
 extern fn rt_winit_window_inner_height(win: i64) -> i64
 extern fn rt_winit_window_scale_factor_milli(win: i64) -> i64
+extern fn rt_winit_window_surface_kind(win: i64) -> i64
+extern fn rt_winit_window_surface_display(win: i64) -> i64
+extern fn rt_winit_window_surface_window(win: i64) -> i64
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_time_now_micros() -> i64
 extern fn rt_env_get(key: text) -> text?
@@ -143,6 +146,21 @@ extern fn sys_get_args() -> [text]
 val WINDOW_WIDTH: i32 = 1024
 val WINDOW_HEIGHT: i32 = 720
 val WINDOW_TITLE: text = "SimpleOS Shared Hosted WM"
+
+fn _hosted_engine2d_raster_for_window(win: i64, width: i32, height: i32) -> Engine2dCompositorBackend:
+    val requested = (rt_env_get("SIMPLE_GUI_BACKEND") ?? "").trim().lower()
+    if requested == "vulkan-window":
+        val kind = rt_winit_window_surface_kind(win)
+        val display = rt_winit_window_surface_display(win)
+        val window = rt_winit_window_surface_window(win)
+        match Engine2dCompositorBackend.create_vulkan_external_window_present(
+            kind, display, window, width, height, true):
+            Ok(raster):
+                print "[hosted-wm] raster-backend=vulkan-window-swapchain adopted=true kind={kind} readback=false"
+                return raster
+            Err(reason):
+                print "[hosted-wm] vulkan-window-adoption-failed reason={reason} fallback=software"
+    Engine2dCompositorBackend.create_from_env(width, height)
 
 val EVT_CLOSE: i64 = 3
 val EVT_RESIZE: i64 = 1
@@ -320,7 +338,8 @@ fn main() -> i64:
         return 1
     print "[hosted-wm] raster-backend=simple-2d-winit-buffer source=pure-simple-pixel-mirror"
     val comp = HostCompositor.new_headless(Size(width: WINDOW_WIDTH as u64, height: WINDOW_HEIGHT as u64))
-    val raster = Engine2dCompositorBackend.create_from_env(WINDOW_WIDTH, WINDOW_HEIGHT)
+    val raster = _hosted_engine2d_raster_for_window(
+        win, WINDOW_WIDTH, WINDOW_HEIGHT)
     _run_hosted_wm(
         comp, raster, backend, el, win, args[0], theme_wire_text
     )
@@ -618,7 +637,8 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
             return 4
         print "[hosted-wm] draw-ir-rejected retry=compatibility"
         comp.render_frame()
-    if not hosted_winit_present_pure_simple_pixels(presenter, comp.pure_simple_pixel_buffer(), comp.width, comp.height):
+    if (not raster.window_present_enabled() and
+        not hosted_winit_present_pure_simple_pixels(presenter, comp.pure_simple_pixel_buffer(), comp.width, comp.height)):
         print "ERROR: hosted WM initial pure-Simple frame presentation failed"
         val _ = _close_hosted_browser_resources(
             browser_renderer, browser_raster,
@@ -999,7 +1019,8 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                     comp.resize(physical.width, physical.height)
                     if raster.w != physical.width or raster.h != physical.height:
                         raster.shutdown()
-                        raster = Engine2dCompositorBackend.create_from_env(physical.width, physical.height)
+                        raster = _hosted_engine2d_raster_for_window(
+                            win, physical.width, physical.height)
                     other_dirty = true
                 print "[hosted-wm] event surface kind={kind} mode={surface.mode} phase={surface.phase} nonce={surface.request_nonce} width={physical.width} height={physical.height} scale_milli={physical.scale_milli}"
             elif kind == EVT_MOVE:
@@ -1929,7 +1950,8 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                     continue
                 print "[hosted-wm] draw-ir-rejected retry=compatibility"
                 comp.render_frame()
-            if not hosted_winit_present_pure_simple_pixels(presenter, comp.pure_simple_pixel_buffer(), comp.width, comp.height):
+            if (not raster.window_present_enabled() and
+                not hosted_winit_present_pure_simple_pixels(presenter, comp.pure_simple_pixel_buffer(), comp.width, comp.height)):
                 print "ERROR: hosted WM live pure-Simple frame presentation failed"
                 running = false
                 continue
@@ -1954,8 +1976,14 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                         continue
                     print "[hosted-wm] draw-ir-rejected retry=compatibility"
                     comp.render_frame()
-            if not hosted_winit_present_pure_simple_pixels(presenter, comp.pure_simple_pixel_buffer(), comp.width, comp.height):
+            if (not raster.window_present_enabled() and
+                not hosted_winit_present_pure_simple_pixels(presenter, comp.pure_simple_pixel_buffer(), comp.width, comp.height)):
                 print "ERROR: hosted WM motion pure-Simple frame presentation failed"
+                running = false
+                continue
+        elif raster.window_present_enabled():
+            if not raster.represent_retained_window():
+                print "ERROR: hosted WM retained Vulkan frame presentation failed"
                 running = false
                 continue
 

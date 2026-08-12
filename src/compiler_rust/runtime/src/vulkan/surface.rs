@@ -13,6 +13,20 @@ pub struct Surface {
 }
 
 impl Surface {
+    #[cfg(target_os = "linux")]
+    pub fn new_xlib(instance: Arc<VulkanInstance>, display: i64, window: i64) -> VulkanResult<Arc<Self>> {
+        if display == 0 || window <= 0 {
+            return Err(VulkanError::SurfaceError("invalid Xlib window descriptor".to_string()));
+        }
+        let loader = ash::khr::xlib_surface::Instance::new(instance.entry(), instance.instance());
+        let info = vk::XlibSurfaceCreateInfoKHR::default()
+            .dpy(display as *mut vk::Display)
+            .window(window as vk::Window);
+        let surface = unsafe { loader.create_xlib_surface(&info, None) }
+            .map_err(|e| VulkanError::SurfaceError(format!("Failed to adopt Xlib surface: {:?}", e)))?;
+        Ok(Arc::new(Self::from_handle(instance, surface)))
+    }
+
     /// Create a headless presentation surface for same-device swapchain tests.
     pub fn new_headless(instance: Arc<VulkanInstance>) -> VulkanResult<Arc<Self>> {
         let loader = ash::ext::headless_surface::Instance::new(instance.entry(), instance.instance());

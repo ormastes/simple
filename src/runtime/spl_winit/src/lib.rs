@@ -29,6 +29,7 @@ use std::num::NonZeroU32;
 use std::os::raw::c_char;
 use std::sync::Arc;
 use std::time::Duration;
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 
 use softbuffer::{Context, Surface};
 use winit::application::ApplicationHandler;
@@ -818,6 +819,46 @@ pub extern "C" fn rt_winit_window_inner_height(win: i64) -> i64 {
         let borrow = cell.borrow();
         borrow.as_ref().and_then(|ps| ps.inner.windows.get(&win))
             .map(|slot| slot.window.inner_size().height as i64).unwrap_or(0)
+    })
+}
+
+/// Platform descriptor for same-window Vulkan adoption. 1 = Linux Xlib.
+/// Unsupported window systems return zero and must retain the buffer presenter.
+#[no_mangle]
+pub extern "C" fn rt_winit_window_surface_kind(win: i64) -> i64 {
+    PUMP.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(slot) = borrow.as_ref().and_then(|ps| ps.inner.windows.get(&win)) else { return 0; };
+        match (slot.window.display_handle(), slot.window.window_handle()) {
+            (Ok(display), Ok(window)) if matches!(display.as_raw(), RawDisplayHandle::Xlib(_))
+                && matches!(window.as_raw(), RawWindowHandle::Xlib(_)) => 1,
+            _ => 0,
+        }
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn rt_winit_window_surface_display(win: i64) -> i64 {
+    PUMP.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(slot) = borrow.as_ref().and_then(|ps| ps.inner.windows.get(&win)) else { return 0; };
+        match slot.window.display_handle().map(|h| h.as_raw()) {
+            Ok(RawDisplayHandle::Xlib(handle)) =>
+                handle.display.map(|p| p.as_ptr() as i64).unwrap_or(0),
+            _ => 0,
+        }
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn rt_winit_window_surface_window(win: i64) -> i64 {
+    PUMP.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(slot) = borrow.as_ref().and_then(|ps| ps.inner.windows.get(&win)) else { return 0; };
+        match slot.window.window_handle().map(|h| h.as_raw()) {
+            Ok(RawWindowHandle::Xlib(handle)) => handle.window as i64,
+            _ => 0,
+        }
     })
 }
 

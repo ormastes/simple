@@ -122,6 +122,28 @@ pub struct WindowManager {
 }
 
 impl WindowManager {
+    #[cfg(target_os = "linux")]
+    pub fn xlib_descriptor(&self, handle: WindowHandle) -> VulkanResult<(i64, i64)> {
+        let windows = self.windows.lock();
+        let state = windows.get(&handle)
+            .ok_or_else(|| VulkanError::WindowError(format!("Window {} not found", handle)))?;
+        let display = state.window.display_handle()
+            .map_err(|e| VulkanError::WindowError(format!("display handle: {e}")))?;
+        let window = state.window.window_handle()
+            .map_err(|e| VulkanError::WindowError(format!("window handle: {e}")))?;
+        match (display.as_raw(), window.as_raw()) {
+            (raw_window_handle::RawDisplayHandle::Xlib(d),
+             raw_window_handle::RawWindowHandle::Xlib(w)) => {
+                let ptr = d.display.map(|p| p.as_ptr() as i64).unwrap_or(0);
+                if ptr == 0 || w.window == 0 {
+                    return Err(VulkanError::WindowError("empty Xlib descriptor".to_string()));
+                }
+                Ok((ptr, w.window as i64))
+            }
+            _ => Err(VulkanError::WindowError("window is not Xlib".to_string())),
+        }
+    }
+
     /// Create a new window manager
     pub fn new(instance: Arc<VulkanInstance>) -> VulkanResult<Self> {
         let (event_sender, event_receiver) = crossbeam::channel::unbounded();
