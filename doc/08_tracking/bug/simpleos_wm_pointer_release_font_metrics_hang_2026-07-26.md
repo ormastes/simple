@@ -302,3 +302,27 @@ receipt print a valid generation and the evidence stage would pass immediately
 window hits this. The redundant-render question is worth raising on its own
 merits, but it is NOT the fix for this bug and must not be used to turn the
 gate green.
+
+## New data point: gui showcase at 240x180 never paints frame 1 (2026-08-13)
+
+Same family, new symptom context. `main_gui.spl` (seed interpreter, GlyphBitmap
+HIR fallback active) at `SIMPLE_SHOWCASE_W=480 SIMPLE_SHOWCASE_H=360` paints
+frame 1 in ~15-17 min CPU; at `240x180` it had NOT painted after 35+ min CPU
+at 100% on one core. The `[rfm]` receipts show the difference is resolve
+VOLUME, not per-call cost: the 480x360 run emitted 698 `[rfm]` lines over its
+whole life (multiple frames); the 240x180 run emitted 7258+ lines before frame
+1 completed, nearly all of them the repeating cycle
+`default-font -> renderer-bound -> cache-lookup -> cache-hit`
+(family=Noto Sans Mono). So ~20x more `resolve_font_metrics_with_language`
+calls at the SMALLER window, all cache-hit — some scene-build or raster loop
+scales inversely with viewport size and re-resolves the same strings. That
+supports the "pathological slowness, not a fixed infinite loop" diagnosis
+above, and points the next investigation at the caller side (who re-resolves
+per frame build at small widths), not the font cache itself.
+
+Event-lane side note from the same session: a minimal `GuiRenderer` +
+`poll_event` probe (no scene build) receives resize/focus/motion/button
+press+release with correct coordinates and button codes (left=0, right=1) as
+long as the window is mapped and polling is prompt. Synthetic XTEST clicks on
+an UNMAPPED winit window (`xwininfo` Map State: IsUnMapped) are silently lost
+— check map state before trusting a negative event result on a bare X server.
