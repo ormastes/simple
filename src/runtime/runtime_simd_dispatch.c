@@ -1317,6 +1317,67 @@ static void engine2d_blend_into(int64_t* out, const int64_t* dst,
     }
     engine2d_blend_into_sse2(out, dst, src, n);
     return;
+#elif defined(__riscv) && defined(__riscv_vector)
+    int64_t i = 0;
+    if (n > 0) engine2d_record_simd_row_hit();
+    while (i < n) {
+        size_t request = (size_t)(n - i);
+        if (request > 64) request = 64;
+        size_t vl = __riscv_vsetvl_e32m1(request);
+        /* Packed pixels occupy the low word of each 64-bit raw lane.  Strided
+           loads keep the arithmetic in e32 lanes without a temporary unpack. */
+        vuint32m1_t sv = __riscv_vlse32_v_u32m1(
+            (const uint32_t*)(const void*)(src + i), (ptrdiff_t)sizeof(int64_t), vl);
+        vuint32m1_t dv = __riscv_vlse32_v_u32m1(
+            (const uint32_t*)(const void*)(dst + i), (ptrdiff_t)sizeof(int64_t), vl);
+        vuint32m1_t sav = __riscv_vand_vx_u32m1(
+            __riscv_vsrl_vx_u32m1(sv, 24, vl), 255u, vl);
+        vuint32m1_t dav = __riscv_vand_vx_u32m1(
+            __riscv_vsrl_vx_u32m1(dv, 24, vl), 255u, vl);
+        vuint32m1_t inv = __riscv_vrsub_vx_u32m1(sav, 255u, vl);
+        vuint32m1_t dw_num = __riscv_vmul_vv_u32m1(dav, inv, vl);
+        uint32_t s_words[64], d_words[64], sa[64], dw[64], dw_numerators[64];
+        uint32_t r_numerators[64], g_numerators[64], b_numerators[64];
+        __riscv_vse32_v_u32m1(s_words, sv, vl);
+        __riscv_vse32_v_u32m1(d_words, dv, vl);
+        __riscv_vse32_v_u32m1(sa, sav, vl);
+        __riscv_vse32_v_u32m1(dw_numerators, dw_num, vl);
+        for (size_t lane = 0; lane < vl; lane++)
+            dw[lane] = dw_numerators[lane] / 255u;
+        vuint32m1_t dwv = __riscv_vle32_v_u32m1(dw, vl);
+#define ENGINE2D_RVV_CHANNEL_NUMERATOR(shift) \
+        __riscv_vadd_vv_u32m1( \
+            __riscv_vmul_vv_u32m1( \
+                __riscv_vand_vx_u32m1(__riscv_vsrl_vx_u32m1(sv, shift, vl), 255u, vl), \
+                sav, vl), \
+            __riscv_vmul_vv_u32m1( \
+                __riscv_vand_vx_u32m1(__riscv_vsrl_vx_u32m1(dv, shift, vl), 255u, vl), \
+                dwv, vl), vl)
+        __riscv_vse32_v_u32m1(r_numerators, ENGINE2D_RVV_CHANNEL_NUMERATOR(16), vl);
+        __riscv_vse32_v_u32m1(g_numerators, ENGINE2D_RVV_CHANNEL_NUMERATOR(8), vl);
+        __riscv_vse32_v_u32m1(b_numerators, ENGINE2D_RVV_CHANNEL_NUMERATOR(0), vl);
+#undef ENGINE2D_RVV_CHANNEL_NUMERATOR
+        for (size_t lane = 0; lane < vl; lane++) {
+            uint32_t s = s_words[lane], d = d_words[lane];
+            uint32_t source_alpha = sa[lane];
+            if (source_alpha == 255u) {
+                out[i + (int64_t)lane] = (int64_t)(uint64_t)s;
+                continue;
+            }
+            if (source_alpha == 0u) {
+                out[i + (int64_t)lane] = (int64_t)(uint64_t)d;
+                continue;
+            }
+            uint32_t oa = source_alpha + dw[lane];
+            uint32_t r = r_numerators[lane] / oa;
+            uint32_t g = g_numerators[lane] / oa;
+            uint32_t b = b_numerators[lane] / oa;
+            out[i + (int64_t)lane] = (int64_t)(uint64_t)
+                ((oa << 24) | (r << 16) | (g << 8) | b);
+        }
+        i += (int64_t)vl;
+    }
+    return;
 #else
     for (int64_t i = 0; i < n; i++) {
         out[i] = engine2d_blend_pixel(src[i], dst[i]);

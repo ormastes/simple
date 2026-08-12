@@ -100,7 +100,8 @@ int main(void) {
     if (output_pixels[0] != (int64_t)((uint64_t)0x80ffffff << 3) ||
         output_pixels[1] != (int64_t)((uint64_t)0xbfaa0054 << 3) ||
         output_pixels[2] != (int64_t)((uint64_t)0x00112233 << 3)) return 9;
-#if defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64)
+#if defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64) || \
+    (defined(__riscv) && defined(__riscv_vector))
     if (rt_simd_engine2d_neon_hits() != 1) return 10;
 #else
     if (rt_simd_engine2d_neon_hits() != 0) return 10;

@@ -220,6 +220,8 @@ int main(void) {
 #elif defined(__x86_64__) || defined(_M_X64)
     fprintf(stderr, "ENGINE2D_SIMD_C_TEST: x86_64 %s path active\n",
             simd_detect_avx2() ? "AVX2" : "SSE2");
+#elif defined(__riscv) && defined(__riscv_vector)
+    fprintf(stderr, "ENGINE2D_SIMD_C_TEST: RVV path active (riscv)\n");
 #else
     fprintf(stderr, "ENGINE2D_SIMD_C_TEST: scalar path\n");
 #endif
