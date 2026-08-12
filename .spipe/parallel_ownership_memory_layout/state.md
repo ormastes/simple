@@ -455,3 +455,12 @@ dev-done
   The focused Rust test build reached compilation but hit its 90-second cap
   before executing, so re-admission still requires a fresh runtime artifact and
   a non-stub W^X execution.
+- impl: Froze the missing compiler-owned typed-view declaration authority for
+  the next WP-22 producer tranche. A declaration binds one final MIR
+  function/base local to an exact compiler-owned raw allocation provenance,
+  source revision, fixed capacity/schema, AoS/SoA plan, and bounds proof.
+  Admission validates every field recipe and currently requires 8-byte scalar
+  fields. RuntimeValue arrays, external/pinned storage, address-observed data,
+  missing bounds, undersized allocations, and unsupported layouts fail closed.
+  The focused spec passes 3/3. Automatic source-pattern production and
+  registration of the provenance/revision evidence remain open.

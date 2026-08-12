@@ -1,0 +1,106 @@
+# Compiler-owned declaration that authorizes a typed fixed-record storage view.
+#
+# This is deliberately not a public Array<T> contract.  It binds an exact raw
+# allocation and its source revision to one MIR function/base local before the
+# logical PROJECT_FIELD producer is allowed to run.
+
+use compiler.mir_opt.mir_opt.storage_projection_lowering.{
+    MirStorageFieldBindingV1, MirStorageViewBindingV1,
+    MirStorageViewSiteBindingV1, mir_storage_address_recipe_v1,
+    mir_storage_view_binding_v1, mir_storage_view_site_binding_v1
+}
+use std.common.structural.storage_layout.storage_layout_contracts.{
+    StorageLayoutKind, StorageLayoutPlanV1
+}
+
+enum MirTypedStorageBackingKindV1:
+    CompilerOwnedRaw
+    RuntimeValueArray
+    ExternalPinned
+
+struct MirTypedStorageViewDeclarationV1:
+    function_symbol_id: i64
+    base_local_id: i64
+    logical_type_id: i64
+    allocation_provenance: text
+    source_revision: text
+    revision: i64
+    backing_kind: MirTypedStorageBackingKindV1
+    element_count: i64
+    allocation_byte_len: i64
+    logical_stride: i64
+    address_observed: bool
+    index_bounds_proven: bool
+    plan: StorageLayoutPlanV1
+    fields: [MirStorageFieldBindingV1]
+
+struct MirTypedStorageViewAdmissionV1:
+    ok: bool
+    site: MirStorageViewSiteBindingV1?
+    allocation_provenance: text
+    source_revision: text
+    reason: text
+
+fn mir_typed_storage_view_declaration_v1(
+    function_symbol_id: i64, base_local_id: i64, logical_type_id: i64,
+    allocation_provenance: text, source_revision: text, revision: i64,
+    backing_kind: MirTypedStorageBackingKindV1, element_count: i64,
+    allocation_byte_len: i64, logical_stride: i64, address_observed: bool,
+    index_bounds_proven: bool, plan: StorageLayoutPlanV1,
+    fields: [MirStorageFieldBindingV1]
+) -> MirTypedStorageViewDeclarationV1:
+    MirTypedStorageViewDeclarationV1(function_symbol_id: function_symbol_id,
+        base_local_id: base_local_id, logical_type_id: logical_type_id,
+        allocation_provenance: allocation_provenance,
+        source_revision: source_revision, revision: revision,
+        backing_kind: backing_kind,
+        element_count: element_count, allocation_byte_len: allocation_byte_len,
+        logical_stride: logical_stride, address_observed: address_observed,
+        index_bounds_proven: index_bounds_proven, plan: plan, fields: fields)
+
+fn mir_typed_storage_view_admission_failure(
+    declaration: MirTypedStorageViewDeclarationV1, reason: text
+) -> MirTypedStorageViewAdmissionV1:
+    MirTypedStorageViewAdmissionV1(ok: false, site: nil,
+        allocation_provenance: declaration.allocation_provenance,
+        source_revision: declaration.source_revision, reason: reason)
+
+fn admit_mir_typed_storage_view_v1(
+    declaration: MirTypedStorageViewDeclarationV1
+) -> MirTypedStorageViewAdmissionV1:
+    if declaration.function_symbol_id < 0 or declaration.base_local_id < 0:
+        return mir_typed_storage_view_admission_failure(declaration,
+            "invalid-storage-view-site")
+    if declaration.allocation_provenance == "" or declaration.source_revision == ""
+        or declaration.revision < 0:
+        return mir_typed_storage_view_admission_failure(declaration,
+            "missing-storage-view-identity")
+    if declaration.backing_kind != MirTypedStorageBackingKindV1.CompilerOwnedRaw:
+        return mir_typed_storage_view_admission_failure(declaration,
+            "storage-view-backing-not-compiler-owned-raw")
+    if not declaration.index_bounds_proven:
+        return mir_typed_storage_view_admission_failure(declaration,
+            "storage-view-index-bounds-unproven")
+    if declaration.plan.layout != StorageLayoutKind.AoS
+        and declaration.plan.layout != StorageLayoutKind.SoA:
+        return mir_typed_storage_view_admission_failure(declaration,
+            "storage-view-layout-not-affine-host")
+    val binding = mir_storage_view_binding_v1(declaration.logical_type_id,
+        declaration.revision, declaration.element_count, declaration.allocation_byte_len,
+        declaration.logical_stride, declaration.address_observed,
+        declaration.plan, declaration.fields)
+    # Validate the complete schema/allocation, not only the field eventually
+    # projected. Every declared field must admit an exact affine recipe.
+    for field in declaration.fields:
+        val recipe = mir_storage_address_recipe_v1(binding, field.field_id)
+        if not recipe.ok:
+            return mir_typed_storage_view_admission_failure(declaration,
+                "storage-view-recipe:{recipe.reason}")
+        if recipe.field_size != 8:
+            return mir_typed_storage_view_admission_failure(declaration,
+                "native-storage-field-width-unsupported")
+    val site = mir_storage_view_site_binding_v1(declaration.function_symbol_id,
+        declaration.base_local_id, true, binding)
+    MirTypedStorageViewAdmissionV1(ok: true, site: Some(site),
+        allocation_provenance: declaration.allocation_provenance,
+        source_revision: declaration.source_revision, reason: "ok")

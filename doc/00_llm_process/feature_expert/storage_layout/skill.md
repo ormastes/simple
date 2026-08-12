@@ -5,6 +5,7 @@
 - `src/lib/common/structural/storage_layout/`
 - `src/compiler/60.mir_opt/mir_opt/storage_access_analysis.spl`
 - `src/compiler/60.mir_opt/mir_opt/storage_projection_lowering.spl`
+- `src/compiler/60.mir_opt/mir_opt/typed_storage_view_declaration.spl`
 - `src/compiler/70.backend/backend/native/isel_x86_64.spl`
 - `doc/03_plan/language/parallel_memory_mdsoc_plus_parallel_agents_2026-08-12.md`
 
@@ -17,10 +18,12 @@
 - Exact function/base-local rewrite from `mir.storage.project_field.v1`.
 - Module-qualified `CompileContext` registry, MIR-coupled eviction, late atomic
   rewrite, and complete sorted binding identity in native cache scope.
+- Compiler-private typed-view declaration admission for exact raw allocation
+  provenance, source revision, fixed schema/capacity, and bounds evidence.
 
 ## Still proposed or incomplete
 
-- Automatic typed `T[]` allocation and view binding.
+- Automatic source-pattern production and public typed `T[]` allocation/view binding.
 - Complete logical field load/store rewriting and other host backends.
 - Grouped, tiled, packed, and factored physical mappings.
 - Address-observation inference, PGO/cost inputs, view cache, and production pilots.
@@ -40,6 +43,8 @@
    worker or store them in `MirModule`.
 9. Admit only x86_64 custom-native 8-byte fields until other backend/width
    owners land; every unsupported route is an error.
+10. A producer must start from `CompilerOwnedRaw` declaration evidence. Never
+    relabel a RuntimeValue array or external/pinned allocation as typed storage.
 
 The W^X store/load parity scenario requires a fresh runtime containing
 `rt_ptr_read_u8`; a stale runner or unresolved-symbol stub is not evidence.
@@ -49,4 +54,5 @@ The W^X store/load parity scenario requires a fresh runtime containing
 ```text
 bin/simple test test/01_unit/common/structural/storage_layout_contract_spec.spl --mode=interpreter
 bin/simple test test/01_unit/compiler/backend/native/storage_layout_native_projection_spec.spl --mode=interpreter
+bin/simple test test/01_unit/compiler/mir_opt/typed_storage_view_declaration_spec.spl --mode=interpreter
 ```

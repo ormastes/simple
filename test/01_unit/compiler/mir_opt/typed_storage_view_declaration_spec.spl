@@ -1,0 +1,64 @@
+use std.spec.{describe, it, assert_equal, assert_true, assert_false}
+use compiler.mir_opt.mir_opt.storage_projection_lowering.{mir_storage_field_binding_v1}
+use compiler.mir_opt.mir_opt.typed_storage_view_declaration.*
+use std.common.structural.storage_layout.storage_layout_contracts.{
+    StorageConversionPolicy, StorageLayoutKind, storage_layout_plan_v1
+}
+
+fn declaration(backing: MirTypedStorageBackingKindV1, layout: StorageLayoutKind,
+               allocation_bytes: i64, bounds: bool, observed: bool,
+               field_size: i64) -> MirTypedStorageViewDeclarationV1:
+    val plan = storage_layout_plan_v1(9101, layout, 1, 8, false,
+        StorageConversionPolicy.Cached, "typed-view-policy-v1", "compiler-private")
+    mir_typed_storage_view_declaration_v1(41, 3, 9101,
+        "arena:task-7:allocation-2", "snapshot:abc123", 4, backing, 5,
+        allocation_bytes, 24, observed, bounds, plan, [
+            mir_storage_field_binding_v1(0, 0, field_size, 0),
+            mir_storage_field_binding_v1(1, 8, 8, 40),
+            mir_storage_field_binding_v1(2, 16, 8, 80)
+        ])
+
+describe "compiler-owned typed storage view declarations":
+    it "admits exact private AoS and SoA allocations":
+        for layout in [StorageLayoutKind.AoS, StorageLayoutKind.SoA]:
+            val admitted = admit_mir_typed_storage_view_v1(declaration(
+                MirTypedStorageBackingKindV1.CompilerOwnedRaw, layout, 128,
+                true, false, 8))
+            assert_true(admitted.ok)
+            assert_equal(admitted.reason, "ok")
+            assert_equal(admitted.allocation_provenance, "arena:task-7:allocation-2")
+            assert_equal(admitted.source_revision, "snapshot:abc123")
+            assert_true(admitted.site.?)
+            assert_equal(admitted.site.unwrap().function_symbol_id, 41)
+            assert_equal(admitted.site.unwrap().base_local_id, 3)
+            assert_equal(admitted.site.unwrap().binding.revision, 4)
+
+    it "rejects RuntimeValue and external storage rather than relabeling it":
+        for backing in [MirTypedStorageBackingKindV1.RuntimeValueArray,
+                        MirTypedStorageBackingKindV1.ExternalPinned]:
+            val rejected = admit_mir_typed_storage_view_v1(declaration(backing,
+                StorageLayoutKind.SoA, 128, true, false, 8))
+            assert_false(rejected.ok)
+            assert_equal(rejected.reason,
+                "storage-view-backing-not-compiler-owned-raw")
+            assert_false(rejected.site.?)
+
+    it "fails closed for missing bounds allocation address and width evidence":
+        val no_bounds = admit_mir_typed_storage_view_v1(declaration(
+            MirTypedStorageBackingKindV1.CompilerOwnedRaw,
+            StorageLayoutKind.SoA, 128, false, false, 8))
+        assert_equal(no_bounds.reason, "storage-view-index-bounds-unproven")
+        val too_small = admit_mir_typed_storage_view_v1(declaration(
+            MirTypedStorageBackingKindV1.CompilerOwnedRaw,
+            StorageLayoutKind.SoA, 64, true, false, 8))
+        assert_equal(too_small.reason,
+            "storage-view-recipe:storage-view-allocation-too-small")
+        val observed = admit_mir_typed_storage_view_v1(declaration(
+            MirTypedStorageBackingKindV1.CompilerOwnedRaw,
+            StorageLayoutKind.AoS, 128, true, true, 8))
+        assert_equal(observed.reason,
+            "storage-view-recipe:address-observed-or-abi-pinned")
+        val narrow = admit_mir_typed_storage_view_v1(declaration(
+            MirTypedStorageBackingKindV1.CompilerOwnedRaw,
+            StorageLayoutKind.AoS, 128, true, false, 4))
+        assert_equal(narrow.reason, "native-storage-field-width-unsupported")

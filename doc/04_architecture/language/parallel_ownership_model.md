@@ -35,6 +35,21 @@ bounded transport --> owner validation/order/conflict/apply --> Snapshot N+1
 
 Sibling layers remain tree-private. Any compiler/runtime shared identifier is extracted into one of these common nodes. No new grammar is required: `mut`, `iso`, `move`, attributes, library APIs, and typed policy are the semantic surface.
 
+## Compiler-owned typed storage authority
+
+Physical projection is admitted only from a compiler-private declaration that
+binds a final MIR function/base local to one exact compiler-owned raw allocation,
+source revision, fixed record schema/capacity, bounds proof, and the canonical
+`StorageLayoutPlanV1`. The runtime region remains owned by its allocation
+domain; the declaration is metadata evidence, not a second owner.
+
+Ordinary RuntimeValue arrays, external or ABI-pinned storage, address-observed
+data, unknown bounds, and unsupported field widths/layouts cannot enter this
+route. MIR lowering will eventually consume an admitted declaration and emit
+`mir.storage.project_field.v1` plus its site evidence atomically. The driver
+module-qualifies and freezes that evidence before cache lookup and parallel
+codegen; workers may only read module-local snapshots.
+
 ## Migration order
 
 Freeze contracts and diagnostic names; make boundary/borrow facts authoritative; replace unsafe transport and add bounded task lifecycle; add parent commit; then implement typed storage layouts and MDSOC/project pilots. Performance lowering cannot precede the raw-pointer and alias-soundness gates.
