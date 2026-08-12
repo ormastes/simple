@@ -477,3 +477,13 @@ dev-done
   passes 11/11. The production helper accepts declarations, runs the producer
   atomically, resolves logical sites before generic optimization, and then
   compiles backend-ready address MIR.
+- impl: Added the authoritative MIR allocation owner for compiler-private typed
+  raw views. `MirBuilder.emit_typed_storage_alloc_owned_raw_v1` emits one exact
+  raw-allocation intrinsic and returns an immutable allocation fact containing
+  final base LocalId, bytes, logical type, numeric/source revisions, count,
+  stable compiler-site provenance, and allocation identity. MIR-opt converts
+  that fact into a declaration without a layer inversion. The producer requires
+  the same allocation identity, consumes the owner intrinsic, and materializes
+  `rt_alloc` before codegen. Focused owner/declaration/producer suites pass
+  1/1, 4/4, and 4/4. No existing RuntimeValue, mmap, linker, or ABI-pinned
+  allocation is relabeled. Driver full-evidence registration/freeze remains.

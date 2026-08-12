@@ -1,5 +1,6 @@
 use std.spec.{describe, it, assert_equal, assert_true, assert_false}
 use compiler.mir.mir_data.*
+use compiler.mir.intrinsics.{MIR_STORAGE_ALLOC_OWNED_RAW_V1}
 use compiler.hir.hir_types.{SymbolId}
 use compiler.common.diagnostics.span.{Span}
 use compiler.mir_opt.mir_opt.storage_projection_lowering.{
@@ -19,7 +20,8 @@ fn producer_declaration(layout: StorageLayoutKind) -> MirTypedStorageViewDeclara
     val plan = storage_layout_plan_v1(9201, layout, 1, 8, false,
         StorageConversionPolicy.Cached, "producer-policy-v1", "compiler-private")
     mir_typed_storage_view_declaration_v1(41, 0, 9201,
-        "arena:task-9:allocation-1", "snapshot:def456", 4,
+        "arena:task-9:allocation-1", "allocation:9201:4:5:128",
+        "snapshot:def456", 4,
         MirTypedStorageBackingKindV1.CompilerOwnedRaw, 5, 128, 24, false,
         true, plan, [
             mir_storage_field_binding_v1(0, 0, 8, 0),
@@ -32,7 +34,7 @@ fn producer_module(marker: bool, index_value: i64, extra_use: bool) -> MirModule
     val record_type = MirType(kind: MirTypeKind.Struct(SymbolId.new(9201)))
     val base_type = MirType(kind: MirTypeKind.Ptr(pointee: record_type, mutable: true))
     val locals = [
-        MirLocal(id: LocalId(id: 0), name: Some("base"), type_: base_type, kind: LocalKind.Arg(0)),
+        MirLocal(id: LocalId(id: 0), name: Some("base"), type_: base_type, kind: LocalKind.Temp),
         MirLocal(id: LocalId(id: 1), name: Some("index"), type_: i64_type, kind: LocalKind.Temp),
         MirLocal(id: LocalId(id: 2), name: Some("element_ptr"), type_: base_type, kind: LocalKind.Temp),
         MirLocal(id: LocalId(id: 3), name: Some("record"), type_: record_type, kind: LocalKind.Temp),
@@ -41,10 +43,13 @@ fn producer_module(marker: bool, index_value: i64, extra_use: bool) -> MirModule
     ]
     var instructions: [MirInst] = []
     if marker:
-        instructions.push(MirInst(kind: MirInstKind.Intrinsic(nil,
-            MIR_STORAGE_OWNED_RAW_BASE_V1, [MirOperand.copy(LocalId(id: 0)),
-                MirOperand.const_int(128), MirOperand.const_int(9201),
-                MirOperand.const_int(4), MirOperand.const_int(5)]), span: nil))
+        instructions.push(MirInst(kind: MirInstKind.Intrinsic(Some(LocalId(id: 0)),
+            MIR_STORAGE_ALLOC_OWNED_RAW_V1, [MirOperand.const_int(128),
+                MirOperand.const_int(9201),
+                MirOperand.const_int(4), MirOperand.const_int(5),
+                MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("allocation:9201:4:5:128"),
+                    MirType(kind: MirTypeKind.Opaque("str"))))]), span: nil))
     instructions.push(MirInst(kind: MirInstKind.Const(LocalId(id: 1),
         MirConstValue.Int(index_value), i64_type), span: nil))
     instructions.push(MirInst(kind: MirInstKind.GetElementPtr(LocalId(id: 2),
@@ -57,7 +62,7 @@ fn producer_module(marker: bool, index_value: i64, extra_use: bool) -> MirModule
         instructions.push(MirInst(kind: MirInstKind.Copy(LocalId(id: 5),
             LocalId(id: 2)), span: nil))
     val function = MirFunction(symbol: SymbolId.new(41), name: "read_mass",
-        signature: MirSignature(params: [base_type], return_type: i64_type,
+        signature: MirSignature(params: [], return_type: i64_type,
             is_variadic: false), locals: locals,
         blocks: [MirBlock(id: BlockId.new(0), label: Some("entry"),
             instructions: instructions,
@@ -130,7 +135,7 @@ describe "automatic compiler-owned typed storage producer":
         val no_marker = produce_mir_typed_storage_views_v1(no_marker_input,
             [producer_declaration(StorageLayoutKind.SoA)])
         assert_false(no_marker.ok)
-        assert_equal(no_marker.reason, "storage-view-owned-base-marker-missing")
+        assert_equal(no_marker.reason, "storage-view-owned-raw-allocation-missing")
         assert_equal(count_intrinsic(no_marker.module, MIR_STORAGE_PROJECT_FIELD_V1), 0)
         val out_of_range = produce_mir_typed_storage_views_v1(
             producer_module(true, 5, false),
@@ -144,7 +149,7 @@ describe "automatic compiler-owned typed storage producer":
     it "rejects unused declarations rather than emitting stale evidence":
         val empty = producer_module(true, 3, false)
         val declaration = mir_typed_storage_view_declaration_v1(99, 0, 9201,
-            "arena:other", "snapshot:other", 4,
+            "arena:other", "allocation:other", "snapshot:other", 4,
             MirTypedStorageBackingKindV1.CompilerOwnedRaw, 5, 128, 24, false,
             true, producer_declaration(StorageLayoutKind.AoS).plan,
             producer_declaration(StorageLayoutKind.AoS).fields)

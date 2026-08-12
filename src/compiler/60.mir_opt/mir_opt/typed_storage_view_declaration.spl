@@ -9,6 +9,7 @@ use compiler.mir_opt.mir_opt.storage_projection_lowering.{
     MirStorageViewSiteBindingV1, mir_storage_address_recipe_v1,
     mir_storage_view_binding_v1, mir_storage_view_site_binding_v1
 }
+use compiler.mir.mir_data.{MirOwnedRawAllocationFactV1}
 use std.common.structural.storage_layout.storage_layout_contracts.{
     StorageLayoutKind, StorageLayoutPlanV1
 }
@@ -23,6 +24,7 @@ struct MirTypedStorageViewDeclarationV1:
     base_local_id: i64
     logical_type_id: i64
     allocation_provenance: text
+    allocation_identity: text
     source_revision: text
     revision: i64
     backing_kind: MirTypedStorageBackingKindV1
@@ -43,7 +45,8 @@ struct MirTypedStorageViewAdmissionV1:
 
 fn mir_typed_storage_view_declaration_v1(
     function_symbol_id: i64, base_local_id: i64, logical_type_id: i64,
-    allocation_provenance: text, source_revision: text, revision: i64,
+    allocation_provenance: text, allocation_identity: text,
+    source_revision: text, revision: i64,
     backing_kind: MirTypedStorageBackingKindV1, element_count: i64,
     allocation_byte_len: i64, logical_stride: i64, address_observed: bool,
     index_bounds_proven: bool, plan: StorageLayoutPlanV1,
@@ -52,11 +55,25 @@ fn mir_typed_storage_view_declaration_v1(
     MirTypedStorageViewDeclarationV1(function_symbol_id: function_symbol_id,
         base_local_id: base_local_id, logical_type_id: logical_type_id,
         allocation_provenance: allocation_provenance,
+        allocation_identity: allocation_identity,
         source_revision: source_revision, revision: revision,
         backing_kind: backing_kind,
         element_count: element_count, allocation_byte_len: allocation_byte_len,
         logical_stride: logical_stride, address_observed: address_observed,
         index_bounds_proven: index_bounds_proven, plan: plan, fields: fields)
+
+fn mir_typed_storage_view_declaration_from_allocation_v1(
+    function_symbol_id: i64, fact: MirOwnedRawAllocationFactV1,
+    logical_stride: i64, address_observed: bool,
+    index_bounds_proven: bool, plan: StorageLayoutPlanV1,
+    fields: [MirStorageFieldBindingV1]
+) -> MirTypedStorageViewDeclarationV1:
+    mir_typed_storage_view_declaration_v1(function_symbol_id,
+        fact.base_local.id, fact.logical_type_id, fact.allocation_provenance,
+        fact.allocation_identity, fact.source_revision, fact.revision,
+        MirTypedStorageBackingKindV1.CompilerOwnedRaw, fact.element_count,
+        fact.allocation_byte_len, logical_stride, address_observed,
+        index_bounds_proven, plan, fields)
 
 fn mir_typed_storage_view_admission_failure(
     declaration: MirTypedStorageViewDeclarationV1, reason: text
@@ -71,7 +88,8 @@ fn admit_mir_typed_storage_view_v1(
     if declaration.function_symbol_id < 0 or declaration.base_local_id < 0:
         return mir_typed_storage_view_admission_failure(declaration,
             "invalid-storage-view-site")
-    if declaration.allocation_provenance == "" or declaration.source_revision == ""
+    if declaration.allocation_provenance == "" or declaration.allocation_identity == ""
+        or declaration.source_revision == ""
         or declaration.revision < 0:
         return mir_typed_storage_view_admission_failure(declaration,
             "missing-storage-view-identity")

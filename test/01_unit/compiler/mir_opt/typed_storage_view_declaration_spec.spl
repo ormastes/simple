@@ -1,6 +1,7 @@
 use std.spec.{describe, it, assert_equal, assert_true, assert_false}
 use compiler.mir_opt.mir_opt.storage_projection_lowering.{mir_storage_field_binding_v1}
 use compiler.mir_opt.mir_opt.typed_storage_view_declaration.*
+use compiler.mir.mir_data.{MirBuilder, MirType}
 use std.common.structural.storage_layout.storage_layout_contracts.{
     StorageConversionPolicy, StorageLayoutKind, storage_layout_plan_v1
 }
@@ -11,7 +12,8 @@ fn declaration(backing: MirTypedStorageBackingKindV1, layout: StorageLayoutKind,
     val plan = storage_layout_plan_v1(9101, layout, 1, 8, false,
         StorageConversionPolicy.Cached, "typed-view-policy-v1", "compiler-private")
     mir_typed_storage_view_declaration_v1(41, 3, 9101,
-        "arena:task-7:allocation-2", "snapshot:abc123", 4, backing, 5,
+        "arena:task-7:allocation-2", "allocation:9201:4:5:128",
+        "snapshot:abc123", 4, backing, 5,
         allocation_bytes, 24, observed, bounds, plan, [
             mir_storage_field_binding_v1(0, 0, field_size, 0),
             mir_storage_field_binding_v1(1, 8, 8, 40),
@@ -19,6 +21,20 @@ fn declaration(backing: MirTypedStorageBackingKindV1, layout: StorageLayoutKind,
         ])
 
 describe "compiler-owned typed storage view declarations":
+    it "converts the allocation owner's fact without changing its identity":
+        var builder = MirBuilder.new()
+        val fact = builder.emit_typed_storage_alloc_owned_raw_v1(MirType.i64(),
+            128, 9101, 4, 5, "allocation:9101:4:5:128",
+            "compiler-site:particles:read_mass:0", "snapshot:abc123")
+        val template = declaration(MirTypedStorageBackingKindV1.CompilerOwnedRaw,
+            StorageLayoutKind.SoA, 128, true, false, 8)
+        val converted = mir_typed_storage_view_declaration_from_allocation_v1(
+            41, fact, 24, false, true, template.plan, template.fields)
+        assert_equal(converted.base_local_id, fact.base_local.id)
+        assert_equal(converted.allocation_identity, fact.allocation_identity)
+        assert_equal(converted.allocation_provenance, fact.allocation_provenance)
+        assert_equal(converted.source_revision, fact.source_revision)
+
     it "admits exact private AoS and SoA allocations":
         for layout in [StorageLayoutKind.AoS, StorageLayoutKind.SoA]:
             val admitted = admit_mir_typed_storage_view_v1(declaration(

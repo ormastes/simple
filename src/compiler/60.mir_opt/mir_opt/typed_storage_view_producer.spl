@@ -5,6 +5,7 @@
 # GEP -> Load(record) -> GetField(address) chain with PROJECT_FIELD.
 
 use compiler.mir.mir_data.*
+use compiler.mir.intrinsics.{MIR_STORAGE_ALLOC_OWNED_RAW_V1}
 use compiler.mir_opt.mir_opt.auto_vectorize_analysis.{get_inst_uses, get_operand_locals}
 use compiler.mir_opt.mir_opt.storage_projection_lowering.{
     MIR_STORAGE_PROJECT_FIELD_V1, MirStorageViewSiteBindingV1,
@@ -13,8 +14,6 @@ use compiler.mir_opt.mir_opt.storage_projection_lowering.{
 use compiler.mir_opt.mir_opt.typed_storage_view_declaration.{
     MirTypedStorageViewDeclarationV1, admit_mir_typed_storage_view_v1
 }
-
-val MIR_STORAGE_OWNED_RAW_BASE_V1: text = "mir.storage.owned_raw_base.v1"
 
 struct MirTypedStorageViewEvidenceV1:
     site: MirStorageViewSiteBindingV1
@@ -112,24 +111,30 @@ fn mir_typed_storage_const_before_v1(block: MirBlock, before: i64,
         case _: pass
     (false, 0)
 
-fn mir_typed_storage_has_owned_base_marker_v1(
+fn mir_typed_storage_const_text_v1(operand: MirOperand) -> text:
+    match operand.kind:
+        case Const(MirConstValue.Str(value), _): value
+        case _: ""
+
+fn mir_typed_storage_has_owned_base_allocation_v1(
     block: MirBlock, before: i64, declaration: MirTypedStorageViewDeclarationV1
 ) -> bool:
     var index = 0
     while index < before:
         match block.instructions[index].kind:
-            case Intrinsic(_, name, args):
-                if name == MIR_STORAGE_OWNED_RAW_BASE_V1 and args.len() == 5
-                    and mir_typed_storage_operand_local_v1(args[0]) == declaration.base_local_id:
-                    val bytes = mir_typed_storage_const_before_v1(block, index, args[1])
-                    val logical_type = mir_typed_storage_const_before_v1(block, index, args[2])
-                    val revision = mir_typed_storage_const_before_v1(block, index, args[3])
-                    val count = mir_typed_storage_const_before_v1(block, index, args[4])
+            case Intrinsic(dest, name, args):
+                if name == MIR_STORAGE_ALLOC_OWNED_RAW_V1 and dest.?
+                    and dest.unwrap().id == declaration.base_local_id and args.len() == 5:
+                    val bytes = mir_typed_storage_const_before_v1(block, index, args[0])
+                    val logical_type = mir_typed_storage_const_before_v1(block, index, args[1])
+                    val revision = mir_typed_storage_const_before_v1(block, index, args[2])
+                    val count = mir_typed_storage_const_before_v1(block, index, args[3])
+                    val identity = mir_typed_storage_const_text_v1(args[4])
                     if bytes[0] and bytes[1] == declaration.allocation_byte_len
                         and logical_type[0] and logical_type[1] == declaration.logical_type_id
                         and revision[0] and revision[1] == declaration.revision
                         and count[0] and count[1] == declaration.element_count:
-                        return true
+                        return identity == declaration.allocation_identity
             case _: pass
         index = index + 1
     false
@@ -176,10 +181,10 @@ fn produce_mir_typed_storage_views_v1(
                                     "duplicate-typed-storage-declaration")
                             if selected[0] >= 0 and indices.len() == 1:
                                 val declaration = declarations[selected[0]]
-                                if not mir_typed_storage_has_owned_base_marker_v1(
+                                if not mir_typed_storage_has_owned_base_allocation_v1(
                                     block, index, declaration):
                                     return mir_typed_storage_view_producer_failure(module,
-                                        "storage-view-owned-base-marker-missing")
+                                        "storage-view-owned-raw-allocation-missing")
                                 val proven_index = mir_typed_storage_const_before_v1(
                                     block, index, indices[0])
                                 if not proven_index[0] or proven_index[1] < 0
@@ -226,10 +231,24 @@ fn produce_mir_typed_storage_views_v1(
                 if not consumed:
                     var keep = true
                     match block.instructions[index].kind:
-                        case Intrinsic(_, name, _):
-                            # Allocation proof markers are compile-time
-                            # evidence. No backend may see or lower them.
-                            if name == MIR_STORAGE_OWNED_RAW_BASE_V1: keep = false
+                        case Intrinsic(dest, name, args):
+                            if name == MIR_STORAGE_ALLOC_OWNED_RAW_V1:
+                                # Materialize the admitted owner operation as
+                                # the ordinary runtime allocator call. The
+                                # compiler-private intrinsic never reaches a
+                                # backend.
+                                if not dest.? or args.len() != 5:
+                                    return mir_typed_storage_view_producer_failure(
+                                        module, "invalid-owned-raw-allocation")
+                                val alloc_sig = MirSignature(params: [MirType.i64()],
+                                    return_type: MirType.i64(), is_variadic: false)
+                                val alloc_fn = MirOperand(kind: MirOperandKind.Const(
+                                    MirConstValue.Str("rt_alloc"),
+                                    MirType(kind: MirTypeKind.FuncPtr(alloc_sig))))
+                                instructions.push(MirInst(kind: MirInstKind.Call(
+                                    dest, alloc_fn, [args[0]]),
+                                    span: block.instructions[index].span))
+                                keep = false
                         case _: pass
                     if keep: instructions.push(block.instructions[index])
                     index = index + 1

@@ -19,6 +19,7 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.common.attributes.{vhdl_hardware_metadata_default}
 use compiler.mir.mir_types.*
 use compiler.mir.mir_instructions.*
+use compiler.mir.intrinsics.{MIR_STORAGE_ALLOC_OWNED_RAW_V1}
 # `eprint` is not an implicit builtin under the self-hosted HIR resolver: the
 # Rust seed happened to resolve it ambiently, so the three [mir-call-value]
 # probes below compiled under stage2 but failed Stage 3 with
@@ -32,6 +33,16 @@ extern fn rt_env_get(key: text) -> text
 # ============================================================================
 # MIR Builder
 # ============================================================================
+
+struct MirOwnedRawAllocationFactV1:
+    base_local: LocalId
+    allocation_byte_len: i64
+    logical_type_id: i64
+    revision: i64
+    element_count: i64
+    allocation_identity: text
+    allocation_provenance: text
+    source_revision: text
 
 struct MirBuilder:
     """Builder for constructing MIR."""
@@ -444,6 +455,35 @@ impl MirBuilder:
             span: self.current_span
         ))
         dest
+
+    me emit_typed_storage_alloc_owned_raw_v1(
+        pointee_type: MirType, allocation_byte_len: i64, logical_type_id: i64,
+        revision: i64, element_count: i64, allocation_identity: text,
+        allocation_provenance: text, source_revision: text
+    ) -> MirOwnedRawAllocationFactV1:
+        """Emit an exact compiler-owned raw fixed-record allocation.
+
+        This operation is compiler-private and must be consumed by the typed
+        storage producer before backend optimization/codegen.
+        """
+        val dest = self.new_temp(MirType.ptr(pointee_type, true))
+        self.emit(MirInst(kind: MirInstKind.Intrinsic(Some(dest),
+            MIR_STORAGE_ALLOC_OWNED_RAW_V1, [
+                MirOperand.const_int(allocation_byte_len),
+                MirOperand.const_int(logical_type_id),
+                MirOperand.const_int(revision),
+                MirOperand.const_int(element_count),
+                MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str(allocation_identity),
+                    MirType(kind: MirTypeKind.Opaque("str"))))
+            ]), span: self.current_span))
+        MirOwnedRawAllocationFactV1(base_local: dest,
+            allocation_byte_len: allocation_byte_len,
+            logical_type_id: logical_type_id, revision: revision,
+            element_count: element_count,
+            allocation_identity: allocation_identity,
+            allocation_provenance: allocation_provenance,
+            source_revision: source_revision)
 
     me emit_entry_alloc(type_: MirType) -> LocalId:
         """Emit a fixed-lifetime allocation in the function entry block."""
@@ -899,7 +939,7 @@ export MirFunction, MirModule
 export MirOperand, MirOperandKind, MirTerminator
 export MirBinOp, MirUnaryOp, AggregateKind, GpuAtomicOpKind, MirBorrowKind
 export mir_operand_copy, mir_operand_const_int
-export MirBuilder
+export MirBuilder, MirOwnedRawAllocationFactV1
 export bootstrap_fn_ret_type_register, bootstrap_fn_ret_type_lookup
 export bootstrap_fn_ret_hir_type_register, bootstrap_fn_ret_hir_type_lookup
 export bootstrap_fn_ret_shape_register, bootstrap_fn_ret_shape_lookup

@@ -58,6 +58,14 @@ the original typed value load. Allocation markers are consumed as compile-time
 evidence and never reach a backend. Logical projections resolve against their
 final LocalIds before generic optimization can renumber them.
 
+The MIR builder is the allocation authority. Its internal owner operation emits
+the exact allocation and returns an immutable fact in one call; MIR-opt may
+derive a declaration only from that fact. A stable allocation identity is
+present in both the instruction and fact/declaration, preventing metadata for
+one plan or source revision from being attached to another allocation. The
+producer consumes the private operation into `rt_alloc`; it is never a public
+intrinsic or ordinary `T[]` representation.
+
 ## Migration order
 
 Freeze contracts and diagnostic names; make boundary/borrow facts authoritative; replace unsafe transport and add bounded task lifecycle; add parent commit; then implement typed storage layouts and MDSOC/project pilots. Performance lowering cannot precede the raw-pointer and alias-soundness gates.

@@ -4,6 +4,7 @@
 
 - `src/lib/common/structural/storage_layout/`
 - `src/compiler/60.mir_opt/mir_opt/storage_access_analysis.spl`
+- `src/compiler/50.mir/mir_data.spl` (`MirOwnedRawAllocationFactV1` owner)
 - `src/compiler/60.mir_opt/mir_opt/storage_projection_lowering.spl`
 - `src/compiler/60.mir_opt/mir_opt/typed_storage_view_declaration.spl`
 - `src/compiler/60.mir_opt/mir_opt/typed_storage_view_producer.spl`
@@ -23,6 +24,8 @@
   provenance, source revision, fixed schema/capacity, and bounds evidence.
 - Canonical same-block MIR producer gated by owned-allocation marker, constant
   bounds proof, exclusive temporaries, and atomic evidence output.
+- Atomic MIR owned-raw allocator operation/fact, cross-bound to declarations by
+  stable allocation identity and lowered to `rt_alloc` only after admission.
 
 ## Still proposed or incomplete
 
@@ -51,6 +54,8 @@
     relabel a RuntimeValue array or external/pinned allocation as typed storage.
 11. Resolve PROJECT_FIELD against final site LocalIds before generic MIR
     optimization; only optimize after it becomes backend-ready PROJECT_ADDRESS.
+12. Create declarations from `MirOwnedRawAllocationFactV1`; a parameter, call,
+    cast, RuntimeValue array, or free-form provenance string is not ownership proof.
 
 The W^X store/load parity scenario requires a fresh runtime containing
 `rt_ptr_read_u8`; a stale runner or unresolved-symbol stub is not evidence.
