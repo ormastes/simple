@@ -81,3 +81,52 @@ convention (e.g. mangled vs. unmangled) than what was registered.
   purely defensive (replaces a silent bad value with a loud error) and touches
   no other control flow, so risk of regressing a currently-passing build is
   low, but it has not been empirically confirmed.
+
+## Follow-up static finding (2026-08-12, still not empirically confirmed)
+
+Read-only follow-up session (host load ~12-16 on the 15m average, borderline
+for a bootstrap build; a debug-symbol stage2/stage3 rebuild plus runtime
+reproduction of the panic was judged out of proportion for this pass and was
+not attempted — this section is static analysis only, not a confirmed repro).
+
+Re-reading the registration loops in all three `emit_elf_*` functions in
+`src/compiler/70.backend/backend/native/native_elf.spl` (e.g. x86_64 at
+lines 44-68): `sym_name_to_idx` is populated from exactly three sources —
+
+1. `module.data_sections` entries **filtered to `entry.is_readonly`** (line
+   48: `for entry in module.data_sections: if entry.is_readonly: ...`)
+2. `module.extern_symbols`
+3. `func.name` for every function in `ordered_funcs`
+
+**Mutable (non-readonly) `data_sections` entries are never added to
+`sym_name_to_idx` at all** — the same `is_readonly` filter is repeated at the
+symbol-table-writing site (line 147-158: `# Add data label symbols (local, in
+rodata)` only ever emits `ElfSymbol`s for `entry.is_readonly` entries too).
+`collect_section_bytes(module.data_sections, false)` (line 142) does emit the
+mutable `.data` section's raw *bytes*, but no local symbol is ever registered
+for any individual mutable-data label inside it. So any relocation whose
+`reloc.symbol_name` names a mutable global/static data label (as opposed to a
+rodata constant, an extern, or a function) will hit the new
+`panic("...relocation references unknown symbol...")` unconditionally,
+regardless of which specific name it is — this is a structural gap in the
+symbol table, not a one-off naming mismatch.
+
+This is a plausible, but *not confirmed*, explanation for the original
+family of missing-symbol failures. It is very likely NOT the cause of the
+specific trivial repro named in the bug title (`fn main() -> i64: 0`), since
+that program has no module-level mutable state and should produce an empty
+`module.data_sections` (or rodata-only). The trivial repro's actual missing
+symbol was not captured in this session (no build was run), so it remains
+open. Confirming either hypothesis requires the still-outstanding step: a
+debug build that prints `reloc.symbol_name` and its caller/MIR context right
+before the panic fires for the trivial repro specifically.
+
+**Suggested next step if the mutable-data-symbol gap turns out to be real
+and reachable:** add a fourth registration loop mirroring lines 44-54 but
+for `if not entry.is_readonly`, assigning offsets from a running `data_offset`
+counter over the `.data` section (parallel to `rodata_offset`/
+`data_label_offsets`), and add corresponding `ElfSymbol`s with
+`section_index` pointing at the `.data` section (not `2`/rodata) at the
+line-147 site. Not implemented in this session — no build was run to verify
+either the hypothesis or a fix, so no code change is landed here, only this
+documented finding.
