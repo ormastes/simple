@@ -1006,14 +1006,18 @@ fn _engine2d_draw_ir_css_background_pixels(
     image: Engine2dResolvedDrawIrImage,
     sample_origin_x: i64,
     sample_origin_y: i64,
+    output_width: i64,
+    output_height: i64,
     target_pixels: i64
 ) -> Engine2dCssBackgroundPixels:
     var empty: [u32] = []
     val metadata = _engine2d_draw_ir_css_background_metadata(command)
-    if (not metadata.valid or command.width <= 0 or command.height <= 0 or
+    if (not metadata.valid or output_width <= 0 or output_height <= 0 or
         target_pixels <= 0):
         return Engine2dCssBackgroundPixels(valid: false, pixels: empty)
-    val work = command.width.to_i64() * command.height.to_i64()
+    if output_width > 2147483647 or output_height > 2147483647:
+        return Engine2dCssBackgroundPixels(valid: false, pixels: empty)
+    val work = output_width * output_height
     if work <= 0 or work > target_pixels or work > 2147483647:
         return Engine2dCssBackgroundPixels(valid: false, pixels: empty)
 
@@ -1024,7 +1028,7 @@ fn _engine2d_draw_ir_css_background_pixels(
     val work_i32 = work as i32
     var pixels: [u32] = [0u32; work_i32]
     var local_y: i64 = 0
-    while local_y < command.height.to_i64():
+    while local_y < output_height:
         val relative_y = sample_origin_y + local_y - metadata.tile_y
         var sample_y = relative_y
         var y_visible = (
@@ -1034,7 +1038,7 @@ fn _engine2d_draw_ir_css_background_pixels(
                 relative_y, metadata.tile_height)
             y_visible = true
         var local_x: i64 = 0
-        while local_x < command.width.to_i64():
+        while local_x < output_width:
             val relative_x = sample_origin_x + local_x - metadata.tile_x
             var sample_x = relative_x
             var x_visible = (
@@ -1051,7 +1055,7 @@ fn _engine2d_draw_ir_css_background_pixels(
                     sample_x * image.width.to_i64() / metadata.tile_width)
                 val source_y = (
                     sample_y * image.height.to_i64() / metadata.tile_height)
-                pixels[local_y * command.width.to_i64() + local_x] = (
+                pixels[local_y * output_width + local_x] = (
                     image.pixels[source_y * image.width.to_i64() + source_x])
             local_x = local_x + 1
         local_y = local_y + 1
@@ -1749,10 +1753,25 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
                 if _engine2d_draw_ir_has_css_background_role(command.computed_style):
                     val metadata = _engine2d_draw_ir_css_background_metadata(
                         command)
+                    val command_bounds = draw_ir_rect_bounds(
+                        x, y, command.width, command.height)
+                    var css_bounds = command_bounds
+                    if active_clip.present:
+                        css_bounds = draw_ir_rect_intersection(
+                            css_bounds, active_clip)
+                    if command.clip_rect.present:
+                        css_bounds = draw_ir_rect_intersection(
+                            css_bounds, draw_ir_rect_translate(
+                                command.clip_rect, offset_x, offset_y))
                     val css_work = (
-                        command.width.to_i64() * command.height.to_i64())
-                    val css_x = offset_x.to_i64() + command.x.to_i64()
-                    val css_y = offset_y.to_i64() + command.y.to_i64()
+                        css_bounds.width.to_i64() *
+                        css_bounds.height.to_i64())
+                    val css_x = css_bounds.x.to_i64()
+                    val css_y = css_bounds.y.to_i64()
+                    val sample_x = command.x.to_i64() +
+                        (css_x - x.to_i64())
+                    val sample_y = command.y.to_i64() +
+                        (css_y - y.to_i64())
                     var css_background_budget_admitted = false
                     if (metadata.valid and css_work > 0 and
                         css_work <= css_background_pixel_work_remaining and
@@ -1766,12 +1785,13 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
                     if css_background_budget_admitted:
                         css = _engine2d_draw_ir_css_background_pixels(
                             command, image,
-                            command.x.to_i64(), command.y.to_i64(),
-                            command.width.to_i64() * command.height.to_i64())
+                            sample_x, sample_y,
+                            css_bounds.width.to_i64(),
+                            css_bounds.height.to_i64(), css_work)
                     if css.valid:
                         eng.draw_image_blend(
                             css_x.to_i32(), css_y.to_i32(),
-                            command.width, command.height, css.pixels)
+                            css_bounds.width, css_bounds.height, css.pixels)
                         rendered = rendered + 1
                     else:
                         skipped = skipped + 1
@@ -2772,6 +2792,13 @@ fn engine2d_draw_ir_render_composition_damaged_with_images(
     readback_frame: bool
 ) -> Engine2dDrawIrTileOutcome:
     """Retained damaged replay with the composition's resolved image table."""
+    if not _engine2d_draw_ir_damage_rects_valid(
+        damage_rects, engine.width(), engine.height()):
+        return Engine2dDrawIrTileOutcome(
+            engine: engine, tiles_total: 0, tiles_rendered: 0,
+            tiles_skipped: 0, ops_rendered: 0, ops_skipped: 0,
+            unsupported_kinds: "invalid-damage-plan",
+            readback: engine2d_readback([], "preflight_rejected"))
     val preflight_reason = _engine2d_draw_ir_fresh_device_reason(
         composition, images, engine.width(), engine.height())
     if preflight_reason != "":
@@ -2795,7 +2822,8 @@ fn engine2d_draw_ir_render_composition_damaged_with_images(
     var rendered = 0
     var skipped = 0
     var unsupported = ""
-    val budget = eng.width().to_i64() * eng.height().to_i64()
+    var css_background_pixel_work_remaining = (
+        eng.width().to_i64() * eng.height().to_i64())
     var i = 0
     while i < damage_rects.len():
         val damage = draw_ir_rect_bounds(
@@ -2810,9 +2838,13 @@ fn engine2d_draw_ir_render_composition_damaged_with_images(
                 eng.set_clip(clip.x, clip.y, clip.width, clip.height)
                 val outcome = _engine2d_draw_ir_render_commands(
                     eng, batch.commands, embedding.x, embedding.y, images,
-                    true, false, clip, budget)
+                    true, false, clip,
+                    css_background_pixel_work_remaining)
                 eng = outcome.engine
                 eng.clear_clip()
+                if outcome.css_background_pixel_work_remaining >= 0:
+                    css_background_pixel_work_remaining = (
+                        outcome.css_background_pixel_work_remaining)
                 rendered += outcome.rendered
                 skipped += outcome.skipped
                 if (outcome.unsupported_kinds != "" and
