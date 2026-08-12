@@ -35,6 +35,8 @@ scenarios() {
     esac
 }
 checks='compiler tooling simpleos rendering allocation fault-injection process-safety stress traceability reviewer'
+# Repeated CLI options are ambiguous and must be rejected before evidence access.
+if "$gate" --evidence "$work/none" --evidence "$work/none" >/dev/null 2>&1; then exit 1; fi
 sign_receipt() {
     receipt=$1 signature=$2 canonical="$work/canonical"
     sed '/^receipt_hash=/d' "$receipt" > "$canonical"
@@ -184,11 +186,34 @@ rm "$generation_evidence/receipts/reviewer.receipt" "$generation_evidence/signat
     --reviewer-key "$work/reviewer-public.pem" --reviewer-key-id reviewer-key \
     --reviewer-trust-policy "$work/generation-review-policy.env" \
     --producer-key "$work/public.pem" --producer-key-id test-key --now-utc-ns "$now_ns" >/dev/null
+# Activate tooling receipt and signature together; flat inputs remain the
+# compatibility path only when no lane marker exists.
+mkdir -p "$generation_evidence/lane-generations/tooling"
+{
+    echo generation_schema=mci-lane-generation-v1
+    echo lane=tooling
+    echo receipt_sha256="$(hash_file "$generation_evidence/receipts/tooling.receipt")"
+    echo signature_sha256="$(hash_file "$generation_evidence/signatures/tooling.sig")"
+} > "$work/tooling-complete.env"
+tooling_generation=$(hash_file "$work/tooling-complete.env")
+tooling_generation_dir="$generation_evidence/lane-generations/tooling/$tooling_generation"
+mkdir "$tooling_generation_dir"
+cp "$generation_evidence/receipts/tooling.receipt" "$tooling_generation_dir/tooling.receipt"
+cp "$generation_evidence/signatures/tooling.sig" "$tooling_generation_dir/tooling.sig"
+cp "$work/tooling-complete.env" "$tooling_generation_dir/complete.env"
+printf '%s\n' "$tooling_generation" > "$generation_evidence/lane-generations/tooling.current"
+rm "$generation_evidence/receipts/tooling.receipt" "$generation_evidence/signatures/tooling.sig"
 "$gate" --evidence "$generation_evidence" --run-id "$run_id" --source-hash "$source_hash" \
     --configuration-hash "$config_hash" --now-utc-ns "$now_ns" $trust_args >/dev/null
 grep -q '^row=reviewer|PASS|none|' "$generation_evidence/aggregate-report-v1.env"
 [ ! -e "$generation_evidence/receipts/reviewer.receipt" ]
 [ ! -e "$generation_evidence/signatures/reviewer.sig" ]
+[ ! -e "$generation_evidence/receipts/tooling.receipt" ]
+[ ! -e "$generation_evidence/signatures/tooling.sig" ]
+printf 'not-a-generation\n' > "$generation_evidence/lane-generations/tooling.current"
+if "$gate" --evidence "$generation_evidence" --run-id "$run_id" --source-hash "$source_hash" \
+    --configuration-hash "$config_hash" --now-utc-ns "$now_ns" $trust_args >/dev/null 2>&1; then exit 1; fi
+grep -q '^row=tooling|BLOCKED|invalid-lane-generation|' "$generation_evidence/aggregate-report-v1.env"
 # POSIX shell functions share variables; restore the original fixture root for
 # the existing flat-compatibility and negative-control matrix below.
 evidence="$work/evidence"

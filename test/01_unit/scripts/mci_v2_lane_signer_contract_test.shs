@@ -32,11 +32,27 @@ tooling_scenarios=MCI-TOOL-001,MCI-TOOL-002,MCI-TOOL-003,MCI-NFR-001,MCI-NFR-002
 } > "$work/tooling.template"
 make_root "$work/tooling-evidence"
 "$signer" --evidence "$work/tooling-evidence" --lane tooling --template "$work/tooling.template" --artifact "$work/tooling-generation-v1.tar" --private-key "$work/key.pem" --trusted-key-id contract-key >/dev/null
-grep -Fxq attestation=signed-v1 "$work/tooling-evidence/receipts/tooling.receipt"
-sed '/^receipt_hash=/d' "$work/tooling-evidence/receipts/tooling.receipt" > "$work/tooling.canonical"
-field_hash=$(sed -n 's/^receipt_hash=//p' "$work/tooling-evidence/receipts/tooling.receipt")
+tooling_generation=$(sed -n '1p' "$work/tooling-evidence/lane-generations/tooling.current")
+tooling_dir="$work/tooling-evidence/lane-generations/tooling/$tooling_generation"
+[ ! -e "$work/tooling-evidence/receipts/tooling.receipt" ] && [ ! -e "$work/tooling-evidence/signatures/tooling.sig" ]
+grep -Fxq attestation=signed-v1 "$tooling_dir/tooling.receipt"
+sed '/^receipt_hash=/d' "$tooling_dir/tooling.receipt" > "$work/tooling.canonical"
+field_hash=$(sed -n 's/^receipt_hash=//p' "$tooling_dir/tooling.receipt")
 [ "$field_hash" = "$(hash_file "$work/tooling.canonical")" ]
-openssl dgst -sha256 -verify "$work/public.pem" -signature "$work/tooling-evidence/signatures/tooling.sig" "$work/tooling.canonical" >/dev/null 2>&1
+openssl dgst -sha256 -verify "$work/public.pem" -signature "$tooling_dir/tooling.sig" "$work/tooling.canonical" >/dev/null 2>&1
+[ "$(hash_file "$tooling_dir/complete.env")" = "$tooling_generation" ]
+
+# Duplicate options and an oversized tooling manifest fail before activation.
+make_root "$work/reject-duplicate"
+if "$signer" --evidence "$work/reject-duplicate" --evidence "$work/reject-duplicate" --lane tooling --template "$work/tooling.template" --artifact "$work/tooling-generation-v1.tar" --private-key "$work/key.pem" --trusted-key-id contract-key >/dev/null 2>&1; then exit 1; fi
+[ ! -e "$work/reject-duplicate/lane-generations/tooling.current" ]
+mkdir "$work/oversized-generation"; dd if=/dev/zero of="$work/oversized-generation/manifest.env" bs=1024 count=65 2>/dev/null
+tar -cf "$work/oversized.tar" -C "$work/oversized-generation" ./manifest.env
+oversized_hash=$(hash_file "$work/oversized.tar")
+sed "s/$tooling_hash/$oversized_hash/; s/tooling-generation-v1.tar/oversized.tar/" "$work/tooling.template" > "$work/oversized.template"
+make_root "$work/reject-oversized"
+if "$signer" --evidence "$work/reject-oversized" --lane tooling --template "$work/oversized.template" --artifact "$work/oversized.tar" --private-key "$work/key.pem" --trusted-key-id contract-key >/dev/null 2>&1; then exit 1; fi
+[ ! -e "$work/reject-oversized/lane-generations/tooling.current" ]
 
 # The compiler helper is always resolved from the repository, never evidence-adjacent source.
 mkdir -p "$work/scripts/check/lib"; printf '#error attacker-controlled helper compiled\n' > "$work/scripts/check/lib/mci-secure-publish.c"
@@ -53,7 +69,8 @@ simpleos_hash=$(hash_file "$work/simpleos.evidence")
 } > "$work/simpleos.template"
 make_root "$work/simpleos-root"
 "$signer" --evidence "$work/simpleos-root" --lane simpleos --template "$work/simpleos.template" --artifact "$work/simpleos.evidence" --private-key "$work/key.pem" --trusted-key-id contract-key >/dev/null
-grep -Fxq receipt_schema=mci-lane-receipt-v1 "$work/simpleos-root/receipts/simpleos.receipt"
+simpleos_generation=$(sed -n '1p' "$work/simpleos-root/lane-generations/simpleos.current")
+grep -Fxq receipt_schema=mci-lane-receipt-v1 "$work/simpleos-root/lane-generations/simpleos/$simpleos_generation/simpleos.receipt"
 
 # Fail closed before publication for malformed templates and fixture artifacts.
 sed 's/^artifact_mode=live$/artifact_mode=fixture/' "$work/simpleos.template" > "$work/malformed.template"
@@ -71,5 +88,6 @@ printf 'artifact_schema=mci-stress-evidence-v1\nartifact_mode=live\nrelease_elig
 { echo receipt_schema=mci-lane-receipt-v1; echo check_id=stress; echo producer_class=stress-target; echo attestation=EXTERNAL_SIGNER_SETS_signed-v1; echo trusted_key_id=EXTERNAL_SIGNER_SETS_key_id; echo signature_relpath=stress.sig; common_tail stress stress.evidence "$stress_hash" mci-stress-evidence-v1 MCI-NFR-015,MCI-NFR-016; echo receipt_hash=placeholder; } > "$work/stress.template"
 sed 's/^valid_until_utc_ns=200$/valid_until_utc_ns=EXTERNAL_SIGNER_SETS_valid_until_utc_ns/' "$work/stress.template" > "$work/stress.placeholder"; mv "$work/stress.placeholder" "$work/stress.template"
 make_root "$work/stress-root"; "$signer" --evidence "$work/stress-root" --lane stress --template "$work/stress.template" --artifact "$work/stress.evidence" --private-key "$work/key.pem" --trusted-key-id contract-key --valid-until-utc-ns 200 >/dev/null
-grep -Fxq valid_until_utc_ns=200 "$work/stress-root/receipts/stress.receipt"
+stress_generation=$(sed -n '1p' "$work/stress-root/lane-generations/stress.current")
+grep -Fxq valid_until_utc_ns=200 "$work/stress-root/lane-generations/stress/$stress_generation/stress.receipt"
 echo 'mci_v2_lane_signer_contract_test: PASS'

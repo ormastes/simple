@@ -29,7 +29,72 @@ static int same_mtime(const struct stat *left, const struct stat *right) {
 #endif
 }
 
+static int safe_name(const char *name) {
+    return name[0] && !strchr(name, '/') && strcmp(name, ".") && strcmp(name, "..");
+}
+
+static int activate_generation(int argc, char **argv) {
+    if (argc != 8 || !safe_name(argv[3]) || !safe_name(argv[4]) ||
+        !safe_name(argv[5]) || !safe_name(argv[7])) return 2;
+    int pfd = -1, gfd = -1, sfd = -1, mfd = -1, tfd = -1, renamed = 0;
+    struct stat ps, gs, ss, ms, after, existing;
+    pfd = open(argv[2], O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (pfd < 0 || fstat(pfd, &ps) || !S_ISDIR(ps.st_mode) || ps.st_uid != geteuid() || (ps.st_mode & 0022)) goto fail;
+    gfd = openat(pfd, argv[3], O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    sfd = gfd < 0 ? -1 : openat(gfd, argv[4], O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    mfd = open(argv[6], O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (gfd < 0 || sfd < 0 || mfd < 0 || fstat(gfd, &gs) || fstat(sfd, &ss) || fstat(mfd, &ms) ||
+        !S_ISDIR(gs.st_mode) || gs.st_uid != geteuid() || (gs.st_mode & 0022) ||
+        !S_ISDIR(ss.st_mode) || ss.st_uid != geteuid() || (ss.st_mode & 0022) ||
+        !S_ISREG(ms.st_mode) || ms.st_nlink != 1) goto fail;
+    if (fstatat(gfd, argv[5], &existing, AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT ||
+        fstatat(pfd, argv[7], &existing, AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT) goto fail;
+    char tmp[96] = {0};
+    snprintf(tmp, sizeof(tmp), ".mci-activate.%ld", (long)getpid());
+    tfd = openat(pfd, tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (tfd < 0) goto fail;
+    char buf[4096]; ssize_t n;
+    while ((n = read(mfd, buf, sizeof(buf))) > 0) {
+        ssize_t off = 0;
+        while (off < n) { ssize_t w = write(tfd, buf + off, (size_t)(n - off)); if (w <= 0) goto fail; off += w; }
+    }
+    if (n < 0 || fstat(mfd, &after) || after.st_dev != ms.st_dev || after.st_ino != ms.st_ino ||
+        after.st_size != ms.st_size || !same_mtime(&after, &ms) || fsync(tfd) || close(tfd)) { tfd = -1; goto fail; }
+    tfd = -1;
+#ifdef TEST_ONLY
+    if (!strcmp(argv[5], "__test_generation_swap__")) {
+        if (renameat(pfd, argv[3], pfd, ".reviewer-generations.old") || mkdirat(pfd, argv[3], 0700)) goto fail;
+    }
+#endif
+    /* Re-open through the pinned parent to prove the pathname still names gfd. */
+    int checkfd = openat(pfd, argv[3], O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    struct stat check;
+    if (checkfd < 0 || fstat(checkfd, &check) || check.st_dev != gs.st_dev || check.st_ino != gs.st_ino) { if (checkfd >= 0) close(checkfd); goto fail; }
+    close(checkfd);
+    if (renameat(gfd, argv[4], gfd, argv[5]) ||
+        fstatat(gfd, argv[5], &after, AT_SYMLINK_NOFOLLOW) ||
+        after.st_dev != ss.st_dev || after.st_ino != ss.st_ino || !S_ISDIR(after.st_mode)) goto fail;
+    renamed = 1;
+    if (linkat(pfd, tmp, pfd, argv[7], 0) || unlinkat(pfd, tmp, 0) || fsync(gfd) || fsync(pfd)) goto fail;
+    close(mfd); close(sfd); close(gfd); close(pfd); return 0;
+fail:
+    if (tfd >= 0) close(tfd);
+    if (pfd >= 0) unlinkat(pfd, tmp, 0);
+    if (renamed && gfd >= 0 && sfd >= 0) {
+        unlinkat(sfd, "reviewer.receipt", 0);
+        unlinkat(sfd, "reviewer.sig", 0);
+        unlinkat(sfd, "complete.env", 0);
+        unlinkat(gfd, argv[5], AT_REMOVEDIR);
+    }
+    if (mfd >= 0) close(mfd);
+    if (sfd >= 0) close(sfd);
+    if (gfd >= 0) close(gfd);
+    if (pfd >= 0) close(pfd);
+    return 2;
+}
+
 int main(int argc, char **argv) {
+    if (argc > 1 && !strcmp(argv[1], "--activate-generation")) return activate_generation(argc, argv);
     if (argc != 4 || strchr(argv[3], '/') || !argv[3][0]) return 2;
     int dfd = open(argv[1], O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     int sfd = open(argv[2], O_RDONLY | O_NOFOLLOW | O_CLOEXEC);

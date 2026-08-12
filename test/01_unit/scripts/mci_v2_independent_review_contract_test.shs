@@ -16,6 +16,22 @@ make_policy() { { echo policy_schema=mci-independent-review-trust-v1; echo revie
 make_decision() { { echo receipt_schema=mci-independent-review-decision-v1; echo check_id=reviewer; echo producer_class=independent-review; echo attestation=signed-v1; echo trusted_key_id=reviewer-key; echo signature_relpath=reviewer.sig; echo reviewer_identity=human-contract-reviewer; echo reviewer_role=independent-release-reviewer; echo reviewer_scope=mci-v2-aggregate; echo run_id=$run; echo source_hash=$source; echo configuration_hash=$config; echo aggregate_candidate_sha256=$candidate; echo decided_at_utc_ns=100; echo valid_until_utc_ns=86400000000100; echo decision=approve; echo scenarios=MCI-NFR-017,MCI-NFR-018; echo artifact_schema=mci-aggregate-candidate-v1; echo artifact_mode=$1; echo release_eligible=$2; } > "$work/decision"; openssl dgst -sha256 -sign "$work/reviewer-private.pem" -out "$work/decision.sig" "$work/decision"; }
 run_gate() { "$gate" --evidence "$1" --aggregate-report "$work/report" --candidate-graph "$work/graph" --decision "$work/decision" --decision-signature "$work/decision.sig" --reviewer-key "$work/reviewer.pem" --reviewer-key-id reviewer-key --reviewer-trust-policy "$work/policy" --producer-key "$work/producer.pem" --producer-key-id producer-key --now-utc-ns 200 ${2:-}; }
 make_policy CONTRACT_ONLY; make_decision CONTRACT_ONLY false; run_gate "$work/fixture" --contract-fixture >/dev/null
+# Every option, including the flag, is single-use and value options require argc.
+if run_gate "$work/duplicate" '--contract-fixture --contract-fixture' >"$work/duplicate.out" 2>"$work/duplicate.err"; then exit 1; fi
+grep -q '^usage:' "$work/duplicate.err"; [ ! -e "$work/duplicate/reviewer-generation.current" ]
+if "$gate" --evidence >"$work/argc.out" 2>"$work/argc.err"; then exit 1; fi
+grep -q '^usage:' "$work/argc.err"
+# A pathname swap of reviewer-generations after descriptor pinning cannot
+# redirect activation into an attacker replacement directory.
+cc -std=c11 -O2 -DTEST_ONLY "$root/scripts/check/lib/mci-secure-publish.c" -o "$work/secure-publish-test"
+mkdir -p "$work/swap-parent/reviewer-generations/.stage"
+cp "$work/decision" "$work/swap-parent/reviewer-generations/.stage/reviewer.receipt"
+cp "$work/decision.sig" "$work/swap-parent/reviewer-generations/.stage/reviewer.sig"
+cp "$work/policy" "$work/swap-parent/reviewer-generations/.stage/complete.env"
+printf '%064d\n' 0 > "$work/current"
+if "$work/secure-publish-test" --activate-generation "$work/swap-parent" reviewer-generations .stage __test_generation_swap__ "$work/current" reviewer-generation.current; then exit 1; fi
+[ ! -e "$work/swap-parent/reviewer-generation.current" ]
+[ ! -e "$work/swap-parent/reviewer-generations/__test_generation_swap__" ]
 fixture_generation=$(cat "$work/fixture/reviewer-generation.current"); fixture_receipt=$work/fixture/reviewer-generations/$fixture_generation/reviewer.receipt
 grep -q '^artifact_mode=CONTRACT_ONLY$' "$fixture_receipt"; grep -q '^release_eligible=false$' "$fixture_receipt"
 make_policy live; make_decision independent-review true; run_gate "$work/live" >/dev/null

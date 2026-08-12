@@ -5,11 +5,20 @@ LC_ALL=C; export LC_ALL
 
 usage() { echo "usage: $0 --evidence DIR --aggregate-report FILE --candidate-graph FILE --decision FILE --decision-signature FILE --reviewer-key PEM --reviewer-key-id ID --reviewer-trust-policy FILE --producer-key PEM --producer-key-id ID --now-utc-ns NS [--contract-fixture]" >&2; exit 2; }
 evidence= report= graph= decision= decision_sig= reviewer_key= reviewer_id= policy= producer_key= producer_id= now= fixture=false
+seen_evidence= seen_report= seen_graph= seen_decision= seen_decision_sig= seen_reviewer_key= seen_reviewer_id= seen_policy= seen_producer_key= seen_producer_id= seen_now= seen_fixture=
 while [ "$#" -gt 0 ]; do case "$1" in
- --evidence) evidence=$2; shift 2;; --aggregate-report) report=$2; shift 2;; --candidate-graph) graph=$2; shift 2;;
- --decision) decision=$2; shift 2;; --decision-signature) decision_sig=$2; shift 2;; --reviewer-key) reviewer_key=$2; shift 2;;
- --reviewer-key-id) reviewer_id=$2; shift 2;; --reviewer-trust-policy) policy=$2; shift 2;; --producer-key) producer_key=$2; shift 2;;
- --producer-key-id) producer_id=$2; shift 2;; --now-utc-ns) now=$2; shift 2;; --contract-fixture) fixture=true; shift;; *) usage;; esac; done
+ --evidence) [ -z "$seen_evidence" ] && [ "$#" -ge 2 ] || usage; seen_evidence=1; evidence=$2; shift 2;;
+ --aggregate-report) [ -z "$seen_report" ] && [ "$#" -ge 2 ] || usage; seen_report=1; report=$2; shift 2;;
+ --candidate-graph) [ -z "$seen_graph" ] && [ "$#" -ge 2 ] || usage; seen_graph=1; graph=$2; shift 2;;
+ --decision) [ -z "$seen_decision" ] && [ "$#" -ge 2 ] || usage; seen_decision=1; decision=$2; shift 2;;
+ --decision-signature) [ -z "$seen_decision_sig" ] && [ "$#" -ge 2 ] || usage; seen_decision_sig=1; decision_sig=$2; shift 2;;
+ --reviewer-key) [ -z "$seen_reviewer_key" ] && [ "$#" -ge 2 ] || usage; seen_reviewer_key=1; reviewer_key=$2; shift 2;;
+ --reviewer-key-id) [ -z "$seen_reviewer_id" ] && [ "$#" -ge 2 ] || usage; seen_reviewer_id=1; reviewer_id=$2; shift 2;;
+ --reviewer-trust-policy) [ -z "$seen_policy" ] && [ "$#" -ge 2 ] || usage; seen_policy=1; policy=$2; shift 2;;
+ --producer-key) [ -z "$seen_producer_key" ] && [ "$#" -ge 2 ] || usage; seen_producer_key=1; producer_key=$2; shift 2;;
+ --producer-key-id) [ -z "$seen_producer_id" ] && [ "$#" -ge 2 ] || usage; seen_producer_id=1; producer_id=$2; shift 2;;
+ --now-utc-ns) [ -z "$seen_now" ] && [ "$#" -ge 2 ] || usage; seen_now=1; now=$2; shift 2;;
+ --contract-fixture) [ -z "$seen_fixture" ] || usage; seen_fixture=1; fixture=true; shift;; *) usage;; esac; done
 
 regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
 token() { [ -n "$1" ] && case "$1" in *[!A-Za-z0-9._-]*) return 1;; esac; }
@@ -71,8 +80,7 @@ mkdir "$stage"; chmod 0700 "$stage"
 "$work/secure-publish" "$stage" "$work/decision.sig" reviewer.sig || { rm -f "$stage/reviewer.receipt"; rmdir "$stage" 2>/dev/null || true; blocked 'secure signature staging failed; no generation published; retry'; }
 { echo generation_schema=mci-independent-review-generation-v1; echo aggregate_candidate_sha256=$candidate; echo receipt_sha256=$(hash_file "$stage/reviewer.receipt"); echo signature_sha256=$(hash_file "$stage/reviewer.sig"); } > "$work/complete"
 "$work/secure-publish" "$stage" "$work/complete" complete.env || { rm -f "$stage/reviewer.receipt" "$stage/reviewer.sig"; rmdir "$stage" 2>/dev/null || true; blocked 'generation marker staging failed; no generation published; retry'; }
-mv "$stage" "$final" || blocked 'atomic generation publication failed; preserve staged evidence and retry after inspection'
-stage=
 printf '%s\n' "$candidate" > "$work/current"
-"$work/secure-publish" "$out" "$work/current" reviewer-generation.current || { rm -f "$final/reviewer.receipt" "$final/reviewer.sig" "$final/complete.env"; rmdir "$final" 2>/dev/null || true; blocked 'activation marker failed; generation rolled back; retry full publication'; }
+"$work/secure-publish" --activate-generation "$out" reviewer-generations "$(basename "$stage")" "$candidate" "$work/current" reviewer-generation.current || blocked 'descriptor-relative generation activation failed; staged or rolled-back evidence requires inspection'
+stage=
 echo "PASS: independent reviewer generation published; mode=$mode candidate=$candidate generation=$final"

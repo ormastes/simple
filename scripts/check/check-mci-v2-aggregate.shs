@@ -12,15 +12,15 @@ usage() {
 evidence= run_id= source_hash= configuration_hash= now_ns= trusted_key= trusted_key_id= reviewer_key= reviewer_key_id=
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --evidence) [ "$#" -ge 2 ] || usage; evidence=$2; shift 2 ;;
-        --run-id) [ "$#" -ge 2 ] || usage; run_id=$2; shift 2 ;;
-        --source-hash) [ "$#" -ge 2 ] || usage; source_hash=$2; shift 2 ;;
-        --configuration-hash) [ "$#" -ge 2 ] || usage; configuration_hash=$2; shift 2 ;;
-        --now-utc-ns) [ "$#" -ge 2 ] || usage; now_ns=$2; shift 2 ;;
-        --trusted-key) [ "$#" -ge 2 ] || usage; trusted_key=$2; shift 2 ;;
-        --trusted-key-id) [ "$#" -ge 2 ] || usage; trusted_key_id=$2; shift 2 ;;
-        --reviewer-key) [ "$#" -ge 2 ] || usage; reviewer_key=$2; shift 2 ;;
-        --reviewer-key-id) [ "$#" -ge 2 ] || usage; reviewer_key_id=$2; shift 2 ;;
+        --evidence) [ "$#" -ge 2 ] && [ -z "${seen_evidence:-}" ] || usage; seen_evidence=1; evidence=$2; shift 2 ;;
+        --run-id) [ "$#" -ge 2 ] && [ -z "${seen_run_id:-}" ] || usage; seen_run_id=1; run_id=$2; shift 2 ;;
+        --source-hash) [ "$#" -ge 2 ] && [ -z "${seen_source_hash:-}" ] || usage; seen_source_hash=1; source_hash=$2; shift 2 ;;
+        --configuration-hash) [ "$#" -ge 2 ] && [ -z "${seen_configuration_hash:-}" ] || usage; seen_configuration_hash=1; configuration_hash=$2; shift 2 ;;
+        --now-utc-ns) [ "$#" -ge 2 ] && [ -z "${seen_now_ns:-}" ] || usage; seen_now_ns=1; now_ns=$2; shift 2 ;;
+        --trusted-key) [ "$#" -ge 2 ] && [ -z "${seen_trusted_key:-}" ] || usage; seen_trusted_key=1; trusted_key=$2; shift 2 ;;
+        --trusted-key-id) [ "$#" -ge 2 ] && [ -z "${seen_trusted_key_id:-}" ] || usage; seen_trusted_key_id=1; trusted_key_id=$2; shift 2 ;;
+        --reviewer-key) [ "$#" -ge 2 ] && [ -z "${seen_reviewer_key:-}" ] || usage; seen_reviewer_key=1; reviewer_key=$2; shift 2 ;;
+        --reviewer-key-id) [ "$#" -ge 2 ] && [ -z "${seen_reviewer_key_id:-}" ] || usage; seen_reviewer_key_id=1; reviewer_key_id=$2; shift 2 ;;
         *) usage ;;
     esac
 done
@@ -175,9 +175,10 @@ artifact_header() {
     if [ "$check" = tooling ]; then
         # The tooling artifact is a generation archive. Only its canonical
         # manifest is policy-bearing; never trust a receipt-side description.
-        [ "$(tar -tf "$artifact" 2>/dev/null | wc -l | tr -d ' ')" -le "${MCI_AGGREGATE_TAR_MEMBER_LIMIT:-256}" ] || return 1
-        [ "$(tar -xOf "$artifact" 2>/dev/null | wc -c | tr -d ' ')" -le "${MCI_AGGREGATE_TAR_EXPANDED_LIMIT_BYTES:-1073741824}" ] || return 1
-        tar -xOf "$artifact" ./manifest.env | dd bs=65537 count=1 of="$output" 2>/dev/null || return 1
+        count=$(tar -tf "$artifact" 2>/dev/null | awk -v limit="${MCI_AGGREGATE_TAR_MEMBER_LIMIT:-256}" 'NR>limit { print NR; exit } END { if (NR<=limit) print NR }') || return 1
+        [ "$count" -le "${MCI_AGGREGATE_TAR_MEMBER_LIMIT:-256}" ] || return 1
+        blocks=$((65536 / 512 + 1))
+        (ulimit -f "$blocks"; tar -xOf "$artifact" ./manifest.env > "$output") 2>/dev/null || return 1
         [ "$(wc -c < "$output")" -le 65536 ] || return 1
     else
         cp -- "$artifact" "$output" || return 1
@@ -281,6 +282,34 @@ for check_id in $required_checks; do
         echo "aggregate_candidate_sha256=$aggregate_candidate_hash" >> "$tmp"
     fi
     receipt="$evidence/receipts/$check_id.receipt"
+    lane_generation_signature=
+    lane_resolution_error=
+    lane_marker_path="$evidence/lane-generations/$check_id.current"
+    if [ "$check_id" != reviewer ] && [ -e "$lane_marker_path" ]; then
+        lane_marker="$work/$check_id-generation.current"
+        if ! regular_nonsymlink "$lane_marker_path" || ! snapshot_file "$lane_marker_path" "$lane_marker"; then
+            lane_resolution_error=invalid-lane-generation-marker
+        else
+            lane_generation=$(sed -n '1p' "$lane_marker")
+            lane_generation_dir="$evidence/lane-generations/$check_id/$lane_generation"
+            lane_complete="$lane_generation_dir/complete.env"
+            lane_complete_snapshot="$work/$check_id-generation.complete"
+            receipt="$lane_generation_dir/$check_id.receipt"
+            lane_generation_signature="$lane_generation_dir/$check_id.sig"
+            if [ "$(wc -l < "$lane_marker" | tr -d ' ')" -ne 1 ] || ! is_sha256 "$lane_generation" ||
+               ! dir_nonsymlink "$evidence/lane-generations" || ! dir_nonsymlink "$evidence/lane-generations/$check_id" ||
+               ! dir_nonsymlink "$lane_generation_dir" || ! regular_nonsymlink "$lane_complete" ||
+               ! snapshot_file "$lane_complete" "$lane_complete_snapshot" ||
+               [ "$(field generation_schema "$lane_complete_snapshot" 2>/dev/null || true)" != mci-lane-generation-v1 ] ||
+               [ "$(field lane "$lane_complete_snapshot" 2>/dev/null || true)" != "$check_id" ] ||
+               ! is_sha256 "$(field receipt_sha256 "$lane_complete_snapshot" 2>/dev/null || true)" ||
+               ! is_sha256 "$(field signature_sha256 "$lane_complete_snapshot" 2>/dev/null || true)" ||
+               [ "$(hash_file "$lane_complete_snapshot")" != "$lane_generation" ] ||
+               [ "$(wc -l < "$lane_complete_snapshot" | tr -d ' ')" -ne 4 ]; then
+                lane_resolution_error=invalid-lane-generation
+            fi
+        fi
+    fi
     reviewer_generation_signature=
     reviewer_resolution_error=
     if [ "$check_id" = reviewer ] && [ -e "$evidence/reviewer-generation.current" ]; then
@@ -314,7 +343,9 @@ for check_id in $required_checks; do
         fi
     fi
     reason=none
-    if [ -n "$reviewer_resolution_error" ]; then
+    if [ -n "$lane_resolution_error" ]; then
+        reason=$lane_resolution_error
+    elif [ -n "$reviewer_resolution_error" ]; then
         reason=$reviewer_resolution_error
     elif [ ! -e "$receipt" ]; then
         reason=missing
@@ -453,12 +484,22 @@ for check_id in $required_checks; do
                 reason=invalid-receipt-hash
             else
                 signature_path="$evidence/signatures/$signature_relpath"
+                if [ -n "$lane_generation_signature" ]; then
+                    signature_path=$lane_generation_signature
+                    declared_receipt_hash=$(field receipt_sha256 "$lane_complete_snapshot" 2>/dev/null || true)
+                    declared_signature_hash=$(field signature_sha256 "$lane_complete_snapshot" 2>/dev/null || true)
+                    if [ "$(hash_file "$snapshot")" != "$declared_receipt_hash" ] || ! regular_nonsymlink "$signature_path"; then
+                        reason=invalid-lane-generation
+                    fi
+                fi
                 if ! regular_nonsymlink "$signature_path"; then
                     reason=invalid-signature
                 else
                     signature_snapshot="$work/$check_id.signature"
                     if ! snapshot_file "$signature_path" "$signature_snapshot"; then
                         reason=signature-changed-during-snapshot
+                    elif [ -n "$lane_generation_signature" ] && [ "$(hash_file "$signature_snapshot")" != "$declared_signature_hash" ]; then
+                        reason=invalid-lane-generation
                     elif ! openssl dgst -sha256 -verify "$trusted_key_snapshot" -signature "$signature_snapshot" "$tmp.canonical" >/dev/null 2>&1; then
                         reason=invalid-signature
                     fi
