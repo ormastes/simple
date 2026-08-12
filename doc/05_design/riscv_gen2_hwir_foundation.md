@@ -117,14 +117,25 @@
     presented after a frontend reset. A matching retirement at the terminal
     64-bit lineage value enters the sticky fault state without incrementing;
     reset is therefore required before any lineage value could be reused.
-17. `RiscvGen2ScalarElaboration` freezes one concrete `CoreConfig`, exact
+    Because the three added retirement identity inputs alter the ordered public
+    ports, this is an ABI and graph-closure change. Existing stateful product
+    labels remain development-only until the owner makes an explicit product
+    version decision and regenerates qualified manifests.
+17. `HwParcelRetirementComposition` binds one `HwParcelFrontendInterface` to
+    a future `HwRetireReceiptProducerInterface`. It has a fixed 15-binding
+    topology: shared `clk`/`rst`, dispatch valid plus its 64/16/32/2-bit
+    identity tuple to the producer, then producer acceptance and the same
+    receipt tuple back. Shape validation rejects an omitted, reordered, or
+    width-drifted binding. It is an elaboration-only contract until typed
+    child instances and architectural effects have sequential HWIR lowering.
+18. `RiscvGen2ScalarElaboration` freezes one concrete `CoreConfig`, exact
     scalar decoder table, and provider selection. `RiscvGen2ScalarDispatchPlan`
     then resolves one 32-bit instruction from that fixed table and accepts its
     provider only through the selection's structural ownership check. This is
     compiler-host preparation for a shared execution-unit lowerer: it does not
     emit an RTL decoder, make a runtime profile decision, or claim scalar-core
     execution coverage.
-18. `strict_zca_addi4spn_outcome_hwir` is the first reserved normal-row adapter. It
+19. `strict_zca_addi4spn_outcome_hwir` is the first reserved normal-row adapter. It
     zero-extends the frozen 16-bit parcel into the established 32-bit row
     graph, alpha-renames that graph, and derives output `legal` from both
     `is_c_addi4spn` and the explicit nonzero-immediate gate. It never infers

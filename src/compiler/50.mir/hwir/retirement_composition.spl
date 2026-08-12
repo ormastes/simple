@@ -1,0 +1,192 @@
+# Typed retirement-receipt composition for the bounded Gen2 frontend.
+#
+# This is an elaboration contract, not an implementation of an architectural
+# core.  It makes the required reset-coupled receipt boundary explicit without
+# claiming that a producer has performed register, memory, trap, or interrupt
+# retirement.  Generic child-instance lowering is deliberately absent from the
+# strict VHDL backend, so this record is not serializable evidence by itself.
+
+use compiler.mir.hwir.types.{CoreConfig, HwNodeId, HwPort, hwir_vhdl_identifier}
+use compiler.mir.hwir.stateful_frontend.{HwParcelFrontendInterface, strict_riscv_parcel_frontend_interface}
+
+pub class HwRetireReceiptProducerInterface:
+    """Typed port contract an architectural owner must satisfy to retire one dispatch.
+
+    The producer receives exactly the identity tuple exposed with an accepted
+    dispatch and returns that tuple only as a retirement receipt.  It is a
+    boundary contract: the producer's architectural-effect proof belongs to a
+    later core owner and cannot be manufactured by this frontend composition.
+    """
+    node_id: HwNodeId
+    config: CoreConfig
+    clk: HwPort
+    rst: HwPort
+    dispatch_valid: HwPort
+    dispatch_lineage: HwPort
+    dispatch_original_parcel: HwPort
+    dispatch_canonical_instruction: HwPort
+    dispatch_original_length_bytes: HwPort
+    dispatch_accept: HwPort
+    retire_valid: HwPort
+    retire_lineage: HwPort
+    retire_original_parcel: HwPort
+    retire_canonical_instruction: HwPort
+    retire_original_length_bytes: HwPort
+
+    me ports() -> [HwPort]:
+        [self.clk, self.rst, self.dispatch_valid, self.dispatch_lineage,
+            self.dispatch_original_parcel, self.dispatch_canonical_instruction,
+            self.dispatch_original_length_bytes, self.dispatch_accept,
+            self.retire_valid, self.retire_lineage, self.retire_original_parcel,
+            self.retire_canonical_instruction, self.retire_original_length_bytes]
+
+    me port_width(name: text) -> i32:
+        for port in self.ports():
+            if port.name == name: return port.bit_width
+        -1
+
+    me port_direction(name: text) -> text:
+        for port in self.ports():
+            if port.name == name: return port.direction
+        ""
+
+    me shape_diagnostic() -> text:
+        val config_error = self.config.diagnostic()
+        if config_error != "": return config_error
+        if not self.node_id.is_valid():
+            return "HWIR-E-RETIRE-PRODUCER-ID: retirement receipt producer requires a stable node ID"
+        var names: [text] = []
+        for port in self.ports():
+            val folded = port.name.lower()
+            if not hwir_vhdl_identifier(port.name) or port.type_name != "Bits" or
+                port.bit_width < 1 or port.clock_domain != "default" or names.contains(folded):
+                return "HWIR-E-RETIRE-PRODUCER-PORT: retirement receipt ports require unique default-domain Bits values"
+            names.push(folded)
+        if self.clk.name != "clk" or self.rst.name != "rst" or self.clk.direction != "in" or
+            self.rst.direction != "in" or self.clk.bit_width != 1 or self.rst.bit_width != 1:
+            return "HWIR-E-RETIRE-PRODUCER-CLOCK: retirement receipt producer requires shared one-bit clk and synchronous active-high rst inputs"
+        for port in [self.dispatch_valid, self.dispatch_lineage, self.dispatch_original_parcel,
+                     self.dispatch_canonical_instruction, self.dispatch_original_length_bytes]:
+            if port.direction != "in":
+                return "HWIR-E-RETIRE-PRODUCER-DISPATCH: retirement receipt producer must consume the frontend dispatch tuple"
+        for port in [self.dispatch_accept, self.retire_valid, self.retire_lineage,
+                     self.retire_original_parcel, self.retire_canonical_instruction,
+                     self.retire_original_length_bytes]:
+            if port.direction != "out":
+                return "HWIR-E-RETIRE-PRODUCER-RECEIPT: retirement receipt producer must publish acceptance and receipt outputs"
+        if self.dispatch_valid.name != "dispatch_valid" or self.dispatch_valid.bit_width != 1 or
+            self.dispatch_lineage.name != "dispatch_lineage" or self.dispatch_lineage.bit_width != 64 or
+            self.dispatch_original_parcel.name != "dispatch_original_parcel" or self.dispatch_original_parcel.bit_width != 16 or
+            self.dispatch_canonical_instruction.name != "dispatch_canonical_instruction" or self.dispatch_canonical_instruction.bit_width != 32 or
+            self.dispatch_original_length_bytes.name != "dispatch_original_length_bytes" or self.dispatch_original_length_bytes.bit_width != 2:
+            return "HWIR-E-RETIRE-PRODUCER-DISPATCH-WIDTH: retirement producer must consume the exact dispatch identity tuple"
+        if self.dispatch_accept.name != "dispatch_accept" or self.dispatch_accept.bit_width != 1 or
+            self.retire_valid.name != "retire_valid" or self.retire_valid.bit_width != 1 or
+            self.retire_lineage.name != "retire_lineage" or self.retire_lineage.bit_width != 64 or
+            self.retire_original_parcel.name != "retire_original_parcel" or self.retire_original_parcel.bit_width != 16 or
+            self.retire_canonical_instruction.name != "retire_canonical_instruction" or self.retire_canonical_instruction.bit_width != 32 or
+            self.retire_original_length_bytes.name != "retire_original_length_bytes" or self.retire_original_length_bytes.bit_width != 2:
+            return "HWIR-E-RETIRE-PRODUCER-RECEIPT-WIDTH: retirement producer must publish the exact receipt identity tuple"
+        ""
+
+pub fn strict_riscv_retire_receipt_producer_interface(config: CoreConfig) -> Result<HwRetireReceiptProducerInterface, text>:
+    val producer = HwRetireReceiptProducerInterface(
+        node_id: HwNodeId.module_root("riscv_gen2_retire_receipt_producer"), config: config,
+        clk: HwPort.input("clk", "Bits", 1), rst: HwPort.input("rst", "Bits", 1),
+        dispatch_valid: HwPort.input("dispatch_valid", "Bits", 1),
+        dispatch_lineage: HwPort.input("dispatch_lineage", "Bits", 64),
+        dispatch_original_parcel: HwPort.input("dispatch_original_parcel", "Bits", 16),
+        dispatch_canonical_instruction: HwPort.input("dispatch_canonical_instruction", "Bits", 32),
+        dispatch_original_length_bytes: HwPort.input("dispatch_original_length_bytes", "Bits", 2),
+        dispatch_accept: HwPort.output("dispatch_accept", "Bits", 1),
+        retire_valid: HwPort.output("retire_valid", "Bits", 1),
+        retire_lineage: HwPort.output("retire_lineage", "Bits", 64),
+        retire_original_parcel: HwPort.output("retire_original_parcel", "Bits", 16),
+        retire_canonical_instruction: HwPort.output("retire_canonical_instruction", "Bits", 32),
+        retire_original_length_bytes: HwPort.output("retire_original_length_bytes", "Bits", 2)
+    )
+    val diagnostic = producer.shape_diagnostic()
+    if diagnostic != "": return Err(diagnostic)
+    Ok(producer)
+
+pub class HwRetireCompositionBinding:
+    kind: text
+    source_owner: text
+    source_port: text
+    destination_owner: text
+    destination_port: text
+    bit_width: i32
+
+fn strict_retire_composition_bindings() -> [HwRetireCompositionBinding]:
+    [HwRetireCompositionBinding(kind: "shared_input", source_owner: "composition", source_port: "clk", destination_owner: "frontend", destination_port: "clk", bit_width: 1),
+        HwRetireCompositionBinding(kind: "shared_input", source_owner: "composition", source_port: "clk", destination_owner: "producer", destination_port: "clk", bit_width: 1),
+        HwRetireCompositionBinding(kind: "shared_input", source_owner: "composition", source_port: "rst", destination_owner: "frontend", destination_port: "rst", bit_width: 1),
+        HwRetireCompositionBinding(kind: "shared_input", source_owner: "composition", source_port: "rst", destination_owner: "producer", destination_port: "rst", bit_width: 1),
+        HwRetireCompositionBinding(kind: "frontend_to_producer", source_owner: "frontend", source_port: "dispatch_valid", destination_owner: "producer", destination_port: "dispatch_valid", bit_width: 1),
+        HwRetireCompositionBinding(kind: "frontend_to_producer", source_owner: "frontend", source_port: "dispatch_lineage", destination_owner: "producer", destination_port: "dispatch_lineage", bit_width: 64),
+        HwRetireCompositionBinding(kind: "frontend_to_producer", source_owner: "frontend", source_port: "original_parcel", destination_owner: "producer", destination_port: "dispatch_original_parcel", bit_width: 16),
+        HwRetireCompositionBinding(kind: "frontend_to_producer", source_owner: "frontend", source_port: "canonical_instruction", destination_owner: "producer", destination_port: "dispatch_canonical_instruction", bit_width: 32),
+        HwRetireCompositionBinding(kind: "frontend_to_producer", source_owner: "frontend", source_port: "original_length_bytes", destination_owner: "producer", destination_port: "dispatch_original_length_bytes", bit_width: 2),
+        HwRetireCompositionBinding(kind: "producer_to_frontend", source_owner: "producer", source_port: "dispatch_accept", destination_owner: "frontend", destination_port: "dispatch_accept", bit_width: 1),
+        HwRetireCompositionBinding(kind: "producer_to_frontend", source_owner: "producer", source_port: "retire_valid", destination_owner: "frontend", destination_port: "retire_valid", bit_width: 1),
+        HwRetireCompositionBinding(kind: "producer_to_frontend", source_owner: "producer", source_port: "retire_lineage", destination_owner: "frontend", destination_port: "retire_lineage", bit_width: 64),
+        HwRetireCompositionBinding(kind: "producer_to_frontend", source_owner: "producer", source_port: "retire_original_parcel", destination_owner: "frontend", destination_port: "retire_original_parcel", bit_width: 16),
+        HwRetireCompositionBinding(kind: "producer_to_frontend", source_owner: "producer", source_port: "retire_canonical_instruction", destination_owner: "frontend", destination_port: "retire_canonical_instruction", bit_width: 32),
+        HwRetireCompositionBinding(kind: "producer_to_frontend", source_owner: "producer", source_port: "retire_original_length_bytes", destination_owner: "frontend", destination_port: "retire_original_length_bytes", bit_width: 2)]
+
+pub class HwParcelRetirementComposition:
+    """Closed wiring contract for one frontend and its reset-coupled receipt producer."""
+    node_id: HwNodeId
+    config: CoreConfig
+    frontend: HwParcelFrontendInterface
+    producer: HwRetireReceiptProducerInterface
+    producer_entity: text
+    bindings: [HwRetireCompositionBinding]
+
+    me binding_diagnostic() -> text:
+        val expected = strict_retire_composition_bindings()
+        if self.bindings.len() != expected.len():
+            return "HWIR-E-RETIRE-COMPOSITION-BINDINGS: retirement composition requires the closed reset, dispatch, and receipt wiring set"
+        var index = 0
+        while index < expected.len():
+            val actual = self.bindings[index]
+            val required = expected[index]
+            if actual.kind != required.kind or actual.source_owner != required.source_owner or
+                actual.source_port != required.source_port or actual.destination_owner != required.destination_owner or
+                actual.destination_port != required.destination_port or actual.bit_width != required.bit_width:
+                return "HWIR-E-RETIRE-COMPOSITION-BINDINGS: retirement composition requires the closed reset, dispatch, and receipt wiring set"
+            index = index + 1
+        ""
+
+    me shape_diagnostic() -> text:
+        val config_error = self.config.diagnostic()
+        if config_error != "": return config_error
+        if not self.node_id.is_valid() or not hwir_vhdl_identifier(self.producer_entity):
+            return "HWIR-E-RETIRE-COMPOSITION-ID: retirement composition requires stable composition and producer identities"
+        val frontend_error = self.frontend.shape_diagnostic()
+        if frontend_error != "": return frontend_error
+        val producer_error = self.producer.shape_diagnostic()
+        if producer_error != "": return producer_error
+        if self.config.xlen != self.frontend.config.xlen or self.config.xlen != self.producer.config.xlen or
+            self.config.physical_address_bits != self.frontend.config.physical_address_bits or
+            self.config.physical_address_bits != self.producer.config.physical_address_bits or
+            self.config.profile != self.frontend.config.profile or self.config.profile != self.producer.config.profile or
+            self.config.isa_profile != self.frontend.config.isa_profile or self.config.isa_profile != self.producer.config.isa_profile or
+            self.config.compressed_decode_profile != self.frontend.config.compressed_decode_profile or
+            self.config.compressed_decode_profile != self.producer.config.compressed_decode_profile:
+            return "HWIR-E-RETIRE-COMPOSITION-CONFIG: frontend and retirement producer must share one concrete product configuration"
+        self.binding_diagnostic()
+
+pub fn strict_zca_single_outstanding_retirement_composition(module_name: text,
+    config: CoreConfig, producer_entity: text) -> Result<HwParcelRetirementComposition, text>:
+    if module_name == "":
+        return Err("HWIR-E-RETIRE-COMPOSITION-ID: retirement composition requires a module name")
+    val frontend = strict_riscv_parcel_frontend_interface(config)?
+    val producer = strict_riscv_retire_receipt_producer_interface(config)?
+    val composition = HwParcelRetirementComposition(
+        node_id: HwNodeId.module_root(module_name), config: config, frontend: frontend,
+        producer: producer, producer_entity: producer_entity,
+        bindings: strict_retire_composition_bindings())
+    val diagnostic = composition.shape_diagnostic()
+    if diagnostic != "": return Err(diagnostic)
+    Ok(composition)

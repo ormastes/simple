@@ -975,3 +975,34 @@ duplicate-check, and modern-SSpec maintenance gates recorded below complete.
   incrementing. This prevents wrap and token reuse before reset; the remaining
   blocker is reset-coupling to the real retirement producer, not a no-wrap
   lifetime assumption.
+- safety-correction: The Gen2 writer no longer exports an artifact-module API
+  that accepts serializable product input and raw VHDL. Product persistence now
+  runs through a private driver receipt; Simple visibility remains advisory, so
+  this narrows the supported boundary without claiming language-enforced
+  non-forgeability.
+- safety-correction: The bounded stateful frontend retirement guard now binds
+  the outstanding transaction by the conjunction of 64-bit lineage, original
+  16-bit parcel, canonical 32-bit instruction, and two-bit original-length
+  encoding. A valid retirement with any mismatched identity field follows the
+  sticky `protocol_fault` path and cannot release the entry as successful.
+  This supersedes earlier lineage-only and missing-wrap-rule descriptions;
+  architectural `RiscvRetireRecord` producer wiring and shared-reset closure
+  remain open.
+- safety-correction: Earlier statements that the v1 product or frontend
+  "remains unchanged" apply only to the v1 decoder's ISA composition. The new
+  retirement identity ports change the stateful frontend ABI, port sequence,
+  and closure hash. Existing product/version labels are not qualification
+  evidence and require an explicit versioning decision plus fresh receipts.
+- verify-blocked: Available retirement-identity checks use the Rust bootstrap
+  seed and one expanded run was warning-truncated. They are development
+  diagnostics only, not proof that the generated reuse/reset fixture or its
+  VHDL/GHDL behavior qualifies. Record one provenance-admitted self-hosted
+  focused receipt before changing mission-critical qualification status.
+- verify-blocked: Self-host qualification was re-audited on 2026-08-12. The
+  deployed `bin/simple` has no adjacent Stage-4 provenance receipt; the only
+  isolated candidates are Stage-2 products, while the current authority build
+  ends `exit-1`. Active unrelated native builds mean no bootstrap may start in
+  this shared checkout. The compiler/bootstrap owner must first produce an
+  admitted non-vacuous Stage-3 and `pure-simple-full-cli` Stage-4, then run
+  the exact RV32/RV64 foundation commands recorded here. See
+  `doc/08_tracking/bug/self_hosted_runtime_authority_republish_path_2026-08-12.md`.

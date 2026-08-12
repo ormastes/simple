@@ -1,0 +1,61 @@
+# Typed reset-coupled retirement-receipt composition tests.
+
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig, HwPort}
+use compiler.mir.hwir.retirement_composition.{HwParcelRetirementComposition, HwRetireCompositionBinding, strict_riscv_retire_receipt_producer_interface, strict_zca_single_outstanding_retirement_composition}
+
+describe "strict Gen2 retirement receipt composition":
+    it "REQ-G2-010 binds the one-entry frontend and receipt producer to one reset for RV32 and RV64":
+        val rv32 = strict_zca_single_outstanding_retirement_composition(
+            "rv32_retirement_composition", CoreConfig.rv32_zca_mission_critical(),
+            "riscv_gen2_rv32_architectural_retirement")
+        val rv64 = strict_zca_single_outstanding_retirement_composition(
+            "rv64_retirement_composition", CoreConfig.rv64_zca_mission_critical(),
+            "riscv_gen2_rv64_architectural_retirement")
+        if rv32.is_ok() and rv64.is_ok():
+            val composition32 = rv32.ok().unwrap()
+            val composition64 = rv64.ok().unwrap()
+            expect(composition32.shape_diagnostic()).to_equal("")
+            expect(composition64.shape_diagnostic()).to_equal("")
+            expect(composition32.bindings.len()).to_equal(15)
+            expect(composition32.bindings[2].source_port).to_equal("rst")
+            expect(composition32.bindings[2].destination_owner).to_equal("frontend")
+            expect(composition32.bindings[3].source_port).to_equal("rst")
+            expect(composition32.bindings[3].destination_owner).to_equal("producer")
+            expect(composition32.producer.dispatch_lineage.bit_width).to_equal(64)
+            expect(composition64.producer.dispatch_original_length_bytes.bit_width).to_equal(2)
+        else:
+            expect(false).to_equal(true)
+
+    it "REQ-G2-010 rejects a producer that loses the shared reset or a receipt width":
+        val config = CoreConfig.rv32_zca_mission_critical()
+        val producer = strict_riscv_retire_receipt_producer_interface(config)
+        if producer.is_ok():
+            val bad_reset = producer.ok().unwrap()
+            bad_reset.rst = HwPort.input("retire_rst", "Bits", 1)
+            expect(bad_reset.shape_diagnostic()).to_equal(
+                "HWIR-E-RETIRE-PRODUCER-CLOCK: retirement receipt producer requires shared one-bit clk and synchronous active-high rst inputs")
+            val bad_width = strict_riscv_retire_receipt_producer_interface(config).ok().unwrap()
+            bad_width.retire_lineage = HwPort.output("retire_lineage", "Bits", 63)
+            expect(bad_width.shape_diagnostic()).to_equal(
+                "HWIR-E-RETIRE-PRODUCER-RECEIPT-WIDTH: retirement producer must publish the exact receipt identity tuple")
+        else:
+            expect(false).to_equal(true)
+
+    it "REQ-G2-010 rejects omitted or rewired receipt bindings before a producer can be composed":
+        val built = strict_zca_single_outstanding_retirement_composition(
+            "retirement_binding_contract", CoreConfig.rv32_zca_mission_critical(),
+            "riscv_gen2_rv32_architectural_retirement")
+        if built.is_ok():
+            val canonical = built.ok().unwrap()
+            var rewired = canonical.bindings
+            rewired[11] = HwRetireCompositionBinding(kind: "producer_to_frontend", source_owner: "producer",
+                source_port: "retire_lineage", destination_owner: "frontend",
+                destination_port: "retire_original_parcel", bit_width: 64)
+            val malformed = HwParcelRetirementComposition(node_id: canonical.node_id,
+                config: canonical.config, frontend: canonical.frontend, producer: canonical.producer,
+                producer_entity: canonical.producer_entity, bindings: rewired)
+            expect(malformed.shape_diagnostic()).to_equal(
+                "HWIR-E-RETIRE-COMPOSITION-BINDINGS: retirement composition requires the closed reset, dispatch, and receipt wiring set")
+        else:
+            expect(false).to_equal(true)

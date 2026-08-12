@@ -84,6 +84,12 @@ non-empty VHDL module without invoking the legacy VHDL route.
 - NFR-G2-001..003: deterministic rejection and no-runtime-selection behavior.
 - NFR-G2-004..005: source ownership and V1 route separation are reviewed by
   the focused source/quality gates.
+- REQ-G2-007/NFR-G2-007: the shared compressed hardware subset carries only
+  fixed-width parcel/canonical data and reason codes. Its zero, reserved, and
+  RV32-C.JAL/RV64-C.ADDIW divergent cases remain explicit non-legacy paths.
+- REQ-G2-008/NFR-G2-009: the declarative 25-entry critical subset derives a
+  non-advertising host-side capability manifest; it records incomplete
+  target-RTL evidence rather than claiming Zca or a release profile.
 - NFR-G2-008: the mission-critical C.EBREAK graph uses fixed-width typed
   values, rejects an invalid predicate before emission, and has no legacy
   decoder path.
@@ -124,7 +130,8 @@ non-empty VHDL module without invoking the legacy VHDL route.
   with reserved, redirect, or trap semantics remain outside composition.
 - REQ-G2-010/NFR-G2-011: the v2 C.EBREAK trap product is emitted through the
   same typed sequential plan and records a nonempty compiler-product graph
-  hash. V1 remains unchanged.
+  hash. The v1 decoder ISA composition remains unchanged; stateful products
+  remain development-stage ABI/version decisions until fresh receipts exist.
 - REQ-G2-011: frontend admission is closed against the declarative capability
   table. This is a structural provenance guard, not full generated-RTL
   equivalence.

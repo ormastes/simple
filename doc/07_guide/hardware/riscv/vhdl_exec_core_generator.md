@@ -79,6 +79,12 @@ a reset-coupled architectural retirement producer and successful self-hosted
 RV32/RV64 VHDL/GHDL receipts. Bootstrap-seed output, including warning-truncated
 test output, is diagnostic only and does not establish any of those conditions.
 
+The added retirement identity inputs change the stateful frontend's public port
+sequence and graph closure hash. Treat existing stateful product IDs as
+development identifiers, not stable ABI claims, until the compiler assigns an
+explicit compatible or breaking version and fresh self-hosted manifest/GHDL
+receipts prove that decision.
+
 `riscv-gen2-zca-rv32-cjal-migrating-predecode-v1` is a separate RV32-only
 product and requires `--riscv-gen2-target rv32-zca-cjal-critical`. It adds the
 RV32 C.JAL parcel to the common migrating predecode graph under a concrete

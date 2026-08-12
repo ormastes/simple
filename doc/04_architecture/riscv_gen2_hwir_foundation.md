@@ -430,8 +430,22 @@ cannot leak a stale trap effect
 while the frontend waits for retirement. Its source-less manifest names both
 the compiler product entity and its decoder dependency; it never fabricates a
 user source span. Its v2 product is enabled only through the typed sequential
-plan and a nonempty graph closure hash. The frozen v1 product remains unchanged
-and still classifies C.EBREAK as unmigrated.
+plan and a nonempty graph closure hash. The frozen v1 decoder composition still
+classifies C.EBREAK as unmigrated. This is not an ABI-stability claim for the
+stateful frontend: adding parcel/canonical/length retirement identity inputs
+changes its public port sequence and therefore its closure hash. Existing
+stateful product IDs must remain unqualified until their version/ABI treatment
+is explicit and fresh self-hosted manifests and GHDL receipts are recorded.
+
+`HwParcelRetirementComposition` freezes the next architectural boundary without
+pretending that it already emits a processor. Its producer contract consumes
+the accepted dispatch identity `(valid, lineage, original parcel, canonical
+instruction, original length)`, shares the frontend's `clk` and synchronous
+`rst`, and returns the same identity with the retirement receipt. The closed
+wiring list rejects width changes, reset separation, and receipt rewiring at
+elaboration. It is not target-legalized because strict HWIR has no generic
+typed child-instance/effect lowering yet. RTL composition therefore remains a
+later scalar-retirement owner task, not evidence supplied by this contract.
 
 The v1 and v2 compositions also publish their admitted declarative ISA IDs.
 The contract test requires v1 to contain exactly the 24 non-trap entries and

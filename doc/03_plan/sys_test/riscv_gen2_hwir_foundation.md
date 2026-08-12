@@ -12,6 +12,9 @@ evidence and resume** execute with a provenance-admitted self-hosted CLI.
 The stateful product is deliberately development-stage: its 64-bit lineage
 requires a reset-coupled retirement producer. A terminal matching retirement
 now faults before increment, so it cannot wrap or reuse a token before reset.
+Retirement acceptance additionally requires exact original parcel, canonical
+instruction, and original-length matches. Independent same-lineage identity
+mutants must enter sticky fault and must not release the outstanding entry.
 It is not a complete processor frontend, core, or Zca claim.
 Compiler-owned Gen2 artifacts use a Gen2-only persistence path; the generic
 raw writer rejects those routes before cleanup. The product driver's private
@@ -92,7 +95,7 @@ evidence.
 | Critical target policy gate | noncritical `--riscv-gen2-target` rejects before stale-artifact removal and cannot silently select legacy VHDL |
 | REQ-G2-009 compiler product route | source-less critical migrating-Zca product emits VHDL plus `hwir-gen2-product` manifest with its own compiler-product identity and an empty user source closure; noncritical request preserves a prior artifact |
 | REQ-G2-010 stateful parcel frontend | RV32/RV64 public APIs and the v2 trap CLI product emit only from `HwSequentialPlan`; require a recomputed closure over complete config, ports, ordered plan, decoder identity/digest, and origins, plus protocol scenarios and GHDL evidence |
-| Stateful protocol recovery | The foundation scenario contains RV32/RV64 trap-front-end vectors for two clean consecutive transactions with incrementing 64-bit lineage, issued-entry backpressure, early/stale/mismatched/repeated retirement, sticky fault containment, fetch refusal, stale-effect suppression, and synchronous reset recovery including reset/retire priority. It remains development-stage, non-qualification evidence until the self-hosted runtime executes the scenario and records the GHDL receipt. |
+| Stateful protocol recovery | The foundation scenario must contain RV32/RV64 vectors for two clean consecutive transactions with incrementing lineage, issued-entry backpressure, early/stale/repeated retirement, and independent same-lineage parcel/canonical/length mismatches. Each mismatch must assert sticky fault, refuse fetch, suppress stale effects, and recover only through synchronous reset including reset/retire priority. Bootstrap-seed execution is diagnostic and cannot qualify this receipt; qualification requires the admitted self-hosted runtime and recorded GHDL result. |
 | REQ-G2-011 normalized outcome | C.ADDI4SPN target RTL proves reserved zero immediate remains explicitly illegal while a nonzero encoding produces legal canonical output; C.LW/C.SW prove classifier match/nonmatch, and C.LWSP proves reserved-register rejection, without a canonical sentinel |
 | REQ-G2-011 migrating predecode | RV32/RV64 strict-HWIR shape preserves a single driver per public output; GHDL proves C.LW, positive C.ADDI16SP, C.JR/C.JALR aligned redirects, index-mismatch rejection, and reserved-zero C.ADDI16SP illegal fallthrough; the one-entry product selects this migrating decoder |
 | Critical compressed product selection | CLI/driver accept explicit `rv32-zca-critical`/`rv64-zca-critical` and resolve only their concrete common-critical `CoreConfig` |
@@ -100,6 +103,8 @@ evidence.
 | Mission-critical compressed subset | no fallback/config/text path; unsupported divergent rows reject; exhaustive 65,536-parcel deterministic classification |
 | Critical capability truth | partial subset manifest records exhaustive classification as verified, cannot advertise Zca, and remains non-release-claimable even when future target-RTL evidence arrives |
 | NFR-G2-008 origin/profile admission | any `zca.*` HWIR origin under a non-critical product profile fails before VHDL emission |
+| NFR-G2-007 fixed-width compressed boundary | unit checks distinguish zero, reserved, and width-divergent reason codes without text-valued hardware payloads |
+| NFR-G2-009 capability honesty | unit and manifest checks forbid full-Zca advertisement while generated-RTL equivalence remains incomplete |
 
 Mutants: invalid XLEN, zero width, non-hardware tag, empty node ID, unknown
 operation, missing operand, and an attempted legacy-fallback marker in strict
