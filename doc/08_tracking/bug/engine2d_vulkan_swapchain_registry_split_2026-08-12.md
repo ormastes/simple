@@ -1,6 +1,6 @@
 # Engine2D Vulkan swapchain registry split
 
-Status: partial — same-device headless bridge implemented; visible-window adapter open
+Status: resolved for canonical runtime ownership; physical-GPU promotion open
 
 Engine2D's Vulkan backend renders into `vulkan_graphics_runtime_core::STATE`
 storage buffers. The implemented window/swapchain SFFI instead owns devices,
@@ -18,7 +18,12 @@ The canonical runtime now has an opt-in initialization path that creates a
 storage buffer on that presentation-capable device, copies it directly to an
 acquired BGRA8 swapchain image, and completes `vkQueuePresentKHR`. This removes
 the registry split for headless evidence without claiming a visible screen.
-The visible winit/window surface must next enter the same pre-device owner.
+The visible winit/window surface now enters the same pre-device owner. Its
+event loop accepts requests from the runtime thread, exits only through an
+explicit shutdown event, and has a bounded window-creation wait. Xvfb with the
+pinned llvmpipe ICD completes two retained same-device window presentations.
+Physical NVIDIA promotion remains separate because the earlier headless
+hardware-preferred probe crashed and no physical display timing is recorded.
 
 Acceptance:
 

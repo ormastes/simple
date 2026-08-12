@@ -54,7 +54,8 @@ use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_destroy_shader, vulkan_sffi_destroy_pipeline,
     vulkan_sffi_last_error,
     vulkan_sffi_recover_dependency_quarantine,
-    vulkan_sffi_init_headless_present, vulkan_sffi_present_buffer,
+    vulkan_sffi_init_headless_present, vulkan_sffi_init_window_present,
+    vulkan_sffi_present_buffer,
     vulkan_sffi_destroy_swapchain
 }
 use std.gc_async_mut.gpu.engine2d.vulkan_session.{VulkanSession}
@@ -245,6 +246,7 @@ class VulkanBackend:
     present_noop_count: i64
     device_finalize_no_readback_count: i64
     presentation_swapchain: i64
+    presentation_mode: text
     device_content_revision: i64
     frame_index: i64
     frame_dirty_rect_count: i64
@@ -336,6 +338,7 @@ class VulkanBackend:
             present_noop_count: 0,
             device_finalize_no_readback_count: 0,
             presentation_swapchain: 0,
+            presentation_mode: "none",
             device_content_revision: 0,
             frame_index: 0,
             frame_dirty_rect_count: 0,
@@ -419,6 +422,24 @@ impl RenderBackend for VulkanBackend:
             vulkan_sffi_destroy_swapchain(swapchain)
             return false
         self.presentation_swapchain = swapchain
+        self.presentation_mode = "headless-swapchain"
+        true
+
+    me init_window_present(width: i32, height: i32, vsync: bool) -> bool:
+        """Initialize Engine2D on a same-device visible window swapchain."""
+        if self.initialized or self.presentation_swapchain != 0:
+            self.last_error = "Vulkan backend already initialized"
+            return false
+        val swapchain = vulkan_sffi_init_window_present(
+            width.to_i64(), height.to_i64(), vsync)
+        if swapchain <= 0:
+            self.last_error = vulkan_sffi_last_error()
+            return false
+        if not self.init(width, height):
+            vulkan_sffi_destroy_swapchain(swapchain)
+            return false
+        self.presentation_swapchain = swapchain
+        self.presentation_mode = "window-swapchain"
         true
 
     me init_with_session(width: i32, height: i32, session: VulkanSession) -> bool:
@@ -557,6 +578,7 @@ impl RenderBackend for VulkanBackend:
         if self.presentation_swapchain != 0:
             vulkan_sffi_destroy_swapchain(self.presentation_swapchain)
             self.presentation_swapchain = 0
+            self.presentation_mode = "none"
         if self.d_font_params != 0:
             vulkan_sffi_free_buffer(self.d_font_params)
             self.d_font_params = 0
@@ -1033,13 +1055,12 @@ impl RenderBackend for VulkanBackend:
             device_identity: self.session.device,
             swapchain_identity: self.presentation_swapchain)
 
-    me present_headless_device() -> bool:
-        """Complete a same-device headless swapchain presentation."""
-        self._begin_frame_receipt("headless-swapchain", false, true)
+    me _present_device(mode: text) -> bool:
+        self._begin_frame_receipt(mode, false, true)
         self.present_readback_bytes = 0
         self.present_readback_rect_count = 0
         if self.presentation_swapchain <= 0 or self.d_framebuffer <= 0:
-            self.frame_fallback_reason = "headless-swapchain-unavailable"
+            self.frame_fallback_reason = mode + "-unavailable"
             return false
         if self.completion_unknown:
             self.frame_fallback_reason = "completion-unknown"
@@ -1054,7 +1075,7 @@ impl RenderBackend for VulkanBackend:
             self.presentation_swapchain, self.d_framebuffer,
             self.w.to_i64(), self.h.to_i64(), self.device_content_revision)
         if presented <= 0:
-            self.frame_fallback_reason = "headless-swapchain-present-failed"
+            self.frame_fallback_reason = mode + "-present-failed"
             return false
         self.frame_present_completed = true
         self.frame_device_present = true
@@ -1063,6 +1084,18 @@ impl RenderBackend for VulkanBackend:
         if presented == 2:
             self.frame_fallback_reason = "swapchain-suboptimal"
         true
+
+    me present_headless_device() -> bool:
+        """Complete a same-device headless swapchain presentation."""
+        if self.presentation_mode != "headless-swapchain":
+            return self._present_device("headless-swapchain")
+        self._present_device(self.presentation_mode)
+
+    me present_window_device() -> bool:
+        """Complete a same-device visible-window swapchain presentation."""
+        if self.presentation_mode != "window-swapchain":
+            return self._present_device("window-swapchain")
+        self._present_device(self.presentation_mode)
 
     me finalize_compute_frame_no_readback() -> bool:
         """Finish a storage-buffer frame without copying it to the host.

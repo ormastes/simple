@@ -1,5 +1,5 @@
 #[cfg(feature = "vulkan")]
-use super::vulkan_graphics_runtime_core::{alloc_handle, Framebuffer, SemaphorePool, Surface, VulkanDevice, VulkanInstance, VulkanSwapchain, STATE};
+use super::vulkan_graphics_runtime_core::{alloc_handle, Framebuffer, SemaphorePool, Surface, VulkanDevice, VulkanInstance, VulkanSwapchain, WindowManager, STATE};
 #[cfg(feature = "vulkan")]
 use std::sync::Arc;
 
@@ -95,6 +95,62 @@ pub extern "C" fn rt_vulkan_destroy_framebuffer(_fb: i64) -> i64 {
 // ============================================================================
 // Swapchain
 // ============================================================================
+
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_init_window_present(w: i64, h: i64, vsync: i64) -> i64 {
+    if w <= 0 || h <= 0 || w > u32::MAX as i64 || h > u32::MAX as i64 { return 0; }
+    let mut state = STATE.lock();
+    if state.device.is_some() || state.has_device_resources() {
+        state.set_error("window presentation must initialize before Vulkan resources".to_string());
+        return 0;
+    }
+    let instance = match VulkanInstance::get_or_init() { Ok(v) => v, Err(e) => { state.set_error(format!("window present instance: {e}")); return 0; } };
+    let mut manager = match WindowManager::new(instance.clone()) { Ok(v) => v, Err(e) => { state.set_error(format!("window present manager: {e}")); return 0; } };
+    if let Err(e) = manager.start_event_loop_thread() { state.set_error(format!("window present event loop: {e}")); return 0; }
+    let window = match manager.create_window(w as u32, h as u32, "Simple Engine2D Vulkan") {
+        Ok(v) => v,
+        Err(e) => { state.set_error(format!("window present create: {e}")); return 0; }
+    };
+    let surface = match manager.get_surface(window) {
+        Ok(v) => v,
+        Err(e) => { let _ = manager.destroy_window(window); state.set_error(format!("window present surface: {e}")); return 0; }
+    };
+    let mut devices = match instance.enumerate_devices() {
+        Ok(v) => v,
+        Err(e) => { let _ = manager.destroy_window(window); state.set_error(format!("window present enumerate: {e}")); return 0; }
+    };
+    devices.sort_by_key(|device| std::cmp::Reverse(device.compute_score()));
+    let mut selected = None;
+    for physical in &devices {
+        if physical.find_compute_queue_family().is_none() || physical.find_graphics_queue_family().is_none()
+            || physical.find_present_queue_family(&instance, surface.handle()).is_none() { continue; }
+        if let Ok(device) = VulkanDevice::new_for_surface(physical.clone(), &surface) { selected = Some(device); break; }
+    }
+    let device = match selected {
+        Some(v) => v,
+        None => { let _ = manager.destroy_window(window); state.set_error("no device supports the window presentation surface".to_string()); return 0; }
+    };
+    let swapchain = match VulkanSwapchain::new(device.clone(), surface.clone(), w as u32, h as u32, false, vsync == 0) {
+        Ok(v) => v,
+        Err(e) => { let _ = manager.destroy_window(window); state.set_error(format!("window present swapchain: {e}")); return 0; }
+    };
+    let surface_handle = alloc_handle();
+    let swapchain_handle = alloc_handle();
+    state.instance = Some(instance);
+    state.physical_devices = devices;
+    state.semaphore_pool = Some(SemaphorePool::new(device.clone()));
+    state.device = Some(device);
+    state.surfaces.insert(surface_handle, surface);
+    state.swapchains.insert(swapchain_handle, swapchain);
+    state.swapchain_windows.insert(swapchain_handle, window);
+    state.window_manager = Some(manager);
+    swapchain_handle
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_init_window_present(_w: i64, _h: i64, _vsync: i64) -> i64 { 0 }
 
 #[no_mangle]
 #[cfg(feature = "vulkan")]
@@ -209,11 +265,15 @@ pub extern "C" fn rt_vulkan_create_swapchain(
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_destroy_swapchain(sc: i64) -> i64 {
     let mut state = STATE.lock();
-    if state.swapchains.remove(&sc).is_some() {
-        1
-    } else {
-        0
+    let removed = state.swapchains.remove(&sc);
+    if removed.is_none() { return 0; }
+    drop(removed);
+    if let Some(window) = state.swapchain_windows.remove(&sc) {
+        if let Some(manager) = state.window_manager.as_ref() {
+            let _ = manager.destroy_window(window);
+        }
     }
+    1
 }
 
 #[no_mangle]
@@ -276,9 +336,9 @@ pub extern "C" fn rt_vulkan_present(_sc: i64, _image_index: i64) -> i64 {
 
 #[cfg(all(test, feature = "vulkan"))]
 mod tests {
-    use super::{rt_vulkan_destroy_swapchain, rt_vulkan_init_headless_present, rt_vulkan_present_buffer};
+    use super::{rt_vulkan_destroy_swapchain, rt_vulkan_init_headless_present, rt_vulkan_init_window_present, rt_vulkan_present_buffer};
     use crate::vulkan_graphics_runtime::vulkan_graphics_runtime_buffer::{rt_vulkan_alloc_buffer, rt_vulkan_copy_to_buffer_raw, rt_vulkan_free_buffer};
-    use crate::vulkan_graphics_runtime::vulkan_graphics_runtime_core::rt_vulkan_shutdown;
+    use crate::vulkan_graphics_runtime::vulkan_graphics_runtime_core::{rt_vulkan_shutdown, STATE};
 
     fn upload_chunks(buffer: i64, bytes: &[u8]) {
         const MAX_UPLOAD: usize = 64 * 1024 * 1024;
@@ -292,8 +352,26 @@ mod tests {
     fn live_headless_swapchain_presents_same_device_buffer_twice() {
         let (width, height) = (64i64, 32i64);
         let swapchain = rt_vulkan_init_headless_present(width, height, 0);
-        assert!(swapchain > 0);
+        assert!(swapchain > 0, "{}", STATE.lock().last_error);
         let pixels = vec![0xff3366ccu32; (width * height) as usize];
+        let bytes = unsafe { std::slice::from_raw_parts(pixels.as_ptr().cast::<u8>(), (width * height * 4) as usize) };
+        let buffer = rt_vulkan_alloc_buffer(width * height * 4, 0x80);
+        assert!(buffer > 0);
+        upload_chunks(buffer, bytes);
+        assert!(rt_vulkan_present_buffer(swapchain, buffer, width, height, 1) > 0);
+        assert!(rt_vulkan_present_buffer(swapchain, buffer, width, height, 1) > 0);
+        assert_eq!(rt_vulkan_free_buffer(buffer), 1);
+        assert_eq!(rt_vulkan_destroy_swapchain(swapchain), 1);
+        assert_eq!(rt_vulkan_shutdown(), 1);
+    }
+
+    #[test]
+    #[ignore = "requires a visible X11/Wayland display and presentation-capable Vulkan ICD"]
+    fn live_window_swapchain_presents_same_device_buffer_twice() {
+        let (width, height) = (320i64, 180i64);
+        let swapchain = rt_vulkan_init_window_present(width, height, 0);
+        assert!(swapchain > 0, "{}", STATE.lock().last_error);
+        let pixels = vec![0xff224488u32; (width * height) as usize];
         let bytes = unsafe { std::slice::from_raw_parts(pixels.as_ptr().cast::<u8>(), (width * height * 4) as usize) };
         let buffer = rt_vulkan_alloc_buffer(width * height * 4, 0x80);
         assert!(buffer > 0);

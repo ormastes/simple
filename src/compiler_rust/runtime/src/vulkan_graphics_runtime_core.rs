@@ -165,6 +165,7 @@ pub(super) struct VulkanState {
     pub framebuffers: HashMap<i64, Arc<Framebuffer>>,
     pub framebuffer_attachments: HashMap<i64, Vec<Arc<VulkanImage>>>,
     pub swapchains: HashMap<i64, Arc<VulkanSwapchain>>,
+    pub swapchain_windows: HashMap<i64, u64>,
     pub descriptor_pools: HashMap<i64, Arc<DescriptorPool>>,
     pub descriptor_set_layouts: HashMap<i64, Arc<DescriptorSetLayout>>,
     pub descriptor_sets: HashMap<i64, Arc<DescriptorSet>>,
@@ -203,6 +204,7 @@ impl VulkanState {
             framebuffers: HashMap::new(),
             framebuffer_attachments: HashMap::new(),
             swapchains: HashMap::new(),
+            swapchain_windows: HashMap::new(),
             descriptor_pools: HashMap::new(),
             descriptor_set_layouts: HashMap::new(),
             descriptor_sets: HashMap::new(),
@@ -245,6 +247,7 @@ impl VulkanState {
             || !self.font_graphics_resources.is_empty()
             || !self.framebuffers.is_empty()
             || !self.swapchains.is_empty()
+            || !self.swapchain_windows.is_empty()
             || !self.descriptor_pools.is_empty()
             || !self.descriptor_set_layouts.is_empty()
             || !self.descriptor_sets.is_empty()
@@ -389,6 +392,12 @@ pub extern "C" fn rt_vulkan_shutdown() -> i64 {
     state.font_graphics_resources.clear();
     state.graphics_pipelines.clear();
     state.render_passes.clear();
+    if let Some(manager) = state.window_manager.as_ref() {
+        for window in state.swapchain_windows.values() {
+            let _ = manager.destroy_window(*window);
+        }
+    }
+    state.swapchain_windows.clear();
     state.swapchains.clear();
     state.surfaces.clear();
     state.images.clear();

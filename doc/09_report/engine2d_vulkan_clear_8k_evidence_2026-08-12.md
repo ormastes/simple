@@ -241,4 +241,20 @@ An earlier hardware-preferred NVIDIA headless probe terminated with SIGSEGV
 while the pinned llvmpipe ICD passed. The headless evidence entry now prefers a
 CPU ICD when one is enumerated, avoiding accidental hardware promotion. No
 physical-GPU or visible-window promotion is claimed until that driver path is
-diagnosed and the winit surface is wired to the same pre-device owner.
+diagnosed. The winit adapter below proves virtual-display correctness but is
+not physical display evidence.
+
+## Visible-window same-device correctness
+
+The winit window surface now follows the same ordering as the headless owner:
+surface creation, compatible device selection, Engine2D storage allocation,
+swapchain acquisition, direct buffer-to-image transfer, then
+`vkQueuePresentKHR`. Window and swapchain lifetimes are paired in the canonical
+runtime registry. The event loop no longer exits before its first asynchronous
+create request and shutdown is an explicit proxied event with a bounded create
+response wait.
+
+Under Xvfb with the llvmpipe ICD, a 320x180 live test completed two successive
+same-device visible-window presentations and clean teardown. This is a
+correctness/lifecycle result only: Xvfb is not a physical display, the test has
+no 8K timing row, and it does not promote the physical NVIDIA lane.

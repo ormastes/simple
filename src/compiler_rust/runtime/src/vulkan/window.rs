@@ -14,6 +14,8 @@ use winit::{
     event_loop::{EventLoop, EventLoopProxy},
     window::{Fullscreen, Window},
 };
+#[cfg(target_os = "linux")]
+use winit::platform::x11::EventLoopBuilderExtX11;
 
 /// Window handle type
 pub type WindowHandle = u64;
@@ -168,7 +170,10 @@ impl WindowManager {
         instance: Arc<VulkanInstance>,
         request_receiver: crossbeam::channel::Receiver<WindowRequest>,
     ) {
-        let event_loop = match EventLoop::<UserEvent>::with_user_event().build() {
+        let mut event_loop_builder = EventLoop::<UserEvent>::with_user_event();
+        #[cfg(target_os = "linux")]
+        event_loop_builder.with_any_thread(true);
+        let event_loop = match event_loop_builder.build() {
             Ok(el) => el,
             Err(e) => {
                 tracing::error!("Failed to create event loop: {:?}", e);
@@ -182,10 +187,9 @@ impl WindowManager {
         let proxy_clone = proxy.clone();
         std::thread::spawn(move || {
             while let Ok(request) = request_receiver.recv() {
-                if matches!(request, WindowRequest::Shutdown) {
-                    break;
-                }
+                let shutting_down = matches!(request, WindowRequest::Shutdown);
                 let _ = proxy_clone.send_event(UserEvent::Request(request));
+                if shutting_down { break; }
             }
         });
 
@@ -213,11 +217,7 @@ impl WindowManager {
                 }
             }
 
-            Event::AboutToWait => {
-                if windows.lock().is_empty() {
-                    target.exit();
-                }
-            }
+            Event::AboutToWait => {}
 
             _ => {}
         });
@@ -264,7 +264,7 @@ impl WindowManager {
             }
 
             WindowRequest::Shutdown => {
-                // Event loop will exit when all windows are closed
+                target.exit();
             }
         }
     }
@@ -463,7 +463,7 @@ impl WindowManager {
 
         // Wait for response
         response_rx
-            .recv()
+            .recv_timeout(std::time::Duration::from_secs(10))
             .map_err(|e| VulkanError::WindowError(format!("Failed to receive create window response: {:?}", e)))??;
 
         Ok(handle)
