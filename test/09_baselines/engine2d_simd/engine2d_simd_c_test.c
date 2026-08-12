@@ -40,6 +40,12 @@
 #  include <immintrin.h>
 #endif
 
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
+#  define SIMPLE_RUNTIME_TARGET_AVX2 __attribute__((target("avx2")))
+#else
+#  define SIMPLE_RUNTIME_TARGET_AVX2
+#endif
+
 /* Pull in the REAL kernel helpers, sliced verbatim from
  * src/runtime/runtime_simd_dispatch.c by the gate runner.
  * MUST stay in sync with src/runtime/runtime_simd_dispatch.c (kept in sync

@@ -43,8 +43,22 @@ int8_t rt_array_set_len_known(int64_t header_ptr, int64_t len) {
 extern SplArray *rt_engine2d_simd_fill_span_u32(SplArray *, int64_t, int64_t, int64_t);
 extern SplArray *rt_engine2d_simd_copy_span_u32(SplArray *, int64_t, SplArray *, int64_t, int64_t);
 extern SplArray *rt_engine2d_simd_blend_row_u32(SplArray *, SplArray *);
+extern SplArray *rt_engine2d_simd_blend_span_u32(SplArray *, int64_t, SplArray *, int64_t, int64_t);
+extern SplArray *rt_engine2d_simd_blend_const_span_u32(SplArray *, int64_t, int64_t, int64_t);
 extern int64_t rt_simd_engine2d_neon_hits(void);
 extern int64_t rt_simd_engine2d_neon_reset(void);
+
+static uint32_t blend_ref(uint32_t s, uint32_t d) {
+    uint32_t sa = s >> 24;
+    if (sa == 255) return s;
+    if (sa == 0) return d;
+    uint32_t dw = ((d >> 24) * (255 - sa)) / 255;
+    uint32_t oa = sa + dw;
+    uint32_t r = ((((s >> 16) & 255) * sa) + (((d >> 16) & 255) * dw)) / oa;
+    uint32_t g = ((((s >> 8) & 255) * sa) + (((d >> 8) & 255) * dw)) / oa;
+    uint32_t b = (((s & 255) * sa) + ((d & 255) * dw)) / oa;
+    return (oa << 24) | (r << 16) | (g << 8) | b;
+}
 
 int main(void) {
     int64_t pixels[16] = {0};
@@ -91,6 +105,38 @@ int main(void) {
 #else
     if (rt_simd_engine2d_neon_hits() != 0) return 10;
 #endif
+
+    int64_t long_pixels[520];
+    int64_t long_src_pixels[300];
+    int64_t expected[300];
+    for (int i = 0; i < 520; i++)
+        long_pixels[i] = (int64_t)((uint64_t)(0xff001000u + (uint32_t)i) << 3);
+    for (int i = 0; i < 300; i++) {
+        uint32_t s = 0x8000ff00u + (uint32_t)(i & 255);
+        long_src_pixels[i] = (int64_t)((uint64_t)s << 3);
+        expected[i] = (int64_t)((uint64_t)blend_ref(s, 0xff001000u + (uint32_t)i) << 3);
+    }
+    TestArray long_dst = {0, 0, {0}, 520, 520, long_pixels};
+    TestArray long_src = {0, 0, {0}, 300, 300, long_src_pixels};
+    result = rt_engine2d_simd_blend_span_u32(
+        (SplArray *)&long_dst, 0, (SplArray *)&long_src, 0, 300);
+    for (int i = 0; i < 300; i++) if (long_pixels[i] != expected[i]) return 11;
+
+    for (int i = 0; i < 300; i++) long_pixels[i] = (int64_t)((uint64_t)(0x800000ffu + (uint32_t)i) << 3);
+    result = rt_engine2d_simd_blend_span_u32(
+        (SplArray *)&long_dst, 20, (SplArray *)&long_dst, 0, 280);
+    for (int i = 0; i < 280; i++) {
+        uint32_t s = 0x800000ffu + (uint32_t)i;
+        uint32_t d = 0x800000ffu + (uint32_t)(i + 20);
+        if (long_pixels[i + 20] != (int64_t)((uint64_t)blend_ref(s, d) << 3)) return 12;
+    }
+
+    for (int i = 0; i < 300; i++) long_pixels[i] = (int64_t)((uint64_t)0xff102030u << 3);
+    result = rt_engine2d_simd_blend_const_span_u32(
+        (SplArray *)&long_dst, 0, 300, 0x804080c0u);
+    for (int i = 0; i < 300; i++) {
+        if (long_pixels[i] != (int64_t)((uint64_t)blend_ref(0x804080c0u, 0xff102030u) << 3)) return 13;
+    }
     puts("ENGINE2D_SIMD_SPAN_TEST: PASS");
     return 0;
 }

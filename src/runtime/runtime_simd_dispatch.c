@@ -1640,10 +1640,24 @@ SplArray* rt_engine2d_simd_blend_span_u32(SplArray* dst, int64_t dst_off,
     int64_t* dst_data = (int64_t*)(uintptr_t)rt_array_data_ptr(dst);
     const int64_t* src_data = (const int64_t*)(uintptr_t)rt_array_data_ptr(src);
     if (!dst_data || !src_data) return dst;
-    for (int64_t i = 0; i < n; i++) {
-        uint32_t s = engine2d_unbox_pixel(src_data[s_off + i]);
-        uint32_t d = engine2d_unbox_pixel(dst_data[d_off + i]);
-        dst_data[d_off + i] = engine2d_box_pixel((uint32_t)engine2d_blend_pixel((int64_t)s, (int64_t)d));
+    enum { ENGINE2D_BLEND_STACK_PIXELS = 256 };
+    int64_t raw_dst[ENGINE2D_BLEND_STACK_PIXELS];
+    int64_t raw_src[ENGINE2D_BLEND_STACK_PIXELS];
+    int backwards = (dst_data == src_data && d_off > s_off && d_off < s_off + n);
+    int64_t done = 0;
+    while (done < n) {
+        int64_t chunk = n - done;
+        if (chunk > ENGINE2D_BLEND_STACK_PIXELS) chunk = ENGINE2D_BLEND_STACK_PIXELS;
+        int64_t begin = backwards ? n - done - chunk : done;
+        for (int64_t i = 0; i < chunk; i++) {
+            raw_src[i] = (int64_t)(uint64_t)engine2d_unbox_pixel(src_data[s_off + begin + i]);
+            raw_dst[i] = (int64_t)(uint64_t)engine2d_unbox_pixel(dst_data[d_off + begin + i]);
+        }
+        engine2d_blend_into(raw_dst, raw_dst, raw_src, chunk);
+        for (int64_t i = 0; i < chunk; i++) {
+            dst_data[d_off + begin + i] = engine2d_box_pixel((uint32_t)(uint64_t)raw_dst[i]);
+        }
+        done += chunk;
     }
     return dst;
 }
@@ -1659,9 +1673,28 @@ SplArray* rt_engine2d_simd_blend_const_span_u32(SplArray* dst, int64_t offset,
     uint32_t s = (uint32_t)(uint64_t)const_color;
     uint32_t sa = (s >> 24) & 0xFFu;
     if (sa == 0u) return dst;
-    for (int64_t i = 0; i < n; i++) {
-        uint32_t d = engine2d_unbox_pixel(dst_data[off + i]);
-        dst_data[off + i] = engine2d_box_pixel((uint32_t)engine2d_blend_pixel((int64_t)s, (int64_t)d));
+    if (sa == 255u) {
+        engine2d_fill_into(dst_data + off, n, engine2d_box_pixel(s));
+        return dst;
+    }
+    enum { ENGINE2D_BLEND_CONST_STACK_PIXELS = 256 };
+    int64_t raw_dst[ENGINE2D_BLEND_CONST_STACK_PIXELS];
+    int64_t raw_src[ENGINE2D_BLEND_CONST_STACK_PIXELS];
+    for (int64_t i = 0; i < ENGINE2D_BLEND_CONST_STACK_PIXELS; i++) {
+        raw_src[i] = (int64_t)(uint64_t)s;
+    }
+    int64_t done = 0;
+    while (done < n) {
+        int64_t chunk = n - done;
+        if (chunk > ENGINE2D_BLEND_CONST_STACK_PIXELS) chunk = ENGINE2D_BLEND_CONST_STACK_PIXELS;
+        for (int64_t i = 0; i < chunk; i++) {
+            raw_dst[i] = (int64_t)(uint64_t)engine2d_unbox_pixel(dst_data[off + done + i]);
+        }
+        engine2d_blend_into(raw_dst, raw_dst, raw_src, chunk);
+        for (int64_t i = 0; i < chunk; i++) {
+            dst_data[off + done + i] = engine2d_box_pixel((uint32_t)(uint64_t)raw_dst[i]);
+        }
+        done += chunk;
     }
     return dst;
 }
