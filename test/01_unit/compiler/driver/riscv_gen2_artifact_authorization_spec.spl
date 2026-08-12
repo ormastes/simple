@@ -1,0 +1,76 @@
+# codex-system-test
+# @manual_section RISC-V Gen2 artifact authorization
+"""Compiler-owned Gen2 product admission must not erase a prior bundle."""
+use std.spec.*
+use std.io_runtime.{file_write, file_read, file_delete, file_exists}
+use compiler.common.driver_core_types.{CompileMode, compile_result_errors,
+    compile_result_is_success, driver_core_compile_options_default,
+    compileoptions_normalize_mir_optimization}
+use compiler.common.assurance.policy.{policy_from_env_value}
+use compiler.driver.driver.{compiler_driver_create,
+    compiler_driver_run_riscv_gen2_zca_control_predecode_product,
+    compiler_driver_run_riscv_gen2_zca_rv32_cjal_migrating_predecode_product}
+
+# Regression for the Gen2 receipt boundary.  This invokes the compiler-owned
+# product runners, not the generic artifact writer: prior output must survive
+# every rejection before a typed receipt has authorized replacement.
+
+fn gen2_authorization_output(case_name: text) -> text:
+    "/tmp/simple-riscv-gen2-artifact-authorization-" + case_name + ".vhd"
+
+fn gen2_authorization_cleanup(output: text):
+    val _ = file_delete(output)
+    val _ = file_delete(output + ".map.json")
+    val _ = file_delete(output + ".gen.json")
+
+fn gen2_authorization_seed_prior_bundle(output: text):
+    gen2_authorization_cleanup(output)
+    expect(file_write(output, "prior-vhdl")).to_equal(true)
+    expect(file_write(output + ".map.json", "prior-map")).to_equal(true)
+    expect(file_write(output + ".gen.json", "prior-manifest")).to_equal(true)
+
+fn gen2_authorization_assert_prior_bundle(output: text):
+    expect(file_exists(output)).to_equal(true)
+    expect(file_exists(output + ".map.json")).to_equal(true)
+    expect(file_exists(output + ".gen.json")).to_equal(true)
+    expect(file_read(output)).to_equal("prior-vhdl")
+    expect(file_read(output + ".map.json")).to_equal("prior-map")
+    expect(file_read(output + ".gen.json")).to_equal("prior-manifest")
+
+fn gen2_authorization_driver(output: text, target: text, policy: text):
+    var options = driver_core_compile_options_default()
+    options.mode = CompileMode.Aot
+    options.output_file = Some(output)
+    options.backend = "vhdl"
+    options.riscv_gen2_target = target
+    options = compileoptions_normalize_mir_optimization(options)
+    var driver = compiler_driver_create(options)
+    driver.ctx.assurance_policy = policy_from_env_value(policy)
+    driver
+
+describe "RISC-V Gen2 artifact authorization boundary":
+    # @req REQ-G2-006 REQ-G2-009 NFR-G2-010
+    it "should preserve a prior bundle when a specialized critical target is not admitted":
+        step("Seed the complete bundle before invoking a rejected specialized target")
+        val output = gen2_authorization_output("wrong-specialized-target")
+        gen2_authorization_seed_prior_bundle(output)
+        val result = compiler_driver_run_riscv_gen2_zca_rv32_cjal_migrating_predecode_product(
+            gen2_authorization_driver(output, "rv32-zca-critical", "critical"))
+        expect(compile_result_is_success(result)).to_equal(false)
+        expect(compile_result_errors(result).join("\n")).to_contain(
+            "HWIR-E-GEN2-PRODUCT-TARGET")
+        gen2_authorization_assert_prior_bundle(output)
+        gen2_authorization_cleanup(output)
+
+    # @req REQ-G2-006 REQ-G2-009 NFR-G2-010
+    it "should preserve a prior bundle when critical-policy admission fails":
+        step("Seed the complete bundle before invoking a noncritical compiler product")
+        val output = gen2_authorization_output("noncritical-policy")
+        gen2_authorization_seed_prior_bundle(output)
+        val result = compiler_driver_run_riscv_gen2_zca_control_predecode_product(
+            gen2_authorization_driver(output, "rv32-zca-critical", ""))
+        expect(compile_result_is_success(result)).to_equal(false)
+        expect(compile_result_errors(result).join("\n")).to_contain(
+            "HWIR-E-CRITICAL-POLICY")
+        gen2_authorization_assert_prior_bundle(output)
+        gen2_authorization_cleanup(output)
