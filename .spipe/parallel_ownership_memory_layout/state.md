@@ -312,3 +312,18 @@ dev-done
   type-identity, and allocation-bound defenses. This is reference evidence,
   not optimized typed-array or backend lowering, and value-semantic byte-array
   copying remains intentionally unsuitable for the production fast path.
+- impl: Advanced WP-23 with a fail-closed MIR storage/SIMD admission contract.
+  It admits only well-formed, non-ABI-pinned AoSoA plans whose block width
+  matches the requested lanes and fits the selected fixed-width route. AoS/SoA
+  select the scalar reference fallback; unsupported layouts, mismatches,
+  malformed widths, and fixed-width overflow reject. SVE/RVV return an explicit
+  deferred result because native scalable lowering is not landed. A Luna
+  sidecar identified the existing router and backend boundary; primary review
+  separated arithmetic overflow from target-width refusal and corrected the
+  frozen plan-field integration. Five focused examples pass. No SIMD
+  instruction, tail mask, backend lowering, or alias evidence is claimed.
+  The mandated broad compiler/lib/MCP/LSP check attempt was not admissible in
+  the isolated worktree: the deployed wrapper is a Rust bootstrap seed and its
+  nested checks repeatedly require a missing local `bin/simple`. The focused
+  module check, spec, diff check, and direct-environment guards are the current
+  evidence; Stage 4 and broad parity remain open rather than being called PASS.

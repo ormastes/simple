@@ -1,0 +1,75 @@
+use std.spec.{describe, it, assert_equal, assert_false, assert_true}
+use std.common.structural.storage_layout.storage_layout_contracts.{
+    StorageConversionPolicy,
+    StorageLayoutKind,
+    storage_layout_plan_v1
+}
+use compiler.mir_opt.mir_opt.simd_recipe_infra.{VectorWidthRouter}
+use compiler.mir_opt.mir_opt.storage_simd_admission.{
+    StorageSimdAdmissionKind,
+    storage_simd_admit
+}
+
+describe "storage SIMD admission":
+    it "admits an AVX2-compatible eight-lane f32 AoSoA block":
+        val plan = storage_layout_plan_v1(41, StorageLayoutKind.AoSoA, 8, 32,
+            false, StorageConversionPolicy.Cached, "simd-policy", "simd-block")
+        val result = storage_simd_admit(
+            plan, 32, 8, VectorWidthRouter.x86_64_avx2())
+        assert_equal(result.kind, StorageSimdAdmissionKind.AdmittedFixed)
+        assert_equal(result.lane_count, 8)
+        assert_equal(result.vector_bits, 256)
+        assert_equal(result.reason, "fixed-width-compatible")
+
+    it "rejects fixed-width overflow and a mismatched AoSoA block":
+        val plan = storage_layout_plan_v1(41, StorageLayoutKind.AoSoA, 8, 32,
+            false, StorageConversionPolicy.Cached, "simd-policy", "simd-block")
+        val too_wide = storage_simd_admit(
+            plan, 32, 8, VectorWidthRouter.x86_64_sse2())
+        assert_equal(too_wide.kind, StorageSimdAdmissionKind.Rejected)
+        assert_equal(too_wide.reason, "fixed-width-too-wide")
+        val mismatch = storage_simd_admit(
+            plan, 32, 4, VectorWidthRouter.x86_64_avx2())
+        assert_equal(mismatch.kind, StorageSimdAdmissionKind.Rejected)
+        assert_equal(mismatch.reason, "block-width-mismatch")
+
+    it "falls back for AoS and SoA without claiming SIMD lowering":
+        val aos = storage_layout_plan_v1(41, StorageLayoutKind.AoS, 1, 8,
+            false, StorageConversionPolicy.Never, "simd-policy", "reference")
+        val soa = storage_layout_plan_v1(41, StorageLayoutKind.SoA, 1, 8,
+            false, StorageConversionPolicy.Cached, "simd-policy", "columns")
+        assert_equal(storage_simd_admit(
+            aos, 32, 4, VectorWidthRouter.aarch64_neon()).kind,
+            StorageSimdAdmissionKind.ScalarFallback)
+        assert_equal(storage_simd_admit(
+            soa, 32, 4, VectorWidthRouter.aarch64_neon()).kind,
+            StorageSimdAdmissionKind.ScalarFallback)
+
+    it "rejects pinned ABI storage and malformed widths":
+        val pinned = storage_layout_plan_v1(41, StorageLayoutKind.ExternalFixed,
+            1, 8, true, StorageConversionPolicy.Pinned,
+            "simd-policy", "external")
+        assert_equal(storage_simd_admit(
+            pinned, 32, 4, VectorWidthRouter.aarch64_neon()).reason,
+            "abi-layout-pinned")
+        val aosoa = storage_layout_plan_v1(41, StorageLayoutKind.AoSoA, 4, 16,
+            false, StorageConversionPolicy.Cached, "simd-policy", "simd-block")
+        assert_equal(storage_simd_admit(
+            aosoa, 7, 4, VectorWidthRouter.aarch64_neon()).reason,
+            "invalid-element-width")
+        assert_equal(storage_simd_admit(
+            aosoa, 64, 4611686018427387903,
+            VectorWidthRouter.x86_64_avx512()).reason,
+            "vector-width-overflow")
+
+    it "defers scalable SVE and RVV routes explicitly":
+        val plan = storage_layout_plan_v1(41, StorageLayoutKind.AoSoA, 4, 16,
+            false, StorageConversionPolicy.Cached, "simd-policy", "simd-block")
+        val sve = storage_simd_admit(
+            plan, 32, 4, VectorWidthRouter.aarch64_sve(128))
+        val rvv = storage_simd_admit(
+            plan, 32, 4, VectorWidthRouter.riscv64_rvv(128))
+        assert_equal(sve.kind, StorageSimdAdmissionKind.DeferredScalable)
+        assert_equal(rvv.kind, StorageSimdAdmissionKind.DeferredScalable)
+        assert_equal(sve.reason, "scalable-native-lowering-deferred")
+        assert_equal(rvv.reason, "scalable-native-lowering-deferred")

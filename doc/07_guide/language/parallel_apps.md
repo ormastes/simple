@@ -60,6 +60,14 @@ limited to 64 MiB, copies value-semantic byte arrays, and rejects malformed or
 overlapping physical mappings. It is test evidence, not the optimized typed
 array view or backend lowering promised by WP-22.
 
+The MIR optimizer now also checks whether an AoSoA block is compatible with a
+selected fixed-width SIMD route. Matching AVX/NEON-style widths are admitted;
+AoS and SoA retain the scalar/reference fallback; ABI-pinned or mismatched
+storage is rejected. SVE and RVV are recorded as explicitly deferred because
+the native scalable-vector lowering path is not yet implemented. Admission is
+only a legality gate: it emits no vector instructions, tail mask, or alias
+metadata.
+
 ## Recommended shape
 
 ```simple

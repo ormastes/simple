@@ -1,0 +1,80 @@
+# Fail-closed bridge between a logical AoSoA storage plan and an existing SIMD
+# width route. This module proves only that the fixed block shape is compatible
+# with the selected route. It emits no MIR/backend instruction and supplies no
+# aliasing evidence.
+
+use std.common.structural.storage_layout.storage_layout_contracts.{
+    StorageLayoutKind,
+    StorageLayoutPlanV1,
+    storage_layout_plan_v1_well_formed
+}
+use compiler.mir_opt.mir_opt.simd_recipe_infra.{VectorWidthRouter}
+
+enum StorageSimdAdmissionKind:
+    AdmittedFixed
+    ScalarFallback
+    DeferredScalable
+    Rejected
+
+struct StorageSimdAdmissionV1:
+    kind: StorageSimdAdmissionKind
+    lane_count: i64
+    vector_bits: i64
+    reason: text
+
+fn storage_simd_admission_v1(
+    kind: StorageSimdAdmissionKind,
+    lane_count: i64,
+    vector_bits: i64,
+    reason: text
+) -> StorageSimdAdmissionV1:
+    StorageSimdAdmissionV1(
+        kind: kind, lane_count: lane_count,
+        vector_bits: vector_bits, reason: reason)
+
+fn storage_simd_admit(
+    plan: StorageLayoutPlanV1,
+    element_bits: i64,
+    requested_lanes: i64,
+    router: VectorWidthRouter
+) -> StorageSimdAdmissionV1:
+    if not storage_layout_plan_v1_well_formed(plan):
+        return storage_simd_admission_v1(
+            StorageSimdAdmissionKind.Rejected, 0, 0, "invalid-layout-plan")
+    if element_bits <= 0 or element_bits > 512 or element_bits % 8 != 0:
+        return storage_simd_admission_v1(
+            StorageSimdAdmissionKind.Rejected, 0, 0, "invalid-element-width")
+    if requested_lanes <= 0
+        or requested_lanes > 4611686018427387903 / element_bits:
+        return storage_simd_admission_v1(
+            StorageSimdAdmissionKind.Rejected, 0, 0, "vector-width-overflow")
+
+    val requested_bits = requested_lanes * element_bits
+    if plan.abi_pinned or plan.layout == StorageLayoutKind.ExternalFixed:
+        return storage_simd_admission_v1(
+            StorageSimdAdmissionKind.Rejected,
+            requested_lanes, requested_bits, "abi-layout-pinned")
+    if plan.layout == StorageLayoutKind.AoS
+        or plan.layout == StorageLayoutKind.SoA:
+        return storage_simd_admission_v1(
+            StorageSimdAdmissionKind.ScalarFallback,
+            requested_lanes, requested_bits, "layout-not-aosoa")
+    if plan.layout != StorageLayoutKind.AoSoA:
+        return storage_simd_admission_v1(
+            StorageSimdAdmissionKind.Rejected,
+            requested_lanes, requested_bits, "unsupported-layout-kind")
+    if plan.block_width != requested_lanes:
+        return storage_simd_admission_v1(
+            StorageSimdAdmissionKind.Rejected,
+            requested_lanes, requested_bits, "block-width-mismatch")
+    if router.has_scalable:
+        return storage_simd_admission_v1(
+            StorageSimdAdmissionKind.DeferredScalable,
+            requested_lanes, requested_bits, "scalable-native-lowering-deferred")
+    if requested_bits > router.max_fixed_width:
+        return storage_simd_admission_v1(
+            StorageSimdAdmissionKind.Rejected,
+            requested_lanes, requested_bits, "fixed-width-too-wide")
+    storage_simd_admission_v1(
+        StorageSimdAdmissionKind.AdmittedFixed,
+        requested_lanes, requested_bits, "fixed-width-compatible")
