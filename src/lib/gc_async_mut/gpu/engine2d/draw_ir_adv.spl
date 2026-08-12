@@ -272,6 +272,32 @@ fn _engine2d_draw_ir_result_from_composition_plan(plan: Simple2dDrawIrCompositio
 fn _engine2d_draw_ir_supported_command(kind: text) -> bool:
     kind == DRAW_IR_COMMAND_RECT or kind == DRAW_IR_COMMAND_TEXT or kind == DRAW_IR_COMMAND_IMAGE or kind == DRAW_IR_COMMAND_EDGE or kind == DRAW_IR_COMMAND_PATH
 
+# Only commands with an exact nominal painted extent may be rejected against a
+# retained damage clip. Styled boxes can paint borders, shadows, glass, and
+# backdrop effects outside x/y/width/height; text and strokes can overhang.
+fn _engine2d_draw_ir_outside_exact_clip(
+    command: DrawIrCommand, x: i32, y: i32, clip: DrawIrRect
+) -> bool:
+    if not clip.present:
+        return false
+    val exact_image = command.kind == DRAW_IR_COMMAND_IMAGE
+    val exact_plain_rect = (
+        command.kind == DRAW_IR_COMMAND_RECT and
+        command.computed_style.len() == 0)
+    if not exact_image and not exact_plain_rect:
+        return false
+    if command.width <= 0 or command.height <= 0:
+        return true
+    val left = x.to_i64()
+    val top = y.to_i64()
+    val right = left + command.width.to_i64()
+    val bottom = top + command.height.to_i64()
+    val clip_left = clip.x.to_i64()
+    val clip_top = clip.y.to_i64()
+    val clip_right = clip_left + clip.width.to_i64()
+    val clip_bottom = clip_top + clip.height.to_i64()
+    right <= clip_left or clip_right <= left or bottom <= clip_top or clip_bottom <= top
+
 # A fully transparent fill has no visible contribution. Nonzero alpha may
 # initialize a fresh transparent child through each backend's canonical fill.
 fn _engine2d_draw_ir_has_visible_alpha(color: u32) -> bool:
@@ -1447,6 +1473,9 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
         val command_kind: text = command.kind
         val x = offset_x + command.x
         val y = offset_y + command.y
+        if _engine2d_draw_ir_outside_exact_clip(command, x, y, active_clip):
+            skipped = skipped + 1
+            continue
         val command_clip = command.clip_rect
         if command_clip.present:
             val clip = draw_ir_rect_intersection(
