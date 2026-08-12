@@ -1,0 +1,133 @@
+#!/bin/sh
+# Canonical host-side QEMU path/capability settings for reusable lane wrappers.
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+storage_resolver=${script_dir}/simple-big-storage-root.shs
+
+detect_host() {
+    if [ -n "${SIMPLE_QEMU_HOST:-}" ]; then
+        printf '%s\n' "${SIMPLE_QEMU_HOST}"
+        return
+    fi
+    case "$(uname -s 2>/dev/null || printf unknown)" in
+        Linux) printf '%s\n' linux ;;
+        Darwin) printf '%s\n' macos ;;
+        FreeBSD) printf '%s\n' freebsd ;;
+        MINGW*|MSYS*|CYGWIN*) printf '%s\n' windows ;;
+        *) printf '%s\n' unknown ;;
+    esac
+}
+
+host=$(detect_host)
+case "${host}" in
+    linux|windows|macos|freebsd) ;;
+    *) printf '%s\n' "simple-qemu-settings: unsupported host: ${host}" >&2; exit 2 ;;
+esac
+storage_root=$(${storage_resolver} --print | sed -n 's/^simple_big_storage_root=//p')
+[ -n "${storage_root}" ] || { printf '%s\n' 'simple-qemu-settings: storage root unresolved' >&2; exit 2; }
+
+qemu_suffix=
+[ "${host}" = windows ] && qemu_suffix=.exe
+qemu_bin_dir=${SIMPLE_QEMU_BIN_DIR:-}
+
+qemu_name() {
+    name=$1
+    if [ -n "${qemu_bin_dir}" ]; then
+        printf '%s/%s%s\n' "${qemu_bin_dir}" "${name}" "${qemu_suffix}"
+    else
+        printf '%s%s\n' "${name}" "${qemu_suffix}"
+    fi
+}
+
+detect_accelerator() {
+    case "${host}" in
+        linux)
+            if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then printf '%s\n' kvm; else printf '%s\n' tcg; fi
+            ;;
+        macos)
+            if sysctl -n kern.hv_support 2>/dev/null | grep -qx 1; then printf '%s\n' hvf; else printf '%s\n' tcg; fi
+            ;;
+        windows) printf '%s\n' whpx ;;
+        freebsd)
+            if [ -r /dev/nvmm ] && [ -w /dev/nvmm ]; then printf '%s\n' nvmm; else printf '%s\n' tcg; fi
+            ;;
+        *) printf '%s\n' tcg ;;
+    esac
+}
+
+accelerator=${SIMPLE_QEMU_ACCELERATOR:-$(detect_accelerator)}
+case "${host}:${accelerator}" in
+    linux:kvm|linux:tcg|windows:whpx|windows:tcg|macos:hvf|macos:tcg|freebsd:nvmm|freebsd:tcg) ;;
+    *) printf '%s\n' "simple-qemu-settings: accelerator ${accelerator} is invalid for ${host}" >&2; exit 3 ;;
+esac
+
+print_settings() {
+    printf '%s\n' "simple_qemu_host=${host}"
+    printf '%s\n' "simple_qemu_accelerator=${accelerator}"
+    printf '%s\n' "simple_qemu_native_timing_applicable=$([ "${accelerator}" = tcg ] && printf false || printf true)"
+    printf '%s\n' "simple_qemu_storage_root=${storage_root}/qemu"
+    printf '%s\n' "simple_qemu_image_root=${storage_root}/qemu/images"
+    printf '%s\n' "simple_qemu_overlay_root=${storage_root}/qemu/overlays"
+    printf '%s\n' "simple_qemu_artifact_root=${storage_root}/qemu/artifacts"
+    printf '%s\n' "simple_qemu_cache_root=${storage_root}/qemu/cache"
+    printf '%s\n' "simple_qemu_x86_32_bin=$(qemu_name qemu-system-x86_64)"
+    printf '%s\n' "simple_qemu_x86_64_bin=$(qemu_name qemu-system-x86_64)"
+    printf '%s\n' "simple_qemu_arm32_bin=$(qemu_name qemu-system-arm)"
+    printf '%s\n' "simple_qemu_arm64_bin=$(qemu_name qemu-system-aarch64)"
+    printf '%s\n' "simple_qemu_riscv32_bin=$(qemu_name qemu-system-riscv32)"
+    printf '%s\n' "simple_qemu_riscv64_bin=$(qemu_name qemu-system-riscv64)"
+}
+
+check_binary() {
+    label=$1
+    binary=$2
+    if command -v "${binary}" >/dev/null 2>&1 || [ -x "${binary}" ]; then
+        printf '%s\n' "simple_qemu_${label}_status=pass"
+        return 0
+    fi
+    printf '%s\n' "simple_qemu_${label}_status=blocked"
+    printf '%s\n' "simple_qemu_${label}_reason=missing-binary:${binary}"
+    return 1
+}
+
+self_test() {
+    [ "$(SIMPLE_QEMU_HOST=linux SIMPLE_QEMU_ACCELERATOR=tcg "$0" --print | sed -n 's/^simple_qemu_host=//p')" = linux ]
+    [ "$(SIMPLE_QEMU_HOST=macos SIMPLE_QEMU_ACCELERATOR=hvf "$0" --print | sed -n 's/^simple_qemu_accelerator=//p')" = hvf ]
+    [ "$(SIMPLE_QEMU_HOST=windows SIMPLE_QEMU_ACCELERATOR=whpx "$0" --print | sed -n 's/^simple_qemu_x86_64_bin=//p')" = qemu-system-x86_64.exe ]
+    [ "$(SIMPLE_QEMU_HOST=freebsd SIMPLE_QEMU_ACCELERATOR=tcg "$0" --print | sed -n 's/^simple_qemu_native_timing_applicable=//p')" = false ]
+    printf '%s\n' 'simple_qemu_settings_self_test=pass'
+}
+
+case "${1:---print}" in
+    --print)
+        print_settings
+        ;;
+    --prepare)
+        "${storage_resolver}" --prepare
+        print_settings
+        printf '%s\n' 'simple_qemu_settings_prepare_status=pass'
+        ;;
+    --check)
+        "${storage_resolver}" --check
+        print_settings
+        failed=0
+        check_binary x86_64 "$(qemu_name qemu-system-x86_64)" || failed=1
+        check_binary arm32 "$(qemu_name qemu-system-arm)" || failed=1
+        check_binary arm64 "$(qemu_name qemu-system-aarch64)" || failed=1
+        check_binary riscv32 "$(qemu_name qemu-system-riscv32)" || failed=1
+        check_binary riscv64 "$(qemu_name qemu-system-riscv64)" || failed=1
+        if [ "${failed}" -ne 0 ]; then
+            printf '%s\n' 'simple_qemu_settings_status=blocked'
+            exit 1
+        fi
+        printf '%s\n' 'simple_qemu_settings_status=pass'
+        ;;
+    --self-test)
+        self_test
+        ;;
+    *)
+        printf '%s\n' 'usage: simple-qemu-settings.shs [--print|--prepare|--check|--self-test]' >&2
+        exit 64
+        ;;
+esac

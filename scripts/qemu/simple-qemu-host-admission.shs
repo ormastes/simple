@@ -1,0 +1,185 @@
+#!/bin/sh
+# Admit a QEMU host/accelerator pair without allowing host relabelling.
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+settings_cmd=${script_dir}/simple-qemu-settings.shs
+
+detect_host() {
+    case "$(uname -s 2>/dev/null || printf unknown)" in
+        Linux) printf '%s\n' linux ;;
+        Darwin) printf '%s\n' macos ;;
+        FreeBSD) printf '%s\n' freebsd ;;
+        MINGW*|MSYS*|CYGWIN*) printf '%s\n' windows ;;
+        *) printf '%s\n' unknown ;;
+    esac
+}
+
+usage() {
+    printf '%s\n' 'usage: simple-qemu-host-admission.shs [--host HOST] [--arch ARCH] [--accelerator ACCEL] [--qemu-binary PATH] [--probe-seconds N]' >&2
+    exit 64
+}
+
+actual_host=$(detect_host)
+requested_host=
+arch=x86_64
+requested_accelerator=
+qemu_binary=
+probe_seconds=5
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --host) [ "$#" -ge 2 ] || usage; requested_host=$2; shift 2 ;;
+        --arch) [ "$#" -ge 2 ] || usage; arch=$2; shift 2 ;;
+        --accelerator) [ "$#" -ge 2 ] || usage; requested_accelerator=$2; shift 2 ;;
+        --qemu-binary) [ "$#" -ge 2 ] || usage; qemu_binary=$2; shift 2 ;;
+        --probe-seconds) [ "$#" -ge 2 ] || usage; probe_seconds=$2; shift 2 ;;
+        --) shift; break ;;
+        *) usage ;;
+    esac
+done
+[ "$#" -eq 0 ] || usage
+
+case "${actual_host}" in linux|windows|macos|freebsd) ;; *) actual_supported=false ;; esac
+: "${actual_supported:=true}"
+[ -n "${requested_host}" ] || requested_host=${actual_host}
+
+case "${probe_seconds}" in ''|*[!0-9]*|0) usage ;; esac
+case "${arch}" in x86_32|x86_64|arm32|arm64|riscv32|riscv64) ;; *) usage ;; esac
+
+host_identity_status=pass
+host_identity_reason=matched
+if [ "${actual_supported}" != true ]; then
+    host_identity_status=fail
+    host_identity_reason=unsupported-actual-host
+elif [ "${requested_host}" != "${actual_host}" ]; then
+    host_identity_status=fail
+    host_identity_reason=requested-host-does-not-match-actual-host
+fi
+
+# Ask the canonical settings owner for accelerator, binary, and storage defaults.
+settings_output=
+if [ "${actual_supported}" = true ]; then
+    if [ -n "${requested_accelerator}" ]; then
+        settings_output=$(SIMPLE_QEMU_HOST=${actual_host} SIMPLE_QEMU_ACCELERATOR=${requested_accelerator} "${settings_cmd}" --print 2>/dev/null) || :
+    else
+        settings_output=$(SIMPLE_QEMU_HOST=${actual_host} "${settings_cmd}" --print 2>/dev/null) || :
+    fi
+fi
+setting() {
+    printf '%s\n' "${settings_output}" | sed -n "s/^$1=//p" | sed -n '1p'
+}
+
+[ -n "${requested_accelerator}" ] || requested_accelerator=$(setting simple_qemu_accelerator)
+: "${requested_accelerator:=unknown}"
+if [ -z "${qemu_binary}" ]; then
+    qemu_binary=$(setting "simple_qemu_${arch}_bin")
+fi
+: "${qemu_binary:=qemu-system-${arch}}"
+storage_root=$(setting simple_qemu_storage_root)
+
+advertised_status=unknown
+advertised_reason=binary-not-found
+probe_status=skipped
+probe_reason=binary-not-found
+qemu_binary_resolved=unavailable
+qemu_sha256=unavailable
+qemu_version=unavailable
+
+scratch=
+cleanup() {
+    [ -z "${scratch}" ] || rm -rf -- "${scratch}"
+}
+trap cleanup EXIT HUP INT TERM
+
+if command -v "${qemu_binary}" >/dev/null 2>&1 || [ -x "${qemu_binary}" ]; then
+    if [ -x "${qemu_binary}" ]; then
+        qemu_binary_resolved=$(CDPATH= cd -- "$(dirname -- "${qemu_binary}")" && pwd)/$(basename -- "${qemu_binary}")
+    else
+        qemu_binary_resolved=$(command -v "${qemu_binary}")
+    fi
+    qemu_sha256=$(sha256sum "${qemu_binary_resolved}" | awk '{print $1}')
+    qemu_version=$("${qemu_binary_resolved}" --version 2>&1 | sed -n '1p')
+    [ -n "${qemu_version}" ] || qemu_version=unavailable
+    scratch=$(mktemp -d "${TMPDIR:-/tmp}/simple-qemu-admission.XXXXXX")
+    if "${qemu_binary}" -accel help >"${scratch}/accel-help" 2>&1; then
+        if sed 's/[^A-Za-z0-9_]/ /g' "${scratch}/accel-help" | tr ' ' '\n' | grep -qx "${requested_accelerator}"; then
+            advertised_status=pass
+            advertised_reason=advertised
+        else
+            advertised_status=fail
+            advertised_reason=accelerator-not-advertised
+        fi
+    else
+        advertised_status=unknown
+        advertised_reason=accel-help-failed
+    fi
+
+    if [ "${host_identity_status}" != pass ]; then
+        probe_status=skipped
+        probe_reason=host-identity-failed
+    elif [ "${advertised_status}" != pass ]; then
+        probe_status=skipped
+        probe_reason=accelerator-not-advertised
+    else
+        printf '%s\n%s\n' \
+            '{"execute":"qmp_capabilities"}' \
+            '{"execute":"quit"}' >"${scratch}/qmp-input"
+        "${qemu_binary}" -machine none -accel "${requested_accelerator}" \
+            -nodefaults -display none -qmp stdio \
+            <"${scratch}/qmp-input" >"${scratch}/probe" 2>&1 &
+        probe_pid=$!
+        (
+            sleep "${probe_seconds}"
+            if kill -0 "${probe_pid}" 2>/dev/null; then
+                : >"${scratch}/probe-timed-out"
+                kill "${probe_pid}" 2>/dev/null || :
+            fi
+        ) &
+        watchdog_pid=$!
+        if wait "${probe_pid}"; then
+            probe_rc=0
+        else
+            probe_rc=$?
+        fi
+        kill "${watchdog_pid}" 2>/dev/null || :
+        wait "${watchdog_pid}" 2>/dev/null || :
+        if [ "${probe_rc}" -eq 0 ] && grep -q '"return"' "${scratch}/probe"; then
+            probe_status=pass
+            probe_reason=accelerator-executed
+        elif [ -f "${scratch}/probe-timed-out" ]; then
+            probe_status=fail
+            probe_reason=accelerator-probe-timeout
+        else
+            probe_status=fail
+            probe_reason=accelerator-runtime-rejected
+        fi
+    fi
+fi
+
+native_timing_applicable=false
+if [ "${host_identity_status}" = pass ] &&
+   [ "${probe_status}" = pass ] &&
+   [ "${requested_accelerator}" != tcg ]; then
+    native_timing_applicable=true
+fi
+
+printf '%s\n' "detected_host=${actual_host}"
+printf '%s\n' "requested_host=${requested_host}"
+printf '%s\n' "host_identity_status=${host_identity_status}"
+printf '%s\n' "host_identity_reason=${host_identity_reason}"
+printf '%s\n' "qemu_binary=${qemu_binary}"
+printf '%s\n' "qemu_binary_resolved=${qemu_binary_resolved}"
+printf '%s\n' "qemu_sha256=${qemu_sha256}"
+printf '%s\n' "qemu_version=${qemu_version}"
+printf '%s\n' "requested_accelerator=${requested_accelerator}"
+printf '%s\n' "accelerator_advertised_status=${advertised_status}"
+printf '%s\n' "accelerator_advertised_reason=${advertised_reason}"
+printf '%s\n' "accelerator_probe_status=${probe_status}"
+printf '%s\n' "accelerator_probe_reason=${probe_reason}"
+printf '%s\n' "native_timing_applicable=${native_timing_applicable}"
+[ -z "${storage_root}" ] || printf '%s\n' "simple_qemu_storage_root=${storage_root}"
+
+[ "${host_identity_status}" = pass ] || exit 2
+[ "${advertised_status}" = pass ] || exit 3
+[ "${probe_status}" = pass ] || exit 4
