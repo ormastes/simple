@@ -15,10 +15,35 @@ describe "Vulkan Engine2D batch descriptor reuse":
             engine.draw_rect_filled(2, 2, 6, 6, 0xFFFF0000u32)
             engine.draw_rect_filled(8, 8, 4, 4, 0xFFFF0000u32)
             if val Some(vulkan) = engine.vulkan_backend:
-                expect(vulkan.pending_compute_descriptors.len()).to_equal(2)
+                expect(vulkan.pending_compute_count).to_equal(2)
+                expect(vulkan.pending_compute_descriptors.len()).to_equal(256)
             else:
                 expect(false).to_equal(true)
             engine.read_pixels_with_source()
+            expect(
+                vulkan_sffi_accepted_compute_submit_count() - before
+            ).to_equal(1)
+            engine.shutdown()
+        else:
+            expect(result.unwrap_err().fallback_reason).to_not_equal("")
+
+    it "keeps thirty-two damaged image sources in one fenced submit":
+        val result = Engine2D.create_with_backend_strict(64, 1, "vulkan")
+        if result.is_ok():
+            var engine = result.unwrap()
+            val before = vulkan_sffi_accepted_compute_submit_count()
+            engine.clear(0xFF101010u32)
+            var x = 0
+            while x < 32:
+                engine.draw_image(x * 2, 0, 1, 1, [0xFFFF0000u32])
+                x += 1
+            if val Some(vulkan) = engine.vulkan_backend:
+                expect(vulkan.pending_compute_count).to_equal(33)
+                expect(vulkan.pending_compute_sources[32]).to_be_greater_than(0)
+            else:
+                expect(false).to_equal(true)
+            val readback = engine.read_pixels_with_source()
+            expect(readback.pixels.len()).to_equal(64)
             expect(
                 vulkan_sffi_accepted_compute_submit_count() - before
             ).to_equal(1)
