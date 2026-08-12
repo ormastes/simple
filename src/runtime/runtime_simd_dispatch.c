@@ -1701,24 +1701,30 @@ SplArray* rt_engine2d_simd_blend_span_u32(SplArray* dst, int64_t dst_off,
     int64_t* dst_data = (int64_t*)(uintptr_t)rt_array_data_ptr(dst);
     const int64_t* src_data = (const int64_t*)(uintptr_t)rt_array_data_ptr(src);
     if (!dst_data || !src_data) return dst;
-    enum { ENGINE2D_BLEND_STACK_PIXELS = 256 };
-    int64_t raw_dst[ENGINE2D_BLEND_STACK_PIXELS];
-    int64_t raw_src[ENGINE2D_BLEND_STACK_PIXELS];
     int backwards = (dst_data == src_data && d_off > s_off && d_off < s_off + n);
-    int64_t done = 0;
-    while (done < n) {
-        int64_t chunk = n - done;
-        if (chunk > ENGINE2D_BLEND_STACK_PIXELS) chunk = ENGINE2D_BLEND_STACK_PIXELS;
-        int64_t begin = backwards ? n - done - chunk : done;
-        for (int64_t i = 0; i < chunk; i++) {
-            raw_src[i] = (int64_t)(uint64_t)engine2d_unbox_pixel(src_data[s_off + begin + i]);
-            raw_dst[i] = (int64_t)(uint64_t)engine2d_unbox_pixel(dst_data[d_off + begin + i]);
+    for (int64_t step = 0; step < n; step++) {
+        int64_t i = backwards ? n - 1 - step : step;
+        uint32_t s = engine2d_unbox_pixel(src_data[s_off + i]);
+        uint32_t d = engine2d_unbox_pixel(dst_data[d_off + i]);
+        uint32_t sa = s >> 24;
+        uint32_t out;
+        if (sa == 255u) {
+            out = s;
+        } else if (sa == 0u) {
+            out = d;
+        } else if ((d >> 24) == 255u) {
+            uint32_t inv = 255u - sa;
+            uint32_t r = ((((s >> 16) & 255u) * sa) +
+                          (((d >> 16) & 255u) * inv)) / 255u;
+            uint32_t g = ((((s >> 8) & 255u) * sa) +
+                          (((d >> 8) & 255u) * inv)) / 255u;
+            uint32_t b = (((s & 255u) * sa) + ((d & 255u) * inv)) / 255u;
+            out = 0xff000000u | (r << 16) | (g << 8) | b;
+        } else {
+            out = (uint32_t)engine2d_blend_pixel(
+                (int64_t)(uint64_t)s, (int64_t)(uint64_t)d);
         }
-        engine2d_blend_into(raw_dst, raw_dst, raw_src, chunk);
-        for (int64_t i = 0; i < chunk; i++) {
-            dst_data[d_off + begin + i] = engine2d_box_pixel((uint32_t)(uint64_t)raw_dst[i]);
-        }
-        done += chunk;
+        dst_data[d_off + i] = engine2d_box_pixel(out);
     }
     return dst;
 }

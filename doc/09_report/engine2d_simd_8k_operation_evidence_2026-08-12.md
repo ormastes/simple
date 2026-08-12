@@ -83,3 +83,20 @@ not physical throughput evidence. This direct fixed-denominator path is not
 yet credited with an operation-local SIMD hit, so explicit vector attribution
 remains open even though surrounding fill and variable-blend calls make the
 aggregate benchmark hit counter nonzero.
+
+## Variable-alpha opaque-destination optimization
+
+The variable-source production span now preserves memmove-style overlap order
+while handling transparent and opaque sources directly. When the retained
+destination is opaque, output alpha and the divisor are fixed at 255; only
+translucent destination pixels use the fully general source-over formula. This
+removes two 256-pixel gather/scatter scratch rows from the common path.
+
+Native full-frame variable blend improved from p50 542,337,679 ns to
+160,778,922 ns (3.37×), with p95 172,583,479 ns. Fifteen-sample retained runs
+measured p95 8,112,508 ns at 5% damage (PASS) and 12,828,783 ns at 7.5%
+(FAIL). After both blend optimizations, **5% is the measured conservative
+all-operation isolated envelope** on this host. This remains below an
+end-to-end guarantee because multiple operations and frame-management overhead
+must share 12.5 ms. AArch64 and RVV QEMU correctness gates pass, including a
+280-pixel overlapping same-array span crossing the former scratch boundary.
